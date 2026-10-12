@@ -22,6 +22,7 @@ haste-physics = { path = "crates/haste-physics" }
 haste-jvm = { path = "crates/haste-jvm" }
 haste-setup = { path = "crates/haste-setup" }
 haste-testkit = { path = "crates/haste-testkit" }
+haste-audio = { path = "crates/haste-audio" }
 
 glam = { version = "0.30", features = ["serde"] }
 uuid = { version = "1", features = ["serde", "v4"] }
@@ -70,6 +71,8 @@ base64 = "0.22"
 bitflags = "2"
 tokio-util = { version = "0.7", features = ["codec"] }
 trust-dns-resolver = "0.23"
+# sound: cpal output + Ogg Vorbis decoding (needs ALSA headers on Linux: libasound2-dev in CI)
+rodio = { version = "0.23", default-features = false, features = ["playback", "vorbis"] }
 
 [profile.release]
 debug = 1

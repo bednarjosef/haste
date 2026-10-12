@@ -219,6 +219,34 @@ JSON, `packets/<name>.bin` (length-prefixed clientbound play packets as received
 `compare_screenshot(a, b) -> Diff` (percentage of differing pixels with tolerance), `Bench` runner
 writing JSON + Markdown tables.
 
+## haste-audio (sound)
+
+API proposed in `docs/briefs/sound.md` (`SoundEngine`, `SoundSource`, `BlockSounds`); final
+signatures land here when the branch merges.
+
+## haste-client player (player): `crates/haste-client/src/player.rs`
+
+```rust
+pub struct LocalPlayer { pub state: haste_physics::PlayerState, pub attrs: haste_physics::PlayerAttributes, .. }
+impl LocalPlayer {
+    pub fn new(login: &haste_protocol::Login) -> LocalPlayer;
+    /// Consumes the packets about the local player (teleports, abilities, attributes, motion,
+    /// respawn, health, game mode, held slot). Returns false for packets it does not handle.
+    pub fn handle(&mut self, p: &haste_protocol::ClientboundPlay, out: &mut Vec<haste_protocol::ServerboundPlay>) -> bool;
+    /// One 20 Hz tick: physics with this tick's input, then the serverbound packets a vanilla
+    /// client sends for it, in vanilla's order (player_input, player_command, move_player_*,
+    /// ..., client_tick_end last).
+    pub fn tick(&mut self, input: &haste_core::input::InputState, world: &haste_world::World, data: &haste_data::GameData, out: &mut Vec<haste_protocol::ServerboundPlay>);
+    /// Eye position and look angles interpolated by partial tick, for the camera.
+    pub fn camera(&self, partial_tick: f32) -> (glam::DVec3, f32, f32);
+}
+```
+
+## haste-client ui (jvm-host): `crates/haste-client/src/ui.rs`
+
+HUD (real vanilla `Gui`) and screens through `GuiPipeline`; API proposed by jvm-host in its
+report (input routing, `frame(...) -> &GuiFrame`, outgoing packets drained per tick).
+
 ## haste-client wiring (lead)
 
 The game thread runs at 20 Hz: drain `Connection::try_recv` -> apply to `World`/`EntityStore`/

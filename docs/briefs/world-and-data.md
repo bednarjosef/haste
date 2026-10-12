@@ -1,47 +1,50 @@
-# world-and-data: haste-data + haste-world
+# world-and-data: block entities, and proof that chunk decoding is exact
 
-You own `crates/haste-data` and `crates/haste-world`. Both are consumed by nearly everyone, so the
-order matters: `haste-data` first (others block on it), then `haste-world`.
+Worker: GLM. Worktree `$HASTE_WT/world-and-data`, branch `world-and-data`, test server port
+**25617**. Read `docs/briefs/COMMON.md` first.
 
-## Task 1 (first, small): haste-data per docs/INTERFACES.md
-- `GameData::load()` / `load_from()`: parse `blocks.json` (block -> properties -> states with
-  `id`, `default`, property values), `registries.json` (registry -> entries -> protocol_id).
-  Build dense tables indexed by `BlockStateId`: block index, property list, plus lookup maps.
-  Verify at load: state ids are dense 0..n with `minecraft:air` = 0; error otherwise.
-- `BlockShapes`: load `cache/oracle/26.3/block_shapes.json` if present (format: see
-  `crates/haste-testkit/FORMATS.md` once oracles writes it; until then assume
-  `{"version":1,"states":[{"id":0,"collision":[[x1,y1,z1,x2,y2,z2],...],"outline":[...]}]}`),
-  else the documented fallback heuristic from INTERFACES.md. `is_oracle_backed()` says which.
-- Tests: unit tests on a tiny hand-written blocks.json/registries.json fixture in the crate
-  (a few blocks); an `#[ignore]` test loading the real reports: counts > 20000 states,
-  `minecraft:stone` default state resolves, `minecraft:oak_stairs` with facing=east resolves,
-  `Registries::index("minecraft:entity_type", "minecraft:player")` is Some.
-- Measure `GameData::load()` time on the real reports and put it in NOTES.md (target < 150 ms release).
+You own `crates/haste-world` and `crates/haste-data`.
 
-## Task 2: haste-world per docs/INTERFACES.md
-- `PalettedContainer<T>`: decode vanilla's wire format (bits-per-entry 0 = single value; 4..=8
-  indirect palette for blocks (1..=3 for biomes); direct above). Packed longs: entries never span
-  longs (1.16+ layout). Read values with no allocation. Provide `get(x,y,z)` and `set` (promote
-  palette when needed). The 26.3 chunk payload: per section `block_count: i16`, blocks container,
-  biomes container; sections ordered from the dimension's lowest. Note: since 1.21.5 the per-section
-  palette length is implicit for the direct format and the data-array length prefix was removed in
-  1.21.5 (`Chunk Format` page on minecraft.wiki documents the current layout; verify against the
-  26.3 page, and write what you verified in NOTES.md). Follow the wiki, not decompiled code.
-- `World`: chunk map keyed by `ChunkPos`, `load_chunk` from `haste_core::chunk::ChunkData`
-  (decode sections, heightmaps packed longs, block entities kept raw, light), `unload_chunk`,
-  `set_block` (marks the section and neighbouring sections dirty when on a border),
-  `apply_light` (light_update packet semantics: masks and arrays, empty masks clear),
-  `BlockView` and `DirtyTracker` impls, `snapshot_section` returning an `Arc<SectionSnapshot>`
-  that carries the section plus a 1-block border from the six neighbours and sky/block light,
-  for lock-free meshing on other threads.
-- Tests: paletted container decode/encode round trips for every bits-per-entry; a synthetic
-  chunk payload built by your own encoder decodes back; `set_block` across a section border dirties
-  both; light nibble get/set; `BlockView` returns AIR outside loaded chunks and outside y range.
-  Benchmark (`cargo bench` or a timed test) of `get` in a hot loop: target < 5 ns/call.
-- Give protocol what it needs: a small `haste_world::wire` module with `decode_sections(bytes,
-  section_count) -> Result<Vec<Section>>` that the protocol crate can call in its own tests.
+## Where it stands
+`haste-world` decodes chunk packets into paletted sections, stores light, tracks dirty sections
+and makes snapshots for the mesher. It has unit tests but has never been checked against real
+chunks from a real server (TASKS.md: "unverified against a real chunk capture"). The client is
+being switched from a stand-in world to `haste_world::World` right now (client-app workstream).
 
-## Task 3 (after join milestone lands): block updates from `section_blocks_update` (packed positions),
-world time/weather state holders, chunk unload radius helper, and performance work the lead asks for.
+## Tasks, in order (commit after each)
+1. **Exactness oracle from region files.** The server saves the same chunks it sends us into
+   Anvil region files (`cache/servers/world-and-data/world/region/*.mca`; format: minecraft.wiki
+   "Region file format", "Chunk format": NBT, `sections[].block_states.palette/data`,
+   `biomes`, `BlockLight`/`SkyLight`, `block_entities`). Write an `#[ignore]` integration test
+   (a test-only module or `tests/region_oracle.rs`) that reads those region files (Pumpkin has an
+   Anvil reader and NBT you may adapt, `cache/pumpkin/pumpkin-world/src/chunk/format/anvil.rs`
+   and its NBT crate; or `haste-protocol`'s vendored NBT), and compares, block by block, every
+   section of chunks our `World` loaded from the network with what the region file says.
+   How to get the network side: use the testkit packet capture
+   (`crates/haste-testkit`, `packets/<name>.bin` format in `FORMATS.md`; find how its proxy
+   records) or decode `level_chunk_with_light` packets from a headless join yourself.
+   Use a normal world (`scripts/test-server.sh world-and-data 25617 3600 minecraft:normal` after
+   deleting the copy's `world/`), save-all on the server before reading regions. Every mismatch
+   is a bug in our decoding: fix it, keep a regression test with a minimal byte sample you
+   construct yourself (never commit captured bytes: they are derived from Mojang's world gen).
+   Compare biomes and light too (light: what the server sent vs what it saved can differ by
+   timing; report rather than chase light mismatches at chunk edges).
+2. **Block entities in the world.** Store `haste_core::chunk::BlockEntityData` from chunk packets,
+   apply `block_entity_data` updates, drop them when `set_block` replaces the block or the chunk
+   unloads. API: `World::block_entity(&self, pos: BlockPos) -> Option<&BlockEntityData>`,
+   `World::block_entities_in(&self, pos: ChunkPos) -> impl Iterator<Item = (BlockPos, &BlockEntityData)>`,
+   `World::set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData)`. Mark the section
+   dirty when a block entity changes (signs and banners will be meshed or drawn from it).
+3. **Section updates and light updates.** `section_blocks_update` (multi-block change),
+   `block_update`, `light_update`, `forget_level_chunk`, `chunk_batch_start/finished` and
+   `set_chunk_cache_center/radius` go through `World` correctly: test each with constructed
+   packets (unit tests on `World` methods, no network), including blocks on section borders
+   marking the neighbour section dirty (the mesher reads neighbour faces).
+4. **Speed.** Measure `load_chunk` per chunk (median, p99) on the captured chunks and the memory
+   per loaded chunk; no per-block allocations. Report the numbers.
 
-Do not touch: haste-protocol, haste-render, haste-entity, haste-physics, haste-client.
+## Done
+`cargo test -p haste-world -p haste-data` (plus `--ignored` with your server's region files) and
+clippy clean; the oracle test passes on at least a 21x21-chunk area of a normal world in the
+overworld and a few chunks in the nether (`/execute in minecraft:the_nether run tp ...` from the
+server console). Report mismatches found and fixed.

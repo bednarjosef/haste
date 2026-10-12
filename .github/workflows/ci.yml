@@ -39,6 +39,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+      - name: System libraries (ALSA for haste-audio)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
@@ -58,6 +60,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+      - name: System libraries (ALSA for haste-audio)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: Test
         run: cargo test --workspace $CARGO_DEP_OPT
 

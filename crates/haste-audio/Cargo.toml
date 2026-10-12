@@ -1,0 +1,16 @@
+[package]
+name = "haste-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sound: sounds.json, Ogg Vorbis decoding, positional playback of sound events. Owner: sound."
+
+[dependencies]
+haste-core.workspace = true
+haste-assets.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+glam.workspace = true
+rodio.workspace = true
