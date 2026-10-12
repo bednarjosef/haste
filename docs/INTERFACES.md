@@ -17,7 +17,8 @@ pub struct BlockStates { .. }
 impl BlockStates {
     pub fn len(&self) -> usize;
     pub fn block_of(&self, s: BlockStateId) -> &Identifier;
-    pub fn properties(&self, s: BlockStateId) -> &[(String, String)];   // sorted by name, as blocks.json lists them
+    pub fn properties(&self, s: BlockStateId) -> Vec<(String, String)>;   // sorted by name (interned storage; owned result)
+    pub fn property_value(&self, s: BlockStateId, name: &str) -> Option<&str>;   // hot-path lookup
     pub fn default_state(&self, block: &Identifier) -> Option<BlockStateId>;
     pub fn state(&self, block: &Identifier, props: &[(&str, &str)]) -> Option<BlockStateId>;
     pub fn with_property(&self, s: BlockStateId, name: &str, value: &str) -> Option<BlockStateId>;
@@ -31,6 +32,8 @@ impl Registries {
 }
 pub struct BlockShapes { .. }
 impl haste_core::view::CollisionShapes for BlockShapes { .. }
+impl haste_core::view::BlockPhysics for GameData { .. }      // friction/speed/jump from block_properties.json; fluid/light/air/opaque from block_shapes.json
+impl haste_core::view::BlockStateTable for BlockStates { .. }
 impl BlockShapes { pub fn is_oracle_backed(&self) -> bool; }
 ```
 Fallback shapes (no oracle file): full cube for every state except air/cave_air/void_air, fluids,
@@ -105,7 +108,9 @@ impl Assets {
     pub fn gui_sprite(&self, id: &Identifier) -> anyhow::Result<(image::RgbaImage, SpriteMeta)>;
 }
 pub struct BakedBlockModels { .. }  // per BlockStateId: list of quads (positions, uv in atlas, normal/face, cull face, tint index, ambient occlusion flag)
-impl BakedBlockModels { pub fn bake(assets: &Assets, data: &GameData, atlas: &mut AtlasBuilder) -> anyhow::Result<Self>; pub fn quads(&self, s: BlockStateId) -> &[BakedQuad]; pub fn is_full_opaque(&self, s: BlockStateId) -> bool; pub fn render_layer(&self, s: BlockStateId) -> RenderLayer }
+impl BakedBlockModels { pub fn bake(assets: &Assets, states: &dyn haste_core::view::BlockStateTable, atlas: &mut AtlasBuilder) -> anyhow::Result<Self>; pub fn quads(&self, s: BlockStateId) -> &[BakedQuad]; pub fn is_full_opaque(&self, s: BlockStateId) -> bool; pub fn render_layer(&self, s: BlockStateId) -> RenderLayer }
+// `haste_data::BlockStates` implements `BlockStateTable`; the atlas is built during baking (textures are discovered then).
+// 26.3 facts (WS3): the jar carries the full asset tree (no extracted objects dir needed); blockstate variant keys are partial (missing properties are wildcards, most specific wins); models have no `render_type`, the layer is a documented heuristic.
 ```
 
 ## haste-render (WS3)
@@ -132,7 +137,7 @@ Meshing runs on a thread pool from `SectionSnapshot`s; the render thread never b
 ```rust
 pub struct EntityStore { .. }
 impl EntityStore {
-    pub fn new(data: Arc<GameData>) -> EntityStore;
+    pub fn new(data: Arc<GameData>) -> EntityStore;   // interim on the branch: new(dims: EntityDimensions) until haste-data lands
     pub fn spawn(&mut self, s: &haste_core::entity::EntitySpawn);
     pub fn remove(&mut self, ids: &[EntityId]);
     pub fn move_delta(&mut self, id: EntityId, delta: DVec3, on_ground: bool);           // short deltas /4096
@@ -157,9 +162,13 @@ Models (`haste_core::model::CubeModel`) are defined in this crate as data (playe
 ```rust
 pub struct PlayerState { pub pos: DVec3, pub velocity: DVec3, pub yaw: f32, pub pitch: f32, pub on_ground: bool, pub sprinting: bool, pub sneaking: bool, pub in_water: bool, pub flying: bool, pub fall_distance: f32, .. }
 pub struct PlayerAttributes { pub movement_speed: f64 /* 0.1 */, pub jump_strength: f64, pub gravity: f64, pub step_height: f64, pub width: f32, pub height: f32 /* standing/sneaking/swimming via pose */ }
-pub fn tick(state: &mut PlayerState, input: &InputState, attrs: &PlayerAttributes, world: &dyn BlockView, shapes: &dyn CollisionShapes, data: &GameData) -> TickResult;
+pub fn tick(state: &mut PlayerState, input: &InputState, attrs: &PlayerAttributes, world: &dyn BlockView, shapes: &dyn CollisionShapes, blocks: &dyn haste_core::view::BlockPhysics) -> TickResult;
 pub struct TickResult { pub moved: bool, pub rotated: bool, pub on_ground_changed: bool, pub collided_horizontally: bool }
-pub fn collide(aabb: Aabb, movement: DVec3, world: &dyn BlockView, shapes: &dyn CollisionShapes) -> DVec3;   // pure, tested in isolation
+pub fn collide(aabb: Aabb, movement: DVec3, world: &dyn BlockView, shapes: &dyn CollisionShapes) -> DVec3;   // pure axis sweep, tested in isolation
+pub fn collide_with_step(aabb: Aabb, movement: DVec3, step_height: f64, on_ground: bool, world: &dyn BlockView, shapes: &dyn CollisionShapes) -> DVec3;
+// PlayerState also carries: in_lava, swimming, pose: Pose, jump_cooldown: u8, horizontal_collision, vertical_collision.
+// PlayerAttributes also carries: sneaking_speed, flying_speed: f32, crouching_height, swimming_height.
+// `haste_data::GameData` implements `BlockPhysics` (from block_properties.json + block_shapes.json).
 ```
 Validated tick by tick against traces in `cache/oracle/26.3/traces/*.json` (format in haste-testkit).
 

@@ -7,7 +7,7 @@ exclude = ["cache"]
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/josefbednar/haste"
+repository = "https://github.com/bednarjosef/haste"
 rust-version = "1.99"
 
 [workspace.dependencies]
@@ -50,6 +50,18 @@ directories = "6"
 crossbeam-channel = "0.5"
 rayon = "1"
 criterion = "0.5"
+# protocol transport (vendored from Pumpkin, GPL-3.0): framing, compression, encryption, auth
+async-compression = { version = "0.4", features = ["tokio", "zlib"] }
+aes = "0.8"
+cfb8 = "0.8"
+cesu8 = "1"
+rsa = "0.9"
+sha1 = "0.10"
+num-bigint = "0.4"
+base64 = "0.22"
+bitflags = "2"
+tokio-util = { version = "0.7", features = ["codec"] }
+trust-dns-resolver = "0.23"
 
 [profile.release]
 debug = 1
