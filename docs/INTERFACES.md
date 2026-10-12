@@ -203,7 +203,7 @@ Tier-2 proxies in Phase 1: `Minecraft` (getInstance, player, level, options, fon
 
 ```rust
 pub struct Installation { pub client_jar: PathBuf, pub server_jar: PathBuf, pub assets_dir: PathBuf, pub assets_index: String, pub libraries_dir: PathBuf, pub jdk_java: PathBuf, pub reports_dir: PathBuf }
-pub async fn ensure_installed(progress: impl FnMut(Progress)) -> anyhow::Result<Installation>;  // manifest -> version json -> client/server jars (sha1), assets index + objects, libraries needed to run the vanilla server + client, JDK 25 (Adoptium) if no suitable java, then data generator reports
+pub async fn ensure_installed(progress: impl FnMut(Progress) + Send + 'static) -> anyhow::Result<Installation>;  // manifest -> version json -> client/server jars (sha1), assets index + objects, libraries needed to run the vanilla server + client, JDK 25 (Adoptium) if no suitable java, then data generator reports
 pub fn find_existing_minecraft() -> Option<PathBuf>;   // ~/.minecraft/versions/26.3 etc. (read only, never modified)
 pub struct Config { pub username: String, pub render_distance: i32, pub gui_scale: u32, pub fov: f32, pub last_server: Option<String>, pub msa: Option<..> }  // TOML in the config dir
 pub struct LocalServer { .. }  impl LocalServer { pub async fn start(world_dir: &Path, port: u16) -> anyhow::Result<LocalServer>; pub fn address(&self) -> String; pub async fn stop(self); }  // vanilla server jar, offline mode, 127.0.0.1, waits for "Done"
