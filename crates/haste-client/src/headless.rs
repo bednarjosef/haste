@@ -10,16 +10,13 @@
 //! `net` lives in this file's directory but is declared here until the lead
 //! adds `mod net;` to main.rs.
 
-#[path = "net.rs"]
-pub mod net;
-
 use std::time::{Duration, Instant};
 
 use haste_protocol::haste_core::game::TICK_SECONDS;
 use haste_protocol::{Account, ConnectOptions};
 
 use crate::Args;
-use net::{EntitySink, NetDriver, StubEntities, StubWorld, WorldSink};
+use crate::net::{EntitySink, NetDriver, StubEntities, StubWorld, WorldSink};
 
 /// Runs the headless join and returns an error if it did not hold.
 pub fn run(args: &Args) -> anyhow::Result<()> {

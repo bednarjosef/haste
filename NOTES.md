@@ -2,6 +2,12 @@
 
 Newest at the top. One entry per decision, with the why; link the brief or report it came from.
 
+- **2026-10-12 M1 reached (headless).** `haste --headless --server 127.0.0.1:25565 --seconds 60`
+  stays connected to the local Fabric 26.3 server: 473 chunks, ~117 entities, ~29k packets, every
+  play packet decoded, zero unknown ids. Server-verified corrections to the wiki (WS1):
+  light-mask bit sets are VarLong-encoded; movement must wait for `player_loaded` after a
+  teleport or the server kicks with `invalid_player_movement`; 26.3 has `punch`/`attack`, no
+  serverbound `swing`. Online mode is untested until Microsoft tokens exist (WS7).
 - **2026-10-12 Cache wiped and rebuilt.** At 19:38 the repo's `cache/` directory was deleted and
   replaced by a symlink to itself (which worker did it is not determined; no Opus transcript shows
   the command). Everything in it is derived data, so `scripts/rebuild-cache.sh` recreates it in ~5
