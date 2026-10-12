@@ -1131,6 +1131,8 @@ dependencies = [
  "glam",
  "haste-core",
  "haste-data",
+ "serde",
+ "serde_json",
  "tracing",
  "uuid",
 ]
