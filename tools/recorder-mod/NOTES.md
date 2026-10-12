@@ -61,3 +61,14 @@ friction stone 0.6 / ice 0.98 / slime 0.8 / blue_ice 0.989.
 - Getting `dynamicShape` at runtime without the heuristic: no accessor exists (see above).
 - Deriving the output dir from the server's own paths: `getServerDirectory()` is the CWD, not
   the install root; abandoned for the system property.
+
+## Client recorder state (Task 3)
+
+`src/main/java/haste/recorder/client/` (the `/haste record|screenshot|bench` commands,
+scripted input sequences, trace/screenshot/bench writers, `MinecraftMixin` + `GuiMixin`)
+compiles via `build.sh` — the jar contains both the server dumps and the client recorder,
+and `fabric.mod.json` is now `environment: "*"` with a `client` entrypoint. It has **not
+been run against the real client yet** (needs a display + the user; exact steps in
+`docs/RECORDING.md`). `build.sh` additionally requires `cache/versions/26.3/client.jar`
+and unpacks three Fabric API nested jars (base, command-api, lifecycle-events) for javac.
+`validate-traces.py` sanity-checks recorded traces once they exist.
