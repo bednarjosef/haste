@@ -13,3 +13,9 @@ serde_json.workspace = true
 anyhow.workspace = true
 image.workspace = true
 glam.workspace = true
+bytes.workspace = true
+flate2.workspace = true
+
+[[bin]]
+name = "haste-packet-proxy"
+path = "src/bin/haste-packet-proxy.rs"

@@ -1042,6 +1042,8 @@ name = "haste-testkit"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
+ "flate2",
  "glam",
  "haste-core",
  "haste-data",
