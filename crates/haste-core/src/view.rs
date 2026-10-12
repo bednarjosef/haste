@@ -60,6 +60,8 @@ pub trait BlockStateTable {
     fn len(&self) -> usize;
     fn is_empty(&self) -> bool { self.len() == 0 }
     fn block_of(&self, state: BlockStateId) -> &crate::Identifier;
-    /// Property name/value pairs as `blocks.json` lists them (sorted by name).
-    fn properties(&self, state: BlockStateId) -> &[(String, String)];
+    /// Property name/value pairs, sorted by name (owned: implementations intern names and values).
+    /// Startup/baking use only; hot paths use `property_value`.
+    fn properties(&self, state: BlockStateId) -> Vec<(String, String)>;
+    fn property_value(&self, state: BlockStateId, name: &str) -> Option<&str>;
 }

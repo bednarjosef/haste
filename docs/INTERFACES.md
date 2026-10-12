@@ -17,7 +17,8 @@ pub struct BlockStates { .. }
 impl BlockStates {
     pub fn len(&self) -> usize;
     pub fn block_of(&self, s: BlockStateId) -> &Identifier;
-    pub fn properties(&self, s: BlockStateId) -> &[(String, String)];   // sorted by name, as blocks.json lists them
+    pub fn properties(&self, s: BlockStateId) -> Vec<(String, String)>;   // sorted by name (interned storage; owned result)
+    pub fn property_value(&self, s: BlockStateId, name: &str) -> Option<&str>;   // hot-path lookup
     pub fn default_state(&self, block: &Identifier) -> Option<BlockStateId>;
     pub fn state(&self, block: &Identifier, props: &[(&str, &str)]) -> Option<BlockStateId>;
     pub fn with_property(&self, s: BlockStateId, name: &str, value: &str) -> Option<BlockStateId>;
