@@ -61,10 +61,12 @@ vanilla client with the mod architecture designed in and no mod support yet.
 
 - `main` is the integration branch and is never committed to directly. All development happens on
   branches (`ws<N>-<name>` for workstreams, `<topic>` for anything else) with small, clear commits.
-- A branch reaches `main` only through a pull request that the lead reviews: tests and clippy
-  clean, no lead-owned files touched without agreement, no derived Mojang data, attributions in
-  `THIRD_PARTY.md` for any reused code. Merges are `--no-ff` so each workstream's history stays
-  visible.
+- A branch reaches `main` only through a pull request on the GitHub remote. The lead agent pushes
+  the branch, opens the PR (`gh pr create`), reviews it (tests and clippy clean, no lead-owned
+  files touched without agreement, no derived Mojang data, attributions in `THIRD_PARTY.md` for
+  any reused code) and merges it (`gh pr merge --merge`, a merge commit so each workstream's
+  history stays visible). There is no human in the loop: the lead agent does all of this itself.
+- Worker agents never push; the lead pushes their branches when opening the PR.
 - Branches pick up `main` with `git merge main` (no rebasing of shared branches).
 - The public remote receives `main` and reviewed branches only; `cache/`, worktrees, and local
   settings never leave the machine.
