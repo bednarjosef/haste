@@ -1178,7 +1178,6 @@ dependencies = [
  "flate2",
  "glam",
  "haste-core",
- "haste-world",
  "num-bigint",
  "reqwest",
  "rsa",
