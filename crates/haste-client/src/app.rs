@@ -321,7 +321,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         let entities = feed.entities(&shared, &mut renderer, partial);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
-        stats = renderer.render(&FrameInput {
+        let frame = FrameInput {
             camera,
             entities,
             gui: &gui,
@@ -329,7 +329,9 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             partial_tick: partial,
             block_target,
             breaking: &breaking,
-        })?;
+        };
+        renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
+        stats = renderer.render(&frame)?;
         frames += 1;
         let placed = shared.view.lock().has_position;
         if shared.is_closed() {
@@ -352,8 +354,9 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         .save(file)
         .with_context(|| format!("saving {}", file.display()))?;
     let c = last_camera;
+    let view = *shared.view.lock();
     println!(
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls",
+        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, target {:?}",
         file.display(),
         image.width(),
         image.height(),
@@ -362,10 +365,11 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         c.pos.z,
         c.yaw,
         c.pitch,
-        shared.view.lock().time_of_day % 24000,
+        view.time_of_day % 24000,
         stats.chunk_sections_drawn,
         stats.chunk_sections_total,
-        stats.draw_calls
+        stats.draw_calls,
+        view.block_target
     );
     drop(session);
     Ok(())
@@ -522,7 +526,7 @@ impl App {
         self.breaking.clear();
         self.breaking
             .extend_from_slice(&self.shared.breaking.lock());
-        match renderer.render(&FrameInput {
+        let frame = FrameInput {
             camera,
             entities,
             gui: &self.gui,
@@ -530,7 +534,10 @@ impl App {
             partial_tick: partial,
             block_target,
             breaking: &self.breaking,
-        }) {
+        };
+        // Outline boxes of the target and the states of breaking blocks (one short read lock).
+        renderer.sample_world(&*self.shared.world.read(), &self.shared.data.shapes, &frame);
+        match renderer.render(&frame) {
             Ok(stats) => {
                 if let Some(line) = self.fps.frame(&stats) {
                     if let Some(w) = &self.window {
