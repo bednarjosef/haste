@@ -107,6 +107,22 @@ pub fn resolve_cached_java() -> Option<PathBuf> {
     java.is_file().then_some(java)
 }
 
+/// Loads the cached 26.3 version JSON (`cache/versions/26.3.json`), fetching it if absent.
+/// Needed by the launcher without redownloading anything.
+pub async fn load_cached_version_info() -> anyhow::Result<VersionInfo> {
+    let vjson_path = paths::version_dir().with_file_name(format!("{}.json", paths::MC_VERSION));
+    if let Ok(cached) = tokio::fs::read_to_string(&vjson_path).await {
+        if let Ok(v) = serde_json::from_str::<VersionInfo>(&cached) {
+            if v.id == paths::MC_VERSION {
+                return Ok(v);
+            }
+        }
+    }
+    let client = reqwest::Client::new();
+    let noop = |_p: crate::download::Progress| {};
+    version_info(&client, &noop).await
+}
+
 /// Looks for `java` on PATH and in `$JAVA_HOME/bin`; returns `(path, major_version)`.
 pub async fn find_system_java() -> Option<(PathBuf, u32)> {
     let mut candidates: Vec<PathBuf> = Vec::new();
