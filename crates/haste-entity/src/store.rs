@@ -1,0 +1,248 @@
+//! Dense entity storage: `Vec`-backed slots with a free list, `EntityId -> slot` in an ahash map.
+//! No per-tick allocation.
+use ahash::AHashMap;
+use haste_core::entity::{EntitySpawn, ItemStackData, MetadataEntry, PlayerInfo, Pose};
+use haste_core::ids::{EntityId, RegistryIndex};
+use haste_core::model::EntityInstance;
+use haste_core::DVec3;
+use uuid::Uuid;
+
+use crate::dims::EntityDimensions;
+use crate::lerp::LerpState;
+use crate::metadata::Metadata;
+
+/// One tracked entity.
+pub struct Entity {
+    pub id: EntityId,
+    pub uuid: Uuid,
+    pub kind: RegistryIndex,
+    pub pos: DVec3,
+    pub prev_pos: DVec3,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub head_yaw: f32,
+    /// Velocity the server sent (blocks/tick); informational until the lead asks for prediction.
+    pub velocity: DVec3,
+    pub on_ground: bool,
+    pub pose: Pose,
+    /// Width, height for the current pose.
+    pub dimensions: (f32, f32),
+    pub metadata: Metadata,
+    pub equipment: Vec<(u8, ItemStackData)>,
+    lerp: LerpState,
+    /// Cached nametag from `player_info`.
+    pub nametag: Option<String>,
+}
+
+impl Entity {
+    fn new(s: &EntitySpawn, dims: &EntityDimensions) -> Entity {
+        Entity {
+            id: s.id,
+            uuid: s.uuid,
+            kind: s.kind,
+            pos: s.pos,
+            prev_pos: s.pos,
+            yaw: s.yaw,
+            pitch: s.pitch,
+            head_yaw: s.head_yaw,
+            velocity: s.velocity,
+            on_ground: false,
+            pose: Pose::Standing,
+            dimensions: dims.get(s.kind, Pose::Standing),
+            metadata: Metadata::default(),
+            equipment: Vec::new(),
+            lerp: LerpState::new(s.pos),
+            nametag: None,
+        }
+    }
+}
+
+pub struct EntityStore {
+    slots: Vec<Option<Entity>>,
+    free: Vec<u32>,
+    by_id: AHashMap<EntityId, u32>,
+    dims: EntityDimensions,
+    players: AHashMap<Uuid, PlayerInfo>,
+}
+
+impl EntityStore {
+    /// Placeholder constructor pending WS2: `docs/INTERFACES.md` specifies
+    /// `new(data: Arc<haste_data::GameData>)`, but `haste-data` does not export `GameData` yet.
+    /// The only thing the store needs from it is the `minecraft:entity_type` registry (name ->
+    /// index) to apply oracle dimensions; until it exists every entity gets the 0.6 x 1.8 default
+    /// box (exactly what the brief says to do without the oracle file). Switch this to the
+    /// documented signature when WS2 lands.
+    pub fn new(dims: EntityDimensions) -> EntityStore {
+        EntityStore {
+            slots: Vec::new(),
+            free: Vec::new(),
+            by_id: AHashMap::new(),
+            dims,
+            players: AHashMap::new(),
+        }
+    }
+
+    fn slot(&self, id: EntityId) -> Option<u32> {
+        self.by_id.get(&id).copied()
+    }
+
+    pub fn spawn(&mut self, s: &EntitySpawn) {
+        if self.by_id.contains_key(&s.id) {
+            return; // duplicate add_entity: ignore
+        }
+        let slot = match self.free.pop() {
+            Some(i) => {
+                self.slots[i as usize] = Some(Entity::new(s, &self.dims));
+                i
+            }
+            None => {
+                self.slots.push(Some(Entity::new(s, &self.dims)));
+                (self.slots.len() - 1) as u32
+            }
+        };
+        if let Some(e) = &mut self.slots[slot as usize] {
+            // A player who joined before their entity spawned (info arrived first).
+            if let Some(p) = self.players.get(&e.uuid) {
+                e.nametag = Some(p.name.clone());
+            }
+        }
+        self.by_id.insert(s.id, slot);
+    }
+
+    pub fn remove(&mut self, ids: &[EntityId]) {
+        for id in ids {
+            if let Some(i) = self.by_id.remove(id) {
+                self.slots[i as usize] = None;
+                self.free.push(i);
+            }
+        }
+    }
+
+    /// Short delta move (`delta` already converted from 1/4096-block units by the caller).
+    pub fn move_delta(&mut self, id: EntityId, delta: DVec3, on_ground: bool) {
+        if let Some(i) = self.slot(id) {
+            if let Some(e) = &mut self.slots[i as usize] {
+                e.lerp.on_delta(delta);
+                e.on_ground = on_ground;
+            }
+        }
+    }
+
+    pub fn set_rotation(&mut self, id: EntityId, yaw: f32, pitch: f32, on_ground: bool) {
+        if let Some(i) = self.slot(id) {
+            if let Some(e) = &mut self.slots[i as usize] {
+                e.yaw = yaw;
+                e.pitch = pitch;
+                e.on_ground = on_ground;
+            }
+        }
+    }
+
+    /// A teleport abandons interpolation and snaps both `prev_pos` and `pos` (a teleport is a
+    /// discontinuity; the renderer must not draw a frame travelling the gap).
+    pub fn teleport(&mut self, id: EntityId, pos: DVec3, yaw: f32, pitch: f32, on_ground: bool) {
+        if let Some(i) = self.slot(id) {
+            if let Some(e) = &mut self.slots[i as usize] {
+                e.yaw = yaw;
+                e.pitch = pitch;
+                e.on_ground = on_ground;
+                e.pos = pos;
+                e.prev_pos = pos;
+                e.lerp.on_teleport(pos);
+            }
+        }
+    }
+
+    pub fn set_head_yaw(&mut self, id: EntityId, yaw: f32) {
+        if let Some(i) = self.slot(id) {
+            if let Some(e) = &mut self.slots[i as usize] {
+                e.head_yaw = yaw;
+            }
+        }
+    }
+
+    pub fn set_velocity(&mut self, id: EntityId, v: DVec3) {
+        if let Some(i) = self.slot(id) {
+            if let Some(e) = &mut self.slots[i as usize] {
+                e.velocity = v;
+            }
+        }
+    }
+
+    pub fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]) {
+        let Some(i) = self.slot(id) else { return };
+        let Some(e) = &mut self.slots[i as usize] else { return };
+        e.metadata.apply(entries);
+        if let Some(pose) = e.metadata.pose {
+            if pose != e.pose {
+                e.pose = pose;
+                e.dimensions = self.dims.get(e.kind, pose);
+            }
+        } else if e.metadata.shared.crouching && e.pose == Pose::Standing {
+            // Sneaking via the shared flags without an explicit pose entry.
+            e.dimensions = self.dims.crouching(e.dimensions);
+        }
+    }
+
+    pub fn set_equipment(&mut self, id: EntityId, slot: u8, item: ItemStackData) {
+        if let Some(i) = self.slot(id) {
+            if let Some(e) = &mut self.slots[i as usize] {
+                match e.equipment.iter_mut().find(|(s, _)| *s == slot) {
+                    Some(x) => x.1 = item,
+                    None => e.equipment.push((slot, item)),
+                }
+            }
+        }
+    }
+
+    pub fn player_info(&mut self, info: &[PlayerInfo]) {
+        for p in info {
+            self.players.insert(p.uuid, p.clone());
+        }
+        for slot in self.slots.iter_mut().flatten() {
+            if let Some(p) = self.players.get(&slot.uuid) {
+                slot.nametag = Some(p.name.clone());
+            }
+        }
+    }
+
+    /// One 20 Hz tick: advance the lerp windows so `prev_pos`/`pos` bracket this tick's step.
+    pub fn tick(&mut self) {
+        for slot in self.slots.iter_mut().flatten() {
+            slot.lerp.tick(&mut slot.pos, &mut slot.prev_pos);
+        }
+    }
+
+    pub fn get(&self, id: EntityId) -> Option<&Entity> {
+        self.slot(id).and_then(|i| self.slots[i as usize].as_ref())
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_id.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_id.is_empty()
+    }
+
+    /// Interpolated draw list for the renderer (WS3). Every entity uses the generic box until
+    /// Task 2 specialises the humanoid.
+    pub fn render_instances(&self, partial_tick: f32, out: &mut Vec<EntityInstance>) {
+        let model = crate::models::generic_box();
+        for slot in self.slots.iter().flatten() {
+            let pos = slot.prev_pos.lerp(slot.pos, partial_tick as f64);
+            out.push(EntityInstance {
+                id: slot.id,
+                model: model.clone(),
+                pos,
+                yaw: slot.yaw,
+                pitch: slot.pitch,
+                head_yaw: slot.head_yaw,
+                scale: 1.0,
+                pose: crate::animation::pose_overrides(slot),
+                skin: None,
+                nametag: slot.nametag.clone(),
+            });
+        }
+    }
+}
