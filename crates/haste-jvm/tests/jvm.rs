@@ -157,7 +157,7 @@ fn pause_screen() {
 
     // Escape closes it as well
     open(&h, haste_jvm::ScreenKind::Pause);
-    assert!(gui.key(haste_jvm::keys::ESCAPE, 0, 0, true));
+    assert!(gui.key(haste_jvm::keys::ESCAPE, haste_jvm::keys::keycode(haste_jvm::keys::ESCAPE), 0, true));
     assert!(!gui.is_open(), "Escape should close the pause screen: {:?}", gui.take_last_error());
 
     let unimpl = h.unimplemented().unwrap();
@@ -187,4 +187,91 @@ fn bench_pause_render() {
     eprintln!("PauseScreen render(): mean {mean:.1} µs, p50 {:.1} µs, p99 {:.1} µs ({n} frames after 3000 warm-up)",
         times[n / 2] as f64 / 1000.0, times[n * 99 / 100] as f64 / 1000.0);
     gui.close_screen();
+}
+
+/// Text drawn on one line (runs joined left to right), e.g. the chat input with its syntax colours.
+fn line_at(f: &haste_core::gui::GuiFrame, y: i32) -> String {
+    let mut runs: Vec<(i32, &str)> = f.commands.iter().filter_map(|c| match c {
+        haste_core::gui::GuiCommand::Text { text, x, y: ty, .. } if *ty == y => Some((*x, text.as_str())),
+        _ => None,
+    }).collect();
+    runs.sort_by_key(|r| r.0);
+    runs.into_iter().map(|r| r.1).collect()
+}
+
+/// The chat input line: the line holding the cursor or the typed text, at the bottom of the screen.
+fn chat_input(f: &haste_core::gui::GuiFrame) -> String {
+    let y = f.commands.iter().filter_map(|c| match c {
+        haste_core::gui::GuiCommand::Text { y, .. } => Some(*y),
+        _ => None,
+    }).max().unwrap_or(0);
+    line_at(f, y).trim_end_matches('_').to_string()
+}
+
+fn type_text(h: &JvmHost, s: &str) {
+    for c in s.chars() {
+        assert!(h.gui().char_typed(c, 0), "char {c:?}: {:?}", h.gui().take_last_error());
+    }
+}
+
+fn press(h: &JvmHost, key: i32) -> bool {
+    let kc = haste_jvm::keys::keycode(key);
+    let r = h.gui().key(key, kc, 0, true);
+    h.gui().key(key, kc, 0, false);
+    assert_eq!(h.gui().take_last_error(), None);
+    r
+}
+
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn chat_screen() {
+    use haste_jvm::keys;
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    h.clear_unimplemented().unwrap();
+    gui.with_state(|s| {
+        s.chat_lines = vec!["<Alex> hello".into(), "<Steve> hi there".into()];
+        s.sent.clear();
+    });
+    open(&h, haste_jvm::ScreenKind::Chat);
+    assert_eq!(gui.screen_class().as_deref(), Some("net.minecraft.client.gui.screens.ChatScreen"));
+    let f = render(&h, (0.0, 0.0));
+    let t = texts(&f);
+    assert!(t.contains(&"<Alex> hello".to_string()) && t.contains(&"<Steve> hi there".to_string()), "history: {t:?}");
+    // newest line is drawn lowest
+    let y_of = |f: &haste_core::gui::GuiFrame, s: &str| f.commands.iter().find_map(|c| match c {
+        haste_core::gui::GuiCommand::Text { text, y, .. } if text == s => Some(*y),
+        _ => None,
+    });
+    assert!(y_of(&f, "<Steve> hi there") > y_of(&f, "<Alex> hello"));
+
+    // typing goes into the real EditBox
+    type_text(&h, "hey there");
+    assert_eq!(chat_input(&render(&h, (0.0, 0.0))), "hey there");
+    assert!(press(&h, keys::BACKSPACE));
+    press(&h, keys::BACKSPACE);
+    assert_eq!(chat_input(&render(&h, (0.0, 0.0))), "hey the", "after two backspaces");
+
+    // Enter sends the line to Rust and closes the screen
+    assert!(press(&h, keys::RETURN));
+    assert!(!gui.is_open());
+    assert_eq!(gui.with_state(|s| s.take_sent()), vec![haste_jvm::ChatMessage { text: "hey the".into(), command: false }]);
+
+    // a command goes out as a command; Up recalls the previous line from the chat history
+    open(&h, haste_jvm::ScreenKind::Chat);
+    type_text(&h, "/help");
+    assert!(press(&h, keys::RETURN));
+    assert_eq!(gui.with_state(|s| s.take_sent()), vec![haste_jvm::ChatMessage { text: "help".into(), command: true }]);
+    open(&h, haste_jvm::ScreenKind::Chat);
+    press(&h, keys::UP);
+    assert_eq!(chat_input(&render(&h, (0.0, 0.0))), "/help", "Up recalls the last sent line");
+    press(&h, keys::UP);
+    assert_eq!(chat_input(&render(&h, (0.0, 0.0))), "hey the", "Up again recalls the one before");
+    assert!(press(&h, keys::ESCAPE));
+    assert!(!gui.is_open());
+    assert!(gui.with_state(|s| s.take_sent()).is_empty(), "Escape sends nothing");
+
+    let unimpl = h.unimplemented().unwrap();
+    assert!(unimpl.is_empty(), "Unimplemented log for ChatScreen: {unimpl:#?}");
 }

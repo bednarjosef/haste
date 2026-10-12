@@ -35,6 +35,19 @@ public final class OptionsImpl {
     /** Vanilla default "Menu Background Blur" (5). Blur is not representable in GuiFrame anyway. */
     public static int getMenuBackgroundBlurriness(Options o) { return 5; }
     public static OptionInstance<Integer> menuBackgroundBlurriness(Options o) { return opt("menuBackgroundBlurriness", 5); }
+    /**
+     * Text background colour: vanilla derives it from the "Text Background Opacity" options; Haste has no such
+     * options yet, so the caller's default is used (approximate).
+     */
+    public static int getBackgroundColor(Options o, int defaultColor) { return defaultColor; }
+    public static int getBackgroundColor(Options o, float defaultOpacity) { return Math.round(defaultOpacity * 255f) << 24; }
+
+    /** Chat drafts are not kept between chat screens (Haste choice; the vanilla default is not determined). */
+    public static OptionInstance<Boolean> saveChatDrafts(Options o) { return opt("saveChatDrafts", false); }
+
+    /** "Command Suggestions": on (vanilla's default in Chat Settings). */
+    public static OptionInstance<Boolean> autoSuggestions(Options o) { return opt("autoSuggestions", true); }
+
     /** Haste plays no music: never show the now-playing toast. */
     public static OptionInstance<MusicToastDisplayState> musicToast(Options o) { return opt("musicToast", MusicToastDisplayState.NEVER); }
 }

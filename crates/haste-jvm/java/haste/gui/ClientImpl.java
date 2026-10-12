@@ -40,6 +40,23 @@ public final class ClientImpl {
     }
     /** Not a developer build. */
     public static boolean isOfflineDeveloperMode(Minecraft m) { return false; }
+    /** Whether a text field has focus (vanilla starts SDL text input / IME then); Rust reads it for winit IME. */
+    static boolean textInput;
+    public static void onTextInputFocusChange(Minecraft m, net.minecraft.client.gui.components.events.GuiEventListener l, boolean focused) {
+        textInput = focused;
+    }
+    /** IME candidate area (GUI pixels) the focused text field asked for: x, y, w, h. */
+    static final int[] textInputArea = new int[4];
+    public static com.mojang.blaze3d.platform.TextInputManager textInputManager(Minecraft m) {
+        return Proxies.service(com.mojang.blaze3d.platform.TextInputManager.class);
+    }
+    public static void setTextInputArea(com.mojang.blaze3d.platform.TextInputManager t, int x, int y, int w, int h) {
+        textInputArea[0] = x; textInputArea[1] = y; textInputArea[2] = w; textInputArea[3] = h;
+    }
+    public static void startTextInput(com.mojang.blaze3d.platform.TextInputManager t, Object owner) { textInput = true; }
+    public static void stopTextInput(com.mojang.blaze3d.platform.TextInputManager t, Object owner) { textInput = false; }
+    public static void stopTextInput(com.mojang.blaze3d.platform.TextInputManager t) { textInput = false; }
+    public static void onTextInputFocusChange(com.mojang.blaze3d.platform.TextInputManager t, Object owner, boolean focused) { textInput = focused; }
     static net.minecraft.client.InputType lastInput = net.minecraft.client.InputType.NONE;
     public static net.minecraft.client.InputType getLastInputType(Minecraft m) { return lastInput; }
     public static void setLastInputType(Minecraft m, net.minecraft.client.InputType t) { lastInput = t; }
@@ -68,6 +85,9 @@ public final class ClientImpl {
     static int guiTicks;
     public static net.minecraft.client.gui.Font getFont(net.minecraft.client.gui.Hud h) { return Proxies.font; }
     public static int getGuiTicks(net.minecraft.client.gui.Hud h) { return guiTicks; }
+    public static net.minecraft.client.gui.components.ChatComponent getChat(net.minecraft.client.gui.Hud h) {
+        return Proxies.service(net.minecraft.client.gui.components.ChatComponent.class);
+    }
 
     // ---- Window ----
     public static int getGuiScaledWidth(Window w) { return GfxImpl.width; }

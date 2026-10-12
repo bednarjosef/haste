@@ -149,9 +149,11 @@ impl GuiPipeline {
             .filter(|s| !s.is_empty())
     }
 
-    /// Key press/release into `Screen.keyPressed/keyReleased(KeyEvent)`. `key` and `scancode` are
-    /// `KeyEvent`'s `key` (SDL3 scancode, [`crate::keys`]) and `keycode`; `mods` are SDL keymod bits.
-    /// Returns whether the screen consumed it.
+    /// Key press/release into `Screen.keyPressed/keyReleased(KeyEvent)`. 26.3 numbering, see
+    /// [`crate::keys`]: `key` is `KeyEvent.key` (SDL3 scancode: what Escape/Enter/key mappings match),
+    /// `scancode` is passed as `KeyEvent.keycode` (SDL keycode: what text editing matches, e.g.
+    /// Backspace = 8; [`crate::keys::keycode`]); `mods` are SDL keymod bits. Returns whether the
+    /// screen consumed it.
     pub fn key(&self, key: i32, scancode: i32, mods: i32, pressed: bool) -> bool {
         self.call_bool("key", self.m.key, &[jvalue { i: key }, jvalue { i: scancode }, jvalue { i: mods }, jvalue { z: pressed }])
     }

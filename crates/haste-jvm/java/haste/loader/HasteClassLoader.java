@@ -163,7 +163,19 @@ public final class HasteClassLoader extends ClassLoader {
     private ClassNotFoundException refuse(String name, String why) {
         String prev;
         synchronized (log) { prev = log.put(name, "refused: " + why); }
-        if (prev == null && verbose) System.err.println("[haste] class refused: " + name + " (" + why + ")");
+        if (prev == null && verbose && !name.startsWith("net.minecraft.")) {
+            System.err.println("[haste] class refused: " + name + " (" + why + ")");
+        } else if (prev == null && verbose) {
+            StringBuilder sb = new StringBuilder("[haste] class refused: " + name + " (" + why + ")");
+            int shown = 0;
+            for (StackTraceElement e : new Throwable().getStackTrace()) {
+                String c = e.getClassName();
+                if (c.startsWith("java.") || c.startsWith("jdk.") || c.startsWith("haste.loader.")) continue;
+                sb.append("\n    at ").append(e);
+                if (++shown == 8) break;
+            }
+            System.err.println(sb);
+        }
         return new ClassNotFoundException(name + " (haste: " + why + ")");
     }
 

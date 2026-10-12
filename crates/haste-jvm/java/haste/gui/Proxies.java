@@ -51,6 +51,8 @@ public final class Proxies {
 
         set(font, "lineHeight", int.class, haste.rt.Native.lineHeight());
         set(minecraft, "font", Font.class, font);
+        // the chat input font ("filter fishy" hides suspicious glyphs): the same Font proxy
+        set(minecraft, "fontFilterFishy", Font.class, font);
         set(minecraft, "options", Options.class, options);
         set(minecraft, "gui", Gui.class, gui);
         set(minecraft, "mouseHandler", net.minecraft.client.MouseHandler.class, make(net.minecraft.client.MouseHandler.class));
