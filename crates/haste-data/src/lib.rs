@@ -3,12 +3,14 @@
 //! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
 
 mod blocks;
+mod physics;
 mod registries;
 mod shapes;
 
 use std::path::Path;
 
 pub use blocks::BlockStates;
+pub use physics::{BlockProperties, BlockProps};
 pub use registries::Registries;
 pub use shapes::BlockShapes;
 
@@ -17,6 +19,7 @@ pub struct GameData {
     pub blocks: BlockStates,
     pub registries: Registries,
     pub shapes: BlockShapes,
+    pub physics: BlockProperties,
 }
 
 impl GameData {
@@ -29,7 +32,8 @@ impl GameData {
         Self::load_from(&reports, oracle.as_deref())
     }
 
-    /// Loads from explicit paths. `oracle` is the `block_shapes.json` path, if present.
+    /// Loads from explicit paths. `oracle` is the `block_shapes.json` path, if present;
+    /// `block_properties.json` is looked up next to it when it exists.
     pub fn load_from(reports: &Path, oracle: Option<&Path>) -> anyhow::Result<GameData> {
         let blocks_json = std::fs::read_to_string(reports.join("blocks.json"))?;
         let registries_json = std::fs::read_to_string(reports.join("registries.json"))?;
@@ -39,10 +43,18 @@ impl GameData {
             Some(p) => BlockShapes::parse_oracle(&std::fs::read_to_string(p)?, blocks.len())?,
             None => BlockShapes::fallback(&blocks),
         };
+        let props_path = oracle.map(|p| p.with_file_name("block_properties.json"));
+        let physics = match props_path {
+            Some(p) if p.is_file() => {
+                BlockProperties::parse(&std::fs::read_to_string(p)?, &blocks)?
+            }
+            _ => BlockProperties::defaults(&blocks),
+        };
         Ok(Self {
             blocks,
             registries,
             shapes,
+            physics,
         })
     }
 }
@@ -114,11 +126,23 @@ mod tests {
     }
 
     /// Writes the fixture into a unique temp dir; returns (reports dir, oracle path).
+    /// `oracle`, when given, is written as `block_shapes.json` in the fixture dir.
     fn write_fixture(
         blocks: &str,
         registries: &str,
         oracle: Option<&str>,
     ) -> (std::path::PathBuf, Option<std::path::PathBuf>) {
+        let dir = write_fixture_dir(blocks, registries);
+        let oracle_path = oracle.map(|o| {
+            let p = dir.join("block_shapes.json");
+            std::fs::write(&p, o).unwrap();
+            p
+        });
+        (dir.join("reports"), oracle_path)
+    }
+
+    /// Creates the fixture dir and writes blocks/registries; returns the dir itself.
+    fn write_fixture_dir(blocks: &str, registries: &str) -> std::path::PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -128,12 +152,7 @@ mod tests {
         std::fs::create_dir_all(&reports).unwrap();
         std::fs::write(reports.join("blocks.json"), blocks).unwrap();
         std::fs::write(reports.join("registries.json"), registries).unwrap();
-        let oracle_path = oracle.map(|o| {
-            let p = dir.join("block_shapes.json");
-            std::fs::write(&p, o).unwrap();
-            p
-        });
-        (reports, oracle_path)
+        dir
     }
 
     use haste_core::view::CollisionShapes as _;
@@ -273,6 +292,149 @@ mod tests {
         assert_eq!(d.shapes.collision_boxes(BlockStateId(2)).len(), 0);
     }
 
+    /// `BlockStateTable for BlockStates` delegates to the inherent methods.
+    #[test]
+    fn block_state_table_impl() {
+        use haste_core::view::BlockStateTable as _;
+        let d = fixture();
+        let t = &d.blocks;
+        assert_eq!(t.len(), 17);
+        assert!(!t.is_empty());
+        assert_eq!(t.block_of(BlockStateId(1)), &Identifier::minecraft("stone"));
+        assert_eq!(
+            t.block_of(BlockStateId(5)),
+            &Identifier::minecraft("oak_stairs")
+        );
+        let props = t.properties(BlockStateId(5));
+        assert_eq!(props.len(), 4);
+        assert_eq!(props[0], ("facing".to_owned(), "north".to_owned()));
+        // name-sorted
+        let mut names: Vec<&String> = props.iter().map(|(k, _)| k).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
+        assert_eq!(t.property_value(BlockStateId(5), "facing"), Some("north"));
+        assert_eq!(t.property_value(BlockStateId(5), "half"), Some("top"));
+        assert_eq!(t.property_value(BlockStateId(1), "facing"), None);
+    }
+
+    /// `BlockPhysics for GameData`: friction/speed/jump from `block_properties.json`
+    /// (defaults 0.6/1.0/1.0), fluid height from the `level` property, light/air/opaque and
+    /// waterlogged fluids from `block_shapes.json`.
+    #[test]
+    fn block_physics_impl() {
+        use haste_core::view::BlockPhysics as _;
+        // Fixture: air/stone/water(level 0..2)/oak_stairs from BLOCKS_JSON; oracle dump with
+        // light/air/opaque/fluid; block_properties.json next to it.
+        let oracle = r#"{
+          "version": 1,
+          "states": [
+            { "id": 0, "collision": [], "outline": [], "light": 0, "air": true, "opaque": false },
+            { "id": 1, "collision": [[0.0,0.0,0.0,1.0,1.0,1.0]], "outline": [[0.0,0.0,0.0,1.0,1.0,1.0]], "light": 0, "air": false, "opaque": true },
+            { "id": 2, "collision": [], "outline": [], "light": 0, "air": false, "opaque": false,
+              "fluid": "minecraft:water", "properties": { "level": "0" } },
+            { "id": 3, "collision": [], "outline": [], "light": 0, "air": false, "opaque": false,
+              "fluid": "minecraft:flowing_water", "properties": { "level": "1" } },
+            { "id": 4, "collision": [], "outline": [], "light": 0, "air": false, "opaque": false,
+              "fluid": "minecraft:flowing_water", "properties": { "level": "8" } },
+            { "id": 5, "collision": [], "outline": [], "light": 0, "air": false, "opaque": false,
+              "fluid": "minecraft:flowing_water", "properties": { "level": "2" } },
+            { "id": 6, "collision": [[0,0,0,1,1,1]], "outline": [[0,0,0,1,1,1]], "light": 14, "air": false, "opaque": false },
+            { "id": 8, "collision": [], "outline": [], "light": 0, "air": false, "opaque": false,
+              "fluid": "minecraft:water" }
+          ]
+        }"#;
+        let props = r#"{
+          "version": 1,
+          "minecraft": "26.3",
+          "blocks": {
+            "minecraft:ice": { "friction": 0.98, "speed_factor": 1.0, "jump_factor": 1.0 },
+            "minecraft:slime_block": { "friction": 0.8, "speed_factor": 1.0, "jump_factor": 1.0 },
+            "minecraft:honey_block": { "friction": 0.6, "speed_factor": 0.4, "jump_factor": 0.5 }
+          }
+        }"#;
+        // blocks.json with the physics-distinguished blocks (ice etc.) added
+        let blocks_json = r#"{
+  "minecraft:air": { "states": [ { "id": 0, "default": true } ] },
+  "minecraft:stone": { "states": [ { "id": 1, "default": true } ] },
+  "minecraft:water": {
+    "properties": { "level": ["0", "1", "2"] },
+    "states": [
+      { "id": 2, "default": true, "properties": { "level": "0" } },
+      { "id": 3, "properties": { "level": "1" } },
+      { "id": 4, "properties": { "level": "2" } }
+    ]
+  },
+  "minecraft:ice": { "states": [ { "id": 5, "default": true } ] },
+  "minecraft:slime_block": { "states": [ { "id": 6, "default": true } ] },
+  "minecraft:honey_block": { "states": [ { "id": 7, "default": true } ] },
+  "minecraft:oak_stairs": {
+    "properties": {
+      "facing": ["north", "south", "west", "east"],
+      "half": ["top", "bottom"],
+      "shape": ["straight", "inner_left", "inner_right", "outer_left", "outer_right"],
+      "waterlogged": ["true", "false"]
+    },
+    "states": [
+      { "id": 8, "properties": { "facing": "north", "half": "top", "shape": "straight", "waterlogged": "true" } },
+      { "id": 9, "default": true, "properties": { "facing": "north", "half": "top", "shape": "straight", "waterlogged": "false" } }
+    ]
+  }
+}"#;
+        let registries_json = r#"{
+  "minecraft:block": {
+    "default": "minecraft:air",
+    "entries": {
+      "minecraft:air": { "protocol_id": 0 },
+      "minecraft:stone": { "protocol_id": 1 },
+      "minecraft:water": { "protocol_id": 2 },
+      "minecraft:ice": { "protocol_id": 3 },
+      "minecraft:slime_block": { "protocol_id": 4 },
+      "minecraft:honey_block": { "protocol_id": 5 },
+      "minecraft:oak_stairs": { "protocol_id": 6 }
+    }
+  }
+}"#;
+        let dir = write_fixture_dir(blocks_json, registries_json);
+        std::fs::write(dir.join("block_shapes.json"), oracle).unwrap();
+        std::fs::write(dir.join("block_properties.json"), props).unwrap();
+        let d = GameData::load_from(&dir.join("reports"), Some(&dir.join("block_shapes.json")))
+            .unwrap();
+
+        // friction/speed/jump from block_properties.json; missing blocks get defaults
+        assert!((d.friction(BlockStateId(5)) - 0.98).abs() < 1e-6); // ice
+        assert!((d.friction(BlockStateId(6)) - 0.8).abs() < 1e-6); // slime
+        assert!((d.friction(BlockStateId(1)) - 0.6).abs() < 1e-6); // stone: default
+        assert!((d.speed_factor(BlockStateId(7)) - 0.4).abs() < 1e-6); // honey
+        assert!((d.jump_factor(BlockStateId(7)) - 0.5).abs() < 1e-6); // honey
+        assert!((d.speed_factor(BlockStateId(1)) - 1.0).abs() < 1e-6);
+
+        // fluid heights: level 0 = 8/9, 1 = 7/9, 2+ (we treat 8 as falling) = ...
+        let f = d.fluid(BlockStateId(2)).unwrap();
+        assert_eq!(f.kind, haste_core::view::FluidKind::Water);
+        assert!((f.height - 8.0 / 9.0).abs() < 1e-6);
+        let f = d.fluid(BlockStateId(3)).unwrap();
+        assert!((f.height - 7.0 / 9.0).abs() < 1e-6);
+        // level 8+ = falling column = full block
+        let f = d.fluid(BlockStateId(4)).unwrap();
+        assert!((f.height - 1.0).abs() < 1e-6);
+        // waterlogged stairs: fluid present, no level property -> full source height
+        let f = d.fluid(BlockStateId(8)).unwrap();
+        assert_eq!(f.kind, haste_core::view::FluidKind::Water);
+        assert!((f.height - 8.0 / 9.0).abs() < 1e-6);
+        // dry stairs: no fluid
+        assert!(d.fluid(BlockStateId(9)).is_none());
+
+        // light/air/opaque from block_shapes.json
+        assert_eq!(d.light_emission(BlockStateId(6)), 14); // slime: from the dump
+        assert_eq!(d.light_emission(BlockStateId(1)), 0);
+        assert!(d.is_air(BlockStateId(0)));
+        assert!(!d.is_air(BlockStateId(1)));
+        assert!(d.is_opaque_full(BlockStateId(1)));
+        assert!(!d.is_opaque_full(BlockStateId(0)));
+        assert!(!d.is_opaque_full(BlockStateId(2))); // water: not opaque
+    }
+
     #[test]
     fn fallback_shape_cases() {
         let blocks_json = r#"{
@@ -399,6 +561,54 @@ mod tests {
                 "oracle-backed stairs have no collision boxes"
             );
         }
+        // Physics from the real oracle dumps (values verified against the dumps directly).
+        use haste_core::view::BlockPhysics as _;
+        let ice = d
+            .blocks
+            .default_state(&Identifier::minecraft("ice"))
+            .unwrap();
+        assert!((d.friction(ice) - 0.98).abs() < 1e-6);
+        let slime = d
+            .blocks
+            .default_state(&Identifier::minecraft("slime_block"))
+            .unwrap();
+        assert!((d.friction(slime) - 0.8).abs() < 1e-6);
+        let honey = d
+            .blocks
+            .default_state(&Identifier::minecraft("honey_block"))
+            .unwrap();
+        assert!((d.speed_factor(honey) - 0.4).abs() < 1e-6);
+        assert!((d.jump_factor(honey) - 0.5).abs() < 1e-6);
+        assert!((d.friction(st) - 0.6).abs() < 1e-6); // stone: default
+                                                      // Water: level 0 source = 8/9, level 1 = 7/9, level 8 (falling) = 1.0; ids verified.
+        let water_l = |lvl: &str| {
+            d.blocks
+                .state(&Identifier::minecraft("water"), &[("level", lvl)])
+                .unwrap()
+        };
+        let f = d.fluid(water_l("0")).expect("water level 0 has fluid");
+        assert_eq!(f.kind, haste_core::view::FluidKind::Water);
+        assert!((f.height - 8.0 / 9.0).abs() < 1e-6);
+        let f = d.fluid(water_l("1")).expect("water level 1 has fluid");
+        assert!((f.height - 7.0 / 9.0).abs() < 1e-6);
+        let f = d.fluid(water_l("8")).expect("water level 8 has fluid");
+        assert!((f.height - 1.0).abs() < 1e-6, "falling water is full");
+        assert!(d.fluid(st).is_none()); // stone: no fluid
+                                        // light/air/opaque
+        let glowstone = d
+            .blocks
+            .default_state(&Identifier::minecraft("glowstone"))
+            .unwrap();
+        assert_eq!(d.light_emission(glowstone), 15);
+        assert!(d.is_air(air));
+        assert!(!d.is_air(st));
+        assert!(d.is_opaque_full(st));
+        assert!(!d.is_opaque_full(air));
+        let torch = d
+            .blocks
+            .default_state(&Identifier::minecraft("torch"))
+            .unwrap();
+        assert_eq!(d.light_emission(torch), 14);
         eprintln!(
             "real reports: {} states, {} blocks, {} entity types, oracle_backed={}, load {:?}",
             d.blocks.len(),

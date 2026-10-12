@@ -4,15 +4,21 @@
 //! fallback heuristic from docs/INTERFACES.md, which is approximate (see NOTES.md). The oracle
 //! file replaces it once WS8 records the dump.
 
+use haste_core::view::{FluidInfo, FluidKind};
 use haste_core::{Aabb, BlockStateId, DVec3};
 
 use crate::blocks::BlockStates;
 
-/// Per-state shape entry (empty = no collision).
+/// Per-state shape entry (empty = no collision). `light`/`air`/`opaque`/`fluid` come from the
+/// oracle dump's per-state fields (or fallback heuristics) and back `BlockPhysics` on `GameData`.
 #[derive(Default, Clone)]
 struct StateShapes {
     collision: Vec<Aabb>,
     outline: Vec<Aabb>,
+    light: u8,
+    air: bool,
+    opaque: bool,
+    fluid: Option<FluidInfo>,
 }
 
 pub struct BlockShapes {
@@ -36,8 +42,20 @@ impl BlockShapes {
             collision: Vec<[f64; 6]>,
             #[serde(default)]
             outline: Vec<[f64; 6]>,
-            // `block`, `properties`, `light`, `air`, `opaque` are present in the real dump
-            // (WS8 recorder) but ignored here.
+            #[serde(default)]
+            light: u8,
+            #[serde(default)]
+            air: bool,
+            #[serde(default)]
+            opaque: bool,
+            /// Fluid id (`minecraft:water`, `minecraft:flowing_water`, `minecraft:lava`,
+            /// `minecraft:flowing_lava`) for fluid states and waterlogged blocks; null otherwise.
+            #[serde(default)]
+            fluid: Option<String>,
+            /// `properties` includes `level` for fluid states; absent for waterlogged blocks
+            /// (their fluid is a full source).
+            #[serde(default)]
+            properties: std::collections::HashMap<String, String>,
         }
         let file: OracleFile =
             serde_json::from_str(json).map_err(|e| anyhow::anyhow!("block_shapes.json: {e}"))?;
@@ -65,6 +83,18 @@ impl BlockShapes {
             shapes[idx] = StateShapes {
                 collision: conv(&s.collision),
                 outline: conv(&s.outline),
+                light: s.light,
+                air: s.air,
+                opaque: s.opaque,
+                fluid: s.fluid.as_deref().and_then(|f| {
+                    let kind = match f {
+                        "minecraft:water" | "minecraft:flowing_water" => FluidKind::Water,
+                        "minecraft:lava" | "minecraft:flowing_lava" => FluidKind::Lava,
+                        _ => return None,
+                    };
+                    let height = fluid_height(s.properties.get("level").map(String::as_str));
+                    Some(FluidInfo { kind, height })
+                }),
             };
         }
         Ok(Self {
@@ -88,6 +118,34 @@ impl BlockShapes {
 
     pub fn is_oracle_backed(&self) -> bool {
         self.oracle_backed
+    }
+
+    /// Light emitted by the state (0..=15); 0 in the fallback.
+    pub(crate) fn light_emission(&self, state: BlockStateId) -> u8 {
+        self.shapes[state.0 as usize].light
+    }
+
+    pub(crate) fn is_air(&self, state: BlockStateId) -> bool {
+        self.shapes[state.0 as usize].air
+    }
+
+    pub(crate) fn is_opaque_full(&self, state: BlockStateId) -> bool {
+        self.shapes[state.0 as usize].opaque
+    }
+
+    pub(crate) fn fluid(&self, state: BlockStateId) -> Option<FluidInfo> {
+        self.shapes[state.0 as usize].fluid
+    }
+}
+
+/// Vanilla fluid surface height from the `level` property: level 0 (source) = 8/9,
+/// levels 1..=7 = (8 - level)/9, level >= 8 (falling column) = 1.0. Waterlogged blocks
+/// (no `level` property) are full sources: 8/9.
+fn fluid_height(level: Option<&str>) -> f32 {
+    match level.and_then(|l| l.parse::<u32>().ok()) {
+        Some(l @ 1..=7) => (8 - l) as f32 / 9.0,
+        Some(8..) => 1.0,
+        _ => 8.0 / 9.0,
     }
 }
 
@@ -141,12 +199,25 @@ const KEYWORDS: &[&str] = &[
 fn fallback_shapes(blocks: &BlockStates, state: BlockStateId) -> StateShapes {
     let path = blocks.block_of(state).path();
     let prop = |k: &str| blocks.property_value(state, k);
-    // Air variants and fluids never collide.
-    if matches!(
-        path,
-        "air" | "cave_air" | "void_air" | "water" | "lava" | "bubble_column"
-    ) {
-        return StateShapes::default();
+    // Air variants and fluids never collide. Fallback physics fields: air variants are air;
+    // water/lava carry a full-source fluid; everything else is an opaque full cube.
+    if matches!(path, "air" | "cave_air" | "void_air") {
+        return StateShapes {
+            air: true,
+            ..Default::default()
+        };
+    }
+    if matches!(path, "water" | "lava" | "bubble_column") {
+        let kind = if path == "lava" {
+            FluidKind::Lava
+        } else {
+            FluidKind::Water
+        };
+        let height = fluid_height(prop("level"));
+        return StateShapes {
+            fluid: Some(FluidInfo { kind, height }),
+            ..Default::default()
+        };
     }
     // Snow: 1/8 per layer.
     if path == "snow" {
@@ -160,6 +231,8 @@ fn fallback_shapes(blocks: &BlockStates, state: BlockStateId) -> StateShapes {
         return StateShapes {
             collision: vec![aabb],
             outline: vec![aabb],
+            opaque: is_full_cube(aabb),
+            ..Default::default()
         };
     }
     // Slabs: half cube (property is `type` in 26.3: top/bottom/double).
@@ -179,6 +252,8 @@ fn fallback_shapes(blocks: &BlockStates, state: BlockStateId) -> StateShapes {
         return StateShapes {
             collision: vec![aabb],
             outline: vec![aabb],
+            opaque: is_full_cube(aabb),
+            ..Default::default()
         };
     }
     // Stairs: approximate as a half cube by `half`.
@@ -198,6 +273,8 @@ fn fallback_shapes(blocks: &BlockStates, state: BlockStateId) -> StateShapes {
         return StateShapes {
             collision: vec![aabb],
             outline: vec![aabb],
+            opaque: is_full_cube(aabb),
+            ..Default::default()
         };
     }
     // Pointed dripstone: half cube by vertical_direction.
@@ -217,6 +294,8 @@ fn fallback_shapes(blocks: &BlockStates, state: BlockStateId) -> StateShapes {
         return StateShapes {
             collision: vec![aabb],
             outline: vec![aabb],
+            opaque: is_full_cube(aabb),
+            ..Default::default()
         };
     }
     if KEYWORDS.iter().any(|k| path.contains(k)) {
@@ -226,5 +305,13 @@ fn fallback_shapes(blocks: &BlockStates, state: BlockStateId) -> StateShapes {
     StateShapes {
         collision: vec![FULL_CUBE],
         outline: vec![FULL_CUBE],
+        opaque: true,
+        ..Default::default()
     }
+}
+
+/// Full 1x1x1 cube (slab "double").
+fn is_full_cube(a: Aabb) -> bool {
+    let d = a.max - a.min;
+    (d.x - 1.0).abs() < 1e-9 && (d.y - 1.0).abs() < 1e-9 && (d.z - 1.0).abs() < 1e-9
 }
