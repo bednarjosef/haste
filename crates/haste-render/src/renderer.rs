@@ -195,6 +195,10 @@ pub struct Renderer {
     /// GUI batch drawing (`FrameInput::gui`) and its own handle on the assets for lazy loads.
     gui: crate::gui::GuiRenderer,
     assets: haste_assets::Assets,
+    /// Entity cube models (`FrameInput::entities`).
+    entity: crate::entity::EntityRenderer,
+    /// Name tags projected to GUI space this frame.
+    nametags: Vec<crate::gui::ScreenNametag>,
 }
 
 #[allow(dead_code)]
@@ -443,6 +447,12 @@ impl Renderer {
             surface_format.remove_srgb_suffix(),
             font,
         );
+        let entity = crate::entity::EntityRenderer::new(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            surface_format,
+            &camera_bind_group_layout,
+        );
         let mut gui_assets = assets.reopen()?;
         gui.preload_sprites(&mut gui_assets, crate::gui::HUD_SPRITES);
 
@@ -468,7 +478,35 @@ impl Renderer {
             size,
             gui,
             assets: gui_assets,
+            entity,
+            nametags: Vec::new(),
         })
+    }
+
+    /// Sky and block light at each entity's position, sampled from the world by the caller
+    /// (the renderer holds no world reference). Call before `render`; entities without an
+    /// entry are drawn at full sky light.
+    pub fn set_entity_lights(
+        &mut self,
+        lights: impl IntoIterator<Item = (haste_core::EntityId, (u8, u8))>,
+    ) {
+        self.entity.set_lights(lights);
+    }
+
+    /// Convenience over `set_entity_lights`: samples `world` at each instance's block position.
+    pub fn sample_entity_lights(
+        &mut self,
+        world: &dyn BlockView,
+        entities: &[haste_core::model::EntityInstance],
+    ) {
+        self.entity.set_lights(entities.iter().map(|e| {
+            let p = haste_core::BlockPos::new(
+                e.pos.x.floor() as i32,
+                (e.pos.y + 0.5).floor() as i32,
+                e.pos.z.floor() as i32,
+            );
+            (e.id, (world.sky_light(p), world.block_light(p)))
+        }));
     }
 
     /// Text measurement over the default font (vanilla `Font.width` rules), for the HUD and
@@ -686,6 +724,16 @@ impl Renderer {
         let started = std::time::Instant::now();
         let aspect = self.size.0 as f32 / self.size.1 as f32;
         let view_proj = Self::view_projection(&frame.camera, aspect);
+        self.entity.prepare(frame.entities, None, &mut self.assets);
+        self.nametags.clear();
+        let gui_scale = frame.gui.scale.max(1) as f32;
+        for tag in &self.entity.nametags {
+            if let Some(t) =
+                crate::gui::project_nametag(&view_proj, &frame.camera, tag, self.size, gui_scale)
+            {
+                self.nametags.push(t);
+            }
+        }
         let fog_color = Self::sky_color(&frame.sky);
         let camera_uniform = CameraUniform {
             cam_pos: [
@@ -845,7 +893,14 @@ impl Renderer {
                         contents: bytemuck::cast_slice(&origins),
                         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                     });
+            let mut entities_drawn = false;
             for (instance, d) in draws.iter().enumerate() {
+                // Entities after the opaque and cutout terrain, before translucent.
+                if !entities_drawn && d.layer == haste_assets::RenderLayer::Translucent {
+                    draw_calls += self.entity.draw(&mut pass);
+                    pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+                    entities_drawn = true;
+                }
                 let pipeline = match d.layer {
                     haste_assets::RenderLayer::Solid | haste_assets::RenderLayer::CutoutMipped => {
                         &self.pipeline_solid
@@ -860,11 +915,20 @@ impl Renderer {
                 pass.draw_indexed(0..d.index_count, 0, instance as u32..instance as u32 + 1);
                 draw_calls += 1;
             }
+            if !entities_drawn {
+                draw_calls += self.entity.draw(&mut pass);
+            }
         }
 
         // GUI on top, in its own pass over the non-sRGB view (no depth).
-        if !frame.gui.commands.is_empty() {
-            self.gui.prepare(frame.gui, self.size, &mut self.assets);
+        if !frame.gui.commands.is_empty() || !self.nametags.is_empty() {
+            self.gui.prepare(
+                frame.gui,
+                frame.entities,
+                &self.nametags,
+                self.size,
+                &mut self.assets,
+            );
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("gui"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {

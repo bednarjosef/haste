@@ -104,6 +104,54 @@ struct PreparedQuad {
     color: [u8; 4],
 }
 
+/// A name tag in GUI space: anchor (top centre of the text) and GUI pixels per text pixel.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScreenNametag {
+    pub x: f32,
+    pub y: f32,
+    pub scale: f32,
+    pub text: String,
+}
+
+/// Projects a world name tag to GUI space (vanilla draws tags at 0.025 blocks per text pixel).
+/// None when it is behind the camera or would be smaller than a pixel.
+pub fn project_nametag(
+    view_proj: &Mat4,
+    camera: &crate::Camera,
+    tag: &crate::entity::Nametag,
+    target: (u32, u32),
+    gui_scale: f32,
+) -> Option<ScreenNametag> {
+    // Relative to the camera in f64 first, so far coordinates keep precision.
+    let p = view_proj.mul_vec4(glam::Vec4::new(
+        tag.anchor.x as f32,
+        tag.anchor.y as f32,
+        tag.anchor.z as f32,
+        1.0,
+    ));
+    if p.w <= 0.05 {
+        return None;
+    }
+    let ndc = p.truncate() / p.w;
+    if !(-1.5..=1.5).contains(&ndc.x) || !(-1.5..=1.5).contains(&ndc.y) {
+        return None;
+    }
+    let (w, h) = (target.0 as f32, target.1 as f32);
+    let fx = (ndc.x + 1.0) * 0.5 * w / gui_scale;
+    let fy = (1.0 - ndc.y) * 0.5 * h / gui_scale;
+    let focal = h / (2.0 * (camera.fov_deg.to_radians() * 0.5).tan());
+    let scale = 0.025 * focal / p.w / gui_scale;
+    if scale * 8.0 < 1.0 / gui_scale {
+        return None;
+    }
+    Some(ScreenNametag {
+        x: fx,
+        y: fy,
+        scale,
+        text: tag.text.clone(),
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Batch {
     /// Framebuffer scissor x, y, w, h (None = whole target).
@@ -145,13 +193,14 @@ pub struct GuiRenderer {
 
     vertices: Vec<GuiVertex>,
     batches: Vec<Batch>,
+    entity_scratch: Vec<crate::entity::EntityVertex>,
     rng: u32,
     pub stats: GuiStats,
 }
 
-/// Shelf packer over the atlas.
+/// Shelf packer over a square atlas.
 #[derive(Default)]
-struct Shelf {
+pub(crate) struct Shelf {
     x: u32,
     y: u32,
     row_h: u32,
@@ -159,15 +208,19 @@ struct Shelf {
 
 impl Shelf {
     fn alloc(&mut self, w: u32, h: u32) -> Option<[u32; 2]> {
-        if w > GUI_ATLAS_SIZE || h > GUI_ATLAS_SIZE {
+        self.alloc_in(w, h, GUI_ATLAS_SIZE)
+    }
+
+    pub(crate) fn alloc_in(&mut self, w: u32, h: u32, size: u32) -> Option<[u32; 2]> {
+        if w > size || h > size {
             return None;
         }
-        if self.x + w > GUI_ATLAS_SIZE {
+        if self.x + w > size {
             self.x = 0;
             self.y += self.row_h;
             self.row_h = 0;
         }
-        if self.y + h > GUI_ATLAS_SIZE {
+        if self.y + h > size {
             return None;
         }
         let at = [self.x, self.y];
@@ -343,6 +396,7 @@ impl GuiRenderer {
             items: HashMap::new(),
             vertices: Vec::new(),
             batches: Vec::new(),
+            entity_scratch: Vec::new(),
             rng: 0x9E37_79B9,
             stats: GuiStats::default(),
         };
@@ -486,13 +540,20 @@ impl GuiRenderer {
 
     /// Turns the frame into vertices and batches and uploads them. `target` is the framebuffer
     /// size in pixels.
-    pub fn prepare(&mut self, frame: &GuiFrame, target: (u32, u32), assets: &mut Assets) {
+    pub fn prepare(
+        &mut self,
+        frame: &GuiFrame,
+        entities: &[haste_core::model::EntityInstance],
+        nametags: &[ScreenNametag],
+        target: (u32, u32),
+        assets: &mut Assets,
+    ) {
         self.stats = GuiStats::default();
         if self.entries[0].rect.is_none() {
             self.resident(0);
         }
         for attempt in 0..2 {
-            self.build(frame, target, assets);
+            self.build(frame, entities, nametags, target, assets);
             if !self.atlas_full {
                 break;
             }
@@ -540,9 +601,42 @@ impl GuiRenderer {
         }
     }
 
-    fn build(&mut self, frame: &GuiFrame, target: (u32, u32), assets: &mut Assets) {
+    fn build(
+        &mut self,
+        frame: &GuiFrame,
+        entities: &[haste_core::model::EntityInstance],
+        nametags: &[ScreenNametag],
+        target: (u32, u32),
+        assets: &mut Assets,
+    ) {
         self.vertices.clear();
         self.batches.clear();
+        // Name tags first, under the HUD: a 25% black background and white text, drawn at the
+        // origin and then moved and scaled into place.
+        for tag in nametags {
+            let start = self.vertices.len();
+            let w = self.font.width_f32(&tag.text);
+            let x = -(w / 2.0).floor();
+            self.solid(
+                [0.0; 2],
+                [x - 1.0, -1.0, x + w, 8.0],
+                [0, 0, 0, 64],
+                [0, 0, 0, 64],
+            );
+            self.text(
+                [0.0; 2],
+                x,
+                0.0,
+                &tag.text,
+                0xFFFF_FFFF,
+                false,
+                TextStyle::default(),
+                assets,
+            );
+            for v in &mut self.vertices[start..] {
+                v.pos = [tag.x + v.pos[0] * tag.scale, tag.y + v.pos[1] * tag.scale];
+            }
+        }
         let scale = frame.scale.max(1) as f32;
         let mut translate: Vec<[f32; 2]> = Vec::new();
         let mut offset = [0.0f32; 2];
@@ -674,7 +768,50 @@ impl GuiRenderer {
                 GuiCommand::Item { item, x, y, .. } => {
                     self.item(offset, item.0, *x as f32, *y as f32, assets)
                 }
-                GuiCommand::Entity { .. } => self.stats.unsupported += 1,
+                GuiCommand::Entity {
+                    entity,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    scale: size,
+                    mouse_x,
+                    mouse_y,
+                } => match entities.iter().find(|e| e.id == *entity) {
+                    None => self.stats.unsupported += 1,
+                    Some(e) => {
+                        // Clipped to its box like vanilla's scissored entity widget.
+                        let mut r = [
+                            *x1 as f32 + offset[0],
+                            *y1 as f32 + offset[1],
+                            *x2 as f32 + offset[0],
+                            *y2 as f32 + offset[1],
+                        ];
+                        if let Some(p) = scissors.last() {
+                            r = [
+                                r[0].max(p[0]),
+                                r[1].max(p[1]),
+                                r[2].min(p[2]),
+                                r[3].min(p[3]),
+                            ];
+                        }
+                        let outer = scissor;
+                        self.switch_scissor(
+                            &mut scissor,
+                            Some(to_framebuffer(r, scale, target)),
+                            &mut batch_start,
+                        );
+                        self.entity_in_box(
+                            offset,
+                            e,
+                            [*x1 as f32, *y1 as f32, *x2 as f32, *y2 as f32],
+                            *size,
+                            [*mouse_x, *mouse_y],
+                            assets,
+                        );
+                        self.switch_scissor(&mut scissor, outer, &mut batch_start);
+                    }
+                },
                 GuiCommand::ScissorPush { x1, y1, x2, y2 } => {
                     let mut r = [
                         *x1 as f32 + offset[0],
@@ -1059,6 +1196,71 @@ impl GuiRenderer {
             [color; 4],
             rect,
         );
+    }
+
+    /// A living entity in a GUI box facing the viewer and turning toward the mouse (the
+    /// inventory player). `size` is GUI pixels per block. Approximate: the body turns by
+    /// atan(dx / 40) * 20 degrees and the head by twice that and pitches by atan(dy / 40) * 20,
+    /// the shape of vanilla's inventory model; the feet stand near the box bottom.
+    fn entity_in_box(
+        &mut self,
+        o: [f32; 2],
+        e: &haste_core::model::EntityInstance,
+        b: [f32; 4],
+        size: f32,
+        mouse: [f32; 2],
+        assets: &mut Assets,
+    ) {
+        let (texture, model_scale) = crate::entity::texture_and_scale(e);
+        let (rect, _) = self.lookup(&TexKey::Texture(texture), assets);
+        let cx = (b[0] + b[2]) / 2.0;
+        let height = crate::entity::model_top(&e.model.root, 0.0) * model_scale / 16.0;
+        let feet = (b[1] + b[3]) / 2.0 + height * size / 2.0;
+        let dx = cx - mouse[0];
+        let dy = feet - height * size * 0.85 - mouse[1];
+        let f = (dx / 40.0).atan();
+        let g = (dy / 40.0).atan();
+        let mut pose = e.pose.clone();
+        pose.rotations.retain(|(n, _)| n != "head");
+        pose.rotations.push((
+            "head".into(),
+            Vec3::new(-g * 20f32.to_radians(), f * 20f32.to_radians(), 0.0),
+        ));
+        // GUI space: x right, y down, z toward the viewer. The model's front (-z) turns to +z.
+        let m = Mat4::from_translation(Vec3::new(cx + o[0], feet + o[1], 0.0))
+            * Mat4::from_scale(Vec3::new(size, -size, size))
+            * Mat4::from_rotation_y(std::f32::consts::PI + f * 20f32.to_radians())
+            * Mat4::from_scale(Vec3::new(-model_scale, -model_scale, model_scale) / 16.0);
+        let mut tris = std::mem::take(&mut self.entity_scratch);
+        tris.clear();
+        crate::entity::emit_part(&mut tris, &e.model, &e.model.root, &pose, m, rect, 1.0);
+        // Back faces off, then back to front.
+        let mut order: Vec<(f32, usize)> = tris
+            .chunks(3)
+            .enumerate()
+            .filter_map(|(i, t)| {
+                let p = [
+                    Vec3::from(t[0].pos),
+                    Vec3::from(t[1].pos),
+                    Vec3::from(t[2].pos),
+                ];
+                let n = (p[1] - p[0]).cross(p[2] - p[0]);
+                (n.z > 0.0).then_some(((p[0].z + p[1].z + p[2].z) / 3.0, i))
+            })
+            .collect();
+        order.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, i) in order {
+            for v in &tris[i * 3..i * 3 + 3] {
+                let c = (v.color[0] * 255.0).round() as u8;
+                self.vertices.push(GuiVertex {
+                    pos: [v.pos[0], v.pos[1]],
+                    uv: v.uv,
+                    color: [c, c, c, 255],
+                    rect: v.rect,
+                });
+            }
+        }
+        self.entity_scratch = tris;
     }
 
     // ---- items ----
