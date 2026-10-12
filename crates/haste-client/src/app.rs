@@ -299,6 +299,8 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             gui: &gui,
             sky,
             partial_tick: partial,
+            block_target: None,
+            breaking: &[],
         })?;
         frames += 1;
         let placed = shared.view.lock().has_position;
@@ -470,6 +472,9 @@ impl App {
             gui: &self.gui,
             sky,
             partial_tick: partial,
+            // Filled from LocalPlayer::target / break_progress when interaction lands.
+            block_target: None,
+            breaking: &[],
         }) {
             Ok(stats) => {
                 if let Some(line) = self.fps.frame(&stats) {
@@ -504,16 +509,10 @@ impl ApplicationHandler for App {
             Ok((window, renderer))
         })();
         match result {
-            Ok((w, r)) => {
+            Ok((w, mut r)) => {
+                r.set_vsync(self.vsync);
                 self.window = Some(w);
                 self.renderer = Some(r);
-                if self.vsync {
-                    tracing::info!(
-                        "--vsync: the renderer presents with FIFO (vsync) in every mode for now"
-                    );
-                } else {
-                    tracing::warn!("vsync off requested but the renderer always presents with FIFO (vsync) for now");
-                }
                 self.set_grab(true);
             }
             Err(e) => {

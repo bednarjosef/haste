@@ -1367,7 +1367,7 @@ fn lambert_shade(n: Vec3, l0: Vec3, l1: Vec3) -> f32 {
 }
 
 /// Display transform matrix: translate, rotate X then Y then Z, scale.
-fn display_matrix(d: &haste_assets::DisplayTransform) -> Mat4 {
+pub(crate) fn display_matrix(d: &haste_assets::DisplayTransform) -> Mat4 {
     Mat4::from_translation(Vec3::from(d.translation))
         * Mat4::from_rotation_x(d.rotation[0].to_radians())
         * Mat4::from_rotation_y(d.rotation[1].to_radians())
@@ -1375,7 +1375,7 @@ fn display_matrix(d: &haste_assets::DisplayTransform) -> Mat4 {
         * Mat4::from_scale(Vec3::from(d.scale))
 }
 
-fn part_matrix(t: &Option<haste_assets::PartTransformation>) -> Mat4 {
+pub(crate) fn part_matrix(t: &Option<haste_assets::PartTransformation>) -> Mat4 {
     match t {
         None => Mat4::IDENTITY,
         Some(t) => {
@@ -1536,6 +1536,7 @@ mod tests {
                     translation: [0.0; 3],
                     scale: [0.625; 3],
                 },
+                firstperson: haste_assets::DisplayTransform::IDENTITY,
                 gui_light_front: false,
                 transformation: None,
             }],

@@ -52,6 +52,11 @@ pub struct FrameInput<'a> {
     pub gui: &'a haste_core::gui::GuiFrame,
     pub sky: SkyState,
     pub partial_tick: f32,
+    /// Block under the crosshair and the face hit: drawn as the outline of its outline shape
+    /// (sampled with `Renderer::sample_world`).
+    pub block_target: Option<(haste_core::BlockPos, haste_core::Direction)>,
+    /// Crack overlays: our own break progress plus other players' stages (0..=9).
+    pub breaking: &'a [(haste_core::BlockPos, u8)],
 }
 
 #[cfg(test)]
@@ -138,6 +143,8 @@ mod tests {
                 fog_end: 200.0,
             },
             partial_tick: 0.0,
+            block_target: None,
+            breaking: &[],
         };
         let stats = renderer.render(&frame).unwrap();
         eprintln!(
@@ -206,6 +213,12 @@ pub struct Renderer {
     entity: crate::entity::EntityRenderer,
     /// Sky, celestial bodies, clouds, weather; terrain fog colour and daylight.
     sky: crate::sky::SkyRenderer,
+    /// Selection outline and break cracks.
+    overlay: crate::overlay::OverlayRenderer,
+    /// Surface present mode (`set_vsync`).
+    present_mode: wgpu::PresentMode,
+    /// First-person arm or held item (`set_first_person`).
+    first_person: Option<crate::entity::FirstPerson>,
     /// Name tags projected to GUI space this frame.
     nametags: Vec<crate::gui::ScreenNametag>,
 }
@@ -468,6 +481,13 @@ impl Renderer {
             surface_format,
             assets,
         );
+        let overlay = crate::overlay::OverlayRenderer::new(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            surface_format,
+            &camera_bind_group_layout,
+            assets,
+        );
         let mut gui_assets = assets.reopen()?;
         gui.preload_sprites(&mut gui_assets, crate::gui::HUD_SPRITES);
 
@@ -495,8 +515,59 @@ impl Renderer {
             assets: gui_assets,
             entity,
             sky,
+            overlay,
+            first_person: None,
+            present_mode: wgpu::PresentMode::Fifo,
             nametags: Vec::new(),
         })
+    }
+
+    /// Vsync on (FIFO) or off (Mailbox, else Immediate, whichever the surface supports; FIFO
+    /// when neither is). Reconfigures the surface; no effect offscreen.
+    pub fn set_vsync(&mut self, on: bool) {
+        let mode = match &self.surface {
+            None => return,
+            Some(surface) if !on => {
+                let modes = surface.get_capabilities(&self.gpu.adapter).present_modes;
+                [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Immediate]
+                    .into_iter()
+                    .find(|m| modes.contains(m))
+                    .unwrap_or(wgpu::PresentMode::Fifo)
+            }
+            Some(_) => wgpu::PresentMode::Fifo,
+        };
+        if mode != self.present_mode {
+            self.present_mode = mode;
+            self.configure_surface();
+        }
+    }
+
+    /// The first-person view: arm (empty hand) or held item; None draws nothing (third person,
+    /// spectator). Stays until changed.
+    pub fn set_first_person(&mut self, fp: Option<crate::entity::FirstPerson>) {
+        self.first_person = fp;
+    }
+
+    /// Samples what this frame's overlays and entities need from the world (the renderer holds
+    /// no world): entity light, the targeted block's outline boxes, the states of breaking
+    /// blocks. Call before `render` with the frame you are about to render.
+    pub fn sample_world(
+        &mut self,
+        world: &dyn BlockView,
+        shapes: &dyn haste_core::view::CollisionShapes,
+        frame: &FrameInput,
+    ) {
+        self.sample_entity_lights(world, frame.entities);
+        let o = &mut self.overlay.world;
+        o.target = frame.block_target.and_then(|(pos, _)| {
+            let state = world.block_state(pos);
+            let boxes = shapes.outline_boxes(state);
+            (!boxes.is_empty()).then(|| (pos, boxes.to_vec()))
+        });
+        o.breaking.clear();
+        for &(pos, stage) in frame.breaking {
+            o.breaking.push((pos, world.block_state(pos), stage));
+        }
     }
 
     /// The dimension being drawn: picks the sky (overworld, End, or fog colour only).
@@ -546,7 +617,8 @@ impl Renderer {
                     .cloned()
                     .unwrap_or_else(|| haste_core::Identifier::minecraft("air"))
             })
-            .collect();
+            .collect::<Vec<_>>();
+        self.entity.set_item_names(names.clone());
         self.gui.set_item_names(names);
     }
 
@@ -612,7 +684,7 @@ impl Renderer {
             color_space: wgpu::SurfaceColorSpace::Auto,
             width: w,
             height: h,
-            present_mode: wgpu::PresentMode::Fifo,
+            present_mode: self.present_mode,
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
             view_formats: if self.surface_format.is_srgb() {
                 vec![self.surface_format.remove_srgb_suffix()]
@@ -732,6 +804,24 @@ impl Renderer {
         let view_proj = Self::view_projection(&frame.camera, aspect);
         self.entity
             .prepare(frame.entities, None, frame.camera.pos, &mut self.assets);
+        {
+            let yaw = frame.camera.yaw.to_radians();
+            let pitch = frame.camera.pitch.to_radians();
+            let forward = glam::Vec3::new(
+                -pitch.cos() * yaw.sin(),
+                -pitch.sin(),
+                pitch.cos() * yaw.cos(),
+            );
+            let view = glam::Mat4::look_to_rh(glam::Vec3::ZERO, forward, glam::Vec3::Y);
+            self.entity
+                .prepare_hand(self.first_person.as_ref(), view.inverse(), &mut self.assets);
+        }
+        self.overlay.prepare(
+            frame.camera.pos,
+            frame.block_target.map(|(p, _)| p),
+            frame.breaking,
+            &self.baked,
+        );
         self.nametags.clear();
         let gui_scale = frame.gui.scale.max(1) as f32;
         for tag in &self.entity.nametags {
@@ -946,7 +1036,38 @@ impl Renderer {
             if !entities_drawn {
                 draw_calls += self.entity.draw(&mut pass);
             }
+            draw_calls += self.overlay.draw(&mut pass);
             draw_calls += self.sky.draw_overlays(&mut pass);
+        }
+
+        // First-person hand: its own pass over the world with the depth cleared, so it never
+        // sinks into walls.
+        if self.entity.has_hand() {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("hand"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            draw_calls += self.entity.draw_hand(&mut pass);
         }
 
         // GUI on top, in its own pass over the non-sRGB view (no depth).

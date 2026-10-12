@@ -72,6 +72,17 @@ pub(crate) fn texture_and_scale(e: &EntityInstance) -> (Identifier, f32) {
     (texture, e.scale * if humanoid { PLAYER_SCALE } else { 1.0 })
 }
 
+/// What the first-person view holds: the local player's skin and arm model, the item in the
+/// main hand (the arm is drawn only when the hand is empty, like vanilla), and the light at the
+/// camera.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FirstPerson {
+    pub skin: Option<Identifier>,
+    pub slim: bool,
+    pub item: Option<haste_core::RegistryIndex>,
+    pub light: (u8, u8),
+}
+
 /// A name tag to draw: world anchor (above the head) and the text.
 #[derive(Clone, Debug)]
 pub struct Nametag {
@@ -97,6 +108,11 @@ pub struct EntityRenderer {
     vertices: Vec<EntityVertex>,
     lights: HashMap<EntityId, (u8, u8)>,
     pub nametags: Vec<Nametag>,
+    hand_buffer: wgpu::Buffer,
+    hand_capacity: usize,
+    hand: Vec<EntityVertex>,
+    item_names: Vec<Identifier>,
+    item_models: HashMap<u32, Option<Arc<haste_assets::ItemModel>>>,
     pub drawn: u32,
 }
 
@@ -191,6 +207,7 @@ impl EntityRenderer {
         });
         let vertex_capacity = 8192;
         let vertex_buffer = make_vertex_buffer(&device, vertex_capacity);
+        let hand_buffer = make_vertex_buffer(&device, 1024);
         EntityRenderer {
             device,
             queue,
@@ -204,6 +221,11 @@ impl EntityRenderer {
             vertices: Vec::new(),
             lights: HashMap::new(),
             nametags: Vec::new(),
+            hand_buffer,
+            hand_capacity: 1024,
+            hand: Vec::new(),
+            item_names: Vec::new(),
+            item_models: HashMap::new(),
             drawn: 0,
         }
     }
@@ -337,6 +359,184 @@ impl EntityRenderer {
         }
     }
 
+    /// Item registry names by protocol id (for the held item).
+    pub fn set_item_names(&mut self, names: Vec<Identifier>) {
+        self.item_names = names;
+        self.item_models.clear();
+    }
+
+    /// Builds the first-person arm or held item. `view_to_world` rotates view space (x right,
+    /// y up, -z forward) into the camera-relative world. Placement is approximate: the item at
+    /// (0.56, -0.52, -0.72) in view space through its `firstperson_righthand` transform, the
+    /// arm reaching forward from the bottom right.
+    pub fn prepare_hand(
+        &mut self,
+        fp: Option<&FirstPerson>,
+        view_to_world: Mat4,
+        assets: &mut Assets,
+    ) {
+        self.hand.clear();
+        let Some(fp) = fp else {
+            return;
+        };
+        let light = lightmap(fp.light.0, fp.light.1);
+        let item = fp.item.and_then(|i| {
+            if let Some(m) = self.item_models.get(&i.0) {
+                return m.clone();
+            }
+            let m = self
+                .item_names
+                .get(i.0 as usize)
+                .filter(|n| n.path() != "air")
+                .and_then(|n| assets.item_model(n).ok())
+                .map(Arc::new);
+            self.item_models.insert(i.0, m.clone());
+            m
+        });
+        let mut out = std::mem::take(&mut self.hand);
+        match item {
+            Some(model) => {
+                for part in &model.parts {
+                    let m = view_to_world
+                        * Mat4::from_translation(Vec3::new(0.56, -0.52, -0.72))
+                        * crate::gui::display_matrix(&part.firstperson)
+                        * crate::gui::part_matrix(&part.transformation)
+                        * Mat4::from_translation(Vec3::splat(-0.5));
+                    let nm = Mat3::from_mat4(m).inverse().transpose();
+                    let tint = |i: Option<u32>| -> [f32; 3] {
+                        i.and_then(|i| part.tints.get(i as usize))
+                            .map(|c| {
+                                let f = |s: u32| {
+                                    crate::sky::linear([((c >> s) & 0xFF) as f32 / 255.0; 3])[0]
+                                };
+                                [f(16), f(8), f(0)]
+                            })
+                            .unwrap_or([1.0; 3])
+                    };
+                    match &part.geometry {
+                        haste_assets::ItemGeometry::None => {}
+                        haste_assets::ItemGeometry::Generated { layers } => {
+                            for (i, layer) in layers.iter().enumerate() {
+                                let rect = self.texture_rect(&parse_tex(layer), assets);
+                                let t = tint(Some(i as u32));
+                                for (z, n) in [(8.5 / 16.0, Vec3::Z), (7.5 / 16.0, Vec3::NEG_Z)] {
+                                    let p = [
+                                        Vec3::new(0.0, 1.0, z),
+                                        Vec3::new(0.0, 0.0, z),
+                                        Vec3::new(1.0, 0.0, z),
+                                        Vec3::new(1.0, 1.0, z),
+                                    ];
+                                    let uv = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+                                    push_world_quad(&mut out, m, nm, p, uv, n, t, light, rect);
+                                }
+                            }
+                        }
+                        haste_assets::ItemGeometry::Elements(quads) => {
+                            for q in quads {
+                                let rect = self.texture_rect(&parse_tex(&q.texture), assets);
+                                let o = q.direction.offset();
+                                push_world_quad(
+                                    &mut out,
+                                    m,
+                                    nm,
+                                    q.positions.map(Vec3::from),
+                                    q.uvs,
+                                    Vec3::new(o[0] as f32, o[1] as f32, o[2] as f32),
+                                    tint(q.tint_index),
+                                    light,
+                                    rect,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            None => {
+                let skin = fp
+                    .skin
+                    .clone()
+                    .unwrap_or_else(|| Identifier::minecraft("entity/player/wide/steve"));
+                let rect = self.texture_rect(&skin, assets);
+                let w = if fp.slim { 3.0 } else { 4.0 };
+                let arm = ModelPart {
+                    name: "right_arm".into(),
+                    pivot: Vec3::ZERO,
+                    rotation: Vec3::ZERO,
+                    visible: true,
+                    cubes: vec![haste_core::model::Cube {
+                        origin: Vec3::new(-w / 2.0, 0.0, -2.0),
+                        size: Vec3::new(w, 12.0, 4.0),
+                        inflate: 0.0,
+                        uv: [40, 16],
+                        mirror: false,
+                    }],
+                    children: vec![ModelPart {
+                        name: "right_sleeve".into(),
+                        pivot: Vec3::ZERO,
+                        rotation: Vec3::ZERO,
+                        visible: true,
+                        cubes: vec![haste_core::model::Cube {
+                            origin: Vec3::new(-w / 2.0, 0.0, -2.0),
+                            size: Vec3::new(w, 12.0, 4.0),
+                            inflate: 0.25,
+                            uv: [40, 32],
+                            mirror: false,
+                        }],
+                        children: vec![],
+                    }],
+                };
+                let model = CubeModel {
+                    texture: skin,
+                    tex_width: 64,
+                    tex_height: 64,
+                    root: arm,
+                };
+                // The arm's length (model +y) reaches forward and a little up and inward from
+                // the shoulder below the bottom right of the view.
+                let dir = Vec3::new(-0.15, 0.3, -1.0).normalize();
+                let m = view_to_world
+                    * Mat4::from_translation(Vec3::new(0.48, -0.78, -0.42))
+                    * Mat4::from_quat(glam::Quat::from_rotation_arc(Vec3::Y, dir))
+                    * Mat4::from_rotation_y(-0.6)
+                    * Mat4::from_scale(Vec3::splat(1.0 / 16.0));
+                emit_part(
+                    &mut out,
+                    &model,
+                    &model.root,
+                    &PoseOverrides::default(),
+                    m,
+                    rect,
+                    light,
+                );
+            }
+        }
+        self.hand = out;
+        if self.hand.len() > self.hand_capacity {
+            self.hand_capacity = self.hand.len().next_power_of_two();
+            self.hand_buffer = make_vertex_buffer(&self.device, self.hand_capacity);
+        }
+        if !self.hand.is_empty() {
+            self.queue
+                .write_buffer(&self.hand_buffer, 0, bytemuck::cast_slice(&self.hand));
+        }
+    }
+
+    /// Draws the first-person arm or item (its own pass, depth cleared).
+    pub fn draw_hand<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) -> u32 {
+        if self.hand.is_empty() {
+            return 0;
+        }
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(1, &self.bind_group, &[]);
+        pass.set_vertex_buffer(0, self.hand_buffer.slice(..));
+        pass.draw(0..self.hand.len() as u32, 0..1);
+        1
+    }
+
+    pub fn has_hand(&self) -> bool {
+        !self.hand.is_empty()
+    }
+
     /// Draws into the main pass; the camera bind group must be set at group 0.
     pub fn draw<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) -> u32 {
         if self.vertices.is_empty() {
@@ -357,6 +557,51 @@ fn make_vertex_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
+}
+
+fn parse_tex(id: &str) -> Identifier {
+    Identifier::parse(id).unwrap_or_else(|_| Identifier::minecraft("missingno"))
+}
+
+/// One textured quad (`uv` 0..1 over `rect`) through `m`, wound counter-clockwise seen from
+/// the side its normal points to, shaded like entities.
+#[allow(clippy::too_many_arguments)]
+fn push_world_quad(
+    out: &mut Vec<EntityVertex>,
+    m: Mat4,
+    normal_matrix: Mat3,
+    p: [Vec3; 4],
+    uv: [[f32; 2]; 4],
+    n: Vec3,
+    tint: [f32; 3],
+    light: f32,
+    rect: [u32; 4],
+) {
+    let p = p.map(|v| m.transform_point3(v));
+    let nw = (normal_matrix * n).normalize_or_zero();
+    let s = entity_shade(nw) * light;
+    let color = [tint[0] * s, tint[1] * s, tint[2] * s, 1.0];
+    let uv = uv.map(|t| {
+        [
+            rect[0] as f32 + t[0] * rect[2] as f32,
+            rect[1] as f32 + t[1] * rect[3] as f32,
+        ]
+    });
+    let ccw = (p[1] - p[0]).cross(p[2] - p[0]).dot(nw) >= 0.0;
+    let order: [usize; 6] = if ccw {
+        [0, 1, 2, 0, 2, 3]
+    } else {
+        [0, 2, 1, 0, 3, 2]
+    };
+    let r16 = rect.map(|v| v as u16);
+    for i in order {
+        out.push(EntityVertex {
+            pos: p[i].to_array(),
+            uv: uv[i],
+            color,
+            rect: r16,
+        });
+    }
 }
 
 /// Light level brightness, the same curve as the terrain shader (`chunk.wgsl::lightmap`).
