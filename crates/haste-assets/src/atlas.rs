@@ -1,4 +1,4 @@
-// This file is derived from Pomme (https://github.com/josefbednar/pomme),
+// This file is derived from Pomme (https://github.com/PommeMC/Client),
 // pomme-client/src/renderer/chunk/atlas.rs, reused under GPL-3.0 and reworked
 // for Haste: CPU-side RGBA buffers instead of Vulkan images (the wgpu renderer
 // uploads them). See THIRD_PARTY.md.

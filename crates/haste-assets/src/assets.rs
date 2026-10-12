@@ -1,4 +1,4 @@
-// This file is derived from Pomme (https://github.com/josefbednar/pomme),
+// This file is derived from Pomme (https://github.com/PommeMC/Client),
 // pomme-client/src/assets.rs and parts of world/block/model.rs, reused under
 // GPL-3.0. Reworked for Haste: reads the client jar directly through `zip`
 // (no extracted assets dir), resolves texture variables, and exposes the

@@ -1,4 +1,4 @@
-// This file is derived from Pomme (https://github.com/josefbednar/pomme),
+// This file is derived from Pomme (https://github.com/PommeMC/Client),
 // pomme-client/src/world/block/model.rs (bake_resolved_model), reused under
 // GPL-3.0 and reworked for Haste: bakes per BlockStateId against a block-state
 // source (haste-data's BlockStates implements `BlockStatesSource`), atlas UV

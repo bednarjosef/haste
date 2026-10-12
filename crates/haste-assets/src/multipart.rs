@@ -1,4 +1,4 @@
-// This file is derived from Pomme (https://github.com/josefbednar/pomme),
+// This file is derived from Pomme (https://github.com/PommeMC/Client),
 // pomme-client/src/world/block/model.rs (blockstate variant/multipart parsing),
 // reused under GPL-3.0 and reworked for Haste: full `when` condition trees with
 // OR/AND and `a|b` value alternation. See THIRD_PARTY.md.

@@ -7,7 +7,7 @@ exclude = ["cache"]
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/josefbednar/haste"
+repository = "https://github.com/bednarjosef/haste"
 rust-version = "1.99"
 
 [workspace.dependencies]
