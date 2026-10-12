@@ -2,6 +2,10 @@
 //!
 //! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
 
+pub mod config;
 pub mod download;
 pub mod install;
+pub mod launch;
 pub mod mojang;
+pub mod msa;
+pub mod server;
