@@ -215,6 +215,8 @@ pub struct Renderer {
     sky: crate::sky::SkyRenderer,
     /// Selection outline and break cracks.
     overlay: crate::overlay::OverlayRenderer,
+    /// First-person arm or held item (`set_first_person`).
+    first_person: Option<crate::entity::FirstPerson>,
     /// Name tags projected to GUI space this frame.
     nametags: Vec<crate::gui::ScreenNametag>,
 }
@@ -512,8 +514,15 @@ impl Renderer {
             entity,
             sky,
             overlay,
+            first_person: None,
             nametags: Vec::new(),
         })
+    }
+
+    /// The first-person view: arm (empty hand) or held item; None draws nothing (third person,
+    /// spectator). Stays until changed.
+    pub fn set_first_person(&mut self, fp: Option<crate::entity::FirstPerson>) {
+        self.first_person = fp;
     }
 
     /// Samples what this frame's overlays and entities need from the world (the renderer holds
@@ -585,7 +594,8 @@ impl Renderer {
                     .cloned()
                     .unwrap_or_else(|| haste_core::Identifier::minecraft("air"))
             })
-            .collect();
+            .collect::<Vec<_>>();
+        self.entity.set_item_names(names.clone());
         self.gui.set_item_names(names);
     }
 
@@ -771,6 +781,18 @@ impl Renderer {
         let view_proj = Self::view_projection(&frame.camera, aspect);
         self.entity
             .prepare(frame.entities, None, frame.camera.pos, &mut self.assets);
+        {
+            let yaw = frame.camera.yaw.to_radians();
+            let pitch = frame.camera.pitch.to_radians();
+            let forward = glam::Vec3::new(
+                -pitch.cos() * yaw.sin(),
+                -pitch.sin(),
+                pitch.cos() * yaw.cos(),
+            );
+            let view = glam::Mat4::look_to_rh(glam::Vec3::ZERO, forward, glam::Vec3::Y);
+            self.entity
+                .prepare_hand(self.first_person.as_ref(), view.inverse(), &mut self.assets);
+        }
         self.overlay.prepare(
             frame.camera.pos,
             frame.block_target.map(|(p, _)| p),
@@ -993,6 +1015,36 @@ impl Renderer {
             }
             draw_calls += self.overlay.draw(&mut pass);
             draw_calls += self.sky.draw_overlays(&mut pass);
+        }
+
+        // First-person hand: its own pass over the world with the depth cleared, so it never
+        // sinks into walls.
+        if self.entity.has_hand() {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("hand"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            draw_calls += self.entity.draw_hand(&mut pass);
         }
 
         // GUI on top, in its own pass over the non-sRGB view (no depth).

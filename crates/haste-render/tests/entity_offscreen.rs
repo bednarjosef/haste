@@ -202,4 +202,37 @@ fn entities_offscreen() {
         .into_iter()
         .any(|(x, y)| img.get_pixel(x, y).0 != [0, 0, 0, 255]));
     assert_eq!(renderer.gui_stats().unsupported, 0);
+
+    // First person: the empty hand, then a held sword and a held stone block.
+    renderer.set_item_registry(&data.registries);
+    let item = |n: &str| {
+        data.registries
+            .index("minecraft:item", &haste_core::Identifier::minecraft(n))
+    };
+    let base = render_scene(&mut renderer, &world, &[], camera);
+    for (name, held) in [
+        ("hand", None),
+        ("sword", item("diamond_sword")),
+        ("stone", item("stone")),
+    ] {
+        renderer.set_first_person(Some(haste_render::FirstPerson {
+            skin: None,
+            slim: false,
+            item: held,
+            light: (15, 0),
+        }));
+        let img = render_scene(&mut renderer, &world, &[], camera);
+        img.save(out.join(format!("first_person_{name}.png")))
+            .unwrap();
+        let changed = base
+            .pixels()
+            .zip(img.pixels())
+            .filter(|(a, b)| a.0 != b.0)
+            .count();
+        assert!(
+            changed > 2000,
+            "{name}: first-person view drew {changed} pixels"
+        );
+    }
+    renderer.set_first_person(None);
 }
