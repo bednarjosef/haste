@@ -283,7 +283,7 @@ mod tests {
         assert_eq!(trace.seed, 42);
         assert_eq!(trace.ticks.len(), 4);
         assert_eq!(trace.ticks[0].pos, DVec3::new(0.5, -60.0, 0.5));
-        assert_eq!(trace.ticks[2].input.jump, true);
+        assert!(trace.ticks[2].input.jump);
         assert_eq!(trace.ticks[3].pose, Pose::Standing);
         assert_eq!(trace.ticks[3].dimensions, (0.6, 1.8));
     }
@@ -330,7 +330,10 @@ mod tests {
     }
 
     fn tempdir() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("haste-testkit-{}", std::process::id()));
+        // Tests run as parallel threads of one process, so the pid alone is not unique.
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("haste-testkit-{}-{}", std::process::id(), n));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

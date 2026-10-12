@@ -29,4 +29,3 @@ tokio-util.workspace = true
 trust-dns-resolver.workspace = true
 reqwest.workspace = true
 glam.workspace = true
-haste-world.workspace = true

@@ -17,7 +17,8 @@ pub struct BlockStates { .. }
 impl BlockStates {
     pub fn len(&self) -> usize;
     pub fn block_of(&self, s: BlockStateId) -> &Identifier;
-    pub fn properties(&self, s: BlockStateId) -> &[(String, String)];   // sorted by name, as blocks.json lists them
+    pub fn properties(&self, s: BlockStateId) -> Vec<(String, String)>;   // sorted by name (interned storage; owned result)
+    pub fn property_value(&self, s: BlockStateId, name: &str) -> Option<&str>;   // hot-path lookup
     pub fn default_state(&self, block: &Identifier) -> Option<BlockStateId>;
     pub fn state(&self, block: &Identifier, props: &[(&str, &str)]) -> Option<BlockStateId>;
     pub fn with_property(&self, s: BlockStateId, name: &str, value: &str) -> Option<BlockStateId>;
@@ -32,6 +33,7 @@ impl Registries {
 pub struct BlockShapes { .. }
 impl haste_core::view::CollisionShapes for BlockShapes { .. }
 impl haste_core::view::BlockPhysics for GameData { .. }      // friction/speed/jump from block_properties.json; fluid/light/air/opaque from block_shapes.json
+impl haste_core::view::BlockStateTable for BlockStates { .. }
 impl BlockShapes { pub fn is_oracle_backed(&self) -> bool; }
 ```
 Fallback shapes (no oracle file): full cube for every state except air/cave_air/void_air, fluids,
@@ -106,7 +108,9 @@ impl Assets {
     pub fn gui_sprite(&self, id: &Identifier) -> anyhow::Result<(image::RgbaImage, SpriteMeta)>;
 }
 pub struct BakedBlockModels { .. }  // per BlockStateId: list of quads (positions, uv in atlas, normal/face, cull face, tint index, ambient occlusion flag)
-impl BakedBlockModels { pub fn bake(assets: &Assets, data: &GameData, atlas: &mut AtlasBuilder) -> anyhow::Result<Self>; pub fn quads(&self, s: BlockStateId) -> &[BakedQuad]; pub fn is_full_opaque(&self, s: BlockStateId) -> bool; pub fn render_layer(&self, s: BlockStateId) -> RenderLayer }
+impl BakedBlockModels { pub fn bake(assets: &Assets, states: &dyn haste_core::view::BlockStateTable, atlas: &mut AtlasBuilder) -> anyhow::Result<Self>; pub fn quads(&self, s: BlockStateId) -> &[BakedQuad]; pub fn is_full_opaque(&self, s: BlockStateId) -> bool; pub fn render_layer(&self, s: BlockStateId) -> RenderLayer }
+// `haste_data::BlockStates` implements `BlockStateTable`; the atlas is built during baking (textures are discovered then).
+// 26.3 facts (WS3): the jar carries the full asset tree (no extracted objects dir needed); blockstate variant keys are partial (missing properties are wildcards, most specific wins); models have no `render_type`, the layer is a documented heuristic.
 ```
 
 ## haste-render (WS3)
@@ -182,7 +186,7 @@ impl GuiPipeline {
     pub fn open_screen(&self, screen: ScreenKind) -> anyhow::Result<()>;   // Chat, Pause, Inventory (real vanilla classes)
     pub fn close_screen(&self);
     pub fn is_open(&self) -> bool;
-    pub fn key(&self, key: i32, scancode: i32, mods: i32, pressed: bool) -> bool;   // returns consumed
+    pub fn key(&self, key: i32, keycode: i32, mods: i32, pressed: bool) -> bool;   // 26.3 uses SDL3: key = scancode, keycode = SDL keycode (EditBox matches on keycode), mods = SDL keymod; returns consumed
     pub fn char_typed(&self, c: char, mods: i32) -> bool;
     pub fn mouse(&self, x: f64, y: f64, button: Option<(i32, bool)>) -> bool;
     pub fn scroll(&self, x: f64, y: f64, dx: f64, dy: f64) -> bool;
@@ -191,13 +195,15 @@ impl GuiPipeline {
     pub fn set_text_metrics(&self, m: Arc<dyn TextMetrics>);   // Font.width natives call back here
 }
 ```
+`JvmConfig` and `ScreenKind` are defined in `haste-jvm`. Extra methods on the implementation: `tick`, `screen_class`, `mouse_grabbed`, `set_mouse_grabbed`, `take_last_error`, `with_state` (Rust-owned `GameState`: inventory slots, selected slot, chat lines, game mode; screens write back sent chat/commands and container clicks).
+
 Tier-2 proxies in Phase 1: `Minecraft` (getInstance, player, level, options, font, screen, setScreen), `LocalPlayer`/`Player`/`Inventory`/`ItemStack` (what the inventory screen reads), `Font`, `GuiGraphicsExtractor` (batched delegates), `Window`, `Options`, `KeyMapping`, `SoundManager` (no-op). Everything else: real vanilla classes or the Unimplemented log.
 
 ## haste-setup (WS7)
 
 ```rust
 pub struct Installation { pub client_jar: PathBuf, pub server_jar: PathBuf, pub assets_dir: PathBuf, pub assets_index: String, pub libraries_dir: PathBuf, pub jdk_java: PathBuf, pub reports_dir: PathBuf }
-pub async fn ensure_installed(progress: impl FnMut(Progress)) -> anyhow::Result<Installation>;  // manifest -> version json -> client/server jars (sha1), assets index + objects, libraries needed to run the vanilla server + client, JDK 25 (Adoptium) if no suitable java, then data generator reports
+pub async fn ensure_installed(progress: impl FnMut(Progress) + Send + 'static) -> anyhow::Result<Installation>;  // manifest -> version json -> client/server jars (sha1), assets index + objects, libraries needed to run the vanilla server + client, JDK 25 (Adoptium) if no suitable java, then data generator reports
 pub fn find_existing_minecraft() -> Option<PathBuf>;   // ~/.minecraft/versions/26.3 etc. (read only, never modified)
 pub struct Config { pub username: String, pub render_distance: i32, pub gui_scale: u32, pub fov: f32, pub last_server: Option<String>, pub msa: Option<..> }  // TOML in the config dir
 pub struct LocalServer { .. }  impl LocalServer { pub async fn start(world_dir: &Path, port: u16) -> anyhow::Result<LocalServer>; pub fn address(&self) -> String; pub async fn stop(self); }  // vanilla server jar, offline mode, 127.0.0.1, waits for "Done"

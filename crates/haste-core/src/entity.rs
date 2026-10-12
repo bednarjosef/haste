@@ -45,7 +45,10 @@ pub enum MetadataValue {
     OptionalBlockState(Option<crate::BlockStateId>),
     Pose(Pose),
     /// Any type we do not model yet: wire type id + raw bytes so nothing is lost.
-    Other { type_id: i32, raw: bytes::Bytes },
+    Other {
+        type_id: i32,
+        raw: bytes::Bytes,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -57,14 +60,49 @@ pub struct MetadataEntry {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum Pose {
-    Standing = 0, FallFlying = 1, Sleeping = 2, Swimming = 3, SpinAttack = 4, Crouching = 5,
-    LongJumping = 6, Dying = 7, Croaking = 8, UsingTongue = 9, Sitting = 10, Roaring = 11,
-    Sniffing = 12, Emerging = 13, Digging = 14, Sliding = 15, Shooting = 16, Inhaling = 17,
+    Standing = 0,
+    FallFlying = 1,
+    Sleeping = 2,
+    Swimming = 3,
+    SpinAttack = 4,
+    Crouching = 5,
+    LongJumping = 6,
+    Dying = 7,
+    Croaking = 8,
+    UsingTongue = 9,
+    Sitting = 10,
+    Roaring = 11,
+    Sniffing = 12,
+    Emerging = 13,
+    Digging = 14,
+    Sliding = 15,
+    Shooting = 16,
+    Inhaling = 17,
 }
 impl Pose {
     pub fn from_id(i: i32) -> Option<Pose> {
         use Pose::*;
-        Some(match i { 0 => Standing, 1 => FallFlying, 2 => Sleeping, 3 => Swimming, 4 => SpinAttack, 5 => Crouching, 6 => LongJumping, 7 => Dying, 8 => Croaking, 9 => UsingTongue, 10 => Sitting, 11 => Roaring, 12 => Sniffing, 13 => Emerging, 14 => Digging, 15 => Sliding, 16 => Shooting, 17 => Inhaling, _ => return None })
+        Some(match i {
+            0 => Standing,
+            1 => FallFlying,
+            2 => Sleeping,
+            3 => Swimming,
+            4 => SpinAttack,
+            5 => Crouching,
+            6 => LongJumping,
+            7 => Dying,
+            8 => Croaking,
+            9 => UsingTongue,
+            10 => Sitting,
+            11 => Roaring,
+            12 => Sniffing,
+            13 => Emerging,
+            14 => Digging,
+            15 => Sliding,
+            16 => Shooting,
+            17 => Inhaling,
+            _ => return None,
+        })
     }
 }
 
@@ -78,7 +116,9 @@ pub struct ItemStackData {
     pub components_raw: bytes::Bytes,
 }
 impl ItemStackData {
-    pub fn is_empty(&self) -> bool { self.count <= 0 || self.item.is_none() }
+    pub fn is_empty(&self) -> bool {
+        self.count <= 0 || self.item.is_none()
+    }
 }
 
 /// Player-list entry data the HUD/tab list and nametags need.

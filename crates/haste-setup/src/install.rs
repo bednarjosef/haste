@@ -46,17 +46,30 @@ pub fn libraries_dir() -> PathBuf {
     paths::cache_dir().join("libraries")
 }
 
-async fn fetch_json<T: serde::de::DeserializeOwned>(client: &reqwest::Client, url: &str) -> anyhow::Result<T> {
-    let resp = client.get(url).send().await.with_context(|| format!("GET {url}"))?;
+async fn fetch_json<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    url: &str,
+) -> anyhow::Result<T> {
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
     let status = resp.status();
-    let body = resp.bytes().await.with_context(|| format!("reading {url}"))?;
+    let body = resp
+        .bytes()
+        .await
+        .with_context(|| format!("reading {url}"))?;
     anyhow::ensure!(status.is_success(), "GET {url} returned {status}");
     serde_json::from_slice(&body).with_context(|| format!("parsing JSON from {url}"))
 }
 
 /// The 26.3 version JSON, cached at `cache/versions/26.3.json` so later steps (and other tools)
 /// do not need the manifest again. Refetched if the cached copy fails to parse.
-async fn version_info(client: &reqwest::Client, progress: &(impl Fn(Progress) + Send)) -> anyhow::Result<VersionInfo> {
+async fn version_info(
+    client: &reqwest::Client,
+    progress: &(impl Fn(Progress) + Send),
+) -> anyhow::Result<VersionInfo> {
     let vjson_path = paths::version_dir().with_file_name(format!("{}.json", paths::MC_VERSION));
     if let Ok(cached) = tokio::fs::read_to_string(&vjson_path).await {
         if let Ok(v) = serde_json::from_str::<VersionInfo>(&cached) {
@@ -70,7 +83,12 @@ async fn version_info(client: &reqwest::Client, progress: &(impl Fn(Progress) + 
         .find(paths::MC_VERSION)
         .ok_or_else(|| anyhow!("version {} not in manifest", paths::MC_VERSION))?;
     let v: VersionInfo = fetch_json(client, &entry.url).await?;
-    anyhow::ensure!(v.id == paths::MC_VERSION, "version JSON id {} != {}", v.id, paths::MC_VERSION);
+    anyhow::ensure!(
+        v.id == paths::MC_VERSION,
+        "version JSON id {} != {}",
+        v.id,
+        paths::MC_VERSION
+    );
     if let Some(parent) = vjson_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -93,12 +111,20 @@ pub async fn resolve_jdk(client: &reqwest::Client) -> anyhow::Result<(PathBuf, J
         }
     }
     install_temurin(client).await?;
-    anyhow::ensure!(cache_java.is_file(), "Temurin install did not produce {}", cache_java.display());
+    anyhow::ensure!(
+        cache_java.is_file(),
+        "Temurin install did not produce {}",
+        cache_java.display()
+    );
     Ok((cache_java, JdkSource::Adoptium))
 }
 
 fn java_exe() -> &'static str {
-    if std::env::consts::OS == "windows" { "java.exe" } else { "java" }
+    if std::env::consts::OS == "windows" {
+        "java.exe"
+    } else {
+        "java"
+    }
 }
 
 /// The cached JDK's `java` if present, without any network access.
@@ -155,12 +181,20 @@ async fn java_major(java: &Path) -> Option<u32> {
         .await
         .ok()?;
     let text = String::from_utf8_lossy(&out.stderr);
-    let text = if text.trim().is_empty() { String::from_utf8_lossy(&out.stdout).into_owned() } else { text.into_owned() };
+    let text = if text.trim().is_empty() {
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    } else {
+        text.into_owned()
+    };
     // OpenJDK/Hotspot: version "25.0.4" or "1.8.0_442" (legacy 8)
     let quoted = text.split('"').nth(1)?;
     let first = quoted.split('.').next()?;
     let major: u32 = first.parse().ok()?;
-    Some(if major == 1 { quoted.split('.').nth(1)?.parse().ok()? } else { major })
+    Some(if major == 1 {
+        quoted.split('.').nth(1)?.parse().ok()?
+    } else {
+        major
+    })
 }
 
 const ADOPTIUM_API: &str = "https://api.adoptium.net/v3";
@@ -182,8 +216,16 @@ async fn install_temurin(client: &reqwest::Client) -> anyhow::Result<()> {
     let url = format!(
         "{ADOPTIUM_API}/binary/latest/25/ga/{os}/{arch}/jdk/hotspot/normal/eclipse?project=jdk"
     );
-    let resp = client.get(&url).send().await.context("GET Adoptium latest 25")?;
-    anyhow::ensure!(resp.status().is_success(), "Adoptium returned {}", resp.status());
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .context("GET Adoptium latest 25")?;
+    anyhow::ensure!(
+        resp.status().is_success(),
+        "Adoptium returned {}",
+        resp.status()
+    );
     let bytes = resp.bytes().await.context("downloading Temurin 25")?;
     let dl = paths::cache_dir().join("dl");
     tokio::fs::create_dir_all(&dl).await?;
@@ -213,7 +255,9 @@ async fn untar(archive: &Path, dest: &Path) -> anyhow::Result<()> {
 }
 
 async fn unzip(_archive: &Path, _dest: &Path) -> anyhow::Result<()> {
-    Err(anyhow!("windows JDK unpack not implemented yet (WS7 runs on linux)"))
+    Err(anyhow!(
+        "windows JDK unpack not implemented yet (WS7 runs on linux)"
+    ))
 }
 
 /// Minimal ustar reader: enough for the Adoptium tarball (regular files, dirs, symlinks;
@@ -230,7 +274,11 @@ fn untar_stream<R: std::io::Read>(reader: &mut R, dest: &Path) -> anyhow::Result
         }
         let name = cstr(&header[..100]);
         let prefix = cstr(&header[345..500]);
-        let full = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+        let full = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
         let size = parse_octal(&header[124..136])?;
         let typeflag = header[156];
         let data_len = size;
@@ -270,7 +318,10 @@ fn untar_stream<R: std::io::Read>(reader: &mut R, dest: &Path) -> anyhow::Result
                         use std::os::unix::fs::PermissionsExt;
                         let mode = parse_octal(&header[100..108])? as u32;
                         if mode & 0o111 != 0 {
-                            std::fs::set_permissions(&out, std::fs::Permissions::from_mode(mode & 0o777))?;
+                            std::fs::set_permissions(
+                                &out,
+                                std::fs::Permissions::from_mode(mode & 0o777),
+                            )?;
                         }
                     }
                 }
@@ -345,9 +396,13 @@ pub async fn run_datagen(java: &Path, server_jar: &Path, reports_dir: &Path) -> 
     if required.iter().all(|f| reports_dir.join(f).is_file()) {
         return Ok(());
     }
-    let cwd = reports_dir.parent().ok_or_else(|| anyhow!("no parent of {}", reports_dir.display()))?;
+    let cwd = reports_dir
+        .parent()
+        .ok_or_else(|| anyhow!("no parent of {}", reports_dir.display()))?;
     tokio::fs::create_dir_all(cwd).await?;
-    let log_path = paths::cache_dir().join("datagen").join(format!("{}.log", paths::MC_VERSION));
+    let log_path = paths::cache_dir()
+        .join("datagen")
+        .join(format!("{}.log", paths::MC_VERSION));
     let log = std::fs::File::create(&log_path)?;
     let status = tokio::process::Command::new(java)
         .arg("-DbundlerMainClass=net.minecraft.data.Main")
@@ -361,7 +416,11 @@ pub async fn run_datagen(java: &Path, server_jar: &Path, reports_dir: &Path) -> 
         .status()
         .await
         .with_context(|| format!("running datagen with {}", java.display()))?;
-    anyhow::ensure!(status.success(), "data generator exited with {status} (log: {})", log_path.display());
+    anyhow::ensure!(
+        status.success(),
+        "data generator exited with {status} (log: {})",
+        log_path.display()
+    );
     for f in required {
         anyhow::ensure!(reports_dir.join(f).is_file(), "datagen did not produce {f}");
     }
@@ -370,7 +429,9 @@ pub async fn run_datagen(java: &Path, server_jar: &Path, reports_dir: &Path) -> 
 
 /// The full installation flow. See INTERFACES.md. Every step is idempotent: present-and-valid
 /// outputs are skipped, partial downloads resume.
-pub async fn ensure_installed(progress: impl FnMut(Progress) + Send + 'static) -> anyhow::Result<Installation> {
+pub async fn ensure_installed(
+    progress: impl FnMut(Progress) + Send + 'static,
+) -> anyhow::Result<Installation> {
     // The callback is used across several sequential download batches; share it behind a Mutex.
     let progress = std::sync::Arc::new(std::sync::Mutex::new(progress));
     let report = {
@@ -488,7 +549,10 @@ pub async fn ensure_installed(progress: impl FnMut(Progress) + Send + 'static) -
             url: f.url.clone(),
             sha1: f.sha1.clone(),
             size: f.size,
-            dest: paths::cache_dir().join("assets").join("log_configs").join(&f.id),
+            dest: paths::cache_dir()
+                .join("assets")
+                .join("log_configs")
+                .join(&f.id),
         });
     }
     download::download_many(lib_specs, {
@@ -529,8 +593,13 @@ pub fn find_existing_minecraft() -> Option<PathBuf> {
         }
         _ => PathBuf::from(home).join(".minecraft"),
     };
-    let marker = root.join("versions").join(paths::MC_VERSION).join(format!("{}.json", paths::MC_VERSION));
-    root.is_dir().then_some(marker.is_file().then_some(root)).flatten()
+    let marker = root
+        .join("versions")
+        .join(paths::MC_VERSION)
+        .join(format!("{}.json", paths::MC_VERSION));
+    root.is_dir()
+        .then_some(marker.is_file().then_some(root))
+        .flatten()
 }
 
 #[cfg(test)]
@@ -539,7 +608,10 @@ mod tests {
 
     #[test]
     fn strips_tar_top_level_dir() {
-        assert_eq!(strip_first_component("jdk-25.0.4/bin/java").unwrap(), "bin/java");
+        assert_eq!(
+            strip_first_component("jdk-25.0.4/bin/java").unwrap(),
+            "bin/java"
+        );
         assert_eq!(strip_first_component("bin/java").unwrap(), "java");
         // a lone top-level dir maps to the root itself, which we do not want to create
         assert_eq!(strip_first_component("jdk/"), None);
@@ -626,7 +698,10 @@ mod tests {
         untar_stream(&mut tar.as_slice(), &dest).unwrap();
         #[cfg(unix)]
         assert_eq!(
-            std::fs::read_link(dest.join("link")).unwrap().to_str().unwrap(),
+            std::fs::read_link(dest.join("link"))
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "target.txt"
         );
     }
@@ -647,7 +722,11 @@ mod tests {
         untar(archive, &dest).await.unwrap();
         let java = dest.join("bin").join(java_exe());
         assert!(java.is_file(), "extracted java missing");
-        let out = tokio::process::Command::new(&java).arg("-version").output().await.unwrap();
+        let out = tokio::process::Command::new(&java)
+            .arg("-version")
+            .output()
+            .await
+            .unwrap();
         assert!(out.status.success());
         let text = String::from_utf8_lossy(&out.stderr);
         assert!(text.contains("25"), "unexpected version output: {text}");
@@ -662,9 +741,13 @@ mod tests {
             std::fs::write(reports.join(f), "{}").unwrap();
         }
         // a nonexistent java would fail if it tried to run; skipping means no run
-        run_datagen(Path::new("/nonexistent-java"), Path::new("/nonexistent.jar"), &reports)
-            .await
-            .unwrap();
+        run_datagen(
+            Path::new("/nonexistent-java"),
+            Path::new("/nonexistent.jar"),
+            &reports,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -672,10 +755,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let reports = dir.path().join("reports");
         std::fs::create_dir_all(&reports).unwrap();
-        let err = run_datagen(Path::new("/nonexistent-java"), Path::new("/nonexistent.jar"), &reports)
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("running datagen") || err.to_string().contains("spawn"), "got: {err}");
+        let err = run_datagen(
+            Path::new("/nonexistent-java"),
+            Path::new("/nonexistent.jar"),
+            &reports,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("running datagen") || err.to_string().contains("spawn"),
+            "got: {err}"
+        );
     }
 }
 
@@ -709,6 +799,10 @@ mod integration_tests {
         assert!(inst.reports_dir.join("packets.json").is_file());
         assert!(inst.reports_dir.join("blocks.json").is_file());
         assert!(inst.reports_dir.join("registries.json").is_file());
-        assert!(inst.assets_dir.join("indexes").join(format!("{}.json", inst.assets_index)).is_file());
+        assert!(inst
+            .assets_dir
+            .join("indexes")
+            .join(format!("{}.json", inst.assets_index))
+            .is_file());
     }
 }

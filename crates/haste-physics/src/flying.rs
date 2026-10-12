@@ -31,7 +31,12 @@ pub(crate) fn travel(
     if input.sneak {
         state.velocity.y -= vertical;
     }
-    let speed = attrs.flying_speed * if state.sprinting { SPRINT_FLY_MULTIPLIER } else { 1.0 };
+    let speed = attrs.flying_speed
+        * if state.sprinting {
+            SPRINT_FLY_MULTIPLIER
+        } else {
+            1.0
+        };
     accelerate(state, imp, speed);
     let motion = state.velocity;
     move_entity(state, attrs, motion, world, shapes);

@@ -5,7 +5,7 @@ compatibility layer later (Phase 2). Phase 1, this repo's current state, is a fa
 with the mod architecture designed in. Licensed GPL-3.0-or-later.
 
 The architecture was proven in two feasibility spikes:
-https://github.com/josefbednar/haste-spike (`REPORT.md`: Mixin handlers at Rust landmarks with
+https://github.com/bednarjosef/haste-spike (`REPORT.md`: Mixin handlers at Rust landmarks with
 Rust-owned state; `REPORT-2.md`: vanilla objects as generated proxies, 30-mod surface scan,
 pure-proxy vs mirrored-field benchmarks). Read `AGENTS.md` for the rules and
 `docs/INTERFACES.md` for the crate contracts.

@@ -32,6 +32,26 @@
   the dump files are absent; with the cache present they run against the real dumps).
   `cargo test -p haste-testkit` + `cargo clippy -p haste-testkit -- -D warnings` clean.
 
+## Client recorder state (Task 3)
+
+The client half of the mod (under `src/main/java/haste/recorder/client/`) compiles —
+`tools/recorder-mod/build.sh` builds the whole jar including it (client classes + client
+mixins are in `build/haste-recorder.jar`). It has NOT been run against the real client
+(that needs a display and the user; see docs/RECORDING.md for the exact steps). So: code
+complete and compiling, runtime verification pending — treat `/haste record`,
+`/haste screenshot` and `/haste bench` as unexercised until the user records once.
+`build.sh` needs `cache/versions/26.3/client.jar` and unpacks the Fabric API nested jars
+(fabric-api-base, fabric-command-api-v2, fabric-lifecycle-events-v1) since javac cannot
+read nested jars.
+
+## Wrapping up (Task 4 state)
+
+- `docs/TESTING.md` and `.github/workflows/ci.yml` exist: CI = fmt + clippy -D warnings +
+  cargo test --workspace on the pinned stable toolchain (1.99.0 via rust-toolchain.toml),
+  cached target; the cache-dependent tier is an `if: false` placeholder job.
+- `examples/bench-report.rs` renders the Markdown bench table (the RECORDING.md TODO is
+  gone).
+
 ## Not done / approximate
 
 - The proxy's state machine uses observed clientbound packet ids for login/config transitions

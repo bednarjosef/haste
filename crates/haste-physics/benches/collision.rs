@@ -16,7 +16,9 @@ struct Dense {
 const N: i32 = 64;
 impl Dense {
     fn new() -> Self {
-        let mut d = Self { blocks: vec![BlockStateId::AIR; (N * N * N) as usize] };
+        let mut d = Self {
+            blocks: vec![BlockStateId::AIR; (N * N * N) as usize],
+        };
         for x in 0..N {
             for z in 0..N {
                 d.set(x, 9, z, STONE);
@@ -78,23 +80,58 @@ fn bench(name: &str, iters: u32, mut f: impl FnMut(u32)) {
 fn main() {
     let w = Dense::new();
     let s = TestShapes::default();
-    let player = |i: u32| Aabb::entity(DVec3::new(20.5 + (i % 13) as f64 * 0.37, 10.0, 20.5 + (i % 7) as f64 * 0.41), 0.6, 1.8);
+    let player = |i: u32| {
+        Aabb::entity(
+            DVec3::new(
+                20.5 + (i % 13) as f64 * 0.37,
+                10.0,
+                20.5 + (i % 7) as f64 * 0.41,
+            ),
+            0.6,
+            1.8,
+        )
+    };
     bench("collide: walk on ground (gravity)", 200_000, |i| {
-        black_box(collide(black_box(player(i)), DVec3::new(0.2, -0.0784, 0.1), &w, &s));
+        black_box(collide(
+            black_box(player(i)),
+            DVec3::new(0.2, -0.0784, 0.1),
+            &w,
+            &s,
+        ));
     });
     bench("collide: fall at terminal velocity", 200_000, |i| {
         let b = player(i).offset(DVec3::new(0.0, 20.0, 0.0));
         black_box(collide(black_box(b), DVec3::new(0.05, -3.92, 0.02), &w, &s));
     });
     bench("collide_with_step: walk on ground", 200_000, |i| {
-        black_box(collide_with_step(black_box(player(i)), DVec3::new(0.28, -0.0784, 0.1), 0.6, true, &w, &s));
+        black_box(collide_with_step(
+            black_box(player(i)),
+            DVec3::new(0.28, -0.0784, 0.1),
+            0.6,
+            true,
+            &w,
+            &s,
+        ));
     });
     bench("collide_with_step: into a wall", 200_000, |_| {
         let b = Aabb::entity(DVec3::new(31.7, 10.0, 20.5), 0.6, 1.8);
-        black_box(collide_with_step(black_box(b), DVec3::new(0.28, -0.0784, 0.1), 0.6, true, &w, &s));
+        black_box(collide_with_step(
+            black_box(b),
+            DVec3::new(0.28, -0.0784, 0.1),
+            0.6,
+            true,
+            &w,
+            &s,
+        ));
     });
     let attrs = PlayerAttributes::default();
-    let input = InputState { forward: true, sprint: true, jump: true, yaw: 30.0, ..Default::default() };
+    let input = InputState {
+        forward: true,
+        sprint: true,
+        jump: true,
+        yaw: 30.0,
+        ..Default::default()
+    };
     let mut st = PlayerState::at(DVec3::new(20.5, 10.0, 20.5));
     bench("tick: sprint-jumping over terrain", 200_000, |i| {
         if i % 100 == 0 {

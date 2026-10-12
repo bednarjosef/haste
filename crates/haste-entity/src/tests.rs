@@ -2,7 +2,7 @@
 //! be meaningful) and run in release via `cargo test --release -- --ignored`.
 use std::time::Instant;
 
-use haste_core::entity::{EntitySpawn, ItemStackData, MetadataEntry, MetadataValue, PlayerInfo, Pose};
+use haste_core::entity::{EntitySpawn, MetadataEntry, MetadataValue, PlayerInfo, Pose};
 use haste_core::game::GameMode;
 use haste_core::ids::{EntityId, RegistryIndex};
 use haste_core::model::EntityInstance;
@@ -67,7 +67,10 @@ fn delta_moves_accumulate_exactly() {
     s.tick();
     s.tick();
     s.tick();
-    assert_eq!(s.get(EntityId(1)).unwrap().pos, DVec3::new(1.5, 0.25, -0.25));
+    assert_eq!(
+        s.get(EntityId(1)).unwrap().pos,
+        DVec3::new(1.5, 0.25, -0.25)
+    );
     assert!(!s.get(EntityId(1)).unwrap().on_ground);
 }
 
@@ -78,7 +81,13 @@ fn teleport_resets_interpolation() {
     s.move_delta(EntityId(1), DVec3::new(10.0, 0.0, 0.0), false);
     s.tick();
     // Mid-lerp teleport: the very next tick lands exactly on the teleport position.
-    s.teleport(EntityId(1), DVec3::new(100.0, 64.0, 100.0), 90.0, -45.0, true);
+    s.teleport(
+        EntityId(1),
+        DVec3::new(100.0, 64.0, 100.0),
+        90.0,
+        -45.0,
+        true,
+    );
     s.tick();
     let e = s.get(EntityId(1)).unwrap();
     assert_eq!(e.pos, DVec3::new(100.0, 64.0, 100.0));
@@ -88,7 +97,10 @@ fn teleport_resets_interpolation() {
     assert!(e.on_ground);
     // And the lerp window is gone: further ticks do not drift.
     s.tick();
-    assert_eq!(s.get(EntityId(1)).unwrap().pos, DVec3::new(100.0, 64.0, 100.0));
+    assert_eq!(
+        s.get(EntityId(1)).unwrap().pos,
+        DVec3::new(100.0, 64.0, 100.0)
+    );
 }
 
 #[test]
@@ -99,22 +111,35 @@ fn metadata_pose_sets_height() {
     assert_eq!(s.get(EntityId(1)).unwrap().dimensions, (0.6, 1.8));
     s.set_metadata(
         EntityId(1),
-        &[MetadataEntry { index: 6, value: MetadataValue::Pose(Pose::Crouching) }],
+        &[MetadataEntry {
+            index: 6,
+            value: MetadataValue::Pose(Pose::Crouching),
+        }],
     );
     let e = s.get(EntityId(1)).unwrap();
     assert_eq!(e.pose, Pose::Crouching);
     assert_eq!(e.dimensions.0, 0.6);
-    assert!((e.dimensions.1 - 1.5).abs() < 1e-6, "crouch height {}", e.dimensions.1);
+    assert!(
+        (e.dimensions.1 - 1.5).abs() < 1e-6,
+        "crouch height {}",
+        e.dimensions.1
+    );
     // Back up.
     s.set_metadata(
         EntityId(1),
-        &[MetadataEntry { index: 6, value: MetadataValue::Pose(Pose::Standing) }],
+        &[MetadataEntry {
+            index: 6,
+            value: MetadataValue::Pose(Pose::Standing),
+        }],
     );
     assert_eq!(s.get(EntityId(1)).unwrap().dimensions, (0.6, 1.8));
     // Swimming crawls.
     s.set_metadata(
         EntityId(1),
-        &[MetadataEntry { index: 6, value: MetadataValue::Pose(Pose::Swimming) }],
+        &[MetadataEntry {
+            index: 6,
+            value: MetadataValue::Pose(Pose::Swimming),
+        }],
     );
     assert!((s.get(EntityId(1)).unwrap().dimensions.1 - 0.6).abs() < 1e-6);
 }
@@ -126,7 +151,10 @@ fn metadata_flags_byte() {
     // flags: 0x02 crouching | 0x10 invisible | 0x40 glowing
     s.set_metadata(
         EntityId(1),
-        &[MetadataEntry { index: 0, value: MetadataValue::Byte(0x02 | 0x10 | 0x40) }],
+        &[MetadataEntry {
+            index: 0,
+            value: MetadataValue::Byte(0x02 | 0x10 | 0x40),
+        }],
     );
     let e = s.get(EntityId(1)).unwrap();
     assert!(e.metadata.shared.crouching);
@@ -135,7 +163,10 @@ fn metadata_flags_byte() {
     // Raw entries are kept per index and later updates replace them.
     s.set_metadata(
         EntityId(1),
-        &[MetadataEntry { index: 0, value: MetadataValue::Byte(0) }],
+        &[MetadataEntry {
+            index: 0,
+            value: MetadataValue::Byte(0),
+        }],
     );
     assert!(!s.get(EntityId(1)).unwrap().metadata.shared.crouching);
     assert_eq!(s.get(EntityId(1)).unwrap().metadata.iter().count(), 1);
@@ -155,7 +186,11 @@ fn render_instances_midpoint() {
     let mut out = Vec::new();
     s.render_instances(0.5, &mut out);
     assert_eq!(out.len(), 1);
-    assert!((out[0].pos.x - 2.0 / 3.0).abs() < 1e-9, "partial {}", out[0].pos.x);
+    assert!(
+        (out[0].pos.x - 2.0 / 3.0).abs() < 1e-9,
+        "partial {}",
+        out[0].pos.x
+    );
     // Endpoints.
     let mut out = Vec::new();
     s.render_instances(0.0, &mut out);
@@ -181,7 +216,10 @@ fn player_info_nametag() {
         listed: true,
         skin_texture_url: None,
     }]);
-    assert_eq!(s.get(EntityId(1)).unwrap().nametag.as_deref(), Some("Steve"));
+    assert_eq!(
+        s.get(EntityId(1)).unwrap().nametag.as_deref(),
+        Some("Steve")
+    );
     // Spawning after the info arrived also picks the name up.
     let sp2 = spawn(2, DVec3::ZERO);
     s.player_info(&[PlayerInfo {
@@ -198,7 +236,9 @@ fn player_info_nametag() {
     // Instances carry the nametag through.
     let mut out = Vec::new();
     s.render_instances(0.0, &mut out);
-    assert!(out.iter().any(|i: &EntityInstance| i.nametag.as_deref() == Some("Steve")));
+    assert!(out
+        .iter()
+        .any(|i: &EntityInstance| i.nametag.as_deref() == Some("Steve")));
 }
 
 #[test]
@@ -255,5 +295,219 @@ fn ten_k_entities_tick_under_1ms() {
     s.render_instances(0.5, &mut out);
     let dur = start.elapsed();
     assert_eq!(out.len(), 10_000);
-    assert!(dur.as_nanos() < 2_000_000, "render_instances took {} ns", dur.as_nanos());
+    assert!(
+        dur.as_nanos() < 2_000_000,
+        "render_instances took {} ns",
+        dur.as_nanos()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 2: models as data + walking animation.
+// ---------------------------------------------------------------------------
+
+use haste_core::model::{CubeModel, ModelPart};
+
+fn find_part<'a>(p: &'a ModelPart, name: &str) -> Option<&'a ModelPart> {
+    if p.name == name {
+        Some(p)
+    } else {
+        p.children.iter().find_map(|c| find_part(c, name))
+    }
+}
+
+fn humanoid_parts(m: &CubeModel) -> Vec<&str> {
+    let mut v: Vec<&str> = m.root.children.iter().map(|c| c.name.as_str()).collect();
+    v.extend(
+        m.root
+            .children
+            .iter()
+            .flat_map(|c| c.children.iter().map(|g| g.name.as_str())),
+    );
+    v
+}
+
+#[test]
+fn humanoid_model_part_tree() {
+    let classic = crate::models::humanoid(false);
+    assert_eq!(classic.tex_width, 64);
+    assert_eq!(classic.tex_height, 64);
+    let names = humanoid_parts(&classic);
+    for expected in [
+        "head",
+        "hat",
+        "body",
+        "jacket",
+        "right_arm",
+        "right_sleeve",
+        "left_arm",
+        "left_sleeve",
+        "right_leg",
+        "right_pants",
+        "left_leg",
+        "left_pants",
+    ] {
+        assert!(
+            names.contains(&expected),
+            "missing part {expected} in {names:?}"
+        );
+    }
+    // UV layout: head 0,0; body 16,16; right arm 40,16; left arm 32,48; right leg 0,16;
+    // left leg 16,48; hat 32,0.
+    let r = &classic.root;
+    assert_eq!(find_part(r, "head").unwrap().cubes[0].uv, [0, 0]);
+    assert_eq!(find_part(r, "hat").unwrap().cubes[0].uv, [32, 0]);
+    assert_eq!(find_part(r, "body").unwrap().cubes[0].uv, [16, 16]);
+    assert_eq!(find_part(r, "jacket").unwrap().cubes[0].uv, [16, 32]);
+    assert_eq!(find_part(r, "right_arm").unwrap().cubes[0].uv, [40, 16]);
+    assert_eq!(find_part(r, "right_sleeve").unwrap().cubes[0].uv, [40, 32]);
+    assert_eq!(find_part(r, "left_arm").unwrap().cubes[0].uv, [32, 48]);
+    assert_eq!(find_part(r, "left_sleeve").unwrap().cubes[0].uv, [48, 48]);
+    assert_eq!(find_part(r, "right_leg").unwrap().cubes[0].uv, [0, 16]);
+    assert_eq!(find_part(r, "right_pants").unwrap().cubes[0].uv, [0, 32]);
+    assert_eq!(find_part(r, "left_leg").unwrap().cubes[0].uv, [16, 48]);
+    assert_eq!(find_part(r, "left_pants").unwrap().cubes[0].uv, [0, 48]);
+    // Cube sizes: head 8x8x8, body 8x12x4, arms 4x12x4 (classic), legs 4x12x4.
+    assert_eq!(
+        find_part(r, "head").unwrap().cubes[0].size,
+        glam::Vec3::new(8.0, 8.0, 8.0)
+    );
+    assert_eq!(
+        find_part(r, "body").unwrap().cubes[0].size,
+        glam::Vec3::new(8.0, 12.0, 4.0)
+    );
+    assert_eq!(
+        find_part(r, "right_arm").unwrap().cubes[0].size,
+        glam::Vec3::new(4.0, 12.0, 4.0)
+    );
+    assert_eq!(
+        find_part(r, "left_leg").unwrap().cubes[0].size,
+        glam::Vec3::new(4.0, 12.0, 4.0)
+    );
+    // Pivots: head at y=-24, legs at y=-12 (feet at 0, model y grows downward).
+    assert_eq!(
+        find_part(r, "head").unwrap().pivot,
+        glam::Vec3::new(0.0, -24.0, 0.0)
+    );
+    assert_eq!(
+        find_part(r, "right_leg").unwrap().pivot,
+        glam::Vec3::new(-1.9, -12.0, 0.0)
+    );
+}
+
+#[test]
+fn humanoid_slim_arms() {
+    let slim = crate::models::humanoid(true);
+    assert_eq!(
+        find_part(&slim.root, "right_arm").unwrap().cubes[0].size,
+        glam::Vec3::new(3.0, 12.0, 4.0)
+    );
+    assert_eq!(
+        find_part(&slim.root, "left_arm").unwrap().cubes[0].size,
+        glam::Vec3::new(3.0, 12.0, 4.0)
+    );
+    // Classic and slim are distinct cached models.
+    assert!(!std::sync::Arc::ptr_eq(
+        &crate::models::humanoid(false),
+        &crate::models::humanoid(true)
+    ));
+}
+
+#[test]
+fn box_model_matches_dimensions() {
+    let m = crate::models::box_for(0.6, 1.95);
+    assert_eq!(m.texture.to_string(), "haste:entity_box");
+    let c = &m.root.cubes[0];
+    // 0.6 blocks wide = 9.6 units, rounded to 10 (1/16 precision); height 1.95 -> 31.2 -> 31.
+    assert_eq!(c.size, glam::Vec3::new(10.0, 31.0, 10.0));
+    assert_eq!(c.origin, glam::Vec3::new(-5.0, -31.0, -5.0));
+    // Cache: same dimensions return the same Arc.
+    let m2 = crate::models::box_for(0.6, 1.95);
+    assert!(std::sync::Arc::ptr_eq(&m, &m2));
+}
+
+#[test]
+fn walking_animation_zero_at_rest_and_bounded() {
+    let mut s = store();
+    let sp = spawn(1, DVec3::ZERO);
+    let uuid = sp.uuid;
+    s.player_info(&[PlayerInfo {
+        uuid,
+        name: "Walker".into(),
+        display_name: None,
+        latency: 20,
+        game_mode: Some(GameMode::Survival),
+        listed: true,
+        skin_texture_url: None,
+    }]);
+    s.spawn(&sp);
+    // A few idle ticks: no limb rotation at all (only the head aim remains).
+    for _ in 0..5 {
+        s.tick();
+    }
+    let mut out = Vec::new();
+    s.render_instances(0.5, &mut out);
+    let limbs: Vec<_> = out[0]
+        .pose
+        .rotations
+        .iter()
+        .filter(|(n, _)| n.ends_with("arm") || n.ends_with("leg"))
+        .collect();
+    assert!(limbs.is_empty(), "limb rotations at rest: {limbs:?}");
+    // Walking: constant 0.1-block deltas each tick; amplitude is smoothed, bounded < pi/4.
+    for _ in 0..20 {
+        s.move_delta(EntityId(1), DVec3::new(0.1, 0.0, 0.0), true);
+        s.tick();
+    }
+    let mut out = Vec::new();
+    s.render_instances(0.5, &mut out);
+    let rot: std::collections::HashMap<_, _> = out[0].pose.rotations.iter().cloned().collect();
+    let arm = rot.get("right_arm").expect("arm rotation while walking");
+    assert!(
+        arm.x.abs() > 1e-3,
+        "arm should swing while walking, got {}",
+        arm.x
+    );
+    assert!(
+        arm.x.abs() <= std::f32::consts::FRAC_PI_2,
+        "arm swing unbounded: {}",
+        arm.x
+    );
+    let leg = rot.get("right_leg").expect("leg rotation while walking");
+    assert!(leg.x.abs() > 1e-3);
+    assert!(leg.x.abs() <= std::f32::consts::FRAC_PI_2);
+    // Arms and legs on the same side are out of phase (opposite sign at some phase; here just
+    // check they differ, which a standing wave would not).
+    let left = rot.get("left_arm").unwrap().x;
+    assert!(
+        (arm.x - left).abs() > 1e-6 || arm.x.abs() < 1e-6,
+        "arms in lockstep"
+    );
+}
+
+#[test]
+fn player_gets_humanoid_model_and_nametag() {
+    let mut s = store();
+    let sp = spawn(1, DVec3::ZERO);
+    let uuid = sp.uuid;
+    s.player_info(&[PlayerInfo {
+        uuid,
+        name: "Steve".into(),
+        display_name: None,
+        latency: 20,
+        game_mode: Some(GameMode::Survival),
+        listed: true,
+        skin_texture_url: None,
+    }]);
+    s.spawn(&sp);
+    let mut out = Vec::new();
+    s.render_instances(0.0, &mut out);
+    assert_eq!(out[0].model.texture.to_string(), "haste:entity/humanoid");
+    assert_eq!(out[0].nametag.as_deref(), Some("Steve"));
+    // Non-player (no player_info entry): generic box.
+    s.spawn(&spawn(2, DVec3::ZERO));
+    let mut out = Vec::new();
+    s.render_instances(0.0, &mut out);
+    let other = out.iter().find(|i| i.id == EntityId(2)).unwrap();
+    assert_eq!(other.model.texture.to_string(), "haste:entity_box");
 }
