@@ -1,0 +1,398 @@
+//! The world: chunk map, block get/set, light, dirty tracking, section snapshots.
+
+use std::cell::UnsafeCell;
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use haste_core::chunk::ChunkData;
+use haste_core::game::DimensionInfo;
+use haste_core::view::{BlockView, DirtyTracker};
+use haste_core::{BiomeId, BlockPos, BlockStateId, ChunkPos, SectionPos};
+use haste_data::GameData;
+
+use crate::chunk::{Chunk, Section};
+use crate::world_error::WorldError;
+
+/// The loaded world of one dimension.
+pub struct World {
+    dim: DimensionInfo,
+    data: Arc<GameData>,
+    chunks: ahash::HashMap<i64, Chunk>,
+    /// Memo of the last chunk hit by a BlockView call: hot loops (physics, meshing, light
+    /// scans) touch the same chunk many times in a row, so the map lookup is skipped.
+    /// Interior mutability through `UnsafeCell` because `BlockView` takes `&self`.
+    last_chunk: UnsafeCell<Option<(i64, *const Chunk)>>,
+    /// Sections needing remesh (set_block and light updates mark them).
+    dirty: Vec<SectionPos>,
+    dirty_dedup: HashSet<SectionPos>,
+    /// Bits for direct-encoded block containers: ceil(log2(state count)), min 4.
+    direct_bits: u8,
+}
+
+// SAFETY: the memo's raw pointer always targets a chunk that is currently in `chunks`; it is
+// invalidated on insert/remove. `Chunk` itself is only read through the shared reference.
+unsafe impl Send for World {}
+unsafe impl Sync for World {}
+
+impl World {
+    pub fn new(dim: DimensionInfo, data: Arc<GameData>) -> World {
+        let states = data.blocks.len();
+        let direct_bits = (u32::BITS - (states as u32).leading_zeros()).max(4) as u8;
+        World {
+            dim,
+            data,
+            chunks: ahash::HashMap::with_hasher(ahash::RandomState::default()),
+            last_chunk: UnsafeCell::new(None),
+            dirty: Vec::new(),
+            dirty_dedup: HashSet::new(),
+            direct_bits,
+        }
+    }
+
+    pub fn dimension(&self) -> &DimensionInfo {
+        &self.dim
+    }
+
+    pub fn game_data(&self) -> &Arc<GameData> {
+        &self.data
+    }
+
+    /// Loads (or replaces) a chunk from `level_chunk_with_light` payload.
+    pub fn load_chunk(&mut self, data: &ChunkData) -> Result<(), WorldError> {
+        self.invalidate_memo();
+        let section_count = self.dim.section_count();
+        let chunk = Chunk::decode(data, self.dim.min_section(), section_count, self.direct_bits)
+            .map_err(WorldError::Palette)?;
+        self.chunks.insert(data.pos.to_packed(), chunk);
+        // a new chunk dirties all its sections and the borders of its neighbours
+        for sy in 0..section_count as i32 {
+            self.mark_dirty(SectionPos::new(data.pos.x, self.dim.min_section() + sy, data.pos.z));
+        }
+        for (dx, dz) in [(-1i32, 0), (1, 0), (0, -1), (0, 1)] {
+            let n = ChunkPos::new(data.pos.x + dx, data.pos.z + dz);
+            if self.chunks.contains_key(&n.to_packed()) {
+                for sy in 0..section_count as i32 {
+                    self.mark_dirty(SectionPos::new(n.x, self.dim.min_section() + sy, n.z));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn unload_chunk(&mut self, pos: ChunkPos) {
+        self.invalidate_memo();
+        self.chunks.remove(&pos.to_packed());
+        // neighbour borders now face void: remesh them
+        for (dx, dz) in [(-1i32, 0), (1, 0), (0, -1), (0, 1)] {
+            let n = ChunkPos::new(pos.x + dx, pos.z + dz);
+            if self.chunks.contains_key(&n.to_packed()) {
+                for sy in 0..self.dim.section_count() as i32 {
+                    self.mark_dirty(SectionPos::new(n.x, self.dim.min_section() + sy, n.z));
+                }
+            }
+        }
+    }
+
+    /// Sets a block. Marks the section (and neighbouring sections when on a border) dirty.
+    pub fn set_block(&mut self, pos: BlockPos, state: BlockStateId) {
+        let chunk_pos = pos.chunk();
+        let sec_y = pos.y >> 4;
+        let direct_bits = self.direct_bits;
+        let Some(chunk) = self.chunks.get_mut(&chunk_pos.to_packed()) else { return };
+        let Some(section) = chunk.section_mut(sec_y) else { return };
+        let lx = (pos.x & 15) as u8;
+        let ly = (pos.y & 15) as u8;
+        let lz = (pos.z & 15) as u8;
+        section.set(lx, ly, lz, state, direct_bits);
+        self.mark_dirty(pos.section());
+        // borders dirty the neighbour section too
+        if lx == 0 {
+            self.mark_dirty(SectionPos::new(chunk_pos.x - 1, sec_y, chunk_pos.z));
+        }
+        if lx == 15 {
+            self.mark_dirty(SectionPos::new(chunk_pos.x + 1, sec_y, chunk_pos.z));
+        }
+        if lz == 0 {
+            self.mark_dirty(SectionPos::new(chunk_pos.x, sec_y, chunk_pos.z - 1));
+        }
+        if lz == 15 {
+            self.mark_dirty(SectionPos::new(chunk_pos.x, sec_y, chunk_pos.z + 1));
+        }
+        if ly == 0 {
+            self.mark_dirty(SectionPos::new(chunk_pos.x, sec_y - 1, chunk_pos.z));
+        }
+        if ly == 15 {
+            self.mark_dirty(SectionPos::new(chunk_pos.x, sec_y + 1, chunk_pos.z));
+        }
+    }
+
+    /// Applies a `light_update` to the chunk at `pos`.
+    pub fn apply_light(&mut self, pos: ChunkPos, light: &haste_core::chunk::LightData) {
+        if let Some(chunk) = self.chunks.get_mut(&pos.to_packed()) {
+            chunk.apply_light(light);
+            for sy in 0..self.dim.section_count() as i32 {
+                self.mark_dirty(SectionPos::new(pos.x, self.dim.min_section() + sy, pos.z));
+            }
+        }
+    }
+
+    pub fn chunk(&self, pos: ChunkPos) -> Option<&Chunk> {
+        self.chunks.get(&pos.to_packed())
+    }
+
+    pub fn loaded_chunks(&self) -> impl Iterator<Item = ChunkPos> + '_ {
+        self.chunks.values().map(|c| c.pos)
+    }
+
+    /// Immutable copy of a section (plus 1-block border from neighbours and its light) for
+    /// meshing threads. `None` if the section's chunk is not loaded.
+    pub fn snapshot_section(&self, pos: SectionPos) -> Option<Arc<SectionSnapshot>> {
+        let chunk = self.chunks.get(&pos.chunk().to_packed())?;
+        let idx = pos.y - chunk.min_section;
+        if idx < 0 || idx as usize >= chunk.sections.len() {
+            return None;
+        }
+        let section = &chunk.sections[idx as usize];
+
+        // Border blocks: neighbours in the six face directions. `None` = unloaded/void (treated
+        // as air by the mesher through `SectionView`).
+        let mut border = BorderCells::default();
+        let gather = |wx: i32, wy: i32, wz: i32| -> Option<BlockStateId> {
+            let cp = BlockPos::new(wx, wy, wz).chunk();
+            let c = self.chunks.get(&cp.to_packed())?;
+            let sy = wy >> 4;
+            let s = c.section(sy)?;
+            Some(s.get((wx & 15) as u8, (wy & 15) as u8, (wz & 15) as u8))
+        };
+        let base = pos.block_min();
+        // -x face (16 y * 16 z)
+        for y in 0..16 {
+            for z in 0..16 {
+                border.neg_x.push(gather(base.x - 1, base.y + y, base.z + z).unwrap_or(BlockStateId::AIR));
+            }
+        }
+        for y in 0..16 {
+            for z in 0..16 {
+                border.pos_x.push(gather(base.x + 16, base.y + y, base.z + z).unwrap_or(BlockStateId::AIR));
+            }
+        }
+        for y in 0..16 {
+            for x in 0..16 {
+                border.neg_z.push(gather(base.x + x, base.y + y, base.z - 1).unwrap_or(BlockStateId::AIR));
+            }
+        }
+        for y in 0..16 {
+            for x in 0..16 {
+                border.pos_z.push(gather(base.x + x, base.y + y, base.z + 16).unwrap_or(BlockStateId::AIR));
+            }
+        }
+        for z in 0..16 {
+            for x in 0..16 {
+                border.neg_y.push(gather(base.x + x, base.y - 1, base.z + z).unwrap_or(BlockStateId::AIR));
+            }
+        }
+        for z in 0..16 {
+            for x in 0..16 {
+                border.pos_y.push(gather(base.x + x, base.y + 16, base.z + z).unwrap_or(BlockStateId::AIR));
+            }
+        }
+
+        let sky = chunk.light.sky.get(idx as usize).cloned().flatten();
+        let block_light = chunk.light.block.get(idx as usize).cloned().unwrap_or_default();
+
+        Some(Arc::new(SectionSnapshot {
+            pos,
+            section: SnapshotSection {
+                block_count: section.block_count,
+                blocks: section.blocks.clone(),
+                biomes: section.biomes.clone(),
+            },
+            border,
+            sky,
+            block: block_light,
+        }))
+    }
+
+    fn mark_dirty(&mut self, pos: SectionPos) {
+        if self.dirty_dedup.insert(pos) {
+            self.dirty.push(pos);
+        }
+    }
+
+    // -- BlockView helpers --
+
+    /// The chunk containing `pos`, using the memo when it hits. Unloaded -> None.
+    #[inline]
+    fn chunk_of(&self, pos: BlockPos) -> Option<&Chunk> {
+        let key = pos.chunk().to_packed();
+        // SAFETY: no &mut World aliasing exists during a &self call; the pointer stored in
+        // the memo is invalidated on chunk insert/remove, so it is never dangling here.
+        // SAFETY: see `chunk_of` doc comment.
+        let memo = unsafe { &*self.last_chunk.get() };
+        if let Some((k, p)) = *memo {
+            if k == key {
+                return Some(unsafe { &*p });
+            }
+        }
+        let chunk = self.chunks.get(&key)?;
+        // SAFETY: same invariant; single-threaded write through the UnsafeCell.
+        *unsafe { &mut *self.last_chunk.get() } = Some((key, chunk as *const Chunk));
+        Some(chunk)
+    }
+
+    fn invalidate_memo(&mut self) {
+        *self.last_chunk.get_mut() = None;
+    }
+
+    fn chunk_and_section(&self, pos: BlockPos) -> Option<(&Chunk, &Section)> {
+        let chunk = self.chunk_of(pos)?;
+        let section = chunk.section(pos.y >> 4)?;
+        Some((chunk, section))
+    }
+}
+
+impl BlockView for World {
+    fn block_state(&self, pos: BlockPos) -> BlockStateId {
+        match self.chunk_and_section(pos) {
+            Some((_, s)) => s.get((pos.x & 15) as u8, (pos.y & 15) as u8, (pos.z & 15) as u8),
+            None => BlockStateId::AIR,
+        }
+    }
+
+    fn is_chunk_loaded(&self, pos: ChunkPos) -> bool {
+        self.chunks.contains_key(&pos.to_packed())
+    }
+
+    fn sky_light(&self, pos: BlockPos) -> u8 {
+        match self.chunk_and_section(pos) {
+            Some((c, _)) => {
+                let idx = (pos.y >> 4) - c.min_section;
+                c.light
+                    .sky
+                    .get(idx as usize)
+                    .and_then(|n| n.as_ref())
+                    .map(|n| n.get((pos.x & 15) as u8, (pos.y & 15) as u8, (pos.z & 15) as u8))
+                    .unwrap_or(15)
+            }
+            None => 15,
+        }
+    }
+
+    fn block_light(&self, pos: BlockPos) -> u8 {
+        match self.chunk_and_section(pos) {
+            Some((c, _)) => {
+                let idx = (pos.y >> 4) - c.min_section;
+                c.light
+                    .block
+                    .get(idx as usize)
+                    .map(|n| n.get((pos.x & 15) as u8, (pos.y & 15) as u8, (pos.z & 15) as u8))
+                    .unwrap_or(0)
+            }
+            None => 0,
+        }
+    }
+
+    fn min_y(&self) -> i32 {
+        self.dim.min_y
+    }
+
+    fn height(&self) -> i32 {
+        self.dim.height
+    }
+}
+
+impl DirtyTracker for World {
+    fn take_dirty_sections(&mut self) -> Vec<SectionPos> {
+        self.dirty_dedup.clear();
+        std::mem::take(&mut self.dirty)
+    }
+}
+
+/// A section plus its six one-block border faces (from the six neighbours), light included.
+/// Cloning the containers is a deep copy; the `PalettedContainer`'s palette and data are cloned.
+#[derive(Clone)]
+pub struct SnapshotSection {
+    pub block_count: i16,
+    pub blocks: crate::palette::BlockContainer,
+    pub biomes: crate::palette::BiomeContainer,
+}
+
+/// Border faces of a snapshot, each 16x16 (or 16x16 for top/bottom), row-major in the loop
+/// order used to gather them (see `snapshot_section`).
+#[derive(Default, Clone)]
+pub struct BorderCells {
+    pub neg_x: Vec<BlockStateId>,
+    pub pos_x: Vec<BlockStateId>,
+    pub neg_y: Vec<BlockStateId>,
+    pub pos_y: Vec<BlockStateId>,
+    pub neg_z: Vec<BlockStateId>,
+    pub pos_z: Vec<BlockStateId>,
+}
+
+/// What meshing threads get: a section, its border, its light.
+pub struct SectionSnapshot {
+    pub pos: SectionPos,
+    pub section: SnapshotSection,
+    pub border: BorderCells,
+    pub sky: Option<crate::light::NibbleArray>,
+    pub block: crate::light::NibbleArray,
+}
+
+impl SectionSnapshot {
+    /// Block at (x, y, z) with x/y/z in -1..=16 (the section plus one-block border).
+    pub fn get(&self, x: i8, y: i8, z: i8) -> BlockStateId {
+        if (0..16).contains(&x) && (0..16).contains(&y) && (0..16).contains(&z) {
+            return self.section.blocks.get_block(x as u8, y as u8, z as u8);
+        }
+        let (face, i) = self.border_face_index(x, y, z);
+        match face {
+            Some(f) => f[i],
+            None => BlockStateId::AIR,
+        }
+    }
+
+    /// Sky light at (x, y, z) in 0..16 coords; outside returns 15 (no data => full sky).
+    pub fn sky_light(&self, x: u8, y: u8, z: u8) -> u8 {
+        self.sky.as_ref().map(|n| n.get(x, y, z)).unwrap_or(15)
+    }
+
+    pub fn block_light(&self, x: u8, y: u8, z: u8) -> u8 {
+        self.block.get(x, y, z)
+    }
+
+    fn border_face_index(&self, x: i8, y: i8, z: i8) -> (Option<&Vec<BlockStateId>>, usize) {
+        // The gather loops in `snapshot_section` define the index order:
+        // neg_x: y*16+z ; pos_x: y*16+z ; neg_z: y*16+x ; pos_z: y*16+x ; neg_y: z*16+x ; pos_y: z*16+x
+        let b = &self.border;
+        if x == -1 {
+            let i = (y as usize) * 16 + z as usize;
+            return (Some(&b.neg_x), i);
+        }
+        if x == 16 {
+            let i = (y as usize) * 16 + z as usize;
+            return (Some(&b.pos_x), i);
+        }
+        if z == -1 {
+            let i = (y as usize) * 16 + x as usize;
+            return (Some(&b.neg_z), i);
+        }
+        if z == 16 {
+            let i = (y as usize) * 16 + x as usize;
+            return (Some(&b.pos_z), i);
+        }
+        if y == -1 {
+            let i = (z as usize) * 16 + x as usize;
+            return (Some(&b.neg_y), i);
+        }
+        if y == 16 {
+            let i = (z as usize) * 16 + x as usize;
+            return (Some(&b.pos_y), i);
+        }
+        (None, 0)
+    }
+}
+
+/// Biome of the snapshot's section at cell coords (0..4).
+pub fn snapshot_biome(s: &SectionSnapshot, x: u8, y: u8, z: u8) -> BiomeId {
+    s.section.biomes.get_biome(x, y, z)
+}
