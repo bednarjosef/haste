@@ -7,7 +7,25 @@ the GUI batch drawing for M5. Performance is the point of Haste: multithreaded m
 render thread, no per-frame allocations in the hot path, frustum culling, measured frame times.
 
 ## Reuse decision
-REUSE_DECISION
+Decided by the lead from the Pomme evaluation (Pomme at `cache/pomme`, GPL-3.0, stable Rust,
+raw Vulkan through `pyronyx` + `shaderc`-compiled GLSL). We stay on **wgpu** (portable, GL
+fallback, simpler to own) and reuse Pomme's azalea-free, clean-provenance pieces with the GPL
+headers kept and `THIRD_PARTY.md` entries:
+- **Reuse as-is / light rework into `haste-assets`**: `pomme-client/src/assets.rs` (asset index
+  over jar + assets dir), `pomme-client/src/world/block/model.rs` (blockstate/model JSON parsing and
+  baking, 2.9k lines) and `pomme-client/src/renderer/chunk/atlas.rs` (atlas stitching + mip chain).
+  Replace its block registry types with `haste_data::BlockStates` and `BlockStateId`.
+- **Reuse with rework into `haste-render`**: `renderer/chunk/greedy.rs` (binary greedy meshing,
+  MIT upstream Inspirateur/binary-greedy-meshing, modified for AO as merge criterion; keep both
+  attributions), the mesher's design (`renderer/chunk/mesher.rs`: worker pool, buffer pool,
+  bounded result channel, 16-byte packed vertices with sprite-local UVs + atlas rectangle buffer),
+  `renderer/chunk/occlusion_graph.rs` (section visibility walk for cave culling), and
+  `renderer/chunk/buffer.rs` (free-list sub-allocator over big buffers) rewritten on wgpu buffers.
+- **Do not reuse**: `world/light/` (self-declared port of vanilla's light engine: provenance),
+  anything under `net/`, `physics/`, `player/`, and Pomme's `ui/` (azalea `ItemStack`/`azalea_chat`
+  types everywhere; our GUI is the batched `GuiFrame`). Vulkan-specific code (context, swapchain,
+  pipelines, GLSL shaders) is reference only: write WGSL.
+- Entity models: WS4 owns them; you only draw `EntityInstance`s.
 
 ## Backend
 wgpu 30 (workspace dependency); winit 0.30 for the window. This machine: AMD Radeon 860M, Mesa

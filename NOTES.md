@@ -2,6 +2,13 @@
 
 Newest at the top. One entry per decision, with the why; link the brief or report it came from.
 
+- **2026-10-12 Renderer: wgpu, with Pomme's azalea-free pieces.** Pomme's renderer is raw Vulkan
+  (pyronyx + shaderc GLSL), ~41k lines, and its net/physics/light are either azalea-bound or
+  self-declared vanilla ports. We keep wgpu and reuse Pomme's asset index, block model baking,
+  atlas stitching, greedy mesher (MIT upstream), occlusion graph and the mesher/buffer design
+  (GPL-3.0, attributed). Pomme's Tauri launcher is not reused in Phase 1 (CLI flow), but its
+  azalea-free MSA OAuth flow (`pomme-launcher/.../auth.rs`) is the reference for WS7. Evaluation
+  report: worker `glm-pomme-eval` (2026-10-12).
 - **2026-10-12 Protocol: vendor Pumpkin's transport, own packets.** Pumpkin (`cache/pumpkin`, GPL-3.0,
   stable Rust, protocol 777) has a tested framing/compression/encryption layer and NBT, but only
   ~27% of clientbound packets decode (it is a server) and its `pumpkin-data` crate is 1.5M generated

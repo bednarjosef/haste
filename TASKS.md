@@ -6,7 +6,7 @@ One line per task; details live in `docs/briefs/<ws>.md` and in the branch.
 | ID | Workstream | Task | Milestone | Status |
 |---|---|---|---|---|
 | L-0 | lead | Repo scaffold, haste-core, interfaces, boards | - | done |
-| L-1 | lead | Evaluate Pomme and Pumpkin for reuse (workers pomme-eval, pumpkin-eval) | - | Pumpkin done; Pomme in progress |
+| L-1 | lead | Evaluate Pomme and Pumpkin for reuse (workers pomme-eval, pumpkin-eval) | - | done |
 | WS2-1 | WS2 | haste-data: GameData from reports, BlockShapes (oracle or fallback) | M1 | in progress |
 | WS2-2 | WS2 | haste-world: paletted containers, chunk decode, light, dirty tracking, snapshots | M1/M2 | claimed |
 | WS4-1 | WS4 | haste-entity: tracking + interpolation | M1 | in progress |
@@ -25,6 +25,6 @@ One line per task; details live in `docs/briefs/<ws>.md` and in the branch.
 | WS1-1 | WS1 | protocol codec + state machine (vendored Pumpkin transport) | M1 | in progress |
 | WS1-2 | WS1 | play packets | M1 | pending |
 | WS1-3 | WS1 | M1 headless join | M1 | pending |
-| WS3-1 | WS3 | haste-assets: jar reading, models, atlas, font | M2 | pending eval |
+| WS3-1 | WS3 | haste-assets: jar reading, models, atlas, font (Pomme pieces reused) | M2 | in progress |
 | WS3-2 | WS3 | haste-render: meshing, world rendering | M2 | pending |
 | WS3-3 | WS3 | entities, HUD, GUI batch drawing | M4/M5 | pending |
