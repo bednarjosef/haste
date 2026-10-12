@@ -9,14 +9,19 @@
 
 pub mod attributes;
 pub mod collision;
+pub mod flying;
+pub mod fluids;
+pub mod movement;
 pub mod oracle;
 pub mod testing;
+mod trig;
 
 use haste_core::{Aabb, BlockStateId, DVec3};
 use serde::{Deserialize, Serialize};
 
 pub use attributes::{PlayerAttributes, Pose};
 pub use collision::{collide, collide_with_step};
+pub use movement::tick;
 
 /// The local player's physics state. Positions/velocities are f64 like vanilla; angles f32.
 #[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
