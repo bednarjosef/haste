@@ -259,6 +259,17 @@ impl<'a> Reader<'a> {
         Ok(v)
     }
 
+    /// BitSet whose longs are VarLongs: the encoding the 26.3 server uses for
+    /// the light masks (verified empirically, see NOTES.md).
+    pub fn bit_set_varlong(&mut self) -> DecodeResult<Vec<u64>> {
+        let n = self.len_prefix(MAX_LIST)?;
+        let mut v = Vec::with_capacity(n.min(self.remaining()));
+        for _ in 0..n {
+            v.push(self.var_long()? as u64);
+        }
+        Ok(v)
+    }
+
     /// Fixed BitSet of `bits` bits (`ceil(bits/8)` bytes).
     pub fn fixed_bit_set(&mut self, bits: usize) -> DecodeResult<Vec<u8>> {
         Ok(self.take(bits.div_ceil(8))?.to_vec())
@@ -453,6 +464,13 @@ impl Writer {
         self.len_prefix(longs.len());
         for l in longs {
             self.u64(*l);
+        }
+    }
+    /// BitSet with VarLong elements (see [`Reader::bit_set_varlong`]).
+    pub fn bit_set_varlong(&mut self, longs: &[u64]) {
+        self.len_prefix(longs.len());
+        for l in longs {
+            self.var_long(*l as i64);
         }
     }
     /// One network NBT value (`None` writes `TAG_End`).
@@ -859,19 +877,21 @@ impl Wire for ResolvableProfile {
 /// Light data as in `level_chunk_with_light` and `light_update`.
 impl Wire for haste_core::chunk::LightData {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        let sky_mask = r.bit_set()?;
-        let block_mask = r.bit_set()?;
-        let empty_sky_mask = r.bit_set()?;
-        let empty_block_mask = r.bit_set()?;
+        // 26.3: the masks' longs are VarLongs (observed on the local server;
+        // the wiki still documents plain longs).
+        let sky_mask = r.bit_set_varlong()?;
+        let block_mask = r.bit_set_varlong()?;
+        let empty_sky_mask = r.bit_set_varlong()?;
+        let empty_block_mask = r.bit_set_varlong()?;
         let sky_arrays = r.list(4096, |r| r.byte_array(2048))?;
         let block_arrays = r.list(4096, |r| r.byte_array(2048))?;
         Ok(Self { sky_mask, block_mask, empty_sky_mask, empty_block_mask, sky_arrays, block_arrays })
     }
     fn write(&self, w: &mut Writer) {
-        w.bit_set(&self.sky_mask);
-        w.bit_set(&self.block_mask);
-        w.bit_set(&self.empty_sky_mask);
-        w.bit_set(&self.empty_block_mask);
+        w.bit_set_varlong(&self.sky_mask);
+        w.bit_set_varlong(&self.block_mask);
+        w.bit_set_varlong(&self.empty_sky_mask);
+        w.bit_set_varlong(&self.empty_block_mask);
         w.list(&self.sky_arrays, |w, a| w.byte_array(a));
         w.list(&self.block_arrays, |w, a| w.byte_array(a));
     }

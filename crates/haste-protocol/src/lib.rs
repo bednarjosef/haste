@@ -24,6 +24,10 @@ pub mod packets;
 pub mod transport;
 pub mod wire;
 
+/// The shared types used in packet structs, re-exported so users of this
+/// crate can name them without a direct dependency.
+pub use haste_core;
+
 pub use auth::MsaTokens;
 pub use connection::{ping, Account, ConnectOptions, Connection, Login, ProtocolError, ServerStatus, StatsSnapshot, SyncedRegistries};
 pub use packets::play::{ClientboundPlay, ServerboundPlay};

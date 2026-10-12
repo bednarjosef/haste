@@ -785,6 +785,7 @@ async fn reader_task(mut c: ReaderCtx) {
                     let ent = m.entry(name).or_insert((0, String::new()));
                     if ent.0 == 0 {
                         tracing::warn!("failed to decode {name}: {e}");
+                        dump_packet(name, &raw.payload);
                     }
                     ent.0 += 1;
                     ent.1 = e.to_string();
@@ -821,6 +822,17 @@ async fn reader_task(mut c: ReaderCtx) {
         }
     }
     set_closed(&c.closed, "connection closed".into());
+}
+
+/// With `HASTE_PROTOCOL_DUMP=<dir>`, writes the body of the first packet of
+/// each name that failed to decode to `<dir>/<name>.bin` (layout debugging).
+fn dump_packet(name: &str, body: &[u8]) {
+    if let Some(dir) = std::env::var_os("HASTE_PROTOCOL_DUMP") {
+        let file = std::path::Path::new(&dir).join(format!("{}.bin", name.replace([':', '/'], "_")));
+        if let Err(e) = std::fs::write(&file, body) {
+            tracing::warn!("dump {}: {e}", file.display());
+        }
+    }
 }
 
 async fn writer_task(
