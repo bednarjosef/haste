@@ -115,72 +115,9 @@ pub trait EntitySink {
     fn len(&self) -> usize;
 }
 
-/// TEMPORARY shim (player workstream; delete when haste-world is fixed): `haste_world` reads
-/// packed palette entries from the most significant bits of each long, vanilla packs entry 0
-/// into the least significant bits. Seen on the vanilla server: a 3x3 stone pad at x 20..22 was
-/// decoded at the mirrored x positions within each 16-entry row, so the player fell through it
-/// and the server corrected every other tick. Rewrites the block containers' longs into the
-/// order `haste_world` reads (biome containers are copied unchanged).
-fn mirror_block_entries(data: &[u8], section_count: usize) -> Option<Vec<u8>> {
-    use haste_protocol::wire::{Reader, Writer};
-    let mut r = Reader::new(data);
-    let mut out = Writer::new();
-    let skip_varint = |r: &mut Reader<'_>, out: &mut Writer| -> Option<i32> {
-        let v = r.var_int().ok()?;
-        out.var_int(v);
-        Some(v)
-    };
-    for _ in 0..section_count {
-        out.bytes(r.take(4).ok()?); // i16 block count, i16 fluid count
-        let bpe = r.u8().ok()?;
-        out.u8(bpe);
-        if bpe == 0 {
-            skip_varint(&mut r, &mut out)?;
-        } else {
-            if bpe <= 8 {
-                let n = skip_varint(&mut r, &mut out)?;
-                for _ in 0..n {
-                    skip_varint(&mut r, &mut out)?;
-                }
-            }
-            let bits = bpe as usize;
-            let per = 64 / bits;
-            let mask = (1u64 << bits) - 1;
-            for _ in 0..4096usize.div_ceil(per) {
-                let l = u64::from_be_bytes(r.take(8).ok()?.try_into().ok()?);
-                let mut m = 0u64;
-                for k in 0..per {
-                    m |= ((l >> (k * bits)) & mask) << (64 - (k + 1) * bits);
-                }
-                out.bytes(&m.to_be_bytes());
-            }
-        }
-        // Biome container: bits, then a single value, or a palette, then the longs.
-        let bpe = r.u8().ok()?;
-        out.u8(bpe);
-        if bpe == 0 {
-            skip_varint(&mut r, &mut out)?;
-        } else {
-            if bpe <= 3 {
-                let n = skip_varint(&mut r, &mut out)?;
-                for _ in 0..n {
-                    skip_varint(&mut r, &mut out)?;
-                }
-            }
-            out.bytes(r.take(64usize.div_ceil(64 / bpe as usize) * 8).ok()?);
-        }
-    }
-    out.bytes(r.take(r.remaining()).ok()?);
-    Some(out.into_inner())
-}
-
 impl WorldSink for World {
     fn load_chunk(&mut self, data: &ChunkData) -> anyhow::Result<()> {
-        let mut fixed = data.clone();
-        fixed.sections = mirror_block_entries(&data.sections, self.dimension().section_count())
-            .ok_or_else(|| anyhow::anyhow!("section payload does not parse"))?
-            .into();
-        World::load_chunk(self, &fixed).map_err(anyhow::Error::from)
+        World::load_chunk(self, data).map_err(anyhow::Error::from)
     }
     fn unload_chunk(&mut self, pos: ChunkPos) {
         World::unload_chunk(self, pos)
