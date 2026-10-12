@@ -29,6 +29,11 @@ mkdir -p "$SRV"
 cp -f "$CACHE/server-spike/fabric-server-launch.jar" "$SRV/"
 cp -f "$CACHE/server-spike/fabric-server-launcher.properties" "$SRV/"
 cp -rf "$CACHE/server-spike/libraries" "$SRV/libraries"
+# fabric-server-launch needs the vanilla server jar (its launcher properties point at server.jar)
+# and its de-bundled copy under versions/.
+cp -f "$CACHE/server-spike/server.jar" "$SRV/"
+mkdir -p "$SRV/versions"
+cp -rf "$CACHE/server-spike/versions/." "$SRV/versions/"
 mkdir -p "$SRV/mods"
 cp -f "$CACHE/server-spike/mods/fabric-api"*.jar "$SRV/mods/" 2>/dev/null || true
 cp -f "$HERE/build/haste-recorder.jar" "$SRV/mods/"
