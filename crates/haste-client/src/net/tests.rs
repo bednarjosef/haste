@@ -260,18 +260,30 @@ fn entity_packets_reach_the_store() {
 fn teleport_is_accepted_then_movement_follows_on_the_next_tick() {
     let mut r = Rig::new();
     // Nothing is sent before the first teleport.
-    r.session
-        .end_tick(&InputState::default(), &r.world, &mut r.out);
+    r.session.end_tick(
+        &InputState::default(),
+        &mut r.world,
+        &r.entities,
+        &mut r.out,
+    );
     assert!(r.out.is_empty());
     r.apply(teleport(1, DVec3::new(0.5, -60.0, 0.5), 0));
     assert_eq!(r.names(), ["accept_teleportation", "player_loaded"]);
-    r.session
-        .end_tick(&InputState::default(), &r.world, &mut r.out);
+    r.session.end_tick(
+        &InputState::default(),
+        &mut r.world,
+        &r.entities,
+        &mut r.out,
+    );
     // The fake world has no chunks: the player stays put, so no movement packet yet.
     assert_eq!(r.names(), ["player_input", "client_tick_end"]);
     // player_input only when it changes; player_loaded only once.
-    r.session
-        .end_tick(&InputState::default(), &r.world, &mut r.out);
+    r.session.end_tick(
+        &InputState::default(),
+        &mut r.world,
+        &r.entities,
+        &mut r.out,
+    );
     assert_eq!(r.names(), ["client_tick_end"]);
     r.apply(teleport(2, DVec3::new(1.0, 0.0, 0.0), teleport_flags::X));
     assert_eq!(r.names(), ["accept_teleportation"]);
@@ -310,8 +322,12 @@ fn respawn_resets_world_and_entities() {
     assert_eq!(r.session.player.game_mode, GameMode::Survival);
     // Movement waits for the next teleport after a respawn.
     r.out.clear();
-    r.session
-        .end_tick(&InputState::default(), &r.world, &mut r.out);
+    r.session.end_tick(
+        &InputState::default(),
+        &mut r.world,
+        &r.entities,
+        &mut r.out,
+    );
     assert!(r.out.is_empty());
 }
 

@@ -73,7 +73,7 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
         interval.tick().await;
         let mut input = Default::default();
         if let Some(w) = walk.as_mut() {
-            let (i, cmd) = w.before_tick(tick, &mut driver.session.player);
+            let (i, cmd) = w.before_tick(tick, &mut driver.session.player, &world);
             input = i;
             if let Some(c) = cmd {
                 driver.queue(c);

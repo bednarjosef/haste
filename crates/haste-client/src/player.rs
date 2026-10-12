@@ -87,6 +87,11 @@ pub struct AttributeIds {
     pub step_height: i32,
     pub scale: i32,
     pub sneaking_speed: i32,
+    pub block_break_speed: i32,
+    pub mining_efficiency: i32,
+    pub submerged_mining_speed: i32,
+    pub block_interaction_range: i32,
+    pub entity_interaction_range: i32,
 }
 
 impl AttributeIds {
@@ -99,6 +104,11 @@ impl AttributeIds {
             step_height: index("step_height")?,
             scale: index("scale")?,
             sneaking_speed: index("sneaking_speed")?,
+            block_break_speed: index("block_break_speed")?,
+            mining_efficiency: index("mining_efficiency")?,
+            submerged_mining_speed: index("submerged_mining_speed")?,
+            block_interaction_range: index("block_interaction_range")?,
+            entity_interaction_range: index("entity_interaction_range")?,
         })
     }
 
@@ -178,6 +188,8 @@ pub struct LocalPlayer {
     attributes: Vec<cb::AttributeProperty>,
     attributes_dirty: bool,
     toggle_flight: bool,
+    /// Breaking, placing, using, attacking, hotbar and inventory (player/interact.rs).
+    pub(crate) int: interact::Interaction,
 }
 
 impl LocalPlayer {
@@ -210,6 +222,7 @@ impl LocalPlayer {
             attributes: Vec::new(),
             attributes_dirty: false,
             toggle_flight: false,
+            int: interact::Interaction::default(),
         };
         p.state.on_ground = true;
         p.prev_eye = p.eye_height();
@@ -362,8 +375,9 @@ impl LocalPlayer {
                 self.has_position = false;
                 self.loaded = false;
                 self.sent = Sent::default();
+                self.int.respawned();
             }
-            _ => return false,
+            other => return self.handle_interact_packet(other),
         }
         true
     }
@@ -461,6 +475,18 @@ impl LocalPlayer {
             ..d
         };
         self.attrs = a;
+        let r = interact::InteractAttributes::default();
+        self.int.attrs = interact::InteractAttributes {
+            block_break_speed: get(ids.block_break_speed, r.block_break_speed, false),
+            mining_efficiency: get(ids.mining_efficiency, r.mining_efficiency, false),
+            submerged_mining_speed: get(
+                ids.submerged_mining_speed,
+                r.submerged_mining_speed,
+                false,
+            ),
+            block_reach: get(ids.block_interaction_range, r.block_reach, false),
+            entity_reach: get(ids.entity_interaction_range, r.entity_reach, false),
+        };
     }
 
     /// One 20 Hz tick against the real world and game data.
@@ -471,15 +497,26 @@ impl LocalPlayer {
         data: &haste_data::GameData,
         out: &mut Vec<ServerboundPlay>,
     ) {
+        self.prepare(data);
+        let env = interact::InteractEnv {
+            data,
+            entities: &[],
+        };
+        self.tick_interact(input, world, &env, out);
+    }
+
+    /// Resolves what the player needs from the game data once (attribute ids, tool table).
+    pub fn prepare(&mut self, data: &haste_data::GameData) {
         if self.attribute_ids.is_none() {
             if let Some(ids) = AttributeIds::from_data(data) {
                 self.set_attribute_ids(ids);
             }
         }
-        self.tick_with(input, world, &data.shapes, data, out);
+        self.int.prepare(data);
     }
 
-    /// One 20 Hz tick over any world view (tests use `haste_physics::testing`).
+    /// One 20 Hz tick over any world view without interactions (tests use
+    /// `haste_physics::testing`).
     pub fn tick_with(
         &mut self,
         input: &InputState,
@@ -488,12 +525,46 @@ impl LocalPlayer {
         blocks: &dyn BlockPhysics,
         out: &mut Vec<ServerboundPlay>,
     ) {
+        self.tick_inner(input, world, shapes, blocks, None, out);
+    }
+
+    /// One 20 Hz tick with the interactions set by [`LocalPlayer::set_interact`] first (hotbar,
+    /// attack/break, use/place, pick block), then movement, as a vanilla client orders them.
+    pub fn tick_interact(
+        &mut self,
+        input: &InputState,
+        world: &dyn BlockView,
+        env: &interact::InteractEnv<'_>,
+        out: &mut Vec<ServerboundPlay>,
+    ) {
+        self.tick_inner(input, world, &env.data.shapes, env.data, Some(env), out);
+    }
+
+    fn tick_inner(
+        &mut self,
+        input: &InputState,
+        world: &dyn BlockView,
+        shapes: &dyn CollisionShapes,
+        blocks: &dyn BlockPhysics,
+        env: Option<&interact::InteractEnv<'_>>,
+        out: &mut Vec<ServerboundPlay>,
+    ) {
         self.apply_attributes();
         self.prev_pos = self.state.pos;
         self.prev_eye = self.eye_height();
         self.last_input_look = (input.yaw, input.pitch);
         if !(self.has_position && self.loaded) {
             return;
+        }
+
+        // 0. Hotbar, crosshair target and interactions (vanilla handles key bindings before
+        // the player's own tick).
+        let look = (
+            input.yaw + self.look_offset.0,
+            (input.pitch + self.look_offset.1).clamp(-90.0, 90.0),
+        );
+        if let Some(env) = env {
+            self.interact_step(look, world, env, out);
         }
 
         // 1. player_input when the held keys change (raw keys, as pressed).
@@ -637,6 +708,7 @@ pub fn input_bits(i: &InputState) -> u8 {
     f
 }
 
+pub mod interact;
 pub mod script;
 #[cfg(test)]
 mod tests;
