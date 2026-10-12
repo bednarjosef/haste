@@ -762,9 +762,12 @@ mod tests {
         )
         .await
         .unwrap_err();
+        // The chain holds the context ("running datagen") and the OS error; which layer is
+        // outermost differs between platforms, so check the whole chain.
+        let chain = format!("{err:#}");
         assert!(
-            err.to_string().contains("running datagen") || err.to_string().contains("spawn"),
-            "got: {err}"
+            chain.contains("datagen") || chain.contains("spawn") || chain.contains("No such file"),
+            "got: {chain}"
         );
     }
 }
