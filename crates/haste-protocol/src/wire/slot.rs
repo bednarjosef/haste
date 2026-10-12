@@ -67,6 +67,18 @@ pub fn skip_patch(r: &mut Reader<'_>) -> DecodeResult<()> {
     Ok(())
 }
 
+/// Skips an exact component list (Prefixed Array of type id + data), as in
+/// `Trade Item`.
+pub fn skip_exact_components(r: &mut Reader<'_>) -> DecodeResult<()> {
+    let n = r.len_prefix(4096)?;
+    for _ in 0..n {
+        let ty = r.var_int()?;
+        let name = component_name(r, ty)?;
+        skip_component(r, name)?;
+    }
+    Ok(())
+}
+
 fn component_name<'a>(r: &Reader<'a>, ty: i32) -> DecodeResult<&'a str> {
     let tables = r.tables().ok_or_else(|| DecodeError::Invalid(format!("data component {ty} needs registry tables")))?;
     tables

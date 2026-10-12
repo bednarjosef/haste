@@ -16,25 +16,38 @@ pub use crate::packets::configuration::clientbound::{
 };
 use crate::metadata::Metadata;
 use crate::packets::{packet, packet_enum, Packet};
+use crate::wire::particle::Particle;
 use crate::wire::{
     Angle, ByteArray, Codec, DecodeError, DecodeResult, IdOr, List, LpVec3, Opt, ProfileProperty, RawNbt, Reader,
     Rest, SoundEvent, VarInt, VarLong, Wire, Writer,
 };
 
 packet_enum! {
-    /// Clientbound play packets. Packets without a struct here arrive as
-    /// `Unknown`.
+    /// Clientbound play packets, in `packets.json` id order. Ids without a
+    /// struct (none in 26.3) or failed decodes arrive as `Unknown`.
     ClientboundPlay {
-        BundleDelimiter, AddEntity, BlockEntityData, BlockUpdate, ChangeDifficulty, ChunkBatchFinished,
-        ChunkBatchStart, Commands, ContainerSetContent, ContainerSetSlot, CookieRequest, CustomPayload,
-        Disconnect, DisguisedChat, EntityPositionSync, ForgetLevelChunk, GameEvent, KeepAlive,
-        LevelChunkWithLight, LevelEvent, LightUpdate, Login, MoveEntityPos, MoveEntityPosRot, MoveEntityRot,
-        Ping, PlayerChat, PlayerInfoRemove, PlayerInfoUpdate, PlayerPosition, RecipeBookAdd, RecipeBookRemove,
-        RecipeBookSettings, RemoveEntities, Respawn, RotateHead, SectionBlocksUpdate, ServerData,
-        SetChunkCacheCenter, SetChunkCacheRadius, SetEntityData, SetEntityMotion, SetEquipment, SetExperience,
-        SetHealth, SetHeldSlot, SetSimulationDistance, SetTime, Sound, SoundEntity, StartConfiguration,
-        SystemChat, TabList, TeleportEntity, UpdateRecipes, UpdateTags, ClearDialog, CustomReportDetails,
-        PostEffects, ResourcePackPop, ResourcePackPush, ServerLinks, StoreCookie, Transfer,
+        BundleDelimiter, AddEntity, Animate, AwardStats, BlockChangedAck, BlockDestruction, BlockEntityData,
+        BlockEvent, BlockUpdate, BossEvent, ChangeDifficulty, ChunkBatchFinished, ChunkBatchStart, ChunksBiomes,
+        ClearTitles, CommandSuggestions, Commands, ContainerClose, ContainerSetContent, ContainerSetData,
+        ContainerSetSlot, CookieRequest, Cooldown, CustomChatCompletions, CustomPayload, DamageEvent, DebugBlockValue,
+        DebugChunkValue, DebugEntityValue, DebugEvent, DebugSample, DeleteChat, Disconnect, DisguisedChat,
+        EntityEvent, EntityPositionSync, Explode, AddTransientBlock, ForgetLevelChunk, GameEvent, GameRuleValues,
+        GameTestHighlightPos, MountScreenOpen, HurtAnimation, InitializeBorder, KeepAlive, LevelChunkWithLight,
+        LevelEvent, LevelParticles, LightUpdate, Login, LowDiskSpaceWarning, MapItemData, MerchantOffers,
+        MoveEntityPos, MoveEntityPosRot, MoveMinecartAlongTrack, MoveEntityRot, MoveVehicle, OpenBook, OpenScreen,
+        OpenSignEditor, Ping, PongResponse, PlaceGhostRecipe, PlayerAbilities, PlayerChat, PlayerCombatEnd,
+        PlayerCombatEnter, PlayerCombatKill, PlayerInfoRemove, PlayerInfoUpdate, PlayerLookAt, PlayerPosition,
+        PlayerRotation, RecipeBookAdd, RecipeBookRemove, RecipeBookSettings, RemoveEntities, RemoveMobEffect,
+        ResetScore, ResourcePackPop, ResourcePackPush, PostEffects, Respawn, RotateHead, SectionBlocksUpdate,
+        SelectAdvancementsTab, ServerData, SetActionBarText, SetBorderCenter, SetBorderLerpSize, SetBorderSize,
+        SetBorderWarningDelay, SetBorderWarningDistance, SetCamera, SetChunkCacheCenter, SetChunkCacheRadius,
+        SetCursorItem, SetDefaultSpawnPosition, SetDisplayObjective, SetEntityData, SetEntityLink, SetEntityMotion,
+        SetEquipment, SetExperience, SetHealth, SetHeldSlot, SetObjective, SetPassengers, SetPlayerInventory,
+        SetPlayerTeam, SetScore, SetSimulationDistance, SetSubtitleText, SetTime, SetTitleText, SetTitlesAnimation,
+        SoundEntity, Sound, StartConfiguration, StopSound, StoreCookie, SwingAnimation, SystemChat, TabList, TagQuery,
+        TakeItemEntity, TeleportEntity, TestInstanceBlockStatus, TickingState, TickingStep, Transfer,
+        UpdateAdvancements, UpdateAttributes, UpdateMobEffect, UpdateRecipes, UpdateTags, ProjectilePower,
+        CustomReportDetails, ServerLinks, Waypoint, ClearDialog, ShowDialog,
     }
 }
 
@@ -1268,6 +1281,1818 @@ packet! {
     UpdateRecipes = "minecraft:update_recipes" {
         /// Raw body.
         body: Bytes as Rest,
+    }
+}
+
+// ---------------------------------------------------------------- remaining clientbound packets
+
+packet! {
+    /// An entity animation (26.3 numbering: 0 leave bed, 1 critical hit,
+    /// 2 magic critical hit; arm swings moved to `swing_animation`).
+    Animate = "minecraft:animate" {
+        /// Entity.
+        entity_id: i32 as VarInt,
+        /// Animation id.
+        animation: u8,
+    }
+}
+
+/// One statistic in `award_stats`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Statistic {
+    /// Index into `minecraft:stat_type`.
+    pub category: i32,
+    /// Id in the category's registry.
+    pub stat: i32,
+    /// New value.
+    pub value: i32,
+}
+impl Wire for Statistic {
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        Ok(Self { category: r.var_int()?, stat: r.var_int()?, value: r.var_int()? })
+    }
+    fn write(&self, w: &mut Writer) {
+        w.var_int(self.category);
+        w.var_int(self.stat);
+        w.var_int(self.value);
+    }
+}
+
+packet! {
+    /// Statistics (answer to `client_command` request stats).
+    AwardStats = "minecraft:award_stats" {
+        /// Changed statistics.
+        stats: Vec<Statistic>,
+    }
+}
+
+packet! {
+    /// Acknowledges a client block change sequence.
+    BlockChangedAck = "minecraft:block_changed_ack" {
+        /// Sequence id.
+        sequence: i32 as VarInt,
+    }
+}
+
+packet! {
+    /// Block breaking progress overlay.
+    BlockDestruction = "minecraft:block_destruction" {
+        /// Breaking entity (any unique id).
+        entity_id: i32 as VarInt,
+        /// Block.
+        pos: BlockPos,
+        /// 0..9, other values remove.
+        stage: u8,
+    }
+}
+
+packet! {
+    /// Block action (chest lid, note block, piston).
+    BlockEvent = "minecraft:block_event" {
+        /// Block.
+        pos: BlockPos,
+        /// Action id.
+        action: u8,
+        /// Action parameter.
+        param: u8,
+        /// Index into `minecraft:block` (unused by vanilla clients).
+        block: i32 as VarInt,
+    }
+}
+
+/// The action of a `boss_event`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BossEventAction {
+    /// 0: add.
+    Add {
+        /// Title.
+        title: Component,
+        /// Health 0..1.
+        health: f32,
+        /// Colour id.
+        color: i32,
+        /// Division id.
+        division: i32,
+        /// 0x01 darken sky, 0x02 dragon bar, 0x04 fog.
+        flags: u8,
+    },
+    /// 1: remove.
+    Remove,
+    /// 2: health.
+    UpdateHealth(f32),
+    /// 3: title.
+    UpdateTitle(Component),
+    /// 4: style.
+    UpdateStyle {
+        /// Colour id.
+        color: i32,
+        /// Division id.
+        division: i32,
+    },
+    /// 5: flags.
+    UpdateFlags(u8),
+}
+
+/// Boss bar update.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BossEvent {
+    /// Bar id.
+    pub id: Uuid,
+    /// What changes.
+    pub action: BossEventAction,
+}
+impl Packet for BossEvent {
+    const NAME: &'static str = "minecraft:boss_event";
+    fn decode(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        let id = r.uuid()?;
+        let action = match r.var_int()? {
+            0 => BossEventAction::Add { title: r.component()?, health: r.f32()?, color: r.var_int()?, division: r.var_int()?, flags: r.u8()? },
+            1 => BossEventAction::Remove,
+            2 => BossEventAction::UpdateHealth(r.f32()?),
+            3 => BossEventAction::UpdateTitle(r.component()?),
+            4 => BossEventAction::UpdateStyle { color: r.var_int()?, division: r.var_int()? },
+            5 => BossEventAction::UpdateFlags(r.u8()?),
+            a => return Err(DecodeError::Invalid(format!("boss event action {a}"))),
+        };
+        Ok(Self { id, action })
+    }
+    fn encode(&self, w: &mut Writer) {
+        w.uuid(&self.id);
+        match &self.action {
+            BossEventAction::Add { title, health, color, division, flags } => {
+                w.var_int(0);
+                w.component(title);
+                w.f32(*health);
+                w.var_int(*color);
+                w.var_int(*division);
+                w.u8(*flags);
+            }
+            BossEventAction::Remove => w.var_int(1),
+            BossEventAction::UpdateHealth(h) => {
+                w.var_int(2);
+                w.f32(*h);
+            }
+            BossEventAction::UpdateTitle(t) => {
+                w.var_int(3);
+                w.component(t);
+            }
+            BossEventAction::UpdateStyle { color, division } => {
+                w.var_int(4);
+                w.var_int(*color);
+                w.var_int(*division);
+            }
+            BossEventAction::UpdateFlags(f) => {
+                w.var_int(5);
+                w.u8(*f);
+            }
+        }
+    }
+}
+
+/// Biome data of one chunk in `chunks_biomes`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChunkBiomes {
+    /// Chunk.
+    pub pos: ChunkPos,
+    /// Sections with only their biome paletted containers (opaque here).
+    pub data: Bytes,
+}
+impl Wire for ChunkBiomes {
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        Ok(Self { pos: PackedChunkPos::read(r)?, data: r.byte_array(crate::transport::MAX_PACKET_DATA_SIZE)? })
+    }
+    fn write(&self, w: &mut Writer) {
+        PackedChunkPos::write(&self.pos, w);
+        w.byte_array(&self.data);
+    }
+}
+
+packet! {
+    /// Biome updates for several chunks.
+    ChunksBiomes = "minecraft:chunks_biomes" {
+        /// Per chunk.
+        chunks: Vec<ChunkBiomes>,
+    }
+}
+
+packet! {
+    /// Clears the title.
+    ClearTitles = "minecraft:clear_titles" {
+        /// Also reset the title times.
+        reset: bool,
+    }
+}
+
+/// One tab-completion match.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SuggestionMatch {
+    /// Text to insert.
+    pub text: String,
+    /// Tooltip.
+    pub tooltip: Option<Component>,
+}
+impl Wire for SuggestionMatch {
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        Ok(Self { text: r.string()?, tooltip: r.read()? })
+    }
+    fn write(&self, w: &mut Writer) {
+        w.string(&self.text);
+        w.write(&self.tooltip);
+    }
+}
+
+packet! {
+    /// Command tab-completion answer.
+    CommandSuggestions = "minecraft:command_suggestions" {
+        /// Transaction id.
+        id: i32 as VarInt,
+        /// Start of the replaced text.
+        start: i32 as VarInt,
+        /// Length of the replaced text.
+        length: i32 as VarInt,
+        /// Matches.
+        matches: Vec<SuggestionMatch>,
+    }
+}
+
+packet! {
+    /// Forcibly closes a container.
+    ContainerClose = "minecraft:container_close" {
+        /// Window id.
+        window_id: i32 as VarInt,
+    }
+}
+
+packet! {
+    /// A container property (furnace progress, enchantment seeds, ...).
+    ContainerSetData = "minecraft:container_set_data" {
+        /// Window id.
+        window_id: i32 as VarInt,
+        /// Property index.
+        property: i16,
+        /// Value.
+        value: i16,
+    }
+}
+
+packet! {
+    /// Item cooldown.
+    Cooldown = "minecraft:cooldown" {
+        /// Item id or `use_cooldown` group.
+        group: Identifier,
+        /// Ticks, 0 clears.
+        ticks: i32 as VarInt,
+    }
+}
+
+packet! {
+    /// Custom chat completions (unused by vanilla servers).
+    CustomChatCompletions = "minecraft:custom_chat_completions" {
+        /// 0 add, 1 remove, 2 set.
+        action: i32 as VarInt,
+        /// Entries.
+        entries: Vec<String>,
+    }
+}
+
+packet! {
+    /// An entity took damage.
+    DamageEvent = "minecraft:damage_event" {
+        /// Damaged entity.
+        entity_id: i32 as VarInt,
+        /// Index into `minecraft:damage_type`.
+        source_type: i32 as VarInt,
+        /// Responsible entity id + 1, 0 for none.
+        source_cause: i32 as VarInt,
+        /// Direct entity id + 1, 0 for none.
+        source_direct: i32 as VarInt,
+        /// Source position (`/damage`).
+        source_pos: Option<DVec3>,
+    }
+}
+
+packet! {
+    /// Debug subscription value for a block (operators only). The update
+    /// data is kept raw.
+    DebugBlockValue = "minecraft:debug/block_value" {
+        /// Block.
+        pos: BlockPos,
+        /// `Debug Subscription Update`, raw.
+        update: Bytes as Rest,
+    }
+}
+
+packet! {
+    /// Debug subscription value for a chunk (operators only). Raw update.
+    DebugChunkValue = "minecraft:debug/chunk_value" {
+        /// Chunk.
+        pos: ChunkPos as PackedChunkPos,
+        /// `Debug Subscription Update`, raw.
+        update: Bytes as Rest,
+    }
+}
+
+packet! {
+    /// Debug subscription value for an entity (operators only). Raw update.
+    DebugEntityValue = "minecraft:debug/entity_value" {
+        /// Entity.
+        entity_id: i32 as VarInt,
+        /// `Debug Subscription Update`, raw.
+        update: Bytes as Rest,
+    }
+}
+
+packet! {
+    /// Debug event (operators only), raw.
+    DebugEvent = "minecraft:debug/event" {
+        /// `Debug Subscription Event`, raw.
+        event: Bytes as Rest,
+    }
+}
+
+packet! {
+    /// Debug sample (tick times) for operators.
+    DebugSample = "minecraft:debug_sample" {
+        /// Samples.
+        sample: Vec<i64>,
+        /// 0 tick time.
+        sample_type: i32 as VarInt,
+    }
+}
+
+/// Removes a signed chat message.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeleteChat {
+    /// The message (cache id or full signature).
+    pub message: PreviousMessage,
+}
+impl Packet for DeleteChat {
+    const NAME: &'static str = "minecraft:delete_chat";
+    fn decode(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        let id = r.var_int()?;
+        let message = if id == 0 { PreviousMessage::Signature(Bytes::copy_from_slice(r.take(256)?)) } else { PreviousMessage::Id(id - 1) };
+        Ok(Self { message })
+    }
+    fn encode(&self, w: &mut Writer) {
+        match &self.message {
+            PreviousMessage::Id(i) => w.var_int(i + 1),
+            PreviousMessage::Signature(s) => {
+                w.var_int(0);
+                w.bytes(s);
+            }
+        }
+    }
+}
+
+packet! {
+    /// Entity status (animations, effects; meaning per entity type).
+    EntityEvent = "minecraft:entity_event" {
+        /// Entity.
+        entity_id: i32,
+        /// Status id.
+        status: i8,
+    }
+}
+
+/// A weighted block particle alternative of an explosion.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExplosionParticle {
+    /// Particle.
+    pub particle: Particle,
+    /// Scaling.
+    pub scaling: f32,
+    /// Speed.
+    pub speed: f32,
+    /// Weight.
+    pub weight: i32,
+}
+impl Wire for ExplosionParticle {
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        Ok(Self { particle: r.read()?, scaling: r.f32()?, speed: r.f32()?, weight: r.var_int()? })
+    }
+    fn write(&self, w: &mut Writer) {
+        w.write(&self.particle);
+        w.f32(self.scaling);
+        w.f32(self.speed);
+        w.var_int(self.weight);
+    }
+}
+
+packet! {
+    /// An explosion.
+    Explode = "minecraft:explode" {
+        /// Centre.
+        center: DVec3,
+        /// Radius.
+        radius: f32,
+        /// Number of affected blocks.
+        block_count: i32,
+        /// Velocity added to the local player.
+        player_knockback: Option<DVec3>,
+        /// Explosion particle.
+        particle: Particle,
+        /// Sound.
+        sound: IdOr<SoundEvent>,
+        /// Block particle alternatives.
+        block_particles: Vec<ExplosionParticle>,
+        /// Play the sound (26.3).
+        play_sound: bool,
+    }
+}
+
+packet! {
+    /// A block state shown for a limited time.
+    AddTransientBlock = "minecraft:add_transient_block" {
+        /// Block.
+        pos: BlockPos,
+        /// Block state.
+        state: i32 as VarInt,
+    }
+}
+
+/// A game rule value in `game_rule_values`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GameRuleValue {
+    /// Rule.
+    pub name: Identifier,
+    /// Value as text.
+    pub value: String,
+}
+impl Wire for GameRuleValue {
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        Ok(Self { name: r.identifier()?, value: r.string()? })
+    }
+    fn write(&self, w: &mut Writer) {
+        w.identifier(&self.name);
+        w.string(&self.value);
+    }
+}
+
+packet! {
+    /// Game rule values (answer to `client_command` 2).
+    GameRuleValues = "minecraft:game_rule_values" {
+        /// Rules.
+        rules: Vec<GameRuleValue>,
+    }
+}
+
+packet! {
+    /// Game test highlight.
+    GameTestHighlightPos = "minecraft:game_test_highlight_pos" {
+        /// Absolute position.
+        absolute: BlockPos,
+        /// Relative position.
+        relative: BlockPos,
+    }
+}
+
+packet! {
+    /// Opens a mount (horse) inventory.
+    MountScreenOpen = "minecraft:mount_screen_open" {
+        /// Window id.
+        window_id: i32 as VarInt,
+        /// Inventory columns.
+        columns: i32 as VarInt,
+        /// Owner entity.
+        entity_id: i32,
+    }
+}
+
+packet! {
+    /// Hurt bobbing animation.
+    HurtAnimation = "minecraft:hurt_animation" {
+        /// Entity.
+        entity_id: i32 as VarInt,
+        /// Damage direction yaw.
+        yaw: f32,
+    }
+}
+
+packet! {
+    /// World border initialisation.
+    InitializeBorder = "minecraft:initialize_border" {
+        /// Centre x.
+        x: f64,
+        /// Centre z.
+        z: f64,
+        /// Current diameter.
+        old_diameter: f64,
+        /// Target diameter.
+        new_diameter: f64,
+        /// Milliseconds to reach the target.
+        speed: i64 as VarLong,
+        /// Portal teleport boundary.
+        portal_boundary: i32 as VarInt,
+        /// Warning distance in blocks.
+        warning_blocks: i32 as VarInt,
+        /// Warning time in seconds.
+        warning_time: i32 as VarInt,
+    }
+}
+
+packet! {
+    /// Particles.
+    LevelParticles = "minecraft:level_particles" {
+        /// Particle (type and data).
+        particle: Particle,
+        /// Override the particle limiter.
+        override_limiter: bool,
+        /// Always visible.
+        always_visible: bool,
+        /// Position.
+        pos: DVec3,
+        /// Offset x.
+        offset_x: f32,
+        /// Offset y.
+        offset_y: f32,
+        /// Offset z.
+        offset_z: f32,
+        /// Max speed x.
+        max_speed_x: f32,
+        /// Max speed y.
+        max_speed_y: f32,
+        /// Max speed z.
+        max_speed_z: f32,
+        /// Count.
+        count: i32 as VarInt,
+        /// 0 default, 1 alternative, 2 alternative with speed.
+        randomization: i32 as VarInt,
+    }
+}
+
+packet! {
+    /// Low disk space warning.
+    LowDiskSpaceWarning = "minecraft:low_disk_space_warning" {}
+}
+
+/// A map decoration icon.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MapIcon {
+    /// Icon type.
+    pub kind: i32,
+    /// X (-128..127).
+    pub x: i8,
+    /// Z.
+    pub z: i8,
+    /// Direction 0..15.
+    pub direction: i8,
+    /// Display name.
+    pub name: Option<Component>,
+}
+impl Wire for MapIcon {
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        Ok(Self { kind: r.var_int()?, x: r.i8()?, z: r.i8()?, direction: r.i8()?, name: r.read()? })
+    }
+    fn write(&self, w: &mut Writer) {
+        w.var_int(self.kind);
+        w.i8(self.x);
+        w.i8(self.z);
+        w.i8(self.direction);
+        w.write(&self.name);
+    }
+}
+
+/// A rectangle of map colours.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MapPatch {
+    /// Columns (> 0).
+    pub columns: u8,
+    /// Rows.
+    pub rows: u8,
+    /// X offset.
+    pub x: u8,
+    /// Z offset.
+    pub z: u8,
+    /// Colours.
+    pub data: Bytes,
+}
+
+/// Map item update.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MapItemData {
+    /// Map id.
+    pub map_id: i32,
+    /// Scale 0..4.
+    pub scale: i8,
+    /// Locked.
+    pub locked: bool,
+    /// Icons, if updated.
+    pub icons: Option<Vec<MapIcon>>,
+    /// Colour patch, if any.
+    pub patch: Option<MapPatch>,
+}
+impl Packet for MapItemData {
+    const NAME: &'static str = "minecraft:map_item_data";
+    fn decode(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        let map_id = r.var_int()?;
+        let scale = r.i8()?;
+        let locked = r.bool()?;
+        let icons = r.read()?;
+        let columns = r.u8()?;
+        let patch = if columns > 0 {
+            Some(MapPatch { columns, rows: r.u8()?, x: r.u8()?, z: r.u8()?, data: r.byte_array(128 * 128)? })
+        } else {
+            None
+        };
+        Ok(Self { map_id, scale, locked, icons, patch })
+    }
+    fn encode(&self, w: &mut Writer) {
+        w.var_int(self.map_id);
+        w.i8(self.scale);
+        w.bool(self.locked);
+        w.write(&self.icons);
+        match &self.patch {
+            Some(p) => {
+                w.u8(p.columns);
+                w.u8(p.rows);
+                w.u8(p.x);
+                w.u8(p.z);
+                w.byte_array(&p.data);
+            }
+            None => w.u8(0),
+        }
+    }
+}
+
+/// A trade cost item (`Trade Item`): item, count and an exact component
+/// list kept raw (Prefixed Array of type + data).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TradeItem {
+    /// Index into `minecraft:item`.
+    pub item: i32,
+    /// Count.
+    pub count: i32,
+    /// Raw component list including its length prefix.
+    pub components_raw: Bytes,
+}
+impl Wire for TradeItem {
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        let item = r.var_int()?;
+        let count = r.var_int()?;
+        let start = r.peek_rest();
+        crate::wire::slot::skip_exact_components(r)?;
+        let used = start.len() - r.remaining();
+        Ok(Self { item, count, components_raw: r.to_bytes(&start[..used]) })
+    }
+    fn write(&self, w: &mut Writer) {
+        w.var_int(self.item);
+        w.var_int(self.count);
+        if self.components_raw.is_empty() {
+            w.var_int(0);
+        } else {
+            w.bytes(&self.components_raw);
+        }
+    }
+}
+
+/// One villager trade.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MerchantOffer {
+    /// First input.
+    pub input1: TradeItem,
+    /// Output.
+    pub output: ItemStackData,
+    /// Second input.
+    pub input2: Option<TradeItem>,
+    /// Disabled.
+    pub disabled: bool,
+    /// Uses so far.
+    pub uses: i32,
+    /// Max uses.
+    pub max_uses: i32,
+    /// Villager XP per trade.
+    pub xp: i32,
+    /// Special price.
+    pub special_price: i32,
+    /// Price multiplier.
+    pub price_multiplier: f32,
+    /// Demand.
+    pub demand: i32,
+}
+impl Wire for MerchantOffer {
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        Ok(Self {
+            input1: r.read()?,
+            output: r.read()?,
+            input2: r.read()?,
+            disabled: r.bool()?,
+            uses: r.i32()?,
+            max_uses: r.i32()?,
+            xp: r.i32()?,
+            special_price: r.i32()?,
+            price_multiplier: r.f32()?,
+            demand: r.i32()?,
+        })
+    }
+    fn write(&self, w: &mut Writer) {
+        w.write(&self.input1);
+        w.write(&self.output);
+        w.write(&self.input2);
+        w.bool(self.disabled);
+        w.i32(self.uses);
+        w.i32(self.max_uses);
+        w.i32(self.xp);
+        w.i32(self.special_price);
+        w.f32(self.price_multiplier);
+        w.i32(self.demand);
+    }
+}
+
+packet! {
+    /// Villager trades.
+    MerchantOffers = "minecraft:merchant_offers" {
+        /// Window id.
+        window_id: i32 as VarInt,
+        /// Trades.
+        offers: Vec<MerchantOffer>,
+        /// Villager level.
+        level: i32 as VarInt,
+        /// Villager experience.
+        experience: i32 as VarInt,
+        /// Regular villager (not wandering trader).
+        regular_villager: bool,
+        /// Can restock.
+        can_restock: bool,
+    }
+}
+
+/// One step of `move_minecart_along_track`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MinecartStep {
+    /// Position.
+    pub pos: DVec3,
+    /// Velocity.
+    pub velocity: DVec3,
+    /// Yaw.
+    pub yaw: f32,
+    /// Pitch.
+    pub pitch: f32,
+    /// Weight.
+    pub weight: f32,
+}
+impl Wire for MinecartStep {
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        Ok(Self { pos: r.read()?, velocity: r.read()?, yaw: r.angle()?, pitch: r.angle()?, weight: r.f32()? })
+    }
+    fn write(&self, w: &mut Writer) {
+        w.write(&self.pos);
+        w.write(&self.velocity);
+        w.angle(self.yaw);
+        w.angle(self.pitch);
+        w.f32(self.weight);
+    }
+}
+
+packet! {
+    /// Minecart movement along a track (new minecart physics).
+    MoveMinecartAlongTrack = "minecraft:move_minecart_along_track" {
+        /// Minecart.
+        entity_id: i32 as VarInt,
+        /// Steps.
+        steps: Vec<MinecartStep>,
+    }
+}
+
+packet! {
+    /// Teleports the client-controlled vehicle.
+    MoveVehicle = "minecraft:move_vehicle" {
+        /// Position.
+        pos: DVec3,
+        /// Yaw.
+        yaw: f32,
+        /// Pitch.
+        pitch: f32,
+    }
+}
+
+packet! {
+    /// Opens a written book.
+    OpenBook = "minecraft:open_book" {
+        /// 0 main hand, 1 off hand.
+        hand: i32 as VarInt,
+    }
+}
+
+packet! {
+    /// Opens a container screen.
+    OpenScreen = "minecraft:open_screen" {
+        /// Window id.
+        window_id: i32 as VarInt,
+        /// Index into `minecraft:menu`.
+        kind: i32 as VarInt,
+        /// Title.
+        title: Component,
+    }
+}
+
+packet! {
+    /// Opens the sign editor.
+    OpenSignEditor = "minecraft:open_sign_editor" {
+        /// Sign.
+        pos: BlockPos,
+        /// 0 back, 1 front.
+        text_slot: i32 as VarInt,
+    }
+}
+
+packet! {
+    /// Answer to `ping_request`.
+    PongResponse = "minecraft:pong_response" {
+        /// The payload sent.
+        payload: i64,
+    }
+}
+
+packet! {
+    /// Ghost recipe in a crafting grid. The `Recipe Display` is kept raw.
+    PlaceGhostRecipe = "minecraft:place_ghost_recipe" {
+        /// Window id.
+        window_id: i32 as VarInt,
+        /// Recipe display, raw.
+        display: Bytes as Rest,
+    }
+}
+
+packet! {
+    /// Player abilities.
+    PlayerAbilities = "minecraft:player_abilities" {
+        /// 0x01 invulnerable, 0x02 flying, 0x04 may fly, 0x08 instant build.
+        flags: i8,
+        /// Flying speed.
+        flying_speed: f32,
+        /// FOV modifier.
+        fov_modifier: f32,
+    }
+}
+
+packet! {
+    /// End of combat (unused by vanilla clients).
+    PlayerCombatEnd = "minecraft:player_combat_end" {
+        /// Duration in ticks.
+        duration: i32 as VarInt,
+    }
+}
+
+packet! {
+    /// Start of combat (unused by vanilla clients).
+    PlayerCombatEnter = "minecraft:player_combat_enter" {}
+}
+
+packet! {
+    /// The player died: death screen.
+    PlayerCombatKill = "minecraft:player_combat_kill" {
+        /// Player entity id.
+        player_id: i32 as VarInt,
+        /// Death message.
+        message: Component,
+    }
+}
+
+/// Entity target of `player_look_at`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LookAtEntity {
+    /// Entity.
+    pub entity_id: i32,
+    /// 0 feet, 1 eyes.
+    pub anchor: i32,
+}
+impl Wire for LookAtEntity {
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        Ok(Self { entity_id: r.var_int()?, anchor: r.var_int()? })
+    }
+    fn write(&self, w: &mut Writer) {
+        w.var_int(self.entity_id);
+        w.var_int(self.anchor);
+    }
+}
+
+packet! {
+    /// Rotates the player to face a point or entity.
+    PlayerLookAt = "minecraft:player_look_at" {
+        /// 0 feet, 1 eyes.
+        from_anchor: i32 as VarInt,
+        /// Target point.
+        target: DVec3,
+        /// Entity target.
+        entity: Option<LookAtEntity>,
+    }
+}
+
+packet! {
+    /// Sets the player's rotation.
+    PlayerRotation = "minecraft:player_rotation" {
+        /// Yaw.
+        yaw: f32,
+        /// Yaw is relative.
+        relative_yaw: bool,
+        /// Pitch.
+        pitch: f32,
+        /// Pitch is relative.
+        relative_pitch: bool,
+    }
+}
+
+packet! {
+    /// Removes a mob effect.
+    RemoveMobEffect = "minecraft:remove_mob_effect" {
+        /// Entity.
+        entity_id: i32 as VarInt,
+        /// Index into `minecraft:mob_effect`.
+        effect: i32 as VarInt,
+    }
+}
+
+packet! {
+    /// Removes a score.
+    ResetScore = "minecraft:reset_score" {
+        /// Score holder.
+        owner: String,
+        /// Objective, or all.
+        objective: Option<String>,
+    }
+}
+
+packet! {
+    /// Switches the advancements tab.
+    SelectAdvancementsTab = "minecraft:select_advancements_tab" {
+        /// Tab root advancement.
+        tab: Option<Identifier>,
+    }
+}
+
+packet! {
+    /// Action bar text.
+    SetActionBarText = "minecraft:set_action_bar_text" {
+        /// Text.
+        text: Component,
+    }
+}
+
+packet! {
+    /// World border centre.
+    SetBorderCenter = "minecraft:set_border_center" {
+        /// X.
+        x: f64,
+        /// Z.
+        z: f64,
+    }
+}
+
+packet! {
+    /// World border resize over time.
+    SetBorderLerpSize = "minecraft:set_border_lerp_size" {
+        /// Current diameter.
+        old_diameter: f64,
+        /// Target diameter.
+        new_diameter: f64,
+        /// Milliseconds.
+        speed: i64 as VarLong,
+    }
+}
+
+packet! {
+    /// World border size.
+    SetBorderSize = "minecraft:set_border_size" {
+        /// Diameter.
+        diameter: f64,
+    }
+}
+
+packet! {
+    /// World border warning time.
+    SetBorderWarningDelay = "minecraft:set_border_warning_delay" {
+        /// Seconds.
+        warning_time: i32 as VarInt,
+    }
+}
+
+packet! {
+    /// World border warning distance.
+    SetBorderWarningDistance = "minecraft:set_border_warning_distance" {
+        /// Blocks.
+        warning_blocks: i32 as VarInt,
+    }
+}
+
+packet! {
+    /// Camera entity (spectating).
+    SetCamera = "minecraft:set_camera" {
+        /// Entity.
+        camera_id: i32 as VarInt,
+    }
+}
+
+packet! {
+    /// Item on the cursor.
+    SetCursorItem = "minecraft:set_cursor_item" {
+        /// Item.
+        item: ItemStackData,
+    }
+}
+
+packet! {
+    /// World spawn point.
+    SetDefaultSpawnPosition = "minecraft:set_default_spawn_position" {
+        /// Dimension.
+        dimension: Identifier,
+        /// Position.
+        pos: BlockPos,
+        /// Yaw.
+        yaw: f32,
+        /// Pitch.
+        pitch: f32,
+    }
+}
+
+packet! {
+    /// Shows a scoreboard objective in a display slot.
+    SetDisplayObjective = "minecraft:set_display_objective" {
+        /// 0 list, 1 sidebar, 2 below name, 3..18 team sidebars.
+        position: i32 as VarInt,
+        /// Objective name.
+        name: String,
+    }
+}
+
+packet! {
+    /// Leash link.
+    SetEntityLink = "minecraft:set_entity_link" {
+        /// Leashed entity.
+        attached: i32,
+        /// Holder, -1 to detach.
+        holder: i32,
+    }
+}
+
+/// Score number format.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NumberFormat {
+    /// 0: show nothing.
+    Blank,
+    /// 1: styled, style compound as raw NBT.
+    Styled(Bytes),
+    /// 2: fixed text.
+    Fixed(Component),
+}
+impl Wire for NumberFormat {
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        Ok(match r.var_int()? {
+            0 => NumberFormat::Blank,
+            1 => NumberFormat::Styled(r.nbt_raw()?),
+            2 => NumberFormat::Fixed(r.component()?),
+            t => return Err(DecodeError::Invalid(format!("number format {t}"))),
+        })
+    }
+    fn write(&self, w: &mut Writer) {
+        match self {
+            NumberFormat::Blank => w.var_int(0),
+            NumberFormat::Styled(s) => {
+                w.var_int(1);
+                w.bytes(s);
+            }
+            NumberFormat::Fixed(c) => {
+                w.var_int(2);
+                w.component(c);
+            }
+        }
+    }
+}
+
+/// Objective display data (modes 0 and 2 of `set_objective`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObjectiveDisplay {
+    /// Display text.
+    pub value: Component,
+    /// 0 integer, 1 hearts.
+    pub render_type: i32,
+    /// Number format.
+    pub number_format: Option<NumberFormat>,
+}
+
+/// Creates, removes or updates a scoreboard objective.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SetObjective {
+    /// Objective name.
+    pub name: String,
+    /// 0 create, 1 remove, 2 update.
+    pub mode: i8,
+    /// Present for modes 0 and 2.
+    pub display: Option<ObjectiveDisplay>,
+}
+impl Packet for SetObjective {
+    const NAME: &'static str = "minecraft:set_objective";
+    fn decode(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        let name = r.string()?;
+        let mode = r.i8()?;
+        let display = if mode == 0 || mode == 2 {
+            Some(ObjectiveDisplay { value: r.component()?, render_type: r.var_int()?, number_format: r.read()? })
+        } else {
+            None
+        };
+        Ok(Self { name, mode, display })
+    }
+    fn encode(&self, w: &mut Writer) {
+        w.string(&self.name);
+        w.i8(self.mode);
+        if let Some(d) = &self.display {
+            w.component(&d.value);
+            w.var_int(d.render_type);
+            w.write(&d.number_format);
+        }
+    }
+}
+
+packet! {
+    /// Passengers of a vehicle.
+    SetPassengers = "minecraft:set_passengers" {
+        /// Vehicle.
+        vehicle: i32 as VarInt,
+        /// Passenger ids.
+        passengers: Vec<i32> as List<VarInt>,
+    }
+}
+
+packet! {
+    /// Sets a player inventory slot directly.
+    SetPlayerInventory = "minecraft:set_player_inventory" {
+        /// Inventory slot index.
+        slot: i32 as VarInt,
+        /// Item.
+        item: ItemStackData,
+    }
+}
+
+/// Team display parameters (methods 0 and 2 of `set_player_team`).
+///
+/// Field order follows the 26.3 wiki; the colour is a Prefixed Optional
+/// VarInt as Pumpkin writes it for 26.2+ (the wiki lists a plain VarInt):
+/// uncertain, see NOTES.md.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TeamParameters {
+    /// Display name.
+    pub display_name: Component,
+    /// Prefix.
+    pub prefix: Component,
+    /// Suffix.
+    pub suffix: Component,
+    /// 0 always, 1 never, 2 hide for other teams, 3 hide for own team.
+    pub name_tag_visibility: i32,
+    /// 0 always, 1 never, 2 push other teams, 3 push own team.
+    pub collision_rule: i32,
+    /// Formatting colour id, if any.
+    pub color: Option<i32>,
+    /// 0x01 friendly fire, 0x02 see invisible teammates.
+    pub flags: i8,
+}
+impl Wire for TeamParameters {
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        Ok(Self {
+            display_name: r.component()?,
+            prefix: r.component()?,
+            suffix: r.component()?,
+            name_tag_visibility: r.var_int()?,
+            collision_rule: r.var_int()?,
+            color: r.option(|r| r.var_int())?,
+            flags: r.i8()?,
+        })
+    }
+    fn write(&self, w: &mut Writer) {
+        w.component(&self.display_name);
+        w.component(&self.prefix);
+        w.component(&self.suffix);
+        w.var_int(self.name_tag_visibility);
+        w.var_int(self.collision_rule);
+        w.option(&self.color, |w, c| w.var_int(*c));
+        w.i8(self.flags);
+    }
+}
+
+/// Team update.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SetPlayerTeam {
+    /// Team name.
+    pub name: String,
+    /// 0 create, 1 remove, 2 update, 3 add entities, 4 remove entities.
+    pub method: i8,
+    /// Parameters for methods 0 and 2.
+    pub parameters: Option<TeamParameters>,
+    /// Entities for methods 0, 3 and 4.
+    pub entities: Vec<String>,
+}
+impl Packet for SetPlayerTeam {
+    const NAME: &'static str = "minecraft:set_player_team";
+    fn decode(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        let name = r.string()?;
+        let method = r.i8()?;
+        let parameters = if method == 0 || method == 2 { Some(r.read()?) } else { None };
+        let entities = if matches!(method, 0 | 3 | 4) { r.read()? } else { Vec::new() };
+        Ok(Self { name, method, parameters, entities })
+    }
+    fn encode(&self, w: &mut Writer) {
+        w.string(&self.name);
+        w.i8(self.method);
+        if let Some(p) = &self.parameters {
+            w.write(p);
+        }
+        if matches!(self.method, 0 | 3 | 4) {
+            w.write(&self.entities);
+        }
+    }
+}
+
+packet! {
+    /// Sets a score.
+    SetScore = "minecraft:set_score" {
+        /// Score holder.
+        owner: String,
+        /// Objective.
+        objective: String,
+        /// Value.
+        value: i32 as VarInt,
+        /// Display name.
+        display_name: Option<Component>,
+        /// Number format.
+        number_format: Option<NumberFormat>,
+    }
+}
+
+packet! {
+    /// Subtitle.
+    SetSubtitleText = "minecraft:set_subtitle_text" {
+        /// Text.
+        text: Component,
+    }
+}
+
+packet! {
+    /// Title.
+    SetTitleText = "minecraft:set_title_text" {
+        /// Text.
+        text: Component,
+    }
+}
+
+packet! {
+    /// Title fade timings.
+    SetTitlesAnimation = "minecraft:set_titles_animation" {
+        /// Fade in ticks.
+        fade_in: i32,
+        /// Stay ticks.
+        stay: i32,
+        /// Fade out ticks.
+        fade_out: i32,
+    }
+}
+
+/// Stops sounds by category and/or name.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StopSound {
+    /// Sound category, or all.
+    pub source: Option<i32>,
+    /// Sound name, or all.
+    pub sound: Option<Identifier>,
+}
+impl Packet for StopSound {
+    const NAME: &'static str = "minecraft:stop_sound";
+    fn decode(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        let flags = r.u8()?;
+        let source = if flags & 1 != 0 { Some(r.var_int()?) } else { None };
+        let sound = if flags & 2 != 0 { Some(r.identifier()?) } else { None };
+        Ok(Self { source, sound })
+    }
+    fn encode(&self, w: &mut Writer) {
+        w.u8(self.source.is_some() as u8 | ((self.sound.is_some() as u8) << 1));
+        if let Some(s) = self.source {
+            w.var_int(s);
+        }
+        if let Some(s) = &self.sound {
+            w.identifier(s);
+        }
+    }
+}
+
+packet! {
+    /// An entity swings a hand (26.3).
+    SwingAnimation = "minecraft:swing_animation" {
+        /// Entity.
+        entity_id: i32 as VarInt,
+        /// 0 main hand, 1 off hand.
+        hand: i32 as VarInt,
+        /// 0 none, 1 whack, 2 stab.
+        animation: i32 as VarInt,
+        /// Duration in ticks.
+        duration: i32 as VarInt,
+    }
+}
+
+packet! {
+    /// NBT query answer.
+    TagQuery = "minecraft:tag_query" {
+        /// Transaction id.
+        transaction_id: i32 as VarInt,
+        /// NBT (raw; may be TAG_End).
+        nbt: Bytes as RawNbt,
+    }
+}
+
+packet! {
+    /// Item pickup animation.
+    TakeItemEntity = "minecraft:take_item_entity" {
+        /// Picked up entity.
+        collected: i32 as VarInt,
+        /// Collector.
+        collector: i32 as VarInt,
+        /// Count.
+        count: i32 as VarInt,
+    }
+}
+
+packet! {
+    /// Test instance block screen status. Kept raw: the wiki (status text,
+    /// optional size) and Pumpkin (position, status id, optional message)
+    /// disagree.
+    TestInstanceBlockStatus = "minecraft:test_instance_block_status" {
+        /// Raw body.
+        body: Bytes as Rest,
+    }
+}
+
+packet! {
+    /// Tick rate and freeze state.
+    TickingState = "minecraft:ticking_state" {
+        /// Ticks per second.
+        tick_rate: f32,
+        /// Frozen.
+        frozen: bool,
+    }
+}
+
+packet! {
+    /// Steps a frozen game.
+    TickingStep = "minecraft:ticking_step" {
+        /// Steps.
+        steps: i32 as VarInt,
+    }
+}
+
+/// Advancement display data.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdvancementDisplay {
+    /// Title.
+    pub title: Component,
+    /// Description.
+    pub description: Component,
+    /// Icon.
+    pub icon: ItemStackData,
+    /// 0 task, 1 challenge, 2 goal.
+    pub frame: i32,
+    /// 0x01 background, 0x02 show toast, 0x04 hidden.
+    pub flags: i32,
+    /// Background texture (present when flags & 1).
+    pub background: Option<Identifier>,
+}
+impl Wire for AdvancementDisplay {
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        let title = r.component()?;
+        let description = r.component()?;
+        let icon = r.read()?;
+        let frame = r.var_int()?;
+        let flags = r.i32()?;
+        let background = if flags & 1 != 0 { Some(r.identifier()?) } else { None };
+        Ok(Self { title, description, icon, frame, flags, background })
+    }
+    fn write(&self, w: &mut Writer) {
+        w.component(&self.title);
+        w.component(&self.description);
+        w.write(&self.icon);
+        w.var_int(self.frame);
+        w.i32(self.flags);
+        if let Some(b) = &self.background {
+            w.identifier(b);
+        }
+    }
+}
+
+/// One advancement.
+///
+/// 26.3 layout as Pumpkin writes it: the tree position (x, y) follows the
+/// telemetry flag for every advancement instead of being inside the display
+/// (the wiki still shows it in the display): uncertain, see NOTES.md.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Advancement {
+    /// Parent.
+    pub parent: Option<Identifier>,
+    /// Display.
+    pub display: Option<AdvancementDisplay>,
+    /// Requirements (AND of ORs of criteria).
+    pub requirements: Vec<Vec<String>>,
+    /// Sends telemetry.
+    pub telemetry: bool,
+    /// Tree x.
+    pub x: f32,
+    /// Tree y.
+    pub y: f32,
+}
+impl Wire for Advancement {
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        Ok(Self {
+            parent: r.read()?,
+            display: r.read()?,
+            requirements: r.read()?,
+            telemetry: r.bool()?,
+            x: r.f32()?,
+            y: r.f32()?,
+        })
+    }
+    fn write(&self, w: &mut Writer) {
+        w.write(&self.parent);
+        w.write(&self.display);
+        w.write(&self.requirements);
+        w.bool(self.telemetry);
+        w.f32(self.x);
+        w.f32(self.y);
+    }
+}
+
+/// Progress of one criterion.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CriterionProgress {
+    /// Criterion.
+    pub criterion: Identifier,
+    /// When achieved (ms since epoch).
+    pub achieved_at: Option<i64>,
+}
+impl Wire for CriterionProgress {
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        Ok(Self { criterion: r.identifier()?, achieved_at: r.read()? })
+    }
+    fn write(&self, w: &mut Writer) {
+        w.identifier(&self.criterion);
+        w.write(&self.achieved_at);
+    }
+}
+
+/// Advancement entry in `update_advancements`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdvancementEntry {
+    /// Id.
+    pub id: Identifier,
+    /// Advancement.
+    pub advancement: Advancement,
+}
+impl Wire for AdvancementEntry {
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        Ok(Self { id: r.identifier()?, advancement: r.read()? })
+    }
+    fn write(&self, w: &mut Writer) {
+        w.identifier(&self.id);
+        w.write(&self.advancement);
+    }
+}
+
+/// Progress entry in `update_advancements`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdvancementProgress {
+    /// Advancement id.
+    pub id: Identifier,
+    /// Criteria.
+    pub criteria: Vec<CriterionProgress>,
+}
+impl Wire for AdvancementProgress {
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        Ok(Self { id: r.identifier()?, criteria: r.read()? })
+    }
+    fn write(&self, w: &mut Writer) {
+        w.identifier(&self.id);
+        w.write(&self.criteria);
+    }
+}
+
+packet! {
+    /// Advancements.
+    UpdateAdvancements = "minecraft:update_advancements" {
+        /// Reset first.
+        reset: bool,
+        /// Added advancements.
+        added: Vec<AdvancementEntry>,
+        /// Removed advancement ids.
+        removed: Vec<Identifier>,
+        /// Progress.
+        progress: Vec<AdvancementProgress>,
+        /// Show the advancements toast/screen.
+        show_advancements: bool,
+    }
+}
+
+/// An attribute modifier.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AttributeModifier {
+    /// Modifier id.
+    pub id: Identifier,
+    /// Amount.
+    pub amount: f64,
+    /// 0 add, 1 multiply base, 2 multiply total.
+    pub operation: u8,
+}
+impl Wire for AttributeModifier {
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        Ok(Self { id: r.identifier()?, amount: r.f64()?, operation: r.u8()? })
+    }
+    fn write(&self, w: &mut Writer) {
+        w.identifier(&self.id);
+        w.f64(self.amount);
+        w.u8(self.operation);
+    }
+}
+
+/// An attribute value with modifiers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AttributeProperty {
+    /// Index into `minecraft:attribute`.
+    pub id: i32,
+    /// Base value.
+    pub value: f64,
+    /// Modifiers.
+    pub modifiers: Vec<AttributeModifier>,
+}
+impl Wire for AttributeProperty {
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        Ok(Self { id: r.var_int()?, value: r.f64()?, modifiers: r.read()? })
+    }
+    fn write(&self, w: &mut Writer) {
+        w.var_int(self.id);
+        w.f64(self.value);
+        w.write(&self.modifiers);
+    }
+}
+
+packet! {
+    /// Entity attributes.
+    UpdateAttributes = "minecraft:update_attributes" {
+        /// Entity.
+        entity_id: i32 as VarInt,
+        /// Attributes.
+        properties: Vec<AttributeProperty>,
+    }
+}
+
+packet! {
+    /// Adds or updates a mob effect.
+    UpdateMobEffect = "minecraft:update_mob_effect" {
+        /// Entity.
+        entity_id: i32 as VarInt,
+        /// Index into `minecraft:mob_effect`.
+        effect: i32 as VarInt,
+        /// Amplifier (level - 1).
+        amplifier: i32 as VarInt,
+        /// Duration in ticks, -1 infinite.
+        duration: i32 as VarInt,
+        /// 0x01 ambient, 0x02 show particles, 0x04 show icon, 0x08 blend.
+        flags: u8,
+    }
+}
+
+packet! {
+    /// Projectile acceleration power.
+    ProjectilePower = "minecraft:projectile_power" {
+        /// Entity.
+        entity_id: i32 as VarInt,
+        /// Power.
+        power: f64,
+    }
+}
+
+packet! {
+    /// Locator bar waypoint. Kept raw: the wiki and Pumpkin disagree on the
+    /// identifier, colour and waypoint type encodings.
+    Waypoint = "minecraft:waypoint" {
+        /// Raw body.
+        body: Bytes as Rest,
+    }
+}
+
+/// A dialog as `ID or NBT`: a `minecraft:dialog` registry id or an inline
+/// definition kept as raw network NBT.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DialogNbt(pub Bytes);
+impl Wire for DialogNbt {
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> { Ok(Self(r.nbt_raw()?)) }
+    fn write(&self, w: &mut Writer) { w.bytes(&self.0) }
+}
+
+packet! {
+    /// Shows a dialog.
+    ShowDialog = "minecraft:show_dialog" {
+        /// Registry id or inline NBT.
+        dialog: IdOr<DialogNbt>,
+    }
+}
+
+#[cfg(test)]
+mod more_tests {
+    use super::*;
+    use crate::packets::test_util::round_trip;
+    use crate::packets::ProtocolTables;
+
+    fn tables() -> ProtocolTables {
+        ProtocolTables::for_tests(&[(3, "minecraft:damage")]).with_particles_for_tests(&[(0, "minecraft:explosion"), (1, "minecraft:block"), (2, "minecraft:dust")])
+    }
+
+    fn round_trip_tables<P: Packet + PartialEq + std::fmt::Debug>(p: &P) {
+        let t = tables();
+        let mut w = Writer::new();
+        p.encode(&mut w);
+        let b = Bytes::from(w.into_inner());
+        let mut r = Reader::from_bytes(&b).with_tables(&t);
+        let back = P::decode_exact(&mut r).unwrap_or_else(|e| panic!("{}: {e}", P::NAME));
+        assert_eq!(&back, p, "{}", P::NAME);
+    }
+
+    fn item() -> ItemStackData {
+        ItemStackData { count: 1, item: Some(RegistryIndex(7)), components_raw: Bytes::from_static(&[0, 0]) }
+    }
+    fn nbt() -> Bytes {
+        let mut c = crate::nbt::NbtCompound::new();
+        c.put_string("color", "red".into());
+        let mut w = Writer::new();
+        w.nbt_compound(Some(&c));
+        w.into_inner().into()
+    }
+
+    #[test]
+    fn round_trips() {
+        round_trip(&Animate { entity_id: 1, animation: 2 });
+        round_trip(&AwardStats { stats: vec![Statistic { category: 8, stat: 3, value: 100 }] });
+        round_trip(&BlockChangedAck { sequence: 5 });
+        round_trip(&BlockDestruction { entity_id: 1, pos: BlockPos::new(1, 2, 3), stage: 4 });
+        round_trip(&BlockEvent { pos: BlockPos::new(0, 1, 0), action: 1, param: 1, block: 200 });
+        let id = Uuid::from_u128(1);
+        for action in [
+            BossEventAction::Add { title: Component::text("Wither"), health: 1.0, color: 5, division: 0, flags: 1 },
+            BossEventAction::Remove,
+            BossEventAction::UpdateHealth(0.5),
+            BossEventAction::UpdateTitle(Component::text("t")),
+            BossEventAction::UpdateStyle { color: 1, division: 2 },
+            BossEventAction::UpdateFlags(4),
+        ] {
+            round_trip(&BossEvent { id, action });
+        }
+        round_trip(&ChunksBiomes { chunks: vec![ChunkBiomes { pos: ChunkPos::new(-1, 3), data: Bytes::from_static(&[0, 1, 2]) }] });
+        round_trip(&ClearTitles { reset: true });
+        round_trip(&CommandSuggestions { id: 1, start: 2, length: 3, matches: vec![SuggestionMatch { text: "a".into(), tooltip: Some(Component::text("t")) }] });
+        round_trip(&ContainerClose { window_id: 3 });
+        round_trip(&ContainerSetData { window_id: 1, property: 2, value: -1 });
+        round_trip(&Cooldown { group: Identifier::minecraft("ender_pearl"), ticks: 20 });
+        round_trip(&CustomChatCompletions { action: 2, entries: vec!["x".into()] });
+        round_trip(&DamageEvent { entity_id: 1, source_type: 2, source_cause: 0, source_direct: 0, source_pos: Some(DVec3::ONE) });
+        round_trip(&DebugBlockValue { pos: BlockPos::new(1, 1, 1), update: Bytes::from_static(&[0, 0]) });
+        round_trip(&DebugChunkValue { pos: ChunkPos::new(1, 2), update: Bytes::from_static(&[1]) });
+        round_trip(&DebugEntityValue { entity_id: 3, update: Bytes::new() });
+        round_trip(&DebugEvent { event: Bytes::from_static(&[0]) });
+        round_trip(&DebugSample { sample: vec![1, 2, 3, 4], sample_type: 0 });
+        round_trip(&DeleteChat { message: PreviousMessage::Id(4) });
+        round_trip(&DeleteChat { message: PreviousMessage::Signature(Bytes::from(vec![2; 256])) });
+        round_trip(&EntityEvent { entity_id: 5, status: 9 });
+        round_trip_tables(&Explode {
+            center: DVec3::new(1.0, 2.0, 3.0),
+            radius: 4.0,
+            block_count: 10,
+            player_knockback: Some(DVec3::X),
+            particle: Particle { kind: 0, data: Bytes::new() },
+            sound: IdOr::Id(5),
+            block_particles: vec![ExplosionParticle { particle: Particle { kind: 1, data: Bytes::from_static(&[9]) }, scaling: 1.0, speed: 0.5, weight: 3 }],
+            play_sound: true,
+        });
+        round_trip(&AddTransientBlock { pos: BlockPos::new(0, 0, 0), state: 1 });
+        round_trip(&GameRuleValues { rules: vec![GameRuleValue { name: Identifier::minecraft("keep_inventory"), value: "true".into() }] });
+        round_trip(&GameTestHighlightPos { absolute: BlockPos::new(1, 2, 3), relative: BlockPos::new(0, 0, 1) });
+        round_trip(&MountScreenOpen { window_id: 1, columns: 5, entity_id: 9 });
+        round_trip(&HurtAnimation { entity_id: 1, yaw: 90.0 });
+        round_trip(&InitializeBorder { x: 0.0, z: 0.0, old_diameter: 1e7, new_diameter: 1e7, speed: 0, portal_boundary: 29999984, warning_blocks: 5, warning_time: 15 });
+        round_trip_tables(&LevelParticles {
+            particle: Particle { kind: 2, data: Bytes::from_static(&[0, 0, 0xff, 0, 0x3f, 0x80, 0, 0]) },
+            override_limiter: false,
+            always_visible: true,
+            pos: DVec3::ONE,
+            offset_x: 0.1,
+            offset_y: 0.2,
+            offset_z: 0.3,
+            max_speed_x: 1.0,
+            max_speed_y: 1.0,
+            max_speed_z: 1.0,
+            count: 10,
+            randomization: 0,
+        });
+        round_trip(&LowDiskSpaceWarning {});
+        round_trip(&MapItemData { map_id: 1, scale: 0, locked: false, icons: Some(vec![MapIcon { kind: 0, x: 1, z: -1, direction: 3, name: None }]), patch: Some(MapPatch { columns: 1, rows: 2, x: 0, z: 0, data: Bytes::from_static(&[4, 5]) }) });
+        round_trip(&MapItemData { map_id: 1, scale: 4, locked: true, icons: None, patch: None });
+        round_trip_tables(&MerchantOffers {
+            window_id: 1,
+            offers: vec![MerchantOffer {
+                input1: TradeItem { item: 1, count: 12, components_raw: Bytes::from_static(&[1, 3, 5]) },
+                output: item(),
+                input2: None,
+                disabled: false,
+                uses: 0,
+                max_uses: 12,
+                xp: 1,
+                special_price: 0,
+                price_multiplier: 0.05,
+                demand: 0,
+            }],
+            level: 1,
+            experience: 0,
+            regular_villager: true,
+            can_restock: true,
+        });
+        round_trip(&MoveMinecartAlongTrack { entity_id: 1, steps: vec![MinecartStep { pos: DVec3::ONE, velocity: DVec3::ZERO, yaw: 90.0, pitch: 0.0, weight: 1.0 }] });
+        round_trip(&MoveVehicle { pos: DVec3::ONE, yaw: 1.0, pitch: 2.0 });
+        round_trip(&OpenBook { hand: 0 });
+        round_trip(&OpenScreen { window_id: 1, kind: 2, title: Component::text("Chest") });
+        round_trip(&OpenSignEditor { pos: BlockPos::new(1, 2, 3), text_slot: 1 });
+        round_trip(&PongResponse { payload: 77 });
+        round_trip(&PlaceGhostRecipe { window_id: 1, display: Bytes::from_static(&[3, 0]) });
+        round_trip(&PlayerAbilities { flags: 0x0d, flying_speed: 0.05, fov_modifier: 0.1 });
+        round_trip(&PlayerCombatEnd { duration: 5 });
+        round_trip(&PlayerCombatEnter {});
+        round_trip(&PlayerCombatKill { player_id: 1, message: Component::text("died") });
+        round_trip(&PlayerLookAt { from_anchor: 1, target: DVec3::ONE, entity: Some(LookAtEntity { entity_id: 3, anchor: 0 }) });
+        round_trip(&PlayerLookAt { from_anchor: 0, target: DVec3::ZERO, entity: None });
+        round_trip(&PlayerRotation { yaw: 10.0, relative_yaw: true, pitch: -5.0, relative_pitch: false });
+        round_trip(&RemoveMobEffect { entity_id: 1, effect: 2 });
+        round_trip(&ResetScore { owner: "Steve".into(), objective: Some("kills".into()) });
+        round_trip(&SelectAdvancementsTab { tab: Some(Identifier::minecraft("story/root")) });
+        round_trip(&SetActionBarText { text: Component::text("a") });
+        round_trip(&SetBorderCenter { x: 1.0, z: 2.0 });
+        round_trip(&SetBorderLerpSize { old_diameter: 1.0, new_diameter: 2.0, speed: 1000 });
+        round_trip(&SetBorderSize { diameter: 100.0 });
+        round_trip(&SetBorderWarningDelay { warning_time: 15 });
+        round_trip(&SetBorderWarningDistance { warning_blocks: 5 });
+        round_trip(&SetCamera { camera_id: 1 });
+        round_trip(&SetCursorItem { item: item() });
+        round_trip(&SetDefaultSpawnPosition { dimension: Identifier::minecraft("overworld"), pos: BlockPos::new(0, 64, 0), yaw: 0.0, pitch: 0.0 });
+        round_trip(&SetDisplayObjective { position: 1, name: "obj".into() });
+        round_trip(&SetEntityLink { attached: 1, holder: -1 });
+        round_trip(&SetObjective { name: "o".into(), mode: 0, display: Some(ObjectiveDisplay { value: Component::text("O"), render_type: 1, number_format: Some(NumberFormat::Styled(nbt())) }) });
+        round_trip(&SetObjective { name: "o".into(), mode: 1, display: None });
+        round_trip(&SetPassengers { vehicle: 1, passengers: vec![2, 3] });
+        round_trip(&SetPlayerInventory { slot: 40, item: item() });
+        round_trip(&SetPlayerTeam {
+            name: "red".into(),
+            method: 0,
+            parameters: Some(TeamParameters { display_name: Component::text("Red"), prefix: Component::default(), suffix: Component::default(), name_tag_visibility: 0, collision_rule: 0, color: Some(12), flags: 3 }),
+            entities: vec!["Steve".into()],
+        });
+        round_trip(&SetPlayerTeam { name: "red".into(), method: 1, parameters: None, entities: vec![] });
+        round_trip(&SetPlayerTeam { name: "red".into(), method: 4, parameters: None, entities: vec!["Alex".into()] });
+        round_trip(&SetScore { owner: "Steve".into(), objective: "o".into(), value: 5, display_name: None, number_format: Some(NumberFormat::Fixed(Component::text("x"))) });
+        round_trip(&SetScore { owner: "a".into(), objective: "b".into(), value: -1, display_name: Some(Component::text("n")), number_format: Some(NumberFormat::Blank) });
+        round_trip(&SetSubtitleText { text: Component::text("s") });
+        round_trip(&SetTitleText { text: Component::text("t") });
+        round_trip(&SetTitlesAnimation { fade_in: 10, stay: 70, fade_out: 20 });
+        round_trip(&StopSound { source: Some(3), sound: None });
+        round_trip(&StopSound { source: None, sound: Some(Identifier::minecraft("music.game")) });
+        round_trip(&StopSound { source: Some(0), sound: Some(Identifier::minecraft("x")) });
+        round_trip(&SwingAnimation { entity_id: 1, hand: 0, animation: 1, duration: 6 });
+        round_trip(&TagQuery { transaction_id: 1, nbt: nbt() });
+        round_trip(&TagQuery { transaction_id: 1, nbt: Bytes::from_static(&[0]) });
+        round_trip(&TakeItemEntity { collected: 1, collector: 2, count: 3 });
+        round_trip(&TestInstanceBlockStatus { body: Bytes::from_static(&[8, 0, 1, b'a', 0]) });
+        round_trip(&TickingState { tick_rate: 20.0, frozen: false });
+        round_trip(&TickingStep { steps: 3 });
+        round_trip(&UpdateAdvancements {
+            reset: true,
+            added: vec![AdvancementEntry {
+                id: Identifier::minecraft("story/root"),
+                advancement: Advancement {
+                    parent: None,
+                    display: Some(AdvancementDisplay {
+                        title: Component::text("Minecraft"),
+                        description: Component::text("d"),
+                        icon: item(),
+                        frame: 0,
+                        flags: 1,
+                        background: Some(Identifier::minecraft("gui/advancements/backgrounds/stone")),
+                    }),
+                    requirements: vec![vec!["crafting_table".into()]],
+                    telemetry: true,
+                    x: 0.0,
+                    y: 1.5,
+                },
+            }],
+            removed: vec![Identifier::minecraft("old")],
+            progress: vec![AdvancementProgress { id: Identifier::minecraft("story/root"), criteria: vec![CriterionProgress { criterion: Identifier::minecraft("crafting_table"), achieved_at: Some(1) }] }],
+            show_advancements: false,
+        });
+        round_trip(&UpdateAttributes {
+            entity_id: 1,
+            properties: vec![AttributeProperty { id: 3, value: 0.1, modifiers: vec![AttributeModifier { id: Identifier::minecraft("sprinting"), amount: 0.3, operation: 2 }] }],
+        });
+        round_trip(&UpdateMobEffect { entity_id: 1, effect: 2, amplifier: 0, duration: -1, flags: 6 });
+        round_trip(&ProjectilePower { entity_id: 1, power: 0.1 });
+        round_trip(&Waypoint { body: Bytes::from_static(&[0]) });
+        round_trip(&ShowDialog { dialog: IdOr::Id(3) });
+        round_trip(&ShowDialog { dialog: IdOr::Inline(DialogNbt(nbt())) });
     }
 }
 
