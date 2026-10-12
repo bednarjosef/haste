@@ -112,12 +112,30 @@ public final class HasteClassLoader extends ClassLoader {
         }
     }
 
-    /** Null if the allow-list permits {@code internal} from the jar, else the reason. Deny wins over allow. */
+    /**
+     * Null if the policy permits {@code internal} from the jar, else the reason. The most specific matching
+     * pattern wins (an exact class beats any package; a longer package prefix beats a shorter one); on a tie
+     * deny wins. So {@code world/level/} can be denied while {@code world/level/storage/DataVersion} is allowed.
+     */
     public String refusal(String internal) {
-        for (String d : deny) if (matches(internal, d)) return "deny-listed (tier 1: needs a proxy)";
-        for (String c : allowClasses) if (matches(internal, c)) return null;
-        for (String p : allowPackages) if (matches(internal, p)) return null;
+        int allowLen = Math.max(longest(internal, allowClasses), longest(internal, allowPackages));
+        int denyLen = longest(internal, deny);
+        if (denyLen >= 0 && denyLen >= allowLen) return "deny-listed (tier 1: needs a proxy)";
+        if (allowLen >= 0) return null;
         return "not in the tier-3 allow-list";
+    }
+
+    /**
+     * Specificity of the best matching pattern: a class pattern beats every package pattern, and a longer pattern
+     * beats a shorter one (so {@code Outer$Nested} beats {@code Outer}); none = -1.
+     */
+    private static int longest(String internal, String[] patterns) {
+        int best = -1;
+        for (String p : patterns) {
+            if (!matches(internal, p)) continue;
+            best = Math.max(best, p.endsWith("/") ? p.length() : 100_000 + p.length());
+        }
+        return best;
     }
 
     /** A pattern ending in '/' is a package prefix (with subpackages), otherwise an exact class (with nested classes). */

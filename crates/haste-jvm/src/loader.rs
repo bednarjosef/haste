@@ -1,8 +1,10 @@
 //! Tier-3 class loading policy (passed to the Java `HasteClassLoader`) and its log.
 //!
 //! Patterns are JVM internal names. A pattern ending in `/` is a package prefix (subpackages
-//! included); anything else is one class (its nested `$` classes included). The deny-list wins over
-//! the allow-list; a generated proxy wins over both. Rationale for each entry is in `NOTES.md`.
+//! included); anything else is one class (its nested `$` classes included). The most specific
+//! matching pattern decides (exact class > longer package prefix > shorter; deny wins ties), so a
+//! value type inside a denied package can be allowed by name. A generated proxy wins over both.
+//! Rationale for each entry is in `NOTES.md`.
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -13,6 +15,8 @@ pub const ALLOW_PACKAGES: &[&str] = &[
     "net/minecraft/resources/",
     "net/minecraft/network/chat/",
     "net/minecraft/network/codec/",
+    "net/minecraft/tags/",
+    "net/minecraft/network/protocol/",
     "net/minecraft/nbt/",
     "net/minecraft/util/",
     "net/minecraft/locale/",
@@ -23,6 +27,7 @@ pub const ALLOW_PACKAGES: &[&str] = &[
     "net/minecraft/client/gui/layouts/",
     "net/minecraft/client/input/",
     "com/mojang/math/",
+    "com/mojang/blaze3d/platform/cursor/",
 ];
 
 /// Single classes served as real vanilla Java (outside the allowed packages).
@@ -39,6 +44,23 @@ pub const ALLOW_CLASSES: &[&str] = &[
     "net/minecraft/CrashReportDetail",
     "net/minecraft/ReportedException",
     "net/minecraft/ReportType",
+    "net/minecraft/world/item/TooltipFlag",
+    "net/minecraft/world/level/storage/DataVersion",
+    "net/minecraft/server/packs/metadata/pack/PackFormat",
+    "net/minecraft/server/ServerLinks",
+    "net/minecraft/commands/BrigadierExceptions",
+    "net/minecraft/network/ClientboundPacketListener",
+    "net/minecraft/network/ServerboundPacketListener",
+    "net/minecraft/network/PacketListener",
+    "net/minecraft/network/TickablePacketListener",
+    "net/minecraft/network/PacketSendListener",
+    "net/minecraft/network/ConnectionProtocol",
+    "net/minecraft/network/ProtocolInfo",
+    "net/minecraft/network/DisconnectionDetails",
+    "net/minecraft/network/LpVec3",
+    "net/minecraft/network/SkipPacketException",
+    "net/minecraft/network/SkipPacketDecoderException",
+    "net/minecraft/network/SkipPacketEncoderException",
     "net/minecraft/network/FriendlyByteBuf",
     "net/minecraft/network/RegistryFriendlyByteBuf",
     "net/minecraft/network/VarInt",
@@ -51,6 +73,10 @@ pub const ALLOW_CLASSES: &[&str] = &[
     "net/minecraft/DefaultUncaughtExceptionHandler",
     "net/minecraft/DefaultUncaughtExceptionHandlerWithName",
     "net/minecraft/client/StringSplitter",
+    "net/minecraft/client/InputType",
+    "net/minecraft/client/MusicToastDisplayState",
+    "net/minecraft/client/NarratorStatus",
+    "net/minecraft/world/entity/player/ChatVisiblity",
     "net/minecraft/client/ComponentCollector",
     "net/minecraft/client/gui/ActiveTextCollector",
     "net/minecraft/client/gui/TextAlignment",

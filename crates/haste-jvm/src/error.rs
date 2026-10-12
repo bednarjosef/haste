@@ -24,6 +24,9 @@ pub enum JvmError {
     /// A JNI call failed; Java exceptions carry their class, message and stack trace.
     #[error("JNI: {0}")]
     Jni(#[from] jni::errors::Error),
+    /// A Java exception, with its full stack trace and causes.
+    #[error("Java exception: {0}")]
+    Java(String),
     /// A protocol error between Rust and the Java bridge (unexpected frame layout etc.).
     #[error("bridge: {0}")]
     Bridge(String),

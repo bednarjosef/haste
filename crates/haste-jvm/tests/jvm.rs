@@ -80,3 +80,111 @@ fn to_string(env: &mut jni::Env, o: &JObject) -> jni::errors::Result<String> {
     let s = unsafe { JString::from_raw(env, s.into_raw()) };
     s.try_to_string(env)
 }
+
+static GUI: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn texts(f: &haste_core::gui::GuiFrame) -> Vec<String> {
+    f.commands.iter().filter_map(|c| match c { haste_core::gui::GuiCommand::Text { text, .. } => Some(text.clone()), _ => None }).collect()
+}
+
+fn dump(f: &haste_core::gui::GuiFrame) {
+    for c in &f.commands {
+        eprintln!("  {c:?}");
+    }
+}
+
+fn sprites(f: &haste_core::gui::GuiFrame) -> Vec<(String, i32, i32, i32, i32)> {
+    f.commands
+        .iter()
+        .filter_map(|c| match c {
+            haste_core::gui::GuiCommand::Sprite { sprite, x, y, w, h, .. } => Some((sprite.to_string(), *x, *y, *w, *h)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Opens a screen and fails with the Unimplemented log if that throws.
+fn open(h: &JvmHost, kind: haste_jvm::ScreenKind) {
+    if let Err(e) = h.gui().open_screen(kind) {
+        panic!("open {kind:?}: {e}\nunimplemented: {:#?}", h.unimplemented().unwrap());
+    }
+}
+
+fn render(h: &JvmHost, mouse: (f64, f64)) -> haste_core::gui::GuiFrame {
+    match h.gui().render(320, 240, 2, mouse, 0.0) {
+        Ok(f) => f,
+        Err(e) => panic!("render: {e}\nunimplemented: {:#?}", h.unimplemented().unwrap()),
+    }
+}
+
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn pause_screen() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    h.clear_unimplemented().unwrap();
+    open(&h, haste_jvm::ScreenKind::Pause);
+    assert!(gui.is_open());
+    assert_eq!(gui.screen_class().as_deref(), Some("net.minecraft.client.gui.screens.PauseScreen"));
+    let f = render(&h, (0.0, 0.0));
+    dump(&f);
+    let t = texts(&f);
+    for want in ["Game Menu", "Back to Game", "Advancements", "Statistics", "Disconnect"] {
+        assert!(t.iter().any(|x| x == want), "missing {want:?} in {t:?}");
+    }
+    let buttons: Vec<_> = sprites(&f).into_iter().filter(|s| s.0.starts_with("minecraft:widget/button")).collect();
+    assert!(buttons.len() >= 4, "{buttons:?}");
+    // the "Back to Game" button: the sprite under its label
+    let label = f.commands.iter().find_map(|c| match c {
+        haste_core::gui::GuiCommand::Text { text, x, y, .. } if text == "Back to Game" => Some((*x, *y)),
+        _ => None,
+    }).unwrap();
+    let (_, bx, by, bw, bh) = buttons.iter().find(|b| b.1 <= label.0 && label.0 < b.1 + b.3 && b.2 <= label.1 && label.1 < b.2 + b.4).cloned().expect("button under label");
+    let centre = ((bx + bw / 2) as f64, (by + bh / 2) as f64);
+
+    // hovering highlights the button (vanilla picks the highlighted sprite)
+    gui.mouse(centre.0, centre.1, None);
+    let hovered = render(&h, centre);
+    assert!(sprites(&hovered).iter().any(|s| s.0 == "minecraft:widget/button_highlighted" && s.1 == bx && s.2 == by), "{:?}", sprites(&hovered));
+
+    // clicking "Back to Game" closes the screen through Gui.setScreen(null)
+    assert!(gui.mouse(centre.0, centre.1, Some((haste_jvm::keys::MOUSE_LEFT, true))), "click consumed: {:?}", gui.take_last_error());
+    gui.mouse(centre.0, centre.1, Some((haste_jvm::keys::MOUSE_LEFT, false)));
+    assert_eq!(gui.take_last_error(), None);
+    assert!(!gui.is_open(), "Back to Game should close the pause screen: {:?}", gui.take_last_error());
+    assert!(gui.mouse_grabbed(), "Back to Game grabs the mouse");
+
+    // Escape closes it as well
+    open(&h, haste_jvm::ScreenKind::Pause);
+    assert!(gui.key(haste_jvm::keys::ESCAPE, 0, 0, true));
+    assert!(!gui.is_open(), "Escape should close the pause screen: {:?}", gui.take_last_error());
+
+    let unimpl = h.unimplemented().unwrap();
+    assert!(unimpl.is_empty(), "Unimplemented log for PauseScreen: {unimpl:#?}");
+}
+
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM); run with --release for the number"]
+fn bench_pause_render() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    open(&h, haste_jvm::ScreenKind::Pause);
+    let gui = h.gui();
+    for _ in 0..3000 {
+        gui.render(320, 240, 2, (10.0, 10.0), 0.0).unwrap();
+    }
+    let n = 5000;
+    let mut times: Vec<u128> = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = Instant::now();
+        let f = gui.render(320, 240, 2, (10.0 + (i % 7) as f64, 10.0), 0.0).unwrap();
+        times.push(t.elapsed().as_nanos());
+        std::hint::black_box(f);
+    }
+    times.sort_unstable();
+    let mean = times.iter().sum::<u128>() as f64 / n as f64 / 1000.0;
+    eprintln!("PauseScreen render(): mean {mean:.1} µs, p50 {:.1} µs, p99 {:.1} µs ({n} frames after 3000 warm-up)",
+        times[n / 2] as f64 / 1000.0, times[n * 99 / 100] as f64 / 1000.0);
+    gui.close_screen();
+}
