@@ -3,7 +3,6 @@
 // Offscreen construction + readback for oracles's screenshot tests.
 // Shading design from Pomme (chunk shaders); see THIRD_PARTY.md.
 
-use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
@@ -209,13 +208,13 @@ pub struct Renderer {
     atlas: Arc<haste_assets::AtlasBuilder>,
     baked: Arc<haste_assets::BakedBlockModels>,
     mesher: Mesher,
-    sections: HashMap<SectionPos, ResidentSection>,
+    sections: ahash::AHashMap<SectionPos, ResidentSection>,
     /// Shared vertex/index buffers the section meshes live in.
     arenas: MeshArenas,
     /// Cave culling: per-section sightlines (also for sections without geometry), the visible
     /// sections from the last walk, and when to walk again.
-    section_vis: HashMap<(ChunkPos, i32), crate::occlusion::VisibilitySet>,
-    visible_mask: HashMap<ChunkPos, u32>,
+    section_vis: ahash::AHashMap<(ChunkPos, i32), crate::occlusion::VisibilitySet>,
+    visible_mask: crate::occlusion::VisibleMask,
     /// Camera section and render distance of the last walk; None forces a new walk.
     visible_for: Option<(SectionPos, i32)>,
     /// Sightline data changed since the last walk; walks for that are at most 4 per second.
@@ -255,6 +254,9 @@ pub struct Renderer {
     sky: crate::sky::SkyRenderer,
     /// Selection outline and break cracks.
     overlay: crate::overlay::OverlayRenderer,
+    /// Timings of the last frame and the GPU timestamp reader.
+    timings: crate::timing::FrameTimings,
+    timer: Option<crate::timing::GpuTimer>,
     /// Surface present mode (`set_vsync`).
     present_mode: wgpu::PresentMode,
     /// First-person arm or held item (`set_first_person`).
@@ -505,6 +507,7 @@ impl Renderer {
 
         let mesher = Mesher::new(baked.clone(), atlas.clone());
         let arenas = MeshArenas::new(gpu.device.clone(), gpu.queue.clone());
+        let timer = crate::timing::GpuTimer::new(&gpu.device, &gpu.queue);
         let origin_buffer = Self::make_origin_buffer(&gpu.device, 4096);
         let indirect_buffer = Self::make_indirect_buffer(&gpu.device, 4096);
 
@@ -548,10 +551,10 @@ impl Renderer {
             atlas,
             baked,
             mesher,
-            sections: HashMap::new(),
+            sections: ahash::AHashMap::new(),
             arenas,
-            section_vis: HashMap::new(),
-            visible_mask: HashMap::new(),
+            section_vis: ahash::AHashMap::new(),
+            visible_mask: Default::default(),
             visible_for: None,
             vis_dirty: false,
             last_walk: std::time::Instant::now(),
@@ -581,6 +584,8 @@ impl Renderer {
             sky,
             overlay,
             first_person: None,
+            timings: Default::default(),
+            timer,
             present_mode: wgpu::PresentMode::Fifo,
             nametags: Vec::new(),
         })
@@ -694,6 +699,21 @@ impl Renderer {
     /// view formats, e.g. GL, where it blends in linear space).
     pub fn gui_blends_in_srgb(&self) -> bool {
         self.gpu.view_formats
+    }
+
+    /// CPU phase and GPU pass timings of the last frame.
+    pub fn timings(&self) -> crate::timing::FrameTimings {
+        self.timings
+    }
+
+    /// Target size in pixels.
+    pub fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    /// The surface present mode in use.
+    pub fn present_mode(&self) -> wgpu::PresentMode {
+        self.present_mode
     }
 
     /// Counters of the last GUI frame.
@@ -856,8 +876,37 @@ impl Renderer {
         for pos in dirty {
             self.mesher.submit(world, *pos);
         }
-        for mesh in self.mesher.drain(32) {
-            self.upload_mesh(mesh);
+        self.upload_finished();
+    }
+
+    /// Like `update_world`, but the mesh workers capture the snapshots themselves from
+    /// `source` (the render thread neither reads the world nor holds its lock).
+    pub fn update_world_from(
+        &mut self,
+        source: &Arc<dyn crate::mesher::SnapshotSource>,
+        dirty: &[SectionPos],
+        _camera_chunk: ChunkPos,
+        view_distance: i32,
+    ) {
+        if view_distance != self.view_distance {
+            self.view_distance = view_distance;
+            self.visible_for = None;
+        }
+        self.mesher.submit_from(source, dirty);
+        self.upload_finished();
+    }
+
+    /// Uploads finished meshes for up to 2 ms.
+    fn upload_finished(&mut self) {
+        let started = std::time::Instant::now();
+        while started.elapsed() < std::time::Duration::from_millis(2) {
+            let batch = self.mesher.drain(16);
+            if batch.is_empty() {
+                break;
+            }
+            for mesh in batch {
+                self.upload_mesh(mesh);
+            }
         }
     }
 
@@ -927,6 +976,13 @@ impl Renderer {
     /// Render one frame. Returns stats (frame time measured around the submit).
     pub fn render(&mut self, frame: &FrameInput) -> Result<FrameStats> {
         let started = std::time::Instant::now();
+        let mut mark = started;
+        let lap = |m: &mut std::time::Instant| {
+            let now = std::time::Instant::now();
+            let d = (now - *m).as_secs_f32() * 1000.0;
+            *m = now;
+            d
+        };
         let aspect = self.size.0 as f32 / self.size.1 as f32;
         let view_proj = Self::view_projection(&frame.camera, aspect);
         self.entity
@@ -990,6 +1046,11 @@ impl Renderer {
         // Which target are we drawing into?
         // The acquired SurfaceTexture must outlive the pass (it presents on drop
         // after submit); hold it alongside the views.
+        self.timings.prepare_ms = lap(&mut mark);
+        if let Some(t) = &mut self.timer {
+            t.poll(&self.gpu.device);
+            self.timings.gpu_ms = t.latest;
+        }
         let mut held_surface_texture: Option<wgpu::SurfaceTexture> = None;
         let (color_view, depth_view, gui_view) = match (&self.offscreen, &self.depth) {
             (Some(off), _) => (
@@ -1028,6 +1089,7 @@ impl Renderer {
         let present = held_surface_texture.is_some();
         let _ = present;
 
+        self.timings.acquire_ms = lap(&mut mark);
         // Frustum cull in camera-relative space (f32 precision far from the origin), into the
         // reused draw list.
         let planes = Self::frustum_planes(&rot_view_proj);
@@ -1044,8 +1106,9 @@ impl Renderer {
         {
             self.vis_dirty = false;
             self.last_walk = std::time::Instant::now();
+            let vis = &self.section_vis;
             self.visible_mask = crate::occlusion::compute_visible_mask(
-                &self.section_vis,
+                |c, si| vis.get(&(c, si)).copied(),
                 ChunkPos::new(cam_section.x, cam_section.z),
                 cam_section.y - self.min_section,
                 cam,
@@ -1059,11 +1122,7 @@ impl Renderer {
         draws.clear();
         for s in self.sections.values() {
             let si = s.pos.y - self.min_section;
-            let column = self
-                .visible_mask
-                .get(&ChunkPos::new(s.pos.x, s.pos.z))
-                .copied()
-                .unwrap_or(0);
+            let column = self.visible_mask.column(ChunkPos::new(s.pos.x, s.pos.z));
             if !(0..32).contains(&si) || column & (1u32 << si) == 0 {
                 continue;
             }
@@ -1146,6 +1205,8 @@ impl Renderer {
             }
         }
 
+        self.timings.cull_ms = lap(&mut mark);
+        let mut ran = [false; 3];
         let mut draw_calls = 0u32;
         let mut encoder = self
             .gpu
@@ -1154,6 +1215,7 @@ impl Renderer {
                 label: Some("frame"),
             });
         {
+            ran[0] = true;
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1178,7 +1240,7 @@ impl Renderer {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: self.timer.as_ref().and_then(|t| t.writes(0)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1256,6 +1318,7 @@ impl Renderer {
         // First-person hand: its own pass over the world with the depth cleared, so it never
         // sinks into walls.
         if self.entity.has_hand() {
+            ran[1] = true;
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("hand"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1275,7 +1338,7 @@ impl Renderer {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: self.timer.as_ref().and_then(|t| t.writes(1)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1292,6 +1355,7 @@ impl Renderer {
                 self.size,
                 &mut self.assets,
             );
+            ran[2] = true;
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("gui"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1304,7 +1368,7 @@ impl Renderer {
                     depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: self.timer.as_ref().and_then(|t| t.writes(2)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1313,10 +1377,20 @@ impl Renderer {
         }
 
         // Submit, then present (wgpu 30: present lives on the queue).
+        let resolved = match &mut self.timer {
+            Some(t) => t.resolve(&mut encoder, ran),
+            None => false,
+        };
+        self.timings.encode_ms = lap(&mut mark);
         self.gpu.queue.submit([encoder.finish()]);
+        if let Some(t) = &mut self.timer {
+            t.after_submit(resolved);
+        }
+        self.timings.submit_ms = lap(&mut mark);
         if let Some(tex) = held_surface_texture {
             self.gpu.queue.present(tex);
         }
+        self.timings.present_ms = lap(&mut mark);
 
         self.draw_list = draws;
         Ok(FrameStats {

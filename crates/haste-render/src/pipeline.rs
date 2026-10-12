@@ -92,7 +92,7 @@ impl Gpu {
         }
         // Multi-draw-indirect terrain needs a non-zero first instance per draw (the section
         // origin); without it the renderer issues direct draws.
-        let optional = wgpu::Features::INDIRECT_FIRST_INSTANCE;
+        let optional = wgpu::Features::INDIRECT_FIRST_INSTANCE | wgpu::Features::TIMESTAMP_QUERY;
         let required_features = adapter.features() & optional;
         let multi_draw = required_features.contains(wgpu::Features::INDIRECT_FIRST_INSTANCE)
             && adapter
