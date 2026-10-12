@@ -31,12 +31,13 @@ pub struct PackedVertex {
     pub pos: [u16; 4],
     /// Sprite-local UV, u16 fixed point (`TERRAIN_UV_FIXED_SCALE` per unit).
     pub uv: [u16; 2],
-    /// Packed per-vertex lighting: [0] sky<<4|block, [1] ao|shade<<2, [2] tint.
+    /// Packed per-vertex lighting: [0] sky<<4|block, [1] ao|shade<<2, [2] tint red,
+    /// [3] tint green.
     pub light: [u8; 4],
     /// Index into the atlas sprite-rect buffer (0 = missing tile).
     pub sprite: u16,
-    /// Pad to the 20-byte stride.
-    pub _pad: [u8; 2],
+    /// [0] tint blue, [1] pad (20-byte stride).
+    pub tint_b: [u8; 2],
 }
 
 impl PackedVertex {
@@ -44,7 +45,7 @@ impl PackedVertex {
     /// the u16s pack into 4-byte groups: pos as Uint16x4 (x, y, z, pad), uv as
     /// Uint16x2, sprite Uint16, light as Uint8x4; 2 pad bytes to stride 20.
     /// `light.0` = sky<<4 | block, `light.1` = ao (bits 0..1) | shade index
-    /// (bits 2..4), `light.2` = tint palette index.
+    /// (bits 2..4), `light.2`/`light.3` = tint red/green, `tint_b.0` = tint blue.
     pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
         array_stride: 20,
         step_mode: wgpu::VertexStepMode::Vertex,
@@ -72,6 +73,12 @@ impl PackedVertex {
                 format: wgpu::VertexFormat::Uint16,
                 offset: 16,
                 shader_location: 2,
+            },
+            // tint blue + pad
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Uint8x2,
+                offset: 18,
+                shader_location: 5,
             },
         ],
     };
@@ -119,8 +126,9 @@ pub struct QuadVertex {
     pub uv: [f32; 2],
 }
 
-/// Pack one vertex: positions are section-local floats, UVs sprite-local.
-pub fn pack_vertex(v: &QuadVertex, sprite: u16, light: [u8; 4]) -> PackedVertex {
+/// Pack one vertex: positions are section-local floats, UVs sprite-local. `light` is
+/// [sky<<4|block, ao|shade<<2], `tint` 0xRRGGBB (0xFFFFFF = untinted).
+pub fn pack_vertex(v: &QuadVertex, sprite: u16, light: [u8; 2], tint: u32) -> PackedVertex {
     PackedVertex {
         pos: [
             quantize_coord(v.position[0]),
@@ -129,9 +137,9 @@ pub fn pack_vertex(v: &QuadVertex, sprite: u16, light: [u8; 4]) -> PackedVertex 
             0,
         ],
         uv: [pack_sprite_uv(v.uv[0]), pack_sprite_uv(v.uv[1])],
-        light,
+        light: [light[0], light[1], (tint >> 16) as u8, (tint >> 8) as u8],
         sprite,
-        _pad: [0; 2],
+        tint_b: [tint as u8, 0],
     }
 }
 

@@ -23,8 +23,10 @@ struct VertexIn {
     @location(1) uv_packed: vec2<u32>,
     // location 2: sprite u16.
     @location(2) sprite_packed: u32,
-    // location 3: light [u8; 4] (sky|block, ao|shade, tint, _), raw bytes.
+    // location 3: light [u8; 4] (sky|block, ao|shade, tint red, tint green), raw bytes.
     @location(3) light: vec4<u32>,
+    // location 5: (tint blue, pad).
+    @location(5) tint_b: vec2<u32>,
     // Instance-rate: section origin in world blocks.
     @location(4) origin: vec3<i32>,
 };
@@ -96,8 +98,15 @@ fn vs_main(in: VertexIn, @builtin(vertex_index) vi: u32) -> VertexOut {
     let ao = 0.4 + 0.2 * f32(ao_level); // AO_BRIGHTNESS [0.4, 0.6, 0.8, 1.0]
     out.light = lightmap(sky, block) * ao * face_shade(shade_index);
 
-    // Tint palette (index 0 = white). Phase 1: white only.
-    out.tint = vec3<f32>(1.0);
+    // Per-vertex biome/block tint. Vanilla multiplies sRGB texel by sRGB tint; the atlas is
+    // sampled linear here, so the tint is linearized too (the product of the two
+    // linearizations is the linearization of the product, up to the curve's linear toe).
+    let tint_srgb = vec3<f32>(f32(in.light.z), f32(in.light.w), f32(in.tint_b.x)) / 255.0;
+    out.tint = select(
+        pow((tint_srgb + 0.055) / 1.055, vec3<f32>(2.4)),
+        tint_srgb / 12.92,
+        tint_srgb <= vec3<f32>(0.04045),
+    );
 
     // Fog: spherical distance bands.
     let dist = length(rel);

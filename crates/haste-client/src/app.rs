@@ -28,6 +28,10 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
+// Declared here rather than in main.rs (lead-owned); the lead may move it.
+#[path = "biomes.rs"]
+mod biomes;
+
 use crate::game::{self, Shared};
 use crate::net::{self, NetDriver};
 use crate::Args;
@@ -48,6 +52,8 @@ struct Session {
     _rt: tokio::runtime::Runtime,
     shared: Arc<Shared>,
     game_thread: Option<std::thread::JoinHandle<()>>,
+    /// Biome colours of the synced biome registry (index = biome id), for the renderer.
+    biomes: Vec<haste_render::BiomeClimate>,
 }
 
 impl Session {
@@ -70,6 +76,7 @@ impl Session {
         let driver: NetDriver = rt.block_on(NetDriver::connect(opts))?;
         let regs = driver.connection().registries();
         let biomes = net::synced_biome_count(regs).unwrap_or(64);
+        let biome_climates = biomes::biome_climates(regs);
         let login = driver.login();
         tracing::info!(
             "joined {address} as {}: {:?}, dimension {}, view distance {}",
@@ -98,6 +105,7 @@ impl Session {
             _rt: rt,
             shared,
             game_thread: Some(game_thread),
+            biomes: biome_climates,
         })
     }
 
@@ -189,12 +197,18 @@ impl WorldFeed {
                 self.meshed.remove(&pos);
             }
             self.submitted.insert(pos);
-            renderer.update_world(&*world, &[pos], camera_chunk, view_distance);
+            renderer.update_world_with_biomes(
+                &*world,
+                Some(&biomes::WorldBiomes(&world)),
+                &[pos],
+                camera_chunk,
+                view_distance,
+            );
             submitted_any = true;
         }
         if !submitted_any {
             // Still upload meshes that finished since the last frame.
-            renderer.update_world(&*world, &[], camera_chunk, view_distance);
+            renderer.update_world_with_biomes(&*world, None, &[], camera_chunk, view_distance);
         }
     }
 
@@ -298,6 +312,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
+    renderer.set_biomes(&session.biomes);
     let gui = GuiFrame::default();
     let mut feed = WorldFeed::default();
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
@@ -382,6 +397,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
         shared: session.shared.clone(),
+        biomes: session.biomes.clone(),
         vsync: args.vsync,
         window: None,
         renderer: None,
@@ -420,6 +436,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
 
 struct App {
     shared: Arc<Shared>,
+    biomes: Vec<haste_render::BiomeClimate>,
     vsync: bool,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
@@ -568,6 +585,7 @@ impl ApplicationHandler for App {
             let mut renderer =
                 Renderer::new(window.clone(), &mut assets, &self.shared.data.blocks)?;
             renderer.set_item_registry(&self.shared.data.registries);
+            renderer.set_biomes(&self.biomes);
             Ok((window, renderer))
         })();
         match result {
