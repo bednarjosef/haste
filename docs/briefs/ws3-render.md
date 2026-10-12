@@ -10,8 +10,10 @@ render thread, no per-frame allocations in the hot path, frustum culling, measur
 REUSE_DECISION
 
 ## Backend
-wgpu 30 (workspace dependency) on Vulkan; winit 0.30 for the window. This machine: AMD Radeon
-860M, Mesa RADV, Wayland session (winit handles it). Headless/offscreen rendering must work too
+wgpu 30 (workspace dependency); winit 0.30 for the window. This machine: AMD Radeon 860M, Mesa
+26.2, Wayland session (winit handles it). NOTE: no Vulkan ICD is installed here yet (`vulkan-radeon`
+is missing; the lead has asked the user). Request the adapter with `wgpu::Backends::all()` so the
+GL (EGL) backend works meanwhile, log which backend was chosen, and keep all code backend-neutral. Headless/offscreen rendering must work too
 (WS8's screenshot tests): `Renderer` must be constructible without a window (offscreen surface
 target) and able to read back a frame to an `RgbaImage`: provide `Renderer::new_offscreen(w, h, ..)`
 and `Renderer::read_back(&mut self) -> RgbaImage` (tell the lead; it goes into INTERFACES.md).

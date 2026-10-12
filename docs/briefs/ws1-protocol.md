@@ -49,7 +49,7 @@ Serverbound: `accept_teleportation`, `move_player_pos`/`pos_rot`/`rot`/`status_o
 `player_action`, `use_item_on`, `use_item`, `interact`, `client_tick_end`, `player_input`.
 Everything else: decode to `Unknown` for now, with a counter per id printed at disconnect; then
 fill them in by frequency. Field layouts: minecraft.wiki `Java Edition protocol/Packets` for
-26.3 (confirm the page's version; where the page lags, verify empirically against the local
+26.3 (the page currently documents 26.3 / protocol 777; where the page lags, verify empirically against the local
 server and write what you verified in NOTES.md). Pumpkin's packet structs (GPL-3.0,
 `cache/pumpkin`) can be reused with attribution where they exist for 26.3 clientbound decoding.
 - Tests: each packet has an encode/decode round trip on a hand-built instance; a recorded-packet
