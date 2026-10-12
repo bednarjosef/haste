@@ -18,6 +18,8 @@ public abstract class MinecraftServerMixin {
         if (haste$dumped) return;
         haste$dumped = true;
         MinecraftServer server = (MinecraftServer) (Object) this;
+        // Only the dedicated dump server; never a client's integrated (singleplayer) server.
+        if (!server.isDedicatedServer()) return;
         ServerDumps.dumpAll(server);
         // The dump is the only reason this server exists; stop it so scripts terminate.
         server.halt(false);

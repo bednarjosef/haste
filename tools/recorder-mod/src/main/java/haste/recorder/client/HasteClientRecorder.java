@@ -26,6 +26,16 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 public class HasteClientRecorder implements ClientModInitializer {
     @Override
     public void onInitializeClient() {
+        String scenarioFile = System.getProperty("haste.scenario");
+        if (scenarioFile != null && !scenarioFile.isEmpty()) {
+            try {
+                RecorderState.scenario = Scenario.load(java.nio.file.Path.of(scenarioFile));
+                RecorderIO.LOGGER.info("haste-recorder: scenario {} loaded", scenarioFile);
+            } catch (java.io.IOException e) {
+                RecorderIO.LOGGER.error("haste-recorder: scenario failed: cannot load {}", scenarioFile, e);
+                throw new RuntimeException(e);
+            }
+        }
         ClientTickEvents.END_CLIENT_TICK.register(RecorderState::tick);
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) ->
             dispatcher.register(ClientCommands.literal("haste")

@@ -11,7 +11,7 @@
     "main": ["haste.recorder.HasteRecorderMod"],
     "client": ["haste.recorder.client.HasteClientRecorder"]
   },
-  "mixins": ["haste-recorder.mixins.json"],
+  "mixins": ["haste-recorder.mixins.json", "haste-recorder.client.mixins.json"],
   "depends": {
     "fabricloader": ">=0.19.5",
     "minecraft": "~26.3",
