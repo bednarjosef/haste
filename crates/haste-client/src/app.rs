@@ -26,7 +26,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
-use crate::game::{self, Shared, EYE_HEIGHT};
+use crate::game::{self, Shared};
 use crate::net::{self, NetDriver};
 use crate::Args;
 
@@ -35,6 +35,8 @@ const FOV_DEG: f32 = 70.0;
 /// Degrees of rotation per pixel of mouse motion at vanilla's default sensitivity (50%):
 /// 0.15 * (0.5 * 0.6 + 0.2)^3 * 8 (minecraft.wiki "Options", mouse sensitivity).
 const LOOK_DEG_PER_PIXEL: f32 = 0.15;
+/// Two jump presses closer than this toggle flight (vanilla: 7 ticks).
+const DOUBLE_TAP: Duration = Duration::from_millis(350);
 /// Wall time the render thread may spend capturing sections for the mesher per frame.
 const CAPTURE_BUDGET: Duration = Duration::from_millis(4);
 
@@ -214,15 +216,17 @@ impl WorldFeed {
     }
 }
 
-/// Builds this frame's camera and sky from the shared view at `now`.
+/// Builds this frame's camera and sky from the shared view at `now`. `yaw`/`pitch` are the
+/// input layer's look; the player's server rotation offset is added here so mouse look is
+/// smooth at frame rate while the player itself turns once per tick.
 fn frame_view(shared: &Shared, yaw: f32, pitch: f32, now: Instant) -> (Camera, SkyState, f32, i32) {
     let view = *shared.view.lock();
     let partial = game::partial_tick(view.tick_at, now);
-    let feet = game::interpolate(view.prev_pos, view.pos, partial);
     let camera = Camera {
-        pos: feet + glam::DVec3::new(0.0, EYE_HEIGHT, 0.0),
-        yaw,
-        pitch,
+        // Linear between LocalPlayer::camera(0.0) and camera(1.0), i.e. camera(partial).
+        pos: game::interpolate(view.prev_eye, view.eye, partial),
+        yaw: yaw + view.look_offset.0,
+        pitch: (pitch + view.look_offset.1).clamp(-90.0, 90.0),
         fov_deg: FOV_DEG,
     };
     let fog_end = (view.view_distance.max(2) * 16) as f32;
@@ -264,16 +268,12 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
     let mut frames = 0u32;
     let mut stats;
+    let mut last_camera;
     loop {
-        let (camera, sky, partial, vd) = {
-            let mut look = shared.look.lock();
-            look.server_rotation = None;
-            look.yaw = args.yaw.unwrap_or(look.yaw);
-            look.pitch = args.pitch.unwrap_or(look.pitch);
-            let (yaw, pitch) = (look.yaw, look.pitch);
-            drop(look);
-            frame_view(&shared, yaw, pitch, Instant::now())
-        };
+        let (mut camera, sky, partial, vd) = frame_view(&shared, 0.0, 0.0, Instant::now());
+        camera.yaw = args.yaw.unwrap_or(camera.yaw);
+        camera.pitch = args.pitch.unwrap_or(camera.pitch);
+        last_camera = camera;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         let entities = feed.entities(&shared, partial).to_vec();
         stats = renderer.render(&FrameInput {
@@ -304,18 +304,17 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     image
         .save(file)
         .with_context(|| format!("saving {}", file.display()))?;
-    let look = *shared.look.lock();
-    let view = *shared.view.lock();
+    let c = last_camera;
     println!(
         "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, sections {} drawn of {}, {} draw calls",
         file.display(),
         image.width(),
         image.height(),
-        view.pos.x,
-        view.pos.y + EYE_HEIGHT,
-        view.pos.z,
-        look.yaw,
-        look.pitch,
+        c.pos.x,
+        c.pos.y,
+        c.pos.z,
+        c.yaw,
+        c.pitch,
         stats.chunk_sections_drawn,
         stats.chunk_sections_total,
         stats.draw_calls
@@ -342,6 +341,8 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         pitch: 0.0,
         keys: HashSet::new(),
         input: InputState::default(),
+        last_jump_press: None,
+        toggle_flight: false,
         fps: FpsCounter::new(),
         error: None,
         seconds: args.window_seconds,
@@ -371,8 +372,10 @@ struct App {
     yaw: f32,
     pitch: f32,
     keys: HashSet<KeyCode>,
-    /// Movement keys and look as of this frame (consumed by the player tick once it lands).
+    /// Movement keys and look as of this frame (the game thread reads it each tick).
     input: InputState,
+    last_jump_press: Option<Instant>,
+    toggle_flight: bool,
     fps: FpsCounter,
     error: Option<anyhow::Error>,
     /// Close the window after this long (`--window-seconds`, for unattended runs).
@@ -399,11 +402,8 @@ impl App {
 
     fn release_keys(&mut self) {
         self.keys.clear();
-        self.input = InputState {
-            yaw: self.yaw,
-            pitch: self.pitch,
-            ..Default::default()
-        };
+        self.last_jump_press = None;
+        self.sample_input();
     }
 
     fn sample_input(&mut self) {
@@ -419,20 +419,25 @@ impl App {
             yaw: self.yaw,
             pitch: self.pitch,
         };
+        let mut shared = self.shared.input.lock();
+        shared.state = self.input;
+        shared.toggle_flight |= std::mem::take(&mut self.toggle_flight);
+    }
+
+    /// Jump pressed: a second press within vanilla's 7-tick window toggles flight.
+    fn jump_pressed(&mut self, now: Instant) {
+        match self.last_jump_press {
+            Some(t) if now.duration_since(t) < DOUBLE_TAP => {
+                self.toggle_flight = true;
+                self.last_jump_press = None;
+            }
+            _ => self.last_jump_press = Some(now),
+        }
     }
 
     fn draw(&mut self, event_loop: &ActiveEventLoop) {
         if self.renderer.is_none() {
             return;
-        }
-        {
-            let mut look = self.shared.look.lock();
-            if let Some((y, p)) = look.server_rotation.take() {
-                self.yaw = y;
-                self.pitch = p;
-            }
-            look.yaw = self.yaw;
-            look.pitch = self.pitch;
         }
         self.sample_input();
         let renderer = self.renderer.as_mut().expect("checked above");
@@ -534,6 +539,9 @@ impl ApplicationHandler for App {
                         KeyCode::Escape => {
                             self.set_grab(false);
                             self.release_keys();
+                        }
+                        KeyCode::Space if self.grabbed && self.focused => {
+                            self.jump_pressed(Instant::now())
                         }
                         KeyCode::F11 => {
                             if let Some(w) = &self.window {

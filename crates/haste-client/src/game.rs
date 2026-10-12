@@ -17,6 +17,7 @@ use haste_data::GameData;
 use haste_entity::EntityStore;
 use haste_protocol::haste_core::chunk::{ChunkData, LightData};
 use haste_protocol::haste_core::game::{DimensionInfo, TICK_SECONDS};
+use haste_protocol::haste_core::input::InputState;
 use haste_protocol::haste_core::view::DirtyTracker;
 use haste_protocol::haste_core::{BlockPos, BlockStateId, ChunkPos, SectionPos};
 use haste_world::World;
@@ -24,16 +25,15 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::net::{NetDriver, WorldSink};
 
-/// Eye height of a standing player (minecraft.wiki "Player": 1.62 blocks).
-pub const EYE_HEIGHT: f64 = 1.62;
-
 /// What the render thread needs each frame, copied out under a short lock.
 #[derive(Clone, Copy, Debug)]
 pub struct ViewState {
-    /// Player feet position at the start of the last tick.
-    pub prev_pos: DVec3,
-    /// Player feet position after the last tick.
-    pub pos: DVec3,
+    /// Player eye position at the start of the last tick (`LocalPlayer::camera(0.0)`).
+    pub prev_eye: DVec3,
+    /// Player eye position after the last tick (`LocalPlayer::camera(1.0)`).
+    pub eye: DVec3,
+    /// Server rotation offset to add to the input layer's look (`LocalPlayer::look_offset`).
+    pub look_offset: (f32, f32),
     /// When the last tick finished (partial tick is measured from here).
     pub tick_at: Instant,
     /// Whether the server has placed the player yet.
@@ -46,16 +46,13 @@ pub struct ViewState {
     pub view_distance: i32,
 }
 
-/// Look direction and focus, written by the render thread, read by the game thread.
+/// Input sampled by the render thread from winit, read by the game thread once per tick.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Look {
-    /// Yaw in degrees.
-    pub yaw: f32,
-    /// Pitch in degrees.
-    pub pitch: f32,
-    /// Set by the game thread when the server teleported the player (the render thread
-    /// adopts the server's rotation and clears it).
-    pub server_rotation: Option<(f32, f32)>,
+pub struct SharedInput {
+    /// Keys and the input layer's look angles (without the server's offset).
+    pub state: InputState,
+    /// Double-tap jump seen since the last tick (`LocalPlayer::toggle_flight`).
+    pub toggle_flight: bool,
 }
 
 /// State shared between the game thread and the render thread.
@@ -70,8 +67,8 @@ pub struct Shared {
     pub dirty: Mutex<Vec<SectionPos>>,
     /// Per-frame view values.
     pub view: Mutex<ViewState>,
-    /// Look direction.
-    pub look: Mutex<Look>,
+    /// Input for the next tick.
+    pub input: Mutex<SharedInput>,
     /// Ask the game thread to stop.
     pub stop: AtomicBool,
     /// Why the connection ended, once it has.
@@ -93,15 +90,16 @@ impl Shared {
             entities: RwLock::new(entities),
             dirty: Mutex::new(Vec::new()),
             view: Mutex::new(ViewState {
-                prev_pos: DVec3::ZERO,
-                pos: DVec3::ZERO,
+                prev_eye: DVec3::ZERO,
+                eye: DVec3::ZERO,
+                look_offset: (0.0, 0.0),
                 tick_at: Instant::now(),
                 has_position: false,
                 time_of_day: 6000,
                 has_sky,
                 view_distance,
             }),
-            look: Mutex::new(Look::default()),
+            input: Mutex::new(SharedInput::default()),
             stop: AtomicBool::new(false),
             closed: Mutex::new(None),
         }
@@ -170,6 +168,14 @@ impl WorldSink for TrackedWorld<'_> {
     fn non_empty_sections(&self) -> usize {
         WorldSink::non_empty_sections(self.world)
     }
+    fn physics(
+        &self,
+    ) -> Option<(
+        &dyn haste_protocol::haste_core::view::BlockView,
+        &haste_data::GameData,
+    )> {
+        WorldSink::physics(self.world)
+    }
 }
 
 /// Runs the 20 Hz game loop until the connection closes or `shared.stop` is set, then closes
@@ -210,8 +216,6 @@ fn tick_once(
     shared: &Shared,
     gone: &mut Vec<SectionPos>,
 ) -> anyhow::Result<()> {
-    let prev_pos = driver.session.player.pos;
-    let teleports = driver.session.counters.teleports;
     {
         let mut world = shared.world.write();
         let mut entities = shared.entities.write();
@@ -226,32 +230,26 @@ fn tick_once(
             shared.dirty.lock().append(&mut dirty);
         }
     }
-    // Rotation: the server's after a teleport, else what the render thread's mouse look says.
-    {
-        let mut look = shared.look.lock();
-        let p = &mut driver.session.player;
-        if driver.session.counters.teleports != teleports {
-            look.server_rotation = Some((p.yaw, p.pitch));
-            look.yaw = p.yaw;
-            look.pitch = p.pitch;
-        } else {
-            p.yaw = look.yaw;
-            p.pitch = look.pitch;
+    // This tick's input, sampled from winit by the render thread.
+    let input = {
+        let mut shared_input = shared.input.lock();
+        if std::mem::take(&mut shared_input.toggle_flight) {
+            driver.session.player.toggle_flight();
         }
-    }
+        shared_input.state
+    };
     {
+        let world = shared.world.read();
         let mut entities = shared.entities.write();
-        driver.end_tick(&mut *entities)?;
+        driver.end_tick(&input, &*world, &mut *entities)?;
     }
     let s = &driver.session;
+    let (prev_eye, _, _) = s.player.camera(0.0);
+    let (eye, _, _) = s.player.camera(1.0);
     let mut view = shared.view.lock();
-    // A teleport is a jump, not motion: do not interpolate across it.
-    view.prev_pos = if s.counters.teleports != teleports {
-        s.player.pos
-    } else {
-        prev_pos
-    };
-    view.pos = s.player.pos;
+    view.prev_eye = prev_eye;
+    view.eye = eye;
+    view.look_offset = s.player.look_offset();
     view.tick_at = Instant::now();
     view.has_position = s.player.has_position;
     view.time_of_day = s.time_of_day.unwrap_or(6000);
