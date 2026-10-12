@@ -29,6 +29,8 @@ pub struct ItemModelPart {
     pub tints: Vec<u32>,
     /// `display.gui` of the model (identity when the chain has none).
     pub gui: DisplayTransform,
+    /// `display.firstperson_righthand` (identity when the chain has none).
+    pub firstperson: DisplayTransform,
     /// `gui_light: front` (flat items) instead of the default side lighting.
     pub gui_light_front: bool,
     /// Composite `transformation` applied to the geometry before the display transform.
@@ -86,12 +88,16 @@ impl Assets {
                 geometry: ItemGeometry::None,
                 tints,
                 gui: DisplayTransform::IDENTITY,
+                firstperson: DisplayTransform::IDENTITY,
                 gui_light_front: false,
                 transformation: leaf.transformation,
             });
         };
         let resolved = self.resolve_model(&Identifier::parse(model)?)?;
         let gui = resolved.gui_display.unwrap_or(DisplayTransform::IDENTITY);
+        let firstperson = resolved
+            .firstperson_display
+            .unwrap_or(DisplayTransform::IDENTITY);
         let geometry = if leaf.special {
             ItemGeometry::None
         } else if resolved.elements.is_empty() {
@@ -111,6 +117,7 @@ impl Assets {
             geometry,
             tints,
             gui,
+            firstperson,
             gui_light_front: resolved.gui_light,
             transformation: leaf.transformation,
         })

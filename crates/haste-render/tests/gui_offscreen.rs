@@ -266,6 +266,8 @@ fn gui_frame_offscreen() {
             fog_end: 200.0,
         },
         partial_tick: 0.0,
+        block_target: None,
+        breaking: &[],
     };
     let stats = renderer.render(&input).unwrap();
     // Second frame: everything resident, measure.

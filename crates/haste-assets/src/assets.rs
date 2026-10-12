@@ -292,6 +292,7 @@ impl Assets {
         let mut ambientocclusion: Option<bool> = None;
         let mut gui_light: Option<bool> = None;
         let mut gui_display: Option<crate::model::DisplayTransform> = None;
+        let mut firstperson_display: Option<crate::model::DisplayTransform> = None;
         let mut current = id.clone();
 
         for _ in 0..20 {
@@ -306,6 +307,12 @@ impl Assets {
             }
             if ambientocclusion.is_none() && model.ambientocclusion.is_some() {
                 ambientocclusion = model.ambientocclusion;
+            }
+            if firstperson_display.is_none() {
+                firstperson_display = model
+                    .display
+                    .get("firstperson_righthand")
+                    .and_then(crate::model::DisplayTransform::parse);
             }
             if gui_display.is_none() {
                 gui_display = model
@@ -342,6 +349,7 @@ impl Assets {
             ambientocclusion: ambientocclusion.unwrap_or(true),
             gui_light: gui_light.unwrap_or(false),
             gui_display,
+            firstperson_display,
         })
     }
 
