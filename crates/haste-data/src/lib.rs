@@ -295,9 +295,9 @@ mod tests {
     /// `BlockStateTable for BlockStates` delegates to the inherent methods.
     #[test]
     fn block_state_table_impl() {
-        use haste_core::view::BlockStateTable as _;
         let d = fixture();
-        let t = &d.blocks;
+        // Go through the trait object so the trait impl itself is what gets exercised.
+        let t: &dyn haste_core::view::BlockStateTable = &d.blocks;
         assert_eq!(t.len(), 17);
         assert!(!t.is_empty());
         assert_eq!(t.block_of(BlockStateId(1)), &Identifier::minecraft("stone"));
