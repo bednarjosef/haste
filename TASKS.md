@@ -20,8 +20,8 @@ One line per task; details live in `docs/briefs/<ws>.md` and in the branch.
 | WS7-2 | WS7 | config, LocalServer, vanilla launcher, MSA auth | M6 | in progress (checkpoint only this session) |
 | WS8-1 | WS8 | server-side oracle dumps (block shapes, entity dims, block props) | M2/M3 | done |
 | WS8-2 | WS8 | testkit formats + harness + packet proxy | M1 | done |
-| WS8-3 | WS8 | client recorder + RECORDING.md (+ FORMATS amendment: per-tick yaw/pitch) | M3 | in progress |
-| WS8-4 | WS8 | CI + TESTING.md | - | claimed |
+| WS8-3 | WS8 | client recorder + RECORDING.md (compiles; never run: needs the user's display) | M3 | done (code); recording pending user |
+| WS8-4 | WS8 | CI + TESTING.md | - | done |
 | WS1-1 | WS1 (Opus) | protocol codec + state machine (vendored Pumpkin transport) | M1 | done |
 | WS1-2 | WS1 (Opus) | play packets (all 144 + 69) | M1 | done |
 | WS1-3 | WS1 (Opus) | M1 headless join (60 s on local server, 473 chunks, 0 unknown) | M1 | done; stub world until haste-world lands |
