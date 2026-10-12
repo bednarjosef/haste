@@ -11,6 +11,34 @@ public final class ConnectionImpl {
     /** Vanilla's built-in registries plus the server's synchronised ones (see {@link Registries}). */
     public static RegistryAccess.Frozen registryAccess(ClientPacketListener c) { return Registries.access(); }
 
+    /**
+     * The hash of a data component in container clicks: CRC32C of the value encoded with vanilla's registry-aware
+     * {@code HashOps} (the server computes the same over the same registries), cached per component value like a
+     * client must (stacks are hashed on every click).
+     */
+    private static final java.util.Map<net.minecraft.core.component.TypedDataComponent<?>, Integer> HASHES = new java.util.HashMap<>();
+    private static net.minecraft.core.RegistryAccess hashedWith;
+    public static net.minecraft.network.HashedPatchMap.HashGenerator decoratedHashOpsGenenerator(ClientPacketListener c) {
+        return typed -> {
+            if (hashedWith != Registries.access()) { HASHES.clear(); hashedWith = Registries.access(); }
+            return HASHES.computeIfAbsent(typed, t -> t.encodeValue(
+                net.minecraft.resources.RegistryOps.create(net.minecraft.util.HashOps.CRC32C_INSTANCE, Registries.access()))
+                .getOrThrow().asInt());
+        };
+    }
+
+    /** The chat log vanilla keeps for player reports: kept (no reporting UI uses it yet). */
+    static final net.minecraft.client.multiplayer.chat.ChatLog CHAT_LOG = new net.minecraft.client.multiplayer.chat.ChatLog(1024);
+    public static net.minecraft.client.multiplayer.chat.ChatLog chatLog(net.minecraft.client.multiplayer.chat.report.ReportingContext r) { return CHAT_LOG; }
+
+    /** Waypoints (the locator bar) are not forwarded yet: vanilla's manager, empty. */
+    static final net.minecraft.client.waypoints.ClientWaypointManager WAYPOINTS = new net.minecraft.client.waypoints.ClientWaypointManager();
+    public static net.minecraft.client.waypoints.ClientWaypointManager getWaypointManager(ClientPacketListener c) { return WAYPOINTS; }
+    /** Signed-chat bookkeeping (last-seen acknowledgements) is Rust's: nothing to do here. */
+    public static void markMessageAsProcessed(ClientPacketListener c, net.minecraft.network.chat.MessageSignature s, boolean acknowledged) {}
+    /** Offline-mode servers are what Haste tests against; online mode is not told to Java yet. */
+    public static boolean onlineMode(ClientPacketListener c) { return false; }
+
     /** Serverbound packets from vanilla code: encoded with vanilla's codec and sent by Rust. */
     public static void send(net.minecraft.client.multiplayer.ClientCommonPacketListenerImpl c, net.minecraft.network.protocol.Packet<?> p) { Packets.send(p); }
 
@@ -20,8 +48,6 @@ public final class ConnectionImpl {
     }
 
     private static net.minecraft.client.multiplayer.ClientSuggestionProvider suggestions;
-    private static final com.mojang.brigadier.CommandDispatcher<net.minecraft.client.multiplayer.ClientSuggestionProvider> COMMANDS =
-        new com.mojang.brigadier.CommandDispatcher<>();
 
     /**
      * Vanilla's real suggestion provider over this connection. Permissions: none until Rust forwards the
@@ -35,14 +61,13 @@ public final class ConnectionImpl {
         return suggestions;
     }
 
-    /** The server's command tree arrives through the protocol (protocol); until it is bridged, the dispatcher is empty. */
+    /** The server's command tree (from its commands packet, see {@link Handlers#handleCommands}). */
     public static com.mojang.brigadier.CommandDispatcher<net.minecraft.client.multiplayer.ClientSuggestionProvider> getCommands(ClientPacketListener c) {
-        return COMMANDS;
+        return Handlers.commands;
     }
 
-    /** The player list (PlayerInfo) is Rust state not bridged yet: empty (no name completion). */
-    public static java.util.Collection<net.minecraft.client.multiplayer.PlayerInfo> getOnlinePlayers(ClientPacketListener c) { return java.util.List.of(); }
-    public static java.util.Collection<net.minecraft.client.multiplayer.PlayerInfo> getListedOnlinePlayers(ClientPacketListener c) { return java.util.List.of(); }
+    /** The scoreboard is the client's own (scoreboard packets, see {@link Handlers}). */
+    public static net.minecraft.world.scores.Scoreboard scoreboard(ClientPacketListener c) { return Handlers.SCOREBOARD; }
 
     /** Chat message from a screen: handed to Rust, which signs/sends it. */
     public static void sendChat(ClientPacketListener c, String message) { Native.sendChat(message, false); }

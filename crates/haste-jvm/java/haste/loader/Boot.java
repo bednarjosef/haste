@@ -45,6 +45,7 @@ public final class Boot {
 
         // game-side code reads the player's jar for data it cannot get through the class loader (data pack listing)
         System.setProperty("haste.clientJar", clientJar.toString());
+        System.setProperty("haste.minecraftDir", one.getOrDefault("minecraftDir", "."));
         long t0 = System.nanoTime();
         HasteClassLoader l = new HasteClassLoader(gameDir, proxyDir, clientJar, libs, allowPackages, allowClasses, deny, verbose);
         String realKey = String.join(",", allowPackages) + "|" + String.join(",", allowClasses) + "|" + String.join(",", deny);

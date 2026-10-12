@@ -25,6 +25,9 @@ public final class Native {
     /** The local player's name. */
     public static native String playerName();
 
+    /** Fills the mirror arrays with Rust's primitive player and debug state (layout: haste.gui.Mirror). */
+    public static native void mirror(int[] ints, double[] doubles);
+
     // ---- Java -> Rust ----
     /**
      * A player inventory slot changed in Java (vanilla numbering; -1 = the stack carried by the cursor). The stack is
@@ -35,8 +38,4 @@ public final class Native {
     public static native void sendPacket(byte[] idAndBody);
     /** Called when a screen sends a chat message or command (Rust signs and sends it). */
     public static native void sendChat(String message, boolean command);
-    /** A container click (menu slot numbering; input = vanilla ContainerInput ordinal = wire click type). */
-    public static native void containerInput(int containerId, int slot, int button, int input);
-    /** The chat history lines Rust provides (oldest first). */
-    public static native String[] chatLines();
 }

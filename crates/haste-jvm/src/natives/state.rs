@@ -1,10 +1,10 @@
 //! Player state / inventory mirror / outgoing natives on [`crate::GameState`].
 use jni::errors::ThrowRuntimeExAndDefault;
-use jni::objects::{JByteArray, JClass, JObjectArray, JString};
+use jni::objects::{JByteArray, JClass, JDoubleArray, JIntArray, JString};
 use jni::sys::{jboolean, jint};
 use jni::EnvUnowned;
 
-use crate::proxies::{decode_stack, with_state, ChatMessage, ContainerClick, ContainerInput};
+use crate::proxies::{decode_stack, with_state, ChatMessage};
 
 pub(crate) extern "system" fn selected_slot<'l>(_env: EnvUnowned<'l>, _c: JClass<'l>) -> jint {
     with_state(|s| s.selected_slot)
@@ -57,24 +57,6 @@ pub(crate) extern "system" fn send_packet<'l>(
     .resolve::<ThrowRuntimeExAndDefault>()
 }
 
-pub(crate) extern "system" fn chat_lines<'l>(
-    mut env: EnvUnowned<'l>,
-    _c: JClass<'l>,
-) -> JObjectArray<'l, JString<'l>> {
-    let lines = with_state(|s| s.chat_lines.clone());
-    env.with_env(
-        |env| -> jni::errors::Result<JObjectArray<'l, JString<'l>>> {
-            let arr = JObjectArray::<JString>::new(env, lines.len(), JString::null())?;
-            for (i, l) in lines.iter().enumerate() {
-                let js = JString::from_str(env, l)?;
-                arr.set_element(env, i, &js)?;
-            }
-            Ok(arr)
-        },
-    )
-    .resolve::<ThrowRuntimeExAndDefault>()
-}
-
 pub(crate) extern "system" fn send_chat<'l>(
     mut env: EnvUnowned<'l>,
     _c: JClass<'l>,
@@ -89,21 +71,18 @@ pub(crate) extern "system" fn send_chat<'l>(
     .resolve::<ThrowRuntimeExAndDefault>()
 }
 
-pub(crate) extern "system" fn container_input<'l>(
-    _env: EnvUnowned<'l>,
+/// Copies the primitive player/debug state into Java's mirror arrays (one call per frame and tick).
+pub(crate) extern "system" fn mirror<'l>(
+    mut env: EnvUnowned<'l>,
     _c: JClass<'l>,
-    container: jint,
-    slot: jint,
-    button: jint,
-    input: jint,
+    ints: JIntArray<'l>,
+    doubles: JDoubleArray<'l>,
 ) {
-    let input = ContainerInput::from_id(input);
-    with_state(|s| {
-        s.container_clicks.push(ContainerClick {
-            container_id: container,
-            slot,
-            button,
-            input,
-        })
-    });
+    let (i, d) = with_state(|s| s.mirror());
+    env.with_env(|env| -> jni::errors::Result<()> {
+        ints.set_region(env, 0, &i)?;
+        doubles.set_region(env, 0, &d)?;
+        Ok(())
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }

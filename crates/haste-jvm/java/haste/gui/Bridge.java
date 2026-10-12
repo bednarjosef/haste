@@ -36,6 +36,7 @@ public final class Bridge {
         GfxImpl.width = 320;
         GfxImpl.height = 240;
         Proxies.create();
+        ClientImpl.running = true;
         return new Bridge();
     }
 
@@ -57,26 +58,60 @@ public final class Bridge {
     /** Name of the open screen's class (tests), or null. */
     public String screenName() { return ClientImpl.screen == null ? null : ClientImpl.screen.getClass().getName(); }
 
-    /** Runs the open screen's extraction into the batch and returns {int[] commands, String[] strings}. */
+    /**
+     * One frame: the vanilla HUD (when in a world) and then the open screen on top, like the game, into the batch.
+     * Returns {int[] commands, String[] strings}.
+     */
     public Object[] render(int width, int height, int scale, double mouseX, double mouseY, float partial) {
         ClientImpl.scale = scale;
+        Mirror.update();
         Screen s = ClientImpl.screen;
         if (s != null && (width != GfxImpl.width || height != GfxImpl.height)) {
             GfxImpl.width = width; GfxImpl.height = height;
             s.resize(width, height);
         }
         GfxImpl.begin(width, height);
+        if (Mirror.inWorld()) {
+            Delta.frame(partial);
+            Proxies.hud.extractRenderState(Proxies.graphics, Delta.INSTANCE);
+            GfxImpl.POSE.reset();
+        }
         s = ClientImpl.screen;
         if (s != null) s.extractRenderStateWithTooltipAndSubtitles(Proxies.graphics, (int) mouseX, (int) mouseY, partial);
         GfxImpl.end();
-        return GuiBatch.frame();
+        return GuiBatch.frame(GfxImpl.cursor);
     }
 
-    /** Ticks the open screen (20 Hz: cursor blink, chat history refresh). */
+    /** One 20 Hz client tick: the HUD (chat fade, titles, overlay message), the chat queue and the open screen. */
     public void tick() {
-        ClientImpl.guiTicks++;
+        Mirror.update();
+        if (Mirror.inWorld()) {
+            Proxies.hud.tick(false);
+            Proxies.chatListener.tick();
+            PlayerImpl.tickEffects();
+        }
         if (ClientImpl.screen != null) ClientImpl.screen.tick();
+        InventorySync.sync();
     }
+
+    /** The local player as the server introduced it (login packet, game profile). */
+    public void setPlayer(int entityId, String name, long uuidMost, long uuidLeast) {
+        Handlers.localEntityId = entityId;
+        Proxies.set(Proxies.player, "id", int.class, entityId);
+        java.util.UUID uuid = new java.util.UUID(uuidMost, uuidLeast);
+        Proxies.set(Proxies.player, "uuid", java.util.UUID.class, uuid);
+        Proxies.set(Proxies.player, "stringUUID", String.class, uuid.toString());
+        PlayerImpl.profile = new com.mojang.authlib.GameProfile(uuid, name);
+    }
+
+    /** The joined world's dimension type (its id in the synchronised dimension_type registry). */
+    public void setDimensionType(int id) { LevelImpl.dimensionTypeId = id; }
+
+    /** F1: hides or shows the HUD (vanilla's toggle). */
+    public void toggleHud() { Proxies.hud.toggle(); }
+
+    /** F3: shows or hides the debug overlay (Haste's stub). */
+    public void toggleDebug() { DebugImpl.shown = !DebugImpl.shown; }
 
     public boolean key(int key, int keycode, int mods, boolean pressed) {
         ClientImpl.mods = mods;

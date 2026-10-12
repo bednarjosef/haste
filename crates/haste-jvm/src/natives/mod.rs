@@ -34,19 +34,9 @@ pub(crate) fn register(env: &mut Env) -> Result<()> {
                 state::selected_slot as *mut _,
             ),
             NativeMethod::from_raw_parts(
-                jni_str!("chatLines"),
-                jni_str!("()[Ljava/lang/String;"),
-                state::chat_lines as *mut _,
-            ),
-            NativeMethod::from_raw_parts(
                 jni_str!("sendChat"),
                 jni_str!("(Ljava/lang/String;Z)V"),
                 state::send_chat as *mut _,
-            ),
-            NativeMethod::from_raw_parts(
-                jni_str!("containerInput"),
-                jni_str!("(IIII)V"),
-                state::container_input as *mut _,
             ),
             NativeMethod::from_raw_parts(
                 jni_str!("gameMode"),
@@ -67,6 +57,11 @@ pub(crate) fn register(env: &mut Env) -> Result<()> {
                 jni_str!("inventorySlot"),
                 jni_str!("(I[B)V"),
                 state::inventory_slot as *mut _,
+            ),
+            NativeMethod::from_raw_parts(
+                jni_str!("mirror"),
+                jni_str!("([I[D)V"),
+                state::mirror as *mut _,
             ),
             NativeMethod::from_raw_parts(
                 jni_str!("sendPacket"),

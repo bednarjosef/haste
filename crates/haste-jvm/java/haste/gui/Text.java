@@ -9,9 +9,9 @@ import net.minecraft.network.chat.TextColor;
 import net.minecraft.util.FormattedCharSequence;
 
 /**
- * Text flattening for the batch: a styled sequence becomes one TEXT command per colour run, each placed after
- * the previous run's measured width. Bold/italic/underline/obfuscated are not represented (GuiCommand::Text
- * has no style; see NOTES.md).
+ * Text flattening for the batch: a styled sequence becomes one command per run of equal colour and style, each
+ * placed after the previous run's measured width (TEXT, or STYLED_TEXT with bold/italic/underline/strikethrough/
+ * obfuscated flags). Fonts other than the default and click/hover events are not represented.
  */
 public final class Text {
     private Text() {}
@@ -71,31 +71,45 @@ public final class Text {
         emit(c.getVisualOrderText(), x, y, color, shadow);
     }
 
-    /** Emits a styled sequence as one TEXT per colour run. Returns the total advance. */
+    /**
+     * Emits a styled sequence as one command per run of equal colour and style flags: TEXT for plain runs,
+     * STYLED_TEXT (bold, italic, underline, strikethrough, obfuscated) otherwise. Returns the total advance.
+     */
     public static int emit(FormattedCharSequence seq, int x, int y, int color, boolean shadow) {
         if (seq == null) return 0;
         RUN.setLength(0);
-        int[] state = {x, x, 0}; // run start x, cursor x, run colour
-        Object[] last = {null};   // last TextColor (identity is fine: TextColor values are interned per colour)
+        int[] state = {x, x, 0, 0}; // run start x, cursor x, run colour, run style flags
         boolean[] started = {false};
         seq.accept((i, style, cp) -> {
             int c = colorOf(style, color);
-            if (started[0] && c != state[2]) {
-                flush(state[0], y, state[2], shadow);
+            int f = flags(style);
+            if (started[0] && (c != state[2] || f != state[3])) {
+                flush(state[0], y, state[2], shadow, state[3]);
                 state[0] = state[1];
             }
             started[0] = true;
             state[2] = c;
+            state[3] = f;
             RUN.appendCodePoint(cp);
             state[1] += (int) charWidth(cp, style);
             return true;
         });
-        if (started[0]) flush(state[0], y, state[2], shadow);
+        if (started[0]) flush(state[0], y, state[2], shadow, state[3]);
         return state[1] - x;
     }
 
-    private static void flush(int x, int y, int color, boolean shadow) {
-        if (RUN.length() > 0) GuiBatch.op(GuiBatch.TEXT, x, y, color, shadow ? 1 : 0, GuiBatch.str(RUN.toString()));
+    /** Style flags as GuiBatch encodes them. */
+    static int flags(Style s) {
+        if (s == null) return 0;
+        return (s.isBold() ? 1 : 0) | (s.isItalic() ? 2 : 0) | (s.isUnderlined() ? 4 : 0) | (s.isStrikethrough() ? 8 : 0)
+            | (s.isObfuscated() ? 16 : 0);
+    }
+
+    private static void flush(int x, int y, int color, boolean shadow, int flags) {
+        if (RUN.length() > 0) {
+            if (flags == 0) GuiBatch.op(GuiBatch.TEXT, x, y, color, shadow ? 1 : 0, GuiBatch.str(RUN.toString()));
+            else GuiBatch.ops(GuiBatch.STYLED_TEXT, x, y, color, shadow ? 1 : 0, GuiBatch.str(RUN.toString()), flags);
+        }
         RUN.setLength(0);
     }
 

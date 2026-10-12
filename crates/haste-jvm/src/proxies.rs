@@ -18,6 +18,163 @@ use parking_lot::Mutex;
 /// + body; Java reports the real size, the mirror grows to it).
 pub const INVENTORY_SIZE: usize = 41;
 
+/// The local player's primitive state the HUD reads (vanilla `Player` getters and fields on the
+/// player proxy). The client fills it from the packets (`set_health`, `set_experience`,
+/// `player_abilities`, `login`/`game_event` for the game mode) and its own physics (eyes in
+/// water); it is copied into Java once per frame and per tick (`haste.gui.Mirror`). The local
+/// player's synched entity data (air, absorption), effects and attributes are vanilla objects in
+/// Java, updated from the forwarded packets.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlayerVitals {
+    /// Health (0 = dead, 20 = full).
+    pub health: f32,
+    /// Food level 0-20.
+    pub food: i32,
+    /// Food saturation.
+    pub saturation: f32,
+    /// Progress to the next experience level, 0-1.
+    pub xp_progress: f32,
+    /// Experience level.
+    pub xp_level: i32,
+    /// Total experience points.
+    pub xp_total: i32,
+    /// The player's eyes are in water (air bubbles shown).
+    pub eye_in_water: bool,
+    /// Hardcore world (hardcore hearts).
+    pub hardcore: bool,
+    /// Abilities: invulnerable.
+    pub invulnerable: bool,
+    /// Abilities: flying.
+    pub flying: bool,
+    /// Abilities: may fly.
+    pub may_fly: bool,
+    /// Abilities: instant build (creative).
+    pub instabuild: bool,
+    /// Abilities: flying speed.
+    pub fly_speed: f32,
+    /// Abilities: walking speed (field of view modifier).
+    pub walk_speed: f32,
+}
+
+impl Default for PlayerVitals {
+    fn default() -> Self {
+        PlayerVitals {
+            health: 20.0,
+            food: 20,
+            saturation: 5.0,
+            xp_progress: 0.0,
+            xp_level: 0,
+            xp_total: 0,
+            eye_in_water: false,
+            hardcore: false,
+            invulnerable: false,
+            flying: false,
+            may_fly: false,
+            instabuild: false,
+            fly_speed: 0.05,
+            walk_speed: 0.1,
+        }
+    }
+}
+
+/// What the F3 overlay shows (a Haste stub, see `NOTES.md`): filled by the client every frame.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DebugInfo {
+    /// Frames per second.
+    pub fps: i32,
+    /// Feet position.
+    pub pos: [f64; 3],
+    /// Yaw and pitch in degrees.
+    pub rot: [f32; 2],
+    /// Loaded chunks.
+    pub chunks: i32,
+    /// Chunk sections drawn / total.
+    pub sections_drawn: i32,
+    /// Chunk sections total.
+    pub sections_total: i32,
+    /// Entities tracked.
+    pub entities: i32,
+}
+
+/// Layout of the per-frame mirror arrays (`haste.gui.Mirror` in Java has the same numbers).
+pub(crate) mod mirror {
+    pub const I_SELECTED: usize = 0;
+    pub const I_GAME_MODE: usize = 1;
+    pub const I_PERMISSION: usize = 2;
+    pub const I_FOOD: usize = 3;
+    pub const I_XP_LEVEL: usize = 4;
+    pub const I_XP_TOTAL: usize = 5;
+    pub const I_FLAGS: usize = 6;
+    pub const I_FPS: usize = 7;
+    pub const I_CHUNKS: usize = 8;
+    pub const I_SECTIONS_DRAWN: usize = 9;
+    pub const I_SECTIONS_TOTAL: usize = 10;
+    pub const I_ENTITIES: usize = 11;
+    pub const INTS: usize = 12;
+    pub const D_HEALTH: usize = 0;
+    pub const D_SATURATION: usize = 1;
+    pub const D_XP_PROGRESS: usize = 2;
+    pub const D_FLY_SPEED: usize = 3;
+    pub const D_WALK_SPEED: usize = 4;
+    pub const D_X: usize = 5;
+    pub const D_Y: usize = 6;
+    pub const D_Z: usize = 7;
+    pub const D_YAW: usize = 8;
+    pub const D_PITCH: usize = 9;
+    pub const D_GAME_TIME: usize = 10;
+    pub const D_DAY_TIME: usize = 11;
+    pub const DOUBLES: usize = 12;
+    pub const F_HARDCORE: i32 = 1;
+    pub const F_EYE_IN_WATER: i32 = 2;
+    pub const F_INVULNERABLE: i32 = 4;
+    pub const F_FLYING: i32 = 8;
+    pub const F_MAY_FLY: i32 = 16;
+    pub const F_INSTABUILD: i32 = 32;
+    pub const F_IN_WORLD: i32 = 64;
+}
+
+impl GameState {
+    /// The mirror arrays Java copies into the proxies (layout in [`mirror`]).
+    pub(crate) fn mirror(&self) -> ([i32; mirror::INTS], [f64; mirror::DOUBLES]) {
+        use mirror::*;
+        let v = &self.vitals;
+        let mut i = [0i32; INTS];
+        let mut d = [0f64; DOUBLES];
+        i[I_SELECTED] = self.selected_slot;
+        i[I_GAME_MODE] = self.game_mode as i32;
+        i[I_PERMISSION] = i32::from(self.permission_level);
+        i[I_FOOD] = v.food;
+        i[I_XP_LEVEL] = v.xp_level;
+        i[I_XP_TOTAL] = v.xp_total;
+        let flag = |b: bool, f: i32| if b { f } else { 0 };
+        i[I_FLAGS] = flag(v.hardcore, F_HARDCORE)
+            | flag(v.eye_in_water, F_EYE_IN_WATER)
+            | flag(v.invulnerable, F_INVULNERABLE)
+            | flag(v.flying, F_FLYING)
+            | flag(v.may_fly, F_MAY_FLY)
+            | flag(v.instabuild, F_INSTABUILD)
+            | flag(self.in_world, F_IN_WORLD);
+        i[I_FPS] = self.debug.fps;
+        i[I_CHUNKS] = self.debug.chunks;
+        i[I_SECTIONS_DRAWN] = self.debug.sections_drawn;
+        i[I_SECTIONS_TOTAL] = self.debug.sections_total;
+        i[I_ENTITIES] = self.debug.entities;
+        d[D_HEALTH] = f64::from(v.health);
+        d[D_SATURATION] = f64::from(v.saturation);
+        d[D_XP_PROGRESS] = f64::from(v.xp_progress);
+        d[D_FLY_SPEED] = f64::from(v.fly_speed);
+        d[D_WALK_SPEED] = f64::from(v.walk_speed);
+        d[D_X] = self.debug.pos[0];
+        d[D_Y] = self.debug.pos[1];
+        d[D_Z] = self.debug.pos[2];
+        d[D_YAW] = f64::from(self.debug.rot[0]);
+        d[D_PITCH] = f64::from(self.debug.rot[1]);
+        d[D_GAME_TIME] = self.game_time as f64;
+        d[D_DAY_TIME] = self.day_time as f64;
+        (i, d)
+    }
+}
+
 /// A chat line or command a screen sent (the client forwards it to the server).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatMessage {
@@ -25,59 +182,6 @@ pub struct ChatMessage {
     pub text: String,
     /// True for commands.
     pub command: bool,
-}
-
-/// Vanilla's `ContainerInput` (the click type of the container-click packet; ids are its ordinals).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ContainerInput {
-    /// Normal click (pick up / put down / swap with carried).
-    Pickup,
-    /// Shift-click.
-    QuickMove,
-    /// Number key or offhand swap (button = hotbar slot, 40 = offhand).
-    Swap,
-    /// Middle click in creative.
-    Clone,
-    /// Drop key over a slot.
-    Throw,
-    /// Drag distribution.
-    QuickCraft,
-    /// Double click: collect all of the kind.
-    PickupAll,
-    /// The container was closed (`LocalPlayer.closeContainer`; slot and button are -1).
-    Close,
-    /// An id this crate does not know.
-    Unknown(i32),
-}
-
-impl ContainerInput {
-    /// From vanilla's ordinal.
-    pub fn from_id(id: i32) -> Self {
-        match id {
-            0 => Self::Pickup,
-            1 => Self::QuickMove,
-            2 => Self::Swap,
-            3 => Self::Clone,
-            4 => Self::Throw,
-            5 => Self::QuickCraft,
-            6 => Self::PickupAll,
-            -1 => Self::Close,
-            n => Self::Unknown(n),
-        }
-    }
-}
-
-/// A click in a container screen, to be sent to the server by the client (Rust owns the inventory).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ContainerClick {
-    /// Menu id (0 = the player's own inventory menu).
-    pub container_id: i32,
-    /// Menu slot index (inventory menu: 0 result, 1-4 crafting, 5-8 armour, 9-35 main, 36-44 hotbar, 45 offhand), -999 outside.
-    pub slot: i32,
-    /// Mouse button or hotbar key, as vanilla passes it.
-    pub button: i32,
-    /// Click type.
-    pub input: ContainerInput,
 }
 
 /// The game state the proxies read. Owned by Rust; the client updates it (e.g. from packets) and
@@ -92,18 +196,24 @@ pub struct GameState {
     pub carried: ItemStackData,
     /// Selected hotbar slot (0-8).
     pub selected_slot: i32,
-    /// Chat history shown by the chat screen, oldest first.
-    pub chat_lines: Vec<String>,
     /// Messages the chat screen sent since the last [`GameState::take_sent`].
     pub sent: Vec<ChatMessage>,
     /// Local player name.
     pub player_name: String,
-    /// Container clicks from screens since the last [`GameState::take_container_clicks`].
-    pub container_clicks: Vec<ContainerClick>,
     /// Local player's game mode (creative has infinite materials).
     pub game_mode: GameMode,
     /// Operator permission level 0-4 (entity events 24-28 for the local player).
     pub permission_level: u8,
+    /// The local player's health, food, experience, abilities, ...
+    pub vitals: PlayerVitals,
+    /// What the F3 overlay shows.
+    pub debug: DebugInfo,
+    /// Joined a world (the HUD is drawn; before that only screens).
+    pub in_world: bool,
+    /// World age in ticks (`set_time`).
+    pub game_time: i64,
+    /// Time of day in ticks (`set_time`).
+    pub day_time: i64,
     /// Serverbound play packets vanilla code sent (VarInt id + body, vanilla's encoding), oldest first.
     pub outgoing: Vec<Vec<u8>>,
 }
@@ -114,12 +224,15 @@ impl Default for GameState {
             inventory: vec![empty_stack(); INVENTORY_SIZE],
             carried: empty_stack(),
             selected_slot: 0,
-            chat_lines: Vec::new(),
             sent: Vec::new(),
             player_name: "Player".to_owned(),
             game_mode: GameMode::Survival,
             permission_level: 0,
-            container_clicks: Vec::new(),
+            vitals: PlayerVitals::default(),
+            debug: DebugInfo::default(),
+            in_world: false,
+            game_time: 0,
+            day_time: 0,
             outgoing: Vec::new(),
         }
     }
@@ -156,10 +269,6 @@ impl GameState {
             self.inventory.resize(i + 1, empty_stack());
         }
         self.inventory[i] = stack;
-    }
-    /// Drains the container clicks made in screens.
-    pub fn take_container_clicks(&mut self) -> Vec<ContainerClick> {
-        std::mem::take(&mut self.container_clicks)
     }
     /// Drains the messages sent by screens.
     pub fn take_sent(&mut self) -> Vec<ChatMessage> {

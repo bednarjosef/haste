@@ -128,16 +128,16 @@ fn tier3_value_types_from_the_jar() {
     let refused = h
         .with_env(|env| {
             Ok(
-                h.load_class(env, "net.minecraft.client.renderer.GameRenderer")
+                h.load_class(env, "net.minecraft.client.renderer.LevelRenderer")
                     .is_err(),
             )
         })
         .unwrap();
-    assert!(refused, "GameRenderer must be refused");
+    assert!(refused, "LevelRenderer must be refused");
     let log = h.class_log().unwrap();
     assert!(matches!(
         log.classes
-            .get("net.minecraft.client.renderer.GameRenderer"),
+            .get("net.minecraft.client.renderer.LevelRenderer"),
         Some(ClassSource::Refused(_))
     ));
     // registry data is real vanilla Java (vanilla's bootstrap ran)
@@ -407,10 +407,13 @@ fn chat_screen() {
     let h = host();
     let gui = h.gui();
     h.clear_unimplemented().unwrap();
+    // received chat goes through vanilla's chat pipeline into the HUD's chat, which the open chat screen shows
     gui.with_state(|s| {
-        s.chat_lines = vec!["<Alex> hello".into(), "<Steve> hi there".into()];
+        s.in_world = true;
         s.sent.clear();
     });
+    gui.packet(&system_chat("<Alex> hello", false)).unwrap();
+    gui.packet(&system_chat("<Steve> hi there", false)).unwrap();
     open(&h, haste_jvm::ScreenKind::Chat);
     assert_eq!(
         gui.screen_class().as_deref(),
@@ -489,13 +492,14 @@ fn chat_screen() {
         unimpl.is_empty(),
         "Unimplemented log for ChatScreen: {unimpl:#?}"
     );
+    gui.with_state(|s| s.in_world = false);
 }
 
 #[test]
 #[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
 fn inventory_screen() {
     use haste_core::gui::GuiCommand;
-    use haste_jvm::{keys, ContainerInput};
+    use haste_jvm::keys;
     let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
     let h = host();
     let gui = h.gui();
@@ -508,7 +512,7 @@ fn inventory_screen() {
         .unwrap(); // hotbar slot 0
     gui.set_inventory_slot(9, &stack("minecraft:oak_planks", 3))
         .unwrap(); // first main slot
-    gui.with_state(|s| s.container_clicks.clear());
+    gui.with_state(|s| s.outgoing.clear());
     // Rust's mirror follows Java's inventory
     assert_eq!(
         gui.with_state(|s| s.slot(0).cloned()),
@@ -573,33 +577,45 @@ fn inventory_screen() {
         texts(&f)
     );
 
-    // clicking a slot sends a container click to Rust (menu slot 36 = hotbar 0)
+    // clicking a slot runs vanilla's click prediction (the stack moves to the cursor) and sends a
+    // container_click (menu slot 36 = hotbar 0) with the changed slot and the carried stack, hashed
     assert!(
         gui.mouse(hot.0, hot.1, Some((keys::MOUSE_LEFT, true))),
         "{:?}",
         gui.take_last_error()
     );
     gui.mouse(hot.0, hot.1, Some((keys::MOUSE_LEFT, false)));
-    let clicks = gui.with_state(|s| s.take_container_clicks());
-    eprintln!("clicks: {clicks:?}");
+    let sent = outgoing(&h);
+    let click = sent
+        .iter()
+        .find(|(id, _)| *id == serverbound_id("minecraft:container_click"))
+        .expect("container_click sent");
+    let (window, state, slot, button, mode) = container_click_header(&click.1);
     assert_eq!(
-        clicks.first().map(|c| (c.container_id, c.slot, c.input)),
-        Some((0, 36, ContainerInput::Pickup))
+        (window, slot, button, mode),
+        (0, 36, 0, 0),
+        "state id {state}"
+    );
+    // the prediction is mirrored into Rust: the slot is empty, the cursor carries the stone
+    assert!(gui.with_state(|s| s.slot(0).is_none()));
+    assert_eq!(
+        gui.with_state(|s| s.carried.clone()),
+        stack("minecraft:stone", 64)
     );
 
     // inventory changes show up on the next frame
-    gui.set_inventory_slot(0, &stack("minecraft:stone", 12))
+    gui.set_inventory_slot(9, &stack("minecraft:stone", 12))
         .unwrap();
     assert!(texts(&render(&h, (0.0, 0.0))).contains(&"12".to_string()));
 
-    // E (the inventory key) closes the screen
+    // E (the inventory key) closes the screen and tells the server (container_close for window 0)
     assert!(press(&h, keys::E));
     assert!(!gui.is_open());
-    assert_eq!(
-        gui.with_state(|s| s.take_container_clicks())
-            .last()
-            .map(|c| c.input),
-        Some(ContainerInput::Close)
+    let sent = outgoing(&h);
+    assert!(
+        sent.iter()
+            .any(|(id, body)| *id == serverbound_id("minecraft:container_close") && body == &[0]),
+        "{sent:?}"
     );
 
     let unimpl = h.unimplemented().unwrap();
@@ -660,4 +676,164 @@ fn builtin_registries_match_the_data_generator() {
         "{} built-in registries, {checked} entries: same ids in Java and in the data generator reports",
         v.as_object().unwrap().len()
     );
+}
+
+/// Play packet id from the data generator's `packets.json`.
+fn packet_id(name: &str) -> u8 {
+    let reports = cache().join("datagen/26.3/reports/packets.json");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(reports).unwrap()).unwrap();
+    let id = v["play"]["clientbound"][name]["protocol_id"]
+        .as_u64()
+        .unwrap();
+    assert!(id < 128, "one-byte VarInt");
+    id as u8
+}
+
+/// `system_chat` with a plain string component (network NBT: a bare TAG_String).
+fn system_chat(text: &str, overlay: bool) -> Vec<u8> {
+    let mut b = vec![packet_id("minecraft:system_chat"), 8];
+    b.extend_from_slice(&(text.len() as u16).to_be_bytes());
+    b.extend_from_slice(text.as_bytes());
+    b.push(u8::from(overlay));
+    b
+}
+
+fn sprite_at(f: &haste_core::gui::GuiFrame, name: &str) -> Vec<(i32, i32, i32, i32)> {
+    sprites(f)
+        .into_iter()
+        .filter(|s| s.0 == name)
+        .map(|s| (s.1, s.2, s.3, s.4))
+        .collect()
+}
+
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM, data generator reports)"]
+fn hud_frame() {
+    use haste_core::gui::GuiCommand;
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    gui.close_screen();
+    h.clear_unimplemented().unwrap();
+    for slot in 0..41 {
+        gui.set_inventory_slot(slot, &haste_jvm::empty_stack())
+            .unwrap();
+    }
+    gui.set_inventory_slot(0, &stack("minecraft:stone", 64))
+        .unwrap();
+    gui.set_inventory_slot(2, &stack("minecraft:oak_planks", 7))
+        .unwrap();
+    gui.with_state(|s| {
+        s.in_world = true;
+        s.selected_slot = 2;
+        s.game_mode = haste_core::game::GameMode::Survival;
+        s.vitals.health = 15.0;
+        s.vitals.food = 17;
+        s.vitals.xp_level = 5;
+        s.vitals.xp_progress = 0.5;
+    });
+    gui.packet(&system_chat("Hello from the server", false))
+        .unwrap();
+    gui.tick();
+    let f = render(&h, (0.0, 0.0));
+    dump(&f);
+    // the hotbar, centred at the bottom of a 320x240 GUI
+    assert_eq!(
+        sprite_at(&f, "minecraft:hud/hotbar"),
+        vec![(160 - 91, 240 - 22, 182, 22)]
+    );
+    // the selection frame over slot 2
+    let sel = sprite_at(&f, "minecraft:hud/hotbar_selection");
+    assert_eq!(sel.len(), 1, "{sel:?}");
+    assert_eq!(sel[0].0, 160 - 91 - 1 + 2 * 20);
+    let items: Vec<_> = f
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            GuiCommand::Item { item, x, y, count } => Some((item.0, *x, *y, *count)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        items.contains(&(item_id("minecraft:stone"), 160 - 90 + 2, 240 - 16 - 3, 64)),
+        "{items:?}"
+    );
+    assert!(
+        items.contains(&(
+            item_id("minecraft:oak_planks"),
+            160 - 90 + 2 + 40,
+            240 - 16 - 3,
+            7
+        )),
+        "{items:?}"
+    );
+    // 15 health: 7 full hearts and a half one; 17 food: 8 full shanks and a half one
+    assert_eq!(sprite_at(&f, "minecraft:hud/heart/full").len(), 7);
+    assert_eq!(sprite_at(&f, "minecraft:hud/heart/half").len(), 1);
+    assert_eq!(sprite_at(&f, "minecraft:hud/food_full").len(), 8);
+    assert_eq!(sprite_at(&f, "minecraft:hud/food_half").len(), 1);
+    // the experience bar and level
+    assert!(!sprite_at(&f, "minecraft:hud/experience_bar_background").is_empty());
+    let t = texts(&f);
+    assert!(t.contains(&"5".to_string()), "xp level: {t:?}");
+    // the chat line through vanilla's ChatComponent
+    assert!(
+        t.iter().any(|x| x.contains("Hello from the server")),
+        "chat: {t:?}"
+    );
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for the HUD: {unimpl:#?}"
+    );
+    gui.with_state(|s| s.in_world = false);
+}
+
+/// Serverbound play packet id from the data generator's `packets.json`.
+fn serverbound_id(name: &str) -> i32 {
+    let reports = cache().join("datagen/26.3/reports/packets.json");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(reports).unwrap()).unwrap();
+    v["play"]["serverbound"][name]["protocol_id"]
+        .as_i64()
+        .unwrap() as i32
+}
+
+fn var_int(b: &[u8], i: &mut usize) -> i32 {
+    let mut v: u32 = 0;
+    for shift in (0..35).step_by(7) {
+        let x = b[*i];
+        *i += 1;
+        v |= u32::from(x & 0x7f) << shift;
+        if x & 0x80 == 0 {
+            break;
+        }
+    }
+    v as i32
+}
+
+/// Drains the serverbound packets vanilla code sent: (id, body).
+fn outgoing(h: &JvmHost) -> Vec<(i32, Vec<u8>)> {
+    h.gui()
+        .with_state(|s| s.take_outgoing())
+        .into_iter()
+        .map(|p| {
+            let mut i = 0;
+            let id = var_int(&p, &mut i);
+            (id, p[i..].to_vec())
+        })
+        .collect()
+}
+
+/// container_click body: window (VarInt), state id (VarInt), slot (i16), button (i8), mode (VarInt).
+fn container_click_header(b: &[u8]) -> (i32, i32, i16, i8, i32) {
+    let mut i = 0;
+    let window = var_int(b, &mut i);
+    let state = var_int(b, &mut i);
+    let slot = i16::from_be_bytes([b[i], b[i + 1]]);
+    let button = b[i + 2] as i8;
+    i += 3;
+    let mode = var_int(b, &mut i);
+    (window, state, slot, button, mode)
 }

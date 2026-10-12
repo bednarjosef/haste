@@ -32,6 +32,10 @@ pub struct JvmConfig {
     pub proxies_conf: PathBuf,
     /// Where generated proxies are written at startup (`cache/proxies/26.3-<checkout hash>`).
     pub proxy_dir: PathBuf,
+    /// The directory vanilla code sees as the game directory (`Minecraft.gameDirectory`). Haste
+    /// keeps every file vanilla would write in memory or in Rust; this is where anything that still
+    /// writes ends up (`cache/jvm-game` by default).
+    pub game_dir: PathBuf,
     /// Extra JVM options (e.g. `-Xmx512m`).
     pub jvm_options: Vec<String>,
     /// Print refused classes to stderr as they happen.
@@ -89,6 +93,7 @@ impl JvmConfig {
                 haste_core::paths::MC_VERSION,
                 fnv1a(crate_dir.to_string_lossy().as_bytes())
             )),
+            game_dir: cache.join("jvm-game"),
             jvm_options: Vec::new(),
             verbose: std::env::var_os("HASTE_JVM_VERBOSE").is_some(),
         };
@@ -402,6 +407,7 @@ fn boot_config(cfg: &JvmConfig) -> String {
     kv("proxyDir", &cfg.proxy_dir.display().to_string());
     kv("proxiesConf", &cfg.proxies_conf.display().to_string());
     kv("verbose", if cfg.verbose { "true" } else { "false" });
+    kv("minecraftDir", &cfg.game_dir.display().to_string());
     for l in &cfg.libraries {
         kv("lib", &l.display().to_string());
     }

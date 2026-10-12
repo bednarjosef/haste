@@ -9,8 +9,8 @@
 //! SDL keymod bits for `mods`), see [`crate::keys`]. Mouse buttons: 1 left, 2 middle, 3 right.
 use std::sync::Arc;
 
-use haste_core::gui::{GuiCommand, GuiFrame, TextMetrics};
-use haste_core::{Identifier, RegistryIndex};
+use haste_core::gui::{CursorShape, GuiCommand, GuiFrame, TextMetrics, TextStyle};
+use haste_core::{EntityId, Identifier, RegistryIndex};
 use jni::objects::{JIntArray, JObject, JObjectArray, JString};
 use jni::refs::Global;
 use jni::signature::{JavaType, Primitive};
@@ -257,15 +257,17 @@ impl GuiPipeline {
         }
     }
 
-    /// Ticks the open screen (call at 20 Hz from the game thread's tick, like vanilla).
+    /// One 20 Hz client tick (call from the game thread's tick, like vanilla): the HUD's timers
+    /// (chat fade, titles, action bar), the chat queue, effect durations and the open screen.
     pub fn tick(&self) {
         if let Err(e) = self.call(self.m.tick, VOID, &[], |_, _| Ok(())) {
             self.failed("tick", e);
         }
     }
 
-    /// Runs the screen's `extractRenderStateWithTooltipAndSubtitles` into the batch and returns the
-    /// frame: ONE JNI call plus one drain of its two arrays. `width`/`height` are GUI-scaled.
+    /// One GUI frame: the vanilla HUD (`Hud.extractRenderState`, once [`GameState::in_world`] is
+    /// set) and the open screen's `extractRenderStateWithTooltipAndSubtitles` on top, into the
+    /// batch: ONE JNI call plus one drain of its two arrays. `width`/`height` are GUI-scaled.
     pub fn render(
         &self,
         width: u32,
@@ -282,7 +284,7 @@ impl GuiPipeline {
             jvalue { d: mouse.1 },
             jvalue { f: partial },
         ];
-        let commands = self.call(self.m.render, JavaType::Array, &args, |env, v| {
+        let (commands, cursor) = self.call(self.m.render, JavaType::Array, &args, |env, v| {
             decode_frame(env, v.l()?)
         })?;
         Ok(GuiFrame {
@@ -290,7 +292,7 @@ impl GuiPipeline {
             scale,
             width,
             height,
-            cursor: None,
+            cursor,
         })
     }
 
@@ -403,6 +405,67 @@ impl GuiPipeline {
         Ok(())
     }
 
+    /// The local player as the server introduced it: entity id (from `login`; effect, attribute
+    /// and entity-data packets for this id update the player proxy), name and profile id.
+    pub fn set_player(&self, entity_id: i32, name: &str, uuid: u128) -> anyhow::Result<()> {
+        self.with_bridge(|env, bridge| {
+            let n = JString::from_str(env, name)?;
+            env.call_method(
+                bridge,
+                jni_str!("setPlayer"),
+                jni_sig!("(ILjava/lang/String;JJ)V"),
+                &[
+                    jni::objects::JValue::Int(entity_id),
+                    (&n).into(),
+                    jni::objects::JValue::Long((uuid >> 64) as i64),
+                    jni::objects::JValue::Long(uuid as u64 as i64),
+                ],
+            )?;
+            Ok(())
+        })?;
+        with_state(|s| s.player_name = name.to_owned());
+        Ok(())
+    }
+
+    /// The joined world's dimension type: its id in the synchronised `minecraft:dimension_type`
+    /// registry (from `login`/`respawn`).
+    pub fn set_dimension_type(&self, id: i32) {
+        if let Err(e) = self.with_bridge(|env, bridge| {
+            env.call_method(
+                bridge,
+                jni_str!("setDimensionType"),
+                jni_sig!("(I)V"),
+                &[jni::objects::JValue::Int(id)],
+            )?;
+            Ok(())
+        }) {
+            self.failed("set_dimension_type", e);
+        }
+    }
+
+    /// F1: hides or shows the HUD (vanilla `Hud.toggle`).
+    pub fn toggle_hud(&self) {
+        if let Err(e) = self.call_void("toggleHud") {
+            self.failed("toggle_hud", e);
+        }
+    }
+
+    /// F3: shows or hides the debug overlay (Haste's stub: FPS, position, chunk and entity counts
+    /// from [`GameState::debug`]).
+    pub fn toggle_debug(&self) {
+        if let Err(e) = self.call_void("toggleDebug") {
+            self.failed("toggle_debug", e);
+        }
+    }
+
+    fn call_void(&self, name: &'static str) -> Result<()> {
+        self.with_bridge(|env, bridge| {
+            let name = jni::strings::JNIString::new(name);
+            env.call_method(bridge, &name, jni_sig!("()V"), &[])?;
+            Ok(())
+        })
+    }
+
     /// Every registry Java sees with its size (built-in from vanilla's bootstrap, plus the
     /// synchronised ones after [`Self::finish_configuration`]).
     pub fn registry_sizes(&self) -> anyhow::Result<std::collections::BTreeMap<String, usize>> {
@@ -462,9 +525,27 @@ const SCISSOR_PUSH: i32 = 7;
 const SCISSOR_POP: i32 = 8;
 const TRANSLATE_PUSH: i32 = 9;
 const TRANSLATE_POP: i32 = 10;
+const SPRITE_REGION: i32 = 11;
+const STYLED_TEXT: i32 = 12;
+const ENTITY: i32 = 13;
 
-fn decode_frame(env: &mut Env, frame: JObject) -> Result<Vec<GuiCommand>> {
-    // Safety: Bridge.render returns Object[]{int[], String[]}.
+/// The cursor shape for a code from `GuiBatch.frame` (`None` = the default arrow).
+fn cursor_shape(code: i32) -> Option<CursorShape> {
+    Some(match code {
+        1 => CursorShape::Arrow,
+        2 => CursorShape::IBeam,
+        3 => CursorShape::Crosshair,
+        4 => CursorShape::PointingHand,
+        5 => CursorShape::ResizeNs,
+        6 => CursorShape::ResizeEw,
+        7 => CursorShape::ResizeAll,
+        8 => CursorShape::NotAllowed,
+        _ => return None,
+    })
+}
+
+fn decode_frame(env: &mut Env, frame: JObject) -> Result<(Vec<GuiCommand>, Option<CursorShape>)> {
+    // Safety: Bridge.render returns Object[]{int[], String[], int[1]}.
     let frame = unsafe { JObjectArray::<JObject>::from_raw(env, frame.into_raw()) };
     let ints = frame.get_element(env, 0)?;
     let ints = unsafe { JIntArray::from_raw(env, ints.into_raw()) };
@@ -480,7 +561,11 @@ fn decode_frame(env: &mut Env, frame: JObject) -> Result<Vec<GuiCommand>> {
         strings.push(s.try_to_string(env)?);
         env.delete_local_ref(s);
     }
-    decode(&buf, &strings)
+    let cur = frame.get_element(env, 2)?;
+    let cur = unsafe { JIntArray::from_raw(env, cur.into_raw()) };
+    let mut code = [0i32; 1];
+    cur.get_region(env, 0, &mut code)?;
+    Ok((decode(&buf, &strings)?, cursor_shape(code[0])))
 }
 
 /// Decodes a frame's int records and string table into commands.
@@ -609,6 +694,55 @@ pub(crate) fn decode(b: &[i32], strings: &[String]) -> Result<Vec<GuiCommand>> {
                 out.push(GuiCommand::TranslatePop);
                 i += 1;
             }
+            SPRITE_REGION => {
+                need(11)?;
+                out.push(GuiCommand::SpriteRegion {
+                    sprite: ident(b[i + 1])?,
+                    sprite_w: b[i + 2],
+                    sprite_h: b[i + 3],
+                    u: b[i + 4],
+                    v: b[i + 5],
+                    x: b[i + 6],
+                    y: b[i + 7],
+                    w: b[i + 8],
+                    h: b[i + 9],
+                    tint: b[i + 10] as u32,
+                });
+                i += 11;
+            }
+            STYLED_TEXT => {
+                need(7)?;
+                let fl = b[i + 6];
+                out.push(GuiCommand::StyledText {
+                    x: b[i + 1],
+                    y: b[i + 2],
+                    color: b[i + 3] as u32,
+                    shadow: b[i + 4] != 0,
+                    text: s(b[i + 5])?,
+                    style: TextStyle {
+                        bold: fl & 1 != 0,
+                        italic: fl & 2 != 0,
+                        underline: fl & 4 != 0,
+                        strikethrough: fl & 8 != 0,
+                        obfuscated: fl & 16 != 0,
+                    },
+                });
+                i += 7;
+            }
+            ENTITY => {
+                need(9)?;
+                out.push(GuiCommand::Entity {
+                    entity: EntityId(b[i + 1]),
+                    x1: b[i + 2],
+                    y1: b[i + 3],
+                    x2: b[i + 4],
+                    y2: b[i + 5],
+                    scale: f(b[i + 6] as u32),
+                    mouse_x: f(b[i + 7] as u32),
+                    mouse_y: f(b[i + 8] as u32),
+                });
+                i += 9;
+            }
             op => return Err(bad(&format!("opcode {op}"))),
         }
     }
@@ -683,9 +817,55 @@ mod tests {
             fb(-2.0),
             fb(0.0),
             TRANSLATE_POP,
+            SPRITE_REGION,
+            1,
+            182,
+            5,
+            0,
+            0,
+            10,
+            20,
+            91,
+            5,
+            -1,
+            STYLED_TEXT,
+            1,
+            2,
+            0xFFFFFF,
+            0,
+            0,
+            1 | 4,
+            ENTITY,
+            42,
+            1,
+            2,
+            3,
+            4,
+            fb(30.0),
+            fb(5.5),
+            fb(6.5),
         ];
         let c = decode(&b, &strings).unwrap();
-        assert_eq!(c.len(), 10);
+        assert_eq!(c.len(), 13);
+        assert!(
+            matches!(&c[10], GuiCommand::SpriteRegion { sprite, sprite_w: 182, w: 91, x: 10, .. } if sprite.path() == "widget/button")
+        );
+        assert!(
+            matches!(&c[11], GuiCommand::StyledText { style, text, .. } if style.bold && style.underline && !style.italic && text == "hi")
+        );
+        assert_eq!(
+            c[12],
+            GuiCommand::Entity {
+                entity: EntityId(42),
+                x1: 1,
+                y1: 2,
+                x2: 3,
+                y2: 4,
+                scale: 30.0,
+                mouse_x: 5.5,
+                mouse_y: 6.5
+            }
+        );
         assert_eq!(
             c[0],
             GuiCommand::Fill {
