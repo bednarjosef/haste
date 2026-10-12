@@ -712,7 +712,9 @@ mod tests {
     #[ignore = "needs the spike cache (~140 MB tarball)"]
     async fn untar_extracts_real_temurin() {
         // The spike checkout next to this repo (override with HASTE_SPIKE); ignored test.
-        let spike = std::env::var("HASTE_SPIKE").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../../haste-spike").to_string());
+        let spike = std::env::var("HASTE_SPIKE").unwrap_or_else(|_| {
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../../haste-spike").to_string()
+        });
         let archive = std::path::PathBuf::from(spike).join("cache/dl/jdk25.tar.gz");
         let archive = archive.as_path();
         if !archive.is_file() {
