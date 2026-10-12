@@ -1,4 +1,4 @@
-//! Chunk storage, paletted containers, lighting data, block updates. Owner: WS2.
+//! Chunk storage, paletted containers, lighting data, block updates. Owner: world-and-data.
 //!
 //! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
 

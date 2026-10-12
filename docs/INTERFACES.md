@@ -3,7 +3,7 @@
 Owned by the lead. Signatures here are the agreement; implementers may add methods but not change
 or remove these without asking. Types without a crate prefix are from `haste_core`.
 
-## haste-data (WS2)
+## haste-data (world-and-data)
 
 ```rust
 pub struct GameData { pub blocks: BlockStates, pub registries: Registries, pub shapes: BlockShapes }
@@ -43,7 +43,7 @@ sugar_cane, kelp, seagrass, lily, dead_bush, cobweb, redstone_wire, tripwire, st
 pointed_dripstone(half), snow (height 1/8 per layer property), slab (half), stairs (half cube).
 Document the fallback as approximate; the oracle file replaces it.
 
-## haste-protocol (WS1)
+## haste-protocol (protocol)
 
 ```rust
 pub enum Account { Offline { username: String }, Microsoft(MsaTokens) }
@@ -72,7 +72,7 @@ positions are `BlockPos` (packed long) / `DVec3`. Packet ids are loaded from
 Keep-alive is answered inside the connection task. Unknown packets are delivered as `Unknown` and
 counted, never dropped silently.
 
-## haste-world (WS2)
+## haste-world (world-and-data)
 
 ```rust
 pub struct World { .. }
@@ -94,7 +94,7 @@ pub struct PalettedContainer<T> { .. }   // vanilla wire format: single value / 
 pub struct SectionSnapshot { .. }  impl SectionSnapshot + SectionView: get(x,y,z) incl. neighbours in -1..=16, sky/block light likewise
 ```
 
-## haste-assets (WS3)
+## haste-assets (renderer)
 
 ```rust
 pub struct Assets { .. }
@@ -110,10 +110,10 @@ impl Assets {
 pub struct BakedBlockModels { .. }  // per BlockStateId: list of quads (positions, uv in atlas, normal/face, cull face, tint index, ambient occlusion flag)
 impl BakedBlockModels { pub fn bake(assets: &Assets, states: &dyn haste_core::view::BlockStateTable, atlas: &mut AtlasBuilder) -> anyhow::Result<Self>; pub fn quads(&self, s: BlockStateId) -> &[BakedQuad]; pub fn is_full_opaque(&self, s: BlockStateId) -> bool; pub fn render_layer(&self, s: BlockStateId) -> RenderLayer }
 // `haste_data::BlockStates` implements `BlockStateTable`; the atlas is built during baking (textures are discovered then).
-// 26.3 facts (WS3): the jar carries the full asset tree (no extracted objects dir needed); blockstate variant keys are partial (missing properties are wildcards, most specific wins); models have no `render_type`, the layer is a documented heuristic.
+// 26.3 facts (renderer): the jar carries the full asset tree (no extracted objects dir needed); blockstate variant keys are partial (missing properties are wildcards, most specific wins); models have no `render_type`, the layer is a documented heuristic.
 ```
 
-## haste-render (WS3)
+## haste-render (renderer)
 
 ```rust
 pub struct Renderer { .. }
@@ -132,7 +132,7 @@ pub struct FrameStats { pub frame_ms: f32, pub chunk_sections_drawn: u32, pub ch
 ```
 Meshing runs on a thread pool from `SectionSnapshot`s; the render thread never blocks on it.
 
-## haste-entity (WS4)
+## haste-entity (entities)
 
 ```rust
 pub struct EntityStore { .. }
@@ -157,7 +157,7 @@ pub struct Entity { pub id, pub uuid, pub kind: RegistryIndex, pub pos: DVec3, p
 ```
 Models (`haste_core::model::CubeModel`) are defined in this crate as data (player/humanoid, quadruped, generic box) and chosen by entity type.
 
-## haste-physics (WS5)
+## haste-physics (physics)
 
 ```rust
 pub struct PlayerState { pub pos: DVec3, pub velocity: DVec3, pub yaw: f32, pub pitch: f32, pub on_ground: bool, pub sprinting: bool, pub sneaking: bool, pub in_water: bool, pub flying: bool, pub fall_distance: f32, .. }
@@ -172,7 +172,7 @@ pub fn collide_with_step(aabb: Aabb, movement: DVec3, step_height: f64, on_groun
 ```
 Validated tick by tick against traces in `cache/oracle/26.3/traces/*.json` (format in haste-testkit).
 
-## haste-jvm (WS6)
+## haste-jvm (jvm-host)
 
 ```rust
 pub struct JvmHost { .. }
@@ -199,7 +199,7 @@ impl GuiPipeline {
 
 Tier-2 proxies in Phase 1: `Minecraft` (getInstance, player, level, options, font, screen, setScreen), `LocalPlayer`/`Player`/`Inventory`/`ItemStack` (what the inventory screen reads), `Font`, `GuiGraphicsExtractor` (batched delegates), `Window`, `Options`, `KeyMapping`, `SoundManager` (no-op). Everything else: real vanilla classes or the Unimplemented log.
 
-## haste-setup (WS7)
+## haste-setup (setup)
 
 ```rust
 pub struct Installation { pub client_jar: PathBuf, pub server_jar: PathBuf, pub assets_dir: PathBuf, pub assets_index: String, pub libraries_dir: PathBuf, pub jdk_java: PathBuf, pub reports_dir: PathBuf }
@@ -209,7 +209,7 @@ pub struct Config { pub username: String, pub render_distance: i32, pub gui_scal
 pub struct LocalServer { .. }  impl LocalServer { pub async fn start(world_dir: &Path, port: u16) -> anyhow::Result<LocalServer>; pub fn address(&self) -> String; pub async fn stop(self); }  // vanilla server jar, offline mode, 127.0.0.1, waits for "Done"
 ```
 
-## haste-testkit (WS8)
+## haste-testkit (oracles)
 
 Formats (JSON, versioned, documented in `crates/haste-testkit/FORMATS.md`): `block_shapes.json`
 (state id -> collision + outline boxes), `entity_dimensions.json`, `traces/<name>.json` (per tick:

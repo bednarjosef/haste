@@ -1,9 +1,9 @@
-# WS3: haste-assets + haste-render + the window/app loop
+# renderer: haste-assets + haste-render + the window/app loop
 
 You own `crates/haste-assets`, `crates/haste-render` and `crates/haste-client/src/app.rs` (window,
-render loop, frame timing). Interfaces in docs/INTERFACES.md. Milestone M2 "first frame" is yours:
-the world renders around the player after M1's join. Then M4's entity drawing + HUD drawing, and
-the GUI batch drawing for M5. Performance is the point of Haste: multithreaded meshing off the
+render loop, frame timing). Interfaces in docs/INTERFACES.md. Milestone first frame milestone "first frame" is yours:
+the world renders around the player after join milestone's join. Then alive milestone's entity drawing + HUD drawing, and
+the GUI batch drawing for vanilla screens milestone. Performance is the point of Haste: multithreaded meshing off the
 render thread, no per-frame allocations in the hot path, frustum culling, measured frame times.
 
 ## Reuse decision
@@ -25,7 +25,7 @@ headers kept and `THIRD_PARTY.md` entries:
   anything under `net/`, `physics/`, `player/`, and Pomme's `ui/` (azalea `ItemStack`/`azalea_chat`
   types everywhere; our GUI is the batched `GuiFrame`). Vulkan-specific code (context, swapchain,
   pipelines, GLSL shaders) is reference only: write WGSL.
-- Entity models: WS4 owns them; you only draw `EntityInstance`s.
+- Entity models: entities owns them; you only draw `EntityInstance`s.
 
 ## Backend
 wgpu 30 (workspace dependency); winit 0.30 for the window. This machine: AMD Radeon 860M, Mesa
@@ -33,7 +33,7 @@ wgpu 30 (workspace dependency); winit 0.30 for the window. This machine: AMD Rad
 exists: `source scripts/env.sh` exports `VK_DRIVER_FILES=${HASTE_VULKAN_ICD:-}`
 (set it in every shell where you run anything graphical, including tests). Request the adapter
 with `wgpu::Backends::all()`, prefer Vulkan, log which backend/adapter was chosen, keep code backend-neutral. Headless/offscreen rendering must work too
-(WS8's screenshot tests): `Renderer` must be constructible without a window (offscreen surface
+(oracles's screenshot tests): `Renderer` must be constructible without a window (offscreen surface
 target) and able to read back a frame to an `RgbaImage`: provide `Renderer::new_offscreen(w, h, ..)`
 and `Renderer::read_back(&mut self) -> RgbaImage` (tell the lead; it goes into INTERFACES.md).
 
@@ -61,21 +61,21 @@ and `Renderer::read_back(&mut self) -> RgbaImage` (tell the lead; it goes into I
   6 quads, `minecraft:oak_stairs` facing east has > 6 quads, bake time and atlas size reported.
 
 ## Task 2: haste-render, world
-- Chunk section meshing from `SectionSnapshot` (WS2): per face culling against neighbours
+- Chunk section meshing from `SectionSnapshot` (world-and-data): per face culling against neighbours
   (opaque full blocks), greedy merging is optional later; vertex format compact (position as
   u8/u16 local, uv u16, light (sky, block) packed, AO, tint); per section one vertex/index buffer
   per render layer; translucent sorted by distance. Mesher thread pool (`rayon`), results through a
   channel, uploads batched per frame with a budget. Rebuild on dirty sections.
 - Camera, projection, frustum culling of sections; sky colour from time of day; distance fog;
   vanilla-like lighting (light map from sky/block light with time-of-day darkening); `FrameStats`.
-- Done (M2): with a world from the headless join (the lead wires it), the world is visible from the
+- Done (first frame milestone): with a world from the headless join (the lead wires it), the world is visible from the
   player position, > 100 FPS at render distance 12 on this machine for a flat world, frame time
   logged. Provide `examples/view_world.rs`: loads a saved snapshot of chunks (a `haste-testkit`
   recorded packet file, or a synthetic flat world) and renders it, for your own testing.
 
 ## Task 3: entities, HUD, GUI batch
 - Draw `EntityInstance`s: cube-model renderer (ModelPart tree transforms on the CPU or in a
-  per-part instance buffer), skins by `Identifier` (player skins downloaded by WS4/WS7 later),
+  per-part instance buffer), skins by `Identifier` (player skins downloaded by entities/setup later),
   nametags via the font. Draw `GuiFrame` commands: fill/gradient/text (bitmap font, shadow)/texture/
   sprite (nine-slice)/item (flat item textures first, block items as the model's 3D icon later)/
   scissor/translate, in GUI scale.

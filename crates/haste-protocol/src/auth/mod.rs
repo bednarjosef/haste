@@ -1,7 +1,7 @@
 //! Online-mode authentication: the encryption handshake and the Mojang
 //! session-server join (minecraft.wiki "Java Edition protocol/Encryption").
 //!
-//! Microsoft/Xbox tokens are not obtained here: `haste-setup` (WS7) produces
+//! Microsoft/Xbox tokens are not obtained here: `haste-setup` (setup) produces
 //! an [`MsaTokens`] (Minecraft access token + profile) and the connection
 //! uses it for `session/minecraft/join`.
 

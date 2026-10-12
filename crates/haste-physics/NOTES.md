@@ -1,4 +1,4 @@
-# haste-physics notes (WS5)
+# haste-physics notes (physics)
 
 Vanilla 26.3 player movement and collision. Status of every rule: **documented** (a public page
 states it), **derived** (follows from documented numbers; a test checks the derivation),
@@ -15,7 +15,7 @@ Nothing here was taken from decompiled Minecraft code or from Pomme's `physics/`
   Movement Formulas" pages also quote 1.8-era MCP code snippets; we used only the stated numbers
   and formulas (65536 angles, 0.003 threshold, 0.2 sprint-jump boost, 0.02 air acceleration),
   but please confirm this source is acceptable.
-- WS8 oracle dumps in `cache/oracle/26.3/`: `block_shapes.json` (collision boxes, fluids),
+- oracles oracle dumps in `cache/oracle/26.3/`: `block_shapes.json` (collision boxes, fluids),
   `block_properties.json` (friction / speed_factor / jump_factor), `entity_dimensions.json`
   (player 0.6 x 1.8, crouching 1.5, swimming 0.6; eye 1.62 / 1.27 / 0.4).
 - Reuse check: Pomme `physics/`/`player/` excluded by the rules. Pumpkin's entity movement
@@ -133,7 +133,7 @@ reports the first tick whose position error exceeds the tolerance (default 1e-6)
 position error, the maximum velocity error and on_ground/pose mismatch counts.
 `cargo test -p haste-physics --test replay -- --ignored --nocapture` replays every
 `cache/oracle/26.3/traces/*.json`; with no traces it prints that the harness is ready and passes.
-Assumptions about the traces, all to confirm with WS8: the world is a default superflat
+Assumptions about the traces, all to confirm with oracles: the world is a default superflat
 (bedrock, dirt, dirt, grass; surface y = -60); `ticks[i].input` produced `ticks[i].pos`
 (`InputAlignment::SameTick`; on divergence the test also reports `PreviousTick`); look angles come
 from `input.yaw`/`input.pitch` or a per-tick `yaw`/`pitch` if present, else the `player` header

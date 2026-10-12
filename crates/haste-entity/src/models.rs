@@ -1,6 +1,6 @@
 //! Entity models as data (`haste_core::model::CubeModel`).
 //!
-//! Model-space convention for everything this crate emits (WS3 renders it):
+//! Model-space convention for everything this crate emits (renderer renders it):
 //! - units are 1/16 block (vanilla model units);
 //! - y increases downward (vanilla `PartPose` convention);
 //! - the feet sit on the plane y = 0, so a player's head top is at y = -32;
@@ -9,7 +9,7 @@
 //!   (head_yaw - yaw) around Y and pitch around X; the rest of the body follows `yaw`.
 //!
 //! The humanoid is the standard 64x64 skin layout (public knowledge; the UV offsets are in the
-//! WS4 brief). The player model is authored 32 units tall and rendered at scale 0.9375 (vanilla's
+//! entities brief). The player model is authored 32 units tall and rendered at scale 0.9375 (vanilla's
 //! player-model scale), i.e. 1.875 blocks against the 1.8 hitbox. Every other entity type gets a
 //! generic box built from its dimensions, textured with the `haste:entity_box` placeholder.
 use std::sync::{Arc, Mutex, OnceLock};

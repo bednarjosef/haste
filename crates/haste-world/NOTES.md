@@ -3,8 +3,8 @@
 ## What was verified vs. assumed (wire format)
 
 - **Verified against the real game:** nothing directly — no packet captures exist yet
-  (`cache/oracle/26.3/packets/` is empty; WS8's recorder will fill it). The implementation
-  follows the minecraft.wiki Chunk Format page as the brief instructs. WS1 should re-run the
+  (`cache/oracle/26.3/packets/` is empty; oracles's recorder will fill it). The implementation
+  follows the minecraft.wiki Chunk Format page as the brief instructs. protocol should re-run the
   round-trip tests against a real captured `level_chunk_with_light` when captures exist.
 - **Section payload layout (assumed from the wiki, 1.21.5+):** per section: block_count (varint,
   i16 range), blocks container, biomes container; sections ordered from the dimension's lowest.
@@ -15,7 +15,7 @@
   direct container at `direct_bits` = ceil(log2(global state count)) = 15 for 26.3 (35723
   states), passed in by `World` (it knows the state count from GameData). If a capture shows
   vanilla sends the direct width itself in the bits-per-entry field, `decode_with_bpe`'s direct
-  arm needs a one-line change. Not verifiable offline; flagged for WS1/WS8.
+  arm needs a one-line change. Not verifiable offline; flagged for protocol/oracles.
 - **Biome containers:** 64 entries (4x4x4 cells per section), indirect 1..=3 bits; I pass 3 as
   the "direct" width so a 4-bit biome container would decode as direct rather than error.
 - **Light masks** index sections from min_section - 1 to max_section + 1 (one extra each end);
@@ -55,7 +55,7 @@
   under load 3-18 from parallel workstream builds; ~8 ns idle). Brief target was < 5 ns/call —
   NOT met on this machine; the bench asserts < 30 ns as a regression bound (losing the chunk
   memo gives ~80 ns). The remaining cost is the packed-array read (runtime div/mod in the
-  generic path; the 4..=8 bit fast paths are specialized) plus bounds checks. If WS5 needs the
+  generic path; the 4..=8 bit fast paths are specialized) plus bounds checks. If physics needs the
   full 5 ns, the next step is a per-section direct block cache (flat [BlockStateId; 4096]
   materialized lazily per section) — deferred; memory cost not justified yet.
 - `PalettedContainer::get_index` micro-bench: ~7.7 ns under load (indirect, 4 bits).

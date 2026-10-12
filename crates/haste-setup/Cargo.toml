@@ -3,7 +3,7 @@ name = "haste-setup"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Fetching 26.3 jars/assets/libraries from Mojang's manifest, running the data generator, config, launching the embedded vanilla server, launcher flow. Owner: WS7."
+description = "Fetching 26.3 jars/assets/libraries from Mojang's manifest, running the data generator, config, launching the embedded vanilla server, launcher flow. Owner: setup."
 
 [dependencies]
 haste-core.workspace = true

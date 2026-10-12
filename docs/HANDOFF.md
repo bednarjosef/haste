@@ -23,12 +23,12 @@ For the next lead session. Read `AGENTS.md`, then this, then `TASKS.md` and `NOT
 
 | | Status |
 |---|---|
-| M1 Join | **done headless**: `haste --headless --server 127.0.0.1:25565 --seconds 60` (local Fabric 26.3 server in `cache/server-spike`; start with `crates/haste-protocol/scripts/local-server.sh`). 473 chunks, ~117 entities, every play packet decoded. Uses a stand-in world/entity sink in `crates/haste-client/src/net.rs` until `haste-world` lands. Online mode untested (needs Microsoft tokens). |
-| M2 First frame | renderer and world crates are merged and work (211 FPS offscreen at render distance 12 on a flat world, readback verified); what is missing is the client wiring: `World` from the join into `Renderer::update_world`, and a winit loop (`crates/haste-client/src/app.rs`). Windowed mode untested interactively (Wayland frame-callback stall in background sessions). |
-| M3 Walk | physics crate done and tested against documented numbers; validation against traces waits for the recording. |
-| M4 Alive | entity store + models done; drawing them needs the renderer. |
-| M5 UI via tier 3 | **done headless**: real `PauseScreen`/`ChatScreen`/`InventoryScreen` in the embedded JVM, one JNI call per frame. Drawing the `GuiFrame` needs the renderer. |
-| M6 Singleplayer + numbers | `ensure_installed`, `LocalServer`, vanilla + Fabric launcher and the MSA device-code flow are done (PR #6; MSA needs a `client_id`); `haste setup`/`haste launch` subcommands and the benchmark runs remain. |
+| Join milestone | **done headless**: `haste --headless --server 127.0.0.1:25565 --seconds 60` (local Fabric 26.3 server in `cache/server-spike`; start with `crates/haste-protocol/scripts/local-server.sh`). 473 chunks, ~117 entities, every play packet decoded. Uses a stand-in world/entity sink in `crates/haste-client/src/net.rs` until `haste-world` lands. Online mode untested (needs Microsoft tokens). |
+| First frame milestone | renderer and world crates are merged and work (211 FPS offscreen at render distance 12 on a flat world, readback verified); what is missing is the client wiring: `World` from the join into `Renderer::update_world`, and a winit loop (`crates/haste-client/src/app.rs`). Windowed mode untested interactively (Wayland frame-callback stall in background sessions). |
+| Walk milestone | physics crate done and tested against documented numbers; validation against traces waits for the recording. |
+| Alive milestone | entity store + models done; drawing them needs the renderer. |
+| Vanilla screens milestone | **done headless**: real `PauseScreen`/`ChatScreen`/`InventoryScreen` in the embedded JVM, one JNI call per frame. Drawing the `GuiFrame` needs the renderer. |
+| Singleplayer and numbers milestone | `ensure_installed`, `LocalServer`, vanilla + Fabric launcher and the MSA device-code flow are done (PR #6; MSA needs a `client_id`); `haste setup`/`haste launch` subcommands and the benchmark runs remain. |
 
 ## What to do next, in order
 
@@ -37,14 +37,14 @@ For the next lead session. Read `AGENTS.md`, then this, then `TASKS.md` and `NOT
    those PR pages no longer exist. The merge commits and messages are in `main`'s history.)
 2. Wire the real `World`/`EntityStore` into `crates/haste-client/src/net.rs` (`WorldSink`/`EntitySink`
    one-line forwards, delete the stubs), then the window/render loop (`app.rs`) with
-   `Renderer::update_world` + `render`: that is M2.
-3. `player.rs`: input sampling, `haste_physics::tick`, movement packets (M3 minus trace validation).
+   `Renderer::update_world` + `render`: that is first frame milestone.
+3. `player.rs`: input sampling, `haste_physics::tick`, movement packets (walk milestone minus trace validation).
 4. Ask the user to run the recorder (`docs/RECORDING.md`); then `cargo test -p haste-physics
    --test replay -- --ignored` and fix divergences.
-5. `ui.rs`: HUD in Rust + `GuiPipeline` when a screen is open; draw `GuiFrame` in the renderer (M4/M5 visible).
+5. `ui.rs`: HUD in Rust + `GuiPipeline` when a screen is open; draw `GuiFrame` in the renderer (alive/vanilla screens milestones visible).
 6. JVM: bridge registry data into Java (`BuiltInRegistries` is refused today), then tooltips/components.
 7. `haste setup` / `haste launch` subcommands in the client binary (haste-setup has everything they need); benchmark route via the recorder mod on the user's machine.
-8. `PHASE1-REPORT.md` at M6.
+8. `PHASE1-REPORT.md` at singleplayer and numbers milestone.
 
 ## Team lessons (session 1)
 

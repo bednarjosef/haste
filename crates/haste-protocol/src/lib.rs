@@ -1,4 +1,4 @@
-//! Minecraft: Java Edition 26.3 protocol (protocol 777). Owner: WS1.
+//! Minecraft: Java Edition 26.3 protocol (protocol 777). Owner: protocol.
 //!
 //! See docs/INTERFACES.md for the contract this crate implements, AGENTS.md
 //! for the rules and `NOTES.md` next to this crate for decisions.

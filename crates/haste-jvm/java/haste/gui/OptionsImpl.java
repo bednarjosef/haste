@@ -9,7 +9,7 @@ import net.minecraft.client.Options;
 
 /**
  * Bodies of the {@code Options} and {@code OptionInstance} proxies. Each option is one canonical OptionInstance
- * proxy whose value lives here. Values are fixed defaults for now (Haste's config, WS7, will feed them); every
+ * proxy whose value lives here. Values are fixed defaults for now (Haste's config, setup, will feed them); every
  * value and its source is listed in NOTES.md.
  */
 public final class OptionsImpl {

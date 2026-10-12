@@ -83,18 +83,18 @@ vanilla client with the mod architecture designed in and no mod support yet.
 
 ```
 crates/haste-core       shared types + cross-crate traits (lead)
-crates/haste-data       registries, block states, oracle dumps from cache (WS2)
-crates/haste-protocol   26.3 protocol, auth, packets (WS1)
-crates/haste-world      chunks, palettes, light, block updates (WS2)
-crates/haste-assets     jar/assets reading: textures, models, fonts (WS3)
-crates/haste-render     wgpu renderer, meshing, GUI batch drawing (WS3)
-crates/haste-entity     entity tracking, interpolation, models (WS4)
-crates/haste-physics    vanilla-exact movement/collision (WS5)
-crates/haste-jvm        embedded JVM, tier 2/3, proxy generator, GUI pipeline (WS6)
-crates/haste-setup      Mojang downloads, datagen, config, singleplayer server, launcher (WS7)
-crates/haste-testkit    oracle formats, replay, screenshot diff, bench harness (WS8)
+crates/haste-data       registries, block states, oracle dumps from cache (world-and-data)
+crates/haste-protocol   26.3 protocol, auth, packets (protocol)
+crates/haste-world      chunks, palettes, light, block updates (world-and-data)
+crates/haste-assets     jar/assets reading: textures, models, fonts (renderer)
+crates/haste-render     wgpu renderer, meshing, GUI batch drawing (renderer)
+crates/haste-entity     entity tracking, interpolation, models (entities)
+crates/haste-physics    vanilla-exact movement/collision (physics)
+crates/haste-jvm        embedded JVM, tier 2/3, proxy generator, GUI pipeline (jvm-host)
+crates/haste-setup      Mojang downloads, datagen, config, singleplayer server, launcher (setup)
+crates/haste-testkit    oracle formats, replay, screenshot diff, bench harness (oracles)
 crates/haste-client     the `haste` binary; one module per workstream (lead + all)
-tools/recorder-mod      Fabric mod for the real game that records golden data (WS8)
+tools/recorder-mod      Fabric mod for the real game that records golden data (oracles)
 phase2/                 spike code for Phase 2: Mixin bridge, surface scanner, oracle mod
 cache/                  gitignored: jars, assets, reports, oracle dumps, JDK
 ```

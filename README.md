@@ -25,11 +25,11 @@ Everything downloaded or derived from Mojang's files lives in `cache/` (gitignor
 
 | | Demo | Status |
 |---|---|---|
-| M1 Join | `haste --headless --server 127.0.0.1:25565` joins a local 26.3 server and an online-mode server, tracks world and entities | in progress |
-| M2 First frame | the world renders around the player | planned |
-| M3 Walk | movement/collision match vanilla traces, no rubber-banding | planned |
-| M4 Alive | entities render and move; HUD | planned |
-| M5 UI via tier 3 | chat, pause menu, inventory as real vanilla Java screens through the batched GUI pipeline | planned |
-| M6 Singleplayer and numbers | embedded vanilla server; benchmarks vs vanilla and vanilla + Sodium | planned |
+| Join milestone | `haste --headless --server 127.0.0.1:25565` joins a local 26.3 server and an online-mode server, tracks world and entities | done headless (local server); online mode pending Microsoft tokens |
+| First frame milestone | the world renders around the player | renderer and world crates done (211 FPS offscreen); client wiring pending |
+| Walk milestone | movement/collision match vanilla traces, no rubber-banding | physics done against documented numbers; traces not recorded yet |
+| Alive milestone | entities render and move; HUD | planned |
+| Vanilla screens milestone | chat, pause menu, inventory as real vanilla Java screens through the batched GUI pipeline | planned |
+| Singleplayer and numbers milestone | embedded vanilla server; benchmarks vs vanilla and vanilla + Sodium | setup, local server and launcher done; benchmarks pending |
 
-See `TASKS.md` (board) and `NOTES.md` (decisions). `PHASE1-REPORT.md` arrives with M6.
+See `TASKS.md` (board) and `NOTES.md` (decisions). `PHASE1-REPORT.md` arrives with singleplayer and numbers milestone.

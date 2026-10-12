@@ -3,7 +3,7 @@ name = "haste-testkit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Oracle data formats, trace replay, screenshot diffing and benchmark harness. Owner: WS8."
+description = "Oracle data formats, trace replay, screenshot diffing and benchmark harness. Owner: oracles."
 
 [dependencies]
 haste-core.workspace = true

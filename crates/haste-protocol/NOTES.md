@@ -1,4 +1,4 @@
-# haste-protocol notes (WS1)
+# haste-protocol notes (protocol)
 
 ## Decisions
 - **Reuse (lead's decision):** NBT, transport (framing, zlib, AES-CFB8) and VarInt codecs are vendored

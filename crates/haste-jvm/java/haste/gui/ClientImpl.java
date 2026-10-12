@@ -30,7 +30,7 @@ public final class ClientImpl {
         return Proxies.service(net.minecraft.client.renderer.entity.EntityRenderDispatcher.class);
     }
     public static PlayerSocialManager getPlayerSocialManager(Minecraft m) { return Proxies.service(PlayerSocialManager.class); }
-    /** Haste always plays through a server connection (singleplayer = a local vanilla server process, WS7). */
+    /** Haste always plays through a server connection (singleplayer = a local vanilla server process, setup). */
     public static boolean isDemo(Minecraft m) { return false; }
     public static boolean isLocalServer(Minecraft m) { return false; }
     public static boolean hasSingleplayerServer(Minecraft m) { return false; }

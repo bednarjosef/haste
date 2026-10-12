@@ -19,7 +19,7 @@ on CI (no `cache/`, no display) must stay green in well under a minute.
 - `cargo test -p haste-testkit` with `cache/oracle/26.3/` present: loaders accept the real
   dumps (35723 block states, 161 entity types, 1286 blocks).
 - `haste_testkit::traces::replay_trace` — tick function under test against recorded vanilla
-  physics (`traces/*.json`); WS5's physics should be the first consumer: per-tick max-axis
+  physics (`traces/*.json`); physics's physics should be the first consumer: per-tick max-axis
   position error, first divergence tick, on_ground mismatches. This is the tier where
   "behaves like vanilla" becomes checkable without a display.
 - `python3 tools/recorder-mod/validate-traces.py` — sanity checks on freshly recorded
@@ -32,11 +32,11 @@ on CI (no `cache/`, no display) must stay green in well under a minute.
 - `haste_testkit::screenshots::compare_screenshot` — Haste render vs `cache/oracle/26.3/
   screenshots/*.png` (fixed camera, HUD hidden; camera parameters recorded in the sibling
   JSON). Diff fraction + mean/max per-channel error + a red-highlighted diff image.
-  Needs WS3's renderer to produce a framebuffer to compare; the harness side is done.
+  Needs renderer's renderer to produce a framebuffer to compare; the harness side is done.
 - `haste_testkit::bench` + `cargo run -p haste-testkit --example bench-report -- <dir>` —
   frame times/RSS comparison against vanilla's recorded `/haste bench` runs.
 - Packet recordings (`cache/oracle/26.3/packets/*.bin`, captured via
-  `cargo run -p haste-testkit --bin haste-packet-proxy`) are WS1/WS2's replay fixtures at
+  `cargo run -p haste-testkit --bin haste-packet-proxy`) are protocol/world-and-data's replay fixtures at
   this tier.
 
 ## How each workstream plugs in

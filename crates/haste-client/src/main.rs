@@ -1,11 +1,11 @@
 //! `haste`: the client binary. Thin: each module belongs to one workstream (see AGENTS.md).
 //!
-//! - `net`     (WS1): connection task, packet -> world/entity/player calls, outgoing packets.
-//! - `app`     (WS3): window, render loop, frame timing.
-//! - `player`  (WS5): input sampling, physics tick, movement packets.
-//! - `ui`      (WS6): HUD + tier-3 screens through the batched GUI pipeline.
-//! - `launch`  (WS7): CLI args, config, setup checks, singleplayer server lifecycle.
-//! - `headless`: M1 mode, no window: joins, tracks world/entities, prints stats.
+//! - `net`     (protocol): connection task, packet -> world/entity/player calls, outgoing packets.
+//! - `app`     (renderer): window, render loop, frame timing.
+//! - `player`  (physics): input sampling, physics tick, movement packets.
+//! - `ui`      (jvm-host): HUD + tier-3 screens through the batched GUI pipeline.
+//! - `launch`  (setup): CLI args, config, setup checks, singleplayer server lifecycle.
+//! - `headless`: join milestone mode, no window: joins, tracks world/entities, prints stats.
 //!
 //! The lead owns this file. Add a module by adding one line here and your own file.
 use clap::Parser;
@@ -56,5 +56,5 @@ fn main() -> anyhow::Result<()> {
     if args.headless {
         return headless::run(&args);
     }
-    anyhow::bail!("windowed mode arrives with M2 (see TASKS.md); use --headless for M1")
+    anyhow::bail!("windowed mode arrives with first frame milestone (see TASKS.md); use --headless for join milestone")
 }

@@ -5,7 +5,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// MSA tokens as consumed by WS1's `Account::Microsoft`. The struct is coordinated through the
+/// MSA tokens as consumed by protocol's `Account::Microsoft`. The struct is coordinated through the
 /// lead; this is haste-setup's copy of the shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct MsaTokens {

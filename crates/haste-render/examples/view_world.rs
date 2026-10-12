@@ -1,4 +1,4 @@
-//! WS3's world viewer: renders a synthetic flat world in a window (Task 2's
+//! renderer's world viewer: renders a synthetic flat world in a window (Task 2's
 //! own testing tool; the lead wires the real headless-join world later).
 //! Run: cargo run -p haste-render --example view_world [-- --distance 12]
 use haste_core::view::BlockView;

@@ -4,7 +4,7 @@ import haste.rt.Native;
 import net.minecraft.client.multiplayer.ClientPacketListener;
 import net.minecraft.core.RegistryAccess;
 
-/** Bodies of the {@code ClientPacketListener} proxy: the connection lives in Rust (WS1). */
+/** Bodies of the {@code ClientPacketListener} proxy: the connection lives in Rust (protocol). */
 public final class ConnectionImpl {
     private ConnectionImpl() {}
 
@@ -32,7 +32,7 @@ public final class ConnectionImpl {
         return suggestions;
     }
 
-    /** The server's command tree arrives through the protocol (WS1); until it is bridged, the dispatcher is empty. */
+    /** The server's command tree arrives through the protocol (protocol); until it is bridged, the dispatcher is empty. */
     public static com.mojang.brigadier.CommandDispatcher<net.minecraft.client.multiplayer.ClientSuggestionProvider> getCommands(ClientPacketListener c) {
         return COMMANDS;
     }

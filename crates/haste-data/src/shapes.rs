@@ -2,7 +2,7 @@
 //!
 //! Oracle-backed when `cache/oracle/26.3/block_shapes.json` exists; otherwise the documented
 //! fallback heuristic from docs/INTERFACES.md, which is approximate (see NOTES.md). The oracle
-//! file replaces it once WS8 records the dump.
+//! file replaces it once oracles records the dump.
 
 use haste_core::view::{FluidInfo, FluidKind};
 use haste_core::{Aabb, BlockStateId, DVec3};

@@ -1,4 +1,4 @@
-//! Launching the vanilla 26.3 client (needed by WS8's recorder and benchmarks) and optionally
+//! Launching the vanilla 26.3 client (needed by oracles's recorder and benchmarks) and optionally
 //! with Fabric Loader, everything under `cache/`, never the user's `.minecraft`.
 
 use crate::download::DownloadSpec;

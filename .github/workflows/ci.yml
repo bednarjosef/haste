@@ -40,7 +40,7 @@ jobs:
         run: cargo test --workspace
 
   # Placeholder for the cache-dependent tier (oracle replays, screenshot diffs):
-  # needs cache/oracle/26.3 in CI storage first. Tracked in WS8.
+  # needs cache/oracle/26.3 in CI storage first. Tracked in oracles.
   oracle-tier:
     if: false
     runs-on: ubuntu-latest

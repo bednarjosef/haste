@@ -3,7 +3,7 @@ name = "haste-protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Minecraft 26.3 Java Edition protocol: codec, states, compression, encryption, auth, packets. Owner: WS1."
+description = "Minecraft 26.3 Java Edition protocol: codec, states, compression, encryption, auth, packets. Owner: protocol."
 
 [dependencies]
 haste-core.workspace = true

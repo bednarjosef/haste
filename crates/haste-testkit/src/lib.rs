@@ -1,4 +1,4 @@
-//! Oracle data formats, trace replay, screenshot diffing and benchmark harness. Owner: WS8.
+//! Oracle data formats, trace replay, screenshot diffing and benchmark harness. Owner: oracles.
 //!
 //! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
 //! The on-disk formats are documented in [FORMATS.md](../FORMATS.md); everything here loads,

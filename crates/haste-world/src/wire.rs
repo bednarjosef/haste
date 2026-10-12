@@ -1,6 +1,6 @@
-//! Wire helpers shared with `haste-protocol` (WS1) and our own tests.
+//! Wire helpers shared with `haste-protocol` (protocol) and our own tests.
 //!
-//! `decode_sections` is the entry point WS1 calls in its tests; `encode_synthetic_chunk` builds
+//! `decode_sections` is the entry point protocol calls in its tests; `encode_synthetic_chunk` builds
 //! a valid 26.3 section payload so `haste-world`'s round-trip tests do not depend on the cache.
 
 use haste_core::chunk::ChunkData;

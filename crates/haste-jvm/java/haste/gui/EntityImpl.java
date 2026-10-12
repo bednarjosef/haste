@@ -5,7 +5,7 @@ import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.world.entity.Entity;
 
 /**
- * Bodies of the {@code EntityRenderDispatcher} proxy. Entity rendering is Rust's (WS3/WS4); screens that draw an
+ * Bodies of the {@code EntityRenderDispatcher} proxy. Entity rendering is Rust's (renderer/entities); screens that draw an
  * entity (the inventory's player model) get an empty vanilla render state, and the extractor records the draw
  * request (no GuiFrame command exists for it yet: interface request).
  */

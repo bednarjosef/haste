@@ -121,7 +121,7 @@ impl BakedBlockModels {
     /// atlas is rebuilt from every texture reachable from any blockstate file
     /// (all variants and all multipart applies). Blocks without a blockstate
     /// JSON or with unresolvable models bake to no quads (invisible), matching
-    /// vanilla's missing-model handling closely enough for M2.
+    /// vanilla's missing-model handling closely enough for first frame milestone.
     pub fn bake(
         assets: &mut Assets,
         states: &dyn haste_core::view::BlockStateTable,

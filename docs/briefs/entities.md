@@ -1,7 +1,7 @@
-# WS4: haste-entity
+# entities: haste-entity
 
 You own `crates/haste-entity`. Implement `EntityStore` exactly as in docs/INTERFACES.md. Consumers:
-`haste-client` (applies packet-derived calls), `haste-render` (draws `EntityInstance`s), WS5
+`haste-client` (applies packet-derived calls), `haste-render` (draws `EntityInstance`s), physics
 (player attributes come from elsewhere; you do not own the local player).
 
 ## Task 1: tracking + interpolation
@@ -13,7 +13,7 @@ You own `crates/haste-entity`. Implement `EntityStore` exactly as in docs/INTERF
 - Interpolation: keep `prev_pos`/`pos` per tick; `render_instances(partial_tick)` lerps. Vanilla
   smooths remote entity moves over 3 ticks ("lerp steps"); document the scheme you implement
   (observed behaviour, not decompiled code) in NOTES.md.
-- Dimensions: from `cache/oracle/26.3/entity_dimensions.json` when present (WS8 writes it;
+- Dimensions: from `cache/oracle/26.3/entity_dimensions.json` when present (oracles writes it;
   format `{"version":1,"entities":{"minecraft:zombie":{"width":0.6,"height":1.95,"eye_height":1.74},...}}`),
   else 0.6 x 1.8. Pose changes (sneaking/swimming) adjust height as documented on the wiki.
 - `tick()` advances interpolation, applies velocity for entities without server moves only if the
@@ -33,5 +33,5 @@ You own `crates/haste-entity`. Implement `EntityStore` exactly as in docs/INTERF
 - Nametags: player entities get their name from `player_info` (uuid match).
 - Tests: model part tree has expected parts; walking animation is zero at rest and bounded.
 
-Do not touch: haste-render (you provide data, WS3 draws it), haste-physics, haste-protocol.
+Do not touch: haste-render (you provide data, renderer draws it), haste-physics, haste-protocol.
 If you need a new field on `EntityInstance` or `CubeModel`, request it from the lead.

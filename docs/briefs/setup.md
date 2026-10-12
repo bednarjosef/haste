@@ -1,4 +1,4 @@
-# WS7: haste-setup (Mojang downloads, data generator, config, local server, launcher flow)
+# setup: haste-setup (Mojang downloads, data generator, config, local server, launcher flow)
 
 You own `crates/haste-setup` and later `crates/haste-client/src/launch.rs` (CLI/config wiring;
 wait for the lead's go). Interfaces in docs/INTERFACES.md. Spike scripts to learn from (bash, in
@@ -31,7 +31,7 @@ properties for offline/localhost, data generator run (`-DbundlerMainClass=net.mi
   `online-mode=false`, `server-ip=127.0.0.1`, random free port, `pause-when-empty-seconds=-1`,
   `nogui`, in `cache/singleplayer/<world>/`; waits for the `Done` log line (timeout 120 s);
   `stop()` sends `stop` on stdin and waits. Capture logs to a file.
-- Vanilla client launcher (needed by WS8's recorder and benchmarks): `launch_vanilla(opts)` builds
+- Vanilla client launcher (needed by oracles's recorder and benchmarks): `launch_vanilla(opts)` builds
   the classpath from the version JSON libraries + client jar, extracts natives, passes the standard
   game arguments (`--username`, `--version`, `--gameDir` = `cache/vanilla-game`, `--assetsDir`,
   `--assetIndex`, `--uuid`, `--accessToken` (offline: any string), `--userType`, `--versionType`),
@@ -40,7 +40,7 @@ properties for offline/localhost, data generator run (`-DbundlerMainClass=net.mi
   libraries, with a `mods/` dir. Everything under `cache/`, never the user's `.minecraft`.
 - Microsoft auth: device-code flow (MSA -> Xbox Live -> XSTS -> Minecraft services -> profile)
   with a configurable `client_id` (none shipped; read from config/env `HASTE_MSA_CLIENT_ID`);
-  returns tokens WS1's `Account::Microsoft` consumes (coordinate the struct through the lead).
+  returns tokens protocol's `Account::Microsoft` consumes (coordinate the struct through the lead).
   Tests: unit tests for the request/response parsing with fixtures; no live calls.
 - `haste setup` and `haste launch` subcommands in your client module when the lead opens it.
 

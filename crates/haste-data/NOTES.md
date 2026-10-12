@@ -22,7 +22,7 @@
   clean). Unknown registry in `len()` returns 0; in `index`/`name` returns None — callers treat
   missing data as absent rather than erroring.
 - **Oracle file:** assumes `{"version":1,"states":[{"id",...,"collision":[[x1,y1,z1,x2,y2,z2]],"outline":[...]}]}`.
-  The real WS8 dump (produced 2026-10-12) matches: extra fields `block`, `properties`, `light`,
+  The real oracles dump (produced 2026-10-12) matches: extra fields `block`, `properties`, `light`,
   `air`, `opaque` are ignored by serde. States absent from the file get empty shapes.
   Unknown `version` is an error.
 
@@ -41,9 +41,9 @@
   memory and time substantially — deferred until someone needs it (startup-only cost).
 - Target in the brief was < 150 ms release for the reports alone; reports alone (blocks +
   registries, no oracle) measure ~85-110 ms, within target. The oracle dump adds ~180 ms;
-  asked the lead whether to optimize now or at M2 (report sent).
+  asked the lead whether to optimize now or at first frame milestone (report sent).
 
-## BlockPhysics / BlockStateTable (added after M1 merge)
+## BlockPhysics / BlockStateTable (added after join milestone merge)
 
 - `BlockStateTable for BlockStates`: thin delegate to the inherent methods (len/block_of/
   properties/property_value). No new state.

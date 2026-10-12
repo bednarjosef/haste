@@ -1,7 +1,7 @@
-# WS6: haste-jvm (embedded JVM, tier 3, tier 2 proxies, batched GUI pipeline)
+# jvm-host: haste-jvm (embedded JVM, tier 3, tier 2 proxies, batched GUI pipeline)
 
 You own `crates/haste-jvm` (Rust + the Java sources under `crates/haste-jvm/java`), and later
-`crates/haste-client/src/ui.rs` (after the lead says M2 is merged). Read the spike reports first:
+`crates/haste-client/src/ui.rs` (after the lead says first frame milestone is merged). Read the spike reports first:
 `../haste-spike/REPORT.md` and `REPORT-2.md`, and the proxy generator you
 inherit: `crates/haste-jvm/java/proxy/Gen.java` (ASM, generates same-name classes with native /
 getter / delegate / stub bodies and merges mixins) and `java/rt/` (Unimplemented log, GuiBatch).
@@ -25,7 +25,7 @@ whole jar is NEVER on the classpath; GUI drawing is batched into `haste_core::gu
   Log every class served from the jar, every proxy served, every class refused (that log is a to-do list).
   Vanilla's third-party libraries (fastutil, guava, gson, joml, jspecify, slf4j, datafixerupper,
   brigadier) are needed by tier-3 classes: get them from the version JSON's `libraries` list
-  (WS7's `haste-setup` downloads them to `cache/libraries`; until then use the jars under
+  (setup's `haste-setup` downloads them to `cache/libraries`; until then use the jars under
   `cache/server-spike/libraries` which has most of them). Static initialisers of vanilla classes run
   for real in tier 3; when one touches a tier-1 type, that is a proxy request.
 - Test (ignored without cache): start JVM, call `net.minecraft.resources.Identifier.parse("minecraft:stone")`
@@ -57,4 +57,4 @@ whole jar is NEVER on the classpath; GUI drawing is batched into `haste_core::gu
 
 Rust-side interfaces you consume: `haste_core::gui::{GuiFrame, GuiCommand, TextMetrics}`. If the
 command set lacks something a screen needs (e.g. item rendering details), request it from the lead.
-Do not touch: haste-render (WS3 draws GuiFrame), haste-entity, haste-world.
+Do not touch: haste-render (renderer draws GuiFrame), haste-entity, haste-world.

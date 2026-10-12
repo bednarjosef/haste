@@ -1,6 +1,6 @@
 // The Renderer (docs/INTERFACES.md): wgpu device, atlas upload, section
 // submission, camera/frustum, per-frame render with sky colour and fog.
-// Offscreen construction + readback for WS8's screenshot tests.
+// Offscreen construction + readback for oracles's screenshot tests.
 // Shading design from Pomme (chunk shaders); see THIRD_PARTY.md.
 
 use std::collections::HashMap;
@@ -169,7 +169,7 @@ struct CameraUniform {
 }
 
 /// The renderer. Construct with a window (windowed mode) or offscreen
-/// (`new_offscreen`, WS8's screenshot tests: fixed-size texture target,
+/// (`new_offscreen`, oracles's screenshot tests: fixed-size texture target,
 /// `read_back` returns the frame as an RgbaImage).
 #[allow(dead_code)]
 pub struct Renderer {
@@ -238,7 +238,7 @@ impl Renderer {
         Ok(renderer)
     }
 
-    /// Offscreen constructor (WS8 screenshot tests): renders into a texture.
+    /// Offscreen constructor (oracles screenshot tests): renders into a texture.
     pub fn new_offscreen(
         w: u32,
         h: u32,

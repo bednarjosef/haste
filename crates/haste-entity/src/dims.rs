@@ -1,4 +1,4 @@
-//! Entity dimensions: from `cache/oracle/26.3/entity_dimensions.json` when WS8 has produced it,
+//! Entity dimensions: from `cache/oracle/26.3/entity_dimensions.json` when oracles has produced it,
 //! else the 0.6 x 1.8 default. Pose adjusts the height (minecraft.wiki, "Entity" hitbox table).
 use std::collections::HashMap;
 
@@ -33,7 +33,7 @@ const DEFAULT: Dimensions = Dimensions {
 /// Sneaking/crawling height scaling. Observed on vanilla servers: a 1.8-tall humanoid crouches to
 /// 1.5, crawls to 0.6. We scale the standing height by the same ratios, which reproduces the wiki
 /// values for all player-like entities; exact per-pose values for odd shapes come from the oracle
-/// dump when WS8 writes it.
+/// dump when oracles writes it.
 const CROUCH_RATIO: f32 = 1.5 / 1.8;
 const CRAWL_RATIO: f32 = 0.6 / 1.8;
 
@@ -44,7 +44,7 @@ pub struct EntityDimensions {
 
 impl EntityDimensions {
     /// From the `minecraft:entity_type` registry only: every type gets the default box until the
-    /// oracle dump exists. The oracle file (WS8) is read lazily at first use from
+    /// oracle dump exists. The oracle file (oracles) is read lazily at first use from
     /// `haste_core::paths::oracle_dir()`.
     pub fn from_registry_len(_entity_types: usize) -> EntityDimensions {
         let map = load_oracle().unwrap_or_default();
@@ -75,13 +75,13 @@ impl EntityDimensions {
 /// `{"version":1,"entities":{"minecraft:zombie":{"width":0.6,"height":1.95,"eye_height":1.74}}}`.
 /// Names need the entity_type registry to become indexes; until haste-data provides it we cannot
 /// map them, so this returns `None` and the default box is used. The oracle file is read once and
-/// cached; when WS2's `GameData` lands, the name -> `RegistryIndex` mapping goes through it.
+/// cached; when world-and-data's `GameData` lands, the name -> `RegistryIndex` mapping goes through it.
 fn load_oracle() -> Option<HashMap<RegistryIndex, Dimensions>> {
     let path = haste_core::paths::oracle_dir().join("entity_dimensions.json");
     let bytes = std::fs::read(path).ok()?;
     let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     let entities = v.get("entities")?.as_object()?;
-    // No registry to resolve names against yet (WS2's GameData is not exported). Parsed but
+    // No registry to resolve names against yet (world-and-data's GameData is not exported). Parsed but
     // unmapped: return nothing rather than guessing index positions.
     let _ = entities.len();
     None

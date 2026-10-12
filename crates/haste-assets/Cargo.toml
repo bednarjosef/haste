@@ -3,7 +3,7 @@ name = "haste-assets"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Textures, block/item models, blockstate definitions, fonts and GUI sprites read from the player's client jar and the assets index. Owner: WS3."
+description = "Textures, block/item models, blockstate definitions, fonts and GUI sprites read from the player's client jar and the assets index. Owner: renderer."
 
 [dependencies]
 haste-core.workspace = true

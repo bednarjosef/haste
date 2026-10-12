@@ -1,6 +1,6 @@
-//! Interim loader for the WS8 oracle dumps (`block_shapes.json`, `block_properties.json`), so that
+//! Interim loader for the oracles oracle dumps (`block_shapes.json`, `block_properties.json`), so that
 //! the physics can be checked against real shapes and replayed against traces before `haste-data`
-//! (WS2) provides `GameData`. Once `GameData` exists, `BlockPhysics` should be implemented for it
+//! (world-and-data) provides `GameData`. Once `GameData` exists, `BlockPhysics` should be implemented for it
 //! and this module reduced to test support (see NOTES.md).
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;

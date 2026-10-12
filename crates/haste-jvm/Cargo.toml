@@ -3,7 +3,7 @@ name = "haste-jvm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Embedded JVM host, tier-3 vanilla class loading, tier-2 proxies, batched GUI pipeline. Owner: WS6."
+description = "Embedded JVM host, tier-3 vanilla class loading, tier-2 proxies, batched GUI pipeline. Owner: jvm-host."
 
 [dependencies]
 haste-core.workspace = true

@@ -40,7 +40,7 @@ pub struct JvmConfig {
 
 impl JvmConfig {
     /// The standard layout under a Haste cache directory (`haste_core::paths::cache_dir()` or the
-    /// repo's `cache/` symlink). Libraries come from `libraries/` (WS7's download) or, until that
+    /// repo's `cache/` symlink). Libraries come from `libraries/` (setup's download) or, until that
     /// exists, from the spike server's `server-spike/libraries`.
     pub fn from_cache(cache: &Path) -> Result<JvmConfig> {
         let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

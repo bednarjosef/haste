@@ -2,7 +2,7 @@
 //! compare every tick's position with the recording. Reports the first tick whose position error
 //! exceeds the tolerance and the maximum error over the trace.
 //!
-//! Trace format: `crates/haste-testkit/FORMATS.md` (WS8, version 1). Parsed here with our own
+//! Trace format: `crates/haste-testkit/FORMATS.md` (oracles, version 1). Parsed here with our own
 //! lenient structs so this crate does not depend on haste-testkit. Assumptions about the format
 //! that the document does not settle are listed on [`InputAlignment`] and in NOTES.md.
 use std::path::Path;

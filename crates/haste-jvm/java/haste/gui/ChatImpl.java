@@ -8,7 +8,7 @@ import net.minecraft.util.ArrayListDeque;
 
 /**
  * Bodies of the {@code ChatComponent} proxy. The chat log is Rust state (received messages arrive through the
- * protocol, WS1); Java only keeps the up-arrow history of lines typed this session, like vanilla's recent chat.
+ * protocol, protocol); Java only keeps the up-arrow history of lines typed this session, like vanilla's recent chat.
  */
 public final class ChatImpl {
     private ChatImpl() {}

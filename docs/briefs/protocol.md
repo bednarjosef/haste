@@ -1,12 +1,12 @@
-# WS1: haste-protocol + the M1 headless join
+# protocol: haste-protocol + the join milestone headless join
 
 You own `crates/haste-protocol` and `crates/haste-client/src/{net.rs,headless.rs}`. Interfaces in
-docs/INTERFACES.md. Milestone M1 is yours: `haste --headless --server 127.0.0.1:25565` joins a local
+docs/INTERFACES.md. Milestone join milestone is yours: `haste --headless --server 127.0.0.1:25565` joins a local
 26.3 vanilla server (offline mode), stays connected for the requested time, tracks the world and
-entities through `haste-world`/`haste-entity` (WS2/WS4 crates; consume their public API, if it is
+entities through `haste-world`/`haste-entity` (world-and-data/entities crates; consume their public API, if it is
 not there yet call into stubs you keep in `net.rs` and swap later), prints chunk/entity counts and
 the player position each second, and leaves cleanly. Then the same against an online-mode server
-with a Microsoft account (tokens come from WS7's auth; coordinate the `Account` struct via the lead).
+with a Microsoft account (tokens come from setup's auth; coordinate the `Account` struct via the lead).
 
 ## Reuse decision
 Decided by the lead from the Pumpkin evaluation (Pumpkin at `cache/pumpkin`, GPL-3.0, stable
@@ -28,8 +28,8 @@ Rust, targets exactly 26.3 / protocol 777):
   respawn, set_container_*, set_equipment, particle, unload_chunk, ...), copy the decode logic
   with attribution. Serverbound packets all have write impls there: reuse likewise.
 - Pumpkin's `CChunkData` payload is opaque bytes and its entity metadata decode is a stub:
-  chunk sections go to `haste_world::wire` (WS2), metadata decode is yours (wiki table of types).
-- Microsoft auth tokens come from WS7 (`haste-setup`); you implement the Mojang session-server
+  chunk sections go to `haste_world::wire` (world-and-data), metadata decode is yours (wiki table of types).
+- Microsoft auth tokens come from setup (`haste-setup`); you implement the Mojang session-server
   join and the encryption handshake only.
 
 ## Task 1: codec + connection state machine
@@ -51,11 +51,11 @@ Rust, targets exactly 26.3 / protocol 777):
   with a generated key; a handshake/login/config flow against a fake server (tokio in-process)
   that you write in tests; `PacketIds::load` on the real file (#[ignore]).
 
-## Task 2: play packets, the ones M1 needs first, then all
+## Task 2: play packets, the ones join milestone needs first, then all
 Clientbound first: `login`, `respawn`, `player_position` (teleport, with the 26.x relative flags,
 answer `accept_teleportation`), `set_chunk_cache_center`, `set_chunk_cache_radius`,
 `level_chunk_with_light` (fill `haste_core::chunk::ChunkData`; the section bytes stay opaque to you;
-`haste_world::wire` decodes them, WS2 provides it), `forget_level_chunk`, `light_update`,
+`haste_world::wire` decodes them, world-and-data provides it), `forget_level_chunk`, `light_update`,
 `block_update`, `section_blocks_update`, `add_entity`, `remove_entities`, `move_entity_pos`,
 `move_entity_pos_rot`, `move_entity_rot`, `teleport_entity`/`entity_position_sync`,
 `rotate_head`, `set_entity_motion`, `set_entity_data` (metadata decode into `MetadataEntry`),
@@ -74,9 +74,9 @@ fill them in by frequency. Field layouts: minecraft.wiki `Java Edition protocol/
 server and write what you verified in NOTES.md). Pumpkin's packet structs (GPL-3.0,
 `cache/pumpkin`) can be reused with attribution where they exist for 26.3 clientbound decoding.
 - Tests: each packet has an encode/decode round trip on a hand-built instance; a recorded-packet
-  replay test over `cache/oracle/26.3/packets/*.bin` when WS8 provides them (#[ignore]).
+  replay test over `cache/oracle/26.3/packets/*.bin` when oracles provides them (#[ignore]).
 
-## Task 3: M1 headless join (`crates/haste-client/src/{net.rs,headless.rs}`)
+## Task 3: join milestone headless join (`crates/haste-client/src/{net.rs,headless.rs}`)
 - `net.rs`: a `NetDriver` that owns the `Connection`, drains packets each tick and applies them
   to `World` and `EntityStore` and to a small `LocalPlayerState` (position from teleports, health,
   held slot); sends `move_player_pos_rot` every tick with the current position (standing still is

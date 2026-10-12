@@ -49,7 +49,7 @@
   implemented.
 - **`RenderLayer` classification is heuristic** (see above); `_glass_pane`/`_glass` name
   suffixes plus a fixed name set.
-- **haste-data is not wired yet** (WS2 still in progress on this branch): `BakedBlockModels::bake`
+- **haste-data is not wired yet** (world-and-data still in progress on this branch): `BakedBlockModels::bake`
   takes a `BlockStatesSource` trait instead of `GameData`'s `BlockStates`. A local
   `BlocksJsonStates` reads `blocks.json` directly with the same semantics. Once haste-data
   lands, it should implement `BlockStatesSource` (or the lead wires the trait) — requested in

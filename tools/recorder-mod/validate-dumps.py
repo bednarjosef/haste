@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validation checks over cache/oracle/26.3 server-side oracle dumps (WS8 brief, Task 1).
+"""Validation checks over cache/oracle/26.3 server-side oracle dumps (oracles brief, Task 1).
 
 Checks: minecraft:stone is a full cube; oak_slab[type=bottom] is a half cube; torch has empty
 collision; water has empty collision. Run from the repo root: tools/recorder-mod/validate-dumps.py

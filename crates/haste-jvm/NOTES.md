@@ -1,4 +1,4 @@
-# haste-jvm notes (WS6)
+# haste-jvm notes (jvm-host)
 
 ## Layout
 - Rust: `src/host.rs` (`JvmHost`, `JvmConfig`), `src/loader.rs` (allow/deny lists, class log), `src/proxies.rs`
@@ -22,7 +22,7 @@
 ## Class loader policy (`src/loader.rs`)
 Order: JDK + boot classes from the parent; `haste.*` from `build/game`; a generated proxy if one exists (proxies
 win); vanilla classes from the client jar if the policy permits; anything else from the vanilla library jars
-(`cache/libraries`, or `cache/server-spike/libraries` until WS7's client set exists; Fabric loader/mixin and ASM
+(`cache/libraries`, or `cache/server-spike/libraries` until setup's client set exists; Fabric loader/mixin and ASM
 excluded). Non-class resources (`version.json`, `assets/minecraft/lang/en_us.json`) come from the client jar.
 Most specific pattern wins (class > longer package > shorter; deny wins ties), so value types inside denied
 packages can be allowed by name. Every decision is logged (`JvmHost::class_log`).

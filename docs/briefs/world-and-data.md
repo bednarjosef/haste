@@ -1,4 +1,4 @@
-# WS2: haste-data + haste-world
+# world-and-data: haste-data + haste-world
 
 You own `crates/haste-data` and `crates/haste-world`. Both are consumed by nearly everyone, so the
 order matters: `haste-data` first (others block on it), then `haste-world`.
@@ -9,7 +9,7 @@ order matters: `haste-data` first (others block on it), then `haste-world`.
   Build dense tables indexed by `BlockStateId`: block index, property list, plus lookup maps.
   Verify at load: state ids are dense 0..n with `minecraft:air` = 0; error otherwise.
 - `BlockShapes`: load `cache/oracle/26.3/block_shapes.json` if present (format: see
-  `crates/haste-testkit/FORMATS.md` once WS8 writes it; until then assume
+  `crates/haste-testkit/FORMATS.md` once oracles writes it; until then assume
   `{"version":1,"states":[{"id":0,"collision":[[x1,y1,z1,x2,y2,z2],...],"outline":[...]}]}`),
   else the documented fallback heuristic from INTERFACES.md. `is_oracle_backed()` says which.
 - Tests: unit tests on a tiny hand-written blocks.json/registries.json fixture in the crate
@@ -38,10 +38,10 @@ order matters: `haste-data` first (others block on it), then `haste-world`.
   chunk payload built by your own encoder decodes back; `set_block` across a section border dirties
   both; light nibble get/set; `BlockView` returns AIR outside loaded chunks and outside y range.
   Benchmark (`cargo bench` or a timed test) of `get` in a hot loop: target < 5 ns/call.
-- Give WS1 what it needs: a small `haste_world::wire` module with `decode_sections(bytes,
+- Give protocol what it needs: a small `haste_world::wire` module with `decode_sections(bytes,
   section_count) -> Result<Vec<Section>>` that the protocol crate can call in its own tests.
 
-## Task 3 (after M1 lands): block updates from `section_blocks_update` (packed positions),
+## Task 3 (after join milestone lands): block updates from `section_blocks_update` (packed positions),
 world time/weather state holders, chunk unload radius helper, and performance work the lead asks for.
 
 Do not touch: haste-protocol, haste-render, haste-entity, haste-physics, haste-client.

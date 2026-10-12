@@ -1,4 +1,4 @@
-# haste-setup notes (WS7)
+# haste-setup notes (setup)
 
 ## Task 1: ensure_installed — done
 
@@ -26,7 +26,7 @@
 ### Approximations / decisions
 - `ensure_installed(progress)` takes `FnMut(Progress) + Send + 'static` (INTERFACES.md says
   `impl FnMut(Progress)`); the 'static bound comes from the concurrency in `download_many`.
-- Windows JDK unpack (`unzip`) is unimplemented — WS7 runs on linux; the Adoptium URL is built
+- Windows JDK unpack (`unzip`) is unimplemented — setup runs on linux; the Adoptium URL is built
   for windows but unpacking a zip is TODO if ever needed.
 - `find_existing_minecraft()` checks `versions/26.3/26.3.json` under the standard `.minecraft`
   roots; read-only by construction (only `is_file` checks).
@@ -37,7 +37,7 @@
 ## Task 2: config + local server + launcher flow — done
 
 - `config.rs`: `Config` TOML in the platform config dir (`directories::ProjectDirs`), 0600 file /
-  0700 dir; `load()` creates defaults on first run. `MsaTokens` shape for WS1 (coordinate the final
+  0700 dir; `load()` creates defaults on first run. `MsaTokens` shape for protocol (coordinate the final
   struct through the lead — I put `access_token`/`refresh_token`/`expires_at`/`profile{uuid,name}`).
 - `server.rs`: `LocalServer::start(world_dir, port)` — vanilla server.jar (not Fabric),
   `eula=true`, `online-mode=false`, `server-ip=127.0.0.1`, `pause-when-empty-seconds=-1`,

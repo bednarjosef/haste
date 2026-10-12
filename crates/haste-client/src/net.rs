@@ -1,4 +1,4 @@
-//! Network driver (WS1): owns the `Connection`, drains packets each tick and
+//! Network driver (protocol): owns the `Connection`, drains packets each tick and
 //! applies them to the world, the entity store and the local player, and
 //! sends the per-tick movement packets.
 //!

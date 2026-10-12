@@ -1,4 +1,4 @@
-# WS8: oracles, test tiers, CI, benchmarks
+# oracles: oracles, test tiers, CI, benchmarks
 
 You own `crates/haste-testkit`, `tools/recorder-mod` (Java, Fabric), `.github/workflows`,
 `crates/haste-testkit/FORMATS.md`, and `docs/RECORDING.md`. Nothing in Haste may be written from
@@ -38,7 +38,7 @@ counts. Validate: `minecraft:stone` is a full cube, `minecraft:oak_slab[type=bot
   `/proc/self/status`, section counts) and a Markdown table writer.
 - A packet recorder binary `haste-packet-proxy` (TCP proxy for OFFLINE servers: handles the
   handshake/login/config/play framing and compression threshold, records decompressed clientbound
-  play packets, forwards everything unchanged). Useful for WS1/WS2 fixtures from any client.
+  play packets, forwards everything unchanged). Useful for protocol/world-and-data fixtures from any client.
 - Tests: format round trips; screenshot compare on generated images; proxy framing unit tests.
 
 ## Task 3: client-side recorder + instructions
@@ -52,7 +52,7 @@ comparisons; it needs a display and the user's machine. Write the client part of
   the PNG and the camera JSON;
 - `/haste bench <route-name>` flies a fixed route for 60 s recording frame times + RSS (for the
   vanilla and vanilla+Sodium numbers).
-Then write `docs/RECORDING.md`: exactly what the user runs (one command via WS7's launcher when it
+Then write `docs/RECORDING.md`: exactly what the user runs (one command via setup's launcher when it
 exists; until then the manual java command line), what to click, how long it takes, where files
 land, how to verify. Do not run the client yourself; report that it needs the user.
 

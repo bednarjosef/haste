@@ -56,7 +56,7 @@ read nested jars.
 
 - The proxy's state machine uses observed clientbound packet ids for login/config transitions
   (compression=3, login success=2, config finish=2). If 26.3's configuration protocol differs,
-  the session still forwards everything (recording would just start late). WS1's
+  the session still forwards everything (recording would just start late). protocol's
   `packets.json`-driven ids are the authoritative fix; a real end-to-end recording against the
   local server is still to be exercised (needs a client to connect through it).
 - `compare_screenshot` does not tolerate subpixel shifts; fine for fixed-camera comparisons.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sanity checks for client-recorded physics traces in cache/oracle/26.3/traces/ (WS8 Task 3).
+"""Sanity checks for client-recorded physics traces in cache/oracle/26.3/traces/ (oracles Task 3).
 
 Checks what the sequences should produce: the walk/sprint/sprint-jump traces moved the player,
 jump traces left the ground, the stop trace stayed (nearly) still, sneak was slower than walk,

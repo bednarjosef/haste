@@ -1,4 +1,4 @@
-//! Renders a flat world offscreen and saves it to a PNG (dev tool for WS3).
+//! Renders a flat world offscreen and saves it to a PNG (dev tool for renderer).
 //! Run: cargo run -p haste-render --example offscreen_dump [-- out.png]
 use haste_core::view::BlockView;
 use haste_core::{BlockPos, BlockStateId, ChunkPos, SectionPos};

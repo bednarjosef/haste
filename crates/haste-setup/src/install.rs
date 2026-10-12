@@ -256,7 +256,7 @@ async fn untar(archive: &Path, dest: &Path) -> anyhow::Result<()> {
 
 async fn unzip(_archive: &Path, _dest: &Path) -> anyhow::Result<()> {
     Err(anyhow!(
-        "windows JDK unpack not implemented yet (WS7 runs on linux)"
+        "windows JDK unpack not implemented yet (setup runs on linux)"
     ))
 }
 

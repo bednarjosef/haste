@@ -32,7 +32,7 @@ pub struct Entity {
     lerp: LerpState,
     /// Cached nametag from `player_info`.
     pub nametag: Option<String>,
-    /// True when the entity type is player-like (humanoid model). Until WS2's registry lands we
+    /// True when the entity type is player-like (humanoid model). Until world-and-data's registry lands we
     /// use the heuristic: an entity whose UUID matches a player-info entry (other players), plus
     /// the caller can set this for remote players seen before their info arrives.
     pub is_player_type: bool,
@@ -77,12 +77,12 @@ pub struct EntityStore {
 }
 
 impl EntityStore {
-    /// Placeholder constructor pending WS2: `docs/INTERFACES.md` specifies
+    /// Placeholder constructor pending world-and-data: `docs/INTERFACES.md` specifies
     /// `new(data: Arc<haste_data::GameData>)`, but `haste-data` does not export `GameData` yet.
     /// The only thing the store needs from it is the `minecraft:entity_type` registry (name ->
     /// index) to apply oracle dimensions; until it exists every entity gets the 0.6 x 1.8 default
     /// box (exactly what the brief says to do without the oracle file). Switch this to the
-    /// documented signature when WS2 lands.
+    /// documented signature when world-and-data lands.
     pub fn new(dims: EntityDimensions) -> EntityStore {
         EntityStore {
             slots: Vec::new(),
@@ -247,8 +247,8 @@ impl EntityStore {
         self.by_id.is_empty()
     }
 
-    /// Interpolated draw list for the renderer (WS3). Players get the humanoid model (classic
-    /// layout; skins arrive with WS3's texture work), everything else a generic box from its
+    /// Interpolated draw list for the renderer (renderer). Players get the humanoid model (classic
+    /// layout; skins arrive with renderer's texture work), everything else a generic box from its
     /// current dimensions. Only humanoids get animation overrides (the box has no limbs).
     pub fn render_instances(&self, partial_tick: f32, out: &mut Vec<EntityInstance>) {
         for slot in self.slots.iter().flatten() {

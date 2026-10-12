@@ -3,7 +3,7 @@ name = "haste-data"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Runtime registries loaded from the data-generator reports and oracle dumps in the cache (block states, registries, block shapes). Owner: WS2."
+description = "Runtime registries loaded from the data-generator reports and oracle dumps in the cache (block states, registries, block shapes). Owner: world-and-data."
 
 [dependencies]
 haste-core.workspace = true

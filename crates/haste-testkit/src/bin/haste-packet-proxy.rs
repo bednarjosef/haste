@@ -126,7 +126,7 @@ impl ProxySession {
     ///
     /// These ids are parsed from the stream as observed, not hardcoded from a wiki; if 26.3's
     /// configuration protocol differs the session still forwards everything (recording just
-    /// starts late or never). The datagen packets.json has the authoritative ids for WS1.
+    /// starts late or never). The datagen packets.json has the authoritative ids for protocol.
     fn on_packet(&mut self, id: i32, body: &[u8]) {
         match self.state {
             State::Handshake => {

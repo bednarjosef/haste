@@ -1,4 +1,4 @@
-//! Vanilla-exact player movement and collision, validated against recorded traces. Owner: WS5.
+//! Vanilla-exact player movement and collision, validated against recorded traces. Owner: physics.
 //!
 //! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
 //! Every constant, where it comes from and how sure we are of it is listed in `NOTES.md`.

@@ -3,7 +3,7 @@ name = "haste-physics"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Vanilla-exact player movement and collision, validated against recorded traces. Owner: WS5."
+description = "Vanilla-exact player movement and collision, validated against recorded traces. Owner: physics."
 
 [dependencies]
 haste-core.workspace = true

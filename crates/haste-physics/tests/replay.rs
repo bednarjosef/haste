@@ -1,5 +1,5 @@
 //! Trace replay. The `#[ignore]` test replays every trace in `cache/oracle/26.3/traces/`
-//! (recorded from the real game by WS8) and reports the first divergence per trace:
+//! (recorded from the real game by oracles) and reports the first divergence per trace:
 //! `cargo test -p haste-physics --test replay -- --ignored --nocapture`.
 use haste_core::input::InputState;
 use haste_core::DVec3;
@@ -115,7 +115,7 @@ fn perturbed_trace_reports_first_divergence() {
 
 #[test]
 fn trace_json_parses() {
-    // The example from crates/haste-testkit/FORMATS.md (WS8), trimmed.
+    // The example from crates/haste-testkit/FORMATS.md (oracles), trimmed.
     let json = r#"{"version":1,"minecraft":"26.3","name":"walk-10s",
         "world":{"seed":12345,"spawn":[0.5,-60.0,0.5],"dimension":"minecraft:overworld"},
         "player":{"yaw":0.0,"pitch":0.0,"initial_pos":[8.5,-60.0,8.5]},
@@ -143,7 +143,7 @@ fn superflat(o: &OracleBlocks) -> FlatWorld {
 }
 
 #[test]
-#[ignore = "needs cache/oracle/26.3/traces/*.json (WS8 recorder) and the oracle dumps"]
+#[ignore = "needs cache/oracle/26.3/traces/*.json (oracles recorder) and the oracle dumps"]
 fn replay_all_recorded_traces() {
     let dir = default_oracle_dir().join("traces");
     let mut paths: Vec<_> = std::fs::read_dir(&dir)

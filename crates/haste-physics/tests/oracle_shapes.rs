@@ -7,7 +7,7 @@ use haste_physics::{collide, collide_with_step, BlockPhysics, FluidKind};
 
 fn load() -> OracleBlocks {
     OracleBlocks::load(&default_oracle_dir())
-        .expect("oracle dump missing: needs cache/oracle/26.3 (WS8)")
+        .expect("oracle dump missing: needs cache/oracle/26.3 (oracles)")
 }
 
 fn player(x: f64, y: f64, z: f64) -> Aabb {

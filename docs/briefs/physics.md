@@ -1,10 +1,10 @@
-# WS5: haste-physics
+# physics: haste-physics
 
 You own `crates/haste-physics` and later `crates/haste-client/src/player.rs` (input sampling +
-movement packets; wait for the lead to say M1 is merged before touching haste-client).
+movement packets; wait for the lead to say join milestone is merged before touching haste-client).
 
 Goal: vanilla-exact player movement and collision, validated tick by tick against recorded traces
-from the real game (WS8 records them into `cache/oracle/26.3/traces/*.json`; format in
+from the real game (oracles records them into `cache/oracle/26.3/traces/*.json`; format in
 `crates/haste-testkit/FORMATS.md`: per tick `input` (forward/back/left/right/jump/sneak/sprint,
 yaw, pitch), `pos`, `velocity`, `on_ground`, `pose`). Until traces exist, build from the public
 documentation and unit tests; the traces will then tell you where you are wrong.

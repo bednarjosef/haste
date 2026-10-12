@@ -6,7 +6,7 @@
 //! the amplitude is zero, so the overrides are empty apart from the head. Sneaking tips the body
 //! forward by 0.5 rad and compensates the head; swimming/elytra poses tip it 90 degrees.
 //!
-//! The renderer (WS3) applies `EntityInstance.yaw` to the whole model and these additive
+//! The renderer (renderer) applies `EntityInstance.yaw` to the whole model and these additive
 //! rotations on top of each part's base rotation; the "head" entry carries the look direction
 //! (`head_yaw` relative to body yaw, `pitch`), clamped to +-75 degrees like vanilla's body/head
 //! split. If the renderer prefers to aim the head itself from `EntityInstance.head_yaw`, it

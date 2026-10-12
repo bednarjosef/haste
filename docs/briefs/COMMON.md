@@ -10,7 +10,7 @@ and the ones you consume), `crates/haste-core/src/*.rs` (shared types; do not ed
 - `cache/` (symlink to the shared cache, gitignored): `cache/jdk/bin/java` (JDK 25),
   `cache/versions/26.3/client.jar` and `server.jar` (Mojang, do not copy anywhere),
   `cache/datagen/26.3/reports/{blocks,registries,packets}.json` (data generator output),
-  `cache/oracle/26.3/` (oracle dumps, may be empty until WS8 produces them),
+  `cache/oracle/26.3/` (oracle dumps, may be empty until oracles produces them),
   `cache/server-spike/` (a working Fabric 26.3 dedicated server from the spike: `fabric-server-launch.jar`, `mods/`),
   `cache/pomme/` (Pomme client, GPL-3.0) and `cache/pumpkin/` (Pumpkin server, GPL-3.0) for reference.
 - The spike repo `../haste-spike` is read-only reference (its REPORT.md, REPORT-2.md).

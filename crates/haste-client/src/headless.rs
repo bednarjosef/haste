@@ -1,4 +1,4 @@
-//! M1: headless join. Owner: WS1.
+//! join milestone: headless join. Owner: protocol.
 //!
 //! `haste --headless --server 127.0.0.1:25565 --seconds 60`: joins (offline
 //! account `--username`), runs the 20 Hz network tick for `--seconds`,
