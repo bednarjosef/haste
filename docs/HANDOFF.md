@@ -32,7 +32,9 @@ For the next lead session. Read `AGENTS.md`, then this, then `TASKS.md` and `NOT
 
 ## What to do next, in order
 
-1. (done in session 1: all eight workstream branches are merged through PRs #1-#8.)
+1. (done in session 1: all eight workstream branches were merged through PRs #1-#8 on the first
+   repo instance; the repo was then recreated with rewritten history to purge personal data, so
+   those PR pages no longer exist. The merge commits and messages are in `main`'s history.)
 2. Wire the real `World`/`EntityStore` into `crates/haste-client/src/net.rs` (`WorldSink`/`EntitySink`
    one-line forwards, delete the stubs), then the window/render loop (`app.rs`) with
    `Renderer::update_world` + `render`: that is M2.

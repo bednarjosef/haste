@@ -2,6 +2,12 @@
 
 Newest at the top. One entry per decision, with the why; link the brief or report it came from.
 
+- **2026-10-12 History rewritten, repo recreated.** Early commits carried a personal email (global
+  git config) and files carried absolute home paths. History was rewritten (identities to the GitHub
+  noreply address, paths to `$HASTE_*` variables; timestamps unchanged) and the GitHub repo was
+  deleted and recreated so no old commit survives behind PR refs. PR numbers restart at #1.
+  `scripts/check-no-personal.sh` (run by CI) prevents a repeat.
+
 - **2026-10-12 Renderer works offscreen (M2 minus wiring).** haste-render draws a 625-section flat
   world at render distance 12 in 4.75 ms/frame (211 FPS) on the Radeon 860M through the local RADV;
   readback PNGs verified. The windowed loop blocks on `get_current_texture` when the Wayland
