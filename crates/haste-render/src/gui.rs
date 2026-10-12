@@ -195,6 +195,8 @@ pub struct GuiRenderer {
     batches: Vec<Batch>,
     entity_scratch: Vec<crate::entity::EntityVertex>,
     rng: u32,
+    /// The target is sRGB (no non-sRGB view available): the shader outputs linear colour.
+    linear_output: bool,
     pub stats: GuiStats,
 }
 
@@ -293,7 +295,7 @@ impl GuiRenderer {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -398,6 +400,7 @@ impl GuiRenderer {
             batches: Vec::new(),
             entity_scratch: Vec::new(),
             rng: 0x9E37_79B9,
+            linear_output: target_format.is_srgb(),
             stats: GuiStats::default(),
         };
         // The missing texture is entry 0 so lookups can always fall back to it.
@@ -567,7 +570,7 @@ impl GuiRenderer {
         let scale = frame.scale.max(1) as f32;
         let uniforms = GuiUniforms {
             size: [target.0 as f32 / scale, target.1 as f32 / scale],
-            _pad: [0.0; 2],
+            _pad: [if self.linear_output { 1.0 } else { 0.0 }, 0.0],
         };
         self.queue
             .write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
@@ -1367,7 +1370,7 @@ fn lambert_shade(n: Vec3, l0: Vec3, l1: Vec3) -> f32 {
 }
 
 /// Display transform matrix: translate, rotate X then Y then Z, scale.
-fn display_matrix(d: &haste_assets::DisplayTransform) -> Mat4 {
+pub(crate) fn display_matrix(d: &haste_assets::DisplayTransform) -> Mat4 {
     Mat4::from_translation(Vec3::from(d.translation))
         * Mat4::from_rotation_x(d.rotation[0].to_radians())
         * Mat4::from_rotation_y(d.rotation[1].to_radians())
@@ -1375,7 +1378,7 @@ fn display_matrix(d: &haste_assets::DisplayTransform) -> Mat4 {
         * Mat4::from_scale(Vec3::from(d.scale))
 }
 
-fn part_matrix(t: &Option<haste_assets::PartTransformation>) -> Mat4 {
+pub(crate) fn part_matrix(t: &Option<haste_assets::PartTransformation>) -> Mat4 {
     match t {
         None => Mat4::IDENTITY,
         Some(t) => {
@@ -1536,6 +1539,7 @@ mod tests {
                     translation: [0.0; 3],
                     scale: [0.625; 3],
                 },
+                firstperson: haste_assets::DisplayTransform::IDENTITY,
                 gui_light_front: false,
                 transformation: None,
             }],

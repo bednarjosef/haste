@@ -130,8 +130,9 @@ fn fs_celestial(in: VertexOut) -> @location(0) vec4<f32> {
         let b = sky.sunrise_dir.w;
         return vec4<f32>(in.color.rgb * b, 1.0);
     }
+    // Additive with the texture's alpha (src alpha, one), like vanilla's sun and moon.
     let c = fetch(in.uv, in.rect);
-    return vec4<f32>(c.rgb * in.color.rgb * in.color.a, 1.0);
+    return vec4<f32>(c.rgb * c.a * in.color.rgb * in.color.a, 1.0);
 }
 
 // ---- world-space: rain and snow columns (alpha blended, depth tested) ----
@@ -184,9 +185,11 @@ fn fs_clouds(in: CloudOut) -> @location(0) vec4<f32> {
     if (c.a < 0.5) {
         discard;
     }
-    let dist = length(in.world - sky.cam_pos.xyz);
-    // Clouds fade out over twice the fog distance (they sit far beyond the terrain).
-    let fade = clamp(1.0 - (dist - sky.params.x) / max(sky.params.x, 1.0), 0.0, 1.0);
+    // Clouds have their own range (they sit far above the terrain fog): fade out toward the
+    // edge of the cloud plane by horizontal distance.
+    let extent = max(sky.params.x * 2.0, 256.0);
+    let hdist = length(in.world.xz - sky.cam_pos.xz);
+    let fade = 1.0 - smoothstep(extent * 0.5, extent, hdist);
     let rgb = mix(sky.fog_color.rgb, vec3<f32>(sky.clouds.x), fade);
     return vec4<f32>(rgb, sky.clouds.y * fade);
 }

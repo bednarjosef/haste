@@ -11,7 +11,9 @@ pub mod attributes;
 pub mod collision;
 pub mod fluids;
 pub mod flying;
+pub mod mining;
 pub mod movement;
+pub mod raycast;
 pub mod replay;
 pub mod testing;
 mod trig;
@@ -46,6 +48,8 @@ pub struct PlayerState {
     pub jump_cooldown: u8,
     pub horizontal_collision: bool,
     pub vertical_collision: bool,
+    /// Eyes under the water surface (last tick); slows mining, starts sprint-swimming.
+    pub eyes_in_water: bool,
 }
 
 impl PlayerState {

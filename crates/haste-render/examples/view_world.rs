@@ -177,6 +177,8 @@ impl App {
                 fog_end: (self.distance as f32) * 16.0,
             },
             partial_tick: 0.0,
+            block_target: None,
+            breaking: &[],
         };
         let stats = renderer.render(&frame).expect("render");
         let dt = self.last_frame.elapsed().as_secs_f32() * 1000.0;

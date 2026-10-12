@@ -17,6 +17,11 @@ fn ids() -> AttributeIds {
         step_height: 33,
         scale: 30,
         sneaking_speed: 31,
+        block_break_speed: 7,
+        mining_efficiency: 24,
+        submerged_mining_speed: 34,
+        block_interaction_range: 8,
+        entity_interaction_range: 13,
     }
 }
 

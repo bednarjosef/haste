@@ -709,7 +709,7 @@ fn star_vertices() -> Vec<SkyVertex> {
         };
         let spin = next() * std::f32::consts::TAU;
         let bitangent = n.cross(tangent);
-        let a = (tangent * spin.cos() + bitangent * spin.sin()) * size * 4.0;
+        let a = (tangent * spin.cos() + bitangent * spin.sin()) * size;
         let b = n.cross(a);
         let corners = [
             centre - a - b,

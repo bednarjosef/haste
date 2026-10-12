@@ -69,6 +69,7 @@ pub fn tick(
 
     // Fluid contact, sneak/sprint flags, pose.
     let eyes_in_water = fluids::update_fluid_state(state, attrs, world, blocks);
+    state.eyes_in_water = eyes_in_water;
     update_flags_and_pose(state, input, attrs, eyes_in_water, world, shapes);
 
     if state.jump_cooldown > 0 {

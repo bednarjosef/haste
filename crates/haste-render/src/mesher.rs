@@ -25,6 +25,8 @@ pub struct SectionMesh {
     pub layers: Vec<(RenderLayer, Vec<u32>)>,
     /// Section-local AABB (min/max in blocks) for frustum culling.
     pub aabb: ([f32; 3], [f32; 3]),
+    /// Face-to-face sightlines through the section (cave culling).
+    pub visibility: crate::occlusion::VisibilitySet,
 }
 
 /// Tint sources resolved at mesh time (palette written into the shader's
@@ -269,7 +271,13 @@ pub fn mesh_section(
                             continue;
                         }
                     }
-                    let sprite = atlas.region_of(&quad.texture).sprite as u16;
+                    let region = atlas.region_of(&quad.texture);
+                    let sprite = region.sprite as u16;
+                    // Baked UVs are atlas texels; the vertex format wants sprite-local 0..1.
+                    let [rx, ry, rw, rh] = region.pixel_rect.map(|v| v as f32);
+                    let uvs = quad
+                        .uvs
+                        .map(|t| [(t[0] - rx) / rw.max(1.0), (t[1] - ry) / rh.max(1.0)]);
 
                     let positions: [[f32; 3]; 4] = quad
                         .positions
@@ -284,7 +292,7 @@ pub fn mesh_section(
                         [light, pack_ao_shade(ao_level, shade), TINT_WHITE, 0]
                     });
 
-                    sink.push_quad(layer, &positions, &quad.uvs, lights, sprite);
+                    sink.push_quad(layer, &positions, &uvs, lights, sprite);
                 }
             }
         }
@@ -310,6 +318,7 @@ pub fn mesh_section(
             .collect(),
         layers,
         aabb: (sink.min, sink.max),
+        visibility: crate::occlusion::section_visibility(snapshot, baked, pos),
     }
 }
 
@@ -566,6 +575,15 @@ mod tests {
         assert_eq!(mesh.layers[0].0, haste_assets::RenderLayer::Solid);
         // Vertices packed, sprite ids resolved from the atlas.
         assert!(mesh.vertices.iter().all(|v| v.sprite != 0));
+        // UVs are sprite-local: full faces span 0..1 (4095 in the fixed-point format).
+        assert!(mesh
+            .vertices
+            .iter()
+            .all(|v| v.uv[0] <= 4095 && v.uv[1] <= 4095));
+        assert!(
+            mesh.vertices.iter().any(|v| v.uv[0] == 0)
+                && mesh.vertices.iter().any(|v| v.uv[0] == 4095)
+        );
         // AABB spans the section.
         assert_eq!(mesh.aabb.0, [0.0, 0.0, 0.0]);
         assert_eq!(mesh.aabb.1, [16.0, 1.0, 16.0]);
