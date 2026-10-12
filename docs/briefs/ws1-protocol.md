@@ -9,7 +9,28 @@ the player position each second, and leaves cleanly. Then the same against an on
 with a Microsoft account (tokens come from WS7's auth; coordinate the `Account` struct via the lead).
 
 ## Reuse decision
-REUSE_DECISION
+Decided by the lead from the Pumpkin evaluation (Pumpkin at `cache/pumpkin`, GPL-3.0, stable
+Rust, targets exactly 26.3 / protocol 777):
+- **Vendor** (copy into `crates/haste-protocol/src/vendored/` keeping the GPL headers and adding a
+  `THIRD_PARTY.md` entry): the transport layer `crates/pumpkin-protocol/src/java/packet_decoder.rs`
+  and `packet_encoder.rs` (length framing, zlib via async-compression, AES-128-CFB8), the stream
+  ciphers from `pumpkin-protocol/src/lib.rs` (`StreamDecryptor`/`StreamEncryptor`), the wire
+  primitives in `pumpkin-protocol/src/ser/mod.rs` and `codec/var_int.rs` (+ var_long, bitset),
+  and the NBT crate `crates/pumpkin-nbt` (3.2k lines, standalone) as a module or as
+  `crates/haste-protocol/nbt` (your call; tell the lead). Adapt them: our `haste_core::{BlockPos,
+  Component}` replace `pumpkin_util`'s `BlockPos`/`TextComponent`; the multi-version branches
+  collapse to 26.3 (keep a `const PROTOCOL: i32 = 777`); drop everything that needs `pumpkin_data`.
+- **Do not depend on** `pumpkin-data` (1.5M generated lines, downloads the server jar at build
+  time) or `pumpkin-util`. Packet ids come from our `packets.json` at runtime, not their constants.
+- **Write our own packet structs** using `haste_core` types. For the ~39 clientbound play packets
+  Pumpkin already decodes (`java/client/play/*.rs` with a `ServerPacket` impl: player_position,
+  light_update, spawn_entity, update_entity_pos/rot, update_attributes, multi_block_update,
+  respawn, set_container_*, set_equipment, particle, unload_chunk, ...), copy the decode logic
+  with attribution. Serverbound packets all have write impls there: reuse likewise.
+- Pumpkin's `CChunkData` payload is opaque bytes and its entity metadata decode is a stub:
+  chunk sections go to `haste_world::wire` (WS2), metadata decode is yours (wiki table of types).
+- Microsoft auth tokens come from WS7 (`haste-setup`); you implement the Mojang session-server
+  join and the encryption handshake only.
 
 ## Task 1: codec + connection state machine
 - Wire primitives (VarInt/VarLong, strings with length limits, UUID, positions as packed longs
