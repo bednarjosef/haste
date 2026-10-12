@@ -71,6 +71,14 @@ vanilla client with the mod architecture designed in and no mod support yet.
 - The public remote receives `main` and reviewed branches only; `cache/`, worktrees, and local
   settings never leave the machine.
 
+## Nothing personal in the tree
+
+- No absolute home paths (`/home/<user>`, `/Users/<user>`) in committed files: use `$HASTE_ROOT`,
+  `$HASTE_CACHE`, `$HASTE_WT`, `../haste-spike` or `~` (see `scripts/env.sh`).
+- No email addresses in committed files except `*@users.noreply.github.com`; commits are authored
+  with the GitHub noreply identity (the repo config sets it).
+- CI fails on either. Secrets, tokens and Mojang-derived data never enter the tree (`cache/`).
+
 ## Layout
 
 ```

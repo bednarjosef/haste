@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Rebuilds the shared derived-data cache from scratch (everything in it is reproducible).
-# Real location: $HASTE_CACHE; the repo's ./cache is a symlink to it.
+# Real location: ../haste-cache next to the repo (override with HASTE_CACHE_REAL); ./cache is a symlink to it.
 set -euo pipefail
-H="$(cd "$(dirname "$0")/.." && pwd)"; C=${HASTE_CACHE_REAL:-$HASTE_CACHE}
-SP=../haste-spike/cache   # spike's JDK, Mojang jars and Fabric server (until haste-setup replaces them)
+H="$(cd "$(dirname "$0")/.." && pwd)"; C=${HASTE_CACHE_REAL:-$(dirname "$H")/haste-cache}
+SP=${HASTE_SPIKE:-$(dirname "$H")/haste-spike}/cache   # spike's JDK, Mojang jars and Fabric server (until haste-setup replaces them)
 mkdir -p "$C"; [ -e "$H/cache" ] && [ ! -L "$H/cache" ] && { echo "$H/cache is a real directory; move it aside first"; exit 1; }
 ln -sfn "$C" "$H/cache"
 mkdir -p "$C/versions/26.3" "$C/datagen/26.3" "$C/oracle/26.3"

@@ -18,6 +18,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the personal-data check inspects every commit identity
+
+      - name: No personal data (paths, emails, commit identities)
+        run: scripts/check-no-personal.sh
 
       # rust-toolchain.toml pins the channel; rustup honors it on a rust-less runner.
       - name: Install Rust (pinned by rust-toolchain.toml)

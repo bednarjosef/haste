@@ -3,7 +3,8 @@
 # usage: scripts/review.sh <ws-branch> [crate...]
 set -uo pipefail
 WS=$1; shift
-W=$HASTE_WT/$WS
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+W=${HASTE_WT:-$(dirname "$ROOT")/haste-wt}/$WS
 cd "$W" || exit 1
 echo "== $WS: $(git log --oneline main..HEAD | wc -l) commits ahead of main"
 git log --oneline main..HEAD | head -40
