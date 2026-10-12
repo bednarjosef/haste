@@ -1,0 +1,4 @@
+[toolchain]
+# Pinned stable. No nightly features anywhere in this workspace (see AGENTS.md).
+channel = "1.99.0"
+components = ["clippy", "rustfmt"]

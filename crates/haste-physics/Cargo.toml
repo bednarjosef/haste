@@ -1,0 +1,14 @@
+[package]
+name = "haste-physics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Vanilla-exact player movement and collision, validated against recorded traces. Owner: WS5."
+
+[dependencies]
+haste-core.workspace = true
+haste-data.workspace = true
+glam.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "haste-test",
+  "version": "0.1.0",
+  "name": "Haste Test Mod",
+  "description": "Two HEAD injections on Minecraft.tick (and a server-side twin on MinecraftServer.tickServer) used by the haste-spike landmark test.",
+  "authors": ["haste-spike"],
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": ["haste.testmod.HasteTestMod"]
+  },
+  "mixins": ["haste-test.mixins.json"],
+  "depends": {
+    "fabricloader": ">=0.19.5",
+    "minecraft": "~26.3",
+    "java": ">=25"
+  }
+}

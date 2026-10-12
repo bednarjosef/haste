@@ -1,0 +1,16 @@
+[package]
+name = "haste-jvm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Embedded JVM host, tier-3 vanilla class loading, tier-2 proxies, batched GUI pipeline. Owner: WS6."
+
+[dependencies]
+haste-core.workspace = true
+jni.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+zip.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true

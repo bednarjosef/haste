@@ -1,0 +1,19 @@
+[package]
+name = "haste-setup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fetching 26.3 jars/assets/libraries from Mojang's manifest, running the data generator, config, launching the embedded vanilla server, launcher flow. Owner: WS7."
+
+[dependencies]
+haste-core.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+clap.workspace = true
+directories.workspace = true
+tracing.workspace = true
+zip.workspace = true

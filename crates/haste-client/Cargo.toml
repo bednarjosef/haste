@@ -1,0 +1,31 @@
+[package]
+name = "haste-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The Haste client binary: wires protocol, world, entities, physics, renderer and the JVM host together."
+
+[[bin]]
+name = "haste"
+path = "src/main.rs"
+
+[dependencies]
+haste-core.workspace = true
+haste-data.workspace = true
+haste-protocol.workspace = true
+haste-world.workspace = true
+haste-assets.workspace = true
+haste-render.workspace = true
+haste-entity.workspace = true
+haste-physics.workspace = true
+haste-jvm.workspace = true
+haste-setup.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+winit.workspace = true
+glam.workspace = true
+parking_lot.workspace = true
+crossbeam-channel.workspace = true

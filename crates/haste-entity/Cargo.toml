@@ -1,0 +1,15 @@
+[package]
+name = "haste-entity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Entity tracking from packet-derived events, interpolation, entity and player models. Owner: WS4."
+
+[dependencies]
+haste-core.workspace = true
+haste-data.workspace = true
+glam.workspace = true
+uuid.workspace = true
+ahash.workspace = true
+anyhow.workspace = true
+tracing.workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "haste-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared types and cross-crate interfaces for the Haste client. Owned by the lead."
+
+[dependencies]
+glam.workspace = true
+uuid.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+bytes.workspace = true

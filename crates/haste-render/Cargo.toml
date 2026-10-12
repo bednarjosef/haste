@@ -1,0 +1,22 @@
+[package]
+name = "haste-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "wgpu render backend: chunk meshing (off-thread), atlas, sky/fog, culling, entity models, GUI batch drawing. Owner: WS3."
+
+[dependencies]
+haste-core.workspace = true
+haste-data.workspace = true
+haste-assets.workspace = true
+wgpu.workspace = true
+winit.workspace = true
+pollster.workspace = true
+bytemuck.workspace = true
+glam.workspace = true
+rayon.workspace = true
+crossbeam-channel.workspace = true
+parking_lot.workspace = true
+ahash.workspace = true
+anyhow.workspace = true
+tracing.workspace = true

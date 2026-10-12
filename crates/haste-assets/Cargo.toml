@@ -1,0 +1,18 @@
+[package]
+name = "haste-assets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Textures, block/item models, blockstate definitions, fonts and GUI sprites read from the player's client jar and the assets index. Owner: WS3."
+
+[dependencies]
+haste-core.workspace = true
+haste-data.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zip.workspace = true
+image.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+ahash.workspace = true
+tracing.workspace = true

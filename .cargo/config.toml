@@ -1,0 +1,4 @@
+[env]
+# All derived Mojang data (jars, assets, data-generator reports, oracle dumps) lives here.
+# Worktrees symlink ./cache to the main checkout's cache.
+HASTE_CACHE = { value = "cache", relative = true }

@@ -1,0 +1,59 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+exclude = ["cache"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/josefbednar/haste"
+rust-version = "1.99"
+
+[workspace.dependencies]
+haste-core = { path = "crates/haste-core" }
+haste-data = { path = "crates/haste-data" }
+haste-protocol = { path = "crates/haste-protocol" }
+haste-world = { path = "crates/haste-world" }
+haste-assets = { path = "crates/haste-assets" }
+haste-render = { path = "crates/haste-render" }
+haste-entity = { path = "crates/haste-entity" }
+haste-physics = { path = "crates/haste-physics" }
+haste-jvm = { path = "crates/haste-jvm" }
+haste-setup = { path = "crates/haste-setup" }
+haste-testkit = { path = "crates/haste-testkit" }
+
+glam = { version = "0.30", features = ["serde"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+bytes = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["full"] }
+parking_lot = "0.12"
+ahash = "0.8"
+smallvec = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+flate2 = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+wgpu = "30"
+winit = "0.30"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+jni = { version = "0.22", features = ["invocation"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+clap = { version = "4", features = ["derive"] }
+directories = "6"
+crossbeam-channel = "0.5"
+rayon = "1"
+criterion = "0.5"
+
+[profile.release]
+debug = 1
+[profile.dev]
+opt-level = 1
+[profile.dev.package."*"]
+opt-level = 3
