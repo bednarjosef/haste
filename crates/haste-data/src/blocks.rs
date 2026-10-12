@@ -214,6 +214,22 @@ impl BlockStates {
         self.state_block.is_empty()
     }
 
+    /// Number of distinct blocks (for per-block side tables).
+    pub(crate) fn block_count(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// Internal block-table index of `name` (e.g. "minecraft:ice"), for per-block tables that
+    /// parallel ours. None if unknown.
+    pub(crate) fn block_index_by_name(&self, name: &str) -> Option<u32> {
+        self.by_name.get(name).copied()
+    }
+
+    /// Internal block-table index of the block owning `state`.
+    pub(crate) fn block_index_of_state(&self, s: BlockStateId) -> u32 {
+        self.state_block[s.0 as usize]
+    }
+
     /// Block owning state `s`. Panics if `s` is out of range (ids are dense at load).
     pub fn block_of(&self, s: BlockStateId) -> &Identifier {
         &self.blocks[self.state_block[s.0 as usize] as usize].name

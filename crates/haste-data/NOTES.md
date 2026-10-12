@@ -43,6 +43,24 @@
   registries, no oracle) measure ~85-110 ms, within target. The oracle dump adds ~180 ms;
   asked the lead whether to optimize now or at M2 (report sent).
 
+## BlockPhysics / BlockStateTable (added after M1 merge)
+
+- `BlockStateTable for BlockStates`: thin delegate to the inherent methods (len/block_of/
+  properties/property_value). No new state.
+- `BlockPhysics for GameData`: friction/speed_factor/jump_factor from
+  `cache/oracle/26.3/block_properties.json` (defaults 0.6/1.0/1.0; unknown blocks in the dump
+  are skipped); fluid/light_emission/is_air/is_opaque_full from the per-state fields of
+  `block_shapes.json` (`fluid` id incl. waterlogged blocks, `light`, `air`, `opaque`).
+  `load_from` reads `block_properties.json` next to the shapes oracle path when present
+  (the interface signature stays `(reports, oracle)`); `BlockProperties::defaults` otherwise.
+- Fluid height from the `level` property: 0 -> 8/9, 1..=7 -> (8-level)/9, >= 8 -> 1.0
+  (falling column is full; per the lead's spec). Waterlogged blocks have no `level` property
+  and read as a full source (8/9). NOTE: haste-physics's own oracle loader
+  (crates/haste-physics/src/oracle.rs:92) maps level >= 8 to 8/9 instead — the two crates
+  disagree; flagged to the lead, who specified 1.0 for haste-data.
+- Verified against the real dumps (in `real_reports` --ignored): ice 0.98, slime 0.8, honey
+  speed 0.4 / jump 0.5, water heights, glowstone light 15, torch 14.
+
 ## Approximate / not verified
 
 - Fallback shapes (no oracle file): documented heuristic from docs/INTERFACES.md. Air
@@ -51,6 +69,8 @@
   `half` (real stairs have two boxes, e.g. oak_stairs east/bottom/straight = base slab + quarter
   column); `pointed_dripstone` half cube by `vertical_direction` (real: taper by `thickness`);
   keyword list (grass, fern, flower, ...) = no collision. All replaced by the real oracle dump,
-  which is present in the cache now; the fallback only fires without it.
+  which is present in the cache now; the fallback only fires without it. The fallback's physics
+  fields are likewise heuristic: air variants are `air`, water/lava carry a full-source fluid,
+  everything else is an opaque full cube, light always 0.
 - Registries with no `protocol_id` (none in 26.3) would fail to deserialize (field is
   non-optional); not handled because not present.
