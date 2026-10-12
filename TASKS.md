@@ -19,8 +19,8 @@ One line per task; details live in `docs/briefs/<ws>.md` and in the branch.
 | WS7-1 | WS7 | ensure_installed: Mojang downloads, JDK, datagen | M1 | in progress |
 | WS7-2 | WS7 | config, LocalServer, vanilla launcher, MSA auth | M6 | claimed |
 | WS8-1 | WS8 | server-side oracle dumps (block shapes, entity dims, block props) | M2/M3 | done |
-| WS8-2 | WS8 | testkit formats + harness + packet proxy | M1 | in progress |
-| WS8-3 | WS8 | client recorder + RECORDING.md | M3 | claimed |
+| WS8-2 | WS8 | testkit formats + harness + packet proxy | M1 | done |
+| WS8-3 | WS8 | client recorder + RECORDING.md (+ FORMATS amendment: per-tick yaw/pitch) | M3 | in progress |
 | WS8-4 | WS8 | CI + TESTING.md | - | claimed |
 | WS1-1 | WS1 (Opus) | protocol codec + state machine (vendored Pumpkin transport) | M1 | in progress |
 | WS1-2 | WS1 (Opus) | play packets | M1 | in progress |
