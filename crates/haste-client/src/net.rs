@@ -7,6 +7,7 @@
 //! for `haste_world::World` and `haste_entity::EntityStore` (one-line forwards) and for the
 //! recording fakes in the tests.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -28,7 +29,7 @@ use haste_protocol::{
 };
 use haste_world::World;
 
-use crate::player::{AttributeIds, LocalPlayer};
+use crate::player::LocalPlayer;
 
 /// What the driver needs from the world (`haste_world::World`).
 pub trait WorldSink {
@@ -107,6 +108,10 @@ pub trait EntitySink {
     fn player_info(&mut self, info: &[PlayerInfo]);
     /// Position and rotation of an entity.
     fn pose(&self, id: EntityId) -> Option<(DVec3, f32, f32)>;
+    /// Hit box of an entity, for the crosshair (none in fakes by default).
+    fn hitbox(&self, _id: EntityId) -> Option<haste_core::Aabb> {
+        None
+    }
     /// Forgets every entity (respawn / dimension change).
     fn clear(&mut self);
     /// `EntityStore::tick`.
@@ -186,6 +191,10 @@ impl EntitySink for EntityStore {
     fn pose(&self, id: EntityId) -> Option<(DVec3, f32, f32)> {
         self.get(id).map(|e| (e.pos, e.yaw, e.pitch))
     }
+    fn hitbox(&self, id: EntityId) -> Option<haste_core::Aabb> {
+        self.get(id)
+            .map(|e| haste_core::Aabb::entity(e.pos, e.dimensions.0 as f64, e.dimensions.1 as f64))
+    }
     fn clear(&mut self) {
         // EntityStore has no clear(); a fresh store re-reads the (small, optional) dimensions
         // oracle. The tab list (`player_info`) is lost with it, which vanilla keeps across a
@@ -259,6 +268,11 @@ pub struct Session {
     pub dimension: DimensionInfo,
     /// Counters.
     pub counters: NetCounters,
+    /// Other players' break progress (`block_destruction`): breaker id -> (block, stage 0..=9).
+    pub breaking: HashMap<i32, (BlockPos, u8)>,
+    /// Entities the server spawned and has not removed (crosshair targets).
+    entity_ids: HashSet<EntityId>,
+    entity_boxes: Vec<(EntityId, haste_core::Aabb)>,
     /// Time of day in ticks from the first world clock of the last `set_time` (approximate:
     /// that the first clock is the day clock is not verified).
     pub time_of_day: Option<i64>,
@@ -275,6 +289,9 @@ impl Session {
             },
             entity_id,
             dimension,
+            breaking: HashMap::new(),
+            entity_ids: HashSet::new(),
+            entity_boxes: Vec::new(),
             time_of_day: None,
         }
     }
@@ -291,7 +308,25 @@ impl Session {
         use ClientboundPlay as P;
         self.counters.packets += 1;
         let own = self.entity_id;
+        if !self.player.int.has_block_tags() {
+            if let Some(t) = regs
+                .tags
+                .iter()
+                .find(|t| t.registry == Identifier::minecraft("block"))
+            {
+                self.player
+                    .int
+                    .set_block_tags(haste_physics::mining::BlockTags::new(
+                        t.tags.iter().map(|t| (t.name.clone(), t.entries.clone())),
+                    ));
+            }
+        }
         let player_packet = self.player.handle(&p, out);
+        if player_packet {
+            for (pos, state) in self.player.take_world_edits() {
+                world.set_block(pos, state);
+            }
+        }
         match p {
             P::Login(l) => {
                 self.counters.got_login = true;
@@ -308,6 +343,8 @@ impl Session {
                     });
                 world.reset(&dim);
                 entities.clear();
+                self.entity_ids.clear();
+                self.breaking.clear();
                 self.dimension = dim;
             }
             P::PlayerPosition(_) => self.counters.teleports += 1,
@@ -328,17 +365,41 @@ impl Session {
             }
             P::BlockUpdate(b) => {
                 let c = b.change();
-                world.set_block(c.pos, c.state);
-            }
-            P::SectionBlocksUpdate(u) => {
-                for c in u.changes() {
+                if !self.player.defer_block_update(c.pos, c.state) {
                     world.set_block(c.pos, c.state);
                 }
             }
+            P::SectionBlocksUpdate(u) => {
+                for c in u.changes() {
+                    if !self.player.defer_block_update(c.pos, c.state) {
+                        world.set_block(c.pos, c.state);
+                    }
+                }
+            }
+            P::BlockDestruction(d) => {
+                tracing::debug!(
+                    "block_destruction {} {:?} stage {}",
+                    d.entity_id,
+                    d.pos,
+                    d.stage
+                );
+                if d.stage <= 9 {
+                    self.breaking.insert(d.entity_id, (d.pos, d.stage));
+                } else {
+                    self.breaking.remove(&d.entity_id);
+                }
+            }
             P::LightUpdate(l) => world.apply_light(l.pos, &l.light),
-            P::AddEntity(a) => entities.spawn(&a.spawn()),
+            P::AddEntity(a) => {
+                let s = a.spawn();
+                self.entity_ids.insert(s.id);
+                entities.spawn(&s)
+            }
             P::RemoveEntities(r) => {
                 let ids: Vec<EntityId> = r.entity_ids.iter().map(|i| EntityId(*i)).collect();
+                for id in &ids {
+                    self.entity_ids.remove(id);
+                }
                 entities.remove(&ids);
             }
             P::MoveEntityPos(m) => {
@@ -415,22 +476,30 @@ impl Session {
         }
     }
 
-    /// The local player's tick with `input` and its packets (`LocalPlayer::tick`); in a world
-    /// without physics data (test fakes) the player stays in place.
-    pub fn end_tick<W: WorldSink + ?Sized>(
+    /// The local player's tick with `input` (and the interactions set with
+    /// `LocalPlayer::set_interact`) and its packets; predicted block changes go into the world.
+    /// In a world without physics data (test fakes) the player stays in place.
+    pub fn end_tick<W: WorldSink + ?Sized, E: EntitySink + ?Sized>(
         &mut self,
         input: &InputState,
-        world: &W,
+        world: &mut W,
+        entities: &E,
         out: &mut Vec<ServerboundPlay>,
     ) {
+        self.entity_boxes.clear();
+        for id in &self.entity_ids {
+            if let Some(b) = entities.hitbox(*id) {
+                self.entity_boxes.push((*id, b));
+            }
+        }
         match world.physics() {
             Some((view, data)) => {
-                if !self.player.has_attribute_ids() {
-                    if let Some(ids) = AttributeIds::from_data(data) {
-                        self.player.set_attribute_ids(ids);
-                    }
-                }
-                self.player.tick_with(input, view, &data.shapes, data, out)
+                self.player.prepare(data);
+                let env = crate::player::interact::InteractEnv {
+                    data,
+                    entities: &self.entity_boxes,
+                };
+                self.player.tick_interact(input, view, &env, out)
             }
             None => self.player.tick_with(
                 input,
@@ -440,6 +509,15 @@ impl Session {
                 out,
             ),
         }
+        for (pos, state) in self.player.take_world_edits() {
+            world.set_block(pos, state);
+        }
+    }
+
+    /// Break cracks to draw: other players' (`block_destruction`) and our own.
+    pub fn breaking_stages(&self, out: &mut Vec<(BlockPos, u8)>) {
+        out.extend(self.breaking.values().copied());
+        out.extend(self.player.break_progress());
     }
 
     fn push_chat(&mut self, line: String) {
@@ -516,11 +594,11 @@ impl NetDriver {
     pub fn end_tick<W: WorldSink + ?Sized, E: EntitySink + ?Sized>(
         &mut self,
         input: &InputState,
-        world: &W,
+        world: &mut W,
         entities: &mut E,
     ) -> anyhow::Result<()> {
         entities.tick();
-        self.session.end_tick(input, world, &mut self.out);
+        self.session.end_tick(input, world, entities, &mut self.out);
         self.flush()
     }
 

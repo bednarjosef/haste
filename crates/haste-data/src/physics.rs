@@ -15,6 +15,10 @@ pub struct BlockProps {
     pub friction: f32,
     pub speed_factor: f32,
     pub jump_factor: f32,
+    /// Hardness (`destroy_time` in the dump; -1 = unbreakable). NaN when the dump predates it.
+    pub destroy_time: f32,
+    /// Drops only with the correct tool (`requires_correct_tool_for_drops`).
+    pub requires_correct_tool: bool,
 }
 
 impl Default for BlockProps {
@@ -23,6 +27,8 @@ impl Default for BlockProps {
             friction: 0.6,
             speed_factor: 1.0,
             jump_factor: 1.0,
+            destroy_time: f32::NAN,
+            requires_correct_tool: false,
         }
     }
 }
@@ -32,6 +38,8 @@ pub struct BlockProperties {
     /// Index parallels `BlockStates`' block descriptors are NOT name-ordered; we look up by
     /// block index into `BlockStates` via a side table built at load.
     props: Vec<BlockProps>,
+    /// States whose destroy time / correct-tool flag differ from their block's default state.
+    state_overrides: std::collections::HashMap<u32, (f32, bool)>,
 }
 
 #[derive(serde::Deserialize)]
@@ -39,7 +47,7 @@ struct PropsFile {
     blocks: std::collections::HashMap<String, RawProps>,
 }
 
-#[derive(serde::Deserialize, Clone, Copy)]
+#[derive(serde::Deserialize, Clone)]
 struct RawProps {
     #[serde(default = "d_friction")]
     friction: f32,
@@ -47,6 +55,23 @@ struct RawProps {
     speed_factor: f32,
     #[serde(default = "one")]
     jump_factor: f32,
+    #[serde(default = "nan")]
+    destroy_time: f32,
+    #[serde(default)]
+    requires_correct_tool_for_drops: bool,
+    /// State id -> differing breaking values.
+    #[serde(default)]
+    states: std::collections::HashMap<String, RawStateProps>,
+}
+
+#[derive(serde::Deserialize, Clone, Copy)]
+struct RawStateProps {
+    destroy_time: f32,
+    requires_correct_tool_for_drops: bool,
+}
+
+fn nan() -> f32 {
+    f32::NAN
 }
 
 fn d_friction() -> f32 {
@@ -64,6 +89,7 @@ impl BlockProperties {
         // One props slot per block, indexed like BlockStates' internal block table: we ask
         // BlockStates to place them (it owns the name -> index map).
         let mut props = vec![BlockProps::default(); blocks.block_count()];
+        let mut state_overrides = std::collections::HashMap::new();
         for (name, raw) in &file.blocks {
             let Some(idx) = blocks.block_index_by_name(name) else {
                 // Unknown block in the dump (newer game?): keep the default, stay silent.
@@ -73,15 +99,27 @@ impl BlockProperties {
                 friction: raw.friction,
                 speed_factor: raw.speed_factor,
                 jump_factor: raw.jump_factor,
+                destroy_time: raw.destroy_time,
+                requires_correct_tool: raw.requires_correct_tool_for_drops,
             };
+            for (id, st) in &raw.states {
+                if let Ok(id) = id.parse::<u32>() {
+                    state_overrides
+                        .insert(id, (st.destroy_time, st.requires_correct_tool_for_drops));
+                }
+            }
         }
-        Ok(Self { props })
+        Ok(Self {
+            props,
+            state_overrides,
+        })
     }
 
     /// All-defaults table (used when the oracle file is absent).
     pub(crate) fn defaults(blocks: &BlockStates) -> Self {
         Self {
             props: vec![BlockProps::default(); blocks.block_count()],
+            state_overrides: Default::default(),
         }
     }
 
@@ -91,6 +129,23 @@ impl BlockProperties {
 }
 
 impl GameData {
+    /// Hardness of `state` (vanilla "destroy time"; -1 = unbreakable, 0 = instant). NaN when the
+    /// oracle dump has no breaking data (regenerate with tools/recorder-mod/dump-server-oracles.sh).
+    pub fn destroy_time(&self, state: BlockStateId) -> f32 {
+        match self.physics.state_overrides.get(&state.0) {
+            Some(&(d, _)) => d,
+            None => self.props_of(state).destroy_time,
+        }
+    }
+
+    /// Whether `state` drops anything only when broken with the correct tool.
+    pub fn requires_correct_tool(&self, state: BlockStateId) -> bool {
+        match self.physics.state_overrides.get(&state.0) {
+            Some(&(_, c)) => c,
+            None => self.props_of(state).requires_correct_tool,
+        }
+    }
+
     /// Friction/speed/jump of the block owning `state`.
     fn props_of(&self, state: BlockStateId) -> BlockProps {
         let block = self.blocks.block_index_of_state(state);

@@ -17,9 +17,9 @@ use haste_data::GameData;
 use haste_entity::EntityStore;
 use haste_protocol::haste_core::chunk::{ChunkData, LightData};
 use haste_protocol::haste_core::game::{DimensionInfo, TICK_SECONDS};
-use haste_protocol::haste_core::input::InputState;
+use haste_protocol::haste_core::input::{InputState, InteractInput};
 use haste_protocol::haste_core::view::DirtyTracker;
-use haste_protocol::haste_core::{BlockPos, BlockStateId, ChunkPos, SectionPos};
+use haste_protocol::haste_core::{BlockPos, BlockStateId, ChunkPos, Direction, SectionPos};
 use haste_world::World;
 use parking_lot::{Mutex, RwLock};
 
@@ -44,6 +44,10 @@ pub struct ViewState {
     pub has_sky: bool,
     /// Server view distance in chunks.
     pub view_distance: i32,
+    /// Block under the crosshair and the face hit (`LocalPlayer::target`).
+    pub block_target: Option<(BlockPos, Direction)>,
+    /// Selected hotbar slot (`LocalPlayer::held_slot`), for the scroll wheel.
+    pub held_slot: i32,
 }
 
 /// Input sampled by the render thread from winit, read by the game thread once per tick.
@@ -53,6 +57,8 @@ pub struct SharedInput {
     pub state: InputState,
     /// Double-tap jump seen since the last tick (`LocalPlayer::toggle_flight`).
     pub toggle_flight: bool,
+    /// Mouse buttons held, middle click and hotbar selection since the last tick.
+    pub interact: InteractInput,
 }
 
 /// State shared between the game thread and the render thread.
@@ -67,6 +73,8 @@ pub struct Shared {
     pub dirty: Mutex<Vec<SectionPos>>,
     /// Per-frame view values.
     pub view: Mutex<ViewState>,
+    /// Break cracks to draw (`Session::breaking_stages`), copied once per tick.
+    pub breaking: Mutex<Vec<(BlockPos, u8)>>,
     /// Input for the next tick.
     pub input: Mutex<SharedInput>,
     /// Ask the game thread to stop.
@@ -98,7 +106,10 @@ impl Shared {
                 time_of_day: 6000,
                 has_sky,
                 view_distance,
+                block_target: None,
+                held_slot: 0,
             }),
+            breaking: Mutex::new(Vec::new()),
             input: Mutex::new(SharedInput::default()),
             stop: AtomicBool::new(false),
             closed: Mutex::new(None),
@@ -236,12 +247,27 @@ fn tick_once(
         if std::mem::take(&mut shared_input.toggle_flight) {
             driver.session.player.toggle_flight();
         }
+        // Held buttons stay; the press-only middle click and the hotbar choice are consumed.
+        let interact = shared_input.interact;
+        shared_input.interact.pick_block = false;
+        shared_input.interact.hotbar = None;
+        driver.session.player.set_interact(interact);
         shared_input.state
     };
     {
-        let world = shared.world.read();
+        // Write lock: the player's breaking predicts block changes into the world.
+        let mut world = shared.world.write();
         let mut entities = shared.entities.write();
-        driver.end_tick(&input, &*world, &mut *entities)?;
+        driver.end_tick(&input, &mut *world, &mut *entities)?;
+        let mut dirty = world.take_dirty_sections();
+        if !dirty.is_empty() {
+            shared.dirty.lock().append(&mut dirty);
+        }
+    }
+    {
+        let mut breaking = shared.breaking.lock();
+        breaking.clear();
+        driver.session.breaking_stages(&mut breaking);
     }
     let s = &driver.session;
     let (prev_eye, _, _) = s.player.camera(0.0);
@@ -254,6 +280,8 @@ fn tick_once(
     view.has_position = s.player.has_position;
     view.time_of_day = s.time_of_day.unwrap_or(6000);
     view.has_sky = s.dimension.has_skylight;
+    view.block_target = s.player.target();
+    view.held_slot = s.player.held_slot;
     Ok(())
 }
 

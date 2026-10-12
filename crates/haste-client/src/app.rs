@@ -21,7 +21,9 @@ use haste_protocol::{Account, ConnectOptions};
 use haste_render::{Camera, FrameInput, FrameStats, Renderer, SkyState};
 use haste_world::World;
 use winit::application::ApplicationHandler;
-use winit::event::{DeviceEvent, DeviceId, ElementState, KeyEvent, MouseButton, WindowEvent};
+use winit::event::{
+    DeviceEvent, DeviceId, ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
@@ -277,6 +279,22 @@ fn frame_view(shared: &Shared, yaw: f32, pitch: f32, now: Instant) -> (Camera, S
     (camera, sky, partial, view.view_distance)
 }
 
+/// Number keys 1-9 select hotbar slots 0-8.
+fn hotbar_key(code: KeyCode) -> Option<u8> {
+    Some(match code {
+        KeyCode::Digit1 => 0,
+        KeyCode::Digit2 => 1,
+        KeyCode::Digit3 => 2,
+        KeyCode::Digit4 => 3,
+        KeyCode::Digit5 => 4,
+        KeyCode::Digit6 => 5,
+        KeyCode::Digit7 => 6,
+        KeyCode::Digit8 => 7,
+        KeyCode::Digit9 => 8,
+        _ => return None,
+    })
+}
+
 fn camera_section(c: &Camera) -> SectionPos {
     let p = c.pos.floor().as_ivec3();
     SectionPos::new(p.x >> 4, p.y >> 4, p.z >> 4)
@@ -312,17 +330,29 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         camera.yaw = args.yaw.unwrap_or(camera.yaw);
         camera.pitch = args.pitch.unwrap_or(camera.pitch);
         last_camera = camera;
+        {
+            // The player looks where the screenshot camera looks, so its crosshair target
+            // (and the outline drawn for it) matches the picture.
+            let offset = shared.view.lock().look_offset;
+            let mut input = shared.input.lock();
+            input.state.yaw = camera.yaw - offset.0;
+            input.state.pitch = camera.pitch - offset.1;
+        }
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         let entities = feed.entities(&shared, &mut renderer, partial);
-        stats = renderer.render(&FrameInput {
+        let block_target = shared.view.lock().block_target;
+        let breaking = shared.breaking.lock().clone();
+        let frame = FrameInput {
             camera,
             entities,
             gui: &gui,
             sky,
             partial_tick: partial,
-            block_target: None,
-            breaking: &[],
-        })?;
+            block_target,
+            breaking: &breaking,
+        };
+        renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
+        stats = renderer.render(&frame)?;
         frames += 1;
         let placed = shared.view.lock().has_position;
         if shared.is_closed() {
@@ -345,8 +375,9 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         .save(file)
         .with_context(|| format!("saving {}", file.display()))?;
     let c = last_camera;
+    let view = *shared.view.lock();
     println!(
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls",
+        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, target {:?}",
         file.display(),
         image.width(),
         image.height(),
@@ -355,10 +386,11 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         c.pos.z,
         c.yaw,
         c.pitch,
-        shared.view.lock().time_of_day % 24000,
+        view.time_of_day % 24000,
         stats.chunk_sections_drawn,
         stats.chunk_sections_total,
-        stats.draw_calls
+        stats.draw_calls,
+        view.block_target
     );
     drop(session);
     Ok(())
@@ -384,6 +416,12 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         input: InputState::default(),
         last_jump_press: None,
         toggle_flight: false,
+        attack: false,
+        use_item: false,
+        pick_block: false,
+        hotbar: None,
+        scroll: 0.0,
+        breaking: Vec::new(),
         fps: FpsCounter::new(),
         error: None,
         seconds: args.window_seconds,
@@ -417,6 +455,15 @@ struct App {
     input: InputState,
     last_jump_press: Option<Instant>,
     toggle_flight: bool,
+    /// Left / right mouse held (attack / use), middle click and hotbar choice since the last
+    /// sample.
+    attack: bool,
+    use_item: bool,
+    pick_block: bool,
+    hotbar: Option<u8>,
+    /// Scroll wheel steps not yet turned into a slot change.
+    scroll: f64,
+    breaking: Vec<(haste_protocol::haste_core::BlockPos, u8)>,
     fps: FpsCounter,
     error: Option<anyhow::Error>,
     /// Close the window after this long (`--window-seconds`, for unattended runs).
@@ -443,6 +490,8 @@ impl App {
 
     fn release_keys(&mut self) {
         self.keys.clear();
+        self.attack = false;
+        self.use_item = false;
         self.last_jump_press = None;
         self.sample_input();
     }
@@ -463,6 +512,13 @@ impl App {
         let mut shared = self.shared.input.lock();
         shared.state = self.input;
         shared.toggle_flight |= std::mem::take(&mut self.toggle_flight);
+        let i = &mut shared.interact;
+        i.attack = self.attack;
+        i.use_item = self.use_item;
+        i.pick_block |= std::mem::take(&mut self.pick_block);
+        if let Some(slot) = self.hotbar.take() {
+            i.hotbar = Some(slot);
+        }
     }
 
     /// Jump pressed: a second press within vanilla's 7-tick window toggles flight.
@@ -489,17 +545,23 @@ impl App {
             .feed(&self.shared, renderer, camera_section(&camera), vd);
         let t1 = Instant::now();
         let entities = self.feed.entities(&self.shared, renderer, partial);
+        let block_target = self.shared.view.lock().block_target;
+        self.breaking.clear();
+        self.breaking
+            .extend_from_slice(&self.shared.breaking.lock());
         let t2 = Instant::now();
-        let result = renderer.render(&FrameInput {
+        let frame = FrameInput {
             camera,
             entities,
             gui: &self.gui,
             sky,
             partial_tick: partial,
-            // Filled from LocalPlayer::target / break_progress when interaction lands.
-            block_target: None,
-            breaking: &[],
-        });
+            block_target,
+            breaking: &self.breaking,
+        };
+        // Outline boxes of the target and the states of breaking blocks (one short read lock).
+        renderer.sample_world(&*self.shared.world.read(), &self.shared.data.shapes, &frame);
+        let result = renderer.render(&frame);
         let t3 = Instant::now();
         self.fps.phases(
             (t1 - t0).as_secs_f32() * 1e3,
@@ -577,6 +639,30 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } if !self.grabbed => self.set_grab(true),
+            WindowEvent::MouseInput { state, button, .. } if self.grabbed && self.focused => {
+                let pressed = state == ElementState::Pressed;
+                match button {
+                    MouseButton::Left => self.attack = pressed,
+                    MouseButton::Right => self.use_item = pressed,
+                    MouseButton::Middle if pressed => self.pick_block = true,
+                    _ => {}
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } if self.grabbed && self.focused => {
+                self.scroll += match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y as f64,
+                    MouseScrollDelta::PixelDelta(p) => p.y / 40.0,
+                };
+                let steps = self.scroll.trunc() as i32;
+                if steps != 0 {
+                    self.scroll -= steps as f64;
+                    // Scrolling down (negative) moves to the next slot, wrapping 0..=8.
+                    let current = self
+                        .hotbar
+                        .map_or(self.shared.view.lock().held_slot, |s| s as i32);
+                    self.hotbar = Some((current - steps).rem_euclid(9) as u8);
+                }
+            }
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
@@ -596,6 +682,9 @@ impl ApplicationHandler for App {
                         }
                         KeyCode::Space if self.grabbed && self.focused => {
                             self.jump_pressed(Instant::now())
+                        }
+                        _ if self.grabbed && self.focused && hotbar_key(code).is_some() => {
+                            self.hotbar = hotbar_key(code);
                         }
                         KeyCode::F11 => {
                             if let Some(w) = &self.window {
