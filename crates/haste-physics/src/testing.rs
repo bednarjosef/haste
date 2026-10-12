@@ -1,0 +1,149 @@
+//! Tiny in-memory `BlockView` + `CollisionShapes` + `BlockPhysics` for tests and benchmarks.
+//! Not used by the game; `haste-world`/`haste-data` provide the real implementations.
+use std::collections::HashMap;
+
+use haste_core::view::{BlockView, CollisionShapes};
+use haste_core::{Aabb, BlockPos, BlockStateId, ChunkPos, DVec3};
+
+use crate::{BlockPhysics, FluidInfo, FluidKind};
+
+/// Hand-made block kinds with fixed state ids.
+pub mod states {
+    use haste_core::BlockStateId;
+    pub const AIR: BlockStateId = BlockStateId(0);
+    pub const STONE: BlockStateId = BlockStateId(1);
+    pub const BOTTOM_SLAB: BlockStateId = BlockStateId(2);
+    pub const TOP_SLAB: BlockStateId = BlockStateId(3);
+    /// Bottom half plus the north (z < 0.5) top quarter, like a stair facing north.
+    pub const STAIR_NORTH: BlockStateId = BlockStateId(4);
+    /// 1.5 tall post, 0.375..0.625 horizontally, like a fence post.
+    pub const FENCE_POST: BlockStateId = BlockStateId(5);
+    pub const ICE: BlockStateId = BlockStateId(6);
+    pub const BLUE_ICE: BlockStateId = BlockStateId(7);
+    pub const SLIME: BlockStateId = BlockStateId(8);
+    /// Soul sand: 0.875 tall, speed factor 0.4.
+    pub const SOUL_SAND: BlockStateId = BlockStateId(9);
+    pub const WATER_SOURCE: BlockStateId = BlockStateId(10);
+    pub const LAVA_SOURCE: BlockStateId = BlockStateId(11);
+    pub const COUNT: usize = 12;
+}
+
+/// Shapes and per-block physics properties for the ids in [`states`].
+pub struct TestShapes {
+    boxes: Vec<Vec<Aabb>>,
+}
+
+fn bx(x0: f64, y0: f64, z0: f64, x1: f64, y1: f64, z1: f64) -> Aabb {
+    Aabb { min: DVec3::new(x0, y0, z0), max: DVec3::new(x1, y1, z1) }
+}
+
+impl Default for TestShapes {
+    fn default() -> Self {
+        let full = vec![bx(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)];
+        let mut boxes = vec![Vec::new(); states::COUNT];
+        boxes[states::STONE.0 as usize] = full.clone();
+        boxes[states::BOTTOM_SLAB.0 as usize] = vec![bx(0.0, 0.0, 0.0, 1.0, 0.5, 1.0)];
+        boxes[states::TOP_SLAB.0 as usize] = vec![bx(0.0, 0.5, 0.0, 1.0, 1.0, 1.0)];
+        boxes[states::STAIR_NORTH.0 as usize] = vec![bx(0.0, 0.0, 0.0, 1.0, 0.5, 1.0), bx(0.0, 0.5, 0.0, 1.0, 1.0, 0.5)];
+        boxes[states::FENCE_POST.0 as usize] = vec![bx(0.375, 0.0, 0.375, 0.625, 1.5, 0.625)];
+        boxes[states::ICE.0 as usize] = full.clone();
+        boxes[states::BLUE_ICE.0 as usize] = full.clone();
+        boxes[states::SLIME.0 as usize] = full.clone();
+        boxes[states::SOUL_SAND.0 as usize] = vec![bx(0.0, 0.0, 0.0, 1.0, 0.875, 1.0)];
+        Self { boxes }
+    }
+}
+
+impl CollisionShapes for TestShapes {
+    fn collision_boxes(&self, state: BlockStateId) -> &[Aabb] {
+        self.boxes.get(state.0 as usize).map(Vec::as_slice).unwrap_or(&[])
+    }
+    fn outline_boxes(&self, state: BlockStateId) -> &[Aabb] {
+        self.collision_boxes(state)
+    }
+}
+
+/// Values from `cache/oracle/26.3/block_properties.json` for the matching vanilla blocks.
+impl BlockPhysics for TestShapes {
+    fn friction(&self, s: BlockStateId) -> f32 {
+        match s {
+            states::ICE => 0.98,
+            states::BLUE_ICE => 0.989,
+            states::SLIME => 0.8,
+            _ => 0.6,
+        }
+    }
+    fn speed_factor(&self, s: BlockStateId) -> f32 {
+        if s == states::SOUL_SAND {
+            0.4
+        } else {
+            1.0
+        }
+    }
+    fn fluid(&self, s: BlockStateId) -> Option<FluidInfo> {
+        match s {
+            states::WATER_SOURCE => Some(FluidInfo { kind: FluidKind::Water, height: 8.0 / 9.0 }),
+            states::LAVA_SOURCE => Some(FluidInfo { kind: FluidKind::Lava, height: 8.0 / 9.0 }),
+            _ => None,
+        }
+    }
+}
+
+/// Sparse block map plus an optional infinite floor layer.
+#[derive(Default, Clone)]
+pub struct TestWorld {
+    pub blocks: HashMap<BlockPos, BlockStateId>,
+    /// Every block with `y <= floor_y` is `floor_state` (if set).
+    pub floor: Option<(i32, BlockStateId)>,
+}
+
+impl TestWorld {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Infinite flat floor whose top surface is at `top_y` (blocks at y < top_y are `state`).
+    pub fn flat(top_y: i32, state: BlockStateId) -> Self {
+        Self { blocks: HashMap::new(), floor: Some((top_y - 1, state)) }
+    }
+    pub fn set(&mut self, x: i32, y: i32, z: i32, s: BlockStateId) -> &mut Self {
+        self.blocks.insert(BlockPos::new(x, y, z), s);
+        self
+    }
+    pub fn fill(&mut self, a: (i32, i32, i32), b: (i32, i32, i32), s: BlockStateId) -> &mut Self {
+        for x in a.0.min(b.0)..=a.0.max(b.0) {
+            for y in a.1.min(b.1)..=a.1.max(b.1) {
+                for z in a.2.min(b.2)..=a.2.max(b.2) {
+                    self.set(x, y, z, s);
+                }
+            }
+        }
+        self
+    }
+}
+
+impl BlockView for TestWorld {
+    fn block_state(&self, pos: BlockPos) -> BlockStateId {
+        if let Some(s) = self.blocks.get(&pos) {
+            return *s;
+        }
+        match self.floor {
+            Some((fy, s)) if pos.y <= fy => s,
+            _ => BlockStateId::AIR,
+        }
+    }
+    fn is_chunk_loaded(&self, _pos: ChunkPos) -> bool {
+        true
+    }
+    fn sky_light(&self, _pos: BlockPos) -> u8 {
+        15
+    }
+    fn block_light(&self, _pos: BlockPos) -> u8 {
+        0
+    }
+    fn min_y(&self) -> i32 {
+        -64
+    }
+    fn height(&self) -> i32 {
+        384
+    }
+}
