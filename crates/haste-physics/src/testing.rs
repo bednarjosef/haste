@@ -73,6 +73,22 @@ impl BlockPhysics for TestShapes {
             _ => 0.6,
         }
     }
+    fn jump_factor(&self, _s: BlockStateId) -> f32 {
+        1.0
+    }
+    fn light_emission(&self, s: BlockStateId) -> u8 {
+        if s == states::LAVA_SOURCE {
+            15
+        } else {
+            0
+        }
+    }
+    fn is_air(&self, s: BlockStateId) -> bool {
+        s == states::AIR
+    }
+    fn is_opaque_full(&self, s: BlockStateId) -> bool {
+        matches!(s, states::STONE | states::ICE | states::BLUE_ICE)
+    }
     fn speed_factor(&self, s: BlockStateId) -> f32 {
         if s == states::SOUL_SAND {
             0.4

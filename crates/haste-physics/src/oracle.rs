@@ -30,6 +30,12 @@ struct StateEntry {
     outline: Vec<[f64; 6]>,
     #[serde(default)]
     fluid: Option<String>,
+    #[serde(default)]
+    light: u8,
+    #[serde(default)]
+    air: bool,
+    #[serde(default)]
+    opaque: bool,
 }
 
 #[derive(Deserialize)]
@@ -57,6 +63,9 @@ struct StateInfo {
     collision: Vec<Aabb>,
     outline: Vec<Aabb>,
     fluid: Option<FluidInfo>,
+    light: u8,
+    air: bool,
+    opaque: bool,
 }
 
 /// Block states with shapes, fluids and movement properties from the oracle dumps.
@@ -99,7 +108,7 @@ impl OracleBlocks {
 
         let max_id = shapes.states.iter().map(|s| s.id).max().unwrap_or(0) as usize;
         let mut states: Vec<StateInfo> = (0..=max_id)
-            .map(|_| StateInfo { block: 0, properties: Vec::new(), collision: Vec::new(), outline: Vec::new(), fluid: None })
+            .map(|_| StateInfo { block: 0, properties: Vec::new(), collision: Vec::new(), outline: Vec::new(), fluid: None, light: 0, air: false, opaque: false })
             .collect();
         let mut block_names = Vec::new();
         let mut block_index: HashMap<String, u32> = HashMap::new();
@@ -124,6 +133,9 @@ impl OracleBlocks {
                 collision: s.collision.iter().map(to_aabb).collect(),
                 outline: s.outline.iter().map(to_aabb).collect(),
                 fluid,
+                light: s.light,
+                air: s.air,
+                opaque: s.opaque,
             };
         }
         let block_props = block_names.iter().map(|n| props.blocks.get(n).copied().unwrap_or_default()).collect();
@@ -179,6 +191,15 @@ impl BlockPhysics for OracleBlocks {
     }
     fn fluid(&self, s: BlockStateId) -> Option<FluidInfo> {
         self.states.get(s.0 as usize).and_then(|i| i.fluid)
+    }
+    fn light_emission(&self, s: BlockStateId) -> u8 {
+        self.states.get(s.0 as usize).map_or(0, |i| i.light)
+    }
+    fn is_air(&self, s: BlockStateId) -> bool {
+        self.states.get(s.0 as usize).is_none_or(|i| i.air)
+    }
+    fn is_opaque_full(&self, s: BlockStateId) -> bool {
+        self.states.get(s.0 as usize).is_some_and(|i| i.opaque)
     }
 }
 
