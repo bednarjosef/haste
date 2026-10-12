@@ -243,7 +243,7 @@ impl BakedBlockModels {
 /// Face texture reference through the resolved texture map. Vanilla allows
 /// referring to a texture variable WITHOUT the `#` prefix (the bare name must
 /// exist in the model's `textures` map, e.g. heavy_core's faces use `all`).
-fn face_texture_id(
+pub(crate) fn face_texture_id(
     face_texture: &str,
     textures: &std::collections::HashMap<String, String>,
 ) -> Option<String> {

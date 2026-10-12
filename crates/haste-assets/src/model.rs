@@ -20,6 +20,9 @@ pub struct ModelFile {
     pub(crate) ambientocclusion: Option<bool>,
     /// vanilla `gui_light`: "front" or "side" (default).
     pub(crate) gui_light: Option<String>,
+    /// `display` transforms by context (`gui`, `ground`, ...), raw.
+    #[serde(default)]
+    pub(crate) display: HashMap<String, serde_json::Value>,
 }
 
 /// `textures` values may be `{"sprite": "..."}` objects (26.3).
@@ -81,6 +84,41 @@ pub struct ResolvedModel {
     pub(crate) elements: Vec<ElementDef>,
     pub(crate) ambientocclusion: bool,
     pub(crate) gui_light: bool,
+    /// `display.gui` from the nearest model in the parent chain that has one.
+    pub(crate) gui_display: Option<DisplayTransform>,
+}
+
+/// A model `display` entry: rotation (degrees, applied X then Y then Z), translation (in
+/// block units: the file's 1/16 values divided by 16, clamped to +-5), scale (clamped +-4).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DisplayTransform {
+    pub rotation: [f32; 3],
+    pub translation: [f32; 3],
+    pub scale: [f32; 3],
+}
+
+impl DisplayTransform {
+    pub const IDENTITY: DisplayTransform = DisplayTransform {
+        rotation: [0.0; 3],
+        translation: [0.0; 3],
+        scale: [1.0; 3],
+    };
+
+    pub(crate) fn parse(v: &serde_json::Value) -> Option<DisplayTransform> {
+        let get = |k: &str, default: f32| -> [f32; 3] {
+            v.get(k)
+                .and_then(|a| a.as_array())
+                .filter(|a| a.len() == 3)
+                .map(|a| std::array::from_fn(|i| a[i].as_f64().unwrap_or(default as f64) as f32))
+                .unwrap_or([default; 3])
+        };
+        v.as_object()?;
+        Some(DisplayTransform {
+            rotation: get("rotation", 0.0),
+            translation: get("translation", 0.0).map(|t| (t / 16.0).clamp(-5.0, 5.0)),
+            scale: get("scale", 1.0).map(|s| s.clamp(-4.0, 4.0)),
+        })
+    }
 }
 
 /// The six block face directions (Pomme `Direction`).

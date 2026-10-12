@@ -192,12 +192,17 @@ pub struct Renderer {
     pipeline_translucent: wgpu::RenderPipeline,
     depth: Option<wgpu::TextureView>,
     size: (u32, u32),
+    /// GUI batch drawing (`FrameInput::gui`) and its own handle on the assets for lazy loads.
+    gui: crate::gui::GuiRenderer,
+    assets: haste_assets::Assets,
 }
 
 #[allow(dead_code)]
 struct Offscreen {
     color: wgpu::Texture,
     color_view: wgpu::TextureView,
+    /// Non-sRGB view of `color` for the GUI pass.
+    gui_view: wgpu::TextureView,
     depth: wgpu::Texture,
     depth_view: wgpu::TextureView,
     width: u32,
@@ -429,6 +434,18 @@ impl Renderer {
 
         let mesher = Mesher::new(baked.clone(), atlas.clone());
 
+        // GUI: the font (with unifont when the assets index has it) and a renderer drawing into
+        // a non-sRGB view of the target so blending happens on sRGB values like vanilla.
+        let font = Arc::new(assets.font_default().context("loading the default font")?);
+        let mut gui = crate::gui::GuiRenderer::new(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            surface_format.remove_srgb_suffix(),
+            font,
+        );
+        let mut gui_assets = assets.reopen()?;
+        gui.preload_sprites(&mut gui_assets, crate::gui::HUD_SPRITES);
+
         Ok(Renderer {
             gpu,
             surface: surface.map(|(s, _)| s),
@@ -449,7 +466,34 @@ impl Renderer {
             pipeline_translucent,
             depth: None,
             size,
+            gui,
+            assets: gui_assets,
         })
+    }
+
+    /// Text measurement over the default font (vanilla `Font.width` rules), for the HUD and
+    /// tier-3 `Font` natives.
+    pub fn text_metrics(&self) -> Arc<dyn haste_core::gui::TextMetrics> {
+        self.gui.font().clone()
+    }
+
+    /// Item names by `minecraft:item` protocol id, so `GuiCommand::Item` can find models.
+    pub fn set_item_registry(&mut self, registries: &haste_data::Registries) {
+        let n = registries.len("minecraft:item");
+        let names = (0..n as u32)
+            .map(|i| {
+                registries
+                    .name("minecraft:item", haste_core::RegistryIndex(i))
+                    .cloned()
+                    .unwrap_or_else(|| haste_core::Identifier::minecraft("air"))
+            })
+            .collect();
+        self.gui.set_item_names(names);
+    }
+
+    /// Counters of the last GUI frame.
+    pub fn gui_stats(&self) -> crate::gui::GuiStats {
+        self.gui.stats
     }
 
     fn make_offscreen(
@@ -470,7 +514,7 @@ impl Renderer {
             dimension: wgpu::TextureDimension::D2,
             format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
+            view_formats: &[format.remove_srgb_suffix()],
         });
         let depth = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("offscreen-depth"),
@@ -487,6 +531,10 @@ impl Renderer {
             view_formats: &[],
         });
         Ok(Offscreen {
+            gui_view: color.create_view(&wgpu::TextureViewDescriptor {
+                format: Some(format.remove_srgb_suffix()),
+                ..Default::default()
+            }),
             color_view: color.create_view(&Default::default()),
             depth_view: depth.create_view(&Default::default()),
             color,
@@ -507,7 +555,11 @@ impl Renderer {
             height: h,
             present_mode: wgpu::PresentMode::Fifo,
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
-            view_formats: vec![],
+            view_formats: if self.surface_format.is_srgb() {
+                vec![self.surface_format.remove_srgb_suffix()]
+            } else {
+                vec![]
+            },
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&self.gpu.device, &config);
@@ -656,8 +708,12 @@ impl Renderer {
         // The acquired SurfaceTexture must outlive the pass (it presents on drop
         // after submit); hold it alongside the views.
         let mut held_surface_texture: Option<wgpu::SurfaceTexture> = None;
-        let (color_view, depth_view) = match (&self.offscreen, &self.depth) {
-            (Some(off), _) => (off.color_view.clone(), off.depth_view.clone()),
+        let (color_view, depth_view, gui_view) = match (&self.offscreen, &self.depth) {
+            (Some(off), _) => (
+                off.color_view.clone(),
+                off.depth_view.clone(),
+                off.gui_view.clone(),
+            ),
             (None, Some(d)) => {
                 let surface = self.surface.as_ref().context("no surface")?;
                 let frame_tex = match surface.get_current_texture() {
@@ -675,7 +731,14 @@ impl Renderer {
                 };
                 held_surface_texture = Some(frame_tex);
                 let tex = held_surface_texture.as_ref().unwrap();
-                (tex.texture.create_view(&Default::default()), d.clone())
+                (
+                    tex.texture.create_view(&Default::default()),
+                    d.clone(),
+                    tex.texture.create_view(&wgpu::TextureViewDescriptor {
+                        format: Some(self.surface_format.remove_srgb_suffix()),
+                        ..Default::default()
+                    }),
+                )
             }
             _ => anyhow::bail!("no render target"),
         };
@@ -799,6 +862,29 @@ impl Renderer {
             }
         }
 
+        // GUI on top, in its own pass over the non-sRGB view (no depth).
+        if !frame.gui.commands.is_empty() {
+            self.gui.prepare(frame.gui, self.size, &mut self.assets);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("gui"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &gui_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.gui.draw(&mut pass, self.size);
+            draw_calls += self.gui.stats.draw_calls;
+        }
+
         // Submit, then present (wgpu 30: present lives on the queue).
         self.gpu.queue.submit([encoder.finish()]);
         if let Some(tex) = held_surface_texture {
@@ -821,10 +907,11 @@ impl Renderer {
             .as_ref()
             .context("read_back requires an offscreen renderer")?;
         let (w, h) = (off.width, off.height);
-        let bytes_per_row = NonZeroU32::new(w * 4).unwrap();
+        // Rows are padded to wgpu's 256-byte copy alignment.
+        let bytes_per_row = NonZeroU32::new((w * 4).next_multiple_of(256)).unwrap();
         let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
-            size: (w * h * 4) as u64,
+            size: (bytes_per_row.get() * h) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -869,18 +956,12 @@ impl Renderer {
         let _ = format;
 
         // Rgba8UnormSrgb: the texture was created with this offscreen format.
-        let mut image = image::RgbaImage::new(w, h);
-        for y in 0..h {
-            for x in 0..w {
-                let i = ((y * w + x) * 4) as usize;
-                image.put_pixel(
-                    x,
-                    y,
-                    image::Rgba([data[i], data[i + 1], data[i + 2], data[i + 3]]),
-                );
-            }
+        let stride = bytes_per_row.get() as usize;
+        let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h as usize {
+            pixels.extend_from_slice(&data[y * stride..y * stride + w as usize * 4]);
         }
-        Ok(image)
+        Ok(image::RgbaImage::from_raw(w, h, pixels).expect("readback size"))
     }
 }
 

@@ -10,11 +10,17 @@
 pub mod assets;
 pub mod atlas;
 pub mod bake;
+pub mod font;
+pub mod item;
 pub mod model;
 pub mod multipart;
 
-pub use assets::{AnimationMeta, Assets, BitmapFont, Glyph, ModelJson, SpriteMeta, TextureMeta};
+pub use assets::{AnimationMeta, Assets, ModelJson, SpriteMeta, TextureMeta};
 pub use atlas::{AtlasBuilder, AtlasRegion, AtlasRegions};
 pub use bake::{BakedBlockModels, BlocksJsonStates, RenderLayer};
-pub use model::{BakedQuad, Direction, ModelRef};
+pub use font::{
+    for_each_formatted, BitmapFont, Glyph, GlyphKind, HexGlyph, TextFormat, LEGACY_COLORS,
+};
+pub use item::{ItemGeometry, ItemModel, ItemModelPart, PartTransformation};
+pub use model::{BakedQuad, Direction, DisplayTransform, ModelRef};
 pub use multipart::{BlockStateDefinition, MultipartCase, MultipartCondition, VariantEntry};

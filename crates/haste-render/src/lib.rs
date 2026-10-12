@@ -4,12 +4,14 @@
 //!
 //! Mesher/vertex packing derived from Pomme (GPL-3.0); see THIRD_PARTY.md.
 
+pub mod gui;
 pub mod mesher;
 pub mod occlusion;
 pub mod pipeline;
 pub mod renderer;
 pub mod vertex;
 
+pub use gui::{GuiRenderer, GuiStats};
 pub use mesher::{mesh_section, MeshSnapshot, Mesher, SectionMesh};
 pub use occlusion::{compute_visible_mask, section_visibility, Face, VisibilitySet};
 pub use pipeline::{upload_atlas, upload_section, Gpu, SectionGpuMesh};
