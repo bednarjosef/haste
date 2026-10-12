@@ -17,3 +17,4 @@ clap.workspace = true
 directories.workspace = true
 tracing.workspace = true
 zip.workspace = true
+flate2.workspace = true
