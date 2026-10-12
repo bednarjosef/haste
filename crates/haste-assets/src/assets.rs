@@ -1,4 +1,4 @@
-// This file is derived from Pomme (https://github.com/josefbednar/pomme),
+// This file is derived from Pomme (https://github.com/PommeMC/Client),
 // pomme-client/src/assets.rs and parts of world/block/model.rs, reused under
 // GPL-3.0. Reworked for Haste: reads the client jar directly through `zip`
 // (no extracted assets dir), resolves texture variables, and exposes the
@@ -9,7 +9,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use haste_core::Identifier;
@@ -64,8 +64,15 @@ pub struct AnimationMeta {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SpriteMeta {
     Stretch,
-    NineSlice { width: u32, height: u32, border: u32 },
-    Tile { width: u32, height: u32 },
+    NineSlice {
+        width: u32,
+        height: u32,
+        border: u32,
+    },
+    Tile {
+        width: u32,
+        height: u32,
+    },
 }
 
 impl Assets {
@@ -76,7 +83,9 @@ impl Assets {
             .with_context(|| format!("reading zip {}", client_jar.display()))?;
 
         let objects_dir = assets_dir.join("objects");
-        let index_path = assets_dir.join("indexes").join(format!("{assets_index}.json"));
+        let index_path = assets_dir
+            .join("indexes")
+            .join(format!("{assets_index}.json"));
         let index_hashes = match std::fs::read(&index_path) {
             Ok(bytes) => {
                 let parsed: AssetIndexFile = serde_json::from_slice(&bytes)
@@ -90,19 +99,31 @@ impl Assets {
             Err(e) => {
                 // 26.3's client jar carries the whole vanilla asset tree; the index
                 // is an alternative view. Soft-fail so tests can run on the jar alone.
-                tracing::warn!("asset index {} unreadable ({e}); using jar assets only", index_path.display());
+                tracing::warn!(
+                    "asset index {} unreadable ({e}); using jar assets only",
+                    index_path.display()
+                );
                 HashMap::new()
             }
         };
         let objects_dir = objects_dir.is_dir().then_some(objects_dir);
 
-        if jar.by_name("assets/minecraft/blockstates/stone.json").is_err() {
+        if jar
+            .by_name("assets/minecraft/blockstates/stone.json")
+            .is_err()
+        {
             bail!("client jar does not contain assets/minecraft/blockstates");
         }
-        let _ = jar.by_name("assets/minecraft/lang/en_us.json")
+        let _ = jar
+            .by_name("assets/minecraft/lang/en_us.json")
             .context("client jar does not contain assets/minecraft/lang/en_us.json")?;
 
-        Ok(Assets { jar, objects_dir, index_hashes, model_cache: HashMap::new() })
+        Ok(Assets {
+            jar,
+            objects_dir,
+            index_hashes,
+            model_cache: HashMap::new(),
+        })
     }
 
     /// `textures/<path>.png` of an identifier, e.g. `minecraft:block/stone`.
@@ -119,8 +140,8 @@ impl Assets {
         let key = asset_key(id, "textures", ".png.mcmeta");
         match self.try_read_asset(&key)? {
             Some(bytes) => {
-                let meta: TextureMetaFile = serde_json::from_slice(&bytes)
-                    .with_context(|| format!("parsing {key}"))?;
+                let meta: TextureMetaFile =
+                    serde_json::from_slice(&bytes).with_context(|| format!("parsing {key}"))?;
                 Ok(TextureMeta {
                     animation: meta.animation.map(AnimationMeta::from),
                 })
@@ -133,8 +154,8 @@ impl Assets {
     pub fn blockstate(&mut self, block: &Identifier) -> Result<BlockStateDefinition> {
         let key = asset_key(block, "blockstates", ".json");
         let bytes = self.read_asset(&key)?;
-        let def: BlockStateDefinition = serde_json::from_slice(&bytes)
-            .with_context(|| format!("parsing {key}"))?;
+        let def: BlockStateDefinition =
+            serde_json::from_slice(&bytes).with_context(|| format!("parsing {key}"))?;
         Ok(def)
     }
 
@@ -155,8 +176,8 @@ impl Assets {
     pub fn language(&mut self, code: &str) -> Result<HashMap<String, String>> {
         let key = format!("assets/minecraft/lang/{code}.json");
         let bytes = self.read_asset(&key)?;
-        let map: HashMap<String, String> = serde_json::from_slice(&bytes)
-            .with_context(|| format!("parsing {key}"))?;
+        let map: HashMap<String, String> =
+            serde_json::from_slice(&bytes).with_context(|| format!("parsing {key}"))?;
         Ok(map)
     }
 
@@ -170,8 +191,8 @@ impl Assets {
     fn load_font(&mut self, id: &Identifier) -> Result<BitmapFont> {
         let key = asset_key(id, "font", ".json");
         let bytes = self.read_asset(&key)?;
-        let file: FontFile = serde_json::from_slice(&bytes)
-            .with_context(|| format!("parsing {key}"))?;
+        let file: FontFile =
+            serde_json::from_slice(&bytes).with_context(|| format!("parsing {key}"))?;
         let mut font = BitmapFont::default();
         for provider in file.providers {
             match provider {
@@ -180,11 +201,7 @@ impl Assets {
                     // (e.g. minecraft:font/ascii.png), unlike `Assets::texture`
                     // which appends .png itself.
                     let id = Identifier::parse(&p.file)?;
-                    let key = format!(
-                        "assets/{}/textures/{}",
-                        id.namespace(),
-                        id.path()
-                    );
+                    let key = format!("assets/{}/textures/{}", id.namespace(), id.path());
                     let bytes = self.read_asset(&key)?;
                     let image = image::load_from_memory(&bytes)
                         .with_context(|| format!("decoding {key}"))?
@@ -217,9 +234,11 @@ impl Assets {
         let meta_key = format!("{key}.mcmeta");
         let meta = match self.try_read_asset(&meta_key)? {
             Some(m) => {
-                let f: TextureMetaFile = serde_json::from_slice(&m)
-                    .with_context(|| format!("parsing {meta_key}"))?;
-                f.gui.map(|g| g.scaling.into()).unwrap_or(SpriteMeta::Stretch)
+                let f: TextureMetaFile =
+                    serde_json::from_slice(&m).with_context(|| format!("parsing {meta_key}"))?;
+                f.gui
+                    .map(|g| g.scaling.into())
+                    .unwrap_or(SpriteMeta::Stretch)
             }
             None => SpriteMeta::Stretch,
         };
@@ -269,7 +288,9 @@ impl Assets {
         for _ in 0..20 {
             let model = self.load_model(&current)?;
             for (key, value) in &model.textures {
-                texture_map.entry(key.clone()).or_insert_with(|| value.clone());
+                texture_map
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
             }
             if elements.is_none() && !model.elements.is_empty() {
                 elements = Some(model.elements.clone());
@@ -306,8 +327,8 @@ impl Assets {
         }
         let key = asset_key(id, "models", ".json");
         let bytes = self.read_asset(&key)?;
-        let model: ModelFile = serde_json::from_slice(&bytes)
-            .with_context(|| format!("parsing {key}"))?;
+        let model: ModelFile =
+            serde_json::from_slice(&bytes).with_context(|| format!("parsing {key}"))?;
         let model = Arc::new(model);
         self.model_cache.insert(id.to_string(), model.clone());
         Ok(model)
@@ -318,7 +339,8 @@ impl Assets {
     /// Asset bytes by key (`assets/<ns>/<path>`), preferring the jar, falling back to
     /// the index/objects dir.
     pub fn read_asset(&mut self, key: &str) -> Result<Vec<u8>> {
-        self.try_read_asset(key)?.with_context(|| format!("asset {key} not found"))
+        self.try_read_asset(key)?
+            .with_context(|| format!("asset {key} not found"))
     }
 
     fn try_read_asset(&mut self, key: &str) -> Result<Option<Vec<u8>>> {
@@ -352,12 +374,17 @@ fn resolve_ref(value: &str, map: &HashMap<String, String>, depth: u32) -> String
 }
 
 pub(crate) fn asset_key(id: &Identifier, category: &str, suffix: &str) -> String {
-    format!("assets/{}/{}/{}{}", id.namespace(), category, id.path(), suffix)
+    format!(
+        "assets/{}/{}/{}{}",
+        id.namespace(),
+        category,
+        id.path(),
+        suffix
+    )
 }
 
 fn decode_png(bytes: &[u8], key: &str) -> Result<image::RgbaImage> {
-    let image = image::load_from_memory(bytes)
-        .with_context(|| format!("decoding png {key}"))?;
+    let image = image::load_from_memory(bytes).with_context(|| format!("decoding png {key}"))?;
     Ok(image.to_rgba8())
 }
 
@@ -375,17 +402,30 @@ struct GuiMetaRaw {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SpriteMetaSerde {
-    NineSlice { width: u32, height: u32, border: u32 },
-    Tile { width: u32, height: u32 },
+    NineSlice {
+        width: u32,
+        height: u32,
+        border: u32,
+    },
+    Tile {
+        width: u32,
+        height: u32,
+    },
     Stretch,
 }
 
 impl From<SpriteMetaSerde> for SpriteMeta {
     fn from(s: SpriteMetaSerde) -> SpriteMeta {
         match s {
-            SpriteMetaSerde::NineSlice { width, height, border } => {
-                SpriteMeta::NineSlice { width, height, border }
-            }
+            SpriteMetaSerde::NineSlice {
+                width,
+                height,
+                border,
+            } => SpriteMeta::NineSlice {
+                width,
+                height,
+                border,
+            },
             SpriteMetaSerde::Tile { width, height } => SpriteMeta::Tile { width, height },
             SpriteMetaSerde::Stretch => SpriteMeta::Stretch,
         }
@@ -404,7 +444,12 @@ impl From<AnimationMetaRaw> for AnimationMeta {
     /// Normalizes to Pomme's `AnimationLayout` rules: frame size defaults to the
     /// image's min dimension (or the other given one), frametime defaults to 1.
     fn from(raw: AnimationMetaRaw) -> AnimationMeta {
-        let AnimationMetaRaw { width, height, frametime, frames } = raw;
+        let AnimationMetaRaw {
+            width,
+            height,
+            frametime,
+            frames,
+        } = raw;
         AnimationMeta {
             width: width.unwrap_or(1),
             height: height.unwrap_or(1),
@@ -412,10 +457,11 @@ impl From<AnimationMetaRaw> for AnimationMeta {
             first_frame: match &frames {
                 Some(list) => match list.first() {
                     Some(serde_json::Value::Number(n)) => n.as_u64().unwrap_or(0) as u32,
-                    Some(serde_json::Value::Object(o)) => o
-                        .get("index")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0) as u32,
+                    Some(serde_json::Value::Object(o)) => {
+                        o.get("index")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0) as u32
+                    }
                     _ => 0,
                 },
                 None => 0,
@@ -490,7 +536,9 @@ impl BitmapFont {
     ) {
         let height = height.unwrap_or(8);
         let ascent = ascent.unwrap_or(7);
-        let page = Page { image: Arc::new(image) };
+        let page = Page {
+            image: Arc::new(image),
+        };
         let page_index = self.pages.len();
         let cell = 8;
         for (row, line) in chars.iter().enumerate() {
@@ -501,7 +549,14 @@ impl BitmapFont {
                 let x = (col as u32) * cell;
                 let y = (row as u32) * cell;
                 let width = page.glyph_width(x, y, height);
-                let glyph = Glyph { page: page_index, x, y, width, height, ascent };
+                let glyph = Glyph {
+                    page: page_index,
+                    x,
+                    y,
+                    width,
+                    height,
+                    ascent,
+                };
                 self.glyphs.entry(ch).or_insert(glyph);
             }
         }
@@ -530,7 +585,10 @@ impl BitmapFont {
         if ch == ' ' {
             return Some(4); // include/space.json: " ": 4
         }
-        self.space_advances.get(ch.to_string().as_str()).copied().or(if ch == ' ' { Some(4) } else { None })
+        self.space_advances
+            .get(ch.to_string().as_str())
+            .copied()
+            .or(if ch == ' ' { Some(4) } else { None })
     }
 }
 
@@ -622,9 +680,15 @@ pub(crate) mod tests {
     #[test]
     fn asset_keys() {
         let id = Identifier::parse("minecraft:block/stone").unwrap();
-        assert_eq!(asset_key(&id, "blockstates", ".json"), "assets/minecraft/blockstates/block/stone.json");
+        assert_eq!(
+            asset_key(&id, "blockstates", ".json"),
+            "assets/minecraft/blockstates/block/stone.json"
+        );
         let id = Identifier::parse("stone").unwrap();
-        assert_eq!(asset_key(&id, "textures", ".png"), "assets/minecraft/textures/stone.png");
+        assert_eq!(
+            asset_key(&id, "textures", ".png"),
+            "assets/minecraft/textures/stone.png"
+        );
     }
 
     #[test]
@@ -662,10 +726,16 @@ pub(crate) mod tests {
             let (img, meta) = a.gui_sprite(&Identifier::minecraft("hud/hotbar")).unwrap();
             assert!(img.dimensions().0 > 0);
             assert_eq!(meta, SpriteMeta::Stretch);
-            let (_, meta) = a.gui_sprite(&Identifier::minecraft("advancements/title_box")).unwrap();
+            let (_, meta) = a
+                .gui_sprite(&Identifier::minecraft("advancements/title_box"))
+                .unwrap();
             assert_eq!(
                 meta,
-                SpriteMeta::NineSlice { width: 200, height: 26, border: 10 }
+                SpriteMeta::NineSlice {
+                    width: 200,
+                    height: 26,
+                    border: 10
+                }
             );
         });
     }

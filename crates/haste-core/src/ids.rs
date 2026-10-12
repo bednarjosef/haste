@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 /// Global block-state id as used on the wire and in chunk palettes (from `blocks.json`).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Default, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Default, Serialize, Deserialize,
+)]
 #[repr(transparent)]
 pub struct BlockStateId(pub u32);
 

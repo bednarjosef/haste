@@ -1,4 +1,4 @@
-// This file is derived from Pomme (https://github.com/josefbednar/pomme),
+// This file is derived from Pomme (https://github.com/PommeMC/Client),
 // pomme-client/src/world/block/model.rs (bake_resolved_model), reused under
 // GPL-3.0 and reworked for Haste: bakes per BlockStateId against a block-state
 // source (haste-data's BlockStates implements `BlockStatesSource`), atlas UV
@@ -14,11 +14,11 @@ use haste_core::{BlockStateId, Identifier};
 
 use crate::assets::Assets;
 use crate::atlas::{AtlasBuilder, AtlasRegions};
+use crate::model::ModelRef;
 use crate::model::{
     apply_element_rotation, direction_from_positions, face_positions, face_uvs, rotate_positions,
     BakedQuad, Direction, ResolvedModel,
 };
-use crate::model::ModelRef;
 
 /// Render layers, in draw order (solid first, translucent last, distance-sorted).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -50,8 +50,7 @@ pub struct BlocksJsonStates {
 
 impl BlocksJsonStates {
     pub fn load(path: &std::path::Path) -> Result<BlocksJsonStates> {
-        let bytes = std::fs::read(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let blocks: HashMap<String, BlocksJsonBlock> =
             serde_json::from_slice(&bytes).with_context(|| "parsing blocks.json")?;
         let mut states: Vec<(String, Vec<(String, String)>)> = Vec::new();
@@ -61,11 +60,7 @@ impl BlocksJsonStates {
                 let props = state
                     .properties
                     .as_ref()
-                    .map(|p| {
-                        p.iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect()
-                    })
+                    .map(|p| p.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                     .unwrap_or_default();
                 by_id.push((state.id as usize, name.clone(), props));
             }
@@ -161,10 +156,10 @@ impl BakedBlockModels {
                     for face in el.faces.values() {
                         if let Some(tex) = face_texture_id(&face.texture, &resolved.textures) {
                             if let Ok(id) = Identifier::parse(&tex) {
-                            if seen_textures.insert(tex) {
-                                texture_ids.push(id);
+                                if seen_textures.insert(tex) {
+                                    texture_ids.push(id);
+                                }
                             }
-                        }
                         }
                     }
                 }
@@ -214,11 +209,18 @@ impl BakedBlockModels {
             }
         }
 
-        Ok(BakedBlockModels { quads, full_opaque, layer })
+        Ok(BakedBlockModels {
+            quads,
+            full_opaque,
+            layer,
+        })
     }
 
     pub fn quads(&self, s: BlockStateId) -> &[BakedQuad] {
-        self.quads.get(s.0 as usize).map(Vec::as_slice).unwrap_or(&[])
+        self.quads
+            .get(s.0 as usize)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     pub fn is_full_opaque(&self, s: BlockStateId) -> bool {
@@ -226,7 +228,10 @@ impl BakedBlockModels {
     }
 
     pub fn render_layer(&self, s: BlockStateId) -> RenderLayer {
-        self.layer.get(s.0 as usize).copied().unwrap_or(RenderLayer::Solid)
+        self.layer
+            .get(s.0 as usize)
+            .copied()
+            .unwrap_or(RenderLayer::Solid)
     }
 }
 
@@ -332,7 +337,10 @@ fn is_full_opaque(quads: &[BakedQuad], atlas: &dyn AtlasRegions) -> bool {
         let Some(cull) = q.cullface else { return false };
         dirs[cull.index()] = true;
         for pos in &q.positions {
-            if pos.iter().any(|&v| (v - 0.0).abs() > 1e-4 && (v - 1.0).abs() > 1e-4) {
+            if pos
+                .iter()
+                .any(|&v| (v - 0.0).abs() > 1e-4 && (v - 1.0).abs() > 1e-4)
+            {
                 return false;
             }
         }
@@ -347,7 +355,11 @@ fn is_full_opaque(quads: &[BakedQuad], atlas: &dyn AtlasRegions) -> bool {
 /// the layer comes from the known vanilla `ItemBlockRenderTypes` sets (by block
 /// name) with a texture-alpha fallback: any non-opaque texture -> cutout.
 /// Documented as approximate in NOTES.md.
-fn classify_layer(quads: &[BakedQuad], block: &Identifier, atlas: &dyn AtlasRegions) -> RenderLayer {
+fn classify_layer(
+    quads: &[BakedQuad],
+    block: &Identifier,
+    atlas: &dyn AtlasRegions,
+) -> RenderLayer {
     let path = block.path();
     let name = path.rsplit('/').next().unwrap_or(path);
     let translucent = matches!(
@@ -413,23 +425,43 @@ mod tests {
         let transparent = TestRegions { opaque: false };
         let q = quad();
         assert_eq!(
-            classify_layer(&[q.clone()], &Identifier::minecraft("stone"), &opaque),
+            classify_layer(
+                std::slice::from_ref(&q),
+                &Identifier::minecraft("stone"),
+                &opaque
+            ),
             RenderLayer::Solid
         );
         assert_eq!(
-            classify_layer(&[q.clone()], &Identifier::minecraft("glass"), &opaque),
+            classify_layer(
+                std::slice::from_ref(&q),
+                &Identifier::minecraft("glass"),
+                &opaque
+            ),
             RenderLayer::Translucent
         );
         assert_eq!(
-            classify_layer(&[q.clone()], &Identifier::minecraft("blue_stained_glass"), &opaque),
+            classify_layer(
+                std::slice::from_ref(&q),
+                &Identifier::minecraft("blue_stained_glass"),
+                &opaque
+            ),
             RenderLayer::Translucent
         );
         assert_eq!(
-            classify_layer(&[q.clone()], &Identifier::minecraft("oak_leaves"), &opaque),
+            classify_layer(
+                std::slice::from_ref(&q),
+                &Identifier::minecraft("oak_leaves"),
+                &opaque
+            ),
             RenderLayer::CutoutMipped
         );
         assert_eq!(
-            classify_layer(&[q.clone()], &Identifier::minecraft("oak_sapling"), &transparent),
+            classify_layer(
+                std::slice::from_ref(&q),
+                &Identifier::minecraft("oak_sapling"),
+                &transparent
+            ),
             RenderLayer::Cutout
         );
     }
@@ -466,12 +498,8 @@ mod tests {
             eprintln!("ignored: needs the client jar in the cache");
             return;
         }
-        let mut assets = Assets::open(
-            &jar,
-            &haste_core::paths::cache_dir().join("assets"),
-            "26.3",
-        )
-        .unwrap();
+        let mut assets =
+            Assets::open(&jar, &haste_core::paths::cache_dir().join("assets"), "26.3").unwrap();
         let reports = haste_core::paths::datagen_reports();
         let states = BlocksJsonStates::load(&reports.join("blocks.json")).unwrap();
         let started = std::time::Instant::now();
@@ -487,7 +515,11 @@ mod tests {
 
         // stone: state id 1, 6 quads, full opaque
         let stone = BlockStateId(1);
-        assert_eq!(baked.quads(stone).len(), 6, "minecraft:stone should have 6 quads");
+        assert_eq!(
+            baked.quads(stone).len(),
+            6,
+            "minecraft:stone should have 6 quads"
+        );
         assert!(baked.is_full_opaque(stone));
 
         // oak_stairs facing=east (bottom, straight): > 6 quads
@@ -495,9 +527,18 @@ mod tests {
         for id in 0..states.len() as u32 {
             let sid = BlockStateId(id);
             if states.block_of(sid).path() == "oak_stairs"
-                && states.properties(sid).iter().any(|(k, v)| k == "facing" && v == "east")
-                && states.properties(sid).iter().any(|(k, v)| k == "half" && v == "bottom")
-                && states.properties(sid).iter().any(|(k, v)| k == "shape" && v == "straight")
+                && states
+                    .properties(sid)
+                    .iter()
+                    .any(|(k, v)| k == "facing" && v == "east")
+                && states
+                    .properties(sid)
+                    .iter()
+                    .any(|(k, v)| k == "half" && v == "bottom")
+                && states
+                    .properties(sid)
+                    .iter()
+                    .any(|(k, v)| k == "shape" && v == "straight")
             {
                 stairs_east = Some(sid);
                 break;

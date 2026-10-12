@@ -1,4 +1,4 @@
-// This file is derived from Pomme (https://github.com/josefbednar/pomme),
+// This file is derived from Pomme (https://github.com/PommeMC/Client),
 // pomme-client/src/world/block/model.rs, reused under GPL-3.0 and reworked for
 // Haste (haste-core Identifier, atlas UVs, haste-data BlockStates). See
 // THIRD_PARTY.md.
@@ -376,7 +376,10 @@ pub(crate) fn quad_normal(positions: &[[f32; 3]; 4]) -> Option<[f32; 3]> {
             a[0] * b[1] - a[1] * b[0],
         ]
     };
-    let n = cross(sub(positions[0], positions[1]), sub(positions[0], positions[2]));
+    let n = cross(
+        sub(positions[0], positions[1]),
+        sub(positions[0], positions[2]),
+    );
     let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
     if len > f32::EPSILON {
         Some([n[0] / len, n[1] / len, n[2] / len])
@@ -462,7 +465,12 @@ mod tests {
     #[test]
     fn face_uvs_show_upright_clockwise_rotated_texture() {
         for dir in DIRS {
-            for (rot, steps) in [(None, 0usize), (Some(90), 1), (Some(180), 2), (Some(270), 3)] {
+            for (rot, steps) in [
+                (None, 0usize),
+                (Some(90), 1),
+                (Some(180), 2),
+                (Some(270), 3),
+            ] {
                 let uvs = face_uvs(dir, [0.0; 3], [1.0; 3], Some(&[0.0, 0.0, 16.0, 16.0]), rot);
                 // vertex 0 must have u=u1, v=v1 of the rotated window
                 let _ = steps;
@@ -470,7 +478,13 @@ mod tests {
             }
             // rotation shifts the corner cycle
             let base = face_uvs(dir, [0.0; 3], [1.0; 3], Some(&[0.0, 0.0, 16.0, 16.0]), None);
-            let rot90 = face_uvs(dir, [0.0; 3], [1.0; 3], Some(&[0.0, 0.0, 16.0, 16.0]), Some(90));
+            let rot90 = face_uvs(
+                dir,
+                [0.0; 3],
+                [1.0; 3],
+                Some(&[0.0, 0.0, 16.0, 16.0]),
+                Some(90),
+            );
             for i in 0..4 {
                 assert_eq!(base[(i + 1) % 4], rot90[i]);
             }

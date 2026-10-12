@@ -1,6 +1,6 @@
 # Phase 2 material (from haste-spike)
 
-Copied from https://github.com/josefbednar/haste-spike (see its REPORT.md and REPORT-2.md). Not built in
+Copied from https://github.com/bednarjosef/haste-spike (see its REPORT.md and REPORT-2.md). Not built in
 Phase 1; kept so Phase 2 starts from working code.
 
 - `bridge/`: the Mixin handler bridge (ASM): reads `@Mixin`/`@Inject`/`@Shadow`, rewrites handlers into

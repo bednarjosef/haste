@@ -7,7 +7,7 @@ exclude = ["cache"]
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/josefbednar/haste"
+repository = "https://github.com/bednarjosef/haste"
 rust-version = "1.99"
 
 [workspace.dependencies]
@@ -33,6 +33,13 @@ bytes = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+futures-util = "0.3"
+hex = "0.4"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tempfile = "3"
 parking_lot = "0.12"
 ahash = "0.8"
 smallvec = "1"

@@ -16,7 +16,10 @@ pub struct InvalidIdentifier(pub String);
 
 impl Identifier {
     pub fn new(namespace: &str, path: &str) -> Self {
-        Self { namespace: namespace.to_owned(), path: path.to_owned() }
+        Self {
+            namespace: namespace.to_owned(),
+            path: path.to_owned(),
+        }
     }
     pub fn minecraft(path: &str) -> Self {
         Self::new("minecraft", path)
@@ -28,28 +31,52 @@ impl Identifier {
             Some((ns, p)) => (ns, p),
             None => ("minecraft", s),
         };
-        let ok_ns = !ns.is_empty() && ns.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'-'));
-        let ok_path = !path.is_empty() && path.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'-' | b'/'));
-        if ok_ns && ok_path { Ok(Self::new(ns, path)) } else { Err(InvalidIdentifier(s.to_owned())) }
+        let ok_ns = !ns.is_empty()
+            && ns
+                .bytes()
+                .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'-'));
+        let ok_path = !path.is_empty()
+            && path
+                .bytes()
+                .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'-' | b'/'));
+        if ok_ns && ok_path {
+            Ok(Self::new(ns, path))
+        } else {
+            Err(InvalidIdentifier(s.to_owned()))
+        }
     }
-    pub fn namespace(&self) -> &str { &self.namespace }
-    pub fn path(&self) -> &str { &self.path }
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+    pub fn path(&self) -> &str {
+        &self.path
+    }
 }
 
 impl fmt::Display for Identifier {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{}:{}", self.namespace, self.path) }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.namespace, self.path)
+    }
 }
 impl fmt::Debug for Identifier {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{self}") }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self}")
+    }
 }
 impl TryFrom<String> for Identifier {
     type Error = InvalidIdentifier;
-    fn try_from(s: String) -> Result<Self, Self::Error> { Self::parse(&s) }
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::parse(&s)
+    }
 }
 impl From<Identifier> for String {
-    fn from(i: Identifier) -> String { i.to_string() }
+    fn from(i: Identifier) -> String {
+        i.to_string()
+    }
 }
 impl std::str::FromStr for Identifier {
     type Err = InvalidIdentifier;
-    fn from_str(s: &str) -> Result<Self, Self::Err> { Self::parse(s) }
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+    }
 }
