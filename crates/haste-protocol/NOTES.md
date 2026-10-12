@@ -19,17 +19,18 @@
   layout (`wire/slot.rs`, keyed by registry name from `registries.json`). The patch is kept raw in
   `ItemStackData::components_raw`. A component without a known layout fails the decode of the containing
   packet.
-- `Reader::bit_set` reads fixed longs. Light data uses VarLong longs (verified, see below). Whether other
-  BitSet uses (the `player_chat` filter mask) changed the same way is not determined.
+- **BitSets (26.3):** a VarInt byte count, then the longs as little-endian bytes with trailing zero bytes
+  dropped (Pumpkin's `BitSet::encode_with_version`; the wiki still documents big-endian longs). Used by the
+  light masks and the `player_chat` filter mask. `Reader::bit_set`/`Writer::bit_set` implement only this form.
 
 ## Verified against the local 26.3 server (Fabric, offline, flat world, 2026-10-12)
 - Login, configuration (known packs answered with none), play. 60 s headless run: 473 chunks, ~117
   entities, ~29k packets, **no unknown ids and no decode failures** with the full play packet set. That
   includes `update_advancements`, `update_attributes`, `set_passengers`, `entity_event` and
   `player_abilities`.
-- **Light masks** in `level_chunk_with_light` (and the shared Light Data in `light_update`) are BitSets
-  whose longs are **VarLongs**. The wiki documents fixed longs. A dumped chunk packet parsed to the exact
-  end only with VarLongs.
+- **Dead end:** the light masks were first read as BitSets of VarLongs, which parsed flat-world chunks by
+  accident (their small masks happen to line up) and failed every chunk and light packet on normal terrain.
+  The byte form above decodes the vanilla server's normal world with zero failures (2026-10-13).
 - Chunk sections carry a fluid count (short) after the block count (as the wiki says for 26.x).
 - **Movement:** sending `move_player_pos_rot` right after `accept_teleportation`, before `player_loaded`,
   gets the client kicked with `multiplayer.disconnect.invalid_player_movement`. The driver now sends
