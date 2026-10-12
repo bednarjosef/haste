@@ -7,8 +7,8 @@ One line per task; details live in `docs/briefs/<ws>.md` and in the branch.
 |---|---|---|---|---|
 | L-0 | lead | Repo scaffold, haste-core, interfaces, boards | - | done |
 | L-1 | lead | Evaluate Pomme and Pumpkin for reuse (workers pomme-eval, pumpkin-eval) | - | done |
-| WS2-1 | WS2 | haste-data: GameData from reports, BlockShapes (oracle or fallback) | M1 | in progress |
-| WS2-2 | WS2 | haste-world: paletted containers, chunk decode, light, dirty tracking, snapshots | M1/M2 | claimed |
+| WS2-1 | WS2 | haste-data: GameData from reports, BlockShapes (oracle or fallback) | M1 | done (PR #1); BlockPhysics/BlockStateTable impls pending |
+| WS2-2 | WS2 | haste-world: paletted containers, chunk decode, light, dirty tracking, snapshots | M1/M2 | done (PR #5); unverified against a real chunk capture |
 | WS4-1 | WS4 | haste-entity: tracking + interpolation | M1 | done |
 | WS4-2 | WS4 | entity models as data + animation | M4 | done |
 | WS5-1 | WS5 (Opus) | physics: collision sweep, tested | M3 | done |
