@@ -2,6 +2,10 @@
 
 Newest at the top. One entry per decision, with the why; link the brief or report it came from.
 
+- **2026-10-12 Open: falling-water height.** `haste-data`'s `BlockPhysics::fluid` reports height 1.0
+  for fluid level >= 8 (falling), `haste-physics`'s own loader (`src/oracle.rs`) reports 8/9. Which
+  matches vanilla is not determined (no decompiled source by rule); settle it with a swim/fall
+  trace, then delete the physics-side loader in favour of the shared trait.
 - **2026-10-12 M5 reached (headless).** Real vanilla `PauseScreen`, `ChatScreen` and
   `InventoryScreen` run in the embedded JVM through the allow-listed tier-3 loader and 76 generated
   proxies, with one JNI call per frame returning the `GuiFrame`; p50 34 µs per PauseScreen frame.
