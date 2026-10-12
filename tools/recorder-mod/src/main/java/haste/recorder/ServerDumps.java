@@ -216,6 +216,25 @@ public final class ServerDumps {
             o.addProperty("friction", block.getFriction());
             o.addProperty("speed_factor", block.getSpeedFactor());
             o.addProperty("jump_factor", block.getJumpFactor());
+            // Breaking: hardness (-1 = unbreakable) and whether drops need the correct tool, from
+            // the default state; states that differ are listed under "states" by state id.
+            BlockState def = block.defaultBlockState();
+            float destroy = def.getDestroySpeed(EmptyBlockGetter.INSTANCE, ORIGIN);
+            boolean correctTool = def.requiresCorrectToolForDrops();
+            o.addProperty("destroy_time", destroy);
+            o.addProperty("requires_correct_tool_for_drops", correctTool);
+            JsonObject differing = new JsonObject();
+            for (BlockState st : block.getStateDefinition().getPossibleStates()) {
+                float d = st.getDestroySpeed(EmptyBlockGetter.INSTANCE, ORIGIN);
+                boolean c = st.requiresCorrectToolForDrops();
+                if (d != destroy || c != correctTool) {
+                    JsonObject so = new JsonObject();
+                    so.addProperty("destroy_time", d);
+                    so.addProperty("requires_correct_tool_for_drops", c);
+                    differing.add(Integer.toString(Block.getId(st)), so);
+                }
+            }
+            if (differing.size() > 0) o.add("states", differing);
             blocks.add(BuiltInRegistries.BLOCK.getKey(block).toString(), o);
         }
         root.add("blocks", blocks);

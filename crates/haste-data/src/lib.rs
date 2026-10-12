@@ -350,7 +350,12 @@ mod tests {
           "blocks": {
             "minecraft:ice": { "friction": 0.98, "speed_factor": 1.0, "jump_factor": 1.0 },
             "minecraft:slime_block": { "friction": 0.8, "speed_factor": 1.0, "jump_factor": 1.0 },
-            "minecraft:honey_block": { "friction": 0.6, "speed_factor": 0.4, "jump_factor": 0.5 }
+            "minecraft:honey_block": { "friction": 0.6, "speed_factor": 0.4, "jump_factor": 0.5 },
+            "minecraft:stone": { "friction": 0.6, "speed_factor": 1.0, "jump_factor": 1.0,
+              "destroy_time": 1.5, "requires_correct_tool_for_drops": true },
+            "minecraft:oak_stairs": { "friction": 0.6, "speed_factor": 1.0, "jump_factor": 1.0,
+              "destroy_time": 2.0, "requires_correct_tool_for_drops": false,
+              "states": { "8": { "destroy_time": 3.0, "requires_correct_tool_for_drops": true } } }
           }
         }"#;
         // blocks.json with the physics-distinguished blocks (ice etc.) added
@@ -408,6 +413,15 @@ mod tests {
         assert!((d.speed_factor(BlockStateId(7)) - 0.4).abs() < 1e-6); // honey
         assert!((d.jump_factor(BlockStateId(7)) - 0.5).abs() < 1e-6); // honey
         assert!((d.speed_factor(BlockStateId(1)) - 1.0).abs() < 1e-6);
+
+        // breaking data: per block, per-state overrides, NaN when the dump has none
+        assert_eq!(d.destroy_time(BlockStateId(1)), 1.5);
+        assert!(d.requires_correct_tool(BlockStateId(1)));
+        assert_eq!(d.destroy_time(BlockStateId(9)), 2.0);
+        assert!(!d.requires_correct_tool(BlockStateId(9)));
+        assert_eq!(d.destroy_time(BlockStateId(8)), 3.0);
+        assert!(d.requires_correct_tool(BlockStateId(8)));
+        assert!(d.destroy_time(BlockStateId(5)).is_nan()); // ice: no breaking data in fixture
 
         // fluid heights: level 0 = 8/9, 1 = 7/9, 2+ (we treat 8 as falling) = ...
         let f = d.fluid(BlockStateId(2)).unwrap();
