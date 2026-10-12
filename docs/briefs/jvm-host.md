@@ -1,60 +1,56 @@
-# jvm-host: haste-jvm (embedded JVM, tier 3, tier 2 proxies, batched GUI pipeline)
+# jvm-host: the HUD and screens as real vanilla Java
 
-You own `crates/haste-jvm` (Rust + the Java sources under `crates/haste-jvm/java`), and later
-`crates/haste-client/src/ui.rs` (after the lead says first frame milestone is merged). Read the spike reports first:
-`../haste-spike/REPORT.md` and `REPORT-2.md`, and the proxy generator you
-inherit: `crates/haste-jvm/java/proxy/Gen.java` (ASM, generates same-name classes with native /
-getter / delegate / stub bodies and merges mixins) and `java/rt/` (Unimplemented log, GuiBatch).
-ASM jars: `cache/mojang-spike/asm-*.jar` (copy nothing; reference by path). JDK: `cache/jdk`.
+Worker: Opus. Worktree `$HASTE_WT/jvm-host`, branch `jvm-host`, test server port **25614**.
+Read `docs/briefs/COMMON.md` first, then `crates/haste-jvm/NOTES.md`.
 
-Architecture reminder (AGENTS.md): tier 3 = real vanilla Java loaded at runtime from the player's
-client jar for stateless classes; tier 2 = generated proxies for stateful tier-1 objects; the
-whole jar is NEVER on the classpath; GUI drawing is batched into `haste_core::gui::GuiFrame`.
+You own `crates/haste-jvm` and `crates/haste-client/src/ui.rs` (new; the client-app workstream
+calls it from the game and render threads).
 
-## Task 1: JVM host + tier-3 loader
-- `JvmHost::start(cfg)`: start the JVM (`jni` 0.22 invocation; locate libjvm under `cfg.java_home`
-  = `cache/jdk`), with a Java-side `HasteClassLoader` that serves classes from (a) our runtime
-  classes, (b) generated proxy class files (a directory), (c) the client jar, but ONLY for an
-  allow-list of packages/classes (start with `net.minecraft.core`, `net.minecraft.resources`,
-  `net.minecraft.network.chat`, `net.minecraft.util`, `net.minecraft.ChatFormatting`, `com.mojang.serialization`,
-  `net.minecraft.client.gui.components`, `net.minecraft.client.gui.screens`, `net.minecraft.client.gui.navigation`,
-  `net.minecraft.client.gui.narration`, `net.minecraft.client.input`, `net.minecraft.client.gui.layouts`)
-  and a deny-list for tier-1 types which must resolve to proxies (`net.minecraft.client.Minecraft`,
-  `net.minecraft.client.player.*`, `net.minecraft.world.entity.*`, `net.minecraft.world.item.ItemStack`,
-  `net.minecraft.world.entity.player.Inventory`, `net.minecraft.client.multiplayer.ClientLevel`, ...).
-  Log every class served from the jar, every proxy served, every class refused (that log is a to-do list).
-  Vanilla's third-party libraries (fastutil, guava, gson, joml, jspecify, slf4j, datafixerupper,
-  brigadier) are needed by tier-3 classes: get them from the version JSON's `libraries` list
-  (setup's `haste-setup` downloads them to `cache/libraries`; until then use the jars under
-  `cache/server-spike/libraries` which has most of them). Static initialisers of vanilla classes run
-  for real in tier 3; when one touches a tier-1 type, that is a proxy request.
-- Test (ignored without cache): start JVM, call `net.minecraft.resources.Identifier.parse("minecraft:stone")`
-  and `toString()` back, construct `BlockPos(1,2,3).offset(...)`, `Component.literal("hi").getString()`.
-  Report JVM start time and first-call time.
+## Where it stands
+Real vanilla `PauseScreen`, `ChatScreen` and `InventoryScreen` run in the embedded JVM through the
+allow-listed tier-3 loader and generated proxies, one JNI call per frame, p50 34 µs. The wall is
+`BuiltInRegistries`: tier-1 registry data is refused, so tags, item components and tooltips are
+approximate.
 
-## Task 2: proxies + GUI pipeline
-- Port `Gen.java` to generate from a config file in the crate (`proxies.conf`): `Minecraft`
-  (static `getInstance()` returns the one canonical proxy; `player`, `level`, `options`, `font`,
-  `screen`, `setScreen`, `getWindow`), `Font` (`width(String)`, `width(FormattedText/Component)`,
-  `lineHeight` field = 9, via natives into Rust `TextMetrics`), `GuiGraphicsExtractor` (every
-  draw method as a batched delegate into `GuiBatch`: fill, fillGradient, text/centeredText,
-  blitSprite/blit (texture), renderItem, scissor, pose push/pop/translate), `Window` (width/
-  height/guiScale fields), `Options`, `KeyMapping` (stub bodies that do not throw for the ones
-  screens call), `SoundManager` (no-op). Record in NOTES.md every method you had to implement.
-- `GuiPipeline` per INTERFACES.md: `render()` = one JNI call into a Java `Frame.render(screen,
-  w, h, scale, mouse, partial)` which calls `screen.extractRenderState(gfx, ...)` and returns the
-  batch as one `int[]` + one `String[]` (+ one `Object[]` for identifiers/items); Rust converts to
-  `GuiFrame`. Input methods forward to `screen.keyPressed(KeyEvent)`, `charTyped`,
-  `mouseClicked(MouseButtonEvent, ...)`, `mouseScrolled` with the 26.3 signatures (check with
-  `javap` on the client jar). `set_text_metrics` wires `Font.width` natives.
-- Screens, in order: `PauseScreen` (buttons as sprites + text), `ChatScreen` (EditBox typing, the
-  chat history comes from Rust via a `ChatComponent` proxy or a simple list), `InventoryScreen`
-  (needs `Inventory`/`ItemStack` proxies reading Rust state through natives; item icons as
-  `GuiCommand::Item`). Each screen is "done" when `render()` returns a sensible `GuiFrame` that a
-  Rust test asserts on (contains the expected texts/buttons), keys/mouse change its state, and
-  the Unimplemented log for it is empty or listed in NOTES.md.
-- Benchmark: `render()` of PauseScreen per frame in microseconds (target < 100 µs after warm-up).
+## Why the HUD goes through Java
+Fabric mods hook the in-game HUD (`Gui` and its chat, hotbar, boss bars, scoreboard, titles) more
+than almost anything else. Running the real vanilla `Gui` class as tier 3, fed by proxies of our
+Rust state, means Phase 2 mixins into it work unchanged. A Rust-drawn HUD would have to be thrown
+away. Same pattern as the screens; the cost budget is the same one JNI call per frame for HUD and
+screen together.
 
-Rust-side interfaces you consume: `haste_core::gui::{GuiFrame, GuiCommand, TextMetrics}`. If the
-command set lacks something a screen needs (e.g. item rendering details), request it from the lead.
-Do not touch: haste-render (renderer draws GuiFrame), haste-entity, haste-world.
+## Tasks, in order (commit after each)
+1. **Registries into Java.** Bridge Rust's registry data (`haste_data::Registries`, the synced
+   registries from the server, tags from `update_tags`) into vanilla's registry objects so that
+   `BuiltInRegistries.ITEM`/`BLOCK`/... lookups, `Holder`s and tag checks work for tier-3 code.
+   Decide how (populate real vanilla `MappedRegistry` instances at startup from our data via
+   tier-3 code vs proxies) and write the decision with its Phase 2 consequences in your NOTES.md.
+   Item stacks crossing into Java carry their real data components (decode the raw component
+   bytes; Pumpkin has component codecs you may adapt), so tooltips, names and enchantment glint
+   decisions are vanilla's own.
+2. **The HUD**: run vanilla `Gui` (hotbar with items, selected slot, crosshair, health, hunger,
+   armor, air, experience bar and level, held item name, action bar text, titles/subtitles,
+   chat overlay with the vanilla fade, boss bars, sidebar scoreboard, player list on Tab,
+   effects) every frame from `ui.rs` into the same `GuiFrame` as the open screen. Feed it from
+   Rust state: the player's health/food/xp/abilities/inventory (from the packets; keep that
+   state in Rust in one `GameState`-like struct the client owns, proxied into Java), chat lines
+   from `system_chat`/`player_chat`/`disguised_chat`, boss events, scoreboard packets, titles,
+   tab list. The F3 debug overlay can be a stub that shows FPS, position and chunk counts.
+3. **Screens complete enough to play**: chat input with command suggestions
+   (`command_suggestion` round trip; the `commands` graph from the server for client-side
+   parsing via Brigadier, which is in the jar), the death screen with respawn
+   (`client_command`), the inventory with real container clicks (`container_click` with 26.3's
+   hashed item stacks; coordinate the hashing with the lead if `haste-protocol` lacks it), other
+   containers opened by `open_screen` (chests, furnaces, crafting) as their vanilla screen
+   classes, the disconnect/kick screen showing the reason.
+4. **`ui.rs` API** for the client: key/char/mouse/scroll input routing (screen open: to the
+   screen, else HUD keybinds such as T, /, E, Escape, F1, Tab, number keys, scroll for hotbar),
+   `fn frame(&mut self, width, height, scale, partial) -> &GuiFrame`, and the outgoing packets
+   that screens produce (chat, commands, clicks, close) as `ServerboundPlay` values drained by
+   the client each tick. Write the API in your report so the lead puts it in INTERFACES.md.
+
+## Done
+- `cargo test -p haste-jvm` (including `--ignored` with the cache) and clippy clean; per-frame
+  cost of HUD + open screen measured (p50/p99) and reported.
+- A headless test that joins your server, receives chat and renders a HUD `GuiFrame` with the
+  hotbar items and the chat line in it.

@@ -1,86 +1,49 @@
-# renderer: haste-assets + haste-render + the window/app loop
+# renderer: everything on screen beyond plain blocks
 
-You own `crates/haste-assets`, `crates/haste-render` and `crates/haste-client/src/app.rs` (window,
-render loop, frame timing). Interfaces in docs/INTERFACES.md. Milestone first frame milestone "first frame" is yours:
-the world renders around the player after join milestone's join. Then alive milestone's entity drawing + HUD drawing, and
-the GUI batch drawing for vanilla screens milestone. Performance is the point of Haste: multithreaded meshing off the
-render thread, no per-frame allocations in the hot path, frustum culling, measured frame times.
+Worker: Opus. Worktree `$HASTE_WT/renderer`, branch `renderer`, test server port **25613**.
+Read `docs/briefs/COMMON.md` first.
 
-## Reuse decision
-Decided by the lead from the Pomme evaluation (Pomme at `cache/pomme`, GPL-3.0, stable Rust,
-raw Vulkan through `pyronyx` + `shaderc`-compiled GLSL). We stay on **wgpu** (portable, GL
-fallback, simpler to own) and reuse Pomme's azalea-free, clean-provenance pieces with the GPL
-headers kept and `THIRD_PARTY.md` entries:
-- **Reuse as-is / light rework into `haste-assets`**: `pomme-client/src/assets.rs` (asset index
-  over jar + assets dir), `pomme-client/src/world/block/model.rs` (blockstate/model JSON parsing and
-  baking, 2.9k lines) and `pomme-client/src/renderer/chunk/atlas.rs` (atlas stitching + mip chain).
-  Replace its block registry types with `haste_data::BlockStates` and `BlockStateId`.
-- **Reuse with rework into `haste-render`**: `renderer/chunk/greedy.rs` (binary greedy meshing,
-  MIT upstream Inspirateur/binary-greedy-meshing, modified for AO as merge criterion; keep both
-  attributions), the mesher's design (`renderer/chunk/mesher.rs`: worker pool, buffer pool,
-  bounded result channel, 16-byte packed vertices with sprite-local UVs + atlas rectangle buffer),
-  `renderer/chunk/occlusion_graph.rs` (section visibility walk for cave culling), and
-  `renderer/chunk/buffer.rs` (free-list sub-allocator over big buffers) rewritten on wgpu buffers.
-- **Do not reuse**: `world/light/` (self-declared port of vanilla's light engine: provenance),
-  anything under `net/`, `physics/`, `player/`, and Pomme's `ui/` (azalea `ItemStack`/`azalea_chat`
-  types everywhere; our GUI is the batched `GuiFrame`). Vulkan-specific code (context, swapchain,
-  pipelines, GLSL shaders) is reference only: write WGSL.
-- Entity models: entities owns them; you only draw `EntityInstance`s.
+You own `crates/haste-render` and `crates/haste-assets`, **except** `crates/haste-render/src/fluid.rs`
+and the biome tint code, which the fluids-and-tint workstream (a GLM worker) writes in parallel:
+it adds `fluid.rs`, a tint module and one call from the mesher. Keep your changes to `mesher.rs`
+small so the two merge cleanly, and tell the lead if you need to restructure it.
 
-## Backend
-wgpu 30 (workspace dependency); winit 0.30 for the window. This machine: AMD Radeon 860M, Mesa
-26.2, Wayland session (winit handles it). NOTE: no system Vulkan ICD is installed here, but a project-local RADV
-exists: `source scripts/env.sh` exports `VK_DRIVER_FILES=${HASTE_VULKAN_ICD:-}`
-(set it in every shell where you run anything graphical, including tests). Request the adapter
-with `wgpu::Backends::all()`, prefer Vulkan, log which backend/adapter was chosen, keep code backend-neutral. Headless/offscreen rendering must work too
-(oracles's screenshot tests): `Renderer` must be constructible without a window (offscreen surface
-target) and able to read back a frame to an `RgbaImage`: provide `Renderer::new_offscreen(w, h, ..)`
-and `Renderer::read_back(&mut self) -> RgbaImage` (tell the lead; it goes into INTERFACES.md).
+## Where it stands
+Chunks mesh on worker threads and draw at 211 FPS offscreen at render distance 12
+(`Renderer::new_offscreen` + `read_back` work; `NOTES.md`). Nothing else is drawn: `FrameInput`
+already carries `entities`, `gui` and `sky`, and they are ignored.
 
-## Task 1: haste-assets
-- Open the client jar (zip) + the assets index/objects directory. `texture()` returns the PNG
-  (animated textures: first frame + `.mcmeta` parsed into `AnimationMeta`). `blockstate()` parses
-  variants/multipart with `when` conditions (`OR`/`AND`, property lists), `model()` resolves
-  `parent` chains (`block/cube_all` etc.), `elements` with `from`/`to`/`rotation`/`faces`
-  (uv, texture refs `#all`, cullface, rotation, tintindex), `textures` variables, `ambientocclusion`.
-  `language()` from `assets/minecraft/lang/<code>.json`. `font_default()`: parse
-  `assets/minecraft/font/default.json` bitmap providers (ascii.png etc., `height`, `ascent`,
-  `chars` rows) into glyphs; a `TextMetrics` impl (character widths from the bitmap's non-empty
-  columns, like vanilla's bitmap font measurement; space = 4 px... verify from the font file).
-  `gui_sprite()`: `assets/minecraft/textures/gui/sprites/<path>.png` with `.mcmeta` scaling
-  (nine-slice/tile/stretch).
-- `BakedBlockModels::bake()`: for every block state, pick the variant(s) (random variants ->
-  take the first), apply model rotation x/y and uvlock, emit quads with atlas uvs, cull faces,
-  tint index, AO flag, and classify `is_full_opaque` (all six faces are full, opaque textures) and
-  the render layer (solid / cutout / cutout_mipped / translucent; the sets of blocks per layer come
-  from observation + the `render_type` field where present, document the heuristic).
-- Atlas: pack all block textures into one RGBA atlas (power-of-two, with mipmaps generated by the
-  renderer); a second atlas for GUI sprites + font pages.
-- Tests: model parent resolution on fixtures you write (do not commit vanilla JSON beyond
-  fragments); multipart condition evaluation; `#[ignore]` on the real jar: `minecraft:stone` has
-  6 quads, `minecraft:oak_stairs` facing east has > 6 quads, bake time and atlas size reported.
+## Tasks, in order (commit after each; offscreen PNGs are your test oracle, look at them)
+1. **GUI drawing** (`FrameInput::gui`, `haste_core::gui::GuiFrame`): every `GuiCommand` variant,
+   in order, in one or a few draw calls per frame (batched quads, one texture array or atlas for
+   GUI sprites from `assets/minecraft/textures/gui/sprites` with their `.mcmeta` nine-slice/tile
+   scaling, the bitmap fonts from `font/default.json` including unicode/accented pages, shadow,
+   bold/italic/underline/strikethrough/obfuscated styles), scissor stack, translate stack, GUI
+   scale. `GuiCommand::Item`: draw the item in the GUI the way vanilla does, from the 26.3 item
+   model definitions (`assets/minecraft/items/*.json` -> models; block items as the 3D
+   isometric block, flat items as extruded sprites seen flat); the stack count text is drawn by
+   whoever emits the frame. Implement `Renderer::text_metrics` exactly from the font's glyph
+   advances (vanilla's widths are what Java screens lay out with; the jvm-host workstream calls
+   it). Test: a `GuiFrame` built by hand with each command, rendered offscreen, compared to
+   expectations (pixel probes at known coordinates), and the jvm-host test frames if available.
+2. **Entities** (`FrameInput::entities`, `haste_core::model::EntityInstance` from `haste-entity`):
+   cube models with their textures (`textures/entity/...`), per-part pose, light at the entity's
+   position, hurt tint, name tags for players. Batch by texture; instancing where it pays off.
+   Player skins: the default skins from the jar (`textures/entity/player/wide|slim/*`) chosen by
+   UUID as vanilla does; downloaded skins later.
+3. **Sky, fog, weather**: sky color and sunrise/sunset from `SkyState::time_of_day`, sun, moon
+   phases, stars, clouds (`textures/environment/clouds.png`), rain and snow (`textures/environment/
+   rain.png`, `snow.png`), fog by render distance and dimension (`DimensionInfo`, the synced
+   dimension type's effects), underwater fog later. Nether/End skies.
+4. **World overlays**: block selection outline (from the oracle's outline shapes in
+   `haste_data`), block-break cracks (`textures/block/destroy_stage_0..9`) at a position and stage
+   the player workstream will supply (`FrameInput` extension: send the field you need to the
+   lead), the first-person hand and held item (simple version: arm cube + item model).
+5. **Performance pass**: report frame time at render distance 12 and 32 on a normal (not flat)
+   world: `scripts/test-server.sh renderer 25613 3600 minecraft:normal` after deleting the copy's
+   `world/`. Profile the worst frame-time component and fix it if it is ours.
 
-## Task 2: haste-render, world
-- Chunk section meshing from `SectionSnapshot` (world-and-data): per face culling against neighbours
-  (opaque full blocks), greedy merging is optional later; vertex format compact (position as
-  u8/u16 local, uv u16, light (sky, block) packed, AO, tint); per section one vertex/index buffer
-  per render layer; translucent sorted by distance. Mesher thread pool (`rayon`), results through a
-  channel, uploads batched per frame with a budget. Rebuild on dirty sections.
-- Camera, projection, frustum culling of sections; sky colour from time of day; distance fog;
-  vanilla-like lighting (light map from sky/block light with time-of-day darkening); `FrameStats`.
-- Done (first frame milestone): with a world from the headless join (the lead wires it), the world is visible from the
-  player position, > 100 FPS at render distance 12 on this machine for a flat world, frame time
-  logged. Provide `examples/view_world.rs`: loads a saved snapshot of chunks (a `haste-testkit`
-  recorded packet file, or a synthetic flat world) and renders it, for your own testing.
-
-## Task 3: entities, HUD, GUI batch
-- Draw `EntityInstance`s: cube-model renderer (ModelPart tree transforms on the CPU or in a
-  per-part instance buffer), skins by `Identifier` (player skins downloaded by entities/setup later),
-  nametags via the font. Draw `GuiFrame` commands: fill/gradient/text (bitmap font, shadow)/texture/
-  sprite (nine-slice)/item (flat item textures first, block items as the model's 3D icon later)/
-  scissor/translate, in GUI scale.
-- Tests: offscreen render of a synthetic 3x3 chunk world compared against a stored golden PNG
-  with tolerance (the golden is generated by you and committed; it is our own rendering, not
-  Mojang's); GUI frame render of a few commands against a golden.
-
-Do not touch: haste-world (consume), haste-entity (consume), haste-jvm. Interface needs to the lead.
+## Done
+- `cargo test -p haste-render -p haste-assets` and clippy clean; offscreen PNGs for each task
+  saved under `target/render-checks/` (never committed) and described in the report.
+- `FrameInput` / `Renderer` API changes listed for the lead to put in `docs/INTERFACES.md`.
