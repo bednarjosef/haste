@@ -32,7 +32,38 @@
   are an instance-rate vertex buffer (wgpu has no push constants on all
   backends).
 
-## Measured (this machine: AMD Radeon 860M, RADV, wgpu 30 Vulkan)
+## Session 2 (GUI, entities, sky, overlays, performance)
+
+- **GUI** (`gui.rs`): one vertex buffer per frame over a lazily filled 4096^2 atlas (sprites,
+  textures, font pages, unifont glyphs, item textures), one draw per scissor change. Drawn into a
+  non-sRGB view of the target so blending is on sRGB values like vanilla; on backends without
+  view formats (GL) it renders linear colour into the sRGB target (half-transparent fills then
+  blend in linear space). Text with alpha 0 is not drawn (vanilla since 1.21.6).
+- **Entities** (`entity.rs`): CPU-posed cubes, one draw; child pivots are relative to the parent
+  (vanilla PartPose). Light comes from `sample_world` / `sample_entity_lights` (the renderer
+  holds no world). Hurt tint needs an `EntityInstance` field (not there).
+- **Sky** (`sky.rs`): time-of-day curves from minecraft.wiki; sunrise colour, stars, rain columns
+  (no heightmap: rain falls through roofs) and flat clouds are approximations.
+- **Terrain draw path**: section meshes in shared arenas (`arena.rs`), one
+  `multi_draw_indexed_indirect` per layer and arena (needs INDIRECT_FIRST_INSTANCE), cave
+  culling walk (`occlusion.rs`) over flat arrays, rerun on camera section change or at most
+  4x/s while sightline data arrives. Dead end: per-section buffers cost ~8 ms/frame in wgpu
+  encode + submit at ~700 sections; std HashMap (SipHash) lookups in the cull loop and walk cost
+  2-16 ms.
+- **Bug fixed**: the bake stores atlas-texel UVs; the mesher must convert back to sprite-local
+  0..1 (every face showed one texel before).
+
+## Measured
+
+- Windowed client, normal world, render distance 12, 2816x1656, Mailbox, loaded machine (load
+  ~19): ~7 ms/frame (~140 FPS) steady, from ~12.5 ms; breakdown per frame: prepare 1.6, acquire
+  0.6, cull 1.7, encode 0.15, submit 2.0, present 0.7 ms CPU; GPU main pass 5.3-5.9 ms.
+  `Renderer::timings()` and the client's 2 s log line give this breakdown.
+- `examples/perf_world synthetic 12` (1280x720 offscreen): 1.3-2.3 ms/frame.
+
+## Earlier measurement (session 1)
+
+this machine: AMD Radeon 860M, RADV, wgpu 30 Vulkan)
 
 - Offscreen 640x480, render distance 12, flat world, 625 sections (348
   drawn after frustum culling): **4.75 ms/frame = 211 FPS** steady state
