@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "wgpu render backend: chunk meshing (off-thread), atlas, sky/fog, culling, entity models, GUI batch drawing. Owner: WS3."
 
+[dev-dependencies]
+tracing-subscriber.workspace = true
+
 [dependencies]
 haste-core.workspace = true
 haste-data.workspace = true
@@ -19,4 +22,5 @@ crossbeam-channel.workspace = true
 parking_lot.workspace = true
 ahash.workspace = true
 anyhow.workspace = true
+image.workspace = true
 tracing.workspace = true
