@@ -103,7 +103,13 @@ pub fn upload_atlas(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     atlas: &haste_assets::AtlasBuilder,
-) -> Result<(wgpu::Texture, wgpu::TextureView, wgpu::Sampler, wgpu::Buffer, u32)> {
+) -> Result<(
+    wgpu::Texture,
+    wgpu::TextureView,
+    wgpu::Sampler,
+    wgpu::Buffer,
+    u32,
+)> {
     let size = atlas.size();
     let mip_levels = atlas.mip_levels() + 1;
     if !size.is_power_of_two() || mip_levels > size.trailing_zeros() + 1 {

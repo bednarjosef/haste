@@ -11,7 +11,7 @@ pub mod renderer;
 pub mod vertex;
 
 pub use mesher::{mesh_section, MeshSnapshot, Mesher, SectionMesh};
-pub use pipeline::{upload_atlas, upload_section, Gpu, SectionGpuMesh};
 pub use occlusion::{compute_visible_mask, section_visibility, Face, VisibilitySet};
+pub use pipeline::{upload_atlas, upload_section, Gpu, SectionGpuMesh};
 pub use renderer::{Camera, FrameInput, FrameStats, Renderer, SkyState};
 pub use vertex::PackedVertex;

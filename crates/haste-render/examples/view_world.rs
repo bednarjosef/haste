@@ -27,7 +27,11 @@ impl BlockView for FlatWorld {
         true
     }
     fn sky_light(&self, p: BlockPos) -> u8 {
-        if p.y <= 0 { 0 } else { 15 }
+        if p.y <= 0 {
+            0
+        } else {
+            15
+        }
     }
     fn block_light(&self, _: BlockPos) -> u8 {
         0
@@ -93,8 +97,8 @@ impl ApplicationHandler for App {
             &haste_core::paths::datagen_reports().join("blocks.json"),
         )
         .expect("load blocks.json");
-        let renderer = haste_render::Renderer::new(window.clone(), &mut assets, &states)
-            .expect("renderer");
+        let renderer =
+            haste_render::Renderer::new(window.clone(), &mut assets, &states).expect("renderer");
         self.window = Some(window);
         self.renderer = Some(renderer);
     }
@@ -151,8 +155,12 @@ impl ApplicationHandler for App {
 
 impl App {
     fn draw(&mut self) {
-        let Some(renderer) = &mut self.renderer else { return };
-        let world = FlatWorld { ground: BlockStateId(1) };
+        let Some(renderer) = &mut self.renderer else {
+            return;
+        };
+        let world = FlatWorld {
+            ground: BlockStateId(1),
+        };
         let dirty = std::mem::take(&mut self.dirty);
         renderer.update_world(&world, &dirty, ChunkPos::new(0, 0), self.distance);
         self.dirty = dirty;

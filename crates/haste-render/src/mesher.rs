@@ -85,14 +85,24 @@ impl MeshSnapshot {
                 }
             }
         }
-        MeshSnapshot { blocks, sky, block, origin, min_y: view.min_y(), height: view.height() }
+        MeshSnapshot {
+            blocks,
+            sky,
+            block,
+            origin,
+            min_y: view.min_y(),
+            height: view.height(),
+        }
     }
 
     /// Block state at world position; out-of-bounds y reads as air.
     pub fn block_state(&self, p: BlockPos) -> BlockStateId {
-        let (dx, dy, dz) = (p.x - self.origin.x, p.y - self.origin.y, p.z - self.origin.z);
-        if (0..EXT).contains(&dx) && (0..EXT).contains(&dy) && (0..EXT).contains(&dz)
-        {
+        let (dx, dy, dz) = (
+            p.x - self.origin.x,
+            p.y - self.origin.y,
+            p.z - self.origin.z,
+        );
+        if (0..EXT).contains(&dx) && (0..EXT).contains(&dy) && (0..EXT).contains(&dz) {
             self.blocks[(dy * EXT2 + dz * EXT + dx) as usize]
         } else {
             BlockStateId::AIR
@@ -101,9 +111,12 @@ impl MeshSnapshot {
 
     /// (sky, block) light at world position; 15/0 outside.
     pub fn light(&self, p: BlockPos) -> (u8, u8) {
-        let (dx, dy, dz) = (p.x - self.origin.x, p.y - self.origin.y, p.z - self.origin.z);
-        if (0..EXT).contains(&dx) && (0..EXT).contains(&dy) && (0..EXT).contains(&dz)
-        {
+        let (dx, dy, dz) = (
+            p.x - self.origin.x,
+            p.y - self.origin.y,
+            p.z - self.origin.z,
+        );
+        if (0..EXT).contains(&dx) && (0..EXT).contains(&dy) && (0..EXT).contains(&dz) {
             (
                 self.sky[(dy * EXT2 + dz * EXT + dx) as usize],
                 self.block[(dy * EXT2 + dz * EXT + dx) as usize],
@@ -194,11 +207,7 @@ fn shade_index(dir: Option<haste_assets::Direction>) -> u8 {
 
 /// Per-vertex (sky, block) light: the face-adjacent cell's light plus the three
 /// AO-neighbour cells, averaged (vanilla smooth lighting). Packed to nibbles.
-fn vertex_light(
-    snapshot: &MeshSnapshot,
-    base: BlockPos,
-    neighbors: &[[i32; 3]; 3],
-) -> u8 {
+fn vertex_light(snapshot: &MeshSnapshot, base: BlockPos, neighbors: &[[i32; 3]; 3]) -> u8 {
     let (cs, cb) = snapshot.light(base);
     let mut s = cs as u32;
     let mut b = cb as u32;
@@ -260,8 +269,9 @@ pub fn mesh_section(
                     }
                     let sprite = atlas.region_of(&quad.texture).sprite as u16;
 
-                    let positions: [[f32; 3]; 4] =
-                        quad.positions.map(|p| [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]]);
+                    let positions: [[f32; 3]; 4] = quad
+                        .positions
+                        .map(|p| [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]]);
 
                     // Per-vertex light: face-adjacent cell + the vertex's AO
                     // neighbours, averaged (smooth lighting).
@@ -369,16 +379,8 @@ fn face_corner_offsets(
         // 0 -> -1, 1 -> +1: the side neighbour toward this vertex along each axis.
         let (fu, fv) = (su * 2 - 1, sv * 2 - 1);
         [
-            [
-                n[0] + fu * u[0],
-                n[1] + fu * u[1],
-                n[2] + fu * u[2],
-            ],
-            [
-                n[0] + fv * v[0],
-                n[1] + fv * v[1],
-                n[2] + fv * v[2],
-            ],
+            [n[0] + fu * u[0], n[1] + fu * u[1], n[2] + fu * u[2]],
+            [n[0] + fv * v[0], n[1] + fv * v[1], n[2] + fv * v[2]],
             [
                 n[0] + fu * u[0] + fv * v[0],
                 n[1] + fu * u[1] + fv * v[1],
@@ -529,7 +531,9 @@ mod tests {
         let baked = haste_assets::BakedBlockModels::bake(&mut assets, &states, &mut atlas).unwrap();
 
         // stone state id 1.
-        let world = FlatWorld { ground: BlockStateId(1) };
+        let world = FlatWorld {
+            ground: BlockStateId(1),
+        };
         let snapshot = MeshSnapshot::capture(&world, SectionPos::new(0, 0, 0));
         let mesh = mesh_section(&snapshot, &baked, &atlas, SectionPos::new(0, 0, 0));
 
@@ -631,10 +635,7 @@ mod tests {
                 let mut ref_sides = [reference[vi][0], reference[vi][1]];
                 mine_sides.sort();
                 ref_sides.sort();
-                assert_eq!(
-                    mine_sides, ref_sides,
-                    "{dir:?} vertex {vi} side mismatch"
-                );
+                assert_eq!(mine_sides, ref_sides, "{dir:?} vertex {vi} side mismatch");
             }
         }
     }

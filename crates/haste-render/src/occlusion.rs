@@ -5,8 +5,8 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use haste_core::{ChunkPos, SectionPos};
 use glam::DVec3;
+use haste_core::{ChunkPos, SectionPos};
 
 /// The six section faces, ordinals matching vanilla Direction.
 #[derive(Clone, Copy, PartialEq, Eq)]

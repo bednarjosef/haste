@@ -17,7 +17,11 @@ impl BlockView for FlatWorld {
         true
     }
     fn sky_light(&self, p: BlockPos) -> u8 {
-        if p.y <= 0 { 0 } else { 15 }
+        if p.y <= 0 {
+            0
+        } else {
+            15
+        }
     }
     fn block_light(&self, _: BlockPos) -> u8 {
         0
@@ -36,12 +40,9 @@ fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?),
         )
         .init();
-        let jar = haste_core::paths::client_jar();
-    let mut assets = haste_assets::Assets::open(
-        &jar,
-        &haste_core::paths::cache_dir().join("assets"),
-        "26.3",
-    )?;
+    let jar = haste_core::paths::client_jar();
+    let mut assets =
+        haste_assets::Assets::open(&jar, &haste_core::paths::cache_dir().join("assets"), "26.3")?;
     let states = haste_assets::BlocksJsonStates::load(
         &haste_core::paths::datagen_reports().join("blocks.json"),
     )?;

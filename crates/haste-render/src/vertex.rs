@@ -156,7 +156,10 @@ mod tests {
     fn packed_uv_keeps_fractional_precision() {
         for uv in [0.25_f32, 1.25, 8.5, 15.75] {
             let decoded = pack_sprite_uv(uv) as f32 / TERRAIN_UV_FIXED_SCALE;
-            assert!((decoded - uv).abs() <= 0.5 / TERRAIN_UV_FIXED_SCALE, "uv {uv} -> {decoded}");
+            assert!(
+                (decoded - uv).abs() <= 0.5 / TERRAIN_UV_FIXED_SCALE,
+                "uv {uv} -> {decoded}"
+            );
         }
     }
 

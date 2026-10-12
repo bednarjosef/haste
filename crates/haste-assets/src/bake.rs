@@ -75,7 +75,10 @@ impl haste_core::view::BlockStateTable for BlocksJsonStates {
         self.len() == 0
     }
     fn block_of(&self, s: BlockStateId) -> &Identifier {
-        self.states[s.0 as usize].2.as_ref().expect("blocks.json names are valid ids")
+        self.states[s.0 as usize]
+            .2
+            .as_ref()
+            .expect("blocks.json names are valid ids")
     }
     fn properties(&self, s: BlockStateId) -> Vec<(String, String)> {
         self.states[s.0 as usize].1.clone()
@@ -90,7 +93,6 @@ impl haste_core::view::BlockStateTable for BlocksJsonStates {
 }
 
 type StateEntry = (usize, String, Vec<(String, String)>);
-
 
 #[derive(Deserialize)]
 struct BlocksJsonBlock {
@@ -401,8 +403,8 @@ use std::sync::Arc;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use haste_core::view::BlockStateTable as _;
     use crate::atlas::{AtlasRegion, AtlasRegions};
+    use haste_core::view::BlockStateTable as _;
 
     struct TestRegions {
         opaque: bool,

@@ -89,13 +89,25 @@ mod tests {
                     haste_core::BlockStateId::AIR
                 }
             }
-            fn is_chunk_loaded(&self, _: haste_core::ChunkPos) -> bool { true }
-            fn sky_light(&self, p: haste_core::BlockPos) -> u8 {
-                if p.y <= 0 { 0 } else { 15 }
+            fn is_chunk_loaded(&self, _: haste_core::ChunkPos) -> bool {
+                true
             }
-            fn block_light(&self, _: haste_core::BlockPos) -> u8 { 0 }
-            fn min_y(&self) -> i32 { -64 }
-            fn height(&self) -> i32 { 384 }
+            fn sky_light(&self, p: haste_core::BlockPos) -> u8 {
+                if p.y <= 0 {
+                    0
+                } else {
+                    15
+                }
+            }
+            fn block_light(&self, _: haste_core::BlockPos) -> u8 {
+                0
+            }
+            fn min_y(&self) -> i32 {
+                -64
+            }
+            fn height(&self) -> i32 {
+                384
+            }
         }
 
         // Mesh and upload a few sections around the origin.
@@ -125,7 +137,10 @@ mod tests {
         let stats = renderer.render(&frame).unwrap();
         eprintln!(
             "offscreen frame: {:.2} ms, {} drawn / {} sections, {} draw calls",
-            stats.frame_ms, stats.chunk_sections_drawn, stats.chunk_sections_total, stats.draw_calls
+            stats.frame_ms,
+            stats.chunk_sections_drawn,
+            stats.chunk_sections_total,
+            stats.draw_calls
         );
         assert!(stats.chunk_sections_drawn > 0, "no sections drawn");
 
@@ -134,10 +149,11 @@ mod tests {
         // The frame must not be entirely the clear colour: some pixel differs
         // from the sky blue (0.47, 0.65, 1.0) => (120, 165, 255).
         let sky = image::Rgba([120, 165, 255, 255]);
-        let any_different = image
-            .pixels()
-            .any(|p| p.0 != sky.0);
-        assert!(any_different, "frame is entirely clear colour; terrain not rendered");
+        let any_different = image.pixels().any(|p| p.0 != sky.0);
+        assert!(
+            any_different,
+            "frame is entirely clear colour; terrain not rendered"
+        );
     }
 }
 
@@ -195,12 +211,14 @@ impl Renderer {
         assets: &mut haste_assets::Assets,
         states: &dyn haste_core::view::BlockStateTable,
     ) -> Result<Renderer> {
-        let display = DisplayHandleWrapper { window: window.clone() };
+        let display = DisplayHandleWrapper {
+            window: window.clone(),
+        };
         let display: Box<dyn crate::pipeline::ShareableDisplayHandle> = Box::new(display);
         let gpu = Gpu::new(Some(display))?;
-        let surface = gpu.instance.create_surface(wgpu::SurfaceTarget::Window(Box::new(
-            window.clone(),
-        )))?;
+        let surface = gpu
+            .instance
+            .create_surface(wgpu::SurfaceTarget::Window(Box::new(window.clone())))?;
         let cap = surface.get_capabilities(&gpu.adapter);
         let format = cap
             .formats
@@ -249,11 +267,13 @@ impl Renderer {
             upload_atlas(&gpu.device, &gpu.queue, &atlas)?;
 
         // Camera uniform.
-        let camera_uniform = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("camera"),
-            contents: &[0; std::mem::size_of::<CameraUniform>()],
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
+        let camera_uniform = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("camera"),
+                contents: &[0; std::mem::size_of::<CameraUniform>()],
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
         let camera_bind_group_layout =
             gpu.device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -344,50 +364,54 @@ impl Renderer {
             .map(|(_, f)| *f)
             .unwrap_or(wgpu::TextureFormat::Rgba8UnormSrgb);
         let make_pipeline = |label: &str, blend: Option<wgpu::BlendState>| {
-            gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&gpu.device.create_pipeline_layout(
-                    &wgpu::PipelineLayoutDescriptor {
-                        label: Some("chunk-layout"),
-                        bind_group_layouts: &[
-                            Some(&camera_bind_group_layout),
-                            Some(&atlas_bind_group_layout),
+            gpu.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&gpu.device.create_pipeline_layout(
+                        &wgpu::PipelineLayoutDescriptor {
+                            label: Some("chunk-layout"),
+                            bind_group_layouts: &[
+                                Some(&camera_bind_group_layout),
+                                Some(&atlas_bind_group_layout),
+                            ],
+                            immediate_size: 0,
+                        },
+                    )),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_main"),
+                        compilation_options: Default::default(),
+                        buffers: &[
+                            Some(PackedVertex::LAYOUT),
+                            Some(PackedVertex::INSTANCE_LAYOUT),
                         ],
-                        immediate_size: 0,
                     },
-                )),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[Some(PackedVertex::LAYOUT), Some(PackedVertex::INSTANCE_LAYOUT)],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: surface_format,
-                        blend,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode: Some(wgpu::Face::Back),
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth24Plus,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: Default::default(),
-                multiview_mask: None,
-                cache: None,
-            })
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_main"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: surface_format,
+                            blend,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        cull_mode: Some(wgpu::Face::Back),
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth24Plus,
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(wgpu::CompareFunction::Less),
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
+                    multisample: Default::default(),
+                    multiview_mask: None,
+                    cache: None,
+                })
         };
         let pipeline_solid = make_pipeline("chunk-solid", None);
         let pipeline_cutout = make_pipeline("chunk-cutout", None);
@@ -436,7 +460,11 @@ impl Renderer {
         let (w, h) = size;
         let color = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("offscreen-color"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -446,7 +474,11 @@ impl Renderer {
         });
         let depth = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("offscreen-depth"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -504,7 +536,8 @@ impl Renderer {
     pub fn resize(&mut self, w: u32, h: u32) {
         self.size = (w.max(1), h.max(1));
         if self.offscreen.is_some() {
-            if let Ok(off) = Self::make_offscreen(&self.gpu.device, self.size, self.surface_format) {
+            if let Ok(off) = Self::make_offscreen(&self.gpu.device, self.size, self.surface_format)
+            {
                 self.offscreen = Some(off);
             }
         } else {
@@ -539,12 +572,7 @@ impl Renderer {
     /// wgpu's default reverse... wgpu uses 0..1 z; glam's perspective_rh
     /// produces -1..1, so use perspective_infinite_rh style correction).
     fn view_projection(camera: &Camera, aspect: f32) -> glam::Mat4 {
-        let proj = glam::Mat4::perspective_rh(
-            camera.fov_deg.to_radians(),
-            aspect,
-            0.05,
-            4096.0,
-        );
+        let proj = glam::Mat4::perspective_rh(camera.fov_deg.to_radians(), aspect, 0.05, 4096.0);
         let yaw = camera.yaw.to_radians();
         let pitch = camera.pitch.to_radians();
         // Minecraft: yaw 0 = +z (south), pitch positive = down.
@@ -568,15 +596,7 @@ impl Renderer {
         // Gribb/Hartmann column extraction from the combined matrix.
         let c = |i: usize| m.col(i);
         let (c0, c1, c2, c3) = (c(0), c(1), c(2), c(3));
-        [
-            c3 + c0,
-            c3 - c0,
-            c3 + c1,
-            c3 - c1,
-            c3 + c2,
-            c3 - c2,
-        ]
-        .map(|row| row.normalize())
+        [c3 + c0, c3 - c0, c3 + c1, c3 - c1, c3 + c2, c3 - c2].map(|row| row.normalize())
     }
 
     fn aabb_visible(planes: &[glam::Vec4; 6], min: [f32; 3], max: [f32; 3]) -> bool {
@@ -628,11 +648,9 @@ impl Renderer {
             fog_end: frame.sky.fog_end,
             _pad: [0.0; 2],
         };
-        self.gpu.queue.write_buffer(
-            &self.camera_uniform,
-            0,
-            bytemuck::bytes_of(&camera_uniform),
-        );
+        self.gpu
+            .queue
+            .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&camera_uniform));
 
         // Which target are we drawing into?
         // The acquired SurfaceTexture must outlive the pass (it presents on drop
@@ -664,7 +682,6 @@ impl Renderer {
         let present = held_surface_texture.is_some();
         let _ = present;
 
-
         // Frustum cull. Collect owned draw data so later buffer work does not
         // borrow self.sections.
         let planes = Self::frustum_planes(&view_proj);
@@ -680,18 +697,17 @@ impl Renderer {
         for meshes in self.sections.values() {
             for m in meshes {
                 if Self::aabb_visible(&planes, m.aabb.0, m.aabb.1) {
-                    let center = glam::Vec3::from(
-                        [
-                            (m.aabb.0[0] + m.aabb.1[0]) * 0.5,
-                            (m.aabb.0[1] + m.aabb.1[1]) * 0.5,
-                            (m.aabb.0[2] + m.aabb.1[2]) * 0.5,
-                        ],
-                    );
-                    let dc = center - glam::Vec3::new(
-                        frame.camera.pos.x as f32,
-                        frame.camera.pos.y as f32,
-                        frame.camera.pos.z as f32,
-                    );
+                    let center = glam::Vec3::from([
+                        (m.aabb.0[0] + m.aabb.1[0]) * 0.5,
+                        (m.aabb.0[1] + m.aabb.1[1]) * 0.5,
+                        (m.aabb.0[2] + m.aabb.1[2]) * 0.5,
+                    ]);
+                    let dc = center
+                        - glam::Vec3::new(
+                            frame.camera.pos.x as f32,
+                            frame.camera.pos.y as f32,
+                            frame.camera.pos.z as f32,
+                        );
                     draws.push(Draw {
                         layer: m.layer,
                         index_count: m.index_count,
@@ -705,9 +721,11 @@ impl Renderer {
         }
         // Translucent far-to-near; opaque front-to-back for early-Z.
         draws.sort_by(|a, b| {
-            a.layer
-                .cmp(&b.layer)
-                .then(a.dist.partial_cmp(&b.dist).unwrap_or(std::cmp::Ordering::Equal))
+            a.layer.cmp(&b.layer).then(
+                a.dist
+                    .partial_cmp(&b.dist)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
         });
         let sections_total = self.sections.len() as u32;
         let drawn = draws.len() as u32;
@@ -755,19 +773,20 @@ impl Renderer {
             // < Translucent), distance-sorted inside each. Section origins go
             // through an instance-rate vertex buffer (attribute 7), one
             // instance per section draw.
-            let origins: Vec<[i32; 3]> =
-                draws.iter().map(|d| d.origin).collect();
-            let origin_buffer = self.gpu.device.create_buffer_init(
-                &wgpu::util::BufferInitDescriptor {
-                    label: Some("section-origins"),
-                    contents: bytemuck::cast_slice(&origins),
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                },
-            );
+            let origins: Vec<[i32; 3]> = draws.iter().map(|d| d.origin).collect();
+            let origin_buffer =
+                self.gpu
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("section-origins"),
+                        contents: bytemuck::cast_slice(&origins),
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    });
             for (instance, d) in draws.iter().enumerate() {
                 let pipeline = match d.layer {
-                    haste_assets::RenderLayer::Solid
-                    | haste_assets::RenderLayer::CutoutMipped => &self.pipeline_solid,
+                    haste_assets::RenderLayer::Solid | haste_assets::RenderLayer::CutoutMipped => {
+                        &self.pipeline_solid
+                    }
                     haste_assets::RenderLayer::Cutout => &self.pipeline_cutout,
                     haste_assets::RenderLayer::Translucent => &self.pipeline_translucent,
                 };
@@ -809,10 +828,7 @@ impl Renderer {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut encoder = self
-            .gpu
-            .device
-            .create_command_encoder(&Default::default());
+        let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
         let format = self.surface_format;
         let block_size = 4; // Rgba8UnormSrgb or Bgra8
         encoder.copy_texture_to_buffer(
@@ -839,7 +855,10 @@ impl Renderer {
         map.map_async(wgpu::MapMode::Read, .., move |r| {
             let _ = tx.send(r);
         });
-        self.gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
+        self.gpu
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .ok();
         rx.recv()
             .context("waiting for the readback map")?
             .context("mapping the readback buffer")?;
@@ -854,7 +873,11 @@ impl Renderer {
         for y in 0..h {
             for x in 0..w {
                 let i = ((y * w + x) * 4) as usize;
-                image.put_pixel(x, y, image::Rgba([data[i], data[i + 1], data[i + 2], data[i + 3]]));
+                image.put_pixel(
+                    x,
+                    y,
+                    image::Rgba([data[i], data[i + 1], data[i + 2], data[i + 3]]),
+                );
             }
         }
         Ok(image)
@@ -870,14 +893,16 @@ struct DisplayHandleWrapper {
 
 impl core::fmt::Debug for DisplayHandleWrapper {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DisplayHandleWrapper").finish_non_exhaustive()
+        f.debug_struct("DisplayHandleWrapper")
+            .finish_non_exhaustive()
     }
 }
 
 impl winit::raw_window_handle::HasDisplayHandle for DisplayHandleWrapper {
     fn display_handle(
         &self,
-    ) -> Result<winit::raw_window_handle::DisplayHandle<'_>, winit::raw_window_handle::HandleError> {
+    ) -> Result<winit::raw_window_handle::DisplayHandle<'_>, winit::raw_window_handle::HandleError>
+    {
         self.window.display_handle()
     }
 }
