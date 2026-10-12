@@ -122,7 +122,10 @@ public final class Bridge {
     }
 
     /** Tab held: the player list overlay is shown while the key is down (vanilla's tab list). */
-    public void setTabListVisible(boolean visible) { Proxies.hud.getTabList().setVisible(visible); }
+    public void setTabListVisible(boolean visible) {
+        Proxies.options.keyPlayerList.setDown(visible);
+        Proxies.hud.getTabList().setVisible(visible);
+    }
 
     /**
      * The connection was lost or the server kicked us: vanilla's disconnect screen with the reason (a text component

@@ -1116,4 +1116,89 @@ mod tests {
         assert!(t.iter().any(|x| x.contains("Bye from the test")), "{t:?}");
         c.ui.gui().close_screen();
     }
+
+    /// The HUD's server-driven parts, all vanilla: effect icons, a boss bar, the sidebar
+    /// scoreboard, title and subtitle, the action bar, the player list while Tab is held.
+    #[test]
+    #[ignore = "needs cache/ and a test server (HASTE_TEST_SERVER, default 127.0.0.1:25614) where 'haste' is an operator; run with --test-threads=1"]
+    fn hud_elements_from_the_server() {
+        let mut c = TestClient::join();
+        c.spawn();
+        for cmd in [
+            "effect give @s minecraft:speed 60 1",
+            "bossbar add haste:test \"Test Boss\"",
+            "bossbar set haste:test players haste",
+            "scoreboard objectives add hastetest dummy \"Haste Sidebar\"",
+            "scoreboard objectives setdisplay sidebar hastetest",
+            "scoreboard players set haste hastetest 42",
+            "title @s times 10 100 10",
+            "title @s subtitle \"Small subtitle\"",
+            "title @s title \"Big Title\"",
+            "title @s actionbar \"Action!\"",
+        ] {
+            c.command(cmd);
+        }
+        c.run(20);
+        c.ui.key(keys::TAB, keys::keycode(keys::TAB), 0, true);
+        let f = c.frame((0.0, 0.0));
+        c.ui.key(keys::TAB, keys::keycode(keys::TAB), 0, false);
+        for cmd in [
+            "effect clear @s",
+            "bossbar remove haste:test",
+            "scoreboard objectives remove hastetest",
+            "title @s clear",
+        ] {
+            c.command(cmd);
+        }
+        c.run(5);
+        for cmd in &f.commands {
+            eprintln!("  {cmd:?}");
+        }
+        let t = texts(&f);
+        for want in [
+            "Test Boss",
+            "Haste Sidebar",
+            "42",
+            "Big Title",
+            "Small subtitle",
+            "Action!",
+        ] {
+            assert!(
+                t.iter().any(|x| x.contains(want)),
+                "missing {want:?} in {t:?}"
+            );
+        }
+        // the player list shows our name (and the sidebar its score holder)
+        assert!(
+            t.iter().filter(|x| x.as_str() == "haste").count() >= 2,
+            "{t:?}"
+        );
+        let sprites: Vec<String> = f
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                GuiCommand::Sprite { sprite, .. } | GuiCommand::SpriteRegion { sprite, .. } => {
+                    Some(sprite.to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            sprites.iter().any(|s| s.contains("effect_background")),
+            "effect icon background: {sprites:?}"
+        );
+        assert!(
+            sprites.iter().any(|s| s.contains("speed")),
+            "speed effect icon: {sprites:?}"
+        );
+        assert!(
+            sprites.iter().any(|s| s.contains("boss_bar")),
+            "boss bar: {sprites:?}"
+        );
+        let unimpl = c.ui.host.unimplemented().unwrap();
+        eprintln!("Unimplemented: {unimpl:#?}");
+        assert_no_refusals(&c.ui.host);
+        assert!(c.kicked.is_none(), "kicked: {:?}", c.kicked);
+        c.disconnect();
+    }
 }
