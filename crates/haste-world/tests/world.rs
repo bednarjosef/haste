@@ -147,10 +147,10 @@ fn light_apply_and_read() {
     // -1..=n; section 8 (y=64..79) is wire idx 9).
     let mut sky = vec![0u8; 2048];
     // byte i holds nibbles 2i (low) and 2i+1 (high); make them distinct per index
-    for i in 0..2048 {
+    for (i, byte) in sky.iter_mut().enumerate() {
         let lo = ((i * 2) % 16) as u8;
         let hi = ((i * 2 + 1) % 16) as u8;
-        sky[i] = (hi << 4) | lo;
+        *byte = (hi << 4) | lo;
     }
     let mut block = vec![0u8; 2048];
     block[0] = 0x12; // nibble x0y0z0 = 2, x1y0z0 = 1
