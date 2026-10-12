@@ -12,16 +12,20 @@ use crate::palette::{
 
 /// Decodes a raw `level_chunk_with_light` section payload into per-section containers.
 /// `section_count` is the dimension's; sections are ordered from the dimension's lowest.
-/// `state_bits` = ceil(log2(global block state count)) for direct-encoded containers.
+/// `state_bits` = ceil(log2(global block state count)) for direct-encoded containers,
+/// `biome_bits` = ceil(log2(biome registry size)).
 pub fn decode_sections(
     bytes: &[u8],
     section_count: usize,
     state_bits: u8,
+    biome_bits: u8,
 ) -> Result<Vec<crate::palette::DecodedSection<BlockStateId>>, crate::palette::PaletteError> {
-    BlockContainer::decode_sections(bytes, section_count, state_bits)
+    BlockContainer::decode_sections(bytes, section_count, state_bits, biome_bits)
 }
 
-/// Encodes one section payload: block count, blocks container, biomes container.
+/// Encodes one section payload: block count (i16), fluid count (i16, written as 0: the
+/// synthetic encoder does not know which states are fluids), blocks container, biomes
+/// container.
 pub fn encode_section(
     w: &mut WireWriter,
     block_count: i16,
@@ -29,7 +33,8 @@ pub fn encode_section(
     biomes: &BiomeContainer,
     direct_bits: u8,
 ) {
-    w.varint(block_count as u32);
+    w.i16_be(block_count);
+    w.i16_be(0);
     blocks.encode(w, direct_bits);
     biomes.encode(w, 3);
 }
