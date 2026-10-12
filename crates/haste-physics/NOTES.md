@@ -125,3 +125,18 @@ collide walking ~450 ns, terminal-velocity fall ~380 ns, collide_with_step ~480 
 (no allocation after the first call); this was ~2x faster than scanning the world per axis
 (4x when blocked by a wall). Above 96 boxes it falls back to the per-axis scan (same results,
 unit test `list_and_world_paths_agree`).
+
+## Trace replay (`src/replay.rs`, `tests/replay.rs`)
+
+`replay(trace, attrs, world, shapes, blocks, tolerance, alignment) -> ReplayReport`: initial state
+from the first tick (pos, velocity, on_ground, pose, look angles), then `tick` per recorded input;
+reports the first tick whose position error exceeds the tolerance (default 1e-6), the maximum
+position error, the maximum velocity error and on_ground/pose mismatch counts.
+`cargo test -p haste-physics --test replay -- --ignored --nocapture` replays every
+`cache/oracle/26.3/traces/*.json`; with no traces it prints that the harness is ready and passes.
+Assumptions about the traces, all to confirm with WS8: the world is a default superflat
+(bedrock, dirt, dirt, grass; surface y = -60); `ticks[i].input` produced `ticks[i].pos`
+(`InputAlignment::SameTick`; on divergence the test also reports `PreviousTick`); look angles come
+from `input.yaw`/`input.pitch` or a per-tick `yaw`/`pitch` if present, else the `player` header
+(FORMATS.md v1 has no per-tick look angles, which a turning trace needs); `strafe > 0` is left.
+The parser is our own (lenient serde structs) so this crate does not depend on haste-testkit.

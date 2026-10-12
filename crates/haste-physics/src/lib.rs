@@ -13,6 +13,7 @@ pub mod flying;
 pub mod fluids;
 pub mod movement;
 pub mod oracle;
+pub mod replay;
 pub mod testing;
 mod trig;
 
