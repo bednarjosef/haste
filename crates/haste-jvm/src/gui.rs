@@ -32,6 +32,8 @@ pub enum ScreenKind {
     Pause,
     /// `net.minecraft.client.gui.screens.inventory.InventoryScreen`.
     Inventory,
+    /// `ChatScreen` opened with "/" typed (the command key).
+    Command,
 }
 
 impl ScreenKind {
@@ -40,6 +42,7 @@ impl ScreenKind {
             ScreenKind::Chat => 0,
             ScreenKind::Pause => 1,
             ScreenKind::Inventory => 2,
+            ScreenKind::Command => 3,
         }
     }
 }
@@ -443,6 +446,61 @@ impl GuiPipeline {
         }
     }
 
+    /// The server's enabled feature flags (configuration phase `update_enabled_features`).
+    pub fn set_features(&self, ids: &[String]) -> anyhow::Result<()> {
+        self.with_bridge(|env, bridge| {
+            let arr = JObjectArray::<JString>::new(env, ids.len(), JString::null())?;
+            for (i, id) in ids.iter().enumerate() {
+                let s = JString::from_str(env, id)?;
+                arr.set_element(env, i, &s)?;
+            }
+            env.call_method(
+                bridge,
+                jni_str!("setFeatures"),
+                jni_sig!("([Ljava/lang/String;)V"),
+                &[(&arr).into()],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// Tab held or released: vanilla's player list overlay is shown while it is down.
+    pub fn set_tab_list_visible(&self, visible: bool) {
+        if let Err(e) = self.with_bridge(|env, bridge| {
+            env.call_method(
+                bridge,
+                jni_str!("setTabListVisible"),
+                jni_sig!("(Z)V"),
+                &[jni::objects::JValue::Bool(visible)],
+            )?;
+            Ok(())
+        }) {
+            self.failed("set_tab_list_visible", e);
+        }
+    }
+
+    /// The connection ended: vanilla's disconnect screen with the reason.
+    pub fn disconnected(&self, reason: &haste_core::Component) -> anyhow::Result<()> {
+        self.disconnected_json(&serde_json::to_string(reason)?)
+    }
+
+    /// [`Self::disconnected`] with the reason as a text component in its JSON form, e.g.
+    /// `{"text":"Kicked"}` or `{"translate":"disconnect.timeout"}`.
+    pub fn disconnected_json(&self, reason_json: &str) -> anyhow::Result<()> {
+        self.with_bridge(|env, bridge| {
+            let r = JString::from_str(env, reason_json)?;
+            env.call_method(
+                bridge,
+                jni_str!("disconnected"),
+                jni_sig!("(Ljava/lang/String;)V"),
+                &[(&r).into()],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     /// F1: hides or shows the HUD (vanilla `Hud.toggle`).
     pub fn toggle_hud(&self) {
         if let Err(e) = self.call_void("toggleHud") {
@@ -464,6 +522,16 @@ impl GuiPipeline {
             env.call_method(bridge, &name, jni_sig!("()V"), &[])?;
             Ok(())
         })
+    }
+
+    /// The chat log as plain text, oldest first (vanilla's `ChatComponent`: what the chat shows,
+    /// after decoration such as "<name> message").
+    pub fn chat_history(&self) -> anyhow::Result<Vec<String>> {
+        Ok(self
+            .call_string("chatHistory")?
+            .lines()
+            .map(str::to_owned)
+            .collect())
     }
 
     /// Every registry Java sees with its size (built-in from vanilla's bootstrap, plus the

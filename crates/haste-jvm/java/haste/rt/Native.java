@@ -36,6 +36,8 @@ public final class Native {
     public static native void inventorySlot(int slot, byte[] stack);
     /** A serverbound play packet vanilla code sent: VarInt id + body, vanilla's encoding. */
     public static native void sendPacket(byte[] idAndBody);
+    /** Vanilla code asked to leave the server (pause screen "Disconnect", death screen "Title Screen"). */
+    public static native void requestDisconnect();
     /** Called when a screen sends a chat message or command (Rust signs and sends it). */
     public static native void sendChat(String message, boolean command);
 }

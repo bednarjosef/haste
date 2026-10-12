@@ -31,6 +31,10 @@ public final class ConnectionImpl {
     static final net.minecraft.client.multiplayer.chat.ChatLog CHAT_LOG = new net.minecraft.client.multiplayer.chat.ChatLog(1024);
     public static net.minecraft.client.multiplayer.chat.ChatLog chatLog(net.minecraft.client.multiplayer.chat.report.ReportingContext r) { return CHAT_LOG; }
 
+    public static net.minecraft.world.flag.FeatureFlagSet enabledFeatures(ClientPacketListener c) { return LevelImpl.features; }
+    /** Players seen this session (social interactions screen): not tracked yet. */
+    public static java.util.Map<java.util.UUID, net.minecraft.client.multiplayer.PlayerInfo> getSeenPlayers(ClientPacketListener c) { return java.util.Map.of(); }
+
     /** Waypoints (the locator bar) are not forwarded yet: vanilla's manager, empty. */
     static final net.minecraft.client.waypoints.ClientWaypointManager WAYPOINTS = new net.minecraft.client.waypoints.ClientWaypointManager();
     public static net.minecraft.client.waypoints.ClientWaypointManager getWaypointManager(ClientPacketListener c) { return WAYPOINTS; }

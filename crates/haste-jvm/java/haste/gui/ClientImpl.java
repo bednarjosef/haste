@@ -90,6 +90,11 @@ public final class ClientImpl {
     /** No player is blocked or restricted (Haste has no social/block list yet). */
     public static boolean isBlocked(Minecraft m, java.util.UUID id) { return false; }
     public static boolean isFriendOnlyRestricted(Minecraft m, java.util.UUID id) { return false; }
+    /** Leaving the server (pause screen "Disconnect", death screen "Title Screen"): Rust disconnects. */
+    public static void disconnectFromWorld(Minecraft m, net.minecraft.network.chat.Component reason) { haste.rt.Native.requestDisconnect(); }
+    public static void disconnectWithSavingScreen(Minecraft m) { haste.rt.Native.requestDisconnect(); }
+    public static boolean allowsMultiplayer(Minecraft m) { return true; }
+
     /** Reduced debug info (the server's game rule, entity events 22/23): not forwarded yet, full info. */
     public static boolean showOnlyReducedInfo(Minecraft m) { return false; }
     /** Vanilla's tutorial (hints and toasts for new players); Haste starts it at the last step (no hints). */

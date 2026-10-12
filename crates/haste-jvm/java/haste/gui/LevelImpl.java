@@ -17,6 +17,11 @@ public final class LevelImpl {
     public static net.minecraft.world.scores.Scoreboard getScoreboard(Level l) { return Handlers.SCOREBOARD; }
     public static net.minecraft.world.scores.Scoreboard getScoreboard(net.minecraft.client.multiplayer.ClientLevel l) { return Handlers.SCOREBOARD; }
 
+    public static void disconnect(net.minecraft.client.multiplayer.ClientLevel l, net.minecraft.network.chat.Component reason) { haste.rt.Native.requestDisconnect(); }
+
+    /** The server's enabled feature flags (from the configuration phase; vanilla's defaults until then). */
+    static net.minecraft.world.flag.FeatureFlagSet features = net.minecraft.world.flag.FeatureFlags.DEFAULT_FLAGS;
+
     /** World age in ticks (Rust's set_time state). */
     public static long getGameTime(Level l) { return (long) Mirror.D[Mirror.D_GAME_TIME]; }
     public static long getGameTime(net.minecraft.client.multiplayer.ClientLevel l) { return getGameTime((Level) l); }
@@ -61,7 +66,6 @@ public final class LevelImpl {
     /** Sky darkening (night, weather) is not mirrored yet: daylight. */
     public static int getSkyDarken(Level l) { return 0; }
 
-    /** Vanilla's default feature flags (the server's enabled set is not forwarded yet). */
-    public static FeatureFlagSet enabledFeatures(Level l) { return net.minecraft.world.flag.FeatureFlags.DEFAULT_FLAGS; }
+    public static FeatureFlagSet enabledFeatures(Level l) { return features; }
     public static FeatureFlagSet enabledFeatures(net.minecraft.client.multiplayer.ClientLevel l) { return enabledFeatures((Level) l); }
 }

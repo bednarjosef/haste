@@ -64,6 +64,11 @@ pub(crate) fn register(env: &mut Env) -> Result<()> {
                 state::mirror as *mut _,
             ),
             NativeMethod::from_raw_parts(
+                jni_str!("requestDisconnect"),
+                jni_str!("()V"),
+                state::request_disconnect as *mut _,
+            ),
+            NativeMethod::from_raw_parts(
                 jni_str!("sendPacket"),
                 jni_str!("([B)V"),
                 state::send_packet as *mut _,

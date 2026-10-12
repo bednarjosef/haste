@@ -86,3 +86,7 @@ pub(crate) extern "system" fn mirror<'l>(
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
+
+pub(crate) extern "system" fn request_disconnect<'l>(_env: EnvUnowned<'l>, _c: JClass<'l>) {
+    with_state(|s| s.disconnect_requested = true);
+}

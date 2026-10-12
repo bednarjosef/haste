@@ -15,7 +15,7 @@ import net.minecraft.client.input.MouseButtonInfo;
  * method runs vanilla screen code with the 26.3 signatures.
  */
 public final class Bridge {
-    public static final int CHAT = 0, PAUSE = 1, INVENTORY = 2;
+    public static final int CHAT = 0, PAUSE = 1, INVENTORY = 2, COMMAND = 3;
 
     private int pressedButton = -1;
     private double lastX, lastY;
@@ -44,6 +44,7 @@ public final class Bridge {
     public void open(int kind) {
         Screen s = switch (kind) {
             case CHAT -> new ChatScreen("", false);
+            case COMMAND -> new ChatScreen("/", false);
             case PAUSE -> new PauseScreen(true);
             case INVENTORY -> new InventoryScreen(Proxies.player);
             default -> throw new IllegalArgumentException("screen kind " + kind);
@@ -106,6 +107,28 @@ public final class Bridge {
 
     /** The joined world's dimension type (its id in the synchronised dimension_type registry). */
     public void setDimensionType(int id) { LevelImpl.dimensionTypeId = id; }
+
+    /** The server's enabled feature flags (configuration phase). */
+    public void setFeatures(String[] ids) {
+        java.util.List<net.minecraft.resources.Identifier> l = new java.util.ArrayList<>();
+        for (String id : ids) l.add(net.minecraft.resources.Identifier.parse(id));
+        LevelImpl.features = net.minecraft.world.flag.FeatureFlags.REGISTRY.fromNames(l, id -> {});
+    }
+
+    /** Tab held: the player list overlay is shown while the key is down (vanilla's tab list). */
+    public void setTabListVisible(boolean visible) { Proxies.hud.getTabList().setVisible(visible); }
+
+    /**
+     * The connection was lost or the server kicked us: vanilla's disconnect screen with the reason (a text component
+     * in its JSON form).
+     */
+    public void disconnected(String reasonJson) {
+        net.minecraft.network.chat.Component reason = net.minecraft.network.chat.ComponentSerialization.CODEC
+            .parse(com.mojang.serialization.JsonOps.INSTANCE, com.google.gson.JsonParser.parseString(reasonJson))
+            .result().orElse(net.minecraft.network.chat.Component.literal(reasonJson));
+        Proxies.gui.setScreen(new net.minecraft.client.gui.screens.DisconnectedScreen(null,
+            net.minecraft.network.chat.Component.translatable("disconnect.lost"), reason));
+    }
 
     /** F1: hides or shows the HUD (vanilla's toggle). */
     public void toggleHud() { Proxies.hud.toggle(); }
@@ -191,6 +214,22 @@ public final class Bridge {
     public void setInventorySlot(int slot, byte[] stack) {
         Proxies.inventory.setItem(slot, InventorySync.decode(stack));
         InventorySync.sync();
+    }
+
+    /** The chat log as plain text, oldest first (vanilla's ChatComponent; headless clients and tests). */
+    @SuppressWarnings("unchecked")
+    public String chatHistory() {
+        try {
+            var f = java.lang.invoke.MethodHandles.privateLookupIn(net.minecraft.client.gui.components.ChatComponent.class,
+                java.lang.invoke.MethodHandles.lookup()).findVarHandle(net.minecraft.client.gui.components.ChatComponent.class,
+                "allMessages", java.util.List.class);
+            var all = (java.util.List<net.minecraft.client.multiplayer.chat.GuiMessage>) f.get(Proxies.hud.getChat());
+            StringBuilder sb = new StringBuilder();
+            for (int i = all.size() - 1; i >= 0; i--) sb.append(all.get(i).content().getString()).append('\n');
+            return sb.toString();
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     /** "registry=size" lines of every registry Java sees (tests). */

@@ -214,6 +214,9 @@ pub struct GameState {
     pub game_time: i64,
     /// Time of day in ticks (`set_time`).
     pub day_time: i64,
+    /// Vanilla code asked to leave the server (pause screen "Disconnect"); the client disconnects
+    /// and clears this.
+    pub disconnect_requested: bool,
     /// Serverbound play packets vanilla code sent (VarInt id + body, vanilla's encoding), oldest first.
     pub outgoing: Vec<Vec<u8>>,
 }
@@ -234,6 +237,7 @@ impl Default for GameState {
             game_time: 0,
             day_time: 0,
             outgoing: Vec::new(),
+            disconnect_requested: false,
         }
     }
 }
