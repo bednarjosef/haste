@@ -23,6 +23,8 @@ public final class RecorderIO {
 
     /** cache/oracle/26.3 — same layout the server dumps use. Resolved from the game dir. */
     public static Path oracleDir() {
+        String out = System.getProperty("haste.oracle.out");
+        if (out != null && !out.isEmpty()) return Path.of(out);
         Path runDir = Minecraft.getInstance().gameDirectory.toPath().toAbsolutePath();
         // runDir is .minecraft (or the server dir); the shared cache is its sibling "cache",
         // mirroring the repo layout. Fallback: an "oracle" dir next to the run dir.
@@ -125,35 +127,34 @@ public final class RecorderIO {
     // ---------------------------------------------------------------- screenshots
 
     /**
-     * Captures the main render target on the next frame (GL thread) with the HUD hidden
-     * ({@link HasteHooks#hideGui} makes the Gui mixin skip it), writes
-     * {@code screenshots/<name>.png} plus the camera JSON alongside.
+     * Captures the main render target as it is now (the last completed frame, so HUD/screen
+     * state must be set a few ticks before) into {@code screenshots/<name>.png} plus the camera
+     * JSON. {@code done} receives null on success or an error message; it runs on the render
+     * thread once the GPU readback has finished.
      */
-    static void captureScreenshot(String name) {
+    static void captureScreenshot(String name, java.util.function.Consumer<String> done) {
         Minecraft mc = Minecraft.getInstance();
-        mc.execute(() -> {
-            try {
-                HasteHooks.hideGui = true;
-                var target = mc.gameRenderer.mainRenderTarget();
-                net.minecraft.client.Screenshot.takeScreenshot(target, 1, image -> {
-                    try {
-                        Path png = screenshotsDir().resolve(name + ".png");
-                        Files.createDirectories(png.getParent());
-                        image.writeToFile(png);
-                        writeScreenshotJson(name, mc, image.getWidth(), image.getHeight());
-                        chat(mc, "haste: screenshot " + png);
-                    } catch (IOException e) {
-                        LOGGER.error("writing screenshot", e);
-                    } finally {
-                        image.close();
-                        HasteHooks.hideGui = false;
-                    }
-                });
-            } catch (Throwable t) {
-                HasteHooks.hideGui = false;
-                LOGGER.error("screenshot failed", t);
-            }
-        });
+        try {
+            var target = mc.gameRenderer.mainRenderTarget();
+            net.minecraft.client.Screenshot.takeScreenshot(target, 1, image -> {
+                try {
+                    Path png = screenshotsDir().resolve(name + ".png");
+                    Files.createDirectories(png.getParent());
+                    image.writeToFile(png);
+                    writeScreenshotJson(name, mc, image.getWidth(), image.getHeight());
+                    LOGGER.info("haste-recorder: screenshot {}", png);
+                    done.accept(null);
+                } catch (IOException e) {
+                    LOGGER.error("writing screenshot", e);
+                    done.accept("writing screenshot: " + e);
+                } finally {
+                    image.close();
+                }
+            });
+        } catch (Throwable t) {
+            LOGGER.error("screenshot failed", t);
+            done.accept("screenshot failed: " + t);
+        }
     }
 
     private static void writeScreenshotJson(String name, Minecraft mc, int width, int height) throws IOException {
@@ -172,7 +173,9 @@ public final class RecorderIO {
         var level = mc.level;
         root.addProperty("time_of_day", level != null ? level.getOverworldClockTime() : 0);
         root.addProperty("render_distance", mc.options.renderDistance().get());
-        root.addProperty("gui_hidden", true);
+        root.addProperty("gui_hidden", mc.gui.hud.isHidden() && mc.gui.screen() == null);
+        root.addProperty("gui_scale", mc.getWindow().getGuiScale());
+        root.addProperty("screen", mc.gui.screen() == null ? "none" : mc.gui.screen().getClass().getSimpleName());
         root.addProperty("width", width);
         root.addProperty("height", height);
         Path json = screenshotsDir().resolve(name + ".json");

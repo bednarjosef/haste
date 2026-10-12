@@ -25,7 +25,16 @@ public final class RecorderState {
     private static TraceRecording activeTrace = null;
     private static BenchRecording activeBench = null;
 
+    /** The unattended scenario (-Dhaste.scenario), if any. */
+    static Scenario scenario = null;
+
+    /** True while a trace recording runs (the scenario's record step waits on it). */
+    public static boolean recording() {
+        return activeTrace != null;
+    }
+
     public static void tick(Minecraft mc) {
+        if (scenario != null) scenario.tick(mc);
         if (pendingAction != null) {
             var action = pendingAction;
             pendingAction = null;
@@ -71,7 +80,7 @@ public final class RecorderState {
             RecorderIO.chat(mc, "haste: join a world first");
             return;
         }
-        RecorderIO.captureScreenshot(name);
+        RecorderIO.captureScreenshot(name, err -> {});
     }
 
     public static void startBench(String name) {

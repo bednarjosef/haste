@@ -3,7 +3,6 @@
   "package": "haste.recorder.mixin",
   "compatibilityLevel": "JAVA_25",
   "mixins": ["MinecraftServerMixin"],
-  "client": ["haste.recorder.client.mixin.GuiMixin", "haste.recorder.client.mixin.MinecraftMixin"],
   "server": [],
   "injectors": { "defaultRequire": 1 },
   "overwrites": { "requireAnnotations": true }
