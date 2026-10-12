@@ -2,6 +2,9 @@
 
 Newest at the top. One entry per decision, with the why; link the brief or report it came from.
 
+- **2026-10-12 Vulkan on the dev box.** No system ICD (`vulkan-radeon` not installed, no sudo). A
+  project-local RADV built by the fastcraft project works via `VK_DRIVER_FILES` (see `scripts/env.sh`).
+
 - **2026-10-12 Runtime data, not build-time codegen.** Block states, registries and packet ids are
   loaded at startup from the data-generator reports in the cache (`haste-data`, `PacketIds::load`).
   Build-time codegen from gitignored data would make every build depend on the cache and every

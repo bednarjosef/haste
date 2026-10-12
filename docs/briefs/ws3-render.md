@@ -11,9 +11,10 @@ REUSE_DECISION
 
 ## Backend
 wgpu 30 (workspace dependency); winit 0.30 for the window. This machine: AMD Radeon 860M, Mesa
-26.2, Wayland session (winit handles it). NOTE: no Vulkan ICD is installed here yet (`vulkan-radeon`
-is missing; the lead has asked the user). Request the adapter with `wgpu::Backends::all()` so the
-GL (EGL) backend works meanwhile, log which backend was chosen, and keep all code backend-neutral. Headless/offscreen rendering must work too
+26.2, Wayland session (winit handles it). NOTE: no system Vulkan ICD is installed here, but a project-local RADV
+exists: `source scripts/env.sh` exports `VK_DRIVER_FILES=${HASTE_VULKAN_ICD:-}`
+(set it in every shell where you run anything graphical, including tests). Request the adapter
+with `wgpu::Backends::all()`, prefer Vulkan, log which backend/adapter was chosen, keep code backend-neutral. Headless/offscreen rendering must work too
 (WS8's screenshot tests): `Renderer` must be constructible without a window (offscreen surface
 target) and able to read back a frame to an `RgbaImage`: provide `Renderer::new_offscreen(w, h, ..)`
 and `Renderer::read_back(&mut self) -> RgbaImage` (tell the lead; it goes into INTERFACES.md).
