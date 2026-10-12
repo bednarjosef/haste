@@ -15,14 +15,56 @@ pub struct Gpu {
     pub device: Arc<wgpu::Device>,
     pub queue: Arc<wgpu::Queue>,
     pub adapter: Arc<wgpu::Adapter>,
+    /// Kept alive for surface creation (windowed mode).
+    #[allow(dead_code)]
+    pub instance: Arc<wgpu::Instance>,
+}
+
+/// A display handle wgpu can hold: `HasDisplayHandle + Debug + Send + Sync`
+/// (wgpu's `WgpuHasDisplayHandle` blanket-implements for this).
+pub trait ShareableDisplayHandle:
+    winit::raw_window_handle::HasDisplayHandle + core::fmt::Debug + Send + Sync + 'static
+{
+}
+
+impl<T: winit::raw_window_handle::HasDisplayHandle + core::fmt::Debug + Send + Sync + 'static>
+    ShareableDisplayHandle for T
+{
 }
 
 impl Gpu {
     /// Enumerate adapters (all backends), prefer Vulkan, log the choice.
-    pub fn new() -> Result<Gpu> {
-        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+    /// `display`: the window's display handle when a surface will be created
+    /// (wgpu 30 requires it in the instance for `create_surface`).
+    pub fn new(display: Option<Box<dyn ShareableDisplayHandle>>) -> Result<Gpu> {
+        // wgpu's WgpuHasDisplayHandle blanket-implements for any
+        // HasDisplayHandle + Debug + Send + Sync; our wrapper satisfies it.
+        let mut descriptor = match display {
+            Some(display) => {
+                // Erase to wgpu's own trait object via the blanket impl.
+                struct WgpuHandle(Box<dyn ShareableDisplayHandle>);
+                impl core::fmt::Debug for WgpuHandle {
+                    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        self.0.fmt(f)
+                    }
+                }
+                impl winit::raw_window_handle::HasDisplayHandle for WgpuHandle {
+                    fn display_handle(
+                        &self,
+                    ) -> Result<
+                        winit::raw_window_handle::DisplayHandle<'_>,
+                        winit::raw_window_handle::HandleError,
+                    > {
+                        self.0.display_handle()
+                    }
+                }
+                wgpu::InstanceDescriptor::new_with_display_handle(Box::new(WgpuHandle(display)))
+            }
+            None => wgpu::InstanceDescriptor::new_without_display_handle(),
+        };
         descriptor.backends = wgpu::Backends::all();
         let instance = wgpu::Instance::new(descriptor);
+        let instance = std::sync::Arc::new(instance);
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
@@ -51,6 +93,7 @@ impl Gpu {
             device: Arc::new(device),
             queue: Arc::new(queue),
             adapter: Arc::new(adapter),
+            instance,
         })
     }
 }

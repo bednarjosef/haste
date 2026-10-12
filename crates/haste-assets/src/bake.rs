@@ -1,7 +1,7 @@
 // This file is derived from Pomme (https://github.com/PommeMC/Client),
 // pomme-client/src/world/block/model.rs (bake_resolved_model), reused under
 // GPL-3.0 and reworked for Haste: bakes per BlockStateId against a block-state
-// source (haste-data's BlockStates implements `BlockStatesSource`), atlas UV
+// source (haste-data's BlockStates implements BlockStateTable), atlas UV
 // assignment, and a render-layer heuristic (26.3 has no render_type field in
 // block models; see NOTES.md). See THIRD_PARTY.md.
 
@@ -29,23 +29,14 @@ pub enum RenderLayer {
     Translucent,
 }
 
-/// The block-state queries baking needs. `haste_data::BlockStates` (WS2) is the
-/// production implementation; `BlocksJsonStates` below reads blocks.json directly
-/// for tests and until haste-data lands.
-pub trait BlockStatesSource {
-    fn len(&self) -> usize;
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-    fn block_of(&self, s: BlockStateId) -> Identifier;
-    fn properties(&self, s: BlockStateId) -> Vec<(String, String)>;
-}
+/// `datagen/26.3/reports/blocks.json` as a
+/// `haste_core::view::BlockStateTable` (same shape as haste-data's loader;
+/// independent of the haste-data crate for tests and until it lands).
+/// (block name, properties, parsed id), indexed by state id.
+type JsonState = (String, Vec<(String, String)>, Option<Identifier>);
 
-/// `datagen/26.3/reports/blocks.json` as a [BlockStatesSource] (same shape as
-/// haste-data's loader; independent of the haste-data crate).
 pub struct BlocksJsonStates {
-    /// State id -> (block name, properties).
-    states: Vec<(String, Vec<(String, String)>)>,
+    states: Vec<JsonState>,
 }
 
 impl BlocksJsonStates {
@@ -53,7 +44,7 @@ impl BlocksJsonStates {
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let blocks: HashMap<String, BlocksJsonBlock> =
             serde_json::from_slice(&bytes).with_context(|| "parsing blocks.json")?;
-        let mut states: Vec<(String, Vec<(String, String)>)> = Vec::new();
+        let mut states: Vec<JsonState> = Vec::new();
         let mut by_id: Vec<StateEntry> = Vec::new();
         for (name, block) in &blocks {
             for state in &block.states {
@@ -69,25 +60,37 @@ impl BlocksJsonStates {
         states.reserve(by_id.len());
         for (i, (id, name, props)) in by_id.into_iter().enumerate() {
             debug_assert_eq!(id, i, "blocks.json state ids must be dense");
-            states.push((name, props));
+            let ident = Identifier::parse(&name).ok();
+            states.push((name, props, ident));
         }
         Ok(BlocksJsonStates { states })
     }
 }
 
-impl BlockStatesSource for BlocksJsonStates {
+impl haste_core::view::BlockStateTable for BlocksJsonStates {
     fn len(&self) -> usize {
         self.states.len()
     }
-    fn block_of(&self, s: BlockStateId) -> Identifier {
-        Identifier::parse(&self.states[s.0 as usize].0).expect("blocks.json names are valid ids")
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    fn block_of(&self, s: BlockStateId) -> &Identifier {
+        self.states[s.0 as usize].2.as_ref().expect("blocks.json names are valid ids")
     }
     fn properties(&self, s: BlockStateId) -> Vec<(String, String)> {
         self.states[s.0 as usize].1.clone()
     }
+    fn property_value(&self, s: BlockStateId, name: &str) -> Option<&str> {
+        self.states[s.0 as usize]
+            .1
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
 }
 
 type StateEntry = (usize, String, Vec<(String, String)>);
+
 
 #[derive(Deserialize)]
 struct BlocksJsonBlock {
@@ -119,7 +122,7 @@ impl BakedBlockModels {
     /// vanilla's missing-model handling closely enough for M2.
     pub fn bake(
         assets: &mut Assets,
-        states: &dyn BlockStatesSource,
+        states: &dyn haste_core::view::BlockStateTable,
         atlas: &mut AtlasBuilder,
     ) -> Result<BakedBlockModels> {
         let n = states.len();
@@ -177,7 +180,7 @@ impl BakedBlockModels {
         for state in 0..n as u32 {
             let sid = BlockStateId(state);
             let block = states.block_of(sid);
-            let Ok(def) = assets.blockstate(&block) else {
+            let Ok(def) = assets.blockstate(block) else {
                 continue;
             };
             let props = states.properties(sid);
@@ -204,7 +207,7 @@ impl BakedBlockModels {
             }
             if !state_quads.is_empty() {
                 full_opaque[state as usize] = is_full_opaque(&state_quads, atlas);
-                layer[state as usize] = classify_layer(&state_quads, &block, atlas);
+                layer[state as usize] = classify_layer(&state_quads, block, atlas);
                 quads[state as usize] = state_quads;
             }
         }
@@ -398,6 +401,7 @@ use std::sync::Arc;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use haste_core::view::BlockStateTable as _;
     use crate::atlas::{AtlasRegion, AtlasRegions};
 
     struct TestRegions {

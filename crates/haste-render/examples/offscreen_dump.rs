@@ -36,8 +36,7 @@ fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?),
         )
         .init();
-    let out = std::env::args().nth(1).unwrap_or_else(|| "offscreen.png".into());
-    let jar = haste_core::paths::client_jar();
+        let jar = haste_core::paths::client_jar();
     let mut assets = haste_assets::Assets::open(
         &jar,
         &haste_core::paths::cache_dir().join("assets"),
@@ -47,8 +46,23 @@ fn main() -> anyhow::Result<()> {
         &haste_core::paths::datagen_reports().join("blocks.json"),
     )?;
     let mut renderer = haste_render::Renderer::new_offscreen(640, 480, &mut assets, &states)?;
-    let dirty: Vec<SectionPos> = (-2..=2)
-        .flat_map(|x| (-2..=2).map(move |z| SectionPos::new(x, 0, z)))
+    // args: [--distance N] [--out FILE]
+    let mut distance = 2i32;
+    let mut out = "offscreen.png".to_string();
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--distance" => {
+                distance = args.next().and_then(|v| v.parse().ok()).unwrap_or(2);
+            }
+            "--out" => {
+                out = args.next().unwrap_or_else(|| "offscreen.png".into());
+            }
+            _ => {}
+        }
+    }
+    let dirty: Vec<SectionPos> = (-distance..=distance)
+        .flat_map(|x| (-distance..=distance).map(move |z| SectionPos::new(x, 0, z)))
         .collect();
     renderer.update_world(&FlatWorld, &dirty, ChunkPos::new(0, 0), 4);
     let frame = haste_render::FrameInput {
@@ -69,10 +83,27 @@ fn main() -> anyhow::Result<()> {
         },
         partial_tick: 0.0,
     };
-    let stats = renderer.render(&frame)?;
+    // Warm up the meshing pipeline: keep calling update_world (drain budget
+    // 32/frame) until all sections are uploaded, then measure steady state.
+    let mut stats = renderer.render(&frame)?;
+    for _ in 0..(distance * 2 + 1).pow(2) / 32 + 5 {
+        renderer.update_world(&FlatWorld, &dirty, ChunkPos::new(0, 0), distance);
+        stats = renderer.render(&frame)?;
+    }
+    let mut total_ms = 0.0f32;
+    let n = 100;
+    for _ in 0..n {
+        renderer.update_world(&FlatWorld, &[], ChunkPos::new(0, 0), distance);
+        stats = renderer.render(&frame)?;
+        total_ms += stats.frame_ms;
+    }
     println!(
-        "frame: {:.2} ms, {} drawn / {} sections, {} draw calls",
-        stats.frame_ms, stats.chunk_sections_drawn, stats.chunk_sections_total, stats.draw_calls
+        "steady state over {n} frames: {:.2} ms avg ({:.0} FPS) | drawn {}/{} sections, {} draw calls",
+        total_ms / n as f32,
+        1000.0 * n as f32 / total_ms,
+        stats.chunk_sections_drawn,
+        stats.chunk_sections_total,
+        stats.draw_calls
     );
     let image = renderer.read_back()?;
     image.save(&out)?;

@@ -193,10 +193,14 @@ impl Renderer {
     pub fn new(
         window: Arc<winit::window::Window>,
         assets: &mut haste_assets::Assets,
-        states: &dyn haste_assets::BlockStatesSource,
+        states: &dyn haste_core::view::BlockStateTable,
     ) -> Result<Renderer> {
-        let gpu = Gpu::new()?;
-        let surface = gpu.instance_create_surface(window.clone())?;
+        let display = DisplayHandleWrapper { window: window.clone() };
+        let display: Box<dyn crate::pipeline::ShareableDisplayHandle> = Box::new(display);
+        let gpu = Gpu::new(Some(display))?;
+        let surface = gpu.instance.create_surface(wgpu::SurfaceTarget::Window(Box::new(
+            window.clone(),
+        )))?;
         let cap = surface.get_capabilities(&gpu.adapter);
         let format = cap
             .formats
@@ -221,9 +225,9 @@ impl Renderer {
         w: u32,
         h: u32,
         assets: &mut haste_assets::Assets,
-        states: &dyn haste_assets::BlockStatesSource,
+        states: &dyn haste_core::view::BlockStateTable,
     ) -> Result<Renderer> {
-        let gpu = Gpu::new()?;
+        let gpu = Gpu::new(None)?;
         Self::init(gpu, None, (w.max(1), h.max(1)), assets, states)
     }
 
@@ -233,7 +237,7 @@ impl Renderer {
         surface: Option<(wgpu::Surface<'static>, wgpu::TextureFormat)>,
         size: (u32, u32),
         assets: &mut haste_assets::Assets,
-        states: &dyn haste_assets::BlockStatesSource,
+        states: &dyn haste_core::view::BlockStateTable,
     ) -> Result<Renderer> {
         // Bake + atlas.
         let mut atlas = haste_assets::AtlasBuilder::build(assets, &[], false)?;
@@ -631,11 +635,11 @@ impl Renderer {
         );
 
         // Which target are we drawing into?
+        // The acquired SurfaceTexture must outlive the pass (it presents on drop
+        // after submit); hold it alongside the views.
+        let mut held_surface_texture: Option<wgpu::SurfaceTexture> = None;
         let (color_view, depth_view) = match (&self.offscreen, &self.depth) {
-            (Some(off), _) => (
-                off.color_view.clone(),
-                off.depth_view.clone(),
-            ),
+            (Some(off), _) => (off.color_view.clone(), off.depth_view.clone()),
             (None, Some(d)) => {
                 let surface = self.surface.as_ref().context("no surface")?;
                 let frame_tex = match surface.get_current_texture() {
@@ -651,14 +655,15 @@ impl Renderer {
                         anyhow::bail!("surface lost/outdated; reconfigure needed")
                     }
                 };
-                (
-                    frame_tex.texture.create_view(&Default::default()),
-                    d.clone(),
-                )
+                held_surface_texture = Some(frame_tex);
+                let tex = held_surface_texture.as_ref().unwrap();
+                (tex.texture.create_view(&Default::default()), d.clone())
             }
             _ => anyhow::bail!("no render target"),
         };
-        let _present = self.offscreen.is_none();
+        let present = held_surface_texture.is_some();
+        let _ = present;
+
 
         // Frustum cull. Collect owned draw data so later buffer work does not
         // borrow self.sections.
@@ -775,8 +780,11 @@ impl Renderer {
             }
         }
 
-        // Submit.
+        // Submit, then present (wgpu 30: present lives on the queue).
         self.gpu.queue.submit([encoder.finish()]);
+        if let Some(tex) = held_surface_texture {
+            self.gpu.queue.present(tex);
+        }
 
         Ok(FrameStats {
             frame_ms: started.elapsed().as_secs_f32() * 1000.0,
@@ -853,25 +861,23 @@ impl Renderer {
     }
 }
 
-impl Gpu {
-    fn instance_create_surface(
-        &self,
-        window: Arc<winit::window::Window>,
-    ) -> Result<wgpu::Surface<'static>> {
-        let surface = self.instance_create_surface_inner(window)?;
-        Ok(surface)
-    }
+/// An owned display handle: the window Arc keeps the underlying connection
+/// alive; the handle is fetched from the window on demand.
+struct DisplayHandleWrapper {
+    #[allow(dead_code)]
+    window: Arc<winit::window::Window>,
+}
 
-    fn instance_create_surface_inner(
+impl core::fmt::Debug for DisplayHandleWrapper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DisplayHandleWrapper").finish_non_exhaustive()
+    }
+}
+
+impl winit::raw_window_handle::HasDisplayHandle for DisplayHandleWrapper {
+    fn display_handle(
         &self,
-        window: Arc<winit::window::Window>,
-    ) -> Result<wgpu::Surface<'static>> {
-        // The Gpu struct doesn't hold the Instance; create one here (cheap).
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let surface = instance
-            .create_surface(wgpu::SurfaceTarget::Window(Box::new(window)))
-            .context("creating the window surface")?;
-        // NOTE: the returned surface keeps the instance alive internally.
-        Ok(surface)
+    ) -> Result<winit::raw_window_handle::DisplayHandle<'_>, winit::raw_window_handle::HandleError> {
+        self.window.display_handle()
     }
 }
