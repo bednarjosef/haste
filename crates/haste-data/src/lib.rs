@@ -606,7 +606,8 @@ mod tests {
         let f = d.fluid(water_l("1")).expect("water level 1 has fluid");
         assert!((f.height - 7.0 / 9.0).abs() < 1e-6);
         let f = d.fluid(water_l("8")).expect("water level 8 has fluid");
-        assert!((f.height - 1.0).abs() < 1e-6, "falling water is full");
+        // Falling water is 8/9 high (settled on the vanilla server, NOTES.md).
+        assert!((f.height - 8.0 / 9.0).abs() < 1e-6, "falling water is 8/9");
         assert!(d.fluid(st).is_none()); // stone: no fluid
                                         // light/air/opaque
         let glowstone = d
