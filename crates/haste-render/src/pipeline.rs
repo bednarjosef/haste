@@ -15,6 +15,10 @@ pub struct Gpu {
     pub device: Arc<wgpu::Device>,
     pub queue: Arc<wgpu::Queue>,
     pub adapter: Arc<wgpu::Adapter>,
+    /// Terrain is drawn with one multi-draw-indirect call per layer and arena.
+    pub multi_draw: bool,
+    /// `DownlevelFlags::VIEW_FORMATS` and `SURFACE_VIEW_FORMATS`.
+    pub view_formats: bool,
     /// Kept alive for surface creation (windowed mode).
     #[allow(dead_code)]
     pub instance: Arc<wgpu::Instance>,
@@ -62,7 +66,8 @@ impl Gpu {
             }
             None => wgpu::InstanceDescriptor::new_without_display_handle(),
         };
-        descriptor.backends = wgpu::Backends::all();
+        // `WGPU_BACKEND=gl|vulkan|...` picks a backend (tests the GL fallback on a Vulkan box).
+        descriptor.backends = wgpu::Backends::from_env().unwrap_or(wgpu::Backends::all());
         let instance = wgpu::Instance::new(descriptor);
         let instance = std::sync::Arc::new(instance);
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -80,16 +85,39 @@ impl Gpu {
             info.backend
         );
         if info.backend != wgpu::Backend::Vulkan {
-            tracing::warn!("Vulkan unavailable; falling back to {:?}", info.backend);
+            tracing::warn!(
+                "Vulkan driver not found; install vulkan-radeon (Arch) or set HASTE_VULKAN_ICD. Falling back to {:?}",
+                info.backend
+            );
         }
+        // Multi-draw-indirect terrain needs a non-zero first instance per draw (the section
+        // origin); without it the renderer issues direct draws.
+        let optional = wgpu::Features::INDIRECT_FIRST_INSTANCE;
+        let required_features = adapter.features() & optional;
+        let multi_draw = required_features.contains(wgpu::Features::INDIRECT_FIRST_INSTANCE)
+            && adapter
+                .get_downlevel_capabilities()
+                .flags
+                .contains(wgpu::DownlevelFlags::INDIRECT_EXECUTION);
+        tracing::info!("terrain multi-draw-indirect: {multi_draw}");
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("haste-render"),
-            required_features: wgpu::Features::empty(),
+            required_features,
             required_limits: wgpu::Limits::default(),
             ..Default::default()
         }))
         .context("requesting a wgpu device")?;
+        // A non-sRGB view of the sRGB target lets the GUI blend in sRGB space like vanilla; GL
+        // lacks it (then the GUI writes linear colour into the sRGB target directly).
+        let flags = adapter.get_downlevel_capabilities().flags;
+        let view_formats = flags.contains(wgpu::DownlevelFlags::VIEW_FORMATS)
+            && flags.contains(wgpu::DownlevelFlags::SURFACE_VIEW_FORMATS);
+        if !view_formats {
+            tracing::warn!("no view formats on this backend: GUI blending happens in linear space");
+        }
         Ok(Gpu {
+            view_formats,
+            multi_draw,
             device: Arc::new(device),
             queue: Arc::new(queue),
             adapter: Arc::new(adapter),
