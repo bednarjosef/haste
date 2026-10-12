@@ -223,6 +223,11 @@ impl LocalPlayer {
         self.toggle_flight = true;
     }
 
+    /// Whether the attribute registry ids are known.
+    pub fn has_attribute_ids(&self) -> bool {
+        self.attribute_ids.is_some()
+    }
+
     /// Sets the attribute registry ids (done automatically by [`LocalPlayer::tick`]).
     pub fn set_attribute_ids(&mut self, ids: AttributeIds) {
         self.attribute_ids = Some(ids);

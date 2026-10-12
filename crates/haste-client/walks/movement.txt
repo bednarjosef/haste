@@ -64,6 +64,7 @@ mark slab end
 wait 10
 
 # Fall 20 blocks
+cmd effect give @s minecraft:instant_health 1 10
 cmd tp @s 50.5 -40 50.5 0 0
 wait 5
 mark fall start

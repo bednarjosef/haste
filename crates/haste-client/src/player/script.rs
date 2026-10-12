@@ -9,6 +9,8 @@
 //! - `mark <label>`: prints the player state with the label; no tick.
 use haste_core::input::InputState;
 
+use super::LocalPlayer;
+
 /// One parsed step.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Step {
@@ -158,6 +160,95 @@ impl WalkScript {
                 Step::Hold { ticks, .. } => self.remaining = ticks,
             }
         }
+    }
+}
+
+/// Plays a [`WalkScript`] into a [`LocalPlayer`] in headless mode and prints what happens:
+/// marks, every teleport (the server's corrections show up here), health changes.
+pub struct Runner {
+    script: WalkScript,
+    finished_at: Option<u64>,
+    teleports: u64,
+    health: f32,
+}
+
+impl Runner {
+    /// The script named by `HASTE_WALK_SCRIPT`, if set.
+    pub fn from_env() -> anyhow::Result<Option<Runner>> {
+        let Some(path) = std::env::var_os("HASTE_WALK_SCRIPT") else {
+            return Ok(None);
+        };
+        Ok(Some(Runner {
+            script: WalkScript::parse(&std::fs::read_to_string(&path)?)?,
+            finished_at: None,
+            teleports: 0,
+            health: 20.0,
+        }))
+    }
+
+    /// This tick's input (look angles already corrected by the player's look offset) and the
+    /// command packet to send, if any.
+    pub fn before_tick(
+        &mut self,
+        tick: u64,
+        player: &mut LocalPlayer,
+    ) -> (InputState, Option<haste_protocol::ServerboundPlay>) {
+        if player.health <= 0.0 && player.has_position {
+            // Dead: press "Respawn" (client_command 0, perform respawn) and wait for it.
+            println!("[tick {tick}] dead, respawning");
+            player.health = 20.0;
+            return (
+                InputState::default(),
+                Some(haste_protocol::ServerboundPlay::ClientCommand(
+                    haste_protocol::packets::play::serverbound::ClientCommand { action: 0 },
+                )),
+            );
+        }
+        let Some(t) = self.script.next_tick() else {
+            if self.finished_at.is_none() {
+                println!("[tick {tick}] script finished");
+                self.finished_at = Some(tick);
+            }
+            return (InputState::default(), None);
+        };
+        for m in &t.marks {
+            let s = &player.state;
+            println!(
+                "[tick {tick}] mark {m}: pos ({:.5}, {:.5}, {:.5}) v ({:.4}, {:.4}, {:.4}) ground {} sprint {} sneak {} fly {} water {} health {} fall {:.3}",
+                s.pos.x, s.pos.y, s.pos.z, s.velocity.x, s.velocity.y, s.velocity.z, s.on_ground,
+                s.sprinting, s.sneaking, s.flying, s.in_water, player.health, s.fall_distance,
+            );
+        }
+        if t.toggle_flight {
+            player.toggle_flight();
+        }
+        let (dy, dp) = player.look_offset();
+        let mut input = t.input;
+        input.yaw -= dy;
+        input.pitch -= dp;
+        let cmd = t.command.map(|command| {
+            haste_protocol::ServerboundPlay::ChatCommand(
+                haste_protocol::packets::play::serverbound::ChatCommand { command },
+            )
+        });
+        (input, cmd)
+    }
+
+    /// Prints teleports and health changes; true once the script is over (plus 2 s to settle).
+    pub fn after_tick(&mut self, tick: u64, player: &LocalPlayer) -> bool {
+        if player.health != self.health {
+            self.health = player.health;
+            println!("[tick {tick}] health {}", self.health);
+        }
+        if player.teleports != self.teleports {
+            self.teleports = player.teleports;
+            let p = player.state.pos;
+            println!(
+                "[tick {tick}] teleport #{} to ({:.5}, {:.5}, {:.5})",
+                self.teleports, p.x, p.y, p.z
+            );
+        }
+        self.finished_at.is_some_and(|t| tick >= t + 40)
     }
 }
 
