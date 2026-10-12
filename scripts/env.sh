@@ -8,4 +8,8 @@ export PATH="$JAVA_HOME/bin:$PATH"
 # Machines without a system Vulkan ICD can point HASTE_VULKAN_ICD at a locally built driver's
 # ICD json (set it in your shell profile, never in the repo). Harmless elsewhere.
 LOCAL_ICD=${HASTE_VULKAN_ICD:-}
-[ -n "$LOCAL_ICD" ] && [ -f "$LOCAL_ICD" ] && [ -z "${VK_DRIVER_FILES:-}" ] && export VK_DRIVER_FILES="$LOCAL_ICD"
+if [ -n "$LOCAL_ICD" ] && [ -f "$LOCAL_ICD" ] && [ -z "${VK_DRIVER_FILES:-}" ]; then
+  export VK_DRIVER_FILES="$LOCAL_ICD"
+fi
+# Always succeed, so `source scripts/env.sh && ...` chains keep going.
+true
