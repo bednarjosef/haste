@@ -58,7 +58,7 @@ impl PlayerState {
     }
     /// Current collision box for this state's pose.
     pub fn aabb(&self, attrs: &PlayerAttributes) -> Aabb {
-        Aabb::entity(self.pos, attrs.width as f64, attrs.height_for(self.pose))
+        Aabb::entity(self.pos, attrs.box_width(), attrs.height_for(self.pose))
     }
 }
 

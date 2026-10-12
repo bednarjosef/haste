@@ -98,7 +98,7 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
                     format!("{}={n}", name.as_deref().unwrap_or(&format!("#{id}")))
                 })
                 .collect();
-            let p = driver.player.pos;
+            let p = driver.player.state.pos;
             println!(
                 "[{:>3}s] chunks {:>4} sections {:>5} entities {:>4} pos ({:.2}, {:.2}, {:.2}) packets/s {:>5} unknown [{}]{}",
                 tick / 20,
