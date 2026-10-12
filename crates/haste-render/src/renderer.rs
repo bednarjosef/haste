@@ -856,8 +856,37 @@ impl Renderer {
         for pos in dirty {
             self.mesher.submit(world, *pos);
         }
-        for mesh in self.mesher.drain(32) {
-            self.upload_mesh(mesh);
+        self.upload_finished();
+    }
+
+    /// Like `update_world`, but the mesh workers capture the snapshots themselves from
+    /// `source` (the render thread neither reads the world nor holds its lock).
+    pub fn update_world_from(
+        &mut self,
+        source: &Arc<dyn crate::mesher::SnapshotSource>,
+        dirty: &[SectionPos],
+        _camera_chunk: ChunkPos,
+        view_distance: i32,
+    ) {
+        if view_distance != self.view_distance {
+            self.view_distance = view_distance;
+            self.visible_for = None;
+        }
+        self.mesher.submit_from(source, dirty);
+        self.upload_finished();
+    }
+
+    /// Uploads finished meshes for up to 2 ms.
+    fn upload_finished(&mut self) {
+        let started = std::time::Instant::now();
+        while started.elapsed() < std::time::Duration::from_millis(2) {
+            let batch = self.mesher.drain(16);
+            if batch.is_empty() {
+                break;
+            }
+            for mesh in batch {
+                self.upload_mesh(mesh);
+            }
         }
     }
 

@@ -38,7 +38,8 @@ const LOOK_DEG_PER_PIXEL: f32 = 0.15;
 /// Two jump presses closer than this toggle flight (vanilla: 7 ticks).
 const DOUBLE_TAP: Duration = Duration::from_millis(350);
 /// Wall time the render thread may spend capturing sections for the mesher per frame.
-const CAPTURE_BUDGET: Duration = Duration::from_millis(4);
+/// Sections handed to the mesh workers per frame (they capture the snapshots themselves).
+const SUBMIT_PER_FRAME: usize = 512;
 
 /// A joined game: runtime, game thread and shared state.
 struct Session {
@@ -131,6 +132,22 @@ pub struct WorldFeed {
     last_arrival: Option<Instant>,
     /// Entity instances for this frame (reused).
     instances: Vec<EntityInstance>,
+    /// The shared world as the mesh workers see it (created on the first feed).
+    source: Option<Arc<dyn haste_render::SnapshotSource>>,
+    /// Sections submitted this frame (reused).
+    batch: Vec<SectionPos>,
+}
+
+/// Lets the mesh worker threads capture section snapshots from the shared world under its
+/// read lock, so the render thread never copies blocks.
+struct SharedWorldSource(Arc<Shared>);
+
+impl haste_render::SnapshotSource for SharedWorldSource {
+    fn capture(&self, pos: SectionPos) -> Option<haste_render::MeshSnapshot> {
+        let world = self.0.world.read();
+        world.chunk(pos.chunk())?;
+        Some(haste_render::MeshSnapshot::capture(&*world, pos))
+    }
 }
 
 impl WorldFeed {
@@ -149,11 +166,11 @@ impl WorldFeed {
         self.last_arrival = Some(Instant::now());
     }
 
-    /// Submits queued sections (nearest first) until the capture budget is used, and lets the
-    /// renderer upload finished meshes.
+    /// Hands queued sections (nearest first) to the mesh workers, which capture and mesh them
+    /// off the render thread, and lets the renderer upload finished meshes.
     fn feed(
         &mut self,
-        shared: &Shared,
+        shared: &Arc<Shared>,
         renderer: &mut Renderer,
         camera: SectionPos,
         view_distance: i32,
@@ -168,32 +185,36 @@ impl WorldFeed {
             self.sort_needed = false;
         }
         let camera_chunk = ChunkPos::new(camera.x, camera.z);
-        let world = shared.world.read();
-        let started = Instant::now();
-        let mut submitted_any = false;
-        while started.elapsed() < CAPTURE_BUDGET {
-            let Some(pos) = self.queue.pop() else { break };
-            self.queued.remove(&pos);
-            let non_empty = world
-                .chunk(pos.chunk())
-                .and_then(|c| c.section(pos.y))
-                .is_some_and(|s| !s.is_empty());
-            if !non_empty && !self.meshed.contains(&pos) {
-                continue;
+        let source = self
+            .source
+            .get_or_insert_with(|| Arc::new(SharedWorldSource(shared.clone())))
+            .clone();
+        let mut batch = std::mem::take(&mut self.batch);
+        batch.clear();
+        {
+            let world = shared.world.read();
+            while batch.len() < SUBMIT_PER_FRAME {
+                let Some(pos) = self.queue.pop() else { break };
+                self.queued.remove(&pos);
+                let non_empty = world
+                    .chunk(pos.chunk())
+                    .and_then(|c| c.section(pos.y))
+                    .is_some_and(|s| !s.is_empty());
+                if !non_empty && !self.meshed.contains(&pos) {
+                    continue;
+                }
+                if non_empty {
+                    self.meshed.insert(pos);
+                } else {
+                    self.meshed.remove(&pos);
+                }
+                self.submitted.insert(pos);
+                batch.push(pos);
             }
-            if non_empty {
-                self.meshed.insert(pos);
-            } else {
-                self.meshed.remove(&pos);
-            }
-            self.submitted.insert(pos);
-            renderer.update_world(&*world, &[pos], camera_chunk, view_distance);
-            submitted_any = true;
         }
-        if !submitted_any {
-            // Still upload meshes that finished since the last frame.
-            renderer.update_world(&*world, &[], camera_chunk, view_distance);
-        }
+        // Also uploads meshes that finished since the last frame.
+        renderer.update_world_from(&source, &batch, camera_chunk, view_distance);
+        self.batch = batch;
     }
 
     /// Copies the interpolated entity instances.

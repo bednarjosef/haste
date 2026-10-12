@@ -17,7 +17,7 @@ pub mod vertex;
 
 pub use entity::{default_skin, EntityRenderer, FirstPerson, Nametag};
 pub use gui::{GuiRenderer, GuiStats, ScreenNametag};
-pub use mesher::{mesh_section, MeshSnapshot, Mesher, SectionMesh};
+pub use mesher::{mesh_section, MeshSnapshot, Mesher, SectionMesh, SnapshotSource};
 pub use occlusion::{compute_visible_mask, section_visibility, Face, VisibilitySet};
 pub use pipeline::{upload_atlas, upload_section, Gpu, SectionGpuMesh};
 pub use renderer::{Camera, FrameInput, FrameStats, Renderer, SkyState};
