@@ -17,9 +17,12 @@
 //!    block, sequence) or `interact` (entity) or `use_item` (nothing targeted, held item not empty);
 //! 5. pick block: `pick_item_from_block` / `pick_item_from_entity`.
 //!
-//! Predictions: a block we break is set to air locally at once (`take_world_edits`), and server
-//! block updates for it are held back until the server acknowledges our sequence number
-//! (`block_changed_ack`); then the latest server state is applied.
+//! Predictions: a block we break is set to air locally at once (`take_world_edits`). Until the
+//! server acknowledges our sequence number (`block_changed_ack`) its block updates for that
+//! position are only recorded; on the ack the last state the server told us (or, if it said
+//! nothing, the state from before our prediction) is put back. Observed on the vanilla server:
+//! a break it rejects gets an ack and no block update, so without the revert our world would keep
+//! a block the server still has.
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -99,8 +102,9 @@ pub struct Interaction {
     use_delay: u8,
     /// Last sequence number used for a prediction.
     sequence: i32,
-    /// Predicted blocks: (sequence, pos, latest server state held back).
-    predictions: Vec<(i32, BlockPos, Option<BlockStateId>)>,
+    /// Predicted blocks: (sequence, pos, the server's state: before the prediction, then the
+    /// latest block update held back).
+    predictions: Vec<(i32, BlockPos, BlockStateId)>,
     world_edits: Vec<(BlockPos, BlockStateId)>,
     /// Hotbar 0..=8 and off hand.
     pub hotbar: [ItemStackData; 9],
@@ -110,6 +114,8 @@ pub struct Interaction {
     tools: Option<Arc<ToolTable>>,
     tags: Option<BlockTags>,
     effect_ids: Option<EffectIds>,
+    /// Last blocks we sent actions for (debug logging of their server updates).
+    recent: Vec<BlockPos>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -172,9 +178,19 @@ impl Interaction {
         self.sequence
     }
 
-    fn predict(&mut self, seq: i32, pos: BlockPos, state: BlockStateId) {
-        self.predictions.push((seq, pos, None));
-        self.world_edits.push((pos, state));
+    /// Predicts `pos` becomes `state` (`None`: left to the server); `old` is our current state.
+    fn predict(&mut self, seq: i32, pos: BlockPos, old: BlockStateId, state: Option<BlockStateId>) {
+        // An earlier prediction for the same block already holds the server's state.
+        let server = self
+            .predictions
+            .iter()
+            .rev()
+            .find(|p| p.1 == pos)
+            .map_or(old, |p| p.2);
+        self.predictions.push((seq, pos, server));
+        if let Some(s) = state {
+            self.world_edits.push((pos, s));
+        }
     }
 }
 
@@ -223,9 +239,16 @@ impl LocalPlayer {
     /// A server block update: `true` if it was held back because we predicted that block and the
     /// server has not acknowledged the prediction yet (it is applied on the ack).
     pub fn defer_block_update(&mut self, pos: BlockPos, state: BlockStateId) -> bool {
+        if self.int.recent.contains(&pos) {
+            tracing::debug!(
+                "block update {pos:?} -> {} (predicted: {})",
+                state.0,
+                self.int.predictions.iter().any(|p| p.1 == pos)
+            );
+        }
         let mut held = false;
         for p in self.int.predictions.iter_mut().filter(|p| p.1 == pos) {
-            p.2 = Some(state);
+            p.2 = state;
             held = true;
         }
         held
@@ -236,20 +259,17 @@ impl LocalPlayer {
         let me = self.entity_id.0;
         match p {
             P::BlockChangedAck(a) => {
+                tracing::debug!("block_changed_ack {}", a.sequence);
                 let (done, keep): (Vec<_>, Vec<_>) = self
                     .int
                     .predictions
                     .drain(..)
                     .partition(|p| p.0 <= a.sequence);
                 self.int.predictions = keep;
-                for (_, pos, state) in done {
-                    // The latest server state wins, unless a newer prediction still covers it.
-                    if let Some(s) = state {
-                        if let Some(newer) = self.int.predictions.iter_mut().find(|p| p.1 == pos) {
-                            newer.2 = newer.2.or(Some(s));
-                        } else {
-                            self.int.world_edits.push((pos, s));
-                        }
+                for (_, pos, server) in done {
+                    // The server's state wins, unless a newer prediction still covers the block.
+                    if !self.int.predictions.iter().any(|p| p.1 == pos) {
+                        self.int.world_edits.push((pos, server));
                     }
                 }
             }
@@ -554,7 +574,9 @@ impl LocalPlayer {
         if self.int.destroying.is_some() {
             self.abort_destroy(out);
         }
-        let d = self.mining_params(state, env).progress_per_tick();
+        let params = self.mining_params(state, env);
+        let d = params.progress_per_tick();
+        tracing::debug!("start breaking {:?}: {params:?} -> {d} per tick", h.pos);
         let instant = d >= 1.0;
         self.send_destroy(action::START_DESTROY, h, state, instant, env, out);
         if !instant {
@@ -628,6 +650,18 @@ impl LocalPlayer {
         out: &mut Vec<ServerboundPlay>,
     ) {
         let seq = self.int.next_sequence();
+        if !self.int.recent.contains(&h.pos) {
+            if self.int.recent.len() >= 8 {
+                self.int.recent.remove(0);
+            }
+            self.int.recent.push(h.pos);
+        }
+        tracing::debug!(
+            "player_action {status} {:?} seq {seq} on_ground {} progress {}",
+            h.pos,
+            self.state.on_ground,
+            self.int.progress
+        );
         out.push(ServerboundPlay::PlayerAction(sb::PlayerAction {
             status,
             pos: h.pos,
@@ -637,11 +671,8 @@ impl LocalPlayer {
         if breaks {
             // Predict the block gone; a waterlogged block leaves water, which we leave to the
             // server's update.
-            if env.data.fluid(state).is_none() {
-                self.int.predict(seq, h.pos, BlockStateId::AIR);
-            } else {
-                self.int.predictions.push((seq, h.pos, None));
-            }
+            let to = env.data.fluid(state).is_none().then_some(BlockStateId::AIR);
+            self.int.predict(seq, h.pos, state, to);
         }
     }
 }

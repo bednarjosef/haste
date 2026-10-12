@@ -373,6 +373,12 @@ impl Session {
                 }
             }
             P::BlockDestruction(d) => {
+                tracing::debug!(
+                    "block_destruction {} {:?} stage {}",
+                    d.entity_id,
+                    d.pos,
+                    d.stage
+                );
                 if d.stage <= 9 {
                     self.breaking.insert(d.entity_id, (d.pos, d.stage));
                 } else {

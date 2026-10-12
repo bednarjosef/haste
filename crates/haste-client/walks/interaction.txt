@@ -1,0 +1,92 @@
+# Breaking, placing, attacking and picking against the vanilla server (bot opped; peaceful).
+# Blocks are mined in a wall at eye height so the player never falls into its own hole. Our
+# world's view after each step is the server's verdict (a rejected break or place comes back as
+# a block update after block_changed_ack); `say` lines in the server log confirm the rest.
+wait 40
+cmd gamemode survival
+cmd difficulty peaceful
+cmd time set day
+cmd fill 0 -60 0 20 -50 20 air
+cmd fill 0 -61 0 20 -61 20 stone
+cmd fill 0 -60 7 20 -58 7 stone
+cmd clear @s
+cmd give @s minecraft:diamond_pickaxe
+cmd give @s minecraft:dirt 64
+wait 20
+
+# Stone by hand (empty slot 2): 151 ticks. Eye at y -58.38 looks at (x, -59, 7).
+slot 2
+cmd tp @s 5.5 -60 5.5 0 0
+wait 20
+check 5 -59 7
+hold 145 attack yaw=0 pitch=0
+check 5 -59 7
+hold 10 attack yaw=0 pitch=0
+wait 20
+check 5 -59 7
+cmd execute if block 5 -59 7 minecraft:air run say hand-break-accepted
+
+# Stone with the diamond pickaxe (slot 0): 6 ticks, three times.
+slot 0
+cmd tp @s 9.5 -60 5.5 0 0
+wait 20
+hold 7 attack yaw=0 pitch=0
+wait 20
+check 9 -59 7
+cmd execute if block 9 -59 7 minecraft:air run say pickaxe-break-accepted
+cmd tp @s 1.5 -60 5.5 0 0
+wait 20
+hold 7 attack yaw=0 pitch=0
+wait 20
+check 1 -59 7
+cmd execute if block 1 -59 7 minecraft:air run say pickaxe-break-accepted
+cmd tp @s 3.5 -60 5.5 0 0
+wait 20
+hold 7 attack yaw=0 pitch=0
+wait 20
+check 3 -59 7
+cmd execute if block 3 -59 7 minecraft:air run say pickaxe-break-accepted
+
+# Released early: aborted, the block stays.
+cmd tp @s 11.5 -60 5.5 0 0
+wait 20
+hold 3 attack yaw=0 pitch=0
+wait 20
+check 11 -59 7
+cmd execute if block 11 -59 7 minecraft:stone run say abort-kept-block
+
+# Place dirt (slot 1) on the floor in front.
+slot 1
+cmd tp @s 13.5 -60 5.5 -90 45
+wait 20
+hold 1 use yaw=-90 pitch=45
+wait 20
+check 15 -60 5
+cmd execute if block 15 -60 5 minecraft:dirt run say dirt-placed
+
+# Creative: holding attack breaks wall blocks (3 high) one after another.
+cmd gamemode creative
+cmd tp @s 17.5 -60 5.5 0 0
+wait 20
+hold 20 attack yaw=0 pitch=0
+wait 20
+check 17 -59 7
+cmd execute if block 17 -59 7 minecraft:air run say creative-break-accepted
+# Pick block on the wall stone at x 16 with an empty hand (slot 2).
+slot 2
+cmd tp @s 16.5 -60 5.5 0 0
+wait 10
+pick
+wait 10
+cmd execute if items entity @s weapon.mainhand minecraft:stone run say picked-stone
+
+# Punch a pig (10 health; a fist does 1).
+cmd summon minecraft:pig 5.5 -60 15.5 {NoAI:1b}
+cmd tp @s 5.5 -60 13.5 0 30
+wait 20
+hold 1 attack yaw=0 pitch=30
+wait 20
+cmd execute if entity @e[type=minecraft:pig,nbt={Health:9.0f}] run say pig-hit
+cmd kill @e[type=minecraft:pig]
+wait 10
+mark end

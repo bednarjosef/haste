@@ -342,6 +342,23 @@ fn server_updates_wait_for_the_ack() {
 }
 
 #[test]
+fn a_silently_rejected_break_is_reverted_on_the_ack() {
+    let mut r = Rig::new(GameMode::Creative);
+    r.tick(ATTACK);
+    let pos = BlockPos::new(0, -1, 0);
+    assert_eq!(r.w.block_state(pos), BlockStateId::AIR);
+    let mut out = Vec::new();
+    r.p.handle(
+        &ClientboundPlay::BlockChangedAck(
+            haste_protocol::packets::play::clientbound::BlockChangedAck { sequence: 1 },
+        ),
+        &mut out,
+    );
+    // No block update came: the server kept its stone.
+    assert_eq!(r.p.take_world_edits().collect::<Vec<_>>(), [(pos, STONE)]);
+}
+
+#[test]
 fn use_on_block_with_cursor_and_repeat_delay() {
     let mut r = Rig::new(GameMode::Survival);
     r.p.int.hotbar[0] = item(3);

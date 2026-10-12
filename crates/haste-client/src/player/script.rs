@@ -174,7 +174,10 @@ impl WalkScript {
                 t.interact = *interact;
                 return Some(t);
             }
-            let step = self.steps.get(self.next)?.clone();
+            let Some(step) = self.steps.get(self.next).cloned() else {
+                // Marks and checks at the very end still get their tick.
+                return (!t.marks.is_empty() || !t.checks.is_empty()).then_some(t);
+            };
             self.next += 1;
             match step {
                 Step::Command(c) => {
