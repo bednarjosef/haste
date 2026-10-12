@@ -1,0 +1,31 @@
+# Falling-water height (NOTES.md): the server's air supply says whether the eyes are in water.
+# Eye 0.995 above the water cell's floor: source (8/9) and falling level 8 must both say no (air
+# stays 300); eye 0.87 above it in falling water must say yes (air drops 1 per tick).
+wait 40
+cmd gamemode survival
+cmd difficulty peaceful
+cmd fill 0 -60 50 12 -50 60 air
+cmd tick freeze
+cmd setblock 2 -60 52 snow[layers=4]
+cmd setblock 2 -59 52 water[level=0]
+cmd setblock 6 -60 52 snow[layers=4]
+cmd setblock 6 -59 52 water[level=8]
+cmd setblock 10 -60 52 snow[layers=3]
+cmd setblock 10 -59 52 water[level=8]
+wait 10
+cmd tp @s 2.5 -59.625 52.5 0 0
+wait 60
+mark source-level0 over snow4
+cmd tp @s 20.5 -60 52.5 0 0
+wait 60
+mark reset
+cmd tp @s 6.5 -59.625 52.5 0 0
+wait 60
+mark falling-level8 over snow4
+cmd tp @s 20.5 -60 52.5 0 0
+wait 60
+mark reset
+cmd tp @s 10.5 -59.75 52.5 0 0
+wait 60
+mark falling-level8 over snow3
+cmd tick unfreeze

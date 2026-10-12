@@ -4,6 +4,8 @@
 //! - units are 1/16 block (vanilla model units);
 //! - y increases downward (vanilla `PartPose` convention);
 //! - the feet sit on the plane y = 0, so a player's head top is at y = -32;
+//! - a child part's pivot is relative to its parent's (vanilla `PartPose`), so overlay layers
+//!   (hat, jacket, sleeves, pants) sit at [0, 0, 0] under their base part;
 //! - parts rotate around their pivot in x, y, z order; `PoseOverrides` rotations are ADDITIVE to
 //!   the part's base rotation. The renderer rotates the part named "head" by
 //!   (head_yaw - yaw) around Y and pitch around X; the rest of the body follows `yaw`.
@@ -63,7 +65,7 @@ pub fn humanoid(slim: bool) -> Arc<CubeModel> {
                         vec![cube([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [0, 0], 0.0)],
                         vec![part(
                             "hat",
-                            [0.0, -24.0, 0.0],
+                            [0.0, 0.0, 0.0],
                             vec![cube([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [32, 0], 0.5)],
                             Vec::new(),
                         )],
@@ -74,7 +76,7 @@ pub fn humanoid(slim: bool) -> Arc<CubeModel> {
                         vec![cube([-4.0, 0.0, -2.0], [8.0, 12.0, 4.0], [16, 16], 0.0)],
                         vec![part(
                             "jacket",
-                            [0.0, -24.0, 0.0],
+                            [0.0, 0.0, 0.0],
                             vec![cube([-4.0, 0.0, -2.0], [8.0, 12.0, 4.0], [16, 32], 0.25)],
                             Vec::new(),
                         )],
@@ -85,7 +87,7 @@ pub fn humanoid(slim: bool) -> Arc<CubeModel> {
                         vec![cube([rao, -2.0, -2.0], [aw, 12.0, 4.0], uv_arm_r, 0.0)],
                         vec![part(
                             "right_sleeve",
-                            [-5.0, -22.0, 0.0],
+                            [0.0, 0.0, 0.0],
                             vec![cube([rao, -2.0, -2.0], [aw, 12.0, 4.0], uv_sleeve_r, 0.25)],
                             Vec::new(),
                         )],
@@ -96,7 +98,7 @@ pub fn humanoid(slim: bool) -> Arc<CubeModel> {
                         vec![cube([-1.0, -2.0, -2.0], [aw, 12.0, 4.0], uv_arm_l, 0.0)],
                         vec![part(
                             "left_sleeve",
-                            [5.0, -22.0, 0.0],
+                            [0.0, 0.0, 0.0],
                             vec![cube([-1.0, -2.0, -2.0], [aw, 12.0, 4.0], uv_sleeve_l, 0.25)],
                             Vec::new(),
                         )],
@@ -107,7 +109,7 @@ pub fn humanoid(slim: bool) -> Arc<CubeModel> {
                         vec![cube([-2.0, 0.0, -2.0], [4.0, 12.0, 4.0], [0, 16], 0.0)],
                         vec![part(
                             "right_pants",
-                            [-1.9, -12.0, 0.0],
+                            [0.0, 0.0, 0.0],
                             vec![cube([-2.0, 0.0, -2.0], [4.0, 12.0, 4.0], [0, 32], 0.25)],
                             Vec::new(),
                         )],
@@ -118,7 +120,7 @@ pub fn humanoid(slim: bool) -> Arc<CubeModel> {
                         vec![cube([-2.0, 0.0, -2.0], [4.0, 12.0, 4.0], [16, 48], 0.0)],
                         vec![part(
                             "left_pants",
-                            [1.9, -12.0, 0.0],
+                            [0.0, 0.0, 0.0],
                             vec![cube([-2.0, 0.0, -2.0], [4.0, 12.0, 4.0], [0, 48], 0.25)],
                             Vec::new(),
                         )],

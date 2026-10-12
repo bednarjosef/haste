@@ -1,21 +1,20 @@
-//! join milestone: headless join. Owner: protocol.
+//! Headless join (client-app). No window.
 //!
-//! `haste --headless --server 127.0.0.1:25565 --seconds 60`: joins (offline
-//! account `--username`), runs the 20 Hz network tick for `--seconds`,
-//! prints chunks, non-empty sections, entities, player position, packets/s
-//! and unknown packet ids once per second, then leaves. Exit status is 0 only
-//! if the connection stayed up the whole time, the login packet arrived and
-//! at least one chunk loaded.
-//!
-//! `net` lives in this file's directory but is declared here until the lead
-//! adds `mod net;` to main.rs.
+//! `haste --headless --server 127.0.0.1:25565 --seconds 60`: joins (offline account
+//! `--username`), runs the 20 Hz network tick for `--seconds` into the real
+//! `haste_world::World` and `haste_entity::EntityStore`, prints chunks, non-empty sections,
+//! entities, player position, packets/s and unknown packet ids once per second, then leaves.
+//! Exit status is 0 only if the connection stayed up the whole time, the login packet arrived,
+//! at least one chunk loaded and every chunk decoded.
 
 use std::time::{Duration, Instant};
 
 use haste_protocol::haste_core::game::TICK_SECONDS;
+use haste_protocol::haste_core::BlockPos;
 use haste_protocol::{Account, ConnectOptions};
+use haste_world::World;
 
-use crate::net::{EntitySink, NetDriver, StubEntities, StubWorld, WorldSink};
+use crate::net::{self, EntitySink, NetDriver, WorldSink};
 use crate::Args;
 
 /// Runs the headless join and returns an error if it did not hold.
@@ -32,53 +31,74 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
 }
 
 async fn run_async(address: String, username: String, seconds: u64) -> anyhow::Result<()> {
+    let data = net::load_game_data()?;
     let opts = ConnectOptions::new(address.clone(), Account::Offline { username });
     let t0 = Instant::now();
-    let biome_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(64));
-    let bc = biome_count.clone();
-    let make_world = Box::new(
-        move |dim: &haste_protocol::haste_core::game::DimensionInfo| {
-            StubWorld::new(dim, bc.load(std::sync::atomic::Ordering::Relaxed))
-        },
-    );
-    let mut driver: NetDriver<StubWorld, StubEntities> =
-        NetDriver::connect(opts, make_world, StubEntities::default()).await?;
-    // The stub world needs the synced biome registry size for direct biome palettes.
-    let biomes = driver
-        .connection()
-        .registries()
+    let mut driver = NetDriver::connect(opts).await?;
+    let regs = driver.connection().registries();
+    let biomes = net::synced_biome_count(regs);
+    let entity_types = regs
         .entries(&haste_protocol::haste_core::Identifier::minecraft(
-            "worldgen/biome",
+            "entity_type",
         ))
-        .map_or(64, |e| e.len());
-    biome_count.store(biomes, std::sync::atomic::Ordering::Relaxed);
-    driver.world = StubWorld::new(&driver.login.dimension, biomes);
+        .map_or_else(|| data.registries.len("minecraft:entity_type"), |e| e.len());
+    let mut world = World::new_with_biomes(
+        driver.login().dimension.clone(),
+        data.clone(),
+        biomes.unwrap_or(64),
+    );
+    let mut entities = net::new_entity_store(entity_types);
+    let login = driver.login();
     println!(
-        "joined {address} as {} in {:.0} ms: entity {:?}, {:?}, dimension {} (min_y {}, height {}), view distance {}",
+        "joined {address} as {} in {:.0} ms: entity {:?}, {:?}, dimension {} (min_y {}, height {}), view distance {}, biomes {} ({} direct bits)",
         driver.connection().profile().name,
         t0.elapsed().as_secs_f64() * 1000.0,
-        driver.login.entity_id,
-        driver.login.game_mode,
-        driver.login.dimension.name,
-        driver.login.dimension.min_y,
-        driver.login.dimension.height,
-        driver.login.view_distance,
+        login.entity_id,
+        login.game_mode,
+        login.dimension.name,
+        login.dimension.min_y,
+        login.dimension.height,
+        login.view_distance,
+        biomes.map_or("not synced".into(), |n| n.to_string()),
+        world.biome_bits(),
     );
 
-    let mut interval = tokio::time::interval(Duration::from_secs_f64(TICK_SECONDS));
+    // HASTE_TICK_RATE (test hook): run the client at the rate a slowed test server runs at
+    // (`/tick rate N`), so tick-counted checks such as break progress compare like for like.
+    let tick_seconds = std::env::var("HASTE_TICK_RATE")
+        .ok()
+        .and_then(|r| r.parse::<f64>().ok())
+        .map_or(TICK_SECONDS, |r| 1.0 / r);
+    let mut interval = tokio::time::interval(Duration::from_secs_f64(tick_seconds));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let total_ticks = seconds * 20;
     let mut last_packets = 0u64;
     let mut failure: Option<String> = None;
+    let mut walk = crate::player::script::Runner::from_env()?;
     for tick in 1..=total_ticks {
         interval.tick().await;
-        if let Err(e) = driver.tick() {
+        let mut input = Default::default();
+        if let Some(w) = walk.as_mut() {
+            let (i, cmd) = w.before_tick(tick, &mut driver.session.player, &world);
+            input = i;
+            if let Some(c) = cmd {
+                driver.queue(c);
+            }
+        }
+        let ticked = driver.tick(&input, &mut world, &mut entities);
+        if walk
+            .as_mut()
+            .is_some_and(|w| w.after_tick(tick, &driver.session.player))
+        {
+            break;
+        }
+        if let Err(e) = ticked {
             failure = Some(format!("tick failed: {e:#}"));
             break;
         }
         if driver.is_closed() {
             // Drain what is left so the disconnect reason is applied.
-            let _ = driver.tick();
+            let _ = driver.receive(&mut world, &mut entities);
             failure = Some(
                 driver
                     .connection()
@@ -87,7 +107,7 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
             );
             break;
         }
-        if tick % 20 == 0 {
+        if tick % 20 == 0 && walk.is_none() {
             let stats = driver.stats();
             let pps = stats.packets_in - last_packets;
             last_packets = stats.packets_in;
@@ -98,35 +118,81 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
                     format!("{}={n}", name.as_deref().unwrap_or(&format!("#{id}")))
                 })
                 .collect();
-            let p = driver.player.pos;
+            let p = driver.session.player.state.pos;
+            let c = &driver.session.counters;
             println!(
-                "[{:>3}s] chunks {:>4} sections {:>5} entities {:>4} pos ({:.2}, {:.2}, {:.2}) packets/s {:>5} unknown [{}]{}",
+                "[{:>3}s] chunks {:>4} sections {:>5} entities {:>4} pos ({:.2}, {:.2}, {:.2}) packets/s {:>5} chunk errors {} unknown [{}]{}",
                 tick / 20,
-                driver.world.chunk_count(),
-                driver.world.non_empty_sections(),
-                driver.entities.len(),
+                world.chunk_count(),
+                world.non_empty_sections(),
+                EntitySink::len(&entities),
                 p.x,
                 p.y,
                 p.z,
                 pps,
+                c.chunk_errors,
                 unknown.join(", "),
                 if stats.decode_failures.is_empty() {
                     String::new()
                 } else {
-                    format!(" decode failures [{}]", stats.decode_failures.iter().map(|(n, c, _)| format!("{n}={c}")).collect::<Vec<_>>().join(", "))
+                    format!(
+                        " decode failures [{}]",
+                        stats
+                            .decode_failures
+                            .iter()
+                            .map(|(n, c, _)| format!("{n}={c}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
                 },
             );
         }
     }
 
     let stats = driver.stats();
-    let counters = driver.counters.clone();
-    let chunks = driver.world.chunk_count();
+    let counters = driver.session.counters.clone();
+    let chunks = world.chunk_count();
     println!("--- summary after {:.1} s", t0.elapsed().as_secs_f64());
     println!(
-        "packets in {} ({} bytes), out {}; chunks loaded {} (unloaded {}, refused by world {}), teleports {}",
-        stats.packets_in, stats.bytes_in, stats.packets_out, counters.chunks_loaded, counters.chunks_unloaded, counters.chunk_errors, counters.teleports
+        "packets in {} ({} bytes), out {}; chunks loaded {} (unloaded {}, refused by world {}), now loaded {} with {} non-empty sections, entities {}, teleports {}",
+        stats.packets_in,
+        stats.bytes_in,
+        stats.packets_out,
+        counters.chunks_loaded,
+        counters.chunks_unloaded,
+        counters.chunk_errors,
+        chunks,
+        world.non_empty_sections(),
+        EntitySink::len(&entities),
+        counters.teleports
     );
+    {
+        // Sanity check of the decode: the column of blocks under the player.
+        use haste_protocol::haste_core::view::BlockView;
+        let p = driver.session.player.state.pos.floor().as_ivec3();
+        let column: Vec<String> = (1..=5)
+            .map(|d| {
+                let s = world.block_state(BlockPos::new(p.x, p.y - d, p.z));
+                data.blocks.block_of(s).to_string()
+            })
+            .collect();
+        println!("blocks below the player: {}", column.join(", "));
+        let light: Vec<String> = (-1..=3)
+            .map(|d| {
+                let b = BlockPos::new(p.x, p.y + d, p.z);
+                format!(
+                    "y{} sky {} block {}",
+                    b.y,
+                    world.sky_light(b),
+                    world.block_light(b)
+                )
+            })
+            .collect();
+        println!("light at the player: {}", light.join(", "));
+    }
+    if let Some(e) = &counters.last_chunk_error {
+        println!("last chunk error: {e}");
+    }
     if stats.unknown.is_empty() {
         println!("unknown packet ids: none");
     } else {
@@ -153,6 +219,9 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
     }
     if chunks == 0 && counters.chunks_loaded == 0 {
         anyhow::bail!("no chunk received");
+    }
+    if counters.chunk_errors > 0 {
+        anyhow::bail!("{} chunks failed to decode", counters.chunk_errors);
     }
     println!("ok: stayed connected {seconds} s");
     Ok(())

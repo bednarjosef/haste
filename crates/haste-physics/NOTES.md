@@ -15,7 +15,8 @@ Nothing here was taken from decompiled Minecraft code or from Pomme's `physics/`
   Movement Formulas" pages also quote 1.8-era MCP code snippets; we used only the stated numbers
   and formulas (65536 angles, 0.003 threshold, 0.2 sprint-jump boost, 0.02 air acceleration),
   but please confirm this source is acceptable.
-- oracles oracle dumps in `cache/oracle/26.3/`: `block_shapes.json` (collision boxes, fluids),
+- Block shapes, properties and fluids come through `haste_data::GameData` (the physics-side oracle
+  loader was deleted). Oracle dumps in `cache/oracle/26.3/`: `block_shapes.json` (collision boxes, fluids),
   `block_properties.json` (friction / speed_factor / jump_factor), `entity_dimensions.json`
   (player 0.6 x 1.8, crouching 1.5, swimming 0.6; eye 1.62 / 1.27 / 0.4).
 - Reuse check: Pomme `physics/`/`player/` excluded by the rules. Pumpkin's entity movement
@@ -57,7 +58,7 @@ Nothing here was taken from decompiled Minecraft code or from Pomme's `physics/`
 | lava gravity | gravity / 4 | **UNVERIFIED assumption** |
 | swim up (jump in fluid) | +0.04 / tick | **UNVERIFIED assumption** |
 | swim down (sneak in water) | -0.04 / tick | **UNVERIFIED assumption** (wiki only says "sinks faster") |
-| fluid height | level 0: 8/9, level L: (8-L)/9, falling: 8/9, 1.0 with same fluid above | documented: wiki "Water" |
+| fluid height | level 0: 8/9, level L: (8-L)/9, falling: 8/9, 1.0 with same fluid above | documented: wiki "Water"; falling level 8 = 8/9 checked on the vanilla server (below) |
 | flying acceleration | flying_speed 0.05 (x2 sprinting) | derived: wiki "Flying" 10.92 m/s (we get 10.89) and 21.6 (we get 21.78) |
 | flying vertical | ±3 x flying_speed per tick, vertical drag 0.6 | **UNVERIFIED assumption** |
 | sine table | 65536 f32 entries, index = (int)(rad x 10430.378) & 65535, cos = +16384 | mcpk.wiki "Angles"; assumption that 26.3 still does this (`trig::USE_TABLE`) |
@@ -107,11 +108,22 @@ block speed factor -> gravity, vertical drag -> horizontal drag.
 - Sine table and the two degree-to-radian constants.
 - Trace input alignment (does `ticks[i].input` produce `ticks[i].pos`?): `replay::InputAlignment`.
 
+## Falling-water height (settled 2026-10-12 against the vanilla server)
+
+`crates/haste-client/walks/falling-water.txt`, `/tick freeze` so the water stays put, player
+standing on snow under one water cell, the server's air supply (entity metadata 1) as the oracle
+for "eyes in water": eyes 0.995 above the cell floor in source water (level 0) and in falling
+water (level 8, no water above): air stays 300 (not in water); eyes 0.87 above it in falling
+water: air drops 59 in 60 ticks. So falling water without water above is lower than 0.995, i.e.
+8/9 as on the wiki, not 1.0. Also shows the eye test has no extra offset below 8/9. Levels 9..15
+not tested. haste-data must report 8/9 for level >= 8 (it reported 1.0; the full-cell case with
+water above is handled here in `fluids.rs`).
+
 ## Interface notes (settled by the lead)
 
 - `tick` takes `blocks: &dyn haste_core::view::BlockPhysics` (friction, speed_factor,
   jump_factor, fluid, light_emission, is_air, is_opaque_full); haste-data implements it for
-  `GameData`. `oracle::OracleBlocks` and `testing::TestShapes` implement it for tests meanwhile.
+  `GameData`. `testing::TestShapes` implements it for unit tests.
 - `collide` is the pure sweep; step-up is `collide_with_step(aabb, movement, step_height,
   on_ground, world, shapes)` (in INTERFACES.md).
 - Extra `PlayerState`/`PlayerAttributes` fields accepted.
@@ -139,3 +151,18 @@ Assumptions about the traces, all to confirm with oracles: the world is a defaul
 from `input.yaw`/`input.pitch` or a per-tick `yaw`/`pitch` if present, else the `player` header
 (FORMATS.md v1 has no per-tick look angles, which a turning trace needs); `strafe > 0` is left.
 The parser is our own (lenient serde structs) so this crate does not depend on haste-testkit.
+
+## Interaction (raycast.rs, mining.rs)
+
+- Crosshair: voxel walk over outline boxes; look vector from the movement sine table (assumption:
+  the game uses the same table for the view vector). A ray starting inside a box hits at its start.
+- Mining speed: minecraft.wiki "Breaking" formula; tool rules from the data generator's item
+  component reports (`minecraft:tool`, first matching rule per field), tags from the server,
+  hardness and correct-tool flag from the recorder dump via `GameData`. Checked against the
+  wiki's break-time table; on the vanilla server: hand and diamond-pickaxe stone breaks, an
+  Efficiency V + Haste II instant break (the server sends Efficiency as `mining_efficiency`).
+- Progress is summed in f32 per tick, so stone by hand finishes on tick 151, not the wiki's 150
+  (assumption that the game sums floats the same way; the server accepts either, its check is
+  70 % of the progress).
+- Not modelled: item component patches on held stacks (protocol does not decode components yet),
+  Aqua Affinity other than through `submerged_mining_speed`, adventure-mode `can_break`.

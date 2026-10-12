@@ -25,6 +25,8 @@ pub struct SectionMesh {
     pub layers: Vec<(RenderLayer, Vec<u32>)>,
     /// Section-local AABB (min/max in blocks) for frustum culling.
     pub aabb: ([f32; 3], [f32; 3]),
+    /// Face-to-face sightlines through the section (cave culling).
+    pub visibility: crate::occlusion::VisibilitySet,
 }
 
 /// Tint sources resolved at mesh time (palette written into the shader's
@@ -37,7 +39,7 @@ pub const TINT_PALETTE_LEN: usize = 2;
 /// A snapshot of the 3x3x3 section neighbourhood, captured on the render/game
 /// thread and sent to the mesh workers. Cheap random access, no locks.
 pub struct MeshSnapshot {
-    /// (x, y, z) block offsets -16..48 relative to the section origin: the
+    /// (x, y, z) block offsets -1..17 relative to the section origin: the
     /// section plus one-block borders into all neighbours (blocks for face
     /// culling and AO). Y is clamped at the world bounds (air outside).
     blocks: Vec<BlockStateId>,
@@ -54,16 +56,18 @@ pub struct MeshSnapshot {
     height: i32,
 }
 
-const EXT: i32 = 48; // 3 sections wide (48 = 16*3)
+/// The section plus a one-block border (face culling, AO and smooth light only look one block
+/// out): 18^3 = 5832 cells instead of the whole 3x3x3 neighbourhood.
+const EXT: i32 = 18;
 const EXT2: i32 = EXT * EXT;
 const EXT3: usize = (EXT2 * EXT) as usize;
 
 impl MeshSnapshot {
     /// Capture the neighbourhood of `pos` from a `BlockView`. Reads
-    /// (3*16)^3 = 110592 block states + light — a few ms per section on this
-    /// machine, amortized by the dirty-section pipeline.
+    /// 18^3 = 5832 block states + light (the section and a one-block border),
+    /// amortized by the dirty-section pipeline.
     pub fn capture(view: &dyn BlockView, pos: SectionPos) -> MeshSnapshot {
-        let origin = pos.block_min().add(-16, -16, -16);
+        let origin = pos.block_min().add(-1, -1, -1);
         let mut blocks = Vec::with_capacity(EXT3);
         let mut sky = Vec::with_capacity(EXT3);
         let mut block = Vec::with_capacity(EXT3);
@@ -267,7 +271,13 @@ pub fn mesh_section(
                             continue;
                         }
                     }
-                    let sprite = atlas.region_of(&quad.texture).sprite as u16;
+                    let region = atlas.region_of(&quad.texture);
+                    let sprite = region.sprite as u16;
+                    // Baked UVs are atlas texels; the vertex format wants sprite-local 0..1.
+                    let [rx, ry, rw, rh] = region.pixel_rect.map(|v| v as f32);
+                    let uvs = quad
+                        .uvs
+                        .map(|t| [(t[0] - rx) / rw.max(1.0), (t[1] - ry) / rh.max(1.0)]);
 
                     let positions: [[f32; 3]; 4] = quad
                         .positions
@@ -282,7 +292,7 @@ pub fn mesh_section(
                         [light, pack_ao_shade(ao_level, shade), TINT_WHITE, 0]
                     });
 
-                    sink.push_quad(layer, &positions, &quad.uvs, lights, sprite);
+                    sink.push_quad(layer, &positions, &uvs, lights, sprite);
                 }
             }
         }
@@ -308,6 +318,7 @@ pub fn mesh_section(
             .collect(),
         layers,
         aabb: (sink.min, sink.max),
+        visibility: crate::occlusion::section_visibility(snapshot, baked, pos),
     }
 }
 
@@ -476,13 +487,18 @@ mod tests {
     /// end-to-end mesh tests (real jar, ignored without cache).
     struct FlatWorld {
         ground: BlockStateId,
+        /// Layers y = 0..layers.
+        layers: i32,
     }
 
     impl haste_core::view::BlockView for FlatWorld {
         fn block_state(&self, pos: BlockPos) -> BlockStateId {
             // A finite 16x16 platform (one section footprint), not an infinite
             // plane: side faces of the edge blocks must survive culling.
-            if pos.y == 0 && (0..16).contains(&pos.x) && (0..16).contains(&pos.z) {
+            if (0..self.layers).contains(&pos.y)
+                && (0..16).contains(&pos.x)
+                && (0..16).contains(&pos.z)
+            {
                 self.ground
             } else {
                 BlockStateId::AIR
@@ -533,6 +549,7 @@ mod tests {
         // stone state id 1.
         let world = FlatWorld {
             ground: BlockStateId(1),
+            layers: 1,
         };
         let snapshot = MeshSnapshot::capture(&world, SectionPos::new(0, 0, 0));
         let mesh = mesh_section(&snapshot, &baked, &atlas, SectionPos::new(0, 0, 0));
@@ -558,9 +575,41 @@ mod tests {
         assert_eq!(mesh.layers[0].0, haste_assets::RenderLayer::Solid);
         // Vertices packed, sprite ids resolved from the atlas.
         assert!(mesh.vertices.iter().all(|v| v.sprite != 0));
+        // UVs are sprite-local: full faces span 0..1 (4095 in the fixed-point format).
+        assert!(mesh
+            .vertices
+            .iter()
+            .all(|v| v.uv[0] <= 4095 && v.uv[1] <= 4095));
+        assert!(
+            mesh.vertices.iter().any(|v| v.uv[0] == 0)
+                && mesh.vertices.iter().any(|v| v.uv[0] == 4095)
+        );
         // AABB spans the section.
         assert_eq!(mesh.aabb.0, [0.0, 0.0, 0.0]);
         assert_eq!(mesh.aabb.1, [16.0, 1.0, 16.0]);
+
+        // A 16x16x4 grass slab: faces between grass blocks are culled. Visible: 256 top,
+        // 256 bottom, 4 * 16 * 4 sides, plus the tinted overlay on each side face.
+        use haste_core::view::BlockStateTable;
+        let grass = (0..states.len() as u32)
+            .map(BlockStateId)
+            .find(|s| {
+                states.block_of(*s).path() == "grass_block"
+                    && states.property_value(*s, "snowy") == Some("false")
+            })
+            .unwrap();
+        let world = FlatWorld {
+            ground: grass,
+            layers: 4,
+        };
+        let snapshot = MeshSnapshot::capture(&world, SectionPos::new(0, 0, 0));
+        let mesh = mesh_section(&snapshot, &baked, &atlas, SectionPos::new(0, 0, 0));
+        let quads: usize = mesh.layers.iter().map(|(_, idx)| idx.len() / 6).sum();
+        eprintln!(
+            "grass slab: {quads} quads, {} vertices",
+            mesh.vertices.len()
+        );
+        assert_eq!(quads, 256 + 256 + 256 + 256, "culled grass slab");
     }
 
     #[test]

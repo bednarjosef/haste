@@ -306,25 +306,21 @@ impl<'a> Reader<'a> {
         Ok(v)
     }
 
-    /// BitSet: prefixed array of longs.
+    /// BitSet. Since 26.3 this is a VarInt byte count followed by the set's
+    /// longs as little-endian bytes with trailing zero bytes dropped (before
+    /// 26.3, and on minecraft.wiki: a count of big-endian longs). Returns
+    /// `ceil(bytes / 8)` longs.
     pub fn bit_set(&mut self) -> DecodeResult<Vec<u64>> {
-        let n = self.len_prefix(MAX_LIST)?;
-        let mut v = Vec::with_capacity(n.min(self.remaining() / 8));
-        for _ in 0..n {
-            v.push(self.u64()?);
-        }
-        Ok(v)
-    }
-
-    /// BitSet whose longs are VarLongs: the encoding the 26.3 server uses for
-    /// the light masks (verified empirically, see NOTES.md).
-    pub fn bit_set_varlong(&mut self) -> DecodeResult<Vec<u64>> {
-        let n = self.len_prefix(MAX_LIST)?;
-        let mut v = Vec::with_capacity(n.min(self.remaining()));
-        for _ in 0..n {
-            v.push(self.var_long()? as u64);
-        }
-        Ok(v)
+        let n = self.len_prefix(MAX_LIST * 8)?;
+        let bytes = self.take(n)?;
+        Ok(bytes
+            .chunks(8)
+            .map(|c| {
+                let mut b = [0u8; 8];
+                b[..c.len()].copy_from_slice(c);
+                u64::from_le_bytes(b)
+            })
+            .collect())
     }
 
     /// Fixed BitSet of `bits` bits (`ceil(bits/8)` bytes).
@@ -564,18 +560,20 @@ impl Writer {
             f(self, x);
         }
     }
-    /// BitSet.
+    /// BitSet in the 26.3 form (see [`Reader::bit_set`]): little-endian
+    /// bytes of the longs, trailing zero bytes dropped, VarInt byte count.
     pub fn bit_set(&mut self, longs: &[u64]) {
-        self.len_prefix(longs.len());
-        for l in longs {
-            self.u64(*l);
-        }
-    }
-    /// BitSet with VarLong elements (see [`Reader::bit_set_varlong`]).
-    pub fn bit_set_varlong(&mut self, longs: &[u64]) {
-        self.len_prefix(longs.len());
-        for l in longs {
-            self.var_long(*l as i64);
+        let len = longs
+            .iter()
+            .rposition(|&l| l != 0)
+            .map_or(0, |i| i * 8 + 8 - (longs[i].leading_zeros() / 8) as usize);
+        self.len_prefix(len);
+        for (i, l) in longs.iter().enumerate() {
+            let take = len.saturating_sub(i * 8).min(8);
+            if take == 0 {
+                break;
+            }
+            self.buf.extend_from_slice(&l.to_le_bytes()[..take]);
         }
     }
     /// One network NBT value (`None` writes `TAG_End`).
@@ -858,7 +856,7 @@ impl Codec<Bytes> for RawNbt {
         w.bytes(v)
     }
 }
-/// BitSet (prefixed longs).
+/// BitSet (26.3 byte form, see [`Reader::bit_set`]).
 pub struct BitSet;
 impl Codec<Vec<u64>> for BitSet {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Vec<u64>> {
@@ -1102,12 +1100,11 @@ impl Wire for ResolvableProfile {
 /// Light data as in `level_chunk_with_light` and `light_update`.
 impl Wire for haste_core::chunk::LightData {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        // 26.3: the masks' longs are VarLongs (observed on the local server;
-        // the wiki still documents plain longs).
-        let sky_mask = r.bit_set_varlong()?;
-        let block_mask = r.bit_set_varlong()?;
-        let empty_sky_mask = r.bit_set_varlong()?;
-        let empty_block_mask = r.bit_set_varlong()?;
+        // 26.3 BitSets are byte arrays (see `Reader::bit_set`).
+        let sky_mask = r.bit_set()?;
+        let block_mask = r.bit_set()?;
+        let empty_sky_mask = r.bit_set()?;
+        let empty_block_mask = r.bit_set()?;
         let sky_arrays = r.list(4096, |r| r.byte_array(2048))?;
         let block_arrays = r.list(4096, |r| r.byte_array(2048))?;
         Ok(Self {
@@ -1120,10 +1117,10 @@ impl Wire for haste_core::chunk::LightData {
         })
     }
     fn write(&self, w: &mut Writer) {
-        w.bit_set_varlong(&self.sky_mask);
-        w.bit_set_varlong(&self.block_mask);
-        w.bit_set_varlong(&self.empty_sky_mask);
-        w.bit_set_varlong(&self.empty_block_mask);
+        w.bit_set(&self.sky_mask);
+        w.bit_set(&self.block_mask);
+        w.bit_set(&self.empty_sky_mask);
+        w.bit_set(&self.empty_block_mask);
         w.list(&self.sky_arrays, |w, a| w.byte_array(a));
         w.list(&self.block_arrays, |w, a| w.byte_array(a));
     }
@@ -1270,6 +1267,29 @@ mod tests {
         assert_eq!(r.uuid().unwrap(), u);
         assert_eq!(r.angle().unwrap(), 90.0);
         r.finish().unwrap();
+    }
+
+    #[test]
+    fn bit_set_is_trimmed_little_endian_bytes() {
+        // Hand-built 26.3 bytes: a sky mask with bits 1..=24 set
+        // (0x01_FF_FF_FE) is 4 bytes, LSB first.
+        let wire = [4u8, 0xFE, 0xFF, 0xFF, 0x01];
+        let mut r = Reader::new(&wire);
+        assert_eq!(r.bit_set().unwrap(), vec![0x01FF_FFFE]);
+        r.finish().unwrap();
+        let mut w = Writer::new();
+        w.bit_set(&[0x01FF_FFFE]);
+        assert_eq!(w.buf, wire);
+        // Empty set: a zero count, also for all-zero longs.
+        let mut w = Writer::new();
+        w.bit_set(&[0, 0]);
+        assert_eq!(w.buf, [0]);
+        assert_eq!(Reader::new(&[0]).bit_set().unwrap(), Vec::<u64>::new());
+        // Two longs: 8 full bytes then the trimmed second long.
+        let mut w = Writer::new();
+        w.bit_set(&[u64::MAX, 0x80]);
+        assert_eq!(w.buf, [9, 255, 255, 255, 255, 255, 255, 255, 255, 0x80]);
+        assert_eq!(Reader::new(&w.buf).bit_set().unwrap(), vec![u64::MAX, 0x80]);
     }
 
     #[test]

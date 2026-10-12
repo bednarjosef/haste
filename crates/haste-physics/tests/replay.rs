@@ -3,7 +3,8 @@
 //! `cargo test -p haste-physics --test replay -- --ignored --nocapture`.
 use haste_core::input::InputState;
 use haste_core::DVec3;
-use haste_physics::oracle::{default_oracle_dir, OracleBlocks};
+use haste_core::{BlockStateId, Identifier};
+use haste_data::GameData;
 use haste_physics::replay::{
     load_trace, replay, FlatWorld, InputAlignment, Trace, TraceInput, TraceTick, DEFAULT_TOLERANCE,
 };
@@ -128,12 +129,13 @@ fn trace_json_parses() {
 
 /// Default superflat (bedrock, 2 dirt, grass; surface y = -60). Assumption: the traces are
 /// recorded on a default superflat world (FORMATS.md's example spawn is y = -60).
-fn superflat(o: &OracleBlocks) -> FlatWorld {
-    let bedrock = o.state("minecraft:bedrock", &[]).expect("bedrock");
-    let dirt = o.state("minecraft:dirt", &[]).expect("dirt");
-    let grass = o
-        .state("minecraft:grass_block", &[("snowy", "false")])
-        .expect("grass");
+fn superflat(o: &GameData) -> FlatWorld {
+    let state = |name: &str| -> BlockStateId {
+        o.blocks
+            .default_state(&Identifier::minecraft(name))
+            .expect(name)
+    };
+    let (bedrock, dirt, grass) = (state("bedrock"), state("dirt"), state("grass_block"));
     FlatWorld {
         bottom: -64,
         layers: vec![bedrock, dirt, dirt, grass],
@@ -145,7 +147,7 @@ fn superflat(o: &OracleBlocks) -> FlatWorld {
 #[test]
 #[ignore = "needs cache/oracle/26.3/traces/*.json (oracles recorder) and the oracle dumps"]
 fn replay_all_recorded_traces() {
-    let dir = default_oracle_dir().join("traces");
+    let dir = haste_core::paths::oracle_dir().join("traces");
     let mut paths: Vec<_> = std::fs::read_dir(&dir)
         .map(|rd| {
             rd.filter_map(|e| e.ok().map(|e| e.path()))
@@ -161,7 +163,7 @@ fn replay_all_recorded_traces() {
         );
         return;
     }
-    let o = OracleBlocks::load(&default_oracle_dir()).expect("oracle dumps");
+    let o = GameData::load().expect("data generator reports and oracle dumps");
     let world = superflat(&o);
     let attrs = PlayerAttributes::default();
     let mut diverged = 0;
@@ -178,7 +180,7 @@ fn replay_all_recorded_traces() {
             &trace,
             &attrs,
             &world,
-            &o,
+            &o.shapes,
             &o,
             DEFAULT_TOLERANCE,
             InputAlignment::SameTick,
@@ -189,7 +191,7 @@ fn replay_all_recorded_traces() {
                 &trace,
                 &attrs,
                 &world,
-                &o,
+                &o.shapes,
                 &o,
                 DEFAULT_TOLERANCE,
                 InputAlignment::PreviousTick,

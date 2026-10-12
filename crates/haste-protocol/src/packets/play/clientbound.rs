@@ -4012,6 +4012,75 @@ mod tests {
         });
     }
 
+    /// Regression: a normal-terrain chunk, built byte by byte in the 26.3
+    /// layout (BitSets are trimmed little-endian byte arrays). Before the fix
+    /// the masks were read as VarLongs and every such packet failed.
+    #[test]
+    fn level_chunk_with_light_golden_bytes() {
+        let mut b = vec![];
+        b.extend_from_slice(&(-3i32).to_be_bytes());
+        b.extend_from_slice(&7i32.to_be_bytes());
+        // Heightmaps: 1 entry, type 1 (world surface), 2 longs.
+        b.extend_from_slice(&[1, 1, 2]);
+        b.extend_from_slice(&0x0102_0304_0506_0708i64.to_be_bytes());
+        b.extend_from_slice(&(-1i64).to_be_bytes());
+        // Sections blob: 3 opaque bytes.
+        b.extend_from_slice(&[3, 0xAA, 0xBB, 0xCC]);
+        // One block entity at (x=5, z=9) in the chunk, y = -12, kind 33, empty compound.
+        b.extend_from_slice(&[1, 0x59]);
+        b.extend_from_slice(&(-12i16).to_be_bytes());
+        b.extend_from_slice(&[33, 10, 0]);
+        // Sky mask: sections 1..=2 and 25 (0x0200_0006): bytes 06 00 00 02.
+        b.extend_from_slice(&[4, 0x06, 0x00, 0x00, 0x02]);
+        // Block mask: bit 3 only: one byte.
+        b.extend_from_slice(&[1, 0x08]);
+        // Empty sky mask: bit 0: one byte. Empty block mask: none.
+        b.extend_from_slice(&[1, 0x01, 0]);
+        // Three sky arrays, one block array, each VarInt 2048 (0x80 0x10) + bytes.
+        b.push(3);
+        for v in [0xFFu8, 0x11, 0x22] {
+            b.extend_from_slice(&[0x80, 0x10]);
+            b.extend(std::iter::repeat_n(v, 2048));
+        }
+        b.push(1);
+        b.extend_from_slice(&[0x80, 0x10]);
+        b.extend(std::iter::repeat_n(0x33u8, 2048));
+
+        let p = LevelChunkWithLight::decode_exact(&mut Reader::new(&b)).unwrap();
+        let c = &p.chunk;
+        assert_eq!(c.pos, ChunkPos::new(-3, 7));
+        assert_eq!(c.heightmaps, vec![(1, vec![0x0102_0304_0506_0708, -1])]);
+        assert_eq!(&c.sections[..], &[0xAA, 0xBB, 0xCC]);
+        assert_eq!(
+            c.block_entities[0].pos,
+            BlockPos::new(-48 + 5, -12, 112 + 9)
+        );
+        assert_eq!(c.block_entities[0].kind, 33);
+        assert_eq!(c.light.sky_mask, vec![0x0200_0006]);
+        assert_eq!(c.light.block_mask, vec![8]);
+        assert_eq!(c.light.empty_sky_mask, vec![1]);
+        assert!(c.light.empty_block_mask.is_empty());
+        assert_eq!(c.light.sky_arrays.len(), 3);
+        assert_eq!(c.light.sky_arrays[2][0], 0x22);
+        assert_eq!(c.light.block_arrays[0][2047], 0x33);
+        // And our encoder writes the same bytes back.
+        let mut w = Writer::new();
+        p.encode(&mut w);
+        assert_eq!(w.into_inner(), b);
+
+        // light_update: VarInt chunk coords + the same light data layout.
+        let mut l = vec![0x7F, 0x01]; // x = 127, z = 1
+        l.extend_from_slice(&[2, 0xFE, 0x01, 0, 1, 0x01, 0, 1]);
+        l.extend_from_slice(&[0x80, 0x10]);
+        l.extend(std::iter::repeat_n(0xF0u8, 2048));
+        l.push(0);
+        let u = LightUpdate::decode_exact(&mut Reader::new(&l)).unwrap();
+        assert_eq!(u.pos, ChunkPos::new(127, 1));
+        assert_eq!(u.light.sky_mask, vec![0x01FE]);
+        assert_eq!(u.light.empty_sky_mask, vec![1]);
+        assert_eq!(u.light.sky_arrays.len(), 1);
+    }
+
     #[test]
     fn add_entity_converts_to_spawn() {
         let a = AddEntity {

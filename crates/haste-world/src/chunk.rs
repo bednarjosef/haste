@@ -10,6 +10,9 @@ use crate::palette::{BiomeContainer, BlockContainer, DecodedSection, PaletteErro
 pub struct Section {
     /// Number of non-air blocks (vanilla's `block_count`); used to skip empty sections.
     pub block_count: i16,
+    /// Number of fluid blocks as the server sent it (not maintained by `set`); 0 lets the
+    /// mesher skip fluid work for the section.
+    pub fluid_count: i16,
     pub blocks: BlockContainer,
     pub biomes: BiomeContainer,
 }
@@ -57,7 +60,7 @@ impl Heightmap {
         let per_long = 64 / bits;
         let long = i / per_long;
         let off = (i % per_long) * bits;
-        (((self.longs[long] as u64) >> (64 - off - bits)) as i32) & ((1 << bits) - 1)
+        (((self.longs[long] as u64) >> off) as i32) & ((1 << bits) - 1)
     }
 }
 
@@ -98,13 +101,15 @@ impl Chunk {
         min_section: i32,
         section_count: usize,
         state_bits: u8,
+        biome_bits: u8,
     ) -> Result<Chunk, PaletteError> {
         let decoded: Vec<DecodedSection<BlockStateId>> =
-            BlockContainer::decode_sections(&data.sections, section_count, state_bits)?;
+            BlockContainer::decode_sections(&data.sections, section_count, state_bits, biome_bits)?;
         let mut sections = Vec::with_capacity(decoded.len());
         for d in decoded {
             sections.push(Section {
                 block_count: d.block_count,
+                fluid_count: d.fluid_count,
                 blocks: d.blocks,
                 biomes: d.biomes.remap::<BiomeId>(),
             });

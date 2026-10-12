@@ -5,14 +5,15 @@
 //!
 //! Layout: [`collision`] (pure AABB sweep + step-up), [`movement`] (the tick), [`fluids`] (water
 //! and lava), [`flying`] (creative flight), [`attributes`], [`replay`] (trace replay harness),
-//! [`oracle`] (interim loaders for the oracle dumps), [`testing`] (in-memory world for tests).
+//! [`testing`] (in-memory world for tests).
 
 pub mod attributes;
 pub mod collision;
 pub mod fluids;
 pub mod flying;
+pub mod mining;
 pub mod movement;
-pub mod oracle;
+pub mod raycast;
 pub mod replay;
 pub mod testing;
 mod trig;
@@ -47,6 +48,8 @@ pub struct PlayerState {
     pub jump_cooldown: u8,
     pub horizontal_collision: bool,
     pub vertical_collision: bool,
+    /// Eyes under the water surface (last tick); slows mining, starts sprint-swimming.
+    pub eyes_in_water: bool,
 }
 
 impl PlayerState {
@@ -58,7 +61,7 @@ impl PlayerState {
     }
     /// Current collision box for this state's pose.
     pub fn aabb(&self, attrs: &PlayerAttributes) -> Aabb {
-        Aabb::entity(self.pos, attrs.width as f64, attrs.height_for(self.pose))
+        Aabb::entity(self.pos, attrs.box_width(), attrs.height_for(self.pose))
     }
 }
 

@@ -52,6 +52,8 @@ pub struct PlayerAttributes {
     pub crouching_height: f32,
     /// entity_dimensions.json "swimming": height 0.6.
     pub swimming_height: f32,
+    /// `minecraft:scale` (wiki "Attribute": 1.0); multiplies the box and the eye height.
+    pub scale: f32,
 }
 
 impl Default for PlayerAttributes {
@@ -67,26 +69,35 @@ impl Default for PlayerAttributes {
             height: 1.8,
             crouching_height: 1.5,
             swimming_height: 0.6,
+            scale: 1.0,
         }
     }
 }
 
 impl PlayerAttributes {
     /// Eye height per pose (entity_dimensions.json: standing 1.62, crouching 1.27, swimming 0.4).
-    /// Not scaled by the `scale` attribute (not modelled).
+    /// Scaled by the `scale` attribute (in f32, as entity dimensions are floats).
     pub fn eye_height_for(&self, pose: Pose) -> f64 {
-        match pose {
+        let eye: f32 = match pose {
             Pose::Standing => 1.62,
             Pose::Crouching => 1.27,
             Pose::Swimming => 0.4,
-        }
+        };
+        (eye * self.scale) as f64
     }
 
+    /// Box height for a pose, scaled by the `scale` attribute.
     pub fn height_for(&self, pose: Pose) -> f64 {
-        match pose {
-            Pose::Standing => self.height as f64,
-            Pose::Crouching => self.crouching_height as f64,
-            Pose::Swimming => self.swimming_height as f64,
-        }
+        let h = match pose {
+            Pose::Standing => self.height,
+            Pose::Crouching => self.crouching_height,
+            Pose::Swimming => self.swimming_height,
+        };
+        (h * self.scale) as f64
+    }
+
+    /// Box width, scaled by the `scale` attribute.
+    pub fn box_width(&self) -> f64 {
+        (self.width * self.scale) as f64
     }
 }
