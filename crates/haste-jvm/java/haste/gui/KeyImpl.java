@@ -28,22 +28,45 @@ public final class KeyImpl {
         Map.entry("keyCommand", 56), Map.entry("keyScreenshot", 59), Map.entry("keyTogglePerspective", 62),
         Map.entry("keyFullscreen", 68), Map.entry("keySocialInteractions", 19), Map.entry("keyAdvancements", 15));
 
+    /** Every KeyMapping field of 26.3's Options (javap); the ones without a known default stay unbound. */
+    private static final String[] ALL = ("keyUp keyLeft keyDown keyRight keyJump keyShift keySprint keyInventory keySwapOffhand keyDrop "
+        + "keyUse keyAttack keyPickItem keyChat keyPlayerList keyCommand keyFriends keySocialInteractions keyScreenshot "
+        + "keyTogglePerspective keySmoothCamera keyFullscreen keyAdvancements keyQuickActions keyToggleGui "
+        + "keyToggleSpectatorShaderEffects keySaveHotbarActivator keyLoadHotbarActivator keySpectatorOutlines keySpectatorHotbar "
+        + "keyDebugOverlay keyDebugModifier keyDebugCrash keyDebugReloadChunk keyDebugShowHitboxes keyDebugClearChat "
+        + "keyDebugShowChunkBorders keyDebugShowAdvancedTooltips keyDebugCopyRecreateCommand keyDebugSpectate "
+        + "keyDebugSwitchGameMode keyDebugDebugOptions keyDebugFocusPause keyDebugDumpDynamicTextures keyDebugReloadResourcePacks "
+        + "keyDebugProfiling keyDebugCopyLocation keyDebugDumpVersion keyDebugPofilingChart keyDebugFpsCharts keyDebugNetworkCharts "
+        + "keyDebugLightmapTexture keyDebugSwitchTranslucencyMode").split(" ");
+
+    /** Mouse-bound defaults (vanilla button numbering: 1 left, 2 middle, 3 right). */
+    private static final Map<String, Integer> MOUSE = Map.of("keyAttack", 1, "keyPickItem", 2, "keyUse", 3);
+    private static final Map<KeyMapping, Integer> BUTTONS = new IdentityHashMap<>();
+
     static void installDefaults(Options o) {
-        for (String name : DEFAULTS.keySet()) {
+        java.util.List<KeyMapping> all = new java.util.ArrayList<>();
+        for (String name : ALL) {
             KeyMapping k = Proxies.make(KeyMapping.class);
-            KEYS.put(k, DEFAULTS.get(name));
+            KEYS.put(k, DEFAULTS.getOrDefault(name, -1));
+            if (MOUSE.containsKey(name)) BUTTONS.put(k, MOUSE.get(name));
             NAMES.put(k, name);
             Proxies.set(o, name, KeyMapping.class, k);
+            all.add(k);
         }
         KeyMapping[] arr = new KeyMapping[9];
-        for (int i = 0; i < 9; i++) { arr[i] = Proxies.make(KeyMapping.class); KEYS.put(arr[i], 30 + i); NAMES.put(arr[i], "keyHotbarSlot" + (i + 1)); }
+        for (int i = 0; i < 9; i++) {
+            arr[i] = Proxies.make(KeyMapping.class); KEYS.put(arr[i], 30 + i); NAMES.put(arr[i], "keyHotbarSlot" + (i + 1));
+            all.add(arr[i]);
+        }
         Proxies.set(o, "keyHotbarSlots", KeyMapping[].class, arr);
+        Proxies.set(o, "keyMappings", KeyMapping[].class, all.toArray(new KeyMapping[0]));
+        Proxies.set(o, "debugKeys", KeyMapping[].class, new KeyMapping[0]);
     }
 
     public static boolean matches(KeyMapping k, KeyEvent e) { Integer c = KEYS.get(k); return c != null && c >= 0 && c == e.key(); }
-    public static boolean matchesMouse(KeyMapping k, MouseButtonEvent e) { return false; }
+    public static boolean matchesMouse(KeyMapping k, MouseButtonEvent e) { Integer b = BUTTONS.get(k); return b != null && b == e.button(); }
     public static boolean isDown(KeyMapping k) { return false; }
     public static boolean consumeClick(KeyMapping k) { return false; }
-    public static boolean isUnbound(KeyMapping k) { Integer c = KEYS.get(k); return c == null || c < 0; }
+    public static boolean isUnbound(KeyMapping k) { Integer c = KEYS.get(k); return (c == null || c < 0) && !BUTTONS.containsKey(k); }
     public static void setDown(KeyMapping k, boolean down) {}
 }

@@ -24,6 +24,8 @@ pub(crate) fn register(env: &mut Env) -> Result<()> {
             NativeMethod::from_raw_parts(jni_str!("selectedSlot"), jni_str!("()I"), state::selected_slot as *mut _),
             NativeMethod::from_raw_parts(jni_str!("chatLines"), jni_str!("()[Ljava/lang/String;"), state::chat_lines as *mut _),
             NativeMethod::from_raw_parts(jni_str!("sendChat"), jni_str!("(Ljava/lang/String;Z)V"), state::send_chat as *mut _),
+            NativeMethod::from_raw_parts(jni_str!("containerInput"), jni_str!("(IIII)V"), state::container_input as *mut _),
+            NativeMethod::from_raw_parts(jni_str!("gameMode"), jni_str!("()I"), state::game_mode as *mut _),
             NativeMethod::from_raw_parts(jni_str!("playerName"), jni_str!("()Ljava/lang/String;"), state::player_name as *mut _),
         ]
     };

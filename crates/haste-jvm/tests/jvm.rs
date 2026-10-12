@@ -62,10 +62,10 @@ fn tier3_value_types_from_the_jar() {
     assert_eq!(log.classes.get("net.minecraft.resources.Identifier"), Some(&ClassSource::Jar));
     assert_eq!(log.classes.get("net.minecraft.core.BlockPos"), Some(&ClassSource::Jar));
     // tier-1 types never come from the jar
-    let refused = h.with_env(|env| Ok(h.load_class(env, "net.minecraft.world.level.Level").is_err())).unwrap();
-    assert!(refused, "Level must be refused");
+    let refused = h.with_env(|env| Ok(h.load_class(env, "net.minecraft.world.level.block.Blocks").is_err())).unwrap();
+    assert!(refused, "Blocks must be refused");
     let log = h.class_log().unwrap();
-    assert!(matches!(log.classes.get("net.minecraft.world.level.Level"), Some(ClassSource::Refused(_))));
+    assert!(matches!(log.classes.get("net.minecraft.world.level.block.Blocks"), Some(ClassSource::Refused(_))));
     eprintln!("class log: {} jar, {} proxy, {} lib, {} refused",
         log.with(|s| *s == ClassSource::Jar).len(), log.with(|s| *s == ClassSource::Proxy).len(),
         log.with(|s| *s == ClassSource::Library).len(), log.refused().len());
@@ -274,4 +274,64 @@ fn chat_screen() {
 
     let unimpl = h.unimplemented().unwrap();
     assert!(unimpl.is_empty(), "Unimplemented log for ChatScreen: {unimpl:#?}");
+}
+
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn inventory_screen() {
+    use haste_core::gui::GuiCommand;
+    use haste_core::RegistryIndex;
+    use haste_jvm::{keys, ContainerInput, ItemSlot};
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    h.clear_unimplemented().unwrap();
+    gui.with_state(|s| {
+        s.inventory.iter_mut().for_each(|x| *x = None);
+        s.inventory[0] = Some(ItemSlot { item: RegistryIndex(1), count: 64 }); // hotbar slot 0
+        s.inventory[9] = Some(ItemSlot { item: RegistryIndex(42), count: 3 }); // first main slot
+        s.item_names = vec!["minecraft:air".into(), "minecraft:stone".into()];
+        s.container_clicks.clear();
+    });
+    open(&h, haste_jvm::ScreenKind::Inventory);
+    let f = render(&h, (0.0, 0.0));
+    dump(&f);
+    assert!(f.commands.iter().any(|c| matches!(c, GuiCommand::Texture { texture, .. } if texture.path() == "textures/gui/container/inventory.png")));
+    // the container is centred (176 px wide in a 320 px GUI) and slots are drawn relative to it
+    let origin = f.commands.iter().find_map(|c| match c { GuiCommand::TranslatePush { dx, dy, .. } => Some((*dx, *dy)), _ => None }).unwrap();
+    assert_eq!(origin.0, 72.0);
+    let items: Vec<_> = f.commands.iter().filter_map(|c| match c { GuiCommand::Item { item, x, y, count } => Some((item.0, *x, *y, *count)), _ => None }).collect();
+    assert_eq!(items, vec![(42, 8, 84, 3), (1, 8, 142, 64)], "items from the Rust inventory as GuiCommand::Item");
+    let t = texts(&f);
+    assert!(t.contains(&"64".to_string()) && t.contains(&"3".to_string()), "stack counts: {t:?}");
+    assert!(t.contains(&"Crafting".to_string()), "{t:?}");
+    for s in ["minecraft:container/slot/helmet", "minecraft:container/slot/shield", "minecraft:recipe_book/button"] {
+        assert!(sprites(&f).iter().any(|x| x.0 == s), "missing sprite {s}");
+    }
+
+    // hovering the hotbar stack: highlight + tooltip with the item's name
+    let hot = (origin.0 as f64 + 16.0, origin.1 as f64 + 150.0);
+    gui.mouse(hot.0, hot.1, None);
+    let f = render(&h, hot);
+    assert!(sprites(&f).iter().any(|s| s.0 == "minecraft:container/slot_highlight_front"), "{:?}", sprites(&f));
+    assert!(texts(&f).contains(&"minecraft:stone".to_string()), "tooltip: {:?}", texts(&f));
+
+    // clicking a slot sends a container click to Rust (menu slot 36 = hotbar 0)
+    assert!(gui.mouse(hot.0, hot.1, Some((keys::MOUSE_LEFT, true))), "{:?}", gui.take_last_error());
+    gui.mouse(hot.0, hot.1, Some((keys::MOUSE_LEFT, false)));
+    let clicks = gui.with_state(|s| s.take_container_clicks());
+    eprintln!("clicks: {clicks:?}");
+    assert_eq!(clicks.first().map(|c| (c.container_id, c.slot, c.input)), Some((0, 36, ContainerInput::Pickup)));
+
+    // Rust state changes show up on the next frame (proxies read through natives)
+    gui.with_state(|s| s.inventory[0] = Some(ItemSlot { item: RegistryIndex(1), count: 12 }));
+    assert!(texts(&render(&h, (0.0, 0.0))).contains(&"12".to_string()));
+
+    // E (the inventory key) closes the screen
+    assert!(press(&h, keys::E));
+    assert!(!gui.is_open());
+    assert_eq!(gui.with_state(|s| s.take_container_clicks()).last().map(|c| c.input), Some(ContainerInput::Close));
+
+    let unimpl = h.unimplemented().unwrap();
+    assert!(unimpl.is_empty(), "Unimplemented log for InventoryScreen: {unimpl:#?}");
 }

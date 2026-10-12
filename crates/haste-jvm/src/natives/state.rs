@@ -4,7 +4,7 @@ use jni::objects::{JClass, JObjectArray, JString};
 use jni::sys::{jboolean, jint, jlong};
 use jni::EnvUnowned;
 
-use crate::proxies::{with_state, ChatMessage, INVENTORY_SIZE};
+use crate::proxies::{with_state, ChatMessage, ContainerClick, ContainerInput, INVENTORY_SIZE};
 
 pub(crate) extern "system" fn stack_item<'l>(_env: EnvUnowned<'l>, _c: JClass<'l>, h: jlong) -> jint {
     with_state(|s| s.stack(h).map_or(-1, |x| x.item.0 as jint))
@@ -70,4 +70,13 @@ pub(crate) extern "system" fn player_name<'l>(mut env: EnvUnowned<'l>, _c: JClas
     let name = with_state(|s| s.player_name.clone());
     env.with_env(|env| -> jni::errors::Result<JString<'l>> { JString::from_str(env, name) })
         .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+pub(crate) extern "system" fn game_mode<'l>(_env: EnvUnowned<'l>, _c: JClass<'l>) -> jint {
+    with_state(|s| s.game_mode as jint)
+}
+
+pub(crate) extern "system" fn container_input<'l>(_env: EnvUnowned<'l>, _c: JClass<'l>, container: jint, slot: jint, button: jint, input: jint) {
+    let input = ContainerInput::from_id(input);
+    with_state(|s| s.container_clicks.push(ContainerClick { container_id: container, slot, button, input }));
 }

@@ -39,6 +39,7 @@ public final class GfxImpl {
         scissorDepth = 0;
         tooltip = null;
         cursor = "default";
+        entityBoxes.clear();
     }
 
     /** Ends a frame: deferred tooltip, then closes open translations and scissors. */
@@ -268,6 +269,30 @@ public final class GfxImpl {
     public static void setComponentTooltipForNextFrame(GuiGraphicsExtractor g, Font f, List<Component> lines, int x, int y, Identifier bg) {
         setComponentTooltipForNextFrame(g, f, lines, x, y);
     }
+    /** Component tooltips with an optional image (bundles, maps: not drawn) and a style sprite (ignored). */
+    public static void setTooltipForNextFrame(GuiGraphicsExtractor g, Font f, List<Component> lines,
+            java.util.Optional<net.minecraft.world.inventory.tooltip.TooltipComponent> image, int x, int y) {
+        setComponentTooltipForNextFrame(g, f, lines, x, y);
+    }
+    public static void setTooltipForNextFrame(GuiGraphicsExtractor g, Font f, List<Component> lines,
+            java.util.Optional<net.minecraft.world.inventory.tooltip.TooltipComponent> image, int x, int y, Identifier style) {
+        setComponentTooltipForNextFrame(g, f, lines, x, y);
+    }
+    public static void setTooltipForNextFrame(GuiGraphicsExtractor g, Font f, List<Component> lines,
+            java.util.Optional<net.minecraft.world.inventory.tooltip.TooltipComponent> image, int x, int y, Identifier style, boolean extraSpace) {
+        setComponentTooltipForNextFrame(g, f, lines, x, y);
+    }
+    public static void setTooltipForNextFrame(GuiGraphicsExtractor g, Font f, List<FormattedCharSequence> lines,
+            net.minecraft.client.gui.screens.inventory.tooltip.ClientTooltipPositioner pos, int x, int y, boolean focused) {
+        setTooltipForNextFrame(g, f, lines, x, y);
+    }
+    public static void setTooltipForNextFrame(GuiGraphicsExtractor g, List<FormattedCharSequence> lines, int x, int y) {
+        tooltip = new ArrayList<>(lines); tooltipX = x; tooltipY = y;
+    }
+    public static void setTooltipForNextFrame(GuiGraphicsExtractor g, Component c, int x, int y) {
+        tooltip = List.of(c.getVisualOrderText()); tooltipX = x; tooltipY = y;
+    }
+
     public static void setTooltipForNextFrame(GuiGraphicsExtractor g, Font f, ItemStack s, int x, int y) {
         String name = StackImpl.displayName(s);
         if (name != null) setTooltipForNextFrame(g, f, Component.literal(name), x, y);
@@ -288,6 +313,17 @@ public final class GfxImpl {
         GuiBatch.op(GuiBatch.SPRITE, GuiBatch.str("minecraft:tooltip/frame"), x - 3 - 9, y - 3 - 9, w + 6 + 18, h + 6 + 18, -1);
         for (FormattedCharSequence l : tooltip) { Text.emit(l, x, y, -1, true); y += 10; }
         tooltip = null;
+    }
+
+    /**
+     * An entity model in a GUI box (the inventory's player). GuiFrame has no command for it yet (interface
+     * request); the box is recorded so tests and a future command can use it.
+     */
+    static final List<int[]> entityBoxes = new ArrayList<>();
+    public static void entity(GuiGraphicsExtractor g, net.minecraft.client.renderer.entity.state.EntityRenderState s, float scale,
+                              org.joml.Vector3fc translation, org.joml.Quaternionfc rotation, org.joml.Quaternionfc cameraAngle,
+                              int x0, int y0, int x1, int y1) {
+        entityBoxes.add(new int[]{x0 + (int) POSE.tx(), y0 + (int) POSE.ty(), x1 + (int) POSE.tx(), y1 + (int) POSE.ty()});
     }
 
     public static void setPreeditOverlay(GuiGraphicsExtractor g, Renderable r) {}

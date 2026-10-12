@@ -29,7 +29,12 @@ public final class Native {
     /** Selected hotbar slot. */
     public static native int selectedSlot();
 
+    /** A container click (menu slot numbering; input = vanilla ContainerInput ordinal = wire click type). */
+    public static native void containerInput(int containerId, int slot, int button, int input);
+
     // ---- chat / player ----
+    /** Local player's game mode id (0 survival, 1 creative, 2 adventure, 3 spectator). */
+    public static native int gameMode();
     /** The chat history lines Rust provides (oldest first). */
     public static native String[] chatLines();
     /** Called when a screen sends a chat message or command. */

@@ -32,6 +32,7 @@ public final class Proxies {
     public static GuiGraphicsExtractor graphics;
     public static LocalPlayer player;
     public static Inventory inventory;
+    public static net.minecraft.client.multiplayer.ClientLevel level;
     public static ItemStack empty;
     private static final Map<Long, ItemStack> STACKS = new HashMap<>();
 
@@ -45,6 +46,7 @@ public final class Proxies {
         graphics = make(GuiGraphicsExtractor.class);
         player = make(LocalPlayer.class);
         inventory = make(Inventory.class);
+        level = make(net.minecraft.client.multiplayer.ClientLevel.class);
         empty = make(ItemStack.class);
         StackImpl.setHandle(empty, -1);
         setStatic(ItemStack.class, "EMPTY", ItemStack.class, empty);
@@ -58,9 +60,24 @@ public final class Proxies {
         set(minecraft, "mouseHandler", net.minecraft.client.MouseHandler.class, make(net.minecraft.client.MouseHandler.class));
         set(gui, "hud", net.minecraft.client.gui.Hud.class, make(net.minecraft.client.gui.Hud.class));
         set(minecraft, "player", LocalPlayer.class, player);
+        minecraft.level = level;
+        set(minecraft, "gameMode", net.minecraft.client.multiplayer.MultiPlayerGameMode.class,
+            make(net.minecraft.client.multiplayer.MultiPlayerGameMode.class));
         set(player, "connection", net.minecraft.client.multiplayer.ClientPacketListener.class,
             service(net.minecraft.client.multiplayer.ClientPacketListener.class));
         KeyImpl.installDefaults(options);
+        // the recipe book is a no-op proxy (no <clinit>), but InventoryScreen still shows its toggle button:
+        // the sprites are the two that exist in the jar under textures/gui/sprites/recipe_book/
+        setStatic(net.minecraft.client.gui.screens.recipebook.RecipeBookComponent.class, "RECIPE_BUTTON_SPRITES",
+            net.minecraft.client.gui.components.WidgetSprites.class,
+            new net.minecraft.client.gui.components.WidgetSprites(
+                net.minecraft.resources.Identifier.withDefaultNamespace("recipe_book/button"),
+                net.minecraft.resources.Identifier.withDefaultNamespace("recipe_book/button_highlighted")));
+        // the player's own menu is real vanilla Java over the Rust-backed Inventory proxy
+        var menu = new net.minecraft.world.inventory.InventoryMenu(inventory, true, player);
+        set(player, "inventoryMenu", net.minecraft.world.inventory.InventoryMenu.class, menu);
+        // no other container open: the player's container menu is its inventory menu
+        player.containerMenu = menu;
     }
 
     private static final Map<Class<?>, Object> SERVICES = new HashMap<>();

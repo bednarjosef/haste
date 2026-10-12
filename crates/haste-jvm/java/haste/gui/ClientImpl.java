@@ -26,6 +26,9 @@ public final class ClientImpl {
     public static net.minecraft.client.multiplayer.chat.report.ReportingContext getReportingContext(Minecraft m) {
         return Proxies.service(net.minecraft.client.multiplayer.chat.report.ReportingContext.class);
     }
+    public static net.minecraft.client.renderer.entity.EntityRenderDispatcher getEntityRenderDispatcher(Minecraft m) {
+        return Proxies.service(net.minecraft.client.renderer.entity.EntityRenderDispatcher.class);
+    }
     public static PlayerSocialManager getPlayerSocialManager(Minecraft m) { return Proxies.service(PlayerSocialManager.class); }
     /** Haste always plays through a server connection (singleplayer = a local vanilla server process, WS7). */
     public static boolean isDemo(Minecraft m) { return false; }

@@ -11,6 +11,7 @@
 //!   numbering: 0-8 hotbar, 9-35 main, 36-39 armour feet..head, 40 offhand). The empty stack
 //!   (`ItemStack.EMPTY`) has handle -1. A slot's proxy stays the same object when its contents
 //!   change (approximation: vanilla moves stack objects between slots; see NOTES.md).
+use haste_core::game::GameMode;
 use haste_core::RegistryIndex;
 use parking_lot::Mutex;
 
@@ -35,6 +36,59 @@ pub struct ChatMessage {
     pub command: bool,
 }
 
+/// Vanilla's `ContainerInput` (the click type of the container-click packet; ids are its ordinals).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContainerInput {
+    /// Normal click (pick up / put down / swap with carried).
+    Pickup,
+    /// Shift-click.
+    QuickMove,
+    /// Number key or offhand swap (button = hotbar slot, 40 = offhand).
+    Swap,
+    /// Middle click in creative.
+    Clone,
+    /// Drop key over a slot.
+    Throw,
+    /// Drag distribution.
+    QuickCraft,
+    /// Double click: collect all of the kind.
+    PickupAll,
+    /// The container was closed (`LocalPlayer.closeContainer`; slot and button are -1).
+    Close,
+    /// An id this crate does not know.
+    Unknown(i32),
+}
+
+impl ContainerInput {
+    /// From vanilla's ordinal.
+    pub fn from_id(id: i32) -> Self {
+        match id {
+            0 => Self::Pickup,
+            1 => Self::QuickMove,
+            2 => Self::Swap,
+            3 => Self::Clone,
+            4 => Self::Throw,
+            5 => Self::QuickCraft,
+            6 => Self::PickupAll,
+            -1 => Self::Close,
+            n => Self::Unknown(n),
+        }
+    }
+}
+
+/// A click in a container screen, to be sent to the server by the client (Rust owns the inventory).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContainerClick {
+    /// Menu id (0 = the player's own inventory menu).
+    pub container_id: i32,
+    /// Menu slot index (inventory menu: 0 result, 1-4 crafting, 5-8 armour, 9-35 main, 36-44 hotbar, 45 offhand), -999 outside.
+    pub slot: i32,
+    /// Mouse button or hotbar key, as vanilla passes it.
+    pub button: i32,
+    /// Click type.
+    pub input: ContainerInput,
+}
+
 /// The game state the proxies read. Owned by Rust; the client updates it (e.g. from inventory
 /// packets) and screens see it immediately through the natives.
 #[derive(Debug)]
@@ -51,6 +105,10 @@ pub struct GameState {
     pub sent: Vec<ChatMessage>,
     /// Local player name.
     pub player_name: String,
+    /// Container clicks from screens since the last [`GameState::take_container_clicks`].
+    pub container_clicks: Vec<ContainerClick>,
+    /// Local player's game mode (creative has infinite materials).
+    pub game_mode: GameMode,
 }
 
 impl Default for GameState {
@@ -62,6 +120,8 @@ impl Default for GameState {
             chat_lines: Vec::new(),
             sent: Vec::new(),
             player_name: "Player".to_owned(),
+            game_mode: GameMode::Survival,
+            container_clicks: Vec::new(),
         }
     }
 }
@@ -70,6 +130,10 @@ impl GameState {
     /// Slot contents for an `ItemStack` handle (None for empty / out of range / EMPTY).
     pub fn stack(&self, handle: i64) -> Option<ItemSlot> {
         usize::try_from(handle).ok().and_then(|i| self.inventory.get(i).copied().flatten())
+    }
+    /// Drains the container clicks made in screens.
+    pub fn take_container_clicks(&mut self) -> Vec<ContainerClick> {
+        std::mem::take(&mut self.container_clicks)
     }
     /// Drains the messages sent by screens.
     pub fn take_sent(&mut self) -> Vec<ChatMessage> {
