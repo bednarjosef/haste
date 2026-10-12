@@ -60,9 +60,11 @@ pub mod types {
     pub const DYE_COLOR: i32 = 43;
 }
 
-/// Inline painting variant (metadata type 34).
+/// Inline painting variant (metadata type 34, and the inline form of the
+/// `painting/variant` data component). Only ever sent for variants that are
+/// not in the registry; the widths' encoding (Int here) is not verified.
 #[derive(Clone, Debug, PartialEq)]
-struct PaintingVariant;
+pub(crate) struct PaintingVariant;
 impl Wire for PaintingVariant {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
         r.i32()?;

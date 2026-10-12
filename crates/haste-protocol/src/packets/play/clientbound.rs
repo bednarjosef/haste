@@ -2832,7 +2832,7 @@ pub struct AdvancementDisplay {
     pub title: Component,
     /// Description.
     pub description: Component,
-    /// Icon.
+    /// Icon (an item stack template on the wire).
     pub icon: ItemStackData,
     /// 0 task, 1 challenge, 2 goal.
     pub frame: i32,
@@ -2845,7 +2845,7 @@ impl Wire for AdvancementDisplay {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
         let title = r.component()?;
         let description = r.component()?;
-        let icon = r.read()?;
+        let icon = r.read_as::<_, crate::wire::slot::ItemStackTemplate>()?;
         let frame = r.var_int()?;
         let flags = r.i32()?;
         let background = if flags & 1 != 0 {
@@ -2865,7 +2865,7 @@ impl Wire for AdvancementDisplay {
     fn write(&self, w: &mut Writer) {
         w.component(&self.title);
         w.component(&self.description);
-        w.write(&self.icon);
+        w.write_as::<_, crate::wire::slot::ItemStackTemplate>(&self.icon);
         w.var_int(self.frame);
         w.i32(self.flags);
         if let Some(b) = &self.background {
