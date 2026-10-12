@@ -12,8 +12,9 @@ use haste_core::view::BlockView;
 use haste_core::{ChunkPos, SectionPos};
 use wgpu::util::DeviceExt;
 
+use crate::arena::{MeshArenas, ResidentSection};
 use crate::mesher::{Mesher, SectionMesh};
-use crate::pipeline::{upload_atlas, upload_section, Gpu, SectionGpuMesh};
+use crate::pipeline::{upload_atlas, Gpu};
 use crate::vertex::PackedVertex;
 
 /// Camera for one frame (docs/INTERFACES.md FrameInput).
@@ -182,6 +183,19 @@ struct CameraUniform {
     _pad: f32,
 }
 
+/// One section layer to draw this frame.
+#[derive(Clone, Copy)]
+struct SectionDraw {
+    /// Sort key: layer, then arena, then distance (negated for translucent: far first).
+    layer: haste_assets::RenderLayer,
+    arena: u32,
+    key: f32,
+    first_index: u32,
+    index_count: u32,
+    base_vertex: u32,
+    origin: [i32; 3],
+}
+
 /// The renderer. Construct with a window (windowed mode) or offscreen
 /// (`new_offscreen`, oracles's screenshot tests: fixed-size texture target,
 /// `read_back` returns the frame as an RgbaImage).
@@ -195,7 +209,33 @@ pub struct Renderer {
     atlas: Arc<haste_assets::AtlasBuilder>,
     baked: Arc<haste_assets::BakedBlockModels>,
     mesher: Mesher,
-    sections: HashMap<SectionPos, Vec<SectionGpuMesh>>,
+    sections: HashMap<SectionPos, ResidentSection>,
+    /// Shared vertex/index buffers the section meshes live in.
+    arenas: MeshArenas,
+    /// Cave culling: per-section sightlines (also for sections without geometry), the visible
+    /// sections from the last walk, and when to walk again.
+    section_vis: HashMap<(ChunkPos, i32), crate::occlusion::VisibilitySet>,
+    visible_mask: HashMap<ChunkPos, u32>,
+    /// Camera section and render distance of the last walk; None forces a new walk.
+    visible_for: Option<(SectionPos, i32)>,
+    /// Sightline data changed since the last walk; walks for that are at most 4 per second.
+    vis_dirty: bool,
+    last_walk: std::time::Instant,
+    /// World vertical extent in sections (`set_dimension`).
+    min_section: i32,
+    section_count: i32,
+    view_distance: i32,
+    /// Per-frame draw list and section origins (instance-rate), reused across frames.
+    draw_list: Vec<SectionDraw>,
+    origins: Vec<[i32; 3]>,
+    origin_buffer: wgpu::Buffer,
+    origin_capacity: usize,
+    /// Indirect draw arguments (multi-draw path), reused across frames.
+    /// Five u32 per draw: index count, instance count, first index, base vertex, first instance
+    /// (`wgpu::util::DrawIndexedIndirectArgs` layout).
+    indirect: Vec<u32>,
+    indirect_buffer: wgpu::Buffer,
+    indirect_capacity: usize,
     camera_uniform: wgpu::Buffer,
     camera_bind_group_layout: wgpu::BindGroupLayout,
     camera_bind_group: wgpu::BindGroup,
@@ -453,12 +493,20 @@ impl Renderer {
 
         // Offscreen targets when windowless.
         let offscreen = if surface.is_none() {
-            Some(Self::make_offscreen(&gpu.device, size, surface_format)?)
+            Some(Self::make_offscreen(
+                &gpu.device,
+                size,
+                surface_format,
+                Self::gui_format_for(&gpu, surface_format),
+            )?)
         } else {
             None
         };
 
         let mesher = Mesher::new(baked.clone(), atlas.clone());
+        let arenas = MeshArenas::new(gpu.device.clone(), gpu.queue.clone());
+        let origin_buffer = Self::make_origin_buffer(&gpu.device, 4096);
+        let indirect_buffer = Self::make_indirect_buffer(&gpu.device, 4096);
 
         // GUI: the font (with unifont when the assets index has it) and a renderer drawing into
         // a non-sRGB view of the target so blending happens on sRGB values like vanilla.
@@ -466,7 +514,7 @@ impl Renderer {
         let mut gui = crate::gui::GuiRenderer::new(
             gpu.device.clone(),
             gpu.queue.clone(),
-            surface_format.remove_srgb_suffix(),
+            Self::gui_format_for(&gpu, surface_format),
             font,
         );
         let entity = crate::entity::EntityRenderer::new(
@@ -501,6 +549,22 @@ impl Renderer {
             baked,
             mesher,
             sections: HashMap::new(),
+            arenas,
+            section_vis: HashMap::new(),
+            visible_mask: HashMap::new(),
+            visible_for: None,
+            vis_dirty: false,
+            last_walk: std::time::Instant::now(),
+            min_section: -4,
+            section_count: 24,
+            view_distance: 32,
+            draw_list: Vec::new(),
+            origins: Vec::new(),
+            origin_buffer,
+            origin_capacity: 4096,
+            indirect: Vec::new(),
+            indirect_buffer,
+            indirect_capacity: 4096,
             camera_uniform,
             camera_bind_group_layout,
             camera_bind_group,
@@ -573,6 +637,10 @@ impl Renderer {
     /// The dimension being drawn: picks the sky (overworld, End, or fog colour only).
     pub fn set_dimension(&mut self, dim: &haste_core::game::DimensionInfo) {
         self.sky.kind = crate::sky::SkyKind::of(dim);
+        self.min_section = dim.min_section();
+        self.section_count = dim.section_count() as i32;
+        self.section_vis.clear();
+        self.visible_for = None;
     }
 
     /// Sky and block light at each entity's position, sampled from the world by the caller
@@ -622,16 +690,53 @@ impl Renderer {
         self.gui.set_item_names(names);
     }
 
+    /// Whether GUI blending happens on sRGB values like vanilla (false on backends without
+    /// view formats, e.g. GL, where it blends in linear space).
+    pub fn gui_blends_in_srgb(&self) -> bool {
+        self.gpu.view_formats
+    }
+
     /// Counters of the last GUI frame.
     pub fn gui_stats(&self) -> crate::gui::GuiStats {
         self.gui.stats
+    }
+
+    fn make_origin_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("section-origins"),
+            size: (capacity * 12) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    fn make_indirect_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("section-indirect"),
+            size: (capacity * std::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>()) as u64,
+            usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// The format the GUI pass renders in: the non-sRGB view of the target where views are
+    /// supported, else the target format itself.
+    fn gui_format_for(gpu: &Gpu, format: wgpu::TextureFormat) -> wgpu::TextureFormat {
+        if gpu.view_formats {
+            format.remove_srgb_suffix()
+        } else {
+            format
+        }
     }
 
     fn make_offscreen(
         device: &wgpu::Device,
         size: (u32, u32),
         format: wgpu::TextureFormat,
+        gui_format: wgpu::TextureFormat,
     ) -> Result<Offscreen> {
+        let extra = [gui_format];
+        let view_formats: &[wgpu::TextureFormat] = if gui_format != format { &extra } else { &[] };
         let (w, h) = size;
         let color = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("offscreen-color"),
@@ -645,7 +750,7 @@ impl Renderer {
             dimension: wgpu::TextureDimension::D2,
             format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[format.remove_srgb_suffix()],
+            view_formats,
         });
         let depth = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("offscreen-depth"),
@@ -663,7 +768,7 @@ impl Renderer {
         });
         Ok(Offscreen {
             gui_view: color.create_view(&wgpu::TextureViewDescriptor {
-                format: Some(format.remove_srgb_suffix()),
+                format: Some(gui_format),
                 ..Default::default()
             }),
             color_view: color.create_view(&Default::default()),
@@ -686,10 +791,13 @@ impl Renderer {
             height: h,
             present_mode: self.present_mode,
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
-            view_formats: if self.surface_format.is_srgb() {
-                vec![self.surface_format.remove_srgb_suffix()]
-            } else {
-                vec![]
+            view_formats: {
+                let gui = Self::gui_format_for(&self.gpu, self.surface_format);
+                if gui != self.surface_format {
+                    vec![gui]
+                } else {
+                    vec![]
+                }
             },
             desired_maximum_frame_latency: 2,
         };
@@ -719,8 +827,12 @@ impl Renderer {
     pub fn resize(&mut self, w: u32, h: u32) {
         self.size = (w.max(1), h.max(1));
         if self.offscreen.is_some() {
-            if let Ok(off) = Self::make_offscreen(&self.gpu.device, self.size, self.surface_format)
-            {
+            if let Ok(off) = Self::make_offscreen(
+                &self.gpu.device,
+                self.size,
+                self.surface_format,
+                Self::gui_format_for(&self.gpu, self.surface_format),
+            ) {
                 self.offscreen = Some(off);
             }
         } else {
@@ -735,8 +847,12 @@ impl Renderer {
         world: &dyn BlockView,
         dirty: &[SectionPos],
         _camera_chunk: ChunkPos,
-        _view_distance: i32,
+        view_distance: i32,
     ) {
+        if view_distance != self.view_distance {
+            self.view_distance = view_distance;
+            self.visible_for = None;
+        }
         for pos in dirty {
             self.mesher.submit(world, *pos);
         }
@@ -747,8 +863,19 @@ impl Renderer {
 
     fn upload_mesh(&mut self, mesh: SectionMesh) {
         let pos = mesh.pos;
-        let uploads = upload_section(&self.gpu.device, &mesh);
-        self.sections.insert(pos, uploads);
+        let si = pos.y - self.min_section;
+        let prev = self
+            .section_vis
+            .insert((ChunkPos::new(pos.x, pos.z), si), mesh.visibility);
+        if prev != Some(mesh.visibility) {
+            self.vis_dirty = true;
+        }
+        if let Some(old) = self.sections.remove(&pos) {
+            self.arenas.free(&old);
+        }
+        if let Some(resident) = self.arenas.upload(&mesh) {
+            self.sections.insert(pos, resident);
+        }
     }
 
     /// Build the view-projection matrix (right-handed, OpenGL-style depth like
@@ -891,7 +1018,7 @@ impl Renderer {
                     tex.texture.create_view(&Default::default()),
                     d.clone(),
                     tex.texture.create_view(&wgpu::TextureViewDescriptor {
-                        format: Some(self.surface_format.remove_srgb_suffix()),
+                        format: Some(Self::gui_format_for(&self.gpu, self.surface_format)),
                         ..Default::default()
                     }),
                 )
@@ -901,62 +1028,123 @@ impl Renderer {
         let present = held_surface_texture.is_some();
         let _ = present;
 
-        // Frustum cull. Collect owned draw data so later buffer work does not
-        // borrow self.sections.
-        // Culling in camera-relative space (f32 precision far from the origin).
+        // Frustum cull in camera-relative space (f32 precision far from the origin), into the
+        // reused draw list.
         let planes = Self::frustum_planes(&rot_view_proj);
-        let cam_f = frame.camera.pos;
-        let rel = |p: [f32; 3]| {
-            [
-                (p[0] as f64 - cam_f.x) as f32,
-                (p[1] as f64 - cam_f.y) as f32,
-                (p[2] as f64 - cam_f.z) as f32,
-            ]
-        };
-        struct Draw<'a> {
-            layer: haste_assets::RenderLayer,
-            index_count: u32,
-            vertex_buffer: &'a wgpu::Buffer,
-            index_buffer: &'a wgpu::Buffer,
-            origin: [i32; 3],
-            dist: f32,
+        let cam = frame.camera.pos;
+        // Cave culling: walk the section graph again when the camera changed section or new
+        // sightline data arrived.
+        let cam_section = SectionPos::new(
+            (cam.x.floor() as i32) >> 4,
+            (cam.y.floor() as i32) >> 4,
+            (cam.z.floor() as i32) >> 4,
+        );
+        if self.visible_for != Some((cam_section, self.view_distance))
+            || (self.vis_dirty && self.last_walk.elapsed() > std::time::Duration::from_millis(250))
+        {
+            self.vis_dirty = false;
+            self.last_walk = std::time::Instant::now();
+            self.visible_mask = crate::occlusion::compute_visible_mask(
+                &self.section_vis,
+                ChunkPos::new(cam_section.x, cam_section.z),
+                cam_section.y - self.min_section,
+                cam,
+                self.min_section * 16,
+                self.section_count,
+                self.view_distance + 1,
+            );
+            self.visible_for = Some((cam_section, self.view_distance));
         }
-        let mut draws: Vec<Draw> = Vec::new();
-        for meshes in self.sections.values() {
-            for m in meshes {
-                if Self::aabb_visible(&planes, rel(m.aabb.0), rel(m.aabb.1)) {
-                    let center = glam::Vec3::from([
-                        (m.aabb.0[0] + m.aabb.1[0]) * 0.5,
-                        (m.aabb.0[1] + m.aabb.1[1]) * 0.5,
-                        (m.aabb.0[2] + m.aabb.1[2]) * 0.5,
-                    ]);
-                    let dc = center
-                        - glam::Vec3::new(
-                            frame.camera.pos.x as f32,
-                            frame.camera.pos.y as f32,
-                            frame.camera.pos.z as f32,
-                        );
-                    draws.push(Draw {
-                        layer: m.layer,
-                        index_count: m.index_count,
-                        vertex_buffer: &m.vertex_buffer,
-                        index_buffer: &m.index_buffer,
-                        origin: [m.pos.x << 4, m.pos.y << 4, m.pos.z << 4],
-                        dist: dc.length_squared(),
-                    });
-                }
+        let mut draws = std::mem::take(&mut self.draw_list);
+        draws.clear();
+        for s in self.sections.values() {
+            let si = s.pos.y - self.min_section;
+            let column = self
+                .visible_mask
+                .get(&ChunkPos::new(s.pos.x, s.pos.z))
+                .copied()
+                .unwrap_or(0);
+            if !(0..32).contains(&si) || column & (1u32 << si) == 0 {
+                continue;
+            }
+            let lo = [
+                (s.aabb.0[0] as f64 - cam.x) as f32,
+                (s.aabb.0[1] as f64 - cam.y) as f32,
+                (s.aabb.0[2] as f64 - cam.z) as f32,
+            ];
+            let hi = [
+                (s.aabb.1[0] as f64 - cam.x) as f32,
+                (s.aabb.1[1] as f64 - cam.y) as f32,
+                (s.aabb.1[2] as f64 - cam.z) as f32,
+            ];
+            if !Self::aabb_visible(&planes, lo, hi) {
+                continue;
+            }
+            let d = glam::Vec3::new(
+                (lo[0] + hi[0]) * 0.5,
+                (lo[1] + hi[1]) * 0.5,
+                (lo[2] + hi[2]) * 0.5,
+            )
+            .length_squared();
+            for l in &s.layers {
+                let translucent = l.layer == haste_assets::RenderLayer::Translucent;
+                draws.push(SectionDraw {
+                    layer: l.layer,
+                    arena: s.arena,
+                    key: if translucent { -d } else { d },
+                    first_index: l.first_index,
+                    index_count: l.index_count,
+                    base_vertex: s.base_vertex,
+                    origin: [s.pos.x << 4, s.pos.y << 4, s.pos.z << 4],
+                });
             }
         }
-        // Translucent far-to-near; opaque front-to-back for early-Z.
-        draws.sort_by(|a, b| {
-            a.layer.cmp(&b.layer).then(
-                a.dist
-                    .partial_cmp(&b.dist)
-                    .unwrap_or(std::cmp::Ordering::Equal),
-            )
+        // Opaque front to back (early depth), translucent back to front; grouped by arena.
+        draws.sort_unstable_by(|a, b| {
+            a.layer
+                .cmp(&b.layer)
+                .then(a.arena.cmp(&b.arena))
+                .then(a.key.total_cmp(&b.key))
         });
         let sections_total = self.sections.len() as u32;
         let drawn = draws.len() as u32;
+        self.origins.clear();
+        self.origins.extend(draws.iter().map(|d| d.origin));
+        if self.origins.len() > self.origin_capacity {
+            self.origin_capacity = self.origins.len().next_power_of_two();
+            self.origin_buffer = Self::make_origin_buffer(&self.gpu.device, self.origin_capacity);
+        }
+        if !self.origins.is_empty() {
+            self.gpu.queue.write_buffer(
+                &self.origin_buffer,
+                0,
+                bytemuck::cast_slice(&self.origins),
+            );
+        }
+        if self.gpu.multi_draw {
+            self.indirect.clear();
+            for (i, d) in draws.iter().enumerate() {
+                self.indirect.extend_from_slice(&[
+                    d.index_count,
+                    1,
+                    d.first_index,
+                    d.base_vertex,
+                    i as u32,
+                ]);
+            }
+            if draws.len() > self.indirect_capacity {
+                self.indirect_capacity = draws.len().next_power_of_two();
+                self.indirect_buffer =
+                    Self::make_indirect_buffer(&self.gpu.device, self.indirect_capacity);
+            }
+            if !self.indirect.is_empty() {
+                self.gpu.queue.write_buffer(
+                    &self.indirect_buffer,
+                    0,
+                    bytemuck::cast_slice(&self.indirect),
+                );
+            }
+        }
 
         let mut draw_calls = 0u32;
         let mut encoder = self
@@ -999,39 +1187,64 @@ impl Renderer {
             pass.set_bind_group(1, &self.atlas_bind_group, &[]);
 
             // Layered draw order (RenderLayer Ord: Solid < Cutout < CutoutMipped
-            // < Translucent), distance-sorted inside each. Section origins go
-            // through an instance-rate vertex buffer (attribute 7), one
-            // instance per section draw.
-            let origins: Vec<[i32; 3]> = draws.iter().map(|d| d.origin).collect();
-            let origin_buffer =
-                self.gpu
-                    .device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("section-origins"),
-                        contents: bytemuck::cast_slice(&origins),
-                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    });
+            // < Translucent). Section origins come from the instance-rate origin buffer, one
+            // instance per draw; buffers are bound once per arena.
+            pass.set_vertex_buffer(1, self.origin_buffer.slice(..));
             let mut entities_drawn = false;
-            for (instance, d) in draws.iter().enumerate() {
+            let mut bound_arena = u32::MAX;
+            let mut bound_layer = None;
+            let mut i = 0;
+            while i < draws.len() {
+                let d = &draws[i];
+                let instance = i;
                 // Entities after the opaque and cutout terrain, before translucent.
                 if !entities_drawn && d.layer == haste_assets::RenderLayer::Translucent {
                     draw_calls += self.entity.draw(&mut pass);
                     pass.set_bind_group(1, &self.atlas_bind_group, &[]);
                     entities_drawn = true;
+                    bound_layer = None;
+                    bound_arena = u32::MAX;
                 }
-                let pipeline = match d.layer {
-                    haste_assets::RenderLayer::Solid | haste_assets::RenderLayer::CutoutMipped => {
-                        &self.pipeline_solid
-                    }
-                    haste_assets::RenderLayer::Cutout => &self.pipeline_cutout,
-                    haste_assets::RenderLayer::Translucent => &self.pipeline_translucent,
-                };
-                pass.set_pipeline(pipeline);
-                pass.set_vertex_buffer(0, d.vertex_buffer.slice(..));
-                pass.set_vertex_buffer(1, origin_buffer.slice(..));
-                pass.set_index_buffer(d.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..d.index_count, 0, instance as u32..instance as u32 + 1);
-                draw_calls += 1;
+                if bound_layer != Some(d.layer) {
+                    let pipeline = match d.layer {
+                        haste_assets::RenderLayer::Solid
+                        | haste_assets::RenderLayer::CutoutMipped => &self.pipeline_solid,
+                        haste_assets::RenderLayer::Cutout => &self.pipeline_cutout,
+                        haste_assets::RenderLayer::Translucent => &self.pipeline_translucent,
+                    };
+                    pass.set_pipeline(pipeline);
+                    bound_layer = Some(d.layer);
+                }
+                if bound_arena != d.arena {
+                    let a = &self.arenas.arenas[d.arena as usize];
+                    pass.set_vertex_buffer(0, a.vertex.slice(..));
+                    pass.set_vertex_buffer(1, self.origin_buffer.slice(..));
+                    pass.set_index_buffer(a.index.slice(..), wgpu::IndexFormat::Uint32);
+                    bound_arena = d.arena;
+                }
+                if self.gpu.multi_draw {
+                    // One call for the run of draws sharing this layer and arena.
+                    let end = draws[i..]
+                        .iter()
+                        .position(|e| e.layer != d.layer || e.arena != d.arena)
+                        .map_or(draws.len(), |n| i + n);
+                    let stride = std::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>();
+                    pass.multi_draw_indexed_indirect(
+                        &self.indirect_buffer,
+                        (i * stride) as u64,
+                        (end - i) as u32,
+                    );
+                    draw_calls += 1;
+                    i = end;
+                } else {
+                    pass.draw_indexed(
+                        d.first_index..d.first_index + d.index_count,
+                        d.base_vertex as i32,
+                        instance as u32..instance as u32 + 1,
+                    );
+                    draw_calls += 1;
+                    i += 1;
+                }
             }
             if !entities_drawn {
                 draw_calls += self.entity.draw(&mut pass);
@@ -1105,6 +1318,7 @@ impl Renderer {
             self.gpu.queue.present(tex);
         }
 
+        self.draw_list = draws;
         Ok(FrameStats {
             frame_ms: started.elapsed().as_secs_f32() * 1000.0,
             chunk_sections_drawn: drawn,

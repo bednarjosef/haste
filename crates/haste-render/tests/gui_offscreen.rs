@@ -298,10 +298,16 @@ fn gui_frame_offscreen() {
         "outside the fill"
     );
     // 50% black over red, blended on sRGB values like vanilla: 255 * 0.5 ~= 127.
+    // Without view formats (GL) the blend happens in linear space: sRGB(0.5 * 1.0) = 188.
     let half = px(&img, 25.5, 25.5);
+    let expected = if renderer.gui_blends_in_srgb() {
+        126..=129
+    } else {
+        185..=190
+    };
     assert!(
-        (126..=129).contains(&half[0]) && half[1] == 0,
-        "sRGB blend {half:?}"
+        expected.contains(&half[0]) && half[1] == 0,
+        "blend {half:?}"
     );
     // Gradient: white top, black bottom, mid grey between.
     assert!(px(&img, 50.0, 10.25)[0] > 245);

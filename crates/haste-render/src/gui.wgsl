@@ -5,7 +5,9 @@
 struct Uniforms {
     // GUI size in GUI pixels (framebuffer / scale).
     size: vec2<f32>,
-    _pad: vec2<f32>,
+    // x: 1 when the target is sRGB-encoded by the hardware (no non-sRGB view on this backend):
+    // colours are converted to linear so they come out unchanged.
+    flags: vec2<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -35,10 +37,21 @@ fn vs_main(v: VertexIn) -> VertexOut {
     return out;
 }
 
+fn to_linear(c: vec3<f32>) -> vec3<f32> {
+    return select(pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), c / 12.92, c <= vec3<f32>(0.04045));
+}
+
+fn out_color(c: vec4<f32>) -> vec4<f32> {
+    if (u.flags.x > 0.5) {
+        return vec4<f32>(to_linear(c.rgb), c.a);
+    }
+    return c;
+}
+
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if (in.rect.z == 0u) {
-        return in.color;
+        return out_color(in.color);
     }
     let origin = vec2<f32>(in.rect.xy);
     let size = vec2<f32>(in.rect.zw);
@@ -49,5 +62,5 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if (c.a <= 0.0) {
         discard;
     }
-    return c;
+    return out_color(c);
 }
