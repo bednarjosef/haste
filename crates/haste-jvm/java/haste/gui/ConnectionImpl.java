@@ -8,8 +8,11 @@ import net.minecraft.core.RegistryAccess;
 public final class ConnectionImpl {
     private ConnectionImpl() {}
 
-    /** Synchronised registries are tier-1 data in Rust; Java sees none yet (lookups come back empty). */
-    public static RegistryAccess.Frozen registryAccess(ClientPacketListener c) { return EmptyRegistries.INSTANCE; }
+    /** Vanilla's built-in registries plus the server's synchronised ones (see {@link Registries}). */
+    public static RegistryAccess.Frozen registryAccess(ClientPacketListener c) { return Registries.access(); }
+
+    /** Serverbound packets from vanilla code: encoded with vanilla's codec and sent by Rust. */
+    public static void send(net.minecraft.client.multiplayer.ClientCommonPacketListenerImpl c, net.minecraft.network.protocol.Packet<?> p) { Packets.send(p); }
 
     /** Server links (custom pause-menu links) are not received by Rust yet: none. */
     public static net.minecraft.server.ServerLinks serverLinks(net.minecraft.client.multiplayer.ClientCommonPacketListenerImpl c) {
@@ -27,7 +30,7 @@ public final class ConnectionImpl {
     public static net.minecraft.client.multiplayer.ClientSuggestionProvider getSuggestionsProvider(ClientPacketListener c) {
         if (suggestions == null) {
             suggestions = new net.minecraft.client.multiplayer.ClientSuggestionProvider(c, Proxies.minecraft,
-                net.minecraft.server.permissions.PermissionSet.NO_PERMISSIONS);
+                PlayerImpl.permissions(Proxies.player));
         }
         return suggestions;
     }

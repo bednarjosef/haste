@@ -20,7 +20,8 @@ use parking_lot::Mutex;
 
 use crate::error::{JvmError, Result};
 use crate::host::{caught, jstring_to_string};
-use crate::proxies::{with_state, GameState};
+use crate::proxies::{encode_stack, with_state, GameState};
+use haste_core::entity::ItemStackData;
 
 /// The vanilla screens Haste opens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -301,9 +302,152 @@ impl GuiPipeline {
         }
     }
 
-    /// Reads or updates the Rust-owned state the proxies see (inventory, chat history, outbox).
+    /// Reads or updates the Rust-owned state the proxies see (inventory mirror, chat history, outbox).
     pub fn with_state<T>(&self, f: impl FnOnce(&mut GameState) -> T) -> T {
         with_state(f)
+    }
+
+    /// Runs `f` with the JNI environment and the bridge object, serialised like every other call;
+    /// a Java exception is returned as an error (cleared).
+    fn with_bridge<T>(
+        &self,
+        f: impl FnOnce(&mut Env, &JObject) -> std::result::Result<T, jni::errors::Error>,
+    ) -> Result<T> {
+        let _g = self.lock.lock();
+        let vm = JavaVM::singleton()?;
+        vm.attach_current_thread(|env| -> Result<T> {
+            let bridge: &JObject = &self.bridge;
+            f(env, bridge).map_err(|e| caught(env, e))
+        })
+    }
+
+    /// Calls a `void` bridge method taking one `byte[]` (and optionally a boolean).
+    fn call_bytes(&self, name: &'static str, bytes: &[u8], flag: Option<bool>) -> Result<()> {
+        self.with_bridge(|env, bridge| {
+            let arr = env.byte_array_from_slice(bytes)?;
+            let name = jni::strings::JNIString::new(name);
+            match flag {
+                None => env.call_method(bridge, &name, jni_sig!("([B)V"), &[(&arr).into()])?,
+                Some(z) => env.call_method(
+                    bridge,
+                    &name,
+                    jni_sig!("([BZ)V"),
+                    &[(&arr).into(), jni::objects::JValue::Bool(z)],
+                )?,
+            };
+            env.delete_local_ref(arr);
+            Ok(())
+        })
+    }
+
+    /// One `registry_data` packet of the configuration phase (body without the packet id, exactly
+    /// as received): collected and built into vanilla registries by [`Self::finish_configuration`].
+    pub fn registry_data(&self, body: &[u8]) -> anyhow::Result<()> {
+        Ok(self.call_bytes("registryData", body, None)?)
+    }
+
+    /// An `update_tags` packet body (without id). `play`: received in the play phase, where the tags
+    /// are applied to the current registries at once; in configuration they wait for
+    /// [`Self::finish_configuration`].
+    pub fn tags(&self, body: &[u8], play: bool) -> anyhow::Result<()> {
+        Ok(self.call_bytes("tags", body, Some(play))?)
+    }
+
+    /// End of the configuration phase: vanilla's `RegistryDataCollector` builds the synchronised
+    /// registries (entries decoded with their codecs, tags bound, item components initialised).
+    pub fn finish_configuration(&self) -> anyhow::Result<()> {
+        self.with_bridge(|env, bridge| {
+            env.call_method(
+                bridge,
+                jni_str!("finishConfiguration"),
+                jni_sig!("()V"),
+                &[],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// Builds the synchronised registries from the vanilla data pack inside the player's client jar
+    /// instead of a server's `registry_data` (no tags). For tests and anything that needs registry
+    /// data without a connection; a connection's registries replace these.
+    pub fn load_jar_registries(&self) -> anyhow::Result<()> {
+        self.with_bridge(|env, bridge| {
+            env.call_method(bridge, jni_str!("loadJarRegistries"), jni_sig!("()V"), &[])?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// A clientbound play packet whose state lives in tier 3 (chat, boss bars, scoreboard, titles,
+    /// tab list, commands, containers, ...): VarInt packet id + body, the exact wire bytes. Java
+    /// decodes it with vanilla's codec and handles it.
+    pub fn packet(&self, id_and_body: &[u8]) -> anyhow::Result<()> {
+        Ok(self.call_bytes("packet", id_and_body, None)?)
+    }
+
+    /// Sets a player inventory slot (vanilla `Inventory` numbering) in Java; the mirror in
+    /// [`GameState::inventory`] follows.
+    pub fn set_inventory_slot(&self, slot: i32, stack: &ItemStackData) -> anyhow::Result<()> {
+        let b = encode_stack(stack);
+        self.with_bridge(|env, bridge| {
+            let arr = env.byte_array_from_slice(&b)?;
+            env.call_method(
+                bridge,
+                jni_str!("setInventorySlot"),
+                jni_sig!("(I[B)V"),
+                &[jni::objects::JValue::Int(slot), (&arr).into()],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// Every registry Java sees with its size (built-in from vanilla's bootstrap, plus the
+    /// synchronised ones after [`Self::finish_configuration`]).
+    pub fn registry_sizes(&self) -> anyhow::Result<std::collections::BTreeMap<String, usize>> {
+        let s = self.call_string("registrySizes")?;
+        Ok(s.lines()
+            .filter_map(|l| l.split_once('='))
+            .filter_map(|(k, v)| Some((k.to_owned(), v.parse().ok()?)))
+            .collect())
+    }
+
+    /// The name of entry `id` of `registry` as Java sees it (`None` if absent).
+    pub fn registry_name(&self, registry: &str, id: i32) -> anyhow::Result<Option<String>> {
+        let s = self.with_bridge(|env, bridge| {
+            let r = JString::from_str(env, registry)?;
+            let v = env
+                .call_method(
+                    bridge,
+                    jni_str!("registryName"),
+                    jni_sig!("(Ljava/lang/String;I)Ljava/lang/String;"),
+                    &[(&r).into(), jni::objects::JValue::Int(id)],
+                )?
+                .l()?;
+            if v.is_null() {
+                return Ok(None);
+            }
+            // Safety: registryName returns a String.
+            let v = unsafe { JString::from_raw(env, v.into_raw()) };
+            Ok(Some(v.try_to_string(env)?))
+        })?;
+        Ok(s)
+    }
+
+    fn call_string(&self, name: &'static str) -> Result<String> {
+        self.with_bridge(|env, bridge| {
+            let name = jni::strings::JNIString::new(name);
+            let v = env
+                .call_method(bridge, &name, jni_sig!("()Ljava/lang/String;"), &[])?
+                .l()?;
+            if v.is_null() {
+                return Ok(String::new());
+            }
+            // Safety: the method returns a String.
+            let v = unsafe { JString::from_raw(env, v.into_raw()) };
+            v.try_to_string(env)
+        })
     }
 }
 

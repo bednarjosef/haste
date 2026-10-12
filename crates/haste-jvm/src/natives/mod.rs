@@ -29,31 +29,6 @@ pub(crate) fn register(env: &mut Env) -> Result<()> {
                 text::line_height as *mut _,
             ),
             NativeMethod::from_raw_parts(
-                jni_str!("stackItem"),
-                jni_str!("(J)I"),
-                state::stack_item as *mut _,
-            ),
-            NativeMethod::from_raw_parts(
-                jni_str!("stackCount"),
-                jni_str!("(J)I"),
-                state::stack_count as *mut _,
-            ),
-            NativeMethod::from_raw_parts(
-                jni_str!("stackSetCount"),
-                jni_str!("(JI)V"),
-                state::stack_set_count as *mut _,
-            ),
-            NativeMethod::from_raw_parts(
-                jni_str!("itemName"),
-                jni_str!("(I)Ljava/lang/String;"),
-                state::item_name as *mut _,
-            ),
-            NativeMethod::from_raw_parts(
-                jni_str!("inventorySize"),
-                jni_str!("()I"),
-                state::inventory_size as *mut _,
-            ),
-            NativeMethod::from_raw_parts(
                 jni_str!("selectedSlot"),
                 jni_str!("()I"),
                 state::selected_slot as *mut _,
@@ -79,9 +54,24 @@ pub(crate) fn register(env: &mut Env) -> Result<()> {
                 state::game_mode as *mut _,
             ),
             NativeMethod::from_raw_parts(
+                jni_str!("permissionLevel"),
+                jni_str!("()I"),
+                state::permission_level as *mut _,
+            ),
+            NativeMethod::from_raw_parts(
                 jni_str!("playerName"),
                 jni_str!("()Ljava/lang/String;"),
                 state::player_name as *mut _,
+            ),
+            NativeMethod::from_raw_parts(
+                jni_str!("inventorySlot"),
+                jni_str!("(I[B)V"),
+                state::inventory_slot as *mut _,
+            ),
+            NativeMethod::from_raw_parts(
+                jni_str!("sendPacket"),
+                jni_str!("([B)V"),
+                state::send_packet as *mut _,
             ),
         ]
     };

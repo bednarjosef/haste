@@ -26,6 +26,18 @@ fn host() -> JvmHost {
         h.timings(),
         h.proxy_summary()
     );
+    // screens need the synchronised registries (dialogs, chat types, ...): from the jar's data pack
+    static JAR_REGISTRIES: std::sync::Once = std::sync::Once::new();
+    JAR_REGISTRIES.call_once(|| {
+        let t = Instant::now();
+        h.gui()
+            .load_jar_registries()
+            .expect("registries from the jar");
+        eprintln!(
+            "synchronised registries from the jar's data pack in {:?}",
+            t.elapsed()
+        );
+    });
     h
 }
 
@@ -112,19 +124,27 @@ fn tier3_value_types_from_the_jar() {
         log.classes.get("net.minecraft.core.BlockPos"),
         Some(&ClassSource::Jar)
     );
-    // tier-1 types never come from the jar
+    // the client engine never comes from the jar
     let refused = h
         .with_env(|env| {
-            Ok(h.load_class(env, "net.minecraft.world.level.block.Blocks")
-                .is_err())
+            Ok(
+                h.load_class(env, "net.minecraft.client.renderer.GameRenderer")
+                    .is_err(),
+            )
         })
         .unwrap();
-    assert!(refused, "Blocks must be refused");
+    assert!(refused, "GameRenderer must be refused");
     let log = h.class_log().unwrap();
     assert!(matches!(
-        log.classes.get("net.minecraft.world.level.block.Blocks"),
+        log.classes
+            .get("net.minecraft.client.renderer.GameRenderer"),
         Some(ClassSource::Refused(_))
     ));
+    // registry data is real vanilla Java (vanilla's bootstrap ran)
+    assert_eq!(
+        log.classes.get("net.minecraft.world.level.block.Blocks"),
+        Some(&ClassSource::Jar)
+    );
     eprintln!(
         "class log: {} jar, {} proxy, {} lib, {} refused",
         log.with(|s| *s == ClassSource::Jar).len(),
@@ -475,25 +495,25 @@ fn chat_screen() {
 #[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
 fn inventory_screen() {
     use haste_core::gui::GuiCommand;
-    use haste_core::RegistryIndex;
-    use haste_jvm::{keys, ContainerInput, ItemSlot};
+    use haste_jvm::{keys, ContainerInput};
     let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
     let h = host();
     let gui = h.gui();
     h.clear_unimplemented().unwrap();
-    gui.with_state(|s| {
-        s.inventory.iter_mut().for_each(|x| *x = None);
-        s.inventory[0] = Some(ItemSlot {
-            item: RegistryIndex(1),
-            count: 64,
-        }); // hotbar slot 0
-        s.inventory[9] = Some(ItemSlot {
-            item: RegistryIndex(42),
-            count: 3,
-        }); // first main slot
-        s.item_names = vec!["minecraft:air".into(), "minecraft:stone".into()];
-        s.container_clicks.clear();
-    });
+    for slot in 0..41 {
+        gui.set_inventory_slot(slot, &haste_jvm::empty_stack())
+            .unwrap();
+    }
+    gui.set_inventory_slot(0, &stack("minecraft:stone", 64))
+        .unwrap(); // hotbar slot 0
+    gui.set_inventory_slot(9, &stack("minecraft:oak_planks", 3))
+        .unwrap(); // first main slot
+    gui.with_state(|s| s.container_clicks.clear());
+    // Rust's mirror follows Java's inventory
+    assert_eq!(
+        gui.with_state(|s| s.slot(0).cloned()),
+        Some(stack("minecraft:stone", 64))
+    );
     open(&h, haste_jvm::ScreenKind::Inventory);
     let f = render(&h, (0.0, 0.0));
     dump(&f);
@@ -516,10 +536,11 @@ fn inventory_screen() {
             _ => None,
         })
         .collect();
+    let (stone, planks) = (item_id("minecraft:stone"), item_id("minecraft:oak_planks"));
     assert_eq!(
         items,
-        vec![(42, 8, 84, 3), (1, 8, 142, 64)],
-        "items from the Rust inventory as GuiCommand::Item"
+        vec![(planks, 8, 84, 3), (stone, 8, 142, 64)],
+        "items from the inventory as GuiCommand::Item"
     );
     let t = texts(&f);
     assert!(
@@ -547,8 +568,8 @@ fn inventory_screen() {
         sprites(&f)
     );
     assert!(
-        texts(&f).contains(&"minecraft:stone".to_string()),
-        "tooltip: {:?}",
+        texts(&f).contains(&"Stone".to_string()),
+        "tooltip with the item's translated name: {:?}",
         texts(&f)
     );
 
@@ -566,13 +587,9 @@ fn inventory_screen() {
         Some((0, 36, ContainerInput::Pickup))
     );
 
-    // Rust state changes show up on the next frame (proxies read through natives)
-    gui.with_state(|s| {
-        s.inventory[0] = Some(ItemSlot {
-            item: RegistryIndex(1),
-            count: 12,
-        })
-    });
+    // inventory changes show up on the next frame
+    gui.set_inventory_slot(0, &stack("minecraft:stone", 12))
+        .unwrap();
     assert!(texts(&render(&h, (0.0, 0.0))).contains(&"12".to_string()));
 
     // E (the inventory key) closes the screen
@@ -589,5 +606,58 @@ fn inventory_screen() {
     assert!(
         unimpl.is_empty(),
         "Unimplemented log for InventoryScreen: {unimpl:#?}"
+    );
+}
+
+/// `minecraft:item` registry id of an item, from the data generator's report (Rust's numbering).
+fn item_id(name: &str) -> u32 {
+    let reports = cache().join("datagen/26.3/reports/registries.json");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(reports).unwrap()).unwrap();
+    v["minecraft:item"]["entries"][name]["protocol_id"]
+        .as_u64()
+        .unwrap() as u32
+}
+
+/// A stack without components (the raw patch is "0 added, 0 removed", as `haste-protocol` keeps it).
+fn stack(item: &str, count: i32) -> haste_core::entity::ItemStackData {
+    haste_core::entity::ItemStackData {
+        count,
+        item: Some(haste_core::RegistryIndex(item_id(item))),
+        components_raw: bytes::Bytes::from_static(&[0, 0]),
+    }
+}
+
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM, data generator reports)"]
+fn builtin_registries_match_the_data_generator() {
+    let h = host();
+    eprintln!("vanilla bootstrap: {}", h.proxy_summary());
+    let java = h.gui().registry_sizes().unwrap();
+    let reports = cache().join("datagen/26.3/reports/registries.json");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(reports).unwrap()).unwrap();
+    let mut checked = 0;
+    for (name, reg) in v.as_object().unwrap() {
+        let entries = reg["entries"].as_object().unwrap();
+        assert_eq!(
+            java.get(name.as_str()).copied(),
+            Some(entries.len()),
+            "size of {name}"
+        );
+        // every entry has the same numeric id in Java as in the report
+        for (entry, e) in entries {
+            let id = e["protocol_id"].as_i64().unwrap() as i32;
+            assert_eq!(
+                h.gui().registry_name(name, id).unwrap().as_deref(),
+                Some(entry.as_str()),
+                "{name} id {id}"
+            );
+            checked += 1;
+        }
+    }
+    eprintln!(
+        "{} built-in registries, {checked} entries: same ids in Java and in the data generator reports",
+        v.as_object().unwrap().len()
     );
 }

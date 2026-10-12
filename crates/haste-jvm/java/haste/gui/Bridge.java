@@ -22,9 +22,17 @@ public final class Bridge {
 
     private Bridge() {}
 
+    /** How long vanilla's bootstrap took (ms). */
+    public static long bootstrapMillis;
+
     public static Bridge create() {
         // like vanilla's startup: version.json from the player's jar (resources come through HasteClassLoader)
         net.minecraft.SharedConstants.tryDetectVersion();
+        // vanilla's bootstrap fills every built-in registry from the player's jar (blocks, items, entity types,
+        // data component types, ...): the registry data tier-3 code looks up. See NOTES.md "Registries".
+        long t = System.nanoTime();
+        net.minecraft.server.Bootstrap.bootStrap();
+        bootstrapMillis = (System.nanoTime() - t) / 1_000_000;
         GfxImpl.width = 320;
         GfxImpl.height = 240;
         Proxies.create();
@@ -75,7 +83,9 @@ public final class Bridge {
         Screen s = ClientImpl.screen;
         if (s == null) return false;
         KeyEvent e = new KeyEvent(key, keycode, mods);
-        return pressed ? s.keyPressed(e) : s.keyReleased(e);
+        boolean r = pressed ? s.keyPressed(e) : s.keyReleased(e);
+        InventorySync.sync();
+        return r;
     }
 
     public boolean charTyped(int codepoint, int mods) {
@@ -99,12 +109,16 @@ public final class Bridge {
         }
         MouseButtonEvent e = new MouseButtonEvent(x, y, new MouseButtonInfo(button, ClientImpl.mods));
         MouseImpl.pressed = pressed ? button : -1;
+        boolean r;
         if (pressed) {
             pressedButton = button;
-            return s.mouseClicked(e, false);
+            r = s.mouseClicked(e, false);
+        } else {
+            pressedButton = -1;
+            r = s.mouseReleased(e);
         }
-        pressedButton = -1;
-        return s.mouseReleased(e);
+        InventorySync.sync();
+        return r;
     }
 
     public boolean scroll(double x, double y, double dx, double dy) {
@@ -117,6 +131,38 @@ public final class Bridge {
 
     /** Rust grabbed/released the mouse itself (e.g. on opening a screen). */
     public void setMouseGrabbed(boolean g) { MouseImpl.grabbed = g; }
+
+    // ---- registries and packets (vanilla wire format, see Registries and Packets) ----
+
+    /** A configuration-phase {@code registry_data} packet body. */
+    public void registryData(byte[] body) { Registries.registryData(body); }
+
+    /** An {@code update_tags} packet body; {@code play}: received in the play phase (applied at once). */
+    public void tags(byte[] body, boolean play) { Registries.tags(body, play); }
+
+    /** End of the configuration phase: builds the synchronised registries. */
+    public void finishConfiguration() { Registries.finish(); InventorySync.reset(); }
+
+    /** Synchronised registries from the vanilla data pack in the client jar (no server; tests). */
+    public void loadJarRegistries() throws java.io.IOException { Registries.loadFromJar(); InventorySync.reset(); }
+
+    /** A clientbound play packet (VarInt id + body) whose state lives in tier 3. */
+    public void packet(byte[] idAndBody) {
+        Packets.receive(idAndBody);
+        InventorySync.sync();
+    }
+
+    /** Sets a player inventory slot (vanilla numbering) from a stack in vanilla's network encoding. */
+    public void setInventorySlot(int slot, byte[] stack) {
+        Proxies.inventory.setItem(slot, InventorySync.decode(stack));
+        InventorySync.sync();
+    }
+
+    /** "registry=size" lines of every registry Java sees (tests). */
+    public String registrySizes() { return Registries.sizes(); }
+
+    /** Name of an entry by registry and numeric id (tests), or null. */
+    public String registryName(String registry, int id) { return Registries.name(registry, id); }
 
     /** Rust installed new text metrics: drop cached glyph widths. */
     public void metricsChanged() {

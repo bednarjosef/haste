@@ -14,11 +14,11 @@ import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.sounds.SoundManager;
 import net.minecraft.world.entity.player.Inventory;
-import net.minecraft.world.item.ItemStack;
 
 /**
  * The canonical tier-2 proxies. Exactly one Java object per Rust object for the JVM's lifetime (mods will keep
- * state on them): singletons for the client objects, one {@link ItemStack} per inventory slot handle.
+ * state on them): singletons for the client objects. The player's {@link Inventory} is a real vanilla inventory
+ * (with real item stacks) attached to the player proxy; see {@link InventorySync}.
  */
 public final class Proxies {
     private Proxies() {}
@@ -32,9 +32,9 @@ public final class Proxies {
     public static GuiGraphicsExtractor graphics;
     public static LocalPlayer player;
     public static Inventory inventory;
+    public static net.minecraft.world.entity.EntityEquipment equipment;
     public static net.minecraft.client.multiplayer.ClientLevel level;
-    public static ItemStack empty;
-    private static final Map<Long, ItemStack> STACKS = new HashMap<>();
+    public static net.minecraft.client.multiplayer.ClientPacketListener connection;
 
     static void create() {
         minecraft = make(Minecraft.class);
@@ -45,11 +45,13 @@ public final class Proxies {
         sound = make(SoundManager.class);
         graphics = make(GuiGraphicsExtractor.class);
         player = make(LocalPlayer.class);
-        inventory = make(Inventory.class);
         level = make(net.minecraft.client.multiplayer.ClientLevel.class);
-        empty = make(ItemStack.class);
-        StackImpl.setHandle(empty, -1);
-        setStatic(ItemStack.class, "EMPTY", ItemStack.class, empty);
+        connection = service(net.minecraft.client.multiplayer.ClientPacketListener.class);
+        // the player's inventory and equipment are real vanilla containers on the player proxy
+        equipment = new net.minecraft.world.entity.EntityEquipment();
+        set(player, "equipment", net.minecraft.world.entity.EntityEquipment.class, equipment);
+        inventory = new Inventory(player, equipment);
+        set(player, "inventory", Inventory.class, inventory);
 
         set(font, "lineHeight", int.class, haste.rt.Native.lineHeight());
         set(minecraft, "font", Font.class, font);
@@ -63,8 +65,7 @@ public final class Proxies {
         minecraft.level = level;
         set(minecraft, "gameMode", net.minecraft.client.multiplayer.MultiPlayerGameMode.class,
             make(net.minecraft.client.multiplayer.MultiPlayerGameMode.class));
-        set(player, "connection", net.minecraft.client.multiplayer.ClientPacketListener.class,
-            service(net.minecraft.client.multiplayer.ClientPacketListener.class));
+        set(player, "connection", net.minecraft.client.multiplayer.ClientPacketListener.class, connection);
         KeyImpl.installDefaults(options);
         // the recipe book is a no-op proxy (no <clinit>), but InventoryScreen still shows its toggle button:
         // the sprites are the two that exist in the jar under textures/gui/sprites/recipe_book/
@@ -87,12 +88,6 @@ public final class Proxies {
         return c.cast(SERVICES.computeIfAbsent(c, Proxies::make));
     }
 
-    /** The canonical proxy for the stack in inventory slot {@code slot}. */
-    public static ItemStack stack(long slot) {
-        if (slot < 0) return empty;
-        return STACKS.computeIfAbsent(slot, h -> { ItemStack s = make(ItemStack.class); StackImpl.setHandle(s, h); return s; });
-    }
-
     /**
      * Instantiates a generated proxy through its generated no-arg constructor. Method handles, not core
      * reflection: reflection would resolve every constructor/field type of the class (most are refused).
@@ -112,10 +107,8 @@ public final class Proxies {
             try {
                 MethodHandles.privateLookupIn(k, MethodHandles.lookup()).findVarHandle(k, field, type).set(o, v);
                 return;
-            } catch (NoSuchFieldException e) {
-                // try the superclass
-            } catch (IllegalAccessException e) {
-                throw new IllegalStateException(e);
+            } catch (NoSuchFieldException | IllegalAccessException e) {
+                // declared in (and private to) a superclass: try there
             }
         }
         throw new IllegalStateException("no field " + field + " on " + o.getClass().getName());

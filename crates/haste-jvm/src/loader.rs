@@ -8,119 +8,78 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Packages served as real vanilla Java from the client jar: stateless value types, chat, codecs,
-/// the Screen/widget family and their helpers.
+/// Packages served as real vanilla Java from the client jar.
+///
+/// Since the registry bridge (see `NOTES.md`, "Registries"), vanilla's own bootstrap runs in tier 3:
+/// every built-in registry entry (blocks, items, entity types, data component types, ...) is a real
+/// vanilla object created by the player's jar. So `net/minecraft/` as a whole is allowed: the
+/// definitions, codecs, value types and the GUI. What must not run from the jar is denied below
+/// (the client engine and the server) or is a generated proxy (tier-1 objects, which win over the
+/// jar). Client packages are re-allowed one by one.
 pub const ALLOW_PACKAGES: &[&str] = &[
-    "net/minecraft/core/",
-    "net/minecraft/resources/",
-    "net/minecraft/network/chat/",
-    "net/minecraft/network/codec/",
-    "net/minecraft/tags/",
-    "net/minecraft/world/inventory/",
-    "net/minecraft/commands/",
-    "net/minecraft/network/protocol/",
-    "net/minecraft/nbt/",
-    "net/minecraft/util/",
-    "net/minecraft/locale/",
+    "net/minecraft/",
     "net/minecraft/client/gui/components/",
     "net/minecraft/client/gui/screens/",
     "net/minecraft/client/gui/navigation/",
     "net/minecraft/client/gui/narration/",
     "net/minecraft/client/gui/layouts/",
+    "net/minecraft/client/gui/contextualbar/",
+    "net/minecraft/client/gui/font/",
     "net/minecraft/client/input/",
-    "com/mojang/math/",
+    "net/minecraft/client/multiplayer/chat/",
     "net/minecraft/client/renderer/entity/state/",
+    "net/minecraft/client/resources/language/",
+    "net/minecraft/server/packs/",
+    "net/minecraft/server/permissions/",
+    "net/minecraft/server/dialog/",
+    "net/minecraft/server/jsonrpc/",
+    "com/mojang/math/",
     "com/mojang/blaze3d/platform/cursor/",
 ];
 
-/// Single classes served as real vanilla Java (outside the allowed packages).
+/// Single classes served as real vanilla Java inside denied packages (value types and helpers the
+/// GUI and the bootstrap reach).
 pub const ALLOW_CLASSES: &[&str] = &[
-    "net/minecraft/ChatFormatting",
-    "net/minecraft/CharPredicate",
-    "net/minecraft/IdentifierException",
-    "net/minecraft/Optionull",
-    "net/minecraft/SharedConstants",
-    "net/minecraft/DetectedVersion",
-    "net/minecraft/WorldVersion",
-    "net/minecraft/CrashReport",
-    "net/minecraft/CrashReportCategory",
-    "net/minecraft/CrashReportDetail",
-    "net/minecraft/ReportedException",
-    "net/minecraft/ReportType",
-    "net/minecraft/world/item/TooltipFlag",
-    "net/minecraft/world/item/Item$TooltipContext",
-    "net/minecraft/world/level/storage/DataVersion",
-    "net/minecraft/server/packs/metadata/pack/PackFormat",
+    "net/minecraft/server/Bootstrap",
+    "net/minecraft/server/LoggedPrintStream",
+    "net/minecraft/server/DebugLoggedPrintStream",
+    "net/minecraft/server/ServerScoreboard",
+    "net/minecraft/server/level/ServerEntityGetter",
+    "net/minecraft/server/level/TicketType",
+    "net/minecraft/server/network/Filterable",
     "net/minecraft/server/ServerLinks",
-    "net/minecraft/server/permissions/",
-    "net/minecraft/client/multiplayer/chat/ChatAbilities",
+    "net/minecraft/server/RegistryLayer",
     "net/minecraft/client/multiplayer/ClientSuggestionProvider",
-    "net/minecraft/client/multiplayer/chat/ChatRestriction",
-    "net/minecraft/client/multiplayer/chat/GuiMessage",
-    "net/minecraft/client/multiplayer/chat/GuiMessageTag",
-    "net/minecraft/client/multiplayer/chat/GuiMessageSource",
-    "net/minecraft/network/ClientboundPacketListener",
-    "net/minecraft/network/ServerboundPacketListener",
-    "net/minecraft/network/PacketListener",
-    "net/minecraft/network/TickablePacketListener",
-    "net/minecraft/network/PacketSendListener",
-    "net/minecraft/network/ConnectionProtocol",
-    "net/minecraft/network/ProtocolInfo",
-    "net/minecraft/network/DisconnectionDetails",
-    "net/minecraft/network/LpVec3",
-    "net/minecraft/network/SkipPacketException",
-    "net/minecraft/network/SkipPacketDecoderException",
-    "net/minecraft/network/SkipPacketEncoderException",
-    "net/minecraft/network/FriendlyByteBuf",
-    "net/minecraft/network/RegistryFriendlyByteBuf",
-    "net/minecraft/network/VarInt",
-    "net/minecraft/network/VarLong",
-    "net/minecraft/network/Utf8String",
-    "net/minecraft/network/HashedPatchMap",
-    "net/minecraft/network/HashedStack",
-    "net/minecraft/SystemReport",
-    "net/minecraft/TracingExecutor",
-    "net/minecraft/DefaultUncaughtExceptionHandler",
-    "net/minecraft/DefaultUncaughtExceptionHandlerWithName",
+    "net/minecraft/client/multiplayer/RegistryDataCollector",
+    "net/minecraft/client/multiplayer/ClientRegistryLayer",
+    "net/minecraft/client/multiplayer/PlayerInfo",
+    "net/minecraft/client/multiplayer/CommonListenerCookie",
     "net/minecraft/client/StringSplitter",
     "net/minecraft/client/InputType",
     "net/minecraft/client/MusicToastDisplayState",
     "net/minecraft/client/NarratorStatus",
-    "net/minecraft/world/entity/player/ChatVisiblity",
-    "net/minecraft/world/entity/EquipmentSlot",
-    "net/minecraft/world/Nameable",
-    "net/minecraft/world/Container",
-    "net/minecraft/world/Clearable",
-    "net/minecraft/world/entity/SlotProvider",
-    "net/minecraft/world/entity/SlotAccess",
-    "net/minecraft/world/entity/ContainerUser",
-    "net/minecraft/world/entity/EquipmentSlotGroup",
     "net/minecraft/client/ComponentCollector",
+    "net/minecraft/client/ScrollWheelHandler",
+    "net/minecraft/client/AttackIndicatorStatus",
+    "net/minecraft/client/CameraType",
+    "net/minecraft/client/DeltaTracker",
     "net/minecraft/client/gui/ActiveTextCollector",
     "net/minecraft/client/gui/TextAlignment",
     "net/minecraft/client/gui/ComponentPath",
     "net/minecraft/client/gui/BundleMouseActions",
-    "net/minecraft/client/ScrollWheelHandler",
     "net/minecraft/client/gui/ItemSlotMouseAction",
+    "net/minecraft/client/gui/Hud",
     "net/minecraft/client/gui/GuiGraphicsExtractor$HoveredTextEffects",
     "net/minecraft/client/gui/Font$DisplayMode",
 ];
 
-/// Tier-1 types (stateful game objects owned by Rust) and engine types that must never be loaded
-/// from the jar: they resolve to generated proxies, or fail and land in the log as a to-do.
+/// The client engine (rendering, sound, window, the `Minecraft` object, the connection) and the
+/// server: never loaded from the jar. Tier-1 objects inside allowed packages (`Level`, `Entity`,
+/// `Player`, ...) are generated proxies, which win over the jar; see `proxies.conf`.
 pub const DENY: &[&str] = &[
-    "net/minecraft/client/Minecraft",
-    "net/minecraft/client/player/",
-    "net/minecraft/client/multiplayer/",
-    "net/minecraft/world/entity/",
-    "net/minecraft/world/item/ItemStack",
-    "net/minecraft/world/level/",
+    "net/minecraft/client/",
     "net/minecraft/server/",
-    "net/minecraft/client/gui/GuiGraphicsExtractor",
-    "net/minecraft/client/gui/Font",
-    "net/minecraft/client/gui/Gui",
-    "net/minecraft/client/gui/Hud",
-    "net/minecraft/core/registries/BuiltInRegistries",
+    "com/mojang/",
 ];
 
 /// How the game class loader resolved a class (or why it did not).
@@ -234,9 +193,9 @@ mod tests {
     #[test]
     fn deny_covers_tier1_types() {
         for t in [
-            "net/minecraft/client/Minecraft",
-            "net/minecraft/world/item/ItemStack",
-            "net/minecraft/client/player/",
+            "net/minecraft/client/",
+            "net/minecraft/server/",
+            "com/mojang/",
         ] {
             assert!(DENY.contains(&t), "{t}");
         }

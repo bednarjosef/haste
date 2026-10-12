@@ -3,9 +3,8 @@ package haste.gui;
 import haste.rt.Native;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
-import net.minecraft.world.item.ItemStack;
 
-/** Bodies of the {@code Player}/{@code LocalPlayer} and {@code Inventory} proxies (state in Rust). */
+/** Bodies of the {@code Player}/{@code LocalPlayer} proxy (state in Rust; the inventory is a real vanilla one). */
 public final class PlayerImpl {
     private PlayerImpl() {}
 
@@ -28,6 +27,21 @@ public final class PlayerImpl {
     }
 
     // ---- LocalPlayer ----
+    /** The server's operator level for this player (entity events 24-28), as vanilla's level-based set. */
+    public static net.minecraft.server.permissions.PermissionSet permissions(net.minecraft.client.player.LocalPlayer p) {
+        return permissionSet(Native.permissionLevel());
+    }
+
+    static net.minecraft.server.permissions.PermissionSet permissionSet(int level) {
+        return switch (level) {
+            case 1 -> net.minecraft.server.permissions.LevelBasedPermissionSet.MODERATOR;
+            case 2 -> net.minecraft.server.permissions.LevelBasedPermissionSet.GAMEMASTER;
+            case 3 -> net.minecraft.server.permissions.LevelBasedPermissionSet.ADMIN;
+            case 4 -> net.minecraft.server.permissions.LevelBasedPermissionSet.OWNER;
+            default -> net.minecraft.server.permissions.LevelBasedPermissionSet.ALL;
+        };
+    }
+
     /** Haste has no account-level chat restrictions (yet): everything allowed. */
     public static net.minecraft.client.multiplayer.chat.ChatAbilities chatAbilities(net.minecraft.client.player.LocalPlayer p) {
         return net.minecraft.client.multiplayer.chat.ChatAbilities.NO_RESTRICTIONS;
@@ -38,16 +52,4 @@ public final class PlayerImpl {
         Native.containerInput(p.containerMenu == null ? 0 : p.containerMenu.containerId, -1, -1, -1);
     }
 
-    // ---- Inventory ----
-    public static ItemStack getItem(Inventory inv, int slot) {
-        if (slot < 0 || slot >= Native.inventorySize()) return Proxies.empty;
-        return Proxies.stack(slot);
-    }
-    /** The player inventory's name, vanilla's "container.inventory" translation. */
-    public static net.minecraft.network.chat.Component getName(Inventory inv) {
-        return net.minecraft.network.chat.Component.translatable("container.inventory");
-    }
-    public static int getContainerSize(Inventory inv) { return Native.inventorySize(); }
-    public static int getSelectedSlot(Inventory inv) { return Native.selectedSlot(); }
-    public static ItemStack getSelectedItem(Inventory inv) { return getItem(inv, Native.selectedSlot()); }
 }

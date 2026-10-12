@@ -43,6 +43,8 @@ public final class Boot {
         String[] deny = many.getOrDefault("deny", List.of()).toArray(new String[0]);
         boolean verbose = Boolean.parseBoolean(one.getOrDefault("verbose", "false"));
 
+        // game-side code reads the player's jar for data it cannot get through the class loader (data pack listing)
+        System.setProperty("haste.clientJar", clientJar.toString());
         long t0 = System.nanoTime();
         HasteClassLoader l = new HasteClassLoader(gameDir, proxyDir, clientJar, libs, allowPackages, allowClasses, deny, verbose);
         String realKey = String.join(",", allowPackages) + "|" + String.join(",", allowClasses) + "|" + String.join(",", deny);
@@ -53,8 +55,9 @@ public final class Boot {
         Class<?> bridge = l.loadClass("haste.gui.Bridge");
         Object b = bridge.getMethod("create").invoke(null);
         long t2 = System.nanoTime();
-        genSummary += String.format(" | proxies %.0f ms, Bridge.create (game classes, canonical proxies) %.0f ms",
-            (t1 - t0) / 1e6, (t2 - t1) / 1e6);
+        long bootstrap = bridge.getField("bootstrapMillis").getLong(null);
+        genSummary += String.format(" | proxies %.0f ms, Bridge.create %.0f ms (vanilla bootstrap %d ms, canonical proxies)",
+            (t1 - t0) / 1e6, (t2 - t1) / 1e6, bootstrap);
         return b;
     }
 

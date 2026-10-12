@@ -30,7 +30,7 @@ pub struct JvmConfig {
     pub build_dir: PathBuf,
     /// The proxy config (`proxies.conf`).
     pub proxies_conf: PathBuf,
-    /// Where generated proxies are written at startup (`cache/proxies/26.3`).
+    /// Where generated proxies are written at startup (`cache/proxies/26.3-<checkout hash>`).
     pub proxy_dir: PathBuf,
     /// Extra JVM options (e.g. `-Xmx512m`).
     pub jvm_options: Vec<String>,
@@ -82,7 +82,13 @@ impl JvmConfig {
             java_src: crate_dir.clone(),
             build_dir: crate_dir.join("build"),
             proxies_conf: crate_dir.join("proxies.conf"),
-            proxy_dir: cache.join("proxies").join(haste_core::paths::MC_VERSION),
+            // one proxy set per checkout: worktrees with different proxies.conf must not regenerate
+            // each other's classes under a running JVM
+            proxy_dir: cache.join("proxies").join(format!(
+                "{}-{:016x}",
+                haste_core::paths::MC_VERSION,
+                fnv1a(crate_dir.to_string_lossy().as_bytes())
+            )),
             jvm_options: Vec::new(),
             verbose: std::env::var_os("HASTE_JVM_VERBOSE").is_some(),
         };
@@ -190,6 +196,12 @@ impl JvmHost {
             .version(JNIVersion::V21)
             .option(format!("-Djava.class.path={boot_cp}"))
             .option("-Djava.awt.headless=true")
+            // vanilla code logs through log4j: our configuration (stderr, warnings) instead of the jar's,
+            // which writes log files into the working directory
+            .option(format!(
+                "-Dlog4j2.configurationFile={}",
+                cfg.java_src.join("log4j2.xml").display()
+            ))
             .option("-Xshare:auto")
             .option("-Xss4m")
             // Link game classes lazily: with verification on, the verifier loads every type a method
@@ -453,6 +465,13 @@ fn build_one(cfg: &JvmConfig, what: &str, stamp: &str) -> Result<bool> {
     }
     std::fs::write(&stamp_file, stamp).map_err(|e| JvmError::JavaBuild(e.to_string()))?;
     Ok(true)
+}
+
+/// FNV-1a, for short stable directory names.
+fn fnv1a(b: &[u8]) -> u64 {
+    b.iter().fold(0xcbf2_9ce4_8422_2325, |h, &x| {
+        (h ^ u64::from(x)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 /// A cheap fingerprint of source trees and single files: every file's path, size and mtime.

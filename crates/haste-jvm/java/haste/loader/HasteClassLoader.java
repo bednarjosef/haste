@@ -120,7 +120,7 @@ public final class HasteClassLoader extends ClassLoader {
     public String refusal(String internal) {
         int allowLen = Math.max(longest(internal, allowClasses), longest(internal, allowPackages));
         int denyLen = longest(internal, deny);
-        if (denyLen >= 0 && denyLen >= allowLen) return "deny-listed (tier 1: needs a proxy)";
+        if (denyLen >= 0 && denyLen >= allowLen) return "deny-listed (client engine or server; tier-1 objects need a proxy)";
         if (allowLen >= 0) return null;
         return "not in the tier-3 allow-list";
     }

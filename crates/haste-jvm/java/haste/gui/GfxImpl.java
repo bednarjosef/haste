@@ -227,24 +227,33 @@ public final class GfxImpl {
     // ---- items ----
     public static void item(GuiGraphicsExtractor g, ItemStack s, int x, int y) { item(g, s, x, y, 0); }
     public static void item(GuiGraphicsExtractor g, ItemStack s, int x, int y, int seed) {
-        if (s == null) return;
-        int item = StackImpl.itemId(s);
-        if (item < 0) return;
+        if (s == null || s.isEmpty()) return;
         POSE.sync();
-        GuiBatch.op(GuiBatch.ITEM, item, x, y, StackImpl.getCount(s));
+        GuiBatch.op(GuiBatch.ITEM, itemId(s), x, y, s.getCount());
     }
+
+    /** Index of the stack's item in the {@code minecraft:item} registry (the same numbering as Rust's). */
+    static int itemId(ItemStack s) { return net.minecraft.core.registries.BuiltInRegistries.ITEM.getId(s.getItem()); }
     public static void item(GuiGraphicsExtractor g, net.minecraft.world.entity.LivingEntity e, ItemStack s, int x, int y, int seed) { item(g, s, x, y, seed); }
     public static void fakeItem(GuiGraphicsExtractor g, ItemStack s, int x, int y) { item(g, s, x, y, 0); }
     public static void fakeItem(GuiGraphicsExtractor g, ItemStack s, int x, int y, int seed) { item(g, s, x, y, seed); }
 
-    /** Stack count in the bottom-right corner (white, shadow), like vanilla's decoration. Durability bars: not yet. */
+    /**
+     * Stack decorations: the count in the bottom-right corner (white, shadow) and the durability bar (13 px wide,
+     * 2 px high, black under the item's bar colour), as they appear in the game. Cooldown overlays: not yet.
+     */
     public static void itemDecorations(GuiGraphicsExtractor g, Font f, ItemStack s, int x, int y) { itemDecorations(g, f, s, x, y, null); }
     public static void itemDecorations(GuiGraphicsExtractor g, Font f, ItemStack s, int x, int y, String text) {
-        if (s == null || StackImpl.itemId(s) < 0) return;
-        int count = StackImpl.getCount(s);
+        if (s == null || s.isEmpty()) return;
+        POSE.sync();
+        if (s.isBarVisible()) {
+            int bx = x + 2, by = y + 13;
+            GuiBatch.op(GuiBatch.FILL, bx, by, bx + 13, by + 2, 0xFF000000);
+            GuiBatch.op(GuiBatch.FILL, bx, by, bx + s.getBarWidth(), by + 1, 0xFF000000 | s.getBarColor());
+        }
+        int count = s.getCount();
         String label = text != null ? text : (count != 1 ? Integer.toString(count) : null);
         if (label == null) return;
-        POSE.sync();
         Text.emit(label, x + 19 - 2 - FontImpl.width(f, label), y + 6 + 3, -1, true);
     }
 
@@ -293,9 +302,10 @@ public final class GfxImpl {
         tooltip = List.of(c.getVisualOrderText()); tooltipX = x; tooltipY = y;
     }
 
+    /** An item's tooltip: vanilla's own lines ({@code Screen.getTooltipFromItem}: name, components, enchantments). */
     public static void setTooltipForNextFrame(GuiGraphicsExtractor g, Font f, ItemStack s, int x, int y) {
-        String name = StackImpl.displayName(s);
-        if (name != null) setTooltipForNextFrame(g, f, Component.literal(name), x, y);
+        if (s == null || s.isEmpty()) return;
+        setComponentTooltipForNextFrame(g, f, net.minecraft.client.gui.screens.Screen.getTooltipFromItem(Proxies.minecraft, s), x, y);
     }
     public static void extractDeferredElements(GuiGraphicsExtractor g, int mx, int my, float partial) {}
 
