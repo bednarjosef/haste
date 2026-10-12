@@ -29,3 +29,4 @@ winit.workspace = true
 glam.workspace = true
 parking_lot.workspace = true
 crossbeam-channel.workspace = true
+image.workspace = true
