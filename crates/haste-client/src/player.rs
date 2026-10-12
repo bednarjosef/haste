@@ -158,6 +158,8 @@ pub struct LocalPlayer {
     pub health: f32,
     pub food: i32,
     pub saturation: f32,
+    /// Air supply in ticks (entity metadata index 1; 300 when not under water).
+    pub air_supply: i32,
     /// Selected hotbar slot (0..8).
     pub held_slot: i32,
     /// Whether a `player_position` arrived since login/respawn.
@@ -194,6 +196,7 @@ impl LocalPlayer {
             health: 20.0,
             food: 20,
             saturation: 5.0,
+            air_supply: 300,
             held_slot: 0,
             has_position: false,
             loaded: false,
@@ -320,6 +323,14 @@ impl LocalPlayer {
                 self.saturation = h.saturation;
             }
             P::SetHeldSlot(s) => self.held_slot = s.slot,
+            P::SetEntityData(d) if EntityId(d.entity_id) == self.entity_id => {
+                // Wiki "Entity metadata": index 1 is the air supply (VarInt).
+                for e in &d.metadata {
+                    if let (1, haste_core::entity::MetadataValue::VarInt(v)) = (e.index, &e.value) {
+                        self.air_supply = *v;
+                    }
+                }
+            }
             P::GameEvent(g) if g.event == 3 => {
                 if let Some(m) = GameMode::from_id(g.value as i32) {
                     self.game_mode = m;

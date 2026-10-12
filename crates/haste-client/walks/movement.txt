@@ -2,6 +2,7 @@
 # HASTE_WALK_SCRIPT=crates/haste-client/walks/movement.txt haste --headless --server 127.0.0.1:25612 --seconds 300
 wait 40
 cmd gamemode survival
+cmd difficulty peaceful
 cmd time set day
 cmd fill 0 -60 0 60 -40 60 air
 wait 10
