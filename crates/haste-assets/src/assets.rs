@@ -585,6 +585,16 @@ pub struct ModelJson {
     pub gui_light: bool,
 }
 
+/// `haste_core::gui::TextMetrics` over the bitmap font: width from glyph
+/// advances (space provider's 4 px for spaces), line height 9 like vanilla.
+impl haste_core::gui::TextMetrics for BitmapFont {
+    fn width(&self, text: &str) -> i32 {
+        text.chars()
+            .map(|ch| self.char_width(ch).unwrap_or(6) as i32)
+            .sum()
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -638,6 +648,10 @@ pub(crate) mod tests {
             assert!(font.char_width('W').unwrap() > font.char_width('i').unwrap_or(0));
             let en = a.language("en_us").unwrap();
             assert!(en.contains_key("block.minecraft.stone"));
+            use haste_core::gui::TextMetrics;
+            assert_eq!(font.width("i"), 1); // 1 px glyph + 0 extra
+            assert!(font.width("W") > font.width("i"));
+            assert_eq!(font.width("ii"), 2);
         });
     }
 
