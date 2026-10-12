@@ -15,12 +15,20 @@ pub struct Dimensions {
 
 impl Default for Dimensions {
     fn default() -> Self {
-        Dimensions { width: 0.6, height: 1.8, eye_height: 1.62 }
+        Dimensions {
+            width: 0.6,
+            height: 1.8,
+            eye_height: 1.62,
+        }
     }
 }
 
 /// The default standing hitbox (0.6 x 1.8) used for every type the oracle does not name.
-const DEFAULT: Dimensions = Dimensions { width: 0.6, height: 1.8, eye_height: 1.62 };
+const DEFAULT: Dimensions = Dimensions {
+    width: 0.6,
+    height: 1.8,
+    eye_height: 1.62,
+};
 
 /// Sneaking/crawling height scaling. Observed on vanilla servers: a 1.8-tall humanoid crouches to
 /// 1.5, crawls to 0.6. We scale the standing height by the same ratios, which reproduces the wiki

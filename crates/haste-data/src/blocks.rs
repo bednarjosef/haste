@@ -99,8 +99,7 @@ impl BlockStates {
         let mut state_props: Vec<(u32, u32)> = Vec::new();
 
         for (name, block) in &raw {
-            let ident =
-                Identifier::parse(name).map_err(|e| anyhow::anyhow!("blocks.json: {e}"))?;
+            let ident = Identifier::parse(name).map_err(|e| anyhow::anyhow!("blocks.json: {e}"))?;
 
             // Property descriptors sorted by name (state-id radix order).
             let mut properties: Vec<PropertyDesc> = Vec::new();
@@ -108,7 +107,10 @@ impl BlockStates {
                 for (pname, values) in props {
                     let pid = strings.intern(pname);
                     let vals: Vec<u32> = values.iter().map(|v| strings.intern(v)).collect();
-                    properties.push(PropertyDesc { name: pid, values: vals });
+                    properties.push(PropertyDesc {
+                        name: pid,
+                        values: vals,
+                    });
                 }
             }
 
@@ -151,7 +153,11 @@ impl BlockStates {
                 let props = state.properties.as_deref().unwrap_or(&[]);
                 let start = state_props.len() as u32;
                 let n_props = props.len();
-                state_props.extend(props.iter().map(|&(k, v)| (strings.intern(k), strings.intern(v))));
+                state_props.extend(
+                    props
+                        .iter()
+                        .map(|&(k, v)| (strings.intern(k), strings.intern(v))),
+                );
                 if n_props != blocks[block_index as usize].properties.len() {
                     anyhow::bail!(
                         "blocks.json: {name}: state {} has {} properties, expected {}",
@@ -229,7 +235,12 @@ impl BlockStates {
         let mut v: Vec<(String, String)> = self
             .prop_ids(s)
             .iter()
-            .map(|&(k, val)| (self.strings.get(k).to_owned(), self.strings.get(val).to_owned()))
+            .map(|&(k, val)| {
+                (
+                    self.strings.get(k).to_owned(),
+                    self.strings.get(val).to_owned(),
+                )
+            })
             .collect();
         v.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         v
@@ -276,12 +287,7 @@ impl BlockStates {
     }
 
     /// State `s` with property `name` set to `value` (the other properties unchanged).
-    pub fn with_property(
-        &self,
-        s: BlockStateId,
-        name: &str,
-        value: &str,
-    ) -> Option<BlockStateId> {
+    pub fn with_property(&self, s: BlockStateId, name: &str, value: &str) -> Option<BlockStateId> {
         if self.property_value(s, name) == Some(value) {
             return Some(s);
         }
@@ -334,9 +340,7 @@ mod ordered_pairs {
     use serde::de::{Deserializer, MapAccess, Visitor};
     use std::fmt;
 
-    pub fn deserialize<'de, D>(
-        d: D,
-    ) -> Result<Option<Vec<(&'de str, &'de str)>>, D::Error>
+    pub fn deserialize<'de, D>(d: D) -> Result<Option<Vec<(&'de str, &'de str)>>, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -359,7 +363,10 @@ mod ordered_pairs {
                     fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
                         f.write_str("a map of property names to values")
                     }
-                    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                    fn visit_map<A: MapAccess<'de>>(
+                        self,
+                        mut map: A,
+                    ) -> Result<Self::Value, A::Error> {
                         let mut out = Vec::with_capacity(map.size_hint().unwrap_or(0));
                         while let Some((k, v)) = map.next_entry()? {
                             out.push((k, v));
@@ -407,8 +414,14 @@ mod tests {
         let bs = BlockStates::parse(&stone_json(), None).unwrap();
         assert_eq!(bs.len(), 6);
         assert_eq!(bs.block_of(BlockStateId(0)), &Identifier::minecraft("air"));
-        assert_eq!(bs.block_of(BlockStateId(1)), &Identifier::minecraft("stone"));
-        assert_eq!(bs.block_of(BlockStateId(2)), &Identifier::minecraft("oak_stairs"));
+        assert_eq!(
+            bs.block_of(BlockStateId(1)),
+            &Identifier::minecraft("stone")
+        );
+        assert_eq!(
+            bs.block_of(BlockStateId(2)),
+            &Identifier::minecraft("oak_stairs")
+        );
         assert_eq!(
             bs.default_state(&Identifier::minecraft("oak_stairs")),
             Some(BlockStateId(4))
@@ -422,21 +435,36 @@ mod tests {
         assert_eq!(
             bs.state(
                 &stairs,
-                &[("facing", "north"), ("half", "top"), ("shape", "straight"), ("waterlogged", "true")]
+                &[
+                    ("facing", "north"),
+                    ("half", "top"),
+                    ("shape", "straight"),
+                    ("waterlogged", "true")
+                ]
             ),
             Some(BlockStateId(2))
         );
         assert_eq!(
             bs.state(
                 &stairs,
-                &[("facing", "north"), ("half", "top"), ("shape", "straight"), ("waterlogged", "false")]
+                &[
+                    ("facing", "north"),
+                    ("half", "top"),
+                    ("shape", "straight"),
+                    ("waterlogged", "false")
+                ]
             ),
             Some(BlockStateId(3))
         );
         assert_eq!(
             bs.state(
                 &stairs,
-                &[("facing", "north"), ("half", "top"), ("shape", "inner_left"), ("waterlogged", "true")]
+                &[
+                    ("facing", "north"),
+                    ("half", "top"),
+                    ("shape", "inner_left"),
+                    ("waterlogged", "true")
+                ]
             ),
             Some(BlockStateId(4))
         );
@@ -515,7 +543,11 @@ mod tests {
         assert_eq!(
             bs.state(
                 &Identifier::minecraft("chest"),
-                &[("facing", "east"), ("type", "left"), ("waterlogged", "true")]
+                &[
+                    ("facing", "east"),
+                    ("type", "left"),
+                    ("waterlogged", "true")
+                ]
             ),
             Some(BlockStateId(21))
         );

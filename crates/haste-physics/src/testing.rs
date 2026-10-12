@@ -34,7 +34,10 @@ pub struct TestShapes {
 }
 
 fn bx(x0: f64, y0: f64, z0: f64, x1: f64, y1: f64, z1: f64) -> Aabb {
-    Aabb { min: DVec3::new(x0, y0, z0), max: DVec3::new(x1, y1, z1) }
+    Aabb {
+        min: DVec3::new(x0, y0, z0),
+        max: DVec3::new(x1, y1, z1),
+    }
 }
 
 impl Default for TestShapes {
@@ -44,7 +47,10 @@ impl Default for TestShapes {
         boxes[states::STONE.0 as usize] = full.clone();
         boxes[states::BOTTOM_SLAB.0 as usize] = vec![bx(0.0, 0.0, 0.0, 1.0, 0.5, 1.0)];
         boxes[states::TOP_SLAB.0 as usize] = vec![bx(0.0, 0.5, 0.0, 1.0, 1.0, 1.0)];
-        boxes[states::STAIR_NORTH.0 as usize] = vec![bx(0.0, 0.0, 0.0, 1.0, 0.5, 1.0), bx(0.0, 0.5, 0.0, 1.0, 1.0, 0.5)];
+        boxes[states::STAIR_NORTH.0 as usize] = vec![
+            bx(0.0, 0.0, 0.0, 1.0, 0.5, 1.0),
+            bx(0.0, 0.5, 0.0, 1.0, 1.0, 0.5),
+        ];
         boxes[states::FENCE_POST.0 as usize] = vec![bx(0.375, 0.0, 0.375, 0.625, 1.5, 0.625)];
         boxes[states::ICE.0 as usize] = full.clone();
         boxes[states::BLUE_ICE.0 as usize] = full.clone();
@@ -56,7 +62,10 @@ impl Default for TestShapes {
 
 impl CollisionShapes for TestShapes {
     fn collision_boxes(&self, state: BlockStateId) -> &[Aabb] {
-        self.boxes.get(state.0 as usize).map(Vec::as_slice).unwrap_or(&[])
+        self.boxes
+            .get(state.0 as usize)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
     fn outline_boxes(&self, state: BlockStateId) -> &[Aabb] {
         self.collision_boxes(state)
@@ -98,8 +107,14 @@ impl BlockPhysics for TestShapes {
     }
     fn fluid(&self, s: BlockStateId) -> Option<FluidInfo> {
         match s {
-            states::WATER_SOURCE => Some(FluidInfo { kind: FluidKind::Water, height: 8.0 / 9.0 }),
-            states::LAVA_SOURCE => Some(FluidInfo { kind: FluidKind::Lava, height: 8.0 / 9.0 }),
+            states::WATER_SOURCE => Some(FluidInfo {
+                kind: FluidKind::Water,
+                height: 8.0 / 9.0,
+            }),
+            states::LAVA_SOURCE => Some(FluidInfo {
+                kind: FluidKind::Lava,
+                height: 8.0 / 9.0,
+            }),
             _ => None,
         }
     }
@@ -119,7 +134,10 @@ impl TestWorld {
     }
     /// Infinite flat floor whose top surface is at `top_y` (blocks at y < top_y are `state`).
     pub fn flat(top_y: i32, state: BlockStateId) -> Self {
-        Self { blocks: HashMap::new(), floor: Some((top_y - 1, state)) }
+        Self {
+            blocks: HashMap::new(),
+            floor: Some((top_y - 1, state)),
+        }
     }
     pub fn set(&mut self, x: i32, y: i32, z: i32, s: BlockStateId) -> &mut Self {
         self.blocks.insert(BlockPos::new(x, y, z), s);

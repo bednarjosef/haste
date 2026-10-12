@@ -141,12 +141,20 @@ impl std::fmt::Display for ReplayReport {
 
 pub fn load_trace(path: &Path) -> anyhow::Result<Trace> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    let mut t: Trace = serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
+    let mut t: Trace =
+        serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
     if t.version != 1 {
-        bail!("{}: trace version {} not supported", path.display(), t.version);
+        bail!(
+            "{}: trace version {} not supported",
+            path.display(),
+            t.version
+        );
     }
     if t.name.is_empty() {
-        t.name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        t.name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
     }
     Ok(t)
 }
@@ -191,13 +199,19 @@ pub fn replay(
         on_ground_mismatches: 0,
         pose_mismatches: 0,
     };
-    let Some(first) = trace.ticks.first() else { return report };
+    let Some(first) = trace.ticks.first() else {
+        return report;
+    };
     let first_input = input_of(trace, first);
     let mut state = PlayerState {
         pos: v3(first.pos),
         velocity: first.velocity.map(v3).unwrap_or_default(),
         on_ground: first.on_ground.unwrap_or(false),
-        pose: first.pose.as_deref().and_then(Pose::from_name).unwrap_or_default(),
+        pose: first
+            .pose
+            .as_deref()
+            .and_then(Pose::from_name)
+            .unwrap_or_default(),
         yaw: first_input.yaw,
         pitch: first_input.pitch,
         ..Default::default()
@@ -208,7 +222,14 @@ pub fn replay(
             InputAlignment::SameTick => rec,
             InputAlignment::PreviousTick => &trace.ticks[i - 1],
         };
-        tick(&mut state, &input_of(trace, src), attrs, world, shapes, blocks);
+        tick(
+            &mut state,
+            &input_of(trace, src),
+            attrs,
+            world,
+            shapes,
+            blocks,
+        );
         let expected = v3(rec.pos);
         let err = (state.pos - expected).length();
         if err > report.max_error {
@@ -216,15 +237,27 @@ pub fn replay(
             report.max_error_tick = rec.tick;
         }
         if err > tolerance && report.first_divergence.is_none() {
-            report.first_divergence = Some(Divergence { tick: rec.tick, expected, actual: state.pos, error: err });
+            report.first_divergence = Some(Divergence {
+                tick: rec.tick,
+                expected,
+                actual: state.pos,
+                error: err,
+            });
         }
         if let Some(v) = rec.velocity {
-            report.max_velocity_error = report.max_velocity_error.max((state.velocity - v3(v)).length());
+            report.max_velocity_error = report
+                .max_velocity_error
+                .max((state.velocity - v3(v)).length());
         }
         if rec.on_ground.is_some_and(|g| g != state.on_ground) {
             report.on_ground_mismatches += 1;
         }
-        if rec.pose.as_deref().and_then(Pose::from_name).is_some_and(|p| p != state.pose) {
+        if rec
+            .pose
+            .as_deref()
+            .and_then(Pose::from_name)
+            .is_some_and(|p| p != state.pose)
+        {
             report.pose_mismatches += 1;
         }
     }
@@ -247,7 +280,10 @@ impl BlockView for FlatWorld {
         if i < 0 {
             return BlockStateId::AIR;
         }
-        self.layers.get(i as usize).copied().unwrap_or(BlockStateId::AIR)
+        self.layers
+            .get(i as usize)
+            .copied()
+            .unwrap_or(BlockStateId::AIR)
     }
     fn is_chunk_loaded(&self, _pos: ChunkPos) -> bool {
         true

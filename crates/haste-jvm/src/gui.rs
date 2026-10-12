@@ -79,27 +79,55 @@ impl GuiPipeline {
             open: env.get_method_id(&cls, jni_str!("open"), jni_sig!("(I)V"))?,
             close: env.get_method_id(&cls, jni_str!("close"), jni_sig!("()V"))?,
             is_open: env.get_method_id(&cls, jni_str!("isOpen"), jni_sig!("()Z"))?,
-            screen_name: env.get_method_id(&cls, jni_str!("screenName"), jni_sig!("()Ljava/lang/String;"))?,
-            render: env.get_method_id(&cls, jni_str!("render"), jni_sig!("(IIIDDF)[Ljava/lang/Object;"))?,
+            screen_name: env.get_method_id(
+                &cls,
+                jni_str!("screenName"),
+                jni_sig!("()Ljava/lang/String;"),
+            )?,
+            render: env.get_method_id(
+                &cls,
+                jni_str!("render"),
+                jni_sig!("(IIIDDF)[Ljava/lang/Object;"),
+            )?,
             tick: env.get_method_id(&cls, jni_str!("tick"), jni_sig!("()V"))?,
             key: env.get_method_id(&cls, jni_str!("key"), jni_sig!("(IIIZ)Z"))?,
             char_typed: env.get_method_id(&cls, jni_str!("charTyped"), jni_sig!("(II)Z"))?,
             mouse: env.get_method_id(&cls, jni_str!("mouse"), jni_sig!("(DDIZ)Z"))?,
             scroll: env.get_method_id(&cls, jni_str!("scroll"), jni_sig!("(DDDD)Z"))?,
-            metrics_changed: env.get_method_id(&cls, jni_str!("metricsChanged"), jni_sig!("()V"))?,
+            metrics_changed: env.get_method_id(
+                &cls,
+                jni_str!("metricsChanged"),
+                jni_sig!("()V"),
+            )?,
             mouse_grabbed: env.get_method_id(&cls, jni_str!("mouseGrabbed"), jni_sig!("()Z"))?,
-            set_mouse_grabbed: env.get_method_id(&cls, jni_str!("setMouseGrabbed"), jni_sig!("(Z)V"))?,
+            set_mouse_grabbed: env.get_method_id(
+                &cls,
+                jni_str!("setMouseGrabbed"),
+                jni_sig!("(Z)V"),
+            )?,
         };
-        Ok(GuiPipeline { bridge, m, lock: Mutex::new(()), last_error: Mutex::new(None) })
+        Ok(GuiPipeline {
+            bridge,
+            m,
+            lock: Mutex::new(()),
+            last_error: Mutex::new(None),
+        })
     }
 
     /// One call on the bridge with the given return type; Java exceptions become errors (cleared).
-    fn call<T>(&self, method: jni::objects::JMethodID, ret: JavaType, args: &[jvalue], f: impl FnOnce(&mut Env, jni::objects::JValueOwned) -> Result<T>) -> Result<T> {
+    fn call<T>(
+        &self,
+        method: jni::objects::JMethodID,
+        ret: JavaType,
+        args: &[jvalue],
+        f: impl FnOnce(&mut Env, jni::objects::JValueOwned) -> Result<T>,
+    ) -> Result<T> {
         let _g = self.lock.lock();
         let vm = JavaVM::singleton()?;
         vm.attach_current_thread(|env| -> Result<T> {
             // Safety: method ids were resolved on the bridge's class with matching signatures/args.
-            let v = unsafe { env.call_method_unchecked(&*self.bridge, method, ret, args) }.map_err(|e| caught(env, e))?;
+            let v = unsafe { env.call_method_unchecked(&*self.bridge, method, ret, args) }
+                .map_err(|e| caught(env, e))?;
             f(env, v)
         })
     }
@@ -126,7 +154,9 @@ impl GuiPipeline {
 
     /// Opens a real vanilla screen (replacing the open one), like `Gui.setScreen(new ...)`.
     pub fn open_screen(&self, screen: ScreenKind) -> anyhow::Result<()> {
-        self.call(self.m.open, VOID, &[jvalue { i: screen.id() }], |_, _| Ok(()))?;
+        self.call(self.m.open, VOID, &[jvalue { i: screen.id() }], |_, _| {
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -144,9 +174,11 @@ impl GuiPipeline {
 
     /// Java class name of the open screen, if any.
     pub fn screen_class(&self) -> Option<String> {
-        self.call(self.m.screen_name, JavaType::Object, &[], |env, v| jstring_to_string(env, v.l()?))
-            .ok()
-            .filter(|s| !s.is_empty())
+        self.call(self.m.screen_name, JavaType::Object, &[], |env, v| {
+            jstring_to_string(env, v.l()?)
+        })
+        .ok()
+        .filter(|s| !s.is_empty())
     }
 
     /// Key press/release into `Screen.keyPressed/keyReleased(KeyEvent)`. 26.3 numbering, see
@@ -155,24 +187,55 @@ impl GuiPipeline {
     /// Backspace = 8; [`crate::keys::keycode`]); `mods` are SDL keymod bits. Returns whether the
     /// screen consumed it.
     pub fn key(&self, key: i32, scancode: i32, mods: i32, pressed: bool) -> bool {
-        self.call_bool("key", self.m.key, &[jvalue { i: key }, jvalue { i: scancode }, jvalue { i: mods }, jvalue { z: pressed }])
+        self.call_bool(
+            "key",
+            self.m.key,
+            &[
+                jvalue { i: key },
+                jvalue { i: scancode },
+                jvalue { i: mods },
+                jvalue { z: pressed },
+            ],
+        )
     }
 
     /// A typed character into `Screen.charTyped(CharacterEvent)`.
     pub fn char_typed(&self, c: char, mods: i32) -> bool {
-        self.call_bool("char_typed", self.m.char_typed, &[jvalue { i: c as i32 }, jvalue { i: mods }])
+        self.call_bool(
+            "char_typed",
+            self.m.char_typed,
+            &[jvalue { i: c as i32 }, jvalue { i: mods }],
+        )
     }
 
     /// Mouse at (x, y) in GUI pixels: a move (`None`; drags while a button is held) or a button
     /// press/release (`Some((button, pressed))`, vanilla numbering 1 left / 2 middle / 3 right).
     pub fn mouse(&self, x: f64, y: f64, button: Option<(i32, bool)>) -> bool {
         let (b, p) = button.unwrap_or((-1, false));
-        self.call_bool("mouse", self.m.mouse, &[jvalue { d: x }, jvalue { d: y }, jvalue { i: b }, jvalue { z: p }])
+        self.call_bool(
+            "mouse",
+            self.m.mouse,
+            &[
+                jvalue { d: x },
+                jvalue { d: y },
+                jvalue { i: b },
+                jvalue { z: p },
+            ],
+        )
     }
 
     /// Scroll wheel at (x, y).
     pub fn scroll(&self, x: f64, y: f64, dx: f64, dy: f64) -> bool {
-        self.call_bool("scroll", self.m.scroll, &[jvalue { d: x }, jvalue { d: y }, jvalue { d: dx }, jvalue { d: dy }])
+        self.call_bool(
+            "scroll",
+            self.m.scroll,
+            &[
+                jvalue { d: x },
+                jvalue { d: y },
+                jvalue { d: dx },
+                jvalue { d: dy },
+            ],
+        )
     }
 
     /// Whether vanilla code asked to grab the mouse (`MouseHandler.grabMouse`, e.g. "Back to Game")
@@ -183,7 +246,12 @@ impl GuiPipeline {
 
     /// Tells the Java side the client grabbed/released the mouse itself.
     pub fn set_mouse_grabbed(&self, grabbed: bool) {
-        if let Err(e) = self.call(self.m.set_mouse_grabbed, VOID, &[jvalue { z: grabbed }], |_, _| Ok(())) {
+        if let Err(e) = self.call(
+            self.m.set_mouse_grabbed,
+            VOID,
+            &[jvalue { z: grabbed }],
+            |_, _| Ok(()),
+        ) {
             self.failed("set_mouse_grabbed", e);
         }
     }
@@ -197,10 +265,32 @@ impl GuiPipeline {
 
     /// Runs the screen's `extractRenderStateWithTooltipAndSubtitles` into the batch and returns the
     /// frame: ONE JNI call plus one drain of its two arrays. `width`/`height` are GUI-scaled.
-    pub fn render(&self, width: u32, height: u32, scale: u32, mouse: (f64, f64), partial: f32) -> anyhow::Result<GuiFrame> {
-        let args = [jvalue { i: width as i32 }, jvalue { i: height as i32 }, jvalue { i: scale as i32 }, jvalue { d: mouse.0 }, jvalue { d: mouse.1 }, jvalue { f: partial }];
-        let commands = self.call(self.m.render, JavaType::Array, &args, |env, v| decode_frame(env, v.l()?))?;
-        Ok(GuiFrame { commands, scale, width, height, cursor: None })
+    pub fn render(
+        &self,
+        width: u32,
+        height: u32,
+        scale: u32,
+        mouse: (f64, f64),
+        partial: f32,
+    ) -> anyhow::Result<GuiFrame> {
+        let args = [
+            jvalue { i: width as i32 },
+            jvalue { i: height as i32 },
+            jvalue { i: scale as i32 },
+            jvalue { d: mouse.0 },
+            jvalue { d: mouse.1 },
+            jvalue { f: partial },
+        ];
+        let commands = self.call(self.m.render, JavaType::Array, &args, |env, v| {
+            decode_frame(env, v.l()?)
+        })?;
+        Ok(GuiFrame {
+            commands,
+            scale,
+            width,
+            height,
+            cursor: None,
+        })
     }
 
     /// Installs the renderer's text metrics; `Font.width` and friends call back into them.
@@ -252,7 +342,12 @@ fn decode_frame(env: &mut Env, frame: JObject) -> Result<Vec<GuiCommand>> {
 /// Decodes a frame's int records and string table into commands.
 pub(crate) fn decode(b: &[i32], strings: &[String]) -> Result<Vec<GuiCommand>> {
     let bad = |what: &str| JvmError::Bridge(format!("malformed frame: {what}"));
-    let s = |i: i32| strings.get(i as usize).cloned().ok_or_else(|| bad("string index"));
+    let s = |i: i32| {
+        strings
+            .get(i as usize)
+            .cloned()
+            .ok_or_else(|| bad("string index"))
+    };
     let ident = |i: i32| -> Result<Identifier> {
         let t = strings.get(i as usize).ok_or_else(|| bad("string index"))?;
         Identifier::parse(t).map_err(|e| JvmError::Bridge(e.to_string()))
@@ -261,21 +356,46 @@ pub(crate) fn decode(b: &[i32], strings: &[String]) -> Result<Vec<GuiCommand>> {
     let mut out = Vec::with_capacity(b.len() / 5);
     let mut i = 0;
     while i < b.len() {
-        let need = |n: usize| if i + n < b.len() + 1 { Ok(()) } else { Err(bad("truncated record")) };
+        let need = |n: usize| {
+            if i + n < b.len() + 1 {
+                Ok(())
+            } else {
+                Err(bad("truncated record"))
+            }
+        };
         match b[i] {
             FILL => {
                 need(6)?;
-                out.push(GuiCommand::Fill { x1: b[i + 1], y1: b[i + 2], x2: b[i + 3], y2: b[i + 4], color: b[i + 5] as u32 });
+                out.push(GuiCommand::Fill {
+                    x1: b[i + 1],
+                    y1: b[i + 2],
+                    x2: b[i + 3],
+                    y2: b[i + 4],
+                    color: b[i + 5] as u32,
+                });
                 i += 6;
             }
             GRADIENT => {
                 need(7)?;
-                out.push(GuiCommand::FillGradient { x1: b[i + 1], y1: b[i + 2], x2: b[i + 3], y2: b[i + 4], top: b[i + 5] as u32, bottom: b[i + 6] as u32 });
+                out.push(GuiCommand::FillGradient {
+                    x1: b[i + 1],
+                    y1: b[i + 2],
+                    x2: b[i + 3],
+                    y2: b[i + 4],
+                    top: b[i + 5] as u32,
+                    bottom: b[i + 6] as u32,
+                });
                 i += 7;
             }
             TEXT => {
                 need(6)?;
-                out.push(GuiCommand::Text { x: b[i + 1], y: b[i + 2], color: b[i + 3] as u32, shadow: b[i + 4] != 0, text: s(b[i + 5])? });
+                out.push(GuiCommand::Text {
+                    x: b[i + 1],
+                    y: b[i + 2],
+                    color: b[i + 3] as u32,
+                    shadow: b[i + 4] != 0,
+                    text: s(b[i + 5])?,
+                });
                 i += 6;
             }
             TEXTURE => {
@@ -298,17 +418,34 @@ pub(crate) fn decode(b: &[i32], strings: &[String]) -> Result<Vec<GuiCommand>> {
             }
             SPRITE => {
                 need(7)?;
-                out.push(GuiCommand::Sprite { sprite: ident(b[i + 1])?, x: b[i + 2], y: b[i + 3], w: b[i + 4], h: b[i + 5], tint: b[i + 6] as u32 });
+                out.push(GuiCommand::Sprite {
+                    sprite: ident(b[i + 1])?,
+                    x: b[i + 2],
+                    y: b[i + 3],
+                    w: b[i + 4],
+                    h: b[i + 5],
+                    tint: b[i + 6] as u32,
+                });
                 i += 7;
             }
             ITEM => {
                 need(5)?;
-                out.push(GuiCommand::Item { item: RegistryIndex(b[i + 1] as u32), x: b[i + 2], y: b[i + 3], count: b[i + 4] });
+                out.push(GuiCommand::Item {
+                    item: RegistryIndex(b[i + 1] as u32),
+                    x: b[i + 2],
+                    y: b[i + 3],
+                    count: b[i + 4],
+                });
                 i += 5;
             }
             SCISSOR_PUSH => {
                 need(5)?;
-                out.push(GuiCommand::ScissorPush { x1: b[i + 1], y1: b[i + 2], x2: b[i + 3], y2: b[i + 4] });
+                out.push(GuiCommand::ScissorPush {
+                    x1: b[i + 1],
+                    y1: b[i + 2],
+                    x2: b[i + 3],
+                    y2: b[i + 4],
+                });
                 i += 5;
             }
             SCISSOR_POP => {
@@ -317,7 +454,11 @@ pub(crate) fn decode(b: &[i32], strings: &[String]) -> Result<Vec<GuiCommand>> {
             }
             TRANSLATE_PUSH => {
                 need(4)?;
-                out.push(GuiCommand::TranslatePush { dx: f(b[i + 1] as u32), dy: f(b[i + 2] as u32), dz: f(b[i + 3] as u32) });
+                out.push(GuiCommand::TranslatePush {
+                    dx: f(b[i + 1] as u32),
+                    dy: f(b[i + 2] as u32),
+                    dz: f(b[i + 3] as u32),
+                });
                 i += 4;
             }
             TRANSLATE_POP => {
@@ -336,26 +477,114 @@ mod tests {
 
     #[test]
     fn decodes_every_opcode() {
-        let strings = vec!["hi".to_owned(), "minecraft:widget/button".to_owned(), "minecraft:textures/gui/x.png".to_owned()];
+        let strings = vec![
+            "hi".to_owned(),
+            "minecraft:widget/button".to_owned(),
+            "minecraft:textures/gui/x.png".to_owned(),
+        ];
         let fb = |x: f32| x.to_bits() as i32;
         let b = vec![
-            FILL, 0, 0, 10, 10, -1,
-            GRADIENT, 0, 0, 5, 5, 1, 2,
-            TEXT, 3, 4, 0xFFFFFF, 1, 0,
-            TEXTURE, 2, 1, 2, 3, 4, fb(0.5), fb(1.0), fb(2.0), fb(3.0), 256, 128, -1,
-            SPRITE, 1, 10, 20, 200, 20, -1,
-            ITEM, 7, 8, 9, 64,
-            SCISSOR_PUSH, 1, 2, 3, 4, SCISSOR_POP,
-            TRANSLATE_PUSH, fb(1.5), fb(-2.0), fb(0.0), TRANSLATE_POP,
+            FILL,
+            0,
+            0,
+            10,
+            10,
+            -1,
+            GRADIENT,
+            0,
+            0,
+            5,
+            5,
+            1,
+            2,
+            TEXT,
+            3,
+            4,
+            0xFFFFFF,
+            1,
+            0,
+            TEXTURE,
+            2,
+            1,
+            2,
+            3,
+            4,
+            fb(0.5),
+            fb(1.0),
+            fb(2.0),
+            fb(3.0),
+            256,
+            128,
+            -1,
+            SPRITE,
+            1,
+            10,
+            20,
+            200,
+            20,
+            -1,
+            ITEM,
+            7,
+            8,
+            9,
+            64,
+            SCISSOR_PUSH,
+            1,
+            2,
+            3,
+            4,
+            SCISSOR_POP,
+            TRANSLATE_PUSH,
+            fb(1.5),
+            fb(-2.0),
+            fb(0.0),
+            TRANSLATE_POP,
         ];
         let c = decode(&b, &strings).unwrap();
         assert_eq!(c.len(), 10);
-        assert_eq!(c[0], GuiCommand::Fill { x1: 0, y1: 0, x2: 10, y2: 10, color: 0xFFFF_FFFF });
-        assert_eq!(c[2], GuiCommand::Text { x: 3, y: 4, text: "hi".into(), color: 0xFFFFFF, shadow: true });
-        assert!(matches!(&c[3], GuiCommand::Texture { texture, u, tex_w: 256, .. } if texture.path() == "textures/gui/x.png" && *u == 0.5));
-        assert!(matches!(&c[4], GuiCommand::Sprite { sprite, w: 200, .. } if sprite.path() == "widget/button"));
-        assert_eq!(c[5], GuiCommand::Item { item: RegistryIndex(7), x: 8, y: 9, count: 64 });
-        assert_eq!(c[8], GuiCommand::TranslatePush { dx: 1.5, dy: -2.0, dz: 0.0 });
+        assert_eq!(
+            c[0],
+            GuiCommand::Fill {
+                x1: 0,
+                y1: 0,
+                x2: 10,
+                y2: 10,
+                color: 0xFFFF_FFFF
+            }
+        );
+        assert_eq!(
+            c[2],
+            GuiCommand::Text {
+                x: 3,
+                y: 4,
+                text: "hi".into(),
+                color: 0xFFFFFF,
+                shadow: true
+            }
+        );
+        assert!(
+            matches!(&c[3], GuiCommand::Texture { texture, u, tex_w: 256, .. } if texture.path() == "textures/gui/x.png" && *u == 0.5)
+        );
+        assert!(
+            matches!(&c[4], GuiCommand::Sprite { sprite, w: 200, .. } if sprite.path() == "widget/button")
+        );
+        assert_eq!(
+            c[5],
+            GuiCommand::Item {
+                item: RegistryIndex(7),
+                x: 8,
+                y: 9,
+                count: 64
+            }
+        );
+        assert_eq!(
+            c[8],
+            GuiCommand::TranslatePush {
+                dx: 1.5,
+                dy: -2.0,
+                dz: 0.0
+            }
+        );
         assert_eq!(c[9], GuiCommand::TranslatePop);
     }
 

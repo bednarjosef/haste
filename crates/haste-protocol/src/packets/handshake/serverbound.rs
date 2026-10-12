@@ -36,6 +36,11 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        round_trip(&Intention { protocol_version: 777, server_address: "localhost".into(), server_port: 25565, intent: INTENT_LOGIN });
+        round_trip(&Intention {
+            protocol_version: 777,
+            server_address: "localhost".into(),
+            server_port: 25565,
+            intent: INTENT_LOGIN,
+        });
     }
 }

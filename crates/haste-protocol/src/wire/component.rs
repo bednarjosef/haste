@@ -15,7 +15,14 @@ use super::{DecodeError, DecodeResult};
 use crate::nbt::{NbtCompound, NbtTag};
 
 /// Keys whose NBT byte value means a JSON boolean.
-const BOOL_KEYS: &[&str] = &["bold", "italic", "underlined", "strikethrough", "obfuscated", "interpret"];
+const BOOL_KEYS: &[&str] = &[
+    "bold",
+    "italic",
+    "underlined",
+    "strikethrough",
+    "obfuscated",
+    "interpret",
+];
 
 /// Decodes a component from its network NBT form.
 pub fn from_nbt(tag: &NbtTag) -> DecodeResult<Component> {
@@ -39,7 +46,16 @@ pub fn from_value(v: Value) -> DecodeResult<Component> {
 /// `Component` flattens its content enum and an "everything else" map side by
 /// side; serde hands content keys to both. Remove the duplicates from `other`.
 fn strip_content_keys(c: &mut Component) {
-    for k in ["text", "translate", "with", "fallback", "keybind", "score", "selector", "nbt"] {
+    for k in [
+        "text",
+        "translate",
+        "with",
+        "fallback",
+        "keybind",
+        "score",
+        "selector",
+        "nbt",
+    ] {
         c.other.remove(k);
     }
     for e in &mut c.extra {
@@ -77,7 +93,9 @@ fn normalize(v: Value) -> Value {
         Value::Bool(b) => obj_text(b.to_string()),
         Value::Array(items) => {
             let mut it = items.into_iter().map(normalize);
-            let Some(mut first) = it.next() else { return obj_text(String::new()) };
+            let Some(mut first) = it.next() else {
+                return obj_text(String::new());
+            };
             let rest: Vec<Value> = it.collect();
             if !rest.is_empty() {
                 if let Value::Object(m) = &mut first {
@@ -92,11 +110,16 @@ fn normalize(v: Value) -> Value {
         Value::Object(mut m) => {
             for key in ["extra", "with"] {
                 if let Some(Value::Array(items)) = m.remove(key) {
-                    m.insert(key.into(), Value::Array(items.into_iter().map(normalize).collect()));
+                    m.insert(
+                        key.into(),
+                        Value::Array(items.into_iter().map(normalize).collect()),
+                    );
                 }
             }
             // A component without any content key is empty text.
-            let has_content = ["text", "translate", "keybind", "score", "selector", "nbt"].iter().any(|k| m.contains_key(*k));
+            let has_content = ["text", "translate", "keybind", "score", "selector", "nbt"]
+                .iter()
+                .any(|k| m.contains_key(*k));
             if !has_content {
                 m.insert("text".into(), Value::String(String::new()));
             }
@@ -129,12 +152,16 @@ pub fn nbt_to_json(tag: &NbtTag, key: Option<&str>) -> Value {
         NbtTag::Long(v) => Value::Number((*v).into()),
         NbtTag::Float(v) => Number::from_f64(*v as f64).map_or(Value::Null, Value::Number),
         NbtTag::Double(v) => Number::from_f64(*v).map_or(Value::Null, Value::Number),
-        NbtTag::ByteArray(a) => Value::Array(a.iter().map(|b| Value::Number((*b).into())).collect()),
+        NbtTag::ByteArray(a) => {
+            Value::Array(a.iter().map(|b| Value::Number((*b).into())).collect())
+        }
         NbtTag::String(s) => Value::String(s.to_string()),
         NbtTag::List(l) => Value::Array(l.iter().map(|t| unwrap_list_element(t, key)).collect()),
         NbtTag::Compound(c) => compound_to_json(c),
         NbtTag::IntArray(a) => Value::Array(a.iter().map(|v| Value::Number((*v).into())).collect()),
-        NbtTag::LongArray(a) => Value::Array(a.iter().map(|v| Value::Number((*v).into())).collect()),
+        NbtTag::LongArray(a) => {
+            Value::Array(a.iter().map(|v| Value::Number((*v).into())).collect())
+        }
     }
 }
 
@@ -177,7 +204,9 @@ pub fn json_to_nbt(v: &Value) -> NbtTag {
         Value::String(s) => NbtTag::String(s.as_str().into()),
         Value::Array(items) => {
             let tags: Vec<NbtTag> = items.iter().map(json_to_nbt).collect();
-            let same = tags.windows(2).all(|w| w[0].get_type_id() == w[1].get_type_id());
+            let same = tags
+                .windows(2)
+                .all(|w| w[0].get_type_id() == w[1].get_type_id());
             if same {
                 NbtTag::List(tags)
             } else {
@@ -217,11 +246,15 @@ mod tests {
 
     #[test]
     fn styled_translate_round_trip_nbt_and_json() {
-        let mut c = Component::translate("chat.type.text", vec![Component::text("Steve"), Component::text("hello")]);
+        let mut c = Component::translate(
+            "chat.type.text",
+            vec![Component::text("Steve"), Component::text("hello")],
+        );
         c.color = Some("yellow".into());
         c.bold = Some(true);
         c.extra.push(Component::text("!"));
-        c.other.insert("insertion".into(), Value::String("x".into()));
+        c.other
+            .insert("insertion".into(), Value::String("x".into()));
         let t = to_nbt(&c);
         let back = from_nbt(&t).unwrap();
         assert_eq!(back, c);
@@ -251,6 +284,9 @@ mod tests {
         assert_eq!(from_json_str(j).unwrap().to_plain(&|_| None), "x 3");
         // bare JSON string and array forms
         assert_eq!(from_json_str("\"hey\"").unwrap(), Component::text("hey"));
-        assert_eq!(from_json_str(r#"["a","b"]"#).unwrap().to_plain(&|_| None), "ab");
+        assert_eq!(
+            from_json_str(r#"["a","b"]"#).unwrap().to_plain(&|_| None),
+            "ab"
+        );
     }
 }

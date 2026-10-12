@@ -35,12 +35,10 @@ impl BlockStateDefinition {
             let mut matches: Vec<(&String, &VariantEntry)> = variants
                 .iter()
                 .filter(|(k, _)| {
-                    k.split(',')
-                        .filter(|p| !p.is_empty())
-                        .all(|part| {
-                            let (k, want) = part.split_once('=').unwrap_or((part, ""));
-                            props.iter().any(|(pk, pv)| pk == k && pv == want)
-                        })
+                    k.split(',').filter(|p| !p.is_empty()).all(|part| {
+                        let (k, want) = part.split_once('=').unwrap_or((part, ""));
+                        props.iter().any(|(pk, pv)| pk == k && pv == want)
+                    })
                 })
                 .collect();
             match matches.len() {
@@ -147,11 +145,13 @@ impl<'de> Deserialize<'de> for MultipartCondition {
             let (key, list) = map.iter().next().unwrap();
             match key.as_str() {
                 "OR" | "or" => {
-                    let conditions = parse_condition_list(list).map_err(serde::de::Error::custom)?;
+                    let conditions =
+                        parse_condition_list(list).map_err(serde::de::Error::custom)?;
                     return Ok(MultipartCondition::Or(conditions));
                 }
                 "AND" | "and" => {
-                    let conditions = parse_condition_list(list).map_err(serde::de::Error::custom)?;
+                    let conditions =
+                        parse_condition_list(list).map_err(serde::de::Error::custom)?;
                     return Ok(MultipartCondition::And(conditions));
                 }
                 _ => {}
@@ -171,9 +171,7 @@ impl<'de> Deserialize<'de> for MultipartCondition {
     }
 }
 
-fn parse_condition_list(
-    value: &serde_json::Value,
-) -> Result<Vec<MultipartCondition>, String> {
+fn parse_condition_list(value: &serde_json::Value) -> Result<Vec<MultipartCondition>, String> {
     let list = value.as_array().ok_or("OR/AND value must be an array")?;
     list.iter()
         .map(|entry| {
@@ -186,12 +184,8 @@ fn parse_condition_list(
 impl MultipartCondition {
     pub fn matches(&self, props: &[(String, String)]) -> bool {
         match self {
-            MultipartCondition::Or(conditions) => {
-                conditions.iter().any(|c| c.matches(props))
-            }
-            MultipartCondition::And(conditions) => {
-                conditions.iter().all(|c| c.matches(props))
-            }
+            MultipartCondition::Or(conditions) => conditions.iter().any(|c| c.matches(props)),
+            MultipartCondition::And(conditions) => conditions.iter().all(|c| c.matches(props)),
             MultipartCondition::Properties(expected) => expected.iter().all(|(k, want)| {
                 props
                     .iter()
@@ -226,8 +220,10 @@ mod tests {
 
     fn refs(json: &str, props: &[(&str, &str)]) -> Vec<ModelRef> {
         let def: BlockStateDefinition = serde_json::from_str(json).unwrap();
-        let props: Vec<(String, String)> =
-            props.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let props: Vec<(String, String)> = props
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         def.model_refs_for(&props)
     }
 

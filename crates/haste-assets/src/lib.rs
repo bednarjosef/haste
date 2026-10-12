@@ -13,9 +13,7 @@ pub mod bake;
 pub mod model;
 pub mod multipart;
 
-pub use assets::{
-    AnimationMeta, Assets, BitmapFont, Glyph, ModelJson, SpriteMeta, TextureMeta,
-};
+pub use assets::{AnimationMeta, Assets, BitmapFont, Glyph, ModelJson, SpriteMeta, TextureMeta};
 pub use atlas::{AtlasBuilder, AtlasRegion, AtlasRegions};
 pub use bake::{BakedBlockModels, BlockStatesSource, BlocksJsonStates, RenderLayer};
 pub use model::{BakedQuad, Direction, ModelRef};

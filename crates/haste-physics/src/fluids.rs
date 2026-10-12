@@ -34,19 +34,36 @@ const CONTACT_SHRINK: f64 = 0.001;
 /// Updates `in_water`/`in_lava` (water wins) and returns whether the eyes are under water.
 /// Contact = the slightly shrunk box overlaps a fluid cell below its surface. The surface is
 /// `FluidInfo::height`, or the full cell when the same fluid is directly above (wiki "Water").
-pub(crate) fn update_fluid_state(state: &mut PlayerState, attrs: &PlayerAttributes, world: &dyn BlockView, blocks: &dyn BlockPhysics) -> bool {
+pub(crate) fn update_fluid_state(
+    state: &mut PlayerState,
+    attrs: &PlayerAttributes,
+    world: &dyn BlockView,
+    blocks: &dyn BlockPhysics,
+) -> bool {
     let b = state.aabb(attrs);
     let eye_y = state.pos.y + attrs.eye_height_for(state.pose);
-    let (min, max) = (b.min + DVec3::splat(CONTACT_SHRINK), b.max - DVec3::splat(CONTACT_SHRINK));
+    let (min, max) = (
+        b.min + DVec3::splat(CONTACT_SHRINK),
+        b.max - DVec3::splat(CONTACT_SHRINK),
+    );
     let (mut water, mut lava, mut eyes) = (false, false, false);
     for x in min.x.floor() as i32..=max.x.floor() as i32 {
         for z in min.z.floor() as i32..=max.z.floor() as i32 {
             for y in min.y.floor() as i32..=max.y.max(eye_y).floor() as i32 {
                 let p = BlockPos::new(x, y, z);
-                let Some(f) = blocks.fluid(world.block_state(p)) else { continue };
-                let full = blocks.fluid(world.block_state(p.add(0, 1, 0))).is_some_and(|a| a.kind == f.kind);
+                let Some(f) = blocks.fluid(world.block_state(p)) else {
+                    continue;
+                };
+                let full = blocks
+                    .fluid(world.block_state(p.add(0, 1, 0)))
+                    .is_some_and(|a| a.kind == f.kind);
                 let surface = y as f64 + if full { 1.0 } else { f.height as f64 };
-                if f.kind == FluidKind::Water && eye_y >= y as f64 && eye_y < surface && x == state.pos.x.floor() as i32 && z == state.pos.z.floor() as i32 {
+                if f.kind == FluidKind::Water
+                    && eye_y >= y as f64
+                    && eye_y < surface
+                    && x == state.pos.x.floor() as i32
+                    && z == state.pos.z.floor() as i32
+                {
                     eyes = true;
                 }
                 if (y as f64) < max.y && surface > min.y {
@@ -82,7 +99,11 @@ pub(crate) fn travel_water(
     if input.sneak {
         state.velocity.y -= SWIM_DOWN;
     }
-    let h_drag = if state.sprinting { WATER_DRAG_SPRINTING } else { WATER_DRAG };
+    let h_drag = if state.sprinting {
+        WATER_DRAG_SPRINTING
+    } else {
+        WATER_DRAG
+    };
     accelerate(state, imp, FLUID_ACCELERATION);
     let motion = state.velocity;
     move_entity(state, attrs, motion, world, shapes);

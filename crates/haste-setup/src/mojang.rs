@@ -28,7 +28,8 @@ pub struct ManifestVersion {
     pub kind: String, // "release", "snapshot", ...
     pub url: String,
     #[serde(default)]
-    pub release_time: String,}
+    pub release_time: String,
+}
 
 impl VersionManifest {
     pub fn find(&self, id: &str) -> Option<&ManifestVersion> {
@@ -206,7 +207,11 @@ impl AssetObject {
 
     /// Download URL on Mojang's resources CDN.
     pub fn url(&self) -> String {
-        format!("https://resources.download.minecraft.net/{}/{}", &self.hash[..2], self.hash)
+        format!(
+            "https://resources.download.minecraft.net/{}/{}",
+            &self.hash[..2],
+            self.hash
+        )
     }
 }
 
@@ -246,7 +251,10 @@ mod tests {
         assert_eq!(m.versions.len(), 2);
         let v = m.find("26.3").expect("26.3 present");
         assert_eq!(v.kind, "release");
-        assert_eq!(v.url, "https://piston-meta.mojang.com/v1/packages/abc/26.3.json");
+        assert_eq!(
+            v.url,
+            "https://piston-meta.mojang.com/v1/packages/abc/26.3.json"
+        );
         assert!(m.find("26.4").is_none());
     }
 
@@ -312,7 +320,10 @@ mod tests {
         assert_eq!(idx.objects.len(), 2);
         let o = &idx.objects["minecraft/textures/block/stone.png"];
         assert_eq!(o.object_path(), "12/1234567890abcdef");
-        assert_eq!(o.url(), "https://resources.download.minecraft.net/12/1234567890abcdef");
+        assert_eq!(
+            o.url(),
+            "https://resources.download.minecraft.net/12/1234567890abcdef"
+        );
     }
 
     #[test]

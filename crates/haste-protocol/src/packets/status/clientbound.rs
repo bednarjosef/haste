@@ -6,7 +6,6 @@ packet_enum! {
     ClientboundStatus { StatusResponse, PongResponse }
 }
 
-
 packet! {
     /// The server list ping JSON (description, players, version, favicon).
     StatusResponse = "minecraft:status_response" {
@@ -30,7 +29,11 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        round_trip(&StatusResponse { json: r#"{"version":{"name":"26.3","protocol":777}}"#.into() });
-        round_trip(&PongResponse { timestamp: 123456789 });
+        round_trip(&StatusResponse {
+            json: r#"{"version":{"name":"26.3","protocol":777}}"#.into(),
+        });
+        round_trip(&PongResponse {
+            timestamp: 123456789,
+        });
     }
 }

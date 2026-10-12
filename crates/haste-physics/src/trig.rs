@@ -8,7 +8,11 @@ const SIZE: usize = 65536;
 
 fn table() -> &'static [f32] {
     static T: OnceLock<Vec<f32>> = OnceLock::new();
-    T.get_or_init(|| (0..SIZE).map(|i| (i as f64 * std::f64::consts::PI * 2.0 / SIZE as f64).sin() as f32).collect())
+    T.get_or_init(|| {
+        (0..SIZE)
+            .map(|i| (i as f64 * std::f64::consts::PI * 2.0 / SIZE as f64).sin() as f32)
+            .collect()
+    })
 }
 
 /// Table units per radian, computed in f32 (= 65536 / 2pi).
@@ -29,7 +33,8 @@ pub(crate) fn sin(rad: f32) -> f32 {
 #[inline]
 pub(crate) fn cos(rad: f32) -> f32 {
     if USE_TABLE {
-        table()[((rad * units_per_radian() + (SIZE / 4) as f32) as i32 & (SIZE as i32 - 1)) as usize]
+        table()
+            [((rad * units_per_radian() + (SIZE / 4) as f32) as i32 & (SIZE as i32 - 1)) as usize]
     } else {
         rad.cos()
     }

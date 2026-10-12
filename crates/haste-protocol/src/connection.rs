@@ -31,7 +31,9 @@ use crate::packets::login::{self, ClientboundLogin};
 use crate::packets::play::{self, ClientboundPlay, ServerboundPlay};
 use crate::packets::status::{self, ClientboundStatus};
 use crate::packets::{Decoded, Direction, Dispatch, Packet, ProtocolTables, State};
-use crate::transport::{PacketDecodeError, PacketEncodeError, TcpNetworkDecoder, TcpNetworkEncoder};
+use crate::transport::{
+    PacketDecodeError, PacketEncodeError, TcpNetworkDecoder, TcpNetworkEncoder,
+};
 use crate::wire::{DecodeError, GameProfile, Reader, Writer};
 
 /// Who we log in as.
@@ -177,7 +179,10 @@ impl SyncedRegistries {
     }
     /// Entries of a registry in id order.
     pub fn entries(&self, registry: &Identifier) -> Option<&[RegistryEntry]> {
-        self.registries.iter().find(|(id, _)| id == registry).map(|(_, e)| e.as_slice())
+        self.registries
+            .iter()
+            .find(|(id, _)| id == registry)
+            .map(|(_, e)| e.as_slice())
     }
     /// Registry names received.
     pub fn names(&self) -> impl Iterator<Item = &Identifier> {
@@ -195,7 +200,11 @@ impl SyncedRegistries {
     /// Dimension info for a `dimension_type` index and dimension name, from
     /// the synced `minecraft:dimension_type` NBT (`min_y`, `height`,
     /// `has_skylight`).
-    pub fn dimension_info(&self, dimension_type: i32, dimension: &Identifier) -> Option<DimensionInfo> {
+    pub fn dimension_info(
+        &self,
+        dimension_type: i32,
+        dimension: &Identifier,
+    ) -> Option<DimensionInfo> {
         let reg = Identifier::minecraft("dimension_type");
         let idx = usize::try_from(dimension_type).ok()?;
         let entry = self.entries(&reg)?.get(idx)?;
@@ -205,7 +214,9 @@ impl SyncedRegistries {
             dimension_type: entry.id.clone(),
             min_y: nbt.get_int("min_y")?,
             height: nbt.get_int("height")?,
-            has_skylight: nbt.get_bool("has_skylight").or_else(|| nbt.get_byte("has_skylight").map(|b| b != 0))?,
+            has_skylight: nbt
+                .get_bool("has_skylight")
+                .or_else(|| nbt.get_byte("has_skylight").map(|b| b != 0))?,
         })
     }
     fn apply_tags(&mut self, tags: Vec<RegistryTags>) {
@@ -273,7 +284,9 @@ pub struct Connection {
 
 impl std::fmt::Debug for Connection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Connection").field("profile", &self.profile.name).finish()
+        f.debug_struct("Connection")
+            .field("profile", &self.profile.name)
+            .finish()
     }
 }
 
@@ -282,7 +295,9 @@ impl std::fmt::Debug for Connection {
 pub async fn resolve(address: &str) -> Result<(String, u16, Vec<SocketAddr>), ProtocolError> {
     let (host, port) = split_host_port(address);
     if let Some(port) = port {
-        let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), port)).await?.collect();
+        let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
+            .await?
+            .collect();
         return Ok((host, port, addrs));
     }
     if host.parse::<std::net::IpAddr>().is_err() {
@@ -290,7 +305,10 @@ pub async fn resolve(address: &str) -> Result<(String, u16, Vec<SocketAddr>), Pr
             if let Ok(srv) = resolver.srv_lookup(format!("_minecraft._tcp.{host}")).await {
                 if let Some(rec) = srv.iter().next() {
                     let target = rec.target().to_utf8().trim_end_matches('.').to_string();
-                    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((target.as_str(), rec.port())).await?.collect();
+                    let addrs: Vec<SocketAddr> =
+                        tokio::net::lookup_host((target.as_str(), rec.port()))
+                            .await?
+                            .collect();
                     if !addrs.is_empty() {
                         return Ok((target, rec.port(), addrs));
                     }
@@ -298,7 +316,9 @@ pub async fn resolve(address: &str) -> Result<(String, u16, Vec<SocketAddr>), Pr
             }
         }
     }
-    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 25565)).await?.collect();
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 25565))
+        .await?
+        .collect();
     Ok((host, 25565, addrs))
 }
 
@@ -328,7 +348,12 @@ impl Io {
     fn new(stream: TcpStream, tables: Arc<ProtocolTables>, stats: Arc<Stats>) -> Self {
         let _ = stream.set_nodelay(true);
         let (r, w) = stream.into_split();
-        Self { dec: TcpNetworkDecoder::new(BufReader::with_capacity(64 * 1024, r)), enc: TcpNetworkEncoder::new(w), tables, stats }
+        Self {
+            dec: TcpNetworkDecoder::new(BufReader::with_capacity(64 * 1024, r)),
+            enc: TcpNetworkEncoder::new(w),
+            tables,
+            stats,
+        }
     }
 
     async fn send<P: Packet>(&mut self, state: State, p: &P) -> Result<(), ProtocolError> {
@@ -342,21 +367,33 @@ impl Io {
     async fn recv(&mut self) -> Result<crate::transport::RawPacket, ProtocolError> {
         let p = self.dec.get_raw_packet().await?;
         self.stats.packets_in.fetch_add(1, Ordering::Relaxed);
-        self.stats.bytes_in.fetch_add(p.payload.len() as u64, Ordering::Relaxed);
+        self.stats
+            .bytes_in
+            .fetch_add(p.payload.len() as u64, Ordering::Relaxed);
         Ok(p)
     }
 }
 
 fn encode<P: Packet>(tables: &ProtocolTables, state: State, p: &P) -> Result<Bytes, ProtocolError> {
-    crate::packets::encode_with_id(&tables.packets, state, Direction::Serverbound, p)
-        .ok_or_else(|| ProtocolError::Tables(format!("no serverbound id for {} in {state:?}", P::NAME)))
+    crate::packets::encode_with_id(&tables.packets, state, Direction::Serverbound, p).ok_or_else(
+        || ProtocolError::Tables(format!("no serverbound id for {} in {state:?}", P::NAME)),
+    )
 }
 
-fn decode_with<T>(d: &Dispatch<T>, raw: &crate::transport::RawPacket, tables: &ProtocolTables, state: State) -> Result<Option<T>, ProtocolError> {
+fn decode_with<T>(
+    d: &Dispatch<T>,
+    raw: &crate::transport::RawPacket,
+    tables: &ProtocolTables,
+    state: State,
+) -> Result<Option<T>, ProtocolError> {
     match d.decode(raw.id, &raw.payload, Some(tables)) {
         Decoded::Ok(p) => Ok(Some(p)),
         Decoded::NoDecoder => {
-            tracing::debug!("{state:?}: ignoring packet id {} ({:?})", raw.id, tables.packets.name(state, Direction::Clientbound, raw.id));
+            tracing::debug!(
+                "{state:?}: ignoring packet id {} ({:?})",
+                raw.id,
+                tables.packets.name(state, Direction::Clientbound, raw.id)
+            );
             Ok(None)
         }
         Decoded::Failed(name, e) => Err(ProtocolError::Decode(name, e)),
@@ -380,7 +417,10 @@ pub struct ServerStatus {
 }
 
 /// Server list ping: handshake with intent status, status request, ping.
-pub async fn ping(address: &str, tables: Option<Arc<ProtocolTables>>) -> Result<ServerStatus, ProtocolError> {
+pub async fn ping(
+    address: &str,
+    tables: Option<Arc<ProtocolTables>>,
+) -> Result<ServerStatus, ProtocolError> {
     let tables = match tables {
         Some(t) => t,
         None => Arc::new(ProtocolTables::load().map_err(|e| ProtocolError::Tables(e.to_string()))?),
@@ -388,24 +428,51 @@ pub async fn ping(address: &str, tables: Option<Arc<ProtocolTables>>) -> Result<
     let (host, port, addrs) = resolve(address).await?;
     let stream = TcpStream::connect(&addrs[..]).await?;
     let mut io = Io::new(stream, tables.clone(), Arc::default());
-    io.send(State::Handshake, &Intention { protocol_version: crate::PROTOCOL, server_address: host, server_port: port, intent: INTENT_STATUS }).await?;
-    io.send(State::Status, &status::serverbound::StatusRequest {}).await?;
-    let d = Dispatch::new(&tables.packets, State::Status, Direction::Clientbound, ClientboundStatus::DECODERS);
+    io.send(
+        State::Handshake,
+        &Intention {
+            protocol_version: crate::PROTOCOL,
+            server_address: host,
+            server_port: port,
+            intent: INTENT_STATUS,
+        },
+    )
+    .await?;
+    io.send(State::Status, &status::serverbound::StatusRequest {})
+        .await?;
+    let d = Dispatch::new(
+        &tables.packets,
+        State::Status,
+        Direction::Clientbound,
+        ClientboundStatus::DECODERS,
+    );
     let json = loop {
         let raw = io.recv().await?;
-        if let Some(ClientboundStatus::StatusResponse(s)) = decode_with(&d, &raw, &tables, State::Status)? {
-            break serde_json::from_str(&s.json).map_err(|e| ProtocolError::Protocol(format!("status JSON: {e}")))?;
+        if let Some(ClientboundStatus::StatusResponse(s)) =
+            decode_with(&d, &raw, &tables, State::Status)?
+        {
+            break serde_json::from_str(&s.json)
+                .map_err(|e| ProtocolError::Protocol(format!("status JSON: {e}")))?;
         }
     };
     let t0 = std::time::Instant::now();
-    io.send(State::Status, &status::serverbound::PingRequest { timestamp: 1 }).await?;
+    io.send(
+        State::Status,
+        &status::serverbound::PingRequest { timestamp: 1 },
+    )
+    .await?;
     loop {
         let raw = io.recv().await?;
-        if let Some(ClientboundStatus::PongResponse(_)) = decode_with(&d, &raw, &tables, State::Status)? {
+        if let Some(ClientboundStatus::PongResponse(_)) =
+            decode_with(&d, &raw, &tables, State::Status)?
+        {
             break;
         }
     }
-    Ok(ServerStatus { json, latency: t0.elapsed() })
+    Ok(ServerStatus {
+        json,
+        latency: t0.elapsed(),
+    })
 }
 
 impl Connection {
@@ -415,7 +482,9 @@ impl Connection {
     pub async fn connect(opts: ConnectOptions) -> Result<(Connection, Login), ProtocolError> {
         let tables = match &opts.tables {
             Some(t) => t.clone(),
-            None => Arc::new(ProtocolTables::load().map_err(|e| ProtocolError::Tables(e.to_string()))?),
+            None => {
+                Arc::new(ProtocolTables::load().map_err(|e| ProtocolError::Tables(e.to_string()))?)
+            }
         };
         let (host, port, addrs) = resolve(&opts.address).await?;
         let stream = TcpStream::connect(&addrs[..]).await?;
@@ -434,8 +503,24 @@ impl Connection {
         let mut io = Io::new(stream, tables.clone(), stats.clone());
 
         // Handshake + login.
-        io.send(State::Handshake, &Intention { protocol_version: opts.protocol_version, server_address: host, server_port: port, intent: INTENT_LOGIN }).await?;
-        io.send(State::Login, &login::serverbound::Hello { name: opts.account.username().to_string(), uuid: opts.account.uuid() }).await?;
+        io.send(
+            State::Handshake,
+            &Intention {
+                protocol_version: opts.protocol_version,
+                server_address: host,
+                server_port: port,
+                intent: INTENT_LOGIN,
+            },
+        )
+        .await?;
+        io.send(
+            State::Login,
+            &login::serverbound::Hello {
+                name: opts.account.username().to_string(),
+                uuid: opts.account.uuid(),
+            },
+        )
+        .await?;
         let profile = login_state(&mut io, &opts).await?;
 
         // Configuration.
@@ -443,19 +528,29 @@ impl Connection {
         configuration_state(&mut io, &opts, &mut regs).await?;
 
         // Play: wait for `login`, queueing anything that comes first.
-        let play_dispatch = Arc::new(Dispatch::new(&tables.packets, State::Play, Direction::Clientbound, ClientboundPlay::DECODERS));
+        let play_dispatch = Arc::new(Dispatch::new(
+            &tables.packets,
+            State::Play,
+            Direction::Clientbound,
+            ClientboundPlay::DECODERS,
+        ));
         let (game_tx, game_rx) = mpsc::unbounded_channel();
         let login = loop {
             let raw = io.recv().await?;
             match play_dispatch.decode(raw.id, &raw.payload, Some(&tables)) {
                 Decoded::Ok(ClientboundPlay::Login(l)) => break l,
-                Decoded::Ok(ClientboundPlay::Disconnect(d)) => return Err(ProtocolError::Disconnected(d.reason.to_plain(&|_| None))),
+                Decoded::Ok(ClientboundPlay::Disconnect(d)) => {
+                    return Err(ProtocolError::Disconnected(d.reason.to_plain(&|_| None)))
+                }
                 Decoded::Ok(p) => {
                     let _ = game_tx.send(p);
                 }
                 Decoded::Failed(name, e) => return Err(ProtocolError::Decode(name, e)),
                 Decoded::NoDecoder => {
-                    let _ = game_tx.send(ClientboundPlay::Unknown { id: raw.id, body: raw.payload });
+                    let _ = game_tx.send(ClientboundPlay::Unknown {
+                        id: raw.id,
+                        body: raw.payload,
+                    });
                 }
             }
         };
@@ -479,7 +574,13 @@ impl Connection {
         let (out_tx, out_rx) = mpsc::unbounded_channel();
         let closed = Arc::new(Mutex::new(None));
         let Io { dec, enc, .. } = io;
-        let writer = tokio::spawn(writer_task(enc, out_rx, tables.clone(), stats.clone(), closed.clone()));
+        let writer = tokio::spawn(writer_task(
+            enc,
+            out_rx,
+            tables.clone(),
+            stats.clone(),
+            closed.clone(),
+        ));
         let reader = tokio::spawn(reader_task(ReaderCtx {
             dec,
             out: out_tx.clone(),
@@ -492,7 +593,17 @@ impl Connection {
             regs: regs.clone(),
         }));
         Ok((
-            Connection { rx: game_rx, tx: out_tx, registries: Arc::new(regs), tables, stats, closed, profile, reader, writer },
+            Connection {
+                rx: game_rx,
+                tx: out_tx,
+                registries: Arc::new(regs),
+                tables,
+                stats,
+                closed,
+                profile,
+                reader,
+                writer,
+            },
             info,
         ))
     }
@@ -509,7 +620,9 @@ impl Connection {
 
     /// Queues a packet for sending.
     pub fn send(&self, p: ServerboundPlay) -> Result<(), ProtocolError> {
-        self.tx.send(Outgoing::Play(Box::new(p))).map_err(|_| ProtocolError::Closed)
+        self.tx
+            .send(Outgoing::Play(Box::new(p)))
+            .map_err(|_| ProtocolError::Closed)
     }
 
     /// Registries from the configuration state.
@@ -554,9 +667,30 @@ fn snapshot(s: &Stats, tables: &ProtocolTables) -> StatsSnapshot {
     let unknown = s
         .unknown
         .lock()
-        .map(|m| m.iter().map(|(id, n)| (*id, tables.packets.name(State::Play, Direction::Clientbound, *id).map(str::to_string), *n)).collect())
+        .map(|m| {
+            m.iter()
+                .map(|(id, n)| {
+                    (
+                        *id,
+                        tables
+                            .packets
+                            .name(State::Play, Direction::Clientbound, *id)
+                            .map(str::to_string),
+                        *n,
+                    )
+                })
+                .collect()
+        })
         .unwrap_or_default();
-    let decode_failures = s.failed.lock().map(|m| m.iter().map(|(k, (n, e))| (k.to_string(), *n, e.clone())).collect()).unwrap_or_default();
+    let decode_failures = s
+        .failed
+        .lock()
+        .map(|m| {
+            m.iter()
+                .map(|(k, (n, e))| (k.to_string(), *n, e.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
     StatsSnapshot {
         packets_in: s.packets_in.load(Ordering::Relaxed),
         bytes_in: s.bytes_in.load(Ordering::Relaxed),
@@ -568,10 +702,17 @@ fn snapshot(s: &Stats, tables: &ProtocolTables) -> StatsSnapshot {
 
 async fn login_state(io: &mut Io, opts: &ConnectOptions) -> Result<GameProfile, ProtocolError> {
     let tables = io.tables.clone();
-    let d = Dispatch::new(&tables.packets, State::Login, Direction::Clientbound, ClientboundLogin::DECODERS);
+    let d = Dispatch::new(
+        &tables.packets,
+        State::Login,
+        Direction::Clientbound,
+        ClientboundLogin::DECODERS,
+    );
     loop {
         let raw = io.recv().await?;
-        let Some(p) = decode_with(&d, &raw, &tables, State::Login)? else { continue };
+        let Some(p) = decode_with(&d, &raw, &tables, State::Login)? else {
+            continue;
+        };
         match p {
             ClientboundLogin::Hello(req) => {
                 let secret = auth::new_shared_secret();
@@ -582,7 +723,9 @@ async fn login_state(io: &mut Io, opts: &ConnectOptions) -> Result<GameProfile, 
                             auth::join_session(t, &hash).await?;
                         }
                         Account::Offline { .. } => {
-                            return Err(ProtocolError::Protocol("server is in online mode; an offline account cannot join".into()))
+                            return Err(ProtocolError::Protocol(
+                                "server is in online mode; an offline account cannot join".into(),
+                            ))
                         }
                     }
                 }
@@ -601,15 +744,32 @@ async fn login_state(io: &mut Io, opts: &ConnectOptions) -> Result<GameProfile, 
                 }
             }
             ClientboundLogin::LoginFinished(f) => {
-                io.send(State::Login, &login::serverbound::LoginAcknowledged {}).await?;
+                io.send(State::Login, &login::serverbound::LoginAcknowledged {})
+                    .await?;
                 return Ok(f.profile);
             }
-            ClientboundLogin::LoginDisconnect(d) => return Err(ProtocolError::Disconnected(d.reason.to_plain(&|_| None))),
+            ClientboundLogin::LoginDisconnect(d) => {
+                return Err(ProtocolError::Disconnected(d.reason.to_plain(&|_| None)))
+            }
             ClientboundLogin::CustomQuery(q) => {
-                io.send(State::Login, &login::serverbound::CustomQueryAnswer { message_id: q.message_id, data: None }).await?;
+                io.send(
+                    State::Login,
+                    &login::serverbound::CustomQueryAnswer {
+                        message_id: q.message_id,
+                        data: None,
+                    },
+                )
+                .await?;
             }
             ClientboundLogin::CookieRequest(c) => {
-                io.send(State::Login, &login::serverbound::CookieResponse { key: c.key, payload: None }).await?;
+                io.send(
+                    State::Login,
+                    &login::serverbound::CookieResponse {
+                        key: c.key,
+                        payload: None,
+                    },
+                )
+                .await?;
             }
             ClientboundLogin::Unknown { .. } => {}
         }
@@ -625,14 +785,22 @@ enum ConfigStep {
 }
 
 /// Handles one configuration packet, updating `regs`.
-fn configuration_step(p: ClientboundConfiguration, tables: &ProtocolTables, regs: &mut SyncedRegistries) -> Result<ConfigStep, ProtocolError> {
+fn configuration_step(
+    p: ClientboundConfiguration,
+    tables: &ProtocolTables,
+    regs: &mut SyncedRegistries,
+) -> Result<ConfigStep, ProtocolError> {
     use cfg::serverbound as sb;
     let s = State::Configuration;
     Ok(match p {
         ClientboundConfiguration::SelectKnownPacks(k) => {
             // Select none so the server sends full registry data.
             regs.server_packs = k.packs;
-            ConfigStep::Reply(vec![encode(tables, s, &sb::SelectKnownPacks { packs: vec![] })?])
+            ConfigStep::Reply(vec![encode(
+                tables,
+                s,
+                &sb::SelectKnownPacks { packs: vec![] },
+            )?])
         }
         ClientboundConfiguration::RegistryData(r) => {
             regs.insert(r.registry, r.entries);
@@ -646,40 +814,88 @@ fn configuration_step(p: ClientboundConfiguration, tables: &ProtocolTables, regs
             regs.features = f.features;
             ConfigStep::Nothing
         }
-        ClientboundConfiguration::KeepAlive(k) => ConfigStep::Reply(vec![encode(tables, s, &sb::KeepAlive { id: k.id })?]),
-        ClientboundConfiguration::Ping(p) => ConfigStep::Reply(vec![encode(tables, s, &sb::Pong { id: p.id })?]),
-        ClientboundConfiguration::CookieRequest(c) => ConfigStep::Reply(vec![encode(tables, s, &sb::CookieResponse { key: c.key, payload: None })?]),
+        ClientboundConfiguration::KeepAlive(k) => {
+            ConfigStep::Reply(vec![encode(tables, s, &sb::KeepAlive { id: k.id })?])
+        }
+        ClientboundConfiguration::Ping(p) => {
+            ConfigStep::Reply(vec![encode(tables, s, &sb::Pong { id: p.id })?])
+        }
+        ClientboundConfiguration::CookieRequest(c) => ConfigStep::Reply(vec![encode(
+            tables,
+            s,
+            &sb::CookieResponse {
+                key: c.key,
+                payload: None,
+            },
+        )?]),
         ClientboundConfiguration::CodeOfConduct(c) => {
             tracing::info!("server code of conduct (auto-accepted): {}", c.text);
             ConfigStep::Reply(vec![encode(tables, s, &sb::AcceptCodeOfConduct {})?])
         }
         ClientboundConfiguration::ResourcePackPush(r) => {
-            tracing::warn!("declining server resource pack {} ({}), forced: {}", r.id, r.url, r.forced);
-            ConfigStep::Reply(vec![encode(tables, s, &sb::ResourcePack { id: r.id, result: 1 })?])
+            tracing::warn!(
+                "declining server resource pack {} ({}), forced: {}",
+                r.id,
+                r.url,
+                r.forced
+            );
+            ConfigStep::Reply(vec![encode(
+                tables,
+                s,
+                &sb::ResourcePack {
+                    id: r.id,
+                    result: 1,
+                },
+            )?])
         }
-        ClientboundConfiguration::FinishConfiguration(_) => ConfigStep::Finished(encode(tables, s, &sb::FinishConfiguration {})?),
-        ClientboundConfiguration::Disconnect(d) => ConfigStep::Disconnected(d.reason.to_plain(&|_| None)),
+        ClientboundConfiguration::FinishConfiguration(_) => {
+            ConfigStep::Finished(encode(tables, s, &sb::FinishConfiguration {})?)
+        }
+        ClientboundConfiguration::Disconnect(d) => {
+            ConfigStep::Disconnected(d.reason.to_plain(&|_| None))
+        }
         _ => ConfigStep::Nothing,
     })
 }
 
-fn configuration_hello(tables: &ProtocolTables, opts: &ConnectOptions) -> Result<Vec<Bytes>, ProtocolError> {
+fn configuration_hello(
+    tables: &ProtocolTables,
+    opts: &ConnectOptions,
+) -> Result<Vec<Bytes>, ProtocolError> {
     Ok(vec![
         encode(tables, State::Configuration, &opts.client_information)?,
-        encode(tables, State::Configuration, &cfg::serverbound::CustomPayload { channel: Identifier::minecraft("brand"), data: brand_payload(&opts.brand) })?,
+        encode(
+            tables,
+            State::Configuration,
+            &cfg::serverbound::CustomPayload {
+                channel: Identifier::minecraft("brand"),
+                data: brand_payload(&opts.brand),
+            },
+        )?,
     ])
 }
 
-async fn configuration_state(io: &mut Io, opts: &ConnectOptions, regs: &mut SyncedRegistries) -> Result<(), ProtocolError> {
+async fn configuration_state(
+    io: &mut Io,
+    opts: &ConnectOptions,
+    regs: &mut SyncedRegistries,
+) -> Result<(), ProtocolError> {
     let tables = io.tables.clone();
     for b in configuration_hello(&tables, opts)? {
         io.enc.write_packet(b).await?;
     }
     io.enc.flush().await?;
-    let d = Dispatch::new(&tables.packets, State::Configuration, Direction::Clientbound, ClientboundConfiguration::DECODERS);
+    let d = Dispatch::new(
+        &tables.packets,
+        State::Configuration,
+        Direction::Clientbound,
+        ClientboundConfiguration::DECODERS,
+    );
     loop {
         let raw = io.recv().await?;
-        let Some(p) = decode_with(&d, &raw, &tables, State::Configuration)? else { continue };
+        let Some(p) = decode_with(&d, &raw, &tables, State::Configuration)? else {
+            continue;
+        };
         match configuration_step(p, &tables, regs)? {
             ConfigStep::Reply(v) => {
                 for b in v {
@@ -721,17 +937,23 @@ fn set_closed(closed: &Mutex<Option<String>>, reason: String) {
 
 async fn reader_task(mut c: ReaderCtx) {
     let mut in_play = true;
-    let cfg_dispatch = Dispatch::new(&c.tables.packets, State::Configuration, Direction::Clientbound, ClientboundConfiguration::DECODERS);
-    let reply = |out: &mpsc::UnboundedSender<Outgoing>, tables: &ProtocolTables, p: ServerboundPlay| {
-        let mut w = Writer::new();
-        if let Some(name) = p.name() {
-            if let Some(id) = tables.packets.id(State::Play, Direction::Serverbound, name) {
-                w.var_int(id);
-                p.encode_body(&mut w);
-                let _ = out.send(Outgoing::Raw(w.into_inner().into()));
+    let cfg_dispatch = Dispatch::new(
+        &c.tables.packets,
+        State::Configuration,
+        Direction::Clientbound,
+        ClientboundConfiguration::DECODERS,
+    );
+    let reply =
+        |out: &mpsc::UnboundedSender<Outgoing>, tables: &ProtocolTables, p: ServerboundPlay| {
+            let mut w = Writer::new();
+            if let Some(name) = p.name() {
+                if let Some(id) = tables.packets.id(State::Play, Direction::Serverbound, name) {
+                    w.var_int(id);
+                    p.encode_body(&mut w);
+                    let _ = out.send(Outgoing::Raw(w.into_inner().into()));
+                }
             }
-        }
-    };
+        };
     loop {
         let raw = match c.dec.get_raw_packet().await {
             Ok(r) => r,
@@ -741,7 +963,9 @@ async fn reader_task(mut c: ReaderCtx) {
             }
         };
         c.stats.packets_in.fetch_add(1, Ordering::Relaxed);
-        c.stats.bytes_in.fetch_add(raw.payload.len() as u64, Ordering::Relaxed);
+        c.stats
+            .bytes_in
+            .fetch_add(raw.payload.len() as u64, Ordering::Relaxed);
         if !in_play {
             // Reconfiguration.
             match cfg_dispatch.decode(raw.id, &raw.payload, Some(&c.tables)) {
@@ -766,7 +990,10 @@ async fn reader_task(mut c: ReaderCtx) {
                 },
                 Decoded::NoDecoder => {}
                 Decoded::Failed(name, e) => {
-                    set_closed(&c.closed, format!("decoding {name} during reconfiguration: {e}"));
+                    set_closed(
+                        &c.closed,
+                        format!("decoding {name} during reconfiguration: {e}"),
+                    );
                     break;
                 }
             }
@@ -778,7 +1005,10 @@ async fn reader_task(mut c: ReaderCtx) {
                 if let Ok(mut m) = c.stats.unknown.lock() {
                     *m.entry(raw.id).or_default() += 1;
                 }
-                ClientboundPlay::Unknown { id: raw.id, body: raw.payload }
+                ClientboundPlay::Unknown {
+                    id: raw.id,
+                    body: raw.payload,
+                }
             }
             Decoded::Failed(name, e) => {
                 if let Ok(mut m) = c.stats.failed.lock() {
@@ -790,19 +1020,38 @@ async fn reader_task(mut c: ReaderCtx) {
                     ent.0 += 1;
                     ent.1 = e.to_string();
                 }
-                ClientboundPlay::Unknown { id: raw.id, body: raw.payload }
+                ClientboundPlay::Unknown {
+                    id: raw.id,
+                    body: raw.payload,
+                }
             }
         };
         use play::serverbound as sb;
         match &packet {
-            ClientboundPlay::KeepAlive(k) => reply(&c.out, &c.tables, ServerboundPlay::KeepAlive(sb::KeepAlive { id: k.id })),
-            ClientboundPlay::Ping(p) => reply(&c.out, &c.tables, ServerboundPlay::Pong(sb::Pong { id: p.id })),
-            ClientboundPlay::ChunkBatchFinished(_) => {
-                reply(&c.out, &c.tables, ServerboundPlay::ChunkBatchReceived(sb::ChunkBatchReceived { chunks_per_tick: c.opts.chunks_per_tick }))
-            }
+            ClientboundPlay::KeepAlive(k) => reply(
+                &c.out,
+                &c.tables,
+                ServerboundPlay::KeepAlive(sb::KeepAlive { id: k.id }),
+            ),
+            ClientboundPlay::Ping(p) => reply(
+                &c.out,
+                &c.tables,
+                ServerboundPlay::Pong(sb::Pong { id: p.id }),
+            ),
+            ClientboundPlay::ChunkBatchFinished(_) => reply(
+                &c.out,
+                &c.tables,
+                ServerboundPlay::ChunkBatchReceived(sb::ChunkBatchReceived {
+                    chunks_per_tick: c.opts.chunks_per_tick,
+                }),
+            ),
             ClientboundPlay::StartConfiguration(_) => {
                 let _ = c.out.send(Outgoing::PlayAllowed(false));
-                reply(&c.out, &c.tables, ServerboundPlay::ConfigurationAcknowledged(sb::ConfigurationAcknowledged {}));
+                reply(
+                    &c.out,
+                    &c.tables,
+                    ServerboundPlay::ConfigurationAcknowledged(sb::ConfigurationAcknowledged {}),
+                );
                 in_play = false;
                 // Vanilla sends client information again on reconfiguration.
                 if let Ok(v) = configuration_hello(&c.tables, &c.opts) {
@@ -812,7 +1061,10 @@ async fn reader_task(mut c: ReaderCtx) {
                 }
             }
             ClientboundPlay::Disconnect(d) => {
-                set_closed(&c.closed, format!("disconnected by server: {}", d.reason.to_plain(&|_| None)));
+                set_closed(
+                    &c.closed,
+                    format!("disconnected by server: {}", d.reason.to_plain(&|_| None)),
+                );
             }
             _ => {}
         }
@@ -828,7 +1080,8 @@ async fn reader_task(mut c: ReaderCtx) {
 /// each name that failed to decode to `<dir>/<name>.bin` (layout debugging).
 fn dump_packet(name: &str, body: &[u8]) {
     if let Some(dir) = std::env::var_os("HASTE_PROTOCOL_DUMP") {
-        let file = std::path::Path::new(&dir).join(format!("{}.bin", name.replace([':', '/'], "_")));
+        let file =
+            std::path::Path::new(&dir).join(format!("{}.bin", name.replace([':', '/'], "_")));
         if let Err(e) = std::fs::write(&file, body) {
             tracing::warn!("dump {}: {e}", file.display());
         }
@@ -849,7 +1102,10 @@ async fn writer_task(
         while let Some(o) = next.take() {
             let bytes = match o {
                 Outgoing::Play(p) if play_allowed => {
-                    let Some(id) = p.name().and_then(|n| tables.packets.id(State::Play, Direction::Serverbound, n)) else {
+                    let Some(id) = p
+                        .name()
+                        .and_then(|n| tables.packets.id(State::Play, Direction::Serverbound, n))
+                    else {
                         tracing::warn!("no serverbound play id for {:?}", p.name());
                         next = rx.try_recv().ok();
                         continue;

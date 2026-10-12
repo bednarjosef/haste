@@ -48,7 +48,10 @@ impl BlockShapes {
         for s in &file.states {
             let idx = s.id as usize;
             if idx >= state_count {
-                anyhow::bail!("block_shapes.json: state id {} out of range (0..{state_count})", s.id);
+                anyhow::bail!(
+                    "block_shapes.json: state id {} out of range (0..{state_count})",
+                    s.id
+                );
             }
             let conv = |lists: &[[f64; 6]]| -> Vec<Aabb> {
                 lists
@@ -59,9 +62,15 @@ impl BlockShapes {
                     })
                     .collect()
             };
-            shapes[idx] = StateShapes { collision: conv(&s.collision), outline: conv(&s.outline) };
+            shapes[idx] = StateShapes {
+                collision: conv(&s.collision),
+                outline: conv(&s.outline),
+            };
         }
-        Ok(Self { shapes, oracle_backed: true })
+        Ok(Self {
+            shapes,
+            oracle_backed: true,
+        })
     }
 
     /// Fallback heuristic from docs/INTERFACES.md. Approximate by design.
@@ -71,7 +80,10 @@ impl BlockShapes {
             let state = BlockStateId(id);
             shapes.push(fallback_shapes(blocks, state));
         }
-        Self { shapes, oracle_backed: false }
+        Self {
+            shapes,
+            oracle_backed: false,
+        }
     }
 
     pub fn is_oracle_backed(&self) -> bool {
@@ -95,58 +107,124 @@ const FULL_CUBE: Aabb = Aabb {
 
 /// Keywords from docs/INTERFACES.md for blocks that are not full cubes in the fallback.
 const KEYWORDS: &[&str] = &[
-    "grass", "fern", "flower", "sapling", "torch", "rail", "button", "lever",
-    "pressure_plate", "carpet", "sign", "banner", "vine", "bush", "mushroom", "wheat", "carrot",
-    "potato", "beetroot", "sugar_cane", "kelp", "seagrass", "lily", "dead_bush", "cobweb",
-    "redstone_wire", "tripwire", "string", "cave_vines",
+    "grass",
+    "fern",
+    "flower",
+    "sapling",
+    "torch",
+    "rail",
+    "button",
+    "lever",
+    "pressure_plate",
+    "carpet",
+    "sign",
+    "banner",
+    "vine",
+    "bush",
+    "mushroom",
+    "wheat",
+    "carrot",
+    "potato",
+    "beetroot",
+    "sugar_cane",
+    "kelp",
+    "seagrass",
+    "lily",
+    "dead_bush",
+    "cobweb",
+    "redstone_wire",
+    "tripwire",
+    "string",
+    "cave_vines",
 ];
 
 fn fallback_shapes(blocks: &BlockStates, state: BlockStateId) -> StateShapes {
     let path = blocks.block_of(state).path();
     let prop = |k: &str| blocks.property_value(state, k);
     // Air variants and fluids never collide.
-    if matches!(path, "air" | "cave_air" | "void_air" | "water" | "lava" | "bubble_column") {
+    if matches!(
+        path,
+        "air" | "cave_air" | "void_air" | "water" | "lava" | "bubble_column"
+    ) {
         return StateShapes::default();
     }
     // Snow: 1/8 per layer.
     if path == "snow" {
-        let layers = prop("layers").and_then(|v| v.parse::<f64>().ok()).unwrap_or(1.0);
-        let aabb = Aabb { min: DVec3::new(0.0, 0.0, 0.0), max: DVec3::new(1.0, layers / 8.0, 1.0) };
-        return StateShapes { collision: vec![aabb], outline: vec![aabb] };
+        let layers = prop("layers")
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(1.0);
+        let aabb = Aabb {
+            min: DVec3::new(0.0, 0.0, 0.0),
+            max: DVec3::new(1.0, layers / 8.0, 1.0),
+        };
+        return StateShapes {
+            collision: vec![aabb],
+            outline: vec![aabb],
+        };
     }
     // Slabs: half cube (property is `type` in 26.3: top/bottom/double).
     if path.ends_with("_slab") {
         let ty = prop("type").unwrap_or("bottom");
         let aabb = match ty {
-            "top" => Aabb { min: DVec3::new(0.0, 0.5, 0.0), max: DVec3::new(1.0, 1.0, 1.0) },
+            "top" => Aabb {
+                min: DVec3::new(0.0, 0.5, 0.0),
+                max: DVec3::new(1.0, 1.0, 1.0),
+            },
             "double" => FULL_CUBE,
-            _ => Aabb { min: DVec3::new(0.0, 0.0, 0.0), max: DVec3::new(1.0, 0.5, 1.0) },
+            _ => Aabb {
+                min: DVec3::new(0.0, 0.0, 0.0),
+                max: DVec3::new(1.0, 0.5, 1.0),
+            },
         };
-        return StateShapes { collision: vec![aabb], outline: vec![aabb] };
+        return StateShapes {
+            collision: vec![aabb],
+            outline: vec![aabb],
+        };
     }
     // Stairs: approximate as a half cube by `half`.
     if path.ends_with("_stairs") {
         let top = prop("half") == Some("top");
         let aabb = if top {
-            Aabb { min: DVec3::new(0.0, 0.5, 0.0), max: DVec3::new(1.0, 1.0, 1.0) }
+            Aabb {
+                min: DVec3::new(0.0, 0.5, 0.0),
+                max: DVec3::new(1.0, 1.0, 1.0),
+            }
         } else {
-            Aabb { min: DVec3::new(0.0, 0.0, 0.0), max: DVec3::new(1.0, 0.5, 1.0) }
+            Aabb {
+                min: DVec3::new(0.0, 0.0, 0.0),
+                max: DVec3::new(1.0, 0.5, 1.0),
+            }
         };
-        return StateShapes { collision: vec![aabb], outline: vec![aabb] };
+        return StateShapes {
+            collision: vec![aabb],
+            outline: vec![aabb],
+        };
     }
     // Pointed dripstone: half cube by vertical_direction.
     if path == "pointed_dripstone" {
         let down = prop("vertical_direction") == Some("down");
         let aabb = if down {
-            Aabb { min: DVec3::new(0.0, 0.0, 0.0), max: DVec3::new(1.0, 0.5, 1.0) }
+            Aabb {
+                min: DVec3::new(0.0, 0.0, 0.0),
+                max: DVec3::new(1.0, 0.5, 1.0),
+            }
         } else {
-            Aabb { min: DVec3::new(0.0, 0.5, 0.0), max: DVec3::new(1.0, 1.0, 1.0) }
+            Aabb {
+                min: DVec3::new(0.0, 0.5, 0.0),
+                max: DVec3::new(1.0, 1.0, 1.0),
+            }
         };
-        return StateShapes { collision: vec![aabb], outline: vec![aabb] };
+        return StateShapes {
+            collision: vec![aabb],
+            outline: vec![aabb],
+        };
     }
     if KEYWORDS.iter().any(|k| path.contains(k)) {
         // Plants, rails and the like: no collision in the fallback.
         return StateShapes::default();
     }
-    StateShapes { collision: vec![FULL_CUBE], outline: vec![FULL_CUBE] }
+    StateShapes {
+        collision: vec![FULL_CUBE],
+        outline: vec![FULL_CUBE],
+    }
 }

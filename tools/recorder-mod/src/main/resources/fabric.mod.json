@@ -3,12 +3,13 @@
   "id": "haste-recorder",
   "version": "0.1.0",
   "name": "Haste Recorder",
-  "description": "Dumps vanilla 26.3 server-side oracle data (block shapes, entity dimensions, block properties) to cache/oracle/26.3 for the Haste client.",
+  "description": "Records vanilla 26.3 oracle data for the Haste client: server-side dumps (block shapes, entity dimensions, block properties) and client-side traces/screenshots/benchmarks.",
   "authors": ["haste"],
   "license": "MIT",
-  "environment": "server",
+  "environment": "*",
   "entrypoints": {
-    "main": ["haste.recorder.HasteRecorderMod"]
+    "main": ["haste.recorder.HasteRecorderMod"],
+    "client": ["haste.recorder.client.HasteClientRecorder"]
   },
   "mixins": ["haste-recorder.mixins.json"],
   "depends": {

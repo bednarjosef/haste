@@ -150,13 +150,17 @@ impl ClassLog {
     pub fn parse(s: &str) -> ClassLog {
         let mut classes = BTreeMap::new();
         for line in s.lines() {
-            let Some((how, name)) = line.split_once('\t') else { continue };
+            let Some((how, name)) = line.split_once('\t') else {
+                continue;
+            };
             let src = match how {
                 "jar" => ClassSource::Jar,
                 "proxy" => ClassSource::Proxy,
                 "game" => ClassSource::Game,
                 "lib" => ClassSource::Library,
-                other => ClassSource::Refused(other.strip_prefix("refused: ").unwrap_or(other).to_owned()),
+                other => ClassSource::Refused(
+                    other.strip_prefix("refused: ").unwrap_or(other).to_owned(),
+                ),
             };
             classes.insert(name.to_owned(), src);
         }
@@ -164,13 +168,20 @@ impl ClassLog {
     }
     /// Names with the given source.
     pub fn with(&self, pred: impl Fn(&ClassSource) -> bool) -> Vec<&str> {
-        self.classes.iter().filter(|(_, s)| pred(s)).map(|(n, _)| n.as_str()).collect()
+        self.classes
+            .iter()
+            .filter(|(_, s)| pred(s))
+            .map(|(n, _)| n.as_str())
+            .collect()
     }
     /// Refused classes with reasons.
     pub fn refused(&self) -> Vec<(&str, &str)> {
         self.classes
             .iter()
-            .filter_map(|(n, s)| match s { ClassSource::Refused(r) => Some((n.as_str(), r.as_str())), _ => None })
+            .filter_map(|(n, s)| match s {
+                ClassSource::Refused(r) => Some((n.as_str(), r.as_str())),
+                _ => None,
+            })
             .collect()
     }
 }
@@ -185,7 +196,11 @@ pub fn library_jars(dir: &Path) -> Vec<PathBuf> {
             if p.is_dir() {
                 walk(&p, root, out);
             } else if p.extension().is_some_and(|x| x == "jar") {
-                let rel = p.strip_prefix(root).unwrap_or(&p).to_string_lossy().replace('\\', "/");
+                let rel = p
+                    .strip_prefix(root)
+                    .unwrap_or(&p)
+                    .to_string_lossy()
+                    .replace('\\', "/");
                 if !rel.starts_with("net/fabricmc/") && !rel.starts_with("org/ow2/asm/") {
                     out.push(p);
                 }
@@ -206,13 +221,23 @@ mod tests {
     fn parses_class_log() {
         let log = ClassLog::parse("jar\tnet.minecraft.core.BlockPos\nproxy\tnet.minecraft.client.Minecraft\nrefused: deny-listed\tnet.minecraft.world.level.Level\nlib\tcom.google.common.base.Preconditions\n");
         assert_eq!(log.classes["net.minecraft.core.BlockPos"], ClassSource::Jar);
-        assert_eq!(log.with(|s| *s == ClassSource::Proxy), vec!["net.minecraft.client.Minecraft"]);
-        assert_eq!(log.refused(), vec![("net.minecraft.world.level.Level", "deny-listed")]);
+        assert_eq!(
+            log.with(|s| *s == ClassSource::Proxy),
+            vec!["net.minecraft.client.Minecraft"]
+        );
+        assert_eq!(
+            log.refused(),
+            vec![("net.minecraft.world.level.Level", "deny-listed")]
+        );
     }
 
     #[test]
     fn deny_covers_tier1_types() {
-        for t in ["net/minecraft/client/Minecraft", "net/minecraft/world/item/ItemStack", "net/minecraft/client/player/"] {
+        for t in [
+            "net/minecraft/client/Minecraft",
+            "net/minecraft/world/item/ItemStack",
+            "net/minecraft/client/player/",
+        ] {
             assert!(DENY.contains(&t), "{t}");
         }
         assert!(ALLOW_PACKAGES.iter().all(|p| p.ends_with('/')));

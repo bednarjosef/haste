@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 
 use haste_core::Identifier;
 
@@ -122,7 +122,11 @@ impl AtlasBuilder {
         for py in 0..MISSING_TILE {
             for px in 0..MISSING_TILE {
                 let pink = (py < MISSING_TILE / 2) ^ (px < MISSING_TILE / 2);
-                let color: [u8; 4] = if pink { [248, 0, 248, 255] } else { [0, 0, 0, 255] };
+                let color: [u8; 4] = if pink {
+                    [248, 0, 248, 255]
+                } else {
+                    [0, 0, 0, 255]
+                };
                 let idx = ((py * atlas_size + px) * 4) as usize;
                 atlas_pixels[idx..idx + 4].copy_from_slice(&color);
             }
@@ -187,7 +191,10 @@ impl AtlasBuilder {
     }
 
     pub fn region(&self, texture_id: &str) -> AtlasRegion {
-        self.regions.get(texture_id).copied().unwrap_or(self.missing)
+        self.regions
+            .get(texture_id)
+            .copied()
+            .unwrap_or(self.missing)
     }
 
     pub fn has(&self, texture_id: &str) -> bool {
@@ -233,10 +240,24 @@ fn load_source(assets: &mut Assets, id: &Identifier) -> Source {
     let name = id.to_string();
     let Ok(image) = assets.texture(id) else {
         tracing::warn!("Missing texture: {name}");
-        return Source { name, data: Vec::new(), w: 0, h: 0, opaque: false, translucent: false };
+        return Source {
+            name,
+            data: Vec::new(),
+            w: 0,
+            h: 0,
+            opaque: false,
+            translucent: false,
+        };
     };
     let Ok(meta) = assets.texture_meta(id) else {
-        return Source { name, data: Vec::new(), w: 0, h: 0, opaque: false, translucent: false };
+        return Source {
+            name,
+            data: Vec::new(),
+            w: 0,
+            h: 0,
+            opaque: false,
+            translucent: false,
+        };
     };
     let (w, h) = image.dimensions();
     let full = image.into_raw();
@@ -257,7 +278,14 @@ fn load_source(assets: &mut Assets, id: &Identifier) -> Source {
         None => (full, w, h),
     };
     let (opaque, translucent) = sprite_transparency(&data);
-    Source { name, data, w, h, opaque, translucent }
+    Source {
+        name,
+        data,
+        w,
+        h,
+        opaque,
+        translucent,
+    }
 }
 
 /// (opaque, translucent) over every texel (Pomme `sprite_transparency`).
@@ -283,12 +311,7 @@ fn pixel_region(x: u32, y: u32, w: u32, h: u32) -> AtlasRegion {
 }
 
 /// Shelf packer (Pomme `pack`): rows sorted by height, mip-aligned positions.
-fn pack(
-    sources: &[Source],
-    atlas_size: u32,
-    mip_align: u32,
-)
--> (PackResult, bool) {
+fn pack(sources: &[Source], atlas_size: u32, mip_align: u32) -> (PackResult, bool) {
     let mut placements: HashMap<String, Option<(u32, u32)>> = HashMap::new();
     let missing_region = pixel_region(0, 0, MISSING_TILE, MISSING_TILE);
     let mut cursor_x = MISSING_TILE;
@@ -330,7 +353,10 @@ fn build_mip_chain(mut level0: Vec<u8>, size: u32, mip_levels: u32) -> Vec<u8> {
         for y in 0..next {
             for x in 0..next {
                 let mut pixels = [[0u8; 4]; 4];
-                for (i, (ox, oy)) in [(0u32, 0u32), (1, 0), (0, 1), (1, 1)].into_iter().enumerate() {
+                for (i, (ox, oy)) in [(0u32, 0u32), (1, 0), (0, 1), (1, 1)]
+                    .into_iter()
+                    .enumerate()
+                {
                     let src = (((y * 2 + oy) * current + x * 2 + ox) * 4) as usize;
                     pixels[i].copy_from_slice(&level0[src..src + 4]);
                 }
@@ -401,8 +427,7 @@ fn extract_frame_rgba(
 ) -> Vec<u8> {
     let row_bytes = full_width as usize * 4;
     let copy_bytes = frame_width as usize * 4;
-    let mut output =
-        Vec::with_capacity(frame_width as usize * frame_height as usize * 4);
+    let mut output = Vec::with_capacity(frame_width as usize * frame_height as usize * 4);
     for row in y..y + frame_height {
         let start = row as usize * row_bytes + x as usize * 4;
         output.extend_from_slice(&data[start..start + copy_bytes]);
@@ -425,9 +450,18 @@ mod tests {
 
     #[test]
     fn sprite_transparency_follows_vanilla_alpha_classes() {
-        assert_eq!(sprite_transparency(&[0, 0, 0, 255, 0, 0, 0, 255]), (true, false));
-        assert_eq!(sprite_transparency(&[0, 0, 0, 255, 0, 0, 0, 0]), (false, false));
-        assert_eq!(sprite_transparency(&[0, 0, 0, 255, 0, 0, 0, 128]), (false, true));
+        assert_eq!(
+            sprite_transparency(&[0, 0, 0, 255, 0, 0, 0, 255]),
+            (true, false)
+        );
+        assert_eq!(
+            sprite_transparency(&[0, 0, 0, 255, 0, 0, 0, 0]),
+            (false, false)
+        );
+        assert_eq!(
+            sprite_transparency(&[0, 0, 0, 255, 0, 0, 0, 128]),
+            (false, true)
+        );
     }
 
     #[test]
@@ -444,13 +478,37 @@ mod tests {
     #[test]
     fn shelf_packer_places_no_overlap() {
         let sources = [
-            Source { name: "a".into(), data: vec![255; 16 * 16 * 4], w: 16, h: 16, opaque: true, translucent: false },
-            Source { name: "b".into(), data: vec![255; 16 * 16 * 4], w: 16, h: 16, opaque: true, translucent: false },
-            Source { name: "c".into(), data: vec![255; 32 * 32 * 4], w: 32, h: 32, opaque: true, translucent: false },
+            Source {
+                name: "a".into(),
+                data: vec![255; 16 * 16 * 4],
+                w: 16,
+                h: 16,
+                opaque: true,
+                translucent: false,
+            },
+            Source {
+                name: "b".into(),
+                data: vec![255; 16 * 16 * 4],
+                w: 16,
+                h: 16,
+                opaque: true,
+                translucent: false,
+            },
+            Source {
+                name: "c".into(),
+                data: vec![255; 32 * 32 * 4],
+                w: 32,
+                h: 32,
+                opaque: true,
+                translucent: false,
+            },
         ];
         let ((placements, _), all_fit) = pack(&sources, 64, 1);
         assert!(all_fit);
-        let rects: Vec<(u32, u32)> = sources.iter().map(|s| placements[&s.name].unwrap()).collect();
+        let rects: Vec<(u32, u32)> = sources
+            .iter()
+            .map(|s| placements[&s.name].unwrap())
+            .collect();
         for i in 0..rects.len() {
             for j in i + 1..rects.len() {
                 let (ax, ay) = rects[i];

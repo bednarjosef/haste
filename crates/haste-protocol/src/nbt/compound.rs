@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::nbt::deserializer::NbtReadHelper;
 use crate::nbt::serializer::NbtWriteHelper;
 use crate::nbt::tag::NbtTag;
-use crate::nbt::{END_ID, Error, Nbt};
+use crate::nbt::{Error, Nbt, END_ID};
 use std::collections::hash_map::IntoIter;
 
 /// Represents a Compound NBT tag, effectively a hash map.

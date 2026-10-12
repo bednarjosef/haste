@@ -108,7 +108,12 @@ thread_local! {
 
 /// Gathers world-space collision boxes intersecting `region` (or touching it within the epsilon).
 /// Returns `false` when they do not fit in the buffer.
-fn gather(region: &Aabb, world: &dyn BlockView, shapes: &dyn CollisionShapes, buf: &mut BoxBuf) -> bool {
+fn gather(
+    region: &Aabb,
+    world: &dyn BlockView,
+    shapes: &dyn CollisionShapes,
+    buf: &mut BoxBuf,
+) -> bool {
     let grown = region.expand(DVec3::splat(COLLISION_EPSILON));
     let mut ok = true;
     buf.boxes.clear();
@@ -183,12 +188,17 @@ fn clip(src: Source, mover: &Aabb, a: Axis, d: f64) -> f64 {
             }
         }
         Source::World(world, shapes) => {
-            for_each_shape(&swept_region(mover, a, d), world, shapes, |origin, boxes| {
-                for local in boxes {
-                    d = clip_one(mover, &local.offset(origin), a, d);
-                }
-                true
-            });
+            for_each_shape(
+                &swept_region(mover, a, d),
+                world,
+                shapes,
+                |origin, boxes| {
+                    for local in boxes {
+                        d = clip_one(mover, &local.offset(origin), a, d);
+                    }
+                    true
+                },
+            );
         }
     }
     if d.abs() < COLLISION_EPSILON {
@@ -200,10 +210,18 @@ fn clip(src: Source, mover: &Aabb, a: Axis, d: f64) -> f64 {
 
 /// Region covered by moving `aabb` by `m` (the box stretched towards the movement).
 fn stretch(aabb: &Aabb, m: DVec3) -> Aabb {
-    Aabb { min: aabb.min + m.min(DVec3::ZERO), max: aabb.max + m.max(DVec3::ZERO) }
+    Aabb {
+        min: aabb.min + m.min(DVec3::ZERO),
+        max: aabb.max + m.max(DVec3::ZERO),
+    }
 }
 
-fn with_boxes<R>(region: &Aabb, world: &dyn BlockView, shapes: &dyn CollisionShapes, f: impl FnOnce(Source) -> R) -> R {
+fn with_boxes<R>(
+    region: &Aabb,
+    world: &dyn BlockView,
+    shapes: &dyn CollisionShapes,
+    f: impl FnOnce(Source) -> R,
+) -> R {
     SCRATCH.with(|cell| match cell.try_borrow_mut() {
         Ok(mut buf) => {
             if gather(region, world, shapes, &mut buf) {
@@ -219,11 +237,18 @@ fn with_boxes<R>(region: &Aabb, world: &dyn BlockView, shapes: &dyn CollisionSha
 
 /// Pure axis-separated sweep: Y first, then X/Z ordered by larger magnitude (X first on ties).
 /// Returns the movement actually possible. No step-up; see [`collide_with_step`].
-pub fn collide(aabb: Aabb, movement: DVec3, world: &dyn BlockView, shapes: &dyn CollisionShapes) -> DVec3 {
+pub fn collide(
+    aabb: Aabb,
+    movement: DVec3,
+    world: &dyn BlockView,
+    shapes: &dyn CollisionShapes,
+) -> DVec3 {
     if movement == DVec3::ZERO {
         return movement;
     }
-    with_boxes(&stretch(&aabb, movement), world, shapes, |src| sweep(src, aabb, movement))
+    with_boxes(&stretch(&aabb, movement), world, shapes, |src| {
+        sweep(src, aabb, movement)
+    })
 }
 
 fn sweep(src: Source, aabb: Aabb, movement: DVec3) -> DVec3 {
@@ -270,10 +295,18 @@ pub fn collide_with_step(
     if step_height > 0.0 {
         region.max.y = region.max.y.max(aabb.max.y + step_height);
     }
-    with_boxes(&region, world, shapes, |src| sweep_with_step(src, aabb, movement, step_height, on_ground))
+    with_boxes(&region, world, shapes, |src| {
+        sweep_with_step(src, aabb, movement, step_height, on_ground)
+    })
 }
 
-fn sweep_with_step(src: Source, aabb: Aabb, movement: DVec3, step_height: f64, on_ground: bool) -> DVec3 {
+fn sweep_with_step(
+    src: Source,
+    aabb: Aabb,
+    movement: DVec3,
+    step_height: f64,
+    on_ground: bool,
+) -> DVec3 {
     let plain = sweep(src, aabb, movement);
     let blocked_h = plain.x != movement.x || plain.z != movement.z;
     let landed = movement.y < 0.0 && plain.y != movement.y;
@@ -314,8 +347,15 @@ pub fn no_collision(aabb: &Aabb, world: &dyn BlockView, shapes: &dyn CollisionSh
 /// The block the mover stands on: among blocks whose collision boxes touch the plane just below
 /// `aabb`, the one whose cell centre is closest (horizontally) to the box centre. `None` if none.
 /// Approximation of vanilla's "supporting block" (documented in NOTES.md).
-pub fn supporting_block(aabb: &Aabb, world: &dyn BlockView, shapes: &dyn CollisionShapes) -> Option<BlockPos> {
-    let probe = Aabb { min: DVec3::new(aabb.min.x, aabb.min.y - 1e-6, aabb.min.z), max: DVec3::new(aabb.max.x, aabb.min.y, aabb.max.z) };
+pub fn supporting_block(
+    aabb: &Aabb,
+    world: &dyn BlockView,
+    shapes: &dyn CollisionShapes,
+) -> Option<BlockPos> {
+    let probe = Aabb {
+        min: DVec3::new(aabb.min.x, aabb.min.y - 1e-6, aabb.min.z),
+        max: DVec3::new(aabb.max.x, aabb.min.y, aabb.max.z),
+    };
     let c = aabb.center();
     let mut best: Option<(f64, BlockPos)> = None;
     for_each_shape(&probe, world, shapes, |origin, boxes| {
@@ -343,7 +383,10 @@ mod tests {
     fn list_and_world_paths_agree() {
         let mut w = TestWorld::flat(0, STONE);
         for i in -6..6 {
-            w.set(i, 0, (i * 3) % 5, BOTTOM_SLAB).set(2, 0, i, STAIR_NORTH).set(i, 1, -3, FENCE_POST).set(-3, 0, i, STONE);
+            w.set(i, 0, (i * 3) % 5, BOTTOM_SLAB)
+                .set(2, 0, i, STAIR_NORTH)
+                .set(i, 1, -3, FENCE_POST)
+                .set(-3, 0, i, STONE);
         }
         let s = TestShapes::default();
         let mut seed = 0x2545_f491_u64;
@@ -367,7 +410,11 @@ mod tests {
             let world = Source::World(&w, &s);
             let list = Source::List(&buf.boxes);
             assert_eq!(sweep(world, b, m), sweep(list, b, m), "{p:?} {m:?}");
-            assert_eq!(sweep_with_step(world, b, m, 0.6, true), sweep_with_step(list, b, m, 0.6, true), "{p:?} {m:?}");
+            assert_eq!(
+                sweep_with_step(world, b, m, 0.6, true),
+                sweep_with_step(list, b, m, 0.6, true),
+                "{p:?} {m:?}"
+            );
         }
     }
 }

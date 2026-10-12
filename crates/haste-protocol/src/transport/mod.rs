@@ -227,7 +227,10 @@ impl<R: AsyncRead + Unpin> TcpNetworkDecoder<R> {
             DecompressionReader::None(bounded_reader)
         };
 
-        let packet_id = VarInt::decode_async(&mut reader).await.map_err(|_| PacketDecodeError::DecodeID)?.0;
+        let packet_id = VarInt::decode_async(&mut reader)
+            .await
+            .map_err(|_| PacketDecodeError::DecodeID)?
+            .0;
         let packet_id_len = VarInt(packet_id).written_size();
 
         let payload_len_hint = expected_packet_data_len.saturating_sub(packet_id_len);
@@ -580,7 +583,10 @@ pub struct StreamDecryptor<R: AsyncRead + Unpin> {
 impl<R: AsyncRead + Unpin> StreamDecryptor<R> {
     /// Wraps `stream`, decrypting everything read from it with `cipher`.
     pub const fn new(cipher: Aes128Cfb8Dec, stream: R) -> Self {
-        Self { cipher, read: stream }
+        Self {
+            cipher,
+            read: stream,
+        }
     }
 }
 
@@ -631,10 +637,18 @@ pub struct StreamEncryptor<W: AsyncWrite + Unpin> {
 impl<W: AsyncWrite + Unpin> StreamEncryptor<W> {
     /// Wraps `stream`, encrypting everything written to it with `cipher`.
     pub fn new(cipher: Aes128Cfb8Enc, stream: W) -> Self {
-        Self { cipher, write: stream, pending: Vec::new(), pending_pos: 0 }
+        Self {
+            cipher,
+            write: stream,
+            pending: Vec::new(),
+            pending_pos: 0,
+        }
     }
 
-    fn poll_drain(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+    fn poll_drain(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
         while self.pending_pos < self.pending.len() {
             let w = std::pin::Pin::new(&mut self.write);
             match w.poll_write(cx, &self.pending[self.pending_pos..]) {
@@ -674,7 +688,10 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for StreamEncryptor<W> {
         }
     }
 
-    fn poll_flush(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), std::io::Error>> {
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
         let this = self.get_mut();
         match this.poll_drain(cx) {
             std::task::Poll::Ready(Ok(())) => std::pin::Pin::new(&mut this.write).poll_flush(cx),
@@ -682,7 +699,10 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for StreamEncryptor<W> {
         }
     }
 
-    fn poll_shutdown(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), std::io::Error>> {
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
         let this = self.get_mut();
         match this.poll_drain(cx) {
             std::task::Poll::Ready(Ok(())) => std::pin::Pin::new(&mut this.write).poll_shutdown(cx),
@@ -754,8 +774,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decode_without_compression_and_encryption() -> Result<(), Box<dyn std::error::Error>>
-    {
+    async fn decode_without_compression_and_encryption() -> Result<(), Box<dyn std::error::Error>> {
         let packet = build_packet(1, b"Hello", false, None, None)?;
         let mut decoder = TcpNetworkDecoder::new(packet.as_slice());
         let raw_packet = decoder.get_raw_packet().await?;
@@ -826,8 +845,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decode_multiple_packets_reuses_scratch() -> Result<(), Box<dyn std::error::Error>>
-    {
+    async fn decode_multiple_packets_reuses_scratch() -> Result<(), Box<dyn std::error::Error>> {
         let packet1 = build_packet(1, b"Hello", false, None, None)?;
         let packet2 = build_packet(2, b"World", false, None, None)?;
 
@@ -926,7 +944,9 @@ mod tests {
             let mut enc = StreamEncryptor::new(cipher, &mut wire);
             // Several writes: the cipher state must carry across them.
             for chunk in plain.chunks(777) {
-                tokio::io::AsyncWriteExt::write_all(&mut enc, chunk).await.unwrap();
+                tokio::io::AsyncWriteExt::write_all(&mut enc, chunk)
+                    .await
+                    .unwrap();
             }
             tokio::io::AsyncWriteExt::flush(&mut enc).await.unwrap();
         }
@@ -938,7 +958,9 @@ mod tests {
         let cipher = Aes128Cfb8Dec::new_from_slices(&key, &key).unwrap();
         let mut dec = StreamDecryptor::new(cipher, &wire[..]);
         let mut out = Vec::new();
-        tokio::io::AsyncReadExt::read_to_end(&mut dec, &mut out).await.unwrap();
+        tokio::io::AsyncReadExt::read_to_end(&mut dec, &mut out)
+            .await
+            .unwrap();
         assert_eq!(out, plain);
     }
 

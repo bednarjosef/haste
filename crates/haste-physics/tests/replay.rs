@@ -4,7 +4,9 @@
 use haste_core::input::InputState;
 use haste_core::DVec3;
 use haste_physics::oracle::{default_oracle_dir, OracleBlocks};
-use haste_physics::replay::{load_trace, replay, FlatWorld, InputAlignment, Trace, TraceInput, TraceTick, DEFAULT_TOLERANCE};
+use haste_physics::replay::{
+    load_trace, replay, FlatWorld, InputAlignment, Trace, TraceInput, TraceTick, DEFAULT_TOLERANCE,
+};
 use haste_physics::testing::{states::*, TestShapes, TestWorld};
 use haste_physics::{tick, PlayerAttributes, PlayerState};
 
@@ -37,7 +39,13 @@ fn record(world: &TestWorld, inputs: &[InputState]) -> Trace {
         tick(&mut s, inp, &attrs, world, &shapes, &shapes);
         ticks.push(tick_of(i + 1, &s, inp));
     }
-    Trace { version: 1, name: "synthetic".into(), world: None, player: None, ticks }
+    Trace {
+        version: 1,
+        name: "synthetic".into(),
+        world: None,
+        player: None,
+        ticks,
+    }
 }
 
 fn inputs() -> Vec<InputState> {
@@ -69,7 +77,15 @@ fn own_trace_replays_without_divergence() {
     let w = terrain();
     let trace = record(&w, &inputs());
     let shapes = TestShapes::default();
-    let r = replay(&trace, &PlayerAttributes::default(), &w, &shapes, &shapes, DEFAULT_TOLERANCE, InputAlignment::SameTick);
+    let r = replay(
+        &trace,
+        &PlayerAttributes::default(),
+        &w,
+        &shapes,
+        &shapes,
+        DEFAULT_TOLERANCE,
+        InputAlignment::SameTick,
+    );
     assert_eq!(r.first_divergence, None, "{r}");
     assert_eq!(r.max_error, 0.0);
     assert_eq!(r.ticks, 201);
@@ -82,7 +98,15 @@ fn perturbed_trace_reports_first_divergence() {
     let mut trace = record(&w, &inputs());
     trace.ticks[57].pos[0] += 1e-3;
     let shapes = TestShapes::default();
-    let r = replay(&trace, &PlayerAttributes::default(), &w, &shapes, &shapes, DEFAULT_TOLERANCE, InputAlignment::SameTick);
+    let r = replay(
+        &trace,
+        &PlayerAttributes::default(),
+        &w,
+        &shapes,
+        &shapes,
+        DEFAULT_TOLERANCE,
+        InputAlignment::SameTick,
+    );
     let d = r.first_divergence.expect("divergence");
     assert_eq!(d.tick, 57);
     assert!((d.error - 1e-3).abs() < 1e-9);
@@ -107,8 +131,15 @@ fn trace_json_parses() {
 fn superflat(o: &OracleBlocks) -> FlatWorld {
     let bedrock = o.state("minecraft:bedrock", &[]).expect("bedrock");
     let dirt = o.state("minecraft:dirt", &[]).expect("dirt");
-    let grass = o.state("minecraft:grass_block", &[("snowy", "false")]).expect("grass");
-    FlatWorld { bottom: -64, layers: vec![bedrock, dirt, dirt, grass], min_y: -64, height: 384 }
+    let grass = o
+        .state("minecraft:grass_block", &[("snowy", "false")])
+        .expect("grass");
+    FlatWorld {
+        bottom: -64,
+        layers: vec![bedrock, dirt, dirt, grass],
+        min_y: -64,
+        height: 384,
+    }
 }
 
 #[test]
@@ -116,11 +147,18 @@ fn superflat(o: &OracleBlocks) -> FlatWorld {
 fn replay_all_recorded_traces() {
     let dir = default_oracle_dir().join("traces");
     let mut paths: Vec<_> = std::fs::read_dir(&dir)
-        .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "json")).collect())
+        .map(|rd| {
+            rd.filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|x| x == "json"))
+                .collect()
+        })
         .unwrap_or_default();
     paths.sort();
     if paths.is_empty() {
-        eprintln!("no traces in {}: replay harness ready, nothing to replay yet", dir.display());
+        eprintln!(
+            "no traces in {}: replay harness ready, nothing to replay yet",
+            dir.display()
+        );
         return;
     }
     let o = OracleBlocks::load(&default_oracle_dir()).expect("oracle dumps");
@@ -136,13 +174,34 @@ fn replay_all_recorded_traces() {
                 continue;
             }
         };
-        let r = replay(&trace, &attrs, &world, &o, &o, DEFAULT_TOLERANCE, InputAlignment::SameTick);
+        let r = replay(
+            &trace,
+            &attrs,
+            &world,
+            &o,
+            &o,
+            DEFAULT_TOLERANCE,
+            InputAlignment::SameTick,
+        );
         eprintln!("{r}");
         if r.first_divergence.is_some() {
-            let alt = replay(&trace, &attrs, &world, &o, &o, DEFAULT_TOLERANCE, InputAlignment::PreviousTick);
+            let alt = replay(
+                &trace,
+                &attrs,
+                &world,
+                &o,
+                &o,
+                DEFAULT_TOLERANCE,
+                InputAlignment::PreviousTick,
+            );
             eprintln!("  (with PreviousTick alignment: {alt})");
             diverged += 1;
         }
     }
-    assert_eq!(diverged, 0, "{diverged} of {} traces diverge (details above)", paths.len());
+    assert_eq!(
+        diverged,
+        0,
+        "{diverged} of {} traces diverge (details above)",
+        paths.len()
+    );
 }

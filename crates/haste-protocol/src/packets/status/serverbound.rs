@@ -6,7 +6,6 @@ packet_enum! {
     ServerboundStatus { StatusRequest, PingRequest }
 }
 
-
 packet! {
     /// Asks for the status JSON.
     StatusRequest = "minecraft:status_request" {}

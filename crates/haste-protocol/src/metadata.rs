@@ -13,7 +13,9 @@ use haste_core::entity::{ItemStackData, MetadataEntry, MetadataValue, Pose};
 use haste_core::{BlockStateId, Direction};
 
 use crate::wire::particle::Particle;
-use crate::wire::{Codec, DecodeError, DecodeResult, IdOr, ResolvableProfile, Reader, Wire, Writer};
+use crate::wire::{
+    Codec, DecodeError, DecodeResult, IdOr, Reader, ResolvableProfile, Wire, Writer,
+};
 
 /// Serializer type ids (wiki table order).
 pub mod types {
@@ -92,24 +94,36 @@ pub fn read_value(r: &mut Reader<'_>, ty: i32) -> DecodeResult<MetadataValue> {
         DIRECTION => {
             let d = r.var_int()?;
             MetadataValue::Direction(
-                u8::try_from(d).ok().and_then(Direction::from_ordinal).ok_or_else(|| DecodeError::Invalid(format!("direction {d}")))?,
+                u8::try_from(d)
+                    .ok()
+                    .and_then(Direction::from_ordinal)
+                    .ok_or_else(|| DecodeError::Invalid(format!("direction {d}")))?,
             )
         }
         OPTIONAL_UUID => MetadataValue::OptionalUuid(r.option(|r| r.uuid())?),
         BLOCK_STATE => MetadataValue::BlockState(BlockStateId(r.var_int()? as u32)),
         OPTIONAL_BLOCK_STATE => {
             let v = r.var_int()?;
-            MetadataValue::OptionalBlockState(if v == 0 { None } else { Some(BlockStateId(v as u32)) })
+            MetadataValue::OptionalBlockState(if v == 0 {
+                None
+            } else {
+                Some(BlockStateId(v as u32))
+            })
         }
         POSE => {
             let p = r.var_int()?;
-            MetadataValue::Pose(Pose::from_id(p).ok_or_else(|| DecodeError::Invalid(format!("pose {p}")))?)
+            MetadataValue::Pose(
+                Pose::from_id(p).ok_or_else(|| DecodeError::Invalid(format!("pose {p}")))?,
+            )
         }
         _ => {
             let start = r.peek_rest();
             skip_other(r, ty)?;
             let used = start.len() - r.remaining();
-            MetadataValue::Other { type_id: ty, raw: r.to_bytes(&start[..used]) }
+            MetadataValue::Other {
+                type_id: ty,
+                raw: r.to_bytes(&start[..used]),
+            }
         }
     })
 }
@@ -128,8 +142,14 @@ fn skip_other(r: &mut Reader<'_>, ty: i32) -> DecodeResult<()> {
             r.var_int()?;
             r.var_int()?;
         }
-        OPTIONAL_VAR_INT | FIRST_VARIANT..=LAST_VARIANT | SNIFFER_STATE | ARMADILLO_STATE | COPPER_GOLEM_STATE
-        | WEATHERING_COPPER_STATE | HUMANOID_ARM | DYE_COLOR => {
+        OPTIONAL_VAR_INT
+        | FIRST_VARIANT..=LAST_VARIANT
+        | SNIFFER_STATE
+        | ARMADILLO_STATE
+        | COPPER_GOLEM_STATE
+        | WEATHERING_COPPER_STATE
+        | HUMANOID_ARM
+        | DYE_COLOR => {
             r.var_int()?;
         }
         OPTIONAL_GLOBAL_POS => {
@@ -150,7 +170,11 @@ fn skip_other(r: &mut Reader<'_>, ty: i32) -> DecodeResult<()> {
         RESOLVABLE_PROFILE => {
             ResolvableProfile::read(r)?;
         }
-        _ => return Err(DecodeError::Invalid(format!("entity metadata serializer type {ty} not determined"))),
+        _ => {
+            return Err(DecodeError::Invalid(format!(
+                "entity metadata serializer type {ty} not determined"
+            )))
+        }
     }
     Ok(())
 }
@@ -247,7 +271,9 @@ impl Codec<Vec<MetadataEntry>> for Metadata {
                 return Ok(out);
             }
             let ty = r.var_int()?;
-            let value = read_value(r, ty).map_err(|e| DecodeError::Invalid(format!("metadata index {index} type {ty}: {e}")))?;
+            let value = read_value(r, ty).map_err(|e| {
+                DecodeError::Invalid(format!("metadata index {index} type {ty}: {e}"))
+            })?;
             out.push(MetadataEntry { index, value });
         }
     }
@@ -262,7 +288,10 @@ impl Codec<Vec<MetadataEntry>> for Metadata {
 
 /// Convenience: raw bytes of an `Other` value (for tests and tools).
 pub fn other(type_id: i32, raw: &'static [u8]) -> MetadataValue {
-    MetadataValue::Other { type_id, raw: Bytes::from_static(raw) }
+    MetadataValue::Other {
+        type_id,
+        raw: Bytes::from_static(raw),
+    }
 }
 
 #[cfg(test)]
@@ -274,27 +303,94 @@ mod tests {
     #[test]
     fn all_modelled_types_round_trip() {
         let entries = vec![
-            MetadataEntry { index: 0, value: MetadataValue::Byte(0x02) },
-            MetadataEntry { index: 1, value: MetadataValue::VarInt(300) },
-            MetadataEntry { index: 2, value: MetadataValue::VarLong(-5) },
-            MetadataEntry { index: 3, value: MetadataValue::Float(1.5) },
-            MetadataEntry { index: 4, value: MetadataValue::String("s".into()) },
-            MetadataEntry { index: 5, value: MetadataValue::Component(Component::text("c")) },
-            MetadataEntry { index: 6, value: MetadataValue::OptionalComponent(None) },
-            MetadataEntry { index: 7, value: MetadataValue::ItemStack(ItemStackData { count: 1, item: Some(RegistryIndex(5)), components_raw: Bytes::from_static(&[0, 0]) }) },
-            MetadataEntry { index: 8, value: MetadataValue::Boolean(true) },
-            MetadataEntry { index: 9, value: MetadataValue::Rotations([1.0, 2.0, 3.0]) },
-            MetadataEntry { index: 10, value: MetadataValue::BlockPos(BlockPos::new(1, -2, 3)) },
-            MetadataEntry { index: 11, value: MetadataValue::OptionalBlockPos(Some(BlockPos::new(0, 0, 0))) },
-            MetadataEntry { index: 12, value: MetadataValue::Direction(Direction::East) },
-            MetadataEntry { index: 13, value: MetadataValue::OptionalUuid(Some(Uuid::from_u128(1))) },
-            MetadataEntry { index: 14, value: MetadataValue::BlockState(BlockStateId(9)) },
-            MetadataEntry { index: 15, value: MetadataValue::OptionalBlockState(None) },
-            MetadataEntry { index: 16, value: MetadataValue::Pose(Pose::Crouching) },
-            MetadataEntry { index: 17, value: other(types::VILLAGER_DATA, &[1, 2, 3]) },
-            MetadataEntry { index: 18, value: other(types::VECTOR3, &[0; 12]) },
-            MetadataEntry { index: 19, value: other(types::DYE_COLOR, &[14]) },
-            MetadataEntry { index: 20, value: other(types::OPTIONAL_GLOBAL_POS, &[0]) },
+            MetadataEntry {
+                index: 0,
+                value: MetadataValue::Byte(0x02),
+            },
+            MetadataEntry {
+                index: 1,
+                value: MetadataValue::VarInt(300),
+            },
+            MetadataEntry {
+                index: 2,
+                value: MetadataValue::VarLong(-5),
+            },
+            MetadataEntry {
+                index: 3,
+                value: MetadataValue::Float(1.5),
+            },
+            MetadataEntry {
+                index: 4,
+                value: MetadataValue::String("s".into()),
+            },
+            MetadataEntry {
+                index: 5,
+                value: MetadataValue::Component(Component::text("c")),
+            },
+            MetadataEntry {
+                index: 6,
+                value: MetadataValue::OptionalComponent(None),
+            },
+            MetadataEntry {
+                index: 7,
+                value: MetadataValue::ItemStack(ItemStackData {
+                    count: 1,
+                    item: Some(RegistryIndex(5)),
+                    components_raw: Bytes::from_static(&[0, 0]),
+                }),
+            },
+            MetadataEntry {
+                index: 8,
+                value: MetadataValue::Boolean(true),
+            },
+            MetadataEntry {
+                index: 9,
+                value: MetadataValue::Rotations([1.0, 2.0, 3.0]),
+            },
+            MetadataEntry {
+                index: 10,
+                value: MetadataValue::BlockPos(BlockPos::new(1, -2, 3)),
+            },
+            MetadataEntry {
+                index: 11,
+                value: MetadataValue::OptionalBlockPos(Some(BlockPos::new(0, 0, 0))),
+            },
+            MetadataEntry {
+                index: 12,
+                value: MetadataValue::Direction(Direction::East),
+            },
+            MetadataEntry {
+                index: 13,
+                value: MetadataValue::OptionalUuid(Some(Uuid::from_u128(1))),
+            },
+            MetadataEntry {
+                index: 14,
+                value: MetadataValue::BlockState(BlockStateId(9)),
+            },
+            MetadataEntry {
+                index: 15,
+                value: MetadataValue::OptionalBlockState(None),
+            },
+            MetadataEntry {
+                index: 16,
+                value: MetadataValue::Pose(Pose::Crouching),
+            },
+            MetadataEntry {
+                index: 17,
+                value: other(types::VILLAGER_DATA, &[1, 2, 3]),
+            },
+            MetadataEntry {
+                index: 18,
+                value: other(types::VECTOR3, &[0; 12]),
+            },
+            MetadataEntry {
+                index: 19,
+                value: other(types::DYE_COLOR, &[14]),
+            },
+            MetadataEntry {
+                index: 20,
+                value: other(types::OPTIONAL_GLOBAL_POS, &[0]),
+            },
         ];
         let mut w = Writer::new();
         Metadata::write(&entries, &mut w);

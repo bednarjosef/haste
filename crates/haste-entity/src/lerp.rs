@@ -17,7 +17,10 @@ pub(crate) struct LerpState {
 
 impl LerpState {
     pub fn new(pos: DVec3) -> LerpState {
-        LerpState { target: pos, remaining: 0 }
+        LerpState {
+            target: pos,
+            remaining: 0,
+        }
     }
 
     /// A short-delta move arrived (`delta` in blocks): extend the target, restart the window.

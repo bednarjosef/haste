@@ -29,7 +29,10 @@ pub mod wire;
 pub use haste_core;
 
 pub use auth::MsaTokens;
-pub use connection::{ping, Account, ConnectOptions, Connection, Login, ProtocolError, ServerStatus, StatsSnapshot, SyncedRegistries};
+pub use connection::{
+    ping, Account, ConnectOptions, Connection, Login, ProtocolError, ServerStatus, StatsSnapshot,
+    SyncedRegistries,
+};
 pub use packets::play::{ClientboundPlay, ServerboundPlay};
 pub use packets::{PacketIds, ProtocolTables};
 

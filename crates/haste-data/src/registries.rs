@@ -31,10 +31,16 @@ impl Registries {
             for (ename, e) in &r.entries {
                 let id = e.protocol_id as usize;
                 if id >= n {
-                    anyhow::bail!("registries.json: {name}: protocol_id {} out of range (0..{n})", e.protocol_id);
+                    anyhow::bail!(
+                        "registries.json: {name}: protocol_id {} out of range (0..{n})",
+                        e.protocol_id
+                    );
                 }
                 if slots[id].is_some() {
-                    anyhow::bail!("registries.json: {name}: duplicate protocol_id {}", e.protocol_id);
+                    anyhow::bail!(
+                        "registries.json: {name}: duplicate protocol_id {}",
+                        e.protocol_id
+                    );
                 }
                 slots[id] = Some(
                     Identifier::parse(ename)
@@ -43,12 +49,16 @@ impl Registries {
                 by_entry.insert((*ename).into(), e.protocol_id);
             }
             let entries: Option<Vec<_>> = slots.into_iter().collect();
-            let entries = entries
-                .ok_or_else(|| anyhow::anyhow!("registries.json: {name}: protocol ids are not dense 0..{n}"))?;
+            let entries = entries.ok_or_else(|| {
+                anyhow::anyhow!("registries.json: {name}: protocol ids are not dense 0..{n}")
+            })?;
             by_name.insert((*name).into(), registries.len() as u32);
             registries.push(Registry { entries, by_entry });
         }
-        Ok(Self { registries, by_name })
+        Ok(Self {
+            registries,
+            by_name,
+        })
     }
 
     /// Index of `entry` in `registry`, e.g. `("minecraft:entity_type", "minecraft:zombie")`.

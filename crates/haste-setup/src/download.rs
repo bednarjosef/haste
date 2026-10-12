@@ -43,11 +43,17 @@ pub struct SharedProgress {
 impl SharedProgress {
     fn emit_bytes(&self) {
         let done = self.bytes_done.load(Ordering::Relaxed);
-        let _ = self.sender.send(Progress::Bytes { done, total: self.bytes_total });
+        let _ = self.sender.send(Progress::Bytes {
+            done,
+            total: self.bytes_total,
+        });
     }
     fn file_finished(&self) {
         let done = self.files_done.fetch_add(1, Ordering::Relaxed) + 1;
-        let _ = self.sender.send(Progress::File { done: done as usize, total: self.files_total });
+        let _ = self.sender.send(Progress::File {
+            done: done as usize,
+            total: self.files_total,
+        });
     }
 }
 
@@ -74,7 +80,9 @@ pub struct DownloadSpec {
 
 /// Verifies `path` against `sha1` (lowercase hex). Missing file -> false.
 pub async fn verify_sha1(path: &Path, sha1: &str) -> bool {
-    let Ok(data) = tokio::fs::read(path).await else { return false };
+    let Ok(data) = tokio::fs::read(path).await else {
+        return false;
+    };
     let digest = Sha1::digest(&data);
     hex::encode(digest) == sha1.to_ascii_lowercase()
 }
@@ -119,7 +127,10 @@ pub async fn download(
     if range_from > 0 {
         req = req.header(reqwest::header::RANGE, format!("bytes={range_from}-"));
     }
-    let resp = req.send().await.with_context(|| format!("GET {}", spec.url))?;
+    let resp = req
+        .send()
+        .await
+        .with_context(|| format!("GET {}", spec.url))?;
     let resumed = range_from > 0 && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT;
     if range_from > 0 && !resumed {
         // Server ignored the range; restart into the same part file.
@@ -136,7 +147,8 @@ pub async fn download(
     while let Some(chunk) = stream.chunk().await? {
         file.write_all(&chunk).await?;
         if let Some(p) = progress {
-            p.bytes_done.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+            p.bytes_done
+                .fetch_add(chunk.len() as u64, Ordering::Relaxed);
             p.emit_bytes();
         }
     }
@@ -217,7 +229,10 @@ async fn download_many_with(
         }
     });
     for h in handles {
-        out.push(h.await.map_err(|e| anyhow!("download task panicked: {e}"))??);
+        out.push(
+            h.await
+                .map_err(|e| anyhow!("download task panicked: {e}"))??,
+        );
     }
     pump.abort();
     Ok(out)
@@ -239,7 +254,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else { break };
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
                 let io = TokioIo::new(stream);
                 let service = service_fn(move |req: Request<Incoming>| async move {
                     let path = req.uri().path().to_string();
@@ -253,16 +270,33 @@ mod tests {
                             let body = contents;
                             if let Some(r) = range {
                                 // "bytes=N-"
-                                let start: usize =
-                                    r.trim_start_matches("bytes=").trim_end_matches('-').parse().unwrap();
-                                Ok::<_, hyper::Error>(Response::builder()
-                                    .status(hyper::StatusCode::PARTIAL_CONTENT)
-                                    .header(hyper::header::CONTENT_RANGE, format!("bytes {}-{}/{}", start, body.len() - 1, body.len()))
-                                    .body(http_body_util::Full::new(bytes::Bytes::from(body[start..].to_vec())))
-                                    .unwrap())
+                                let start: usize = r
+                                    .trim_start_matches("bytes=")
+                                    .trim_end_matches('-')
+                                    .parse()
+                                    .unwrap();
+                                Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(hyper::StatusCode::PARTIAL_CONTENT)
+                                        .header(
+                                            hyper::header::CONTENT_RANGE,
+                                            format!(
+                                                "bytes {}-{}/{}",
+                                                start,
+                                                body.len() - 1,
+                                                body.len()
+                                            ),
+                                        )
+                                        .body(http_body_util::Full::new(bytes::Bytes::from(
+                                            body[start..].to_vec(),
+                                        )))
+                                        .unwrap(),
+                                )
                             } else {
                                 Ok(Response::builder()
-                                    .body(http_body_util::Full::new(bytes::Bytes::from(body.to_vec())))
+                                    .body(http_body_util::Full::new(bytes::Bytes::from(
+                                        body.to_vec(),
+                                    )))
                                     .unwrap())
                             }
                         }

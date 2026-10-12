@@ -81,14 +81,35 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        round_trip(&LoginDisconnect { reason: Component::text("bye") });
-        round_trip(&Hello { server_id: String::new(), public_key: Bytes::from_static(&[1, 2, 3]), verify_token: Bytes::from_static(&[9; 4]), should_authenticate: true });
+        round_trip(&LoginDisconnect {
+            reason: Component::text("bye"),
+        });
+        round_trip(&Hello {
+            server_id: String::new(),
+            public_key: Bytes::from_static(&[1, 2, 3]),
+            verify_token: Bytes::from_static(&[9; 4]),
+            should_authenticate: true,
+        });
         round_trip(&LoginFinished {
-            profile: GameProfile { uuid: Uuid::from_u128(7), name: "Steve".into(), properties: vec![ProfileProperty { name: "textures".into(), value: "e30=".into(), signature: Some("sig".into()) }] },
+            profile: GameProfile {
+                uuid: Uuid::from_u128(7),
+                name: "Steve".into(),
+                properties: vec![ProfileProperty {
+                    name: "textures".into(),
+                    value: "e30=".into(),
+                    signature: Some("sig".into()),
+                }],
+            },
             session_id: Uuid::from_u128(99),
         });
         round_trip(&LoginCompression { threshold: 256 });
-        round_trip(&CustomQuery { message_id: 3, channel: Identifier::new("velocity", "player_info"), data: Bytes::from_static(b"xyz") });
-        round_trip(&CookieRequest { key: Identifier::minecraft("k") });
+        round_trip(&CustomQuery {
+            message_id: 3,
+            channel: Identifier::new("velocity", "player_info"),
+            data: Bytes::from_static(b"xyz"),
+        });
+        round_trip(&CookieRequest {
+            key: Identifier::minecraft("k"),
+        });
     }
 }

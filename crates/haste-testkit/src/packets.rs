@@ -210,7 +210,7 @@ mod tests {
         assert!(back.packets[2].body.is_empty());
         // 21-byte header + per packet: 4B len + id varint + body
         // (0x20: 1B id, 3B body; 0x1234: 2B id, 13B body; -1: 5B id, 0B body)
-        assert_eq!(bytes.len(), 21 + (4 + 1 + 3) + (4 + 2 + 13) + (4 + 5 + 0));
+        assert_eq!(bytes.len(), 21 + (4 + 1 + 3) + (4 + 2 + 13) + (4 + 5));
     }
 
     #[test]

@@ -129,7 +129,9 @@ impl Default for GameState {
 impl GameState {
     /// Slot contents for an `ItemStack` handle (None for empty / out of range / EMPTY).
     pub fn stack(&self, handle: i64) -> Option<ItemSlot> {
-        usize::try_from(handle).ok().and_then(|i| self.inventory.get(i).copied().flatten())
+        usize::try_from(handle)
+            .ok()
+            .and_then(|i| self.inventory.get(i).copied().flatten())
     }
     /// Drains the container clicks made in screens.
     pub fn take_container_clicks(&mut self) -> Vec<ContainerClick> {
@@ -156,12 +158,18 @@ mod tests {
     #[test]
     fn stack_handles() {
         let mut s = GameState::default();
-        s.inventory[3] = Some(ItemSlot { item: RegistryIndex(1), count: 5 });
+        s.inventory[3] = Some(ItemSlot {
+            item: RegistryIndex(1),
+            count: 5,
+        });
         assert_eq!(s.stack(3).map(|x| x.count), Some(5));
         assert_eq!(s.stack(-1), None);
         assert_eq!(s.stack(4), None);
         assert_eq!(s.stack(999), None);
-        s.sent.push(ChatMessage { text: "hi".into(), command: false });
+        s.sent.push(ChatMessage {
+            text: "hi".into(),
+            command: false,
+        });
         assert_eq!(s.take_sent().len(), 1);
         assert!(s.sent.is_empty());
     }

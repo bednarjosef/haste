@@ -39,7 +39,11 @@ impl GameData {
             Some(p) => BlockShapes::parse_oracle(&std::fs::read_to_string(p)?, blocks.len())?,
             None => BlockShapes::fallback(&blocks),
         };
-        Ok(Self { blocks, registries, shapes })
+        Ok(Self {
+            blocks,
+            registries,
+            shapes,
+        })
     }
 }
 
@@ -118,11 +122,8 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "haste-data-test-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("haste-data-test-{}-{}", std::process::id(), n));
         let reports = dir.join("reports");
         std::fs::create_dir_all(&reports).unwrap();
         std::fs::write(reports.join("blocks.json"), blocks).unwrap();
@@ -142,9 +143,18 @@ mod tests {
     fn fixture_loads_and_looks_up() {
         let d = fixture();
         assert_eq!(d.blocks.len(), 17);
-        assert_eq!(d.blocks.block_of(BlockStateId(1)), &Identifier::minecraft("stone"));
-        assert_eq!(d.blocks.block_of(BlockStateId(5)), &Identifier::minecraft("oak_stairs"));
-        assert_eq!(d.blocks.block_of(BlockStateId(16)), &Identifier::minecraft("oak_stairs"));
+        assert_eq!(
+            d.blocks.block_of(BlockStateId(1)),
+            &Identifier::minecraft("stone")
+        );
+        assert_eq!(
+            d.blocks.block_of(BlockStateId(5)),
+            &Identifier::minecraft("oak_stairs")
+        );
+        assert_eq!(
+            d.blocks.block_of(BlockStateId(16)),
+            &Identifier::minecraft("oak_stairs")
+        );
         assert_eq!(
             d.blocks.default_state(&Identifier::minecraft("stone")),
             Some(BlockStateId(1))
@@ -156,14 +166,24 @@ mod tests {
         assert_eq!(
             d.blocks.state(
                 &Identifier::minecraft("oak_stairs"),
-                &[("facing", "north"), ("half", "top"), ("shape", "straight"), ("waterlogged", "true")]
+                &[
+                    ("facing", "north"),
+                    ("half", "top"),
+                    ("shape", "straight"),
+                    ("waterlogged", "true")
+                ]
             ),
             Some(BlockStateId(5))
         );
         assert_eq!(
             d.blocks.state(
                 &Identifier::minecraft("oak_stairs"),
-                &[("facing", "north"), ("half", "bottom"), ("shape", "straight"), ("waterlogged", "false")]
+                &[
+                    ("facing", "north"),
+                    ("half", "bottom"),
+                    ("shape", "straight"),
+                    ("waterlogged", "false")
+                ]
             ),
             Some(BlockStateId(16))
         );
@@ -172,23 +192,25 @@ mod tests {
             Some(BlockStateId(1))
         );
         assert_eq!(
-            d.blocks.state(&Identifier::minecraft("water"), &[("level", "2")]),
+            d.blocks
+                .state(&Identifier::minecraft("water"), &[("level", "2")]),
             Some(BlockStateId(4))
         );
         // wrong property count
+        assert_eq!(d.blocks.state(&Identifier::minecraft("water"), &[]), None);
         assert_eq!(
-            d.blocks.state(&Identifier::minecraft("water"), &[]),
-            None
-        );
-        assert_eq!(
-            d.blocks.with_property(BlockStateId(5), "waterlogged", "false"),
+            d.blocks
+                .with_property(BlockStateId(5), "waterlogged", "false"),
             Some(BlockStateId(6))
         );
         assert_eq!(
             d.blocks.with_property(BlockStateId(5), "half", "bottom"),
             Some(BlockStateId(15))
         );
-        assert_eq!(d.blocks.property_value(BlockStateId(5), "facing"), Some("north"));
+        assert_eq!(
+            d.blocks.property_value(BlockStateId(5), "facing"),
+            Some("north")
+        );
         assert_eq!(d.blocks.property_value(BlockStateId(1), "facing"), None);
         let props = d.blocks.properties(BlockStateId(5));
         assert_eq!(props.len(), 4);
@@ -196,15 +218,18 @@ mod tests {
         assert_eq!(props[3], ("waterlogged".to_owned(), "true".to_owned()));
         // registries
         assert_eq!(
-            d.registries.index("minecraft:entity_type", &Identifier::minecraft("player")),
+            d.registries
+                .index("minecraft:entity_type", &Identifier::minecraft("player")),
             Some(haste_core::RegistryIndex(2))
         );
         assert_eq!(
-            d.registries.index("minecraft:block", &Identifier::minecraft("oak_stairs")),
+            d.registries
+                .index("minecraft:block", &Identifier::minecraft("oak_stairs")),
             Some(haste_core::RegistryIndex(3))
         );
         assert_eq!(
-            d.registries.name("minecraft:entity_type", haste_core::RegistryIndex(1)),
+            d.registries
+                .name("minecraft:entity_type", haste_core::RegistryIndex(1)),
             Some(&Identifier::minecraft("zombie"))
         );
         assert_eq!(d.registries.len("minecraft:entity_type"), 3);
@@ -240,7 +265,10 @@ mod tests {
         assert_eq!(d.shapes.collision_boxes(BlockStateId(1)).len(), 1);
         assert_eq!(d.shapes.collision_boxes(BlockStateId(5)).len(), 0);
         assert_eq!(d.shapes.outline_boxes(BlockStateId(5)).len(), 1);
-        assert_eq!(d.shapes.outline_boxes(BlockStateId(5))[0].size(), haste_core::DVec3::new(0.5, 0.5, 0.5));
+        assert_eq!(
+            d.shapes.outline_boxes(BlockStateId(5))[0].size(),
+            haste_core::DVec3::new(0.5, 0.5, 0.5)
+        );
         // states not in the file: empty
         assert_eq!(d.shapes.collision_boxes(BlockStateId(2)).len(), 0);
     }
@@ -325,7 +353,9 @@ mod tests {
     fn real_reports() {
         let reports = haste_core::paths::datagen_reports();
         if !reports.join("blocks.json").is_file() {
-            eprintln!("skipped: no real reports at {reports:?} (set HASTE_CACHE or run haste setup)");
+            eprintln!(
+                "skipped: no real reports at {reports:?} (set HASTE_CACHE or run haste setup)"
+            );
             return;
         }
         let t0 = std::time::Instant::now();
@@ -337,7 +367,8 @@ mod tests {
         assert_eq!(st, BlockStateId(1));
         assert_eq!(d.blocks.block_of(st), &stone);
         let stairs = Identifier::minecraft("oak_stairs");
-        let s = d.blocks
+        let s = d
+            .blocks
             .state(
                 &stairs,
                 &[
@@ -350,16 +381,23 @@ mod tests {
             .expect("oak_stairs facing=east");
         assert_eq!(d.blocks.block_of(s), &stairs);
         assert_eq!(
-            d.registries.index("minecraft:entity_type", &Identifier::minecraft("player")),
+            d.registries
+                .index("minecraft:entity_type", &Identifier::minecraft("player")),
             Some(haste_core::RegistryIndex(159))
         );
-        let air = d.blocks.default_state(&Identifier::minecraft("air")).unwrap();
+        let air = d
+            .blocks
+            .default_state(&Identifier::minecraft("air"))
+            .unwrap();
         assert_eq!(air, BlockStateId::AIR);
         // Oracle dump presence is optional at this stage; report which one we got.
         if d.shapes.is_oracle_backed() {
             // oak_stairs facing=east/bottom/straight/unwaterlogged = two boxes (real dump).
             let boxes = haste_core::view::CollisionShapes::collision_boxes(&d.shapes, s);
-            assert!(boxes.len() >= 1, "oracle-backed stairs have no collision boxes");
+            assert!(
+                boxes.len() >= 1,
+                "oracle-backed stairs have no collision boxes"
+            );
         }
         eprintln!(
             "real reports: {} states, {} blocks, {} entity types, oracle_backed={}, load {:?}",

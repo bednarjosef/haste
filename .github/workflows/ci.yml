@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  test:
+    # Fast tier: fmt + clippy -D warnings + cargo test on the pinned stable toolchain.
+    # No cache/ (oracle data is gitignored and several GiB; tier-2/3 tests live on dev
+    # machines, see docs/TESTING.md — testkit tests skip their cache-dependent
+    # assertions when the dumps are absent).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the channel; rustup honors it on a rust-less runner.
+      - name: Install Rust (pinned by rust-toolchain.toml)
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+  # Placeholder for the cache-dependent tier (oracle replays, screenshot diffs):
+  # needs cache/oracle/26.3 in CI storage first. Tracked in WS8.
+  oracle-tier:
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Oracle-dependent tests
+        run: cargo test -p haste-testkit

@@ -13,20 +13,31 @@ use bytes::Bytes;
 use haste_core::entity::ItemStackData;
 use haste_core::RegistryIndex;
 
-use super::{Codec, DecodeError, DecodeResult, IdOr, IdSet, Reader, ResolvableProfile, SoundEvent, Wire, Writer, MAX_LIST};
+use super::{
+    Codec, DecodeError, DecodeResult, IdOr, IdSet, Reader, ResolvableProfile, SoundEvent, Wire,
+    Writer, MAX_LIST,
+};
 
 impl Wire for ItemStackData {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
         let count = r.var_int()?;
         if count <= 0 {
-            return Ok(ItemStackData { count: 0, item: None, components_raw: Bytes::new() });
+            return Ok(ItemStackData {
+                count: 0,
+                item: None,
+                components_raw: Bytes::new(),
+            });
         }
         let item = r.var_int()?;
         let start = r.peek_rest();
         skip_patch(r)?;
         let used = start.len() - r.remaining();
         let components_raw = r.to_bytes(&start[..used]);
-        Ok(ItemStackData { count, item: Some(RegistryIndex(item as u32)), components_raw })
+        Ok(ItemStackData {
+            count,
+            item: Some(RegistryIndex(item as u32)),
+            components_raw,
+        })
     }
     fn write(&self, w: &mut Writer) {
         match (self.count, self.item) {
@@ -48,8 +59,12 @@ impl Wire for ItemStackData {
 /// Item stack encoding where the empty stack is allowed (the default `Slot`).
 pub struct Slot;
 impl Codec<ItemStackData> for Slot {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<ItemStackData> { ItemStackData::read(r) }
-    fn write(v: &ItemStackData, w: &mut Writer) { v.write(w) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<ItemStackData> {
+        ItemStackData::read(r)
+    }
+    fn write(v: &ItemStackData, w: &mut Writer) {
+        v.write(w)
+    }
 }
 
 /// Skips a data component patch (add count, remove count, adds, removes).
@@ -80,7 +95,9 @@ pub fn skip_exact_components(r: &mut Reader<'_>) -> DecodeResult<()> {
 }
 
 fn component_name<'a>(r: &Reader<'a>, ty: i32) -> DecodeResult<&'a str> {
-    let tables = r.tables().ok_or_else(|| DecodeError::Invalid(format!("data component {ty} needs registry tables")))?;
+    let tables = r.tables().ok_or_else(|| {
+        DecodeError::Invalid(format!("data component {ty} needs registry tables"))
+    })?;
     tables
         .data_component_name(ty)
         .ok_or_else(|| DecodeError::Invalid(format!("unknown data component type id {ty}")))
@@ -95,14 +112,47 @@ pub fn skip_component(r: &mut Reader<'_>, name: &str) -> DecodeResult<()> {
         // No data.
         "unbreakable" | "creative_slot_lock" | "glider" => {}
         // A single VarInt (counts, enums, registry ids, dye colours).
-        "max_stack_size" | "max_damage" | "damage" | "rarity" | "damage_type" | "additional_trade_cost"
-        | "repair_cost" | "enchantable" | "map_id" | "map_post_processing" | "ominous_bottle_amplifier" | "base_color"
-        | "dye" | "villager/variant" | "wolf/variant" | "wolf/sound_variant" | "wolf/collar" | "fox/variant"
-        | "salmon/size" | "parrot/variant" | "tropical_fish/pattern" | "tropical_fish/base_color"
-        | "tropical_fish/pattern_color" | "mooshroom/variant" | "rabbit/variant" | "pig/variant"
-        | "pig/sound_variant" | "cow/variant" | "cow/sound_variant" | "chicken/variant" | "chicken/sound_variant"
-        | "zombie_nautilus/variant" | "frog/variant" | "horse/variant" | "llama/variant" | "axolotl/variant"
-        | "cat/variant" | "cat/sound_variant" | "cat/collar" | "sheep/color" | "shulker/color" => {
+        "max_stack_size"
+        | "max_damage"
+        | "damage"
+        | "rarity"
+        | "damage_type"
+        | "additional_trade_cost"
+        | "repair_cost"
+        | "enchantable"
+        | "map_id"
+        | "map_post_processing"
+        | "ominous_bottle_amplifier"
+        | "base_color"
+        | "dye"
+        | "villager/variant"
+        | "wolf/variant"
+        | "wolf/sound_variant"
+        | "wolf/collar"
+        | "fox/variant"
+        | "salmon/size"
+        | "parrot/variant"
+        | "tropical_fish/pattern"
+        | "tropical_fish/base_color"
+        | "tropical_fish/pattern_color"
+        | "mooshroom/variant"
+        | "rabbit/variant"
+        | "pig/variant"
+        | "pig/sound_variant"
+        | "cow/variant"
+        | "cow/sound_variant"
+        | "chicken/variant"
+        | "chicken/sound_variant"
+        | "zombie_nautilus/variant"
+        | "frog/variant"
+        | "horse/variant"
+        | "llama/variant"
+        | "axolotl/variant"
+        | "cat/variant"
+        | "cat/sound_variant"
+        | "cat/collar"
+        | "sheep/color"
+        | "shulker/color" => {
             r.var_int()?;
         }
         // Int.
@@ -118,8 +168,14 @@ pub fn skip_component(r: &mut Reader<'_>, name: &str) -> DecodeResult<()> {
             r.bool()?;
         }
         // One network NBT value.
-        "custom_data" | "intangible_projectile" | "bucket_entity_data" | "debug_stick_state" | "lock" | "recipes"
-        | "map_decorations" | "container_loot" => {
+        "custom_data"
+        | "intangible_projectile"
+        | "bucket_entity_data"
+        | "debug_stick_state"
+        | "lock"
+        | "recipes"
+        | "map_decorations"
+        | "container_loot" => {
             r.nbt_raw()?;
         }
         // Registry id + NBT.
@@ -378,7 +434,10 @@ pub fn skip_component(r: &mut Reader<'_>, name: &str) -> DecodeResult<()> {
 }
 
 /// `ID or X` where X is skipped by `f`.
-fn skip_id_or(r: &mut Reader<'_>, f: impl FnOnce(&mut Reader<'_>) -> DecodeResult<()>) -> DecodeResult<()> {
+fn skip_id_or(
+    r: &mut Reader<'_>,
+    f: impl FnOnce(&mut Reader<'_>) -> DecodeResult<()>,
+) -> DecodeResult<()> {
     if r.var_int()? == 0 {
         f(r)?;
     }
@@ -500,7 +559,11 @@ mod tests {
     #[test]
     fn empty_and_plain_stacks_round_trip() {
         let empty = ItemStackData::default();
-        let plain = ItemStackData { count: 3, item: Some(RegistryIndex(42)), components_raw: Bytes::new() };
+        let plain = ItemStackData {
+            count: 3,
+            item: Some(RegistryIndex(42)),
+            components_raw: Bytes::new(),
+        };
         let mut w = Writer::new();
         w.write(&empty);
         w.write(&plain);
@@ -516,7 +579,10 @@ mod tests {
 
     #[test]
     fn components_need_tables_and_known_layouts() {
-        let tables = crate::packets::ids::ProtocolTables::for_tests(&[(3, "minecraft:damage"), (60, "minecraft:mystery")]);
+        let tables = crate::packets::ids::ProtocolTables::for_tests(&[
+            (3, "minecraft:damage"),
+            (60, "minecraft:mystery"),
+        ]);
         // count 1, item 7, 1 add, 1 remove, damage=5, remove type 4
         let bytes = [1u8, 7, 1, 1, 3, 5, 4];
         let mut r = Reader::new(&bytes).with_tables(&tables);
@@ -525,7 +591,10 @@ mod tests {
         r.finish().unwrap();
         assert!(Reader::new(&bytes).read::<ItemStackData>().is_err());
         let unknown = [1u8, 7, 1, 0, 60, 0];
-        assert!(Reader::new(&unknown).with_tables(&tables).read::<ItemStackData>().is_err());
+        assert!(Reader::new(&unknown)
+            .with_tables(&tables)
+            .read::<ItemStackData>()
+            .is_err());
     }
 
     /// Hand-built values for every documented component; each must be
@@ -543,9 +612,20 @@ mod tests {
             w.nbt_compound(Some(&c));
         };
         let text = |w: &mut Writer| w.component(&Component::text("t"));
-        let sound = |w: &mut Writer| w.write(&SoundEvent { name: Identifier::minecraft("s"), fixed_range: Some(1.0) });
+        let sound = |w: &mut Writer| {
+            w.write(&SoundEvent {
+                name: Identifier::minecraft("s"),
+                fixed_range: Some(1.0),
+            })
+        };
         let id_set = |w: &mut Writer| w.write(&IdSet::Ids(vec![1, 2]));
-        let stack = |w: &mut Writer| w.write(&ItemStackData { count: 1, item: Some(RegistryIndex(3)), components_raw: Bytes::new() });
+        let stack = |w: &mut Writer| {
+            w.write(&ItemStackData {
+                count: 1,
+                item: Some(RegistryIndex(3)),
+                components_raw: Bytes::new(),
+            })
+        };
         let effect = |w: &mut Writer| {
             w.var_int(1); // type
             w.var_int(0);
@@ -607,239 +687,352 @@ mod tests {
             ("custom_data", w(&nbt)),
             ("max_stack_size", w(&|w| w.var_int(16))),
             ("unbreakable", vec![]),
-            ("use_effects", w(&|w| {
-                w.bool(true);
-                w.bool(false);
-                w.f32(0.5);
-            })),
+            (
+                "use_effects",
+                w(&|w| {
+                    w.bool(true);
+                    w.bool(false);
+                    w.f32(0.5);
+                }),
+            ),
             ("custom_name", w(&text)),
             ("minimum_attack_charge", w(&|w| w.f32(0.5))),
             ("damage_type", w(&|w| w.var_int(3))),
-            ("lore", w(&|w| {
-                w.var_int(2);
-                text(w);
-                text(w);
-            })),
-            ("enchantments", w(&|w| {
-                w.var_int(1);
-                w.var_int(5);
-                w.var_int(3);
-            })),
-            ("can_place_on", w(&|w| {
-                w.var_int(1);
-                predicate(w);
-            })),
-            ("custom_model_data", w(&|w| {
-                w.write(&vec![1.0f32]);
-                w.write(&vec![true]);
-                w.write(&vec!["a".to_string()]);
-                w.write(&vec![7i32]);
-            })),
-            ("tooltip_display", w(&|w| {
-                w.bool(false);
-                w.write_as::<_, crate::wire::List<crate::wire::VarInt>>(&vec![1i32, 2]);
-            })),
-            ("food", w(&|w| {
-                w.var_int(4);
-                w.f32(2.4);
-                w.bool(false);
-            })),
-            ("consumable", w(&|w| {
-                w.f32(1.6);
-                w.var_int(1);
-                w.write(&IdOr::<SoundEvent>::Id(10));
-                w.bool(true);
-                consume_effects(w);
-            })),
+            (
+                "lore",
+                w(&|w| {
+                    w.var_int(2);
+                    text(w);
+                    text(w);
+                }),
+            ),
+            (
+                "enchantments",
+                w(&|w| {
+                    w.var_int(1);
+                    w.var_int(5);
+                    w.var_int(3);
+                }),
+            ),
+            (
+                "can_place_on",
+                w(&|w| {
+                    w.var_int(1);
+                    predicate(w);
+                }),
+            ),
+            (
+                "custom_model_data",
+                w(&|w| {
+                    w.write(&vec![1.0f32]);
+                    w.write(&vec![true]);
+                    w.write(&vec!["a".to_string()]);
+                    w.write(&vec![7i32]);
+                }),
+            ),
+            (
+                "tooltip_display",
+                w(&|w| {
+                    w.bool(false);
+                    w.write_as::<_, crate::wire::List<crate::wire::VarInt>>(&vec![1i32, 2]);
+                }),
+            ),
+            (
+                "food",
+                w(&|w| {
+                    w.var_int(4);
+                    w.f32(2.4);
+                    w.bool(false);
+                }),
+            ),
+            (
+                "consumable",
+                w(&|w| {
+                    w.f32(1.6);
+                    w.var_int(1);
+                    w.write(&IdOr::<SoundEvent>::Id(10));
+                    w.bool(true);
+                    consume_effects(w);
+                }),
+            ),
             ("use_remainder", w(&stack)),
-            ("use_cooldown", w(&|w| {
-                w.f32(1.0);
-                w.write(&Some(Identifier::minecraft("g")));
-            })),
+            (
+                "use_cooldown",
+                w(&|w| {
+                    w.f32(1.0);
+                    w.write(&Some(Identifier::minecraft("g")));
+                }),
+            ),
             ("damage_resistant", w(&id_set)),
             ("attack_range", w(&|w| (0..6).for_each(|_| w.f32(1.0)))),
-            ("tool", w(&|w| {
-                w.var_int(1);
-                id_set(w);
-                w.write(&Some(8.0f32));
-                w.write(&Some(true));
-                w.f32(1.0);
-                w.var_int(1);
-                w.bool(true);
-            })),
-            ("weapon", w(&|w| {
-                w.var_int(1);
-                w.f32(5.0);
-            })),
-            ("equippable", w(&|w| {
-                w.var_int(4);
-                w.write(&IdOr::Inline(SoundEvent { name: Identifier::minecraft("e"), fixed_range: None }));
-                w.write(&Some(Identifier::minecraft("m")));
-                w.write(&None::<Identifier>);
-                w.write(&Some(IdSet::Tag(Identifier::minecraft("t"))));
-                w.bool(true);
-                w.bool(true);
-                w.bool(true);
-                w.bool(false);
-                w.write(&IdOr::<SoundEvent>::Id(1));
-            })),
+            (
+                "tool",
+                w(&|w| {
+                    w.var_int(1);
+                    id_set(w);
+                    w.write(&Some(8.0f32));
+                    w.write(&Some(true));
+                    w.f32(1.0);
+                    w.var_int(1);
+                    w.bool(true);
+                }),
+            ),
+            (
+                "weapon",
+                w(&|w| {
+                    w.var_int(1);
+                    w.f32(5.0);
+                }),
+            ),
+            (
+                "equippable",
+                w(&|w| {
+                    w.var_int(4);
+                    w.write(&IdOr::Inline(SoundEvent {
+                        name: Identifier::minecraft("e"),
+                        fixed_range: None,
+                    }));
+                    w.write(&Some(Identifier::minecraft("m")));
+                    w.write(&None::<Identifier>);
+                    w.write(&Some(IdSet::Tag(Identifier::minecraft("t"))));
+                    w.bool(true);
+                    w.bool(true);
+                    w.bool(true);
+                    w.bool(false);
+                    w.write(&IdOr::<SoundEvent>::Id(1));
+                }),
+            ),
             ("repairable", w(&id_set)),
             ("death_protection", w(&consume_effects)),
-            ("blocks_attacks", w(&|w| {
-                w.f32(0.25);
-                w.f32(1.0);
-                w.var_int(1);
-                w.f32(90.0);
-                w.bool(true);
-                id_set(w);
-                w.f32(0.0);
-                w.f32(1.0);
-                w.f32(3.0);
-                w.f32(1.0);
-                w.f32(1.0);
-                w.bool(false);
-                w.bool(true);
-                w.write(&IdOr::<SoundEvent>::Id(2));
-                w.bool(false);
-            })),
-            ("piercing_weapon", w(&|w| {
-                w.bool(true);
-                w.bool(false);
-                w.bool(true);
-                sound(w);
-                w.bool(false);
-            })),
-            ("kinetic_weapon", w(&|w| {
-                w.var_int(10);
-                w.var_int(5);
-                w.bool(true);
-                w.var_int(20);
-                w.f32(0.1);
-                w.f32(0.2);
-                w.bool(false);
-                w.bool(false);
-                w.f32(1.0);
-                w.f32(2.0);
-                w.bool(false);
-                w.bool(true);
-                sound(w);
-            })),
-            ("charged_projectiles", w(&|w| {
-                w.var_int(1);
-                stack(w);
-            })),
-            ("potion_contents", w(&|w| {
-                w.option(&Some(0i32), |w, p| w.var_int(*p));
-                w.write(&Some(0xff00ffi32));
-                w.var_int(1);
-                effect(w);
-                w.write(&Some("n".to_string()));
-            })),
+            (
+                "blocks_attacks",
+                w(&|w| {
+                    w.f32(0.25);
+                    w.f32(1.0);
+                    w.var_int(1);
+                    w.f32(90.0);
+                    w.bool(true);
+                    id_set(w);
+                    w.f32(0.0);
+                    w.f32(1.0);
+                    w.f32(3.0);
+                    w.f32(1.0);
+                    w.f32(1.0);
+                    w.bool(false);
+                    w.bool(true);
+                    w.write(&IdOr::<SoundEvent>::Id(2));
+                    w.bool(false);
+                }),
+            ),
+            (
+                "piercing_weapon",
+                w(&|w| {
+                    w.bool(true);
+                    w.bool(false);
+                    w.bool(true);
+                    sound(w);
+                    w.bool(false);
+                }),
+            ),
+            (
+                "kinetic_weapon",
+                w(&|w| {
+                    w.var_int(10);
+                    w.var_int(5);
+                    w.bool(true);
+                    w.var_int(20);
+                    w.f32(0.1);
+                    w.f32(0.2);
+                    w.bool(false);
+                    w.bool(false);
+                    w.f32(1.0);
+                    w.f32(2.0);
+                    w.bool(false);
+                    w.bool(true);
+                    sound(w);
+                }),
+            ),
+            (
+                "charged_projectiles",
+                w(&|w| {
+                    w.var_int(1);
+                    stack(w);
+                }),
+            ),
+            (
+                "potion_contents",
+                w(&|w| {
+                    w.option(&Some(0i32), |w, p| w.var_int(*p));
+                    w.write(&Some(0xff00ffi32));
+                    w.var_int(1);
+                    effect(w);
+                    w.write(&Some("n".to_string()));
+                }),
+            ),
             ("potion_duration_scale", w(&|w| w.f32(0.5))),
-            ("suspicious_stew_effects", w(&|w| {
-                w.var_int(1);
-                w.var_int(2);
-                w.var_int(160);
-            })),
-            ("writable_book_content", w(&|w| {
-                w.var_int(1);
-                w.string("p");
-                w.write(&None::<String>);
-            })),
-            ("written_book_content", w(&|w| {
-                w.string("title");
-                w.write(&None::<String>);
-                w.string("author");
-                w.var_int(0);
-                w.var_int(1);
-                text(w);
-                w.bool(true);
-                text(w);
-                w.bool(true);
-            })),
-            ("trim", w(&|w| {
-                w.var_int(0);
-                w.string("_gold");
-                w.var_int(1);
-                w.identifier(&Identifier::minecraft("iron"));
-                w.string("gold_darker");
-                text(w);
-                w.var_int(0);
-                w.string("coast");
-                w.var_int(5);
-                text(w);
-                w.bool(false);
-            })),
+            (
+                "suspicious_stew_effects",
+                w(&|w| {
+                    w.var_int(1);
+                    w.var_int(2);
+                    w.var_int(160);
+                }),
+            ),
+            (
+                "writable_book_content",
+                w(&|w| {
+                    w.var_int(1);
+                    w.string("p");
+                    w.write(&None::<String>);
+                }),
+            ),
+            (
+                "written_book_content",
+                w(&|w| {
+                    w.string("title");
+                    w.write(&None::<String>);
+                    w.string("author");
+                    w.var_int(0);
+                    w.var_int(1);
+                    text(w);
+                    w.bool(true);
+                    text(w);
+                    w.bool(true);
+                }),
+            ),
+            (
+                "trim",
+                w(&|w| {
+                    w.var_int(0);
+                    w.string("_gold");
+                    w.var_int(1);
+                    w.identifier(&Identifier::minecraft("iron"));
+                    w.string("gold_darker");
+                    text(w);
+                    w.var_int(0);
+                    w.string("coast");
+                    w.var_int(5);
+                    text(w);
+                    w.bool(false);
+                }),
+            ),
             ("debug_stick_state", w(&nbt)),
-            ("entity_data", w(&|w| {
-                w.var_int(5);
-                nbt(w);
-            })),
-            ("instrument", w(&|w| {
-                w.var_int(0);
-                w.write(&IdOr::<SoundEvent>::Id(1));
-                w.f32(7.0);
-                w.f32(256.0);
-                text(w);
-            })),
-            ("jukebox_playable", w(&|w| {
-                w.var_int(0);
-                w.write(&IdOr::<SoundEvent>::Id(1));
-                text(w);
-                w.f32(100.0);
-                w.var_int(5);
-            })),
-            ("lodestone_tracker", w(&|w| {
-                w.bool(true);
-                w.identifier(&Identifier::minecraft("overworld"));
-                w.block_pos(&BlockPos::new(1, 2, 3));
-                w.bool(true);
-            })),
+            (
+                "entity_data",
+                w(&|w| {
+                    w.var_int(5);
+                    nbt(w);
+                }),
+            ),
+            (
+                "instrument",
+                w(&|w| {
+                    w.var_int(0);
+                    w.write(&IdOr::<SoundEvent>::Id(1));
+                    w.f32(7.0);
+                    w.f32(256.0);
+                    text(w);
+                }),
+            ),
+            (
+                "jukebox_playable",
+                w(&|w| {
+                    w.var_int(0);
+                    w.write(&IdOr::<SoundEvent>::Id(1));
+                    text(w);
+                    w.f32(100.0);
+                    w.var_int(5);
+                }),
+            ),
+            (
+                "lodestone_tracker",
+                w(&|w| {
+                    w.bool(true);
+                    w.identifier(&Identifier::minecraft("overworld"));
+                    w.block_pos(&BlockPos::new(1, 2, 3));
+                    w.bool(true);
+                }),
+            ),
             ("firework_explosion", w(&firework)),
-            ("fireworks", w(&|w| {
-                w.var_int(2);
-                w.var_int(1);
-                firework(w);
-            })),
-            ("profile", w(&|w| w.write(&ResolvableProfile {
-                profile: crate::wire::ResolvableProfileKind::Partial { name: Some("Steve".into()), uuid: None, properties: vec![] },
-                body: None,
-                cape: None,
-                elytra: None,
-                model: Some(1),
-            }))),
-            ("banner_patterns", w(&|w| {
-                w.var_int(2);
-                w.var_int(3);
-                w.var_int(14);
-                w.var_int(0);
-                w.identifier(&Identifier::minecraft("stripe"));
-                w.string("block.minecraft.banner.stripe");
-                w.var_int(0);
-            })),
-            ("pot_decorations", w(&|w| w.write_as::<_, crate::wire::List<crate::wire::VarInt>>(&vec![1i32, 2, 3, 4]))),
-            ("container", w(&|w| {
-                w.var_int(2);
-                stack(w);
-                w.var_int(0);
-            })),
-            ("block_state", w(&|w| {
-                w.var_int(1);
-                w.string("lit");
-                w.string("true");
-            })),
-            ("bees", w(&|w| {
-                w.var_int(1);
-                w.var_int(9);
-                nbt(w);
-                w.var_int(10);
-                w.var_int(600);
-            })),
-            ("lock", w(&|w| w.nbt_tag(Some(&crate::nbt::NbtTag::String("key".into()))))),
+            (
+                "fireworks",
+                w(&|w| {
+                    w.var_int(2);
+                    w.var_int(1);
+                    firework(w);
+                }),
+            ),
+            (
+                "profile",
+                w(&|w| {
+                    w.write(&ResolvableProfile {
+                        profile: crate::wire::ResolvableProfileKind::Partial {
+                            name: Some("Steve".into()),
+                            uuid: None,
+                            properties: vec![],
+                        },
+                        body: None,
+                        cape: None,
+                        elytra: None,
+                        model: Some(1),
+                    })
+                }),
+            ),
+            (
+                "banner_patterns",
+                w(&|w| {
+                    w.var_int(2);
+                    w.var_int(3);
+                    w.var_int(14);
+                    w.var_int(0);
+                    w.identifier(&Identifier::minecraft("stripe"));
+                    w.string("block.minecraft.banner.stripe");
+                    w.var_int(0);
+                }),
+            ),
+            (
+                "pot_decorations",
+                w(&|w| {
+                    w.write_as::<_, crate::wire::List<crate::wire::VarInt>>(&vec![1i32, 2, 3, 4])
+                }),
+            ),
+            (
+                "container",
+                w(&|w| {
+                    w.var_int(2);
+                    stack(w);
+                    w.var_int(0);
+                }),
+            ),
+            (
+                "block_state",
+                w(&|w| {
+                    w.var_int(1);
+                    w.string("lit");
+                    w.string("true");
+                }),
+            ),
+            (
+                "bees",
+                w(&|w| {
+                    w.var_int(1);
+                    w.var_int(9);
+                    nbt(w);
+                    w.var_int(10);
+                    w.var_int(600);
+                }),
+            ),
+            (
+                "lock",
+                w(&|w| w.nbt_tag(Some(&crate::nbt::NbtTag::String("key".into())))),
+            ),
             ("break_sound", w(&|w| w.write(&IdOr::<SoundEvent>::Id(3)))),
             ("sulfur_cube_content", w(&stack)),
             ("dyed_color", w(&|w| w.i32(0x00ff00))),
-            ("provides_banner_patterns", w(&|w| w.write(&IdSet::Tag(Identifier::minecraft("pattern_item/flower"))))),
+            (
+                "provides_banner_patterns",
+                w(&|w| w.write(&IdSet::Tag(Identifier::minecraft("pattern_item/flower")))),
+            ),
             ("provides_trim_material", w(&|w| w.var_int(4))),
             ("sheep/color", w(&|w| w.var_int(14))),
         ]
@@ -852,8 +1045,13 @@ mod tests {
             let mut with_tail = bytes.clone();
             with_tail.push(0xAB);
             let mut r = Reader::new(&with_tail).with_tables(&tables);
-            skip_component(&mut r, &format!("minecraft:{name}")).unwrap_or_else(|e| panic!("{name}: {e}"));
-            assert_eq!(r.peek_rest(), &[0xAB], "{name} did not consume exactly its bytes");
+            skip_component(&mut r, &format!("minecraft:{name}"))
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(
+                r.peek_rest(),
+                &[0xAB],
+                "{name} did not consume exactly its bytes"
+            );
         }
     }
 
@@ -863,7 +1061,9 @@ mod tests {
         let t = crate::packets::ids::ProtocolTables::load().expect("reports");
         let mut missing = Vec::new();
         for id in 0..200 {
-            let Some(name) = t.data_component_name(id) else { continue };
+            let Some(name) = t.data_component_name(id) else {
+                continue;
+            };
             let mut r = Reader::new(&[]);
             if let Err(DecodeError::Invalid(m)) = skip_component(&mut r, name) {
                 if m.contains("not implemented") {

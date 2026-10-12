@@ -7,19 +7,22 @@
 use bytes::Bytes;
 use haste_core::chunk::{BlockChange, BlockEntityData as ChunkBlockEntity, ChunkData, LightData};
 use haste_core::entity::{EntitySpawn, ItemStackData, MetadataEntry};
-use haste_core::{BlockPos, BlockStateId, ChunkPos, Component, DVec3, EntityId, Identifier, RegistryIndex, SectionPos};
+use haste_core::{
+    BlockPos, BlockStateId, ChunkPos, Component, DVec3, EntityId, Identifier, RegistryIndex,
+    SectionPos,
+};
 use uuid::Uuid;
 
-pub use crate::packets::configuration::clientbound::{
-    ClearDialog, CookieRequest, CustomPayload, CustomReportDetails, Disconnect, KeepAlive, Ping, PostEffects,
-    ResourcePackPop, ResourcePackPush, ServerLinks, StoreCookie, Transfer, UpdateTags,
-};
 use crate::metadata::Metadata;
+pub use crate::packets::configuration::clientbound::{
+    ClearDialog, CookieRequest, CustomPayload, CustomReportDetails, Disconnect, KeepAlive, Ping,
+    PostEffects, ResourcePackPop, ResourcePackPush, ServerLinks, StoreCookie, Transfer, UpdateTags,
+};
 use crate::packets::{packet, packet_enum, Packet};
 use crate::wire::particle::Particle;
 use crate::wire::{
-    Angle, ByteArray, Codec, DecodeError, DecodeResult, IdOr, List, LpVec3, Opt, ProfileProperty, RawNbt, Reader,
-    Rest, SoundEvent, VarInt, VarLong, Wire, Writer,
+    Angle, ByteArray, Codec, DecodeError, DecodeResult, IdOr, List, LpVec3, Opt, ProfileProperty,
+    RawNbt, Reader, Rest, SoundEvent, VarInt, VarLong, Wire, Writer,
 };
 
 packet_enum! {
@@ -63,7 +66,10 @@ pub struct GlobalPos {
 }
 impl Wire for GlobalPos {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { dimension: r.identifier()?, pos: r.block_pos()? })
+        Ok(Self {
+            dimension: r.identifier()?,
+            pos: r.block_pos()?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.identifier(&self.dimension);
@@ -136,7 +142,11 @@ pub struct ChatDecoration {
 }
 impl Wire for ChatDecoration {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { translation_key: r.string()?, parameters: r.read_as::<_, List<VarInt>>()?, style: r.nbt_raw()? })
+        Ok(Self {
+            translation_key: r.string()?,
+            parameters: r.read_as::<_, List<VarInt>>()?,
+            style: r.nbt_raw()?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.string(&self.translation_key);
@@ -155,7 +165,10 @@ pub struct ChatType {
 }
 impl Wire for ChatType {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { chat: r.read()?, narration: r.read()? })
+        Ok(Self {
+            chat: r.read()?,
+            narration: r.read()?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.write(&self.chat);
@@ -166,8 +179,12 @@ impl Wire for ChatType {
 /// Chunk position sent as one long (`ChunkPos::to_packed`: z high, x low).
 pub struct PackedChunkPos;
 impl Codec<ChunkPos> for PackedChunkPos {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<ChunkPos> { Ok(ChunkPos::from_packed(r.i64()?)) }
-    fn write(v: &ChunkPos, w: &mut Writer) { w.i64(v.to_packed()) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<ChunkPos> {
+        Ok(ChunkPos::from_packed(r.i64()?))
+    }
+    fn write(v: &ChunkPos, w: &mut Writer) {
+        w.i64(v.to_packed())
+    }
 }
 
 /// Relative-teleport flag bits (`Teleport Flags`).
@@ -255,7 +272,10 @@ packet! {
 impl BlockUpdate {
     /// As the shared `BlockChange`.
     pub fn change(&self) -> BlockChange {
-        BlockChange { pos: self.pos, state: BlockStateId(self.state as u32) }
+        BlockChange {
+            pos: self.pos,
+            state: BlockStateId(self.state as u32),
+        }
     }
 }
 
@@ -374,7 +394,13 @@ impl Packet for EntityPositionSync {
             1 => PositionPath::Stepped(r.list(4096, |r| Ok((r.read::<DVec3>()?, r.var_int()?)))?),
             t => return Err(DecodeError::Invalid(format!("position path type {t}"))),
         };
-        Ok(Self { entity_id, path, yaw: r.f32()?, pitch: r.f32()?, on_ground: r.bool()? })
+        Ok(Self {
+            entity_id,
+            path,
+            yaw: r.f32()?,
+            pitch: r.f32()?,
+            on_ground: r.bool()?,
+        })
     }
     fn encode(&self, w: &mut Writer) {
         w.var_int(self.entity_id);
@@ -429,7 +455,10 @@ impl PartialEq for LevelChunkWithLight {
             && a.heightmaps == b.heightmaps
             && a.sections == b.sections
             && a.block_entities.len() == b.block_entities.len()
-            && a.block_entities.iter().zip(&b.block_entities).all(|(x, y)| x.pos == y.pos && x.kind == y.kind && x.nbt == y.nbt)
+            && a.block_entities
+                .iter()
+                .zip(&b.block_entities)
+                .all(|(x, y)| x.pos == y.pos && x.kind == y.kind && x.nbt == y.nbt)
             && light_eq(&a.light, &b.light)
     }
 }
@@ -454,13 +483,25 @@ impl Packet for LevelChunkWithLight {
             let kind = r.var_int()?;
             let nbt = r.nbt_raw()?;
             Ok(ChunkBlockEntity {
-                pos: BlockPos::new((x << 4) + (xz >> 4) as i32, y as i32, (z << 4) + (xz & 15) as i32),
+                pos: BlockPos::new(
+                    (x << 4) + (xz >> 4) as i32,
+                    y as i32,
+                    (z << 4) + (xz & 15) as i32,
+                ),
                 kind: kind as u32,
                 nbt,
             })
         })?;
         let light = r.read()?;
-        Ok(Self { chunk: ChunkData { pos: ChunkPos::new(x, z), heightmaps, sections, block_entities, light } })
+        Ok(Self {
+            chunk: ChunkData {
+                pos: ChunkPos::new(x, z),
+                heightmaps,
+                sections,
+                block_entities,
+                light,
+            },
+        })
     }
     fn encode(&self, w: &mut Writer) {
         let c = &self.chunk;
@@ -504,12 +545,17 @@ pub struct LightUpdate {
     pub light: LightData,
 }
 impl PartialEq for LightUpdate {
-    fn eq(&self, o: &Self) -> bool { self.pos == o.pos && light_eq(&self.light, &o.light) }
+    fn eq(&self, o: &Self) -> bool {
+        self.pos == o.pos && light_eq(&self.light, &o.light)
+    }
 }
 impl Packet for LightUpdate {
     const NAME: &'static str = "minecraft:light_update";
     fn decode(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { pos: ChunkPos::new(r.var_int()?, r.var_int()?), light: r.read()? })
+        Ok(Self {
+            pos: ChunkPos::new(r.var_int()?, r.var_int()?),
+            light: r.read()?,
+        })
     }
     fn encode(&self, w: &mut Writer) {
         w.var_int(self.pos.x);
@@ -571,7 +617,8 @@ impl MoveDeltas {
         let props = r.var_int()?;
         let on_ground = props & 1 != 0;
         let steps = (props as u32 >> 1) as usize;
-        let d3 = |r: &mut Reader<'_>| -> DecodeResult<[i16; 3]> { Ok([r.i16()?, r.i16()?, r.i16()?]) };
+        let d3 =
+            |r: &mut Reader<'_>| -> DecodeResult<[i16; 3]> { Ok([r.i16()?, r.i16()?, r.i16()?]) };
         let m = if steps == 0 {
             MoveDeltas::Linear(d3(r)?)
         } else {
@@ -619,7 +666,11 @@ impl Packet for MoveEntityPos {
     fn decode(r: &mut Reader<'_>) -> DecodeResult<Self> {
         let entity_id = r.var_int()?;
         let (deltas, on_ground) = MoveDeltas::read(r)?;
-        Ok(Self { entity_id, deltas, on_ground })
+        Ok(Self {
+            entity_id,
+            deltas,
+            on_ground,
+        })
     }
     fn encode(&self, w: &mut Writer) {
         w.var_int(self.entity_id);
@@ -646,7 +697,13 @@ impl Packet for MoveEntityPosRot {
     fn decode(r: &mut Reader<'_>) -> DecodeResult<Self> {
         let entity_id = r.var_int()?;
         let (deltas, on_ground) = MoveDeltas::read(r)?;
-        Ok(Self { entity_id, deltas, on_ground, yaw: r.angle()?, pitch: r.angle()? })
+        Ok(Self {
+            entity_id,
+            deltas,
+            on_ground,
+            yaw: r.angle()?,
+            pitch: r.angle()?,
+        })
     }
     fn encode(&self, w: &mut Writer) {
         w.var_int(self.entity_id);
@@ -724,11 +781,21 @@ impl Packet for PlayerChat {
         let salt = r.i64()?;
         let previous = r.list(20, |r| {
             let id = r.var_int()?;
-            if id == 0 { Ok(PreviousMessage::Signature(Bytes::copy_from_slice(r.take(256)?))) } else { Ok(PreviousMessage::Id(id - 1)) }
+            if id == 0 {
+                Ok(PreviousMessage::Signature(Bytes::copy_from_slice(
+                    r.take(256)?,
+                )))
+            } else {
+                Ok(PreviousMessage::Id(id - 1))
+            }
         })?;
         let unsigned_content = r.option(|r| r.component())?;
         let filter_type = r.var_int()?;
-        let filter_bits = if filter_type == 2 { Some(r.bit_set()?) } else { None };
+        let filter_bits = if filter_type == 2 {
+            Some(r.bit_set()?)
+        } else {
+            None
+        };
         Ok(Self {
             global_index,
             sender,
@@ -794,7 +861,12 @@ pub struct ChatSession {
 }
 impl Wire for ChatSession {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { session_id: r.uuid()?, expires_at: r.i64()?, public_key: r.byte_array(512)?, key_signature: r.byte_array(4096)? })
+        Ok(Self {
+            session_id: r.uuid()?,
+            expires_at: r.i64()?,
+            public_key: r.byte_array(512)?,
+            key_signature: r.byte_array(4096)?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.uuid(&self.session_id);
@@ -872,7 +944,10 @@ impl Packet for PlayerInfoUpdate {
         use player_info_actions::*;
         let actions = r.u8()?;
         let entries = r.list(4096, |r| {
-            let mut e = PlayerInfoEntry { uuid: r.uuid()?, ..Default::default() };
+            let mut e = PlayerInfoEntry {
+                uuid: r.uuid()?,
+                ..Default::default()
+            };
             if actions & ADD_PLAYER != 0 {
                 e.add = Some((r.string_max(16)?, r.list(16, ProfileProperty::read)?));
             }
@@ -1017,17 +1092,27 @@ impl SectionBlocksUpdate {
     /// The section.
     pub fn section_pos(&self) -> SectionPos {
         let v = self.section;
-        SectionPos::new((v >> 42) as i32, ((v << 44) >> 44) as i32, ((v << 22) >> 42) as i32)
+        SectionPos::new(
+            (v >> 42) as i32,
+            ((v << 44) >> 44) as i32,
+            ((v << 22) >> 42) as i32,
+        )
     }
     /// Packs a section position.
     pub fn pack_section(p: SectionPos) -> i64 {
-        ((p.x as i64 & 0x3F_FFFF) << 42) | (p.y as i64 & 0xF_FFFF) | ((p.z as i64 & 0x3F_FFFF) << 20)
+        ((p.x as i64 & 0x3F_FFFF) << 42)
+            | (p.y as i64 & 0xF_FFFF)
+            | ((p.z as i64 & 0x3F_FFFF) << 20)
     }
     /// The changes as absolute positions.
     pub fn changes(&self) -> impl Iterator<Item = BlockChange> + '_ {
         let base = self.section_pos().block_min();
         self.blocks.iter().map(move |b| BlockChange {
-            pos: base.add(((b >> 8) & 15) as i32, (b & 15) as i32, ((b >> 4) & 15) as i32),
+            pos: base.add(
+                ((b >> 8) & 15) as i32,
+                (b & 15) as i32,
+                ((b >> 4) & 15) as i32,
+            ),
             state: BlockStateId((b >> 12) as u32),
         })
     }
@@ -1105,7 +1190,10 @@ impl Packet for SetEquipment {
                 return Err(DecodeError::TooLarge("equipment list".into()));
             }
         }
-        Ok(Self { entity_id, equipment })
+        Ok(Self {
+            entity_id,
+            equipment,
+        })
     }
     fn encode(&self, w: &mut Writer) {
         w.var_int(self.entity_id);
@@ -1171,7 +1259,12 @@ pub struct ClockState {
 }
 impl Wire for ClockState {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { clock: r.var_int()?, time: r.var_long()?, fraction: r.f32()?, rate: r.f32()? })
+        Ok(Self {
+            clock: r.var_int()?,
+            time: r.var_long()?,
+            fraction: r.f32()?,
+            rate: r.f32()?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.var_int(self.clock);
@@ -1309,7 +1402,11 @@ pub struct Statistic {
 }
 impl Wire for Statistic {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { category: r.var_int()?, stat: r.var_int()?, value: r.var_int()? })
+        Ok(Self {
+            category: r.var_int()?,
+            stat: r.var_int()?,
+            value: r.var_int()?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.var_int(self.category);
@@ -1406,11 +1503,20 @@ impl Packet for BossEvent {
     fn decode(r: &mut Reader<'_>) -> DecodeResult<Self> {
         let id = r.uuid()?;
         let action = match r.var_int()? {
-            0 => BossEventAction::Add { title: r.component()?, health: r.f32()?, color: r.var_int()?, division: r.var_int()?, flags: r.u8()? },
+            0 => BossEventAction::Add {
+                title: r.component()?,
+                health: r.f32()?,
+                color: r.var_int()?,
+                division: r.var_int()?,
+                flags: r.u8()?,
+            },
             1 => BossEventAction::Remove,
             2 => BossEventAction::UpdateHealth(r.f32()?),
             3 => BossEventAction::UpdateTitle(r.component()?),
-            4 => BossEventAction::UpdateStyle { color: r.var_int()?, division: r.var_int()? },
+            4 => BossEventAction::UpdateStyle {
+                color: r.var_int()?,
+                division: r.var_int()?,
+            },
             5 => BossEventAction::UpdateFlags(r.u8()?),
             a => return Err(DecodeError::Invalid(format!("boss event action {a}"))),
         };
@@ -1419,7 +1525,13 @@ impl Packet for BossEvent {
     fn encode(&self, w: &mut Writer) {
         w.uuid(&self.id);
         match &self.action {
-            BossEventAction::Add { title, health, color, division, flags } => {
+            BossEventAction::Add {
+                title,
+                health,
+                color,
+                division,
+                flags,
+            } => {
                 w.var_int(0);
                 w.component(title);
                 w.f32(*health);
@@ -1459,7 +1571,10 @@ pub struct ChunkBiomes {
 }
 impl Wire for ChunkBiomes {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { pos: PackedChunkPos::read(r)?, data: r.byte_array(crate::transport::MAX_PACKET_DATA_SIZE)? })
+        Ok(Self {
+            pos: PackedChunkPos::read(r)?,
+            data: r.byte_array(crate::transport::MAX_PACKET_DATA_SIZE)?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         PackedChunkPos::write(&self.pos, w);
@@ -1493,7 +1608,10 @@ pub struct SuggestionMatch {
 }
 impl Wire for SuggestionMatch {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { text: r.string()?, tooltip: r.read()? })
+        Ok(Self {
+            text: r.string()?,
+            tooltip: r.read()?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.string(&self.text);
@@ -1630,7 +1748,11 @@ impl Packet for DeleteChat {
     const NAME: &'static str = "minecraft:delete_chat";
     fn decode(r: &mut Reader<'_>) -> DecodeResult<Self> {
         let id = r.var_int()?;
-        let message = if id == 0 { PreviousMessage::Signature(Bytes::copy_from_slice(r.take(256)?)) } else { PreviousMessage::Id(id - 1) };
+        let message = if id == 0 {
+            PreviousMessage::Signature(Bytes::copy_from_slice(r.take(256)?))
+        } else {
+            PreviousMessage::Id(id - 1)
+        };
         Ok(Self { message })
     }
     fn encode(&self, w: &mut Writer) {
@@ -1668,7 +1790,12 @@ pub struct ExplosionParticle {
 }
 impl Wire for ExplosionParticle {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { particle: r.read()?, scaling: r.f32()?, speed: r.f32()?, weight: r.var_int()? })
+        Ok(Self {
+            particle: r.read()?,
+            scaling: r.f32()?,
+            speed: r.f32()?,
+            weight: r.var_int()?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.write(&self.particle);
@@ -1720,7 +1847,10 @@ pub struct GameRuleValue {
 }
 impl Wire for GameRuleValue {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { name: r.identifier()?, value: r.string()? })
+        Ok(Self {
+            name: r.identifier()?,
+            value: r.string()?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.identifier(&self.name);
@@ -1841,7 +1971,13 @@ pub struct MapIcon {
 }
 impl Wire for MapIcon {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { kind: r.var_int()?, x: r.i8()?, z: r.i8()?, direction: r.i8()?, name: r.read()? })
+        Ok(Self {
+            kind: r.var_int()?,
+            x: r.i8()?,
+            z: r.i8()?,
+            direction: r.i8()?,
+            name: r.read()?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.var_int(self.kind);
@@ -1890,11 +2026,23 @@ impl Packet for MapItemData {
         let icons = r.read()?;
         let columns = r.u8()?;
         let patch = if columns > 0 {
-            Some(MapPatch { columns, rows: r.u8()?, x: r.u8()?, z: r.u8()?, data: r.byte_array(128 * 128)? })
+            Some(MapPatch {
+                columns,
+                rows: r.u8()?,
+                x: r.u8()?,
+                z: r.u8()?,
+                data: r.byte_array(128 * 128)?,
+            })
         } else {
             None
         };
-        Ok(Self { map_id, scale, locked, icons, patch })
+        Ok(Self {
+            map_id,
+            scale,
+            locked,
+            icons,
+            patch,
+        })
     }
     fn encode(&self, w: &mut Writer) {
         w.var_int(self.map_id);
@@ -1932,7 +2080,11 @@ impl Wire for TradeItem {
         let start = r.peek_rest();
         crate::wire::slot::skip_exact_components(r)?;
         let used = start.len() - r.remaining();
-        Ok(Self { item, count, components_raw: r.to_bytes(&start[..used]) })
+        Ok(Self {
+            item,
+            count,
+            components_raw: r.to_bytes(&start[..used]),
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.var_int(self.item);
@@ -2032,7 +2184,13 @@ pub struct MinecartStep {
 }
 impl Wire for MinecartStep {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { pos: r.read()?, velocity: r.read()?, yaw: r.angle()?, pitch: r.angle()?, weight: r.f32()? })
+        Ok(Self {
+            pos: r.read()?,
+            velocity: r.read()?,
+            yaw: r.angle()?,
+            pitch: r.angle()?,
+            weight: r.f32()?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.write(&self.pos);
@@ -2158,7 +2316,10 @@ pub struct LookAtEntity {
 }
 impl Wire for LookAtEntity {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { entity_id: r.var_int()?, anchor: r.var_int()? })
+        Ok(Self {
+            entity_id: r.var_int()?,
+            anchor: r.var_int()?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.var_int(self.entity_id);
@@ -2385,11 +2546,19 @@ impl Packet for SetObjective {
         let name = r.string()?;
         let mode = r.i8()?;
         let display = if mode == 0 || mode == 2 {
-            Some(ObjectiveDisplay { value: r.component()?, render_type: r.var_int()?, number_format: r.read()? })
+            Some(ObjectiveDisplay {
+                value: r.component()?,
+                render_type: r.var_int()?,
+                number_format: r.read()?,
+            })
         } else {
             None
         };
-        Ok(Self { name, mode, display })
+        Ok(Self {
+            name,
+            mode,
+            display,
+        })
     }
     fn encode(&self, w: &mut Writer) {
         w.string(&self.name);
@@ -2484,9 +2653,22 @@ impl Packet for SetPlayerTeam {
     fn decode(r: &mut Reader<'_>) -> DecodeResult<Self> {
         let name = r.string()?;
         let method = r.i8()?;
-        let parameters = if method == 0 || method == 2 { Some(r.read()?) } else { None };
-        let entities = if matches!(method, 0 | 3 | 4) { r.read()? } else { Vec::new() };
-        Ok(Self { name, method, parameters, entities })
+        let parameters = if method == 0 || method == 2 {
+            Some(r.read()?)
+        } else {
+            None
+        };
+        let entities = if matches!(method, 0 | 3 | 4) {
+            r.read()?
+        } else {
+            Vec::new()
+        };
+        Ok(Self {
+            name,
+            method,
+            parameters,
+            entities,
+        })
     }
     fn encode(&self, w: &mut Writer) {
         w.string(&self.name);
@@ -2556,8 +2738,16 @@ impl Packet for StopSound {
     const NAME: &'static str = "minecraft:stop_sound";
     fn decode(r: &mut Reader<'_>) -> DecodeResult<Self> {
         let flags = r.u8()?;
-        let source = if flags & 1 != 0 { Some(r.var_int()?) } else { None };
-        let sound = if flags & 2 != 0 { Some(r.identifier()?) } else { None };
+        let source = if flags & 1 != 0 {
+            Some(r.var_int()?)
+        } else {
+            None
+        };
+        let sound = if flags & 2 != 0 {
+            Some(r.identifier()?)
+        } else {
+            None
+        };
         Ok(Self { source, sound })
     }
     fn encode(&self, w: &mut Writer) {
@@ -2658,8 +2848,19 @@ impl Wire for AdvancementDisplay {
         let icon = r.read()?;
         let frame = r.var_int()?;
         let flags = r.i32()?;
-        let background = if flags & 1 != 0 { Some(r.identifier()?) } else { None };
-        Ok(Self { title, description, icon, frame, flags, background })
+        let background = if flags & 1 != 0 {
+            Some(r.identifier()?)
+        } else {
+            None
+        };
+        Ok(Self {
+            title,
+            description,
+            icon,
+            frame,
+            flags,
+            background,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.component(&self.title);
@@ -2724,7 +2925,10 @@ pub struct CriterionProgress {
 }
 impl Wire for CriterionProgress {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { criterion: r.identifier()?, achieved_at: r.read()? })
+        Ok(Self {
+            criterion: r.identifier()?,
+            achieved_at: r.read()?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.identifier(&self.criterion);
@@ -2742,7 +2946,10 @@ pub struct AdvancementEntry {
 }
 impl Wire for AdvancementEntry {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { id: r.identifier()?, advancement: r.read()? })
+        Ok(Self {
+            id: r.identifier()?,
+            advancement: r.read()?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.identifier(&self.id);
@@ -2760,7 +2967,10 @@ pub struct AdvancementProgress {
 }
 impl Wire for AdvancementProgress {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { id: r.identifier()?, criteria: r.read()? })
+        Ok(Self {
+            id: r.identifier()?,
+            criteria: r.read()?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.identifier(&self.id);
@@ -2796,7 +3006,11 @@ pub struct AttributeModifier {
 }
 impl Wire for AttributeModifier {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { id: r.identifier()?, amount: r.f64()?, operation: r.u8()? })
+        Ok(Self {
+            id: r.identifier()?,
+            amount: r.f64()?,
+            operation: r.u8()?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.identifier(&self.id);
@@ -2817,7 +3031,11 @@ pub struct AttributeProperty {
 }
 impl Wire for AttributeProperty {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { id: r.var_int()?, value: r.f64()?, modifiers: r.read()? })
+        Ok(Self {
+            id: r.var_int()?,
+            value: r.f64()?,
+            modifiers: r.read()?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.var_int(self.id);
@@ -2876,8 +3094,12 @@ packet! {
 #[derive(Clone, Debug, PartialEq)]
 pub struct DialogNbt(pub Bytes);
 impl Wire for DialogNbt {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> { Ok(Self(r.nbt_raw()?)) }
-    fn write(&self, w: &mut Writer) { w.bytes(&self.0) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        Ok(Self(r.nbt_raw()?))
+    }
+    fn write(&self, w: &mut Writer) {
+        w.bytes(&self.0)
+    }
 }
 
 packet! {
@@ -2895,7 +3117,11 @@ mod more_tests {
     use crate::packets::ProtocolTables;
 
     fn tables() -> ProtocolTables {
-        ProtocolTables::for_tests(&[(3, "minecraft:damage")]).with_particles_for_tests(&[(0, "minecraft:explosion"), (1, "minecraft:block"), (2, "minecraft:dust")])
+        ProtocolTables::for_tests(&[(3, "minecraft:damage")]).with_particles_for_tests(&[
+            (0, "minecraft:explosion"),
+            (1, "minecraft:block"),
+            (2, "minecraft:dust"),
+        ])
     }
 
     fn round_trip_tables<P: Packet + PartialEq + std::fmt::Debug>(p: &P) {
@@ -2909,7 +3135,11 @@ mod more_tests {
     }
 
     fn item() -> ItemStackData {
-        ItemStackData { count: 1, item: Some(RegistryIndex(7)), components_raw: Bytes::from_static(&[0, 0]) }
+        ItemStackData {
+            count: 1,
+            item: Some(RegistryIndex(7)),
+            components_raw: Bytes::from_static(&[0, 0]),
+        }
     }
     fn nbt() -> Bytes {
         let mut c = crate::nbt::NbtCompound::new();
@@ -2921,56 +3151,174 @@ mod more_tests {
 
     #[test]
     fn round_trips() {
-        round_trip(&Animate { entity_id: 1, animation: 2 });
-        round_trip(&AwardStats { stats: vec![Statistic { category: 8, stat: 3, value: 100 }] });
+        round_trip(&Animate {
+            entity_id: 1,
+            animation: 2,
+        });
+        round_trip(&AwardStats {
+            stats: vec![Statistic {
+                category: 8,
+                stat: 3,
+                value: 100,
+            }],
+        });
         round_trip(&BlockChangedAck { sequence: 5 });
-        round_trip(&BlockDestruction { entity_id: 1, pos: BlockPos::new(1, 2, 3), stage: 4 });
-        round_trip(&BlockEvent { pos: BlockPos::new(0, 1, 0), action: 1, param: 1, block: 200 });
+        round_trip(&BlockDestruction {
+            entity_id: 1,
+            pos: BlockPos::new(1, 2, 3),
+            stage: 4,
+        });
+        round_trip(&BlockEvent {
+            pos: BlockPos::new(0, 1, 0),
+            action: 1,
+            param: 1,
+            block: 200,
+        });
         let id = Uuid::from_u128(1);
         for action in [
-            BossEventAction::Add { title: Component::text("Wither"), health: 1.0, color: 5, division: 0, flags: 1 },
+            BossEventAction::Add {
+                title: Component::text("Wither"),
+                health: 1.0,
+                color: 5,
+                division: 0,
+                flags: 1,
+            },
             BossEventAction::Remove,
             BossEventAction::UpdateHealth(0.5),
             BossEventAction::UpdateTitle(Component::text("t")),
-            BossEventAction::UpdateStyle { color: 1, division: 2 },
+            BossEventAction::UpdateStyle {
+                color: 1,
+                division: 2,
+            },
             BossEventAction::UpdateFlags(4),
         ] {
             round_trip(&BossEvent { id, action });
         }
-        round_trip(&ChunksBiomes { chunks: vec![ChunkBiomes { pos: ChunkPos::new(-1, 3), data: Bytes::from_static(&[0, 1, 2]) }] });
+        round_trip(&ChunksBiomes {
+            chunks: vec![ChunkBiomes {
+                pos: ChunkPos::new(-1, 3),
+                data: Bytes::from_static(&[0, 1, 2]),
+            }],
+        });
         round_trip(&ClearTitles { reset: true });
-        round_trip(&CommandSuggestions { id: 1, start: 2, length: 3, matches: vec![SuggestionMatch { text: "a".into(), tooltip: Some(Component::text("t")) }] });
+        round_trip(&CommandSuggestions {
+            id: 1,
+            start: 2,
+            length: 3,
+            matches: vec![SuggestionMatch {
+                text: "a".into(),
+                tooltip: Some(Component::text("t")),
+            }],
+        });
         round_trip(&ContainerClose { window_id: 3 });
-        round_trip(&ContainerSetData { window_id: 1, property: 2, value: -1 });
-        round_trip(&Cooldown { group: Identifier::minecraft("ender_pearl"), ticks: 20 });
-        round_trip(&CustomChatCompletions { action: 2, entries: vec!["x".into()] });
-        round_trip(&DamageEvent { entity_id: 1, source_type: 2, source_cause: 0, source_direct: 0, source_pos: Some(DVec3::ONE) });
-        round_trip(&DebugBlockValue { pos: BlockPos::new(1, 1, 1), update: Bytes::from_static(&[0, 0]) });
-        round_trip(&DebugChunkValue { pos: ChunkPos::new(1, 2), update: Bytes::from_static(&[1]) });
-        round_trip(&DebugEntityValue { entity_id: 3, update: Bytes::new() });
-        round_trip(&DebugEvent { event: Bytes::from_static(&[0]) });
-        round_trip(&DebugSample { sample: vec![1, 2, 3, 4], sample_type: 0 });
-        round_trip(&DeleteChat { message: PreviousMessage::Id(4) });
-        round_trip(&DeleteChat { message: PreviousMessage::Signature(Bytes::from(vec![2; 256])) });
-        round_trip(&EntityEvent { entity_id: 5, status: 9 });
+        round_trip(&ContainerSetData {
+            window_id: 1,
+            property: 2,
+            value: -1,
+        });
+        round_trip(&Cooldown {
+            group: Identifier::minecraft("ender_pearl"),
+            ticks: 20,
+        });
+        round_trip(&CustomChatCompletions {
+            action: 2,
+            entries: vec!["x".into()],
+        });
+        round_trip(&DamageEvent {
+            entity_id: 1,
+            source_type: 2,
+            source_cause: 0,
+            source_direct: 0,
+            source_pos: Some(DVec3::ONE),
+        });
+        round_trip(&DebugBlockValue {
+            pos: BlockPos::new(1, 1, 1),
+            update: Bytes::from_static(&[0, 0]),
+        });
+        round_trip(&DebugChunkValue {
+            pos: ChunkPos::new(1, 2),
+            update: Bytes::from_static(&[1]),
+        });
+        round_trip(&DebugEntityValue {
+            entity_id: 3,
+            update: Bytes::new(),
+        });
+        round_trip(&DebugEvent {
+            event: Bytes::from_static(&[0]),
+        });
+        round_trip(&DebugSample {
+            sample: vec![1, 2, 3, 4],
+            sample_type: 0,
+        });
+        round_trip(&DeleteChat {
+            message: PreviousMessage::Id(4),
+        });
+        round_trip(&DeleteChat {
+            message: PreviousMessage::Signature(Bytes::from(vec![2; 256])),
+        });
+        round_trip(&EntityEvent {
+            entity_id: 5,
+            status: 9,
+        });
         round_trip_tables(&Explode {
             center: DVec3::new(1.0, 2.0, 3.0),
             radius: 4.0,
             block_count: 10,
             player_knockback: Some(DVec3::X),
-            particle: Particle { kind: 0, data: Bytes::new() },
+            particle: Particle {
+                kind: 0,
+                data: Bytes::new(),
+            },
             sound: IdOr::Id(5),
-            block_particles: vec![ExplosionParticle { particle: Particle { kind: 1, data: Bytes::from_static(&[9]) }, scaling: 1.0, speed: 0.5, weight: 3 }],
+            block_particles: vec![ExplosionParticle {
+                particle: Particle {
+                    kind: 1,
+                    data: Bytes::from_static(&[9]),
+                },
+                scaling: 1.0,
+                speed: 0.5,
+                weight: 3,
+            }],
             play_sound: true,
         });
-        round_trip(&AddTransientBlock { pos: BlockPos::new(0, 0, 0), state: 1 });
-        round_trip(&GameRuleValues { rules: vec![GameRuleValue { name: Identifier::minecraft("keep_inventory"), value: "true".into() }] });
-        round_trip(&GameTestHighlightPos { absolute: BlockPos::new(1, 2, 3), relative: BlockPos::new(0, 0, 1) });
-        round_trip(&MountScreenOpen { window_id: 1, columns: 5, entity_id: 9 });
-        round_trip(&HurtAnimation { entity_id: 1, yaw: 90.0 });
-        round_trip(&InitializeBorder { x: 0.0, z: 0.0, old_diameter: 1e7, new_diameter: 1e7, speed: 0, portal_boundary: 29999984, warning_blocks: 5, warning_time: 15 });
+        round_trip(&AddTransientBlock {
+            pos: BlockPos::new(0, 0, 0),
+            state: 1,
+        });
+        round_trip(&GameRuleValues {
+            rules: vec![GameRuleValue {
+                name: Identifier::minecraft("keep_inventory"),
+                value: "true".into(),
+            }],
+        });
+        round_trip(&GameTestHighlightPos {
+            absolute: BlockPos::new(1, 2, 3),
+            relative: BlockPos::new(0, 0, 1),
+        });
+        round_trip(&MountScreenOpen {
+            window_id: 1,
+            columns: 5,
+            entity_id: 9,
+        });
+        round_trip(&HurtAnimation {
+            entity_id: 1,
+            yaw: 90.0,
+        });
+        round_trip(&InitializeBorder {
+            x: 0.0,
+            z: 0.0,
+            old_diameter: 1e7,
+            new_diameter: 1e7,
+            speed: 0,
+            portal_boundary: 29999984,
+            warning_blocks: 5,
+            warning_time: 15,
+        });
         round_trip_tables(&LevelParticles {
-            particle: Particle { kind: 2, data: Bytes::from_static(&[0, 0, 0xff, 0, 0x3f, 0x80, 0, 0]) },
+            particle: Particle {
+                kind: 2,
+                data: Bytes::from_static(&[0, 0, 0xff, 0, 0x3f, 0x80, 0, 0]),
+            },
             override_limiter: false,
             always_visible: true,
             pos: DVec3::ONE,
@@ -2984,12 +3332,40 @@ mod more_tests {
             randomization: 0,
         });
         round_trip(&LowDiskSpaceWarning {});
-        round_trip(&MapItemData { map_id: 1, scale: 0, locked: false, icons: Some(vec![MapIcon { kind: 0, x: 1, z: -1, direction: 3, name: None }]), patch: Some(MapPatch { columns: 1, rows: 2, x: 0, z: 0, data: Bytes::from_static(&[4, 5]) }) });
-        round_trip(&MapItemData { map_id: 1, scale: 4, locked: true, icons: None, patch: None });
+        round_trip(&MapItemData {
+            map_id: 1,
+            scale: 0,
+            locked: false,
+            icons: Some(vec![MapIcon {
+                kind: 0,
+                x: 1,
+                z: -1,
+                direction: 3,
+                name: None,
+            }]),
+            patch: Some(MapPatch {
+                columns: 1,
+                rows: 2,
+                x: 0,
+                z: 0,
+                data: Bytes::from_static(&[4, 5]),
+            }),
+        });
+        round_trip(&MapItemData {
+            map_id: 1,
+            scale: 4,
+            locked: true,
+            icons: None,
+            patch: None,
+        });
         round_trip_tables(&MerchantOffers {
             window_id: 1,
             offers: vec![MerchantOffer {
-                input1: TradeItem { item: 1, count: 12, components_raw: Bytes::from_static(&[1, 3, 5]) },
+                input1: TradeItem {
+                    item: 1,
+                    count: 12,
+                    components_raw: Bytes::from_static(&[1, 3, 5]),
+                },
                 output: item(),
                 input2: None,
                 disabled: false,
@@ -3005,60 +3381,216 @@ mod more_tests {
             regular_villager: true,
             can_restock: true,
         });
-        round_trip(&MoveMinecartAlongTrack { entity_id: 1, steps: vec![MinecartStep { pos: DVec3::ONE, velocity: DVec3::ZERO, yaw: 90.0, pitch: 0.0, weight: 1.0 }] });
-        round_trip(&MoveVehicle { pos: DVec3::ONE, yaw: 1.0, pitch: 2.0 });
+        round_trip(&MoveMinecartAlongTrack {
+            entity_id: 1,
+            steps: vec![MinecartStep {
+                pos: DVec3::ONE,
+                velocity: DVec3::ZERO,
+                yaw: 90.0,
+                pitch: 0.0,
+                weight: 1.0,
+            }],
+        });
+        round_trip(&MoveVehicle {
+            pos: DVec3::ONE,
+            yaw: 1.0,
+            pitch: 2.0,
+        });
         round_trip(&OpenBook { hand: 0 });
-        round_trip(&OpenScreen { window_id: 1, kind: 2, title: Component::text("Chest") });
-        round_trip(&OpenSignEditor { pos: BlockPos::new(1, 2, 3), text_slot: 1 });
+        round_trip(&OpenScreen {
+            window_id: 1,
+            kind: 2,
+            title: Component::text("Chest"),
+        });
+        round_trip(&OpenSignEditor {
+            pos: BlockPos::new(1, 2, 3),
+            text_slot: 1,
+        });
         round_trip(&PongResponse { payload: 77 });
-        round_trip(&PlaceGhostRecipe { window_id: 1, display: Bytes::from_static(&[3, 0]) });
-        round_trip(&PlayerAbilities { flags: 0x0d, flying_speed: 0.05, fov_modifier: 0.1 });
+        round_trip(&PlaceGhostRecipe {
+            window_id: 1,
+            display: Bytes::from_static(&[3, 0]),
+        });
+        round_trip(&PlayerAbilities {
+            flags: 0x0d,
+            flying_speed: 0.05,
+            fov_modifier: 0.1,
+        });
         round_trip(&PlayerCombatEnd { duration: 5 });
         round_trip(&PlayerCombatEnter {});
-        round_trip(&PlayerCombatKill { player_id: 1, message: Component::text("died") });
-        round_trip(&PlayerLookAt { from_anchor: 1, target: DVec3::ONE, entity: Some(LookAtEntity { entity_id: 3, anchor: 0 }) });
-        round_trip(&PlayerLookAt { from_anchor: 0, target: DVec3::ZERO, entity: None });
-        round_trip(&PlayerRotation { yaw: 10.0, relative_yaw: true, pitch: -5.0, relative_pitch: false });
-        round_trip(&RemoveMobEffect { entity_id: 1, effect: 2 });
-        round_trip(&ResetScore { owner: "Steve".into(), objective: Some("kills".into()) });
-        round_trip(&SelectAdvancementsTab { tab: Some(Identifier::minecraft("story/root")) });
-        round_trip(&SetActionBarText { text: Component::text("a") });
+        round_trip(&PlayerCombatKill {
+            player_id: 1,
+            message: Component::text("died"),
+        });
+        round_trip(&PlayerLookAt {
+            from_anchor: 1,
+            target: DVec3::ONE,
+            entity: Some(LookAtEntity {
+                entity_id: 3,
+                anchor: 0,
+            }),
+        });
+        round_trip(&PlayerLookAt {
+            from_anchor: 0,
+            target: DVec3::ZERO,
+            entity: None,
+        });
+        round_trip(&PlayerRotation {
+            yaw: 10.0,
+            relative_yaw: true,
+            pitch: -5.0,
+            relative_pitch: false,
+        });
+        round_trip(&RemoveMobEffect {
+            entity_id: 1,
+            effect: 2,
+        });
+        round_trip(&ResetScore {
+            owner: "Steve".into(),
+            objective: Some("kills".into()),
+        });
+        round_trip(&SelectAdvancementsTab {
+            tab: Some(Identifier::minecraft("story/root")),
+        });
+        round_trip(&SetActionBarText {
+            text: Component::text("a"),
+        });
         round_trip(&SetBorderCenter { x: 1.0, z: 2.0 });
-        round_trip(&SetBorderLerpSize { old_diameter: 1.0, new_diameter: 2.0, speed: 1000 });
+        round_trip(&SetBorderLerpSize {
+            old_diameter: 1.0,
+            new_diameter: 2.0,
+            speed: 1000,
+        });
         round_trip(&SetBorderSize { diameter: 100.0 });
         round_trip(&SetBorderWarningDelay { warning_time: 15 });
         round_trip(&SetBorderWarningDistance { warning_blocks: 5 });
         round_trip(&SetCamera { camera_id: 1 });
         round_trip(&SetCursorItem { item: item() });
-        round_trip(&SetDefaultSpawnPosition { dimension: Identifier::minecraft("overworld"), pos: BlockPos::new(0, 64, 0), yaw: 0.0, pitch: 0.0 });
-        round_trip(&SetDisplayObjective { position: 1, name: "obj".into() });
-        round_trip(&SetEntityLink { attached: 1, holder: -1 });
-        round_trip(&SetObjective { name: "o".into(), mode: 0, display: Some(ObjectiveDisplay { value: Component::text("O"), render_type: 1, number_format: Some(NumberFormat::Styled(nbt())) }) });
-        round_trip(&SetObjective { name: "o".into(), mode: 1, display: None });
-        round_trip(&SetPassengers { vehicle: 1, passengers: vec![2, 3] });
-        round_trip(&SetPlayerInventory { slot: 40, item: item() });
+        round_trip(&SetDefaultSpawnPosition {
+            dimension: Identifier::minecraft("overworld"),
+            pos: BlockPos::new(0, 64, 0),
+            yaw: 0.0,
+            pitch: 0.0,
+        });
+        round_trip(&SetDisplayObjective {
+            position: 1,
+            name: "obj".into(),
+        });
+        round_trip(&SetEntityLink {
+            attached: 1,
+            holder: -1,
+        });
+        round_trip(&SetObjective {
+            name: "o".into(),
+            mode: 0,
+            display: Some(ObjectiveDisplay {
+                value: Component::text("O"),
+                render_type: 1,
+                number_format: Some(NumberFormat::Styled(nbt())),
+            }),
+        });
+        round_trip(&SetObjective {
+            name: "o".into(),
+            mode: 1,
+            display: None,
+        });
+        round_trip(&SetPassengers {
+            vehicle: 1,
+            passengers: vec![2, 3],
+        });
+        round_trip(&SetPlayerInventory {
+            slot: 40,
+            item: item(),
+        });
         round_trip(&SetPlayerTeam {
             name: "red".into(),
             method: 0,
-            parameters: Some(TeamParameters { display_name: Component::text("Red"), prefix: Component::default(), suffix: Component::default(), name_tag_visibility: 0, collision_rule: 0, color: Some(12), flags: 3 }),
+            parameters: Some(TeamParameters {
+                display_name: Component::text("Red"),
+                prefix: Component::default(),
+                suffix: Component::default(),
+                name_tag_visibility: 0,
+                collision_rule: 0,
+                color: Some(12),
+                flags: 3,
+            }),
             entities: vec!["Steve".into()],
         });
-        round_trip(&SetPlayerTeam { name: "red".into(), method: 1, parameters: None, entities: vec![] });
-        round_trip(&SetPlayerTeam { name: "red".into(), method: 4, parameters: None, entities: vec!["Alex".into()] });
-        round_trip(&SetScore { owner: "Steve".into(), objective: "o".into(), value: 5, display_name: None, number_format: Some(NumberFormat::Fixed(Component::text("x"))) });
-        round_trip(&SetScore { owner: "a".into(), objective: "b".into(), value: -1, display_name: Some(Component::text("n")), number_format: Some(NumberFormat::Blank) });
-        round_trip(&SetSubtitleText { text: Component::text("s") });
-        round_trip(&SetTitleText { text: Component::text("t") });
-        round_trip(&SetTitlesAnimation { fade_in: 10, stay: 70, fade_out: 20 });
-        round_trip(&StopSound { source: Some(3), sound: None });
-        round_trip(&StopSound { source: None, sound: Some(Identifier::minecraft("music.game")) });
-        round_trip(&StopSound { source: Some(0), sound: Some(Identifier::minecraft("x")) });
-        round_trip(&SwingAnimation { entity_id: 1, hand: 0, animation: 1, duration: 6 });
-        round_trip(&TagQuery { transaction_id: 1, nbt: nbt() });
-        round_trip(&TagQuery { transaction_id: 1, nbt: Bytes::from_static(&[0]) });
-        round_trip(&TakeItemEntity { collected: 1, collector: 2, count: 3 });
-        round_trip(&TestInstanceBlockStatus { body: Bytes::from_static(&[8, 0, 1, b'a', 0]) });
-        round_trip(&TickingState { tick_rate: 20.0, frozen: false });
+        round_trip(&SetPlayerTeam {
+            name: "red".into(),
+            method: 1,
+            parameters: None,
+            entities: vec![],
+        });
+        round_trip(&SetPlayerTeam {
+            name: "red".into(),
+            method: 4,
+            parameters: None,
+            entities: vec!["Alex".into()],
+        });
+        round_trip(&SetScore {
+            owner: "Steve".into(),
+            objective: "o".into(),
+            value: 5,
+            display_name: None,
+            number_format: Some(NumberFormat::Fixed(Component::text("x"))),
+        });
+        round_trip(&SetScore {
+            owner: "a".into(),
+            objective: "b".into(),
+            value: -1,
+            display_name: Some(Component::text("n")),
+            number_format: Some(NumberFormat::Blank),
+        });
+        round_trip(&SetSubtitleText {
+            text: Component::text("s"),
+        });
+        round_trip(&SetTitleText {
+            text: Component::text("t"),
+        });
+        round_trip(&SetTitlesAnimation {
+            fade_in: 10,
+            stay: 70,
+            fade_out: 20,
+        });
+        round_trip(&StopSound {
+            source: Some(3),
+            sound: None,
+        });
+        round_trip(&StopSound {
+            source: None,
+            sound: Some(Identifier::minecraft("music.game")),
+        });
+        round_trip(&StopSound {
+            source: Some(0),
+            sound: Some(Identifier::minecraft("x")),
+        });
+        round_trip(&SwingAnimation {
+            entity_id: 1,
+            hand: 0,
+            animation: 1,
+            duration: 6,
+        });
+        round_trip(&TagQuery {
+            transaction_id: 1,
+            nbt: nbt(),
+        });
+        round_trip(&TagQuery {
+            transaction_id: 1,
+            nbt: Bytes::from_static(&[0]),
+        });
+        round_trip(&TakeItemEntity {
+            collected: 1,
+            collector: 2,
+            count: 3,
+        });
+        round_trip(&TestInstanceBlockStatus {
+            body: Bytes::from_static(&[8, 0, 1, b'a', 0]),
+        });
+        round_trip(&TickingState {
+            tick_rate: 20.0,
+            frozen: false,
+        });
         round_trip(&TickingStep { steps: 3 });
         round_trip(&UpdateAdvancements {
             reset: true,
@@ -3072,7 +3604,9 @@ mod more_tests {
                         icon: item(),
                         frame: 0,
                         flags: 1,
-                        background: Some(Identifier::minecraft("gui/advancements/backgrounds/stone")),
+                        background: Some(Identifier::minecraft(
+                            "gui/advancements/backgrounds/stone",
+                        )),
                     }),
                     requirements: vec![vec!["crafting_table".into()]],
                     telemetry: true,
@@ -3081,18 +3615,47 @@ mod more_tests {
                 },
             }],
             removed: vec![Identifier::minecraft("old")],
-            progress: vec![AdvancementProgress { id: Identifier::minecraft("story/root"), criteria: vec![CriterionProgress { criterion: Identifier::minecraft("crafting_table"), achieved_at: Some(1) }] }],
+            progress: vec![AdvancementProgress {
+                id: Identifier::minecraft("story/root"),
+                criteria: vec![CriterionProgress {
+                    criterion: Identifier::minecraft("crafting_table"),
+                    achieved_at: Some(1),
+                }],
+            }],
             show_advancements: false,
         });
         round_trip(&UpdateAttributes {
             entity_id: 1,
-            properties: vec![AttributeProperty { id: 3, value: 0.1, modifiers: vec![AttributeModifier { id: Identifier::minecraft("sprinting"), amount: 0.3, operation: 2 }] }],
+            properties: vec![AttributeProperty {
+                id: 3,
+                value: 0.1,
+                modifiers: vec![AttributeModifier {
+                    id: Identifier::minecraft("sprinting"),
+                    amount: 0.3,
+                    operation: 2,
+                }],
+            }],
         });
-        round_trip(&UpdateMobEffect { entity_id: 1, effect: 2, amplifier: 0, duration: -1, flags: 6 });
-        round_trip(&ProjectilePower { entity_id: 1, power: 0.1 });
-        round_trip(&Waypoint { body: Bytes::from_static(&[0]) });
-        round_trip(&ShowDialog { dialog: IdOr::Id(3) });
-        round_trip(&ShowDialog { dialog: IdOr::Inline(DialogNbt(nbt())) });
+        round_trip(&UpdateMobEffect {
+            entity_id: 1,
+            effect: 2,
+            amplifier: 0,
+            duration: -1,
+            flags: 6,
+        });
+        round_trip(&ProjectilePower {
+            entity_id: 1,
+            power: 0.1,
+        });
+        round_trip(&Waypoint {
+            body: Bytes::from_static(&[0]),
+        });
+        round_trip(&ShowDialog {
+            dialog: IdOr::Id(3),
+        });
+        round_trip(&ShowDialog {
+            dialog: IdOr::Inline(DialogNbt(nbt())),
+        });
     }
 }
 
@@ -3110,11 +3673,22 @@ mod tests {
         w.into_inner().into()
     }
     fn item() -> ItemStackData {
-        ItemStackData { count: 2, item: Some(RegistryIndex(1)), components_raw: Bytes::from_static(&[0, 0]) }
+        ItemStackData {
+            count: 2,
+            item: Some(RegistryIndex(1)),
+            components_raw: Bytes::from_static(&[0, 0]),
+        }
     }
     fn chat_type() -> ChatType {
-        let d = ChatDecoration { translation_key: "chat.type.text".into(), parameters: vec![0, 2], style: Bytes::from_static(&[0]) };
-        ChatType { chat: d.clone(), narration: d }
+        let d = ChatDecoration {
+            translation_key: "chat.type.text".into(),
+            parameters: vec![0, 2],
+            style: Bytes::from_static(&[0]),
+        };
+        ChatType {
+            chat: d.clone(),
+            narration: d,
+        }
     }
     fn spawn_info() -> SpawnInfo {
         SpawnInfo {
@@ -3125,7 +3699,10 @@ mod tests {
             previous_game_mode: 0,
             is_debug: false,
             is_flat: true,
-            death_location: Some(GlobalPos { dimension: Identifier::minecraft("the_nether"), pos: BlockPos::new(1, 2, 3) }),
+            death_location: Some(GlobalPos {
+                dimension: Identifier::minecraft("the_nether"),
+                pos: BlockPos::new(1, 2, 3),
+            }),
             portal_cooldown: 0,
             sea_level: 63,
         }
@@ -3145,30 +3722,93 @@ mod tests {
             head_yaw: 180.0,
             data: 0,
         });
-        round_trip(&BlockEntityData { pos: BlockPos::new(1, 2, 3), kind: 7, nbt: nbt() });
-        round_trip(&BlockUpdate { pos: BlockPos::new(-1, -64, 5), state: 1234 });
-        round_trip(&ChangeDifficulty { difficulty: 2, locked: false });
+        round_trip(&BlockEntityData {
+            pos: BlockPos::new(1, 2, 3),
+            kind: 7,
+            nbt: nbt(),
+        });
+        round_trip(&BlockUpdate {
+            pos: BlockPos::new(-1, -64, 5),
+            state: 1234,
+        });
+        round_trip(&ChangeDifficulty {
+            difficulty: 2,
+            locked: false,
+        });
         round_trip(&ChunkBatchFinished { batch_size: 25 });
         round_trip(&ChunkBatchStart {});
-        round_trip(&Commands { body: Bytes::from_static(&[1, 2, 3]) });
-        round_trip(&ContainerSetContent { window_id: 0, state_id: 1, slots: vec![ItemStackData::default(), item()], carried: ItemStackData::default() });
-        round_trip(&ContainerSetSlot { window_id: 0, state_id: 2, slot: 36, item: item() });
-        round_trip(&DisguisedChat { message: Component::text("hi"), chat_type: IdOr::Inline(chat_type()), sender_name: Component::text("Server"), target_name: None });
-        round_trip(&EntityPositionSync { entity_id: 1, path: PositionPath::Linear(DVec3::new(1.0, 2.0, 3.0)), yaw: 10.0, pitch: -5.0, on_ground: true });
-        round_trip(&EntityPositionSync { entity_id: 1, path: PositionPath::Stepped(vec![(DVec3::X, 1), (DVec3::Y, 2)]), yaw: 0.0, pitch: 0.0, on_ground: false });
-        round_trip(&ForgetLevelChunk { pos: ChunkPos::new(-3, 7) });
-        round_trip(&GameEvent { event: 13, value: 0.0 });
+        round_trip(&Commands {
+            body: Bytes::from_static(&[1, 2, 3]),
+        });
+        round_trip(&ContainerSetContent {
+            window_id: 0,
+            state_id: 1,
+            slots: vec![ItemStackData::default(), item()],
+            carried: ItemStackData::default(),
+        });
+        round_trip(&ContainerSetSlot {
+            window_id: 0,
+            state_id: 2,
+            slot: 36,
+            item: item(),
+        });
+        round_trip(&DisguisedChat {
+            message: Component::text("hi"),
+            chat_type: IdOr::Inline(chat_type()),
+            sender_name: Component::text("Server"),
+            target_name: None,
+        });
+        round_trip(&EntityPositionSync {
+            entity_id: 1,
+            path: PositionPath::Linear(DVec3::new(1.0, 2.0, 3.0)),
+            yaw: 10.0,
+            pitch: -5.0,
+            on_ground: true,
+        });
+        round_trip(&EntityPositionSync {
+            entity_id: 1,
+            path: PositionPath::Stepped(vec![(DVec3::X, 1), (DVec3::Y, 2)]),
+            yaw: 0.0,
+            pitch: 0.0,
+            on_ground: false,
+        });
+        round_trip(&ForgetLevelChunk {
+            pos: ChunkPos::new(-3, 7),
+        });
+        round_trip(&GameEvent {
+            event: 13,
+            value: 0.0,
+        });
         round_trip(&LevelChunkWithLight {
             chunk: ChunkData {
                 pos: ChunkPos::new(-2, 5),
                 heightmaps: vec![(1, vec![1, 2, 3]), (4, vec![])],
                 sections: Bytes::from_static(&[0, 1, 0, 0]),
-                block_entities: vec![ChunkBlockEntity { pos: BlockPos::new(-32 + 3, -60, 80 + 15), kind: 9, nbt: nbt() }],
-                light: LightData { sky_mask: vec![3], block_mask: vec![], empty_sky_mask: vec![4], empty_block_mask: vec![], sky_arrays: vec![Bytes::from(vec![0xff; 2048]), Bytes::from(vec![0; 2048])], block_arrays: vec![] },
+                block_entities: vec![ChunkBlockEntity {
+                    pos: BlockPos::new(-32 + 3, -60, 80 + 15),
+                    kind: 9,
+                    nbt: nbt(),
+                }],
+                light: LightData {
+                    sky_mask: vec![3],
+                    block_mask: vec![],
+                    empty_sky_mask: vec![4],
+                    empty_block_mask: vec![],
+                    sky_arrays: vec![Bytes::from(vec![0xff; 2048]), Bytes::from(vec![0; 2048])],
+                    block_arrays: vec![],
+                },
             },
         });
-        round_trip(&LevelEvent { event: 1000, pos: BlockPos::new(0, 0, 0), data: 0, global: false });
-        round_trip(&LightUpdate { pos: ChunkPos::new(1, 2), light: LightData::default() });
+        round_trip(&LevelEvent {
+            event: 1000,
+            pos: BlockPos::new(0, 0, 0),
+            data: 0,
+            global: false,
+        });
+        round_trip(&LightUpdate {
+            pos: ChunkPos::new(1, 2),
+            light: LightData::default(),
+        });
         round_trip(&Login {
             entity_id: 42,
             hardcore: false,
@@ -3183,10 +3823,29 @@ mod tests {
             online_mode: false,
             enforces_secure_chat: false,
         });
-        round_trip(&MoveEntityPos { entity_id: 3, deltas: MoveDeltas::Linear([4096, -1, 0]), on_ground: true });
-        round_trip(&MoveEntityPos { entity_id: 3, deltas: MoveDeltas::Stepped(vec![(0, [1, 2, 3]), (1, [4, 5, 6])]), on_ground: false });
-        round_trip(&MoveEntityPosRot { entity_id: 3, deltas: MoveDeltas::Linear([0, 0, 1]), on_ground: false, yaw: 90.0, pitch: 0.0 });
-        round_trip(&MoveEntityRot { entity_id: 3, on_ground: true, yaw: 45.0, pitch: 270.0 });
+        round_trip(&MoveEntityPos {
+            entity_id: 3,
+            deltas: MoveDeltas::Linear([4096, -1, 0]),
+            on_ground: true,
+        });
+        round_trip(&MoveEntityPos {
+            entity_id: 3,
+            deltas: MoveDeltas::Stepped(vec![(0, [1, 2, 3]), (1, [4, 5, 6])]),
+            on_ground: false,
+        });
+        round_trip(&MoveEntityPosRot {
+            entity_id: 3,
+            deltas: MoveDeltas::Linear([0, 0, 1]),
+            on_ground: false,
+            yaw: 90.0,
+            pitch: 0.0,
+        });
+        round_trip(&MoveEntityRot {
+            entity_id: 3,
+            on_ground: true,
+            yaw: 45.0,
+            pitch: 270.0,
+        });
         round_trip(&PlayerChat {
             global_index: 0,
             sender: Uuid::from_u128(1),
@@ -3195,7 +3854,10 @@ mod tests {
             message: "hello".into(),
             timestamp: 1,
             salt: 2,
-            previous: vec![PreviousMessage::Id(3), PreviousMessage::Signature(Bytes::from(vec![1; 256]))],
+            previous: vec![
+                PreviousMessage::Id(3),
+                PreviousMessage::Signature(Bytes::from(vec![1; 256])),
+            ],
             unsigned_content: None,
             filter_type: 2,
             filter_bits: Some(vec![5]),
@@ -3203,7 +3865,9 @@ mod tests {
             sender_name: Component::text("Steve"),
             target_name: Some(Component::text("Alex")),
         });
-        round_trip(&PlayerInfoRemove { uuids: vec![Uuid::from_u128(9)] });
+        round_trip(&PlayerInfoRemove {
+            uuids: vec![Uuid::from_u128(9)],
+        });
         round_trip(&PlayerInfoUpdate {
             actions: 0xff,
             entries: vec![PlayerInfoEntry {
@@ -3218,44 +3882,149 @@ mod tests {
                 show_hat: Some(true),
             }],
         });
-        round_trip(&PlayerInfoUpdate { actions: player_info_actions::UPDATE_LATENCY, entries: vec![PlayerInfoEntry { uuid: Uuid::from_u128(2), latency: Some(5), ..Default::default() }] });
-        round_trip(&PlayerPosition { teleport_id: 1, pos: DVec3::new(0.5, 70.0, 0.5), velocity: DVec3::ZERO, yaw: 0.0, pitch: 0.0, flags: teleport_flags::VEL_X | teleport_flags::YAW });
-        round_trip(&RecipeBookAdd { body: Bytes::from_static(&[0, 1]) });
+        round_trip(&PlayerInfoUpdate {
+            actions: player_info_actions::UPDATE_LATENCY,
+            entries: vec![PlayerInfoEntry {
+                uuid: Uuid::from_u128(2),
+                latency: Some(5),
+                ..Default::default()
+            }],
+        });
+        round_trip(&PlayerPosition {
+            teleport_id: 1,
+            pos: DVec3::new(0.5, 70.0, 0.5),
+            velocity: DVec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.0,
+            flags: teleport_flags::VEL_X | teleport_flags::YAW,
+        });
+        round_trip(&RecipeBookAdd {
+            body: Bytes::from_static(&[0, 1]),
+        });
         round_trip(&RecipeBookRemove { body: Bytes::new() });
-        round_trip(&RecipeBookSettings { body: Bytes::from_static(&[0; 8]) });
-        round_trip(&RemoveEntities { entity_ids: vec![1, 2, 300] });
-        round_trip(&Respawn { spawn: spawn_info(), data_kept: 3 });
-        round_trip(&RotateHead { entity_id: 2, head_yaw: 33.75 });
+        round_trip(&RecipeBookSettings {
+            body: Bytes::from_static(&[0; 8]),
+        });
+        round_trip(&RemoveEntities {
+            entity_ids: vec![1, 2, 300],
+        });
+        round_trip(&Respawn {
+            spawn: spawn_info(),
+            data_kept: 3,
+        });
+        round_trip(&RotateHead {
+            entity_id: 2,
+            head_yaw: 33.75,
+        });
         let p = SectionPos::new(-3, -4, 1_000_000);
-        let u = SectionBlocksUpdate { section: SectionBlocksUpdate::pack_section(p), blocks: vec![(5 << 12) | (1 << 8) | (2 << 4) | 3] };
+        let u = SectionBlocksUpdate {
+            section: SectionBlocksUpdate::pack_section(p),
+            blocks: vec![(5 << 12) | (1 << 8) | (2 << 4) | 3],
+        };
         assert_eq!(u.section_pos(), p);
         let c: Vec<_> = u.changes().collect();
         assert_eq!(c[0].pos, BlockPos::new(-48 + 1, -64 + 3, 16_000_000 + 2));
         assert_eq!(c[0].state, BlockStateId(5));
         round_trip(&u);
-        round_trip(&ServerData { motd: Component::text("A Minecraft Server"), icon: None });
+        round_trip(&ServerData {
+            motd: Component::text("A Minecraft Server"),
+            icon: None,
+        });
         round_trip(&SetChunkCacheCenter { x: -1, z: 2 });
         round_trip(&SetChunkCacheRadius { radius: 10 });
-        round_trip(&SetEntityData { entity_id: 1, metadata: vec![MetadataEntry { index: 0, value: MetadataValue::Byte(0) }] });
-        round_trip(&SetEntityMotion { entity_id: 1, velocity: DVec3::ZERO });
-        round_trip(&SetEquipment { entity_id: 5, equipment: vec![(0, item()), (5, ItemStackData::default())] });
-        round_trip(&SetExperience { bar: 0.5, level: 3, total: 40 });
-        round_trip(&SetHealth { health: 20.0, food: 20, saturation: 5.0 });
+        round_trip(&SetEntityData {
+            entity_id: 1,
+            metadata: vec![MetadataEntry {
+                index: 0,
+                value: MetadataValue::Byte(0),
+            }],
+        });
+        round_trip(&SetEntityMotion {
+            entity_id: 1,
+            velocity: DVec3::ZERO,
+        });
+        round_trip(&SetEquipment {
+            entity_id: 5,
+            equipment: vec![(0, item()), (5, ItemStackData::default())],
+        });
+        round_trip(&SetExperience {
+            bar: 0.5,
+            level: 3,
+            total: 40,
+        });
+        round_trip(&SetHealth {
+            health: 20.0,
+            food: 20,
+            saturation: 5.0,
+        });
         round_trip(&SetHeldSlot { slot: 4 });
         round_trip(&SetSimulationDistance { distance: 12 });
-        round_trip(&SetTime { world_age: 1000, clocks: vec![ClockState { clock: 0, time: 6000, fraction: 0.0, rate: 1.0 }] });
-        round_trip(&Sound { sound: IdOr::Id(10), category: 0, x: 8, y: 16, z: -8, volume: 1.0, pitch: 1.0, seed: 99 });
-        round_trip(&SoundEntity { sound: IdOr::Inline(SoundEvent { name: Identifier::minecraft("x"), fixed_range: None }), category: 5, entity_id: 3, volume: 0.5, pitch: 2.0, seed: 0 });
+        round_trip(&SetTime {
+            world_age: 1000,
+            clocks: vec![ClockState {
+                clock: 0,
+                time: 6000,
+                fraction: 0.0,
+                rate: 1.0,
+            }],
+        });
+        round_trip(&Sound {
+            sound: IdOr::Id(10),
+            category: 0,
+            x: 8,
+            y: 16,
+            z: -8,
+            volume: 1.0,
+            pitch: 1.0,
+            seed: 99,
+        });
+        round_trip(&SoundEntity {
+            sound: IdOr::Inline(SoundEvent {
+                name: Identifier::minecraft("x"),
+                fixed_range: None,
+            }),
+            category: 5,
+            entity_id: 3,
+            volume: 0.5,
+            pitch: 2.0,
+            seed: 0,
+        });
         round_trip(&StartConfiguration {});
-        round_trip(&SystemChat { content: Component::text("sys"), overlay: true });
-        round_trip(&TabList { header: Component::text("h"), footer: Component::default() });
-        round_trip(&TeleportEntity { entity_id: 9, pos: DVec3::ONE, velocity: DVec3::ZERO, yaw: 1.0, pitch: 2.0, flags: 0, on_ground: true });
-        round_trip(&UpdateRecipes { body: Bytes::from_static(&[0, 0]) });
+        round_trip(&SystemChat {
+            content: Component::text("sys"),
+            overlay: true,
+        });
+        round_trip(&TabList {
+            header: Component::text("h"),
+            footer: Component::default(),
+        });
+        round_trip(&TeleportEntity {
+            entity_id: 9,
+            pos: DVec3::ONE,
+            velocity: DVec3::ZERO,
+            yaw: 1.0,
+            pitch: 2.0,
+            flags: 0,
+            on_ground: true,
+        });
+        round_trip(&UpdateRecipes {
+            body: Bytes::from_static(&[0, 0]),
+        });
     }
 
     #[test]
     fn add_entity_converts_to_spawn() {
-        let a = AddEntity { entity_id: 7, uuid: Uuid::nil(), kind: 3, pos: DVec3::ONE, velocity: DVec3::ZERO, pitch: 1.0, yaw: 2.0, head_yaw: 3.0, data: 4 };
+        let a = AddEntity {
+            entity_id: 7,
+            uuid: Uuid::nil(),
+            kind: 3,
+            pos: DVec3::ONE,
+            velocity: DVec3::ZERO,
+            pitch: 1.0,
+            yaw: 2.0,
+            head_yaw: 3.0,
+            data: 4,
+        };
         let s = a.spawn();
         assert_eq!(s.id, EntityId(7));
         assert_eq!((s.yaw, s.pitch, s.head_yaw), (2.0, 1.0, 3.0));

@@ -67,8 +67,10 @@ pub fn new_shared_secret() -> [u8; 16] {
 /// Encrypts `data` with the server's DER (`SubjectPublicKeyInfo`) RSA key,
 /// PKCS#1 v1.5 padded, as the encryption response requires.
 pub fn rsa_encrypt(public_key_der: &[u8], data: &[u8]) -> Result<Vec<u8>, AuthError> {
-    let key = RsaPublicKey::from_public_key_der(public_key_der).map_err(|e| AuthError::Rsa(e.to_string()))?;
-    key.encrypt(&mut OsRng, Pkcs1v15Encrypt, data).map_err(|e| AuthError::Rsa(e.to_string()))
+    let key = RsaPublicKey::from_public_key_der(public_key_der)
+        .map_err(|e| AuthError::Rsa(e.to_string()))?;
+    key.encrypt(&mut OsRng, Pkcs1v15Encrypt, data)
+        .map_err(|e| AuthError::Rsa(e.to_string()))
 }
 
 /// Tells the session server we are joining the server identified by
@@ -78,7 +80,11 @@ pub async fn join_session(tokens: &MsaTokens, server_hash: &str) -> Result<(), A
 }
 
 /// [`join_session`] against an explicit URL (tests).
-pub async fn join_session_at(url: &str, tokens: &MsaTokens, server_hash: &str) -> Result<(), AuthError> {
+pub async fn join_session_at(
+    url: &str,
+    tokens: &MsaTokens,
+    server_hash: &str,
+) -> Result<(), AuthError> {
     let body = serde_json::json!({
         "accessToken": tokens.access_token,
         "selectedProfile": tokens.profile_uuid.simple().to_string(),
@@ -106,9 +112,18 @@ mod tests {
 
     #[test]
     fn hex_digest_wiki_examples() {
-        assert_eq!(minecraft_hex_digest(&sha1("Notch")), "4ed1f46bbe04bc756bcb17c0c7ce3e4632f06a48");
-        assert_eq!(minecraft_hex_digest(&sha1("jeb_")), "-7c9d5b0044c130109a5d7b5fb5c317c02b4e28c1");
-        assert_eq!(minecraft_hex_digest(&sha1("simon")), "88e16a1019277b15d58faf0541e11910eb756f6");
+        assert_eq!(
+            minecraft_hex_digest(&sha1("Notch")),
+            "4ed1f46bbe04bc756bcb17c0c7ce3e4632f06a48"
+        );
+        assert_eq!(
+            minecraft_hex_digest(&sha1("jeb_")),
+            "-7c9d5b0044c130109a5d7b5fb5c317c02b4e28c1"
+        );
+        assert_eq!(
+            minecraft_hex_digest(&sha1("simon")),
+            "88e16a1019277b15d58faf0541e11910eb756f6"
+        );
     }
 
     #[test]

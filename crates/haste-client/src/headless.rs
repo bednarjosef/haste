@@ -15,13 +15,19 @@ use std::time::{Duration, Instant};
 use haste_protocol::haste_core::game::TICK_SECONDS;
 use haste_protocol::{Account, ConnectOptions};
 
-use crate::Args;
 use crate::net::{EntitySink, NetDriver, StubEntities, StubWorld, WorldSink};
+use crate::Args;
 
 /// Runs the headless join and returns an error if it did not hold.
 pub fn run(args: &Args) -> anyhow::Result<()> {
-    let address = args.server.clone().ok_or_else(|| anyhow::anyhow!("--headless needs --server <host[:port]>"))?;
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().worker_threads(2).build()?;
+    let address = args
+        .server
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("--headless needs --server <host[:port]>"))?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .build()?;
     rt.block_on(run_async(address, args.username.clone(), args.seconds))
 }
 
@@ -30,10 +36,21 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
     let t0 = Instant::now();
     let biome_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(64));
     let bc = biome_count.clone();
-    let make_world = Box::new(move |dim: &haste_protocol::haste_core::game::DimensionInfo| StubWorld::new(dim, bc.load(std::sync::atomic::Ordering::Relaxed)));
-    let mut driver: NetDriver<StubWorld, StubEntities> = NetDriver::connect(opts, make_world, StubEntities::default()).await?;
+    let make_world = Box::new(
+        move |dim: &haste_protocol::haste_core::game::DimensionInfo| {
+            StubWorld::new(dim, bc.load(std::sync::atomic::Ordering::Relaxed))
+        },
+    );
+    let mut driver: NetDriver<StubWorld, StubEntities> =
+        NetDriver::connect(opts, make_world, StubEntities::default()).await?;
     // The stub world needs the synced biome registry size for direct biome palettes.
-    let biomes = driver.connection().registries().entries(&haste_protocol::haste_core::Identifier::minecraft("worldgen/biome")).map_or(64, |e| e.len());
+    let biomes = driver
+        .connection()
+        .registries()
+        .entries(&haste_protocol::haste_core::Identifier::minecraft(
+            "worldgen/biome",
+        ))
+        .map_or(64, |e| e.len());
     biome_count.store(biomes, std::sync::atomic::Ordering::Relaxed);
     driver.world = StubWorld::new(&driver.login.dimension, biomes);
     println!(
@@ -62,14 +79,25 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
         if driver.is_closed() {
             // Drain what is left so the disconnect reason is applied.
             let _ = driver.tick();
-            failure = Some(driver.connection().close_reason().unwrap_or_else(|| "connection closed".into()));
+            failure = Some(
+                driver
+                    .connection()
+                    .close_reason()
+                    .unwrap_or_else(|| "connection closed".into()),
+            );
             break;
         }
         if tick % 20 == 0 {
             let stats = driver.stats();
             let pps = stats.packets_in - last_packets;
             last_packets = stats.packets_in;
-            let unknown: Vec<String> = stats.unknown.iter().map(|(id, name, n)| format!("{}={n}", name.as_deref().unwrap_or(&format!("#{id}")))).collect();
+            let unknown: Vec<String> = stats
+                .unknown
+                .iter()
+                .map(|(id, name, n)| {
+                    format!("{}={n}", name.as_deref().unwrap_or(&format!("#{id}")))
+                })
+                .collect();
             let p = driver.player.pos;
             println!(
                 "[{:>3}s] chunks {:>4} sections {:>5} entities {:>4} pos ({:.2}, {:.2}, {:.2}) packets/s {:>5} unknown [{}]{}",

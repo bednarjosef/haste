@@ -34,7 +34,11 @@ fn with_metrics<T>(f: impl FnOnce(&dyn TextMetrics) -> T) -> T {
     }
 }
 
-pub(crate) extern "system" fn text_width<'l>(mut env: EnvUnowned<'l>, _c: JClass<'l>, s: JString<'l>) -> jint {
+pub(crate) extern "system" fn text_width<'l>(
+    mut env: EnvUnowned<'l>,
+    _c: JClass<'l>,
+    s: JString<'l>,
+) -> jint {
     env.with_env(|env| -> jni::errors::Result<jint> {
         if s.is_null() {
             return Ok(0);
@@ -45,8 +49,14 @@ pub(crate) extern "system" fn text_width<'l>(mut env: EnvUnowned<'l>, _c: JClass
     .resolve::<ThrowRuntimeExAndDefault>()
 }
 
-pub(crate) extern "system" fn char_width<'l>(_env: EnvUnowned<'l>, _c: JClass<'l>, cp: jint) -> jint {
-    let Some(ch) = u32::try_from(cp).ok().and_then(char::from_u32) else { return 0 };
+pub(crate) extern "system" fn char_width<'l>(
+    _env: EnvUnowned<'l>,
+    _c: JClass<'l>,
+    cp: jint,
+) -> jint {
+    let Some(ch) = u32::try_from(cp).ok().and_then(char::from_u32) else {
+        return 0;
+    };
     let mut buf = [0u8; 4];
     with_metrics(|m| m.width(ch.encode_utf8(&mut buf)))
 }

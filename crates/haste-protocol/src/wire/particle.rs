@@ -27,7 +27,10 @@ impl Wire for Particle {
         let start = r.peek_rest();
         skip_data(r, name)?;
         let used = start.len() - r.remaining();
-        Ok(Particle { kind, data: r.to_bytes(&start[..used]) })
+        Ok(Particle {
+            kind,
+            data: r.to_bytes(&start[..used]),
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.var_int(self.kind);
@@ -69,7 +72,11 @@ pub fn skip_data(r: &mut Reader<'_>, name: &str) -> DecodeResult<()> {
                     r.var_int()?;
                     r.f32()?;
                 }
-                t => return Err(DecodeError::Invalid(format!("vibration position source type {t}"))),
+                t => {
+                    return Err(DecodeError::Invalid(format!(
+                        "vibration position source type {t}"
+                    )))
+                }
             }
             r.var_int()?;
         }
@@ -81,25 +88,114 @@ pub fn skip_data(r: &mut Reader<'_>, name: &str) -> DecodeResult<()> {
             r.var_int()?;
         }
         // Types the wiki lists as data-less.
-        "angry_villager" | "bubble" | "sulfur_bubbles" | "noxious_gas" | "noxious_gas_cloud" | "cloud"
-        | "copper_fire_flame" | "crit" | "damage_indicator" | "dripping_lava" | "falling_lava" | "landing_lava"
-        | "dripping_water" | "falling_water" | "elder_guardian" | "enchanted_hit" | "enchant" | "end_rod"
-        | "explosion_emitter" | "explosion" | "gust" | "small_gust" | "gust_emitter_large" | "gust_emitter_small"
-        | "sonic_boom" | "firework" | "fishing" | "flame" | "infested" | "cherry_leaves" | "pale_oak_leaves"
-        | "sculk_soul" | "sculk_charge_pop" | "soul_fire_flame" | "soul" | "happy_villager" | "composter" | "heart"
-        | "pause_mob_growth" | "reset_mob_growth" | "item_slime" | "item_cobweb" | "item_snowball" | "large_smoke"
-        | "lava" | "mycelium" | "note" | "poof" | "portal" | "rain" | "smoke" | "white_smoke" | "sneeze" | "spit"
-        | "squid_ink" | "sweep_attack" | "totem_of_undying" | "underwater" | "splash" | "witch" | "bubble_pop"
-        | "current_down" | "bubble_column_up" | "nautilus" | "dolphin" | "campfire_cosy_smoke"
-        | "campfire_signal_smoke" | "dripping_honey" | "falling_honey" | "landing_honey" | "falling_nectar"
-        | "falling_spore_blossom" | "ash" | "crimson_spore" | "warped_spore" | "spore_blossom_air"
-        | "dripping_obsidian_tear" | "falling_obsidian_tear" | "landing_obsidian_tear" | "reverse_portal"
-        | "white_ash" | "small_flame" | "snowflake" | "dripping_dripstone_lava" | "falling_dripstone_lava"
-        | "dripping_dripstone_water" | "falling_dripstone_water" | "glow_squid_ink" | "glow" | "wax_on" | "wax_off"
-        | "electric_spark" | "scrape" | "egg_crack" | "dust_plume" | "trial_spawner_detection"
-        | "trial_spawner_detection_ominous" | "vault_connection" | "ominous_spawning" | "raid_omen" | "trial_omen"
-        | "firefly" | "sulfur_cube_goo" => {}
-        _ => return Err(DecodeError::Invalid(format!("particle {name} data layout not determined"))),
+        "angry_villager"
+        | "bubble"
+        | "sulfur_bubbles"
+        | "noxious_gas"
+        | "noxious_gas_cloud"
+        | "cloud"
+        | "copper_fire_flame"
+        | "crit"
+        | "damage_indicator"
+        | "dripping_lava"
+        | "falling_lava"
+        | "landing_lava"
+        | "dripping_water"
+        | "falling_water"
+        | "elder_guardian"
+        | "enchanted_hit"
+        | "enchant"
+        | "end_rod"
+        | "explosion_emitter"
+        | "explosion"
+        | "gust"
+        | "small_gust"
+        | "gust_emitter_large"
+        | "gust_emitter_small"
+        | "sonic_boom"
+        | "firework"
+        | "fishing"
+        | "flame"
+        | "infested"
+        | "cherry_leaves"
+        | "pale_oak_leaves"
+        | "sculk_soul"
+        | "sculk_charge_pop"
+        | "soul_fire_flame"
+        | "soul"
+        | "happy_villager"
+        | "composter"
+        | "heart"
+        | "pause_mob_growth"
+        | "reset_mob_growth"
+        | "item_slime"
+        | "item_cobweb"
+        | "item_snowball"
+        | "large_smoke"
+        | "lava"
+        | "mycelium"
+        | "note"
+        | "poof"
+        | "portal"
+        | "rain"
+        | "smoke"
+        | "white_smoke"
+        | "sneeze"
+        | "spit"
+        | "squid_ink"
+        | "sweep_attack"
+        | "totem_of_undying"
+        | "underwater"
+        | "splash"
+        | "witch"
+        | "bubble_pop"
+        | "current_down"
+        | "bubble_column_up"
+        | "nautilus"
+        | "dolphin"
+        | "campfire_cosy_smoke"
+        | "campfire_signal_smoke"
+        | "dripping_honey"
+        | "falling_honey"
+        | "landing_honey"
+        | "falling_nectar"
+        | "falling_spore_blossom"
+        | "ash"
+        | "crimson_spore"
+        | "warped_spore"
+        | "spore_blossom_air"
+        | "dripping_obsidian_tear"
+        | "falling_obsidian_tear"
+        | "landing_obsidian_tear"
+        | "reverse_portal"
+        | "white_ash"
+        | "small_flame"
+        | "snowflake"
+        | "dripping_dripstone_lava"
+        | "falling_dripstone_lava"
+        | "dripping_dripstone_water"
+        | "falling_dripstone_water"
+        | "glow_squid_ink"
+        | "glow"
+        | "wax_on"
+        | "wax_off"
+        | "electric_spark"
+        | "scrape"
+        | "egg_crack"
+        | "dust_plume"
+        | "trial_spawner_detection"
+        | "trial_spawner_detection_ominous"
+        | "vault_connection"
+        | "ominous_spawning"
+        | "raid_omen"
+        | "trial_omen"
+        | "firefly"
+        | "sulfur_cube_goo" => {}
+        _ => {
+            return Err(DecodeError::Invalid(format!(
+                "particle {name} data layout not determined"
+            )))
+        }
     }
     Ok(())
 }
@@ -111,16 +207,33 @@ mod tests {
 
     #[test]
     fn particles_round_trip_and_skip() {
-        let t = ProtocolTables::default().with_particles_for_tests(&[(0, "minecraft:angry_villager"), (1, "minecraft:block"), (2, "minecraft:dust"), (3, "minecraft:red_poplar_leaves")]);
+        let t = ProtocolTables::default().with_particles_for_tests(&[
+            (0, "minecraft:angry_villager"),
+            (1, "minecraft:block"),
+            (2, "minecraft:dust"),
+            (3, "minecraft:red_poplar_leaves"),
+        ]);
         let mut w = Writer::new();
-        w.write(&Particle { kind: 1, data: Bytes::from_static(&[0x81, 0x01]) });
-        w.write(&Particle { kind: 2, data: Bytes::from_static(&[0, 0, 0, 255, 0x3f, 0x80, 0, 0]) });
-        w.write(&Particle { kind: 0, data: Bytes::new() });
+        w.write(&Particle {
+            kind: 1,
+            data: Bytes::from_static(&[0x81, 0x01]),
+        });
+        w.write(&Particle {
+            kind: 2,
+            data: Bytes::from_static(&[0, 0, 0, 255, 0x3f, 0x80, 0, 0]),
+        });
+        w.write(&Particle {
+            kind: 0,
+            data: Bytes::new(),
+        });
         let mut r = Reader::new(&w.buf).with_tables(&t);
         assert_eq!(r.read::<Particle>().unwrap().data.len(), 2);
         assert_eq!(r.read::<Particle>().unwrap().data.len(), 8);
         assert_eq!(r.read::<Particle>().unwrap().kind, 0);
         r.finish().unwrap();
-        assert!(Reader::new(&[3]).with_tables(&t).read::<Particle>().is_err());
+        assert!(Reader::new(&[3])
+            .with_tables(&t)
+            .read::<Particle>()
+            .is_err());
     }
 }

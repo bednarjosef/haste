@@ -124,7 +124,11 @@ pub struct Dispatch<T> {
 
 impl<T> std::fmt::Debug for Dispatch<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Dispatch({} ids)", self.by_id.iter().filter(|x| x.is_some()).count())
+        write!(
+            f,
+            "Dispatch({} ids)",
+            self.by_id.iter().filter(|x| x.is_some()).count()
+        )
     }
 }
 
@@ -141,7 +145,12 @@ pub enum Decoded<T> {
 impl<T> Dispatch<T> {
     /// Builds the table for `state`/`dir` from the ids. Names listed in
     /// `packets.json` without a decoder in `decoders` stay `Unknown`.
-    pub fn new(ids: &PacketIds, state: State, dir: Direction, decoders: &'static [(&'static str, DecodeFn<T>)]) -> Self {
+    pub fn new(
+        ids: &PacketIds,
+        state: State,
+        dir: Direction,
+        decoders: &'static [(&'static str, DecodeFn<T>)],
+    ) -> Self {
         let mut by_id = Vec::new();
         for (id, name) in ids.iter(state, dir) {
             if let Some((n, f)) = decoders.iter().find(|(n, _)| *n == name) {
@@ -157,12 +166,18 @@ impl<T> Dispatch<T> {
 
     /// The packet name for an id, if it has a decoder.
     pub fn name(&self, id: i32) -> Option<&'static str> {
-        usize::try_from(id).ok().and_then(|i| self.by_id.get(i).copied().flatten()).map(|(n, _)| n)
+        usize::try_from(id)
+            .ok()
+            .and_then(|i| self.by_id.get(i).copied().flatten())
+            .map(|(n, _)| n)
     }
 
     /// Decodes `body` as packet `id`.
     pub fn decode(&self, id: i32, body: &Bytes, tables: Option<&ProtocolTables>) -> Decoded<T> {
-        let Some((name, f)) = usize::try_from(id).ok().and_then(|i| self.by_id.get(i).copied().flatten()) else {
+        let Some((name, f)) = usize::try_from(id)
+            .ok()
+            .and_then(|i| self.by_id.get(i).copied().flatten())
+        else {
             return Decoded::NoDecoder;
         };
         let mut r = Reader::from_bytes(body);
@@ -177,7 +192,12 @@ impl<T> Dispatch<T> {
 }
 
 /// Encodes a packet body with its id from the table.
-pub fn encode_with_id<P: Packet>(ids: &PacketIds, state: State, dir: Direction, p: &P) -> Option<Bytes> {
+pub fn encode_with_id<P: Packet>(
+    ids: &PacketIds,
+    state: State,
+    dir: Direction,
+    p: &P,
+) -> Option<Bytes> {
     let id = ids.id(state, dir, P::NAME)?;
     let mut w = Writer::new();
     w.var_int(id);

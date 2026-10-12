@@ -137,14 +137,26 @@ mod tests {
     #[test]
     fn round_trips() {
         round_trip(&ClientInformation::defaults("en_us", 10));
-        round_trip(&CookieResponse { key: Identifier::minecraft("k"), payload: None });
-        round_trip(&CustomPayload { channel: Identifier::minecraft("brand"), data: Bytes::from_static(b"\x05haste") });
+        round_trip(&CookieResponse {
+            key: Identifier::minecraft("k"),
+            payload: None,
+        });
+        round_trip(&CustomPayload {
+            channel: Identifier::minecraft("brand"),
+            data: Bytes::from_static(b"\x05haste"),
+        });
         round_trip(&FinishConfiguration {});
         round_trip(&KeepAlive { id: 1 });
         round_trip(&Pong { id: 2 });
-        round_trip(&ResourcePack { id: Uuid::from_u128(3), result: 1 });
+        round_trip(&ResourcePack {
+            id: Uuid::from_u128(3),
+            result: 1,
+        });
         round_trip(&SelectKnownPacks { packs: vec![] });
-        round_trip(&CustomClickAction { id: Identifier::minecraft("a"), payload: Bytes::from_static(&[0]) });
+        round_trip(&CustomClickAction {
+            id: Identifier::minecraft("a"),
+            payload: Bytes::from_static(&[0]),
+        });
         round_trip(&AcceptCodeOfConduct {});
     }
 }

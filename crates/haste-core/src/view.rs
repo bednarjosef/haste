@@ -45,7 +45,10 @@ pub trait BlockPhysics {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum FluidKind { Water, Lava }
+pub enum FluidKind {
+    Water,
+    Lava,
+}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct FluidInfo {
@@ -58,7 +61,9 @@ pub struct FluidInfo {
 /// (model baking) and anything else that needs names without depending on `haste-data`.
 pub trait BlockStateTable {
     fn len(&self) -> usize;
-    fn is_empty(&self) -> bool { self.len() == 0 }
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     fn block_of(&self, state: BlockStateId) -> &crate::Identifier;
     /// Property name/value pairs, sorted by name (owned: implementations intern names and values).
     /// Startup/baking use only; hot paths use `property_value`.

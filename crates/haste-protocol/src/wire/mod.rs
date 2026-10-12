@@ -77,12 +77,20 @@ pub struct Reader<'a> {
 impl<'a> Reader<'a> {
     /// Reads from a plain slice; byte fields are copied out.
     pub fn new(buf: &'a [u8]) -> Self {
-        Self { buf, src: None, tables: None }
+        Self {
+            buf,
+            src: None,
+            tables: None,
+        }
     }
 
     /// Reads from a `Bytes`; byte fields are zero-copy slices of it.
     pub fn from_bytes(b: &'a Bytes) -> Self {
-        Self { buf: b, src: Some(b), tables: None }
+        Self {
+            buf: b,
+            src: Some(b),
+            tables: None,
+        }
     }
 
     /// Attaches registry tables (needed to decode item stacks with data
@@ -109,13 +117,20 @@ impl<'a> Reader<'a> {
 
     /// Fails with [`DecodeError::Trailing`] if bytes are left.
     pub fn finish(&self) -> DecodeResult<()> {
-        if self.buf.is_empty() { Ok(()) } else { Err(DecodeError::Trailing(self.buf.len())) }
+        if self.buf.is_empty() {
+            Ok(())
+        } else {
+            Err(DecodeError::Trailing(self.buf.len()))
+        }
     }
 
     /// Consumes `len` bytes.
     pub fn take(&mut self, len: usize) -> DecodeResult<&'a [u8]> {
         if self.buf.len() < len {
-            return Err(DecodeError::Eof { needed: len, remaining: self.buf.len() });
+            return Err(DecodeError::Eof {
+                needed: len,
+                remaining: self.buf.len(),
+            });
         }
         let (head, tail) = self.buf.split_at(len);
         self.buf = tail;
@@ -147,9 +162,13 @@ impl<'a> Reader<'a> {
     }
 
     /// Unsigned byte.
-    pub fn u8(&mut self) -> DecodeResult<u8> { Ok(self.take(1)?[0]) }
+    pub fn u8(&mut self) -> DecodeResult<u8> {
+        Ok(self.take(1)?[0])
+    }
     /// Signed byte.
-    pub fn i8(&mut self) -> DecodeResult<i8> { Ok(self.take(1)?[0] as i8) }
+    pub fn i8(&mut self) -> DecodeResult<i8> {
+        Ok(self.take(1)?[0] as i8)
+    }
     /// Boolean. Strict: bytes other than 0 and 1 are an error. Vanilla
     /// accepts any non-zero byte, but servers only send 0/1, so a stray value
     /// almost always means we misread the layout.
@@ -161,21 +180,37 @@ impl<'a> Reader<'a> {
         }
     }
     /// Big-endian u16.
-    pub fn u16(&mut self) -> DecodeResult<u16> { Ok(u16::from_be_bytes(self.array()?)) }
+    pub fn u16(&mut self) -> DecodeResult<u16> {
+        Ok(u16::from_be_bytes(self.array()?))
+    }
     /// Big-endian i16.
-    pub fn i16(&mut self) -> DecodeResult<i16> { Ok(i16::from_be_bytes(self.array()?)) }
+    pub fn i16(&mut self) -> DecodeResult<i16> {
+        Ok(i16::from_be_bytes(self.array()?))
+    }
     /// Big-endian i32 (`Int`).
-    pub fn i32(&mut self) -> DecodeResult<i32> { Ok(i32::from_be_bytes(self.array()?)) }
+    pub fn i32(&mut self) -> DecodeResult<i32> {
+        Ok(i32::from_be_bytes(self.array()?))
+    }
     /// Big-endian u32.
-    pub fn u32(&mut self) -> DecodeResult<u32> { Ok(u32::from_be_bytes(self.array()?)) }
+    pub fn u32(&mut self) -> DecodeResult<u32> {
+        Ok(u32::from_be_bytes(self.array()?))
+    }
     /// Big-endian i64 (`Long`).
-    pub fn i64(&mut self) -> DecodeResult<i64> { Ok(i64::from_be_bytes(self.array()?)) }
+    pub fn i64(&mut self) -> DecodeResult<i64> {
+        Ok(i64::from_be_bytes(self.array()?))
+    }
     /// Big-endian u64.
-    pub fn u64(&mut self) -> DecodeResult<u64> { Ok(u64::from_be_bytes(self.array()?)) }
+    pub fn u64(&mut self) -> DecodeResult<u64> {
+        Ok(u64::from_be_bytes(self.array()?))
+    }
     /// IEEE float.
-    pub fn f32(&mut self) -> DecodeResult<f32> { Ok(f32::from_be_bytes(self.array()?)) }
+    pub fn f32(&mut self) -> DecodeResult<f32> {
+        Ok(f32::from_be_bytes(self.array()?))
+    }
     /// IEEE double.
-    pub fn f64(&mut self) -> DecodeResult<f64> { Ok(f64::from_be_bytes(self.array()?)) }
+    pub fn f64(&mut self) -> DecodeResult<f64> {
+        Ok(f64::from_be_bytes(self.array()?))
+    }
 
     /// VarInt.
     pub fn var_int(&mut self) -> DecodeResult<i32> {
@@ -202,14 +237,19 @@ impl<'a> Reader<'a> {
     pub fn string_max(&mut self, max: usize) -> DecodeResult<String> {
         let len = self.len_prefix(max.saturating_mul(3))?;
         let bytes = self.take(len)?;
-        let s = std::str::from_utf8(bytes).map_err(|_| DecodeError::Invalid("string is not UTF-8".into()))?;
+        let s = std::str::from_utf8(bytes)
+            .map_err(|_| DecodeError::Invalid("string is not UTF-8".into()))?;
         if s.len() > max && s.encode_utf16().nth(max).is_some() {
-            return Err(DecodeError::TooLarge(format!("string longer than {max} chars")));
+            return Err(DecodeError::TooLarge(format!(
+                "string longer than {max} chars"
+            )));
         }
         Ok(s.to_owned())
     }
     /// String (32767).
-    pub fn string(&mut self) -> DecodeResult<String> { self.string_max(MAX_STRING) }
+    pub fn string(&mut self) -> DecodeResult<String> {
+        self.string_max(MAX_STRING)
+    }
 
     /// Identifier (`ns:path`, namespace defaults to `minecraft`).
     pub fn identifier(&mut self) -> DecodeResult<Identifier> {
@@ -218,13 +258,19 @@ impl<'a> Reader<'a> {
     }
 
     /// UUID (two big-endian longs).
-    pub fn uuid(&mut self) -> DecodeResult<Uuid> { Ok(Uuid::from_bytes(self.array()?)) }
+    pub fn uuid(&mut self) -> DecodeResult<Uuid> {
+        Ok(Uuid::from_bytes(self.array()?))
+    }
 
     /// Position (packed long).
-    pub fn block_pos(&mut self) -> DecodeResult<BlockPos> { Ok(BlockPos::from_packed(self.i64()?)) }
+    pub fn block_pos(&mut self) -> DecodeResult<BlockPos> {
+        Ok(BlockPos::from_packed(self.i64()?))
+    }
 
     /// Angle: 1/256 of a turn, returned in degrees in `[0, 360)`.
-    pub fn angle(&mut self) -> DecodeResult<f32> { Ok(self.u8()? as f32 * (360.0 / 256.0)) }
+    pub fn angle(&mut self) -> DecodeResult<f32> {
+        Ok(self.u8()? as f32 * (360.0 / 256.0))
+    }
 
     /// Prefixed array of bytes, at most `max` long.
     pub fn byte_array(&mut self, max: usize) -> DecodeResult<Bytes> {
@@ -234,12 +280,23 @@ impl<'a> Reader<'a> {
     }
 
     /// Prefixed Optional.
-    pub fn option<T>(&mut self, f: impl FnOnce(&mut Self) -> DecodeResult<T>) -> DecodeResult<Option<T>> {
-        if self.bool()? { Ok(Some(f(self)?)) } else { Ok(None) }
+    pub fn option<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> DecodeResult<T>,
+    ) -> DecodeResult<Option<T>> {
+        if self.bool()? {
+            Ok(Some(f(self)?))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Prefixed Array with at most `max` elements.
-    pub fn list<T>(&mut self, max: usize, mut f: impl FnMut(&mut Self) -> DecodeResult<T>) -> DecodeResult<Vec<T>> {
+    pub fn list<T>(
+        &mut self,
+        max: usize,
+        mut f: impl FnMut(&mut Self) -> DecodeResult<T>,
+    ) -> DecodeResult<Vec<T>> {
         let n = self.len_prefix(max)?;
         // Never trust the count for the allocation.
         let mut v = Vec::with_capacity(n.min(self.remaining()));
@@ -286,7 +343,10 @@ impl<'a> Reader<'a> {
         NbtTag::skip_data(&mut helper, id)?;
         let used = cursor.position() as usize;
         if used > all.len() {
-            return Err(DecodeError::Eof { needed: used, remaining: all.len() });
+            return Err(DecodeError::Eof {
+                needed: used,
+                remaining: all.len(),
+            });
         }
         Ok(used)
     }
@@ -318,7 +378,10 @@ impl<'a> Reader<'a> {
         match self.nbt_tag()? {
             None => Ok(None),
             Some(NbtTag::Compound(c)) => Ok(Some(c)),
-            Some(other) => Err(DecodeError::Invalid(format!("expected NBT compound, got tag id {}", other.get_type_id()))),
+            Some(other) => Err(DecodeError::Invalid(format!(
+                "expected NBT compound, got tag id {}",
+                other.get_type_id()
+            ))),
         }
     }
 
@@ -353,7 +416,11 @@ impl<'a> Reader<'a> {
         fn unpack(v: u64) -> f64 {
             ((v & 32767) as f64).min(32766.0) * 2.0 / 32766.0 - 1.0
         }
-        Ok(DVec3::new(unpack(packed >> 3) * scale, unpack(packed >> 18) * scale, unpack(packed >> 33) * scale))
+        Ok(DVec3::new(
+            unpack(packed >> 3) * scale,
+            unpack(packed >> 18) * scale,
+            unpack(packed >> 33) * scale,
+        ))
     }
 
     /// Reads a value with its canonical encoding.
@@ -377,33 +444,61 @@ pub struct Writer {
 
 impl Writer {
     /// An empty writer.
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
     /// The bytes written.
-    pub fn into_inner(self) -> Vec<u8> { self.buf }
+    pub fn into_inner(self) -> Vec<u8> {
+        self.buf
+    }
     /// Raw bytes.
-    pub fn bytes(&mut self, b: &[u8]) { self.buf.extend_from_slice(b); }
+    pub fn bytes(&mut self, b: &[u8]) {
+        self.buf.extend_from_slice(b);
+    }
     /// Unsigned byte.
-    pub fn u8(&mut self, v: u8) { self.buf.push(v); }
+    pub fn u8(&mut self, v: u8) {
+        self.buf.push(v);
+    }
     /// Signed byte.
-    pub fn i8(&mut self, v: i8) { self.buf.push(v as u8); }
+    pub fn i8(&mut self, v: i8) {
+        self.buf.push(v as u8);
+    }
     /// Boolean.
-    pub fn bool(&mut self, v: bool) { self.buf.push(v as u8); }
+    pub fn bool(&mut self, v: bool) {
+        self.buf.push(v as u8);
+    }
     /// Big-endian u16.
-    pub fn u16(&mut self, v: u16) { self.bytes(&v.to_be_bytes()); }
+    pub fn u16(&mut self, v: u16) {
+        self.bytes(&v.to_be_bytes());
+    }
     /// Big-endian i16.
-    pub fn i16(&mut self, v: i16) { self.bytes(&v.to_be_bytes()); }
+    pub fn i16(&mut self, v: i16) {
+        self.bytes(&v.to_be_bytes());
+    }
     /// Big-endian i32.
-    pub fn i32(&mut self, v: i32) { self.bytes(&v.to_be_bytes()); }
+    pub fn i32(&mut self, v: i32) {
+        self.bytes(&v.to_be_bytes());
+    }
     /// Big-endian u32.
-    pub fn u32(&mut self, v: u32) { self.bytes(&v.to_be_bytes()); }
+    pub fn u32(&mut self, v: u32) {
+        self.bytes(&v.to_be_bytes());
+    }
     /// Big-endian i64.
-    pub fn i64(&mut self, v: i64) { self.bytes(&v.to_be_bytes()); }
+    pub fn i64(&mut self, v: i64) {
+        self.bytes(&v.to_be_bytes());
+    }
     /// Big-endian u64.
-    pub fn u64(&mut self, v: u64) { self.bytes(&v.to_be_bytes()); }
+    pub fn u64(&mut self, v: u64) {
+        self.bytes(&v.to_be_bytes());
+    }
     /// Float.
-    pub fn f32(&mut self, v: f32) { self.bytes(&v.to_be_bytes()); }
+    pub fn f32(&mut self, v: f32) {
+        self.bytes(&v.to_be_bytes());
+    }
     /// Double.
-    pub fn f64(&mut self, v: f64) { self.bytes(&v.to_be_bytes()); }
+    pub fn f64(&mut self, v: f64) {
+        self.bytes(&v.to_be_bytes());
+    }
     /// VarInt.
     pub fn var_int(&mut self, v: i32) {
         let mut v = v as u32;
@@ -423,20 +518,30 @@ impl Writer {
         self.buf.push(v as u8);
     }
     /// A length as VarInt.
-    pub fn len_prefix(&mut self, n: usize) { self.var_int(n as i32); }
+    pub fn len_prefix(&mut self, n: usize) {
+        self.var_int(n as i32);
+    }
     /// String.
     pub fn string(&mut self, s: &str) {
         self.len_prefix(s.len());
         self.bytes(s.as_bytes());
     }
     /// Identifier.
-    pub fn identifier(&mut self, id: &Identifier) { self.string(&id.to_string()); }
+    pub fn identifier(&mut self, id: &Identifier) {
+        self.string(&id.to_string());
+    }
     /// UUID.
-    pub fn uuid(&mut self, u: &Uuid) { self.bytes(u.as_bytes()); }
+    pub fn uuid(&mut self, u: &Uuid) {
+        self.bytes(u.as_bytes());
+    }
     /// Position.
-    pub fn block_pos(&mut self, p: &BlockPos) { self.i64(p.to_packed()); }
+    pub fn block_pos(&mut self, p: &BlockPos) {
+        self.i64(p.to_packed());
+    }
     /// Angle from degrees (wraps).
-    pub fn angle(&mut self, deg: f32) { self.u8((deg * 256.0 / 360.0).floor() as i32 as u8); }
+    pub fn angle(&mut self, deg: f32) {
+        self.u8((deg * 256.0 / 360.0).floor() as i32 as u8);
+    }
     /// Prefixed byte array.
     pub fn byte_array(&mut self, b: &[u8]) {
         self.len_prefix(b.len());
@@ -481,7 +586,9 @@ impl Writer {
                 let mut w = crate::nbt::serializer::NbtWriteHelperJava::new(&mut self.buf);
                 // Writing into a Vec only fails for strings over 65535 bytes,
                 // which we never build; treat it as a programming error.
-                t.clone().serialize(&mut w).expect("NBT serialisation into a Vec");
+                t.clone()
+                    .serialize(&mut w)
+                    .expect("NBT serialisation into a Vec");
             }
         }
     }
@@ -515,7 +622,8 @@ impl Writer {
             ((v * 0.5 + 0.5) * 32766.0).round() as u64
         }
         let s = scale as f64;
-        let packed = (pack(v.z / s) << 33) | (pack(v.y / s) << 18) | (pack(v.x / s) << 3) | packed_scale;
+        let packed =
+            (pack(v.z / s) << 33) | (pack(v.y / s) << 18) | (pack(v.x / s) << 3) | packed_scale;
         self.u8(packed as u8);
         self.u8((packed >> 8) as u8);
         self.u32((packed >> 16) as u32);
@@ -553,15 +661,23 @@ pub trait Codec<T> {
 /// The canonical encoding ([`Wire`]).
 pub struct Native;
 impl<T: Wire> Codec<T> for Native {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<T> { T::read(r) }
-    fn write(v: &T, w: &mut Writer) { v.write(w) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<T> {
+        T::read(r)
+    }
+    fn write(v: &T, w: &mut Writer) {
+        v.write(w)
+    }
 }
 
 macro_rules! prim {
     ($t:ty, $r:ident, $w:ident) => {
         impl Wire for $t {
-            fn read(r: &mut Reader<'_>) -> DecodeResult<Self> { r.$r() }
-            fn write(&self, w: &mut Writer) { w.$w(*self) }
+            fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+                r.$r()
+            }
+            fn write(&self, w: &mut Writer) {
+                w.$w(*self)
+            }
         }
     };
 }
@@ -576,28 +692,50 @@ prim!(f32, f32, f32);
 prim!(f64, f64, f64);
 
 impl Wire for String {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> { r.string() }
-    fn write(&self, w: &mut Writer) { w.string(self) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        r.string()
+    }
+    fn write(&self, w: &mut Writer) {
+        w.string(self)
+    }
 }
 impl Wire for Identifier {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> { r.identifier() }
-    fn write(&self, w: &mut Writer) { w.identifier(self) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        r.identifier()
+    }
+    fn write(&self, w: &mut Writer) {
+        w.identifier(self)
+    }
 }
 impl Wire for Uuid {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> { r.uuid() }
-    fn write(&self, w: &mut Writer) { w.uuid(self) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        r.uuid()
+    }
+    fn write(&self, w: &mut Writer) {
+        w.uuid(self)
+    }
 }
 impl Wire for BlockPos {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> { r.block_pos() }
-    fn write(&self, w: &mut Writer) { w.block_pos(self) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        r.block_pos()
+    }
+    fn write(&self, w: &mut Writer) {
+        w.block_pos(self)
+    }
 }
 impl Wire for Component {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> { r.component() }
-    fn write(&self, w: &mut Writer) { w.component(self) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        r.component()
+    }
+    fn write(&self, w: &mut Writer) {
+        w.component(self)
+    }
 }
 /// Three doubles.
 impl Wire for DVec3 {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> { Ok(DVec3::new(r.f64()?, r.f64()?, r.f64()?)) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        Ok(DVec3::new(r.f64()?, r.f64()?, r.f64()?))
+    }
     fn write(&self, w: &mut Writer) {
         w.f64(self.x);
         w.f64(self.y);
@@ -606,89 +744,149 @@ impl Wire for DVec3 {
 }
 /// Network NBT; `TAG_End` decodes to `NbtTag::End`.
 impl Wire for NbtTag {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> { Ok(r.nbt_tag()?.unwrap_or(NbtTag::End)) }
-    fn write(&self, w: &mut Writer) { w.nbt_tag(Some(self)) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        Ok(r.nbt_tag()?.unwrap_or(NbtTag::End))
+    }
+    fn write(&self, w: &mut Writer) {
+        w.nbt_tag(Some(self))
+    }
 }
 /// Prefixed Optional.
 impl<T: Wire> Wire for Option<T> {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> { r.option(T::read) }
-    fn write(&self, w: &mut Writer) { w.option(self, |w, v| v.write(w)) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        r.option(T::read)
+    }
+    fn write(&self, w: &mut Writer) {
+        w.option(self, |w, v| v.write(w))
+    }
 }
 /// Prefixed Array.
 impl<T: Wire> Wire for Vec<T> {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> { r.list(MAX_LIST, T::read) }
-    fn write(&self, w: &mut Writer) { w.list(self, |w, v| v.write(w)) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        r.list(MAX_LIST, T::read)
+    }
+    fn write(&self, w: &mut Writer) {
+        w.list(self, |w, v| v.write(w))
+    }
 }
 
 /// VarInt encoding of an `i32` (or `u32`).
 pub struct VarInt;
 impl Codec<i32> for VarInt {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<i32> { r.var_int() }
-    fn write(v: &i32, w: &mut Writer) { w.var_int(*v) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<i32> {
+        r.var_int()
+    }
+    fn write(v: &i32, w: &mut Writer) {
+        w.var_int(*v)
+    }
 }
 impl Codec<u32> for VarInt {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<u32> { Ok(r.var_int()? as u32) }
-    fn write(v: &u32, w: &mut Writer) { w.var_int(*v as i32) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<u32> {
+        Ok(r.var_int()? as u32)
+    }
+    fn write(v: &u32, w: &mut Writer) {
+        w.var_int(*v as i32)
+    }
 }
 /// VarLong encoding of an `i64`.
 pub struct VarLong;
 impl Codec<i64> for VarLong {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<i64> { r.var_long() }
-    fn write(v: &i64, w: &mut Writer) { w.var_long(*v) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<i64> {
+        r.var_long()
+    }
+    fn write(v: &i64, w: &mut Writer) {
+        w.var_long(*v)
+    }
 }
 /// Angle byte encoding of degrees.
 pub struct Angle;
 impl Codec<f32> for Angle {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<f32> { r.angle() }
-    fn write(v: &f32, w: &mut Writer) { w.angle(*v) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<f32> {
+        r.angle()
+    }
+    fn write(v: &f32, w: &mut Writer) {
+        w.angle(*v)
+    }
 }
 /// LpVec3 encoding of a vector.
 pub struct LpVec3;
 impl Codec<DVec3> for LpVec3 {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<DVec3> { r.lp_vec3() }
-    fn write(v: &DVec3, w: &mut Writer) { w.lp_vec3(*v) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<DVec3> {
+        r.lp_vec3()
+    }
+    fn write(v: &DVec3, w: &mut Writer) {
+        w.lp_vec3(*v)
+    }
 }
 /// JSON string encoding of a text component.
 pub struct Json;
 impl Codec<Component> for Json {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<Component> { r.json_component() }
-    fn write(v: &Component, w: &mut Writer) { w.json_component(v) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Component> {
+        r.json_component()
+    }
+    fn write(v: &Component, w: &mut Writer) {
+        w.json_component(v)
+    }
 }
 /// Everything up to the end of the packet, raw.
 pub struct Rest;
 impl Codec<Bytes> for Rest {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<Bytes> { Ok(r.rest()) }
-    fn write(v: &Bytes, w: &mut Writer) { w.bytes(v) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Bytes> {
+        Ok(r.rest())
+    }
+    fn write(v: &Bytes, w: &mut Writer) {
+        w.bytes(v)
+    }
 }
 /// Prefixed array of bytes.
 pub struct ByteArray;
 impl Codec<Bytes> for ByteArray {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<Bytes> { r.byte_array(crate::transport::MAX_PACKET_DATA_SIZE) }
-    fn write(v: &Bytes, w: &mut Writer) { w.byte_array(v) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Bytes> {
+        r.byte_array(crate::transport::MAX_PACKET_DATA_SIZE)
+    }
+    fn write(v: &Bytes, w: &mut Writer) {
+        w.byte_array(v)
+    }
 }
 /// One network NBT value kept as raw bytes.
 pub struct RawNbt;
 impl Codec<Bytes> for RawNbt {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<Bytes> { r.nbt_raw() }
-    fn write(v: &Bytes, w: &mut Writer) { w.bytes(v) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Bytes> {
+        r.nbt_raw()
+    }
+    fn write(v: &Bytes, w: &mut Writer) {
+        w.bytes(v)
+    }
 }
 /// BitSet (prefixed longs).
 pub struct BitSet;
 impl Codec<Vec<u64>> for BitSet {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<Vec<u64>> { r.bit_set() }
-    fn write(v: &Vec<u64>, w: &mut Writer) { w.bit_set(v) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Vec<u64>> {
+        r.bit_set()
+    }
+    fn write(v: &Vec<u64>, w: &mut Writer) {
+        w.bit_set(v)
+    }
 }
 /// Prefixed Array with an element codec.
 pub struct List<C>(std::marker::PhantomData<C>);
 impl<T, C: Codec<T>> Codec<Vec<T>> for List<C> {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<Vec<T>> { r.list(MAX_LIST, C::read) }
-    fn write(v: &Vec<T>, w: &mut Writer) { w.list(v, |w, x| C::write(x, w)) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Vec<T>> {
+        r.list(MAX_LIST, C::read)
+    }
+    fn write(v: &Vec<T>, w: &mut Writer) {
+        w.list(v, |w, x| C::write(x, w))
+    }
 }
 /// Prefixed Optional with an element codec.
 pub struct Opt<C>(std::marker::PhantomData<C>);
 impl<T, C: Codec<T>> Codec<Option<T>> for Opt<C> {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<Option<T>> { r.option(C::read) }
-    fn write(v: &Option<T>, w: &mut Writer) { w.option(v, |w, x| C::write(x, w)) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Option<T>> {
+        r.option(C::read)
+    }
+    fn write(v: &Option<T>, w: &mut Writer) {
+        w.option(v, |w, x| C::write(x, w))
+    }
 }
 
 /// `ID or X`: a registry reference (`Id(n)`, sent as n+1) or an inline value.
@@ -702,7 +900,11 @@ pub enum IdOr<T> {
 impl<T: Wire> Wire for IdOr<T> {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
         let id = r.var_int()?;
-        if id == 0 { Ok(IdOr::Inline(T::read(r)?)) } else { Ok(IdOr::Id(id - 1)) }
+        if id == 0 {
+            Ok(IdOr::Inline(T::read(r)?))
+        } else {
+            Ok(IdOr::Id(id - 1))
+        }
     }
     fn write(&self, w: &mut Writer) {
         match self {
@@ -763,7 +965,12 @@ pub struct SoundEvent {
     pub fixed_range: Option<f32>,
 }
 impl Wire for SoundEvent {
-    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> { Ok(Self { name: r.identifier()?, fixed_range: r.read()? }) }
+    fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        Ok(Self {
+            name: r.identifier()?,
+            fixed_range: r.read()?,
+        })
+    }
     fn write(&self, w: &mut Writer) {
         w.identifier(&self.name);
         w.write(&self.fixed_range);
@@ -782,7 +989,11 @@ pub struct ProfileProperty {
 }
 impl Wire for ProfileProperty {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { name: r.string_max(64)?, value: r.string()?, signature: r.option(|r| r.string_max(1024))? })
+        Ok(Self {
+            name: r.string_max(64)?,
+            value: r.string()?,
+            signature: r.option(|r| r.string_max(1024))?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.string(&self.name);
@@ -803,7 +1014,11 @@ pub struct GameProfile {
 }
 impl Wire for GameProfile {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { uuid: r.uuid()?, name: r.string_max(16)?, properties: r.list(16, ProfileProperty::read)? })
+        Ok(Self {
+            uuid: r.uuid()?,
+            name: r.string_max(16)?,
+            properties: r.list(16, ProfileProperty::read)?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.uuid(&self.uuid);
@@ -852,11 +1067,21 @@ impl Wire for ResolvableProfile {
             1 => ResolvableProfileKind::Complete(r.read()?),
             k => return Err(DecodeError::Invalid(format!("resolvable profile kind {k}"))),
         };
-        Ok(Self { profile, body: r.read()?, cape: r.read()?, elytra: r.read()?, model: r.option(|r| r.var_int())? })
+        Ok(Self {
+            profile,
+            body: r.read()?,
+            cape: r.read()?,
+            elytra: r.read()?,
+            model: r.option(|r| r.var_int())?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         match &self.profile {
-            ResolvableProfileKind::Partial { name, uuid, properties } => {
+            ResolvableProfileKind::Partial {
+                name,
+                uuid,
+                properties,
+            } => {
                 w.var_int(0);
                 w.write(name);
                 w.write(uuid);
@@ -885,7 +1110,14 @@ impl Wire for haste_core::chunk::LightData {
         let empty_block_mask = r.bit_set_varlong()?;
         let sky_arrays = r.list(4096, |r| r.byte_array(2048))?;
         let block_arrays = r.list(4096, |r| r.byte_array(2048))?;
-        Ok(Self { sky_mask, block_mask, empty_sky_mask, empty_block_mask, sky_arrays, block_arrays })
+        Ok(Self {
+            sky_mask,
+            block_mask,
+            empty_sky_mask,
+            empty_block_mask,
+            sky_arrays,
+            block_arrays,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.bit_set_varlong(&self.sky_mask);
@@ -927,7 +1159,9 @@ mod tests {
             assert_eq!(varint_bytes(*v), *bytes, "encode {v}");
             assert_eq!(Reader::new(bytes).var_int().unwrap(), *v, "decode {v}");
         }
-        assert!(Reader::new(&[0xff, 0xff, 0xff, 0xff, 0xff, 0x01]).var_int().is_err());
+        assert!(Reader::new(&[0xff, 0xff, 0xff, 0xff, 0xff, 0x01])
+            .var_int()
+            .is_err());
         assert!(Reader::new(&[0x80]).var_int().is_err());
     }
 
@@ -938,10 +1172,22 @@ mod tests {
             (127, &[0x7f]),
             (128, &[0x80, 0x01]),
             (2147483647, &[0xff, 0xff, 0xff, 0xff, 0x07]),
-            (9223372036854775807, &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f]),
-            (-1, &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01]),
-            (-2147483648, &[0x80, 0x80, 0x80, 0x80, 0xf8, 0xff, 0xff, 0xff, 0xff, 0x01]),
-            (-9223372036854775808, &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01]),
+            (
+                9223372036854775807,
+                &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f],
+            ),
+            (
+                -1,
+                &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01],
+            ),
+            (
+                -2147483648,
+                &[0x80, 0x80, 0x80, 0x80, 0xf8, 0xff, 0xff, 0xff, 0xff, 0x01],
+            ),
+            (
+                -9223372036854775808,
+                &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01],
+            ),
         ];
         for (v, bytes) in cases {
             let mut w = Writer::new();
@@ -958,7 +1204,10 @@ mod tests {
         let mut w = Writer::new();
         w.block_pos(&p);
         let v = i64::from_be_bytes(w.buf.clone().try_into().unwrap());
-        assert_eq!(v as u64, 0b0100011000000111011000110010110000010101101101001000001100111111);
+        assert_eq!(
+            v as u64,
+            0b0100011000000111011000110010110000010101101101001000001100111111
+        );
         assert_eq!(Reader::new(&w.buf).block_pos().unwrap(), p);
     }
 
@@ -968,8 +1217,14 @@ mod tests {
         let cases: &[Case] = &[
             ((0.0, 0.0, 0.0), &[0]),
             ((1.0, 0.0, -1.0), &[0xF1, 0xFF, 0x00, 0x00, 0xFF, 0xFF]),
-            ((10.0, 0.2, -5.0), &[0xF6, 0xFF, 0x40, 0x01, 0x05, 0x1F, 0x02]),
-            ((123457.0, 15.071, 0.0), &[0xF5, 0xFF, 0x7F, 0xFF, 0x00, 0x07, 0x90, 0xF1, 0x01]),
+            (
+                (10.0, 0.2, -5.0),
+                &[0xF6, 0xFF, 0x40, 0x01, 0x05, 0x1F, 0x02],
+            ),
+            (
+                (123457.0, 15.071, 0.0),
+                &[0xF5, 0xFF, 0x7F, 0xFF, 0x00, 0x07, 0x90, 0xF1, 0x01],
+            ),
         ];
         for ((x, y, z), bytes) in cases {
             let mut w = Writer::new();
@@ -977,7 +1232,10 @@ mod tests {
             assert_eq!(w.buf, *bytes, "encode {x},{y},{z}");
             let v = Reader::new(bytes).lp_vec3().unwrap();
             let tol = (x.abs().max(y.abs()).max(z.abs())).ceil() / 16000.0 + 1e-9;
-            assert!((v.x - x).abs() <= tol && (v.y - y).abs() <= tol && (v.z - z).abs() <= tol, "{v:?}");
+            assert!(
+                (v.x - x).abs() <= tol && (v.y - y).abs() <= tol && (v.z - z).abs() <= tol,
+                "{v:?}"
+            );
         }
     }
 
@@ -1039,13 +1297,22 @@ mod tests {
     fn id_or_and_id_set() {
         let mut w = Writer::new();
         w.write(&IdOr::<SoundEvent>::Id(4));
-        w.write(&IdOr::Inline(SoundEvent { name: Identifier::minecraft("a"), fixed_range: Some(2.0) }));
+        w.write(&IdOr::Inline(SoundEvent {
+            name: Identifier::minecraft("a"),
+            fixed_range: Some(2.0),
+        }));
         w.write(&IdSet::Tag(Identifier::minecraft("logs")));
         w.write(&IdSet::Ids(vec![1, 2]));
         let mut r = Reader::new(&w.buf);
         assert_eq!(r.read::<IdOr<SoundEvent>>().unwrap(), IdOr::Id(4));
-        assert!(matches!(r.read::<IdOr<SoundEvent>>().unwrap(), IdOr::Inline(_)));
-        assert_eq!(r.read::<IdSet>().unwrap(), IdSet::Tag(Identifier::minecraft("logs")));
+        assert!(matches!(
+            r.read::<IdOr<SoundEvent>>().unwrap(),
+            IdOr::Inline(_)
+        ));
+        assert_eq!(
+            r.read::<IdSet>().unwrap(),
+            IdSet::Tag(Identifier::minecraft("logs"))
+        );
         assert_eq!(r.read::<IdSet>().unwrap(), IdSet::Ids(vec![1, 2]));
         r.finish().unwrap();
     }

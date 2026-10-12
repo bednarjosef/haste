@@ -9,8 +9,8 @@
 
 pub mod attributes;
 pub mod collision;
-pub mod flying;
 pub mod fluids;
+pub mod flying;
 pub mod movement;
 pub mod oracle;
 pub mod replay;
@@ -51,7 +51,10 @@ pub struct PlayerState {
 
 impl PlayerState {
     pub fn at(pos: DVec3) -> Self {
-        Self { pos, ..Default::default() }
+        Self {
+            pos,
+            ..Default::default()
+        }
     }
     /// Current collision box for this state's pose.
     pub fn aabb(&self, attrs: &PlayerAttributes) -> Aabb {

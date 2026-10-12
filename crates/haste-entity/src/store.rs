@@ -183,7 +183,9 @@ impl EntityStore {
 
     pub fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]) {
         let Some(i) = self.slot(id) else { return };
-        let Some(e) = &mut self.slots[i as usize] else { return };
+        let Some(e) = &mut self.slots[i as usize] else {
+            return;
+        };
         e.metadata.apply(entries);
         if let Some(pose) = e.metadata.pose {
             if pose != e.pose {

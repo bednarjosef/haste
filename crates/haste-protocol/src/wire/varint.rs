@@ -485,7 +485,11 @@ mod tests {
             VarInt(*value).encode(&mut out).unwrap();
             assert_eq!(&out, bytes, "encoding {value}");
             let mut r: &[u8] = bytes;
-            assert_eq!(VarInt::decode(&mut r).unwrap().0, *value, "decoding {bytes:?}");
+            assert_eq!(
+                VarInt::decode(&mut r).unwrap().0,
+                *value,
+                "decoding {bytes:?}"
+            );
             assert!(r.is_empty());
         }
     }
@@ -499,7 +503,10 @@ mod tests {
             (128, &[0x80, 0x01]),
             (32_767, &[0xff, 0xff, 0x01]),
             (2_147_483_647, &[0xff, 0xff, 0xff, 0xff, 0x07]),
-            (9_223_372_036_854_775_807, &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f]),
+            (
+                9_223_372_036_854_775_807,
+                &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f],
+            ),
         ];
         for (value, bytes) in cases {
             let mut out = Vec::new();
@@ -523,8 +530,18 @@ mod tests {
     #[test]
     fn accepts_boundary_values() {
         assert_eq!(VarInt::decode(&mut &[0x00][..]).unwrap().0, 0);
-        assert_eq!(VarInt::decode(&mut &[0xFF, 0xFF, 0xFF, 0xFF, 0x0F][..]).unwrap().0, -1);
-        assert_eq!(VarInt::decode(&mut &[0xFF, 0xFF, 0xFF, 0xFF, 0x07][..]).unwrap().0, i32::MAX);
+        assert_eq!(
+            VarInt::decode(&mut &[0xFF, 0xFF, 0xFF, 0xFF, 0x0F][..])
+                .unwrap()
+                .0,
+            -1
+        );
+        assert_eq!(
+            VarInt::decode(&mut &[0xFF, 0xFF, 0xFF, 0xFF, 0x07][..])
+                .unwrap()
+                .0,
+            i32::MAX
+        );
         let mut max_ok = vec![0xFF; 9];
         max_ok.push(0x01);
         assert_eq!(VarLong::decode(&mut &max_ok[..]).unwrap().0, -1);

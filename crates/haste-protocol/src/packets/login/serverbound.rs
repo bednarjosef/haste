@@ -64,11 +64,26 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        round_trip(&Hello { name: "haste".into(), uuid: Uuid::from_u128(5) });
-        round_trip(&Key { shared_secret: Bytes::from_static(&[1; 128]), verify_token: Bytes::from_static(&[2; 128]) });
-        round_trip(&CustomQueryAnswer { message_id: 1, data: None });
-        round_trip(&CustomQueryAnswer { message_id: 1, data: Some(Bytes::from_static(b"ok")) });
+        round_trip(&Hello {
+            name: "haste".into(),
+            uuid: Uuid::from_u128(5),
+        });
+        round_trip(&Key {
+            shared_secret: Bytes::from_static(&[1; 128]),
+            verify_token: Bytes::from_static(&[2; 128]),
+        });
+        round_trip(&CustomQueryAnswer {
+            message_id: 1,
+            data: None,
+        });
+        round_trip(&CustomQueryAnswer {
+            message_id: 1,
+            data: Some(Bytes::from_static(b"ok")),
+        });
         round_trip(&LoginAcknowledged {});
-        round_trip(&CookieResponse { key: Identifier::minecraft("k"), payload: Some(Bytes::from_static(b"v")) });
+        round_trip(&CookieResponse {
+            key: Identifier::minecraft("k"),
+            payload: Some(Bytes::from_static(b"v")),
+        });
     }
 }

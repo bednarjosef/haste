@@ -25,7 +25,13 @@ pub enum State {
 
 impl State {
     /// All states, in protocol order.
-    pub const ALL: [State; 5] = [State::Handshake, State::Status, State::Login, State::Configuration, State::Play];
+    pub const ALL: [State; 5] = [
+        State::Handshake,
+        State::Status,
+        State::Login,
+        State::Configuration,
+        State::Play,
+    ];
 
     /// The key used in `packets.json`.
     pub fn as_str(self) -> &'static str {
@@ -89,18 +95,24 @@ impl PacketIds {
 
     /// Loads from an explicit `packets.json` path.
     pub fn load_from(path: &Path) -> anyhow::Result<PacketIds> {
-        let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
         Self::from_json(&text).map_err(|e| anyhow::anyhow!("parsing {}: {e}", path.display()))
     }
 
     /// Parses the contents of `packets.json`.
     pub fn from_json(text: &str) -> anyhow::Result<PacketIds> {
-        let parsed: HashMap<String, HashMap<String, HashMap<String, Entry>>> = serde_json::from_str(text)?;
+        let parsed: HashMap<String, HashMap<String, HashMap<String, Entry>>> =
+            serde_json::from_str(text)?;
         let mut ids = PacketIds::default();
         for state in State::ALL {
-            let Some(dirs) = parsed.get(state.as_str()) else { continue };
+            let Some(dirs) = parsed.get(state.as_str()) else {
+                continue;
+            };
             for dir in [Direction::Clientbound, Direction::Serverbound] {
-                let Some(entries) = dirs.get(dir.as_str()) else { continue };
+                let Some(entries) = dirs.get(dir.as_str()) else {
+                    continue;
+                };
                 let t = &mut ids.tables[key(state, dir)];
                 for (name, e) in entries {
                     if e.protocol_id < 0 {
@@ -140,7 +152,10 @@ impl PacketIds {
     /// The name of a packet id.
     pub fn name(&self, state: State, dir: Direction, id: i32) -> Option<&str> {
         let t = &self.tables[key(state, dir)];
-        usize::try_from(id).ok().and_then(|i| t.by_id.get(i)).and_then(|n| n.as_deref())
+        usize::try_from(id)
+            .ok()
+            .and_then(|i| t.by_id.get(i))
+            .and_then(|n| n.as_deref())
     }
 
     /// Number of packets in a state/direction.
@@ -155,7 +170,11 @@ impl PacketIds {
 
     /// All `(id, name)` pairs of a state/direction, by id.
     pub fn iter(&self, state: State, dir: Direction) -> impl Iterator<Item = (i32, &str)> {
-        self.tables[key(state, dir)].by_id.iter().enumerate().filter_map(|(i, n)| n.as_deref().map(|n| (i as i32, n)))
+        self.tables[key(state, dir)]
+            .by_id
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| n.as_deref().map(|n| (i as i32, n)))
     }
 }
 
@@ -179,7 +198,8 @@ impl ProtocolTables {
     pub fn load_from(reports: &Path) -> anyhow::Result<ProtocolTables> {
         let packets = PacketIds::load_from(&reports.join("packets.json"))?;
         let reg_path = reports.join("registries.json");
-        let text = std::fs::read_to_string(&reg_path).map_err(|e| anyhow::anyhow!("reading {}: {e}", reg_path.display()))?;
+        let text = std::fs::read_to_string(&reg_path)
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", reg_path.display()))?;
         #[derive(Deserialize)]
         struct Reg {
             entries: HashMap<String, Entry>,
@@ -207,12 +227,20 @@ impl ProtocolTables {
 
     /// Name of a `minecraft:particle_type` id.
     pub fn particle_name(&self, id: i32) -> Option<&str> {
-        usize::try_from(id).ok().and_then(|i| self.particle_types.get(i)).map(String::as_str).filter(|s| !s.is_empty())
+        usize::try_from(id)
+            .ok()
+            .and_then(|i| self.particle_types.get(i))
+            .map(String::as_str)
+            .filter(|s| !s.is_empty())
     }
 
     /// Name of a data component type id.
     pub fn data_component_name(&self, id: i32) -> Option<&str> {
-        usize::try_from(id).ok().and_then(|i| self.data_components.get(i)).map(String::as_str).filter(|s| !s.is_empty())
+        usize::try_from(id)
+            .ok()
+            .and_then(|i| self.data_components.get(i))
+            .map(String::as_str)
+            .filter(|s| !s.is_empty())
     }
 
     /// Replaces the packet ids (tests and tools).
@@ -256,15 +284,35 @@ mod tests {
         let json = r#"{"login":{"clientbound":{"minecraft:hello":{"protocol_id":1},"minecraft:login_compression":{"protocol_id":3}},
                        "serverbound":{"minecraft:hello":{"protocol_id":0}}}}"#;
         let ids = PacketIds::from_json(json).unwrap();
-        assert_eq!(ids.id(State::Login, Direction::Clientbound, "minecraft:hello"), Some(1));
-        assert_eq!(ids.id(State::Login, Direction::Clientbound, "minecraft:login_compression"), Some(3));
-        assert_eq!(ids.id(State::Login, Direction::Clientbound, "minecraft:nope"), None);
-        assert_eq!(ids.name(State::Login, Direction::Serverbound, 0), Some("minecraft:hello"));
+        assert_eq!(
+            ids.id(State::Login, Direction::Clientbound, "minecraft:hello"),
+            Some(1)
+        );
+        assert_eq!(
+            ids.id(
+                State::Login,
+                Direction::Clientbound,
+                "minecraft:login_compression"
+            ),
+            Some(3)
+        );
+        assert_eq!(
+            ids.id(State::Login, Direction::Clientbound, "minecraft:nope"),
+            None
+        );
+        assert_eq!(
+            ids.name(State::Login, Direction::Serverbound, 0),
+            Some("minecraft:hello")
+        );
         assert_eq!(ids.name(State::Login, Direction::Clientbound, 2), None);
         assert_eq!(ids.name(State::Login, Direction::Clientbound, -1), None);
         assert_eq!(ids.len(State::Login, Direction::Clientbound), 2);
         assert_eq!(ids.len(State::Play, Direction::Clientbound), 0);
-        assert_eq!(ids.iter(State::Login, Direction::Clientbound).collect::<Vec<_>>(), vec![(1, "minecraft:hello"), (3, "minecraft:login_compression")]);
+        assert_eq!(
+            ids.iter(State::Login, Direction::Clientbound)
+                .collect::<Vec<_>>(),
+            vec![(1, "minecraft:hello"), (3, "minecraft:login_compression")]
+        );
     }
 
     #[test]
@@ -272,12 +320,24 @@ mod tests {
     fn loads_real_reports() {
         let t = ProtocolTables::load().expect("reports load");
         let ids = &t.packets;
-        assert_eq!(ids.id(State::Handshake, Direction::Serverbound, "minecraft:intention"), Some(0));
+        assert_eq!(
+            ids.id(
+                State::Handshake,
+                Direction::Serverbound,
+                "minecraft:intention"
+            ),
+            Some(0)
+        );
         assert_eq!(ids.len(State::Play, Direction::Clientbound), 144);
         assert_eq!(ids.len(State::Play, Direction::Serverbound), 69);
         assert_eq!(ids.len(State::Configuration, Direction::Clientbound), 21);
-        let ka = ids.id(State::Play, Direction::Clientbound, "minecraft:keep_alive").unwrap();
-        assert_eq!(ids.name(State::Play, Direction::Clientbound, ka), Some("minecraft:keep_alive"));
+        let ka = ids
+            .id(State::Play, Direction::Clientbound, "minecraft:keep_alive")
+            .unwrap();
+        assert_eq!(
+            ids.name(State::Play, Direction::Clientbound, ka),
+            Some("minecraft:keep_alive")
+        );
         assert_eq!(t.data_component_name(0), Some("minecraft:custom_data"));
         assert_eq!(t.particle_name(1), Some("minecraft:block"));
         assert!(t.data_component_name(10_000).is_none());

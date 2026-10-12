@@ -19,7 +19,9 @@ use haste_protocol::haste_core::game::{DimensionInfo, GameMode};
 use haste_protocol::haste_core::{BlockPos, BlockStateId, ChunkPos, EntityId};
 use haste_protocol::packets::play::clientbound::{self as cb, teleport_flags};
 use haste_protocol::packets::play::serverbound::{self as sb, move_flags};
-use haste_protocol::{ClientboundPlay, ConnectOptions, Connection, Login, ServerboundPlay, StatsSnapshot};
+use haste_protocol::{
+    ClientboundPlay, ConnectOptions, Connection, Login, ServerboundPlay, StatsSnapshot,
+};
 
 /// What the driver needs from the world (`haste_world::World`).
 pub trait WorldSink {
@@ -114,12 +116,33 @@ impl LocalPlayerState {
         let old_yaw = self.yaw;
         let old_pitch = self.pitch;
         self.pos = DVec3::new(
-            if rel(teleport_flags::X) { self.pos.x + p.pos.x } else { p.pos.x },
-            if rel(teleport_flags::Y) { self.pos.y + p.pos.y } else { p.pos.y },
-            if rel(teleport_flags::Z) { self.pos.z + p.pos.z } else { p.pos.z },
+            if rel(teleport_flags::X) {
+                self.pos.x + p.pos.x
+            } else {
+                p.pos.x
+            },
+            if rel(teleport_flags::Y) {
+                self.pos.y + p.pos.y
+            } else {
+                p.pos.y
+            },
+            if rel(teleport_flags::Z) {
+                self.pos.z + p.pos.z
+            } else {
+                p.pos.z
+            },
         );
-        self.yaw = if rel(teleport_flags::YAW) { self.yaw + p.yaw } else { p.yaw };
-        self.pitch = (if rel(teleport_flags::PITCH) { self.pitch + p.pitch } else { p.pitch }).clamp(-90.0, 90.0);
+        self.yaw = if rel(teleport_flags::YAW) {
+            self.yaw + p.yaw
+        } else {
+            p.yaw
+        };
+        self.pitch = (if rel(teleport_flags::PITCH) {
+            self.pitch + p.pitch
+        } else {
+            p.pitch
+        })
+        .clamp(-90.0, 90.0);
         let mut v = self.velocity;
         if rel(teleport_flags::ROTATE_VELOCITY) {
             // Rotate the old velocity by the change in rotation (yaw only;
@@ -130,9 +153,21 @@ impl LocalPlayerState {
             v = DVec3::new(v.x * c - v.z * s, v.y, v.x * s + v.z * c);
         }
         self.velocity = DVec3::new(
-            if rel(teleport_flags::VEL_X) { v.x + p.velocity.x } else { p.velocity.x },
-            if rel(teleport_flags::VEL_Y) { v.y + p.velocity.y } else { p.velocity.y },
-            if rel(teleport_flags::VEL_Z) { v.z + p.velocity.z } else { p.velocity.z },
+            if rel(teleport_flags::VEL_X) {
+                v.x + p.velocity.x
+            } else {
+                p.velocity.x
+            },
+            if rel(teleport_flags::VEL_Y) {
+                v.y + p.velocity.y
+            } else {
+                p.velocity.y
+            },
+            if rel(teleport_flags::VEL_Z) {
+                v.z + p.velocity.z
+            } else {
+                p.velocity.z
+            },
         );
         self.has_position = true;
     }
@@ -180,7 +215,11 @@ pub struct NetDriver<W: WorldSink, E: EntitySink> {
 
 impl<W: WorldSink, E: EntitySink> NetDriver<W, E> {
     /// Connects and builds the world for the login dimension with `make_world`.
-    pub async fn connect(opts: ConnectOptions, mut make_world: Box<dyn FnMut(&DimensionInfo) -> W + Send>, entities: E) -> anyhow::Result<Self> {
+    pub async fn connect(
+        opts: ConnectOptions,
+        mut make_world: Box<dyn FnMut(&DimensionInfo) -> W + Send>,
+        entities: E,
+    ) -> anyhow::Result<Self> {
         let (conn, login) = Connection::connect(opts).await.context("connecting")?;
         let world = make_world(&login.dimension);
         Ok(Self {
@@ -188,7 +227,10 @@ impl<W: WorldSink, E: EntitySink> NetDriver<W, E> {
             world,
             entities,
             player: LocalPlayerState::new(login.game_mode),
-            counters: NetCounters { got_login: true, ..Default::default() },
+            counters: NetCounters {
+                got_login: true,
+                ..Default::default()
+            },
             login,
             make_world,
             sent_loaded: false,
@@ -227,9 +269,18 @@ impl<W: WorldSink, E: EntitySink> NetDriver<W, E> {
         self.entities.tick();
         self.ticks += 1;
         if self.player.has_position && self.sent_loaded {
-            let flags = if self.player.on_ground { move_flags::ON_GROUND } else { 0 };
+            let flags = if self.player.on_ground {
+                move_flags::ON_GROUND
+            } else {
+                0
+            };
             let pl = &self.player;
-            self.send(ServerboundPlay::MovePlayerPosRot(sb::MovePlayerPosRot { pos: pl.pos, yaw: pl.yaw, pitch: pl.pitch, flags }))?;
+            self.send(ServerboundPlay::MovePlayerPosRot(sb::MovePlayerPosRot {
+                pos: pl.pos,
+                yaw: pl.yaw,
+                pitch: pl.pitch,
+                flags,
+            }))?;
             if self.last_input != Some(0) {
                 self.send(ServerboundPlay::PlayerInput(sb::PlayerInput { flags: 0 }))?;
                 self.last_input = Some(0);
@@ -249,7 +300,8 @@ impl<W: WorldSink, E: EntitySink> NetDriver<W, E> {
         match p {
             P::Login(l) => {
                 self.counters.got_login = true;
-                self.player.game_mode = GameMode::from_id(l.spawn.game_mode).unwrap_or(self.player.game_mode);
+                self.player.game_mode =
+                    GameMode::from_id(l.spawn.game_mode).unwrap_or(self.player.game_mode);
             }
             P::Respawn(r) => {
                 self.counters.respawns += 1;
@@ -257,10 +309,14 @@ impl<W: WorldSink, E: EntitySink> NetDriver<W, E> {
                     .conn
                     .registries()
                     .dimension_info(r.spawn.dimension_type, &r.spawn.dimension)
-                    .unwrap_or_else(|| DimensionInfo { name: r.spawn.dimension.clone(), ..DimensionInfo::overworld() });
+                    .unwrap_or_else(|| DimensionInfo {
+                        name: r.spawn.dimension.clone(),
+                        ..DimensionInfo::overworld()
+                    });
                 self.world = (self.make_world)(&dim);
                 self.login.dimension = dim;
-                self.player.game_mode = GameMode::from_id(r.spawn.game_mode).unwrap_or(self.player.game_mode);
+                self.player.game_mode =
+                    GameMode::from_id(r.spawn.game_mode).unwrap_or(self.player.game_mode);
                 self.player.has_position = false;
                 self.sent_loaded = false;
             }
@@ -269,7 +325,14 @@ impl<W: WorldSink, E: EntitySink> NetDriver<W, E> {
                 self.player.apply_teleport(&t);
                 self.counters.teleports += 1;
                 let pl = &self.player;
-                self.send(ServerboundPlay::AcceptTeleportation(sb::AcceptTeleportation { teleport_id: t.teleport_id, pos: pl.pos, yaw: pl.yaw, pitch: pl.pitch }))?;
+                self.send(ServerboundPlay::AcceptTeleportation(
+                    sb::AcceptTeleportation {
+                        teleport_id: t.teleport_id,
+                        pos: pl.pos,
+                        yaw: pl.yaw,
+                        pitch: pl.pitch,
+                    },
+                ))?;
                 // Observed on the 26.3 server: a movement packet sent between
                 // accept_teleportation and player_loaded gets the client kicked
                 // with invalid_player_movement, so movement starts on the next tick.
@@ -306,16 +369,23 @@ impl<W: WorldSink, E: EntitySink> NetDriver<W, E> {
                 let ids: Vec<EntityId> = r.entity_ids.iter().map(|i| EntityId(*i)).collect();
                 self.entities.remove(&ids);
             }
-            P::MoveEntityPos(m) => self.entities.move_delta(EntityId(m.entity_id), m.deltas.total(), m.on_ground),
+            P::MoveEntityPos(m) => {
+                self.entities
+                    .move_delta(EntityId(m.entity_id), m.deltas.total(), m.on_ground)
+            }
             P::MoveEntityPosRot(m) => {
                 let id = EntityId(m.entity_id);
                 self.entities.move_delta(id, m.deltas.total(), m.on_ground);
                 self.entities.set_rotation(id, m.yaw, m.pitch, m.on_ground);
             }
-            P::MoveEntityRot(m) => self.entities.set_rotation(EntityId(m.entity_id), m.yaw, m.pitch, m.on_ground),
+            P::MoveEntityRot(m) => {
+                self.entities
+                    .set_rotation(EntityId(m.entity_id), m.yaw, m.pitch, m.on_ground)
+            }
             P::EntityPositionSync(s) => {
                 if let Some(pos) = s.end_pos() {
-                    self.entities.teleport(EntityId(s.entity_id), pos, s.yaw, s.pitch, s.on_ground);
+                    self.entities
+                        .teleport(EntityId(s.entity_id), pos, s.yaw, s.pitch, s.on_ground);
                 }
             }
             P::TeleportEntity(t) => {
@@ -323,30 +393,55 @@ impl<W: WorldSink, E: EntitySink> NetDriver<W, E> {
                 let (old, oy, op) = self.entities.pose(id).unwrap_or((DVec3::ZERO, 0.0, 0.0));
                 let rel = |bit: i32| t.flags & bit != 0;
                 let pos = DVec3::new(
-                    if rel(teleport_flags::X) { old.x + t.pos.x } else { t.pos.x },
-                    if rel(teleport_flags::Y) { old.y + t.pos.y } else { t.pos.y },
-                    if rel(teleport_flags::Z) { old.z + t.pos.z } else { t.pos.z },
+                    if rel(teleport_flags::X) {
+                        old.x + t.pos.x
+                    } else {
+                        t.pos.x
+                    },
+                    if rel(teleport_flags::Y) {
+                        old.y + t.pos.y
+                    } else {
+                        t.pos.y
+                    },
+                    if rel(teleport_flags::Z) {
+                        old.z + t.pos.z
+                    } else {
+                        t.pos.z
+                    },
                 );
-                let yaw = if rel(teleport_flags::YAW) { oy + t.yaw } else { t.yaw };
-                let pitch = if rel(teleport_flags::PITCH) { op + t.pitch } else { t.pitch };
+                let yaw = if rel(teleport_flags::YAW) {
+                    oy + t.yaw
+                } else {
+                    t.yaw
+                };
+                let pitch = if rel(teleport_flags::PITCH) {
+                    op + t.pitch
+                } else {
+                    t.pitch
+                };
                 self.entities.teleport(id, pos, yaw, pitch, t.on_ground);
             }
-            P::RotateHead(h) => self.entities.set_head_yaw(EntityId(h.entity_id), h.head_yaw),
+            P::RotateHead(h) => self
+                .entities
+                .set_head_yaw(EntityId(h.entity_id), h.head_yaw),
             P::SetEntityMotion(m) => {
                 if EntityId(m.entity_id) == own {
                     self.player.velocity = m.velocity;
                 } else {
-                    self.entities.set_velocity(EntityId(m.entity_id), m.velocity);
+                    self.entities
+                        .set_velocity(EntityId(m.entity_id), m.velocity);
                 }
             }
             P::SetEntityData(d) => {
                 if EntityId(d.entity_id) != own {
-                    self.entities.set_metadata(EntityId(d.entity_id), &d.metadata);
+                    self.entities
+                        .set_metadata(EntityId(d.entity_id), &d.metadata);
                 }
             }
             P::SetEquipment(e) => {
                 for (slot, item) in e.equipment {
-                    self.entities.set_equipment(EntityId(e.entity_id), slot, item);
+                    self.entities
+                        .set_equipment(EntityId(e.entity_id), slot, item);
                 }
             }
             P::PlayerInfoUpdate(u) => self.entities.player_info(&u.infos()),
@@ -361,9 +456,19 @@ impl<W: WorldSink, E: EntitySink> NetDriver<W, E> {
                 }
             }
             P::SystemChat(c) if !c.overlay => self.push_chat(c.content.to_plain(&|_| None)),
-            P::DisguisedChat(c) => self.push_chat(format!("<{}> {}", c.sender_name.to_plain(&|_| None), c.message.to_plain(&|_| None))),
-            P::PlayerChat(c) => self.push_chat(format!("<{}> {}", c.sender_name.to_plain(&|_| None), c.message)),
-            P::Disconnect(d) => tracing::warn!("server disconnected us: {}", d.reason.to_plain(&|_| None)),
+            P::DisguisedChat(c) => self.push_chat(format!(
+                "<{}> {}",
+                c.sender_name.to_plain(&|_| None),
+                c.message.to_plain(&|_| None)
+            )),
+            P::PlayerChat(c) => self.push_chat(format!(
+                "<{}> {}",
+                c.sender_name.to_plain(&|_| None),
+                c.message
+            )),
+            P::Disconnect(d) => {
+                tracing::warn!("server disconnected us: {}", d.reason.to_plain(&|_| None))
+            }
             _ => {}
         }
         Ok(())
@@ -395,7 +500,11 @@ impl StubWorld {
     /// A stub for a dimension; `biome_count` is the synced biome registry size.
     pub fn new(dim: &DimensionInfo, biome_count: usize) -> Self {
         let bits = (usize::BITS - biome_count.saturating_sub(1).leading_zeros()) as u8;
-        Self { chunks: HashMap::new(), section_count: dim.section_count(), biome_direct_bits: bits.max(1) }
+        Self {
+            chunks: HashMap::new(),
+            section_count: dim.section_count(),
+            biome_direct_bits: bits.max(1),
+        }
     }
 
     /// Counts sections with a non-zero block count. Approximation for the
@@ -419,7 +528,12 @@ impl StubWorld {
 
 /// Skips a paletted container (wiki "Paletted Container structure"; the data
 /// array is not length-prefixed, its size follows from the bits per entry).
-fn skip_container(r: &mut haste_protocol::wire::Reader<'_>, entries: usize, min_indirect: u8, direct_bits: u8) -> Option<()> {
+fn skip_container(
+    r: &mut haste_protocol::wire::Reader<'_>,
+    entries: usize,
+    min_indirect: u8,
+    direct_bits: u8,
+) -> Option<()> {
     let bits = r.u8().ok()?;
     let bits = if bits == 0 {
         r.var_int().ok()?;
@@ -442,7 +556,9 @@ fn skip_container(r: &mut haste_protocol::wire::Reader<'_>, entries: usize, min_
 
 impl WorldSink for StubWorld {
     fn load_chunk(&mut self, data: &ChunkData) -> anyhow::Result<()> {
-        let n = self.count_non_empty(&data.sections).ok_or_else(|| anyhow::anyhow!("stub could not walk the section payload"))?;
+        let n = self
+            .count_non_empty(&data.sections)
+            .ok_or_else(|| anyhow::anyhow!("stub could not walk the section payload"))?;
         self.chunks.insert(data.pos, n);
         Ok(())
     }
@@ -518,7 +634,14 @@ mod tests {
     #[test]
     fn teleport_relative_flags() {
         let mut p = LocalPlayerState::new(GameMode::Survival);
-        p.apply_teleport(&cb::PlayerPosition { teleport_id: 1, pos: DVec3::new(10.0, 64.0, -5.0), velocity: DVec3::ZERO, yaw: 90.0, pitch: 10.0, flags: 0 });
+        p.apply_teleport(&cb::PlayerPosition {
+            teleport_id: 1,
+            pos: DVec3::new(10.0, 64.0, -5.0),
+            velocity: DVec3::ZERO,
+            yaw: 90.0,
+            pitch: 10.0,
+            flags: 0,
+        });
         assert_eq!(p.pos, DVec3::new(10.0, 64.0, -5.0));
         p.apply_teleport(&cb::PlayerPosition {
             teleport_id: 2,
@@ -526,7 +649,11 @@ mod tests {
             velocity: DVec3::ZERO,
             yaw: 5.0,
             pitch: 0.0,
-            flags: teleport_flags::X | teleport_flags::Y | teleport_flags::Z | teleport_flags::YAW | teleport_flags::PITCH,
+            flags: teleport_flags::X
+                | teleport_flags::Y
+                | teleport_flags::Z
+                | teleport_flags::YAW
+                | teleport_flags::PITCH,
         });
         assert_eq!(p.pos, DVec3::new(11.0, 64.0, -4.0));
         assert_eq!((p.yaw, p.pitch), (95.0, 10.0));
@@ -535,7 +662,11 @@ mod tests {
 
     #[test]
     fn stub_world_counts_sections() {
-        let dim = DimensionInfo { min_y: 0, height: 32, ..DimensionInfo::overworld() };
+        let dim = DimensionInfo {
+            min_y: 0,
+            height: 32,
+            ..DimensionInfo::overworld()
+        };
         let w = StubWorld::new(&dim, 64);
         // Section 1: 0 blocks, single-valued air, single-valued biome.
         // Section 2: 10 blocks, indirect 4-bit palette of 2, single biome.

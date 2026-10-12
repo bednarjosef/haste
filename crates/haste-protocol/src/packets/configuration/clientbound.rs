@@ -79,7 +79,10 @@ pub struct RegistryEntry {
 }
 impl Wire for RegistryEntry {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { id: r.identifier()?, data: r.option(|r| r.nbt_raw())? })
+        Ok(Self {
+            id: r.identifier()?,
+            data: r.option(|r| r.nbt_raw())?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.identifier(&self.id);
@@ -168,7 +171,10 @@ pub struct Tag {
 }
 impl Wire for Tag {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { name: r.identifier()?, entries: r.read_as::<_, List<VarInt>>()? })
+        Ok(Self {
+            name: r.identifier()?,
+            entries: r.read_as::<_, List<VarInt>>()?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.identifier(&self.name);
@@ -186,7 +192,10 @@ pub struct RegistryTags {
 }
 impl Wire for RegistryTags {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { registry: r.identifier()?, tags: r.read()? })
+        Ok(Self {
+            registry: r.identifier()?,
+            tags: r.read()?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.identifier(&self.registry);
@@ -214,7 +223,11 @@ pub struct KnownPack {
 }
 impl Wire for KnownPack {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { namespace: r.string()?, id: r.string()?, version: r.string()? })
+        Ok(Self {
+            namespace: r.string()?,
+            id: r.string()?,
+            version: r.string()?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.string(&self.namespace);
@@ -241,7 +254,10 @@ pub struct ReportDetail {
 }
 impl Wire for ReportDetail {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        Ok(Self { title: r.string_max(128)?, description: r.string_max(4096)? })
+        Ok(Self {
+            title: r.string_max(128)?,
+            description: r.string_max(4096)?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         w.string(&self.title);
@@ -276,8 +292,15 @@ pub struct ServerLink {
 }
 impl Wire for ServerLink {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
-        let label = if r.bool()? { ServerLinkLabel::BuiltIn(r.var_int()?) } else { ServerLinkLabel::Custom(r.component()?) };
-        Ok(Self { label, url: r.string()? })
+        let label = if r.bool()? {
+            ServerLinkLabel::BuiltIn(r.var_int()?)
+        } else {
+            ServerLinkLabel::Custom(r.component()?)
+        };
+        Ok(Self {
+            label,
+            url: r.string()?,
+        })
     }
     fn write(&self, w: &mut Writer) {
         match &self.label {
@@ -339,9 +362,16 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        round_trip(&CookieRequest { key: Identifier::minecraft("c") });
-        round_trip(&CustomPayload { channel: Identifier::minecraft("brand"), data: Bytes::from_static(b"\x07vanilla") });
-        round_trip(&Disconnect { reason: Component::text("x") });
+        round_trip(&CookieRequest {
+            key: Identifier::minecraft("c"),
+        });
+        round_trip(&CustomPayload {
+            channel: Identifier::minecraft("brand"),
+            data: Bytes::from_static(b"\x07vanilla"),
+        });
+        round_trip(&Disconnect {
+            reason: Component::text("x"),
+        });
         round_trip(&FinishConfiguration {});
         round_trip(&KeepAlive { id: -9 });
         round_trip(&Ping { id: 4 });
@@ -349,29 +379,80 @@ mod tests {
         round_trip(&RegistryData {
             registry: Identifier::minecraft("dimension_type"),
             entries: vec![
-                RegistryEntry { id: Identifier::minecraft("overworld"), data: Some(nbt_bytes()) },
-                RegistryEntry { id: Identifier::minecraft("the_nether"), data: None },
+                RegistryEntry {
+                    id: Identifier::minecraft("overworld"),
+                    data: Some(nbt_bytes()),
+                },
+                RegistryEntry {
+                    id: Identifier::minecraft("the_nether"),
+                    data: None,
+                },
             ],
         });
-        round_trip(&ResourcePackPop { id: Some(Uuid::from_u128(1)) });
-        round_trip(&ResourcePackPush { id: Uuid::from_u128(2), url: "http://x".into(), hash: "ab".into(), forced: false, prompt: Some(Component::text("p")) });
-        round_trip(&PostEffects { effects: vec![Identifier::minecraft("blur")] });
-        round_trip(&StoreCookie { key: Identifier::minecraft("k"), payload: Bytes::from_static(b"v") });
-        round_trip(&Transfer { host: "example.org".into(), port: 25565 });
-        round_trip(&UpdateEnabledFeatures { features: vec![Identifier::minecraft("vanilla")] });
-        round_trip(&UpdateTags {
-            registries: vec![RegistryTags { registry: Identifier::minecraft("block"), tags: vec![Tag { name: Identifier::minecraft("logs"), entries: vec![1, 2, 300] }] }],
+        round_trip(&ResourcePackPop {
+            id: Some(Uuid::from_u128(1)),
         });
-        round_trip(&SelectKnownPacks { packs: vec![KnownPack { namespace: "minecraft".into(), id: "core".into(), version: "26.3".into() }] });
-        round_trip(&CustomReportDetails { details: vec![ReportDetail { title: "a".into(), description: "b".into() }] });
+        round_trip(&ResourcePackPush {
+            id: Uuid::from_u128(2),
+            url: "http://x".into(),
+            hash: "ab".into(),
+            forced: false,
+            prompt: Some(Component::text("p")),
+        });
+        round_trip(&PostEffects {
+            effects: vec![Identifier::minecraft("blur")],
+        });
+        round_trip(&StoreCookie {
+            key: Identifier::minecraft("k"),
+            payload: Bytes::from_static(b"v"),
+        });
+        round_trip(&Transfer {
+            host: "example.org".into(),
+            port: 25565,
+        });
+        round_trip(&UpdateEnabledFeatures {
+            features: vec![Identifier::minecraft("vanilla")],
+        });
+        round_trip(&UpdateTags {
+            registries: vec![RegistryTags {
+                registry: Identifier::minecraft("block"),
+                tags: vec![Tag {
+                    name: Identifier::minecraft("logs"),
+                    entries: vec![1, 2, 300],
+                }],
+            }],
+        });
+        round_trip(&SelectKnownPacks {
+            packs: vec![KnownPack {
+                namespace: "minecraft".into(),
+                id: "core".into(),
+                version: "26.3".into(),
+            }],
+        });
+        round_trip(&CustomReportDetails {
+            details: vec![ReportDetail {
+                title: "a".into(),
+                description: "b".into(),
+            }],
+        });
         round_trip(&ServerLinks {
             links: vec![
-                ServerLink { label: ServerLinkLabel::BuiltIn(0), url: "u".into() },
-                ServerLink { label: ServerLinkLabel::Custom(Component::text("c")), url: "v".into() },
+                ServerLink {
+                    label: ServerLinkLabel::BuiltIn(0),
+                    url: "u".into(),
+                },
+                ServerLink {
+                    label: ServerLinkLabel::Custom(Component::text("c")),
+                    url: "v".into(),
+                },
             ],
         });
         round_trip(&ClearDialog {});
-        round_trip(&ShowDialog { dialog: nbt_bytes() });
-        round_trip(&CodeOfConduct { text: "be nice".into() });
+        round_trip(&ShowDialog {
+            dialog: nbt_bytes(),
+        });
+        round_trip(&CodeOfConduct {
+            text: "be nice".into(),
+        });
     }
 }

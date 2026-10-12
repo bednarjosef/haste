@@ -30,7 +30,13 @@ fn part(name: &str, pivot: [f32; 3], cubes: Vec<Cube>, children: Vec<ModelPart>)
 }
 
 fn cube(origin: [f32; 3], size: [f32; 3], uv: [u32; 2], inflate: f32) -> Cube {
-    Cube { origin: origin.into(), size: size.into(), inflate, uv, mirror: false }
+    Cube {
+        origin: origin.into(),
+        size: size.into(),
+        inflate,
+        uv,
+        mirror: false,
+    }
 }
 
 /// The humanoid/player model. `slim` selects the 3-pixel-wide arm layout (Alex-style skins);

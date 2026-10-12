@@ -45,17 +45,33 @@ impl JvmConfig {
     pub fn from_cache(cache: &Path) -> Result<JvmConfig> {
         let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let java_home = cache.join("jdk");
-        let client_jar = cache.join("versions").join(haste_core::paths::MC_VERSION).join("client.jar");
-        let lib_dir = [cache.join("libraries"), cache.join("server-spike").join("libraries")]
-            .into_iter()
-            .find(|d| d.is_dir())
-            .ok_or(JvmError::Missing { what: "vanilla libraries directory", path: cache.join("libraries") })?;
+        let client_jar = cache
+            .join("versions")
+            .join(haste_core::paths::MC_VERSION)
+            .join("client.jar");
+        let lib_dir = [
+            cache.join("libraries"),
+            cache.join("server-spike").join("libraries"),
+        ]
+        .into_iter()
+        .find(|d| d.is_dir())
+        .ok_or(JvmError::Missing {
+            what: "vanilla libraries directory",
+            path: cache.join("libraries"),
+        })?;
         let asm_dir = cache.join("mojang-spike");
         let mut asm_jars: Vec<PathBuf> = std::fs::read_dir(&asm_dir)
-            .map_err(|_| JvmError::Missing { what: "ASM jars", path: asm_dir.clone() })?
+            .map_err(|_| JvmError::Missing {
+                what: "ASM jars",
+                path: asm_dir.clone(),
+            })?
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("asm-") && n.ends_with(".jar")))
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("asm-") && n.ends_with(".jar"))
+            })
             .collect();
         asm_jars.sort();
         let cfg = JvmConfig {
@@ -75,24 +91,41 @@ impl JvmConfig {
     }
 
     fn check(&self) -> Result<()> {
-        for (what, p) in [("JDK", &self.java_home), ("client jar", &self.client_jar), ("proxies.conf", &self.proxies_conf)] {
+        for (what, p) in [
+            ("JDK", &self.java_home),
+            ("client jar", &self.client_jar),
+            ("proxies.conf", &self.proxies_conf),
+        ] {
             if !p.exists() {
-                return Err(JvmError::Missing { what, path: p.clone() });
+                return Err(JvmError::Missing {
+                    what,
+                    path: p.clone(),
+                });
             }
         }
         if self.asm_jars.is_empty() {
-            return Err(JvmError::Missing { what: "ASM jars", path: PathBuf::new() });
+            return Err(JvmError::Missing {
+                what: "ASM jars",
+                path: PathBuf::new(),
+            });
         }
         Ok(())
     }
 
     fn libjvm(&self) -> Result<PathBuf> {
-        let names = ["lib/server/libjvm.so", "lib/server/libjvm.dylib", "bin/server/jvm.dll"];
+        let names = [
+            "lib/server/libjvm.so",
+            "lib/server/libjvm.dylib",
+            "bin/server/jvm.dll",
+        ];
         names
             .iter()
             .map(|n| self.java_home.join(n))
             .find(|p| p.is_file())
-            .ok_or(JvmError::Missing { what: "libjvm", path: self.java_home.join(names[0]) })
+            .ok_or(JvmError::Missing {
+                what: "libjvm",
+                path: self.java_home.join(names[0]),
+            })
     }
 }
 
@@ -171,7 +204,8 @@ impl JvmHost {
         let args = args.build().map_err(|e| JvmError::Start(e.to_string()))?;
         let libjvm = cfg.libjvm()?;
         let t = Instant::now();
-        let vm = JavaVM::with_libjvm(args, || Ok(libjvm.clone())).map_err(|e| JvmError::Start(e.to_string()))?;
+        let vm = JavaVM::with_libjvm(args, || Ok(libjvm.clone()))
+            .map_err(|e| JvmError::Start(e.to_string()))?;
         let jvm_create = t.elapsed();
 
         let t = Instant::now();
@@ -180,17 +214,39 @@ impl JvmHost {
             let boot_cls = env.find_class(jni_str!("haste/loader/Boot"))?;
             let conf = JString::from_str(env, boot_config(&cfg))?;
             let bridge = env
-                .call_static_method(&boot_cls, jni_str!("boot"), jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"), &[JValue::Object(&conf)])
+                .call_static_method(
+                    &boot_cls,
+                    jni_str!("boot"),
+                    jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
+                    &[JValue::Object(&conf)],
+                )
                 .map_err(|e| caught(env, e))?
                 .l()?;
             let summary = call_static_string(env, &boot_cls, "genSummary")?;
-            Ok((env.new_global_ref(&boot_cls)?, env.new_global_ref(&bridge)?, summary))
+            Ok((
+                env.new_global_ref(&boot_cls)?,
+                env.new_global_ref(&bridge)?,
+                summary,
+            ))
         })?;
         let boot_time = t.elapsed();
         let gui = vm.attach_current_thread(|env| GuiPipeline::new(env, bridge))?;
-        let timings = StartTimings { java_build, jvm_create, boot: boot_time };
+        let timings = StartTimings {
+            java_build,
+            jvm_create,
+            boot: boot_time,
+        };
         tracing::info!(?timings, %gen_summary, "JVM started");
-        Ok(JvmHost { inner: Arc::new(Inner { config: cfg, vm, boot, timings, gen_summary, gui }) })
+        Ok(JvmHost {
+            inner: Arc::new(Inner {
+                config: cfg,
+                vm,
+                boot,
+                timings,
+                gen_summary,
+                gui,
+            }),
+        })
     }
 
     /// The batched GUI pipeline (vanilla screens).
@@ -221,10 +277,19 @@ impl JvmHost {
     /// Loads (and initialises) a class through the game class loader: a real tier-3 class from the
     /// jar, a generated proxy, or `haste.gui.*`. Fails (and logs) for refused classes; the Java
     /// exception is cleared and returned as the error.
-    pub fn load_class<'local>(&self, env: &mut Env<'local>, binary_name: &str) -> Result<JClass<'local>> {
+    pub fn load_class<'local>(
+        &self,
+        env: &mut Env<'local>,
+        binary_name: &str,
+    ) -> Result<JClass<'local>> {
         let name = JString::from_str(env, binary_name)?;
         let cls = env
-            .call_static_method(&*self.inner.boot, jni_str!("loadClass"), jni_sig!("(Ljava/lang/String;)Ljava/lang/Class;"), &[JValue::Object(&name)])
+            .call_static_method(
+                &*self.inner.boot,
+                jni_str!("loadClass"),
+                jni_sig!("(Ljava/lang/String;)Ljava/lang/Class;"),
+                &[JValue::Object(&name)],
+            )
             .map_err(|e| caught(env, e))?
             .l()?;
         // Safety: Boot.loadClass returns a java.lang.Class.
@@ -233,7 +298,13 @@ impl JvmHost {
 
     /// The class loader's log: everything served from the jar, as a proxy, or refused.
     pub fn class_log(&self) -> Result<ClassLog> {
-        self.with_env(|env| Ok(ClassLog::parse(&call_static_string(env, &self.inner.boot, "classLog")?)))
+        self.with_env(|env| {
+            Ok(ClassLog::parse(&call_static_string(
+                env,
+                &self.inner.boot,
+                "classLog",
+            )?))
+        })
     }
 
     /// Methods of generated proxies that were called without an implementation (sorted, distinct).
@@ -241,7 +312,10 @@ impl JvmHost {
         self.with_env(|env| {
             let cls = env.find_class(jni_str!("haste/rt/Unimplemented"))?;
             let s = call_static_string(env, &cls, "seen")?;
-            Ok(s.lines().filter(|l| !l.is_empty()).map(str::to_owned).collect())
+            Ok(s.lines()
+                .filter(|l| !l.is_empty())
+                .map(str::to_owned)
+                .collect())
         })
     }
 
@@ -261,11 +335,20 @@ pub(crate) fn caught(env: &mut Env, e: jni::errors::Error) -> JvmError {
     if !matches!(e, jni::errors::Error::JavaException) {
         return e.into();
     }
-    let Some(t) = env.exception_occurred() else { return e.into() };
+    let Some(t) = env.exception_occurred() else {
+        return e.into();
+    };
     env.exception_clear();
     let described = (|| -> Result<String> {
         let cls = env.find_class(jni_str!("haste/rt/Errors"))?;
-        let s = env.call_static_method(&cls, jni_str!("describe"), jni_sig!("(Ljava/lang/Throwable;)Ljava/lang/String;"), &[JValue::Object(&t)])?.l()?;
+        let s = env
+            .call_static_method(
+                &cls,
+                jni_str!("describe"),
+                jni_sig!("(Ljava/lang/Throwable;)Ljava/lang/String;"),
+                &[JValue::Object(&t)],
+            )?
+            .l()?;
         jstring_to_string(env, s)
     })();
     env.exception_clear();
@@ -278,7 +361,9 @@ pub(crate) fn caught(env: &mut Env, e: jni::errors::Error) -> JvmError {
 /// Calls a static `()Ljava/lang/String;` method by name.
 pub(crate) fn call_static_string(env: &mut Env, cls: &JClass, name: &str) -> Result<String> {
     let name = jni::strings::JNIString::new(name);
-    let v = env.call_static_method(cls, &name, jni_sig!("()Ljava/lang/String;"), &[])?.l()?;
+    let v = env
+        .call_static_method(cls, &name, jni_sig!("()Ljava/lang/String;"), &[])?
+        .l()?;
     jstring_to_string(env, v)
 }
 
@@ -328,17 +413,27 @@ fn build_java(cfg: &JvmConfig) -> Result<bool> {
     let boot_stamp = source_stamp(&boot_dirs, &[&script]);
     let built_boot = build_one(cfg, "boot", &boot_stamp)?;
     // game classes compile against the boot classes and the client jar
-    let game_stamp = format!("{}\n{boot_stamp}", source_stamp(&[java.join("gui")], &[&script, &cfg.client_jar]));
+    let game_stamp = format!(
+        "{}\n{boot_stamp}",
+        source_stamp(&[java.join("gui")], &[&script, &cfg.client_jar])
+    );
     let built_game = build_one(cfg, "game", &game_stamp)?;
     Ok(built_boot || built_game)
 }
 
 fn build_one(cfg: &JvmConfig, what: &str, stamp: &str) -> Result<bool> {
     let stamp_file = cfg.build_dir.join(format!(".stamp-{what}"));
-    if cfg.build_dir.join(what).is_dir() && std::fs::read_to_string(&stamp_file).is_ok_and(|s| s == stamp) {
+    if cfg.build_dir.join(what).is_dir()
+        && std::fs::read_to_string(&stamp_file).is_ok_and(|s| s == stamp)
+    {
         return Ok(false);
     }
-    let join = |v: &[PathBuf]| v.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(":");
+    let join = |v: &[PathBuf]| {
+        v.iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(":")
+    };
     let out = Command::new("bash")
         .arg(cfg.java_src.join("build-java.sh"))
         .arg(what)
@@ -350,7 +445,11 @@ fn build_one(cfg: &JvmConfig, what: &str, stamp: &str) -> Result<bool> {
         .output()
         .map_err(|e| JvmError::JavaBuild(e.to_string()))?;
     if !out.status.success() {
-        return Err(JvmError::JavaBuild(format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))));
+        return Err(JvmError::JavaBuild(format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )));
     }
     std::fs::write(&stamp_file, stamp).map_err(|e| JvmError::JavaBuild(e.to_string()))?;
     Ok(true)
@@ -371,7 +470,11 @@ fn source_stamp(dirs: &[PathBuf], files: &[&Path]) -> String {
     }
     fn fingerprint(p: &Path) -> String {
         let m = std::fs::metadata(p).ok();
-        let mtime = m.as_ref().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+        let mtime = m
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos());
         format!("{}|{}|{}", p.display(), m.map_or(0, |m| m.len()), mtime)
     }
     let mut v = Vec::new();

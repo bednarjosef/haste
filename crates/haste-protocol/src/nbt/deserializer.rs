@@ -6,7 +6,7 @@
 use std::borrow::Cow;
 use std::io::{Cursor, Seek, SeekFrom};
 
-use crate::nbt::{Error, io};
+use crate::nbt::{io, Error};
 use io::Read;
 
 /// Result type returned by NBT deserialization operations.
