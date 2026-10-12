@@ -151,3 +151,18 @@ Assumptions about the traces, all to confirm with oracles: the world is a defaul
 from `input.yaw`/`input.pitch` or a per-tick `yaw`/`pitch` if present, else the `player` header
 (FORMATS.md v1 has no per-tick look angles, which a turning trace needs); `strafe > 0` is left.
 The parser is our own (lenient serde structs) so this crate does not depend on haste-testkit.
+
+## Interaction (raycast.rs, mining.rs)
+
+- Crosshair: voxel walk over outline boxes; look vector from the movement sine table (assumption:
+  the game uses the same table for the view vector). A ray starting inside a box hits at its start.
+- Mining speed: minecraft.wiki "Breaking" formula; tool rules from the data generator's item
+  component reports (`minecraft:tool`, first matching rule per field), tags from the server,
+  hardness and correct-tool flag from the recorder dump via `GameData`. Checked against the
+  wiki's break-time table; on the vanilla server: hand and diamond-pickaxe stone breaks, an
+  Efficiency V + Haste II instant break (the server sends Efficiency as `mining_efficiency`).
+- Progress is summed in f32 per tick, so stone by hand finishes on tick 151, not the wiki's 150
+  (assumption that the game sums floats the same way; the server accepts either, its check is
+  70 % of the progress).
+- Not modelled: item component patches on held stacks (protocol does not decode components yet),
+  Aqua Affinity other than through `submerged_mining_speed`, adventure-mode `can_break`.

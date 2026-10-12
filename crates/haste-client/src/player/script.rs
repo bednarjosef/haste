@@ -3,11 +3,14 @@
 //! One step per line, `#` starts a comment:
 //! - `cmd <command>`: sends `/<command>` as `chat_command` (the bot must be an operator); 1 tick.
 //! - `wait <ticks>`: no keys held.
-//! - `hold <ticks> [forward|back|left|right|jump|sneak|sprint]... [yaw=<deg>] [pitch=<deg>]`.
+//! - `hold <ticks> [forward|back|left|right|jump|sneak|sprint|attack|use]... [yaw=<deg>] [pitch=<deg>]`.
+//! - `slot <0..8>`: selects a hotbar slot; 1 tick.
+//! - `pick`: middle click; 1 tick.
+//! - `check <x> <y> <z>`: prints the block state id our world has there; no tick.
 //! - `look <yaw> <pitch>`: absolute look for the following steps (default 0 0); no tick.
 //! - `fly`: toggles creative flight (double-tap jump); 1 tick.
 //! - `mark <label>`: prints the player state with the label; no tick.
-use haste_core::input::InputState;
+use haste_core::input::{InputState, InteractInput};
 
 use super::LocalPlayer;
 
@@ -15,7 +18,14 @@ use super::LocalPlayer;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Step {
     Command(String),
-    Hold { ticks: u32, input: InputState },
+    Hold {
+        ticks: u32,
+        input: InputState,
+        interact: InteractInput,
+    },
+    Slot(u8),
+    Pick,
+    Check(haste_core::BlockPos),
     Look(f32, f32),
     Fly,
     Mark(String),
@@ -26,10 +36,13 @@ pub enum Step {
 pub struct ScriptTick {
     /// Keys and absolute look (the caller subtracts the player's look offset).
     pub input: InputState,
+    pub interact: InteractInput,
     pub command: Option<String>,
     pub toggle_flight: bool,
     /// Labels to print before this tick.
     pub marks: Vec<String>,
+    /// Blocks to print before this tick.
+    pub checks: Vec<haste_core::BlockPos>,
 }
 
 /// A walk script being played back.
@@ -74,6 +87,7 @@ impl WalkScript {
                         pitch: f32::NAN,
                         ..Default::default()
                     };
+                    let mut interact = InteractInput::default();
                     for w in it {
                         match w {
                             "forward" => input.forward = true,
@@ -83,6 +97,8 @@ impl WalkScript {
                             "jump" => input.jump = true,
                             "sneak" => input.sneak = true,
                             "sprint" => input.sprint = true,
+                            "attack" => interact.attack = true,
+                            "use" => interact.use_item = true,
                             _ => {
                                 if let Some(v) = w.strip_prefix("yaw=") {
                                     input.yaw = v.parse().map_err(|_| bad("bad yaw"))?;
@@ -94,7 +110,23 @@ impl WalkScript {
                             }
                         }
                     }
-                    Step::Hold { ticks, input }
+                    Step::Hold {
+                        ticks,
+                        input,
+                        interact,
+                    }
+                }
+                "slot" => Step::Slot(rest.parse().map_err(|_| bad("slot needs 0..8"))?),
+                "pick" => Step::Pick,
+                "check" => {
+                    let v: Vec<i32> = rest
+                        .split_whitespace()
+                        .filter_map(|w| w.parse().ok())
+                        .collect();
+                    match v[..] {
+                        [x, y, z] => Step::Check(haste_core::BlockPos::new(x, y, z)),
+                        _ => return Err(bad("check needs <x> <y> <z>")),
+                    }
                 }
                 _ => return Err(bad("unknown step")),
             });
@@ -119,7 +151,10 @@ impl WalkScript {
         };
         loop {
             if self.remaining > 0 {
-                let Some(Step::Hold { input, .. }) = self.steps.get(self.next - 1) else {
+                let Some(Step::Hold {
+                    input, interact, ..
+                }) = self.steps.get(self.next - 1)
+                else {
                     unreachable!("remaining ticks belong to a hold step");
                 };
                 self.remaining -= 1;
@@ -136,13 +171,25 @@ impl WalkScript {
                     },
                     ..*input
                 };
+                t.interact = *interact;
                 return Some(t);
             }
-            let step = self.steps.get(self.next)?.clone();
+            let Some(step) = self.steps.get(self.next).cloned() else {
+                // Marks and checks at the very end still get their tick.
+                return (!t.marks.is_empty() || !t.checks.is_empty()).then_some(t);
+            };
             self.next += 1;
             match step {
                 Step::Command(c) => {
                     t.command = Some(c);
+                    return Some(t);
+                }
+                Step::Slot(n) => {
+                    t.interact.hotbar = Some(n);
+                    return Some(t);
+                }
+                Step::Pick => {
+                    t.interact.pick_block = true;
                     return Some(t);
                 }
                 Step::Fly => {
@@ -152,6 +199,7 @@ impl WalkScript {
                     return Some(t);
                 }
                 Step::Mark(m) => t.marks.push(m),
+                Step::Check(p) => t.checks.push(p),
                 Step::Look(y, p) => {
                     self.look = (y, p);
                     t.input.yaw = y;
@@ -192,7 +240,9 @@ impl Runner {
         &mut self,
         tick: u64,
         player: &mut LocalPlayer,
+        world: &dyn haste_core::view::BlockView,
     ) -> (InputState, Option<haste_protocol::ServerboundPlay>) {
+        player.set_interact(InteractInput::default());
         if player.health <= 0.0 && player.has_position {
             // Dead: press "Respawn" (client_command 0, perform respawn) and wait for it.
             println!("[tick {tick}] dead, respawning");
@@ -219,9 +269,21 @@ impl Runner {
                 s.sprinting, s.sneaking, s.flying, s.in_water, player.health, player.air_supply, s.fall_distance,
             );
         }
+        for p in &t.checks {
+            println!(
+                "[tick {tick}] check {} {} {}: state {} (target {:?}, breaking {:?})",
+                p.x,
+                p.y,
+                p.z,
+                world.block_state(*p).0,
+                player.target(),
+                player.break_progress()
+            );
+        }
         if t.toggle_flight {
             player.toggle_flight();
         }
+        player.set_interact(t.interact);
         let (dy, dp) = player.look_offset();
         let mut input = t.input;
         input.yaw -= dy;
