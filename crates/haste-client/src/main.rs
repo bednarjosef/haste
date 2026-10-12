@@ -15,6 +15,7 @@ mod game;
 mod headless;
 mod net;
 mod player;
+mod ui;
 
 #[derive(Parser, Debug)]
 #[command(

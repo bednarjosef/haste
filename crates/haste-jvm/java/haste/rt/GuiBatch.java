@@ -20,6 +20,9 @@ public final class GuiBatch {
     public static final int SCISSOR_POP = 8;
     public static final int TRANSLATE_PUSH = 9;  // dx dy dz (float bits)
     public static final int TRANSLATE_POP = 10;
+    public static final int SPRITE_REGION = 11;  // sprite spriteW spriteH u v x y w h tint
+    public static final int STYLED_TEXT = 12;    // x y argb shadow(0/1) str flags(1 bold, 2 italic, 4 underline, 8 strikethrough, 16 obfuscated)
+    public static final int ENTITY = 13;         // entityId x1 y1 x2 y2 scale(float bits) mouseX(float bits) mouseY(float bits)
 
     private static int[] buf = new int[4096];
     private static int len;
@@ -49,9 +52,13 @@ public final class GuiBatch {
     /** Number of ints recorded so far this frame (tests). */
     public static int length() { return len; }
 
-    /** Returns {int[] commands, String[] strings} for this frame and resets the buffer. */
-    public static Object[] frame() {
-        Object[] r = { Arrays.copyOf(buf, len), Arrays.copyOf(strings, nstrings) };
+    /**
+     * Returns {int[] commands, String[] strings, int[] {cursor}} for this frame and resets the buffer. The cursor
+     * code is the shape the screen asked for (0 default arrow, then CursorTypes' order: 1 arrow, 2 I-beam,
+     * 3 crosshair, 4 pointing hand, 5 resize north-south, 6 resize east-west, 7 resize all, 8 not allowed).
+     */
+    public static Object[] frame(int cursor) {
+        Object[] r = { Arrays.copyOf(buf, len), Arrays.copyOf(strings, nstrings), new int[] { cursor } };
         reset();
         return r;
     }
