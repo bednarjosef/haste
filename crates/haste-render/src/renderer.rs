@@ -115,6 +115,11 @@ mod tests {
             .flat_map(|x| (-1..=1).map(move |z| SectionPos::new(x, 0, z)))
             .collect();
         renderer.update_world(&Flat, &dirty, ChunkPos::new(0, 0), 4);
+        // Meshing is asynchronous: keep draining until the sections are uploaded.
+        for _ in 0..200 {
+            renderer.update_world(&Flat, &[], ChunkPos::new(0, 0), 4);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
 
         let frame = FrameInput {
             camera: Camera {
@@ -165,7 +170,9 @@ struct CameraUniform {
     fog_color: [f32; 4],
     fog_start: f32,
     fog_end: f32,
-    _pad: [f32; 2],
+    /// Sky light multiplier by time of day (`chunk.wgsl`).
+    daylight: f32,
+    _pad: f32,
 }
 
 /// The renderer. Construct with a window (windowed mode) or offscreen
@@ -192,12 +199,23 @@ pub struct Renderer {
     pipeline_translucent: wgpu::RenderPipeline,
     depth: Option<wgpu::TextureView>,
     size: (u32, u32),
+    /// GUI batch drawing (`FrameInput::gui`) and its own handle on the assets for lazy loads.
+    gui: crate::gui::GuiRenderer,
+    assets: haste_assets::Assets,
+    /// Entity cube models (`FrameInput::entities`).
+    entity: crate::entity::EntityRenderer,
+    /// Sky, celestial bodies, clouds, weather; terrain fog colour and daylight.
+    sky: crate::sky::SkyRenderer,
+    /// Name tags projected to GUI space this frame.
+    nametags: Vec<crate::gui::ScreenNametag>,
 }
 
 #[allow(dead_code)]
 struct Offscreen {
     color: wgpu::Texture,
     color_view: wgpu::TextureView,
+    /// Non-sRGB view of `color` for the GUI pass.
+    gui_view: wgpu::TextureView,
     depth: wgpu::Texture,
     depth_view: wgpu::TextureView,
     width: u32,
@@ -429,6 +447,30 @@ impl Renderer {
 
         let mesher = Mesher::new(baked.clone(), atlas.clone());
 
+        // GUI: the font (with unifont when the assets index has it) and a renderer drawing into
+        // a non-sRGB view of the target so blending happens on sRGB values like vanilla.
+        let font = Arc::new(assets.font_default().context("loading the default font")?);
+        let mut gui = crate::gui::GuiRenderer::new(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            surface_format.remove_srgb_suffix(),
+            font,
+        );
+        let entity = crate::entity::EntityRenderer::new(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            surface_format,
+            &camera_bind_group_layout,
+        );
+        let sky = crate::sky::SkyRenderer::new(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            surface_format,
+            assets,
+        );
+        let mut gui_assets = assets.reopen()?;
+        gui.preload_sprites(&mut gui_assets, crate::gui::HUD_SPRITES);
+
         Ok(Renderer {
             gpu,
             surface: surface.map(|(s, _)| s),
@@ -449,7 +491,68 @@ impl Renderer {
             pipeline_translucent,
             depth: None,
             size,
+            gui,
+            assets: gui_assets,
+            entity,
+            sky,
+            nametags: Vec::new(),
         })
+    }
+
+    /// The dimension being drawn: picks the sky (overworld, End, or fog colour only).
+    pub fn set_dimension(&mut self, dim: &haste_core::game::DimensionInfo) {
+        self.sky.kind = crate::sky::SkyKind::of(dim);
+    }
+
+    /// Sky and block light at each entity's position, sampled from the world by the caller
+    /// (the renderer holds no world reference). Call before `render`; entities without an
+    /// entry are drawn at full sky light.
+    pub fn set_entity_lights(
+        &mut self,
+        lights: impl IntoIterator<Item = (haste_core::EntityId, (u8, u8))>,
+    ) {
+        self.entity.set_lights(lights);
+    }
+
+    /// Convenience over `set_entity_lights`: samples `world` at each instance's block position.
+    pub fn sample_entity_lights(
+        &mut self,
+        world: &dyn BlockView,
+        entities: &[haste_core::model::EntityInstance],
+    ) {
+        self.entity.set_lights(entities.iter().map(|e| {
+            let p = haste_core::BlockPos::new(
+                e.pos.x.floor() as i32,
+                (e.pos.y + 0.5).floor() as i32,
+                e.pos.z.floor() as i32,
+            );
+            (e.id, (world.sky_light(p), world.block_light(p)))
+        }));
+    }
+
+    /// Text measurement over the default font (vanilla `Font.width` rules), for the HUD and
+    /// tier-3 `Font` natives.
+    pub fn text_metrics(&self) -> Arc<dyn haste_core::gui::TextMetrics> {
+        self.gui.font().clone()
+    }
+
+    /// Item names by `minecraft:item` protocol id, so `GuiCommand::Item` can find models.
+    pub fn set_item_registry(&mut self, registries: &haste_data::Registries) {
+        let n = registries.len("minecraft:item");
+        let names = (0..n as u32)
+            .map(|i| {
+                registries
+                    .name("minecraft:item", haste_core::RegistryIndex(i))
+                    .cloned()
+                    .unwrap_or_else(|| haste_core::Identifier::minecraft("air"))
+            })
+            .collect();
+        self.gui.set_item_names(names);
+    }
+
+    /// Counters of the last GUI frame.
+    pub fn gui_stats(&self) -> crate::gui::GuiStats {
+        self.gui.stats
     }
 
     fn make_offscreen(
@@ -470,7 +573,7 @@ impl Renderer {
             dimension: wgpu::TextureDimension::D2,
             format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
+            view_formats: &[format.remove_srgb_suffix()],
         });
         let depth = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("offscreen-depth"),
@@ -487,6 +590,10 @@ impl Renderer {
             view_formats: &[],
         });
         Ok(Offscreen {
+            gui_view: color.create_view(&wgpu::TextureViewDescriptor {
+                format: Some(format.remove_srgb_suffix()),
+                ..Default::default()
+            }),
             color_view: color.create_view(&Default::default()),
             depth_view: depth.create_view(&Default::default()),
             color,
@@ -507,7 +614,11 @@ impl Renderer {
             height: h,
             present_mode: wgpu::PresentMode::Fifo,
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
-            view_formats: vec![],
+            view_formats: if self.surface_format.is_srgb() {
+                vec![self.surface_format.remove_srgb_suffix()]
+            } else {
+                vec![]
+            },
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&self.gpu.device, &config);
@@ -593,10 +704,12 @@ impl Renderer {
 
     /// Frustum culling of sections (Pomme cull.comp reference; CPU here).
     fn frustum_planes(m: &glam::Mat4) -> [glam::Vec4; 6] {
-        // Gribb/Hartmann column extraction from the combined matrix.
-        let c = |i: usize| m.col(i);
-        let (c0, c1, c2, c3) = (c(0), c(1), c(2), c(3));
-        [c3 + c0, c3 - c0, c3 + c1, c3 - c1, c3 + c2, c3 - c2].map(|row| row.normalize())
+        // Gribb/Hartmann: planes are row3 +- row_i of the clip matrix (clip = M * p).
+        // wgpu clip z is 0..w: the near plane is row2 alone.
+        let r = |i: usize| m.row(i);
+        let (r0, r1, r2, r3) = (r(0), r(1), r(2), r(3));
+        [r3 + r0, r3 - r0, r3 + r1, r3 - r1, r2, r3 - r2]
+            .map(|p| p / p.truncate().length().max(1e-12))
     }
 
     fn aabb_visible(planes: &[glam::Vec4; 6], min: [f32; 3], max: [f32; 3]) -> bool {
@@ -612,29 +725,32 @@ impl Renderer {
         true
     }
 
-    /// Vanilla sky colour by time of day (approximate: angle-based blend).
-    fn sky_color(sky: &SkyState) -> [f32; 3] {
-        if !sky.dimension_has_sky {
-            return [0.02, 0.02, 0.05];
-        }
-        // 24000 ticks per day; noon at 6000. Angle 0 = sunrise.
-        let angle = (sky.time_of_day as f32 / 24000.0) * std::f32::consts::TAU;
-        let daylight = (angle.cos().clamp(-1.0, 1.0) + 0.6).clamp(0.0, 1.0);
-        let day = [0.47, 0.65, 1.0];
-        let night = [0.01, 0.01, 0.03];
-        [
-            night[0] + (day[0] - night[0]) * daylight,
-            night[1] + (day[1] - night[1]) * daylight,
-            night[2] + (day[2] - night[2]) * daylight,
-        ]
-    }
-
     /// Render one frame. Returns stats (frame time measured around the submit).
     pub fn render(&mut self, frame: &FrameInput) -> Result<FrameStats> {
         let started = std::time::Instant::now();
         let aspect = self.size.0 as f32 / self.size.1 as f32;
         let view_proj = Self::view_projection(&frame.camera, aspect);
-        let fog_color = Self::sky_color(&frame.sky);
+        self.entity
+            .prepare(frame.entities, None, frame.camera.pos, &mut self.assets);
+        self.nametags.clear();
+        let gui_scale = frame.gui.scale.max(1) as f32;
+        for tag in &self.entity.nametags {
+            if let Some(t) =
+                crate::gui::project_nametag(&view_proj, &frame.camera, tag, self.size, gui_scale)
+            {
+                self.nametags.push(t);
+            }
+        }
+        let rot_view_proj = Self::view_projection(
+            &Camera {
+                pos: glam::DVec3::ZERO,
+                ..frame.camera
+            },
+            aspect,
+        );
+        self.sky
+            .prepare(&frame.camera, &frame.sky, view_proj, rot_view_proj);
+        let fog_color = self.sky.fog_linear();
         let camera_uniform = CameraUniform {
             cam_pos: [
                 frame.camera.pos.x as f32,
@@ -642,11 +758,13 @@ impl Renderer {
                 frame.camera.pos.z as f32,
                 0.0,
             ],
-            view_proj: view_proj.to_cols_array_2d(),
+            // Camera-relative: the shaders subtract cam_pos from world positions.
+            view_proj: rot_view_proj.to_cols_array_2d(),
             fog_color: [fog_color[0], fog_color[1], fog_color[2], 0.0],
             fog_start: frame.sky.fog_start,
             fog_end: frame.sky.fog_end,
-            _pad: [0.0; 2],
+            daylight: self.sky.daylight(),
+            _pad: 0.0,
         };
         self.gpu
             .queue
@@ -656,8 +774,12 @@ impl Renderer {
         // The acquired SurfaceTexture must outlive the pass (it presents on drop
         // after submit); hold it alongside the views.
         let mut held_surface_texture: Option<wgpu::SurfaceTexture> = None;
-        let (color_view, depth_view) = match (&self.offscreen, &self.depth) {
-            (Some(off), _) => (off.color_view.clone(), off.depth_view.clone()),
+        let (color_view, depth_view, gui_view) = match (&self.offscreen, &self.depth) {
+            (Some(off), _) => (
+                off.color_view.clone(),
+                off.depth_view.clone(),
+                off.gui_view.clone(),
+            ),
             (None, Some(d)) => {
                 let surface = self.surface.as_ref().context("no surface")?;
                 let frame_tex = match surface.get_current_texture() {
@@ -675,7 +797,14 @@ impl Renderer {
                 };
                 held_surface_texture = Some(frame_tex);
                 let tex = held_surface_texture.as_ref().unwrap();
-                (tex.texture.create_view(&Default::default()), d.clone())
+                (
+                    tex.texture.create_view(&Default::default()),
+                    d.clone(),
+                    tex.texture.create_view(&wgpu::TextureViewDescriptor {
+                        format: Some(self.surface_format.remove_srgb_suffix()),
+                        ..Default::default()
+                    }),
+                )
             }
             _ => anyhow::bail!("no render target"),
         };
@@ -684,7 +813,16 @@ impl Renderer {
 
         // Frustum cull. Collect owned draw data so later buffer work does not
         // borrow self.sections.
-        let planes = Self::frustum_planes(&view_proj);
+        // Culling in camera-relative space (f32 precision far from the origin).
+        let planes = Self::frustum_planes(&rot_view_proj);
+        let cam_f = frame.camera.pos;
+        let rel = |p: [f32; 3]| {
+            [
+                (p[0] as f64 - cam_f.x) as f32,
+                (p[1] as f64 - cam_f.y) as f32,
+                (p[2] as f64 - cam_f.z) as f32,
+            ]
+        };
         struct Draw<'a> {
             layer: haste_assets::RenderLayer,
             index_count: u32,
@@ -696,7 +834,7 @@ impl Renderer {
         let mut draws: Vec<Draw> = Vec::new();
         for meshes in self.sections.values() {
             for m in meshes {
-                if Self::aabb_visible(&planes, m.aabb.0, m.aabb.1) {
+                if Self::aabb_visible(&planes, rel(m.aabb.0), rel(m.aabb.1)) {
                     let center = glam::Vec3::from([
                         (m.aabb.0[0] + m.aabb.1[0]) * 0.5,
                         (m.aabb.0[1] + m.aabb.1[1]) * 0.5,
@@ -766,6 +904,7 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            draw_calls += self.sky.draw_background(&mut pass);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_bind_group(1, &self.atlas_bind_group, &[]);
 
@@ -782,7 +921,14 @@ impl Renderer {
                         contents: bytemuck::cast_slice(&origins),
                         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                     });
+            let mut entities_drawn = false;
             for (instance, d) in draws.iter().enumerate() {
+                // Entities after the opaque and cutout terrain, before translucent.
+                if !entities_drawn && d.layer == haste_assets::RenderLayer::Translucent {
+                    draw_calls += self.entity.draw(&mut pass);
+                    pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+                    entities_drawn = true;
+                }
                 let pipeline = match d.layer {
                     haste_assets::RenderLayer::Solid | haste_assets::RenderLayer::CutoutMipped => {
                         &self.pipeline_solid
@@ -797,6 +943,39 @@ impl Renderer {
                 pass.draw_indexed(0..d.index_count, 0, instance as u32..instance as u32 + 1);
                 draw_calls += 1;
             }
+            if !entities_drawn {
+                draw_calls += self.entity.draw(&mut pass);
+            }
+            draw_calls += self.sky.draw_overlays(&mut pass);
+        }
+
+        // GUI on top, in its own pass over the non-sRGB view (no depth).
+        if !frame.gui.commands.is_empty() || !self.nametags.is_empty() {
+            self.gui.prepare(
+                frame.gui,
+                frame.entities,
+                &self.nametags,
+                self.size,
+                &mut self.assets,
+            );
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("gui"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &gui_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.gui.draw(&mut pass, self.size);
+            draw_calls += self.gui.stats.draw_calls;
         }
 
         // Submit, then present (wgpu 30: present lives on the queue).
@@ -821,10 +1000,11 @@ impl Renderer {
             .as_ref()
             .context("read_back requires an offscreen renderer")?;
         let (w, h) = (off.width, off.height);
-        let bytes_per_row = NonZeroU32::new(w * 4).unwrap();
+        // Rows are padded to wgpu's 256-byte copy alignment.
+        let bytes_per_row = NonZeroU32::new((w * 4).next_multiple_of(256)).unwrap();
         let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
-            size: (w * h * 4) as u64,
+            size: (bytes_per_row.get() * h) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -869,18 +1049,12 @@ impl Renderer {
         let _ = format;
 
         // Rgba8UnormSrgb: the texture was created with this offscreen format.
-        let mut image = image::RgbaImage::new(w, h);
-        for y in 0..h {
-            for x in 0..w {
-                let i = ((y * w + x) * 4) as usize;
-                image.put_pixel(
-                    x,
-                    y,
-                    image::Rgba([data[i], data[i + 1], data[i + 2], data[i + 3]]),
-                );
-            }
+        let stride = bytes_per_row.get() as usize;
+        let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h as usize {
+            pixels.extend_from_slice(&data[y * stride..y * stride + w as usize * 4]);
         }
-        Ok(image)
+        Ok(image::RgbaImage::from_raw(w, h, pixels).expect("readback size"))
     }
 }
 

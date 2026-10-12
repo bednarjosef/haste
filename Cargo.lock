@@ -1329,6 +1329,7 @@ dependencies = [
  "haste-assets",
  "haste-core",
  "haste-data",
+ "haste-entity",
  "image",
  "parking_lot",
  "pollster",

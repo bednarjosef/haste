@@ -125,7 +125,11 @@ impl Renderer {
     pub fn render(&mut self, frame: &FrameInput) -> anyhow::Result<FrameStats>;
     pub fn text_metrics(&self) -> Arc<dyn haste_core::gui::TextMetrics>;
 }
-pub struct FrameInput<'a> { pub camera: Camera, pub entities: &'a [haste_core::model::EntityInstance], pub gui: &'a haste_core::gui::GuiFrame, pub sky: SkyState, pub partial_tick: f32 }
+pub struct FrameInput<'a> { pub camera: Camera, pub entities: &'a [haste_core::model::EntityInstance], pub gui: &'a haste_core::gui::GuiFrame, pub sky: SkyState, pub partial_tick: f32,
+    /// Block under the crosshair and the face hit: drawn as the outline of its outline shape.
+    pub block_target: Option<(BlockPos, Direction)>,
+    /// Crack overlays: our own break progress plus other players' `block_destruction` stages (0..=9).
+    pub breaking: &'a [(BlockPos, u8)] }
 pub struct Camera { pub pos: DVec3, pub yaw: f32, pub pitch: f32, pub fov_deg: f32 }
 pub struct SkyState { pub time_of_day: i64, pub rain: f32, pub dimension_has_sky: bool, pub fog_start: f32, pub fog_end: f32 }
 pub struct FrameStats { pub frame_ms: f32, pub chunk_sections_drawn: u32, pub chunk_sections_total: u32, pub meshes_pending: u32, pub draw_calls: u32 }
@@ -237,6 +241,12 @@ impl LocalPlayer {
     /// client sends for it, in vanilla's order (player_input, player_command, move_player_*,
     /// ..., client_tick_end last).
     pub fn tick(&mut self, input: &haste_core::input::InputState, world: &haste_world::World, data: &haste_data::GameData, out: &mut Vec<haste_protocol::ServerboundPlay>);
+    /// Breaking, placing, using, attacking, picking and hotbar changes for this tick
+    /// (`haste_core::input::InteractInput`); runs inside `tick` in vanilla's order.
+    pub fn set_interact(&mut self, input: haste_core::input::InteractInput);
+    /// Block under the crosshair and the face hit; our own break progress (stage 0..=9).
+    pub fn target(&self) -> Option<(BlockPos, Direction)>;
+    pub fn break_progress(&self) -> Option<(BlockPos, u8)>;
     /// Eye position and look angles interpolated by partial tick, for the camera.
     pub fn camera(&self, partial_tick: f32) -> (glam::DVec3, f32, f32);
 }
