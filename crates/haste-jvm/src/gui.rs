@@ -200,7 +200,7 @@ impl GuiPipeline {
     pub fn render(&self, width: u32, height: u32, scale: u32, mouse: (f64, f64), partial: f32) -> anyhow::Result<GuiFrame> {
         let args = [jvalue { i: width as i32 }, jvalue { i: height as i32 }, jvalue { i: scale as i32 }, jvalue { d: mouse.0 }, jvalue { d: mouse.1 }, jvalue { f: partial }];
         let commands = self.call(self.m.render, JavaType::Array, &args, |env, v| decode_frame(env, v.l()?))?;
-        Ok(GuiFrame { commands, scale, width, height })
+        Ok(GuiFrame { commands, scale, width, height, cursor: None })
     }
 
     /// Installs the renderer's text metrics; `Font.width` and friends call back into them.

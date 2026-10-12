@@ -18,8 +18,16 @@ pub enum GuiCommand {
     Texture { texture: Identifier, x: i32, y: i32, w: i32, h: i32, u: f32, v: f32, uw: f32, vh: f32, tex_w: u32, tex_h: u32, tint: Argb },
     /// A GUI sprite from the `gui` atlas (`minecraft:hud/hotbar` etc.), nine-slice handled by the renderer.
     Sprite { sprite: Identifier, x: i32, y: i32, w: i32, h: i32, tint: Argb },
-    /// Item icon by item registry index (renderer looks up the model).
+    /// Item icon by item registry index (renderer looks up the model). `count` is informational:
+    /// vanilla draws the count as a `Text` command itself, so the renderer must not draw it again.
     Item { item: crate::RegistryIndex, x: i32, y: i32, count: i32 },
+    /// A live entity drawn into a GUI box (inventory player model). The renderer renders the
+    /// entity's model looking at the mouse position, clipped to the box.
+    Entity { entity: crate::EntityId, x1: i32, y1: i32, x2: i32, y2: i32, scale: f32, mouse_x: f32, mouse_y: f32 },
+    /// A sub-region (u,v,w,h in sprite pixels of a sprite_w x sprite_h sprite) of a GUI sprite.
+    SpriteRegion { sprite: Identifier, sprite_w: i32, sprite_h: i32, u: i32, v: i32, x: i32, y: i32, w: i32, h: i32, tint: Argb },
+    /// Text with vanilla style flags (one command per style run). `Text` is the unstyled form.
+    StyledText { x: i32, y: i32, text: String, color: Argb, shadow: bool, style: TextStyle },
     /// Scissor rectangle on/off, in GUI pixels.
     ScissorPush { x1: i32, y1: i32, x2: i32, y2: i32 },
     ScissorPop,
@@ -28,6 +36,8 @@ pub enum GuiCommand {
     TranslatePop,
 }
 
+/// Scissor and translate commands apply to the commands that follow them; scissor rectangles are
+/// given in the translated space in effect when they are pushed.
 #[derive(Clone, Debug, Default)]
 pub struct GuiFrame {
     pub commands: Vec<GuiCommand>,
@@ -35,7 +45,21 @@ pub struct GuiFrame {
     pub scale: u32,
     pub width: u32,
     pub height: u32,
+    /// Cursor shape the screen asked for this frame (`None` = default arrow).
+    pub cursor: Option<CursorShape>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct TextStyle {
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strikethrough: bool,
+    pub obfuscated: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorShape { Arrow, IBeam, Crosshair, PointingHand, ResizeNs, ResizeEw, ResizeAll, NotAllowed }
 
 /// Text measurement the renderer provides to anyone laying out text (HUD, tier-3 `Font.width`).
 pub trait TextMetrics: Send + Sync {

@@ -186,7 +186,7 @@ impl GuiPipeline {
     pub fn open_screen(&self, screen: ScreenKind) -> anyhow::Result<()>;   // Chat, Pause, Inventory (real vanilla classes)
     pub fn close_screen(&self);
     pub fn is_open(&self) -> bool;
-    pub fn key(&self, key: i32, scancode: i32, mods: i32, pressed: bool) -> bool;   // returns consumed
+    pub fn key(&self, key: i32, keycode: i32, mods: i32, pressed: bool) -> bool;   // 26.3 uses SDL3: key = scancode, keycode = SDL keycode (EditBox matches on keycode), mods = SDL keymod; returns consumed
     pub fn char_typed(&self, c: char, mods: i32) -> bool;
     pub fn mouse(&self, x: f64, y: f64, button: Option<(i32, bool)>) -> bool;
     pub fn scroll(&self, x: f64, y: f64, dx: f64, dy: f64) -> bool;
@@ -195,6 +195,8 @@ impl GuiPipeline {
     pub fn set_text_metrics(&self, m: Arc<dyn TextMetrics>);   // Font.width natives call back here
 }
 ```
+`JvmConfig` and `ScreenKind` are defined in `haste-jvm`. Extra methods on the implementation: `tick`, `screen_class`, `mouse_grabbed`, `set_mouse_grabbed`, `take_last_error`, `with_state` (Rust-owned `GameState`: inventory slots, selected slot, chat lines, game mode; screens write back sent chat/commands and container clicks).
+
 Tier-2 proxies in Phase 1: `Minecraft` (getInstance, player, level, options, font, screen, setScreen), `LocalPlayer`/`Player`/`Inventory`/`ItemStack` (what the inventory screen reads), `Font`, `GuiGraphicsExtractor` (batched delegates), `Window`, `Options`, `KeyMapping`, `SoundManager` (no-op). Everything else: real vanilla classes or the Unimplemented log.
 
 ## haste-setup (WS7)

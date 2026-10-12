@@ -14,8 +14,8 @@ One line per task; details live in `docs/briefs/<ws>.md` and in the branch.
 | WS5-1 | WS5 (Opus) | physics: collision sweep, tested | M3 | done |
 | WS5-2 | WS5 (Opus) | physics: movement tick from public docs | M3 | done (awaiting traces) |
 | WS5-3 | WS5 (Opus) | trace replay harness | M3 | done; replay runs when traces exist |
-| WS6-1 | WS6 (Opus) | JVM host + tier-3 allow-listed loader | M5 | in progress |
-| WS6-2 | WS6 | proxies + GuiPipeline + Pause/Chat/Inventory screens | M5 | claimed |
+| WS6-1 | WS6 (Opus) | JVM host + tier-3 allow-listed loader | M5 | done |
+| WS6-2 | WS6 (Opus) | proxies + GuiPipeline + Pause/Chat/Inventory screens (real vanilla classes, 1 JNI call/frame, p50 34 µs) | M5 | done (headless; needs the renderer to draw GuiFrame) |
 | WS7-1 | WS7 | ensure_installed: Mojang downloads, JDK, datagen | M1 | in progress |
 | WS7-2 | WS7 | config, LocalServer, vanilla launcher, MSA auth | M6 | claimed |
 | WS8-1 | WS8 | server-side oracle dumps (block shapes, entity dims, block props) | M2/M3 | done |

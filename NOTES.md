@@ -2,6 +2,13 @@
 
 Newest at the top. One entry per decision, with the why; link the brief or report it came from.
 
+- **2026-10-12 M5 reached (headless).** Real vanilla `PauseScreen`, `ChatScreen` and
+  `InventoryScreen` run in the embedded JVM through the allow-listed tier-3 loader and 76 generated
+  proxies, with one JNI call per frame returning the `GuiFrame`; p50 34 µs per PauseScreen frame.
+  Bytecode verification is off (`-XX:-BytecodeVerificationRemote`) so classes link lazily; revisit
+  for Phase 2 mod classes. The wall for the next step is `BuiltInRegistries` (tier-1 data): bridging
+  Rust's registry data into Java is the next JVM task; until then tags, item components and
+  tooltips are approximate. Drawing the frame needs WS3's renderer (M2).
 - **2026-10-12 M1 reached (headless).** `haste --headless --server 127.0.0.1:25565 --seconds 60`
   stays connected to the local Fabric 26.3 server: 473 chunks, ~117 entities, ~29k packets, every
   play packet decoded, zero unknown ids. Server-verified corrections to the wiki (WS1):
