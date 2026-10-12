@@ -197,12 +197,28 @@ impl WorldFeed {
     }
 
     /// Copies the interpolated entity instances.
-    fn entities(&mut self, shared: &Shared, partial: f32) -> &[EntityInstance] {
+    /// Copies the interpolated entity instances, gives players their default skin and samples
+    /// each entity's light for the renderer.
+    fn entities(
+        &mut self,
+        shared: &Shared,
+        renderer: &mut Renderer,
+        partial: f32,
+    ) -> &[EntityInstance] {
         self.instances.clear();
-        shared
-            .entities
-            .read()
-            .render_instances(partial, &mut self.instances);
+        {
+            let store = shared.entities.read();
+            store.render_instances(partial, &mut self.instances);
+            for inst in &mut self.instances {
+                if inst.skin.is_none() {
+                    if let Some(e) = store.get(inst.id).filter(|e| e.is_player_type) {
+                        // The slim-arm flag is not used: haste-entity's humanoid model is wide.
+                        inst.skin = Some(haste_render::default_skin(e.uuid.as_u128()).0);
+                    }
+                }
+            }
+        }
+        renderer.sample_entity_lights(&*shared.world.read(), &self.instances);
         &self.instances
     }
 
@@ -263,6 +279,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut assets = open_assets()?;
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
+    renderer.set_item_registry(&shared.data.registries);
     let gui = GuiFrame::default();
     let mut feed = WorldFeed::default();
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
@@ -275,7 +292,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         camera.pitch = args.pitch.unwrap_or(camera.pitch);
         last_camera = camera;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
-        let entities = feed.entities(&shared, partial);
+        let entities = feed.entities(&shared, &mut renderer, partial);
         stats = renderer.render(&FrameInput {
             camera,
             entities,
@@ -445,7 +462,7 @@ impl App {
             frame_view(&self.shared, self.yaw, self.pitch, Instant::now());
         self.feed
             .feed(&self.shared, renderer, camera_section(&camera), vd);
-        let entities = self.feed.entities(&self.shared, partial);
+        let entities = self.feed.entities(&self.shared, renderer, partial);
         match renderer.render(&FrameInput {
             camera,
             entities,
@@ -480,7 +497,9 @@ impl ApplicationHandler for App {
         let result = (|| -> anyhow::Result<(Arc<Window>, Renderer)> {
             let window = Arc::new(event_loop.create_window(attrs)?);
             let mut assets = open_assets()?;
-            let renderer = Renderer::new(window.clone(), &mut assets, &self.shared.data.blocks)?;
+            let mut renderer =
+                Renderer::new(window.clone(), &mut assets, &self.shared.data.blocks)?;
+            renderer.set_item_registry(&self.shared.data.registries);
             Ok((window, renderer))
         })();
         match result {
