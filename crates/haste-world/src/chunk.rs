@@ -60,7 +60,7 @@ impl Heightmap {
         let per_long = 64 / bits;
         let long = i / per_long;
         let off = (i % per_long) * bits;
-        (((self.longs[long] as u64) >> (64 - off - bits)) as i32) & ((1 << bits) - 1)
+        (((self.longs[long] as u64) >> off) as i32) & ((1 << bits) - 1)
     }
 }
 

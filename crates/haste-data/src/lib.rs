@@ -415,9 +415,9 @@ mod tests {
         assert!((f.height - 8.0 / 9.0).abs() < 1e-6);
         let f = d.fluid(BlockStateId(3)).unwrap();
         assert!((f.height - 7.0 / 9.0).abs() < 1e-6);
-        // level 8+ = falling column = full block
+        // level 8+ = falling: 8/9 like a source (vanilla server, NOTES.md)
         let f = d.fluid(BlockStateId(4)).unwrap();
-        assert!((f.height - 1.0).abs() < 1e-6);
+        assert!((f.height - 8.0 / 9.0).abs() < 1e-6);
         // waterlogged stairs: fluid present, no level property -> full source height
         let f = d.fluid(BlockStateId(8)).unwrap();
         assert_eq!(f.kind, haste_core::view::FluidKind::Water);
