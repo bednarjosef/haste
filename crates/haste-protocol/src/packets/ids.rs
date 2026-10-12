@@ -118,6 +118,20 @@ impl PacketIds {
         Ok(ids)
     }
 
+    /// Builds a table from explicit name lists, assigning ids in list order.
+    /// For tests and tools that must not depend on `packets.json`.
+    pub fn from_names(lists: &[(State, Direction, &[&str])]) -> PacketIds {
+        let mut ids = PacketIds::default();
+        for (state, dir, names) in lists {
+            let t = &mut ids.tables[key(*state, *dir)];
+            for (i, n) in names.iter().enumerate() {
+                t.by_id.push(Some((*n).to_string()));
+                t.by_name.insert((*n).to_string(), i as i32);
+            }
+        }
+        ids
+    }
+
     /// The id of a packet (`minecraft:level_chunk_with_light`).
     pub fn id(&self, state: State, dir: Direction, name: &str) -> Option<i32> {
         self.tables[key(state, dir)].by_name.get(name).copied()
