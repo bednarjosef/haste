@@ -7,7 +7,8 @@ struct Camera {
     fog_color: vec4<f32>,
     fog_start: f32,
     fog_end: f32,
-    _pad: vec2<f32>,
+    daylight: f32,
+    _pad: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -36,7 +37,8 @@ fn vs_main(v: VertexIn) -> VertexOut {
     out.uv = v.uv;
     out.color = v.color;
     out.rect = v.rect;
-    let dist = length(v.pos - camera.cam_pos.xyz);
+    // Positions are camera-relative.
+    let dist = length(v.pos);
     var fog = 0.0;
     if (dist > camera.fog_start) {
         fog = clamp((dist - camera.fog_start) / max(camera.fog_end - camera.fog_start, 0.001), 0.0, 1.0);

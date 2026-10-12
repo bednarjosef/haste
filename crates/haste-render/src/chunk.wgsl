@@ -9,7 +9,9 @@ struct Camera {
     fog_color: vec4<f32>,
     fog_start: f32,
     fog_end: f32,
-    _pad: vec2<f32>,
+    // Sky light multiplier by time of day (1 at day, 0 at night; block light is unaffected).
+    daylight: f32,
+    _pad: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -62,7 +64,7 @@ fn lightmap(sky: u32, block: u32) -> f32 {
     let b = f32(block) / 15.0;
     // Vanilla light texture: sky fades with time of day; here daylight=1.
     // Use the standard gamma-ish response.
-    let sky_l = pow(s, 1.55) * 0.95 + 0.05;
+    let sky_l = (pow(s, 1.55) * 0.95 + 0.05) * (0.15 + 0.85 * camera.daylight);
     let block_l = pow(b, 1.55) * 0.95 + 0.05;
     return max(sky_l, block_l);
 }

@@ -283,11 +283,13 @@ impl EntityRenderer {
     }
 
     /// Poses every entity into the vertex buffer. `skip` is the entity the camera is (not drawn
-    /// in first person).
+    /// in first person). Positions are camera-relative (`camera` subtracted in f64) like the
+    /// terrain.
     pub fn prepare(
         &mut self,
         entities: &[EntityInstance],
         skip: Option<EntityId>,
+        camera: glam::DVec3,
         assets: &mut Assets,
     ) {
         self.vertices.clear();
@@ -301,7 +303,7 @@ impl EntityRenderer {
             let rect = self.texture_rect(&texture, assets);
             let (sky, block) = self.lights.get(&e.id).copied().unwrap_or((15, 0));
             let light = lightmap(sky, block);
-            let root = Mat4::from_translation(e.pos.as_vec3())
+            let root = Mat4::from_translation((e.pos - camera).as_vec3())
                 * Mat4::from_rotation_y((180.0 - e.yaw).to_radians())
                 * Mat4::from_scale(Vec3::new(-scale, -scale, scale) / 16.0);
             let start = self.vertices.len();

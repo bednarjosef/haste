@@ -10,6 +10,7 @@ pub mod mesher;
 pub mod occlusion;
 pub mod pipeline;
 pub mod renderer;
+pub mod sky;
 pub mod vertex;
 
 pub use entity::{default_skin, EntityRenderer, Nametag};
@@ -18,4 +19,5 @@ pub use mesher::{mesh_section, MeshSnapshot, Mesher, SectionMesh};
 pub use occlusion::{compute_visible_mask, section_visibility, Face, VisibilitySet};
 pub use pipeline::{upload_atlas, upload_section, Gpu, SectionGpuMesh};
 pub use renderer::{Camera, FrameInput, FrameStats, Renderer, SkyState};
+pub use sky::{SkyColors, SkyKind};
 pub use vertex::PackedVertex;

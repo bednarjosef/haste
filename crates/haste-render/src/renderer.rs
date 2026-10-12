@@ -115,6 +115,11 @@ mod tests {
             .flat_map(|x| (-1..=1).map(move |z| SectionPos::new(x, 0, z)))
             .collect();
         renderer.update_world(&Flat, &dirty, ChunkPos::new(0, 0), 4);
+        // Meshing is asynchronous: keep draining until the sections are uploaded.
+        for _ in 0..200 {
+            renderer.update_world(&Flat, &[], ChunkPos::new(0, 0), 4);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
 
         let frame = FrameInput {
             camera: Camera {
@@ -165,7 +170,9 @@ struct CameraUniform {
     fog_color: [f32; 4],
     fog_start: f32,
     fog_end: f32,
-    _pad: [f32; 2],
+    /// Sky light multiplier by time of day (`chunk.wgsl`).
+    daylight: f32,
+    _pad: f32,
 }
 
 /// The renderer. Construct with a window (windowed mode) or offscreen
@@ -197,6 +204,8 @@ pub struct Renderer {
     assets: haste_assets::Assets,
     /// Entity cube models (`FrameInput::entities`).
     entity: crate::entity::EntityRenderer,
+    /// Sky, celestial bodies, clouds, weather; terrain fog colour and daylight.
+    sky: crate::sky::SkyRenderer,
     /// Name tags projected to GUI space this frame.
     nametags: Vec<crate::gui::ScreenNametag>,
 }
@@ -453,6 +462,12 @@ impl Renderer {
             surface_format,
             &camera_bind_group_layout,
         );
+        let sky = crate::sky::SkyRenderer::new(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            surface_format,
+            assets,
+        );
         let mut gui_assets = assets.reopen()?;
         gui.preload_sprites(&mut gui_assets, crate::gui::HUD_SPRITES);
 
@@ -479,8 +494,14 @@ impl Renderer {
             gui,
             assets: gui_assets,
             entity,
+            sky,
             nametags: Vec::new(),
         })
+    }
+
+    /// The dimension being drawn: picks the sky (overworld, End, or fog colour only).
+    pub fn set_dimension(&mut self, dim: &haste_core::game::DimensionInfo) {
+        self.sky.kind = crate::sky::SkyKind::of(dim);
     }
 
     /// Sky and block light at each entity's position, sampled from the world by the caller
@@ -683,10 +704,12 @@ impl Renderer {
 
     /// Frustum culling of sections (Pomme cull.comp reference; CPU here).
     fn frustum_planes(m: &glam::Mat4) -> [glam::Vec4; 6] {
-        // Gribb/Hartmann column extraction from the combined matrix.
-        let c = |i: usize| m.col(i);
-        let (c0, c1, c2, c3) = (c(0), c(1), c(2), c(3));
-        [c3 + c0, c3 - c0, c3 + c1, c3 - c1, c3 + c2, c3 - c2].map(|row| row.normalize())
+        // Gribb/Hartmann: planes are row3 +- row_i of the clip matrix (clip = M * p).
+        // wgpu clip z is 0..w: the near plane is row2 alone.
+        let r = |i: usize| m.row(i);
+        let (r0, r1, r2, r3) = (r(0), r(1), r(2), r(3));
+        [r3 + r0, r3 - r0, r3 + r1, r3 - r1, r2, r3 - r2]
+            .map(|p| p / p.truncate().length().max(1e-12))
     }
 
     fn aabb_visible(planes: &[glam::Vec4; 6], min: [f32; 3], max: [f32; 3]) -> bool {
@@ -702,29 +725,13 @@ impl Renderer {
         true
     }
 
-    /// Vanilla sky colour by time of day (approximate: angle-based blend).
-    fn sky_color(sky: &SkyState) -> [f32; 3] {
-        if !sky.dimension_has_sky {
-            return [0.02, 0.02, 0.05];
-        }
-        // 24000 ticks per day; noon at 6000. Angle 0 = sunrise.
-        let angle = (sky.time_of_day as f32 / 24000.0) * std::f32::consts::TAU;
-        let daylight = (angle.cos().clamp(-1.0, 1.0) + 0.6).clamp(0.0, 1.0);
-        let day = [0.47, 0.65, 1.0];
-        let night = [0.01, 0.01, 0.03];
-        [
-            night[0] + (day[0] - night[0]) * daylight,
-            night[1] + (day[1] - night[1]) * daylight,
-            night[2] + (day[2] - night[2]) * daylight,
-        ]
-    }
-
     /// Render one frame. Returns stats (frame time measured around the submit).
     pub fn render(&mut self, frame: &FrameInput) -> Result<FrameStats> {
         let started = std::time::Instant::now();
         let aspect = self.size.0 as f32 / self.size.1 as f32;
         let view_proj = Self::view_projection(&frame.camera, aspect);
-        self.entity.prepare(frame.entities, None, &mut self.assets);
+        self.entity
+            .prepare(frame.entities, None, frame.camera.pos, &mut self.assets);
         self.nametags.clear();
         let gui_scale = frame.gui.scale.max(1) as f32;
         for tag in &self.entity.nametags {
@@ -734,7 +741,16 @@ impl Renderer {
                 self.nametags.push(t);
             }
         }
-        let fog_color = Self::sky_color(&frame.sky);
+        let rot_view_proj = Self::view_projection(
+            &Camera {
+                pos: glam::DVec3::ZERO,
+                ..frame.camera
+            },
+            aspect,
+        );
+        self.sky
+            .prepare(&frame.camera, &frame.sky, view_proj, rot_view_proj);
+        let fog_color = self.sky.fog_linear();
         let camera_uniform = CameraUniform {
             cam_pos: [
                 frame.camera.pos.x as f32,
@@ -742,11 +758,13 @@ impl Renderer {
                 frame.camera.pos.z as f32,
                 0.0,
             ],
-            view_proj: view_proj.to_cols_array_2d(),
+            // Camera-relative: the shaders subtract cam_pos from world positions.
+            view_proj: rot_view_proj.to_cols_array_2d(),
             fog_color: [fog_color[0], fog_color[1], fog_color[2], 0.0],
             fog_start: frame.sky.fog_start,
             fog_end: frame.sky.fog_end,
-            _pad: [0.0; 2],
+            daylight: self.sky.daylight(),
+            _pad: 0.0,
         };
         self.gpu
             .queue
@@ -795,7 +813,16 @@ impl Renderer {
 
         // Frustum cull. Collect owned draw data so later buffer work does not
         // borrow self.sections.
-        let planes = Self::frustum_planes(&view_proj);
+        // Culling in camera-relative space (f32 precision far from the origin).
+        let planes = Self::frustum_planes(&rot_view_proj);
+        let cam_f = frame.camera.pos;
+        let rel = |p: [f32; 3]| {
+            [
+                (p[0] as f64 - cam_f.x) as f32,
+                (p[1] as f64 - cam_f.y) as f32,
+                (p[2] as f64 - cam_f.z) as f32,
+            ]
+        };
         struct Draw<'a> {
             layer: haste_assets::RenderLayer,
             index_count: u32,
@@ -807,7 +834,7 @@ impl Renderer {
         let mut draws: Vec<Draw> = Vec::new();
         for meshes in self.sections.values() {
             for m in meshes {
-                if Self::aabb_visible(&planes, m.aabb.0, m.aabb.1) {
+                if Self::aabb_visible(&planes, rel(m.aabb.0), rel(m.aabb.1)) {
                     let center = glam::Vec3::from([
                         (m.aabb.0[0] + m.aabb.1[0]) * 0.5,
                         (m.aabb.0[1] + m.aabb.1[1]) * 0.5,
@@ -877,6 +904,7 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            draw_calls += self.sky.draw_background(&mut pass);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_bind_group(1, &self.atlas_bind_group, &[]);
 
@@ -918,6 +946,7 @@ impl Renderer {
             if !entities_drawn {
                 draw_calls += self.entity.draw(&mut pass);
             }
+            draw_calls += self.sky.draw_overlays(&mut pass);
         }
 
         // GUI on top, in its own pass over the non-sRGB view (no depth).

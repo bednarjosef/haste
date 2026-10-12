@@ -152,14 +152,7 @@ impl Assets {
     }
 }
 
-/// Texture ids in models may omit the namespace.
-fn normalize_texture_id(t: &str) -> String {
-    if t.contains(':') {
-        t.to_string()
-    } else {
-        format!("minecraft:{t}")
-    }
-}
+use crate::bake::normalize_texture_id;
 
 /// An integer ARGB or a three-float RGB array.
 fn parse_rgb(v: &serde_json::Value) -> Option<u32> {

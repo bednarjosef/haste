@@ -39,26 +39,6 @@ impl haste_core::view::BlockView for Flat {
     }
 }
 
-/// haste-entity's humanoid gives child parts (hat, jacket, sleeves, pants) the parent's absolute
-/// pivot; the renderer follows vanilla `PartPose` (child pivots relative to the parent). Convert
-/// until haste-entity changes, so this test checks the renderer, not that mismatch.
-fn relative_pivots(
-    model: &haste_core::model::CubeModel,
-) -> std::sync::Arc<haste_core::model::CubeModel> {
-    fn fix(part: &mut haste_core::model::ModelPart) {
-        let p = part.pivot;
-        for c in &mut part.children {
-            c.pivot -= p;
-            fix(c);
-        }
-    }
-    let mut m = model.clone();
-    for c in &mut m.root.children {
-        fix(c);
-    }
-    std::sync::Arc::new(m)
-}
-
 fn render_scene(
     renderer: &mut Renderer,
     world: &Flat,
@@ -134,7 +114,7 @@ fn entities_offscreen() {
     let (skin, slim) = haste_render::default_skin(0x1234_5678_9abc_def0_1234_5678_9abc_def0);
     let player = EntityInstance {
         id: EntityId(1),
-        model: relative_pivots(&haste_entity::models::humanoid(slim)),
+        model: haste_entity::models::humanoid(slim),
         pos: glam::DVec3::new(0.0, 1.0, 0.0),
         // Facing the camera (camera looks toward +z from z = -4, so the player faces -z).
         yaw: 180.0,
