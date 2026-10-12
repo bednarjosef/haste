@@ -28,6 +28,8 @@ pub struct Assets {
     /// Parsed `<assets_dir>/indexes/<index>.json`, when present.
     index_hashes: HashMap<String, String>,
     model_cache: HashMap<String, Arc<ModelFile>>,
+    /// Where this was opened from (`reopen`).
+    source: (PathBuf, PathBuf, String),
 }
 
 #[derive(Deserialize)]
@@ -67,7 +69,10 @@ pub enum SpriteMeta {
     NineSlice {
         width: u32,
         height: u32,
-        border: u32,
+        /// Left, top, right, bottom (a single number in the file means all four).
+        border: [u32; 4],
+        /// `stretch_inner`: the centre is stretched instead of tiled.
+        stretch_inner: bool,
     },
     Tile {
         width: u32,
@@ -77,15 +82,34 @@ pub enum SpriteMeta {
 
 impl Assets {
     pub fn open(client_jar: &Path, assets_dir: &Path, assets_index: &str) -> Result<Assets> {
+        let source = (
+            client_jar.to_path_buf(),
+            assets_dir.to_path_buf(),
+            assets_index.to_string(),
+        );
         let file = std::fs::File::open(client_jar)
             .with_context(|| format!("opening client jar {}", client_jar.display()))?;
         let mut jar = zip::ZipArchive::new(file)
             .with_context(|| format!("reading zip {}", client_jar.display()))?;
 
         let objects_dir = assets_dir.join("objects");
-        let index_path = assets_dir
+        let mut index_path = assets_dir
             .join("indexes")
             .join(format!("{assets_index}.json"));
+        if !index_path.exists() {
+            // The launcher names the index by its asset-index id (`34`), not the game version;
+            // with a single index present that is the one.
+            if let Ok(dir) = std::fs::read_dir(assets_dir.join("indexes")) {
+                let found: Vec<PathBuf> = dir
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|e| e == "json"))
+                    .collect();
+                if found.len() == 1 {
+                    index_path = found[0].clone();
+                }
+            }
+        }
         let index_hashes = match std::fs::read(&index_path) {
             Ok(bytes) => {
                 let parsed: AssetIndexFile = serde_json::from_slice(&bytes)
@@ -123,7 +147,25 @@ impl Assets {
             objects_dir,
             index_hashes,
             model_cache: HashMap::new(),
+            source,
         })
+    }
+
+    /// A second handle on the same jar and assets (the renderer keeps one for lazy loads).
+    pub fn reopen(&self) -> Result<Assets> {
+        Assets::open(&self.source.0, &self.source.1, &self.source.2)
+    }
+
+    /// `assets/<ns>/<path>` of a full texture id such as `minecraft:textures/gui/x.png`, or
+    /// `textures/<path>.png` of a short one (`minecraft:gui/x`), decoded.
+    pub fn texture_any(&mut self, id: &Identifier) -> Result<image::RgbaImage> {
+        let key = if id.path().ends_with(".png") {
+            format!("assets/{}/{}", id.namespace(), id.path())
+        } else {
+            asset_key(id, "textures", ".png")
+        };
+        let bytes = self.read_asset(&key)?;
+        decode_png(&bytes, &key)
     }
 
     /// `textures/<path>.png` of an identifier, e.g. `minecraft:block/stone`.
@@ -181,50 +223,6 @@ impl Assets {
         Ok(map)
     }
 
-    /// `font/default.json` resolved through its `reference` providers into bitmap
-    /// providers (ascii.png, accented.png, ...) plus the `space` provider's advances.
-    pub fn font_default(&mut self) -> Result<BitmapFont> {
-        self.load_font(&Identifier::minecraft("default"))
-    }
-
-    /// `font/<path>.json` (used by `default`'s reference providers).
-    fn load_font(&mut self, id: &Identifier) -> Result<BitmapFont> {
-        let key = asset_key(id, "font", ".json");
-        let bytes = self.read_asset(&key)?;
-        let file: FontFile =
-            serde_json::from_slice(&bytes).with_context(|| format!("parsing {key}"))?;
-        let mut font = BitmapFont::default();
-        for provider in file.providers {
-            match provider {
-                FontProvider::Bitmap(p) => {
-                    // The provider's `file` is a full texture id ending in .png
-                    // (e.g. minecraft:font/ascii.png), unlike `Assets::texture`
-                    // which appends .png itself.
-                    let id = Identifier::parse(&p.file)?;
-                    let key = format!("assets/{}/textures/{}", id.namespace(), id.path());
-                    let bytes = self.read_asset(&key)?;
-                    let image = image::load_from_memory(&bytes)
-                        .with_context(|| format!("decoding {key}"))?
-                        .to_rgba8();
-                    font.add_bitmap_page(p.height, p.ascent, &p.chars, image);
-                }
-                FontProvider::Reference { id: ref_id } => {
-                    // Reference the referenced font's glyphs; depth is bounded by the
-                    // recursion guard below (vanilla fonts are shallow).
-                    let sub = self.load_font(&Identifier::parse(&ref_id)?)?;
-                    font.merge(sub);
-                }
-                FontProvider::Space { advances } => {
-                    font.space_advances = advances;
-                }
-                FontProvider::Unimplemented => {
-                    tracing::debug!("unimplemented font provider type skipped");
-                }
-            }
-        }
-        Ok(font)
-    }
-
     /// `assets/minecraft/textures/gui/sprites/<path>.png` with its `.mcmeta` scaling
     /// (`gui/scaling`: nine_slice with a uniform border in 26.3, tile, or stretch).
     pub fn gui_sprite(&mut self, id: &Identifier) -> Result<(image::RgbaImage, SpriteMeta)> {
@@ -232,10 +230,14 @@ impl Assets {
         let bytes = self.read_asset(&key)?;
         let image = decode_png(&bytes, &key)?;
         let meta_key = format!("{key}.mcmeta");
+        let mut image = image;
         let meta = match self.try_read_asset(&meta_key)? {
             Some(m) => {
                 let f: TextureMetaFile =
                     serde_json::from_slice(&m).with_context(|| format!("parsing {meta_key}"))?;
+                if let Some(anim) = &f.animation {
+                    image = first_animation_frame(image, anim);
+                }
                 f.gui
                     .map(|g| g.scaling.into())
                     .unwrap_or(SpriteMeta::Stretch)
@@ -258,6 +260,12 @@ impl Assets {
         self.names_under("assets/minecraft/textures/block/", ".png")
             .map(|p| Identifier::minecraft(&format!("block/{p}")))
             .collect()
+    }
+
+    /// File names directly under `dir` (an `assets/...` key prefix) ending with `ext`, path
+    /// relative to `dir`, without the extension.
+    pub fn names_in(&mut self, dir: &str, ext: &str) -> impl Iterator<Item = String> {
+        self.names_under(dir, ext)
     }
 
     /// File names directly under `dir` ending with `ext`, path relative to `dir`.
@@ -283,6 +291,8 @@ impl Assets {
         let mut elements: Option<Vec<crate::model::ElementDef>> = None;
         let mut ambientocclusion: Option<bool> = None;
         let mut gui_light: Option<bool> = None;
+        let mut gui_display: Option<crate::model::DisplayTransform> = None;
+        let mut firstperson_display: Option<crate::model::DisplayTransform> = None;
         let mut current = id.clone();
 
         for _ in 0..20 {
@@ -298,10 +308,30 @@ impl Assets {
             if ambientocclusion.is_none() && model.ambientocclusion.is_some() {
                 ambientocclusion = model.ambientocclusion;
             }
+            if firstperson_display.is_none() {
+                firstperson_display = model
+                    .display
+                    .get("firstperson_righthand")
+                    .and_then(crate::model::DisplayTransform::parse);
+            }
+            if gui_display.is_none() {
+                gui_display = model
+                    .display
+                    .get("gui")
+                    .and_then(crate::model::DisplayTransform::parse);
+            }
             if gui_light.is_none() && model.gui_light.is_some() {
                 gui_light = Some(model.gui_light.as_deref() == Some("front"));
             }
             match &model.parent {
+                // `builtin/generated` (flat items) and `builtin/entity` have no file.
+                Some(parent)
+                    if parent
+                        .trim_start_matches("minecraft:")
+                        .starts_with("builtin/") =>
+                {
+                    break
+                }
                 Some(parent) => current = Identifier::parse(parent)?,
                 None => break,
             }
@@ -318,6 +348,8 @@ impl Assets {
             elements: elements.unwrap_or_default(),
             ambientocclusion: ambientocclusion.unwrap_or(true),
             gui_light: gui_light.unwrap_or(false),
+            gui_display,
+            firstperson_display,
         })
     }
 
@@ -343,17 +375,22 @@ impl Assets {
             .with_context(|| format!("asset {key} not found"))
     }
 
-    fn try_read_asset(&mut self, key: &str) -> Result<Option<Vec<u8>>> {
+    /// The downloaded assets (index + objects) take precedence over the jar: the jar carries
+    /// stubs for what the launcher downloads (`font/include/unifont.json` is empty in the jar).
+    /// Index keys have no `assets/` prefix.
+    pub(crate) fn try_read_asset(&mut self, key: &str) -> Result<Option<Vec<u8>>> {
+        let index_key = key.strip_prefix("assets/").unwrap_or(key);
+        if let (Some(objects), Some(hash)) = (&self.objects_dir, self.index_hashes.get(index_key)) {
+            let path = objects.join(&hash[..2]).join(hash);
+            if let Ok(bytes) = std::fs::read(&path) {
+                return Ok(Some(bytes));
+            }
+            tracing::warn!("indexed asset {key} missing at {}", path.display());
+        }
         if let Ok(mut entry) = self.jar.by_name(key) {
             let mut buf = Vec::with_capacity(entry.size() as usize);
             entry.read_to_end(&mut buf)?;
             return Ok(Some(buf));
-        }
-        if let (Some(objects), Some(hash)) = (&self.objects_dir, self.index_hashes.get(key)) {
-            let path = objects.join(&hash[..2]).join(hash);
-            let bytes = std::fs::read(&path)
-                .with_context(|| format!("reading indexed asset {key} from {}", path.display()))?;
-            return Ok(Some(bytes));
         }
         Ok(None)
     }
@@ -383,6 +420,57 @@ pub(crate) fn asset_key(id: &Identifier, category: &str, suffix: &str) -> String
     )
 }
 
+/// The first frame of an animated strip (frames stacked vertically; frame size from the
+/// `.mcmeta` `width`/`height`, else square frames of the image width). Uses the first listed
+/// frame index when `frames` is given.
+fn first_animation_frame(image: image::RgbaImage, anim: &AnimationMetaRaw) -> image::RgbaImage {
+    let (w, h) = image.dimensions();
+    let fw = anim.width.unwrap_or(w).min(w).max(1);
+    let fh = anim
+        .height
+        .unwrap_or(if anim.width.is_some() { h } else { w })
+        .min(h)
+        .max(1);
+    let per_row = (w / fw).max(1);
+    let count = per_row * (h / fh).max(1);
+    let first = match anim.frames.as_ref().and_then(|f| f.first()) {
+        Some(serde_json::Value::Number(n)) => n.as_u64().unwrap_or(0) as u32,
+        Some(serde_json::Value::Object(o)) => {
+            o.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32
+        }
+        _ => 0,
+    };
+    let first = if first < count { first } else { 0 };
+    if fw == w && fh == h {
+        return image;
+    }
+    let (fx, fy) = ((first % per_row) * fw, (first / per_row) * fh);
+    image::imageops::crop_imm(&image, fx, fy, fw, fh).to_image()
+}
+
+/// `textures/<path>.png` reduced to its first animation frame when it has an `.mcmeta`
+/// animation (block textures used by GUI items).
+impl Assets {
+    pub fn texture_first_frame(&mut self, id: &Identifier) -> Result<image::RgbaImage> {
+        let image = self.texture_any(id)?;
+        let meta_key = if id.path().ends_with(".png") {
+            format!("assets/{}/{}.mcmeta", id.namespace(), id.path())
+        } else {
+            asset_key(id, "textures", ".png.mcmeta")
+        };
+        Ok(match self.try_read_asset(&meta_key)? {
+            Some(m) => match serde_json::from_slice::<TextureMetaFile>(&m) {
+                Ok(TextureMetaFile {
+                    animation: Some(anim),
+                    ..
+                }) => first_animation_frame(image, &anim),
+                _ => image,
+            },
+            None => image,
+        })
+    }
+}
+
 fn decode_png(bytes: &[u8], key: &str) -> Result<image::RgbaImage> {
     let image = image::load_from_memory(bytes).with_context(|| format!("decoding png {key}"))?;
     Ok(image.to_rgba8())
@@ -400,12 +488,26 @@ struct GuiMetaRaw {
 }
 
 #[derive(Deserialize)]
+#[serde(untagged)]
+enum BorderSerde {
+    Uniform(u32),
+    Sides {
+        left: u32,
+        top: u32,
+        right: u32,
+        bottom: u32,
+    },
+}
+
+#[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SpriteMetaSerde {
     NineSlice {
         width: u32,
         height: u32,
-        border: u32,
+        border: BorderSerde,
+        #[serde(default)]
+        stretch_inner: bool,
     },
     Tile {
         width: u32,
@@ -421,10 +523,20 @@ impl From<SpriteMetaSerde> for SpriteMeta {
                 width,
                 height,
                 border,
+                stretch_inner,
             } => SpriteMeta::NineSlice {
                 width,
                 height,
-                border,
+                border: match border {
+                    BorderSerde::Uniform(b) => [b; 4],
+                    BorderSerde::Sides {
+                        left,
+                        top,
+                        right,
+                        bottom,
+                    } => [left, top, right, bottom],
+                },
+                stretch_inner,
             },
             SpriteMetaSerde::Tile { width, height } => SpriteMeta::Tile { width, height },
             SpriteMetaSerde::Stretch => SpriteMeta::Stretch,
@@ -471,166 +583,6 @@ impl From<AnimationMetaRaw> for AnimationMeta {
     }
 }
 
-#[derive(Deserialize)]
-struct FontFile {
-    #[serde(default)]
-    providers: Vec<FontProvider>,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "type")]
-enum FontProvider {
-    // NOTE: every variant needs an explicit rename: serde's internally-tagged
-    // matching is case-sensitive and does NOT apply rename_all here.
-    #[serde(rename = "bitmap")]
-    Bitmap(BitmapProviderRaw),
-    #[serde(rename = "reference")]
-    Reference { id: String },
-    #[serde(rename = "space")]
-    Space { advances: HashMap<String, u32> },
-    #[serde(other)]
-    Unimplemented,
-}
-
-#[derive(Deserialize)]
-struct BitmapProviderRaw {
-    file: String,
-    height: Option<u32>,
-    ascent: Option<i32>,
-    chars: Vec<String>,
-}
-
-/// A resolved bitmap font: glyph pages (each row of `chars` names 16 columns of an
-/// 8-px-wide font page) plus space-provider advances. Space = 4 px comes from
-/// `include/space.json`'s `" ": 4`; measurement defaults to non-empty columns + 1.
-#[derive(Default)]
-pub struct BitmapFont {
-    pub glyphs: HashMap<char, Glyph>,
-    pub space_advances: HashMap<String, u32>,
-    pages: Vec<Page>,
-}
-
-#[derive(Clone, Debug)]
-pub struct Glyph {
-    /// Glyph page this glyph lives in (index in `BitmapFont::pages` order).
-    pub page: usize,
-    /// Position in the page in pixels.
-    pub x: u32,
-    pub y: u32,
-    /// Width in pixels (non-empty columns + 1, vanilla's bitmap measurement).
-    pub width: u32,
-    /// Glyph height as declared by the provider (`height` field, default 8).
-    pub height: u32,
-    /// `ascent` (distance from the top of the line box to the glyph baseline).
-    pub ascent: i32,
-}
-
-impl BitmapFont {
-    /// A bitmap page: `chars` rows of 16 code points, an 8-px cell grid over the image.
-    fn add_bitmap_page(
-        &mut self,
-        height: Option<u32>,
-        ascent: Option<i32>,
-        chars: &[String],
-        image: image::RgbaImage,
-    ) {
-        let height = height.unwrap_or(8);
-        let ascent = ascent.unwrap_or(7);
-        let page = Page {
-            image: Arc::new(image),
-        };
-        let page_index = self.pages.len();
-        let cell = 8;
-        for (row, line) in chars.iter().enumerate() {
-            for (col, ch) in line.chars().enumerate() {
-                if ch == '\0' {
-                    continue;
-                }
-                let x = (col as u32) * cell;
-                let y = (row as u32) * cell;
-                let width = page.glyph_width(x, y, height);
-                let glyph = Glyph {
-                    page: page_index,
-                    x,
-                    y,
-                    width,
-                    height,
-                    ascent,
-                };
-                self.glyphs.entry(ch).or_insert(glyph);
-            }
-        }
-        self.pages.push(page);
-    }
-
-    /// Merge another font's pages/glyphs (a `reference` provider); later pages
-    /// never override earlier glyphs, matching provider priority order.
-    fn merge(&mut self, other: BitmapFont) {
-        let page_base = self.pages.len();
-        for (ch, mut g) in other.glyphs {
-            g.page += page_base;
-            self.glyphs.entry(ch).or_insert(g);
-        }
-        self.pages.extend(other.pages);
-        if self.space_advances.is_empty() {
-            self.space_advances = other.space_advances;
-        }
-    }
-
-    /// Advance width of one character, or None for an unknown char.
-    pub fn char_width(&self, ch: char) -> Option<u32> {
-        if let Some(glyph) = self.glyphs.get(&ch) {
-            return Some(glyph.width);
-        }
-        if ch == ' ' {
-            return Some(4); // include/space.json: " ": 4
-        }
-        self.space_advances
-            .get(ch.to_string().as_str())
-            .copied()
-            .or(if ch == ' ' { Some(4) } else { None })
-    }
-}
-
-pub(crate) struct Page {
-    pub image: Arc<image::RgbaImage>,
-}
-
-impl Page {
-    /// Width by non-empty columns: count columns with any non-zero-alpha pixel in
-    /// the glyph's cell, then +1 for the spacing column (vanilla's `GlyphInfo` for
-    /// bitmap fonts measures the advance as the last non-empty column + 1).
-    fn glyph_width(&self, x: u32, y: u32, height: u32) -> u32 {
-        let (w, _h) = self.image.dimensions();
-        let mut last_nonempty = 0;
-        let mut any = false;
-        for cx in 0..8 {
-            if x + cx >= w {
-                break;
-            }
-            let mut nonempty = false;
-            for cy in 0..height {
-                if y + cy >= self.image.height() {
-                    break;
-                }
-                if self.image.get_pixel(x + cx, y + cy).0[3] != 0 {
-                    nonempty = true;
-                    break;
-                }
-            }
-            if nonempty {
-                last_nonempty = cx + 1;
-                any = true;
-            }
-        }
-        if any {
-            last_nonempty
-        } else {
-            4 // blank glyph cell (vanilla gives spaces advance 4 through the space provider)
-        }
-    }
-}
-
 /// The model with parent chain resolved, as returned by `Assets::model`.
 /// (Pomme's `ResolvedModel` shape, restricted to what block baking needs.)
 #[derive(Clone, Debug)]
@@ -641,16 +593,6 @@ pub struct ModelJson {
     pub ambientocclusion: bool,
     /// `gui_light`: true = `front` (flat items). Only used by item rendering later.
     pub gui_light: bool,
-}
-
-/// `haste_core::gui::TextMetrics` over the bitmap font: width from glyph
-/// advances (space provider's 4 px for spaces), line height 9 like vanilla.
-impl haste_core::gui::TextMetrics for BitmapFont {
-    fn width(&self, text: &str) -> i32 {
-        text.chars()
-            .map(|ch| self.char_width(ch).unwrap_or(6) as i32)
-            .sum()
-    }
 }
 
 #[cfg(test)]
@@ -707,15 +649,29 @@ pub(crate) mod tests {
     fn jar_font_and_language() {
         jar_test("font", |a| {
             let font = a.font_default().unwrap();
-            assert!(font.glyphs.contains_key(&'A'));
+            assert!(font.defined_glyph('A').is_some());
             assert_eq!(font.char_width(' '), Some(4));
             assert!(font.char_width('W').unwrap() > font.char_width('i').unwrap_or(0));
             let en = a.language("en_us").unwrap();
             assert!(en.contains_key("block.minecraft.stone"));
             use haste_core::gui::TextMetrics;
-            assert_eq!(font.width("i"), 1); // 1 px glyph + 0 extra
-            assert!(font.width("W") > font.width("i"));
-            assert_eq!(font.width("ii"), 2);
+            // Vanilla widths: glyph columns + 1 spacing column.
+            assert_eq!(font.width("i"), 2);
+            assert_eq!(font.width("l"), 3);
+            assert_eq!(font.width("A"), 6);
+            assert_eq!(font.width("W"), 6);
+            assert_eq!(font.width(" "), 4);
+            assert_eq!(font.width("Hello World"), 55); // H6 e6 l3 l3 o6 _4 W6 o6 r6 l3 d6
+            assert!(
+                font.len() > 10_000,
+                "unifont not loaded from the assets index"
+            );
+            // Accented page (9x12 cells, height 12): measured in its own cell size.
+            assert_eq!(font.width("É"), 6);
+            // Unifont from the assets index (CJK: 16 columns at half scale + 1).
+            if font.len() > 10_000 {
+                assert_eq!(font.width("中"), 9);
+            }
         });
     }
 
@@ -734,9 +690,20 @@ pub(crate) mod tests {
                 SpriteMeta::NineSlice {
                     width: 200,
                     height: 26,
-                    border: 10
+                    border: [10; 4],
+                    stretch_inner: false
                 }
             );
+            let (_, meta) = a
+                .gui_sprite(&Identifier::minecraft("tooltip/frame"))
+                .unwrap();
+            assert!(matches!(
+                meta,
+                SpriteMeta::NineSlice {
+                    stretch_inner: true,
+                    ..
+                }
+            ));
         });
     }
 

@@ -177,6 +177,18 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
             })
             .collect();
         println!("blocks below the player: {}", column.join(", "));
+        let light: Vec<String> = (-1..=3)
+            .map(|d| {
+                let b = BlockPos::new(p.x, p.y + d, p.z);
+                format!(
+                    "y{} sky {} block {}",
+                    b.y,
+                    world.sky_light(b),
+                    world.block_light(b)
+                )
+            })
+            .collect();
+        println!("light at the player: {}", light.join(", "));
     }
     if let Some(e) = &counters.last_chunk_error {
         println!("last chunk error: {e}");

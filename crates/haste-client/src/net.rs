@@ -273,6 +273,9 @@ pub struct Session {
     /// Entities the server spawned and has not removed (crosshair targets).
     entity_ids: HashSet<EntityId>,
     entity_boxes: Vec<(EntityId, haste_core::Aabb)>,
+    /// Time of day in ticks from the first world clock of the last `set_time` (approximate:
+    /// that the first clock is the day clock is not verified).
+    pub time_of_day: Option<i64>,
 }
 
 impl Session {
@@ -289,6 +292,7 @@ impl Session {
             breaking: HashMap::new(),
             entity_ids: HashSet::new(),
             entity_boxes: Vec::new(),
+            time_of_day: None,
         }
     }
 
@@ -449,6 +453,11 @@ impl Session {
                 }
             }
             P::PlayerInfoUpdate(u) => entities.player_info(&u.infos()),
+            P::SetTime(t) => {
+                if let Some(c) = t.clocks.first() {
+                    self.time_of_day = Some(c.time);
+                }
+            }
             P::SystemChat(c) if !c.overlay => self.push_chat(c.content.to_plain(&|_| None)),
             P::DisguisedChat(c) => self.push_chat(format!(
                 "<{}> {}",
@@ -505,7 +514,6 @@ impl Session {
         }
     }
 
-    #[allow(dead_code)] // the windowed client (client-app) passes these to FrameInput.breaking
     /// Break cracks to draw: other players' (`block_destruction`) and our own.
     pub fn breaking_stages(&self, out: &mut Vec<(BlockPos, u8)>) {
         out.extend(self.breaking.values().copied());
