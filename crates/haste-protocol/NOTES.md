@@ -62,8 +62,16 @@
 - The inline painting variant (metadata and `painting/variant` id 0) reads width/height as Int; never
   observed (the server only sends registry ids).
 - Particles `red/orange/yellow_poplar_leaves` have no documented data layout, so they are unsupported.
-- Reconfiguration (`start_configuration` in play) is acknowledged and handled in the reader task, but new
-  registries are not exposed through `Connection::registries()`.
+- Reconfiguration: the reader acknowledges, re-runs configuration with fresh registries and hands them to
+  `Connection::registries()` when the game dequeues the following `login`. Whether vanilla resends brand and
+  client information on reconfiguration is not determined (we do; servers accept it).
+- Transfer: the old connection is closed first (connecting while it is open gets the old session kicked
+  with "logged in from another location"), then handshake with intent 3; cookies (`CookieJar`) survive.
+  Verified with vanilla `/transfer` to the same server. The pack is never downloaded: with
+  `ResourcePackPolicy::Accept` we answer accepted, downloaded, loaded (a forced pack did not get us kicked).
+- Known packs: we answer `select_known_packs` with none, so the server sends full registry data. A vanilla
+  client answers `minecraft:core`; a server can tell the difference. Fixing it needs vanilla's registry
+  data from the player's jar.
 
 ## Debugging
 - `HASTE_PROTOCOL_DUMP=<dir>` writes the body of the first failing packet of each name to `<dir>/<name>.bin`.

@@ -262,6 +262,8 @@ pub struct Session {
     /// Time of day in ticks from the first world clock of the last `set_time` (approximate:
     /// that the first clock is the day clock is not verified).
     pub time_of_day: Option<i64>,
+    /// Set by `start_configuration` or `transfer`: the next `login` starts a new world.
+    pub new_world_pending: bool,
 }
 
 impl Session {
@@ -276,6 +278,7 @@ impl Session {
             entity_id,
             dimension,
             time_of_day: None,
+            new_world_pending: false,
         }
     }
 
@@ -290,9 +293,29 @@ impl Session {
     ) {
         use ClientboundPlay as P;
         self.counters.packets += 1;
+        if let P::Login(l) = &p {
+            if std::mem::take(&mut self.new_world_pending) {
+                // After a reconfiguration or transfer: a new world, a new player entity.
+                // `regs` already holds the registries that came with this login.
+                let dim = regs
+                    .dimension_info(l.spawn.dimension_type, &l.spawn.dimension)
+                    .unwrap_or_else(|| DimensionInfo {
+                        name: l.spawn.dimension.clone(),
+                        ..DimensionInfo::overworld()
+                    });
+                world.reset(&dim);
+                entities.clear();
+                self.dimension = dim;
+                self.entity_id = EntityId(l.entity_id);
+                let mode = GameMode::from_id(l.spawn.game_mode).unwrap_or(self.player.game_mode);
+                self.player = LocalPlayer::with_entity(self.entity_id, mode);
+                self.counters.respawns += 1;
+            }
+        }
         let own = self.entity_id;
         let player_packet = self.player.handle(&p, out);
         match p {
+            P::StartConfiguration(_) | P::Transfer(_) => self.new_world_pending = true,
             P::Login(l) => {
                 self.counters.got_login = true;
                 self.player.game_mode =
