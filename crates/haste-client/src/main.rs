@@ -12,6 +12,7 @@ use clap::Parser;
 
 mod headless;
 mod net;
+mod player;
 
 #[derive(Parser, Debug)]
 #[command(

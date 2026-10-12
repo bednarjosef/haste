@@ -145,7 +145,7 @@ fn update_flags_and_pose(
     // Keep a smaller pose if the desired one does not fit (e.g. crouching under a 1.5 high ceiling).
     let fits = |p: Pose| {
         no_collision(
-            &Aabb::entity(state.pos, attrs.width as f64, attrs.height_for(p)),
+            &Aabb::entity(state.pos, attrs.box_width(), attrs.height_for(p)),
             world,
             shapes,
         )

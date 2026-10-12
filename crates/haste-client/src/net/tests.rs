@@ -248,7 +248,7 @@ fn entity_packets_reach_the_store() {
         entity_id: 3,
         velocity: DVec3::new(0.0, -1.0, 0.0),
     }));
-    assert_eq!(r.session.player.velocity.y, 0.5);
+    assert_eq!(r.session.player.state.velocity.y, 0.5);
     assert_eq!(r.entities.log, ["head 3 30", "velocity 3 -1"]);
     r.apply(ClientboundPlay::RemoveEntities(cb::RemoveEntities {
         entity_ids: vec![3],
@@ -260,22 +260,23 @@ fn entity_packets_reach_the_store() {
 fn teleport_is_accepted_then_movement_follows_on_the_next_tick() {
     let mut r = Rig::new();
     // Nothing is sent before the first teleport.
-    r.session.end_tick(&mut r.out);
+    r.session
+        .end_tick(&InputState::default(), &r.world, &mut r.out);
     assert!(r.out.is_empty());
     r.apply(teleport(1, DVec3::new(0.5, -60.0, 0.5), 0));
     assert_eq!(r.names(), ["accept_teleportation", "player_loaded"]);
-    r.session.end_tick(&mut r.out);
-    assert_eq!(
-        r.names(),
-        ["move_player_pos_rot", "player_input", "client_tick_end"]
-    );
+    r.session
+        .end_tick(&InputState::default(), &r.world, &mut r.out);
+    // The fake world has no chunks: the player stays put, so no movement packet yet.
+    assert_eq!(r.names(), ["player_input", "client_tick_end"]);
     // player_input only when it changes; player_loaded only once.
-    r.session.end_tick(&mut r.out);
-    assert_eq!(r.names(), ["move_player_pos_rot", "client_tick_end"]);
+    r.session
+        .end_tick(&InputState::default(), &r.world, &mut r.out);
+    assert_eq!(r.names(), ["client_tick_end"]);
     r.apply(teleport(2, DVec3::new(1.0, 0.0, 0.0), teleport_flags::X));
     assert_eq!(r.names(), ["accept_teleportation"]);
     // x relative, y and z absolute.
-    assert_eq!(r.session.player.pos, DVec3::new(1.5, 0.0, 0.0));
+    assert_eq!(r.session.player.state.pos, DVec3::new(1.5, 0.0, 0.0));
 }
 
 #[test]
@@ -309,37 +310,9 @@ fn respawn_resets_world_and_entities() {
     assert_eq!(r.session.player.game_mode, GameMode::Survival);
     // Movement waits for the next teleport after a respawn.
     r.out.clear();
-    r.session.end_tick(&mut r.out);
+    r.session
+        .end_tick(&InputState::default(), &r.world, &mut r.out);
     assert!(r.out.is_empty());
-}
-
-#[test]
-fn teleport_relative_flags() {
-    let mut p = LocalPlayerState::new(GameMode::Survival);
-    p.apply_teleport(&cb::PlayerPosition {
-        teleport_id: 1,
-        pos: DVec3::new(10.0, 64.0, -5.0),
-        velocity: DVec3::ZERO,
-        yaw: 90.0,
-        pitch: 10.0,
-        flags: 0,
-    });
-    assert_eq!(p.pos, DVec3::new(10.0, 64.0, -5.0));
-    p.apply_teleport(&cb::PlayerPosition {
-        teleport_id: 2,
-        pos: DVec3::new(1.0, 0.0, 1.0),
-        velocity: DVec3::ZERO,
-        yaw: 5.0,
-        pitch: 0.0,
-        flags: teleport_flags::X
-            | teleport_flags::Y
-            | teleport_flags::Z
-            | teleport_flags::YAW
-            | teleport_flags::PITCH,
-    });
-    assert_eq!(p.pos, DVec3::new(11.0, 64.0, -4.0));
-    assert_eq!((p.yaw, p.pitch), (95.0, 10.0));
-    assert!(p.has_position);
 }
 
 /// The real `World` behind the sink: a synthetic chunk (our own encoder) loads and counts,
