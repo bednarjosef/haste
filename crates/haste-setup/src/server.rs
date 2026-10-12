@@ -26,10 +26,13 @@ impl LocalServer {
     /// scanned for the `Done` line (timeout 120 s).
     pub async fn start(world_dir: &Path, port: u16) -> anyhow::Result<LocalServer> {
         let server_jar = paths::server_jar();
-        anyhow::ensure!(server_jar.is_file(), "server jar missing at {} (run ensure_installed)", server_jar.display());
-        let java = crate::install::resolve_cached_java().ok_or_else(|| {
-            anyhow!("no cache/jdk/bin/java; run ensure_installed first")
-        })?;
+        anyhow::ensure!(
+            server_jar.is_file(),
+            "server jar missing at {} (run ensure_installed)",
+            server_jar.display()
+        );
+        let java = crate::install::resolve_cached_java()
+            .ok_or_else(|| anyhow!("no cache/jdk/bin/java; run ensure_installed first"))?;
         tokio::fs::create_dir_all(world_dir).await?;
         let world_name = world_dir
             .file_name()
@@ -162,15 +165,23 @@ mod tests {
         }
         let world = paths::cache_dir().join("singleplayer").join("test-start");
         let port = free_port().unwrap();
-        let server = LocalServer::start(&world, port).await.expect("server started");
+        let server = LocalServer::start(&world, port)
+            .await
+            .expect("server started");
         assert_eq!(server.address(), format!("127.0.0.1:{port}"));
         // the port should now accept connections
-        let conn = tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(("127.0.0.1", port))).await;
+        let conn = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::TcpStream::connect(("127.0.0.1", port)),
+        )
+        .await;
         assert!(conn.is_ok(), "server port not accepting connections");
         server.stop().await;
         // after stop, the port closes eventually; give it a moment and check the process is gone
         tokio::time::sleep(Duration::from_secs(2)).await;
-        let refused = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err();
+        let refused = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_err();
         assert!(refused, "server still accepting after stop");
     }
 }

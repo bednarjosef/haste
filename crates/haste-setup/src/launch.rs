@@ -16,7 +16,7 @@ pub struct LaunchOptions {
     pub uuid: Option<String>,
     /// Any string for offline; a real MSA token otherwise.
     pub access_token: String,
-    pub user_type: String,   // "legacy" for offline, "msa" for Microsoft
+    pub user_type: String,    // "legacy" for offline, "msa" for Microsoft
     pub version_type: String, // "release" or a custom label
     /// Install and launch Fabric Loader instead of the vanilla main class.
     pub fabric: bool,
@@ -40,21 +40,27 @@ impl Default for LaunchOptions {
 
 /// The game dir the client runs in: `cache/vanilla-game` (or `cache/fabric-game` with Fabric).
 pub fn game_dir(fabric: bool) -> PathBuf {
-    paths::cache_dir().join(if fabric { "fabric-game" } else { "vanilla-game" })
+    paths::cache_dir().join(if fabric {
+        "fabric-game"
+    } else {
+        "vanilla-game"
+    })
 }
 
 /// Offline-mode UUID (v3, MD5 of "OfflinePlayer:<name>"), matching vanilla servers' behavior.
 pub fn offline_uuid(username: &str) -> String {
     let digest = md5(format!("OfflinePlayer:{username}").as_bytes());
-    uuid::Builder::from_md5_bytes(digest).into_uuid().to_string()
+    uuid::Builder::from_md5_bytes(digest)
+        .into_uuid()
+        .to_string()
 }
 
 /// Minimal MD5 (RFC 1321), used only for offline UUIDs (the `md-5` crate is not a workspace dep).
 fn md5(input: &[u8]) -> [u8; 16] {
     const S: [u32; 64] = [
         7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
-        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6,
-        10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
     ];
     const K: [u32; 64] = [
         0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613,
@@ -95,10 +101,7 @@ fn md5(input: &[u8]) -> [u8; 16] {
             let tmp = dd;
             dd = cc;
             cc = bb;
-            let sum = aa
-                .wrapping_add(f)
-                .wrapping_add(K[i])
-                .wrapping_add(m[g]);
+            let sum = aa.wrapping_add(f).wrapping_add(K[i]).wrapping_add(m[g]);
             bb = bb.wrapping_add(sum.rotate_left(S[i]));
             aa = tmp;
         }
@@ -121,15 +124,23 @@ fn extract_natives(v: &VersionInfo, natives_dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(natives_dir)?;
     let os = crate::install::mojang_os();
     for lib in &v.libraries {
-        let Some(classifiers) = &lib.downloads.classifiers else { continue };
-        let Some(natives) = &lib.natives else { continue };
+        let Some(classifiers) = &lib.downloads.classifiers else {
+            continue;
+        };
+        let Some(natives) = &lib.natives else {
+            continue;
+        };
         let key = match os {
             "linux" => "linux",
             "osx" => "osx",
             _ => "windows",
         };
-        let Some(classifier) = natives.get(key) else { continue };
-        let Some(artifact) = classifiers.get(classifier) else { continue };
+        let Some(classifier) = natives.get(key) else {
+            continue;
+        };
+        let Some(artifact) = classifiers.get(classifier) else {
+            continue;
+        };
         let jar_path = crate::install::libraries_dir().join(&artifact.path);
         if !jar_path.is_file() {
             continue; // not downloaded for this OS
@@ -158,21 +169,35 @@ pub fn classpath(v: &VersionInfo) -> anyhow::Result<String> {
         }
     }
     parts.push(paths::client_jar());
-    Ok(std::env::join_paths(parts)?.into_string().expect("classpath is valid UTF-8 paths"))
+    Ok(std::env::join_paths(parts)?
+        .into_string()
+        .expect("classpath is valid UTF-8 paths"))
 }
 
 /// The substituted game arguments for the vanilla (or Fabric Knot) main class.
 fn game_args(opts: &LaunchOptions, game_dir: &Path, index_id: &str) -> Vec<String> {
     [
-        "--username", &opts.username,
-        "--version", paths::MC_VERSION,
-        "--gameDir", &game_dir.to_string_lossy(),
-        "--assetsDir", &paths::assets_dir().to_string_lossy(),
-        "--assetIndex", index_id,
-        "--uuid", &opts.uuid.clone().unwrap_or_else(|| offline_uuid(&opts.username)),
-        "--accessToken", &opts.access_token,
-        "--userType", &opts.user_type,
-        "--versionType", &opts.version_type,
+        "--username",
+        &opts.username,
+        "--version",
+        paths::MC_VERSION,
+        "--gameDir",
+        &game_dir.to_string_lossy(),
+        "--assetsDir",
+        &paths::assets_dir().to_string_lossy(),
+        "--assetIndex",
+        index_id,
+        "--uuid",
+        &opts
+            .uuid
+            .clone()
+            .unwrap_or_else(|| offline_uuid(&opts.username)),
+        "--accessToken",
+        &opts.access_token,
+        "--userType",
+        &opts.user_type,
+        "--versionType",
+        &opts.version_type,
     ]
     .into_iter()
     .map(|s| s.to_string())
@@ -223,14 +248,21 @@ pub async fn launch_vanilla(opts: LaunchOptions) -> anyhow::Result<LaunchedClien
             fabric.jvm_args,
         )
     } else {
-        (v.main_class.clone().unwrap_or_else(|| "net.minecraft.client.main.Main".into()), classpath(&v)?, vec![])
+        (
+            v.main_class
+                .clone()
+                .unwrap_or_else(|| "net.minecraft.client.main.Main".into()),
+            classpath(&v)?,
+            vec![],
+        )
     };
 
     let java = crate::install::resolve_cached_java()
         .ok_or_else(|| anyhow!("no cache/jdk/bin/java; run ensure_installed first"))?;
 
     let log_path = dir.join("client.log");
-    let log = std::fs::File::create(&log_path).with_context(|| format!("creating {}", log_path.display()))?;
+    let log = std::fs::File::create(&log_path)
+        .with_context(|| format!("creating {}", log_path.display()))?;
     let mut cmd = std::process::Command::new(&java);
     cmd.args(jvm_args(&v, &natives_dir, &classpath_str, &{
         let mut a = opts.jvm_args.clone();
@@ -243,8 +275,14 @@ pub async fn launch_vanilla(opts: LaunchOptions) -> anyhow::Result<LaunchedClien
     .stdin(Stdio::null())
     .stdout(Stdio::from(log))
     .stderr(Stdio::inherit());
-    let child = cmd.spawn().with_context(|| format!("launching client with {}", java.display()))?;
-    Ok(LaunchedClient { child, game_dir: dir, log_path })
+    let child = cmd
+        .spawn()
+        .with_context(|| format!("launching client with {}", java.display()))?;
+    Ok(LaunchedClient {
+        child,
+        game_dir: dir,
+        log_path,
+    })
 }
 
 const FABRIC_META: &str = "https://meta.fabricmc.net/v2";
@@ -257,7 +295,10 @@ struct FabricInstall {
 /// Installs the Fabric Loader for this MC version into the game dir (profile JSON + libraries
 /// into cache/libraries), returning the loader library paths and JVM args. Idempotent.
 async fn install_fabric(_v: &VersionInfo, game_dir: &Path) -> anyhow::Result<FabricInstall> {
-    let profile_url = format!("{FABRIC_META}/versions/loader/{}?limit=1", paths::MC_VERSION);
+    let profile_url = format!(
+        "{FABRIC_META}/versions/loader/{}?limit=1",
+        paths::MC_VERSION
+    );
     let client = reqwest::Client::new();
     let resp: serde_json::Value = client
         .get(&profile_url)
@@ -273,7 +314,11 @@ async fn install_fabric(_v: &VersionInfo, game_dir: &Path) -> anyhow::Result<Fab
         .to_string();
 
     // the profile JSON tells us the libraries and main class
-    let profile_json_url = format!("{FABRIC_META}/versions/loader/{}/{}/profile/json", paths::MC_VERSION, version);
+    let profile_json_url = format!(
+        "{FABRIC_META}/versions/loader/{}/{}/profile/json",
+        paths::MC_VERSION,
+        version
+    );
     let profile: serde_json::Value = client
         .get(&profile_json_url)
         .send()
@@ -293,8 +338,13 @@ async fn install_fabric(_v: &VersionInfo, game_dir: &Path) -> anyhow::Result<Fab
     let mut libraries = Vec::new();
     if let Some(libs) = profile["libraries"].as_array() {
         for lib in libs {
-            let name = lib["name"].as_str().context("fabric library without name")?;
-            let url = lib["url"].as_str().unwrap_or("https://maven.fabricmc.net/").to_string();
+            let name = lib["name"]
+                .as_str()
+                .context("fabric library without name")?;
+            let url = lib["url"]
+                .as_str()
+                .unwrap_or("https://maven.fabricmc.net/")
+                .to_string();
             let path = crate::mojang::maven_path(name)
                 .ok_or_else(|| anyhow!("unparseable fabric library name {name}"))?;
             let dest = libs_dir.join(&path);
@@ -303,7 +353,12 @@ async fn install_fabric(_v: &VersionInfo, game_dir: &Path) -> anyhow::Result<Fab
             if !dest.exists() {
                 // '+' is legal in Maven artifact names but must be percent-encoded in URLs
                 let dl = format!("{url}{}", path.replace('+', "%2B"));
-                specs.push(DownloadSpec { url: dl, sha1, size: 0, dest: dest.clone() });
+                specs.push(DownloadSpec {
+                    url: dl,
+                    sha1,
+                    size: 0,
+                    dest: dest.clone(),
+                });
             }
             libraries.push(dest);
         }
@@ -320,7 +375,10 @@ async fn install_fabric(_v: &VersionInfo, game_dir: &Path) -> anyhow::Result<Fab
             }
         }
     }
-    Ok(FabricInstall { libraries, jvm_args: fabric_jvm })
+    Ok(FabricInstall {
+        libraries,
+        jvm_args: fabric_jvm,
+    })
 }
 
 #[cfg(test)]
@@ -330,8 +388,14 @@ mod tests {
     #[test]
     fn offline_uuid_matches_known_value() {
         // v3 UUID of MD5("OfflinePlayer:Notch"), matching Java's UUID.nameUUIDFromBytes
-        assert_eq!(offline_uuid("Notch"), "b50ad385-829d-3141-a216-7e7d7539ba7f");
-        assert_eq!(offline_uuid("Player"), "a01e3843-e521-3998-958a-f459800e4d11");
+        assert_eq!(
+            offline_uuid("Notch"),
+            "b50ad385-829d-3141-a216-7e7d7539ba7f"
+        );
+        assert_eq!(
+            offline_uuid("Player"),
+            "a01e3843-e521-3998-958a-f459800e4d11"
+        );
         assert_ne!(offline_uuid("Notch"), offline_uuid("Steve"));
     }
 
@@ -349,7 +413,10 @@ mod tests {
     fn game_args_shape() {
         let dir = Path::new("/tmp/g");
         let args = game_args(
-            &LaunchOptions { username: "Steve".into(), ..Default::default() },
+            &LaunchOptions {
+                username: "Steve".into(),
+                ..Default::default()
+            },
             dir,
             "34",
         );
@@ -379,7 +446,10 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_secs(20)).await;
         let status = client.child.try_wait().expect("child is ours");
         let log = std::fs::read_to_string(&client.log_path).unwrap_or_default();
-        eprintln!("--- client.log (first 2000 chars) ---\n{}", &log[..log.len().min(2000)]);
+        eprintln!(
+            "--- client.log (first 2000 chars) ---\n{}",
+            &log[..log.len().min(2000)]
+        );
         match status {
             None => {
                 // still running (window may have opened on this box); kill it
@@ -392,7 +462,10 @@ mod tests {
                 let bad = log.contains("ClassNotFoundException")
                     || log.contains("NoClassDefFoundError")
                     || log.contains("Error occurred during initialization of VM");
-                assert!(!bad, "client failed to boot the JVM/classpath (exit {code}): {log}");
+                assert!(
+                    !bad,
+                    "client failed to boot the JVM/classpath (exit {code}): {log}"
+                );
             }
         }
     }
@@ -417,7 +490,10 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_secs(25)).await;
         let status = client.child.try_wait().expect("child is ours");
         let log = std::fs::read_to_string(&client.log_path).unwrap_or_default();
-        eprintln!("--- fabric client.log (first 2000 chars) ---\n{}", &log[..log.len().min(2000)]);
+        eprintln!(
+            "--- fabric client.log (first 2000 chars) ---\n{}",
+            &log[..log.len().min(2000)]
+        );
         let bad = log.contains("ClassNotFoundException")
             || log.contains("NoClassDefFoundError")
             || log.contains("Error occurred during initialization of VM")
@@ -425,6 +501,9 @@ mod tests {
         if status.is_none() {
             let _ = client.child.kill();
         }
-        assert!(!bad, "fabric client failed to boot (status {status:?}): {log}");
+        assert!(
+            !bad,
+            "fabric client failed to boot (status {status:?}): {log}"
+        );
     }
 }

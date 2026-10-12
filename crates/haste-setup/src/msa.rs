@@ -20,7 +20,9 @@ pub const MSA_SCOPE: &str = "XboxLive.signin offline_access";
 /// Reads `HASTE_MSA_CLIENT_ID`; the caller decides what to do when absent (no client_id is
 /// shipped with Haste).
 pub fn client_id() -> Option<String> {
-    std::env::var("HASTE_MSA_CLIENT_ID").ok().filter(|s| !s.is_empty())
+    std::env::var("HASTE_MSA_CLIENT_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 /// Step 1 response: what the user must enter where.
@@ -55,7 +57,10 @@ pub struct OauthToken {
 
 impl OauthToken {
     pub fn expires_at(&self) -> i64 {
-        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
             + self.expires_in as i64
     }
 }
@@ -144,14 +149,15 @@ pub async fn begin_device_code(client: &reqwest::Client) -> anyhow::Result<Devic
     let id = client_id().ok_or_else(|| anyhow!("HASTE_MSA_CLIENT_ID is not set"))?;
     let resp = client
         .post(DEVICE_CODE_URL)
-        .form(&[
-            ("client_id", id.as_str()),
-            ("scope", MSA_SCOPE),
-        ])
+        .form(&[("client_id", id.as_str()), ("scope", MSA_SCOPE)])
         .send()
         .await
         .context("POST devicecode")?;
-    anyhow::ensure!(resp.status().is_success(), "devicecode returned {}", resp.status());
+    anyhow::ensure!(
+        resp.status().is_success(),
+        "devicecode returned {}",
+        resp.status()
+    );
     resp.json().await.context("parsing devicecode response")
 }
 
@@ -177,7 +183,10 @@ pub async fn poll_device_code(
     match resp.error.as_deref() {
         None => Ok(Some(resp)),
         Some("authorization_pending") | Some("slow_down") => Ok(None),
-        Some(e) => Err(anyhow!("msa token error: {e}: {:?}", resp.error_description)),
+        Some(e) => Err(anyhow!(
+            "msa token error: {e}: {:?}",
+            resp.error_description
+        )),
     }
 }
 
@@ -205,7 +214,10 @@ pub async fn refresh(client: &reqwest::Client, refresh_token: &str) -> anyhow::R
 }
 
 /// MSA access token -> Xbox Live (XBL) token + user hash.
-pub async fn xbl_auth(client: &reqwest::Client, msa_access_token: &str) -> anyhow::Result<(String, String)> {
+pub async fn xbl_auth(
+    client: &reqwest::Client,
+    msa_access_token: &str,
+) -> anyhow::Result<(String, String)> {
     let req = XblRequest {
         properties: XblProperties {
             auth_method: "RPS",
@@ -234,7 +246,10 @@ pub async fn xbl_auth(client: &reqwest::Client, msa_access_token: &str) -> anyho
 }
 
 /// XBL token + uhs -> XSTS token for `rp://api.minecraftservices.com/`.
-pub async fn xsts_auth(client: &reqwest::Client, xbl_token: &str) -> anyhow::Result<(String, String)> {
+pub async fn xsts_auth(
+    client: &reqwest::Client,
+    xbl_token: &str,
+) -> anyhow::Result<(String, String)> {
     let user_tokens = [xbl_token.to_string()];
     let req = XstsRequest {
         properties: XstsProperties {
@@ -263,7 +278,11 @@ pub async fn xsts_auth(client: &reqwest::Client, xbl_token: &str) -> anyhow::Res
 }
 
 /// XSTS token + uhs -> Minecraft services access token.
-pub async fn mc_login(client: &reqwest::Client, uhs: &str, xsts_token: &str) -> anyhow::Result<McLoginResponse> {
+pub async fn mc_login(
+    client: &reqwest::Client,
+    uhs: &str,
+    xsts_token: &str,
+) -> anyhow::Result<McLoginResponse> {
     let req = McLoginRequest {
         identity_token: format!("XBL3.0 x={uhs};{xsts_token}").into(),
     };
@@ -280,17 +299,28 @@ pub async fn mc_login(client: &reqwest::Client, uhs: &str, xsts_token: &str) -> 
 }
 
 /// Minecraft access token -> player profile (uuid, name).
-pub async fn mc_profile(client: &reqwest::Client, mc_access_token: &str) -> anyhow::Result<MsaProfile> {
+pub async fn mc_profile(
+    client: &reqwest::Client,
+    mc_access_token: &str,
+) -> anyhow::Result<MsaProfile> {
     let resp = client
         .get(MC_PROFILE_URL)
         .bearer_auth(mc_access_token)
         .send()
         .await
         .context("GET mc profile")?;
-    anyhow::ensure!(resp.status().is_success(), "mc profile returned {}", resp.status());
+    anyhow::ensure!(
+        resp.status().is_success(),
+        "mc profile returned {}",
+        resp.status()
+    );
     let v: serde_json::Value = resp.json().await.context("parsing mc profile")?;
-    let id = v["id"].as_str().ok_or_else(|| anyhow!("profile has no id"))?;
-    let name = v["name"].as_str().ok_or_else(|| anyhow!("profile has no name"))?;
+    let id = v["id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("profile has no id"))?;
+    let name = v["name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("profile has no name"))?;
     Ok(MsaProfile {
         uuid: id.to_string(),
         name: name.to_string(),
@@ -310,8 +340,11 @@ pub async fn exchange_msa_token(
         access_token: mc.access_token,
         refresh_token: msa.refresh_token.clone(),
         expires_at: Some(
-            SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
-                + mc.expires_in as i64
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0)
+                + mc.expires_in as i64,
         ),
         profile: Some(profile),
     })
@@ -399,7 +432,9 @@ mod tests {
 
     #[test]
     fn builds_mc_identity_token() {
-        let req = McLoginRequest { identity_token: "XBL3.0 x=uhs;xsts".into() };
+        let req = McLoginRequest {
+            identity_token: "XBL3.0 x=uhs;xsts".into(),
+        };
         let j = serde_json::to_value(&req).unwrap();
         assert_eq!(j["identityToken"], "XBL3.0 x=uhs;xsts");
     }

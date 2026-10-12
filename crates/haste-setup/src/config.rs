@@ -70,7 +70,8 @@ impl Config {
             cfg.save()?;
             return Ok(cfg);
         }
-        let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
     }
 
@@ -112,7 +113,10 @@ mod tests {
                 access_token: "tok".into(),
                 refresh_token: "ref".into(),
                 expires_at: Some(1900000000),
-                profile: Some(MsaProfile { uuid: "u".into(), name: "Josef".into() }),
+                profile: Some(MsaProfile {
+                    uuid: "u".into(),
+                    name: "Josef".into(),
+                }),
             }),
         };
         let text = toml::to_string_pretty(&cfg).unwrap();
@@ -148,7 +152,10 @@ fov = 70.0
         let old = std::env::var_os("XDG_CONFIG_HOME");
         std::env::set_var("XDG_CONFIG_HOME", &home);
         let result: anyhow::Result<()> = (|| {
-            let cfg = Config { username: "Hermes".into(), ..Config::default() };
+            let cfg = Config {
+                username: "Hermes".into(),
+                ..Config::default()
+            };
             cfg.save()?;
             let path = config_path().unwrap();
             use std::os::unix::fs::PermissionsExt;
