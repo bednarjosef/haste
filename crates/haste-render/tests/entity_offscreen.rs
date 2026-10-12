@@ -72,6 +72,8 @@ fn render_with_gui(
             fog_end: 200.0,
         },
         partial_tick: 0.0,
+        block_target: None,
+        breaking: &[],
     };
     renderer.render(&frame).unwrap();
     renderer.read_back().unwrap()

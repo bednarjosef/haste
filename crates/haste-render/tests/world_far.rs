@@ -100,6 +100,8 @@ fn terrain_far_from_origin() {
                 fog_end: 64.0,
             },
             partial_tick: 0.0,
+            block_target: None,
+            breaking: &[],
         };
         let stats = renderer.render(&frame).unwrap();
         let img = renderer.read_back().unwrap();
@@ -204,6 +206,8 @@ fn sky_times_of_day() {
                 fog_end: 64.0,
             },
             partial_tick: 0.0,
+            block_target: None,
+            breaking: &[],
         };
         renderer.render(&frame).unwrap();
         let img = renderer.read_back().unwrap();
@@ -224,4 +228,85 @@ fn sky_times_of_day() {
     );
     let sunrise = get("sunrise_east");
     assert!(sunrise[0] > sunrise[2], "sunrise glow is warm: {sunrise:?}");
+}
+
+#[test]
+#[ignore = "needs the client jar, datagen reports and a Vulkan driver (source scripts/env.sh)"]
+fn outline_and_cracks() {
+    let jar = haste_core::paths::client_jar();
+    let mut assets =
+        haste_assets::Assets::open(&jar, &haste_core::paths::assets_dir(), "26.3").unwrap();
+    let data = haste_data::GameData::load().unwrap();
+    let world = Plain {
+        grass: data
+            .blocks
+            .state(
+                &haste_core::Identifier::minecraft("grass_block"),
+                &[("snowy", "false")],
+            )
+            .unwrap(),
+        dirt: data
+            .blocks
+            .default_state(&haste_core::Identifier::minecraft("dirt"))
+            .unwrap(),
+    };
+    let (w, h) = (320, 240);
+    let mut renderer = Renderer::new_offscreen(w, h, &mut assets, &data.blocks).unwrap();
+    let centre = SectionPos::new(X0 >> 4, 63 >> 4, Z0 >> 4);
+    let dirty: Vec<SectionPos> = (-1..=1)
+        .flat_map(|dx| {
+            (-1..=1).map(move |dz| SectionPos::new(centre.x + dx, centre.y, centre.z + dz))
+        })
+        .collect();
+    renderer.update_world(&world, &dirty, ChunkPos::new(centre.x, centre.z), 4);
+    for _ in 0..200 {
+        renderer.update_world(&world, &[], ChunkPos::new(centre.x, centre.z), 4);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let gui = haste_core::gui::GuiFrame::default();
+    let target = BlockPos::new(X0, 63, Z0 + 2);
+    let breaking = [(BlockPos::new(X0 + 1, 63, Z0 + 2), 9u8)];
+    let render = |renderer: &mut Renderer, with: bool| {
+        let frame = FrameInput {
+            camera: Camera {
+                pos: glam::DVec3::new(X0 as f64 + 0.5, 65.62, Z0 as f64 + 0.5),
+                yaw: 0.0,
+                pitch: 50.0,
+                fov_deg: 70.0,
+            },
+            entities: &[],
+            gui: &gui,
+            sky: SkyState {
+                time_of_day: 6000,
+                rain: 0.0,
+                dimension_has_sky: true,
+                fog_start: 48.0,
+                fog_end: 64.0,
+            },
+            partial_tick: 0.0,
+            block_target: with.then_some((target, haste_core::Direction::Up)),
+            breaking: if with { &breaking } else { &[] },
+        };
+        renderer.sample_world(&world, &data.shapes, &frame);
+        let stats = renderer.render(&frame).unwrap();
+        (renderer.read_back().unwrap(), stats)
+    };
+    let (plain, _) = render(&mut renderer, false);
+    let (img, stats) = render(&mut renderer, true);
+    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
+    std::fs::create_dir_all(&out).unwrap();
+    img.save(out.join("overlays.png")).unwrap();
+    eprintln!("overlay frame: {} draw calls", stats.draw_calls);
+    // Darker pixels appear (outline lines and cracks) and nothing gets brighter.
+    let mut darker = 0;
+    for (a, b) in plain.pixels().zip(img.pixels()) {
+        let (la, lb) = (
+            a.0[0] as i32 + a.0[1] as i32 + a.0[2] as i32,
+            b.0[0] as i32 + b.0[1] as i32 + b.0[2] as i32,
+        );
+        if lb + 30 < la {
+            darker += 1;
+        }
+    }
+    assert!(darker > 200, "outline and cracks darken {darker} pixels");
 }

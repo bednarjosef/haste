@@ -52,6 +52,11 @@ pub struct FrameInput<'a> {
     pub gui: &'a haste_core::gui::GuiFrame,
     pub sky: SkyState,
     pub partial_tick: f32,
+    /// Block under the crosshair and the face hit: drawn as the outline of its outline shape
+    /// (sampled with `Renderer::sample_world`).
+    pub block_target: Option<(haste_core::BlockPos, haste_core::Direction)>,
+    /// Crack overlays: our own break progress plus other players' stages (0..=9).
+    pub breaking: &'a [(haste_core::BlockPos, u8)],
 }
 
 #[cfg(test)]
@@ -138,6 +143,8 @@ mod tests {
                 fog_end: 200.0,
             },
             partial_tick: 0.0,
+            block_target: None,
+            breaking: &[],
         };
         let stats = renderer.render(&frame).unwrap();
         eprintln!(
@@ -206,6 +213,8 @@ pub struct Renderer {
     entity: crate::entity::EntityRenderer,
     /// Sky, celestial bodies, clouds, weather; terrain fog colour and daylight.
     sky: crate::sky::SkyRenderer,
+    /// Selection outline and break cracks.
+    overlay: crate::overlay::OverlayRenderer,
     /// Name tags projected to GUI space this frame.
     nametags: Vec<crate::gui::ScreenNametag>,
 }
@@ -468,6 +477,13 @@ impl Renderer {
             surface_format,
             assets,
         );
+        let overlay = crate::overlay::OverlayRenderer::new(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            surface_format,
+            &camera_bind_group_layout,
+            assets,
+        );
         let mut gui_assets = assets.reopen()?;
         gui.preload_sprites(&mut gui_assets, crate::gui::HUD_SPRITES);
 
@@ -495,8 +511,31 @@ impl Renderer {
             assets: gui_assets,
             entity,
             sky,
+            overlay,
             nametags: Vec::new(),
         })
+    }
+
+    /// Samples what this frame's overlays and entities need from the world (the renderer holds
+    /// no world): entity light, the targeted block's outline boxes, the states of breaking
+    /// blocks. Call before `render` with the frame you are about to render.
+    pub fn sample_world(
+        &mut self,
+        world: &dyn BlockView,
+        shapes: &dyn haste_core::view::CollisionShapes,
+        frame: &FrameInput,
+    ) {
+        self.sample_entity_lights(world, frame.entities);
+        let o = &mut self.overlay.world;
+        o.target = frame.block_target.and_then(|(pos, _)| {
+            let state = world.block_state(pos);
+            let boxes = shapes.outline_boxes(state);
+            (!boxes.is_empty()).then(|| (pos, boxes.to_vec()))
+        });
+        o.breaking.clear();
+        for &(pos, stage) in frame.breaking {
+            o.breaking.push((pos, world.block_state(pos), stage));
+        }
     }
 
     /// The dimension being drawn: picks the sky (overworld, End, or fog colour only).
@@ -732,6 +771,12 @@ impl Renderer {
         let view_proj = Self::view_projection(&frame.camera, aspect);
         self.entity
             .prepare(frame.entities, None, frame.camera.pos, &mut self.assets);
+        self.overlay.prepare(
+            frame.camera.pos,
+            frame.block_target.map(|(p, _)| p),
+            frame.breaking,
+            &self.baked,
+        );
         self.nametags.clear();
         let gui_scale = frame.gui.scale.max(1) as f32;
         for tag in &self.entity.nametags {
@@ -946,6 +991,7 @@ impl Renderer {
             if !entities_drawn {
                 draw_calls += self.entity.draw(&mut pass);
             }
+            draw_calls += self.overlay.draw(&mut pass);
             draw_calls += self.sky.draw_overlays(&mut pass);
         }
 

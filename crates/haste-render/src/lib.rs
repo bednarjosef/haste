@@ -8,6 +8,7 @@ pub mod entity;
 pub mod gui;
 pub mod mesher;
 pub mod occlusion;
+pub mod overlay;
 pub mod pipeline;
 pub mod renderer;
 pub mod sky;
