@@ -29,8 +29,9 @@ and the ones you consume), `crates/haste-core/src/*.rs` (shared types; do not ed
   added to `THIRD_PARTY.md`, except Pomme's physics/player code (provenance problem) which must not be reused.
 - Tests define done: `cargo test -p <crate>` and `cargo clippy -p <crate> -- -D warnings` clean.
   Tests needing `cache/` are `#[ignore]` with a message, and you run them with `--ignored` yourself.
-- Commit to your branch often (`git add -A && git commit -m ...`). Never push, never touch other
-  branches, never rebase.
+- Commit to your branch often (`git add -A && git commit -m ...`). Never push. The only merge you
+  may run is `git merge main` into your own branch to pick up the lead's merges; never touch other
+  branches, never rebase. The lead merges your branch into `main` through a pull request.
 - Keep a short `crates/<crate>/NOTES.md`: decisions, dead ends, what is approximate.
 
 ## Report (send it when you finish a milestone task or get stuck)

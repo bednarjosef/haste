@@ -11,6 +11,7 @@
 use clap::Parser;
 
 mod headless;
+mod net;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -31,6 +32,9 @@ pub struct Args {
     /// Seconds to stay connected in headless mode.
     #[arg(long, default_value_t = 30)]
     pub seconds: u64,
+    /// Server list ping only: print the status JSON and exit.
+    #[arg(long)]
+    pub ping: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -40,6 +44,15 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
     let args = Args::parse();
+    if args.ping {
+        let addr = args
+            .server
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("--ping needs --server"))?;
+        let status = tokio::runtime::Runtime::new()?.block_on(haste_protocol::ping(&addr, None))?;
+        println!("{status:#?}");
+        return Ok(());
+    }
     if args.headless {
         return headless::run(&args);
     }
