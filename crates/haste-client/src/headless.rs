@@ -63,7 +63,13 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
         world.biome_bits(),
     );
 
-    let mut interval = tokio::time::interval(Duration::from_secs_f64(TICK_SECONDS));
+    // HASTE_TICK_RATE (test hook): run the client at the rate a slowed test server runs at
+    // (`/tick rate N`), so tick-counted checks such as break progress compare like for like.
+    let tick_seconds = std::env::var("HASTE_TICK_RATE")
+        .ok()
+        .and_then(|r| r.parse::<f64>().ok())
+        .map_or(TICK_SECONDS, |r| 1.0 / r);
+    let mut interval = tokio::time::interval(Duration::from_secs_f64(tick_seconds));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let total_ticks = seconds * 20;
     let mut last_packets = 0u64;

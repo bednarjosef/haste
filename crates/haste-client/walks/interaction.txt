@@ -26,23 +26,24 @@ wait 20
 check 5 -59 7
 cmd execute if block 5 -59 7 minecraft:air run say hand-break-accepted
 
-# Stone with the diamond pickaxe (slot 0): 6 ticks, three times.
+# Stone with the diamond pickaxe (slot 0): 6 ticks, three times (held 12: a break leaves a
+# 5-tick delay that only counts down while attack is held).
 slot 0
 cmd tp @s 9.5 -60 5.5 0 0
 wait 20
-hold 7 attack yaw=0 pitch=0
+hold 12 attack yaw=0 pitch=0
 wait 20
 check 9 -59 7
 cmd execute if block 9 -59 7 minecraft:air run say pickaxe-break-accepted
 cmd tp @s 1.5 -60 5.5 0 0
 wait 20
-hold 7 attack yaw=0 pitch=0
+hold 12 attack yaw=0 pitch=0
 wait 20
 check 1 -59 7
 cmd execute if block 1 -59 7 minecraft:air run say pickaxe-break-accepted
 cmd tp @s 3.5 -60 5.5 0 0
 wait 20
-hold 7 attack yaw=0 pitch=0
+hold 12 attack yaw=0 pitch=0
 wait 20
 check 3 -59 7
 cmd execute if block 3 -59 7 minecraft:air run say pickaxe-break-accepted

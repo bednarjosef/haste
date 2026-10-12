@@ -44,11 +44,15 @@ pub const DESTROY_DELAY: u8 = 5;
 /// Ticks between repeated uses while use stays held.
 pub const USE_DELAY: u8 = 4;
 
-/// `player_action` statuses (wiki "Player Action").
+/// `player_action` statuses. 26.3 inserted `CHANGE_DESTROY_DIRECTION` at 1, moving abort to 2
+/// and finish to 3 (enum order read from the server jar's `ServerboundPlayerActionPacket$Action`
+/// and confirmed on the vanilla server: status 2 is handled as an abort). The wiki's older order
+/// (0 start, 1 abort, 2 finish) makes every survival break an abort.
 pub mod action {
     pub const START_DESTROY: i32 = 0;
-    pub const ABORT_DESTROY: i32 = 1;
-    pub const STOP_DESTROY: i32 = 2;
+    pub const CHANGE_DESTROY_DIRECTION: i32 = 1;
+    pub const ABORT_DESTROY: i32 = 2;
+    pub const STOP_DESTROY: i32 = 3;
 }
 
 /// Interaction-related attributes (server values; vanilla defaults until it sends them).
@@ -605,7 +609,17 @@ impl LocalPlayer {
             return false;
         }
         match self.int.destroying {
-            Some((pos, _)) if pos == h.pos => {
+            Some((pos, face)) if pos == h.pos => {
+                if face != h.face {
+                    // Same block, another face under the crosshair (new in 26.3).
+                    out.push(ServerboundPlay::PlayerAction(sb::PlayerAction {
+                        status: action::CHANGE_DESTROY_DIRECTION,
+                        pos,
+                        face: h.face as u8,
+                        sequence: 0,
+                    }));
+                    self.int.destroying = Some((pos, h.face));
+                }
                 let state = world.block_state(pos);
                 if env.data.is_air(state) {
                     self.int.destroying = None;
