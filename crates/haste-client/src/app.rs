@@ -275,10 +275,10 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         camera.pitch = args.pitch.unwrap_or(camera.pitch);
         last_camera = camera;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
-        let entities = feed.entities(&shared, partial).to_vec();
+        let entities = feed.entities(&shared, partial);
         stats = renderer.render(&FrameInput {
             camera,
-            entities: &entities,
+            entities,
             gui: &gui,
             sky,
             partial_tick: partial,
@@ -445,10 +445,10 @@ impl App {
             frame_view(&self.shared, self.yaw, self.pitch, Instant::now());
         self.feed
             .feed(&self.shared, renderer, camera_section(&camera), vd);
-        let entities = self.feed.entities(&self.shared, partial).to_vec();
+        let entities = self.feed.entities(&self.shared, partial);
         match renderer.render(&FrameInput {
             camera,
-            entities: &entities,
+            entities,
             gui: &self.gui,
             sky,
             partial_tick: partial,
