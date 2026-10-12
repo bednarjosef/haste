@@ -309,7 +309,7 @@ mod tests {
         assert_eq!(props.len(), 4);
         assert_eq!(props[0], ("facing".to_owned(), "north".to_owned()));
         // name-sorted
-        let mut names: Vec<&String> = props.iter().map(|(k, _)| k).collect();
+        let names: Vec<&String> = props.iter().map(|(k, _)| k).collect();
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted);
