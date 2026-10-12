@@ -32,6 +32,14 @@ pub struct Entity {
     lerp: LerpState,
     /// Cached nametag from `player_info`.
     pub nametag: Option<String>,
+    /// True when the entity type is player-like (humanoid model). Until WS2's registry lands we
+    /// use the heuristic: an entity whose UUID matches a player-info entry (other players), plus
+    /// the caller can set this for remote players seen before their info arrives.
+    pub is_player_type: bool,
+    /// Limb-swing phase (accumulates horizontal distance travelled).
+    pub limb_swing: f32,
+    /// Smoothed horizontal speed (amplitude of the limb swing).
+    pub limb_speed: f32,
 }
 
 impl Entity {
@@ -53,6 +61,9 @@ impl Entity {
             equipment: Vec::new(),
             lerp: LerpState::new(s.pos),
             nametag: None,
+            is_player_type: false,
+            limb_swing: 0.0,
+            limb_speed: 0.0,
         }
     }
 }
@@ -104,6 +115,7 @@ impl EntityStore {
             // A player who joined before their entity spawned (info arrived first).
             if let Some(p) = self.players.get(&e.uuid) {
                 e.nametag = Some(p.name.clone());
+                e.is_player_type = true;
             }
         }
         self.by_id.insert(s.id, slot);
@@ -202,14 +214,22 @@ impl EntityStore {
         for slot in self.slots.iter_mut().flatten() {
             if let Some(p) = self.players.get(&slot.uuid) {
                 slot.nametag = Some(p.name.clone());
+                // Player-info entries are only sent for real players.
+                slot.is_player_type = true;
             }
         }
     }
 
-    /// One 20 Hz tick: advance the lerp windows so `prev_pos`/`pos` bracket this tick's step.
+    /// One 20 Hz tick: advance the lerp windows so `prev_pos`/`pos` bracket this tick's step,
+    /// and update the limb-swing phase/amplitude from this tick's horizontal distance.
     pub fn tick(&mut self) {
         for slot in self.slots.iter_mut().flatten() {
             slot.lerp.tick(&mut slot.pos, &mut slot.prev_pos);
+            let d = slot.pos - slot.prev_pos;
+            let dist = f32::sqrt((d.x * d.x + d.z * d.z) as f32);
+            slot.limb_swing += dist * 0.5;
+            // Vanilla smooths the amplitude towards distance x 4 by 0.4 each tick.
+            slot.limb_speed += (dist * 4.0 - slot.limb_speed) * 0.4;
         }
     }
 
@@ -225,21 +245,31 @@ impl EntityStore {
         self.by_id.is_empty()
     }
 
-    /// Interpolated draw list for the renderer (WS3). Every entity uses the generic box until
-    /// Task 2 specialises the humanoid.
+    /// Interpolated draw list for the renderer (WS3). Players get the humanoid model (classic
+    /// layout; skins arrive with WS3's texture work), everything else a generic box from its
+    /// current dimensions. Only humanoids get animation overrides (the box has no limbs).
     pub fn render_instances(&self, partial_tick: f32, out: &mut Vec<EntityInstance>) {
-        let model = crate::models::generic_box();
         for slot in self.slots.iter().flatten() {
             let pos = slot.prev_pos.lerp(slot.pos, partial_tick as f64);
+            let pose = if slot.is_player_type {
+                crate::animation::pose_overrides(slot, partial_tick)
+            } else {
+                haste_core::model::PoseOverrides::default()
+            };
+            let model = if slot.is_player_type {
+                crate::models::humanoid(false)
+            } else {
+                crate::models::box_for(slot.dimensions.0, slot.dimensions.1)
+            };
             out.push(EntityInstance {
                 id: slot.id,
-                model: model.clone(),
+                model,
                 pos,
                 yaw: slot.yaw,
                 pitch: slot.pitch,
                 head_yaw: slot.head_yaw,
                 scale: 1.0,
-                pose: crate::animation::pose_overrides(slot),
+                pose,
                 skin: None,
                 nametag: slot.nametag.clone(),
             });
