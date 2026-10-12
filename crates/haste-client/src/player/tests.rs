@@ -98,7 +98,7 @@ fn first_teleport_accepts_then_reports_loaded_without_moving() {
 }
 
 #[test]
-fn later_teleport_confirms_with_a_full_movement_packet() {
+fn later_teleport_is_confirmed_by_the_accept_alone() {
     let (mut p, mut out) = spawned();
     p.handle(
         &teleport(
@@ -109,7 +109,7 @@ fn later_teleport_confirms_with_a_full_movement_packet() {
         ),
         &mut out,
     );
-    assert_eq!(names(&out), ["accept", "pos_rot"]);
+    assert_eq!(names(&out), ["accept"]);
     assert_eq!(p.state.pos, DVec3::new(1.5, 0.0, 1.5));
     assert_eq!(p.state.yaw, 10.0);
 }

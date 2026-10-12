@@ -226,6 +226,11 @@ impl<W: WorldSink, E: EntitySink> NetDriver<W, E> {
         self.flush()
     }
 
+    /// Queues a packet for this tick's flush (sent at the end of `tick_input`).
+    pub fn queue(&mut self, p: ServerboundPlay) {
+        self.outgoing.push(p);
+    }
+
     fn flush(&mut self) -> anyhow::Result<()> {
         for p in self.outgoing.drain(..) {
             self.conn
@@ -395,12 +400,92 @@ impl<W: WorldSink, E: EntitySink> NetDriver<W, E> {
     }
 }
 
+// ------------------------------------------------------------ the real world
+
+/// TEMPORARY shim (player workstream, for the walk tests). `haste_world` (a) reads each
+/// section's block count as a VarInt with no fluid count, but 26.3 sends `i16` block count +
+/// `i16` fluid count, and (b) reads packed entries from the most significant bits of each long,
+/// but vanilla packs entry 0 into the least significant bits (checked on a dumped chunk: a 3x3
+/// stone pad came out mirrored in x). Rewrites the payload into what `haste_world` reads.
+/// Delete once haste-world decodes the 26.3 layout.
+fn sections_for_haste_world(data: &[u8], section_count: usize) -> Option<Vec<u8>> {
+    let mut r = haste_protocol::wire::Reader::new(data);
+    let mut out = haste_protocol::wire::Writer::new();
+    for _ in 0..section_count {
+        let blocks = r.i16().ok()?;
+        let _fluids = r.i16().ok()?;
+        out.var_int(blocks as i32);
+        let bpe = r.u8().ok()?;
+        out.u8(bpe);
+        if bpe == 0 {
+            out.var_int(r.var_int().ok()?);
+        } else {
+            if bpe <= 8 {
+                let n = r.var_int().ok()?;
+                out.var_int(n);
+                for _ in 0..n {
+                    out.var_int(r.var_int().ok()?);
+                }
+            }
+            let bits = bpe as usize;
+            let per = 64 / bits;
+            for _ in 0..4096usize.div_ceil(per) {
+                let l = u64::from_be_bytes(r.take(8).ok()?.try_into().ok()?);
+                let mask = (1u64 << bits) - 1;
+                let mut m = 0u64;
+                for k in 0..per {
+                    m |= ((l >> (k * bits)) & mask) << (64 - (k + 1) * bits);
+                }
+                out.bytes(&m.to_be_bytes());
+            }
+        }
+        let start = data.len() - r.remaining();
+        skip_container(&mut r, 64, 1, 7)?;
+        let end = data.len() - r.remaining();
+        out.bytes(&data[start..end]);
+    }
+    Some(out.into_inner())
+}
+
+impl WorldSink for haste_world::World {
+    fn load_chunk(&mut self, data: &ChunkData) -> anyhow::Result<()> {
+        let mut fixed = data.clone();
+        fixed.sections = sections_for_haste_world(&data.sections, self.dimension().section_count())
+            .ok_or_else(|| anyhow::anyhow!("section payload does not parse"))?
+            .into();
+        haste_world::World::load_chunk(self, &fixed).map_err(|e| anyhow::anyhow!("{e}"))
+    }
+    fn unload_chunk(&mut self, pos: ChunkPos) {
+        haste_world::World::unload_chunk(self, pos)
+    }
+    fn set_block(&mut self, pos: BlockPos, state: BlockStateId) {
+        haste_world::World::set_block(self, pos, state)
+    }
+    fn apply_light(&mut self, pos: ChunkPos, light: &LightData) {
+        haste_world::World::apply_light(self, pos, light)
+    }
+    fn chunk_count(&self) -> usize {
+        self.loaded_chunks().count()
+    }
+    fn non_empty_sections(&self) -> usize {
+        self.loaded_chunks()
+            .filter_map(|p| self.chunk(p))
+            .map(|c| c.sections.iter().filter(|s| !s.is_empty()).count())
+            .sum()
+    }
+    fn physics_view(&self) -> Option<PhysicsView<'_>> {
+        let data: &haste_data::GameData = self.game_data();
+        Some((self, &data.shapes, data))
+    }
+}
+
 // ------------------------------------------------------------ stand-ins
 
 /// Minimal world stand-in: tracks loaded chunks and, per chunk, how many
 /// sections have a non-zero block count (read from the section payload;
 /// the full palette decode is `haste_world`'s job).
 #[derive(Debug, Default)]
+#[allow(dead_code)] // headless now uses haste_world::World; client-app removes the stub
 pub struct StubWorld {
     chunks: HashMap<ChunkPos, usize>,
     section_count: usize,
@@ -408,6 +493,7 @@ pub struct StubWorld {
     biome_direct_bits: u8,
 }
 
+#[allow(dead_code)]
 impl StubWorld {
     /// A stub for a dimension; `biome_count` is the synced biome registry size.
     pub fn new(dim: &DimensionInfo, biome_count: usize) -> Self {

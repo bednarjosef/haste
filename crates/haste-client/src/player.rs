@@ -259,22 +259,17 @@ impl LocalPlayer {
                         pitch: self.state.pitch,
                     },
                 ));
-                if self.loaded {
-                    // A vanilla client confirms the new position with a full movement packet.
-                    out.push(ServerboundPlay::MovePlayerPosRot(sb::MovePlayerPosRot {
-                        pos: self.state.pos,
-                        yaw: self.state.yaw,
-                        pitch: self.state.pitch,
-                        flags: 0,
-                    }));
-                    self.mark_sent_position(false, false);
-                } else {
+                // 26.3's accept_teleportation carries the resulting position and rotation; an
+                // extra move_player_pos_rot right after it (what older clients sent) gets the
+                // client kicked with invalid_player_movement after a relative `/tp ~ ~10 ~`
+                // (observed on the vanilla 26.3 server). The accepted position counts as sent.
+                self.mark_sent_position(self.state.on_ground, self.state.horizontal_collision);
+                if !self.loaded {
                     // Observed on the 26.3 server: a movement packet between
                     // accept_teleportation and player_loaded gets the client kicked
                     // (invalid_player_movement), so the first move goes out next tick.
                     out.push(ServerboundPlay::PlayerLoaded(sb::PlayerLoaded {}));
                     self.loaded = true;
-                    self.mark_sent_position(self.state.on_ground, false);
                 }
             }
             P::PlayerRotation(r) => {
@@ -367,6 +362,7 @@ impl LocalPlayer {
     /// Applies a `player_position` teleport with its relative flags (wiki "Synchronize Player
     /// Position"; 26.3 adds velocity and the rotate-velocity flag).
     fn teleport(&mut self, p: &cb::PlayerPosition) {
+        tracing::debug!("teleport {p:?} from {:?}", self.state);
         let rel = |bit: i32| p.flags & bit != 0;
         let pick = |bit, old: f64, new: f64| if rel(bit) { old + new } else { new };
         let s = &mut self.state;
@@ -401,6 +397,7 @@ impl LocalPlayer {
         );
         s.fall_distance = 0.0;
         self.set_look(yaw, pitch);
+        tracing::debug!("after teleport {:?}", self.state);
         self.prev_pos = self.state.pos;
         self.prev_eye = self.eye_height();
         self.has_position = true;
@@ -554,6 +551,10 @@ impl LocalPlayer {
 
     fn send_movement(&mut self, out: &mut Vec<ServerboundPlay>) {
         let s = &self.state;
+        if !(s.pos.is_finite() && s.yaw.is_finite() && s.pitch.is_finite()) {
+            tracing::error!("non-finite player state, not sent: {s:?}");
+            return;
+        }
         self.sent.reminder += 1;
         let pos_changed = (s.pos - self.sent.pos).length_squared() > POSITION_THRESHOLD_SQ
             || self.sent.reminder >= POSITION_REMINDER_TICKS;
@@ -620,5 +621,6 @@ pub fn input_bits(i: &InputState) -> u8 {
     f
 }
 
+pub mod script;
 #[cfg(test)]
 mod tests;

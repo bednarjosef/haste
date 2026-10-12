@@ -15,7 +15,9 @@ use std::time::{Duration, Instant};
 use haste_protocol::haste_core::game::TICK_SECONDS;
 use haste_protocol::{Account, ConnectOptions};
 
-use crate::net::{EntitySink, NetDriver, StubEntities, StubWorld, WorldSink};
+use crate::net::{EntitySink, NetDriver, StubEntities, WorldSink};
+use crate::player::script::WalkScript;
+use crate::player::AttributeIds;
 use crate::Args;
 
 /// Runs the headless join and returns an error if it did not hold.
@@ -34,25 +36,25 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
 async fn run_async(address: String, username: String, seconds: u64) -> anyhow::Result<()> {
     let opts = ConnectOptions::new(address.clone(), Account::Offline { username });
     let t0 = Instant::now();
-    let biome_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(64));
-    let bc = biome_count.clone();
+    let data = std::sync::Arc::new(haste_data::GameData::load()?);
+    let d = data.clone();
     let make_world = Box::new(
         move |dim: &haste_protocol::haste_core::game::DimensionInfo| {
-            StubWorld::new(dim, bc.load(std::sync::atomic::Ordering::Relaxed))
+            haste_world::World::new(dim.clone(), d.clone())
         },
     );
-    let mut driver: NetDriver<StubWorld, StubEntities> =
+    let mut driver: NetDriver<haste_world::World, StubEntities> =
         NetDriver::connect(opts, make_world, StubEntities::default()).await?;
-    // The stub world needs the synced biome registry size for direct biome palettes.
-    let biomes = driver
-        .connection()
-        .registries()
-        .entries(&haste_protocol::haste_core::Identifier::minecraft(
-            "worldgen/biome",
-        ))
-        .map_or(64, |e| e.len());
-    biome_count.store(biomes, std::sync::atomic::Ordering::Relaxed);
-    driver.world = StubWorld::new(&driver.login.dimension, biomes);
+    if let Some(ids) = AttributeIds::from_data(&data) {
+        driver.player.set_attribute_ids(ids);
+    }
+    let mut script = match std::env::var_os("HASTE_WALK_SCRIPT") {
+        Some(path) => Some(WalkScript::parse(&std::fs::read_to_string(&path)?)?),
+        None => None,
+    };
+    let mut script_done_at = None;
+    let mut teleports_seen = 0;
+    let mut last_health = 20.0;
     println!(
         "joined {address} as {} in {:.0} ms: entity {:?}, {:?}, dimension {} (min_y {}, height {}), view distance {}",
         driver.connection().profile().name,
@@ -72,7 +74,48 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
     let mut failure: Option<String> = None;
     for tick in 1..=total_ticks {
         interval.tick().await;
-        if let Err(e) = driver.tick() {
+        let mut input = Default::default();
+        if let Some(sc) = script.as_mut() {
+            match sc.next_tick() {
+                Some(t) => {
+                    for m in &t.marks {
+                        let p = &driver.player;
+                        let below = haste_core::view::BlockView::block_state(
+                            &driver.world,
+                            haste_core::BlockPos::from_dvec3(
+                                p.state.pos - glam::DVec3::new(0.0, 0.5, 0.0),
+                            ),
+                        );
+                        println!(
+                            "[tick {tick}] mark {m}: below {below:?} pos ({:.5}, {:.5}, {:.5}) v ({:.4}, {:.4}, {:.4}) ground {} sprint {} sneak {} fly {} water {} health {} fall {:.3}",
+                            p.state.pos.x, p.state.pos.y, p.state.pos.z,
+                            p.state.velocity.x, p.state.velocity.y, p.state.velocity.z,
+                            p.state.on_ground, p.state.sprinting, p.state.sneaking,
+                            p.state.flying, p.state.in_water, p.health, p.state.fall_distance,
+                        );
+                    }
+                    let (dy, dp) = driver.player.look_offset();
+                    input = t.input;
+                    input.yaw -= dy;
+                    input.pitch -= dp;
+                    if t.toggle_flight {
+                        driver.player.toggle_flight();
+                    }
+                    if let Some(c) = t.command {
+                        driver.queue(haste_protocol::ServerboundPlay::ChatCommand(
+                            haste_protocol::packets::play::serverbound::ChatCommand { command: c },
+                        ));
+                    }
+                }
+                None => {
+                    if script_done_at.is_none() {
+                        println!("[tick {tick}] script finished");
+                        script_done_at = Some(tick);
+                    }
+                }
+            }
+        }
+        if let Err(e) = driver.tick_input(&input) {
             failure = Some(format!("tick failed: {e:#}"));
             break;
         }
@@ -87,7 +130,34 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
             );
             break;
         }
-        if tick % 20 == 0 {
+        if driver.player.health != last_health {
+            last_health = driver.player.health;
+            println!("[tick {tick}] health {last_health}");
+        }
+        if driver.player.teleports != teleports_seen {
+            teleports_seen = driver.player.teleports;
+            let p = driver.player.state.pos;
+            let col: Vec<String> = (-3..=1)
+                .map(|dy| {
+                    let s = haste_core::view::BlockView::block_state(
+                        &driver.world,
+                        haste_core::BlockPos::from_dvec3(p).add(0, dy, 0),
+                    );
+                    format!("{dy}:{}", data.blocks.block_of(s).path())
+                })
+                .collect();
+            println!(
+                "[tick {tick}] teleport #{teleports_seen} to ({:.5}, {:.5}, {:.5}) column [{}]",
+                p.x,
+                p.y,
+                p.z,
+                col.join(" ")
+            );
+        }
+        if script_done_at.is_some_and(|t| tick >= t + 40) {
+            break;
+        }
+        if tick % 20 == 0 && script.is_none() {
             let stats = driver.stats();
             let pps = stats.packets_in - last_packets;
             last_packets = stats.packets_in;

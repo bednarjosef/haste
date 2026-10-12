@@ -1,0 +1,107 @@
+# Movement cases against a flat test server (surface y = -60). The bot must be an operator.
+# HASTE_WALK_SCRIPT=crates/haste-client/walks/movement.txt haste --headless --server 127.0.0.1:25612 --seconds 300
+wait 40
+cmd gamemode survival
+cmd time set day
+cmd fill 0 -60 0 60 -40 60 air
+wait 10
+# Terrain
+cmd fill 20 -60 20 22 -60 22 stone
+cmd fill 30 -60 10 32 -60 10 oak_stairs[facing=south]
+cmd fill 30 -60 11 32 -60 11 stone
+cmd fill 30 -59 11 32 -59 11 oak_stairs[facing=south]
+cmd fill 30 -60 12 32 -59 14 stone
+cmd fill 40 -60 10 42 -60 10 stone_slab
+cmd fill 40 -60 11 42 -60 14 stone
+cmd fill 0 -60 30 10 -55 40 glass hollow
+cmd fill 1 -60 31 9 -56 39 water
+wait 20
+
+# Square walk
+cmd tp @s 5.5 -60 5.5 0 0
+wait 20
+mark square start
+hold 40 forward yaw=0
+hold 40 forward yaw=-90
+hold 40 forward yaw=180
+hold 40 forward yaw=90
+mark square end
+wait 10
+
+# Sprint-jump
+cmd tp @s 5.5 -60 5.5 0 0
+wait 20
+mark sprint-jump start
+hold 40 forward sprint jump yaw=0
+mark sprint-jump end
+wait 20
+mark sprint-jump rest
+
+# Sneak to an edge: must not fall off
+cmd tp @s 21.5 -59 21.5 0 0
+wait 20
+mark sneak start
+hold 40 forward sneak yaw=0
+mark sneak edge z
+hold 40 forward sneak yaw=-90
+mark sneak edge x
+wait 10
+
+# Stairs
+cmd tp @s 31.5 -60 7.5 0 0
+wait 20
+mark stairs start
+hold 40 forward yaw=0
+mark stairs end
+wait 10
+
+# Slab step-up
+cmd tp @s 41.5 -60 7.5 0 0
+wait 20
+mark slab start
+hold 40 forward yaw=0
+mark slab end
+wait 10
+
+# Fall 20 blocks
+cmd tp @s 50.5 -40 50.5 0 0
+wait 5
+mark fall start
+wait 60
+mark fall end
+
+# Water: sink, swim up, swim forward, sneak down
+cmd tp @s 5.5 -56 35.5 0 0
+wait 5
+mark water start
+wait 40
+mark water sunk
+hold 30 jump
+mark water up
+hold 30 forward yaw=-90
+mark water forward
+hold 20 sneak
+mark water sneak-down
+wait 10
+
+# Creative flight
+cmd gamemode creative
+cmd tp @s 20.5 -55 50.5 0 0
+wait 20
+fly
+hold 10 jump
+mark fly up
+hold 40 forward yaw=0
+mark fly forward
+hold 30 forward sprint yaw=180
+mark fly sprint
+hold 10 sneak
+mark fly down
+fly
+wait 60
+mark fly landed
+
+# Relative teleport
+cmd tp @s ~ ~10 ~
+wait 60
+mark tp fallen
