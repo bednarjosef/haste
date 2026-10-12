@@ -57,6 +57,16 @@ impl<'a> WireReader<'a> {
         Err(PaletteError::BadBits(0)) // too many continuation bits
     }
 
+    /// A big-endian i16 (the section header's block and fluid counts).
+    pub fn i16_be(&mut self) -> Result<i16, PaletteError> {
+        let b = self
+            .data
+            .get(self.pos..self.pos + 2)
+            .ok_or(PaletteError::UnexpectedEof)?;
+        self.pos += 2;
+        Ok(i16::from_be_bytes([b[0], b[1]]))
+    }
+
     /// A single i64 in big-endian (packed data longs are BE).
     pub fn i64_be(&mut self) -> Result<i64, PaletteError> {
         let b = self
@@ -103,10 +113,15 @@ impl WireWriter {
     pub fn i64_be(&mut self, v: i64) {
         self.data.extend_from_slice(&v.to_be_bytes());
     }
+
+    pub fn i16_be(&mut self, v: i16) {
+        self.data.extend_from_slice(&v.to_be_bytes());
+    }
 }
 
 /// Packed long array where entries never span longs (1.16+ layout): each 64-bit long holds
-/// `floor(64 / bits)` entries, left-aligned; the tail bits of the last long are unused.
+/// `floor(64 / bits)` entries, entry 0 in the least significant bits (vanilla's layout; the
+/// unused padding is the high bits of each long).
 #[derive(Debug, Clone)]
 pub struct PackedArray {
     bits: u8,
@@ -134,7 +149,7 @@ impl PackedArray {
                 let per_long = 64 / bits;
                 let long = i / per_long;
                 let off = (i % per_long) * bits;
-                ((self.longs[long] as u64 >> (64 - off - bits)) as u32) & ((1u32 << bits) - 1)
+                ((self.longs[long] as u64 >> off) as u32) & ((1u32 << bits) - 1)
             }
         }
     }
@@ -143,7 +158,7 @@ impl PackedArray {
         let per_long = 64 / B as usize;
         let long = i / per_long;
         let off = (i % per_long) * B as usize;
-        let v = ((longs[long] as u64) >> (64 - off - B as usize)) as u32;
+        let v = ((longs[long] as u64) >> off) as u32;
         v & ((1u32 << B) - 1)
     }
 
@@ -152,9 +167,9 @@ impl PackedArray {
         let per_long = 64 / bits;
         let long = i / per_long;
         let off = (i % per_long) * bits;
-        let mask = ((1u64 << bits) - 1) << (64 - off - bits);
+        let mask = ((1u64 << bits) - 1) << off;
         let cleared = (self.longs[long] as u64 & !mask) as i64;
-        let v64 = ((v as u64) & ((1u64 << bits) - 1)) << (64 - off - bits);
+        let v64 = ((v as u64) & ((1u64 << bits) - 1)) << off;
         self.longs[long] = (cleared as u64 | v64) as i64;
     }
 }
@@ -267,7 +282,11 @@ impl<T: WireId> PalettedContainer<T> {
                 let v = r.varint()?;
                 Storage::Single(v)
             }
-            b if b <= 8 && b as usize <= direct_bits as usize => {
+            // Indirect up to 8 bits for blocks and 3 for biomes (minecraft.wiki "Chunk Format",
+            // paletted container); anything wider is direct at `direct_bits`. Confirmed against
+            // the 26.3 server: biome containers above 3 bits are direct at
+            // ceil(log2(biome registry size)).
+            b if b as usize <= Self::max_indirect_bits(capacity) => {
                 // indirect: palette + packed data; no length prefix (1.21.5+)
                 let palette_len = r.varint()? as usize;
                 let mut palette = Vec::with_capacity(palette_len.min(1024));
@@ -292,6 +311,15 @@ impl<T: WireId> PalettedContainer<T> {
             capacity,
             _marker: std::marker::PhantomData,
         })
+    }
+
+    /// Widest indirect (palette) encoding for a container of `capacity` entries.
+    fn max_indirect_bits(capacity: usize) -> usize {
+        if capacity == BIOMES_PER_SECTION {
+            3
+        } else {
+            8
+        }
     }
 
     fn read_packed(
@@ -436,21 +464,27 @@ impl<T: WireId> PalettedContainer<T> {
     }
 
     /// Decodes an entire section payload (the 26.3 level_chunk format) into per-section block
-    /// and biome containers. The containers share the container type `T`; `Chunk::decode`
-    /// re-wraps the biome container with `BiomeId`.
+    /// and biome containers. Each section is: block count (i16 BE), fluid count (i16 BE),
+    /// block container, biome container (verified against the 26.3 server). `direct_bits` is
+    /// the block direct width, `biome_bits` the biome direct width
+    /// (ceil(log2(synced worldgen/biome registry size))). The containers share the container
+    /// type `T`; `Chunk::decode` re-wraps the biome container with `BiomeId`.
     pub fn decode_sections(
         bytes: &[u8],
         section_count: usize,
         direct_bits: u8,
+        biome_bits: u8,
     ) -> Result<Vec<DecodedSection<T>>, PaletteError> {
         let mut r = WireReader::new(bytes);
         let mut out = Vec::with_capacity(section_count);
         for _ in 0..section_count {
-            let block_count = r.varint()? as i16; // i16 per the format (non-negative)
+            let block_count = r.i16_be()?;
+            let fluid_count = r.i16_be()?;
             let blocks = Self::decode(&mut r, BLOCKS_PER_SECTION, direct_bits)?;
-            let biomes = Self::decode(&mut r, BIOMES_PER_SECTION, 3)?;
+            let biomes = Self::decode(&mut r, BIOMES_PER_SECTION, biome_bits)?;
             out.push(DecodedSection {
                 block_count,
+                fluid_count,
                 blocks,
                 biomes,
             });
@@ -488,6 +522,8 @@ impl<T: WireId> PalettedContainer<T> {
 /// One decoded section: block count plus its two containers.
 pub struct DecodedSection<T> {
     pub block_count: i16,
+    /// Number of fluid blocks (26.x section header); 0 lets meshers skip fluids.
+    pub fluid_count: i16,
     pub blocks: PalettedContainer<T>,
     pub biomes: PalettedContainer<T>,
 }
@@ -628,8 +664,9 @@ mod tests {
     fn sections_payload_roundtrip() {
         // build a 2-section payload with our encoder and decode it back
         let mut w = WireWriter::new();
-        // section 0: block_count 3, blocks single 5, biomes single 1
-        w.varint(3);
+        // section 0: block_count 3, fluid_count 0, blocks single 5, biomes single 1
+        w.i16_be(3);
+        w.i16_be(0);
         w.varint(0); // bpe 0
         w.varint(5); // value
         w.varint(0); // bpe 0
@@ -638,7 +675,8 @@ mod tests {
         let palette: Vec<u32> = vec![1, 2, 3, 5];
         let bits = 4u8;
         let longs = PackedArray::long_count(bits, BLOCKS_PER_SECTION);
-        w.varint(4096 - 3);
+        w.i16_be(4096 - 3);
+        w.i16_be(0);
         w.varint(bits as u32);
         w.varint(palette.len() as u32);
         for &p in &palette {
@@ -657,7 +695,7 @@ mod tests {
         w.varint(0);
         w.varint(42);
         let sections: Vec<DecodedSection<BlockStateId>> =
-            PalettedContainer::decode_sections(&w.data, 2, 15).unwrap();
+            PalettedContainer::decode_sections(&w.data, 2, 15, 7).unwrap();
         assert_eq!(sections.len(), 2);
         assert_eq!(sections[0].block_count, 3);
         assert_eq!(sections[0].blocks.get_index(0), 5);
@@ -665,5 +703,126 @@ mod tests {
         assert_eq!(sections[1].block_count, 4093);
         // index i has palette index i%4; i=5 -> 1 -> palette[1] = 2
         assert_eq!(sections[1].blocks.get_index(5), 2);
+        assert_eq!(w.data.len(), {
+            let mut r = WireReader::new(&w.data);
+            for _ in 0..2 {
+                r.i16_be().unwrap();
+                r.i16_be().unwrap();
+                PalettedContainer::<BlockStateId>::decode(&mut r, BLOCKS_PER_SECTION, 15).unwrap();
+                PalettedContainer::<BlockStateId>::decode(&mut r, BIOMES_PER_SECTION, 7).unwrap();
+            }
+            w.data.len() - r.remaining()
+        });
+    }
+
+    /// Regression (26.3 server): the section header is block count and fluid count, two
+    /// big-endian i16s. A full section (4096 = 0x1000) read as a VarInt desynchronised the
+    /// whole payload.
+    #[test]
+    fn section_header_is_two_big_endian_shorts() {
+        let mut w = WireWriter::new();
+        // full stone section with water counted: 4096 blocks, 300 fluids
+        w.data.extend_from_slice(&[0x10, 0x00, 0x01, 0x2C]);
+        w.varint(0);
+        w.varint(1);
+        w.varint(0);
+        w.varint(2);
+        // second section: empty
+        w.data.extend_from_slice(&[0, 0, 0, 0]);
+        w.varint(0);
+        w.varint(0);
+        w.varint(0);
+        w.varint(2);
+        let s: Vec<DecodedSection<BlockStateId>> =
+            PalettedContainer::decode_sections(&w.data, 2, 15, 7).unwrap();
+        assert_eq!((s[0].block_count, s[0].fluid_count), (4096, 300));
+        assert_eq!(s[0].blocks.get_index(4095), 1);
+        assert_eq!((s[1].block_count, s[1].fluid_count), (0, 0));
+        assert_eq!(s[1].biomes.get_index(63), 2);
+    }
+
+    /// Regression (26.3 server, 67 biomes): biome containers wider than 3 bits are direct at
+    /// ceil(log2(biome registry size)) bits, not at 3; 3 bits and below stay indirect.
+    #[test]
+    fn biome_containers_direct_above_three_bits() {
+        let mut w = WireWriter::new();
+        w.i16_be(1);
+        w.i16_be(0);
+        w.varint(0);
+        w.varint(1);
+        // direct biomes at 7 bits: 9 entries per long, 64 entries -> 8 longs
+        let mut data = PackedArray {
+            bits: 7,
+            longs: vec![0; PackedArray::long_count(7, BIOMES_PER_SECTION)],
+        };
+        for i in 0..BIOMES_PER_SECTION {
+            data.write_at(i, i as u32 + 3);
+        }
+        w.varint(7);
+        for &l in &data.longs {
+            w.i64_be(l);
+        }
+        // second section: indirect 3-bit biomes still decode with biome_bits 7
+        w.i16_be(0);
+        w.i16_be(0);
+        w.varint(0);
+        w.varint(0);
+        w.varint(3);
+        let palette = [10u32, 20, 30, 40, 50];
+        w.varint(palette.len() as u32);
+        for p in palette {
+            w.varint(p);
+        }
+        let mut idx = PackedArray {
+            bits: 3,
+            longs: vec![0; PackedArray::long_count(3, BIOMES_PER_SECTION)],
+        };
+        for i in 0..BIOMES_PER_SECTION {
+            idx.write_at(i, (i % 5) as u32);
+        }
+        for &l in &idx.longs {
+            w.i64_be(l);
+        }
+        let s: Vec<DecodedSection<BlockStateId>> =
+            PalettedContainer::decode_sections(&w.data, 2, 15, 7).unwrap();
+        assert_eq!(s[0].biomes.get_index(0), 3);
+        assert_eq!(s[0].biomes.get_index(63), 66);
+        assert_eq!(s[1].biomes.get_index(7), 30);
+        // With the old fixed 3-bit width the first section's 8 longs are misread.
+        assert!(
+            PalettedContainer::<BlockStateId>::decode_sections(&w.data, 2, 15, 3)
+                .map_or(true, |s| s[0].biomes.get_index(63) != 66)
+        );
+    }
+}
+
+#[cfg(test)]
+mod bit_order_tests {
+    use super::PackedArray;
+
+    /// Vanilla packs entry 0 into the least significant bits of each long. Found against the
+    /// 26.3 server: a 3x3 pad at x 20..22 decoded mirrored with the old MSB-first order.
+    #[test]
+    fn entry_zero_is_in_the_low_bits() {
+        let a = PackedArray {
+            bits: 4,
+            longs: vec![0x0000_0000_0000_0321],
+        };
+        assert_eq!(
+            [a.read_at(0), a.read_at(1), a.read_at(2), a.read_at(3)],
+            [1, 2, 3, 0]
+        );
+        // 5 bits: 12 entries per long, 4 padding bits at the top.
+        let b = PackedArray {
+            bits: 5,
+            longs: vec![(7 << 5) | 3],
+        };
+        assert_eq!([b.read_at(0), b.read_at(1)], [3, 7]);
+        let mut c = PackedArray {
+            bits: 9,
+            longs: vec![0],
+        };
+        c.write_at(1, 0x1ff);
+        assert_eq!(c.longs[0], 0x1ff << 9);
     }
 }

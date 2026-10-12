@@ -393,6 +393,21 @@ fn humanoid_model_part_tree() {
         find_part(r, "right_leg").unwrap().pivot,
         glam::Vec3::new(-1.9, -12.0, 0.0)
     );
+    // Child pivots are relative to the parent (vanilla PartPose): overlays sit at the origin.
+    for overlay in [
+        "hat",
+        "jacket",
+        "right_sleeve",
+        "left_sleeve",
+        "right_pants",
+        "left_pants",
+    ] {
+        assert_eq!(
+            find_part(r, overlay).unwrap().pivot,
+            glam::Vec3::ZERO,
+            "{overlay}"
+        );
+    }
 }
 
 #[test]

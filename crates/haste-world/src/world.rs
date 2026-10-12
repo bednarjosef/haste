@@ -27,6 +27,8 @@ pub struct World {
     dirty_dedup: HashSet<SectionPos>,
     /// Bits for direct-encoded block containers: ceil(log2(state count)), min 4.
     direct_bits: u8,
+    /// Bits for direct-encoded biome containers: ceil(log2(synced biome registry size)).
+    biome_bits: u8,
 }
 
 // SAFETY: the memo's raw pointer always targets a chunk that is currently in `chunks`; it is
@@ -35,7 +37,21 @@ unsafe impl Send for World {}
 unsafe impl Sync for World {}
 
 impl World {
+    /// A world whose direct biome containers are 3 bits wide (the old default, right only
+    /// for a biome registry of at most 8 entries). For tests; the client uses
+    /// [`World::new_with_biomes`] with the synced registry size.
     pub fn new(dim: DimensionInfo, data: Arc<GameData>) -> World {
+        Self::new_with_biomes(dim, data, 8)
+    }
+
+    /// A world for a server whose synced `minecraft:worldgen/biome` registry has
+    /// `biome_registry_len` entries (direct biome containers are ceil(log2(len)) bits wide).
+    pub fn new_with_biomes(
+        dim: DimensionInfo,
+        data: Arc<GameData>,
+        biome_registry_len: usize,
+    ) -> World {
+        let biome_bits = ceil_log2(biome_registry_len);
         let states = data.blocks.len();
         let direct_bits = (u32::BITS - (states as u32).leading_zeros()).max(4) as u8;
         World {
@@ -46,7 +62,13 @@ impl World {
             dirty: Vec::new(),
             dirty_dedup: HashSet::new(),
             direct_bits,
+            biome_bits,
         }
+    }
+
+    /// Direct biome container width in bits.
+    pub fn biome_bits(&self) -> u8 {
+        self.biome_bits
     }
 
     pub fn dimension(&self) -> &DimensionInfo {
@@ -66,6 +88,7 @@ impl World {
             self.dim.min_section(),
             section_count,
             self.direct_bits,
+            self.biome_bits,
         )
         .map_err(WorldError::Palette)?;
         self.chunks.insert(data.pos.to_packed(), chunk);
@@ -234,6 +257,7 @@ impl World {
             pos,
             section: SnapshotSection {
                 block_count: section.block_count,
+                fluid_count: section.fluid_count,
                 blocks: section.blocks.clone(),
                 biomes: section.biomes.clone(),
             },
@@ -343,6 +367,8 @@ impl DirtyTracker for World {
 #[derive(Clone)]
 pub struct SnapshotSection {
     pub block_count: i16,
+    /// Fluid count from the server's section header (0: no fluids to mesh).
+    pub fluid_count: i16,
     pub blocks: crate::palette::BlockContainer,
     pub biomes: crate::palette::BiomeContainer,
 }
@@ -425,4 +451,9 @@ impl SectionSnapshot {
 /// Biome of the snapshot's section at cell coords (0..4).
 pub fn snapshot_biome(s: &SectionSnapshot, x: u8, y: u8, z: u8) -> BiomeId {
     s.section.biomes.get_biome(x, y, z)
+}
+
+/// ceil(log2(n)), at least 1 (bit width of an id in `0..n`).
+fn ceil_log2(n: usize) -> u8 {
+    ((usize::BITS - n.saturating_sub(1).leading_zeros()) as u8).max(1)
 }

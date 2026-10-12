@@ -1,27 +1,29 @@
-//! Network driver (protocol): owns the `Connection`, drains packets each tick and
-//! applies them to the world, the entity store and the local player, and
-//! sends the per-tick movement packets.
+//! Network driver (client-app): owns the `Connection`, drains packets each tick and applies them
+//! to the world, the entity store and the local player, and sends the per-tick packets.
 //!
-//! `haste_world::World` and `haste_entity::EntityStore` are not on this
-//! branch yet, so the driver talks to them through the [`WorldSink`] and
-//! [`EntitySink`] traits, whose methods mirror docs/INTERFACES.md one to one.
-//! [`StubWorld`] and [`StubEntities`] are minimal stand-ins; at merge the
-//! lead implements the two traits for the real types (each method is a
-//! one-line forward) and drops the stubs.
+//! The driver does not own the world or the entities: each tick borrows them (`&mut`), so the
+//! client can keep them behind its own locks and the render thread can read them between ticks.
+//! [`WorldSink`] and [`EntitySink`] are the narrow surface the driver needs; they are implemented
+//! for `haste_world::World` and `haste_entity::EntityStore` (one-line forwards) and for the
+//! recording fakes in the tests.
 
-use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use anyhow::Context;
 use glam::DVec3;
+use haste_data::GameData;
+use haste_entity::{EntityDimensions, EntityStore};
 use haste_protocol::haste_core::chunk::{ChunkData, LightData};
 use haste_protocol::haste_core::entity::{EntitySpawn, ItemStackData, MetadataEntry, PlayerInfo};
 use haste_protocol::haste_core::game::{DimensionInfo, GameMode};
-use haste_protocol::haste_core::{BlockPos, BlockStateId, ChunkPos, EntityId};
+use haste_protocol::haste_core::{BlockPos, BlockStateId, ChunkPos, EntityId, Identifier};
 use haste_protocol::packets::play::clientbound::{self as cb, teleport_flags};
 use haste_protocol::packets::play::serverbound::{self as sb, move_flags};
 use haste_protocol::{
     ClientboundPlay, ConnectOptions, Connection, Login, ServerboundPlay, StatsSnapshot,
+    SyncedRegistries,
 };
+use haste_world::World;
 
 /// What the driver needs from the world (`haste_world::World`).
 pub trait WorldSink {
@@ -33,7 +35,9 @@ pub trait WorldSink {
     fn set_block(&mut self, pos: BlockPos, state: BlockStateId);
     /// `World::apply_light`.
     fn apply_light(&mut self, pos: ChunkPos, light: &LightData);
-    /// Number of loaded chunks (`World::loaded_chunks().count()`).
+    /// Drops every chunk and switches to `dim` (respawn / dimension change).
+    fn reset(&mut self, dim: &DimensionInfo);
+    /// Number of loaded chunks.
     fn chunk_count(&self) -> usize;
     /// Number of loaded sections with at least one non-air block.
     fn non_empty_sections(&self) -> usize;
@@ -61,12 +65,122 @@ pub trait EntitySink {
     fn set_equipment(&mut self, id: EntityId, slot: u8, item: ItemStackData);
     /// `EntityStore::player_info`.
     fn player_info(&mut self, info: &[PlayerInfo]);
-    /// Position and rotation of an entity (`EntityStore::get(id).map(|e| (e.pos, e.yaw, e.pitch))`).
+    /// Position and rotation of an entity.
     fn pose(&self, id: EntityId) -> Option<(DVec3, f32, f32)>;
+    /// Forgets every entity (respawn / dimension change).
+    fn clear(&mut self);
     /// `EntityStore::tick`.
     fn tick(&mut self);
     /// `EntityStore::len`.
     fn len(&self) -> usize;
+}
+
+impl WorldSink for World {
+    fn load_chunk(&mut self, data: &ChunkData) -> anyhow::Result<()> {
+        World::load_chunk(self, data).map_err(anyhow::Error::from)
+    }
+    fn unload_chunk(&mut self, pos: ChunkPos) {
+        World::unload_chunk(self, pos)
+    }
+    fn set_block(&mut self, pos: BlockPos, state: BlockStateId) {
+        World::set_block(self, pos, state)
+    }
+    fn apply_light(&mut self, pos: ChunkPos, light: &LightData) {
+        World::apply_light(self, pos, light)
+    }
+    fn reset(&mut self, dim: &DimensionInfo) {
+        let biomes = 1usize << self.biome_bits();
+        *self = World::new_with_biomes(dim.clone(), self.game_data().clone(), biomes);
+    }
+    fn chunk_count(&self) -> usize {
+        self.loaded_chunks().count()
+    }
+    fn non_empty_sections(&self) -> usize {
+        let dim = self.dimension();
+        let (min, count) = (dim.min_section(), dim.section_count() as i32);
+        self.loaded_chunks()
+            .filter_map(|p| self.chunk(p))
+            .map(|c| {
+                (min..min + count)
+                    .filter(|y| c.section(*y).is_some_and(|s| !s.is_empty()))
+                    .count()
+            })
+            .sum()
+    }
+}
+
+impl EntitySink for EntityStore {
+    fn spawn(&mut self, s: &EntitySpawn) {
+        EntityStore::spawn(self, s)
+    }
+    fn remove(&mut self, ids: &[EntityId]) {
+        EntityStore::remove(self, ids)
+    }
+    fn move_delta(&mut self, id: EntityId, delta: DVec3, on_ground: bool) {
+        EntityStore::move_delta(self, id, delta, on_ground)
+    }
+    fn set_rotation(&mut self, id: EntityId, yaw: f32, pitch: f32, on_ground: bool) {
+        EntityStore::set_rotation(self, id, yaw, pitch, on_ground)
+    }
+    fn teleport(&mut self, id: EntityId, pos: DVec3, yaw: f32, pitch: f32, on_ground: bool) {
+        EntityStore::teleport(self, id, pos, yaw, pitch, on_ground)
+    }
+    fn set_head_yaw(&mut self, id: EntityId, yaw: f32) {
+        EntityStore::set_head_yaw(self, id, yaw)
+    }
+    fn set_velocity(&mut self, id: EntityId, v: DVec3) {
+        EntityStore::set_velocity(self, id, v)
+    }
+    fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]) {
+        EntityStore::set_metadata(self, id, entries)
+    }
+    fn set_equipment(&mut self, id: EntityId, slot: u8, item: ItemStackData) {
+        EntityStore::set_equipment(self, id, slot, item)
+    }
+    fn player_info(&mut self, info: &[PlayerInfo]) {
+        EntityStore::player_info(self, info)
+    }
+    fn pose(&self, id: EntityId) -> Option<(DVec3, f32, f32)> {
+        self.get(id).map(|e| (e.pos, e.yaw, e.pitch))
+    }
+    fn clear(&mut self) {
+        // EntityStore has no clear(); a fresh store re-reads the (small, optional) dimensions
+        // oracle. The tab list (`player_info`) is lost with it, which vanilla keeps across a
+        // respawn: requested `EntityStore::clear()` that keeps players.
+        *self = new_entity_store(0);
+    }
+    fn tick(&mut self) {
+        EntityStore::tick(self)
+    }
+    fn len(&self) -> usize {
+        EntityStore::len(self)
+    }
+}
+
+/// The entity store (dimensions oracle when present).
+pub fn new_entity_store(entity_types: usize) -> EntityStore {
+    EntityStore::new(EntityDimensions::from_registry_len(entity_types))
+}
+
+/// Loads the game data (block states, registries, shapes) once for the whole client.
+pub fn load_game_data() -> anyhow::Result<Arc<GameData>> {
+    let t = std::time::Instant::now();
+    let data = GameData::load().context(
+        "loading game data from the data generator reports (run scripts/rebuild-cache.sh)",
+    )?;
+    tracing::info!(
+        "game data: {} block states in {:.0} ms",
+        data.blocks.len(),
+        t.elapsed().as_secs_f64() * 1000.0
+    );
+    Ok(Arc::new(data))
+}
+
+/// Number of entries in the synced `minecraft:worldgen/biome` registry (the direct biome
+/// palette's bit width depends on it).
+pub fn synced_biome_count(regs: &SyncedRegistries) -> Option<usize> {
+    regs.entries(&Identifier::minecraft("worldgen/biome"))
+        .map(|e| e.len())
 }
 
 /// The local player as the server last told us.
@@ -113,24 +227,12 @@ impl LocalPlayerState {
     /// Applies a `player_position` teleport with its relative flags.
     pub fn apply_teleport(&mut self, p: &cb::PlayerPosition) {
         let rel = |bit: i32| p.flags & bit != 0;
+        let pick = |bit: i32, old: f64, new: f64| if rel(bit) { old + new } else { new };
         let old_yaw = self.yaw;
-        let old_pitch = self.pitch;
         self.pos = DVec3::new(
-            if rel(teleport_flags::X) {
-                self.pos.x + p.pos.x
-            } else {
-                p.pos.x
-            },
-            if rel(teleport_flags::Y) {
-                self.pos.y + p.pos.y
-            } else {
-                p.pos.y
-            },
-            if rel(teleport_flags::Z) {
-                self.pos.z + p.pos.z
-            } else {
-                p.pos.z
-            },
+            pick(teleport_flags::X, self.pos.x, p.pos.x),
+            pick(teleport_flags::Y, self.pos.y, p.pos.y),
+            pick(teleport_flags::Z, self.pos.z, p.pos.z),
         );
         self.yaw = if rel(teleport_flags::YAW) {
             self.yaw + p.yaw
@@ -145,29 +247,16 @@ impl LocalPlayerState {
         .clamp(-90.0, 90.0);
         let mut v = self.velocity;
         if rel(teleport_flags::ROTATE_VELOCITY) {
-            // Rotate the old velocity by the change in rotation (yaw only;
-            // pitch rotation of velocity is approximate here).
+            // Rotate the old velocity by the change in yaw (pitch rotation of velocity is
+            // approximate here: not applied).
             let dyaw = (self.yaw - old_yaw).to_radians() as f64;
-            let _ = old_pitch;
             let (s, c) = dyaw.sin_cos();
             v = DVec3::new(v.x * c - v.z * s, v.y, v.x * s + v.z * c);
         }
         self.velocity = DVec3::new(
-            if rel(teleport_flags::VEL_X) {
-                v.x + p.velocity.x
-            } else {
-                p.velocity.x
-            },
-            if rel(teleport_flags::VEL_Y) {
-                v.y + p.velocity.y
-            } else {
-                p.velocity.y
-            },
-            if rel(teleport_flags::VEL_Z) {
-                v.z + p.velocity.z
-            } else {
-                p.velocity.z
-            },
+            pick(teleport_flags::VEL_X, v.x, p.velocity.x),
+            pick(teleport_flags::VEL_Y, v.y, p.velocity.y),
+            pick(teleport_flags::VEL_Z, v.z, p.velocity.z),
         );
         self.has_position = true;
     }
@@ -180,12 +269,14 @@ pub struct NetCounters {
     pub packets: u64,
     /// Teleports accepted.
     pub teleports: u64,
-    /// Chunks loaded / unloaded.
+    /// Chunks loaded.
     pub chunks_loaded: u64,
     /// Chunk unloads.
     pub chunks_unloaded: u64,
     /// Chunks the world refused to load.
     pub chunk_errors: u64,
+    /// Last chunk error message.
+    pub last_chunk_error: Option<String>,
     /// Whether the play `login` packet was seen.
     pub got_login: bool,
     /// Respawns / dimension changes.
@@ -194,109 +285,48 @@ pub struct NetCounters {
     pub chat: Vec<String>,
 }
 
-/// Owns the connection and the client-side game state it feeds.
-pub struct NetDriver<W: WorldSink, E: EntitySink> {
-    conn: Connection,
-    /// The world.
-    pub world: W,
-    /// The entities.
-    pub entities: E,
+/// Client-side session state the packets drive (everything except world and entities).
+pub struct Session {
     /// The local player.
     pub player: LocalPlayerState,
-    /// What `login` said.
-    pub login: Login,
+    /// The local player's entity id (from `login`).
+    pub entity_id: EntityId,
+    /// The current dimension (from `login`, then each `respawn`).
+    pub dimension: DimensionInfo,
     /// Counters.
     pub counters: NetCounters,
-    make_world: Box<dyn FnMut(&DimensionInfo) -> W + Send>,
     sent_loaded: bool,
     last_input: Option<u8>,
-    ticks: u64,
 }
 
-impl<W: WorldSink, E: EntitySink> NetDriver<W, E> {
-    /// Connects and builds the world for the login dimension with `make_world`.
-    pub async fn connect(
-        opts: ConnectOptions,
-        mut make_world: Box<dyn FnMut(&DimensionInfo) -> W + Send>,
-        entities: E,
-    ) -> anyhow::Result<Self> {
-        let (conn, login) = Connection::connect(opts).await.context("connecting")?;
-        let world = make_world(&login.dimension);
-        Ok(Self {
-            conn,
-            world,
-            entities,
-            player: LocalPlayerState::new(login.game_mode),
+impl Session {
+    /// Fresh state after `Connection::connect` (from the `Login` it returned).
+    pub fn new(entity_id: EntityId, game_mode: GameMode, dimension: DimensionInfo) -> Self {
+        Self {
+            player: LocalPlayerState::new(game_mode),
             counters: NetCounters {
                 got_login: true,
                 ..Default::default()
             },
-            login,
-            make_world,
+            entity_id,
+            dimension,
             sent_loaded: false,
             last_input: None,
-            ticks: 0,
-        })
-    }
-
-    /// The connection (registries, stats, close reason).
-    pub fn connection(&self) -> &Connection {
-        &self.conn
-    }
-
-    /// Connection counters.
-    pub fn stats(&self) -> StatsSnapshot {
-        self.conn.stats()
-    }
-
-    /// Whether the connection has closed.
-    pub fn is_closed(&self) -> bool {
-        self.conn.is_closed()
-    }
-
-    /// Closes the connection.
-    pub fn disconnect(self) {
-        self.conn.disconnect();
-    }
-
-    /// One 20 Hz tick: drain and apply every queued packet, then send this
-    /// tick's movement/input/tick-end packets.
-    pub fn tick(&mut self) -> anyhow::Result<()> {
-        while let Some(p) = self.conn.try_recv() {
-            self.counters.packets += 1;
-            self.apply(p)?;
         }
-        self.entities.tick();
-        self.ticks += 1;
-        if self.player.has_position && self.sent_loaded {
-            let flags = if self.player.on_ground {
-                move_flags::ON_GROUND
-            } else {
-                0
-            };
-            let pl = &self.player;
-            self.send(ServerboundPlay::MovePlayerPosRot(sb::MovePlayerPosRot {
-                pos: pl.pos,
-                yaw: pl.yaw,
-                pitch: pl.pitch,
-                flags,
-            }))?;
-            if self.last_input != Some(0) {
-                self.send(ServerboundPlay::PlayerInput(sb::PlayerInput { flags: 0 }))?;
-                self.last_input = Some(0);
-            }
-            self.send(ServerboundPlay::ClientTickEnd(sb::ClientTickEnd {}))?;
-        }
-        Ok(())
     }
 
-    fn send(&self, p: ServerboundPlay) -> anyhow::Result<()> {
-        self.conn.send(p).map_err(|e| anyhow::anyhow!("send: {e}"))
-    }
-
-    fn apply(&mut self, p: ClientboundPlay) -> anyhow::Result<()> {
+    /// Applies one clientbound packet; serverbound replies go to `out`.
+    pub fn apply<W: WorldSink + ?Sized, E: EntitySink + ?Sized>(
+        &mut self,
+        p: ClientboundPlay,
+        world: &mut W,
+        entities: &mut E,
+        regs: &SyncedRegistries,
+        out: &mut Vec<ServerboundPlay>,
+    ) {
         use ClientboundPlay as P;
-        let own = self.login.entity_id;
+        self.counters.packets += 1;
+        let own = self.entity_id;
         match p {
             P::Login(l) => {
                 self.counters.got_login = true;
@@ -305,16 +335,15 @@ impl<W: WorldSink, E: EntitySink> NetDriver<W, E> {
             }
             P::Respawn(r) => {
                 self.counters.respawns += 1;
-                let dim = self
-                    .conn
-                    .registries()
+                let dim = regs
                     .dimension_info(r.spawn.dimension_type, &r.spawn.dimension)
                     .unwrap_or_else(|| DimensionInfo {
                         name: r.spawn.dimension.clone(),
                         ..DimensionInfo::overworld()
                     });
-                self.world = (self.make_world)(&dim);
-                self.login.dimension = dim;
+                world.reset(&dim);
+                entities.clear();
+                self.dimension = dim;
                 self.player.game_mode =
                     GameMode::from_id(r.spawn.game_mode).unwrap_or(self.player.game_mode);
                 self.player.has_position = false;
@@ -325,89 +354,76 @@ impl<W: WorldSink, E: EntitySink> NetDriver<W, E> {
                 self.player.apply_teleport(&t);
                 self.counters.teleports += 1;
                 let pl = &self.player;
-                self.send(ServerboundPlay::AcceptTeleportation(
+                out.push(ServerboundPlay::AcceptTeleportation(
                     sb::AcceptTeleportation {
                         teleport_id: t.teleport_id,
                         pos: pl.pos,
                         yaw: pl.yaw,
                         pitch: pl.pitch,
                     },
-                ))?;
+                ));
                 // Observed on the 26.3 server: a movement packet sent between
                 // accept_teleportation and player_loaded gets the client kicked
                 // with invalid_player_movement, so movement starts on the next tick.
                 if !self.sent_loaded {
-                    self.send(ServerboundPlay::PlayerLoaded(sb::PlayerLoaded {}))?;
+                    out.push(ServerboundPlay::PlayerLoaded(sb::PlayerLoaded {}));
                     self.sent_loaded = true;
                 }
             }
-            P::LevelChunkWithLight(c) => match self.world.load_chunk(&c.chunk) {
+            P::LevelChunkWithLight(c) => match world.load_chunk(&c.chunk) {
                 Ok(()) => self.counters.chunks_loaded += 1,
                 Err(e) => {
                     self.counters.chunk_errors += 1;
                     if self.counters.chunk_errors <= 3 {
                         tracing::warn!("chunk {:?} not loaded: {e:#}", c.chunk.pos);
                     }
+                    self.counters.last_chunk_error = Some(format!("{e:#}"));
                 }
             },
             P::ForgetLevelChunk(f) => {
-                self.world.unload_chunk(f.pos);
+                world.unload_chunk(f.pos);
                 self.counters.chunks_unloaded += 1;
             }
             P::BlockUpdate(b) => {
                 let c = b.change();
-                self.world.set_block(c.pos, c.state);
+                world.set_block(c.pos, c.state);
             }
             P::SectionBlocksUpdate(u) => {
                 for c in u.changes() {
-                    self.world.set_block(c.pos, c.state);
+                    world.set_block(c.pos, c.state);
                 }
             }
-            P::LightUpdate(l) => self.world.apply_light(l.pos, &l.light),
-            P::AddEntity(a) => self.entities.spawn(&a.spawn()),
+            P::LightUpdate(l) => world.apply_light(l.pos, &l.light),
+            P::AddEntity(a) => entities.spawn(&a.spawn()),
             P::RemoveEntities(r) => {
                 let ids: Vec<EntityId> = r.entity_ids.iter().map(|i| EntityId(*i)).collect();
-                self.entities.remove(&ids);
+                entities.remove(&ids);
             }
             P::MoveEntityPos(m) => {
-                self.entities
-                    .move_delta(EntityId(m.entity_id), m.deltas.total(), m.on_ground)
+                entities.move_delta(EntityId(m.entity_id), m.deltas.total(), m.on_ground)
             }
             P::MoveEntityPosRot(m) => {
                 let id = EntityId(m.entity_id);
-                self.entities.move_delta(id, m.deltas.total(), m.on_ground);
-                self.entities.set_rotation(id, m.yaw, m.pitch, m.on_ground);
+                entities.move_delta(id, m.deltas.total(), m.on_ground);
+                entities.set_rotation(id, m.yaw, m.pitch, m.on_ground);
             }
             P::MoveEntityRot(m) => {
-                self.entities
-                    .set_rotation(EntityId(m.entity_id), m.yaw, m.pitch, m.on_ground)
+                entities.set_rotation(EntityId(m.entity_id), m.yaw, m.pitch, m.on_ground)
             }
             P::EntityPositionSync(s) => {
                 if let Some(pos) = s.end_pos() {
-                    self.entities
-                        .teleport(EntityId(s.entity_id), pos, s.yaw, s.pitch, s.on_ground);
+                    entities.teleport(EntityId(s.entity_id), pos, s.yaw, s.pitch, s.on_ground);
                 }
             }
             P::TeleportEntity(t) => {
                 let id = EntityId(t.entity_id);
-                let (old, oy, op) = self.entities.pose(id).unwrap_or((DVec3::ZERO, 0.0, 0.0));
+                let (old, oy, op) = entities.pose(id).unwrap_or((DVec3::ZERO, 0.0, 0.0));
                 let rel = |bit: i32| t.flags & bit != 0;
+                let pick = |bit: i32, old: f64, new: f64| if rel(bit) { old + new } else { new };
                 let pos = DVec3::new(
-                    if rel(teleport_flags::X) {
-                        old.x + t.pos.x
-                    } else {
-                        t.pos.x
-                    },
-                    if rel(teleport_flags::Y) {
-                        old.y + t.pos.y
-                    } else {
-                        t.pos.y
-                    },
-                    if rel(teleport_flags::Z) {
-                        old.z + t.pos.z
-                    } else {
-                        t.pos.z
-                    },
+                    pick(teleport_flags::X, old.x, t.pos.x),
+                    pick(teleport_flags::Y, old.y, t.pos.y),
+                    pick(teleport_flags::Z, old.z, t.pos.z),
                 );
                 let yaw = if rel(teleport_flags::YAW) {
                     oy + t.yaw
@@ -419,32 +435,27 @@ impl<W: WorldSink, E: EntitySink> NetDriver<W, E> {
                 } else {
                     t.pitch
                 };
-                self.entities.teleport(id, pos, yaw, pitch, t.on_ground);
+                entities.teleport(id, pos, yaw, pitch, t.on_ground);
             }
-            P::RotateHead(h) => self
-                .entities
-                .set_head_yaw(EntityId(h.entity_id), h.head_yaw),
+            P::RotateHead(h) => entities.set_head_yaw(EntityId(h.entity_id), h.head_yaw),
             P::SetEntityMotion(m) => {
                 if EntityId(m.entity_id) == own {
                     self.player.velocity = m.velocity;
                 } else {
-                    self.entities
-                        .set_velocity(EntityId(m.entity_id), m.velocity);
+                    entities.set_velocity(EntityId(m.entity_id), m.velocity);
                 }
             }
             P::SetEntityData(d) => {
                 if EntityId(d.entity_id) != own {
-                    self.entities
-                        .set_metadata(EntityId(d.entity_id), &d.metadata);
+                    entities.set_metadata(EntityId(d.entity_id), &d.metadata);
                 }
             }
             P::SetEquipment(e) => {
                 for (slot, item) in e.equipment {
-                    self.entities
-                        .set_equipment(EntityId(e.entity_id), slot, item);
+                    entities.set_equipment(EntityId(e.entity_id), slot, item);
                 }
             }
-            P::PlayerInfoUpdate(u) => self.entities.player_info(&u.infos()),
+            P::PlayerInfoUpdate(u) => entities.player_info(&u.infos()),
             P::SetHealth(h) => {
                 self.player.health = h.health;
                 self.player.food = h.food;
@@ -471,7 +482,32 @@ impl<W: WorldSink, E: EntitySink> NetDriver<W, E> {
             }
             _ => {}
         }
-        Ok(())
+    }
+
+    /// The packets a vanilla client sends at the end of a tick while it stands still: the
+    /// position/rotation, the (empty) player input when it changed, and `client_tick_end`.
+    /// Nothing before the first teleport has been accepted and `player_loaded` sent.
+    pub fn end_tick(&mut self, out: &mut Vec<ServerboundPlay>) {
+        if !(self.player.has_position && self.sent_loaded) {
+            return;
+        }
+        let pl = &self.player;
+        let flags = if pl.on_ground {
+            move_flags::ON_GROUND
+        } else {
+            0
+        };
+        out.push(ServerboundPlay::MovePlayerPosRot(sb::MovePlayerPosRot {
+            pos: pl.pos,
+            yaw: pl.yaw,
+            pitch: pl.pitch,
+            flags,
+        }));
+        if self.last_input != Some(0) {
+            out.push(ServerboundPlay::PlayerInput(sb::PlayerInput { flags: 0 }));
+            self.last_input = Some(0);
+        }
+        out.push(ServerboundPlay::ClientTickEnd(sb::ClientTickEnd {}));
     }
 
     fn push_chat(&mut self, line: String) {
@@ -483,198 +519,92 @@ impl<W: WorldSink, E: EntitySink> NetDriver<W, E> {
     }
 }
 
-// ------------------------------------------------------------ stand-ins
-
-/// Minimal world stand-in: tracks loaded chunks and, per chunk, how many
-/// sections have a non-zero block count (read from the section payload;
-/// the full palette decode is `haste_world`'s job).
-#[derive(Debug, Default)]
-pub struct StubWorld {
-    chunks: HashMap<ChunkPos, usize>,
-    section_count: usize,
-    /// Bits per entry of the direct biome palette (from the biome registry size).
-    biome_direct_bits: u8,
+/// Owns the connection and the session state; world and entities are borrowed per tick.
+pub struct NetDriver {
+    conn: Connection,
+    login: Login,
+    /// Session state.
+    pub session: Session,
+    out: Vec<ServerboundPlay>,
 }
 
-impl StubWorld {
-    /// A stub for a dimension; `biome_count` is the synced biome registry size.
-    pub fn new(dim: &DimensionInfo, biome_count: usize) -> Self {
-        let bits = (usize::BITS - biome_count.saturating_sub(1).leading_zeros()) as u8;
-        Self {
-            chunks: HashMap::new(),
-            section_count: dim.section_count(),
-            biome_direct_bits: bits.max(1),
-        }
+impl NetDriver {
+    /// Connects (handshake, login, configuration) and returns in the play state.
+    pub async fn connect(opts: ConnectOptions) -> anyhow::Result<Self> {
+        let (conn, login) = Connection::connect(opts).await.context("connecting")?;
+        let session = Session::new(login.entity_id, login.game_mode, login.dimension.clone());
+        Ok(Self {
+            conn,
+            login,
+            session,
+            out: Vec::new(),
+        })
     }
 
-    /// Counts sections with a non-zero block count. Approximation for the
-    /// stand-in: a direct block palette is assumed to use 15 bits (the
-    /// wiki's vanilla value); `None` if the payload does not parse.
-    fn count_non_empty(&self, data: &[u8]) -> Option<usize> {
-        let mut r = haste_protocol::wire::Reader::new(data);
-        let mut n = 0;
-        for _ in 0..self.section_count {
-            let blocks = r.i16().ok()?;
-            let _fluids = r.i16().ok()?;
-            skip_container(&mut r, 4096, 4, 15)?;
-            skip_container(&mut r, 64, 1, self.biome_direct_bits)?;
-            if blocks > 0 {
-                n += 1;
-            }
-        }
-        Some(n)
+    /// The connection (registries, stats, close reason).
+    pub fn connection(&self) -> &Connection {
+        &self.conn
     }
-}
 
-/// Skips a paletted container (wiki "Paletted Container structure"; the data
-/// array is not length-prefixed, its size follows from the bits per entry).
-fn skip_container(
-    r: &mut haste_protocol::wire::Reader<'_>,
-    entries: usize,
-    min_indirect: u8,
-    direct_bits: u8,
-) -> Option<()> {
-    let bits = r.u8().ok()?;
-    let bits = if bits == 0 {
-        r.var_int().ok()?;
-        0
-    } else if (entries == 4096 && bits <= 8) || (entries == 64 && bits <= 3) {
-        let n = r.len_prefix(4096).ok()?;
-        for _ in 0..n {
-            r.var_int().ok()?;
-        }
-        bits.max(min_indirect)
-    } else {
-        direct_bits
-    };
-    if bits > 0 {
-        let per_long = 64 / bits as usize;
-        r.take(entries.div_ceil(per_long) * 8).ok()?;
+    /// What `login` said (the dimension may since have changed: `session.dimension`).
+    pub fn login(&self) -> &Login {
+        &self.login
     }
-    Some(())
-}
 
-impl WorldSink for StubWorld {
-    fn load_chunk(&mut self, data: &ChunkData) -> anyhow::Result<()> {
-        let n = self
-            .count_non_empty(&data.sections)
-            .ok_or_else(|| anyhow::anyhow!("stub could not walk the section payload"))?;
-        self.chunks.insert(data.pos, n);
+    /// Connection counters.
+    pub fn stats(&self) -> StatsSnapshot {
+        self.conn.stats()
+    }
+
+    /// Whether the connection has closed.
+    pub fn is_closed(&self) -> bool {
+        self.conn.is_closed()
+    }
+
+    /// Closes the connection.
+    pub fn disconnect(self) {
+        self.conn.disconnect();
+    }
+
+    /// Drains every queued packet into the session, world and entities, and sends the replies.
+    pub fn receive<W: WorldSink + ?Sized, E: EntitySink + ?Sized>(
+        &mut self,
+        world: &mut W,
+        entities: &mut E,
+    ) -> anyhow::Result<()> {
+        while let Some(p) = self.conn.try_recv() {
+            let regs = self.conn.registries();
+            self.session.apply(p, world, entities, regs, &mut self.out);
+        }
+        self.flush()
+    }
+
+    /// Ends the tick: entity interpolation step and this tick's serverbound packets.
+    pub fn end_tick<E: EntitySink + ?Sized>(&mut self, entities: &mut E) -> anyhow::Result<()> {
+        entities.tick();
+        self.session.end_tick(&mut self.out);
+        self.flush()
+    }
+
+    /// One 20 Hz tick: [`Self::receive`] then [`Self::end_tick`].
+    pub fn tick<W: WorldSink + ?Sized, E: EntitySink + ?Sized>(
+        &mut self,
+        world: &mut W,
+        entities: &mut E,
+    ) -> anyhow::Result<()> {
+        self.receive(world, entities)?;
+        self.end_tick(entities)
+    }
+
+    fn flush(&mut self) -> anyhow::Result<()> {
+        for p in self.out.drain(..) {
+            self.conn
+                .send(p)
+                .map_err(|e| anyhow::anyhow!("send: {e}"))?;
+        }
         Ok(())
-    }
-    fn unload_chunk(&mut self, pos: ChunkPos) {
-        self.chunks.remove(&pos);
-    }
-    fn set_block(&mut self, _pos: BlockPos, _state: BlockStateId) {}
-    fn apply_light(&mut self, _pos: ChunkPos, _light: &LightData) {}
-    fn chunk_count(&self) -> usize {
-        self.chunks.len()
-    }
-    fn non_empty_sections(&self) -> usize {
-        self.chunks.values().sum()
-    }
-}
-
-/// Minimal entity store stand-in: positions only.
-#[derive(Debug, Default)]
-pub struct StubEntities {
-    entities: HashMap<EntityId, (DVec3, f32, f32)>,
-    players: HashSet<u128>,
-}
-
-impl EntitySink for StubEntities {
-    fn spawn(&mut self, s: &EntitySpawn) {
-        self.entities.insert(s.id, (s.pos, s.yaw, s.pitch));
-    }
-    fn remove(&mut self, ids: &[EntityId]) {
-        for id in ids {
-            self.entities.remove(id);
-        }
-    }
-    fn move_delta(&mut self, id: EntityId, delta: DVec3, _on_ground: bool) {
-        if let Some(e) = self.entities.get_mut(&id) {
-            e.0 += delta;
-        }
-    }
-    fn set_rotation(&mut self, id: EntityId, yaw: f32, pitch: f32, _on_ground: bool) {
-        if let Some(e) = self.entities.get_mut(&id) {
-            e.1 = yaw;
-            e.2 = pitch;
-        }
-    }
-    fn teleport(&mut self, id: EntityId, pos: DVec3, yaw: f32, pitch: f32, _on_ground: bool) {
-        if let Some(e) = self.entities.get_mut(&id) {
-            *e = (pos, yaw, pitch);
-        }
-    }
-    fn set_head_yaw(&mut self, _id: EntityId, _yaw: f32) {}
-    fn set_velocity(&mut self, _id: EntityId, _v: DVec3) {}
-    fn set_metadata(&mut self, _id: EntityId, _entries: &[MetadataEntry]) {}
-    fn set_equipment(&mut self, _id: EntityId, _slot: u8, _item: ItemStackData) {}
-    fn player_info(&mut self, info: &[PlayerInfo]) {
-        for i in info {
-            if !i.name.is_empty() {
-                self.players.insert(i.uuid.as_u128());
-            }
-        }
-    }
-    fn pose(&self, id: EntityId) -> Option<(DVec3, f32, f32)> {
-        self.entities.get(&id).copied()
-    }
-    fn tick(&mut self) {}
-    fn len(&self) -> usize {
-        self.entities.len()
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn teleport_relative_flags() {
-        let mut p = LocalPlayerState::new(GameMode::Survival);
-        p.apply_teleport(&cb::PlayerPosition {
-            teleport_id: 1,
-            pos: DVec3::new(10.0, 64.0, -5.0),
-            velocity: DVec3::ZERO,
-            yaw: 90.0,
-            pitch: 10.0,
-            flags: 0,
-        });
-        assert_eq!(p.pos, DVec3::new(10.0, 64.0, -5.0));
-        p.apply_teleport(&cb::PlayerPosition {
-            teleport_id: 2,
-            pos: DVec3::new(1.0, 0.0, 1.0),
-            velocity: DVec3::ZERO,
-            yaw: 5.0,
-            pitch: 0.0,
-            flags: teleport_flags::X
-                | teleport_flags::Y
-                | teleport_flags::Z
-                | teleport_flags::YAW
-                | teleport_flags::PITCH,
-        });
-        assert_eq!(p.pos, DVec3::new(11.0, 64.0, -4.0));
-        assert_eq!((p.yaw, p.pitch), (95.0, 10.0));
-        assert!(p.has_position);
-    }
-
-    #[test]
-    fn stub_world_counts_sections() {
-        let dim = DimensionInfo {
-            min_y: 0,
-            height: 32,
-            ..DimensionInfo::overworld()
-        };
-        let w = StubWorld::new(&dim, 64);
-        // Section 1: 0 blocks, single-valued air, single-valued biome.
-        // Section 2: 10 blocks, indirect 4-bit palette of 2, single biome.
-        let mut data = vec![0, 0, 0, 0, 0, 0, 0, 0];
-        data.extend([0, 10, 0, 0, 4, 2, 0, 1]);
-        data.extend(vec![0u8; 256 * 8]);
-        data.extend([0, 0]);
-        assert_eq!(w.count_non_empty(&data), Some(1));
-        assert_eq!(w.count_non_empty(&data[..10]), None);
-    }
-}
+mod tests;
