@@ -38,6 +38,9 @@ public final class ClientImpl {
     public static boolean isMultiplayerServer(Minecraft m) { return true; }
     public static net.minecraft.client.multiplayer.ServerData getCurrentServer(Minecraft m) { return null; }
     public static boolean isPaused(Minecraft m) { return false; }
+    /** False while the canonical proxies are built (option changes then skip their side effects, like vanilla at startup). */
+    static boolean running;
+    public static boolean isRunning(Minecraft m) { return running; }
     public static net.minecraft.client.multiplayer.ClientPacketListener getConnection(Minecraft m) {
         return Proxies.service(net.minecraft.client.multiplayer.ClientPacketListener.class);
     }
@@ -84,13 +87,39 @@ public final class ClientImpl {
         }
     }
 
-    // ---- Hud (drawn by Rust; everything else is a no-op) ----
-    static int guiTicks;
-    public static net.minecraft.client.gui.Font getFont(net.minecraft.client.gui.Hud h) { return Proxies.font; }
-    public static int getGuiTicks(net.minecraft.client.gui.Hud h) { return guiTicks; }
-    public static net.minecraft.client.gui.components.ChatComponent getChat(net.minecraft.client.gui.Hud h) {
-        return Proxies.service(net.minecraft.client.gui.components.ChatComponent.class);
+    /** No player is blocked or restricted (Haste has no social/block list yet). */
+    public static boolean isBlocked(Minecraft m, java.util.UUID id) { return false; }
+    public static boolean isFriendOnlyRestricted(Minecraft m, java.util.UUID id) { return false; }
+    /** Leaving the server (pause screen "Disconnect", death screen "Title Screen"): Rust disconnects. */
+    public static void disconnectFromWorld(Minecraft m, net.minecraft.network.chat.Component reason) { haste.rt.Native.requestDisconnect(); }
+    public static void disconnectWithSavingScreen(Minecraft m) { haste.rt.Native.requestDisconnect(); }
+    public static boolean allowsMultiplayer(Minecraft m) { return true; }
+
+    /** Reduced debug info (the server's game rule, entity events 22/23): not forwarded yet, full info. */
+    public static boolean showOnlyReducedInfo(Minecraft m) { return false; }
+    /** Vanilla's tutorial (hints and toasts for new players); Haste starts it at the last step (no hints). */
+    public static net.minecraft.client.tutorial.Tutorial getTutorial(Minecraft m) { return Proxies.tutorial; }
+    /** Frames per second from Rust's render loop. */
+    public static int getFps(Minecraft m) { return Mirror.I[Mirror.I_FPS]; }
+    public static net.minecraft.client.DeltaTracker getDeltaTracker(Minecraft m) { return Delta.INSTANCE; }
+
+    /** Vanilla's toast manager (advancement, recipe and system toasts), real tier-3 Java. */
+    public static net.minecraft.client.gui.components.toasts.ToastManager toastManager(Gui g) { return Proxies.toasts; }
+
+    /** Vanilla's chat message pipeline (decoration, delays, the chat log), real tier-3 Java. */
+    public static net.minecraft.client.multiplayer.chat.ChatListener chatListener(Gui g) { return Proxies.chatListener; }
+
+    /** The camera is always the local player (spectating other entities is not supported yet). */
+    public static net.minecraft.world.entity.Entity getCameraEntity(Minecraft m) { return Proxies.player; }
+
+    // ---- CommandHistory (in memory: the last 50 typed lines, like vanilla's cap; no file) ----
+    private static final net.minecraft.util.ArrayListDeque<String> HISTORY = new net.minecraft.util.ArrayListDeque<>(50);
+    public static void addCommand(net.minecraft.client.CommandHistory h, String line) {
+        if (!HISTORY.isEmpty() && HISTORY.peekLast().equals(line)) return;
+        if (HISTORY.size() >= 50) HISTORY.removeFirst();
+        HISTORY.addLast(line);
     }
+    public static java.util.Collection<String> history(net.minecraft.client.CommandHistory h) { return HISTORY; }
 
     // ---- Window ----
     public static int getGuiScaledWidth(Window w) { return GfxImpl.width; }

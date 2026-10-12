@@ -10,6 +10,7 @@
 
 pub const A: i32 = 4;
 pub const E: i32 = 8;
+pub const Q: i32 = 20;
 pub const T: i32 = 23;
 pub const NUM_1: i32 = 30;
 pub const NUM_0: i32 = 39;
@@ -26,6 +27,8 @@ pub const RIGHT: i32 = 79;
 pub const LEFT: i32 = 80;
 pub const DOWN: i32 = 81;
 pub const UP: i32 = 82;
+pub const F1: i32 = 58;
+pub const F3: i32 = 60;
 pub const LCTRL: i32 = 224;
 pub const LSHIFT: i32 = 225;
 

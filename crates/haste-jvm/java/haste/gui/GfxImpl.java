@@ -38,7 +38,7 @@ public final class GfxImpl {
         width = w; height = h;
         scissorDepth = 0;
         tooltip = null;
-        cursor = "default";
+        cursor = 0;
         entityBoxes.clear();
     }
 
@@ -55,10 +55,20 @@ public final class GfxImpl {
     public static Matrix3x2fStack pose(GuiGraphicsExtractor g) { return POSE; }
     public static void nextStratum(GuiGraphicsExtractor g) {}
     public static void blurBeforeThisStratum(GuiGraphicsExtractor g) {}
-    /** Name of the cursor the screen asked for this frame ("default" if none). */
-    static String cursor = "default";
+    /** The cursor the screen asked for this frame (GuiBatch.frame's code; 0 = default). */
+    static int cursor;
     public static void requestCursor(GuiGraphicsExtractor g, com.mojang.blaze3d.platform.cursor.CursorType c) {
-        cursor = c == null ? "default" : CursorImpl.NAMES.getOrDefault(c, "default");
+        cursor = cursorCode(c);
+    }
+    private static int cursorCode(com.mojang.blaze3d.platform.cursor.CursorType c) {
+        if (c == null) return 0;
+        com.mojang.blaze3d.platform.cursor.CursorType[] order = {
+            com.mojang.blaze3d.platform.cursor.CursorTypes.ARROW, com.mojang.blaze3d.platform.cursor.CursorTypes.IBEAM,
+            com.mojang.blaze3d.platform.cursor.CursorTypes.CROSSHAIR, com.mojang.blaze3d.platform.cursor.CursorTypes.POINTING_HAND,
+            com.mojang.blaze3d.platform.cursor.CursorTypes.RESIZE_NS, com.mojang.blaze3d.platform.cursor.CursorTypes.RESIZE_EW,
+            com.mojang.blaze3d.platform.cursor.CursorTypes.RESIZE_ALL, com.mojang.blaze3d.platform.cursor.CursorTypes.NOT_ALLOWED };
+        for (int i = 0; i < order.length; i++) if (order[i] == c) return i + 1;
+        return 0;
     }
 
     public static void enableScissor(GuiGraphicsExtractor g, int x1, int y1, int x2, int y2) {
@@ -189,17 +199,13 @@ public final class GfxImpl {
         POSE.sync();
         GuiBatch.op(GuiBatch.SPRITE, id(s), x, y, w, h, tint);
     }
-    /**
-     * Sub-region of a sprite (texW x texH sprite, region u,v of size w,h drawn at x,y). GuiFrame has no sprite
-     * region command: the whole sprite is drawn into the region's rectangle (approximate; see interface requests).
-     */
-    public static void blitSprite(GuiGraphicsExtractor g, RenderPipeline p, Identifier s, int texW, int texH, int u, int v, int x, int y, int w, int h) {
-        blitSprite(g, p, s, texW, texH, u, v, x, y, w, h, -1);
+    /** Sub-region of a sprite: region (u, v, w, h) of a sprite drawn as {@code spriteW x spriteH}, placed at x, y. */
+    public static void blitSprite(GuiGraphicsExtractor g, RenderPipeline p, Identifier s, int spriteW, int spriteH, int u, int v, int x, int y, int w, int h) {
+        blitSprite(g, p, s, spriteW, spriteH, u, v, x, y, w, h, -1);
     }
-    public static void blitSprite(GuiGraphicsExtractor g, RenderPipeline p, Identifier s, int texW, int texH, int u, int v, int x, int y, int w, int h, int tint) {
-        haste.rt.Unimplemented.fail("haste.gui.GfxImpl#blitSprite(region): drawn as whole sprite");
+    public static void blitSprite(GuiGraphicsExtractor g, RenderPipeline p, Identifier s, int spriteW, int spriteH, int u, int v, int x, int y, int w, int h, int tint) {
         POSE.sync();
-        GuiBatch.op(GuiBatch.SPRITE, id(s), x, y, w, h, tint);
+        GuiBatch.ops(GuiBatch.SPRITE_REGION, id(s), spriteW, spriteH, u, v, x, y, w, h, tint);
     }
 
     private static void texture(Identifier t, int x, int y, int w, int h, float u, float v, float uw, float vh, int texW, int texH, int tint) {
@@ -227,24 +233,33 @@ public final class GfxImpl {
     // ---- items ----
     public static void item(GuiGraphicsExtractor g, ItemStack s, int x, int y) { item(g, s, x, y, 0); }
     public static void item(GuiGraphicsExtractor g, ItemStack s, int x, int y, int seed) {
-        if (s == null) return;
-        int item = StackImpl.itemId(s);
-        if (item < 0) return;
+        if (s == null || s.isEmpty()) return;
         POSE.sync();
-        GuiBatch.op(GuiBatch.ITEM, item, x, y, StackImpl.getCount(s));
+        GuiBatch.op(GuiBatch.ITEM, itemId(s), x, y, s.getCount());
     }
+
+    /** Index of the stack's item in the {@code minecraft:item} registry (the same numbering as Rust's). */
+    static int itemId(ItemStack s) { return net.minecraft.core.registries.BuiltInRegistries.ITEM.getId(s.getItem()); }
     public static void item(GuiGraphicsExtractor g, net.minecraft.world.entity.LivingEntity e, ItemStack s, int x, int y, int seed) { item(g, s, x, y, seed); }
     public static void fakeItem(GuiGraphicsExtractor g, ItemStack s, int x, int y) { item(g, s, x, y, 0); }
     public static void fakeItem(GuiGraphicsExtractor g, ItemStack s, int x, int y, int seed) { item(g, s, x, y, seed); }
 
-    /** Stack count in the bottom-right corner (white, shadow), like vanilla's decoration. Durability bars: not yet. */
+    /**
+     * Stack decorations: the count in the bottom-right corner (white, shadow) and the durability bar (13 px wide,
+     * 2 px high, black under the item's bar colour), as they appear in the game. Cooldown overlays: not yet.
+     */
     public static void itemDecorations(GuiGraphicsExtractor g, Font f, ItemStack s, int x, int y) { itemDecorations(g, f, s, x, y, null); }
     public static void itemDecorations(GuiGraphicsExtractor g, Font f, ItemStack s, int x, int y, String text) {
-        if (s == null || StackImpl.itemId(s) < 0) return;
-        int count = StackImpl.getCount(s);
+        if (s == null || s.isEmpty()) return;
+        POSE.sync();
+        if (s.isBarVisible()) {
+            int bx = x + 2, by = y + 13;
+            GuiBatch.op(GuiBatch.FILL, bx, by, bx + 13, by + 2, 0xFF000000);
+            GuiBatch.op(GuiBatch.FILL, bx, by, bx + s.getBarWidth(), by + 1, 0xFF000000 | s.getBarColor());
+        }
+        int count = s.getCount();
         String label = text != null ? text : (count != 1 ? Integer.toString(count) : null);
         if (label == null) return;
-        POSE.sync();
         Text.emit(label, x + 19 - 2 - FontImpl.width(f, label), y + 6 + 3, -1, true);
     }
 
@@ -293,9 +308,10 @@ public final class GfxImpl {
         tooltip = List.of(c.getVisualOrderText()); tooltipX = x; tooltipY = y;
     }
 
+    /** An item's tooltip: vanilla's own lines ({@code Screen.getTooltipFromItem}: name, components, enchantments). */
     public static void setTooltipForNextFrame(GuiGraphicsExtractor g, Font f, ItemStack s, int x, int y) {
-        String name = StackImpl.displayName(s);
-        if (name != null) setTooltipForNextFrame(g, f, Component.literal(name), x, y);
+        if (s == null || s.isEmpty()) return;
+        setComponentTooltipForNextFrame(g, f, net.minecraft.client.gui.screens.Screen.getTooltipFromItem(Proxies.minecraft, s), x, y);
     }
     public static void extractDeferredElements(GuiGraphicsExtractor g, int mx, int my, float partial) {}
 
@@ -316,14 +332,17 @@ public final class GfxImpl {
     }
 
     /**
-     * An entity model in a GUI box (the inventory's player). GuiFrame has no command for it yet (interface
-     * request); the box is recorded so tests and a future command can use it.
+     * An entity model in a GUI box (the inventory's player): GuiCommand::Entity with the local player's entity id,
+     * the box, the scale and the mouse position the model looks at (Rust renders the model).
      */
     static final List<int[]> entityBoxes = new ArrayList<>();
     public static void entity(GuiGraphicsExtractor g, net.minecraft.client.renderer.entity.state.EntityRenderState s, float scale,
                               org.joml.Vector3fc translation, org.joml.Quaternionfc rotation, org.joml.Quaternionfc cameraAngle,
                               int x0, int y0, int x1, int y1) {
         entityBoxes.add(new int[]{x0 + (int) POSE.tx(), y0 + (int) POSE.ty(), x1 + (int) POSE.tx(), y1 + (int) POSE.ty()});
+        POSE.sync();
+        GuiBatch.ops(GuiBatch.ENTITY, Handlers.localEntityId, x0, y0, x1, y1, Float.floatToRawIntBits(scale),
+            Float.floatToRawIntBits((float) MouseImpl.x), Float.floatToRawIntBits((float) MouseImpl.y));
     }
 
     public static void setPreeditOverlay(GuiGraphicsExtractor g, Renderable r) {}

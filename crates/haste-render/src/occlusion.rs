@@ -3,7 +3,7 @@
 // (vanilla-style section visibility for cave culling: VisGraph flood fill +
 // SectionOcclusionGraph walk). See THIRD_PARTY.md.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 
 use glam::DVec3;
 use haste_core::{ChunkPos, SectionPos};
@@ -190,30 +190,91 @@ const ADV_CULL_SECTION_DIST: i32 = 3;
 const CEILED_SECTION_DIAGONAL: f64 = 28.0;
 const ADV_CULL_MIN_DIST_SQ: f64 = 3600.0;
 
-struct Node {
-    source: u8,
-    cone: u8,
+/// The sections the walk reached, per column, over the square of columns around the camera.
+#[derive(Clone, Debug, Default)]
+pub struct VisibleMask {
+    cx: i32,
+    cz: i32,
+    r: i32,
+    columns: Vec<u32>,
+}
+
+impl VisibleMask {
+    /// Bit `si` set when section index `si` of the column was reached.
+    pub fn column(&self, c: ChunkPos) -> u32 {
+        let (dx, dz) = (c.x - self.cx + self.r, c.z - self.cz + self.r);
+        let w = 2 * self.r + 1;
+        if self.columns.is_empty() || dx < 0 || dz < 0 || dx >= w || dz >= w {
+            return 0;
+        }
+        self.columns[(dx * w + dz) as usize]
+    }
+
+    /// HashMap-style lookup (tests).
+    pub fn get(&self, c: &ChunkPos) -> Option<u32> {
+        Some(self.column(*c)).filter(|m| *m != 0)
+    }
+}
+
+/// Walk state over a flat grid of (2r+1)^2 columns x `section_count` sections.
+struct Grid {
+    cx: i32,
+    cz: i32,
+    r: i32,
+    h: i32,
+    /// Per node: entered-from faces, cone, visited flag (bit 7 of `cone`).
+    source: Vec<u8>,
+    cone: Vec<u8>,
+}
+
+const VISITED: u8 = 0x80;
+
+impl Grid {
+    fn index(&self, x: i32, si: i32, z: i32) -> Option<usize> {
+        let (dx, dz) = (x - self.cx + self.r, z - self.cz + self.r);
+        let w = 2 * self.r + 1;
+        if dx < 0 || dz < 0 || dx >= w || dz >= w || si < 0 || si >= self.h {
+            return None;
+        }
+        Some(((dx * w + dz) * self.h + si) as usize)
+    }
+
+    fn visited(&self, x: i32, si: i32, z: i32) -> bool {
+        self.index(x, si, z)
+            .is_some_and(|i| self.cone[i] & VISITED != 0)
+    }
 }
 
 /// Vanilla's `SectionOcclusionGraph` walk (Pomme compute_visible_mask): flood
 /// the section grid outward from the camera section, stepping into a neighbour
 /// only when the path isn't a backtrack and a sightline crosses the current
-/// section. Returns each visible column's set of visible section indices.
-/// Sections without computed visibility default to see-through, so the result
-/// only ever under-culls. Frustum culling is applied separately.
+/// section. Sections without visibility data are see-through, so the result
+/// only ever under-culls. Frustum culling is applied separately. Flat arrays
+/// instead of hash maps: a full walk at render distance 12 visits ~15k nodes.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_visible_mask(
-    section_vis: &HashMap<(ChunkPos, i32), VisibilitySet>,
+    section_vis: impl Fn(ChunkPos, i32) -> Option<VisibilitySet>,
     cam_col: ChunkPos,
     cam_si: i32,
     eye: DVec3,
     min_y: i32,
     section_count: i32,
     render_distance: i32,
-) -> HashMap<ChunkPos, u32> {
-    let mut visible: HashMap<ChunkPos, u32> = HashMap::new();
-    let mut nodes: HashMap<(i32, i32, i32), Node> = HashMap::new();
-    let mut queue: VecDeque<(i32, i32, i32)> = VecDeque::new();
+) -> VisibleMask {
+    let r = render_distance.max(0);
+    let w = 2 * r + 1;
+    let h = section_count.max(1);
+    let n = (w * w * h) as usize;
+    let mut grid = Grid {
+        cx: cam_col.x,
+        cz: cam_col.z,
+        r,
+        h,
+        source: vec![0; n],
+        cone: vec![0; n],
+    };
+    let mut columns = vec![0u32; (w * w) as usize];
+    let mut queue: VecDeque<(i32, i32, i32)> = VecDeque::with_capacity(1024);
 
     let cam_center = DVec3::new(
         (cam_col.x * 16 + 8) as f64,
@@ -223,17 +284,17 @@ pub fn compute_visible_mask(
     let world_min_y = min_y as f64;
     let world_max_y = (min_y + section_count * 16) as f64;
 
-    let start = (cam_col.x, cam_si.clamp(0, section_count - 1), cam_col.z);
-    nodes.insert(start, Node { source: 0, cone: 0 });
+    let start = (cam_col.x, cam_si.clamp(0, h - 1), cam_col.z);
+    let si0 = grid.index(start.0, start.1, start.2).unwrap();
+    grid.cone[si0] = VISITED;
+    columns[(r * w + r) as usize] |= 1u32 << start.1;
     queue.push_back(start);
-    visible.insert(ChunkPos::new(start.0, start.2), 1u32 << start.1);
 
     while let Some((x, si, z)) = queue.pop_front() {
-        let Node { source, cone } = nodes[&(x, si, z)];
-        let vis = section_vis
-            .get(&(ChunkPos::new(x, z), si))
-            .copied()
-            .unwrap_or(VisibilitySet::all());
+        let i = grid.index(x, si, z).unwrap();
+        let source = grid.source[i];
+        let cone = grid.cone[i] & !VISITED;
+        let vis = section_vis(ChunkPos::new(x, z), si).unwrap_or(VisibilitySet::all());
         let distant = (x - cam_col.x).abs() > ADV_CULL_SECTION_DIST
             || (si - cam_si).abs() > ADV_CULL_SECTION_DIST
             || (z - cam_col.z).abs() > ADV_CULL_SECTION_DIST;
@@ -251,13 +312,14 @@ pub fn compute_visible_mask(
             {
                 continue;
             }
+            let (dx, dy, dz) = face.offset();
+            let (nx, nsi, nz) = (x + dx, si + dy, z + dz);
             // Distant sections also get a coarse ray-march back to the camera.
             if distant
                 && ray_occluded(
-                    &nodes,
+                    &grid,
                     eye,
                     cam_center,
-                    face,
                     (x, si, z),
                     min_y,
                     world_min_y,
@@ -266,42 +328,35 @@ pub fn compute_visible_mask(
             {
                 continue;
             }
-            let (dx, dy, dz) = face.offset();
-            let (nx, nsi, nz) = (x + dx, si + dy, z + dz);
-            if nsi < 0 || nsi >= section_count {
+            let Some(ni) = grid.index(nx, nsi, nz) else {
+                continue;
+            };
+            if grid.cone[ni] & VISITED != 0 {
+                grid.source[ni] |= face.bit();
                 continue;
             }
-            if (nx - cam_col.x).abs() > render_distance || (nz - cam_col.z).abs() > render_distance
-            {
-                continue;
-            }
-            if let Some(existing) = nodes.get_mut(&(nx, nsi, nz)) {
-                existing.source |= face.bit();
-                continue;
-            }
-            nodes.insert(
-                (nx, nsi, nz),
-                Node {
-                    source: face.bit(),
-                    cone: cone | face.bit(),
-                },
-            );
-            *visible.entry(ChunkPos::new(nx, nz)).or_insert(0) |= 1u32 << nsi;
+            grid.source[ni] = face.bit();
+            grid.cone[ni] = VISITED | cone | face.bit();
+            let col = ((nx - cam_col.x + r) * w + (nz - cam_col.z + r)) as usize;
+            columns[col] |= 1u32 << nsi;
             queue.push_back((nx, nsi, nz));
         }
     }
-    visible
+    VisibleMask {
+        cx: cam_col.x,
+        cz: cam_col.z,
+        r,
+        columns,
+    }
 }
 
 /// Step from the distant section's corner facing the camera toward the camera
 /// by one section diagonal at a time; if a step lands in a section the walk
 /// hasn't reached, the line of sight is blocked.
-#[allow(clippy::too_many_arguments)]
 fn ray_occluded(
-    nodes: &HashMap<(i32, i32, i32), Node>,
+    grid: &Grid,
     eye: DVec3,
     cam_center: DVec3,
-    face: Face,
     (sx, ssi, sz): (i32, i32, i32),
     min_y: i32,
     world_min_y: f64,
@@ -310,7 +365,6 @@ fn ray_occluded(
     let ox = (sx * 16) as f64;
     let oy = (min_y + ssi * 16) as f64;
     let oz = (sz * 16) as f64;
-    let _ = face;
     let corner = |c: f64, o: f64| o + if c > o { 16.0 } else { 0.0 };
     let mut check = DVec3::new(
         corner(cam_center.x, ox),
@@ -326,7 +380,7 @@ fn ray_occluded(
         let cx = (check.x / 16.0).floor() as i32;
         let csi = ((check.y - min_y as f64) / 16.0).floor() as i32;
         let cz = (check.z / 16.0).floor() as i32;
-        if !nodes.contains_key(&(cx, csi, cz)) {
+        if !grid.visited(cx, csi, cz) {
             return true;
         }
     }
@@ -350,6 +404,7 @@ pub fn section_visibility(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn empty_section_connects_all_faces() {
@@ -384,16 +439,24 @@ mod tests {
     fn open_grid_reaches_every_section() {
         // No visibility data => every section is see-through; the walk must
         // reach every section within render distance.
-        let section_vis = HashMap::new();
+        let section_vis: HashMap<(ChunkPos, i32), VisibilitySet> = HashMap::new();
         let sc = 8;
         let rd = 6;
         let eye = DVec3::new(8.0, 72.0, 8.0);
-        let mask = compute_visible_mask(&section_vis, ChunkPos::new(0, 0), 4, eye, 0, sc, rd);
+        let mask = compute_visible_mask(
+            |c, si| section_vis.get(&(c, si)).copied(),
+            ChunkPos::new(0, 0),
+            4,
+            eye,
+            0,
+            sc,
+            rd,
+        );
         let full = (1u32 << sc) - 1;
         for x in -rd..=rd {
             for z in -rd..=rd {
                 assert_eq!(
-                    mask.get(&ChunkPos::new(x, z)).copied().unwrap_or(0),
+                    mask.column(ChunkPos::new(x, z)),
                     full,
                     "column ({x}, {z}) not fully reached"
                 );
@@ -406,10 +469,18 @@ mod tests {
         let mut section_vis = HashMap::new();
         section_vis.insert((ChunkPos::new(0, -1), 4), VisibilitySet::none());
         let eye = DVec3::new(8.0, 72.0, 8.0);
-        let mask = compute_visible_mask(&section_vis, ChunkPos::new(0, 0), 4, eye, 0, 8, 4);
+        let mask = compute_visible_mask(
+            |c, si| section_vis.get(&(c, si)).copied(),
+            ChunkPos::new(0, 0),
+            4,
+            eye,
+            0,
+            8,
+            4,
+        );
         // The wall section itself is reached (visible face)...
-        assert!(mask.get(&ChunkPos::new(0, -1)).copied().unwrap_or(0) & (1 << 4) != 0);
+        assert!(mask.column(ChunkPos::new(0, -1)) & (1 << 4) != 0);
         // ...but the section directly behind it on the same row is not.
-        assert!(mask.get(&ChunkPos::new(0, -2)).copied().unwrap_or(0) & (1 << 4) == 0);
+        assert!(mask.column(ChunkPos::new(0, -2)) & (1 << 4) == 0);
     }
 }

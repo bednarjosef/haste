@@ -14,11 +14,11 @@ import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.sounds.SoundManager;
 import net.minecraft.world.entity.player.Inventory;
-import net.minecraft.world.item.ItemStack;
 
 /**
  * The canonical tier-2 proxies. Exactly one Java object per Rust object for the JVM's lifetime (mods will keep
- * state on them): singletons for the client objects, one {@link ItemStack} per inventory slot handle.
+ * state on them): singletons for the client objects. The player's {@link Inventory} is a real vanilla inventory
+ * (with real item stacks) attached to the player proxy; see {@link InventorySync}.
  */
 public final class Proxies {
     private Proxies() {}
@@ -32,40 +32,92 @@ public final class Proxies {
     public static GuiGraphicsExtractor graphics;
     public static LocalPlayer player;
     public static Inventory inventory;
+    public static net.minecraft.world.entity.EntityEquipment equipment;
     public static net.minecraft.client.multiplayer.ClientLevel level;
-    public static ItemStack empty;
-    private static final Map<Long, ItemStack> STACKS = new HashMap<>();
+    public static net.minecraft.client.multiplayer.ClientPacketListener connection;
+    /** The real vanilla HUD, chat pipeline and the player's attribute map. */
+    public static net.minecraft.client.gui.Hud hud;
+    public static net.minecraft.client.gui.components.toasts.ToastManager toasts;
+    public static net.minecraft.client.Camera camera;
+    public static net.minecraft.client.tutorial.Tutorial tutorial;
+    public static net.minecraft.client.multiplayer.chat.ChatListener chatListener;
+    public static net.minecraft.world.entity.ai.attributes.AttributeMap attributes;
 
     static void create() {
         minecraft = make(Minecraft.class);
         gui = make(Gui.class);
         font = make(Font.class);
-        options = make(Options.class);
         window = make(Window.class);
         sound = make(SoundManager.class);
         graphics = make(GuiGraphicsExtractor.class);
         player = make(LocalPlayer.class);
-        inventory = make(Inventory.class);
         level = make(net.minecraft.client.multiplayer.ClientLevel.class);
-        empty = make(ItemStack.class);
-        StackImpl.setHandle(empty, -1);
-        setStatic(ItemStack.class, "EMPTY", ItemStack.class, empty);
+        connection = service(net.minecraft.client.multiplayer.ClientPacketListener.class);
+        // the player's inventory and equipment are real vanilla containers on the player proxy
+        equipment = new net.minecraft.world.entity.EntityEquipment();
+        set(player, "equipment", net.minecraft.world.entity.EntityEquipment.class, equipment);
+        inventory = new Inventory(player, equipment);
+        set(player, "inventory", Inventory.class, inventory);
 
         set(font, "lineHeight", int.class, haste.rt.Native.lineHeight());
         set(minecraft, "font", Font.class, font);
         // the chat input font ("filter fishy" hides suspicious glyphs): the same Font proxy
         set(minecraft, "fontFilterFishy", Font.class, font);
+        java.io.File gameDir = new java.io.File(System.getProperty("haste.minecraftDir", "."));
+        gameDir.mkdirs();
+        set(minecraft, "gameDirectory", java.io.File.class, gameDir);
+        // Options is real vanilla Java: every option with its vanilla default, key mappings with their default keys
+        // (options.txt in Haste's JVM game directory is read if present; Haste's own config does not feed it yet)
+        options = new Options(minecraft, gameDir);
+        // no tutorial hints (vanilla starts new installs at the movement step; Haste's players are not new to the game)
+        options.tutorialStep = net.minecraft.client.tutorial.TutorialSteps.NONE;
+        // Haste plays no music: never show the now-playing toast
+        options.musicToast().set(net.minecraft.client.MusicToastDisplayState.NEVER);
         set(minecraft, "options", Options.class, options);
+        // which F3 entries are on (vanilla's list; the HUD's crosshair asks it)
+        set(minecraft, "debugEntries", net.minecraft.client.gui.components.debug.DebugScreenEntryList.class,
+            new net.minecraft.client.gui.components.debug.DebugScreenEntryList(gameDir, net.minecraft.util.datafix.DataFixers.getDataFixer()));
         set(minecraft, "gui", Gui.class, gui);
         set(minecraft, "mouseHandler", net.minecraft.client.MouseHandler.class, make(net.minecraft.client.MouseHandler.class));
-        set(gui, "hud", net.minecraft.client.gui.Hud.class, make(net.minecraft.client.gui.Hud.class));
+        // the player's attributes and effects are real vanilla objects on the proxy (forwarded packets update them)
+        attributes = new net.minecraft.world.entity.ai.attributes.AttributeMap(net.minecraft.world.entity.player.Player.createAttributes().build());
+        set(player, "attributes", net.minecraft.world.entity.ai.attributes.AttributeMap.class, attributes);
+        set(player, "activeEffects", java.util.Map.class, new java.util.HashMap<>());
+        // the vanilla value objects Rust's state is mirrored into (see Mirror)
+        set(player, "foodData", net.minecraft.world.food.FoodData.class, Mirror.FOOD);
+        set(player, "abilities", net.minecraft.world.entity.player.Abilities.class, Mirror.ABILITIES);
+        // what Entity's constructor would set: the type, its dimensions and eye height, a position
+        var playerType = net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getValue(
+            net.minecraft.resources.Identifier.withDefaultNamespace("player"));
+        set(player, "type", net.minecraft.world.entity.EntityType.class, playerType);
+        set(player, "dimensions", net.minecraft.world.entity.EntityDimensions.class, playerType.getDimensions());
+        set(player, "eyeHeight", float.class, playerType.getDimensions().eyeHeight());
+        set(player, "position", net.minecraft.world.phys.Vec3.class, net.minecraft.world.phys.Vec3.ZERO);
+        set(player, "blockPosition", net.minecraft.core.BlockPos.class, net.minecraft.core.BlockPos.ZERO);
+        set(player, "chunkPosition", net.minecraft.world.level.ChunkPos.class, new net.minecraft.world.level.ChunkPos(0, 0));
+        set(player, "deltaMovement", net.minecraft.world.phys.Vec3.class, net.minecraft.world.phys.Vec3.ZERO);
+        // the player's synched entity data, defined by vanilla's own defineSynchedData chain (kept bodies)
+        try {
+            var b = new net.minecraft.network.syncher.SynchedEntityData.Builder(player);
+            defineEntityBase(b);
+            MethodHandles.privateLookupIn(net.minecraft.world.entity.Entity.class, MethodHandles.lookup())
+                .findVirtual(net.minecraft.world.entity.Entity.class, "defineSynchedData",
+                    MethodType.methodType(void.class, net.minecraft.network.syncher.SynchedEntityData.Builder.class))
+                .invoke(player, b);
+            set(player, "entityData", net.minecraft.network.syncher.SynchedEntityData.class, b.build());
+        } catch (Throwable e) {
+            throw new IllegalStateException("defining the player's entity data", e);
+        }
         set(minecraft, "player", LocalPlayer.class, player);
+        camera = make(net.minecraft.client.Camera.class);
+        set(minecraft, "gameRenderer", net.minecraft.client.renderer.GameRenderer.class, make(net.minecraft.client.renderer.GameRenderer.class));
         minecraft.level = level;
-        set(minecraft, "gameMode", net.minecraft.client.multiplayer.MultiPlayerGameMode.class,
-            make(net.minecraft.client.multiplayer.MultiPlayerGameMode.class));
-        set(player, "connection", net.minecraft.client.multiplayer.ClientPacketListener.class,
-            service(net.minecraft.client.multiplayer.ClientPacketListener.class));
-        KeyImpl.installDefaults(options);
+        var gameMode = make(net.minecraft.client.multiplayer.MultiPlayerGameMode.class);
+        set(gameMode, "minecraft", Minecraft.class, minecraft);
+        set(gameMode, "connection", net.minecraft.client.multiplayer.ClientPacketListener.class, connection);
+        set(minecraft, "gameMode", net.minecraft.client.multiplayer.MultiPlayerGameMode.class, gameMode);
+        set(player, "minecraft", Minecraft.class, minecraft);
+        set(player, "connection", net.minecraft.client.multiplayer.ClientPacketListener.class, connection);
         // the recipe book is a no-op proxy (no <clinit>), but InventoryScreen still shows its toggle button:
         // the sprites are the two that exist in the jar under textures/gui/sprites/recipe_book/
         setStatic(net.minecraft.client.gui.screens.recipebook.RecipeBookComponent.class, "RECIPE_BUTTON_SPRITES",
@@ -73,11 +125,40 @@ public final class Proxies {
             new net.minecraft.client.gui.components.WidgetSprites(
                 net.minecraft.resources.Identifier.withDefaultNamespace("recipe_book/button"),
                 net.minecraft.resources.Identifier.withDefaultNamespace("recipe_book/button_highlighted")));
-        // the player's own menu is real vanilla Java over the Rust-backed Inventory proxy
+        // the HUD and the chat pipeline are real vanilla Java (tier 3) over the proxies
+        toasts = new net.minecraft.client.gui.components.toasts.ToastManager(minecraft, options);
+        tutorial = new net.minecraft.client.tutorial.Tutorial(minecraft, options);
+        hud = new net.minecraft.client.gui.Hud(minecraft);
+        set(gui, "hud", net.minecraft.client.gui.Hud.class, hud);
+        chatListener = new net.minecraft.client.multiplayer.chat.ChatListener(minecraft);
+        // the player's own menu is real vanilla Java over the real Inventory
         var menu = new net.minecraft.world.inventory.InventoryMenu(inventory, true, player);
         set(player, "inventoryMenu", net.minecraft.world.inventory.InventoryMenu.class, menu);
         // no other container open: the player's container menu is its inventory menu
         player.containerMenu = menu;
+    }
+
+    /**
+     * The entity data every entity has (vanilla defines it in Entity's constructor, which proxies do not run):
+     * each {@code EntityDataAccessor} constant of {@code Entity} with its type's empty value; the air supply starts
+     * full (300 ticks, the documented default of entity metadata index 1).
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static void defineEntityBase(net.minecraft.network.syncher.SynchedEntityData.Builder b) throws ReflectiveOperationException {
+        for (java.lang.reflect.Field f : net.minecraft.world.entity.Entity.class.getDeclaredFields()) {
+            if (f.getType() != net.minecraft.network.syncher.EntityDataAccessor.class || !java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+            f.setAccessible(true);
+            var acc = (net.minecraft.network.syncher.EntityDataAccessor) f.get(null);
+            var ser = acc.serializer();
+            Object v;
+            if (ser == net.minecraft.network.syncher.EntityDataSerializers.BYTE) v = (byte) 0;
+            else if (ser == net.minecraft.network.syncher.EntityDataSerializers.INT) v = f.getName().contains("AIR") ? 300 : 0;
+            else if (ser == net.minecraft.network.syncher.EntityDataSerializers.BOOLEAN) v = false;
+            else if (ser == net.minecraft.network.syncher.EntityDataSerializers.OPTIONAL_COMPONENT) v = java.util.Optional.empty();
+            else if (ser == net.minecraft.network.syncher.EntityDataSerializers.POSE) v = net.minecraft.world.entity.Pose.STANDING;
+            else throw new IllegalStateException("no default for entity data " + f.getName());
+            b.define(acc, v);
+        }
     }
 
     private static final Map<Class<?>, Object> SERVICES = new HashMap<>();
@@ -85,12 +166,6 @@ public final class Proxies {
     /** The canonical proxy of a client service Haste does not have (all methods no-ops), created on first use. */
     static <T> T service(Class<T> c) {
         return c.cast(SERVICES.computeIfAbsent(c, Proxies::make));
-    }
-
-    /** The canonical proxy for the stack in inventory slot {@code slot}. */
-    public static ItemStack stack(long slot) {
-        if (slot < 0) return empty;
-        return STACKS.computeIfAbsent(slot, h -> { ItemStack s = make(ItemStack.class); StackImpl.setHandle(s, h); return s; });
     }
 
     /**
@@ -112,10 +187,8 @@ public final class Proxies {
             try {
                 MethodHandles.privateLookupIn(k, MethodHandles.lookup()).findVarHandle(k, field, type).set(o, v);
                 return;
-            } catch (NoSuchFieldException e) {
-                // try the superclass
-            } catch (IllegalAccessException e) {
-                throw new IllegalStateException(e);
+            } catch (NoSuchFieldException | IllegalAccessException e) {
+                // declared in (and private to) a superclass: try there
             }
         }
         throw new IllegalStateException("no field " + field + " on " + o.getClass().getName());

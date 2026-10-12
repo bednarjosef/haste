@@ -204,10 +204,34 @@ packet! {
     }
 }
 
+/// `player_action` status values. 26.3 inserted `CHANGE_DESTROY_DIRECTION`
+/// at 1 and renumbered the rest (observed on the 26.3 server by the player
+/// workstream; minecraft.wiki still lists the old order).
+pub mod player_action_status {
+    /// Start breaking a block.
+    pub const START_DESTROY_BLOCK: i32 = 0;
+    /// The face being broken changed (new in 26.3).
+    pub const CHANGE_DESTROY_DIRECTION: i32 = 1;
+    /// Cancel breaking.
+    pub const ABORT_DESTROY_BLOCK: i32 = 2;
+    /// Finish breaking.
+    pub const STOP_DESTROY_BLOCK: i32 = 3;
+    /// Drop the whole held stack.
+    pub const DROP_ALL_ITEMS: i32 = 4;
+    /// Drop one held item.
+    pub const DROP_ITEM: i32 = 5;
+    /// Release the item in use (bow, shield, ...).
+    pub const RELEASE_USE_ITEM: i32 = 6;
+    /// Swap main and off hand.
+    pub const SWAP_ITEM_WITH_OFFHAND: i32 = 7;
+    /// Spear stab.
+    pub const STAB: i32 = 8;
+}
+
 packet! {
     /// Digging, dropping, swapping hands.
     PlayerAction = "minecraft:player_action" {
-        /// 0 start digging .. 7 stab.
+        /// A [`player_action_status`] value (26.3 order).
         status: i32 as VarInt,
         /// Block.
         pos: BlockPos,
