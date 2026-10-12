@@ -1203,10 +1203,12 @@ dependencies = [
  "haste-assets",
  "haste-core",
  "haste-data",
+ "image",
  "parking_lot",
  "pollster",
  "rayon",
  "tracing",
+ "tracing-subscriber",
  "wgpu",
  "winit",
 ]

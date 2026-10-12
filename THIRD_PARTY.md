@@ -10,3 +10,6 @@ Code reused from other projects, with licence. Keep headers intact. GPL-3.0-comp
 | `crates/haste-assets/src/multipart.rs` | Pomme `pomme-client/src/world/block/model.rs` | GPL-3.0 | blockstate variants/multipart parsing; `when` OR/AND + value alternation written for Haste |
 | `crates/haste-assets/src/atlas.rs` | Pomme `pomme-client/src/renderer/chunk/atlas.rs` | GPL-3.0 | shelf packer, sRGB-correct box-filter mip chain, sprite transparency classes, animation first-frame extraction (CPU-side buffers instead of Vulkan) |
 | `crates/haste-assets/src/bake.rs` | Pomme `pomme-client/src/world/block/model.rs` | GPL-3.0 | `bake_resolved_model` geometry pipeline (per BlockStateId, atlas UV assignment and layer heuristic are new) |
+| `crates/haste-render/src/vertex.rs` | Pomme `pomme-client/src/renderer/chunk/mesher.rs` + `packing_consts.rs` | GPL-3.0 | 16-byte packed terrain vertex, position quantization and sprite-local UV packing |
+| `crates/haste-render/src/mesher.rs` | Pomme `pomme-client/src/renderer/chunk/mesher.rs` | GPL-3.0 | section meshing (MeshSink, AO/smooth light, cullface culling), snapshot capture, worker-pool design on rayon |
+| `crates/haste-render/src/occlusion.rs` | Pomme `pomme-client/src/renderer/chunk/occlusion_graph.rs` | GPL-3.0 | section visibility flood fill + cave-culling walk (planned) |

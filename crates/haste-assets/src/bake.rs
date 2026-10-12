@@ -230,14 +230,23 @@ impl BakedBlockModels {
     }
 }
 
-/// Face texture reference (`#all` or a direct id) through the resolved texture map.
+/// Face texture reference through the resolved texture map. Vanilla allows
+/// referring to a texture variable WITHOUT the `#` prefix (the bare name must
+/// exist in the model's `textures` map, e.g. heavy_core's faces use `all`).
 fn face_texture_id(
     face_texture: &str,
     textures: &std::collections::HashMap<String, String>,
 ) -> Option<String> {
-    match face_texture.strip_prefix('#') {
-        Some(var) => textures.get(var).cloned(),
-        None => Some(face_texture.to_string()),
+    let var = face_texture.strip_prefix('#').unwrap_or(face_texture);
+    if let Some(resolved) = textures.get(var) {
+        return Some(resolved.clone());
+    }
+    if face_texture.starts_with('#') || face_texture.contains(':') || face_texture.contains('/') {
+        // A `#ref` that did not resolve, or a direct texture id
+        // (`minecraft:block/x`): use it as written.
+        Some(face_texture.to_string())
+    } else {
+        None
     }
 }
 

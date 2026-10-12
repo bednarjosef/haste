@@ -5,7 +5,11 @@
 //! Mesher/vertex packing derived from Pomme (GPL-3.0); see THIRD_PARTY.md.
 
 pub mod mesher;
+pub mod pipeline;
+pub mod renderer;
 pub mod vertex;
 
 pub use mesher::{mesh_section, MeshSnapshot, Mesher, SectionMesh};
+pub use pipeline::{upload_atlas, upload_section, Gpu, SectionGpuMesh};
+pub use renderer::{Camera, FrameInput, FrameStats, Renderer, SkyState};
 pub use vertex::PackedVertex;

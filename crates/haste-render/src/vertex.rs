@@ -23,66 +23,68 @@ pub const TERRAIN_UV_MAX_REPEAT: f32 = 16.0;
 /// as u16 fixed point; the shader wraps them inside the sprite's atlas
 /// rectangle (from the sprite-rect storage buffer), which avoids
 /// atlas-boundary rounding and lets a greedy quad repeat one sprite later.
-#[repr(C)]
+#[repr(C, align(4))]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Debug)]
 pub struct PackedVertex {
-    /// Section-local position, quantized over `[-POS_BIAS, POS_RANGE-POS_BIAS]`.
-    pub pos: [u16; 3],
+    /// Section-local position, quantized over `[-POS_BIAS, POS_RANGE-POS_BIAS]`,
+    /// plus one pad u16 (alignment for Uint16x4).
+    pub pos: [u16; 4],
     /// Sprite-local UV, u16 fixed point (`TERRAIN_UV_FIXED_SCALE` per unit).
     pub uv: [u16; 2],
+    /// Packed per-vertex lighting: [0] sky<<4|block, [1] ao|shade<<2, [2] tint.
+    pub light: [u8; 4],
     /// Index into the atlas sprite-rect buffer (0 = missing tile).
     pub sprite: u16,
-    /// Packed per-vertex lighting, see the byte layout below.
-    pub light: [u8; 4],
+    /// Pad to the 20-byte stride.
+    pub _pad: [u8; 2],
 }
 
 impl PackedVertex {
+    /// Attribute layout: wgpu requires offsets aligned to the format size, so
+    /// the u16s pack into 4-byte groups: pos as Uint16x4 (x, y, z, pad), uv as
+    /// Uint16x2, sprite Uint16, light as Uint8x4; 2 pad bytes to stride 20.
+    /// `light.0` = sky<<4 | block, `light.1` = ao (bits 0..1) | shade index
+    /// (bits 2..4), `light.2` = tint palette index.
     pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<PackedVertex>() as u64,
+        array_stride: 20,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &[
-            // pos
+            // pos (x, y, z, pad)
             wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Uint16x2,
+                format: wgpu::VertexFormat::Uint16x4,
                 offset: 0,
                 shader_location: 0,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Uint16,
-                offset: 4,
-                shader_location: 1,
             },
             // uv
             wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Uint16x2,
-                offset: 6,
-                shader_location: 2,
+                offset: 8,
+                shader_location: 1,
+            },
+            // light [u8; 4] (4-byte alignment)
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Uint8x4,
+                offset: 12,
+                shader_location: 3,
             },
             // sprite
             wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Uint16,
-                offset: 10,
-                shader_location: 3,
-            },
-            // light[0]: sky (high nibble) | block (low nibble)
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Uint8,
-                offset: 12,
-                shader_location: 4,
-            },
-            // light[1]: ao level (bits 0..1) | face shade index (bits 2..4)
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Uint8,
-                offset: 13,
-                shader_location: 5,
-            },
-            // light[2]: tint palette index
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Uint8,
-                offset: 14,
-                shader_location: 6,
+                offset: 16,
+                shader_location: 2,
             },
         ],
+    };
+
+    /// Instance-rate layout: one i32x3 section origin per section instance.
+    pub const INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+        array_stride: 12,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &[wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Sint32x3,
+            offset: 0,
+            shader_location: 4,
+        }],
     };
 }
 
@@ -124,10 +126,12 @@ pub fn pack_vertex(v: &QuadVertex, sprite: u16, light: [u8; 4]) -> PackedVertex 
             quantize_coord(v.position[0]),
             quantize_coord(v.position[1]),
             quantize_coord(v.position[2]),
+            0,
         ],
         uv: [pack_sprite_uv(v.uv[0]), pack_sprite_uv(v.uv[1])],
-        sprite,
         light,
+        sprite,
+        _pad: [0; 2],
     }
 }
 
@@ -136,8 +140,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn packed_vertex_is_16_bytes() {
-        assert_eq!(std::mem::size_of::<PackedVertex>(), 16);
+    fn packed_vertex_is_20_bytes() {
+        assert_eq!(std::mem::size_of::<PackedVertex>(), 20);
     }
 
     #[test]
