@@ -1,0 +1,168 @@
+//! Rust-owned state behind the tier-2 proxies, and the handle scheme.
+//!
+//! The proxies themselves are Java objects (generated classes, see `proxies.conf`); this module is
+//! the Rust side they read through `haste.rt.Native`. Canonical-proxy rule: Java keeps exactly one
+//! proxy per handle in `haste.gui.Proxies` for the JVM's lifetime, so state mods attach to a proxy
+//! (Phase 2 `@Unique` fields) survives.
+//!
+//! Handles:
+//! * `LocalPlayer`, `Inventory`, `Minecraft`, `Gui`, `Window`, `Options`, `Font`: singletons, handle 0.
+//! * `ItemStack`: the stack held in inventory slot `n` has handle `n` (vanilla `Inventory` slot
+//!   numbering: 0-8 hotbar, 9-35 main, 36-39 armour feet..head, 40 offhand). The empty stack
+//!   (`ItemStack.EMPTY`) has handle -1. A slot's proxy stays the same object when its contents
+//!   change (approximation: vanilla moves stack objects between slots; see NOTES.md).
+use haste_core::game::GameMode;
+use haste_core::RegistryIndex;
+use parking_lot::Mutex;
+
+/// Number of slots of vanilla's player `Inventory` (36 main + 4 armour + offhand).
+pub const INVENTORY_SIZE: usize = 41;
+
+/// One non-empty inventory slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ItemSlot {
+    /// Index into the `minecraft:item` registry.
+    pub item: RegistryIndex,
+    /// Stack size (> 0).
+    pub count: i32,
+}
+
+/// A chat line or command a screen sent (the client forwards it to the server).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatMessage {
+    /// The text without the leading `/` for commands.
+    pub text: String,
+    /// True for commands.
+    pub command: bool,
+}
+
+/// Vanilla's `ContainerInput` (the click type of the container-click packet; ids are its ordinals).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContainerInput {
+    /// Normal click (pick up / put down / swap with carried).
+    Pickup,
+    /// Shift-click.
+    QuickMove,
+    /// Number key or offhand swap (button = hotbar slot, 40 = offhand).
+    Swap,
+    /// Middle click in creative.
+    Clone,
+    /// Drop key over a slot.
+    Throw,
+    /// Drag distribution.
+    QuickCraft,
+    /// Double click: collect all of the kind.
+    PickupAll,
+    /// The container was closed (`LocalPlayer.closeContainer`; slot and button are -1).
+    Close,
+    /// An id this crate does not know.
+    Unknown(i32),
+}
+
+impl ContainerInput {
+    /// From vanilla's ordinal.
+    pub fn from_id(id: i32) -> Self {
+        match id {
+            0 => Self::Pickup,
+            1 => Self::QuickMove,
+            2 => Self::Swap,
+            3 => Self::Clone,
+            4 => Self::Throw,
+            5 => Self::QuickCraft,
+            6 => Self::PickupAll,
+            -1 => Self::Close,
+            n => Self::Unknown(n),
+        }
+    }
+}
+
+/// A click in a container screen, to be sent to the server by the client (Rust owns the inventory).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContainerClick {
+    /// Menu id (0 = the player's own inventory menu).
+    pub container_id: i32,
+    /// Menu slot index (inventory menu: 0 result, 1-4 crafting, 5-8 armour, 9-35 main, 36-44 hotbar, 45 offhand), -999 outside.
+    pub slot: i32,
+    /// Mouse button or hotbar key, as vanilla passes it.
+    pub button: i32,
+    /// Click type.
+    pub input: ContainerInput,
+}
+
+/// The game state the proxies read. Owned by Rust; the client updates it (e.g. from inventory
+/// packets) and screens see it immediately through the natives.
+#[derive(Debug)]
+pub struct GameState {
+    /// Inventory slots in vanilla `Inventory` numbering (always [`INVENTORY_SIZE`] long).
+    pub inventory: Vec<Option<ItemSlot>>,
+    /// Selected hotbar slot (0-8).
+    pub selected_slot: i32,
+    /// Item registry names by registry index (`minecraft:stone`), for tooltips; may be empty.
+    pub item_names: Vec<String>,
+    /// Chat history shown by the chat screen, oldest first.
+    pub chat_lines: Vec<String>,
+    /// Messages the chat screen sent since the last [`GameState::take_sent`].
+    pub sent: Vec<ChatMessage>,
+    /// Local player name.
+    pub player_name: String,
+    /// Container clicks from screens since the last [`GameState::take_container_clicks`].
+    pub container_clicks: Vec<ContainerClick>,
+    /// Local player's game mode (creative has infinite materials).
+    pub game_mode: GameMode,
+}
+
+impl Default for GameState {
+    fn default() -> Self {
+        GameState {
+            inventory: vec![None; INVENTORY_SIZE],
+            selected_slot: 0,
+            item_names: Vec::new(),
+            chat_lines: Vec::new(),
+            sent: Vec::new(),
+            player_name: "Player".to_owned(),
+            game_mode: GameMode::Survival,
+            container_clicks: Vec::new(),
+        }
+    }
+}
+
+impl GameState {
+    /// Slot contents for an `ItemStack` handle (None for empty / out of range / EMPTY).
+    pub fn stack(&self, handle: i64) -> Option<ItemSlot> {
+        usize::try_from(handle).ok().and_then(|i| self.inventory.get(i).copied().flatten())
+    }
+    /// Drains the container clicks made in screens.
+    pub fn take_container_clicks(&mut self) -> Vec<ContainerClick> {
+        std::mem::take(&mut self.container_clicks)
+    }
+    /// Drains the messages sent by screens.
+    pub fn take_sent(&mut self) -> Vec<ChatMessage> {
+        std::mem::take(&mut self.sent)
+    }
+}
+
+static STATE: Mutex<Option<GameState>> = Mutex::new(None);
+
+/// Runs `f` on the process-wide game state (created on first use).
+pub(crate) fn with_state<T>(f: impl FnOnce(&mut GameState) -> T) -> T {
+    let mut g = STATE.lock();
+    f(g.get_or_insert_with(GameState::default))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stack_handles() {
+        let mut s = GameState::default();
+        s.inventory[3] = Some(ItemSlot { item: RegistryIndex(1), count: 5 });
+        assert_eq!(s.stack(3).map(|x| x.count), Some(5));
+        assert_eq!(s.stack(-1), None);
+        assert_eq!(s.stack(4), None);
+        assert_eq!(s.stack(999), None);
+        s.sent.push(ChatMessage { text: "hi".into(), command: false });
+        assert_eq!(s.take_sent().len(), 1);
+        assert!(s.sent.is_empty());
+    }
+}
