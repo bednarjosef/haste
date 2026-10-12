@@ -120,7 +120,8 @@ impl WireWriter {
 }
 
 /// Packed long array where entries never span longs (1.16+ layout): each 64-bit long holds
-/// `floor(64 / bits)` entries, left-aligned; the tail bits of the last long are unused.
+/// `floor(64 / bits)` entries, entry 0 in the least significant bits (vanilla's layout; the
+/// unused padding is the high bits of each long).
 #[derive(Debug, Clone)]
 pub struct PackedArray {
     bits: u8,
@@ -148,7 +149,7 @@ impl PackedArray {
                 let per_long = 64 / bits;
                 let long = i / per_long;
                 let off = (i % per_long) * bits;
-                ((self.longs[long] as u64 >> (64 - off - bits)) as u32) & ((1u32 << bits) - 1)
+                ((self.longs[long] as u64 >> off) as u32) & ((1u32 << bits) - 1)
             }
         }
     }
@@ -157,7 +158,7 @@ impl PackedArray {
         let per_long = 64 / B as usize;
         let long = i / per_long;
         let off = (i % per_long) * B as usize;
-        let v = ((longs[long] as u64) >> (64 - off - B as usize)) as u32;
+        let v = ((longs[long] as u64) >> off) as u32;
         v & ((1u32 << B) - 1)
     }
 
@@ -166,9 +167,9 @@ impl PackedArray {
         let per_long = 64 / bits;
         let long = i / per_long;
         let off = (i % per_long) * bits;
-        let mask = ((1u64 << bits) - 1) << (64 - off - bits);
+        let mask = ((1u64 << bits) - 1) << off;
         let cleared = (self.longs[long] as u64 & !mask) as i64;
-        let v64 = ((v as u64) & ((1u64 << bits) - 1)) << (64 - off - bits);
+        let v64 = ((v as u64) & ((1u64 << bits) - 1)) << off;
         self.longs[long] = (cleared as u64 | v64) as i64;
     }
 }
@@ -792,5 +793,36 @@ mod tests {
             PalettedContainer::<BlockStateId>::decode_sections(&w.data, 2, 15, 3)
                 .map_or(true, |s| s[0].biomes.get_index(63) != 66)
         );
+    }
+}
+
+#[cfg(test)]
+mod bit_order_tests {
+    use super::PackedArray;
+
+    /// Vanilla packs entry 0 into the least significant bits of each long. Found against the
+    /// 26.3 server: a 3x3 pad at x 20..22 decoded mirrored with the old MSB-first order.
+    #[test]
+    fn entry_zero_is_in_the_low_bits() {
+        let a = PackedArray {
+            bits: 4,
+            longs: vec![0x0000_0000_0000_0321],
+        };
+        assert_eq!(
+            [a.read_at(0), a.read_at(1), a.read_at(2), a.read_at(3)],
+            [1, 2, 3, 0]
+        );
+        // 5 bits: 12 entries per long, 4 padding bits at the top.
+        let b = PackedArray {
+            bits: 5,
+            longs: vec![(7 << 5) | 3],
+        };
+        assert_eq!([b.read_at(0), b.read_at(1)], [3, 7]);
+        let mut c = PackedArray {
+            bits: 9,
+            longs: vec![0],
+        };
+        c.write_at(1, 0x1ff);
+        assert_eq!(c.longs[0], 0x1ff << 9);
     }
 }

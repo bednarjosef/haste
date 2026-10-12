@@ -139,12 +139,12 @@ impl BlockShapes {
 }
 
 /// Vanilla fluid surface height from the `level` property: level 0 (source) = 8/9,
-/// levels 1..=7 = (8 - level)/9, level >= 8 (falling column) = 1.0. Waterlogged blocks
-/// (no `level` property) are full sources: 8/9.
+/// levels 1..=7 = (8 - level)/9, level >= 8 (falling) = 8/9 like a source (settled on the
+/// vanilla server, NOTES.md; a column with the same fluid above is full height, which the
+/// caller decides). Waterlogged blocks (no `level` property) are full sources: 8/9.
 fn fluid_height(level: Option<&str>) -> f32 {
     match level.and_then(|l| l.parse::<u32>().ok()) {
         Some(l @ 1..=7) => (8 - l) as f32 / 9.0,
-        Some(8..) => 1.0,
         _ => 8.0 / 9.0,
     }
 }
