@@ -48,6 +48,30 @@
   extra ids: the data generator numbering stops being enough, Rust must take ids from Java for modded entries).
   Mixins into `Item`, `Block`, `ItemStack`, `DataComponents`, tooltips etc. apply to real vanilla classes.
 
+## HUD (decision, session 2)
+The HUD is vanilla's `Hud` running as tier 3 every frame (`Bridge.render`: HUD, then the open screen, one JNI call).
+`Hud`, `ChatComponent`, `ChatListener`, `Options`, `OptionInstance`, `KeyMapping`, `ToastManager`, `Tutorial`,
+`Scoreboard`, boss/tab overlays are real vanilla classes. The player proxy keeps vanilla's method bodies
+(`keepall`) over real vanilla parts on it: synched entity data (built by vanilla's `defineSynchedData` chain plus
+`Entity`'s base accessors, updated from forwarded `set_entity_data`), `AttributeMap`, effects map, `FoodData`,
+`Abilities`, inventory. Rust's primitive state (health, food, xp, abilities, game mode, selected slot, operator level,
+position, time) is copied in once per frame and tick by one native call (`Mirror`). Impls (`PlayerImpl`, `LevelImpl`,
+`CameraImpl`, ...) win over kept bodies for what Rust owns.
+- Packets: Rust re-encodes the packets whose state is tier 3 (list in `haste-client/src/ui.rs` `FORWARDED`); Java
+  decodes them with vanilla's play codec (`Packets`) and `Handlers` feeds the vanilla component that owns the state.
+  Serverbound packets vanilla code sends go through vanilla's serverbound codec to Rust (`GameState::outgoing`), so
+  container clicks (vanilla prediction + hashed stacks, verified: the server sends no corrections), container close,
+  command suggestions, respawn are byte-exact by construction. Hash generator: CRC32C `HashOps` over the registries.
+- Approximate (from observation, not vanilla code): player chat is shown through the disguised-chat path (no
+  signature verification, no secure indicator logic, filter masks ignored); `delete_chat` ignored; light is full
+  everywhere (`LevelLightEngine` proxy), sky darkening 0; world border default; attack cooldown 1, no item use,
+  no vehicle; eyes at standing height; difficulty NORMAL; F3 is a stub; restricted command nodes need level 2.
+- Dead ends: vanilla code inside `CompletableFuture`s swallows refused-class errors (the chat suggestion list failed
+  silently on `Rect2i`): server tests now assert the class log has no new refusals.
+- Phase 2: mixins into `Hud`, `ChatComponent`, `Options`, `KeyMapping`, the menus and screens apply to vanilla code
+  that really runs; mixins into `Entity`/`Player` methods apply to the kept bodies (the generator would have to merge
+  them into the proxy, `Gen.merge`).
+
 ## Inventory (decision, session 2)
 The player's `Inventory` and its `ItemStack`s are real vanilla objects in Java (`Proxies.inventory`, on the player
 proxy's `inventory`/`equipment` fields), not proxies. Vanilla's menus apply the server's container packets and
@@ -59,6 +83,9 @@ every bridge call that can change it (packets, input, ticks): changed slots are 
 `ItemStack.matches` per call. Phase 2: mods that keep state on stacks see vanilla's object lifetimes.
 
 ## Class loader policy (`src/loader.rs`)
+Session 2: `net/minecraft/` is allowed as a whole; `net/minecraft/client/`, `net/minecraft/server/` and `com/mojang/`
+are denied with client GUI/input/tutorial/state packages and named value types re-allowed (rationale in the list
+comments). Tier-1 objects are proxies (which win). The session-1 lists below are history.
 Order: JDK + boot classes from the parent; `haste.*` from `build/game`; a generated proxy if one exists (proxies
 win); vanilla classes from the client jar if the policy permits; anything else from the vanilla library jars
 (`cache/libraries`, or `cache/server-spike/libraries` until setup's client set exists; Fabric loader/mixin and ASM
@@ -90,7 +117,11 @@ Refused after all four tests (the to-do list): `BuiltInRegistries` (from `Comman
 `Permission.<clinit>` while typing a command: command usage hints do not work), `RenderPipeline` (a signature
 type, harmless), log4j's servlet probes (harmless), `Blocks` (requested on purpose by the test).
 
-## Proxies (`proxies.conf`; every method body listed in `cache/proxies/26.3/GENERATED.txt`)
+## Proxies (`proxies.conf`; every method body listed in `cache/proxies/26.3-<checkout>/GENERATED.txt`)
+Session 2: new generator directives `statics` (vanilla `<clinit>` and static bodies), `keep owner#name[desc]`,
+`keepall class`, name-only `noop`; impls registered for a superclass cover overrides in generated subclasses;
+proxies are generated per checkout (`cache/proxies/26.3-<hash>`). `ItemStack`, `Inventory`, `Options`,
+`OptionInstance`, `KeyMapping`, `Hud`, `ChatComponent` are no longer proxies. The session-1 list below is history.
 76 classes, 4024 methods: 190 impl, 338 no-op, the rest logging stubs. Implemented methods and why:
 - `Minecraft` (ClientImpl): `getInstance` (canonical proxy), `getWindow`, `getSoundManager`, `getConnection`,
   `getNarrator`, `getPlayerSocialManager`, `getReportingContext`, `getEntityRenderDispatcher`, `textInputManager`
@@ -173,7 +204,13 @@ what Escape/Enter/key mappings match) and `keycode` the SDL keycode (EditBox mat
 it). `GuiPipeline::key(key, scancode, ...)` passes them in that order; `keys::keycode` maps scancodes to US
 layout keycodes. Mouse buttons: 1 left, 2 middle, 3 right. Mods: SDL keymod bits (shift 3, ctrl 192, alt 768).
 
-## Measurements (load average 15-35 on this machine during the session: numbers are noisy)
+## Measurements, session 2 (load average 15-36; numbers are noisy)
+- Vanilla bootstrap in `Bridge.create`: 9-47 s (median ~15 s). Synchronised registries from a real server through
+  `RegistryDataCollector`: 1-5 s on the first join, 80-450 ms after.
+- Release, after 3000 warm-up frames: HUD alone p50 80 µs; HUD + PauseScreen p50 166 µs; p99 2.5-4.4 ms (GC/JIT
+  under load 22). PauseScreen alone p50 43 µs.
+
+## Measurements, session 1 (load average 15-35 on this machine during the session: numbers are noisy)
 - JVM create 50-250 ms; boot (stamp check ~0.3 s + Bridge.create, i.e. loading/initialising the vanilla classes
   the canonical proxies touch) 2.7-11 s; Java build when sources changed 5-40 s (javac against the client jar).
 - First tier-3 call (`Identifier.parse` in a fresh JVM before the bridge preloaded anything): 0.5-1.9 s; after

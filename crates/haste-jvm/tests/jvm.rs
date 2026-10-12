@@ -837,3 +837,49 @@ fn container_click_header(b: &[u8]) -> (i32, i32, i16, i8, i32) {
     let mode = var_int(b, &mut i);
     (window, state, slot, button, mode)
 }
+
+/// Per-frame cost of the vanilla HUD plus an open screen (the pause menu), one JNI call each.
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM); run with --release for the number"]
+fn bench_hud_and_screen() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    gui.set_inventory_slot(0, &stack("minecraft:stone", 64))
+        .unwrap();
+    gui.with_state(|s| {
+        s.in_world = true;
+        s.vitals.health = 15.0;
+    });
+    gui.packet(&system_chat("a chat line for the bench", false))
+        .unwrap();
+    for (what, screen) in [
+        ("HUD", None),
+        ("HUD + PauseScreen", Some(haste_jvm::ScreenKind::Pause)),
+    ] {
+        if let Some(k) = screen {
+            open(&h, k);
+        }
+        for _ in 0..3000 {
+            gui.render(320, 240, 2, (10.0, 10.0), 0.5).unwrap();
+        }
+        let n = 5000;
+        let mut times: Vec<u128> = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = Instant::now();
+            let f = gui
+                .render(320, 240, 2, (10.0 + (i % 7) as f64, 10.0), 0.5)
+                .unwrap();
+            times.push(t.elapsed().as_nanos());
+            std::hint::black_box(f);
+        }
+        times.sort_unstable();
+        eprintln!(
+            "{what} render(): p50 {:.1} µs, p99 {:.1} µs ({n} frames after 3000 warm-up)",
+            times[n / 2] as f64 / 1000.0,
+            times[n * 99 / 100] as f64 / 1000.0
+        );
+    }
+    gui.close_screen();
+    gui.with_state(|s| s.in_world = false);
+}
