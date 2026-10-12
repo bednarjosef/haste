@@ -32,6 +32,7 @@ impl Registries {
 pub struct BlockShapes { .. }
 impl haste_core::view::CollisionShapes for BlockShapes { .. }
 impl haste_core::view::BlockPhysics for GameData { .. }      // friction/speed/jump from block_properties.json; fluid/light/air/opaque from block_shapes.json
+impl haste_core::view::BlockStateTable for BlockStates { .. }
 impl BlockShapes { pub fn is_oracle_backed(&self) -> bool; }
 ```
 Fallback shapes (no oracle file): full cube for every state except air/cave_air/void_air, fluids,
@@ -106,7 +107,9 @@ impl Assets {
     pub fn gui_sprite(&self, id: &Identifier) -> anyhow::Result<(image::RgbaImage, SpriteMeta)>;
 }
 pub struct BakedBlockModels { .. }  // per BlockStateId: list of quads (positions, uv in atlas, normal/face, cull face, tint index, ambient occlusion flag)
-impl BakedBlockModels { pub fn bake(assets: &Assets, data: &GameData, atlas: &mut AtlasBuilder) -> anyhow::Result<Self>; pub fn quads(&self, s: BlockStateId) -> &[BakedQuad]; pub fn is_full_opaque(&self, s: BlockStateId) -> bool; pub fn render_layer(&self, s: BlockStateId) -> RenderLayer }
+impl BakedBlockModels { pub fn bake(assets: &Assets, states: &dyn haste_core::view::BlockStateTable, atlas: &mut AtlasBuilder) -> anyhow::Result<Self>; pub fn quads(&self, s: BlockStateId) -> &[BakedQuad]; pub fn is_full_opaque(&self, s: BlockStateId) -> bool; pub fn render_layer(&self, s: BlockStateId) -> RenderLayer }
+// `haste_data::BlockStates` implements `BlockStateTable`; the atlas is built during baking (textures are discovered then).
+// 26.3 facts (WS3): the jar carries the full asset tree (no extracted objects dir needed); blockstate variant keys are partial (missing properties are wildcards, most specific wins); models have no `render_type`, the layer is a documented heuristic.
 ```
 
 ## haste-render (WS3)

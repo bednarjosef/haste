@@ -25,6 +25,6 @@ One line per task; details live in `docs/briefs/<ws>.md` and in the branch.
 | WS1-1 | WS1 (Opus) | protocol codec + state machine (vendored Pumpkin transport) | M1 | in progress |
 | WS1-2 | WS1 (Opus) | play packets | M1 | in progress |
 | WS1-3 | WS1 (Opus) | M1 headless join | M1 | claimed |
-| WS3-1 | WS3 | haste-assets: jar reading, models, atlas, font (Pomme pieces reused) | M2 | in progress |
-| WS3-2 | WS3 | haste-render: meshing, world rendering | M2 | pending |
+| WS3-1 | WS3 | haste-assets: jar reading, models, atlas, font (Pomme pieces reused) | M2 | done |
+| WS3-2 | WS3 | haste-render: meshing, world rendering | M2 | in progress |
 | WS3-3 | WS3 | entities, HUD, GUI batch drawing | M4/M5 | pending |

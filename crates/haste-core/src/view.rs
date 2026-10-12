@@ -53,3 +53,13 @@ pub struct FluidInfo {
     /// Fluid surface height within the block, 0..=1 (level 0 source = 8/9 like vanilla).
     pub height: f32,
 }
+
+/// The block-state table as `haste-data` loads it from `blocks.json`; consumed by `haste-assets`
+/// (model baking) and anything else that needs names without depending on `haste-data`.
+pub trait BlockStateTable {
+    fn len(&self) -> usize;
+    fn is_empty(&self) -> bool { self.len() == 0 }
+    fn block_of(&self, state: BlockStateId) -> &crate::Identifier;
+    /// Property name/value pairs as `blocks.json` lists them (sorted by name).
+    fn properties(&self, state: BlockStateId) -> &[(String, String)];
+}
