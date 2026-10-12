@@ -395,7 +395,7 @@ mod tests {
             // oak_stairs facing=east/bottom/straight/unwaterlogged = two boxes (real dump).
             let boxes = haste_core::view::CollisionShapes::collision_boxes(&d.shapes, s);
             assert!(
-                boxes.len() >= 1,
+                !boxes.is_empty(),
                 "oracle-backed stairs have no collision boxes"
             );
         }

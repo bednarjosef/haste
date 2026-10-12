@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use haste_core::game::DimensionInfo;
 use haste_core::view::{BlockView, DirtyTracker};
-use haste_core::{BiomeId, BlockStateId, BlockPos, ChunkPos, SectionPos};
+use haste_core::{BiomeId, BlockPos, BlockStateId, ChunkPos, SectionPos};
 use haste_data::GameData;
 use haste_world::chunk::synthetic_chunk_data;
 use haste_world::World;
@@ -64,7 +64,11 @@ fn chunk_load_and_block_view() {
     let cp = ChunkPos::new(0, 0);
     let cd = synthetic_chunk_data(cp, -4, sections, |si, _x, y, _z| {
         // stone up to y=64 in every section below 8, air above
-        if si < 8 && y < 16 { STONE } else { BlockStateId::AIR }
+        if si < 8 && y < 16 {
+            STONE
+        } else {
+            BlockStateId::AIR
+        }
     });
     w.load_chunk(&cd).unwrap();
     assert!(w.is_chunk_loaded(cp));
@@ -216,7 +220,11 @@ fn biome_read() {
 fn hot_get_bench() {
     let mut w = World::new(overworld(), game_data());
     let cd = synthetic_chunk_data(ChunkPos::new(0, 0), -4, 24, |si, x, y, z| {
-        if si < 8 { BlockStateId(1 + ((x + y + z) % 2) as u32) } else { BlockStateId::AIR }
+        if si < 8 {
+            BlockStateId(1 + ((x + y + z) % 2) as u32)
+        } else {
+            BlockStateId::AIR
+        }
     });
     w.load_chunk(&cd).unwrap();
     let positions: Vec<BlockPos> = (0..4096)
@@ -237,10 +245,15 @@ fn hot_get_bench() {
         let t = std::time::Instant::now();
         for _ in 0..REPS {
             for &p in &positions {
-                sink2 += sec.get((p.x & 15) as u8, (p.y & 15) as u8, (p.z & 15) as u8).0 as u64;
+                sink2 += sec
+                    .get((p.x & 15) as u8, (p.y & 15) as u8, (p.z & 15) as u8)
+                    .0 as u64;
             }
         }
-        eprintln!("section.get alone: {:.2} ns/call (sink={sink2})", t.elapsed().as_nanos() as f64 / (REPS as f64 * positions.len() as f64));
+        eprintln!(
+            "section.get alone: {:.2} ns/call (sink={sink2})",
+            t.elapsed().as_nanos() as f64 / (REPS as f64 * positions.len() as f64)
+        );
     }
     let t0 = std::time::Instant::now();
     const REPS: u32 = 1000;

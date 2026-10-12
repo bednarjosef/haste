@@ -6,7 +6,9 @@
 use haste_core::chunk::ChunkData;
 use haste_core::{BlockStateId, ChunkPos};
 
-use crate::palette::{BiomeContainer, BlockContainer, PalettedContainer, WireWriter, BLOCKS_PER_SECTION};
+use crate::palette::{
+    BiomeContainer, BlockContainer, PalettedContainer, WireWriter, BLOCKS_PER_SECTION,
+};
 
 /// Decodes a raw `level_chunk_with_light` section payload into per-section containers.
 /// `section_count` is the dimension's; sections are ordered from the dimension's lowest.

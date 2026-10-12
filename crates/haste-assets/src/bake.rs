@@ -416,28 +416,40 @@ mod tests {
         let transparent = TestRegions { opaque: false };
         let q = quad();
         assert_eq!(
-            classify_layer(&[q.clone()], &Identifier::minecraft("stone"), &opaque),
+            classify_layer(
+                std::slice::from_ref(&q),
+                &Identifier::minecraft("stone"),
+                &opaque
+            ),
             RenderLayer::Solid
         );
         assert_eq!(
-            classify_layer(&[q.clone()], &Identifier::minecraft("glass"), &opaque),
+            classify_layer(
+                std::slice::from_ref(&q),
+                &Identifier::minecraft("glass"),
+                &opaque
+            ),
             RenderLayer::Translucent
         );
         assert_eq!(
             classify_layer(
-                &[q.clone()],
+                std::slice::from_ref(&q),
                 &Identifier::minecraft("blue_stained_glass"),
                 &opaque
             ),
             RenderLayer::Translucent
         );
         assert_eq!(
-            classify_layer(&[q.clone()], &Identifier::minecraft("oak_leaves"), &opaque),
+            classify_layer(
+                std::slice::from_ref(&q),
+                &Identifier::minecraft("oak_leaves"),
+                &opaque
+            ),
             RenderLayer::CutoutMipped
         );
         assert_eq!(
             classify_layer(
-                &[q.clone()],
+                std::slice::from_ref(&q),
                 &Identifier::minecraft("oak_sapling"),
                 &transparent
             ),

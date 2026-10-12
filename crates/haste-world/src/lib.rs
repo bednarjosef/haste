@@ -10,9 +10,9 @@ pub mod world;
 pub mod world_error;
 
 pub use chunk::{Chunk, ChunkLight, Section};
-pub use world::{SectionSnapshot, SnapshotSection};
 pub use palette::{
-    BiomeContainer, BlockContainer, DecodedSection, PalettedContainer, PaletteError,
+    BiomeContainer, BlockContainer, DecodedSection, PaletteError, PalettedContainer,
 };
 pub use world::World;
+pub use world::{SectionSnapshot, SnapshotSection};
 pub use world_error::WorldError;

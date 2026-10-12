@@ -61,12 +61,21 @@ impl World {
     pub fn load_chunk(&mut self, data: &ChunkData) -> Result<(), WorldError> {
         self.invalidate_memo();
         let section_count = self.dim.section_count();
-        let chunk = Chunk::decode(data, self.dim.min_section(), section_count, self.direct_bits)
-            .map_err(WorldError::Palette)?;
+        let chunk = Chunk::decode(
+            data,
+            self.dim.min_section(),
+            section_count,
+            self.direct_bits,
+        )
+        .map_err(WorldError::Palette)?;
         self.chunks.insert(data.pos.to_packed(), chunk);
         // a new chunk dirties all its sections and the borders of its neighbours
         for sy in 0..section_count as i32 {
-            self.mark_dirty(SectionPos::new(data.pos.x, self.dim.min_section() + sy, data.pos.z));
+            self.mark_dirty(SectionPos::new(
+                data.pos.x,
+                self.dim.min_section() + sy,
+                data.pos.z,
+            ));
         }
         for (dx, dz) in [(-1i32, 0), (1, 0), (0, -1), (0, 1)] {
             let n = ChunkPos::new(data.pos.x + dx, data.pos.z + dz);
@@ -98,8 +107,12 @@ impl World {
         let chunk_pos = pos.chunk();
         let sec_y = pos.y >> 4;
         let direct_bits = self.direct_bits;
-        let Some(chunk) = self.chunks.get_mut(&chunk_pos.to_packed()) else { return };
-        let Some(section) = chunk.section_mut(sec_y) else { return };
+        let Some(chunk) = self.chunks.get_mut(&chunk_pos.to_packed()) else {
+            return;
+        };
+        let Some(section) = chunk.section_mut(sec_y) else {
+            return;
+        };
         let lx = (pos.x & 15) as u8;
         let ly = (pos.y & 15) as u8;
         let lz = (pos.z & 15) as u8;
@@ -168,37 +181,54 @@ impl World {
         // -x face (16 y * 16 z)
         for y in 0..16 {
             for z in 0..16 {
-                border.neg_x.push(gather(base.x - 1, base.y + y, base.z + z).unwrap_or(BlockStateId::AIR));
+                border
+                    .neg_x
+                    .push(gather(base.x - 1, base.y + y, base.z + z).unwrap_or(BlockStateId::AIR));
             }
         }
         for y in 0..16 {
             for z in 0..16 {
-                border.pos_x.push(gather(base.x + 16, base.y + y, base.z + z).unwrap_or(BlockStateId::AIR));
+                border
+                    .pos_x
+                    .push(gather(base.x + 16, base.y + y, base.z + z).unwrap_or(BlockStateId::AIR));
             }
         }
         for y in 0..16 {
             for x in 0..16 {
-                border.neg_z.push(gather(base.x + x, base.y + y, base.z - 1).unwrap_or(BlockStateId::AIR));
+                border
+                    .neg_z
+                    .push(gather(base.x + x, base.y + y, base.z - 1).unwrap_or(BlockStateId::AIR));
             }
         }
         for y in 0..16 {
             for x in 0..16 {
-                border.pos_z.push(gather(base.x + x, base.y + y, base.z + 16).unwrap_or(BlockStateId::AIR));
+                border
+                    .pos_z
+                    .push(gather(base.x + x, base.y + y, base.z + 16).unwrap_or(BlockStateId::AIR));
             }
         }
         for z in 0..16 {
             for x in 0..16 {
-                border.neg_y.push(gather(base.x + x, base.y - 1, base.z + z).unwrap_or(BlockStateId::AIR));
+                border
+                    .neg_y
+                    .push(gather(base.x + x, base.y - 1, base.z + z).unwrap_or(BlockStateId::AIR));
             }
         }
         for z in 0..16 {
             for x in 0..16 {
-                border.pos_y.push(gather(base.x + x, base.y + 16, base.z + z).unwrap_or(BlockStateId::AIR));
+                border
+                    .pos_y
+                    .push(gather(base.x + x, base.y + 16, base.z + z).unwrap_or(BlockStateId::AIR));
             }
         }
 
         let sky = chunk.light.sky.get(idx as usize).cloned().flatten();
-        let block_light = chunk.light.block.get(idx as usize).cloned().unwrap_or_default();
+        let block_light = chunk
+            .light
+            .block
+            .get(idx as usize)
+            .cloned()
+            .unwrap_or_default();
 
         Some(Arc::new(SectionSnapshot {
             pos,

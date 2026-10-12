@@ -445,6 +445,6 @@ mod tests {
         assert_eq!(out.len(), 20);
         assert!(out.iter().all(|o| *o == DownloadOutcome::Downloaded));
         assert_eq!(*reporter.lock().unwrap(), 20);
-        assert!(matches!(rx.try_recv(), Ok(_)));
+        assert!(rx.try_recv().is_ok());
     }
 }

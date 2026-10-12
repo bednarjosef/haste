@@ -59,7 +59,10 @@ impl<'a> WireReader<'a> {
 
     /// A single i64 in big-endian (packed data longs are BE).
     pub fn i64_be(&mut self) -> Result<i64, PaletteError> {
-        let b = self.data.get(self.pos..self.pos + 8).ok_or(PaletteError::UnexpectedEof)?;
+        let b = self
+            .data
+            .get(self.pos..self.pos + 8)
+            .ok_or(PaletteError::UnexpectedEof)?;
         self.pos += 8;
         Ok(i64::from_be_bytes(b.try_into().unwrap()))
     }
@@ -162,7 +165,10 @@ pub enum Storage {
     /// bits_per_entry 0: every entry is this value. No data array on the wire.
     Single(u32),
     /// Indirect: palette of global ids, data are palette indices.
-    Indirect { palette: Vec<u32>, data: PackedArray },
+    Indirect {
+        palette: Vec<u32>,
+        data: PackedArray,
+    },
     /// Direct: data are raw global ids at direct bits.
     Direct(PackedArray),
 }
@@ -204,12 +210,20 @@ pub struct PalettedContainer<T> {
 impl<T: WireId> PalettedContainer<T> {
     /// Single-value container (every entry `v`). Block capacity.
     pub fn single(v: u32) -> Self {
-        Self { storage: Storage::Single(v), capacity: BLOCKS_PER_SECTION, _marker: std::marker::PhantomData }
+        Self {
+            storage: Storage::Single(v),
+            capacity: BLOCKS_PER_SECTION,
+            _marker: std::marker::PhantomData,
+        }
     }
 
     /// Single-value biome container (every cell `v`).
     pub fn single_biome(v: u32) -> Self {
-        Self { storage: Storage::Single(v), capacity: BIOMES_PER_SECTION, _marker: std::marker::PhantomData }
+        Self {
+            storage: Storage::Single(v),
+            capacity: BIOMES_PER_SECTION,
+            _marker: std::marker::PhantomData,
+        }
     }
 
     /// Indirect container from a palette and per-entry global ids (used by the test encoder).
@@ -223,7 +237,11 @@ impl<T: WireId> PalettedContainer<T> {
             let idx = palette.iter().position(|&p| p == v).unwrap_or(0) as u32;
             data.write_at(i, idx);
         }
-        Self { storage: Storage::Indirect { palette, data }, capacity: values.len(), _marker: std::marker::PhantomData }
+        Self {
+            storage: Storage::Indirect { palette, data },
+            capacity: values.len(),
+            _marker: std::marker::PhantomData,
+        }
     }
 
     /// Decodes a container from the wire. `direct_bits` is the bit width used when the wire's
@@ -269,10 +287,18 @@ impl<T: WireId> PalettedContainer<T> {
                 Storage::Direct(data)
             }
         };
-        Ok(Self { storage, capacity, _marker: std::marker::PhantomData })
+        Ok(Self {
+            storage,
+            capacity,
+            _marker: std::marker::PhantomData,
+        })
     }
 
-    fn read_packed(r: &mut WireReader<'_>, bits: u8, capacity: usize) -> Result<PackedArray, PaletteError> {
+    fn read_packed(
+        r: &mut WireReader<'_>,
+        bits: u8,
+        capacity: usize,
+    ) -> Result<PackedArray, PaletteError> {
         if bits == 0 || bits > 32 {
             return Err(PaletteError::BadBits(bits));
         }
@@ -311,7 +337,10 @@ impl<T: WireId> PalettedContainer<T> {
                 // promote: single -> indirect with a 2-entry palette (4 bits min for blocks)
                 let mut palette = vec![*cur, v];
                 let bits = Self::indirect_bits(palette.len());
-                let mut data = PackedArray { bits, longs: vec![0; PackedArray::long_count(bits, self.capacity)] };
+                let mut data = PackedArray {
+                    bits,
+                    longs: vec![0; PackedArray::long_count(bits, self.capacity)],
+                };
                 for j in 0..self.capacity {
                     // only indices == i change; all others are `cur`
                     let val = if j == i { v } else { *cur };
@@ -320,14 +349,19 @@ impl<T: WireId> PalettedContainer<T> {
                 }
                 let _ = palette.pop(); // keep vec arithmetic obvious; palette stays [cur, v]
                 let _ = &mut palette;
-                self.storage = Storage::Indirect { palette: vec![*cur, v], data };
+                self.storage = Storage::Indirect {
+                    palette: vec![*cur, v],
+                    data,
+                };
             }
             Storage::Indirect { palette, data } => {
                 if let Some(pos) = palette.iter().position(|&p| p == v) {
                     data.write_at(i, pos as u32);
                 } else {
                     // grow palette; promote to direct if it would exceed the indirect max
-                    if palette.len() + 1 > (1usize << data.bits) || palette.len() + 1 > Self::max_indirect_palette() {
+                    if palette.len() + 1 > (1usize << data.bits)
+                        || palette.len() + 1 > Self::max_indirect_palette()
+                    {
                         let direct = self.to_direct(direct_bits);
                         self.storage = Storage::Direct(direct);
                         return self.set_index(i, v, direct_bits);
@@ -340,7 +374,10 @@ impl<T: WireId> PalettedContainer<T> {
                 if v >= (1u32 << data.bits) {
                     // need wider direct bits: rebuild
                     let new_bits = (u32::BITS - v.leading_zeros()).max(1) as u8;
-                    let mut nd = PackedArray { bits: new_bits, longs: vec![0; PackedArray::long_count(new_bits, self.capacity)] };
+                    let mut nd = PackedArray {
+                        bits: new_bits,
+                        longs: vec![0; PackedArray::long_count(new_bits, self.capacity)],
+                    };
                     for j in 0..self.capacity {
                         nd.write_at(j, self.get_index(j));
                     }
@@ -362,7 +399,10 @@ impl<T: WireId> PalettedContainer<T> {
     }
 
     fn to_direct(&self, direct_bits: u8) -> PackedArray {
-        let mut data = PackedArray { bits: direct_bits, longs: vec![0; PackedArray::long_count(direct_bits, self.capacity)] };
+        let mut data = PackedArray {
+            bits: direct_bits,
+            longs: vec![0; PackedArray::long_count(direct_bits, self.capacity)],
+        };
         for j in 0..self.capacity {
             data.write_at(j, self.get_index(j));
         }
@@ -409,7 +449,11 @@ impl<T: WireId> PalettedContainer<T> {
             let block_count = r.varint()? as i16; // i16 per the format (non-negative)
             let blocks = Self::decode(&mut r, BLOCKS_PER_SECTION, direct_bits)?;
             let biomes = Self::decode(&mut r, BIOMES_PER_SECTION, 3)?;
-            out.push(DecodedSection { block_count, blocks, biomes });
+            out.push(DecodedSection {
+                block_count,
+                blocks,
+                biomes,
+            });
         }
         if r.remaining() != 0 {
             // trailing garbage: keep it loud in tests, tolerate in production
@@ -505,7 +549,10 @@ mod tests {
     fn indirect_roundtrip() {
         for bits in [4u8, 5, 6, 7, 8] {
             let palette: Vec<u32> = (0..(1 << bits)).map(|i| i as u32 * 3 + 1).collect();
-            let mut data = PackedArray { bits, longs: vec![0; PackedArray::long_count(bits, BLOCKS_PER_SECTION)] };
+            let mut data = PackedArray {
+                bits,
+                longs: vec![0; PackedArray::long_count(bits, BLOCKS_PER_SECTION)],
+            };
             for i in 0..BLOCKS_PER_SECTION {
                 data.write_at(i, (i % palette.len()) as u32);
             }
@@ -519,7 +566,8 @@ mod tests {
                 w.i64_be(l);
             }
             let mut r = WireReader::new(&w.data);
-            let c: BlockContainer = PalettedContainer::decode(&mut r, BLOCKS_PER_SECTION, 15).unwrap();
+            let c: BlockContainer =
+                PalettedContainer::decode(&mut r, BLOCKS_PER_SECTION, 15).unwrap();
             for i in [0usize, 1, 255, 256, 4095, 1000] {
                 let want = palette[i % palette.len()];
                 assert_eq!(c.get_index(i), want, "bits {bits} index {i}");
@@ -528,7 +576,8 @@ mod tests {
             let mut w2 = WireWriter::new();
             c.encode(&mut w2, roundtrip_direct_bits());
             let mut r2 = WireReader::new(&w2.data);
-            let c2: BlockContainer = PalettedContainer::decode(&mut r2, BLOCKS_PER_SECTION, 15).unwrap();
+            let c2: BlockContainer =
+                PalettedContainer::decode(&mut r2, BLOCKS_PER_SECTION, 15).unwrap();
             for i in [0usize, 1, 255, 256, 4095, 1000] {
                 assert_eq!(c2.get_index(i), c.get_index(i));
             }
@@ -538,7 +587,10 @@ mod tests {
     #[test]
     fn direct_roundtrip() {
         let bits = 15u8;
-        let mut data = PackedArray { bits, longs: vec![0; PackedArray::long_count(bits, BLOCKS_PER_SECTION)] };
+        let mut data = PackedArray {
+            bits,
+            longs: vec![0; PackedArray::long_count(bits, BLOCKS_PER_SECTION)],
+        };
         for i in 0..BLOCKS_PER_SECTION {
             data.write_at(i, (i as u32 * 7919) % 32768);
         }
@@ -557,8 +609,11 @@ mod tests {
 
     #[test]
     fn set_index_promotes_palette() {
-        let mut c: BlockContainer =
-            PalettedContainer { storage: Storage::Single(1), capacity: BLOCKS_PER_SECTION, _marker: std::marker::PhantomData };
+        let mut c: BlockContainer = PalettedContainer {
+            storage: Storage::Single(1),
+            capacity: BLOCKS_PER_SECTION,
+            _marker: std::marker::PhantomData,
+        };
         assert_eq!(c.set_index(10, 2, 15), 1);
         assert_eq!(c.get_index(10), 2);
         assert_eq!(c.get_index(0), 1);
@@ -579,7 +634,7 @@ mod tests {
         w.varint(5); // value
         w.varint(0); // bpe 0
         w.varint(1); // biome
-        // section 1: indirect 4-bit blocks, biomes single
+                     // section 1: indirect 4-bit blocks, biomes single
         let palette: Vec<u32> = vec![1, 2, 3, 5];
         let bits = 4u8;
         let longs = PackedArray::long_count(bits, BLOCKS_PER_SECTION);
@@ -589,7 +644,10 @@ mod tests {
         for &p in &palette {
             w.varint(p);
         }
-        let mut data = PackedArray { bits, longs: vec![0; longs] };
+        let mut data = PackedArray {
+            bits,
+            longs: vec![0; longs],
+        };
         for i in 0..BLOCKS_PER_SECTION {
             data.write_at(i, (i % 4) as u32);
         }

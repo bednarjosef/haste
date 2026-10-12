@@ -21,7 +21,8 @@ impl Section {
 
     pub fn set(&mut self, x: u8, y: u8, z: u8, state: BlockStateId, direct_bits: u8) {
         let old = self.blocks.get_block(x, y, z);
-        self.blocks.set_index(crate::palette::flat_index(x, y, z), state.0, direct_bits);
+        self.blocks
+            .set_index(crate::palette::flat_index(x, y, z), state.0, direct_bits);
         let now_air = state == BlockStateId::AIR;
         let was_air = old == BlockStateId::AIR;
         if was_air && !now_air {
@@ -111,7 +112,15 @@ impl Chunk {
         let heightmaps = data
             .heightmaps
             .iter()
-            .map(|(ty, longs)| (*ty, Heightmap { bits: 9, longs: longs.clone() }))
+            .map(|(ty, longs)| {
+                (
+                    *ty,
+                    Heightmap {
+                        bits: 9,
+                        longs: longs.clone(),
+                    },
+                )
+            })
             .collect();
         let mut chunk = Chunk {
             pos: data.pos,
@@ -148,7 +157,10 @@ impl Chunk {
 
     /// First heightmap of the given wire type id, if present.
     pub fn heightmap(&self, ty: i32) -> Option<&Heightmap> {
-        self.heightmaps.iter().find(|(t, _)| *t == ty).map(|(_, h)| h)
+        self.heightmaps
+            .iter()
+            .find(|(t, _)| *t == ty)
+            .map(|(_, h)| h)
     }
 
     /// Highest non-air y at column (x, z) using the first heightmap (value = top y + 1,

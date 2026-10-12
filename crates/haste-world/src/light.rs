@@ -30,8 +30,14 @@ impl NibbleArray {
     /// A default-constructed (empty) array reads as 0.
     pub fn get(&self, x: u8, y: u8, z: u8) -> u8 {
         let i = (y as usize) * 256 + (z as usize) * 16 + x as usize;
-        let Some(&b) = self.0.get(i / 2) else { return 0 };
-        if i.is_multiple_of(2) { b & 0x0F } else { b >> 4 }
+        let Some(&b) = self.0.get(i / 2) else {
+            return 0;
+        };
+        if i.is_multiple_of(2) {
+            b & 0x0F
+        } else {
+            b >> 4
+        }
     }
 
     pub fn all_zero(&self) -> bool {
@@ -43,7 +49,11 @@ impl NibbleArray {
 pub fn nibble_get(arr: &[u8], x: u8, y: u8, z: u8) -> u8 {
     let i = (y as usize) * 256 + (z as usize) * 16 + x as usize;
     let b = arr[i / 2];
-    if i.is_multiple_of(2) { b & 0x0F } else { b >> 4 }
+    if i.is_multiple_of(2) {
+        b & 0x0F
+    } else {
+        b >> 4
+    }
 }
 
 pub fn nibble_set(arr: &mut [u8], x: u8, y: u8, z: u8, v: u8) {
@@ -60,7 +70,13 @@ pub fn nibble_set(arr: &mut [u8], x: u8, y: u8, z: u8, v: u8) {
 /// Iterates set bits of a bit set (u64 words, bit i of word i/64).
 pub fn set_bits(mask: &[u64]) -> impl Iterator<Item = usize> + '_ {
     mask.iter().enumerate().flat_map(|(w, &word)| {
-        (0..64).filter_map(move |b| if word >> b & 1 == 1 { Some(w * 64 + b) } else { None })
+        (0..64).filter_map(move |b| {
+            if word >> b & 1 == 1 {
+                Some(w * 64 + b)
+            } else {
+                None
+            }
+        })
     })
 }
 
@@ -71,7 +87,13 @@ pub(crate) fn apply_to_chunk(chunk: &mut Chunk, light: &LightData) {
     let n = chunk.sections.len();
     let sky_slots = &mut chunk.light.sky;
     let block_slots = &mut chunk.light.block;
-    apply_side(&light.sky_mask, &light.empty_sky_mask, &light.sky_arrays, sky_slots, n);
+    apply_side(
+        &light.sky_mask,
+        &light.empty_sky_mask,
+        &light.sky_arrays,
+        sky_slots,
+        n,
+    );
     apply_side_optional(
         &light.block_mask,
         &light.empty_block_mask,
@@ -90,12 +112,9 @@ fn apply_side(
 ) {
     // Wire indices cover -1..=n (n+2 slots); our slots are 0..n (shift by one).
     let wire_len = n_sections + 2;
-    let set = |i: usize, bit: usize| -> bool {
-        i < mask.len() && (mask[i] >> bit) & 1 == 1
-    };
-    let empty = |i: usize, bit: usize| -> bool {
-        i < empty_mask.len() && (empty_mask[i] >> bit) & 1 == 1
-    };
+    let set = |i: usize, bit: usize| -> bool { i < mask.len() && (mask[i] >> bit) & 1 == 1 };
+    let empty =
+        |i: usize, bit: usize| -> bool { i < empty_mask.len() && (empty_mask[i] >> bit) & 1 == 1 };
     let mut array_iter = arrays.iter();
     for wire_idx in 0..wire_len {
         let our_idx = wire_idx as i64 - 1; // -1 or n_sections are outside our storage
@@ -125,9 +144,8 @@ fn apply_side_optional(
 ) {
     let wire_len = n_sections + 2;
     let set = |i: usize, bit: usize| -> bool { i < mask.len() && (mask[i] >> bit) & 1 == 1 };
-    let empty = |i: usize, bit: usize| -> bool {
-        i < empty_mask.len() && (empty_mask[i] >> bit) & 1 == 1
-    };
+    let empty =
+        |i: usize, bit: usize| -> bool { i < empty_mask.len() && (empty_mask[i] >> bit) & 1 == 1 };
     let mut array_iter = arrays.iter();
     for wire_idx in 0..wire_len {
         let our_idx = wire_idx as i64 - 1;
