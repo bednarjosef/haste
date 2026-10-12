@@ -11,19 +11,24 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use glam::DVec3;
+use haste_core::input::InputState;
+use haste_core::view::{BlockView, CollisionShapes};
 use haste_data::GameData;
 use haste_entity::{EntityDimensions, EntityStore};
 use haste_protocol::haste_core::chunk::{ChunkData, LightData};
 use haste_protocol::haste_core::entity::{EntitySpawn, ItemStackData, MetadataEntry, PlayerInfo};
 use haste_protocol::haste_core::game::{DimensionInfo, GameMode};
 use haste_protocol::haste_core::{BlockPos, BlockStateId, ChunkPos, EntityId, Identifier};
-use haste_protocol::packets::play::clientbound::{self as cb, teleport_flags};
-use haste_protocol::packets::play::serverbound::{self as sb, move_flags};
+#[cfg(test)]
+use haste_protocol::packets::play::clientbound as cb;
+use haste_protocol::packets::play::clientbound::teleport_flags;
 use haste_protocol::{
     ClientboundPlay, ConnectOptions, Connection, Login, ServerboundPlay, StatsSnapshot,
     SyncedRegistries,
 };
 use haste_world::World;
+
+use crate::player::{AttributeIds, LocalPlayer};
 
 /// What the driver needs from the world (`haste_world::World`).
 pub trait WorldSink {
@@ -41,6 +46,41 @@ pub trait WorldSink {
     fn chunk_count(&self) -> usize;
     /// Number of loaded sections with at least one non-air block.
     fn non_empty_sections(&self) -> usize;
+    /// What the local player's physics reads; `None` (test fakes) freezes the player in place.
+    fn physics(&self) -> Option<(&dyn BlockView, &GameData)> {
+        None
+    }
+}
+
+/// A world with no chunks: the player does not move in it.
+struct NoBlocks;
+impl BlockView for NoBlocks {
+    fn block_state(&self, _pos: BlockPos) -> BlockStateId {
+        BlockStateId::AIR
+    }
+    fn is_chunk_loaded(&self, _pos: ChunkPos) -> bool {
+        false
+    }
+    fn sky_light(&self, _pos: BlockPos) -> u8 {
+        15
+    }
+    fn block_light(&self, _pos: BlockPos) -> u8 {
+        0
+    }
+    fn min_y(&self) -> i32 {
+        0
+    }
+    fn height(&self) -> i32 {
+        0
+    }
+}
+impl CollisionShapes for NoBlocks {
+    fn collision_boxes(&self, _state: BlockStateId) -> &[haste_core::Aabb] {
+        &[]
+    }
+    fn outline_boxes(&self, _state: BlockStateId) -> &[haste_core::Aabb] {
+        &[]
+    }
 }
 
 /// What the driver needs from the entity store (`haste_entity::EntityStore`).
@@ -106,6 +146,9 @@ impl WorldSink for World {
                     .count()
             })
             .sum()
+    }
+    fn physics(&self) -> Option<(&dyn BlockView, &GameData)> {
+        Some((self, self.game_data()))
     }
 }
 
@@ -183,85 +226,6 @@ pub fn synced_biome_count(regs: &SyncedRegistries) -> Option<usize> {
         .map(|e| e.len())
 }
 
-/// The local player as the server last told us.
-#[derive(Clone, Debug)]
-pub struct LocalPlayerState {
-    /// Feet position.
-    pub pos: DVec3,
-    /// Velocity from the last teleport.
-    pub velocity: DVec3,
-    /// Yaw in degrees.
-    pub yaw: f32,
-    /// Pitch in degrees.
-    pub pitch: f32,
-    /// On ground (sent in movement packets).
-    pub on_ground: bool,
-    /// Health (20 = full).
-    pub health: f32,
-    /// Food level.
-    pub food: i32,
-    /// Selected hotbar slot.
-    pub held_slot: i32,
-    /// Game mode.
-    pub game_mode: GameMode,
-    /// Whether a position has been received (movement is sent only after).
-    pub has_position: bool,
-}
-
-impl LocalPlayerState {
-    fn new(game_mode: GameMode) -> Self {
-        Self {
-            pos: DVec3::ZERO,
-            velocity: DVec3::ZERO,
-            yaw: 0.0,
-            pitch: 0.0,
-            on_ground: true,
-            health: 20.0,
-            food: 20,
-            held_slot: 0,
-            game_mode,
-            has_position: false,
-        }
-    }
-
-    /// Applies a `player_position` teleport with its relative flags.
-    pub fn apply_teleport(&mut self, p: &cb::PlayerPosition) {
-        let rel = |bit: i32| p.flags & bit != 0;
-        let pick = |bit: i32, old: f64, new: f64| if rel(bit) { old + new } else { new };
-        let old_yaw = self.yaw;
-        self.pos = DVec3::new(
-            pick(teleport_flags::X, self.pos.x, p.pos.x),
-            pick(teleport_flags::Y, self.pos.y, p.pos.y),
-            pick(teleport_flags::Z, self.pos.z, p.pos.z),
-        );
-        self.yaw = if rel(teleport_flags::YAW) {
-            self.yaw + p.yaw
-        } else {
-            p.yaw
-        };
-        self.pitch = (if rel(teleport_flags::PITCH) {
-            self.pitch + p.pitch
-        } else {
-            p.pitch
-        })
-        .clamp(-90.0, 90.0);
-        let mut v = self.velocity;
-        if rel(teleport_flags::ROTATE_VELOCITY) {
-            // Rotate the old velocity by the change in yaw (pitch rotation of velocity is
-            // approximate here: not applied).
-            let dyaw = (self.yaw - old_yaw).to_radians() as f64;
-            let (s, c) = dyaw.sin_cos();
-            v = DVec3::new(v.x * c - v.z * s, v.y, v.x * s + v.z * c);
-        }
-        self.velocity = DVec3::new(
-            pick(teleport_flags::VEL_X, v.x, p.velocity.x),
-            pick(teleport_flags::VEL_Y, v.y, p.velocity.y),
-            pick(teleport_flags::VEL_Z, v.z, p.velocity.z),
-        );
-        self.has_position = true;
-    }
-}
-
 /// Per-connection counters for the HUD/headless printout.
 #[derive(Clone, Debug, Default)]
 pub struct NetCounters {
@@ -287,31 +251,27 @@ pub struct NetCounters {
 
 /// Client-side session state the packets drive (everything except world and entities).
 pub struct Session {
-    /// The local player.
-    pub player: LocalPlayerState,
+    /// The local player (player.rs): its packets in, its movement packets out.
+    pub player: LocalPlayer,
     /// The local player's entity id (from `login`).
     pub entity_id: EntityId,
     /// The current dimension (from `login`, then each `respawn`).
     pub dimension: DimensionInfo,
     /// Counters.
     pub counters: NetCounters,
-    sent_loaded: bool,
-    last_input: Option<u8>,
 }
 
 impl Session {
     /// Fresh state after `Connection::connect` (from the `Login` it returned).
     pub fn new(entity_id: EntityId, game_mode: GameMode, dimension: DimensionInfo) -> Self {
         Self {
-            player: LocalPlayerState::new(game_mode),
+            player: LocalPlayer::with_entity(entity_id, game_mode),
             counters: NetCounters {
                 got_login: true,
                 ..Default::default()
             },
             entity_id,
             dimension,
-            sent_loaded: false,
-            last_input: None,
         }
     }
 
@@ -327,6 +287,7 @@ impl Session {
         use ClientboundPlay as P;
         self.counters.packets += 1;
         let own = self.entity_id;
+        let player_packet = self.player.handle(&p, out);
         match p {
             P::Login(l) => {
                 self.counters.got_login = true;
@@ -344,32 +305,9 @@ impl Session {
                 world.reset(&dim);
                 entities.clear();
                 self.dimension = dim;
-                self.player.game_mode =
-                    GameMode::from_id(r.spawn.game_mode).unwrap_or(self.player.game_mode);
-                self.player.has_position = false;
-                self.sent_loaded = false;
             }
-            P::PlayerPosition(t) => {
-                tracing::debug!("teleport {t:?}");
-                self.player.apply_teleport(&t);
-                self.counters.teleports += 1;
-                let pl = &self.player;
-                out.push(ServerboundPlay::AcceptTeleportation(
-                    sb::AcceptTeleportation {
-                        teleport_id: t.teleport_id,
-                        pos: pl.pos,
-                        yaw: pl.yaw,
-                        pitch: pl.pitch,
-                    },
-                ));
-                // Observed on the 26.3 server: a movement packet sent between
-                // accept_teleportation and player_loaded gets the client kicked
-                // with invalid_player_movement, so movement starts on the next tick.
-                if !self.sent_loaded {
-                    out.push(ServerboundPlay::PlayerLoaded(sb::PlayerLoaded {}));
-                    self.sent_loaded = true;
-                }
-            }
+            P::PlayerPosition(_) => self.counters.teleports += 1,
+            _ if player_packet => {}
             P::LevelChunkWithLight(c) => match world.load_chunk(&c.chunk) {
                 Ok(()) => self.counters.chunks_loaded += 1,
                 Err(e) => {
@@ -438,13 +376,7 @@ impl Session {
                 entities.teleport(id, pos, yaw, pitch, t.on_ground);
             }
             P::RotateHead(h) => entities.set_head_yaw(EntityId(h.entity_id), h.head_yaw),
-            P::SetEntityMotion(m) => {
-                if EntityId(m.entity_id) == own {
-                    self.player.velocity = m.velocity;
-                } else {
-                    entities.set_velocity(EntityId(m.entity_id), m.velocity);
-                }
-            }
+            P::SetEntityMotion(m) => entities.set_velocity(EntityId(m.entity_id), m.velocity),
             P::SetEntityData(d) => {
                 if EntityId(d.entity_id) != own {
                     entities.set_metadata(EntityId(d.entity_id), &d.metadata);
@@ -456,16 +388,6 @@ impl Session {
                 }
             }
             P::PlayerInfoUpdate(u) => entities.player_info(&u.infos()),
-            P::SetHealth(h) => {
-                self.player.health = h.health;
-                self.player.food = h.food;
-            }
-            P::SetHeldSlot(s) => self.player.held_slot = s.slot,
-            P::GameEvent(g) if g.event == 3 => {
-                if let Some(m) = GameMode::from_id(g.value as i32) {
-                    self.player.game_mode = m;
-                }
-            }
             P::SystemChat(c) if !c.overlay => self.push_chat(c.content.to_plain(&|_| None)),
             P::DisguisedChat(c) => self.push_chat(format!(
                 "<{}> {}",
@@ -484,30 +406,31 @@ impl Session {
         }
     }
 
-    /// The packets a vanilla client sends at the end of a tick while it stands still: the
-    /// position/rotation, the (empty) player input when it changed, and `client_tick_end`.
-    /// Nothing before the first teleport has been accepted and `player_loaded` sent.
-    pub fn end_tick(&mut self, out: &mut Vec<ServerboundPlay>) {
-        if !(self.player.has_position && self.sent_loaded) {
-            return;
+    /// The local player's tick with `input` and its packets (`LocalPlayer::tick`); in a world
+    /// without physics data (test fakes) the player stays in place.
+    pub fn end_tick<W: WorldSink + ?Sized>(
+        &mut self,
+        input: &InputState,
+        world: &W,
+        out: &mut Vec<ServerboundPlay>,
+    ) {
+        match world.physics() {
+            Some((view, data)) => {
+                if !self.player.has_attribute_ids() {
+                    if let Some(ids) = AttributeIds::from_data(data) {
+                        self.player.set_attribute_ids(ids);
+                    }
+                }
+                self.player.tick_with(input, view, &data.shapes, data, out)
+            }
+            None => self.player.tick_with(
+                input,
+                &NoBlocks,
+                &NoBlocks,
+                &haste_physics::DefaultBlockPhysics,
+                out,
+            ),
         }
-        let pl = &self.player;
-        let flags = if pl.on_ground {
-            move_flags::ON_GROUND
-        } else {
-            0
-        };
-        out.push(ServerboundPlay::MovePlayerPosRot(sb::MovePlayerPosRot {
-            pos: pl.pos,
-            yaw: pl.yaw,
-            pitch: pl.pitch,
-            flags,
-        }));
-        if self.last_input != Some(0) {
-            out.push(ServerboundPlay::PlayerInput(sb::PlayerInput { flags: 0 }));
-            self.last_input = Some(0);
-        }
-        out.push(ServerboundPlay::ClientTickEnd(sb::ClientTickEnd {}));
     }
 
     fn push_chat(&mut self, line: String) {
@@ -579,21 +502,33 @@ impl NetDriver {
         self.flush()
     }
 
-    /// Ends the tick: entity interpolation step and this tick's serverbound packets.
-    pub fn end_tick<E: EntitySink + ?Sized>(&mut self, entities: &mut E) -> anyhow::Result<()> {
+    /// Ends the tick: entity interpolation step, the local player's tick with `input` and this
+    /// tick's serverbound packets.
+    pub fn end_tick<W: WorldSink + ?Sized, E: EntitySink + ?Sized>(
+        &mut self,
+        input: &InputState,
+        world: &W,
+        entities: &mut E,
+    ) -> anyhow::Result<()> {
         entities.tick();
-        self.session.end_tick(&mut self.out);
+        self.session.end_tick(input, world, &mut self.out);
         self.flush()
+    }
+
+    /// Queues a serverbound packet; it goes out with this tick's packets.
+    pub fn queue(&mut self, p: ServerboundPlay) {
+        self.out.push(p);
     }
 
     /// One 20 Hz tick: [`Self::receive`] then [`Self::end_tick`].
     pub fn tick<W: WorldSink + ?Sized, E: EntitySink + ?Sized>(
         &mut self,
+        input: &InputState,
         world: &mut W,
         entities: &mut E,
     ) -> anyhow::Result<()> {
         self.receive(world, entities)?;
-        self.end_tick(entities)
+        self.end_tick(input, world, entities)
     }
 
     fn flush(&mut self) -> anyhow::Result<()> {

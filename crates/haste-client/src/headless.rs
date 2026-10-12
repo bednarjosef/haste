@@ -68,9 +68,25 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
     let total_ticks = seconds * 20;
     let mut last_packets = 0u64;
     let mut failure: Option<String> = None;
+    let mut walk = crate::player::script::Runner::from_env()?;
     for tick in 1..=total_ticks {
         interval.tick().await;
-        if let Err(e) = driver.tick(&mut world, &mut entities) {
+        let mut input = Default::default();
+        if let Some(w) = walk.as_mut() {
+            let (i, cmd) = w.before_tick(tick, &mut driver.session.player);
+            input = i;
+            if let Some(c) = cmd {
+                driver.queue(c);
+            }
+        }
+        let ticked = driver.tick(&input, &mut world, &mut entities);
+        if walk
+            .as_mut()
+            .is_some_and(|w| w.after_tick(tick, &driver.session.player))
+        {
+            break;
+        }
+        if let Err(e) = ticked {
             failure = Some(format!("tick failed: {e:#}"));
             break;
         }
@@ -85,7 +101,7 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
             );
             break;
         }
-        if tick % 20 == 0 {
+        if tick % 20 == 0 && walk.is_none() {
             let stats = driver.stats();
             let pps = stats.packets_in - last_packets;
             last_packets = stats.packets_in;
@@ -96,7 +112,7 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
                     format!("{}={n}", name.as_deref().unwrap_or(&format!("#{id}")))
                 })
                 .collect();
-            let p = driver.session.player.pos;
+            let p = driver.session.player.state.pos;
             let c = &driver.session.counters;
             println!(
                 "[{:>3}s] chunks {:>4} sections {:>5} entities {:>4} pos ({:.2}, {:.2}, {:.2}) packets/s {:>5} chunk errors {} unknown [{}]{}",
@@ -147,7 +163,7 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
     {
         // Sanity check of the decode: the column of blocks under the player.
         use haste_protocol::haste_core::view::BlockView;
-        let p = driver.session.player.pos.floor().as_ivec3();
+        let p = driver.session.player.state.pos.floor().as_ivec3();
         let column: Vec<String> = (1..=5)
             .map(|d| {
                 let s = world.block_state(BlockPos::new(p.x, p.y - d, p.z));
