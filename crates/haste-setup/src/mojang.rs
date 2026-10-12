@@ -144,7 +144,10 @@ impl Library {
     /// Does this library's rule list allow the given OS (`"linux"`, `"windows"`, `"osx"`)?
     /// No rules means allowed everywhere; otherwise the last matching rule wins.
     pub fn allowed_on_os(&self, os: &str) -> bool {
-        let Some(rules) = &self.rules else { return true };
+        let rules = match &self.rules {
+            None => return true,
+            Some(r) => r,
+        };
         let mut allowed = false; // rules start from a "deny all" state
         for r in rules {
             let matches = match &r.os {
@@ -167,10 +170,19 @@ pub struct LoggingInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogConfig {
     pub argument: String, // "-Dlog4j.configurationFile=${path}"
-    #[serde(rename = "file")]
-    pub file: Download,
+    pub file: LogConfigFile,
     #[serde(rename = "type")]
     pub kind: String, // "log4j2-xml"
+}
+
+/// `logging.client.file`: `id` names the file, the rest is a download.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogConfigFile {
+    pub id: String,
+    pub sha1: String,
+    #[serde(default)]
+    pub size: u64,
+    pub url: String,
 }
 
 /// The asset index JSON (`34.json` for 26.3): sha1 -> {hash, size}.
