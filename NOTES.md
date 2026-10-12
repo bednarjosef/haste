@@ -2,6 +2,12 @@
 
 Newest at the top. One entry per decision, with the why; link the brief or report it came from.
 
+- **2026-10-12 Cache wiped and rebuilt.** At 19:38 the repo's `cache/` directory was deleted and
+  replaced by a symlink to itself (which worker did it is not determined; no Opus transcript shows
+  the command). Everything in it is derived data, so `scripts/rebuild-cache.sh` recreates it in ~5
+  minutes. The real cache now lives OUTSIDE the repo tree at `$HASTE_CACHE`
+  and `./cache` (repo and worktrees) is a symlink to it, so a stray `rm -rf cache` in a checkout
+  removes only the link. Nothing in the tree depends on cache contents being committed.
 - **2026-10-12 Physics sources.** haste-physics is built from minecraft.wiki plus mcpk.wiki (the
   parkour community's observed formulas; only numbers and prose were used, not the decompiled
   snippets that site also quotes). Every constant is tabled in `crates/haste-physics/NOTES.md`
