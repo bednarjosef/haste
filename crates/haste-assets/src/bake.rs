@@ -243,20 +243,30 @@ impl BakedBlockModels {
 /// Face texture reference through the resolved texture map. Vanilla allows
 /// referring to a texture variable WITHOUT the `#` prefix (the bare name must
 /// exist in the model's `textures` map, e.g. heavy_core's faces use `all`).
-fn face_texture_id(
+pub(crate) fn face_texture_id(
     face_texture: &str,
     textures: &std::collections::HashMap<String, String>,
 ) -> Option<String> {
     let var = face_texture.strip_prefix('#').unwrap_or(face_texture);
     if let Some(resolved) = textures.get(var) {
-        return Some(resolved.clone());
+        return Some(normalize_texture_id(resolved));
     }
     if face_texture.starts_with('#') || face_texture.contains(':') || face_texture.contains('/') {
         // A `#ref` that did not resolve, or a direct texture id
         // (`minecraft:block/x`): use it as written.
-        Some(face_texture.to_string())
+        Some(normalize_texture_id(face_texture))
     } else {
         None
+    }
+}
+
+/// Texture references in models may omit the namespace (`block/grass_block_side`); the atlas
+/// is keyed by full identifiers (`minecraft:block/grass_block_side`).
+pub(crate) fn normalize_texture_id(t: &str) -> String {
+    if t.starts_with('#') || t.contains(':') {
+        t.to_string()
+    } else {
+        format!("minecraft:{t}")
     }
 }
 
@@ -331,26 +341,19 @@ fn assign_atlas_uvs(quad: &mut BakedQuad, region: crate::atlas::AtlasRegion) {
     }
 }
 
-/// Full opaque cube: exactly six cullfaces, each spanning the full block face,
-/// all textures fully opaque (Pomme `check_full_cube` + atlas alpha).
+/// Full opaque cube: every one of the six faces is covered by a full-size quad with that
+/// cullface and a fully opaque texture. Extra quads (the grass block's tinted side overlay)
+/// do not change that: they sit on top of an already opaque face.
 fn is_full_opaque(quads: &[BakedQuad], atlas: &dyn AtlasRegions) -> bool {
-    if quads.len() != 6 {
-        return false;
-    }
     let mut dirs = [false; 6];
     for q in quads {
-        let Some(cull) = q.cullface else { return false };
-        dirs[cull.index()] = true;
-        for pos in &q.positions {
-            if pos
-                .iter()
-                .any(|&v| (v - 0.0).abs() > 1e-4 && (v - 1.0).abs() > 1e-4)
-            {
-                return false;
-            }
-        }
-        if !atlas.region_of(&q.texture).opaque {
-            return false;
+        let Some(cull) = q.cullface else { continue };
+        let full = q.positions.iter().all(|pos| {
+            pos.iter()
+                .all(|&v| v.abs() < 1e-4 || (v - 1.0).abs() < 1e-4)
+        });
+        if full && atlas.region_of(&q.texture).opaque {
+            dirs[cull.index()] = true;
         }
     }
     dirs.iter().all(|&d| d)
@@ -527,6 +530,35 @@ mod tests {
             "minecraft:stone should have 6 quads"
         );
         assert!(baked.is_full_opaque(stone));
+
+        // Every baked quad samples a real sprite: none falls back to the missing texture
+        // (states without a model bake to no quads and are not checked).
+        let missing = atlas.missing_region();
+        let mut bad = Vec::new();
+        for id in 0..states.len() as u32 {
+            let sid = BlockStateId(id);
+            for q in baked.quads(sid) {
+                if atlas.region_of(&q.texture) == missing {
+                    bad.push(format!("{} -> {}", states.block_of(sid), q.texture));
+                    break;
+                }
+            }
+        }
+        bad.dedup();
+        assert!(
+            bad.is_empty(),
+            "{} states use the missing sprite: {:?}",
+            bad.len(),
+            &bad[..bad.len().min(20)]
+        );
+
+        // grass_block (snowy=false): full opaque despite its side overlay quads, so faces
+        // between grass blocks are culled.
+        let grass = (0..states.len() as u32)
+            .map(BlockStateId)
+            .find(|s| states.block_of(*s).path() == "grass_block")
+            .unwrap();
+        assert!(baked.is_full_opaque(grass), "grass_block full opaque");
 
         // oak_stairs facing=east (bottom, straight): > 6 quads
         let mut stairs_east = None;
