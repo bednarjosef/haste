@@ -101,6 +101,12 @@ fn java_exe() -> &'static str {
     if std::env::consts::OS == "windows" { "java.exe" } else { "java" }
 }
 
+/// The cached JDK's `java` if present, without any network access.
+pub fn resolve_cached_java() -> Option<PathBuf> {
+    let java = paths::cache_dir().join("jdk").join("bin").join(java_exe());
+    java.is_file().then_some(java)
+}
+
 /// Looks for `java` on PATH and in `$JAVA_HOME/bin`; returns `(path, major_version)`.
 pub async fn find_system_java() -> Option<(PathBuf, u32)> {
     let mut candidates: Vec<PathBuf> = Vec::new();

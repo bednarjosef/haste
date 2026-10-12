@@ -6,3 +6,4 @@ pub mod config;
 pub mod download;
 pub mod install;
 pub mod mojang;
+pub mod server;
