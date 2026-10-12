@@ -13,7 +13,11 @@ use clap::Parser;
 mod headless;
 
 #[derive(Parser, Debug)]
-#[command(name = "haste", version, about = "Haste: a Minecraft 26.3 client in Rust")]
+#[command(
+    name = "haste",
+    version,
+    about = "Haste: a Minecraft 26.3 client in Rust"
+)]
 pub struct Args {
     /// Server address (host or host:port). Omit for the launcher flow.
     #[arg(long)]
@@ -30,7 +34,11 @@ pub struct Args {
 }
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?)).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?),
+        )
+        .init();
     let args = Args::parse();
     if args.headless {
         return headless::run(&args);
