@@ -4,3 +4,4 @@
 **/build/
 *.log
 /.worktrees/
+.claude/settings.local.json
