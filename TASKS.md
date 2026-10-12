@@ -17,7 +17,7 @@ One line per task; details live in `docs/briefs/<ws>.md` and in the branch.
 | WS6-1 | WS6 (Opus) | JVM host + tier-3 allow-listed loader | M5 | done |
 | WS6-2 | WS6 (Opus) | proxies + GuiPipeline + Pause/Chat/Inventory screens (real vanilla classes, 1 JNI call/frame, p50 34 µs) | M5 | done (headless; needs the renderer to draw GuiFrame) |
 | WS7-1 | WS7 | ensure_installed: Mojang downloads, JDK, datagen | M1 | done |
-| WS7-2 | WS7 | config, LocalServer, vanilla launcher, MSA auth | M6 | in progress (checkpoint only this session) |
+| WS7-2 | WS7 | config, LocalServer, vanilla launcher, MSA auth | M6 | done (PR #6); `haste setup`/`launch` subcommands pending (lead) |
 | WS8-1 | WS8 | server-side oracle dumps (block shapes, entity dims, block props) | M2/M3 | done |
 | WS8-2 | WS8 | testkit formats + harness + packet proxy | M1 | done |
 | WS8-3 | WS8 | client recorder + RECORDING.md (compiles; never run: needs the user's display) | M3 | done (code); recording pending user |
