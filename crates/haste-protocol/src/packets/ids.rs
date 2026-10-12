@@ -152,6 +152,7 @@ pub struct ProtocolTables {
     /// Packet ids.
     pub packets: PacketIds,
     data_components: Vec<String>,
+    particle_types: Vec<String>,
 }
 
 impl ProtocolTables {
@@ -170,23 +171,52 @@ impl ProtocolTables {
             entries: HashMap<String, Entry>,
         }
         let regs: HashMap<String, Reg> = serde_json::from_str(&text)?;
-        let mut data_components = Vec::new();
-        if let Some(r) = regs.get("minecraft:data_component_type") {
-            data_components = vec![String::new(); r.entries.len()];
-            for (name, e) in &r.entries {
-                let i = e.protocol_id as usize;
-                if i >= data_components.len() {
-                    data_components.resize(i + 1, String::new());
+        let by_id = |name: &str| -> Vec<String> {
+            let mut v = Vec::new();
+            if let Some(r) = regs.get(name) {
+                for (entry, e) in &r.entries {
+                    let i = e.protocol_id as usize;
+                    if i >= v.len() {
+                        v.resize(i + 1, String::new());
+                    }
+                    v[i] = entry.clone();
                 }
-                data_components[i] = name.clone();
             }
-        }
-        Ok(ProtocolTables { packets, data_components })
+            v
+        };
+        Ok(ProtocolTables {
+            packets,
+            data_components: by_id("minecraft:data_component_type"),
+            particle_types: by_id("minecraft:particle_type"),
+        })
+    }
+
+    /// Name of a `minecraft:particle_type` id.
+    pub fn particle_name(&self, id: i32) -> Option<&str> {
+        usize::try_from(id).ok().and_then(|i| self.particle_types.get(i)).map(String::as_str).filter(|s| !s.is_empty())
     }
 
     /// Name of a data component type id.
     pub fn data_component_name(&self, id: i32) -> Option<&str> {
         usize::try_from(id).ok().and_then(|i| self.data_components.get(i)).map(String::as_str).filter(|s| !s.is_empty())
+    }
+
+    /// Replaces the packet ids (tests and tools).
+    pub fn with_packets(mut self, packets: PacketIds) -> Self {
+        self.packets = packets;
+        self
+    }
+
+    /// Adds particle type names (tests).
+    pub fn with_particles_for_tests(mut self, particles: &[(i32, &str)]) -> Self {
+        for (i, n) in particles {
+            let i = *i as usize;
+            if self.particle_types.len() <= i {
+                self.particle_types.resize(i + 1, String::new());
+            }
+            self.particle_types[i] = (*n).to_string();
+        }
+        self
     }
 
     /// Tables with the given data component names (tests).
@@ -235,6 +265,7 @@ mod tests {
         let ka = ids.id(State::Play, Direction::Clientbound, "minecraft:keep_alive").unwrap();
         assert_eq!(ids.name(State::Play, Direction::Clientbound, ka), Some("minecraft:keep_alive"));
         assert_eq!(t.data_component_name(0), Some("minecraft:custom_data"));
+        assert_eq!(t.particle_name(1), Some("minecraft:block"));
         assert!(t.data_component_name(10_000).is_none());
     }
 }

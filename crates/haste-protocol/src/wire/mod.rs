@@ -10,6 +10,7 @@
 //! (26.3, protocol 777). VarInt/VarLong decoding comes from Pumpkin (`varint`).
 
 pub mod component;
+pub mod particle;
 pub mod slot;
 pub mod varint;
 
@@ -149,8 +150,16 @@ impl<'a> Reader<'a> {
     pub fn u8(&mut self) -> DecodeResult<u8> { Ok(self.take(1)?[0]) }
     /// Signed byte.
     pub fn i8(&mut self) -> DecodeResult<i8> { Ok(self.take(1)?[0] as i8) }
-    /// Boolean (any non-zero byte is true).
-    pub fn bool(&mut self) -> DecodeResult<bool> { Ok(self.u8()? != 0) }
+    /// Boolean. Strict: bytes other than 0 and 1 are an error. Vanilla
+    /// accepts any non-zero byte, but servers only send 0/1, so a stray value
+    /// almost always means we misread the layout.
+    pub fn bool(&mut self) -> DecodeResult<bool> {
+        match self.u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            b => Err(DecodeError::Invalid(format!("boolean byte {b}"))),
+        }
+    }
     /// Big-endian u16.
     pub fn u16(&mut self) -> DecodeResult<u16> { Ok(u16::from_be_bytes(self.array()?)) }
     /// Big-endian i16.

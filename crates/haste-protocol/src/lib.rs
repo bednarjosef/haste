@@ -11,6 +11,7 @@
 //!   from Pumpkin (GPL-3.0).
 //! - [`packets`]: packet ids from `packets.json` and one struct per packet.
 
+pub mod metadata;
 pub mod nbt;
 pub mod packets;
 pub mod transport;
