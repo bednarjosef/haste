@@ -215,6 +215,8 @@ pub struct Renderer {
     sky: crate::sky::SkyRenderer,
     /// Selection outline and break cracks.
     overlay: crate::overlay::OverlayRenderer,
+    /// Surface present mode (`set_vsync`).
+    present_mode: wgpu::PresentMode,
     /// First-person arm or held item (`set_first_person`).
     first_person: Option<crate::entity::FirstPerson>,
     /// Name tags projected to GUI space this frame.
@@ -515,8 +517,29 @@ impl Renderer {
             sky,
             overlay,
             first_person: None,
+            present_mode: wgpu::PresentMode::Fifo,
             nametags: Vec::new(),
         })
+    }
+
+    /// Vsync on (FIFO) or off (Mailbox, else Immediate, whichever the surface supports; FIFO
+    /// when neither is). Reconfigures the surface; no effect offscreen.
+    pub fn set_vsync(&mut self, on: bool) {
+        let mode = match &self.surface {
+            None => return,
+            Some(surface) if !on => {
+                let modes = surface.get_capabilities(&self.gpu.adapter).present_modes;
+                [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Immediate]
+                    .into_iter()
+                    .find(|m| modes.contains(m))
+                    .unwrap_or(wgpu::PresentMode::Fifo)
+            }
+            Some(_) => wgpu::PresentMode::Fifo,
+        };
+        if mode != self.present_mode {
+            self.present_mode = mode;
+            self.configure_surface();
+        }
     }
 
     /// The first-person view: arm (empty hand) or held item; None draws nothing (third person,
@@ -661,7 +684,7 @@ impl Renderer {
             color_space: wgpu::SurfaceColorSpace::Auto,
             width: w,
             height: h,
-            present_mode: wgpu::PresentMode::Fifo,
+            present_mode: self.present_mode,
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
             view_formats: if self.surface_format.is_srgb() {
                 vec![self.surface_format.remove_srgb_suffix()]
