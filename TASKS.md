@@ -26,5 +26,5 @@ One line per task; details live in `docs/briefs/<ws>.md` and in the branch.
 | WS1-2 | WS1 (Opus) | play packets (all 144 + 69) | M1 | done |
 | WS1-3 | WS1 (Opus) | M1 headless join (60 s on local server, 473 chunks, 0 unknown) | M1 | done; stub world until haste-world lands |
 | WS3-1 | WS3 | haste-assets: jar reading, models, atlas, font (Pomme pieces reused) | M2 | done |
-| WS3-2 | WS3 | haste-render: meshing, world rendering | M2 | in progress |
-| WS3-3 | WS3 | entities, HUD, GUI batch drawing | M4/M5 | pending |
+| WS3-2 | WS3 | haste-render: meshing, world rendering (211 FPS offscreen rd12 flat) | M2 | done (PR #8); client wiring pending (lead) |
+| WS3-3 | WS3 | entities, HUD, GUI batch drawing | M4/M5 | not started |

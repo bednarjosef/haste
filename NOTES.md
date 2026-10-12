@@ -2,6 +2,11 @@
 
 Newest at the top. One entry per decision, with the why; link the brief or report it came from.
 
+- **2026-10-12 Renderer works offscreen (M2 minus wiring).** haste-render draws a 625-section flat
+  world at render distance 12 in 4.75 ms/frame (211 FPS) on the Radeon 860M through the local RADV;
+  readback PNGs verified. The windowed loop blocks on `get_current_texture` when the Wayland
+  compositor sends no frame callbacks to an unviewed window: test windowed mode in an interactive
+  session. Wiring `World` -> `Renderer::update_world` in the client is the lead's next step.
 - **2026-10-12 Open: falling-water height.** `haste-data`'s `BlockPhysics::fluid` reports height 1.0
   for fluid level >= 8 (falling), `haste-physics`'s own loader (`src/oracle.rs`) reports 8/9. Which
   matches vanilla is not determined (no decompiled source by rule); settle it with a swim/fall
