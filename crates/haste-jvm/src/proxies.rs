@@ -131,6 +131,7 @@ pub(crate) mod mirror {
     pub const F_MAY_FLY: i32 = 16;
     pub const F_INSTABUILD: i32 = 32;
     pub const F_IN_WORLD: i32 = 64;
+    pub const F_IMMEDIATE_RESPAWN: i32 = 128;
 }
 
 impl GameState {
@@ -153,7 +154,8 @@ impl GameState {
             | flag(v.flying, F_FLYING)
             | flag(v.may_fly, F_MAY_FLY)
             | flag(v.instabuild, F_INSTABUILD)
-            | flag(self.in_world, F_IN_WORLD);
+            | flag(self.in_world, F_IN_WORLD)
+            | flag(self.immediate_respawn, F_IMMEDIATE_RESPAWN);
         i[I_FPS] = self.debug.fps;
         i[I_CHUNKS] = self.debug.chunks;
         i[I_SECTIONS_DRAWN] = self.debug.sections_drawn;
@@ -210,6 +212,8 @@ pub struct GameState {
     pub debug: DebugInfo,
     /// Joined a world (the HUD is drawn; before that only screens).
     pub in_world: bool,
+    /// The server respawns dead players at once (no death screen: `login`, `game_event` 11).
+    pub immediate_respawn: bool,
     /// World age in ticks (`set_time`).
     pub game_time: i64,
     /// Time of day in ticks (`set_time`).
@@ -234,6 +238,7 @@ impl Default for GameState {
             vitals: PlayerVitals::default(),
             debug: DebugInfo::default(),
             in_world: false,
+            immediate_respawn: false,
             game_time: 0,
             day_time: 0,
             outgoing: Vec::new(),

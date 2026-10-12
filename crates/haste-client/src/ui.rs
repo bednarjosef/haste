@@ -61,6 +61,8 @@ struct Shared {
     sent_slot: AtomicI32,
     tab_down: AtomicBool,
     salt: AtomicU64,
+    /// Packets the UI itself decided to send (immediate respawn).
+    outbox: Mutex<Vec<ServerboundPlay>>,
 }
 
 /// Clientbound play packets whose state lives in tier 3 (forwarded to Java whole).
@@ -119,6 +121,7 @@ impl Ui {
                 sent_slot: AtomicI32::new(-1),
                 tab_down: AtomicBool::new(false),
                 salt: AtomicU64::new(0x9e37_79b9_7f4a_7c15),
+                outbox: Mutex::new(Vec::new()),
             }),
             frame: GuiFrame::default(),
         }
@@ -172,6 +175,7 @@ impl Ui {
             s.in_world = true;
             s.game_mode = login.game_mode;
             s.vitals.hardcore = login.hardcore;
+            s.immediate_respawn = !login.packet.enable_respawn_screen;
             s.disconnect_requested = false;
         });
         Ok(())
@@ -206,7 +210,24 @@ impl Ui {
                     self.state(|s| s.game_mode = m);
                 }
             }
+            // 11: respawn screen on (0) or immediate respawn (1)
+            P::GameEvent(g) if g.event == 11 => {
+                self.state(|s| s.immediate_respawn = g.value == 1.0)
+            }
+            P::PlayerCombatKill(k)
+                if k.player_id == local && self.state(|s| s.immediate_respawn) =>
+            {
+                // no death screen: respawn at once, as the vanilla client does
+                self.shared
+                    .outbox
+                    .lock()
+                    .push(ServerboundPlay::ClientCommand(sb::ClientCommand {
+                        action: 0,
+                    }));
+            }
             P::Respawn(r) => {
+                // a respawned player is a new entity at full health until the server says otherwise
+                self.state(|s| s.vitals.health = 20.0);
                 if let Some(m) = GameMode::from_id(r.spawn.game_mode) {
                     self.state(|s| s.game_mode = m);
                 }
@@ -560,35 +581,58 @@ mod tests {
         }
     }
 
-    /// Joins the test server as "haste", gives itself stone and says hello through commands (the
-    /// player must be an operator: `ops.json` of the test server), plays a few seconds and renders
-    /// the HUD: the hotbar with the stone and the chat line must be in the frame.
-    #[test]
-    #[ignore = "needs cache/ and a test server (HASTE_TEST_SERVER, default 127.0.0.1:25614) where 'haste' is an operator"]
-    fn joins_and_renders_the_hud() {
-        use haste_protocol::haste_core::gui::GuiCommand;
-        use haste_protocol::packets::play::clientbound as cb;
-        use haste_protocol::{Account, ConnectOptions};
+    // ---- tests against a server (ignored: need cache/ and the test server) ----
 
-        let addr = std::env::var("HASTE_TEST_SERVER").unwrap_or_else(|_| "127.0.0.1:25614".into());
-        let cache = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
-        let t = std::time::Instant::now();
-        let host = JvmHost::start(haste_jvm::JvmConfig::from_cache(&cache).unwrap()).unwrap();
-        eprintln!("JVM ready in {:?}: {}", t.elapsed(), host.proxy_summary());
-        let mut ui = Ui::new(host);
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(2)
-            .build()
-            .unwrap();
-        rt.block_on(async {
+    use haste_protocol::haste_core::gui::GuiCommand;
+    use haste_protocol::haste_core::DVec3;
+
+    const NEEDS_SERVER: &str = "needs cache/ and a test server (HASTE_TEST_SERVER, default 127.0.0.1:25614) where 'haste' is an operator; run with --test-threads=1";
+
+    /// The process's JVM (one per process), started once.
+    fn host() -> JvmHost {
+        static HOST: std::sync::OnceLock<JvmHost> = std::sync::OnceLock::new();
+        HOST.get_or_init(|| {
+            let cache = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+            let t = std::time::Instant::now();
+            let host = JvmHost::start(haste_jvm::JvmConfig::from_cache(&cache).unwrap()).unwrap();
+            eprintln!("JVM ready in {:?}: {}", t.elapsed(), host.proxy_summary());
+            host
+        })
+        .clone()
+    }
+
+    /// A minimal client for the tests: joins, answers teleports, sends the per-tick movement and
+    /// tick-end packets (standing still), drives `Ui` like the game loop does.
+    struct TestClient {
+        rt: tokio::runtime::Runtime,
+        conn: Option<Connection>,
+        ui: Ui,
+        pos: Option<(DVec3, f32, f32)>,
+        loaded: bool,
+        tick: u64,
+        received: Vec<&'static str>,
+        sent: Vec<ServerboundPlay>,
+        kicked: Option<Component>,
+    }
+
+    impl TestClient {
+        fn join() -> TestClient {
+            use haste_protocol::{Account, ConnectOptions};
+            let addr =
+                std::env::var("HASTE_TEST_SERVER").unwrap_or_else(|_| "127.0.0.1:25614".into());
+            let ui = Ui::new(host());
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(2)
+                .build()
+                .unwrap();
             let opts = ConnectOptions::new(
                 addr.clone(),
                 Account::Offline {
                     username: "haste".into(),
                 },
             );
-            let (mut conn, login) = Connection::connect(opts).await.expect("connect");
+            let (conn, login) = rt.block_on(Connection::connect(opts)).expect("connect");
             let t = std::time::Instant::now();
             ui.joined(&conn, &login).expect("registries into Java");
             eprintln!(
@@ -596,121 +640,480 @@ mod tests {
                 conn.registries().names().count(),
                 t.elapsed()
             );
-            let mut pos = None;
-            let mut loaded = false;
-            let mut out = Vec::new();
-            let mut received = Vec::new();
-            for tick in 0..140 {
-                while let Some(p) = conn.try_recv() {
-                    ui.handle(&p);
+            TestClient {
+                rt,
+                conn: Some(conn),
+                ui,
+                pos: None,
+                loaded: false,
+                tick: 0,
+                received: Vec::new(),
+                sent: Vec::new(),
+                kicked: None,
+            }
+        }
+
+        fn conn(&mut self) -> &mut Connection {
+            self.conn.as_mut().expect("connected")
+        }
+
+        fn send(&mut self, p: ServerboundPlay) {
+            self.conn().send(p).unwrap();
+        }
+
+        /// `n` game ticks (50 ms each).
+        fn run(&mut self, n: u64) {
+            let _rt = self.rt.enter();
+            for _ in 0..n {
+                while let Some(p) = self.conn.as_mut().and_then(|c| c.try_recv()) {
+                    self.ui.handle(&p);
                     if let Some(n) = p.name() {
-                        received.push(n);
+                        self.received.push(n);
                     }
-                    if let ClientboundPlay::PlayerPosition(t) = &p {
-                        pos = Some((t.pos, t.yaw, t.pitch));
-                        conn.send(ServerboundPlay::AcceptTeleportation(
-                            sb::AcceptTeleportation {
-                                teleport_id: t.teleport_id,
-                                pos: t.pos,
-                                yaw: t.yaw,
-                                pitch: t.pitch,
-                            },
-                        ))
-                        .unwrap();
-                        if !loaded {
-                            conn.send(ServerboundPlay::PlayerLoaded(sb::PlayerLoaded {}))
-                                .unwrap();
-                            loaded = true;
-                            continue;
+                    match &p {
+                        ClientboundPlay::PlayerPosition(t) => {
+                            self.pos = Some((t.pos, t.yaw, t.pitch));
+                            self.send(ServerboundPlay::AcceptTeleportation(
+                                sb::AcceptTeleportation {
+                                    teleport_id: t.teleport_id,
+                                    pos: t.pos,
+                                    yaw: t.yaw,
+                                    pitch: t.pitch,
+                                },
+                            ));
+                            if !self.loaded {
+                                self.send(ServerboundPlay::PlayerLoaded(sb::PlayerLoaded {}));
+                                self.loaded = true;
+                            }
                         }
-                    }
-                    if let ClientboundPlay::Disconnect(d) = &p {
-                        panic!("kicked: {}", d.reason.to_plain(&|_| None));
+                        ClientboundPlay::Disconnect(d) => {
+                            self.ui.disconnected(&d.reason);
+                            self.kicked = Some(d.reason.clone());
+                            self.conn.take();
+                            return;
+                        }
+                        _ => {}
                     }
                 }
-                if loaded && tick == 30 {
-                    // what the chat screen produces for typed commands
-                    ui.gui().with_state(|s| {
-                        s.sent.push(haste_jvm::ChatMessage {
-                            text: "give @s minecraft:stone 64".into(),
-                            command: true,
-                        });
-                        s.sent.push(haste_jvm::ChatMessage {
-                            text: "say hello from haste".into(),
-                            command: true,
-                        });
-                    });
-                }
-                if let (true, Some((p, yaw, pitch))) = (loaded, pos) {
-                    conn.send(ServerboundPlay::MovePlayerPosRot(sb::MovePlayerPosRot {
+                if let (true, Some((p, yaw, pitch))) = (self.loaded, self.pos) {
+                    self.send(ServerboundPlay::MovePlayerPosRot(sb::MovePlayerPosRot {
                         pos: p,
                         yaw,
                         pitch,
                         flags: sb::move_flags::ON_GROUND,
-                    }))
-                    .unwrap();
-                    conn.send(ServerboundPlay::ClientTickEnd(sb::ClientTickEnd {}))
-                        .unwrap();
+                    }));
+                    self.send(ServerboundPlay::ClientTickEnd(sb::ClientTickEnd {}));
                 }
-                ui.tick();
-                ui.drain_outgoing(&mut out);
-                for p in out.drain(..) {
-                    conn.send(p).unwrap();
+                self.ui.tick();
+                let mut out = Vec::new();
+                self.ui.drain_outgoing(&mut out);
+                for p in out {
+                    self.sent.push(p.clone());
+                    self.send(p);
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                self.tick += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            assert!(!conn.is_closed(), "closed: {:?}", conn.close_reason());
-            let _ = cb::SetHealth::NAME;
-            eprintln!(
-                "tier-3 packets seen: {:?}",
-                received
-                    .iter()
-                    .filter(|n| FORWARDED.contains(n) || FORWARDED_LOCAL.contains(n))
-                    .collect::<std::collections::BTreeSet<_>>()
+        }
+
+        /// Runs until the player is loaded in the world.
+        fn spawn(&mut self) {
+            for _ in 0..200 {
+                if self.loaded {
+                    self.run(10);
+                    return;
+                }
+                self.run(1);
+            }
+            panic!("no spawn teleport");
+        }
+
+        /// A command as the chat screen would send it (setup steps of the tests).
+        fn command(&mut self, c: &str) {
+            self.ui.gui().with_state(|s| {
+                s.sent.push(haste_jvm::ChatMessage {
+                    text: c.into(),
+                    command: true,
+                })
+            });
+        }
+
+        fn frame(&mut self, mouse: (f64, f64)) -> haste_protocol::haste_core::gui::GuiFrame {
+            self.ui.frame(320, 240, 2, mouse, 0.0).clone()
+        }
+
+        fn press(&mut self, key: i32) {
+            let kc = keys::keycode(key);
+            self.ui.key(key, kc, 0, true);
+            self.ui.key(key, kc, 0, false);
+        }
+
+        fn type_text(&mut self, t: &str) {
+            for c in t.chars() {
+                self.ui.char_typed(c, 0);
+            }
+        }
+
+        /// Clicks the button whose label is `label` (the widget sprite under the text).
+        fn click(&mut self, label: &str) {
+            let f = self.frame((0.0, 0.0));
+            let (x, y) =
+                text_pos(&f, label).unwrap_or_else(|| panic!("no {label:?} in {:?}", texts(&f)));
+            self.ui.mouse_moved(f64::from(x) + 1.0, f64::from(y) + 1.0);
+            self.ui.mouse_button(
+                f64::from(x) + 1.0,
+                f64::from(y) + 1.0,
+                keys::MOUSE_LEFT,
+                true,
             );
-            conn.disconnect();
-        });
-        let stone = ui
-            .gui()
-            .with_state(|s| s.slot(0).cloned())
-            .expect("stone in hotbar slot 0 (from the server's container_set_slot)");
+            self.ui.mouse_button(
+                f64::from(x) + 1.0,
+                f64::from(y) + 1.0,
+                keys::MOUSE_LEFT,
+                false,
+            );
+        }
+
+        fn disconnect(mut self) {
+            if let Some(c) = self.conn.take() {
+                c.disconnect();
+            }
+            self.ui.gui().with_state(|s| s.in_world = false);
+            self.ui.gui().close_screen();
+        }
+    }
+
+    /// Vanilla code that hits a refused class fails, and inside a `CompletableFuture` it fails
+    /// silently: every test checks the class log. These refusals are known and harmless.
+    fn assert_no_refusals(host: &JvmHost) {
+        const KNOWN: &[&str] = &[
+            "com.mojang.renderpearl.api.pipeline.RenderPipeline", // a parameter type of draw calls
+            "jakarta.servlet.Servlet",                            // log4j probes
+            "javax.servlet.Servlet",
+            "net.minecraft.client.sounds.MusicManager", // option callbacks (no music)
+        ];
+        let log = host.class_log().unwrap();
+        let bad: Vec<_> = log
+            .refused()
+            .into_iter()
+            .filter(|(n, _)| !KNOWN.contains(n))
+            .collect();
+        assert!(bad.is_empty(), "classes refused: {bad:#?}");
+    }
+
+    fn texts(f: &haste_protocol::haste_core::gui::GuiFrame) -> Vec<String> {
+        f.commands
+            .iter()
+            .filter_map(|c| match c {
+                GuiCommand::Text { text, .. } | GuiCommand::StyledText { text, .. } => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Where a text is drawn, in absolute GUI pixels (translations applied).
+    fn text_pos(f: &haste_protocol::haste_core::gui::GuiFrame, want: &str) -> Option<(i32, i32)> {
+        let mut stack: Vec<(f32, f32)> = vec![(0.0, 0.0)];
+        for c in &f.commands {
+            match c {
+                GuiCommand::TranslatePush { dx, dy, .. } => {
+                    let (x, y) = *stack.last().unwrap();
+                    stack.push((x + dx, y + dy));
+                }
+                GuiCommand::TranslatePop => {
+                    stack.pop();
+                }
+                GuiCommand::Text { text, x, y, .. } | GuiCommand::StyledText { text, x, y, .. }
+                    if text == want =>
+                {
+                    let (dx, dy) = *stack.last().unwrap();
+                    return Some((x + dx as i32, y + dy as i32));
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Joins the test server as "haste", gives itself stone and says hello through commands (the
+    /// player must be an operator: `ops.json` of the test server), plays a few seconds and renders
+    /// the HUD: the hotbar with the stone and the chat line must be in the frame.
+    #[test]
+    #[ignore = "needs cache/ and a test server (HASTE_TEST_SERVER, default 127.0.0.1:25614) where 'haste' is an operator; run with --test-threads=1"]
+    fn joins_and_renders_the_hud() {
+        let mut c = TestClient::join();
+        c.spawn();
+        c.command("clear @s");
+        c.command("give @s minecraft:stone 64");
+        c.command("say hello from haste");
+        c.run(40);
+        assert!(c.kicked.is_none(), "kicked: {:?}", c.kicked);
+        eprintln!(
+            "tier-3 packets seen: {:?}",
+            c.received
+                .iter()
+                .filter(|n| FORWARDED.contains(n) || FORWARDED_LOCAL.contains(n))
+                .collect::<std::collections::BTreeSet<_>>()
+        );
+        let stone =
+            c.ui.gui()
+                .with_state(|s| s.slot(0).cloned())
+                .expect("stone in hotbar slot 0 (from the server's container_set_slot)");
         assert_eq!(stone.count, 64);
         let t = std::time::Instant::now();
-        let f = ui.frame(320, 240, 2, (0.0, 0.0), 0.0).clone();
+        let f = c.frame((0.0, 0.0));
         eprintln!(
             "HUD frame in {:?}: {} commands",
             t.elapsed(),
             f.commands.len()
         );
-        for c in &f.commands {
-            eprintln!("  {c:?}");
+        for cmd in &f.commands {
+            eprintln!("  {cmd:?}");
         }
         assert!(f.commands.iter().any(
             |c| matches!(c, GuiCommand::Sprite { sprite, .. } if sprite.path() == "hud/hotbar")
         ));
         assert!(f.commands.iter().any(|c| matches!(c,
             GuiCommand::Item { item, count: 64, x: 72, y: 221 } if Some(*item) == stone.item)));
-        let text: Vec<&str> = f
-            .commands
-            .iter()
-            .filter_map(|c| match c {
-                GuiCommand::Text { text, .. } | GuiCommand::StyledText { text, .. } => {
-                    Some(text.as_str())
-                }
-                _ => None,
-            })
-            .collect();
+        let text = texts(&f);
         assert!(
             text.iter().any(|t| t.contains("hello from haste")),
             "chat line in the HUD: {text:?}"
         );
-        let chat = ui.gui().chat_history().unwrap();
+        let chat = c.ui.gui().chat_history().unwrap();
         eprintln!("chat log: {chat:?}");
         assert!(
             chat.iter().any(|l| l == "[haste] hello from haste"),
             "{chat:?}"
         );
-        let unimpl = ui.host.unimplemented().unwrap();
+        let unimpl = c.ui.host.unimplemented().unwrap();
         eprintln!("Unimplemented: {unimpl:#?}");
+        assert_no_refusals(&c.ui.host);
+        c.disconnect();
+    }
+
+    /// The chat screen parses commands with the server's command tree (from its `commands`
+    /// packet) and asks the server for suggestions where the tree says so (`command_suggestion`
+    /// round trip, here the recipe names of `/recipe give <player> `).
+    #[test]
+    #[ignore = "needs cache/ and a test server (HASTE_TEST_SERVER, default 127.0.0.1:25614) where 'haste' is an operator; run with --test-threads=1"]
+    fn command_suggestions_from_the_server() {
+        let mut c = TestClient::join();
+        c.spawn();
+        assert!(c.received.contains(&"minecraft:commands"));
+        let names = c.ui.gui().command_names().unwrap();
+        eprintln!(
+            "permission level {}, {} commands: {names:?}",
+            c.ui.gui().with_state(|s| s.permission_level),
+            names.len()
+        );
+        assert!(names.iter().any(|n| n == "gamemode"), "{names:?}");
+        let comp = c.ui.gui().completions("gamem").unwrap();
+        eprintln!(
+            "completions of 'gamem': {comp:?}; autoSuggestions {:?}",
+            c.ui.gui().option("autoSuggestions")
+        );
+        // "/" opens the chat screen with "/" typed
+        c.press(keys::SLASH);
+        assert_eq!(
+            c.ui.gui().screen_class().as_deref(),
+            Some("net.minecraft.client.gui.screens.ChatScreen")
+        );
+        c.type_text("gamem");
+        c.run(2);
+        let f = c.frame((0.0, 0.0));
+        eprintln!(
+            "unimplemented: {:#?}; last error {:?}",
+            c.ui.host.unimplemented().unwrap(),
+            c.ui.gui().take_last_error()
+        );
+        let t = texts(&f);
+        assert!(
+            t.iter().any(|x| x == "gamemode"),
+            "client-side suggestions: {t:?}"
+        );
+        // an argument the server completes: the screen sends command_suggestion, the answer shows
+        for _ in 0.."gamem".len() {
+            c.press(keys::BACKSPACE);
+        }
+        c.type_text("recipe give haste ");
+        c.run(20);
+        assert!(
+            c.sent.iter().any(|p| matches!(p, ServerboundPlay::CommandSuggestion(s) if s.text.starts_with("/recipe give haste"))),
+            "{:?}",
+            c.sent
+        );
+        assert!(c.received.contains(&"minecraft:command_suggestions"));
+        let t = texts(&c.frame((0.0, 0.0)));
+        assert!(
+            t.iter().any(|x| x.starts_with("minecraft:")),
+            "server suggestions: {t:?}"
+        );
+        // like vanilla: the first Escape hides the suggestion list, the second closes the screen
+        c.press(keys::ESCAPE);
+        assert!(c.ui.screen_open());
+        c.press(keys::ESCAPE);
+        assert!(!c.ui.screen_open());
+        assert!(c.kicked.is_none(), "kicked: {:?}", c.kicked);
+        assert_no_refusals(&c.ui.host);
+        c.disconnect();
+    }
+
+    /// Dying opens vanilla's death screen; its Respawn button sends `client_command` and the
+    /// server's respawn closes it.
+    #[test]
+    #[ignore = "needs cache/ and a test server (HASTE_TEST_SERVER, default 127.0.0.1:25614) where 'haste' is an operator; run with --test-threads=1"]
+    fn death_screen_and_respawn() {
+        let mut c = TestClient::join();
+        c.spawn();
+        if c.ui.gui().with_state(|s| s.vitals.health <= 0.0) {
+            // left dead by an earlier run: respawn first
+            c.send(ServerboundPlay::ClientCommand(sb::ClientCommand {
+                action: 0,
+            }));
+            c.run(20);
+        }
+        c.command("kill @s");
+        c.run(10);
+        assert_eq!(
+            c.ui.gui().screen_class().as_deref(),
+            Some("net.minecraft.client.gui.screens.DeathScreen"),
+            "received {:?}",
+            c.received
+        );
+        let t = texts(&c.frame((0.0, 0.0)));
+        assert!(t.iter().any(|x| x == "You Died!"), "{t:?}");
+        // the buttons are enabled after a second
+        c.run(25);
+        c.click("Respawn");
+        c.run(10);
+        assert!(
+            c.sent
+                .iter()
+                .any(|p| matches!(p, ServerboundPlay::ClientCommand(x) if x.action == 0)),
+            "{:?}",
+            c.sent
+        );
+        assert!(c.received.contains(&"minecraft:respawn"));
+        assert!(!c.ui.screen_open(), "{:?}", c.ui.gui().screen_class());
+        assert!(c.kicked.is_none(), "kicked: {:?}", c.kicked);
+        let unimpl = c.ui.host.unimplemented().unwrap();
+        eprintln!("Unimplemented: {unimpl:#?}");
+        assert_no_refusals(&c.ui.host);
+        c.disconnect();
+    }
+
+    /// A chest the player opens is vanilla's container screen over the server's container
+    /// packets; clicks are predicted and sent with hashed stacks, and the server agrees (no
+    /// correction of the clicked slots), Escape closes it with `container_close`.
+    #[test]
+    #[ignore = "needs cache/ and a test server (HASTE_TEST_SERVER, default 127.0.0.1:25614) where 'haste' is an operator; run with --test-threads=1"]
+    fn chest_screen() {
+        let mut c = TestClient::join();
+        c.spawn();
+        let (p, _, _) = c.pos.unwrap();
+        let chest = haste_protocol::haste_core::BlockPos::new(
+            p.x.floor() as i32 + 2,
+            p.y.floor() as i32,
+            p.z.floor() as i32,
+        );
+        c.command(&format!(
+            "setblock {} {} {} minecraft:air",
+            chest.x, chest.y, chest.z
+        ));
+        c.command(&format!(
+            "setblock {} {} {} minecraft:chest{{Items:[{{Slot:0b,id:\"minecraft:diamond\",count:5}}]}}",
+            chest.x, chest.y, chest.z
+        ));
+        c.run(10);
+        c.send(ServerboundPlay::UseItemOn(sb::UseItemOn {
+            hand: 0,
+            pos: chest,
+            face: 4, // west face (the player is to the west)
+            cursor_x: 0.0,
+            cursor_y: 0.5,
+            cursor_z: 0.5,
+            inside_block: false,
+            world_border_hit: false,
+            sequence: 1,
+        }));
+        c.run(10);
+        assert!(
+            c.received.contains(&"minecraft:open_screen"),
+            "{:?}",
+            c.received
+        );
+        assert_eq!(
+            c.ui.gui().screen_class().as_deref(),
+            Some("net.minecraft.client.gui.screens.inventory.ContainerScreen")
+        );
+        let f = c.frame((0.0, 0.0));
+        let t = texts(&f);
+        assert!(t.iter().any(|x| x == "Chest"), "{t:?}");
+        assert!(t.iter().any(|x| x == "5"), "the diamonds' count: {t:?}");
+        // pick up the diamonds: slot 0 of the chest, at (8, 18) in the 176x166 container
+        let origin = ((320 - 176) / 2, (240 - 166) / 2);
+        let at = (f64::from(origin.0 + 8 + 8), f64::from(origin.1 + 18 + 8));
+        let corrections_before = c
+            .received
+            .iter()
+            .filter(|n| **n == "minecraft:container_set_slot")
+            .count();
+        c.ui.mouse_moved(at.0, at.1);
+        c.ui.mouse_button(at.0, at.1, keys::MOUSE_LEFT, true);
+        c.ui.mouse_button(at.0, at.1, keys::MOUSE_LEFT, false);
+        c.run(10);
+        let click = c
+            .sent
+            .iter()
+            .find_map(|p| match p {
+                ServerboundPlay::ContainerClick(x) => Some(x.clone()),
+                _ => None,
+            })
+            .expect("container_click sent");
+        assert_eq!((click.slot, click.button, click.mode), (0, 0, 0));
+        assert!(click.window_id > 0);
+        assert_eq!(click.changed.len(), 1, "{click:?}");
+        assert!(click.carried.item.is_some(), "carried diamonds: {click:?}");
+        let corrections = c
+            .received
+            .iter()
+            .filter(|n| **n == "minecraft:container_set_slot")
+            .count()
+            - corrections_before;
+        assert_eq!(corrections, 0, "the server corrected our prediction");
+        c.press(keys::ESCAPE);
+        c.run(5);
+        assert!(!c.ui.screen_open());
+        assert!(
+            c.sent.iter().any(|p| matches!(p, ServerboundPlay::ContainerClose(x) if x.window_id == click.window_id)),
+            "{:?}",
+            c.sent
+        );
+        assert!(c.kicked.is_none(), "kicked: {:?}", c.kicked);
+        let unimpl = c.ui.host.unimplemented().unwrap();
+        eprintln!("Unimplemented: {unimpl:#?}");
+        assert_no_refusals(&c.ui.host);
+        c.disconnect();
+    }
+
+    /// A kick shows vanilla's disconnect screen with the reason.
+    #[test]
+    #[ignore = "needs cache/ and a test server (HASTE_TEST_SERVER, default 127.0.0.1:25614) where 'haste' is an operator; run with --test-threads=1"]
+    fn kick_shows_the_disconnect_screen() {
+        let mut c = TestClient::join();
+        c.spawn();
+        c.command("kick haste Bye from the test");
+        c.run(20);
+        assert!(c.kicked.is_some(), "not kicked");
+        assert_eq!(
+            c.ui.gui().screen_class().as_deref(),
+            Some("net.minecraft.client.gui.screens.DisconnectedScreen")
+        );
+        let t = texts(&c.frame((0.0, 0.0)));
+        assert!(t.iter().any(|x| x.contains("Bye from the test")), "{t:?}");
+        c.ui.gui().close_screen();
     }
 }

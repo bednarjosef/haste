@@ -534,6 +534,61 @@ impl GuiPipeline {
             .collect())
     }
 
+    /// The server's commands the local player may use (the root of the client-side command tree
+    /// built from the `commands` packet).
+    pub fn command_names(&self) -> anyhow::Result<Vec<String>> {
+        Ok(self
+            .call_string("commandNames")?
+            .lines()
+            .map(str::to_owned)
+            .collect())
+    }
+
+    #[doc(hidden)]
+    pub fn debug_suggestions(&self) -> anyhow::Result<String> {
+        Ok(self.call_string("debugSuggestions")?)
+    }
+
+    /// The value of a vanilla option by its accessor name (`"autoSuggestions"`, `"guiScale"`, ...)
+    /// as Java prints it.
+    pub fn option(&self, name: &str) -> anyhow::Result<String> {
+        let s = self.with_bridge(|env, bridge| {
+            let l = JString::from_str(env, name)?;
+            let v = env
+                .call_method(
+                    bridge,
+                    jni_str!("option"),
+                    jni_sig!("(Ljava/lang/String;)Ljava/lang/String;"),
+                    &[(&l).into()],
+                )?
+                .l()?;
+            // Safety: option returns a String.
+            let v = unsafe { JString::from_raw(env, v.into_raw()) };
+            v.try_to_string(env)
+        })?;
+        Ok(s)
+    }
+
+    /// Brigadier's completions of a command line (without "/") from the server's command tree, as
+    /// the chat screen computes them (server-side suggestions are not waited for).
+    pub fn completions(&self, line: &str) -> anyhow::Result<Vec<String>> {
+        let s = self.with_bridge(|env, bridge| {
+            let l = JString::from_str(env, line)?;
+            let v = env
+                .call_method(
+                    bridge,
+                    jni_str!("completions"),
+                    jni_sig!("(Ljava/lang/String;)Ljava/lang/String;"),
+                    &[(&l).into()],
+                )?
+                .l()?;
+            // Safety: completions returns a String.
+            let v = unsafe { JString::from_raw(env, v.into_raw()) };
+            v.try_to_string(env)
+        })?;
+        Ok(s.lines().map(str::to_owned).collect())
+    }
+
     /// Every registry Java sees with its size (built-in from vanilla's bootstrap, plus the
     /// synchronised ones after [`Self::finish_configuration`]).
     pub fn registry_sizes(&self) -> anyhow::Result<std::collections::BTreeMap<String, usize>> {

@@ -304,7 +304,7 @@ public final class Handlers {
 
     // ---- death ----
     public static void handlePlayerCombatKill(ClientPacketListener c, ClientboundPlayerCombatKillPacket p) {
-        if (p.playerId() != localEntityId) return;
+        if (p.playerId() != localEntityId || Mirror.flag(Mirror.F_IMMEDIATE_RESPAWN)) return;
         Proxies.gui.setScreen(new net.minecraft.client.gui.screens.DeathScreen(p.message(), Mirror.flag(Mirror.F_HARDCORE), Proxies.player));
     }
 }

@@ -81,6 +81,7 @@ pub const ALLOW_CLASSES: &[&str] = &[
     "net/minecraft/client/sounds/SoundEngine$PlayResult",
     "net/minecraft/client/renderer/texture/MissingTextureAtlasSprite",
     "net/minecraft/client/renderer/culling/Frustum",
+    "net/minecraft/client/renderer/Rect2i",
     "net/minecraft/client/renderer/fog/FogData",
     "net/minecraft/client/resources/model/sprite/Material",
     "net/minecraft/server/level/ClientInformation",

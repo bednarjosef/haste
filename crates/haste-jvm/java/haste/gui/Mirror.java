@@ -20,7 +20,7 @@ final class Mirror {
     static final int D_HEALTH = 0, D_SATURATION = 1, D_XP_PROGRESS = 2, D_FLY_SPEED = 3, D_WALK_SPEED = 4, D_X = 5,
         D_Y = 6, D_Z = 7, D_YAW = 8, D_PITCH = 9, D_GAME_TIME = 10, D_DAY_TIME = 11, DOUBLES = 12;
     static final int F_HARDCORE = 1, F_EYE_IN_WATER = 2, F_INVULNERABLE = 4, F_FLYING = 8, F_MAY_FLY = 16,
-        F_INSTABUILD = 32, F_IN_WORLD = 64;
+        F_INSTABUILD = 32, F_IN_WORLD = 64, F_IMMEDIATE_RESPAWN = 128;
 
     static final int[] I = new int[INTS];
     static final double[] D = new double[DOUBLES];

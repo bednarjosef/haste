@@ -1,6 +1,7 @@
 package haste.gui;
 
 import haste.rt.GuiBatch;
+import net.minecraft.client.Options;
 import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.client.gui.screens.PauseScreen;
 import net.minecraft.client.gui.screens.Screen;
@@ -87,6 +88,11 @@ public final class Bridge {
     public void tick() {
         Mirror.update();
         if (Mirror.inWorld()) {
+            // a dead player (killed, or joined while dead) sees the death screen
+            if (Mirror.health() <= 0f && !Mirror.flag(Mirror.F_IMMEDIATE_RESPAWN)
+                && !(ClientImpl.screen instanceof net.minecraft.client.gui.screens.DeathScreen)) {
+                Proxies.gui.setScreen(new net.minecraft.client.gui.screens.DeathScreen(null, Mirror.flag(Mirror.F_HARDCORE), Proxies.player));
+            }
             Proxies.hud.tick(false);
             Proxies.chatListener.tick();
             PlayerImpl.tickEffects();
@@ -230,6 +236,47 @@ public final class Bridge {
         } catch (ReflectiveOperationException e) {
             throw new IllegalStateException(e);
         }
+    }
+
+    /** Names of the server's commands the local player may use (the root of the command tree), one per line. */
+    public String commandNames() {
+        var src = ConnectionImpl.getSuggestionsProvider(Proxies.connection);
+        StringBuilder sb = new StringBuilder();
+        for (var n : Handlers.commands.getRoot().getChildren()) {
+            if (n.canUse(src)) sb.append(n.getName()).append('\n');
+        }
+        return sb.toString();
+    }
+
+    /** Debug: the open chat screen's suggestions: calls updateCommandInfo and showSuggestions directly. */
+    public String debugSuggestions() {
+        try {
+            Screen sc = ClientImpl.screen;
+            var f = java.lang.invoke.MethodHandles.privateLookupIn(ChatScreen.class, java.lang.invoke.MethodHandles.lookup())
+                .findVarHandle(ChatScreen.class, "commandSuggestions", net.minecraft.client.gui.components.CommandSuggestions.class);
+            var cs = (net.minecraft.client.gui.components.CommandSuggestions) f.get(sc);
+            cs.updateCommandInfo();
+            cs.showSuggestions(false);
+            return "visible=" + cs.isVisible();
+        } catch (Throwable t) {
+            return haste.rt.Errors.describe(t);
+        }
+    }
+
+    /** The value of a vanilla option by its accessor name (e.g. "autoSuggestions"), as a string (tests). */
+    public String option(String name) throws ReflectiveOperationException {
+        Object o = Options.class.getMethod(name).invoke(Proxies.options);
+        return String.valueOf(((net.minecraft.client.OptionInstance<?>) o).get());
+    }
+
+    /** Brigadier's completions of a command line (without "/") with the server's tree, one per line (tests). */
+    public String completions(String line) {
+        var src = ConnectionImpl.getSuggestionsProvider(Proxies.connection);
+        var parse = Handlers.commands.parse(line, src);
+        var s = Handlers.commands.getCompletionSuggestions(parse).join();
+        StringBuilder sb = new StringBuilder();
+        for (var x : s.getList()) sb.append(x.getText()).append('\n');
+        return sb.toString();
     }
 
     /** "registry=size" lines of every registry Java sees (tests). */
