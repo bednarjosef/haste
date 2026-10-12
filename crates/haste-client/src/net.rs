@@ -295,6 +295,9 @@ pub struct Session {
     pub dimension: DimensionInfo,
     /// Counters.
     pub counters: NetCounters,
+    /// Time of day in ticks from the first world clock of the last `set_time` (approximate:
+    /// which clock is the day clock is taken to be the first; not verified).
+    pub time_of_day: Option<i64>,
     sent_loaded: bool,
     last_input: Option<u8>,
 }
@@ -310,6 +313,7 @@ impl Session {
             },
             entity_id,
             dimension,
+            time_of_day: None,
             sent_loaded: false,
             last_input: None,
         }
@@ -461,6 +465,12 @@ impl Session {
                 self.player.food = h.food;
             }
             P::SetHeldSlot(s) => self.player.held_slot = s.slot,
+            P::SetTime(t) => {
+                tracing::debug!("set_time {t:?}");
+                if let Some(c) = t.clocks.first() {
+                    self.time_of_day = Some(c.time);
+                }
+            }
             P::GameEvent(g) if g.event == 3 => {
                 if let Some(m) = GameMode::from_id(g.value as i32) {
                     self.player.game_mode = m;

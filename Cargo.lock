@@ -1215,6 +1215,7 @@ dependencies = [
  "haste-render",
  "haste-setup",
  "haste-world",
+ "image",
  "parking_lot",
  "tokio",
  "tracing",

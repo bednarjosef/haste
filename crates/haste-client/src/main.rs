@@ -10,6 +10,8 @@
 //! The lead owns this file. Add a module by adding one line here and your own file.
 use clap::Parser;
 
+mod app;
+mod game;
 mod headless;
 mod net;
 
@@ -35,6 +37,28 @@ pub struct Args {
     /// Server list ping only: print the status JSON and exit.
     #[arg(long)]
     pub ping: bool,
+    /// Join, wait until the world is meshed, render one frame offscreen to this PNG and exit
+    /// (`--seconds` bounds the wait).
+    #[arg(long)]
+    pub screenshot: Option<std::path::PathBuf>,
+    /// Screenshot width in pixels.
+    #[arg(long, default_value_t = 960)]
+    pub width: u32,
+    /// Screenshot height in pixels.
+    #[arg(long, default_value_t = 540)]
+    pub height: u32,
+    /// Screenshot camera yaw in degrees (default: the server's spawn rotation).
+    #[arg(long, allow_hyphen_values = true)]
+    pub yaw: Option<f32>,
+    /// Screenshot camera pitch in degrees (default: the server's spawn rotation).
+    #[arg(long, allow_hyphen_values = true)]
+    pub pitch: Option<f32>,
+    /// Present with vsync (default off).
+    #[arg(long)]
+    pub vsync: bool,
+    /// Close the window after this many seconds (unattended runs).
+    #[arg(long)]
+    pub window_seconds: Option<u64>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -56,5 +80,8 @@ fn main() -> anyhow::Result<()> {
     if args.headless {
         return headless::run(&args);
     }
-    anyhow::bail!("windowed mode arrives with first frame milestone (see TASKS.md); use --headless for join milestone")
+    if let Some(file) = args.screenshot.clone() {
+        return app::screenshot(&args, &file);
+    }
+    app::run(&args)
 }
