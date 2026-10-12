@@ -482,12 +482,15 @@ impl App {
         }
         self.sample_input();
         let renderer = self.renderer.as_mut().expect("checked above");
+        let t0 = Instant::now();
         let (camera, sky, partial, vd) =
             frame_view(&self.shared, self.yaw, self.pitch, Instant::now());
         self.feed
             .feed(&self.shared, renderer, camera_section(&camera), vd);
+        let t1 = Instant::now();
         let entities = self.feed.entities(&self.shared, renderer, partial);
-        match renderer.render(&FrameInput {
+        let t2 = Instant::now();
+        let result = renderer.render(&FrameInput {
             camera,
             entities,
             gui: &self.gui,
@@ -496,9 +499,20 @@ impl App {
             // Filled from LocalPlayer::target / break_progress when interaction lands.
             block_target: None,
             breaking: &[],
-        }) {
+        });
+        let t3 = Instant::now();
+        self.fps.phases(
+            (t1 - t0).as_secs_f32() * 1e3,
+            (t2 - t1).as_secs_f32() * 1e3,
+            (t3 - t2).as_secs_f32() * 1e3,
+            renderer.timings(),
+        );
+        match result {
             Ok(stats) => {
                 if let Some(line) = self.fps.frame(&stats) {
+                    if let Some(b) = self.fps.breakdown(renderer) {
+                        tracing::info!("{b}");
+                    }
                     if let Some(w) = &self.window {
                         w.set_title(&format!("Haste - {line}"));
                     }
@@ -644,6 +658,12 @@ struct FpsCounter {
     frames: u32,
     worst_ms: f32,
     last: Instant,
+    /// Per-phase sums since the last breakdown: feed, entities, render, and the renderer's
+    /// own phases; logged every 2 s.
+    phase_sum: [f32; 3],
+    render_sum: haste_render::FrameTimings,
+    phase_frames: u32,
+    phase_since: Instant,
 }
 
 impl FpsCounter {
@@ -654,7 +674,61 @@ impl FpsCounter {
             frames: 0,
             worst_ms: 0.0,
             last: now,
+            phase_sum: [0.0; 3],
+            render_sum: Default::default(),
+            phase_frames: 0,
+            phase_since: now,
         }
+    }
+
+    fn phases(&mut self, feed: f32, entities: f32, render: f32, t: haste_render::FrameTimings) {
+        self.phase_sum[0] += feed;
+        self.phase_sum[1] += entities;
+        self.phase_sum[2] += render;
+        let s = &mut self.render_sum;
+        s.prepare_ms += t.prepare_ms;
+        s.acquire_ms += t.acquire_ms;
+        s.cull_ms += t.cull_ms;
+        s.encode_ms += t.encode_ms;
+        s.submit_ms += t.submit_ms;
+        s.present_ms += t.present_ms;
+        for i in 0..3 {
+            s.gpu_ms[i] += t.gpu_ms[i];
+        }
+        self.phase_frames += 1;
+    }
+
+    /// Average per-phase milliseconds over the last 2 s.
+    fn breakdown(&mut self, renderer: &Renderer) -> Option<String> {
+        if self.phase_since.elapsed() < Duration::from_secs(2) || self.phase_frames == 0 {
+            return None;
+        }
+        let n = self.phase_frames as f32;
+        let s = self.render_sum;
+        let size = renderer.size();
+        let line = format!(
+            "frame ms: feed {:.2} entities {:.2} render {:.2} (prepare {:.2} acquire {:.2} cull {:.2} encode {:.2} submit {:.2} present {:.2}) gpu main {:.2} hand {:.2} gui {:.2}; {}x{} {:?}",
+            self.phase_sum[0] / n,
+            self.phase_sum[1] / n,
+            self.phase_sum[2] / n,
+            s.prepare_ms / n,
+            s.acquire_ms / n,
+            s.cull_ms / n,
+            s.encode_ms / n,
+            s.submit_ms / n,
+            s.present_ms / n,
+            s.gpu_ms[0] / n,
+            s.gpu_ms[1] / n,
+            s.gpu_ms[2] / n,
+            size.0,
+            size.1,
+            renderer.present_mode(),
+        );
+        self.phase_sum = [0.0; 3];
+        self.render_sum = Default::default();
+        self.phase_frames = 0;
+        self.phase_since = Instant::now();
+        Some(line)
     }
 
     fn frame(&mut self, stats: &FrameStats) -> Option<String> {
