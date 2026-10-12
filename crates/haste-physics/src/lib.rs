@@ -68,25 +68,13 @@ pub struct TickResult {
     pub collided_horizontally: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum FluidKind {
-    Water,
-    Lava,
-}
+/// Block-dependent properties come through `haste_core::view::BlockPhysics` (implemented by
+/// haste-data's `GameData`); re-exported here for convenience.
+pub use haste_core::view::{BlockPhysics, FluidInfo, FluidKind};
 
-/// Fluid in a block state. `height` is the surface height inside the cell when nothing of the same
-/// fluid is above (wiki "Water": level/9 rule, source = 8/9); the tick raises it to 1.0 itself
-/// when the same fluid is directly above.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct FluidInfo {
-    pub kind: FluidKind,
-    pub height: f32,
-}
-
-/// Block-dependent movement properties. Stand-in for `GameData` (not available yet; see the
-/// interface request in NOTES.md). Defaults are vanilla's defaults from block_properties.json.
-pub trait BlockPhysics {
-    /// Slipperiness (block_properties.json `friction`).
+/// Every block behaves like stone (vanilla defaults: friction 0.6, factors 1.0); no fluids.
+pub struct DefaultBlockPhysics;
+impl BlockPhysics for DefaultBlockPhysics {
     fn friction(&self, _state: BlockStateId) -> f32 {
         0.6
     }
@@ -99,8 +87,13 @@ pub trait BlockPhysics {
     fn fluid(&self, _state: BlockStateId) -> Option<FluidInfo> {
         None
     }
+    fn light_emission(&self, _state: BlockStateId) -> u8 {
+        0
+    }
+    fn is_air(&self, state: BlockStateId) -> bool {
+        state == BlockStateId::AIR
+    }
+    fn is_opaque_full(&self, state: BlockStateId) -> bool {
+        state != BlockStateId::AIR
+    }
 }
-
-/// Every block behaves like stone; no fluids.
-pub struct DefaultBlockPhysics;
-impl BlockPhysics for DefaultBlockPhysics {}

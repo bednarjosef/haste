@@ -107,15 +107,14 @@ block speed factor -> gravity, vertical drag -> horizontal drag.
 - Sine table and the two degree-to-radian constants.
 - Trace input alignment (does `ticks[i].input` produce `ticks[i].pos`?): `replay::InputAlignment`.
 
-## Interface notes (requested from the lead, see report)
+## Interface notes (settled by the lead)
 
-- `tick` takes `blocks: &dyn BlockPhysics` instead of `data: &GameData` (GameData does not exist
-  yet). `BlockPhysics` (friction, speed_factor, jump_factor, fluid) is defined in this crate;
-  `oracle::OracleBlocks` implements it from the oracle dumps meanwhile.
+- `tick` takes `blocks: &dyn haste_core::view::BlockPhysics` (friction, speed_factor,
+  jump_factor, fluid, light_emission, is_air, is_opaque_full); haste-data implements it for
+  `GameData`. `oracle::OracleBlocks` and `testing::TestShapes` implement it for tests meanwhile.
 - `collide` is the pure sweep; step-up is `collide_with_step(aabb, movement, step_height,
-  on_ground, world, shapes)`.
-- `PlayerState`/`PlayerAttributes` gained fields (pose, in_lava, swimming, jump_cooldown,
-  collision flags; sneaking_speed, flying_speed, crouching/swimming heights).
+  on_ground, world, shapes)` (in INTERFACES.md).
+- Extra `PlayerState`/`PlayerAttributes` fields accepted.
 
 ## Performance
 
