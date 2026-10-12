@@ -2,6 +2,10 @@
 
 Newest at the top. One entry per decision, with the why; link the brief or report it came from.
 
+- **2026-10-12 Team mix.** Eight GLM workers on two API keys caused HTTP 429 storms and one gate
+  stall (restart fixed it). Protocol (WS1), physics (WS5) and the JVM host (WS6), the precision- and
+  judgement-heavy streams, moved to Claude Opus subagents (medium effort) in the same worktrees;
+  GLM keeps world/data, entities, renderer assets, setup and oracles (five concurrent).
 - **2026-10-12 Renderer: wgpu, with Pomme's azalea-free pieces.** Pomme's renderer is raw Vulkan
   (pyronyx + shaderc GLSL), ~41k lines, and its net/physics/light are either azalea-bound or
   self-declared vanilla ports. We keep wgpu and reuse Pomme's asset index, block model baking,
