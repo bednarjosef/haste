@@ -195,6 +195,8 @@ pub struct GuiRenderer {
     batches: Vec<Batch>,
     entity_scratch: Vec<crate::entity::EntityVertex>,
     rng: u32,
+    /// The target is sRGB (no non-sRGB view available): the shader outputs linear colour.
+    linear_output: bool,
     pub stats: GuiStats,
 }
 
@@ -293,7 +295,7 @@ impl GuiRenderer {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -398,6 +400,7 @@ impl GuiRenderer {
             batches: Vec::new(),
             entity_scratch: Vec::new(),
             rng: 0x9E37_79B9,
+            linear_output: target_format.is_srgb(),
             stats: GuiStats::default(),
         };
         // The missing texture is entry 0 so lookups can always fall back to it.
@@ -567,7 +570,7 @@ impl GuiRenderer {
         let scale = frame.scale.max(1) as f32;
         let uniforms = GuiUniforms {
             size: [target.0 as f32 / scale, target.1 as f32 / scale],
-            _pad: [0.0; 2],
+            _pad: [if self.linear_output { 1.0 } else { 0.0 }, 0.0],
         };
         self.queue
             .write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));

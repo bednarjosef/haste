@@ -4,6 +4,7 @@
 //!
 //! Mesher/vertex packing derived from Pomme (GPL-3.0); see THIRD_PARTY.md.
 
+pub mod arena;
 pub mod entity;
 pub mod gui;
 pub mod mesher;

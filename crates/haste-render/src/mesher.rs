@@ -25,6 +25,8 @@ pub struct SectionMesh {
     pub layers: Vec<(RenderLayer, Vec<u32>)>,
     /// Section-local AABB (min/max in blocks) for frustum culling.
     pub aabb: ([f32; 3], [f32; 3]),
+    /// Face-to-face sightlines through the section (cave culling).
+    pub visibility: crate::occlusion::VisibilitySet,
 }
 
 /// Tint sources resolved at mesh time (palette written into the shader's
@@ -316,6 +318,7 @@ pub fn mesh_section(
             .collect(),
         layers,
         aabb: (sink.min, sink.max),
+        visibility: crate::occlusion::section_visibility(snapshot, baked, pos),
     }
 }
 

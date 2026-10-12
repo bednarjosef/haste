@@ -157,11 +157,18 @@ fn measure(
         block_target: None,
         breaking: &[],
     };
-    // Mesh everything (drain uploads frame by frame).
+    // Mesh everything (drain uploads frame by frame) until the resident section count has not
+    // changed for a second.
+    let mut last_total = 0;
+    let mut stable_since = Instant::now();
     loop {
         renderer.update_world(world, &[], camera_chunk, view_distance);
         let s = renderer.render(&frame(0.0))?;
-        if s.meshes_pending == 0 && t_mesh.elapsed() > Duration::from_millis(500) {
+        if s.chunk_sections_total != last_total || s.meshes_pending > 0 {
+            last_total = s.chunk_sections_total;
+            stable_since = Instant::now();
+        }
+        if stable_since.elapsed() > Duration::from_secs(1) {
             println!(
                 "meshed {} dirty sections -> {} section meshes in {:.2} s",
                 dirty.len(),
