@@ -1,10 +1,10 @@
 //! Launching the vanilla 26.3 client (needed by WS8's recorder and benchmarks) and optionally
 //! with Fabric Loader, everything under `cache/`, never the user's `.minecraft`.
 
+use crate::download::DownloadSpec;
 use crate::mojang::VersionInfo;
 use anyhow::{anyhow, Context};
 use haste_core::paths;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -290,6 +290,7 @@ async fn install_fabric(_v: &VersionInfo, game_dir: &Path) -> anyhow::Result<Fab
 
     let libs_dir = crate::install::libraries_dir();
     let mut specs = Vec::new();
+    let mut libraries = Vec::new();
     if let Some(libs) = profile["libraries"].as_array() {
         for lib in libs {
             let name = lib["name"].as_str().context("fabric library without name")?;
@@ -297,45 +298,20 @@ async fn install_fabric(_v: &VersionInfo, game_dir: &Path) -> anyhow::Result<Fab
             let path = crate::mojang::maven_path(name)
                 .ok_or_else(|| anyhow!("unparseable fabric library name {name}"))?;
             let dest = libs_dir.join(&path);
-            if dest.exists() {
-                continue;
+            // the profile carries sha1 for all libraries except fabric-loader itself
+            let sha1 = lib["sha1"].as_str().unwrap_or("").to_string();
+            if !dest.exists() {
+                // '+' is legal in Maven artifact names but must be percent-encoded in URLs
+                let dl = format!("{url}{}", path.replace('+', "%2B"));
+                specs.push(DownloadSpec { url: dl, sha1, size: 0, dest: dest.clone() });
             }
-            let dl = format!("{url}{}", path.replace('+', "%2B"));
-            specs.push((dl, dest, name.to_string()));
+            libraries.push(dest);
         }
     }
     if !specs.is_empty() {
-        use crate::download::DownloadSpec;
-        // Fabric's maven has no sha1 in the profile; download and keep whatever arrives
-        let mut dl_specs = Vec::new();
-        for (url, dest, name) in specs {
-            dl_specs.push(DownloadSpec { url, sha1: String::new(), size: 0, dest: dest.clone() });
-            let _ = name;
-        }
-        // sha1 "" would fail verification; download_many requires sha1s, so fetch them raw
-        for spec in dl_specs {
-            let resp = client.get(&spec.url).send().await.with_context(|| format!("GET {}", spec.url))?;
-            anyhow::ensure!(resp.status().is_success(), "GET {} returned {}", spec.url, resp.status());
-            let bytes = resp.bytes().await?;
-            if let Some(parent) = spec.dest.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-            tokio::fs::write(&spec.dest, &bytes).await?;
-        }
+        crate::download::download_many(specs, |_| {}).await?;
     }
 
-    let mut libraries = Vec::new();
-    if let Some(libs) = profile["libraries"].as_array() {
-        for lib in libs {
-            let name = lib["name"].as_str().context("fabric library without name")?;
-            if let Some(path) = crate::mojang::maven_path(name) {
-                let p = libs_dir.join(&path);
-                if p.is_file() {
-                    libraries.push(p);
-                }
-            }
-        }
-    }
     let mut fabric_jvm = vec!["-Dfabric.development=false".to_string()];
     if let Some(args) = profile["arguments"]["jvm"].as_array() {
         for a in args {
@@ -346,9 +322,6 @@ async fn install_fabric(_v: &VersionInfo, game_dir: &Path) -> anyhow::Result<Fab
     }
     Ok(FabricInstall { libraries, jvm_args: fabric_jvm })
 }
-
-#[allow(dead_code)]
-fn _unused(_: &BTreeMap<String, String>) {}
 
 #[cfg(test)]
 mod tests {
@@ -384,5 +357,74 @@ mod tests {
         assert!(joined.contains("--username Steve"));
         assert!(joined.contains("--assetIndex 34"));
         assert!(joined.contains("--gameDir /tmp/g"));
+    }
+
+    /// Launches the real vanilla client against the cache. On a headless box it dies at window
+    /// creation (GLFW), which still proves the JVM, classpath, natives and game args are right.
+    /// Run with `cargo test -p haste-setup -- --ignored`.
+    #[tokio::test]
+    #[ignore = "needs the full cache (jars+assets+libraries+jdk); opens/tries to open a window"]
+    async fn launches_vanilla_client_headless() {
+        if crate::install::resolve_cached_java().is_none() {
+            eprintln!("skipping: no cache/jdk");
+            return;
+        }
+        let mut client = launch_vanilla(LaunchOptions {
+            username: "HasteTest".into(),
+            ..Default::default()
+        })
+        .await
+        .expect("launch");
+        // give it time to get past class loading
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        let status = client.child.try_wait().expect("child is ours");
+        let log = std::fs::read_to_string(&client.log_path).unwrap_or_default();
+        eprintln!("--- client.log (first 2000 chars) ---\n{}", &log[..log.len().min(2000)]);
+        match status {
+            None => {
+                // still running (window may have opened on this box); kill it
+                let _ = client.child.kill();
+                // running this far means Main loaded fine
+            }
+            Some(code) => {
+                // must NOT be a classpath/JVM failure (those exit with code 1 and a stack trace
+                // about ClassNotFound / module issues); GLFW/display failures are acceptable.
+                let bad = log.contains("ClassNotFoundException")
+                    || log.contains("NoClassDefFoundError")
+                    || log.contains("Error occurred during initialization of VM");
+                assert!(!bad, "client failed to boot the JVM/classpath (exit {code}): {log}");
+            }
+        }
+    }
+
+    /// Installs Fabric Loader (meta.fabricmc.net profile for 26.3) and launches KnotClient.
+    /// Verifies the loader downloads (percent-encoded '+' URLs) and starts.
+    /// Run with `cargo test -p haste-setup -- --ignored`.
+    #[tokio::test]
+    #[ignore = "network (fabric meta + maven) + the full cache; opens/tries to open a window"]
+    async fn launches_fabric_client() {
+        if crate::install::resolve_cached_java().is_none() {
+            eprintln!("skipping: no cache/jdk");
+            return;
+        }
+        let mut client = launch_vanilla(LaunchOptions {
+            username: "HasteTest".into(),
+            fabric: true,
+            ..Default::default()
+        })
+        .await
+        .expect("launch");
+        tokio::time::sleep(std::time::Duration::from_secs(25)).await;
+        let status = client.child.try_wait().expect("child is ours");
+        let log = std::fs::read_to_string(&client.log_path).unwrap_or_default();
+        eprintln!("--- fabric client.log (first 2000 chars) ---\n{}", &log[..log.len().min(2000)]);
+        let bad = log.contains("ClassNotFoundException")
+            || log.contains("NoClassDefFoundError")
+            || log.contains("Error occurred during initialization of VM")
+            || log.contains("failed to download");
+        if status.is_none() {
+            let _ = client.child.kill();
+        }
+        assert!(!bad, "fabric client failed to boot (status {status:?}): {log}");
     }
 }

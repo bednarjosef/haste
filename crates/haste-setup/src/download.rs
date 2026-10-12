@@ -121,6 +121,22 @@ pub async fn download(
     }
     let resp = req.send().await.with_context(|| format!("GET {}", spec.url))?;
     let resumed = range_from > 0 && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+    if resp.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+        // Our part file is already at least as long as the resource: either it is complete
+        // (verify and rename below) or corrupt (truncate and retry once from scratch).
+        drop(file);
+        let data = tokio::fs::read(&part).await?;
+        let digest = hex::encode(Sha1::digest(&data));
+        if digest == spec.sha1.to_ascii_lowercase() {
+            tokio::fs::rename(&part, &spec.dest).await?;
+            if let Some(p) = progress {
+                p.file_finished();
+            }
+            return Ok(DownloadOutcome::Downloaded);
+        }
+        tokio::fs::write(&part, b"").await?;
+        return Box::pin(download(client, spec, progress)).await;
+    }
     if range_from > 0 && !resumed {
         // Server ignored the range; restart into the same part file.
         file = tokio::fs::File::create(&part).await?;
@@ -143,16 +159,19 @@ pub async fn download(
     file.flush().await?;
     drop(file);
 
-    let got = tokio::fs::read(&part).await?;
-    let digest = hex::encode(Sha1::digest(&got));
-    anyhow::ensure!(
-        digest == spec.sha1.to_ascii_lowercase(),
-        "sha1 mismatch for {}: expected {}, got {} (url {})",
-        spec.dest.display(),
-        spec.sha1,
-        digest,
-        spec.url
-    );
+    // An empty sha1 means "unverifiable" (some maven repos give no checksum); accept as-is.
+    if !spec.sha1.is_empty() {
+        let got = tokio::fs::read(&part).await?;
+        let digest = hex::encode(Sha1::digest(&got));
+        anyhow::ensure!(
+            digest == spec.sha1.to_ascii_lowercase(),
+            "sha1 mismatch for {}: expected {}, got {} (url {})",
+            spec.dest.display(),
+            spec.sha1,
+            digest,
+            spec.url
+        );
+    }
     tokio::fs::rename(&part, &spec.dest)
         .await
         .with_context(|| format!("renaming {} -> {}", part.display(), spec.dest.display()))?;
