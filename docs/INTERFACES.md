@@ -31,6 +31,7 @@ impl Registries {
 }
 pub struct BlockShapes { .. }
 impl haste_core::view::CollisionShapes for BlockShapes { .. }
+impl haste_core::view::BlockPhysics for GameData { .. }      // friction/speed/jump from block_properties.json; fluid/light/air/opaque from block_shapes.json
 impl BlockShapes { pub fn is_oracle_backed(&self) -> bool; }
 ```
 Fallback shapes (no oracle file): full cube for every state except air/cave_air/void_air, fluids,
@@ -132,7 +133,7 @@ Meshing runs on a thread pool from `SectionSnapshot`s; the render thread never b
 ```rust
 pub struct EntityStore { .. }
 impl EntityStore {
-    pub fn new(data: Arc<GameData>) -> EntityStore;
+    pub fn new(data: Arc<GameData>) -> EntityStore;   // interim on the branch: new(dims: EntityDimensions) until haste-data lands
     pub fn spawn(&mut self, s: &haste_core::entity::EntitySpawn);
     pub fn remove(&mut self, ids: &[EntityId]);
     pub fn move_delta(&mut self, id: EntityId, delta: DVec3, on_ground: bool);           // short deltas /4096
@@ -157,9 +158,13 @@ Models (`haste_core::model::CubeModel`) are defined in this crate as data (playe
 ```rust
 pub struct PlayerState { pub pos: DVec3, pub velocity: DVec3, pub yaw: f32, pub pitch: f32, pub on_ground: bool, pub sprinting: bool, pub sneaking: bool, pub in_water: bool, pub flying: bool, pub fall_distance: f32, .. }
 pub struct PlayerAttributes { pub movement_speed: f64 /* 0.1 */, pub jump_strength: f64, pub gravity: f64, pub step_height: f64, pub width: f32, pub height: f32 /* standing/sneaking/swimming via pose */ }
-pub fn tick(state: &mut PlayerState, input: &InputState, attrs: &PlayerAttributes, world: &dyn BlockView, shapes: &dyn CollisionShapes, data: &GameData) -> TickResult;
+pub fn tick(state: &mut PlayerState, input: &InputState, attrs: &PlayerAttributes, world: &dyn BlockView, shapes: &dyn CollisionShapes, blocks: &dyn haste_core::view::BlockPhysics) -> TickResult;
 pub struct TickResult { pub moved: bool, pub rotated: bool, pub on_ground_changed: bool, pub collided_horizontally: bool }
-pub fn collide(aabb: Aabb, movement: DVec3, world: &dyn BlockView, shapes: &dyn CollisionShapes) -> DVec3;   // pure, tested in isolation
+pub fn collide(aabb: Aabb, movement: DVec3, world: &dyn BlockView, shapes: &dyn CollisionShapes) -> DVec3;   // pure axis sweep, tested in isolation
+pub fn collide_with_step(aabb: Aabb, movement: DVec3, step_height: f64, on_ground: bool, world: &dyn BlockView, shapes: &dyn CollisionShapes) -> DVec3;
+// PlayerState also carries: in_lava, swimming, pose: Pose, jump_cooldown: u8, horizontal_collision, vertical_collision.
+// PlayerAttributes also carries: sneaking_speed, flying_speed: f32, crouching_height, swimming_height.
+// `haste_data::GameData` implements `BlockPhysics` (from block_properties.json + block_shapes.json).
 ```
 Validated tick by tick against traces in `cache/oracle/26.3/traces/*.json` (format in haste-testkit).
 

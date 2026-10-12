@@ -2,6 +2,12 @@
 
 Newest at the top. One entry per decision, with the why; link the brief or report it came from.
 
+- **2026-10-12 Physics sources.** haste-physics is built from minecraft.wiki plus mcpk.wiki (the
+  parkour community's observed formulas; only numbers and prose were used, not the decompiled
+  snippets that site also quotes). Every constant is tabled in `crates/haste-physics/NOTES.md`
+  with its source; water/lava gravity, swim up/down and flight vertical speed are marked
+  UNVERIFIED until the recorder traces exist. Pumpkin's entity movement was not reused (it is
+  organised after yarn-named vanilla methods). Full tick ~1.2 µs, collide ~450 ns.
 - **2026-10-12 Team mix.** Eight GLM workers on two API keys caused HTTP 429 storms and one gate
   stall (restart fixed it). Protocol (WS1), physics (WS5) and the JVM host (WS6), the precision- and
   judgement-heavy streams, moved to Claude Opus subagents (medium effort) in the same worktrees;

@@ -9,11 +9,11 @@ One line per task; details live in `docs/briefs/<ws>.md` and in the branch.
 | L-1 | lead | Evaluate Pomme and Pumpkin for reuse (workers pomme-eval, pumpkin-eval) | - | done |
 | WS2-1 | WS2 | haste-data: GameData from reports, BlockShapes (oracle or fallback) | M1 | in progress |
 | WS2-2 | WS2 | haste-world: paletted containers, chunk decode, light, dirty tracking, snapshots | M1/M2 | claimed |
-| WS4-1 | WS4 | haste-entity: tracking + interpolation | M1 | in progress |
-| WS4-2 | WS4 | entity models as data + animation | M4 | claimed |
-| WS5-1 | WS5 (Opus) | physics: collision sweep, tested | M3 | in progress |
-| WS5-2 | WS5 | physics: movement tick from public docs | M3 | claimed |
-| WS5-3 | WS5 | trace replay against oracle traces | M3 | claimed |
+| WS4-1 | WS4 | haste-entity: tracking + interpolation | M1 | done |
+| WS4-2 | WS4 | entity models as data + animation | M4 | in progress |
+| WS5-1 | WS5 (Opus) | physics: collision sweep, tested | M3 | done |
+| WS5-2 | WS5 (Opus) | physics: movement tick from public docs | M3 | done (awaiting traces) |
+| WS5-3 | WS5 (Opus) | trace replay harness | M3 | done; replay runs when traces exist |
 | WS6-1 | WS6 (Opus) | JVM host + tier-3 allow-listed loader | M5 | in progress |
 | WS6-2 | WS6 | proxies + GuiPipeline + Pause/Chat/Inventory screens | M5 | claimed |
 | WS7-1 | WS7 | ensure_installed: Mojang downloads, JDK, datagen | M1 | in progress |
