@@ -323,7 +323,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("saving {}", file.display()))?;
     let c = last_camera;
     println!(
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, sections {} drawn of {}, {} draw calls",
+        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls",
         file.display(),
         image.width(),
         image.height(),
@@ -332,6 +332,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         c.pos.z,
         c.yaw,
         c.pitch,
+        shared.view.lock().time_of_day % 24000,
         stats.chunk_sections_drawn,
         stats.chunk_sections_total,
         stats.draw_calls
