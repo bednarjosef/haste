@@ -1,6 +1,7 @@
 //! User config: TOML in the platform config dir, marked 0600 (it will hold MSA tokens;
 //! encrypting them at rest is out of scope).
 
+use crate::options::Options;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -39,6 +40,8 @@ pub struct Config {
     pub last_server: Option<String>,
     #[serde(default)]
     pub msa: Option<MsaTokens>,
+    #[serde(default)]
+    pub options: Options,
 }
 
 impl Default for Config {
@@ -50,6 +53,7 @@ impl Default for Config {
             fov: 70.0,
             last_server: None,
             msa: None,
+            options: Options::default(),
         }
     }
 }
@@ -72,7 +76,10 @@ impl Config {
         }
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+        let mut cfg: Config =
+            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        cfg.options = std::mem::take(&mut cfg.options).sanitized();
+        Ok(cfg)
     }
 
     /// Writes the config back, 0600.
@@ -118,6 +125,7 @@ mod tests {
                     name: "Josef".into(),
                 }),
             }),
+            ..Config::default()
         };
         let text = toml::to_string_pretty(&cfg).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
