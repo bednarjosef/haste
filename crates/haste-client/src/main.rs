@@ -6,6 +6,7 @@
 //! - `ui`      (jvm-host): HUD + tier-3 screens through the batched GUI pipeline.
 //! - `launch`  (setup): CLI args, config, setup checks, singleplayer server lifecycle.
 //! - `headless`: join milestone mode, no window: joins, tracks world/entities, prints stats.
+//! - `sound`  (sound): packets and music into `haste-audio`'s output, 20 Hz on the game thread.
 //!
 //! The lead owns this file. Add a module by adding one line here and your own file.
 use clap::Parser;
@@ -17,6 +18,7 @@ mod launch;
 mod net;
 mod player;
 mod screenshots;
+mod sound;
 mod ui;
 
 #[derive(Parser, Debug)]
