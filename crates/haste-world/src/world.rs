@@ -1,6 +1,5 @@
 //! The world: chunk map, block get/set, light, dirty tracking, section snapshots.
 
-use std::cell::UnsafeCell;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -18,10 +17,6 @@ pub struct World {
     dim: DimensionInfo,
     data: Arc<GameData>,
     chunks: ahash::HashMap<i64, Chunk>,
-    /// Memo of the last chunk hit by a BlockView call: hot loops (physics, meshing, light
-    /// scans) touch the same chunk many times in a row, so the map lookup is skipped.
-    /// Interior mutability through `UnsafeCell` because `BlockView` takes `&self`.
-    last_chunk: UnsafeCell<Option<(i64, *const Chunk)>>,
     /// Sections needing remesh (set_block and light updates mark them).
     dirty: Vec<SectionPos>,
     dirty_dedup: HashSet<SectionPos>,
@@ -30,11 +25,6 @@ pub struct World {
     /// Bits for direct-encoded biome containers: ceil(log2(synced biome registry size)).
     biome_bits: u8,
 }
-
-// SAFETY: the memo's raw pointer always targets a chunk that is currently in `chunks`; it is
-// invalidated on insert/remove. `Chunk` itself is only read through the shared reference.
-unsafe impl Send for World {}
-unsafe impl Sync for World {}
 
 impl World {
     /// A world whose direct biome containers are 3 bits wide (the old default, right only
@@ -58,7 +48,6 @@ impl World {
             dim,
             data,
             chunks: ahash::HashMap::with_hasher(ahash::RandomState::default()),
-            last_chunk: UnsafeCell::new(None),
             dirty: Vec::new(),
             dirty_dedup: HashSet::new(),
             direct_bits,
@@ -81,7 +70,6 @@ impl World {
 
     /// Loads (or replaces) a chunk from `level_chunk_with_light` payload.
     pub fn load_chunk(&mut self, data: &ChunkData) -> Result<(), WorldError> {
-        self.invalidate_memo();
         let section_count = self.dim.section_count();
         let chunk = Chunk::decode(
             data,
@@ -118,7 +106,6 @@ impl World {
     }
 
     pub fn unload_chunk(&mut self, pos: ChunkPos) {
-        self.invalidate_memo();
         self.chunks.remove(&pos.to_packed());
         // neighbour borders now face void: remesh them (diagonal chunks included:
         // their corner columns sampled the removed chunk)
@@ -331,27 +318,10 @@ impl World {
 
     // -- BlockView helpers --
 
-    /// The chunk containing `pos`, using the memo when it hits. Unloaded -> None.
+    /// The chunk containing `pos`. Unloaded -> None.
     #[inline]
     fn chunk_of(&self, pos: BlockPos) -> Option<&Chunk> {
-        let key = pos.chunk().to_packed();
-        // SAFETY: no &mut World aliasing exists during a &self call; the pointer stored in
-        // the memo is invalidated on chunk insert/remove, so it is never dangling here.
-        // SAFETY: see `chunk_of` doc comment.
-        let memo = unsafe { &*self.last_chunk.get() };
-        if let Some((k, p)) = *memo {
-            if k == key {
-                return Some(unsafe { &*p });
-            }
-        }
-        let chunk = self.chunks.get(&key)?;
-        // SAFETY: same invariant; single-threaded write through the UnsafeCell.
-        *unsafe { &mut *self.last_chunk.get() } = Some((key, chunk as *const Chunk));
-        Some(chunk)
-    }
-
-    fn invalidate_memo(&mut self) {
-        *self.last_chunk.get_mut() = None;
+        self.chunks.get(&pos.chunk().to_packed())
     }
 
     fn chunk_and_section(&self, pos: BlockPos) -> Option<(&Chunk, &Section)> {
