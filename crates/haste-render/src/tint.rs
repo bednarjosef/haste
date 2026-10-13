@@ -605,9 +605,6 @@ mod tests {
         fn len(&self) -> usize {
             self.states.len()
         }
-        fn placeholder_state(&self) -> BlockStateId {
-            BlockStateId(0)
-        }
         fn block_of(&self, state: BlockStateId) -> &Identifier {
             &self.states[state.0 as usize].0
         }
