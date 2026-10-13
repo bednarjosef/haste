@@ -9,7 +9,7 @@ with the mod architecture designed in. Licensed GPL-3.0-or-later.
 What a player needs to play Haste like the original game, without noticing a difference.
 Fabric mod support (Phase 2) is not counted here.
 
-**14 of 62 done, 26 partly done, 22 not started (about 44 %, counting partly done as half).**
+**15 of 62 done, 25 partly done, 22 not started (about 44 %, counting partly done as half).**
 
 ✅ done: works in the game window today, checked against a real server.
 🟡 partly done: some of it exists (in a library, or working without a window) but a player cannot use it fully yet.
@@ -48,7 +48,7 @@ Fabric mod support (Phase 2) is not counted here.
 - ✅ First-person hand and held item
 - ✅ Block selection outline and break cracks
 - ✅ Fullscreen (F11)
-- 🟡 Animated textures (water, lava, fire, portals): all frames load; they do not animate on screen yet
+- ✅ Animated textures (water, lava, fire, portals), prepared off the render thread
 - 🟡 Smooth lighting and ambient occlusion: present, but leaves, bark and grass sides are about 1.35x brighter than vanilla
 - 🟡 Fog: distance fog, not matched to vanilla
 - 🟡 Mobs and players: drawn as cube models with default skins and name tags, not vanilla's models
