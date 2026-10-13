@@ -5,7 +5,6 @@ use std::collections::HashMap;
 
 use super::*;
 use haste_protocol::nbt::{Nbt, NbtCompound};
-use haste_protocol::packets::configuration::clientbound::RegistryEntry;
 use haste_protocol::packets::play::clientbound::{MoveDeltas, SpawnInfo};
 use haste_protocol::wire::particle::Particle;
 
@@ -128,10 +127,24 @@ struct Rig {
     out: Vec<ServerboundPlay>,
 }
 
+/// The static particle registry the test sessions resolve ids against (id 0 `flame`, 1
+/// `smoke`).
+fn test_particle_names() -> std::sync::Arc<Vec<Identifier>> {
+    std::sync::Arc::new(vec![
+        Identifier::minecraft("flame"),
+        Identifier::minecraft("smoke"),
+    ])
+}
+
 impl Rig {
     fn new() -> Self {
         Self {
-            session: Session::new(EntityId(7), GameMode::Creative, DimensionInfo::overworld()),
+            session: Session::new(
+                EntityId(7),
+                GameMode::Creative,
+                DimensionInfo::overworld(),
+                test_particle_names(),
+            ),
             world: FakeWorld::default(),
             entities: FakeEntities::default(),
             regs: SyncedRegistries::default(),
@@ -413,7 +426,7 @@ fn real_world_through_the_sink() {
         dim.section_count(),
         |s, _, _, _| if s < 2 { stone } else { BlockStateId::AIR },
     );
-    let mut s = Session::new(EntityId(1), GameMode::Creative, dim);
+    let mut s = Session::new(EntityId(1), GameMode::Creative, dim, test_particle_names());
     let mut ents = new_entity_store(0);
     let mut out = Vec::new();
     s.apply(
@@ -541,25 +554,6 @@ fn end_tick_once(r: &mut Rig) {
     r.entities = entities;
 }
 
-/// A synced `minecraft:particle_type` registry (id 0 `flame`, 1 `smoke`).
-fn particle_registry() -> SyncedRegistries {
-    let mut regs = SyncedRegistries::default();
-    regs.insert(
-        Identifier::minecraft("particle_type"),
-        vec![
-            RegistryEntry {
-                id: Identifier::minecraft("flame"),
-                data: None,
-            },
-            RegistryEntry {
-                id: Identifier::minecraft("smoke"),
-                data: None,
-            },
-        ],
-    );
-    regs
-}
-
 /// A `level_particles` packet (flame by default).
 fn level_particles(kind: i32, count: i32) -> ClientboundPlay {
     ClientboundPlay::LevelParticles(cb::LevelParticles {
@@ -584,7 +578,7 @@ fn level_particles(kind: i32, count: i32) -> ClientboundPlay {
 #[test]
 fn level_particles_queue_a_spawn_per_packet() {
     let mut r = Rig::new();
-    r.regs = particle_registry();
+    // The ids come from the session's static particle registry (flame 0, smoke 1).
     r.apply(level_particles(0, 10));
     r.apply(level_particles(1, 0));
     assert_eq!(r.session.particle_spawns.len(), 2);
@@ -604,12 +598,7 @@ fn level_particles_queue_a_spawn_per_packet() {
 #[test]
 fn level_particles_with_an_unknown_type_id_are_dropped() {
     let mut r = Rig::new();
-    r.regs = particle_registry();
-    // No id 7 in the synced registry: dropped silently (no panic, nothing queued).
+    // No id 7 in the static registry: dropped silently (no panic, nothing queued).
     r.apply(level_particles(7, 10));
     assert_eq!(r.session.particle_spawns.len(), 0);
-    // Without a synced particle registry at all: same.
-    let mut r2 = Rig::new();
-    r2.apply(level_particles(0, 10));
-    assert_eq!(r2.session.particle_spawns.len(), 0);
 }

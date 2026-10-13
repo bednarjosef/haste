@@ -286,6 +286,8 @@ pub struct ParticleRenderer {
     vertex_buffer: wgpu::Buffer,
     capacity: usize,
     vertices: Vec<EntityVertex>,
+    /// Frames since the last debug log of the drawn count.
+    log_clock: u32,
     pub drawn: u32,
 }
 
@@ -365,6 +367,7 @@ impl ParticleRenderer {
             vertex_buffer,
             capacity,
             vertices: Vec::new(),
+            log_clock: 0,
             drawn: 0,
         }
     }
@@ -430,6 +433,9 @@ impl ParticleRenderer {
     ) {
         self.vertices.clear();
         self.drawn = 0;
+        // Debug visibility: how many particles the frame poses (once a second).
+        self.log_clock += 1;
+        let log = self.log_clock.is_multiple_of(60);
         let types = particles.types.clone();
         let Some(types) = types.as_deref() else {
             return;
@@ -482,6 +488,14 @@ impl ParticleRenderer {
                 });
             }
             self.drawn += 1;
+        }
+        if log && (self.drawn > 0 || particles.alive() > 0) {
+            tracing::debug!(
+                "particles: {} drawn of {} alive, {} vertices",
+                self.drawn,
+                particles.alive(),
+                self.vertices.len()
+            );
         }
         if self.vertices.len() > self.capacity {
             self.capacity = self.vertices.len().next_power_of_two();

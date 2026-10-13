@@ -883,6 +883,11 @@ impl Renderer {
         self.gui.stats
     }
 
+    /// Particles posed in the last frame (debug: also logged once a second at debug level).
+    pub fn particles_drawn(&self) -> u32 {
+        self.particles.drawn
+    }
+
     fn make_origin_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("section-origins"),

@@ -304,11 +304,21 @@ pub struct Session {
     pub particle_spawns: Vec<haste_render::ParticleSpawn>,
     /// Particle spawns the game thread took over the whole session (counters).
     pub particle_spawned: usize,
+    /// `minecraft:particle_type` names by protocol id (the static registry the packet's
+    /// numeric ids index; the synced registry is not authoritative for it).
+    particle_names: std::sync::Arc<Vec<Identifier>>,
 }
 
 impl Session {
     /// Fresh state after `Connection::connect` (from the `Login` it returned).
-    pub fn new(entity_id: EntityId, game_mode: GameMode, dimension: DimensionInfo) -> Self {
+    /// `particle_names` is the static `minecraft:particle_type` registry by protocol id
+    /// (the connection's `ProtocolTables`).
+    pub fn new(
+        entity_id: EntityId,
+        game_mode: GameMode,
+        dimension: DimensionInfo,
+        particle_names: std::sync::Arc<Vec<Identifier>>,
+    ) -> Self {
         Self {
             player: LocalPlayer::with_entity(entity_id, game_mode),
             counters: NetCounters {
@@ -326,6 +336,7 @@ impl Session {
             hurt_tilt_dir: 0.0,
             particle_spawns: Vec::new(),
             particle_spawned: 0,
+            particle_names,
         }
     }
 
@@ -619,17 +630,19 @@ impl Session {
         out.extend(self.player.break_progress());
     }
 
-    /// `level_particles`: resolve the particle type against the synced registry and queue
-    /// the spawn (see the renderer's particles module for the semantics; unknown types are
-    /// skipped there, logged once). The type-specific `data` is not used yet.
-    fn push_particles(&mut self, p: &cb::LevelParticles, regs: &SyncedRegistries) {
-        let entry = usize::try_from(p.particle.kind).ok().and_then(|i| {
-            regs.entries(&Identifier::minecraft("particle_type"))
-                .and_then(|e| e.get(i))
-        });
-        let Some(entry) = entry else { return };
+    /// `level_particles`: resolve the particle type against the static registry's names and
+    /// queue the spawn (see the renderer's particles module for the semantics; unknown types
+    /// are skipped there, logged once). The type-specific `data` is not used yet.
+    fn push_particles(&mut self, p: &cb::LevelParticles, _regs: &SyncedRegistries) {
+        let Some(kind) = self
+            .particle_names
+            .get(usize::try_from(p.particle.kind).ok().unwrap_or(usize::MAX))
+            .cloned()
+        else {
+            return;
+        };
         self.particle_spawns.push(haste_render::ParticleSpawn {
-            kind: entry.id.clone(),
+            kind,
             pos: p.pos,
             offset: [p.offset_x, p.offset_y, p.offset_z],
             max_speed: [p.max_speed_x, p.max_speed_y, p.max_speed_z],
@@ -659,7 +672,20 @@ impl NetDriver {
     /// Connects (handshake, login, configuration) and returns in the play state.
     pub async fn connect(opts: ConnectOptions) -> anyhow::Result<Self> {
         let (conn, login) = Connection::connect(opts).await.context("connecting")?;
-        let session = Session::new(login.entity_id, login.game_mode, login.dimension.clone());
+        // The static `minecraft:particle_type` registry by protocol id, from the same
+        // tables the packet decoder resolves particle names with.
+        let particle_names = std::sync::Arc::new(
+            (0..)
+                .map_while(|i| conn.tables().particle_name(i).map(|s| s.to_string()))
+                .map(|s| Identifier::parse(&s).expect("registry names are valid identifiers"))
+                .collect::<Vec<_>>(),
+        );
+        let session = Session::new(
+            login.entity_id,
+            login.game_mode,
+            login.dimension.clone(),
+            particle_names,
+        );
         Ok(Self {
             conn,
             login,
