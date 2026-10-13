@@ -38,6 +38,10 @@ pub struct ViewState {
     pub tick_at: Instant,
     /// Whether the server has placed the player yet.
     pub has_position: bool,
+    /// Player feet position after the last tick (`PlayerState::pos`).
+    pub feet: DVec3,
+    /// Eye height for the current pose (the camera sits this far above the feet).
+    pub eye_height: f64,
     /// Time of day in ticks (first world clock of `set_time`; 6000 = noon until one arrives).
     pub time_of_day: i64,
     /// Whether the current dimension has a sky.
@@ -103,6 +107,8 @@ impl Shared {
                 look_offset: (0.0, 0.0),
                 tick_at: Instant::now(),
                 has_position: false,
+                feet: DVec3::ZERO,
+                eye_height: 0.0,
                 time_of_day: 6000,
                 has_sky,
                 view_distance,
@@ -278,6 +284,8 @@ fn tick_once(
     view.look_offset = s.player.look_offset();
     view.tick_at = Instant::now();
     view.has_position = s.player.has_position;
+    view.feet = s.player.state.pos;
+    view.eye_height = s.player.eye_height();
     view.time_of_day = s.time_of_day.unwrap_or(6000);
     view.has_sky = s.dimension.has_skylight;
     view.block_target = s.player.target();

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use glam::DVec3;
 use haste_protocol::haste_core::gui::GuiFrame;
 use haste_protocol::haste_core::input::InputState;
 use haste_protocol::haste_core::model::EntityInstance;
@@ -336,6 +337,13 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let gui = GuiFrame::default();
     let mut feed = WorldFeed::default();
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
+    // With `--pos`, the shot is only taken once the server has teleported the player to these
+    // feet coordinates (the compare script teleports over RCON while we join).
+    let want_pos = args
+        .pos
+        .as_ref()
+        .filter(|v| v.len() == 3)
+        .map(|v| DVec3::new(v[0], v[1], v[2]));
     let mut frames = 0u32;
     let mut stats;
     let mut last_camera;
@@ -343,6 +351,10 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         let (mut camera, sky, partial, vd) = frame_view(&shared, 0.0, 0.0, Instant::now());
         camera.yaw = args.yaw.unwrap_or(camera.yaw);
         camera.pitch = args.pitch.unwrap_or(camera.pitch);
+        if let Some(pos) = want_pos {
+            let view = *shared.view.lock();
+            camera.pos = pos + DVec3::new(0.0, view.eye_height, 0.0);
+        }
         last_camera = camera;
         {
             // The player looks where the screenshot camera looks, so its crosshair target
@@ -374,6 +386,26 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
                 "disconnected: {}",
                 shared.closed.lock().clone().unwrap_or_default()
             );
+        }
+        if let Some(pos) = want_pos {
+            let view = *shared.view.lock();
+            let reached = placed && (view.feet - pos).length() <= 0.5;
+            if !reached {
+                if Instant::now() > deadline {
+                    let c = last_camera;
+                    anyhow::bail!(
+                        "--seconds elapsed before reaching --pos; player at ({:.2}, {:.2}, {:.2}), camera would have been at ({:.2}, {:.2}, {:.2})",
+                        view.feet.x,
+                        view.feet.y,
+                        view.feet.z,
+                        c.pos.x,
+                        c.pos.y,
+                        c.pos.z
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
         }
         if placed && feed.settled(&stats, Duration::from_millis(1500)) {
             break;
