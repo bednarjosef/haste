@@ -17,6 +17,7 @@ mod launch;
 mod net;
 mod player;
 mod screenshots;
+mod script;
 mod ui;
 
 #[derive(Parser, Debug)]
