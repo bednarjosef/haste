@@ -78,7 +78,7 @@ fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
     if let Some(cmd) = args.command {
-        return launch::run(cmd);
+        return launch::run(cmd, &args.username);
     }
     if args.ping {
         let addr = args
