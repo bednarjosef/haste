@@ -1,71 +1,107 @@
 #!/usr/bin/env bash
-# One-command join smoke test: builds haste, starts a private test server, joins it headless
-# for 20 s and greps both logs for the server's verdict (kicks, "moved wrongly") or client
-# panics. Prints PASS or FAIL (exit 0/1).
-# usage: scripts/smoke.sh [port]   (default 25618)
+# One-command join smoke test: builds release haste, starts a private test server, joins it
+# headless for 20 s, then greps both logs for the server's verdict on our client and for
+# client panics. Prints PASS or FAIL, exit 0/1. Always stops the server it started.
+# usage: scripts/smoke.sh [port]   (default 25618; server copy $HASTE_CACHE/servers/smoke)
+#
+# Three server-log lines appear on every healthy join and do not fail the run (each is
+# still printed, marked known-benign):
+#   "lost connection: Disconnected"  haste's own goodbye after its 20 s; a real disconnect
+#                                    still fails, via haste's non-zero exit and the reason
+#                                    text differing from a bare "Disconnected"
+#   "moved too quickly! X,Y,Z" where X,Y,Z is the login position: the spawn position ack
+#                                    (the server compares it against the pre-login spot)
+#   "No key layers in MapLike[{}]"   flat-world preset datapack noise at server start,
+#                                    logged before the client even connects
 set -uo pipefail
 PORT=${1:-25618}
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CACHE="${HASTE_CACHE:-$ROOT/cache}"
-cd "$ROOT"
 LOG="$CACHE/servers/smoke/logs/latest.log"
+cd "$ROOT" || exit 1
 mkdir -p target/smoke
 
 cleanup() {
-  if [ -n "${SERVER_PID:-}" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
-    kill "$SERVER_PID" 2>/dev/null
-    for _ in $(seq 1 20); do kill -0 "$SERVER_PID" 2>/dev/null || break; sleep 0.5; done
-    kill -9 "$SERVER_PID" 2>/dev/null || true
+  local pid children
+  if [ -n "${SERVER_PID:-}" ]; then
+    children=$(pgrep -P "$SERVER_PID" 2>/dev/null || true)  # timeout(1)'s java child
+    kill "$SERVER_PID" 2>/dev/null || true                  # timeout forwards TERM to java
+    for pid in $children; do kill "$pid" 2>/dev/null || true; done
     wait "$SERVER_PID" 2>/dev/null || true
   fi
-  # exec'd timeout/java may not be gone with the script's own PID; catch stragglers.
-  local pid
-  for pid in $(pgrep -f "servers/smoke.*fabric-server-launch" || true); do
-    [ "$pid" != "$$" ] && kill "$pid" 2>/dev/null || true
+  # A stray java from our copy only: matched by working directory, never another server.
+  for pid in $(pgrep -f fabric-server-launch 2>/dev/null || true); do
+    if [ "$(readlink "/proc/$pid/cwd" 2>/dev/null || true)" = "$CACHE/servers/smoke" ]; then
+      kill "$pid" 2>/dev/null || true
+    fi
   done
 }
 trap cleanup EXIT
 
-echo "== building release haste"
+echo "== building release haste (first build takes a few minutes)"
 cargo build --release -q --bin haste || { echo "FAIL: cargo build"; exit 1; }
 
-echo "== starting test server on port $PORT"
-# remember the old log's line count so a stale "Done (" from a previous run doesn't count
-OLD_LINES=0
-[ -f "$LOG" ] && OLD_LINES=$(wc -l < "$LOG")
-"$ROOT/scripts/test-server.sh" smoke "$PORT" 180 &
+echo "== starting private test server on port $PORT"
+[ -f "$LOG" ] && : > "$LOG"  # truncate: an old "Done (" must not count as this run's
+"$ROOT/scripts/test-server.sh" smoke "$PORT" 180 > target/smoke/server.out 2>&1 &
 SERVER_PID=$!
 
-echo -n "== waiting for server startup "
-up=0
+echo -n "== waiting up to 120 s for the server "
+up=
 for _ in $(seq 1 240); do
-  if [ -f "$LOG" ] && [ "$(wc -l < "$LOG")" -gt "$OLD_LINES" ] && \
-     tail -n "+$((OLD_LINES + 1))" "$LOG" | grep -q 'Done ('; then
-    up=1; break
-  fi
+  grep -q 'Done (' "$LOG" 2>/dev/null && { up=1; break; }
+  kill -0 "$SERVER_PID" 2>/dev/null || break
   sleep 0.5
 done
-[ "$up" = 1 ] || { echo; echo "FAIL: server did not start"; tail -5 "$LOG" 2>/dev/null; exit 1; }
-echo "up"
+if [ -z "$up" ]; then
+  echo
+  echo "FAIL: server did not start (or died); last lines of target/smoke/server.out:"
+  tail -5 target/smoke/server.out 2>/dev/null
+  exit 1
+fi
+echo up
 
-echo "== running headless haste"
-target/release/haste --headless --server "127.0.0.1:$PORT" --username smoke --seconds 20 \
-  > target/smoke/haste.log 2>&1
-HASTE_RC=$?
-echo "-- last 5 lines of target/smoke/haste.log:"
+echo "== running headless haste for 20 s (target/smoke/haste.log)"
+target/release/haste --headless --server "127.0.0.1:${SMOKE_CLIENT_PORT:-$PORT}" \
+  --username smoke --seconds 20 > target/smoke/haste.log 2>&1
+RC=$?
+echo "-- haste exit code $RC; last 5 lines of its log:"
 tail -5 target/smoke/haste.log
 
-FAIL=""
-[ "$HASTE_RC" -eq 0 ] || FAIL="haste exited $HASTE_RC"
-NEW_LOG=$(tail -n "+$((OLD_LINES + 1))" "$LOG")
+FAIL=
+[ "$RC" -eq 0 ] || FAIL="haste exited $RC"
+
+# The login position: a "moved too quickly" carrying exactly it is the spawn ack, not a move.
+LOGIN_POS=$(sed -n 's/.*logged in with entity id [0-9]* at (\([^)]*\)).*/\1/p' "$LOG" 2>/dev/null | head -1 | tr -d ' ')
+SPAWN_ACK='__no_login_position__'
+[ -n "$LOGIN_POS" ] && SPAWN_ACK="*moved too quickly! $LOGIN_POS*"
+
 for pat in 'kicked' 'lost connection' 'moved wrongly' 'moved too quickly' 'Exception' 'ERROR'; do
-  hits=$(printf '%s\n' "$NEW_LOG" | grep -i "$pat" || true)
-  [ -n "$hits" ] && { echo "-- server log matches '$pat':"; echo "$hits"; FAIL="${FAIL:+$FAIL; }server log: $pat"; }
-done
-for pat in 'panicked' 'Error:'; do
-  hits=$(grep -E "$pat" target/smoke/haste.log || true)
-  [ -n "$hits" ] && { echo "-- client log matches '$pat':"; echo "$hits"; FAIL="${FAIL:+$FAIL; }client log: $pat"; }
+  while IFS= read -r line; do
+    benign=
+    case "$line" in
+      *"lost connection: Disconnected") benign="haste's goodbye after its 20 s";;
+      *"No key layers in MapLike[{}]") benign="flat-preset datapack noise before login";;
+      $SPAWN_ACK) benign="spawn position ack (equals the login position)";;
+    esac
+    echo "server: $line"
+    if [ -n "$benign" ]; then
+      echo "        known-benign: $benign"
+    else
+      FAIL="${FAIL:+$FAIL; }server: $line"
+    fi
+  done < <(grep -i -- "$pat" "$LOG" 2>/dev/null || true)
 done
 
-if [ -n "$FAIL" ]; then echo "FAIL: $FAIL"; exit 1; fi
+for pat in 'panicked' 'Error:'; do
+  while IFS= read -r line; do
+    echo "client: $line"
+    FAIL="${FAIL:+$FAIL; }client: $line"
+  done < <(grep -F -- "$pat" target/smoke/haste.log 2>/dev/null || true)
+done
+
+if [ -n "$FAIL" ]; then
+  echo "FAIL: $FAIL"
+  exit 1
+fi
 echo PASS
