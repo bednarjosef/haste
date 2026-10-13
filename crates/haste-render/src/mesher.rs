@@ -29,12 +29,26 @@ pub struct SectionMesh {
     pub visibility: crate::occlusion::VisibilitySet,
 }
 
-/// Tint sources resolved at mesh time (palette written into the shader's
-/// uniform; indices carried per vertex). Phase 1: white + a few fixed colors.
-pub const TINT_WHITE: u8 = 0;
-#[allow(dead_code)]
-pub const TINT_WATER: u8 = 1;
-pub const TINT_PALETTE_LEN: usize = 2;
+/// Untinted vertex colour.
+pub const TINT_WHITE: u32 = 0xFFFFFF;
+
+/// Per-block-state and per-biome tables the mesher reads (shared with the workers).
+#[derive(Clone)]
+pub struct MeshTables {
+    pub tints: Arc<crate::tint::TintTable>,
+    pub colors: Arc<crate::tint::BiomeColors>,
+    pub fluids: Arc<crate::fluid::FluidTable>,
+}
+
+impl Default for MeshTables {
+    fn default() -> Self {
+        MeshTables {
+            tints: Arc::new(crate::tint::TintTable::empty()),
+            colors: Arc::new(crate::tint::BiomeColors::default()),
+            fluids: Arc::new(crate::fluid::FluidTable::empty()),
+        }
+    }
+}
 
 /// A snapshot of the 3x3x3 section neighbourhood, captured on the render/game
 /// thread and sent to the mesh workers. Cheap random access, no locks.
@@ -47,6 +61,8 @@ pub struct MeshSnapshot {
     sky: Vec<u8>,
     /// Block light per block, same layout.
     block: Vec<u8>,
+    /// Biome cells around the section (tint blending).
+    biomes: crate::tint::BiomeGrid,
     /// Section origin in world blocks.
     origin: BlockPos,
     /// World bounds for y clamping (kept for debug/documentation).
@@ -67,6 +83,21 @@ impl MeshSnapshot {
     /// 18^3 = 5832 block states + light (the section and a one-block border),
     /// amortized by the dirty-section pipeline.
     pub fn capture(view: &dyn BlockView, pos: SectionPos) -> MeshSnapshot {
+        Self::capture_with_biomes(view, None, 0, pos)
+    }
+
+    /// `capture` plus the biome cells within `blend_radius` blocks of the section (for
+    /// tints); without a biome source every block is biome 0.
+    pub fn capture_with_biomes(
+        view: &dyn BlockView,
+        biome_source: Option<&dyn crate::tint::BiomeSource>,
+        blend_radius: i32,
+        pos: SectionPos,
+    ) -> MeshSnapshot {
+        let biomes = match biome_source {
+            Some(src) => crate::tint::BiomeGrid::capture(src, pos.block_min(), blend_radius),
+            None => crate::tint::BiomeGrid::uniform(haste_core::BiomeId(0)),
+        };
         let origin = pos.block_min().add(-1, -1, -1);
         let mut blocks = Vec::with_capacity(EXT3);
         let mut sky = Vec::with_capacity(EXT3);
@@ -93,6 +124,7 @@ impl MeshSnapshot {
             blocks,
             sky,
             block,
+            biomes,
             origin,
             min_y: view.min_y(),
             height: view.height(),
@@ -141,8 +173,10 @@ impl MeshSnapshot {
 #[derive(Default)]
 struct MeshSink {
     vertices: Vec<QuadVertex>,
-    /// Per-vertex packed light (nibbles, AO, shade, tint), parallel to `vertices`.
-    lights: Vec<[u8; 4]>,
+    /// Per-vertex packed light (nibbles, AO|shade), parallel to `vertices`.
+    lights: Vec<[u8; 2]>,
+    /// Per-vertex tint 0xRRGGBB, parallel to `vertices`.
+    tints: Vec<u32>,
     /// Per-vertex atlas sprite index, parallel to `vertices`.
     sprites: Vec<u16>,
     /// Layer -> index list. RenderLayer order gives draw order.
@@ -174,7 +208,8 @@ impl MeshSink {
         layer: RenderLayer,
         positions: &[[f32; 3]; 4],
         uvs: &[[f32; 2]; 4],
-        lights: [[u8; 4]; 4],
+        lights: [[u8; 2]; 4],
+        tint: u32,
         sprite: u16,
     ) {
         let base = self.vertices.len() as u32;
@@ -184,6 +219,7 @@ impl MeshSink {
                 uv: uvs[i],
             });
             self.lights.push(lights[i]);
+            self.tints.push(tint);
             self.sprites.push(sprite);
             self.note_position(positions[i]);
         }
@@ -239,6 +275,29 @@ pub fn mesh_section(
     atlas: &dyn haste_assets::AtlasRegions,
     pos: SectionPos,
 ) -> SectionMesh {
+    mesh_section_with(snapshot, baked, atlas, &MeshTables::default(), pos)
+}
+
+/// The blended tint of `kind` at block `p` from the snapshot's biome cells.
+fn block_tint(
+    snapshot: &MeshSnapshot,
+    tables: &MeshTables,
+    kind: crate::tint::TintKind,
+    p: BlockPos,
+) -> u32 {
+    tables
+        .colors
+        .blended(kind, p.x, p.z, |x, z| snapshot.biomes.get(x, p.y, z))
+}
+
+/// `mesh_section` with tint and fluid tables.
+pub fn mesh_section_with(
+    snapshot: &MeshSnapshot,
+    baked: &haste_assets::BakedBlockModels,
+    atlas: &dyn haste_assets::AtlasRegions,
+    tables: &MeshTables,
+    pos: SectionPos,
+) -> SectionMesh {
     let origin = pos.block_min();
     let mut sink = MeshSink {
         min: [f32::MAX; 3],
@@ -254,12 +313,25 @@ pub fn mesh_section(
                 if state == BlockStateId::AIR {
                     continue;
                 }
+                if let Some(fluid) = tables.fluids.fluid(state) {
+                    mesh_fluid(
+                        snapshot,
+                        baked,
+                        tables,
+                        block_pos,
+                        [lx, ly, lz],
+                        fluid,
+                        &mut sink,
+                    );
+                }
                 let quads = baked.quads(state);
                 if quads.is_empty() {
                     continue;
                 }
                 let layer = baked.render_layer(state);
                 let offset = [lx as f32, ly as f32, lz as f32];
+                // The block's tint, computed on its first tinted quad.
+                let mut tint: Option<u32> = None;
 
                 for quad in quads {
                     // Cullface: skip the face when the neighbour is a full
@@ -285,14 +357,21 @@ pub fn mesh_section(
 
                     // Per-vertex light: face-adjacent cell + the vertex's AO
                     // neighbours, averaged (smooth lighting).
-                    let lights: [[u8; 4]; 4] = core::array::from_fn(|vi| {
+                    let lights: [[u8; 2]; 4] = core::array::from_fn(|vi| {
                         let (ao_level, light) =
                             vertex_light_for(snapshot, baked, block_pos, quad.direction, vi);
                         let shade = shade_index(quad.shade_face);
-                        [light, pack_ao_shade(ao_level, shade), TINT_WHITE, 0]
+                        [light, pack_ao_shade(ao_level, shade)]
                     });
+                    let quad_tint = if quad.tint_index.is_some() {
+                        *tint.get_or_insert_with(|| {
+                            block_tint(snapshot, tables, tables.tints.kind(state), block_pos)
+                        })
+                    } else {
+                        TINT_WHITE
+                    };
 
-                    sink.push_quad(layer, &positions, &uvs, lights, sprite);
+                    sink.push_quad(layer, &positions, &uvs, lights, quad_tint, sprite);
                 }
             }
         }
@@ -314,11 +393,76 @@ pub fn mesh_section(
             .iter()
             .zip(sink.lights.iter().copied())
             .zip(sink.sprites.iter().copied())
-            .map(|((v, light), sprite)| pack_vertex(v, sprite, light))
+            .zip(sink.tints.iter().copied())
+            .map(|(((v, light), sprite), tint)| pack_vertex(v, sprite, light, tint))
             .collect(),
         layers,
         aabb: (sink.min, sink.max),
         visibility: crate::occlusion::section_visibility(snapshot, baked, pos),
+    }
+}
+
+/// The snapshot as the fluid mesher sees it.
+struct FluidView<'a> {
+    snapshot: &'a MeshSnapshot,
+    baked: &'a haste_assets::BakedBlockModels,
+}
+
+impl crate::fluid::FluidWorld for FluidView<'_> {
+    fn state(&self, p: BlockPos) -> BlockStateId {
+        self.snapshot.block_state(p)
+    }
+    fn opaque(&self, p: BlockPos) -> bool {
+        self.baked.is_full_opaque(self.snapshot.block_state(p))
+    }
+    fn solid(&self, p: BlockPos) -> bool {
+        crate::fluid::baked_solid(self.baked, self.snapshot.block_state(p))
+    }
+}
+
+/// Max of two packed (sky, block) light values per channel.
+fn max_light(a: (u8, u8), b: (u8, u8)) -> u8 {
+    pack_light(a.0.max(b.0), a.1.max(b.1))
+}
+
+/// Emits the fluid surface of one block (see `fluid.rs` for the rules).
+#[allow(clippy::too_many_arguments)]
+fn mesh_fluid(
+    snapshot: &MeshSnapshot,
+    baked: &haste_assets::BakedBlockModels,
+    tables: &MeshTables,
+    block_pos: BlockPos,
+    local: [i32; 3],
+    fluid: crate::fluid::FluidState,
+    sink: &mut MeshSink,
+) {
+    use crate::fluid::Fluid;
+    let view = FluidView { snapshot, baked };
+    let mut quads: Vec<crate::fluid::FluidQuad> = Vec::with_capacity(11);
+    crate::fluid::fluid_quads(&view, &tables.fluids, block_pos, fluid, &mut quads);
+    if quads.is_empty() {
+        return;
+    }
+    let tint = match fluid.fluid {
+        Fluid::Water => block_tint(snapshot, tables, crate::tint::TintKind::Water, block_pos),
+        Fluid::Lava => TINT_WHITE,
+    };
+    let layer = crate::fluid::fluid_layer(fluid.fluid);
+    let own = snapshot.light(block_pos);
+    let top_light = max_light(own, snapshot.light(block_pos.add(0, 1, 0)));
+    let bottom_light = max_light(own, snapshot.light(block_pos.add(0, -1, 0)));
+    let offset = local.map(|v| v as f32);
+    for q in quads {
+        let light = if q.dir == haste_assets::Direction::Down {
+            bottom_light
+        } else {
+            top_light
+        };
+        let packed = [light, pack_ao_shade(3, shade_index(Some(q.dir)))];
+        let positions = q
+            .positions
+            .map(|p| [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]]);
+        sink.push_quad(layer, &positions, &q.uvs, [packed; 4], tint, q.sprite);
     }
 }
 
@@ -408,12 +552,14 @@ fn face_corner_offsets(
 /// Something mesh workers can capture section snapshots from on their own threads (the
 /// client's shared, lock-protected world). `None` when the section's chunk is gone.
 pub trait SnapshotSource: Send + Sync {
-    fn capture(&self, pos: SectionPos) -> Option<MeshSnapshot>;
+    /// Captures `pos` with the biome cells within `blend_radius` blocks (for tints).
+    fn capture(&self, pos: SectionPos, blend_radius: i32) -> Option<MeshSnapshot>;
 }
 
 pub struct Mesher {
     baked: Arc<haste_assets::BakedBlockModels>,
     atlas: Arc<dyn haste_assets::AtlasRegions + Send + Sync>,
+    tables: Mutex<MeshTables>,
     pending: Mutex<Vec<(SectionPos, Arc<MeshSnapshot>)>>,
     results: crossbeam_channel::Receiver<SectionMesh>,
     result_tx: crossbeam_channel::Sender<SectionMesh>,
@@ -431,6 +577,7 @@ impl Mesher {
         Mesher {
             baked,
             atlas,
+            tables: Mutex::new(MeshTables::default()),
             pending: Mutex::new(Vec::new()),
             results: rx,
             result_tx: tx,
@@ -442,14 +589,37 @@ impl Mesher {
     /// thread (world data is not Send across threads); deduplicates pending
     /// submissions for the same section.
     pub fn submit(&self, view: &dyn BlockView, pos: SectionPos) {
+        self.submit_with_biomes(view, None, pos);
+    }
+
+    /// `submit` with the biome source for tints.
+    pub fn submit_with_biomes(
+        &self,
+        view: &dyn BlockView,
+        biomes: Option<&dyn crate::tint::BiomeSource>,
+        pos: SectionPos,
+    ) {
+        let radius = self.tables.lock().colors.radius();
         {
             let mut pending = self.pending.lock();
             if pending.iter().any(|(p, _)| *p == pos) {
                 return;
             }
-            pending.push((pos, Arc::new(MeshSnapshot::capture(view, pos))));
+            pending.push((
+                pos,
+                Arc::new(MeshSnapshot::capture_with_biomes(view, biomes, radius, pos)),
+            ));
         }
         self.kick();
+    }
+
+    /// Replaces the tint/fluid tables used for sections meshed from now on.
+    pub fn set_tables(&self, tables: MeshTables) {
+        *self.tables.lock() = tables;
+    }
+
+    pub fn tables(&self) -> MeshTables {
+        self.tables.lock().clone()
     }
 
     /// Capture and mesh `positions` on the worker pool: the render thread only schedules.
@@ -461,14 +631,16 @@ impl Mesher {
         let jobs = positions.to_vec();
         self.in_flight.fetch_add(jobs.len(), Ordering::Relaxed);
         let baked = self.baked.clone();
+        let tables = self.tables();
+        let radius = tables.colors.radius();
         let atlas = self.atlas.clone();
         let tx = self.result_tx.clone();
         let source = source.clone();
         let in_flight = self.in_flight.clone();
         rayon::spawn(move || {
             jobs.into_par_iter().for_each(|pos| {
-                if let Some(snapshot) = source.capture(pos) {
-                    let _ = tx.send(mesh_section(&snapshot, &baked, &*atlas, pos));
+                if let Some(snapshot) = source.capture(pos, radius) {
+                    let _ = tx.send(mesh_section_with(&snapshot, &baked, &*atlas, &tables, pos));
                 }
                 in_flight.fetch_sub(1, Ordering::Relaxed);
             });
@@ -485,10 +657,11 @@ impl Mesher {
         }
         let baked = self.baked.clone();
         let atlas = self.atlas.clone();
+        let tables = self.tables.lock().clone();
         let tx = self.result_tx.clone();
         rayon::spawn(move || {
             jobs.into_par_iter()
-                .map(|(pos, snapshot)| mesh_section(&snapshot, &baked, &*atlas, pos))
+                .map(|(pos, snapshot)| mesh_section_with(&snapshot, &baked, &*atlas, &tables, pos))
                 .for_each(|mesh| {
                     let _ = tx.send(mesh);
                 });

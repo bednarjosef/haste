@@ -172,6 +172,18 @@ impl BakedBlockModels {
             }
         }
 
+        // Fluids have no model elements; the chunk mesher draws them with these sprites.
+        for tex in [
+            "minecraft:block/water_still",
+            "minecraft:block/water_flow",
+            "minecraft:block/water_overlay",
+            "minecraft:block/lava_still",
+            "minecraft:block/lava_flow",
+        ] {
+            if seen_textures.insert(tex.to_string()) {
+                texture_ids.push(Identifier::parse(tex)?);
+            }
+        }
         texture_ids.sort();
         *atlas = AtlasBuilder::build(assets, &texture_ids, true)?;
 

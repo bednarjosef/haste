@@ -6,6 +6,7 @@
 
 pub mod arena;
 pub mod entity;
+pub mod fluid;
 pub mod gui;
 pub mod mesher;
 pub mod occlusion;
@@ -14,6 +15,7 @@ pub mod pipeline;
 pub mod renderer;
 pub mod sky;
 pub mod timing;
+pub mod tint;
 pub mod vertex;
 
 pub use entity::{default_skin, EntityRenderer, FirstPerson, Nametag};
@@ -24,4 +26,5 @@ pub use pipeline::{upload_atlas, upload_section, Gpu, SectionGpuMesh};
 pub use renderer::{Camera, FrameInput, FrameStats, Renderer, SkyState};
 pub use sky::{SkyColors, SkyKind};
 pub use timing::FrameTimings;
+pub use tint::{BiomeClimate, BiomeColors, BiomeSource, Colormaps, GrassModifier};
 pub use vertex::PackedVertex;

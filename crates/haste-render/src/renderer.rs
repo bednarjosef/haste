@@ -208,6 +208,8 @@ pub struct Renderer {
     atlas: Arc<haste_assets::AtlasBuilder>,
     baked: Arc<haste_assets::BakedBlockModels>,
     mesher: Mesher,
+    /// Grass/foliage colormaps from the assets (biome colours are resolved against them).
+    colormaps: crate::tint::Colormaps,
     sections: ahash::AHashMap<SectionPos, ResidentSection>,
     /// Shared vertex/index buffers the section meshes live in.
     arenas: MeshArenas,
@@ -506,6 +508,18 @@ impl Renderer {
         };
 
         let mesher = Mesher::new(baked.clone(), atlas.clone());
+        let colormaps = crate::tint::Colormaps::load(assets).unwrap_or_else(|e| {
+            tracing::warn!("colormaps unavailable ({e:#}): uniform grass/foliage colour");
+            crate::tint::Colormaps::uniform(0x91BD59)
+        });
+        mesher.set_tables(crate::mesher::MeshTables {
+            tints: Arc::new(crate::tint::TintTable::new(states)),
+            colors: Arc::new(crate::tint::BiomeColors::new(&[], &colormaps)),
+            fluids: Arc::new(crate::fluid::FluidTable::new(
+                states,
+                crate::fluid::FluidSprites::from_atlas(&*atlas),
+            )),
+        });
         let arenas = MeshArenas::new(gpu.device.clone(), gpu.queue.clone());
         let timer = crate::timing::GpuTimer::new(&gpu.device, &gpu.queue);
         let origin_buffer = Self::make_origin_buffer(&gpu.device, 4096);
@@ -551,6 +565,7 @@ impl Renderer {
             atlas,
             baked,
             mesher,
+            colormaps,
             sections: ahash::AHashMap::new(),
             arenas,
             section_vis: ahash::AHashMap::new(),
@@ -860,11 +875,40 @@ impl Renderer {
         }
     }
 
+    /// The biome table of the joined server (synced `minecraft:worldgen/biome` registry, index =
+    /// biome id). Applies to sections meshed afterwards: call it before the first chunks.
+    pub fn set_biomes(&mut self, biomes: &[crate::tint::BiomeClimate]) {
+        let mut tables = self.mesher.tables();
+        let radius = tables.colors.radius();
+        tables.colors =
+            Arc::new(crate::tint::BiomeColors::new(biomes, &self.colormaps).with_radius(radius));
+        self.mesher.set_tables(tables);
+    }
+
+    /// Biome blend radius (vanilla "Biome Blend": 0 = off, 2 = default 5x5).
+    pub fn set_biome_blend(&mut self, radius: i32) {
+        let mut tables = self.mesher.tables();
+        tables.colors = Arc::new((*tables.colors).clone().with_radius(radius));
+        self.mesher.set_tables(tables);
+    }
+
     /// Submit dirty sections to the mesher (snapshots taken from `world`) and
-    /// upload finished meshes (per-frame budget).
+    /// upload finished meshes (per-frame budget). Without biomes every block tints as plains.
     pub fn update_world(
         &mut self,
         world: &dyn BlockView,
+        dirty: &[SectionPos],
+        camera_chunk: ChunkPos,
+        view_distance: i32,
+    ) {
+        self.update_world_with_biomes(world, None, dirty, camera_chunk, view_distance);
+    }
+
+    /// `update_world` reading biomes (for grass/foliage/water tints) from `biomes`.
+    pub fn update_world_with_biomes(
+        &mut self,
+        world: &dyn BlockView,
+        biomes: Option<&dyn crate::tint::BiomeSource>,
         dirty: &[SectionPos],
         _camera_chunk: ChunkPos,
         view_distance: i32,
@@ -874,7 +918,7 @@ impl Renderer {
             self.visible_for = None;
         }
         for pos in dirty {
-            self.mesher.submit(world, *pos);
+            self.mesher.submit_with_biomes(world, biomes, *pos);
         }
         self.upload_finished();
     }
