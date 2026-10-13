@@ -122,6 +122,7 @@ impl Session {
             world,
             net::new_entity_store(entity_types),
             view_distance,
+            haste_render::default_skin(login.profile.uuid.as_u128()),
         ));
         let handle = rt.handle().clone();
         let sh = shared.clone();
@@ -174,6 +175,8 @@ pub struct WorldFeed {
     source: Option<Arc<dyn haste_render::SnapshotSource>>,
     /// Sections submitted this frame (reused).
     batch: Vec<SectionPos>,
+    /// The first-person state last sent to the renderer (None also before the first).
+    first_person: Option<game::FirstPersonView>,
 }
 
 /// Lets the mesh worker threads capture section snapshots from the shared world under its
@@ -283,6 +286,19 @@ impl WorldFeed {
         }
         renderer.sample_entity_lights(&*shared.world.read(), &self.instances);
         &self.instances
+    }
+
+    /// Hands the renderer the first-person hand (`Renderer::set_first_person`) when the view's
+    /// per-tick part changed since the last call. The skin is fixed for the connection, so
+    /// comparing the per-tick part is enough to catch every change; the skin is cloned only when
+    /// one happens (no allocation per frame).
+    fn set_first_person(&mut self, shared: &Shared, renderer: &mut Renderer) {
+        let view = shared.view.lock().first_person;
+        if view == self.first_person {
+            return;
+        }
+        self.first_person = view;
+        renderer.set_first_person(view.map(|v| v.with_skin(&shared.skin)));
     }
 
     /// Whether everything the game thread produced has been meshed and uploaded, and nothing
@@ -413,6 +429,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             input.state.pitch = camera.pitch - offset.1;
         }
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
+        feed.set_first_person(&shared, &mut renderer);
         let entities = feed.entities(&shared, &mut renderer, partial);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
@@ -674,6 +691,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         base = camera;
         vd = v;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
+        feed.set_first_person(&shared, &mut renderer);
         let entities = feed.entities(&shared, &mut renderer, partial);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
@@ -982,6 +1000,7 @@ impl App {
         self.feed
             .feed(&self.shared, renderer, camera_section(&camera), vd);
         let t1 = Instant::now();
+        self.feed.set_first_person(&self.shared, renderer);
         let entities = self.feed.entities(&self.shared, renderer, partial);
         let block_target = self.shared.view.lock().block_target;
         self.breaking.clear();
