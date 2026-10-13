@@ -44,6 +44,9 @@ impl GpuTimer {
         if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
             return None;
         }
+        if std::env::var_os("HASTE_NO_GPU_TIMER").is_some() {
+            return None;
+        }
         let count = PASSES.len() as u32 * 2;
         let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
             label: Some("pass-timestamps"),

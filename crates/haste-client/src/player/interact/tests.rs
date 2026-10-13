@@ -540,3 +540,19 @@ fn swap_offhand_key_sends_status_7_with_zeroed_pos() {
         })
         .is_empty());
 }
+
+/// The `player_action` statuses this module sends, pinned to the declaration
+/// order of `ServerboundPlayerActionPacket$Action` in the 26.3 client jar
+/// (CHANGE_DESTROY_DIRECTION was inserted at 1, moving every later value).
+#[test]
+fn player_action_status_values_match_the_jar() {
+    assert_eq!(action::START_DESTROY, 0);
+    assert_eq!(action::CHANGE_DESTROY_DIRECTION, 1);
+    assert_eq!(action::ABORT_DESTROY, 2);
+    assert_eq!(action::STOP_DESTROY, 3);
+    assert_eq!(action::DROP_ALL_ITEMS, 4);
+    assert_eq!(action::DROP_ITEM, 5);
+    assert_eq!(action::RELEASE_USE_ITEM, 6);
+    assert_eq!(action::SWAP_ITEM_WITH_OFFHAND, 7);
+    assert_eq!(action::STAB, 8);
+}
