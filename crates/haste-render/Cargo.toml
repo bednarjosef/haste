@@ -7,6 +7,7 @@ description = "wgpu render backend: chunk meshing (off-thread), atlas, sky/fog, 
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
+zip.workspace = true
 haste-entity.workspace = true
 haste-protocol.workspace = true
 haste-world.workspace = true

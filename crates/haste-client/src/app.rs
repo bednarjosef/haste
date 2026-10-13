@@ -87,7 +87,12 @@ impl Session {
             .thread_name("haste-net")
             .build()?;
         let data = net::load_game_data()?;
-        let options = load_options();
+        let mut options = load_options();
+        // `--render-distance` overrides the saved option for this run (bench mode compares
+        // render distances without editing the config file).
+        if let Some(rd) = args.render_distance {
+            options.render_distance = rd;
+        }
         let mut opts = ConnectOptions::new(
             address.clone(),
             Account::Offline {
@@ -303,7 +308,7 @@ fn frame_view(
     pitch: f32,
     fov_deg: f32,
     now: Instant,
-) -> (Camera, SkyState, f32, i32) {
+) -> (Camera, SkyState, f32, i32, u64) {
     let view = *shared.view.lock();
     let partial = game::partial_tick(view.tick_at, now);
     let camera = Camera {
@@ -321,7 +326,13 @@ fn frame_view(
         fog_start: fog_end * 0.75,
         fog_end,
     };
-    (camera, sky, partial, view.view_distance)
+    (
+        camera,
+        sky,
+        partial,
+        view.view_distance,
+        view.animation_tick,
+    )
 }
 
 /// Number keys 1-9 select hotbar slots 0-8.
@@ -379,7 +390,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut stats;
     let mut last_camera;
     loop {
-        let (mut camera, sky, partial, vd) = frame_view(
+        let (mut camera, sky, partial, vd, animation_tick) = frame_view(
             &shared,
             0.0,
             0.0,
@@ -415,6 +426,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             breaking: &breaking,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
+        renderer.set_animation_tick(animation_tick);
         stats = renderer.render(&frame)?;
         frames += 1;
         let placed = shared.view.lock().has_position;
@@ -479,6 +491,320 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The bench camera at normalised time `t` in 0..=1 (t is elapsed/total). The first half is a
+/// slow 360-degree turn in place around the spawn eye; the second half flies straight along +X
+/// at 10 blocks/s at eye height + 20. `base` is the settle-frame camera; only the camera moves,
+/// never the player. Deterministic: same t, same camera.
+pub fn bench_camera(t: f32, base: &Camera, total_seconds: f32) -> Camera {
+    let half = 0.5_f32;
+    let mut camera = *base;
+    if t < half {
+        // One full turn over the first half.
+        camera.yaw = base.yaw + (t / half) * 360.0;
+    } else {
+        camera.yaw = base.yaw + 360.0;
+        // 10 blocks/s for the second half (which is total/2 seconds long).
+        let flight_seconds = total_seconds * (t - half);
+        camera.pos.x = base.pos.x + 10.0 * flight_seconds as f64;
+        camera.pos.y = base.pos.y + 20.0;
+    }
+    camera
+}
+
+/// One recorded bench frame.
+#[derive(Clone, Copy, Debug)]
+struct BenchSample {
+    frame_ms: f32,
+    sections_drawn: u32,
+    sections_total: u32,
+    draw_calls: u32,
+    timings: haste_render::FrameTimings,
+}
+
+/// Summary of a bench run: aggregate frame times plus the renderer's phase and pass averages.
+#[derive(Debug)]
+struct BenchSummary {
+    frames: u32,
+    avg_ms: f32,
+    /// 1% low: the 99th percentile frame time.
+    p99_ms: f32,
+    worst_ms: f32,
+    sections_drawn: f32,
+    sections_total: f32,
+    draw_calls: f32,
+    prepare_ms: f32,
+    acquire_ms: f32,
+    cull_ms: f32,
+    encode_ms: f32,
+    submit_ms: f32,
+    present_ms: f32,
+    /// GPU time of the main, hand and GUI passes.
+    gpu_ms: [f32; 3],
+}
+
+impl BenchSummary {
+    fn fps(&self) -> f32 {
+        if self.avg_ms > 0.0 {
+            1000.0 / self.avg_ms
+        } else {
+            0.0
+        }
+    }
+
+    /// One block of text, printed and also written to `--bench-out` as JSON.
+    fn text(&self, meta: &BenchMeta) -> String {
+        format!(
+            "bench: {} frames in {:.0} s\n\
+             frame time: avg {:.2} ms ({:.0} FPS), 1% low {:.2} ms, worst {:.2} ms\n\
+             breakdown ms: prepare {:.2} acquire {:.2} cull {:.2} encode {:.2} submit {:.2} present {:.2} | gpu main {:.2} hand {:.2} gui {:.2}\n\
+             sections drawn {}/{} avg, draw calls {:.0} avg\n\
+             render distance {} (requested {}), {}x{}, adapter {}",
+            self.frames,
+            meta.seconds,
+            self.avg_ms,
+            self.fps(),
+            self.p99_ms,
+            self.worst_ms,
+            self.prepare_ms,
+            self.acquire_ms,
+            self.cull_ms,
+            self.encode_ms,
+            self.submit_ms,
+            self.present_ms,
+            self.gpu_ms[0],
+            self.gpu_ms[1],
+            self.gpu_ms[2],
+            self.sections_drawn,
+            self.sections_total,
+            self.draw_calls,
+            meta.render_distance,
+            meta.requested_render_distance,
+            meta.width,
+            meta.height,
+            meta.adapter,
+        )
+    }
+}
+
+/// Run metadata printed with the summary.
+struct BenchMeta {
+    seconds: f32,
+    /// The effective render distance: the requested one capped by the server's view distance.
+    render_distance: i32,
+    requested_render_distance: u8,
+    width: u32,
+    height: u32,
+    adapter: String,
+}
+
+/// Percentile of sorted ascending `values` in 0..=1 (linear interpolation between samples,
+/// nearest at the ends). Matches `haste_testkit::Bench::percentile_frame_ms`'s definition.
+fn percentile(sorted: &[f32], p: f32) -> f32 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let p = p.clamp(0.0, 1.0);
+    let idx = (sorted.len() as f32 - 1.0) * p;
+    let lo = idx.floor() as usize;
+    let hi = idx.ceil() as usize;
+    let frac = idx - lo as f32;
+    sorted[lo] * (1.0 - frac) + sorted[hi.min(sorted.len() - 1)] * frac
+}
+
+/// Aggregates the samples into a summary (avg, 99th percentile, phase averages).
+fn bench_summary(samples: &[BenchSample]) -> BenchSummary {
+    let n = samples.len().max(1) as f32;
+    let mut times: Vec<f32> = samples.iter().map(|s| s.frame_ms).collect();
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    fn sum(samples: &[BenchSample], n: f32, f: impl Fn(&BenchSample) -> f32) -> f32 {
+        samples.iter().map(f).sum::<f32>() / n
+    }
+    let t = |f: fn(&haste_render::FrameTimings) -> f32| sum(samples, n, |s| f(&s.timings));
+    let gpu = |i: usize| sum(samples, n, |s| s.timings.gpu_ms[i]);
+    BenchSummary {
+        frames: samples.len() as u32,
+        avg_ms: sum(samples, n, |s| s.frame_ms),
+        p99_ms: percentile(&times, 0.99),
+        worst_ms: times.last().copied().unwrap_or(0.0),
+        sections_drawn: sum(samples, n, |s| s.sections_drawn as f32),
+        sections_total: sum(samples, n, |s| s.sections_total as f32),
+        draw_calls: sum(samples, n, |s| s.draw_calls as f32),
+        prepare_ms: t(|x| x.prepare_ms),
+        acquire_ms: t(|x| x.acquire_ms),
+        cull_ms: t(|x| x.cull_ms),
+        encode_ms: t(|x| x.encode_ms),
+        submit_ms: t(|x| x.submit_ms),
+        present_ms: t(|x| x.present_ms),
+        gpu_ms: [gpu(0), gpu(1), gpu(2)],
+    }
+}
+
+/// `--bench SECONDS`: join, wait until the world settles (screenshot's logic), then render
+/// offscreen at `--width`x`--height` along the fixed `bench_camera` path for SECONDS while
+/// recording per-frame `FrameStats` and `FrameTimings`. Prints one summary block, writes the
+/// same as JSON to `--bench-out` when given, and disconnects.
+pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
+    let Some(_server) = args.server.as_ref() else {
+        anyhow::bail!("--bench needs --server <host[:port]>");
+    };
+    let session = Session::join(args)?;
+    let shared = session.shared.clone();
+    let mut assets = open_assets()?;
+    let mut renderer =
+        Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
+    renderer.set_item_registry(&shared.data.registries);
+    renderer.set_biomes(&session.biomes);
+    let gui = GuiFrame::default();
+    let mut feed = WorldFeed::default();
+    let deadline = Instant::now() + Duration::from_secs(args.seconds);
+    let mut stats;
+    let mut base;
+    let mut vd;
+    // Settle phase: identical to the screenshot path (wait for position, meshing done, quiet).
+    loop {
+        let (mut camera, sky, partial, v, animation_tick) = frame_view(
+            &shared,
+            0.0,
+            0.0,
+            session.options.fov as f32,
+            Instant::now(),
+        );
+        camera.yaw = args.yaw.unwrap_or(camera.yaw);
+        camera.pitch = args.pitch.unwrap_or(camera.pitch);
+        base = camera;
+        vd = v;
+        feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
+        let entities = feed.entities(&shared, &mut renderer, partial);
+        let block_target = shared.view.lock().block_target;
+        let breaking = shared.breaking.lock().clone();
+        let frame = FrameInput {
+            camera,
+            entities,
+            gui: &gui,
+            sky,
+            partial_tick: partial,
+            block_target,
+            breaking: &breaking,
+        };
+        renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
+        renderer.set_animation_tick(animation_tick);
+        stats = renderer.render(&frame)?;
+        if shared.is_closed() {
+            anyhow::bail!(
+                "disconnected: {}",
+                shared.closed.lock().clone().unwrap_or_default()
+            );
+        }
+        let placed = shared.view.lock().has_position;
+        if placed && feed.settled(&stats, Duration::from_millis(1500)) {
+            break;
+        }
+        if Instant::now() > deadline {
+            tracing::warn!("--seconds elapsed before the world settled; benching what is there");
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Measure phase. The buffer is sized up front: at most 1000 fps for the whole run, and it
+    // grows once if the machine is faster than that (no allocation during steady-state frames).
+    let mut samples: Vec<BenchSample> = Vec::with_capacity(seconds as usize * 1000);
+    let total = seconds as f32;
+    let adapter = {
+        let info = renderer.adapter_info();
+        format!("{} ({})", info.name, info.backend)
+    };
+    let meta = BenchMeta {
+        seconds: total,
+        render_distance: vd,
+        requested_render_distance: session.options.render_distance,
+        width: args.width,
+        height: args.height,
+        adapter,
+    };
+    let started = Instant::now();
+    loop {
+        let elapsed = started.elapsed().as_secs_f32();
+        if elapsed >= total {
+            break;
+        }
+        // The bench camera follows its fixed path; the sky and entities come from the live view
+        // (time of day moves, the player stays where the server put it).
+        let (_, mut sky, partial_tick, _, animation_tick) = frame_view(
+            &shared,
+            0.0,
+            0.0,
+            session.options.fov as f32,
+            Instant::now(),
+        );
+        let camera = bench_camera(elapsed / total, &base, total);
+        let fog_end = (vd.max(2) * 16) as f32;
+        sky.fog_start = fog_end * 0.75;
+        sky.fog_end = fog_end;
+        feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
+        let entities = feed.entities(&shared, &mut renderer, partial_tick);
+        let block_target = shared.view.lock().block_target;
+        let breaking = shared.breaking.lock().clone();
+        let frame = FrameInput {
+            camera,
+            entities,
+            gui: &gui,
+            sky,
+            partial_tick,
+            block_target,
+            breaking: &breaking,
+        };
+        renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
+        renderer.set_animation_tick(animation_tick);
+        let stats = renderer.render(&frame)?;
+        samples.push(BenchSample {
+            frame_ms: stats.frame_ms,
+            sections_drawn: stats.chunk_sections_drawn,
+            sections_total: stats.chunk_sections_total,
+            draw_calls: stats.draw_calls,
+            timings: renderer.timings(),
+        });
+        if shared.is_closed() {
+            anyhow::bail!(
+                "disconnected during the bench: {}",
+                shared.closed.lock().clone().unwrap_or_default()
+            );
+        }
+    }
+    let summary = bench_summary(&samples);
+    println!("{}", summary.text(&meta));
+    if let Some(out) = &args.bench_out {
+        let json = serde_json::json!({
+            "frames": summary.frames,
+            "seconds": total,
+            "avg_ms": summary.avg_ms,
+            "fps": summary.fps(),
+            "p99_ms": summary.p99_ms,
+            "worst_ms": summary.worst_ms,
+            "sections_drawn": summary.sections_drawn,
+            "sections_total": summary.sections_total,
+            "draw_calls": summary.draw_calls,
+            "prepare_ms": summary.prepare_ms,
+            "acquire_ms": summary.acquire_ms,
+            "cull_ms": summary.cull_ms,
+            "encode_ms": summary.encode_ms,
+            "submit_ms": summary.submit_ms,
+            "present_ms": summary.present_ms,
+            "gpu_main_ms": summary.gpu_ms[0],
+            "gpu_hand_ms": summary.gpu_ms[1],
+            "gpu_gui_ms": summary.gpu_ms[2],
+            "render_distance": meta.render_distance,
+            "requested_render_distance": meta.requested_render_distance,
+            "width": meta.width,
+            "height": meta.height,
+            "adapter": meta.adapter,
+        });
+        std::fs::write(out, serde_json::to_string_pretty(&json)?)?;
+        println!("bench summary written to {}", out.display());
+    }
+    drop(session);
+    Ok(())
+}
+
 /// Windowed mode.
 pub fn run(args: &Args) -> anyhow::Result<()> {
     let session = Session::join(args)?;
@@ -514,6 +840,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         fps: FpsCounter::new(),
         error: None,
         seconds: args.window_seconds,
+        screenshot: false,
         started: Instant::now(),
     };
     event_loop.run_app(&mut app)?;
@@ -563,6 +890,9 @@ struct App {
     error: Option<anyhow::Error>,
     /// Close the window after this long (`--window-seconds`, for unattended runs).
     seconds: Option<u64>,
+    /// F2 pressed: the next frame is captured for a screenshot; once its async readback
+    /// lands (a few frames later), `take_capture` hands it to a save thread.
+    screenshot: bool,
     started: Instant,
 }
 
@@ -642,7 +972,7 @@ impl App {
         self.sample_input();
         let renderer = self.renderer.as_mut().expect("checked above");
         let t0 = Instant::now();
-        let (camera, sky, partial, vd) = frame_view(
+        let (camera, sky, partial, vd, animation_tick) = frame_view(
             &self.shared,
             self.yaw,
             self.pitch,
@@ -669,7 +999,25 @@ impl App {
         };
         // Outline boxes of the target and the states of breaking blocks (one short read lock).
         renderer.sample_world(&*self.shared.world.read(), &self.shared.data.shapes, &frame);
+        renderer.set_animation_tick(animation_tick);
+        if self.screenshot {
+            self.screenshot = false;
+            renderer.request_capture();
+        }
         let result = renderer.render(&frame);
+        if let Some(result) = renderer.take_capture() {
+            // Encode and write off the render thread: PNG compression of a full frame
+            // would stall the frame loop (vanilla's chat line becomes a log line here).
+            match result {
+                Ok(image) => {
+                    std::thread::spawn(move || match crate::screenshots::save(image) {
+                        Ok(name) => tracing::info!("Saved screenshot as {name}"),
+                        Err(e) => tracing::warn!("screenshot failed: {e:#}"),
+                    });
+                }
+                Err(e) => tracing::warn!("screenshot readback failed: {e:#}"),
+            }
+        }
         let t3 = Instant::now();
         self.fps.phases(
             (t1 - t0).as_secs_f32() * 1e3,
@@ -811,6 +1159,11 @@ impl ApplicationHandler for App {
                                 let full = w.fullscreen().is_some();
                                 w.set_fullscreen((!full).then_some(Fullscreen::Borderless(None)));
                             }
+                        }
+                        KeyCode::F2 => {
+                            // Vanilla's screenshot key: capture on the next frame (`draw`),
+                            // where the render (and its offscreen target) happens.
+                            self.screenshot = true;
                         }
                         _ => {}
                     }
@@ -990,5 +1343,90 @@ mod tests {
         assert_eq!(look_deg_per_pixel(0.0), 0.0096);
         // Max sensitivity: 0.8^3 * 8 * 0.15.
         assert!((look_deg_per_pixel(1.0) - 0.6144).abs() < 1e-6);
+    }
+
+    fn sample(frame_ms: f32) -> BenchSample {
+        BenchSample {
+            frame_ms,
+            sections_drawn: 900,
+            sections_total: 4000,
+            draw_calls: 200,
+            timings: haste_render::FrameTimings {
+                prepare_ms: 1.0,
+                cull_ms: 2.0,
+                encode_ms: 3.0,
+                submit_ms: 4.0,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn percentile_interpolates_and_clamps() {
+        let v = [1.0, 2.0, 3.0, 4.0];
+        assert_eq!(percentile(&v, 0.0), 1.0);
+        assert_eq!(percentile(&v, 1.0), 4.0);
+        // Halfway between 3 and 4: index (4-1)*0.75 = 2.25.
+        assert!((percentile(&v, 0.75) - 3.25).abs() < 1e-6);
+        assert!(percentile(&v, 2.0) <= 4.0); // out-of-range p clamps
+        assert_eq!(percentile(&[], 0.5), 0.0);
+    }
+
+    #[test]
+    fn bench_summary_averages_and_percentile() {
+        // 200 samples: 199 at 10 ms, one at 100 ms -> the 1% low (p99) is still a 10 ms frame,
+        // the outlier sits above the 99th percentile.
+        let samples: Vec<BenchSample> = (0..200)
+            .map(|i| sample(if i == 0 { 100.0 } else { 10.0 }))
+            .collect();
+        let s = bench_summary(&samples);
+        assert_eq!(s.frames, 200);
+        // f32: (199*10 + 100)/200 accumulates to 10.45.
+        assert!((s.avg_ms - 10.45).abs() < 1e-2, "{}", s.avg_ms);
+        assert!((s.p99_ms - 10.0).abs() < 1e-2, "{}", s.p99_ms);
+        assert_eq!(s.worst_ms, 100.0);
+        assert!((s.fps() - 1000.0 / 10.45).abs() < 1e-2, "{}", s.fps());
+        assert!((s.prepare_ms - 1.0).abs() < 1e-6);
+        assert!((s.cull_ms - 2.0).abs() < 1e-6);
+        assert!((s.encode_ms - 3.0).abs() < 1e-6);
+        assert!((s.submit_ms - 4.0).abs() < 1e-6);
+        assert!((s.sections_drawn - 900.0).abs() < 1e-6);
+        assert!((s.draw_calls - 200.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bench_camera_path_turns_then_flies() {
+        let base = Camera {
+            pos: DVec3::new(100.0, 64.0, -200.0),
+            yaw: 30.0,
+            pitch: 10.0,
+            fov_deg: 70.0,
+        };
+        // t = 0: at the base, unturned.
+        let c = bench_camera(0.0, &base, 60.0);
+        assert_eq!(c.pos, base.pos);
+        assert_eq!(c.yaw, 30.0);
+        // t = half: a full 360 turned; flight begins here (y = eye + 20, no distance yet).
+        let c = bench_camera(0.5, &base, 60.0);
+        assert!((c.pos.y - 84.0).abs() < 1e-4, "{}", c.pos.y);
+        assert!((c.pos.x - 100.0).abs() < 1e-4, "{}", c.pos.x);
+        assert!((c.yaw - 390.0).abs() < 1e-4, "{}", c.yaw);
+        // t = 1: 30 s of flight at 10 b/s along +X, 20 blocks up.
+        let c = bench_camera(1.0, &base, 60.0);
+        assert!((c.pos.x - 400.0).abs() < 1e-4, "{}", c.pos.x);
+        assert!((c.pos.y - 84.0).abs() < 1e-4, "{}", c.pos.y);
+        assert!((c.yaw - 390.0).abs() < 1e-4);
+        assert_eq!(c.pos.z, base.pos.z);
+        // Quarter point: 180 degrees around, no flight yet.
+        let c = bench_camera(0.25, &base, 60.0);
+        assert!((c.yaw - 210.0).abs() < 1e-4, "{}", c.yaw);
+        assert_eq!(c.pos, base.pos);
+        // Just after half: climbing already done, flight starting.
+        let c = bench_camera(0.51, &base, 60.0);
+        assert!((c.pos.y - 84.0).abs() < 1e-4, "{}", c.pos.y);
+        // Three-quarter point: 15 s flown = 150 blocks along +X.
+        let c = bench_camera(0.75, &base, 60.0);
+        assert!((c.pos.x - 250.0).abs() < 1e-4, "{}", c.pos.x);
+        assert!((c.pos.y - 84.0).abs() < 1e-4, "{}", c.pos.y);
     }
 }
