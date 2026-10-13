@@ -12,13 +12,15 @@
 //! The caller's thread never decodes: `play` only sends a request over a channel; the
 //! worker thread reads the Ogg from the assets, decodes it and starts the player.
 //! Non-streamed sounds keep their decoded samples in an LRU cache in the worker (streamed
-//! entries, music, are decoded on the fly and never cached).
+//! entries, music, are decoded on the fly and never cached). The worker hands each new
+//! player's controls to the main thread through a queue the main thread drains on
+//! `tick`, so a quiet tick allocates nothing on the game thread.
 //!
 //! `AudioOutput::open()` never fails: with no output device (headless CI, tests) it logs
 //! once and stays silent, and every call is accepted and does nothing.
 use std::collections::VecDeque;
 use std::io::Cursor;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -35,6 +37,9 @@ const CACHE_CAPACITY: usize = 64;
 
 /// How often the audio thread picks up new per-channel gains for a playing sound.
 const GAIN_UPDATE_PERIOD: Duration = Duration::from_millis(50);
+
+/// How often the worker wakes on an idle channel to drop finished players.
+const WORKER_PRUNE_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Identifies one playing sound across threads; assigned by `SoundSystem`.
 type SoundId = u64;
@@ -55,12 +60,23 @@ struct PlayRequest {
     pitch: f32,
 }
 
-/// Main-thread handle to a playing sound: the player (volume, speed, end) and the shared
-/// per-channel gains the audio thread applies.
+/// Main-thread handle to a playing sound: the player (volume, speed, end), the shared
+/// per-channel gains the audio thread applies, and the sound's id.
 #[derive(Clone)]
 struct SoundControls {
+    id: SoundId,
     player: Weak<Player>,
     gains: Arc<Mutex<(f32, f32)>>,
+}
+
+impl SoundControls {
+    fn new(player: &Arc<Player>, gains: &Arc<Mutex<(f32, f32)>>, id: SoundId) -> Self {
+        Self {
+            id,
+            player: Arc::downgrade(player),
+            gains: Arc::clone(gains),
+        }
+    }
 }
 
 /// A fully decoded sound: interleaved samples with channel count and sample rate.
@@ -242,29 +258,50 @@ struct Worker {
     assets: Option<haste_assets::Assets>,
     cache: LruCache,
     playing: Vec<Playing>,
-    /// Live controls, shared read-only with the main thread.
-    shared: Arc<Mutex<Vec<(SoundId, SoundControls)>>>,
+    /// Live controls, queued one message per new player for the main thread.
+    shared: Sender<SoundControls>,
 }
 
 impl Worker {
-    /// Decode the request's sound and start playing it, then publish the live controls.
-    fn play(&mut self, mut request: PlayRequest) {
-        // Drop finished players first: the main thread has seen them as empty already.
+    /// Drop players that played through.
+    fn prune_finished(&mut self) {
         self.playing.retain(|p| !p.player.empty());
+    }
+
+    /// Stop the player of a sound the main thread stopped. A sound still in the decode
+    /// queue is stopped by its own `Play` handling, because the stop order queues behind
+    /// its play request in the shared channel.
+    fn stop(&mut self, id: SoundId) {
+        if let Some(playing) = self.playing.iter().find(|p| p.id == id) {
+            playing.player.stop();
+        }
+    }
+
+    /// Queue one player's controls for the main thread.
+    fn publish(&self, index: usize) {
+        let p = &self.playing[index];
+        let _ = self
+            .shared
+            .send(SoundControls::new(&p.player, &p.gains, p.id));
+    }
+
+    /// Decode the request's sound and start playing it, then queue its controls.
+    fn play(&mut self, mut request: PlayRequest) {
+        self.prune_finished();
         if let Some(assets) = request.assets.take() {
             self.assets = Some(assets);
         }
         let source = match self.decode(&request) {
             Some(source) => source,
             None => {
-                // Nothing to play. Publish an already-finished player under this id so the
+                // Nothing to play. Queue an already-finished player under this id so the
                 // engine drops the sound on its next tick instead of tracking it forever.
                 self.playing.push(Playing {
                     id: request.id,
                     player: Arc::new(Player::connect_new(&self.mixer)),
                     gains: Arc::new(Mutex::new((0.0, 0.0))),
                 });
-                self.publish();
+                self.publish(self.playing.len() - 1);
                 return;
             }
         };
@@ -286,7 +323,7 @@ impl Worker {
             player: Arc::new(player),
             gains,
         });
-        self.publish();
+        self.publish(self.playing.len() - 1);
     }
 
     /// The decoded source for a request: streamed live, from the cache, or freshly
@@ -324,23 +361,6 @@ impl Worker {
             }
         }
     }
-
-    /// Publish the live controls to the main thread.
-    fn publish(&self) {
-        *self.shared.lock().unwrap() = self
-            .playing
-            .iter()
-            .map(|p| {
-                (
-                    p.id,
-                    SoundControls {
-                        player: Arc::downgrade(&p.player),
-                        gains: Arc::clone(&p.gains),
-                    },
-                )
-            })
-            .collect();
-    }
 }
 
 /// Real audio output: the channel to the decode worker, or nothing when there is no
@@ -348,8 +368,10 @@ impl Worker {
 pub struct AudioOutput {
     /// `None` = silent fallback (no device or no worker; logged once in `open`).
     tx: Option<Sender<PlayRequest>>,
-    /// Live controls, mirrored by the worker after each request it handles.
-    shared: Arc<Mutex<Vec<(SoundId, SoundControls)>>>,
+    /// Controls of new players, one message each, drained into `SoundSystem::incoming`.
+    controls_rx: Receiver<SoundControls>,
+    /// Stop orders for the worker, one message per stopped sound.
+    stop_tx: Option<Sender<SoundId>>,
 }
 
 impl AudioOutput {
@@ -368,11 +390,11 @@ impl AudioOutput {
             }
         };
         let (tx, rx) = channel::<PlayRequest>();
-        let shared = Arc::new(Mutex::new(Vec::new()));
-        let worker_shared = Arc::clone(&shared);
+        let (controls_tx, controls_rx) = channel::<SoundControls>();
+        let (stop_tx, stop_rx) = channel::<SoundId>();
         let spawn = std::thread::Builder::new()
             .name("audio-decode".to_string())
-            .spawn(move || run_worker(rx, sink.mixer().clone(), worker_shared));
+            .spawn(move || run_worker(rx, stop_rx, sink.mixer().clone(), controls_tx));
         match spawn {
             // Detached: the worker loop ends when the last `AudioOutput` drops the sender,
             // which also drops the sink and stops the device stream.
@@ -380,7 +402,8 @@ impl AudioOutput {
                 std::mem::forget(thread);
                 AudioOutput {
                     tx: Some(tx),
-                    shared,
+                    controls_rx,
+                    stop_tx: Some(stop_tx),
                 }
             }
             Err(e) => {
@@ -391,9 +414,11 @@ impl AudioOutput {
     }
 
     fn silent() -> AudioOutput {
+        let (_controls_tx, controls_rx) = channel::<SoundControls>();
         AudioOutput {
             tx: None,
-            shared: Arc::new(Mutex::new(Vec::new())),
+            controls_rx,
+            stop_tx: None,
         }
     }
 
@@ -413,27 +438,56 @@ impl AudioOutput {
         }
     }
 
-    /// The live controls, in play order. Empty on the silent path.
-    fn controls(&self) -> Vec<(SoundId, SoundControls)> {
-        self.shared.lock().unwrap().clone()
+    /// Tell the worker to stop a sound (already dispatched to play). A no-op on the silent
+    /// path. The message queues behind any earlier `Play` for the same sound, so the
+    /// worker stops the player once it exists.
+    fn send_stop(&self, id: SoundId) {
+        let Some(tx) = &self.stop_tx else {
+            return;
+        };
+        if tx.send(id).is_err() {
+            warn!("audio decode worker is gone; sound not stopped");
+        }
+    }
+
+    /// Move the controls queued since the last call into `into`, reusing its allocation.
+    /// Does nothing on the silent path (nothing is ever queued there).
+    fn drain_controls(&self, into: &mut Vec<SoundControls>) {
+        while let Ok(controls) = self.controls_rx.try_recv() {
+            into.push(controls);
+        }
     }
 }
 
-/// The worker loop: play each request as it arrives, publishing the live controls.
+/// The worker loop: handle each request or stop order as it arrives; on an idle channel
+/// wake periodically to drop finished players.
 fn run_worker(
     rx: Receiver<PlayRequest>,
+    stop_rx: Receiver<SoundId>,
     mixer: rodio::mixer::Mixer,
-    shared: Arc<Mutex<Vec<(SoundId, SoundControls)>>>,
+    controls_tx: Sender<SoundControls>,
 ) {
     let mut worker = Worker {
         mixer,
         assets: None,
         cache: LruCache::new(CACHE_CAPACITY),
         playing: Vec::new(),
-        shared,
+        shared: controls_tx,
     };
-    for request in rx {
-        worker.play(request);
+    loop {
+        // Process everything already queued before waiting, so orders keep their order.
+        while let Ok(request) = rx.try_recv() {
+            worker.play(request);
+        }
+        while let Ok(id) = stop_rx.try_recv() {
+            worker.stop(id);
+        }
+        worker.prune_finished();
+        match rx.recv_timeout(WORKER_PRUNE_INTERVAL) {
+            Ok(request) => worker.play(request),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
     }
 }
 
@@ -476,7 +530,9 @@ struct Sounded {
 ///
 /// `play` picks the event's variant, registers it with the engine and sends it to the
 /// output worker; `tick` recomputes gains and keeps each playing sound's stereo gains and
-/// speed in sync with the engine, and drops finished sounds from the engine.
+/// speed in sync with the engine, and drops finished sounds from the engine. A `tick`
+/// with nothing new started allocates nothing: the controls arriving from the worker are
+/// drained into a reused buffer and merged in id order.
 pub struct SoundSystem {
     events: SoundEvents,
     engine: SilentEngine,
@@ -487,6 +543,10 @@ pub struct SoundSystem {
     next_id: SoundId,
     /// Whether the worker already owns a copy of the assets (set on the first send).
     assets_sent: bool,
+    /// Controls drained from the worker since the last tick, reused across ticks.
+    incoming: Vec<SoundControls>,
+    /// Indices of sounds whose player finished this tick, reused across ticks.
+    finished: Vec<usize>,
 }
 
 impl SoundSystem {
@@ -510,6 +570,8 @@ impl SoundSystem {
             sounded: Vec::new(),
             next_id: 0,
             assets_sent: false,
+            incoming: Vec::new(),
+            finished: Vec::new(),
         }
     }
 
@@ -585,23 +647,21 @@ impl SoundSystem {
         let matches = |s: &Sounded| {
             source.is_none_or(|src| s.source == src) && path.is_none_or(|p| s.path == p)
         };
-        // Stop the players of the sounds being removed before dropping them from the
-        // engine; sounds still decoding simply never start.
-        let controls = self.output.controls();
-        let stopped: Vec<SoundControls> = self
-            .sounded
-            .iter()
-            .filter(|s| matches(s))
-            .filter_map(|s| controls.iter().find(|(id, _)| *id == s.id).map(|(_, c)| c))
-            .cloned()
-            .collect();
-        for control in stopped {
-            if let Some(player) = control.player.upgrade() {
-                player.stop();
+        // Tell the worker to stop the players; a sound still in the decode queue is
+        // stopped by its own play handling, because the stop order queues behind its
+        // play request in the shared channel.
+        for sounded in &self.sounded {
+            if matches(sounded) {
+                self.output.send_stop(sounded.id);
             }
         }
-        self.engine.stop(source, path);
+        // Drop controls of the stopped sounds; the worker never sends them (or they are
+        // drained and discarded on the next tick by the id check below).
         self.sounded.retain(|s| !matches(s));
+        self.incoming.clear();
+        self.output.drain_controls(&mut self.incoming);
+        self.incoming.clear();
+        self.engine.stop(source, path);
     }
 
     /// Set the listener (camera) position and yaw for attenuation and panning.
@@ -615,48 +675,72 @@ impl SoundSystem {
     }
 
     /// 20 Hz: recompute gains, push them and the pitches to the playing sounds, and drop
-    /// finished sounds from the engine.
+    /// finished sounds from the engine. Allocates nothing when no sound started since the
+    /// last tick (all scratch buffers are fields, cleared and refilled in place).
     pub fn tick(&mut self) {
         self.engine.tick();
         if !self.output.is_live() {
             return;
         }
-        // Adopt the controls of players the worker created since the last tick.
-        let controls = self.output.controls();
+        // Adopt the controls of players the worker created since the last tick. Both this
+        // queue and `sounded` are ordered by id (ids are handed out in play order and the
+        // worker queues controls in the order plays arrive), so one merge pass matches
+        // them with no per-sound scan.
+        self.incoming.clear();
+        self.output.drain_controls(&mut self.incoming);
+        let mut next_incoming = 0;
         for sounded in &mut self.sounded {
-            if sounded.controls.is_none() {
-                if let Some((_, control)) = controls.iter().find(|(id, _)| *id == sounded.id) {
-                    sounded.controls = Some(control.clone());
+            if sounded.controls.is_some() {
+                continue;
+            }
+            if self
+                .incoming
+                .get(next_incoming)
+                .is_some_and(|c| c.id == sounded.id)
+            {
+                sounded.controls = Some(self.incoming[next_incoming].clone());
+                next_incoming += 1;
+            }
+        }
+        // Anything still queued belongs to a sound this side no longer tracks (stopped
+        // before adoption); its player was stopped by the worker.
+        self.finished.clear();
+        {
+            let (mut gains, mut pitches) = (self.engine.gains(), self.engine.pitches());
+            for (i, sounded) in self.sounded.iter().enumerate() {
+                // The iterators yield one item per sound, in play order; every branch
+                // consumes exactly one pair so the next sound reads its own values.
+                let Some(control) = &sounded.controls else {
+                    let _ = (gains.next(), pitches.next()); // still decoding
+                    continue;
+                };
+                // A gone player was pruned by the worker: it played through.
+                let player = match control.player.upgrade() {
+                    Some(player) => player,
+                    None => {
+                        self.finished.push(i);
+                        let _ = (gains.next(), pitches.next());
+                        continue;
+                    }
+                };
+                if player.empty() {
+                    self.finished.push(i);
+                    let _ = (gains.next(), pitches.next());
+                    continue;
+                }
+                if let Some((left, right)) = gains.next() {
+                    *control.gains.lock().unwrap() = (left, right);
+                }
+                if let Some(pitch) = pitches.next() {
+                    player.set_speed(pitch);
                 }
             }
         }
-        let gains: Vec<(f32, f32)> = self.engine.gains().collect();
-        let pitches: Vec<f32> = self.engine.pitches().collect();
-        let mut finished = Vec::new();
-        for (i, sounded) in self.sounded.iter().enumerate() {
-            let Some(control) = &sounded.controls else {
-                continue; // still decoding
-            };
-            // A gone player was pruned by the worker: it played through.
-            let Some(player) = control.player.upgrade() else {
-                finished.push(i);
-                continue;
-            };
-            if player.empty() {
-                finished.push(i);
-                continue;
-            }
-            if let Some(&(left, right)) = gains.get(i) {
-                *control.gains.lock().unwrap() = (left, right);
-            }
-            if let Some(&pitch) = pitches.get(i) {
-                player.set_speed(pitch);
-            }
-        }
-        // Highest index first so the lower indices stay valid.
-        for i in finished.into_iter().rev() {
-            self.engine.remove(i);
-            self.sounded.remove(i);
+        // Highest index first so the lower indices stay valid. The engine iterators are
+        // dropped by now, so `remove` can borrow the engine again.
+        for i in self.finished.iter().rev() {
+            self.engine.remove(*i);
+            self.sounded.remove(*i);
         }
     }
 
@@ -717,6 +801,7 @@ mod tests {
     fn silent_output_accepts_every_call() {
         let output = AudioOutput::silent();
         assert!(!output.is_live());
+        let mut drained = Vec::new();
         output.send(PlayRequest {
             id: 0,
             path: "sounds/dig/stone1.ogg".into(),
@@ -725,7 +810,6 @@ mod tests {
             gains: (1.0, 1.0),
             pitch: 1.0,
         });
-        assert!(output.controls().is_empty());
         output.send(PlayRequest {
             id: 1,
             path: "sounds/x.ogg".into(),
@@ -734,7 +818,9 @@ mod tests {
             gains: (0.0, 0.0),
             pitch: 0.5,
         });
-        assert!(output.controls().is_empty());
+        output.drain_controls(&mut drained);
+        assert!(drained.is_empty());
+        output.send_stop(0);
     }
 
     /// The real assets when the cache is present, else `None` (the caller skips).
@@ -775,6 +861,40 @@ mod tests {
         // An unknown event does nothing.
         system.play("nope", SoundSource::Block, None, 1.0, 1.0, 1);
         assert_eq!(system.playing(), 0);
+    }
+
+    #[test]
+    fn quiet_tick_allocates_nothing() {
+        let Some(assets) = cached_assets() else {
+            return;
+        };
+        let events = SoundEvents::parse(br#"{"e": {"sounds": ["dig/stone1"]}}"#).unwrap();
+        let mut system = SoundSystem::with_output(events, assets, AudioOutput::silent());
+        system.play("e", SoundSource::Block, None, 1.0, 1.0, 1);
+        system.play("e", SoundSource::Block, None, 1.0, 1.0, 2);
+        system.play("e", SoundSource::Block, None, 1.0, 1.0, 3);
+        system.tick();
+        // After the first tick with nothing new started, the scratch buffers keep their
+        // capacity: clear() + refill reuses the allocation instead of growing it.
+        let caps = (
+            system.incoming.capacity(),
+            system.finished.capacity(),
+            system.sounded.capacity(),
+        );
+        for _ in 0..10 {
+            system.tick();
+        }
+        assert_eq!(
+            (
+                system.incoming.capacity(),
+                system.finished.capacity(),
+                system.sounded.capacity()
+            ),
+            caps
+        );
+        assert!(system.incoming.is_empty());
+        assert!(system.finished.is_empty());
+        assert_eq!(system.playing(), 3);
     }
 
     /// Opens the real device and plays `minecraft:block.note_block.harp` from the real
