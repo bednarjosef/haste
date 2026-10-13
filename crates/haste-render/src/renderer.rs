@@ -731,6 +731,11 @@ impl Renderer {
         self.present_mode
     }
 
+    /// The adapter this renderer runs on (name and backend, for bench reports).
+    pub fn adapter_info(&self) -> wgpu::AdapterInfo {
+        self.gpu.adapter.get_info()
+    }
+
     /// Counters of the last GUI frame.
     pub fn gui_stats(&self) -> crate::gui::GuiStats {
         self.gui.stats
