@@ -118,6 +118,7 @@ impl Session {
             net::new_entity_store(entity_types),
             view_distance,
         ));
+        *shared.sound.lock() = open_sounds(regs, &shared.data, &options.sound);
         let handle = rt.handle().clone();
         let sh = shared.clone();
         let game_thread = std::thread::Builder::new()
@@ -353,6 +354,35 @@ fn open_assets() -> anyhow::Result<haste_assets::Assets> {
         "26.3",
     )
     .with_context(|| format!("opening assets from {}", jar.display()))
+}
+
+/// The sound output for a joined game: `sounds.json` parsed from the real assets, the
+/// sound-event name table (the server's synced registry or the static one), played
+/// through the default device with the saved volumes. Without an audio device it stays
+/// silent; when the assets or `sounds.json` cannot be read the game runs without sound
+/// (logged) rather than not at all.
+fn open_sounds(
+    regs: &haste_protocol::SyncedRegistries,
+    data: &haste_data::GameData,
+    volumes: &haste_setup::options::SoundVolumes,
+) -> Option<crate::sound::Sounds> {
+    let events = (|| -> anyhow::Result<haste_audio::sounds::SoundEvents> {
+        let mut assets = open_assets()?;
+        let bytes = assets.read_asset("assets/minecraft/sounds.json")?;
+        haste_audio::sounds::SoundEvents::parse(&bytes)
+    })();
+    match events {
+        Ok(events) => Some(crate::sound::Sounds::new(
+            events,
+            open_assets().ok()?,
+            crate::sound::sound_event_names(regs, data),
+            volumes,
+        )),
+        Err(e) => {
+            tracing::warn!("sound stays off: {e:#}");
+            None
+        }
+    }
 }
 
 /// `--screenshot <file>`: join, wait until the world is meshed, render one frame offscreen,

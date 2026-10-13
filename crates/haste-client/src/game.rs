@@ -81,6 +81,9 @@ pub struct Shared {
     pub breaking: Mutex<Vec<(BlockPos, u8)>>,
     /// Input for the next tick.
     pub input: Mutex<SharedInput>,
+    /// The sound and music output (None until the client sets it up; headless leaves it
+    /// silent). Driven by the game thread only.
+    pub sound: Mutex<Option<crate::sound::Sounds>>,
     /// Ask the game thread to stop.
     pub stop: AtomicBool,
     /// Why the connection ended, once it has.
@@ -117,6 +120,7 @@ impl Shared {
             }),
             breaking: Mutex::new(Vec::new()),
             input: Mutex::new(SharedInput::default()),
+            sound: Mutex::new(None),
             stop: AtomicBool::new(false),
             closed: Mutex::new(None),
         }
@@ -250,6 +254,20 @@ fn tick_once(
             shared.dirty.lock().append(&mut dirty);
         }
     }
+    // This tick's sound packets, played through the output (when the client set one up).
+    {
+        let requests = &mut driver.session.sound_requests;
+        let mut sound = shared.sound.lock();
+        if let Some(sounds) = sound.as_mut() {
+            // Entity positions for `sound_entity`, from the store the packets just updated.
+            let entities = shared.entities.read();
+            sounds.apply(requests, |id| {
+                entities
+                    .get(haste_protocol::haste_core::EntityId(id))
+                    .map(|e| e.pos)
+            });
+        }
+    }
     // This tick's input, sampled from winit by the render thread.
     let input = {
         let mut shared_input = shared.input.lock();
@@ -284,7 +302,16 @@ fn tick_once(
     }
     let s = &driver.session;
     let (prev_eye, _, _) = s.player.camera(0.0);
-    let (eye, _, _) = s.player.camera(1.0);
+    let (eye, eye_yaw, _) = s.player.camera(1.0);
+    // The sound output's tick: listener from the eye, music situation, then 20 Hz tick.
+    {
+        let mut sound = shared.sound.lock();
+        if let Some(sounds) = sound.as_mut() {
+            let situation =
+                crate::sound::music_situation(s.player.game_mode, s.player.state.eyes_in_water);
+            sounds.tick(eye, eye_yaw, situation);
+        }
+    }
     let mut view = shared.view.lock();
     view.prev_eye = prev_eye;
     view.eye = eye;

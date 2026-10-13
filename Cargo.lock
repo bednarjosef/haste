@@ -1206,6 +1206,7 @@ dependencies = [
  "crossbeam-channel",
  "glam",
  "haste-assets",
+ "haste-audio",
  "haste-core",
  "haste-data",
  "haste-entity",

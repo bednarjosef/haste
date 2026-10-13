@@ -261,6 +261,8 @@ pub struct NetCounters {
     pub respawns: u64,
     /// Last chat/system lines (most recent last, at most 20).
     pub chat: Vec<String>,
+    /// `sound`, `sound_entity` and `stop_sound` packets seen.
+    pub sound_packets: u64,
 }
 
 /// Client-side session state the packets drive (everything except world and entities).
@@ -283,6 +285,11 @@ pub struct Session {
     pub time_of_day: Option<i64>,
     /// Set by `start_configuration` or `transfer`: the next `login` starts a new world.
     pub new_world_pending: bool,
+    /// Sound packets recorded this tick ([`crate::sound::record`]), drained by the game
+    /// thread's sound output ([`crate::sound::Sounds::apply`]); cleared at `end_tick` when
+    /// nobody drains them (headless). Reused, so a tick without sound packets allocates
+    /// nothing.
+    pub sound_requests: Vec<crate::sound::SoundRequest>,
 }
 
 impl Session {
@@ -301,6 +308,7 @@ impl Session {
             entity_boxes: Vec::new(),
             time_of_day: None,
             new_world_pending: false,
+            sound_requests: Vec::new(),
         }
     }
 
@@ -511,6 +519,12 @@ impl Session {
             P::Disconnect(d) => {
                 tracing::warn!("server disconnected us: {}", d.reason.to_plain(&|_| None))
             }
+            P::Sound(_) | P::SoundEntity(_) | P::StopSound(_) => {
+                if let Some(request) = crate::sound::record(&p) {
+                    self.counters.sound_packets += 1;
+                    self.sound_requests.push(request);
+                }
+            }
             _ => {}
         }
     }
@@ -525,6 +539,9 @@ impl Session {
         entities: &E,
         out: &mut Vec<ServerboundPlay>,
     ) {
+        // Sound requests nobody drained (headless) are dropped here; the game thread
+        // drains them between `receive` and `end_tick`.
+        self.sound_requests.clear();
         self.entity_boxes.clear();
         for id in &self.entity_ids {
             if let Some(b) = entities.hitbox(*id) {
