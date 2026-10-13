@@ -17,7 +17,7 @@ Fabric mod support (Phase 2) is not counted here.
 
 ### Launching and setup
 - ✅ Install the game files (`haste setup`): downloads 26.3 from Mojang and runs the data generator; a second run is instant
-- 🟡 Singleplayer: `haste singleplayer --world NAME` starts a local server and prints its address to join; no world list or create-world screen
+- 🟡 Singleplayer: `haste singleplayer --world NAME` starts a local world and opens the game in it; no world list or create-world screen
 - 🟡 Joining a server: `haste --server host:port` from the command line; no direct-connect screen
 - 🟡 Server list: status ping works (`haste --ping --server host:port`); no server list screen
 - 🟡 Microsoft account login: `haste login` / `haste logout` run the device-code flow and store the account, untested end to end (needs a Microsoft app id)
@@ -96,13 +96,14 @@ These run as the game's own Java code inside Haste and work against a real serve
 
 ```bash
 cargo run --release --bin haste -- setup                         # once: game files and data generator
-cargo run --release --bin haste -- singleplayer --world test     # terminal 1: local server, prints its address
-cargo run --release --bin haste -- --server 127.0.0.1:PORT       # terminal 2: the game window
+cargo run --release --bin haste -- singleplayer --world test     # a local world, opens the game window in it
+cargo run --release --bin haste -- --server host:port             # or join any offline-mode 26.3 server
 ```
 
 Any offline-mode 26.3 server works with `--server` (`--username NAME` sets the player name).
 Controls are vanilla's defaults: WASD, space, shift, ctrl, mouse to look, left click to break,
-right click to place or use, 1-9 and the mouse wheel for the hotbar, F11 for fullscreen. There is
+right click to place or use, 1-9 and the mouse wheel for the hotbar, Q / Ctrl+Q to drop, F to
+swap hands, F11 for fullscreen. There is
 no HUD in the window yet, so health and inventory are not visible.
 
 ## Build
