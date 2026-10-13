@@ -156,7 +156,10 @@ fn unload_chunk_dirties_diagonal_neighbours() {
                 continue;
             }
             for sy in -4..20 {
-                assert!(dirty.contains(&SectionPos::new(dx, sy, dz)), "missing {dx},{sy},{dz}");
+                assert!(
+                    dirty.contains(&SectionPos::new(dx, sy, dz)),
+                    "missing {dx},{sy},{dz}"
+                );
             }
         }
     }
@@ -168,7 +171,16 @@ fn load_chunk_dirties_diagonal_neighbours() {
     let mut w = World::new(overworld(), game_data());
     // a 3x3 block of chunks loaded one at a time: the last (middle) load must dirty
     // all 8 already-loaded neighbours
-    let order = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)];
+    let order = [
+        (-1, -1),
+        (-1, 0),
+        (-1, 1),
+        (0, -1),
+        (0, 1),
+        (1, -1),
+        (1, 0),
+        (1, 1),
+    ];
     for &(dx, dz) in &order {
         let cd = synthetic_chunk_data(ChunkPos::new(dx, dz), -4, 24, |_si, _x, _y, _z| STONE);
         w.load_chunk(&cd).unwrap();
@@ -181,7 +193,10 @@ fn load_chunk_dirties_diagonal_neighbours() {
     for dx in -1..=1 {
         for dz in -1..=1 {
             for sy in -4..20 {
-                assert!(dirty.contains(&SectionPos::new(dx, sy, dz)), "missing {dx},{sy},{dz}");
+                assert!(
+                    dirty.contains(&SectionPos::new(dx, sy, dz)),
+                    "missing {dx},{sy},{dz}"
+                );
             }
         }
     }
