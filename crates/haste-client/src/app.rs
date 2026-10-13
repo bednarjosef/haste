@@ -466,6 +466,9 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         attack: false,
         use_item: false,
         pick_block: false,
+        drop_item: false,
+        drop_stack: false,
+        swap_offhand: false,
         hotbar: None,
         scroll: 0.0,
         breaking: Vec::new(),
@@ -508,6 +511,9 @@ struct App {
     attack: bool,
     use_item: bool,
     pick_block: bool,
+    drop_item: bool,
+    drop_stack: bool,
+    swap_offhand: bool,
     hotbar: Option<u8>,
     /// Scroll wheel steps not yet turned into a slot change.
     scroll: f64,
@@ -564,6 +570,9 @@ impl App {
         i.attack = self.attack;
         i.use_item = self.use_item;
         i.pick_block |= std::mem::take(&mut self.pick_block);
+        i.drop_item |= std::mem::take(&mut self.drop_item);
+        i.drop_stack |= std::mem::take(&mut self.drop_stack);
+        i.swap_offhand |= std::mem::take(&mut self.swap_offhand);
         if let Some(slot) = self.hotbar.take() {
             i.hotbar = Some(slot);
         }
@@ -734,6 +743,17 @@ impl ApplicationHandler for App {
                         }
                         _ if self.grabbed && self.focused && hotbar_key(code).is_some() => {
                             self.hotbar = hotbar_key(code);
+                        }
+                        KeyCode::KeyQ if self.grabbed && self.focused => {
+                            // Ctrl+Q drops the whole stack, plain Q one item.
+                            if self.keys.contains(&KeyCode::ControlLeft) {
+                                self.drop_stack = true;
+                            } else {
+                                self.drop_item = true;
+                            }
+                        }
+                        KeyCode::KeyF if self.grabbed && self.focused => {
+                            self.swap_offhand = true;
                         }
                         KeyCode::F11 => {
                             if let Some(w) = &self.window {
