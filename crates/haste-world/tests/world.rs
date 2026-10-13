@@ -204,6 +204,64 @@ fn load_chunk_dirties_diagonal_neighbours() {
     assert_eq!(dirty.len(), 9 * 24);
 }
 
+/// The dirty bitset lives per chunk: re-marking a chunk that is already dirty does not
+/// duplicate its sections in the drain, and a chunk replaced or unloaded while dirty
+/// still reports exactly its own sections once.
+#[test]
+fn dirty_bitset_dedups_and_survives_reload() {
+    let mut w = World::new(overworld(), game_data());
+    let load = |w: &mut World| {
+        let cd = synthetic_chunk_data(ChunkPos::new(0, 0), -4, 24, |_si, _x, _y, _z| STONE);
+        w.load_chunk(&cd).unwrap();
+    };
+    load(&mut w);
+    // a block change marks one section of an already-dirty chunk
+    w.set_block(BlockPos::new(5, 8, 5), DIRT);
+    let _ = w.take_dirty_sections();
+    assert!(w.take_dirty_sections().is_empty());
+
+    // reload (replace) the chunk: 24 sections, each exactly once
+    load(&mut w);
+    w.set_block(BlockPos::new(5, 8, 5), DIRT);
+    let mut dirty = w.take_dirty_sections();
+    assert_eq!(
+        dirty
+            .iter()
+            .filter(|p| **p == SectionPos::new(0, 0, 0))
+            .count(),
+        1
+    );
+    dirty.retain(|p| *p != SectionPos::new(0, 0, 0));
+    assert_eq!(dirty.len(), 23);
+
+    // unloaded before the drain: its sections are gone, the neighbours' stay
+    load(&mut w);
+    w.unload_chunk(ChunkPos::new(0, 0));
+    let dirty = w.take_dirty_sections();
+    assert!(dirty.iter().all(|p| p.chunk() != ChunkPos::new(0, 0)));
+}
+
+/// A section marked in a chunk that is not loaded reaches the drain (as before the
+/// bitset: `set_block` on a border block marks the neighbour chunk's section).
+#[test]
+fn dirty_bitset_keeps_unloaded_neighbour_marks() {
+    let mut w = World::new(overworld(), game_data());
+    let cd = synthetic_chunk_data(ChunkPos::new(0, 0), -4, 24, |_si, _x, _y, _z| STONE);
+    w.load_chunk(&cd).unwrap();
+    let _ = w.take_dirty_sections();
+    w.set_block(BlockPos::new(0, 100, 5), DIRT);
+    // twice on the same border block: the unloaded section appears once
+    w.set_block(BlockPos::new(0, 100, 5), STONE);
+    let dirty = w.take_dirty_sections();
+    assert_eq!(dirty_set(dirty.clone()), {
+        let mut s = std::collections::HashSet::new();
+        s.insert(SectionPos::new(0, 6, 0));
+        s.insert(SectionPos::new(-1, 6, 0));
+        s
+    });
+    assert_eq!(dirty.len(), 2);
+}
+
 /// The exact dirty-section set a `set_block` at (x, y, z) must produce.
 fn dirty_set(dirty: Vec<SectionPos>) -> std::collections::HashSet<SectionPos> {
     dirty.into_iter().collect()

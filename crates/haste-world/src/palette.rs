@@ -274,7 +274,17 @@ impl<T: WireId> PalettedContainer<T> {
     }
 
     /// Indirect container from a palette and per-entry global ids (used by the test encoder).
+    /// A palette with a single entry is a single-value container: it is stored as
+    /// `Storage::Single`, without a data array, exactly as vanilla's zero-bits
+    /// configuration does (`Strategy::ZERO_BITS`).
     pub fn indirect(palette: Vec<u32>, values: &[u32]) -> Self {
+        if palette.len() == 1 && values.iter().all(|&v| v == palette[0]) {
+            return Self {
+                storage: Storage::Single(palette[0]),
+                capacity: values.len(),
+                _marker: std::marker::PhantomData,
+            };
+        }
         let bits = bits_for(palette.len());
         let mut data = PackedArray {
             bits,
@@ -655,6 +665,64 @@ mod tests {
         let c: BlockContainer = PalettedContainer::decode(&mut r, BLOCKS_PER_SECTION, 15).unwrap();
         assert_eq!(c.get_index(0), 7);
         assert_eq!(c.get_index(4095), 7);
+    }
+
+    /// Vanilla's `Strategy::createForBiomes` maps bits-per-entry 0 to the zero-bits
+    /// configuration: a single value with NO data array on the wire. Our biome storage
+    /// must be `Single` too (no palette, no packed longs), for block capacity and for
+    /// the 64-entry biome capacity alike.
+    #[test]
+    fn single_value_biome_container_has_no_data_array() {
+        for (value, bits) in [(0u32, 3u8), (42, 7)] {
+            let mut w = WireWriter::new();
+            w.varint(0); // bpe 0
+            w.varint(value);
+            let mut r = WireReader::new(&w.data);
+            let c: BiomeContainer =
+                PalettedContainer::decode(&mut r, BIOMES_PER_SECTION, bits).unwrap();
+            assert!(matches!(c.storage, Storage::Single(v) if v == value));
+            // no data array was on the wire: nothing left to read
+            assert_eq!(r.remaining(), 0);
+            // every cell reads the value, at cell coordinates and flat
+            for &(x, y, z) in &[(0u8, 0u8, 0u8), (3, 3, 3), (1, 2, 0)] {
+                assert_eq!(c.get_biome(x, y, z), haste_core::BiomeId(value));
+            }
+            assert_eq!(c.get_index(0), value);
+            assert_eq!(c.get_index(63), value);
+            // round trip: encode writes bpe 0 + the value and nothing else
+            let mut w2 = WireWriter::new();
+            c.encode(&mut w2, bits);
+            assert_eq!(w2.data, w.data);
+        }
+    }
+
+    /// The one-entry palette of `indirect` is the same thing as a single-value container.
+    #[test]
+    fn indirect_with_one_entry_is_single_value() {
+        let blocks = BlockContainer::indirect(vec![9], &[9; BLOCKS_PER_SECTION]);
+        assert!(matches!(blocks.storage, Storage::Single(9)));
+        assert_eq!(blocks.get_index(1234), 9);
+        let biomes = BiomeContainer::indirect(vec![4], &[4, 4, 4, 4]);
+        assert!(matches!(biomes.storage, Storage::Single(4)));
+        assert_eq!(biomes.get_index(3), 4);
+        // a differing entry keeps the indirect form (the palette cannot express it)
+        let mixed = BlockContainer::indirect(vec![9], &[9, 9, 8]);
+        assert!(matches!(mixed.storage, Storage::Indirect { .. }));
+    }
+
+    /// A biome container stored as a single value promotes to an indirect palette on the
+    /// first `set_index`, keeping the 64-entry capacity.
+    #[test]
+    fn single_value_biome_promotes_on_set() {
+        let mut c = BiomeContainer::single_biome(3);
+        assert_eq!(c.set_index(biome_flat_index(1, 2, 3), 5, 3), 3);
+        assert!(matches!(c.storage, Storage::Indirect { .. }));
+        assert_eq!(c.get_index(biome_flat_index(1, 2, 3)), 5);
+        assert_eq!(c.get_index(0), 3);
+        assert_eq!(c.get_index(63), 3);
+        let mut c = BlockContainer::single(6);
+        assert_eq!(c.set_index(1000, 6, 15), 6); // same value: no promotion
+        assert!(matches!(c.storage, Storage::Single(6)));
     }
 
     #[test]
