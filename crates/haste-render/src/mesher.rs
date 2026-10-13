@@ -673,7 +673,6 @@ fn mesh_fluid(
     fluid: crate::fluid::FluidState,
     sink: &mut MeshSink,
 ) {
-    use crate::fluid::Fluid;
     let block_pos = ctx.origin.add(lx, ly, lz);
     let mut quads = std::mem::take(&mut *ctx.fluid_scratch);
     quads.clear();
@@ -685,16 +684,16 @@ fn mesh_fluid(
         crate::fluid::fluid_quads(&view, &ctx.tables.fluids, block_pos, fluid, &mut quads);
     }
     if !quads.is_empty() {
-        let tint = match fluid.fluid {
-            Fluid::Water => block_tint(
+        let tint = match ctx.tables.fluids.defs.def(fluid.fluid).tint {
+            crate::fluid::FluidTint::BiomeWater => block_tint(
                 ctx.snapshot,
                 ctx.tables,
                 crate::tint::TintKind::Water,
                 block_pos,
             ),
-            Fluid::Lava => TINT_WHITE,
+            crate::fluid::FluidTint::None => TINT_WHITE,
         };
-        let layer = crate::fluid::fluid_layer(fluid.fluid);
+        let layer = crate::fluid::fluid_layer(&ctx.tables.fluids.defs, fluid.fluid);
         let own = ctx.snapshot.light(block_pos);
         let top_light = max_light(own, ctx.snapshot.light(block_pos.add(0, 1, 0)));
         let bottom_light = max_light(own, ctx.snapshot.light(block_pos.add(0, -1, 0)));

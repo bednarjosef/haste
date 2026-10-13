@@ -181,6 +181,9 @@ impl BlockStateTable for BlockStates {
     fn len(&self) -> usize {
         BlockStates::len(self)
     }
+    fn placeholder_state(&self) -> BlockStateId {
+        BlockStates::placeholder_state(self)
+    }
     fn block_of(&self, state: BlockStateId) -> &haste_core::Identifier {
         BlockStates::block_of(self, state)
     }

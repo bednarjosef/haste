@@ -24,10 +24,26 @@ struct StateShapes {
 pub struct BlockShapes {
     shapes: Vec<StateShapes>,
     oracle_backed: bool,
+    /// Placeholder for ids outside the table: `minecraft:stone`'s default state. A modded
+    /// server can send ids past the end of the table; every lookup below resolves them to
+    /// this state's entry instead of panicking.
+    placeholder: BlockStateId,
 }
 
 impl BlockShapes {
-    pub(crate) fn parse_oracle(json: &str, state_count: usize) -> anyhow::Result<Self> {
+    /// Table row for `state`: the id itself when in range, else the placeholder's row.
+    /// One bounds check, no allocation.
+    fn row(&self, state: BlockStateId) -> usize {
+        let id = state.0 as usize;
+        if id < self.shapes.len() {
+            id
+        } else {
+            self.placeholder.0 as usize
+        }
+    }
+
+    pub(crate) fn parse_oracle(json: &str, blocks: &BlockStates) -> anyhow::Result<Self> {
+        let state_count = blocks.len();
         // Deserializing into Vec<OracleState> buffers all ~903k floats as f64 before we convert;
         // that double-buffering is a large part of the 30 MB file's cost (see NOTES.md).
         #[derive(serde::Deserialize)]
@@ -100,6 +116,7 @@ impl BlockShapes {
         Ok(Self {
             shapes,
             oracle_backed: true,
+            placeholder: blocks.placeholder_state(),
         })
     }
 
@@ -113,6 +130,7 @@ impl BlockShapes {
         Self {
             shapes,
             oracle_backed: false,
+            placeholder: blocks.placeholder_state(),
         }
     }
 
@@ -120,21 +138,22 @@ impl BlockShapes {
         self.oracle_backed
     }
 
-    /// Light emitted by the state (0..=15); 0 in the fallback.
+    /// Light emitted by the state (0..=15); 0 in the fallback. Ids outside the table
+    /// resolve to the placeholder's entry.
     pub(crate) fn light_emission(&self, state: BlockStateId) -> u8 {
-        self.shapes[state.0 as usize].light
+        self.shapes[self.row(state)].light
     }
 
     pub(crate) fn is_air(&self, state: BlockStateId) -> bool {
-        self.shapes[state.0 as usize].air
+        self.shapes[self.row(state)].air
     }
 
     pub(crate) fn is_opaque_full(&self, state: BlockStateId) -> bool {
-        self.shapes[state.0 as usize].opaque
+        self.shapes[self.row(state)].opaque
     }
 
     pub(crate) fn fluid(&self, state: BlockStateId) -> Option<FluidInfo> {
-        self.shapes[state.0 as usize].fluid
+        self.shapes[self.row(state)].fluid
     }
 }
 
@@ -151,10 +170,10 @@ fn fluid_height(level: Option<&str>) -> f32 {
 
 impl haste_core::view::CollisionShapes for BlockShapes {
     fn collision_boxes(&self, state: BlockStateId) -> &[Aabb] {
-        &self.shapes[state.0 as usize].collision
+        &self.shapes[self.row(state)].collision
     }
     fn outline_boxes(&self, state: BlockStateId) -> &[Aabb] {
-        &self.shapes[state.0 as usize].outline
+        &self.shapes[self.row(state)].outline
     }
 }
 
@@ -314,4 +333,63 @@ fn fallback_shapes(blocks: &BlockStates, state: BlockStateId) -> StateShapes {
 fn is_full_cube(a: Aabb) -> bool {
     let d = a.max - a.min;
     (d.x - 1.0).abs() < 1e-9 && (d.y - 1.0).abs() < 1e-9 && (d.z - 1.0).abs() < 1e-9
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use haste_core::view::CollisionShapes as _;
+
+    /// air = 0, stone = 1 (the placeholder): the fallback gives stone a solid full cube.
+    const BLOCKS_JSON: &str = r#"{
+  "minecraft:air": { "states": [ { "id": 0, "default": true } ] },
+  "minecraft:stone": { "states": [ { "id": 1, "default": true } ] }
+}"#;
+
+    fn fallback_shapes() -> BlockShapes {
+        let blocks = BlockStates::parse(BLOCKS_JSON, None).unwrap();
+        BlockShapes::fallback(&blocks)
+    }
+
+    #[test]
+    fn out_of_range_ids_use_the_placeholder_entry() {
+        let s = fallback_shapes();
+        let stone = BlockStateId(1);
+        assert!(s.is_opaque_full(stone));
+        assert!(!s.is_air(stone));
+        assert_eq!(s.collision_boxes(stone).len(), 1);
+        for id in [2u32, 100, u32::MAX] {
+            let unknown = BlockStateId(id);
+            assert_eq!(s.light_emission(unknown), s.light_emission(stone));
+            assert_eq!(s.is_air(unknown), s.is_air(stone));
+            assert_eq!(s.is_opaque_full(unknown), s.is_opaque_full(stone));
+            assert_eq!(s.fluid(unknown), s.fluid(stone));
+            assert_eq!(s.collision_boxes(unknown), s.collision_boxes(stone));
+            assert_eq!(s.outline_boxes(unknown), s.outline_boxes(stone));
+        }
+    }
+
+    #[test]
+    fn oracle_backed_shapes_are_total_too() {
+        let blocks = BlockStates::parse(BLOCKS_JSON, None).unwrap();
+        let oracle = r#"{
+  "version": 1,
+  "states": [
+    { "id": 0, "air": true, "collision": [], "outline": [], "light": 0, "opaque": false },
+    { "id": 1, "air": false, "collision": [[0,0,0,1,1,1]], "outline": [[0,0,0,1,1,1]], "light": 0, "opaque": true }
+  ]
+}"#;
+        let s = BlockShapes::parse_oracle(oracle, &blocks).unwrap();
+        assert!(s.is_oracle_backed());
+        let stone = blocks.placeholder_state();
+        for id in [2u32, u32::MAX] {
+            let unknown = BlockStateId(id);
+            assert_eq!(s.collision_boxes(unknown), s.collision_boxes(stone));
+            assert_eq!(s.outline_boxes(unknown), s.outline_boxes(stone));
+            assert_eq!(s.is_opaque_full(unknown), s.is_opaque_full(stone));
+            assert_eq!(s.is_air(unknown), s.is_air(stone));
+            assert_eq!(s.light_emission(unknown), s.light_emission(stone));
+            assert_eq!(s.fluid(unknown), s.fluid(stone));
+        }
+    }
 }
