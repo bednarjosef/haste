@@ -13,6 +13,7 @@ use clap::Parser;
 mod app;
 mod game;
 mod headless;
+mod launch;
 mod net;
 mod player;
 mod ui;
@@ -64,6 +65,9 @@ pub struct Args {
     /// Close the window after this many seconds (unattended runs).
     #[arg(long)]
     pub window_seconds: Option<u64>,
+    /// Subcommand (setup, singleplayer). Omit for the normal launcher flow.
+    #[command(subcommand)]
+    pub command: Option<launch::Command>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -73,6 +77,9 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
     let args = Args::parse();
+    if let Some(cmd) = args.command {
+        return launch::run(cmd);
+    }
     if args.ping {
         let addr = args
             .server
