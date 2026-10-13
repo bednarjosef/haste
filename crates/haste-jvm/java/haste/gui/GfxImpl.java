@@ -394,8 +394,8 @@ public final class GfxImpl {
         if (y + h + 4 > height) y = height - h - 4;
         if (y < 4) y = 4;
         POSE.reset();
-        GuiBatch.op(GuiBatch.SPRITE, GuiBatch.str("minecraft:tooltip/background"), x - 3 - 9, y - 3 - 9, w + 6 + 18, h + 6 + 18, -1);
-        GuiBatch.op(GuiBatch.SPRITE, GuiBatch.str("minecraft:tooltip/frame"), x - 3 - 9, y - 3 - 9, w + 6 + 18, h + 6 + 18, -1);
+        GuiBatch.ops(GuiBatch.SPRITE, GuiBatch.str("minecraft:tooltip/background"), x - 3 - 9, y - 3 - 9, w + 6 + 18, h + 6 + 18, -1, GuiBlend.NORMAL);
+        GuiBatch.ops(GuiBatch.SPRITE, GuiBatch.str("minecraft:tooltip/frame"), x - 3 - 9, y - 3 - 9, w + 6 + 18, h + 6 + 18, -1, GuiBlend.NORMAL);
         for (FormattedCharSequence l : tooltip) { Text.emit(l, x, y, -1, true); y += 10; }
         tooltip = null;
     }
