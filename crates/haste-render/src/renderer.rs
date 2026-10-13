@@ -23,6 +23,8 @@ pub struct Camera {
     pub yaw: f32,
     pub pitch: f32,
     pub fov_deg: f32,
+    /// Camera roll in degrees (hurt tilt; positive rolls the horizon clockwise on screen).
+    pub roll_deg: f32,
 }
 
 /// Sky/fog state for one frame.
@@ -43,6 +45,10 @@ pub struct FrameStats {
     pub chunk_sections_total: u32,
     pub meshes_pending: u32,
     pub draw_calls: u32,
+    /// Section meshes uploaded this frame (one per finished mesh written to the arenas).
+    pub uploads: u32,
+    /// Vertex+index bytes written by this frame's uploads.
+    pub upload_bytes: u64,
 }
 
 /// One frame's draw input.
@@ -132,6 +138,7 @@ mod tests {
                 yaw: 0.0,
                 pitch: 60.0,
                 fov_deg: 70.0,
+                roll_deg: 0.0,
             },
             entities: &[],
             gui: &haste_core::gui::GuiFrame::default(),
@@ -299,6 +306,9 @@ pub struct Renderer {
     /// Timings of the last frame and the GPU timestamp reader.
     timings: crate::timing::FrameTimings,
     timer: Option<crate::timing::GpuTimer>,
+    /// Mesh uploads and their bytes during the last `update_world*` call (feed phase, before
+    /// `render`): reported in `FrameStats` so the bench can attribute slow frames.
+    last_uploads: (u32, u64),
     /// Surface present mode (`set_vsync`).
     present_mode: wgpu::PresentMode,
     /// First-person arm or held item (`set_first_person`).
@@ -700,6 +710,7 @@ impl Renderer {
             overlay,
             first_person: None,
             timings: Default::default(),
+            last_uploads: (0, 0),
             timer,
             present_mode: wgpu::PresentMode::Fifo,
             nametags: Vec::new(),
@@ -840,6 +851,11 @@ impl Renderer {
     /// The surface present mode in use.
     pub fn present_mode(&self) -> wgpu::PresentMode {
         self.present_mode
+    }
+
+    /// The adapter this renderer runs on (name and backend, for bench reports).
+    pub fn adapter_info(&self) -> wgpu::AdapterInfo {
+        self.gpu.adapter.get_info()
     }
 
     /// Counters of the last GUI frame.
@@ -1055,7 +1071,7 @@ impl Renderer {
         for pos in dirty {
             self.mesher.submit_with_biomes(world, biomes, *pos);
         }
-        self.upload_finished();
+        self.last_uploads = self.upload_finished();
     }
 
     /// Like `update_world`, but the mesh workers capture the snapshots themselves from
@@ -1072,21 +1088,26 @@ impl Renderer {
             self.visible_for = None;
         }
         self.mesher.submit_from(source, dirty);
-        self.upload_finished();
+        self.last_uploads = self.upload_finished();
     }
 
-    /// Uploads finished meshes for up to 2 ms.
-    fn upload_finished(&mut self) {
+    /// Uploads finished meshes for up to 2 ms; returns (sections uploaded, bytes written).
+    fn upload_finished(&mut self) -> (u32, u64) {
         let started = std::time::Instant::now();
+        let mut uploads = 0;
+        let mut bytes = 0;
         while started.elapsed() < std::time::Duration::from_millis(2) {
             let batch = self.mesher.drain(16);
             if batch.is_empty() {
                 break;
             }
             for mesh in batch {
+                bytes += mesh.vertex_bytes() + mesh.index_bytes();
                 self.upload_mesh(mesh);
+                uploads += 1;
             }
         }
+        (uploads, bytes)
     }
 
     fn upload_mesh(&mut self, mesh: SectionMesh) {
@@ -1120,12 +1141,18 @@ impl Renderer {
             pitch.cos() * yaw.cos(),
         )
         .normalize();
+        // Roll (hurt tilt): rotate the up vector around the forward axis.
+        let up = if camera.roll_deg == 0.0 {
+            glam::Vec3::Y
+        } else {
+            glam::Quat::from_axis_angle(forward, camera.roll_deg.to_radians()) * glam::Vec3::Y
+        };
         let eye = glam::Vec3::new(
             camera.pos.x as f32,
             camera.pos.y as f32,
             camera.pos.z as f32,
         );
-        let view = glam::Mat4::look_to_rh(eye, forward, glam::Vec3::Y);
+        let view = glam::Mat4::look_to_rh(eye, forward, up);
         proj * view
     }
 
@@ -1615,6 +1642,8 @@ impl Renderer {
             chunk_sections_drawn: drawn,
             chunk_sections_total: sections_total,
             meshes_pending: self.mesher.pending_len() as u32,
+            uploads: self.last_uploads.0,
+            upload_bytes: self.last_uploads.1,
             draw_calls,
         })
     }

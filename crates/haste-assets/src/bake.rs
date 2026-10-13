@@ -51,7 +51,14 @@ impl BlocksJsonStates {
                 let props = state
                     .properties
                     .as_ref()
-                    .map(|p| p.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                    .map(|p| {
+                        let mut kv: Vec<(String, String)> =
+                            p.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                        // The properties come from a HashMap; sort them so a state's
+                        // property list is the same in every process.
+                        kv.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+                        kv
+                    })
                     .unwrap_or_default();
                 by_id.push((state.id as usize, name.clone(), props));
             }
@@ -311,15 +318,14 @@ fn bake_refs(
         for el in &res.elements {
             let from = [el.from[0] / 16.0, el.from[1] / 16.0, el.from[2] / 16.0];
             let to = [el.to[0] / 16.0, el.to[1] / 16.0, el.to[2] / 16.0];
-            for (face_name, face) in &el.faces {
-                let Some(dir) = Direction::parse(face_name) else {
-                    continue;
-                };
+            // `faces` is a BTreeMap keyed by direction in vanilla's order, so the
+            // quads of an element always come out in the same order.
+            for (dir, face) in &el.faces {
                 let Some(tex) = face_texture_id(&face.texture, &res.textures) else {
                     continue;
                 };
-                let positions = face_positions(dir, from, to);
-                let uvs = face_uvs(dir, from, to, face.uv.as_ref(), face.rotation);
+                let positions = face_positions(*dir, from, to);
+                let uvs = face_uvs(*dir, from, to, face.uv.as_ref(), face.rotation);
                 let mut positions = apply_element_rotation(positions, &el.rotation);
                 let mut cullface = face.cullface.as_deref().and_then(Direction::parse);
                 if r.x != 0 || r.y != 0 {
@@ -336,7 +342,7 @@ fn bake_refs(
                     cullface,
                     shade_face,
                     tint_index: face.tint_index.and_then(|i| u32::try_from(i).ok()),
-                    direction: dir,
+                    direction: *dir,
                 });
             }
         }
@@ -485,6 +491,76 @@ mod tests {
             ),
             RenderLayer::Cutout
         );
+    }
+
+    /// A cube with all six faces, written to the JSON in a scrambled order (the file's
+    /// key order is irrelevant: baking must always produce vanilla's face order).
+    const CUBE_MODEL: &str = r##"{
+        "textures": {"all": "minecraft:block/stone"},
+        "elements": [{
+            "from": [0, 0, 0],
+            "to": [16, 16, 16],
+            "faces": {
+                "east": {"texture": "#all"},
+                "north": {"texture": "#all"},
+                "west": {"texture": "#all", "rotation": 90},
+                "south": {"texture": "#all"},
+                "up": {"texture": "#all"},
+                "down": {"texture": "#all"}
+            }
+        }]
+    }"##;
+
+    /// Fresh parse -> resolved model -> baked quads, the path `BakedBlockModels::bake`
+    /// runs per model.
+    fn bake_cube() -> Vec<BakedQuad> {
+        let file: crate::model::ModelFile = serde_json::from_str(CUBE_MODEL).unwrap();
+        let mut textures = HashMap::new();
+        textures.insert("all".to_string(), "minecraft:block/stone".to_string());
+        let resolved = ResolvedModel {
+            textures,
+            elements: file.elements,
+            ambientocclusion: true,
+            gui_light: false,
+            gui_display: None,
+            firstperson_display: None,
+        };
+        let mut resolved_models = HashMap::new();
+        resolved_models.insert("minecraft:block/cube".to_string(), resolved);
+        let refs = [ModelRef {
+            model: "minecraft:block/cube".to_string(),
+            x: 0,
+            y: 0,
+            uvlock: false,
+        }];
+        bake_refs(&refs, &resolved_models).unwrap()
+    }
+
+    #[test]
+    fn baked_quads_identical_across_fresh_parses() {
+        let first = bake_cube();
+        let second = bake_cube();
+        assert_eq!(first.len(), 6, "one quad per face");
+        // Same order, not just the same set: `ElementDef.faces` was a HashMap, so the
+        // quad order (and the mesher's vertex order) differed per process.
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn baked_faces_come_in_vanilla_order() {
+        let quads = bake_cube();
+        let dirs: Vec<Direction> = quads.iter().map(|q| q.direction).collect();
+        assert_eq!(dirs, Direction::ALL, "down, up, north, south, west, east");
+        let file: crate::model::ModelFile = serde_json::from_str(CUBE_MODEL).unwrap();
+        let faces: Vec<Direction> = file.elements[0].faces.keys().copied().collect();
+        assert_eq!(faces, Direction::ALL.to_vec());
+        // Unknown face names are skipped, not parsed into geometry.
+        let partial: crate::model::ModelFile = serde_json::from_str(
+            r##"{"elements":[{"from":[0,0,0],"to":[16,16,16],
+                 "faces":{"up":{"texture":"#all"},"inside":{"texture":"#all"}}}]}"##,
+        )
+        .unwrap();
+        assert_eq!(partial.elements[0].faces.len(), 1);
     }
 
     #[test]
