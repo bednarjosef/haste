@@ -36,6 +36,8 @@ pub struct ViewState {
     pub look_offset: (f32, f32),
     /// When the last tick finished (partial tick is measured from here).
     pub tick_at: Instant,
+    /// Game ticks since join (animated atlas textures play at this tick).
+    pub animation_tick: u64,
     /// Whether the server has placed the player yet.
     pub has_position: bool,
     /// Player feet position after the last tick (`PlayerState::pos`).
@@ -106,6 +108,7 @@ impl Shared {
                 eye: DVec3::ZERO,
                 look_offset: (0.0, 0.0),
                 tick_at: Instant::now(),
+                animation_tick: 0,
                 has_position: false,
                 feet: DVec3::ZERO,
                 eye_height: 0.0,
@@ -256,9 +259,13 @@ fn tick_once(
         if std::mem::take(&mut shared_input.toggle_flight) {
             driver.session.player.toggle_flight();
         }
-        // Held buttons stay; the press-only middle click and the hotbar choice are consumed.
+        // Held buttons stay; the press-only middle click, drop/swap presses and the hotbar choice
+        // are consumed.
         let interact = shared_input.interact;
         shared_input.interact.pick_block = false;
+        shared_input.interact.drop_item = false;
+        shared_input.interact.drop_stack = false;
+        shared_input.interact.swap_offhand = false;
         shared_input.interact.hotbar = None;
         driver.session.player.set_interact(interact);
         shared_input.state
@@ -286,6 +293,7 @@ fn tick_once(
     view.eye = eye;
     view.look_offset = s.player.look_offset();
     view.tick_at = Instant::now();
+    view.animation_tick = view.animation_tick.wrapping_add(1);
     view.has_position = s.player.has_position;
     view.feet = s.player.state.pos;
     view.eye_height = s.player.eye_height();

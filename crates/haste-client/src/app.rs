@@ -303,7 +303,7 @@ fn frame_view(
     pitch: f32,
     fov_deg: f32,
     now: Instant,
-) -> (Camera, SkyState, f32, i32) {
+) -> (Camera, SkyState, f32, i32, u64) {
     let view = *shared.view.lock();
     let partial = game::partial_tick(view.tick_at, now);
     let camera = Camera {
@@ -321,7 +321,13 @@ fn frame_view(
         fog_start: fog_end * 0.75,
         fog_end,
     };
-    (camera, sky, partial, view.view_distance)
+    (
+        camera,
+        sky,
+        partial,
+        view.view_distance,
+        view.animation_tick,
+    )
 }
 
 /// Number keys 1-9 select hotbar slots 0-8.
@@ -379,7 +385,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut stats;
     let mut last_camera;
     loop {
-        let (mut camera, sky, partial, vd) = frame_view(
+        let (mut camera, sky, partial, vd, animation_tick) = frame_view(
             &shared,
             0.0,
             0.0,
@@ -415,6 +421,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             breaking: &breaking,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
+        renderer.set_animation_tick(animation_tick);
         stats = renderer.render(&frame)?;
         frames += 1;
         let placed = shared.view.lock().has_position;
@@ -505,6 +512,9 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         attack: false,
         use_item: false,
         pick_block: false,
+        drop_item: false,
+        drop_stack: false,
+        swap_offhand: false,
         hotbar: None,
         scroll: 0.0,
         breaking: Vec::new(),
@@ -550,6 +560,9 @@ struct App {
     attack: bool,
     use_item: bool,
     pick_block: bool,
+    drop_item: bool,
+    drop_stack: bool,
+    swap_offhand: bool,
     hotbar: Option<u8>,
     /// Scroll wheel steps not yet turned into a slot change.
     scroll: f64,
@@ -609,6 +622,9 @@ impl App {
         i.attack = self.attack;
         i.use_item = self.use_item;
         i.pick_block |= std::mem::take(&mut self.pick_block);
+        i.drop_item |= std::mem::take(&mut self.drop_item);
+        i.drop_stack |= std::mem::take(&mut self.drop_stack);
+        i.swap_offhand |= std::mem::take(&mut self.swap_offhand);
         if let Some(slot) = self.hotbar.take() {
             i.hotbar = Some(slot);
         }
@@ -637,7 +653,7 @@ impl App {
         self.sample_input();
         let renderer = self.renderer.as_mut().expect("checked above");
         let t0 = Instant::now();
-        let (camera, sky, partial, vd) = frame_view(
+        let (camera, sky, partial, vd, animation_tick) = frame_view(
             &self.shared,
             self.yaw,
             self.pitch,
@@ -664,6 +680,7 @@ impl App {
         };
         // Outline boxes of the target and the states of breaking blocks (one short read lock).
         renderer.sample_world(&*self.shared.world.read(), &self.shared.data.shapes, &frame);
+        renderer.set_animation_tick(animation_tick);
         if self.screenshot {
             self.screenshot = false;
             renderer.request_capture();
@@ -806,6 +823,17 @@ impl ApplicationHandler for App {
                         }
                         _ if self.grabbed && self.focused && hotbar_key(code).is_some() => {
                             self.hotbar = hotbar_key(code);
+                        }
+                        KeyCode::KeyQ if self.grabbed && self.focused => {
+                            // Ctrl+Q drops the whole stack, plain Q one item.
+                            if self.keys.contains(&KeyCode::ControlLeft) {
+                                self.drop_stack = true;
+                            } else {
+                                self.drop_item = true;
+                            }
+                        }
+                        KeyCode::KeyF if self.grabbed && self.focused => {
+                            self.swap_offhand = true;
                         }
                         KeyCode::F11 => {
                             if let Some(w) = &self.window {
