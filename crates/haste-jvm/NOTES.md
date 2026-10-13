@@ -186,6 +186,26 @@ proxies are generated per checkout (`cache/proxies/26.3-<hash>`). `ItemStack`, `
 - Generated superclasses that shadow allowed classes: `ReentrantBlockableEventLoop`, `BlockableEventLoop`
   (Minecraft's), `RecipeBookComponent`.
 
+Session 3 (title-screens branch; the Title, Options and Multiplayer screens of the menu):
+- `Panorama` is a tier-2 proxy (one canonical instance, `GameRenderer.panorama()`): `startSpin/holdSpin`
+  keep the spin state, `extractRenderState` contributes nothing to a frame - Rust's renderer draws the
+  rotating cube map later.
+- `Minecraft`: `allowsTelemetry` false (Haste sends no telemetry), `isTextFilteringEnabled` false (no
+  player reporting; the options screen saves its settings through it), `checkModStatus`
+  `ModCheck(PROBABLY_NOT, "haste")` (no mods in phase 1), `splashManager` a real `SplashManager` with no
+  user - Haste runs no resource reload, so no splash object and the title screen draws no splash text yet.
+- `Window`: `getPreferredFullscreenVideoMode` empty (the display mode is Rust's decision).
+- `loader`: `net/minecraft/client/resources/SplashManager` allow-listed (a helper the GUI reaches).
+- `Bridge.open` is atomic: a screen whose `init` throws is dropped before the exception reaches Rust
+  (`Gui.setScreen` leaves the new screen set even when `init` throws, so the next open would call
+  `removed()` on half of it).
+- Still blocking the title screen: `RealmsNotificationsScreen` (`NoClassDefFoundError` from
+  `TitleScreen.init`; `com/mojang/` is deny-listed). A tier-2 proxy cannot work: a `class` line generates
+  the whole superclass chain (`RealmsScreen` -> `Screen`) and would replace every real vanilla screen.
+  Allow-listing the real class starts `RealmsAvailability`'s async availability check, which dies on the
+  denied `RealmsClient` and its exception surfaces through `Bridge.render`. Needs a Gen feature (a proxy
+  with a real super chain and a ctor that passes through) or a realms stub - roadmap decision.
+
 ## Canonical proxies and handles
 Java keeps one proxy per Rust object for the JVM's lifetime (`haste.gui.Proxies`): singletons for Minecraft, Gui,
 Hud, Font, Options, Window, LocalPlayer, Inventory, services; `ItemStack` per inventory slot (handle = slot,

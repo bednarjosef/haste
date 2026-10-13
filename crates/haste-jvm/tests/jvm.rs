@@ -325,7 +325,7 @@ fn pause_screen() {
 }
 
 #[test]
-#[ignore = "TitleScreen.<init> throws NoClassDefFoundError: net/minecraft/client/renderer/Panorama is deny-listed (crates/haste-jvm/src/loader.rs DENY)"]
+#[ignore = "TitleScreen.init throws NoClassDefFoundError: com/mojang/realmsclient/gui/screens/RealmsNotificationsScreen is deny-listed; a tier-2 proxy would regenerate the Screen chain, see NOTES.md"]
 fn title_screen() {
     let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
     let h = host();
@@ -351,7 +351,7 @@ fn title_screen() {
 }
 
 #[test]
-#[ignore = "OptionsScreen.init throws UnsupportedOperationException: net/minecraft/client/Minecraft#allowsTelemetry()Z is an unimplemented proxy stub (no impl in haste/gui/ClientImpl)"]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
 fn options_screen() {
     let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
     let h = host();
@@ -366,14 +366,16 @@ fn options_screen() {
     let f = render(&h, (0.0, 0.0));
     dump(&f);
     let t = texts(&f);
-    for want in ["Options", "Done"] {
+    for want in [
+        "Options",
+        "Done",
+        // the FOV slider at the default value, and two of the setting buttons
+        "FOV: Normal",
+        "Skin Customization...",
+        "Music & Sounds...",
+    ] {
         assert!(t.iter().any(|x| x == want), "missing {want:?} in {t:?}");
     }
-    // the FOV slider at the head of the screen ("FOV: normal" at the default value)
-    assert!(
-        t.iter().any(|x| x.starts_with("FOV")),
-        "missing the FOV slider in {t:?}"
-    );
     let unimpl = h.unimplemented().unwrap();
     assert!(
         unimpl.is_empty(),
@@ -382,7 +384,7 @@ fn options_screen() {
 }
 
 #[test]
-#[ignore = "its parent TitleScreen cannot be built (Panorama deny-listed), and JoinMultiplayerScreen.init needs net/minecraft/client/multiplayer/ServerList (denied too)"]
+#[ignore = "JoinMultiplayerScreen.<init> throws NoClassDefFoundError: net/minecraft/client/multiplayer/ServerStatusPinger is deny-listed (its init then needs ServerList too), see crates/haste-jvm/src/loader.rs DENY"]
 fn multiplayer_screen() {
     let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
     let h = host();

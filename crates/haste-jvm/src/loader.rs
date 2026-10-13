@@ -60,6 +60,8 @@ pub const ALLOW_CLASSES: &[&str] = &[
     "net/minecraft/client/NarratorStatus",
     "net/minecraft/client/ComponentCollector",
     "net/minecraft/client/ScrollWheelHandler",
+    // the title screen asks the HUD for the splash text; its reload listener does not run in Haste
+    "net/minecraft/client/resources/SplashManager",
     "net/minecraft/client/Options",
     "net/minecraft/client/OptionInstance",
     "net/minecraft/client/ToggleKeyMapping",
