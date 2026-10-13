@@ -88,6 +88,15 @@ pub const ALLOW_CLASSES: &[&str] = &[
     "net/minecraft/server/level/ParticleStatus",
     "net/minecraft/client/CameraType",
     "net/minecraft/client/DeltaTracker",
+    // A render pipeline is GPU state, but a pipeline *object* is only data (a location, a blend function):
+    // Haste's tier-2 RenderPipelines holds the GUI's, built through vanilla's own builder out of these value
+    // types, and GfxImpl reads the blend function off them (see haste.gui.Pipelines). No shader is compiled,
+    // no backend is asked for anything, nothing else of the renderer runs.
+    "com/mojang/renderpearl/api/GpuFormat",
+    "com/mojang/renderpearl/api/pipeline/",
+    "com/mojang/renderpearl/api/vertex/",
+    // the builder's (empty) shader-defines map; same value-type reasoning
+    "net/minecraft/client/renderer/ShaderDefines",
 ];
 
 /// The client engine (rendering, sound, window, the `Minecraft` object, the connection) and the
