@@ -171,6 +171,7 @@ impl Rig {
         };
         r.tick(InteractInput::default());
         r.tick(InteractInput::default());
+        r.tick(InteractInput::default());
         r
     }
 

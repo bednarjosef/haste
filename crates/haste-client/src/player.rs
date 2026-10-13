@@ -176,6 +176,13 @@ pub struct LocalPlayer {
     pub has_position: bool,
     /// Whether `player_loaded` was sent since login/respawn (movement is sent only after).
     pub loaded: bool,
+    /// Teleport id awaiting its `accept_teleportation`; the accept waits one full tick
+    /// after the teleport arrived (see [`LocalPlayer::flush_pending_accept`]). The server
+    /// queues further teleports until the accept, so one slot is enough.
+    pending_accept: Option<i32>,
+    /// Ticks the pending accept has been waiting (one full tick, not just until the next
+    /// `tick_inner`: the driver drains packets and ends the tick in the same call).
+    pending_accept_age: u32,
     /// Counters for tests and the headless printout.
     pub teleports: u64,
     prev_pos: DVec3,
@@ -212,6 +219,8 @@ impl LocalPlayer {
             held_slot: 0,
             has_position: false,
             loaded: false,
+            pending_accept: None,
+            pending_accept_age: 0,
             teleports: 0,
             prev_pos: DVec3::ZERO,
             prev_eye: 0.0,
@@ -267,31 +276,22 @@ impl LocalPlayer {
     }
 
     /// Consumes the packets about the local player. Returns false for packets it does not handle.
-    pub fn handle(&mut self, p: &ClientboundPlay, out: &mut Vec<ServerboundPlay>) -> bool {
+    /// The `out` buffer is kept for the caller's uniform signature; this handler defers every
+    /// serverbound reply to the next tick (see [`LocalPlayer::flush_pending_accept`]).
+    pub fn handle(&mut self, p: &ClientboundPlay, _out: &mut Vec<ServerboundPlay>) -> bool {
         use ClientboundPlay as P;
         match p {
             P::PlayerPosition(t) => {
                 self.teleport(t);
-                out.push(ServerboundPlay::AcceptTeleportation(
-                    sb::AcceptTeleportation {
-                        teleport_id: t.teleport_id,
-                        pos: self.state.pos,
-                        yaw: self.state.yaw,
-                        pitch: self.state.pitch,
-                    },
-                ));
-                // 26.3's accept_teleportation carries the resulting position and rotation; an
-                // extra move_player_pos_rot right after it (what older clients sent) gets the
-                // client kicked with invalid_player_movement after a relative `/tp ~ ~10 ~`
-                // (observed on the vanilla 26.3 server). The accepted position counts as sent.
+                // The accept is not sent from the network reader (immediately, mid-tick): a
+                // join teleport answered within microseconds of arrival races the server's
+                // own join bookkeeping, which logs "moved too quickly! <spawn position>"
+                // (the delta it computed against a not-yet-set position). A vanilla client
+                // answers from its game loop; the accept waits one full tick
+                // (flush_pending_accept).
+                self.pending_accept = Some(t.teleport_id);
+                self.pending_accept_age = 0;
                 self.mark_sent_position(self.state.on_ground, self.state.horizontal_collision);
-                if !self.loaded {
-                    // Observed on the 26.3 server: a movement packet between
-                    // accept_teleportation and player_loaded gets the client kicked
-                    // (invalid_player_movement), so the first move goes out next tick.
-                    out.push(ServerboundPlay::PlayerLoaded(sb::PlayerLoaded {}));
-                    self.loaded = true;
-                }
             }
             P::PlayerRotation(r) => {
                 let yaw = if r.relative_yaw {
@@ -374,6 +374,8 @@ impl LocalPlayer {
                 self.abilities = Abilities::for_mode(self.game_mode);
                 self.has_position = false;
                 self.loaded = false;
+                self.pending_accept = None;
+                self.pending_accept_age = 0;
                 self.sent = Sent::default();
                 self.int.respawned();
             }
@@ -432,6 +434,44 @@ impl LocalPlayer {
         self.prev_eye = self.eye_height();
         self.has_position = true;
         self.teleports += 1;
+    }
+
+    /// Sends the `accept_teleportation` (and the first `player_loaded`) for a teleport that
+    /// arrived a full tick ago. A vanilla client answers teleports from its game loop,
+    /// never from the network reader; answering within microseconds of the join teleport
+    /// races the server's join bookkeeping and it logs
+    /// "moved too quickly! <spawn position>" (observed on the vanilla 26.3 server, ~1 join
+    /// in 8). One full tick later the server holds the login position, so the accept's
+    /// position matches it. The accepted position counts as sent (26.3's accept carries the
+    /// resulting position and rotation; an extra move_player_pos_rot right after it, what
+    /// older clients sent, gets the client kicked with invalid_player_movement after a
+    /// relative `/tp ~ ~10 ~`).
+    fn flush_pending_accept(&mut self, out: &mut Vec<ServerboundPlay>) {
+        if self.pending_accept.is_none() {
+            return;
+        }
+        self.pending_accept_age += 1;
+        if self.pending_accept_age < 2 {
+            // Age 1 is the tick the teleport arrived in (the driver drains packets and
+            // ends the tick in one call); the accept goes out on the next.
+            return;
+        }
+        let teleport_id = self.pending_accept.take().unwrap();
+        out.push(ServerboundPlay::AcceptTeleportation(
+            sb::AcceptTeleportation {
+                teleport_id,
+                pos: self.state.pos,
+                yaw: self.state.yaw,
+                pitch: self.state.pitch,
+            },
+        ));
+        if !self.loaded {
+            // Observed on the 26.3 server: a movement packet between accept_teleportation
+            // and player_loaded gets the client kicked (invalid_player_movement), so the
+            // first move goes out next tick.
+            out.push(ServerboundPlay::PlayerLoaded(sb::PlayerLoaded {}));
+            self.loaded = true;
+        }
     }
 
     fn mark_sent_position(&mut self, on_ground: bool, horizontal_collision: bool) {
@@ -553,6 +593,7 @@ impl LocalPlayer {
         self.prev_pos = self.state.pos;
         self.prev_eye = self.eye_height();
         self.last_input_look = (input.yaw, input.pitch);
+        self.flush_pending_accept(out);
         if !(self.has_position && self.loaded) {
             return;
         }

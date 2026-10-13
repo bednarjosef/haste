@@ -257,7 +257,7 @@ fn entity_packets_reach_the_store() {
 }
 
 #[test]
-fn teleport_is_accepted_then_movement_follows_on_the_next_tick() {
+fn teleport_is_accepted_one_tick_later_then_movement_follows() {
     let mut r = Rig::new();
     // Nothing is sent before the first teleport.
     r.session.end_tick(
@@ -268,15 +268,33 @@ fn teleport_is_accepted_then_movement_follows_on_the_next_tick() {
     );
     assert!(r.out.is_empty());
     r.apply(teleport(1, DVec3::new(0.5, -60.0, 0.5), 0));
-    assert_eq!(r.names(), ["accept_teleportation", "player_loaded"]);
+    // The accept is not sent from the packet handler (a join teleport answered within
+    // microseconds of arrival races the server's join bookkeeping: "moved too quickly!"),
+    // and not on the tick it arrived in either.
+    assert!(r.out.is_empty());
     r.session.end_tick(
         &InputState::default(),
         &mut r.world,
         &r.entities,
         &mut r.out,
     );
-    // The fake world has no chunks: the player stays put, so no movement packet yet.
-    assert_eq!(r.names(), ["player_input", "client_tick_end"]);
+    assert!(r.out.is_empty());
+    r.session.end_tick(
+        &InputState::default(),
+        &mut r.world,
+        &r.entities,
+        &mut r.out,
+    );
+    assert_eq!(
+        r.names(),
+        [
+            "accept_teleportation",
+            "player_loaded",
+            "player_input",
+            "client_tick_end"
+        ]
+    );
+    // The fake world has no chunks: the player stays put, so no movement packet.
     // player_input only when it changes; player_loaded only once.
     r.session.end_tick(
         &InputState::default(),
@@ -286,9 +304,23 @@ fn teleport_is_accepted_then_movement_follows_on_the_next_tick() {
     );
     assert_eq!(r.names(), ["client_tick_end"]);
     r.apply(teleport(2, DVec3::new(1.0, 0.0, 0.0), teleport_flags::X));
-    assert_eq!(r.names(), ["accept_teleportation"]);
+    assert!(r.out.is_empty());
     // x relative, y and z absolute.
     assert_eq!(r.session.player.state.pos, DVec3::new(1.5, 0.0, 0.0));
+    r.session.end_tick(
+        &InputState::default(),
+        &mut r.world,
+        &r.entities,
+        &mut r.out,
+    );
+    assert_eq!(r.names(), ["client_tick_end"]);
+    r.session.end_tick(
+        &InputState::default(),
+        &mut r.world,
+        &r.entities,
+        &mut r.out,
+    );
+    assert_eq!(r.names(), ["accept_teleportation", "client_tick_end"]);
 }
 
 #[test]
