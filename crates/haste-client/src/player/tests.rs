@@ -225,6 +225,16 @@ fn sprint_command_comes_before_the_move() {
     assert_eq!(names(&out)[..2], ["input", "command"]);
 }
 
+/// The `player_command` action ids this module sends, pinned to the declaration
+/// order of `ServerboundPlayerCommandPacket$Action` in the 26.3 client jar
+/// (STOP_SLEEPING=0, START_SPRINTING=1, STOP_SPRINTING=2, START_RIDING_JUMP=3,
+/// STOP_RIDING_JUMP=4, OPEN_INVENTORY=5, START_FALL_FLYING=6).
+#[test]
+fn player_command_action_values_match_the_jar() {
+    assert_eq!(command::START_SPRINTING, 1);
+    assert_eq!(command::STOP_SPRINTING, 2);
+}
+
 /// The first movement packet after the join teleport carries the server's position, so the
 /// server-side delta is ~0 (regression test for the join "moved too quickly!" whose logged
 /// delta equalled the whole spawn position).
