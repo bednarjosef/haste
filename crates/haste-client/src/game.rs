@@ -32,11 +32,10 @@ use crate::net::{NetDriver, WorldSink};
 use crate::ui::Ui;
 
 /// How far the third-person camera sits from the eye when nothing is in the way (vanilla's
-/// `Camera` max zoom, minecraft.wiki "Perspective").
+/// `Camera` max zoom, minecraft.wiki "Perspective"). Vanilla's `Camera.alignWithEntity` scales
+/// this by the entity's scale and its `CAMERA_DISTANCE` attribute (default 4.0); haste reads
+/// neither yet, so the constant is the whole distance.
 pub const THIRD_PERSON_DISTANCE: f64 = 4.0;
-/// The camera stops this far before the first solid block along the ray, so it does not clip
-/// into it (vanilla's behaviour of pulling the camera closer against a wall).
-pub const OBSTRUCTION_CLEARANCE: f64 = 0.1;
 
 /// The perspective F5 cycles through (vanilla's three: first person, third person behind,
 /// third person in front).
@@ -79,9 +78,8 @@ impl Perspective {
 
 /// Camera position and look for a perspective: at the eye in first person; otherwise
 /// [`THIRD_PERSON_DISTANCE`] blocks from the eye along the view direction (in front mode the
-/// camera faces back: yaw + 180, pitch negated), pulled closer when a block outline is in the
-/// way (the same raycast the crosshair's block picking uses, so a wall that blocks the view
-/// also stops the camera).
+/// camera faces back: yaw + 180, pitch negated), pulled closer when a block is in the way
+/// (vanilla's `Camera.getMaxZoom`, see [`camera_pullback`]).
 pub fn third_person_camera(
     perspective: Perspective,
     eye: DVec3,
@@ -107,22 +105,37 @@ pub fn third_person_camera(
     }
 }
 
-/// `eye + dir * d` for the largest `d` that keeps the camera [`OBSTRUCTION_CLEARANCE`] blocks
-/// before the first block outline along the ray (at most [`THIRD_PERSON_DISTANCE`]). A hit the
-/// ray starts inside (the eye in a block, e.g. a snow layer) is not an obstruction.
+/// `eye + dir * d` for the largest `d` no block along the way beats (at most
+/// [`THIRD_PERSON_DISTANCE`]), vanilla's `Camera.getMaxZoom`: 8 rays from the eye's ±0.1
+/// corners along `dir`, each cast up to the current best `d`, and every hit whose straight-line
+/// distance from the eye is smaller shrinks it. The distance is measured from the eye, not
+/// along the ray, and no clearance margin is subtracted: on a flat wall the camera stops
+/// epsilon inside the face, and a block the eye is inside counts as a hit at the corner and
+/// pulls the camera to sqrt(0.03) ≈ 0.173 blocks out.
 fn camera_pullback(
     eye: DVec3,
     dir: DVec3,
     world: &dyn BlockView,
     shapes: &dyn CollisionShapes,
 ) -> DVec3 {
-    let reach = THIRD_PERSON_DISTANCE + OBSTRUCTION_CLEARANCE;
-    let hit = haste_physics::raycast::raycast_blocks(eye, dir, reach, world, shapes);
-    let d = match hit {
-        Some(h) if !h.inside => (h.distance - OBSTRUCTION_CLEARANCE).max(0.0),
-        _ => THIRD_PERSON_DISTANCE,
-    };
-    eye + dir * d
+    let mut camera_dist = THIRD_PERSON_DISTANCE;
+    for i in 0..8i32 {
+        // The eight corners of the 0.2 cube around the eye (vanilla's jitter offsets).
+        let corner = eye
+            + DVec3::new(
+                ((i & 1) * 2 - 1) as f64 * 0.1,
+                ((i >> 1 & 1) * 2 - 1) as f64 * 0.1,
+                ((i >> 2 & 1) * 2 - 1) as f64 * 0.1,
+            );
+        let hit = haste_physics::raycast::raycast_blocks(corner, dir, camera_dist, world, shapes);
+        if let Some(h) = hit {
+            let d = (h.location - eye).length();
+            if d < camera_dist {
+                camera_dist = d;
+            }
+        }
+    }
+    eye + dir * camera_dist
 }
 
 /// The local player's pose for its own model: the physics pose's render equivalent (sleeping,
@@ -877,21 +890,43 @@ mod tests {
     }
 
     #[test]
-    fn behind_stops_one_point_nine_at_a_wall_at_two_blocks() {
+    fn behind_wall_distance_is_measured_straight_line_from_the_eye() {
         let mut w = TestWorld::new();
         // Looking west, so the behind camera goes east; stone cell (2, 0, 0) puts its
-        // outline's west face at x = 2 ("a wall at 2 blocks").
+        // outline's west face at x = 2, 1.5 blocks ahead of the eye.
         w.set(2, 0, 0, states::STONE);
         let s = TestShapes::default();
         let (pos, yaw, _) =
             third_person_camera(Perspective::ThirdPersonBehind, EYE, 90.0, 0.0, &w, &s);
         assert_eq!(yaw, 90.0);
-        // The camera stops 0.1 blocks before the outline: x = 2 - 0.1 = 1.9.
-        assert!((pos.x - 1.9).abs() < EPS, "{pos:?}");
+        // All eight corner rays hit the face: the hit is 1.5 blocks along the ray but
+        // sqrt(1.5^2 + 0.1^2 + 0.1^2) = sqrt(2.27) from the eye, and no clearance margin is
+        // subtracted, so the camera stops epsilon inside the wall (vanilla's
+        // `Camera.getMaxZoom`).
+        let want = 0.5 + (2.27f64).sqrt();
+        assert!((pos.x - want).abs() < EPS, "{pos:?}");
+        assert!(pos.x > 2.0, "{pos:?}");
         assert!(
             (pos.y - 0.5).abs() < EPS && (pos.z - 0.5).abs() < EPS,
             "{pos:?}"
         );
+    }
+
+    #[test]
+    fn diagonal_wall_takes_the_shortest_of_the_eight_corner_rays() {
+        let mut w = TestWorld::new();
+        // A diagonal wall one cell behind and to the side: every corner ray meets its x = 1
+        // face, but at straight-line distances from the eye of sqrt(0.75), sqrt(0.99) and
+        // sqrt(1.31) — the shortest wins.
+        w.set(1, 0, 1, states::STONE);
+        let s = TestShapes::default();
+        let eye = DVec3::new(0.3, 0.5, 0.7);
+        let (pos, yaw, pitch) =
+            third_person_camera(Perspective::ThirdPersonBehind, eye, 135.0, 0.0, &w, &s);
+        assert_eq!((yaw, pitch), (135.0, 0.0));
+        let back = -haste_physics::raycast::look_vector(135.0, 0.0);
+        let want = eye + back * (0.75f64).sqrt();
+        assert!((pos - want).length() < 1e-5, "{pos:?} != {want:?}");
     }
 
     #[test]
@@ -910,14 +945,14 @@ mod tests {
     }
 
     #[test]
-    fn a_block_the_eye_starts_inside_is_not_an_obstruction() {
+    fn a_block_the_eye_starts_inside_pulls_the_camera_to_its_corner() {
         let mut w = TestWorld::new();
-        // The eye is inside this block's outline (an `inside` hit): the pullback ignores it.
+        // The eye is inside this block: all eight corner rays start inside its outline, and
+        // vanilla counts that as a hit at the corner, 0.1 * sqrt(3) from the eye.
         w.set(0, 0, 0, states::STONE);
         let s = TestShapes::default();
         let (pos, _, _) =
             third_person_camera(Perspective::ThirdPersonBehind, EYE, -90.0, 0.0, &w, &s);
-        // No further hit, so the full distance.
-        assert!((pos.x - 0.5 + THIRD_PERSON_DISTANCE).abs() < EPS, "{pos:?}");
+        assert!((pos.x - (0.5 - (0.03f64).sqrt())).abs() < EPS, "{pos:?}");
     }
 }
