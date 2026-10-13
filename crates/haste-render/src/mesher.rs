@@ -29,6 +29,18 @@ pub struct SectionMesh {
     pub visibility: crate::occlusion::VisibilitySet,
 }
 
+impl SectionMesh {
+    /// GPU bytes the vertices will occupy in an arena.
+    pub fn vertex_bytes(&self) -> u64 {
+        (self.vertices.len() as u64) * std::mem::size_of::<PackedVertex>() as u64
+    }
+
+    /// GPU bytes the indices will occupy in an arena.
+    pub fn index_bytes(&self) -> u64 {
+        self.layers.iter().map(|(_, i)| i.len() as u64 * 4).sum()
+    }
+}
+
 /// Untinted vertex colour.
 pub const TINT_WHITE: u32 = 0xFFFFFF;
 
