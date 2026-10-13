@@ -86,8 +86,11 @@ struct PlayingSound {
     path: String,
     source: SoundSource,
     pos: Option<DVec3>,
-    /// Overall volume of the sound (already includes the variant's volume).
+    /// Overall volume of the sound: the play volume times the variant's volume.
     volume: f32,
+    /// Final pitch multiplier: the play pitch times the variant's pitch, clamped to
+    /// 0.5..=2.0.
+    pitch: f32,
     attenuation_distance: u32,
     /// (left, right) gains as of the last `tick()`.
     gains: (f32, f32),
@@ -122,10 +125,10 @@ impl SilentEngine {
         }
     }
 
-    /// Start tracking a sound. `volume`/`pitch` are the final values (variant values
-    /// already folded in); the pitch is clamped here so every consumer sees valid input.
-    /// Sounds with a position are attenuated and panned on `tick()`; sounds without one
-    /// play at full gain, centred.
+    /// Start tracking a sound. The variant's `volume`/`pitch` from sounds.json multiply
+    /// into the play `volume`/`pitch`; the pitch is clamped here so every consumer sees
+    /// valid input. Sounds with a position are attenuated and panned on `tick()`; sounds
+    /// without one play at full gain, centred.
     pub fn play(
         &mut self,
         variant: &SoundVariant,
@@ -134,12 +137,12 @@ impl SilentEngine {
         volume: f32,
         pitch: f32,
     ) {
-        let _ = clamp_pitch(pitch);
         self.sounds.push(PlayingSound {
             path: variant.path.clone(),
             source,
             pos,
-            volume,
+            volume: volume * variant.volume,
+            pitch: clamp_pitch(pitch * variant.pitch),
             attenuation_distance: variant.attenuation_distance,
             gains: (0.0, 0.0),
         });
@@ -171,17 +174,17 @@ impl SilentEngine {
     /// listener and source volumes.
     pub fn tick(&mut self) {
         for sound in &mut self.sounds {
-            let gain = sound.volume * self.volumes.effective(sound.source);
+            let effective = self.volumes.effective(sound.source);
             let (gain, pan) = match sound.pos {
                 Some(pos) => (
-                    gain * attenuation(
+                    attenuation(
                         (pos - self.listener_pos).length(),
-                        1.0,
+                        sound.volume,
                         sound.attenuation_distance,
-                    ),
+                    ) * effective,
                     pan(self.listener_pos, self.listener_yaw, pos),
                 ),
-                None => (gain, 0.0),
+                None => (sound.volume.min(1.0) * effective, 0.0),
             };
             sound.gains = stereo_gains(gain, pan);
         }
@@ -196,6 +199,11 @@ impl SilentEngine {
     pub fn gains(&self) -> impl Iterator<Item = (f32, f32)> + '_ {
         self.sounds.iter().map(|s| s.gains)
     }
+
+    /// The final (variant-adjusted, clamped) pitch of all playing sounds, in play order.
+    pub fn pitches(&self) -> impl Iterator<Item = f32> + '_ {
+        self.sounds.iter().map(|s| s.pitch)
+    }
 }
 
 #[cfg(test)]
@@ -205,11 +213,20 @@ mod tests {
     use haste_core::Identifier;
 
     fn variant(path: &str, attenuation_distance: u32) -> SoundVariant {
+        variant_with(path, attenuation_distance, 1.0, 1.0)
+    }
+
+    fn variant_with(
+        path: &str,
+        attenuation_distance: u32,
+        volume: f32,
+        pitch: f32,
+    ) -> SoundVariant {
         SoundVariant {
             id: Identifier::new("minecraft", path.trim_end_matches(".ogg")),
             path: path.to_string(),
-            volume: 1.0,
-            pitch: 1.0,
+            volume,
+            pitch,
             weight: 1,
             stream: false,
             attenuation_distance,
@@ -410,5 +427,71 @@ mod tests {
             (l * l + r * r).sqrt() - 0.5 < 1e-5,
             "half range = half gain"
         );
+    }
+
+    #[test]
+    fn volume_two_sound_is_audible_at_distance_24() {
+        // volume 2.0 doubles the audible range to 32, so 24 blocks is still in range.
+        let mut engine = SilentEngine::new();
+        engine.set_listener(DVec3::ZERO, 0.0);
+        engine.play(
+            &variant("sounds/a.ogg", 16),
+            SoundSource::Block,
+            Some(DVec3::new(24.0, 0.0, 0.0)),
+            2.0,
+            1.0,
+        );
+        engine.tick();
+        let (l, r) = engine.gains().next().unwrap();
+        // gain = min(2, 1) * (1 - 24/32) = 0.25, split over both channels.
+        let norm = (l * l + r * r).sqrt();
+        assert!((norm - 0.25).abs() < 1e-5, "norm {norm}");
+        assert!(l <= 1.0 && r <= 1.0);
+    }
+
+    #[test]
+    fn variant_volume_scales_the_gain() {
+        // A variant with volume 0.5 played at volume 1.0 has half the gain of a
+        // volume-1.0 variant at the same spot.
+        let mut loud = SilentEngine::new();
+        loud.set_listener(DVec3::ZERO, 0.0);
+        loud.play(
+            &variant_with("sounds/a.ogg", 16, 1.0, 1.0),
+            SoundSource::Block,
+            Some(DVec3::new(4.0, 0.0, 0.0)),
+            1.0,
+            1.0,
+        );
+        loud.tick();
+        let mut quiet = SilentEngine::new();
+        quiet.set_listener(DVec3::ZERO, 0.0);
+        quiet.play(
+            &variant_with("sounds/a.ogg", 16, 0.5, 1.0),
+            SoundSource::Block,
+            Some(DVec3::new(4.0, 0.0, 0.0)),
+            1.0,
+            1.0,
+        );
+        quiet.tick();
+        let norm = |e: &SilentEngine| {
+            let (l, r) = e.gains().next().unwrap();
+            (l * l + r * r).sqrt()
+        };
+        assert!((norm(&loud) - 0.75).abs() < 1e-5);
+        assert!((norm(&quiet) - 0.375).abs() < 1e-5);
+    }
+
+    #[test]
+    fn variant_pitch_multiplies_and_clamps() {
+        // Variant pitch 1.5 played at pitch 1.5: 2.25 clamps to 2.0.
+        let mut engine = SilentEngine::new();
+        engine.play(
+            &variant_with("sounds/a.ogg", 16, 1.0, 1.5),
+            SoundSource::Block,
+            None,
+            1.0,
+            1.5,
+        );
+        assert_eq!(engine.pitches().next().unwrap(), 2.0);
     }
 }
