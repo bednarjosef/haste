@@ -137,8 +137,6 @@ pub struct WorldFeed {
     queued: HashSet<SectionPos>,
     /// Sections whose last submitted mesh was non-empty.
     meshed: HashSet<SectionPos>,
-    /// Every section ever submitted (the renderer keeps a mesh entry for each).
-    submitted: HashSet<SectionPos>,
     sort_needed: bool,
     last_arrival: Option<Instant>,
     /// Entity instances for this frame (reused).
@@ -224,7 +222,6 @@ impl WorldFeed {
                 } else {
                     self.meshed.remove(&pos);
                 }
-                self.submitted.insert(pos);
                 batch.push(pos);
             }
         }
@@ -261,10 +258,14 @@ impl WorldFeed {
 
     /// Whether everything the game thread produced has been meshed and uploaded, and nothing
     /// new arrived for `quiet`.
+    ///
+    /// `meshes_pending` (pending + queued results + in-flight) already guarantees every
+    /// submitted section was meshed and uploaded; comparing the renderer's resident-section
+    /// count against a client-side count cannot work, because a section with blocks can still
+    /// mesh to zero vertices (fully enclosed) and the renderer then keeps no entry for it.
     fn settled(&self, stats: &FrameStats, quiet: Duration) -> bool {
         self.queue.is_empty()
             && stats.meshes_pending == 0
-            && stats.chunk_sections_total as usize >= self.submitted.len()
             && self.last_arrival.is_some_and(|t| t.elapsed() >= quiet)
     }
 }
