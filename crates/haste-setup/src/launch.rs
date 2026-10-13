@@ -20,6 +20,8 @@ pub struct LaunchOptions {
     pub version_type: String, // "release" or a custom label
     /// Install and launch Fabric Loader instead of the vanilla main class.
     pub fabric: bool,
+    /// `host:port` to join immediately on the title screen's "Quick Play" path.
+    pub quick_play_server: Option<String>,
     /// Extra JVM args (e.g. ["-Xmx4G"]).
     pub jvm_args: Vec<String>,
 }
@@ -33,6 +35,7 @@ impl Default for LaunchOptions {
             user_type: "legacy".into(),
             version_type: "release".into(),
             fabric: false,
+            quick_play_server: None,
             jvm_args: vec!["-Xmx4G".into()],
         }
     }
@@ -201,6 +204,11 @@ fn game_args(opts: &LaunchOptions, game_dir: &Path, index_id: &str) -> Vec<Strin
     ]
     .into_iter()
     .map(|s| s.to_string())
+    .chain(
+        opts.quick_play_server
+            .iter()
+            .flat_map(|server| ["--quickPlayMultiplayer".to_string(), server.clone()]),
+    )
     .collect()
 }
 
@@ -424,6 +432,21 @@ mod tests {
         assert!(joined.contains("--username Steve"));
         assert!(joined.contains("--assetIndex 34"));
         assert!(joined.contains("--gameDir /tmp/g"));
+        assert!(!joined.contains("quickPlayMultiplayer"));
+        // quick-play appends --quickPlayMultiplayer <server> only when a server is set
+        let args = game_args(
+            &LaunchOptions {
+                username: "Steve".into(),
+                quick_play_server: Some("localhost:25565".into()),
+                ..Default::default()
+            },
+            dir,
+            "34",
+        );
+        assert!(args.ends_with(&[
+            "--quickPlayMultiplayer".to_string(),
+            "localhost:25565".to_string()
+        ]));
     }
 
     /// Launches the real vanilla client against the cache. On a headless box it dies at window

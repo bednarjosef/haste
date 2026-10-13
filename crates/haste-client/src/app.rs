@@ -20,6 +20,7 @@ use haste_protocol::haste_core::model::EntityInstance;
 use haste_protocol::haste_core::{ChunkPos, SectionPos};
 use haste_protocol::{Account, ConnectOptions};
 use haste_render::{Camera, FrameInput, FrameStats, Renderer, SkyState};
+use haste_setup::options::Options;
 use haste_world::World;
 use winit::application::ApplicationHandler;
 use winit::event::{
@@ -37,11 +38,26 @@ use crate::game::{self, Shared};
 use crate::net::{self, NetDriver};
 use crate::Args;
 
-/// Field of view in degrees (vanilla default "Normal" = 70).
-const FOV_DEG: f32 = 70.0;
-/// Degrees of rotation per pixel of mouse motion at vanilla's default sensitivity (50%):
-/// 0.15 * (0.5 * 0.6 + 0.2)^3 * 8 (minecraft.wiki "Options", mouse sensitivity).
-const LOOK_DEG_PER_PIXEL: f32 = 0.15;
+/// Saved options this run uses: FOV, render distance, mouse sensitivity and (unless the
+/// `--vsync` flag says otherwise) vsync. `Config::load` creates the file with defaults on
+/// first run, so the fallback only fires on a broken file.
+fn load_options() -> haste_setup::options::Options {
+    match haste_setup::config::Config::load() {
+        Ok(c) => c.options,
+        Err(e) => {
+            tracing::warn!("config load failed, using default options: {e:#}");
+            Options::default()
+        }
+    }
+}
+
+/// Degrees of rotation per pixel of mouse motion at sensitivity 0..=1. Vanilla's curve, as
+/// the client community documents it (minecraft.wiki "Options" > Sensitivity documents the
+/// 0..=1 range): `f = s * 0.6 + 0.2`, `f * f * f * 8 * 0.15` degrees per pixel.
+pub fn look_deg_per_pixel(sensitivity: f32) -> f32 {
+    let f = sensitivity * 0.6 + 0.2;
+    f * f * f * 8.0 * 0.15
+}
 /// Two jump presses closer than this toggle flight (vanilla: 7 ticks).
 const DOUBLE_TAP: Duration = Duration::from_millis(350);
 /// Wall time the render thread may spend capturing sections for the mesher per frame.
@@ -56,6 +72,8 @@ struct Session {
     game_thread: Option<std::thread::JoinHandle<()>>,
     /// Biome colours of the synced biome registry (index = biome id), for the renderer.
     biomes: Vec<haste_render::BiomeClimate>,
+    /// The saved options this run uses (loaded once).
+    options: Options,
 }
 
 impl Session {
@@ -69,12 +87,16 @@ impl Session {
             .thread_name("haste-net")
             .build()?;
         let data = net::load_game_data()?;
-        let opts = ConnectOptions::new(
+        let options = load_options();
+        let mut opts = ConnectOptions::new(
             address.clone(),
             Account::Offline {
                 username: args.username.clone(),
             },
         );
+        // The saved render distance is what we advertise in client_information; the server's
+        // own view distance (login packet) caps what we mesh below.
+        opts.client_information.view_distance = options.render_distance as i8;
         let driver: NetDriver = rt.block_on(NetDriver::connect(opts))?;
         let regs = driver.connection().registries();
         let biomes = net::synced_biome_count(regs).unwrap_or(64);
@@ -89,11 +111,12 @@ impl Session {
         );
         let world = World::new_with_biomes(login.dimension.clone(), data.clone(), biomes);
         let entity_types = data.registries.len("minecraft:entity_type");
+        let view_distance = login.view_distance.min(options.render_distance as i32);
         let shared = Arc::new(Shared::new(
             data,
             world,
             net::new_entity_store(entity_types),
-            login.view_distance,
+            view_distance,
         ));
         let handle = rt.handle().clone();
         let sh = shared.clone();
@@ -108,6 +131,7 @@ impl Session {
             shared,
             game_thread: Some(game_thread),
             biomes: biome_climates,
+            options,
         })
     }
 
@@ -137,8 +161,6 @@ pub struct WorldFeed {
     queued: HashSet<SectionPos>,
     /// Sections whose last submitted mesh was non-empty.
     meshed: HashSet<SectionPos>,
-    /// Every section ever submitted (the renderer keeps a mesh entry for each).
-    submitted: HashSet<SectionPos>,
     sort_needed: bool,
     last_arrival: Option<Instant>,
     /// Entity instances for this frame (reused).
@@ -224,7 +246,6 @@ impl WorldFeed {
                 } else {
                     self.meshed.remove(&pos);
                 }
-                self.submitted.insert(pos);
                 batch.push(pos);
             }
         }
@@ -261,10 +282,14 @@ impl WorldFeed {
 
     /// Whether everything the game thread produced has been meshed and uploaded, and nothing
     /// new arrived for `quiet`.
+    ///
+    /// `meshes_pending` (pending + queued results + in-flight) already guarantees every
+    /// submitted section was meshed and uploaded; comparing the renderer's resident-section
+    /// count against a client-side count cannot work, because a section with blocks can still
+    /// mesh to zero vertices (fully enclosed) and the renderer then keeps no entry for it.
     fn settled(&self, stats: &FrameStats, quiet: Duration) -> bool {
         self.queue.is_empty()
             && stats.meshes_pending == 0
-            && stats.chunk_sections_total as usize >= self.submitted.len()
             && self.last_arrival.is_some_and(|t| t.elapsed() >= quiet)
     }
 }
@@ -272,7 +297,13 @@ impl WorldFeed {
 /// Builds this frame's camera and sky from the shared view at `now`. `yaw`/`pitch` are the
 /// input layer's look; the player's server rotation offset is added here so mouse look is
 /// smooth at frame rate while the player itself turns once per tick.
-fn frame_view(shared: &Shared, yaw: f32, pitch: f32, now: Instant) -> (Camera, SkyState, f32, i32) {
+fn frame_view(
+    shared: &Shared,
+    yaw: f32,
+    pitch: f32,
+    fov_deg: f32,
+    now: Instant,
+) -> (Camera, SkyState, f32, i32) {
     let view = *shared.view.lock();
     let partial = game::partial_tick(view.tick_at, now);
     let camera = Camera {
@@ -280,7 +311,7 @@ fn frame_view(shared: &Shared, yaw: f32, pitch: f32, now: Instant) -> (Camera, S
         pos: game::interpolate(view.prev_eye, view.eye, partial),
         yaw: yaw + view.look_offset.0,
         pitch: (pitch + view.look_offset.1).clamp(-90.0, 90.0),
-        fov_deg: FOV_DEG,
+        fov_deg,
     };
     let fog_end = (view.view_distance.max(2) * 16) as f32;
     let sky = SkyState {
@@ -348,7 +379,13 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut stats;
     let mut last_camera;
     loop {
-        let (mut camera, sky, partial, vd) = frame_view(&shared, 0.0, 0.0, Instant::now());
+        let (mut camera, sky, partial, vd) = frame_view(
+            &shared,
+            0.0,
+            0.0,
+            session.options.fov as f32,
+            Instant::now(),
+        );
         camera.yaw = args.yaw.unwrap_or(camera.yaw);
         camera.pitch = args.pitch.unwrap_or(camera.pitch);
         if let Some(pos) = want_pos {
@@ -450,7 +487,9 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
     let mut app = App {
         shared: session.shared.clone(),
         biomes: session.biomes.clone(),
-        vsync: args.vsync,
+        // The flag wins over the saved option; without it, the saved option decides.
+        vsync: args.vsync.unwrap_or(session.options.vsync),
+        options: session.options.clone(),
         window: None,
         renderer: None,
         feed: WorldFeed::default(),
@@ -466,6 +505,9 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         attack: false,
         use_item: false,
         pick_block: false,
+        drop_item: false,
+        drop_stack: false,
+        swap_offhand: false,
         hotbar: None,
         scroll: 0.0,
         breaking: Vec::new(),
@@ -490,6 +532,8 @@ struct App {
     shared: Arc<Shared>,
     biomes: Vec<haste_render::BiomeClimate>,
     vsync: bool,
+    /// Saved options (FOV for rendering, sensitivity for mouse look).
+    options: Options,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     feed: WorldFeed,
@@ -508,6 +552,9 @@ struct App {
     attack: bool,
     use_item: bool,
     pick_block: bool,
+    drop_item: bool,
+    drop_stack: bool,
+    swap_offhand: bool,
     hotbar: Option<u8>,
     /// Scroll wheel steps not yet turned into a slot change.
     scroll: f64,
@@ -564,6 +611,9 @@ impl App {
         i.attack = self.attack;
         i.use_item = self.use_item;
         i.pick_block |= std::mem::take(&mut self.pick_block);
+        i.drop_item |= std::mem::take(&mut self.drop_item);
+        i.drop_stack |= std::mem::take(&mut self.drop_stack);
+        i.swap_offhand |= std::mem::take(&mut self.swap_offhand);
         if let Some(slot) = self.hotbar.take() {
             i.hotbar = Some(slot);
         }
@@ -580,6 +630,11 @@ impl App {
         }
     }
 
+    /// Mouse look speed from the saved sensitivity.
+    fn look_deg_per_pixel(&self) -> f32 {
+        look_deg_per_pixel(self.options.mouse_sensitivity)
+    }
+
     fn draw(&mut self, event_loop: &ActiveEventLoop) {
         if self.renderer.is_none() {
             return;
@@ -587,8 +642,13 @@ impl App {
         self.sample_input();
         let renderer = self.renderer.as_mut().expect("checked above");
         let t0 = Instant::now();
-        let (camera, sky, partial, vd) =
-            frame_view(&self.shared, self.yaw, self.pitch, Instant::now());
+        let (camera, sky, partial, vd) = frame_view(
+            &self.shared,
+            self.yaw,
+            self.pitch,
+            self.options.fov as f32,
+            Instant::now(),
+        );
         self.feed
             .feed(&self.shared, renderer, camera_section(&camera), vd);
         let t1 = Instant::now();
@@ -735,6 +795,17 @@ impl ApplicationHandler for App {
                         _ if self.grabbed && self.focused && hotbar_key(code).is_some() => {
                             self.hotbar = hotbar_key(code);
                         }
+                        KeyCode::KeyQ if self.grabbed && self.focused => {
+                            // Ctrl+Q drops the whole stack, plain Q one item.
+                            if self.keys.contains(&KeyCode::ControlLeft) {
+                                self.drop_stack = true;
+                            } else {
+                                self.drop_item = true;
+                            }
+                        }
+                        KeyCode::KeyF if self.grabbed && self.focused => {
+                            self.swap_offhand = true;
+                        }
                         KeyCode::F11 => {
                             if let Some(w) = &self.window {
                                 let full = w.fullscreen().is_some();
@@ -758,7 +829,8 @@ impl ApplicationHandler for App {
     fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
         if let DeviceEvent::MouseMotion { delta } = event {
             if self.grabbed && self.focused {
-                let (yaw, pitch) = apply_mouse(self.yaw, self.pitch, delta);
+                let (yaw, pitch) =
+                    apply_mouse(self.yaw, self.pitch, delta, self.look_deg_per_pixel());
                 self.yaw = yaw;
                 self.pitch = pitch;
             }
@@ -783,10 +855,11 @@ impl ApplicationHandler for App {
     }
 }
 
-/// Mouse look: yaw wraps freely, pitch is clamped to straight up/down.
-pub fn apply_mouse(yaw: f32, pitch: f32, delta: (f64, f64)) -> (f32, f32) {
-    let yaw = yaw + delta.0 as f32 * LOOK_DEG_PER_PIXEL;
-    let pitch = (pitch + delta.1 as f32 * LOOK_DEG_PER_PIXEL).clamp(-90.0, 90.0);
+/// Mouse look: yaw wraps freely, pitch is clamped to straight up/down. `deg_per_pixel` is
+/// [`look_deg_per_pixel`] of the saved sensitivity.
+pub fn apply_mouse(yaw: f32, pitch: f32, delta: (f64, f64), deg_per_pixel: f32) -> (f32, f32) {
+    let yaw = yaw + delta.0 as f32 * deg_per_pixel;
+    let pitch = (pitch + delta.1 as f32 * deg_per_pixel).clamp(-90.0, 90.0);
     (yaw, pitch)
 }
 
@@ -899,11 +972,23 @@ impl FpsCounter {
 mod tests {
     use super::*;
 
+    const DPP: f32 = 0.15; // vanilla's default sensitivity (50%) value
+
     #[test]
     fn mouse_look_clamps_pitch() {
-        let (yaw, pitch) = apply_mouse(0.0, 0.0, (100.0, 0.0));
+        let (yaw, pitch) = apply_mouse(0.0, 0.0, (100.0, 0.0), DPP);
         assert!((yaw - 15.0).abs() < 1e-4 && pitch == 0.0, "{yaw} {pitch}");
-        assert_eq!(apply_mouse(0.0, 80.0, (0.0, 200.0)), (0.0, 90.0));
-        assert_eq!(apply_mouse(10.0, -80.0, (0.0, -200.0)), (10.0, -90.0));
+        assert_eq!(apply_mouse(0.0, 80.0, (0.0, 200.0), DPP), (0.0, 90.0));
+        assert_eq!(apply_mouse(10.0, -80.0, (0.0, -200.0), DPP), (10.0, -90.0));
+    }
+
+    #[test]
+    fn sensitivity_formula_matches_vanilla_curve() {
+        // Default sensitivity 50%: (0.5 * 0.6 + 0.2)^3 * 8 * 0.15 = 0.4^3 * 8 * 0.15.
+        assert_eq!(look_deg_per_pixel(0.5), 0.15);
+        // Off: the curve's minimum.
+        assert_eq!(look_deg_per_pixel(0.0), 0.0096);
+        // Max sensitivity: 0.8^3 * 8 * 0.15.
+        assert!((look_deg_per_pixel(1.0) - 0.6144).abs() < 1e-6);
     }
 }

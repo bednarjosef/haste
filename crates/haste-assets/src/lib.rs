@@ -14,6 +14,7 @@ pub mod font;
 pub mod item;
 pub mod model;
 pub mod multipart;
+pub mod particle;
 
 pub use assets::{
     frame_at, Animation, AnimationFrame, AnimationMeta, AnimationSchedule, Assets, ModelJson,
@@ -27,3 +28,4 @@ pub use font::{
 pub use item::{ItemGeometry, ItemModel, ItemModelPart, PartTransformation};
 pub use model::{BakedQuad, Direction, DisplayTransform, ModelRef};
 pub use multipart::{BlockStateDefinition, MultipartCase, MultipartCondition, VariantEntry};
+pub use particle::{ParticleAtlas, ParticleDefinition};
