@@ -49,7 +49,7 @@ pub fn run(cmd: Command, username: &str) -> anyhow::Result<()> {
             window_seconds,
         } => {
             let rt = tokio::runtime::Runtime::new()?;
-            let (server, address) = rt.block_on(start_singleplayer(&world, username))?;
+            let (server, address) = rt.block_on(start_singleplayer(&world))?;
             if no_window {
                 println!("singleplayer server on {address}; join with: haste --server {address}");
                 rt.block_on(wait_for_ctrl_c());
@@ -115,39 +115,17 @@ fn run_setup() -> anyhow::Result<()> {
     })
 }
 
-/// Starts the embedded singleplayer server on a free port with the world under the config dir,
-/// with `username` allowed through the server's whitelist (the 26.3 server defaults
-/// `white-list=true`, which would refuse every join). Returns the running server and its
-/// `host:port` address; the caller owns the server (dropping the `LocalServer` does not stop it,
-/// call `stop`).
+/// Starts the embedded singleplayer server on a free port with the world under the config dir.
+/// Returns the running server and its `host:port` address; the caller owns the server (dropping
+/// the `LocalServer` does not stop it, call `stop`).
 pub async fn start_singleplayer(
     world: &str,
-    username: &str,
 ) -> anyhow::Result<(haste_setup::server::LocalServer, String)> {
     let world_dir = singleplayer_world_dir(world);
-    write_whitelist(&world_dir, username)?;
     let port = haste_setup::server::free_port()?;
     let server = haste_setup::server::LocalServer::start(&world_dir, port).await?;
     let address = server.address();
     Ok((server, address))
-}
-
-/// Writes `whitelist.json` with the single joining player, so the server lets the local client
-/// in. Pure: builds the file text for a username.
-fn whitelist_json(username: &str) -> String {
-    let uuid = haste_setup::launch::offline_uuid(username);
-    format!("[\n  {{\n    \"uuid\": \"{uuid}\",\n    \"name\": \"{username}\"\n  }}\n]\n")
-}
-
-/// Writes `whitelist.json` (and its directory) into the world dir before the server starts.
-fn write_whitelist(world_dir: &std::path::Path, username: &str) -> anyhow::Result<()> {
-    tokio::task::block_in_place(|| {
-        std::fs::create_dir_all(world_dir)
-            .with_context(|| format!("creating {}", world_dir.display()))?;
-        let path = world_dir.join("whitelist.json");
-        std::fs::write(&path, whitelist_json(username))
-            .with_context(|| format!("writing {}", path.display()))
-    })
 }
 
 /// Where singleplayer worlds live: `<config dir>/singleplayer/<world>`.
@@ -303,18 +281,5 @@ mod tests {
         let args = client_args("127.0.0.1:1".into(), "haste".into(), None);
         assert_eq!(args.username, "haste");
         assert_eq!(args.window_seconds, None);
-    }
-
-    #[test]
-    fn whitelist_json_names_the_joining_player() {
-        let json = whitelist_json("haste");
-        assert!(json.contains("\"name\": \"haste\""));
-        // the offline UUID haste-setup computes for "haste", the one vanilla servers expect
-        assert!(json.contains(&format!(
-            "\"uuid\": \"{}\"",
-            haste_setup::launch::offline_uuid("haste")
-        )));
-        // a different username must give a different whitelist entry
-        assert_ne!(whitelist_json("steve"), json);
     }
 }
