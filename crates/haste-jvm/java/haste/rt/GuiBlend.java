@@ -11,4 +11,5 @@ public final class GuiBlend {
     public static final int NORMAL = 0;
     public static final int MULTIPLY = 1;
     public static final int INVERT = 2;
+    public static final int ADDITIVE = 3;
 }

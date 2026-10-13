@@ -41,6 +41,32 @@ fn host() -> JvmHost {
     h
 }
 
+/// The JVM of the process (and everything vanilla state in it) is shared by every test below, so no
+/// test starts from a clean slate unless it asks for one: `bench_hud_and_screen` leaves stone 64 in
+/// hotbar slot 0 and a chat line, which would draw over the chat input this test measures.
+fn reset(gui: &haste_jvm::GuiPipeline) {
+    gui.reset_for_test();
+    // Java's own `Inventory` keeps the stacks the mirror only follows: clear it there too.
+    for slot in 0..haste_jvm::INVENTORY_SIZE {
+        gui.set_inventory_slot(slot as i32, &haste_jvm::empty_stack())
+            .unwrap();
+    }
+    gui.with_state(|s| {
+        s.inventory = vec![haste_jvm::empty_stack(); haste_jvm::INVENTORY_SIZE];
+        s.carried = haste_jvm::empty_stack();
+        s.selected_slot = 0;
+        s.sent.clear();
+        s.outgoing.clear();
+        s.vitals = haste_jvm::PlayerVitals::default();
+        s.debug = haste_jvm::DebugInfo::default();
+        s.game_mode = haste_core::game::GameMode::Survival;
+        s.permission_level = 0;
+        s.game_time = 0;
+        s.day_time = 0;
+        s.disconnect_requested = false;
+    });
+}
+
 #[test]
 #[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
 fn tier3_value_types_from_the_jar() {
@@ -341,7 +367,8 @@ fn blend_of(h: &JvmHost, env: &mut jni::Env, p: &JObject) -> i32 {
 }
 
 /// A mod's own pipeline maps by its blend function, not by its name: the vignette's multiplies, the
-/// crosshair's inverts, and one Haste has no mode for (additive, like the nausea overlay) draws normal.
+/// crosshair's inverts, the text selection highlight's additive (vanilla's GUI_TEXT_HIGHLIGHT,
+/// BlendFunction.ADDITIVE).
 #[test]
 #[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
 fn pipeline_blend_maps_by_blend_function() {
@@ -362,17 +389,28 @@ fn pipeline_blend_maps_by_blend_function() {
             ["ONE_MINUS_DST_COLOR", "ONE_MINUS_SRC_COLOR", "ONE", "ZERO"],
         )?;
         assert_eq!(blend_of(&h, env, &crosshair), 2);
-        // a GUI pipeline whose blend Haste has no mode for: the nausea overlay draws normally
+        let highlight = mod_pipeline(
+            &h,
+            env,
+            "test_mod_text_highlight",
+            ["ONE", "ONE", "ONE", "ONE"],
+        )?;
+        assert_eq!(blend_of(&h, env, &highlight), 3);
+        // vanilla's own additive pipelines: the edit box's text selection highlight and the nausea
+        // overlay, both built with BlendFunction.ADDITIVE
         let pipelines = h.load_class(env, "net.minecraft.client.renderer.RenderPipelines")?;
-        let nausea = env
-            .get_static_field(
-                &pipelines,
-                jni_str!("GUI_NAUSEA_OVERLAY"),
-                jni_sig!("Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;"),
-            )?
-            .l()?;
-        assert!(!nausea.is_null(), "the GUI's pipelines are installed");
-        assert_eq!(blend_of(&h, env, &nausea), 0);
+        for field in ["GUI_TEXT_HIGHLIGHT", "GUI_NAUSEA_OVERLAY"] {
+            let name = jni::strings::JNIString::new(field);
+            let p = env
+                .get_static_field(
+                    &pipelines,
+                    &name,
+                    jni_sig!("Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;"),
+                )?
+                .l()?;
+            assert!(!p.is_null(), "the GUI's pipelines are installed");
+            assert_eq!(blend_of(&h, env, &p), 3, "{field} blends additively");
+        }
         Ok(())
     })
     .expect("pipeline blend mapping");
@@ -385,6 +423,7 @@ fn pause_screen() {
     let h = host();
     let gui = h.gui();
     h.clear_unimplemented().unwrap();
+    reset(gui);
     open(&h, haste_jvm::ScreenKind::Pause);
     assert!(gui.is_open());
     assert_eq!(
@@ -592,6 +631,7 @@ fn multiplayer_screen() {
 fn bench_pause_render() {
     let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
     let h = host();
+    reset(h.gui());
     open(&h, haste_jvm::ScreenKind::Pause);
     let gui = h.gui();
     for _ in 0..3000 {
@@ -670,6 +710,7 @@ fn chat_screen() {
     let h = host();
     let gui = h.gui();
     h.clear_unimplemented().unwrap();
+    reset(gui);
     // received chat goes through vanilla's chat pipeline into the HUD's chat, which the open chat screen shows
     gui.with_state(|s| {
         s.in_world = true;
@@ -977,8 +1018,8 @@ fn hud_frame() {
     let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
     let h = host();
     let gui = h.gui();
-    gui.close_screen();
     h.clear_unimplemented().unwrap();
+    reset(gui);
     for slot in 0..41 {
         gui.set_inventory_slot(slot, &haste_jvm::empty_stack())
             .unwrap();
@@ -1108,6 +1149,7 @@ fn bench_hud_and_screen() {
     let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
     let h = host();
     let gui = h.gui();
+    reset(gui);
     gui.set_inventory_slot(0, &stack("minecraft:stone", 64))
         .unwrap();
     gui.with_state(|s| {

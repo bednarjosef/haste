@@ -152,6 +152,7 @@ mod ab_tests {
             heightmaps: vec![],
             block_entities: Default::default(),
             light: ChunkLight::new(1),
+            dirty: vec![0; 1],
         };
         // uniform full sky: stored as None (absent sky reads 15, same as the array)
         // uniform zero block light: stored empty (absent block light reads 0)

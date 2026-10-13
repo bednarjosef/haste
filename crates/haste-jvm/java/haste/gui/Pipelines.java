@@ -32,6 +32,8 @@ public final class Pipelines {
         BlendFactor.ZERO, BlendFactor.ONE_MINUS_SRC_COLOR, BlendFactor.ZERO, BlendFactor.ONE);
     /** Vanilla's crosshair blend (BlendFunction.INVERT): the source inverts the colour behind it. */
     private static final BlendFunction INVERT = BlendFunction.INVERT;
+    /** Vanilla's text selection highlight blend (RenderPipelines.GUI_TEXT_HIGHLIGHT, BlendFunction.ADDITIVE). */
+    private static final BlendFunction ADDITIVE = BlendFunction.ADDITIVE;
 
     /** Pipelines whose blend function Haste has no GUI mode for: each is logged once, drawn normally. */
     private static final Set<RenderPipeline> UNMAPPED = ConcurrentHashMap.newKeySet();
@@ -59,8 +61,8 @@ public final class Pipelines {
 
     /**
      * The {@link GuiBlend} code of a blit drawn with {@code p}: the vignette multiplies, the crosshair inverts,
-     * every other GUI blend (translucent, additive, premultiplied, none) is normal. Codes: 0 normal,
-     * 1 multiply, 2 invert.
+     * the text selection highlight adds, every other GUI blend (translucent, premultiplied, none) is normal.
+     * Codes: 0 normal, 1 multiply, 2 invert, 3 additive.
      */
     public static int blendOf(RenderPipeline p) {
         for (ColorTargetState target : p.getColorTargetStates()) {
@@ -70,6 +72,7 @@ public final class Pipelines {
             BlendFunction f = blend.get();
             if (f.equals(MULTIPLY)) return GuiBlend.MULTIPLY;
             if (f.equals(INVERT)) return GuiBlend.INVERT;
+            if (f.equals(ADDITIVE)) return GuiBlend.ADDITIVE;
             if (UNMAPPED.add(p)) {
                 System.err.println("[haste] GUI pipeline " + p.getLocation() + " blends " + f
                     + ": Haste has no such mode, drawing it normally");
