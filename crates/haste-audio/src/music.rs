@@ -140,6 +140,11 @@ impl MusicRng {
 /// situation's own no-delay cases, the dragon fight and the credits).
 const REPLACE_PLAY_MAX: u32 = 100;
 
+/// If the output never confirms a `Play` within this many ticks of issuing it (missing file,
+/// failed decode, no audio device), the track is treated as ended: the manager clears it and
+/// waits a fresh countdown, so one bad track cannot silence music forever.
+const PLAY_CONFIRM_TIMEOUT: u32 = 100;
+
 /// Decides when background music plays, driven at 20 Hz. Owns no output: each tick it reports
 /// the next thing to do, or `None`.
 #[derive(Debug)]
@@ -153,6 +158,8 @@ pub struct MusicManager {
     replace_play: bool,
     /// We sent `Play` and are waiting for the output to confirm it started.
     play_issued: bool,
+    /// Ticks since `Play` was issued without the output confirming it started.
+    play_unconfirmed: u32,
     /// The output confirmed our track and has not reported it finished yet.
     track_live: bool,
     /// Event of the track we believe is playing.
@@ -168,6 +175,7 @@ impl MusicManager {
             stop_pending: false,
             replace_play: false,
             play_issued: false,
+            play_unconfirmed: 0,
             track_live: false,
             playing: None,
         }
@@ -189,6 +197,7 @@ impl MusicManager {
         if replaces {
             self.stop_pending = self.playing.is_some();
             self.play_issued = false;
+            self.play_unconfirmed = 0;
             self.track_live = false;
             self.playing = None;
             self.countdown = None;
@@ -222,6 +231,7 @@ impl MusicManager {
             self.stop_pending = false;
             self.playing = None;
             self.play_issued = false;
+            self.play_unconfirmed = 0;
             self.track_live = false;
             self.countdown = None;
             return Some(MusicCommand::Stop);
@@ -230,7 +240,19 @@ impl MusicManager {
         // Follow the track we started: once the output confirms it, wait for it to end.
         if self.play_issued && is_playing {
             self.play_issued = false;
+            self.play_unconfirmed = 0;
             self.track_live = true;
+        }
+        if self.play_issued && !is_playing {
+            self.play_unconfirmed += 1;
+            if self.play_unconfirmed >= PLAY_CONFIRM_TIMEOUT {
+                // The output never started our track (missing file, failed decode, no
+                // device): treat it as ended and pick a fresh countdown.
+                self.play_issued = false;
+                self.play_unconfirmed = 0;
+                self.playing = None;
+                self.countdown = None;
+            }
         }
         if self.track_live && !is_playing {
             // The track ended: wait a fresh random pause before the next one.
@@ -434,5 +456,36 @@ mod tests {
         let run = script(1234);
         assert!(!run.is_empty());
         assert_eq!(run, script(1234));
+    }
+
+    #[test]
+    fn unconfirmed_play_times_out_and_music_recovers() {
+        let mut manager = MusicManager::new();
+        manager.set_situation(MusicSituation::Dragon);
+        let mut rng = MusicRng::new(7);
+        // The dragon fight plays at once, but the output never confirms it.
+        assert_eq!(
+            manager.tick(&mut rng, false),
+            Some(MusicCommand::Play("minecraft:music.dragon".to_owned()))
+        );
+        // The menu replaces it; the new track follows promptly.
+        manager.set_situation(MusicSituation::Menu);
+        assert_eq!(manager.tick(&mut rng, false), Some(MusicCommand::Stop));
+        let (ticks, event) = until_play(&mut manager, &mut rng, false);
+        assert_eq!(event, "minecraft:music.menu");
+        assert!(
+            ticks <= REPLACE_PLAY_MAX as usize,
+            "menu music should follow within {REPLACE_PLAY_MAX} ticks, took {ticks}"
+        );
+        // The track never starts: the manager must time out and try again.
+        for _ in 0..PLAY_CONFIRM_TIMEOUT {
+            assert_eq!(manager.tick(&mut rng, false), None);
+        }
+        let (ticks, event) = until_play(&mut manager, &mut rng, false);
+        assert_eq!(event, "minecraft:music.menu");
+        assert!(
+            ticks <= 600,
+            "fresh menu countdown after the timeout should stay within the wiki range, took {ticks}"
+        );
     }
 }
