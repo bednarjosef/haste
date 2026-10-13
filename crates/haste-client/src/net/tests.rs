@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use super::*;
+use haste_protocol::nbt::{Nbt, NbtCompound};
 use haste_protocol::packets::play::clientbound::{MoveDeltas, SpawnInfo};
 
 #[derive(Default)]
@@ -31,6 +32,12 @@ impl WorldSink for FakeWorld {
     }
     fn apply_light(&mut self, pos: ChunkPos, _light: &LightData) {
         self.log.push(format!("light {} {}", pos.x, pos.z));
+    }
+    fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData) {
+        self.log.push(format!(
+            "be {} {} {} {} {:?}",
+            pos.x, pos.y, pos.z, data.kind, data.nbt
+        ));
     }
     fn reset(&mut self, dim: &DimensionInfo) {
         self.chunks.clear();
@@ -157,6 +164,13 @@ fn chunk(x: i32, z: i32) -> ChunkData {
     }
 }
 
+/// Network NBT (unnamed root compound with one string), as the protocol crate's tests build it.
+fn nbt() -> Nbt {
+    let mut c = NbtCompound::new();
+    c.put_string("color", "red".into());
+    Nbt::new(String::new(), c)
+}
+
 fn level_chunk(x: i32, z: i32) -> ClientboundPlay {
     ClientboundPlay::LevelChunkWithLight(cb::LevelChunkWithLight { chunk: chunk(x, z) })
 }
@@ -209,6 +223,18 @@ fn chunk_and_block_packets_reach_the_world() {
 }
 
 #[test]
+fn block_entity_data_reaches_the_world() {
+    let mut r = Rig::new();
+    let nbt = nbt().write_unnamed();
+    r.apply(ClientboundPlay::BlockEntityData(cb::BlockEntityData {
+        pos: BlockPos::new(17, 64, 33),
+        kind: 7,
+        nbt: nbt.clone(),
+    }));
+    assert_eq!(r.world.log, [format!("be 17 64 33 7 {:?}", nbt)]);
+}
+
+#[test]
 fn entity_packets_reach_the_store() {
     let mut r = Rig::new();
     r.apply(spawn_packet(3, DVec3::new(1.0, 2.0, 3.0)));
@@ -257,7 +283,7 @@ fn entity_packets_reach_the_store() {
 }
 
 #[test]
-fn teleport_is_accepted_then_movement_follows_on_the_next_tick() {
+fn teleport_is_accepted_one_tick_later_then_movement_follows() {
     let mut r = Rig::new();
     // Nothing is sent before the first teleport.
     r.session.end_tick(
@@ -268,15 +294,33 @@ fn teleport_is_accepted_then_movement_follows_on_the_next_tick() {
     );
     assert!(r.out.is_empty());
     r.apply(teleport(1, DVec3::new(0.5, -60.0, 0.5), 0));
-    assert_eq!(r.names(), ["accept_teleportation", "player_loaded"]);
+    // The accept is not sent from the packet handler (a join teleport answered within
+    // microseconds of arrival races the server's join bookkeeping: "moved too quickly!"),
+    // and not on the tick it arrived in either.
+    assert!(r.out.is_empty());
     r.session.end_tick(
         &InputState::default(),
         &mut r.world,
         &r.entities,
         &mut r.out,
     );
-    // The fake world has no chunks: the player stays put, so no movement packet yet.
-    assert_eq!(r.names(), ["player_input", "client_tick_end"]);
+    assert!(r.out.is_empty());
+    r.session.end_tick(
+        &InputState::default(),
+        &mut r.world,
+        &r.entities,
+        &mut r.out,
+    );
+    assert_eq!(
+        r.names(),
+        [
+            "accept_teleportation",
+            "player_loaded",
+            "player_input",
+            "client_tick_end"
+        ]
+    );
+    // The fake world has no chunks: the player stays put, so no movement packet.
     // player_input only when it changes; player_loaded only once.
     r.session.end_tick(
         &InputState::default(),
@@ -286,9 +330,23 @@ fn teleport_is_accepted_then_movement_follows_on_the_next_tick() {
     );
     assert_eq!(r.names(), ["client_tick_end"]);
     r.apply(teleport(2, DVec3::new(1.0, 0.0, 0.0), teleport_flags::X));
-    assert_eq!(r.names(), ["accept_teleportation"]);
+    assert!(r.out.is_empty());
     // x relative, y and z absolute.
     assert_eq!(r.session.player.state.pos, DVec3::new(1.5, 0.0, 0.0));
+    r.session.end_tick(
+        &InputState::default(),
+        &mut r.world,
+        &r.entities,
+        &mut r.out,
+    );
+    assert_eq!(r.names(), ["client_tick_end"]);
+    r.session.end_tick(
+        &InputState::default(),
+        &mut r.world,
+        &r.entities,
+        &mut r.out,
+    );
+    assert_eq!(r.names(), ["accept_teleportation", "client_tick_end"]);
 }
 
 #[test]
@@ -364,6 +422,22 @@ fn real_world_through_the_sink() {
     );
     assert_eq!(WorldSink::chunk_count(&world), 1);
     assert_eq!(world.non_empty_sections(), 2);
+    // A block_entity_data packet updates the block entity for the loaded chunk.
+    let sign = BlockPos::new(3, 8, 3);
+    let nbt = nbt().write_unnamed();
+    s.apply(
+        ClientboundPlay::BlockEntityData(cb::BlockEntityData {
+            pos: sign,
+            kind: 7,
+            nbt: nbt.clone(),
+        }),
+        &mut world,
+        &mut ents,
+        &SyncedRegistries::default(),
+        &mut out,
+    );
+    let be = world.block_entity(sign).unwrap();
+    assert_eq!((be.kind, &be.nbt), (7, &nbt));
     WorldSink::reset(&mut world, &DimensionInfo::overworld());
     assert_eq!(WorldSink::chunk_count(&world), 0);
     assert_eq!(world.biome_bits(), 7);

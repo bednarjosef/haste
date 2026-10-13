@@ -298,6 +298,24 @@ pub async fn mc_login(
     Ok(resp)
 }
 
+/// The `/minecraft/profile` response shape (only the fields Haste uses).
+#[derive(Debug, Clone, Deserialize)]
+pub struct McProfileResponse {
+    #[serde(rename = "id")]
+    pub uuid: String,
+    pub name: String,
+}
+
+/// Parses a `/minecraft/profile` response body. Split out of [`mc_profile`] so tests can run it
+/// on hand-written JSON without a network.
+pub fn parse_mc_profile(json: &str) -> anyhow::Result<MsaProfile> {
+    let v: McProfileResponse = serde_json::from_str(json).context("parsing mc profile")?;
+    Ok(MsaProfile {
+        uuid: v.uuid,
+        name: v.name,
+    })
+}
+
 /// Minecraft access token -> player profile (uuid, name).
 pub async fn mc_profile(
     client: &reqwest::Client,
@@ -314,17 +332,8 @@ pub async fn mc_profile(
         "mc profile returned {}",
         resp.status()
     );
-    let v: serde_json::Value = resp.json().await.context("parsing mc profile")?;
-    let id = v["id"]
-        .as_str()
-        .ok_or_else(|| anyhow!("profile has no id"))?;
-    let name = v["name"]
-        .as_str()
-        .ok_or_else(|| anyhow!("profile has no name"))?;
-    Ok(MsaProfile {
-        uuid: id.to_string(),
-        name: name.to_string(),
-    })
+    let body = resp.text().await.context("reading mc profile body")?;
+    parse_mc_profile(&body)
 }
 
 /// Runs the tail of the flow after the MSA token is in hand: XBL -> XSTS -> MC login -> profile.
@@ -348,6 +357,48 @@ pub async fn exchange_msa_token(
         ),
         profile: Some(profile),
     })
+}
+
+/// Runs the full device-code flow on a fresh HTTP client: prints the verification URL and user
+/// code, polls the token endpoint (honoring `interval`, bounding by `expires_in`), then does the
+/// XBL -> XSTS -> MC login -> profile exchange. `on_code` shows the code to the user.
+pub async fn device_code_login<F: FnOnce(&DeviceCode)>(on_code: F) -> anyhow::Result<MsaTokens> {
+    let client = reqwest::Client::new();
+    let device = begin_device_code(&client).await?;
+    on_code(&device);
+    let msa = poll_until_token(&client, &device).await?;
+    exchange_msa_token(&client, &msa).await
+}
+
+/// Polls `poll_device_code` every `interval` seconds until the user approves or the device code
+/// expires. `slow_down` widens the interval by 5s (per the spec) instead of just retrying.
+async fn poll_until_token(
+    client: &reqwest::Client,
+    device: &DeviceCode,
+) -> anyhow::Result<OauthToken> {
+    let interval = if device.interval > 0 {
+        device.interval
+    } else {
+        5
+    };
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(device.expires_in.max(interval).saturating_sub(2));
+    let mut interval = std::time::Duration::from_secs(interval);
+    loop {
+        tokio::time::sleep(interval).await;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(anyhow!("the sign-in code expired, run `haste login` again"));
+        }
+        match poll_device_code(client, device).await {
+            Ok(Some(token)) => return Ok(token),
+            Ok(None) => {}
+            // server asked us to slow down: widen the interval by 5s and keep waiting
+            Err(e) if e.to_string().contains("slow_down") => {
+                interval += std::time::Duration::from_secs(5)
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -423,11 +474,19 @@ mod tests {
         let login: McLoginResponse =
             serde_json::from_str(r#"{"access_token":"mc-token","expires_in":86400}"#).unwrap();
         assert_eq!(login.access_token, "mc-token");
-        let profile = MsaProfile {
-            uuid: "069a79f444e94726a5befca90e38aaf5".into(),
-            name: "Notch".into(),
-        };
+        // /minecraft/profile response shape (minecraft.wiki "Mojang API")
+        let profile = parse_mc_profile(
+            r#"{"id":"069a79f444e94726a5befca90e38aaf5","name":"Notch","skins":[],"capes":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(profile.uuid, "069a79f444e94726a5befca90e38aaf5");
         assert_eq!(profile.name, "Notch");
+    }
+
+    #[test]
+    fn mc_profile_without_name_is_an_error() {
+        assert!(parse_mc_profile(r#"{"id":"069a79f444e94726a5befca90e38aaf5"}"#).is_err());
+        assert!(parse_mc_profile("{}").is_err());
     }
 
     #[test]

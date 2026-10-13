@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use glam::DVec3;
 use haste_data::GameData;
 use haste_entity::EntityStore;
-use haste_protocol::haste_core::chunk::{ChunkData, LightData};
+use haste_protocol::haste_core::chunk::{BlockEntityData, ChunkData, LightData};
 use haste_protocol::haste_core::game::{DimensionInfo, TICK_SECONDS};
 use haste_protocol::haste_core::input::{InputState, InteractInput};
 use haste_protocol::haste_core::view::DirtyTracker;
@@ -175,6 +175,9 @@ impl WorldSink for TrackedWorld<'_> {
     fn apply_light(&mut self, pos: ChunkPos, light: &LightData) {
         WorldSink::apply_light(self.world, pos, light)
     }
+    fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData) {
+        WorldSink::set_block_entity(self.world, pos, data)
+    }
     fn reset(&mut self, dim: &DimensionInfo) {
         let loaded: Vec<ChunkPos> = self.world.loaded_chunks().collect();
         for c in loaded {
@@ -256,9 +259,13 @@ fn tick_once(
         if std::mem::take(&mut shared_input.toggle_flight) {
             driver.session.player.toggle_flight();
         }
-        // Held buttons stay; the press-only middle click and the hotbar choice are consumed.
+        // Held buttons stay; the press-only middle click, drop/swap presses and the hotbar choice
+        // are consumed.
         let interact = shared_input.interact;
         shared_input.interact.pick_block = false;
+        shared_input.interact.drop_item = false;
+        shared_input.interact.drop_stack = false;
+        shared_input.interact.swap_offhand = false;
         shared_input.interact.hotbar = None;
         driver.session.player.set_interact(interact);
         shared_input.state
