@@ -25,11 +25,11 @@ Everything downloaded or derived from Mojang's files lives in `cache/` (gitignor
 
 | | Demo | Status |
 |---|---|---|
-| Join milestone | `haste --headless --server 127.0.0.1:25565` joins a local 26.3 server and an online-mode server, tracks world and entities | done headless (local server); online mode pending Microsoft tokens |
-| First frame milestone | the world renders around the player | renderer and world crates done (211 FPS offscreen); client wiring pending |
-| Walk milestone | movement/collision match vanilla traces, no rubber-banding | physics done against documented numbers; traces not recorded yet |
-| Alive milestone | entities render and move; HUD | entity store and models done; drawing pending |
-| Vanilla screens milestone | chat, pause menu, inventory as real vanilla Java screens through the batched GUI pipeline | done headless (one JNI call per frame); drawing pending |
-| Singleplayer and numbers milestone | embedded vanilla server; benchmarks vs vanilla and vanilla + Sodium | setup, local server and launcher done; benchmarks pending |
+| Join milestone | `haste --headless --server 127.0.0.1:25565` joins a local 26.3 server and an online-mode server, tracks world and entities | done on vanilla/Fabric offline servers, normal terrain, reconfiguration and transfer; online mode pending Microsoft tokens |
+| First frame milestone | the world renders around the player | done: textured terrain with biome colours, water and lava, sky, entities in a window; PR #15 floating-block regression open |
+| Walk milestone | movement/collision match vanilla traces, no rubber-banding | movement and interaction accepted by the vanilla server with zero corrections; vanilla traces not recorded yet |
+| Alive milestone | entities render and move; HUD | entities drawn as cube models; vanilla HUD runs in Java but is not wired into the window |
+| Vanilla screens milestone | chat, pause menu, inventory as real vanilla Java screens through the batched GUI pipeline | done headless (chat, death, chest, kick screens against a server); drawing code done; window wiring pending |
+| Singleplayer and numbers milestone | embedded vanilla server; benchmarks vs vanilla and vanilla + Sodium | setup library done; commands and benchmarks pending |
 
 See `TASKS.md` (board) and `NOTES.md` (decisions). `PHASE1-REPORT.md` arrives with singleplayer and numbers milestone.
