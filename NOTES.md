@@ -2,6 +2,29 @@
 
 Newest at the top. One entry per decision, with the why; link the brief or report it came from.
 
+- **2026-10-13 Floating-block regression from PR #15.** Normal-world screenshots show blocks
+  scattered in mid-air after PR #15 (capture on mesh workers / flat-array cull walk); clean at
+  PR #13. All renderer tests passed because they use hand-built worlds: review renderer merges
+  with a normal-world `--screenshot`. Details in docs/HANDOFF.md.
+- **2026-10-13 Vanilla HUD and registries in tier 3.** Vanilla's own bootstrap runs in Java;
+  server registries are built by vanilla's `RegistryDataCollector` from the exact configuration
+  packets; tier-3 packets cross in vanilla's wire format both ways, so container clicks and their
+  hashed stacks are byte-exact. The inventory is Java-canonical with a Rust mirror (vanilla's
+  menus mutate stacks in place during click prediction). Bootstrap costs 9-47 s: start it on its
+  own thread. Phase 2: mods register into the real `BuiltInRegistries`; Rust then takes modded ids
+  from Java.
+- **2026-10-13 Item stack templates and configuration.** 26.x item stack templates are item,
+  count, patch (container, bundle_contents, charged_projectiles, use_remainder, pot_decorations as
+  four optional templates without count, advancement icons); `equippable` has five bools. On a
+  transfer, close the old connection before connecting or the server kicks the old session.
+  We answer `select_known_packs` with none, vanilla with `minecraft:core` (detectable).
+- **2026-10-13 Renderer performance.** Per-section buffers cost ~8 ms at ~700 sections; shared
+  arenas + multi-draw-indirect fixed it (5 draw calls). SipHash maps on the cull path cost 2-16 ms
+  per frame: flat arrays or ahash there. Bake stores atlas-texel UVs; the mesher converts to
+  sprite-local. Unifont comes from the assets index, not the jar.
+- **2026-10-13 Vanilla client unattended.** Fabric Knot + recorder scenario (`-Dhaste.scenario`)
+  that quits the game itself; client mixins need their own config; `graphicsPreset` must be
+  "custom" in options.txt; Wayland framebuffers are HiDPI-scaled (record the real size).
 - **2026-10-13 Session 2: the real server is the test.** Every component first checked against a
   real 26.3 server had a bug that unit tests missed: section header (i16 block + fluid counts),
   direct biome width (ceil(log2(synced biome count))), packed arrays LSB-first, light-mask BitSet

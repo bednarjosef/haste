@@ -1,64 +1,133 @@
-# Handoff: state of Haste Phase 1 after session 1 (2026-10-12)
+# Handoff: state of Haste Phase 1 after session 2 (2026-10-13)
 
 For the next lead session. Read `AGENTS.md`, then this, then `TASKS.md` and `NOTES.md`.
 
-## Where things are
+## How to run it
 
-- Repo: `$HASTE_ROOT`, branch `main`, remote `git@github.com:bednarjosef/haste.git`
-  (private for now; it will be made public). Merges go through pull requests opened and merged by
-  the lead agent (`gh pr create` / `gh pr merge --merge`); see AGENTS.md "Branches and merging".
-- Worktrees: `$HASTE_WT/ws{1..8}-*` on branches of the same name,
-  each with `./cache` symlinked to the shared cache and a `.claude/settings.local.json` with the
-  worker allow/deny rules. Rebuild or delete freely; they hold nothing that is not on their branch.
-- Cache (derived Mojang data, never committed): real location
-  `$HASTE_CACHE`; `./cache` in every checkout is a symlink to it.
-  `scripts/rebuild-cache.sh` recreates it from nothing in ~5 minutes. `source scripts/env.sh` sets
-  `HASTE_CACHE`, `JAVA_HOME` (JDK 25 in the cache) and the project-local Vulkan driver.
-- Oracle data in `cache/oracle/26.3/`: `block_shapes.json`, `entity_dimensions.json`,
-  `block_properties.json` (real, from the recorder mod on the dedicated server). `traces/`,
-  `screenshots/`, `packets/` are empty: they need the user to run the vanilla client once
-  (`docs/RECORDING.md`).
+```
+scripts/test-server.sh mine 25700 3600 minecraft:normal      # private Fabric 26.3 server (offline, creative)
+cargo run --release --bin haste -- --server 127.0.0.1:25700  # window: WASD, mouse look, click to grab, Esc releases
+cargo run --release --bin haste -- --server HOST --screenshot out.png [--yaw Y --pitch P --width W --height H]
+cargo run --release --bin haste -- --server HOST --headless --seconds 60
+```
+`HASTE_SERVER=vanilla scripts/test-server.sh ...` runs Mojang's plain server (the purer oracle).
+`vulkan-radeon` is now installed system-wide on the dev laptop; `WGPU_BACKEND=gl` forces the GL
+fallback. Walk/interaction scripts: `HASTE_WALK_SCRIPT=crates/haste-client/walks/<name>.txt`
+with the bot opped on the server.
 
-## Milestones
+## What works (all on main)
 
-| | Status |
-|---|---|
-| Join milestone | **done headless**: `haste --headless --server 127.0.0.1:25565 --seconds 60` (local Fabric 26.3 server in `cache/server-spike`; start with `crates/haste-protocol/scripts/local-server.sh`). 473 chunks, ~117 entities, every play packet decoded. Uses a stand-in world/entity sink in `crates/haste-client/src/net.rs` until `haste-world` lands. Online mode untested (needs Microsoft tokens). |
-| First frame milestone | renderer and world crates are merged and work (211 FPS offscreen at render distance 12 on a flat world, readback verified); what is missing is the client wiring: `World` from the join into `Renderer::update_world`, and a winit loop (`crates/haste-client/src/app.rs`). Windowed mode untested interactively (Wayland frame-callback stall in background sessions). |
-| Walk milestone | physics crate done and tested against documented numbers; validation against traces waits for the recording. |
-| Alive milestone | entity store + models done; drawing them needs the renderer. |
-| Vanilla screens milestone | **done headless**: real `PauseScreen`/`ChatScreen`/`InventoryScreen` in the embedded JVM, one JNI call per frame. Drawing the `GuiFrame` needs the renderer. |
-| Singleplayer and numbers milestone | `ensure_installed`, `LocalServer`, vanilla + Fabric launcher and the MSA device-code flow are done (PR #6; MSA needs a `client_id`); `haste setup`/`haste launch` subcommands and the benchmark runs remain. |
+- **Join and stay connected** to vanilla/Fabric 26.3 servers in offline mode, on normal terrain:
+  every chunk and light packet decodes (PR #10 BitSet fix), 0 decode failures over a ~180-command
+  scenario with mobs, block entities, items with components, advancements, a second player.
+- **Configuration both ways** (PR #17): start_configuration back to configuration, transfer
+  (`/transfer` rejoins cleanly), cookies, resource pack answers, brand "vanilla".
+- **Window client** (PR #8): 20 Hz game thread + winit render thread, mouse look at frame rate,
+  `--screenshot` for unattended rendering checks.
+- **Movement** (PR #5): `LocalPlayer` sends vanilla's per-tick packets; a 180 s scripted walk on
+  the vanilla server (walk, sprint-jump, sneak edges, stairs, slabs, 20-block fall = 17 damage,
+  swim, creative flight) has 0 corrections and no "moved wrongly".
+- **Interaction** (PR #12): survival/creative breaking with vanilla mining speed, placing, using,
+  attacking, pick block, hotbar; mouse and number keys in the window; 10/10 server-side
+  confirmations in `walks/interaction.txt`.
+- **Rendering** (PRs #7, #9, #11, #15): textured terrain, sky/sun/moon/stars/clouds/rain,
+  Nether/End skies, entities as cube models with default skins and name tags, selection outline
+  and break cracks, first-person arm/held item, the full `GuiFrame` (vanilla font widths,
+  nine-slice sprites, 3D GUI items), GL fallback. Batched draws: offscreen render distance 12 at
+  1.3-2.3 ms; windowed 2816x1656 ~7 ms (~140 FPS) after PR #15.
+- **Vanilla HUD and screens in Java** (PR #16): vanilla's bootstrap runs in tier 3 (95
+  registries / 7053 entries match the data generator), server registries via vanilla's
+  `RegistryDataCollector`, vanilla `Hud` (hotbar, health, chat, boss bars, sidebar, titles, tab
+  list), chat with command suggestions, death screen, chests with byte-exact `container_click`
+  hashed stacks, kick screen. HUD p50 80 us/frame. **Not wired into the window yet** (see below).
+- **Vanilla reference** (PR #18): `scripts/vanilla-client.sh` runs the real 26.3 client
+  unattended (a window opens on the desktop) against `scripts/vanilla-server.sh` (seed 20263);
+  `scripts/compare-vanilla.sh` produces vanilla | haste | difference images in
+  `target/vanilla-compare/`.
+- **Biome colours, water and lava** (PR #19): per-biome grass/foliage/water colours from the
+  synced registry and the player's colormaps, 5x5 blending, fixed block tints; grass tops match
+  the vanilla reference within ~2 per channel. Water/lava meshing with corner heights,
+  flow-rotated textures, culling, translucency. Animated textures (water, lava, fire...) show
+  frame 0: the atlas has no animation yet. Leaves, bark and grass sides are ~1.35x brighter than
+  vanilla (lighting/shading, not tint).
 
-## What to do next, in order
+## End-of-session check (main at the merge of PR #19)
 
-1. (done in session 1: all eight workstream branches were merged through PRs #1-#8 on the first
-   repo instance; the repo was then recreated with rewritten history to purge personal data, so
-   those PR pages no longer exist. The merge commits and messages are in `main`'s history.)
-2. Wire the real `World`/`EntityStore` into `crates/haste-client/src/net.rs` (`WorldSink`/`EntitySink`
-   one-line forwards, delete the stubs), then the window/render loop (`app.rs`) with
-   `Renderer::update_world` + `render`: that is first frame milestone.
-3. `player.rs`: input sampling, `haste_physics::tick`, movement packets (walk milestone minus trace validation).
-4. Ask the user to run the recorder (`docs/RECORDING.md`); then `cargo test -p haste-physics
-   --test replay -- --ignored` and fix divergences.
-5. `ui.rs`: HUD in Rust + `GuiPipeline` when a screen is open; draw `GuiFrame` in the renderer (alive/vanilla screens milestones visible).
-6. JVM: bridge registry data into Java (`BuiltInRegistries` is refused today), then tooltips/components.
-7. `haste setup` / `haste launch` subcommands in the client binary (haste-setup has everything they need); benchmark route via the recorder mod on the user's machine.
-8. `PHASE1-REPORT.md` at singleplayer and numbers milestone.
+- `cargo test` for haste-render/haste-assets (including GPU tests) and haste-client: all pass;
+  workspace clippy `-D warnings` and fmt clean. The jvm-host server tests (`ui::tests`,
+  `#[ignore]`) need their test server on port 25614 with `haste` opped and `--test-threads=1`.
+- Headless 40 s on a normal-terrain Fabric server: 473 chunks, 4650 non-empty sections, 126
+  entities, 0 chunk errors, no unknown packet ids, stayed connected.
+- `--screenshot` on the same server: textured snowy terrain, ice, sky, outline; **blocks floating
+  in mid-air** (problem 1 below).
 
-## Team lessons (session 1)
+## Known problems (documented, not fixed: the user asked for a wind-down without fixes)
 
-- Opus (medium effort) agents finished whole briefs in 30-80 minutes with better reports; GLM
-  workers took 2-3 hours per task and needed relaunches. Put precision/judgement work on Opus.
-- Eight GLM workers on two API keys produced 429 storms and one gate stall (restart `glm-gate`).
-  Run at most five, and give them single-line commands and `--allow Bash` (the deny list lives in
-  each worktree's `.claude/settings.local.json`).
-- Something deleted the repo's `cache/` once; keep the cache outside the tree (done) and never
-  track the symlink (`.gitignore` has `/cache`, not `/cache/`).
-- Workers ignore "ask before editing root Cargo.toml"; review the manifest diff on every PR.
+1. **Floating blocks on main (regression from PR #15).** On a normal world, dirt/stone cubes
+   are drawn scattered in mid-air above the terrain. Bisected with `--screenshot --yaw 180
+   --pitch 25` on the same server: clean at `b5fe1fd` (PR #13), broken at `ecd321f` (PR #15).
+   PR #15 moved section capture to the mesh workers (`ca0750e`) and rewrote the cave-culling
+   walk over flat arrays (`d41a04a`); one of them misplaces sections (wrong section origin or a
+   capture race). First task next session: find which, fix, add a regression screenshot test on a
+   normal world. Fallback: `git revert -m 1 ecd321f` restores correct output at ~12.5 ms/frame.
+2. **The HUD and screens are not visible in the window.** `crates/haste-client/src/ui.rs` (API
+   in its doc comment and INTERFACES.md) works headless; it still has to be wired into
+   `game.rs`/`app.rs`: `Ui::handle` for every packet, `tick`, `drain_outgoing`, key/mouse routing
+   (screen open -> Java, else game), `frame()` into `FrameInput.gui`, `Renderer::text_metrics`
+   into `set_text_metrics`, JVM bootstrap (9-47 s) on its own thread at startup.
+3. **Vanilla comparison numbers are not meaningful yet**: 94-98 % differing pixels on the three
+   forest shots, dominated by untinted grass and a camera ~1.2 blocks low in Haste's shot. Our own
+   `--screenshot` places the eye correctly at feet + 1.62 on the lead's server, so the low camera
+   is probably the comparison script's teleport race (the script teleports the bot repeatedly
+   during join); a `--pos x y z` screenshot flag would remove it. GUI shots need an exact
+   framebuffer size (Wayland HiDPI gives 2816x1656 for a 1280x720 window, XWayland 1408x828).
+4. Machine load: eight agents plus servers ran the vanilla servers into "Can't keep up" stalls;
+   a GLM worker's scripts once took 15 GB. Check `free -g` and server logs before trusting a
+   tick-counted result; `HASTE_TICK_RATE` + `/tick rate` separate server lag from client bugs.
+
+## What is left for Phase 1 (estimates in Opus-hours, from session 2's pace)
+
+| Task | Brief | Estimate |
+|---|---|---|
+| Fix the PR #15 regression | - | 0.5-1 |
+| Wire `Ui` (HUD, chat, inventory, menus) into the window; menus' keybinds | jvm-host next steps | 2-3 |
+| Sound (`haste-audio` is an empty crate) | docs/briefs/sound.md | 1.5-2 |
+| World: block entities (one unreviewed commit on branch `world-and-data`), region-file oracle, section updates | docs/briefs/world-and-data.md | 1-2 |
+| Setup: `haste setup/login/singleplayer/vanilla`, player certificates (unreviewed WIP `launch.rs` on branch `setup-cli`) | docs/briefs/setup-cli.md | 1-2 |
+| Protocol: chat and signing, typed data components, remaining enum checks, `select_known_packs` answering `minecraft:core` | docs/briefs/protocol-compat.md tasks 3-5 | 3 |
+| Vanilla reference: GUI scenarios, more viewpoints, physics traces + replay fixes | docs/briefs/vanilla-reference.md tasks 2-4 | 2-3 |
+| Block entities rendering (chests, signs with text, beds, banners, heads, shulkers) | not written | 2-3 |
+| Exact mob/player models from the jar's Java code, animation, armour, skin download | not written | 3-4 |
+| Particles | not written | 2-3 |
+| Rendering details (animated textures, smooth light/AO vs vanilla, fog, item frames/paintings, hurt tint) | not written | 2-3 |
+| Title screen, server list, options and keybind screens (vanilla Java), settings persistence | not written | 2-3 |
+| Vehicles, riding, elytra | not written | 2-3 |
+| Online mode end to end (needs a Microsoft app client_id and the user's login) | - | 1-2 |
+| Benchmarks vs vanilla and Sodium, PHASE1-REPORT.md | - | 2 |
+
+Roughly 30-40 Opus-hours: two to three sessions with four Opus agents. Code size at the end of
+session 2: 62.5k lines of Rust, Java and WGSL (43.8k at its start).
+
+## Team and process lessons (session 2)
+
+- **Opus at medium effort, four at a time, is the team.** GLM workers were dropped: four of them
+  committed nothing in 2.5 hours (huge contexts, 15-minute requests, connection drops) while
+  Opus merged 15+ PRs. The user decided Opus only.
+- **The real server is the test.** Every component checked against a real server had a bug unit
+  tests missed (NOTES.md 2026-10-13). Give every brief a server-side oracle: the vanilla
+  server's movement checks and logs, a second headless client as observer, region files, a local
+  probe mod on a private server copy (never committed), the vanilla client via
+  `scripts/vanilla-client.sh`.
+- **Screenshots after every renderer merge.** The PR #15 regression passed all tests (they use
+  hand-built worlds); a normal-world `--screenshot` would have caught it. Add one to the review
+  routine (`scripts/review.sh`) next session.
+- The lead merges in its own worktree (`$HASTE_WT/lead`), never in the user's checkout.
+- `scripts/env.sh` must always return success (fixed in PR #13); it had silently broken every
+  `source env.sh && ...` chain.
+- Agents report through SendMessage mid-task ("task 1 done" + hash) so the lead can merge and
+  unblock others early; that worked well.
 
 ## Before going public
 
-- Rewrite the author email on the early commits to the GitHub noreply address (later commits use it).
-- Parameterise the absolute `~/...` paths in `docs/briefs/*`, `scripts/*.sh`, `NOTES.md`.
-- Push `haste-spike` to GitHub too (README and AGENTS.md link to `bednarjosef/haste-spike`).
+Unchanged from session 1: history is already clean (`scripts/check-no-personal.sh` runs in CI);
+push `haste-spike` to GitHub too (README and AGENTS.md link to it).

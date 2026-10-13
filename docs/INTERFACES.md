@@ -254,8 +254,43 @@ impl LocalPlayer {
 
 ## haste-client ui (jvm-host): `crates/haste-client/src/ui.rs`
 
-HUD (real vanilla `Gui`) and screens through `GuiPipeline`; API proposed by jvm-host in its
-report (input routing, `frame(...) -> &GuiFrame`, outgoing packets drained per tick).
+HUD (vanilla `Hud`) and screens in one JNI call per frame. Not yet wired into game.rs/app.rs.
+
+```rust
+#[derive(Clone)] pub struct Ui { .. }   // one clone per thread; JVM calls are serialised inside
+impl Ui {
+    pub fn new(host: JvmHost) -> Ui;                       // JvmHost::start takes 9-47 s: own thread
+    pub fn set_text_metrics(&self, m: Arc<dyn TextMetrics>);
+    pub fn joined(&self, conn: &Connection, login: &Login) -> anyhow::Result<()>;
+    pub fn handle(&self, p: &ClientboundPlay);             // game thread: every packet, in order
+    pub fn tick(&self);                                    // 20 Hz
+    pub fn drain_outgoing(&self, out: &mut Vec<ServerboundPlay>);  // once per tick
+    pub fn key(&self, key: i32, keycode: i32, mods: i32, pressed: bool) -> bool;  // false = game input
+    pub fn char_typed(&self, c: char, mods: i32) -> bool;
+    pub fn mouse_moved(&self, x: f64, y: f64) -> bool;    // GUI-scaled pixels
+    pub fn mouse_button(&self, x: f64, y: f64, button: i32, pressed: bool) -> bool;  // 1 left, 2 middle, 3 right
+    pub fn scroll(&self, x: f64, y: f64, dx: f64, dy: f64) -> bool;
+    pub fn frame(&mut self, w: u32, h: u32, scale: u32, mouse: (f64, f64), partial: f32) -> &GuiFrame;
+    pub fn screen_open(&self) -> bool;
+    pub fn wants_mouse_grabbed(&self) -> bool;
+    pub fn set_mouse_grabbed(&self, g: bool);
+    pub fn selected_slot(&self) -> i32;
+    pub fn take_disconnect_request(&self) -> bool;
+    pub fn disconnected(&self, reason: &Component);
+    pub fn set_debug(&self, d: haste_jvm::DebugInfo);
+    pub fn set_eye_in_water(&self, v: bool);
+}
+```
+With no screen open, `key` handles T, /, E, Escape, F1, F3, Tab and 1-9 like vanilla.
+
+## haste-render additions (session 2)
+
+`Renderer`: `text_metrics()`, `set_item_registry(&Registries)`, `sample_world(world, shapes,
+&FrameInput)` and `sample_entity_lights(world, entities)` (the renderer holds no world; call
+before `render`), `set_dimension(&DimensionInfo)`, `set_first_person(Option<FirstPerson>)`,
+`set_vsync(bool)`, `update_world_from(&Arc<dyn SnapshotSource>, dirty, chunk, vd)` (meshing
+capture on worker threads), `timings() -> FrameTimings`, `gui_stats()`. Free:
+`haste_render::default_skin(uuid) -> (Identifier, slim)`. `WGPU_BACKEND` selects the backend.
 
 ## haste-client wiring (lead)
 
