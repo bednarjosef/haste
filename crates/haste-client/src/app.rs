@@ -312,6 +312,7 @@ fn frame_view(
         yaw: yaw + view.look_offset.0,
         pitch: (pitch + view.look_offset.1).clamp(-90.0, 90.0),
         fov_deg,
+        roll_deg: view.hurt_tilt,
     };
     let fog_end = (view.view_distance.max(2) * 16) as f32;
     let sky = SkyState {

@@ -57,4 +57,8 @@ pub struct EntityInstance {
     pub pose: PoseOverrides,
     pub skin: Option<Identifier>,
     pub nametag: Option<String>,
+    /// Hurt flash strength in 0..1 (1 just after the hit, easing to 0 over the 10 hurt
+    /// ticks; death holds it at 1 for the 20-tick death animation). The renderer mixes
+    /// red into the entity's colour for values above 0.
+    pub hurt: f32,
 }

@@ -52,6 +52,8 @@ pub struct ViewState {
     pub block_target: Option<(BlockPos, Direction)>,
     /// Selected hotbar slot (`LocalPlayer::held_slot`), for the scroll wheel.
     pub held_slot: i32,
+    /// Hurt-tilt camera roll in degrees (`Session::hurt_tilt_degrees`).
+    pub hurt_tilt: f32,
 }
 
 /// Input sampled by the render thread from winit, read by the game thread once per tick.
@@ -114,6 +116,7 @@ impl Shared {
                 view_distance,
                 block_target: None,
                 held_slot: 0,
+                hurt_tilt: 0.0,
             }),
             breaking: Mutex::new(Vec::new()),
             input: Mutex::new(SharedInput::default()),
@@ -293,6 +296,7 @@ fn tick_once(
     view.has_sky = s.dimension.has_skylight;
     view.block_target = s.player.target();
     view.held_slot = s.player.held_slot;
+    view.hurt_tilt = s.hurt_tilt_degrees();
     Ok(())
 }
 
