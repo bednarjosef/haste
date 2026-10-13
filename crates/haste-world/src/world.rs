@@ -80,7 +80,8 @@ impl World {
         )
         .map_err(WorldError::Palette)?;
         self.chunks.insert(data.pos.to_packed(), chunk);
-        // a new chunk dirties all its sections and the borders of its neighbours
+        // a new chunk dirties all its sections and the borders of its neighbours,
+        // including the diagonal chunks (their corner columns sample the new chunk)
         for sy in 0..section_count as i32 {
             self.mark_dirty(SectionPos::new(
                 data.pos.x,
@@ -88,11 +89,16 @@ impl World {
                 data.pos.z,
             ));
         }
-        for (dx, dz) in [(-1i32, 0), (1, 0), (0, -1), (0, 1)] {
-            let n = ChunkPos::new(data.pos.x + dx, data.pos.z + dz);
-            if self.chunks.contains_key(&n.to_packed()) {
-                for sy in 0..section_count as i32 {
-                    self.mark_dirty(SectionPos::new(n.x, self.dim.min_section() + sy, n.z));
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                if dx == 0 && dz == 0 {
+                    continue;
+                }
+                let n = ChunkPos::new(data.pos.x + dx, data.pos.z + dz);
+                if self.chunks.contains_key(&n.to_packed()) {
+                    for sy in 0..section_count as i32 {
+                        self.mark_dirty(SectionPos::new(n.x, self.dim.min_section() + sy, n.z));
+                    }
                 }
             }
         }
@@ -101,18 +107,26 @@ impl World {
 
     pub fn unload_chunk(&mut self, pos: ChunkPos) {
         self.chunks.remove(&pos.to_packed());
-        // neighbour borders now face void: remesh them
-        for (dx, dz) in [(-1i32, 0), (1, 0), (0, -1), (0, 1)] {
-            let n = ChunkPos::new(pos.x + dx, pos.z + dz);
-            if self.chunks.contains_key(&n.to_packed()) {
-                for sy in 0..self.dim.section_count() as i32 {
-                    self.mark_dirty(SectionPos::new(n.x, self.dim.min_section() + sy, n.z));
+        // neighbour borders now face void: remesh them (diagonal chunks included:
+        // their corner columns sampled the removed chunk)
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                if dx == 0 && dz == 0 {
+                    continue;
+                }
+                let n = ChunkPos::new(pos.x + dx, pos.z + dz);
+                if self.chunks.contains_key(&n.to_packed()) {
+                    for sy in 0..self.dim.section_count() as i32 {
+                        self.mark_dirty(SectionPos::new(n.x, self.dim.min_section() + sy, n.z));
+                    }
                 }
             }
         }
     }
 
-    /// Sets a block. Marks the section (and neighbouring sections when on a border) dirty.
+    /// Sets a block. Marks every section whose one-block border touches the block dirty: the
+    /// mesher samples AO and smooth light from the 3x3x3 block neighbourhood, so edge and
+    /// corner blocks also affect the diagonally adjacent sections.
     pub fn set_block(&mut self, pos: BlockPos, state: BlockStateId) {
         let chunk_pos = pos.chunk();
         let sec_y = pos.y >> 4;
@@ -127,34 +141,76 @@ impl World {
         let ly = (pos.y & 15) as u8;
         let lz = (pos.z & 15) as u8;
         section.set(lx, ly, lz, state, direct_bits);
-        self.mark_dirty(pos.section());
-        // borders dirty the neighbour section too
-        if lx == 0 {
-            self.mark_dirty(SectionPos::new(chunk_pos.x - 1, sec_y, chunk_pos.z));
-        }
-        if lx == 15 {
-            self.mark_dirty(SectionPos::new(chunk_pos.x + 1, sec_y, chunk_pos.z));
-        }
-        if lz == 0 {
-            self.mark_dirty(SectionPos::new(chunk_pos.x, sec_y, chunk_pos.z - 1));
-        }
-        if lz == 15 {
-            self.mark_dirty(SectionPos::new(chunk_pos.x, sec_y, chunk_pos.z + 1));
-        }
-        if ly == 0 {
-            self.mark_dirty(SectionPos::new(chunk_pos.x, sec_y - 1, chunk_pos.z));
-        }
-        if ly == 15 {
-            self.mark_dirty(SectionPos::new(chunk_pos.x, sec_y + 1, chunk_pos.z));
+        // per axis, the section offsets of the block's 3x3x3 neighbourhood: {0} plus {-1}
+        // when on the low border, {+1} when on the high border (at most 2 per axis)
+        let offs = |l: u8| -> &[i32] {
+            if l == 0 {
+                &[-1, 0]
+            } else if l == 15 {
+                &[0, 1]
+            } else {
+                &[0]
+            }
+        };
+        let xs = offs(lx);
+        let ys = offs(ly);
+        let zs = offs(lz);
+        // sections outside the world's vertical range are skipped: the dimension knows its
+        // section span, and the mesher can never read them (out-of-bounds y is air)
+        let min_sec = self.dim.min_section();
+        let max_sec = min_sec + self.dim.section_count() as i32;
+        for &dx in xs {
+            for &dy in ys {
+                for &dz in zs {
+                    let ty = sec_y + dy;
+                    if ty < min_sec || ty >= max_sec {
+                        continue;
+                    }
+                    self.mark_dirty(SectionPos::new(chunk_pos.x + dx, ty, chunk_pos.z + dz));
+                }
+            }
         }
     }
 
-    /// Applies a `light_update` to the chunk at `pos`.
+    /// Applies a `light_update` to the chunk at `pos`. Marks dirty the 3x3x3 section
+    /// neighbourhood of every changed light section, like `set_block` does for blocks: the
+    /// mesher's smooth light samples the 3x3x3 block neighbourhood of each block, so a
+    /// section's border blocks read light from the adjacent sections (diagonal ones too, in
+    /// neighbouring chunks).
     pub fn apply_light(&mut self, pos: ChunkPos, light: &haste_core::chunk::LightData) {
         if let Some(chunk) = self.chunks.get_mut(&pos.to_packed()) {
             chunk.apply_light(light);
-            for sy in 0..self.dim.section_count() as i32 {
-                self.mark_dirty(SectionPos::new(pos.x, self.dim.min_section() + sy, pos.z));
+            // light sections are indexed from one below the world: light index i is
+            // section y `min_section - 1 + i`, `section_count + 2` of them in total
+            let min_sec = self.dim.min_section();
+            let max_sec = min_sec + self.dim.section_count() as i32;
+            let changed = |i: i32| -> bool {
+                let set =
+                    |mask: &[u64]| mask.get(i as usize / 64).map_or(0, |w| w >> (i % 64) & 1) != 0;
+                set(&light.sky_mask)
+                    || set(&light.block_mask)
+                    || set(&light.empty_sky_mask)
+                    || set(&light.empty_block_mask)
+            };
+            for i in 0..self.dim.section_count() as i32 + 2 {
+                if !changed(i) {
+                    continue;
+                }
+                // the light sections outside the world's span only change light for the
+                // sections next to them: sections outside the span are skipped (out-of-bounds
+                // y is air for the mesher)
+                let sy = min_sec - 1 + i;
+                for dx in -1..=1 {
+                    for dy in -1..=1 {
+                        for dz in -1..=1 {
+                            let ty = sy + dy;
+                            if ty < min_sec || ty >= max_sec {
+                                continue;
+                            }
+                            self.mark_dirty(SectionPos::new(pos.x + dx, ty, pos.z + dz));
+                        }
+                    }
+                }
             }
         }
     }
