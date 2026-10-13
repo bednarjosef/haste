@@ -511,6 +511,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         fps: FpsCounter::new(),
         error: None,
         seconds: args.window_seconds,
+        screenshot: false,
         started: Instant::now(),
     };
     event_loop.run_app(&mut app)?;
@@ -557,6 +558,9 @@ struct App {
     error: Option<anyhow::Error>,
     /// Close the window after this long (`--window-seconds`, for unattended runs).
     seconds: Option<u64>,
+    /// F2 pressed: the next frame renders offscreen for a screenshot, and `take_capture`
+    /// after it hands the image to a save thread.
+    screenshot: bool,
     started: Instant,
 }
 
@@ -660,7 +664,24 @@ impl App {
         };
         // Outline boxes of the target and the states of breaking blocks (one short read lock).
         renderer.sample_world(&*self.shared.world.read(), &self.shared.data.shapes, &frame);
+        if self.screenshot {
+            self.screenshot = false;
+            renderer.request_capture();
+        }
         let result = renderer.render(&frame);
+        if let Some(result) = renderer.take_capture() {
+            // Encode and write off the render thread: PNG compression of a full frame
+            // would stall the frame loop (vanilla's chat line becomes a log line here).
+            match result {
+                Ok(image) => {
+                    std::thread::spawn(move || match crate::screenshots::save(image) {
+                        Ok(name) => tracing::info!("Saved screenshot as {name}"),
+                        Err(e) => tracing::warn!("screenshot failed: {e:#}"),
+                    });
+                }
+                Err(e) => tracing::warn!("screenshot readback failed: {e:#}"),
+            }
+        }
         let t3 = Instant::now();
         self.fps.phases(
             (t1 - t0).as_secs_f32() * 1e3,
@@ -791,6 +812,11 @@ impl ApplicationHandler for App {
                                 let full = w.fullscreen().is_some();
                                 w.set_fullscreen((!full).then_some(Fullscreen::Borderless(None)));
                             }
+                        }
+                        KeyCode::F2 => {
+                            // Vanilla's screenshot key: capture on the next frame (`draw`),
+                            // where the render (and its offscreen target) happens.
+                            self.screenshot = true;
                         }
                         _ => {}
                     }

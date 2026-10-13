@@ -1216,6 +1216,7 @@ dependencies = [
  "haste-setup",
  "haste-world",
  "image",
+ "libc",
  "parking_lot",
  "tokio",
  "tracing",
