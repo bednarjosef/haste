@@ -342,30 +342,37 @@ fn dropped_items_offscreen() {
             .count();
         assert!(diff > 40, "two item scenes differ in only {diff} pixels");
     }
-    // Case B: the spin and bob move the item between frames.
+    // Case B: the spin and bob move the item between frames. Vanilla's periods are
+    // 40*pi ticks for the spin (`ItemEntity.getSpin`) and 20*pi for the bob
+    // (`ItemEntityRenderer.submit`), both far longer than the old guesswork's 40, so we
+    // compare ages 0, 10 and 20 instead of waiting for a full period: 10 ticks is a
+    // quarter of the bob's half-cycle and a ninth of a spin, so it must differ from
+    // both endpoints.
     let mut spinning = drop(1, item("diamond").unwrap(), 1);
     let a = render_scene(&mut renderer, &world, &[spinning.clone()], camera);
     spinning.item.as_mut().unwrap().age = 10.0;
     let b = render_scene(&mut renderer, &world, &[spinning.clone()], camera);
+    spinning.item.as_mut().unwrap().age = 20.0;
+    let c = render_scene(&mut renderer, &world, &[spinning.clone()], camera);
     let diff = |x: &image::RgbaImage, y: &image::RgbaImage| {
         x.pixels()
             .zip(y.pixels())
             .filter(|(p, q)| p.0 != q.0)
             .count()
     };
-    // Age 10 (quarter spin, quarter bob cycle later) must look different; age 40 is the
-    // full period, so the view is exactly the age 0 one again (spin and bob both have
-    // 40-tick periods).
-    spinning.item.as_mut().unwrap().age = 40.0;
-    let full = render_scene(&mut renderer, &world, &[spinning], camera);
     assert!(
         diff(&a, &b) > 40,
-        "no spin between ages 0 and 10: {}",
+        "no motion between ages 0 and 10: {}",
         diff(&a, &b)
     );
-    assert_eq!(
-        diff(&a, &full),
-        0,
-        "age 40 (full period) must render like age 0"
+    assert!(
+        diff(&a, &c) > 40,
+        "no motion between ages 0 and 20: {}",
+        diff(&a, &c)
+    );
+    assert!(
+        diff(&b, &c) > 40,
+        "ages 10 and 20 look the same: {}",
+        diff(&b, &c)
     );
 }

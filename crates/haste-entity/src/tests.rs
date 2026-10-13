@@ -200,15 +200,16 @@ fn render_instances_midpoint() {
     assert!((out[0].pos.x - 4.0 / 3.0).abs() < 1e-9);
 }
 
-/// A dropped item entity carries its stack in metadata index 9 (`Item`): it reaches the
-/// draw list with the item's registry id, the stack count and its age (partial-tick
-/// interpolated), and an emptied stack clears it.
+/// A dropped item entity carries its stack in `ItemEntity.DATA_ITEM`, metadata index 8
+/// (Entity's eight synched fields come first): it reaches the draw list with the item's
+/// registry id, the stack count and its age (partial-tick interpolated), and an
+/// emptied stack clears it.
 #[test]
 fn item_entity_stack_from_metadata() {
     let mut s = store();
     s.spawn(&spawn(1, DVec3::ZERO));
     let stack = |count, item: Option<u32>| MetadataEntry {
-        index: 9,
+        index: 8,
         value: MetadataValue::ItemStack(haste_core::entity::ItemStackData {
             count,
             item: item.map(RegistryIndex),

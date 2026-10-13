@@ -18,31 +18,64 @@ const ATLAS_SIZE: u32 = 2048;
 /// Vanilla renders the player model at 15/16 scale.
 const PLAYER_SCALE: f32 = 0.9375;
 
-/// Dropped items spin about the vertical axis (minecraft.wiki "Item (entity)": one full
-/// turn in 40 ticks, i.e. 9 degrees per tick) ...
-pub(crate) fn item_entity_spin(age: f32) -> f32 {
-    age * 9.0f32.to_radians()
+/// Dropped items spin about the vertical axis: `ItemEntity.getSpin`, the age in ticks
+/// (plus the partial tick) over 20, plus the entity's random phase, in radians.
+pub(crate) fn item_entity_spin(age: f32, bob_offs: f32) -> f32 {
+    age / 20.0 + bob_offs
 }
 
-/// ... and bob up and down (one full cycle in 40 ticks, 0.1 blocks amplitude, the top
-/// 0.1 above and the bottom touching the spawn height: offset 0.1 + 0.1 sin).
-pub(crate) fn item_entity_bob(age: f32) -> f32 {
-    0.1 + 0.1 * (age * (std::f32::consts::TAU / 40.0)).sin()
+/// ... and bob up and down: `ItemEntityRenderer.submit`'s
+/// `sin(age / 10 + phase) * 0.1 + 0.1` blocks, on top of the lift that puts the
+/// model's bounding box above the ground (see `item_entity_lift`).
+pub(crate) fn item_entity_bob(age: f32, bob_offs: f32) -> f32 {
+    ((age / 10.0 + bob_offs).sin()) * 0.1 + 0.1
 }
 
-/// The whole dropped item is drawn at a quarter block size (vanilla's `ItemRenderer`
-/// scales the model by 0.25 for items on the ground; flat items keep their 1/16
-/// thickness, like the held item).
+/// The lift `ItemEntityRenderer.submit` applies so the model's bounding box sits above
+/// the ground: -bbox.minY + 1/16 (the model spans 0..1, centred by -0.5 at emission,
+/// so the minimum y of a scaled model is (bbox_min - 0.5) * scale).
+pub(crate) fn item_entity_lift(bbox_min_y: f32, scale: f32) -> f32 {
+    -(bbox_min_y - 0.5) * scale + 1.0 / 16.0
+}
+
+/// The whole dropped item is drawn at a quarter block size (vanilla's
+/// `ItemEntityRenderer` scales the model by 0.25 for items on the ground).
 const ITEM_ENTITY_SCALE: f32 = 0.25;
 
-/// How many copies of the item a stack draws (vanilla `ItemRenderer.getRenderedAmount`:
-/// 1 + count/4, capped at 5, and count > 1 needs at least 2).
+/// How many copies of the item a stack draws: `ItemClusterRenderState
+/// .getRenderedAmount` — 1 for a single item, then one more per full 16 of the count,
+/// up to 5.
 pub(crate) fn item_entity_copies(count: i32) -> u32 {
-    if count <= 1 {
-        1
-    } else {
-        (1 + count as u32 / 4).clamp(2, 5)
+    match count {
+        ..=1 => 1,
+        2..=16 => 2,
+        17..=32 => 3,
+        33..=48 => 4,
+        _ => 5,
     }
+}
+
+/// The per-entity phase `ItemEntity.bobOffs` stands in for: vanilla draws it from the
+/// entity's random at spawn, in [0, 2pi); ours hashes the entity id (indistinguishable
+/// to a player).
+pub(crate) fn entity_phase(id: EntityId) -> f32 {
+    let mut h = (id.0 as u32).wrapping_mul(0x9E37_79B9);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xC2B2_AE35);
+    (h >> 8) as f32 / (1u32 << 24) as f32 * std::f32::consts::TAU
+}
+
+/// A deterministic [0,1) stream for the stack-copy offsets (vanilla reseeds Java's
+/// `Random` with `getSeedForItemStack` — the item — each frame, so the offsets are
+/// stable per item type; matching Java's sequence exactly is not required, only the
+/// stability and the range).
+pub(crate) fn seeded_float(seed: u32, i: u32) -> f32 {
+    let mut h = seed
+        .wrapping_mul(0x85EB_CA6B)
+        .wrapping_add(i.wrapping_mul(0xC2B2_AE35));
+    h ^= h >> 13;
+    h = h.wrapping_mul(0x27D4_EB2F);
+    (h >> 8) as f32 / (1u32 << 24) as f32
 }
 
 #[repr(C)]
@@ -401,11 +434,12 @@ impl EntityRenderer {
         }
     }
 
-    /// Poses a dropped item entity (`minecraft:item`) into the vertex buffer: the item's
-    /// own model (the same one the GUI and the held item use), about 0.25 blocks large,
-    /// spinning around the vertical axis and bobbing. Stacks draw several copies, each
-    /// jittered by a hash of the entity id and copy index. Items without a model (mods,
-    /// special renderers) draw the missing-texture quad instead; nothing panics.
+    /// Poses a dropped item entity (`minecraft:item`) into the vertex buffer, following
+    /// `ItemEntityRenderer.submit`: the item's own model (the same one the GUI and the
+    /// held item use) at a quarter block scale, lifted so its bounding box sits 1/16
+    /// above the ground, bobbing and spinning with the entity's random phase, and the
+    /// copies of a stack laid out by `submitMultipleFromCount`. Items without a model
+    /// (mods, special renderers) draw the missing-texture quad instead; nothing panics.
     fn emit_dropped_item(
         &mut self,
         e: &EntityInstance,
@@ -415,24 +449,53 @@ impl EntityRenderer {
         assets: &mut Assets,
     ) {
         let model = self.item_model(dropped.item, assets);
+        // `ItemEntity.bobOffs`: a per-entity random phase in [0, 2pi); ours is a hash of
+        // the entity id (the player cannot tell the difference).
+        let bob_offs = entity_phase(e.id);
+        // The model's bounding box decides the lift and whether the copies spread in 3D
+        // or stack flat (`submitMultipleFromCount` branches on the z size).
+        let bbox = model
+            .as_deref()
+            .and_then(item_model_bbox)
+            .unwrap_or_else(|| (Vec3::ZERO, Vec3::new(1.0, 1.0, 8.5 / 16.0)));
+        let lift = item_entity_lift(bbox.0.y, ITEM_ENTITY_SCALE);
         let base = Mat4::from_translation(
-            (e.pos - camera).as_vec3() + Vec3::new(0.0, item_entity_bob(dropped.age), 0.0),
-        ) * Mat4::from_rotation_y(item_entity_spin(dropped.age))
+            (e.pos - camera).as_vec3()
+                + Vec3::new(0.0, lift + item_entity_bob(dropped.age, bob_offs), 0.0),
+        ) * Mat4::from_rotation_y(item_entity_spin(dropped.age, bob_offs))
             * Mat4::from_scale(Vec3::splat(ITEM_ENTITY_SCALE));
         let copies = item_entity_copies(dropped.count) as usize;
+        // `ItemClusterRenderState.getSeedForItemStack`: the renderer reseeds its random
+        // with the item each frame, so the copy offsets are stable per item type (ours
+        // hashes the registry id and stream index; matching Java's Random is not needed).
+        let rand = |i: u32| seeded_float(dropped.item.0, i);
+        // The copies: the first sits at the origin, each further one offset by
+        // `submitMultipleFromCount` (3D: +-0.15 in x, y and z; flat: spread along z by
+        // 1.5x the sprite depth, jittered +-0.075 in x and y).
+        let depth = bbox.1.z - bbox.0.z;
+        let flat = depth <= 1.0 / 16.0;
+        let step = depth * 1.5;
         // Take the vertex buffer out so the texture lookup (`&mut self`) and the emission
         // (the buffer) do not fight over the borrow.
         let mut out = std::mem::take(&mut self.vertices);
         for copy in 0..copies {
-            // Copy jitter: a hash of the entity id and copy index in vanilla's +-0.15 range
-            // (`ItemRenderer` jitters a stack's copies the same way, seeded per entity
-            // there; the hash is our deterministic stand-in).
-            let mut h =
-                (e.id.0 as u32).wrapping_mul(0x9E37_79B9) ^ (copy as u32).wrapping_mul(0x85EB_CA6B);
-            h ^= h >> 13;
-            h = h.wrapping_mul(0xC2B2_AE35);
-            let j = |shift: u32| ((h >> shift) & 0xFF) as f32 / 255.0 * 0.3 - 0.15;
-            let m = base * Mat4::from_translation(Vec3::new(j(0), j(8), j(16)));
+            let mut off = Vec3::ZERO;
+            if copy > 0 {
+                if flat {
+                    off = Vec3::new(
+                        (rand(2 * copy as u32 - 2) * 2.0 - 1.0) * 0.075,
+                        (rand(2 * copy as u32 - 1) * 2.0 - 1.0) * 0.075,
+                        step * copy as f32 - step * (copies as f32 - 1.0) / 2.0,
+                    );
+                } else {
+                    off = Vec3::new(
+                        (rand(3 * copy as u32 - 3) * 2.0 - 1.0) * 0.15,
+                        (rand(3 * copy as u32 - 2) * 2.0 - 1.0) * 0.15,
+                        (rand(3 * copy as u32 - 1) * 2.0 - 1.0) * 0.15,
+                    );
+                }
+            }
+            let m = base * Mat4::from_translation(off);
             match &model {
                 Some(model) => {
                     let mut rects = |t: &str| self.texture_rect(&parse_tex(t), assets);
@@ -929,15 +992,9 @@ fn emit_item_parts(
                     let r = rect(layer);
                     let t = tint(Some(i as u32));
                     // The two sides of the flat item, 1/16 apart like the held item.
-                    for (z, n) in [(8.5 / 16.0, Vec3::Z), (7.5 / 16.0, Vec3::NEG_Z)] {
-                        let p = [
-                            Vec3::new(0.0, 1.0, z),
-                            Vec3::new(0.0, 0.0, z),
-                            Vec3::new(1.0, 0.0, z),
-                            Vec3::new(1.0, 1.0, z),
-                        ];
+                    for (quad, n) in sprite_corners().into_iter().zip([Vec3::Z, Vec3::NEG_Z]) {
                         let uv = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
-                        push_world_quad(out, pm, nm_part, p, uv, n, t, light, r);
+                        push_world_quad(out, pm, nm_part, quad, uv, n, t, light, r);
                     }
                 }
             }
@@ -962,20 +1019,69 @@ fn emit_item_parts(
     }
 }
 
+/// The corners of the flat-item sprite: x and y span 0..1, the two sides 1/16 apart
+/// around z = 0.5 (the `emit_item_parts` `Generated` geometry).
+fn sprite_corners() -> [[Vec3; 4]; 2] {
+    [
+        [
+            Vec3::new(0.0, 1.0, 8.5 / 16.0),
+            Vec3::new(0.0, 0.0, 8.5 / 16.0),
+            Vec3::new(1.0, 0.0, 8.5 / 16.0),
+            Vec3::new(1.0, 1.0, 8.5 / 16.0),
+        ],
+        [
+            Vec3::new(0.0, 1.0, 7.5 / 16.0),
+            Vec3::new(0.0, 0.0, 7.5 / 16.0),
+            Vec3::new(1.0, 0.0, 7.5 / 16.0),
+            Vec3::new(1.0, 1.0, 7.5 / 16.0),
+        ],
+    ]
+}
+
+/// The model's bounding box in the space `emit_item_parts` draws (model units 0..1,
+/// before the -0.5 centring): the `ground`-transformed element positions, or the sprite
+/// for flat items. None when the model has no geometry at all.
+fn item_model_bbox(model: &haste_assets::ItemModel) -> Option<(Vec3, Vec3)> {
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    let mut any = false;
+    let mut see = |p: Vec3| {
+        min = min.min(p);
+        max = max.max(p);
+        any = true;
+    };
+    for part in &model.parts {
+        let m = crate::gui::display_matrix(&part.ground)
+            * crate::gui::part_matrix(&part.transformation);
+        match &part.geometry {
+            haste_assets::ItemGeometry::None => {}
+            haste_assets::ItemGeometry::Generated { .. } => {
+                for quad in sprite_corners() {
+                    for p in quad {
+                        see(m.transform_point3(p));
+                    }
+                }
+            }
+            haste_assets::ItemGeometry::Elements(quads) => {
+                for q in quads {
+                    for p in q.positions {
+                        see(m.transform_point3(Vec3::from(p)));
+                    }
+                }
+            }
+        }
+    }
+    any.then_some((min, max))
+}
+
 /// The missing-item stand-in: a flat quad with the missing texture (pink/black checker),
 /// the same size and pose a flat item would have.
 fn emit_missing_item(out: &mut Vec<EntityVertex>, m: Mat4, light: f32, rect: [u32; 4]) {
     let pm = m * Mat4::from_translation(Vec3::splat(-0.5));
     let nm = Mat3::from_mat4(pm).inverse().transpose();
-    for (z, n) in [(8.5 / 16.0, Vec3::Z), (7.5 / 16.0, Vec3::NEG_Z)] {
-        let p = [
-            Vec3::new(0.0, 1.0, z),
-            Vec3::new(0.0, 0.0, z),
-            Vec3::new(1.0, 0.0, z),
-            Vec3::new(1.0, 1.0, z),
-        ];
+    for (quad, n) in sprite_corners().into_iter().zip([Vec3::Z, Vec3::NEG_Z]) {
         let uv = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
-        push_world_quad(out, pm, nm, p, uv, n, [1.0; 3], light, rect);
+        push_world_quad(out, pm, nm, quad, uv, n, [1.0; 3], light, rect);
     }
 }
 
@@ -1095,44 +1201,80 @@ mod tests {
     }
 
     #[test]
-    fn dropped_item_spins_a_quarter_turn_in_10_ticks() {
-        // 9 degrees per tick (one full turn in 40 ticks): at 0 nothing turned, at 10 a
-        // quarter turn, at 20 half a turn, at 40 exactly one full turn again.
-        assert_eq!(item_entity_spin(0.0), 0.0);
-        assert!((item_entity_spin(10.0) - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
-        assert!((item_entity_spin(20.0) - std::f32::consts::PI).abs() < 1e-5);
-        assert!((item_entity_spin(40.0) - std::f32::consts::TAU).abs() < 1e-5);
+    fn dropped_item_spin_is_age_over_20_plus_the_phase() {
+        // `ItemEntity.getSpin`: radians, the age over 20 plus the entity's phase, so
+        // one turn takes 40*pi ticks (about 125.7) — a slow spin.
+        assert_eq!(item_entity_spin(0.0, 0.0), 0.0);
+        assert_eq!(item_entity_spin(20.0, 0.0), 1.0);
+        assert!((item_entity_spin(10.0, 0.0) - 0.5).abs() < 1e-6);
+        assert!((item_entity_spin(0.0, 1.0) - 1.0).abs() < 1e-6);
+        assert!((item_entity_spin(10.0, 1.0) - 1.5).abs() < 1e-6);
     }
 
     #[test]
-    fn dropped_item_bobs_around_a_tenth_of_a_block() {
-        // The bob lifts the item between 0 and 0.2 blocks above the spawn point, one
-        // cycle every 40 ticks: sin(0) = 0 -> 0.1, quarter cycle -> the 0.2 top, and the
-        // pattern repeats at 40.
-        assert!((item_entity_bob(0.0) - 0.1).abs() < 1e-6);
-        assert!((item_entity_bob(10.0) - 0.2).abs() < 1e-6);
-        assert!((item_entity_bob(30.0) - 0.0).abs() < 1e-6);
-        assert!((item_entity_bob(40.0) - item_entity_bob(0.0)).abs() < 1e-6);
+    fn dropped_item_bobs_a_tenth_of_a_block_every_20_pi_ticks() {
+        // `ItemEntityRenderer.submit`: sin(age / 10 + phase) * 0.1 + 0.1, so the bob
+        // spans 0..0.2 blocks with a 20*pi-tick period (about 62.8).
+        assert!((item_entity_bob(0.0, 0.0) - 0.1).abs() < 1e-6);
+        // sin tops out a quarter period in: age = 5*pi.
+        assert!((item_entity_bob(5.0 * std::f32::consts::PI, 0.0) - 0.2).abs() < 1e-5);
+        assert!((item_entity_bob(15.0 * std::f32::consts::PI, 0.0) - 0.0).abs() < 1e-5);
+        // The phase shifts the whole curve.
+        assert!((item_entity_bob(0.0, std::f32::consts::FRAC_PI_2) - 0.2).abs() < 1e-5);
         for age in [0.0f32, 7.5, 19.3, 33.7, 60.1] {
-            let b = item_entity_bob(age);
+            let b = item_entity_bob(age, entity_phase(EntityId(7)));
             assert!((0.0..=0.2).contains(&b), "bob {b} at age {age}");
         }
     }
 
     #[test]
     fn dropped_item_copies_follow_the_stack_size() {
-        // Vanilla's rule: 1 + count/4, at most 5, at least 2 when the stack has more
-        // than one item.
+        // `ItemClusterRenderState.getRenderedAmount`: 1 for a single item, then one
+        // more per full 16 of the count, up to 5.
+        assert_eq!(item_entity_copies(0), 1);
         assert_eq!(item_entity_copies(1), 1);
         assert_eq!(item_entity_copies(2), 2);
-        assert_eq!(item_entity_copies(4), 2);
-        assert_eq!(item_entity_copies(5), 2);
-        assert_eq!(item_entity_copies(8), 3);
-        assert_eq!(item_entity_copies(9), 3);
-        assert_eq!(item_entity_copies(16), 5);
-        assert_eq!(item_entity_copies(17), 5);
+        assert_eq!(item_entity_copies(16), 2);
+        assert_eq!(item_entity_copies(17), 3);
+        assert_eq!(item_entity_copies(32), 3);
+        assert_eq!(item_entity_copies(33), 4);
+        assert_eq!(item_entity_copies(48), 4);
+        assert_eq!(item_entity_copies(49), 5);
         assert_eq!(item_entity_copies(64), 5);
         assert_eq!(item_entity_copies(99), 5);
+    }
+
+    #[test]
+    fn dropped_item_lift_puts_the_bbox_bottom_a_sixteenth_up() {
+        // `ItemEntityRenderer.submit` lifts by -bbox.minY + 1/16; our emission centres
+        // the model at -0.5, so a model spanning 0..1 (minY 0) needs 0.5 * scale +
+        // 1/16 of lift, and a sprite (minY 0 as well) the same.
+        assert!((item_entity_lift(0.0, 0.25) - (0.5 * 0.25 + 0.0625)).abs() < 1e-6);
+        // A model that dips below 0 needs more lift; one that starts above 0, less.
+        assert!(item_entity_lift(-0.25, 0.25) > item_entity_lift(0.0, 0.25));
+        assert!(item_entity_lift(0.25, 0.25) < item_entity_lift(0.0, 0.25));
+        assert!(item_entity_lift(0.0, 0.25) > 0.0625);
+    }
+
+    #[test]
+    fn entity_phase_and_seed_streams_cover_their_ranges() {
+        // The phase covers [0, 2pi) across ids and is stable for one id.
+        let phases: Vec<f32> = (0..200).map(|i| entity_phase(EntityId(i))).collect();
+        assert!(phases
+            .iter()
+            .all(|p| (0.0..std::f32::consts::TAU).contains(p)));
+        assert!(phases.iter().any(|p| *p > std::f32::consts::PI));
+        assert!(phases.iter().any(|p| *p < std::f32::consts::PI));
+        assert_eq!(entity_phase(EntityId(42)), entity_phase(EntityId(42)));
+        // The seeded stream is in [0,1) and stable per (seed, index).
+        for (seed, i) in [(0u32, 0u32), (5, 1), (1234, 7), (187, 3)] {
+            let r = seeded_float(seed, i);
+            assert!((0.0..1.0).contains(&r));
+            assert_eq!(r, seeded_float(seed, i));
+        }
+        let values: Vec<f32> = (0..50).map(|i| seeded_float(9, i)).collect();
+        assert!(values.iter().any(|r| *r < 0.33));
+        assert!(values.iter().any(|r| *r > 0.66));
     }
 
     #[test]

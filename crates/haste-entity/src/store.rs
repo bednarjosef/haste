@@ -249,9 +249,10 @@ impl EntityStore {
             return;
         };
         e.metadata.apply(entries);
-        // A dropped item entity's stack: metadata index 9, slot type ItemStack
-        // (minecraft.wiki "Entity format", Item). An emptied stack clears the drop.
-        if let Some(entry) = e.metadata.get(9) {
+        // A dropped item entity's stack: `ItemEntity.DATA_ITEM`, the first slot after
+        // Entity's eight synched fields (indices 0-7), so index 8. An emptied stack
+        // clears the drop.
+        if let Some(entry) = e.metadata.get(8) {
             e.item = match &entry.value {
                 MetadataValue::ItemStack(s) if !s.is_empty() => Some(s.clone()),
                 _ => None,
