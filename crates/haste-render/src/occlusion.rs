@@ -131,6 +131,12 @@ fn edge_faces(x: usize, y: usize, z: usize) -> u8 {
     f
 }
 
+// Reusable flood-fill stack for `compute_visibility` (per thread; the fill
+// is not reentrant).
+thread_local! {
+    static VISIT_STACK: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// Compute a section's `VisibilitySet` from its 16³ opacity grid via vanilla's
 /// `VisGraph`: flood each connected non-opaque region seeded from the boundary
 /// and connect every section face that region reaches.
@@ -156,47 +162,49 @@ pub fn compute_visibility(opaque: impl Fn(usize, usize, usize) -> bool) -> Visib
         return VisibilitySet::none();
     }
 
-    let mut vis = VisibilitySet::none();
-    let mut stack: Vec<usize> = Vec::new();
-    for z in 0..16usize {
-        for y in 0..16usize {
-            for x in 0..16usize {
-                if x != 0 && x != 15 && y != 0 && y != 15 && z != 0 && z != 15 {
-                    continue;
-                }
-                let seed = idx(x, y, z);
-                if blocked[seed] {
-                    continue;
-                }
-                blocked[seed] = true;
-                stack.clear();
-                stack.push(seed);
-                let mut faces = 0u8;
-                while let Some(i) = stack.pop() {
-                    let (cx, cy, cz) = (i & 15, i >> 4 & 15, i >> 8 & 15);
-                    faces |= edge_faces(cx, cy, cz);
-                    for face in Face::ALL {
-                        let (dx, dy, dz) = face.offset();
-                        let (nx, ny, nz) = (cx as i32 + dx, cy as i32 + dy, cz as i32 + dz);
-                        if !(0..16).contains(&nx)
-                            || !(0..16).contains(&ny)
-                            || !(0..16).contains(&nz)
-                        {
-                            continue;
-                        }
-                        let ni = idx(nx as usize, ny as usize, nz as usize);
-                        if blocked[ni] {
-                            continue;
-                        }
-                        blocked[ni] = true;
-                        stack.push(ni);
+    VISIT_STACK.with(|cell| {
+        let mut stack = cell.borrow_mut();
+        stack.clear();
+        let mut vis = VisibilitySet::none();
+        for z in 0..16usize {
+            for y in 0..16usize {
+                for x in 0..16usize {
+                    if x != 0 && x != 15 && y != 0 && y != 15 && z != 0 && z != 15 {
+                        continue;
                     }
+                    let seed = idx(x, y, z);
+                    if blocked[seed] {
+                        continue;
+                    }
+                    blocked[seed] = true;
+                    stack.push(seed);
+                    let mut faces = 0u8;
+                    while let Some(i) = stack.pop() {
+                        let (cx, cy, cz) = (i & 15, i >> 4 & 15, i >> 8 & 15);
+                        faces |= edge_faces(cx, cy, cz);
+                        for face in Face::ALL {
+                            let (dx, dy, dz) = face.offset();
+                            let (nx, ny, nz) = (cx as i32 + dx, cy as i32 + dy, cz as i32 + dz);
+                            if !(0..16).contains(&nx)
+                                || !(0..16).contains(&ny)
+                                || !(0..16).contains(&nz)
+                            {
+                                continue;
+                            }
+                            let ni = idx(nx as usize, ny as usize, nz as usize);
+                            if blocked[ni] {
+                                continue;
+                            }
+                            blocked[ni] = true;
+                            stack.push(ni);
+                        }
+                    }
+                    vis.add(faces);
                 }
-                vis.add(faces);
             }
         }
-    }
-    vis
+        vis
+    })
 }
 
 /// Vanilla advanced-culling thresholds (Pomme's constants).

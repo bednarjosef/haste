@@ -81,7 +81,9 @@ struct Session {
 }
 
 impl Session {
-    fn join(args: &Args) -> anyhow::Result<Self> {
+    /// `sound`: open the audio output (the window only; screenshots and the benchmark stay
+    /// silent so they neither make noise nor measure the audio thread).
+    fn join(args: &Args, sound: bool) -> anyhow::Result<Self> {
         let address = args.server.clone().ok_or_else(|| {
             anyhow::anyhow!("--server <host[:port]> is required (no launcher yet)")
         })?;
@@ -127,7 +129,11 @@ impl Session {
             world,
             net::new_entity_store(entity_types),
             view_distance,
+            haste_render::default_skin(login.profile.uuid.as_u128()),
         ));
+        if sound {
+            *shared.sound.lock() = open_sounds(regs, &shared.data, &options.sound);
+        }
         let handle = rt.handle().clone();
         let sh = shared.clone();
         let game_thread = std::thread::Builder::new()
@@ -180,6 +186,8 @@ pub struct WorldFeed {
     source: Option<Arc<dyn haste_render::SnapshotSource>>,
     /// Sections submitted this frame (reused).
     batch: Vec<SectionPos>,
+    /// The first-person state last sent to the renderer (None also before the first).
+    first_person: Option<game::FirstPersonView>,
 }
 
 /// Lets the mesh worker threads capture section snapshots from the shared world under its
@@ -300,6 +308,28 @@ impl WorldFeed {
         &self.instances
     }
 
+    /// Hands the renderer the first-person hand (`Renderer::set_first_person`) when the view's
+    /// per-tick part changed since the last call. The skin is fixed for the connection, so
+    /// comparing the per-tick part is enough to catch every change; the skin is cloned only when
+    /// one happens (no allocation per frame).
+    /// The first-person hand only exists in the first-person perspective (F5 hides it).
+    fn set_first_person(
+        &mut self,
+        shared: &Shared,
+        renderer: &mut Renderer,
+        perspective: game::Perspective,
+    ) {
+        let view = match perspective {
+            game::Perspective::FirstPerson => shared.view.lock().first_person,
+            _ => None,
+        };
+        if view == self.first_person {
+            return;
+        }
+        self.first_person = view;
+        renderer.set_first_person(view.map(|v| v.with_skin(&shared.skin)));
+    }
+
     /// Whether everything the game thread produced has been meshed and uploaded, and nothing
     /// new arrived for `quiet`.
     ///
@@ -396,10 +426,39 @@ fn open_assets() -> anyhow::Result<haste_assets::Assets> {
     .with_context(|| format!("opening assets from {}", jar.display()))
 }
 
+/// The sound output for a joined game: `sounds.json` parsed from the real assets, the
+/// sound-event name table (the server's synced registry or the static one), played
+/// through the default device with the saved volumes. Without an audio device it stays
+/// silent; when the assets or `sounds.json` cannot be read the game runs without sound
+/// (logged) rather than not at all.
+fn open_sounds(
+    regs: &haste_protocol::SyncedRegistries,
+    data: &haste_data::GameData,
+    volumes: &haste_setup::options::SoundVolumes,
+) -> Option<crate::sound::Sounds> {
+    let events = (|| -> anyhow::Result<haste_audio::sounds::SoundEvents> {
+        let mut assets = open_assets()?;
+        let bytes = assets.read_asset("assets/minecraft/sounds.json")?;
+        haste_audio::sounds::SoundEvents::parse(&bytes)
+    })();
+    match events {
+        Ok(events) => Some(crate::sound::Sounds::new(
+            events,
+            open_assets().ok()?,
+            crate::sound::sound_event_names(regs, data),
+            volumes,
+        )),
+        Err(e) => {
+            tracing::warn!("sound stays off: {e:#}");
+            None
+        }
+    }
+}
+
 /// `--screenshot <file>`: join, wait until the world is meshed, render one frame offscreen,
 /// save it as PNG and leave. `--seconds` bounds the wait.
 pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
-    let session = Session::join(args)?;
+    let session = Session::join(args, false)?;
     let shared = session.shared.clone();
     let mut assets = open_assets()?;
     let mut renderer =
@@ -458,6 +517,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         }
         last_camera = camera;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
+        feed.set_first_person(&shared, &mut renderer, perspective);
         let entities = feed.entities(&shared, &mut renderer, perspective, session.local, partial);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
@@ -779,7 +839,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let Some(_server) = args.server.as_ref() else {
         anyhow::bail!("--bench needs --server <host[:port]>");
     };
-    let session = Session::join(args)?;
+    let session = Session::join(args, false)?;
     let shared = session.shared.clone();
     let mut assets = open_assets()?;
     let mut renderer =
@@ -807,6 +867,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         base = camera;
         vd = v;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
+        feed.set_first_person(&shared, &mut renderer, game::Perspective::FirstPerson);
         let entities = feed.entities(
             &shared,
             &mut renderer,
@@ -962,7 +1023,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
 
 /// Windowed mode.
 pub fn run(args: &Args) -> anyhow::Result<()> {
-    let session = Session::join(args)?;
+    let session = Session::join(args, true)?;
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
@@ -1152,6 +1213,8 @@ impl App {
         self.feed
             .feed(&self.shared, renderer, camera_section(&camera), vd);
         let t1 = Instant::now();
+        self.feed
+            .set_first_person(&self.shared, renderer, self.perspective);
         let entities = self.feed.entities(
             &self.shared,
             renderer,
