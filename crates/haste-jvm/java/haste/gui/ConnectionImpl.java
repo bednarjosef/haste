@@ -78,4 +78,11 @@ public final class ConnectionImpl {
 
     /** Command (without the leading slash). */
     public static void sendCommand(ClientPacketListener c, String command) { Native.sendChat(command, true); }
+
+    /**
+     * The settings an option change must tell the server (vanilla re-sends its client information). Haste's own
+     * settings already went to the server at configuration time, and they are Rust's, not the vanilla options
+     * the screens edit: nothing to send yet.
+     */
+    public static void broadcastClientInformation(ClientPacketListener c, net.minecraft.server.level.ClientInformation information) {}
 }
