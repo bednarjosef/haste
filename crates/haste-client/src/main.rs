@@ -71,6 +71,10 @@ pub struct Args {
     /// Screenshot: feet position to wait for and render from (camera at eye height above it).
     #[arg(long, num_args = 3, value_names = ["X", "Y", "Z"], allow_hyphen_values = true)]
     pub pos: Option<Vec<f64>>,
+    /// Screenshot perspective: first, back (third person behind) or front (third person in
+    /// front, looking back at the player).
+    #[arg(long, default_value = "first")]
+    pub perspective: String,
     /// Present with vsync; overrides the saved option when given.
     #[arg(long)]
     pub vsync: Option<bool>,

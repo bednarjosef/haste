@@ -9,7 +9,7 @@
 //! SDL keymod bits for `mods`), see [`crate::keys`]. Mouse buttons: 1 left, 2 middle, 3 right.
 use std::sync::Arc;
 
-use haste_core::gui::{CursorShape, GuiCommand, GuiFrame, TextMetrics, TextStyle};
+use haste_core::gui::{CursorShape, GuiBlend, GuiCommand, GuiFrame, TextMetrics, TextStyle};
 use haste_core::{EntityId, Identifier, RegistryIndex};
 use jni::objects::{JIntArray, JObject, JObjectArray, JString};
 use jni::refs::Global;
@@ -667,6 +667,15 @@ fn cursor_shape(code: i32) -> Option<CursorShape> {
     })
 }
 
+/// The blend mode of a blit (`GuiBatch`'s code, set by `GfxImpl.blend` in Java).
+fn blend_of(code: i32) -> GuiBlend {
+    match code {
+        1 => GuiBlend::Multiply,
+        2 => GuiBlend::Invert,
+        _ => GuiBlend::Normal,
+    }
+}
+
 fn decode_frame(env: &mut Env, frame: JObject) -> Result<(Vec<GuiCommand>, Option<CursorShape>)> {
     // Safety: Bridge.render returns Object[]{int[], String[], int[1]}.
     let frame = unsafe { JObjectArray::<JObject>::from_raw(env, frame.into_raw()) };
@@ -751,7 +760,7 @@ pub(crate) fn decode(b: &[i32], strings: &[String]) -> Result<Vec<GuiCommand>> {
                 i += 6;
             }
             TEXTURE => {
-                need(13)?;
+                need(14)?;
                 out.push(GuiCommand::Texture {
                     texture: ident(b[i + 1])?,
                     x: b[i + 2],
@@ -765,11 +774,12 @@ pub(crate) fn decode(b: &[i32], strings: &[String]) -> Result<Vec<GuiCommand>> {
                     tex_w: b[i + 10] as u32,
                     tex_h: b[i + 11] as u32,
                     tint: b[i + 12] as u32,
+                    blend: blend_of(b[i + 13]),
                 });
-                i += 13;
+                i += 14;
             }
             SPRITE => {
-                need(7)?;
+                need(8)?;
                 out.push(GuiCommand::Sprite {
                     sprite: ident(b[i + 1])?,
                     x: b[i + 2],
@@ -777,8 +787,9 @@ pub(crate) fn decode(b: &[i32], strings: &[String]) -> Result<Vec<GuiCommand>> {
                     w: b[i + 4],
                     h: b[i + 5],
                     tint: b[i + 6] as u32,
+                    blend: blend_of(b[i + 7]),
                 });
-                i += 7;
+                i += 8;
             }
             ITEM => {
                 need(5)?;
@@ -818,7 +829,7 @@ pub(crate) fn decode(b: &[i32], strings: &[String]) -> Result<Vec<GuiCommand>> {
                 i += 1;
             }
             SPRITE_REGION => {
-                need(11)?;
+                need(12)?;
                 out.push(GuiCommand::SpriteRegion {
                     sprite: ident(b[i + 1])?,
                     sprite_w: b[i + 2],
@@ -830,8 +841,9 @@ pub(crate) fn decode(b: &[i32], strings: &[String]) -> Result<Vec<GuiCommand>> {
                     w: b[i + 8],
                     h: b[i + 9],
                     tint: b[i + 10] as u32,
+                    blend: blend_of(b[i + 11]),
                 });
-                i += 11;
+                i += 12;
             }
             STYLED_TEXT => {
                 need(7)?;
@@ -917,6 +929,7 @@ mod tests {
             256,
             128,
             -1,
+            0,
             SPRITE,
             1,
             10,
@@ -924,6 +937,7 @@ mod tests {
             200,
             20,
             -1,
+            0,
             ITEM,
             7,
             8,
@@ -951,6 +965,7 @@ mod tests {
             91,
             5,
             -1,
+            0,
             STYLED_TEXT,
             1,
             2,
@@ -1010,7 +1025,7 @@ mod tests {
             }
         );
         assert!(
-            matches!(&c[3], GuiCommand::Texture { texture, u, tex_w: 256, .. } if texture.path() == "textures/gui/x.png" && *u == 0.5)
+            matches!(&c[3], GuiCommand::Texture { texture, u, tex_w: 256, blend: GuiBlend::Normal, .. } if texture.path() == "textures/gui/x.png" && *u == 0.5)
         );
         assert!(
             matches!(&c[4], GuiCommand::Sprite { sprite, w: 200, .. } if sprite.path() == "widget/button")
