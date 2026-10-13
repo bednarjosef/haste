@@ -346,9 +346,10 @@ impl Renderer {
         let (atlas_texture, view, sampler, sprite_rects, _len) =
             upload_atlas(&gpu.device, &gpu.queue, &atlas)?;
         let animation = crate::animation::SpriteAnimator::new(
-            atlas.animated_sprites().len(),
-            atlas.mip_levels(),
-        );
+            atlas.clone(),
+            gpu.queue.clone(),
+            atlas_texture.clone(),
+        )?;
 
         // Camera uniform.
         let camera_uniform = gpu
@@ -1438,9 +1439,11 @@ impl Renderer {
             draw_calls += self.gui.stats.draw_calls;
         }
 
-        // Animated atlas textures changed this tick (no-op until the tick moves).
-        self.animation
-            .update(&self.gpu.queue, &self.atlas_texture, &self.atlas);
+        // Animated atlas textures: the animation worker writes each tick's
+        // changed regions itself; this only collects what landed. Writes the
+        // worker finished before this frame's submit (below) are ordered
+        // before it, so this frame already sees them.
+        self.animation.update();
 
         // Submit, then present (wgpu 30: present lives on the queue).
         let resolved = match &mut self.timer {

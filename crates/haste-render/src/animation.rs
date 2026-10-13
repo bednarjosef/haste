@@ -1,80 +1,170 @@
-// Animated atlas textures (water, lava, fire, portals): each game tick the
-// renderer re-uploads every animated sprite's atlas region — level 0 plus the
-// matching sub-rectangle of every further mip level, box-filtered exactly like
-// the atlas chain (haste-assets `build_mip_chain` / `mean_linear`).
+// Animated atlas textures (water, lava, fire, portals): each game tick a
+// worker thread prepares every animated sprite's changed pixels — the blend
+// plus all mip levels, box-filtered exactly like the atlas chain (haste-assets
+// `build_mip_chain` / `mean_linear`) — and issues the `write_texture` calls
+// itself. The render thread never touches pixels or staging: `set_tick`
+// hands the tick to the worker (deduped) and `update` only drains what the
+// worker finished. When a tick is not ready yet, the previous frame stays.
+//
+// Thread safety: `wgpu::Queue` is `Send + Sync`, and a `write_texture` issued
+// before a frame's `submit` (on any thread) is ordered before it, so writes
+// the worker finished before the render thread's `update` are visible to that
+// frame's passes; writes finishing later apply to the next frame.
 
-/// The frame state `haste_assets::frame_at` returns: (index, next, blend).
-type FrameState = (u32, u32, f32);
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 
-/// Per-tick animated sprite region uploads into the atlas texture. The renderer
-/// sets the game tick (`set_tick`) once per tick and calls `update` per frame;
-/// sprites whose shown pixels did not change are not re-uploaded.
+use crossbeam_channel::{unbounded, Receiver, Sender};
+
+/// Worker timings (for the perf test).
+#[derive(Default)]
+struct WorkerStats {
+    prepare_nanos: AtomicU64,
+    prepare_count: AtomicU64,
+}
+
+/// Animated sprite region uploads, split across two threads: a worker thread
+/// (`haste-animation`) prepares each tick's changed pixels and issues the
+/// atlas writes; the render thread only announces ticks (`set_tick`) and
+/// collects what landed (`update`), never blending, downsampling, staging or
+/// waiting.
 pub(crate) struct SpriteAnimator {
-    /// The tick set by the client; `None` until the first `set_tick`.
+    /// Last tick handed to the worker (dedupes per-frame calls).
     tick: Option<u64>,
-    /// The tick whose frames were last uploaded.
-    uploaded: Option<u64>,
-    /// Last uploaded frame state per sprite (the shown pixels are a pure
-    /// function of it, so an equal state means unchanged texels).
-    last: Vec<Option<FrameState>>,
-    /// Scratch pixels per sprite and mip level (index `level - 1`), reused
-    /// across ticks once grown.
-    mips: Vec<Vec<Vec<u8>>>,
+    /// Ticks the worker finished writing; drained by `update`.
+    done_rx: Receiver<u64>,
+    /// Tick requests to the worker; dropping it ends the thread.
+    tick_tx: Option<Sender<u64>>,
+    /// Worker prepare+issue timings (for the perf test).
+    #[cfg(test)]
+    stats: Arc<WorkerStats>,
+    worker: Option<JoinHandle<()>>,
 }
 
 impl SpriteAnimator {
-    /// `sprite_count` and `mip_levels` come from the built atlas
-    /// (`animated_sprites().len()`, `mip_levels()`).
-    pub(crate) fn new(sprite_count: usize, mip_levels: u32) -> Self {
-        Self {
+    /// `atlas` is the renderer's built atlas, `texture`/`queue` the uploaded
+    /// atlas texture and the shared queue the worker writes through.
+    pub(crate) fn new(
+        atlas: Arc<haste_assets::AtlasBuilder>,
+        queue: Arc<wgpu::Queue>,
+        texture: wgpu::Texture,
+    ) -> anyhow::Result<Self> {
+        let stats = Arc::new(WorkerStats::default());
+        let (tick_tx, tick_rx) = unbounded();
+        let (done_tx, done_rx) = unbounded::<u64>();
+        let worker = std::thread::Builder::new()
+            .name("haste-animation".into())
+            .spawn({
+                let stats = stats.clone();
+                move || {
+                    let sprites = atlas.animated_sprites();
+                    // One scratch per mip level (level 0 included), reused
+                    // across sprites and ticks: `write_texture` stages its
+                    // data before returning, so the buffers are free to reuse
+                    // once the call is done.
+                    let mut scratch: Vec<Vec<u8>> =
+                        vec![Vec::new(); atlas.mip_levels() as usize + 1];
+                    // The tick whose pixels are on the GPU; `None` until the
+                    // first prepared tick (the GPU starts on the sprites'
+                    // initial frames, so the first tick rewrites everything).
+                    let mut written: Option<u64> = None;
+                    // Next tick to prepare, coalescing any already queued
+                    // behind it (only the newest matters); `None` when the
+                    // animator is dropped.
+                    while let Ok(mut target) = tick_rx.recv() {
+                        while let Ok(newer) = tick_rx.try_recv() {
+                            target = newer;
+                        }
+                        let started = std::time::Instant::now();
+                        for sprite in sprites {
+                            // Same frame state: the shown pixels are unchanged.
+                            if let Some(written) = written {
+                                if haste_assets::frame_at(&sprite.schedule, written)
+                                    == haste_assets::frame_at(&sprite.schedule, target)
+                                {
+                                    continue;
+                                }
+                            }
+                            let rect = sprite.region.pixel_rect;
+                            scratch[0].clear();
+                            scratch[0].extend_from_slice(&sprite.frame_pixels(target));
+                            let levels = 1 + downsample_region(&mut scratch, rect);
+                            for level in 0..levels as u32 {
+                                let [x, y, w, h] = rect;
+                                write_region(
+                                    &queue,
+                                    &texture,
+                                    level,
+                                    [x >> level, y >> level, w >> level, h >> level],
+                                    &scratch[level as usize],
+                                );
+                            }
+                        }
+                        written = Some(target);
+                        stats
+                            .prepare_nanos
+                            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                        stats.prepare_count.fetch_add(1, Ordering::Relaxed);
+                        if done_tx.send(target).is_err() {
+                            break;
+                        }
+                    }
+                }
+            })?;
+        Ok(Self {
             tick: None,
-            uploaded: None,
-            last: vec![None; sprite_count],
-            mips: vec![vec![Vec::new(); mip_levels as usize]; sprite_count],
-        }
+            done_rx,
+            tick_tx: Some(tick_tx),
+            #[cfg(test)]
+            stats,
+            worker: Some(worker),
+        })
     }
 
-    /// The game tick animated sprites show.
+    /// The worker's (prepare count, average prepare+issue cost in microseconds)
+    /// (for tests).
+    #[cfg(test)]
+    fn worker_stats(&self) -> (u64, f64) {
+        let prepares = self.stats.prepare_count.load(Ordering::Relaxed);
+        let per_call = self.stats.prepare_nanos.load(Ordering::Relaxed) as f64
+            / prepares.max(1) as f64
+            / 1000.0;
+        (prepares, per_call)
+    }
+
+    /// The game tick animated atlas textures (water, lava, fire, portals)
+    /// should show. Hands the tick to the worker; duplicate ticks (per-frame
+    /// calls between game ticks) wake nothing.
     pub(crate) fn set_tick(&mut self, tick: u64) {
-        self.tick = Some(tick);
-    }
-
-    /// Uploads every animated sprite whose shown pixels changed since the last
-    /// upload (a no-op while the tick is unchanged). `texture` is the atlas
-    /// texture `upload_atlas` returned.
-    pub(crate) fn update(
-        &mut self,
-        queue: &wgpu::Queue,
-        texture: &wgpu::Texture,
-        atlas: &haste_assets::AtlasBuilder,
-    ) {
-        let Some(tick) = self.tick else { return };
-        if self.uploaded == Some(tick) {
+        if self.tick == Some(tick) {
             return;
         }
-        self.uploaded = Some(tick);
-        for (i, sprite) in atlas.animated_sprites().iter().enumerate() {
-            let state = haste_assets::frame_at(&sprite.schedule, tick);
-            if self.last[i] == Some(state) {
-                continue; // same frame and blend: the region's texels are unchanged
-            }
-            self.last[i] = Some(state);
-            let cow = sprite.frame_pixels(tick);
-            let pixels: &[u8] = &cow;
-            let rect = sprite.region.pixel_rect;
-            write_region(queue, texture, 0, rect, pixels);
-            let levels = downsample_region(&mut self.mips[i], pixels, rect);
-            for (level, buffer) in self.mips[i][..levels].iter().enumerate() {
-                let level = level as u32 + 1;
-                let [x, y, w, h] = rect;
-                write_region(
-                    queue,
-                    texture,
-                    level,
-                    [x >> level, y >> level, w >> level, h >> level],
-                    buffer,
-                );
-            }
+        self.tick = Some(tick);
+        if let Some(tx) = &self.tick_tx {
+            let _ = tx.send(tick);
+        }
+    }
+
+    /// Collects the newest tick the worker finished writing, if any. Cheap by
+    /// construction — no pixel work, no staging, no waiting: a tick that is
+    /// not ready yet simply keeps the previous frame. Returns the tick now on
+    /// the GPU when the worker finished a new one since the last call.
+    pub(crate) fn update(&mut self) -> Option<u64> {
+        let mut latest = None;
+        while let Ok(tick) = self.done_rx.try_recv() {
+            latest = Some(tick);
+        }
+        latest
+    }
+}
+
+impl Drop for SpriteAnimator {
+    fn drop(&mut self) {
+        // Drop the request channel first so the worker exits; join it.
+        self.tick_tx.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
         }
     }
 }
@@ -109,23 +199,24 @@ fn write_region(
     );
 }
 
-/// Downsamples the region's level-0 `pixels` into `mips[level - 1]` for as many
-/// levels as the region subdivides exactly (origin and size divisible by the
-/// level's texel size — the packer's mip alignment holds for atlas sprites)
-/// and as `mips` holds; returns the number of levels written. The filter is the
-/// atlas chain's: an iterated plain 2x2 box filter per level.
-fn downsample_region(mips: &mut [Vec<u8>], pixels: &[u8], rect: [u32; 4]) -> usize {
+/// Downsamples `levels[0]` (the region's level-0 pixels) into `levels[1..]`
+/// for as many levels as the region subdivides exactly (origin and size
+/// divisible by the level's texel size — the packer's mip alignment holds for
+/// atlas sprites) and as `levels` holds; returns the number of downsampled
+/// levels written. The filter is the atlas chain's: an iterated plain 2x2 box
+/// filter per level.
+fn downsample_region(levels: &mut [Vec<u8>], rect: [u32; 4]) -> usize {
     let [x, y, w, h] = rect;
     let mut written = 0;
-    for level in 1..=mips.len() {
+    for level in 1..levels.len() {
         let step = 1u32 << level;
         if x % step != 0 || y % step != 0 || w % step != 0 || h % step != 0 {
             break; // the region does not subdivide exactly at this level (nor deeper)
         }
         let (dw, dh) = (w >> level, h >> level);
-        let (done, rest) = mips.split_at_mut(level - 1);
+        let (done, rest) = levels.split_at_mut(level);
         let dst = &mut rest[0];
-        let src: &[u8] = if level == 1 { pixels } else { &done[level - 2] };
+        let src: &[u8] = &done[level - 1];
         let sw = w >> (level - 1);
         dst.clear();
         for py in 0..dh {
@@ -149,6 +240,7 @@ fn downsample_region(mips: &mut [Vec<u8>], pixels: &[u8], rect: [u32; 4]) -> usi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     /// An atlas over a synthetic client jar holding one animated texture: a
     /// 16x32 vertical strip of two 16x16 frames, `frametime` 2, with mips.
@@ -204,30 +296,37 @@ mod tests {
     }
 
     /// Uploads the 2-frame sprite at tick 2 (frametime 2: frame 1) and reads
-    /// the region back from the atlas texture, mip levels 0 and 1. Skips when
-    /// no GPU adapter is available.
+    /// the region back from the atlas texture, mip levels 0 and 1. The worker
+    /// prepares and writes the tick off-thread, so this polls until it lands.
+    /// Skips when no GPU adapter is available.
     #[test]
     fn gpu_updates_region_per_tick() {
         let Ok(gpu) = crate::pipeline::Gpu::new(None) else {
             eprintln!("skipped: no GPU adapter");
             return;
         };
-        let atlas = synthetic_atlas();
+        let atlas = Arc::new(synthetic_atlas());
         let (texture, _view, _sampler, _rects, _len) =
             crate::pipeline::upload_atlas(&gpu.device, &gpu.queue, &atlas).unwrap();
-        let mut animator = SpriteAnimator::new(atlas.animated_sprites().len(), atlas.mip_levels());
+        let mut animator =
+            SpriteAnimator::new(atlas.clone(), gpu.queue.clone(), texture.clone()).unwrap();
         animator.set_tick(2);
-        animator.update(&gpu.queue, &texture, &atlas);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while animator.update() != Some(2) {
+            assert!(Instant::now() < deadline, "worker never wrote tick 2");
+            std::thread::sleep(Duration::from_millis(2));
+        }
         let sprite = &atlas.animated_sprites()[0];
         let [x, y, w, h] = sprite.region.pixel_rect;
         let frame1 = sprite.frames[1].as_raw();
         assert_eq!(&read_region(&gpu, &texture, x, y, w, h, 0), frame1);
-        let mut mips = vec![Vec::new(); atlas.mip_levels() as usize];
-        let levels = downsample_region(&mut mips, frame1, sprite.region.pixel_rect);
-        assert!(levels >= 1, "expected at least one downsampled level");
+        let mut levels = vec![Vec::new(); atlas.mip_levels() as usize + 1];
+        levels[0] = frame1.to_vec();
+        let written = downsample_region(&mut levels, sprite.region.pixel_rect);
+        assert!(written >= 1, "expected at least one downsampled level");
         assert_eq!(
             &read_region(&gpu, &texture, x / 2, y / 2, w / 2, h / 2, 1),
-            &mips[0]
+            &levels[1]
         );
     }
 
@@ -288,11 +387,10 @@ mod tests {
             .collect()
     }
 
-    /// `SpriteAnimator::update` on the real atlas (all animated sprites): 100
-    /// calls over consecutive ticks (every sprite that changes that tick
-    /// re-uploads) and 100 calls on an already-uploaded tick (nothing changes).
-    /// Prints microseconds per call. Needs the client jar and datagen reports
-    /// in the cache (source scripts/env.sh) and a GPU.
+    /// `SpriteAnimator` on the real atlas (all animated sprites): the
+    /// render-thread cost per tick (`update`, a channel drain) and the
+    /// worker's cost of preparing and writing a tick. Needs the client jar
+    /// and datagen reports in the cache (source scripts/env.sh) and a GPU.
     #[test]
     #[ignore = "needs the client jar, datagen reports and a GPU (source scripts/env.sh)"]
     fn perf_animator_update_real_atlas() {
@@ -315,8 +413,9 @@ mod tests {
             &haste_core::paths::datagen_reports().join("blocks.json"),
         )
         .unwrap();
-        let mut atlas = haste_assets::AtlasBuilder::build(&mut assets, &[], false).unwrap();
-        haste_assets::BakedBlockModels::bake(&mut assets, &states, &mut atlas).unwrap();
+        let mut built = haste_assets::AtlasBuilder::build(&mut assets, &[], false).unwrap();
+        haste_assets::BakedBlockModels::bake(&mut assets, &states, &mut built).unwrap();
+        let atlas = Arc::new(built);
         let sprites = atlas.animated_sprites();
         eprintln!(
             "atlas {}x{}, {} mip levels, {} animated sprites",
@@ -327,52 +426,54 @@ mod tests {
         );
         let (texture, _view, _sampler, _rects, _len) =
             crate::pipeline::upload_atlas(&gpu.device, &gpu.queue, &atlas).unwrap();
-        let mut animator = SpriteAnimator::new(sprites.len(), atlas.mip_levels());
+        let mut animator =
+            SpriteAnimator::new(atlas.clone(), gpu.queue.clone(), texture.clone()).unwrap();
 
-        // Consecutive ticks: every sprite whose frame or blend moved re-uploads.
+        // Render-thread cost: time every update() call, the draining ones
+        // (a tick landed) and the empty ones alike.
         const RUNS: u64 = 100;
-        let mut changed_sprites = 0;
-        let started = std::time::Instant::now();
+        let mut update_calls = 0u32;
+        let mut update_total = Duration::ZERO;
         for tick in 1..=RUNS {
             animator.set_tick(tick);
-            animator.update(&gpu.queue, &texture, &atlas);
-            changed_sprites += sprites
-                .iter()
-                .filter(|s| {
-                    let state = haste_assets::frame_at(&s.schedule, tick);
-                    haste_assets::frame_at(&s.schedule, tick - 1) != state
-                })
-                .count();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                let started = Instant::now();
+                let done = animator.update();
+                update_total += started.elapsed();
+                update_calls += 1;
+                if done == Some(tick) {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "worker never wrote tick {tick}");
+                std::thread::sleep(Duration::from_micros(100));
+            }
         }
-        gpu.queue.submit([]);
         // GPU side: how long the device takes to drain the queued writes.
-        let gpu_started = std::time::Instant::now();
+        let gpu_started = Instant::now();
         gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
         let gpu_per_tick = gpu_started.elapsed() / RUNS as u32;
-        let per_tick = started.elapsed() / RUNS as u32;
-        // Same tick again: nothing changed, `update` must be a no-op.
-        let started = std::time::Instant::now();
+        // Same tick again: nothing changed, update must be a no-op.
+        let started = Instant::now();
         for _ in 0..RUNS {
             animator.set_tick(RUNS);
-            animator.update(&gpu.queue, &texture, &atlas);
+            animator.update();
         }
         let unchanged = started.elapsed() / RUNS as u32;
 
-        let interpolating = sprites.iter().filter(|s| s.schedule.interpolate).count();
+        let (prepares, worker_per_call) = animator.worker_stats();
         eprintln!(
-            "update, tick changed (avg {:.1} of {} sprites/tick over {RUNS} ticks): {:.1} us",
-            changed_sprites as f64 / RUNS as f64,
-            sprites.len(),
-            per_tick.as_secs_f64() * 1e6
+            "render thread, update() (channel drain, {update_calls} calls over {RUNS} ticks): {:.2} us/call",
+            update_total.as_secs_f64() * 1e6 / update_calls as f64
         );
         eprintln!(
-            "update, tick unchanged (no-op): {:.2} us",
+            "render thread, update with nothing new: {:.2} us",
             unchanged.as_secs_f64() * 1e6
         );
+        eprintln!("worker, prepare + issue per tick ({prepares} ticks): {worker_per_call:.1} us");
         eprintln!(
             "device draining {RUNS} ticks of region writes: {:.1} us/tick",
             gpu_per_tick.as_secs_f64() * 1e6
         );
-        eprintln!("{interpolating} sprites interpolate (blended pixels allocate per tick)");
     }
 }
