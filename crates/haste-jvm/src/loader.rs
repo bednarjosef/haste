@@ -60,6 +60,8 @@ pub const ALLOW_CLASSES: &[&str] = &[
     "net/minecraft/client/NarratorStatus",
     "net/minecraft/client/ComponentCollector",
     "net/minecraft/client/ScrollWheelHandler",
+    // the title screen asks the HUD for the splash text; its reload listener does not run in Haste
+    "net/minecraft/client/resources/SplashManager",
     "net/minecraft/client/Options",
     "net/minecraft/client/OptionInstance",
     "net/minecraft/client/ToggleKeyMapping",
@@ -109,6 +111,18 @@ pub const DENY: &[&str] = &[
     "com/mojang/",
 ];
 
+/// Haste-written replacement classes (sources: `java/haste/replace/<internal>.java`), served from the
+/// game build under their vanilla name whatever the package rules above say.
+///
+/// A replacement exists for a vanilla class that must not run in Haste (deny-listed) but which vanilla
+/// code instantiates unconditionally. It extends the real vanilla class it stands in for and keeps the
+/// methods that code calls as no-ops.
+pub const REPLACEMENTS: &[&str] = &[
+    // The title screen builds one in `init()` and ticks, renders and clicks it. Haste has no Realms, so
+    // the notification bell is a plain `Screen` that draws nothing.
+    "com/mojang/realmsclient/gui/screens/RealmsNotificationsScreen",
+];
+
 /// How the game class loader resolved a class (or why it did not).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClassSource {
@@ -118,6 +132,8 @@ pub enum ClassSource {
     Proxy,
     /// Haste's own game-side Java (`haste.gui`).
     Game,
+    /// A Haste-written replacement for a vanilla class (see [`REPLACEMENTS`]).
+    Replacement,
     /// A third-party library jar (fastutil, guava, DFU, ...).
     Library,
     /// Refused, with the reason (the to-do list).
@@ -143,6 +159,7 @@ impl ClassLog {
                 "jar" => ClassSource::Jar,
                 "proxy" => ClassSource::Proxy,
                 "game" => ClassSource::Game,
+                "replacement" => ClassSource::Replacement,
                 "lib" => ClassSource::Library,
                 other => ClassSource::Refused(
                     other.strip_prefix("refused: ").unwrap_or(other).to_owned(),
@@ -205,7 +222,7 @@ mod tests {
 
     #[test]
     fn parses_class_log() {
-        let log = ClassLog::parse("jar\tnet.minecraft.core.BlockPos\nproxy\tnet.minecraft.client.Minecraft\nrefused: deny-listed\tnet.minecraft.world.level.Level\nlib\tcom.google.common.base.Preconditions\n");
+        let log = ClassLog::parse("jar\tnet.minecraft.core.BlockPos\nproxy\tnet.minecraft.client.Minecraft\nrefused: deny-listed\tnet.minecraft.world.level.Level\nlib\tcom.google.common.base.Preconditions\nreplacement\tcom.mojang.realmsclient.gui.screens.RealmsNotificationsScreen\n");
         assert_eq!(log.classes["net.minecraft.core.BlockPos"], ClassSource::Jar);
         assert_eq!(
             log.with(|s| *s == ClassSource::Proxy),
@@ -215,6 +232,28 @@ mod tests {
             log.refused(),
             vec![("net.minecraft.world.level.Level", "deny-listed")]
         );
+        assert_eq!(
+            log.with(|s| *s == ClassSource::Replacement),
+            vec!["com.mojang.realmsclient.gui.screens.RealmsNotificationsScreen"]
+        );
+    }
+
+    #[test]
+    fn every_replacement_is_denied() {
+        // a replacement only makes sense for a class Haste refuses from the jar
+        for &internal in REPLACEMENTS {
+            assert!(
+                DENY.iter().any(|d| {
+                    let d: &str = d;
+                    if d.ends_with('/') {
+                        internal.starts_with(d)
+                    } else {
+                        internal == d
+                    }
+                }),
+                "{internal} is not denied"
+            );
+        }
     }
 
     #[test]

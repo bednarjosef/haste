@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -21,12 +22,14 @@ import java.util.zip.ZipFile;
  *   <li>JDK classes and Haste's boot classes ({@code haste.loader/proxy/rt}) from the parent;</li>
  *   <li>Haste's game-side classes ({@code haste.gui.*}, compiled against the client jar) from {@code gameDir};</li>
  *   <li>a generated tier-2 proxy from {@code proxyDir}, if one exists for the name (proxies win over everything);</li>
+ *   <li>a Haste replacement for a vanilla class (compiled into {@code gameDir} under the vanilla name), for
+ *       classes the policy must never load from the jar;</li>
  *   <li>vanilla classes ({@code net.minecraft.*}, {@code com.mojang.*} that are in the client jar): from the
  *       player's client jar, but only when the allow-list permits and the deny-list does not;</li>
  *   <li>everything else (fastutil, guava, DFU's {@code com.mojang.serialization}, ...) from vanilla's
  *       third-party library jars.</li>
  * </ol>
- * Every decision is logged in {@link #log()}: "jar", "proxy", "game", "lib" or "refused: reason". The refused
+ * Every decision is logged in {@link #log()}: "jar", "proxy", "game", "replacement", "lib" or "refused: reason". The refused
  * entries are the to-do list (a missing proxy or allow-list entry).
  *
  * <p>The whole client jar is NEVER on the class path: it is only reachable through {@link #findClass}, one
@@ -40,12 +43,15 @@ public final class HasteClassLoader extends ClassLoader {
     private final ZipFile clientJar;
     private final URLClassLoader libs;
     private final String[] allowPackages, allowClasses, deny;
+    /** Binary names of Haste's replacements for vanilla classes (served from {@link #gameDir}). */
+    private final Set<String> replacements;
     /** class name -> how it was served or why it was refused (sorted, for stable output). */
     private final Map<String, String> log = new TreeMap<>();
     private final boolean verbose;
 
     public HasteClassLoader(Path gameDir, Path proxyDir, Path clientJar, Path[] libraryJars,
-                            String[] allowPackages, String[] allowClasses, String[] deny, boolean verbose) throws IOException {
+                            String[] allowPackages, String[] allowClasses, String[] deny,
+                            String[] replacements, boolean verbose) throws IOException {
         super("haste-game", HasteClassLoader.class.getClassLoader());
         this.gameDir = gameDir;
         this.proxyDir = proxyDir;
@@ -59,6 +65,7 @@ public final class HasteClassLoader extends ClassLoader {
         this.allowPackages = allowPackages;
         this.allowClasses = allowClasses;
         this.deny = deny;
+        this.replacements = Set.copyOf(List.of(replacements));
         this.verbose = verbose;
     }
 
@@ -90,6 +97,14 @@ public final class HasteClassLoader extends ClassLoader {
         }
         Class<?> proxy = defineFromDir(proxyDir, name, internal);
         if (proxy != null) { record(name, "proxy"); return proxy; }
+        // A replacement stands in for vanilla code that must not run here: it is Haste's own class (built
+        // next to haste.gui), served under the vanilla name even inside a denied package.
+        if (replacements.contains(name)) {
+            Class<?> r = defineFromDir(gameDir, name, internal);
+            if (r == null) throw refuse(name, "replacement class not built");
+            record(name, "replacement");
+            return r;
+        }
         boolean vanilla = name.startsWith("net.minecraft.") || name.startsWith("com.mojang.");
         ZipEntry e = vanilla ? clientJar.getEntry(internal + ".class") : null;
         if (e != null) {

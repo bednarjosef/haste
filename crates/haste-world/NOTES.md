@@ -90,8 +90,36 @@ Behaviour pinned by `benchmark_chunks_decode_stably`: FNV-1a hash over every blo
 biome of the bench chunks (`0xa7e8f48376c8ee92`, `0x5088a771ee4ad23a`), identical before and
 after the optimizations.
 
-Next steps if more is needed: single-value sections skip the biome container storage (they
-still arrive on the wire); `load_chunk`'s neighbour-dirty loop allocates nothing but touches
-the hash set ~216x — could switch to a fixed-size bitset over a loaded-chunk window; light
-arrays could be stored as `Arc<[u8; 2048]>` copies to unpin packet buffers even for
-non-uniform sections.
+## Chunk memory: single-value biomes, dirty bitset (branch `chunk-memory-next`)
+
+Follow-up to the two "next steps" above, measured on the shared machine (load 2-9; the
+machine's absolute numbers move a lot between passes, so the before/after below was taken
+alternating within one session):
+
+- **Single-value biome containers** (vanilla's `Strategy.ZERO_BITS`, verified in the 26.3
+  client source: bpe 0 -> one value varint, no data array). `decode` already stored those as
+  `Storage::Single`; what was missing was a test pinning it for the 64-entry biome capacity
+  and the encoder path: `PalettedContainer::indirect` now collapses a one-entry palette to
+  `Single` (a 1-entry palette IS the zero-bits configuration; it used to encode 4 bits of
+  data for 64 entries — wrong for biomes anyway, whose indirect range is 1..=3 bits). Tests:
+  `single_value_biome_container_has_no_data_array`, `indirect_with_one_entry_is_single_value`,
+  `single_value_biome_promotes_on_set`.
+- **Dirty tracking is a per-chunk bitset** (`Chunk::dirty`, one bit per section, one word for
+  any world up to 64 sections). `World` keeps only `dirty_chunks` (packed keys with marks, in
+  mark order — a key can repeat, the second drain reads cleared bits) plus a short
+  `dirty_unloaded` list for sections in chunks that have not loaded yet (a `set_block` on a
+  border block marks the neighbour chunk's section; those entries were in the old hash set,
+  and `set_block_and_border_dirty` pins them, so they stay — deduplicated on drain, no hash).
+  `load_chunk`/`unload_chunk` mark whole chunks by bitset instead of 216 hash inserts.
+- Bench numbers, best pass of 5, before -> after: `load_chunk` median 10.8-11.7 -> 9.9-10.9 us,
+  p99 17.9-26.4 -> 13.1-18.8 us. Same chunks with single-value biome containers on the wire
+  (no palette, no packed longs): median 8.7-9.7 us, and `Chunk::decode` alone 7.9 -> 6.5
+  us/chunk. Resident: 63992 -> 64000 bytes/chunk for the 2-bit-biome shape (+8 for the dirty
+  word) and 63232 for single-value biomes (-768, the 24 sections' 2-bit containers).
+  Allocations: 131 -> 132/chunk (+1 for the dirty bitset), which also removes the world-level
+  hash set entirely. Pinned hashes unchanged.
+
+Next steps if more is needed: `dirty_unloaded` could be dropped if the renderer stopped
+meshing unloaded sections (it captures all-air snapshots for them; the unload path reports
+those separately through `gone`); light arrays could be stored as `Arc<[u8; 2048]>` copies to
+unpin packet buffers even for non-uniform sections.

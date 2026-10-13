@@ -7,6 +7,10 @@
 //! air above ground, biome containers, two heightmaps, 8 block entities, full light. Fixed
 //! seeds, so runs (and code versions) are comparable.
 //!
+//! Biome containers are measured in two shapes: 2-bit indirect with four biomes (mixed
+//! terrain) and single-valued (`bpe 0`, no data array: ocean, desert, the End). Both use
+//! the same generator stream, so they differ only in the biome encoding.
+//!
 //! Run: `cargo test -q -p haste-world --release -- --ignored --nocapture load_bench`
 //! (`benchmark_chunks_decode_stably` runs in every plain `cargo test`).
 
@@ -114,14 +118,24 @@ enum Blocks<'a> {
     Indirect(&'a [u32], &'a PackedArray),
 }
 
+/// How a section's biome container is put on the wire.
+enum Biomes<'a> {
+    /// Indirect 2 bits, four biomes per section: a mixed-terrain section.
+    Mixed(&'a PackedArray),
+    /// bits-per-entry 0: one biome for the whole section — what a server sends for a
+    /// uniform-biome section (ocean, desert, deep plains, the End). No palette, no data
+    /// array; ours stores it as a single value, so nothing is kept.
+    Uniform(u32),
+}
+
 /// Encodes one section: block count, fluid count, block container, biome container
-/// (indirect, 2 bits, 4 biomes — the common server shape).
+/// (2-bit indirect with four biomes, or a single-valued biome container).
 fn encode_section(
     w: &mut WireWriter,
     block_count: i16,
     fluid_count: i16,
     blocks: Blocks<'_>,
-    biomes: &PackedArray,
+    biomes: Biomes<'_>,
 ) {
     w.i16_be(block_count);
     w.i16_be(fluid_count);
@@ -141,29 +155,74 @@ fn encode_section(
             }
         }
     }
-    w.varint(2); // biome bpe
-    w.varint(4);
-    for b in 0..4u32 {
-        w.varint(b);
+    match biomes {
+        Biomes::Mixed(data) => {
+            w.varint(data.bits() as u32);
+            w.varint(4); // palette [0, 1, 2, 3]
+            for b in 0..4u32 {
+                w.varint(b);
+            }
+            for &l in data.longs() {
+                w.i64_be(l);
+            }
+        }
+        // bpe 0 + the value: no palette, no data array (vanilla's zero-bits configuration)
+        Biomes::Uniform(v) => {
+            w.varint(0);
+            w.varint(v);
+        }
     }
-    for &l in biomes.longs() {
-        w.i64_be(l);
+}
+
+/// Which biome wire shape the synthetic chunks use.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BiomeShape {
+    /// Every section's biome container is indirect 2 bits with four biomes.
+    Mixed,
+    /// Every section's biome container is single-valued (`bpe 0`).
+    Uniform,
+}
+
+impl BiomeShape {
+    /// The biome values a section's 64 cells hold (the same draw stream either way, so
+    /// the two shapes differ only in how the biomes are encoded).
+    fn cells(rng: &mut Rng) -> [u32; 64] {
+        let mut cells = [0u32; 64];
+        for c in cells.iter_mut() {
+            *c = rng.next() % 4;
+        }
+        cells
+    }
+
+    /// The container for one section: `Mixed` packs all 64 cells, `Uniform` writes the
+    /// first cell's biome as the single value.
+    fn wire<'a>(self, cells: &[u32; 64], packed: &'a PackedArray) -> Biomes<'a> {
+        match self {
+            BiomeShape::Mixed => Biomes::Mixed(packed),
+            BiomeShape::Uniform => Biomes::Uniform(cells[0]),
+        }
     }
 }
 
 /// Builds one realistic overworld `ChunkData` (seed varies per chunk; the shape is fixed).
 fn realistic_chunk(pos: ChunkPos, seed: u32) -> ChunkData {
+    chunk_payload(pos, seed, BiomeShape::Mixed)
+}
+
+/// `realistic_chunk` with the given biome wire shape.
+fn chunk_payload(pos: ChunkPos, seed: u32, biome_shape: BiomeShape) -> ChunkData {
     let mut rng = Rng(seed | 1);
     let mut w = WireWriter::new();
     for si in 0..24usize {
-        // biome container: 2-bit indices into [0,1,2,3]
+        let cells = BiomeShape::cells(&mut rng);
         let mut biomes = PackedArray::zeroed(2, 64);
-        for i in 0..64 {
-            biomes.write_at(i, rng.next() % 4);
+        for (i, &c) in cells.iter().enumerate() {
+            biomes.write_at(i, c);
         }
+        let biome_wire = biome_shape.wire(&cells, &biomes);
         match si {
             // 0..=3 (y -64..-1): solid deepslate belt, single-value stone
-            0..=3 => encode_section(&mut w, 4096, 0, Blocks::Single(STONE), &biomes),
+            0..=3 => encode_section(&mut w, 4096, 0, Blocks::Single(STONE), biome_wire),
             // 4..=7 (y 0..63): stone with sparse ores, 2-bit palette
             4..=7 => {
                 let palette = [STONE, ORES[0], ORES[1]];
@@ -179,7 +238,7 @@ fn realistic_chunk(pos: ChunkPos, seed: u32) -> ChunkData {
                     bc += (idx == 0) as i16;
                     data.write_at(i, idx);
                 }
-                encode_section(&mut w, bc, 0, Blocks::Indirect(&palette, &data), &biomes)
+                encode_section(&mut w, bc, 0, Blocks::Indirect(&palette, &data), biome_wire)
             }
             // 8 (y 64..79): cave section, full 3-bit palette
             8 => {
@@ -188,7 +247,7 @@ fn realistic_chunk(pos: ChunkPos, seed: u32) -> ChunkData {
                 for i in 0..BLOCKS_PER_SECTION {
                     data.write_at(i, rng.next() % CAVES.len() as u32);
                 }
-                encode_section(&mut w, 4096, 0, Blocks::Indirect(&CAVES, &data), &biomes)
+                encode_section(&mut w, 4096, 0, Blocks::Indirect(&CAVES, &data), biome_wire)
             }
             // 9..=10 (y 80..111): surface belt, stone/dirt/grass/sand/water
             9 | 10 => {
@@ -216,11 +275,11 @@ fn realistic_chunk(pos: ChunkPos, seed: u32) -> ChunkData {
                     bc,
                     fluids,
                     Blocks::Indirect(&palette, &data),
-                    &biomes,
+                    biome_wire,
                 )
             }
             // 11..=23 (y 112..319): single-value air
-            _ => encode_section(&mut w, 0, 0, Blocks::Single(0), &biomes),
+            _ => encode_section(&mut w, 0, 0, Blocks::Single(0), biome_wire),
         }
     }
 
@@ -354,6 +413,8 @@ fn resident_bytes(c: &haste_world::Chunk) -> u64 {
         .map(|n| n.0.len() as u64)
         .sum::<u64>();
     total += c.light.block.iter().map(|n| n.0.len() as u64).sum::<u64>();
+    // the per-chunk dirty bitset (remesh marks; one word covers up to 64 sections)
+    total += c.dirty_bits().len() as u64 * 8;
     total
 }
 
@@ -378,6 +439,45 @@ fn state_hash(w: &World, pos: ChunkPos) -> u64 {
     hash
 }
 
+/// Loads `chunks` into a fresh world, draining the dirty sections after each load the way
+/// a frame loop does; best of 5 passes (the machine runs other workstreams; the min pass
+/// filters their noise): (median us, p99 us, chunks/s).
+fn load_pass(chunks: &[ChunkData]) -> (f64, f64, f64) {
+    let n = chunks.len();
+    let mut best = (f64::INFINITY, 0.0, 0.0);
+    for _ in 0..5 {
+        let mut world = World::new_with_biomes(overworld(), game_data(), 67);
+        let mut times = Vec::with_capacity(n);
+        let t0 = Instant::now();
+        for cd in chunks {
+            let t = Instant::now();
+            world.load_chunk(cd).unwrap();
+            times.push(t.elapsed());
+            let _ = world.take_dirty_sections();
+        }
+        let total = t0.elapsed();
+        times.sort();
+        let median = times[n / 2].as_nanos() as f64 / 1000.0;
+        let p99 = times[(n * 99) / 100].as_nanos() as f64 / 1000.0;
+        let cps = n as f64 / total.as_secs_f64();
+        if median < best.0 {
+            best = (median, p99, cps);
+        }
+    }
+    best
+}
+
+/// Resident container bytes per chunk, averaged over a fresh world's load of `chunks`.
+fn resident_per_chunk(chunks: &[ChunkData]) -> u64 {
+    let mut world = World::new_with_biomes(overworld(), game_data(), 67);
+    let mut rb = 0u64;
+    for cd in chunks {
+        world.load_chunk(cd).unwrap();
+        rb += resident_bytes(world.chunk(cd.pos).unwrap());
+    }
+    rb / chunks.len() as u64
+}
+
 /// The benchmark: 3 runs x N chunks; prints median/p99 per chunk, chunks/s, allocations and
 /// allocated bytes per chunk, resident container bytes, and the state hashes.
 #[test]
@@ -387,6 +487,17 @@ fn load_bench() {
     // a spread of positions over a 32-wide grid, so neighbour dirtying is realistic
     let chunks: Vec<ChunkData> = (0..n as u32)
         .map(|i| realistic_chunk(ChunkPos::new(i as i32 % 32, (i / 32) as i32), i * 7919 + 3))
+        .collect();
+    // the same chunks, shapes and seeds, but every section's biome container is a single
+    // value (bpe 0: no palette, no data array)
+    let single_biome: Vec<ChunkData> = (0..n as u32)
+        .map(|i| {
+            chunk_payload(
+                ChunkPos::new(i as i32 % 32, (i / 32) as i32),
+                i * 7919 + 3,
+                BiomeShape::Uniform,
+            )
+        })
         .collect();
 
     for run in 0..3 {
@@ -433,33 +544,20 @@ fn load_bench() {
     // steady-state timing: repeat the whole 200-chunk load 5 times on a pre-warmed world,
     // report the best full pass (the machine runs other workstreams; min filters them out)
     {
-        let mut best_median = f64::INFINITY;
-        let mut best_p99 = f64::INFINITY;
-        let mut best_cps = 0.0;
-        for _ in 0..5 {
-            let mut world = World::new_with_biomes(overworld(), game_data(), 67);
-            let mut times = Vec::with_capacity(n);
-            let t0 = Instant::now();
-            for cd in &chunks {
-                let t = Instant::now();
-                world.load_chunk(cd).unwrap();
-                times.push(t.elapsed());
-                let _ = world.take_dirty_sections();
-            }
-            let total = t0.elapsed();
-            times.sort();
-            let median = times[n / 2].as_nanos() as f64 / 1000.0;
-            let p99 = times[(n * 99) / 100].as_nanos() as f64 / 1000.0;
-            let cps = n as f64 / total.as_secs_f64();
-            if median < best_median {
-                best_median = median;
-                best_p99 = p99;
-                best_cps = cps;
-            }
-        }
+        let (median, p99, cps) = load_pass(&chunks);
         eprintln!(
-            "load_chunk best pass: median {best_median:.1} us, p99 {best_p99:.1} us, \
-             {best_cps:.0} chunks/s"
+            "load_chunk best pass: median {median:.1} us, p99 {p99:.1} us, {cps:.0} chunks/s"
+        );
+    }
+
+    // the same load with single-valued biome containers on the wire: what a uniform-biome
+    // (ocean, desert, End) chunk looks like — no palette and no packed longs to decode,
+    // and nothing stored per section
+    {
+        let (median, p99, cps) = load_pass(&single_biome);
+        eprintln!(
+            "single-value biomes, load_chunk best pass: median {median:.1} us, \
+             p99 {p99:.1} us, {cps:.0} chunks/s"
         );
     }
 
@@ -475,6 +573,16 @@ fn load_bench() {
             best = best.min(per);
         }
         eprintln!("Chunk::decode alone: best {best:.1} us/chunk");
+        let mut best = f64::INFINITY;
+        for _ in 0..5 {
+            let t0 = Instant::now();
+            for cd in &single_biome {
+                let _ = haste_world::Chunk::decode(cd, -4, 24, 15, 7, u32::MAX).unwrap();
+            }
+            let per = t0.elapsed().as_nanos() as f64 / n as f64 / 1000.0;
+            best = best.min(per);
+        }
+        eprintln!("Chunk::decode alone, single-value biomes: best {best:.1} us/chunk");
     }
 
     // same chunks with light stripped: isolates what light application costs
@@ -501,16 +609,19 @@ fn load_bench() {
     }
 
     // resident size of loaded chunks (containers; allocator overhead excluded)
+    eprintln!(
+        "resident container bytes per chunk (2-bit biomes): {} (average over {n})",
+        resident_per_chunk(&chunks)
+    );
+    eprintln!(
+        "resident container bytes per chunk (single-value biomes): {} (average over {n})",
+        resident_per_chunk(&single_biome)
+    );
+
     let mut world = World::new_with_biomes(overworld(), game_data(), 67);
-    let mut rb = 0u64;
     for cd in &chunks {
         world.load_chunk(cd).unwrap();
-        rb += resident_bytes(world.chunk(cd.pos).unwrap());
     }
-    eprintln!(
-        "resident container bytes per chunk: {} (average over {n})",
-        rb / n as u64
-    );
     eprintln!(
         "state hash chunk 0: {:016x}",
         state_hash(&world, chunks[0].pos)

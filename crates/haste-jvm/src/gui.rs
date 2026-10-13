@@ -34,6 +34,14 @@ pub enum ScreenKind {
     Inventory,
     /// `ChatScreen` opened with "/" typed (the command key).
     Command,
+    /// `net.minecraft.client.gui.screens.TitleScreen` (the game's main menu).
+    Title,
+    /// `net.minecraft.client.gui.screens.options.OptionsScreen` (vanilla opens it from the title
+    /// screen; "Done" returns to the screen that opened it).
+    Options,
+    /// `net.minecraft.client.gui.screens.multiplayer.JoinMultiplayerScreen`, whose parent is a
+    /// `TitleScreen`.
+    Multiplayer,
 }
 
 impl ScreenKind {
@@ -43,6 +51,9 @@ impl ScreenKind {
             ScreenKind::Pause => 1,
             ScreenKind::Inventory => 2,
             ScreenKind::Command => 3,
+            ScreenKind::Title => 4,
+            ScreenKind::Options => 5,
+            ScreenKind::Multiplayer => 6,
         }
     }
 }
@@ -51,6 +62,7 @@ impl ScreenKind {
 struct Methods {
     open: jni::objects::JMethodID,
     close: jni::objects::JMethodID,
+    reset_for_test: jni::objects::JMethodID,
     is_open: jni::objects::JMethodID,
     screen_name: jni::objects::JMethodID,
     render: jni::objects::JMethodID,
@@ -83,6 +95,7 @@ impl GuiPipeline {
         let m = Methods {
             open: env.get_method_id(&cls, jni_str!("open"), jni_sig!("(I)V"))?,
             close: env.get_method_id(&cls, jni_str!("close"), jni_sig!("()V"))?,
+            reset_for_test: env.get_method_id(&cls, jni_str!("resetForTest"), jni_sig!("()V"))?,
             is_open: env.get_method_id(&cls, jni_str!("isOpen"), jni_sig!("()Z"))?,
             screen_name: env.get_method_id(
                 &cls,
@@ -174,6 +187,16 @@ impl GuiPipeline {
     pub fn close_screen(&self) {
         if let Err(e) = self.call(self.m.close, VOID, &[], |_, _| Ok(())) {
             self.failed("close_screen", e);
+        }
+    }
+
+    /// Drops the GUI state earlier tests leave behind in the process-wide JVM: the chat log and its
+    /// scroll, the held mouse button and position, the open screen and the mouse grab. Tests call
+    /// this at their start (the JVM is one per process, so everything vanilla remembers about the
+    /// GUI survives a test).
+    pub fn reset_for_test(&self) {
+        if let Err(e) = self.call(self.m.reset_for_test, VOID, &[], |_, _| Ok(())) {
+            self.failed("reset_for_test", e);
         }
     }
 
@@ -681,11 +704,13 @@ fn cursor_shape(code: i32) -> Option<CursorShape> {
     })
 }
 
-/// The blend mode of a blit (`GuiBatch`'s code, set by `GfxImpl.blend` in Java).
+/// The blend mode of a blit (`GuiBatch`'s code, set by `GfxImpl.blend` in Java; 0 also falls back
+/// to normal for codes this build does not know).
 fn blend_of(code: i32) -> GuiBlend {
     match code {
         1 => GuiBlend::Multiply,
         2 => GuiBlend::Invert,
+        3 => GuiBlend::Additive,
         _ => GuiBlend::Normal,
     }
 }
@@ -951,7 +976,7 @@ mod tests {
             200,
             20,
             -1,
-            0,
+            3,
             ITEM,
             7,
             8,
@@ -1042,7 +1067,7 @@ mod tests {
             matches!(&c[3], GuiCommand::Texture { texture, u, tex_w: 256, blend: GuiBlend::Normal, .. } if texture.path() == "textures/gui/x.png" && *u == 0.5)
         );
         assert!(
-            matches!(&c[4], GuiCommand::Sprite { sprite, w: 200, .. } if sprite.path() == "widget/button")
+            matches!(&c[4], GuiCommand::Sprite { sprite, w: 200, blend: GuiBlend::Additive, .. } if sprite.path() == "widget/button")
         );
         assert_eq!(
             c[5],
@@ -1069,5 +1094,13 @@ mod tests {
         assert!(decode(&[FILL, 1, 2], &[]).is_err());
         assert!(decode(&[TEXT, 0, 0, 0, 0, 5], &[]).is_err());
         assert!(decode(&[99], &[]).is_err());
+    }
+
+    #[test]
+    fn decodes_blend_codes() {
+        assert_eq!(blend_of(0), GuiBlend::Normal);
+        assert_eq!(blend_of(1), GuiBlend::Multiply);
+        assert_eq!(blend_of(2), GuiBlend::Invert);
+        assert_eq!(blend_of(3), GuiBlend::Additive);
     }
 }
