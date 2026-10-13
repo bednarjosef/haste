@@ -367,6 +367,21 @@ struct MeshScratch {
     sink: MeshSink,
     states: Vec<Option<std::rc::Rc<StateInfo>>>,
     fluid_scratch: Vec<crate::fluid::FluidQuad>,
+    /// The (baked, atlas, fluids) set `states` was built from; `None` before
+    /// the first mesh. The cache is only valid for one set: a second Renderer
+    /// in the same process (reconnect, a new world) reuses the mesh thread,
+    /// so the cache is cleared whenever the identity changes.
+    state_key: Option<SourceKey>,
+}
+
+/// Identity of the inputs the state cache is derived from: the baked models,
+/// the atlas (its data pointer; UVs/sprite ids come from it) and the fluid
+/// table. Compared by pointer: all three outlive the meshing call.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SourceKey {
+    baked: usize,
+    atlas: usize,
+    fluids: usize,
 }
 
 impl MeshScratch {
@@ -375,6 +390,7 @@ impl MeshScratch {
             sink: MeshSink::new(),
             states: Vec::new(),
             fluid_scratch: Vec::with_capacity(11),
+            state_key: None,
         }
     }
 
@@ -459,11 +475,25 @@ pub fn mesh_section_with(
 ) -> SectionMesh {
     SCRATCH.with(|cell| {
         let mut scratch = cell.borrow_mut();
+        // The state cache is only valid for the (baked, atlas, fluids) set it
+        // was built from: a second Renderer in the same process (reconnect, a
+        // new world) reuses the mesh thread, so clear it when the identity
+        // changes. Pointer identity: all three outlive the meshing call.
+        let key = SourceKey {
+            baked: baked as *const _ as usize,
+            atlas: atlas as *const _ as *const () as usize,
+            fluids: std::sync::Arc::as_ptr(&tables.fluids) as usize,
+        };
+        if scratch.state_key != Some(key) {
+            scratch.states.clear();
+            scratch.state_key = Some(key);
+        }
         scratch.begin_section();
         let MeshScratch {
             sink,
             states,
             fluid_scratch,
+            state_key: _,
         } = &mut *scratch;
         let mut ctx = MeshContext {
             snapshot,
@@ -938,6 +968,77 @@ mod tests {
         fn height(&self) -> i32 {
             384
         }
+    }
+
+    #[test]
+    #[ignore = "needs the client jar and datagen reports in the cache"]
+    fn state_cache_rekeys_per_atlas() {
+        // The per-state cache is thread-local and persists across sections;
+        // it is only valid for the (baked, atlas, fluids) set it was built
+        // from. A second Renderer in the same process (reconnect, a new
+        // world) reuses the mesh thread, so meshing with a different atlas
+        // on the same thread must rebuild, not reuse the stale entries.
+        let jar = haste_core::paths::client_jar();
+        if !jar.exists() {
+            eprintln!("ignored: needs the client jar in the cache");
+            return;
+        }
+        let mut assets = haste_assets::Assets::open(
+            &jar,
+            &haste_core::paths::cache_dir().join("assets"),
+            "26.3",
+        )
+        .unwrap();
+        let states = haste_assets::BlocksJsonStates::load(
+            &haste_core::paths::datagen_reports().join("blocks.json"),
+        )
+        .unwrap();
+        let mut atlas1 = haste_assets::AtlasBuilder::build(&mut assets, &[], false).unwrap();
+        let baked =
+            haste_assets::BakedBlockModels::bake(&mut assets, &states, &mut atlas1).unwrap();
+
+        // A different atlas over the same baked models: only stone is packed,
+        // so stone's sprite id differs from the full atlas's.
+        let stone = haste_core::Identifier::parse("minecraft:block/stone").unwrap();
+        let atlas2 = haste_assets::AtlasBuilder::build(&mut assets, &[stone], false).unwrap();
+        let sprite1 = atlas1.region("minecraft:block/stone").sprite as u16;
+        let sprite2 = atlas2.region("minecraft:block/stone").sprite as u16;
+        assert_ne!(
+            sprite1, sprite2,
+            "test premise: atlases place stone differently"
+        );
+
+        // One layer of stone: every emitted vertex comes from the stone
+        // texture, so every vertex's sprite names the atlas it was meshed with.
+        let world = FlatWorld {
+            ground: BlockStateId(1),
+            layers: 1,
+        };
+        let snapshot = MeshSnapshot::capture(&world, SectionPos::new(0, 0, 0));
+        // One tables instance, passed by reference each call: the fluid Arc
+        // pointer (part of the cache key) stays stable, so only the atlas
+        // change re-keys the cache.
+        let tables = MeshTables::default();
+        let pos = SectionPos::new(0, 0, 0);
+
+        let mesh1 = mesh_section_with(&snapshot, &baked, &atlas1, &tables, pos);
+        assert!(
+            mesh1.vertices.iter().all(|v| v.sprite == sprite1),
+            "atlas1 mesh must carry atlas1's stone sprite"
+        );
+
+        let mesh2 = mesh_section_with(&snapshot, &baked, &atlas2, &tables, pos);
+        assert_eq!(mesh2.vertices.len(), mesh1.vertices.len());
+        assert!(
+            mesh2.vertices.iter().all(|v| v.sprite == sprite2),
+            "atlas2 mesh must be rebuilt with atlas2's stone sprite, not the cached one"
+        );
+
+        let mesh3 = mesh_section_with(&snapshot, &baked, &atlas1, &tables, pos);
+        assert!(
+            mesh3.vertices.iter().all(|v| v.sprite == sprite1),
+            "switching back to atlas1 must re-key again"
+        );
     }
 
     #[test]
