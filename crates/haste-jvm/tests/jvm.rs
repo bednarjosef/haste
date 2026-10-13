@@ -482,6 +482,112 @@ fn pause_screen() {
 }
 
 #[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn title_screen() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    h.clear_unimplemented().unwrap();
+    open(&h, haste_jvm::ScreenKind::Title);
+    assert!(gui.is_open());
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.TitleScreen")
+    );
+    let f = render(&h, (0.0, 0.0));
+    dump(&f);
+    let t = texts(&f);
+    for want in [
+        "Singleplayer",
+        "Multiplayer",
+        "Minecraft Realms",
+        "Options...",
+        "Quit Game",
+        "Copyright Mojang AB. Do not distribute!",
+    ] {
+        assert!(t.iter().any(|x| x == want), "missing {want:?} in {t:?}");
+    }
+    // the realms notification bell is Haste's replacement (it must draw nothing), never vanilla's
+    assert_eq!(
+        h.class_log()
+            .unwrap()
+            .classes
+            .get("com.mojang.realmsclient.gui.screens.RealmsNotificationsScreen"),
+        Some(&ClassSource::Replacement)
+    );
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for TitleScreen: {unimpl:#?}"
+    );
+}
+
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn options_screen() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    h.clear_unimplemented().unwrap();
+    open(&h, haste_jvm::ScreenKind::Options);
+    assert!(gui.is_open());
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.options.OptionsScreen")
+    );
+    let f = render(&h, (0.0, 0.0));
+    dump(&f);
+    let t = texts(&f);
+    for want in [
+        "Options",
+        "Done",
+        // the FOV slider at the default value, and two of the setting buttons
+        "FOV: Normal",
+        "Skin Customization...",
+        "Music & Sounds...",
+    ] {
+        assert!(t.iter().any(|x| x == want), "missing {want:?} in {t:?}");
+    }
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for OptionsScreen: {unimpl:#?}"
+    );
+}
+
+#[test]
+#[ignore = "JoinMultiplayerScreen.<init> throws NoClassDefFoundError: net/minecraft/client/multiplayer/ServerStatusPinger is deny-listed (its init then needs ServerList too), see crates/haste-jvm/src/loader.rs DENY"]
+fn multiplayer_screen() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    h.clear_unimplemented().unwrap();
+    open(&h, haste_jvm::ScreenKind::Multiplayer);
+    assert!(gui.is_open());
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.multiplayer.JoinMultiplayerScreen")
+    );
+    let f = render(&h, (0.0, 0.0));
+    dump(&f);
+    let t = texts(&f);
+    for want in [
+        "Play Multiplayer",
+        "Join Server",
+        "Direct Connection",
+        "Add Server",
+        "Back",
+    ] {
+        assert!(t.iter().any(|x| x == want), "missing {want:?} in {t:?}");
+    }
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for JoinMultiplayerScreen: {unimpl:#?}"
+    );
+}
+
+#[test]
 #[ignore = "needs cache/ (JDK, client jar, libraries, ASM); run with --release for the number"]
 fn bench_pause_render() {
     let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
