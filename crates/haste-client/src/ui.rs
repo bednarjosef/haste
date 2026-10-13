@@ -26,7 +26,8 @@
 //!
 //! `Ui` is cheap to clone: give the game thread and the render thread one each (the JVM side is
 //! serialised internally; each clone has its own frame buffer).
-// Wired into the game loop by the client (client-app); until then only the tests use it.
+// The input methods (key, char_typed, mouse_moved, mouse_button, scroll) are not wired into the
+// window yet: keyboard/mouse routing to screens is a later task.
 #![allow(dead_code)]
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
@@ -472,6 +473,14 @@ impl Ui {
     /// The selected hotbar slot (0-8): the HUD's and the server's, kept here.
     pub fn selected_slot(&self) -> i32 {
         self.state(|s| s.selected_slot)
+    }
+
+    /// The client selected a hotbar slot itself (1-9, the wheel): the HUD shows it from here.
+    /// The client's own `set_carried_item` tells the server, so `sent_slot` is set with it (the
+    /// UI must not send it a second time).
+    pub fn set_selected_slot(&self, slot: i32) {
+        self.state(|s| s.selected_slot = slot);
+        self.shared.sent_slot.store(slot, Ordering::Relaxed);
     }
 
     /// Whether vanilla code asked to leave the server (pause screen "Disconnect"); clears it.

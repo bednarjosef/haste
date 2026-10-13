@@ -6,6 +6,7 @@
 //! - `ui`      (jvm-host): HUD + tier-3 screens through the batched GUI pipeline.
 //! - `launch`  (setup): CLI args, config, setup checks, singleplayer server lifecycle.
 //! - `headless`: join milestone mode, no window: joins, tracks world/entities, prints stats.
+//! - `sound`  (sound): packets and music into `haste-audio`'s output, 20 Hz on the game thread.
 //!
 //! The lead owns this file. Add a module by adding one line here and your own file.
 use clap::Parser;
@@ -16,6 +17,9 @@ mod headless;
 mod launch;
 mod net;
 mod player;
+mod screenshots;
+mod script;
+mod sound;
 mod ui;
 
 #[derive(Parser, Debug)]
@@ -44,6 +48,17 @@ pub struct Args {
     /// (`--seconds` bounds the wait).
     #[arg(long)]
     pub screenshot: Option<std::path::PathBuf>,
+    /// Bench mode (needs `--server`): after the world settles (as `--screenshot`), render
+    /// offscreen along a fixed camera path for this many seconds and print a frame-time
+    /// summary (`--seconds` bounds the settle wait).
+    #[arg(long)]
+    pub bench: Option<u64>,
+    /// Bench mode: write the summary as JSON to this file.
+    #[arg(long)]
+    pub bench_out: Option<std::path::PathBuf>,
+    /// Render distance in chunks, overriding the saved option (like `--vsync`).
+    #[arg(long)]
+    pub render_distance: Option<u8>,
     /// Screenshot width in pixels.
     #[arg(long, default_value_t = 960)]
     pub width: u32,
@@ -59,6 +74,10 @@ pub struct Args {
     /// Screenshot: feet position to wait for and render from (camera at eye height above it).
     #[arg(long, num_args = 3, value_names = ["X", "Y", "Z"], allow_hyphen_values = true)]
     pub pos: Option<Vec<f64>>,
+    /// Screenshot perspective: first, back (third person behind) or front (third person in
+    /// front, looking back at the player).
+    #[arg(long, default_value = "first")]
+    pub perspective: String,
     /// Present with vsync; overrides the saved option when given.
     #[arg(long)]
     pub vsync: Option<bool>,
@@ -75,6 +94,7 @@ fn main() -> anyhow::Result<()> {
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?),
         )
+        .with_writer(std::io::stderr)
         .init();
     let args = Args::parse();
     if let Some(cmd) = args.command {
@@ -94,6 +114,9 @@ fn main() -> anyhow::Result<()> {
     }
     if let Some(file) = args.screenshot.clone() {
         return app::screenshot(&args, &file);
+    }
+    if let Some(seconds) = args.bench {
+        return app::bench(&args, seconds);
     }
     app::run(&args)
 }

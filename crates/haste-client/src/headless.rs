@@ -106,7 +106,7 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
         }
         if driver.is_closed() {
             // Drain what is left so the disconnect reason is applied.
-            let _ = driver.receive(&mut world, &mut entities);
+            let _ = driver.receive(&mut world, &mut entities, None);
             failure = Some(
                 driver
                     .connection()
@@ -160,6 +160,7 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
     let stats = driver.stats();
     let counters = driver.session.counters.clone();
     let chunks = world.chunk_count();
+    tracing::debug!("sound packets: {}", counters.sound_packets);
     println!("--- summary after {:.1} s", t0.elapsed().as_secs_f64());
     println!(
         "packets in {} ({} bytes), out {}; chunks loaded {} (unloaded {}, refused by world {}), now loaded {} with {} non-empty sections, entities {}, teleports {}",

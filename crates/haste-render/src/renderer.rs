@@ -23,6 +23,8 @@ pub struct Camera {
     pub yaw: f32,
     pub pitch: f32,
     pub fov_deg: f32,
+    /// Camera roll in degrees (hurt tilt; positive rolls the horizon clockwise on screen).
+    pub roll_deg: f32,
 }
 
 /// Sky/fog state for one frame.
@@ -43,6 +45,10 @@ pub struct FrameStats {
     pub chunk_sections_total: u32,
     pub meshes_pending: u32,
     pub draw_calls: u32,
+    /// Section meshes uploaded this frame (one per finished mesh written to the arenas).
+    pub uploads: u32,
+    /// Vertex+index bytes written by this frame's uploads.
+    pub upload_bytes: u64,
 }
 
 /// One frame's draw input.
@@ -132,6 +138,7 @@ mod tests {
                 yaw: 0.0,
                 pitch: 60.0,
                 fov_deg: 70.0,
+                roll_deg: 0.0,
             },
             entities: &[],
             gui: &haste_core::gui::GuiFrame::default(),
@@ -166,6 +173,41 @@ mod tests {
             any_different,
             "frame is entirely clear colour; terrain not rendered"
         );
+    }
+
+    // Readback unpacking: 256-byte row padding and BGRA swap, no GPU needed.
+    #[test]
+    fn texel_rows_unpads_rows() {
+        // 3x1 RGBA pixels, stride padded past 12 bytes.
+        let row = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        let stride = 16;
+        let mut data = row.to_vec();
+        data.resize(stride, 0);
+        let out = texel_rows_to_rgba(&data, 3, 1, stride, false);
+        assert_eq!(out, row.to_vec());
+    }
+
+    #[test]
+    fn texel_rows_swap_bgra() {
+        // Two BGRA pixels in one padded row: r and b swap per pixel.
+        let row = [10u8, 20, 30, 255, 40, 50, 60, 255];
+        let stride = 16;
+        let mut data = row.to_vec();
+        data.resize(stride, 0);
+        let out = texel_rows_to_rgba(&data, 2, 1, stride, true);
+        assert_eq!(out, vec![30, 20, 10, 255, 60, 50, 40, 255]);
+    }
+
+    // The async capture state machine's shared half, no GPU needed: the map callback
+    // (a clone of the flag) advances Pending to Ready or Failed; take_capture polls.
+    #[test]
+    fn capture_flag_advances_pending_to_ready_or_failed() {
+        let flag = CaptureFlag::default();
+        assert_eq!(flag.get(), CapturePhase::Pending);
+        flag.clone().set(CapturePhase::Ready);
+        assert_eq!(flag.get(), CapturePhase::Ready);
+        flag.clone().set(CapturePhase::Failed);
+        assert_eq!(flag.get(), CapturePhase::Failed);
     }
 }
 
@@ -264,12 +306,68 @@ pub struct Renderer {
     /// Timings of the last frame and the GPU timestamp reader.
     timings: crate::timing::FrameTimings,
     timer: Option<crate::timing::GpuTimer>,
+    /// Mesh uploads and their bytes during the last `update_world*` call (feed phase, before
+    /// `render`): reported in `FrameStats` so the bench can attribute slow frames.
+    last_uploads: (u32, u64),
     /// Surface present mode (`set_vsync`).
     present_mode: wgpu::PresentMode,
     /// First-person arm or held item (`set_first_person`).
     first_person: Option<crate::entity::FirstPerson>,
     /// Name tags projected to GUI space this frame.
     nametags: Vec<crate::gui::ScreenNametag>,
+    /// F2 screenshot requested: the next `render` arms the capture for `take_capture`.
+    capture_pending: bool,
+    /// In-flight screenshot readback (copy submitted, async map pending) until
+    /// `take_capture` collects it.
+    capture: Option<Capture>,
+    /// Whether the surface was configured with COPY_SRC: F2 then copies the presented
+    /// frame; without it, the capture frame renders into a temporary offscreen target.
+    surface_copy: bool,
+    /// Whether the F2 capture path of this surface was logged (once per renderer).
+    surface_copy_logged: bool,
+}
+
+/// An in-flight screenshot readback: the copy is submitted and `map_async` posted, the
+/// callback flips `status`, and `take_capture` collects it frames later without blocking.
+struct Capture {
+    buffer: std::sync::Arc<wgpu::Buffer>,
+    status: CaptureFlag,
+    width: u32,
+    height: u32,
+    /// Row stride of the padded copy buffer.
+    stride: usize,
+    /// Red/blue swapped on BGRA surfaces.
+    bgra: bool,
+}
+
+/// Phases of an in-flight screenshot readback; the `map_async` callback advances
+/// `Pending` to `Ready` or `Failed`, `take_capture` polls the flag.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CapturePhase {
+    /// Copy submitted, map posted, callback not yet run.
+    Pending,
+    /// Mapped and readable.
+    Ready,
+    /// The map failed.
+    Failed,
+}
+
+/// The phase shared with the `map_async` callback (a `CapturePhase` in an atomic).
+#[derive(Clone, Debug, Default)]
+struct CaptureFlag(std::sync::Arc<std::sync::atomic::AtomicU8>);
+
+impl CaptureFlag {
+    fn get(&self) -> CapturePhase {
+        match self.0.load(std::sync::atomic::Ordering::Acquire) {
+            1 => CapturePhase::Ready,
+            2 => CapturePhase::Failed,
+            _ => CapturePhase::Pending,
+        }
+    }
+    fn set(&self, phase: CapturePhase) {
+        self.0
+            .store(phase as u8, std::sync::atomic::Ordering::Release);
+    }
 }
 
 #[allow(dead_code)]
@@ -522,14 +620,16 @@ impl Renderer {
             tracing::warn!("colormaps unavailable ({e:#}): uniform grass/foliage colour");
             crate::tint::Colormaps::uniform(0x91BD59)
         });
-        mesher.set_tables(crate::mesher::MeshTables {
-            tints: Arc::new(crate::tint::TintTable::new(states)),
-            colors: Arc::new(crate::tint::BiomeColors::new(&[], &colormaps)),
-            fluids: Arc::new(crate::fluid::FluidTable::new(
+        mesher.set_tables(crate::mesher::MeshTables::new(
+            Arc::new(crate::tint::TintTable::new(states)),
+            Arc::new(crate::tint::BiomeColors::new(&[], &colormaps)),
+            Arc::new(crate::fluid::FluidTable::new(
                 states,
+                &crate::fluid::Fluids::vanilla(&crate::fluid::FluidSprites::from_atlas(&*atlas)),
+                &crate::fluid::FluidRules::vanilla(),
                 crate::fluid::FluidSprites::from_atlas(&*atlas),
             )),
-        });
+        ));
         let arenas = MeshArenas::new(gpu.device.clone(), gpu.queue.clone());
         let timer = crate::timing::GpuTimer::new(&gpu.device, &gpu.queue);
         let origin_buffer = Self::make_origin_buffer(&gpu.device, 4096);
@@ -612,9 +712,14 @@ impl Renderer {
             overlay,
             first_person: None,
             timings: Default::default(),
+            last_uploads: (0, 0),
             timer,
             present_mode: wgpu::PresentMode::Fifo,
             nametags: Vec::new(),
+            capture_pending: false,
+            capture: None,
+            surface_copy: false,
+            surface_copy_logged: false,
         })
     }
 
@@ -750,6 +855,11 @@ impl Renderer {
         self.present_mode
     }
 
+    /// The adapter this renderer runs on (name and backend, for bench reports).
+    pub fn adapter_info(&self) -> wgpu::AdapterInfo {
+        self.gpu.adapter.get_info()
+    }
+
     /// Counters of the last GUI frame.
     pub fn gui_stats(&self) -> crate::gui::GuiStats {
         self.gui.stats
@@ -837,8 +947,32 @@ impl Renderer {
     fn configure_surface(&mut self) {
         let Some(surface) = &self.surface else { return };
         let (w, h) = self.size;
+        // COPY_SRC, when the surface supports it, lets F2 copy the presented frame out
+        // directly; without it, the capture frame renders into an offscreen target.
+        let copy_src = surface
+            .get_capabilities(&self.gpu.adapter)
+            .usages
+            .contains(wgpu::TextureUsages::COPY_SRC);
+        if !self.surface_copy_logged {
+            self.surface_copy_logged = true;
+            tracing::info!(
+                "surface {} COPY_SRC: F2 captures {}",
+                if copy_src { "supports" } else { "lacks" },
+                if copy_src {
+                    "the presented frame"
+                } else {
+                    "an offscreen frame"
+                }
+            );
+        }
+        self.surface_copy = copy_src;
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | if copy_src {
+                    wgpu::TextureUsages::COPY_SRC
+                } else {
+                    wgpu::TextureUsages::empty()
+                },
             format: self.surface_format,
             color_space: wgpu::SurfaceColorSpace::Auto,
             width: w,
@@ -939,7 +1073,7 @@ impl Renderer {
         for pos in dirty {
             self.mesher.submit_with_biomes(world, biomes, *pos);
         }
-        self.upload_finished();
+        self.last_uploads = self.upload_finished();
     }
 
     /// Like `update_world`, but the mesh workers capture the snapshots themselves from
@@ -956,21 +1090,26 @@ impl Renderer {
             self.visible_for = None;
         }
         self.mesher.submit_from(source, dirty);
-        self.upload_finished();
+        self.last_uploads = self.upload_finished();
     }
 
-    /// Uploads finished meshes for up to 2 ms.
-    fn upload_finished(&mut self) {
+    /// Uploads finished meshes for up to 2 ms; returns (sections uploaded, bytes written).
+    fn upload_finished(&mut self) -> (u32, u64) {
         let started = std::time::Instant::now();
+        let mut uploads = 0;
+        let mut bytes = 0;
         while started.elapsed() < std::time::Duration::from_millis(2) {
             let batch = self.mesher.drain(16);
             if batch.is_empty() {
                 break;
             }
             for mesh in batch {
+                bytes += mesh.vertex_bytes() + mesh.index_bytes();
                 self.upload_mesh(mesh);
+                uploads += 1;
             }
         }
+        (uploads, bytes)
     }
 
     fn upload_mesh(&mut self, mesh: SectionMesh) {
@@ -1004,12 +1143,18 @@ impl Renderer {
             pitch.cos() * yaw.cos(),
         )
         .normalize();
+        // Roll (hurt tilt): rotate the up vector around the forward axis.
+        let up = if camera.roll_deg == 0.0 {
+            glam::Vec3::Y
+        } else {
+            glam::Quat::from_axis_angle(forward, camera.roll_deg.to_radians()) * glam::Vec3::Y
+        };
         let eye = glam::Vec3::new(
             camera.pos.x as f32,
             camera.pos.y as f32,
             camera.pos.z as f32,
         );
-        let view = glam::Mat4::look_to_rh(eye, forward, glam::Vec3::Y);
+        let view = glam::Mat4::look_to_rh(eye, forward, up);
         proj * view
     }
 
@@ -1114,40 +1259,61 @@ impl Renderer {
             t.poll(&self.gpu.device);
             self.timings.gpu_ms = t.latest;
         }
+        // A pending capture (F2) copies this frame's image out for `take_capture`; with
+        // COPY_SRC on the surface that is the presented frame itself, and only without it
+        // does this frame render into a temporary offscreen target (and not present).
+        let capture_frame = self.capture_pending && self.offscreen.is_none();
         let mut held_surface_texture: Option<wgpu::SurfaceTexture> = None;
-        let (color_view, depth_view, gui_view) = match (&self.offscreen, &self.depth) {
-            (Some(off), _) => (
-                off.color_view.clone(),
-                off.depth_view.clone(),
-                off.gui_view.clone(),
-            ),
-            (None, Some(d)) => {
-                let surface = self.surface.as_ref().context("no surface")?;
-                let frame_tex = match surface.get_current_texture() {
-                    wgpu::CurrentSurfaceTexture::Success(t)
-                    | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-                    wgpu::CurrentSurfaceTexture::Timeout
-                    | wgpu::CurrentSurfaceTexture::Occluded => {
-                        anyhow::bail!("surface frame unavailable (timeout/occluded)")
-                    }
-                    wgpu::CurrentSurfaceTexture::Outdated
-                    | wgpu::CurrentSurfaceTexture::Lost
-                    | wgpu::CurrentSurfaceTexture::Validation => {
-                        anyhow::bail!("surface lost/outdated; reconfigure needed")
-                    }
-                };
-                held_surface_texture = Some(frame_tex);
-                let tex = held_surface_texture.as_ref().unwrap();
-                (
-                    tex.texture.create_view(&Default::default()),
-                    d.clone(),
-                    tex.texture.create_view(&wgpu::TextureViewDescriptor {
-                        format: Some(Self::gui_format_for(&self.gpu, self.surface_format)),
-                        ..Default::default()
-                    }),
-                )
+        let mut capture_color: Option<wgpu::Texture> = None;
+        let (color_view, depth_view, gui_view) = if capture_frame && !self.surface_copy {
+            let cap = Self::make_offscreen(
+                &self.gpu.device,
+                self.size,
+                self.surface_format,
+                Self::gui_format_for(&self.gpu, self.surface_format),
+            )?;
+            let views = (
+                cap.color_view.clone(),
+                cap.depth_view.clone(),
+                cap.gui_view.clone(),
+            );
+            capture_color = Some(cap.color);
+            views
+        } else {
+            match (&self.offscreen, &self.depth) {
+                (Some(off), _) => (
+                    off.color_view.clone(),
+                    off.depth_view.clone(),
+                    off.gui_view.clone(),
+                ),
+                (None, Some(d)) => {
+                    let surface = self.surface.as_ref().context("no surface")?;
+                    let frame_tex = match surface.get_current_texture() {
+                        wgpu::CurrentSurfaceTexture::Success(t)
+                        | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+                        wgpu::CurrentSurfaceTexture::Timeout
+                        | wgpu::CurrentSurfaceTexture::Occluded => {
+                            anyhow::bail!("surface frame unavailable (timeout/occluded)")
+                        }
+                        wgpu::CurrentSurfaceTexture::Outdated
+                        | wgpu::CurrentSurfaceTexture::Lost
+                        | wgpu::CurrentSurfaceTexture::Validation => {
+                            anyhow::bail!("surface lost/outdated; reconfigure needed")
+                        }
+                    };
+                    held_surface_texture = Some(frame_tex);
+                    let tex = held_surface_texture.as_ref().unwrap();
+                    (
+                        tex.texture.create_view(&Default::default()),
+                        d.clone(),
+                        tex.texture.create_view(&wgpu::TextureViewDescriptor {
+                            format: Some(Self::gui_format_for(&self.gpu, self.surface_format)),
+                            ..Default::default()
+                        }),
+                    )
+                }
+                _ => anyhow::bail!("no render target"),
             }
-            _ => anyhow::bail!("no render target"),
         };
         let present = held_surface_texture.is_some();
         let _ = present;
@@ -1169,15 +1335,38 @@ impl Renderer {
         {
             self.vis_dirty = false;
             self.last_walk = std::time::Instant::now();
-            let vis = &self.section_vis;
+            // Dense per-grid copy of the section visibility sets: the walk reads
+            // each visited section's set once, and a slice index beats an
+            // ahash probe per node.
+            let r = self.view_distance + 1;
+            let w = 2 * r + 1;
+            let h = self.section_count;
+            let mut dense = vec![crate::occlusion::VisibilitySet::all(); (w * w * h) as usize];
+            for ((c, si), v) in &self.section_vis {
+                let dx = c.x - cam_section.x + r;
+                let dz = c.z - cam_section.z + r;
+                if dx < 0 || dz < 0 || dx >= w || dz >= w || *si < 0 || *si >= h {
+                    continue;
+                }
+                dense[((dx * w + dz) * h + *si) as usize] = *v;
+            }
+            let cx = cam_section.x;
+            let cz = cam_section.z;
             self.visible_mask = crate::occlusion::compute_visible_mask(
-                |c, si| vis.get(&(c, si)).copied(),
-                ChunkPos::new(cam_section.x, cam_section.z),
+                move |c, si| {
+                    let dx = c.x - cx + r;
+                    let dz = c.z - cz + r;
+                    if dx < 0 || dz < 0 || dx >= w || dz >= w || si < 0 || si >= h {
+                        return None;
+                    }
+                    Some(dense[((dx * w + dz) * h + si) as usize])
+                },
+                ChunkPos::new(cx, cz),
                 cam_section.y - self.min_section,
                 cam,
                 self.min_section * 16,
                 self.section_count,
-                self.view_distance + 1,
+                r,
             );
             self.visible_for = Some((cam_section, self.view_distance));
         }
@@ -1456,9 +1645,20 @@ impl Renderer {
             t.after_submit(resolved);
         }
         self.timings.submit_ms = lap(&mut mark);
+        // Submit the screenshot copy before present, so the GPU orders it ahead of the
+        // present; the async map lands in `take_capture` a few frames later.
+        if capture_frame {
+            let src = match (&held_surface_texture, &capture_color) {
+                (Some(tex), _) => tex.texture.as_image_copy(),
+                (None, Some(color)) => color.as_image_copy(),
+                (None, None) => anyhow::bail!("capture frame without a render target"),
+            };
+            self.start_capture(src);
+        }
         if let Some(tex) = held_surface_texture {
             self.gpu.queue.present(tex);
         }
+        self.capture_pending = false;
         self.timings.present_ms = lap(&mut mark);
 
         self.draw_list = draws;
@@ -1467,6 +1667,8 @@ impl Renderer {
             chunk_sections_drawn: drawn,
             chunk_sections_total: sections_total,
             meshes_pending: self.mesher.pending_len() as u32,
+            uploads: self.last_uploads.0,
+            upload_bytes: self.last_uploads.1,
             draw_calls,
         })
     }
@@ -1477,7 +1679,111 @@ impl Renderer {
             .offscreen
             .as_ref()
             .context("read_back requires an offscreen renderer")?;
-        let (w, h) = (off.width, off.height);
+        self.read_texture(off.color.as_image_copy(), off.width, off.height)
+    }
+
+    /// F2: capture the next rendered frame for `take_capture` (window renderers; the
+    /// offscreen path has `read_back`). Ignored while a previous capture is still in
+    /// flight: its buffer stays mapped until collected.
+    pub fn request_capture(&mut self) {
+        if self.capture.is_none() {
+            self.capture_pending = true;
+        }
+    }
+
+    /// Starts the readback of the just-rendered frame: submits the texture copy and
+    /// posts `map_async` without blocking; the callback flips the shared status and
+    /// `take_capture` collects the image a few frames later.
+    fn start_capture(&mut self, texture: wgpu::TexelCopyTextureInfo) {
+        let (w, h) = self.size;
+        let bytes_per_row = NonZeroU32::new((w * 4).next_multiple_of(256)).unwrap();
+        let buffer = std::sync::Arc::new(self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("screenshot"),
+            size: (bytes_per_row.get() * h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        }));
+        let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            texture,
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row.get()),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.gpu.queue.submit([encoder.finish()]);
+        let status = CaptureFlag::default();
+        let flag = status.clone();
+        buffer.map_async(wgpu::MapMode::Read, .., move |r| {
+            flag.set(match r {
+                Ok(()) => CapturePhase::Ready,
+                Err(_) => CapturePhase::Failed,
+            });
+        });
+        self.capture = Some(Capture {
+            buffer,
+            status,
+            width: w,
+            height: h,
+            stride: bytes_per_row.get() as usize,
+            bgra: matches!(
+                self.surface_format,
+                wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm
+            ),
+        });
+    }
+
+    /// The frame captured after `request_capture`, once its async readback has landed
+    /// (a few frames later); `None` while pending or with no capture in flight.
+    pub fn take_capture(&mut self) -> Option<anyhow::Result<image::RgbaImage>> {
+        let cap = self.capture.as_ref()?;
+        // Non-blocking pump: runs the map callback once the copy has finished.
+        let _ = self.gpu.device.poll(wgpu::PollType::Poll);
+        match cap.status.get() {
+            CapturePhase::Pending => None,
+            CapturePhase::Failed => {
+                self.capture.take();
+                Some(Err(anyhow::anyhow!(
+                    "mapping the screenshot readback failed"
+                )))
+            }
+            CapturePhase::Ready => {
+                let cap = self.capture.take().expect("phase was Ready");
+                let image = cap
+                    .buffer
+                    .slice(..)
+                    .get_mapped_range()
+                    .context("mapped screenshot range")
+                    .map(|data| {
+                        texel_rows_to_rgba(&data, cap.width, cap.height, cap.stride, cap.bgra)
+                    })
+                    .and_then(|pixels| {
+                        image::RgbaImage::from_raw(cap.width, cap.height, pixels)
+                            .context("screenshot size")
+                    });
+                cap.buffer.unmap();
+                Some(image)
+            }
+        }
+    }
+
+    /// Copies a 4-byte-per-texel texture to a MAP_READ buffer, maps it and unwraps it
+    /// into tightly packed RGBA rows.
+    fn read_texture(
+        &self,
+        texture: wgpu::TexelCopyTextureInfo,
+        w: u32,
+        h: u32,
+    ) -> Result<image::RgbaImage> {
         // Rows are padded to wgpu's 256-byte copy alignment.
         let bytes_per_row = NonZeroU32::new((w * 4).next_multiple_of(256)).unwrap();
         let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1487,10 +1793,12 @@ impl Renderer {
             mapped_at_creation: false,
         });
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
-        let format = self.surface_format;
-        let block_size = 4; // Rgba8UnormSrgb or Bgra8
+        let bgra = matches!(
+            self.surface_format,
+            wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm
+        );
         encoder.copy_texture_to_buffer(
-            off.color.as_image_copy(),
+            texture,
             wgpu::TexelCopyBufferInfo {
                 buffer: &buffer,
                 layout: wgpu::TexelCopyBufferLayout {
@@ -1523,17 +1831,28 @@ impl Renderer {
 
         let data = map.get_mapped_range(..).context("mapped range")?.to_vec();
         map.unmap();
-        let _ = block_size;
-        let _ = format;
 
-        // Rgba8UnormSrgb: the texture was created with this offscreen format.
-        let stride = bytes_per_row.get() as usize;
-        let mut pixels = Vec::with_capacity((w * h * 4) as usize);
-        for y in 0..h as usize {
-            pixels.extend_from_slice(&data[y * stride..y * stride + w as usize * 4]);
-        }
+        let pixels = texel_rows_to_rgba(&data, w, h, bytes_per_row.get() as usize, bgra);
         Ok(image::RgbaImage::from_raw(w, h, pixels).expect("readback size"))
     }
+}
+
+/// Unpacks a GPU copy buffer into tightly packed RGBA rows: drops the 256-byte row
+/// padding and, for BGRA surfaces, swaps the red and blue channels.
+fn texel_rows_to_rgba(data: &[u8], w: u32, h: u32, stride: usize, bgra: bool) -> Vec<u8> {
+    let row = w as usize * 4;
+    let mut pixels = Vec::with_capacity(row * h as usize);
+    for y in 0..h as usize {
+        let src = &data[y * stride..y * stride + row];
+        if bgra {
+            for px in src.as_chunks::<4>().0 {
+                pixels.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+            }
+        } else {
+            pixels.extend_from_slice(src);
+        }
+    }
+    pixels
 }
 
 /// An owned display handle: the window Arc keeps the underlying connection
