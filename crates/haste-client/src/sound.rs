@@ -451,6 +451,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs cache/ (data generator reports)"]
     fn name_table_prefers_synced_entries_over_the_static_registry() {
         let regs = regs_with(&["minecraft:from.server"]);
         let names = sound_event_names(&regs, &static_game_data());

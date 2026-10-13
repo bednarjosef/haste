@@ -1,7 +1,7 @@
 //! A chunk: sections, heightmaps, block entities, light. Owned by `World`.
 
 use haste_core::chunk::{BlockEntityData, ChunkData, LightData};
-use haste_core::{BiomeId, BlockPos, BlockStateId, ChunkPos};
+use haste_core::{BiomeId, BlockPos, BlockStateId, ChunkPos, SectionPos};
 
 use crate::light::NibbleArray;
 use crate::palette::{BiomeContainer, BlockContainer, DecodedSection, PaletteError};
@@ -72,7 +72,7 @@ pub struct ChunkLight {
 }
 
 impl ChunkLight {
-    fn new(section_count: usize) -> Self {
+    pub(crate) fn new(section_count: usize) -> Self {
         Self {
             sky: vec![None; section_count],
             block: vec![NibbleArray::default(); section_count],
@@ -93,6 +93,15 @@ pub struct Chunk {
     pub block_entities: ahash::HashMap<BlockPos, BlockEntityData>,
     /// Sky/block light per section (same indexing as `sections`).
     pub light: ChunkLight,
+    /// One dirty bit per section (index = section y - `min_section`), so remesh marking
+    /// is a bit-set instead of a hash insert. Owned by the chunk, cleared when the
+    /// world drains the dirty sections.
+    pub(crate) dirty: Vec<u64>,
+}
+
+/// Bit `i % 64` of word `i / 64` set.
+fn bit_word(i: usize) -> (usize, u64) {
+    (i / 64, 1u64 << (i % 64))
 }
 
 impl Chunk {
@@ -152,6 +161,7 @@ impl Chunk {
                 .map(|be| (be.pos, be.clone()))
                 .collect(),
             light: ChunkLight::new(section_count),
+            dirty: vec![0; section_count.div_ceil(64)],
         };
         chunk.apply_light(&data.light);
         Ok(chunk)
@@ -206,6 +216,57 @@ impl Chunk {
         }
         None
     }
+
+    /// Marks section `idx` (0-based from the dimension's lowest section) as needing a
+    /// remesh. Returns true when the chunk had no dirty section before, so the caller
+    /// knows to add it to the drain list.
+    pub(crate) fn mark_dirty(&mut self, idx: usize) -> bool {
+        if idx >= self.sections.len() {
+            return false;
+        }
+        let had_none = self.dirty.iter().all(|&w| w == 0);
+        let (w, bit) = bit_word(idx);
+        self.dirty[w] |= bit;
+        had_none
+    }
+
+    /// Marks every section dirty (a freshly loaded or replaced chunk).
+    pub(crate) fn mark_all_dirty(&mut self) -> bool {
+        let was_clean = self.dirty.iter().all(|&w| w == 0);
+        self.dirty.fill(u64::MAX);
+        // the last word may hold bits past the section count: those are not sections
+        let rem = self.sections.len() % 64;
+        if rem != 0 {
+            if let Some(last) = self.dirty.last_mut() {
+                *last &= (1u64 << rem) - 1;
+            }
+        }
+        was_clean
+    }
+
+    /// The dirty bits: bit `i` of word `i / 64` is section `i` (indexed from the
+    /// dimension's lowest section). One word covers up to 64 sections.
+    pub fn dirty_bits(&self) -> &[u64] {
+        &self.dirty
+    }
+
+    /// Appends this chunk's dirty sections to `out` (in section order), clearing the
+    /// bits as they go.
+    pub(crate) fn take_dirty(&mut self, out: &mut Vec<SectionPos>) {
+        for (w, word) in self.dirty.iter_mut().enumerate() {
+            let mut bits = *word;
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                out.push(SectionPos::new(
+                    self.pos.x,
+                    self.min_section + (w * 64 + b) as i32,
+                    self.pos.z,
+                ));
+            }
+            *word = 0;
+        }
+    }
 }
 
 /// Test/bench helper: build a synthetic `ChunkData` with our own encoder.
@@ -216,4 +277,78 @@ pub fn synthetic_chunk_data(
     fill: impl Fn(usize, u8, u8, u8) -> BlockStateId,
 ) -> ChunkData {
     crate::wire::encode_synthetic_chunk(pos, min_section, section_count, fill)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A chunk with `sections` single-value air sections (the dirty bitset is what
+    /// these tests exercise; the contents do not matter).
+    fn chunk_with_sections(sections: usize, min_section: i32) -> Chunk {
+        let cd = synthetic_chunk_data(
+            ChunkPos::new(1, -2),
+            min_section,
+            sections,
+            |_si, _x, _y, _z| BlockStateId::AIR,
+        );
+        Chunk::decode(&cd, min_section, sections, 15, 7, u32::MAX).unwrap()
+    }
+
+    #[test]
+    fn dirty_bitset_marks_and_takes_sections() {
+        let mut c = chunk_with_sections(24, -4);
+        assert!(!c.dirty.iter().any(|&w| w != 0));
+        // marking twice keeps one bit; a chunk that is dirty already reports "was clean"
+        // no more, so the world lists it once
+        assert!(c.mark_dirty(0));
+        assert!(!c.mark_dirty(0));
+        assert!(!c.mark_dirty(23));
+        let mut out = Vec::new();
+        c.take_dirty(&mut out);
+        assert_eq!(
+            out,
+            vec![SectionPos::new(1, -4, -2), SectionPos::new(1, 19, -2)]
+        );
+        // drained: nothing left
+        assert!(!c.dirty.iter().any(|&w| w != 0));
+        out.clear();
+        c.take_dirty(&mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn mark_all_dirty_covers_exactly_the_sections() {
+        // 24 sections: the single word's upper 40 bits must not become sections
+        let mut c = chunk_with_sections(24, -4);
+        assert!(c.mark_all_dirty());
+        assert!(!c.mark_all_dirty());
+        let mut out = Vec::new();
+        c.take_dirty(&mut out);
+        assert_eq!(out.len(), 24);
+        assert_eq!(out.first().copied(), Some(SectionPos::new(1, -4, -2)));
+        assert_eq!(out.last().copied(), Some(SectionPos::new(1, 19, -2)));
+    }
+
+    #[test]
+    fn dirty_bitset_second_word_and_out_of_range() {
+        // a taller-than-64-sections world uses more than one word
+        let mut c = chunk_with_sections(70, 0);
+        assert!(c.mark_dirty(0));
+        assert!(!c.mark_dirty(64));
+        assert!(!c.mark_dirty(69));
+        // past the section count: ignored
+        assert!(!c.mark_dirty(70));
+        assert!(!c.mark_dirty(1000));
+        let mut out = Vec::new();
+        c.take_dirty(&mut out);
+        assert_eq!(
+            out,
+            vec![
+                SectionPos::new(1, 0, -2),
+                SectionPos::new(1, 64, -2),
+                SectionPos::new(1, 69, -2),
+            ]
+        );
+    }
 }

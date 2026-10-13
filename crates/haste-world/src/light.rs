@@ -41,7 +41,21 @@ impl NibbleArray {
     }
 
     pub fn all_zero(&self) -> bool {
-        self.0.iter().all(|&b| b == 0)
+        Self::all_bytes(&self.0, 0)
+    }
+
+    /// Every nibble is 15 (full light). Absent sky light reads as 15, so such an array can
+    /// be stored as `None` without changing any read.
+    pub fn all_full(&self) -> bool {
+        Self::all_bytes(&self.0, 0xFF)
+    }
+
+    /// `data` is `fill` repeated (word-wide compare; a byte loop costs ~1 ns/byte on
+    /// 2 KB arrays and would dominate chunk load).
+    fn all_bytes(data: &[u8], fill: u8) -> bool {
+        let word = u64::from_ne_bytes([fill; 8]);
+        let (chunks, rem) = data.as_chunks::<8>();
+        chunks.iter().all(|c| u64::from_ne_bytes(*c) == word) && rem.iter().all(|&b| b == fill)
     }
 }
 
@@ -83,6 +97,10 @@ pub fn set_bits(mask: &[u64]) -> impl Iterator<Item = usize> + '_ {
 /// Applies `light` to `chunk`. Section indices in the masks run over
 /// `min_section - 1 ..= min_section + len`, i.e. one extra on each end; the extras are ignored
 /// for storage (we keep exactly one light entry per real section).
+///
+/// Uniform arrays are deduplicated (all-15 sky stored as absent, all-0 block light stored
+/// empty) — reads are unchanged, and the ~1 us/chunk scan buys ~45 KB/chunk: above-ground
+/// daylight sections stop pinning the packet's bytes.
 pub(crate) fn apply_to_chunk(chunk: &mut Chunk, light: &LightData) {
     let n = chunk.sections.len();
     let sky_slots = &mut chunk.light.sky;
@@ -101,6 +119,53 @@ pub(crate) fn apply_to_chunk(chunk: &mut Chunk, light: &LightData) {
         block_slots,
         n,
     );
+}
+
+#[cfg(test)]
+mod ab_tests {
+    use super::*;
+    use crate::chunk::ChunkLight;
+
+    /// A/B: decoding the same chunk with and without the uniform-light dedup must produce
+    /// identical reads (sky 15 / block 0 where the array was uniform), and the dedup must
+    /// actually drop the memory.
+    #[test]
+    fn uniform_light_drops_storage_without_changing_reads() {
+        use crate::chunk::Section;
+        let mk = |sky_fill: u8, block_fill: u8| LightData {
+            sky_mask: vec![0b10], // wire index 1 = the first real section
+            block_mask: vec![0b10],
+            empty_sky_mask: vec![0],
+            empty_block_mask: vec![0],
+            sky_arrays: vec![bytes::Bytes::from(vec![sky_fill; 2048])],
+            block_arrays: vec![bytes::Bytes::from(vec![block_fill; 2048])],
+        };
+        let mut chunk = Chunk {
+            pos: haste_core::ChunkPos::new(0, 0),
+            min_section: -4,
+            sections: vec![Section {
+                block_count: 0,
+                fluid_count: 0,
+                blocks: crate::palette::BlockContainer::single(0),
+                biomes: crate::palette::BiomeContainer::single_biome(0),
+            }],
+            heightmaps: vec![],
+            block_entities: Default::default(),
+            light: ChunkLight::new(1),
+            dirty: vec![0; 1],
+        };
+        // uniform full sky: stored as None (absent sky reads 15, same as the array)
+        // uniform zero block light: stored empty (absent block light reads 0)
+        chunk.apply_light(&mk(0xFF, 0x00));
+        assert!(chunk.light.sky[0].is_none());
+        assert!(chunk.light.block[0].all_zero());
+        assert!(chunk.light.block[0].0.is_empty());
+        // non-uniform arrays are kept
+        chunk.apply_light(&mk(0x12, 0x34));
+        assert!(chunk.light.sky[0].is_some());
+        assert_eq!(chunk.light.sky[0].as_ref().unwrap().get(0, 0, 0), 0x2);
+        assert!(!chunk.light.block[0].all_zero());
+    }
 }
 
 fn apply_side(
@@ -123,7 +188,11 @@ fn apply_side(
         if m {
             if let Some(bytes) = array_iter.next() {
                 if our_idx >= 0 && (our_idx as usize) < n_sections {
-                    slots[our_idx as usize] = Some(NibbleArray::from_bytes(bytes.clone()));
+                    // all-15 sky reads the same as absent sky (15): skip storing it, so
+                    // uniform-daylight sections (everything above ground) cost no memory
+                    // and stop pinning the packet's bytes
+                    let n = NibbleArray::from_bytes(bytes.clone());
+                    slots[our_idx as usize] = if n.all_full() { None } else { Some(n) };
                 }
             }
         } else if e && our_idx >= 0 && (our_idx as usize) < n_sections {
@@ -154,7 +223,14 @@ fn apply_side_optional(
         if m {
             if let Some(bytes) = array_iter.next() {
                 if our_idx >= 0 && (our_idx as usize) < n_sections {
-                    slots[our_idx as usize] = NibbleArray::from_bytes(bytes.clone());
+                    // all-0 block light reads the same as the default empty array (0):
+                    // skip storing it (dark sections below ground cost no memory)
+                    let n = NibbleArray::from_bytes(bytes.clone());
+                    slots[our_idx as usize] = if n.all_zero() {
+                        NibbleArray::default()
+                    } else {
+                        n
+                    };
                 }
             }
         } else if e && our_idx >= 0 && (our_idx as usize) < n_sections {

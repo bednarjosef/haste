@@ -570,6 +570,9 @@ mod tests {
     }
 
     impl BlockStateTable for MockStates {
+        fn placeholder_state(&self) -> BlockStateId {
+            BlockStateId(0)
+        }
         fn len(&self) -> usize {
             self.states.len()
         }
