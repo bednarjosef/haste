@@ -9,7 +9,7 @@ with the mod architecture designed in. Licensed GPL-3.0-or-later.
 What a player needs to play Haste like the original game, without noticing a difference.
 Fabric mod support (Phase 2) is not counted here.
 
-**14 of 62 done, 25 partly done, 23 not started (about 43 %, counting partly done as half).**
+**14 of 62 done, 26 partly done, 22 not started (about 44 %, counting partly done as half).**
 
 ✅ done: works in the game window today, checked against a real server.
 🟡 partly done: some of it exists (in a library, or working without a window) but a player cannot use it fully yet.
@@ -80,8 +80,8 @@ These run as the game's own Java code inside Haste and work against a real serve
 ### Playing
 - ✅ Walking, sprinting, sneaking, jumping, swimming, creative flight and fall damage, accepted by the vanilla server without corrections
 - ✅ Breaking and placing blocks, using items, attacking, pick block, hotbar (mouse wheel and 1-9)
+- 🟡 Dropping items (Q, Ctrl+Q) and swapping to the off-hand (F): sent like vanilla; not yet checked by hand on a server
 - 🟡 Game modes: survival and creative work; spectator and adventure are untested
-- ⬜ Dropping items (Q) and swapping to the off-hand (F)
 - ⬜ Riding boats, minecarts, horses and pigs
 - ⬜ Elytra flight
 - ⬜ Screenshot key (F2)
