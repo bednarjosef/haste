@@ -206,6 +206,11 @@ pub struct Renderer {
     surface_state: Option<(u32, u32, wgpu::SurfaceConfiguration)>,
     offscreen: Option<Offscreen>,
     atlas: Arc<haste_assets::AtlasBuilder>,
+    /// The uploaded atlas texture; animated sprites rewrite their regions in it
+    /// (`animation`) each tick, so it must outlive init.
+    atlas_texture: wgpu::Texture,
+    /// Animated atlas textures: per-tick region uploads (`set_animation_tick`).
+    animation: crate::animation::SpriteAnimator,
     baked: Arc<haste_assets::BakedBlockModels>,
     mesher: Mesher,
     /// Grass/foliage colormaps from the assets (biome colours are resolved against them).
@@ -338,8 +343,12 @@ impl Renderer {
         let baked = Arc::new(baked);
         let atlas = Arc::new(atlas);
 
-        let (_texture, view, sampler, sprite_rects, _len) =
+        let (atlas_texture, view, sampler, sprite_rects, _len) =
             upload_atlas(&gpu.device, &gpu.queue, &atlas)?;
+        let animation = crate::animation::SpriteAnimator::new(
+            atlas.animated_sprites().len(),
+            atlas.mip_levels(),
+        );
 
         // Camera uniform.
         let camera_uniform = gpu
@@ -563,6 +572,8 @@ impl Renderer {
             surface_state: None,
             offscreen,
             atlas,
+            atlas_texture,
+            animation,
             baked,
             mesher,
             colormaps,
@@ -624,6 +635,13 @@ impl Renderer {
             self.present_mode = mode;
             self.configure_surface();
         }
+    }
+
+    /// The game tick animated atlas textures (water, lava, fire, portals) show;
+    /// the client calls this once per game tick (20 Hz) and the next `render`
+    /// re-uploads every changed sprite region.
+    pub fn set_animation_tick(&mut self, tick: u64) {
+        self.animation.set_tick(tick);
     }
 
     /// The first-person view: arm (empty hand) or held item; None draws nothing (third person,
@@ -1419,6 +1437,10 @@ impl Renderer {
             self.gui.draw(&mut pass, self.size);
             draw_calls += self.gui.stats.draw_calls;
         }
+
+        // Animated atlas textures changed this tick (no-op until the tick moves).
+        self.animation
+            .update(&self.gpu.queue, &self.atlas_texture, &self.atlas);
 
         // Submit, then present (wgpu 30: present lives on the queue).
         let resolved = match &mut self.timer {
