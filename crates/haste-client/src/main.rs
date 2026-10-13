@@ -18,6 +18,7 @@ mod launch;
 mod net;
 mod player;
 mod screenshots;
+mod script;
 mod sound;
 mod ui;
 
