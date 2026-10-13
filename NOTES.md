@@ -113,3 +113,16 @@ Newest at the top. One entry per decision, with the why; link the brief or repor
   Pomme's protocol layer is not reusable as-is either (evaluation in progress).
 - **2026-10-12 Worktrees share a prebuilt target.** `cargo build` of the workspace deps (wgpu, winit,
   tokio) is copied into each worktree's `target/` so eight workers do not compile them eight times.
+- **2026-10-13 Protocol enum orders audited against the 26.3 jar.** Every enum Haste sends or reads
+  as an ordinal (player action and command, client command, hands, pose, game mode, difficulty,
+  client information, resource pack status, recipe book type, boss bar, scoreboard, equipment slot,
+  direction, animate and swing, game event, entity metadata serializers, teleport/player info/input
+  flags, position path, structure/test/command block and sign packets, seen advancements, team
+  rules, container click mode, sound source, consume effects, resolvable profile) was checked with
+  `javap` on the enum constants and static initialisers, no decompiling. No mismatch: the only 26.3
+  shift (`CHANGE_DESTROY_DIRECTION` inserted at 1 in player action) was already handled. Equipment
+  slots are sent as the enum ordinal, not `getIndex()`; metadata type 13 is an optional plain UUID.
+  26.3 has no title-action enum (three separate packets). The orders are pinned by
+  `enum_order_tests` in `crates/haste-protocol/src/packets/mod.rs`, each naming its jar class;
+  registry-driven ids (sounds, particles, items, blocks, entity types, chat types) are not pinned
+  because they come from the reports at runtime.
