@@ -299,6 +299,8 @@ pub struct Renderer {
     sky: crate::sky::SkyRenderer,
     /// Selection outline and break cracks.
     overlay: crate::overlay::OverlayRenderer,
+    /// Particles (`FrameInput::particles`).
+    particles: crate::particles::ParticleRenderer,
     /// Timings of the last frame and the GPU timestamp reader.
     timings: crate::timing::FrameTimings,
     timer: Option<crate::timing::GpuTimer>,
@@ -654,6 +656,12 @@ impl Renderer {
             &camera_bind_group_layout,
             assets,
         );
+        let particles = crate::particles::ParticleRenderer::new(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            surface_format,
+            &camera_bind_group_layout,
+        );
         let mut gui_assets = assets.reopen()?;
         gui.preload_sprites(&mut gui_assets, crate::gui::HUD_SPRITES);
 
@@ -701,6 +709,7 @@ impl Renderer {
             entity,
             sky,
             overlay,
+            particles,
             first_person: None,
             timings: Default::default(),
             timer,
@@ -775,6 +784,25 @@ impl Renderer {
         self.section_count = dim.section_count() as i32;
         self.section_vis.clear();
         self.visible_for = None;
+    }
+
+    /// Uploads the particle atlas of `types` as the particle texture (call after
+    /// `ParticleTypes::build`, once).
+    pub fn set_particle_types(&mut self, types: &Arc<crate::particles::ParticleTypes>) {
+        self.particles.set_types(types);
+    }
+
+    /// Poses this frame's particles (billboards, interpolated at `partial`) and samples their
+    /// light from `world`. Like [`Self::sample_world`]: call before `render` with the frame
+    /// you are about to render (the renderer holds no world).
+    pub fn prepare_particles(
+        &mut self,
+        particles: &mut crate::particles::Particles,
+        world: &dyn BlockView,
+        camera: Camera,
+        partial: f32,
+    ) {
+        self.particles.prepare(particles, camera, partial, world);
     }
 
     /// Sky and block light at each entity's position, sampled from the world by the caller
@@ -1525,6 +1553,7 @@ impl Renderer {
             if !entities_drawn {
                 draw_calls += self.entity.draw(&mut pass);
             }
+            draw_calls += self.particles.draw(&mut pass);
             draw_calls += self.overlay.draw(&mut pass);
             draw_calls += self.sky.draw_overlays(&mut pass);
         }

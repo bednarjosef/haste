@@ -31,6 +31,11 @@ use parking_lot::{Mutex, RwLock};
 use crate::net::{NetDriver, WorldSink};
 use crate::ui::Ui;
 
+/// The particle pool: filled from `level_particles` packets (the renderer's atlas-backed
+/// particle types, so unknown/mod types are skipped there), ticked at 20 Hz by the game
+/// thread. The render thread reads it per frame under this lock (no GPU state inside).
+pub type SharedParticles = Mutex<haste_render::Particles>;
+
 /// How far the third-person camera sits from the eye when nothing is in the way (vanilla's
 /// `Camera` max zoom, minecraft.wiki "Perspective").
 pub const THIRD_PERSON_DISTANCE: f64 = 4.0;
@@ -265,6 +270,9 @@ pub struct Shared {
     pub view: Mutex<ViewState>,
     /// Break cracks to draw (`Session::breaking_stages`), copied once per tick.
     pub breaking: Mutex<Vec<(BlockPos, u8)>>,
+    /// Particles (`level_particles`): the game thread spawns and ticks them, the render
+    /// thread draws them.
+    pub particles: SharedParticles,
     /// Input for the next tick.
     pub input: Mutex<SharedInput>,
     /// Ask the game thread to stop.
@@ -285,6 +293,7 @@ impl Shared {
         world: World,
         entities: EntityStore,
         view_distance: i32,
+        particles: haste_render::Particles,
     ) -> Self {
         let has_sky = world.dimension().has_skylight;
         Self {
@@ -313,6 +322,7 @@ impl Shared {
                 pose: None,
             }),
             breaking: Mutex::new(Vec::new()),
+            particles: Mutex::new(particles),
             input: Mutex::new(SharedInput::default()),
             stop: AtomicBool::new(false),
             closed: Mutex::new(None),
@@ -569,6 +579,16 @@ fn tick_once(
         let mut breaking = shared.breaking.lock();
         breaking.clear();
         driver.session.breaking_stages(&mut breaking);
+    }
+    // Particles: spawn what the packets brought, then one 20 Hz simulation step.
+    {
+        let mut particles = shared.particles.lock();
+        let spawns = std::mem::take(&mut driver.session.particle_spawns);
+        for s in &spawns {
+            particles.spawn(s);
+        }
+        driver.session.particle_spawned = spawns.len();
+        particles.tick();
     }
     if let Some(ui) = shared.ui.lock().as_ref() {
         // The hotbar authority is the player (the client picks with 1-9 and the wheel and tells

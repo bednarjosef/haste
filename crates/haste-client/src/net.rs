@@ -20,7 +20,6 @@ use haste_protocol::haste_core::chunk::{BlockEntityData, ChunkData, LightData};
 use haste_protocol::haste_core::entity::{EntitySpawn, ItemStackData, MetadataEntry, PlayerInfo};
 use haste_protocol::haste_core::game::{DimensionInfo, GameMode};
 use haste_protocol::haste_core::{BlockPos, BlockStateId, ChunkPos, EntityId, Identifier};
-#[cfg(test)]
 use haste_protocol::packets::play::clientbound as cb;
 use haste_protocol::packets::play::clientbound::teleport_flags;
 use haste_protocol::{
@@ -300,6 +299,11 @@ pub struct Session {
     hurt_tilt_ticks: u32,
     /// Direction of the tilt: +1 rolls one way, -1 the other (from the damage yaw).
     hurt_tilt_dir: f32,
+    /// Particle spawns queued by `level_particles` since the last tick (drained by the game
+    /// thread into the shared pool).
+    pub particle_spawns: Vec<haste_render::ParticleSpawn>,
+    /// Particle spawns the game thread took over the whole session (counters).
+    pub particle_spawned: usize,
 }
 
 impl Session {
@@ -320,6 +324,8 @@ impl Session {
             new_world_pending: false,
             hurt_tilt_ticks: 0,
             hurt_tilt_dir: 0.0,
+            particle_spawns: Vec::new(),
+            particle_spawned: 0,
         }
     }
 
@@ -418,6 +424,7 @@ impl Session {
                 self.dimension = dim;
             }
             P::PlayerPosition(_) => self.counters.teleports += 1,
+            P::LevelParticles(p) => self.push_particles(&p, regs),
             _ if player_packet => {}
             P::LevelChunkWithLight(c) => match world.load_chunk(&c.chunk) {
                 Ok(()) => self.counters.chunks_loaded += 1,
@@ -610,6 +617,24 @@ impl Session {
     pub fn breaking_stages(&self, out: &mut Vec<(BlockPos, u8)>) {
         out.extend(self.breaking.values().copied());
         out.extend(self.player.break_progress());
+    }
+
+    /// `level_particles`: resolve the particle type against the synced registry and queue
+    /// the spawn (see the renderer's particles module for the semantics; unknown types are
+    /// skipped there, logged once). The type-specific `data` is not used yet.
+    fn push_particles(&mut self, p: &cb::LevelParticles, regs: &SyncedRegistries) {
+        let entry = usize::try_from(p.particle.kind).ok().and_then(|i| {
+            regs.entries(&Identifier::minecraft("particle_type"))
+                .and_then(|e| e.get(i))
+        });
+        let Some(entry) = entry else { return };
+        self.particle_spawns.push(haste_render::ParticleSpawn {
+            kind: entry.id.clone(),
+            pos: p.pos,
+            offset: [p.offset_x, p.offset_y, p.offset_z],
+            max_speed: [p.max_speed_x, p.max_speed_y, p.max_speed_z],
+            count: p.count,
+        });
     }
 
     fn push_chat(&mut self, line: String) {

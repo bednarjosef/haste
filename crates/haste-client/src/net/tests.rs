@@ -5,7 +5,9 @@ use std::collections::HashMap;
 
 use super::*;
 use haste_protocol::nbt::{Nbt, NbtCompound};
+use haste_protocol::packets::configuration::clientbound::RegistryEntry;
 use haste_protocol::packets::play::clientbound::{MoveDeltas, SpawnInfo};
+use haste_protocol::wire::particle::Particle;
 
 #[derive(Default)]
 struct FakeWorld {
@@ -537,4 +539,77 @@ fn end_tick_once(r: &mut Rig) {
     );
     r.world = world;
     r.entities = entities;
+}
+
+/// A synced `minecraft:particle_type` registry (id 0 `flame`, 1 `smoke`).
+fn particle_registry() -> SyncedRegistries {
+    let mut regs = SyncedRegistries::default();
+    regs.insert(
+        Identifier::minecraft("particle_type"),
+        vec![
+            RegistryEntry {
+                id: Identifier::minecraft("flame"),
+                data: None,
+            },
+            RegistryEntry {
+                id: Identifier::minecraft("smoke"),
+                data: None,
+            },
+        ],
+    );
+    regs
+}
+
+/// A `level_particles` packet (flame by default).
+fn level_particles(kind: i32, count: i32) -> ClientboundPlay {
+    ClientboundPlay::LevelParticles(cb::LevelParticles {
+        particle: Particle {
+            kind,
+            data: bytes::Bytes::new(),
+        },
+        override_limiter: false,
+        always_visible: false,
+        pos: DVec3::new(10.0, 64.0, -5.0),
+        offset_x: 0.5,
+        offset_y: 0.0,
+        offset_z: 0.25,
+        max_speed_x: 0.1,
+        max_speed_y: 0.0,
+        max_speed_z: 0.05,
+        count,
+        randomization: 0,
+    })
+}
+
+#[test]
+fn level_particles_queue_a_spawn_per_packet() {
+    let mut r = Rig::new();
+    r.regs = particle_registry();
+    r.apply(level_particles(0, 10));
+    r.apply(level_particles(1, 0));
+    assert_eq!(r.session.particle_spawns.len(), 2);
+    let first = &r.session.particle_spawns[0];
+    assert_eq!(first.kind, Identifier::minecraft("flame"));
+    assert_eq!(first.pos, DVec3::new(10.0, 64.0, -5.0));
+    assert_eq!(first.offset, [0.5, 0.0, 0.25]);
+    assert_eq!(first.max_speed, [0.1, 0.0, 0.05]);
+    assert_eq!(first.count, 10);
+    assert_eq!(
+        r.session.particle_spawns[1].kind,
+        Identifier::minecraft("smoke")
+    );
+    assert_eq!(r.session.particle_spawns[1].count, 0);
+}
+
+#[test]
+fn level_particles_with_an_unknown_type_id_are_dropped() {
+    let mut r = Rig::new();
+    r.regs = particle_registry();
+    // No id 7 in the synced registry: dropped silently (no panic, nothing queued).
+    r.apply(level_particles(7, 10));
+    assert_eq!(r.session.particle_spawns.len(), 0);
+    // Without a synced particle registry at all: same.
+    let mut r2 = Rig::new();
+    r2.apply(level_particles(0, 10));
+    assert_eq!(r2.session.particle_spawns.len(), 0);
 }

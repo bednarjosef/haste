@@ -33,5 +33,9 @@ serde_json.workspace = true
 crossbeam-channel.workspace = true
 image.workspace = true
 
+[dev-dependencies]
+# net/tests.rs builds `level_particles` packets (the `Particle` payload is a `Bytes`).
+bytes.workspace = true
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
