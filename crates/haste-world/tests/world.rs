@@ -329,8 +329,102 @@ fn light_apply_and_read() {
     // sections with no light data at all: sky 15, block 0
     assert_eq!(w.sky_light(BlockPos::new(0, 0, 0)), 15);
     assert_eq!(w.block_light(BlockPos::new(0, 0, 0)), 0);
-    // light update dirties the chunk's sections
+    // light update dirties the changed section's neighbourhood
     assert!(!w.take_dirty_sections().is_empty());
+}
+
+/// Builds a `LightData` with a single bit set in one of the masks (no arrays needed: only the
+/// dirty set is inspected, not the light values).
+fn one_bit_light(mask: &str, i: i32) -> haste_core::chunk::LightData {
+    let word = vec![1u64 << (i % 64)];
+    let mut light = haste_core::chunk::LightData::default();
+    match mask {
+        "sky" => light.sky_mask = word,
+        "block" => light.block_mask = word,
+        "empty_sky" => light.empty_sky_mask = word,
+        "empty_block" => light.empty_block_mask = word,
+        _ => panic!("unknown mask {mask}"),
+    }
+    light
+}
+
+/// A 3x3 chunk area around (0, 0) with the dirty list drained.
+fn world_3x3() -> World {
+    let mut w = World::new(overworld(), game_data());
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            let cd = synthetic_chunk_data(ChunkPos::new(dx, dz), -4, 24, |_si, _x, _y, _z| STONE);
+            w.load_chunk(&cd).unwrap();
+        }
+    }
+    let _ = w.take_dirty_sections();
+    w
+}
+
+#[test]
+fn light_update_dirty_neighbourhood() {
+    let mut w = world_3x3();
+    // middle section (y=0, wire index 5): sky bit set
+    w.apply_light(ChunkPos::new(0, 0), &one_bit_light("sky", 5));
+    // all 27 sections around it: 3x3 chunks x section y -1..=1
+    let mut expected = std::collections::HashSet::new();
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                expected.insert(SectionPos::new(dx, dy, dz));
+            }
+        }
+    }
+    assert_eq!(dirty_set(w.take_dirty_sections()), expected);
+}
+
+#[test]
+fn light_update_bottom_section() {
+    let mut w = world_3x3();
+    // light index 0 is one below the world: only the lowest world section changes
+    w.apply_light(ChunkPos::new(0, 0), &one_bit_light("sky", 0));
+    let mut expected = std::collections::HashSet::new();
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            expected.insert(SectionPos::new(dx, -4, dz));
+        }
+    }
+    assert_eq!(dirty_set(w.take_dirty_sections()), expected);
+}
+
+#[test]
+fn light_update_empty_block_mask_alone() {
+    let mut w = world_3x3();
+    w.apply_light(ChunkPos::new(0, 0), &one_bit_light("empty_block", 5));
+    // an empty-mask bit alone counts as a change: full 3x3x3 neighbourhood
+    let mut expected = std::collections::HashSet::new();
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                expected.insert(SectionPos::new(dx, dy, dz));
+            }
+        }
+    }
+    assert_eq!(dirty_set(w.take_dirty_sections()), expected);
+}
+
+#[test]
+fn light_update_no_bits_nothing_dirty() {
+    let mut w = world_3x3();
+    w.apply_light(
+        ChunkPos::new(0, 0),
+        &haste_core::chunk::LightData::default(),
+    );
+    assert!(w.take_dirty_sections().is_empty());
+}
+
+#[test]
+fn light_update_unloaded_chunk_nothing_dirty() {
+    let mut w = world_3x3();
+    w.unload_chunk(ChunkPos::new(0, 0));
+    let _ = w.take_dirty_sections();
+    w.apply_light(ChunkPos::new(0, 0), &one_bit_light("sky", 5));
+    assert!(w.take_dirty_sections().is_empty());
 }
 
 #[test]

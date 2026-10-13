@@ -185,12 +185,45 @@ impl World {
         }
     }
 
-    /// Applies a `light_update` to the chunk at `pos`.
+    /// Applies a `light_update` to the chunk at `pos`. Marks dirty the 3x3x3 section
+    /// neighbourhood of every changed light section, like `set_block` does for blocks: the
+    /// mesher's smooth light samples the 3x3x3 block neighbourhood of each block, so a
+    /// section's border blocks read light from the adjacent sections (diagonal ones too, in
+    /// neighbouring chunks).
     pub fn apply_light(&mut self, pos: ChunkPos, light: &haste_core::chunk::LightData) {
         if let Some(chunk) = self.chunks.get_mut(&pos.to_packed()) {
             chunk.apply_light(light);
-            for sy in 0..self.dim.section_count() as i32 {
-                self.mark_dirty(SectionPos::new(pos.x, self.dim.min_section() + sy, pos.z));
+            // light sections are indexed from one below the world: light index i is
+            // section y `min_section - 1 + i`, `section_count + 2` of them in total
+            let min_sec = self.dim.min_section();
+            let max_sec = min_sec + self.dim.section_count() as i32;
+            let changed = |i: i32| -> bool {
+                let set =
+                    |mask: &[u64]| mask.get(i as usize / 64).map_or(0, |w| w >> (i % 64) & 1) != 0;
+                set(&light.sky_mask)
+                    || set(&light.block_mask)
+                    || set(&light.empty_sky_mask)
+                    || set(&light.empty_block_mask)
+            };
+            for i in 0..self.dim.section_count() as i32 + 2 {
+                if !changed(i) {
+                    continue;
+                }
+                // the light sections outside the world's span only change light for the
+                // sections next to them: sections outside the span are skipped (out-of-bounds
+                // y is air for the mesher)
+                let sy = min_sec - 1 + i;
+                for dx in -1..=1 {
+                    for dy in -1..=1 {
+                        for dz in -1..=1 {
+                            let ty = sy + dy;
+                            if ty < min_sec || ty >= max_sec {
+                                continue;
+                            }
+                            self.mark_dirty(SectionPos::new(pos.x + dx, ty, pos.z + dz));
+                        }
+                    }
+                }
             }
         }
     }
