@@ -137,6 +137,146 @@ fn unload_chunk() {
 }
 
 #[test]
+fn unload_chunk_dirties_diagonal_neighbours() {
+    let mut w = World::new(overworld(), game_data());
+    // a 3x3 block of chunks; removing the middle one must dirty all 8 around it
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            let cd = synthetic_chunk_data(ChunkPos::new(dx, dz), -4, 24, |_si, _x, _y, _z| STONE);
+            w.load_chunk(&cd).unwrap();
+        }
+    }
+    let _ = w.take_dirty_sections();
+    w.unload_chunk(ChunkPos::new(0, 0));
+    let dirty = w.take_dirty_sections();
+    // every section of every remaining chunk (8 chunks * 24 sections)
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            if dx == 0 && dz == 0 {
+                continue;
+            }
+            for sy in -4..20 {
+                assert!(dirty.contains(&SectionPos::new(dx, sy, dz)), "missing {dx},{sy},{dz}");
+            }
+        }
+    }
+    assert_eq!(dirty.len(), 8 * 24);
+}
+
+#[test]
+fn load_chunk_dirties_diagonal_neighbours() {
+    let mut w = World::new(overworld(), game_data());
+    // a 3x3 block of chunks loaded one at a time: the last (middle) load must dirty
+    // all 8 already-loaded neighbours
+    let order = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)];
+    for &(dx, dz) in &order {
+        let cd = synthetic_chunk_data(ChunkPos::new(dx, dz), -4, 24, |_si, _x, _y, _z| STONE);
+        w.load_chunk(&cd).unwrap();
+    }
+    let _ = w.take_dirty_sections();
+    let cd = synthetic_chunk_data(ChunkPos::new(0, 0), -4, 24, |_si, _x, _y, _z| STONE);
+    w.load_chunk(&cd).unwrap();
+    let dirty = w.take_dirty_sections();
+    // every section of the new chunk and of all 8 neighbours (9 chunks * 24 sections)
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            for sy in -4..20 {
+                assert!(dirty.contains(&SectionPos::new(dx, sy, dz)), "missing {dx},{sy},{dz}");
+            }
+        }
+    }
+    assert_eq!(dirty.len(), 9 * 24);
+}
+
+/// The exact dirty-section set a `set_block` at (x, y, z) must produce.
+fn dirty_set(dirty: Vec<SectionPos>) -> std::collections::HashSet<SectionPos> {
+    dirty.into_iter().collect()
+}
+
+#[test]
+fn set_block_dirty_neighbourhood() {
+    let mut w = World::new(overworld(), game_data());
+    let cd = synthetic_chunk_data(ChunkPos::new(0, 0), -4, 24, |_si, _x, _y, _z| STONE);
+    w.load_chunk(&cd).unwrap();
+    let _ = w.take_dirty_sections();
+
+    // interior block: only its own section (the 3x3x3 neighbourhood stays inside)
+    let p = BlockPos::new(5, 8, 5);
+    w.set_block(p, DIRT);
+    assert_eq!(
+        dirty_set(w.take_dirty_sections()),
+        std::iter::once(SectionPos::new(0, 0, 0)).collect()
+    );
+
+    // face block (x=0): 2 sections
+    let p = BlockPos::new(0, 8, 5);
+    w.set_block(p, DIRT);
+    assert_eq!(
+        dirty_set(w.take_dirty_sections()),
+        [SectionPos::new(0, 0, 0), SectionPos::new(-1, 0, 0)]
+            .into_iter()
+            .collect()
+    );
+
+    // edge block (lx=0, lz=15): 4 sections
+    let p = BlockPos::new(0, 8, 15);
+    w.set_block(p, DIRT);
+    assert_eq!(
+        dirty_set(w.take_dirty_sections()),
+        [
+            SectionPos::new(0, 0, 0),
+            SectionPos::new(-1, 0, 0),
+            SectionPos::new(0, 0, 1),
+            SectionPos::new(-1, 0, 1),
+        ]
+        .into_iter()
+        .collect()
+    );
+
+    // corner block (lx=0, ly=0, lz=0): 8 sections
+    let p = BlockPos::new(0, 64, 0);
+    w.set_block(p, DIRT);
+    assert_eq!(
+        dirty_set(w.take_dirty_sections()),
+        [
+            SectionPos::new(0, 4, 0),
+            SectionPos::new(-1, 4, 0),
+            SectionPos::new(0, 3, 0),
+            SectionPos::new(-1, 3, 0),
+            SectionPos::new(0, 4, -1),
+            SectionPos::new(-1, 4, -1),
+            SectionPos::new(0, 3, -1),
+            SectionPos::new(-1, 3, -1),
+        ]
+        .into_iter()
+        .collect()
+    );
+}
+
+#[test]
+fn set_block_at_world_bottom() {
+    let mut w = World::new(overworld(), game_data());
+    let cd = synthetic_chunk_data(ChunkPos::new(0, 0), -4, 24, |_si, _x, _y, _z| STONE);
+    w.load_chunk(&cd).unwrap();
+    let _ = w.take_dirty_sections();
+
+    // the lowest block in the world: no panic, and no section below the world is marked
+    let p = BlockPos::new(0, -64, 0);
+    w.set_block(p, DIRT);
+    assert_eq!(
+        dirty_set(w.take_dirty_sections()),
+        [
+            SectionPos::new(0, -4, 0),
+            SectionPos::new(-1, -4, 0),
+            SectionPos::new(0, -4, -1),
+            SectionPos::new(-1, -4, -1),
+        ]
+        .into_iter()
+        .collect()
+    );
+}
+
+#[test]
 fn light_apply_and_read() {
     let mut w = World::new(overworld(), game_data());
     let cd = synthetic_chunk_data(ChunkPos::new(0, 0), -4, 24, |_si, _x, _y, _z| STONE);
