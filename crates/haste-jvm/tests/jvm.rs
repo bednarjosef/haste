@@ -325,7 +325,7 @@ fn pause_screen() {
 }
 
 #[test]
-#[ignore = "TitleScreen.init throws NoClassDefFoundError: com/mojang/realmsclient/gui/screens/RealmsNotificationsScreen is deny-listed; a tier-2 proxy would regenerate the Screen chain, see NOTES.md"]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
 fn title_screen() {
     let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
     let h = host();
@@ -340,9 +340,24 @@ fn title_screen() {
     let f = render(&h, (0.0, 0.0));
     dump(&f);
     let t = texts(&f);
-    for want in ["Singleplayer", "Multiplayer", "Options...", "Quit Game"] {
+    for want in [
+        "Singleplayer",
+        "Multiplayer",
+        "Minecraft Realms",
+        "Options...",
+        "Quit Game",
+        "Copyright Mojang AB. Do not distribute!",
+    ] {
         assert!(t.iter().any(|x| x == want), "missing {want:?} in {t:?}");
     }
+    // the realms notification bell is Haste's replacement (it must draw nothing), never vanilla's
+    assert_eq!(
+        h.class_log()
+            .unwrap()
+            .classes
+            .get("com.mojang.realmsclient.gui.screens.RealmsNotificationsScreen"),
+        Some(&ClassSource::Replacement)
+    );
     let unimpl = h.unimplemented().unwrap();
     assert!(
         unimpl.is_empty(),

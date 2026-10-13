@@ -199,12 +199,23 @@ Session 3 (title-screens branch; the Title, Options and Multiplayer screens of t
 - `Bridge.open` is atomic: a screen whose `init` throws is dropped before the exception reaches Rust
   (`Gui.setScreen` leaves the new screen set even when `init` throws, so the next open would call
   `removed()` on half of it).
-- Still blocking the title screen: `RealmsNotificationsScreen` (`NoClassDefFoundError` from
-  `TitleScreen.init`; `com/mojang/` is deny-listed). A tier-2 proxy cannot work: a `class` line generates
-  the whole superclass chain (`RealmsScreen` -> `Screen`) and would replace every real vanilla screen.
-  Allow-listing the real class starts `RealmsAvailability`'s async availability check, which dies on the
-  denied `RealmsClient` and its exception surfaces through `Bridge.render`. Needs a Gen feature (a proxy
-  with a real super chain and a ctor that passes through) or a realms stub - roadmap decision.
+- Still blocking the multiplayer screen: `ServerStatusPinger` (`NoClassDefFoundError` from
+  `JoinMultiplayerScreen.<init>`; `net/minecraft/client/multiplayer/` is deny-listed, its `init` needs
+  `ServerList` too) - roadmap L1e.
+
+## Replacements (`java/haste/replace`)
+
+Haste-written stand-ins for vanilla classes that must not run here (deny-listed) but which vanilla code
+instantiates unconditionally. `loader::REPLACEMENTS` lists the internal names; the class loader serves them
+from the game build under their vanilla name, whatever the allow/deny policy says, and logs them as
+`ClassSource::Replacement` (`title_screen` checks it). Each one extends the real vanilla class it stands in
+for and reduces what vanilla calls to no-ops.
+- `com/mojang/realmsclient/gui/screens/RealmsNotificationsScreen`: TitleScreen.init builds one and ticks,
+  renders and clicks it. Vanilla's builds a realms client to look for notifications; Haste has no Realms, so
+  it is a plain `Screen` that draws nothing and the bell never appears. Allow-listing the real class instead
+  starts `RealmsAvailability`'s async availability check, which dies on the denied `RealmsClient` and whose
+  exception surfaces through `Bridge.render`; a tier-2 proxy cannot cover it, because a `class` line
+  generates the whole super chain (`RealmsScreen` -> `Screen`) and would replace every real vanilla screen.
 
 ## Canonical proxies and handles
 Java keeps one proxy per Rust object for the JVM's lifetime (`haste.gui.Proxies`): singletons for Minecraft, Gui,
