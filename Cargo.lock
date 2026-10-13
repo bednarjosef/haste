@@ -1361,6 +1361,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "haste-core",
+ "haste-protocol",
  "hex",
  "http-body-util",
  "hyper",
