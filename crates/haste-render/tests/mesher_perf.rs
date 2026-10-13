@@ -257,9 +257,9 @@ fn setup() -> Option<(
     .unwrap();
     let mut atlas = haste_assets::AtlasBuilder::build(&mut assets, &[], false).unwrap();
     let baked = haste_assets::BakedBlockModels::bake(&mut assets, &states, &mut atlas).unwrap();
-    let tables = MeshTables {
-        tints: std::sync::Arc::new(tint::TintTable::new(&states)),
-        colors: std::sync::Arc::new(
+    let tables = MeshTables::new(
+        std::sync::Arc::new(tint::TintTable::new(&states)),
+        std::sync::Arc::new(
             tint::BiomeColors::new(
                 &[
                     tint::BiomeClimate::plains(),
@@ -273,11 +273,11 @@ fn setup() -> Option<(
             )
             .with_radius(tint::DEFAULT_BLEND_RADIUS),
         ),
-        fluids: std::sync::Arc::new(fluid::FluidTable::new(
+        std::sync::Arc::new(fluid::FluidTable::new(
             &states,
             fluid::FluidSprites::from_atlas(&atlas),
         )),
-    };
+    );
     Some((states, baked, atlas, tables))
 }
 
