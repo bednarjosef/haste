@@ -469,7 +469,7 @@ fn load_bench() {
         for _ in 0..5 {
             let t0 = Instant::now();
             for cd in &chunks {
-                let _ = haste_world::Chunk::decode(cd, -4, 24, 15, 7).unwrap();
+                let _ = haste_world::Chunk::decode(cd, -4, 24, 15, 7, u32::MAX).unwrap();
             }
             let per = t0.elapsed().as_nanos() as f64 / n as f64 / 1000.0;
             best = best.min(per);
@@ -492,7 +492,7 @@ fn load_bench() {
         for _ in 0..5 {
             let t0 = Instant::now();
             for cd in &no_light {
-                let _ = haste_world::Chunk::decode(cd, -4, 24, 15, 7).unwrap();
+                let _ = haste_world::Chunk::decode(cd, -4, 24, 15, 7, u32::MAX).unwrap();
             }
             let per = t0.elapsed().as_nanos() as f64 / n as f64 / 1000.0;
             best = best.min(per);
