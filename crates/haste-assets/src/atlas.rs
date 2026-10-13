@@ -3,13 +3,14 @@
 // for Haste: CPU-side RGBA buffers instead of Vulkan images (the wgpu renderer
 // uploads them). See THIRD_PARTY.md.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use anyhow::{bail, Result};
 
 use haste_core::Identifier;
 
-use crate::assets::Assets;
+use crate::assets::{frame_at, Animation, AnimationSchedule, Assets};
 
 /// A sprite's placement in the atlas.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +48,69 @@ impl AtlasRegion {
 
 const MISSING_TILE: u32 = 16;
 
+/// An animated sprite packed into the atlas: the region its current frame occupies
+/// (all frames share it), the frames' RGBA pixels in schedule-index order, and the
+/// playback schedule. The renderer re-uploads the region's texels each tick from
+/// `frame_pixels`.
+#[derive(Clone, Debug)]
+pub struct AnimatedSprite {
+    /// Texture id (`minecraft:block/water_still`) the animation belongs to.
+    pub name: String,
+    /// The atlas region all frames are shown in.
+    pub region: AtlasRegion,
+    /// Frames in schedule-index order; sizes match `region`.
+    pub frames: Vec<image::RgbaImage>,
+    pub schedule: AnimationSchedule,
+}
+
+impl AnimatedSprite {
+    /// The frame shown before animation starts (vanilla's initial display frame:
+    /// the first listed frame, else frame 0). Panics when there are no frames.
+    pub fn initial_frame(&self) -> &image::RgbaImage {
+        let index = self
+            .schedule
+            .frames
+            .first()
+            .map(|f| f.index)
+            .unwrap_or(0) as usize;
+        self.frames.get(index).unwrap_or(&self.frames[0])
+    }
+
+    /// The RGBA pixels of the frame shown at `tick`, blending towards the next
+    /// frame when the schedule interpolates. `Cow::Borrowed` is the exact frame
+    /// (no interpolation or blend 0); blending allocates.
+    pub fn frame_pixels(&self, tick: u64) -> Cow<'_, [u8]> {
+        let (index, next, blend) = frame_at(&self.schedule, tick);
+        let current = &self.frames[index as usize];
+        if !self.schedule.interpolate || blend <= 0.0 {
+            return Cow::Borrowed(current.as_raw());
+        }
+        let next = &self.frames[next as usize];
+        Cow::Owned(blend_frames(current, next, blend))
+    }
+}
+
+/// Linear per-channel blend of two same-size RGBA frames (vanilla `interpolate`;
+/// alpha too, so a fading frame fades its coverage as well).
+fn blend_frames(current: &image::RgbaImage, next: &image::RgbaImage, blend: f32) -> Vec<u8> {
+    let (w, h) = current.dimensions();
+    let mut out = Vec::with_capacity(current.as_raw().len());
+    for y in 0..h {
+        for x in 0..w {
+            let a = current.get_pixel(x, y);
+            let b = next.get_pixel(x, y);
+            let mixed = [
+                (f32::from(a.0[0]) * (1.0 - blend) + f32::from(b.0[0]) * blend).round() as u8,
+                (f32::from(a.0[1]) * (1.0 - blend) + f32::from(b.0[1]) * blend).round() as u8,
+                (f32::from(a.0[2]) * (1.0 - blend) + f32::from(b.0[2]) * blend).round() as u8,
+                (f32::from(a.0[3]) * (1.0 - blend) + f32::from(b.0[3]) * blend).round() as u8,
+            ];
+            out.extend_from_slice(&mixed);
+        }
+    }
+    out
+}
+
 type Placements = HashMap<String, Option<(u32, u32)>>;
 type PackResult = (Placements, AtlasRegion);
 const MAX_ATLAS_SIZE: u32 = 8192;
@@ -76,6 +140,8 @@ pub struct AtlasBuilder {
     size: u32,
     mip_levels: u32,
     missing: AtlasRegion,
+    /// Sprites with an `.mcmeta` animation; packed with their first frame.
+    animated: Vec<AnimatedSprite>,
 }
 
 impl AtlasBuilder {
@@ -134,6 +200,7 @@ impl AtlasBuilder {
 
         let mut regions = HashMap::new();
         let mut rects = vec![missing_region.pixel_rect];
+        let mut animated = Vec::new();
         for src in &sources {
             match placements.get(src.name.as_str()) {
                 Some(Some((cx, cy))) => {
@@ -148,6 +215,14 @@ impl AtlasBuilder {
                             let d = (((cy + py) * atlas_size + cx + px) * 4) as usize;
                             atlas_pixels[d..d + 4].copy_from_slice(&src.data[s..s + 4]);
                         }
+                    }
+                    if let Some(animation) = &src.animation {
+                        animated.push(AnimatedSprite {
+                            name: src.name.clone(),
+                            region,
+                            frames: animation.frames.clone(),
+                            schedule: animation.schedule.clone(),
+                        });
                     }
                     regions.insert(src.name.clone(), region);
                 }
@@ -187,6 +262,7 @@ impl AtlasBuilder {
             size: atlas_size,
             mip_levels,
             missing: missing_region,
+            animated,
         })
     }
 
@@ -222,6 +298,12 @@ impl AtlasBuilder {
     pub fn mip_levels(&self) -> u32 {
         self.mip_levels
     }
+
+    /// Sprites with an `.mcmeta` animation, packed with their initial display frame;
+    /// the renderer updates their regions each tick via `AnimatedSprite::frame_pixels`.
+    pub fn animated_sprites(&self) -> &[AnimatedSprite] {
+        &self.animated
+    }
 }
 
 struct Source {
@@ -232,15 +314,22 @@ struct Source {
     h: u32,
     opaque: bool,
     translucent: bool,
+    /// The full animation, when the texture has an `.mcmeta` one.
+    animation: Option<Animation>,
 }
 
 /// Load a texture through `Assets`, reduced to its first animation frame
-/// (Pomme `load_source`).
+/// (Pomme `load_source`); the full animation is kept for `animated_sprites`.
 fn load_source(assets: &mut Assets, id: &Identifier) -> Source {
     let name = id.to_string();
-    // `texture_first_frame` applies vanilla's frame-size defaults (square frames of the image
-    // width when the .mcmeta gives no size); the raw `AnimationMeta` sizes default to 1.
-    let Ok(image) = assets.texture_first_frame(id) else {
+    // `Assets::animation` reads the `.mcmeta` first and the PNG only when it
+    // declares an animation; `texture_first_frame` is the static-path load.
+    let animation = assets.animation(id);
+    let image = match &animation {
+        Some(a) => Ok(a.initial_frame().clone()),
+        None => assets.texture_first_frame(id),
+    };
+    let Ok(image) = image else {
         tracing::warn!("Missing texture: {name}");
         return Source {
             name,
@@ -249,6 +338,7 @@ fn load_source(assets: &mut Assets, id: &Identifier) -> Source {
             h: 0,
             opaque: false,
             translucent: false,
+            animation: None,
         };
     };
     let (w, h) = image.dimensions();
@@ -261,6 +351,7 @@ fn load_source(assets: &mut Assets, id: &Identifier) -> Source {
         h,
         opaque,
         translucent,
+        animation,
     }
 }
 
@@ -442,6 +533,7 @@ mod tests {
                 h: 16,
                 opaque: true,
                 translucent: false,
+                animation: None,
             },
             Source {
                 name: "b".into(),
@@ -450,6 +542,7 @@ mod tests {
                 h: 16,
                 opaque: true,
                 translucent: false,
+                animation: None,
             },
             Source {
                 name: "c".into(),
@@ -458,6 +551,7 @@ mod tests {
                 h: 32,
                 opaque: true,
                 translucent: false,
+                animation: None,
             },
         ];
         let ((placements, _), all_fit) = pack(&sources, 64, 1);
@@ -487,6 +581,86 @@ mod tests {
         // every level is solid white
         for px in chain.as_chunks::<4>().0 {
             assert_eq!(px, &[255, 255, 255, 255]);
+        }
+    }
+
+    #[test]
+    fn frame_pixels_blends_black_and_white_frames() {
+        // Two 1x1 frames at 2 ticks each with interpolation: halfway is ~128 gray.
+        let sprite = AnimatedSprite {
+            name: "test".into(),
+            region: pixel_region(0, 0, 1, 1),
+            frames: vec![
+                image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 255])),
+                image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 255, 255, 255])),
+            ],
+            schedule: AnimationSchedule {
+                frames: vec![
+                    crate::assets::AnimationFrame { index: 0, time: 2 },
+                    crate::assets::AnimationFrame { index: 1, time: 2 },
+                ],
+                interpolate: true,
+            },
+        };
+        // Not interpolating at blend 0: the exact frame, borrowed.
+        assert_eq!(&*sprite.frame_pixels(0), &[0, 0, 0, 255]);
+        assert_eq!(&*sprite.frame_pixels(2), &[255, 255, 255, 255]); // frame 1 starts
+        assert_eq!(&*sprite.frame_pixels(4), &[0, 0, 0, 255]); // wrapped back to frame 0
+        // Halfway through frame 0: 50% black + 50% white.
+        let blended = sprite.frame_pixels(1);
+        assert_eq!(&*blended, &[128, 128, 128, 255]);
+        // Without interpolation the frames switch abruptly with no blending.
+        let mut plain = sprite.clone();
+        plain.schedule.interpolate = false;
+        assert_eq!(&*plain.frame_pixels(1), &[0, 0, 0, 255]);
+        assert_eq!(&*plain.frame_pixels(2), &[255, 255, 255, 255]);
+        // The initial frame is the first listed one.
+        assert_eq!(
+            sprite.initial_frame().get_pixel(0, 0),
+            &image::Rgba([0, 0, 0, 255])
+        );
+    }
+
+    #[test]
+    #[ignore = "needs the client jar and datagen reports in the cache"]
+    fn jar_atlas_animated_sprites() {
+        let jar = haste_core::paths::client_jar();
+        if !jar.exists() {
+            eprintln!("ignored: needs the client jar in the cache");
+            return;
+        }
+        let mut assets =
+            Assets::open(&jar, &haste_core::paths::cache_dir().join("assets"), "26.3").unwrap();
+        let reports = haste_core::paths::datagen_reports();
+        let states = crate::bake::BlocksJsonStates::load(&reports.join("blocks.json")).unwrap();
+        let mut atlas = AtlasBuilder::build(&mut assets, &[], true).unwrap();
+        // Bake to discover the texture set, as the renderer does.
+        crate::bake::BakedBlockModels::bake(&mut assets, &states, &mut atlas).unwrap();
+        let animated = atlas.animated_sprites();
+        let names: Vec<&str> = animated.iter().map(|s| s.name.as_str()).collect();
+        eprintln!("animated sprites ({}): {:#?}", animated.len(), names);
+        for expected in [
+            "minecraft:block/water_still",
+            "minecraft:block/lava_still",
+            "minecraft:block/fire_0",
+            "minecraft:block/nether_portal",
+            "minecraft:block/sea_lantern",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "expected {expected} among the animated sprites"
+            );
+        }
+        // Every animated frame matches its atlas region's size.
+        for sprite in animated {
+            for frame in &sprite.frames {
+                assert_eq!(
+                    (frame.width(), frame.height()),
+                    (sprite.region.width(), sprite.region.height()),
+                    "{}",
+                    sprite.name
+                );
+            }
         }
     }
 }
