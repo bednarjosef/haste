@@ -9,7 +9,7 @@ with the mod architecture designed in. Licensed GPL-3.0-or-later.
 What a player needs to play Haste like the original game, without noticing a difference.
 Fabric mod support (Phase 2) is not counted here.
 
-**17 of 62 done, 26 partly done, 19 not started (about 48 %, counting partly done as half).**
+**17 of 62 done, 30 partly done, 15 not started (about 52 %, counting partly done as half).**
 
 ✅ done: works in the game window today, checked against a real server.
 🟡 partly done: some of it exists (in a library, or working without a window) but a player cannot use it fully yet.
@@ -21,9 +21,9 @@ Fabric mod support (Phase 2) is not counted here.
 - 🟡 Joining a server: `haste --server host:port` from the command line; no direct-connect screen
 - 🟡 Server list: status ping works (`haste --ping --server host:port`); no server list screen
 - 🟡 Microsoft account login: `haste login` / `haste logout` run the device-code flow and store the account, untested end to end (needs a Microsoft app id)
+- 🟡 Title screen: vanilla's title screen opens in the embedded UI (tested); not yet shown when `haste` starts
+- 🟡 Options screens: vanilla's options screen opens in the embedded UI (tested); not reachable from the game yet, and the sub-screens are untested
 - 🟡 Saved options: stored in the config with vanilla defaults; the client uses render distance, FOV, mouse sensitivity and vsync, not yet GUI scale, volumes or keybinds
-- ⬜ Title screen
-- ⬜ Options screens (video, controls, sound, skin, chat, accessibility)
 - ⬜ Keybind remapping (controls are fixed to the vanilla defaults)
 - ⬜ Resource packs (selection screen, applying server resource packs)
 - ⬜ Languages other than English
@@ -32,8 +32,8 @@ Fabric mod support (Phase 2) is not counted here.
 - ✅ Offline-mode vanilla and Fabric servers: join and stay connected on normal terrain, every packet decodes
 - ✅ Configuration phase, server transfers, cookies, resource pack answers
 - 🟡 Online-mode servers: encryption and session join need the Microsoft login above
-- 🟡 Item data: stacks with components decode and round-trip; names, enchantments, damage and the like are not decoded into typed values in Rust yet
-- ⬜ Signed chat (required by online-mode servers)
+- 🟡 Signed chat (required by online-mode servers): message and command signing match vanilla's format (unit-tested); used once online mode works
+- 🟡 Item data: stacks decode and round-trip, and names, enchantments, damage, rarity and tool rules read into typed values; the game logic does not use them yet
 
 ### World
 - ✅ Terrain: chunks, light, block and multi-block updates, chunk loading and unloading
@@ -65,14 +65,14 @@ Fabric mod support (Phase 2) is not counted here.
 ### HUD and screens
 These run as the game's own Java code inside Haste. The HUD is drawn in the game window; keyboard and mouse input to the screens is not connected yet.
 - ✅ HUD: hotbar, health, hunger, armour, air, experience
-- 🟡 Chat: messages are shown; typing and command suggestions need keyboard input
+- 🟡 Chat: messages are shown, and keyboard input now reaches the chat box; typing and sending not yet checked
 - 🟡 Player list (Tab), boss bars, scoreboard sidebar, titles and action bar
 - 🟡 Pause menu
 - 🟡 Player inventory and crafting grid
 - 🟡 Chests (clicks match vanilla byte for byte); furnace, crafting table, anvil, enchanting, brewing and trading are untested
 - 🟡 Death screen and respawn
+- 🟡 Debug screen (F3): opens with F3 and shows FPS, position, chunks, sections and entities; not yet checked on screen
 - ⬜ Creative inventory
-- ⬜ Debug screen (F3)
 - ⬜ Editing signs, books and command blocks
 - ⬜ Advancements and statistics screens
 - ⬜ Recipe book
