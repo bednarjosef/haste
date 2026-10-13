@@ -105,6 +105,43 @@ block models) and so do not appear here.
 }
 ```
 
+## block_sounds.json
+
+Every block's SoundType (the break/step/place/hit/fall sound events plus volume and pitch),
+dumped by the recorder mod's `dump_block_sounds` scenario step. Vanilla keeps these as code
+(BlockBehaviour's per-state sound type), not in the data generator's reports, so the recorder
+reads them from the running game via `BlockState.getSoundType()`. Identical sound types are
+deduped into a table referenced by index; a state is listed only where it differs from its
+block's default (in 26.3 only the decorated pot's `cracked` variant does).
+
+```jsonc
+{
+  "version": 1,
+  "minecraft": "26.3",
+  "source": "client block registry (BlockState.getSoundType)",
+  "sound_types": [                        // dedupe table, referenced by index
+    {
+      "break": "block.stone.break",       // sound event ids; vanilla's "no sound" is
+      "step": "block.stone.step",         //   "minecraft:intentionally_empty"
+      "place": "block.stone.place",
+      "hit": "block.stone.hit",
+      "fall": "block.stone.fall",
+      "volume": 1.0,                      // SoundType volume/pitch multipliers
+      "pitch": 1.0
+    }
+  ],
+  "blocks": {
+    "minecraft:stone": { "sound": 0 },    // default sound type index for every state
+    "minecraft:decorated_pot": {
+      "sound": 42,
+      "states": [                         // only states differing from the default
+        { "properties": { "cracked": true }, "sound": 43 }
+      ]
+    }
+  }
+}
+```
+
 ## block_properties.json
 
 ```jsonc

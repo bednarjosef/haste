@@ -45,6 +45,23 @@ vanilla client with the mod architecture designed in and no mod support yet.
    into `cache/datagen/26.3/reports`). Collision shapes, entity dimensions and the like come from
    the recorder mod's oracle dumps in `cache/oracle/26.3`.
 
+## Faithful wherever the player can feel it (read this whatever your task is)
+
+Anything the player sees, hears or feels, and anything the server can observe, is **ported from
+vanilla's code** (the decompiled 26.3 client in `cache/source/26.3/client`, rule 5): the same
+constants, the same math, the same order of steps per tick, the same timings. That includes
+movement and collision, sneaking and its camera smoothing, input timing (click delays, attack and
+use cooldowns, block-breaking delays, key repeat), what can be attacked or used, the first-person
+hand and item animations (swing, equip, bob), the camera (FOV changes, view bobbing, hurt and death
+tilt), HUD and screen behaviour, sound timing and volumes, and every packet the client sends.
+No guessed values, no "close enough", no wiki numbers when the source is there. Each PR that
+touches such behaviour names the vanilla class and method it follows.
+
+Everything the player cannot notice and the server cannot see (data structures, threading,
+batching, caching, meshing, GPU work, decoding) is ours to design for speed (see "Performance is
+the product"), but any constant it carries (light curves, colours, distances, sizes) still comes
+from vanilla.
+
 ## Built for mods (read this whatever your task is)
 
 Phase 1 is a vanilla client, but everything in it will later host Fabric mods through the
@@ -101,7 +118,7 @@ it is the top priority.
   next to the code; anything needing the cache (jars, reports) is `#[ignore]`d unless the cache
   exists, and says so.
 - Write `NOTES.md`-worthy decisions and dead ends in your report; the lead copies them in.
-- Performance and mod-readiness rules are in the two sections above; they apply to every task.
+- Faithfulness, performance and mod-readiness rules are in the sections above; they apply to every task.
 - Absolute paths in reports. Cite `file:line` for anything you want the lead to look at.
 
 ## Branches and merging

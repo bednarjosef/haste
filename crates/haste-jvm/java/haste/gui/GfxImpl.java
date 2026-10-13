@@ -206,9 +206,9 @@ public final class GfxImpl {
     /**
      * The blend mode of a blit: vanilla picks one per draw call in the {@code RenderPipeline} the caller passes,
      * and Haste's tier-2 {@link Pipelines} give the GUI's blits a real pipeline, so the blend function is read
-     * from there (vignette multiplies, crosshair inverts, everything else blends normally). The identifier rule
-     * below is only the fallback for a draw call whose pipeline is still null (Haste's own blits, or a caller
-     * that built none). Codes: 0 normal, 1 multiply, 2 invert.
+     * from there (vignette multiplies, crosshair inverts, the text selection highlight adds, everything else
+     * blends normally). The identifier rule below is only the fallback for a draw call whose pipeline is still
+     * null (Haste's own blits, or a caller that built none). Codes: 0 normal, 1 multiply, 2 invert, 3 additive.
      */
     private static int blend(RenderPipeline p, Identifier t) {
         if (p != null) {
@@ -245,7 +245,7 @@ public final class GfxImpl {
     }
 
     /**
-     * The blend mode of a blit without a pipeline, by identifier: every GUI pipeline except two blends
+     * The blend mode of a blit without a pipeline, by identifier: every GUI pipeline except three blends
      * normally, so the identifier says which pipeline it was: {@code textures/misc/vignette.png} is
      * {@code RenderPipelines.VIGNETTE} (multiplicative: darkens the edges) and the crosshair sprites
      * ({@code hud/crosshair...}) are drawn with {@code RenderPipelines.CROSSHAIR} (inverts the colour behind it).
