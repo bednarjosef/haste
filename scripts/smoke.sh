@@ -4,16 +4,11 @@
 # client panics. Prints PASS or FAIL, exit 0/1. Always stops the server it started.
 # usage: scripts/smoke.sh [port]   (default 25618; server copy $HASTE_CACHE/servers/smoke)
 #
-# Three server-log lines appear on every join and do not fail the run (each is still
+# Two server-log lines appear on every join and do not fail the run (each is still
 # printed and marked):
 #   "lost connection: Disconnected"  haste's own goodbye after its 20 s; a real disconnect
 #                                    still fails, via haste's non-zero exit and the reason
 #                                    text differing from a bare "Disconnected"
-#   "moved too quickly! X,Y,Z" where X,Y,Z equals the login position: a KNOWN CLIENT BUG,
-#                                    not noise. Vanilla logs the movement delta here, so the
-#                                    client moved by its whole spawn position (seen on a fresh
-#                                    flat world, not on the normal-world server). Remove this
-#                                    allowance once it is fixed.
 #   "No key layers in MapLike[{}]"   flat-world preset datapack noise at server start,
 #                                    logged before the client even connects
 set -uo pipefail
@@ -74,18 +69,12 @@ tail -5 target/smoke/haste.log
 FAIL=
 [ "$RC" -eq 0 ] || FAIL="haste exited $RC"
 
-# The login position: a "moved too quickly" whose delta is exactly it is the known bug above.
-LOGIN_POS=$(sed -n 's/.*logged in with entity id [0-9]* at (\([^)]*\)).*/\1/p' "$LOG" 2>/dev/null | head -1 | tr -d ' ')
-SPAWN_ACK='__no_login_position__'
-[ -n "$LOGIN_POS" ] && SPAWN_ACK="*moved too quickly! $LOGIN_POS*"
-
 for pat in 'kicked' 'lost connection' 'moved wrongly' 'moved too quickly' 'Exception' 'ERROR'; do
   while IFS= read -r line; do
     benign=
     case "$line" in
       *"lost connection: Disconnected") benign="haste's goodbye after its 20 s";;
       *"No key layers in MapLike[{}]") benign="flat-preset datapack noise before login";;
-      $SPAWN_ACK) benign="KNOWN CLIENT BUG: first move = whole spawn position (see header)";;
     esac
     echo "server: $line"
     if [ -n "$benign" ]; then
