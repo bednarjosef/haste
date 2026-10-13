@@ -3,7 +3,7 @@
 // reused under GPL-3.0 and reworked for Haste: full `when` condition trees with
 // OR/AND and `a|b` value alternation. See THIRD_PARTY.md.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::Deserialize;
 
@@ -12,8 +12,12 @@ use crate::model::ModelRef;
 /// `blockstates/<path>.json`: either `variants` or `multipart`.
 #[derive(Deserialize, Debug, Clone)]
 pub struct BlockStateDefinition {
+    /// Keyed by the variant's `k=v,...` property key. A BTreeMap keeps the
+    /// iteration sorted, so `all_model_refs` collects textures in a stable order
+    /// and the "most properties" tie-break in `model_refs_for` never depends on
+    /// hash order (a HashMap picked a different model for ambiguous states per process).
     #[serde(default)]
-    pub variants: Option<HashMap<String, VariantEntry>>,
+    pub variants: Option<BTreeMap<String, VariantEntry>>,
     #[serde(default)]
     pub multipart: Option<Vec<MultipartCase>>,
 }
