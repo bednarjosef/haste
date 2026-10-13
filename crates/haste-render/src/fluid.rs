@@ -40,6 +40,118 @@ pub enum Fluid {
     Lava,
 }
 
+/// How a fluid is tinted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FluidTint {
+    /// No tint (lava).
+    None,
+    /// Biome water colour blend (water).
+    BiomeWater,
+}
+
+/// A fluid's rendering properties (the `Fluids` registry values).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FluidDef {
+    pub tint: FluidTint,
+    /// Render layer the fluid draws in.
+    pub layer: RenderLayer,
+    /// Whether sides facing glass/leaves use the water overlay sprite.
+    pub overlay: bool,
+    pub still: u16,
+    pub flow: u16,
+}
+
+/// Registry of fluids: fluid id -> rendering properties. Water and lava are
+/// registered by [`Fluids::vanilla`]; mods add their own fluids here.
+#[derive(Clone, Copy, Debug)]
+pub struct Fluids {
+    water: FluidDef,
+    lava: FluidDef,
+}
+
+impl Fluids {
+    /// The two vanilla fluids, with their atlas sprites.
+    pub fn vanilla(sprites: &FluidSprites) -> Fluids {
+        Fluids {
+            water: FluidDef {
+                tint: FluidTint::BiomeWater,
+                layer: RenderLayer::Translucent,
+                overlay: true,
+                still: sprites.water_still,
+                flow: sprites.water_flow,
+            },
+            lava: FluidDef {
+                tint: FluidTint::None,
+                layer: RenderLayer::Solid,
+                overlay: false,
+                still: sprites.lava_still,
+                flow: sprites.lava_flow,
+            },
+        }
+    }
+
+    /// Rendering properties of a fluid.
+    pub fn def(&self, fluid: Fluid) -> FluidDef {
+        match fluid {
+            Fluid::Water => self.water,
+            Fluid::Lava => self.lava,
+        }
+    }
+}
+
+impl Default for Fluids {
+    fn default() -> Fluids {
+        Fluids::vanilla(&FluidSprites::default())
+    }
+}
+
+/// Decides which fluid a block state holds (resolved once per state at load).
+///
+/// The generic vanilla rules are: any state with `waterlogged=true` holds
+/// water; the liquid blocks (`water`/`lava`) use their `level` property for
+/// the height. Blocks that always hold a fluid source (kelp, seagrass, bubble
+/// column, ...) are registered in [`FluidRules::vanilla`]; mods add more with
+/// [`FluidRules::register_block`].
+#[derive(Clone, Debug)]
+pub struct FluidRules {
+    /// Block path -> fluid, for blocks that always hold a fluid source.
+    sources: std::collections::HashMap<&'static str, Fluid>,
+}
+
+impl FluidRules {
+    /// The vanilla rules: the always-water plants.
+    pub fn vanilla() -> FluidRules {
+        let mut rules = FluidRules {
+            sources: std::collections::HashMap::new(),
+        };
+        for block in [
+            "kelp",
+            "kelp_plant",
+            "seagrass",
+            "tall_seagrass",
+            "bubble_column",
+        ] {
+            rules.register_block(block, Fluid::Water);
+        }
+        rules
+    }
+
+    /// Register a block that always holds a fluid source (mods).
+    pub fn register_block(&mut self, block: &'static str, fluid: Fluid) {
+        self.sources.insert(block, fluid);
+    }
+
+    fn fluid_of(&self, name: &str) -> Option<Fluid> {
+        self.sources.get(name).copied()
+    }
+}
+
+impl Default for FluidRules {
+    fn default() -> FluidRules {
+        FluidRules::vanilla()
+    }
+}
+
 /// The fluid a block state holds.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FluidState {
@@ -82,6 +194,8 @@ impl FluidSprites {
 pub struct FluidTable {
     fluids: Vec<Option<FluidState>>,
     classes: Vec<Class>,
+    /// Fluid rendering properties (sprites, tint, overlay, layer).
+    pub defs: Fluids,
     pub sprites: FluidSprites,
 }
 
@@ -94,42 +208,36 @@ fn level_height(level: u8) -> f32 {
 }
 
 impl FluidTable {
-    pub fn new(states: &dyn BlockStateTable, sprites: FluidSprites) -> FluidTable {
+    pub fn new(
+        states: &dyn BlockStateTable,
+        defs: &Fluids,
+        rules: &FluidRules,
+        sprites: FluidSprites,
+    ) -> FluidTable {
         let n = states.len();
         let mut fluids = Vec::with_capacity(n);
         let mut classes = Vec::with_capacity(n);
         for s in 0..n as u32 {
             let state = BlockStateId(s);
             let name = states.block_of(state).path();
-            let level = || {
-                states
-                    .property_value(state, "level")
-                    .and_then(|v| v.parse::<u8>().ok())
-                    .unwrap_or(0)
-            };
-            let source = |fluid| {
-                Some(FluidState {
-                    fluid,
-                    height: 8.0 / 9.0,
-                })
-            };
-            fluids.push(match name {
-                "water" => Some(FluidState {
-                    fluid: Fluid::Water,
-                    height: level_height(level()),
-                }),
-                "lava" => Some(FluidState {
-                    fluid: Fluid::Lava,
-                    height: level_height(level()),
-                }),
-                "kelp" | "kelp_plant" | "seagrass" | "tall_seagrass" | "bubble_column" => {
-                    source(Fluid::Water)
+            let fluid = if states.property_value(state, "waterlogged") == Some("true") {
+                Some((Fluid::Water, 0))
+            } else if let Some(level) = states
+                .property_value(state, "level")
+                .and_then(|v| v.parse::<u8>().ok())
+            {
+                match name {
+                    "water" => Some((Fluid::Water, level)),
+                    "lava" => Some((Fluid::Lava, level)),
+                    _ => None,
                 }
-                _ if states.property_value(state, "waterlogged") == Some("true") => {
-                    source(Fluid::Water)
-                }
-                _ => None,
-            });
+            } else {
+                rules.fluid_of(name).map(|f| (f, 0))
+            };
+            fluids.push(fluid.map(|(fluid, level)| FluidState {
+                fluid,
+                height: level_height(level),
+            }));
             classes.push(Class {
                 overlay: name.ends_with("glass")
                     || name.ends_with("glass_pane")
@@ -139,6 +247,7 @@ impl FluidTable {
         FluidTable {
             fluids,
             classes,
+            defs: *defs,
             sprites,
         }
     }
@@ -148,6 +257,7 @@ impl FluidTable {
         FluidTable {
             fluids: Vec::new(),
             classes: Vec::new(),
+            defs: Fluids::default(),
             sprites: FluidSprites::default(),
         }
     }
@@ -158,6 +268,7 @@ impl FluidTable {
         FluidTable {
             fluids,
             classes,
+            defs: Fluids::default(),
             sprites: FluidSprites::default(),
         }
     }
@@ -305,10 +416,8 @@ pub fn fluid_quads(
     out: &mut Vec<FluidQuad>,
 ) {
     let sprites = &table.sprites;
-    let (still, flow) = match fluid.fluid {
-        Fluid::Water => (sprites.water_still, sprites.water_flow),
-        Fluid::Lava => (sprites.lava_still, sprites.lava_flow),
-    };
+    let def = table.defs.def(fluid.fluid);
+    let (still, flow) = (def.still, def.flow);
     let same = |q: BlockPos| {
         table
             .fluid(world.state(q))
@@ -381,7 +490,7 @@ pub fn fluid_quads(
         if same(q) || world.opaque(q) {
             continue;
         }
-        let overlay = fluid.fluid == Fluid::Water && table.overlay(world.state(q));
+        let overlay = def.overlay && table.overlay(world.state(q));
         // Model side-face order: top-left, bottom-left, bottom-right, top-right.
         let positions = [
             [a[0], a[2], a[1]],
@@ -409,11 +518,8 @@ pub fn fluid_quads(
 }
 
 /// Render layer of a fluid.
-pub fn fluid_layer(fluid: Fluid) -> RenderLayer {
-    match fluid {
-        Fluid::Water => RenderLayer::Translucent,
-        Fluid::Lava => RenderLayer::Solid,
-    }
+pub fn fluid_layer(defs: &Fluids, fluid: Fluid) -> RenderLayer {
+    defs.def(fluid).layer
 }
 
 #[cfg(test)]
@@ -440,6 +546,139 @@ mod tests {
             });
         }
         FluidTable::from_fluids(fluids)
+    }
+
+    struct MockStates {
+        states: Vec<(haste_core::Identifier, Vec<(String, String)>)>,
+    }
+
+    fn mock_states(entries: &[(&str, &[(&str, &str)])]) -> MockStates {
+        MockStates {
+            states: entries
+                .iter()
+                .map(|(name, props)| {
+                    (
+                        haste_core::Identifier::minecraft(name),
+                        props
+                            .iter()
+                            .map(|(k, v)| (k.to_string(), v.to_string()))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    impl BlockStateTable for MockStates {
+        fn len(&self) -> usize {
+            self.states.len()
+        }
+        fn block_of(&self, state: BlockStateId) -> &haste_core::Identifier {
+            &self.states[state.0 as usize].0
+        }
+        fn properties(&self, state: BlockStateId) -> Vec<(String, String)> {
+            self.states[state.0 as usize].1.clone()
+        }
+        fn property_value(&self, state: BlockStateId, name: &str) -> Option<&str> {
+            self.states[state.0 as usize]
+                .1
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        }
+    }
+
+    fn source(fluid: Fluid) -> Option<FluidState> {
+        Some(FluidState {
+            fluid,
+            height: 8.0 / 9.0,
+        })
+    }
+
+    #[test]
+    fn waterlogged_states_hold_water() {
+        let states = mock_states(&[
+            ("oak_stairs", &[("waterlogged", "true")]),
+            ("stone", &[("waterlogged", "true")]),
+        ]);
+        let t = FluidTable::new(
+            &states,
+            &Fluids::default(),
+            &FluidRules::default(),
+            FluidSprites::default(),
+        );
+        assert_eq!(t.fluid(BlockStateId(0)), source(Fluid::Water));
+        assert_eq!(t.fluid(BlockStateId(1)), source(Fluid::Water));
+    }
+
+    #[test]
+    fn level_property_gives_height() {
+        let states = mock_states(&[
+            ("water", &[("level", "0")]),
+            ("water", &[("level", "3")]),
+            ("water", &[("level", "8")]),
+            ("lava", &[("level", "5")]),
+        ]);
+        let t = FluidTable::new(
+            &states,
+            &Fluids::default(),
+            &FluidRules::default(),
+            FluidSprites::default(),
+        );
+        assert_eq!(t.fluid(BlockStateId(0)), source(Fluid::Water));
+        assert_eq!(
+            t.fluid(BlockStateId(1)),
+            Some(FluidState {
+                fluid: Fluid::Water,
+                height: 5.0 / 9.0,
+            })
+        );
+        assert_eq!(t.fluid(BlockStateId(2)), source(Fluid::Water));
+        assert_eq!(
+            t.fluid(BlockStateId(3)),
+            Some(FluidState {
+                fluid: Fluid::Lava,
+                height: 3.0 / 9.0,
+            })
+        );
+    }
+
+    #[test]
+    fn registered_always_water_blocks() {
+        let states = mock_states(&[("kelp", &[]), ("seagrass", &[]), ("bubble_column", &[])]);
+        let t = FluidTable::new(
+            &states,
+            &Fluids::default(),
+            &FluidRules::default(),
+            FluidSprites::default(),
+        );
+        for s in 0..3 {
+            assert_eq!(t.fluid(BlockStateId(s)), source(Fluid::Water));
+        }
+    }
+
+    #[test]
+    fn register_block_for_mods() {
+        let states = mock_states(&[("mod_coral", &[]), ("mod_magma", &[])]);
+        let mut rules = FluidRules::vanilla();
+        rules.register_block("mod_coral", Fluid::Water);
+        rules.register_block("mod_magma", Fluid::Lava);
+        let t = FluidTable::new(&states, &Fluids::default(), &rules, FluidSprites::default());
+        assert_eq!(t.fluid(BlockStateId(0)), source(Fluid::Water));
+        assert_eq!(t.fluid(BlockStateId(1)), source(Fluid::Lava));
+    }
+
+    #[test]
+    fn unknown_block_has_no_fluid() {
+        let states = mock_states(&[("stone", &[]), ("dirt", &[])]);
+        let t = FluidTable::new(
+            &states,
+            &Fluids::default(),
+            &FluidRules::default(),
+            FluidSprites::default(),
+        );
+        assert_eq!(t.fluid(BlockStateId(0)), None);
+        assert_eq!(t.fluid(BlockStateId(1)), None);
     }
 
     #[derive(Default)]

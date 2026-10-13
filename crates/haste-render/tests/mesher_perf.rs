@@ -275,6 +275,8 @@ fn setup() -> Option<(
         ),
         std::sync::Arc::new(fluid::FluidTable::new(
             &states,
+            &fluid::Fluids::vanilla(&fluid::FluidSprites::from_atlas(&atlas)),
+            &fluid::FluidRules::vanilla(),
             fluid::FluidSprites::from_atlas(&atlas),
         )),
     );
