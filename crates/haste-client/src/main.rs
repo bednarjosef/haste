@@ -16,6 +16,7 @@ mod headless;
 mod launch;
 mod net;
 mod player;
+mod screenshots;
 mod ui;
 
 #[derive(Parser, Debug)]

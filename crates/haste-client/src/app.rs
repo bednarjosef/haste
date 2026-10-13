@@ -308,7 +308,7 @@ fn frame_view(
     pitch: f32,
     fov_deg: f32,
     now: Instant,
-) -> (Camera, SkyState, f32, i32) {
+) -> (Camera, SkyState, f32, i32, u64) {
     let view = *shared.view.lock();
     let partial = game::partial_tick(view.tick_at, now);
     let camera = Camera {
@@ -326,7 +326,13 @@ fn frame_view(
         fog_start: fog_end * 0.75,
         fog_end,
     };
-    (camera, sky, partial, view.view_distance)
+    (
+        camera,
+        sky,
+        partial,
+        view.view_distance,
+        view.animation_tick,
+    )
 }
 
 /// Number keys 1-9 select hotbar slots 0-8.
@@ -384,7 +390,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut stats;
     let mut last_camera;
     loop {
-        let (mut camera, sky, partial, vd) = frame_view(
+        let (mut camera, sky, partial, vd, animation_tick) = frame_view(
             &shared,
             0.0,
             0.0,
@@ -420,6 +426,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             breaking: &breaking,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
+        renderer.set_animation_tick(animation_tick);
         stats = renderer.render(&frame)?;
         frames += 1;
         let placed = shared.view.lock().has_position;
@@ -831,6 +838,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         fps: FpsCounter::new(),
         error: None,
         seconds: args.window_seconds,
+        screenshot: false,
         started: Instant::now(),
     };
     event_loop.run_app(&mut app)?;
@@ -880,6 +888,9 @@ struct App {
     error: Option<anyhow::Error>,
     /// Close the window after this long (`--window-seconds`, for unattended runs).
     seconds: Option<u64>,
+    /// F2 pressed: the next frame is captured for a screenshot; once its async readback
+    /// lands (a few frames later), `take_capture` hands it to a save thread.
+    screenshot: bool,
     started: Instant,
 }
 
@@ -959,7 +970,7 @@ impl App {
         self.sample_input();
         let renderer = self.renderer.as_mut().expect("checked above");
         let t0 = Instant::now();
-        let (camera, sky, partial, vd) = frame_view(
+        let (camera, sky, partial, vd, animation_tick) = frame_view(
             &self.shared,
             self.yaw,
             self.pitch,
@@ -986,7 +997,25 @@ impl App {
         };
         // Outline boxes of the target and the states of breaking blocks (one short read lock).
         renderer.sample_world(&*self.shared.world.read(), &self.shared.data.shapes, &frame);
+        renderer.set_animation_tick(animation_tick);
+        if self.screenshot {
+            self.screenshot = false;
+            renderer.request_capture();
+        }
         let result = renderer.render(&frame);
+        if let Some(result) = renderer.take_capture() {
+            // Encode and write off the render thread: PNG compression of a full frame
+            // would stall the frame loop (vanilla's chat line becomes a log line here).
+            match result {
+                Ok(image) => {
+                    std::thread::spawn(move || match crate::screenshots::save(image) {
+                        Ok(name) => tracing::info!("Saved screenshot as {name}"),
+                        Err(e) => tracing::warn!("screenshot failed: {e:#}"),
+                    });
+                }
+                Err(e) => tracing::warn!("screenshot readback failed: {e:#}"),
+            }
+        }
         let t3 = Instant::now();
         self.fps.phases(
             (t1 - t0).as_secs_f32() * 1e3,
@@ -1128,6 +1157,11 @@ impl ApplicationHandler for App {
                                 let full = w.fullscreen().is_some();
                                 w.set_fullscreen((!full).then_some(Fullscreen::Borderless(None)));
                             }
+                        }
+                        KeyCode::F2 => {
+                            // Vanilla's screenshot key: capture on the next frame (`draw`),
+                            // where the render (and its offscreen target) happens.
+                            self.screenshot = true;
                         }
                         _ => {}
                     }
