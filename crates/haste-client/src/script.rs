@@ -3,9 +3,8 @@
 //! A script is a list of steps, one per line. `#` starts a comment and blank lines are ignored.
 //! `parse` turns the text into `Vec<Step>`; a [`Runner`] drives those steps and returns the
 //! [`Action`]s the client must perform each game tick (20 ticks per second). This module is pure
-//! logic only: no window, renderer or network. The `--script FILE` wiring comes later.
-
-#![allow(dead_code)] // the runner API is not called from `main` yet (wired up in a later step)
+//! logic only: no window, renderer or network; the `--script FILE` offscreen client wires it up
+//! (app.rs `script_run`).
 
 use std::fmt;
 
@@ -518,6 +517,9 @@ impl Runner {
         }
     }
 
+    /// Whether the script has finished (an `Action::Finished` also reports it; this is the
+    /// query form, used by tests).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_finished(&self) -> bool {
         self.finished
     }
