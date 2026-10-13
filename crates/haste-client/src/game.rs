@@ -221,6 +221,9 @@ pub struct ViewState {
     pub view_distance: i32,
     /// Block under the crosshair and the face hit (`LocalPlayer::target`).
     pub block_target: Option<(BlockPos, Direction)>,
+    /// Whether the player's eyes are in water (`PlayerState::eyes_in_water`), for the HUD's
+    /// air bubbles and the water overlay.
+    pub eye_in_water: bool,
     /// Selected hotbar slot (`LocalPlayer::held_slot`), for the scroll wheel.
     pub held_slot: i32,
     /// Look angles (yaw, pitch) before and after the last tick, for the player's own model in
@@ -299,6 +302,7 @@ impl Shared {
                 has_sky,
                 view_distance,
                 block_target: None,
+                eye_in_water: false,
                 held_slot: 0,
                 prev_look: (0.0, 0.0),
                 look: (0.0, 0.0),
@@ -539,12 +543,25 @@ fn tick_once(
         }
         // Held buttons stay; the press-only middle click, drop/swap presses and the hotbar choice
         // are consumed.
-        let interact = shared_input.interact;
+        let mut interact = shared_input.interact;
         shared_input.interact.pick_block = false;
         shared_input.interact.drop_item = false;
         shared_input.interact.drop_stack = false;
         shared_input.interact.swap_offhand = false;
         shared_input.interact.hotbar = None;
+        // A hotbar slot the UI picked since the last tick (the HUD's digits and wheel, or
+        // Java-side code) goes through the normal interact path, like the client's own
+        // digits did before the UI owned them: `set_carried_item` is sent and a changed
+        // held item restarts breaking. The server's `set_held_slot` changes both sides
+        // alike, so it never looks like a UI pick.
+        if interact.hotbar.is_none() {
+            if let Some(ui) = shared.ui.lock().as_ref() {
+                let slot = ui.selected_slot();
+                if slot != driver.session.player.held_slot {
+                    interact.hotbar = Some(slot.clamp(0, 8) as u8);
+                }
+            }
+        }
         driver.session.player.set_interact(interact);
         shared_input.state
     };
@@ -596,6 +613,7 @@ fn tick_once(
     view.time_of_day = s.time_of_day.unwrap_or(6000);
     view.has_sky = s.dimension.has_skylight;
     view.block_target = s.player.target();
+    view.eye_in_water = s.player.state.eyes_in_water;
     view.held_slot = s.player.held_slot;
     Ok(())
 }

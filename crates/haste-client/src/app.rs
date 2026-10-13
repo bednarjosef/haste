@@ -36,6 +36,7 @@ mod biomes;
 
 use crate::game::{self, Shared};
 use crate::net::{self, NetDriver};
+use crate::ui::keys;
 use crate::Args;
 
 /// Saved options this run uses: FOV, render distance, mouse sensitivity and (unless the
@@ -362,6 +363,140 @@ fn frame_view(
         view.view_distance,
         view.animation_tick,
     )
+}
+
+/// The SDL3 scancode (USB HID usage id, `InputConstants.KEY_*` in 26.3) of a winit `KeyCode`.
+/// `haste_jvm::keys` documents the numbering; letters, digits and punctuation take the
+/// consecutive HID ranges, everything else is one entry per key.
+fn sdl_scancode(code: KeyCode) -> Option<i32> {
+    use haste_jvm::keys as sdl;
+    use KeyCode as K;
+    Some(match code {
+        K::KeyA => sdl::letter(b'a'),
+        K::KeyB => sdl::letter(b'b'),
+        K::KeyC => sdl::letter(b'c'),
+        K::KeyD => sdl::letter(b'd'),
+        K::KeyE => sdl::letter(b'e'),
+        K::KeyF => sdl::letter(b'f'),
+        K::KeyG => sdl::letter(b'g'),
+        K::KeyH => sdl::letter(b'h'),
+        K::KeyI => sdl::letter(b'i'),
+        K::KeyJ => sdl::letter(b'j'),
+        K::KeyK => sdl::letter(b'k'),
+        K::KeyL => sdl::letter(b'l'),
+        K::KeyM => sdl::letter(b'm'),
+        K::KeyN => sdl::letter(b'n'),
+        K::KeyO => sdl::letter(b'o'),
+        K::KeyP => sdl::letter(b'p'),
+        K::KeyQ => sdl::letter(b'q'),
+        K::KeyR => sdl::letter(b'r'),
+        K::KeyS => sdl::letter(b's'),
+        K::KeyT => sdl::letter(b't'),
+        K::KeyU => sdl::letter(b'u'),
+        K::KeyV => sdl::letter(b'v'),
+        K::KeyW => sdl::letter(b'w'),
+        K::KeyX => sdl::letter(b'x'),
+        K::KeyY => sdl::letter(b'y'),
+        K::KeyZ => sdl::letter(b'z'),
+        K::Digit1 => sdl::NUM_1,
+        K::Digit2 => sdl::NUM_1 + 1,
+        K::Digit3 => sdl::NUM_1 + 2,
+        K::Digit4 => sdl::NUM_1 + 3,
+        K::Digit5 => sdl::NUM_1 + 4,
+        K::Digit6 => sdl::NUM_1 + 5,
+        K::Digit7 => sdl::NUM_1 + 6,
+        K::Digit8 => sdl::NUM_1 + 7,
+        K::Digit9 => sdl::NUM_1 + 8,
+        K::Digit0 => sdl::NUM_0,
+        K::Enter | K::NumpadEnter => sdl::RETURN,
+        K::Escape => sdl::ESCAPE,
+        K::Backspace => sdl::BACKSPACE,
+        K::Tab => sdl::TAB,
+        K::Space => sdl::SPACE,
+        K::Minus => 45,
+        K::Equal => 46,
+        K::BracketLeft => 47,
+        K::BracketRight => 48,
+        K::Backslash => 49,
+        K::Semicolon => 51,
+        K::Quote => 52,
+        K::Backquote => 53,
+        K::Comma => 54,
+        K::Period => 55,
+        K::Slash => sdl::SLASH,
+        K::Delete => sdl::DELETE,
+        K::Home => sdl::HOME,
+        K::End => sdl::END,
+        K::PageUp => 75,
+        K::PageDown => 78,
+        K::ArrowRight => sdl::RIGHT,
+        K::ArrowLeft => sdl::LEFT,
+        K::ArrowDown => sdl::DOWN,
+        K::ArrowUp => sdl::UP,
+        K::F1 => sdl::F1,
+        K::F2 => 59,
+        K::F3 => sdl::F3,
+        K::F4 => 61,
+        K::F5 => 62,
+        K::F6 => 63,
+        K::F7 => 64,
+        K::F8 => 65,
+        K::F9 => 66,
+        K::F10 => 67,
+        K::F11 => 68,
+        K::F12 => 69,
+        K::ControlLeft => sdl::LCTRL,
+        K::ShiftLeft => sdl::LSHIFT,
+        K::ControlRight => 228,
+        K::ShiftRight => 229,
+        K::AltLeft => 226,
+        K::AltRight => 230,
+        _ => return None,
+    })
+}
+
+/// The SDL keymod bits of a key press/release, tracked by the App as keys go down and up
+/// (winit gives no modifier-changed event). The three masks are the plain, left and right
+/// variants of each modifier, as SDL3 defines them.
+fn sdl_keymod(ctrl: bool, shift: bool, alt: bool) -> i32 {
+    use haste_jvm::keys as sdl;
+    (if ctrl { sdl::MOD_CONTROL } else { 0 })
+        | (if shift { sdl::MOD_SHIFT } else { 0 })
+        | (if alt { sdl::MOD_ALT } else { 0 })
+}
+
+/// Whether a winit key event carries text (winit's `KeyEvent::text`, given for printable keys
+/// including via dead-key composition, not for control keys), which the chat and sign screens
+/// need as `char_typed`.
+fn typed_char_of(text: Option<&str>) -> Option<char> {
+    text.and_then(|s| s.chars().next())
+}
+
+/// A winit mouse button in vanilla's numbering (1 left, 2 middle, 3 right, the same as SDL's).
+fn vanilla_button(button: MouseButton) -> i32 {
+    match button {
+        MouseButton::Left => 1,
+        MouseButton::Middle => 2,
+        MouseButton::Right => 3,
+        MouseButton::Back => 4,
+        MouseButton::Forward => 5,
+        _ => 0,
+    }
+}
+
+/// The key routing decision (pure, so the routing is testable without a JVM): whether the
+/// event goes to the UI at all. Repeats (a held key) only reach an open screen (held
+/// Backspace in the chat box); with no screen the first press and the release go, so Tab's
+/// player list shows while held and hides on release.
+fn key_goes_to_ui(repeat: bool, screen_open: bool) -> bool {
+    screen_open || !repeat
+}
+
+/// The other half of the routing decision: whether the game may use the key after the UI
+/// saw it. It may not when the UI used it or any screen is open (no movement, no look, no
+/// attack while chat or the inventory is up).
+fn game_uses_key(ui_used: bool, screen_open: bool) -> bool {
+    !ui_used && !screen_open
 }
 
 /// Number keys 1-9 select hotbar slots 0-8.
@@ -911,7 +1046,9 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         ui: None,
         gui: GuiFrame::default(),
         mouse: (0.0, 0.0),
+        mods: (false, false, false),
         grabbed: false,
+        screen_was_open: false,
         focused: true,
         yaw: 0.0,
         pitch: 0.0,
@@ -928,6 +1065,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         hotbar: None,
         scroll: 0.0,
         breaking: Vec::new(),
+        frame_stats: FrameStats::default(),
         fps: FpsCounter::new(),
         error: None,
         seconds: args.window_seconds,
@@ -966,7 +1104,11 @@ struct App {
     /// The cursor in GUI-scaled pixels (`frame`'s mouse argument; the game keeps the mouse
     /// grabbed, so this stays where the grab began).
     mouse: (f64, f64),
+    /// SDL keymod bits of the currently held Ctrl/Shift/Alt keys, for the UI's key events.
+    mods: (bool, bool, bool),
     grabbed: bool,
+    /// A screen was open in the last `sync_grab` (its closing re-grabs the cursor).
+    screen_was_open: bool,
     focused: bool,
     yaw: f32,
     pitch: f32,
@@ -987,6 +1129,8 @@ struct App {
     /// Scroll wheel steps not yet turned into a slot change.
     scroll: f64,
     breaking: Vec<(haste_protocol::haste_core::BlockPos, u8)>,
+    /// The previous frame's statistics (F3 reads them between frames).
+    frame_stats: FrameStats,
     fps: FpsCounter,
     error: Option<anyhow::Error>,
     /// Close the window after this long (`--window-seconds`, for unattended runs).
@@ -1011,6 +1155,58 @@ impl App {
             let _ = w.set_cursor_grab(CursorGrabMode::None);
             w.set_cursor_visible(true);
             self.grabbed = false;
+        }
+    }
+
+    /// The UI's view of the grab, applied after a screen opens or closes and after vanilla code
+    /// asks for a grab ("Back to Game"): while any screen is open the cursor is free (vanilla
+    /// never grabs with a screen up, except the ones that lock it themselves like F8's pie
+    /// menu, none of which exist here yet). When a screen closes with no grab request (chat
+    /// Escape, "Back to Game"), vanilla re-grabs (`MouseHandler` grabs on `setScreen(null)`
+    /// unless a menu asks otherwise); the frame after, we do the same.
+    fn sync_grab(&mut self) {
+        let (open, wanted) = match &self.ui {
+            Some(ui) => (ui.screen_open(), ui.wants_mouse_grabbed()),
+            None => return,
+        };
+        if open {
+            self.screen_was_open = true;
+            if self.grabbed {
+                if let Some(ui) = &self.ui {
+                    ui.set_mouse_grabbed(false);
+                }
+                self.set_grab(false);
+                self.release_keys();
+            }
+        } else {
+            let regrab = wanted || self.screen_was_open;
+            self.screen_was_open = false;
+            if !self.grabbed && regrab && self.focused {
+                self.set_grab(true);
+                if let Some(ui) = &self.ui {
+                    ui.set_mouse_grabbed(true);
+                }
+            }
+        }
+    }
+
+    /// Whether a vanilla screen is open (the UI owns all input then).
+    fn screen_open(&self) -> bool {
+        self.ui.as_ref().is_some_and(|ui| ui.screen_open())
+    }
+
+    /// Once per frame (in `draw`): whether the pause screen's "Disconnect" (or the death
+    /// screen's "Title Screen") was clicked since the last frame, in which case the client
+    /// leaves the server and the window closes.
+    fn take_disconnect(&mut self, event_loop: &ActiveEventLoop) {
+        if self
+            .ui
+            .as_ref()
+            .is_some_and(|ui| ui.take_disconnect_request())
+        {
+            tracing::info!("disconnect requested by the UI");
+            self.shared.stop.store(true, Ordering::Relaxed);
+            event_loop.exit();
         }
     }
 
@@ -1071,6 +1267,10 @@ impl App {
             return;
         }
         self.sample_input();
+        // The screen that opened or closed since the last frame takes or frees the cursor,
+        // and "Disconnect" ends the run.
+        self.sync_grab();
+        self.take_disconnect(event_loop);
         let renderer = self.renderer.as_mut().expect("checked above");
         let t0 = Instant::now();
         let (camera, sky, partial, vd, animation_tick) = frame_view(
@@ -1106,6 +1306,22 @@ impl App {
             }
         }
         let (w, h) = renderer.size();
+        if let Some(ui) = &self.ui {
+            // F3's numbers and the water overlay's flag, every frame (cheap: short mutexes,
+            // no allocation). The section counts are the previous frame's.
+            let view = *self.shared.view.lock();
+            let stats = self.frame_stats;
+            ui.set_debug(haste_jvm::DebugInfo {
+                fps: self.fps.fps as i32,
+                pos: [view.feet.x, view.feet.y, view.feet.z],
+                rot: [self.yaw, self.pitch],
+                chunks: self.shared.world.read().loaded_chunks().count() as i32,
+                sections_drawn: stats.chunk_sections_drawn as i32,
+                sections_total: stats.chunk_sections_total as i32,
+                entities: self.shared.entities.read().len() as i32,
+            });
+            ui.set_eye_in_water(view.eye_in_water);
+        }
         if let Some(ui) = &mut self.ui {
             self.gui = ui
                 .frame(w / GUI_SCALE, h / GUI_SCALE, GUI_SCALE, self.mouse, partial)
@@ -1128,6 +1344,9 @@ impl App {
             renderer.request_capture();
         }
         let result = renderer.render(&frame);
+        if let Ok(stats) = &result {
+            self.frame_stats = *stats;
+        }
         if let Some(result) = renderer.take_capture() {
             // Encode and write off the render thread: PNG compression of a full frame
             // would stall the frame loop (vanilla's chat line becomes a log line here).
@@ -1206,6 +1425,9 @@ impl ApplicationHandler for App {
                 // GUI-scaled pixels: physical size divided by the GUI scale.
                 let s = f64::from(GUI_SCALE);
                 self.mouse = (position.x / s, position.y / s);
+                if let Some(ui) = &self.ui {
+                    ui.mouse_moved(self.mouse.0, self.mouse.1);
+                }
             }
             WindowEvent::Resized(size) => {
                 if let Some(r) = &mut self.renderer {
@@ -1223,9 +1445,20 @@ impl ApplicationHandler for App {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } if !self.grabbed => self.set_grab(true),
-            WindowEvent::MouseInput { state, button, .. } if self.grabbed && self.focused => {
+            } if !self.grabbed && !self.screen_open() => self.set_grab(true),
+            WindowEvent::MouseInput { state, button, .. } if self.focused => {
                 let pressed = state == ElementState::Pressed;
+                // A screen takes the click at its GUI-scaled position; the first click into a
+                // just-opened screen also serves as the "click to focus" of the pre-screen era.
+                if let Some(ui) = &self.ui {
+                    if ui.mouse_button(self.mouse.0, self.mouse.1, vanilla_button(button), pressed)
+                    {
+                        return;
+                    }
+                }
+                if !self.grabbed {
+                    return;
+                }
                 match button {
                     MouseButton::Left => self.attack = pressed,
                     MouseButton::Right => self.use_item = pressed,
@@ -1233,11 +1466,22 @@ impl ApplicationHandler for App {
                     _ => {}
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } if self.grabbed && self.focused => {
-                self.scroll += match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y as f64,
-                    MouseScrollDelta::PixelDelta(p) => p.y / 40.0,
+            WindowEvent::MouseWheel { delta, .. } if self.focused => {
+                let (dx, dy) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (x as f64, y as f64),
+                    MouseScrollDelta::PixelDelta(p) => (p.x / 40.0, p.y / 40.0),
                 };
+                // A screen scrolls at its GUI-scaled position; the HUD's hotbar wheel needs
+                // whole notches (like vanilla: one slot per notch).
+                if let Some(ui) = &self.ui {
+                    if ui.scroll(self.mouse.0, self.mouse.1, dx, dy) {
+                        return;
+                    }
+                }
+                if !self.grabbed {
+                    return;
+                }
+                self.scroll += dy;
                 let steps = self.scroll.trunc() as i32;
                 if steps != 0 {
                     self.scroll -= steps as f64;
@@ -1254,14 +1498,46 @@ impl ApplicationHandler for App {
                         physical_key: PhysicalKey::Code(code),
                         state,
                         repeat,
+                        text,
                         ..
                     },
                 ..
             } => {
                 let pressed = state == ElementState::Pressed;
+                // Track the keymod bits first: they go into the same event's mods.
+                match code {
+                    KeyCode::ControlLeft | KeyCode::ControlRight => self.mods.0 = pressed,
+                    KeyCode::ShiftLeft | KeyCode::ShiftRight => self.mods.1 = pressed,
+                    KeyCode::AltLeft | KeyCode::AltRight => self.mods.2 = pressed,
+                    _ => {}
+                }
+                let mods = sdl_keymod(self.mods.0, self.mods.1, self.mods.2);
+                // The UI goes first: an open screen takes every key and typed character
+                // (Escape, the chat's typing, the inventory's search box), including key
+                // repeats (held Backspace in the chat box); with no screen it takes the HUD's
+                // keys (T, /, E, Escape, F1, F3, Tab, the hotbar digits), first press only.
+                // Only a false return falls through to the game's own handling below.
+                if let (Some(ui), Some(sc)) = (&self.ui, sdl_scancode(code)) {
+                    let forward = key_goes_to_ui(repeat, self.screen_open());
+                    let used = forward && ui.key(sc, keys::keycode(sc), mods, pressed);
+                    if let (Some(c), true) = (typed_char_of(text.as_deref()), pressed) {
+                        ui.char_typed(c, mods);
+                    }
+                    if !game_uses_key(used, self.screen_open()) {
+                        // The UI took it: whatever the game thought was held must go.
+                        self.keys.remove(&code);
+                        return;
+                    }
+                } else if self.screen_open() {
+                    self.keys.remove(&code);
+                    return;
+                }
                 if pressed && !repeat {
                     match code {
                         KeyCode::Escape => {
+                            // Not consumed by the UI (no screen): vanilla's Escape has no
+                            // game meaning beyond opening the pause menu, so this only frees
+                            // the cursor for the pre-UI behaviour.
                             self.set_grab(false);
                             self.release_keys();
                         }
@@ -1358,6 +1634,8 @@ struct FpsCounter {
     frames: u32,
     worst_ms: f32,
     last: Instant,
+    /// Smoothed frames per second (the F3 overlay reads it every frame).
+    fps: f32,
     /// Per-phase sums since the last breakdown: feed, entities, render, and the renderer's
     /// own phases; logged every 2 s.
     phase_sum: [f32; 3],
@@ -1374,6 +1652,7 @@ impl FpsCounter {
             frames: 0,
             worst_ms: 0.0,
             last: now,
+            fps: 0.0,
             phase_sum: [0.0; 3],
             render_sum: Default::default(),
             phase_frames: 0,
@@ -1437,6 +1716,14 @@ impl FpsCounter {
         self.last = now;
         self.frames += 1;
         self.worst_ms = self.worst_ms.max(dt);
+        // Exponential moving average: smooth enough for F3's every-frame read, settles within
+        // a second of a real change.
+        let instant = 1000.0 / dt.max(0.001);
+        self.fps = if self.fps == 0.0 {
+            instant
+        } else {
+            self.fps * 0.95 + instant * 0.05
+        };
         let span = now.duration_since(self.since).as_secs_f32();
         if span < 0.5 {
             return None;
@@ -1479,6 +1766,104 @@ mod tests {
         assert_eq!(look_deg_per_pixel(0.0), 0.0096);
         // Max sensitivity: 0.8^3 * 8 * 0.15.
         assert!((look_deg_per_pixel(1.0) - 0.6144).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sdl_scancodes_match_the_hid_usage_table() {
+        use haste_jvm::keys as sdl;
+        // Letters, digits and punctuation: the consecutive HID ranges.
+        assert_eq!(sdl_scancode(KeyCode::KeyA), Some(4));
+        assert_eq!(sdl_scancode(KeyCode::KeyZ), Some(29));
+        assert_eq!(sdl_scancode(KeyCode::Digit1), Some(sdl::NUM_1));
+        assert_eq!(sdl_scancode(KeyCode::Digit0), Some(sdl::NUM_0));
+        assert_eq!(sdl_scancode(KeyCode::Slash), Some(56));
+        // The control keys and F1-F12, one entry each.
+        assert_eq!(sdl_scancode(KeyCode::Escape), Some(41));
+        assert_eq!(sdl_scancode(KeyCode::Enter), Some(40));
+        assert_eq!(sdl_scancode(KeyCode::Backspace), Some(42));
+        assert_eq!(sdl_scancode(KeyCode::Tab), Some(43));
+        assert_eq!(sdl_scancode(KeyCode::Space), Some(44));
+        assert_eq!(sdl_scancode(KeyCode::Delete), Some(76));
+        assert_eq!(sdl_scancode(KeyCode::Home), Some(74));
+        assert_eq!(sdl_scancode(KeyCode::End), Some(77));
+        assert_eq!(sdl_scancode(KeyCode::PageUp), Some(75));
+        assert_eq!(sdl_scancode(KeyCode::PageDown), Some(78));
+        assert_eq!(sdl_scancode(KeyCode::ArrowUp), Some(82));
+        assert_eq!(sdl_scancode(KeyCode::ArrowDown), Some(81));
+        assert_eq!(sdl_scancode(KeyCode::ArrowLeft), Some(80));
+        assert_eq!(sdl_scancode(KeyCode::ArrowRight), Some(79));
+        for (i, code) in [
+            KeyCode::F1,
+            KeyCode::F2,
+            KeyCode::F3,
+            KeyCode::F4,
+            KeyCode::F5,
+            KeyCode::F6,
+            KeyCode::F7,
+            KeyCode::F8,
+            KeyCode::F9,
+            KeyCode::F10,
+            KeyCode::F11,
+            KeyCode::F12,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(sdl_scancode(code), Some(58 + i as i32), "{code:?}");
+        }
+        // Modifiers: the shared left codes, the right ones one up.
+        assert_eq!(sdl_scancode(KeyCode::ControlLeft), Some(224));
+        assert_eq!(sdl_scancode(KeyCode::ShiftLeft), Some(225));
+        assert_eq!(sdl_scancode(KeyCode::ControlRight), Some(228));
+        assert_eq!(sdl_scancode(KeyCode::ShiftRight), Some(229));
+        // The keycodes the screens match on (the US-layout mapping of the scancode).
+        assert_eq!(keys::keycode(sdl_scancode(KeyCode::Escape).unwrap()), 27);
+        assert_eq!(keys::keycode(sdl_scancode(KeyCode::Enter).unwrap()), 13);
+        assert_eq!(keys::keycode(sdl_scancode(KeyCode::Backspace).unwrap()), 8);
+    }
+
+    #[test]
+    fn sdl_keymod_combines_the_modifier_masks() {
+        use haste_jvm::keys as sdl;
+        assert_eq!(sdl_keymod(false, false, false), 0);
+        assert_eq!(sdl_keymod(true, false, false), sdl::MOD_CONTROL);
+        assert_eq!(sdl_keymod(false, true, false), sdl::MOD_SHIFT);
+        assert_eq!(sdl_keymod(false, false, true), sdl::MOD_ALT);
+        let all = sdl_keymod(true, true, true);
+        assert_eq!(all & sdl::MOD_CONTROL, sdl::MOD_CONTROL);
+        assert_eq!(all & sdl::MOD_SHIFT, sdl::MOD_SHIFT);
+        assert_eq!(all & sdl::MOD_ALT, sdl::MOD_ALT);
+    }
+
+    #[test]
+    fn typed_char_takes_the_first_character() {
+        assert_eq!(typed_char_of(None), None);
+        assert_eq!(typed_char_of(Some("a")), Some('a'));
+        assert_eq!(typed_char_of(Some("é")), Some('é'));
+    }
+
+    #[test]
+    fn key_routing_goes_to_the_ui_first() {
+        // With no screen: the first press and the release reach the UI, repeats do not
+        // (holding a HUD key must not re-trigger).
+        assert!(key_goes_to_ui(false, false));
+        assert!(key_goes_to_ui(false, true));
+        assert!(!key_goes_to_ui(true, false));
+        // With a screen open: everything reaches it, repeats included (held Backspace in
+        // the chat box).
+        assert!(key_goes_to_ui(true, true));
+    }
+
+    #[test]
+    fn key_routing_blocks_game_input_when_the_ui_takes_it() {
+        // The UI used it: no game input, screen or not.
+        assert!(!game_uses_key(true, false));
+        assert!(!game_uses_key(true, true));
+        // The UI did not use it and no screen is open: the game may use it.
+        assert!(game_uses_key(false, false));
+        // A screen is open: no game input even for keys the screen ignored (movement stops
+        // while chat or the inventory is up).
+        assert!(!game_uses_key(false, true));
     }
 
     fn sample(frame_ms: f32) -> BenchSample {
