@@ -221,6 +221,163 @@ fn render(h: &JvmHost, mouse: (f64, f64)) -> haste_core::gui::GuiFrame {
     }
 }
 
+/// A pipeline Haste did not build, the way a mod registers one: a location of the mod's own and a blend
+/// function of four blend factors (src colour, dst colour, src alpha, dst alpha), on vanilla's builder.
+fn mod_pipeline<'local>(
+    h: &JvmHost,
+    env: &mut jni::Env<'local>,
+    location: &str,
+    factors: [&str; 4],
+) -> Result<JObject<'local>, haste_jvm::JvmError> {
+    let bf = h.load_class(env, "com.mojang.renderpearl.api.pipeline.BlendFactor")?;
+    let function = h.load_class(env, "com.mojang.renderpearl.api.pipeline.BlendFunction")?;
+    let target_class = h.load_class(env, "com.mojang.renderpearl.api.pipeline.ColorTargetState")?;
+    let snippet = h.load_class(
+        env,
+        "com.mojang.renderpearl.api.pipeline.RenderPipeline$Snippet",
+    )?;
+    let pipeline = h.load_class(env, "com.mojang.renderpearl.api.pipeline.RenderPipeline")?;
+    let topology_class =
+        h.load_class(env, "com.mojang.renderpearl.api.pipeline.PrimitiveTopology")?;
+    let mut factor_objects = Vec::with_capacity(4);
+    for name in factors {
+        let name = jni::strings::JNIString::new(name);
+        factor_objects.push(
+            env.get_static_field(
+                &bf,
+                &name,
+                jni_sig!("Lcom/mojang/renderpearl/api/pipeline/BlendFactor;"),
+            )?
+            .l()?,
+        );
+    }
+    let factor_args: Vec<JValue> = factor_objects.iter().map(JValue::Object).collect();
+    let blend = env.new_object(
+        &function,
+        jni_sig!("(Lcom/mojang/renderpearl/api/pipeline/BlendFactor;Lcom/mojang/renderpearl/api/pipeline/BlendFactor;Lcom/mojang/renderpearl/api/pipeline/BlendFactor;Lcom/mojang/renderpearl/api/pipeline/BlendFactor;)V"),
+        &factor_args,
+    )?;
+    let target = env.new_object(
+        &target_class,
+        jni_sig!("(Lcom/mojang/renderpearl/api/pipeline/BlendFunction;)V"),
+        &[JValue::Object(&blend)],
+    )?;
+    let snippets = env.new_object_array(0, &snippet, JObject::null())?;
+    let builder = env
+        .call_static_method(
+            &pipeline,
+            jni_str!("builder"),
+            jni_sig!("([Lcom/mojang/renderpearl/api/pipeline/RenderPipeline$Snippet;)Lcom/mojang/renderpearl/api/pipeline/RenderPipeline$Builder;"),
+            &[JValue::Object(&snippets)],
+        )?
+        .l()?;
+    let shader = JString::from_str(env, location)?;
+    let _ = env.call_method(
+        &builder,
+        jni_str!("withLocation"),
+        jni_sig!(
+            "(Ljava/lang/String;)Lcom/mojang/renderpearl/api/pipeline/RenderPipeline$Builder;"
+        ),
+        &[JValue::Object(&shader)],
+    )?;
+    let _ = env.call_method(
+        &builder,
+        jni_str!("withVertexShader"),
+        jni_sig!(
+            "(Ljava/lang/String;)Lcom/mojang/renderpearl/api/pipeline/RenderPipeline$Builder;"
+        ),
+        &[JValue::Object(&shader)],
+    )?;
+    let _ = env.call_method(
+        &builder,
+        jni_str!("withFragmentShader"),
+        jni_sig!(
+            "(Ljava/lang/String;)Lcom/mojang/renderpearl/api/pipeline/RenderPipeline$Builder;"
+        ),
+        &[JValue::Object(&shader)],
+    )?;
+    let _ = env.call_method(
+        &builder,
+        jni_str!("withColorTargetState"),
+        jni_sig!("(Lcom/mojang/renderpearl/api/pipeline/ColorTargetState;)Lcom/mojang/renderpearl/api/pipeline/RenderPipeline$Builder;"),
+        &[JValue::Object(&target)],
+    )?;
+    let topology = env
+        .get_static_field(
+            &topology_class,
+            jni_str!("QUADS"),
+            jni_sig!("Lcom/mojang/renderpearl/api/pipeline/PrimitiveTopology;"),
+        )?
+        .l()?;
+    let _ = env.call_method(
+        &builder,
+        jni_str!("withPrimitiveTopology"),
+        jni_sig!("(Lcom/mojang/renderpearl/api/pipeline/PrimitiveTopology;)Lcom/mojang/renderpearl/api/pipeline/RenderPipeline$Builder;"),
+        &[JValue::Object(&topology)],
+    )?;
+    let p = env
+        .call_method(
+            &builder,
+            jni_str!("build"),
+            jni_sig!("()Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;"),
+            &[],
+        )?
+        .l()?;
+    Ok(unsafe { JObject::from_raw(env, p.into_raw()) })
+}
+
+/// The blend mode `haste.gui.Pipelines` maps a pipeline to (0 normal, 1 multiply, 2 invert).
+fn blend_of(h: &JvmHost, env: &mut jni::Env, p: &JObject) -> i32 {
+    let cls = h.load_class(env, "haste.gui.Pipelines").expect("Pipelines");
+    env.call_static_method(
+        &cls,
+        jni_str!("blendOf"),
+        jni_sig!("(Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;)I"),
+        &[JValue::Object(p)],
+    )
+    .expect("blendOf")
+    .i()
+    .expect("blendOf returns an int")
+}
+
+/// A mod's own pipeline maps by its blend function, not by its name: the vignette's multiplies, the
+/// crosshair's inverts, and one Haste has no mode for (additive, like the nausea overlay) draws normal.
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn pipeline_blend_maps_by_blend_function() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    h.with_env(|env| -> Result<(), haste_jvm::JvmError> {
+        let vignette = mod_pipeline(
+            &h,
+            env,
+            "test_mod_vignette",
+            ["ZERO", "ONE_MINUS_SRC_COLOR", "ZERO", "ONE"],
+        )?;
+        assert_eq!(blend_of(&h, env, &vignette), 1);
+        let crosshair = mod_pipeline(
+            &h,
+            env,
+            "test_mod_crosshair",
+            ["ONE_MINUS_DST_COLOR", "ONE_MINUS_SRC_COLOR", "ONE", "ZERO"],
+        )?;
+        assert_eq!(blend_of(&h, env, &crosshair), 2);
+        // a GUI pipeline whose blend Haste has no mode for: the nausea overlay draws normally
+        let pipelines = h.load_class(env, "net.minecraft.client.renderer.RenderPipelines")?;
+        let nausea = env
+            .get_static_field(
+                &pipelines,
+                jni_str!("GUI_NAUSEA_OVERLAY"),
+                jni_sig!("Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;"),
+            )?
+            .l()?;
+        assert!(!nausea.is_null(), "the GUI's pipelines are installed");
+        assert_eq!(blend_of(&h, env, &nausea), 0);
+        Ok(())
+    })
+    .expect("pipeline blend mapping");
+}
+
 #[test]
 #[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
 fn pause_screen() {

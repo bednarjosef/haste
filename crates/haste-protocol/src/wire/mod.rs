@@ -10,6 +10,7 @@
 //! (26.3, protocol 777). VarInt/VarLong decoding comes from Pumpkin (`varint`).
 
 pub mod component;
+pub mod components;
 pub mod particle;
 pub mod slot;
 pub mod varint;

@@ -11,6 +11,8 @@
 //! Verified against the wiki's Chunk Format page (1.21.5+ section layout) and the 26.3
 //! protocol docs (see NOTES.md for what was checked).
 
+use std::sync::atomic::AtomicBool;
+
 use haste_core::BlockStateId;
 
 /// Number of entries in a block section container (16^3) and a biome container (4^3 per section).
@@ -77,6 +79,17 @@ impl<'a> WireReader<'a> {
         Ok(i64::from_be_bytes(b.try_into().unwrap()))
     }
 
+    /// Takes `n` bytes in one bounds check (bulk reads: packed data arrays).
+    pub fn take(&mut self, n: usize) -> Result<&'a [u8], PaletteError> {
+        let end = self.pos.checked_add(n).ok_or(PaletteError::UnexpectedEof)?;
+        let s = self
+            .data
+            .get(self.pos..end)
+            .ok_or(PaletteError::UnexpectedEof)?;
+        self.pos = end;
+        Ok(s)
+    }
+
     pub fn remaining(&self) -> usize {
         self.data.len() - self.pos
     }
@@ -133,6 +146,25 @@ impl PackedArray {
     pub fn long_count(bits: u8, entries: usize) -> usize {
         let per_long = 64 / bits as usize;
         entries.div_ceil(per_long)
+    }
+
+    /// A zeroed array for `entries` entries at `bits` per entry (tests and benches build
+    /// wire payloads with it).
+    pub fn zeroed(bits: u8, entries: usize) -> Self {
+        Self {
+            bits,
+            longs: vec![0; Self::long_count(bits, entries)],
+        }
+    }
+
+    /// Bit width per entry.
+    pub fn bits(&self) -> u8 {
+        self.bits
+    }
+
+    /// The packed longs (big-endian on the wire; entry 0 in the low bits of each long).
+    pub fn longs(&self) -> &[i64] {
+        &self.longs
     }
 
     pub fn read_at(&self, i: usize) -> u32 {
@@ -331,9 +363,12 @@ impl<T: WireId> PalettedContainer<T> {
             return Err(PaletteError::BadBits(bits));
         }
         let longs = PackedArray::long_count(bits, capacity);
+        // one bounds check for the whole array, then a bulk big-endian conversion
+        // (a per-long `i64_be` costs a slice `get` + try_into per 8 bytes)
+        let bytes = r.take(longs * 8)?;
         let mut v = Vec::with_capacity(longs);
-        for _ in 0..longs {
-            v.push(r.i64_be()?);
+        for c in bytes.as_chunks::<8>().0 {
+            v.push(i64::from_be_bytes(*c));
         }
         Ok(PackedArray { bits, longs: v })
     }
@@ -537,6 +572,47 @@ impl PalettedContainer<BlockStateId> {
     pub fn get_block(&self, x: u8, y: u8, z: u8) -> BlockStateId {
         BlockStateId(self.get_index(flat_index(x, y, z)))
     }
+
+    /// Largest block-state id in this container that is outside the local table (`table_len`
+    /// states), if any. A modded server can send ids past the end of our data-generator table;
+    /// they decode fine and read back as the placeholder state.
+    pub fn largest_unknown_id(&self, table_len: u32) -> Option<u32> {
+        match &self.storage {
+            Storage::Single(v) => (*v >= table_len).then_some(*v),
+            Storage::Indirect { palette, .. } => {
+                palette.iter().copied().filter(|&v| v >= table_len).max()
+            }
+            Storage::Direct(data) => (0..self.capacity)
+                .map(|i| data.read_at(i))
+                .filter(|&v| v >= table_len)
+                .max(),
+        }
+    }
+}
+
+/// Set the first time any chunk decodes an out-of-range block-state id: a modded server
+/// sent an id our local table does not know. Logged once per session.
+static UNKNOWN_BLOCK_STATE_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// Logs a one-per-session warning that a chunk contained a block-state id outside the table,
+/// naming the largest id seen and the table size. `warned` is the session flag; returns
+/// whether this call logged (false when an earlier call already did).
+pub fn warn_unknown_block_state_once(warned: &AtomicBool, largest: u32, table_len: u32) -> bool {
+    if warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    tracing::warn!(
+        largest,
+        table_len,
+        "chunk block-state id outside the local table (modded server?); \
+         unknown ids collide and render as the placeholder"
+    );
+    true
+}
+
+/// Session-wide entry point for the once-per-session unknown-block-state warning.
+pub fn warn_unknown_block_state(largest: u32, table_len: u32) {
+    warn_unknown_block_state_once(&UNKNOWN_BLOCK_STATE_WARNED, largest, table_len);
 }
 
 impl PalettedContainer<haste_core::BiomeId> {
@@ -793,6 +869,44 @@ mod tests {
             PalettedContainer::<BlockStateId>::decode_sections(&w.data, 2, 15, 3)
                 .map_or(true, |s| s[0].biomes.get_index(63) != 66)
         );
+    }
+
+    /// A modded server can send ids past the end of the local table: the container decodes
+    /// them fine and reports the largest one for the once-per-session warning.
+    #[test]
+    fn largest_unknown_id_per_storage() {
+        // single-value
+        assert_eq!(BlockContainer::single(999).largest_unknown_id(6), Some(999));
+        assert_eq!(BlockContainer::single(3).largest_unknown_id(6), None);
+        // indirect: the palette holds the global ids
+        let c = BlockContainer::indirect(vec![1, 2, 999], &[1, 999, 2]);
+        assert_eq!(c.largest_unknown_id(6), Some(999));
+        assert_eq!(
+            BlockContainer::indirect(vec![1, 2, 3], &[1, 2, 3]).largest_unknown_id(6),
+            None
+        );
+        // direct: raw ids in the packed array
+        let mut data = PackedArray {
+            bits: 15,
+            longs: vec![0; PackedArray::long_count(15, BLOCKS_PER_SECTION)],
+        };
+        data.write_at(100, 4242);
+        let c = BlockContainer {
+            storage: Storage::Direct(data),
+            capacity: BLOCKS_PER_SECTION,
+            _marker: std::marker::PhantomData,
+        };
+        assert_eq!(c.largest_unknown_id(6), Some(4242));
+        assert_eq!(c.largest_unknown_id(5000), None);
+    }
+
+    /// The unknown-block-state warning fires once per session, naming the first (largest) id.
+    #[test]
+    fn unknown_block_state_warning_fires_once() {
+        let warned = AtomicBool::new(false);
+        assert!(warn_unknown_block_state_once(&warned, 999, 6));
+        assert!(!warn_unknown_block_state_once(&warned, 1234, 6));
+        assert!(warned.load(std::sync::atomic::Ordering::Relaxed));
     }
 }
 

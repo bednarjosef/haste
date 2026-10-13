@@ -620,14 +620,16 @@ impl Renderer {
             tracing::warn!("colormaps unavailable ({e:#}): uniform grass/foliage colour");
             crate::tint::Colormaps::uniform(0x91BD59)
         });
-        mesher.set_tables(crate::mesher::MeshTables {
-            tints: Arc::new(crate::tint::TintTable::new(states)),
-            colors: Arc::new(crate::tint::BiomeColors::new(&[], &colormaps)),
-            fluids: Arc::new(crate::fluid::FluidTable::new(
+        mesher.set_tables(crate::mesher::MeshTables::new(
+            Arc::new(crate::tint::TintTable::new(states)),
+            Arc::new(crate::tint::BiomeColors::new(&[], &colormaps)),
+            Arc::new(crate::fluid::FluidTable::new(
                 states,
+                &crate::fluid::Fluids::vanilla(&crate::fluid::FluidSprites::from_atlas(&*atlas)),
+                &crate::fluid::FluidRules::vanilla(),
                 crate::fluid::FluidSprites::from_atlas(&*atlas),
             )),
-        });
+        ));
         let arenas = MeshArenas::new(gpu.device.clone(), gpu.queue.clone());
         let timer = crate::timing::GpuTimer::new(&gpu.device, &gpu.queue);
         let origin_buffer = Self::make_origin_buffer(&gpu.device, 4096);
@@ -1333,15 +1335,38 @@ impl Renderer {
         {
             self.vis_dirty = false;
             self.last_walk = std::time::Instant::now();
-            let vis = &self.section_vis;
+            // Dense per-grid copy of the section visibility sets: the walk reads
+            // each visited section's set once, and a slice index beats an
+            // ahash probe per node.
+            let r = self.view_distance + 1;
+            let w = 2 * r + 1;
+            let h = self.section_count;
+            let mut dense = vec![crate::occlusion::VisibilitySet::all(); (w * w * h) as usize];
+            for ((c, si), v) in &self.section_vis {
+                let dx = c.x - cam_section.x + r;
+                let dz = c.z - cam_section.z + r;
+                if dx < 0 || dz < 0 || dx >= w || dz >= w || *si < 0 || *si >= h {
+                    continue;
+                }
+                dense[((dx * w + dz) * h + *si) as usize] = *v;
+            }
+            let cx = cam_section.x;
+            let cz = cam_section.z;
             self.visible_mask = crate::occlusion::compute_visible_mask(
-                |c, si| vis.get(&(c, si)).copied(),
-                ChunkPos::new(cam_section.x, cam_section.z),
+                move |c, si| {
+                    let dx = c.x - cx + r;
+                    let dz = c.z - cz + r;
+                    if dx < 0 || dz < 0 || dx >= w || dz >= w || si < 0 || si >= h {
+                        return None;
+                    }
+                    Some(dense[((dx * w + dz) * h + si) as usize])
+                },
+                ChunkPos::new(cx, cz),
                 cam_section.y - self.min_section,
                 cam,
                 self.min_section * 16,
                 self.section_count,
-                self.view_distance + 1,
+                r,
             );
             self.visible_for = Some((cam_section, self.view_distance));
         }

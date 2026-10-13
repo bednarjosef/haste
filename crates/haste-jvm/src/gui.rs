@@ -71,6 +71,7 @@ struct Methods {
     mouse: jni::objects::JMethodID,
     scroll: jni::objects::JMethodID,
     metrics_changed: jni::objects::JMethodID,
+    blend_debug: jni::objects::JMethodID,
     mouse_grabbed: jni::objects::JMethodID,
     set_mouse_grabbed: jni::objects::JMethodID,
 }
@@ -113,6 +114,11 @@ impl GuiPipeline {
                 &cls,
                 jni_str!("metricsChanged"),
                 jni_sig!("()V"),
+            )?,
+            blend_debug: env.get_method_id(
+                &cls,
+                jni_str!("blendDebug"),
+                jni_sig!("()Ljava/lang/String;"),
             )?,
             mouse_grabbed: env.get_method_id(&cls, jni_str!("mouseGrabbed"), jni_sig!("()Z"))?,
             set_mouse_grabbed: env.get_method_id(
@@ -316,6 +322,14 @@ impl GuiPipeline {
         if let Err(e) = self.call(self.m.metrics_changed, VOID, &[], |_, _| Ok(())) {
             self.failed("set_text_metrics", e);
         }
+    }
+
+    /// Where the last frame's blend modes came from: the pipeline and the name counts, then the
+    /// multiply/invert blits' pipelines as `<pipeline location> <code> <count>` lines.
+    pub fn blend_debug(&self) -> Result<String> {
+        self.call(self.m.blend_debug, JavaType::Object, &[], |env, v| {
+            jstring_to_string(env, v.l()?)
+        })
     }
 
     /// Reads or updates the Rust-owned state the proxies see (inventory mirror, chat history, outbox).

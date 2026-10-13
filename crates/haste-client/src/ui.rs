@@ -26,8 +26,8 @@
 //!
 //! `Ui` is cheap to clone: give the game thread and the render thread one each (the JVM side is
 //! serialised internally; each clone has its own frame buffer).
-// The input methods (key, char_typed, mouse_moved, mouse_button, scroll) are not wired into the
-// window yet: keyboard/mouse routing to screens is a later task.
+// The input methods (key, char_typed, mouse_moved, mouse_button, scroll) are called from app.rs's
+// winit event loop, which translates winit's keys to the SDL numbering haste_jvm::keys expects.
 #![allow(dead_code)]
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
