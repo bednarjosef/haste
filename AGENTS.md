@@ -39,6 +39,48 @@ vanilla client with the mod architecture designed in and no mod support yet.
    into `cache/datagen/26.3/reports`). Collision shapes, entity dimensions and the like come from
    the recorder mod's oracle dumps in `cache/oracle/26.3`.
 
+## Built for mods (read this whatever your task is)
+
+Phase 1 is a vanilla client, but everything in it will later host Fabric mods through the
+compatibility layer (Phase 2: Mixin handlers at Rust landmarks with Rust-owned state, vanilla
+objects as generated proxies; see the architecture above). Write Phase 1 code so that layer can
+be added without rewriting it:
+
+- **Keep vanilla's seams.** Split behaviour where vanilla splits it (per-tick steps, render
+  passes per renderer, one handler per packet, screens, block entity and entity renderers), so
+  every place a mod injects into in vanilla has a matching function in Haste where a landmark can
+  go. Do not fold several vanilla steps into one opaque loop.
+- **Name things after vanilla's concepts** (Screen, EntityRenderer, BlockEntity, registry ids),
+  so the proxy generator and Mixin targets map onto them.
+- **Everything registry-driven.** Mods add blocks, items, entities, particles, sounds, screens:
+  take them from registries and game data (rule 7), never from closed hard-coded lists, and
+  handle ids you have never seen (draw a placeholder, play nothing, log once) instead of
+  panicking.
+- **Stable identity for game objects.** One Rust object per world/entity/block entity for its
+  whole lifetime, addressable by a stable handle (rule 2): mods keep references and state on them.
+- **Tier 3 stays real vanilla Java** (UI, codecs, value types), so mod screens and mod-added
+  GUI code keep working.
+- If a design choice might block mods later, say so in your report.
+
+## Performance is the product
+
+Haste exists to be faster than vanilla and than vanilla with Sodium; client performance comes
+first, and for anything on the frame path (renderer, meshing, entities, particles, GUI drawing)
+it is the top priority.
+
+- **Measure every rendering change**, before and after: the renderer's per-frame timing
+  breakdown (feed, entities, cull, encode, submit, GPU time per pass) in the window, and the
+  offscreen benchmark at render distance 12 and 32 on a normal world. Put the numbers (average and
+  worst frame) in your report and the PR. A change that makes frames slower is not done until it
+  wins the time back or the lead accepts the trade.
+- **Rules on the frame path:** no heap allocation per frame, per entity or per section (reuse
+  buffers); no draw call per object (batch into one draw list per pass, instanced or merged);
+  never block the render thread on the game thread, I/O or a GPU readback; anything that can run
+  off the render thread does (meshing, decoding, uploads prepared ahead).
+- **Elsewhere:** no per-block allocations in meshing or physics, no per-packet allocations beyond
+  the packet itself, no locks held across I/O.
+- Measure before claiming; numbers beat adjectives.
+
 ## How the team works
 
 - The **lead** owns `haste-core`, `docs/INTERFACES.md`, `crates/haste-client/src/main.rs`,
@@ -53,8 +95,7 @@ vanilla client with the mod architecture designed in and no mod support yet.
   next to the code; anything needing the cache (jars, reports) is `#[ignore]`d unless the cache
   exists, and says so.
 - Write `NOTES.md`-worthy decisions and dead ends in your report; the lead copies them in.
-- Performance matters everywhere: no per-block allocations in meshing or physics, no per-packet
-  allocations beyond the packet itself, no locks held across I/O. Measure before claiming.
+- Performance and mod-readiness rules are in the two sections above; they apply to every task.
 - Absolute paths in reports. Cite `file:line` for anything you want the lead to look at.
 
 ## Branches and merging

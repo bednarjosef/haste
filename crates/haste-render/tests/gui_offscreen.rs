@@ -2,7 +2,7 @@
 //! GUI scale 2 and probed at known pixels. Saves `target/render-checks/gui.png` for a human look.
 //! Needs the client jar, the datagen reports and a Vulkan driver (source scripts/env.sh).
 
-use haste_core::gui::{GuiCommand, GuiFrame, TextStyle};
+use haste_core::gui::{GuiBlend, GuiCommand, GuiFrame, TextStyle};
 use haste_core::{Identifier, RegistryIndex};
 use haste_render::{Camera, FrameInput, Renderer, SkyState};
 
@@ -39,6 +39,7 @@ fn sprite(name: &str, x: i32, y: i32, w: i32, h: i32) -> GuiCommand {
         w,
         h,
         tint: 0xFFFF_FFFF,
+        blend: GuiBlend::Normal,
     }
 }
 
@@ -146,6 +147,7 @@ fn frame(items: &[(RegistryIndex, &str)]) -> GuiFrame {
             tex_w: 256,
             tex_h: 256,
             tint: 0xFFFF_FFFF,
+            blend: GuiBlend::Normal,
         },
         GuiCommand::SpriteRegion {
             sprite: Identifier::minecraft("hud/experience_bar_progress"),
@@ -158,6 +160,7 @@ fn frame(items: &[(RegistryIndex, &str)]) -> GuiFrame {
             w: 91,
             h: 5,
             tint: 0xFFFF_FFFF,
+            blend: GuiBlend::Normal,
         },
         // Scissor: a blue fill larger than the clip.
         GuiCommand::ScissorPush {

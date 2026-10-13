@@ -3,7 +3,7 @@
 //! and a dispatch line when `Args.command` is `Some`.
 
 use anyhow::Context;
-use clap::Subcommand;
+use clap::{Parser, Subcommand};
 use std::time::Instant;
 
 /// The `haste` subcommands. `main.rs` owns the top-level flags (`--server`, `--headless`, ...);
@@ -13,11 +13,17 @@ pub enum Command {
     /// Download the 26.3 client/server jars, assets, libraries, JDK and run the data generator.
     /// Idempotent: a second run with everything present is fast.
     Setup,
-    /// Start the embedded singleplayer server and print the address to join.
+    /// Start the embedded singleplayer server and open the game window joined to it.
     Singleplayer {
         /// World name; the world lives under the config dir.
         #[arg(long, default_value = "world")]
         world: String,
+        /// Do not open the game window: print the address and wait for Ctrl-C (scripts, tests).
+        #[arg(long)]
+        no_window: bool,
+        /// Close the game window after this many seconds (unattended runs).
+        #[arg(long)]
+        window_seconds: Option<u64>,
     },
     /// Sign in with a Microsoft account (device-code flow) and store it in the config.
     Login,
@@ -38,17 +44,34 @@ pub enum Command {
 }
 
 /// Runs one subcommand. Blocking (own tokio runtime inside for the async steps).
-pub fn run(cmd: Command) -> anyhow::Result<()> {
+pub fn run(cmd: Command, username: &str) -> anyhow::Result<()> {
     match cmd {
         Command::Setup => run_setup(),
-        Command::Singleplayer { world } => tokio::runtime::Runtime::new()?.block_on(async move {
-            let (server, address) = start_singleplayer(&world).await?;
-            println!("singleplayer server on {address}; join with: haste --server {address}");
-            wait_for_ctrl_c().await;
-            server.stop().await;
+        Command::Singleplayer {
+            world,
+            no_window,
+            window_seconds,
+        } => {
+            let rt = tokio::runtime::Runtime::new()?;
+            let (server, address) = rt.block_on(start_singleplayer(&world))?;
+            if no_window {
+                println!("singleplayer server on {address}; join with: haste --server {address}");
+                rt.block_on(wait_for_ctrl_c());
+                rt.block_on(server.stop());
+                println!("server stopped");
+                return Ok(());
+            }
+            println!("singleplayer server on {address}; opening the game window");
+            // Outside `block_on` on the main thread: `app::run` builds its own runtime to
+            // join the server, which panics ("cannot start a runtime within a runtime")
+            // if it were called from inside this one.
+            let exit = crate::app::run(&client_args(address, username.to_string(), window_seconds));
+            // Whatever closed the window (user, `--window-seconds`, disconnect), the
+            // server comes down with it so no java process is left behind.
+            rt.block_on(server.stop());
             println!("server stopped");
-            Ok(())
-        }),
+            exit
+        }
         Command::Login => tokio::runtime::Runtime::new()?.block_on(run_login()),
         Command::Logout => run_logout(),
         Command::Vanilla {
@@ -57,6 +80,17 @@ pub fn run(cmd: Command) -> anyhow::Result<()> {
             username,
         } => run_vanilla(fabric, server, username),
     }
+}
+
+/// The client invocation for the singleplayer window: the plain defaults (`haste` with no
+/// flags, parsed so there is one source of truth for them) with the local server, the user's
+/// username and the window auto-close bound filled in.
+fn client_args(address: String, username: String, window_seconds: Option<u64>) -> crate::Args {
+    let mut args = crate::Args::parse_from(["haste"]);
+    args.server = Some(address);
+    args.username = username;
+    args.window_seconds = window_seconds;
+    args
 }
 
 /// `haste setup`: `ensure_installed` with a readable progress line per step. Byte progress is
@@ -296,6 +330,26 @@ mod tests {
         assert!(dir.ends_with(&expected), "world dir is {dir:?}");
         // a different world gets its own dir
         assert_ne!(singleplayer_world_dir("other"), dir);
+    }
+
+    #[test]
+    fn client_args_join_the_local_server() {
+        let args = client_args("127.0.0.1:25565".into(), "Steve".into(), Some(20));
+        assert_eq!(args.server.as_deref(), Some("127.0.0.1:25565"));
+        assert_eq!(args.username, "Steve");
+        assert_eq!(args.window_seconds, Some(20));
+        // nothing else is implied: windowed join, no screenshot, no ping
+        assert!(!args.headless);
+        assert!(!args.ping);
+        assert!(args.screenshot.is_none());
+        assert_eq!(args.vsync, None);
+    }
+
+    #[test]
+    fn client_args_default_username_when_unnamed() {
+        let args = client_args("127.0.0.1:1".into(), "haste".into(), None);
+        assert_eq!(args.username, "haste");
+        assert_eq!(args.window_seconds, None);
     }
 
     /// A fresh config path in the system temp dir (haste-client has no tempfile dev-dependency;

@@ -5,6 +5,21 @@ use crate::Identifier;
 /// Packed ARGB like vanilla (`0xAARRGGBB`).
 pub type Argb = u32;
 
+/// How a texture is blended over what is already there. Vanilla's GUI pipelines choose one per
+/// draw call; almost everything is `Normal` alpha blending, but the vignette multiplies (only
+/// darkens the edges, src ZERO / dst ONE_MINUS_SRC_COLOR) and the crosshair inverts the colour
+/// behind it (src ONE_MINUS_DST_COLOR / dst ONE_MINUS_SRC_COLOR).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GuiBlend {
+    /// Vanilla's `gui_textured`: straight alpha blending.
+    #[default]
+    Normal,
+    /// Vanilla's `vignette`: the result is the product of source and destination (darkens).
+    Multiply,
+    /// Vanilla's `crosshair`: the source inverts the colour behind it.
+    Invert,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum GuiCommand {
     /// Solid rectangle, x1/y1 inclusive, x2/y2 exclusive, in GUI pixels (scaled).
@@ -47,6 +62,8 @@ pub enum GuiCommand {
         tex_w: u32,
         tex_h: u32,
         tint: Argb,
+        /// The blend mode this blit was drawn with (vanilla picks per pipeline).
+        blend: GuiBlend,
     },
     /// A GUI sprite from the `gui` atlas (`minecraft:hud/hotbar` etc.), nine-slice handled by the renderer.
     Sprite {
@@ -56,6 +73,8 @@ pub enum GuiCommand {
         w: i32,
         h: i32,
         tint: Argb,
+        /// The blend mode this sprite was drawn with (the crosshair inverts).
+        blend: GuiBlend,
     },
     /// Item icon by item registry index (renderer looks up the model). `count` is informational:
     /// vanilla draws the count as a `Text` command itself, so the renderer must not draw it again.
@@ -89,6 +108,8 @@ pub enum GuiCommand {
         w: i32,
         h: i32,
         tint: Argb,
+        /// The blend mode this sprite was drawn with (the crosshair inverts).
+        blend: GuiBlend,
     },
     /// Text with vanilla style flags (one command per style run). `Text` is the unstyled form.
     StyledText {

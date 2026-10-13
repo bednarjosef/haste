@@ -668,15 +668,23 @@ impl NetDriver {
         self.conn.disconnect();
     }
 
-    /// Drains every queued packet into the session, world and entities, and sends the replies.
+    /// Drains every queued packet into the session, world, entities and the UI (the HUD: every
+    /// packet in order, after the client's own handling), and sends the replies.
     pub fn receive<W: WorldSink + ?Sized, E: EntitySink + ?Sized>(
         &mut self,
         world: &mut W,
         entities: &mut E,
+        ui: Option<&crate::ui::Ui>,
     ) -> anyhow::Result<()> {
         while let Some(p) = self.conn.try_recv() {
             let regs = self.conn.registries();
+            // The HUD sees every packet after the client's own handling, in order; cloning only
+            // when there is a UI to show it (the session takes the original).
+            let for_ui = ui.is_some().then(|| p.clone());
             self.session.apply(p, world, entities, regs, &mut self.out);
+            if let (Some(ui), Some(p)) = (ui, for_ui) {
+                ui.handle(&p);
+            }
         }
         self.flush()
     }
@@ -699,14 +707,14 @@ impl NetDriver {
         self.out.push(p);
     }
 
-    /// One 20 Hz tick: [`Self::receive`] then [`Self::end_tick`].
+    /// One 20 Hz tick: [`Self::receive`] then [`Self::end_tick`], without a HUD.
     pub fn tick<W: WorldSink + ?Sized, E: EntitySink + ?Sized>(
         &mut self,
         input: &InputState,
         world: &mut W,
         entities: &mut E,
     ) -> anyhow::Result<()> {
-        self.receive(world, entities)?;
+        self.receive(world, entities, None)?;
         self.end_tick(input, world, entities)
     }
 
