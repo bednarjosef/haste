@@ -662,7 +662,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let mut vd;
     // Settle phase: identical to the screenshot path (wait for position, meshing done, quiet).
     loop {
-        let (mut camera, sky, partial, v) = frame_view(
+        let (mut camera, sky, partial, v, animation_tick) = frame_view(
             &shared,
             0.0,
             0.0,
@@ -687,6 +687,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             breaking: &breaking,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
+        renderer.set_animation_tick(animation_tick);
         stats = renderer.render(&frame)?;
         if shared.is_closed() {
             anyhow::bail!(
@@ -728,7 +729,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         }
         // The bench camera follows its fixed path; the sky and entities come from the live view
         // (time of day moves, the player stays where the server put it).
-        let (_, mut sky, partial_tick, _) = frame_view(
+        let (_, mut sky, partial_tick, _, animation_tick) = frame_view(
             &shared,
             0.0,
             0.0,
@@ -753,6 +754,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             breaking: &breaking,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
+        renderer.set_animation_tick(animation_tick);
         let stats = renderer.render(&frame)?;
         samples.push(BenchSample {
             frame_ms: stats.frame_ms,
