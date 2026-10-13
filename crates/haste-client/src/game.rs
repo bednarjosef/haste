@@ -49,6 +49,16 @@ pub enum Perspective {
 }
 
 impl Perspective {
+    /// The `--perspective` screenshot flag's names.
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "first" => Ok(Perspective::FirstPerson),
+            "back" => Ok(Perspective::ThirdPersonBehind),
+            "front" => Ok(Perspective::ThirdPersonFront),
+            _ => anyhow::bail!("unknown perspective {s:?} (first, back or front)"),
+        }
+    }
+
     /// F5: the next perspective, vanilla's cycle.
     pub fn next(self) -> Self {
         match self {

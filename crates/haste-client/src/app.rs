@@ -405,38 +405,41 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut frames = 0u32;
     let mut stats;
     let mut last_camera;
+    let perspective = game::Perspective::parse(&args.perspective)?;
     loop {
+        // The look the shot is taken with: `--yaw`/`--pitch`, else the player's own (the
+        // input layer's zero look plus the server's rotation offset). It goes into
+        // `frame_view` so the third-person camera offset follows it. The player is made to
+        // look the same way, so its crosshair target (and the outline drawn for it) matches
+        // the picture.
+        let offset = shared.view.lock().look_offset;
+        let look = (args.yaw.unwrap_or(offset.0), args.pitch.unwrap_or(offset.1));
+        {
+            let mut input = shared.input.lock();
+            input.state.yaw = look.0 - offset.0;
+            input.state.pitch = (look.1 - offset.1).clamp(-90.0, 90.0);
+        }
         let (mut camera, sky, partial, vd) = frame_view(
             &shared,
-            game::Perspective::FirstPerson,
-            0.0,
-            0.0,
+            perspective,
+            look.0 - offset.0,
+            look.1 - offset.1,
             session.options.fov as f32,
             Instant::now(),
         );
-        camera.yaw = args.yaw.unwrap_or(camera.yaw);
-        camera.pitch = args.pitch.unwrap_or(camera.pitch);
         if let Some(pos) = want_pos {
             let view = *shared.view.lock();
-            camera.pos = pos + DVec3::new(0.0, view.eye_height, 0.0);
+            let eye = pos + DVec3::new(0.0, view.eye_height, 0.0);
+            camera.pos = if perspective.draws_player() {
+                let (world, shapes) = (shared.world.read(), &shared.data.shapes);
+                game::third_person_camera(perspective, eye, look.0, look.1, &*world, shapes).0
+            } else {
+                eye
+            };
         }
         last_camera = camera;
-        {
-            // The player looks where the screenshot camera looks, so its crosshair target
-            // (and the outline drawn for it) matches the picture.
-            let offset = shared.view.lock().look_offset;
-            let mut input = shared.input.lock();
-            input.state.yaw = camera.yaw - offset.0;
-            input.state.pitch = camera.pitch - offset.1;
-        }
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
-        let entities = feed.entities(
-            &shared,
-            &mut renderer,
-            game::Perspective::FirstPerson,
-            session.local,
-            partial,
-        );
+        let entities = feed.entities(&shared, &mut renderer, perspective, session.local, partial);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
         let frame = FrameInput {
@@ -493,8 +496,9 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("saving {}", file.display()))?;
     let c = last_camera;
     let view = *shared.view.lock();
+    let entities = feed.instances.len();
     println!(
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, target {:?}",
+        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} entity instances (perspective {}, local player {}), target {:?}",
         file.display(),
         image.width(),
         image.height(),
@@ -507,6 +511,9 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         stats.chunk_sections_drawn,
         stats.chunk_sections_total,
         stats.draw_calls,
+        entities,
+        args.perspective,
+        perspective.draws_player(),
         view.block_target
     );
     drop(session);
