@@ -87,9 +87,9 @@ These run as the game's own Java code inside Haste. The HUD is drawn in the game
 - ⬜ Elytra flight
 
 ### Sound
-- 🟡 Sound effects: sounds.json, variant choice and real audio output exist; not yet hooked to the game's sound events
-- 🟡 3D sound: distance falloff and stereo panning are computed and played by the audio output; not yet hooked to the game
-- 🟡 Music: tracks and pauses by situation are chosen; not yet started by the game
+- 🟡 Sound effects: the server's sounds play in the window (block, entity and stopped sounds, per-category volumes); not yet checked by ear
+- 🟡 3D sound: distance falloff and stereo panning from the player's eye, entity sounds follow the entity; not yet checked by ear
+- 🟡 Music: plays by situation (game, creative, underwater) with vanilla's pauses; not yet checked by ear
 - ⬜ Sounds of your own footsteps, block breaking and placing
 
 ## Try it
