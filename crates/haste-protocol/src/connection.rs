@@ -427,6 +427,9 @@ struct Io {
     enc: Encoder,
     tables: Arc<ProtocolTables>,
     stats: Arc<Stats>,
+    /// Which [cosmetic-loss packets](COSMETIC_LOSS_PACKETS) have already
+    /// warned on this connection.
+    warned: WarnedOnce,
 }
 
 impl Io {
@@ -438,6 +441,7 @@ impl Io {
             enc: TcpNetworkEncoder::new(w),
             tables,
             stats,
+            warned: WarnedOnce::default(),
         }
     }
 
@@ -465,11 +469,60 @@ fn encode<P: Packet>(tables: &ProtocolTables, state: State, p: &P) -> Result<Byt
     )
 }
 
+/// Packets whose loss the player only notices as a missing particle or a
+/// silent sound, so a body we cannot decode is dropped instead of ending the
+/// connection. Vanilla clients already ignore what they cannot decode here,
+/// and a server-side mod can register a particle type or sound that Haste's
+/// tables have never seen; `minecraft:level_particles`'s particle is the first
+/// field and has no length prefix, so the rest of the packet cannot be found
+/// either.
+///
+/// Everything else keeps ending the connection: `minecraft:explode` is
+/// deliberately absent, since the same particle field failing there also loses
+/// the knockback of an explosion that moves the player.
+const COSMETIC_LOSS_PACKETS: [&str; 4] = [
+    "minecraft:level_particles",
+    "minecraft:sound",
+    "minecraft:sound_entity",
+    "minecraft:stop_sound",
+];
+
+const _: () = assert!(COSMETIC_LOSS_PACKETS.len() <= u32::BITS as usize);
+
+/// Whether losing the packet named `name` is only cosmetic (it is in
+/// [`COSMETIC_LOSS_PACKETS`]).
+fn cosmetic_loss(name: &str) -> bool {
+    COSMETIC_LOSS_PACKETS.contains(&name)
+}
+
+/// Which of [`COSMETIC_LOSS_PACKETS`] have already warned on one connection,
+/// as one bit per name. The set of names is fixed and tiny, so this needs no
+/// allocation on the packet path and no map per packet.
+#[derive(Default)]
+struct WarnedOnce(u32);
+
+impl WarnedOnce {
+    /// `true` the first time `name` in [`COSMETIC_LOSS_PACKETS`] is seen, and
+    /// `false` after: names outside the list have no bit and always `false`.
+    fn mark(&mut self, name: &str) -> bool {
+        let Some(i) = COSMETIC_LOSS_PACKETS.iter().position(|n| *n == name) else {
+            return false;
+        };
+        let bit = 1u32 << i;
+        if self.0 & bit != 0 {
+            return false;
+        }
+        self.0 |= bit;
+        true
+    }
+}
+
 fn decode_with<T>(
     d: &Dispatch<T>,
     raw: &crate::transport::RawPacket,
     tables: &ProtocolTables,
     state: State,
+    warned: &mut WarnedOnce,
 ) -> Result<Option<T>, ProtocolError> {
     match d.decode(raw.id, &raw.payload, Some(tables)) {
         Decoded::Ok(p) => Ok(Some(p)),
@@ -481,7 +534,19 @@ fn decode_with<T>(
             );
             Ok(None)
         }
-        Decoded::Failed(name, e) => Err(ProtocolError::Decode(name, e)),
+        Decoded::Failed(name, e) => {
+            if !cosmetic_loss(name) {
+                return Err(ProtocolError::Decode(name, e));
+            }
+            // Cosmetic loss: warn once per name and drop the packet. The rest
+            // of the body cannot be skipped either (`level_particles`'s
+            // particle has no length prefix), so the packet is lost whole.
+            if warned.mark(name) {
+                tracing::warn!("{state:?}: dropping {name}, its loss is only cosmetic: {e}");
+                dump_packet(name, &raw.payload);
+            }
+            Ok(None)
+        }
     }
 }
 
@@ -534,7 +599,7 @@ pub async fn ping(
     let json = loop {
         let raw = io.recv().await?;
         if let Some(ClientboundStatus::StatusResponse(s)) =
-            decode_with(&d, &raw, &tables, State::Status)?
+            decode_with(&d, &raw, &tables, State::Status, &mut io.warned)?
         {
             break serde_json::from_str(&s.json)
                 .map_err(|e| ProtocolError::Protocol(format!("status JSON: {e}")))?;
@@ -549,7 +614,7 @@ pub async fn ping(
     loop {
         let raw = io.recv().await?;
         if let Some(ClientboundStatus::PongResponse(_)) =
-            decode_with(&d, &raw, &tables, State::Status)?
+            decode_with(&d, &raw, &tables, State::Status, &mut io.warned)?
         {
             break;
         }
@@ -855,6 +920,14 @@ async fn establish(
                 return Err(ProtocolError::Disconnected(d.reason.to_plain(&|_| None)))
             }
             Decoded::Ok(p) => early.push(p),
+            // A cosmetic loss waits for the play `login` too: drop it, keep
+            // the connection (vanilla also tolerates these).
+            Decoded::Failed(name, e) if cosmetic_loss(name) => {
+                if io.warned.mark(name) {
+                    tracing::warn!("Play: dropping {name}, its loss is only cosmetic: {e}");
+                    dump_packet(name, &raw.payload);
+                }
+            }
             Decoded::Failed(name, e) => return Err(ProtocolError::Decode(name, e)),
             Decoded::NoDecoder => early.push(ClientboundPlay::Unknown {
                 id: raw.id,
@@ -913,7 +986,7 @@ async fn login_state(io: &mut Io, opts: &ConnectOptions) -> Result<GameProfile, 
     );
     loop {
         let raw = io.recv().await?;
-        let Some(p) = decode_with(&d, &raw, &tables, State::Login)? else {
+        let Some(p) = decode_with(&d, &raw, &tables, State::Login, &mut io.warned)? else {
             continue;
         };
         match p {
@@ -1119,7 +1192,7 @@ async fn configuration_state(
     );
     loop {
         let raw = io.recv().await?;
-        let Some(p) = decode_with(&d, &raw, &tables, State::Configuration)? else {
+        let Some(p) = decode_with(&d, &raw, &tables, State::Configuration, &mut io.warned)? else {
             continue;
         };
         match configuration_step(p, &tables, opts, regs)? {
