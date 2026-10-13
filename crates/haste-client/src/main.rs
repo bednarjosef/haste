@@ -55,6 +55,9 @@ pub struct Args {
     /// Screenshot camera pitch in degrees (default: the server's spawn rotation).
     #[arg(long, allow_hyphen_values = true)]
     pub pitch: Option<f32>,
+    /// Screenshot: feet position to wait for and render from (camera at eye height above it).
+    #[arg(long, num_args = 3, value_names = ["X", "Y", "Z"], allow_hyphen_values = true)]
+    pub pos: Option<Vec<f64>>,
     /// Present with vsync (default off).
     #[arg(long)]
     pub vsync: bool,

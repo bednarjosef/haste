@@ -250,7 +250,8 @@ impl LocalPlayer {
         self.attributes_dirty = true;
     }
 
-    fn eye_height(&self) -> f64 {
+    /// Eye height for the current pose (the camera sits this far above the feet).
+    pub fn eye_height(&self) -> f64 {
         self.attrs.eye_height_for(self.state.pose)
     }
 
