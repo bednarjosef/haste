@@ -9,7 +9,7 @@ with the mod architecture designed in. Licensed GPL-3.0-or-later.
 What a player needs to play Haste like the original game, without noticing a difference.
 Fabric mod support (Phase 2) is not counted here.
 
-**16 of 62 done, 26 partly done, 20 not started (about 47 %, counting partly done as half).**
+**16 of 62 done, 27 partly done, 19 not started (about 48 %, counting partly done as half).**
 
 ✅ done: works in the game window today, checked against a real server.
 🟡 partly done: some of it exists (in a library, or working without a window) but a player cannot use it fully yet.
@@ -54,13 +54,13 @@ Fabric mod support (Phase 2) is not counted here.
 - 🟡 Fog: distance fog, not matched to vanilla
 - 🟡 Mobs and players: drawn as cube models with default skins and name tags, not vanilla's models
 - 🟡 Particles: particle textures load (114 particle types); no particles are drawn
-- 🟡 Performance: about 140 FPS windowed at render distance 12 on the development laptop; not yet measured against vanilla and Sodium
+- 🟡 Performance: `haste --bench` measures about 440 FPS (2.3 ms per frame) at 1920x1080, view distance 10, on the development laptop's integrated GPU; not yet compared with vanilla and Sodium
+- 🟡 Screen effects: damage tilt, red flash on hit entities and the vignette work; underwater and fire overlays, nausea and pumpkin do not
 - ⬜ Block entities drawn: chests, signs with text, beds, banners, heads, shulker boxes
 - ⬜ Entity animation (walking, attacking, swimming)
 - ⬜ Downloaded player skins and capes
 - ⬜ Armour and held items on mobs and players
 - ⬜ Dropped items, item frames and paintings drawn as themselves
-- ⬜ Screen effects: damage tilt and red flash, underwater and fire overlays, nausea, vignette, pumpkin
 
 ### HUD and screens
 These run as the game's own Java code inside Haste. The HUD is drawn in the game window; keyboard and mouse input to the screens is not connected yet.
@@ -87,9 +87,9 @@ These run as the game's own Java code inside Haste. The HUD is drawn in the game
 - ⬜ Elytra flight
 
 ### Sound
-- 🟡 Sound effects: sounds.json and the variant choice are done; no audio output yet
-- 🟡 3D sound: distance falloff and stereo panning are computed but not played
-- 🟡 Music: choosing tracks and pauses by situation is done; nothing is played
+- 🟡 Sound effects: sounds.json, variant choice and real audio output exist; not yet hooked to the game's sound events
+- 🟡 3D sound: distance falloff and stereo panning are computed and played by the audio output; not yet hooked to the game
+- 🟡 Music: tracks and pauses by situation are chosen; not yet started by the game
 - ⬜ Sounds of your own footsteps, block breaking and placing
 
 ## Try it
