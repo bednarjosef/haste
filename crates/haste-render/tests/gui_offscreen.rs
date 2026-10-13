@@ -258,6 +258,7 @@ fn gui_frame_offscreen() {
             yaw: 0.0,
             pitch: 0.0,
             fov_deg: 70.0,
+            roll_deg: 0.0,
         },
         entities: &[],
         gui: &gui,

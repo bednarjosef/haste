@@ -82,7 +82,9 @@ struct Session {
 }
 
 impl Session {
-    fn join(args: &Args) -> anyhow::Result<Self> {
+    /// `sound`: open the audio output (the window only; screenshots and the benchmark stay
+    /// silent so they neither make noise nor measure the audio thread).
+    fn join(args: &Args, sound: bool) -> anyhow::Result<Self> {
         let address = args.server.clone().ok_or_else(|| {
             anyhow::anyhow!("--server <host[:port]> is required (no launcher yet)")
         })?;
@@ -128,7 +130,11 @@ impl Session {
             world,
             net::new_entity_store(entity_types),
             view_distance,
+            haste_render::default_skin(login.profile.uuid.as_u128()),
         ));
+        if sound {
+            *shared.sound.lock() = open_sounds(regs, &shared.data, &options.sound);
+        }
         let handle = rt.handle().clone();
         let sh = shared.clone();
         let game_thread = std::thread::Builder::new()
@@ -181,6 +187,8 @@ pub struct WorldFeed {
     source: Option<Arc<dyn haste_render::SnapshotSource>>,
     /// Sections submitted this frame (reused).
     batch: Vec<SectionPos>,
+    /// The first-person state last sent to the renderer (None also before the first).
+    first_person: Option<game::FirstPersonView>,
 }
 
 /// Lets the mesh worker threads capture section snapshots from the shared world under its
@@ -301,6 +309,28 @@ impl WorldFeed {
         &self.instances
     }
 
+    /// Hands the renderer the first-person hand (`Renderer::set_first_person`) when the view's
+    /// per-tick part changed since the last call. The skin is fixed for the connection, so
+    /// comparing the per-tick part is enough to catch every change; the skin is cloned only when
+    /// one happens (no allocation per frame).
+    /// The first-person hand only exists in the first-person perspective (F5 hides it).
+    fn set_first_person(
+        &mut self,
+        shared: &Shared,
+        renderer: &mut Renderer,
+        perspective: game::Perspective,
+    ) {
+        let view = match perspective {
+            game::Perspective::FirstPerson => shared.view.lock().first_person,
+            _ => None,
+        };
+        if view == self.first_person {
+            return;
+        }
+        self.first_person = view;
+        renderer.set_first_person(view.map(|v| v.with_skin(&shared.skin)));
+    }
+
     /// Whether everything the game thread produced has been meshed and uploaded, and nothing
     /// new arrived for `quiet`.
     ///
@@ -347,6 +377,7 @@ fn frame_view(
         yaw,
         pitch,
         fov_deg,
+        roll_deg: view.hurt_tilt,
     };
     let fog_end = (view.view_distance.max(2) * 16) as f32;
     let sky = SkyState {
@@ -530,10 +561,39 @@ fn open_assets() -> anyhow::Result<haste_assets::Assets> {
     .with_context(|| format!("opening assets from {}", jar.display()))
 }
 
+/// The sound output for a joined game: `sounds.json` parsed from the real assets, the
+/// sound-event name table (the server's synced registry or the static one), played
+/// through the default device with the saved volumes. Without an audio device it stays
+/// silent; when the assets or `sounds.json` cannot be read the game runs without sound
+/// (logged) rather than not at all.
+fn open_sounds(
+    regs: &haste_protocol::SyncedRegistries,
+    data: &haste_data::GameData,
+    volumes: &haste_setup::options::SoundVolumes,
+) -> Option<crate::sound::Sounds> {
+    let events = (|| -> anyhow::Result<haste_audio::sounds::SoundEvents> {
+        let mut assets = open_assets()?;
+        let bytes = assets.read_asset("assets/minecraft/sounds.json")?;
+        haste_audio::sounds::SoundEvents::parse(&bytes)
+    })();
+    match events {
+        Ok(events) => Some(crate::sound::Sounds::new(
+            events,
+            open_assets().ok()?,
+            crate::sound::sound_event_names(regs, data),
+            volumes,
+        )),
+        Err(e) => {
+            tracing::warn!("sound stays off: {e:#}");
+            None
+        }
+    }
+}
+
 /// `--screenshot <file>`: join, wait until the world is meshed, render one frame offscreen,
 /// save it as PNG and leave. `--seconds` bounds the wait.
 pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
-    let session = Session::join(args)?;
+    let session = Session::join(args, false)?;
     let shared = session.shared.clone();
     let mut assets = open_assets()?;
     let mut renderer =
@@ -592,6 +652,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         }
         last_camera = camera;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
+        feed.set_first_person(&shared, &mut renderer, perspective);
         let entities = feed.entities(&shared, &mut renderer, perspective, session.local, partial);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
@@ -727,6 +788,15 @@ struct BenchSample {
     sections_total: u32,
     draw_calls: u32,
     timings: haste_render::FrameTimings,
+    /// WorldFeed::feed time (dirty collection, submit, mesh upload).
+    feed_ms: f32,
+    /// Sections that were not drawn by the previous sample's frame (meshes became visible).
+    sections_new: u32,
+    /// Section meshes uploaded this frame and their vertex+index bytes.
+    uploads: u32,
+    upload_bytes: u64,
+    /// Frame index since the measure phase started.
+    index: u32,
 }
 
 /// Summary of a bench run: aggregate frame times plus the renderer's phase and pass averages.
@@ -794,6 +864,55 @@ impl BenchSummary {
     }
 }
 
+/// The `count` slowest sample indices, slowest first (earliest frame breaks ties). The
+/// allocation is at the end of the bench, after all frames are recorded.
+fn slowest_indices(samples: &[BenchSample], count: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..samples.len()).collect();
+    order.sort_by(|&a, &b| {
+        samples[b]
+            .frame_ms
+            .total_cmp(&samples[a].frame_ms)
+            .then(samples[a].index.cmp(&samples[b].index))
+    });
+    order.truncate(count);
+    order
+}
+
+/// The `count` slowest bench frames with their full breakdown: frame index and time, the
+/// renderer phases (prepare/cull/encode/submit, GPU main pass), the feed phase, mesh uploads
+/// (count and bytes) and how many sections the frame drew that the previous one did not.
+/// GPU pass times arrive a frame or two late (timestamp readback), so they are the latest
+/// available at that frame, not necessarily that exact frame's passes.
+fn print_slowest_frames(samples: &[BenchSample]) {
+    const COUNT: usize = 20;
+    let order = slowest_indices(samples, COUNT);
+    if order.is_empty() {
+        return;
+    }
+    println!("slowest {} frames (of {}):", order.len(), samples.len());
+    println!("  frame   ms | feed prep cull enc sub gpuM | up #/KB sect+ drawn/total calls");
+    for &i in &order {
+        let s = &samples[i];
+        println!(
+            "  {:5} {:5.2} | {:5.2} {:5.2} {:5.2} {:4.2} {:5.2} {:5.2} | {:3} {:5.0} {:4} {}/{} {}",
+            s.index,
+            s.frame_ms,
+            s.feed_ms,
+            s.timings.prepare_ms,
+            s.timings.cull_ms,
+            s.timings.encode_ms,
+            s.timings.submit_ms,
+            s.timings.gpu_ms[0],
+            s.uploads,
+            s.upload_bytes as f32 / 1024.0,
+            s.sections_new,
+            s.sections_drawn,
+            s.sections_total,
+            s.draw_calls,
+        );
+    }
+}
+
 /// Run metadata printed with the summary.
 struct BenchMeta {
     seconds: f32,
@@ -855,7 +974,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let Some(_server) = args.server.as_ref() else {
         anyhow::bail!("--bench needs --server <host[:port]>");
     };
-    let session = Session::join(args)?;
+    let session = Session::join(args, false)?;
     let shared = session.shared.clone();
     let mut assets = open_assets()?;
     let mut renderer =
@@ -883,6 +1002,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         base = camera;
         vd = v;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
+        feed.set_first_person(&shared, &mut renderer, game::Perspective::FirstPerson);
         let entities = feed.entities(
             &shared,
             &mut renderer,
@@ -956,7 +1076,9 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         let fog_end = (vd.max(2) * 16) as f32;
         sky.fog_start = fog_end * 0.75;
         sky.fog_end = fog_end;
+        let feed_start = Instant::now();
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
+        let feed_ms = feed_start.elapsed().as_secs_f32() * 1000.0;
         let entities = feed.entities(
             &shared,
             &mut renderer,
@@ -978,12 +1100,18 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
         let stats = renderer.render(&frame)?;
+        let prev_drawn = samples.last().map_or(0, |s| s.sections_drawn);
         samples.push(BenchSample {
             frame_ms: stats.frame_ms,
             sections_drawn: stats.chunk_sections_drawn,
             sections_total: stats.chunk_sections_total,
             draw_calls: stats.draw_calls,
             timings: renderer.timings(),
+            feed_ms,
+            sections_new: stats.chunk_sections_drawn.saturating_sub(prev_drawn),
+            uploads: stats.uploads,
+            upload_bytes: stats.upload_bytes,
+            index: samples.len() as u32,
         });
         if shared.is_closed() {
             anyhow::bail!(
@@ -994,6 +1122,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     }
     let summary = bench_summary(&samples);
     println!("{}", summary.text(&meta));
+    print_slowest_frames(&samples);
     if let Some(out) = &args.bench_out {
         let json = serde_json::json!({
             "frames": summary.frames,
@@ -1029,7 +1158,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
 
 /// Windowed mode.
 pub fn run(args: &Args) -> anyhow::Result<()> {
-    let session = Session::join(args)?;
+    let session = Session::join(args, true)?;
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
@@ -1284,6 +1413,8 @@ impl App {
         self.feed
             .feed(&self.shared, renderer, camera_section(&camera), vd);
         let t1 = Instant::now();
+        self.feed
+            .set_first_person(&self.shared, renderer, self.perspective);
         let entities = self.feed.entities(
             &self.shared,
             renderer,
@@ -1879,6 +2010,11 @@ mod tests {
                 submit_ms: 4.0,
                 ..Default::default()
             },
+            feed_ms: 0.5,
+            sections_new: 0,
+            uploads: 0,
+            upload_bytes: 0,
+            index: 0,
         }
     }
 
@@ -1916,12 +2052,31 @@ mod tests {
     }
 
     #[test]
+    fn slowest_indices_slowest_first_with_ties_by_frame() {
+        let mut slow = sample(50.0);
+        slow.index = 10;
+        let mut samples: Vec<BenchSample> = (0..49).map(|_| sample(5.0)).collect();
+        samples.push(slow);
+        let order = slowest_indices(&samples, 20);
+        assert_eq!(order.len(), 20);
+        assert_eq!(order[0], 49, "the 50 ms frame leads");
+        // All 5 ms frames tie; the earliest frames come first among them.
+        assert_eq!(order[1], 0);
+        assert_eq!(order[2], 1);
+        // Asking for more than there are returns all, and an empty run returns none.
+        assert_eq!(slowest_indices(&samples, 100).len(), 50);
+        assert!(slowest_indices(&[], 20).is_empty());
+        print_slowest_frames(&samples);
+    }
+
+    #[test]
     fn bench_camera_path_turns_then_flies() {
         let base = Camera {
             pos: DVec3::new(100.0, 64.0, -200.0),
             yaw: 30.0,
             pitch: 10.0,
             fov_deg: 70.0,
+            roll_deg: 0.0,
         };
         // t = 0: at the base, unturned.
         let c = bench_camera(0.0, &base, 60.0);

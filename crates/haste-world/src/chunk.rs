@@ -72,7 +72,7 @@ pub struct ChunkLight {
 }
 
 impl ChunkLight {
-    fn new(section_count: usize) -> Self {
+    pub(crate) fn new(section_count: usize) -> Self {
         Self {
             sky: vec![None; section_count],
             block: vec![NibbleArray::default(); section_count],
@@ -97,12 +97,16 @@ pub struct Chunk {
 
 impl Chunk {
     /// Decodes a full chunk from `ChunkData` (the `level_chunk_with_light` payload).
+    /// `state_table_len` is the local block-state table size: ids at or above it are unknown
+    /// (modded server). They are detected once per chunk and logged once per session; the
+    /// chunk is kept and the ids read back as the placeholder state.
     pub fn decode(
         data: &ChunkData,
         min_section: i32,
         section_count: usize,
         state_bits: u8,
         biome_bits: u8,
+        state_table_len: u32,
     ) -> Result<Chunk, PaletteError> {
         let decoded: Vec<DecodedSection<BlockStateId>> =
             BlockContainer::decode_sections(&data.sections, section_count, state_bits, biome_bits)?;
@@ -114,6 +118,15 @@ impl Chunk {
                 blocks: d.blocks,
                 biomes: d.biomes.remap::<BiomeId>(),
             });
+        }
+        let mut largest_unknown = None;
+        for s in &sections {
+            if let Some(v) = s.blocks.largest_unknown_id(state_table_len) {
+                largest_unknown = Some(largest_unknown.map_or(v, |m: u32| m.max(v)));
+            }
+        }
+        if let Some(largest) = largest_unknown {
+            crate::palette::warn_unknown_block_state(largest, state_table_len);
         }
         let heightmaps = data
             .heightmaps

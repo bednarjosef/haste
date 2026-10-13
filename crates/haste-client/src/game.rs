@@ -17,13 +17,13 @@ use haste_data::GameData;
 use haste_entity::EntityStore;
 use haste_jvm::JvmHost;
 use haste_protocol::haste_core::chunk::{BlockEntityData, ChunkData, LightData};
-use haste_protocol::haste_core::game::{DimensionInfo, TICK_SECONDS};
+use haste_protocol::haste_core::game::{DimensionInfo, GameMode, TICK_SECONDS};
 use haste_protocol::haste_core::input::{InputState, InteractInput};
 use haste_protocol::haste_core::math::Vec3;
 use haste_protocol::haste_core::model::{EntityInstance, PoseOverrides};
 use haste_protocol::haste_core::view::{BlockView, CollisionShapes, DirtyTracker};
 use haste_protocol::haste_core::{
-    BlockPos, BlockStateId, ChunkPos, Direction, EntityId, SectionPos,
+    BlockPos, BlockStateId, ChunkPos, Direction, EntityId, Identifier, RegistryIndex, SectionPos,
 };
 use haste_world::World;
 use parking_lot::{Mutex, RwLock};
@@ -191,6 +191,10 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
         // default skin for our UUID is what vanilla shows without a downloaded skin.
         skin: Some(haste_render::default_skin(uuid).0),
         nametag: None,
+        // Our own model flashes red in third person like other entities: the hurt tilt follows
+        // the same 10-tick ease-out curve, so its size (out of the 14-degree peak) is the
+        // hurt strength.
+        hurt: (view.hurt_tilt.abs() / 14.0).clamp(0.0, 1.0),
     }
 }
 
@@ -226,6 +230,11 @@ pub struct ViewState {
     pub eye_in_water: bool,
     /// Selected hotbar slot (`LocalPlayer::held_slot`), for the scroll wheel.
     pub held_slot: i32,
+    /// What the first-person view holds this tick (`None` draws no hand: spectator, not yet
+    /// placed). The skin it is drawn with is [`Shared::skin`], set once at join.
+    pub first_person: Option<FirstPersonView>,
+    /// Hurt-tilt camera roll in degrees (`Session::hurt_tilt_degrees`).
+    pub hurt_tilt: f32,
     /// Look angles (yaw, pitch) before and after the last tick, for the player's own model in
     /// third person.
     pub prev_look: (f32, f32),
@@ -235,6 +244,44 @@ pub struct ViewState {
     /// Body pose metadata for the own model (`None`: the physics pose only knows standing,
     /// crouching and swimming).
     pub pose: Option<haste_core::entity::Pose>,
+}
+
+/// The per-tick part of the first-person hand: the held item and the light at the eye. The skin
+/// lives in [`Shared::skin`] because it never changes during a connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FirstPersonView {
+    /// The main-hand stack's item (`None` draws the bare arm).
+    pub item: Option<RegistryIndex>,
+    /// (sky light, block light) at the eye position, `FirstPerson::light`'s order.
+    pub light: (u8, u8),
+}
+
+impl FirstPersonView {
+    /// The first-person hand for `item` in `world` at `eye`: the item held and the light at the
+    /// eye, sampled the same way entities are (`Renderer::sample_entity_lights`).
+    pub fn sample(world: &dyn BlockView, eye: DVec3, item: Option<RegistryIndex>) -> Self {
+        let p = BlockPos::new(
+            eye.x.floor() as i32,
+            (eye.y + 0.5).floor() as i32,
+            eye.z.floor() as i32,
+        );
+        FirstPersonView {
+            item,
+            light: (world.sky_light(p), world.block_light(p)),
+        }
+    }
+
+    /// The renderer's first-person hand for this view drawn with `skin` (the connection's
+    /// fixed skin): since the skin never changes, two views that compare equal produce equal
+    /// hands, so comparing the views is the whole "changed?" check.
+    pub fn with_skin(&self, skin: &(Identifier, bool)) -> haste_render::FirstPerson {
+        haste_render::FirstPerson {
+            skin: Some(skin.0.clone()),
+            slim: skin.1,
+            item: self.item,
+            light: self.light,
+        }
+    }
 }
 
 /// Input sampled by the render thread from winit, read by the game thread once per tick.
@@ -264,10 +311,17 @@ pub struct Shared {
     pub breaking: Mutex<Vec<(BlockPos, u8)>>,
     /// Input for the next tick.
     pub input: Mutex<SharedInput>,
+    /// The sound and music output (None until the client sets it up; headless leaves it
+    /// silent). Driven by the game thread only.
+    pub sound: Mutex<Option<crate::sound::Sounds>>,
     /// Ask the game thread to stop.
     pub stop: AtomicBool,
     /// Why the connection ended, once it has.
     pub closed: Mutex<Option<String>>,
+    /// The skin the first-person arm is drawn with and whether it is the slim model (the local
+    /// player's default skin for its profile UUID, `haste_render::default_skin`); set once at
+    /// join, it never changes during a connection.
+    pub skin: (Identifier, bool),
     /// The HUD and chat (ui.rs): set by the game thread once the JVM has started and
     /// [`Ui::joined`] ran; the render thread clones it per frame ([`Ui`] is cheap to clone).
     pub ui: Mutex<Option<Ui>>,
@@ -282,6 +336,7 @@ impl Shared {
         world: World,
         entities: EntityStore,
         view_distance: i32,
+        skin: (Identifier, bool),
     ) -> Self {
         let has_sky = world.dimension().has_skylight;
         Self {
@@ -304,6 +359,8 @@ impl Shared {
                 block_target: None,
                 eye_in_water: false,
                 held_slot: 0,
+                first_person: None,
+                hurt_tilt: 0.0,
                 prev_look: (0.0, 0.0),
                 look: (0.0, 0.0),
                 prev_feet: DVec3::ZERO,
@@ -311,8 +368,10 @@ impl Shared {
             }),
             breaking: Mutex::new(Vec::new()),
             input: Mutex::new(SharedInput::default()),
+            sound: Mutex::new(None),
             stop: AtomicBool::new(false),
             closed: Mutex::new(None),
+            skin,
             ui: Mutex::new(None),
             hud_failed: AtomicBool::new(false),
         }
@@ -535,6 +594,20 @@ fn tick_once(
             shared.dirty.lock().append(&mut dirty);
         }
     }
+    // This tick's sound packets, played through the output (when the client set one up).
+    {
+        let requests = &mut driver.session.sound_requests;
+        let mut sound = shared.sound.lock();
+        if let Some(sounds) = sound.as_mut() {
+            // Entity positions for `sound_entity`, from the store the packets just updated.
+            let entities = shared.entities.read();
+            sounds.apply(requests, |id| {
+                entities
+                    .get(haste_protocol::haste_core::EntityId(id))
+                    .map(|e| e.pos)
+            });
+        }
+    }
     // This tick's input, sampled from winit by the render thread.
     let input = {
         let mut shared_input = shared.input.lock();
@@ -594,6 +667,24 @@ fn tick_once(
     let s = &driver.session;
     let (prev_eye, prev_yaw, prev_pitch) = s.player.camera(0.0);
     let (eye, yaw, pitch) = s.player.camera(1.0);
+    // The first-person hand this tick: hidden in spectator (vanilla hides it there), otherwise
+    // the main-hand item lit like entities are. Sampled under the world's read lock, like the
+    // breaking stages above; the render thread only reads the copy in the view state.
+    let first_person = if s.player.game_mode == GameMode::Spectator {
+        None
+    } else {
+        let item = s.player.main_hand().item;
+        Some(FirstPersonView::sample(&*shared.world.read(), eye, item))
+    };
+    // The sound output's tick: listener from the eye, music situation, then 20 Hz tick.
+    {
+        let mut sound = shared.sound.lock();
+        if let Some(sounds) = sound.as_mut() {
+            let situation =
+                crate::sound::music_situation(s.player.game_mode, s.player.state.eyes_in_water);
+            sounds.tick(eye, yaw, situation);
+        }
+    }
     let mut view = shared.view.lock();
     // The feet bracket the tick like the eye does; the eye height can change within it
     // (sneaking), so the old feet are the last view's, not the eye minus its height.
@@ -615,6 +706,8 @@ fn tick_once(
     view.block_target = s.player.target();
     view.eye_in_water = s.player.state.eyes_in_water;
     view.held_slot = s.player.held_slot;
+    view.first_person = first_person;
+    view.hurt_tilt = s.hurt_tilt_degrees();
     Ok(())
 }
 
@@ -622,6 +715,86 @@ fn tick_once(
 mod tests {
     use super::*;
     use haste_physics::testing::{states, TestShapes, TestWorld};
+
+    #[test]
+    fn first_person_view_change_detection() {
+        // The skin is fixed for a connection, so view equality is the whole "did the hand
+        // change?" check: equal views produce equal hands, differing ones differing hands.
+        let skin = (
+            haste_core::Identifier::minecraft("entity/player/wide/steve"),
+            false,
+        );
+        let a = FirstPersonView {
+            item: Some(RegistryIndex(5)),
+            light: (15, 0),
+        };
+        let b = FirstPersonView {
+            item: None,
+            light: (15, 0),
+        };
+        assert_eq!(a, a);
+        assert_ne!(a, b);
+        let ha = a.with_skin(&skin);
+        let hb = b.with_skin(&skin);
+        assert_eq!(ha, a.with_skin(&skin));
+        assert_ne!(ha, hb);
+        assert_eq!(ha.skin, Some(skin.0.clone()));
+        assert!(!ha.slim);
+        assert_eq!(ha.item, Some(RegistryIndex(5)));
+        assert_eq!(ha.light, (15, 0));
+        // A differing light also differs (the eye moved into shade).
+        let c = FirstPersonView {
+            item: Some(RegistryIndex(5)),
+            light: (4, 7),
+        };
+        assert_ne!(a, c);
+        assert_ne!(ha, c.with_skin(&skin));
+    }
+
+    #[test]
+    fn first_person_sample_reads_the_eye_block_light() {
+        // Sky 12, block 7: sampled at the eye's block, in FirstPerson::light's order.
+        let world = LightWorld {
+            sky: 12,
+            block: 7,
+            asked: parking_lot::Mutex::new(Vec::new()),
+        };
+        let v =
+            FirstPersonView::sample(&world, DVec3::new(3.2, 65.5, -7.8), Some(RegistryIndex(1)));
+        assert_eq!(v.item, Some(RegistryIndex(1)));
+        assert_eq!(v.light, (12, 7));
+        // The eye at y = 65.5 samples y = 66 (eye.y + 0.5 floored), like entity light.
+        assert_eq!(world.asked.lock().clone(), vec![BlockPos::new(3, 66, -8)]);
+    }
+
+    /// A world that answers one sky/block light pair and records where it was asked.
+    struct LightWorld {
+        sky: u8,
+        block: u8,
+        asked: parking_lot::Mutex<Vec<BlockPos>>,
+    }
+
+    impl haste_protocol::haste_core::view::BlockView for LightWorld {
+        fn block_state(&self, _pos: BlockPos) -> BlockStateId {
+            BlockStateId::AIR
+        }
+        fn is_chunk_loaded(&self, _pos: ChunkPos) -> bool {
+            true
+        }
+        fn sky_light(&self, pos: BlockPos) -> u8 {
+            self.asked.lock().push(pos);
+            self.sky
+        }
+        fn block_light(&self, _pos: BlockPos) -> u8 {
+            self.block
+        }
+        fn min_y(&self) -> i32 {
+            0
+        }
+        fn height(&self) -> i32 {
+            384
+        }
+    }
 
     #[test]
     fn partial_tick_runs_from_zero_to_one_over_a_tick() {

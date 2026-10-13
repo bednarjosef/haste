@@ -63,6 +63,48 @@ Common conventions:
 }
 ```
 
+## entity_models.json
+
+Every model layer the client's `EntityModelSet` has baked (entity, armour and block-entity
+models that are model layers), dumped by the recorder mod's `dump_models` scenario step.
+In 26.3 signs and beds are NOT model layers (no `ModelLayers` entries; they render as baked
+block models) and so do not appear here.
+
+```jsonc
+{
+  "version": 1,
+  "minecraft": "26.3",
+  "source": "client EntityModelSet (baked model layers)",
+  "layers": [
+    {
+      "layer": "minecraft:pig#main",        // ModelLayerLocation: model id # layer name
+      "texture_width": 64,
+      "texture_height": 64,
+      "parts": [                            // root part's children (root has no name)
+        {
+          "name": "head",
+          "pivot": [0.0, 12.0, -6.0],       // PartPose x/y/z
+          "rotation": [0.0, 0.0, 0.0],      // PartPose xRot/yRot/zRot, radians
+          "scale": [1.0, 1.0, 1.0],         // PartPose xScale/yScale/zScale
+          "cubes": [
+            {
+              "origin": [-4.0, -4.0, -8.0], // CubeDefinition origin (model units)
+              "size": [8.0, 8.0, 8.0],       // CubeDefinition dimensions
+              "uv": "0 0",                   // "u v" (duplicated numerically below)
+              "u": 0.0, "v": 0.0,           // UVPair texCoord
+              "mirror": false,
+              "inflate": [0.0, 0.0, 0.0],    // CubeDeformation growX/Y/Z
+              "visible_faces": ["down", "up", "north", "south", "west", "east"]
+            }
+          ],
+          "children": [ /* more parts, same shape, recursive */ ]
+        }
+      ]
+    }
+  ]
+}
+```
+
 ## block_properties.json
 
 ```jsonc

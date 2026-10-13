@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use indexmap::IndexMap;
 use serde::Deserialize;
 
 use crate::model::ModelRef;
@@ -12,8 +13,14 @@ use crate::model::ModelRef;
 /// `blockstates/<path>.json`: either `variants` or `multipart`.
 #[derive(Deserialize, Debug, Clone)]
 pub struct BlockStateDefinition {
+    /// Keyed by the variant's `k=v,...` property key. An `IndexMap` keeps the
+    /// keys in the file's order, which is the order vanilla resolves ambiguously
+    /// matching states in: iteration (texture coverage in `all_model_refs`) and
+    /// the "most properties" tie-break in `model_refs_for` both follow it, and
+    /// both are therefore deterministic. A `HashMap` made the winner differ per
+    /// process; a sorted map made it alphabetical instead of file order.
     #[serde(default)]
-    pub variants: Option<HashMap<String, VariantEntry>>,
+    pub variants: Option<IndexMap<String, VariantEntry>>,
     #[serde(default)]
     pub multipart: Option<Vec<MultipartCase>>,
 }
@@ -342,5 +349,30 @@ mod tests {
         assert_eq!(r[0].model, "minecraft:block/lit");
         let r = refs(json, &[("lit", "false")]);
         assert_eq!(r[0].model, "minecraft:block/generic");
+    }
+
+    #[test]
+    fn variant_key_tie_goes_to_the_first_key_in_the_file() {
+        // Both keys name one property, so neither is more specific: vanilla resolves by
+        // the order the keys appear in the JSON (Jackson's LinkedHashMap), not alphabetically.
+        let json = r#"{
+            "variants": {
+                "axis=x": { "model": "minecraft:block/first_in_file" },
+                "lit=false": { "model": "minecraft:block/second_in_file" }
+            }
+        }"#;
+        let r = refs(json, &[("axis", "x"), ("lit", "false")]);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].model, "minecraft:block/first_in_file");
+        // The keys iterate in file order for texture collection too.
+        let def: BlockStateDefinition = serde_json::from_str(json).unwrap();
+        let names: Vec<&str> = def
+            .variants
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .collect();
+        assert_eq!(names, ["axis=x", "lit=false"]);
     }
 }

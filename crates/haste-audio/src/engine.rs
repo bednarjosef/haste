@@ -3,6 +3,8 @@
 //!
 //! This is the fully testable tracking half of the engine; the rodio output stage is built
 //! on top of it later and only consumes `gains()`.
+use std::sync::Arc;
+
 use glam::DVec3;
 
 use crate::sounds::SoundVariant;
@@ -79,11 +81,32 @@ impl SourceVolumes {
     }
 }
 
+/// The (namespace, path) of an event name, with the `minecraft` namespace defaulted the
+/// way `sounds.json` keys and packet identifiers are namespaced.
+fn namespace_and_path(event: &str) -> (&str, &str) {
+    match event.split_once(':') {
+        Some((namespace, path)) => (namespace, path),
+        None => ("minecraft", event),
+    }
+}
+
+/// Whether two event names name the same event: exact match, or the same namespace and
+/// path once the `minecraft` namespace is defaulted (`music.game` and
+/// `minecraft:music.game` are one event, as they are for vanilla's `Identifier`).
+pub(crate) fn event_eq(stored: &str, queried: &str) -> bool {
+    let (stored_ns, stored_path) = namespace_and_path(stored);
+    let (queried_ns, queried_path) = namespace_and_path(queried);
+    stored_ns == queried_ns && stored_path == queried_path
+}
+
 /// One sound currently tracked by the engine.
 #[derive(Clone, Debug)]
 struct PlayingSound {
-    /// Path of the Ogg inside the assets, used to identify the sound for `stop`.
-    path: String,
+    /// The sound event this was started with (namespaced, e.g.
+    /// `minecraft:block.stone.break`): what `stop`'s event filter and
+    /// [`SilentEngine::is_event_playing`] match on. Shared and interned, so tracking it
+    /// costs one reference count per played sound.
+    event: Arc<str>,
     source: SoundSource,
     pos: Option<DVec3>,
     /// Overall volume of the sound: the play volume times the variant's volume.
@@ -128,7 +151,9 @@ impl SilentEngine {
     /// Start tracking a sound. The variant's `volume`/`pitch` from sounds.json multiply
     /// into the play `volume`/`pitch`; the pitch is clamped here so every consumer sees
     /// valid input. Sounds with a position are attenuated and panned on `tick()`; sounds
-    /// without one play at full gain, centred.
+    /// without one play at full gain, centred. `event` is the sound event the sound was
+    /// started with, kept for `stop`'s event filter and [`Self::is_event_playing`]; it is
+    /// shared, so tracking it costs no allocation.
     pub fn play(
         &mut self,
         variant: &SoundVariant,
@@ -136,9 +161,10 @@ impl SilentEngine {
         pos: Option<DVec3>,
         volume: f32,
         pitch: f32,
+        event: Arc<str>,
     ) {
         self.sounds.push(PlayingSound {
-            path: variant.path.clone(),
+            event,
             source,
             pos,
             volume: volume * variant.volume,
@@ -160,13 +186,15 @@ impl SilentEngine {
         self.volumes.set(source, volume);
     }
 
-    /// Stop playing sounds. `None` matches everything on that axis; a sound is stopped
-    /// when both the source filter and the path filter match it.
-    pub fn stop(&mut self, source: Option<SoundSource>, path: Option<&str>) {
+    /// Stop playing sounds. `None` on an axis matches everything; a sound is stopped
+    /// when both the source filter and the event filter match it, as vanilla's
+    /// `SoundManager.stop(Identifier, SoundSource)` does: both `None` stops everything,
+    /// one `None` stops that whole axis.
+    pub fn stop(&mut self, source: Option<SoundSource>, event: Option<&str>) {
         self.sounds.retain(|s| {
             let source_matches = source.is_none_or(|src| s.source == src);
-            let path_matches = path.is_none_or(|p| s.path == p);
-            !(source_matches && path_matches)
+            let event_matches = event.is_none_or(|e| event_eq(&s.event, e));
+            !(source_matches && event_matches)
         });
     }
 
@@ -199,6 +227,18 @@ impl SilentEngine {
     /// Number of sounds currently tracked as playing.
     pub fn playing(&self) -> usize {
         self.sounds.len()
+    }
+
+    /// Number of sounds currently playing in one source: how the music logic tells the
+    /// track apart from block and mob sounds, which all share the `playing` count.
+    pub fn playing_in(&self, source: SoundSource) -> usize {
+        self.sounds.iter().filter(|s| s.source == source).count()
+    }
+
+    /// Whether a sound with this event name is playing (namespace-defaulted match), so
+    /// the caller can follow one specific sound rather than a whole source.
+    pub fn is_event_playing(&self, event: &str) -> bool {
+        self.sounds.iter().any(|s| event_eq(&s.event, event))
     }
 
     /// The current (left, right) gains of all playing sounds, in play order.
@@ -240,6 +280,16 @@ mod tests {
         }
     }
 
+    /// Plays one sound of `event`, in play order, like the output stage does.
+    fn play_event(
+        engine: &mut SilentEngine,
+        variant: &SoundVariant,
+        source: SoundSource,
+        event: &str,
+    ) {
+        engine.play(variant, source, None, 1.0, 1.0, Arc::from(event));
+    }
+
     /// Sum of all gains, as a cheap "everything is silent" check.
     fn total_gains(engine: &SilentEngine) -> (f32, f32) {
         engine
@@ -250,12 +300,12 @@ mod tests {
     #[test]
     fn non_positional_sound_is_full_gain_and_centred() {
         let mut engine = SilentEngine::new();
-        engine.play(
-            &variant("sounds/dig/stone1.ogg", 16),
+        let sound = variant("sounds/dig/stone1.ogg", 16);
+        play_event(
+            &mut engine,
+            &sound,
             SoundSource::Block,
-            None,
-            1.0,
-            1.0,
+            "minecraft:block.stone.break",
         );
         engine.tick();
         assert_eq!(engine.playing(), 1);
@@ -275,6 +325,7 @@ mod tests {
             Some(DVec3::new(2.0, 0.0, 0.0)),
             1.0,
             1.0,
+            Arc::from("minecraft:a"),
         );
         engine.play(
             &variant("sounds/b.ogg", 16),
@@ -282,6 +333,7 @@ mod tests {
             None,
             1.0,
             1.0,
+            Arc::from("minecraft:b"),
         );
         engine.set_volume(SoundSource::Master, 0.0);
         engine.tick();
@@ -293,19 +345,17 @@ mod tests {
     #[test]
     fn per_source_volume_scales_only_that_source() {
         let mut engine = SilentEngine::new();
-        engine.play(
+        play_event(
+            &mut engine,
             &variant("sounds/a.ogg", 16),
             SoundSource::Block,
-            None,
-            1.0,
-            1.0,
+            "minecraft:a",
         );
-        engine.play(
+        play_event(
+            &mut engine,
             &variant("sounds/b.ogg", 16),
             SoundSource::Ui,
-            None,
-            1.0,
-            1.0,
+            "minecraft:b",
         );
         engine.set_volume(SoundSource::Block, 0.25);
         engine.tick();
@@ -316,28 +366,78 @@ mod tests {
     }
 
     #[test]
-    fn stop_by_source() {
+    fn playing_in_counts_per_source() {
         let mut engine = SilentEngine::new();
-        engine.play(
+        play_event(
+            &mut engine,
             &variant("sounds/a.ogg", 16),
             SoundSource::Block,
-            None,
-            1.0,
-            1.0,
+            "minecraft:a",
         );
-        engine.play(
+        play_event(
+            &mut engine,
+            &variant("sounds/b.ogg", 16),
+            SoundSource::Block,
+            "minecraft:b",
+        );
+        play_event(
+            &mut engine,
+            &variant("sounds/c.ogg", 16),
+            SoundSource::Music,
+            "minecraft:c",
+        );
+        assert_eq!(engine.playing(), 3);
+        assert_eq!(engine.playing_in(SoundSource::Block), 2);
+        assert_eq!(engine.playing_in(SoundSource::Music), 1);
+        assert_eq!(engine.playing_in(SoundSource::Ui), 0);
+        // Master is not a source of its own: it scales the others.
+        assert_eq!(engine.playing_in(SoundSource::Master), 0);
+    }
+
+    #[test]
+    fn is_event_playing_follows_the_event_not_the_source() {
+        let mut engine = SilentEngine::new();
+        play_event(
+            &mut engine,
+            &variant("sounds/dig/stone1.ogg", 16),
+            SoundSource::Block,
+            "minecraft:block.stone.break",
+        );
+        assert!(engine.is_event_playing("minecraft:block.stone.break"));
+        // The same event without the namespace, the way `sounds.json` keys it.
+        assert!(engine.is_event_playing("block.stone.break"));
+        assert!(!engine.is_event_playing("minecraft:block.stone.place"));
+        // A sound in another source does not answer for this event.
+        play_event(
+            &mut engine,
+            &variant("sounds/music/game.ogg", 16),
+            SoundSource::Music,
+            "minecraft:music.game",
+        );
+        assert!(engine.is_event_playing("minecraft:block.stone.break"));
+        assert!(engine.is_event_playing("minecraft:music.game"));
+    }
+
+    #[test]
+    fn stop_by_source() {
+        let mut engine = SilentEngine::new();
+        play_event(
+            &mut engine,
+            &variant("sounds/a.ogg", 16),
+            SoundSource::Block,
+            "minecraft:a",
+        );
+        play_event(
+            &mut engine,
             &variant("sounds/b.ogg", 16),
             SoundSource::Ui,
-            None,
-            1.0,
-            1.0,
+            "minecraft:b",
         );
-        engine.play(
+        play_event(
+            &mut engine,
             &variant("sounds/c.ogg", 16),
             SoundSource::Block,
-            None,
-            1.0,
-            1.0,
+            "minecraft:c",
         );
         engine.stop(Some(SoundSource::Block), None);
         assert_eq!(engine.playing(), 1);
@@ -347,48 +447,103 @@ mod tests {
     }
 
     #[test]
-    fn stop_by_path() {
+    fn stop_by_event_only() {
         let mut engine = SilentEngine::new();
-        engine.play(
+        play_event(
+            &mut engine,
             &variant("sounds/a.ogg", 16),
             SoundSource::Block,
-            None,
-            1.0,
-            1.0,
+            "minecraft:a",
         );
-        engine.play(
+        play_event(
+            &mut engine,
             &variant("sounds/b.ogg", 16),
             SoundSource::Block,
-            None,
-            1.0,
-            1.0,
+            "minecraft:b",
         );
-        engine.stop(None, Some("sounds/a.ogg"));
+        engine.stop(None, Some("minecraft:a"));
         assert_eq!(engine.playing(), 1);
-        // The remaining sound is b, not a.
-        engine.stop(None, Some("sounds/b.ogg"));
+        // The surviving sound is b's, not a's.
+        assert!(engine.is_event_playing("minecraft:b"));
+        assert!(!engine.is_event_playing("minecraft:a"));
+    }
+
+    #[test]
+    fn stop_by_event_matches_the_namespaced_name() {
+        let mut engine = SilentEngine::new();
+        play_event(
+            &mut engine,
+            &variant("sounds/dig/stone1.ogg", 16),
+            SoundSource::Block,
+            "minecraft:block.stone.break",
+        );
+        // The event name without the namespace, the way a stop packet's identifier or
+        // sounds.json key spells it, stops the same sound.
+        engine.stop(None, Some("block.stone.break"));
         assert_eq!(engine.playing(), 0);
     }
 
     #[test]
-    fn stop_all() {
+    fn stop_by_source_and_event() {
         let mut engine = SilentEngine::new();
-        engine.play(
+        play_event(
+            &mut engine,
             &variant("sounds/a.ogg", 16),
             SoundSource::Block,
-            None,
-            1.0,
-            1.0,
+            "minecraft:a",
         );
-        engine.play(
+        play_event(
+            &mut engine,
+            &variant("sounds/b.ogg", 16),
+            SoundSource::Ui,
+            "minecraft:a",
+        );
+        play_event(
+            &mut engine,
+            &variant("sounds/c.ogg", 16),
+            SoundSource::Block,
+            "minecraft:b",
+        );
+        // Both filters must match: the Block sound of event a goes, the Ui one of the same
+        // event stays, as does the Block sound of the other event.
+        engine.stop(Some(SoundSource::Block), Some("minecraft:a"));
+        assert_eq!(engine.playing(), 2);
+        assert_eq!(engine.playing_in(SoundSource::Ui), 1);
+        assert_eq!(engine.playing_in(SoundSource::Block), 1);
+        assert!(engine.is_event_playing("minecraft:a"), "the Ui a survives");
+        assert!(engine.is_event_playing("minecraft:b"));
+    }
+
+    #[test]
+    fn stop_by_neither_stops_everything() {
+        let mut engine = SilentEngine::new();
+        play_event(
+            &mut engine,
+            &variant("sounds/a.ogg", 16),
+            SoundSource::Block,
+            "minecraft:a",
+        );
+        play_event(
+            &mut engine,
             &variant("sounds/b.ogg", 16),
             SoundSource::Music,
-            None,
-            1.0,
-            1.0,
+            "minecraft:music.game",
         );
         engine.stop(None, None);
         assert_eq!(engine.playing(), 0);
+    }
+
+    #[test]
+    fn stop_by_unknown_event_stops_nothing() {
+        let mut engine = SilentEngine::new();
+        play_event(
+            &mut engine,
+            &variant("sounds/a.ogg", 16),
+            SoundSource::Block,
+            "minecraft:a",
+        );
+        engine.stop(None, Some("minecraft:not.a.real.event"));
+        assert_eq!(engine.playing(), 1);
     }
 
     #[test]
@@ -402,6 +557,7 @@ mod tests {
             Some(DVec3::new(4.0, 0.0, 0.0)),
             1.0,
             1.0,
+            Arc::from("minecraft:block.stone.break"),
         );
         engine.tick();
         let (l, r) = engine.gains().next().unwrap();
@@ -426,6 +582,7 @@ mod tests {
             Some(DVec3::new(8.0, 0.0, 0.0)),
             1.0,
             1.0,
+            Arc::from("minecraft:a"),
         );
         engine.tick();
         let (l, r) = engine.gains().next().unwrap();
@@ -446,6 +603,7 @@ mod tests {
             Some(DVec3::new(24.0, 0.0, 0.0)),
             2.0,
             1.0,
+            Arc::from("minecraft:a"),
         );
         engine.tick();
         let (l, r) = engine.gains().next().unwrap();
@@ -467,6 +625,7 @@ mod tests {
             Some(DVec3::new(4.0, 0.0, 0.0)),
             1.0,
             1.0,
+            Arc::from("minecraft:a"),
         );
         loud.tick();
         let mut quiet = SilentEngine::new();
@@ -477,6 +636,7 @@ mod tests {
             Some(DVec3::new(4.0, 0.0, 0.0)),
             1.0,
             1.0,
+            Arc::from("minecraft:a"),
         );
         quiet.tick();
         let norm = |e: &SilentEngine| {
@@ -497,6 +657,7 @@ mod tests {
             None,
             1.0,
             1.5,
+            Arc::from("minecraft:a"),
         );
         assert_eq!(engine.pitches().next().unwrap(), 2.0);
     }
@@ -504,8 +665,19 @@ mod tests {
     #[test]
     fn remove_drops_the_sound_at_the_index() {
         let mut engine = SilentEngine::new();
-        for path in ["sounds/a.ogg", "sounds/b.ogg", "sounds/c.ogg"] {
-            engine.play(&variant(path, 16), SoundSource::Block, None, 1.0, 1.0);
+        for (index, path) in ["sounds/a.ogg", "sounds/b.ogg", "sounds/c.ogg"]
+            .iter()
+            .enumerate()
+        {
+            let event: Arc<str> = format!("minecraft:s{index}").into();
+            engine.play(
+                &variant(path, 16),
+                SoundSource::Block,
+                None,
+                1.0,
+                1.0,
+                event,
+            );
         }
         engine.remove(1);
         assert_eq!(engine.playing(), 2);

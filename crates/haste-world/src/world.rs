@@ -1,6 +1,5 @@
 //! The world: chunk map, block get/set, light, dirty tracking, section snapshots.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use haste_core::chunk::{BlockEntityData, ChunkData};
@@ -19,7 +18,7 @@ pub struct World {
     chunks: ahash::HashMap<i64, Chunk>,
     /// Sections needing remesh (set_block and light updates mark them).
     dirty: Vec<SectionPos>,
-    dirty_dedup: HashSet<SectionPos>,
+    dirty_dedup: ahash::HashSet<SectionPos>,
     /// Bits for direct-encoded block containers: ceil(log2(state count)), min 4.
     direct_bits: u8,
     /// Bits for direct-encoded biome containers: ceil(log2(synced biome registry size)).
@@ -43,13 +42,15 @@ impl World {
     ) -> World {
         let biome_bits = ceil_log2(biome_registry_len);
         let states = data.blocks.len();
+        // Local table width only: matching a modded server's wider bit width needs registry
+        // sync (a Phase 2 task), not a bigger local table.
         let direct_bits = (u32::BITS - (states as u32).leading_zeros()).max(4) as u8;
         World {
             dim,
             data,
             chunks: ahash::HashMap::with_hasher(ahash::RandomState::default()),
             dirty: Vec::new(),
-            dirty_dedup: HashSet::new(),
+            dirty_dedup: ahash::HashSet::with_hasher(ahash::RandomState::default()),
             direct_bits,
             biome_bits,
         }
@@ -77,6 +78,7 @@ impl World {
             section_count,
             self.direct_bits,
             self.biome_bits,
+            self.data.blocks.len() as u32,
         )
         .map_err(WorldError::Palette)?;
         self.chunks.insert(data.pos.to_packed(), chunk);
