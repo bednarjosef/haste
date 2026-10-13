@@ -14,7 +14,7 @@ use haste_assets::{
     for_each_formatted, Assets, BitmapFont, GlyphKind, ItemGeometry, ItemModel, SpriteMeta,
     TextFormat,
 };
-use haste_core::gui::{GuiCommand, GuiFrame, TextStyle};
+use haste_core::gui::{GuiBlend, GuiCommand, GuiFrame, TextStyle};
 use haste_core::Identifier;
 
 /// Sprites the vanilla HUD draws every frame; loaded at startup.
@@ -156,6 +156,8 @@ pub fn project_nametag(
 struct Batch {
     /// Framebuffer scissor x, y, w, h (None = whole target).
     scissor: Option<[u32; 4]>,
+    /// The blend mode these vertices are drawn with (one pipeline per mode).
+    blend: GuiBlend,
     start: u32,
     end: u32,
 }
@@ -175,7 +177,8 @@ pub struct GuiStats {
 pub struct GuiRenderer {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
-    pipeline: wgpu::RenderPipeline,
+    /// One pipeline per blend mode, indexed like [`GuiBlend`] discriminants (normal first).
+    pipelines: [wgpu::RenderPipeline; 3],
     bind_group: wgpu::BindGroup,
     uniforms: wgpu::Buffer,
     atlas: wgpu::Texture,
@@ -338,52 +341,90 @@ impl GuiRenderer {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("gui"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(GuiVertex::LAYOUT)],
+        // One pipeline per blend mode: vanilla's GUI pipelines (RenderPipelines.GUI_TEXTURED and
+        // friends blend normally; VIGNETTE multiplies; CROSSHAIR inverts the destination).
+        let make_pipeline = |label, blend: Option<wgpu::BlendState>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(GuiVertex::LAYOUT)],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let normal = Some(wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::SrcAlpha,
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                operation: wgpu::BlendOperation::Add,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::SrcAlpha,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                operation: wgpu::BlendOperation::Add,
             },
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
         });
+        // Vanilla's vignette: src ZERO, dst ONE_MINUS_SRC_COLOR — the vignette texture is an
+        // opaque grayscale radial gradient (black centre, bright edges), so this multiplies
+        // the destination by it: unchanged in the centre, darkened towards the edges.
+        let multiply = Some(wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Zero,
+                dst_factor: wgpu::BlendFactor::OneMinusSrc,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Zero,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+        });
+        // Vanilla's crosshair: src ONE_MINUS_DST_COLOR, dst ONE_MINUS_SRC_COLOR.
+        let invert = Some(wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::OneMinusDst,
+                dst_factor: wgpu::BlendFactor::OneMinusSrc,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                operation: wgpu::BlendOperation::Add,
+            },
+        });
+        let pipelines = [
+            make_pipeline("gui-normal", normal),
+            make_pipeline("gui-multiply", multiply),
+            make_pipeline("gui-invert", invert),
+        ];
         let vertex_capacity = 16 * 1024;
         let vertex_buffer = Self::make_vertex_buffer(&device, vertex_capacity);
         let mut gui = GuiRenderer {
             device,
             queue,
-            pipeline,
+            pipelines,
             bind_group,
             uniforms,
             atlas,
@@ -592,10 +633,10 @@ impl GuiRenderer {
         if self.batches.is_empty() {
             return;
         }
-        pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         for b in &self.batches {
+            pass.set_pipeline(&self.pipelines[b.blend as usize]);
             match b.scissor {
                 Some([x, y, w, h]) => pass.set_scissor_rect(x, y, w, h),
                 None => pass.set_scissor_rect(0, 0, target.0, target.1),
@@ -645,6 +686,7 @@ impl GuiRenderer {
         let mut offset = [0.0f32; 2];
         let mut scissors: Vec<[f32; 4]> = Vec::new();
         let mut scissor: Option<[u32; 4]> = None;
+        let mut blend = GuiBlend::Normal;
         let mut batch_start = 0u32;
         for cmd in &frame.commands {
             match cmd {
@@ -720,7 +762,10 @@ impl GuiRenderer {
                     tex_w,
                     tex_h,
                     tint,
+                    blend: cmd_blend,
                 } => {
+                    let cur = scissor;
+                    self.switch(&mut scissor, &mut blend, cur, *cmd_blend, &mut batch_start);
                     let (rect, index) = self.lookup(&TexKey::Texture(texture.clone()), assets);
                     let (iw, ih) = self.entries[index as usize].image.dimensions();
                     let kx = iw as f32 / (*tex_w).max(1) as f32;
@@ -742,7 +787,12 @@ impl GuiRenderer {
                     w,
                     h,
                     tint,
-                } => self.sprite(offset, sprite, *x, *y, *w, *h, *tint, assets),
+                    blend: cmd_blend,
+                } => {
+                    let cur = scissor;
+                    self.switch(&mut scissor, &mut blend, cur, *cmd_blend, &mut batch_start);
+                    self.sprite(offset, sprite, *x, *y, *w, *h, *tint, assets)
+                }
                 GuiCommand::SpriteRegion {
                     sprite,
                     sprite_w,
@@ -754,7 +804,10 @@ impl GuiRenderer {
                     w,
                     h,
                     tint,
+                    blend: cmd_blend,
                 } => {
+                    let cur = scissor;
+                    self.switch(&mut scissor, &mut blend, cur, *cmd_blend, &mut batch_start);
                     let (rect, _) = self.lookup(&TexKey::Sprite(sprite.clone()), assets);
                     let kx = rect[2] as f32 / (*sprite_w).max(1) as f32;
                     let ky = rect[3] as f32 / (*sprite_h).max(1) as f32;
@@ -799,9 +852,12 @@ impl GuiRenderer {
                             ];
                         }
                         let outer = scissor;
-                        self.switch_scissor(
+                        let cur_blend = blend;
+                        self.switch(
                             &mut scissor,
+                            &mut blend,
                             Some(to_framebuffer(r, scale, target)),
+                            cur_blend,
                             &mut batch_start,
                         );
                         self.entity_in_box(
@@ -812,7 +868,7 @@ impl GuiRenderer {
                             [*mouse_x, *mouse_y],
                             assets,
                         );
-                        self.switch_scissor(&mut scissor, outer, &mut batch_start);
+                        self.switch(&mut scissor, &mut blend, outer, cur_blend, &mut batch_start);
                     }
                 },
                 GuiCommand::ScissorPush { x1, y1, x2, y2 } => {
@@ -832,12 +888,14 @@ impl GuiRenderer {
                     }
                     scissors.push(r);
                     let next = Some(to_framebuffer(r, scale, target));
-                    self.switch_scissor(&mut scissor, next, &mut batch_start);
+                    let cur = blend;
+                    self.switch(&mut scissor, &mut blend, next, cur, &mut batch_start);
                 }
                 GuiCommand::ScissorPop => {
                     scissors.pop();
                     let next = scissors.last().map(|r| to_framebuffer(*r, scale, target));
-                    self.switch_scissor(&mut scissor, next, &mut batch_start);
+                    let cur = blend;
+                    self.switch(&mut scissor, &mut blend, next, cur, &mut batch_start);
                 }
                 GuiCommand::TranslatePush { dx, dy, .. } => {
                     translate.push(offset);
@@ -852,31 +910,39 @@ impl GuiRenderer {
         if end > batch_start {
             self.batches.push(Batch {
                 scissor,
+                blend,
                 start: batch_start,
                 end,
             });
         }
     }
 
-    fn switch_scissor(
+    /// Ends the current batch when the scissor or the blend mode is about to change, so each
+    /// batch is one draw call with one pipeline (batching by blend, never per sprite).
+    #[allow(clippy::too_many_arguments)]
+    fn switch(
         &mut self,
-        current: &mut Option<[u32; 4]>,
-        next: Option<[u32; 4]>,
+        scissor: &mut Option<[u32; 4]>,
+        blend: &mut GuiBlend,
+        next_scissor: Option<[u32; 4]>,
+        next_blend: GuiBlend,
         batch_start: &mut u32,
     ) {
-        if *current == next {
+        if *scissor == next_scissor && *blend == next_blend {
             return;
         }
         let end = self.vertices.len() as u32;
         if end > *batch_start {
             self.batches.push(Batch {
-                scissor: *current,
+                scissor: *scissor,
+                blend: *blend,
                 start: *batch_start,
                 end,
             });
         }
         *batch_start = end;
-        *current = next;
+        *scissor = next_scissor;
+        *blend = next_blend;
     }
 
     // ---- primitives ----
