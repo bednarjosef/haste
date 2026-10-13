@@ -41,6 +41,32 @@ fn host() -> JvmHost {
     h
 }
 
+/// The JVM of the process (and everything vanilla state in it) is shared by every test below, so no
+/// test starts from a clean slate unless it asks for one: `bench_hud_and_screen` leaves stone 64 in
+/// hotbar slot 0 and a chat line, which would draw over the chat input this test measures.
+fn reset(gui: &haste_jvm::GuiPipeline) {
+    gui.reset_for_test();
+    // Java's own `Inventory` keeps the stacks the mirror only follows: clear it there too.
+    for slot in 0..haste_jvm::INVENTORY_SIZE {
+        gui.set_inventory_slot(slot as i32, &haste_jvm::empty_stack())
+            .unwrap();
+    }
+    gui.with_state(|s| {
+        s.inventory = vec![haste_jvm::empty_stack(); haste_jvm::INVENTORY_SIZE];
+        s.carried = haste_jvm::empty_stack();
+        s.selected_slot = 0;
+        s.sent.clear();
+        s.outgoing.clear();
+        s.vitals = haste_jvm::PlayerVitals::default();
+        s.debug = haste_jvm::DebugInfo::default();
+        s.game_mode = haste_core::game::GameMode::Survival;
+        s.permission_level = 0;
+        s.game_time = 0;
+        s.day_time = 0;
+        s.disconnect_requested = false;
+    });
+}
+
 #[test]
 #[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
 fn tier3_value_types_from_the_jar() {
@@ -385,6 +411,7 @@ fn pause_screen() {
     let h = host();
     let gui = h.gui();
     h.clear_unimplemented().unwrap();
+    reset(gui);
     open(&h, haste_jvm::ScreenKind::Pause);
     assert!(gui.is_open());
     assert_eq!(
@@ -482,10 +509,117 @@ fn pause_screen() {
 }
 
 #[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn title_screen() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    h.clear_unimplemented().unwrap();
+    open(&h, haste_jvm::ScreenKind::Title);
+    assert!(gui.is_open());
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.TitleScreen")
+    );
+    let f = render(&h, (0.0, 0.0));
+    dump(&f);
+    let t = texts(&f);
+    for want in [
+        "Singleplayer",
+        "Multiplayer",
+        "Minecraft Realms",
+        "Options...",
+        "Quit Game",
+        "Copyright Mojang AB. Do not distribute!",
+    ] {
+        assert!(t.iter().any(|x| x == want), "missing {want:?} in {t:?}");
+    }
+    // the realms notification bell is Haste's replacement (it must draw nothing), never vanilla's
+    assert_eq!(
+        h.class_log()
+            .unwrap()
+            .classes
+            .get("com.mojang.realmsclient.gui.screens.RealmsNotificationsScreen"),
+        Some(&ClassSource::Replacement)
+    );
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for TitleScreen: {unimpl:#?}"
+    );
+}
+
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn options_screen() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    h.clear_unimplemented().unwrap();
+    open(&h, haste_jvm::ScreenKind::Options);
+    assert!(gui.is_open());
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.options.OptionsScreen")
+    );
+    let f = render(&h, (0.0, 0.0));
+    dump(&f);
+    let t = texts(&f);
+    for want in [
+        "Options",
+        "Done",
+        // the FOV slider at the default value, and two of the setting buttons
+        "FOV: Normal",
+        "Skin Customization...",
+        "Music & Sounds...",
+    ] {
+        assert!(t.iter().any(|x| x == want), "missing {want:?} in {t:?}");
+    }
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for OptionsScreen: {unimpl:#?}"
+    );
+}
+
+#[test]
+#[ignore = "JoinMultiplayerScreen.<init> throws NoClassDefFoundError: net/minecraft/client/multiplayer/ServerStatusPinger is deny-listed (its init then needs ServerList too), see crates/haste-jvm/src/loader.rs DENY"]
+fn multiplayer_screen() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    h.clear_unimplemented().unwrap();
+    open(&h, haste_jvm::ScreenKind::Multiplayer);
+    assert!(gui.is_open());
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.multiplayer.JoinMultiplayerScreen")
+    );
+    let f = render(&h, (0.0, 0.0));
+    dump(&f);
+    let t = texts(&f);
+    for want in [
+        "Play Multiplayer",
+        "Join Server",
+        "Direct Connection",
+        "Add Server",
+        "Back",
+    ] {
+        assert!(t.iter().any(|x| x == want), "missing {want:?} in {t:?}");
+    }
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for JoinMultiplayerScreen: {unimpl:#?}"
+    );
+}
+
+#[test]
 #[ignore = "needs cache/ (JDK, client jar, libraries, ASM); run with --release for the number"]
 fn bench_pause_render() {
     let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
     let h = host();
+    reset(h.gui());
     open(&h, haste_jvm::ScreenKind::Pause);
     let gui = h.gui();
     for _ in 0..3000 {
@@ -564,6 +698,7 @@ fn chat_screen() {
     let h = host();
     let gui = h.gui();
     h.clear_unimplemented().unwrap();
+    reset(gui);
     // received chat goes through vanilla's chat pipeline into the HUD's chat, which the open chat screen shows
     gui.with_state(|s| {
         s.in_world = true;
@@ -871,8 +1006,8 @@ fn hud_frame() {
     let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
     let h = host();
     let gui = h.gui();
-    gui.close_screen();
     h.clear_unimplemented().unwrap();
+    reset(gui);
     for slot in 0..41 {
         gui.set_inventory_slot(slot, &haste_jvm::empty_stack())
             .unwrap();
@@ -1002,6 +1137,7 @@ fn bench_hud_and_screen() {
     let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
     let h = host();
     let gui = h.gui();
+    reset(gui);
     gui.set_inventory_slot(0, &stack("minecraft:stone", 64))
         .unwrap();
     gui.with_state(|s| {
