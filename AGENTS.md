@@ -25,11 +25,17 @@ vanilla client with the mod architecture designed in and no mod support yet.
    Mixin oracle harness) stays in the repo for Phase 2 and must keep working.
 5. **Legal.** Never commit Mojang jars, assets, decompiled source or anything generated from them
    (data-generator reports, oracle dumps, extracted textures). Read the player's installation at
-   runtime; derived data lives in the gitignored `cache/` (`haste_core::paths`). Implement behaviour
-   from observation and our own oracle data (recorded by `tools/recorder-mod` from the real game),
-   never by translating decompiled code. Do not copy code from projects whose licence forbids it
-   (Sodium: ideas only). Reused open-source code keeps its header and is listed in
-   `THIRD_PARTY.md` with its licence (GPL-3.0-compatible only).
+   runtime; derived data lives in the gitignored `cache/` (`haste_core::paths`). **Do not guess
+   vanilla behaviour: look it up.** The 26.3 client decompiled by `scripts/decompile.sh` lives in
+   `cache/source/26.3/client` (unobfuscated Mojang names); read it for exact constants, orders,
+   formulas and the sequence of steps, and use the real jar (`javap`) and the recorder mod's dumps
+   from the running game (`tools/recorder-mod`) to check. Then write Haste's own Rust: never paste
+   Mojang code into the tree or translate a method line by line, and never quote it in comments,
+   docs or commit messages (naming the vanilla class and method, e.g. `LocalPlayer.rideTick`, is
+   fine and encouraged). Every agent and person on the project may read it; it stays only in
+   `cache/`. Do not copy code from projects whose licence forbids it (Sodium: ideas only).
+   GPL-compatible projects are fair game to reuse, Pumpkin (`cache/pumpkin`, GPL-3.0) first:
+   reused code keeps its header and is listed in `THIRD_PARTY.md` with its licence.
 6. **Toolchain.** Pinned stable Rust (`rust-toolchain.toml`). No nightly features. No azalea crates.
    Before writing a large subsystem from scratch, spend ten minutes checking for an existing crate
    or GPL-compatible project (Pomme, Pumpkin, Fabric Loader for Phase 2); write the result in

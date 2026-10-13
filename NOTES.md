@@ -126,3 +126,10 @@ Newest at the top. One entry per decision, with the why; link the brief or repor
   `enum_order_tests` in `crates/haste-protocol/src/packets/mod.rs`, each naming its jar class;
   registry-driven ids (sounds, particles, items, blocks, entity types, chat types) are not pinned
   because they come from the reports at runtime.
+- **2026-10-13 Read the decompiled client instead of guessing.** Workers were filling gaps with
+  minecraft.wiki numbers and guesses (seat offsets, falling-water height, physics constants marked
+  UNVERIFIED). Rule 5 now allows reading the 26.3 client decompiled with Vineflower into
+  `cache/source/26.3/client` (`scripts/decompile.sh`) for exact behaviour, while Haste's code is
+  still written by us and never contains Mojang code; the recorder mod and `javap` stay the checks.
+  Earlier entries saying "no decompiled source by rule" are superseded; their open questions can
+  now be settled by reading the source.
