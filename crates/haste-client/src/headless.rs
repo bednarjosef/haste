@@ -106,7 +106,7 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
         }
         if driver.is_closed() {
             // Drain what is left so the disconnect reason is applied.
-            let _ = driver.receive(&mut world, &mut entities);
+            let _ = driver.receive(&mut world, &mut entities, None);
             failure = Some(
                 driver
                     .connection()

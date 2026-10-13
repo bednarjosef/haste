@@ -87,6 +87,12 @@ impl EntitySink for FakeEntities {
     fn set_velocity(&mut self, id: EntityId, v: DVec3) {
         self.log.push(format!("velocity {} {}", id.0, v.y));
     }
+    fn mark_hurt(&mut self, id: EntityId) {
+        self.log.push(format!("hurt {}", id.0));
+    }
+    fn mark_dead(&mut self, id: EntityId) {
+        self.log.push(format!("dead {}", id.0));
+    }
     fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]) {
         self.log
             .push(format!("metadata {} {}", id.0, entries.len()));
@@ -283,7 +289,7 @@ fn entity_packets_reach_the_store() {
 }
 
 #[test]
-fn teleport_is_accepted_then_movement_follows_on_the_next_tick() {
+fn teleport_is_accepted_one_tick_later_then_movement_follows() {
     let mut r = Rig::new();
     // Nothing is sent before the first teleport.
     r.session.end_tick(
@@ -294,15 +300,33 @@ fn teleport_is_accepted_then_movement_follows_on_the_next_tick() {
     );
     assert!(r.out.is_empty());
     r.apply(teleport(1, DVec3::new(0.5, -60.0, 0.5), 0));
-    assert_eq!(r.names(), ["accept_teleportation", "player_loaded"]);
+    // The accept is not sent from the packet handler (a join teleport answered within
+    // microseconds of arrival races the server's join bookkeeping: "moved too quickly!"),
+    // and not on the tick it arrived in either.
+    assert!(r.out.is_empty());
     r.session.end_tick(
         &InputState::default(),
         &mut r.world,
         &r.entities,
         &mut r.out,
     );
-    // The fake world has no chunks: the player stays put, so no movement packet yet.
-    assert_eq!(r.names(), ["player_input", "client_tick_end"]);
+    assert!(r.out.is_empty());
+    r.session.end_tick(
+        &InputState::default(),
+        &mut r.world,
+        &r.entities,
+        &mut r.out,
+    );
+    assert_eq!(
+        r.names(),
+        [
+            "accept_teleportation",
+            "player_loaded",
+            "player_input",
+            "client_tick_end"
+        ]
+    );
+    // The fake world has no chunks: the player stays put, so no movement packet.
     // player_input only when it changes; player_loaded only once.
     r.session.end_tick(
         &InputState::default(),
@@ -312,9 +336,23 @@ fn teleport_is_accepted_then_movement_follows_on_the_next_tick() {
     );
     assert_eq!(r.names(), ["client_tick_end"]);
     r.apply(teleport(2, DVec3::new(1.0, 0.0, 0.0), teleport_flags::X));
-    assert_eq!(r.names(), ["accept_teleportation"]);
+    assert!(r.out.is_empty());
     // x relative, y and z absolute.
     assert_eq!(r.session.player.state.pos, DVec3::new(1.5, 0.0, 0.0));
+    r.session.end_tick(
+        &InputState::default(),
+        &mut r.world,
+        &r.entities,
+        &mut r.out,
+    );
+    assert_eq!(r.names(), ["client_tick_end"]);
+    r.session.end_tick(
+        &InputState::default(),
+        &mut r.world,
+        &r.entities,
+        &mut r.out,
+    );
+    assert_eq!(r.names(), ["accept_teleportation", "client_tick_end"]);
 }
 
 #[test]
@@ -409,4 +447,94 @@ fn real_world_through_the_sink() {
     WorldSink::reset(&mut world, &DimensionInfo::overworld());
     assert_eq!(WorldSink::chunk_count(&world), 0);
     assert_eq!(world.biome_bits(), 7);
+}
+
+#[test]
+fn hurt_animation_marks_and_tilts() {
+    let mut r = Rig::new();
+    // Another entity's hurt: marked, no camera tilt.
+    r.apply(ClientboundPlay::HurtAnimation(cb::HurtAnimation {
+        entity_id: 42,
+        yaw: 0.0,
+    }));
+    assert!(r.entities.log.iter().any(|l| l == "hurt 42"));
+    assert_eq!(r.session.hurt_tilt_degrees(), 0.0);
+    // Our own hurt (session id 7): the tilt starts and eases out over 10 ticks.
+    r.apply(ClientboundPlay::HurtAnimation(cb::HurtAnimation {
+        entity_id: 7,
+        yaw: 0.0,
+    }));
+    assert_eq!(r.session.hurt_tilt_degrees().abs(), 14.0);
+    // 5 ticks in: (5/10)^2 of 14 degrees.
+    for _ in 0..5 {
+        end_tick_once(&mut r);
+    }
+    let half = r.session.hurt_tilt_degrees().abs();
+    assert!((half - 14.0 * 0.25).abs() < 1e-6, "{half}");
+    // 10 ticks in: gone.
+    for _ in 0..5 {
+        end_tick_once(&mut r);
+    }
+    assert_eq!(r.session.hurt_tilt_degrees(), 0.0);
+    // A second hurt restarts the tilt.
+    r.apply(ClientboundPlay::HurtAnimation(cb::HurtAnimation {
+        entity_id: 7,
+        yaw: 0.0,
+    }));
+    assert_eq!(r.session.hurt_tilt_degrees().abs(), 14.0);
+}
+
+#[test]
+fn hurt_tilt_direction_follows_the_damage_yaw() {
+    let mut r = Rig::new();
+    // Damage from the player's right (yaw 90 degrees off our facing) rolls the other way
+    // than damage from the left.
+    r.session.player.state.yaw = 0.0;
+    r.apply(ClientboundPlay::HurtAnimation(cb::HurtAnimation {
+        entity_id: 7,
+        yaw: 90.0,
+    }));
+    let right = r.session.hurt_tilt_degrees();
+    let mut r2 = Rig::new();
+    r2.session.player.state.yaw = 0.0;
+    r2.apply(ClientboundPlay::HurtAnimation(cb::HurtAnimation {
+        entity_id: 7,
+        yaw: -90.0,
+    }));
+    let left = r2.session.hurt_tilt_degrees();
+    assert!(right * left < 0.0, "opposite rolls: {right} vs {left}");
+    assert!((right.abs() - 14.0).abs() < 1e-6);
+}
+
+#[test]
+fn damage_event_and_death_mark_entities() {
+    let mut r = Rig::new();
+    r.apply(ClientboundPlay::DamageEvent(cb::DamageEvent {
+        entity_id: 42,
+        source_type: 1,
+        source_cause: 0,
+        source_direct: 0,
+        source_pos: None,
+    }));
+    assert!(r.entities.log.iter().any(|l| l == "hurt 42"));
+    r.apply(ClientboundPlay::EntityEvent(cb::EntityEvent {
+        entity_id: 42,
+        status: 3,
+    }));
+    assert!(r.entities.log.iter().any(|l| l == "dead 42"));
+}
+
+/// One session tick (the part of `NetDriver::end_tick` that lives in `Session`).
+fn end_tick_once(r: &mut Rig) {
+    let mut out = Vec::new();
+    let mut world = std::mem::take(&mut r.world);
+    let entities = std::mem::take(&mut r.entities);
+    r.session.end_tick(
+        &haste_core::input::InputState::default(),
+        &mut world,
+        &entities,
+        &mut out,
+    );
+    r.world = world;
+    r.entities = entities;
 }

@@ -36,13 +36,18 @@ fn teleport(id: i32, pos: DVec3, yaw: f32, flags: i32) -> ClientboundPlay {
     })
 }
 
-/// A survival player standing on the floor at (0.5, 0, 0.5), loaded, after its first tick.
+/// A survival player standing on the floor at (0.5, 0, 0.5), loaded, after its spawn accept.
 fn spawned() -> (LocalPlayer, Vec<ServerboundPlay>) {
     let mut p = LocalPlayer::with_entity(ME, GameMode::Survival);
     p.set_attribute_ids(ids());
     let mut out = Vec::new();
     assert!(p.handle(&teleport(1, DVec3::new(0.5, 0.0, 0.5), 0.0, 0), &mut out));
-    out.clear();
+    // The accept waits one full tick after the teleport, not sent from the packet handler.
+    tick(&mut p, &InputState::default());
+    assert_eq!(
+        names(&tick(&mut p, &InputState::default())),
+        ["accept", "loaded", "input", "status", "tick_end"]
+    );
     (p, out)
 }
 
@@ -77,7 +82,7 @@ fn names(out: &[ServerboundPlay]) -> Vec<&'static str> {
 }
 
 #[test]
-fn first_teleport_accepts_then_reports_loaded_without_moving() {
+fn first_teleport_accepts_one_tick_later_then_reports_loaded() {
     let mut p = LocalPlayer::with_entity(ME, GameMode::Survival);
     let mut out = Vec::new();
     // Nothing is sent before a position arrives.
@@ -89,8 +94,20 @@ fn first_teleport_accepts_then_reports_loaded_without_moving() {
         &mut out,
     );
     assert!(out.is_empty());
+    // The teleport is applied at once, but the accept is not sent from the packet
+    // handler: answering within microseconds of the join teleport races the server's
+    // join bookkeeping ("moved too quickly! <spawn position>"). It waits one full tick.
     p.handle(&teleport(5, DVec3::new(1.5, 2.0, -3.5), 90.0, 0), &mut out);
-    assert_eq!(names(&out), ["accept", "loaded"]);
+    assert!(out.is_empty());
+    assert!(p.has_position && !p.loaded);
+    // The tick the teleport arrived in sends nothing (movement waits for player_loaded).
+    assert!(tick(&mut p, &InputState::default()).is_empty());
+    assert!(!p.loaded);
+    let out = tick(&mut p, &InputState::default());
+    assert_eq!(
+        names(&out),
+        ["accept", "loaded", "input", "status", "tick_end"]
+    );
     match &out[0] {
         ServerboundPlay::AcceptTeleportation(a) => {
             assert_eq!(a.teleport_id, 5);
@@ -114,7 +131,13 @@ fn later_teleport_is_confirmed_by_the_accept_alone() {
         ),
         &mut out,
     );
-    assert_eq!(names(&out), ["accept"]);
+    // Nothing inline; the accept carries the resulting position one full tick later.
+    assert!(out.is_empty());
+    assert_eq!(names(&tick(&mut p, &InputState::default())), ["tick_end"]);
+    assert_eq!(
+        names(&tick(&mut p, &InputState::default()))[..1],
+        ["accept"]
+    );
     assert_eq!(p.state.pos, DVec3::new(1.5, 0.0, 1.5));
     assert_eq!(p.state.yaw, 10.0);
 }
@@ -124,12 +147,10 @@ fn tick_order_and_input_only_on_change() {
     let (mut p, _) = spawned();
     let still = InputState::default();
     let out = tick(&mut p, &still);
-    // First tick: input (never sent yet). Standing still with zero velocity the move does not
-    // collide downwards, so on_ground drops for one tick (status-only packets).
-    assert_eq!(names(&out), ["input", "status", "tick_end"]);
-    assert_eq!(names(&tick(&mut p, &still)), ["status", "tick_end"]);
-    let out = tick(&mut p, &still);
-    assert_eq!(names(&out), ["tick_end"]);
+    // The spawn tick already sent input; standing still with zero velocity the move does
+    // not collide downwards, so on_ground drops for one more tick (status-only packet).
+    assert_eq!(names(&out), ["status", "tick_end"]);
+    assert_eq!(names(&tick(&mut p, &still)), ["tick_end"]);
     let walk = InputState {
         forward: true,
         ..still
@@ -150,8 +171,8 @@ fn position_reminder_every_twenty_ticks() {
             sent_at.push(t);
         }
     }
-    // The spawn teleport counts as a sent position.
-    assert_eq!(sent_at, [20, 40]);
+    // The spawn teleport counts as a sent position, and `spawned()` spent one tick of it.
+    assert_eq!(sent_at, [19, 39]);
 }
 
 #[test]
@@ -204,6 +225,76 @@ fn sprint_command_comes_before_the_move() {
     assert_eq!(names(&out)[..2], ["input", "command"]);
 }
 
+/// The `player_command` action ids this module sends, pinned to the declaration
+/// order of `ServerboundPlayerCommandPacket$Action` in the 26.3 client jar
+/// (STOP_SLEEPING=0, START_SPRINTING=1, STOP_SPRINTING=2, START_RIDING_JUMP=3,
+/// STOP_RIDING_JUMP=4, OPEN_INVENTORY=5, START_FALL_FLYING=6).
+#[test]
+fn player_command_action_values_match_the_jar() {
+    assert_eq!(command::START_SPRINTING, 1);
+    assert_eq!(command::STOP_SPRINTING, 2);
+}
+
+/// The first movement packet after the join teleport carries the server's position, so the
+/// server-side delta is ~0 (regression test for the join "moved too quickly!" whose logged
+/// delta equalled the whole spawn position).
+#[test]
+fn first_move_after_join_carries_the_server_position() {
+    // A floor whose top is the spawn y, so physics leaves the player standing in place.
+    let mut p = LocalPlayer::with_entity(ME, GameMode::Survival);
+    p.set_attribute_ids(ids());
+    let mut out = Vec::new();
+    let spawn = DVec3::new(7.5, -60.0, -3.5);
+    assert!(p.handle(&teleport(1, spawn, 0.0, 0), &mut out));
+    assert!(out.is_empty());
+    let floor = TestWorld::flat(-60, states::STONE);
+    // The tick the teleport arrived in: the accept is held for one full tick.
+    let mut out = Vec::new();
+    p.tick_with(
+        &InputState::default(),
+        &floor,
+        &TestShapes::default(),
+        &TestShapes::default(),
+        &mut out,
+    );
+    assert!(out.is_empty());
+    p.tick_with(
+        &InputState::default(),
+        &floor,
+        &TestShapes::default(),
+        &TestShapes::default(),
+        &mut out,
+    );
+    // accept (with the server's position) + player_loaded, then the per-tick packets.
+    let names = names(&out);
+    assert_eq!(names[..3], ["accept", "loaded", "input"]);
+    match &out[0] {
+        ServerboundPlay::AcceptTeleportation(a) => {
+            assert_eq!(a.teleport_id, 1);
+            assert_eq!(a.pos, spawn);
+        }
+        _ => unreachable!(),
+    }
+    // The first movement packet, when it comes, is at the server's position (delta ~0).
+    let first_move = out.iter().find(|p| {
+        matches!(
+            p,
+            ServerboundPlay::MovePlayerPos(_) | ServerboundPlay::MovePlayerPosRot(_)
+        )
+    });
+    if let Some(m) = first_move {
+        let pos = match m {
+            ServerboundPlay::MovePlayerPos(m) => m.pos,
+            ServerboundPlay::MovePlayerPosRot(m) => m.pos,
+            _ => unreachable!(),
+        };
+        assert!(
+            (pos - spawn).length_squared() < POSITION_THRESHOLD_SQ,
+            "move packet position {pos:?} not at the server's position {spawn:?}"
+        );
+    }
+}
+
 #[test]
 fn no_sprint_when_hungry() {
     let (mut p, _) = spawned();
@@ -245,8 +336,11 @@ fn creative_flight_toggle_sends_abilities() {
     let mut out = Vec::new();
     p.handle(&teleport(1, DVec3::new(0.5, 0.0, 0.5), 0.0, 0), &mut out);
     p.toggle_flight();
+    // The tick the teleport arrived in waits (no accept yet); the next sends the spawn
+    // accept, player_loaded, then the abilities.
+    assert!(tick(&mut p, &InputState::default()).is_empty());
     let out = tick(&mut p, &InputState::default());
-    assert_eq!(names(&out)[..2], ["input", "abilities"]);
+    assert_eq!(names(&out)[..4], ["accept", "loaded", "input", "abilities"]);
     assert!(p.state.flying);
     // Survival cannot fly: toggling does nothing.
     let (mut s, _) = spawned();
@@ -391,5 +485,12 @@ fn respawn_waits_for_a_new_position() {
     assert_eq!(p.game_mode, GameMode::Creative);
     assert!(tick(&mut p, &InputState::default()).is_empty());
     p.handle(&teleport(9, DVec3::new(0.5, 0.0, 0.5), 0.0, 0), &mut out);
+    // The respawn teleport's accept and the new player_loaded go out one full tick later.
+    assert!(!p.loaded);
+    assert!(tick(&mut p, &InputState::default()).is_empty());
+    assert_eq!(
+        names(&tick(&mut p, &InputState::default()))[..2],
+        ["accept", "loaded"]
+    );
     assert!(p.loaded);
 }

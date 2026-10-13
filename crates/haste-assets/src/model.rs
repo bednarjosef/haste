@@ -3,7 +3,7 @@
 // Haste (haste-core Identifier, atlas UVs, haste-data BlockStates). See
 // THIRD_PARTY.md.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::Deserialize;
 
@@ -48,14 +48,38 @@ pub struct ElementDef {
     pub(crate) to: [f32; 3],
     #[serde(default)]
     pub(crate) rotation: Option<ElementRotation>,
-    #[serde(default)]
-    pub(crate) faces: HashMap<String, FaceDef>,
+    /// Faces keyed by direction, in vanilla's fixed order (down, up, north, south,
+    /// west, east): `Direction`'s declaration order is that order and `BTreeMap`
+    /// iterates by key, so baking is deterministic. A `HashMap` here made the quad
+    /// order differ from every other process for identical input.
+    #[serde(default, deserialize_with = "deserialize_faces")]
+    pub(crate) faces: BTreeMap<Direction, FaceDef>,
     #[serde(default = "default_true")]
     pub(crate) shade: bool,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// The `faces` object is keyed by the direction's vanilla name (`"up"`, ...).
+fn deserialize_faces<'de, D>(de: D) -> Result<BTreeMap<Direction, FaceDef>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: HashMap<String, FaceDef> = HashMap::deserialize(de)?;
+    let mut out = BTreeMap::new();
+    for (name, face) in raw {
+        match Direction::parse(&name) {
+            Some(dir) => {
+                out.insert(dir, face);
+            }
+            // Vanilla only accepts the six directions as face keys; anything else has
+            // no place to draw, so it is skipped (never a panic on unknown data).
+            None => tracing::debug!("model face {name:?} ignored: not a direction"),
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -123,8 +147,12 @@ impl DisplayTransform {
     }
 }
 
-/// The six block face directions (Pomme `Direction`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+/// The six block face directions (Pomme `Direction`). The declaration order is
+/// vanilla's fixed order (down, up, north, south, west, east), which `Ord` keeps,
+/// so maps keyed by it iterate in that order.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum Direction {
     Down,
     Up,

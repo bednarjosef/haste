@@ -17,7 +17,7 @@ use glam::DVec3;
 use haste_protocol::haste_core::gui::GuiFrame;
 use haste_protocol::haste_core::input::InputState;
 use haste_protocol::haste_core::model::EntityInstance;
-use haste_protocol::haste_core::{ChunkPos, SectionPos};
+use haste_protocol::haste_core::{ChunkPos, EntityId, SectionPos};
 use haste_protocol::{Account, ConnectOptions};
 use haste_render::{Camera, FrameInput, FrameStats, Renderer, SkyState};
 use haste_setup::options::Options;
@@ -63,6 +63,8 @@ const DOUBLE_TAP: Duration = Duration::from_millis(350);
 /// Wall time the render thread may spend capturing sections for the mesher per frame.
 /// Sections handed to the mesh workers per frame (they capture the snapshots themselves).
 const SUBMIT_PER_FRAME: usize = 512;
+/// Vanilla's "GUI scale" (the auto option is not wired; 2 is a common choice at 1080p).
+const GUI_SCALE: u32 = 2;
 
 /// A joined game: runtime, game thread and shared state.
 struct Session {
@@ -74,10 +76,14 @@ struct Session {
     biomes: Vec<haste_render::BiomeClimate>,
     /// The saved options this run uses (loaded once).
     options: Options,
+    /// The local player's entity id and UUID (`login`), for its own model in third person.
+    local: (EntityId, u128),
 }
 
 impl Session {
-    fn join(args: &Args) -> anyhow::Result<Self> {
+    /// `sound`: open the audio output (the window only; screenshots and the benchmark stay
+    /// silent so they neither make noise nor measure the audio thread).
+    fn join(args: &Args, sound: bool) -> anyhow::Result<Self> {
         let address = args.server.clone().ok_or_else(|| {
             anyhow::anyhow!("--server <host[:port]> is required (no launcher yet)")
         })?;
@@ -87,7 +93,12 @@ impl Session {
             .thread_name("haste-net")
             .build()?;
         let data = net::load_game_data()?;
-        let options = load_options();
+        let mut options = load_options();
+        // `--render-distance` overrides the saved option for this run (bench mode compares
+        // render distances without editing the config file).
+        if let Some(rd) = args.render_distance {
+            options.render_distance = rd;
+        }
         let mut opts = ConnectOptions::new(
             address.clone(),
             Account::Offline {
@@ -102,6 +113,7 @@ impl Session {
         let biomes = net::synced_biome_count(regs).unwrap_or(64);
         let biome_climates = biomes::biome_climates(regs);
         let login = driver.login();
+        let local = (login.entity_id, login.profile.uuid.as_u128());
         tracing::info!(
             "joined {address} as {}: {:?}, dimension {}, view distance {}",
             driver.connection().profile().name,
@@ -118,7 +130,9 @@ impl Session {
             net::new_entity_store(entity_types),
             view_distance,
         ));
-        *shared.sound.lock() = open_sounds(regs, &shared.data, &options.sound);
+        if sound {
+            *shared.sound.lock() = open_sounds(regs, &shared.data, &options.sound);
+        }
         let handle = rt.handle().clone();
         let sh = shared.clone();
         let game_thread = std::thread::Builder::new()
@@ -133,6 +147,7 @@ impl Session {
             game_thread: Some(game_thread),
             biomes: biome_climates,
             options,
+            local,
         })
     }
 
@@ -257,11 +272,15 @@ impl WorldFeed {
 
     /// Copies the interpolated entity instances.
     /// Copies the interpolated entity instances, gives players their default skin and samples
-    /// each entity's light for the renderer.
+    /// each entity's light for the renderer. In the third-person perspectives the local
+    /// player's own model is included (the server does not spawn us as an entity, so it is
+    /// built here from the shared view).
     fn entities(
         &mut self,
         shared: &Shared,
         renderer: &mut Renderer,
+        perspective: game::Perspective,
+        local: (EntityId, u128),
         partial: f32,
     ) -> &[EntityInstance] {
         self.instances.clear();
@@ -276,6 +295,11 @@ impl WorldFeed {
                     }
                 }
             }
+        }
+        if perspective.draws_player() {
+            let view = *shared.view.lock();
+            self.instances
+                .push(game::player_instance(local.0, local.1, &view, partial));
         }
         renderer.sample_entity_lights(&*shared.world.read(), &self.instances);
         &self.instances
@@ -297,22 +321,37 @@ impl WorldFeed {
 
 /// Builds this frame's camera and sky from the shared view at `now`. `yaw`/`pitch` are the
 /// input layer's look; the player's server rotation offset is added here so mouse look is
-/// smooth at frame rate while the player itself turns once per tick.
+/// smooth at frame rate while the player itself turns once per tick. In the third-person
+/// perspectives the camera is moved off the eye (`game::third_person_camera`).
 fn frame_view(
     shared: &Shared,
+    perspective: game::Perspective,
     yaw: f32,
     pitch: f32,
     fov_deg: f32,
     now: Instant,
-) -> (Camera, SkyState, f32, i32) {
+) -> (Camera, SkyState, f32, i32, u64) {
     let view = *shared.view.lock();
     let partial = game::partial_tick(view.tick_at, now);
+    let eye = game::interpolate(view.prev_eye, view.eye, partial);
+    let look = (
+        yaw + view.look_offset.0,
+        (pitch + view.look_offset.1).clamp(-90.0, 90.0),
+    );
+    let (pos, yaw, pitch) = if perspective.draws_player() {
+        // The world is read here (the outline shapes the crosshair raycast uses too), held
+        // only for the ray.
+        let (world, shapes) = (shared.world.read(), &shared.data.shapes);
+        game::third_person_camera(perspective, eye, look.0, look.1, &*world, shapes)
+    } else {
+        (eye, look.0, look.1)
+    };
     let camera = Camera {
-        // Linear between LocalPlayer::camera(0.0) and camera(1.0), i.e. camera(partial).
-        pos: game::interpolate(view.prev_eye, view.eye, partial),
-        yaw: yaw + view.look_offset.0,
-        pitch: (pitch + view.look_offset.1).clamp(-90.0, 90.0),
+        pos,
+        yaw,
+        pitch,
         fov_deg,
+        roll_deg: view.hurt_tilt,
     };
     let fog_end = (view.view_distance.max(2) * 16) as f32;
     let sky = SkyState {
@@ -322,7 +361,13 @@ fn frame_view(
         fog_start: fog_end * 0.75,
         fog_end,
     };
-    (camera, sky, partial, view.view_distance)
+    (
+        camera,
+        sky,
+        partial,
+        view.view_distance,
+        view.animation_tick,
+    )
 }
 
 /// Number keys 1-9 select hotbar slots 0-8.
@@ -388,14 +433,15 @@ fn open_sounds(
 /// `--screenshot <file>`: join, wait until the world is meshed, render one frame offscreen,
 /// save it as PNG and leave. `--seconds` bounds the wait.
 pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
-    let session = Session::join(args)?;
+    let session = Session::join(args, false)?;
     let shared = session.shared.clone();
     let mut assets = open_assets()?;
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
     renderer.set_biomes(&session.biomes);
-    let gui = GuiFrame::default();
+    let mut gui = GuiFrame::default();
+    let mut ui: Option<crate::ui::Ui> = None;
     let mut feed = WorldFeed::default();
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
     // With `--pos`, the shot is only taken once the server has teleported the player to these
@@ -405,36 +451,68 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         .as_ref()
         .filter(|v| v.len() == 3)
         .map(|v| DVec3::new(v[0], v[1], v[2]));
+    // The HUD's JVM (started by the game thread) gets this long to be ready; the shot then
+    // waits for it past the world settling, so the HUD is in the picture whenever it can be.
+    let jvm_deadline = Instant::now() + Duration::from_secs(args.seconds.min(30));
+    let mut wait_for_hud = true;
     let mut frames = 0u32;
     let mut stats;
     let mut last_camera;
+    let perspective = game::Perspective::parse(&args.perspective)?;
     loop {
-        let (mut camera, sky, partial, vd) = frame_view(
+        // The look the shot is taken with: `--yaw`/`--pitch`, else the player's own (the
+        // input layer's zero look plus the server's rotation offset). It goes into
+        // `frame_view` so the third-person camera offset follows it. The player is made to
+        // look the same way, so its crosshair target (and the outline drawn for it) matches
+        // the picture.
+        let offset = shared.view.lock().look_offset;
+        let look = (args.yaw.unwrap_or(offset.0), args.pitch.unwrap_or(offset.1));
+        {
+            let mut input = shared.input.lock();
+            input.state.yaw = look.0 - offset.0;
+            input.state.pitch = (look.1 - offset.1).clamp(-90.0, 90.0);
+        }
+        let (mut camera, sky, partial, vd, animation_tick) = frame_view(
             &shared,
-            0.0,
-            0.0,
+            perspective,
+            look.0 - offset.0,
+            look.1 - offset.1,
             session.options.fov as f32,
             Instant::now(),
         );
-        camera.yaw = args.yaw.unwrap_or(camera.yaw);
-        camera.pitch = args.pitch.unwrap_or(camera.pitch);
         if let Some(pos) = want_pos {
             let view = *shared.view.lock();
-            camera.pos = pos + DVec3::new(0.0, view.eye_height, 0.0);
+            let eye = pos + DVec3::new(0.0, view.eye_height, 0.0);
+            camera.pos = if perspective.draws_player() {
+                let (world, shapes) = (shared.world.read(), &shared.data.shapes);
+                game::third_person_camera(perspective, eye, look.0, look.1, &*world, shapes).0
+            } else {
+                eye
+            };
         }
         last_camera = camera;
-        {
-            // The player looks where the screenshot camera looks, so its crosshair target
-            // (and the outline drawn for it) matches the picture.
-            let offset = shared.view.lock().look_offset;
-            let mut input = shared.input.lock();
-            input.state.yaw = camera.yaw - offset.0;
-            input.state.pitch = camera.pitch - offset.1;
-        }
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
-        let entities = feed.entities(&shared, &mut renderer, partial);
+        let entities = feed.entities(&shared, &mut renderer, perspective, session.local, partial);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
+        // The HUD, like the window: waiting for the JVM, then one `Ui` for this render thread.
+        if ui.is_none() {
+            ui = shared.ui.lock().clone();
+            if let Some(u) = &ui {
+                u.set_text_metrics(renderer.text_metrics());
+            }
+        }
+        if let Some(u) = &mut ui {
+            gui = u
+                .frame(
+                    args.width / GUI_SCALE,
+                    args.height / GUI_SCALE,
+                    GUI_SCALE,
+                    (0.0, 0.0),
+                    partial,
+                )
+                .clone();
+        }
         let frame = FrameInput {
             camera,
             entities,
@@ -445,6 +523,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             breaking: &breaking,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
+        renderer.set_animation_tick(animation_tick);
         stats = renderer.render(&frame)?;
         frames += 1;
         let placed = shared.view.lock().has_position;
@@ -474,8 +553,15 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
                 continue;
             }
         }
-        if placed && feed.settled(&stats, Duration::from_millis(1500)) {
+        if placed && feed.settled(&stats, Duration::from_millis(1500)) && !wait_for_hud {
             break;
+        }
+        wait_for_hud = wait_for_hud
+            && ui.is_none()
+            && !shared.hud_failed.load(Ordering::Relaxed)
+            && Instant::now() < jvm_deadline;
+        if wait_for_hud && Instant::now() > jvm_deadline {
+            tracing::warn!("the HUD's JVM did not start in time; the shot has no HUD");
         }
         if Instant::now() > deadline {
             tracing::warn!("--seconds elapsed before the world settled; saving what is there");
@@ -489,8 +575,9 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("saving {}", file.display()))?;
     let c = last_camera;
     let view = *shared.view.lock();
+    let entities = feed.instances.len();
     println!(
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, target {:?}",
+        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} entity instances (perspective {}, local player {}), target {:?}",
         file.display(),
         image.width(),
         image.height(),
@@ -503,15 +590,413 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         stats.chunk_sections_drawn,
         stats.chunk_sections_total,
         stats.draw_calls,
+        entities,
+        args.perspective,
+        perspective.draws_player(),
         view.block_target
     );
     drop(session);
     Ok(())
 }
 
+/// The bench camera at normalised time `t` in 0..=1 (t is elapsed/total). The first half is a
+/// slow 360-degree turn in place around the spawn eye; the second half flies straight along +X
+/// at 10 blocks/s at eye height + 20. `base` is the settle-frame camera; only the camera moves,
+/// never the player. Deterministic: same t, same camera.
+pub fn bench_camera(t: f32, base: &Camera, total_seconds: f32) -> Camera {
+    let half = 0.5_f32;
+    let mut camera = *base;
+    if t < half {
+        // One full turn over the first half.
+        camera.yaw = base.yaw + (t / half) * 360.0;
+    } else {
+        camera.yaw = base.yaw + 360.0;
+        // 10 blocks/s for the second half (which is total/2 seconds long).
+        let flight_seconds = total_seconds * (t - half);
+        camera.pos.x = base.pos.x + 10.0 * flight_seconds as f64;
+        camera.pos.y = base.pos.y + 20.0;
+    }
+    camera
+}
+
+/// One recorded bench frame.
+#[derive(Clone, Copy, Debug)]
+struct BenchSample {
+    frame_ms: f32,
+    sections_drawn: u32,
+    sections_total: u32,
+    draw_calls: u32,
+    timings: haste_render::FrameTimings,
+    /// WorldFeed::feed time (dirty collection, submit, mesh upload).
+    feed_ms: f32,
+    /// Sections that were not drawn by the previous sample's frame (meshes became visible).
+    sections_new: u32,
+    /// Section meshes uploaded this frame and their vertex+index bytes.
+    uploads: u32,
+    upload_bytes: u64,
+    /// Frame index since the measure phase started.
+    index: u32,
+}
+
+/// Summary of a bench run: aggregate frame times plus the renderer's phase and pass averages.
+#[derive(Debug)]
+struct BenchSummary {
+    frames: u32,
+    avg_ms: f32,
+    /// 1% low: the 99th percentile frame time.
+    p99_ms: f32,
+    worst_ms: f32,
+    sections_drawn: f32,
+    sections_total: f32,
+    draw_calls: f32,
+    prepare_ms: f32,
+    acquire_ms: f32,
+    cull_ms: f32,
+    encode_ms: f32,
+    submit_ms: f32,
+    present_ms: f32,
+    /// GPU time of the main, hand and GUI passes.
+    gpu_ms: [f32; 3],
+}
+
+impl BenchSummary {
+    fn fps(&self) -> f32 {
+        if self.avg_ms > 0.0 {
+            1000.0 / self.avg_ms
+        } else {
+            0.0
+        }
+    }
+
+    /// One block of text, printed and also written to `--bench-out` as JSON.
+    fn text(&self, meta: &BenchMeta) -> String {
+        format!(
+            "bench: {} frames in {:.0} s\n\
+             frame time: avg {:.2} ms ({:.0} FPS), 1% low {:.2} ms, worst {:.2} ms\n\
+             breakdown ms: prepare {:.2} acquire {:.2} cull {:.2} encode {:.2} submit {:.2} present {:.2} | gpu main {:.2} hand {:.2} gui {:.2}\n\
+             sections drawn {}/{} avg, draw calls {:.0} avg\n\
+             render distance {} (requested {}), {}x{}, adapter {}",
+            self.frames,
+            meta.seconds,
+            self.avg_ms,
+            self.fps(),
+            self.p99_ms,
+            self.worst_ms,
+            self.prepare_ms,
+            self.acquire_ms,
+            self.cull_ms,
+            self.encode_ms,
+            self.submit_ms,
+            self.present_ms,
+            self.gpu_ms[0],
+            self.gpu_ms[1],
+            self.gpu_ms[2],
+            self.sections_drawn,
+            self.sections_total,
+            self.draw_calls,
+            meta.render_distance,
+            meta.requested_render_distance,
+            meta.width,
+            meta.height,
+            meta.adapter,
+        )
+    }
+}
+
+/// The `count` slowest sample indices, slowest first (earliest frame breaks ties). The
+/// allocation is at the end of the bench, after all frames are recorded.
+fn slowest_indices(samples: &[BenchSample], count: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..samples.len()).collect();
+    order.sort_by(|&a, &b| {
+        samples[b]
+            .frame_ms
+            .total_cmp(&samples[a].frame_ms)
+            .then(samples[a].index.cmp(&samples[b].index))
+    });
+    order.truncate(count);
+    order
+}
+
+/// The `count` slowest bench frames with their full breakdown: frame index and time, the
+/// renderer phases (prepare/cull/encode/submit, GPU main pass), the feed phase, mesh uploads
+/// (count and bytes) and how many sections the frame drew that the previous one did not.
+/// GPU pass times arrive a frame or two late (timestamp readback), so they are the latest
+/// available at that frame, not necessarily that exact frame's passes.
+fn print_slowest_frames(samples: &[BenchSample]) {
+    const COUNT: usize = 20;
+    let order = slowest_indices(samples, COUNT);
+    if order.is_empty() {
+        return;
+    }
+    println!("slowest {} frames (of {}):", order.len(), samples.len());
+    println!("  frame   ms | feed prep cull enc sub gpuM | up #/KB sect+ drawn/total calls");
+    for &i in &order {
+        let s = &samples[i];
+        println!(
+            "  {:5} {:5.2} | {:5.2} {:5.2} {:5.2} {:4.2} {:5.2} {:5.2} | {:3} {:5.0} {:4} {}/{} {}",
+            s.index,
+            s.frame_ms,
+            s.feed_ms,
+            s.timings.prepare_ms,
+            s.timings.cull_ms,
+            s.timings.encode_ms,
+            s.timings.submit_ms,
+            s.timings.gpu_ms[0],
+            s.uploads,
+            s.upload_bytes as f32 / 1024.0,
+            s.sections_new,
+            s.sections_drawn,
+            s.sections_total,
+            s.draw_calls,
+        );
+    }
+}
+
+/// Run metadata printed with the summary.
+struct BenchMeta {
+    seconds: f32,
+    /// The effective render distance: the requested one capped by the server's view distance.
+    render_distance: i32,
+    requested_render_distance: u8,
+    width: u32,
+    height: u32,
+    adapter: String,
+}
+
+/// Percentile of sorted ascending `values` in 0..=1 (linear interpolation between samples,
+/// nearest at the ends). Matches `haste_testkit::Bench::percentile_frame_ms`'s definition.
+fn percentile(sorted: &[f32], p: f32) -> f32 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let p = p.clamp(0.0, 1.0);
+    let idx = (sorted.len() as f32 - 1.0) * p;
+    let lo = idx.floor() as usize;
+    let hi = idx.ceil() as usize;
+    let frac = idx - lo as f32;
+    sorted[lo] * (1.0 - frac) + sorted[hi.min(sorted.len() - 1)] * frac
+}
+
+/// Aggregates the samples into a summary (avg, 99th percentile, phase averages).
+fn bench_summary(samples: &[BenchSample]) -> BenchSummary {
+    let n = samples.len().max(1) as f32;
+    let mut times: Vec<f32> = samples.iter().map(|s| s.frame_ms).collect();
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    fn sum(samples: &[BenchSample], n: f32, f: impl Fn(&BenchSample) -> f32) -> f32 {
+        samples.iter().map(f).sum::<f32>() / n
+    }
+    let t = |f: fn(&haste_render::FrameTimings) -> f32| sum(samples, n, |s| f(&s.timings));
+    let gpu = |i: usize| sum(samples, n, |s| s.timings.gpu_ms[i]);
+    BenchSummary {
+        frames: samples.len() as u32,
+        avg_ms: sum(samples, n, |s| s.frame_ms),
+        p99_ms: percentile(&times, 0.99),
+        worst_ms: times.last().copied().unwrap_or(0.0),
+        sections_drawn: sum(samples, n, |s| s.sections_drawn as f32),
+        sections_total: sum(samples, n, |s| s.sections_total as f32),
+        draw_calls: sum(samples, n, |s| s.draw_calls as f32),
+        prepare_ms: t(|x| x.prepare_ms),
+        acquire_ms: t(|x| x.acquire_ms),
+        cull_ms: t(|x| x.cull_ms),
+        encode_ms: t(|x| x.encode_ms),
+        submit_ms: t(|x| x.submit_ms),
+        present_ms: t(|x| x.present_ms),
+        gpu_ms: [gpu(0), gpu(1), gpu(2)],
+    }
+}
+
+/// `--bench SECONDS`: join, wait until the world settles (screenshot's logic), then render
+/// offscreen at `--width`x`--height` along the fixed `bench_camera` path for SECONDS while
+/// recording per-frame `FrameStats` and `FrameTimings`. Prints one summary block, writes the
+/// same as JSON to `--bench-out` when given, and disconnects.
+pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
+    let Some(_server) = args.server.as_ref() else {
+        anyhow::bail!("--bench needs --server <host[:port]>");
+    };
+    let session = Session::join(args, false)?;
+    let shared = session.shared.clone();
+    let mut assets = open_assets()?;
+    let mut renderer =
+        Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
+    renderer.set_item_registry(&shared.data.registries);
+    renderer.set_biomes(&session.biomes);
+    let gui = GuiFrame::default();
+    let mut feed = WorldFeed::default();
+    let deadline = Instant::now() + Duration::from_secs(args.seconds);
+    let mut stats;
+    let mut base;
+    let mut vd;
+    // Settle phase: identical to the screenshot path (wait for position, meshing done, quiet).
+    loop {
+        let (mut camera, sky, partial, v, animation_tick) = frame_view(
+            &shared,
+            game::Perspective::FirstPerson,
+            0.0,
+            0.0,
+            session.options.fov as f32,
+            Instant::now(),
+        );
+        camera.yaw = args.yaw.unwrap_or(camera.yaw);
+        camera.pitch = args.pitch.unwrap_or(camera.pitch);
+        base = camera;
+        vd = v;
+        feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
+        let entities = feed.entities(
+            &shared,
+            &mut renderer,
+            game::Perspective::FirstPerson,
+            session.local,
+            partial,
+        );
+        let block_target = shared.view.lock().block_target;
+        let breaking = shared.breaking.lock().clone();
+        let frame = FrameInput {
+            camera,
+            entities,
+            gui: &gui,
+            sky,
+            partial_tick: partial,
+            block_target,
+            breaking: &breaking,
+        };
+        renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
+        renderer.set_animation_tick(animation_tick);
+        stats = renderer.render(&frame)?;
+        if shared.is_closed() {
+            anyhow::bail!(
+                "disconnected: {}",
+                shared.closed.lock().clone().unwrap_or_default()
+            );
+        }
+        let placed = shared.view.lock().has_position;
+        if placed && feed.settled(&stats, Duration::from_millis(1500)) {
+            break;
+        }
+        if Instant::now() > deadline {
+            tracing::warn!("--seconds elapsed before the world settled; benching what is there");
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Measure phase. The buffer is sized up front: at most 1000 fps for the whole run, and it
+    // grows once if the machine is faster than that (no allocation during steady-state frames).
+    let mut samples: Vec<BenchSample> = Vec::with_capacity(seconds as usize * 1000);
+    let total = seconds as f32;
+    let adapter = {
+        let info = renderer.adapter_info();
+        format!("{} ({})", info.name, info.backend)
+    };
+    let meta = BenchMeta {
+        seconds: total,
+        render_distance: vd,
+        requested_render_distance: session.options.render_distance,
+        width: args.width,
+        height: args.height,
+        adapter,
+    };
+    let started = Instant::now();
+    loop {
+        let elapsed = started.elapsed().as_secs_f32();
+        if elapsed >= total {
+            break;
+        }
+        // The bench camera follows its fixed path; the sky and entities come from the live view
+        // (time of day moves, the player stays where the server put it).
+        let (_, mut sky, partial_tick, _, animation_tick) = frame_view(
+            &shared,
+            game::Perspective::FirstPerson,
+            0.0,
+            0.0,
+            session.options.fov as f32,
+            Instant::now(),
+        );
+        let camera = bench_camera(elapsed / total, &base, total);
+        let fog_end = (vd.max(2) * 16) as f32;
+        sky.fog_start = fog_end * 0.75;
+        sky.fog_end = fog_end;
+        let feed_start = Instant::now();
+        feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
+        let feed_ms = feed_start.elapsed().as_secs_f32() * 1000.0;
+        let entities = feed.entities(
+            &shared,
+            &mut renderer,
+            game::Perspective::FirstPerson,
+            session.local,
+            partial_tick,
+        );
+        let block_target = shared.view.lock().block_target;
+        let breaking = shared.breaking.lock().clone();
+        let frame = FrameInput {
+            camera,
+            entities,
+            gui: &gui,
+            sky,
+            partial_tick,
+            block_target,
+            breaking: &breaking,
+        };
+        renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
+        renderer.set_animation_tick(animation_tick);
+        let stats = renderer.render(&frame)?;
+        let prev_drawn = samples.last().map_or(0, |s| s.sections_drawn);
+        samples.push(BenchSample {
+            frame_ms: stats.frame_ms,
+            sections_drawn: stats.chunk_sections_drawn,
+            sections_total: stats.chunk_sections_total,
+            draw_calls: stats.draw_calls,
+            timings: renderer.timings(),
+            feed_ms,
+            sections_new: stats.chunk_sections_drawn.saturating_sub(prev_drawn),
+            uploads: stats.uploads,
+            upload_bytes: stats.upload_bytes,
+            index: samples.len() as u32,
+        });
+        if shared.is_closed() {
+            anyhow::bail!(
+                "disconnected during the bench: {}",
+                shared.closed.lock().clone().unwrap_or_default()
+            );
+        }
+    }
+    let summary = bench_summary(&samples);
+    println!("{}", summary.text(&meta));
+    print_slowest_frames(&samples);
+    if let Some(out) = &args.bench_out {
+        let json = serde_json::json!({
+            "frames": summary.frames,
+            "seconds": total,
+            "avg_ms": summary.avg_ms,
+            "fps": summary.fps(),
+            "p99_ms": summary.p99_ms,
+            "worst_ms": summary.worst_ms,
+            "sections_drawn": summary.sections_drawn,
+            "sections_total": summary.sections_total,
+            "draw_calls": summary.draw_calls,
+            "prepare_ms": summary.prepare_ms,
+            "acquire_ms": summary.acquire_ms,
+            "cull_ms": summary.cull_ms,
+            "encode_ms": summary.encode_ms,
+            "submit_ms": summary.submit_ms,
+            "present_ms": summary.present_ms,
+            "gpu_main_ms": summary.gpu_ms[0],
+            "gpu_hand_ms": summary.gpu_ms[1],
+            "gpu_gui_ms": summary.gpu_ms[2],
+            "render_distance": meta.render_distance,
+            "requested_render_distance": meta.requested_render_distance,
+            "width": meta.width,
+            "height": meta.height,
+            "adapter": meta.adapter,
+        });
+        std::fs::write(out, serde_json::to_string_pretty(&json)?)?;
+        println!("bench summary written to {}", out.display());
+    }
+    drop(session);
+    Ok(())
+}
+
 /// Windowed mode.
 pub fn run(args: &Args) -> anyhow::Result<()> {
-    let session = Session::join(args)?;
+    let session = Session::join(args, true)?;
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
@@ -520,10 +1005,14 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         // The flag wins over the saved option; without it, the saved option decides.
         vsync: args.vsync.unwrap_or(session.options.vsync),
         options: session.options.clone(),
+        local: session.local,
+        perspective: game::Perspective::default(),
         window: None,
         renderer: None,
         feed: WorldFeed::default(),
+        ui: None,
         gui: GuiFrame::default(),
+        mouse: (0.0, 0.0),
         grabbed: false,
         focused: true,
         yaw: 0.0,
@@ -544,6 +1033,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         fps: FpsCounter::new(),
         error: None,
         seconds: args.window_seconds,
+        screenshot: false,
         started: Instant::now(),
     };
     event_loop.run_app(&mut app)?;
@@ -564,10 +1054,20 @@ struct App {
     vsync: bool,
     /// Saved options (FOV for rendering, sensitivity for mouse look).
     options: Options,
+    /// The local player's entity id and UUID, for its own model in third person.
+    local: (EntityId, u128),
+    /// Current perspective (F5 cycles it).
+    perspective: game::Perspective,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     feed: WorldFeed,
+    /// The HUD's `Ui`, cloned from the game thread's once it is ready (the JVM takes seconds
+    /// to start); `gui` stays the empty default until then.
+    ui: Option<crate::ui::Ui>,
     gui: GuiFrame,
+    /// The cursor in GUI-scaled pixels (`frame`'s mouse argument; the game keeps the mouse
+    /// grabbed, so this stays where the grab began).
+    mouse: (f64, f64),
     grabbed: bool,
     focused: bool,
     yaw: f32,
@@ -593,6 +1093,9 @@ struct App {
     error: Option<anyhow::Error>,
     /// Close the window after this long (`--window-seconds`, for unattended runs).
     seconds: Option<u64>,
+    /// F2 pressed: the next frame is captured for a screenshot; once its async readback
+    /// lands (a few frames later), `take_capture` hands it to a save thread.
+    screenshot: bool,
     started: Instant,
 }
 
@@ -672,8 +1175,9 @@ impl App {
         self.sample_input();
         let renderer = self.renderer.as_mut().expect("checked above");
         let t0 = Instant::now();
-        let (camera, sky, partial, vd) = frame_view(
+        let (camera, sky, partial, vd, animation_tick) = frame_view(
             &self.shared,
+            self.perspective,
             self.yaw,
             self.pitch,
             self.options.fov as f32,
@@ -682,12 +1186,33 @@ impl App {
         self.feed
             .feed(&self.shared, renderer, camera_section(&camera), vd);
         let t1 = Instant::now();
-        let entities = self.feed.entities(&self.shared, renderer, partial);
+        let entities = self.feed.entities(
+            &self.shared,
+            renderer,
+            self.perspective,
+            self.local,
+            partial,
+        );
         let block_target = self.shared.view.lock().block_target;
         self.breaking.clear();
         self.breaking
             .extend_from_slice(&self.shared.breaking.lock());
         let t2 = Instant::now();
+        // The HUD: once the game thread's `Ui` is ready, clone it here (cheap, one per thread)
+        // and render the frame through it; until then (JVM still starting, or failed: no JDK
+        // or cache) the empty default draws no HUD.
+        if self.ui.is_none() {
+            self.ui = self.shared.ui.lock().clone();
+            if let Some(ui) = &self.ui {
+                ui.set_text_metrics(renderer.text_metrics());
+            }
+        }
+        let (w, h) = renderer.size();
+        if let Some(ui) = &mut self.ui {
+            self.gui = ui
+                .frame(w / GUI_SCALE, h / GUI_SCALE, GUI_SCALE, self.mouse, partial)
+                .clone();
+        }
         let frame = FrameInput {
             camera,
             entities,
@@ -699,7 +1224,25 @@ impl App {
         };
         // Outline boxes of the target and the states of breaking blocks (one short read lock).
         renderer.sample_world(&*self.shared.world.read(), &self.shared.data.shapes, &frame);
+        renderer.set_animation_tick(animation_tick);
+        if self.screenshot {
+            self.screenshot = false;
+            renderer.request_capture();
+        }
         let result = renderer.render(&frame);
+        if let Some(result) = renderer.take_capture() {
+            // Encode and write off the render thread: PNG compression of a full frame
+            // would stall the frame loop (vanilla's chat line becomes a log line here).
+            match result {
+                Ok(image) => {
+                    std::thread::spawn(move || match crate::screenshots::save(image) {
+                        Ok(name) => tracing::info!("Saved screenshot as {name}"),
+                        Err(e) => tracing::warn!("screenshot failed: {e:#}"),
+                    });
+                }
+                Err(e) => tracing::warn!("screenshot readback failed: {e:#}"),
+            }
+        }
         let t3 = Instant::now();
         self.fps.phases(
             (t1 - t0).as_secs_f32() * 1e3,
@@ -761,6 +1304,11 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CursorMoved { position, .. } => {
+                // GUI-scaled pixels: physical size divided by the GUI scale.
+                let s = f64::from(GUI_SCALE);
+                self.mouse = (position.x / s, position.y / s);
+            }
             WindowEvent::Resized(size) => {
                 if let Some(r) = &mut self.renderer {
                     r.resize(size.width.max(1), size.height.max(1));
@@ -841,6 +1389,19 @@ impl ApplicationHandler for App {
                                 let full = w.fullscreen().is_some();
                                 w.set_fullscreen((!full).then_some(Fullscreen::Borderless(None)));
                             }
+                        }
+                        // F5 cycles the perspective (vanilla's three). In third person there
+                        // is no first-person hand.
+                        KeyCode::F5 => {
+                            self.perspective = self.perspective.next();
+                            if let Some(r) = &mut self.renderer {
+                                r.set_first_person(None);
+                            }
+                        }
+                        KeyCode::F2 => {
+                            // Vanilla's screenshot key: capture on the next frame (`draw`),
+                            // where the render (and its offscreen target) happens.
+                            self.screenshot = true;
                         }
                         _ => {}
                     }
@@ -1020,5 +1581,114 @@ mod tests {
         assert_eq!(look_deg_per_pixel(0.0), 0.0096);
         // Max sensitivity: 0.8^3 * 8 * 0.15.
         assert!((look_deg_per_pixel(1.0) - 0.6144).abs() < 1e-6);
+    }
+
+    fn sample(frame_ms: f32) -> BenchSample {
+        BenchSample {
+            frame_ms,
+            sections_drawn: 900,
+            sections_total: 4000,
+            draw_calls: 200,
+            timings: haste_render::FrameTimings {
+                prepare_ms: 1.0,
+                cull_ms: 2.0,
+                encode_ms: 3.0,
+                submit_ms: 4.0,
+                ..Default::default()
+            },
+            feed_ms: 0.5,
+            sections_new: 0,
+            uploads: 0,
+            upload_bytes: 0,
+            index: 0,
+        }
+    }
+
+    #[test]
+    fn percentile_interpolates_and_clamps() {
+        let v = [1.0, 2.0, 3.0, 4.0];
+        assert_eq!(percentile(&v, 0.0), 1.0);
+        assert_eq!(percentile(&v, 1.0), 4.0);
+        // Halfway between 3 and 4: index (4-1)*0.75 = 2.25.
+        assert!((percentile(&v, 0.75) - 3.25).abs() < 1e-6);
+        assert!(percentile(&v, 2.0) <= 4.0); // out-of-range p clamps
+        assert_eq!(percentile(&[], 0.5), 0.0);
+    }
+
+    #[test]
+    fn bench_summary_averages_and_percentile() {
+        // 200 samples: 199 at 10 ms, one at 100 ms -> the 1% low (p99) is still a 10 ms frame,
+        // the outlier sits above the 99th percentile.
+        let samples: Vec<BenchSample> = (0..200)
+            .map(|i| sample(if i == 0 { 100.0 } else { 10.0 }))
+            .collect();
+        let s = bench_summary(&samples);
+        assert_eq!(s.frames, 200);
+        // f32: (199*10 + 100)/200 accumulates to 10.45.
+        assert!((s.avg_ms - 10.45).abs() < 1e-2, "{}", s.avg_ms);
+        assert!((s.p99_ms - 10.0).abs() < 1e-2, "{}", s.p99_ms);
+        assert_eq!(s.worst_ms, 100.0);
+        assert!((s.fps() - 1000.0 / 10.45).abs() < 1e-2, "{}", s.fps());
+        assert!((s.prepare_ms - 1.0).abs() < 1e-6);
+        assert!((s.cull_ms - 2.0).abs() < 1e-6);
+        assert!((s.encode_ms - 3.0).abs() < 1e-6);
+        assert!((s.submit_ms - 4.0).abs() < 1e-6);
+        assert!((s.sections_drawn - 900.0).abs() < 1e-6);
+        assert!((s.draw_calls - 200.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn slowest_indices_slowest_first_with_ties_by_frame() {
+        let mut slow = sample(50.0);
+        slow.index = 10;
+        let mut samples: Vec<BenchSample> = (0..49).map(|_| sample(5.0)).collect();
+        samples.push(slow);
+        let order = slowest_indices(&samples, 20);
+        assert_eq!(order.len(), 20);
+        assert_eq!(order[0], 49, "the 50 ms frame leads");
+        // All 5 ms frames tie; the earliest frames come first among them.
+        assert_eq!(order[1], 0);
+        assert_eq!(order[2], 1);
+        // Asking for more than there are returns all, and an empty run returns none.
+        assert_eq!(slowest_indices(&samples, 100).len(), 50);
+        assert!(slowest_indices(&[], 20).is_empty());
+        print_slowest_frames(&samples);
+    }
+
+    #[test]
+    fn bench_camera_path_turns_then_flies() {
+        let base = Camera {
+            pos: DVec3::new(100.0, 64.0, -200.0),
+            yaw: 30.0,
+            pitch: 10.0,
+            fov_deg: 70.0,
+            roll_deg: 0.0,
+        };
+        // t = 0: at the base, unturned.
+        let c = bench_camera(0.0, &base, 60.0);
+        assert_eq!(c.pos, base.pos);
+        assert_eq!(c.yaw, 30.0);
+        // t = half: a full 360 turned; flight begins here (y = eye + 20, no distance yet).
+        let c = bench_camera(0.5, &base, 60.0);
+        assert!((c.pos.y - 84.0).abs() < 1e-4, "{}", c.pos.y);
+        assert!((c.pos.x - 100.0).abs() < 1e-4, "{}", c.pos.x);
+        assert!((c.yaw - 390.0).abs() < 1e-4, "{}", c.yaw);
+        // t = 1: 30 s of flight at 10 b/s along +X, 20 blocks up.
+        let c = bench_camera(1.0, &base, 60.0);
+        assert!((c.pos.x - 400.0).abs() < 1e-4, "{}", c.pos.x);
+        assert!((c.pos.y - 84.0).abs() < 1e-4, "{}", c.pos.y);
+        assert!((c.yaw - 390.0).abs() < 1e-4);
+        assert_eq!(c.pos.z, base.pos.z);
+        // Quarter point: 180 degrees around, no flight yet.
+        let c = bench_camera(0.25, &base, 60.0);
+        assert!((c.yaw - 210.0).abs() < 1e-4, "{}", c.yaw);
+        assert_eq!(c.pos, base.pos);
+        // Just after half: climbing already done, flight starting.
+        let c = bench_camera(0.51, &base, 60.0);
+        assert!((c.pos.y - 84.0).abs() < 1e-4, "{}", c.pos.y);
+        // Three-quarter point: 15 s flown = 150 blocks along +X.
+        let c = bench_camera(0.75, &base, 60.0);
+        assert!((c.pos.x - 250.0).abs() < 1e-4, "{}", c.pos.x);
+        assert!((c.pos.y - 84.0).abs() < 1e-4, "{}", c.pos.y);
     }
 }

@@ -337,6 +337,7 @@ impl EntityRenderer {
                 root,
                 rect,
                 light,
+                e.hurt,
             );
             if self.vertices.len() > start {
                 self.drawn += 1;
@@ -507,6 +508,7 @@ impl EntityRenderer {
                     m,
                     rect,
                     light,
+                    0.0,
                 );
             }
         }
@@ -618,6 +620,19 @@ fn entity_shade(n: Vec3) -> f32 {
     ((n.dot(l0).max(0.0) + n.dot(l1).max(0.0)) * 0.6 + 0.4).min(1.0)
 }
 
+/// Hurt flash red overlay strength. Vanilla overlays red at about 30 % (`hurt` in
+/// `EntityRenderState` mixes `0.3 * hurt` towards (1, 0, 0)); we use the same 0.3.
+pub(crate) const HURT_RED_STRENGTH: f32 = 0.3;
+
+/// The per-channel colour of a hurt entity: shade and light with red mixed in at vanilla's
+/// about-30 % overlay strength. This is the CPU-side vertex colour the shader multiplies the
+/// texture by (linear RGB), so the tint shows without shader changes.
+pub(crate) fn hurt_color(s: f32, hurt: f32) -> [f32; 3] {
+    let r = (s + HURT_RED_STRENGTH * hurt).min(1.0);
+    let g = s * (1.0 - HURT_RED_STRENGTH * hurt);
+    [r, g, g]
+}
+
 /// Highest point of a model above its feet, in model units (y is down in model space).
 pub(crate) fn model_top(part: &ModelPart, parent_y: f32) -> f32 {
     let y = parent_y + part.pivot.y;
@@ -640,7 +655,8 @@ fn pose_rotation(pose: &PoseOverrides, name: &str) -> Option<Vec3> {
 }
 
 /// Child pivots are relative to the parent (vanilla `PartPose`); rotation is Z * Y * X around
-/// the pivot, pose overrides add to the base rotation.
+/// the pivot, pose overrides add to the base rotation. `hurt` (0..1) tints the part red.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_part(
     out: &mut Vec<EntityVertex>,
     model: &CubeModel,
@@ -649,6 +665,7 @@ pub(crate) fn emit_part(
     parent: Mat4,
     rect: [u32; 4],
     light: f32,
+    hurt: f32,
 ) {
     if !part.visible || pose.hidden.iter().any(|h| h == &part.name) {
         return;
@@ -754,7 +771,8 @@ pub(crate) fn emit_part(
             let p = corners.map(|c| m.transform_point3(c));
             let nw = (normal_matrix * n).normalize_or_zero();
             let s = entity_shade(nw) * light;
-            let color = [s, s, s, 1.0];
+            let [r, g, b] = hurt_color(s, hurt);
+            let color = [r, g, b, 1.0];
             let uv = [
                 [uvr[0], uvr[1]],
                 [uvr[0], uvr[3]],
@@ -780,7 +798,7 @@ pub(crate) fn emit_part(
         }
     }
     for child in &part.children {
-        emit_part(out, model, child, pose, m, rect, light);
+        emit_part(out, model, child, pose, m, rect, light, hurt);
     }
 }
 
@@ -847,6 +865,7 @@ mod tests {
             root,
             [0, 0, 64, 64],
             1.0,
+            0.0,
         );
         assert_eq!(out.len(), 36);
         // Every triangle faces away from the cube centre (0, 0.25, 0).
@@ -870,6 +889,21 @@ mod tests {
             .iter()
             .flat_map(|t| t.iter())
             .all(|v| (v.pos[2] + 0.25).abs() < 1e-5));
+    }
+
+    #[test]
+    fn hurt_mixes_red_into_the_vertex_colour() {
+        // Untinted: the colour is the shade alone.
+        assert_eq!(hurt_color(0.8, 0.0), [0.8, 0.8, 0.8]);
+        // Fully hurt at vanilla's ~30 % overlay: red boosted (clamped at 1.0 here),
+        // green/blue pulled down.
+        let [r, g, b] = hurt_color(0.8, 1.0);
+        assert_eq!(r, 1.0);
+        assert!((g - 0.8 * (1.0 - HURT_RED_STRENGTH)).abs() < 1e-6);
+        assert_eq!(g, b);
+        // Monotone in hurt: the red channel grows, green shrinks.
+        assert!(hurt_color(0.8, 0.25)[0] < hurt_color(0.8, 0.75)[0]);
+        assert!(hurt_color(0.8, 0.25)[1] > hurt_color(0.8, 0.75)[1]);
     }
 
     #[test]
