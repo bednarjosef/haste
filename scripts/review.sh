@@ -26,12 +26,13 @@ if [[ -n "${REVIEW_SERVER:-}" ]]; then
   png=target/review/$WS.png; log=target/review/$WS.log
   rm -f "$png"
   target/debug/haste --server "$REVIEW_SERVER" --username review --screenshot "$png" \
-    --yaw 180 --pitch 25 --seconds 60 >"$log" 2>&1 || true
-  if [[ -f $png ]]; then
+    --yaw 180 --pitch 25 --seconds 60 >"$log" 2>&1
+  status=$?
+  if [[ $status -eq 0 && -f $png ]]; then
     echo "$png"
     tail -5 "$log"
   else
-    echo "!! screenshot failed"
+    echo "!! screenshot failed (haste exit $status)"
     tail -5 "$log" 2>/dev/null
   fi
 else
