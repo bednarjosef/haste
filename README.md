@@ -10,6 +10,107 @@ Rust-owned state; `REPORT-2.md`: vanilla objects as generated proxies, 30-mod su
 pure-proxy vs mirrored-field benchmarks). Read `AGENTS.md` for the rules and
 `docs/INTERFACES.md` for the crate contracts.
 
+## How far along it is
+
+What a player needs to play Haste like the original game, without noticing a difference.
+Fabric mod support (Phase 2) is not counted here.
+
+**14 of 62 done, 25 partly done, 23 not started (about 43 %, counting partly done as half).**
+
+✅ done: works in the game window today, checked against a real server.
+🟡 partly done: some of it exists (in a library, or working without a window) but a player cannot use it fully yet.
+⬜ not started.
+
+### Launching and setup
+- ✅ Install the game files (`haste setup`): downloads 26.3 from Mojang and runs the data generator; a second run is instant
+- ⬜ Title screen
+- 🟡 Singleplayer: `haste singleplayer --world NAME` starts a local server and prints its address to join; no world list or create-world screen
+- 🟡 Joining a server: `haste --server host:port` from the command line; no direct-connect screen
+- 🟡 Server list: status ping works (`haste --ping --server host:port`); no server list screen
+- 🟡 Microsoft account login: the device-code steps exist in the setup library; no `haste login` command yet and no Microsoft app id
+- ⬜ Options screens (video, controls, sound, skin, chat, accessibility)
+- 🟡 Saved options: render distance, FOV, mouse sensitivity, GUI scale, volumes and keybinds are stored in the config with vanilla defaults, but the client does not read them yet
+- ⬜ Keybind remapping (controls are fixed to the vanilla defaults)
+- ⬜ Resource packs (selection screen, applying server resource packs)
+- ⬜ Languages other than English
+
+### Connecting to servers
+- ✅ Offline-mode vanilla and Fabric servers: join and stay connected on normal terrain, every packet decodes
+- ✅ Configuration phase, server transfers, cookies, resource pack answers
+- 🟡 Online-mode servers: encryption and session join need the Microsoft login above
+- ⬜ Signed chat (required by online-mode servers)
+- 🟡 Item data: stacks with components decode and round-trip; names, enchantments, damage and the like are not decoded into typed values in Rust yet
+
+### World
+- ✅ Terrain: chunks, light, block and multi-block updates, chunk loading and unloading
+- ✅ Biomes and their grass, foliage and water colours
+- ✅ Dimensions: Overworld, Nether, End, respawn and dimension changes
+- ✅ Day and night, weather, sun, moon, stars and clouds
+- 🟡 Block entities (chests, signs, beds, banners, ...): stored with their chunks; live updates and drawing are missing
+
+### Rendering
+- ✅ Textured blocks and block models
+- ✅ Water and lava with flow direction and corner heights
+- 🟡 Animated textures (water, lava, fire, portals): all frames load; they do not animate on screen yet
+- 🟡 Smooth lighting and ambient occlusion: present, but leaves, bark and grass sides are about 1.35x brighter than vanilla
+- 🟡 Fog: distance fog, not matched to vanilla
+- ⬜ Block entities drawn: chests, signs with text, beds, banners, heads, shulker boxes
+- 🟡 Mobs and players: drawn as cube models with default skins and name tags, not vanilla's models
+- ⬜ Entity animation (walking, attacking, swimming)
+- ⬜ Downloaded player skins and capes
+- ⬜ Armour and held items on mobs and players
+- ⬜ Dropped items, item frames and paintings drawn as themselves
+- 🟡 Particles: particle textures load (114 particle types); no particles are drawn
+- ✅ First-person hand and held item
+- ✅ Block selection outline and break cracks
+- ⬜ Third-person view (F5)
+- ⬜ Screen effects: damage tilt and red flash, underwater and fire overlays, nausea, vignette, pumpkin
+- ✅ Fullscreen (F11)
+- 🟡 Performance: about 140 FPS windowed at render distance 12 on the development laptop; not yet measured against vanilla and Sodium
+
+### HUD and screens
+These run as the game's own Java code inside Haste and work against a real server, but are not shown in the game window yet.
+- 🟡 HUD: hotbar, health, hunger, armour, air, experience
+- 🟡 Chat: reading, typing, command suggestions
+- 🟡 Player list (Tab), boss bars, scoreboard sidebar, titles and action bar
+- 🟡 Pause menu
+- 🟡 Player inventory and crafting grid
+- 🟡 Chests (clicks match vanilla byte for byte); furnace, crafting table, anvil, enchanting, brewing and trading are untested
+- ⬜ Creative inventory
+- 🟡 Death screen and respawn
+- ⬜ Debug screen (F3)
+- ⬜ Editing signs, books and command blocks
+- ⬜ Advancements and statistics screens
+- ⬜ Recipe book
+
+### Playing
+- ✅ Walking, sprinting, sneaking, jumping, swimming, creative flight and fall damage, accepted by the vanilla server without corrections
+- ✅ Breaking and placing blocks, using items, attacking, pick block, hotbar (mouse wheel and 1-9)
+- ⬜ Dropping items (Q) and swapping to the off-hand (F)
+- ⬜ Riding boats, minecarts, horses and pigs
+- ⬜ Elytra flight
+- 🟡 Game modes: survival and creative work; spectator and adventure are untested
+- ⬜ Screenshot key (F2)
+
+### Sound
+- 🟡 Sound effects: sounds.json and the variant choice are done; no audio output yet
+- 🟡 3D sound: distance falloff and stereo panning are computed but not played
+- 🟡 Music: choosing tracks and pauses by situation is done; nothing is played
+- ⬜ Sounds of your own footsteps, block breaking and placing
+
+## Try it
+
+```bash
+cargo run --release --bin haste -- setup                         # once: game files and data generator
+cargo run --release --bin haste -- singleplayer --world test     # terminal 1: local server, prints its address
+cargo run --release --bin haste -- --server 127.0.0.1:PORT       # terminal 2: the game window
+```
+
+Any offline-mode 26.3 server works with `--server` (`--username NAME` sets the player name).
+Controls are vanilla's defaults: WASD, space, shift, ctrl, mouse to look, left click to break,
+right click to place or use, 1-9 and the mouse wheel for the hotbar, F11 for fullscreen. There is
+no HUD in the window yet, so health and inventory are not visible.
+
 ## Build
 
 Pinned stable Rust (`rust-toolchain.toml`), no system-wide installs. First run:
@@ -21,15 +122,4 @@ cargo run --release --bin haste -- setup        # downloads 26.3 from Mojang int
 Everything downloaded or derived from Mojang's files lives in `cache/` (gitignored) or
 `$HASTE_CACHE`. Nothing from it is ever committed.
 
-## Milestones
-
-| | Demo | Status |
-|---|---|---|
-| Join milestone | `haste --headless --server 127.0.0.1:25565` joins a local 26.3 server and an online-mode server, tracks world and entities | done on vanilla/Fabric offline servers, normal terrain, reconfiguration and transfer; online mode pending Microsoft tokens |
-| First frame milestone | the world renders around the player | done: textured terrain with biome colours, water and lava, sky, entities in a window; PR #15 floating-block regression open |
-| Walk milestone | movement/collision match vanilla traces, no rubber-banding | movement and interaction accepted by the vanilla server with zero corrections; vanilla traces not recorded yet |
-| Alive milestone | entities render and move; HUD | entities drawn as cube models; vanilla HUD runs in Java but is not wired into the window |
-| Vanilla screens milestone | chat, pause menu, inventory as real vanilla Java screens through the batched GUI pipeline | done headless (chat, death, chest, kick screens against a server); drawing code done; window wiring pending |
-| Singleplayer and numbers milestone | embedded vanilla server; benchmarks vs vanilla and vanilla + Sodium | setup library done; commands and benchmarks pending |
-
-See `TASKS.md` (board) and `NOTES.md` (decisions). `PHASE1-REPORT.md` arrives with singleplayer and numbers milestone.
+See `TASKS.md` (board), `NOTES.md` (decisions) and `docs/HANDOFF.md` (state and known problems).
