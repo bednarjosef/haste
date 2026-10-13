@@ -625,6 +625,8 @@ impl Renderer {
             Arc::new(crate::tint::BiomeColors::new(&[], &colormaps)),
             Arc::new(crate::fluid::FluidTable::new(
                 states,
+                &crate::fluid::Fluids::vanilla(&crate::fluid::FluidSprites::from_atlas(&*atlas)),
+                &crate::fluid::FluidRules::vanilla(),
                 crate::fluid::FluidSprites::from_atlas(&*atlas),
             )),
         ));
