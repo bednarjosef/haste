@@ -13,8 +13,8 @@ public final class GuiBatch {
     public static final int FILL = 1;            // x1 y1 x2 y2 argb
     public static final int GRADIENT = 2;        // x1 y1 x2 y2 top bottom
     public static final int TEXT = 3;            // x y argb shadow(0/1) str
-    public static final int TEXTURE = 4;         // tex x y w h u v uw vh texW texH tint   (u v uw vh float bits)
-    public static final int SPRITE = 5;          // sprite x y w h tint
+    public static final int TEXTURE = 4;         // tex x y w h u v uw vh texW texH tint blend  (u v uw vh float bits)
+    public static final int SPRITE = 5;          // sprite x y w h tint blend
     public static final int ITEM = 6;            // item x y count
     public static final int SCISSOR_PUSH = 7;    // x1 y1 x2 y2
     public static final int SCISSOR_POP = 8;
