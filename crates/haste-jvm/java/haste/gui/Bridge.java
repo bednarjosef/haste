@@ -34,6 +34,9 @@ public final class Bridge {
         long t = System.nanoTime();
         net.minecraft.server.Bootstrap.bootStrap();
         bootstrapMillis = (System.nanoTime() - t) / 1_000_000;
+        // vanilla's GUI code passes RenderPipelines fields to the extractor: Haste's own copies of the ones the
+        // GUI uses, so GfxImpl reads the blend mode from the pipeline like vanilla does
+        Pipelines.install();
         GfxImpl.width = 320;
         GfxImpl.height = 240;
         Proxies.create();
@@ -292,5 +295,11 @@ public final class Bridge {
     public void metricsChanged() {
         Text.invalidateWidths();
         Proxies.set(Proxies.font, "lineHeight", int.class, haste.rt.Native.lineHeight());
+    }
+
+    /** Debug (tests): where this frame's blend modes came from — the pipeline and name counts, then the
+     * multiply/invert blits' pipelines as "{@code <pipeline location> <code> <count>}" lines. */
+    public String blendDebug() {
+        return "pipeline=" + GfxImpl.pipelineBlits + " name=" + GfxImpl.nameBlits + "\n" + GfxImpl.specialBlends();
     }
 }

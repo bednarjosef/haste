@@ -79,6 +79,17 @@ impl<'a> WireReader<'a> {
         Ok(i64::from_be_bytes(b.try_into().unwrap()))
     }
 
+    /// Takes `n` bytes in one bounds check (bulk reads: packed data arrays).
+    pub fn take(&mut self, n: usize) -> Result<&'a [u8], PaletteError> {
+        let end = self.pos.checked_add(n).ok_or(PaletteError::UnexpectedEof)?;
+        let s = self
+            .data
+            .get(self.pos..end)
+            .ok_or(PaletteError::UnexpectedEof)?;
+        self.pos = end;
+        Ok(s)
+    }
+
     pub fn remaining(&self) -> usize {
         self.data.len() - self.pos
     }
@@ -135,6 +146,25 @@ impl PackedArray {
     pub fn long_count(bits: u8, entries: usize) -> usize {
         let per_long = 64 / bits as usize;
         entries.div_ceil(per_long)
+    }
+
+    /// A zeroed array for `entries` entries at `bits` per entry (tests and benches build
+    /// wire payloads with it).
+    pub fn zeroed(bits: u8, entries: usize) -> Self {
+        Self {
+            bits,
+            longs: vec![0; Self::long_count(bits, entries)],
+        }
+    }
+
+    /// Bit width per entry.
+    pub fn bits(&self) -> u8 {
+        self.bits
+    }
+
+    /// The packed longs (big-endian on the wire; entry 0 in the low bits of each long).
+    pub fn longs(&self) -> &[i64] {
+        &self.longs
     }
 
     pub fn read_at(&self, i: usize) -> u32 {
@@ -333,9 +363,12 @@ impl<T: WireId> PalettedContainer<T> {
             return Err(PaletteError::BadBits(bits));
         }
         let longs = PackedArray::long_count(bits, capacity);
+        // one bounds check for the whole array, then a bulk big-endian conversion
+        // (a per-long `i64_be` costs a slice `get` + try_into per 8 bytes)
+        let bytes = r.take(longs * 8)?;
         let mut v = Vec::with_capacity(longs);
-        for _ in 0..longs {
-            v.push(r.i64_be()?);
+        for c in bytes.as_chunks::<8>().0 {
+            v.push(i64::from_be_bytes(*c));
         }
         Ok(PackedArray { bits, longs: v })
     }

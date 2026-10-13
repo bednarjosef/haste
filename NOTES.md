@@ -133,3 +133,11 @@ Newest at the top. One entry per decision, with the why; link the brief or repor
   still written by us and never contains Mojang code; the recorder mod and `javap` stay the checks.
   Earlier entries saying "no decompiled source by rule" are superseded; their open questions can
   now be settled by reading the source.
+- **2026-10-13 GUI blend modes come from vanilla's RenderPipeline.** Haste's tier-2
+  `RenderPipelines` builds the GUI pipelines through vanilla's own builder (so their locations and
+  blend functions are vanilla's), and `GfxImpl.blend` maps a pipeline's blend function to the
+  three GUI blend codes (normal, multiply for the vignette, invert for the crosshair). The value
+  types this needs are allow-listed in `loader.rs` (`com/mojang/renderpearl/api/{pipeline,vertex}`,
+  `ShaderDefines`). A mod pipeline with a known blend function maps correctly; the texture-name
+  rule is only the fallback for a null pipeline. Additive pipelines (`GUI_TEXT_HIGHLIGHT`) still
+  draw normal until the renderer gets an additive GUI blend.
