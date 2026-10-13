@@ -45,15 +45,39 @@ pub struct MeshTables {
     pub tints: Arc<crate::tint::TintTable>,
     pub colors: Arc<crate::tint::BiomeColors>,
     pub fluids: Arc<crate::fluid::FluidTable>,
+    /// Set identity for the mesher's per-state cache: a fresh value per
+    /// constructed set (monotonic counter), so a new Renderer's tables
+    /// never alias a previous set's pointer identities after a reconnect.
+    pub generation: u64,
+}
+
+/// Monotonic source of `MeshTables::generation`: every construction takes
+/// the next value, so two sets are never the same cache generation even when
+/// the allocator reuses a freed set's addresses.
+static TABLE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl MeshTables {
+    pub fn new(
+        tints: Arc<crate::tint::TintTable>,
+        colors: Arc<crate::tint::BiomeColors>,
+        fluids: Arc<crate::fluid::FluidTable>,
+    ) -> MeshTables {
+        MeshTables {
+            tints,
+            colors,
+            fluids,
+            generation: TABLE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
 }
 
 impl Default for MeshTables {
     fn default() -> Self {
-        MeshTables {
-            tints: Arc::new(crate::tint::TintTable::empty()),
-            colors: Arc::new(crate::tint::BiomeColors::default()),
-            fluids: Arc::new(crate::fluid::FluidTable::empty()),
-        }
+        MeshTables::new(
+            Arc::new(crate::tint::TintTable::empty()),
+            Arc::new(crate::tint::BiomeColors::default()),
+            Arc::new(crate::fluid::FluidTable::empty()),
+        )
     }
 }
 
@@ -375,13 +399,16 @@ struct MeshScratch {
 }
 
 /// Identity of the inputs the state cache is derived from: the baked models,
-/// the atlas (its data pointer; UVs/sprite ids come from it) and the fluid
-/// table. Compared by pointer: all three outlive the meshing call.
+/// the atlas (its data pointer; UVs/sprite ids come from it), the fluid
+/// table and the table set's generation. The pointers say which set it is
+/// when addresses are unique; the generation catches a new set allocated at
+/// a freed set's addresses (ABA across a reconnect).
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct SourceKey {
     baked: usize,
     atlas: usize,
     fluids: usize,
+    generation: u64,
 }
 
 impl MeshScratch {
@@ -483,6 +510,7 @@ pub fn mesh_section_with(
             baked: baked as *const _ as usize,
             atlas: atlas as *const _ as *const () as usize,
             fluids: std::sync::Arc::as_ptr(&tables.fluids) as usize,
+            generation: tables.generation,
         };
         if scratch.state_key != Some(key) {
             scratch.states.clear();
@@ -1015,26 +1043,25 @@ mod tests {
             layers: 1,
         };
         let snapshot = MeshSnapshot::capture(&world, SectionPos::new(0, 0, 0));
-        // One tables instance, passed by reference each call: the fluid Arc
-        // pointer (part of the cache key) stays stable, so only the atlas
-        // change re-keys the cache.
-        let tables = MeshTables::default();
         let pos = SectionPos::new(0, 0, 0);
 
-        let mesh1 = mesh_section_with(&snapshot, &baked, &atlas1, &tables, pos);
+        // A fresh MeshTables per call: each set carries its own generation,
+        // so a set whose allocator addresses reuse a previous set's (the
+        // reconnect ABA) still re-keys the cache.
+        let mesh1 = mesh_section_with(&snapshot, &baked, &atlas1, &MeshTables::default(), pos);
         assert!(
             mesh1.vertices.iter().all(|v| v.sprite == sprite1),
             "atlas1 mesh must carry atlas1's stone sprite"
         );
 
-        let mesh2 = mesh_section_with(&snapshot, &baked, &atlas2, &tables, pos);
+        let mesh2 = mesh_section_with(&snapshot, &baked, &atlas2, &MeshTables::default(), pos);
         assert_eq!(mesh2.vertices.len(), mesh1.vertices.len());
         assert!(
             mesh2.vertices.iter().all(|v| v.sprite == sprite2),
             "atlas2 mesh must be rebuilt with atlas2's stone sprite, not the cached one"
         );
 
-        let mesh3 = mesh_section_with(&snapshot, &baked, &atlas1, &tables, pos);
+        let mesh3 = mesh_section_with(&snapshot, &baked, &atlas1, &MeshTables::default(), pos);
         assert!(
             mesh3.vertices.iter().all(|v| v.sprite == sprite1),
             "switching back to atlas1 must re-key again"
@@ -1126,6 +1153,23 @@ mod tests {
             mesh.vertices.len()
         );
         assert_eq!(quads, 256 + 256 + 256 + 256, "culled grass slab");
+    }
+
+    #[test]
+    fn table_generations_are_unique() {
+        // Every constructed set takes the next counter value: two sets never
+        // share a generation, even if the allocator reuses a freed set's
+        // addresses (the reconnect ABA the cache key must survive).
+        let a = MeshTables::default();
+        let b = MeshTables::default();
+        assert_ne!(a.generation, b.generation);
+        let c = MeshTables::new(
+            Arc::new(crate::tint::TintTable::empty()),
+            Arc::new(crate::tint::BiomeColors::default()),
+            Arc::new(crate::fluid::FluidTable::empty()),
+        );
+        assert_ne!(a.generation, c.generation);
+        assert_ne!(b.generation, c.generation);
     }
 
     #[test]

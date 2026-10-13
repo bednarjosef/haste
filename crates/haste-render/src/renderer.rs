@@ -610,14 +610,14 @@ impl Renderer {
             tracing::warn!("colormaps unavailable ({e:#}): uniform grass/foliage colour");
             crate::tint::Colormaps::uniform(0x91BD59)
         });
-        mesher.set_tables(crate::mesher::MeshTables {
-            tints: Arc::new(crate::tint::TintTable::new(states)),
-            colors: Arc::new(crate::tint::BiomeColors::new(&[], &colormaps)),
-            fluids: Arc::new(crate::fluid::FluidTable::new(
+        mesher.set_tables(crate::mesher::MeshTables::new(
+            Arc::new(crate::tint::TintTable::new(states)),
+            Arc::new(crate::tint::BiomeColors::new(&[], &colormaps)),
+            Arc::new(crate::fluid::FluidTable::new(
                 states,
                 crate::fluid::FluidSprites::from_atlas(&*atlas),
             )),
-        });
+        ));
         let arenas = MeshArenas::new(gpu.device.clone(), gpu.queue.clone());
         let timer = crate::timing::GpuTimer::new(&gpu.device, &gpu.queue);
         let origin_buffer = Self::make_origin_buffer(&gpu.device, 4096);
