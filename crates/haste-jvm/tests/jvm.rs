@@ -341,7 +341,8 @@ fn blend_of(h: &JvmHost, env: &mut jni::Env, p: &JObject) -> i32 {
 }
 
 /// A mod's own pipeline maps by its blend function, not by its name: the vignette's multiplies, the
-/// crosshair's inverts, and one Haste has no mode for (additive, like the nausea overlay) draws normal.
+/// crosshair's inverts, the text selection highlight's additive (vanilla's GUI_TEXT_HIGHLIGHT,
+/// BlendFunction.ADDITIVE).
 #[test]
 #[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
 fn pipeline_blend_maps_by_blend_function() {
@@ -362,17 +363,28 @@ fn pipeline_blend_maps_by_blend_function() {
             ["ONE_MINUS_DST_COLOR", "ONE_MINUS_SRC_COLOR", "ONE", "ZERO"],
         )?;
         assert_eq!(blend_of(&h, env, &crosshair), 2);
-        // a GUI pipeline whose blend Haste has no mode for: the nausea overlay draws normally
+        let highlight = mod_pipeline(
+            &h,
+            env,
+            "test_mod_text_highlight",
+            ["ONE", "ONE", "ONE", "ONE"],
+        )?;
+        assert_eq!(blend_of(&h, env, &highlight), 3);
+        // vanilla's own additive pipelines: the edit box's text selection highlight and the nausea
+        // overlay, both built with BlendFunction.ADDITIVE
         let pipelines = h.load_class(env, "net.minecraft.client.renderer.RenderPipelines")?;
-        let nausea = env
-            .get_static_field(
-                &pipelines,
-                jni_str!("GUI_NAUSEA_OVERLAY"),
-                jni_sig!("Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;"),
-            )?
-            .l()?;
-        assert!(!nausea.is_null(), "the GUI's pipelines are installed");
-        assert_eq!(blend_of(&h, env, &nausea), 0);
+        for field in ["GUI_TEXT_HIGHLIGHT", "GUI_NAUSEA_OVERLAY"] {
+            let name = jni::strings::JNIString::new(field);
+            let p = env
+                .get_static_field(
+                    &pipelines,
+                    &name,
+                    jni_sig!("Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;"),
+                )?
+                .l()?;
+            assert!(!p.is_null(), "the GUI's pipelines are installed");
+            assert_eq!(blend_of(&h, env, &p), 3, "{field} blends additively");
+        }
         Ok(())
     })
     .expect("pipeline blend mapping");
