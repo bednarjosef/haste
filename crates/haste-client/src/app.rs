@@ -17,7 +17,7 @@ use glam::DVec3;
 use haste_protocol::haste_core::gui::GuiFrame;
 use haste_protocol::haste_core::input::InputState;
 use haste_protocol::haste_core::model::EntityInstance;
-use haste_protocol::haste_core::{ChunkPos, SectionPos};
+use haste_protocol::haste_core::{ChunkPos, EntityId, SectionPos};
 use haste_protocol::{Account, ConnectOptions};
 use haste_render::{Camera, FrameInput, FrameStats, Renderer, SkyState};
 use haste_setup::options::Options;
@@ -74,6 +74,8 @@ struct Session {
     biomes: Vec<haste_render::BiomeClimate>,
     /// The saved options this run uses (loaded once).
     options: Options,
+    /// The local player's entity id and UUID (`login`), for its own model in third person.
+    local: (EntityId, u128),
 }
 
 impl Session {
@@ -102,6 +104,7 @@ impl Session {
         let biomes = net::synced_biome_count(regs).unwrap_or(64);
         let biome_climates = biomes::biome_climates(regs);
         let login = driver.login();
+        let local = (login.entity_id, login.profile.uuid.as_u128());
         tracing::info!(
             "joined {address} as {}: {:?}, dimension {}, view distance {}",
             driver.connection().profile().name,
@@ -132,6 +135,7 @@ impl Session {
             game_thread: Some(game_thread),
             biomes: biome_climates,
             options,
+            local,
         })
     }
 
@@ -256,11 +260,15 @@ impl WorldFeed {
 
     /// Copies the interpolated entity instances.
     /// Copies the interpolated entity instances, gives players their default skin and samples
-    /// each entity's light for the renderer.
+    /// each entity's light for the renderer. In the third-person perspectives the local
+    /// player's own model is included (the server does not spawn us as an entity, so it is
+    /// built here from the shared view).
     fn entities(
         &mut self,
         shared: &Shared,
         renderer: &mut Renderer,
+        perspective: game::Perspective,
+        local: (EntityId, u128),
         partial: f32,
     ) -> &[EntityInstance] {
         self.instances.clear();
@@ -275,6 +283,11 @@ impl WorldFeed {
                     }
                 }
             }
+        }
+        if perspective.draws_player() {
+            let view = *shared.view.lock();
+            self.instances
+                .push(game::player_instance(local.0, local.1, &view, partial));
         }
         renderer.sample_entity_lights(&*shared.world.read(), &self.instances);
         &self.instances
@@ -296,9 +309,11 @@ impl WorldFeed {
 
 /// Builds this frame's camera and sky from the shared view at `now`. `yaw`/`pitch` are the
 /// input layer's look; the player's server rotation offset is added here so mouse look is
-/// smooth at frame rate while the player itself turns once per tick.
+/// smooth at frame rate while the player itself turns once per tick. In the third-person
+/// perspectives the camera is moved off the eye (`game::third_person_camera`).
 fn frame_view(
     shared: &Shared,
+    perspective: game::Perspective,
     yaw: f32,
     pitch: f32,
     fov_deg: f32,
@@ -306,11 +321,23 @@ fn frame_view(
 ) -> (Camera, SkyState, f32, i32) {
     let view = *shared.view.lock();
     let partial = game::partial_tick(view.tick_at, now);
+    let eye = game::interpolate(view.prev_eye, view.eye, partial);
+    let look = (
+        yaw + view.look_offset.0,
+        (pitch + view.look_offset.1).clamp(-90.0, 90.0),
+    );
+    let (pos, yaw, pitch) = if perspective.draws_player() {
+        // The world is read here (the outline shapes the crosshair raycast uses too), held
+        // only for the ray.
+        let (world, shapes) = (shared.world.read(), &shared.data.shapes);
+        game::third_person_camera(perspective, eye, look.0, look.1, &*world, shapes)
+    } else {
+        (eye, look.0, look.1)
+    };
     let camera = Camera {
-        // Linear between LocalPlayer::camera(0.0) and camera(1.0), i.e. camera(partial).
-        pos: game::interpolate(view.prev_eye, view.eye, partial),
-        yaw: yaw + view.look_offset.0,
-        pitch: (pitch + view.look_offset.1).clamp(-90.0, 90.0),
+        pos,
+        yaw,
+        pitch,
         fov_deg,
     };
     let fog_end = (view.view_distance.max(2) * 16) as f32;
@@ -381,6 +408,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     loop {
         let (mut camera, sky, partial, vd) = frame_view(
             &shared,
+            game::Perspective::FirstPerson,
             0.0,
             0.0,
             session.options.fov as f32,
@@ -402,7 +430,13 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             input.state.pitch = camera.pitch - offset.1;
         }
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
-        let entities = feed.entities(&shared, &mut renderer, partial);
+        let entities = feed.entities(
+            &shared,
+            &mut renderer,
+            game::Perspective::FirstPerson,
+            session.local,
+            partial,
+        );
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
         let frame = FrameInput {
@@ -490,6 +524,8 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         // The flag wins over the saved option; without it, the saved option decides.
         vsync: args.vsync.unwrap_or(session.options.vsync),
         options: session.options.clone(),
+        local: session.local,
+        perspective: game::Perspective::default(),
         window: None,
         renderer: None,
         feed: WorldFeed::default(),
@@ -531,6 +567,10 @@ struct App {
     vsync: bool,
     /// Saved options (FOV for rendering, sensitivity for mouse look).
     options: Options,
+    /// The local player's entity id and UUID, for its own model in third person.
+    local: (EntityId, u128),
+    /// Current perspective (F5 cycles it).
+    perspective: game::Perspective,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     feed: WorldFeed,
@@ -635,6 +675,7 @@ impl App {
         let t0 = Instant::now();
         let (camera, sky, partial, vd) = frame_view(
             &self.shared,
+            self.perspective,
             self.yaw,
             self.pitch,
             self.options.fov as f32,
@@ -643,7 +684,13 @@ impl App {
         self.feed
             .feed(&self.shared, renderer, camera_section(&camera), vd);
         let t1 = Instant::now();
-        let entities = self.feed.entities(&self.shared, renderer, partial);
+        let entities = self.feed.entities(
+            &self.shared,
+            renderer,
+            self.perspective,
+            self.local,
+            partial,
+        );
         let block_target = self.shared.view.lock().block_target;
         self.breaking.clear();
         self.breaking
@@ -790,6 +837,14 @@ impl ApplicationHandler for App {
                             if let Some(w) = &self.window {
                                 let full = w.fullscreen().is_some();
                                 w.set_fullscreen((!full).then_some(Fullscreen::Borderless(None)));
+                            }
+                        }
+                        // F5 cycles the perspective (vanilla's three). In third person there
+                        // is no first-person hand.
+                        KeyCode::F5 => {
+                            self.perspective = self.perspective.next();
+                            if let Some(r) = &mut self.renderer {
+                                r.set_first_person(None);
                             }
                         }
                         _ => {}
