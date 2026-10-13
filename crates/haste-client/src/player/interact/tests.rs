@@ -171,6 +171,7 @@ impl Rig {
         };
         r.tick(InteractInput::default());
         r.tick(InteractInput::default());
+        r.tick(InteractInput::default());
         r
     }
 
@@ -209,6 +210,9 @@ const ATTACK: InteractInput = InteractInput {
     attack: true,
     use_item: false,
     pick_block: false,
+    drop_item: false,
+    drop_stack: false,
+    swap_offhand: false,
     hotbar: None,
 };
 
@@ -471,4 +475,68 @@ fn inventory_and_effects_from_packets() {
         (p.tool_speed, p.tool_correct, p.haste_level),
         (8.0, Some(true), 2)
     );
+}
+
+#[test]
+fn drop_item_key_sends_status_5_once_per_press() {
+    let mut r = Rig::new(GameMode::Survival);
+    let q = InteractInput {
+        drop_item: true,
+        ..Default::default()
+    };
+    let out = r.tick(q);
+    assert_eq!(actions(&out), [(action::DROP_ITEM, 0)]);
+    // Held, and on the tick after release: nothing more.
+    assert!(r.tick(q).is_empty());
+    assert!(r.tick(InteractInput::default()).is_empty());
+    let out = r.tick(q);
+    assert_eq!(actions(&out), [(action::DROP_ITEM, 0)]);
+}
+
+#[test]
+fn drop_stack_key_sends_status_4() {
+    let mut r = Rig::new(GameMode::Survival);
+    let out = r.tick(InteractInput {
+        drop_stack: true,
+        ..Default::default()
+    });
+    assert_eq!(actions(&out), [(action::DROP_ALL_ITEMS, 0)]);
+    assert!(r
+        .tick(InteractInput {
+            drop_stack: true,
+            ..Default::default()
+        })
+        .is_empty());
+}
+
+#[test]
+fn swap_offhand_key_sends_status_7_with_zeroed_pos() {
+    let mut r = Rig::new(GameMode::Survival);
+    let out = r.tick(InteractInput {
+        swap_offhand: true,
+        ..Default::default()
+    });
+    // Vanilla zeroes pos, face and sequence for these actions; the server updates the slots.
+    let sw: Vec<&sb::PlayerAction> = out
+        .iter()
+        .filter_map(|p| match p {
+            ServerboundPlay::PlayerAction(a) => Some(a),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sw,
+        [&sb::PlayerAction {
+            status: action::SWAP_ITEM_WITH_OFFHAND,
+            pos: BlockPos::new(0, 0, 0),
+            face: 0,
+            sequence: 0,
+        }]
+    );
+    assert!(r
+        .tick(InteractInput {
+            swap_offhand: true,
+            ..Default::default()
+        })
+        .is_empty());
 }

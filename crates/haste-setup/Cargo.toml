@@ -7,6 +7,7 @@ description = "Fetching 26.3 jars/assets/libraries from Mojang's manifest, runni
 
 [dependencies]
 haste-core.workspace = true
+base64.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
 serde.workspace = true

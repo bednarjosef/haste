@@ -170,6 +170,12 @@ impl SilentEngine {
         });
     }
 
+    /// Remove the sound at `index` (play order), like `Vec::remove`: indices after it
+    /// shift down. The output stage uses this for sounds whose player finished.
+    pub fn remove(&mut self, index: usize) {
+        self.sounds.remove(index);
+    }
+
     /// Recompute the (left, right) gains of every playing sound from the current
     /// listener and source volumes.
     pub fn tick(&mut self) {
@@ -493,5 +499,18 @@ mod tests {
             1.5,
         );
         assert_eq!(engine.pitches().next().unwrap(), 2.0);
+    }
+
+    #[test]
+    fn remove_drops_the_sound_at_the_index() {
+        let mut engine = SilentEngine::new();
+        for path in ["sounds/a.ogg", "sounds/b.ogg", "sounds/c.ogg"] {
+            engine.play(&variant(path, 16), SoundSource::Block, None, 1.0, 1.0);
+        }
+        engine.remove(1);
+        assert_eq!(engine.playing(), 2);
+        // The first and third sounds survive with their gains.
+        engine.tick();
+        assert!(total_gains(&engine).0 > 0.0);
     }
 }
