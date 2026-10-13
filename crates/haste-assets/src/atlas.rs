@@ -435,7 +435,9 @@ fn build_mip_chain(mut level0: Vec<u8>, size: u32, mip_levels: u32) -> Vec<u8> {
 }
 
 /// sRGB-correct 2x2 average (Pomme `mean_linear` via 10-bit linear tables).
-fn mean_linear(pixels: [[u8; 4]; 4]) -> [u8; 4] {
+/// Public so the renderer can downsample animated sprite regions the same way
+/// the atlas mip chain is built.
+pub fn mean_linear(pixels: [[u8; 4]; 4]) -> [u8; 4] {
     let mut output = [0u8; 4];
     for channel in 0..3 {
         let linear_sum: u32 = pixels

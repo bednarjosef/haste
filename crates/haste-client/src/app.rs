@@ -272,7 +272,12 @@ impl WorldFeed {
 /// Builds this frame's camera and sky from the shared view at `now`. `yaw`/`pitch` are the
 /// input layer's look; the player's server rotation offset is added here so mouse look is
 /// smooth at frame rate while the player itself turns once per tick.
-fn frame_view(shared: &Shared, yaw: f32, pitch: f32, now: Instant) -> (Camera, SkyState, f32, i32) {
+fn frame_view(
+    shared: &Shared,
+    yaw: f32,
+    pitch: f32,
+    now: Instant,
+) -> (Camera, SkyState, f32, i32, u64) {
     let view = *shared.view.lock();
     let partial = game::partial_tick(view.tick_at, now);
     let camera = Camera {
@@ -290,7 +295,13 @@ fn frame_view(shared: &Shared, yaw: f32, pitch: f32, now: Instant) -> (Camera, S
         fog_start: fog_end * 0.75,
         fog_end,
     };
-    (camera, sky, partial, view.view_distance)
+    (
+        camera,
+        sky,
+        partial,
+        view.view_distance,
+        view.animation_tick,
+    )
 }
 
 /// Number keys 1-9 select hotbar slots 0-8.
@@ -348,7 +359,8 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut stats;
     let mut last_camera;
     loop {
-        let (mut camera, sky, partial, vd) = frame_view(&shared, 0.0, 0.0, Instant::now());
+        let (mut camera, sky, partial, vd, animation_tick) =
+            frame_view(&shared, 0.0, 0.0, Instant::now());
         camera.yaw = args.yaw.unwrap_or(camera.yaw);
         camera.pitch = args.pitch.unwrap_or(camera.pitch);
         if let Some(pos) = want_pos {
@@ -378,6 +390,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             breaking: &breaking,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
+        renderer.set_animation_tick(animation_tick);
         stats = renderer.render(&frame)?;
         frames += 1;
         let placed = shared.view.lock().has_position;
@@ -587,7 +600,7 @@ impl App {
         self.sample_input();
         let renderer = self.renderer.as_mut().expect("checked above");
         let t0 = Instant::now();
-        let (camera, sky, partial, vd) =
+        let (camera, sky, partial, vd, animation_tick) =
             frame_view(&self.shared, self.yaw, self.pitch, Instant::now());
         self.feed
             .feed(&self.shared, renderer, camera_section(&camera), vd);
@@ -609,6 +622,7 @@ impl App {
         };
         // Outline boxes of the target and the states of breaking blocks (one short read lock).
         renderer.sample_world(&*self.shared.world.read(), &self.shared.data.shapes, &frame);
+        renderer.set_animation_tick(animation_tick);
         let result = renderer.render(&frame);
         let t3 = Instant::now();
         self.fps.phases(

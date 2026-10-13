@@ -1,9 +1,7 @@
 // Animated atlas textures (water, lava, fire, portals): each game tick the
 // renderer re-uploads every animated sprite's atlas region — level 0 plus the
 // matching sub-rectangle of every further mip level, box-filtered exactly like
-// the atlas chain (haste-assets `build_mip_chain`; the linear-light average is
-// Pomme-derived and duplicated here because haste-assets keeps it private —
-// the chain-matching test below pins the two together).
+// the atlas chain (haste-assets `build_mip_chain` / `mean_linear`).
 
 /// The frame state `haste_assets::frame_at` returns: (index, next, blend).
 type FrameState = (u32, u32, f32);
@@ -140,57 +138,12 @@ fn downsample_region(mips: &mut [Vec<u8>], pixels: &[u8], rect: [u32; 4]) -> usi
                     let s = (((py * 2 + oy) * sw + px * 2 + ox) * 4) as usize;
                     quad[i].copy_from_slice(&src[s..s + 4]);
                 }
-                dst.extend_from_slice(&mean_linear(quad));
+                dst.extend_from_slice(&haste_assets::mean_linear(quad));
             }
         }
         written = level;
     }
     written
-}
-
-/// sRGB-correct 2x2 average (haste-assets `mean_linear`, Pomme: 10-bit linear
-/// tables; alpha is a plain mean so cutout coverage survives).
-fn mean_linear(pixels: [[u8; 4]; 4]) -> [u8; 4] {
-    let mut output = [0u8; 4];
-    for channel in 0..3 {
-        let linear_sum: u32 = pixels
-            .iter()
-            .map(|pixel| u32::from(srgb_to_linear_10(pixel[channel])))
-            .sum();
-        output[channel] = linear_10_to_srgb((linear_sum / 4) as u16);
-    }
-    output[3] = (pixels.iter().map(|pixel| u32::from(pixel[3])).sum::<u32>() / 4) as u8;
-    output
-}
-
-fn srgb_to_linear_10(channel: u8) -> u16 {
-    static TABLE: std::sync::OnceLock<[u16; 256]> = std::sync::OnceLock::new();
-    TABLE.get_or_init(|| {
-        std::array::from_fn(|index| {
-            let x = index as f32 / 255.0;
-            let linear = if x >= 0.04045 {
-                (((f64::from(x) + 0.055) / 1.055).powf(2.4)) as f32
-            } else {
-                x / 12.92
-            };
-            (linear * 1023.0).round() as u16
-        })
-    })[channel as usize]
-}
-
-fn linear_10_to_srgb(channel: u16) -> u8 {
-    static TABLE: std::sync::OnceLock<[u8; 1024]> = std::sync::OnceLock::new();
-    TABLE.get_or_init(|| {
-        std::array::from_fn(|index| {
-            let x = index as f32 / 1023.0;
-            let srgb = if x >= 0.0031308 {
-                (1.055 * f64::from(x).powf(1.0 / 2.4) - 0.055) as f32
-            } else {
-                12.92 * x
-            };
-            (srgb * 255.0).round().clamp(0.0, 255.0) as u8
-        })
-    })[usize::from(channel)]
 }
 
 #[cfg(test)]
@@ -248,39 +201,6 @@ mod tests {
         let mut assets = haste_assets::Assets::open(&jar, &dir.join("assets"), "test").unwrap();
         let id = haste_core::Identifier::parse("minecraft:block/anim").unwrap();
         haste_assets::AtlasBuilder::build(&mut assets, &[id], true).unwrap()
-    }
-
-    /// The region downsampling must reproduce the atlas chain's texels for the
-    /// same level-0 pixels, at every mip level.
-    #[test]
-    fn region_mips_match_the_atlas_chain() {
-        let atlas = synthetic_atlas();
-        let sprite = &atlas.animated_sprites()[0];
-        assert_eq!(sprite.frames.len(), 2);
-        let frame = sprite.initial_frame();
-        let rect @ [x, y, w, h] = sprite.region.pixel_rect;
-        assert_eq!([x, y, w, h], [16, 0, 16, 16]);
-        let mut mips = vec![Vec::new(); atlas.mip_levels() as usize];
-        let levels = downsample_region(&mut mips, frame.as_raw(), rect);
-        assert_eq!(levels, atlas.mip_levels() as usize);
-        for level in 0..=levels as u32 {
-            let dim = atlas.size() >> level;
-            let rdim = (w >> level) as usize;
-            let offset: usize = (0..level)
-                .map(|l| ((atlas.size() >> l) as usize).pow(2) * 4)
-                .sum();
-            let mut expected = Vec::with_capacity(rdim * rdim * 4);
-            for row in 0..rdim {
-                let start = offset + (row * dim as usize + (x >> level) as usize) * 4;
-                expected.extend_from_slice(&atlas.pixels()[start..start + rdim * 4]);
-            }
-            let actual: &[u8] = if level == 0 {
-                frame.as_raw()
-            } else {
-                &mips[(level - 1) as usize]
-            };
-            assert_eq!(actual, &expected[..], "mip level {level}");
-        }
     }
 
     /// Uploads the 2-frame sprite at tick 2 (frametime 2: frame 1) and reads
@@ -366,5 +286,93 @@ mod tests {
                 data[start..start + (w * 4) as usize].to_vec()
             })
             .collect()
+    }
+
+    /// `SpriteAnimator::update` on the real atlas (all animated sprites): 100
+    /// calls over consecutive ticks (every sprite that changes that tick
+    /// re-uploads) and 100 calls on an already-uploaded tick (nothing changes).
+    /// Prints microseconds per call. Needs the client jar and datagen reports
+    /// in the cache (source scripts/env.sh) and a GPU.
+    #[test]
+    #[ignore = "needs the client jar, datagen reports and a GPU (source scripts/env.sh)"]
+    fn perf_animator_update_real_atlas() {
+        let jar = haste_core::paths::client_jar();
+        if !jar.exists() {
+            eprintln!("ignored: needs the client jar in the cache");
+            return;
+        }
+        let Ok(gpu) = crate::pipeline::Gpu::new(None) else {
+            eprintln!("ignored: no GPU adapter");
+            return;
+        };
+        let mut assets = haste_assets::Assets::open(
+            &jar,
+            &haste_core::paths::cache_dir().join("assets"),
+            "26.3",
+        )
+        .unwrap();
+        let states = haste_assets::BlocksJsonStates::load(
+            &haste_core::paths::datagen_reports().join("blocks.json"),
+        )
+        .unwrap();
+        let mut atlas = haste_assets::AtlasBuilder::build(&mut assets, &[], false).unwrap();
+        haste_assets::BakedBlockModels::bake(&mut assets, &states, &mut atlas).unwrap();
+        let sprites = atlas.animated_sprites();
+        eprintln!(
+            "atlas {}x{}, {} mip levels, {} animated sprites",
+            atlas.size(),
+            atlas.size(),
+            atlas.mip_levels(),
+            sprites.len()
+        );
+        let (texture, _view, _sampler, _rects, _len) =
+            crate::pipeline::upload_atlas(&gpu.device, &gpu.queue, &atlas).unwrap();
+        let mut animator = SpriteAnimator::new(sprites.len(), atlas.mip_levels());
+
+        // Consecutive ticks: every sprite whose frame or blend moved re-uploads.
+        const RUNS: u64 = 100;
+        let mut changed_sprites = 0;
+        let started = std::time::Instant::now();
+        for tick in 1..=RUNS {
+            animator.set_tick(tick);
+            animator.update(&gpu.queue, &texture, &atlas);
+            changed_sprites += sprites
+                .iter()
+                .filter(|s| {
+                    let state = haste_assets::frame_at(&s.schedule, tick);
+                    haste_assets::frame_at(&s.schedule, tick - 1) != state
+                })
+                .count();
+        }
+        gpu.queue.submit([]);
+        // GPU side: how long the device takes to drain the queued writes.
+        let gpu_started = std::time::Instant::now();
+        gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
+        let gpu_per_tick = gpu_started.elapsed() / RUNS as u32;
+        let per_tick = started.elapsed() / RUNS as u32;
+        // Same tick again: nothing changed, `update` must be a no-op.
+        let started = std::time::Instant::now();
+        for _ in 0..RUNS {
+            animator.set_tick(RUNS);
+            animator.update(&gpu.queue, &texture, &atlas);
+        }
+        let unchanged = started.elapsed() / RUNS as u32;
+
+        let interpolating = sprites.iter().filter(|s| s.schedule.interpolate).count();
+        eprintln!(
+            "update, tick changed (avg {:.1} of {} sprites/tick over {RUNS} ticks): {:.1} us",
+            changed_sprites as f64 / RUNS as f64,
+            sprites.len(),
+            per_tick.as_secs_f64() * 1e6
+        );
+        eprintln!(
+            "update, tick unchanged (no-op): {:.2} us",
+            unchanged.as_secs_f64() * 1e6
+        );
+        eprintln!(
+            "device draining {RUNS} ticks of region writes: {:.1} us/tick",
+            gpu_per_tick.as_secs_f64() * 1e6
+        );
+        eprintln!("{interpolating} sprites interpolate (blended pixels allocate per tick)");
     }
 }

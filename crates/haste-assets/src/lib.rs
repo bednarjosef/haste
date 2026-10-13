@@ -19,7 +19,7 @@ pub use assets::{
     frame_at, Animation, AnimationFrame, AnimationMeta, AnimationSchedule, Assets, ModelJson,
     SpriteMeta, TextureMeta,
 };
-pub use atlas::{AnimatedSprite, AtlasBuilder, AtlasRegion, AtlasRegions};
+pub use atlas::{mean_linear, AnimatedSprite, AtlasBuilder, AtlasRegion, AtlasRegions};
 pub use bake::{BakedBlockModels, BlocksJsonStates, RenderLayer};
 pub use font::{
     for_each_formatted, BitmapFont, Glyph, GlyphKind, HexGlyph, TextFormat, LEGACY_COLORS,
