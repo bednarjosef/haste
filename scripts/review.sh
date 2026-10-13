@@ -5,7 +5,14 @@
 set -uo pipefail
 WS=$1; shift
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-W=${HASTE_WT:-$(dirname "$ROOT")/haste-wt}/$WS
+WT_ROOT=${HASTE_WT:-$(dirname "$ROOT")/haste-wt}
+# Find the worktree git has checked out on $WS; branch and directory names need not match.
+W=$(git -C "$ROOT" worktree list --porcelain | awk -v br="$WS" '
+  $1 == "worktree" { wt = $2 }
+  $1 == "branch" && substr($2, 1, 11) == "refs/heads/" && substr($2, 12) == br { print wt }
+')
+[[ -n $W ]] || W=$WT_ROOT/$WS
+if [[ ! -d $W ]]; then echo "!! no worktree for branch $WS"; exit 1; fi
 cd "$W" || exit 1
 echo "== $WS: $(git log --oneline main..HEAD | wc -l) commits ahead of main"
 git log --oneline main..HEAD | head -40
