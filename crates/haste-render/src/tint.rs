@@ -599,6 +599,9 @@ mod tests {
     }
 
     impl haste_core::view::BlockStateTable for FakeStates {
+        fn placeholder_state(&self) -> BlockStateId {
+            BlockStateId(0)
+        }
         fn len(&self) -> usize {
             self.states.len()
         }

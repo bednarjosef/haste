@@ -3,6 +3,7 @@
 // RenderPipelines.VIGNETTE over textures/misc/vignette.png, RenderPipelines.CROSSHAIR over the
 // hud/crosshair sprites (see GfxImpl.blend and haste.gui.Pipelines in java/haste/gui).
 #[test]
+#[ignore = "needs cache/ (the client jar)"]
 fn vignette_and_crosshair_draw_with_special_pipelines() {
     // The mapping lives in Java (GfxImpl.blend, reading the pipeline's blend function); this asserts the
     // identifiers the name fallback matches are what vanilla 26.3's Hud actually references, so a renamed
