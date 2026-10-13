@@ -2,3 +2,7 @@
 //! events the server sends. Owner: sound.
 //!
 //! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
+
+pub mod engine;
+pub mod sounds;
+pub mod spatial;
