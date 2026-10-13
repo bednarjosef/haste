@@ -40,7 +40,7 @@ impl GameData {
         let registries = Registries::parse(&registries_json)?;
         let blocks = BlockStates::parse(&blocks_json, Some(&registries))?;
         let shapes = match oracle {
-            Some(p) => BlockShapes::parse_oracle(&std::fs::read_to_string(p)?, blocks.len())?,
+            Some(p) => BlockShapes::parse_oracle(&std::fs::read_to_string(p)?, &blocks)?,
             None => BlockShapes::fallback(&blocks),
         };
         let props_path = oracle.map(|p| p.with_file_name("block_properties.json"));
