@@ -47,6 +47,8 @@ const DOUBLE_TAP: Duration = Duration::from_millis(350);
 /// Wall time the render thread may spend capturing sections for the mesher per frame.
 /// Sections handed to the mesh workers per frame (they capture the snapshots themselves).
 const SUBMIT_PER_FRAME: usize = 512;
+/// Vanilla's "GUI scale" (the auto option is not wired; 2 is a common choice at 1080p).
+const GUI_SCALE: u32 = 2;
 
 /// A joined game: runtime, game thread and shared state.
 struct Session {
@@ -335,7 +337,8 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
     renderer.set_biomes(&session.biomes);
-    let gui = GuiFrame::default();
+    let mut gui = GuiFrame::default();
+    let mut ui: Option<crate::ui::Ui> = None;
     let mut feed = WorldFeed::default();
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
     // With `--pos`, the shot is only taken once the server has teleported the player to these
@@ -345,6 +348,10 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         .as_ref()
         .filter(|v| v.len() == 3)
         .map(|v| DVec3::new(v[0], v[1], v[2]));
+    // The HUD's JVM (started by the game thread) gets this long to be ready; the shot then
+    // waits for it past the world settling, so the HUD is in the picture whenever it can be.
+    let jvm_deadline = Instant::now() + Duration::from_secs(args.seconds.min(30));
+    let mut wait_for_hud = true;
     let mut frames = 0u32;
     let mut stats;
     let mut last_camera;
@@ -369,6 +376,24 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         let entities = feed.entities(&shared, &mut renderer, partial);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
+        // The HUD, like the window: waiting for the JVM, then one `Ui` for this render thread.
+        if ui.is_none() {
+            ui = shared.ui.lock().clone();
+            if let Some(u) = &ui {
+                u.set_text_metrics(renderer.text_metrics());
+            }
+        }
+        if let Some(u) = &mut ui {
+            gui = u
+                .frame(
+                    args.width / GUI_SCALE,
+                    args.height / GUI_SCALE,
+                    GUI_SCALE,
+                    (0.0, 0.0),
+                    partial,
+                )
+                .clone();
+        }
         let frame = FrameInput {
             camera,
             entities,
@@ -408,8 +433,15 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
                 continue;
             }
         }
-        if placed && feed.settled(&stats, Duration::from_millis(1500)) {
+        if placed && feed.settled(&stats, Duration::from_millis(1500)) && !wait_for_hud {
             break;
+        }
+        wait_for_hud = wait_for_hud
+            && ui.is_none()
+            && !shared.hud_failed.load(Ordering::Relaxed)
+            && Instant::now() < jvm_deadline;
+        if wait_for_hud && Instant::now() > jvm_deadline {
+            tracing::warn!("the HUD's JVM did not start in time; the shot has no HUD");
         }
         if Instant::now() > deadline {
             tracing::warn!("--seconds elapsed before the world settled; saving what is there");
@@ -455,7 +487,9 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         window: None,
         renderer: None,
         feed: WorldFeed::default(),
+        ui: None,
         gui: GuiFrame::default(),
+        mouse: (0.0, 0.0),
         grabbed: false,
         focused: true,
         yaw: 0.0,
@@ -494,7 +528,13 @@ struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     feed: WorldFeed,
+    /// The HUD's `Ui`, cloned from the game thread's once it is ready (the JVM takes seconds
+    /// to start); `gui` stays the empty default until then.
+    ui: Option<crate::ui::Ui>,
     gui: GuiFrame,
+    /// The cursor in GUI-scaled pixels (`frame`'s mouse argument; the game keeps the mouse
+    /// grabbed, so this stays where the grab began).
+    mouse: (f64, f64),
     grabbed: bool,
     focused: bool,
     yaw: f32,
@@ -599,6 +639,21 @@ impl App {
         self.breaking
             .extend_from_slice(&self.shared.breaking.lock());
         let t2 = Instant::now();
+        // The HUD: once the game thread's `Ui` is ready, clone it here (cheap, one per thread)
+        // and render the frame through it; until then (JVM still starting, or failed: no JDK
+        // or cache) the empty default draws no HUD.
+        if self.ui.is_none() {
+            self.ui = self.shared.ui.lock().clone();
+            if let Some(ui) = &self.ui {
+                ui.set_text_metrics(renderer.text_metrics());
+            }
+        }
+        let (w, h) = renderer.size();
+        if let Some(ui) = &mut self.ui {
+            self.gui = ui
+                .frame(w / GUI_SCALE, h / GUI_SCALE, GUI_SCALE, self.mouse, partial)
+                .clone();
+        }
         let frame = FrameInput {
             camera,
             entities,
@@ -672,6 +727,11 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CursorMoved { position, .. } => {
+                // GUI-scaled pixels: physical size divided by the GUI scale.
+                let s = f64::from(GUI_SCALE);
+                self.mouse = (position.x / s, position.y / s);
+            }
             WindowEvent::Resized(size) => {
                 if let Some(r) = &mut self.renderer {
                     r.resize(size.width.max(1), size.height.max(1));

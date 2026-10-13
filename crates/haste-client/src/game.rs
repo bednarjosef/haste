@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use glam::DVec3;
 use haste_data::GameData;
 use haste_entity::EntityStore;
+use haste_jvm::JvmHost;
 use haste_protocol::haste_core::chunk::{BlockEntityData, ChunkData, LightData};
 use haste_protocol::haste_core::game::{DimensionInfo, TICK_SECONDS};
 use haste_protocol::haste_core::input::{InputState, InteractInput};
@@ -24,6 +25,7 @@ use haste_world::World;
 use parking_lot::{Mutex, RwLock};
 
 use crate::net::{NetDriver, WorldSink};
+use crate::ui::Ui;
 
 /// What the render thread needs each frame, copied out under a short lock.
 #[derive(Clone, Copy, Debug)]
@@ -85,6 +87,11 @@ pub struct Shared {
     pub stop: AtomicBool,
     /// Why the connection ended, once it has.
     pub closed: Mutex<Option<String>>,
+    /// The HUD and chat (ui.rs): set by the game thread once the JVM has started and
+    /// [`Ui::joined`] ran; the render thread clones it per frame ([`Ui`] is cheap to clone).
+    pub ui: Mutex<Option<Ui>>,
+    /// The HUD's JVM failed to start (no JDK, missing cache): there will be no HUD, ever.
+    pub hud_failed: AtomicBool,
 }
 
 impl Shared {
@@ -119,6 +126,8 @@ impl Shared {
             input: Mutex::new(SharedInput::default()),
             stop: AtomicBool::new(false),
             closed: Mutex::new(None),
+            ui: Mutex::new(None),
+            hud_failed: AtomicBool::new(false),
         }
     }
 
@@ -204,11 +213,15 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>) {
     let tick = Duration::from_secs_f64(TICK_SECONDS);
     let mut next = Instant::now();
     let mut gone = Vec::new();
+    // The JVM for the HUD takes tens of seconds to start: on its own thread, in parallel with
+    // joining (the connection would time out if we waited here). One warning, no retries: a
+    // client without a JDK or cache keeps playing without a HUD.
+    let mut jvm = spawn_jvm(&shared);
     let reason = loop {
         if shared.stop.load(Ordering::Relaxed) {
             break "left the game".to_string();
         }
-        if let Err(e) = tick_once(&mut driver, &shared, &mut gone) {
+        if let Err(e) = tick_once(&mut driver, &shared, &mut gone, &mut jvm) {
             break format!("tick failed: {e:#}");
         }
         if driver.is_closed() {
@@ -231,11 +244,95 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>) {
     driver.disconnect();
 }
 
+/// Starts the JVM for the HUD on its own thread (tens of seconds; the connection would time
+/// out if the game thread waited). On failure: one warning and `shared.hud_failed` set, then
+/// the client keeps running without a HUD.
+fn spawn_jvm(shared: &Arc<Shared>) -> JvmSlot {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let shared = shared.clone();
+    std::thread::Builder::new()
+        .name("haste-jvm".into())
+        .spawn(move || {
+            let t = Instant::now();
+            let result =
+                haste_jvm::JvmConfig::from_cache(&haste_protocol::haste_core::paths::cache_dir())
+                    .map_err(anyhow::Error::from)
+                    .and_then(JvmHost::start);
+            match result {
+                Ok(host) => {
+                    tracing::info!(
+                        "HUD JVM ready in {:.1} s: {}",
+                        t.elapsed().as_secs_f32(),
+                        host.proxy_summary()
+                    );
+                    let _ = tx.send(Some(host));
+                }
+                Err(e) => {
+                    tracing::warn!("no HUD: the JVM did not start: {e:#}");
+                    shared.hud_failed.store(true, Ordering::Relaxed);
+                    let _ = tx.send(None);
+                }
+            }
+        })
+        .expect("spawning the JVM thread");
+    JvmSlot { rx: Some(rx) }
+}
+
+/// The JVM arriving on its own thread: `take()` once, at the start of a game tick.
+struct JvmSlot {
+    rx: Option<std::sync::mpsc::Receiver<Option<JvmHost>>>,
+}
+
+/// Takes `item` from a slot that a background thread fills once: `None` while it is still
+/// working (the slot stays), the item when it arrived, `None` for good after a failure or once
+/// taken (the slot is dropped, so later calls are `None` without touching the channel).
+fn take_slot<T>(rx: &mut Option<std::sync::mpsc::Receiver<Option<T>>>) -> Option<T> {
+    let r = rx.take()?;
+    match r.try_recv() {
+        Ok(item) => item,
+        Err(std::sync::mpsc::TryRecvError::Empty) => {
+            *rx = Some(r);
+            None
+        }
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+    }
+}
+
+impl JvmSlot {
+    /// The started JVM, if it arrived since the last tick. `None` while it is still starting
+    /// (or after it failed or was taken).
+    fn take(&mut self) -> Option<JvmHost> {
+        take_slot(&mut self.rx)
+    }
+}
+
 fn tick_once(
     driver: &mut NetDriver,
     shared: &Shared,
     gone: &mut Vec<SectionPos>,
+    jvm: &mut JvmSlot,
 ) -> anyhow::Result<()> {
+    // Once the JVM arrives (the session joined before the game thread started): build the
+    // `Ui` and give the JVM the registries, tags and the local player.
+    if let Some(host) = jvm.take() {
+        let mut slot = shared.ui.lock();
+        if slot.is_none() {
+            let ui = Ui::new(host);
+            let t = Instant::now();
+            match ui.joined(driver.connection(), driver.login()) {
+                Ok(()) => {
+                    tracing::info!(
+                        "HUD joined in {:.0} ms; the vanilla HUD and chat are live",
+                        t.elapsed().as_secs_f64() * 1000.0
+                    );
+                    *slot = Some(ui);
+                }
+                Err(e) => tracing::warn!("no HUD: joining the UI failed: {e:#}"),
+            }
+        }
+    }
+    // This tick's UI output (packets vanilla code sent, chat and commands typed).
+    let mut ui_out = Vec::new();
     {
         let mut world = shared.world.write();
         let mut entities = shared.entities.write();
@@ -243,7 +340,8 @@ fn tick_once(
             world: &mut world,
             gone,
         };
-        driver.receive(&mut tracked, &mut *entities)?;
+        let ui = shared.ui.lock().clone();
+        driver.receive(&mut tracked, &mut *entities, ui.as_ref())?;
         let mut dirty = world.take_dirty_sections();
         dirty.append(gone);
         if !dirty.is_empty() {
@@ -277,6 +375,17 @@ fn tick_once(
         let mut breaking = shared.breaking.lock();
         breaking.clear();
         driver.session.breaking_stages(&mut breaking);
+    }
+    if let Some(ui) = shared.ui.lock().as_ref() {
+        // The hotbar authority is the player (the client picks with 1-9 and the wheel and tells
+        // the server itself; `set_selected_slot` also marks it sent so the UI does not send it
+        // a second time). The server's `set_held_slot` reaches both sides alike.
+        ui.set_selected_slot(driver.session.player.held_slot);
+        ui.tick();
+        ui.drain_outgoing(&mut ui_out);
+    }
+    for p in ui_out {
+        driver.queue(p);
     }
     let s = &driver.session;
     let (prev_eye, _, _) = s.player.camera(0.0);
@@ -319,5 +428,26 @@ mod tests {
         assert_eq!(interpolate(a, b, 1.0), b);
         let m = interpolate(a, b, 0.25);
         assert!((m - DVec3::new(0.1, 64.0, -0.05)).length() < 1e-9);
+    }
+
+    #[test]
+    fn jvm_slot_waits_arrives_and_stays_taken() {
+        let (tx, rx) = std::sync::mpsc::channel::<Option<u8>>();
+        let mut slot = Some(rx);
+        // Still starting: nothing, and the slot stays for the next tick.
+        assert_eq!(take_slot(&mut slot), None);
+        assert!(slot.is_some());
+        // It failed (the thread sent None and ended): nothing now, and nothing ever after.
+        tx.send(None).unwrap();
+        drop(tx);
+        assert_eq!(take_slot(&mut slot), None);
+        assert!(slot.is_none());
+        // A fresh slot that arrives: the item once, then the slot is spent.
+        let (tx, rx) = std::sync::mpsc::channel::<Option<u8>>();
+        tx.send(Some(7)).unwrap();
+        let mut slot = Some(rx);
+        assert_eq!(take_slot(&mut slot), Some(7));
+        assert_eq!(take_slot(&mut slot), None);
+        assert!(slot.is_none());
     }
 }
