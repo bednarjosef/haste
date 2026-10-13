@@ -1,6 +1,6 @@
-//! `haste setup` and `haste singleplayer` subcommands (see docs/briefs/setup-cli.md).
-//! Self-contained: `main.rs` wires it in with `mod launch;` and a dispatch line when
-//! `Args.command` is `Some`.
+//! `haste setup`, `haste singleplayer`, `haste login` and `haste logout` subcommands
+//! (see docs/briefs/setup-cli.md). Self-contained: `main.rs` wires it in with `mod launch;`
+//! and a dispatch line when `Args.command` is `Some`.
 
 use clap::Subcommand;
 use std::time::Instant;
@@ -18,6 +18,10 @@ pub enum Command {
         #[arg(long, default_value = "world")]
         world: String,
     },
+    /// Sign in with a Microsoft account (device-code flow) and store it in the config.
+    Login,
+    /// Remove the stored Microsoft account from the config.
+    Logout,
 }
 
 /// Runs one subcommand. Blocking (own tokio runtime inside for the async steps).
@@ -32,6 +36,8 @@ pub fn run(cmd: Command) -> anyhow::Result<()> {
             println!("server stopped");
             Ok(())
         }),
+        Command::Login => tokio::runtime::Runtime::new()?.block_on(run_login()),
+        Command::Logout => run_logout(),
     }
 }
 
@@ -91,6 +97,55 @@ async fn wait_for_ctrl_c() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
+/// `haste login`: the Microsoft device-code flow. Needs `HASTE_MSA_CLIENT_ID` (none is shipped);
+/// checked before any network call. Stores tokens + profile in the config.
+pub async fn run_login() -> anyhow::Result<()> {
+    // begin_device_code is the first thing that would use the client id, so this check is what
+    // keeps the unset-env error before any network call.
+    haste_setup::msa::client_id().ok_or_else(|| {
+        anyhow::anyhow!(
+            "HASTE_MSA_CLIENT_ID is not set; haste ships no Microsoft client id. \
+             Set it to an Azure application (client) id and retry."
+        )
+    })?;
+    let tokens = haste_setup::msa::device_code_login(|device| {
+        println!(
+            "to sign in, open {} and enter the code {}",
+            device.verification_uri, device.user_code
+        );
+        println!("waiting for sign-in...");
+    })
+    .await?;
+    let name = tokens
+        .profile
+        .as_ref()
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let mut config = haste_setup::config::Config::load()?;
+    config.msa = Some(tokens);
+    config.save()?;
+    println!("logged in as {name}");
+    Ok(())
+}
+
+/// `haste logout`: drops the stored Microsoft account (if any) and saves.
+fn run_logout() -> anyhow::Result<()> {
+    let mut config = haste_setup::config::Config::load()?;
+    match config.msa.take() {
+        Some(tokens) => {
+            let name = tokens
+                .profile
+                .as_ref()
+                .map(|p| p.name.as_str())
+                .unwrap_or("unknown account");
+            config.save()?;
+            println!("logged out {name}");
+        }
+        None => println!("no account was logged in"),
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,5 +157,82 @@ mod tests {
         assert!(dir.ends_with(&expected), "world dir is {dir:?}");
         // a different world gets its own dir
         assert_ne!(singleplayer_world_dir("other"), dir);
+    }
+
+    /// Tests that touch the config need `XDG_CONFIG_HOME` pointed at a temp dir (the config
+    /// path has no other override). One at a time: the env var is process-global. The dir is
+    /// left behind in the system temp; it holds no secrets (fake tokens only).
+    fn with_temp_config_dir(f: impl FnOnce() -> anyhow::Result<()>) {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("haste-launch-tests-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let result = f();
+        match old {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        result.unwrap();
+    }
+
+    /// `run_login` must fail with a clear message when no client id is configured, without
+    /// reaching the network. `with_temp_config_dir` also isolates `HASTE_MSA_CLIENT_ID` removal
+    /// from any developer environment that has it set for real runs.
+    #[test]
+    fn login_without_client_id_is_a_clear_error() {
+        with_temp_config_dir(|| {
+            // env mutation is serialized by with_temp_config_dir's lock
+            let old = std::env::var_os("HASTE_MSA_CLIENT_ID");
+            std::env::remove_var("HASTE_MSA_CLIENT_ID");
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let result = rt.block_on(run_login());
+            if let Some(v) = old {
+                std::env::set_var("HASTE_MSA_CLIENT_ID", v);
+            }
+            let err = result.expect_err("login must fail without a client id");
+            assert!(
+                err.to_string().contains("HASTE_MSA_CLIENT_ID"),
+                "error should name the env var: {err}"
+            );
+            // nothing was stored by the failed login
+            assert!(haste_setup::config::Config::load()?.msa.is_none());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn logout_removes_a_stored_account() {
+        with_temp_config_dir(|| {
+            let mut config = haste_setup::config::Config::load()?;
+            config.msa = Some(haste_setup::config::MsaTokens {
+                access_token: "tok".into(),
+                refresh_token: "ref".into(),
+                expires_at: Some(1900000000),
+                profile: Some(haste_setup::config::MsaProfile {
+                    uuid: "u".into(),
+                    name: "Notch".into(),
+                }),
+            });
+            config.save()?;
+            run_logout()?;
+            assert!(haste_setup::config::Config::load()?.msa.is_none());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn logout_without_account_is_ok() {
+        with_temp_config_dir(|| {
+            haste_setup::config::Config::load()?.save()?; // a config with no msa entry
+            run_logout()?;
+            assert!(haste_setup::config::Config::load()?.msa.is_none());
+            Ok(())
+        });
     }
 }
