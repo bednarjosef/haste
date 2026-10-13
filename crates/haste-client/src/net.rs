@@ -31,6 +31,9 @@ use haste_world::World;
 
 use crate::player::LocalPlayer;
 
+/// Hurt-tilt camera roll duration in ticks (vanilla's `hurtTime` runs to 10).
+pub const HURT_TILT_TICKS: u32 = 10;
+
 /// What the driver needs from the world (`haste_world::World`).
 pub trait WorldSink {
     /// `World::load_chunk`.
@@ -102,6 +105,10 @@ pub trait EntitySink {
     fn set_head_yaw(&mut self, id: EntityId, yaw: f32);
     /// `EntityStore::set_velocity`.
     fn set_velocity(&mut self, id: EntityId, v: DVec3);
+    /// `EntityStore::mark_hurt`.
+    fn mark_hurt(&mut self, id: EntityId);
+    /// `EntityStore::mark_dead`.
+    fn mark_dead(&mut self, id: EntityId);
     /// `EntityStore::set_metadata`.
     fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]);
     /// `EntityStore::set_equipment`.
@@ -183,6 +190,12 @@ impl EntitySink for EntityStore {
     }
     fn set_velocity(&mut self, id: EntityId, v: DVec3) {
         EntityStore::set_velocity(self, id, v)
+    }
+    fn mark_hurt(&mut self, id: EntityId) {
+        EntityStore::mark_hurt(self, id)
+    }
+    fn mark_dead(&mut self, id: EntityId) {
+        EntityStore::mark_dead(self, id)
     }
     fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]) {
         EntityStore::set_metadata(self, id, entries)
@@ -283,6 +296,10 @@ pub struct Session {
     pub time_of_day: Option<i64>,
     /// Set by `start_configuration` or `transfer`: the next `login` starts a new world.
     pub new_world_pending: bool,
+    /// Ticks of hurt-tilt camera roll left (10 per hit on our own entity).
+    hurt_tilt_ticks: u32,
+    /// Direction of the tilt: +1 rolls one way, -1 the other (from the damage yaw).
+    hurt_tilt_dir: f32,
 }
 
 impl Session {
@@ -301,7 +318,32 @@ impl Session {
             entity_boxes: Vec::new(),
             time_of_day: None,
             new_world_pending: false,
+            hurt_tilt_ticks: 0,
+            hurt_tilt_dir: 0.0,
         }
+    }
+
+    /// The hurt-tilt camera roll in degrees for the remaining tilt ticks, easing out over
+    /// the 10 ticks from vanilla's maximum of 14 degrees. 0 after 10 ticks.
+    pub fn hurt_tilt_degrees(&self) -> f32 {
+        const MAX_DEGREES: f32 = 14.0;
+        let left = self.hurt_tilt_ticks.min(crate::net::HURT_TILT_TICKS) as f32
+            / crate::net::HURT_TILT_TICKS as f32;
+        self.hurt_tilt_dir * MAX_DEGREES * left * left
+    }
+
+    /// `hurt_animation` for our own entity id: roll the camera for 10 ticks. The packet's
+    /// damage-direction yaw picks the roll's side (vanilla's view bobbing on damage).
+    fn start_hurt_tilt(&mut self, damage_yaw: f32, player_yaw: f32) {
+        // The damage comes from the direction the yaw points at; the roll goes away from it.
+        let rel = (damage_yaw - player_yaw + 180.0).rem_euclid(360.0) - 180.0;
+        self.hurt_tilt_dir = if rel >= 0.0 { 1.0 } else { -1.0 };
+        self.hurt_tilt_ticks = crate::net::HURT_TILT_TICKS;
+    }
+
+    /// One 20 Hz tick of the hurt tilt (called from `end_tick`).
+    fn tick_hurt_tilt(&mut self) {
+        self.hurt_tilt_ticks = self.hurt_tilt_ticks.saturating_sub(1);
     }
 
     /// Applies one clientbound packet; serverbound replies go to `out`.
@@ -481,6 +523,16 @@ impl Session {
             }
             P::RotateHead(h) => entities.set_head_yaw(EntityId(h.entity_id), h.head_yaw),
             P::SetEntityMotion(m) => entities.set_velocity(EntityId(m.entity_id), m.velocity),
+            P::HurtAnimation(h) => {
+                entities.mark_hurt(EntityId(h.entity_id));
+                if EntityId(h.entity_id) == own {
+                    self.start_hurt_tilt(h.yaw, self.player.state.yaw);
+                }
+            }
+            P::DamageEvent(d) => {
+                entities.mark_hurt(EntityId(d.entity_id));
+            }
+            P::EntityEvent(e) if e.status == 3 => entities.mark_dead(EntityId(e.entity_id)),
             P::SetEntityData(d) => {
                 if EntityId(d.entity_id) != own {
                     entities.set_metadata(EntityId(d.entity_id), &d.metadata);
@@ -551,6 +603,7 @@ impl Session {
         for (pos, state) in self.player.take_world_edits() {
             world.set_block(pos, state);
         }
+        self.tick_hurt_tilt();
     }
 
     /// Break cracks to draw: other players' (`block_destruction`) and our own.

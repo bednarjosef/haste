@@ -346,6 +346,7 @@ fn frame_view(
         yaw,
         pitch,
         fov_deg,
+        roll_deg: view.hurt_tilt,
     };
     let fog_end = (view.view_distance.max(2) * 16) as f32;
     let sky = SkyState {
@@ -1537,6 +1538,7 @@ mod tests {
             yaw: 30.0,
             pitch: 10.0,
             fov_deg: 70.0,
+            roll_deg: 0.0,
         };
         // t = 0: at the base, unturned.
         let c = bench_camera(0.0, &base, 60.0);

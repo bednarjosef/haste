@@ -23,6 +23,8 @@ pub struct Camera {
     pub yaw: f32,
     pub pitch: f32,
     pub fov_deg: f32,
+    /// Camera roll in degrees (hurt tilt; positive rolls the horizon clockwise on screen).
+    pub roll_deg: f32,
 }
 
 /// Sky/fog state for one frame.
@@ -132,6 +134,7 @@ mod tests {
                 yaw: 0.0,
                 pitch: 60.0,
                 fov_deg: 70.0,
+                roll_deg: 0.0,
             },
             entities: &[],
             gui: &haste_core::gui::GuiFrame::default(),
@@ -1125,12 +1128,18 @@ impl Renderer {
             pitch.cos() * yaw.cos(),
         )
         .normalize();
+        // Roll (hurt tilt): rotate the up vector around the forward axis.
+        let up = if camera.roll_deg == 0.0 {
+            glam::Vec3::Y
+        } else {
+            glam::Quat::from_axis_angle(forward, camera.roll_deg.to_radians()) * glam::Vec3::Y
+        };
         let eye = glam::Vec3::new(
             camera.pos.x as f32,
             camera.pos.y as f32,
             camera.pos.z as f32,
         );
-        let view = glam::Mat4::look_to_rh(eye, forward, glam::Vec3::Y);
+        let view = glam::Mat4::look_to_rh(eye, forward, up);
         proj * view
     }
 

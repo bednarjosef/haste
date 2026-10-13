@@ -191,6 +191,10 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
         // default skin for our UUID is what vanilla shows without a downloaded skin.
         skin: Some(haste_render::default_skin(uuid).0),
         nametag: None,
+        // Our own model flashes red in third person like other entities: the hurt tilt follows
+        // the same 10-tick ease-out curve, so its size (out of the 14-degree peak) is the
+        // hurt strength.
+        hurt: (view.hurt_tilt.abs() / 14.0).clamp(0.0, 1.0),
     }
 }
 
@@ -223,6 +227,8 @@ pub struct ViewState {
     pub block_target: Option<(BlockPos, Direction)>,
     /// Selected hotbar slot (`LocalPlayer::held_slot`), for the scroll wheel.
     pub held_slot: i32,
+    /// Hurt-tilt camera roll in degrees (`Session::hurt_tilt_degrees`).
+    pub hurt_tilt: f32,
     /// Look angles (yaw, pitch) before and after the last tick, for the player's own model in
     /// third person.
     pub prev_look: (f32, f32),
@@ -300,6 +306,7 @@ impl Shared {
                 view_distance,
                 block_target: None,
                 held_slot: 0,
+                hurt_tilt: 0.0,
                 prev_look: (0.0, 0.0),
                 look: (0.0, 0.0),
                 prev_feet: DVec3::ZERO,
@@ -597,6 +604,7 @@ fn tick_once(
     view.has_sky = s.dimension.has_skylight;
     view.block_target = s.player.target();
     view.held_slot = s.player.held_slot;
+    view.hurt_tilt = s.hurt_tilt_degrees();
     Ok(())
 }
 
