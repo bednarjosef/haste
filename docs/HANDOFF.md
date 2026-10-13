@@ -110,9 +110,11 @@ session 2: 62.5k lines of Rust, Java and WGSL (43.8k at its start).
 
 ## Team and process lessons (session 2)
 
-- **Opus at medium effort, four at a time, is the team.** GLM workers were dropped: four of them
-  committed nothing in 2.5 hours (huge contexts, 15-minute requests, connection drops) while
-  Opus merged 15+ PRs. The user decided Opus only.
+- **Opus at medium effort, four at a time, was the team in session 2.** GLM workers committed
+  nothing in 2.5 hours then (huge contexts, 15-minute requests, connection drops). Session 3
+  brought them back with one small, fully specified task each, no permission prompts, no image
+  reads and a rate-limit-aware gate, and merged about twenty of their branches: see
+  docs/GLM-WORKERS.md.
 - **The real server is the test.** Every component checked against a real server had a bug unit
   tests missed (NOTES.md 2026-10-13). Give every brief a server-side oracle: the vanilla
   server's movement checks and logs, a second headless client as observer, region files, a local
