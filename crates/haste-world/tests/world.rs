@@ -499,6 +499,125 @@ fn concurrent_block_view_reads_hit_the_right_chunk() {
     });
 }
 
+/// A synthetic chunk at (0,0) carrying two block entities, plus the dirty list drained.
+fn world_with_block_entities() -> (World, BlockPos, BlockPos) {
+    let mut w = World::new(overworld(), game_data());
+    let mut cd = synthetic_chunk_data(ChunkPos::new(0, 0), -4, 24, |_si, _x, _y, _z| STONE);
+    let sign = BlockPos::new(3, 8, 3);
+    let chest = BlockPos::new(11, 72, 11);
+    for (pos, kind) in [(sign, 7u32), (chest, 33u32)] {
+        cd.block_entities.push(haste_core::chunk::BlockEntityData {
+            pos,
+            kind,
+            nbt: bytes::Bytes::from_static(&[1, 2, 3]),
+        });
+    }
+    w.load_chunk(&cd).unwrap();
+    let _ = w.take_dirty_sections();
+    (w, sign, chest)
+}
+
+fn block_entity(pos: BlockPos, kind: u32) -> haste_core::chunk::BlockEntityData {
+    haste_core::chunk::BlockEntityData {
+        pos,
+        kind,
+        nbt: bytes::Bytes::from_static(&[9, 8, 7]),
+    }
+}
+
+#[test]
+fn block_entities_from_chunk_data() {
+    let (w, sign, chest) = world_with_block_entities();
+    let be = w.block_entity(sign).unwrap();
+    assert_eq!(be.kind, 7);
+    assert_eq!(be.nbt.as_ref(), &[1, 2, 3]);
+    assert_eq!(w.block_entity(chest).unwrap().kind, 33);
+    // a position without a block entity
+    assert!(w.block_entity(BlockPos::new(4, 8, 4)).is_none());
+    // an unloaded chunk has no block entities either
+    assert!(w.block_entity(BlockPos::new(1000, 8, 1000)).is_none());
+    // block_entities_in lists exactly the two (order is arbitrary)
+    let mut listed: Vec<(BlockPos, u32)> = w
+        .block_entities_in(ChunkPos::new(0, 0))
+        .map(|(p, be)| (p, be.kind))
+        .collect();
+    listed.sort_unstable_by_key(|(p, _)| p.to_packed());
+    assert_eq!(listed, vec![(sign, 7), (chest, 33)]);
+    // ... and nothing for another chunk
+    assert_eq!(w.block_entities_in(ChunkPos::new(1, 0)).count(), 0);
+}
+
+#[test]
+fn set_block_drops_block_entity() {
+    let (mut w, sign, _chest) = world_with_block_entities();
+    w.set_block(sign, DIRT);
+    assert!(w.block_entity(sign).is_none());
+    // the other one survives
+    assert!(w.block_entity(BlockPos::new(11, 72, 11)).is_some());
+    let _ = w.take_dirty_sections();
+}
+
+#[test]
+fn set_block_entity_replaces_and_marks_dirty() {
+    let (mut w, sign, chest) = world_with_block_entities();
+    // replace: same position, different kind
+    w.set_block_entity(sign, block_entity(sign, 42));
+    assert_eq!(w.block_entity(sign).unwrap().kind, 42);
+    assert_eq!(w.block_entity(sign).unwrap().nbt.as_ref(), &[9, 8, 7]);
+    assert_eq!(w.block_entity(chest).unwrap().kind, 33);
+    assert_eq!(
+        dirty_set(w.take_dirty_sections()),
+        std::iter::once(sign.section()).collect()
+    );
+    // add: a position the chunk did not have
+    let fresh = BlockPos::new(8, 130, 8);
+    w.set_block_entity(fresh, block_entity(fresh, 5));
+    assert_eq!(w.block_entity(fresh).unwrap().kind, 5);
+    assert_eq!(
+        dirty_set(w.take_dirty_sections()),
+        std::iter::once(fresh.section()).collect()
+    );
+}
+
+#[test]
+fn set_block_entity_ignored_in_unloaded_chunk() {
+    let (mut w, _sign, _chest) = world_with_block_entities();
+    let away = BlockPos::new(1000, 8, 1000); // chunk (62, 62): not loaded
+    w.set_block_entity(away, block_entity(away, 1));
+    assert!(w.block_entity(away).is_none());
+    assert!(w.take_dirty_sections().is_empty());
+    assert_eq!(w.block_entities_in(ChunkPos::new(0, 0)).count(), 2);
+}
+
+#[test]
+fn unload_drops_block_entities() {
+    let (mut w, sign, chest) = world_with_block_entities();
+    w.unload_chunk(ChunkPos::new(0, 0));
+    assert!(w.block_entity(sign).is_none());
+    assert!(w.block_entity(chest).is_none());
+    assert_eq!(w.block_entities_in(ChunkPos::new(0, 0)).count(), 0);
+}
+
+#[test]
+fn reload_replaces_block_entities() {
+    let (mut w, sign, chest) = world_with_block_entities();
+    let gone = BlockPos::new(5, 9, 5);
+    // same chunk sent again with only one, different, block entity
+    let mut cd = synthetic_chunk_data(ChunkPos::new(0, 0), -4, 24, |_si, _x, _y, _z| STONE);
+    cd.block_entities.push(block_entity(gone, 3));
+    w.load_chunk(&cd).unwrap();
+    // the old ones are gone ...
+    assert!(w.block_entity(sign).is_none());
+    assert!(w.block_entity(chest).is_none());
+    // ... the new one is there
+    assert_eq!(w.block_entity(gone).unwrap().kind, 3);
+    let listed: Vec<BlockPos> = w
+        .block_entities_in(ChunkPos::new(0, 0))
+        .map(|(p, _)| p)
+        .collect();
+    assert_eq!(listed, vec![gone]);
+}
+
 /// Timed hot-loop get (not criterion; good enough for the < 5 ns target check in release).
 #[test]
 #[ignore = "perf: run with --release --ignored"]

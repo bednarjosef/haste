@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use haste_core::chunk::ChunkData;
+use haste_core::chunk::{BlockEntityData, ChunkData};
 use haste_core::game::DimensionInfo;
 use haste_core::view::{BlockView, DirtyTracker};
 use haste_core::{BiomeId, BlockPos, BlockStateId, ChunkPos, SectionPos};
@@ -141,6 +141,9 @@ impl World {
         let ly = (pos.y & 15) as u8;
         let lz = (pos.z & 15) as u8;
         section.set(lx, ly, lz, state, direct_bits);
+        // a replaced block drops its block entity (the server resends one if the new
+        // block has one)
+        chunk.block_entities.remove(&pos);
         // per axis, the section offsets of the block's 3x3x3 neighbourhood: {0} plus {-1}
         // when on the low border, {+1} when on the high border (at most 2 per axis)
         let offs = |l: u8| -> &[i32] {
@@ -170,6 +173,33 @@ impl World {
                 }
             }
         }
+    }
+
+    /// The block entity at `pos` (signs, chests, ...), if that chunk is loaded.
+    pub fn block_entity(&self, pos: BlockPos) -> Option<&BlockEntityData> {
+        self.chunk_of(pos).and_then(|c| c.block_entities.get(&pos))
+    }
+
+    /// Every block entity in chunk `pos`, in arbitrary order.
+    pub fn block_entities_in(
+        &self,
+        pos: ChunkPos,
+    ) -> impl Iterator<Item = (BlockPos, &BlockEntityData)> + '_ {
+        self.chunk(pos)
+            .into_iter()
+            .flat_map(|c| c.block_entities.iter().map(|(p, be)| (*p, be)))
+    }
+
+    /// Replaces (or adds) the block entity at `pos` of `data` (the `block_entity_data`
+    /// packet). Ignored if that chunk is not loaded; marks the section dirty (the change is
+    /// visible in the mesh or UI).
+    pub fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData) {
+        let chunk_pos = pos.chunk();
+        let Some(chunk) = self.chunks.get_mut(&chunk_pos.to_packed()) else {
+            return;
+        };
+        chunk.block_entities.insert(pos, data);
+        self.mark_dirty(pos.section());
     }
 
     /// Applies a `light_update` to the chunk at `pos`. Marks dirty the 3x3x3 section
