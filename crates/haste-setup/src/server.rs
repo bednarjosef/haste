@@ -41,16 +41,7 @@ impl LocalServer {
             .to_string();
 
         tokio::fs::write(world_dir.join("eula.txt"), "eula=true\n").await?;
-        let properties = format!(
-            "online-mode=false\n\
-             server-ip=127.0.0.1\n\
-             server-port={port}\n\
-             level-name={world_name}\n\
-             pause-when-empty-seconds=-1\n\
-             spawn-protection=0\n\
-             sync-chunk-writes=false\n\
-             motd=haste\n"
-        );
+        let properties = server_properties(&world_name, port);
         tokio::fs::write(world_dir.join("server.properties"), properties).await?;
 
         let log_path = world_dir.join("server.log");
@@ -123,7 +114,6 @@ impl LocalServer {
     pub fn address(&self) -> String {
         self.addr.to_string()
     }
-
     /// Sends `stop` on stdin and waits for the process to exit.
     pub async fn stop(mut self) {
         if let Some(mut stdin) = self.child.stdin.take() {
@@ -142,9 +132,40 @@ pub fn free_port() -> anyhow::Result<u16> {
     Ok(listener.local_addr()?.port())
 }
 
+/// The `server.properties` contents for a singleplayer world. Vanilla singleplayer has no
+/// whitelist, and the 26.3 server defaults `white-list=true` when the property is absent, so it
+/// is set to false explicitly (the server would otherwise refuse every join with
+/// `multiplayer.disconnect.not_whitelisted`).
+fn server_properties(world_name: &str, port: u16) -> String {
+    format!(
+        "online-mode=false\n\
+         server-ip=127.0.0.1\n\
+         server-port={port}\n\
+         level-name={world_name}\n\
+         pause-when-empty-seconds=-1\n\
+         spawn-protection=0\n\
+         sync-chunk-writes=false\n\
+         white-list=false\n\
+         enforce-whitelist=false\n\
+         motd=haste\n"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn properties_disable_the_whitelist() {
+        let properties = server_properties("gltest", 25565);
+        assert!(properties.contains("white-list=false\n"));
+        assert!(properties.contains("enforce-whitelist=false\n"));
+        assert!(!properties.contains("white-list=true"));
+        // the settings LocalServer has always written stay as they were
+        assert!(properties.contains("online-mode=false\n"));
+        assert!(properties.contains("server-port=25565\n"));
+        assert!(properties.contains("level-name=gltest\n"));
+    }
 
     #[test]
     fn free_port_is_bindable_and_random() {

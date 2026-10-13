@@ -13,6 +13,7 @@ use clap::Parser;
 mod app;
 mod game;
 mod headless;
+mod launch;
 mod net;
 mod player;
 mod ui;
@@ -55,12 +56,18 @@ pub struct Args {
     /// Screenshot camera pitch in degrees (default: the server's spawn rotation).
     #[arg(long, allow_hyphen_values = true)]
     pub pitch: Option<f32>,
-    /// Present with vsync (default off).
+    /// Screenshot: feet position to wait for and render from (camera at eye height above it).
+    #[arg(long, num_args = 3, value_names = ["X", "Y", "Z"], allow_hyphen_values = true)]
+    pub pos: Option<Vec<f64>>,
+    /// Present with vsync; overrides the saved option when given.
     #[arg(long)]
-    pub vsync: bool,
+    pub vsync: Option<bool>,
     /// Close the window after this many seconds (unattended runs).
     #[arg(long)]
     pub window_seconds: Option<u64>,
+    /// Subcommand (setup, singleplayer). Omit for the normal launcher flow.
+    #[command(subcommand)]
+    pub command: Option<launch::Command>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -70,6 +77,9 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
     let args = Args::parse();
+    if let Some(cmd) = args.command {
+        return launch::run(cmd, &args.username);
+    }
     if args.ping {
         let addr = args
             .server

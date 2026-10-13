@@ -14,9 +14,13 @@ pub mod font;
 pub mod item;
 pub mod model;
 pub mod multipart;
+pub mod particle;
 
-pub use assets::{AnimationMeta, Assets, ModelJson, SpriteMeta, TextureMeta};
-pub use atlas::{AtlasBuilder, AtlasRegion, AtlasRegions};
+pub use assets::{
+    frame_at, Animation, AnimationFrame, AnimationMeta, AnimationSchedule, Assets, ModelJson,
+    SpriteMeta, TextureMeta,
+};
+pub use atlas::{AnimatedSprite, AtlasBuilder, AtlasRegion, AtlasRegions};
 pub use bake::{BakedBlockModels, BlocksJsonStates, RenderLayer};
 pub use font::{
     for_each_formatted, BitmapFont, Glyph, GlyphKind, HexGlyph, TextFormat, LEGACY_COLORS,
@@ -24,3 +28,4 @@ pub use font::{
 pub use item::{ItemGeometry, ItemModel, ItemModelPart, PartTransformation};
 pub use model::{BakedQuad, Direction, DisplayTransform, ModelRef};
 pub use multipart::{BlockStateDefinition, MultipartCase, MultipartCondition, VariantEntry};
+pub use particle::{ParticleAtlas, ParticleDefinition};

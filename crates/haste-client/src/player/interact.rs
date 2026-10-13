@@ -15,7 +15,9 @@
 //!    (swords) send nothing;
 //! 4. use: on press and every 4 ticks while held, `use_item_on` (block target, cursor inside the
 //!    block, sequence) or `interact` (entity) or `use_item` (nothing targeted, held item not empty);
-//! 5. pick block: `pick_item_from_block` / `pick_item_from_entity`.
+//! 5. pick block: `pick_item_from_block` / `pick_item_from_entity`;
+//! 6. drop (Q, Ctrl+Q) and off-hand swap (F): `player_action` with a zeroed position, as vanilla
+//!    sends it; the server answers with the slot updates.
 //!
 //! Predictions: a block we break is set to air locally at once (`take_world_edits`). Until the
 //! server acknowledges our sequence number (`block_changed_ack`) its block updates for that
@@ -53,6 +55,11 @@ pub mod action {
     pub const CHANGE_DESTROY_DIRECTION: i32 = 1;
     pub const ABORT_DESTROY: i32 = 2;
     pub const STOP_DESTROY: i32 = 3;
+    pub const DROP_ALL_ITEMS: i32 = 4;
+    pub const DROP_ITEM: i32 = 5;
+    pub const RELEASE_USE_ITEM: i32 = 6;
+    pub const SWAP_ITEM_WITH_OFFHAND: i32 = 7;
+    pub const STAB: i32 = 8;
 }
 
 /// Interaction-related attributes (server values; vanilla defaults until it sends them).
@@ -441,8 +448,33 @@ impl LocalPlayer {
                 None => {}
             }
         }
+        // 6. Drop (Q / Ctrl+Q) and off-hand swap (F): no target, pos and face zeroed as vanilla
+        // does; the server sends the slot updates, nothing is predicted here.
+        if self.health > 0.0 {
+            let status = if input.drop_stack && !last.drop_stack {
+                Some(action::DROP_ALL_ITEMS)
+            } else if input.drop_item && !last.drop_item {
+                Some(action::DROP_ITEM)
+            } else if input.swap_offhand && !last.swap_offhand {
+                Some(action::SWAP_ITEM_WITH_OFFHAND)
+            } else {
+                None
+            };
+            if let Some(status) = status {
+                out.push(ServerboundPlay::PlayerAction(sb::PlayerAction {
+                    status,
+                    pos: BlockPos::new(0, 0, 0),
+                    face: 0,
+                    sequence: 0,
+                }));
+            }
+        }
+
         // The press-only fields are consumed; held buttons stay until the caller changes them.
         self.int.input.pick_block = false;
+        self.int.input.drop_item = false;
+        self.int.input.drop_stack = false;
+        self.int.input.swap_offhand = false;
         self.int.input.hotbar = None;
     }
 

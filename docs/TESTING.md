@@ -38,6 +38,9 @@ on CI (no `cache/`, no display) must stay green in well under a minute.
 - Packet recordings (`cache/oracle/26.3/packets/*.bin`, captured via
   `cargo run -p haste-testkit --bin haste-packet-proxy`) are protocol/world-and-data's replay fixtures at
   this tier.
+- `REVIEW_SERVER=host:port scripts/review.sh <branch>` — one screenshot of a live normal world
+  (fixed yaw 180 / pitch 25 camera) into the branch worktree's `target/review/`; catches
+  renderer regressions the fixed-camera oracle diffs miss (e.g. missing chunks).
 
 ## How each workstream plugs in
 

@@ -1,10 +1,9 @@
 //! The world: chunk map, block get/set, light, dirty tracking, section snapshots.
 
-use std::cell::UnsafeCell;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use haste_core::chunk::ChunkData;
+use haste_core::chunk::{BlockEntityData, ChunkData};
 use haste_core::game::DimensionInfo;
 use haste_core::view::{BlockView, DirtyTracker};
 use haste_core::{BiomeId, BlockPos, BlockStateId, ChunkPos, SectionPos};
@@ -18,10 +17,6 @@ pub struct World {
     dim: DimensionInfo,
     data: Arc<GameData>,
     chunks: ahash::HashMap<i64, Chunk>,
-    /// Memo of the last chunk hit by a BlockView call: hot loops (physics, meshing, light
-    /// scans) touch the same chunk many times in a row, so the map lookup is skipped.
-    /// Interior mutability through `UnsafeCell` because `BlockView` takes `&self`.
-    last_chunk: UnsafeCell<Option<(i64, *const Chunk)>>,
     /// Sections needing remesh (set_block and light updates mark them).
     dirty: Vec<SectionPos>,
     dirty_dedup: HashSet<SectionPos>,
@@ -30,11 +25,6 @@ pub struct World {
     /// Bits for direct-encoded biome containers: ceil(log2(synced biome registry size)).
     biome_bits: u8,
 }
-
-// SAFETY: the memo's raw pointer always targets a chunk that is currently in `chunks`; it is
-// invalidated on insert/remove. `Chunk` itself is only read through the shared reference.
-unsafe impl Send for World {}
-unsafe impl Sync for World {}
 
 impl World {
     /// A world whose direct biome containers are 3 bits wide (the old default, right only
@@ -58,7 +48,6 @@ impl World {
             dim,
             data,
             chunks: ahash::HashMap::with_hasher(ahash::RandomState::default()),
-            last_chunk: UnsafeCell::new(None),
             dirty: Vec::new(),
             dirty_dedup: HashSet::new(),
             direct_bits,
@@ -81,7 +70,6 @@ impl World {
 
     /// Loads (or replaces) a chunk from `level_chunk_with_light` payload.
     pub fn load_chunk(&mut self, data: &ChunkData) -> Result<(), WorldError> {
-        self.invalidate_memo();
         let section_count = self.dim.section_count();
         let chunk = Chunk::decode(
             data,
@@ -92,7 +80,8 @@ impl World {
         )
         .map_err(WorldError::Palette)?;
         self.chunks.insert(data.pos.to_packed(), chunk);
-        // a new chunk dirties all its sections and the borders of its neighbours
+        // a new chunk dirties all its sections and the borders of its neighbours,
+        // including the diagonal chunks (their corner columns sample the new chunk)
         for sy in 0..section_count as i32 {
             self.mark_dirty(SectionPos::new(
                 data.pos.x,
@@ -100,11 +89,16 @@ impl World {
                 data.pos.z,
             ));
         }
-        for (dx, dz) in [(-1i32, 0), (1, 0), (0, -1), (0, 1)] {
-            let n = ChunkPos::new(data.pos.x + dx, data.pos.z + dz);
-            if self.chunks.contains_key(&n.to_packed()) {
-                for sy in 0..section_count as i32 {
-                    self.mark_dirty(SectionPos::new(n.x, self.dim.min_section() + sy, n.z));
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                if dx == 0 && dz == 0 {
+                    continue;
+                }
+                let n = ChunkPos::new(data.pos.x + dx, data.pos.z + dz);
+                if self.chunks.contains_key(&n.to_packed()) {
+                    for sy in 0..section_count as i32 {
+                        self.mark_dirty(SectionPos::new(n.x, self.dim.min_section() + sy, n.z));
+                    }
                 }
             }
         }
@@ -112,20 +106,27 @@ impl World {
     }
 
     pub fn unload_chunk(&mut self, pos: ChunkPos) {
-        self.invalidate_memo();
         self.chunks.remove(&pos.to_packed());
-        // neighbour borders now face void: remesh them
-        for (dx, dz) in [(-1i32, 0), (1, 0), (0, -1), (0, 1)] {
-            let n = ChunkPos::new(pos.x + dx, pos.z + dz);
-            if self.chunks.contains_key(&n.to_packed()) {
-                for sy in 0..self.dim.section_count() as i32 {
-                    self.mark_dirty(SectionPos::new(n.x, self.dim.min_section() + sy, n.z));
+        // neighbour borders now face void: remesh them (diagonal chunks included:
+        // their corner columns sampled the removed chunk)
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                if dx == 0 && dz == 0 {
+                    continue;
+                }
+                let n = ChunkPos::new(pos.x + dx, pos.z + dz);
+                if self.chunks.contains_key(&n.to_packed()) {
+                    for sy in 0..self.dim.section_count() as i32 {
+                        self.mark_dirty(SectionPos::new(n.x, self.dim.min_section() + sy, n.z));
+                    }
                 }
             }
         }
     }
 
-    /// Sets a block. Marks the section (and neighbouring sections when on a border) dirty.
+    /// Sets a block. Marks every section whose one-block border touches the block dirty: the
+    /// mesher samples AO and smooth light from the 3x3x3 block neighbourhood, so edge and
+    /// corner blocks also affect the diagonally adjacent sections.
     pub fn set_block(&mut self, pos: BlockPos, state: BlockStateId) {
         let chunk_pos = pos.chunk();
         let sec_y = pos.y >> 4;
@@ -140,34 +141,106 @@ impl World {
         let ly = (pos.y & 15) as u8;
         let lz = (pos.z & 15) as u8;
         section.set(lx, ly, lz, state, direct_bits);
-        self.mark_dirty(pos.section());
-        // borders dirty the neighbour section too
-        if lx == 0 {
-            self.mark_dirty(SectionPos::new(chunk_pos.x - 1, sec_y, chunk_pos.z));
-        }
-        if lx == 15 {
-            self.mark_dirty(SectionPos::new(chunk_pos.x + 1, sec_y, chunk_pos.z));
-        }
-        if lz == 0 {
-            self.mark_dirty(SectionPos::new(chunk_pos.x, sec_y, chunk_pos.z - 1));
-        }
-        if lz == 15 {
-            self.mark_dirty(SectionPos::new(chunk_pos.x, sec_y, chunk_pos.z + 1));
-        }
-        if ly == 0 {
-            self.mark_dirty(SectionPos::new(chunk_pos.x, sec_y - 1, chunk_pos.z));
-        }
-        if ly == 15 {
-            self.mark_dirty(SectionPos::new(chunk_pos.x, sec_y + 1, chunk_pos.z));
+        // a replaced block drops its block entity (the server resends one if the new
+        // block has one)
+        chunk.block_entities.remove(&pos);
+        // per axis, the section offsets of the block's 3x3x3 neighbourhood: {0} plus {-1}
+        // when on the low border, {+1} when on the high border (at most 2 per axis)
+        let offs = |l: u8| -> &[i32] {
+            if l == 0 {
+                &[-1, 0]
+            } else if l == 15 {
+                &[0, 1]
+            } else {
+                &[0]
+            }
+        };
+        let xs = offs(lx);
+        let ys = offs(ly);
+        let zs = offs(lz);
+        // sections outside the world's vertical range are skipped: the dimension knows its
+        // section span, and the mesher can never read them (out-of-bounds y is air)
+        let min_sec = self.dim.min_section();
+        let max_sec = min_sec + self.dim.section_count() as i32;
+        for &dx in xs {
+            for &dy in ys {
+                for &dz in zs {
+                    let ty = sec_y + dy;
+                    if ty < min_sec || ty >= max_sec {
+                        continue;
+                    }
+                    self.mark_dirty(SectionPos::new(chunk_pos.x + dx, ty, chunk_pos.z + dz));
+                }
+            }
         }
     }
 
-    /// Applies a `light_update` to the chunk at `pos`.
+    /// The block entity at `pos` (signs, chests, ...), if that chunk is loaded.
+    pub fn block_entity(&self, pos: BlockPos) -> Option<&BlockEntityData> {
+        self.chunk_of(pos).and_then(|c| c.block_entities.get(&pos))
+    }
+
+    /// Every block entity in chunk `pos`, in arbitrary order.
+    pub fn block_entities_in(
+        &self,
+        pos: ChunkPos,
+    ) -> impl Iterator<Item = (BlockPos, &BlockEntityData)> + '_ {
+        self.chunk(pos)
+            .into_iter()
+            .flat_map(|c| c.block_entities.iter().map(|(p, be)| (*p, be)))
+    }
+
+    /// Replaces (or adds) the block entity at `pos` of `data` (the `block_entity_data`
+    /// packet). Ignored if that chunk is not loaded; marks the section dirty (the change is
+    /// visible in the mesh or UI).
+    pub fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData) {
+        let chunk_pos = pos.chunk();
+        let Some(chunk) = self.chunks.get_mut(&chunk_pos.to_packed()) else {
+            return;
+        };
+        chunk.block_entities.insert(pos, data);
+        self.mark_dirty(pos.section());
+    }
+
+    /// Applies a `light_update` to the chunk at `pos`. Marks dirty the 3x3x3 section
+    /// neighbourhood of every changed light section, like `set_block` does for blocks: the
+    /// mesher's smooth light samples the 3x3x3 block neighbourhood of each block, so a
+    /// section's border blocks read light from the adjacent sections (diagonal ones too, in
+    /// neighbouring chunks).
     pub fn apply_light(&mut self, pos: ChunkPos, light: &haste_core::chunk::LightData) {
         if let Some(chunk) = self.chunks.get_mut(&pos.to_packed()) {
             chunk.apply_light(light);
-            for sy in 0..self.dim.section_count() as i32 {
-                self.mark_dirty(SectionPos::new(pos.x, self.dim.min_section() + sy, pos.z));
+            // light sections are indexed from one below the world: light index i is
+            // section y `min_section - 1 + i`, `section_count + 2` of them in total
+            let min_sec = self.dim.min_section();
+            let max_sec = min_sec + self.dim.section_count() as i32;
+            let changed = |i: i32| -> bool {
+                let set =
+                    |mask: &[u64]| mask.get(i as usize / 64).map_or(0, |w| w >> (i % 64) & 1) != 0;
+                set(&light.sky_mask)
+                    || set(&light.block_mask)
+                    || set(&light.empty_sky_mask)
+                    || set(&light.empty_block_mask)
+            };
+            for i in 0..self.dim.section_count() as i32 + 2 {
+                if !changed(i) {
+                    continue;
+                }
+                // the light sections outside the world's span only change light for the
+                // sections next to them: sections outside the span are skipped (out-of-bounds
+                // y is air for the mesher)
+                let sy = min_sec - 1 + i;
+                for dx in -1..=1 {
+                    for dy in -1..=1 {
+                        for dz in -1..=1 {
+                            let ty = sy + dy;
+                            if ty < min_sec || ty >= max_sec {
+                                continue;
+                            }
+                            self.mark_dirty(SectionPos::new(pos.x + dx, ty, pos.z + dz));
+                        }
+                    }
+                }
             }
         }
     }
@@ -275,27 +348,10 @@ impl World {
 
     // -- BlockView helpers --
 
-    /// The chunk containing `pos`, using the memo when it hits. Unloaded -> None.
+    /// The chunk containing `pos`. Unloaded -> None.
     #[inline]
     fn chunk_of(&self, pos: BlockPos) -> Option<&Chunk> {
-        let key = pos.chunk().to_packed();
-        // SAFETY: no &mut World aliasing exists during a &self call; the pointer stored in
-        // the memo is invalidated on chunk insert/remove, so it is never dangling here.
-        // SAFETY: see `chunk_of` doc comment.
-        let memo = unsafe { &*self.last_chunk.get() };
-        if let Some((k, p)) = *memo {
-            if k == key {
-                return Some(unsafe { &*p });
-            }
-        }
-        let chunk = self.chunks.get(&key)?;
-        // SAFETY: same invariant; single-threaded write through the UnsafeCell.
-        *unsafe { &mut *self.last_chunk.get() } = Some((key, chunk as *const Chunk));
-        Some(chunk)
-    }
-
-    fn invalidate_memo(&mut self) {
-        *self.last_chunk.get_mut() = None;
+        self.chunks.get(&pos.chunk().to_packed())
     }
 
     fn chunk_and_section(&self, pos: BlockPos) -> Option<(&Chunk, &Section)> {
