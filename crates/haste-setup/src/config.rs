@@ -61,23 +61,35 @@ pub fn config_path() -> Option<PathBuf> {
 }
 
 impl Config {
-    /// Loads the config, creating it with defaults if absent. The file (and its directory) is
-    /// created with 0600/0700 permissions because of the MSA tokens.
+    /// Loads the config from the platform config dir, creating it with defaults if absent.
     pub fn load() -> anyhow::Result<Config> {
         let path = config_path().context("no platform config dir on this system")?;
+        Config::load_from(&path)
+    }
+
+    /// Loads the config at `path`, creating it with defaults if absent. The file (and its
+    /// directory) is created with 0600/0700 permissions because of the MSA tokens. Path-
+    /// parameterized so tests (and anything else) never have to touch the real config dir or
+    /// mutate environment variables.
+    pub fn load_from(path: &std::path::Path) -> anyhow::Result<Config> {
         if !path.exists() {
             let cfg = Config::default();
-            cfg.save()?;
+            cfg.save_to(path)?;
             return Ok(cfg);
         }
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
     }
 
-    /// Writes the config back, 0600.
+    /// Writes the config back to the platform config dir, 0600.
     pub fn save(&self) -> anyhow::Result<()> {
         let path = config_path().context("no platform config dir on this system")?;
+        self.save_to(&path)
+    }
+
+    /// Writes the config to `path` (creating its directory), 0600.
+    pub fn save_to(&self, path: &std::path::Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
             #[cfg(unix)]
@@ -87,11 +99,11 @@ impl Config {
             }
         }
         let text = toml::to_string_pretty(self)?;
-        std::fs::write(&path, text)?;
+        std::fs::write(path, text)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         }
         Ok(())
     }
@@ -146,29 +158,28 @@ fov = 70.0
     #[cfg(unix)]
     #[test]
     fn save_load_creates_0600_file() {
-        // redirect the config dir to a temp home
         let dir = tempfile::tempdir().unwrap();
-        let home = dir.path().to_path_buf();
-        let old = std::env::var_os("XDG_CONFIG_HOME");
-        std::env::set_var("XDG_CONFIG_HOME", &home);
-        let result: anyhow::Result<()> = (|| {
-            let cfg = Config {
-                username: "Hermes".into(),
-                ..Config::default()
-            };
-            cfg.save()?;
-            let path = config_path().unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600, "config must be 0600");
-            let loaded = Config::load().unwrap();
-            assert_eq!(loaded.username, "Hermes");
-            Ok(())
-        })();
-        match old {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
-        result.unwrap();
+        let path = dir.path().join("haste").join("config.toml");
+        let cfg = Config {
+            username: "Hermes".into(),
+            ..Config::default()
+        };
+        cfg.save_to(&path).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "config must be 0600");
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.username, "Hermes");
+    }
+
+    #[test]
+    fn load_from_missing_file_creates_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("config.toml");
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.username, "Player");
+        assert!(path.is_file(), "default config was written");
+        // a second load reads what was written
+        assert_eq!(Config::load_from(&path).unwrap().username, "Player");
     }
 }
