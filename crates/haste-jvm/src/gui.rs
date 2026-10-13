@@ -62,6 +62,7 @@ impl ScreenKind {
 struct Methods {
     open: jni::objects::JMethodID,
     close: jni::objects::JMethodID,
+    reset_for_test: jni::objects::JMethodID,
     is_open: jni::objects::JMethodID,
     screen_name: jni::objects::JMethodID,
     render: jni::objects::JMethodID,
@@ -94,6 +95,7 @@ impl GuiPipeline {
         let m = Methods {
             open: env.get_method_id(&cls, jni_str!("open"), jni_sig!("(I)V"))?,
             close: env.get_method_id(&cls, jni_str!("close"), jni_sig!("()V"))?,
+            reset_for_test: env.get_method_id(&cls, jni_str!("resetForTest"), jni_sig!("()V"))?,
             is_open: env.get_method_id(&cls, jni_str!("isOpen"), jni_sig!("()Z"))?,
             screen_name: env.get_method_id(
                 &cls,
@@ -185,6 +187,16 @@ impl GuiPipeline {
     pub fn close_screen(&self) {
         if let Err(e) = self.call(self.m.close, VOID, &[], |_, _| Ok(())) {
             self.failed("close_screen", e);
+        }
+    }
+
+    /// Drops the GUI state earlier tests leave behind in the process-wide JVM: the chat log and its
+    /// scroll, the held mouse button and position, the open screen and the mouse grab. Tests call
+    /// this at their start (the JVM is one per process, so everything vanilla remembers about the
+    /// GUI survives a test).
+    pub fn reset_for_test(&self) {
+        if let Err(e) = self.call(self.m.reset_for_test, VOID, &[], |_, _| Ok(())) {
+            self.failed("reset_for_test", e);
         }
     }
 
