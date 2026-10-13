@@ -18,7 +18,7 @@ use glam::DVec3;
 use haste_audio::engine::SoundSource;
 use haste_audio::music::{MusicCommand, MusicManager, MusicRng, MusicSituation};
 use haste_audio::output::SoundSystem;
-use haste_audio::sounds::{SoundEntry, SoundEvents};
+use haste_audio::sounds::SoundEvents;
 use haste_core::game::GameMode;
 use haste_core::Identifier;
 use haste_protocol::wire::{IdOr, SoundEvent as InlineSoundEvent};
@@ -194,8 +194,8 @@ pub enum SoundRequest {
 /// started allocates nothing (`SoundSystem::tick` reuses its buffers).
 pub struct Sounds {
     system: SoundSystem,
-    /// The parsed `sounds.json`, to tell known events from unknown ones (log once per id)
-    /// and to resolve a stop-by-event into the variant paths `stop` matches.
+    /// The parsed `sounds.json`, to tell known events from unknown ones (log once per
+    /// id): the stop-by-event filter matches event names, so no resolving is needed.
     events: SoundEvents,
     /// The `minecraft:sound_event` name table registry ids resolve through.
     names: Vec<String>,
@@ -207,8 +207,23 @@ pub struct Sounds {
     music_event: Option<String>,
     /// Ids/events already logged as unknown (log once per id, no spam).
     unknown_logged: HashSet<String>,
-    /// Variant paths of the event being stopped (reused; stop packets are rare).
-    stop_paths: Vec<String>,
+}
+
+/// The saved per-category volumes onto the system (vanilla's `soundCategory_*` option
+/// keys), each scaled by the master volume.
+fn apply_volumes(system: &mut SoundSystem, volumes: &haste_setup::options::SoundVolumes) {
+    let v = volumes;
+    system.set_volume(SoundSource::Master, v.master);
+    system.set_volume(SoundSource::Music, v.music);
+    system.set_volume(SoundSource::Record, v.record);
+    system.set_volume(SoundSource::Weather, v.weather);
+    system.set_volume(SoundSource::Block, v.block);
+    system.set_volume(SoundSource::Hostile, v.hostile);
+    system.set_volume(SoundSource::Neutral, v.neutral);
+    system.set_volume(SoundSource::Player, v.player);
+    system.set_volume(SoundSource::Ambient, v.ambient);
+    system.set_volume(SoundSource::Voice, v.voice);
+    system.set_volume(SoundSource::Ui, v.ui);
 }
 
 impl Sounds {
@@ -222,18 +237,13 @@ impl Sounds {
         volumes: &haste_setup::options::SoundVolumes,
     ) -> Self {
         let mut system = SoundSystem::new(events.clone(), assets);
-        let v = volumes;
-        system.set_volume(SoundSource::Master, v.master);
-        system.set_volume(SoundSource::Music, v.music);
-        system.set_volume(SoundSource::Record, v.record);
-        system.set_volume(SoundSource::Weather, v.weather);
-        system.set_volume(SoundSource::Block, v.block);
-        system.set_volume(SoundSource::Hostile, v.hostile);
-        system.set_volume(SoundSource::Neutral, v.neutral);
-        system.set_volume(SoundSource::Player, v.player);
-        system.set_volume(SoundSource::Ambient, v.ambient);
-        system.set_volume(SoundSource::Voice, v.voice);
-        system.set_volume(SoundSource::Ui, v.ui);
+        apply_volumes(&mut system, volumes);
+        Self::with_system(system, events, names)
+    }
+
+    /// The glue over an already built `SoundSystem` (a test builds it over the silent
+    /// output, so no test ever opens the audio device).
+    fn with_system(system: SoundSystem, events: SoundEvents, names: Vec<String>) -> Self {
         Self {
             system,
             events,
@@ -243,7 +253,6 @@ impl Sounds {
             situation: MusicSituation::Menu,
             music_event: None,
             unknown_logged: HashSet::new(),
-            stop_paths: Vec::new(),
         }
     }
 
@@ -288,52 +297,13 @@ impl Sounds {
             .play(&event, source, pos, p.volume, p.pitch, p.seed);
     }
 
-    /// One recorded stop request: stop by category and/or event name. haste-audio's
-    /// `stop` matches the *variant path* (`sounds/dig/stone1.ogg`), so the event is
-    /// resolved into its file variants' paths first (a stop packet is rare; the scratch
-    /// buffer is a field).
+    /// One recorded stop request: stop by category and/or event name, the packet's own
+    /// two fields. `SoundSystem::stop` matches playing sounds by event name (vanilla's
+    /// `SoundManager.stop(Identifier, SoundSource)`), so a name that is not playing
+    /// stops nothing, and both fields absent stops everything.
     fn stop(&mut self, s: StopRequest) {
         let source = s.source.and_then(sound_source);
-        let Some(event) = s.sound else {
-            self.system.stop(source, None);
-            return;
-        };
-        // Resolve the event into variant paths first, then stop each (a stop packet is
-        // rare; the scratch buffer is a field).
-        let mut paths = std::mem::take(&mut self.stop_paths);
-        paths.clear();
-        self.event_paths(&event, 0, &mut paths);
-        if paths.is_empty() {
-            // Not a known event: stop nothing rather than everything.
-            self.log_unknown(&event);
-            self.stop_paths = paths;
-            return;
-        }
-        for path in &paths {
-            self.system.stop(source, Some(path));
-        }
-        self.stop_paths = paths;
-    }
-
-    /// The file variant paths of an event (following `type: "event"` references), for
-    /// stop-by-event. Unknown events leave `out` empty.
-    fn event_paths(&self, event: &str, depth: u32, out: &mut Vec<String>) {
-        if depth > 8 {
-            return;
-        }
-        let Some(e) = self.events.get(event) else {
-            return;
-        };
-        for entry in &e.sounds {
-            match entry {
-                SoundEntry::File(v) => {
-                    if !out.contains(&v.path) {
-                        out.push(v.path.clone());
-                    }
-                }
-                SoundEntry::Event { name, .. } => self.event_paths(name, depth + 1, out),
-            }
-        }
+        self.system.stop(source, s.sound.as_deref());
     }
 
     /// Log one unknown id/event once; further occurrences stay quiet.
@@ -343,12 +313,13 @@ impl Sounds {
         }
     }
 
-    /// Whether the music this client started is still playing. `SoundSystem` counts all
-    /// playing sounds (not per source), so any sound counts as the track being live; sound
-    /// effects are short, so the track's end is detected on the next quiet tick. Until
-    /// haste-audio grows a per-source query this is the closest available answer.
+    /// Whether the music this client started is still playing. `SoundSystem` remembers
+    /// the event each sound was started with, so this follows our own track and no other:
+    /// a block or mob sound never counts, as in vanilla's `isActive(currentMusic)`.
     fn music_playing(&self) -> bool {
-        self.music_event.is_some() && self.system.playing() > 0
+        self.music_event
+            .as_deref()
+            .is_some_and(|event| self.system.is_event_playing(event))
     }
 
     /// The end of a game tick (20 Hz): listener from the local player's eye and yaw, the
@@ -380,6 +351,7 @@ impl Sounds {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use haste_audio::output::AudioOutput;
     use haste_protocol::packets::configuration::clientbound::RegistryEntry;
 
     fn regs_with(names: &[&str]) -> SyncedRegistries {
@@ -406,6 +378,28 @@ mod tests {
     /// otherwise, like `real_world_through_the_sink`).
     fn static_game_data() -> std::sync::Arc<haste_data::GameData> {
         crate::net::load_game_data().expect("cache/datagen/26.3/reports")
+    }
+
+    /// The real assets when the cache is present, else `None` (the caller skips), the
+    /// way `haste-audio`'s output tests do: `SoundSystem` owns an `Assets` by value.
+    fn cached_assets() -> Option<haste_assets::Assets> {
+        let jar = haste_core::paths::client_jar();
+        if !jar.exists() {
+            return None;
+        }
+        haste_assets::Assets::open(&jar, &haste_core::paths::assets_dir(), "26.3").ok()
+    }
+
+    /// One recorded play request of an inline event in `category`.
+    fn play_of(event: &str, category: i32) -> SoundRequest {
+        SoundRequest::Play(PlayRequest {
+            sound: SoundRef::Inline(event.to_owned()),
+            category,
+            pos: SoundPos::Fixed(DVec3::new(1.0, 2.0, 3.0)),
+            volume: 1.0,
+            pitch: 1.0,
+            seed: 1,
+        })
     }
 
     #[test]
@@ -571,5 +565,81 @@ mod tests {
                 sound: None,
             }))
         );
+    }
+
+    #[test]
+    fn a_block_sound_is_not_the_music_track_playing() {
+        let Some(assets) = cached_assets() else {
+            // No downloaded assets in this environment; skip like the audio tests.
+            return;
+        };
+        let events = SoundEvents::parse(
+            br#"{"block.stone.break": {"sounds": ["dig/stone1"]},
+                 "music.game": {"sounds": ["music/game/calm1"]}}"#,
+        )
+        .unwrap();
+        let mut sounds = Sounds::with_system(
+            SoundSystem::with_output(events.clone(), assets, AudioOutput::silent()),
+            events,
+            Vec::new(),
+        );
+        // The music track this client started is running.
+        sounds.music_event = Some("minecraft:music.game".to_owned());
+        // A block sound arrives while it plays: it must not be mistaken for the track,
+        // so no Music-source sound counts as playing.
+        let mut requests = vec![play_of("minecraft:block.stone.break", 4)];
+        sounds.apply(&mut requests, |_| None);
+        assert_eq!(sounds.system.playing(), 1);
+        assert_eq!(sounds.system.playing_in(SoundSource::Block), 1);
+        assert_eq!(sounds.system.playing_in(SoundSource::Music), 0);
+        assert!(!sounds.music_playing());
+        // The music event itself counts.
+        let mut requests = vec![play_of("minecraft:music.game", 1)];
+        sounds.apply(&mut requests, |_| None);
+        assert!(sounds.music_playing());
+        assert_eq!(sounds.system.playing_in(SoundSource::Music), 1);
+    }
+
+    #[test]
+    fn stop_by_event_stops_only_that_event() {
+        let Some(assets) = cached_assets() else {
+            return;
+        };
+        let events = SoundEvents::parse(
+            br#"{"block.stone.break": {"sounds": ["dig/stone1"]},
+                 "music.game": {"sounds": ["music/game/calm1"]}}"#,
+        )
+        .unwrap();
+        let mut sounds = Sounds::with_system(
+            SoundSystem::with_output(events.clone(), assets, AudioOutput::silent()),
+            events,
+            Vec::new(),
+        );
+        sounds.music_event = Some("minecraft:music.game".to_owned());
+        let mut requests = vec![
+            play_of("minecraft:block.stone.break", 4),
+            play_of("minecraft:music.game", 1),
+        ];
+        sounds.apply(&mut requests, |_| None);
+        assert_eq!(sounds.system.playing(), 2);
+        // `minecraft:stop_sound` with both fields, as the packet sends them.
+        let stop = StopRequest {
+            source: Some(1),
+            sound: Some("minecraft:music.game".to_owned()),
+        };
+        sounds.stop(stop);
+        assert_eq!(sounds.system.playing(), 1);
+        assert!(sounds
+            .system
+            .is_event_playing("minecraft:block.stone.break"));
+        assert!(!sounds.music_playing());
+        // An event that is not playing stops nothing, so no event name can stop more
+        // than it should.
+        let stop = StopRequest {
+            source: Some(4),
+            sound: Some("minecraft:entity.zombie.ambient".to_owned()),
+        };
+        sounds.stop(stop);
+        assert_eq!(sounds.system.playing(), 1);
     }
 }
