@@ -235,10 +235,12 @@ struct Source {
 }
 
 /// Load a texture through `Assets`, reduced to its first animation frame
-/// (Pomme `load_source` + `extract_frame_rgba` for the display frame).
+/// (Pomme `load_source`).
 fn load_source(assets: &mut Assets, id: &Identifier) -> Source {
     let name = id.to_string();
-    let Ok(image) = assets.texture(id) else {
+    // `texture_first_frame` applies vanilla's frame-size defaults (square frames of the image
+    // width when the .mcmeta gives no size); the raw `AnimationMeta` sizes default to 1.
+    let Ok(image) = assets.texture_first_frame(id) else {
         tracing::warn!("Missing texture: {name}");
         return Source {
             name,
@@ -249,34 +251,8 @@ fn load_source(assets: &mut Assets, id: &Identifier) -> Source {
             translucent: false,
         };
     };
-    let Ok(meta) = assets.texture_meta(id) else {
-        return Source {
-            name,
-            data: Vec::new(),
-            w: 0,
-            h: 0,
-            opaque: false,
-            translucent: false,
-        };
-    };
     let (w, h) = image.dimensions();
-    let full = image.into_raw();
-    let (data, w, h) = match meta.animation {
-        Some(anim) => {
-            let frame_w = anim.width;
-            let frame_h = anim.height;
-            let frames_per_row = w.checked_div(frame_w).unwrap_or(0);
-            let frame = anim.first_frame;
-            let fx = frame % frames_per_row.max(1);
-            let fy = frame / frames_per_row.max(1);
-            (
-                extract_frame_rgba(&full, w, frame_w, frame_h, fx * frame_w, fy * frame_h),
-                frame_w,
-                frame_h,
-            )
-        }
-        None => (full, w, h),
-    };
+    let data = image.into_raw();
     let (opaque, translucent) = sprite_transparency(&data);
     Source {
         name,
@@ -414,25 +390,6 @@ fn linear_10_to_srgb(channel: u16) -> u8 {
             (srgb * 255.0).round().clamp(0.0, 255.0) as u8
         })
     })[usize::from(channel)]
-}
-
-/// Extract a frame from an animation strip (Pomme `extract_frame_rgba`).
-fn extract_frame_rgba(
-    data: &[u8],
-    full_width: u32,
-    frame_width: u32,
-    frame_height: u32,
-    x: u32,
-    y: u32,
-) -> Vec<u8> {
-    let row_bytes = full_width as usize * 4;
-    let copy_bytes = frame_width as usize * 4;
-    let mut output = Vec::with_capacity(frame_width as usize * frame_height as usize * 4);
-    for row in y..y + frame_height {
-        let start = row as usize * row_bytes + x as usize * 4;
-        output.extend_from_slice(&data[start..start + copy_bytes]);
-    }
-    output
 }
 
 /// Guard for the atlas constructor in tests.

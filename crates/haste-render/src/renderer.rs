@@ -513,6 +513,10 @@ impl Renderer {
         mesher.set_tables(crate::mesher::MeshTables {
             tints: Arc::new(crate::tint::TintTable::new(states)),
             colors: Arc::new(crate::tint::BiomeColors::new(&[], &colormaps)),
+            fluids: Arc::new(crate::fluid::FluidTable::new(
+                states,
+                crate::fluid::FluidSprites::from_atlas(&*atlas),
+            )),
         });
         let arenas = MeshArenas::new(gpu.device.clone(), gpu.queue.clone());
         let origin_buffer = Self::make_origin_buffer(&gpu.device, 4096);

@@ -57,3 +57,16 @@
   light texture; tint palette is white-only (grass/foliage colormaps pending).
 - **update_world ignores view_distance/camera_chunk** (no unloading yet —
   sections accumulate until the Renderer is dropped).
+
+## Biome tint and fluids (fluids-and-tint)
+
+- Tint is per-vertex RGB (`light[2..4]` + `tint_b[0]`), linearized in the shader so the
+  product matches vanilla's sRGB multiply. Per-block colour = integer average over a
+  (2r+1)^2 square (r = 2) from biome cells captured with the snapshot (`tint::BiomeGrid`).
+  Approximate: no per-block biome fuzzing (seed-hash zoom); swamp grass is always 0x6A7039
+  (vanilla alternates with 0x4C763C by a noise).
+- Fluids (`fluid.rs`): rules in the module docs. Approximate: "solid" for corner averaging
+  is a heuristic, partial blocks never cull fluid faces, sprites show frame 0 (no
+  animation), side faces start at y = 0 with no 0.001 insets.
+- Fixed in haste-assets: animated sprites without an explicit frame size were packed as 1x1
+  (AnimationMeta defaults width/height to 1); the atlas now uses `texture_first_frame`.

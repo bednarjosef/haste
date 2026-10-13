@@ -6,6 +6,7 @@
 
 pub mod arena;
 pub mod entity;
+pub mod fluid;
 pub mod gui;
 pub mod mesher;
 pub mod occlusion;

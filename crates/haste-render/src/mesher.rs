@@ -37,6 +37,7 @@ pub const TINT_WHITE: u32 = 0xFFFFFF;
 pub struct MeshTables {
     pub tints: Arc<crate::tint::TintTable>,
     pub colors: Arc<crate::tint::BiomeColors>,
+    pub fluids: Arc<crate::fluid::FluidTable>,
 }
 
 impl Default for MeshTables {
@@ -44,6 +45,7 @@ impl Default for MeshTables {
         MeshTables {
             tints: Arc::new(crate::tint::TintTable::empty()),
             colors: Arc::new(crate::tint::BiomeColors::default()),
+            fluids: Arc::new(crate::fluid::FluidTable::empty()),
         }
     }
 }
@@ -311,6 +313,17 @@ pub fn mesh_section_with(
                 if state == BlockStateId::AIR {
                     continue;
                 }
+                if let Some(fluid) = tables.fluids.fluid(state) {
+                    mesh_fluid(
+                        snapshot,
+                        baked,
+                        tables,
+                        block_pos,
+                        [lx, ly, lz],
+                        fluid,
+                        &mut sink,
+                    );
+                }
                 let quads = baked.quads(state);
                 if quads.is_empty() {
                     continue;
@@ -386,6 +399,70 @@ pub fn mesh_section_with(
         layers,
         aabb: (sink.min, sink.max),
         visibility: crate::occlusion::section_visibility(snapshot, baked, pos),
+    }
+}
+
+/// The snapshot as the fluid mesher sees it.
+struct FluidView<'a> {
+    snapshot: &'a MeshSnapshot,
+    baked: &'a haste_assets::BakedBlockModels,
+}
+
+impl crate::fluid::FluidWorld for FluidView<'_> {
+    fn state(&self, p: BlockPos) -> BlockStateId {
+        self.snapshot.block_state(p)
+    }
+    fn opaque(&self, p: BlockPos) -> bool {
+        self.baked.is_full_opaque(self.snapshot.block_state(p))
+    }
+    fn solid(&self, p: BlockPos) -> bool {
+        crate::fluid::baked_solid(self.baked, self.snapshot.block_state(p))
+    }
+}
+
+/// Max of two packed (sky, block) light values per channel.
+fn max_light(a: (u8, u8), b: (u8, u8)) -> u8 {
+    pack_light(a.0.max(b.0), a.1.max(b.1))
+}
+
+/// Emits the fluid surface of one block (see `fluid.rs` for the rules).
+#[allow(clippy::too_many_arguments)]
+fn mesh_fluid(
+    snapshot: &MeshSnapshot,
+    baked: &haste_assets::BakedBlockModels,
+    tables: &MeshTables,
+    block_pos: BlockPos,
+    local: [i32; 3],
+    fluid: crate::fluid::FluidState,
+    sink: &mut MeshSink,
+) {
+    use crate::fluid::Fluid;
+    let view = FluidView { snapshot, baked };
+    let mut quads: Vec<crate::fluid::FluidQuad> = Vec::with_capacity(11);
+    crate::fluid::fluid_quads(&view, &tables.fluids, block_pos, fluid, &mut quads);
+    if quads.is_empty() {
+        return;
+    }
+    let tint = match fluid.fluid {
+        Fluid::Water => block_tint(snapshot, tables, crate::tint::TintKind::Water, block_pos),
+        Fluid::Lava => TINT_WHITE,
+    };
+    let layer = crate::fluid::fluid_layer(fluid.fluid);
+    let own = snapshot.light(block_pos);
+    let top_light = max_light(own, snapshot.light(block_pos.add(0, 1, 0)));
+    let bottom_light = max_light(own, snapshot.light(block_pos.add(0, -1, 0)));
+    let offset = local.map(|v| v as f32);
+    for q in quads {
+        let light = if q.dir == haste_assets::Direction::Down {
+            bottom_light
+        } else {
+            top_light
+        };
+        let packed = [light, pack_ao_shade(3, shade_index(Some(q.dir)))];
+        let positions = q
+            .positions
+            .map(|p| [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]]);
+        sink.push_quad(layer, &positions, &q.uvs, [packed; 4], tint, q.sprite);
     }
 }
 
