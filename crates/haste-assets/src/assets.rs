@@ -143,12 +143,7 @@ impl Animation {
     /// The frame shown before animation starts (vanilla's initial display frame:
     /// the first listed frame, else frame 0). Panics when there are no frames.
     pub fn initial_frame(&self) -> &image::RgbaImage {
-        let index = self
-            .schedule
-            .frames
-            .first()
-            .map(|f| f.index)
-            .unwrap_or(0) as usize;
+        let index = self.schedule.frames.first().map(|f| f.index).unwrap_or(0) as usize;
         self.frames.get(index).unwrap_or(&self.frames[0])
     }
 }
@@ -924,13 +919,9 @@ pub(crate) mod tests {
     /// A vertical 3-frame strip of 2x2 frames, colours distinguishable per frame.
     fn three_frame_strip() -> image::RgbaImage {
         let mut sheet = image::RgbaImage::new(2, 6);
-        for (frame, color) in [
-            (60u8, 0, 0, 255),
-            (120, 60, 0, 255),
-            (180, 120, 0, 255),
-        ]
-        .iter()
-        .enumerate()
+        for (frame, color) in [(60u8, 0, 0, 255), (120, 60, 0, 255), (180, 120, 0, 255)]
+            .iter()
+            .enumerate()
         {
             for y in 0..2 {
                 for x in 0..2 {
@@ -946,9 +937,8 @@ pub(crate) mod tests {
     }
 
     fn mcmeta(json: &str) -> AnimationMetaRaw {
-        let file: TextureMetaFile =
-            serde_json::from_str(&format!("{{\"animation\":{json}}}"))
-                .unwrap_or_else(|e| panic!("bad test mcmeta {json}: {e}"));
+        let file: TextureMetaFile = serde_json::from_str(&format!("{{\"animation\":{json}}}"))
+            .unwrap_or_else(|e| panic!("bad test mcmeta {json}: {e}"));
         file.animation
             .expect("test mcmeta should have an animation section")
     }
@@ -965,8 +955,16 @@ pub(crate) mod tests {
             animation.schedule,
             AnimationSchedule::sequential(3, 2, false)
         );
-        for (tick, frame) in [(0u64, 0u32), (1, 0), (2, 1), (3, 1), (4, 2), (5, 2), (6, 0), (7, 0)]
-        {
+        for (tick, frame) in [
+            (0u64, 0u32),
+            (1, 0),
+            (2, 1),
+            (3, 1),
+            (4, 2),
+            (5, 2),
+            (6, 0),
+            (7, 0),
+        ] {
             assert_eq!(
                 frame_at(&animation.schedule, tick),
                 (frame, (frame + 1) % 3, 0.0),
@@ -993,7 +991,7 @@ pub(crate) mod tests {
         assert_eq!(frame_at(&animation.schedule, 1), (0, 2, 0.0));
         assert_eq!(frame_at(&animation.schedule, 5), (0, 2, 0.0));
         assert_eq!(frame_at(&animation.schedule, 6), (2, 0, 0.0)); // wrap at total 6
-        // An object without `time` uses frametime.
+                                                                   // An object without `time` uses frametime.
         let animation = animation_of(
             three_frame_strip(),
             r#"{"frametime":3,"frames":[1,{"index":2}]}"#,

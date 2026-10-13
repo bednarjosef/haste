@@ -67,12 +67,7 @@ impl AnimatedSprite {
     /// The frame shown before animation starts (vanilla's initial display frame:
     /// the first listed frame, else frame 0). Panics when there are no frames.
     pub fn initial_frame(&self) -> &image::RgbaImage {
-        let index = self
-            .schedule
-            .frames
-            .first()
-            .map(|f| f.index)
-            .unwrap_or(0) as usize;
+        let index = self.schedule.frames.first().map(|f| f.index).unwrap_or(0) as usize;
         self.frames.get(index).unwrap_or(&self.frames[0])
     }
 
@@ -606,7 +601,7 @@ mod tests {
         assert_eq!(&*sprite.frame_pixels(0), &[0, 0, 0, 255]);
         assert_eq!(&*sprite.frame_pixels(2), &[255, 255, 255, 255]); // frame 1 starts
         assert_eq!(&*sprite.frame_pixels(4), &[0, 0, 0, 255]); // wrapped back to frame 0
-        // Halfway through frame 0: 50% black + 50% white.
+                                                               // Halfway through frame 0: 50% black + 50% white.
         let blended = sprite.frame_pixels(1);
         assert_eq!(&*blended, &[128, 128, 128, 255]);
         // Without interpolation the frames switch abruptly with no blending.
