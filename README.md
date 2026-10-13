@@ -20,8 +20,8 @@ Fabric mod support (Phase 2) is not counted here.
 - 🟡 Singleplayer: `haste singleplayer --world NAME` starts a local server and prints its address to join; no world list or create-world screen
 - 🟡 Joining a server: `haste --server host:port` from the command line; no direct-connect screen
 - 🟡 Server list: status ping works (`haste --ping --server host:port`); no server list screen
-- 🟡 Microsoft account login: the device-code steps exist in the setup library; no `haste login` command yet and no Microsoft app id
-- 🟡 Saved options: render distance, FOV, mouse sensitivity, GUI scale, volumes and keybinds are stored in the config with vanilla defaults, but the client does not read them yet
+- 🟡 Microsoft account login: `haste login` / `haste logout` run the device-code flow and store the account, untested end to end (needs a Microsoft app id)
+- 🟡 Saved options: stored in the config with vanilla defaults; the client uses render distance, FOV, mouse sensitivity and vsync, not yet GUI scale, volumes or keybinds
 - ⬜ Title screen
 - ⬜ Options screens (video, controls, sound, skin, chat, accessibility)
 - ⬜ Keybind remapping (controls are fixed to the vanilla defaults)
