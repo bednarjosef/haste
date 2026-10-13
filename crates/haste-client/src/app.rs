@@ -558,8 +558,8 @@ struct App {
     error: Option<anyhow::Error>,
     /// Close the window after this long (`--window-seconds`, for unattended runs).
     seconds: Option<u64>,
-    /// F2 pressed: the next frame renders offscreen for a screenshot, and `take_capture`
-    /// after it hands the image to a save thread.
+    /// F2 pressed: the next frame is captured for a screenshot; once its async readback
+    /// lands (a few frames later), `take_capture` hands it to a save thread.
     screenshot: bool,
     started: Instant,
 }

@@ -190,6 +190,18 @@ mod tests {
         let out = texel_rows_to_rgba(&data, 2, 1, stride, true);
         assert_eq!(out, vec![30, 20, 10, 255, 60, 50, 40, 255]);
     }
+
+    // The async capture state machine's shared half, no GPU needed: the map callback
+    // (a clone of the flag) advances Pending to Ready or Failed; take_capture polls.
+    #[test]
+    fn capture_flag_advances_pending_to_ready_or_failed() {
+        let flag = CaptureFlag::default();
+        assert_eq!(flag.get(), CapturePhase::Pending);
+        flag.clone().set(CapturePhase::Ready);
+        assert_eq!(flag.get(), CapturePhase::Ready);
+        flag.clone().set(CapturePhase::Failed);
+        assert_eq!(flag.get(), CapturePhase::Failed);
+    }
 }
 
 #[repr(C)]
@@ -288,11 +300,59 @@ pub struct Renderer {
     first_person: Option<crate::entity::FirstPerson>,
     /// Name tags projected to GUI space this frame.
     nametags: Vec<crate::gui::ScreenNametag>,
-    /// F2 screenshot pending: the next `render` draws into an offscreen copy instead of
-    /// the window (the surface is configured without COPY_SRC) for `take_capture`.
+    /// F2 screenshot requested: the next `render` arms the capture for `take_capture`.
     capture_pending: bool,
-    /// Offscreen target of the capture frame, awaiting `take_capture`.
-    capture: Option<Offscreen>,
+    /// In-flight screenshot readback (copy submitted, async map pending) until
+    /// `take_capture` collects it.
+    capture: Option<Capture>,
+    /// Whether the surface was configured with COPY_SRC: F2 then copies the presented
+    /// frame; without it, the capture frame renders into a temporary offscreen target.
+    surface_copy: bool,
+    /// Whether the F2 capture path of this surface was logged (once per renderer).
+    surface_copy_logged: bool,
+}
+
+/// An in-flight screenshot readback: the copy is submitted and `map_async` posted, the
+/// callback flips `status`, and `take_capture` collects it frames later without blocking.
+struct Capture {
+    buffer: std::sync::Arc<wgpu::Buffer>,
+    status: CaptureFlag,
+    width: u32,
+    height: u32,
+    /// Row stride of the padded copy buffer.
+    stride: usize,
+    /// Red/blue swapped on BGRA surfaces.
+    bgra: bool,
+}
+
+/// Phases of an in-flight screenshot readback; the `map_async` callback advances
+/// `Pending` to `Ready` or `Failed`, `take_capture` polls the flag.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CapturePhase {
+    /// Copy submitted, map posted, callback not yet run.
+    Pending,
+    /// Mapped and readable.
+    Ready,
+    /// The map failed.
+    Failed,
+}
+
+/// The phase shared with the `map_async` callback (a `CapturePhase` in an atomic).
+#[derive(Clone, Debug, Default)]
+struct CaptureFlag(std::sync::Arc<std::sync::atomic::AtomicU8>);
+
+impl CaptureFlag {
+    fn get(&self) -> CapturePhase {
+        match self.0.load(std::sync::atomic::Ordering::Acquire) {
+            1 => CapturePhase::Ready,
+            2 => CapturePhase::Failed,
+            _ => CapturePhase::Pending,
+        }
+    }
+    fn set(&self, phase: CapturePhase) {
+        self.0
+            .store(phase as u8, std::sync::atomic::Ordering::Release);
+    }
 }
 
 #[allow(dead_code)]
@@ -633,6 +693,8 @@ impl Renderer {
             nametags: Vec::new(),
             capture_pending: false,
             capture: None,
+            surface_copy: false,
+            surface_copy_logged: false,
         })
     }
 
@@ -848,8 +910,32 @@ impl Renderer {
     fn configure_surface(&mut self) {
         let Some(surface) = &self.surface else { return };
         let (w, h) = self.size;
+        // COPY_SRC, when the surface supports it, lets F2 copy the presented frame out
+        // directly; without it, the capture frame renders into an offscreen target.
+        let copy_src = surface
+            .get_capabilities(&self.gpu.adapter)
+            .usages
+            .contains(wgpu::TextureUsages::COPY_SRC);
+        if !self.surface_copy_logged {
+            self.surface_copy_logged = true;
+            tracing::info!(
+                "surface {} COPY_SRC: F2 captures {}",
+                if copy_src { "supports" } else { "lacks" },
+                if copy_src {
+                    "the presented frame"
+                } else {
+                    "an offscreen frame"
+                }
+            );
+        }
+        self.surface_copy = copy_src;
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | if copy_src {
+                    wgpu::TextureUsages::COPY_SRC
+                } else {
+                    wgpu::TextureUsages::empty()
+                },
             format: self.surface_format,
             color_space: wgpu::SurfaceColorSpace::Auto,
             width: w,
@@ -1125,11 +1211,13 @@ impl Renderer {
             t.poll(&self.gpu.device);
             self.timings.gpu_ms = t.latest;
         }
-        // A pending capture (F2) renders this frame offscreen instead: the surface is
-        // configured without COPY_SRC, so the frame is drawn into a texture we can read.
-        let capture = self.capture_pending && self.offscreen.is_none();
+        // A pending capture (F2) copies this frame's image out for `take_capture`; with
+        // COPY_SRC on the surface that is the presented frame itself, and only without it
+        // does this frame render into a temporary offscreen target (and not present).
+        let capture_frame = self.capture_pending && self.offscreen.is_none();
         let mut held_surface_texture: Option<wgpu::SurfaceTexture> = None;
-        let (color_view, depth_view, gui_view) = if capture {
+        let mut capture_color: Option<wgpu::Texture> = None;
+        let (color_view, depth_view, gui_view) = if capture_frame && !self.surface_copy {
             let cap = Self::make_offscreen(
                 &self.gpu.device,
                 self.size,
@@ -1141,7 +1229,7 @@ impl Renderer {
                 cap.depth_view.clone(),
                 cap.gui_view.clone(),
             );
-            self.capture = Some(cap);
+            capture_color = Some(cap.color);
             views
         } else {
             match (&self.offscreen, &self.depth) {
@@ -1480,6 +1568,16 @@ impl Renderer {
             t.after_submit(resolved);
         }
         self.timings.submit_ms = lap(&mut mark);
+        // Submit the screenshot copy before present, so the GPU orders it ahead of the
+        // present; the async map lands in `take_capture` a few frames later.
+        if capture_frame {
+            let src = match (&held_surface_texture, &capture_color) {
+                (Some(tex), _) => tex.texture.as_image_copy(),
+                (None, Some(color)) => color.as_image_copy(),
+                (None, None) => anyhow::bail!("capture frame without a render target"),
+            };
+            self.start_capture(src);
+        }
         if let Some(tex) = held_surface_texture {
             self.gpu.queue.present(tex);
         }
@@ -1505,17 +1603,98 @@ impl Renderer {
         self.read_texture(off.color.as_image_copy(), off.width, off.height)
     }
 
-    /// F2: draw the next `render` into an offscreen copy of the window frame so
-    /// `take_capture` can read it back (the surface lacks COPY_SRC usage).
+    /// F2: capture the next rendered frame for `take_capture` (window renderers; the
+    /// offscreen path has `read_back`). Ignored while a previous capture is still in
+    /// flight: its buffer stays mapped until collected.
     pub fn request_capture(&mut self) {
-        self.capture_pending = true;
+        if self.capture.is_none() {
+            self.capture_pending = true;
+        }
     }
 
-    /// The frame captured after `request_capture`, once that render has happened
-    /// (window renderers only; the offscreen path has `read_back` instead).
+    /// Starts the readback of the just-rendered frame: submits the texture copy and
+    /// posts `map_async` without blocking; the callback flips the shared status and
+    /// `take_capture` collects the image a few frames later.
+    fn start_capture(&mut self, texture: wgpu::TexelCopyTextureInfo) {
+        let (w, h) = self.size;
+        let bytes_per_row = NonZeroU32::new((w * 4).next_multiple_of(256)).unwrap();
+        let buffer = std::sync::Arc::new(self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("screenshot"),
+            size: (bytes_per_row.get() * h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        }));
+        let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            texture,
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row.get()),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.gpu.queue.submit([encoder.finish()]);
+        let status = CaptureFlag::default();
+        let flag = status.clone();
+        buffer.map_async(wgpu::MapMode::Read, .., move |r| {
+            flag.set(match r {
+                Ok(()) => CapturePhase::Ready,
+                Err(_) => CapturePhase::Failed,
+            });
+        });
+        self.capture = Some(Capture {
+            buffer,
+            status,
+            width: w,
+            height: h,
+            stride: bytes_per_row.get() as usize,
+            bgra: matches!(
+                self.surface_format,
+                wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm
+            ),
+        });
+    }
+
+    /// The frame captured after `request_capture`, once its async readback has landed
+    /// (a few frames later); `None` while pending or with no capture in flight.
     pub fn take_capture(&mut self) -> Option<anyhow::Result<image::RgbaImage>> {
-        let off = self.capture.take()?;
-        Some(self.read_texture(off.color.as_image_copy(), off.width, off.height))
+        let cap = self.capture.as_ref()?;
+        // Non-blocking pump: runs the map callback once the copy has finished.
+        let _ = self.gpu.device.poll(wgpu::PollType::Poll);
+        match cap.status.get() {
+            CapturePhase::Pending => None,
+            CapturePhase::Failed => {
+                self.capture.take();
+                Some(Err(anyhow::anyhow!(
+                    "mapping the screenshot readback failed"
+                )))
+            }
+            CapturePhase::Ready => {
+                let cap = self.capture.take().expect("phase was Ready");
+                let image = cap
+                    .buffer
+                    .slice(..)
+                    .get_mapped_range()
+                    .context("mapped screenshot range")
+                    .map(|data| {
+                        texel_rows_to_rgba(&data, cap.width, cap.height, cap.stride, cap.bgra)
+                    })
+                    .and_then(|pixels| {
+                        image::RgbaImage::from_raw(cap.width, cap.height, pixels)
+                            .context("screenshot size")
+                    });
+                cap.buffer.unmap();
+                Some(image)
+            }
+        }
     }
 
     /// Copies a 4-byte-per-texel texture to a MAP_READ buffer, maps it and unwraps it
