@@ -214,6 +214,42 @@ fn biome_read() {
     assert_eq!(s.biome(0, 0, 0), BiomeId(0));
 }
 
+/// Regression test for the data race in `chunk_of`'s chunk memo: the memo stored a
+/// (chunk key, raw pointer) pair in an `UnsafeCell` written through `&self`, so concurrent
+/// readers could tear the pair and read blocks from the wrong chunk (floating blocks on
+/// screen). The memo is gone; this test hammers `block_state` from many threads and asserts
+/// every read returns the block of the chunk it asked for.
+#[test]
+fn concurrent_block_view_reads_hit_the_right_chunk() {
+    let mut w = World::new(overworld(), game_data());
+    let stone = synthetic_chunk_data(ChunkPos::new(0, 0), -4, 24, |_si, _x, _y, _z| STONE);
+    w.load_chunk(&stone).unwrap();
+    let dirt = synthetic_chunk_data(ChunkPos::new(1, 0), -4, 24, |_si, _x, _y, _z| DIRT);
+    w.load_chunk(&dirt).unwrap();
+
+    // blocks alternating between the two chunks; 0 <= x < 16 is chunk (0,0), 16 <= x < 32
+    // is chunk (1,0)
+    let positions: Vec<(BlockPos, BlockStateId)> = (0..100_000u32)
+        .map(|i| {
+            let x = if i % 2 == 0 { 0 } else { 16 };
+            let expected = if x == 0 { STONE } else { DIRT };
+            (
+                BlockPos::new(x, (i % 300) as i32, (i % 16) as i32),
+                expected,
+            )
+        })
+        .collect();
+    std::thread::scope(|s| {
+        for _ in 0..8 {
+            s.spawn(|| {
+                for &(p, expected) in &positions {
+                    assert_eq!(w.block_state(p), expected);
+                }
+            });
+        }
+    });
+}
+
 /// Timed hot-loop get (not criterion; good enough for the < 5 ns target check in release).
 #[test]
 #[ignore = "perf: run with --release --ignored"]
