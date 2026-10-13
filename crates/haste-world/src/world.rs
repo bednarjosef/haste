@@ -1,6 +1,5 @@
 //! The world: chunk map, block get/set, light, dirty tracking, section snapshots.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use haste_core::chunk::{BlockEntityData, ChunkData};
@@ -19,7 +18,7 @@ pub struct World {
     chunks: ahash::HashMap<i64, Chunk>,
     /// Sections needing remesh (set_block and light updates mark them).
     dirty: Vec<SectionPos>,
-    dirty_dedup: HashSet<SectionPos>,
+    dirty_dedup: ahash::HashSet<SectionPos>,
     /// Bits for direct-encoded block containers: ceil(log2(state count)), min 4.
     direct_bits: u8,
     /// Bits for direct-encoded biome containers: ceil(log2(synced biome registry size)).
@@ -51,7 +50,7 @@ impl World {
             data,
             chunks: ahash::HashMap::with_hasher(ahash::RandomState::default()),
             dirty: Vec::new(),
-            dirty_dedup: HashSet::new(),
+            dirty_dedup: ahash::HashSet::with_hasher(ahash::RandomState::default()),
             direct_bits,
             biome_bits,
         }
