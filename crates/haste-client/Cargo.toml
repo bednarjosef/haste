@@ -30,3 +30,6 @@ glam.workspace = true
 parking_lot.workspace = true
 crossbeam-channel.workspace = true
 image.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
