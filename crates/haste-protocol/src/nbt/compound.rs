@@ -4,7 +4,7 @@
 //! marked with `HASTE:` comments.
 
 use std::collections::HashMap;
-use std::fmt::{Display, Formatter};
+use std::fmt::{Display, Formatter, Write as _};
 use uuid::Uuid;
 
 use crate::nbt::deserializer::NbtReadHelper;
@@ -381,6 +381,23 @@ impl From<NbtCompound> for NbtTag {
     }
 }
 
+// HASTE: escape strings and quote non-bare keys (Pumpkin wrote them raw).
+/// Writes a string as a quoted SNBT string, escaping `\` and `"` (plus newlines and tabs)
+/// so the output is always valid SNBT.
+fn write_snbt_string(f: &mut Formatter<'_>, s: &str) -> std::fmt::Result {
+    f.write_str("\"")?;
+    for c in s.chars() {
+        match c {
+            '\\' => f.write_str("\\\\")?,
+            '"' => f.write_str("\\\"")?,
+            '\n' => f.write_str("\\n")?,
+            '\t' => f.write_str("\\t")?,
+            c => f.write_char(c)?,
+        }
+    }
+    f.write_str("\"")
+}
+
 /// SNBT display implementation for `NbtCompound`
 impl Display for NbtCompound {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -389,7 +406,18 @@ impl Display for NbtCompound {
             if i > 0 {
                 f.write_str(", ")?;
             }
-            write!(f, "{key}: {value}")?;
+            // HASTE: bare keys only for [A-Za-z0-9._+-]; anything else is quoted and escaped.
+            if !key.is_empty()
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
+            {
+                f.write_str(key)?;
+            } else {
+                write_snbt_string(f, key)?;
+            }
+            f.write_str(": ")?;
+            write!(f, "{value}")?;
         }
         f.write_str("}")
     }
@@ -405,7 +433,7 @@ impl Display for NbtTag {
             Self::Long(v) => write!(f, "{v}L"),
             Self::Float(v) => write!(f, "{v}f"),
             Self::Double(v) => write!(f, "{v}d"),
-            Self::String(v) => write!(f, "\"{v}\""), // TODO: Proper escaping needed for robust SNBT
+            Self::String(v) => write_snbt_string(f, v),
             Self::Compound(v) => write!(f, "{v}"),
             Self::ByteArray(v) => {
                 f.write_str("[B;")?;
@@ -453,8 +481,37 @@ impl Display for NbtTag {
 
 #[cfg(test)]
 mod tests {
-    use super::NbtCompound;
+    use super::{NbtCompound, NbtTag};
     use uuid::Uuid;
+
+    #[test]
+    fn snbt_string_escaping() {
+        let cases = [
+            ("plain", "\"plain\""),
+            ("a\"b", "\"a\\\"b\""),
+            ("a\\b", "\"a\\\\b\""),
+            ("a\nb", "\"a\\nb\""),
+            ("a\tb", "\"a\\tb\""),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(NbtTag::String(input.into()).to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn snbt_compound_key_escaping() {
+        let mut nbt = NbtCompound::new();
+        nbt.put("plain_key", NbtTag::Int(1));
+        nbt.put("key with space", NbtTag::Int(2));
+        nbt.put("", NbtTag::Int(3));
+        nbt.put("quote\"key", NbtTag::Int(4));
+
+        let s = nbt.to_string();
+        assert!(s.contains("plain_key: 1"));
+        assert!(s.contains("\"key with space\": 2"));
+        assert!(s.contains("\"\": 3"));
+        assert!(s.contains("\"quote\\\"key\": 4"));
+    }
 
     #[test]
     fn uuid_int_array_round_trip() {
