@@ -2,6 +2,7 @@ package haste.gui;
 
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import haste.rt.GuiBatch;
+import haste.rt.GuiBlend;
 import java.util.ArrayList;
 import java.util.List;
 import net.minecraft.client.gui.ActiveTextCollector;
@@ -188,6 +189,21 @@ public final class GfxImpl {
     // ---- sprites and textures ----
     private static int id(Identifier i) { return GuiBatch.str(i.toString()); }
 
+    /**
+     * The blend mode of a blit, by identifier: vanilla picks the {@code RenderPipeline} per draw call, but the
+     * {@code p} arguments are null here ({@code RenderPipelines} has no {@code <clinit>}), and every GUI pipeline
+     * except two blends normally — so the identifier says which pipeline it was: {@code textures/misc/vignette.png}
+     * is {@code RenderPipelines.VIGNETTE} (multiplicative: darkens the edges) and the crosshair sprites
+     * ({@code hud/crosshair...}) are drawn with {@code RenderPipelines.CROSSHAIR} (inverts the colour behind it).
+     * Codes: 0 normal, 1 multiply, 2 invert.
+     */
+    private static int blend(Identifier t) {
+        String p = t.getPath();
+        if (p.endsWith("vignette.png")) return GuiBlend.MULTIPLY;
+        if (p.equals("hud/crosshair") || p.startsWith("hud/crosshair_")) return GuiBlend.INVERT;
+        return GuiBlend.NORMAL;
+    }
+
     public static void blitSprite(GuiGraphicsExtractor g, RenderPipeline p, Identifier s, int x, int y, int w, int h) {
         blitSprite(g, p, s, x, y, w, h, -1);
     }
@@ -197,7 +213,7 @@ public final class GfxImpl {
     }
     public static void blitSprite(GuiGraphicsExtractor g, RenderPipeline p, Identifier s, int x, int y, int w, int h, int tint) {
         POSE.sync();
-        GuiBatch.op(GuiBatch.SPRITE, id(s), x, y, w, h, tint);
+        GuiBatch.ops(GuiBatch.SPRITE, id(s), x, y, w, h, tint, blend(s));
     }
     /** Sub-region of a sprite: region (u, v, w, h) of a sprite drawn as {@code spriteW x spriteH}, placed at x, y. */
     public static void blitSprite(GuiGraphicsExtractor g, RenderPipeline p, Identifier s, int spriteW, int spriteH, int u, int v, int x, int y, int w, int h) {
@@ -205,13 +221,13 @@ public final class GfxImpl {
     }
     public static void blitSprite(GuiGraphicsExtractor g, RenderPipeline p, Identifier s, int spriteW, int spriteH, int u, int v, int x, int y, int w, int h, int tint) {
         POSE.sync();
-        GuiBatch.ops(GuiBatch.SPRITE_REGION, id(s), spriteW, spriteH, u, v, x, y, w, h, tint);
+        GuiBatch.ops(GuiBatch.SPRITE_REGION, id(s), spriteW, spriteH, u, v, x, y, w, h, tint, blend(s));
     }
 
     private static void texture(Identifier t, int x, int y, int w, int h, float u, float v, float uw, float vh, int texW, int texH, int tint) {
         POSE.sync();
         GuiBatch.ops(GuiBatch.TEXTURE, id(t), x, y, w, h, Float.floatToRawIntBits(u), Float.floatToRawIntBits(v),
-            Float.floatToRawIntBits(uw), Float.floatToRawIntBits(vh), texW, texH, tint);
+            Float.floatToRawIntBits(uw), Float.floatToRawIntBits(vh), texW, texH, tint, blend(t));
     }
     public static void blit(GuiGraphicsExtractor g, RenderPipeline p, Identifier t, int x, int y, float u, float v, int w, int h, int texW, int texH) {
         texture(t, x, y, w, h, u, v, w, h, texW, texH, -1);

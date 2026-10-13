@@ -126,6 +126,7 @@ fn entities_offscreen() {
         pose: walk,
         skin: Some(skin.clone()),
         nametag: Some("Steve".into()),
+        hurt: 0.0,
     };
     let boxed = EntityInstance {
         id: EntityId(2),
@@ -138,6 +139,7 @@ fn entities_offscreen() {
         pose: PoseOverrides::default(),
         skin: None,
         nametag: None,
+        hurt: 0.0,
     };
     let entities = vec![player, boxed];
     let camera = Camera {
@@ -145,6 +147,7 @@ fn entities_offscreen() {
         yaw: 0.0,
         pitch: 5.0,
         fov_deg: 70.0,
+        roll_deg: 0.0,
     };
     let img = render_scene(&mut renderer, &world, &entities, camera);
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
