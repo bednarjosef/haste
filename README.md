@@ -9,7 +9,7 @@ with the mod architecture designed in. Licensed GPL-3.0-or-later.
 What a player needs to play Haste like the original game, without noticing a difference.
 Fabric mod support (Phase 2) is not counted here.
 
-**14 of 62 done, 26 partly done, 22 not started (about 44 %, counting partly done as half).**
+**16 of 62 done, 26 partly done, 20 not started (about 47 %, counting partly done as half).**
 
 ✅ done: works in the game window today, checked against a real server.
 🟡 partly done: some of it exists (in a library, or working without a window) but a player cannot use it fully yet.
@@ -48,6 +48,7 @@ Fabric mod support (Phase 2) is not counted here.
 - ✅ Block selection outline and break cracks
 - ✅ Fullscreen (F11)
 - ✅ Animated textures (water, lava, fire, portals), prepared off the render thread
+- ✅ Third-person view (F5)
 - 🟡 First-person hand and held item: the renderer draws them, but the client does not turn them on yet
 - 🟡 Smooth lighting and ambient occlusion: present, but leaves, bark and grass sides are about 1.35x brighter than vanilla
 - 🟡 Fog: distance fog, not matched to vanilla
@@ -59,13 +60,12 @@ Fabric mod support (Phase 2) is not counted here.
 - ⬜ Downloaded player skins and capes
 - ⬜ Armour and held items on mobs and players
 - ⬜ Dropped items, item frames and paintings drawn as themselves
-- ⬜ Third-person view (F5)
 - ⬜ Screen effects: damage tilt and red flash, underwater and fire overlays, nausea, vignette, pumpkin
 
 ### HUD and screens
-These run as the game's own Java code inside Haste and work against a real server, but are not shown in the game window yet.
-- 🟡 HUD: hotbar, health, hunger, armour, air, experience
-- 🟡 Chat: reading, typing, command suggestions
+These run as the game's own Java code inside Haste. The HUD is drawn in the game window; keyboard and mouse input to the screens is not connected yet.
+- ✅ HUD: hotbar, health, hunger, armour, air, experience
+- 🟡 Chat: messages are shown; typing and command suggestions need keyboard input
 - 🟡 Player list (Tab), boss bars, scoreboard sidebar, titles and action bar
 - 🟡 Pause menu
 - 🟡 Player inventory and crafting grid
@@ -82,9 +82,9 @@ These run as the game's own Java code inside Haste and work against a real serve
 - ✅ Breaking and placing blocks, using items, attacking, pick block, hotbar (mouse wheel and 1-9)
 - 🟡 Dropping items (Q, Ctrl+Q) and swapping to the off-hand (F): sent like vanilla; not yet checked by hand on a server
 - 🟡 Game modes: survival and creative work; spectator and adventure are untested
+- 🟡 Screenshot key (F2): saves to the screenshots folder; not yet checked by hand in the window
 - ⬜ Riding boats, minecarts, horses and pigs
 - ⬜ Elytra flight
-- ⬜ Screenshot key (F2)
 
 ### Sound
 - 🟡 Sound effects: sounds.json and the variant choice are done; no audio output yet
@@ -103,8 +103,8 @@ cargo run --release --bin haste -- --server host:port             # or join any 
 Any offline-mode 26.3 server works with `--server` (`--username NAME` sets the player name).
 Controls are vanilla's defaults: WASD, space, shift, ctrl, mouse to look, left click to break,
 right click to place or use, 1-9 and the mouse wheel for the hotbar, Q / Ctrl+Q to drop, F to
-swap hands, F11 for fullscreen. There is
-no HUD in the window yet, so health and inventory are not visible.
+swap hands, F11 for fullscreen. The HUD shows
+health, hunger and the hotbar; F5 switches to third person.
 
 ## Build
 
