@@ -2,6 +2,7 @@ package haste.gui;
 
 import haste.rt.Native;
 import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.world.level.entity.EntityInLevelCallback;
 import net.minecraft.world.entity.player.Abilities;
 import net.minecraft.world.food.FoodData;
 
@@ -33,6 +34,8 @@ final class Mirror {
     static boolean inWorld() { return flag(F_IN_WORLD); }
     static float health() { return (float) D[D_HEALTH]; }
 
+    private static boolean callbackSet;
+
     /** Pulls Rust's state (one native call) and writes it into the proxies. */
     static void update() {
         Native.mirror(I, D);
@@ -48,7 +51,15 @@ final class Mirror {
         ABILITIES.instabuild = flag(F_INSTABUILD);
         ABILITIES.setFlyingSpeed((float) D[D_FLY_SPEED]);
         ABILITIES.setWalkingSpeed((float) D[D_WALK_SPEED]);
-        // position and rotation into the entity's own fields (vanilla's setters keep the derived fields current)
+        // position and rotation into the entity's own fields (vanilla's setters keep the derived fields current).
+        // The proxy is allocated without vanilla's constructor, so Entity.levelCallback (normally initialised
+        // to EntityInLevelCallback.NULL) is null, and setPosRaw calls levelCallback.onMove() whenever the block
+        // position changes: that threw on every frame the player moved and the whole HUD frame was lost
+        // (the flashing vignette and hotbar).
+        if (!callbackSet) {
+            p.setLevelCallback(EntityInLevelCallback.NULL);
+            callbackSet = true;
+        }
         p.setPosRaw(D[D_X], D[D_Y], D[D_Z]);
         p.setYRot((float) D[D_YAW]);
         p.setXRot((float) D[D_PITCH]);
