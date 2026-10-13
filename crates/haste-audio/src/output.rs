@@ -18,7 +18,7 @@
 //!
 //! `AudioOutput::open()` never fails: with no output device (headless CI, tests) it logs
 //! once and stays silent, and every call is accepted and does nothing.
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::io::Cursor;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, Weak};
@@ -28,7 +28,7 @@ use rodio::source::ChannelVolume;
 use rodio::{Decoder, Player, Sample, Source};
 use tracing::{debug, warn};
 
-use crate::engine::{SilentEngine, SoundSource};
+use crate::engine::{event_eq, SilentEngine, SoundSource};
 use crate::sounds::{SoundEvents, SoundVariant};
 use glam::DVec3;
 
@@ -413,7 +413,10 @@ impl AudioOutput {
         }
     }
 
-    fn silent() -> AudioOutput {
+    /// The silent fallback: no device, no worker, every call a no-op. Tests and callers
+    /// managing the output themselves build their system over it, so no test ever opens
+    /// the audio device.
+    pub fn silent() -> AudioOutput {
         let (_controls_tx, controls_rx) = channel::<SoundControls>();
         AudioOutput {
             tx: None,
@@ -519,8 +522,11 @@ fn decode(bytes: Vec<u8>, path: &str) -> Option<DecodedSound> {
 /// the same order, the same length, kept in lockstep by `play`, `stop` and `tick`.
 struct Sounded {
     id: SoundId,
-    /// The engine's sound identity, used for `stop`'s path filter.
-    path: String,
+    /// The sound event this was started with, shared with the engine and interned (so
+    /// tracking it costs one reference count): what `stop`'s event filter and
+    /// [`SoundSystem::is_event_playing`] match on, as vanilla's
+    /// `SoundManager.stop(Identifier, SoundSource)` matches the event, not a file.
+    event: Arc<str>,
     source: SoundSource,
     /// The output's controls once the worker created the player; `None` until then.
     controls: Option<SoundControls>,
@@ -540,6 +546,10 @@ pub struct SoundSystem {
     assets: haste_assets::Assets,
     /// The engine's sounds that were sent to the output, in play order.
     sounded: Vec<Sounded>,
+    /// The interned event names, so playing an event again clones a shared `Arc<str>`
+    /// instead of building a new string per sound (the first play of a name allocates
+    /// once; every later play of it only bumps the reference count).
+    interned: HashSet<Arc<str>>,
     next_id: SoundId,
     /// Whether the worker already owns a copy of the assets (set on the first send).
     assets_sent: bool,
@@ -568,11 +578,22 @@ impl SoundSystem {
             output,
             assets,
             sounded: Vec::new(),
+            interned: HashSet::new(),
             next_id: 0,
             assets_sent: false,
             incoming: Vec::new(),
             finished: Vec::new(),
         }
+    }
+
+    /// The interned name of an event, shared with every sound that plays it.
+    fn intern(&mut self, event: &str) -> Arc<str> {
+        if let Some(event) = self.interned.get(event) {
+            return Arc::clone(event);
+        }
+        let event: Arc<str> = Arc::from(event);
+        self.interned.insert(Arc::clone(&event));
+        event
     }
 
     /// Play a sound event at `pos` (or globally when `None`): pick the variant by `seed`
@@ -591,10 +612,12 @@ impl SoundSystem {
             debug!("no variant for sound event {event}");
             return;
         };
-        self.play_variant(&variant, source, pos, volume, pitch);
+        self.play_variant(&variant, source, pos, volume, pitch, event);
     }
 
-    /// Play a concrete variant (the one `sounds.rs` picked, or a music module's choice).
+    /// Play a concrete variant (the one `sounds.rs` picked, or a music module's choice)
+    /// under the sound event name `event`, which is remembered for `stop`'s event filter
+    /// and [`Self::is_event_playing`].
     pub fn play_variant(
         &mut self,
         variant: &SoundVariant,
@@ -602,8 +625,11 @@ impl SoundSystem {
         pos: Option<DVec3>,
         volume: f32,
         pitch: f32,
+        event: &str,
     ) {
-        self.engine.play(variant, source, pos, volume, pitch);
+        let event = self.intern(event);
+        self.engine
+            .play(variant, source, pos, volume, pitch, Arc::clone(&event));
         // The engine's gains for this sound right now, so the player starts at the right
         // volume instead of full until the first tick.
         self.engine.tick();
@@ -635,17 +661,20 @@ impl SoundSystem {
         });
         self.sounded.push(Sounded {
             id,
-            path: variant.path.clone(),
+            event,
             source,
             controls: None,
         });
     }
 
     /// Stop playing sounds. `None` on an axis matches everything; a sound is stopped when
-    /// both the source filter and the path filter match it.
-    pub fn stop(&mut self, source: Option<SoundSource>, path: Option<&str>) {
+    /// both the source filter and the event filter match it, as vanilla's
+    /// `SoundManager.stop(Identifier, SoundSource)` does: both `None` stops everything,
+    /// one `None` stops that whole axis. An event that is not playing stops nothing, so
+    /// an unknown event name never stops more than it should.
+    pub fn stop(&mut self, source: Option<SoundSource>, event: Option<&str>) {
         let matches = |s: &Sounded| {
-            source.is_none_or(|src| s.source == src) && path.is_none_or(|p| s.path == p)
+            source.is_none_or(|src| s.source == src) && event.is_none_or(|e| event_eq(&s.event, e))
         };
         // Tell the worker to stop the players; a sound still in the decode queue is
         // stopped by its own play handling, because the stop order queues behind its
@@ -661,7 +690,7 @@ impl SoundSystem {
         self.incoming.clear();
         self.output.drain_controls(&mut self.incoming);
         self.incoming.clear();
-        self.engine.stop(source, path);
+        self.engine.stop(source, event);
     }
 
     /// Set the listener (camera) position and yaw for attenuation and panning.
@@ -747,6 +776,19 @@ impl SoundSystem {
     /// Number of sounds currently tracked as playing.
     pub fn playing(&self) -> usize {
         self.engine.playing()
+    }
+
+    /// Number of sounds currently playing in one source, so a caller can tell its own
+    /// sounds apart from the rest (block and mob sounds share the `playing` count).
+    pub fn playing_in(&self, source: SoundSource) -> usize {
+        self.engine.playing_in(source)
+    }
+
+    /// Whether a sound with this event name is playing (namespace-defaulted match), as
+    /// vanilla's `SoundManager.isActive(SoundInstance)` answers for one sound rather
+    /// than for a whole source.
+    pub fn is_event_playing(&self, event: &str) -> bool {
+        self.engine.is_event_playing(event)
     }
 }
 
@@ -861,6 +903,78 @@ mod tests {
         // An unknown event does nothing.
         system.play("nope", SoundSource::Block, None, 1.0, 1.0, 1);
         assert_eq!(system.playing(), 0);
+    }
+
+    /// A system over the silent output, with a block event and a music event parsed.
+    fn silent_system(assets: haste_assets::Assets) -> SoundSystem {
+        let events = SoundEvents::parse(
+            br#"{"block.stone.break": {"sounds": ["dig/stone1"]},
+                 "music.game": {"sounds": ["music/game/calm1"]}}"#,
+        )
+        .unwrap();
+        SoundSystem::with_output(events, assets, AudioOutput::silent())
+    }
+
+    #[test]
+    fn queries_answer_per_source_and_per_event() {
+        let Some(assets) = cached_assets() else {
+            return;
+        };
+        let mut system = silent_system(assets);
+        system.play("block.stone.break", SoundSource::Block, None, 1.0, 1.0, 1);
+        system.play("music.game", SoundSource::Music, None, 1.0, 1.0, 2);
+        system.play("music.game", SoundSource::Music, None, 1.0, 1.0, 3);
+        assert_eq!(system.playing(), 3);
+        // The music is one of them, not the whole count: the block sound never makes it
+        // 3.
+        assert_eq!(system.playing_in(SoundSource::Music), 2);
+        assert_eq!(system.playing_in(SoundSource::Block), 1);
+        assert_eq!(system.playing_in(SoundSource::Ui), 0);
+        assert!(system.is_event_playing("minecraft:music.game"));
+        assert!(system.is_event_playing("block.stone.break"));
+        assert!(!system.is_event_playing("minecraft:block.stone.place"));
+        system.tick();
+    }
+
+    #[test]
+    fn stop_matches_the_event_name_not_the_variant_path() {
+        let Some(assets) = cached_assets() else {
+            return;
+        };
+        let mut system = silent_system(assets);
+        system.play("block.stone.break", SoundSource::Block, None, 1.0, 1.0, 1);
+        system.play("music.game", SoundSource::Music, None, 1.0, 1.0, 1);
+        // Stop by event only: the other event's sounds keep playing.
+        system.stop(None, Some("minecraft:block.stone.break"));
+        assert_eq!(system.playing(), 1);
+        assert!(system.is_event_playing("minecraft:music.game"));
+        // Stop by source and event together, and by the namespace-defaulted name.
+        system.play("block.stone.break", SoundSource::Ambient, None, 1.0, 1.0, 2);
+        system.stop(Some(SoundSource::Ambient), Some("block.stone.break"));
+        assert_eq!(system.playing(), 1);
+        // An event that is not playing stops nothing rather than everything.
+        system.stop(None, Some("minecraft:not.a.real.event"));
+        assert_eq!(system.playing(), 1);
+        // Both None stops everything, as vanilla's stop() with no filters does.
+        system.stop(None, None);
+        assert_eq!(system.playing(), 0);
+    }
+
+    #[test]
+    fn playing_an_event_again_does_not_allocate_a_new_name() {
+        let Some(assets) = cached_assets() else {
+            return;
+        };
+        let mut system = silent_system(assets);
+        system.play("music.game", SoundSource::Music, None, 1.0, 1.0, 1);
+        // The name is interned once: the second play shares it instead of building a
+        // new string (the table has one entry per distinct event name).
+        let interned = system.interned.len();
+        system.play("music.game", SoundSource::Music, None, 1.0, 1.0, 2);
+        assert_eq!(system.interned.len(), interned);
+        assert_eq!(system.playing_in(SoundSource::Music), 2);
+        system.play("block.stone.break", SoundSource::Block, None, 1.0, 1.0, 3);
+        assert_eq!(system.interned.len(), interned + 1);
     }
 
     #[test]
