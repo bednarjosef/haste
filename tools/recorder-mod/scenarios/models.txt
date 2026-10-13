@@ -1,0 +1,6 @@
+# Dump every baked model layer's geometry (entity + block-entity models) from the running
+# client's EntityModelSet into cache/oracle/26.3/entity_models.json, then quit. No world
+# interaction is needed beyond being in one, so a plain wait is enough.
+wait 40
+dump_models
+quit
