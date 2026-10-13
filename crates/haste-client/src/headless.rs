@@ -32,7 +32,15 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
 
 async fn run_async(address: String, username: String, seconds: u64) -> anyhow::Result<()> {
     let data = net::load_game_data()?;
-    let opts = ConnectOptions::new(address.clone(), Account::Offline { username });
+    let options = match haste_setup::config::Config::load() {
+        Ok(c) => c.options,
+        Err(e) => {
+            tracing::warn!("config load failed, using default options: {e:#}");
+            haste_setup::options::Options::default()
+        }
+    };
+    let mut opts = ConnectOptions::new(address.clone(), Account::Offline { username });
+    opts.client_information.view_distance = options.render_distance as i8;
     let t0 = Instant::now();
     let mut driver = NetDriver::connect(opts).await?;
     let regs = driver.connection().registries();

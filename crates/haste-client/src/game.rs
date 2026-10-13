@@ -256,9 +256,13 @@ fn tick_once(
         if std::mem::take(&mut shared_input.toggle_flight) {
             driver.session.player.toggle_flight();
         }
-        // Held buttons stay; the press-only middle click and the hotbar choice are consumed.
+        // Held buttons stay; the press-only middle click, drop/swap presses and the hotbar choice
+        // are consumed.
         let interact = shared_input.interact;
         shared_input.interact.pick_block = false;
+        shared_input.interact.drop_item = false;
+        shared_input.interact.drop_stack = false;
+        shared_input.interact.swap_offhand = false;
         shared_input.interact.hotbar = None;
         driver.session.player.set_interact(interact);
         shared_input.state
