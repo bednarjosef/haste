@@ -2,6 +2,7 @@
 //! Self-contained: `main.rs` wires it in with `mod launch;` and a dispatch line when
 //! `Args.command` is `Some`.
 
+use anyhow::Context;
 use clap::Subcommand;
 use std::time::Instant;
 
@@ -18,6 +19,18 @@ pub enum Command {
         #[arg(long, default_value = "world")]
         world: String,
     },
+    /// Launch the real vanilla 26.3 client (side-by-side comparison with haste).
+    Vanilla {
+        /// Install and launch Fabric Loader instead of the vanilla main class.
+        #[arg(long)]
+        fabric: bool,
+        /// `host:port` to join immediately (quick play).
+        #[arg(long)]
+        server: Option<String>,
+        /// Offline-mode username the vanilla client plays under.
+        #[arg(long, default_value = "HasteRef")]
+        username: String,
+    },
 }
 
 /// Runs one subcommand. Blocking (own tokio runtime inside for the async steps).
@@ -32,6 +45,11 @@ pub fn run(cmd: Command) -> anyhow::Result<()> {
             println!("server stopped");
             Ok(())
         }),
+        Command::Vanilla {
+            fabric,
+            server,
+            username,
+        } => run_vanilla(fabric, server, username),
     }
 }
 
@@ -91,9 +109,103 @@ async fn wait_for_ctrl_c() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
+/// `haste vanilla`: launch the real client through the haste-setup launcher and wait for it.
+/// The game dir and client log stay behind after the client exits (haste-setup owns both).
+fn run_vanilla(fabric: bool, server: Option<String>, username: String) -> anyhow::Result<()> {
+    tokio::runtime::Runtime::new()?.block_on(async move {
+        ensure_vanilla_installation()?;
+        let opts = vanilla_launch_options(fabric, server, username);
+        let mut client = haste_setup::launch::launch_vanilla(opts).await?;
+        println!(
+            "vanilla client started (pid {}, game dir {})",
+            client.child.id(),
+            client.game_dir.display()
+        );
+        let status = client
+            .child
+            .wait()
+            .context("waiting for the vanilla client to exit")?;
+        if !status.success() {
+            return Err(anyhow::anyhow!("vanilla client exited with {status}"));
+        }
+        println!("vanilla client exited cleanly");
+        Ok(())
+    })
+}
+
+/// The launcher options for `haste vanilla`: offline username, optional quick-play join,
+/// the Fabric loader when asked for.
+fn vanilla_launch_options(
+    fabric: bool,
+    server: Option<String>,
+    username: String,
+) -> haste_setup::launch::LaunchOptions {
+    haste_setup::launch::LaunchOptions {
+        username,
+        quick_play_server: server,
+        fabric,
+        ..Default::default()
+    }
+}
+
+/// Fails with a clear error when the installation the vanilla launcher needs is absent
+/// (client jar, libraries, assets, JDK), pointing at `haste setup` before any launch happens.
+/// Purely local checks: no network, no process, before the client is ever started.
+fn ensure_vanilla_installation() -> anyhow::Result<()> {
+    let missing: Vec<String> = [
+        haste_core::paths::client_jar(),
+        haste_core::paths::assets_dir(),
+        haste_setup::install::libraries_dir(),
+    ]
+    .into_iter()
+    .filter(|p| !p.exists())
+    .map(|p| p.display().to_string())
+    .collect();
+    if !missing.is_empty() {
+        return Err(anyhow::anyhow!(
+            "missing installation for the vanilla client ({}); run `haste setup` first",
+            missing.join(", ")
+        ));
+    }
+    if haste_setup::install::resolve_cached_java().is_none() {
+        return Err(anyhow::anyhow!(
+            "no java in {}; run `haste setup` first",
+            haste_core::paths::cache_dir().display()
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vanilla_launch_options_from_flags() {
+        let opts = vanilla_launch_options(false, None, "HasteRef".into());
+        assert_eq!(opts.username, "HasteRef");
+        assert_eq!(opts.quick_play_server, None);
+        assert!(!opts.fabric);
+        assert_eq!(opts.user_type, "legacy");
+
+        let opts = vanilla_launch_options(true, Some("localhost:25565".into()), "Steve".into());
+        assert!(opts.fabric);
+        assert_eq!(opts.quick_play_server.as_deref(), Some("localhost:25565"));
+        assert_eq!(opts.username, "Steve");
+        // the username flows into the offline UUID, so different names give different UUIDs
+        let a = haste_setup::launch::offline_uuid(&opts.username);
+        let b = haste_setup::launch::offline_uuid("HasteRef");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn vanilla_missing_installation_is_a_clear_error() {
+        std::env::set_var("HASTE_CACHE", "/nonexistent-haste-cache-for-test");
+        let err = ensure_vanilla_installation().expect_err("nothing exists under the empty cache");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("run `haste setup`"), "message was: {msg}");
+        assert!(msg.contains("client.jar"), "message was: {msg}");
+    }
 
     #[test]
     fn world_dir_is_under_config_singleplayer() {
