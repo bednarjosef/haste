@@ -123,8 +123,8 @@ impl SoundEvents {
     /// Parses `assets/minecraft/sounds.json`. Keys are event names without namespace;
     /// the `minecraft` namespace is applied to them.
     pub fn parse(json: &[u8]) -> anyhow::Result<SoundEvents> {
-        let raw: HashMap<String, RawEvent> =
-            serde_json::from_slice(json).map_err(|e| anyhow::anyhow!("parsing sounds.json: {e}"))?;
+        let raw: HashMap<String, RawEvent> = serde_json::from_slice(json)
+            .map_err(|e| anyhow::anyhow!("parsing sounds.json: {e}"))?;
         let mut events = HashMap::with_capacity(raw.len());
         for (name, ev) in raw {
             let mut sounds = Vec::with_capacity(ev.sounds.len());
@@ -307,7 +307,10 @@ mod tests {
         assert_eq!(v.id.to_string(), "minecraft:dig/stone1");
         assert_eq!(v.path, "sounds/dig/stone1.ogg");
         assert_eq!((v.volume, v.pitch, v.weight), (1.0, 1.0, 1));
-        assert_eq!((v.stream, v.attenuation_distance, v.preload), (false, 16, false));
+        assert_eq!(
+            (v.stream, v.attenuation_distance, v.preload),
+            (false, 16, false)
+        );
         let SoundEntry::File(v) = &ev.sounds[1] else {
             panic!("expected file entry");
         };
@@ -316,7 +319,10 @@ mod tests {
             panic!("expected file entry");
         };
         assert_eq!((v.volume, v.pitch, v.weight), (0.8, 1.4, 2));
-        assert_eq!((v.stream, v.attenuation_distance, v.preload), (true, 8, true));
+        assert_eq!(
+            (v.stream, v.attenuation_distance, v.preload),
+            (true, 8, true)
+        );
         assert_eq!(events.len(), 1);
     }
 
