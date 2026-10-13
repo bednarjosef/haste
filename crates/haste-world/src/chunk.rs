@@ -72,7 +72,7 @@ pub struct ChunkLight {
 }
 
 impl ChunkLight {
-    fn new(section_count: usize) -> Self {
+    pub(crate) fn new(section_count: usize) -> Self {
         Self {
             sky: vec![None; section_count],
             block: vec![NibbleArray::default(); section_count],
