@@ -195,6 +195,7 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
         // the same 10-tick ease-out curve, so its size (out of the 14-degree peak) is the
         // hurt strength.
         hurt: (view.hurt_tilt.abs() / 14.0).clamp(0.0, 1.0),
+        item: None,
     }
 }
 

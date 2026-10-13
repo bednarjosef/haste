@@ -88,6 +88,8 @@ pub struct ResolvedModel {
     pub(crate) gui_display: Option<DisplayTransform>,
     /// `display.firstperson_righthand`, likewise.
     pub(crate) firstperson_display: Option<DisplayTransform>,
+    /// `display.ground`, likewise (dropped item entities).
+    pub(crate) ground_display: Option<DisplayTransform>,
 }
 
 /// A model `display` entry: rotation (degrees, applied X then Y then Z), translation (in

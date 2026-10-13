@@ -1,7 +1,9 @@
 //! Dense entity storage: `Vec`-backed slots with a free list, `EntityId -> slot` in an ahash map.
 //! No per-tick allocation.
 use ahash::AHashMap;
-use haste_core::entity::{EntitySpawn, ItemStackData, MetadataEntry, PlayerInfo, Pose};
+use haste_core::entity::{
+    EntitySpawn, ItemStackData, MetadataEntry, MetadataValue, PlayerInfo, Pose,
+};
 use haste_core::ids::{EntityId, RegistryIndex};
 use haste_core::model::EntityInstance;
 use haste_core::DVec3;
@@ -49,6 +51,10 @@ pub struct Entity {
     pub hurt_ticks: u32,
     /// Set on the death event: holds the hurt tint instead of easing out.
     pub dead: bool,
+    /// A dropped item entity's stack (metadata index 9, `Item`), if its metadata named one.
+    pub item: Option<ItemStackData>,
+    /// Ticks since spawn: drives the dropped items' spin and bob.
+    pub age: u32,
 }
 
 impl Entity {
@@ -75,8 +81,22 @@ impl Entity {
             limb_speed: 0.0,
             hurt_ticks: 0,
             dead: false,
+            item: None,
+            age: 0,
         }
     }
+}
+
+/// The `EntityInstance::item` entry for a tracked entity: the stack of a dropped item entity
+/// (count included; the renderer draws 1-5 copies from it), aged by the partial tick.
+fn item_of(e: &Entity, partial_tick: f32) -> Option<haste_core::model::DroppedItem> {
+    let stack = e.item.as_ref()?;
+    let item = stack.item?;
+    Some(haste_core::model::DroppedItem {
+        item,
+        count: stack.count,
+        age: e.age as f32 + partial_tick,
+    })
 }
 
 pub struct EntityStore {
@@ -229,6 +249,14 @@ impl EntityStore {
             return;
         };
         e.metadata.apply(entries);
+        // A dropped item entity's stack: metadata index 9, slot type ItemStack
+        // (minecraft.wiki "Entity format", Item). An emptied stack clears the drop.
+        if let Some(entry) = e.metadata.get(9) {
+            e.item = match &entry.value {
+                MetadataValue::ItemStack(s) if !s.is_empty() => Some(s.clone()),
+                _ => None,
+            };
+        }
         if let Some(pose) = e.metadata.pose {
             if pose != e.pose {
                 e.pose = pose;
@@ -275,6 +303,7 @@ impl EntityStore {
             // Vanilla smooths the amplitude towards distance x 4 by 0.4 each tick.
             slot.limb_speed += (dist * 4.0 - slot.limb_speed) * 0.4;
             slot.hurt_ticks = slot.hurt_ticks.saturating_sub(1);
+            slot.age = slot.age.saturating_add(1);
         }
     }
 
@@ -292,7 +321,8 @@ impl EntityStore {
 
     /// Interpolated draw list for the renderer (renderer). Players get the humanoid model (classic
     /// layout; skins arrive with renderer's texture work), everything else a generic box from its
-    /// current dimensions. Only humanoids get animation overrides (the box has no limbs).
+    /// current dimensions; a dropped item entity draws as the item itself. Only humanoids get
+    /// animation overrides (the box has no limbs).
     pub fn render_instances(&self, partial_tick: f32, out: &mut Vec<EntityInstance>) {
         for slot in self.slots.iter().flatten() {
             let pos = slot.prev_pos.lerp(slot.pos, partial_tick as f64);
@@ -318,6 +348,7 @@ impl EntityStore {
                 skin: None,
                 nametag: slot.nametag.clone(),
                 hurt: hurt_strength(slot),
+                item: item_of(slot, partial_tick),
             });
         }
     }

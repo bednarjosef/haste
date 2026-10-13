@@ -200,6 +200,55 @@ fn render_instances_midpoint() {
     assert!((out[0].pos.x - 4.0 / 3.0).abs() < 1e-9);
 }
 
+/// A dropped item entity carries its stack in metadata index 9 (`Item`): it reaches the
+/// draw list with the item's registry id, the stack count and its age (partial-tick
+/// interpolated), and an emptied stack clears it.
+#[test]
+fn item_entity_stack_from_metadata() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    let stack = |count, item: Option<u32>| MetadataEntry {
+        index: 9,
+        value: MetadataValue::ItemStack(haste_core::entity::ItemStackData {
+            count,
+            item: item.map(RegistryIndex),
+            components_raw: Default::default(),
+        }),
+    };
+    s.set_metadata(EntityId(1), &[stack(10, Some(5))]);
+    let mut out = Vec::new();
+    s.render_instances(0.5, &mut out);
+    assert_eq!(
+        out[0].item,
+        Some(haste_core::model::DroppedItem {
+            item: RegistryIndex(5),
+            count: 10,
+            age: 0.5,
+        })
+    );
+    // Age advances with the ticks (plus the partial).
+    s.tick();
+    s.tick();
+    let mut out = Vec::new();
+    s.render_instances(0.25, &mut out);
+    assert_eq!(out[0].item.unwrap().age, 2.25);
+    // An emptied stack (count 0) stops the item from drawing as an item.
+    s.set_metadata(EntityId(1), &[stack(0, Some(5))]);
+    let mut out = Vec::new();
+    s.render_instances(0.0, &mut out);
+    assert_eq!(out[0].item, None);
+    // An empty stack slot (None item) likewise.
+    s.set_metadata(EntityId(1), &[stack(3, None)]);
+    let mut out = Vec::new();
+    s.render_instances(0.0, &mut out);
+    assert_eq!(out[0].item, None);
+    // Entities without the metadata entry are unaffected.
+    s.spawn(&spawn(2, DVec3::ZERO));
+    let mut out = Vec::new();
+    s.render_instances(0.0, &mut out);
+    assert_eq!(out.iter().find(|i| i.id == EntityId(2)).unwrap().item, None);
+}
+
 #[test]
 fn player_info_nametag() {
     let mut s = store();

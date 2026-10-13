@@ -379,6 +379,7 @@ impl Assets {
         let mut gui_light: Option<bool> = None;
         let mut gui_display: Option<crate::model::DisplayTransform> = None;
         let mut firstperson_display: Option<crate::model::DisplayTransform> = None;
+        let mut ground_display: Option<crate::model::DisplayTransform> = None;
         let mut current = id.clone();
 
         for _ in 0..20 {
@@ -404,6 +405,12 @@ impl Assets {
                 gui_display = model
                     .display
                     .get("gui")
+                    .and_then(crate::model::DisplayTransform::parse);
+            }
+            if ground_display.is_none() {
+                ground_display = model
+                    .display
+                    .get("ground")
                     .and_then(crate::model::DisplayTransform::parse);
             }
             if gui_light.is_none() && model.gui_light.is_some() {
@@ -436,6 +443,7 @@ impl Assets {
             gui_light: gui_light.unwrap_or(false),
             gui_display,
             firstperson_display,
+            ground_display,
         })
     }
 

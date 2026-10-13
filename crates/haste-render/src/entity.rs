@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use glam::{Mat3, Mat4, Vec3};
 use haste_assets::Assets;
-use haste_core::model::{CubeModel, EntityInstance, ModelPart, PoseOverrides};
+use haste_core::model::{CubeModel, DroppedItem, EntityInstance, ModelPart, PoseOverrides};
 use haste_core::{EntityId, Identifier};
 
 use crate::gui::Shelf;
@@ -17,6 +17,33 @@ const ATLAS_SIZE: u32 = 2048;
 
 /// Vanilla renders the player model at 15/16 scale.
 const PLAYER_SCALE: f32 = 0.9375;
+
+/// Dropped items spin about the vertical axis (minecraft.wiki "Item (entity)": one full
+/// turn in 40 ticks, i.e. 9 degrees per tick) ...
+pub(crate) fn item_entity_spin(age: f32) -> f32 {
+    age * 9.0f32.to_radians()
+}
+
+/// ... and bob up and down (one full cycle in 40 ticks, 0.1 blocks amplitude, the top
+/// 0.1 above and the bottom touching the spawn height: offset 0.1 + 0.1 sin).
+pub(crate) fn item_entity_bob(age: f32) -> f32 {
+    0.1 + 0.1 * (age * (std::f32::consts::TAU / 40.0)).sin()
+}
+
+/// The whole dropped item is drawn at a quarter block size (vanilla's `ItemRenderer`
+/// scales the model by 0.25 for items on the ground; flat items keep their 1/16
+/// thickness, like the held item).
+const ITEM_ENTITY_SCALE: f32 = 0.25;
+
+/// How many copies of the item a stack draws (vanilla `ItemRenderer.getRenderedAmount`:
+/// 1 + count/4, capped at 5, and count > 1 needs at least 2).
+pub(crate) fn item_entity_copies(count: i32) -> u32 {
+    if count <= 1 {
+        1
+    } else {
+        (1 + count as u32 / 4).clamp(2, 5)
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -240,7 +267,11 @@ impl EntityRenderer {
     fn texture_rect(&mut self, id: &Identifier, assets: &mut Assets) -> [u32; 4] {
         if !self.textures.contains_key(id) {
             let image = if id.namespace() == "haste" {
-                placeholder_texture()
+                if id.path() == "missing" {
+                    missing_texture()
+                } else {
+                    placeholder_texture()
+                }
             } else {
                 assets.texture_any(id).unwrap_or_else(|e| {
                     tracing::warn!("entity texture {id}: {e:#}");
@@ -321,6 +352,16 @@ impl EntityRenderer {
             if Some(e.id) == skip {
                 continue;
             }
+            if let Some(item) = &e.item {
+                let (sky, block) = self.lights.get(&e.id).copied().unwrap_or((15, 0));
+                let light = lightmap(sky, block);
+                let start = self.vertices.len();
+                self.emit_dropped_item(e, item, camera, light, assets);
+                if self.vertices.len() > start {
+                    self.drawn += 1;
+                }
+                continue;
+            }
             let (texture, scale) = texture_and_scale(e);
             let rect = self.texture_rect(&texture, assets);
             let (sky, block) = self.lights.get(&e.id).copied().unwrap_or((15, 0));
@@ -360,10 +401,76 @@ impl EntityRenderer {
         }
     }
 
+    /// Poses a dropped item entity (`minecraft:item`) into the vertex buffer: the item's
+    /// own model (the same one the GUI and the held item use), about 0.25 blocks large,
+    /// spinning around the vertical axis and bobbing. Stacks draw several copies, each
+    /// jittered by a hash of the entity id and copy index. Items without a model (mods,
+    /// special renderers) draw the missing-texture quad instead; nothing panics.
+    fn emit_dropped_item(
+        &mut self,
+        e: &EntityInstance,
+        dropped: &DroppedItem,
+        camera: glam::DVec3,
+        light: f32,
+        assets: &mut Assets,
+    ) {
+        let model = self.item_model(dropped.item, assets);
+        let base = Mat4::from_translation(
+            (e.pos - camera).as_vec3() + Vec3::new(0.0, item_entity_bob(dropped.age), 0.0),
+        ) * Mat4::from_rotation_y(item_entity_spin(dropped.age))
+            * Mat4::from_scale(Vec3::splat(ITEM_ENTITY_SCALE));
+        let copies = item_entity_copies(dropped.count) as usize;
+        // Take the vertex buffer out so the texture lookup (`&mut self`) and the emission
+        // (the buffer) do not fight over the borrow.
+        let mut out = std::mem::take(&mut self.vertices);
+        for copy in 0..copies {
+            // Copy jitter: a hash of the entity id and copy index in vanilla's +-0.15 range
+            // (`ItemRenderer` jitters a stack's copies the same way, seeded per entity
+            // there; the hash is our deterministic stand-in).
+            let mut h =
+                (e.id.0 as u32).wrapping_mul(0x9E37_79B9) ^ (copy as u32).wrapping_mul(0x85EB_CA6B);
+            h ^= h >> 13;
+            h = h.wrapping_mul(0xC2B2_AE35);
+            let j = |shift: u32| ((h >> shift) & 0xFF) as f32 / 255.0 * 0.3 - 0.15;
+            let m = base * Mat4::from_translation(Vec3::new(j(0), j(8), j(16)));
+            match &model {
+                Some(model) => {
+                    let mut rects = |t: &str| self.texture_rect(&parse_tex(t), assets);
+                    emit_item_parts(&mut out, model, m, light, &mut rects);
+                }
+                None => {
+                    let rect = self.texture_rect(&Identifier::new("haste", "missing"), assets);
+                    emit_missing_item(&mut out, m, light, rect);
+                }
+            }
+        }
+        self.vertices = out;
+    }
+
     /// Item registry names by protocol id (for the held item).
     pub fn set_item_names(&mut self, names: Vec<Identifier>) {
         self.item_names = names;
         self.item_models.clear();
+    }
+
+    /// The cached item model of a registry id (air and unknown items have none: the
+    /// caller draws the missing texture instead).
+    fn item_model(
+        &mut self,
+        item: haste_core::RegistryIndex,
+        assets: &mut Assets,
+    ) -> Option<Arc<haste_assets::ItemModel>> {
+        if let Some(m) = self.item_models.get(&item.0) {
+            return m.clone();
+        }
+        let m = self
+            .item_names
+            .get(item.0 as usize)
+            .filter(|n| n.path() != "air")
+            .and_then(|n| assets.item_model(n).ok())
+            .map(Arc::new);
+        self.item_models.insert(item.0, m.clone());
+        m
     }
 
     /// Builds the first-person arm or held item. `view_to_world` rotates view space (x right,
@@ -381,19 +488,7 @@ impl EntityRenderer {
             return;
         };
         let light = lightmap(fp.light.0, fp.light.1);
-        let item = fp.item.and_then(|i| {
-            if let Some(m) = self.item_models.get(&i.0) {
-                return m.clone();
-            }
-            let m = self
-                .item_names
-                .get(i.0 as usize)
-                .filter(|n| n.path() != "air")
-                .and_then(|n| assets.item_model(n).ok())
-                .map(Arc::new);
-            self.item_models.insert(i.0, m.clone());
-            m
-        });
+        let item = fp.item.and_then(|i| self.item_model(i, assets));
         let mut out = std::mem::take(&mut self.hand);
         match item {
             Some(model) => {
@@ -802,6 +897,99 @@ pub(crate) fn emit_part(
     }
 }
 
+/// Emits one copy of an item model in the world (`m` places model space, 0..1 block units,
+/// into camera-relative world space; already scaled to the drop's size). Block items use
+/// their element quads, flat items two quads with a thin offset like the held item. Each
+/// texture's atlas rectangle comes from `rect` (rendered at most once per texture).
+fn emit_item_parts(
+    out: &mut Vec<EntityVertex>,
+    model: &haste_assets::ItemModel,
+    m: Mat4,
+    light: f32,
+    rect: &mut impl FnMut(&str) -> [u32; 4],
+) {
+    for part in &model.parts {
+        let pm = m
+            * crate::gui::display_matrix(&part.ground)
+            * crate::gui::part_matrix(&part.transformation)
+            * Mat4::from_translation(Vec3::splat(-0.5));
+        let nm_part = Mat3::from_mat4(pm).inverse().transpose();
+        let tint = |i: Option<u32>| -> [f32; 3] {
+            i.and_then(|i| part.tints.get(i as usize))
+                .map(|c| {
+                    let f = |s: u32| crate::sky::linear([((c >> s) & 0xFF) as f32 / 255.0; 3])[0];
+                    [f(16), f(8), f(0)]
+                })
+                .unwrap_or([1.0; 3])
+        };
+        match &part.geometry {
+            haste_assets::ItemGeometry::None => {}
+            haste_assets::ItemGeometry::Generated { layers } => {
+                for (i, layer) in layers.iter().enumerate() {
+                    let r = rect(layer);
+                    let t = tint(Some(i as u32));
+                    // The two sides of the flat item, 1/16 apart like the held item.
+                    for (z, n) in [(8.5 / 16.0, Vec3::Z), (7.5 / 16.0, Vec3::NEG_Z)] {
+                        let p = [
+                            Vec3::new(0.0, 1.0, z),
+                            Vec3::new(0.0, 0.0, z),
+                            Vec3::new(1.0, 0.0, z),
+                            Vec3::new(1.0, 1.0, z),
+                        ];
+                        let uv = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+                        push_world_quad(out, pm, nm_part, p, uv, n, t, light, r);
+                    }
+                }
+            }
+            haste_assets::ItemGeometry::Elements(quads) => {
+                for q in quads {
+                    let r = rect(&q.texture);
+                    let o = q.direction.offset();
+                    push_world_quad(
+                        out,
+                        pm,
+                        nm_part,
+                        q.positions.map(Vec3::from),
+                        q.uvs,
+                        Vec3::new(o[0] as f32, o[1] as f32, o[2] as f32),
+                        tint(q.tint_index),
+                        light,
+                        r,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The missing-item stand-in: a flat quad with the missing texture (pink/black checker),
+/// the same size and pose a flat item would have.
+fn emit_missing_item(out: &mut Vec<EntityVertex>, m: Mat4, light: f32, rect: [u32; 4]) {
+    let pm = m * Mat4::from_translation(Vec3::splat(-0.5));
+    let nm = Mat3::from_mat4(pm).inverse().transpose();
+    for (z, n) in [(8.5 / 16.0, Vec3::Z), (7.5 / 16.0, Vec3::NEG_Z)] {
+        let p = [
+            Vec3::new(0.0, 1.0, z),
+            Vec3::new(0.0, 0.0, z),
+            Vec3::new(1.0, 0.0, z),
+            Vec3::new(1.0, 1.0, z),
+        ];
+        let uv = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+        push_world_quad(out, pm, nm, p, uv, n, [1.0; 3], light, rect);
+    }
+}
+
+/// Vanilla's missing texture: 16x16 magenta/black checker of 8x8 squares.
+fn missing_texture() -> image::RgbaImage {
+    image::RgbaImage::from_fn(16, 16, |x, y| {
+        if (x < 8) ^ (y < 8) {
+            image::Rgba([248, 0, 248, 255])
+        } else {
+            image::Rgba([0, 0, 0, 255])
+        }
+    })
+}
+
 /// `haste:` placeholder texture: light grey with a darker 1 px border per 8 px cell.
 fn placeholder_texture() -> image::RgbaImage {
     image::RgbaImage::from_fn(64, 64, |x, y| {
@@ -904,6 +1092,47 @@ mod tests {
         // Monotone in hurt: the red channel grows, green shrinks.
         assert!(hurt_color(0.8, 0.25)[0] < hurt_color(0.8, 0.75)[0]);
         assert!(hurt_color(0.8, 0.25)[1] > hurt_color(0.8, 0.75)[1]);
+    }
+
+    #[test]
+    fn dropped_item_spins_a_quarter_turn_in_10_ticks() {
+        // 9 degrees per tick (one full turn in 40 ticks): at 0 nothing turned, at 10 a
+        // quarter turn, at 20 half a turn, at 40 exactly one full turn again.
+        assert_eq!(item_entity_spin(0.0), 0.0);
+        assert!((item_entity_spin(10.0) - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+        assert!((item_entity_spin(20.0) - std::f32::consts::PI).abs() < 1e-5);
+        assert!((item_entity_spin(40.0) - std::f32::consts::TAU).abs() < 1e-5);
+    }
+
+    #[test]
+    fn dropped_item_bobs_around_a_tenth_of_a_block() {
+        // The bob lifts the item between 0 and 0.2 blocks above the spawn point, one
+        // cycle every 40 ticks: sin(0) = 0 -> 0.1, quarter cycle -> the 0.2 top, and the
+        // pattern repeats at 40.
+        assert!((item_entity_bob(0.0) - 0.1).abs() < 1e-6);
+        assert!((item_entity_bob(10.0) - 0.2).abs() < 1e-6);
+        assert!((item_entity_bob(30.0) - 0.0).abs() < 1e-6);
+        assert!((item_entity_bob(40.0) - item_entity_bob(0.0)).abs() < 1e-6);
+        for age in [0.0f32, 7.5, 19.3, 33.7, 60.1] {
+            let b = item_entity_bob(age);
+            assert!((0.0..=0.2).contains(&b), "bob {b} at age {age}");
+        }
+    }
+
+    #[test]
+    fn dropped_item_copies_follow_the_stack_size() {
+        // Vanilla's rule: 1 + count/4, at most 5, at least 2 when the stack has more
+        // than one item.
+        assert_eq!(item_entity_copies(1), 1);
+        assert_eq!(item_entity_copies(2), 2);
+        assert_eq!(item_entity_copies(4), 2);
+        assert_eq!(item_entity_copies(5), 2);
+        assert_eq!(item_entity_copies(8), 3);
+        assert_eq!(item_entity_copies(9), 3);
+        assert_eq!(item_entity_copies(16), 5);
+        assert_eq!(item_entity_copies(17), 5);
+        assert_eq!(item_entity_copies(64), 5);
+        assert_eq!(item_entity_copies(99), 5);
     }
 
     #[test]
