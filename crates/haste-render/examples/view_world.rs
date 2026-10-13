@@ -65,6 +65,7 @@ impl App {
                 yaw: 45.0,
                 pitch: 50.0,
                 fov_deg: 70.0,
+                roll_deg: 0.0,
             },
             dirty: (-distance..=distance)
                 .flat_map(|x| (-distance..=distance).map(move |z| SectionPos::new(x, 0, z)))
