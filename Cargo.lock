@@ -1217,13 +1217,11 @@ dependencies = [
  "haste-world",
  "image",
  "parking_lot",
- "pollster",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "wgpu",
  "winit",
 ]
 
