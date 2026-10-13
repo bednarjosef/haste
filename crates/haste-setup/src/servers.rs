@@ -10,6 +10,10 @@
 //!
 //! Unknown tags in a file are preserved on save: mods add their own fields to
 //! server data, and rewriting the file must not drop them.
+//!
+//! A `servers.dat` that cannot be parsed is logged and discarded, like vanilla's
+//! `ServerList.load`, so a broken file never keeps the multiplayer screen from
+//! opening.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -121,10 +125,16 @@ fn take_byte(compound: &mut NbtCompound, name: &str) -> Option<i8> {
     }
 }
 
-/// The saved server list, in the order the multiplayer screen should show it.
+/// The saved server list: visible entries first, then the hidden ones (vanilla's
+/// `ServerList` keeps the direct-connect entries, `hidden = true`, in a second
+/// list, [`Self::entries`] returns only the visible ones, and [`Self::save`]
+/// writes visible then hidden).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ServerList {
+    /// Entries shown in the multiplayer screen, in list order.
     entries: Vec<ServerEntry>,
+    /// Direct-connect entries kept out of that listing, newest first.
+    hidden: Vec<ServerEntry>,
     /// Unknown root-level tags, preserved on save.
     extra: NbtCompound,
 }
@@ -136,8 +146,11 @@ impl ServerList {
         Self::default()
     }
 
-    /// Reads `servers.dat` from `path`. A missing file is an empty list; a file
-    /// that exists but does not parse is an error for the caller to report.
+    /// Reads `servers.dat` from `path`. A missing file is an empty list, and so
+    /// is a file that does not parse: vanilla's `ServerList.load` logs the
+    /// failure and keeps the list it has, and the multiplayer screen has to open
+    /// no matter what is on disk. Only I/O errors (a permission problem, a
+    /// directory in the way) are returned.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let bytes = match std::fs::read(path) {
             Ok(bytes) => bytes,
@@ -147,17 +160,31 @@ impl ServerList {
             }
         };
         let mut reader = NbtReadHelperJava::new(std::io::Cursor::new(bytes));
-        let document =
-            Nbt::read(&mut reader).with_context(|| format!("parsing {}", path.display()))?;
+        let document = match Nbt::read(&mut reader) {
+            Ok(document) => document,
+            Err(error) => {
+                tracing::warn!(
+                    "ignoring unreadable server list {}: {error}",
+                    path.display()
+                );
+                return Ok(Self::new());
+            }
+        };
 
         let mut extra = NbtCompound::new();
         let mut entries = Vec::new();
+        let mut hidden = Vec::new();
         for (name, tag) in document.root_tag.child_tags {
             if name.as_ref() == "servers" {
                 if let NbtTag::List(list) = tag {
                     for item in list {
                         if let NbtTag::Compound(compound) = item {
-                            entries.push(ServerEntry::from_compound(compound));
+                            let entry = ServerEntry::from_compound(compound);
+                            if entry.hidden {
+                                hidden.push(entry);
+                            } else {
+                                entries.push(entry);
+                            }
                         }
                     }
                 }
@@ -165,7 +192,11 @@ impl ServerList {
                 extra.put(&name, tag);
             }
         }
-        Ok(Self { entries, extra })
+        Ok(Self {
+            entries,
+            hidden,
+            extra,
+        })
     }
 
     /// Writes the list to `path` as uncompressed NBT, via a temp file in the
@@ -176,6 +207,7 @@ impl ServerList {
         let servers = self
             .entries
             .iter()
+            .chain(self.hidden.iter())
             .map(|entry| NbtTag::Compound(entry.to_compound()))
             .collect();
         root.put_list("servers", servers);
@@ -203,18 +235,30 @@ impl ServerList {
         Ok(())
     }
 
-    /// The entries, in list order.
+    /// The visible entries, in list order.
     #[must_use]
     pub fn entries(&self) -> &[ServerEntry] {
         &self.entries
     }
 
-    /// Appends an entry to the end of the list.
-    pub fn add(&mut self, entry: ServerEntry) {
-        self.entries.push(entry);
+    /// The hidden entries (direct-connect ones), what [`Self::save`] writes
+    /// after the visible list. They are not shown by the multiplayer screen.
+    #[must_use]
+    pub fn hidden_entries(&self) -> &[ServerEntry] {
+        &self.hidden
     }
 
-    /// Removes the entry at `index`, returning it if it was there.
+    /// Appends an entry: a hidden one to the front of the hidden ones, a visible
+    /// one to the end of the visible list, as vanilla's `add` does.
+    pub fn add(&mut self, entry: ServerEntry) {
+        if entry.hidden {
+            self.hidden.insert(0, entry);
+        } else {
+            self.entries.push(entry);
+        }
+    }
+
+    /// Removes the visible entry at `index`, returning it if it was there.
     pub fn remove(&mut self, index: usize) -> Option<ServerEntry> {
         if index < self.entries.len() {
             Some(self.entries.remove(index))
@@ -223,7 +267,7 @@ impl ServerList {
         }
     }
 
-    /// Moves the entry at `index` one slot up; returns whether it moved.
+    /// Moves the visible entry at `index` one slot up; returns whether it moved.
     pub fn move_up(&mut self, index: usize) -> bool {
         if index == 0 || index >= self.entries.len() {
             return false;
@@ -232,7 +276,7 @@ impl ServerList {
         true
     }
 
-    /// Moves the entry at `index` one slot down; returns whether it moved.
+    /// Moves the visible entry at `index` one slot down; returns whether it moved.
     pub fn move_down(&mut self, index: usize) -> bool {
         if index + 1 >= self.entries.len() {
             return false;
@@ -279,13 +323,107 @@ mod tests {
         let loaded = ServerList::load(&path).unwrap();
 
         assert_eq!(loaded.entries(), list.entries());
-        assert_eq!(loaded.entries().len(), 3);
+        assert_eq!(loaded.hidden_entries(), list.hidden_entries());
+        assert_eq!(loaded.entries().len(), 2);
         assert_eq!(loaded.entries()[0].name, "alpha");
         assert_eq!(loaded.entries()[0].address, "alpha.example.com:25565");
         assert_eq!(loaded.entries()[1].name, "beta");
-        assert!(loaded.entries()[2].hidden);
-        assert!(loaded.entries()[2].name.is_empty());
         assert!(!loaded.entries()[0].hidden);
+        assert_eq!(loaded.hidden_entries().len(), 1);
+        assert!(loaded.hidden_entries()[0].hidden);
+        assert!(loaded.hidden_entries()[0].name.is_empty());
+    }
+
+    #[test]
+    fn adds_hidden_entries_at_the_front_of_the_hidden_list() {
+        let mut list = ServerList::new();
+        let mut first_hidden = ServerEntry::new("", "first.example.com");
+        first_hidden.hidden = true;
+        let mut second_hidden = ServerEntry::new("", "second.example.com");
+        second_hidden.hidden = true;
+        list.add(first_hidden);
+        list.add(second_hidden);
+        list.add(ServerEntry::new("visible", "visible.example.com"));
+
+        assert_eq!(list.entries().len(), 1);
+        assert_eq!(list.entries()[0].name, "visible");
+        assert_eq!(
+            list.hidden_entries()
+                .iter()
+                .map(|entry| entry.address.as_str())
+                .collect::<Vec<_>>(),
+            vec!["second.example.com", "first.example.com"],
+            "hidden entries are newest first, and never appear in entries()"
+        );
+    }
+
+    #[test]
+    fn saves_visible_entries_before_hidden_ones() {
+        let (dir, path) = temp_path("servers.dat");
+        let _keep_alive = &dir;
+        let mut list = ServerList::new();
+        list.add(ServerEntry::new("first", "first.example.com"));
+        list.add(ServerEntry::new("second", "second.example.com"));
+        let mut hidden = ServerEntry::new("", "direct.example.com");
+        hidden.hidden = true;
+        list.add(hidden);
+
+        list.save(&path).unwrap();
+
+        // Read the file's `servers` list straight through the NBT codec to check
+        // the on-disk order, not just what load() reconstructs from it.
+        let bytes = std::fs::read(&path).unwrap();
+        let mut reader = NbtReadHelperJava::new(std::io::Cursor::new(bytes));
+        let document = Nbt::read(&mut reader).unwrap();
+        let list_tag = document
+            .root_tag
+            .get("servers")
+            .and_then(|tag| tag.extract_list())
+            .unwrap();
+        let written: Vec<String> = list_tag
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .extract_compound()?
+                    .get_string("ip")
+                    .map(str::to_owned)
+            })
+            .collect();
+        assert_eq!(
+            written,
+            vec![
+                "first.example.com",
+                "second.example.com",
+                "direct.example.com"
+            ]
+        );
+    }
+
+    #[test]
+    fn unparseable_file_yields_an_empty_list() {
+        let (dir, path) = temp_path("servers.dat");
+        let _keep_alive = &dir;
+        std::fs::write(&path, b"this is not nbt at all \xff\xff").unwrap();
+        let list = ServerList::load(&path).unwrap();
+        assert!(list.entries().is_empty());
+        assert!(list.hidden_entries().is_empty());
+
+        // A truncated compound: right root tag and name, cut off inside it.
+        std::fs::write(&path, [0x0a, 0x00, 0x00, b'x']).unwrap();
+        let list = ServerList::load(&path).unwrap();
+        assert!(list.entries().is_empty());
+        assert!(list.hidden_entries().is_empty());
+    }
+
+    #[test]
+    fn io_errors_are_still_reported() {
+        let (dir, path) = temp_path("servers.dat");
+        let _keep_alive = &dir;
+        std::fs::create_dir(&path).unwrap();
+        assert!(
+            ServerList::load(&path).is_err(),
+            "an unreadable path is an error, not a silently empty list"
+        );
     }
 
     #[test]
@@ -326,6 +464,7 @@ mod tests {
         let path = dir.path().join("nope").join("servers.dat");
         let list = ServerList::load(&path).unwrap();
         assert!(list.entries().is_empty());
+        assert!(list.hidden_entries().is_empty());
     }
 
     #[test]
@@ -400,7 +539,7 @@ mod tests {
         push_string(&BASE64.encode(PNG_BYTES), &mut bytes);
         bytes.push(0x00); // TAG_End of the entry compound
                           // Second entry, minimal.
-        push_named_string("ip", "hidden.example.com", &mut bytes);
+        push_named_string("ip", "second.example.com", &mut bytes);
         bytes.push(0x00); // end of the second entry compound
         bytes.push(0x00); // end of the root compound
 
@@ -415,7 +554,7 @@ mod tests {
         assert_eq!(list.entries()[0].accept_textures, Some(false));
         assert_eq!(list.entries()[0].icon.as_deref(), Some(PNG_BYTES));
         assert_eq!(list.entries()[1].name, "");
-        assert_eq!(list.entries()[1].address, "hidden.example.com");
+        assert_eq!(list.entries()[1].address, "second.example.com");
         assert_eq!(list.entries()[1].accept_textures, None);
         assert_eq!(list.entries()[1].icon, None);
         assert!(!list.entries()[1].hidden);
