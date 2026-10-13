@@ -8,4 +8,5 @@ pub mod install;
 pub mod launch;
 pub mod mojang;
 pub mod msa;
+pub mod options;
 pub mod server;
