@@ -16,7 +16,7 @@ use haste_core::input::InputState;
 use haste_core::view::{BlockView, CollisionShapes};
 use haste_data::GameData;
 use haste_entity::{EntityDimensions, EntityStore};
-use haste_protocol::haste_core::chunk::{ChunkData, LightData};
+use haste_protocol::haste_core::chunk::{BlockEntityData, ChunkData, LightData};
 use haste_protocol::haste_core::entity::{EntitySpawn, ItemStackData, MetadataEntry, PlayerInfo};
 use haste_protocol::haste_core::game::{DimensionInfo, GameMode};
 use haste_protocol::haste_core::{BlockPos, BlockStateId, ChunkPos, EntityId, Identifier};
@@ -41,6 +41,8 @@ pub trait WorldSink {
     fn set_block(&mut self, pos: BlockPos, state: BlockStateId);
     /// `World::apply_light`.
     fn apply_light(&mut self, pos: ChunkPos, light: &LightData);
+    /// `World::set_block_entity`.
+    fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData);
     /// Drops every chunk and switches to `dim` (respawn / dimension change).
     fn reset(&mut self, dim: &DimensionInfo);
     /// Number of loaded chunks.
@@ -132,6 +134,9 @@ impl WorldSink for World {
     }
     fn apply_light(&mut self, pos: ChunkPos, light: &LightData) {
         World::apply_light(self, pos, light)
+    }
+    fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData) {
+        World::set_block_entity(self, pos, data)
     }
     fn reset(&mut self, dim: &DimensionInfo) {
         let biomes = 1usize << self.biome_bits();
@@ -391,6 +396,17 @@ impl Session {
                 if !self.player.defer_block_update(c.pos, c.state) {
                     world.set_block(c.pos, c.state);
                 }
+            }
+            P::BlockEntityData(b) => {
+                let pos = b.pos;
+                world.set_block_entity(
+                    pos,
+                    BlockEntityData {
+                        pos,
+                        kind: b.kind as u32,
+                        nbt: b.nbt.clone(),
+                    },
+                );
             }
             P::SectionBlocksUpdate(u) => {
                 for c in u.changes() {

@@ -1,7 +1,7 @@
 //! A chunk: sections, heightmaps, block entities, light. Owned by `World`.
 
 use haste_core::chunk::{BlockEntityData, ChunkData, LightData};
-use haste_core::{BiomeId, BlockStateId, ChunkPos};
+use haste_core::{BiomeId, BlockPos, BlockStateId, ChunkPos};
 
 use crate::light::NibbleArray;
 use crate::palette::{BiomeContainer, BlockContainer, DecodedSection, PaletteError};
@@ -88,8 +88,9 @@ pub struct Chunk {
     pub sections: Vec<Section>,
     /// Heightmaps by wire type id, as sent.
     pub heightmaps: Vec<(i32, Heightmap)>,
-    /// Block entities kept raw (NBT decoded lazily by whoever needs them).
-    pub block_entities: Vec<BlockEntityData>,
+    /// Block entities kept raw (NBT decoded lazily by whoever needs them), by position.
+    /// Replacing the chunk (a re-sent `level_chunk_with_light`) replaces these wholesale.
+    pub block_entities: ahash::HashMap<BlockPos, BlockEntityData>,
     /// Sky/block light per section (same indexing as `sections`).
     pub light: ChunkLight,
 }
@@ -132,7 +133,11 @@ impl Chunk {
             min_section,
             sections,
             heightmaps,
-            block_entities: data.block_entities.clone(),
+            block_entities: data
+                .block_entities
+                .iter()
+                .map(|be| (be.pos, be.clone()))
+                .collect(),
             light: ChunkLight::new(section_count),
         };
         chunk.apply_light(&data.light);
