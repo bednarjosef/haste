@@ -14,7 +14,7 @@
 //! Field orders follow vanilla's data component classes (`DataComponents`,
 //! `world/item/component/Tool`, `world/item/enchantment/ItemEnchantments`):
 //! `Tool` is its rules then the mining and durability defaults, an enchantment
-//! is a registry holder (wire id + 1) with its level.
+//! is a plain registry id with its level.
 
 use bytes::Bytes;
 use haste_core::Component;
@@ -83,17 +83,19 @@ fn read_component(r: &mut Reader<'_>, name: &str) -> DecodeResult<ItemComponent>
     Ok(component)
 }
 
-/// `enchantments` / `stored_enchantments`: registry id + level pairs.
+/// `enchantments` / `stored_enchantments`: registry id + level pairs. The id is the plain
+/// `minecraft:enchantment` registry id (vanilla `Enchantment.STREAM_CODEC` is
+/// `ByteBufCodecs.holderRegistry`, which has no inline form and no +1 offset).
 fn read_enchantments(r: &mut Reader<'_>) -> DecodeResult<Vec<EnchantmentLevel>> {
     r.list(MAX_ENCHANTMENTS, |r| {
-        let holder = r.var_int()?;
-        if holder <= 0 {
+        let id = r.var_int()?;
+        if id < 0 {
             return Err(DecodeError::Invalid(format!(
-                "enchantment holder id {holder} is not a registry entry"
+                "enchantment id {id} is negative"
             )));
         }
         Ok(EnchantmentLevel {
-            id: holder - 1,
+            id,
             level: r.var_int()?,
         })
     })
@@ -377,8 +379,9 @@ mod tests {
                 (5, &[3]),
                 (6, &name.buf),
                 (7, &item_name.buf),
-                (8, &[1, 9, 3]), // sharpness (id 8), level 3
-                (9, &[1, 40, 5]),
+                (8, &[1, 8, 3]), // sharpness (id 8), level 3
+                // id 0 is a valid enchantment (the first in the registry)
+                (9, &[2, 0, 1, 39, 5]),
                 (10, &tool.buf),
                 (12, &[2]),
             ],
@@ -398,7 +401,12 @@ mod tests {
         );
         assert_eq!(
             parsed.stored_enchantments(),
-            Some(&[EnchantmentLevel { id: 39, level: 5 }][..])
+            Some(
+                &[
+                    EnchantmentLevel { id: 0, level: 1 },
+                    EnchantmentLevel { id: 39, level: 5 }
+                ][..]
+            )
         );
         let rules = &parsed.tool().unwrap().rules;
         assert_eq!(
@@ -521,8 +529,8 @@ mod tests {
         let mut body = patch(&[(3, &[1])], &[]);
         body.push(0);
         assert!(read_patch(&body, &tables).is_err());
-        // An inline (non-registry) enchantment holder: not a registry entry.
-        let body = patch(&[(8, &[1, 0, 3])], &[]);
+        // A truncated enchantment list (count 2, one entry).
+        let body = patch(&[(8, &[2, 0, 3])], &[]);
         assert!(read_patch(&body, &tables).is_err());
     }
 }
