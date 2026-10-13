@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use super::*;
+use haste_protocol::nbt::{Nbt, NbtCompound};
 use haste_protocol::packets::play::clientbound::{MoveDeltas, SpawnInfo};
 
 #[derive(Default)]
@@ -31,6 +32,12 @@ impl WorldSink for FakeWorld {
     }
     fn apply_light(&mut self, pos: ChunkPos, _light: &LightData) {
         self.log.push(format!("light {} {}", pos.x, pos.z));
+    }
+    fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData) {
+        self.log.push(format!(
+            "be {} {} {} {} {:?}",
+            pos.x, pos.y, pos.z, data.kind, data.nbt
+        ));
     }
     fn reset(&mut self, dim: &DimensionInfo) {
         self.chunks.clear();
@@ -157,6 +164,13 @@ fn chunk(x: i32, z: i32) -> ChunkData {
     }
 }
 
+/// Network NBT (unnamed root compound with one string), as the protocol crate's tests build it.
+fn nbt() -> Nbt {
+    let mut c = NbtCompound::new();
+    c.put_string("color", "red".into());
+    Nbt::new(String::new(), c)
+}
+
 fn level_chunk(x: i32, z: i32) -> ClientboundPlay {
     ClientboundPlay::LevelChunkWithLight(cb::LevelChunkWithLight { chunk: chunk(x, z) })
 }
@@ -206,6 +220,18 @@ fn chunk_and_block_packets_reach_the_world() {
     );
     assert_eq!(c.last_chunk_error.as_deref(), Some("bad chunk"));
     assert_eq!(r.world.chunk_count(), 0);
+}
+
+#[test]
+fn block_entity_data_reaches_the_world() {
+    let mut r = Rig::new();
+    let nbt = nbt().write_unnamed();
+    r.apply(ClientboundPlay::BlockEntityData(cb::BlockEntityData {
+        pos: BlockPos::new(17, 64, 33),
+        kind: 7,
+        nbt: nbt.clone(),
+    }));
+    assert_eq!(r.world.log, [format!("be 17 64 33 7 {:?}", nbt)]);
 }
 
 #[test]
@@ -364,6 +390,22 @@ fn real_world_through_the_sink() {
     );
     assert_eq!(WorldSink::chunk_count(&world), 1);
     assert_eq!(world.non_empty_sections(), 2);
+    // A block_entity_data packet updates the block entity for the loaded chunk.
+    let sign = BlockPos::new(3, 8, 3);
+    let nbt = nbt().write_unnamed();
+    s.apply(
+        ClientboundPlay::BlockEntityData(cb::BlockEntityData {
+            pos: sign,
+            kind: 7,
+            nbt: nbt.clone(),
+        }),
+        &mut world,
+        &mut ents,
+        &SyncedRegistries::default(),
+        &mut out,
+    );
+    let be = world.block_entity(sign).unwrap();
+    assert_eq!((be.kind, &be.nbt), (7, &nbt));
     WorldSink::reset(&mut world, &DimensionInfo::overworld());
     assert_eq!(WorldSink::chunk_count(&world), 0);
     assert_eq!(world.biome_bits(), 7);
