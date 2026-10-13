@@ -9,7 +9,7 @@ with the mod architecture designed in. Licensed GPL-3.0-or-later.
 What a player needs to play Haste like the original game, without noticing a difference.
 Fabric mod support (Phase 2) is not counted here.
 
-**16 of 62 done, 27 partly done, 19 not started (about 48 %, counting partly done as half).**
+**17 of 62 done, 26 partly done, 19 not started (about 48 %, counting partly done as half).**
 
 ✅ done: works in the game window today, checked against a real server.
 🟡 partly done: some of it exists (in a library, or working without a window) but a player cannot use it fully yet.
@@ -49,12 +49,12 @@ Fabric mod support (Phase 2) is not counted here.
 - ✅ Fullscreen (F11)
 - ✅ Animated textures (water, lava, fire, portals), prepared off the render thread
 - ✅ Third-person view (F5)
-- 🟡 First-person hand and held item: the renderer draws them, but the client does not turn them on yet
+- ✅ First-person hand and held item (hidden in third person)
 - 🟡 Smooth lighting and ambient occlusion: present, but leaves, bark and grass sides are about 1.35x brighter than vanilla
 - 🟡 Fog: distance fog, not matched to vanilla
 - 🟡 Mobs and players: drawn as cube models with default skins and name tags, not vanilla's models
 - 🟡 Particles: particle textures load (114 particle types); no particles are drawn
-- 🟡 Performance: `haste --bench` measures about 440 FPS (2.3 ms per frame) at 1920x1080, view distance 10, on the development laptop's integrated GPU; not yet compared with vanilla and Sodium
+- 🟡 Performance: `haste --bench` measures about 900-980 FPS (1.0-1.1 ms per frame) at 1920x1080, render distance 12, on the development laptop's integrated GPU; not yet compared with vanilla and Sodium
 - 🟡 Screen effects: damage tilt, red flash on hit entities and the vignette work; underwater and fire overlays, nausea and pumpkin do not
 - ⬜ Block entities drawn: chests, signs with text, beds, banners, heads, shulker boxes
 - ⬜ Entity animation (walking, attacking, swimming)
@@ -87,9 +87,9 @@ These run as the game's own Java code inside Haste. The HUD is drawn in the game
 - ⬜ Elytra flight
 
 ### Sound
-- 🟡 Sound effects: sounds.json, variant choice and real audio output exist; not yet hooked to the game's sound events
-- 🟡 3D sound: distance falloff and stereo panning are computed and played by the audio output; not yet hooked to the game
-- 🟡 Music: tracks and pauses by situation are chosen; not yet started by the game
+- 🟡 Sound effects: the server's sounds play in the window (block, entity and stopped sounds, per-category volumes); not yet checked by ear
+- 🟡 3D sound: distance falloff and stereo panning from the player's eye, entity sounds follow the entity; not yet checked by ear
+- 🟡 Music: plays by situation (game, creative, underwater) with vanilla's pauses; not yet checked by ear
 - ⬜ Sounds of your own footsteps, block breaking and placing
 
 ## Try it

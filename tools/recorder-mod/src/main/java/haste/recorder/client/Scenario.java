@@ -73,7 +73,7 @@ public final class Scenario {
             String[] args = rest.isEmpty() ? new String[0] : rest.split("\\s+");
             switch (op) {
                 case "wait", "wait_world", "cmd", "look", "hud", "screen", "chat", "screenshot",
-                     "record", "slot", "quit", "log" -> {}
+                     "record", "slot", "quit", "log", "dump_models" -> {}
                 default -> throw new IOException(file + ":" + n + ": unknown step '" + op + "'");
             }
             steps.add(new Step(n, op, args, rest));
@@ -236,6 +236,16 @@ public final class Scenario {
                     return false;
                 }
                 return !RecorderState.recording();
+            }
+            case "dump_models" -> {
+                // Zero-time: walks the client's baked model layers and writes the JSON dump.
+                try {
+                    int layers = ModelDumps.dumpModels();
+                    RecorderIO.LOGGER.info("haste-recorder: dumped {} model layers", layers);
+                } catch (IOException | ReflectiveOperationException e) {
+                    throw new IllegalStateException("dump_models failed", e);
+                }
+                return true;
             }
             case "quit" -> {
                 done(mc);
