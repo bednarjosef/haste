@@ -113,7 +113,7 @@ async fn wait_for_ctrl_c() {
 /// The game dir and client log stay behind after the client exits (haste-setup owns both).
 fn run_vanilla(fabric: bool, server: Option<String>, username: String) -> anyhow::Result<()> {
     tokio::runtime::Runtime::new()?.block_on(async move {
-        ensure_vanilla_installation()?;
+        ensure_vanilla_installation(haste_core::paths::cache_dir())?;
         let opts = vanilla_launch_options(fabric, server, username);
         let mut client = haste_setup::launch::launch_vanilla(opts).await?;
         println!(
@@ -150,12 +150,18 @@ fn vanilla_launch_options(
 
 /// Fails with a clear error when the installation the vanilla launcher needs is absent
 /// (client jar, libraries, assets, JDK), pointing at `haste setup` before any launch happens.
-/// Purely local checks: no network, no process, before the client is ever started.
-fn ensure_vanilla_installation() -> anyhow::Result<()> {
+/// Purely local checks on the given cache root: no network, no process, before the client is
+/// ever started. The cache root is a parameter so tests can pass an empty temp dir instead of
+/// mutating the process-wide `HASTE_CACHE`.
+fn ensure_vanilla_installation(cache: impl AsRef<std::path::Path>) -> anyhow::Result<()> {
+    let cache = cache.as_ref();
     let missing: Vec<String> = [
-        haste_core::paths::client_jar(),
-        haste_core::paths::assets_dir(),
-        haste_setup::install::libraries_dir(),
+        cache
+            .join("versions")
+            .join(haste_core::paths::MC_VERSION)
+            .join("client.jar"),
+        cache.join("assets"),
+        cache.join("libraries"),
     ]
     .into_iter()
     .filter(|p| !p.exists())
@@ -167,10 +173,15 @@ fn ensure_vanilla_installation() -> anyhow::Result<()> {
             missing.join(", ")
         ));
     }
-    if haste_setup::install::resolve_cached_java().is_none() {
+    let java = if std::env::consts::OS == "windows" {
+        cache.join("jdk").join("bin").join("java.exe")
+    } else {
+        cache.join("jdk").join("bin").join("java")
+    };
+    if !java.is_file() {
         return Err(anyhow::anyhow!(
             "no java in {}; run `haste setup` first",
-            haste_core::paths::cache_dir().display()
+            cache.display()
         ));
     }
     Ok(())
@@ -200,8 +211,10 @@ mod tests {
 
     #[test]
     fn vanilla_missing_installation_is_a_clear_error() {
-        std::env::set_var("HASTE_CACHE", "/nonexistent-haste-cache-for-test");
-        let err = ensure_vanilla_installation().expect_err("nothing exists under the empty cache");
+        // an empty temp dir as the cache root: every check fails, no env var is touched
+        let cache = std::env::temp_dir().join("haste-test-empty-cache");
+        std::fs::create_dir_all(&cache).expect("create temp dir");
+        let err = ensure_vanilla_installation(&cache).expect_err("nothing exists under the cache");
         let msg = format!("{err:#}");
         assert!(msg.contains("run `haste setup`"), "message was: {msg}");
         assert!(msg.contains("client.jar"), "message was: {msg}");
