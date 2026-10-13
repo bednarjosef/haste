@@ -115,6 +115,12 @@ pub trait EntitySink {
     fn set_equipment(&mut self, id: EntityId, slot: u8, item: ItemStackData);
     /// `EntityStore::player_info`.
     fn player_info(&mut self, info: &[PlayerInfo]);
+    /// `EntityStore::set_passengers`: the vehicle's passenger list is replaced by `passengers`.
+    fn set_passengers(&mut self, vehicle: EntityId, passengers: &[EntityId]);
+    /// `EntityStore::entity_type_info`: registry index and dimensions, for the seat offset.
+    fn entity_type_info(&self, _id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
+        None
+    }
     /// Position and rotation of an entity.
     fn pose(&self, id: EntityId) -> Option<(DVec3, f32, f32)>;
     /// Hit box of an entity, for the crosshair (none in fakes by default).
@@ -206,6 +212,12 @@ impl EntitySink for EntityStore {
     fn player_info(&mut self, info: &[PlayerInfo]) {
         EntityStore::player_info(self, info)
     }
+    fn set_passengers(&mut self, vehicle: EntityId, passengers: &[EntityId]) {
+        EntityStore::set_passengers(self, vehicle, passengers)
+    }
+    fn entity_type_info(&self, id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
+        EntityStore::entity_type_info(self, id)
+    }
     fn pose(&self, id: EntityId) -> Option<(DVec3, f32, f32)> {
         self.get(id).map(|e| (e.pos, e.yaw, e.pitch))
     }
@@ -230,6 +242,23 @@ impl EntitySink for EntityStore {
 /// The entity store (dimensions oracle when present).
 pub fn new_entity_store(entity_types: usize) -> EntityStore {
     EntityStore::new(EntityDimensions::from_registry_len(entity_types))
+}
+
+/// The `minecraft:entity_type` registry entries in id order: the synced registry's when the
+/// server sent one (its entry order defines the ids), else the static one from the game data
+/// (`registries.json`, the data generator's own order; the two agree on vanilla servers).
+pub fn entity_type_names(regs: &SyncedRegistries, data: &GameData) -> Vec<Identifier> {
+    if let Some(entries) = regs.entries(&Identifier::minecraft("entity_type")) {
+        return entries.iter().map(|e| e.id.clone()).collect();
+    }
+    let n = data.registries.len("minecraft:entity_type");
+    (0..n)
+        .filter_map(|i| {
+            data.registries
+                .name("minecraft:entity_type", haste_core::RegistryIndex(i as u32))
+                .cloned()
+        })
+        .collect()
 }
 
 /// Loads the game data (block states, registries, shapes) once for the whole client.
@@ -296,6 +325,10 @@ pub struct Session {
     pub time_of_day: Option<i64>,
     /// Set by `start_configuration` or `transfer`: the next `login` starts a new world.
     pub new_world_pending: bool,
+    /// `minecraft:entity_type` registry entries in id order (the synced registry's when the
+    /// server sent one, else the static one from the data generator reports): resolves the
+    /// vehicle's type index to its name, for the passenger seat offset.
+    pub entity_type_names: Vec<Identifier>,
     /// Ticks of hurt-tilt camera roll left (10 per hit on our own entity).
     hurt_tilt_ticks: u32,
     /// Direction of the tilt: +1 rolls one way, -1 the other (from the damage yaw).
@@ -318,9 +351,18 @@ impl Session {
             entity_boxes: Vec::new(),
             time_of_day: None,
             new_world_pending: false,
+            entity_type_names: Vec::new(),
             hurt_tilt_ticks: 0,
             hurt_tilt_dir: 0.0,
         }
+    }
+
+    /// Sets the `minecraft:entity_type` registry entries in id order: the synced registry when
+    /// the server sent one, else the static one from the game data (`registries.json`). The
+    /// two agree on vanilla servers (both are the registry's own order); mods that add entity
+    /// types are unknown here and ride on the default seat, never a panic.
+    pub fn set_entity_type_names(&mut self, names: Vec<Identifier>) {
+        self.entity_type_names = names;
     }
 
     /// The hurt-tilt camera roll in degrees for the remaining tilt ticks, easing out over
@@ -416,6 +458,8 @@ impl Session {
                 self.entity_ids.clear();
                 self.breaking.clear();
                 self.dimension = dim;
+                // A respawn is a new body: no vehicle, no riding.
+                self.player.set_vehicle(None, 0.0);
             }
             P::PlayerPosition(_) => self.counters.teleports += 1,
             _ if player_packet => {}
@@ -478,10 +522,39 @@ impl Session {
             }
             P::RemoveEntities(r) => {
                 let ids: Vec<EntityId> = r.entity_ids.iter().map(|i| EntityId(*i)).collect();
+                // If our vehicle is removed, we dismount (the store's riding bookkeeping drops
+                // us too, as a passenger of the removed vehicle).
+                if self.player.vehicle.is_some_and(|v| ids.contains(&v)) {
+                    self.player.set_vehicle(None, 0.0);
+                }
                 for id in &ids {
                     self.entity_ids.remove(id);
                 }
                 entities.remove(&ids);
+            }
+            P::SetPassengers(s) => {
+                let vehicle = EntityId(s.vehicle);
+                let passengers: Vec<EntityId> = s.passengers.iter().map(|i| EntityId(*i)).collect();
+                entities.set_passengers(vehicle, &passengers);
+                let own = self.entity_id;
+                if passengers.contains(&own) {
+                    // Mount (or re-seat): the seat offset comes from the vehicle's type.
+                    let seat = entities
+                        .entity_type_info(vehicle)
+                        .map(|(kind, dims)| {
+                            let name = self
+                                .entity_type_names
+                                .get(kind.0 as usize)
+                                .map_or("?", |id| id.path());
+                            haste_entity::passenger_offset(name, dims)
+                        })
+                        .unwrap_or(0.0);
+                    self.player.set_vehicle(Some(vehicle), seat);
+                } else if self.player.vehicle == Some(vehicle) {
+                    // Dismount: our vehicle's new list no longer names us. Sneak's shift flag
+                    // in player_input is what made the server send this.
+                    self.player.set_vehicle(None, 0.0);
+                }
             }
             P::MoveEntityPos(m) => {
                 entities.move_delta(EntityId(m.entity_id), m.deltas.total(), m.on_ground)
@@ -583,6 +656,13 @@ impl Session {
                 self.entity_boxes.push((*id, b));
             }
         }
+        // The vehicle's position this tick, for the passenger tick (`ride_tick`). A vehicle we
+        // do not track (removed before its set_passengers, spawn not yet arrived) leaves the
+        // passenger at its last position.
+        let vehicle_pos = self
+            .player
+            .vehicle
+            .and_then(|v| entities.pose(v).map(|p| p.0));
         match world.physics() {
             Some((view, data)) => {
                 self.player.prepare(data);
@@ -590,13 +670,15 @@ impl Session {
                     data,
                     entities: &self.entity_boxes,
                 };
-                self.player.tick_interact(input, view, &env, out)
+                self.player
+                    .tick_interact(input, view, &env, vehicle_pos, out)
             }
             None => self.player.tick_with(
                 input,
                 &NoBlocks,
                 &NoBlocks,
                 &haste_physics::DefaultBlockPhysics,
+                vehicle_pos,
                 out,
             ),
         }

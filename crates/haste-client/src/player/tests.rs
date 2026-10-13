@@ -52,12 +52,22 @@ fn spawned() -> (LocalPlayer, Vec<ServerboundPlay>) {
 }
 
 fn tick(p: &mut LocalPlayer, input: &InputState) -> Vec<ServerboundPlay> {
+    tick_riding(p, input, None)
+}
+
+/// One tick that knows where the vehicle we ride is (the passenger tick follows it).
+fn tick_riding(
+    p: &mut LocalPlayer,
+    input: &InputState,
+    vehicle_pos: Option<DVec3>,
+) -> Vec<ServerboundPlay> {
     let mut out = Vec::new();
     p.tick_with(
         input,
         &world(),
         &TestShapes::default(),
         &TestShapes::default(),
+        vehicle_pos,
         &mut out,
     );
     out
@@ -91,6 +101,7 @@ fn first_teleport_accepts_one_tick_later_then_reports_loaded() {
         &world(),
         &TestShapes::default(),
         &TestShapes::default(),
+        None,
         &mut out,
     );
     assert!(out.is_empty());
@@ -245,6 +256,7 @@ fn first_move_after_join_carries_the_server_position() {
         &floor,
         &TestShapes::default(),
         &TestShapes::default(),
+        None,
         &mut out,
     );
     assert!(out.is_empty());
@@ -253,6 +265,7 @@ fn first_move_after_join_carries_the_server_position() {
         &floor,
         &TestShapes::default(),
         &TestShapes::default(),
+        None,
         &mut out,
     );
     // accept (with the server's position) + player_loaded, then the per-tick packets.
@@ -483,4 +496,107 @@ fn respawn_waits_for_a_new_position() {
         ["accept", "loaded"]
     );
     assert!(p.loaded);
+}
+
+// ---------------------------------------------------------------------------
+// Riding: the passenger tick (vanilla `rideTick`).
+// ---------------------------------------------------------------------------
+
+/// Mounted on a vehicle at (0.5, 64, 0.5) with a seat offset of 0.1, after the join flow.
+fn riding() -> LocalPlayer {
+    let (mut p, _) = spawned();
+    p.set_vehicle(Some(EntityId(9)), 0.1);
+    p
+}
+
+#[test]
+fn the_passenger_sits_at_the_seat_and_follows_the_vehicle() {
+    let mut p = riding();
+    let pos = DVec3::new(10.0, 64.0, 10.0);
+    let out = tick_riding(&mut p, &InputState::default(), Some(pos));
+    assert_eq!(p.state.pos, DVec3::new(10.0, 64.1, 10.0));
+    // Rotation only; never a position packet.
+    assert_eq!(names(&out), ["tick_end"]);
+    // The vehicle moves: the passenger moves with it, and the camera follows (prev_pos
+    // brackets the tick like always).
+    let out = tick_riding(
+        &mut p,
+        &InputState::default(),
+        Some(DVec3::new(11.0, 64.0, 10.0)),
+    );
+    assert_eq!(p.state.pos, DVec3::new(11.0, 64.1, 10.0));
+    assert_eq!(p.prev_pos, DVec3::new(10.0, 64.1, 10.0));
+    let (eye, _, _) = p.camera(0.5);
+    assert!((eye.x - 10.5).abs() < 1e-9, "{eye:?}");
+    assert_eq!(names(&out), ["tick_end"]);
+    // An untracked vehicle leaves the passenger where it was.
+    tick_riding(&mut p, &InputState::default(), None);
+    assert_eq!(p.state.pos, DVec3::new(11.0, 64.1, 10.0));
+}
+
+#[test]
+fn a_passenger_looks_freely_and_sends_rotation_only() {
+    let mut p = riding();
+    let look = InputState {
+        yaw: 30.0,
+        pitch: 10.0,
+        ..Default::default()
+    };
+    let out = tick_riding(&mut p, &look, Some(DVec3::new(10.0, 64.0, 10.0)));
+    assert_eq!((p.state.yaw, p.state.pitch), (30.0, 10.0));
+    // The look changed: one rotation packet, no position (the keys have not changed, so no
+    // player_input with it).
+    assert_eq!(names(&out), ["rot", "tick_end"]);
+    // Same look again: nothing but the tick end.
+    let out = tick_riding(&mut p, &look, Some(DVec3::new(10.0, 64.0, 10.0)));
+    assert_eq!(names(&out), ["tick_end"]);
+}
+
+#[test]
+fn sneak_while_riding_sets_the_shift_flag_in_player_input() {
+    let mut p = riding();
+    let sneak = InputState {
+        sneak: true,
+        ..Default::default()
+    };
+    let out = tick_riding(&mut p, &sneak, Some(DVec3::new(10.0, 64.0, 10.0)));
+    let flags = out.iter().find_map(|p| match p {
+        ServerboundPlay::PlayerInput(i) => Some(i.flags),
+        _ => None,
+    });
+    assert_eq!(
+        flags,
+        Some(haste_protocol::packets::play::serverbound::input_flags::SNEAK)
+    );
+    // Still mounted: the server answers the shift flag with set_passengers (not our doing).
+    assert_eq!(p.vehicle(), Some(EntityId(9)));
+}
+
+#[test]
+fn dismount_resumes_physics_from_the_seat() {
+    let mut p = riding();
+    tick_riding(
+        &mut p,
+        &InputState::default(),
+        Some(DVec3::new(0.5, 64.0, 0.5)),
+    );
+    assert_eq!(p.state.pos, DVec3::new(0.5, 64.1, 0.5));
+    // Dismount: gravity takes over from the seat position. The first tick after it builds
+    // velocity (the ride zeroed it); the fall starts the tick after.
+    p.set_vehicle(None, 0.0);
+    tick_riding(&mut p, &InputState::default(), None);
+    assert_eq!(p.state.pos, DVec3::new(0.5, 64.1, 0.5));
+    let out = tick_riding(&mut p, &InputState::default(), None);
+    assert!(
+        p.state.pos.y < 64.1 && p.state.pos.y > 63.9,
+        "gravity resumed: {}",
+        p.state.pos.y
+    );
+    // And movement packets are position packets again.
+    assert!(out.iter().any(|p| {
+        matches!(
+            p,
+            ServerboundPlay::MovePlayerPos(_) | ServerboundPlay::MovePlayerPosRot(_)
+        )
+    }));
 }

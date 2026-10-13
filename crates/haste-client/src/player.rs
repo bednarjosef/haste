@@ -176,6 +176,12 @@ pub struct LocalPlayer {
     pub has_position: bool,
     /// Whether `player_loaded` was sent since login/respawn (movement is sent only after).
     pub loaded: bool,
+    /// The vehicle the server has us riding (`set_passengers`); `None` when on foot. While set,
+    /// the player's own physics does not run: each tick its position is the vehicle's position
+    /// plus the seat offset ([`LocalPlayer::ride_tick`]).
+    pub vehicle: Option<EntityId>,
+    /// Where our feet sit above the vehicle's position while riding (set on mount).
+    seat_offset: f64,
     /// Teleport id awaiting its `accept_teleportation`; the accept waits one full tick
     /// after the teleport arrived (see [`LocalPlayer::flush_pending_accept`]). The server
     /// queues further teleports until the accept, so one slot is enough.
@@ -219,6 +225,8 @@ impl LocalPlayer {
             held_slot: 0,
             has_position: false,
             loaded: false,
+            vehicle: None,
+            seat_offset: 0.0,
             pending_accept: None,
             pending_accept_age: 0,
             teleports: 0,
@@ -543,7 +551,7 @@ impl LocalPlayer {
             data,
             entities: &[],
         };
-        self.tick_interact(input, world, &env, out);
+        self.tick_interact(input, world, &env, None, out);
     }
 
     /// Resolves what the player needs from the game data once (attribute ids, tool table).
@@ -557,37 +565,93 @@ impl LocalPlayer {
     }
 
     /// One 20 Hz tick over any world view without interactions (tests use
-    /// `haste_physics::testing`).
+    /// `haste_physics::testing`). `vehicle_pos` is the position of the vehicle we ride, if any,
+    /// this tick ([`LocalPlayer::ride_tick`]).
     pub fn tick_with(
         &mut self,
         input: &InputState,
         world: &dyn BlockView,
         shapes: &dyn CollisionShapes,
         blocks: &dyn BlockPhysics,
+        vehicle_pos: Option<DVec3>,
         out: &mut Vec<ServerboundPlay>,
     ) {
-        self.tick_inner(input, world, shapes, blocks, None, out);
+        self.tick_inner(
+            input,
+            &TickCtx {
+                world,
+                shapes,
+                blocks,
+                env: None,
+            },
+            vehicle_pos,
+            out,
+        );
     }
 
     /// One 20 Hz tick with the interactions set by [`LocalPlayer::set_interact`] first (hotbar,
     /// attack/break, use/place, pick block), then movement, as a vanilla client orders them.
+    /// `vehicle_pos` is the position of the vehicle we ride, if any, this tick.
     pub fn tick_interact(
         &mut self,
         input: &InputState,
         world: &dyn BlockView,
         env: &interact::InteractEnv<'_>,
+        vehicle_pos: Option<DVec3>,
         out: &mut Vec<ServerboundPlay>,
     ) {
-        self.tick_inner(input, world, &env.data.shapes, env.data, Some(env), out);
+        self.tick_inner(
+            input,
+            &TickCtx {
+                world,
+                shapes: &env.data.shapes,
+                blocks: env.data,
+                env: Some(env),
+            },
+            vehicle_pos,
+            out,
+        );
+    }
+
+    /// Mounts or dismounts (`set_passengers`): `seat` is where our feet sit above the vehicle's
+    /// position each tick (the vehicle type's passenger attachment, see
+    /// `haste_entity::riding::passenger_offset`). On a dismount, normal physics resumes from
+    /// where the player is.
+    pub fn set_vehicle(&mut self, vehicle: Option<EntityId>, seat: f64) {
+        if vehicle.is_some() {
+            self.seat_offset = seat;
+        }
+        self.vehicle = vehicle;
+    }
+
+    /// The vehicle we ride, if any.
+    pub fn vehicle(&self) -> Option<EntityId> {
+        self.vehicle
+    }
+
+    /// The passenger tick, vanilla's `rideTick`: a separate seam next to the movement tick, not
+    /// a branch inside it. The passenger's own physics does not run; its position is the
+    /// vehicle's position plus the seat offset, and only its look is free (`look` is the
+    /// player's look for this tick, look offset already applied). `vehicle_pos` is `None` when
+    /// the vehicle is not tracked (removed, or its spawn not yet arrived): the passenger keeps
+    /// its last position.
+    pub fn ride_tick(&mut self, look: (f32, f32), vehicle_pos: Option<DVec3>) {
+        if let Some(pos) = vehicle_pos {
+            self.state.pos = pos + DVec3::new(0.0, self.seat_offset, 0.0);
+        }
+        self.state.velocity = DVec3::ZERO;
+        self.state.fall_distance = 0.0;
+        self.state.on_ground = false;
+        self.state.horizontal_collision = false;
+        self.state.yaw = look.0;
+        self.state.pitch = look.1;
     }
 
     fn tick_inner(
         &mut self,
         input: &InputState,
-        world: &dyn BlockView,
-        shapes: &dyn CollisionShapes,
-        blocks: &dyn BlockPhysics,
-        env: Option<&interact::InteractEnv<'_>>,
+        ctx: &TickCtx<'_>,
+        vehicle_pos: Option<DVec3>,
         out: &mut Vec<ServerboundPlay>,
     ) {
         self.apply_attributes();
@@ -605,18 +669,29 @@ impl LocalPlayer {
             input.yaw + self.look_offset.0,
             (input.pitch + self.look_offset.1).clamp(-90.0, 90.0),
         );
-        if let Some(env) = env {
-            self.interact_step(look, world, env, out);
+        if let Some(env) = ctx.env {
+            self.interact_step(look, ctx.world, env, out);
         }
 
-        // 1. player_input when the held keys change (raw keys, as pressed).
+        // 1. player_input when the held keys change (raw keys, as pressed). While riding this
+        // is how the vehicle learns our keys (steering, and sneak to dismount: the shift flag
+        // makes the server answer with a set_passengers that removes us).
         let flags = input_bits(input);
         if self.sent.input != Some(flags) {
             out.push(ServerboundPlay::PlayerInput(sb::PlayerInput { flags }));
             self.sent.input = Some(flags);
         }
 
-        // 2. Physics. The player does not move while its chunk is not loaded.
+        // 2. The passenger tick (vanilla `rideTick`) replaces physics: a passenger sends
+        // rotation only, never position packets (the server owns a passenger's position).
+        if self.vehicle.is_some() {
+            self.ride_tick(look, vehicle_pos);
+            self.send_rotation(out);
+            out.push(ServerboundPlay::ClientTickEnd(sb::ClientTickEnd {}));
+            return;
+        }
+
+        // 3. Physics. The player does not move while its chunk is not loaded.
         let mut phys_input = *input;
         phys_input.yaw = input.yaw + self.look_offset.0;
         phys_input.pitch = (input.pitch + self.look_offset.1).clamp(-90.0, 90.0);
@@ -632,21 +707,21 @@ impl LocalPlayer {
             self.state.flying = false;
         }
         let chunk = BlockPos::from_dvec3(self.state.pos).chunk();
-        if world.is_chunk_loaded(chunk) {
+        if ctx.world.is_chunk_loaded(chunk) {
             haste_physics::tick(
                 &mut self.state,
                 &phys_input,
                 &self.attrs,
-                world,
-                shapes,
-                blocks,
+                ctx.world,
+                ctx.shapes,
+                ctx.blocks,
             );
         } else {
             self.state.yaw = phys_input.yaw;
             self.state.pitch = phys_input.pitch;
         }
 
-        // 3. Flight started or stopped (toggle or landing).
+        // 4. Flight started or stopped (toggle or landing).
         if self.state.flying != was_flying {
             let mut f = 0;
             if self.state.flying {
@@ -657,7 +732,7 @@ impl LocalPlayer {
             }));
         }
 
-        // 4. Sprint state.
+        // 5. Sprint state.
         if self.state.sprinting != self.sent.sprinting {
             out.push(ServerboundPlay::PlayerCommand(sb::PlayerCommand {
                 entity_id: self.entity_id.0,
@@ -671,11 +746,48 @@ impl LocalPlayer {
             self.sent.sprinting = self.state.sprinting;
         }
 
-        // 5. Movement.
+        // 6. Movement.
         self.send_movement(out);
 
         // 6. End of tick.
         out.push(ServerboundPlay::ClientTickEnd(sb::ClientTickEnd {}));
+    }
+
+    /// Movement send while riding (a passenger never sends position packets: the server owns
+    /// its position): rotation when it changed, else a status-only packet when on-ground or
+    /// collision changed. Sneak dismounts arrive as `player_input`'s shift flag, answered by
+    /// the server with `set_passengers`.
+    fn send_rotation(&mut self, out: &mut Vec<ServerboundPlay>) {
+        let s = &self.state;
+        if !(s.yaw.is_finite() && s.pitch.is_finite()) {
+            tracing::error!("non-finite player state, not sent: {s:?}");
+            return;
+        }
+        let rot_changed = s.yaw != self.sent.yaw || s.pitch != self.sent.pitch;
+        let mut flags = 0;
+        if s.on_ground {
+            flags |= move_flags::ON_GROUND;
+        }
+        if s.horizontal_collision {
+            flags |= move_flags::HORIZONTAL_COLLISION;
+        }
+        let status_changed = s.on_ground != self.sent.on_ground
+            || s.horizontal_collision != self.sent.horizontal_collision;
+        if rot_changed {
+            out.push(ServerboundPlay::MovePlayerRot(sb::MovePlayerRot {
+                yaw: s.yaw,
+                pitch: s.pitch,
+                flags,
+            }));
+            self.sent.yaw = s.yaw;
+            self.sent.pitch = s.pitch;
+        } else if status_changed {
+            out.push(ServerboundPlay::MovePlayerStatusOnly(
+                sb::MovePlayerStatusOnly { flags },
+            ));
+        }
+        self.sent.on_ground = s.on_ground;
+        self.sent.horizontal_collision = s.horizontal_collision;
     }
 
     fn send_movement(&mut self, out: &mut Vec<ServerboundPlay>) {
@@ -748,6 +860,16 @@ pub fn input_bits(i: &InputState) -> u8 {
         }
     }
     f
+}
+
+/// What one player tick runs against: the world and its physics tables, and the interactions
+/// environment when the tick has interactions (the client's real path; `None` in tests that
+/// only move).
+struct TickCtx<'a> {
+    world: &'a dyn BlockView,
+    shapes: &'a dyn CollisionShapes,
+    blocks: &'a dyn BlockPhysics,
+    env: Option<&'a interact::InteractEnv<'a>>,
 }
 
 pub mod interact;

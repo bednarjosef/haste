@@ -7,6 +7,7 @@ pub mod dims;
 pub mod lerp;
 pub mod metadata;
 pub mod models;
+pub mod riding;
 pub mod store;
 
 #[cfg(test)]
@@ -14,4 +15,5 @@ mod tests;
 
 pub use dims::{Dimensions, EntityDimensions};
 pub use metadata::{Metadata, SharedFlags};
+pub use riding::passenger_offset;
 pub use store::{Entity, EntityStore};

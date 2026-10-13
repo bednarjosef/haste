@@ -600,3 +600,85 @@ fn death_holds_the_tint_for_20_ticks() {
     s.tick();
     assert_eq!(strength(&s), 0.0);
 }
+
+// ---------------------------------------------------------------------------
+// Riding: set_passengers bookkeeping and the seat offset.
+// ---------------------------------------------------------------------------
+
+use crate::riding::passenger_offset;
+
+#[test]
+fn set_passengers_mounts_replaces_and_dismounts() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO)); // vehicle
+    s.spawn(&spawn(2, DVec3::ZERO));
+    s.spawn(&spawn(3, DVec3::ZERO));
+    // Mount two passengers.
+    s.set_passengers(EntityId(1), &[EntityId(2), EntityId(3)]);
+    assert_eq!(s.vehicle_of(EntityId(2)), Some(EntityId(1)));
+    assert_eq!(s.vehicle_of(EntityId(3)), Some(EntityId(1)));
+    assert_eq!(
+        s.passengers_of(EntityId(1)).unwrap(),
+        &[EntityId(2), EntityId(3)]
+    );
+    // A passenger list replaces the previous one: 3 stays, 2 is dropped.
+    s.set_passengers(EntityId(1), &[EntityId(3)]);
+    assert_eq!(s.vehicle_of(EntityId(2)), None);
+    assert_eq!(s.vehicle_of(EntityId(3)), Some(EntityId(1)));
+    assert_eq!(s.passengers_of(EntityId(1)).unwrap(), &[EntityId(3)]);
+    // An empty list dismounts everyone.
+    s.set_passengers(EntityId(1), &[]);
+    assert_eq!(s.vehicle_of(EntityId(3)), None);
+    assert!(s.passengers_of(EntityId(1)).is_none());
+    // A vehicle's list can also name entities never spawned: the bookkeeping holds them
+    // (the server does this between the spawn and the set_passengers arriving).
+    s.set_passengers(EntityId(1), &[EntityId(9)]);
+    assert_eq!(s.vehicle_of(EntityId(9)), Some(EntityId(1)));
+}
+
+#[test]
+fn removed_entities_drop_out_of_riding_on_both_sides() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.spawn(&spawn(2, DVec3::ZERO));
+    s.spawn(&spawn(3, DVec3::ZERO));
+    s.set_passengers(EntityId(1), &[EntityId(2)]);
+    s.set_passengers(EntityId(3), &[EntityId(1)]);
+    // The vehicle is removed: its passengers are freed, and it stops riding entity 3.
+    s.remove(&[EntityId(1)]);
+    assert_eq!(s.vehicle_of(EntityId(2)), None);
+    assert_eq!(s.vehicle_of(EntityId(1)), None);
+    assert!(s.passengers_of(EntityId(3)).is_none());
+    // A passenger removed from the store also vanishes from its vehicle's list.
+    s.set_passengers(EntityId(3), &[EntityId(2)]);
+    s.remove(&[EntityId(2)]);
+    assert!(s.passengers_of(EntityId(3)).is_none());
+}
+
+#[test]
+fn seat_offsets_for_the_vanilla_vehicles() {
+    // Minecart: the passenger sits inside, near the cart's floor.
+    assert_eq!(passenger_offset("minecart", (0.98, 0.7)), 0.1);
+    // Boats and rafts (every wood, chest variants too) share the boat seat.
+    for name in [
+        "boat",
+        "oak_boat",
+        "birch_raft",
+        "mangrove_chest_boat",
+        "raft",
+    ] {
+        assert_eq!(passenger_offset(name, (1.375, 0.5625)), 0.15, "{name}");
+    }
+    // Horse family: the saddle.
+    for name in ["horse", "skeleton_horse", "zombie_horse", "donkey", "mule"] {
+        assert_eq!(passenger_offset(name, (1.39648, 1.6)), 0.6, "{name}");
+    }
+    assert_eq!(passenger_offset("camel", (1.7, 2.375)), 1.1);
+    assert_eq!(passenger_offset("pig", (0.9, 0.9)), 0.4);
+    assert_eq!(passenger_offset("strider", (0.9, 1.7)), 0.6);
+    // Unknown types (mods): the vehicle's own height, never a panic.
+    let off = passenger_offset("somemod:walker", (1.0, 2.5));
+    assert!((off - 2.5).abs() < 1e-6, "{off}");
+    let off = passenger_offset("zombie", (0.6, 1.95));
+    assert!((off - 1.95).abs() < 1e-6, "{off}");
+}
