@@ -60,3 +60,38 @@
   materialized lazily per section) — deferred; memory cost not justified yet.
 - `PalettedContainer::get_index` micro-bench: ~7.7 ns under load (indirect, 4 bits).
 - Palette decode: no allocation per entry; palette vec + packed longs only.
+
+## Chunk load benchmark (branch `chunk-load-speed`)
+
+`tests/load_bench.rs`: realistic synthetic overworld chunks (24 sections: single-value stone
+below y 0, 2-bit ore belt, 3-bit cave, 3-bit surface belt with water, single-value air above;
+2-bit biome containers, 2 heightmaps, 8 block entities, full light — daylight-shaped: all-15
+sky / all-0 block light above ground). Counting global allocator (opt-in per run). Run:
+`cargo test -q -p haste-world --release -- --ignored --nocapture load_bench`.
+
+Numbers on the shared machine (load 2-8, single thread; noisy — best pass of 5):
+
+- baseline (main): `load_chunk` median 13-16 us, p99 ~21-31 us, ~57-71k chunks/s;
+  `Chunk::decode` alone 8.7 us; 75 allocs/chunk steady state, ~22.8 KB allocated/chunk;
+  resident ~109 KB/chunk.
+- after bulk packed-long reads (`WireReader::take`, one bounds check per array instead of a
+  checked `get` + `from_be_bytes` per long): decode 8.7 -> 3.7 us.
+- after `dirty_dedup` switched std HashSet -> ahash (216 inserts per loaded chunk):
+  `load_chunk` median down to ~7-9 us.
+- after uniform-light dedup (all-15 sky stored as absent, all-0 block light stored empty;
+  word-wide scan): resident 109 -> 64 KB/chunk (-41%), decode +~1 us (7.9-9.5 us with light
+  vs 3-4.5 us without; the scan reads the same bytes the packet brought in anyway, and it
+  unpins the packet's `Bytes` — light arrays stop keeping the whole packet buffer alive).
+- final: `load_chunk` median 10.7-12.8 us, p99 15-19 us, ~75-92k chunks/s best pass;
+  131 allocs/chunk total (75 steady state + one-time world warmup), ~22.8 KB allocated/chunk,
+  64 KB resident/chunk. At render distance 32 (1089 chunks): ~70 MB containers.
+
+Behaviour pinned by `benchmark_chunks_decode_stably`: FNV-1a hash over every block state and
+biome of the bench chunks (`0xa7e8f48376c8ee92`, `0x5088a771ee4ad23a`), identical before and
+after the optimizations.
+
+Next steps if more is needed: single-value sections skip the biome container storage (they
+still arrive on the wire); `load_chunk`'s neighbour-dirty loop allocates nothing but touches
+the hash set ~216x — could switch to a fixed-size bitset over a loaded-chunk window; light
+arrays could be stored as `Arc<[u8; 2048]>` copies to unpin packet buffers even for
+non-uniform sections.

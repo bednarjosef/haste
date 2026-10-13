@@ -34,6 +34,14 @@ pub enum ScreenKind {
     Inventory,
     /// `ChatScreen` opened with "/" typed (the command key).
     Command,
+    /// `net.minecraft.client.gui.screens.TitleScreen` (the game's main menu).
+    Title,
+    /// `net.minecraft.client.gui.screens.options.OptionsScreen` (vanilla opens it from the title
+    /// screen; "Done" returns to the screen that opened it).
+    Options,
+    /// `net.minecraft.client.gui.screens.multiplayer.JoinMultiplayerScreen`, whose parent is a
+    /// `TitleScreen`.
+    Multiplayer,
 }
 
 impl ScreenKind {
@@ -43,6 +51,9 @@ impl ScreenKind {
             ScreenKind::Pause => 1,
             ScreenKind::Inventory => 2,
             ScreenKind::Command => 3,
+            ScreenKind::Title => 4,
+            ScreenKind::Options => 5,
+            ScreenKind::Multiplayer => 6,
         }
     }
 }
@@ -61,6 +72,7 @@ struct Methods {
     mouse: jni::objects::JMethodID,
     scroll: jni::objects::JMethodID,
     metrics_changed: jni::objects::JMethodID,
+    blend_debug: jni::objects::JMethodID,
     mouse_grabbed: jni::objects::JMethodID,
     set_mouse_grabbed: jni::objects::JMethodID,
 }
@@ -104,6 +116,11 @@ impl GuiPipeline {
                 &cls,
                 jni_str!("metricsChanged"),
                 jni_sig!("()V"),
+            )?,
+            blend_debug: env.get_method_id(
+                &cls,
+                jni_str!("blendDebug"),
+                jni_sig!("()Ljava/lang/String;"),
             )?,
             mouse_grabbed: env.get_method_id(&cls, jni_str!("mouseGrabbed"), jni_sig!("()Z"))?,
             set_mouse_grabbed: env.get_method_id(
@@ -317,6 +334,14 @@ impl GuiPipeline {
         if let Err(e) = self.call(self.m.metrics_changed, VOID, &[], |_, _| Ok(())) {
             self.failed("set_text_metrics", e);
         }
+    }
+
+    /// Where the last frame's blend modes came from: the pipeline and the name counts, then the
+    /// multiply/invert blits' pipelines as `<pipeline location> <code> <count>` lines.
+    pub fn blend_debug(&self) -> Result<String> {
+        self.call(self.m.blend_debug, JavaType::Object, &[], |env, v| {
+            jstring_to_string(env, v.l()?)
+        })
     }
 
     /// Reads or updates the Rust-owned state the proxies see (inventory mirror, chat history, outbox).
