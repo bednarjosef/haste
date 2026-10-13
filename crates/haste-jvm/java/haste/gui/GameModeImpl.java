@@ -1,18 +1,19 @@
 package haste.gui;
 
-import haste.rt.Native;
 import net.minecraft.client.multiplayer.MultiPlayerGameMode;
-import net.minecraft.world.entity.player.Player;
-import net.minecraft.world.inventory.ContainerInput;
 
 /**
- * Bodies of the {@code MultiPlayerGameMode} proxy: container clicks go to Rust (which owns the inventory and
- * talks to the server). No client-side prediction yet: the slots change when Rust's state changes.
+ * Bodies of the {@code MultiPlayerGameMode} proxy: the game mode is Rust's. Container clicks keep vanilla's bodies
+ * (proxies.conf): vanilla predicts the click on the real menu and sends container_click with the hashed stacks.
  */
 public final class GameModeImpl {
     private GameModeImpl() {}
 
-    public static void handleContainerInput(MultiPlayerGameMode m, int containerId, int slot, int button, ContainerInput input, Player p) {
-        Native.containerInput(containerId, slot, button, input.ordinal());
+    /** The local player's game mode (Rust's state: login, respawn, game_event). */
+    public static net.minecraft.world.level.GameType getPlayerMode(MultiPlayerGameMode m) {
+        return net.minecraft.world.level.GameType.byId(PlayerImpl.gameMode());
     }
+    public static boolean canHurtPlayer(MultiPlayerGameMode m) { return getPlayerMode(m).isSurvival(); }
+    public static boolean hasExperience(MultiPlayerGameMode m) { return getPlayerMode(m).isSurvival(); }
+
 }

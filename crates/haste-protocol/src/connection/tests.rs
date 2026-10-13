@@ -234,14 +234,7 @@ async fn serve(
         panic!("expected ack")
     };
 
-    // Configuration.
-    let ServerboundConfiguration::ClientInformation(ci) = s
-        .recv(State::Configuration, ServerboundConfiguration::DECODERS)
-        .await
-    else {
-        panic!("expected client information")
-    };
-    log.push(format!("locale {}", ci.locale));
+    // Configuration: brand, then client information (the wiki's order).
     let ServerboundConfiguration::CustomPayload(brand) = s
         .recv(State::Configuration, ServerboundConfiguration::DECODERS)
         .await
@@ -252,6 +245,13 @@ async fn serve(
         "brand {}",
         Reader::new(&brand.data).string().unwrap()
     ));
+    let ServerboundConfiguration::ClientInformation(ci) = s
+        .recv(State::Configuration, ServerboundConfiguration::DECODERS)
+        .await
+    else {
+        panic!("expected client information")
+    };
+    log.push(format!("locale {}", ci.locale));
     s.send(
         State::Configuration,
         &ccb::SelectKnownPacks {
@@ -460,7 +460,7 @@ async fn run(encrypt: bool, compression: Option<i32>) {
     assert_eq!(stats.decode_failures[0].0, "minecraft:set_health");
     let log = server.await.unwrap();
     assert!(log.contains(&"hello tester".to_string()));
-    assert!(log.contains(&"brand haste".to_string()));
+    assert!(log.contains(&"brand vanilla".to_string()));
     assert!(log.contains(&"chunks/tick 64".to_string()));
     assert_eq!(log.contains(&"encrypted".to_string()), encrypt);
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -631,4 +631,304 @@ fn host_port_parsing() {
     assert_eq!(split_host_port("example.org"), ("example.org".into(), None));
     assert_eq!(split_host_port("[::1]:25566"), ("::1".into(), Some(25566)));
     assert_eq!(split_host_port("::1"), ("::1".into(), None));
+}
+
+// ---------------------------------------------------------------- reconfiguration and transfer
+
+impl Server {
+    /// Accepts a connection and runs handshake + offline login.
+    async fn accept(listener: &TcpListener, tables: Arc<ProtocolTables>, intent: i32) -> Server {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (r, w) = stream.into_split();
+        let mut s = Server {
+            dec: TcpNetworkDecoder::new(BufReader::new(r)),
+            enc: TcpNetworkEncoder::new(w),
+            tables,
+        };
+        let ServerboundHandshake::Intention(h) = s
+            .recv(State::Handshake, ServerboundHandshake::DECODERS)
+            .await
+        else {
+            panic!()
+        };
+        assert_eq!(h.intent, intent);
+        let ServerboundLogin::Hello(hello) = s.recv(State::Login, ServerboundLogin::DECODERS).await
+        else {
+            panic!("expected hello")
+        };
+        s.send(
+            State::Login,
+            &lcb::LoginFinished {
+                profile: GameProfile {
+                    uuid: Uuid::from_u128(42),
+                    name: hello.name,
+                    properties: vec![],
+                },
+                session_id: Uuid::from_u128(1),
+            },
+        )
+        .await;
+        let ServerboundLogin::LoginAcknowledged(_) =
+            s.recv(State::Login, ServerboundLogin::DECODERS).await
+        else {
+            panic!("expected ack")
+        };
+        s
+    }
+
+    async fn recv_cfg(&mut self) -> ServerboundConfiguration {
+        self.recv(State::Configuration, ServerboundConfiguration::DECODERS)
+            .await
+    }
+
+    /// Expects brand + client information.
+    async fn expect_hello(&mut self) {
+        assert!(matches!(
+            self.recv_cfg().await,
+            ServerboundConfiguration::CustomPayload(_)
+        ));
+        assert!(matches!(
+            self.recv_cfg().await,
+            ServerboundConfiguration::ClientInformation(_)
+        ));
+    }
+
+    /// Sends registries with one biome named `biome`, finishes configuration
+    /// and sends the play `login` with `entity_id`.
+    async fn finish_with(&mut self, biome: &str, entity_id: i32) {
+        self.send(
+            State::Configuration,
+            &ccb::RegistryData {
+                registry: Identifier::minecraft("dimension_type"),
+                entries: vec![RegistryEntry {
+                    id: Identifier::minecraft("overworld"),
+                    data: Some(overworld_type()),
+                }],
+            },
+        )
+        .await;
+        self.send(
+            State::Configuration,
+            &ccb::RegistryData {
+                registry: Identifier::minecraft("worldgen/biome"),
+                entries: vec![RegistryEntry {
+                    id: Identifier::minecraft(biome),
+                    data: None,
+                }],
+            },
+        )
+        .await;
+        self.send(State::Configuration, &ccb::FinishConfiguration {})
+            .await;
+        assert!(matches!(
+            self.recv_cfg().await,
+            ServerboundConfiguration::FinishConfiguration(_)
+        ));
+        self.send(State::Play, &play_login(entity_id)).await;
+    }
+}
+
+fn play_login(entity_id: i32) -> pcb::Login {
+    pcb::Login {
+        entity_id,
+        hardcore: false,
+        dimension_names: vec![Identifier::minecraft("overworld")],
+        max_players: 20,
+        view_distance: 8,
+        simulation_distance: 6,
+        reduced_debug_info: false,
+        enable_respawn_screen: true,
+        do_limited_crafting: false,
+        spawn: pcb::SpawnInfo {
+            dimension_type: 0,
+            dimension: Identifier::minecraft("overworld"),
+            hashed_seed: 0,
+            game_mode: 1,
+            previous_game_mode: 0,
+            is_debug: false,
+            is_flat: false,
+            death_location: None,
+            portal_cooldown: 0,
+            sea_level: 63,
+        },
+        online_mode: false,
+        enforces_secure_chat: false,
+    }
+}
+
+/// Server A: cookies and a resource pack in configuration, play, then a
+/// reconfiguration with new registries, then a transfer to server B, which
+/// reads the cookie stored on A.
+async fn serve_a_then_b(
+    a: TcpListener,
+    b: TcpListener,
+    tables: Arc<ProtocolTables>,
+) -> Vec<String> {
+    let mut log = Vec::new();
+    let mut s = Server::accept(&a, tables.clone(), INTENT_LOGIN).await;
+    s.expect_hello().await;
+    let key = Identifier::new("test", "cookie");
+    s.send(
+        State::Configuration,
+        &ccb::StoreCookie {
+            key: key.clone(),
+            payload: Bytes::from_static(&[1, 2, 3]),
+        },
+    )
+    .await;
+    s.send(
+        State::Configuration,
+        &ccb::CookieRequest { key: key.clone() },
+    )
+    .await;
+    let ServerboundConfiguration::CookieResponse(c) = s.recv_cfg().await else {
+        panic!("expected cookie response")
+    };
+    assert_eq!(c.payload.as_deref(), Some(&[1u8, 2, 3][..]));
+    s.send(
+        State::Configuration,
+        &ccb::ResourcePackPush {
+            id: Uuid::from_u128(7),
+            url: "http://127.0.0.1/pack.zip".into(),
+            hash: String::new(),
+            forced: true,
+            prompt: None,
+        },
+    )
+    .await;
+    for _ in 0..3 {
+        let ServerboundConfiguration::ResourcePack(r) = s.recv_cfg().await else {
+            panic!("expected resource pack status")
+        };
+        log.push(format!("pack {}", r.result));
+    }
+    s.finish_with("plains", 5).await;
+
+    // Reconfiguration.
+    s.send(State::Play, &pcb::StartConfiguration {}).await;
+    let ServerboundPlay::ConfigurationAcknowledged(_) =
+        s.recv(State::Play, ServerboundPlay::DECODERS).await
+    else {
+        panic!("expected configuration acknowledged")
+    };
+    s.expect_hello().await;
+    s.send(State::Configuration, &ccb::KeepAlive { id: 5 })
+        .await;
+    let ServerboundConfiguration::KeepAlive(k) = s.recv_cfg().await else {
+        panic!("expected keep alive")
+    };
+    assert_eq!(k.id, 5);
+    s.finish_with("desert", 6).await;
+    log.push("reconfigured".into());
+
+    // Transfer.
+    let target = b.local_addr().unwrap();
+    s.send(
+        State::Play,
+        &ccb::StoreCookie {
+            key: Identifier::new("test", "ticket"),
+            payload: Bytes::from_static(&[9]),
+        },
+    )
+    .await;
+    s.send(
+        State::Play,
+        &ccb::Transfer {
+            host: target.ip().to_string(),
+            port: target.port() as i32,
+        },
+    )
+    .await;
+    let mut t = Server::accept(&b, tables, INTENT_TRANSFER).await;
+    t.expect_hello().await;
+    t.send(
+        State::Configuration,
+        &ccb::CookieRequest {
+            key: Identifier::new("test", "ticket"),
+        },
+    )
+    .await;
+    let ServerboundConfiguration::CookieResponse(c) = t.recv_cfg().await else {
+        panic!("expected cookie response")
+    };
+    assert_eq!(c.payload.as_deref(), Some(&[9u8][..]));
+    t.finish_with("forest", 7).await;
+    log.push("transferred".into());
+    t.send(State::Play, &pcb::KeepAlive { id: 1234 }).await;
+    let ServerboundPlay::KeepAlive(k) = t.recv(State::Play, ServerboundPlay::DECODERS).await else {
+        panic!("expected keep alive on the new server")
+    };
+    assert_eq!(k.id, 1234);
+    t.send(
+        State::Play,
+        &pcb::Disconnect {
+            reason: Component::text("done"),
+        },
+    )
+    .await;
+    log
+}
+
+#[tokio::test]
+async fn reconfiguration_cookies_resource_pack_and_transfer() {
+    let tables = test_tables();
+    let a = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let b = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = a.local_addr().unwrap();
+    let server = tokio::spawn(serve_a_then_b(a, b, tables.clone()));
+    let mut opts = ConnectOptions::new(
+        addr.to_string(),
+        Account::Offline {
+            username: "tester".into(),
+        },
+    );
+    opts.tables = Some(tables);
+    let (mut conn, login) =
+        tokio::time::timeout(Duration::from_secs(10), Connection::connect(opts))
+            .await
+            .expect("connect timeout")
+            .unwrap();
+    assert_eq!(login.entity_id, EntityId(5));
+    let biome = |c: &Connection| {
+        c.registries()
+            .entries(&Identifier::minecraft("worldgen/biome"))
+            .unwrap()[0]
+            .id
+            .path()
+            .to_string()
+    };
+    let mut seen = Vec::new();
+    loop {
+        let p = tokio::time::timeout(Duration::from_secs(5), conn.recv())
+            .await
+            .expect("client recv timeout");
+        let Some(p) = p else { break };
+        match p {
+            ClientboundPlay::Login(l) => {
+                seen.push(format!("login {} {}", l.entity_id, biome(&conn)))
+            }
+            ClientboundPlay::StartConfiguration(_) => seen.push("start configuration".into()),
+            ClientboundPlay::Transfer(_) => seen.push("transfer".into()),
+            ClientboundPlay::Disconnect(d) => {
+                seen.push(d.reason.to_plain(&|_| None));
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        seen,
+        [
+            "login 5 plains",
+            "start configuration",
+            "login 6 desert",
+            "transfer",
+            "login 7 forest",
+            "done"
+        ]
+    );
+    let log = server.await.unwrap();
+    assert_eq!(&log[..3], ["pack 3", "pack 4", "pack 0"]);
+    assert_eq!(&log[3..], ["reconfigured", "transferred"]);
+    conn.disconnect();
 }

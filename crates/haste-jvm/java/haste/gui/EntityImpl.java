@@ -21,6 +21,9 @@ public final class EntityImpl {
         return new EntityRenderState();
     }
 
+    /** Upside-down name easter egg ("Dinnerbone"): not shown in GUI-drawn players. */
+    public static boolean isPlayerUpsideDown(net.minecraft.world.entity.player.Player p) { return false; }
+
     public static EntityRenderState extractEntity(EntityRenderDispatcher d, Entity e, float partial) {
         return new EntityRenderState();
     }

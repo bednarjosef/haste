@@ -1,6 +1,7 @@
 package haste.gui;
 
 import haste.rt.GuiBatch;
+import net.minecraft.client.Options;
 import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.client.gui.screens.PauseScreen;
 import net.minecraft.client.gui.screens.Screen;
@@ -15,19 +16,28 @@ import net.minecraft.client.input.MouseButtonInfo;
  * method runs vanilla screen code with the 26.3 signatures.
  */
 public final class Bridge {
-    public static final int CHAT = 0, PAUSE = 1, INVENTORY = 2;
+    public static final int CHAT = 0, PAUSE = 1, INVENTORY = 2, COMMAND = 3;
 
     private int pressedButton = -1;
     private double lastX, lastY;
 
     private Bridge() {}
 
+    /** How long vanilla's bootstrap took (ms). */
+    public static long bootstrapMillis;
+
     public static Bridge create() {
         // like vanilla's startup: version.json from the player's jar (resources come through HasteClassLoader)
         net.minecraft.SharedConstants.tryDetectVersion();
+        // vanilla's bootstrap fills every built-in registry from the player's jar (blocks, items, entity types,
+        // data component types, ...): the registry data tier-3 code looks up. See NOTES.md "Registries".
+        long t = System.nanoTime();
+        net.minecraft.server.Bootstrap.bootStrap();
+        bootstrapMillis = (System.nanoTime() - t) / 1_000_000;
         GfxImpl.width = 320;
         GfxImpl.height = 240;
         Proxies.create();
+        ClientImpl.running = true;
         return new Bridge();
     }
 
@@ -35,6 +45,7 @@ public final class Bridge {
     public void open(int kind) {
         Screen s = switch (kind) {
             case CHAT -> new ChatScreen("", false);
+            case COMMAND -> new ChatScreen("/", false);
             case PAUSE -> new PauseScreen(true);
             case INVENTORY -> new InventoryScreen(Proxies.player);
             default -> throw new IllegalArgumentException("screen kind " + kind);
@@ -49,33 +60,99 @@ public final class Bridge {
     /** Name of the open screen's class (tests), or null. */
     public String screenName() { return ClientImpl.screen == null ? null : ClientImpl.screen.getClass().getName(); }
 
-    /** Runs the open screen's extraction into the batch and returns {int[] commands, String[] strings}. */
+    /**
+     * One frame: the vanilla HUD (when in a world) and then the open screen on top, like the game, into the batch.
+     * Returns {int[] commands, String[] strings}.
+     */
     public Object[] render(int width, int height, int scale, double mouseX, double mouseY, float partial) {
         ClientImpl.scale = scale;
+        Mirror.update();
         Screen s = ClientImpl.screen;
         if (s != null && (width != GfxImpl.width || height != GfxImpl.height)) {
             GfxImpl.width = width; GfxImpl.height = height;
             s.resize(width, height);
         }
         GfxImpl.begin(width, height);
+        if (Mirror.inWorld()) {
+            Delta.frame(partial);
+            Proxies.hud.extractRenderState(Proxies.graphics, Delta.INSTANCE);
+            GfxImpl.POSE.reset();
+        }
         s = ClientImpl.screen;
         if (s != null) s.extractRenderStateWithTooltipAndSubtitles(Proxies.graphics, (int) mouseX, (int) mouseY, partial);
         GfxImpl.end();
-        return GuiBatch.frame();
+        return GuiBatch.frame(GfxImpl.cursor);
     }
 
-    /** Ticks the open screen (20 Hz: cursor blink, chat history refresh). */
+    /** One 20 Hz client tick: the HUD (chat fade, titles, overlay message), the chat queue and the open screen. */
     public void tick() {
-        ClientImpl.guiTicks++;
+        Mirror.update();
+        if (Mirror.inWorld()) {
+            // a dead player (killed, or joined while dead) sees the death screen
+            if (Mirror.health() <= 0f && !Mirror.flag(Mirror.F_IMMEDIATE_RESPAWN)
+                && !(ClientImpl.screen instanceof net.minecraft.client.gui.screens.DeathScreen)) {
+                Proxies.gui.setScreen(new net.minecraft.client.gui.screens.DeathScreen(null, Mirror.flag(Mirror.F_HARDCORE), Proxies.player));
+            }
+            Proxies.hud.tick(false);
+            Proxies.chatListener.tick();
+            PlayerImpl.tickEffects();
+        }
         if (ClientImpl.screen != null) ClientImpl.screen.tick();
+        InventorySync.sync();
     }
+
+    /** The local player as the server introduced it (login packet, game profile). */
+    public void setPlayer(int entityId, String name, long uuidMost, long uuidLeast) {
+        Handlers.localEntityId = entityId;
+        Proxies.set(Proxies.player, "id", int.class, entityId);
+        java.util.UUID uuid = new java.util.UUID(uuidMost, uuidLeast);
+        Proxies.set(Proxies.player, "uuid", java.util.UUID.class, uuid);
+        Proxies.set(Proxies.player, "stringUUID", String.class, uuid.toString());
+        PlayerImpl.profile = new com.mojang.authlib.GameProfile(uuid, name);
+    }
+
+    /** The joined world's dimension type (its id in the synchronised dimension_type registry). */
+    public void setDimensionType(int id) { LevelImpl.dimensionTypeId = id; }
+
+    /** The server's enabled feature flags (configuration phase). */
+    public void setFeatures(String[] ids) {
+        java.util.List<net.minecraft.resources.Identifier> l = new java.util.ArrayList<>();
+        for (String id : ids) l.add(net.minecraft.resources.Identifier.parse(id));
+        LevelImpl.features = net.minecraft.world.flag.FeatureFlags.REGISTRY.fromNames(l, id -> {});
+    }
+
+    /** Tab held: the player list overlay is shown while the key is down (vanilla's tab list). */
+    public void setTabListVisible(boolean visible) {
+        Proxies.options.keyPlayerList.setDown(visible);
+        Proxies.hud.getTabList().setVisible(visible);
+    }
+
+    /**
+     * The connection was lost or the server kicked us: vanilla's disconnect screen with the reason (a text component
+     * in its JSON form).
+     */
+    public void disconnected(String reasonJson) {
+        net.minecraft.network.chat.Component reason = net.minecraft.network.chat.ComponentSerialization.CODEC
+            .parse(com.mojang.serialization.JsonOps.INSTANCE, com.google.gson.JsonParser.parseString(reasonJson))
+            .result().orElse(net.minecraft.network.chat.Component.literal(reasonJson));
+        Proxies.gui.setScreen(new net.minecraft.client.gui.screens.DisconnectedScreen(null,
+            net.minecraft.network.chat.Component.translatable("disconnect.lost"), reason));
+    }
+
+    /** F1: hides or shows the HUD (vanilla's toggle). */
+    public void toggleHud() { Proxies.hud.toggle(); }
+
+    /** F3: shows or hides the debug overlay (Haste's stub). */
+    public void toggleDebug() { DebugImpl.shown = !DebugImpl.shown; }
 
     public boolean key(int key, int keycode, int mods, boolean pressed) {
         ClientImpl.mods = mods;
         Screen s = ClientImpl.screen;
         if (s == null) return false;
         KeyEvent e = new KeyEvent(key, keycode, mods);
-        return pressed ? s.keyPressed(e) : s.keyReleased(e);
+        boolean r = pressed ? s.keyPressed(e) : s.keyReleased(e);
+        InventorySync.sync();
+        return r;
     }
 
     public boolean charTyped(int codepoint, int mods) {
@@ -99,12 +176,16 @@ public final class Bridge {
         }
         MouseButtonEvent e = new MouseButtonEvent(x, y, new MouseButtonInfo(button, ClientImpl.mods));
         MouseImpl.pressed = pressed ? button : -1;
+        boolean r;
         if (pressed) {
             pressedButton = button;
-            return s.mouseClicked(e, false);
+            r = s.mouseClicked(e, false);
+        } else {
+            pressedButton = -1;
+            r = s.mouseReleased(e);
         }
-        pressedButton = -1;
-        return s.mouseReleased(e);
+        InventorySync.sync();
+        return r;
     }
 
     public boolean scroll(double x, double y, double dx, double dy) {
@@ -117,6 +198,95 @@ public final class Bridge {
 
     /** Rust grabbed/released the mouse itself (e.g. on opening a screen). */
     public void setMouseGrabbed(boolean g) { MouseImpl.grabbed = g; }
+
+    // ---- registries and packets (vanilla wire format, see Registries and Packets) ----
+
+    /** A configuration-phase {@code registry_data} packet body. */
+    public void registryData(byte[] body) { Registries.registryData(body); }
+
+    /** An {@code update_tags} packet body; {@code play}: received in the play phase (applied at once). */
+    public void tags(byte[] body, boolean play) { Registries.tags(body, play); }
+
+    /** End of the configuration phase: builds the synchronised registries. */
+    public void finishConfiguration() { Registries.finish(); InventorySync.reset(); }
+
+    /** Synchronised registries from the vanilla data pack in the client jar (no server; tests). */
+    public void loadJarRegistries() throws java.io.IOException { Registries.loadFromJar(); InventorySync.reset(); }
+
+    /** A clientbound play packet (VarInt id + body) whose state lives in tier 3. */
+    public void packet(byte[] idAndBody) {
+        Packets.receive(idAndBody);
+        InventorySync.sync();
+    }
+
+    /** Sets a player inventory slot (vanilla numbering) from a stack in vanilla's network encoding. */
+    public void setInventorySlot(int slot, byte[] stack) {
+        Proxies.inventory.setItem(slot, InventorySync.decode(stack));
+        InventorySync.sync();
+    }
+
+    /** The chat log as plain text, oldest first (vanilla's ChatComponent; headless clients and tests). */
+    @SuppressWarnings("unchecked")
+    public String chatHistory() {
+        try {
+            var f = java.lang.invoke.MethodHandles.privateLookupIn(net.minecraft.client.gui.components.ChatComponent.class,
+                java.lang.invoke.MethodHandles.lookup()).findVarHandle(net.minecraft.client.gui.components.ChatComponent.class,
+                "allMessages", java.util.List.class);
+            var all = (java.util.List<net.minecraft.client.multiplayer.chat.GuiMessage>) f.get(Proxies.hud.getChat());
+            StringBuilder sb = new StringBuilder();
+            for (int i = all.size() - 1; i >= 0; i--) sb.append(all.get(i).content().getString()).append('\n');
+            return sb.toString();
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** Names of the server's commands the local player may use (the root of the command tree), one per line. */
+    public String commandNames() {
+        var src = ConnectionImpl.getSuggestionsProvider(Proxies.connection);
+        StringBuilder sb = new StringBuilder();
+        for (var n : Handlers.commands.getRoot().getChildren()) {
+            if (n.canUse(src)) sb.append(n.getName()).append('\n');
+        }
+        return sb.toString();
+    }
+
+    /** Debug: the open chat screen's suggestions: calls updateCommandInfo and showSuggestions directly. */
+    public String debugSuggestions() {
+        try {
+            Screen sc = ClientImpl.screen;
+            var f = java.lang.invoke.MethodHandles.privateLookupIn(ChatScreen.class, java.lang.invoke.MethodHandles.lookup())
+                .findVarHandle(ChatScreen.class, "commandSuggestions", net.minecraft.client.gui.components.CommandSuggestions.class);
+            var cs = (net.minecraft.client.gui.components.CommandSuggestions) f.get(sc);
+            cs.updateCommandInfo();
+            cs.showSuggestions(false);
+            return "visible=" + cs.isVisible();
+        } catch (Throwable t) {
+            return haste.rt.Errors.describe(t);
+        }
+    }
+
+    /** The value of a vanilla option by its accessor name (e.g. "autoSuggestions"), as a string (tests). */
+    public String option(String name) throws ReflectiveOperationException {
+        Object o = Options.class.getMethod(name).invoke(Proxies.options);
+        return String.valueOf(((net.minecraft.client.OptionInstance<?>) o).get());
+    }
+
+    /** Brigadier's completions of a command line (without "/") with the server's tree, one per line (tests). */
+    public String completions(String line) {
+        var src = ConnectionImpl.getSuggestionsProvider(Proxies.connection);
+        var parse = Handlers.commands.parse(line, src);
+        var s = Handlers.commands.getCompletionSuggestions(parse).join();
+        StringBuilder sb = new StringBuilder();
+        for (var x : s.getList()) sb.append(x.getText()).append('\n');
+        return sb.toString();
+    }
+
+    /** "registry=size" lines of every registry Java sees (tests). */
+    public String registrySizes() { return Registries.sizes(); }
+
+    /** Name of an entry by registry and numeric id (tests), or null. */
+    public String registryName(String registry, int id) { return Registries.name(registry, id); }
 
     /** Rust installed new text metrics: drop cached glyph widths. */
     public void metricsChanged() {

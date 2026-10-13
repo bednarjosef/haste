@@ -2,6 +2,21 @@
 
 Newest at the top. One entry per decision, with the why; link the brief or report it came from.
 
+- **2026-10-13 Session 2: the real server is the test.** Every component first checked against a
+  real 26.3 server had a bug that unit tests missed: section header (i16 block + fluid counts),
+  direct biome width (ceil(log2(synced biome count))), packed arrays LSB-first, light-mask BitSet
+  (VarInt byte count + little-endian bytes, trailing zeros dropped; flat worlds hid it),
+  `player_action` renumbered (1 change destroy direction, 2 abort, 3 finish; the wiki is stale),
+  `accept_teleportation` alone confirms a teleport (an extra move packet gets a kick after
+  relative /tp), falling water 8/9 high. Rule: verify every enum order and encoding against the
+  server; a local probe mod on a private test-server copy (never committed) is fine for observing.
+- **2026-10-13 GLM workers dropped.** Four GLM workers (two keys) committed nothing in 2.5 hours
+  (huge contexts, 15-minute requests, connection drops); Opus agents at medium effort merged 12
+  PRs in the same time. The user chose: Opus only, four at a time, GLM tasks queued for Opus.
+- **2026-10-13 Per-worktree test servers** (`scripts/test-server.sh <ws> <port>`, optional
+  `HASTE_SERVER=vanilla`); `scripts/env.sh` must always return success (it silently broke
+  `source env.sh && ...` chains when HASTE_VULKAN_ICD was unset).
+
 - **2026-10-12 History rewritten, repo recreated.** Early commits carried a personal email (global
   git config) and files carried absolute home paths. History was rewritten (identities to the GitHub
   noreply address, paths to `$HASTE_*` variables; timestamps unchanged) and the GitHub repo was

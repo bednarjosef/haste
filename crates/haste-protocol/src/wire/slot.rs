@@ -67,6 +67,58 @@ impl Codec<ItemStackData> for Slot {
     }
 }
 
+/// Item stack template (26.x): `VarInt item, VarInt count, component patch`.
+/// Unlike a [`Slot`] it is never empty and the item comes before the count.
+/// Used inside `container`, `bundle_contents`, `charged_projectiles`,
+/// `use_remainder` and `sulfur_cube_content`, and for advancement icons and
+/// recipe display results (layout from Pumpkin's `write_template0`, confirmed
+/// on the 26.3 vanilla server).
+pub struct ItemStackTemplate;
+impl Codec<ItemStackData> for ItemStackTemplate {
+    fn read(r: &mut Reader<'_>) -> DecodeResult<ItemStackData> {
+        let item = r.var_int()?;
+        let count = r.var_int()?;
+        let start = r.peek_rest();
+        skip_patch(r)?;
+        let used = start.len() - r.remaining();
+        Ok(ItemStackData {
+            count,
+            item: Some(RegistryIndex(item as u32)),
+            components_raw: r.to_bytes(&start[..used]),
+        })
+    }
+    fn write(v: &ItemStackData, w: &mut Writer) {
+        w.var_int(v.item.map_or(0, |i| i.0 as i32));
+        w.var_int(v.count);
+        if v.components_raw.is_empty() {
+            w.var_int(0);
+            w.var_int(0);
+        } else {
+            w.bytes(&v.components_raw);
+        }
+    }
+}
+
+/// Optional item stack template: `bool present`, then an [`ItemStackTemplate`].
+/// Absent reads as the empty stack.
+pub struct OptionalItemStackTemplate;
+impl Codec<ItemStackData> for OptionalItemStackTemplate {
+    fn read(r: &mut Reader<'_>) -> DecodeResult<ItemStackData> {
+        if r.bool()? {
+            ItemStackTemplate::read(r)
+        } else {
+            Ok(ItemStackData::default())
+        }
+    }
+    fn write(v: &ItemStackData, w: &mut Writer) {
+        let present = v.count > 0 && v.item.is_some();
+        w.bool(present);
+        if present {
+            ItemStackTemplate::write(v, w);
+        }
+    }
+}
+
 /// Skips a data component patch (add count, remove count, adds, removes).
 pub fn skip_patch(r: &mut Reader<'_>) -> DecodeResult<()> {
     let adds = r.len_prefix(4096)?;
@@ -206,9 +258,9 @@ pub fn skip_component(r: &mut Reader<'_>, name: &str) -> DecodeResult<()> {
         "break_sound" => {
             IdOr::<SoundEvent>::read(r)?;
         }
-        // Slot.
+        // Item stack template.
         "use_remainder" | "sulfur_cube_content" => {
-            ItemStackData::read(r)?;
+            ItemStackTemplate::read(r)?;
         }
         // Prefixed array of (VarInt id, VarInt level).
         "enchantments" | "stored_enchantments" => {
@@ -272,16 +324,20 @@ pub fn skip_component(r: &mut Reader<'_>, name: &str) -> DecodeResult<()> {
             r.var_int()?;
             r.f32()?;
         }
+        // Slot, equip sound, asset, camera overlay, allowed entities, then
+        // five bools (dispensable, swappable, damage on hurt, equip on
+        // interact, can be sheared) and the shearing sound. The fifth bool
+        // was observed on the 26.3 vanilla server (diamond helmet with
+        // `equippable={slot:"head"}`); Pumpkin agrees.
         "equippable" => {
             r.var_int()?;
             IdOr::<SoundEvent>::read(r)?;
             r.option(|r| r.identifier())?;
             r.option(|r| r.identifier())?;
             r.option(|r| IdSet::read(r))?;
-            r.bool()?;
-            r.bool()?;
-            r.bool()?;
-            r.bool()?;
+            for _ in 0..5 {
+                r.bool()?;
+            }
             IdOr::<SoundEvent>::read(r)?;
         }
         "death_protection" => {
@@ -325,10 +381,10 @@ pub fn skip_component(r: &mut Reader<'_>, name: &str) -> DecodeResult<()> {
             r.option(|r| SoundEvent::read(r))?;
         }
         "charged_projectiles" | "bundle_contents" => {
-            r.list(MAX_LIST, ItemStackData::read)?;
+            r.list(MAX_LIST, ItemStackTemplate::read)?;
         }
         "container" => {
-            r.list(256, ItemStackData::read)?;
+            r.list(256, OptionalItemStackTemplate::read)?;
         }
         "potion_contents" => {
             r.option(|r| r.var_int())?;
@@ -411,8 +467,14 @@ pub fn skip_component(r: &mut Reader<'_>, name: &str) -> DecodeResult<()> {
                 r.var_int()
             })?;
         }
+        // Four optional item stack templates (back, left, right, front), no
+        // count prefix. Observed on the 26.3 vanilla server (the
+        // `craft_decorated_pot_using_only_sherds` advancement icon); the wiki
+        // and Pumpkin still have a list of item ids.
         "pot_decorations" => {
-            r.list(4, |r| r.var_int())?;
+            for _ in 0..4 {
+                OptionalItemStackTemplate::read(r)?;
+            }
         }
         "block_state" => {
             r.list(MAX_LIST, |r| {
@@ -427,6 +489,33 @@ pub fn skip_component(r: &mut Reader<'_>, name: &str) -> DecodeResult<()> {
                 r.var_int()?;
                 r.var_int()
             })?;
+        }
+        // Prefixed array of (attribute id, modifier id, amount, operation,
+        // slot group, display: 0 default, 1 hidden, 2 override + component).
+        // Observed on the 26.3 vanilla server; matches Pumpkin.
+        "attribute_modifiers" => {
+            r.list(MAX_LIST, |r| {
+                r.var_int()?;
+                r.identifier()?;
+                r.f64()?;
+                r.var_int()?;
+                r.var_int()?;
+                if r.var_int()? == 2 {
+                    r.component()?;
+                }
+                Ok(())
+            })?;
+        }
+        // Holder<PaintingVariant>: registry id + 1, or 0 + inline variant.
+        // Observed on the 26.3 vanilla server (`painting[painting/variant=
+        // "minecraft:kebab"]` is the single byte 25).
+        "painting/variant" => {
+            IdOr::<crate::metadata::PaintingVariant>::read(r)?;
+        }
+        // Swing animation: VarInt type, VarInt duration (Pumpkin).
+        "attack_animation" => {
+            r.var_int()?;
+            r.var_int()?;
         }
         _ => return Err(unsupported(name)),
     }
@@ -619,10 +708,12 @@ mod tests {
             })
         };
         let id_set = |w: &mut Writer| w.write(&IdSet::Ids(vec![1, 2]));
+        // Components hold item stack templates: item 300 (two VarInt bytes),
+        // then count 2, then an empty patch.
         let stack = |w: &mut Writer| {
-            w.write(&ItemStackData {
-                count: 1,
-                item: Some(RegistryIndex(3)),
+            w.write_as::<_, ItemStackTemplate>(&ItemStackData {
+                count: 2,
+                item: Some(RegistryIndex(300)),
                 components_raw: Bytes::new(),
             })
         };
@@ -798,6 +889,7 @@ mod tests {
                     w.bool(true);
                     w.bool(true);
                     w.bool(true);
+                    w.bool(false);
                     w.bool(false);
                     w.write(&IdOr::<SoundEvent>::Id(1));
                 }),
@@ -992,16 +1084,16 @@ mod tests {
             ),
             (
                 "pot_decorations",
-                w(&|w| {
-                    w.write_as::<_, crate::wire::List<crate::wire::VarInt>>(&vec![1i32, 2, 3, 4])
-                }),
+                // Observed bytes: back and right empty, left and front sherds.
+                vec![0, 1, 0xC9, 0x0C, 1, 0, 0, 0, 1, 0xC5, 0x0C, 1, 0, 0],
             ),
             (
                 "container",
                 w(&|w| {
                     w.var_int(2);
+                    w.bool(true);
                     stack(w);
-                    w.var_int(0);
+                    w.bool(false);
                 }),
             ),
             (
@@ -1035,7 +1127,39 @@ mod tests {
             ),
             ("provides_trim_material", w(&|w| w.var_int(4))),
             ("sheep/color", w(&|w| w.var_int(14))),
+            // Observed on the 26.3 vanilla server: `iron_sword[attribute_modifiers=
+            // [{type:"attack_damage",amount:5,id:"x:y",operation:"add_value"}]]`.
+            (
+                "attribute_modifiers",
+                vec![
+                    1, 3, 3, b'x', b':', b'y', 0x40, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                ],
+            ),
+            ("painting/variant", vec![25]),
+            (
+                "attack_animation",
+                w(&|w| {
+                    w.var_int(1);
+                    w.var_int(6);
+                }),
+            ),
         ]
+    }
+
+    /// Bytes observed from the 26.3 vanilla server for a shulker box holding
+    /// five diamonds (`container` = list of optional templates).
+    #[test]
+    fn container_holds_optional_templates() {
+        let t = crate::packets::ids::ProtocolTables::for_tests(&[(77, "minecraft:container")]);
+        let wire = [1u8, 0x90, 0x05, 1, 0, 77, 1, 1, 0xF4, 0x07, 5, 0, 0];
+        let mut r = Reader::new(&wire).with_tables(&t);
+        let s = ItemStackData::read(&mut r).unwrap();
+        r.finish().unwrap();
+        assert_eq!(s.item, Some(RegistryIndex(656)));
+        let mut r = Reader::new(&s.components_raw[3..]);
+        let inner = r.list(256, OptionalItemStackTemplate::read).unwrap();
+        assert_eq!(inner[0].item, Some(RegistryIndex(1012)));
+        assert_eq!(inner[0].count, 5);
     }
 
     #[test]

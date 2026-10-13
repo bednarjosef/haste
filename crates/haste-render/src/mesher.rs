@@ -549,6 +549,13 @@ fn face_corner_offsets(
 /// back through a bounded channel (back-pressure), drained per frame with a
 /// budget (Pomme MeshDispatcher + drain_results, on rayon instead of raw
 /// threads).
+/// Something mesh workers can capture section snapshots from on their own threads (the
+/// client's shared, lock-protected world). `None` when the section's chunk is gone.
+pub trait SnapshotSource: Send + Sync {
+    /// Captures `pos` with the biome cells within `blend_radius` blocks (for tints).
+    fn capture(&self, pos: SectionPos, blend_radius: i32) -> Option<MeshSnapshot>;
+}
+
 pub struct Mesher {
     baked: Arc<haste_assets::BakedBlockModels>,
     atlas: Arc<dyn haste_assets::AtlasRegions + Send + Sync>,
@@ -556,6 +563,8 @@ pub struct Mesher {
     pending: Mutex<Vec<(SectionPos, Arc<MeshSnapshot>)>>,
     results: crossbeam_channel::Receiver<SectionMesh>,
     result_tx: crossbeam_channel::Sender<SectionMesh>,
+    /// Sections handed to workers whose mesh has not been sent yet.
+    in_flight: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Mesher {
@@ -563,7 +572,8 @@ impl Mesher {
         baked: Arc<haste_assets::BakedBlockModels>,
         atlas: Arc<dyn haste_assets::AtlasRegions + Send + Sync>,
     ) -> Mesher {
-        let (tx, rx) = crossbeam_channel::bounded(256);
+        // Unbounded: workers never block a rayon thread waiting for the render thread.
+        let (tx, rx) = crossbeam_channel::unbounded();
         Mesher {
             baked,
             atlas,
@@ -571,6 +581,7 @@ impl Mesher {
             pending: Mutex::new(Vec::new()),
             results: rx,
             result_tx: tx,
+            in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -611,6 +622,31 @@ impl Mesher {
         self.tables.lock().clone()
     }
 
+    /// Capture and mesh `positions` on the worker pool: the render thread only schedules.
+    pub fn submit_from(&self, source: &Arc<dyn SnapshotSource>, positions: &[SectionPos]) {
+        if positions.is_empty() {
+            return;
+        }
+        use std::sync::atomic::Ordering;
+        let jobs = positions.to_vec();
+        self.in_flight.fetch_add(jobs.len(), Ordering::Relaxed);
+        let baked = self.baked.clone();
+        let tables = self.tables();
+        let radius = tables.colors.radius();
+        let atlas = self.atlas.clone();
+        let tx = self.result_tx.clone();
+        let source = source.clone();
+        let in_flight = self.in_flight.clone();
+        rayon::spawn(move || {
+            jobs.into_par_iter().for_each(|pos| {
+                if let Some(snapshot) = source.capture(pos, radius) {
+                    let _ = tx.send(mesh_section_with(&snapshot, &baked, &*atlas, &tables, pos));
+                }
+                in_flight.fetch_sub(1, Ordering::Relaxed);
+            });
+        });
+    }
+
     /// Mesh all pending sections on the rayon pool. Called from the render
     /// loop; rayon's work-stealing keeps the render thread responsive because
     /// this call only *schedules* the work (spawn) and returns.
@@ -645,7 +681,9 @@ impl Mesher {
     }
 
     pub fn pending_len(&self) -> usize {
-        self.pending.lock().len() + self.results.len()
+        self.pending.lock().len()
+            + self.results.len()
+            + self.in_flight.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

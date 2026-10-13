@@ -44,7 +44,8 @@ const LOOK_DEG_PER_PIXEL: f32 = 0.15;
 /// Two jump presses closer than this toggle flight (vanilla: 7 ticks).
 const DOUBLE_TAP: Duration = Duration::from_millis(350);
 /// Wall time the render thread may spend capturing sections for the mesher per frame.
-const CAPTURE_BUDGET: Duration = Duration::from_millis(4);
+/// Sections handed to the mesh workers per frame (they capture the snapshots themselves).
+const SUBMIT_PER_FRAME: usize = 512;
 
 /// A joined game: runtime, game thread and shared state.
 struct Session {
@@ -141,6 +142,27 @@ pub struct WorldFeed {
     last_arrival: Option<Instant>,
     /// Entity instances for this frame (reused).
     instances: Vec<EntityInstance>,
+    /// The shared world as the mesh workers see it (created on the first feed).
+    source: Option<Arc<dyn haste_render::SnapshotSource>>,
+    /// Sections submitted this frame (reused).
+    batch: Vec<SectionPos>,
+}
+
+/// Lets the mesh worker threads capture section snapshots from the shared world under its
+/// read lock, so the render thread never copies blocks.
+struct SharedWorldSource(Arc<Shared>);
+
+impl haste_render::SnapshotSource for SharedWorldSource {
+    fn capture(&self, pos: SectionPos, blend_radius: i32) -> Option<haste_render::MeshSnapshot> {
+        let world = self.0.world.read();
+        world.chunk(pos.chunk())?;
+        Some(haste_render::MeshSnapshot::capture_with_biomes(
+            &*world,
+            Some(&biomes::WorldBiomes(&world)),
+            blend_radius,
+            pos,
+        ))
+    }
 }
 
 impl WorldFeed {
@@ -159,11 +181,11 @@ impl WorldFeed {
         self.last_arrival = Some(Instant::now());
     }
 
-    /// Submits queued sections (nearest first) until the capture budget is used, and lets the
-    /// renderer upload finished meshes.
+    /// Hands queued sections (nearest first) to the mesh workers, which capture and mesh them
+    /// off the render thread, and lets the renderer upload finished meshes.
     fn feed(
         &mut self,
-        shared: &Shared,
+        shared: &Arc<Shared>,
         renderer: &mut Renderer,
         camera: SectionPos,
         view_distance: i32,
@@ -178,38 +200,36 @@ impl WorldFeed {
             self.sort_needed = false;
         }
         let camera_chunk = ChunkPos::new(camera.x, camera.z);
-        let world = shared.world.read();
-        let started = Instant::now();
-        let mut submitted_any = false;
-        while started.elapsed() < CAPTURE_BUDGET {
-            let Some(pos) = self.queue.pop() else { break };
-            self.queued.remove(&pos);
-            let non_empty = world
-                .chunk(pos.chunk())
-                .and_then(|c| c.section(pos.y))
-                .is_some_and(|s| !s.is_empty());
-            if !non_empty && !self.meshed.contains(&pos) {
-                continue;
+        let source = self
+            .source
+            .get_or_insert_with(|| Arc::new(SharedWorldSource(shared.clone())))
+            .clone();
+        let mut batch = std::mem::take(&mut self.batch);
+        batch.clear();
+        {
+            let world = shared.world.read();
+            while batch.len() < SUBMIT_PER_FRAME {
+                let Some(pos) = self.queue.pop() else { break };
+                self.queued.remove(&pos);
+                let non_empty = world
+                    .chunk(pos.chunk())
+                    .and_then(|c| c.section(pos.y))
+                    .is_some_and(|s| !s.is_empty());
+                if !non_empty && !self.meshed.contains(&pos) {
+                    continue;
+                }
+                if non_empty {
+                    self.meshed.insert(pos);
+                } else {
+                    self.meshed.remove(&pos);
+                }
+                self.submitted.insert(pos);
+                batch.push(pos);
             }
-            if non_empty {
-                self.meshed.insert(pos);
-            } else {
-                self.meshed.remove(&pos);
-            }
-            self.submitted.insert(pos);
-            renderer.update_world_with_biomes(
-                &*world,
-                Some(&biomes::WorldBiomes(&world)),
-                &[pos],
-                camera_chunk,
-                view_distance,
-            );
-            submitted_any = true;
         }
-        if !submitted_any {
-            // Still upload meshes that finished since the last frame.
-            renderer.update_world_with_biomes(&*world, None, &[], camera_chunk, view_distance);
-        }
+        // Also uploads meshes that finished since the last frame.
+        renderer.update_world_from(&source, &batch, camera_chunk, view_distance);
+        self.batch = batch;
     }
 
     /// Copies the interpolated entity instances.
@@ -534,15 +554,18 @@ impl App {
         }
         self.sample_input();
         let renderer = self.renderer.as_mut().expect("checked above");
+        let t0 = Instant::now();
         let (camera, sky, partial, vd) =
             frame_view(&self.shared, self.yaw, self.pitch, Instant::now());
         self.feed
             .feed(&self.shared, renderer, camera_section(&camera), vd);
+        let t1 = Instant::now();
         let entities = self.feed.entities(&self.shared, renderer, partial);
         let block_target = self.shared.view.lock().block_target;
         self.breaking.clear();
         self.breaking
             .extend_from_slice(&self.shared.breaking.lock());
+        let t2 = Instant::now();
         let frame = FrameInput {
             camera,
             entities,
@@ -554,9 +577,20 @@ impl App {
         };
         // Outline boxes of the target and the states of breaking blocks (one short read lock).
         renderer.sample_world(&*self.shared.world.read(), &self.shared.data.shapes, &frame);
-        match renderer.render(&frame) {
+        let result = renderer.render(&frame);
+        let t3 = Instant::now();
+        self.fps.phases(
+            (t1 - t0).as_secs_f32() * 1e3,
+            (t2 - t1).as_secs_f32() * 1e3,
+            (t3 - t2).as_secs_f32() * 1e3,
+            renderer.timings(),
+        );
+        match result {
             Ok(stats) => {
                 if let Some(line) = self.fps.frame(&stats) {
+                    if let Some(b) = self.fps.breakdown(renderer) {
+                        tracing::info!("{b}");
+                    }
                     if let Some(w) = &self.window {
                         w.set_title(&format!("Haste - {line}"));
                     }
@@ -730,6 +764,12 @@ struct FpsCounter {
     frames: u32,
     worst_ms: f32,
     last: Instant,
+    /// Per-phase sums since the last breakdown: feed, entities, render, and the renderer's
+    /// own phases; logged every 2 s.
+    phase_sum: [f32; 3],
+    render_sum: haste_render::FrameTimings,
+    phase_frames: u32,
+    phase_since: Instant,
 }
 
 impl FpsCounter {
@@ -740,7 +780,61 @@ impl FpsCounter {
             frames: 0,
             worst_ms: 0.0,
             last: now,
+            phase_sum: [0.0; 3],
+            render_sum: Default::default(),
+            phase_frames: 0,
+            phase_since: now,
         }
+    }
+
+    fn phases(&mut self, feed: f32, entities: f32, render: f32, t: haste_render::FrameTimings) {
+        self.phase_sum[0] += feed;
+        self.phase_sum[1] += entities;
+        self.phase_sum[2] += render;
+        let s = &mut self.render_sum;
+        s.prepare_ms += t.prepare_ms;
+        s.acquire_ms += t.acquire_ms;
+        s.cull_ms += t.cull_ms;
+        s.encode_ms += t.encode_ms;
+        s.submit_ms += t.submit_ms;
+        s.present_ms += t.present_ms;
+        for i in 0..3 {
+            s.gpu_ms[i] += t.gpu_ms[i];
+        }
+        self.phase_frames += 1;
+    }
+
+    /// Average per-phase milliseconds over the last 2 s.
+    fn breakdown(&mut self, renderer: &Renderer) -> Option<String> {
+        if self.phase_since.elapsed() < Duration::from_secs(2) || self.phase_frames == 0 {
+            return None;
+        }
+        let n = self.phase_frames as f32;
+        let s = self.render_sum;
+        let size = renderer.size();
+        let line = format!(
+            "frame ms: feed {:.2} entities {:.2} render {:.2} (prepare {:.2} acquire {:.2} cull {:.2} encode {:.2} submit {:.2} present {:.2}) gpu main {:.2} hand {:.2} gui {:.2}; {}x{} {:?}",
+            self.phase_sum[0] / n,
+            self.phase_sum[1] / n,
+            self.phase_sum[2] / n,
+            s.prepare_ms / n,
+            s.acquire_ms / n,
+            s.cull_ms / n,
+            s.encode_ms / n,
+            s.submit_ms / n,
+            s.present_ms / n,
+            s.gpu_ms[0] / n,
+            s.gpu_ms[1] / n,
+            s.gpu_ms[2] / n,
+            size.0,
+            size.1,
+            renderer.present_mode(),
+        );
+        self.phase_sum = [0.0; 3];
+        self.render_sum = Default::default();
+        self.phase_frames = 0;
+        self.phase_since = Instant::now();
+        Some(line)
     }
 
     fn frame(&mut self, stats: &FrameStats) -> Option<String> {

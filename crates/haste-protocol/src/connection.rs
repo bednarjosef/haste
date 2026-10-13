@@ -8,7 +8,7 @@
 //! writer (encodes `ServerboundPlay` from the game). The game thread only
 //! touches channels: `try_recv`/`recv`/`send`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,9 +24,13 @@ use uuid::Uuid;
 
 use crate::auth::{self, AuthError, MsaTokens};
 use crate::nbt::NbtCompound;
-use crate::packets::configuration::clientbound::{KnownPack, RegistryEntry, RegistryTags};
+use crate::packets::configuration::clientbound::{
+    KnownPack, RegistryEntry, RegistryTags, ReportDetail, ServerLink,
+};
 use crate::packets::configuration::{self as cfg, ClientboundConfiguration};
-use crate::packets::handshake::serverbound::{Intention, INTENT_LOGIN, INTENT_STATUS};
+use crate::packets::handshake::serverbound::{
+    Intention, INTENT_LOGIN, INTENT_STATUS, INTENT_TRANSFER,
+};
 use crate::packets::login::{self, ClientboundLogin};
 use crate::packets::play::{self, ClientboundPlay, ServerboundPlay};
 use crate::packets::status::{self, ClientboundStatus};
@@ -84,19 +88,87 @@ pub struct ConnectOptions {
     pub tables: Option<Arc<ProtocolTables>>,
     /// Chunks per tick requested in `chunk_batch_received`.
     pub chunks_per_tick: f32,
+    /// How to answer `resource_pack_push`.
+    pub resource_packs: ResourcePackPolicy,
+    /// Cookies from `store_cookie`. Clones share the jar, so cookies survive
+    /// a `transfer` (vanilla keeps them in memory for the session only).
+    pub cookies: CookieJar,
+}
+
+/// How the connection answers a server resource pack offer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ResourcePackPolicy {
+    /// Answer accepted, downloaded, successfully loaded (what a vanilla client
+    /// that accepts sends). The pack is not downloaded.
+    #[default]
+    Accept,
+    /// Answer declined (a forced pack then gets us kicked, as in vanilla).
+    Decline,
+}
+
+/// `resource_pack` result values (serverbound, configuration and play).
+pub mod resource_pack_status {
+    /// Successfully loaded.
+    pub const SUCCESSFULLY_LOADED: i32 = 0;
+    /// Declined by the user.
+    pub const DECLINED: i32 = 1;
+    /// Download failed.
+    pub const FAILED_DOWNLOAD: i32 = 2;
+    /// Accepted (download starts).
+    pub const ACCEPTED: i32 = 3;
+    /// Downloaded.
+    pub const DOWNLOADED: i32 = 4;
+    /// Invalid URL.
+    pub const INVALID_URL: i32 = 5;
+    /// Reload failed.
+    pub const FAILED_RELOAD: i32 = 6;
+    /// Discarded.
+    pub const DISCARDED: i32 = 7;
+}
+
+impl ResourcePackPolicy {
+    /// The statuses sent for one offered pack, in order.
+    pub fn replies(self) -> &'static [i32] {
+        use resource_pack_status::*;
+        match self {
+            ResourcePackPolicy::Accept => &[ACCEPTED, DOWNLOADED, SUCCESSFULLY_LOADED],
+            ResourcePackPolicy::Decline => &[DECLINED],
+        }
+    }
+}
+
+/// Cookies stored by servers, shared between clones.
+#[derive(Clone, Debug, Default)]
+pub struct CookieJar(Arc<Mutex<HashMap<Identifier, Bytes>>>);
+
+impl CookieJar {
+    /// The cookie stored under `key`.
+    pub fn get(&self, key: &Identifier) -> Option<Bytes> {
+        self.0.lock().ok()?.get(key).cloned()
+    }
+    /// Stores (replaces) a cookie.
+    pub fn store(&self, key: Identifier, payload: Bytes) {
+        if let Ok(mut m) = self.0.lock() {
+            m.insert(key, payload);
+        }
+    }
 }
 
 impl ConnectOptions {
-    /// Defaults: protocol 777, `en_us`, view distance 10, brand `haste`.
+    /// Defaults: protocol 777, `en_us`, view distance 10, brand `vanilla`
+    /// (what the vanilla client sends; servers cannot tell us apart by it),
+    /// resource packs accepted.
     pub fn new(address: impl Into<String>, account: Account) -> Self {
         Self {
             address: address.into(),
             account,
             protocol_version: crate::PROTOCOL,
             client_information: cfg::serverbound::ClientInformation::defaults("en_us", 10),
-            brand: "haste".into(),
+            brand: "vanilla".into(),
             tables: None,
             chunks_per_tick: 64.0,
+            resource_packs: ResourcePackPolicy::Accept,
+            cookies: CookieJar::default(),
         }
     }
 }
@@ -165,6 +237,11 @@ pub struct SyncedRegistries {
     pub features: Vec<Identifier>,
     /// Packs the server announced in `select_known_packs`.
     pub server_packs: Vec<KnownPack>,
+    /// Pause-menu links from `server_links` (configuration state; later
+    /// updates arrive as play packets).
+    pub server_links: Vec<ServerLink>,
+    /// Crash report lines from `custom_report_details`.
+    pub report_details: Vec<ReportDetail>,
 }
 
 impl SyncedRegistries {
@@ -262,6 +339,11 @@ enum Outgoing {
     Raw(Bytes),
     /// Switch: the writer may (true) or may not (false) send play packets.
     PlayAllowed(bool),
+    /// Flush and close the current connection (before following a
+    /// `transfer`, as vanilla does), then acknowledge.
+    CloseCurrent(tokio::sync::oneshot::Sender<()>),
+    /// Continue on a new connection (after a `transfer`).
+    NewEncoder(Box<Encoder>),
     /// Flush and close.
     Shutdown,
 }
@@ -274,6 +356,9 @@ pub struct Connection {
     rx: mpsc::UnboundedReceiver<ClientboundPlay>,
     tx: mpsc::UnboundedSender<Outgoing>,
     registries: Arc<SyncedRegistries>,
+    /// Registries from a reconfiguration or transfer, swapped in when the
+    /// game dequeues the `login` that follows them.
+    pending_registries: Arc<Mutex<Option<SyncedRegistries>>>,
     tables: Arc<ProtocolTables>,
     stats: Arc<Stats>,
     closed: Arc<Mutex<Option<String>>>,
@@ -500,60 +585,27 @@ impl Connection {
         tables: Arc<ProtocolTables>,
     ) -> Result<(Connection, Login), ProtocolError> {
         let stats = Arc::new(Stats::default());
-        let mut io = Io::new(stream, tables.clone(), stats.clone());
-
-        // Handshake + login.
-        io.send(
-            State::Handshake,
-            &Intention {
-                protocol_version: opts.protocol_version,
-                server_address: host,
-                server_port: port,
-                intent: INTENT_LOGIN,
-            },
-        )
-        .await?;
-        io.send(
-            State::Login,
-            &login::serverbound::Hello {
-                name: opts.account.username().to_string(),
-                uuid: opts.account.uuid(),
-            },
-        )
-        .await?;
-        let profile = login_state(&mut io, &opts).await?;
-
-        // Configuration.
-        let mut regs = SyncedRegistries::default();
-        configuration_state(&mut io, &opts, &mut regs).await?;
-
-        // Play: wait for `login`, queueing anything that comes first.
-        let play_dispatch = Arc::new(Dispatch::new(
-            &tables.packets,
-            State::Play,
-            Direction::Clientbound,
-            ClientboundPlay::DECODERS,
-        ));
-        let (game_tx, game_rx) = mpsc::unbounded_channel();
-        let login = loop {
-            let raw = io.recv().await?;
-            match play_dispatch.decode(raw.id, &raw.payload, Some(&tables)) {
-                Decoded::Ok(ClientboundPlay::Login(l)) => break l,
-                Decoded::Ok(ClientboundPlay::Disconnect(d)) => {
-                    return Err(ProtocolError::Disconnected(d.reason.to_plain(&|_| None)))
-                }
-                Decoded::Ok(p) => {
-                    let _ = game_tx.send(p);
-                }
-                Decoded::Failed(name, e) => return Err(ProtocolError::Decode(name, e)),
-                Decoded::NoDecoder => {
-                    let _ = game_tx.send(ClientboundPlay::Unknown {
-                        id: raw.id,
-                        body: raw.payload,
-                    });
-                }
-            }
+        let est = match establish(stream, host, port, &opts, &tables, &stats, INTENT_LOGIN).await? {
+            Handshaked::Play(e) => *e,
+            Handshaked::Transfer(addr) => open(&addr, &opts, &tables, &stats).await?,
         };
+        Ok(Self::start(est, opts, tables, stats))
+    }
+
+    /// Spawns the reader and writer for an established connection.
+    fn start(
+        est: Established,
+        opts: ConnectOptions,
+        tables: Arc<ProtocolTables>,
+        stats: Arc<Stats>,
+    ) -> (Connection, Login) {
+        let Established {
+            io,
+            profile,
+            regs,
+            login,
+            early,
+        } = est;
         let dimension = regs.dimension_info(login.spawn.dimension_type, &login.spawn.dimension).unwrap_or_else(|| {
             tracing::warn!("dimension type {} not resolvable from synced registries; assuming overworld layout", login.spawn.dimension_type);
             DimensionInfo { name: login.spawn.dimension.clone(), ..DimensionInfo::overworld() }
@@ -568,11 +620,16 @@ impl Connection {
             profile: profile.clone(),
             packet: login,
         };
+        let (game_tx, game_rx) = mpsc::unbounded_channel();
+        for p in early {
+            let _ = game_tx.send(p);
+        }
         let _ = game_tx.send(ClientboundPlay::Login(info.packet.clone()));
 
         // Tasks.
         let (out_tx, out_rx) = mpsc::unbounded_channel();
         let closed = Arc::new(Mutex::new(None));
+        let pending_registries = Arc::new(Mutex::new(None));
         let Io { dec, enc, .. } = io;
         let writer = tokio::spawn(writer_task(
             enc,
@@ -580,6 +637,12 @@ impl Connection {
             tables.clone(),
             stats.clone(),
             closed.clone(),
+        ));
+        let play_dispatch = Arc::new(Dispatch::new(
+            &tables.packets,
+            State::Play,
+            Direction::Clientbound,
+            ClientboundPlay::DECODERS,
         ));
         let reader = tokio::spawn(reader_task(ReaderCtx {
             dec,
@@ -591,12 +654,14 @@ impl Connection {
             closed: closed.clone(),
             opts,
             regs: regs.clone(),
+            pending_registries: pending_registries.clone(),
         }));
-        Ok((
+        (
             Connection {
                 rx: game_rx,
                 tx: out_tx,
                 registries: Arc::new(regs),
+                pending_registries,
                 tables,
                 stats,
                 closed,
@@ -605,17 +670,38 @@ impl Connection {
                 writer,
             },
             info,
-        ))
+        )
     }
 
     /// Next packet without waiting (for the game tick).
+    ///
+    /// A `login` after the first one follows a reconfiguration
+    /// (`start_configuration`) or a `transfer`; when it is returned,
+    /// [`Self::registries`] already holds the registries that came with it.
     pub fn try_recv(&mut self) -> Option<ClientboundPlay> {
-        self.rx.try_recv().ok()
+        let p = self.rx.try_recv().ok()?;
+        self.on_dequeue(&p);
+        Some(p)
     }
 
     /// Next packet; `None` once the connection is closed and drained.
     pub async fn recv(&mut self) -> Option<ClientboundPlay> {
-        self.rx.recv().await
+        let p = self.rx.recv().await?;
+        self.on_dequeue(&p);
+        Some(p)
+    }
+
+    fn on_dequeue(&mut self, p: &ClientboundPlay) {
+        if matches!(p, ClientboundPlay::Login(_)) {
+            if let Some(r) = self
+                .pending_registries
+                .lock()
+                .ok()
+                .and_then(|mut g| g.take())
+            {
+                self.registries = Arc::new(r);
+            }
+        }
     }
 
     /// Queues a packet for sending.
@@ -700,6 +786,123 @@ fn snapshot(s: &Stats, tables: &ProtocolTables) -> StatsSnapshot {
     }
 }
 
+/// A connection that reached the play state's `login`.
+struct Established {
+    io: Io,
+    profile: GameProfile,
+    regs: SyncedRegistries,
+    login: play::clientbound::Login,
+    /// Play packets that arrived before `login`.
+    early: Vec<ClientboundPlay>,
+}
+
+enum Handshaked {
+    Play(Box<Established>),
+    /// The server sent `transfer` during configuration: `host:port`.
+    Transfer(String),
+}
+
+/// Handshake (with `intent`), login and configuration up to the play-state
+/// `login` packet.
+async fn establish(
+    stream: TcpStream,
+    host: String,
+    port: u16,
+    opts: &ConnectOptions,
+    tables: &Arc<ProtocolTables>,
+    stats: &Arc<Stats>,
+    intent: i32,
+) -> Result<Handshaked, ProtocolError> {
+    let mut io = Io::new(stream, tables.clone(), stats.clone());
+    io.send(
+        State::Handshake,
+        &Intention {
+            protocol_version: opts.protocol_version,
+            server_address: host,
+            server_port: port,
+            intent,
+        },
+    )
+    .await?;
+    io.send(
+        State::Login,
+        &login::serverbound::Hello {
+            name: opts.account.username().to_string(),
+            uuid: opts.account.uuid(),
+        },
+    )
+    .await?;
+    let profile = login_state(&mut io, opts).await?;
+
+    let mut regs = SyncedRegistries::default();
+    if let Some(addr) = configuration_state(&mut io, opts, &mut regs).await? {
+        return Ok(Handshaked::Transfer(addr));
+    }
+
+    // Play: wait for `login`, keeping anything that comes first.
+    let play_dispatch = Dispatch::new(
+        &tables.packets,
+        State::Play,
+        Direction::Clientbound,
+        ClientboundPlay::DECODERS,
+    );
+    let mut early = Vec::new();
+    let login = loop {
+        let raw = io.recv().await?;
+        match play_dispatch.decode(raw.id, &raw.payload, Some(tables)) {
+            Decoded::Ok(ClientboundPlay::Login(l)) => break l,
+            Decoded::Ok(ClientboundPlay::Disconnect(d)) => {
+                return Err(ProtocolError::Disconnected(d.reason.to_plain(&|_| None)))
+            }
+            Decoded::Ok(p) => early.push(p),
+            Decoded::Failed(name, e) => return Err(ProtocolError::Decode(name, e)),
+            Decoded::NoDecoder => early.push(ClientboundPlay::Unknown {
+                id: raw.id,
+                body: raw.payload,
+            }),
+        }
+    };
+    Ok(Handshaked::Play(Box::new(Established {
+        io,
+        profile,
+        regs,
+        login,
+        early,
+    })))
+}
+
+/// Connects to `addr` (`host:port`, from a `transfer`) with the transfer
+/// intent, following further transfers.
+async fn open(
+    addr: &str,
+    opts: &ConnectOptions,
+    tables: &Arc<ProtocolTables>,
+    stats: &Arc<Stats>,
+) -> Result<Established, ProtocolError> {
+    let mut addr = addr.to_string();
+    for _ in 0..8 {
+        tracing::info!("transferring to {addr}");
+        let (host, port, addrs) = resolve(&addr).await?;
+        let stream = TcpStream::connect(&addrs[..]).await?;
+        match establish(stream, host, port, opts, tables, stats, INTENT_TRANSFER).await? {
+            Handshaked::Play(e) => return Ok(*e),
+            Handshaked::Transfer(next) => addr = next,
+        }
+    }
+    Err(ProtocolError::Protocol(
+        "more than 8 transfers in a row".into(),
+    ))
+}
+
+/// `host:port` for a transfer target (IPv6 literals in brackets).
+fn transfer_address(host: &str, port: i32) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
 async fn login_state(io: &mut Io, opts: &ConnectOptions) -> Result<GameProfile, ProtocolError> {
     let tables = io.tables.clone();
     let d = Dispatch::new(
@@ -762,11 +965,12 @@ async fn login_state(io: &mut Io, opts: &ConnectOptions) -> Result<GameProfile, 
                 .await?;
             }
             ClientboundLogin::CookieRequest(c) => {
+                let payload = opts.cookies.get(&c.key);
                 io.send(
                     State::Login,
                     &login::serverbound::CookieResponse {
                         key: c.key,
-                        payload: None,
+                        payload,
                     },
                 )
                 .await?;
@@ -781,6 +985,8 @@ enum ConfigStep {
     Reply(Vec<Bytes>),
     Finished(Bytes),
     Disconnected(String),
+    /// Reconnect to `host:port` with the transfer intent.
+    Transfer(String),
     Nothing,
 }
 
@@ -788,6 +994,7 @@ enum ConfigStep {
 fn configuration_step(
     p: ClientboundConfiguration,
     tables: &ProtocolTables,
+    opts: &ConnectOptions,
     regs: &mut SyncedRegistries,
 ) -> Result<ConfigStep, ProtocolError> {
     use cfg::serverbound as sb;
@@ -820,33 +1027,49 @@ fn configuration_step(
         ClientboundConfiguration::Ping(p) => {
             ConfigStep::Reply(vec![encode(tables, s, &sb::Pong { id: p.id })?])
         }
-        ClientboundConfiguration::CookieRequest(c) => ConfigStep::Reply(vec![encode(
-            tables,
-            s,
-            &sb::CookieResponse {
-                key: c.key,
-                payload: None,
-            },
-        )?]),
+        ClientboundConfiguration::CookieRequest(c) => {
+            let payload = opts.cookies.get(&c.key);
+            ConfigStep::Reply(vec![encode(
+                tables,
+                s,
+                &sb::CookieResponse {
+                    key: c.key,
+                    payload,
+                },
+            )?])
+        }
+        ClientboundConfiguration::StoreCookie(c) => {
+            opts.cookies.store(c.key, c.payload);
+            ConfigStep::Nothing
+        }
+        ClientboundConfiguration::Transfer(t) => {
+            ConfigStep::Transfer(transfer_address(&t.host, t.port))
+        }
+        ClientboundConfiguration::ServerLinks(l) => {
+            regs.server_links = l.links;
+            ConfigStep::Nothing
+        }
+        ClientboundConfiguration::CustomReportDetails(d) => {
+            regs.report_details = d.details;
+            ConfigStep::Nothing
+        }
         ClientboundConfiguration::CodeOfConduct(c) => {
             tracing::info!("server code of conduct (auto-accepted): {}", c.text);
             ConfigStep::Reply(vec![encode(tables, s, &sb::AcceptCodeOfConduct {})?])
         }
         ClientboundConfiguration::ResourcePackPush(r) => {
-            tracing::warn!(
-                "declining server resource pack {} ({}), forced: {}",
+            tracing::info!(
+                "server resource pack {} ({}), forced: {}: {:?}",
                 r.id,
                 r.url,
-                r.forced
+                r.forced,
+                opts.resource_packs
             );
-            ConfigStep::Reply(vec![encode(
-                tables,
-                s,
-                &sb::ResourcePack {
-                    id: r.id,
-                    result: 1,
-                },
-            )?])
+            let mut v = Vec::new();
+            for &result in opts.resource_packs.replies() {
+                v.push(encode(tables, s, &sb::ResourcePack { id: r.id, result })?);
+            }
+            ConfigStep::Reply(v)
         }
         ClientboundConfiguration::FinishConfiguration(_) => {
             ConfigStep::Finished(encode(tables, s, &sb::FinishConfiguration {})?)
@@ -862,8 +1085,8 @@ fn configuration_hello(
     tables: &ProtocolTables,
     opts: &ConnectOptions,
 ) -> Result<Vec<Bytes>, ProtocolError> {
+    // Order as in the wiki's login sequence: brand, then client information.
     Ok(vec![
-        encode(tables, State::Configuration, &opts.client_information)?,
         encode(
             tables,
             State::Configuration,
@@ -872,14 +1095,17 @@ fn configuration_hello(
                 data: brand_payload(&opts.brand),
             },
         )?,
+        encode(tables, State::Configuration, &opts.client_information)?,
     ])
 }
 
+/// Runs the configuration state; `Some(host:port)` if the server
+/// transferred us instead of finishing.
 async fn configuration_state(
     io: &mut Io,
     opts: &ConnectOptions,
     regs: &mut SyncedRegistries,
-) -> Result<(), ProtocolError> {
+) -> Result<Option<String>, ProtocolError> {
     let tables = io.tables.clone();
     for b in configuration_hello(&tables, opts)? {
         io.enc.write_packet(b).await?;
@@ -896,7 +1122,7 @@ async fn configuration_state(
         let Some(p) = decode_with(&d, &raw, &tables, State::Configuration)? else {
             continue;
         };
-        match configuration_step(p, &tables, regs)? {
+        match configuration_step(p, &tables, opts, regs)? {
             ConfigStep::Reply(v) => {
                 for b in v {
                     io.enc.write_packet(b).await?;
@@ -907,8 +1133,9 @@ async fn configuration_state(
             ConfigStep::Finished(ack) => {
                 io.enc.write_packet(ack).await?;
                 io.enc.flush().await?;
-                return Ok(());
+                return Ok(None);
             }
+            ConfigStep::Transfer(addr) => return Ok(Some(addr)),
             ConfigStep::Disconnected(r) => return Err(ProtocolError::Disconnected(r)),
             ConfigStep::Nothing => {}
         }
@@ -925,12 +1152,26 @@ struct ReaderCtx {
     closed: Arc<Mutex<Option<String>>>,
     opts: ConnectOptions,
     regs: SyncedRegistries,
+    pending_registries: Arc<Mutex<Option<SyncedRegistries>>>,
 }
 
 fn set_closed(closed: &Mutex<Option<String>>, reason: String) {
     if let Ok(mut g) = closed.lock() {
         if g.is_none() {
             *g = Some(reason);
+        }
+    }
+}
+
+/// Encodes a play packet as `Outgoing::Raw` (sent even while the game's play
+/// packets are held back).
+fn reply(out: &mpsc::UnboundedSender<Outgoing>, tables: &ProtocolTables, p: ServerboundPlay) {
+    let mut w = Writer::new();
+    if let Some(name) = p.name() {
+        if let Some(id) = tables.packets.id(State::Play, Direction::Serverbound, name) {
+            w.var_int(id);
+            p.encode_body(&mut w);
+            let _ = out.send(Outgoing::Raw(w.into_inner().into()));
         }
     }
 }
@@ -943,17 +1184,6 @@ async fn reader_task(mut c: ReaderCtx) {
         Direction::Clientbound,
         ClientboundConfiguration::DECODERS,
     );
-    let reply =
-        |out: &mpsc::UnboundedSender<Outgoing>, tables: &ProtocolTables, p: ServerboundPlay| {
-            let mut w = Writer::new();
-            if let Some(name) = p.name() {
-                if let Some(id) = tables.packets.id(State::Play, Direction::Serverbound, name) {
-                    w.var_int(id);
-                    p.encode_body(&mut w);
-                    let _ = out.send(Outgoing::Raw(w.into_inner().into()));
-                }
-            }
-        };
     loop {
         let raw = match c.dec.get_raw_packet().await {
             Ok(r) => r,
@@ -968,32 +1198,42 @@ async fn reader_task(mut c: ReaderCtx) {
             .fetch_add(raw.payload.len() as u64, Ordering::Relaxed);
         if !in_play {
             // Reconfiguration.
-            match cfg_dispatch.decode(raw.id, &raw.payload, Some(&c.tables)) {
-                Decoded::Ok(p) => match configuration_step(p, &c.tables, &mut c.regs) {
-                    Ok(ConfigStep::Reply(v)) => v.into_iter().for_each(|b| {
-                        let _ = c.out.send(Outgoing::Raw(b));
-                    }),
-                    Ok(ConfigStep::Finished(ack)) => {
-                        let _ = c.out.send(Outgoing::Raw(ack));
-                        let _ = c.out.send(Outgoing::PlayAllowed(true));
-                        in_play = true;
-                    }
-                    Ok(ConfigStep::Disconnected(r)) => {
-                        set_closed(&c.closed, format!("disconnected by server: {r}"));
-                        break;
-                    }
-                    Ok(ConfigStep::Nothing) => {}
-                    Err(e) => {
-                        set_closed(&c.closed, e.to_string());
-                        break;
-                    }
-                },
-                Decoded::NoDecoder => {}
+            let step = match cfg_dispatch.decode(raw.id, &raw.payload, Some(&c.tables)) {
+                Decoded::Ok(p) => configuration_step(p, &c.tables, &c.opts, &mut c.regs),
+                Decoded::NoDecoder => Ok(ConfigStep::Nothing),
                 Decoded::Failed(name, e) => {
                     set_closed(
                         &c.closed,
                         format!("decoding {name} during reconfiguration: {e}"),
                     );
+                    break;
+                }
+            };
+            match step {
+                Ok(ConfigStep::Reply(v)) => v.into_iter().for_each(|b| {
+                    let _ = c.out.send(Outgoing::Raw(b));
+                }),
+                Ok(ConfigStep::Finished(ack)) => {
+                    let _ = c.out.send(Outgoing::Raw(ack));
+                    let _ = c.out.send(Outgoing::PlayAllowed(true));
+                    if let Ok(mut g) = c.pending_registries.lock() {
+                        *g = Some(c.regs.clone());
+                    }
+                    in_play = true;
+                }
+                Ok(ConfigStep::Transfer(addr)) => {
+                    if !transfer(&mut c, &addr).await {
+                        break;
+                    }
+                    in_play = true;
+                }
+                Ok(ConfigStep::Disconnected(r)) => {
+                    set_closed(&c.closed, format!("disconnected by server: {r}"));
+                    break;
+                }
+                Ok(ConfigStep::Nothing) => {}
+                Err(e) => {
+                    set_closed(&c.closed, e.to_string());
                     break;
                 }
             }
@@ -1027,6 +1267,7 @@ async fn reader_task(mut c: ReaderCtx) {
             }
         };
         use play::serverbound as sb;
+        let mut transfer_to = None;
         match &packet {
             ClientboundPlay::KeepAlive(k) => reply(
                 &c.out,
@@ -1045,6 +1286,34 @@ async fn reader_task(mut c: ReaderCtx) {
                     chunks_per_tick: c.opts.chunks_per_tick,
                 }),
             ),
+            ClientboundPlay::CookieRequest(r) => reply(
+                &c.out,
+                &c.tables,
+                ServerboundPlay::CookieResponse(sb::CookieResponse {
+                    key: r.key.clone(),
+                    payload: c.opts.cookies.get(&r.key),
+                }),
+            ),
+            ClientboundPlay::StoreCookie(s) => {
+                c.opts.cookies.store(s.key.clone(), s.payload.clone())
+            }
+            ClientboundPlay::ResourcePackPush(r) => {
+                tracing::info!(
+                    "server resource pack {} ({}), forced: {}: {:?}",
+                    r.id,
+                    r.url,
+                    r.forced,
+                    c.opts.resource_packs
+                );
+                for &result in c.opts.resource_packs.replies() {
+                    reply(
+                        &c.out,
+                        &c.tables,
+                        ServerboundPlay::ResourcePack(sb::ResourcePack { id: r.id, result }),
+                    );
+                }
+            }
+            ClientboundPlay::Transfer(t) => transfer_to = Some(transfer_address(&t.host, t.port)),
             ClientboundPlay::StartConfiguration(_) => {
                 let _ = c.out.send(Outgoing::PlayAllowed(false));
                 reply(
@@ -1053,7 +1322,10 @@ async fn reader_task(mut c: ReaderCtx) {
                     ServerboundPlay::ConfigurationAcknowledged(sb::ConfigurationAcknowledged {}),
                 );
                 in_play = false;
-                // Vanilla sends client information again on reconfiguration.
+                // The server sends every registry again.
+                c.regs = SyncedRegistries::default();
+                // Whether vanilla sends brand and client information again
+                // here is not determined; servers accept it.
                 if let Ok(v) = configuration_hello(&c.tables, &c.opts) {
                     v.into_iter().for_each(|b| {
                         let _ = c.out.send(Outgoing::Raw(b));
@@ -1072,8 +1344,55 @@ async fn reader_task(mut c: ReaderCtx) {
         if c.game.send(packet).is_err() || is_disconnect {
             break;
         }
+        if let Some(addr) = transfer_to {
+            if !transfer(&mut c, &addr).await {
+                break;
+            }
+        }
     }
     set_closed(&c.closed, "connection closed".into());
+}
+
+/// Follows a `transfer`: connects to `addr` with the transfer intent (cookies
+/// kept), swaps the reader's decoder and the writer's encoder, and hands the
+/// new `login` (and the registries for it) to the game. The game sees the
+/// `transfer` packet first, then that `login`. Returns false if it failed
+/// (the connection is then closed).
+async fn transfer(c: &mut ReaderCtx, addr: &str) -> bool {
+    let _ = c.out.send(Outgoing::PlayAllowed(false));
+    // Close the old connection first; connecting while it is open makes the
+    // server kick the old session ("logged in from another location").
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let _ = c.out.send(Outgoing::CloseCurrent(done_tx));
+    let _ = done_rx.await;
+    match open(addr, &c.opts, &c.tables, &c.stats).await {
+        Ok(est) => {
+            let Established {
+                io,
+                regs,
+                login,
+                early,
+                ..
+            } = est;
+            let Io { dec, enc, .. } = io;
+            c.dec = dec;
+            let _ = c.out.send(Outgoing::NewEncoder(Box::new(enc)));
+            let _ = c.out.send(Outgoing::PlayAllowed(true));
+            if let Ok(mut g) = c.pending_registries.lock() {
+                *g = Some(regs.clone());
+            }
+            c.regs = regs;
+            let _ = c.game.send(ClientboundPlay::Login(login));
+            for p in early {
+                let _ = c.game.send(p);
+            }
+            true
+        }
+        Err(e) => {
+            set_closed(&c.closed, format!("transfer to {addr} failed: {e}"));
+            false
+        }
+    }
 }
 
 /// With `HASTE_PROTOCOL_DUMP=<dir>`, writes the body of the first packet of
@@ -1089,12 +1408,14 @@ fn dump_packet(name: &str, body: &[u8]) {
 }
 
 async fn writer_task(
-    mut enc: Encoder,
+    enc: Encoder,
     mut rx: mpsc::UnboundedReceiver<Outgoing>,
     tables: Arc<ProtocolTables>,
     stats: Arc<Stats>,
     closed: Arc<Mutex<Option<String>>>,
 ) {
+    // `None` between closing the old connection and a transfer's new one.
+    let mut enc = Some(enc);
     let mut play_allowed = true;
     while let Some(first) = rx.recv().await {
         let mut next = Some(first);
@@ -1121,23 +1442,39 @@ async fn writer_task(
                     play_allowed = a;
                     None
                 }
+                Outgoing::CloseCurrent(done) => {
+                    if let Some(mut e) = enc.take() {
+                        let _ = e.flush().await;
+                        // Dropping the write half sends FIN.
+                    }
+                    let _ = done.send(());
+                    None
+                }
+                Outgoing::NewEncoder(e) => {
+                    enc = Some(*e);
+                    None
+                }
                 Outgoing::Shutdown => {
-                    let _ = enc.flush().await;
+                    if let Some(e) = enc.as_mut() {
+                        let _ = e.flush().await;
+                    }
                     return;
                 }
             };
-            if let Some(b) = bytes {
-                if let Err(e) = enc.write_packet(b).await {
-                    set_closed(&closed, format!("write failed: {e}"));
+            if let (Some(b), Some(e)) = (bytes, enc.as_mut()) {
+                if let Err(err) = e.write_packet(b).await {
+                    set_closed(&closed, format!("write failed: {err}"));
                     return;
                 }
                 stats.packets_out.fetch_add(1, Ordering::Relaxed);
             }
             next = rx.try_recv().ok();
         }
-        if let Err(e) = enc.flush().await {
-            set_closed(&closed, format!("flush failed: {e}"));
-            return;
+        if let Some(e) = enc.as_mut() {
+            if let Err(err) = e.flush().await {
+                set_closed(&closed, format!("flush failed: {err}"));
+                return;
+            }
         }
     }
 }

@@ -1,0 +1,21 @@
+# Terrain reference shots on the reference server (scripts/vanilla-server.sh, seed 20263; the
+# world spawn is in a forest near 144, -192). HUD and hand hidden (F1). `spreadplayers` puts the
+# player on the surface at a fixed x/z; the JSON next to each PNG records the exact camera,
+# which scripts/compare-vanilla.sh reproduces in Haste. Pitch: positive looks down.
+hud off
+cmd time set 6000
+cmd spreadplayers 144.5 -191.5 0 1 false @s
+wait 40
+cmd tp @s ~ ~ ~ 0 15
+wait 10
+wait_world
+screenshot terrain-forest-south
+cmd tp @s ~ ~ ~ 180 15
+wait 10
+wait_world
+screenshot terrain-forest-north
+cmd tp @s ~ ~ ~ 90 35
+wait 10
+wait_world
+screenshot terrain-forest-west-down
+quit
