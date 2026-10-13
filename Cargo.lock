@@ -1176,6 +1176,7 @@ dependencies = [
  "haste-core",
  "haste-data",
  "image",
+ "indexmap",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -1206,6 +1207,7 @@ dependencies = [
  "crossbeam-channel",
  "glam",
  "haste-assets",
+ "haste-audio",
  "haste-core",
  "haste-data",
  "haste-entity",
@@ -1360,6 +1362,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "haste-core",
+ "haste-protocol",
  "hex",
  "http-body-util",
  "hyper",
@@ -1665,6 +1668,8 @@ checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]

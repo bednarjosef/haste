@@ -149,6 +149,7 @@ fn measure(
             yaw,
             pitch: 10.0,
             fov_deg: 70.0,
+            roll_deg: 0.0,
         },
         entities: &[],
         gui: &gui,

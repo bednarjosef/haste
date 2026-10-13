@@ -11,6 +11,11 @@ use crate::dims::EntityDimensions;
 use crate::lerp::LerpState;
 use crate::metadata::Metadata;
 
+/// Hurt flash duration in ticks (vanilla's `hurtTime` runs to 10).
+pub const HURT_TICKS: u32 = 10;
+/// Death animation duration in ticks (vanilla's `deathTime` runs to 20).
+pub const DEATH_TICKS: u32 = 20;
+
 /// One tracked entity.
 pub struct Entity {
     pub id: EntityId,
@@ -40,6 +45,10 @@ pub struct Entity {
     pub limb_swing: f32,
     /// Smoothed horizontal speed (amplitude of the limb swing).
     pub limb_speed: f32,
+    /// Ticks of hurt animation left (10 per hit; `hurt_animation`/`damage_event` restart it).
+    pub hurt_ticks: u32,
+    /// Set on the death event: holds the hurt tint instead of easing out.
+    pub dead: bool,
 }
 
 impl Entity {
@@ -64,6 +73,8 @@ impl Entity {
             is_player_type: false,
             limb_swing: 0.0,
             limb_speed: 0.0,
+            hurt_ticks: 0,
+            dead: false,
         }
     }
 }
@@ -74,6 +85,17 @@ pub struct EntityStore {
     by_id: AHashMap<EntityId, u32>,
     dims: EntityDimensions,
     players: AHashMap<Uuid, PlayerInfo>,
+}
+
+/// Hurt flash strength for an entity's remaining hurt ticks, eased out (quadratic, like
+/// vanilla's `hurtTime`-driven fade: strong on impact, gone by tick 10). `dead` holds the
+/// flash while the death animation's 20 ticks run.
+pub fn hurt_strength(e: &Entity) -> f32 {
+    if e.dead {
+        return if e.hurt_ticks > 0 { 1.0 } else { 0.0 };
+    }
+    let left = e.hurt_ticks.min(HURT_TICKS) as f32 / HURT_TICKS as f32;
+    left * left
 }
 
 impl EntityStore {
@@ -181,6 +203,26 @@ impl EntityStore {
         }
     }
 
+    /// `hurt_animation` / `damage_event`: (re)start the 10-tick red flash.
+    pub fn mark_hurt(&mut self, id: EntityId) {
+        if let Some(i) = self.slot(id) {
+            if let Some(e) = &mut self.slots[i as usize] {
+                e.hurt_ticks = HURT_TICKS;
+            }
+        }
+    }
+
+    /// The death event (entity status 3): holds the hurt tint while the 20-tick death
+    /// animation would play, then nothing.
+    pub fn mark_dead(&mut self, id: EntityId) {
+        if let Some(i) = self.slot(id) {
+            if let Some(e) = &mut self.slots[i as usize] {
+                e.dead = true;
+                e.hurt_ticks = DEATH_TICKS;
+            }
+        }
+    }
+
     pub fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]) {
         let Some(i) = self.slot(id) else { return };
         let Some(e) = &mut self.slots[i as usize] else {
@@ -232,6 +274,7 @@ impl EntityStore {
             slot.limb_swing += dist * 0.5;
             // Vanilla smooths the amplitude towards distance x 4 by 0.4 each tick.
             slot.limb_speed += (dist * 4.0 - slot.limb_speed) * 0.4;
+            slot.hurt_ticks = slot.hurt_ticks.saturating_sub(1);
         }
     }
 
@@ -274,6 +317,7 @@ impl EntityStore {
                 pose,
                 skin: None,
                 nametag: slot.nametag.clone(),
+                hurt: hurt_strength(slot),
             });
         }
     }

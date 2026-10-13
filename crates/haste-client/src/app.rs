@@ -17,7 +17,7 @@ use glam::DVec3;
 use haste_protocol::haste_core::gui::GuiFrame;
 use haste_protocol::haste_core::input::InputState;
 use haste_protocol::haste_core::model::EntityInstance;
-use haste_protocol::haste_core::{ChunkPos, SectionPos};
+use haste_protocol::haste_core::{ChunkPos, EntityId, SectionPos};
 use haste_protocol::{Account, ConnectOptions};
 use haste_render::{Camera, FrameInput, FrameStats, Renderer, SkyState};
 use haste_setup::options::Options;
@@ -63,6 +63,8 @@ const DOUBLE_TAP: Duration = Duration::from_millis(350);
 /// Wall time the render thread may spend capturing sections for the mesher per frame.
 /// Sections handed to the mesh workers per frame (they capture the snapshots themselves).
 const SUBMIT_PER_FRAME: usize = 512;
+/// Vanilla's "GUI scale" (the auto option is not wired; 2 is a common choice at 1080p).
+const GUI_SCALE: u32 = 2;
 
 /// A joined game: runtime, game thread and shared state.
 struct Session {
@@ -74,10 +76,14 @@ struct Session {
     biomes: Vec<haste_render::BiomeClimate>,
     /// The saved options this run uses (loaded once).
     options: Options,
+    /// The local player's entity id and UUID (`login`), for its own model in third person.
+    local: (EntityId, u128),
 }
 
 impl Session {
-    fn join(args: &Args) -> anyhow::Result<Self> {
+    /// `sound`: open the audio output (the window only; screenshots and the benchmark stay
+    /// silent so they neither make noise nor measure the audio thread).
+    fn join(args: &Args, sound: bool) -> anyhow::Result<Self> {
         let address = args.server.clone().ok_or_else(|| {
             anyhow::anyhow!("--server <host[:port]> is required (no launcher yet)")
         })?;
@@ -107,6 +113,7 @@ impl Session {
         let biomes = net::synced_biome_count(regs).unwrap_or(64);
         let biome_climates = biomes::biome_climates(regs);
         let login = driver.login();
+        let local = (login.entity_id, login.profile.uuid.as_u128());
         tracing::info!(
             "joined {address} as {}: {:?}, dimension {}, view distance {}",
             driver.connection().profile().name,
@@ -124,6 +131,9 @@ impl Session {
             view_distance,
             haste_render::default_skin(login.profile.uuid.as_u128()),
         ));
+        if sound {
+            *shared.sound.lock() = open_sounds(regs, &shared.data, &options.sound);
+        }
         let handle = rt.handle().clone();
         let sh = shared.clone();
         let game_thread = std::thread::Builder::new()
@@ -138,6 +148,7 @@ impl Session {
             game_thread: Some(game_thread),
             biomes: biome_climates,
             options,
+            local,
         })
     }
 
@@ -264,11 +275,15 @@ impl WorldFeed {
 
     /// Copies the interpolated entity instances.
     /// Copies the interpolated entity instances, gives players their default skin and samples
-    /// each entity's light for the renderer.
+    /// each entity's light for the renderer. In the third-person perspectives the local
+    /// player's own model is included (the server does not spawn us as an entity, so it is
+    /// built here from the shared view).
     fn entities(
         &mut self,
         shared: &Shared,
         renderer: &mut Renderer,
+        perspective: game::Perspective,
+        local: (EntityId, u128),
         partial: f32,
     ) -> &[EntityInstance] {
         self.instances.clear();
@@ -284,6 +299,11 @@ impl WorldFeed {
                 }
             }
         }
+        if perspective.draws_player() {
+            let view = *shared.view.lock();
+            self.instances
+                .push(game::player_instance(local.0, local.1, &view, partial));
+        }
         renderer.sample_entity_lights(&*shared.world.read(), &self.instances);
         &self.instances
     }
@@ -292,8 +312,17 @@ impl WorldFeed {
     /// per-tick part changed since the last call. The skin is fixed for the connection, so
     /// comparing the per-tick part is enough to catch every change; the skin is cloned only when
     /// one happens (no allocation per frame).
-    fn set_first_person(&mut self, shared: &Shared, renderer: &mut Renderer) {
-        let view = shared.view.lock().first_person;
+    /// The first-person hand only exists in the first-person perspective (F5 hides it).
+    fn set_first_person(
+        &mut self,
+        shared: &Shared,
+        renderer: &mut Renderer,
+        perspective: game::Perspective,
+    ) {
+        let view = match perspective {
+            game::Perspective::FirstPerson => shared.view.lock().first_person,
+            _ => None,
+        };
         if view == self.first_person {
             return;
         }
@@ -317,9 +346,11 @@ impl WorldFeed {
 
 /// Builds this frame's camera and sky from the shared view at `now`. `yaw`/`pitch` are the
 /// input layer's look; the player's server rotation offset is added here so mouse look is
-/// smooth at frame rate while the player itself turns once per tick.
+/// smooth at frame rate while the player itself turns once per tick. In the third-person
+/// perspectives the camera is moved off the eye (`game::third_person_camera`).
 fn frame_view(
     shared: &Shared,
+    perspective: game::Perspective,
     yaw: f32,
     pitch: f32,
     fov_deg: f32,
@@ -327,12 +358,25 @@ fn frame_view(
 ) -> (Camera, SkyState, f32, i32, u64) {
     let view = *shared.view.lock();
     let partial = game::partial_tick(view.tick_at, now);
+    let eye = game::interpolate(view.prev_eye, view.eye, partial);
+    let look = (
+        yaw + view.look_offset.0,
+        (pitch + view.look_offset.1).clamp(-90.0, 90.0),
+    );
+    let (pos, yaw, pitch) = if perspective.draws_player() {
+        // The world is read here (the outline shapes the crosshair raycast uses too), held
+        // only for the ray.
+        let (world, shapes) = (shared.world.read(), &shared.data.shapes);
+        game::third_person_camera(perspective, eye, look.0, look.1, &*world, shapes)
+    } else {
+        (eye, look.0, look.1)
+    };
     let camera = Camera {
-        // Linear between LocalPlayer::camera(0.0) and camera(1.0), i.e. camera(partial).
-        pos: game::interpolate(view.prev_eye, view.eye, partial),
-        yaw: yaw + view.look_offset.0,
-        pitch: (pitch + view.look_offset.1).clamp(-90.0, 90.0),
+        pos,
+        yaw,
+        pitch,
         fov_deg,
+        roll_deg: view.hurt_tilt,
     };
     let fog_end = (view.view_distance.max(2) * 16) as f32;
     let sky = SkyState {
@@ -382,17 +426,47 @@ fn open_assets() -> anyhow::Result<haste_assets::Assets> {
     .with_context(|| format!("opening assets from {}", jar.display()))
 }
 
+/// The sound output for a joined game: `sounds.json` parsed from the real assets, the
+/// sound-event name table (the server's synced registry or the static one), played
+/// through the default device with the saved volumes. Without an audio device it stays
+/// silent; when the assets or `sounds.json` cannot be read the game runs without sound
+/// (logged) rather than not at all.
+fn open_sounds(
+    regs: &haste_protocol::SyncedRegistries,
+    data: &haste_data::GameData,
+    volumes: &haste_setup::options::SoundVolumes,
+) -> Option<crate::sound::Sounds> {
+    let events = (|| -> anyhow::Result<haste_audio::sounds::SoundEvents> {
+        let mut assets = open_assets()?;
+        let bytes = assets.read_asset("assets/minecraft/sounds.json")?;
+        haste_audio::sounds::SoundEvents::parse(&bytes)
+    })();
+    match events {
+        Ok(events) => Some(crate::sound::Sounds::new(
+            events,
+            open_assets().ok()?,
+            crate::sound::sound_event_names(regs, data),
+            volumes,
+        )),
+        Err(e) => {
+            tracing::warn!("sound stays off: {e:#}");
+            None
+        }
+    }
+}
+
 /// `--screenshot <file>`: join, wait until the world is meshed, render one frame offscreen,
 /// save it as PNG and leave. `--seconds` bounds the wait.
 pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
-    let session = Session::join(args)?;
+    let session = Session::join(args, false)?;
     let shared = session.shared.clone();
     let mut assets = open_assets()?;
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
     renderer.set_biomes(&session.biomes);
-    let gui = GuiFrame::default();
+    let mut gui = GuiFrame::default();
+    let mut ui: Option<crate::ui::Ui> = None;
     let mut feed = WorldFeed::default();
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
     // With `--pos`, the shot is only taken once the server has teleported the player to these
@@ -402,37 +476,69 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         .as_ref()
         .filter(|v| v.len() == 3)
         .map(|v| DVec3::new(v[0], v[1], v[2]));
+    // The HUD's JVM (started by the game thread) gets this long to be ready; the shot then
+    // waits for it past the world settling, so the HUD is in the picture whenever it can be.
+    let jvm_deadline = Instant::now() + Duration::from_secs(args.seconds.min(30));
+    let mut wait_for_hud = true;
     let mut frames = 0u32;
     let mut stats;
     let mut last_camera;
+    let perspective = game::Perspective::parse(&args.perspective)?;
     loop {
+        // The look the shot is taken with: `--yaw`/`--pitch`, else the player's own (the
+        // input layer's zero look plus the server's rotation offset). It goes into
+        // `frame_view` so the third-person camera offset follows it. The player is made to
+        // look the same way, so its crosshair target (and the outline drawn for it) matches
+        // the picture.
+        let offset = shared.view.lock().look_offset;
+        let look = (args.yaw.unwrap_or(offset.0), args.pitch.unwrap_or(offset.1));
+        {
+            let mut input = shared.input.lock();
+            input.state.yaw = look.0 - offset.0;
+            input.state.pitch = (look.1 - offset.1).clamp(-90.0, 90.0);
+        }
         let (mut camera, sky, partial, vd, animation_tick) = frame_view(
             &shared,
-            0.0,
-            0.0,
+            perspective,
+            look.0 - offset.0,
+            look.1 - offset.1,
             session.options.fov as f32,
             Instant::now(),
         );
-        camera.yaw = args.yaw.unwrap_or(camera.yaw);
-        camera.pitch = args.pitch.unwrap_or(camera.pitch);
         if let Some(pos) = want_pos {
             let view = *shared.view.lock();
-            camera.pos = pos + DVec3::new(0.0, view.eye_height, 0.0);
+            let eye = pos + DVec3::new(0.0, view.eye_height, 0.0);
+            camera.pos = if perspective.draws_player() {
+                let (world, shapes) = (shared.world.read(), &shared.data.shapes);
+                game::third_person_camera(perspective, eye, look.0, look.1, &*world, shapes).0
+            } else {
+                eye
+            };
         }
         last_camera = camera;
-        {
-            // The player looks where the screenshot camera looks, so its crosshair target
-            // (and the outline drawn for it) matches the picture.
-            let offset = shared.view.lock().look_offset;
-            let mut input = shared.input.lock();
-            input.state.yaw = camera.yaw - offset.0;
-            input.state.pitch = camera.pitch - offset.1;
-        }
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
-        feed.set_first_person(&shared, &mut renderer);
-        let entities = feed.entities(&shared, &mut renderer, partial);
+        feed.set_first_person(&shared, &mut renderer, perspective);
+        let entities = feed.entities(&shared, &mut renderer, perspective, session.local, partial);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
+        // The HUD, like the window: waiting for the JVM, then one `Ui` for this render thread.
+        if ui.is_none() {
+            ui = shared.ui.lock().clone();
+            if let Some(u) = &ui {
+                u.set_text_metrics(renderer.text_metrics());
+            }
+        }
+        if let Some(u) = &mut ui {
+            gui = u
+                .frame(
+                    args.width / GUI_SCALE,
+                    args.height / GUI_SCALE,
+                    GUI_SCALE,
+                    (0.0, 0.0),
+                    partial,
+                )
+                .clone();
+        }
         let frame = FrameInput {
             camera,
             entities,
@@ -473,8 +579,15 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
                 continue;
             }
         }
-        if placed && feed.settled(&stats, Duration::from_millis(1500)) {
+        if placed && feed.settled(&stats, Duration::from_millis(1500)) && !wait_for_hud {
             break;
+        }
+        wait_for_hud = wait_for_hud
+            && ui.is_none()
+            && !shared.hud_failed.load(Ordering::Relaxed)
+            && Instant::now() < jvm_deadline;
+        if wait_for_hud && Instant::now() > jvm_deadline {
+            tracing::warn!("the HUD's JVM did not start in time; the shot has no HUD");
         }
         if Instant::now() > deadline {
             tracing::warn!("--seconds elapsed before the world settled; saving what is there");
@@ -488,8 +601,9 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("saving {}", file.display()))?;
     let c = last_camera;
     let view = *shared.view.lock();
+    let entities = feed.instances.len();
     println!(
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, target {:?}",
+        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} entity instances (perspective {}, local player {}), target {:?}",
         file.display(),
         image.width(),
         image.height(),
@@ -502,6 +616,9 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         stats.chunk_sections_drawn,
         stats.chunk_sections_total,
         stats.draw_calls,
+        entities,
+        args.perspective,
+        perspective.draws_player(),
         view.block_target
     );
     drop(session);
@@ -536,6 +653,15 @@ struct BenchSample {
     sections_total: u32,
     draw_calls: u32,
     timings: haste_render::FrameTimings,
+    /// WorldFeed::feed time (dirty collection, submit, mesh upload).
+    feed_ms: f32,
+    /// Sections that were not drawn by the previous sample's frame (meshes became visible).
+    sections_new: u32,
+    /// Section meshes uploaded this frame and their vertex+index bytes.
+    uploads: u32,
+    upload_bytes: u64,
+    /// Frame index since the measure phase started.
+    index: u32,
 }
 
 /// Summary of a bench run: aggregate frame times plus the renderer's phase and pass averages.
@@ -603,6 +729,55 @@ impl BenchSummary {
     }
 }
 
+/// The `count` slowest sample indices, slowest first (earliest frame breaks ties). The
+/// allocation is at the end of the bench, after all frames are recorded.
+fn slowest_indices(samples: &[BenchSample], count: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..samples.len()).collect();
+    order.sort_by(|&a, &b| {
+        samples[b]
+            .frame_ms
+            .total_cmp(&samples[a].frame_ms)
+            .then(samples[a].index.cmp(&samples[b].index))
+    });
+    order.truncate(count);
+    order
+}
+
+/// The `count` slowest bench frames with their full breakdown: frame index and time, the
+/// renderer phases (prepare/cull/encode/submit, GPU main pass), the feed phase, mesh uploads
+/// (count and bytes) and how many sections the frame drew that the previous one did not.
+/// GPU pass times arrive a frame or two late (timestamp readback), so they are the latest
+/// available at that frame, not necessarily that exact frame's passes.
+fn print_slowest_frames(samples: &[BenchSample]) {
+    const COUNT: usize = 20;
+    let order = slowest_indices(samples, COUNT);
+    if order.is_empty() {
+        return;
+    }
+    println!("slowest {} frames (of {}):", order.len(), samples.len());
+    println!("  frame   ms | feed prep cull enc sub gpuM | up #/KB sect+ drawn/total calls");
+    for &i in &order {
+        let s = &samples[i];
+        println!(
+            "  {:5} {:5.2} | {:5.2} {:5.2} {:5.2} {:4.2} {:5.2} {:5.2} | {:3} {:5.0} {:4} {}/{} {}",
+            s.index,
+            s.frame_ms,
+            s.feed_ms,
+            s.timings.prepare_ms,
+            s.timings.cull_ms,
+            s.timings.encode_ms,
+            s.timings.submit_ms,
+            s.timings.gpu_ms[0],
+            s.uploads,
+            s.upload_bytes as f32 / 1024.0,
+            s.sections_new,
+            s.sections_drawn,
+            s.sections_total,
+            s.draw_calls,
+        );
+    }
+}
+
 /// Run metadata printed with the summary.
 struct BenchMeta {
     seconds: f32,
@@ -664,7 +839,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let Some(_server) = args.server.as_ref() else {
         anyhow::bail!("--bench needs --server <host[:port]>");
     };
-    let session = Session::join(args)?;
+    let session = Session::join(args, false)?;
     let shared = session.shared.clone();
     let mut assets = open_assets()?;
     let mut renderer =
@@ -681,6 +856,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     loop {
         let (mut camera, sky, partial, v, animation_tick) = frame_view(
             &shared,
+            game::Perspective::FirstPerson,
             0.0,
             0.0,
             session.options.fov as f32,
@@ -691,8 +867,14 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         base = camera;
         vd = v;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
-        feed.set_first_person(&shared, &mut renderer);
-        let entities = feed.entities(&shared, &mut renderer, partial);
+        feed.set_first_person(&shared, &mut renderer, game::Perspective::FirstPerson);
+        let entities = feed.entities(
+            &shared,
+            &mut renderer,
+            game::Perspective::FirstPerson,
+            session.local,
+            partial,
+        );
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
         let frame = FrameInput {
@@ -749,6 +931,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         // (time of day moves, the player stays where the server put it).
         let (_, mut sky, partial_tick, _, animation_tick) = frame_view(
             &shared,
+            game::Perspective::FirstPerson,
             0.0,
             0.0,
             session.options.fov as f32,
@@ -758,8 +941,16 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         let fog_end = (vd.max(2) * 16) as f32;
         sky.fog_start = fog_end * 0.75;
         sky.fog_end = fog_end;
+        let feed_start = Instant::now();
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
-        let entities = feed.entities(&shared, &mut renderer, partial_tick);
+        let feed_ms = feed_start.elapsed().as_secs_f32() * 1000.0;
+        let entities = feed.entities(
+            &shared,
+            &mut renderer,
+            game::Perspective::FirstPerson,
+            session.local,
+            partial_tick,
+        );
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
         let frame = FrameInput {
@@ -774,12 +965,18 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
         let stats = renderer.render(&frame)?;
+        let prev_drawn = samples.last().map_or(0, |s| s.sections_drawn);
         samples.push(BenchSample {
             frame_ms: stats.frame_ms,
             sections_drawn: stats.chunk_sections_drawn,
             sections_total: stats.chunk_sections_total,
             draw_calls: stats.draw_calls,
             timings: renderer.timings(),
+            feed_ms,
+            sections_new: stats.chunk_sections_drawn.saturating_sub(prev_drawn),
+            uploads: stats.uploads,
+            upload_bytes: stats.upload_bytes,
+            index: samples.len() as u32,
         });
         if shared.is_closed() {
             anyhow::bail!(
@@ -790,6 +987,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     }
     let summary = bench_summary(&samples);
     println!("{}", summary.text(&meta));
+    print_slowest_frames(&samples);
     if let Some(out) = &args.bench_out {
         let json = serde_json::json!({
             "frames": summary.frames,
@@ -825,7 +1023,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
 
 /// Windowed mode.
 pub fn run(args: &Args) -> anyhow::Result<()> {
-    let session = Session::join(args)?;
+    let session = Session::join(args, true)?;
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
@@ -834,10 +1032,14 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         // The flag wins over the saved option; without it, the saved option decides.
         vsync: args.vsync.unwrap_or(session.options.vsync),
         options: session.options.clone(),
+        local: session.local,
+        perspective: game::Perspective::default(),
         window: None,
         renderer: None,
         feed: WorldFeed::default(),
+        ui: None,
         gui: GuiFrame::default(),
+        mouse: (0.0, 0.0),
         grabbed: false,
         focused: true,
         yaw: 0.0,
@@ -879,10 +1081,20 @@ struct App {
     vsync: bool,
     /// Saved options (FOV for rendering, sensitivity for mouse look).
     options: Options,
+    /// The local player's entity id and UUID, for its own model in third person.
+    local: (EntityId, u128),
+    /// Current perspective (F5 cycles it).
+    perspective: game::Perspective,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     feed: WorldFeed,
+    /// The HUD's `Ui`, cloned from the game thread's once it is ready (the JVM takes seconds
+    /// to start); `gui` stays the empty default until then.
+    ui: Option<crate::ui::Ui>,
     gui: GuiFrame,
+    /// The cursor in GUI-scaled pixels (`frame`'s mouse argument; the game keeps the mouse
+    /// grabbed, so this stays where the grab began).
+    mouse: (f64, f64),
     grabbed: bool,
     focused: bool,
     yaw: f32,
@@ -992,6 +1204,7 @@ impl App {
         let t0 = Instant::now();
         let (camera, sky, partial, vd, animation_tick) = frame_view(
             &self.shared,
+            self.perspective,
             self.yaw,
             self.pitch,
             self.options.fov as f32,
@@ -1000,13 +1213,35 @@ impl App {
         self.feed
             .feed(&self.shared, renderer, camera_section(&camera), vd);
         let t1 = Instant::now();
-        self.feed.set_first_person(&self.shared, renderer);
-        let entities = self.feed.entities(&self.shared, renderer, partial);
+        self.feed
+            .set_first_person(&self.shared, renderer, self.perspective);
+        let entities = self.feed.entities(
+            &self.shared,
+            renderer,
+            self.perspective,
+            self.local,
+            partial,
+        );
         let block_target = self.shared.view.lock().block_target;
         self.breaking.clear();
         self.breaking
             .extend_from_slice(&self.shared.breaking.lock());
         let t2 = Instant::now();
+        // The HUD: once the game thread's `Ui` is ready, clone it here (cheap, one per thread)
+        // and render the frame through it; until then (JVM still starting, or failed: no JDK
+        // or cache) the empty default draws no HUD.
+        if self.ui.is_none() {
+            self.ui = self.shared.ui.lock().clone();
+            if let Some(ui) = &self.ui {
+                ui.set_text_metrics(renderer.text_metrics());
+            }
+        }
+        let (w, h) = renderer.size();
+        if let Some(ui) = &mut self.ui {
+            self.gui = ui
+                .frame(w / GUI_SCALE, h / GUI_SCALE, GUI_SCALE, self.mouse, partial)
+                .clone();
+        }
         let frame = FrameInput {
             camera,
             entities,
@@ -1098,6 +1333,11 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CursorMoved { position, .. } => {
+                // GUI-scaled pixels: physical size divided by the GUI scale.
+                let s = f64::from(GUI_SCALE);
+                self.mouse = (position.x / s, position.y / s);
+            }
             WindowEvent::Resized(size) => {
                 if let Some(r) = &mut self.renderer {
                     r.resize(size.width.max(1), size.height.max(1));
@@ -1177,6 +1417,14 @@ impl ApplicationHandler for App {
                             if let Some(w) = &self.window {
                                 let full = w.fullscreen().is_some();
                                 w.set_fullscreen((!full).then_some(Fullscreen::Borderless(None)));
+                            }
+                        }
+                        // F5 cycles the perspective (vanilla's three). In third person there
+                        // is no first-person hand.
+                        KeyCode::F5 => {
+                            self.perspective = self.perspective.next();
+                            if let Some(r) = &mut self.renderer {
+                                r.set_first_person(None);
                             }
                         }
                         KeyCode::F2 => {
@@ -1377,6 +1625,11 @@ mod tests {
                 submit_ms: 4.0,
                 ..Default::default()
             },
+            feed_ms: 0.5,
+            sections_new: 0,
+            uploads: 0,
+            upload_bytes: 0,
+            index: 0,
         }
     }
 
@@ -1414,12 +1667,31 @@ mod tests {
     }
 
     #[test]
+    fn slowest_indices_slowest_first_with_ties_by_frame() {
+        let mut slow = sample(50.0);
+        slow.index = 10;
+        let mut samples: Vec<BenchSample> = (0..49).map(|_| sample(5.0)).collect();
+        samples.push(slow);
+        let order = slowest_indices(&samples, 20);
+        assert_eq!(order.len(), 20);
+        assert_eq!(order[0], 49, "the 50 ms frame leads");
+        // All 5 ms frames tie; the earliest frames come first among them.
+        assert_eq!(order[1], 0);
+        assert_eq!(order[2], 1);
+        // Asking for more than there are returns all, and an empty run returns none.
+        assert_eq!(slowest_indices(&samples, 100).len(), 50);
+        assert!(slowest_indices(&[], 20).is_empty());
+        print_slowest_frames(&samples);
+    }
+
+    #[test]
     fn bench_camera_path_turns_then_flies() {
         let base = Camera {
             pos: DVec3::new(100.0, 64.0, -200.0),
             yaw: 30.0,
             pitch: 10.0,
             fov_deg: 70.0,
+            roll_deg: 0.0,
         };
         // t = 0: at the base, unturned.
         let c = bench_camera(0.0, &base, 60.0);
