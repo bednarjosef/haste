@@ -704,11 +704,13 @@ fn cursor_shape(code: i32) -> Option<CursorShape> {
     })
 }
 
-/// The blend mode of a blit (`GuiBatch`'s code, set by `GfxImpl.blend` in Java).
+/// The blend mode of a blit (`GuiBatch`'s code, set by `GfxImpl.blend` in Java; 0 also falls back
+/// to normal for codes this build does not know).
 fn blend_of(code: i32) -> GuiBlend {
     match code {
         1 => GuiBlend::Multiply,
         2 => GuiBlend::Invert,
+        3 => GuiBlend::Additive,
         _ => GuiBlend::Normal,
     }
 }
@@ -974,7 +976,7 @@ mod tests {
             200,
             20,
             -1,
-            0,
+            3,
             ITEM,
             7,
             8,
@@ -1065,7 +1067,7 @@ mod tests {
             matches!(&c[3], GuiCommand::Texture { texture, u, tex_w: 256, blend: GuiBlend::Normal, .. } if texture.path() == "textures/gui/x.png" && *u == 0.5)
         );
         assert!(
-            matches!(&c[4], GuiCommand::Sprite { sprite, w: 200, .. } if sprite.path() == "widget/button")
+            matches!(&c[4], GuiCommand::Sprite { sprite, w: 200, blend: GuiBlend::Additive, .. } if sprite.path() == "widget/button")
         );
         assert_eq!(
             c[5],
@@ -1092,5 +1094,13 @@ mod tests {
         assert!(decode(&[FILL, 1, 2], &[]).is_err());
         assert!(decode(&[TEXT, 0, 0, 0, 0, 5], &[]).is_err());
         assert!(decode(&[99], &[]).is_err());
+    }
+
+    #[test]
+    fn decodes_blend_codes() {
+        assert_eq!(blend_of(0), GuiBlend::Normal);
+        assert_eq!(blend_of(1), GuiBlend::Multiply);
+        assert_eq!(blend_of(2), GuiBlend::Invert);
+        assert_eq!(blend_of(3), GuiBlend::Additive);
     }
 }
