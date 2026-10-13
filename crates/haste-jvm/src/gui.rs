@@ -34,6 +34,14 @@ pub enum ScreenKind {
     Inventory,
     /// `ChatScreen` opened with "/" typed (the command key).
     Command,
+    /// `net.minecraft.client.gui.screens.TitleScreen` (the game's main menu).
+    Title,
+    /// `net.minecraft.client.gui.screens.options.OptionsScreen` (vanilla opens it from the title
+    /// screen; "Done" returns to the screen that opened it).
+    Options,
+    /// `net.minecraft.client.gui.screens.multiplayer.JoinMultiplayerScreen`, whose parent is a
+    /// `TitleScreen`.
+    Multiplayer,
 }
 
 impl ScreenKind {
@@ -43,6 +51,9 @@ impl ScreenKind {
             ScreenKind::Pause => 1,
             ScreenKind::Inventory => 2,
             ScreenKind::Command => 3,
+            ScreenKind::Title => 4,
+            ScreenKind::Options => 5,
+            ScreenKind::Multiplayer => 6,
         }
     }
 }

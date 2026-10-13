@@ -325,6 +325,95 @@ fn pause_screen() {
 }
 
 #[test]
+#[ignore = "TitleScreen.<init> throws NoClassDefFoundError: net/minecraft/client/renderer/Panorama is deny-listed (crates/haste-jvm/src/loader.rs DENY)"]
+fn title_screen() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    h.clear_unimplemented().unwrap();
+    open(&h, haste_jvm::ScreenKind::Title);
+    assert!(gui.is_open());
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.TitleScreen")
+    );
+    let f = render(&h, (0.0, 0.0));
+    dump(&f);
+    let t = texts(&f);
+    for want in ["Singleplayer", "Multiplayer", "Options...", "Quit Game"] {
+        assert!(t.iter().any(|x| x == want), "missing {want:?} in {t:?}");
+    }
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for TitleScreen: {unimpl:#?}"
+    );
+}
+
+#[test]
+#[ignore = "OptionsScreen.init throws UnsupportedOperationException: net/minecraft/client/Minecraft#allowsTelemetry()Z is an unimplemented proxy stub (no impl in haste/gui/ClientImpl)"]
+fn options_screen() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    h.clear_unimplemented().unwrap();
+    open(&h, haste_jvm::ScreenKind::Options);
+    assert!(gui.is_open());
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.options.OptionsScreen")
+    );
+    let f = render(&h, (0.0, 0.0));
+    dump(&f);
+    let t = texts(&f);
+    for want in ["Options", "Done"] {
+        assert!(t.iter().any(|x| x == want), "missing {want:?} in {t:?}");
+    }
+    // the FOV slider at the head of the screen ("FOV: normal" at the default value)
+    assert!(
+        t.iter().any(|x| x.starts_with("FOV")),
+        "missing the FOV slider in {t:?}"
+    );
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for OptionsScreen: {unimpl:#?}"
+    );
+}
+
+#[test]
+#[ignore = "its parent TitleScreen cannot be built (Panorama deny-listed), and JoinMultiplayerScreen.init needs net/minecraft/client/multiplayer/ServerList (denied too)"]
+fn multiplayer_screen() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    h.clear_unimplemented().unwrap();
+    open(&h, haste_jvm::ScreenKind::Multiplayer);
+    assert!(gui.is_open());
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.multiplayer.JoinMultiplayerScreen")
+    );
+    let f = render(&h, (0.0, 0.0));
+    dump(&f);
+    let t = texts(&f);
+    for want in [
+        "Play Multiplayer",
+        "Join Server",
+        "Direct Connection",
+        "Add Server",
+        "Back",
+    ] {
+        assert!(t.iter().any(|x| x == want), "missing {want:?} in {t:?}");
+    }
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for JoinMultiplayerScreen: {unimpl:#?}"
+    );
+}
+
+#[test]
 #[ignore = "needs cache/ (JDK, client jar, libraries, ASM); run with --release for the number"]
 fn bench_pause_render() {
     let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
