@@ -801,7 +801,11 @@ fn tick_once(
                     HudArrival::Menu(ui) => ui,
                 };
                 let t = Instant::now();
-                match ui.joined(driver.connection(), driver.login()) {
+                match ui.joined(
+                    driver.connection(),
+                    driver.login(),
+                    driver.session.player.game_mode,
+                ) {
                     Ok(()) => {
                         tracing::info!(
                             "HUD joined in {:.0} ms; the vanilla HUD and chat are live",
