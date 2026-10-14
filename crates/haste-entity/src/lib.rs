@@ -18,6 +18,6 @@ mod tests;
 
 pub use decoration::PaintingVariant;
 pub use dims::{Dimensions, EntityDimensions};
-pub use metadata::{Metadata, SharedFlags};
+pub use metadata::{Metadata, MobFlags, SharedFlags};
 pub use riding::{passenger_seat, PassengerKind, SeatPoint, SeatQuery};
 pub use store::{Entity, EntityStore};
