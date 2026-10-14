@@ -125,6 +125,68 @@ pub struct EntityInstance {
     /// `model` (vanilla's `ItemFrameRenderer` / `PaintingRenderer`). `None` for every other
     /// entity, which the renderer draws from its cube model.
     pub decoration: Option<Decoration>,
+    /// The item held in each hand, by item registry index: `[right (main), left (off)]`.
+    /// `None` is an empty hand (vanilla `ItemInHandLayer` draws nothing for it).
+    pub hands: [Option<RegistryIndex>; 2],
+    /// Armour and other equipment layers the renderer draws, already resolved to the equipment
+    /// asset each item names (vanilla `HumanoidArmorLayer`). Empty for entities with none.
+    pub equipment: Vec<EquipmentPiece>,
+    /// The head-slot item when it is not armour (vanilla `CustomHeadLayer`: pumpkins, mob and
+    /// player heads). `None` when the head is bare or wears a helmet (drawn by `equipment`).
+    pub head_item: Option<RegistryIndex>,
+}
+
+/// An equipment slot, matching vanilla `EquipmentSlot`'s wire order (the ordinals the
+/// `set_equipment` packet uses).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EquipmentSlot {
+    MainHand,
+    OffHand,
+    Feet,
+    Legs,
+    Chest,
+    Head,
+    Body,
+    Saddle,
+}
+
+impl EquipmentSlot {
+    /// The slot for a `set_equipment` wire ordinal, or `None` for an id we do not know.
+    pub fn from_wire(id: u8) -> Option<EquipmentSlot> {
+        use EquipmentSlot::*;
+        Some(match id {
+            0 => MainHand,
+            1 => OffHand,
+            2 => Feet,
+            3 => Legs,
+            4 => Chest,
+            5 => Head,
+            6 => Body,
+            7 => Saddle,
+            _ => return None,
+        })
+    }
+
+    /// Whether the slot is humanoid armour (vanilla `EquipmentSlot.Type.HUMANOID_ARMOR`).
+    pub fn is_armor(self) -> bool {
+        matches!(
+            self,
+            EquipmentSlot::Feet | EquipmentSlot::Legs | EquipmentSlot::Chest | EquipmentSlot::Head
+        )
+    }
+}
+
+/// One worn equipment piece, resolved by `haste-entity` from the entity's equipment and the
+/// item's default `equippable` component.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EquipmentPiece {
+    pub slot: EquipmentSlot,
+    /// The item's registry index (`None` for an empty slot).
+    pub item: Option<RegistryIndex>,
+    /// The `equippable.asset_id` (`minecraft:iron` -> `equipment/iron.json`), if the item has one.
+    pub asset: Option<Identifier>,
+    /// The stack's `dyed_color` component (ARGB) when dyed (leather armour); `None` otherwise.
+    pub dye: Option<u32>,
 }
 
 /// What a dropped item entity carries: which item to draw (index into `minecraft:item`,
