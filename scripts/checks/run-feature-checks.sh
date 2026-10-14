@@ -284,7 +284,8 @@ pause() {
     grep -q "script frame\[$t\]" "$log" || { echo "missing screenshot $t"; r=1; }
   done
   has "$(cat "$ev")" "Minecraft" || { echo "missing the Minecraft advancement tab"; r=1; }
-  has "$(cat "$ev")" "Retrieving statistics" || { echo "statistics screen never asked the server"; r=1; }
+  # the stats screen's rows: the values arrive between the click and the screenshot
+  has "$(cat "$ev")" "Animals Bred" || { echo "statistics screen never showed its rows"; r=1; }
   has "$(cat "$ev")" "Difficulty" || { echo "missing World Options difficulty row"; r=1; }
   has "$(cat "$ev")" "Social Interactions" || { echo "missing player reporting screen"; r=1; }
   has "$(cat "$ev")" "open this link" || { echo "missing the report-bugs link confirmation"; r=1; }
