@@ -19,7 +19,7 @@ use haste_protocol::haste_core::input::InputState;
 use haste_protocol::haste_core::model::EntityInstance;
 use haste_protocol::haste_core::{ChunkPos, EntityId, SectionPos};
 use haste_protocol::{Account, ConnectOptions};
-use haste_render::{Camera, FrameInput, FrameStats, Renderer, SkyState};
+use haste_render::{Camera, FrameInput, FrameStats, LightmapFrame, Renderer, SkyState};
 use haste_setup::options::Options;
 use haste_world::World;
 use winit::application::ApplicationHandler;
@@ -755,7 +755,7 @@ fn frame_view(
     pitch: f32,
     options: &Options,
     now: Instant,
-) -> (Camera, SkyState, f32, i32, u64) {
+) -> (Camera, SkyState, LightmapFrame, f32, i32, u64) {
     let view = *shared.view.lock();
     let partial = game::partial_tick(view.tick_at, now);
     let eye = game::interpolate(view.prev_eye, view.eye, partial);
@@ -821,9 +821,32 @@ fn frame_view(
         fog_start: fog_end * 0.75,
         fog_end,
     };
+    // The lightmap inputs the extractor gathers per frame (LightmapRenderStateExtractor.extract):
+    // the night-vision intensity, the darkness effect's brightness modifier and pulse, and the
+    // boss-overlay darkening; the flicker and lightning come straight from the tick.
+    let night_vision = match view.lightmap_night_vision {
+        Some(duration) => haste_render::lightmap::night_vision_scale(duration, partial),
+        None => 0.0,
+    };
+    let darkness_blend = view.lightmap_darkness_blend.factor(partial);
+    let darkness_modifier = darkness_blend * options.darkness_effect_scale;
+    let lightmap = LightmapFrame {
+        block_light_flicker: view.lightmap_flicker,
+        gamma: haste_render::lightmap::brightness(options.gamma, darkness_modifier),
+        night_vision,
+        darkness: haste_render::lightmap::darkness_scale(
+            view.lightmap_tick_count,
+            darkness_modifier,
+            partial,
+        ) * options.darkness_effect_scale,
+        boss_overlay_darkening: view.lightmap_boss_darkening.0
+            + (view.lightmap_boss_darkening.1 - view.lightmap_boss_darkening.0) * partial,
+        lightning_flash: view.lightmap_lightning,
+    };
     (
         camera,
         sky,
+        lightmap,
         partial,
         view.view_distance,
         view.animation_tick,
@@ -1387,6 +1410,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     renderer.set_item_registry(&shared.data.registries);
     renderer.set_biomes(&session.biomes);
     renderer.set_particle_types(&session.particle_types);
+    renderer.set_dimension(shared.world.read().dimension());
     let mut gui = GuiFrame::default();
     let mut ui: Option<crate::ui::Ui> = None;
     let mut feed = WorldFeed::default();
@@ -1419,7 +1443,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             input.state.yaw = look.0 - offset.0;
             input.state.pitch = (look.1 - offset.1).clamp(-90.0, 90.0);
         }
-        let (mut camera, sky, partial, vd, animation_tick) = frame_view(
+        let (mut camera, sky, lightmap, partial, vd, animation_tick) = frame_view(
             &shared,
             perspective,
             look.0 - offset.0,
@@ -1471,6 +1495,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        renderer.set_lightmap_frame(lightmap);
         {
             let world = shared.world.read();
             let mut particles = shared.particles.lock();
@@ -1600,6 +1625,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
     renderer.set_biomes(&session.biomes);
+    renderer.set_dimension(shared.world.read().dimension());
     let mut gui = GuiFrame::default();
     let mut ui: Option<crate::ui::Ui> = None;
     let mut feed = WorldFeed::default();
@@ -1714,7 +1740,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         }
         // Render the frame like the screenshot mode does (the HUD and any open screen via
         // `Ui::frame`), so `screenshot` actions capture exactly what the window would show.
-        let (camera, sky, partial, vd, animation_tick) = frame_view(
+        let (camera, sky, lightmap, partial, vd, animation_tick) = frame_view(
             &shared,
             game::Perspective::FirstPerson,
             look.0,
@@ -1772,6 +1798,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        renderer.set_lightmap_frame(lightmap);
         if let Ok(stats) = renderer.render(&frame) {
             last_stats = stats;
             fps.frame(&stats);
@@ -2076,6 +2103,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     renderer.set_item_registry(&shared.data.registries);
     renderer.set_biomes(&session.biomes);
     renderer.set_particle_types(&session.particle_types);
+    renderer.set_dimension(shared.world.read().dimension());
     let gui = GuiFrame::default();
     let mut feed = WorldFeed::default();
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
@@ -2084,7 +2112,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let mut vd;
     // Settle phase: identical to the screenshot path (wait for position, meshing done, quiet).
     loop {
-        let (mut camera, sky, partial, v, animation_tick) = frame_view(
+        let (mut camera, sky, lightmap, partial, v, animation_tick) = frame_view(
             &shared,
             game::Perspective::FirstPerson,
             0.0,
@@ -2113,6 +2141,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        renderer.set_lightmap_frame(lightmap);
         {
             let world = shared.world.read();
             let mut particles = shared.particles.lock();
@@ -2159,7 +2188,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         }
         // The bench camera follows its fixed path; the sky and entities come from the live view
         // (time of day moves, the player stays where the server put it).
-        let (_, mut sky, partial_tick, _, animation_tick) = frame_view(
+        let (_, mut sky, lightmap, partial_tick, _, animation_tick) = frame_view(
             &shared,
             game::Perspective::FirstPerson,
             0.0,
@@ -2189,6 +2218,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        renderer.set_lightmap_frame(lightmap);
         {
             let world = shared.world.read();
             let mut particles = shared.particles.lock();
@@ -2427,7 +2457,7 @@ impl App {
         self.take_disconnect(event_loop);
         let renderer = self.renderer.as_mut().expect("checked above");
         let t0 = Instant::now();
-        let (camera, sky, partial, vd, animation_tick) = frame_view(
+        let (camera, sky, lightmap, partial, vd, animation_tick) = frame_view(
             &self.shared,
             self.perspective,
             self.input.yaw,
@@ -2502,6 +2532,7 @@ impl App {
             renderer.prepare_particles(&mut particles, &*world, camera, partial);
         }
         renderer.set_animation_tick(animation_tick);
+        renderer.set_lightmap_frame(lightmap);
         if self.screenshot {
             self.screenshot = false;
             renderer.request_capture();
@@ -2566,6 +2597,7 @@ impl ApplicationHandler for App {
             renderer.set_item_registry(&self.shared.data.registries);
             renderer.set_biomes(&self.biomes);
             renderer.set_particle_types(&self.particle_types);
+            renderer.set_dimension(self.shared.world.read().dimension());
             Ok((window, renderer))
         })();
         match result {
