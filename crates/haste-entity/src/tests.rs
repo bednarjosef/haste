@@ -1326,6 +1326,7 @@ const LIVING_TYPES: &[&str] = &[
 
 /// Entity types with renderers but no living-model layer: projectiles, vehicles, block-like
 /// and UI entities (out of scope; drawn as boxes) plus the player (its own model path).
+#[allow(dead_code)] // documents what the table deliberately leaves out
 const NON_LIVING: &[&str] = &[
     "boat-like: *_boat, *_chest_boat, *_raft",
     "minecart-like: minecart, *_minecart, tnt_minecart",
