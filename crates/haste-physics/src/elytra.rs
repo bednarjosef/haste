@@ -12,7 +12,7 @@
 //!   `LivingEntity.updateFallFlying` stop check (`canGlide` no longer true).
 //! - Firework boosts are entity side (`FireworkRocketEntity` pushes the player it is attached to
 //!   every tick) and are not modelled here; see NOTES.md.
-use haste_core::view::{BlockView, CollisionShapes};
+use haste_core::view::{BlockPhysics, BlockView, CollisionShapes};
 use haste_core::DVec3;
 
 use crate::movement::move_entity;
@@ -106,6 +106,7 @@ pub fn travel(
     attrs: &PlayerAttributes,
     world: &dyn BlockView,
     shapes: &dyn CollisionShapes,
+    blocks: &dyn BlockPhysics,
     slow_falling: bool,
 ) {
     // Client half of LivingEntity.updateFallFlying: while gliding the fall distance stops
@@ -121,7 +122,7 @@ pub fn travel(
     // does not apply to it.
     let sneaking = state.sneaking;
     state.sneaking = false;
-    move_entity(state, attrs, state.velocity, world, shapes);
+    move_entity(state, attrs, state.velocity, world, shapes, blocks);
     state.sneaking = sneaking;
     // Landing ends the glide (the server clears its shared flag; the client follows the server).
     if state.on_ground {
@@ -413,7 +414,7 @@ mod tests {
         assert!(crate::collision::no_collision(&aabb, &world, &shapes));
 
         let mut state = state;
-        travel(&mut state, &attrs, &world, &shapes, false);
+        travel(&mut state, &attrs, &world, &shapes, &shapes, false);
         assert!(
             !state.vertical_collision,
             "the small box went under the block"
@@ -436,7 +437,7 @@ mod tests {
             if !state.fall_flying {
                 break;
             }
-            travel(&mut state, &attrs, &world, &shapes, false);
+            travel(&mut state, &attrs, &world, &shapes, &shapes, false);
         }
         assert!(state.fall_distance <= 1.0, "{}", state.fall_distance);
         assert!(state.on_ground, "{}", state.pos);
