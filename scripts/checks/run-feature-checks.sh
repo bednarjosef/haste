@@ -269,13 +269,43 @@ craft() {
   check craft "one oak log became 4 oak planks in the survival inventory" "$r"
 }
 
-ALL=(hud death drop modes f2 craft)
+# ---- 7. Block particles: the client's own destroy grid and mining cracks ----
+particles() {
+  local log="$LOGDIR/particles.log"
+  client_start "$ROOT/scripts/checks/block-particles.txt" "$log"
+  wait_online || { check particles "player never joined" 1; return; }
+  # The script waits 15 s after its setup screenshot; set the stage in that window:
+  # survival, an empty hotbar, a stone platform under the player, an iron pickaxe.
+  # (`execute as/at` selectors: plain name arguments race other agents' players on
+  # the shared server; the selector forms resolve at run time.)
+  while ! grep -q "script-setup" "$log" 2>/dev/null; do
+    sleep 1
+    grep -q "game thread stopping" "$log" 2>/dev/null && break
+  done
+  rcon "execute as $NAME run tp @s 0 100 0 0 0" >/dev/null
+  rcon "execute as $NAME run gamemode survival @s" >/dev/null
+  rcon "execute as $NAME run clear @s" >/dev/null
+  rcon "execute at $NAME run fill ~-4 ~-1 ~-4 ~4 ~-1 ~4 stone" >/dev/null
+  rcon "execute at $NAME run fill ~-3 ~ ~-3 ~3 ~4 ~3 air" >/dev/null
+  rcon "execute as $NAME run give @s minecraft:iron_pickaxe 1" >/dev/null
+  wait_exit
+  echo "--- block particles evidence ---"
+  grep "particles drawn" "$log" | tail -3
+  local cracks broken r=0
+  cracks=$(grep "script-mining-cracks" "$log" | grep -o '[0-9]* particles drawn' | grep -o '[0-9]*')
+  broken=$(grep "script-block-broken" "$log" | grep -o '[0-9]* particles drawn' | grep -o '[0-9]*')
+  [ -n "$cracks" ] && [ "$cracks" -gt 0 ] || { echo "no crack particles while mining"; r=1; }
+  [ -n "$broken" ] && [ "$broken" -gt 20 ] || { echo "no destroy grid on break"; r=1; }
+  check particles "mining drew crack particles ($cracks) and the break the destroy grid ($broken)" "$r"
+}
+
+ALL=(hud death drop modes f2 craft particles)
 if [ $# -eq 0 ]; then
   set -- "${ALL[@]}"
 fi
 for f in "$@"; do
   case "$f" in
-    hud | death | drop | modes | f2 | craft) "$f" ;;
+    hud | death | drop | modes | f2 | craft | particles) "$f" ;;
     *) echo "unknown feature: $f" ;;
   esac
 done

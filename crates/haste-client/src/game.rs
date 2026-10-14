@@ -794,8 +794,9 @@ fn tick_once(
         breaking.clear();
         driver.session.breaking_stages(&mut breaking);
     }
-    // Particles: spawn what the packets brought, then one 20 Hz simulation step. The camera
-    // for `ClientLevel.doAddParticle`'s 32-block limiter is the player's eye.
+    // Particles: spawn what the packets brought (and the client spawned itself), then one
+    // 20 Hz simulation step. The camera for `ClientLevel.doAddParticle`'s 32-block limiter
+    // is the player's eye.
     {
         let mut particles = shared.particles.lock();
         let camera = driver.session.player.camera(1.0).0;
@@ -804,6 +805,32 @@ fn tick_once(
             particles.spawn(s, camera);
         }
         driver.session.particle_spawned = spawns.len();
+        // Block particles: our own break/mining and the server's level events. The world
+        // (state, shapes, biomes) is read here, where the game thread holds it.
+        let requests = std::mem::take(&mut driver.session.block_particle_requests);
+        if !requests.is_empty() {
+            let world = shared.world.read();
+            let data = shared.data.clone();
+            let biomes = crate::app::biomes::WorldBiomes(&world);
+            let state_count = data.blocks.len();
+            for r in &requests {
+                match *r {
+                    crate::block_particles::BlockParticleRequest::Destroy { pos, state } => {
+                        // Vanilla's `Block.stateById` answers air (nothing spawns) for
+                        // ids the state table does not know.
+                        if (state.0 as usize) < state_count {
+                            particles.spawn_destroy(pos, state, &data.shapes, &biomes);
+                        }
+                    }
+                    crate::block_particles::BlockParticleRequest::Crack { pos, face } => {
+                        let state = world.block_state(pos);
+                        if !haste_physics::BlockPhysics::is_air(data.as_ref(), state) {
+                            particles.spawn_crack(pos, face, state, &data.shapes, &biomes);
+                        }
+                    }
+                }
+            }
+        }
         particles.tick();
     }
     if let Some(ui) = shared.ui.lock().as_ref() {

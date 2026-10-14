@@ -12,6 +12,7 @@
 use clap::Parser;
 
 mod app;
+mod block_particles;
 mod game;
 mod hand;
 mod headless;

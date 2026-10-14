@@ -6,6 +6,7 @@
 
 pub mod animation;
 pub mod arena;
+pub mod block_particles;
 pub mod entity;
 pub mod fluid;
 pub mod fog;
@@ -21,6 +22,7 @@ pub mod timing;
 pub mod tint;
 pub mod vertex;
 
+pub use block_particles::{BlockParticleSprite, BlockParticleTable};
 pub use entity::{default_skin, EntityRenderer, FirstPerson, Nametag, TickPair};
 pub use fog::{setup_fog, FogData, FogEnvironment};
 pub use gui::{GuiRenderer, GuiStats, ScreenNametag};

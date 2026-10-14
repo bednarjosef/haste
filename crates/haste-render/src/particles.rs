@@ -1,8 +1,9 @@
-//! Server-sent particles (`level_particles`), ported from vanilla 26.3's particle classes
-//! (`net.minecraft.client.particle`): a fixed-capacity pool simulated at 20 Hz on the game
-//! thread ([`Particles`]), drawn as camera-facing quads textured from the particle atlas in
-//! one batched draw inside the main pass ([`ParticleRenderer`], reusing the entity shader:
-//! sprite rects by textureLoad, vertex light colour, fog).
+//! Server-sent particles (`level_particles`) and the client-spawned terrain particles,
+//! ported from vanilla 26.3's particle classes (`net.minecraft.client.particle`): a
+//! fixed-capacity pool simulated at 20 Hz on the game thread ([`Particles`]), drawn as
+//! camera-facing quads textured from the particle atlas in one batched draw inside the
+//! main pass ([`ParticleRenderer`], reusing the entity shader: sprite rects by
+//! textureLoad, vertex light colour, fog).
 //!
 //! Per-type behaviour lives in the [`ParticleBehaviour`] table: gravity, friction, lifetime,
 //! quad size and its growth over the particle's life, colour, alpha and spawn-time motion.
@@ -18,10 +19,16 @@
 //! drops spawns beyond `sqrt(1024.0)` = 32 blocks of the camera unless the packet overrides
 //! the limiter.
 //!
+//! The terrain particles (vanilla `TerrainParticle`: block breaking's destroy grid,
+//! mining cracks) are the client's own, spawned by [`Particles::spawn_destroy`] and
+//! [`Particles::spawn_crack`] — their sprites and tints come from the block table
+//! ([`crate::block_particles`]) packed into the same atlas. See that module for the
+//! vanilla paths.
+//!
 //! Not modelled (each a separate later step): block collisions (`Particle.move` with
 //! `hasPhysics`, so no `onGround` drag and no `speedUpWhenYMotionIsBlocked` trigger beyond
-//! an exactly zero y step), block/item particles (they draw from the block and item atlases
-//! in vanilla), particle options other than `dust` (block states, trail colors, geyser),
+//! an exactly zero y step), item particles (they draw from the item atlas in vanilla),
+//! particle options other than `dust` (block states, trail colors, geyser),
 //! the 16384-particle cap with the distance squash (`ParticleGroup`), roll (billboards keep
 //! facing the camera), and the per-type light boosts `FlameParticle`/`PortalParticle` add.
 
@@ -29,9 +36,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use glam::{DVec3, Vec3};
-use haste_assets::{Assets, ParticleAtlas};
-use haste_core::view::BlockView;
-use haste_core::{BlockPos, Identifier};
+use haste_assets::{Assets, AtlasRegions};
+use haste_core::view::{BlockView, CollisionShapes};
+use haste_core::{BlockPos, BlockStateId, Direction, Identifier};
 
 use crate::entity::EntityVertex;
 use crate::renderer::Camera;
@@ -494,8 +501,10 @@ impl ParticleBehaviour {
                 speed_up_when_blocked: true,
                 ..ParticleBehaviour::DEFAULT
             },
-            // TerrainParticle (block): gravity 1, quad halved, grey 0.6 base (block tint
-            // not modelled: block particles draw from the block atlas in vanilla).
+            // TerrainParticle (block): gravity 1, quad halved, grey 0.6 base. The packet's
+            // BlockParticleOption (its block state) is not decoded, so server-sent block
+            // particles draw the behaviour's grey; the client's own (see
+            // `spawn_destroy`/`spawn_crack`) carry their block's sprite and tint.
             "block" | "block_marker" | "falling_dust" | "dust_pillar" | "block_crumble" => {
                 &ParticleBehaviour {
                     source: "TerrainParticle",
@@ -716,27 +725,55 @@ struct ParticleType {
 pub struct ParticleTypes {
     types: Vec<ParticleType>,
     by_name: ahash::HashMap<Identifier, u32>,
+    /// Terrain-particle sprites per block state (vanilla `TerrainParticle`).
+    pub(crate) blocks: Option<crate::block_particles::BlockParticleTable>,
     pixels: Vec<u8>,
     size: u32,
 }
 
 impl ParticleTypes {
-    /// Packs the sprites of `ids` into one atlas (types without a definition or with no
-    /// placed sprites contribute nothing: block/item particles are drawn from block/item
-    /// textures in vanilla, none of that here).
-    pub fn build(assets: &mut Assets, ids: &[Identifier]) -> Result<ParticleTypes> {
-        let atlas = ParticleAtlas::build(assets, ids)?;
-        let mut types = Vec::new();
+    /// Packs the sprites of `ids` into one atlas, and with `states` also every block
+    /// state's model `particle` texture (terrain particles: block breaking and mining
+    /// cracks), so both draw from the one texture the renderer binds. Types without a
+    /// definition or with no placed sprites contribute nothing.
+    pub fn build(
+        assets: &mut Assets,
+        ids: &[Identifier],
+        states: Option<&dyn haste_core::view::BlockStateTable>,
+    ) -> Result<ParticleTypes> {
+        // The particle json texture ids (`minecraft:generic_7` ->
+        // `minecraft:particle/generic_7`), in file order per type.
+        let mut definitions: Vec<(Identifier, Vec<Identifier>)> = Vec::new();
+        let mut texture_ids: Vec<Identifier> = Vec::new();
         for id in ids {
-            let sprites: Vec<[u16; 4]> = atlas
-                .sprites_of(id)
+            if let Some(definition) = assets.particle_definition(id)? {
+                let mut sprites = Vec::with_capacity(definition.textures.len());
+                for texture in &definition.textures {
+                    sprites.push(crate::block_particles::particle_texture_id(texture));
+                }
+                texture_ids.extend(sprites.iter().cloned());
+                definitions.push((id.clone(), sprites));
+            }
+        }
+        // Block particle textures resolve per state (see `block_particles`).
+        let (block_textures, block_ids) = match states {
+            Some(states) => crate::block_particles::block_particle_textures(assets, states),
+            None => (Vec::new(), Vec::new()),
+        };
+        texture_ids.extend(block_ids);
+        texture_ids.sort();
+        texture_ids.dedup();
+        let atlas = haste_assets::AtlasBuilder::build(assets, &texture_ids, false)?;
+        let mut types = Vec::new();
+        for (id, sprites) in &definitions {
+            let rects: Vec<[u16; 4]> = sprites
                 .iter()
-                .map(|r| r.pixel_rect.map(|v| v as u16))
+                .map(|t| atlas.region_of(&t.to_string()).pixel_rect.map(|v| v as u16))
                 .collect();
-            if !sprites.is_empty() {
+            if !rects.is_empty() {
                 types.push(ParticleType {
                     name: id.clone(),
-                    sprites,
+                    sprites: rects,
                 });
             }
         }
@@ -745,9 +782,13 @@ impl ParticleTypes {
             .enumerate()
             .map(|(i, t)| (t.name.clone(), i as u32))
             .collect();
+        let blocks = states.map(|states| {
+            crate::block_particles::block_particle_table(states, block_textures, &atlas)
+        });
         Ok(ParticleTypes {
             types,
             by_name,
+            blocks,
             pixels: atlas.pixels().to_vec(),
             size: atlas.size(),
         })
@@ -792,6 +833,18 @@ struct ParticleState {
     light_at: BlockPos,
     sky_light: u8,
     block_light: u8,
+    /// Terrain-particle override: the block sprite (clamping rect) and its 4x4
+    /// sub-piece (uv offsets `uo`/`vo` of vanilla `TerrainParticle`), in place of
+    /// the type's sprite list.
+    block_sprite: Option<BlockSpriteUv>,
+}
+
+/// A terrain particle's texture: the sprite rect (for the shader's clamp) and the
+/// sub-piece's uv corners in atlas texels (`[u0, v0, u1, v1]`).
+#[derive(Clone, Copy, Debug)]
+struct BlockSpriteUv {
+    rect: [u16; 4],
+    uv: [f32; 4],
 }
 
 /// The particle pool (game state, no GPU): the game thread spawns into it from
@@ -803,6 +856,9 @@ pub struct Particles {
     pool: Vec<ParticleState>,
     /// Types logged as unknown already (log once per type).
     unknown: Vec<Identifier>,
+    /// Biome colours for terrain-particle tints (set once at join; `None` leaves
+    /// them white, which only headless runs without a pool ever see).
+    biome_colors: Option<crate::tint::BiomeColors>,
     rng: Rng,
 }
 
@@ -813,8 +869,15 @@ impl Particles {
             types: Some(types),
             pool: Vec::new(),
             unknown: Vec::new(),
+            biome_colors: None,
             rng: Rng(0x853C_49E6_748F_EA9B),
         }
+    }
+
+    /// The biome colours terrain particles tint with (the joined server's synced
+    /// biome registry; `BiomeColors::new` from the same climates the renderer gets).
+    pub fn set_biome_colors(&mut self, colors: crate::tint::BiomeColors) {
+        self.biome_colors = Some(colors);
     }
 
     /// Number of live particles.
@@ -899,6 +962,213 @@ impl Particles {
                 }
             }
         }
+    }
+
+    /// A breaking block's terrain particles: vanilla
+    /// `ClientLevel.addDestroyBlockEffect` — a grid over every box of the state's
+    /// outline shape (`ceil(width/0.25)` per axis, at least 2), one `TerrainParticle`
+    /// per cell at its centre with velocity `rel - 0.5`. Spawned by our own break
+    /// prediction (`MultiPlayerGameMode.destroyBlock` -> `playerWillDestroy` ->
+    /// `levelEvent(2001)` on the client) and for the server's `level_event` 2001.
+    /// No distance limiter: vanilla's `ParticleEngine.add` bypasses it.
+    pub fn spawn_destroy(
+        &mut self,
+        pos: BlockPos,
+        state: BlockStateId,
+        shapes: &dyn CollisionShapes,
+        biomes: &dyn crate::tint::BiomeSource,
+    ) {
+        let Some(sprite) = self
+            .types
+            .as_deref()
+            .and_then(|t| t.blocks.as_ref())
+            .and_then(|b| b.sprite(state))
+            .filter(|s| s.spawn)
+            .copied()
+        else {
+            return;
+        };
+        let tint = self.terrain_tint(&sprite, pos, biomes);
+        for box_ in shapes.outline_boxes(state) {
+            let [wx, wy, wz] = [
+                (box_.max.x - box_.min.x).min(1.0),
+                (box_.max.y - box_.min.y).min(1.0),
+                (box_.max.z - box_.min.z).min(1.0),
+            ];
+            let count = |w: f64| (w / 0.25).ceil().max(2.0) as i32;
+            let (cx, cy, cz) = (count(wx), count(wy), count(wz));
+            for xx in 0..cx {
+                for yy in 0..cy {
+                    for zz in 0..cz {
+                        let rel = [
+                            (xx as f64 + 0.5) / cx as f64,
+                            (yy as f64 + 0.5) / cy as f64,
+                            (zz as f64 + 0.5) / cz as f64,
+                        ];
+                        let p = DVec3::new(
+                            pos.x as f64 + rel[0] * wx + box_.min.x,
+                            pos.y as f64 + rel[1] * wy + box_.min.y,
+                            pos.z as f64 + rel[2] * wz + box_.min.z,
+                        );
+                        let v = Vec3::new(
+                            (rel[0] - 0.5) as f32,
+                            (rel[1] - 0.5) as f32,
+                            (rel[2] - 0.5) as f32,
+                        );
+                        self.push_terrain(&sprite, p, v, 1.0, None, tint);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The mining crack particle: vanilla `ClientLevel.addBreakingParticles` — one
+    /// `TerrainParticle` per tick on the hit face, at a random point of the state's
+    /// outline bounds (0.1 inside, or 0.1 outside the hit face), velocity zeroed and
+    /// `setPower(0.2)` applied, quad `scale(0.6)`. Spawned by our own mining start
+    /// tick and for the server's `level_event` 2019/2020 (`addBreakingBlockEffects`).
+    pub fn spawn_crack(
+        &mut self,
+        pos: BlockPos,
+        face: Direction,
+        state: BlockStateId,
+        shapes: &dyn CollisionShapes,
+        biomes: &dyn crate::tint::BiomeSource,
+    ) {
+        let Some(sprite) = self
+            .types
+            .as_deref()
+            .and_then(|t| t.blocks.as_ref())
+            .and_then(|b| b.sprite(state))
+            .filter(|s| s.spawn)
+            .copied()
+        else {
+            return;
+        };
+        // The outline bounds (vanilla `shape.bounds()`).
+        let mut bounds_min = DVec3::new(f64::MAX, f64::MAX, f64::MAX);
+        let mut bounds_max = DVec3::new(f64::MIN, f64::MIN, f64::MIN);
+        for b in shapes.outline_boxes(state) {
+            bounds_min = bounds_min.min(b.min);
+            bounds_max = bounds_max.max(b.max);
+        }
+        let (bx, by, bz) = (bounds_min.x, bounds_min.y, bounds_min.z);
+        let size = bounds_max - bounds_min;
+        let r = self.rng.next_f64();
+        let mut p = DVec3::new(
+            pos.x as f64 + r * (size.x - 0.2) + 0.1 + bx,
+            pos.y as f64,
+            pos.z as f64,
+        );
+        let r = self.rng.next_f64();
+        p.y = pos.y as f64 + r * (size.y - 0.2) + 0.1 + by;
+        let r = self.rng.next_f64();
+        p.z += r * (size.z - 0.2) + 0.1 + bz;
+        // The hit face moves the particle 0.1 outside the bounds on that axis.
+        match face {
+            Direction::Down => p.y = pos.y as f64 + by - 0.1,
+            Direction::Up => p.y = pos.y as f64 + by + size.y + 0.1,
+            Direction::North => p.z = pos.z as f64 + bz - 0.1,
+            Direction::South => p.z = pos.z as f64 + bz + size.z + 0.1,
+            Direction::West => p.x = pos.x as f64 + bx - 0.1,
+            Direction::East => p.x = pos.x as f64 + bx + size.x + 0.1,
+        }
+        let tint = self.terrain_tint(&sprite, pos, biomes);
+        self.push_terrain(&sprite, p, Vec3::ZERO, 0.6, Some(0.2), tint);
+    }
+
+    /// The tint of a terrain particle at `pos` (`TerrainParticle`'s colour source).
+    fn terrain_tint(
+        &self,
+        sprite: &crate::block_particles::BlockParticleSprite,
+        pos: BlockPos,
+        biomes: &dyn crate::tint::BiomeSource,
+    ) -> [f32; 3] {
+        self.biome_colors.as_ref().map_or([0.6; 3], |colors| {
+            crate::block_particles::terrain_tint(sprite, pos, biomes, colors)
+        })
+    }
+
+    /// One `TerrainParticle` (vanilla: gravity 1, friction 0.98, life
+    /// `(int)(4/(r*0.9+0.1))`, quad halved — times `quad_scale` — grey 0.6 tint, the
+    /// 4x4 uv sub-piece, the speed constructor over `speed`, then optional
+    /// `setPower(power)`). `quad_scale` is 1 for break particles, 0.6 for cracks.
+    fn push_terrain(
+        &mut self,
+        sprite: &crate::block_particles::BlockParticleSprite,
+        pos: DVec3,
+        speed: Vec3,
+        quad_scale: f32,
+        power: Option<f32>,
+        tint: [f32; 3],
+    ) {
+        if self.pool.len() >= MAX_PARTICLES {
+            return;
+        }
+        let rng = &mut self.rng;
+        // `Particle`'s speed constructor: the speed inside a ±0.4 jitter per axis,
+        // rescaled to `(r+r+1) * 0.15` length and lifted 0.1 on y.
+        let mut vel = speed
+            + Vec3::new(
+                (rng.next_f32() * 2.0 - 1.0) * 0.4,
+                (rng.next_f32() * 2.0 - 1.0) * 0.4,
+                (rng.next_f32() * 2.0 - 1.0) * 0.4,
+            );
+        let scale = (rng.next_f32() + rng.next_f32() + 1.0) * 0.15;
+        let len = vel.length();
+        if len > 0.0 {
+            vel *= scale * 0.4 / len;
+        }
+        vel.y += 0.1;
+        // `setPower`: horizontal drag, y re-centred on the 0.1 lift.
+        if let Some(power) = power {
+            vel.x *= power;
+            vel.y = (vel.y - 0.1) * power + 0.1;
+            vel.z *= power;
+        }
+        // `SingleQuadParticle`'s quad, halved by TerrainParticle, times the caller's
+        // scale (crack: 0.6).
+        let quad = 0.1 * (rng.next_f32() * 0.5 + 0.5) * 2.0 * 0.5 * quad_scale;
+        let lifetime = (4.0 / (rng.next_f32() * 0.9 + 0.1)).floor().max(1.0);
+        // The uv sub-piece: `(uo..uo+1)/4` of the sprite, uo/vo random 0..3 (vanilla
+        // `getU0/getU1/getV0/getV1` interpolate the sprite's texel space).
+        let [x, y, w, h] = sprite.rect;
+        let (uo, vo) = (rng.next_f32() * 3.0, rng.next_f32() * 3.0);
+        let sub = BlockSpriteUv {
+            rect: sprite.rect,
+            uv: [
+                x as f32 + w as f32 * uo / 4.0,
+                y as f32 + h as f32 * vo / 4.0,
+                x as f32 + w as f32 * (uo + 1.0) / 4.0,
+                y as f32 + h as f32 * (vo + 1.0) / 4.0,
+            ],
+        };
+        let pos32 = pos.as_vec3();
+        let state = ParticleState {
+            kind: 0,
+            pos: pos32,
+            prev_pos: pos32,
+            vel,
+            age: 0.0,
+            lifetime,
+            behaviour: ParticleBehaviour {
+                source: "TerrainParticle",
+                gravity: 1.0,
+                ..ParticleBehaviour::DEFAULT
+            },
+            quad,
+            color: tint,
+            portal_start: pos,
+            light_at: BlockPos::new(
+                pos.x.floor() as i32,
+                pos.y.floor() as i32,
+                pos.z.floor() as i32,
+            ),
+            sky_light: UNSAMPLED,
+            block_light: 0,
+            block_sprite: Some(sub),
+        };
+        self.pool.push(state);
     }
 
     fn push(
@@ -997,6 +1267,7 @@ impl Particles {
             ),
             sky_light: UNSAMPLED,
             block_light: 0,
+            block_sprite: None,
         };
         self.pool.push(state);
         if behaviour.tick_at_spawn {
@@ -1309,14 +1580,35 @@ impl ParticleRenderer {
                 p.sky_light = world.sky_light(block);
                 p.block_light = world.block_light(block);
             }
-            let sprites = types.sprites(p.kind);
-            if sprites.is_empty() {
-                continue;
-            }
-            // The sprite for the particle's age (multi-sprite types animate over the list,
-            // like vanilla's `setSpriteFromAge`).
-            let index = ((p.age / p.lifetime) * sprites.len() as f32).floor() as usize;
-            let rect = sprites[index.min(sprites.len() - 1)];
+            let (rect, uvs) = match p.block_sprite {
+                // A terrain particle: its block sprite's fixed 4x4 sub-piece.
+                Some(s) => (
+                    s.rect,
+                    [
+                        [s.uv[0], s.uv[3]],
+                        [s.uv[2], s.uv[3]],
+                        [s.uv[2], s.uv[1]],
+                        [s.uv[0], s.uv[1]],
+                    ],
+                ),
+                None => {
+                    let sprites = types.sprites(p.kind);
+                    if sprites.is_empty() {
+                        continue;
+                    }
+                    // The sprite for the particle's age (multi-sprite types animate over
+                    // the list, like vanilla's `setSpriteFromAge`).
+                    let index = ((p.age / p.lifetime) * sprites.len() as f32).floor() as usize;
+                    let rect = sprites[index.min(sprites.len() - 1)];
+                    let (x, y, w, h) = (
+                        rect[0] as f32,
+                        rect[1] as f32,
+                        rect[2] as f32,
+                        rect[3] as f32,
+                    );
+                    (rect, [[x, y + h], [x + w, y + h], [x + w, y], [x, y]])
+                }
+            };
             let light = if p.behaviour.full_light {
                 // HugeExplosionParticle.getLightCoords: always full light.
                 crate::entity::lightmap(15, 15)
@@ -1338,13 +1630,6 @@ impl ParticleRenderer {
             let r = right * half;
             let u = up * half;
             let corners = [rel - r - u, rel + r - u, rel + r + u, rel - r + u];
-            let (x, y, w, h) = (
-                rect[0] as f32,
-                rect[1] as f32,
-                rect[2] as f32,
-                rect[3] as f32,
-            );
-            let uvs = [[x, y + h], [x + w, y + h], [x + w, y], [x, y]];
             let rect16 = rect;
             for i in [0usize, 1, 2, 0, 2, 3] {
                 self.vertices.push(EntityVertex {
@@ -1425,6 +1710,7 @@ mod tests {
         let mut types = ParticleTypes {
             types: Vec::new(),
             by_name: Default::default(),
+            blocks: None,
             pixels: Vec::new(),
             size: 0,
         };
@@ -1474,6 +1760,191 @@ mod tests {
     /// True while the pool still has particles.
     fn alive(particles: &Particles) -> bool {
         particles.alive() > 0
+    }
+
+    /// A types table whose block table maps every state to one 16x16 sprite (stone-like:
+    /// spawns terrain particles, untinted), for the block-particle tests.
+    fn types_with_blocks() -> Arc<ParticleTypes> {
+        let mut types = ParticleTypes {
+            types: Vec::new(),
+            by_name: Default::default(),
+            blocks: Some(crate::block_particles::BlockParticleTable::uniform(
+                crate::block_particles::BlockParticleSprite {
+                    rect: [0, 0, 16, 16],
+                    tint: crate::tint::TintKind::None,
+                    spawn: true,
+                    upper_half_tint_below: false,
+                },
+            )),
+            pixels: Vec::new(),
+            size: 0,
+        };
+        types.types.push(ParticleType {
+            name: Identifier::minecraft("flame"),
+            sprites: vec![[0, 0, 8, 8]],
+        });
+        types.by_name.insert(Identifier::minecraft("flame"), 0);
+        Arc::new(types)
+    }
+
+    /// One full-cube outline box (state 0), the shape stone has.
+    fn full_cube_shapes() -> impl CollisionShapes {
+        struct FullCube;
+        impl CollisionShapes for FullCube {
+            fn collision_boxes(&self, _s: BlockStateId) -> &[haste_core::Aabb] {
+                &[]
+            }
+            fn outline_boxes(&self, _s: BlockStateId) -> &[haste_core::Aabb] {
+                const FULL: &[haste_core::Aabb] = &[haste_core::Aabb {
+                    min: DVec3::ZERO,
+                    max: DVec3::new(1.0, 1.0, 1.0),
+                }];
+                FULL
+            }
+        }
+        FullCube
+    }
+
+    /// A biome source that knows one biome everywhere.
+    struct OneBiome;
+    impl crate::tint::BiomeSource for OneBiome {
+        fn biome(&self, _pos: BlockPos) -> haste_core::BiomeId {
+            haste_core::BiomeId(0)
+        }
+    }
+
+    #[test]
+    fn destroy_spawns_the_vanilla_grid() {
+        let mut particles = Particles::new(types_with_blocks());
+        particles.spawn_destroy(
+            BlockPos::new(10, 64, -5),
+            BlockStateId(0),
+            &full_cube_shapes(),
+            &OneBiome,
+        );
+        // A full cube: ceil(1.0/0.25) = 4 per axis, at least 2 -> 4x4x4 = 64 particles
+        // (vanilla `addDestroyBlockEffect`'s density 0.25 grid).
+        assert_eq!(particles.alive(), 64);
+        for p in &particles.pool {
+            // TerrainParticle: gravity 1, quad halved from the 0.1..=0.2 default.
+            assert_eq!(p.behaviour.gravity, 1.0);
+            assert!((0.05..=0.1).contains(&p.quad), "quad {}", p.quad);
+            assert_eq!(p.color, [0.6, 0.6, 0.6]);
+            // The speed constructor's output: the vector rescaled to a length of
+            // (r+r+1)*0.15*0.4 = 0.06..<0.18 (the ±0.375 grid offsets only pick its
+            // direction), then y lifted 0.1 — so y sits in 0.1 ± 0.18.
+            let horizontal = (p.vel.x * p.vel.x + p.vel.z * p.vel.z).sqrt();
+            assert!(horizontal < 0.18, "horizontal {horizontal}");
+            assert!(
+                p.vel.y > 0.1 - 0.18 && p.vel.y < 0.1 + 0.18,
+                "y {}",
+                p.vel.y
+            );
+            // The lifetime is Particle's default 4..=40.
+            assert!((4.0..=40.0).contains(&p.lifetime), "life {}", p.lifetime);
+            // The uv sub-piece: one 4x4 texel quarter of the 16x16 sprite.
+            let sprite = p.block_sprite.expect("terrain particle");
+            let [u0, v0, u1, v1] = sprite.uv;
+            assert!((u1 - u0 - 4.0).abs() < 1e-3, "u span {}", u1 - u0);
+            assert!((v1 - v0 - 4.0).abs() < 1e-3, "v span {}", v1 - v0);
+            assert!(u0 >= 0.0 && u0 <= 12.0, "u0 {u0}");
+            assert!(v0 >= 0.0 && v0 <= 12.0, "v0 {v0}");
+        }
+        // Every grid cell position appears once: the 64 rel centres of a 4x4x4 grid
+        // over the unit cube are (i+0.5)/4, i in 0..4, per axis.
+        let mut cells = std::collections::HashSet::new();
+        for p in &particles.pool {
+            let rel = [p.pos.x - 10.0, p.pos.y - 64.0, p.pos.z + 5.0];
+            for v in rel {
+                assert!([0.125, 0.375, 0.625, 0.875].contains(&v), "cell {rel:?}");
+            }
+            let cell: [u64; 3] = rel.map(|v| (v * 8.0) as u64);
+            cells.insert(cell);
+        }
+        assert_eq!(cells.len(), 64);
+    }
+
+    #[test]
+    fn destroy_skips_states_without_terrain_particles() {
+        // No block table: nothing spawns.
+        let mut particles = Particles::new(types_for_tests(&[("flame", &[[0, 0, 8, 8]])]));
+        particles.spawn_destroy(
+            BlockPos::new(10, 64, -5),
+            BlockStateId(0),
+            &full_cube_shapes(),
+            &OneBiome,
+        );
+        assert_eq!(particles.alive(), 0);
+        // The pool cap applies like every spawn.
+        let mut particles = Particles::new(types_with_blocks());
+        for i in 0..(MAX_PARTICLES / 64 + 8) as i32 {
+            particles.spawn_destroy(
+                BlockPos::new(10 + i, 64, -5),
+                BlockStateId(0),
+                &full_cube_shapes(),
+                &OneBiome,
+            );
+        }
+        assert_eq!(particles.alive(), MAX_PARTICLES);
+    }
+
+    #[test]
+    fn crack_sits_on_the_hit_face_with_power_scaled_velocity() {
+        let mut particles = Particles::new(types_with_blocks());
+        particles.spawn_crack(
+            BlockPos::new(10, 64, -5),
+            Direction::North,
+            BlockStateId(0),
+            &full_cube_shapes(),
+            &OneBiome,
+        );
+        assert_eq!(particles.alive(), 1);
+        let p = &particles.pool[0];
+        // North face: z = min - 0.1, one block outside the front of the cube; x
+        // and y stay within the (0.1 .. 0.9) inner span of the bounds.
+        assert!((p.pos.z - (-5.0 + 0.0 - 0.1)).abs() < 1e-9, "z {:?}", p.pos);
+        assert!(p.pos.x > 10.0 && p.pos.x < 11.0, "x {:?}", p.pos);
+        assert!(p.pos.y > 64.0 && p.pos.y < 65.0, "y {:?}", p.pos);
+        // setPower(0.2): the horizontal velocity at most a fifth of the constructor's
+        // 0.06..=0.12 range, y within 0.1 ± 0.024.
+        assert!(p.vel.x.abs() <= 0.12 * 0.2 + 1e-6, "vx {}", p.vel.x);
+        assert!(p.vel.z.abs() <= 0.12 * 0.2 + 1e-6, "vz {}", p.vel.z);
+        assert!((p.vel.y - 0.1).abs() <= 0.12 * 0.2 + 1e-6, "vy {}", p.vel.y);
+        // scale(0.6) on the halved quad: 0.6 * (0.1..=0.2) / 2.
+        assert!((0.03..=0.06).contains(&p.quad), "quad {}", p.quad);
+
+        // The other faces put the particle outside their own side of the cube.
+        let cases: [(Direction, fn(&ParticleState) -> f32); 5] = [
+            (Direction::Down, |p| p.pos.y),
+            (Direction::Up, |p| p.pos.y),
+            (Direction::South, |p| p.pos.z),
+            (Direction::West, |p| p.pos.x),
+            (Direction::East, |p| p.pos.x),
+        ];
+        for (face, axis) in cases {
+            let mut particles = Particles::new(types_with_blocks());
+            particles.spawn_crack(
+                BlockPos::new(10, 64, -5),
+                face,
+                BlockStateId(0),
+                &full_cube_shapes(),
+                &OneBiome,
+            );
+            let p = &particles.pool[0];
+            let v = axis(p);
+            let (lo, hi) = match face {
+                Direction::Down => (63.9, 64.0),
+                Direction::Up => (65.0, 65.1),
+                Direction::South => (-4.0, -3.9),
+                Direction::West => (9.9, 10.0),
+                Direction::East => (11.0, 11.1),
+                _ => unreachable!(),
+            };
+            assert!(
+                v > lo - 1e-4 && v < hi + 1e-4,
+                "{face:?}: {v} not in {lo}..{hi}"
+            );
+        }
     }
 
     #[test]
@@ -1789,5 +2260,79 @@ mod tests {
             assert!(up.is_normalized(), "{up:?}");
             assert!(right.cross(up).length() > 0.99);
         }
+    }
+
+    /// The block sprite table over the real assets: every state of a few familiar
+    /// blocks resolves a 16x16 (or larger) sprite, barrier/structure_void refuse to
+    /// spawn, and grass_block's particles are untinted (vanilla's
+    /// `colorAsTerrainParticle` override) while leaves take the foliage tint.
+    #[test]
+    #[ignore = "needs the client jar and datagen reports in the cache"]
+    fn block_particle_table_resolves_real_sprites() {
+        let jar = haste_core::paths::client_jar();
+        if !jar.exists() {
+            eprintln!("ignored: needs the client jar in the cache");
+            return;
+        }
+        let mut assets = haste_assets::Assets::open(
+            &jar,
+            &haste_core::paths::cache_dir().join("assets"),
+            "26.3",
+        )
+        .unwrap();
+        let states = haste_assets::BlocksJsonStates::load(
+            &haste_core::paths::datagen_reports().join("blocks.json"),
+        )
+        .unwrap();
+        let types = ParticleTypes::build(&mut assets, &[], Some(&states)).unwrap();
+        let blocks = types.blocks.as_ref().unwrap();
+        // The state id of `name` with `props` (BlocksJsonStates has no lookup, so scan).
+        let find = |name: &str, props: &[(&str, &str)]| {
+            use haste_core::view::BlockStateTable;
+            let want: std::collections::HashMap<_, _> = props
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            (0..states.len() as u32)
+                .map(BlockStateId)
+                .find(|s| {
+                    states.block_of(*s).path() == name
+                        && states
+                            .properties(*s)
+                            .into_iter()
+                            .filter(|(k, _)| want.contains_key(k))
+                            .eq(want.iter().map(|(k, v)| (k.clone(), v.clone())))
+                })
+                .unwrap_or_else(|| panic!("no state for {name} {props:?}"))
+        };
+        // Stone: a full 16x16 sprite, spawnable, untinted.
+        let stone = find("stone", &[]);
+        let s = blocks.sprite(stone).expect("stone has a particle sprite");
+        assert!(s.spawn);
+        assert_eq!(s.tint, crate::tint::TintKind::None);
+        assert_eq!(s.rect[2], 16);
+        assert_eq!(s.rect[3], 16);
+        // Barrier breaks without terrain particles (vanilla `noTerrainParticles`).
+        let barrier = find("barrier", &[]);
+        assert!(!blocks.sprite(barrier).expect("sprite").spawn);
+        // Grass block particles are WHITE (BlockTintSources.grassBlock overrides
+        // colorAsTerrainParticle), oak leaves take the biome foliage colour.
+        let grass = find("grass_block", &[]);
+        assert_eq!(
+            blocks.sprite(grass).unwrap().tint,
+            crate::tint::TintKind::None
+        );
+        let leaves = find("oak_leaves", &[]);
+        assert_eq!(
+            blocks.sprite(leaves).unwrap().tint,
+            crate::tint::TintKind::Foliage
+        );
+        // An upper tall grass reads the biome below (doubleTallGrass).
+        let upper = find("tall_grass", &[("half", "upper")]);
+        assert!(blocks.sprite(upper).unwrap().upper_half_tint_below);
+        let lower = find("tall_grass", &[("half", "lower")]);
+        assert!(!blocks.sprite(lower).unwrap().upper_half_tint_below);
+        // Out-of-range ids resolve to the placeholder (stone), like the baked models.
+        assert!(blocks.sprite(BlockStateId(u32::MAX - 5)).is_some());
     }
 }

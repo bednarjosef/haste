@@ -406,6 +406,9 @@ pub struct Session {
     /// Particle spawns queued by `level_particles` since the last tick (drained by the game
     /// thread into the shared pool).
     pub particle_spawns: Vec<haste_render::ParticleSpawn>,
+    /// Block particles queued since the last tick (our own break and mining start, and the
+    /// server's `level_event`s), drained by the game thread into the shared pool.
+    pub block_particle_requests: Vec<crate::block_particles::BlockParticleRequest>,
     /// Particle spawns the game thread took over the whole session (counters).
     pub particle_spawned: usize,
     /// `minecraft:particle_type` names by protocol id (the static registry the packet's
@@ -449,6 +452,7 @@ impl Session {
             use_ticks: 0,
             use_item: None,
             particle_spawns: Vec::new(),
+            block_particle_requests: Vec::new(),
             particle_spawned: 0,
             particle_names,
         }
@@ -699,6 +703,15 @@ impl Session {
             }
             P::PlayerPosition(_) => self.counters.teleports += 1,
             P::LevelParticles(p) => self.push_particles(&p, regs),
+            P::LevelEvent(e) => {
+                // The block-particle events (2001 break, 2019/2020 mining ticks); the
+                // rest of the level events are sounds and effects we do not decode.
+                if let Some(r) =
+                    crate::block_particles::request_from_level_event(e.event, e.pos, e.data)
+                {
+                    self.block_particle_requests.push(r);
+                }
+            }
             _ if player_packet => {}
             P::LevelChunkWithLight(c) => match world.load_chunk(&c.chunk) {
                 Ok(()) => self.counters.chunks_loaded += 1,
@@ -918,6 +931,9 @@ impl Session {
             self.counters.own_sounds += 1;
             self.sound_requests.push(request);
         }
+        // The player's own block particles this tick (break grid, mining cracks).
+        self.block_particle_requests
+            .extend(self.player.take_own_block_particles());
         self.entity_boxes.clear();
         for id in &self.entity_ids {
             if let Some(b) = entities.hitbox(*id) {

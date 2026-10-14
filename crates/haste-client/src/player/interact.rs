@@ -694,7 +694,7 @@ impl LocalPlayer {
                 return;
             }
             self.int.destroy_delay = DESTROY_DELAY;
-            self.own_mining_hit(h.pos, state, env);
+            self.own_mining_hit(h.pos, h.face, state, env);
             self.send_destroy(action::START_DESTROY, h, state, true, env, out);
             return;
         }
@@ -710,7 +710,7 @@ impl LocalPlayer {
         let instant = d >= 1.0;
         // The start tick's hit sound (vanilla: addBreakingBlockEffects with playSound=true;
         // the follow-up hits every 4 ticks are the server's 2020 level events).
-        self.own_mining_hit(h.pos, state, env);
+        self.own_mining_hit(h.pos, h.face, state, env);
         self.send_destroy(action::START_DESTROY, h, state, instant, env, out);
         if !instant {
             self.int.destroying = Some((h.pos, h.face));
@@ -721,7 +721,13 @@ impl LocalPlayer {
     /// The mining hit sound of a block we start breaking (vanilla plays it
     /// client-side on the start tick; the block's type comes from the
     /// `block_sounds.json` dump). Unknown blocks play nothing.
-    fn own_mining_hit(&mut self, pos: BlockPos, state: BlockStateId, env: &InteractEnv<'_>) {
+    fn own_mining_hit(
+        &mut self,
+        pos: BlockPos,
+        face: Direction,
+        state: BlockStateId,
+        env: &InteractEnv<'_>,
+    ) {
         if let Some(t) = env.data.block_sound_type(state) {
             self.own_sounds.mining_hit(
                 pos.as_dvec3() + DVec3::new(0.5, 0.5, 0.5),
@@ -729,6 +735,10 @@ impl LocalPlayer {
                 &mut self.sound_out,
             );
         }
+        // The start tick's crack particle (vanilla: `addBreakingBlockEffects` with
+        // `playSound=true`; the follow-up ticks are the server's 2019/2020 events).
+        self.block_particles_out
+            .push(crate::block_particles::BlockParticleRequest::Crack { pos, face });
     }
 
     /// One tick of held attack on a block; true if the arm swings this tick.
@@ -829,8 +839,8 @@ impl LocalPlayer {
             // server's update.
             let to = env.data.fluid(state).is_none().then_some(BlockStateId::AIR);
             self.int.predict(seq, h.pos, state, to);
-            // The break sound, played the moment the block goes for us (vanilla's client
-            // gets it as the server's level_event 2001, which we do not decode yet).
+            // The break sound, played the moment the block goes for us (the server's
+            // 2001 broadcast excludes the breaker; its sound half we do not decode).
             if let Some(t) = env.data.block_sound_type(state) {
                 self.own_sounds.block_broken(
                     h.pos.as_dvec3() + DVec3::new(0.5, 0.5, 0.5),
@@ -838,6 +848,10 @@ impl LocalPlayer {
                     &mut self.sound_out,
                 );
             }
+            // The destroy particles with it (vanilla: `playerWillDestroy` plays the
+            // 2001 level event on the client too; the server's broadcast excludes us).
+            self.block_particles_out
+                .push(crate::block_particles::BlockParticleRequest::Destroy { pos: h.pos, state });
         }
     }
 }
