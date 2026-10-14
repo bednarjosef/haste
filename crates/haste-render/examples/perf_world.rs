@@ -142,6 +142,7 @@ fn measure(
         dimension_has_sky: true,
         fog_start: (view_distance * 16) as f32 * 0.9,
         fog_end: (view_distance * 16) as f32,
+        ..Default::default()
     };
     let frame = |yaw: f32| FrameInput {
         camera: Camera {

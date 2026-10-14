@@ -550,6 +550,7 @@ impl SkyRenderer {
                     dimension_has_sky: true,
                     fog_start: 0.0,
                     fog_end: 1.0,
+                    ..Default::default()
                 },
                 SkyKind::Overworld,
                 12.0,
@@ -579,8 +580,10 @@ impl SkyRenderer {
         // the exact environment colour; the dome colours keep our sunrise approximation
         // fed with the exact tint and strength).
         let mut colors = colors;
+        // The horizon colour is the exact environment fog colour (all dimensions), so the dome
+        // and the terrain fog agree.
+        colors.fog = fog_color;
         if kind == SkyKind::Overworld {
-            colors.fog = fog_color;
             let glow = crate::fog::sunrise_sunset_color(sky.time_of_day);
             colors.sunrise = [glow[0], glow[1], glow[2], glow[3]];
             colors.sunrise_side = crate::fog::sun_glow_side(sky.time_of_day);
@@ -954,6 +957,7 @@ mod tests {
             dimension_has_sky: true,
             fog_start: 0.0,
             fog_end: 192.0,
+            ..Default::default()
         }
     }
 
