@@ -592,7 +592,40 @@ impl EntityRenderer {
                     tint,
                 );
             }
+            // Wings (`WingsLayer`): an elytra on the chest draws the WINGS layers on the elytra
+            // model, pushed 0.125 blocks back (the wings' flap animation is not modelled yet).
+            if slot == haste_core::model::EquipmentSlot::Chest {
+                let elytra = elytra_model();
+                let wings_root = root * Mat4::from_translation(Vec3::new(0.0, 0.0, 0.125));
+                for layer in info.layers_of("wings") {
+                    let tint = piece.dye.or(layer.dyeable).map(argb_linear).unwrap_or([1.0; 3]);
+                    let rect = self.texture_rect(&layer.texture, assets);
+                    emit_part_tinted(
+                        &mut out,
+                        &elytra,
+                        &elytra.root,
+                        &e.pose,
+                        wings_root,
+                        rect,
+                        light,
+                        e.hurt,
+                        tint,
+                    );
+                }
+            }
             self.vertices = out;
+        }
+        // Custom head (vanilla `CustomHeadLayer`): the head-slot item when it is not armour
+        // (pumpkins, heads), through the head part's animated transform.
+        if let Some(idx) = e.head_item {
+            if let Some(model) = self.item_model_for(idx, assets) {
+                if let Some(head_m) = part_matrix(&e.model.root, &e.pose, Mat4::IDENTITY, "head") {
+                    let head_root = root * head_m * custom_head_layer_matrix();
+                    let mut out = std::mem::take(&mut self.vertices);
+                    self.emit_item(&mut out, &model, head_root, light, ItemDisplay::Head, assets);
+                    self.vertices = out;
+                }
+            }
         }
     }
 
@@ -1178,6 +1211,15 @@ pub(crate) fn held_item_layer_matrix(left: bool) -> Mat4 {
             2.0 / 16.0,
             -10.0 / 16.0,
         ))
+}
+
+/// `CustomHeadLayer.translateToHead` (the static one, after the head part's own transform):
+/// translate `(0, -0.25, 0)`, rotate Y 180 degrees, scale `(0.625, -0.625, -0.625)`. The item
+/// then draws through `display.head`.
+pub(crate) fn custom_head_layer_matrix() -> Mat4 {
+    Mat4::from_translation(Vec3::new(0.0, -0.25, 0.0))
+        * Mat4::from_rotation_y(180.0f32.to_radians())
+        * Mat4::from_scale(Vec3::new(0.625, -0.625, -0.625))
 }
 
 /// An ARGB colour (armour dye / undyed fallback) as a linear-RGB vertex multiplier, the same
@@ -1773,6 +1815,63 @@ fn build_armor_model(slot: haste_core::model::EquipmentSlot) -> Arc<CubeModel> {
         tex_height: 32,
         root: part("root", [0.0, 0.0, 0.0], Vec::new(), children),
     })
+}
+
+/// The elytra model (vanilla `ElytraModel.createLayer`): a left and a right wing, 64x32 texture.
+/// In Haste's model space (y down, the head base at y = -24) the wings hang from the shoulders.
+/// Built once.
+pub(crate) fn elytra_model() -> Arc<CubeModel> {
+    static MODEL: std::sync::OnceLock<Arc<CubeModel>> = std::sync::OnceLock::new();
+    MODEL
+        .get_or_init(|| {
+            use haste_core::model::{Cube, ModelPart};
+            let cube = |origin: [f32; 3], mirror: bool| Cube {
+                origin: origin.into(),
+                size: Vec3::new(10.0, 20.0, 2.0),
+                inflate: 1.0,
+                uv: [22, 0],
+                mirror,
+            };
+            let wing = |name: &str, pivot: [f32; 3], rotation: [f32; 3], mirror: bool| ModelPart {
+                name: name.to_owned(),
+                pivot: pivot.into(),
+                rotation: rotation.into(),
+                visible: true,
+                cubes: vec![cube(
+                    if mirror { [0.0, 0.0, 0.0] } else { [-10.0, 0.0, 0.0] },
+                    mirror,
+                )],
+                children: vec![],
+            };
+            let pi = std::f32::consts::PI;
+            Arc::new(CubeModel {
+                texture: Identifier::minecraft("entity/elytra"),
+                tex_width: 64,
+                tex_height: 32,
+                root: ModelPart {
+                    name: "root".into(),
+                    pivot: Vec3::ZERO,
+                    rotation: Vec3::ZERO,
+                    visible: true,
+                    cubes: vec![],
+                    children: vec![
+                        wing(
+                            "left_wing",
+                            [5.0, -24.0, 0.0],
+                            [pi / 12.0, 0.0, -pi / 12.0],
+                            false,
+                        ),
+                        wing(
+                            "right_wing",
+                            [-5.0, -24.0, 0.0],
+                            [pi / 12.0, 0.0, pi / 12.0],
+                            true,
+                        ),
+                    ],
+                },
+            })
+        })
+        .clone()
 }
 
 /// The missing item model vanilla's `ModelBakery.MissingModels` bakes (`MissingCuboidModel`):/// a unit cube with the missingno texture and no display transforms, so it draws centred on
@@ -2490,6 +2589,33 @@ mod tests {
             "{p:?}"
         );
         assert!(part_matrix(&model.root, &pose, Mat4::IDENTITY, "nope").is_none());
+    }
+
+    /// `CustomHeadLayer.translateToHead`: translate (0, -0.25, 0), rotate Y 180, scale
+    /// (0.625, -0.625, -0.625).
+    #[test]
+    fn the_custom_head_transform_is_vanillas() {
+        let deg = |d: f32| d.to_radians();
+        let want = Mat4::from_translation(Vec3::new(0.0, -0.25, 0.0))
+            * Mat4::from_rotation_y(deg(180.0))
+            * Mat4::from_scale(Vec3::new(0.625, -0.625, -0.625));
+        assert!(close(custom_head_layer_matrix(), want, 1e-6));
+    }
+
+    /// `ElytraModel.createLayer`: a left and a right wing at the shoulders, 64x32 texture.
+    #[test]
+    fn the_elytra_model_has_two_wings() {
+        let m = elytra_model();
+        assert_eq!(m.tex_width, 64);
+        assert_eq!(m.tex_height, 32);
+        assert_eq!(m.root.children.len(), 2);
+        let left = &m.root.children[0];
+        assert_eq!(left.name, "left_wing");
+        assert_eq!(left.pivot, Vec3::new(5.0, -24.0, 0.0));
+        assert_eq!(left.cubes[0].size, Vec3::new(10.0, 20.0, 2.0));
+        assert_eq!(left.cubes[0].inflate, 1.0);
+        assert!(!left.cubes[0].mirror);
+        assert!(m.root.children[1].cubes[0].mirror);
     }
 
     /// The armour model has the parts vanilla retains per slot, with the right deformations.

@@ -75,6 +75,9 @@ pub struct EntityInstance {
     /// Armour and other equipment layers the renderer draws, already resolved to the equipment
     /// asset each item names (vanilla `HumanoidArmorLayer`). Empty for entities with none.
     pub equipment: Vec<EquipmentPiece>,
+    /// The head-slot item when it is not armour (vanilla `CustomHeadLayer`: pumpkins, mob and
+    /// player heads). `None` when the head is bare or wears a helmet (drawn by `equipment`).
+    pub head_item: Option<RegistryIndex>,
 }
 
 /// An equipment slot, matching vanilla `EquipmentSlot`'s wire order (the ordinals the

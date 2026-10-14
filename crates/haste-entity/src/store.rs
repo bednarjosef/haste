@@ -334,20 +334,23 @@ fn model_has_part(part: &haste_core::model::ModelPart, name: &str) -> bool {
     part.name == name || part.children.iter().any(|c| model_has_part(c, name))
 }
 
-/// The hands and equipment layers of an entity: the item in each hand (main hand -> right,
-/// off hand -> left) and every armour piece whose item's `equippable` component names the same
-/// slot (vanilla `HumanoidArmorLayer.shouldRender`). The equipment asset id comes from the item's
-/// default `equippable` component; the dye from the stack's `dyed_color` patch.
+/// The hands, equipment layers and custom head item of an entity: the item in each hand (main
+/// hand -> right, off hand -> left), every armour piece whose item's `equippable` component names
+/// the same slot (vanilla `HumanoidArmorLayer.shouldRender`), and the head-slot item when it is
+/// not armour (vanilla `CustomHeadLayer`: pumpkins, heads). The equipment asset id comes from the
+/// item's default `equippable` component; the dye from the stack's `dyed_color` patch.
 fn equipment_of(
     e: &Entity,
     components: &haste_data::ItemComponents,
 ) -> (
     [Option<RegistryIndex>; 2],
     Vec<haste_core::model::EquipmentPiece>,
+    Option<RegistryIndex>,
 ) {
     use haste_core::model::{EquipmentPiece, EquipmentSlot};
     let mut hands = [None, None];
     let mut equipment = Vec::new();
+    let mut head_item = None;
     for (wire, stack) in &e.equipment {
         if stack.is_empty() {
             continue;
@@ -358,7 +361,13 @@ fn equipment_of(
             Some(EquipmentSlot::OffHand) => hands[1] = Some(item),
             Some(slot) if slot.is_armor() => {
                 let equippable = components.equippable(item);
-                if equippable.map(|x| x.slot) != Some(slot) {
+                let is_armor = equippable.map(|x| x.slot) == Some(slot);
+                if slot == EquipmentSlot::Head && !is_armor {
+                    // Not a helmet: `CustomHeadLayer` draws it on the head instead.
+                    head_item = Some(item);
+                    continue;
+                }
+                if !is_armor {
                     continue;
                 }
                 equipment.push(EquipmentPiece {
@@ -371,7 +380,7 @@ fn equipment_of(
             _ => {}
         }
     }
-    (hands, equipment)
+    (hands, equipment, head_item)
 }
 
 pub struct EntityStore {
@@ -759,10 +768,10 @@ impl EntityStore {
             // Equipment layers (held items, armour) are only drawn on humanoid models
             // (vanilla adds `ItemInHandLayer`/`HumanoidArmorLayer` per renderer type).
             let humanoid = has_head && model_has_part(&model.root, "right_arm");
-            let (hands, equipment) = if humanoid {
+            let (hands, equipment, head_item) = if humanoid {
                 equipment_of(slot, &self.item_components)
             } else {
-                ([None, None], Vec::new())
+                ([None, None], Vec::new(), None)
             };
             out.push(EntityInstance {
                 id: slot.id,
@@ -780,6 +789,7 @@ impl EntityStore {
                 decoration,
                 hands,
                 equipment,
+                head_item,
             });
         }
     }

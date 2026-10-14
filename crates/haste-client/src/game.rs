@@ -218,6 +218,7 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
         decoration: None,
         hands: [None, None],
         equipment: Vec::new(),
+        head_item: None,
     }
 }
 

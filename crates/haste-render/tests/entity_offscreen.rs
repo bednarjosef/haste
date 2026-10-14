@@ -158,6 +158,7 @@ fn entities_offscreen() {
         decoration: None,
         hands: [None, None],
         equipment: Vec::new(),
+        head_item: None,
     };
     let boxed = EntityInstance {
         id: EntityId(2),
@@ -175,6 +176,7 @@ fn entities_offscreen() {
         decoration: None,
         hands: [None, None],
         equipment: Vec::new(),
+        head_item: None,
     };
     let entities = vec![player, boxed];
     let camera = Camera {
@@ -367,6 +369,7 @@ fn dropped_items_offscreen() {
         decoration: None,
         hands: [None, None],
         equipment: Vec::new(),
+        head_item: None,
     };
     let camera = Camera {
         pos: glam::DVec3::new(0.0, 1.7, -2.5),
@@ -473,6 +476,7 @@ fn decoration(id: i32, pos: glam::DVec3, decoration: Decoration) -> EntityInstan
         decoration: Some(decoration),
         hands: [None, None],
         equipment: Vec::new(),
+        head_item: None,
     }
 }
 
@@ -606,7 +610,6 @@ fn equipment_offscreen() {
     }
     let mut equipment = Vec::new();
     for (name, slot) in [
-        ("iron_helmet", EquipmentSlot::Head),
         ("iron_chestplate", EquipmentSlot::Chest),
         ("iron_leggings", EquipmentSlot::Legs),
         ("iron_boots", EquipmentSlot::Feet),
@@ -624,6 +627,10 @@ fn equipment_offscreen() {
             dye: None,
         });
     }
+    // A leather chestplate with a dye: exercises the `dyed_color` tint path.
+    let leather = item("leather_chestplate").expect("leather_chestplate in the item registry");
+    assert!(data.item_components.equippable(leather).is_some());
+    let pumpkin_item = item("carved_pumpkin").expect("carved_pumpkin in the item registry");
 
     let bare = EntityInstance {
         id: EntityId(1),
@@ -641,10 +648,44 @@ fn equipment_offscreen() {
         decoration: None,
         hands: [None, None],
         equipment: Vec::new(),
+        head_item: None,
     };
     let mut armed = bare.clone();
     armed.hands = [Some(sword), None];
     armed.equipment = equipment;
+    let mut pumpkin = bare.clone();
+    pumpkin.head_item = Some(pumpkin_item);
+    let mut dyed = bare.clone();
+    dyed.equipment = vec![EquipmentPiece {
+        slot: EquipmentSlot::Chest,
+        item: Some(leather),
+        asset: data
+            .item_components
+            .equippable(leather)
+            .and_then(|e| e.asset.clone()),
+        dye: Some(0xFF00_FF00),
+    }];
+    // An elytra on the chest: the WINGS layer on the elytra model (no humanoid layer).
+    let elytra_item = item("elytra").expect("elytra in the item registry");
+    let elytra_eq = data
+        .item_components
+        .equippable(elytra_item)
+        .expect("elytra has an equippable component");
+    assert_eq!(elytra_eq.slot, EquipmentSlot::Chest);
+    let elytra_info = assets
+        .equipment_info(elytra_eq.asset.as_ref().expect("elytra asset"))
+        .expect("equipment/elytra.json");
+    assert!(
+        elytra_info.layers_of("wings").next().is_some(),
+        "elytra has a wings layer"
+    );
+    let mut winged = bare.clone();
+    winged.equipment = vec![EquipmentPiece {
+        slot: EquipmentSlot::Chest,
+        item: Some(elytra_item),
+        asset: elytra_eq.asset.clone(),
+        dye: None,
+    }];
 
     let camera = Camera {
         pos: glam::DVec3::new(0.0, 2.2, -4.0),
@@ -664,10 +705,36 @@ fn equipment_offscreen() {
         .zip(img.pixels())
         .filter(|(a, b)| a.0 != b.0)
         .count();
-    eprintln!("equipment drew into {} pixels; entities_drawn={}", changed, renderer.entities_drawn());
+    eprintln!("equipment drew into {changed} pixels; entities_drawn={}", renderer.entities_drawn());
     assert!(
         changed > 200,
         "the held sword and armour changed {changed} pixels"
     );
     assert_eq!(renderer.entities_drawn(), 1);
+
+    // The custom head (a carved pumpkin) and a dyed leather chestplate both change pixels.
+    let pumpkin_img = render_scene(&mut renderer, &world, std::slice::from_ref(&pumpkin), camera);
+    pumpkin_img.save(out.join("equipment_head.png")).unwrap();
+    let head_changed = base
+        .pixels()
+        .zip(pumpkin_img.pixels())
+        .filter(|(a, b)| a.0 != b.0)
+        .count();
+    assert!(head_changed > 100, "the pumpkin changed {head_changed} pixels");
+    let dyed_img = render_scene(&mut renderer, &world, std::slice::from_ref(&dyed), camera);
+    dyed_img.save(out.join("equipment_dyed.png")).unwrap();
+    let dyed_changed = base
+        .pixels()
+        .zip(dyed_img.pixels())
+        .filter(|(a, b)| a.0 != b.0)
+        .count();
+    assert!(dyed_changed > 100, "the dyed leather changed {dyed_changed} pixels");
+    let winged_img = render_scene(&mut renderer, &world, std::slice::from_ref(&winged), camera);
+    winged_img.save(out.join("equipment_elytra.png")).unwrap();
+    let winged_changed = base
+        .pixels()
+        .zip(winged_img.pixels())
+        .filter(|(a, b)| a.0 != b.0)
+        .count();
+    assert!(winged_changed > 100, "the elytra changed {winged_changed} pixels");
 }
