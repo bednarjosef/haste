@@ -435,8 +435,35 @@ fn frame_view(
     )
 }
 
-/// The SDL3 scancode (USB HID usage id, `InputConstants.KEY_*` in 26.3) of a winit `KeyCode`.
-/// `haste_jvm::keys` documents the numbering; letters, digits and punctuation take the
+/// Where a label is drawn in a GUI frame, in absolute GUI pixels (translation stack applied):
+/// an exact text, or a slider's dynamic `label: value`. The first match. Used by the script
+/// runner's `click_text`.
+fn gui_text_pos(frame: &GuiFrame, want: &str) -> Option<(i32, i32)> {
+    use haste_protocol::haste_core::gui::GuiCommand;
+    let matches = |text: &str| text == want || text.strip_prefix(want).is_some_and(|r| r.starts_with(':'));
+    let mut stack: Vec<(f32, f32)> = vec![(0.0, 0.0)];
+    for c in &frame.commands {
+        match c {
+            GuiCommand::TranslatePush { dx, dy, .. } => {
+                let (x, y) = *stack.last().unwrap();
+                stack.push((x + dx, y + dy));
+            }
+            GuiCommand::TranslatePop => {
+                stack.pop();
+            }
+            GuiCommand::Text { text, x, y, .. } | GuiCommand::StyledText { text, x, y, .. }
+                if matches(text) =>
+            {
+                let (dx, dy) = *stack.last().unwrap();
+                return Some((x + dx as i32, y + dy as i32));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The SDL3 scancode (USB HID usage id, `InputConstants.KEY_*` in 26.3) of a winit `KeyCode`./// `haste_jvm::keys` documents the numbering; letters, digits and punctuation take the
 /// consecutive HID ranges, everything else is one entry per key.
 fn sdl_scancode(code: KeyCode) -> Option<i32> {
     use haste_jvm::keys as sdl;
@@ -1253,6 +1280,19 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                         // A click is a press and a release on the same tick.
                         input.mouse_button(b, true, x, y, ui.as_ref());
                         input.mouse_button(b, false, x, y, ui.as_ref());
+                    }
+                    script::Action::ClickText(text, dx, dy) => {
+                        // The label's position in the last rendered frame, so the check does not
+                        // depend on the GUI scale or window size. A slider's label is centred, so
+                        // `(dx, dy)` moves the click onto its track.
+                        match gui_text_pos(&gui, &text) {
+                            Some((x, y)) => {
+                                let (x, y) = (f64::from(x + dx), f64::from(y + dy));
+                                input.mouse_button(1, true, x, y, ui.as_ref());
+                                input.mouse_button(1, false, x, y, ui.as_ref());
+                            }
+                            None => tracing::warn!("script click_text {text:?}: no such label"),
+                        }
                     }
                     script::Action::Scroll(n) => {
                         let (x, y) = input.mouse;
@@ -2358,8 +2398,42 @@ mod tests {
     const DPP: f32 = 0.15; // vanilla's default sensitivity (50%) value
 
     #[test]
-    fn mouse_look_clamps_pitch() {
-        let (yaw, pitch) = apply_mouse(0.0, 0.0, (100.0, 0.0), DPP);
+    fn gui_text_pos_finds_labels_and_slider_values() {
+        use haste_protocol::haste_core::gui::{GuiCommand, GuiFrame};
+        let frame = GuiFrame {
+            commands: vec![
+                GuiCommand::Text {
+                    x: 10,
+                    y: 20,
+                    text: "Done".into(),
+                    color: 0xffff_ffff,
+                    shadow: true,
+                },
+                GuiCommand::TranslatePush {
+                    dx: 5.0,
+                    dy: 7.0,
+                    dz: 0.0,
+                },
+                GuiCommand::Text {
+                    x: 10,
+                    y: 20,
+                    text: "Render Distance: 12".into(),
+                    color: 0xffff_ffff,
+                    shadow: true,
+                },
+                GuiCommand::TranslatePop,
+            ],
+            ..GuiFrame::default()
+        };
+        // An exact label, in the frame's coordinates.
+        assert_eq!(gui_text_pos(&frame, "Done"), Some((10, 20)));
+        // A slider's dynamic `label: value`, with the translation stack applied.
+        assert_eq!(gui_text_pos(&frame, "Render Distance"), Some((15, 27)));
+        assert_eq!(gui_text_pos(&frame, "FOV"), None);
+    }
+
+    #[test]
+    fn mouse_look_clamps_pitch() {        let (yaw, pitch) = apply_mouse(0.0, 0.0, (100.0, 0.0), DPP);
         assert!((yaw - 15.0).abs() < 1e-4 && pitch == 0.0, "{yaw} {pitch}");
         assert_eq!(apply_mouse(0.0, 80.0, (0.0, 200.0), DPP), (0.0, 90.0));
         assert_eq!(apply_mouse(10.0, -80.0, (0.0, -200.0), DPP), (10.0, -90.0));

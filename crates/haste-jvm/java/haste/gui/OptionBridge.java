@@ -1,10 +1,10 @@
 package haste.gui;
 
 import com.mojang.blaze3d.platform.InputConstants;
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.VarHandle;
 import java.lang.reflect.Field;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.OptionInstance;
@@ -13,12 +13,15 @@ import net.minecraft.sounds.SoundSource;
 /**
  * The options bridge between the vanilla {@code Options} object and Rust.
  *
- * <p>Every {@link OptionInstance} of the live options is wrapped so that the moment vanilla
- * applies a change ({@code OptionInstance.set} fires {@code onValueUpdate} when the value
- * actually changed), the options.txt key and value reach Rust through
- * {@link haste.rt.Native#optionsChanged}. Key bindings are polled once per client tick
- * ({@link #tick()}, from {@code Bridge.tick}) and reported the same way when the player
- * rebinds a key in the controls screen.
+ * <p>Every {@link OptionInstance} of the live options (and every sound category slider) is polled
+ * once per client tick ({@link #tick()}, from {@code Bridge.tick}). The moment a value differs
+ * from what was last reported, the options.txt key and value reach Rust through
+ * {@link haste.rt.Native#optionsChanged}. Polling the values is how this stays on the real
+ * vanilla {@code Options} object: {@code OptionInstance.onValueUpdate} is a private final field,
+ * so it cannot be wrapped. Vanilla applies each change the instant the player makes it
+ * ({@code OptionInstance.set} fires {@code onValueUpdate}); the tick that follows reports it, at
+ * most one tick (50 ms) later. Key bindings are polled the same way, when the player rebinds a
+ * key in the controls screen.
  *
  * <p>The bridge also mirrors the client's own key and mouse events into the
  * {@link KeyMapping}s (vanilla's {@code KeyboardHandler.keyPress}/{@code MouseHandler.onPress}
@@ -48,25 +51,21 @@ public final class OptionBridge {
     public static final int C_SWAP_OFFHAND = 1 << 10;
     public static final int C_JUMP = 1 << 11;
 
-    /** OptionInstance.onValueUpdate, wrapped per instance (private final, like Proxies.set). */
-    private static final VarHandle ON_VALUE_UPDATE;
+    /** An option to poll: its options.txt key and the instance to read. */
+    private record Tracked(String key, OptionInstance<?> instance) {}
 
-    static {
-        try {
-            ON_VALUE_UPDATE = MethodHandles.privateLookupIn(OptionInstance.class, MethodHandles.lookup())
-                .findVarHandle(OptionInstance.class, "onValueUpdate", OptionInstance.ValueUpdateListener.class);
-        } catch (Exception e) {
-            throw new IllegalStateException("no onValueUpdate handle on OptionInstance", e);
-        }
-    }
+    /** The options polled every tick, in a stable order. */
+    private static final List<Tracked> OPTIONS = new ArrayList<>();
+
+    /** The last value reported per options.txt key (seeded on the first tick, never reported). */
+    private static final Map<String, String> LAST_OPTION = new HashMap<>();
 
     /** The key bindings were last reported as, by mapping name (detected per tick). */
     private static final Map<String, String> BINDS = new HashMap<>();
 
     /**
-     * Wraps every OptionInstance of the live options (and every sound category slider) so each
-     * change is reported to Rust. Called once from {@code Proxies.create} after the Options
-     * object exists (its constructor's own load must not report: those are the initial values).
+     * Collects every OptionInstance of the live options (and every sound category slider) to poll.
+     * Called once from {@code Proxies.create} after the Options object exists.
      */
     public static void install() {
         for (Field f : net.minecraft.client.Options.class.getDeclaredFields()) {
@@ -75,13 +74,19 @@ public final class OptionBridge {
             }
             f.setAccessible(true);
             try {
-                wrap((OptionInstance<?>) f.get(Proxies.options), optionsKey(f.getName()));
+                OPTIONS.add(new Tracked(optionsKey(f.getName()), (OptionInstance<?>) f.get(Proxies.options)));
             } catch (IllegalAccessException e) {
                 throw new IllegalStateException("reading Options." + f.getName(), e);
             }
         }
-        for (Map.Entry<SoundSource, OptionInstance<Double>> e : soundSources().entrySet()) {
-            wrap(e.getValue(), "soundCategory_" + e.getKey().getName());
+        for (SoundSource source : SoundSource.values()) {
+            OPTIONS.add(new Tracked("soundCategory_" + source.getName(),
+                Proxies.options.getSoundSourceOptionInstance(source)));
+        }
+        // Seed the key bindings too: the initial state is not a change (only a rebind in the
+        // controls screen reports).
+        for (KeyMapping m : Proxies.options.keyMappings) {
+            BINDS.put(m.getName(), m.saveString());
         }
     }
 
@@ -100,29 +105,21 @@ public final class OptionBridge {
         };
     }
 
-    @SuppressWarnings("unchecked")
-    private static void wrap(OptionInstance<?> instance, String key) {
-        OptionInstance.ValueUpdateListener<Object> original =
-            (OptionInstance.ValueUpdateListener<Object>) ON_VALUE_UPDATE.get(instance);
-        ON_VALUE_UPDATE.set(instance, (OptionInstance.ValueUpdateListener<Object>) value -> {
-            original.valueChanged(value);
-            haste.rt.Native.optionsChanged(key, String.valueOf(value));
-        });
-    }
-
-    @SuppressWarnings("unchecked")
-    private static Map<SoundSource, OptionInstance<Double>> soundSources() throws IllegalAccessException {
-        Field f = net.minecraft.client.Options.class.getDeclaredField("soundSourceVolumes");
-        f.setAccessible(true);
-        return (Map<SoundSource, OptionInstance<Double>>) f.get(Proxies.options);
-    }
-
     /**
-     * Once per client tick (from {@code Bridge.tick}): reports key bindings the player changed in
-     * the controls screen, and rebuilds the key-to-mapping table so the game input mirroring
-     * ({@link #gameKey}) matches the new bindings (vanilla's {@code KeyMapping.resetMapping}).
+     * Once per client tick (from {@code Bridge.tick}): reports options whose value changed since
+     * the last tick (the first tick only seeds the last values), and key bindings the player
+     * changed in the controls screen. Rebuilds the key-to-mapping table after a rebind so the
+     * game input mirroring ({@link #gameKey}) matches the new bindings (vanilla's
+     * {@code KeyMapping.resetMapping}).
      */
     public static void tick() {
+        for (Tracked o : OPTIONS) {
+            String now = String.valueOf(o.instance().get());
+            String before = LAST_OPTION.put(o.key(), now);
+            if (before != null && !before.equals(now)) {
+                haste.rt.Native.optionsChanged(o.key(), now);
+            }
+        }
         boolean changed = false;
         for (KeyMapping m : Proxies.options.keyMappings) {
             String now = m.saveString();
