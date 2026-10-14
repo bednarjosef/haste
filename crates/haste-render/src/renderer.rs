@@ -1653,6 +1653,7 @@ impl Renderer {
         if let Some(t) = &mut self.timer {
             t.poll(&self.gpu.device);
             self.timings.gpu_ms = t.latest;
+            self.timings.gpu_sub_ms = t.latest_sub;
         }
         // A pending capture (F2) copies this frame's image out for `take_capture`; with
         // COPY_SRC on the surface that is the presented frame itself, and only without it
@@ -1840,6 +1841,8 @@ impl Renderer {
 
         self.timings.cull_ms = lap(&mut mark);
         let mut ran = [false; 3];
+        // Which main-pass sub-passes drew this frame (timing.rs MAIN_SUBPASSES order).
+        let mut ran_sub = [false; 7];
         let mut draw_calls = 0u32;
         let mut encoder = self
             .gpu
@@ -1877,7 +1880,13 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            if let Some(t) = self.timer.as_ref() {
+                t.begin_subpass(&mut pass, 0);
+            }
             draw_calls += self.sky.draw_background(&mut pass);
+            if let Some(t) = self.timer.as_ref() {
+                t.end_subpass(&mut pass, 0);
+            }
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_bind_group(1, &self.atlas_bind_group, &[]);
             pass.set_bind_group(2, &self.lightmap_bind_group, &[]);
@@ -1895,6 +1904,15 @@ impl Renderer {
                 let instance = i;
                 // Entities after the opaque and cutout terrain, before translucent.
                 if !entities_drawn && d.layer == haste_assets::RenderLayer::Translucent {
+                    if let Some(t) = self.timer.as_ref() {
+                        for s in [1usize, 2, 3] {
+                            if ran_sub[s] {
+                                t.end_subpass(&mut pass, s as u32);
+                            }
+                        }
+                        t.begin_subpass(&mut pass, 4);
+                        ran_sub[4] = true;
+                    }
                     draw_calls += self.entity.draw(&mut pass);
                     pass.set_bind_group(1, &self.atlas_bind_group, &[]);
                     entities_drawn = true;
@@ -1902,12 +1920,22 @@ impl Renderer {
                     bound_arena = u32::MAX;
                 }
                 if bound_layer != Some(d.layer) {
-                    let pipeline = match d.layer {
+                    let (pipeline, sub) = match d.layer {
                         haste_assets::RenderLayer::Solid
-                        | haste_assets::RenderLayer::CutoutMipped => &self.pipeline_solid,
-                        haste_assets::RenderLayer::Cutout => &self.pipeline_cutout,
-                        haste_assets::RenderLayer::Translucent => &self.pipeline_translucent,
+                        | haste_assets::RenderLayer::CutoutMipped => (&self.pipeline_solid, 1),
+                        haste_assets::RenderLayer::Cutout => (&self.pipeline_cutout, 2),
+                        haste_assets::RenderLayer::Translucent => (&self.pipeline_translucent, 3),
                     };
+                    if let Some(t) = self.timer.as_ref() {
+                        // Close the previous terrain bracket, open the new layer's.
+                        for s in [1usize, 2, 3] {
+                            if ran_sub[s] {
+                                t.end_subpass(&mut pass, s as u32);
+                            }
+                        }
+                        t.begin_subpass(&mut pass, sub);
+                        ran_sub[sub as usize] = true;
+                    }
                     pass.set_pipeline(pipeline);
                     bound_layer = Some(d.layer);
                 }
@@ -1943,11 +1971,37 @@ impl Renderer {
                 }
             }
             if !entities_drawn {
+                if let Some(t) = self.timer.as_ref() {
+                    for s in [1usize, 2, 3] {
+                        if ran_sub[s] {
+                            t.end_subpass(&mut pass, s as u32);
+                        }
+                    }
+                    t.begin_subpass(&mut pass, 4);
+                    ran_sub[4] = true;
+                }
                 draw_calls += self.entity.draw(&mut pass);
             }
+            if let Some(t) = self.timer.as_ref() {
+                if ran_sub[4] {
+                    t.end_subpass(&mut pass, 4);
+                }
+                t.begin_subpass(&mut pass, 5);
+                ran_sub[5] = true;
+            }
             draw_calls += self.particles.draw(&mut pass);
+            if let Some(t) = self.timer.as_ref() {
+                if ran_sub[5] {
+                    t.end_subpass(&mut pass, 5);
+                }
+                t.begin_subpass(&mut pass, 6);
+                ran_sub[6] = true;
+            }
             draw_calls += self.overlay.draw(&mut pass);
             draw_calls += self.sky.draw_overlays(&mut pass);
+            if let Some(t) = self.timer.as_ref() {
+                t.end_subpass(&mut pass, 6);
+            }
         }
 
         // First-person hand: its own pass over the world with the depth cleared, so it never
@@ -2020,7 +2074,7 @@ impl Renderer {
 
         // Submit, then present (wgpu 30: present lives on the queue).
         let resolved = match &mut self.timer {
-            Some(t) => t.resolve(&mut encoder, ran),
+            Some(t) => t.resolve(&mut encoder, ran, ran_sub),
             None => false,
         };
         self.timings.encode_ms = lap(&mut mark);

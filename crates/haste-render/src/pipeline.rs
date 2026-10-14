@@ -91,8 +91,11 @@ impl Gpu {
             );
         }
         // Multi-draw-indirect terrain needs a non-zero first instance per draw (the section
-        // origin); without it the renderer issues direct draws.
-        let optional = wgpu::Features::INDIRECT_FIRST_INSTANCE | wgpu::Features::TIMESTAMP_QUERY;
+        // origin); without it the renderer issues direct draws. TIMESTAMP_QUERY gives the
+        // per-pass GPU times, TIMESTAMP_QUERY_INSIDE_PASSES the main-pass sub-pass split.
+        let optional = wgpu::Features::INDIRECT_FIRST_INSTANCE
+            | wgpu::Features::TIMESTAMP_QUERY
+            | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES;
         let required_features = adapter.features() & optional;
         let multi_draw = required_features.contains(wgpu::Features::INDIRECT_FIRST_INSTANCE)
             && adapter

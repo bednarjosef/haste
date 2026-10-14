@@ -61,6 +61,10 @@ pub struct Args {
     /// Bench mode: write the summary as JSON to this file.
     #[arg(long)]
     pub bench_out: Option<std::path::PathBuf>,
+    /// Bench mode: hold the settle camera still instead of the flight path (isolates one view,
+    /// e.g. the screenshot comparison spot).
+    #[arg(long)]
+    pub bench_fixed: bool,
     /// Render distance in chunks, overriding the saved option (like `--vsync`).
     #[arg(long)]
     pub render_distance: Option<u8>,
