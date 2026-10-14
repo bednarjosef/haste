@@ -92,6 +92,15 @@ impl VarInt {
     }
 
     pub async fn decode_async(read: &mut (impl tokio::io::AsyncRead + Unpin)) -> Result<Self> {
+        Ok(Self::decode_async_sized(read).await?.0)
+    }
+
+    /// [`Self::decode_async`], also returning how many bytes the VarInt took
+    /// on the wire. The encoding need not be canonical, so the size comes from
+    /// the bytes actually read, not from the value.
+    pub async fn decode_async_sized(
+        read: &mut (impl tokio::io::AsyncRead + Unpin),
+    ) -> Result<(Self, usize)> {
         use tokio::io::AsyncReadExt;
         let mut val = 0;
         for i in 0..Self::MAX_SIZE.get() {
@@ -106,7 +115,7 @@ impl VarInt {
             }
             val |= (i32::from(byte) & 0x7F) << (i * 7);
             if byte & 0x80 == 0 {
-                return Ok(Self(val));
+                return Ok((Self(val), i + 1));
             }
         }
         Err(VarError::too_large("VarInt"))

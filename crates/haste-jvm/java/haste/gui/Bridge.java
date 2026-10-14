@@ -5,7 +5,10 @@ import net.minecraft.client.Options;
 import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.client.gui.screens.PauseScreen;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.gui.screens.inventory.InventoryScreen;
+import net.minecraft.client.gui.screens.multiplayer.JoinMultiplayerScreen;
+import net.minecraft.client.gui.screens.options.OptionsScreen;
 import net.minecraft.client.input.CharacterEvent;
 import net.minecraft.client.input.KeyEvent;
 import net.minecraft.client.input.MouseButtonEvent;
@@ -16,7 +19,7 @@ import net.minecraft.client.input.MouseButtonInfo;
  * method runs vanilla screen code with the 26.3 signatures.
  */
 public final class Bridge {
-    public static final int CHAT = 0, PAUSE = 1, INVENTORY = 2, COMMAND = 3;
+    public static final int CHAT = 0, PAUSE = 1, INVENTORY = 2, COMMAND = 3, TITLE = 4, OPTIONS = 5, MULTIPLAYER = 6;
 
     private int pressedButton = -1;
     private double lastX, lastY;
@@ -34,6 +37,9 @@ public final class Bridge {
         long t = System.nanoTime();
         net.minecraft.server.Bootstrap.bootStrap();
         bootstrapMillis = (System.nanoTime() - t) / 1_000_000;
+        // vanilla's GUI code passes RenderPipelines fields to the extractor: Haste's own copies of the ones the
+        // GUI uses, so GfxImpl reads the blend mode from the pipeline like vanilla does
+        Pipelines.install();
         GfxImpl.width = 320;
         GfxImpl.height = 240;
         Proxies.create();
@@ -41,19 +47,54 @@ public final class Bridge {
         return new Bridge();
     }
 
-    /** Opens one of the supported vanilla screens (replacing the current one). */
+    /**
+     * Opens one of the supported vanilla screens (replacing the current one). The options screen's
+     * parent is whatever screen was open (vanilla opens it from the title screen) and the multiplayer
+     * screen's parent is a title screen, as in vanilla.
+     */
     public void open(int kind) {
         Screen s = switch (kind) {
             case CHAT -> new ChatScreen("", false);
             case COMMAND -> new ChatScreen("/", false);
             case PAUSE -> new PauseScreen(true);
             case INVENTORY -> new InventoryScreen(Proxies.player);
+            case TITLE -> new TitleScreen();
+            case OPTIONS -> new OptionsScreen(ClientImpl.screen, Proxies.options);
+            case MULTIPLAYER -> new JoinMultiplayerScreen(new TitleScreen());
             default -> throw new IllegalArgumentException("screen kind " + kind);
         };
-        Proxies.gui.setScreen(s);
+        try {
+            Proxies.gui.setScreen(s);
+        } catch (Throwable t) {
+            // Gui.setScreen leaves the new screen set even when its init throws: a screen that could not
+            // open must not stay half-open (the next open would call removed() on it, and options
+            // screens save on that). Drop it and report the failure to Rust.
+            ClientImpl.screen = null;
+            if (t instanceof RuntimeException e) throw e;
+            if (t instanceof Error e) throw e;
+            throw new RuntimeException(t);
+        }
     }
 
     public void close() { Proxies.gui.setScreen(null); }
+
+    /**
+     * Drops everything a test (or a disconnecting client) leaves behind: the chat log and its scroll
+     * position (the history stays), the held mouse button and its position, the screen currently open
+     * and whether vanilla code still believes the mouse is grabbed.
+     */
+    public void resetForTest() {
+        this.pressedButton = -1;
+        this.lastX = 0.0;
+        this.lastY = 0.0;
+        MouseImpl.pressed = -1;
+        MouseImpl.x = 0.0;
+        MouseImpl.y = 0.0;
+        Proxies.hud.getChat().clearMessages(false);
+        Proxies.hud.getChat().resetChatScroll();
+        Proxies.gui.setScreen(null);
+        MouseImpl.grabbed = false;
+    }
 
     public boolean isOpen() { return ClientImpl.screen != null; }
 
@@ -292,5 +333,11 @@ public final class Bridge {
     public void metricsChanged() {
         Text.invalidateWidths();
         Proxies.set(Proxies.font, "lineHeight", int.class, haste.rt.Native.lineHeight());
+    }
+
+    /** Debug (tests): where this frame's blend modes came from — the pipeline and name counts, then the
+     * multiply/invert blits' pipelines as "{@code <pipeline location> <code> <count>}" lines. */
+    public String blendDebug() {
+        return "pipeline=" + GfxImpl.pipelineBlits + " name=" + GfxImpl.nameBlits + "\n" + GfxImpl.specialBlends();
     }
 }

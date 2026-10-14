@@ -6,6 +6,7 @@
 //! - `ui`      (jvm-host): HUD + tier-3 screens through the batched GUI pipeline.
 //! - `launch`  (setup): CLI args, config, setup checks, singleplayer server lifecycle.
 //! - `headless`: join milestone mode, no window: joins, tracks world/entities, prints stats.
+//! - `sound`  (sound): packets and music into `haste-audio`'s output, 20 Hz on the game thread.
 //!
 //! The lead owns this file. Add a module by adding one line here and your own file.
 use clap::Parser;
@@ -17,6 +18,8 @@ mod launch;
 mod net;
 mod player;
 mod screenshots;
+mod script;
+mod sound;
 mod ui;
 
 #[derive(Parser, Debug)]
@@ -45,6 +48,10 @@ pub struct Args {
     /// (`--seconds` bounds the wait).
     #[arg(long)]
     pub screenshot: Option<std::path::PathBuf>,
+    /// Input script for the offscreen client: runs the steps every game tick through the
+    /// same routing as the window (needs `--server`; `--seconds` bounds the run).
+    #[arg(long)]
+    pub script: Option<std::path::PathBuf>,
     /// Bench mode (needs `--server`): after the world settles (as `--screenshot`), render
     /// offscreen along a fixed camera path for this many seconds and print a frame-time
     /// summary (`--seconds` bounds the settle wait).
@@ -111,6 +118,9 @@ fn main() -> anyhow::Result<()> {
     }
     if let Some(file) = args.screenshot.clone() {
         return app::screenshot(&args, &file);
+    }
+    if let Some(file) = args.script.clone() {
+        return app::script_run(&args, &file);
     }
     if let Some(seconds) = args.bench {
         return app::bench(&args, seconds);
