@@ -21,6 +21,7 @@
 // The windowed client (client-app) uses the parts the headless driver does not.
 #![allow(dead_code)]
 
+use crate::hand;
 use glam::DVec3;
 use haste_core::game::GameMode;
 use haste_core::input::InputState;
@@ -101,6 +102,9 @@ pub struct AttributeIds {
     pub submerged_mining_speed: i32,
     pub block_interaction_range: i32,
     pub entity_interaction_range: i32,
+    /// `attack_speed`: how fast the equip progress returns after an item switch
+    /// (`Player.getCurrentItemAttackStrengthDelay`).
+    pub attack_speed: i32,
 }
 
 impl AttributeIds {
@@ -118,6 +122,7 @@ impl AttributeIds {
             submerged_mining_speed: index("submerged_mining_speed")?,
             block_interaction_range: index("block_interaction_range")?,
             entity_interaction_range: index("entity_interaction_range")?,
+            attack_speed: index("attack_speed")?,
         })
     }
 
@@ -218,6 +223,9 @@ pub struct LocalPlayer {
     jump_held: bool,
     /// Breaking, placing, using, attacking, hotbar and inventory (player/interact.rs).
     pub(crate) int: interact::Interaction,
+    /// The first-person hand's per-tick animation state (player/hand.rs): swing, equip
+    /// progress and bob, filled for the render state at the end of each tick.
+    pub hand: hand::Hand,
 }
 
 impl LocalPlayer {
@@ -257,6 +265,7 @@ impl LocalPlayer {
             jump_trigger_time: 0,
             jump_held: false,
             int: interact::Interaction::default(),
+            hand: hand::Hand::new(),
         };
         p.state.on_ground = true;
         p.prev_eye = p.eye_height();
@@ -588,6 +597,7 @@ impl LocalPlayer {
             ),
             block_reach: get(ids.block_interaction_range, r.block_reach, false),
             entity_reach: get(ids.entity_interaction_range, r.entity_reach, false),
+            attack_speed: get(ids.attack_speed, r.attack_speed, false),
         };
     }
 
