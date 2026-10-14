@@ -40,17 +40,12 @@ pub(crate) fn cos(rad: f32) -> f32 {
     }
 }
 
-/// Degrees to radians for movement direction: `(deg * pi) / 180` in f32 (mcpk.wiki "Angles").
+/// Degrees to radians for movement direction and the sprint-jump boost: `(deg * pi) / 180` in f32
+/// (mcpk.wiki "Angles"; vanilla `LivingEntity.jumpFromGround` uses the same `(float)(PI / 180.0)`
+/// conversion as the movement code).
 #[inline]
 pub(crate) fn deg_to_rad(deg: f32) -> f32 {
     deg * std::f32::consts::PI / 180.0
-}
-
-/// Degrees to radians for the sprint-jump boost: `deg * 0.017453292` (mcpk.wiki "Angles" notes the
-/// sprint jump uses this other constant). Assumption pending traces.
-#[inline]
-pub(crate) fn deg_to_rad_jump(deg: f32) -> f32 {
-    deg * 0.017_453_292
 }
 
 #[cfg(test)]

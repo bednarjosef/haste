@@ -44,8 +44,9 @@ pub(crate) fn travel(
     state.velocity.x *= drag;
     state.velocity.z *= drag;
     state.velocity.y *= VERTICAL_FLY_DRAG;
-    // Landing ends creative flight (observed behaviour; assumption about the exact condition).
-    if state.on_ground {
+    // Landing ends creative flight, except for spectators (vanilla `LocalPlayer.aiStep`:
+    // `onGround() && abilities.flying && !gameMode.isSpectator()`).
+    if state.on_ground && !state.spectating {
         state.flying = false;
     }
 }

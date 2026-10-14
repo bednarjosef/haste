@@ -43,14 +43,17 @@ copied from Pomme's `physics/`/`player/`.
 | input normalisation | vector normalised only if longer than 1 | derived: wiki "Walking" (45° walking is faster), wiki "Sneaking" (1.3 m/s straight, 1.8 diagonal) |
 | movement_speed | 0.1 | documented: wiki "Attribute" |
 | sprint | x1.3 on movement speed | documented: wiki "Sprinting" (30 %); 5.612 m/s reproduced |
+| sprint stop/start | stops on a non-minor horizontal collision; starting has no collision condition, but not while crawling on land | verified: `LocalPlayer.shouldStopRunSprinting` / `isHorizontalCollisionMinor` (angle between input direction and actual movement < 0.13962634 rad) / `canStartSprinting` (requires not `isMovingSlowly`: crouching or swimming pose out of water) |
 | sneaking_speed | 0.3 | documented: wiki "Attribute"; 1.295 m/s ("about 1.3") reproduced |
 | jump_strength | 0.42 | documented: wiki "Attribute", "Transportation" |
 | jump height | 1.2522 | documented: wiki "Jumping"; reproduced (apex test) |
 | flat jump airtime | 12 ticks | documented: mcpk.wiki "Tiers"; reproduced |
 | sprint-jump boost | +0.2 along facing | mcpk.wiki; derived check: 7.127 m/s average reproduced to 0.005 |
 | jump cooldown | 10 ticks while jump held | documented: wiki "Jumping" (half a second) |
+| jump rise | y = max(jump power, current y) | verified: `LivingEntity.jumpFromGround` (jumping keeps a faster rise) |
 | step_height | 0.6 | documented: wiki "Attribute" |
-| velocity threshold | components below 0.003 zeroed at tick start | mcpk.wiki (1.9+) |
+| block below offset | 0.500001 below the feet | verified: `Entity.getBlockPosBelowThatAffectsMyMovement` = `getOnPos(0.500001F)`; on the ground the supporting block's X/Z is used (fences, walls, gates keep the supporting pos) |
+| velocity threshold | x and z zeroed together below horizontal length squared 9.0E-6, y below 0.003 on its own | verified: `LivingEntity.aiStep` (the player branch) |
 | block speed factor | soul sand 0.4, honey 0.4; applied to horizontal velocity after the move | value: oracle; order derived from wiki "Walking": soul sand 2.508 m/s, soul sand under water 0.576, under lava 0.490 all reproduced |
 | jump factor | honey 0.5 (oracle) | value: oracle. Not checked: wiki "Jumping" says honey jumps reach 3/16 block, our model gives more; **not determined**, see open questions |
 | water drag | 0.8 (all axes) | derived: wiki "Walking" water 1.960 m/s = 20 x 0.0196 / 0.2 |
@@ -61,7 +64,7 @@ copied from Pomme's `physics/`/`player/`.
 | water gravity | gravity / 16 | verified: `LivingEntity.getFluidFallingAdjustedMovement`; skipped while sprinting (any pose); the isFalling clamp (0.005 / -0.003) is unreachable at gravity 0.08 (the two y windows do not overlap) |
 | lava gravity, deep | gravity / 4 | verified: `LivingEntity.travelInLava` (`baseGravity != 0`) |
 | lava gravity, shallow | gravity / 16, then the same gravity / 4 | verified: same two vanilla methods applied in order |
-| swim up (jump in fluid) | +0.04 / tick | verified: `LivingEntity.jumpInLiquid`; the trigger conditions in `movement.rs` (which fluid, on ground, shallow/deep) are still an approximation of vanilla's jump section |
+| swim up (jump in fluid) | +0.04 / tick | verified: `LivingEntity.jumpInLiquid`; trigger conditions follow `LivingEntity.aiStep` jump section: in a fluid the player jumps normally (`jumpFromGround`) only while on ground with the fluid no deeper than the jump threshold, otherwise holding jump swims up |
 | swim down (sneak in water) | -0.04 / tick | verified: `LivingEntity.goDownInWater`, called from `LocalPlayer.aiStep` when in water and sneaking |
 | fluid jump threshold | 0.4 (0 when the eye height is below 0.4) | verified: `Entity.getFluidJumpThreshold`; decides lava shallow vs deep |
 | fluid depth | max fluid surface above the feet over the cells the shrunk box touches | verified: `EntityFluidInteraction.update` -> `Entity.getFluidHeight`; lava reads it after the move (vanilla refreshes the trackers inside `move`) |
@@ -71,35 +74,45 @@ copied from Pomme's `physics/`/`player/`.
 | flying acceleration | flying_speed 0.05 (x2 sprinting) | derived: wiki "Flying" 10.92 m/s (we get 10.89) and 21.6 (we get 21.78) |
 | flying vertical | ±3 x flying_speed per tick, vertical drag 0.6 | **UNVERIFIED assumption** |
 | sine table | 65536 f32 entries, index = (int)(rad x 10430.378) & 65535, cos = +16384 | mcpk.wiki "Angles"; assumption that 26.3 still does this (`trig::USE_TABLE`) |
-| deg -> rad | (deg x π) / 180 in f32; sprint-jump uses deg x 0.017453292 | mcpk.wiki "Angles" (1.8-era); assumption |
+| deg -> rad | (deg x π) / 180 in f32, also for the sprint-jump boost | verified: `LivingEntity.jumpFromGround` uses the same `(float)(PI / 180.0)` conversion as the movement code (the separate 0.017453292 jump constant is gone) |
 | collision epsilon | 1e-7 | assumption (typical f64 voxel sweep value) |
 | sneak edge back-off step | 0.05 | assumption |
 | box half-width | 0.6f32 / 2 widened to f64 | entity dimensions are floats; consequence: against a wall the player stops at x.69999998808, not x.7 (test `walking_into_a_full_block_stops`) |
 
 ## Tick order (as implemented)
 
-1. Rotation from input. 2. Zero |v| < 0.003. 3. Fluid contact (shrunk box vs fluid surface),
-sprint/sneak flags, pose (keeps crouching/swimming if the bigger pose does not fit).
-4. Jump cooldown; jump (on ground) or swim up (in fluid). 5. Impulse: keys -> ±1, x sneaking
-speed when crouching/crawling, x 0.98. 6. Travel: normal / water / lava / flying:
-accelerate (rotated by yaw, sine table) -> move (sneak edge back-off, sweep with step-up) ->
-zero velocity on collided axes, on_ground = vertical collision while moving down, fall distance ->
-block speed factor -> gravity, vertical drag -> horizontal drag.
+1. Rotation from input. 2. Zero x/z together below horizontal length squared 9.0E-6, y below
+   0.003 on its own. 3. Fluid contact (shrunk box vs fluid surface), sprint/sneak flags, pose
+   (keeps crouching/swimming if the bigger pose does not fit).
+   4. Jump cooldown; jump (on ground, or in a fluid no deeper than the jump threshold while on the
+   ground) or swim up (otherwise in a fluid). 5. Impulse: keys -> ±1, x sneaking
+   speed when crouching/crawling, x 0.98. 6. Travel: normal / water / lava / flying:
+   accelerate (rotated by yaw, sine table) -> move (sneak edge back-off, sweep with step-up) ->
+   zero velocity on collided axes, on_ground = vertical collision while moving down, fall distance ->
+   block speed factor -> gravity, vertical drag -> horizontal drag.
 In water the tick starts with the sneak sink, then the sprint-swim steering (`Player.travel`),
 and ends with `jump_out_of_fluid`; in lava the shallow/deep branch (depth after the move) picks
 the drags, then gravity/4, then the same `jump_out_of_fluid`.
 
 ## Approximate / not modelled
 
-- Step-up uses a single candidate height (full step, clipped by ceilings). Whether 26.3 tries
-  several heights: not determined. Stairs/slabs traces will tell.
-- Supporting block for friction: block 0.5 below the feet, else the colliding block under the box
-  closest to its centre. Approximation of vanilla's supporting block.
-- Speed/jump factor block: the block at the feet if non-default, else the one 0.5 below.
-- Sprint stop on collision ignores the wiki's "> 8 degrees" angle condition; sprint is not
-  restarted while still colliding (assumption). Hunger/blindness: caller clears `input.sprint`.
+- Step-up tries every candidate height from the collider Y coordinates below the max step,
+  ascending, keeping the first that covers more horizontal distance than the plain sweep
+  (verified: `Entity.collide` / `Entity.collectCandidateStepUpHeights`).
+- Supporting block for friction: `getOnPos(0.500001F)`; on the ground the supporting block's
+  X/Z with `floor(y - 0.500001)` (verified: `Entity.getBlockPosBelowThatAffectsMyMovement`).
+- Jump factor block: the block at the feet if non-default, else the supporting block below
+  (verified: `Entity.getBlockJumpFactor`). The speed factor block in the fluids path is still
+  the simple `floor(pos - 0.500001)` without the supporting-block refinement (see the comment
+  on `apply_speed_factor`).
+- Sprint stops on a non-minor horizontal collision (input direction vs actual movement within
+  8 degrees, `LocalPlayer.isHorizontalCollisionMinor`); starting has no collision condition
+  but requires not crawling on land (`isMovingSlowly`). The stop is evaluated after the start
+  so a persistent collision keeps the sprint off. Hunger/blindness: caller clears `input.sprint`.
 - Sneak edge protection near (not on) ground follows the wiki's "up to 0.6 blocks above ground"
-  via `fall_distance < step_height` and a probe box; exact condition not determined.
+  via `fall_distance < step_height`; the probe is vanilla `Player.canFallAtLeast`: only the slab
+  below the feet of the moved box (X/Z shrunk 1e-7, from `minY - step - 1e-7` to `minY`), not
+  the whole body shifted down.
 - Swimming: surface bobbing (wiki 2.20 m/s at the surface), water currents (1.39 m/s push),
   bubble columns, depth strider, dolphin's grace: not implemented. Pitch steering and the
   climb-out boost are in (`fluids.rs`); the jump section's choice between `jumpFromGround`,
@@ -109,7 +122,8 @@ the drags, then gravity/4, then the same `jump_out_of_fluid`.
 - Not implemented: ladders/vines (climbing), cobweb/berry bush/powder snow slowdowns, slime
   bounce, honey sliding, elytra, levitation/slow falling/jump boost/speed effects, world border,
   unloaded-chunk freeze, entity pushing, knockback. `PlayerAttributes` carries no effect state yet.
-- Landing ends creative flight (assumption about the exact condition). Double-tap to fly and
+- Landing ends creative flight except for spectators (verified: `LocalPlayer.aiStep`:
+  `onGround() && abilities.flying && !gameMode.isSpectator()`). Double-tap to fly and
   double-tap sprint are input-layer concerns (haste-client).
 - `fall_distance` is f32 (interface); vanilla's type not determined.
 

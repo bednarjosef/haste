@@ -25,7 +25,12 @@ pub mod states {
     pub const SOUL_SAND: BlockStateId = BlockStateId(9);
     pub const WATER_SOURCE: BlockStateId = BlockStateId(10);
     pub const LAVA_SOURCE: BlockStateId = BlockStateId(11);
-    pub const COUNT: usize = 12;
+    /// Block whose top is at 0.3: a step-up candidate height vanilla's loop tries.
+    pub const STEP_03: BlockStateId = BlockStateId(12);
+    /// Block whose top is exactly 0.6 below a player standing at y = 0: the sneak edge probe
+    /// (`Player.canFallAtLeast`, depth step + 1e-7) reaches it.
+    pub const LEDGE_0_6: BlockStateId = BlockStateId(13);
+    pub const COUNT: usize = 14;
 }
 
 /// Shapes and per-block physics properties for the ids in [`states`].
@@ -56,6 +61,8 @@ impl Default for TestShapes {
         boxes[states::BLUE_ICE.0 as usize] = full.clone();
         boxes[states::SLIME.0 as usize] = full.clone();
         boxes[states::SOUL_SAND.0 as usize] = vec![bx(0.0, 0.0, 0.0, 1.0, 0.875, 1.0)];
+        boxes[states::STEP_03.0 as usize] = vec![bx(0.0, -0.7, 0.0, 1.0, 0.3, 1.0)];
+        boxes[states::LEDGE_0_6.0 as usize] = vec![bx(0.0, -1.6, 0.0, 1.0, -0.6, 1.0)];
         Self { boxes }
     }
 }
