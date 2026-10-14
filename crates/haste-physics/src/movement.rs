@@ -376,6 +376,14 @@ pub(crate) fn move_entity(
     shapes: &dyn CollisionShapes,
     blocks: &dyn BlockPhysics,
 ) -> DVec3 {
+    // Vanilla `Entity.move`'s noPhysics branch (`Player.tick` sets it in spectator): add the
+    // motion without collision and report no collisions.
+    if state.no_physics {
+        state.pos += motion;
+        state.horizontal_collision = false;
+        state.vertical_collision = false;
+        return motion;
+    }
     let aabb = state.aabb(attrs);
     let mut motion = block_effects::consume_stuck_multiplier(state, motion);
     if state.sneaking

@@ -812,6 +812,10 @@ fn dust_option(kind: &Identifier, data: &[u8]) -> Option<haste_render::DustOptio
     })
 }
 
+/// Cap on the packets kept for a still-starting HUD (a server spamming the UI channel must not
+/// grow the buffer without bound; the real backlog during JVM boot is a handful of packets).
+const UI_BACKLOG_LIMIT: usize = 8192;
+
 /// Owns the connection and the session state; world and entities are borrowed per tick.
 pub struct NetDriver {
     conn: Connection,
@@ -819,6 +823,9 @@ pub struct NetDriver {
     /// Session state.
     pub session: Session,
     out: Vec<ServerboundPlay>,
+    /// Packets the UI would use, seen while the HUD JVM was still starting (replayed by the
+    /// game thread once the `Ui` exists; see `crate::ui::ui_handles`).
+    ui_backlog: Vec<ClientboundPlay>,
 }
 
 impl NetDriver {
@@ -844,6 +851,7 @@ impl NetDriver {
             login,
             session,
             out: Vec::new(),
+            ui_backlog: Vec::new(),
         })
     }
 
@@ -855,6 +863,13 @@ impl NetDriver {
     /// What `login` said (the dimension may since have changed: `session.dimension`).
     pub fn login(&self) -> &Login {
         &self.login
+    }
+
+    /// UI-bound packets seen before the HUD JVM was up, in order; the game thread replays them
+    /// into the new `Ui` once it exists so a fresh join's tab list, boss bars and scoreboard
+    /// survive the boot.
+    pub fn take_ui_backlog(&mut self) -> Vec<ClientboundPlay> {
+        std::mem::take(&mut self.ui_backlog)
     }
 
     /// Connection counters.
@@ -883,11 +898,17 @@ impl NetDriver {
         while let Some(p) = self.conn.try_recv() {
             let regs = self.conn.registries();
             // The HUD sees every packet after the client's own handling, in order; cloning only
-            // when there is a UI to show it (the session takes the original).
-            let for_ui = ui.is_some().then(|| p.clone());
+            // when there is a UI to show it (the session takes the original). While the HUD JVM
+            // is still starting the UI-bound packets are kept and replayed once it is up.
+            let keep = ui.is_some() || crate::ui::ui_handles(&p);
+            let for_ui = keep.then(|| p.clone());
             self.session.apply(p, world, entities, regs, &mut self.out);
-            if let (Some(ui), Some(p)) = (ui, for_ui) {
-                ui.handle(&p);
+            match (ui, for_ui) {
+                (Some(ui), Some(p)) => ui.handle(&p),
+                (None, Some(p)) if self.ui_backlog.len() < UI_BACKLOG_LIMIT => {
+                    self.ui_backlog.push(p)
+                }
+                _ => {}
             }
         }
         self.flush()

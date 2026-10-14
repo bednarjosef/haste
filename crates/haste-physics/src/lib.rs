@@ -62,6 +62,11 @@ pub struct PlayerState {
     /// Gliding with an elytra (vanilla's shared flag 7). While set the player uses the
     /// fall-flying pose box and `elytra::travel` instead of the normal walk/fall.
     pub fall_flying: bool,
+    /// Spectator mode (vanilla `Entity.noPhysics`, set from `Player.tick` when
+    /// `isSpectator()`): movement adds the motion without any collision, so the player walks
+    /// through blocks.
+    #[serde(default)]
+    pub no_physics: bool,
 }
 
 impl PlayerState {
