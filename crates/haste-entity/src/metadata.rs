@@ -64,6 +64,24 @@ impl Metadata {
         self.entries.iter().find(|e| e.index == index)
     }
 
+    /// `Entity.DATA_CUSTOM_NAME` (index 2): the custom name in plain text, if set.
+    pub fn custom_name(&self) -> Option<String> {
+        match self.get(2).map(|e| &e.value) {
+            Some(MetadataValue::OptionalComponent(Some(c))) => Some(c.to_plain(&|_| None)),
+            Some(MetadataValue::Component(c)) => Some(c.to_plain(&|_| None)),
+            _ => None,
+        }
+    }
+
+    /// `Entity.DATA_CUSTOM_NAME_VISIBLE` (index 3): whether the custom name always shows
+    /// (`Entity.shouldShowName`).
+    pub fn custom_name_visible(&self) -> bool {
+        matches!(
+            self.get(3).map(|e| &e.value),
+            Some(MetadataValue::Boolean(true))
+        )
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &MetadataEntry> {
         self.entries.iter()
     }

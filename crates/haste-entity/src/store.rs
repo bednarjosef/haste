@@ -644,14 +644,17 @@ impl EntityStore {
             } else {
                 slot.prev_pos.lerp(slot.pos, partial_tick as f64)
             };
+            let type_name = crate::registry::entity_type_name(slot.kind);
+            let is_baby = !slot.is_player_type && crate::registry::is_baby(&slot.metadata);
             let (model, has_head) = if slot.is_player_type {
                 (crate::models::humanoid(false), true)
             } else {
                 // Registry table first (shared per type, head flag precomputed), then the box.
                 // Babies use the row's baby layer, like vanilla's AgeableMobRenderer.submit.
-                let baby = crate::registry::entity_type_name(slot.kind)
-                    .filter(|_| crate::registry::is_baby(&slot.metadata))
-                    .and_then(|n| crate::registry::baby_model_for_name(&n));
+                let baby = type_name
+                    .as_deref()
+                    .filter(|_| is_baby)
+                    .and_then(crate::registry::baby_model_for_name);
                 match crate::registry::model_entry(slot.kind) {
                     Some((head, m)) => (baby.unwrap_or(m), head),
                     None => (
@@ -669,6 +672,41 @@ impl EntityStore {
             } else {
                 slot.yaw
             };
+            // `LivingEntityRenderer.getShadowRadius`/`MobRenderer.getShadowRadius`: the
+            // renderer's base radius times the living/age scale (0.5 for babies). The player's
+            // `AvatarRenderer` uses 0.5.
+            let base_shadow = type_name
+                .as_deref()
+                .map(crate::registry::shadow_radius_for_name)
+                .unwrap_or(0.0);
+            let shadow_scale = if is_baby { 0.5 } else { 1.0 };
+            let shadow_radius = if slot.is_player_type {
+                0.5
+            } else {
+                base_shadow * shadow_scale
+            };
+            let shadow_strength = type_name
+                .as_deref()
+                .map(crate::registry::shadow_strength_for_name)
+                .unwrap_or(1.0);
+            let invisible = slot.metadata.shared.invisible;
+            // `EntityRenderer.extractNameTags`/`shouldShowName`: players always show their name
+            // (`Player.shouldShowName`), mobs only a visible custom name (`LivingEntity`), both
+            // hidden while invisible (`isVisibleToPlayer`).
+            let custom_name = slot.metadata.custom_name();
+            let nametag = if invisible {
+                None
+            } else if slot.is_player_type {
+                slot.nametag.clone()
+            } else if slot.metadata.custom_name_visible() {
+                custom_name.or_else(|| slot.nametag.clone())
+            } else {
+                None
+            };
+            let name_tag_y = crate::registry::name_tag_offset_for_name(
+                type_name.as_deref().unwrap_or(""),
+                slot.dimensions.1,
+            );
             out.push(EntityInstance {
                 id: slot.id,
                 model,
@@ -679,7 +717,13 @@ impl EntityStore {
                 scale: 1.0,
                 pose,
                 skin: None,
-                nametag: slot.nametag.clone(),
+                nametag,
+                below_name: None,
+                shadow_radius,
+                shadow_strength,
+                invisible,
+                is_discrete: slot.metadata.shared.crouching,
+                name_tag_y,
                 hurt: hurt_strength(slot),
                 decoration,
             });

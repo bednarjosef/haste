@@ -56,7 +56,24 @@ pub struct EntityInstance {
     pub scale: f32,
     pub pose: PoseOverrides,
     pub skin: Option<Identifier>,
+    /// The name tag's text when it should show (`EntityRenderer.extractNameTags`: within 64
+    /// blocks and `shouldShowName`), `None` otherwise. For players this is the player name.
     pub nametag: Option<String>,
+    /// The scoreboard's below-name line (`Entity.belowNameDisplay`), drawn under the name tag.
+    pub below_name: Option<String>,
+    /// `EntityRenderer.shadowRadius` for this entity's renderer, already scaled by the age
+    /// (`MobRenderer.getShadowRadius` * `ageScale`) or living scale; 0 draws no shadow.
+    pub shadow_radius: f32,
+    /// `EntityRenderer.shadowStrength` (1.0, or 0.75 for items/experience orbs).
+    pub shadow_strength: f32,
+    /// `Entity.isInvisible()`: no shadow (`extractShadow` skips it) and no name tag.
+    pub invisible: bool,
+    /// `Entity.isDiscrete()` (crouching): the name tag hides past 32 blocks and drops the
+    /// see-through pass (`LivingEntityRenderer.shouldShowName`, `submitNameTag`).
+    pub is_discrete: bool,
+    /// The name tag's anchor above the entity's feet: `EntityAttachment.NAME_TAG`'s fallback
+    /// `AT_HEIGHT` (`Entity.getBbHeight`, 2.05 for the sniffer).
+    pub name_tag_y: f32,
     /// Hurt flash strength in 0..1 (1 just after the hit, easing to 0 over the 10 hurt
     /// ticks; death holds it at 1 for the 20-tick death animation). The renderer mixes
     /// red into the entity's colour for values above 0.
