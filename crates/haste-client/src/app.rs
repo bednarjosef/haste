@@ -93,6 +93,210 @@ pub fn gui_scaled_size(width: u32, height: u32, scale: u32) -> (u32, u32) {
     (width.div_ceil(scale.max(1)), height.div_ceil(scale.max(1)))
 }
 
+/// F3's numbers for this frame: the cheap part (position, counts) always; the strings (biome,
+/// targeted block/fluid with properties and tags) only while the overlay is on, like vanilla
+/// building its lines only then. `look` is the yaw/pitch the player is rendered with.
+#[allow(clippy::too_many_arguments)]
+fn debug_info(
+    env: &DebugEnv,
+    shared: &Shared,
+    renderer: &Renderer,
+    look: (f32, f32),
+    fps: i32,
+    stats: &FrameStats,
+    entities_rendered: i32,
+    gui_scale: u32,
+    gpu: &str,
+) -> haste_jvm::DebugInfo {
+    use haste_core::view::{BlockPhysics as _, BlockView};
+    use haste_protocol::haste_core::BlockPos;
+    use haste_render::BiomeSource as _;
+    let view = *shared.view.lock();
+    let world = shared.world.read();
+    let mut d = haste_jvm::DebugInfo {
+        fps,
+        pos: [view.feet.x, view.feet.y, view.feet.z],
+        rot: [look.0, look.1],
+        chunks: world.loaded_chunks().count() as i32,
+        sections_drawn: stats.chunk_sections_drawn as i32,
+        sections_total: stats.chunk_sections_total as i32,
+        entities: shared.entities.read().len() as i32,
+        entities_rendered,
+        simulation_distance: env.simulation_distance,
+        view_distance: view.view_distance,
+        framerate_limit: 260,
+        refresh_rate: 0,
+        display_size: [renderer.size().0 as i32, renderer.size().1 as i32],
+        gui_scale: gui_scale as i32,
+        light: [0, 0],
+        ..Default::default()
+    };
+    if !shared.ui.lock().as_ref().is_some_and(|ui| ui.debug_shown()) {
+        return d;
+    }
+    d.gpu = gpu.to_owned();
+    d.cpu = cpu_info();
+    d.dimension = world.dimension().name.to_string();
+    // Biome and light at the feet position (vanilla DebugEntryBiome/DebugEntryLight).
+    let feet = BlockPos::new(
+        view.feet.x.floor() as i32,
+        view.feet.y.floor() as i32,
+        view.feet.z.floor() as i32,
+    );
+    d.biome = {
+        let id = self::biomes::WorldBiomes(&world).biome(feet).0 as usize;
+        env.biome_names
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| "minecraft:plains".to_owned())
+    };
+    d.light = [
+        i32::from(world.sky_light(feet)),
+        i32::from(world.block_light(feet)),
+    ];
+    // The looking-at block/fluid (vanilla Entity.pick, 20 blocks, block without fluids, fluid
+    // with them): both rays from the interpolated eye along the look direction.
+    let eye = game::interpolate(view.prev_eye, view.eye, 0.0);
+    let dir = haste_physics::raycast::look_vector(look.0, look.1);
+    let data = &shared.data;
+    if let Some(hit) = haste_physics::raycast::raycast_blocks(eye, dir, 20.0, &*world, &data.shapes)
+    {
+        let state = world.block_state(hit.pos);
+        d.target_block = Some(haste_jvm::TargetedState {
+            name: data.blocks.block_of(state).to_string(),
+            pos: [hit.pos.x, hit.pos.y, hit.pos.z],
+            properties: data.blocks.properties(state),
+            tags: data
+                .blocks
+                .block_index(data.blocks.block_of(state))
+                .and_then(|r| env.block_tags.get(&r.0))
+                .cloned()
+                .unwrap_or_default(),
+        });
+    }
+    d.target_fluid = raycast_fluid(eye, dir, 20.0, &world, data).map(|(state, pos)| {
+        let info = data.fluid(state).expect("checked: has a fluid");
+        let name = match info.kind {
+            haste_core::view::FluidKind::Water => "minecraft:water",
+            haste_core::view::FluidKind::Lava => "minecraft:lava",
+        };
+        haste_jvm::TargetedState {
+            name: name.to_owned(),
+            pos: [pos.x, pos.y, pos.z],
+            properties: data
+                .blocks
+                .properties(state)
+                .into_iter()
+                .filter(|(k, _)| k == "level")
+                .collect(),
+            tags: env.fluid_tags.get(&0).cloned().unwrap_or_default(),
+        }
+    });
+    d.tx_per_s = f64::from_bits(shared.debug_tx.load(Ordering::Relaxed));
+    d.rx_per_s = f64::from_bits(shared.debug_rx.load(Ordering::Relaxed));
+    d.brand = "vanilla".to_owned();
+    d
+}
+
+/// The first fluid cell the segment `from .. from + dir * reach` touches (vanilla
+/// `Entity.pick(withLiquids)`: the first block whose fluid state is non-empty). Returns the
+/// block state (it carries the fluid and its `level` property) and the cell position.
+fn raycast_fluid(
+    from: DVec3,
+    dir: DVec3,
+    reach: f64,
+    world: &World,
+    data: &haste_data::GameData,
+) -> Option<(
+    haste_protocol::haste_core::BlockStateId,
+    haste_protocol::haste_core::BlockPos,
+)> {
+    use haste_core::view::{BlockPhysics as _, BlockView};
+    let delta = dir * reach;
+    let mut cell = from.floor().as_ivec3();
+    let end = (from + delta).floor().as_ivec3();
+    let step = delta.signum().as_ivec3();
+    let mut t_max = DVec3::ZERO;
+    let mut t_delta = DVec3::ZERO;
+    for a in 0..3 {
+        if delta[a] == 0.0 {
+            t_max[a] = f64::INFINITY;
+            t_delta[a] = f64::INFINITY;
+        } else {
+            let next = if delta[a] > 0.0 {
+                cell[a] as f64 + 1.0
+            } else {
+                cell[a] as f64
+            };
+            t_max[a] = (next - from[a]) / delta[a];
+            t_delta[a] = 1.0 / delta[a].abs();
+        }
+    }
+    let max_cells = (end - cell).abs().element_sum() + 1;
+    for _ in 0..=max_cells {
+        let pos = haste_protocol::haste_core::BlockPos::new(cell.x, cell.y, cell.z);
+        let state = world.block_state(pos);
+        if data.fluid(state).is_some() {
+            return Some((state, pos));
+        }
+        if cell == end {
+            break;
+        }
+        let a = if t_max.x < t_max.y {
+            if t_max.x < t_max.z {
+                0
+            } else {
+                2
+            }
+        } else if t_max.y < t_max.z {
+            1
+        } else {
+            2
+        };
+        if t_max[a] > 1.0 {
+            break;
+        }
+        cell[a] += step[a];
+        t_max[a] += t_delta[a];
+    }
+    None
+}
+
+/// CPU as vanilla's DebugEntrySystemSpecs prints it ("<logical>x <model name>"), read once.
+fn cpu_info() -> String {
+    static CPU: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CPU.get_or_init(|| {
+        let model = std::fs::read_to_string("/proc/cpuinfo")
+            .ok()
+            .and_then(|c| {
+                c.lines().find_map(|l| {
+                    l.strip_prefix("model name")
+                        .and_then(|r| r.split_once(':'))
+                        .map(|(_, n)| n.trim().to_owned())
+                })
+            })
+            .unwrap_or_else(|| "unknown".to_owned());
+        format!(
+            "{}x {}",
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
+            model
+        )
+    })
+    .clone()
+}
+
+/// The GPU as F3's system group prints it ("name (backend)"), read from the adapter once.
+fn gpu_info(renderer: &Renderer) -> String {
+    static GPU: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    GPU.get_or_init(|| {
+        let i = renderer.adapter_info();
+        format!("{} ({})", i.name, i.backend)
+    })
+    .clone()
+}
+
 /// A joined game: runtime, game thread and shared state.
 struct Session {
     /// Kept alive for the connection's tasks; dropped after the game thread.
@@ -101,10 +305,62 @@ struct Session {
     game_thread: Option<std::thread::JoinHandle<()>>,
     /// Biome colours of the synced biome registry (index = biome id), for the renderer.
     biomes: Vec<haste_render::BiomeClimate>,
+    /// What the F3 overlay needs that only the connection phase knows (biome names, tags).
+    debug_env: DebugEnv,
     /// The saved options this run uses (loaded once).
     options: Options,
     /// The local player's entity id and UUID (`login`), for its own model in third person.
     local: (EntityId, u128),
+}
+
+/// Connection-phase data the F3 overlay shows: biome names of the synced registry (index = the
+/// biome id the world's sections store) and the block/fluid tags (registry id -> "#tag" names),
+/// both fixed for the connection; plus the server's simulation distance.
+#[derive(Clone, Default)]
+struct DebugEnv {
+    biome_names: Vec<String>,
+    /// Block registry id -> tags.
+    block_tags: std::collections::HashMap<u32, Vec<String>>,
+    /// Fluid registry id -> tags.
+    fluid_tags: std::collections::HashMap<u32, Vec<String>>,
+    simulation_distance: i32,
+}
+
+impl DebugEnv {
+    fn new(regs: &haste_protocol::SyncedRegistries, simulation_distance: i32) -> Self {
+        use haste_protocol::haste_core::Identifier;
+        let biome_names = regs
+            .entries(&Identifier::minecraft("worldgen/biome"))
+            .map(|es| es.iter().map(|e| e.id.to_string()).collect())
+            .unwrap_or_default();
+        // Tag entries are registry ids; invert tag -> ids into id -> tags for both registries the
+        // looking-at entries print.
+        let invert = |registry: &str, out: &mut std::collections::HashMap<u32, Vec<String>>| {
+            for rt in regs
+                .tags
+                .iter()
+                .filter(|t| t.registry == Identifier::minecraft(registry))
+            {
+                for tag in &rt.tags {
+                    for &id in &tag.entries {
+                        out.entry(u32::try_from(id).unwrap_or(u32::MAX))
+                            .or_default()
+                            .push(format!("#{}", tag.name));
+                    }
+                }
+            }
+        };
+        let mut block_tags = std::collections::HashMap::new();
+        let mut fluid_tags = std::collections::HashMap::new();
+        invert("block", &mut block_tags);
+        invert("fluid", &mut fluid_tags);
+        Self {
+            biome_names,
+            block_tags,
+            fluid_tags,
+            simulation_distance,
+        }
+    }
 }
 
 impl Session {
@@ -151,6 +407,7 @@ impl Session {
             )
         };
         let login = driver.login().clone();
+        let debug_env = DebugEnv::new(driver.connection().registries(), login.simulation_distance);
         let local = (login.entity_id, login.profile.uuid.as_u128());
         tracing::info!(
             "joined {address} as {}: {:?}, dimension {}, view distance {}",
@@ -187,6 +444,7 @@ impl Session {
             shared,
             game_thread: Some(game_thread),
             biomes: biome_climates,
+            debug_env,
             options,
             local,
         })
@@ -1154,6 +1412,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut next_tick = Instant::now();
     let mut frames = 0u32;
     let mut last_stats = FrameStats::default();
+    let mut fps = FpsCounter::new();
     let mut last_err: Option<String> = None;
     let mut finished = false;
     // Screenshot actions of this tick, saved after the frame is rendered (the readback must
@@ -1253,6 +1512,25 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 u.set_text_metrics(renderer.text_metrics());
             }
         }
+        if let Some(u) = &ui {
+            // F3's numbers every frame, like the window's `draw` (cheap: short mutexes; the
+            // overlay's strings are only built while it is on).
+            u.set_debug(debug_info(
+                &session.debug_env,
+                &shared,
+                &renderer,
+                look,
+                fps.fps as i32,
+                &last_stats,
+                entities.len() as i32,
+                resolve_gui_scale(
+                    u32::from(session.options.gui_scale),
+                    args.width,
+                    args.height,
+                ),
+                &gpu_info(&renderer),
+            ));
+        }
         if let Some(u) = &mut ui {
             let scale = resolve_gui_scale(
                 u32::from(session.options.gui_scale),
@@ -1276,6 +1554,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         renderer.set_animation_tick(animation_tick);
         if let Ok(stats) = renderer.render(&frame) {
             last_stats = stats;
+            fps.frame(&stats);
         }
         frames += 1;
         // This tick's screenshot actions: the frame they caused is now on the GPU.
@@ -1712,6 +1991,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
     let mut app = App {
         shared: session.shared.clone(),
         biomes: session.biomes.clone(),
+        debug_env: session.debug_env.clone(),
         // The flag wins over the saved option; without it, the saved option decides.
         vsync: args.vsync.unwrap_or(session.options.vsync),
         options: session.options.clone(),
@@ -1749,6 +2029,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
 struct App {
     shared: Arc<Shared>,
     biomes: Vec<haste_render::BiomeClimate>,
+    debug_env: DebugEnv,
     vsync: bool,
     /// Saved options (FOV for rendering, sensitivity for mouse look).
     options: Options,
@@ -1908,18 +2189,22 @@ impl App {
         let (w, h) = renderer.size();
         if let Some(ui) = &self.ui {
             // F3's numbers and the water overlay's flag, every frame (cheap: short mutexes,
-            // no allocation). The section counts are the previous frame's.
-            let view = *self.shared.view.lock();
+            // no allocation while the overlay is off). The section counts are the previous
+            // frame's.
             let stats = self.frame_stats;
-            ui.set_debug(haste_jvm::DebugInfo {
-                fps: self.fps.fps as i32,
-                pos: [view.feet.x, view.feet.y, view.feet.z],
-                rot: [self.input.yaw, self.input.pitch],
-                chunks: self.shared.world.read().loaded_chunks().count() as i32,
-                sections_drawn: stats.chunk_sections_drawn as i32,
-                sections_total: stats.chunk_sections_total as i32,
-                entities: self.shared.entities.read().len() as i32,
-            });
+            let gpu = gpu_info(renderer);
+            ui.set_debug(debug_info(
+                &self.debug_env,
+                &self.shared,
+                renderer,
+                (self.input.yaw, self.input.pitch),
+                self.fps.fps as i32,
+                &stats,
+                entities.len() as i32,
+                resolve_gui_scale(u32::from(self.options.gui_scale), w, h),
+                &gpu,
+            ));
+            let view = *self.shared.view.lock();
             ui.set_eye_in_water(view.eye_in_water);
         }
         if let Some(ui) = &mut self.ui {
