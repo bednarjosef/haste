@@ -6,7 +6,7 @@
 //! interpolated player position and renders. `--screenshot <file>` renders the same frame
 //! offscreen once the world has finished meshing, saves it and exits.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -17,7 +17,9 @@ use glam::DVec3;
 use haste_protocol::haste_core::gui::{GuiCommand, GuiFrame};
 use haste_protocol::haste_core::input::InputState;
 use haste_protocol::haste_core::model::EntityInstance;
-use haste_protocol::haste_core::{ChunkPos, EntityId, SectionPos};
+use haste_protocol::haste_core::{
+    BlockPos, BlockStateId, ChunkPos, Direction, EntityId, Identifier, SectionPos,
+};
 use haste_protocol::{Account, ConnectOptions};
 use haste_render::{Camera, FrameInput, FrameStats, LightmapFrame, Renderer, SkyState};
 use haste_setup::options::Options;
@@ -39,6 +41,7 @@ use crate::net::{self, NetDriver};
 use crate::script;
 use crate::ui::keys;
 use crate::Args;
+use haste_jvm::JvmHost;
 
 /// Saved options this run uses: FOV, render distance, mouse sensitivity and (unless the
 /// `--vsync` flag says otherwise) vsync. `Config::load` creates the file with defaults on
@@ -379,11 +382,17 @@ impl DebugEnv {
 
 impl Session {
     /// `sound`: open the audio output (the window only; screenshots and the benchmark stay
-    /// silent so they neither make noise nor measure the audio thread).
-    fn join(args: &Args, sound: bool) -> anyhow::Result<Self> {
-        let address = args.server.clone().ok_or_else(|| {
-            anyhow::anyhow!("--server <host[:port]> is required (no launcher yet)")
-        })?;
+    /// silent so they neither make noise nor measure the audio thread). `address` is the server
+    /// (`--server`, or the address chosen on the multiplayer screen in menu mode).
+    /// `existing_ui`: menu mode's UI over its already-started JVM, reused for the HUD so the
+    /// screens and chat history survive the transition into the game.
+    fn join(
+        username: &str,
+        render_distance: Option<u8>,
+        address: &str,
+        sound: bool,
+        existing_ui: Option<crate::ui::Ui>,
+    ) -> anyhow::Result<Self> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .worker_threads(2)
@@ -393,13 +402,13 @@ impl Session {
         let mut options = load_options();
         // `--render-distance` overrides the saved option for this run (bench mode compares
         // render distances without editing the config file).
-        if let Some(rd) = args.render_distance {
+        if let Some(rd) = render_distance {
             options.render_distance = rd;
         }
         let mut opts = ConnectOptions::new(
-            address.clone(),
+            address.to_owned(),
             Account::Offline {
-                username: args.username.clone(),
+                username: username.to_owned(),
             },
         );
         // The saved render distance is what we advertise in client_information; the server's
@@ -407,7 +416,7 @@ impl Session {
         opts.client_information.view_distance = options.render_distance as i8;
         let mut driver: NetDriver = rt.block_on(NetDriver::connect(opts))?;
         driver.session.fov_effect_scale = options.fov_effect_scale;
-        let (biomes, biome_climates, type_names, sounds, painting_variants) = {
+        let (biomes, biome_climates, type_names, sounds, painting_variants, mob_variants) = {
             let regs = driver.connection().registries();
             let sounds = if sound {
                 open_sounds(regs, &data, &options.sound)
@@ -420,6 +429,7 @@ impl Session {
                 net::entity_type_names(regs, &data),
                 sounds,
                 net::painting_variants(regs),
+                net::mob_variants(regs),
             )
         };
         let login = driver.login().clone();
@@ -437,6 +447,13 @@ impl Session {
         let mut driver = driver;
         driver.session.set_entity_type_names(type_names);
         let view_distance = login.view_distance.min(options.render_distance as i32);
+        // Block entity type names by synced registry id (the static registry's order when the
+        // server did not sync one), and the block states whose lids `block_event` drives.
+        let block_entity_names = {
+            let regs = driver.connection().registries();
+            block_entity_type_names(regs, &data)
+        };
+        let lid_states = lid_block_states(&data);
         // The particle types of the datagen registry (the synced one has no data we need):
         // one atlas built once, shared by the pool (name resolution) and the renderer.
         let particle_ids: Vec<haste_protocol::haste_core::Identifier> =
@@ -454,6 +471,15 @@ impl Session {
         let mut entities = net::new_entity_store(entity_types);
         tracing::info!("synced painting variants: {}", painting_variants.len());
         entities.set_painting_variants(painting_variants);
+        for (registry, table) in mob_variants {
+            tracing::info!(
+                "synced {}: {} entries",
+                registry,
+                table.iter().filter(|e| e.is_some()).count()
+            );
+            entities.set_mob_variants(&registry, table);
+        }
+        entities.set_item_components(data.item_components.clone());
         let shared = Arc::new(Shared::new(
             data,
             world,
@@ -461,17 +487,20 @@ impl Session {
             view_distance,
             haste_render::Particles::new(particle_types.clone()),
             haste_render::default_skin(login.profile.uuid.as_u128()),
+            block_entity_names,
+            options.clone(),
         ));
         if sounds.is_some() {
             *shared.sound.lock() = sounds;
         }
+        driver.session.set_lid_states(lid_states);
         let handle = rt.handle().clone();
         let sh = shared.clone();
         let game_thread = std::thread::Builder::new()
             .name("haste-game".into())
             .spawn(move || {
                 let _rt = handle.enter();
-                game::run(driver, sh)
+                game::run(driver, sh, existing_ui)
             })?;
         Ok(Self {
             _rt: rt,
@@ -502,6 +531,96 @@ impl Drop for Session {
     }
 }
 
+/// A running singleplayer world: the local server and the runtime that spawned it. The
+/// server's stdin/stdout pipes are tied to that runtime's reactor (tokio ties a spawned
+/// child to the runtime that spawned it), so it stays alive until the world is left; `stop`
+/// saves the world and ends the process.
+struct LocalWorld {
+    _rt: tokio::runtime::Runtime,
+    server: haste_setup::server::LocalServer,
+}
+
+impl LocalWorld {
+    /// Starts (or creates) the world's local server, with its own runtime. Blocking (the
+    /// server's "Done" line can take tens of seconds on a fresh world).
+    fn start(
+        dir: &Path,
+        create: Option<&haste_jvm::CreateWorldRequest>,
+        username: &str,
+    ) -> anyhow::Result<LocalWorld> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let server = rt
+            .block_on(async {
+                let port = haste_setup::server::free_port()?;
+                match create {
+                    None => haste_setup::server::LocalServer::start(dir, port).await,
+                    Some(create) => {
+                        let settings = local_server_settings(dir, create);
+                        write_ops_json(dir, username, create.allow_commands);
+                        haste_setup::server::LocalServer::start_with(dir, port, &settings).await
+                    }
+                }
+            })
+            .map_err(|e| anyhow::anyhow!("starting the local server: {e:#}"))?;
+        Ok(LocalWorld { _rt: rt, server })
+    }
+
+    /// The `host:port` the client joins.
+    fn address(&self) -> String {
+        self.server.address()
+    }
+
+    /// Saves the world and ends the server process.
+    fn stop(self) {
+        self._rt.block_on(self.server.stop());
+        println!("singleplayer server stopped");
+    }
+}
+
+/// The local-server settings for a world the create screen asked to make: vanilla's
+/// CreateWorldScreen choices mapped onto `server.properties` (the server creates the world
+/// from them). `level-name` must be the folder's name (the server puts the level at
+/// `<universe>/<level-name>`, and the world dir is the universe's `..`/name).
+fn local_server_settings(
+    dir: &Path,
+    create: &haste_jvm::CreateWorldRequest,
+) -> haste_setup::server::WorldSettings {
+    let level_name = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&create.folder)
+        .to_string();
+    haste_setup::server::WorldSettings {
+        level_name,
+        game_mode: create.game_mode,
+        difficulty: create.difficulty,
+        hardcore: create.hardcore,
+        allow_commands: create.allow_commands,
+        seed: create.seed.clone(),
+        generate_structures: create.generate_structures,
+        level_type: create.level_type.clone(),
+    }
+}
+
+/// Cheats on a created world (`allowCommands`): vanilla singleplayer gives the player operator
+/// permissions; Haste's world runs on a local dedicated server, so the joining player is
+/// written into its `ops.json` with level 4 (an offline-mode UUID, like the server computes).
+/// `allow_commands` false clears a leftover file (the world dir may be reused).
+fn write_ops_json(dir: &Path, username: &str, allow_commands: bool) {
+    let path = dir.join("ops.json");
+    if !allow_commands {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    let uuid = haste_setup::launch::offline_uuid(username);
+    let ops = format!("[{{\"uuid\":\"{uuid}\",\"name\":\"{username}\",\"level\":4,\"bypassesPlayerLimit\":false}}]\n");
+    if let Err(e) = std::fs::write(&path, ops) {
+        tracing::warn!("writing {}: {e:#}", path.display());
+    }
+}
+
 /// Feeds dirty sections to the renderer within a per-frame time budget, nearest first, and
 /// skips sections that are empty and were never meshed (nothing to draw, nothing to clear).
 #[derive(Default)]
@@ -515,6 +634,12 @@ pub struct WorldFeed {
     last_arrival: Option<Instant>,
     /// Entity instances for this frame (reused).
     instances: Vec<EntityInstance>,
+    /// Block entity instances for this frame (reused).
+    be_instances: Vec<haste_render::BlockEntityInstance>,
+    /// Block entity types already logged as undrawable (log once per type).
+    unknown_be_types: HashSet<String>,
+    /// Lid animations by position for this frame (reused lookup scratch).
+    lid_map: HashMap<BlockPos, (f32, f32)>,
     /// The shared world as the mesh workers see it (created on the first feed).
     source: Option<Arc<dyn haste_render::SnapshotSource>>,
     /// Sections submitted this frame (reused).
@@ -610,14 +735,16 @@ impl WorldFeed {
     /// each entity's light for the renderer. The local player's own model is always included
     /// (the server does not spawn us as an entity, so it is built here from the shared view):
     /// the GUI's inventory preview needs it in first person too, and the caller tells the
-    /// renderer not to draw it in the world then (`FrameInput::camera_entity`).
+    /// renderer not to draw it in the world then (`FrameInput::camera_entity`). The frame's
+    /// block entity instances are built first, so one call returns both slices the frame draws.
     fn entities(
         &mut self,
         shared: &Shared,
         renderer: &mut Renderer,
         local: (EntityId, u128),
         partial: f32,
-    ) -> &[EntityInstance] {
+    ) -> (&[EntityInstance], &[haste_render::BlockEntityInstance]) {
+        self.block_entities(shared);
         self.instances.clear();
         {
             let store = shared.entities.read();
@@ -637,7 +764,102 @@ impl WorldFeed {
                 .push(game::player_instance(local.0, local.1, &view, partial));
         }
         renderer.sample_entity_lights(&*shared.world.read(), &self.instances);
-        &self.instances
+        (&self.instances, &self.be_instances)
+    }
+
+    /// Builds this frame's block entity instances (chests, ender chests, trapped chests,
+    /// shulker boxes) from the world's stored block entities: resolves the type name to what
+    /// to draw, reads facing and double-chest half from the block state, combines the lid
+    /// animation over a double chest's halves (vanilla `ChestBlock.opennessCombiner`'s max,
+    /// `BrightnessCombiner`'s max light) and samples the block light. Types Haste cannot
+    /// draw are logged once and skipped. The result is `self.be_instances` (read it after
+    /// this call; `entities` borrows the feed too).
+    fn block_entities(&mut self, shared: &Shared) {
+        use haste_core::view::BlockView as _;
+        self.be_instances.clear();
+        let world = shared.world.read();
+        {
+            let lids = shared.block_entity_lids.lock();
+            self.lid_map.clear();
+            self.lid_map.extend(lids.iter().copied());
+        }
+        let names = &shared.block_entity_names;
+        let blocks = &shared.data.blocks;
+        let xmas = haste_render::xmas_textures();
+        // Only the chunks the camera can see carry drawable block entities; skipping the
+        // rest keeps the per-frame walk short on big worlds with nothing in them.
+        let view = *shared.view.lock();
+        let cam_chunk = ChunkPos::new(
+            view.feet.x.floor() as i32 >> 4,
+            view.feet.z.floor() as i32 >> 4,
+        );
+        let r = view.view_distance.max(1);
+        for chunk in world.loaded_chunks() {
+            if chunk.x < cam_chunk.x - r
+                || chunk.x > cam_chunk.x + r
+                || chunk.z < cam_chunk.z - r
+                || chunk.z > cam_chunk.z + r
+            {
+                continue;
+            }
+            for (pos, be) in world.block_entities_in(chunk) {
+                let Some(type_name) = names.get(be.kind as usize) else {
+                    if self.unknown_be_types.insert(format!("#{}", be.kind)) {
+                        tracing::warn!(
+                            "block entity type id {} is outside the registry; not drawn",
+                            be.kind
+                        );
+                    }
+                    continue;
+                };
+                let state = world.block_state(pos);
+                let block = blocks.block_of(state);
+                let Some(kind) = haste_render::blockentity::kind_of(type_name, block, xmas) else {
+                    if self.unknown_be_types.insert(type_name.to_string()) {
+                        tracing::warn!("no renderer for block entity type {type_name}; not drawn");
+                    }
+                    continue;
+                };
+                let facing = blocks
+                    .property_value(state, "facing")
+                    .and_then(direction_of_property)
+                    .unwrap_or(Direction::South);
+                let half = match blocks.property_value(state, "type") {
+                    Some("left") => haste_render::ChestHalf::Left,
+                    Some("right") => haste_render::ChestHalf::Right,
+                    _ => haste_render::ChestHalf::Single,
+                };
+                // Lid and light: a double chest uses the max over both halves (vanilla's
+                // combiners); the neighbour is the block the connected direction points at
+                // (`ChestBlock.getConnectedDirection`).
+                let mut open = self.lid_map.get(&pos).copied().unwrap_or((0.0, 0.0));
+                let mut light = (world.sky_light(pos), world.block_light(pos));
+                if half != haste_render::ChestHalf::Single {
+                    let connected = connected_direction(facing, half);
+                    let neighbour = pos.offset(connected);
+                    if is_double_chest_half(blocks, &world, neighbour, half, facing) {
+                        if let Some(n) = self.lid_map.get(&neighbour) {
+                            open = (open.0.max(n.0), open.1.max(n.1));
+                        }
+                        light = (
+                            light.0.max(world.sky_light(neighbour)),
+                            light.1.max(world.block_light(neighbour)),
+                        );
+                    }
+                }
+                self.be_instances.push(haste_render::BlockEntityInstance {
+                    pos,
+                    facing,
+                    half,
+                    kind,
+                    open: haste_render::TickPair {
+                        start: open.0,
+                        end: open.1,
+                    },
+                    light,
+                });
+            }
+        }
     }
 
     /// Hands the renderer the first-person hand (`Renderer::set_first_person`) when the view's
@@ -674,6 +896,60 @@ impl WorldFeed {
             && stats.meshes_pending == 0
             && self.last_arrival.is_some_and(|t| t.elapsed() >= quiet)
     }
+}
+
+/// A block state `facing` property value as a `Direction`.
+fn direction_of_property(v: &str) -> Option<Direction> {
+    Direction::ALL.iter().find(|d| d.name() == v).copied()
+}
+
+/// Where a double chest's other half is (vanilla `ChestBlock.getConnectedDirection`:
+/// the LEFT half's neighbour is clockwise of the facing, the RIGHT half's counter-clockwise).
+fn connected_direction(facing: Direction, half: haste_render::ChestHalf) -> Direction {
+    let clockwise = |d: Direction| match d {
+        Direction::North => Direction::East,
+        Direction::East => Direction::South,
+        Direction::South => Direction::West,
+        Direction::West => Direction::North,
+        Direction::Down | Direction::Up => d,
+    };
+    match half {
+        haste_render::ChestHalf::Left => clockwise(facing),
+        _ => clockwise(facing).opposite(),
+    }
+}
+
+/// Whether `pos` holds the matching other half of our double chest: a chest/trapped chest of
+/// the opposite half, the same facing, whose connected direction points back at us (vanilla's
+/// `DoubleBlockCombiner` accepts exactly that neighbour).
+fn is_double_chest_half(
+    blocks: &haste_data::BlockStates,
+    world: &World,
+    pos: BlockPos,
+    our_half: haste_render::ChestHalf,
+    facing: Direction,
+) -> bool {
+    use haste_core::view::BlockView as _;
+    let state = world.block_state(pos);
+    let block = blocks.block_of(state);
+    if block.namespace() != "minecraft" || !matches!(block.path(), "chest" | "trapped_chest") {
+        return false;
+    }
+    let neighbour_half = match blocks.property_value(state, "type") {
+        Some("left") => haste_render::ChestHalf::Left,
+        Some("right") => haste_render::ChestHalf::Right,
+        _ => return false,
+    };
+    let Some(neighbour_facing) = blocks
+        .property_value(state, "facing")
+        .and_then(direction_of_property)
+    else {
+        return false;
+    };
+    neighbour_facing == facing
+        && neighbour_half == our_half.other()
+        && connected_direction(neighbour_facing, neighbour_half).opposite()
+            == connected_direction(facing, our_half)
 }
 
 /// `Camera.calculateFov` + `Camera.modifyFovBasedOnDeathOrFluid` (vanilla): the saved FOV
@@ -853,8 +1129,41 @@ fn frame_view(
     )
 }
 
-/// The SDL3 scancode (USB HID usage id, `InputConstants.KEY_*` in 26.3) of a winit `KeyCode`.
-/// `haste_jvm::keys` documents the numbering; letters, digits and punctuation take the
+/// Where a label is drawn in a GUI frame, in absolute GUI pixels (translation stack applied):
+/// an exact text, or a slider's dynamic `label: value`. The first match. Used by the script
+/// runner's `click_text`.
+fn gui_text_pos(frame: &GuiFrame, want: &str) -> Option<(i32, i32)> {
+    use haste_protocol::haste_core::gui::GuiCommand;
+    // Each `|`-separated alternative matches exactly or as a slider's dynamic `label: value`.
+    let wants: Vec<&str> = want.split('|').collect();
+    let matches = |text: &str| {
+        wants
+            .iter()
+            .any(|w| text == *w || text.strip_prefix(*w).is_some_and(|r| r.starts_with(':')))
+    };
+    let mut stack: Vec<(f32, f32)> = vec![(0.0, 0.0)];
+    for c in &frame.commands {
+        match c {
+            GuiCommand::TranslatePush { dx, dy, .. } => {
+                let (x, y) = *stack.last().unwrap();
+                stack.push((x + dx, y + dy));
+            }
+            GuiCommand::TranslatePop => {
+                stack.pop();
+            }
+            GuiCommand::Text { text, x, y, .. } | GuiCommand::StyledText { text, x, y, .. }
+                if matches(text) =>
+            {
+                let (dx, dy) = *stack.last().unwrap();
+                return Some((x + dx as i32, y + dy as i32));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The SDL3 scancode (USB HID usage id, `InputConstants.KEY_*` in 26.3) of a winit `KeyCode`./// `haste_jvm::keys` documents the numbering; letters, digits and punctuation take the
 /// consecutive HID ranges, everything else is one entry per key.
 fn sdl_scancode(code: KeyCode) -> Option<i32> {
     use haste_jvm::keys as sdl;
@@ -1179,7 +1488,11 @@ impl InputRouter {
             self.keys.remove(&code);
             return true;
         }
-        if pressed && !repeat {
+        // The game's own keyboard actions. Once the JVM is up the controls come from the vanilla
+        // `KeyMapping`s instead (mirrored in `Ui::key`, read in `sample`), so these raw
+        // `KeyCode` bindings are the fallback for the seconds before the JVM starts (or when it
+        // failed): a rebind in the controls screen then changes what the keys do.
+        if pressed && !repeat && ui.is_none() {
             match code {
                 KeyCode::Escape => {
                     // Not consumed by the UI (no screen): vanilla's Escape has no game
@@ -1318,11 +1631,21 @@ impl InputRouter {
     }
 
     /// Copy the sampled state into the shared input the game thread reads each tick, and
-    /// consume the press-only actions. `perspective` is the camera's own: the game thread's
-    /// camera effects that are gated on it (the spyglass FOV) only apply in first person.
-    fn sample(&mut self, shared: &Shared, perspective: game::Perspective) {
+    /// consume the press-only actions. With a `Ui` (the JVM is up) the movement and action
+    /// controls come from the vanilla `KeyMapping`s (`Ui::game_input`/`consume_clicks`), so a
+    /// rebind in the controls screen changes what the keys do, exactly like vanilla; without
+    /// one (the JVM still starting, or failed) the raw `KeyCode`s are the fallback.
+    /// `perspective` is the camera's own: the game thread's camera effects that are gated on it
+    /// (the spyglass FOV) only apply in first person.
+    fn sample(
+        &mut self,
+        shared: &Shared,
+        ui: Option<&crate::ui::Ui>,
+        perspective: game::Perspective,
+    ) {
+        use crate::ui::bits;
         let k = |c: KeyCode| self.keys.contains(&c);
-        let state = InputState {
+        let mut state = InputState {
             forward: k(KeyCode::KeyW),
             back: k(KeyCode::KeyS),
             left: k(KeyCode::KeyA),
@@ -1333,28 +1656,56 @@ impl InputRouter {
             yaw: self.yaw,
             pitch: self.pitch,
         };
+        if let Some(ui) = ui {
+            let b = ui.game_input();
+            state.forward = b & bits::B_FORWARD != 0;
+            state.back = b & bits::B_BACK != 0;
+            state.left = b & bits::B_LEFT != 0;
+            state.right = b & bits::B_RIGHT != 0;
+            state.jump = b & bits::B_JUMP != 0;
+            state.sneak = b & bits::B_SNEAK != 0;
+            state.sprint = b & bits::B_SPRINT != 0;
+        }
         let mut shared_input = shared.input.lock();
         shared_input.state = state;
         shared_input.first_person = matches!(perspective, game::Perspective::FirstPerson);
-        shared_input.toggle_flight |= std::mem::take(&mut self.toggle_flight);
-        let i = &mut shared_input.interact;
-        i.attack = self.attack;
-        i.use_item = self.use_item;
-        // The click counts accumulate across samples (the render thread may sample several
-        // times per tick); the game thread drains them once per tick.
-        i.attack_clicks = i
-            .attack_clicks
-            .saturating_add(std::mem::take(&mut self.attack_clicks));
-        i.use_clicks = i
-            .use_clicks
-            .saturating_add(std::mem::take(&mut self.use_clicks));
-        i.pick_block |= std::mem::take(&mut self.pick_block);
-        i.drop_item |= std::mem::take(&mut self.drop_item);
-        i.drop_stack |= std::mem::take(&mut self.drop_stack);
-        i.swap_offhand |= std::mem::take(&mut self.swap_offhand);
-        if let Some(slot) = self.hotbar.take() {
-            i.hotbar = Some(slot);
+        {
+            let i = &mut shared_input.interact;
+            i.attack = self.attack;
+            i.use_item = self.use_item;
+            // The click counts accumulate across samples (the render thread may sample several
+            // times per tick); the game thread drains them once per tick.
+            i.attack_clicks = i
+                .attack_clicks
+                .saturating_add(std::mem::take(&mut self.attack_clicks));
+            i.use_clicks = i
+                .use_clicks
+                .saturating_add(std::mem::take(&mut self.use_clicks));
+            i.pick_block |= std::mem::take(&mut self.pick_block);
+            if let Some(ui) = ui {
+                // The action mappings' clicks (hotbar, drop, swap, jump), consumed once per
+                // frame and handed to the game thread through the shared input.
+                let c = ui.consume_clicks();
+                for slot in 0..9 {
+                    if c & (bits::C_HOTBAR_0 << slot) != 0 {
+                        i.hotbar = Some(slot as u8);
+                    }
+                }
+                i.drop_item |= c & bits::C_DROP != 0;
+                i.swap_offhand |= c & bits::C_SWAP_OFFHAND != 0;
+                if c & bits::C_JUMP != 0 {
+                    self.jump_pressed(Instant::now());
+                }
+            }
+            i.drop_item |= std::mem::take(&mut self.drop_item);
+            i.drop_stack |= std::mem::take(&mut self.drop_stack);
+            i.swap_offhand |= std::mem::take(&mut self.swap_offhand);
+            if let Some(slot) = self.hotbar.take() {
+                i.hotbar = Some(slot);
+            }
         }
+        // After the jump clicks above, so a double tap seen here reaches the game this frame.
+        shared_input.toggle_flight |= std::mem::take(&mut self.toggle_flight);
     }
 }
 
@@ -1366,6 +1717,37 @@ fn open_assets() -> anyhow::Result<haste_assets::Assets> {
         "26.3",
     )
     .with_context(|| format!("opening assets from {}", jar.display()))
+}
+
+/// `minecraft:block_entity_type` names by synced registry id (stored block entities carry that
+/// id); the static registry from the data generator when the server did not sync one, whose
+/// ids are the same on vanilla servers.
+fn block_entity_type_names(
+    regs: &haste_protocol::SyncedRegistries,
+    data: &haste_data::GameData,
+) -> Vec<Identifier> {
+    let registry = Identifier::minecraft("block_entity_type");
+    if let Some(entries) = regs.entries(&registry) {
+        return entries.iter().map(|e| e.id.clone()).collect();
+    }
+    let n = data.registries.len("minecraft:block_entity_type");
+    (0..n as u32)
+        .map(|i| {
+            data.registries
+                .name("minecraft:block_entity_type", haste_core::RegistryIndex(i))
+                .cloned()
+                .unwrap_or_else(|| Identifier::minecraft("air"))
+        })
+        .collect()
+}
+
+/// The block states whose `block_event` action 1 drives a lid (chests, ender chests, trapped
+/// chests, shulker boxes; copper chests are not drawn yet), for the session's event filter.
+fn lid_block_states(data: &haste_data::GameData) -> std::collections::HashSet<BlockStateId> {
+    (0..data.blocks.len() as u32)
+        .map(BlockStateId)
+        .filter(|s| haste_render::blockentity::is_lid_block(data.blocks.block_of(*s)))
+        .collect()
 }
 
 /// The sound output for a joined game: `sounds.json` parsed from the real assets, the
@@ -1397,10 +1779,192 @@ fn open_sounds(
     }
 }
 
-/// `--screenshot <file>`: join, wait until the world is meshed, render one frame offscreen,
-/// save it as PNG and leave. `--seconds` bounds the wait.
+/// The client without a server: the vanilla title screen (and everything it opens) in the same
+/// JVM the game would use, opened at launch when `haste` runs without `--server`. The UI it
+/// delivers is the window's own from then on (ticked at 20 Hz like vanilla's `Minecraft.tick`
+/// while no session exists); a Join on the multiplayer screen spawns the session, whose game
+/// thread takes a clone of the same UI over.
+struct Menu {
+    /// Where the menu thread delivers the UI (nothing after a failure; it already logged why).
+    rx: Option<std::sync::mpsc::Receiver<crate::ui::Ui>>,
+}
+
+impl Menu {
+    /// Starts the JVM on its own thread (vanilla's bootstrap takes seconds) and, once it is up,
+    /// loads the jar's registries and opens the title screen. Returns immediately; [`Self::poll`]
+    /// picks the UI up (vanilla shows a loading overlay in the meantime).
+    fn new() -> Menu {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("haste-jvm".into())
+            .spawn(move || {
+                let result = (|| -> anyhow::Result<JvmHost> {
+                    let mut cfg = haste_jvm::JvmConfig::from_cache(
+                        &haste_protocol::haste_core::paths::cache_dir(),
+                    )?;
+                    // Vanilla reads and writes its own files (servers.dat, options.txt) in the
+                    // game directory: Haste's config directory, where the saved server list
+                    // already lives (haste-setup's servers.dat). Singleplayer worlds live next
+                    // to it (haste-setup's worlds module); the world list reads that dir.
+                    cfg.game_dir = haste_setup::servers::path()
+                        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+                        .unwrap_or(cfg.game_dir);
+                    if let Some(dir) = haste_setup::worlds::worlds_dir() {
+                        cfg.singleplayer_dir = dir;
+                    }
+                    JvmHost::start(cfg).map_err(|e| anyhow::anyhow!("{e}"))
+                })();
+                match result {
+                    Ok(host) => {
+                        let ui = crate::ui::Ui::new(host);
+                        // Screens need the synced registries (L1c): the jar's data pack stands in
+                        // for a server's registry_data until one is joined.
+                        if let Err(e) = ui.gui().load_jar_registries() {
+                            tracing::warn!("registries from the jar: {e:#}");
+                        }
+                        if let Err(e) = ui.open_screen(haste_jvm::ScreenKind::Title) {
+                            tracing::warn!("opening the title screen: {e:#}");
+                        }
+                        let _ = tx.send(ui);
+                    }
+                    Err(e) => {
+                        tracing::warn!("no menu screens: the JVM did not start: {e:#}");
+                    }
+                }
+            })
+            .expect("spawning the JVM thread");
+        Menu { rx: Some(rx) }
+    }
+
+    /// The UI once the JVM is up and the title screen open (`None` while starting or failed).
+    fn poll(&mut self) -> Option<crate::ui::Ui> {
+        let r = self.rx.as_mut()?;
+        match r.try_recv() {
+            Ok(ui) => {
+                self.rx = None;
+                Some(ui)
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.rx = None;
+                None
+            }
+        }
+    }
+}
+
+/// `--screenshot` without `--server`: menu mode's title screen, once the JVM is up. No world:
+/// the open screen (and whatever it draws) over the plain background, saved as PNG.
+fn menu_screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
+    let mut menu = Menu::new();
+    let mut assets = open_assets()?;
+    let data = net::load_game_data()?;
+    let mut renderer = Renderer::new_offscreen(args.width, args.height, &mut assets, &data.blocks)?;
+    renderer.set_item_registry(&data.registries);
+    let deadline = Instant::now() + Duration::from_secs(args.seconds.max(60));
+    let options = load_options();
+    let input = InputRouter::default();
+    let mut ui: Option<crate::ui::Ui> = None;
+    let mut frames = 0u32;
+    loop {
+        if ui.is_none() {
+            ui = menu.poll();
+            if let Some(u) = &ui {
+                u.set_text_metrics(renderer.text_metrics());
+            }
+        }
+        if let Some(u) = ui.as_mut() {
+            let (gui, camera, sky, partial) = menu_frame(u, &mut renderer, &input, &options);
+            let frame = FrameInput {
+                camera,
+                entities: &[],
+                block_entities: &[],
+                gui: &gui,
+                sky,
+                partial_tick: partial,
+                block_target: None,
+                breaking: &[],
+                camera_entity: None,
+            };
+            renderer.render(&frame)?;
+            frames += 1;
+        }
+        // The title screen fades its widgets in over 2 s (TitleScreen.fading); wait past it.
+        if frames > 150 {
+            break;
+        }
+        if Instant::now() > deadline {
+            anyhow::bail!("--seconds elapsed before the title screen was ready");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let image = renderer.read_back()?;
+    image
+        .save(file)
+        .with_context(|| format!("saving {}", file.display()))?;
+    let class = ui.as_ref().and_then(|u| u.gui().screen_class());
+    println!(
+        "menu screenshot {} ({}x{}) after {frames} frames: screen {}",
+        file.display(),
+        image.width(),
+        image.height(),
+        class.as_deref().unwrap_or("(none)")
+    );
+    Ok(())
+}
+
+/// The GUI frame of menu mode: the open screen over the plain background the renderer draws
+/// without a world. `mouse` is the cursor in GUI pixels; the camera looks straight ahead.
+fn menu_frame(
+    ui: &mut crate::ui::Ui,
+    renderer: &mut Renderer,
+    input: &InputRouter,
+    options: &Options,
+) -> (GuiFrame, Camera, SkyState, f32) {
+    let (w, h) = renderer.size();
+    let scale = resolve_gui_scale(u32::from(options.gui_scale), w, h);
+    let (gw, gh) = gui_scaled_size(w, h, scale);
+    let gui = ui.frame(gw, gh, scale, input.mouse, 0.0).clone();
+    (gui, menu_camera(), menu_sky(), 0.0)
+}
+
+/// Menu mode's camera: at the origin looking north (the world is not drawn).
+fn menu_camera() -> Camera {
+    Camera {
+        pos: DVec3::ZERO,
+        yaw: 180.0,
+        pitch: 0.0,
+        fov_deg: 70.0,
+        roll_deg: 0.0,
+        bob: haste_render::ViewBob::default(),
+    }
+}
+
+/// Menu mode's sky: noon, no fog (a plain bright background behind the screen).
+fn menu_sky() -> SkyState {
+    SkyState {
+        time_of_day: 6000,
+        rain: 0.0,
+        dimension_has_sky: true,
+        fog_start: 1000.0,
+        fog_end: 1000.0,
+    }
+}
+
+/// `--screenshot <file>`: with `--server`, join, wait until the world is meshed, render one
+/// frame offscreen, save it as PNG and leave (`--seconds` bounds the wait). Without one, menu
+/// mode: the title screen once the JVM is up, saved the same way.
 pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
-    let session = Session::join(args, false)?;
+    if args.server.is_none() {
+        return menu_screenshot(args, file);
+    }
+    let session = Session::join(
+        &args.username,
+        args.render_distance,
+        args.server.as_deref().unwrap(),
+        false,
+        None,
+    )?;
     let shared = session.shared.clone();
     // The shot is first person: the game thread's camera effects take that perspective.
     shared.input.lock().first_person = true;
@@ -1464,7 +2028,8 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         last_camera = camera;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         feed.set_first_person(&shared, &mut renderer, perspective);
-        let entities = feed.entities(&shared, &mut renderer, session.local, partial);
+        let (entities, block_entities) =
+            feed.entities(&shared, &mut renderer, session.local, partial);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
         // The HUD, like the window: waiting for the JVM, then one `Ui` for this render thread.
@@ -1486,6 +2051,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         let frame = FrameInput {
             camera,
             entities,
+            block_entities,
             gui: &gui,
             sky,
             partial_tick: partial,
@@ -1554,7 +2120,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let view = *shared.view.lock();
     let entities = feed.instances.len();
     println!(
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} entity instances (perspective {}, local player {}), {} particles drawn, target {:?}",
+        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} entity instances ({} drew geometry; perspective {}, local player {}), {} particles drawn, {} block entities, target {:?}",
         file.display(),
         image.width(),
         image.height(),
@@ -1568,9 +2134,11 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         stats.chunk_sections_total,
         stats.draw_calls,
         entities,
+        renderer.entities_drawn(),
         args.perspective,
         perspective.draws_player(),
         renderer.particles_drawn(),
+        stats.block_entities_drawn,
         view.block_target
     );
     drop(session);
@@ -1586,72 +2154,96 @@ fn mouse_button_id(button: script::MouseButton) -> i32 {
     }
 }
 
-/// Prints the text and HUD-sprite facts of a script screenshot's frame. The check scripts grep
-/// these lines as evidence instead of opening the PNGs.
-fn log_script_frame(frame: &GuiFrame, name: &str) {
+/// Prints the text, item and HUD-sprite facts of a script screenshot's frame. The check scripts
+/// grep these lines as evidence instead of opening the PNGs.
+fn log_script_frame(frame: &GuiFrame, name: &str, item_names: &[Identifier]) {
     let mut hotbar = false;
+    let mut items = Vec::new();
     for c in &frame.commands {
         match c {
             GuiCommand::Text { text, .. } | GuiCommand::StyledText { text, .. } => {
                 println!("script text[{name}]: {text}");
             }
             GuiCommand::Sprite { sprite, .. } if sprite.path() == "hud/hotbar" => hotbar = true,
+            GuiCommand::Item { item, .. } => {
+                // The item's registry name (creative inventory checks grep for these).
+                if let Some(id) = item_names.get(item.0 as usize) {
+                    items.push(id.to_string());
+                }
+            }
             _ => {}
         }
     }
     println!(
-        "script frame[{name}]: hotbar={}",
-        if hotbar { "yes" } else { "no" }
+        "script frame[{name}]: hotbar={}, items=[{}]",
+        if hotbar { "yes" } else { "no" },
+        items.join(",")
     );
 }
 
-/// Where a text label is drawn, in absolute GUI pixels (translations applied): the point to click
-/// for `click_text` (inside the widget the label belongs to). `None` when the frame does not draw
-/// the label.
-fn text_pos(f: &GuiFrame, want: &str) -> Option<(i32, i32)> {
-    let mut stack: Vec<(f32, f32)> = vec![(0.0, 0.0)];
-    for c in &f.commands {
-        match c {
-            GuiCommand::TranslatePush { dx, dy, .. } => {
-                let (x, y) = *stack.last().unwrap();
-                stack.push((x + dx, y + dy));
-            }
-            GuiCommand::TranslatePop => {
-                stack.pop();
-            }
-            GuiCommand::Text { text, x, y, .. } | GuiCommand::StyledText { text, x, y, .. }
-                if text == want =>
-            {
-                let (dx, dy) = *stack.last().unwrap();
-                return Some((x + dx as i32, y + dy as i32));
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// `--script FILE`: join like `--screenshot`, then drive the parsed script's actions every
-/// game tick (20 Hz) through the same input routing the window uses (`InputRouter`: the UI
-/// first, then the game), rendering every frame offscreen. `screenshot NAME` actions save
-/// the frame (HUD and open screens included) as `target/shots/script-NAME.png`. `Error`
-/// actions (a `wait_until` timeout) and `Finished` end the run; an error exits non-zero.
+/// `--script FILE`: with `--server`, join like `--screenshot` and drive the parsed script's
+/// actions every game tick (20 Hz) through the same input routing the window uses
+/// (`InputRouter`: the UI first, then the game). Without one, menu mode: the title screen in
+/// the same offscreen window, the script clicks through it (Singleplayer, the world list, the
+/// create screen, or Multiplayer) and the join the screens request creates the session,
+/// carrying the UI into the game. `screenshot NAME` actions save the frame (HUD and open
+/// screens included) as `target/shots/script-NAME.png`. `Error` actions (a `wait_until`
+/// timeout) and `Finished` end the run; an error exits non-zero.
 pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
-    let Some(_server) = args.server.as_ref() else {
-        anyhow::bail!("--script needs --server <host[:port]>");
-    };
     let text = std::fs::read_to_string(file)
         .with_context(|| format!("reading script {}", file.display()))?;
     let steps = script::parse(&text).map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut runner = script::Runner::new(steps);
-    let session = Session::join(args, false)?;
-    let shared = session.shared.clone();
+    // The session (with `--server` at once; in menu mode once the multiplayer screen joins).
+    let mut session: Option<Session> = match &args.server {
+        Some(address) => Some(Session::join(
+            &args.username,
+            args.render_distance,
+            address,
+            false,
+            None,
+        )?),
+        None => None,
+    };
+    let mut menu = if session.is_none() {
+        Some(Menu::new())
+    } else {
+        None
+    };
+    // Whether the screens are ticked here (menu mode: before a join, and again after leaving
+    // a world; `menu` above only covers the boot, so this outlives it).
+    let mut in_menu = session.is_none();
+    let mut shared = session.as_ref().map(|s| s.shared.clone());
     let mut assets = open_assets()?;
-    let mut renderer =
-        Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
-    renderer.set_item_registry(&shared.data.registries);
-    renderer.set_biomes(&session.biomes);
-    renderer.set_dimension(shared.world.read().dimension());
+    let data = net::load_game_data()?;
+    let mut renderer = Renderer::new_offscreen(args.width, args.height, &mut assets, &data.blocks)?;
+    if let Some(s) = &session {
+        renderer.set_item_registry(&s.shared.data.registries);
+        renderer.set_biomes(&s.biomes);
+        renderer.set_particle_types(&s.particle_types);
+        renderer.set_dimension(s.shared.world.read().dimension());
+    }
+    // The live options, refreshed when a vanilla screen changed one (the options bridge): FOV
+    // and GUI scale follow the change within a frame, like the windowed client. In menu mode
+    // the saved ones stand in until a session arrives with its own.
+    let mut options = session
+        .as_ref()
+        .map_or_else(load_options, |s| s.options.clone());
+    let mut options_version = shared
+        .as_ref()
+        .map_or(0, |s| s.options_version.load(Ordering::Relaxed));
+    // Item names by protocol id, so `log_script_frame` can name the items a frame drew.
+    let item_names: Vec<Identifier> = (0..data.registries.len("minecraft:item") as u32)
+        .map(|i| {
+            data.registries
+                .name(
+                    "minecraft:item",
+                    haste_protocol::haste_core::RegistryIndex(i),
+                )
+                .cloned()
+                .unwrap_or_else(|| Identifier::minecraft("air"))
+        })
+        .collect();
     let mut gui = GuiFrame::default();
     let mut ui: Option<crate::ui::Ui> = None;
     let mut feed = WorldFeed::default();
@@ -1660,7 +2252,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         grabbed: true,
         ..InputRouter::default()
     };
-    let deadline = Instant::now() + Duration::from_secs(args.seconds);
+    let deadline = Instant::now() + Duration::from_secs(args.seconds.max(60));
     let tick = Duration::from_secs_f64(haste_protocol::haste_core::game::TICK_SECONDS);
     let mut next_tick = Instant::now();
     let mut frames = 0u32;
@@ -1668,132 +2260,361 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut fps = FpsCounter::new();
     let mut last_err: Option<String> = None;
     let mut finished = false;
+    // With `--pos`, the script's `wait_until settled` also waits for the server to have
+    // teleported the player to these feet coordinates (the caller teleports over RCON while
+    // we join, like the screenshot mode's `--pos`).
+    let want_pos = args
+        .pos
+        .as_ref()
+        .filter(|v| v.len() == 3)
+        .map(|v| DVec3::new(v[0], v[1], v[2]));
     // Screenshot actions of this tick, saved after the frame is rendered (the readback must
     // include the frame the actions just produced: an open screen, the typed chat).
     let mut shots: Vec<String> = Vec::new();
+    // The last rendered GUI frame (click_text finds its label in it).
+    let mut last_gui = GuiFrame::default();
     // An F2 press this tick: save the frame to the config screenshots dir after it is rendered.
     let mut f2_pending = false;
+    // The local singleplayer world of the joined session (stopped when the world is left and
+    // at the end of the script, whatever it ended with).
+    let mut local_server: Option<LocalWorld> = None;
     'run: loop {
+        // Menu mode: the open screen ticks at 20 Hz, and the join the multiplayer screen
+        // requests creates the session (its game thread takes a clone of the UI over).
+        if let Some(m) = &mut menu {
+            if ui.is_none() {
+                if let Some(u) = m.poll() {
+                    u.set_text_metrics(renderer.text_metrics());
+                    ui = Some(u);
+                }
+            }
+        }
         // The look the player is rendered with: the input layer's (the script's `look`
-        // actions write it) plus the server's rotation offset, like the window.
-        let mut view = *shared.view.lock();
+        // actions write it) plus the server's rotation offset, like the window. In menu
+        // mode there is no view yet: `joined`/`settled` read as false.
+        let mut view = shared.as_ref().map(|s| *s.view.lock());
         let look = (input.yaw, input.pitch);
+        // Pick up a live option change (the options bridge) within a frame.
+        if let Some(shared) = shared.as_ref() {
+            let version = shared.options_version.load(Ordering::Relaxed);
+            if version != options_version {
+                options_version = version;
+                options = shared.live_options.lock().clone();
+            }
+        }
         // One game tick's actions whenever it is time (`wait_until settled` uses the same
         // quiet test as the screenshot mode, plus the HUD's JVM being up or known-failed: a
         // script's keys go to the UI, so pressing them before it exists would lose them).
+        // In menu mode the script drives the screens the same way (joined/settled stay
+        // false until the multiplayer screen's join creates the session).
         if Instant::now() >= next_tick {
             next_tick += tick;
-            let hud_ready = ui.is_some() || shared.hud_failed.load(Ordering::Relaxed);
-            let settled = view.has_position
-                && hud_ready
-                && feed.settled(&last_stats, Duration::from_millis(1500));
-            if !settled && frames.is_multiple_of(40) {
-                tracing::info!(
-                    "waiting to settle: queue {} pending {} arrival {:?}",
-                    feed.queue.len(),
-                    last_stats.meshes_pending,
-                    feed.last_arrival.map(|t| t.elapsed())
-                );
-            }
-            let state = script::ScriptState {
-                joined: view.has_position,
-                settled,
-                screen_open: ui.as_ref().is_some_and(|u| u.screen_open()),
-            };
-            for action in runner.tick(&state) {
-                match action {
-                    script::Action::KeyDown(k) => {
-                        // F2 is the window-only screenshot key (the UI never takes it): capture
-                        // the next frame, like the windowed event loop does.
-                        if k == script::Key::F2 {
-                            f2_pending = true;
+            let mut arrived: Option<Session> = None;
+            {
+                let shared = shared.as_ref();
+                let hud_ready =
+                    ui.is_some() || shared.is_some_and(|s| s.hud_failed.load(Ordering::Relaxed));
+                let at_pos =
+                    want_pos.is_none_or(|p| view.is_some_and(|v| (v.feet - p).length() <= 0.5));
+                let settled = view.is_some_and(|v| v.has_position)
+                    && at_pos
+                    && hud_ready
+                    && feed.settled(&last_stats, Duration::from_millis(1500));
+                if !settled && view.is_some_and(|v| v.has_position) && frames.is_multiple_of(40) {
+                    tracing::info!(
+                        "waiting to settle: queue {} pending {} arrival {:?}",
+                        feed.queue.len(),
+                        last_stats.meshes_pending,
+                        feed.last_arrival.map(|t| t.elapsed())
+                    );
+                }
+                let screen_class = ui.as_ref().and_then(|u| u.gui().screen_class());
+                let state = script::ScriptState {
+                    joined: view.is_some_and(|v| v.has_position),
+                    settled,
+                    screen_open: ui.as_ref().is_some_and(|u| u.screen_open()),
+                    screen_class,
+                };
+                // Menu mode's screen tick and the join the screens requested — the multiplayer
+                // list's Join (a plain address), the world list's Play or the create screen's
+                // Create (a local server first) — the session takes a clone of the UI over;
+                // its game thread ticks from now on.
+                if in_menu {
+                    if let Some(u) = ui.as_ref() {
+                        u.tick();
+                        let cancelled = u.take_join_cancelled();
+                        let address = u.take_join_request().filter(|_| !cancelled);
+                        let open_world = u.take_open_world_request().filter(|_| !cancelled);
+                        let create_world = u.take_create_world_request().filter(|_| !cancelled);
+                        if cancelled && (open_world.is_some() || create_world.is_some()) {
+                            last_err = Some("the local world join was cancelled".into());
+                            break 'run;
                         }
-                        input.key(winit_key(k), true, false, None, ui.as_ref());
-                    }
-                    script::Action::KeyUp(k) => {
-                        input.key(winit_key(k), false, false, None, ui.as_ref());
-                    }
-                    script::Action::Text(t) => {
-                        if let Some(ui) = &ui {
-                            for c in t.chars() {
-                                ui.char_typed(c, 0);
+                        if let Some(address) = address {
+                            let for_game = u.clone();
+                            match Session::join(
+                                &args.username,
+                                args.render_distance,
+                                &address,
+                                false,
+                                Some(for_game),
+                            ) {
+                                Ok(s) => {
+                                    renderer.set_item_registry(&s.shared.data.registries);
+                                    renderer.set_biomes(&s.biomes);
+                                    renderer.set_particle_types(&s.particle_types);
+                                    arrived = Some(s);
+                                }
+                                Err(e) => {
+                                    // Vanilla shows its disconnect screen with the reason; a
+                                    // script ends with the error instead (the next action
+                                    // would just miss).
+                                    last_err = Some(format!("joining {address}: {e:#}"));
+                                    break 'run;
+                                }
+                            }
+                        } else if open_world.is_some() || create_world.is_some() {
+                            // Singleplayer: start (or create) the local server, then join it
+                            // through the same seam. The script blocks on this tick: the
+                            // server's first start takes tens of seconds (world creation),
+                            // and a GenericMessageScreen ("Preparing world data...") is up.
+                            let create = create_world;
+                            let world = open_world.unwrap_or_else(|| {
+                                create
+                                    .as_ref()
+                                    .map(|c| c.folder.clone())
+                                    .unwrap_or_default()
+                            });
+                            let dir = haste_setup::worlds::world_dir(&world)
+                                .unwrap_or_else(|| std::path::PathBuf::from(&world));
+                            match LocalWorld::start(&dir, create.as_ref(), &args.username) {
+                                Ok(world) => {
+                                    let address = world.address();
+                                    u.gui().set_local_world_running(true);
+                                    local_server = Some(world);
+                                    let for_game = u.clone();
+                                    match Session::join(
+                                        &args.username,
+                                        args.render_distance,
+                                        &address,
+                                        false,
+                                        Some(for_game),
+                                    ) {
+                                        Ok(s) => {
+                                            renderer.set_item_registry(&s.shared.data.registries);
+                                            renderer.set_biomes(&s.biomes);
+                                            renderer.set_particle_types(&s.particle_types);
+                                            arrived = Some(s);
+                                        }
+                                        Err(e) => {
+                                            last_err = Some(format!("joining {address}: {e:#}"));
+                                            break 'run;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    last_err = Some(format!("{e:#}"));
+                                    break 'run;
+                                }
                             }
                         }
                     }
-                    script::Action::MouseMove(x, y) => {
-                        input.mouse_moved(f64::from(x), f64::from(y), ui.as_ref());
-                    }
-                    script::Action::Click(button, x, y) => {
-                        let b = mouse_button_id(button);
-                        let (x, y) = (f64::from(x), f64::from(y));
-                        // A click is a press and a release on the same tick.
-                        input.mouse_button(b, true, x, y, ui.as_ref());
-                        input.mouse_button(b, false, x, y, ui.as_ref());
-                    }
-                    script::Action::ClickText(label) => {
-                        // The label's position comes from the last rendered frame (its layout is
-                        // stable while the screen is open); a click just inside the label hits the
-                        // widget it belongs to.
-                        match text_pos(&gui, &label).map(|(x, y)| (x + 1, y + 1)) {
-                            Some((x, y)) => {
-                                let (x, y) = (f64::from(x), f64::from(y));
-                                input.mouse_moved(x, y, ui.as_ref());
-                                input.mouse_button(1, true, x, y, ui.as_ref());
-                                input.mouse_button(1, false, x, y, ui.as_ref());
+                }
+                for action in runner.tick(&state) {
+                    match action {
+                        script::Action::KeyDown(k) => {
+                            // F2 is the window-only screenshot key (the UI never takes it):
+                            // capture the next frame, like the windowed event loop does.
+                            if k == script::Key::F2 {
+                                f2_pending = true;
                             }
-                            None => {
-                                last_err = Some(format!("click_text: no {label:?} in the frame"));
-                                break 'run;
+                            input.key(winit_key(k), true, false, None, ui.as_ref());
+                        }
+                        script::Action::KeyUp(k) => {
+                            input.key(winit_key(k), false, false, None, ui.as_ref());
+                        }
+                        script::Action::Text(t) => {
+                            if let Some(ui) = &ui {
+                                for c in t.chars() {
+                                    ui.char_typed(c, 0);
+                                }
                             }
                         }
-                    }
-                    script::Action::MouseDown(button) => {
-                        let (x, y) = input.mouse;
-                        input.mouse_button(mouse_button_id(button), true, x, y, ui.as_ref());
-                    }
-                    script::Action::MouseUp(button) => {
-                        let (x, y) = input.mouse;
-                        input.mouse_button(mouse_button_id(button), false, x, y, ui.as_ref());
-                    }
-                    script::Action::Scroll(n) => {
-                        let (x, y) = input.mouse;
-                        input.wheel(0.0, f64::from(n), x, y, ui.as_ref(), &shared);
-                    }
-                    script::Action::Look(yaw, pitch) => input.look(yaw, pitch),
-                    script::Action::Screenshot(name) => shots.push(name),
-                    script::Action::Error(e) => {
-                        last_err = Some(e);
-                        break 'run;
-                    }
-                    script::Action::Finished => {
-                        finished = true;
-                        break 'run;
+                        script::Action::MouseMove(x, y) => {
+                            input.mouse_moved(f64::from(x), f64::from(y), ui.as_ref());
+                        }
+                        script::Action::Click(button, x, y) => {
+                            let b = mouse_button_id(button);
+                            let (x, y) = (f64::from(x), f64::from(y));
+                            // A click is a press and a release on the same tick.
+                            input.mouse_button(b, true, x, y, ui.as_ref());
+                            input.mouse_button(b, false, x, y, ui.as_ref());
+                        }
+                        script::Action::MouseDown(button) => {
+                            let (x, y) = input.mouse;
+                            input.mouse_button(mouse_button_id(button), true, x, y, ui.as_ref());
+                        }
+                        script::Action::MouseUp(button) => {
+                            let (x, y) = input.mouse;
+                            input.mouse_button(mouse_button_id(button), false, x, y, ui.as_ref());
+                        }
+                        // A click on the widget whose label is `text`, at the label's position
+                        // plus `(dx, dy)`: the label's place in the last rendered frame, so the
+                        // check does not depend on the GUI scale or window size. A slider's
+                        // label is centred, so `(dx, dy)` moves the click onto its track.
+                        script::Action::ClickText(text, dx, dy) => {
+                            match gui_text_pos(&last_gui, &text) {
+                                Some((x, y)) => {
+                                    let (x, y) = (f64::from(x + dx), f64::from(y + dy));
+                                    input.mouse_moved(x, y, ui.as_ref());
+                                    input.mouse_button(1, true, x, y, ui.as_ref());
+                                    input.mouse_button(1, false, x, y, ui.as_ref());
+                                }
+                                None => {
+                                    last_err =
+                                        Some(format!("no {text:?} to click in the current frame"));
+                                    break 'run;
+                                }
+                            }
+                        }
+                        script::Action::Scroll(n) => {
+                            let (x, y) = input.mouse;
+                            if let Some(shared) = shared.as_ref() {
+                                input.wheel(0.0, f64::from(n), x, y, ui.as_ref(), shared);
+                            } else if let Some(ui) = &ui {
+                                ui.scroll(x, y, 0.0, f64::from(n));
+                            }
+                        }
+                        script::Action::Look(yaw, pitch) => input.look(yaw, pitch),
+                        script::Action::Screenshot(name) => shots.push(name),
+                        script::Action::Error(e) => {
+                            last_err = Some(e);
+                            break 'run;
+                        }
+                        script::Action::Finished => {
+                            finished = true;
+                            break 'run;
+                        }
                     }
                 }
             }
+            // A session the multiplayer screen's join created: it takes over from here (the
+            // game thread ticks the UI clone; the loop renders the world from now on).
+            if let Some(s) = arrived {
+                session = Some(s);
+                shared = session.as_ref().map(|s| s.shared.clone());
+                menu = None;
+                in_menu = false;
+                if let Some(u) = &ui {
+                    // The screens close like vanilla's ConnectScreen does when the level is
+                    // ready (the connecting or preparing screen); the HUD takes over.
+                    u.gui().close_screen();
+                }
+            }
             // The actions may have changed what the game thread sees this tick.
-            input.sample(&shared, game::Perspective::FirstPerson);
-            view = *shared.view.lock();
+            if let Some(shared) = shared.as_ref() {
+                input.sample(shared, ui.as_ref(), game::Perspective::FirstPerson);
+                view = Some(*shared.view.lock());
+            }
         }
-        if shared.is_closed() {
-            anyhow::bail!(
-                "disconnected: {}",
-                shared.closed.lock().clone().unwrap_or_default()
-            );
+        // Leaving the world: the pause screen's "Save and Quit" (or the death screen's "Title
+        // Screen") asked to disconnect — like the window, the client drops the session, stops
+        // the local server (saving the world) and returns to the title screen. A connection
+        // the server closed instead ends the script with the reason.
+        if let Some(mut s) = session.take() {
+            if s.shared.is_closed() {
+                let reason = s.shared.closed.lock().clone().unwrap_or_default();
+                anyhow::bail!("disconnected: {reason}");
+            }
+            if ui.as_ref().is_some_and(|u| u.take_disconnect_request()) {
+                tracing::info!("disconnect requested by the UI (script)");
+                s.leave();
+                if let Some(world) = local_server.take() {
+                    if let Some(u) = &ui {
+                        u.gui().set_local_world_running(false);
+                    }
+                    world.stop();
+                }
+                if let Some(u) = &ui {
+                    u.gui().set_local_world_running(false);
+                    u.open_screen(haste_jvm::ScreenKind::Title)?;
+                }
+                shared = None;
+                in_menu = true;
+                input.release();
+            } else {
+                session = Some(s);
+            }
+        }
+        if let Some(shared) = shared.as_ref() {
+            if shared.is_closed() {
+                anyhow::bail!(
+                    "disconnected: {}",
+                    shared.closed.lock().clone().unwrap_or_default()
+                );
+            }
         }
         // Render the frame like the screenshot mode does (the HUD and any open screen via
         // `Ui::frame`), so `screenshot` actions capture exactly what the window would show.
+        // Menu mode renders the open screen over the plain background (no world yet).
+        if session.is_none() {
+            if let Some(u) = ui.as_mut() {
+                let scale =
+                    resolve_gui_scale(u32::from(options.gui_scale), args.width, args.height);
+                let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
+                gui = u.frame(gw, gh, scale, input.mouse, 0.0).clone();
+                last_gui = gui.clone();
+            }
+            let frame = FrameInput {
+                camera: menu_camera(),
+                entities: &[],
+                block_entities: &[],
+                gui: &gui,
+                sky: menu_sky(),
+                partial_tick: 0.0,
+                block_target: None,
+                breaking: &[],
+                camera_entity: None,
+            };
+            renderer.render(&frame)?;
+            frames += 1;
+            if !shots.is_empty() {
+                let image = renderer
+                    .read_back()
+                    .context("reading the frame back for the script screenshots")?;
+                for name in shots.drain(..) {
+                    // Log what the frame drew (the check scripts grep this as evidence), like
+                    // the in-game branch does.
+                    log_script_frame(&gui, &name, &item_names);
+                    save_script_shot(&image, &name)?;
+                }
+            }
+            if Instant::now() > deadline {
+                tracing::warn!("--seconds elapsed before the script finished; stopping early");
+                break;
+            }
+            let now = Instant::now();
+            if now < next_tick {
+                std::thread::sleep((next_tick - now).min(Duration::from_millis(5)));
+            } else {
+                next_tick = now;
+            }
+            continue;
+        }
+        let shared = shared.as_ref().expect("the session exists");
+        let session_ref = session.as_ref().expect("the session exists");
         let (camera, sky, lightmap, partial, vd, animation_tick) = frame_view(
-            &shared,
+            shared,
             game::Perspective::FirstPerson,
             look.0,
             look.1,
-            &session.options,
+            &options,
             Instant::now(),
         );
-        feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
-        let entities = feed.entities(&shared, &mut renderer, session.local, partial);
-        let block_target = view.block_target;
+        feed.feed(shared, &mut renderer, camera_section(&camera), vd);
+        let (entities, block_entities) =
+            feed.entities(shared, &mut renderer, session_ref.local, partial);
+        let block_target = view.and_then(|v| v.block_target);
         let breaking = shared.breaking.lock().clone();
         if ui.is_none() {
             ui = shared.ui.lock().clone();
@@ -1805,39 +2626,33 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             // F3's numbers every frame, like the window's `draw` (cheap: short mutexes; the
             // overlay's strings are only built while it is on).
             u.set_debug(debug_info(
-                &session.debug_env,
-                &shared,
+                &session_ref.debug_env,
+                shared,
                 &renderer,
                 look,
                 fps.fps as i32,
                 &last_stats,
                 entities.len() as i32,
-                resolve_gui_scale(
-                    u32::from(session.options.gui_scale),
-                    args.width,
-                    args.height,
-                ),
+                resolve_gui_scale(u32::from(options.gui_scale), args.width, args.height),
                 &gpu_info(&renderer),
             ));
         }
         if let Some(u) = &mut ui {
-            let scale = resolve_gui_scale(
-                u32::from(session.options.gui_scale),
-                args.width,
-                args.height,
-            );
+            let scale = resolve_gui_scale(u32::from(options.gui_scale), args.width, args.height);
             let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
             gui = u.frame(gw, gh, scale, input.mouse, partial).clone();
+            last_gui = gui.clone();
         }
         let frame = FrameInput {
             camera,
             entities,
+            block_entities,
             gui: &gui,
             sky,
             partial_tick: partial,
             block_target,
             breaking: &breaking,
-            camera_entity: Some(session.local.0),
+            camera_entity: Some(session_ref.local.0),
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -1855,7 +2670,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             // Log what the frame drew (the check scripts grep this as evidence; images are not
             // opened). The hotbar sprite is the visible proof a HUD element is hidden or shown.
             for name in shots.drain(..) {
-                log_script_frame(&gui, &name);
+                log_script_frame(&gui, &name, &item_names);
                 let path = std::path::Path::new("target/shots").join(format!("script-{name}.png"));
                 if let Some(dir) = path.parent() {
                     std::fs::create_dir_all(dir)
@@ -1886,7 +2701,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 .with_context(|| "writing the screenshot's text")?;
             }
             if std::mem::take(&mut f2_pending) {
-                log_script_frame(&gui, "f2");
+                log_script_frame(&gui, "f2", &item_names);
                 // Vanilla's F2: the frame goes to the config dir's `screenshots/` folder.
                 match crate::screenshots::save(image.clone()) {
                     Ok(name) => {
@@ -1913,12 +2728,31 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     }
     let _ = frames;
     drop(session);
+    // The local singleplayer server outlives the session: stop it whatever ended the script
+    // (finished, error, timeout), or the java process would keep running and hold the world's
+    // lock. Its `stop` saves the world first.
+    if let Some(world) = local_server.take() {
+        world.stop();
+    }
     if let Some(e) = last_err {
         anyhow::bail!("script failed: {e}");
     }
     if !finished {
         anyhow::bail!("script did not finish before --seconds elapsed");
     }
+    Ok(())
+}
+
+/// Saves a script `screenshot NAME` action's frame as `target/shots/script-NAME.png`.
+fn save_script_shot(image: &image::RgbaImage, name: &str) -> anyhow::Result<()> {
+    let path = std::path::Path::new("target/shots").join(format!("script-{name}.png"));
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    image
+        .save(&path)
+        .with_context(|| format!("saving {}", path.display()))?;
+    println!("script screenshot saved to {}", path.display());
     Ok(())
 }
 
@@ -2133,10 +2967,10 @@ fn bench_summary(samples: &[BenchSample]) -> BenchSummary {
 /// recording per-frame `FrameStats` and `FrameTimings`. Prints one summary block, writes the
 /// same as JSON to `--bench-out` when given, and disconnects.
 pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
-    let Some(_server) = args.server.as_ref() else {
+    let Some(server) = args.server.as_deref() else {
         anyhow::bail!("--bench needs --server <host[:port]>");
     };
-    let session = Session::join(args, false)?;
+    let session = Session::join(&args.username, args.render_distance, server, false, None)?;
     let shared = session.shared.clone();
     // The bench camera is first person: the game thread's camera effects take that perspective.
     shared.input.lock().first_person = true;
@@ -2169,12 +3003,14 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         vd = v;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         feed.set_first_person(&shared, &mut renderer, game::Perspective::FirstPerson);
-        let entities = feed.entities(&shared, &mut renderer, session.local, partial);
+        let (entities, block_entities) =
+            feed.entities(&shared, &mut renderer, session.local, partial);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
         let frame = FrameInput {
             camera,
             entities,
+            block_entities,
             gui: &gui,
             sky,
             partial_tick: partial,
@@ -2246,12 +3082,14 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         let feed_start = Instant::now();
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         let feed_ms = feed_start.elapsed().as_secs_f32() * 1000.0;
-        let entities = feed.entities(&shared, &mut renderer, session.local, partial_tick);
+        let (entities, block_entities) =
+            feed.entities(&shared, &mut renderer, session.local, partial_tick);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
         let frame = FrameInput {
             camera,
             entities,
+            block_entities,
             gui: &gui,
             sky,
             partial_tick,
@@ -2324,20 +3162,41 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Windowed mode.
+/// Windowed mode. With `--server` it joins at once; without it the vanilla title screen opens
+/// (menu mode) and a Join on the multiplayer screen creates the session in the same window.
+/// Leaving the server (pause screen "Disconnect") or being kicked returns to the menus.
 pub fn run(args: &Args) -> anyhow::Result<()> {
-    let session = Session::join(args, true)?;
+    // The session (with `--server` at once; in menu mode the multiplayer screen's join).
+    let session = match &args.server {
+        Some(address) => Some(Session::join(
+            &args.username,
+            args.render_distance,
+            address,
+            true,
+            None,
+        )?),
+        None => None,
+    };
+    let menu = session.is_none().then(Menu::new);
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
+    let options = session
+        .as_ref()
+        .map_or_else(load_options, |s| s.options.clone());
     let mut app = App {
-        shared: session.shared.clone(),
-        biomes: session.biomes.clone(),
-        debug_env: session.debug_env.clone(),
-        particle_types: session.particle_types.clone(),
-        // The flag wins over the saved option; without it, the saved option decides.
-        vsync: args.vsync.unwrap_or(session.options.vsync),
-        options: session.options.clone(),
-        local: session.local,
+        username: args.username.clone(),
+        render_distance: args.render_distance,
+        session,
+        menu,
+        // A join the screens asked for, connecting on its own thread (the window stays live).
+        joining: None,
+        local_server: None,
+        // The flag wins over the saved option; without it, the saved option decides (and a
+        // change in the options screen applies live, like vanilla's Vsync option).
+        vsync: args.vsync.unwrap_or(options.vsync),
+        vsync_forced: args.vsync,
+        options,
+        options_version: 0,
         perspective: game::Perspective::default(),
         window: None,
         renderer: None,
@@ -2355,37 +3214,61 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         seconds: args.window_seconds,
         screenshot: false,
         started: Instant::now(),
+        menu_next: Instant::now(),
+        quitting: false,
     };
     event_loop.run_app(&mut app)?;
-    let reason = session.shared.closed.lock().clone();
-    drop(session);
     if let Some(e) = app.error {
         return Err(e);
     }
-    if let Some(r) = reason {
-        println!("connection ended: {r}");
+    if let Some(session) = &app.session {
+        if let Some(r) = session.shared.closed.lock().clone() {
+            println!("connection ended: {r}");
+        }
     }
     Ok(())
 }
 
+/// A join the screens requested, connecting on its own thread: what to show as the target
+/// (the address, or the world folder of a local world) and where the session (with its local
+/// world, for singleplayer) arrives.
+struct JoinInProgress {
+    target: String,
+    rx: std::sync::mpsc::Receiver<anyhow::Result<(Session, Option<LocalWorld>)>>,
+}
+
 struct App {
-    shared: Arc<Shared>,
-    biomes: Vec<haste_render::BiomeClimate>,
-    debug_env: DebugEnv,
-    /// The particle atlas types (uploaded to the renderer once it exists).
-    particle_types: std::sync::Arc<haste_render::ParticleTypes>,
+    /// The offline username joins use (menu mode: from `--username`).
+    username: String,
+    /// `--render-distance`, overriding the saved option for this run.
+    render_distance: Option<u8>,
+    /// The joined game (`None` in menu mode, while connecting, and after leaving the server).
+    session: Option<Session>,
+    /// Menu mode's JVM boot (`--server` omitted): delivers the UI, then nothing.
+    menu: Option<Menu>,
+    /// The join the screens requested, connecting on its own thread: what to show as the
+    /// target (the address, or the world folder for a local world) and where the session
+    /// (and the local world, for singleplayer) arrives.
+    joining: Option<JoinInProgress>,
+    /// The local singleplayer world of the joined session (stopped when the world is left).
+    local_server: Option<LocalWorld>,
     vsync: bool,
-    /// Saved options (FOV for rendering, sensitivity for mouse look).
+    /// `--vsync` forced the mode: a change in the options screen must not override it.
+    vsync_forced: Option<bool>,
+    /// The options the game is running with: refreshed from [`Shared::live_options`] whenever
+    /// its version changes (not every frame), so a change in a vanilla options screen takes
+    /// effect immediately (FOV, GUI scale, mouse sensitivity, fullscreen, vsync).
     options: Options,
-    /// The local player's entity id and UUID, for its own model in third person.
-    local: (EntityId, u128),
+    /// The `Shared::options_version` [`App::options`] was copied from (0 until a session).
+    options_version: u64,
     /// Current perspective (F5 cycles it).
     perspective: game::Perspective,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     feed: WorldFeed,
-    /// The HUD's `Ui`, cloned from the game thread's once it is ready (the JVM takes seconds
-    /// to start); `gui` stays the empty default until then.
+    /// The HUD's `Ui`: the game thread's clone once it is ready (the JVM takes seconds to
+    /// start), or the menu's (the window's own; the game thread takes a clone when joining).
+    /// `gui` stays the empty default until then.
     ui: Option<crate::ui::Ui>,
     gui: GuiFrame,
     /// The input half: keys, mouse, look and the routing to the UI and the game. `mouse`
@@ -2406,6 +3289,10 @@ struct App {
     /// lands (a few frames later), `take_capture` hands it to a save thread.
     screenshot: bool,
     started: Instant,
+    /// When the next 20 Hz menu tick runs (menu mode only).
+    menu_next: Instant,
+    /// The title screen's Quit Game was clicked: close at the next `about_to_wait`.
+    quitting: bool,
 }
 
 impl App {
@@ -2464,24 +3351,228 @@ impl App {
         self.ui.as_ref().is_some_and(|ui| ui.screen_open())
     }
 
-    /// Once per frame (in `draw`): whether the pause screen's "Disconnect" (or the death
-    /// screen's "Title Screen") was clicked since the last frame, in which case the client
-    /// leaves the server and the window closes.
-    fn take_disconnect(&mut self, event_loop: &ActiveEventLoop) {
+    /// Once per frame (in `draw`): whether the pause screen's "Disconnect" / "Save and Quit"
+    /// (or the death screen's "Title Screen") was clicked since the last frame. With a session
+    /// the client leaves the server and, like vanilla's pause screen, returns to the screen it
+    /// came from: the title screen for a singleplayer world, the server list for multiplayer.
+    /// Without a session it is the connecting screen's dead parent and just closes the screen.
+    fn take_disconnect(&mut self, _event_loop: &ActiveEventLoop) {
         if self
             .ui
             .as_ref()
             .is_some_and(|ui| ui.take_disconnect_request())
         {
-            tracing::info!("disconnect requested by the UI");
-            self.shared.stop.store(true, Ordering::Relaxed);
-            event_loop.exit();
+            if self.session.is_some() {
+                let was_local = self.local_server.is_some();
+                tracing::info!("disconnect requested by the UI");
+                self.leave_server();
+                if let Some(ui) = &self.ui {
+                    let kind = if was_local {
+                        haste_jvm::ScreenKind::Title
+                    } else {
+                        haste_jvm::ScreenKind::Multiplayer
+                    };
+                    if let Err(e) = ui.open_screen(kind) {
+                        tracing::warn!(
+                            "opening the {} screen: {e:#}",
+                            if was_local { "title" } else { "multiplayer" }
+                        );
+                    }
+                }
+            } else if let Some(ui) = &self.ui {
+                ui.gui().close_screen();
+            }
+        }
+    }
+
+    /// Drops the session (stopping its game thread and closing the connection) and the local
+    /// singleplayer server, if one runs (its `stop` saves the world); the UI stays, menu mode
+    /// resumes around whatever screen the disconnect showed.
+    fn leave_server(&mut self) {
+        if let Some(session) = self.session.take() {
+            session.shared.stop.store(true, Ordering::Relaxed);
+            let reason = session.shared.closed.lock().clone();
+            drop(session);
+            if let Some(r) = reason {
+                println!("connection ended: {r}");
+            }
+        }
+        if let Some(world) = self.local_server.take() {
+            if let Some(ui) = &self.ui {
+                ui.gui().set_local_world_running(false);
+            }
+            world.stop();
+        }
+        self.input.release();
+    }
+
+    /// Menu mode's 20 Hz tick and the join the screens requested (called every frame while
+    /// there is no session). The join connects on its own thread; the window keeps rendering
+    /// the connecting screen until the session arrives (`Self::poll_join`).
+    fn menu_tick(&mut self) {
+        if let Some(menu) = &mut self.menu {
+            if let Some(ui) = menu.poll() {
+                if let Some(r) = self.renderer.as_mut() {
+                    ui.set_text_metrics(r.text_metrics());
+                }
+                self.ui = Some(ui);
+            }
+        }
+        let tick = Duration::from_secs_f64(haste_protocol::haste_core::game::TICK_SECONDS);
+        let now = Instant::now();
+        if now < self.menu_next {
+            return;
+        }
+        self.menu_next = now + tick;
+        let Some(ui) = self.ui.clone() else { return };
+        ui.tick();
+        let cancelled = ui.take_join_cancelled();
+        if cancelled {
+            if self.joining.is_some() {
+                tracing::info!("join cancelled");
+                self.joining = None;
+            }
+            return;
+        }
+        let address = ui.take_join_request();
+        let open_world = ui.take_open_world_request();
+        let create_world = ui.take_create_world_request();
+        if self.joining.is_none() && self.session.is_none() {
+            if let Some(address) = address {
+                tracing::info!("joining {address} (from the multiplayer screen)");
+                self.spawn_join(address, None);
+            } else if let Some(world) = open_world {
+                tracing::info!("opening singleplayer world {world} (from the world list)");
+                let dir = haste_setup::worlds::world_dir(&world);
+                self.spawn_join(world, Some((dir, None)));
+            } else if let Some(create) = create_world {
+                tracing::info!(
+                    "creating singleplayer world {} (from the create screen)",
+                    create.name
+                );
+                let dir = haste_setup::worlds::world_dir(&create.folder);
+                self.spawn_join(create.folder.clone(), Some((dir, Some(create))));
+            }
+        }
+        // The title screen's Quit Game closes the window.
+        if ui.take_quit_request() {
+            tracing::info!("quit requested by the title screen");
+            self.quitting = true;
+        }
+    }
+
+    /// Spawns the join thread for `target` (shown in logs): either a plain address, or a
+    /// singleplayer world (its dir; `Some` settings mean the world is created first, the create
+    /// screen's choices). The thread starts the local server when there is one, joins, and
+    /// sends back the session with the server for the client to stop when the world is left.
+    fn spawn_join(
+        &mut self,
+        target: String,
+        local: Option<(
+            Option<std::path::PathBuf>,
+            Option<haste_jvm::CreateWorldRequest>,
+        )>,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let Some(ui) = &self.ui else { return };
+        let for_game = ui.clone();
+        let username = self.username.clone();
+        let render_distance = self.render_distance;
+        let plain_address = target.clone();
+        std::thread::Builder::new()
+            .name("haste-join".into())
+            .spawn(move || {
+                // A singleplayer world: start (or create) the local server first; its address
+                // is what gets joined.
+                let is_local = local.is_some();
+                let world = local.and_then(|(dir, create)| {
+                    let dir = dir.unwrap_or_else(|| {
+                        create
+                            .as_ref()
+                            .map(|c| {
+                                haste_setup::worlds::world_dir(&c.folder)
+                                    .unwrap_or_else(|| std::path::PathBuf::from(&c.folder))
+                            })
+                            .unwrap_or_default()
+                    });
+                    match LocalWorld::start(&dir, create.as_ref(), &username) {
+                        Ok(world) => Some(world),
+                        Err(e) => {
+                            let _ = tx.send(Err(anyhow::anyhow!(
+                                "starting the local server for {}: {e:#}",
+                                dir.display()
+                            )));
+                            None
+                        }
+                    }
+                });
+                if is_local && world.is_none() {
+                    // The failure was already sent; nothing to join.
+                    return;
+                }
+                let address = world
+                    .as_ref()
+                    .map(|w| w.address())
+                    .unwrap_or_else(|| plain_address.clone());
+                let _ = tx.send(
+                    Session::join(&username, render_distance, &address, true, Some(for_game))
+                        .map(|s| (s, world)),
+                );
+            })
+            .expect("spawning the join thread");
+        self.joining = Some(JoinInProgress { target, rx });
+    }
+
+    /// Takes the session once the join thread finished it; a failed join shows vanilla's
+    /// disconnect screen with the reason (the connecting screen's parent gets the back button).
+    fn poll_join(&mut self) {
+        let result = match self.joining.as_ref() {
+            Some(j) => match j.rx.try_recv() {
+                Ok(result) => result,
+                Err(_) => return,
+            },
+            None => return,
+        };
+        let target = self.joining.take().expect("checked above").target;
+        match result {
+            Ok((session, server)) => {
+                if let Some(r) = self.renderer.as_mut() {
+                    r.set_item_registry(&session.shared.data.registries);
+                    r.set_biomes(&session.biomes);
+                    r.set_particle_types(&session.particle_types);
+                }
+                // A singleplayer world: keep its local server (stopped when the world is
+                // left) and tell the screens (the pause screen's "Save and Quit" label).
+                if let Some(server) = server {
+                    self.local_server = Some(server);
+                    if let Some(ui) = &self.ui {
+                        ui.gui().set_local_world_running(true);
+                    }
+                }
+                self.options = session.options.clone();
+                self.session = Some(session);
+                if let Some(ui) = &self.ui {
+                    // The screens close like vanilla's ConnectScreen does when the level is
+                    // ready; the HUD takes over.
+                    ui.gui().close_screen();
+                }
+            }
+            Err(e) => {
+                tracing::warn!("joining {target} failed: {e:#}");
+                if let Some(ui) = &self.ui {
+                    let reason = haste_protocol::haste_core::Component::text(format!("{e:#}"));
+                    ui.disconnected(&reason);
+                }
+            }
         }
     }
 
     fn release_keys(&mut self) {
         self.input.release();
-        self.input.sample(&self.shared, self.perspective);
+        if let Some(session) = &self.session {
+            self.input
+                .sample(&session.shared, self.ui.as_ref(), self.perspective);
+        }
     }
 
     /// Mouse look speed from the saved sensitivity.
@@ -2489,19 +3580,80 @@ impl App {
         look_deg_per_pixel(self.options.mouse_sensitivity)
     }
 
+    /// Menu mode's frame: the open screen over the plain background the renderer draws
+    /// without a world (vanilla draws the rotating panorama there; not yet in Haste).
+    fn draw_menu(&mut self) {
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+        let (gui, camera, sky, partial) = match &mut self.ui {
+            Some(ui) => menu_frame(ui, renderer, &self.input, &self.options),
+            None => (GuiFrame::default(), menu_camera(), menu_sky(), 0.0),
+        };
+        self.gui = gui;
+        let frame = FrameInput {
+            camera,
+            entities: &[],
+            block_entities: &[],
+            gui: &self.gui,
+            sky,
+            partial_tick: partial,
+            block_target: None,
+            breaking: &[],
+            camera_entity: None,
+        };
+        if let Err(e) = renderer.render(&frame) {
+            self.error = Some(e.context("render"));
+        }
+    }
+
     fn draw(&mut self, event_loop: &ActiveEventLoop) {
         if self.renderer.is_none() {
             return;
         }
-        self.input.sample(&self.shared, self.perspective);
         // The screen that opened or closed since the last frame takes or frees the cursor,
-        // and "Disconnect" ends the run.
+        // and "Disconnect" leaves the server (back to the multiplayer screen, like vanilla).
         self.sync_grab();
         self.take_disconnect(event_loop);
+        if self.session.is_none() {
+            // Menu mode: the screens tick here, the join the multiplayer screen requested
+            // connects on its own thread, and the frame is the open screen over the plain
+            // background (no world). The session arriving switches to the game path below.
+            self.menu_tick();
+            self.poll_join();
+            self.draw_menu();
+            return;
+        }
+        let session = self.session.as_ref().expect("checked above");
+        // The options the player just changed in a vanilla screen: the game thread applied
+        // them to `live_options` and bumped its version; copy them here so FOV, GUI scale and
+        // sensitivity follow this frame (vanilla reads its Options object live too).
+        let version = session.shared.options_version.load(Ordering::Relaxed);
+        if version != self.options_version {
+            self.options_version = version;
+            self.options = session.shared.live_options.lock().clone();
+            // The two options the window itself owns (vanilla's Fullscreen/Vsync callbacks touch
+            // the window and the swapchain): apply them to this client's window and renderer.
+            if let Some(w) = &self.window {
+                let want = self.options.fullscreen;
+                if w.fullscreen().is_some() != want {
+                    w.set_fullscreen(want.then_some(Fullscreen::Borderless(None)));
+                }
+            }
+            let want_vsync = self.vsync_forced.unwrap_or(self.options.vsync);
+            if want_vsync != self.vsync {
+                self.vsync = want_vsync;
+                if let Some(r) = &mut self.renderer {
+                    r.set_vsync(want_vsync);
+                }
+            }
+        }
+        self.input
+            .sample(&session.shared, self.ui.as_ref(), self.perspective);
         let renderer = self.renderer.as_mut().expect("checked above");
         let t0 = Instant::now();
         let (camera, sky, lightmap, partial, vd, animation_tick) = frame_view(
-            &self.shared,
+            &session.shared,
             self.perspective,
             self.input.yaw,
             self.input.pitch,
@@ -2509,23 +3661,23 @@ impl App {
             Instant::now(),
         );
         self.feed
-            .feed(&self.shared, renderer, camera_section(&camera), vd);
+            .feed(&session.shared, renderer, camera_section(&camera), vd);
         let t1 = Instant::now();
         self.feed
-            .set_first_person(&self.shared, renderer, self.perspective);
-        let entities = self
-            .feed
-            .entities(&self.shared, renderer, self.local, partial);
-        let block_target = self.shared.view.lock().block_target;
+            .set_first_person(&session.shared, renderer, self.perspective);
+        let (entities, block_entities) =
+            self.feed
+                .entities(&session.shared, renderer, session.local, partial);
+        let block_target = session.shared.view.lock().block_target;
         self.breaking.clear();
         self.breaking
-            .extend_from_slice(&self.shared.breaking.lock());
+            .extend_from_slice(&session.shared.breaking.lock());
         let t2 = Instant::now();
         // The HUD: once the game thread's `Ui` is ready, clone it here (cheap, one per thread)
         // and render the frame through it; until then (JVM still starting, or failed: no JDK
         // or cache) the empty default draws no HUD.
         if self.ui.is_none() {
-            self.ui = self.shared.ui.lock().clone();
+            self.ui = session.shared.ui.lock().clone();
             if let Some(ui) = &self.ui {
                 ui.set_text_metrics(renderer.text_metrics());
             }
@@ -2538,8 +3690,8 @@ impl App {
             let stats = self.frame_stats;
             let gpu = gpu_info(renderer);
             ui.set_debug(debug_info(
-                &self.debug_env,
-                &self.shared,
+                &session.debug_env,
+                &session.shared,
                 renderer,
                 (self.input.yaw, self.input.pitch),
                 self.fps.fps as i32,
@@ -2548,7 +3700,7 @@ impl App {
                 resolve_gui_scale(u32::from(self.options.gui_scale), w, h),
                 &gpu,
             ));
-            let view = *self.shared.view.lock();
+            let view = *session.shared.view.lock();
             ui.set_eye_in_water(view.eye_in_water);
         }
         if let Some(ui) = &mut self.ui {
@@ -2560,18 +3712,25 @@ impl App {
         let frame = FrameInput {
             camera,
             entities,
+            block_entities,
             gui: &self.gui,
             sky,
             partial_tick: partial,
             block_target,
             breaking: &self.breaking,
-            camera_entity: (!self.perspective.draws_player()).then_some(self.local.0),
+            camera_entity: (!self.perspective.draws_player()).then_some(session.local.0),
         };
-        // Outline boxes of the target and the states of breaking blocks (one short read lock).
-        renderer.sample_world(&*self.shared.world.read(), &self.shared.data.shapes, &frame);
+        // Outline boxes of the target and the states of breaking blocks (one short read lock),
+        // then the particles (one short read lock).
+        let session = self.session.as_ref().expect("the game path above");
+        renderer.sample_world(
+            &*session.shared.world.read(),
+            &session.shared.data.shapes,
+            &frame,
+        );
         {
-            let world = self.shared.world.read();
-            let mut particles = self.shared.particles.lock();
+            let world = session.shared.world.read();
+            let mut particles = session.shared.particles.lock();
             renderer.prepare_particles(&mut particles, &*world, camera, partial);
         }
         renderer.set_animation_tick(animation_tick);
@@ -2635,12 +3794,14 @@ impl ApplicationHandler for App {
         let result = (|| -> anyhow::Result<(Arc<Window>, Renderer)> {
             let window = Arc::new(event_loop.create_window(attrs)?);
             let mut assets = open_assets()?;
-            let mut renderer =
-                Renderer::new(window.clone(), &mut assets, &self.shared.data.blocks)?;
-            renderer.set_item_registry(&self.shared.data.registries);
-            renderer.set_biomes(&self.biomes);
-            renderer.set_particle_types(&self.particle_types);
-            renderer.set_dimension(self.shared.world.read().dimension());
+            let data = net::load_game_data()?;
+            let mut renderer = Renderer::new(window.clone(), &mut assets, &data.blocks)?;
+            if let Some(session) = &self.session {
+                renderer.set_item_registry(&session.shared.data.registries);
+                renderer.set_biomes(&session.biomes);
+                renderer.set_particle_types(&session.particle_types);
+                renderer.set_dimension(session.shared.world.read().dimension());
+            }
             Ok((window, renderer))
         })();
         match result {
@@ -2648,7 +3809,9 @@ impl ApplicationHandler for App {
                 r.set_vsync(self.vsync);
                 self.window = Some(w);
                 self.renderer = Some(r);
-                self.set_grab(true);
+                if self.session.is_some() {
+                    self.set_grab(true);
+                }
             }
             Err(e) => {
                 self.error = Some(e);
@@ -2704,8 +3867,12 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::PixelDelta(p) => (p.x / 40.0, p.y / 40.0),
                 };
                 let (x, y) = self.input.mouse;
-                self.input
-                    .wheel(dx, dy, x, y, self.ui.as_ref(), &self.shared);
+                if let Some(session) = &self.session {
+                    self.input
+                        .wheel(dx, dy, x, y, self.ui.as_ref(), &session.shared);
+                } else if let Some(ui) = &self.ui {
+                    ui.scroll(x, y, dx, dy);
+                }
             }
             WindowEvent::KeyboardInput {
                 event:
@@ -2768,9 +3935,31 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.shared.is_closed() {
+        if self.quitting {
+            self.leave_server();
             event_loop.exit();
             return;
+        }
+        // The connection ended (kick, timeout): the UI already shows the disconnect screen;
+        // drop the session and stay in menu mode around it.
+        if let Some(session) = &self.session {
+            if session.shared.is_closed() {
+                self.leave_server();
+            }
+        }
+        // After leaving (or a kick): no screen open means the disconnect screen was closed;
+        // the title screen returns, like vanilla's "Back to title screen".
+        if self.session.is_none()
+            && self.joining.is_none()
+            && self.ui.as_ref().is_some_and(|ui| !ui.screen_open())
+            && !self.screen_was_open
+            && self.menu.is_none()
+        {
+            if let Some(ui) = &self.ui {
+                if let Err(e) = ui.open_screen(haste_jvm::ScreenKind::Title) {
+                    tracing::warn!("opening the title screen: {e:#}");
+                }
+            }
         }
         if self
             .seconds
@@ -2914,6 +4103,41 @@ mod tests {
     use super::*;
 
     const DPP: f32 = 0.15; // vanilla's default sensitivity (50%) value
+
+    #[test]
+    fn gui_text_pos_finds_labels_and_slider_values() {
+        use haste_protocol::haste_core::gui::{GuiCommand, GuiFrame};
+        let frame = GuiFrame {
+            commands: vec![
+                GuiCommand::Text {
+                    x: 10,
+                    y: 20,
+                    text: "Done".into(),
+                    color: 0xffff_ffff,
+                    shadow: true,
+                },
+                GuiCommand::TranslatePush {
+                    dx: 5.0,
+                    dy: 7.0,
+                    dz: 0.0,
+                },
+                GuiCommand::Text {
+                    x: 10,
+                    y: 20,
+                    text: "Render Distance: 12".into(),
+                    color: 0xffff_ffff,
+                    shadow: true,
+                },
+                GuiCommand::TranslatePop,
+            ],
+            ..GuiFrame::default()
+        };
+        // An exact label, in the frame's coordinates.
+        assert_eq!(gui_text_pos(&frame, "Done"), Some((10, 20)));
+        // A slider's dynamic `label: value`, with the translation stack applied.
+        assert_eq!(gui_text_pos(&frame, "Render Distance"), Some((15, 27)));
+        assert_eq!(gui_text_pos(&frame, "FOV"), None);
+    }
 
     #[test]
     fn mouse_look_clamps_pitch() {

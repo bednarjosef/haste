@@ -20,7 +20,7 @@ use haste_protocol::haste_core::chunk::{BlockEntityData, ChunkData, LightData};
 use haste_protocol::haste_core::game::{DimensionInfo, GameMode, TICK_SECONDS};
 use haste_protocol::haste_core::input::{InputState, InteractInput};
 use haste_protocol::haste_core::math::Vec3;
-use haste_protocol::haste_core::model::{EntityInstance, PoseOverrides};
+use haste_protocol::haste_core::model::{BodyTransform, EntityInstance, PoseOverrides};
 use haste_protocol::haste_core::view::{BlockView, CollisionShapes, DirtyTracker};
 use haste_protocol::haste_core::{
     BlockPos, BlockStateId, ChunkPos, Direction, EntityId, Identifier, RegistryIndex, SectionPos,
@@ -206,6 +206,8 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
         head_yaw: yaw,
         scale: 1.0,
         pose,
+        body: BodyTransform::default(),
+        body_scale: Vec3::ONE,
         // The skin servers send for other players is not synced for ourselves; the renderer's
         // default skin for our UUID is what vanilla shows without a downloaded skin.
         skin: Some(haste_render::default_skin(uuid).0),
@@ -214,7 +216,11 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
         // tick of the hit, fading over the 10 hurt ticks (vanilla's hurtTime / hurtDuration).
         hurt: (view.hurt_ticks.min(crate::net::HURT_TILT_TICKS) as f32
             / crate::net::HURT_TILT_TICKS as f32),
+        item: None,
         decoration: None,
+        hands: [None, None],
+        equipment: Vec::new(),
+        head_item: None,
     }
 }
 
@@ -405,6 +411,13 @@ pub struct Shared {
     pub view: Mutex<ViewState>,
     /// Break cracks to draw (`Session::breaking_stages`), copied once per tick.
     pub breaking: Mutex<Vec<(BlockPos, u8)>>,
+    /// Lid animations to draw (`Session::lid_states`): (position, open value at the last
+    /// tick's start and end), copied once per tick; the render thread lerps by partial tick.
+    pub block_entity_lids: Mutex<Vec<(BlockPos, (f32, f32))>>,
+    /// Block entity type names by synced registry id (`minecraft:block_entity_type`), for
+    /// resolving what each stored block entity is; the static registry's order when the server
+    /// did not sync one (vanilla servers' ids agree with the data generator's).
+    pub block_entity_names: Vec<haste_core::Identifier>,
     /// Particles (`level_particles`): the game thread spawns and ticks them, the render
     /// thread draws them.
     pub particles: SharedParticles,
@@ -426,6 +439,13 @@ pub struct Shared {
     pub ui: Mutex<Option<Ui>>,
     /// The HUD's JVM failed to start (no JDK, missing cache): there will be no HUD, ever.
     pub hud_failed: AtomicBool,
+    /// The options the game is running with right now: loaded at join, then updated live from
+    /// the vanilla options screens through the option bridge ([`crate::ui::Ui`]). The render
+    /// thread copies it once per frame; the game thread is the only writer.
+    pub live_options: Mutex<haste_setup::options::Options>,
+    /// Bumped every time [`Shared::live_options`] changes, so the render thread copies the
+    /// options only when they changed (never a per-frame clone).
+    pub options_version: AtomicU64,
     /// F3's tps line: packets sent per second (f64 bits), updated once per second by the game
     /// thread from the connection's counters.
     pub debug_tx: AtomicU64,
@@ -434,7 +454,9 @@ pub struct Shared {
 }
 
 impl Shared {
-    /// Shared state for a fresh connection.
+    /// Shared state for a fresh connection. `block_entity_names` are the
+    /// `minecraft:block_entity_type` names by synced id (see [`Shared::block_entity_names`]).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         data: Arc<GameData>,
         world: World,
@@ -442,6 +464,8 @@ impl Shared {
         view_distance: i32,
         particles: haste_render::Particles,
         skin: (Identifier, bool),
+        block_entity_names: Vec<Identifier>,
+        options: haste_setup::options::Options,
     ) -> Self {
         let has_sky = world.dimension().has_skylight;
         Self {
@@ -487,6 +511,8 @@ impl Shared {
                 lightmap_tick_count: 0,
             }),
             breaking: Mutex::new(Vec::new()),
+            block_entity_lids: Mutex::new(Vec::new()),
+            block_entity_names,
             particles: Mutex::new(particles),
             input: Mutex::new(SharedInput::default()),
             sound: Mutex::new(None),
@@ -495,6 +521,8 @@ impl Shared {
             skin,
             ui: Mutex::new(None),
             hud_failed: AtomicBool::new(false),
+            live_options: Mutex::new(options),
+            options_version: AtomicU64::new(1),
             debug_tx: AtomicU64::new(0),
             debug_rx: AtomicU64::new(0),
         }
@@ -553,6 +581,9 @@ impl WorldSink for TrackedWorld<'_> {
     fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData) {
         WorldSink::set_block_entity(self.world, pos, data)
     }
+    fn block_state_at(&self, pos: BlockPos) -> BlockStateId {
+        WorldSink::block_state_at(self.world, pos)
+    }
     fn reset(&mut self, dim: &DimensionInfo) {
         let loaded: Vec<ChunkPos> = self.world.loaded_chunks().collect();
         for c in loaded {
@@ -578,7 +609,10 @@ impl WorldSink for TrackedWorld<'_> {
 
 /// Runs the 20 Hz game loop until the connection closes or `shared.stop` is set, then closes
 /// the connection. Must run inside the tokio runtime's context (the connection's tasks).
-pub fn run(mut driver: NetDriver, shared: Arc<Shared>) {
+/// `existing_ui`: a UI over an already-started JVM (menu mode joins through the title screen's
+/// multiplayer list, whose JVM and UI stay for the whole run); without one the HUD's JVM starts
+/// on its own thread in parallel with joining.
+pub fn run(mut driver: NetDriver, shared: Arc<Shared>, existing_ui: Option<Ui>) {
     let tick = Duration::from_secs_f64(TICK_SECONDS);
     let mut next = Instant::now();
     let mut gone = Vec::new();
@@ -590,7 +624,14 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>) {
     // The JVM for the HUD takes tens of seconds to start: on its own thread, in parallel with
     // joining (the connection would time out if we waited here). One warning, no retries: a
     // client without a JDK or cache keeps playing without a HUD.
-    let mut jvm = spawn_jvm(&shared);
+    let mut jvm = existing_ui
+        .map(|ui| {
+            // The menu already ticked this Ui; the game thread takes it over from here.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _ = tx.send(Some(HudArrival::Menu(ui)));
+            HudSlot { rx: Some(rx) }
+        })
+        .unwrap_or_else(|| spawn_jvm(&shared));
     let reason = loop {
         if shared.stop.load(Ordering::Relaxed) {
             break "left the game".to_string();
@@ -632,10 +673,50 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>) {
     driver.disconnect();
 }
 
-/// Starts the JVM for the HUD on its own thread (tens of seconds; the connection would time
-/// out if the game thread waited). On failure: one warning and `shared.hud_failed` set, then
+/// Applies the option changes a vanilla screen made to the running client: the shared live
+/// options (FOV, GUI scale, mouse sensitivity, volumes, ... the render thread reads them), the
+/// render distance the mesher uses (capped by the server's view distance, like at join) and the
+/// sound volumes. One info log line per applied option, the way vanilla applies each change the
+/// moment the player makes it (`OptionInstance.set` -> `onValueUpdate`).
+fn apply_option_changes(shared: &Shared, driver: &NetDriver, changes: Vec<(String, String)>) {
+    let mut sound_changed = false;
+    let mut render_distance = None;
+    let mut applied = false;
+    {
+        let mut live = shared.live_options.lock();
+        for (key, value) in changes {
+            if !live.apply_one(&key, &value) {
+                continue;
+            }
+            tracing::info!("applied option {key} = {value}");
+            applied = true;
+            sound_changed |= key.starts_with("soundCategory_");
+            if key == "renderDistance" {
+                render_distance = Some(live.render_distance as i32);
+            }
+        }
+    }
+    if !applied {
+        return;
+    }
+    // Bumped after the lock is released: a reader that sees the new version will see the new
+    // options when it locks.
+    shared.options_version.fetch_add(1, Ordering::Relaxed);
+    if let Some(rd) = render_distance {
+        // The server's view distance still caps what we mesh, like at join.
+        shared.view.lock().view_distance = driver.login().view_distance.min(rd);
+    }
+    if sound_changed {
+        let volumes = shared.live_options.lock().sound;
+        if let Some(sounds) = shared.sound.lock().as_mut() {
+            sounds.set_volumes(&volumes);
+        }
+    }
+}
+
+/// Starts the JVM for the HUD on its own thread (tens of seconds; the connection would time/// out if the game thread waited). On failure: one warning and `shared.hud_failed` set, then
 /// the client keeps running without a HUD.
-fn spawn_jvm(shared: &Arc<Shared>) -> JvmSlot {
+fn spawn_jvm(shared: &Arc<Shared>) -> HudSlot {
     let (tx, rx) = std::sync::mpsc::channel();
     let shared = shared.clone();
     std::thread::Builder::new()
@@ -653,22 +734,29 @@ fn spawn_jvm(shared: &Arc<Shared>) -> JvmSlot {
                         t.elapsed().as_secs_f32(),
                         host.proxy_summary()
                     );
-                    let _ = tx.send(Some(host));
+                    let _ = tx.send(Some(HudArrival::Fresh(host)));
                 }
                 Err(e) => {
                     tracing::warn!("no HUD: the JVM did not start: {e:#}");
                     shared.hud_failed.store(true, Ordering::Relaxed);
-                    let _ = tx.send(None);
                 }
             }
         })
         .expect("spawning the JVM thread");
-    JvmSlot { rx: Some(rx) }
+    HudSlot { rx: Some(rx) }
 }
 
-/// The JVM arriving on its own thread: `take()` once, at the start of a game tick.
-struct JvmSlot {
-    rx: Option<std::sync::mpsc::Receiver<Option<JvmHost>>>,
+/// What the HUD's slot delivers: a freshly started JVM, or menu mode's already-built UI.
+enum HudArrival {
+    /// The JVM thread started one (spawn_jvm): the `Ui` is built around it here.
+    Fresh(JvmHost),
+    /// Menu mode's UI (title screen, registries already loaded in Java).
+    Menu(Ui),
+}
+
+/// The JVM (or menu UI) arriving on its own thread: `take()` once, at the start of a game tick.
+struct HudSlot {
+    rx: Option<std::sync::mpsc::Receiver<Option<HudArrival>>>,
 }
 
 /// Takes `item` from a slot that a background thread fills once: `None` while it is still
@@ -686,10 +774,10 @@ fn take_slot<T>(rx: &mut Option<std::sync::mpsc::Receiver<Option<T>>>) -> Option
     }
 }
 
-impl JvmSlot {
-    /// The started JVM, if it arrived since the last tick. `None` while it is still starting
-    /// (or after it failed or was taken).
-    fn take(&mut self) -> Option<JvmHost> {
+impl HudSlot {
+    /// The JVM (or menu UI), if it arrived since the last tick. `None` while it is still
+    /// starting (or after it failed or was taken).
+    fn take_ui(&mut self) -> Option<HudArrival> {
         take_slot(&mut self.rx)
     }
 }
@@ -698,16 +786,20 @@ fn tick_once(
     driver: &mut NetDriver,
     shared: &Shared,
     gone: &mut Vec<SectionPos>,
-    jvm: &mut JvmSlot,
+    jvm: &mut HudSlot,
 ) -> anyhow::Result<()> {
     // Once the JVM arrives (the session joined before the game thread started): build the
-    // `Ui` and give the JVM the registries, tags and the local player.
-    if let Some(host) = jvm.take() {
+    // `Ui` and give the JVM the registries, tags and the local player. Menu mode's UI arrives
+    // pre-built (its JVM opened the title screen); only `joined` runs for it.
+    if let Some(ui) = jvm.take_ui() {
         let mut created = false;
         {
             let mut slot = shared.ui.lock();
             if slot.is_none() {
-                let ui = Ui::new(host);
+                let ui = match ui {
+                    HudArrival::Fresh(host) => Ui::new(host),
+                    HudArrival::Menu(ui) => ui,
+                };
                 let t = Instant::now();
                 match ui.joined(driver.connection(), driver.login()) {
                     Ok(()) => {
@@ -846,6 +938,12 @@ fn tick_once(
         breaking.clear();
         driver.session.breaking_stages(&mut breaking);
     }
+    // The lids' open targets (vanilla routes `block_event` to the block entity).
+    {
+        let mut lids = shared.block_entity_lids.lock();
+        lids.clear();
+        driver.session.lid_states(&mut lids);
+    }
     // Particles: spawn what the packets brought, then one 20 Hz simulation step. The camera
     // for `ClientLevel.doAddParticle`'s 32-block limiter is the player's eye.
     {
@@ -864,6 +962,12 @@ fn tick_once(
         // a second time). The server's `set_held_slot` reaches both sides alike.
         ui.set_selected_slot(driver.session.player.held_slot);
         ui.tick();
+        // Every option a vanilla screen changed this tick reaches the running client live
+        // (vanilla's `OptionInstance.onValueUpdate` callbacks, reported through the bridge).
+        let changes = ui.drain_option_changes();
+        if !changes.is_empty() {
+            apply_option_changes(shared, driver, changes);
+        }
         ui.drain_outgoing(&mut ui_out);
     }
     for p in ui_out {

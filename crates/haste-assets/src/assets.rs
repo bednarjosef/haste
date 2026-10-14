@@ -379,6 +379,9 @@ impl Assets {
         let mut gui_light: Option<bool> = None;
         let mut gui_display: Option<crate::model::DisplayTransform> = None;
         let mut firstperson_display: Option<crate::model::DisplayTransform> = None;
+        let mut thirdperson_display: Option<crate::model::DisplayTransform> = None;
+        let mut head_display: Option<crate::model::DisplayTransform> = None;
+        let mut ground_display: Option<crate::model::DisplayTransform> = None;
         let mut fixed_display: Option<crate::model::DisplayTransform> = None;
         let mut current = id.clone();
 
@@ -405,6 +408,24 @@ impl Assets {
                 gui_display = model
                     .display
                     .get("gui")
+                    .and_then(crate::model::DisplayTransform::parse);
+            }
+            if thirdperson_display.is_none() {
+                thirdperson_display = model
+                    .display
+                    .get("thirdperson_righthand")
+                    .and_then(crate::model::DisplayTransform::parse);
+            }
+            if head_display.is_none() {
+                head_display = model
+                    .display
+                    .get("head")
+                    .and_then(crate::model::DisplayTransform::parse);
+            }
+            if ground_display.is_none() {
+                ground_display = model
+                    .display
+                    .get("ground")
                     .and_then(crate::model::DisplayTransform::parse);
             }
             if fixed_display.is_none() {
@@ -443,6 +464,9 @@ impl Assets {
             gui_light: gui_light.unwrap_or(false),
             gui_display,
             firstperson_display,
+            thirdperson_display,
+            head_display,
+            ground_display,
             fixed_display,
         })
     }

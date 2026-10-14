@@ -1275,11 +1275,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "flate2",
  "haste-core",
+ "haste-protocol",
  "jni",
  "parking_lot",
  "serde_json",
  "thiserror 2.0.21",
+ "tokio",
  "tracing",
  "zip",
 ]

@@ -79,6 +79,8 @@ public final class Proxies {
         // Haste plays no music: never show the now-playing toast
         options.musicToast().set(net.minecraft.client.MusicToastDisplayState.NEVER);
         set(minecraft, "options", Options.class, options);
+        // every option change (and key binding, polled per tick) reaches Rust live
+        OptionBridge.install();
         // which F3 entries are on (vanilla's list; the HUD's crosshair asks it)
         set(minecraft, "debugEntries", net.minecraft.client.gui.components.debug.DebugScreenEntryList.class,
             new net.minecraft.client.gui.components.debug.DebugScreenEntryList(gameDir, net.minecraft.util.datafix.DataFixers.getDataFixer()));

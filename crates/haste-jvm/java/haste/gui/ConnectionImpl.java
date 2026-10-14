@@ -48,15 +48,25 @@ public final class ConnectionImpl {
     public static net.minecraft.client.multiplayer.chat.report.AbuseReportSender sender(
         net.minecraft.client.multiplayer.chat.report.ReportingContext r) { return SENDER; }
 
-    /** No draft report is ever kept (Haste has no reporting UI): the callback runs at once. */
+     * The pause screen's Disconnect / "Save and Quit" goes through the report draft check
+     * (vanilla: a draft asks whether to discard it first). Haste has no report drafts, so the
+     * action runs at once, like vanilla's no-draft path.
+     */
     public static void draftReportHandled(net.minecraft.client.multiplayer.chat.report.ReportingContext r,
-        net.minecraft.client.Minecraft m, net.minecraft.client.gui.screens.Screen lastScreen,
-        Runnable onDiscard, boolean quitToTitle) { onDiscard.run(); }
+        net.minecraft.client.Minecraft minecraft, net.minecraft.client.gui.screens.Screen lastScreen,
+        Runnable onDiscard, boolean quitToTitle) {
+        onDiscard.run();
+    }
 
     public static net.minecraft.world.flag.FeatureFlagSet enabledFeatures(ClientPacketListener c) { return LevelImpl.features; }
-    /** Whether the server's feature flags include these (vanilla: ClientPacketListener.isFeatureEnabled). */
+
+    /**
+     * Whether the joined server enables the given flags (vanilla: {@code ClientPacketListener.isFeatureEnabled},
+     * a subset test over the configuration phase's {@code update_enabled_features} set). Vanilla's kept
+     * game-mode bodies ask this before sending a creative slot's item ({@code handleCreativeModeItemAdd/Drop}).
+     */
     public static boolean isFeatureEnabled(ClientPacketListener c, net.minecraft.world.flag.FeatureFlagSet required) {
-        return required.isSubsetOf(LevelImpl.features);
+        return required.isSubsetOf(enabledFeatures(c));
     }
     /** Players seen this session (social interactions screen): not tracked yet. */
     public static java.util.Map<java.util.UUID, net.minecraft.client.multiplayer.PlayerInfo> getSeenPlayers(ClientPacketListener c) { return java.util.Map.of(); }
@@ -118,13 +128,15 @@ public final class ConnectionImpl {
     public static void broadcastClientInformation(ClientPacketListener c, net.minecraft.server.level.ClientInformation information) {}
 
     /**
-     * The creative inventory's search trees: vanilla's own object with empty trees. The creative search
-     * finds nothing (the index would need the synced item registry's display names and tags, forwarded to
-     * Java like other registry data — later), but the screen opens and browsing works. Reloads are no-ops:
-     * vanilla's `reloaders` start empty and nothing fills them.
+     * The creative inventory's search trees: vanilla's own object (tier 3, plain data holder). The screen
+     * fills it itself: the creative screen's constructor and per-tick tab refresh call
+     * {@code updateCreativeTooltips} and {@code updateCreativeTags} (vanilla:
+     * {@code CreativeModeInventoryScreen.tryRebuildTabContents}), and a play-phase {@code update_tags}
+     * rebuilds the tag tree (vanilla: {@code ClientPacketListener.handleUpdateTags}, see
+     * {@link Registries#tags}); both build on vanilla's background executor, off the render thread.
      */
     public static net.minecraft.client.multiplayer.SessionSearchTrees searchTrees(ClientPacketListener c) {
         return SEARCH_TREES;
     }
-    private static final net.minecraft.client.multiplayer.SessionSearchTrees SEARCH_TREES = new net.minecraft.client.multiplayer.SessionSearchTrees();
+    static final net.minecraft.client.multiplayer.SessionSearchTrees SEARCH_TREES = new net.minecraft.client.multiplayer.SessionSearchTrees();
 }
