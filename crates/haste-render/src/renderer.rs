@@ -262,6 +262,38 @@ mod tests {
         }
     }
 
+    /// The look direction (Minecraft: yaw 0 = +z, pitch +90 = straight down) lands on view -Z
+    /// at every angle, including straight up and down, where a look-at would degenerate.
+    #[test]
+    fn view_rotation_looks_along_minus_z_at_every_pitch() {
+        for &(yaw, pitch) in &[
+            (0.0f32, 0.0f32),
+            (90.0, 30.0),
+            (-135.0, -60.0),
+            (37.0, 90.0),
+            (37.0, -90.0),
+            (180.0, 89.9),
+        ] {
+            let mut cam = camera_with(ViewBob::default(), 0.0);
+            cam.yaw = yaw;
+            cam.pitch = pitch;
+            let (y, p) = (yaw.to_radians(), pitch.to_radians());
+            let forward = glam::Vec3::new(-p.cos() * y.sin(), -p.sin(), p.cos() * y.cos());
+            let v = Renderer::view_rotation(&cam).transform_vector3(forward);
+            assert!(
+                (v - glam::Vec3::NEG_Z).length() < 1e-5,
+                "{yaw} {pitch}: {v}"
+            );
+            // The camera's right never flips: at yaw 0 the player's left (+x) is view -X.
+            let left = glam::Vec3::new(y.cos(), 0.0, y.sin());
+            let l = Renderer::view_rotation(&cam).transform_vector3(left);
+            assert!(
+                (l - glam::Vec3::NEG_X).length() < 1e-5,
+                "{yaw} {pitch}: {l}"
+            );
+        }
+    }
+
     #[test]
     fn view_transform_is_identity_without_effects() {
         let m = Renderer::view_transform(&camera_with(ViewBob::default(), 0.0));
@@ -1336,22 +1368,22 @@ impl Renderer {
     /// produces -1..1, so use perspective_infinite_rh style correction).
     fn view_projection(camera: &Camera, aspect: f32) -> glam::Mat4 {
         let proj = glam::Mat4::perspective_rh(camera.fov_deg.to_radians(), aspect, 0.05, 4096.0);
-        let yaw = camera.yaw.to_radians();
-        let pitch = camera.pitch.to_radians();
-        // Minecraft: yaw 0 = +z (south), pitch positive = down.
-        let forward = glam::Vec3::new(
-            -pitch.cos() * yaw.sin(),
-            -pitch.sin(),
-            pitch.cos() * yaw.cos(),
-        )
-        .normalize();
         let eye = glam::Vec3::new(
             camera.pos.x as f32,
             camera.pos.y as f32,
             camera.pos.z as f32,
         );
-        let view = glam::Mat4::look_to_rh(eye, forward, glam::Vec3::Y);
+        let view = Self::view_rotation(camera) * glam::Mat4::from_translation(-eye);
         proj * Self::view_transform(camera) * view
+    }
+
+    /// The camera's rotation as vanilla builds it (`Camera.setRotation`: a YXZ rotation from yaw
+    /// and pitch, plus the roll), so looking straight up or down (pitch +-90) is exact and never
+    /// flips, unlike a look-at with a fixed up vector. View space looks along -Z.
+    fn view_rotation(camera: &Camera) -> glam::Mat4 {
+        glam::Mat4::from_rotation_z(-camera.roll_deg.to_radians())
+            * glam::Mat4::from_rotation_x(camera.pitch.to_radians())
+            * glam::Mat4::from_rotation_y((camera.yaw + 180.0).to_radians())
     }
 
     /// Frustum culling of sections (Pomme cull.comp reference; CPU here).
@@ -1399,21 +1431,7 @@ impl Renderer {
             // The hand is drawn in view space, like vanilla's `renderItemInHand` from the
             // camera's own view matrix: the hurt tilt roll is included, so the hand rolls with
             // the world (vanilla applies `bobHurt` to the hand as well).
-            let yaw = frame.camera.yaw.to_radians();
-            let pitch = frame.camera.pitch.to_radians();
-            let forward = glam::Vec3::new(
-                -pitch.cos() * yaw.sin(),
-                -pitch.sin(),
-                pitch.cos() * yaw.cos(),
-            )
-            .normalize();
-            let up = if frame.camera.roll_deg == 0.0 {
-                glam::Vec3::Y
-            } else {
-                glam::Quat::from_axis_angle(forward, frame.camera.roll_deg.to_radians())
-                    * glam::Vec3::Y
-            };
-            let view = glam::Mat4::look_to_rh(glam::Vec3::ZERO, forward, up);
+            let view = Self::view_rotation(&frame.camera);
             // The hand gets the same pose stack as the world view (vanilla's
             // `renderItemInHand` applies bobHurt and bobView to it too).
             let m = Self::view_transform(&frame.camera);
