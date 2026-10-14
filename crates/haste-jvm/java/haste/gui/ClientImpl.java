@@ -19,6 +19,13 @@ public final class ClientImpl {
     // ---- Minecraft ----
     public static Minecraft getInstance() { return Proxies.minecraft; }
 
+    /**
+     * The DataFixer every saved file goes through (vanilla builds {@code DataFixers.getDataFixer()} once in
+     * {@code Minecraft}'s constructor). Real vanilla Java: options.txt loads through it ({@code Options.dataFix}).
+     */
+    private static final com.mojang.datafixers.DataFixer FIXER = net.minecraft.util.datafix.DataFixers.getDataFixer();
+    public static com.mojang.datafixers.DataFixer getFixerUpper(Minecraft m) { return FIXER; }
+
     /** The mod check of the title screen and the debug overlay: Haste is the vanilla client rebuilt, no mods. */
     public static net.minecraft.util.ModCheck checkModStatus() {
         return new net.minecraft.util.ModCheck(net.minecraft.util.ModCheck.Confidence.PROBABLY_NOT, "haste");

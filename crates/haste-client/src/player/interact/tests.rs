@@ -556,3 +556,67 @@ fn player_action_status_values_match_the_jar() {
     assert_eq!(action::SWAP_ITEM_WITH_OFFHAND, 7);
     assert_eq!(action::STAB, 8);
 }
+
+/// Vanilla's `Minecraft.continueAttack`: while the block is breaking the arm swings every tick,
+/// but `LivingEntity.SwingState.startIfAble` refuses a restart less than half way through the
+/// 6 tick swing, so the swing runs 1/6, 2/6, 3/6, then starts over.
+#[test]
+fn a_held_attack_swings_the_hand_every_tick() {
+    let mut r = Rig::new(GameMode::Survival);
+    assert!(!r.p.hand.is_swinging(), "no swing before the attack");
+    // The press tick starts the swing (`Minecraft.startAttack`).
+    r.tick(ATTACK);
+    assert!(r.p.hand.is_swinging(), "the attack started a swing");
+    let mut progress = Vec::new();
+    for _ in 0..8 {
+        r.tick(ATTACK);
+        let item = r.p.main_hand().item;
+        r.p.hand.tick(0.0, (0.0, 90.0), true, false, item, 4.0);
+        progress.push(r.p.hand.attack().1);
+    }
+    for (got, want) in progress.iter().zip([
+        0.0,
+        1.0 / 6.0,
+        2.0 / 6.0,
+        3.0 / 6.0,
+        0.0,
+        1.0 / 6.0,
+        2.0 / 6.0,
+        3.0 / 6.0,
+    ]) {
+        assert!((got - want).abs() < 1e-6, "{got} != {want}");
+    }
+    assert!(r.p.hand.is_swinging(), "still mining, still swinging");
+}
+
+/// A right click with an item in hand swings it (`Minecraft.startUseItem` swings the result of
+/// `InteractionResult.SUCCESS`) and puts the hand down for the item switch.
+#[test]
+fn a_use_swings_the_hand_and_drops_it() {
+    let mut r = Rig::new(GameMode::Survival);
+    let place = InteractInput {
+        use_item: true,
+        ..InteractInput::default()
+    };
+    // The hotbar's first slot holds a block to place.
+    r.p.int.hotbar[0] = item(1);
+    r.tick(place);
+    assert!(r.p.hand.is_swinging(), "the use started a swing");
+    // `player.itemUsed(hand)` zeroed the equip progress, and the hand started at 0 (vanilla's
+    // field default), so the pair for this tick is (0, 0).
+    assert_eq!(r.p.hand.equip(), (0.0, 0.0));
+    // The held item is new this tick, so the shown item still differs from it: the progress
+    // stays 0 and the new item is shown. The tick after brings the hand back up towards
+    // ((itemSwapTicker + 1) / (20 / attack_speed))^3 = (2 / 5)^3 = 0.064, under the 0.1 at
+    // which the item is switched.
+    let item = r.p.main_hand().item;
+    r.p.hand.tick(0.0, (0.0, 90.0), true, false, item, 4.0);
+    assert_eq!(r.p.hand.equip(), (0.0, 0.0));
+    assert_eq!(r.p.hand.shown_item(), item);
+    r.p.hand.tick(0.0, (0.0, 90.0), true, false, item, 4.0);
+    assert!(
+        (r.p.hand.equip().1 - 0.064).abs() < 1e-6,
+        "{}",
+        r.p.hand.equip().1
+    );
+}

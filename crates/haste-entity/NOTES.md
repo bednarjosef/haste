@@ -2,6 +2,28 @@
 
 Newest at the top.
 
+- **2026-10-14 Mob models from the recorder dump.** `model_dump.rs` loads
+  `cache/oracle/26.3/entity_models.json` once (361 layers) and converts each layer to a shared
+  `Arc<CubeModel>`; the dump is in vanilla model space (y down, ground at y = 24 model units),
+  so conversion shifts every pivot's y by -24 - cube origins are pivot-relative and stay. The
+  dump's root `PartPose` is not recorded (the recorder walks the root's children), which means
+  layers whose vanilla `LayerDefinition` was built with a root `MeshTransformer.scaling(f)`
+  (villager/witch/illagers 0.9375, husk 1.0625, wither skeleton 1.2, cave spider 0.7, ghast 4.5,
+  happy ghast 4.0, elder guardian 2.35, giant 6.0) lose it - `registry.rs`'s table carries the
+  scale per entity type and `ModelLibrary::get` applies it (a clone per type, once, then
+  cached). Per-axis inflate and part scale are folded to their mean (vanilla uses uniform
+  values nearly everywhere; the exceptions are spin-attack arrows and end-crystal cores, not in
+  the table). `registry.rs` maps 51 entity types to (layer, texture, scale) after their vanilla
+  renderers (adult, default variant only); kind -> name goes through the `entity_type` section
+  of the datagen registries.json read directly (haste-data's `Registries::parse` is private);
+  everything else keeps the dimension box. Mod-readiness: the table is a fallback default, not
+  a registry - when mods add entities their layers should register into a lookup this module
+  exposes, keyed by layer id, before the static table.
+- **2026-10-14 Head aim on dumped models.** `animation::head_only` gives non-player models
+  with a "head" part the same yaw/pitch aim players get (clamped to vanilla's 75 degrees);
+  limb animation for mobs is still pending (the models stand in their rest pose, walking is a
+  later task). It allocates one rotation entry per entity per frame, same as the player path.
+
 - **2026-10-12 (Task 2) Player-type detection.** Without the entity_type registry (world-and-data) we cannot
   resolve `RegistryIndex -> minecraft:player`. Heuristic: any entity whose UUID has a player-info
   entry is a player (real players always have one, other entity types never do). When world-and-data lands,

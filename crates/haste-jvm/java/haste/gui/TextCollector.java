@@ -20,9 +20,14 @@ public final class TextCollector implements ActiveTextCollector {
     private Parameters params;
     private int color = -1;
 
-    /** Widget labels: white, or grey for inactive widgets (approximate, see NOTES.md). */
+    /**
+     * Widget labels: white, or grey for inactive buttons (vanilla's {@code AbstractWidget.getColor} returns
+     * the inactive grey only where the widget's own rendering consults {@code active}; the pause screen's
+     * title is an inactive {@code StringWidget} that vanilla draws white, so only button-like widgets grey).
+     */
     static TextCollector forWidget(AbstractWidget w) {
-        WIDGET.color = w != null && !w.active ? 0xFFA0A0A0 : -1;
+        boolean button = w instanceof net.minecraft.client.gui.components.AbstractButton;
+        WIDGET.color = w != null && !w.active && button ? 0xFFA0A0A0 : -1;
         WIDGET.params = null;
         return WIDGET;
     }

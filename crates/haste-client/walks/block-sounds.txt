@@ -1,0 +1,23 @@
+# Own block sounds check (roadmap A2b): walk, sprint and jump around on flat ground,
+# then fall a few blocks. The headless summary line "own block sounds produced while
+# walking" must show a nonzero count (vanilla's client-side footsteps; the server
+# never sends them for the acting player). The bot must be an operator.
+# HASTE_WALK_SCRIPT=crates/haste-client/walks/block-sounds.txt \
+#   haste --headless --server 127.0.0.1:25691 --seconds 60
+wait 40
+cmd gamemode survival
+cmd difficulty peaceful
+cmd time set day
+wait 20
+mark walk start
+hold 100 forward yaw=0
+mark walk done
+hold 60 forward sprint yaw=90
+mark sprint done
+hold 20 jump forward yaw=180
+mark jumps done
+cmd tp @s ~ ~6 ~
+wait 60
+mark fell
+hold 40 forward yaw=0
+mark end
