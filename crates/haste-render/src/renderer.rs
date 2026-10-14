@@ -218,8 +218,14 @@ struct CameraUniform {
     cam_pos: [f32; 4],
     view_proj: [[f32; 4]; 4],
     fog_color: [f32; 4],
-    fog_start: f32,
-    fog_end: f32,
+    /// Fog bands (vanilla FogData): environmental (spherical) and render distance
+    /// (cylindrical) start/end, sky fog end, cloud fog end.
+    fog_env_start: f32,
+    fog_env_end: f32,
+    fog_rd_start: f32,
+    fog_rd_end: f32,
+    fog_sky_end: f32,
+    fog_cloud_end: f32,
     /// Sky light multiplier by time of day (`chunk.wgsl`).
     daylight: f32,
     _pad: f32,
@@ -562,7 +568,7 @@ impl Renderer {
             .as_ref()
             .map(|(_, f)| *f)
             .unwrap_or(wgpu::TextureFormat::Rgba8UnormSrgb);
-        let make_pipeline = |label: &str, blend: Option<wgpu::BlendState>| {
+        let make_pipeline = |label: &str, fragment: &str, blend: Option<wgpu::BlendState>| {
             gpu.device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(label),
@@ -587,7 +593,7 @@ impl Renderer {
                     },
                     fragment: Some(wgpu::FragmentState {
                         module: &shader,
-                        entry_point: Some("fs_main"),
+                        entry_point: Some(fragment),
                         compilation_options: Default::default(),
                         targets: &[Some(wgpu::ColorTargetState {
                             format: surface_format,
@@ -603,7 +609,13 @@ impl Renderer {
                     depth_stencil: Some(wgpu::DepthStencilState {
                         format: wgpu::TextureFormat::Depth24Plus,
                         depth_write_enabled: Some(true),
-                        depth_compare: Some(wgpu::CompareFunction::Less),
+                        // Vanilla's terrain depth test: TERRAIN_SNIPPET inherits
+                        // `DepthStencilState.DEFAULT` (GREATER_THAN_OR_EQUAL), drawn
+                        // against a depth cleared to 0. Haste clears to 1, so the
+                        // same rule is LessEqual: a quad may share a depth (vanilla's
+                        // coplanar model elements, e.g. the grass block's side
+                        // overlay over its side texture, both draw).
+                        depth_compare: Some(wgpu::CompareFunction::LessEqual),
                         stencil: Default::default(),
                         bias: Default::default(),
                     }),
@@ -612,10 +624,11 @@ impl Renderer {
                     cache: None,
                 })
         };
-        let pipeline_solid = make_pipeline("chunk-solid", None);
-        let pipeline_cutout = make_pipeline("chunk-cutout", None);
+        let pipeline_solid = make_pipeline("chunk-solid", "fs_main", None);
+        let pipeline_cutout = make_pipeline("chunk-cutout", "fs_main", None);
         let pipeline_translucent = make_pipeline(
             "chunk-translucent",
+            "fs_translucent",
             Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
         );
 
@@ -1246,16 +1259,31 @@ impl Renderer {
         self.entity
             .prepare(frame.entities, None, frame.camera.pos, &mut self.assets);
         {
+            // The hand is drawn in view space, like vanilla's `renderItemInHand` from the
+            // camera's own view matrix: the hurt tilt roll is included, so the hand rolls with
+            // the world (vanilla applies `bobHurt` to the hand as well).
             let yaw = frame.camera.yaw.to_radians();
             let pitch = frame.camera.pitch.to_radians();
             let forward = glam::Vec3::new(
                 -pitch.cos() * yaw.sin(),
                 -pitch.sin(),
                 pitch.cos() * yaw.cos(),
+            )
+            .normalize();
+            let up = if frame.camera.roll_deg == 0.0 {
+                glam::Vec3::Y
+            } else {
+                glam::Quat::from_axis_angle(forward, frame.camera.roll_deg.to_radians())
+                    * glam::Vec3::Y
+            };
+            let view = glam::Mat4::look_to_rh(glam::Vec3::ZERO, forward, up);
+            self.entity.prepare_hand(
+                self.first_person.as_ref(),
+                view.inverse(),
+                (frame.camera.yaw, frame.camera.pitch),
+                frame.partial_tick,
+                &mut self.assets,
             );
-            let view = glam::Mat4::look_to_rh(glam::Vec3::ZERO, forward, glam::Vec3::Y);
-            self.entity
-                .prepare_hand(self.first_person.as_ref(), view.inverse(), &mut self.assets);
         }
         self.overlay.prepare(
             frame.camera.pos,
@@ -1279,9 +1307,52 @@ impl Renderer {
             },
             aspect,
         );
-        self.sky
-            .prepare(&frame.camera, &frame.sky, view_proj, rot_view_proj);
-        let fog_color = self.sky.fog_linear();
+        // Vanilla fog: the overworld's clear-air environment; other dimensions keep the
+        // sky-state approximation until their own fog task (vanilla picks per dimension
+        // attributes there, not per environment).
+        let camera_forward = {
+            let yaw = frame.camera.yaw.to_radians();
+            let pitch = frame.camera.pitch.to_radians();
+            [
+                -pitch.cos() * yaw.sin(),
+                -pitch.sin(),
+                pitch.cos() * yaw.cos(),
+            ]
+        };
+        let world_min_y = (self.min_section << 4) as f32;
+        let (fog_srgb, fog_data) = if frame.sky.dimension_has_sky {
+            crate::fog::frame_fog(
+                &frame.sky,
+                camera_forward,
+                frame.camera.pos.y as f32,
+                world_min_y,
+            )
+        } else {
+            let colors =
+                crate::sky::sky_colors(&frame.sky, self.sky.kind, frame.sky.fog_end / 16.0);
+            (
+                colors.fog,
+                crate::fog::FogData {
+                    // The previous single spherical band from the client.
+                    environmental_start: frame.sky.fog_start,
+                    environmental_end: frame.sky.fog_end,
+                    render_distance_start: f32::MAX,
+                    render_distance_end: f32::MAX,
+                    sky_end: frame.sky.fog_end,
+                    cloud_end: frame.sky.fog_end,
+                    environment: crate::fog::FogEnvironment::Atmospheric,
+                },
+            )
+        };
+        self.sky.prepare(
+            &frame.camera,
+            &frame.sky,
+            view_proj,
+            rot_view_proj,
+            &fog_data,
+            fog_srgb,
+        );
+        let fog_color = crate::sky::linear(fog_srgb);
         let camera_uniform = CameraUniform {
             cam_pos: [
                 frame.camera.pos.x as f32,
@@ -1292,8 +1363,12 @@ impl Renderer {
             // Camera-relative: the shaders subtract cam_pos from world positions.
             view_proj: rot_view_proj.to_cols_array_2d(),
             fog_color: [fog_color[0], fog_color[1], fog_color[2], 0.0],
-            fog_start: frame.sky.fog_start,
-            fog_end: frame.sky.fog_end,
+            fog_env_start: fog_data.environmental_start,
+            fog_env_end: fog_data.environmental_end,
+            fog_rd_start: fog_data.render_distance_start,
+            fog_rd_end: fog_data.render_distance_end,
+            fog_sky_end: fog_data.sky_end,
+            fog_cloud_end: fog_data.cloud_end,
             daylight: self.sky.daylight(),
             _pad: 0.0,
         };
