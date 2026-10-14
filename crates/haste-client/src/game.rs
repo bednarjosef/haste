@@ -210,19 +210,12 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
         // default skin for our UUID is what vanilla shows without a downloaded skin.
         skin: Some(haste_render::default_skin(uuid).0),
         nametag: None,
-// MERGE(item-entities side):
-        // Our own model flashes red in third person like other entities: the hurt tilt follows
-        // the same 10-tick ease-out curve, so its size (out of the 14-degree peak) is the
-        // hurt strength.
-        hurt: (view.hurt_tilt.abs() / 14.0).clamp(0.0, 1.0),
-        item: None,
-// MERGE(main side):
         // Our own model flashes red in third person like other entities: full strength on the
         // tick of the hit, fading over the 10 hurt ticks (vanilla's hurtTime / hurtDuration).
         hurt: (view.hurt_ticks.min(crate::net::HURT_TILT_TICKS) as f32
             / crate::net::HURT_TILT_TICKS as f32),
+        item: None,
         decoration: None,
-// MERGE end
     }
 }
 

@@ -1829,11 +1829,8 @@ mod tests {
                     scale: [0.625; 3],
                 },
                 firstperson: haste_assets::DisplayTransform::IDENTITY,
-// MERGE(item-entities side):
                 ground: haste_assets::DisplayTransform::IDENTITY,
-// MERGE(main side):
                 fixed: haste_assets::DisplayTransform::IDENTITY,
-// MERGE end
                 gui_light_front: false,
                 transformation: None,
             }],

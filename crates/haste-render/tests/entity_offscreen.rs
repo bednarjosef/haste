@@ -154,11 +154,8 @@ fn entities_offscreen() {
         skin: Some(skin.clone()),
         nametag: Some("Steve".into()),
         hurt: 0.0,
-// MERGE(item-entities side):
         item: None,
-// MERGE(main side):
         decoration: None,
-// MERGE end
     };
     let boxed = EntityInstance {
         id: EntityId(2),
@@ -172,11 +169,8 @@ fn entities_offscreen() {
         skin: None,
         nametag: None,
         hurt: 0.0,
-// MERGE(item-entities side):
         item: None,
-// MERGE(main side):
         decoration: None,
-// MERGE end
     };
     let entities = vec![player, boxed];
     let camera = Camera {
@@ -318,39 +312,12 @@ fn entities_offscreen() {
     renderer.set_first_person(None);
 }
 
-// MERGE(item-entities side):
 /// Dropped item entities draw the item itself (the GUI item model path), flat and block
 /// items both, spinning and bobbing; an unknown item draws the missing texture instead
-/// of the box placeholder. Saves target/render-checks/items.png.
+/// of the box placeholder. Saves target/render-checks/item_*.png.
 #[test]
 #[ignore = "needs the client jar, datagen reports, and a Vulkan driver (source scripts/env.sh)"]
 fn dropped_items_offscreen() {
-// MERGE(main side):
-/// A hanging decoration instance (the model is unused; the renderer draws the decoration).
-fn decoration(id: i32, pos: glam::DVec3, decoration: Decoration) -> EntityInstance {
-    EntityInstance {
-        id: EntityId(id),
-        model: haste_entity::models::box_for(1.0, 1.0),
-        pos,
-        yaw: 0.0,
-        pitch: 0.0,
-        head_yaw: 0.0,
-        scale: 1.0,
-        pose: PoseOverrides::default(),
-        skin: None,
-        nametag: None,
-        hurt: 0.0,
-        decoration: Some(decoration),
-    }
-}
-
-/// Item frames (one with a diamond, one glow) and a 2x2 painting drawn offscreen: the same
-/// scene as the RCON screenshot but deterministic (no server). Saves
-/// `target/render-checks/frames.png`.
-#[test]
-#[ignore = "needs the client jar, datagen reports and a Vulkan driver (source scripts/env.sh)"]
-fn frames_and_paintings_offscreen() {
-// MERGE end
     let jar = haste_core::paths::client_jar();
     let mut assets =
         haste_assets::Assets::open(&jar, &haste_core::paths::assets_dir(), "26.3").unwrap();
@@ -371,7 +338,6 @@ fn frames_and_paintings_offscreen() {
         renderer.update_world(&world, &[], ChunkPos::new(0, 0), 4);
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-// MERGE(item-entities side):
     let item = |n: &str| {
         data.registries
             .index("minecraft:item", &haste_core::Identifier::minecraft(n))
@@ -394,6 +360,7 @@ fn frames_and_paintings_offscreen() {
             count,
             age: 0.0,
         }),
+        decoration: None,
     };
     let camera = Camera {
         pos: glam::DVec3::new(0.0, 1.7, -2.5),
@@ -401,6 +368,7 @@ fn frames_and_paintings_offscreen() {
         pitch: 10.0,
         fov_deg: 70.0,
         roll_deg: 0.0,
+        bob: haste_render::ViewBob::default(),
     };
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
     std::fs::create_dir_all(&out).unwrap();
@@ -478,7 +446,54 @@ fn frames_and_paintings_offscreen() {
         diff(&b, &c) > 40,
         "ages 10 and 20 look the same: {}",
         diff(&b, &c)
-// MERGE(main side):
+    );
+}
+
+/// A hanging decoration instance (the model is unused; the renderer draws the decoration).
+fn decoration(id: i32, pos: glam::DVec3, decoration: Decoration) -> EntityInstance {
+    EntityInstance {
+        id: EntityId(id),
+        model: haste_entity::models::box_for(1.0, 1.0),
+        pos,
+        yaw: 0.0,
+        pitch: 0.0,
+        head_yaw: 0.0,
+        scale: 1.0,
+        pose: PoseOverrides::default(),
+        skin: None,
+        nametag: None,
+        hurt: 0.0,
+        item: None,
+        decoration: Some(decoration),
+    }
+}
+
+/// Item frames (one with a diamond, one glow) and a 2x2 painting drawn offscreen: the same
+/// scene as the RCON screenshot but deterministic (no server). Saves
+/// `target/render-checks/frames.png`.
+#[test]
+#[ignore = "needs the client jar, datagen reports and a Vulkan driver (source scripts/env.sh)"]
+fn frames_and_paintings_offscreen() {
+    let jar = haste_core::paths::client_jar();
+    let mut assets =
+        haste_assets::Assets::open(&jar, &haste_core::paths::assets_dir(), "26.3").unwrap();
+    let data = haste_data::GameData::load().unwrap();
+    let mut renderer = Renderer::new_offscreen(640, 480, &mut assets, &data.blocks).unwrap();
+    renderer.set_item_registry(&data.registries);
+    let world = Flat {
+        stone: data
+            .blocks
+            .default_state(&haste_core::Identifier::minecraft("stone"))
+            .unwrap(),
+    };
+    let dirty: Vec<SectionPos> = (-1..=1)
+        .flat_map(|x| (-1..=1).map(move |z| SectionPos::new(x, 0, z)))
+        .collect();
+    renderer.update_world(&world, &dirty, ChunkPos::new(0, 0), 4);
+    for _ in 0..200 {
+        renderer.update_world(&world, &[], ChunkPos::new(0, 0), 4);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     let camera = Camera {
         pos: glam::DVec3::new(0.0, 2.2, -4.0),
         yaw: 0.0,
@@ -536,6 +551,5 @@ fn frames_and_paintings_offscreen() {
     assert!(
         changed > 2000,
         "the decorations changed {changed} pixels (item frame, glow frame, painting)"
-// MERGE end
     );
 }

@@ -648,16 +648,11 @@ impl EntityStore {
     }
 
     /// Interpolated draw list for the renderer (renderer). Players get the humanoid model (classic
-// MERGE(item-entities side):
-    /// layout; skins arrive with renderer's texture work), everything else a generic box from its
-    /// current dimensions; a dropped item entity draws as the item itself. Only humanoids get
-    /// animation overrides (the box has no limbs).
-// MERGE(main side):
     /// layout; skins arrive with renderer's texture work), known mob types the model the recorder
-    /// dumped for their vanilla layer, everything else a generic box from its current dimensions.
-    /// Each model's `setupAnim` (walk swing, head aim, attack, pose) is applied by part name;
-    /// models with no "head" part (the box) get no overrides.
-// MERGE end
+    /// dumped for their vanilla layer, everything else a generic box from its current dimensions;
+    /// a dropped item entity draws as the item itself. Each model's `setupAnim` (walk swing, head
+    /// aim, attack, pose) is applied by part name; models with no "head" part (the box) get no
+    /// overrides.
     pub fn render_instances(&self, partial_tick: f32, out: &mut Vec<EntityInstance>) {
         for slot in self.slots.iter().flatten() {
             // Hanging entities (item frames, paintings) are drawn specially, and the client
@@ -713,11 +708,8 @@ impl EntityStore {
                 skin: None,
                 nametag: slot.nametag.clone(),
                 hurt: hurt_strength(slot),
-// MERGE(item-entities side):
                 item: item_of(slot, partial_tick),
-// MERGE(main side):
                 decoration,
-// MERGE end
             });
         }
     }

@@ -39,13 +39,10 @@ pub struct ItemModelPart {
     pub gui: DisplayTransform,
     /// `display.firstperson_righthand` (identity when the chain has none).
     pub firstperson: DisplayTransform,
-// MERGE(item-entities side):
     /// `display.ground` (identity when the chain has none): dropped item entities.
     pub ground: DisplayTransform,
-// MERGE(main side):
     /// `display.fixed` (identity when the chain has none): item frames and other fixed mounts.
     pub fixed: DisplayTransform,
-// MERGE end
     /// `gui_light: front` (flat items) instead of the default side lighting.
     pub gui_light_front: bool,
     /// Composite `transformation` applied to the geometry before the display transform.
@@ -116,11 +113,8 @@ impl Assets {
                 tints,
                 gui: DisplayTransform::IDENTITY,
                 firstperson: DisplayTransform::IDENTITY,
-// MERGE(item-entities side):
                 ground: DisplayTransform::IDENTITY,
-// MERGE(main side):
                 fixed: DisplayTransform::IDENTITY,
-// MERGE end
                 gui_light_front: false,
                 transformation: leaf.transformation,
             });
@@ -130,13 +124,10 @@ impl Assets {
         let firstperson = resolved
             .firstperson_display
             .unwrap_or(DisplayTransform::IDENTITY);
-// MERGE(item-entities side):
         let ground = resolved
             .ground_display
             .unwrap_or(DisplayTransform::IDENTITY);
-// MERGE(main side):
         let fixed = resolved.fixed_display.unwrap_or(DisplayTransform::IDENTITY);
-// MERGE end
         let geometry = if leaf.special {
             ItemGeometry::None
         } else if resolved.elements.is_empty() {
@@ -164,11 +155,8 @@ impl Assets {
             tints,
             gui,
             firstperson,
-// MERGE(item-entities side):
             ground,
-// MERGE(main side):
             fixed,
-// MERGE end
             gui_light_front: resolved.gui_light,
             transformation: leaf.transformation,
         })

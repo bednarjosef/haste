@@ -112,13 +112,10 @@ pub struct ResolvedModel {
     pub(crate) gui_display: Option<DisplayTransform>,
     /// `display.firstperson_righthand`, likewise.
     pub(crate) firstperson_display: Option<DisplayTransform>,
-// MERGE(item-entities side):
     /// `display.ground`, likewise (dropped item entities).
     pub(crate) ground_display: Option<DisplayTransform>,
-// MERGE(main side):
     /// `display.fixed` (item frames and other fixed mounts), likewise.
     pub(crate) fixed_display: Option<DisplayTransform>,
-// MERGE end
 }
 
 /// A model `display` entry: rotation (degrees, applied X then Y then Z), translation (in
