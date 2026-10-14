@@ -408,12 +408,6 @@ impl Session {
         // own view distance (login packet) caps what we mesh below.
         opts.client_information.view_distance = options.render_distance as i8;
         let mut driver: NetDriver = rt.block_on(NetDriver::connect(opts))?;
-// MERGE(block-entity side):
-        let regs = driver.connection().registries();
-        let biomes = net::synced_biome_count(regs).unwrap_or(64);
-        let biome_climates = biomes::biome_climates(regs);
-        let login = driver.login();
-// MERGE(main side):
         driver.session.fov_effect_scale = options.fov_effect_scale;
         let (biomes, biome_climates, type_names, sounds, painting_variants) = {
             let regs = driver.connection().registries();
@@ -432,7 +426,6 @@ impl Session {
         };
         let login = driver.login().clone();
         let debug_env = DebugEnv::new(driver.connection().registries(), login.simulation_distance);
-// MERGE end
         let local = (login.entity_id, login.profile.uuid.as_u128());
         tracing::info!(
             "joined {address} as {}: {:?}, dimension {}, view distance {}",
@@ -446,12 +439,13 @@ impl Session {
         let mut driver = driver;
         driver.session.set_entity_type_names(type_names);
         let view_distance = login.view_distance.min(options.render_distance as i32);
-// MERGE(block-entity side):
         // Block entity type names by synced registry id (the static registry's order when the
         // server did not sync one), and the block states whose lids `block_event` drives.
-        let block_entity_names = block_entity_type_names(regs, &data);
+        let block_entity_names = {
+            let regs = driver.connection().registries();
+            block_entity_type_names(regs, &data)
+        };
         let lid_states = lid_block_states(&data);
-// MERGE(main side):
         // The particle types of the datagen registry (the synced one has no data we need):
         // one atlas built once, shared by the pool (name resolution) and the renderer.
         let particle_ids: Vec<haste_protocol::haste_core::Identifier> =
@@ -469,7 +463,6 @@ impl Session {
         let mut entities = net::new_entity_store(entity_types);
         tracing::info!("synced painting variants: {}", painting_variants.len());
         entities.set_painting_variants(painting_variants);
-// MERGE end
         let shared = Arc::new(Shared::new(
             data,
             world,
@@ -631,17 +624,11 @@ impl WorldFeed {
     }
 
     /// Copies the interpolated entity instances, gives players their default skin and samples
-// MERGE(block-entity side):
-    /// each entity's light for the renderer. In the third-person perspectives the local
-    /// player's own model is included (the server does not spawn us as an entity, so it is
-    /// built here from the shared view). The frame's block entity instances are built first,
-    /// so one call returns both slices the frame draws.
-// MERGE(main side):
     /// each entity's light for the renderer. The local player's own model is always included
     /// (the server does not spawn us as an entity, so it is built here from the shared view):
     /// the GUI's inventory preview needs it in first person too, and the caller tells the
-    /// renderer not to draw it in the world then (`FrameInput::camera_entity`).
-// MERGE end
+    /// renderer not to draw it in the world then (`FrameInput::camera_entity`). The frame's
+    /// block entity instances are built first, so one call returns both slices the frame draws.
     fn entities(
         &mut self,
         shared: &Shared,
@@ -803,7 +790,6 @@ impl WorldFeed {
     }
 }
 
-// MERGE(block-entity side):
 /// A block state `facing` property value as a `Direction`.
 fn direction_of_property(v: &str) -> Option<Direction> {
     Direction::ALL.iter().find(|d| d.name() == v).copied()
@@ -857,7 +843,7 @@ fn is_double_chest_half(
         && connected_direction(neighbour_facing, neighbour_half).opposite()
             == connected_direction(facing, our_half)
 }
-// MERGE(main side):
+
 /// `Camera.calculateFov` + `Camera.modifyFovBasedOnDeathOrFluid` (vanilla): the saved FOV
 /// times the interpolated smoothed modifier, then the death and fluid adjustments (in that
 /// order, as vanilla applies them).
@@ -924,7 +910,6 @@ pub fn view_bob(
 }
 
 /// Builds this frame's camera and sky from the shared view at `now`. `yaw`/`pitch` are the
-// MERGE end
 /// input layer's look; the player's server rotation offset is added here so mouse look is
 /// smooth at frame rate while the player itself turns once per tick. In the third-person
 /// perspectives the camera is moved off the eye (`game::third_person_camera`). The FOV is the
@@ -1678,12 +1663,8 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         last_camera = camera;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         feed.set_first_person(&shared, &mut renderer, perspective);
-// MERGE(block-entity side):
         let (entities, block_entities) =
-            feed.entities(&shared, &mut renderer, perspective, session.local, partial);
-// MERGE(main side):
-        let entities = feed.entities(&shared, &mut renderer, session.local, partial);
-// MERGE end
+            feed.entities(&shared, &mut renderer, session.local, partial);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
         // The HUD, like the window: waiting for the JVM, then one `Ui` for this render thread.
@@ -1774,11 +1755,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let view = *shared.view.lock();
     let entities = feed.instances.len();
     println!(
-// MERGE(block-entity side):
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} entity instances (perspective {}, local player {}), {} block entities, target {:?}",
-// MERGE(main side):
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} entity instances (perspective {}, local player {}), {} particles drawn, target {:?}",
-// MERGE end
+        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} entity instances (perspective {}, local player {}), {} particles drawn, {} block entities, target {:?}",
         file.display(),
         image.width(),
         image.height(),
@@ -1794,11 +1771,8 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         entities,
         args.perspective,
         perspective.draws_player(),
-// MERGE(block-entity side):
-        stats.block_entities_drawn,
-// MERGE(main side):
         renderer.particles_drawn(),
-// MERGE end
+        stats.block_entities_drawn,
         view.block_target
     );
     drop(session);
@@ -1987,17 +1961,8 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             Instant::now(),
         );
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
-// MERGE(block-entity side):
-        let (entities, block_entities) = feed.entities(
-            &shared,
-            &mut renderer,
-            game::Perspective::FirstPerson,
-            session.local,
-            partial,
-        );
-// MERGE(main side):
-        let entities = feed.entities(&shared, &mut renderer, session.local, partial);
-// MERGE end
+        let (entities, block_entities) =
+            feed.entities(&shared, &mut renderer, session.local, partial);
         let block_target = view.block_target;
         let breaking = shared.breaking.lock().clone();
         if ui.is_none() {
@@ -2375,17 +2340,8 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         vd = v;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         feed.set_first_person(&shared, &mut renderer, game::Perspective::FirstPerson);
-// MERGE(block-entity side):
-        let (entities, block_entities) = feed.entities(
-            &shared,
-            &mut renderer,
-            game::Perspective::FirstPerson,
-            session.local,
-            partial,
-        );
-// MERGE(main side):
-        let entities = feed.entities(&shared, &mut renderer, session.local, partial);
-// MERGE end
+        let (entities, block_entities) =
+            feed.entities(&shared, &mut renderer, session.local, partial);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
         let frame = FrameInput {
@@ -2463,17 +2419,8 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         let feed_start = Instant::now();
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         let feed_ms = feed_start.elapsed().as_secs_f32() * 1000.0;
-// MERGE(block-entity side):
-        let (entities, block_entities) = feed.entities(
-            &shared,
-            &mut renderer,
-            game::Perspective::FirstPerson,
-            session.local,
-            partial_tick,
-        );
-// MERGE(main side):
-        let entities = feed.entities(&shared, &mut renderer, session.local, partial_tick);
-// MERGE end
+        let (entities, block_entities) =
+            feed.entities(&shared, &mut renderer, session.local, partial_tick);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
         let frame = FrameInput {
@@ -2741,19 +2688,9 @@ impl App {
         let t1 = Instant::now();
         self.feed
             .set_first_person(&self.shared, renderer, self.perspective);
-// MERGE(block-entity side):
-        let (entities, block_entities) = self.feed.entities(
-            &self.shared,
-            renderer,
-            self.perspective,
-            self.local,
-            partial,
-        );
-// MERGE(main side):
-        let entities = self
-            .feed
-            .entities(&self.shared, renderer, self.local, partial);
-// MERGE end
+        let (entities, block_entities) =
+            self.feed
+                .entities(&self.shared, renderer, self.local, partial);
         let block_target = self.shared.view.lock().block_target;
         self.breaking.clear();
         self.breaking

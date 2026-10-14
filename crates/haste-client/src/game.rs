@@ -405,7 +405,6 @@ pub struct Shared {
     pub view: Mutex<ViewState>,
     /// Break cracks to draw (`Session::breaking_stages`), copied once per tick.
     pub breaking: Mutex<Vec<(BlockPos, u8)>>,
-// MERGE(block-entity side):
     /// Lid animations to draw (`Session::lid_states`): (position, open value at the last
     /// tick's start and end), copied once per tick; the render thread lerps by partial tick.
     pub block_entity_lids: Mutex<Vec<(BlockPos, (f32, f32))>>,
@@ -413,11 +412,9 @@ pub struct Shared {
     /// resolving what each stored block entity is; the static registry's order when the server
     /// did not sync one (vanilla servers' ids agree with the data generator's).
     pub block_entity_names: Vec<haste_core::Identifier>,
-// MERGE(main side):
     /// Particles (`level_particles`): the game thread spawns and ticks them, the render
     /// thread draws them.
     pub particles: SharedParticles,
-// MERGE end
     /// Input for the next tick.
     pub input: Mutex<SharedInput>,
     /// The sound and music output (None until the client sets it up; headless leaves it
@@ -499,12 +496,9 @@ impl Shared {
                 lightmap_tick_count: 0,
             }),
             breaking: Mutex::new(Vec::new()),
-// MERGE(block-entity side):
             block_entity_lids: Mutex::new(Vec::new()),
             block_entity_names,
-// MERGE(main side):
             particles: Mutex::new(particles),
-// MERGE end
             input: Mutex::new(SharedInput::default()),
             sound: Mutex::new(None),
             stop: AtomicBool::new(false),
@@ -866,12 +860,12 @@ fn tick_once(
         breaking.clear();
         driver.session.breaking_stages(&mut breaking);
     }
-// MERGE(block-entity side):
+    // The lids' open targets (vanilla routes `block_event` to the block entity).
     {
         let mut lids = shared.block_entity_lids.lock();
         lids.clear();
         driver.session.lid_states(&mut lids);
-// MERGE(main side):
+    }
     // Particles: spawn what the packets brought, then one 20 Hz simulation step. The camera
     // for `ClientLevel.doAddParticle`'s 32-block limiter is the player's eye.
     {
@@ -883,7 +877,6 @@ fn tick_once(
         }
         driver.session.particle_spawned = spawns.len();
         particles.tick();
-// MERGE end
     }
     if let Some(ui) = shared.ui.lock().as_ref() {
         // The hotbar authority is the player (the client picks with 1-9 and the wheel and tells

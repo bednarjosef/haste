@@ -368,7 +368,6 @@ pub struct NetCounters {
     pub own_sounds: u64,
 }
 
-// MERGE(block-entity side):
 /// One block entity's lid animation (vanilla `ChestLidController` for chests and ender chests,
 /// `ShulkerBoxBlockEntity.updateAnimation`'s progress for shulker boxes: both step their value
 /// by 0.1 per tick towards the open target). `old` is the value at the start of the last tick,
@@ -395,7 +394,9 @@ impl LidAnim {
     /// Whether the lid is at rest closed (nothing left to animate, no need to copy it out).
     fn at_rest_closed(&self) -> bool {
         !self.open && self.value == 0.0
-// MERGE(main side):
+    }
+}
+
 /// The client's per-tick lightmap state: vanilla `LightmapRenderStateExtractor` (the
 /// block-light flicker random walk, the effect-driven night vision and darkness) plus
 /// `GameRenderer`'s boss-overlay world darkening and `ClientLevel`'s lightning sky flash. The
@@ -540,7 +541,6 @@ impl LightmapState {
     /// `LightningBolt.tick` on the client: `ClientLevel.setSkyFlashTime(2)`.
     fn lightning(&mut self) {
         self.sky_flash_time = 2;
-// MERGE end
     }
 }
 
@@ -916,12 +916,9 @@ impl Session {
                 entities.clear();
                 self.entity_ids.clear();
                 self.breaking.clear();
-// MERGE(block-entity side):
                 self.lids.clear();
-// MERGE(main side):
                 self.fireworks.clear();
                 self.attached_firework = None;
-// MERGE end
                 self.dimension = dim;
                 // A respawn is a new body: no vehicle, no riding.
                 self.player.set_vehicle(None, SeatPoint::ZERO);
@@ -1231,15 +1228,11 @@ impl Session {
             world.set_block(pos, state);
             self.lids.remove(&pos);
         }
-// MERGE(block-entity side):
-        self.tick_hurt_tilt();
         // Every lid's animation step (vanilla ticks each chest's `ChestLidController` and each
         // shulker box's `updateAnimation` once per client tick).
         for lid in self.lids.values_mut() {
             lid.tick();
         }
-// MERGE(main side):
-// MERGE end
     }
 
     /// Break cracks to draw: other players' (`block_destruction`) and our own.
@@ -1248,7 +1241,6 @@ impl Session {
         out.extend(self.player.break_progress());
     }
 
-// MERGE(block-entity side):
     /// Lid animations to draw this frame, as (position, value at the last tick's start and
     /// end) pairs for the partial-tick lerp. Only open or animating lids are listed (a closed
     /// chest at rest draws the same as no entry).
@@ -1259,7 +1251,8 @@ impl Session {
                 .filter(|(_, l)| !l.at_rest_closed())
                 .map(|(pos, l)| (*pos, (l.old, l.value))),
         );
-// MERGE(main side):
+    }
+
     /// `level_particles`: resolve the particle type against the static registry's names and
     /// queue the spawn (see the renderer's particles module for the semantics; unknown types
     /// are skipped there, logged once). `minecraft:dust`'s option data (colour, size) is the
@@ -1283,7 +1276,6 @@ impl Session {
             override_limiter: p.override_limiter,
             dust,
         });
-// MERGE end
     }
 
     fn push_chat(&mut self, line: String) {

@@ -61,6 +61,7 @@ fn render(
         partial_tick: 0.0,
         block_target: None,
         breaking: &[],
+        camera_entity: None,
     };
     renderer.render(&frame).unwrap();
     renderer.read_back().unwrap()
@@ -115,6 +116,7 @@ fn block_entities_offscreen() {
         pitch: 18.0,
         fov_deg: 70.0,
         roll_deg: 0.0,
+        bob: haste_render::ViewBob::default(),
     };
 
     // Warm-up renders: the section-visibility walk lags a frame (the previous mask is drawn

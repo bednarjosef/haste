@@ -622,7 +622,6 @@ impl EntityRenderer {
         self.item_models.clear();
     }
 
-// MERGE(block-entity side):
     /// Poses the frame's block entities (chests, shulker boxes) into the same vertex stream as
     /// the entities, after `prepare`: one draw call covers both, and each texture lands in the
     /// shared atlas on first use (the per-vertex `rect` picks it). `visible` decides per
@@ -650,8 +649,6 @@ impl EntityRenderer {
                 }
             };
             let rect = self.texture_rect(&texture, assets);
-            let (sky, block) = inst.light;
-            let light = lightmap(sky, block);
             let out = &mut self.vertices;
             let emit = |out: &mut Vec<EntityVertex>,
                         model: &CubeModel,
@@ -659,10 +656,10 @@ impl EntityRenderer {
                         pose: &PoseOverrides,
                         m: Mat4,
                         rect: [u32; 4],
-                        light: f32| {
+                        light: (u8, u8)| {
                 emit_part(out, model, part, pose, m, rect, light, 0.0);
             };
-            crate::blockentity::emit_block_entity(out, inst, camera, rect, light, &emit);
+            crate::blockentity::emit_block_entity(out, inst, camera, rect, &emit);
             drawn += 1;
         }
         if self.vertices.len() > self.vertex_capacity {
@@ -675,7 +672,8 @@ impl EntityRenderer {
         }
         self.drawn += drawn;
         drawn
-// MERGE(main side):
+    }
+
     /// The item model of a registry index, loaded once and cached (`air` and unknown ids map to
     /// `None`, never a panic).
     fn item_model_for(
@@ -727,7 +725,6 @@ impl EntityRenderer {
         let arc = Arc::new(quads);
         self.frame_models.insert((glow, map), arc.clone());
         arc
-// MERGE end
     }
 
     /// The empty hand's arm model for the skin's arm width, built once (no per-frame work).

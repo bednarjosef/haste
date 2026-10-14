@@ -412,19 +412,28 @@ pub fn chest_open_curve(open: f32) -> f32 {
 }
 
 /// The entity renderer's cube emitter, as a type (light and shading are its job).
-pub(crate) type EmitPart<'a> =
-    &'a dyn Fn(&mut Vec<EntityVertex>, &CubeModel, &ModelPart, &PoseOverrides, Mat4, [u32; 4], f32);
+pub(crate) type EmitPart<'a> = &'a dyn Fn(
+    &mut Vec<EntityVertex>,
+    &CubeModel,
+    &ModelPart,
+    &PoseOverrides,
+    Mat4,
+    [u32; 4],
+    (u8, u8),
+);
 
 /// Poses one block entity into `out` (camera-relative, the entity stream's convention).
-/// `rect` is the texture's atlas rectangle, `light` the lightmap brightness 0..1.
+/// `rect` is the texture's atlas rectangle, `light` the lightmap coordinates (block, sky).
 pub(crate) fn emit_block_entity(
     out: &mut Vec<EntityVertex>,
     inst: &BlockEntityInstance,
     camera: glam::DVec3,
     rect: [u32; 4],
-    light: f32,
     emit_part: EmitPart,
 ) {
+    // The instance stores (sky, block); the vertex wants (block, sky).
+    let (sky, block) = inst.light;
+    let light = (block, sky);
     match inst.kind {
         BlockEntityKind::Chest(_material) => {
             let models = chest_models();
@@ -494,10 +503,10 @@ mod tests {
                  pose: &PoseOverrides,
                  m: Mat4,
                  rect: [u32; 4],
-                 light: f32| {
+                 light: (u8, u8)| {
             emit_part(out, model, part, pose, m, rect, light, 0.0);
         };
-        emit_block_entity(&mut out, inst, glam::DVec3::ZERO, [0, 0, 64, 64], 1.0, &f);
+        emit_block_entity(&mut out, inst, glam::DVec3::ZERO, [0, 0, 64, 64], &f);
         out
     }
 
