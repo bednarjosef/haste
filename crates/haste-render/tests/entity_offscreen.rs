@@ -605,7 +605,10 @@ fn equipment_offscreen() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 
-    let item = |n: &str| data.registries.index("minecraft:item", &Identifier::minecraft(n));
+    let item = |n: &str| {
+        data.registries
+            .index("minecraft:item", &Identifier::minecraft(n))
+    };
     let sword = item("iron_sword").expect("iron_sword in the item registry");
     // The iron equipment asset resolves and its humanoid layer texture is in the jar.
     let info = assets
@@ -625,10 +628,9 @@ fn equipment_offscreen() {
         ("iron_boots", EquipmentSlot::Feet),
     ] {
         let idx = item(name).unwrap_or_else(|| panic!("{name} in the item registry"));
-        let eq = data
-            .item_components
-            .equippable(idx)
-            .unwrap_or_else(|| panic!("{name} has an equippable component (is the report cached?)"));
+        let eq = data.item_components.equippable(idx).unwrap_or_else(|| {
+            panic!("{name} has an equippable component (is the report cached?)")
+        });
         assert_eq!(eq.slot, slot);
         equipment.push(EquipmentPiece {
             slot,
@@ -715,7 +717,10 @@ fn equipment_offscreen() {
         .zip(img.pixels())
         .filter(|(a, b)| a.0 != b.0)
         .count();
-    eprintln!("equipment drew into {changed} pixels; entities_drawn={}", renderer.entities_drawn());
+    eprintln!(
+        "equipment drew into {changed} pixels; entities_drawn={}",
+        renderer.entities_drawn()
+    );
     assert!(
         changed > 200,
         "the held sword and armour changed {changed} pixels"
@@ -723,14 +728,22 @@ fn equipment_offscreen() {
     assert_eq!(renderer.entities_drawn(), 1);
 
     // The custom head (a carved pumpkin) and a dyed leather chestplate both change pixels.
-    let pumpkin_img = render_scene(&mut renderer, &world, std::slice::from_ref(&pumpkin), camera);
+    let pumpkin_img = render_scene(
+        &mut renderer,
+        &world,
+        std::slice::from_ref(&pumpkin),
+        camera,
+    );
     pumpkin_img.save(out.join("equipment_head.png")).unwrap();
     let head_changed = base
         .pixels()
         .zip(pumpkin_img.pixels())
         .filter(|(a, b)| a.0 != b.0)
         .count();
-    assert!(head_changed > 100, "the pumpkin changed {head_changed} pixels");
+    assert!(
+        head_changed > 100,
+        "the pumpkin changed {head_changed} pixels"
+    );
     let dyed_img = render_scene(&mut renderer, &world, std::slice::from_ref(&dyed), camera);
     dyed_img.save(out.join("equipment_dyed.png")).unwrap();
     let dyed_changed = base
@@ -738,7 +751,10 @@ fn equipment_offscreen() {
         .zip(dyed_img.pixels())
         .filter(|(a, b)| a.0 != b.0)
         .count();
-    assert!(dyed_changed > 100, "the dyed leather changed {dyed_changed} pixels");
+    assert!(
+        dyed_changed > 100,
+        "the dyed leather changed {dyed_changed} pixels"
+    );
     let winged_img = render_scene(&mut renderer, &world, std::slice::from_ref(&winged), camera);
     winged_img.save(out.join("equipment_elytra.png")).unwrap();
     let winged_changed = base
@@ -746,5 +762,8 @@ fn equipment_offscreen() {
         .zip(winged_img.pixels())
         .filter(|(a, b)| a.0 != b.0)
         .count();
-    assert!(winged_changed > 100, "the elytra changed {winged_changed} pixels");
+    assert!(
+        winged_changed > 100,
+        "the elytra changed {winged_changed} pixels"
+    );
 }

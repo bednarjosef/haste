@@ -611,7 +611,11 @@ impl EntityRenderer {
             for layer in info.layers_of(layer_type) {
                 // `EquipmentLayerRenderer.getColorForLayer`: the stack's dye, else the layer's
                 // undyed colour, else no tint.
-                let tint = piece.dye.or(layer.dyeable).map(argb_linear).unwrap_or([1.0; 3]);
+                let tint = piece
+                    .dye
+                    .or(layer.dyeable)
+                    .map(argb_linear)
+                    .unwrap_or([1.0; 3]);
                 let rect = self.texture_rect(&layer.texture, assets);
                 emit_part_tinted(
                     &mut out,
@@ -631,7 +635,11 @@ impl EntityRenderer {
                 let elytra = elytra_model();
                 let wings_root = root * Mat4::from_translation(Vec3::new(0.0, 0.0, 0.125));
                 for layer in info.layers_of("wings") {
-                    let tint = piece.dye.or(layer.dyeable).map(argb_linear).unwrap_or([1.0; 3]);
+                    let tint = piece
+                        .dye
+                        .or(layer.dyeable)
+                        .map(argb_linear)
+                        .unwrap_or([1.0; 3]);
                     let rect = self.texture_rect(&layer.texture, assets);
                     emit_part_tinted(
                         &mut out,
@@ -655,7 +663,14 @@ impl EntityRenderer {
                 if let Some(head_m) = part_matrix(&e.model.root, &e.pose, Mat4::IDENTITY, "head") {
                     let head_root = root * head_m * custom_head_layer_matrix();
                     let mut out = std::mem::take(&mut self.vertices);
-                    self.emit_item(&mut out, &model, head_root, light, ItemDisplay::Head, assets);
+                    self.emit_item(
+                        &mut out,
+                        &model,
+                        head_root,
+                        light,
+                        ItemDisplay::Head,
+                        assets,
+                    );
                     self.vertices = out;
                 }
             }
@@ -1325,8 +1340,16 @@ pub(crate) fn item_display_matrix(
 ) -> Mat4 {
     let display = if left {
         haste_assets::DisplayTransform {
-            rotation: [display.rotation[0], -display.rotation[1], -display.rotation[2]],
-            translation: [-display.translation[0], display.translation[1], display.translation[2]],
+            rotation: [
+                display.rotation[0],
+                -display.rotation[1],
+                -display.rotation[2],
+            ],
+            translation: [
+                -display.translation[0],
+                display.translation[1],
+                display.translation[2],
+            ],
             scale: display.scale,
         }
     } else {
@@ -1813,19 +1836,26 @@ fn build_armor_model(slot: haste_core::model::EquipmentSlot) -> Arc<CubeModel> {
         uv,
         mirror,
     };
-    let part = |name: &str, pivot: [f32; 3], cubes: Vec<Cube>, children: Vec<ModelPart>| ModelPart {
-        name: name.to_owned(),
-        pivot: pivot.into(),
-        rotation: Vec3::ZERO,
-        visible: true,
-        cubes,
-        children,
-    };
+    let part =
+        |name: &str, pivot: [f32; 3], cubes: Vec<Cube>, children: Vec<ModelPart>| ModelPart {
+            name: name.to_owned(),
+            pivot: pivot.into(),
+            rotation: Vec3::ZERO,
+            visible: true,
+            cubes,
+            children,
+        };
     let head = || {
         part(
             "head",
             [0.0, -24.0, 0.0],
-            vec![cube([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [0, 0], outer, false)],
+            vec![cube(
+                [-4.0, -8.0, -4.0],
+                [8.0, 8.0, 8.0],
+                [0, 0],
+                outer,
+                false,
+            )],
             vec![part(
                 "hat",
                 [0.0, 0.0, 0.0],
@@ -1844,7 +1874,13 @@ fn build_armor_model(slot: haste_core::model::EquipmentSlot) -> Arc<CubeModel> {
         part(
             "body",
             [0.0, -24.0, 0.0],
-            vec![cube([-4.0, 0.0, -2.0], [8.0, 12.0, 4.0], [16, 16], inflate, false)],
+            vec![cube(
+                [-4.0, 0.0, -2.0],
+                [8.0, 12.0, 4.0],
+                [16, 16],
+                inflate,
+                false,
+            )],
             Vec::new(),
         )
     };
@@ -1853,13 +1889,25 @@ fn build_armor_model(slot: haste_core::model::EquipmentSlot) -> Arc<CubeModel> {
             part(
                 "right_arm",
                 [-5.0, -22.0, 0.0],
-                vec![cube([-3.0, -2.0, -2.0], [4.0, 12.0, 4.0], [40, 16], outer, false)],
+                vec![cube(
+                    [-3.0, -2.0, -2.0],
+                    [4.0, 12.0, 4.0],
+                    [40, 16],
+                    outer,
+                    false,
+                )],
                 Vec::new(),
             ),
             part(
                 "left_arm",
                 [5.0, -22.0, 0.0],
-                vec![cube([-1.0, -2.0, -2.0], [4.0, 12.0, 4.0], [40, 16], outer, true)],
+                vec![cube(
+                    [-1.0, -2.0, -2.0],
+                    [4.0, 12.0, 4.0],
+                    [40, 16],
+                    outer,
+                    true,
+                )],
                 Vec::new(),
             ),
         ]
@@ -1869,13 +1917,25 @@ fn build_armor_model(slot: haste_core::model::EquipmentSlot) -> Arc<CubeModel> {
             part(
                 "right_leg",
                 [-1.9, -12.0, 0.0],
-                vec![cube([-2.0, 0.0, -2.0], [4.0, 12.0, 4.0], [0, 16], inflate, false)],
+                vec![cube(
+                    [-2.0, 0.0, -2.0],
+                    [4.0, 12.0, 4.0],
+                    [0, 16],
+                    inflate,
+                    false,
+                )],
                 Vec::new(),
             ),
             part(
                 "left_leg",
                 [1.9, -12.0, 0.0],
-                vec![cube([-2.0, 0.0, -2.0], [4.0, 12.0, 4.0], [0, 16], inflate, true)],
+                vec![cube(
+                    [-2.0, 0.0, -2.0],
+                    [4.0, 12.0, 4.0],
+                    [0, 16],
+                    inflate,
+                    true,
+                )],
                 Vec::new(),
             ),
         ]
@@ -1923,7 +1983,11 @@ pub(crate) fn elytra_model() -> Arc<CubeModel> {
                 rotation: rotation.into(),
                 visible: true,
                 cubes: vec![cube(
-                    if mirror { [0.0, 0.0, 0.0] } else { [-10.0, 0.0, 0.0] },
+                    if mirror {
+                        [0.0, 0.0, 0.0]
+                    } else {
+                        [-10.0, 0.0, 0.0]
+                    },
                     mirror,
                 )],
                 children: vec![],
@@ -2679,7 +2743,10 @@ mod tests {
         let mut pose = PoseOverrides::default();
         let rest = part_matrix(&model.root, &pose, Mat4::IDENTITY, "right_arm").unwrap();
         // The right arm's own pivot (no override): (-5, -22, 0).
-        assert_eq!(rest.transform_point3(Vec3::ZERO), Vec3::new(-5.0, -22.0, 0.0));
+        assert_eq!(
+            rest.transform_point3(Vec3::ZERO),
+            Vec3::new(-5.0, -22.0, 0.0)
+        );
         // A pose override rotates the arm about its pivot.
         pose.rotations.push((
             "right_arm".into(),
@@ -2733,7 +2800,12 @@ mod tests {
         assert_eq!(chest.root.children.len(), 3);
         assert!(chest.root.children.iter().any(|c| c.name == "left_arm"));
         let legs = humanoid_armor(S::Legs);
-        let body = legs.root.children.iter().find(|c| c.name == "body").unwrap();
+        let body = legs
+            .root
+            .children
+            .iter()
+            .find(|c| c.name == "body")
+            .unwrap();
         assert_eq!(body.cubes[0].inflate, 0.5);
         let feet = humanoid_armor(S::Feet);
         assert_eq!(feet.root.children.len(), 2);
