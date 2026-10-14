@@ -11,6 +11,7 @@
 # env: HASTE_VANILLA_WIDTH/HEIGHT (default 1280x720), HASTE_VANILLA_USER (default HasteRef),
 #      HASTE_VANILLA_VIDEO (SDL video driver, default x11),
 #      HASTE_VANILLA_NO_BUILD=1 to skip rebuilding the recorder mod
+#      HASTE_VANILLA_OPTIONS="key:value ..." extra options.txt lines (e.g. "renderDistance:12 maxFps:260")
 # Output: whatever the scenario records, under $HASTE_CACHE/oracle/26.3/ (screenshots/, traces/);
 # client log in $HASTE_CACHE/vanilla-reference/game/logs/latest.log.
 # Never touches ~/.minecraft: the game dir lives under the cache.
@@ -87,7 +88,7 @@ PY
 )
 ASSET_INDEX=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["assetIndex"]["id"])' "$VERSION_JSON")
 
-"$ROOT/scripts/vanilla-options.sh" "$GAME/options.txt" "$WIDTH" "$HEIGHT"
+"$ROOT/scripts/vanilla-options.sh" "$GAME/options.txt" "$WIDTH" "$HEIGHT" ${HASTE_VANILLA_OPTIONS:-}
 
 UUID=$(python3 -I -c 'import hashlib,sys,uuid; h=bytearray(hashlib.md5(("OfflinePlayer:"+sys.argv[1]).encode()).digest()); h[6]=h[6]&0x0f|0x30; h[8]=h[8]&0x3f|0x80; print(uuid.UUID(bytes=bytes(h)))' "$USERNAME")
 

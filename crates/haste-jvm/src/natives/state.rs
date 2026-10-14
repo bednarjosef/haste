@@ -71,6 +71,23 @@ pub(crate) extern "system" fn send_chat<'l>(
     .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// An option changed in a vanilla options screen (`haste.gui.OptionBridge`): the options.txt key
+/// and value, exactly as `Options.save` would write them. Queued for the client to apply live.
+pub(crate) extern "system" fn options_changed<'l>(
+    mut env: EnvUnowned<'l>,
+    _c: JClass<'l>,
+    key: JString<'l>,
+    value: JString<'l>,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let key = key.try_to_string(env)?;
+        let value = value.try_to_string(env)?;
+        with_state(|s| s.option_changes.push((key, value)));
+        Ok(())
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// Copies the primitive player/debug state into Java's mirror arrays (one call per frame and tick).
 pub(crate) extern "system" fn mirror<'l>(
     mut env: EnvUnowned<'l>,
@@ -85,6 +102,16 @@ pub(crate) extern "system" fn mirror<'l>(
         Ok(())
     })
     .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// The F3 overlay's string values (see `GameState::debug_text`), one call per frame while on.
+pub(crate) extern "system" fn debug_text<'l>(
+    mut env: EnvUnowned<'l>,
+    _c: JClass<'l>,
+) -> JString<'l> {
+    let text = with_state(|s| s.debug_text());
+    env.with_env(|env| -> jni::errors::Result<JString<'l>> { JString::from_str(env, text) })
+        .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 pub(crate) extern "system" fn request_disconnect<'l>(_env: EnvUnowned<'l>, _c: JClass<'l>) {

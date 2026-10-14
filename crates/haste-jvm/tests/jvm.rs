@@ -929,6 +929,112 @@ fn inventory_screen() {
     );
 }
 
+/// The creative inventory: vanilla's `CreativeModeInventoryScreen` over the connection's
+/// feature flags and search trees. In creative mode E opens it, the tabs are built for the
+/// server's enabled features (chest and oak_door appear), the search tab filters by typed
+/// text, and picking an item from a tab sends `set_creative_slot` (which vanilla's kept
+/// `handleCreativeModeItemAdd` gates on `isFeatureEnabled`).
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM, data generator reports)"]
+fn creative_inventory_and_search() {
+    use haste_core::gui::GuiCommand;
+    use haste_jvm::keys;
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    h.clear_unimplemented().unwrap();
+    reset(gui);
+    gui.with_state(|s| {
+        s.in_world = true;
+        s.game_mode = haste_core::game::GameMode::Creative;
+        s.permission_level = 0;
+    });
+    // One frame first: the mirror arrays (game mode) are filled per render/tick, and the
+    // inventory screen's init asks hasInfiniteMaterials while opening.
+    let _ = render(&h, (0.0, 0.0));
+    // E opens the inventory, whose init swaps in the creative screen (vanilla:
+    // InventoryScreen.init when hasInfiniteMaterials)
+    open(&h, haste_jvm::ScreenKind::Inventory);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen"),
+        "the creative screen replaces the inventory screen"
+    );
+    // The default tab is Building Blocks: its items are the ones the enabled features allow
+    // (the 195x136 panel is centred in the 320x240 GUI: leftPos 62, topPos 52).
+    let f = render(&h, (0.0, 0.0));
+    let items = |f: &haste_core::gui::GuiFrame| {
+        f.commands
+            .iter()
+            .filter_map(|c| match c {
+                GuiCommand::Item { item, .. } => Some(item.0),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let tab_items = items(&f);
+    assert!(
+        tab_items.contains(&item_id("minecraft:chest")),
+        "chest in the tab items (enabled features): first frame's {:?}",
+        tab_items.iter().take(5).collect::<Vec<_>>()
+    );
+    // Click the search tab (the rightmost top tab: getTabX for the aligned-right column 6 is
+    // 195-27+1 = 169, so x 62+169..62+195 = 231..257, y 52-32 = 20..52 in GUI pixels) and type
+    // "stone": the results are the stone family.
+    assert!(
+        gui.mouse(244.0, 36.0, Some((keys::MOUSE_LEFT, true))),
+        "clicking the search tab"
+    );
+    assert!(gui.mouse(244.0, 36.0, Some((keys::MOUSE_LEFT, false))));
+    for c in "stone".chars() {
+        assert!(
+            gui.char_typed(c, 0),
+            "typing {c:?}: {:?}",
+            gui.take_last_error()
+        );
+    }
+    let f = render(&h, (0.0, 0.0));
+    let found = items(&f);
+    assert!(
+        found.contains(&item_id("minecraft:stone")),
+        "stone in the search results: {found:?}"
+    );
+    assert!(
+        found.contains(&item_id("minecraft:cobblestone")),
+        "cobblestone in the search results: {found:?}"
+    );
+    assert!(
+        !found.contains(&item_id("minecraft:oak_planks")),
+        "oak planks not in the stone results: {found:?}"
+    );
+    // The tab strip is still drawn (the search tab's icon is the compass)
+    assert!(found.contains(&item_id("minecraft:compass")));
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for CreativeModeInventoryScreen: {unimpl:#?}"
+    );
+    // Escape closes the screen through vanilla's onClose -> closeContainer, which restores the
+    // player's containerMenu (the creative screen replaced it with its item picker menu) and
+    // sends container_close for the picker's window id. (E would type into the focused search
+    // box: the search tab captures it, so vanilla closes this screen with Escape.)
+    assert!(press(&h, keys::ESCAPE));
+    assert!(!gui.is_open());
+    assert!(
+        outgoing(&h)
+            .iter()
+            .any(|(id, _)| *id == serverbound_id("minecraft:container_close")),
+        "container_close sent"
+    );
+    gui.with_state(|s| {
+        s.game_mode = haste_core::game::GameMode::Survival;
+        s.in_world = false;
+    });
+    // The mirror arrays only refresh on render/tick: update them so the game mode is back
+    // before any later test opens a screen.
+    gui.tick();
+}
+
 /// `minecraft:item` registry id of an item, from the data generator's report (Rust's numbering).
 fn item_id(name: &str) -> u32 {
     let reports = cache().join("datagen/26.3/reports/registries.json");
@@ -1117,15 +1223,31 @@ fn debug_overlay_f3() {
         "debug_overlay_f3: {count_before} text commands before F3, {} after",
         t.len()
     );
-    // the stub's first lines (DebugImpl.lines)
+    // the overlay's vanilla-format lines (DebugScreenEntries' defaults)
     assert!(
         t.iter().any(|x| x.starts_with("Minecraft ")),
         "version line: {t:?}"
     );
-    assert!(t.iter().any(|x| x.ends_with(" fps")), "fps line: {t:?}");
+    assert!(t.iter().any(|x| x.contains(" fps T: ")), "fps line: {t:?}");
     assert!(
         t.iter().any(|x| x.starts_with("XYZ: ")),
         "position line: {t:?}"
+    );
+    assert!(
+        t.iter().any(|x| x.starts_with("Chunk: ")),
+        "chunk line: {t:?}"
+    );
+    assert!(
+        t.iter().any(|x| x.starts_with("Facing: ")),
+        "facing line: {t:?}"
+    );
+    assert!(
+        t.iter().any(|x| x.starts_with("Mem: ")),
+        "memory line: {t:?}"
+    );
+    assert!(
+        t.iter().any(|x| x.starts_with("Java: ")),
+        "system spec line: {t:?}"
     );
     assert!(
         t.len() > count_before,
@@ -1234,4 +1356,115 @@ fn bench_hud_and_screen() {
     }
     gui.close_screen();
     gui.with_state(|s| s.in_world = false);
+}
+
+/// Every options sub-screen opens and closes without Unimplemented entries or Java exceptions,
+/// like scripts/checks/options-all.txt does through the whole client (which needs a server; this
+/// is the JVM-only half). GUI 480x270 at scale 2, the offscreen script client's size; the button
+/// coordinates are vanilla's layout (verified against the dumped text positions).
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn options_screens_open_and_close() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    reset(gui);
+    h.clear_unimplemented().unwrap();
+    open(&h, haste_jvm::ScreenKind::Pause);
+    // the script client renders at 480x270 (960x540 at gui scale 2); a first frame also
+    // re-lays the pause menu out for that size before the clicks
+    gui.render(480, 270, 2, (-1.0, -1.0), 0.5).unwrap();
+    // "Options..." (pause menu row 5, left column)
+    click(gui, 165.0, 158.0);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.options.OptionsScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    // Every sub-screen: (button centre, class simple name). The Telemetry Data button stays out:
+    // vanilla greys it out while telemetry is unavailable (Haste sends none) and its tooltip shows.
+    for (x, y, want) in [
+        (320.0, 44.0, "OnlineOptionsScreen"),
+        (160.0, 102.0, "SkinCustomizationScreen"),
+        (336.0, 102.0, "SoundOptionsScreen"),
+        (160.0, 126.0, "VideoSettingsScreen"),
+        (336.0, 126.0, "ControlsScreen"),
+        (160.0, 150.0, "LanguageSelectScreen"),
+        (336.0, 150.0, "ChatOptionsScreen"),
+        (160.0, 174.0, "PackSelectionScreen"),
+        (336.0, 174.0, "AccessibilityOptionsScreen"),
+        (336.0, 198.0, "CreditsAndAttributionScreen"),
+    ] {
+        click(gui, x, y);
+        let got = gui.screen_class();
+        assert_eq!(
+            got.as_deref().map(|c| c.rsplit('.').next().unwrap_or(c)),
+            Some(want),
+            "click at {x},{y}: {got:?} (last error {:?})",
+            gui.take_last_error()
+        );
+        // one frame of it, with the mouse over the button (tooltip)
+        gui.render(480, 270, 2, (x, y), 0.5).unwrap();
+        escape(gui);
+        assert_eq!(
+            gui.screen_class().as_deref(),
+            Some("net.minecraft.client.gui.screens.options.OptionsScreen"),
+            "Escape from {want}: {:?} (last error {:?})",
+            gui.screen_class(),
+            gui.take_last_error()
+        );
+    }
+    // Key Binds and Mouse Settings from the Controls screen (its top row). A list's buttons get
+    // their positions during rendering (OptionsList.Entry.extractContent, like vanilla's frame
+    // loop), so render one frame of the Controls screen before clicking them.
+    click(gui, 336.0, 126.0);
+    gui.render(480, 270, 2, (336.0, 126.0), 0.5).unwrap();
+    for (x, want) in [(160.0, "MouseSettingsScreen"), (336.0, "KeyBindsScreen")] {
+        click(gui, x, 48.0);
+        let got = gui.screen_class();
+        assert_eq!(
+            got.as_deref().map(|c| c.rsplit('.').next().unwrap_or(c)),
+            Some(want),
+            "Controls sub-screen at {x}: {got:?} (last error {:?})",
+            gui.take_last_error()
+        );
+        escape(gui);
+    }
+    escape(gui);
+    // and the Options screen closes back to the pause menu, which closes
+    escape(gui);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.PauseScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    escape(gui);
+    assert!(!gui.is_open(), "{:?}", gui.take_last_error());
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for the options screens: {unimpl:#?}"
+    );
+}
+
+fn click(gui: &haste_jvm::GuiPipeline, x: f64, y: f64) {
+    gui.mouse(x, y, Some((haste_jvm::keys::MOUSE_LEFT, true)));
+    gui.mouse(x, y, Some((haste_jvm::keys::MOUSE_LEFT, false)));
+}
+
+fn escape(gui: &haste_jvm::GuiPipeline) {
+    gui.key(
+        haste_jvm::keys::ESCAPE,
+        haste_jvm::keys::keycode(haste_jvm::keys::ESCAPE),
+        0,
+        true,
+    );
+    gui.key(
+        haste_jvm::keys::ESCAPE,
+        haste_jvm::keys::keycode(haste_jvm::keys::ESCAPE),
+        0,
+        false,
+    );
 }

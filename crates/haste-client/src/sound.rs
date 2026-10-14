@@ -452,6 +452,12 @@ impl Sounds {
         }
     }
 
+    /// Re-applies the per-category volumes live, the moment the player moves a sound slider
+    /// (vanilla's `SoundEngine.refreshCategoryVolume` for every `soundCategory_*` option).
+    pub fn set_volumes(&mut self, volumes: &haste_setup::options::SoundVolumes) {
+        apply_volumes(&mut self.system, volumes);
+    }
+
     /// Plays the requests this tick's packets recorded. `entity_pos` resolves a
     /// `sound_entity`'s entity to its current position; `None` (unknown entity) skips the
     /// sound, as vanilla does. The requests are consumed (the caller's buffer is cleared).

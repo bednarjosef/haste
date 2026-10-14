@@ -9,7 +9,11 @@ use std::sync::Arc;
 use glam::{Mat3, Mat4, Vec3};
 use haste_assets::Assets;
 use haste_core::model::{
+// MERGE(animations side):
     BodyOp, BodyTransform, CubeModel, Decoration, EntityInstance, ItemFrameDecoration, ModelPart,
+// MERGE(main side):
+    CubeModel, Decoration, DroppedItem, EntityInstance, ItemFrameDecoration, ModelPart,
+// MERGE end
     PaintingDecoration, PoseOverrides,
 };
 use haste_core::{EntityId, Identifier};
@@ -21,6 +25,73 @@ const ATLAS_SIZE: u32 = 2048;
 /// Vanilla renders the player model at 15/16 scale.
 const PLAYER_SCALE: f32 = 0.9375;
 
+/// Dropped items spin about the vertical axis: `ItemEntity.getSpin`, the age in ticks
+/// (plus the partial tick) over 20, plus the entity's random phase, in radians.
+pub(crate) fn item_entity_spin(age: f32, bob_offs: f32) -> f32 {
+    age / 20.0 + bob_offs
+}
+
+/// ... and bob up and down: `ItemEntityRenderer.submit`'s
+/// `sin(age / 10 + phase) * 0.1 + 0.1` blocks, on top of the lift that puts the
+/// model's bounding box above the ground (see `item_entity_lift`).
+pub(crate) fn item_entity_bob(age: f32, bob_offs: f32) -> f32 {
+    ((age / 10.0 + bob_offs).sin()) * 0.1 + 0.1
+}
+
+/// The lift `ItemEntityRenderer.submit` applies so the model's bounding box sits above
+/// the ground: `-bbox.minY + 1/16`. The bounding box is the model drawn through its
+/// `display.ground` transform (which carries vanilla's 0.5/0.25 ground scales), so no
+/// extra scale is applied here.
+pub(crate) fn item_entity_lift(bbox_min_y: f32) -> f32 {
+    -bbox_min_y + 1.0 / 16.0
+}
+
+/// Which of vanilla's `ItemDisplayContext`s an item is drawn through: the `display`
+/// section of the model it names (firstperson_righthand for the held item, fixed for
+/// item frames, ground for dropped items).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ItemDisplay {
+    FirstPerson,
+    Fixed,
+    Ground,
+}
+
+/// How many copies of the item a stack draws: `ItemClusterRenderState
+/// .getRenderedAmount` — 1 for a single item, then one more per full 16 of the count,
+/// up to 5.
+pub(crate) fn item_entity_copies(count: i32) -> u32 {
+    match count {
+        ..=1 => 1,
+        2..=16 => 2,
+        17..=32 => 3,
+        33..=48 => 4,
+        _ => 5,
+    }
+}
+
+/// The per-entity phase `ItemEntity.bobOffs` stands in for: vanilla draws it from the
+/// entity's random at spawn, in [0, 2pi); ours hashes the entity id (indistinguishable
+/// to a player).
+pub(crate) fn entity_phase(id: EntityId) -> f32 {
+    let mut h = (id.0 as u32).wrapping_mul(0x9E37_79B9);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xC2B2_AE35);
+    (h >> 8) as f32 / (1u32 << 24) as f32 * std::f32::consts::TAU
+}
+
+/// A deterministic [0,1) stream for the stack-copy offsets (vanilla reseeds Java's
+/// `Random` with `getSeedForItemStack` — the item — each frame, so the offsets are
+/// stable per item type; matching Java's sequence exactly is not required, only the
+/// stability and the range).
+pub(crate) fn seeded_float(seed: u32, i: u32) -> f32 {
+    let mut h = seed
+        .wrapping_mul(0x85EB_CA6B)
+        .wrapping_add(i.wrapping_mul(0xC2B2_AE35));
+    h ^= h >> 13;
+    h = h.wrapping_mul(0x27D4_EB2F);
+    (h >> 8) as f32 / (1u32 << 24) as f32
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct EntityVertex {
@@ -28,11 +99,13 @@ pub struct EntityVertex {
     pub uv: [f32; 2],
     pub color: [f32; 4],
     pub rect: [u16; 4],
+    /// Light levels for the vanilla light texture: block, sky, unused, unused.
+    pub light: [u16; 4],
 }
 
 impl EntityVertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
-        0 => Float32x3, 1 => Float32x2, 2 => Float32x4, 3 => Uint16x4
+    const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+        0 => Float32x3, 1 => Float32x2, 2 => Float32x4, 3 => Uint16x4, 4 => Uint16x4
     ];
     pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<EntityVertex>() as u64,
@@ -184,6 +257,7 @@ impl EntityRenderer {
         queue: Arc<wgpu::Queue>,
         target_format: wgpu::TextureFormat,
         camera_layout: &wgpu::BindGroupLayout,
+        lightmap_layout: &wgpu::BindGroupLayout,
     ) -> EntityRenderer {
         let atlas = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("entity-atlas"),
@@ -228,7 +302,7 @@ impl EntityRenderer {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("entity-pipeline-layout"),
-            bind_group_layouts: &[Some(camera_layout), Some(&layout)],
+            bind_group_layouts: &[Some(camera_layout), Some(&layout), Some(lightmap_layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -307,7 +381,11 @@ impl EntityRenderer {
     fn texture_rect(&mut self, id: &Identifier, assets: &mut Assets) -> [u32; 4] {
         if !self.textures.contains_key(id) {
             let image = if id.namespace() == "haste" {
-                placeholder_texture()
+                if id.path() == "missing" {
+                    missing_texture()
+                } else {
+                    placeholder_texture()
+                }
             } else {
                 assets.texture_any(id).unwrap_or_else(|e| {
                     tracing::warn!("entity texture {id}: {e:#}");
@@ -389,6 +467,16 @@ impl EntityRenderer {
                 continue;
             }
             let (sky, block) = self.lights.get(&e.id).copied().unwrap_or((15, 0));
+            // The map is (sky, block); the vertex wants (block, sky).
+            let light = (block, sky);
+            if let Some(item) = &e.item {
+                let start = self.vertices.len();
+                self.emit_dropped_item(e, item, camera, light, assets);
+                if self.vertices.len() > start {
+                    self.drawn += 1;
+                }
+                continue;
+            }
             if let Some(d) = &e.decoration {
                 let start = self.vertices.len();
                 match d {
@@ -404,6 +492,7 @@ impl EntityRenderer {
             }
             let (texture, scale) = texture_and_scale(e);
             let rect = self.texture_rect(&texture, assets);
+// MERGE(animations side):
             let light = lightmap(sky, block);
             // `LivingEntityRenderer.setupRotations`: the body yaw turns the whole model, except a
             // sleeping entity, whose pose replaces that yaw with its own rotation sequence. The
@@ -426,6 +515,11 @@ impl EntityRenderer {
                 * yaw
                 * body_matrix(&e.body)
                 * Mat4::from_scale(s / 16.0);
+// MERGE(main side):
+            let root = Mat4::from_translation((e.pos - camera).as_vec3())
+                * Mat4::from_rotation_y((180.0 - e.yaw).to_radians())
+                * Mat4::from_scale(Vec3::new(-scale, -scale, scale) / 16.0);
+// MERGE end
             let start = self.vertices.len();
             emit_part(
                 &mut self.vertices,
@@ -458,6 +552,73 @@ impl EntityRenderer {
         }
     }
 
+    /// Poses a dropped item entity (`minecraft:item`) into the vertex buffer, following
+    /// `ItemEntityRenderer.submit` and `ItemClusterRenderState.submitMultipleFromCount`: the
+    /// item's own model (the one the GUI and held items use) through its `display.ground`
+    /// transform — which carries vanilla's ground scales, a flat item 0.5 and a block 0.25 —
+    /// lifted so its bounding box sits 1/16 above the ground, bobbing and spinning with the
+    /// entity's random phase, and a stack's copies spread like vanilla's. An unknown item
+    /// draws the missing model (vanilla's missingno cube); nothing panics.
+    fn emit_dropped_item(
+        &mut self,
+        e: &EntityInstance,
+        dropped: &DroppedItem,
+        camera: glam::DVec3,
+        light: (u8, u8),
+        assets: &mut Assets,
+    ) {
+        let model = self
+            .item_model_for(dropped.item, assets)
+            .unwrap_or_else(missing_item_model);
+        // `ItemEntity.bobOffs`: a per-entity random phase in [0, 2pi); ours is a hash of
+        // the entity id (the player cannot tell the difference).
+        let bob_offs = entity_phase(e.id);
+        // The model's bounding box (through the ground transform) decides the lift and
+        // whether the copies of a stack spread in 3D or line up flat
+        // (`submitMultipleFromCount` branches on the z size).
+        let (bbox_min, bbox_max) = item_model_bbox(&model);
+        let lift = item_entity_lift(bbox_min.y);
+        let base = Mat4::from_translation(
+            (e.pos - camera).as_vec3()
+                + Vec3::new(0.0, lift + item_entity_bob(dropped.age, bob_offs), 0.0),
+        ) * Mat4::from_rotation_y(item_entity_spin(dropped.age, bob_offs));
+        let copies = item_entity_copies(dropped.count) as usize;
+        // `ItemClusterRenderState.getSeedForItemStack`: the renderer reseeds its random
+        // with the item each frame, so the copy offsets are stable per item type (ours
+        // hashes the registry id and stream index; matching Java's Random is not needed).
+        let rand = |i: u32| seeded_float(dropped.item.0, i);
+        // The copies: the first sits at the origin, each further one offset by
+        // `submitMultipleFromCount` (3D: +-0.15 in x, y and z; flat: spread along z by
+        // 1.5x the sprite depth, jittered +-0.075 in x and y).
+        let depth = bbox_max.z - bbox_min.z;
+        let flat = depth <= 1.0 / 16.0;
+        let step = depth * 1.5;
+        // Take the vertex buffer out so the texture lookup (`&mut self`) and the emission
+        // (the buffer) do not fight over the borrow.
+        let mut out = std::mem::take(&mut self.vertices);
+        for copy in 0..copies {
+            let mut off = Vec3::ZERO;
+            if copy > 0 {
+                if flat {
+                    off = Vec3::new(
+                        (rand(2 * copy as u32 - 2) * 2.0 - 1.0) * 0.075,
+                        (rand(2 * copy as u32 - 1) * 2.0 - 1.0) * 0.075,
+                        step * copy as f32 - step * (copies as f32 - 1.0) / 2.0,
+                    );
+                } else {
+                    off = Vec3::new(
+                        (rand(3 * copy as u32 - 3) * 2.0 - 1.0) * 0.15,
+                        (rand(3 * copy as u32 - 2) * 2.0 - 1.0) * 0.15,
+                        (rand(3 * copy as u32 - 1) * 2.0 - 1.0) * 0.15,
+                    );
+                }
+            }
+            let m = base * Mat4::from_translation(off);
+            self.emit_item(&mut out, &model, m, light, ItemDisplay::Ground, assets);
+        }
+        self.vertices = out;
+    }
+
     /// One item frame, following vanilla's `ItemFrameRenderer.submit`: the frame block model at
     /// `direction * 0.46875` turned to face `direction`, then the framed item rotated by
     /// `rotation * 45` degrees at scale 0.5. Glow frames light the frame at least block-light 5
@@ -481,9 +642,9 @@ impl EntityRenderer {
         let quads = self.frame_quads(f.glow, map, assets);
         // `ItemFrameRenderer.getBlockLightLevel`: glow frames are at least block-light 5.
         let frame_light = if f.glow {
-            lightmap(sky, block.max(5))
+            (block.max(5), sky)
         } else {
-            lightmap(sky, block)
+            (block, sky)
         };
         let model = base * Mat4::from_translation(Vec3::splat(-0.5));
         let nm = Mat3::from_mat4(model).inverse().transpose();
@@ -505,10 +666,18 @@ impl EntityRenderer {
         }
         if let Some(idx) = f.item {
             if let Some(item) = self.item_model_for(idx, assets) {
-                // Glow frames draw the item full-bright (`getLightCoords(isGlowFrame, 15728880)`).
-                let item_light = if f.glow { 1.0 } else { lightmap(sky, block) };
+                // Glow frames draw the item full-bright (`getLightCoords(isGlowFrame, 15728880)`,
+                // block 15 / sky 15); otherwise the frame's own (block, sky) light.
+                let item_light = if f.glow { (15, 15) } else { (block, sky) };
                 let root = base * item_frame_item_transform(f.rotation);
-                self.emit_item(&mut out, &item, root, item_light, true, assets);
+                self.emit_item(
+                    &mut out,
+                    &item,
+                    root,
+                    item_light,
+                    ItemDisplay::Fixed,
+                    assets,
+                );
             }
         }
         self.vertices = out;
@@ -529,7 +698,8 @@ impl EntityRenderer {
     ) {
         let base =
             Mat4::from_translation((e.pos - camera).as_vec3()) * painting_transform(p.facing);
-        let light = lightmap(sky, block);
+        // Paintings use the entity's own light (`PaintingRenderer` draws with `state.lightCoords`).
+        let light = (block, sky);
         let width = p.width.max(1) as i32;
         let height = p.height.max(1) as i32;
         let back = self.texture_rect(&Identifier::minecraft("painting/back"), assets);
@@ -732,14 +902,22 @@ impl EntityRenderer {
         let Some(fp) = fp else {
             return;
         };
-        let light = lightmap(fp.light.0, fp.light.1);
+        // `FirstPerson::light` is (sky, block); the vertex wants (block, sky).
+        let light = (fp.light.1, fp.light.0);
         let item = fp.item.and_then(|i| self.item_model_for(i, assets));
         let mut out = std::mem::take(&mut self.hand);
         let root = view_to_world * hand_root_matrix(fp, view, partial);
         match item {
             Some(model) => {
                 let root = root * item_arm_matrix(fp, partial);
-                self.emit_item(&mut out, &model, root, light, false, assets);
+                self.emit_item(
+                    &mut out,
+                    &model,
+                    root,
+                    light,
+                    ItemDisplay::FirstPerson,
+                    assets,
+                );
             }
             None => {
                 let steve = Identifier::minecraft("entity/player/wide/steve");
@@ -773,22 +951,23 @@ impl EntityRenderer {
     }
 
     /// Emits an item model's geometry through `root` (model space, 0..1 blocks, through the
-    /// part's display transform) into `out`. `use_fixed` picks vanilla's `fixed` display context
-    /// (item frames) instead of `firstperson_righthand`.
+    /// part's display transform) into `out`. `display` picks which of vanilla's
+    /// `ItemDisplayContext`s the model is drawn through (`firstperson_righthand` for the hand,
+    /// `fixed` for item frames, `ground` for dropped items).
     fn emit_item(
         &mut self,
         out: &mut Vec<EntityVertex>,
         model: &haste_assets::ItemModel,
         root: Mat4,
-        light: f32,
-        use_fixed: bool,
+        light: (u8, u8),
+        display: ItemDisplay,
         assets: &mut Assets,
     ) {
         for part in &model.parts {
-            let display = if use_fixed {
-                &part.fixed
-            } else {
-                &part.firstperson
+            let display = match display {
+                ItemDisplay::FirstPerson => &part.firstperson,
+                ItemDisplay::Fixed => &part.fixed,
+                ItemDisplay::Ground => &part.ground,
             };
             let m = root * item_display_matrix(part, display);
             let nm = Mat3::from_mat4(m).inverse().transpose();
@@ -1063,12 +1242,12 @@ fn push_world_quad(
     uv: [[f32; 2]; 4],
     n: Vec3,
     tint: [f32; 3],
-    light: f32,
+    light: (u8, u8),
     rect: [u32; 4],
 ) {
     let p = p.map(|v| m.transform_point3(v));
     let nw = (normal_matrix * n).normalize_or_zero();
-    let s = entity_shade(nw) * light;
+    let s = entity_shade(nw);
     let color = [tint[0] * s, tint[1] * s, tint[2] * s, 1.0];
     let uv = uv.map(|t| {
         [
@@ -1089,14 +1268,9 @@ fn push_world_quad(
             uv: uv[i],
             color,
             rect: r16,
+            light: [light.0 as u16, light.1 as u16, 0, 0],
         });
     }
-}
-
-/// Light level brightness, the same curve as the terrain shader (`chunk.wgsl::lightmap`).
-pub(crate) fn lightmap(sky: u8, block: u8) -> f32 {
-    let f = |l: u8| (l.min(15) as f32 / 15.0).powf(1.55) * 0.95 + 0.05;
-    f(sky).max(f(block))
 }
 
 /// World-space entity shading: two directional lights at 0.6 and 0.4 ambient (the same
@@ -1151,7 +1325,7 @@ pub(crate) fn emit_part(
     pose: &PoseOverrides,
     parent: Mat4,
     rect: [u32; 4],
-    light: f32,
+    light: (u8, u8),
     hurt: f32,
 ) {
     if !part.visible || pose.hidden.iter().any(|h| h == &part.name) {
@@ -1257,7 +1431,7 @@ pub(crate) fn emit_part(
         for (corners, uvr, n) in faces {
             let p = corners.map(|c| m.transform_point3(c));
             let nw = (normal_matrix * n).normalize_or_zero();
-            let s = entity_shade(nw) * light;
+            let s = entity_shade(nw);
             let [r, g, b] = hurt_color(s, hurt);
             let color = [r, g, b, 1.0];
             let uv = [
@@ -1280,6 +1454,7 @@ pub(crate) fn emit_part(
                     uv: uv[i],
                     color,
                     rect: r16,
+                    light: [light.0 as u16, light.1 as u16, 0, 0],
                 });
             }
         }
@@ -1287,6 +1462,102 @@ pub(crate) fn emit_part(
     for child in &part.children {
         emit_part(out, model, child, pose, m, rect, light, hurt);
     }
+}
+
+/// The model's bounding box in the space `emit_item` draws it through the ground display
+/// (block units, after the -0.5 centring `ItemTransform.apply` ends with): the transformed
+/// element or extruded-sprite positions. Vanilla's `ItemStackRenderState.getModelBoundingBox`
+/// (which drives `ItemEntityRenderer.submit`'s lift and the stack-copy layout) computes
+/// exactly this; a model with no geometry gets vanilla's empty box (a point at the origin).
+fn item_model_bbox(model: &haste_assets::ItemModel) -> (Vec3, Vec3) {
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    let mut any = false;
+    let mut see = |p: Vec3| {
+        min = min.min(p);
+        max = max.max(p);
+        any = true;
+    };
+    for part in &model.parts {
+        let m = crate::gui::display_matrix(&part.ground)
+            * crate::gui::part_matrix(&part.transformation)
+            * Mat4::from_translation(Vec3::splat(-0.5));
+        match &part.geometry {
+            haste_assets::ItemGeometry::None => {}
+            haste_assets::ItemGeometry::Generated { layers } => {
+                for layer in layers {
+                    for q in &layer.quads {
+                        for p in q.positions {
+                            see(m.transform_point3(Vec3::from(p)));
+                        }
+                    }
+                }
+            }
+            haste_assets::ItemGeometry::Elements(quads) => {
+                for q in quads {
+                    for p in q.positions {
+                        see(m.transform_point3(Vec3::from(p)));
+                    }
+                }
+            }
+        }
+    }
+    if any {
+        (min, max)
+    } else {
+        (Vec3::ZERO, Vec3::ZERO)
+    }
+}
+
+/// The missing item model vanilla's `ModelBakery.MissingModels` bakes (`MissingCuboidModel`):
+/// a unit cube with the missingno texture and no display transforms, so it draws centred on
+/// the origin like any `NO_TRANSFORM` item. Built once; unknown items are rare (modded ids).
+fn missing_item_model() -> std::sync::Arc<haste_assets::ItemModel> {
+    static MISSING: std::sync::OnceLock<std::sync::Arc<haste_assets::ItemModel>> =
+        std::sync::OnceLock::new();
+    MISSING
+        .get_or_init(|| {
+            let quads = [
+                haste_assets::Direction::Down,
+                haste_assets::Direction::Up,
+                haste_assets::Direction::North,
+                haste_assets::Direction::South,
+                haste_assets::Direction::West,
+                haste_assets::Direction::East,
+            ]
+            .into_iter()
+            .map(|d| {
+                let mut q =
+                    haste_assets::BakedQuad::from_element(d, [0.0; 3], [1.0; 3], None, None);
+                q.texture = "haste:missing".into();
+                q
+            })
+            .collect();
+            std::sync::Arc::new(haste_assets::ItemModel {
+                parts: vec![haste_assets::ItemModelPart {
+                    geometry: haste_assets::ItemGeometry::Elements(quads),
+                    tints: vec![],
+                    gui: haste_assets::DisplayTransform::IDENTITY,
+                    firstperson: haste_assets::DisplayTransform::IDENTITY,
+                    ground: haste_assets::DisplayTransform::IDENTITY,
+                    fixed: haste_assets::DisplayTransform::IDENTITY,
+                    gui_light_front: false,
+                    transformation: None,
+                }],
+            })
+        })
+        .clone()
+}
+
+/// Vanilla's missing texture: 16x16 magenta/black checker of 8x8 squares.
+fn missing_texture() -> image::RgbaImage {
+    image::RgbaImage::from_fn(16, 16, |x, y| {
+        if (x < 8) ^ (y < 8) {
+            image::Rgba([248, 0, 248, 255])
+        } else {
+            image::Rgba([0, 0, 0, 255])
+        }
+    })
 }
 
 /// `haste:` placeholder texture: light grey with a darker 1 px border per 8 px cell.
@@ -1443,7 +1714,7 @@ mod tests {
             &PoseOverrides::default(),
             root,
             [0, 0, 64, 64],
-            1.0,
+            (15, 15),
             0.0,
         );
         assert_eq!(out.len(), 36);
@@ -1483,6 +1754,84 @@ mod tests {
         // Monotone in hurt: the red channel grows, green shrinks.
         assert!(hurt_color(0.8, 0.25)[0] < hurt_color(0.8, 0.75)[0]);
         assert!(hurt_color(0.8, 0.25)[1] > hurt_color(0.8, 0.75)[1]);
+    }
+
+    #[test]
+    fn dropped_item_spin_is_age_over_20_plus_the_phase() {
+        // `ItemEntity.getSpin`: radians, the age over 20 plus the entity's phase, so
+        // one turn takes 40*pi ticks (about 125.7) — a slow spin.
+        assert_eq!(item_entity_spin(0.0, 0.0), 0.0);
+        assert_eq!(item_entity_spin(20.0, 0.0), 1.0);
+        assert!((item_entity_spin(10.0, 0.0) - 0.5).abs() < 1e-6);
+        assert!((item_entity_spin(0.0, 1.0) - 1.0).abs() < 1e-6);
+        assert!((item_entity_spin(10.0, 1.0) - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn dropped_item_bobs_a_tenth_of_a_block_every_20_pi_ticks() {
+        // `ItemEntityRenderer.submit`: sin(age / 10 + phase) * 0.1 + 0.1, so the bob
+        // spans 0..0.2 blocks with a 20*pi-tick period (about 62.8).
+        assert!((item_entity_bob(0.0, 0.0) - 0.1).abs() < 1e-6);
+        // sin tops out a quarter period in: age = 5*pi.
+        assert!((item_entity_bob(5.0 * std::f32::consts::PI, 0.0) - 0.2).abs() < 1e-5);
+        assert!((item_entity_bob(15.0 * std::f32::consts::PI, 0.0) - 0.0).abs() < 1e-5);
+        // The phase shifts the whole curve.
+        assert!((item_entity_bob(0.0, std::f32::consts::FRAC_PI_2) - 0.2).abs() < 1e-5);
+        for age in [0.0f32, 7.5, 19.3, 33.7, 60.1] {
+            let b = item_entity_bob(age, entity_phase(EntityId(7)));
+            assert!((0.0..=0.2).contains(&b), "bob {b} at age {age}");
+        }
+    }
+
+    #[test]
+    fn dropped_item_copies_follow_the_stack_size() {
+        // `ItemClusterRenderState.getRenderedAmount`: 1 for a single item, then one
+        // more per full 16 of the count, up to 5.
+        assert_eq!(item_entity_copies(0), 1);
+        assert_eq!(item_entity_copies(1), 1);
+        assert_eq!(item_entity_copies(2), 2);
+        assert_eq!(item_entity_copies(16), 2);
+        assert_eq!(item_entity_copies(17), 3);
+        assert_eq!(item_entity_copies(32), 3);
+        assert_eq!(item_entity_copies(33), 4);
+        assert_eq!(item_entity_copies(48), 4);
+        assert_eq!(item_entity_copies(49), 5);
+        assert_eq!(item_entity_copies(64), 5);
+        assert_eq!(item_entity_copies(99), 5);
+    }
+
+    #[test]
+    fn dropped_item_lift_puts_the_bbox_bottom_a_sixteenth_up() {
+        // `ItemEntityRenderer.submit` lifts by -bbox.minY + 1/16 (the bounding box is the
+        // model through its ground display, so a block item reaching minY -0.125 needs
+        // 0.1875 and a centred model spanning -0.5..0.5 needs 0.5625).
+        assert!((item_entity_lift(-0.5) - 0.5625).abs() < 1e-6);
+        assert!((item_entity_lift(-0.125) - 0.1875).abs() < 1e-6);
+        assert!((item_entity_lift(0.0) - 0.0625).abs() < 1e-6);
+        // A model that dips below 0 needs more lift; one that starts above 0, less.
+        assert!(item_entity_lift(-0.25) > item_entity_lift(0.0));
+        assert!(item_entity_lift(0.25) < item_entity_lift(0.0));
+    }
+
+    #[test]
+    fn entity_phase_and_seed_streams_cover_their_ranges() {
+        // The phase covers [0, 2pi) across ids and is stable for one id.
+        let phases: Vec<f32> = (0..200).map(|i| entity_phase(EntityId(i))).collect();
+        assert!(phases
+            .iter()
+            .all(|p| (0.0..std::f32::consts::TAU).contains(p)));
+        assert!(phases.iter().any(|p| *p > std::f32::consts::PI));
+        assert!(phases.iter().any(|p| *p < std::f32::consts::PI));
+        assert_eq!(entity_phase(EntityId(42)), entity_phase(EntityId(42)));
+        // The seeded stream is in [0,1) and stable per (seed, index).
+        for (seed, i) in [(0u32, 0u32), (5, 1), (1234, 7), (187, 3)] {
+            let r = seeded_float(seed, i);
+            assert!((0.0..1.0).contains(&r));
+            assert_eq!(r, seeded_float(seed, i));
+        }
+        let values: Vec<f32> = (0..50).map(|i| seeded_float(9, i)).collect();
+        assert!(values.iter().any(|r| *r < 0.33));
+        assert!(values.iter().any(|r| *r > 0.66));
     }
 
     #[test]
@@ -1557,7 +1906,7 @@ mod tests {
             &PoseOverrides::default(),
             m,
             [0, 0, 64, 64],
-            1.0,
+            (15, 15),
             0.0,
         );
         // The arm and its sleeve, six faces of six vertices each.
@@ -1588,7 +1937,7 @@ mod tests {
             &PoseOverrides::default(),
             swung,
             [0, 0, 64, 64],
-            1.0,
+            (15, 15),
             0.0,
         );
         let moved = out

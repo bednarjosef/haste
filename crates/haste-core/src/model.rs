@@ -3,6 +3,7 @@
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
+use crate::ids::RegistryIndex;
 use crate::Identifier;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -117,10 +118,23 @@ pub struct EntityInstance {
     /// ticks; death holds it at 1 for the 20-tick death animation). The renderer mixes
     /// red into the entity's colour for values above 0.
     pub hurt: f32,
+    /// A dropped item entity (`minecraft:item`) drawn as the item itself (spinning and
+    /// bobbing); the model above is ignored for these.
+    pub item: Option<DroppedItem>,
     /// Set for hanging decorations (item frames, paintings): drawn specially instead of from
     /// `model` (vanilla's `ItemFrameRenderer` / `PaintingRenderer`). `None` for every other
     /// entity, which the renderer draws from its cube model.
     pub decoration: Option<Decoration>,
+}
+
+/// What a dropped item entity carries: which item to draw (index into `minecraft:item`,
+/// resolved against the renderer's item names) and the stack size (stacks draw 1-5
+/// copies). `age` is the item entity's age in ticks plus the partial tick.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DroppedItem {
+    pub item: RegistryIndex,
+    pub count: i32,
+    pub age: f32,
 }
 
 /// A hanging decoration the renderer draws itself rather than from a cube model.
@@ -153,4 +167,5 @@ pub struct PaintingDecoration {
     pub height: u8,
     /// The front sprite's texture id, `None` for a variant we do not know (draw the back only).
     pub front: Option<Identifier>,
+    // MERGE end
 }

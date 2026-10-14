@@ -39,6 +39,8 @@ pub struct ItemModelPart {
     pub gui: DisplayTransform,
     /// `display.firstperson_righthand` (identity when the chain has none).
     pub firstperson: DisplayTransform,
+    /// `display.ground` (identity when the chain has none): dropped item entities.
+    pub ground: DisplayTransform,
     /// `display.fixed` (identity when the chain has none): item frames and other fixed mounts.
     pub fixed: DisplayTransform,
     /// `gui_light: front` (flat items) instead of the default side lighting.
@@ -111,6 +113,7 @@ impl Assets {
                 tints,
                 gui: DisplayTransform::IDENTITY,
                 firstperson: DisplayTransform::IDENTITY,
+                ground: DisplayTransform::IDENTITY,
                 fixed: DisplayTransform::IDENTITY,
                 gui_light_front: false,
                 transformation: leaf.transformation,
@@ -120,6 +123,9 @@ impl Assets {
         let gui = resolved.gui_display.unwrap_or(DisplayTransform::IDENTITY);
         let firstperson = resolved
             .firstperson_display
+            .unwrap_or(DisplayTransform::IDENTITY);
+        let ground = resolved
+            .ground_display
             .unwrap_or(DisplayTransform::IDENTITY);
         let fixed = resolved.fixed_display.unwrap_or(DisplayTransform::IDENTITY);
         let geometry = if leaf.special {
@@ -149,6 +155,7 @@ impl Assets {
             tints,
             gui,
             firstperson,
+            ground,
             fixed,
             gui_light_front: resolved.gui_light,
             transformation: leaf.transformation,

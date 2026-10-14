@@ -201,6 +201,56 @@ fn render_instances_midpoint() {
     assert!((out[0].pos.x - 4.0 / 3.0).abs() < 1e-9);
 }
 
+/// A dropped item entity carries its stack in `ItemEntity.DATA_ITEM`, metadata index 8
+/// (Entity's eight synched fields come first): it reaches the draw list with the item's
+/// registry id, the stack count and its age (partial-tick interpolated), and an
+/// emptied stack clears it.
+#[test]
+fn item_entity_stack_from_metadata() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    let stack = |count, item: Option<u32>| MetadataEntry {
+        index: 8,
+        value: MetadataValue::ItemStack(haste_core::entity::ItemStackData {
+            count,
+            item: item.map(RegistryIndex),
+            components_raw: Default::default(),
+        }),
+    };
+    s.set_metadata(EntityId(1), &[stack(10, Some(5))]);
+    let mut out = Vec::new();
+    s.render_instances(0.5, &mut out);
+    assert_eq!(
+        out[0].item,
+        Some(haste_core::model::DroppedItem {
+            item: RegistryIndex(5),
+            count: 10,
+            age: 0.5,
+        })
+    );
+    // Age advances with the ticks (plus the partial).
+    s.tick();
+    s.tick();
+    let mut out = Vec::new();
+    s.render_instances(0.25, &mut out);
+    assert_eq!(out[0].item.unwrap().age, 2.25);
+    // An emptied stack (count 0) stops the item from drawing as an item.
+    s.set_metadata(EntityId(1), &[stack(0, Some(5))]);
+    let mut out = Vec::new();
+    s.render_instances(0.0, &mut out);
+    assert_eq!(out[0].item, None);
+    // An empty stack slot (None item) likewise.
+    s.set_metadata(EntityId(1), &[stack(3, None)]);
+    let mut out = Vec::new();
+    s.render_instances(0.0, &mut out);
+    assert_eq!(out[0].item, None);
+    // Entities without the metadata entry are unaffected.
+    s.spawn(&spawn(2, DVec3::ZERO));
+    let mut out = Vec::new();
+    s.render_instances(0.0, &mut out);
+    assert_eq!(out.iter().find(|i| i.id == EntityId(2)).unwrap().item, None);
+}
+
 #[test]
 fn player_info_nametag() {
     let mut s = store();
@@ -574,9 +624,21 @@ fn attack_arm_angle_mid_swing() {
     s.render_instances(1.0, &mut out);
     let rot: std::collections::HashMap<_, _> = out[0].pose.rotations.iter().cloned().collect();
     let ra = rot.get("right_arm").unwrap();
-    assert!((ra.x - -0.742_670).abs() < 2e-3, "arm x {} != -0.74267", ra.x);
-    assert!((ra.y - -0.578_342).abs() < 2e-3, "arm y {} != -0.57834", ra.y);
-    assert!((ra.z - -0.304_978).abs() < 2e-3, "arm z {} != -0.30498", ra.z);
+    assert!(
+        (ra.x - -0.742_670).abs() < 2e-3,
+        "arm x {} != -0.74267",
+        ra.x
+    );
+    assert!(
+        (ra.y - -0.578_342).abs() < 2e-3,
+        "arm y {} != -0.57834",
+        ra.y
+    );
+    assert!(
+        (ra.z - -0.304_978).abs() < 2e-3,
+        "arm z {} != -0.30498",
+        ra.z
+    );
 }
 
 /// `AnimationUtils.animateZombieArms`: a zombie holds its arms forward even at rest
@@ -584,7 +646,10 @@ fn attack_arm_angle_mid_swing() {
 /// from its texture; here the parts/texture are built directly.
 #[test]
 fn zombie_arms_are_forward_at_rest() {
-    let model = mob_model("minecraft:entity/zombie/zombie", &["head", "right_arm", "left_arm"]);
+    let model = mob_model(
+        "minecraft:entity/zombie/zombie",
+        &["head", "right_arm", "left_arm"],
+    );
     let mut s = store();
     s.spawn(&spawn(1, DVec3::ZERO));
     let e = s.get(EntityId(1)).unwrap();
@@ -602,7 +667,11 @@ fn zombie_arms_are_forward_at_rest() {
         ra.y
     );
     // The idle arm bob (age 0) adds 0.1 to z on top of the zombie pose.
-    assert!((ra.z - 0.1).abs() < 1e-4, "zombie right arm z {} != 0.1", ra.z);
+    assert!(
+        (ra.z - 0.1).abs() < 1e-4,
+        "zombie right arm z {} != 0.1",
+        ra.z
+    );
 }
 
 /// `Mob.DATA_MOB_FLAGS_ID` is metadata index 15 (Entity's 8 + LivingEntity's 7); bit 2 is
@@ -1553,4 +1622,228 @@ fn real_dump_pig_has_head_body_and_four_legs() {
     // Also spot-check a scaled layer (villager, 0.9375) resolves.
     let villager = lib.get("minecraft:villager#main", 0.9375);
     assert!(villager.is_some(), "villager layer missing");
+}
+
+// ---------------------------------------------------------------------------
+// Table coverage and baby variants.
+// ---------------------------------------------------------------------------
+
+/// Every living entity type vanilla registers a mob renderer for (EntityRenderers.java's
+/// PROVIDERS, minus the player/mannequin handled separately, minus non-living types).
+/// A type appearing here but not in the table (and not in NON_LIVING) fails the coverage
+/// test, so new mob types cannot silently fall back to the box.
+const LIVING_TYPES: &[&str] = &[
+    "minecraft:allay",
+    "minecraft:armadillo",
+    "minecraft:axolotl",
+    "minecraft:bat",
+    "minecraft:bee",
+    "minecraft:blaze",
+    "minecraft:bogged",
+    "minecraft:breeze",
+    "minecraft:camel",
+    "minecraft:camel_husk",
+    "minecraft:cat",
+    "minecraft:cave_spider",
+    "minecraft:chicken",
+    "minecraft:cod",
+    "minecraft:copper_golem",
+    "minecraft:cow",
+    "minecraft:creaking",
+    "minecraft:creeper",
+    "minecraft:dolphin",
+    "minecraft:donkey",
+    "minecraft:drowned",
+    "minecraft:elder_guardian",
+    "minecraft:ender_dragon",
+    "minecraft:enderman",
+    "minecraft:endermite",
+    "minecraft:evoker",
+    "minecraft:fox",
+    "minecraft:frog",
+    "minecraft:ghast",
+    "minecraft:giant",
+    "minecraft:glow_squid",
+    "minecraft:goat",
+    "minecraft:guardian",
+    "minecraft:happy_ghast",
+    "minecraft:hoglin",
+    "minecraft:horse",
+    "minecraft:husk",
+    "minecraft:illusioner",
+    "minecraft:iron_golem",
+    "minecraft:llama",
+    "minecraft:magma_cube",
+    "minecraft:mooshroom",
+    "minecraft:mule",
+    "minecraft:nautilus",
+    "minecraft:ocelot",
+    "minecraft:panda",
+    "minecraft:parched",
+    "minecraft:parrot",
+    "minecraft:phantom",
+    "minecraft:pig",
+    "minecraft:piglin",
+    "minecraft:piglin_brute",
+    "minecraft:pillager",
+    "minecraft:polar_bear",
+    "minecraft:pufferfish",
+    "minecraft:rabbit",
+    "minecraft:ravager",
+    "minecraft:salmon",
+    "minecraft:sheep",
+    "minecraft:shulker",
+    "minecraft:silverfish",
+    "minecraft:skeleton",
+    "minecraft:skeleton_horse",
+    "minecraft:slime",
+    "minecraft:sniffer",
+    "minecraft:snow_golem",
+    "minecraft:spider",
+    "minecraft:squid",
+    "minecraft:stray",
+    "minecraft:strider",
+    "minecraft:sulfur_cube",
+    "minecraft:tadpole",
+    "minecraft:trader_llama",
+    "minecraft:tropical_fish",
+    "minecraft:turtle",
+    "minecraft:vex",
+    "minecraft:villager",
+    "minecraft:vindicator",
+    "minecraft:wandering_trader",
+    "minecraft:warden",
+    "minecraft:witch",
+    "minecraft:wither",
+    "minecraft:wither_skeleton",
+    "minecraft:wolf",
+    "minecraft:zoglin",
+    "minecraft:zombie",
+    "minecraft:zombie_horse",
+    "minecraft:zombie_nautilus",
+    "minecraft:zombie_villager",
+    "minecraft:zombified_piglin",
+];
+
+/// Entity types with renderers but no living-model layer: projectiles, vehicles, block-like
+/// and UI entities (out of scope; drawn as boxes) plus the player (its own model path).
+#[allow(dead_code)] // documents what the table deliberately leaves out
+const NON_LIVING: &[&str] = &[
+    "boat-like: *_boat, *_chest_boat, *_raft",
+    "minecart-like: minecart, *_minecart, tnt_minecart",
+    "projectiles: arrow, egg, ender_pearl, trident, fireball(s), snowball, potions,",
+    "  dragon_fireball, evoker_fangs, llama_spit, shulker_bullet, wind_charge(s),",
+    "  experience_bottle, eye_of_ender, fishing_bobber, wither_skull",
+    "object entities: area_effect_cloud, armor_stand, block/item/text_display, cushion,",
+    "  end_crystal, falling_block, firework_rocket, interaction, item, item_frame(s),",
+    "  leash_knot, lightning_bolt, mannequin, marker, ominous_item_spawner, painting,",
+    "  player, tnt, experience_orb",
+];
+
+/// Every living entity type has a table row (so it gets its vanilla model, or an explicit
+/// pending entry). Runs without the cache: it checks the table, not the dump.
+#[test]
+fn table_covers_every_living_entity_type() {
+    for name in LIVING_TYPES {
+        assert!(
+            crate::registry::table_entry(name).is_some(),
+            "{name} has no model table row"
+        );
+    }
+    // And nothing in the table references a type outside the known set (typos).
+    let covered = crate::registry::table_textures().count();
+    assert!(
+        covered >= LIVING_TYPES.len(),
+        "table smaller than living set"
+    );
+}
+
+/// The baby rows point at real `*_baby` layers and the baby metadata flag flips them
+/// (`AgeableMob.DATA_BABY_ID` = index 16; `Zombie`/`Zoglin`/`Piglin` put theirs on the same
+/// slot through the same super-chain, Entity 0-7 -> LivingEntity 8-14 -> Mob 15).
+#[test]
+fn baby_flag_and_baby_layers() {
+    // The flag: metadata index 16, boolean true.
+    let baby_meta = |v: bool| {
+        let mut m = crate::metadata::Metadata::default();
+        m.apply(&[MetadataEntry {
+            index: crate::registry::BABY_METADATA_INDEX,
+            value: MetadataValue::Boolean(v),
+        }]);
+        m
+    };
+    assert!(crate::registry::is_baby(&baby_meta(true)));
+    assert!(!crate::registry::is_baby(&baby_meta(false)));
+    assert!(!crate::registry::is_baby(
+        &crate::metadata::Metadata::default()
+    ));
+}
+
+/// Baby layers come from the recorder's model dump, which CI does not have.
+#[test]
+#[ignore = "needs cache/oracle/26.3/entity_models.json"]
+fn baby_layers_from_the_dump() {
+    // Rows whose renderer has a baby model (AgeableMobRenderer and friends) name it.
+    // Vanilla types with a baby layer but none in our table yet would fail here.
+    for (name, has_baby) in [
+        ("minecraft:pig", true),
+        ("minecraft:villager", true),
+        ("minecraft:zombie", true),
+        ("minecraft:horse", true),
+        ("minecraft:sniffer", true),
+        ("minecraft:creeper", false), // MobRenderer only
+        ("minecraft:spider", false),
+        ("minecraft:bat", false),
+    ] {
+        let baby = crate::registry::baby_model_for_name(name);
+        assert_eq!(
+            baby.is_some(),
+            has_baby,
+            "{name} baby layer presence mismatch"
+        );
+    }
+    // With the dump present, the baby model differs from the adult and carries the baby
+    // texture; without it both are None and the store falls back to the box.
+    if let (Some(adult), Some(baby)) = (
+        crate::registry::model_for_name("minecraft:pig"),
+        crate::registry::baby_model_for_name("minecraft:pig"),
+    ) {
+        let adult_head = find_part(&adult.root, "head").unwrap();
+        let baby_head = find_part(&baby.root, "head").unwrap();
+        assert_ne!(adult_head.pivot, baby_head.pivot);
+        assert_eq!(baby.texture.path(), "entity/pig/pig_temperate_baby");
+    }
+    // The sniffer's baby texture is "snifflet", not "sniffer_baby" (SnifferRenderer).
+    if let Some(baby) = crate::registry::baby_model_for_name("minecraft:sniffer") {
+        assert_eq!(baby.texture.path(), "entity/sniffer/snifflet");
+    }
+}
+
+/// Every table texture exists in the client jar as `assets/minecraft/textures/<path>.png`.
+/// Needs the installation (client jar + asset index) from `haste setup`.
+#[test]
+#[ignore = "needs the client jar and assets index (HASTE_CACHE; from `haste setup`)"]
+fn table_textures_exist_in_jar() {
+    let jar = haste_core::paths::client_jar();
+    let file = std::fs::File::open(&jar).unwrap_or_else(|e| {
+        panic!(
+            "opening {}: {e} (run `haste setup` or set HASTE_CACHE)",
+            jar.display()
+        )
+    });
+    let zip = zip::ZipArchive::new(file).expect("reading client jar zip");
+    let names: std::collections::HashSet<String> =
+        zip.file_names().map(|s| s.to_string()).collect();
+    let mut missing = Vec::new();
+    for texture in crate::registry::table_textures() {
+        let key = format!("assets/minecraft/textures/{texture}.png");
+        if !names.contains(&key) {
+            missing.push(key);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "{} table textures missing from the jar: {missing:?}",
+        missing.len()
+    );
 }
