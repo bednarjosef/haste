@@ -376,6 +376,7 @@ fn dropped_items_offscreen() {
             count,
             age: 0.0,
         }),
+        overlays: Default::default(),
         decoration: None,
         hands: [None, None],
         equipment: Vec::new(),
@@ -579,12 +580,6 @@ fn frames_and_paintings_offscreen() {
     );
 }
 
-/// A red-wool sheep through the whole store path (spawn + wool metadata +
-/// `render_instances`): the sheep model draws (not the fallback box) and the wool overlay
-/// tints the frame red. Deterministic, no server. Saves `target/render-checks/sheep.png`.
-#[test]
-#[ignore = "needs the client jar, datagen reports, the model dump and a Vulkan driver (source scripts/env.sh)"]
-fn sheep_wool_overlay_offscreen() {
 /// A humanoid with a held iron sword and a full set of iron armour drawn offscreen: the
 /// equipment layers change the pixels (and are drawn in the same entity pass). Saves
 /// `target/render-checks/equipment.png`. Needs the client jar, the datagen reports (including
@@ -668,6 +663,7 @@ fn equipment_offscreen() {
         nametag: None,
         hurt: 0.0,
         item: None,
+        overlays: Default::default(),
         decoration: None,
         hands: [None, None],
         equipment: Vec::new(),
@@ -718,7 +714,103 @@ fn equipment_offscreen() {
         roll_deg: 0.0,
         bob: haste_render::ViewBob::default(),
     };
-    // The sheep's kind through the real entity-type names, like the store resolves it.
+    let base = render_scene(&mut renderer, &world, std::slice::from_ref(&bare), camera);
+    let img = render_scene(&mut renderer, &world, std::slice::from_ref(&armed), camera);
+    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
+    std::fs::create_dir_all(&out).unwrap();
+    img.save(out.join("equipment.png")).unwrap();
+    let changed = base
+        .pixels()
+        .zip(img.pixels())
+        .filter(|(a, b)| a.0 != b.0)
+        .count();
+    eprintln!(
+        "equipment drew into {changed} pixels; entities_drawn={}",
+        renderer.entities_drawn()
+    );
+    assert!(
+        changed > 200,
+        "the held sword and armour changed {changed} pixels"
+    );
+    assert_eq!(renderer.entities_drawn(), 1);
+
+    // The custom head (a carved pumpkin) and a dyed leather chestplate both change pixels.
+    let pumpkin_img = render_scene(
+        &mut renderer,
+        &world,
+        std::slice::from_ref(&pumpkin),
+        camera,
+    );
+    pumpkin_img.save(out.join("equipment_head.png")).unwrap();
+    let head_changed = base
+        .pixels()
+        .zip(pumpkin_img.pixels())
+        .filter(|(a, b)| a.0 != b.0)
+        .count();
+    assert!(
+        head_changed > 100,
+        "the pumpkin changed {head_changed} pixels"
+    );
+    let dyed_img = render_scene(&mut renderer, &world, std::slice::from_ref(&dyed), camera);
+    dyed_img.save(out.join("equipment_dyed.png")).unwrap();
+    let dyed_changed = base
+        .pixels()
+        .zip(dyed_img.pixels())
+        .filter(|(a, b)| a.0 != b.0)
+        .count();
+    assert!(
+        dyed_changed > 100,
+        "the dyed leather changed {dyed_changed} pixels"
+    );
+    let winged_img = render_scene(&mut renderer, &world, std::slice::from_ref(&winged), camera);
+    winged_img.save(out.join("equipment_elytra.png")).unwrap();
+    let winged_changed = base
+        .pixels()
+        .zip(winged_img.pixels())
+        .filter(|(a, b)| a.0 != b.0)
+        .count();
+    assert!(
+        winged_changed > 100,
+        "the elytra changed {winged_changed} pixels"
+    );
+}
+
+/// A red-wool sheep through the whole store path (spawn + wool metadata +
+/// `render_instances`): the sheep model draws (not the fallback box, not a shulker — the
+/// wool byte sits at the same metadata index as a shulker's colour byte) and the wool
+/// overlay tints the frame red. Deterministic, no server. Saves
+/// `target/render-checks/sheep.png`.
+#[test]
+#[ignore = "needs the client jar, datagen reports, the model dump and a Vulkan driver (source scripts/env.sh)"]
+fn sheep_wool_overlay_offscreen() {
+    let jar = haste_core::paths::client_jar();
+    let mut assets =
+        haste_assets::Assets::open(&jar, &haste_core::paths::assets_dir(), "26.3").unwrap();
+    let data = haste_data::GameData::load().unwrap();
+    let mut renderer = Renderer::new_offscreen(640, 480, &mut assets, &data.blocks).unwrap();
+    let world = Flat {
+        stone: data
+            .blocks
+            .default_state(&haste_core::Identifier::minecraft("stone"))
+            .unwrap(),
+    };
+    let dirty: Vec<SectionPos> = (-1..=1)
+        .flat_map(|x| (-1..=1).map(move |z| SectionPos::new(x, 0, z)))
+        .collect();
+    renderer.update_world(&world, &dirty, ChunkPos::new(0, 0), 4);
+    for _ in 0..200 {
+        renderer.update_world(&world, &[], ChunkPos::new(0, 0), 4);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let camera = Camera {
+        pos: glam::DVec3::new(0.0, 2.2, -4.0),
+        yaw: 0.0,
+        pitch: 5.0,
+        fov_deg: 70.0,
+        roll_deg: 0.0,
+        bob: haste_render::ViewBob::default(),
+    };
+    // The sheep's kind through the real entity-type registry, like the store resolves it.
     let sheep_kind = data
         .registries
         .index("minecraft:entity_type", &Identifier::minecraft("sheep"))
@@ -770,11 +862,6 @@ fn equipment_offscreen() {
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
     std::fs::create_dir_all(&out).unwrap();
     img.save(out.join("sheep.png")).unwrap();
-    let base = render_scene(&mut renderer, &world, std::slice::from_ref(&bare), camera);
-    let img = render_scene(&mut renderer, &world, std::slice::from_ref(&armed), camera);
-    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
-    std::fs::create_dir_all(&out).unwrap();
-    img.save(out.join("equipment.png")).unwrap();
     let changed = base
         .pixels()
         .zip(img.pixels())
@@ -794,53 +881,4 @@ fn equipment_offscreen() {
         .filter(|p| p.0[0] as i32 - p.0[1] as i32 > 15 && p.0[0] as i32 - p.0[2] as i32 > 15)
         .count();
     assert!(red > 200, "red wool pixels: {red}");
-    eprintln!(
-        "equipment drew into {changed} pixels; entities_drawn={}",
-        renderer.entities_drawn()
-    );
-    assert!(
-        changed > 200,
-        "the held sword and armour changed {changed} pixels"
-    );
-    assert_eq!(renderer.entities_drawn(), 1);
-
-    // The custom head (a carved pumpkin) and a dyed leather chestplate both change pixels.
-    let pumpkin_img = render_scene(
-        &mut renderer,
-        &world,
-        std::slice::from_ref(&pumpkin),
-        camera,
-    );
-    pumpkin_img.save(out.join("equipment_head.png")).unwrap();
-    let head_changed = base
-        .pixels()
-        .zip(pumpkin_img.pixels())
-        .filter(|(a, b)| a.0 != b.0)
-        .count();
-    assert!(
-        head_changed > 100,
-        "the pumpkin changed {head_changed} pixels"
-    );
-    let dyed_img = render_scene(&mut renderer, &world, std::slice::from_ref(&dyed), camera);
-    dyed_img.save(out.join("equipment_dyed.png")).unwrap();
-    let dyed_changed = base
-        .pixels()
-        .zip(dyed_img.pixels())
-        .filter(|(a, b)| a.0 != b.0)
-        .count();
-    assert!(
-        dyed_changed > 100,
-        "the dyed leather changed {dyed_changed} pixels"
-    );
-    let winged_img = render_scene(&mut renderer, &world, std::slice::from_ref(&winged), camera);
-    winged_img.save(out.join("equipment_elytra.png")).unwrap();
-    let winged_changed = base
-        .pixels()
-        .zip(winged_img.pixels())
-        .filter(|(a, b)| a.0 != b.0)
-        .count();
-    assert!(
-        winged_changed > 100,
-        "the elytra changed {winged_changed} pixels"
-    );
 }

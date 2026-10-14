@@ -43,11 +43,6 @@ fn main() {
     }
     println!(
         "{path} {w}x{h}: grid={} body={} red={} blue={} green={} snow={} total={total}",
-        grid,
-        body,
-        tinted_red,
-        blue,
-        green,
-        white_snow
+        grid, body, tinted_red, blue, green, white_snow
     );
 }
