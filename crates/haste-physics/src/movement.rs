@@ -7,11 +7,19 @@ use haste_core::{Aabb, BlockPos, BlockStateId, DVec3};
 
 use crate::block_effects;
 use crate::collision::{collide_with_step, no_collision, supporting_block};
-use crate::{fluids, flying, trig, BlockPhysics, PlayerAttributes, PlayerState, Pose, TickResult};
+use crate::{
+    fluids, flying, trig, BlockPhysics, FluidKind, PlayerAttributes, PlayerState, Pose, TickResult,
+};
+
+/// Box shrink before measuring fluid contact (assumption, as in `fluids`).
+const FLUID_CONTACT_SHRINK: f64 = 0.001;
 
 /// Velocity components with a smaller magnitude are zeroed at the start of the tick
 /// (mcpk.wiki "Horizontal/Vertical Movement Formulas": 0.003 in 1.9+).
 pub const VELOCITY_THRESHOLD: f64 = 0.003;
+/// Horizontal length squared below which both horizontal velocity components are zeroed together
+/// (verified: `LivingEntity.aiStep`, the player branch; 9.0E-6 = 0.003 squared).
+pub const VELOCITY_ZERO_LEN_SQ: f64 = 9.0e-6;
 /// Movement key impulses are scaled by this (mcpk.wiki "Default 0.98" multiplier; it is also what
 /// makes the wiki's 4.317 m/s walking speed come out of 0.1 x 0.98 / (1 - 0.546)).
 pub const INPUT_SCALE: f32 = 0.98;
@@ -32,8 +40,10 @@ pub const SPRINT_JUMP_BOOST: f32 = 0.2;
 pub const JUMP_COOLDOWN_TICKS: u8 = 10;
 /// Sneak edge back-off step (vanilla `Player.maybeBackOffFromEdge`: 0.05).
 pub const EDGE_BACKOFF_STEP: f64 = 0.05;
-/// Offset below the feet used to find the block whose friction/jump factor applies (assumption).
-pub const BLOCK_BELOW_OFFSET: f64 = 0.5;
+/// Offset below the feet for the block that affects movement (verified:
+/// `Entity.getBlockPosBelowThatAffectsMyMovement` = `getOnPos(0.500001F)`; the 0.500001 makes a
+/// player standing on a half slab attribute the movement to the block under the slab).
+pub const BLOCK_BELOW_OFFSET: f64 = 0.500001;
 /// By how much the pose-fit and edge-probe boxes are shrunk (vanilla
 /// `Player.canPlayerFitWithinBlocksAndEntitiesWhen` and `Player.canFallAtLeast`: 1.0E-7).
 pub const POSE_TEST_EPSILON: f64 = 1.0e-7;
@@ -43,6 +53,57 @@ pub const POSE_TEST_EPSILON: f64 = 1.0e-7;
 pub(crate) struct Impulse {
     pub strafe: f32,
     pub forward: f32,
+}
+
+/// Depth of the deepest fluid around the player, measured from the feet (vanilla
+/// `Entity.getFluidHeight` via `EntityFluidInteraction.update`: the highest fluid surface among
+/// the cells the slightly shrunk box touches). Lava when the player is in lava, else water, like
+/// the choice in `LivingEntity.aiStep`.
+fn fluid_height(
+    state: &PlayerState,
+    attrs: &PlayerAttributes,
+    world: &dyn BlockView,
+    blocks: &dyn BlockPhysics,
+) -> f64 {
+    let kind = if state.in_lava {
+        FluidKind::Lava
+    } else {
+        FluidKind::Water
+    };
+    let b = state.aabb(attrs);
+    let min = b.min + DVec3::splat(FLUID_CONTACT_SHRINK);
+    let max = b.max - DVec3::splat(FLUID_CONTACT_SHRINK);
+    let mut height = 0.0f64;
+    for x in min.x.floor() as i32..=(max.x.ceil() as i32 - 1) {
+        for z in min.z.floor() as i32..=(max.z.ceil() as i32 - 1) {
+            for y in min.y.floor() as i32..=(max.y.ceil() as i32 - 1) {
+                let p = BlockPos::new(x, y, z);
+                let Some(f) = blocks.fluid(world.block_state(p)) else {
+                    continue;
+                };
+                if f.kind != kind {
+                    continue;
+                }
+                let full = blocks
+                    .fluid(world.block_state(p.add(0, 1, 0)))
+                    .is_some_and(|a| a.kind == kind);
+                let surface = y as f64 + if full { 1.0 } else { f.height as f64 };
+                if surface >= min.y {
+                    height = height.max(surface - b.min.y);
+                }
+            }
+        }
+    }
+    height
+}
+
+/// vanilla `Entity.getFluidJumpThreshold`: 0.4 unless the eye height is below 0.4 (then 0).
+fn fluid_jump_threshold(attrs: &PlayerAttributes, pose: Pose) -> f64 {
+    if attrs.eye_height_for(pose) < fluids::FLUID_JUMP_THRESHOLD {
+        0.0
+    } else {
+        fluids::FLUID_JUMP_THRESHOLD
+    }
 }
 
 /// One 50 ms player tick. `blocks` stands in for `GameData` until haste-data provides it (see
@@ -63,12 +124,16 @@ pub fn tick(
     state.yaw = input.yaw;
     state.pitch = input.pitch.clamp(-90.0, 90.0);
 
-    // Negligible velocities are cancelled first.
+    // Negligible velocities are cancelled first (vanilla `LivingEntity.aiStep`: for the player,
+    // x and z are cancelled together when the horizontal length squared is below 9.0E-6;
+    // y is cancelled on its own below 0.003).
     let v = &mut state.velocity;
-    for c in [&mut v.x, &mut v.y, &mut v.z] {
-        if c.abs() < VELOCITY_THRESHOLD {
-            *c = 0.0;
-        }
+    if v.x * v.x + v.z * v.z < VELOCITY_ZERO_LEN_SQ {
+        v.x = 0.0;
+        v.z = 0.0;
+    }
+    if v.y.abs() < VELOCITY_THRESHOLD {
+        v.y = 0.0;
     }
 
     // Fluid contact and sneak/sprint flags (vanilla `Entity.baseTick` sets the fluid and
@@ -85,10 +150,24 @@ pub fn tick(
     if state.flying {
         state.jump_cooldown = 0;
     } else if input.jump {
+        // vanilla `LivingEntity.aiStep`, "jump" profiler section: in a fluid the player jumps
+        // normally only while on ground with the fluid no deeper than the jump threshold;
+        // otherwise holding jump swims up.
+        let threshold = fluid_jump_threshold(attrs, state.pose);
+        let height = fluid_height(state, attrs, world, blocks);
+        let shallow = state.on_ground && height <= threshold;
+        let jump_from_ground = state.on_ground && state.jump_cooldown == 0;
         if state.in_water || state.in_lava {
-            fluids::swim_up(state);
-        } else if state.on_ground && state.jump_cooldown == 0 {
-            jump(state, attrs, world, blocks);
+            if shallow {
+                if jump_from_ground {
+                    jump(state, attrs, world, shapes, blocks);
+                    state.jump_cooldown = JUMP_COOLDOWN_TICKS;
+                }
+            } else {
+                fluids::swim_up(state);
+            }
+        } else if jump_from_ground {
+            jump(state, attrs, world, shapes, blocks);
             state.jump_cooldown = JUMP_COOLDOWN_TICKS;
         }
     } else {
@@ -109,7 +188,17 @@ pub fn tick(
         travel_normal(state, impulse, attrs, world, shapes, blocks);
     }
 
-    // Slime stepOn, honey slide, stuck-in-block multipliers (vanilla applyEffectsFromBlocks).
+    // vanilla `Entity.move`: the flag next tick's `shouldStopRunSprinting` reads - whether the
+    // input direction and the movement that actually resulted (the velocity after the move, its
+    // collided axes zeroed) were within 8 degrees (`LocalPlayer.isHorizontalCollisionMinor`).
+    // The post-move drags only scale the velocity, so the direction is unchanged.
+    state.minor_horizontal_collision = if state.horizontal_collision {
+        minor_horizontal_collision(state, &impulse, state.velocity)
+    } else {
+        false
+    };
+    // End of tick (vanilla `LivingEntity.aiStep` -> `Entity.applyEffectsFromBlocks`): slime
+    // stepOn first, then the entityInside scan (honey slide, stuck-in-block multipliers).
     block_effects::apply_end_of_tick_effects(state, attrs, world, shapes, blocks);
     // Vanilla `Player.tick` ends with `updatePlayerPose`: the new pose's box applies from
     // the next tick's movement, and the camera picks up its eye height the tick after that
@@ -124,9 +213,9 @@ pub fn tick(
     }
 }
 
-/// The input-driven flags for this tick's movement: `sneaking` (raw shift key), the sprint
-/// state and `crouching` (vanilla `LocalPlayer.aiStep` computes its `crouching` field from the
-/// CURRENT box, i.e. the pose the last tick ended with, before the player moves).
+/// The input-driven flags for this tick's movement: `sneaking` (raw shift key), `crouching` and
+/// the sprint state (vanilla `LocalPlayer.aiStep`, in that order, from the CURRENT box, i.e. the
+/// pose the last tick ended with, before the player moves).
 fn update_flags(
     state: &mut PlayerState,
     input: &InputState,
@@ -139,21 +228,31 @@ fn update_flags(
     let forward = input.forward && !input.back;
     // Crouching (vanilla `LocalPlayer.aiStep`): not flying, not swimming, the crouching box
     // fits, and shift is held or standing does not fit (forced crouch under a low ceiling).
+    // Riding and sleeping are not modelled.
     state.crouching = !state.flying
         && !state.swimming
         && fits_pose(state, attrs, Pose::Crouching, world, shapes)
         && (state.sneaking || !fits_pose(state, attrs, Pose::Standing, world, shapes));
-    // Sprint: needs forward; ends on horizontal collision (wiki "Sprinting": collision at more than
-    // 8 degrees ends it; the angle test is not modelled) or when forward is released; releasing
-    // the sprint key alone does not end it. Hunger and blindness are the caller's business.
-    if state.sprinting {
-        if !forward || state.horizontal_collision {
-            state.sprinting = false;
-        }
-    } else if input.sprint && forward && !state.crouching && !state.horizontal_collision {
-        // Not restarted while still pushing into a wall (assumption; avoids on/off flapping).
+    // Sprint (vanilla `LocalPlayer.aiStep`, `canStartSprinting` / `shouldStopRunSprinting`):
+    // starting needs the forward impulse and not moving slowly (`isMovingSlowly`: crouching or
+    // the swimming pose out of water, unless under water), with no collision condition; a
+    // horizontal collision ends it only when the collision is not minor (the input direction and
+    // the actual movement within 8 degrees, `isHorizontalCollisionMinor`). The stop is evaluated
+    // after the start so a persistent collision keeps the sprint off instead of restarting it
+    // every other tick. Releasing the sprint key alone does not end it. Hunger and blindness
+    // are the caller's business.
+    let moving_slowly = state.crouching || (state.pose == Pose::Swimming && !state.in_water);
+    let under_water = state.eyes_in_water && state.in_water;
+    if !state.sprinting && input.sprint && forward && (!moving_slowly || under_water) {
         state.sprinting = true;
     }
+    if state.sprinting
+        && (!forward || (state.horizontal_collision && !state.minor_horizontal_collision))
+    {
+        state.sprinting = false;
+    }
+    // Sprint-swimming state (vanilla `Entity.updateSwimming`: sprinting in water with the eyes
+    // in it, or already swimming; never while flying).
     state.swimming =
         state.sprinting && state.in_water && (eyes_in_water || state.swimming) && !state.flying;
 }
@@ -262,51 +361,85 @@ fn block_below(state: &PlayerState) -> BlockPos {
     ))
 }
 
-/// Block whose friction/jump factor applies: the block half a block below the feet, or, when that
-/// has no collision (standing on an edge), the closest supporting block.
+/// The block whose friction/jump/speed factor applies: vanilla
+/// `Entity.getBlockPosBelowThatAffectsMyMovement` = `getOnPos(0.500001F)` (Entity.java:1090).
+/// On the ground, the supporting block's X/Z with `floor(y - 0.500001)` (a wall or fence gate
+/// keeps the supporting pos - the same cell while the player stands on its 1.5 tall top - and a
+/// fence lands on that same cell either way); airborne or unsupported, `floor(pos - 0.500001)`.
 pub(crate) fn ground_block(
     state: &PlayerState,
     attrs: &PlayerAttributes,
     world: &dyn BlockView,
     shapes: &dyn CollisionShapes,
 ) -> BlockStateId {
-    let below = world.block_state(block_below(state));
-    if !shapes.collision_boxes(below).is_empty() {
-        return below;
+    if state.on_ground {
+        if let Some(p) = supporting_block(&state.aabb(attrs), world, shapes) {
+            let y = (state.pos.y - BLOCK_BELOW_OFFSET).floor() as i32;
+            return world.block_state(BlockPos::new(p.x, y, p.z));
+        }
     }
-    match supporting_block(&state.aabb(attrs), world, shapes) {
-        Some(p) => world.block_state(p),
-        None => below,
-    }
+    world.block_state(block_below(state))
 }
 
 /// Speed/jump factor: the block at the feet if it has a non-default factor (soul sand and honey
-/// are shorter than a block, so the player stands inside their cell), else the block below.
+/// are shorter than a block, so the player stands inside their cell), else the block below
+/// (vanilla `Entity.getBlockJumpFactor` / `Entity.getBlockSpeedFactor`).
 fn block_factor(
     state: &PlayerState,
+    attrs: &PlayerAttributes,
     world: &dyn BlockView,
+    shapes: &dyn CollisionShapes,
     f: impl Fn(BlockStateId) -> f32,
 ) -> f32 {
     let at = f(world.block_state(BlockPos::from_dvec3(state.pos)));
     if at != 1.0 {
         at
     } else {
-        f(world.block_state(block_below(state)))
+        f(ground_block(state, attrs, world, shapes))
     }
+}
+
+/// Angle below which a horizontal collision counts as minor (vanilla
+/// `LocalPlayer.isHorizontalCollisionMinor`: 0.13962634 rad, i.e. 8 degrees).
+pub const MINOR_COLLISION_ANGLE: f64 = 0.13962634;
+
+/// vanilla `LocalPlayer.isHorizontalCollisionMinor`: the angle between the input direction
+/// (rotated by yaw) and the movement the move attempted; minor when below 8 degrees, and false
+/// when either vector is near zero.
+fn minor_horizontal_collision(state: &PlayerState, imp: &Impulse, attempted: DVec3) -> bool {
+    let r = trig::deg_to_rad(state.yaw);
+    let (sin, cos) = (trig::sin(r) as f64, trig::cos(r) as f64);
+    let want_x = imp.strafe as f64 * cos - imp.forward as f64 * sin;
+    let want_z = imp.forward as f64 * cos + imp.strafe as f64 * sin;
+    let want_len_sq = want_x * want_x + want_z * want_z;
+    let got_len_sq = attempted.x * attempted.x + attempted.z * attempted.z;
+    if want_len_sq < 1.0e-5 || got_len_sq < 1.0e-5 {
+        return false;
+    }
+    let dot = want_x * attempted.x + want_z * attempted.z;
+    let angle = (dot / (want_len_sq * got_len_sq).sqrt()).acos();
+    angle < MINOR_COLLISION_ANGLE
 }
 
 fn jump(
     state: &mut PlayerState,
     attrs: &PlayerAttributes,
     world: &dyn BlockView,
+    shapes: &dyn CollisionShapes,
     blocks: &dyn BlockPhysics,
 ) {
-    let factor = block_factor(state, world, |s| blocks.jump_factor(s));
-    state.velocity.y = attrs.jump_strength * factor as f64;
-    if state.sprinting {
-        let r = trig::deg_to_rad_jump(state.yaw);
-        state.velocity.x -= (trig::sin(r) * SPRINT_JUMP_BOOST) as f64;
-        state.velocity.z += (trig::cos(r) * SPRINT_JUMP_BOOST) as f64;
+    let factor = block_factor(state, attrs, world, shapes, |s| blocks.jump_factor(s));
+    // vanilla `LivingEntity.jumpFromGround` (LivingEntity.java:2372): y = max(jump power, current
+    // y), so jumping keeps a faster rise; the sprint boost uses the same deg->rad conversion as
+    // the movement code (no separate jump constant).
+    let power = attrs.jump_strength * factor as f64;
+    if power > 1.0e-5 {
+        state.velocity.y = power.max(state.velocity.y);
+        if state.sprinting {
+            let r = trig::deg_to_rad(state.yaw);
+            state.velocity.x -= (trig::sin(r) * SPRINT_JUMP_BOOST) as f64;
+            state.velocity.z += (trig::cos(r) * SPRINT_JUMP_BOOST) as f64;
+        }
     }
 }
 
@@ -350,12 +483,26 @@ fn travel_normal(
 /// Block speed factor (soul sand, honey) on horizontal velocity after the move. The order is
 /// derived from the wiki "Walking" table: soul sand 2.508 m/s = 20 x 0.098 / (1 - 0.4 x 0.546),
 /// i.e. the factor multiplies the velocity that carries into the next tick, not this tick's move.
+/// The factor block is the block at the feet if non-default, else the block below (vanilla
+/// `Entity.getBlockSpeedFactor` -> `getOnPos(0.500001F)`; the fluids path keeps this function's
+/// signature, so the below block here is `floor(pos - 0.500001)` without the supporting-block
+/// refinement - see NOTES.md). While the feet are in water (or a bubble column) vanilla returns
+/// the feet factor alone, so a soul sand floor underwater does not slow the player.
 pub(crate) fn apply_speed_factor(
     state: &mut PlayerState,
     world: &dyn BlockView,
     blocks: &dyn BlockPhysics,
 ) {
-    let f = block_factor(state, world, |s| blocks.speed_factor(s));
+    let feet = world.block_state(BlockPos::from_dvec3(state.pos));
+    let at = blocks.speed_factor(feet);
+    let in_water = blocks
+        .fluid(feet)
+        .is_some_and(|f| f.kind == FluidKind::Water);
+    let f = if in_water || at != 1.0 {
+        at
+    } else {
+        blocks.speed_factor(world.block_state(block_below(state)))
+    };
     if f != 1.0 {
         state.velocity.x *= f as f64;
         state.velocity.z *= f as f64;
@@ -527,4 +674,273 @@ fn back_off_from_edge(
         }
     }
     DVec3::new(x, motion.y, z)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{states::*, TestShapes, TestWorld};
+    use haste_core::input::InputState;
+
+    fn settle(w: &TestWorld, s: &mut PlayerState, attrs: &PlayerAttributes, shapes: &TestShapes) {
+        for _ in 0..3 {
+            tick(s, &InputState::default(), attrs, w, shapes, shapes);
+        }
+    }
+
+    fn fence_pool(fluid: haste_core::BlockStateId, deep: bool) -> TestWorld {
+        let mut w = TestWorld::flat(0, STONE);
+        w.set(0, 0, 0, FENCE_POST); // 1.5 tall post to stand on
+        w.set(0, 1, 0, fluid);
+        if deep {
+            w.set(0, 2, 0, fluid); // surface 2 + 8/9: depth 1.389 > 0.4
+        }
+        w // surface 1 + 8/9: depth from the feet 0.389 <= 0.4
+    }
+
+    #[test]
+    fn jump_in_shallow_water_on_ground_is_a_normal_jump() {
+        // vanilla `LivingEntity.aiStep`, "jump" section: on ground with the fluid no deeper than
+        // the jump threshold, the player jumps normally instead of swimming up.
+        let w = fence_pool(WATER_SOURCE, false);
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let mut s = PlayerState::at(DVec3::new(0.5, 1.5, 0.5));
+        settle(&w, &mut s, &attrs, &shapes);
+        assert!(s.on_ground, "standing on the post");
+        assert!(s.in_water, "the cell above the post is water");
+        s.velocity = DVec3::ZERO;
+        let input = InputState {
+            jump: true,
+            ..Default::default()
+        };
+        tick(&mut s, &input, &attrs, &w, &shapes, &shapes);
+        // jumpFromGround: y = 0.42; the move lifts 0.42, the water drag 0.8, then the water
+        // gravity sink gravity/16.
+        assert_eq!(s.pos.y, 1.92);
+        assert!(
+            (s.velocity.y - (0.42 * 0.8 - 0.08 / 16.0)).abs() < 1e-12,
+            "{}",
+            s.velocity.y
+        );
+        assert_eq!(s.jump_cooldown, JUMP_COOLDOWN_TICKS);
+    }
+
+    #[test]
+    fn jump_in_deep_water_on_the_ground_swims_up() {
+        let w = fence_pool(WATER_SOURCE, true);
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let mut s = PlayerState::at(DVec3::new(0.5, 1.5, 0.5));
+        settle(&w, &mut s, &attrs, &shapes);
+        assert!(s.on_ground && s.in_water);
+        s.velocity = DVec3::ZERO;
+        let input = InputState {
+            jump: true,
+            ..Default::default()
+        };
+        tick(&mut s, &input, &attrs, &w, &shapes, &shapes);
+        // jumpInLiquid: y = +0.04; the move lifts 0.04, the water drag 0.8, then the sink.
+        assert_eq!(s.pos.y, 1.54);
+        assert!(
+            (s.velocity.y - (0.04 * 0.8 - 0.08 / 16.0)).abs() < 1e-12,
+            "{}",
+            s.velocity.y
+        );
+        assert_eq!(s.jump_cooldown, 0, "no jump cooldown when swimming up");
+    }
+
+    #[test]
+    fn jump_in_shallow_lava_on_ground_is_a_normal_jump() {
+        let w = fence_pool(LAVA_SOURCE, false);
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let mut s = PlayerState::at(DVec3::new(0.5, 1.5, 0.5));
+        settle(&w, &mut s, &attrs, &shapes);
+        assert!(s.on_ground && s.in_lava);
+        s.velocity = DVec3::ZERO;
+        let input = InputState {
+            jump: true,
+            ..Default::default()
+        };
+        tick(&mut s, &input, &attrs, &w, &shapes, &shapes);
+        assert_eq!(s.pos.y, 1.92);
+        // jumpFromGround y = 0.42; the move lifts 0.42, the shallow-lava vertical drag 0.8, the
+        // sink gravity/16, then gravity/4.
+        assert!(
+            (s.velocity.y - (0.42 * 0.8 - 0.08 / 16.0 - 0.08 / 4.0)).abs() < 1e-12,
+            "{}",
+            s.velocity.y
+        );
+    }
+
+    #[test]
+    fn jump_keeps_a_faster_rise() {
+        // vanilla `LivingEntity.jumpFromGround`: y = max(jump power, current y).
+        let w = TestWorld::flat(0, STONE);
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let mut s = PlayerState::at(DVec3::new(0.5, 0.0, 0.5));
+        s.on_ground = true;
+        s.velocity.y = 0.5; // already rising faster than the jump power
+        let input = InputState {
+            jump: true,
+            ..Default::default()
+        };
+        tick(&mut s, &input, &attrs, &w, &shapes, &shapes);
+        assert_eq!(s.pos.y, 0.5, "y keeps the faster 0.5 rise");
+        assert!(
+            (s.velocity.y - (0.5 - attrs.gravity) * VERTICAL_DRAG as f64).abs() < 1e-12,
+            "{}",
+            s.velocity.y
+        );
+    }
+
+    #[test]
+    fn sprint_jump_boost_uses_the_movement_deg_to_rad() {
+        // vanilla `LivingEntity.jumpFromGround`: the boost angle is yaw * (float)(PI/180), the
+        // same conversion as the movement code.
+        let w = TestWorld::flat(0, STONE);
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let mut s = PlayerState::at(DVec3::new(0.5, 0.0, 0.5));
+        s.on_ground = true;
+        let input = InputState {
+            forward: true,
+            sprint: true,
+            jump: true,
+            yaw: 30.0,
+            ..Default::default()
+        };
+        tick(&mut s, &input, &attrs, &w, &shapes, &shapes);
+        let r = trig::deg_to_rad(30.0);
+        let (sin, cos) = (trig::sin(r), trig::cos(r));
+        let speed = (attrs.movement_speed * SPRINT_MULTIPLIER) as f32;
+        let accel = INPUT_SCALE as f64 * speed as f64;
+        let drag = (DEFAULT_SLIPPERINESS * HORIZONTAL_DRAG) as f64;
+        assert_eq!(
+            s.velocity.x,
+            (-(sin * SPRINT_JUMP_BOOST) as f64 - accel * sin as f64) * drag
+        );
+        assert_eq!(
+            s.velocity.z,
+            ((cos * SPRINT_JUMP_BOOST) as f64 + accel * cos as f64) * drag
+        );
+        assert_eq!(
+            s.velocity.y,
+            (attrs.jump_strength - attrs.gravity) * VERTICAL_DRAG as f64
+        );
+    }
+
+    #[test]
+    fn player_velocity_threshold_zeroes_horizontal_components_together() {
+        // vanilla `LivingEntity.aiStep`: the player zeroes x and z together when the horizontal
+        // length squared is below 9.0E-6; y on its own below 0.003.
+        let w = TestWorld::flat(0, STONE);
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let drag = (DEFAULT_SLIPPERINESS * HORIZONTAL_DRAG) as f64;
+        // x^2 + z^2 = 2.0E-5 >= 9.0E-6: neither component is zeroed (z alone is below 0.003).
+        let mut s = PlayerState::at(DVec3::new(0.5, 0.0, 0.5));
+        s.on_ground = true;
+        s.velocity = DVec3::new(0.004, 0.5, 0.002);
+        tick(&mut s, &InputState::default(), &attrs, &w, &shapes, &shapes);
+        assert!(
+            (s.velocity.x - 0.004 * drag).abs() < 1e-15,
+            "{}",
+            s.velocity.x
+        );
+        assert!(
+            (s.velocity.z - 0.002 * drag).abs() < 1e-15,
+            "{}",
+            s.velocity.z
+        );
+        // x^2 + z^2 = 2.0E-6 < 9.0E-6: both are zeroed together.
+        let mut s = PlayerState::at(DVec3::new(0.5, 0.0, 0.5));
+        s.on_ground = true;
+        s.velocity = DVec3::new(0.001, 0.5, 0.001);
+        tick(&mut s, &InputState::default(), &attrs, &w, &shapes, &shapes);
+        assert_eq!(s.velocity.x, 0.0);
+        assert_eq!(s.velocity.z, 0.0);
+    }
+
+    #[test]
+    fn sneak_edge_probe_reaches_a_ledge_exactly_step_below_the_feet() {
+        // vanilla `Player.canFallAtLeast`: the probe is the slab from minY - step - 1e-7 to
+        // minY, so a block top exactly `step` below the feet is still reached.
+        let mut w = TestWorld::new();
+        w.set(0, -1, 0, STONE); // the block the player stands on (top y = 0)
+        w.set(1, 0, 0, LEDGE_0_6); // top at -0.6, exactly the step height below the feet
+        let shapes = TestShapes::default();
+        let aabb = Aabb::entity(DVec3::new(0.5, 0.0, 0.5), 0.6, 1.8);
+        let kept = back_off_from_edge(&aabb, DVec3::new(0.8, 0.0, 0.0), 0.6, &w, &shapes);
+        assert_eq!(kept.x, 0.8, "the probe reaches step + 1e-7 below the feet");
+    }
+
+    #[test]
+    fn minor_collision_is_the_angle_between_input_and_actual_movement() {
+        // vanilla `LocalPlayer.isHorizontalCollisionMinor`: the angle between the input direction
+        // and the movement that actually resulted, minor below 8 degrees (0.13962634 rad).
+        let imp = Impulse {
+            strafe: 0.0,
+            forward: INPUT_SCALE,
+        };
+        let mut s = PlayerState::at(DVec3::new(0.5, 0.0, 0.5));
+        s.yaw = 0.0; // input direction +z
+        for (deg, minor) in [(0.0f64, true), (7.0, true), (10.0, false), (90.0, false)] {
+            let a = deg.to_radians();
+            let actual = DVec3::new(a.sin(), 0.0, a.cos());
+            assert_eq!(
+                minor_horizontal_collision(&s, &imp, actual),
+                minor,
+                "{deg} degrees"
+            );
+        }
+        // A near-zero actual movement is never minor (the player is flush against the wall).
+        assert!(!minor_horizontal_collision(
+            &s,
+            &imp,
+            DVec3::new(0.0, 0.0, 0.0)
+        ));
+    }
+
+    #[test]
+    fn sprinting_stops_in_a_corner_but_not_on_a_minor_collision() {
+        // vanilla `LocalPlayer.shouldStopRunSprinting` / `isHorizontalCollisionMinor`.
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        // Straight into the wall: the actual movement is zeroed on the collided axis, so the
+        // collision is not minor and sprinting stays off.
+        let mut w = TestWorld::flat(0, STONE);
+        w.fill((2, 0, -2), (2, 0, 2), STONE);
+        let mut s = PlayerState::at(DVec3::new(0.5, 0.0, 0.5));
+        let input = InputState {
+            forward: true,
+            sprint: true,
+            yaw: -90.0,
+            ..Default::default()
+        };
+        for _ in 0..10 {
+            tick(&mut s, &input, &attrs, &w, &shapes, &shapes);
+        }
+        assert!(s.horizontal_collision);
+        assert!(!s.sprinting, "pushing into a wall stops sprinting");
+
+        // Grazing the wall at 5 degrees: the actual movement stays within 8 degrees of the input,
+        // so the collision is minor and sprinting continues.
+        let mut w = TestWorld::flat(0, STONE);
+        w.fill((2, 0, -2), (2, 0, 60), STONE);
+        let mut s = PlayerState::at(DVec3::new(1.5, 0.0, 0.5));
+        let input = InputState {
+            forward: true,
+            sprint: true,
+            yaw: -5.0,
+            ..Default::default()
+        };
+        for _ in 0..40 {
+            tick(&mut s, &input, &attrs, &w, &shapes, &shapes);
+        }
+        assert!(s.horizontal_collision, "grazing the wall at x={}", s.pos.x);
+        assert!(s.sprinting, "a minor collision keeps sprinting");
+    }
 }
