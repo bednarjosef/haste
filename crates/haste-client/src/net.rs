@@ -133,6 +133,11 @@ pub trait EntitySink {
     fn hitbox(&self, _id: EntityId) -> Option<haste_core::Aabb> {
         None
     }
+    /// `minecraft:entity_type` registry index of an entity, for the crosshair's pickability
+    /// filter (`Entity.isPickable`); none in fakes, which the picker treats as a mod type.
+    fn entity_type(&self, _id: EntityId) -> Option<haste_core::RegistryIndex> {
+        None
+    }
     /// Forgets every entity (respawn / dimension change).
     fn clear(&mut self);
     /// `EntityStore::tick`.
@@ -233,6 +238,9 @@ impl EntitySink for EntityStore {
     fn hitbox(&self, id: EntityId) -> Option<haste_core::Aabb> {
         self.get(id)
             .map(|e| haste_core::Aabb::entity(e.pos, e.dimensions.0 as f64, e.dimensions.1 as f64))
+    }
+    fn entity_type(&self, id: EntityId) -> Option<haste_core::RegistryIndex> {
+        self.get(id).map(|e| e.kind)
     }
     fn clear(&mut self) {
         // Keeps the dimensions oracle, player info and painting variants (vanilla keeps the tab
@@ -366,6 +374,9 @@ pub struct Session {
     /// Entities the server spawned and has not removed (crosshair targets).
     entity_ids: HashSet<EntityId>,
     entity_boxes: Vec<(EntityId, haste_core::Aabb)>,
+    /// `minecraft:entity_type` registry index per `entity_boxes` entry (same order), for the
+    /// crosshair's pickability filter. A sentinel (`u32::MAX`) means unknown (mod) type.
+    entity_types: Vec<haste_core::RegistryIndex>,
     /// Firework rockets the server spawned and has not removed (their metadata index 9 is the
     /// attached-to entity id, `FireworkRocketEntity.DATA_ATTACHED_TO_TARGET`).
     fireworks: HashSet<EntityId>,
@@ -434,6 +445,7 @@ impl Session {
             breaking: HashMap::new(),
             entity_ids: HashSet::new(),
             entity_boxes: Vec::new(),
+            entity_types: Vec::new(),
             fireworks: HashSet::new(),
             attached_firework: None,
             time_of_day: None,
@@ -919,9 +931,16 @@ impl Session {
             self.sound_requests.push(request);
         }
         self.entity_boxes.clear();
+        self.entity_types.clear();
         for id in &self.entity_ids {
             if let Some(b) = entities.hitbox(*id) {
                 self.entity_boxes.push((*id, b));
+                // Unknown (fakes, mod types) -> sentinel, which the picker treats as pickable.
+                self.entity_types.push(
+                    entities
+                        .entity_type(*id)
+                        .unwrap_or(haste_core::RegistryIndex(u32::MAX)),
+                );
             }
         }
         // The vehicle's position this tick, for the passenger tick (`ride_tick`). A vehicle we
@@ -948,6 +967,7 @@ impl Session {
                 let env = crate::player::interact::InteractEnv {
                     data,
                     entities: &self.entity_boxes,
+                    entity_types: &self.entity_types,
                 };
                 self.player.tick_interact(input, view, &env, vehicle, out)
             }

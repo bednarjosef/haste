@@ -739,6 +739,10 @@ fn tick_once(
         // Held buttons stay; the press-only middle click, drop/swap presses and the hotbar choice
         // are consumed.
         let mut interact = shared_input.interact;
+        // The click counts (vanilla's KeyMapping.clickCount) are drained into the player, which
+        // consumes them in `Minecraft.handleKeybinds`' consumeClick loops.
+        let attack_clicks = std::mem::take(&mut shared_input.interact.attack_clicks);
+        let use_clicks = std::mem::take(&mut shared_input.interact.use_clicks);
         shared_input.interact.pick_block = false;
         shared_input.interact.drop_item = false;
         shared_input.interact.drop_stack = false;
@@ -758,6 +762,12 @@ fn tick_once(
             }
         }
         driver.session.player.set_interact(interact);
+        for _ in 0..attack_clicks {
+            driver.session.player.queue_attack_click();
+        }
+        for _ in 0..use_clicks {
+            driver.session.player.queue_use_click();
+        }
         SharedInput {
             toggle_flight: shared_input.toggle_flight,
             interact: shared_input.interact,

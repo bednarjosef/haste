@@ -808,6 +808,10 @@ struct InputRouter {
     /// last sample.
     attack: bool,
     use_item: bool,
+    /// Left / right clicks queued since the last sample (vanilla's `KeyMapping.clickCount`:
+    /// one per press). Drained into the shared input by `sample`.
+    attack_clicks: u8,
+    use_clicks: u8,
     pick_block: bool,
     drop_item: bool,
     drop_stack: bool,
@@ -832,6 +836,8 @@ impl Default for InputRouter {
             toggle_flight: false,
             attack: false,
             use_item: false,
+            attack_clicks: 0,
+            use_clicks: 0,
             pick_block: false,
             drop_item: false,
             drop_stack: false,
@@ -942,8 +948,18 @@ impl InputRouter {
             return false;
         }
         match button {
-            1 => self.attack = pressed,
-            3 => self.use_item = pressed,
+            1 => {
+                self.attack = pressed;
+                if pressed {
+                    self.attack_clicks = self.attack_clicks.saturating_add(1);
+                }
+            }
+            3 => {
+                self.use_item = pressed;
+                if pressed {
+                    self.use_clicks = self.use_clicks.saturating_add(1);
+                }
+            }
             2 if pressed => self.pick_block = true,
             _ => {}
         }
@@ -1031,6 +1047,14 @@ impl InputRouter {
         let i = &mut shared_input.interact;
         i.attack = self.attack;
         i.use_item = self.use_item;
+        // The click counts accumulate across samples (the render thread may sample several
+        // times per tick); the game thread drains them once per tick.
+        i.attack_clicks = i
+            .attack_clicks
+            .saturating_add(std::mem::take(&mut self.attack_clicks));
+        i.use_clicks = i
+            .use_clicks
+            .saturating_add(std::mem::take(&mut self.use_clicks));
         i.pick_block |= std::mem::take(&mut self.pick_block);
         i.drop_item |= std::mem::take(&mut self.drop_item);
         i.drop_stack |= std::mem::take(&mut self.drop_stack);
