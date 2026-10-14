@@ -107,13 +107,21 @@ impl Gpu {
             ..Default::default()
         }))
         .context("requesting a wgpu device")?;
-        // A non-sRGB view of the sRGB target lets the GUI blend in sRGB space like vanilla; GL
-        // lacks it (then the GUI writes linear colour into the sRGB target directly).
+        // A non-sRGB view of the sRGB target lets the GUI blend in sRGB space like vanilla.
+        // Backends without it (GL: neither VIEW_FORMATS nor SURFACE_VIEW_FORMATS) leave the GUI
+        // only the sRGB view, where the hardware decodes the destination, blends in linear space
+        // and encodes the result: opaque GUI pixels are still vanilla-exact but translucent ones
+        // drift towards the background's encoding (see gui.rs's blend_gui_pixel). Fixing that
+        // needs a non-sRGB colour attachment for the GUI pass, which only the target owner can
+        // give it (Renderer::init picks the surface format).
         let flags = adapter.get_downlevel_capabilities().flags;
         let view_formats = flags.contains(wgpu::DownlevelFlags::VIEW_FORMATS)
             && flags.contains(wgpu::DownlevelFlags::SURFACE_VIEW_FORMATS);
         if !view_formats {
-            tracing::warn!("no view formats on this backend: GUI blending happens in linear space");
+            tracing::warn!(
+                "no view formats on this backend ({:?}): GUI blending happens in linear space",
+                info.backend
+            );
         }
         Ok(Gpu {
             view_formats,
@@ -186,6 +194,8 @@ pub fn upload_atlas(
         offset += bytes;
     }
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    // Vanilla's block-atlas sampler for terrain (GlSampler: NEAREST_MIPMAP_LINEAR):
+    // nearest within a level, linear blend between the two nearest mip levels.
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("atlas-sampler"),
         address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -193,7 +203,7 @@ pub fn upload_atlas(
         address_mode_w: wgpu::AddressMode::ClampToEdge,
         mag_filter: wgpu::FilterMode::Nearest,
         min_filter: wgpu::FilterMode::Nearest,
-        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        mipmap_filter: wgpu::MipmapFilterMode::Linear,
         ..Default::default()
     });
     let rects = atlas.rects();

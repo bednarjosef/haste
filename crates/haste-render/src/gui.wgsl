@@ -1,12 +1,23 @@
 // GUI batch: coloured and textured triangles in GUI pixels, one atlas, nearest texel fetch with
 // per-vertex wrap rectangles (tiling and nine-slice edges need repeat inside an atlas region).
-// Written to a non-sRGB view of the target so blending happens on sRGB values like vanilla.
+//
+// Colour space: vanilla's GUI is composited onto its main target with BlendFunction.TRANSLUCENT
+// on stored (sRGB-encoded) bytes -- vanilla's MainTarget and its GUI atlas are both RGBA8_UNORM
+// and its GUI shaders emit the encoded value, so what vanilla writes is what it blends. The
+// GUI here draws through a non-sRGB view of the target, which leaves the stored bytes raw and
+// blends them the same way, so `fs_main` writes its colour unchanged in that case.
+//
+// On backends whose surface has no non-sRGB view (GL) the target *is* sRGB-encoded: the hardware
+// then decodes the destination, blends in linear space and encodes the result. `fs_main` converts
+// its colour to linear so opaque pixels still land on vanilla's value (encode(decode(x)) == x),
+// while translucent pixels blend in the wrong space -- far from vanilla for Multiply and Invert,
+// where the raw value is measurably closer, so only `fs_main` converts.
 
 struct Uniforms {
     // GUI size in GUI pixels (framebuffer / scale).
     size: vec2<f32>,
-    // x: 1 when the target is sRGB-encoded by the hardware (no non-sRGB view on this backend):
-    // colours are converted to linear so they come out unchanged.
+    // x: 1 when the target is sRGB-encoded by the hardware (no non-sRGB view on this backend),
+    // so the normal blend needs its colour in linear space.
     flags: vec2<f32>,
 };
 
@@ -41,26 +52,52 @@ fn to_linear(c: vec3<f32>) -> vec3<f32> {
     return select(pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), c / 12.92, c <= vec3<f32>(0.04045));
 }
 
-fn out_color(c: vec4<f32>) -> vec4<f32> {
-    if (u.flags.x > 0.5) {
+/// The GUI fragment colour, `linearize` converting it for an sRGB-encoded target. `discard` on a
+/// fully transparent texel keeps an empty glyph or sprite hole from writing anything.
+fn gui_color(in: VertexOut, linearize: bool) -> vec4<f32> {
+    var c: vec4<f32>;
+    if (in.rect.z == 0u) {
+        c = in.color;
+    } else {
+        let origin = vec2<f32>(in.rect.xy);
+        let size = vec2<f32>(in.rect.zw);
+        let local = in.uv - origin;
+        let wrapped = local - size * floor(local / size);
+        let texel = clamp(vec2<i32>(floor(origin + wrapped)), vec2<i32>(in.rect.xy), vec2<i32>(in.rect.xy + in.rect.zw) - vec2<i32>(1, 1));
+        c = textureLoad(atlas, texel, 0) * in.color;
+        if (c.a <= 0.0) {
+            discard;
+        }
+    }
+    if (linearize) {
         return vec4<f32>(to_linear(c.rgb), c.a);
     }
     return c;
 }
 
+// Vanilla's GUI_TEXTURED (BlendFunction.TRANSLUCENT: src SRC_ALPHA, dst ONE_MINUS_SRC_ALPHA,
+// alpha ONE, ONE_MINUS_SRC_ALPHA): the normal blend, linearized on an sRGB target.
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    if (in.rect.z == 0u) {
-        return out_color(in.color);
-    }
-    let origin = vec2<f32>(in.rect.xy);
-    let size = vec2<f32>(in.rect.zw);
-    let local = in.uv - origin;
-    let wrapped = local - size * floor(local / size);
-    let texel = clamp(vec2<i32>(floor(origin + wrapped)), vec2<i32>(in.rect.xy), vec2<i32>(in.rect.xy + in.rect.zw) - vec2<i32>(1, 1));
-    let c = textureLoad(atlas, texel, 0) * in.color;
-    if (c.a <= 0.0) {
-        discard;
-    }
-    return out_color(c);
+    return gui_color(in, u.flags.x > 0.5);
+}
+
+// Vanilla's VIGNETTE (src ZERO, dst ONE_MINUS_SRC_COLOR, alpha ZERO, ONE): a product of the
+// destination, so the raw texel stays closest to vanilla's stored-value product.
+@fragment
+fn fs_main_multiply(in: VertexOut) -> @location(0) vec4<f32> {
+    return gui_color(in, false);
+}
+
+// Vanilla's CROSSHAIR (BlendFunction.INVERT: src ONE_MINUS_DST_COLOR, dst ONE_MINUS_SRC_COLOR,
+// alpha ONE, ZERO): the colour inverse of the destination.
+@fragment
+fn fs_main_invert(in: VertexOut) -> @location(0) vec4<f32> {
+    return gui_color(in, false);
+}
+
+// Vanilla's GUI_TEXT_HIGHLIGHT (BlendFunction.ADDITIVE: ONE, ONE): adds the stored value.
+@fragment
+fn fs_main_additive(in: VertexOut) -> @location(0) vec4<f32> {
+    return gui_color(in, false);
 }

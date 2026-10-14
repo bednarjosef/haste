@@ -65,8 +65,33 @@ const DOUBLE_TAP: Duration = Duration::from_millis(350);
 /// Wall time the render thread may spend capturing sections for the mesher per frame.
 /// Sections handed to the mesh workers per frame (they capture the snapshots themselves).
 const SUBMIT_PER_FRAME: usize = 512;
-/// Vanilla's "GUI scale" (the auto option is not wired; 2 is a common choice at 1080p).
-const GUI_SCALE: u32 = 2;
+/// The GUI scale the option asks for: 0 means auto (vanilla: `Options.AUTO_GUI_SCALE`).
+/// Like `Minecraft.resizeGui`, auto and any fixed scale both go through
+/// [`gui_scale_for`] (vanilla: `Window.calculateScale`).
+pub fn resolve_gui_scale(option: u32, width: u32, height: u32) -> u32 {
+    gui_scale_for(option.min(4), width, height)
+}
+
+/// The scale vanilla would use for the option at the window's framebuffer size
+/// (vanilla: `Window.calculateScale`; `max_scale` 0 grows it while the framebuffer
+/// keeps at least 320x240 GUI pixels).
+pub fn gui_scale_for(max_scale: u32, width: u32, height: u32) -> u32 {
+    let mut scale = 1;
+    while scale != max_scale
+        && scale < width
+        && scale < height
+        && width / (scale + 1) >= 320
+        && height / (scale + 1) >= 240
+    {
+        scale += 1;
+    }
+    scale
+}
+
+/// The GUI-scaled size at `scale` (vanilla: `Window.setGuiScale` uses ceil division).
+pub fn gui_scaled_size(width: u32, height: u32, scale: u32) -> (u32, u32) {
+    (width.div_ceil(scale.max(1)), height.div_ceil(scale.max(1)))
+}
 
 /// A joined game: runtime, game thread and shared state.
 struct Session {
@@ -988,15 +1013,13 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             }
         }
         if let Some(u) = &mut ui {
-            gui = u
-                .frame(
-                    args.width / GUI_SCALE,
-                    args.height / GUI_SCALE,
-                    GUI_SCALE,
-                    (0.0, 0.0),
-                    partial,
-                )
-                .clone();
+            let scale = resolve_gui_scale(
+                u32::from(session.options.gui_scale),
+                args.width,
+                args.height,
+            );
+            let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
+            gui = u.frame(gw, gh, scale, (0.0, 0.0), partial).clone();
         }
         let frame = FrameInput {
             camera,
@@ -1218,15 +1241,13 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             }
         }
         if let Some(u) = &mut ui {
-            gui = u
-                .frame(
-                    args.width / GUI_SCALE,
-                    args.height / GUI_SCALE,
-                    GUI_SCALE,
-                    input.mouse,
-                    partial,
-                )
-                .clone();
+            let scale = resolve_gui_scale(
+                u32::from(session.options.gui_scale),
+                args.width,
+                args.height,
+            );
+            let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
+            gui = u.frame(gw, gh, scale, input.mouse, partial).clone();
         }
         let frame = FrameInput {
             camera,
@@ -1890,9 +1911,9 @@ impl App {
         }
         if let Some(ui) = &mut self.ui {
             let mouse = self.input.mouse;
-            self.gui = ui
-                .frame(w / GUI_SCALE, h / GUI_SCALE, GUI_SCALE, mouse, partial)
-                .clone();
+            let scale = resolve_gui_scale(u32::from(self.options.gui_scale), w, h);
+            let (gw, gh) = gui_scaled_size(w, h, scale);
+            self.gui = ui.frame(gw, gh, scale, mouse, partial).clone();
         }
         let frame = FrameInput {
             camera,
@@ -1990,10 +2011,18 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::CursorMoved { position, .. } => {
-                // GUI-scaled pixels: physical size divided by the GUI scale.
-                let s = f64::from(GUI_SCALE);
-                self.input
-                    .mouse_moved(position.x / s, position.y / s, self.ui.as_ref());
+                // GUI-scaled pixels: physical size divided by the GUI scale. The scale is
+                // recomputed from the current framebuffer (the renderer knows the size;
+                // vanilla updates it the same way on every resize: `Minecraft.resizeGui`).
+                if let Some(r) = &self.renderer {
+                    let s = f64::from(resolve_gui_scale(
+                        u32::from(self.options.gui_scale),
+                        r.size().0,
+                        r.size().1,
+                    ));
+                    self.input
+                        .mouse_moved(position.x / s, position.y / s, self.ui.as_ref());
+                }
             }
             WindowEvent::Resized(size) => {
                 if let Some(r) = &mut self.renderer {
@@ -2252,6 +2281,41 @@ mod tests {
         assert_eq!(look_deg_per_pixel(0.0), 0.0096);
         // Max sensitivity: 0.8^3 * 8 * 0.15.
         assert!((look_deg_per_pixel(1.0) - 0.6144).abs() < 1e-6);
+    }
+
+    #[test]
+    fn auto_gui_scale_matches_vanilla_resolutions() {
+        // `Window.calculateScale(0, ...)` at vanilla's default window and common
+        // resolutions: the scale grows while the framebuffer keeps >= 320x240 GUI
+        // pixels. Computed by hand from the vanilla method's conditions.
+        assert_eq!(gui_scale_for(0, 854, 480), 2);
+        assert_eq!(gui_scale_for(0, 1280, 720), 3);
+        assert_eq!(gui_scale_for(0, 1920, 1080), 4);
+        assert_eq!(gui_scale_for(0, 2560, 1440), 6);
+        assert_eq!(gui_scale_for(0, 3840, 2160), 9);
+    }
+
+    #[test]
+    fn fixed_gui_scale_is_honoured_and_clamped() {
+        // A fixed option stops there (vanilla: `calculateScale(maxScale, ...)`); a value
+        // too large for the framebuffer is still bounded by the 320x240 rule.
+        assert_eq!(gui_scale_for(1, 1920, 1080), 1);
+        assert_eq!(gui_scale_for(3, 1920, 1080), 3);
+        assert_eq!(gui_scale_for(4, 854, 480), 2);
+        // The option is clamped to 0..=4 like `Options.sanitized`.
+        assert_eq!(resolve_gui_scale(9, 1920, 1080), 4);
+        assert_eq!(resolve_gui_scale(0, 1920, 1080), 4);
+        // Tiny framebuffers still get scale 1 (the loop stops immediately).
+        assert_eq!(gui_scale_for(0, 320, 240), 1);
+        assert_eq!(gui_scale_for(0, 100, 100), 1);
+    }
+
+    #[test]
+    fn gui_scaled_size_uses_ceiling_division() {
+        // `Window.setGuiScale` ceils, so the GUI covers the whole framebuffer.
+        assert_eq!(gui_scaled_size(854, 480, 2), (427, 240));
+        assert_eq!(gui_scaled_size(853, 479, 2), (427, 240));
+        assert_eq!(gui_scaled_size(1920, 1080, 4), (480, 270));
     }
 
     #[test]

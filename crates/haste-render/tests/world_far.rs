@@ -105,7 +105,17 @@ fn terrain_far_from_origin() {
             breaking: &[],
             camera_entity: None,
         };
-        let stats = renderer.render(&frame).unwrap();
+        // The section visibility walk runs off the render thread and lands a frame later
+        // (vanilla draws the previous graph until the async update is swapped in), so keep
+        // rendering until its mask arrives instead of asserting on the empty first frame.
+        let mut stats = renderer.render(&frame).unwrap();
+        for _ in 0..200 {
+            if stats.chunk_sections_drawn > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            stats = renderer.render(&frame).unwrap();
+        }
         let img = renderer.read_back().unwrap();
         assert_eq!(img.dimensions(), (w, h));
         img.save(out.join(format!("world_far_{name}.png"))).unwrap();

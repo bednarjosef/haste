@@ -45,11 +45,21 @@ fn render_scene(
     entities: &[EntityInstance],
     camera: Camera,
 ) -> image::RgbaImage {
+    render_scene_at(renderer, world, entities, camera, 0.0)
+}
+
+fn render_scene_at(
+    renderer: &mut Renderer,
+    world: &Flat,
+    entities: &[EntityInstance],
+    camera: Camera,
+    partial_tick: f32,
+) -> image::RgbaImage {
     let gui = haste_core::gui::GuiFrame {
         scale: 2,
         ..Default::default()
     };
-    render_with_gui(renderer, world, entities, camera, &gui)
+    render_with_gui(renderer, world, entities, camera, &gui, partial_tick)
 }
 
 fn render_with_gui(
@@ -58,6 +68,7 @@ fn render_with_gui(
     entities: &[EntityInstance],
     camera: Camera,
     gui: &haste_core::gui::GuiFrame,
+    partial_tick: f32,
 ) -> image::RgbaImage {
     render_with_gui_skip(renderer, world, entities, camera, gui, None)
 }
@@ -83,7 +94,7 @@ fn render_with_gui_skip(
             fog_start: 100.0,
             fog_end: 200.0,
         },
-        partial_tick: 0.0,
+        partial_tick,
         block_target: None,
         breaking: &[],
         camera_entity,
@@ -209,7 +220,7 @@ fn entities_offscreen() {
         height: 240,
         cursor: None,
     };
-    let img = render_with_gui(&mut renderer, &world, &entities, camera, &gui);
+    let img = render_with_gui(&mut renderer, &world, &entities, camera, &gui, 0.0);
     img.save(out.join("entities_gui.png")).unwrap();
     // Something other than the black box inside it (the model), nothing outside the box edge
     // rows beyond the clip.
@@ -243,17 +254,24 @@ fn entities_offscreen() {
             .index("minecraft:item", &haste_core::Identifier::minecraft(n))
     };
     let base = render_scene(&mut renderer, &world, &[], camera);
+    let hand = |held: Option<haste_core::RegistryIndex>| haste_render::FirstPerson {
+        skin: None,
+        slim: false,
+        item: held,
+        light: (15, 0),
+        attack: haste_render::TickPair::fixed(0.0),
+        equip: haste_render::TickPair::fixed(1.0),
+        x_bob: haste_render::TickPair::fixed(0.0),
+        y_bob: haste_render::TickPair::fixed(0.0),
+        bob: haste_render::TickPair::fixed(0.0),
+        walk_dist: haste_render::TickPair::fixed(0.0),
+    };
     for (name, held) in [
         ("hand", None),
         ("sword", item("diamond_sword")),
         ("stone", item("stone")),
     ] {
-        renderer.set_first_person(Some(haste_render::FirstPerson {
-            skin: None,
-            slim: false,
-            item: held,
-            light: (15, 0),
-        }));
+        renderer.set_first_person(Some(hand(held)));
         let img = render_scene(&mut renderer, &world, &[], camera);
         img.save(out.join(format!("first_person_{name}.png")))
             .unwrap();
@@ -267,5 +285,20 @@ fn entities_offscreen() {
             "{name}: first-person view drew {changed} pixels"
         );
     }
+    // A swing moves the hand: the same hand at the swing's start, middle and end (the swing runs
+    // over 6 ticks, so partial 0.33 and 0.66 are its second and fourth ticks).
+    renderer.set_first_person(Some(hand(item("diamond_sword"))));
+    let still = render_scene(&mut renderer, &world, &[], camera);
+    renderer.set_first_person(Some(haste_render::FirstPerson {
+        attack: haste_render::TickPair::fixed(0.33),
+        ..hand(item("diamond_sword"))
+    }));
+    let swung = render_scene_at(&mut renderer, &world, &[], camera, 0.33);
+    let moved = still
+        .pixels()
+        .zip(swung.pixels())
+        .filter(|(a, b)| a.0 != b.0)
+        .count();
+    assert!(moved > 500, "the swing moved {moved} pixels");
     renderer.set_first_person(None);
 }
