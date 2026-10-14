@@ -63,6 +63,85 @@ Common conventions:
 }
 ```
 
+## entity_models.json
+
+Every model layer the client's `EntityModelSet` has baked (entity, armour and block-entity
+models that are model layers), dumped by the recorder mod's `dump_models` scenario step.
+In 26.3 signs and beds are NOT model layers (no `ModelLayers` entries; they render as baked
+block models) and so do not appear here.
+
+```jsonc
+{
+  "version": 1,
+  "minecraft": "26.3",
+  "source": "client EntityModelSet (baked model layers)",
+  "layers": [
+    {
+      "layer": "minecraft:pig#main",        // ModelLayerLocation: model id # layer name
+      "texture_width": 64,
+      "texture_height": 64,
+      "parts": [                            // root part's children (root has no name)
+        {
+          "name": "head",
+          "pivot": [0.0, 12.0, -6.0],       // PartPose x/y/z
+          "rotation": [0.0, 0.0, 0.0],      // PartPose xRot/yRot/zRot, radians
+          "scale": [1.0, 1.0, 1.0],         // PartPose xScale/yScale/zScale
+          "cubes": [
+            {
+              "origin": [-4.0, -4.0, -8.0], // CubeDefinition origin (model units)
+              "size": [8.0, 8.0, 8.0],       // CubeDefinition dimensions
+              "uv": "0 0",                   // "u v" (duplicated numerically below)
+              "u": 0.0, "v": 0.0,           // UVPair texCoord
+              "mirror": false,
+              "inflate": [0.0, 0.0, 0.0],    // CubeDeformation growX/Y/Z
+              "visible_faces": ["down", "up", "north", "south", "west", "east"]
+            }
+          ],
+          "children": [ /* more parts, same shape, recursive */ ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+## block_sounds.json
+
+Every block's SoundType (the break/step/place/hit/fall sound events plus volume and pitch),
+dumped by the recorder mod's `dump_block_sounds` scenario step. Vanilla keeps these as code
+(BlockBehaviour's per-state sound type), not in the data generator's reports, so the recorder
+reads them from the running game via `BlockState.getSoundType()`. Identical sound types are
+deduped into a table referenced by index; a state is listed only where it differs from its
+block's default (in 26.3 only the decorated pot's `cracked` variant does).
+
+```jsonc
+{
+  "version": 1,
+  "minecraft": "26.3",
+  "source": "client block registry (BlockState.getSoundType)",
+  "sound_types": [                        // dedupe table, referenced by index
+    {
+      "break": "block.stone.break",       // sound event ids; vanilla's "no sound" is
+      "step": "block.stone.step",         //   "minecraft:intentionally_empty"
+      "place": "block.stone.place",
+      "hit": "block.stone.hit",
+      "fall": "block.stone.fall",
+      "volume": 1.0,                      // SoundType volume/pitch multipliers
+      "pitch": 1.0
+    }
+  ],
+  "blocks": {
+    "minecraft:stone": { "sound": 0 },    // default sound type index for every state
+    "minecraft:decorated_pot": {
+      "sound": 42,
+      "states": [                         // only states differing from the default
+        { "properties": { "cracked": true }, "sound": 43 }
+      ]
+    }
+  }
+}
+```
+
 ## block_properties.json
 
 ```jsonc

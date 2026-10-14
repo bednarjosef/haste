@@ -26,7 +26,7 @@ use crate::packets::PacketIds;
 const FAKE_UNKNOWN: &str = "minecraft:fake_unknown";
 
 /// Ids assigned in our own declaration order, so the test needs no cache.
-fn test_tables() -> Arc<ProtocolTables> {
+fn test_tables_owned() -> ProtocolTables {
     fn names<T>(d: &'static [(&'static str, crate::packets::DecodeFn<T>)]) -> Vec<&'static str> {
         d.iter().map(|(n, _)| *n).collect()
     }
@@ -79,7 +79,12 @@ fn test_tables() -> Arc<ProtocolTables> {
         .iter()
         .map(|(s, d, v)| (*s, *d, v.as_slice()))
         .collect();
-    Arc::new(ProtocolTables::default().with_packets(PacketIds::from_names(&borrowed)))
+    ProtocolTables::default().with_packets(PacketIds::from_names(&borrowed))
+}
+
+/// [`test_tables_owned`] behind an `Arc` (the connection API).
+fn test_tables() -> Arc<ProtocolTables> {
+    Arc::new(test_tables_owned())
 }
 
 struct Server {
@@ -631,6 +636,111 @@ fn host_port_parsing() {
     assert_eq!(split_host_port("example.org"), ("example.org".into(), None));
     assert_eq!(split_host_port("[::1]:25566"), ("::1".into(), Some(25566)));
     assert_eq!(split_host_port("::1"), ("::1".into(), None));
+}
+
+// ---------------------------------------------------------------- cosmetic decode loss
+
+/// Tables where particle id 0 is a made-up, mod-registered type: the registry
+/// knows it, but `wire::particle::skip_data` has no layout for it.
+fn tables_with_unknown_particle() -> ProtocolTables {
+    test_tables_owned().with_particles_for_tests(&[(0, "haste_cosy:glitter")])
+}
+
+/// A raw clientbound play packet: id from the tables, the given body.
+fn raw_play(tables: &ProtocolTables, name: &str, body: &[u8]) -> crate::transport::RawPacket {
+    crate::transport::RawPacket {
+        id: tables
+            .packets
+            .id(State::Play, Direction::Clientbound, name)
+            .unwrap_or_else(|| panic!("no clientbound play id for {name}")),
+        payload: Bytes::copy_from_slice(body),
+    }
+}
+
+/// A `level_particles` body whose particle is an unknown, mod-registered type:
+/// the layout fails, so the rest of the packet cannot be located either.
+fn broken_level_particles() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(0); // the particle: `level_particles`'s first field
+    w.bytes(&[0xff; 8]); // what follows, unreachable once the layout fails
+    w.into_inner()
+}
+
+#[test]
+fn unknown_particle_level_particles_is_dropped_and_play_continues() {
+    let tables = tables_with_unknown_particle();
+    let d = Dispatch::new(
+        &tables.packets,
+        State::Play,
+        Direction::Clientbound,
+        ClientboundPlay::DECODERS,
+    );
+    let broken = raw_play(
+        &tables,
+        "minecraft:level_particles",
+        &broken_level_particles(),
+    );
+    let mut health = Writer::new();
+    health.f32(20.0);
+    health.var_int(20);
+    health.f32(5.0);
+    let after = raw_play(&tables, "minecraft:set_health", &health.into_inner());
+
+    let mut warned = WarnedOnce::default();
+    // Dropped, not an error.
+    assert!(decode_with(&d, &broken, &tables, State::Play, &mut warned)
+        .unwrap()
+        .is_none());
+    // The first failure warned and marked the name; the second is silent but
+    // still dropped.
+    assert!(!warned.mark("minecraft:level_particles"));
+    assert!(decode_with(&d, &broken, &tables, State::Play, &mut warned)
+        .unwrap()
+        .is_none());
+    // The connection carries on: the next packet decodes.
+    assert!(matches!(
+        decode_with(&d, &after, &tables, State::Play, &mut warned).unwrap(),
+        Some(ClientboundPlay::SetHealth(h)) if h.health == 20.0
+    ));
+}
+
+#[test]
+fn the_same_particle_in_explode_is_not_cosmetic() {
+    let tables = tables_with_unknown_particle();
+    let d = Dispatch::new(
+        &tables.packets,
+        State::Play,
+        Direction::Clientbound,
+        ClientboundPlay::DECODERS,
+    );
+    // `minecraft:explode` up to its particle field.
+    let mut w = Writer::new();
+    w.f64(0.0);
+    w.f64(0.0);
+    w.f64(0.0); // center
+    w.f32(4.0); // radius
+    w.i32(0); // block count
+    w.bool(false); // no player knockback
+    w.var_int(0); // the unknown particle
+    let broken = raw_play(&tables, "minecraft:explode", &w.into_inner());
+
+    // It moves the player, so it stays a protocol error.
+    let mut warned = WarnedOnce::default();
+    match decode_with(&d, &broken, &tables, State::Play, &mut warned) {
+        Err(ProtocolError::Decode("minecraft:explode", _)) => {}
+        other => panic!("explode should stay an error, got {other:?}"),
+    }
+    assert!(!warned.mark("minecraft:explode"));
+}
+
+#[test]
+fn cosmetic_warning_fires_once_per_name() {
+    let mut warned = WarnedOnce::default();
+    for name in COSMETIC_LOSS_PACKETS {
+        assert!(warned.mark(name), "{name} should warn the first time");
+        assert!(!warned.mark(name), "{name} should warn only once");
+    }
+    assert!(!warned.mark("minecraft:explode"));
 }
 
 // ---------------------------------------------------------------- reconfiguration and transfer

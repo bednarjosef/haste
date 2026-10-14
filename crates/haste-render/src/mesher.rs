@@ -29,6 +29,18 @@ pub struct SectionMesh {
     pub visibility: crate::occlusion::VisibilitySet,
 }
 
+impl SectionMesh {
+    /// GPU bytes the vertices will occupy in an arena.
+    pub fn vertex_bytes(&self) -> u64 {
+        (self.vertices.len() as u64) * std::mem::size_of::<PackedVertex>() as u64
+    }
+
+    /// GPU bytes the indices will occupy in an arena.
+    pub fn index_bytes(&self) -> u64 {
+        self.layers.iter().map(|(_, i)| i.len() as u64 * 4).sum()
+    }
+}
+
 /// Untinted vertex colour.
 pub const TINT_WHITE: u32 = 0xFFFFFF;
 
@@ -45,15 +57,39 @@ pub struct MeshTables {
     pub tints: Arc<crate::tint::TintTable>,
     pub colors: Arc<crate::tint::BiomeColors>,
     pub fluids: Arc<crate::fluid::FluidTable>,
+    /// Set identity for the mesher's per-state cache: a fresh value per
+    /// constructed set (monotonic counter), so a new Renderer's tables
+    /// never alias a previous set's pointer identities after a reconnect.
+    pub generation: u64,
+}
+
+/// Monotonic source of `MeshTables::generation`: every construction takes
+/// the next value, so two sets are never the same cache generation even when
+/// the allocator reuses a freed set's addresses.
+static TABLE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl MeshTables {
+    pub fn new(
+        tints: Arc<crate::tint::TintTable>,
+        colors: Arc<crate::tint::BiomeColors>,
+        fluids: Arc<crate::fluid::FluidTable>,
+    ) -> MeshTables {
+        MeshTables {
+            tints,
+            colors,
+            fluids,
+            generation: TABLE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
 }
 
 impl Default for MeshTables {
     fn default() -> Self {
-        MeshTables {
-            tints: Arc::new(crate::tint::TintTable::empty()),
-            colors: Arc::new(crate::tint::BiomeColors::default()),
-            fluids: Arc::new(crate::fluid::FluidTable::empty()),
-        }
+        MeshTables::new(
+            Arc::new(crate::tint::TintTable::empty()),
+            Arc::new(crate::tint::BiomeColors::default()),
+            Arc::new(crate::fluid::FluidTable::empty()),
+        )
     }
 }
 
@@ -338,7 +374,8 @@ struct StateInfo {
 }
 
 /// The per-section meshing context: snapshot access by local offset plus the
-/// lazily built per-state info.
+/// lazily built per-state info. The state cache and the fluid scratch are
+/// borrowed from the per-thread scratch (see `MeshScratch`).
 struct MeshContext<'a> {
     snapshot: &'a MeshSnapshot,
     baked: &'a haste_assets::BakedBlockModels,
@@ -348,9 +385,67 @@ struct MeshContext<'a> {
     origin: BlockPos,
     /// Lazily built per-state info, indexed by state id (grown on demand, None
     /// until first seen).
-    states: Vec<Option<std::rc::Rc<StateInfo>>>,
+    states: &'a mut Vec<Option<std::rc::Rc<StateInfo>>>,
     /// Reusable scratch for the fluid mesher (no per-block allocation).
+    fluid_scratch: &'a mut Vec<crate::fluid::FluidQuad>,
+}
+
+// Per-thread meshing scratch: the sink's output vectors, the per-state cache
+// and the fluid mesher's quad buffer, kept (cleared, not freed) between
+// sections so meshing a section allocates only the vectors handed to the
+// `SectionMesh` as its final output. One per thread: rayon workers each mesh
+// on their own thread, and `mesh_section_with` is never reentrant.
+thread_local! {
+    static SCRATCH: std::cell::RefCell<MeshScratch> = std::cell::RefCell::new(MeshScratch::new());
+}
+
+struct MeshScratch {
+    sink: MeshSink,
+    states: Vec<Option<std::rc::Rc<StateInfo>>>,
     fluid_scratch: Vec<crate::fluid::FluidQuad>,
+    /// The (baked, atlas, fluids) set `states` was built from; `None` before
+    /// the first mesh. The cache is only valid for one set: a second Renderer
+    /// in the same process (reconnect, a new world) reuses the mesh thread,
+    /// so the cache is cleared whenever the identity changes.
+    state_key: Option<SourceKey>,
+}
+
+/// Identity of the inputs the state cache is derived from: the baked models,
+/// the atlas (its data pointer; UVs/sprite ids come from it), the fluid
+/// table and the table set's generation. The pointers say which set it is
+/// when addresses are unique; the generation catches a new set allocated at
+/// a freed set's addresses (ABA across a reconnect).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SourceKey {
+    baked: usize,
+    atlas: usize,
+    fluids: usize,
+    generation: u64,
+}
+
+impl MeshScratch {
+    fn new() -> MeshScratch {
+        MeshScratch {
+            sink: MeshSink::new(),
+            states: Vec::new(),
+            fluid_scratch: Vec::with_capacity(11),
+            state_key: None,
+        }
+    }
+
+    /// Reset the per-section scratch. The state cache is deliberately NOT
+    /// cleared: it is a pure function of the immutable baked models, atlas and
+    /// tables, so it persists across sections (clearing it would redo the
+    /// atlas lookups and re-allocate every state's quad vector per section).
+    fn begin_section(&mut self) {
+        self.sink.vertices.clear();
+        for idx in &mut self.sink.layers {
+            idx.clear();
+        }
+        self.sink.min = [f32::MAX; 3];
+        self.sink.max = [f32::MIN; 3];
+        self.fluid_scratch.clear();
+    }
 }
 
 impl<'a> MeshContext<'a> {
@@ -417,99 +512,132 @@ pub fn mesh_section_with(
     tables: &MeshTables,
     pos: SectionPos,
 ) -> SectionMesh {
-    let mut ctx = MeshContext {
-        snapshot,
-        baked,
-        atlas,
-        tables,
-        origin: pos.block_min(),
-        states: Vec::new(),
-        fluid_scratch: Vec::with_capacity(11),
-    };
-    let mut sink = MeshSink::new();
+    SCRATCH.with(|cell| {
+        let mut scratch = cell.borrow_mut();
+        // The state cache is only valid for the (baked, atlas, fluids) set it
+        // was built from: a second Renderer in the same process (reconnect, a
+        // new world) reuses the mesh thread, so clear it when the identity
+        // changes. Pointer identity: all three outlive the meshing call.
+        let key = SourceKey {
+            baked: baked as *const _ as usize,
+            atlas: atlas as *const _ as *const () as usize,
+            fluids: std::sync::Arc::as_ptr(&tables.fluids) as usize,
+            generation: tables.generation,
+        };
+        if scratch.state_key != Some(key) {
+            scratch.states.clear();
+            scratch.state_key = Some(key);
+        }
+        scratch.begin_section();
+        let MeshScratch {
+            sink,
+            states,
+            fluid_scratch,
+            state_key: _,
+        } = &mut *scratch;
+        let mut ctx = MeshContext {
+            snapshot,
+            baked,
+            atlas,
+            tables,
+            origin: pos.block_min(),
+            states,
+            fluid_scratch,
+        };
 
-    for ly in 0..16i32 {
-        for lz in 0..16i32 {
-            for lx in 0..16i32 {
-                let state = ctx.cell(lx + 1, ly + 1, lz + 1).state;
-                if state == BlockStateId::AIR {
-                    continue;
-                }
-                let info = ctx.state_info(state);
-                if let Some(fluid) = info.fluid {
-                    mesh_fluid(&mut ctx, lx, ly, lz, fluid, &mut sink);
-                }
-                if info.quads.is_empty() {
-                    continue;
-                }
-                let offset = [lx as f32, ly as f32, lz as f32];
-                // The block's tint, computed on its first tinted quad.
-                let mut tint: Option<u32> = None;
-
-                for quad in &info.quads {
-                    // Cullface: skip the face when the neighbour is a full
-                    // opaque block (vanilla's model culling).
-                    if let Some(cull) = quad.cullface {
-                        let o = cull.offset();
-                        let neighbor = ctx.cell(lx + 1 + o[0], ly + 1 + o[1], lz + 1 + o[2]);
-                        if ctx.baked.is_full_opaque(neighbor.state) {
-                            continue;
-                        }
+        for ly in 0..16i32 {
+            for lz in 0..16i32 {
+                for lx in 0..16i32 {
+                    let state = ctx.cell(lx + 1, ly + 1, lz + 1).state;
+                    if state == BlockStateId::AIR {
+                        continue;
                     }
-                    let positions: [[f32; 3]; 4] = quad
-                        .positions
-                        .map(|p| [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]]);
+                    let info = ctx.state_info(state);
+                    if let Some(fluid) = info.fluid {
+                        mesh_fluid(&mut ctx, lx, ly, lz, fluid, sink);
+                    }
+                    if info.quads.is_empty() {
+                        continue;
+                    }
+                    let offset = [lx as f32, ly as f32, lz as f32];
+                    // The block's tint, computed on its first tinted quad.
+                    let mut tint: Option<u32> = None;
 
-                    // Per-vertex light: face-adjacent cell + the vertex's AO
-                    // neighbours, averaged (smooth lighting).
-                    let lights: [[u8; 2]; 4] = core::array::from_fn(|vi| {
-                        let (ao_level, light) =
-                            vertex_light_for(&ctx, lx, ly, lz, quad.direction, vi);
-                        let shade = shade_index(quad.shade_face);
-                        [light, pack_ao_shade(ao_level, shade)]
-                    });
-                    let quad_tint = if quad.tinted {
-                        *tint.get_or_insert_with(|| {
-                            block_tint(
-                                snapshot,
-                                tables,
-                                tables.tints.kind(state),
-                                ctx.origin.add(lx, ly, lz),
-                            )
-                        })
-                    } else {
-                        TINT_WHITE
-                    };
+                    for quad in &info.quads {
+                        // Cullface: skip the face when the neighbour is a full
+                        // opaque block (vanilla's model culling).
+                        if let Some(cull) = quad.cullface {
+                            let o = cull.offset();
+                            let neighbor = ctx.cell(lx + 1 + o[0], ly + 1 + o[1], lz + 1 + o[2]);
+                            if ctx.baked.is_full_opaque(neighbor.state) {
+                                continue;
+                            }
+                        }
+                        let positions: [[f32; 3]; 4] = quad
+                            .positions
+                            .map(|p| [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]]);
 
-                    sink.push_quad(
-                        info.layer,
-                        &positions,
-                        &quad.uvs,
-                        lights,
-                        quad_tint,
-                        quad.sprite,
-                    );
+                        // Per-vertex light: face-adjacent cell + the vertex's AO
+                        // neighbours, averaged (smooth lighting).
+                        let lights: [[u8; 2]; 4] = core::array::from_fn(|vi| {
+                            let (ao_level, light) =
+                                vertex_light_for(&ctx, lx, ly, lz, quad.direction, vi);
+                            let shade = shade_index(quad.shade_face);
+                            [light, pack_ao_shade(ao_level, shade)]
+                        });
+                        let quad_tint = if quad.tinted {
+                            *tint.get_or_insert_with(|| {
+                                block_tint(
+                                    snapshot,
+                                    tables,
+                                    tables.tints.kind(state),
+                                    ctx.origin.add(lx, ly, lz),
+                                )
+                            })
+                        } else {
+                            TINT_WHITE
+                        };
+
+                        sink.push_quad(
+                            info.layer,
+                            &positions,
+                            &quad.uvs,
+                            lights,
+                            quad_tint,
+                            quad.sprite,
+                        );
+                    }
                 }
             }
         }
-    }
 
-    // Compact into per-layer (vertices, indices).
-    let layers: Vec<(RenderLayer, Vec<u32>)> = sink
-        .layers
-        .into_iter()
-        .enumerate()
-        .filter(|(_, idx)| !idx.is_empty())
-        .map(|(i, idx)| (layer_from_index(i), idx))
-        .collect();
+        // The section's final output: the sink's vectors, moved (not copied)
+        // into the SectionMesh. Refill the scratch with right-sized vectors:
+        // consecutive sections are similar in size, so the next section pays
+        // one allocation per vector instead of growing them geometrically.
+        let vertex_len = sink.vertices.len();
+        let index_lens: [usize; 4] = core::array::from_fn(|i| sink.layers[i].len());
+        let vertices = std::mem::take(&mut sink.vertices);
+        let index_vecs = std::mem::take(&mut sink.layers);
+        sink.vertices = Vec::with_capacity(vertex_len);
+        sink.layers = index_lens.map(Vec::with_capacity);
 
-    SectionMesh {
-        pos,
-        vertices: sink.vertices,
-        layers,
-        aabb: (sink.min, sink.max),
-        visibility: crate::occlusion::section_visibility(snapshot, baked, pos),
-    }
+        // Compact into per-layer (vertices, indices).
+        let layers: Vec<(RenderLayer, Vec<u32>)> = index_vecs
+            .into_iter()
+            .enumerate()
+            .filter(|(_, idx)| !idx.is_empty())
+            .map(|(i, idx)| (layer_from_index(i), idx))
+            .collect();
+
+        SectionMesh {
+            pos,
+            vertices,
+            layers,
+            aabb: (sink.min, sink.max),
+            visibility: crate::occlusion::section_visibility(snapshot, baked, pos),
+        }
+    })
 }
 
 /// The snapshot as the fluid mesher sees it.
@@ -545,9 +673,8 @@ fn mesh_fluid(
     fluid: crate::fluid::FluidState,
     sink: &mut MeshSink,
 ) {
-    use crate::fluid::Fluid;
     let block_pos = ctx.origin.add(lx, ly, lz);
-    let mut quads = std::mem::take(&mut ctx.fluid_scratch);
+    let mut quads = std::mem::take(&mut *ctx.fluid_scratch);
     quads.clear();
     {
         let view = FluidView {
@@ -557,16 +684,16 @@ fn mesh_fluid(
         crate::fluid::fluid_quads(&view, &ctx.tables.fluids, block_pos, fluid, &mut quads);
     }
     if !quads.is_empty() {
-        let tint = match fluid.fluid {
-            Fluid::Water => block_tint(
+        let tint = match ctx.tables.fluids.defs.def(fluid.fluid).tint {
+            crate::fluid::FluidTint::BiomeWater => block_tint(
                 ctx.snapshot,
                 ctx.tables,
                 crate::tint::TintKind::Water,
                 block_pos,
             ),
-            Fluid::Lava => TINT_WHITE,
+            crate::fluid::FluidTint::None => TINT_WHITE,
         };
-        let layer = crate::fluid::fluid_layer(fluid.fluid);
+        let layer = crate::fluid::fluid_layer(&ctx.tables.fluids.defs, fluid.fluid);
         let own = ctx.snapshot.light(block_pos);
         let top_light = max_light(own, ctx.snapshot.light(block_pos.add(0, 1, 0)));
         let bottom_light = max_light(own, ctx.snapshot.light(block_pos.add(0, -1, 0)));
@@ -584,7 +711,7 @@ fn mesh_fluid(
             sink.push_quad(layer, &positions, &q.uvs, [packed; 4], tint, q.sprite);
         }
     }
-    ctx.fluid_scratch = quads;
+    *ctx.fluid_scratch = quads;
 }
 
 fn layer_from_index(i: usize) -> RenderLayer {
@@ -884,6 +1011,76 @@ mod tests {
 
     #[test]
     #[ignore = "needs the client jar and datagen reports in the cache"]
+    fn state_cache_rekeys_per_atlas() {
+        // The per-state cache is thread-local and persists across sections;
+        // it is only valid for the (baked, atlas, fluids) set it was built
+        // from. A second Renderer in the same process (reconnect, a new
+        // world) reuses the mesh thread, so meshing with a different atlas
+        // on the same thread must rebuild, not reuse the stale entries.
+        let jar = haste_core::paths::client_jar();
+        if !jar.exists() {
+            eprintln!("ignored: needs the client jar in the cache");
+            return;
+        }
+        let mut assets = haste_assets::Assets::open(
+            &jar,
+            &haste_core::paths::cache_dir().join("assets"),
+            "26.3",
+        )
+        .unwrap();
+        let states = haste_assets::BlocksJsonStates::load(
+            &haste_core::paths::datagen_reports().join("blocks.json"),
+        )
+        .unwrap();
+        let mut atlas1 = haste_assets::AtlasBuilder::build(&mut assets, &[], false).unwrap();
+        let baked =
+            haste_assets::BakedBlockModels::bake(&mut assets, &states, &mut atlas1).unwrap();
+
+        // A different atlas over the same baked models: only stone is packed,
+        // so stone's sprite id differs from the full atlas's.
+        let stone = haste_core::Identifier::parse("minecraft:block/stone").unwrap();
+        let atlas2 = haste_assets::AtlasBuilder::build(&mut assets, &[stone], false).unwrap();
+        let sprite1 = atlas1.region("minecraft:block/stone").sprite as u16;
+        let sprite2 = atlas2.region("minecraft:block/stone").sprite as u16;
+        assert_ne!(
+            sprite1, sprite2,
+            "test premise: atlases place stone differently"
+        );
+
+        // One layer of stone: every emitted vertex comes from the stone
+        // texture, so every vertex's sprite names the atlas it was meshed with.
+        let world = FlatWorld {
+            ground: BlockStateId(1),
+            layers: 1,
+        };
+        let snapshot = MeshSnapshot::capture(&world, SectionPos::new(0, 0, 0));
+        let pos = SectionPos::new(0, 0, 0);
+
+        // A fresh MeshTables per call: each set carries its own generation,
+        // so a set whose allocator addresses reuse a previous set's (the
+        // reconnect ABA) still re-keys the cache.
+        let mesh1 = mesh_section_with(&snapshot, &baked, &atlas1, &MeshTables::default(), pos);
+        assert!(
+            mesh1.vertices.iter().all(|v| v.sprite == sprite1),
+            "atlas1 mesh must carry atlas1's stone sprite"
+        );
+
+        let mesh2 = mesh_section_with(&snapshot, &baked, &atlas2, &MeshTables::default(), pos);
+        assert_eq!(mesh2.vertices.len(), mesh1.vertices.len());
+        assert!(
+            mesh2.vertices.iter().all(|v| v.sprite == sprite2),
+            "atlas2 mesh must be rebuilt with atlas2's stone sprite, not the cached one"
+        );
+
+        let mesh3 = mesh_section_with(&snapshot, &baked, &atlas1, &MeshTables::default(), pos);
+        assert!(
+            mesh3.vertices.iter().all(|v| v.sprite == sprite1),
+            "switching back to atlas1 must re-key again"
+        );
+    }
+
+    #[test]
+    #[ignore = "needs the client jar and datagen reports in the cache"]
     fn jar_mesh_flat_stone_section() {
         let jar = haste_core::paths::client_jar();
         if !jar.exists() {
@@ -967,6 +1164,198 @@ mod tests {
             mesh.vertices.len()
         );
         assert_eq!(quads, 256 + 256 + 256 + 256, "culled grass slab");
+    }
+
+    /// The client jar's baked models and atlas (None without the cache: the caller
+    /// returns, so the test is skipped rather than failed).
+    fn load_baked() -> Option<(
+        haste_assets::BlocksJsonStates,
+        haste_assets::BakedBlockModels,
+        haste_assets::AtlasBuilder,
+    )> {
+        let jar = haste_core::paths::client_jar();
+        if !jar.exists() {
+            eprintln!("ignored: needs the client jar in the cache");
+            return None;
+        }
+        let mut assets = haste_assets::Assets::open(
+            &jar,
+            &haste_core::paths::cache_dir().join("assets"),
+            "26.3",
+        )
+        .unwrap();
+        let states = haste_assets::BlocksJsonStates::load(
+            &haste_core::paths::datagen_reports().join("blocks.json"),
+        )
+        .unwrap();
+        let mut atlas = haste_assets::AtlasBuilder::build(&mut assets, &[], false).unwrap();
+        let baked = haste_assets::BakedBlockModels::bake(&mut assets, &states, &mut atlas).unwrap();
+        Some((states, baked, atlas))
+    }
+
+    /// `minecraft:grass_block`'s non-snowy state.
+    fn grass_state(states: &haste_assets::BlocksJsonStates) -> BlockStateId {
+        use haste_core::view::BlockStateTable;
+        (0..states.len() as u32)
+            .map(BlockStateId)
+            .find(|s| {
+                states.block_of(*s).path() == "grass_block"
+                    && states.property_value(*s, "snowy") == Some("false")
+            })
+            .expect("grass_block in blocks.json")
+    }
+
+    /// One vertex's tint (0xRRGGBB), unpacked from the packed bytes.
+    fn vertex_tint(v: &PackedVertex) -> u32 {
+        ((v.light[2] as u32) << 16) | ((v.light[3] as u32) << 8) | v.tint_b[0] as u32
+    }
+
+    #[test]
+    #[ignore = "needs the client jar and datagen reports in the cache"]
+    fn every_tinted_quad_of_a_block_takes_its_blended_colour() {
+        let Some((states, baked, atlas)) = load_baked() else {
+            return;
+        };
+        // A snowy biome's grass colour: explicit, and nothing like the default green.
+        let mut snowy = crate::tint::BiomeClimate::plains();
+        snowy.grass_color = Some(0x3A7D5C);
+        let tables = MeshTables::new(
+            Arc::new(crate::tint::TintTable::new(&states)),
+            Arc::new(
+                crate::tint::BiomeColors::new(&[snowy], &crate::tint::Colormaps::uniform(0x91BD59))
+                    .with_radius(0),
+            ),
+            Arc::new(crate::fluid::FluidTable::empty()),
+        );
+        struct Snowy;
+        impl crate::tint::BiomeSource for Snowy {
+            fn biome(&self, _pos: BlockPos) -> haste_core::BiomeId {
+                haste_core::BiomeId(0)
+            }
+        }
+        let grass = grass_state(&states);
+        let world = FlatWorld {
+            ground: grass,
+            layers: 1,
+        };
+        let pos = SectionPos::new(0, 0, 0);
+        let snapshot = MeshSnapshot::capture_with_biomes(&world, Some(&Snowy), 0, pos);
+        let mesh = mesh_section_with(&snapshot, &baked, &atlas, &tables, pos);
+
+        let sprite = |texture: &str| atlas.region(texture).sprite as u16;
+        let (top, side, overlay, bottom) = (
+            sprite("minecraft:block/grass_block_top"),
+            sprite("minecraft:block/grass_block_side"),
+            sprite("minecraft:block/grass_block_side_overlay"),
+            sprite("minecraft:block/dirt"),
+        );
+        // Every quad with a tint index (the top face and the side overlay, both
+        // tintindex 0 in block/grass_block) takes the block's blended grass colour;
+        // the untinted side and bottom quads stay white.
+        let mut tinted = 0usize;
+        let mut untinted = 0usize;
+        for v in &mesh.vertices {
+            let tint = vertex_tint(v);
+            match v.sprite {
+                s if s == top || s == overlay => {
+                    assert_eq!(tint, 0x3A7D5C, "tinted quad's colour");
+                    tinted += 1;
+                }
+                s if s == side || s == bottom => {
+                    assert_eq!(tint, TINT_WHITE, "untinted quad's colour");
+                    untinted += 1;
+                }
+                _ => {}
+            }
+        }
+        assert!(tinted >= 4 && untinted >= 4, "both kinds must be meshed");
+    }
+
+    /// The grass block's side overlay is the model's second element: four quads
+    /// lying exactly on the side faces, one tintindex over the same plane the side
+    /// texture covers. The mesher must emit it unchanged (vanilla draws both
+    /// quads; the terrain depth test lets them share a depth), or the side loses
+    /// the biome tint the overlay carries.
+    #[test]
+    #[ignore = "needs the client jar and datagen reports in the cache"]
+    fn side_overlay_quad_is_meshed_on_the_faces_plane() {
+        let Some((states, baked, atlas)) = load_baked() else {
+            return;
+        };
+        let grass = grass_state(&states);
+        let world = FlatWorld {
+            ground: grass,
+            layers: 1,
+        };
+        let pos = SectionPos::new(0, 0, 0);
+        let snapshot = MeshSnapshot::capture(&world, pos);
+        let mesh = mesh_section_with(&snapshot, &baked, &atlas, &MeshTables::default(), pos);
+
+        // The packed position, back to section-local blocks (a quantization step is
+        // far below any model feature, so this recovers the exact quad).
+        let decode = |p: [u16; 4]| {
+            std::array::from_fn(|i| {
+                f32::from(p[i]) / 65535.0 * crate::vertex::POS_RANGE - crate::vertex::POS_BIAS
+            })
+        };
+        let close = |a: [f32; 3], b: [f32; 3]| {
+            a.iter()
+                .zip(b)
+                .all(|(x, y)| (x - y).abs() < 2.0 / 65535.0 * crate::vertex::POS_RANGE)
+        };
+        let sprite_of = |texture: &str| atlas.region(texture).sprite as u16;
+        let overlay_sprite = sprite_of("minecraft:block/grass_block_side_overlay");
+        let side_sprite = sprite_of("minecraft:block/grass_block_side");
+        let at = |quad: &haste_assets::BakedQuad| quad.direction == haste_assets::Direction::North;
+        let base = baked
+            .quads(grass)
+            .iter()
+            .find(|q| at(q) && q.tint_index.is_none())
+            .expect("the grass block's untinted side quad");
+        let overlay = baked
+            .quads(grass)
+            .iter()
+            .find(|q| at(q) && q.tint_index.is_some())
+            .expect("the grass block's tinted side overlay quad");
+        // The model's two elements share the face plane: same direction, same four
+        // vertices. The mesh must keep the overlay on that plane, untouched.
+        assert_eq!(overlay.positions, base.positions, "coplanar model elements");
+
+        for want in base.positions {
+            assert!(
+                mesh.vertices
+                    .iter()
+                    .any(|v| v.sprite == side_sprite && close(decode(v.pos), want)),
+                "the side quad on the face: {want:?} is not in the mesh"
+            );
+            assert!(
+                mesh.vertices
+                    .iter()
+                    .any(|v| v.sprite == overlay_sprite && close(decode(v.pos), want)),
+                "the overlay quad shares the face plane, but {want:?} is not in the mesh"
+            );
+        }
+        assert!(
+            mesh.vertices.iter().any(|v| v.sprite == overlay_sprite),
+            "the grass block's side overlay must be meshed"
+        );
+    }
+
+    #[test]
+    fn table_generations_are_unique() {
+        // Every constructed set takes the next counter value: two sets never
+        // share a generation, even if the allocator reuses a freed set's
+        // addresses (the reconnect ABA the cache key must survive).
+        let a = MeshTables::default();
+        let b = MeshTables::default();
+        assert_ne!(a.generation, b.generation);
+        let c = MeshTables::new(
+            Arc::new(crate::tint::TintTable::empty()),
+            Arc::new(crate::tint::BiomeColors::default()),
+            Arc::new(crate::fluid::FluidTable::empty()),
+        );
+        assert_ne!(a.generation, c.generation);
+        assert_ne!(b.generation, c.generation);
     }
 
     #[test]

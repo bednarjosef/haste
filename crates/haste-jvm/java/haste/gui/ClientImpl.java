@@ -18,6 +18,18 @@ public final class ClientImpl {
 
     // ---- Minecraft ----
     public static Minecraft getInstance() { return Proxies.minecraft; }
+
+    /**
+     * The DataFixer every saved file goes through (vanilla builds {@code DataFixers.getDataFixer()} once in
+     * {@code Minecraft}'s constructor). Real vanilla Java: options.txt loads through it ({@code Options.dataFix}).
+     */
+    private static final com.mojang.datafixers.DataFixer FIXER = net.minecraft.util.datafix.DataFixers.getDataFixer();
+    public static com.mojang.datafixers.DataFixer getFixerUpper(Minecraft m) { return FIXER; }
+
+    /** The mod check of the title screen and the debug overlay: Haste is the vanilla client rebuilt, no mods. */
+    public static net.minecraft.util.ModCheck checkModStatus() {
+        return new net.minecraft.util.ModCheck(net.minecraft.util.ModCheck.Confidence.PROBABLY_NOT, "haste");
+    }
     public static Window getWindow(Minecraft m) { return Proxies.window; }
     public static SoundManager getSoundManager(Minecraft m) { return Proxies.sound; }
     /** No narrator: a no-op proxy (isActive() is false). */
@@ -74,6 +86,15 @@ public final class ClientImpl {
     public static Screen screen(Gui g) { return screen; }
 
     /**
+     * The splash text of the title screen. Splash texts come from the resource reload
+     * ({@code texts/splashes.txt}), which Haste does not run yet: no splash object, so the title screen
+     * draws none until Rust draws it.
+     */
+    public static net.minecraft.client.resources.SplashManager splashManager(Gui g) {
+        return new net.minecraft.client.resources.SplashManager(null);
+    }
+
+    /**
      * Switches screens like vanilla: the old screen is told it was removed, the new one is added and initialised
      * at the current GUI size. Rust sees the change through {@code GuiPipeline::is_open}.
      */
@@ -90,6 +111,10 @@ public final class ClientImpl {
     /** No player is blocked or restricted (Haste has no social/block list yet). */
     public static boolean isBlocked(Minecraft m, java.util.UUID id) { return false; }
     public static boolean isFriendOnlyRestricted(Minecraft m, java.util.UUID id) { return false; }
+    /** Haste sends no telemetry: no telemetry button, no telemetry screen (the options screen asks). */
+    public static boolean allowsTelemetry(Minecraft m) { return false; }
+    /** Haste filters no chat text: the options the screen saves report unfiltered (no player reporting yet). */
+    public static boolean isTextFilteringEnabled(Minecraft m) { return false; }
     /** Leaving the server (pause screen "Disconnect", death screen "Title Screen"): Rust disconnects. */
     public static void disconnectFromWorld(Minecraft m, net.minecraft.network.chat.Component reason) { haste.rt.Native.requestDisconnect(); }
     public static void disconnectWithSavingScreen(Minecraft m) { haste.rt.Native.requestDisconnect(); }
@@ -125,6 +150,10 @@ public final class ClientImpl {
     public static int getGuiScaledWidth(Window w) { return GfxImpl.width; }
     public static int getGuiScaledHeight(Window w) { return GfxImpl.height; }
     public static int getGuiScale(Window w) { return scale; }
+    /** The display mode is Rust's decision (Rust owns the window): none is preferred. */
+    public static java.util.Optional<com.mojang.blaze3d.platform.VideoMode> getPreferredFullscreenVideoMode(Window w) {
+        return java.util.Optional.empty();
+    }
     public static int getWidth(Window w) { return GfxImpl.width * scale; }
     public static int getHeight(Window w) { return GfxImpl.height * scale; }
     public static int getScreenWidth(Window w) { return GfxImpl.width * scale; }

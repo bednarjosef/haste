@@ -1176,6 +1176,7 @@ dependencies = [
  "haste-core",
  "haste-data",
  "image",
+ "indexmap",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -1207,6 +1208,7 @@ dependencies = [
  "crossbeam-channel",
  "glam",
  "haste-assets",
+ "haste-audio",
  "haste-core",
  "haste-data",
  "haste-entity",
@@ -1314,6 +1316,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
+ "sha2",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
@@ -1361,6 +1364,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "haste-core",
+ "haste-protocol",
  "hex",
  "http-body-util",
  "hyper",
@@ -1666,6 +1670,8 @@ checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -3292,6 +3298,17 @@ name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",

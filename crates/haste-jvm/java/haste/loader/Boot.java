@@ -19,7 +19,7 @@ public final class Boot {
 
     /**
      * @param config newline-separated {@code key=value} lines: clientJar, gameDir, proxyDir, proxiesConf, verbose,
-     *               and repeated lib, allowPackage, allowClass, deny.
+     *               and repeated lib, allowPackage, allowClass, deny, replacement.
      * @return the {@code haste.gui.Bridge} instance
      */
     public static synchronized Object boot(String config) throws Throwable {
@@ -41,13 +41,14 @@ public final class Boot {
         String[] allowPackages = many.getOrDefault("allowPackage", List.of()).toArray(new String[0]);
         String[] allowClasses = many.getOrDefault("allowClass", List.of()).toArray(new String[0]);
         String[] deny = many.getOrDefault("deny", List.of()).toArray(new String[0]);
+        String[] replacements = many.getOrDefault("replacement", List.of()).toArray(new String[0]);
         boolean verbose = Boolean.parseBoolean(one.getOrDefault("verbose", "false"));
 
         // game-side code reads the player's jar for data it cannot get through the class loader (data pack listing)
         System.setProperty("haste.clientJar", clientJar.toString());
         System.setProperty("haste.minecraftDir", one.getOrDefault("minecraftDir", "."));
         long t0 = System.nanoTime();
-        HasteClassLoader l = new HasteClassLoader(gameDir, proxyDir, clientJar, libs, allowPackages, allowClasses, deny, verbose);
+        HasteClassLoader l = new HasteClassLoader(gameDir, proxyDir, clientJar, libs, allowPackages, allowClasses, deny, replacements, verbose);
         String realKey = String.join(",", allowPackages) + "|" + String.join(",", allowClasses) + "|" + String.join(",", deny);
         genSummary = Gen.generateIfStale(clientJar, conf, gameDir, proxyDir, n -> l.refusal(n) == null, realKey);
         long t1 = System.nanoTime();

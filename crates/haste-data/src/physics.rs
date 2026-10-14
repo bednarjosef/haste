@@ -2,8 +2,8 @@
 //! (friction/speed/jump per block) and the `BlockPhysics`/`BlockStateTable` impls for
 //! `GameData`/`BlockStates`.
 
-use haste_core::view::{BlockPhysics, BlockStateTable, FluidInfo};
-use haste_core::BlockStateId;
+use haste_core::view::{BlockPhysics, BlockStateTable, BlockView, FluidInfo};
+use haste_core::{BlockPos, BlockStateId, DVec3, Direction};
 
 use crate::blocks::BlockStates;
 use crate::GameData;
@@ -151,7 +151,57 @@ impl GameData {
         let block = self.blocks.block_index_of_state(state);
         self.physics.get_by_block(block)
     }
+
+    /// Whether `state` is the vanilla block `minecraft:<path>`. A mod block reusing the path in
+    /// another namespace is not it.
+    fn is_minecraft_block(&self, state: BlockStateId, path: &str) -> bool {
+        let block = self.blocks.block_of(state);
+        block.namespace() == "minecraft" && block.path() == path
+    }
+
+    /// The fluid state's `FALLING` flag. Water's block state `level` is `getLegacyLevel`
+    /// (`FlowingFluid.getLegacyLevel`): a source is 0, flowing 1..=7, falling 8..=15, so
+    /// `level >= 8` is falling. Waterlogged blocks carry no `level` and are full sources.
+    fn is_falling_fluid(&self, state: BlockStateId) -> bool {
+        self.blocks
+            .property_value(state, "level")
+            .and_then(|l| l.parse::<u32>().ok())
+            .is_some_and(|l| l >= 8)
+    }
+
+    /// Approximation of `BlockTags.BLOCKS_FLUID_FLOW`: a solid full block stops fluid flowing
+    /// past it in `FlowingFluid.getFlow`. The tag itself is not loaded yet (see NOTES.md), so a
+    /// full opaque cube stands in for it.
+    fn blocks_fluid_flow(&self, state: BlockStateId) -> bool {
+        self.shapes.is_opaque_full(state)
+    }
+
+    /// Approximation of `BlockState.isFaceSturdy` for `FlowingFluid.isSolidFace`: a full opaque
+    /// cube is a solid face. The exact collision-shape test needs the face direction, which the
+    /// callers in `getFlow` only use to decide the FALLING push.
+    fn is_solid_face(&self, world: &dyn BlockView, pos: BlockPos) -> bool {
+        self.shapes.is_opaque_full(world.block_state(pos))
+    }
 }
+
+/// Vanilla `Vec3.normalize`: a vector shorter than 1e-4 becomes zero (glam's `normalize` returns
+/// NaN there).
+fn mc_normalize(v: DVec3) -> DVec3 {
+    let len = v.length();
+    if len < 1.0e-4 {
+        DVec3::ZERO
+    } else {
+        v / len
+    }
+}
+
+/// The horizontal plane in `Direction.Plane.HORIZONTAL` order (north, south, west, east).
+const HORIZONTAL: [Direction; 4] = [
+    Direction::North,
+    Direction::South,
+    Direction::West,
+    Direction::East,
+];
 
 impl BlockPhysics for GameData {
     fn friction(&self, state: BlockStateId) -> f32 {
@@ -175,11 +225,100 @@ impl BlockPhysics for GameData {
     fn is_opaque_full(&self, state: BlockStateId) -> bool {
         self.shapes.is_opaque_full(state)
     }
+    fn is_cobweb(&self, state: BlockStateId) -> bool {
+        self.is_minecraft_block(state, "cobweb")
+    }
+    fn is_powder_snow(&self, state: BlockStateId) -> bool {
+        self.is_minecraft_block(state, "powder_snow")
+    }
+    fn is_sweet_berry_bush(&self, state: BlockStateId) -> bool {
+        self.is_minecraft_block(state, "sweet_berry_bush")
+    }
+    fn is_slime(&self, state: BlockStateId) -> bool {
+        self.is_minecraft_block(state, "slime_block")
+    }
+    fn is_honey(&self, state: BlockStateId) -> bool {
+        self.is_minecraft_block(state, "honey_block")
+    }
+    /// `Block.getBounceRestitution`: 1.0 for `minecraft:slime_block`, 0.0 otherwise. Vanilla
+    /// 26.3 also gives the coloured beds and `minecraft:shelf_mushroom` 0.75
+    /// (`Blocks.BED`/`Blocks.SHELF_MUSHROOM` `bounceRestitution`); those blocks are out of this
+    /// task's scope (see the report), so they keep 0.0.
+    fn bounce_restitution(&self, state: BlockStateId) -> f32 {
+        if self.is_slime(state) {
+            1.0
+        } else {
+            0.0
+        }
+    }
+    /// `FluidState.getFlow` -> `FlowingFluid.getFlow(level, pos, fluidState)`: the normalised
+    /// horizontal flow at the cell, from the fluid-height difference to its four horizontal
+    /// neighbours (and the cell below an empty one), with the downward FALLING component against
+    /// a solid face.
+    fn water_flow(
+        &self,
+        world: &dyn BlockView,
+        pos: BlockPos,
+        state: BlockStateId,
+    ) -> Option<DVec3> {
+        let own = self.shapes.fluid(state)?;
+        let own_height = own.height as f64;
+        let mut flow_x = 0.0_f64;
+        let mut flow_z = 0.0_f64;
+        for dir in HORIZONTAL {
+            let o = dir.offset();
+            let nb_pos = BlockPos::new(pos.x + o.x, pos.y, pos.z + o.z);
+            let nb_state = world.block_state(nb_pos);
+            let nb_fluid = self.shapes.fluid(nb_state);
+            // `affectsFlow`: an empty neighbour or one of the same fluid type.
+            if nb_fluid.is_some_and(|f| f.kind != own.kind) {
+                continue;
+            }
+            let nb_height = nb_fluid.map_or(0.0, |f| f.height as f64);
+            let distance = if nb_height == 0.0 {
+                // No fluid of its own: look at the cell below it, unless the neighbour block
+                // stops fluid flow (`BlockTags.BLOCKS_FLUID_FLOW`).
+                if self.blocks_fluid_flow(nb_state) {
+                    0.0
+                } else {
+                    let below_pos = BlockPos::new(nb_pos.x, nb_pos.y - 1, nb_pos.z);
+                    match self.shapes.fluid(world.block_state(below_pos)) {
+                        Some(f) if f.kind == own.kind && f.height > 0.0 => {
+                            own_height - (f.height as f64 - 0.8888889)
+                        }
+                        _ => 0.0,
+                    }
+                }
+            } else {
+                own_height - nb_height
+            };
+            if distance != 0.0 {
+                flow_x += o.x as f64 * distance;
+                flow_z += o.z as f64 * distance;
+            }
+        }
+        let mut flow = DVec3::new(flow_x, 0.0, flow_z);
+        if self.is_falling_fluid(state) {
+            for dir in HORIZONTAL {
+                let o = dir.offset();
+                let nb_pos = BlockPos::new(pos.x + o.x, pos.y, pos.z + o.z);
+                let above = BlockPos::new(nb_pos.x, nb_pos.y + 1, nb_pos.z);
+                if self.is_solid_face(world, nb_pos) || self.is_solid_face(world, above) {
+                    flow = mc_normalize(flow) + DVec3::new(0.0, -6.0, 0.0);
+                    break;
+                }
+            }
+        }
+        Some(mc_normalize(flow))
+    }
 }
 
 impl BlockStateTable for BlockStates {
     fn len(&self) -> usize {
         BlockStates::len(self)
+    }
+    fn placeholder_state(&self) -> BlockStateId {
+        BlockStates::placeholder_state(self)
     }
     fn block_of(&self, state: BlockStateId) -> &haste_core::Identifier {
         BlockStates::block_of(self, state)

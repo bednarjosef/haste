@@ -4,6 +4,7 @@ import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import haste.rt.GuiBatch;
 import haste.rt.GuiBlend;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import net.minecraft.client.gui.ActiveTextCollector;
 import net.minecraft.client.gui.Font;
@@ -31,6 +32,15 @@ public final class GfxImpl {
     private static int scissorDepth;
     private static List<FormattedCharSequence> tooltip;
     private static int tooltipX, tooltipY;
+    /**
+     * Debug counters for the tests: how this frame's blits got their blend mode, and which pipelines decided
+     * the non-normal ones (a blit comes from its pipeline when {@code p} is not null, see {@link #blend}).
+     */
+    static int pipelineBlits, nameBlits;
+    private static final RenderPipeline[] SPECIAL = new RenderPipeline[8];
+    private static final int[] SPECIAL_CODE = new int[8];
+    private static final int[] SPECIAL_COUNT = new int[8];
+    private static int specialCount;
 
     /** Starts a frame of the given GUI size. */
     static void begin(int w, int h) {
@@ -41,6 +51,10 @@ public final class GfxImpl {
         tooltip = null;
         cursor = 0;
         entityBoxes.clear();
+        pipelineBlits = 0;
+        nameBlits = 0;
+        Arrays.fill(SPECIAL, null);
+        specialCount = 0;
     }
 
     /** Ends a frame: deferred tooltip, then closes open translations and scissors. */
@@ -190,14 +204,53 @@ public final class GfxImpl {
     private static int id(Identifier i) { return GuiBatch.str(i.toString()); }
 
     /**
-     * The blend mode of a blit, by identifier: vanilla picks the {@code RenderPipeline} per draw call, but the
-     * {@code p} arguments are null here ({@code RenderPipelines} has no {@code <clinit>}), and every GUI pipeline
-     * except two blends normally — so the identifier says which pipeline it was: {@code textures/misc/vignette.png}
-     * is {@code RenderPipelines.VIGNETTE} (multiplicative: darkens the edges) and the crosshair sprites
-     * ({@code hud/crosshair...}) are drawn with {@code RenderPipelines.CROSSHAIR} (inverts the colour behind it).
-     * Codes: 0 normal, 1 multiply, 2 invert.
+     * The blend mode of a blit: vanilla picks one per draw call in the {@code RenderPipeline} the caller passes,
+     * and Haste's tier-2 {@link Pipelines} give the GUI's blits a real pipeline, so the blend function is read
+     * from there (vignette multiplies, crosshair inverts, the text selection highlight adds, everything else
+     * blends normally). The identifier rule below is only the fallback for a draw call whose pipeline is still
+     * null (Haste's own blits, or a caller that built none). Codes: 0 normal, 1 multiply, 2 invert, 3 additive.
      */
-    private static int blend(Identifier t) {
+    private static int blend(RenderPipeline p, Identifier t) {
+        if (p != null) {
+            pipelineBlits++;
+            int b = Pipelines.blendOf(p);
+            if (b != GuiBlend.NORMAL) noteSpecial(p, b);
+            return b;
+        }
+        nameBlits++;
+        return blendByName(t);
+    }
+
+    /** Debug: collects the pipeline behind a multiply/invert blit, so a test can check where the mode came from. */
+    private static void noteSpecial(RenderPipeline p, int b) {
+        for (int i = 0; i < specialCount; i++) {
+            if (SPECIAL[i] == p) { SPECIAL_COUNT[i]++; return; }
+        }
+        if (specialCount < SPECIAL.length) {
+            SPECIAL[specialCount] = p;
+            SPECIAL_CODE[specialCount] = b;
+            SPECIAL_COUNT[specialCount] = 1;
+            specialCount++;
+        }
+    }
+
+    /** Debug: the blend modes of this frame, as "{@code <pipeline location> <code> <count>}" lines. */
+    static String specialBlends() {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < specialCount; i++) {
+            sb.append(SPECIAL[i].getLocation()).append(' ').append(SPECIAL_CODE[i])
+                .append(' ').append(SPECIAL_COUNT[i]).append('\n');
+        }
+        return sb.toString();
+    }
+
+    /**
+     * The blend mode of a blit without a pipeline, by identifier: every GUI pipeline except three blends
+     * normally, so the identifier says which pipeline it was: {@code textures/misc/vignette.png} is
+     * {@code RenderPipelines.VIGNETTE} (multiplicative: darkens the edges) and the crosshair sprites
+     * ({@code hud/crosshair...}) are drawn with {@code RenderPipelines.CROSSHAIR} (inverts the colour behind it).
+     */
+    private static int blendByName(Identifier t) {
         String p = t.getPath();
         if (p.endsWith("vignette.png")) return GuiBlend.MULTIPLY;
         if (p.equals("hud/crosshair") || p.startsWith("hud/crosshair_")) return GuiBlend.INVERT;
@@ -213,7 +266,7 @@ public final class GfxImpl {
     }
     public static void blitSprite(GuiGraphicsExtractor g, RenderPipeline p, Identifier s, int x, int y, int w, int h, int tint) {
         POSE.sync();
-        GuiBatch.ops(GuiBatch.SPRITE, id(s), x, y, w, h, tint, blend(s));
+        GuiBatch.ops(GuiBatch.SPRITE, id(s), x, y, w, h, tint, blend(p, s));
     }
     /** Sub-region of a sprite: region (u, v, w, h) of a sprite drawn as {@code spriteW x spriteH}, placed at x, y. */
     public static void blitSprite(GuiGraphicsExtractor g, RenderPipeline p, Identifier s, int spriteW, int spriteH, int u, int v, int x, int y, int w, int h) {
@@ -221,29 +274,29 @@ public final class GfxImpl {
     }
     public static void blitSprite(GuiGraphicsExtractor g, RenderPipeline p, Identifier s, int spriteW, int spriteH, int u, int v, int x, int y, int w, int h, int tint) {
         POSE.sync();
-        GuiBatch.ops(GuiBatch.SPRITE_REGION, id(s), spriteW, spriteH, u, v, x, y, w, h, tint, blend(s));
+        GuiBatch.ops(GuiBatch.SPRITE_REGION, id(s), spriteW, spriteH, u, v, x, y, w, h, tint, blend(p, s));
     }
 
-    private static void texture(Identifier t, int x, int y, int w, int h, float u, float v, float uw, float vh, int texW, int texH, int tint) {
+    private static void texture(RenderPipeline p, Identifier t, int x, int y, int w, int h, float u, float v, float uw, float vh, int texW, int texH, int tint) {
         POSE.sync();
         GuiBatch.ops(GuiBatch.TEXTURE, id(t), x, y, w, h, Float.floatToRawIntBits(u), Float.floatToRawIntBits(v),
-            Float.floatToRawIntBits(uw), Float.floatToRawIntBits(vh), texW, texH, tint, blend(t));
+            Float.floatToRawIntBits(uw), Float.floatToRawIntBits(vh), texW, texH, tint, blend(p, t));
     }
     public static void blit(GuiGraphicsExtractor g, RenderPipeline p, Identifier t, int x, int y, float u, float v, int w, int h, int texW, int texH) {
-        texture(t, x, y, w, h, u, v, w, h, texW, texH, -1);
+        texture(p, t, x, y, w, h, u, v, w, h, texW, texH, -1);
     }
     public static void blit(GuiGraphicsExtractor g, RenderPipeline p, Identifier t, int x, int y, float u, float v, int w, int h, int texW, int texH, int tint) {
-        texture(t, x, y, w, h, u, v, w, h, texW, texH, tint);
+        texture(p, t, x, y, w, h, u, v, w, h, texW, texH, tint);
     }
     public static void blit(GuiGraphicsExtractor g, RenderPipeline p, Identifier t, int x, int y, float u, float v, int w, int h, int uw, int vh, int texW, int texH) {
-        texture(t, x, y, w, h, u, v, uw, vh, texW, texH, -1);
+        texture(p, t, x, y, w, h, u, v, uw, vh, texW, texH, -1);
     }
     public static void blit(GuiGraphicsExtractor g, RenderPipeline p, Identifier t, int x, int y, float u, float v, int w, int h, int uw, int vh, int texW, int texH, int tint) {
-        texture(t, x, y, w, h, u, v, uw, vh, texW, texH, tint);
+        texture(p, t, x, y, w, h, u, v, uw, vh, texW, texH, tint);
     }
-    /** blit(texture, x1, y1, x2, y2, u0, u1, v0, v1) with normalised UVs. */
+    /** blit(texture, x1, y1, x2, y2, u0, u1, v0, v1) with normalised UVs (no pipeline: normal blending). */
     public static void blit(GuiGraphicsExtractor g, Identifier t, int x1, int y1, int x2, int y2, float u0, float u1, float v0, float v1) {
-        texture(t, x1, y1, x2 - x1, y2 - y1, u0, v0, u1 - u0, v1 - v0, 1, 1, -1);
+        texture(null, t, x1, y1, x2 - x1, y2 - y1, u0, v0, u1 - u0, v1 - v0, 1, 1, -1);
     }
 
     // ---- items ----
@@ -341,8 +394,8 @@ public final class GfxImpl {
         if (y + h + 4 > height) y = height - h - 4;
         if (y < 4) y = 4;
         POSE.reset();
-        GuiBatch.op(GuiBatch.SPRITE, GuiBatch.str("minecraft:tooltip/background"), x - 3 - 9, y - 3 - 9, w + 6 + 18, h + 6 + 18, -1);
-        GuiBatch.op(GuiBatch.SPRITE, GuiBatch.str("minecraft:tooltip/frame"), x - 3 - 9, y - 3 - 9, w + 6 + 18, h + 6 + 18, -1);
+        GuiBatch.ops(GuiBatch.SPRITE, GuiBatch.str("minecraft:tooltip/background"), x - 3 - 9, y - 3 - 9, w + 6 + 18, h + 6 + 18, -1, GuiBlend.NORMAL);
+        GuiBatch.ops(GuiBatch.SPRITE, GuiBatch.str("minecraft:tooltip/frame"), x - 3 - 9, y - 3 - 9, w + 6 + 18, h + 6 + 18, -1, GuiBlend.NORMAL);
         for (FormattedCharSequence l : tooltip) { Text.emit(l, x, y, -1, true); y += 10; }
         tooltip = null;
     }

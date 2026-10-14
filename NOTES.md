@@ -113,3 +113,31 @@ Newest at the top. One entry per decision, with the why; link the brief or repor
   Pomme's protocol layer is not reusable as-is either (evaluation in progress).
 - **2026-10-12 Worktrees share a prebuilt target.** `cargo build` of the workspace deps (wgpu, winit,
   tokio) is copied into each worktree's `target/` so eight workers do not compile them eight times.
+- **2026-10-13 Protocol enum orders audited against the 26.3 jar.** Every enum Haste sends or reads
+  as an ordinal (player action and command, client command, hands, pose, game mode, difficulty,
+  client information, resource pack status, recipe book type, boss bar, scoreboard, equipment slot,
+  direction, animate and swing, game event, entity metadata serializers, teleport/player info/input
+  flags, position path, structure/test/command block and sign packets, seen advancements, team
+  rules, container click mode, sound source, consume effects, resolvable profile) was checked with
+  `javap` on the enum constants and static initialisers, no decompiling. No mismatch: the only 26.3
+  shift (`CHANGE_DESTROY_DIRECTION` inserted at 1 in player action) was already handled. Equipment
+  slots are sent as the enum ordinal, not `getIndex()`; metadata type 13 is an optional plain UUID.
+  26.3 has no title-action enum (three separate packets). The orders are pinned by
+  `enum_order_tests` in `crates/haste-protocol/src/packets/mod.rs`, each naming its jar class;
+  registry-driven ids (sounds, particles, items, blocks, entity types, chat types) are not pinned
+  because they come from the reports at runtime.
+- **2026-10-13 Read the decompiled client instead of guessing.** Workers were filling gaps with
+  minecraft.wiki numbers and guesses (seat offsets, falling-water height, physics constants marked
+  UNVERIFIED). Rule 5 now allows reading the 26.3 client decompiled with Vineflower into
+  `cache/source/26.3/client` (`scripts/decompile.sh`) for exact behaviour, while Haste's code is
+  still written by us and never contains Mojang code; the recorder mod and `javap` stay the checks.
+  Earlier entries saying "no decompiled source by rule" are superseded; their open questions can
+  now be settled by reading the source.
+- **2026-10-13 GUI blend modes come from vanilla's RenderPipeline.** Haste's tier-2
+  `RenderPipelines` builds the GUI pipelines through vanilla's own builder (so their locations and
+  blend functions are vanilla's), and `GfxImpl.blend` maps a pipeline's blend function to the
+  three GUI blend codes (normal, multiply for the vignette, invert for the crosshair). The value
+  types this needs are allow-listed in `loader.rs` (`com/mojang/renderpearl/api/{pipeline,vertex}`,
+  `ShaderDefines`). A mod pipeline with a known blend function maps correctly; the texture-name
+  rule is only the fallback for a null pipeline. Additive pipelines (`GUI_TEXT_HIGHLIGHT`) still
+  draw normal until the renderer gets an additive GUI blend.
