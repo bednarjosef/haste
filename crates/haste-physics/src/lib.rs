@@ -4,11 +4,13 @@
 //! Every constant, where it comes from and how sure we are of it is listed in `NOTES.md`.
 //!
 //! Layout: [`collision`] (pure AABB sweep + step-up), [`movement`] (the tick), [`fluids`] (water
-//! and lava), [`flying`] (creative flight), [`attributes`], [`replay`] (trace replay harness),
-//! [`testing`] (in-memory world for tests).
+//! and lava), [`flying`] (creative flight), [`elytra`] (gliding), [`attributes`], [`replay`]
+//! (trace replay harness), [`testing`] (in-memory world for tests).
 
 pub mod attributes;
+pub mod block_effects;
 pub mod collision;
+pub mod elytra;
 pub mod fluids;
 pub mod flying;
 pub mod mining;
@@ -23,6 +25,7 @@ use serde::{Deserialize, Serialize};
 
 pub use attributes::{PlayerAttributes, Pose};
 pub use collision::{collide, collide_with_step};
+pub use elytra::{effective_gravity, glide_velocity, look_angle};
 pub use movement::tick;
 
 /// The local player's physics state. Positions/velocities are f64 like vanilla; angles f32.
@@ -37,6 +40,9 @@ pub struct PlayerState {
     pub on_ground: bool,
     pub sprinting: bool,
     pub sneaking: bool,
+    /// Shift is held and the crouching box fits, or standing does not (vanilla
+    /// `LocalPlayer.aiStep`'s `crouching` field, `LocalPlayer.isCrouching`): slows the input.
+    pub crouching: bool,
     pub in_water: bool,
     pub flying: bool,
     pub fall_distance: f32,
@@ -50,6 +56,12 @@ pub struct PlayerState {
     pub vertical_collision: bool,
     /// Eyes under the water surface (last tick); slows mining, starts sprint-swimming.
     pub eyes_in_water: bool,
+    /// Stuck-in-block speed multiplier set by `makeStuckInBlock` (cobweb, powder snow, sweet
+    /// berry bush) at the end of the tick; consumed by the next move (vanilla `Entity.move`).
+    pub stuck_multiplier: DVec3,
+    /// Gliding with an elytra (vanilla's shared flag 7). While set the player uses the
+    /// fall-flying pose box and `elytra::travel` instead of the normal walk/fall.
+    pub fall_flying: bool,
 }
 
 impl PlayerState {
@@ -59,9 +71,15 @@ impl PlayerState {
             ..Default::default()
         }
     }
-    /// Current collision box for this state's pose.
+    /// Current collision box for this state's pose. While gliding the box is the fall-flying
+    /// pose's 0.6 x 0.6 (vanilla's fall_flying dimensions), not the pose's.
     pub fn aabb(&self, attrs: &PlayerAttributes) -> Aabb {
-        Aabb::entity(self.pos, attrs.box_width(), attrs.height_for(self.pose))
+        if self.fall_flying {
+            let height = elytra::GLIDER_BOX_HEIGHT * attrs.scale;
+            Aabb::entity(self.pos, attrs.box_width(), height as f64)
+        } else {
+            Aabb::entity(self.pos, attrs.box_width(), attrs.height_for(self.pose))
+        }
     }
 }
 
@@ -101,5 +119,13 @@ impl BlockPhysics for DefaultBlockPhysics {
     }
     fn is_opaque_full(&self, state: BlockStateId) -> bool {
         state != BlockStateId::AIR
+    }
+    fn water_flow(
+        &self,
+        _world: &dyn haste_core::view::BlockView,
+        _pos: haste_core::BlockPos,
+        _state: BlockStateId,
+    ) -> Option<DVec3> {
+        None
     }
 }

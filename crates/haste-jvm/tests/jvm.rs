@@ -1094,6 +1094,53 @@ fn hud_frame() {
     gui.with_state(|s| s.in_world = false);
 }
 
+/// F3: the debug overlay is drawn over the HUD in every frame while it is on (vanilla
+/// `Gui.extractRenderState` draws it after the screen, `Gui.java:200`), and stops when toggled off.
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM, data generator reports)"]
+fn debug_overlay_f3() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    h.clear_unimplemented().unwrap();
+    reset(gui);
+    gui.with_state(|s| {
+        s.in_world = true;
+        s.game_mode = haste_core::game::GameMode::Survival;
+    });
+    let before = render(&h, (0.0, 0.0));
+    let count_before = texts(&before).len();
+    gui.toggle_debug();
+    let after = render(&h, (0.0, 0.0));
+    let t = texts(&after);
+    eprintln!(
+        "debug_overlay_f3: {count_before} text commands before F3, {} after",
+        t.len()
+    );
+    // the stub's first lines (DebugImpl.lines)
+    assert!(
+        t.iter().any(|x| x.starts_with("Minecraft ")),
+        "version line: {t:?}"
+    );
+    assert!(t.iter().any(|x| x.ends_with(" fps")), "fps line: {t:?}");
+    assert!(
+        t.iter().any(|x| x.starts_with("XYZ: ")),
+        "position line: {t:?}"
+    );
+    assert!(
+        t.len() > count_before,
+        "F3 added no text: {count_before} before, {} after",
+        t.len()
+    );
+    // toggled off: the overlay's lines are gone
+    gui.toggle_debug();
+    let off = render(&h, (0.0, 0.0));
+    assert_eq!(texts(&off).len(), count_before);
+    let unimpl = h.unimplemented().unwrap();
+    assert!(unimpl.is_empty(), "Unimplemented log for F3: {unimpl:#?}");
+    gui.with_state(|s| s.in_world = false);
+}
+
 /// Serverbound play packet id from the data generator's `packets.json`.
 fn serverbound_id(name: &str) -> i32 {
     let reports = cache().join("datagen/26.3/reports/packets.json");

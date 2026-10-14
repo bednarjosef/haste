@@ -1,0 +1,11 @@
+# Survival inventory: open with E, put the mouse over the player preview box,
+# screenshot (the player model must be drawn, following the mouse), close again.
+wait_until joined
+wait_until settled
+key E
+wait_until screen_open
+mouse 212 120
+wait 10
+screenshot inventory-survival
+key E
+wait_until screen_closed

@@ -86,6 +86,7 @@ fn main() -> anyhow::Result<()> {
         partial_tick: 0.0,
         block_target: None,
         breaking: &[],
+        camera_entity: None,
     };
     // Warm up the meshing pipeline: keep calling update_world (drain budget
     // 32/frame) until all sections are uploaded, then measure steady state.

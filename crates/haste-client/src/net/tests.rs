@@ -56,15 +56,29 @@ struct FakeEntities {
     poses: HashMap<EntityId, (DVec3, f32, f32)>,
     log: Vec<String>,
     ticks: u32,
+    /// Riding bookkeeping, mirroring the store's (vehicle -> passengers).
+    riding: HashMap<EntityId, Vec<EntityId>>,
+    /// Registry index per entity id (spawn's `kind`), for the seat offset.
+    kinds: HashMap<EntityId, i32>,
+    dims: HashMap<EntityId, (f32, f32)>,
 }
 
 impl EntitySink for FakeEntities {
     fn spawn(&mut self, s: &EntitySpawn) {
         self.poses.insert(s.id, (s.pos, s.yaw, s.pitch));
+        self.kinds.insert(s.id, s.kind.0 as i32);
+        // The default box, like a store without the oracle dump.
+        self.dims.insert(s.id, (0.6, 1.8));
     }
     fn remove(&mut self, ids: &[EntityId]) {
         for id in ids {
             self.poses.remove(id);
+            self.kinds.remove(id);
+            self.dims.remove(id);
+            self.riding.remove(id);
+            for list in self.riding.values_mut() {
+                list.retain(|p| !ids.contains(p));
+            }
         }
     }
     fn move_delta(&mut self, id: EntityId, delta: DVec3, _on_ground: bool) {
@@ -102,6 +116,18 @@ impl EntitySink for FakeEntities {
     }
     fn player_info(&mut self, info: &[PlayerInfo]) {
         self.log.push(format!("player_info {}", info.len()));
+    }
+    fn set_passengers(&mut self, vehicle: EntityId, passengers: &[EntityId]) {
+        self.riding.insert(vehicle, passengers.to_vec());
+        self.log
+            .push(format!("passengers {} {:?}", vehicle.0, passengers));
+    }
+    fn entity_type_info(&self, id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
+        self.kinds.get(&id).and_then(|k| {
+            self.dims
+                .get(&id)
+                .map(|d| (haste_core::RegistryIndex(*k as u32), *d))
+        })
     }
     fn pose(&self, id: EntityId) -> Option<(DVec3, f32, f32)> {
         self.poses.get(&id).copied()
@@ -193,10 +219,15 @@ fn teleport(id: i32, pos: DVec3, flags: i32) -> ClientboundPlay {
 }
 
 fn spawn_packet(id: i32, pos: DVec3) -> ClientboundPlay {
+    spawn_packet_kind(id, pos, 3)
+}
+
+/// Spawn with a chosen entity type index (the synced registry's order matters for the seat).
+fn spawn_packet_kind(id: i32, pos: DVec3, kind: i32) -> ClientboundPlay {
     ClientboundPlay::AddEntity(cb::AddEntity {
         entity_id: id,
         uuid: Default::default(),
-        kind: 3,
+        kind,
         pos,
         velocity: DVec3::ZERO,
         pitch: 0.0,
@@ -537,4 +568,187 @@ fn end_tick_once(r: &mut Rig) {
     );
     r.world = world;
     r.entities = entities;
+    r.out.extend(out);
+}
+
+/// The `minecraft:entity_type` names in id order, as `set_entity_type_names` takes them
+/// (entry i at index i, like the real registry: entry order defines the ids).
+fn names(names: &[&str]) -> Vec<Identifier> {
+    names.iter().map(|n| Identifier::minecraft(n)).collect()
+}
+
+#[test]
+fn set_passengers_mounts_and_dismounts_the_local_player() {
+    let mut r = Rig::new();
+    r.session
+        .set_entity_type_names(names(&["player", "zombie", "minecart", "horse", "pig"]));
+    r.apply(spawn_packet_kind(5, DVec3::new(40.0, 70.0, 40.0), 2)); // minecart
+                                                                    // Mount: our entity id is 7.
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 5,
+        passengers: vec![7],
+    }));
+    assert_eq!(r.session.player.vehicle(), Some(EntityId(5)));
+    assert_eq!(
+        r.entities.riding.get(&EntityId(5)).unwrap(),
+        &vec![EntityId(7)]
+    );
+    // The minecart's seat: `passengerAttachments(0.1875)` minus the player's own vehicle
+    // attachment (`Avatar.DEFAULT_VEHICLE_ATTACHMENT`, 0.6) is 0.4125 *below* the cart's
+    // position. The ride tick runs once the join is through (accept, player_loaded: two ticks
+    // after the teleport); the player's own teleport position is irrelevant while riding: the
+    // vehicle's position is.
+    r.apply(teleport(1, DVec3::new(40.0, 71.0, 40.0), 0));
+    end_tick_once(&mut r);
+    end_tick_once(&mut r);
+    end_tick_once(&mut r);
+    assert_eq!(
+        r.session.player.state.pos,
+        DVec3::new(40.0, 69.5875, 40.0),
+        "the passenger sits at the vehicle's position plus the seat offset"
+    );
+    // The passenger follows the vehicle's moves.
+    r.apply(ClientboundPlay::MoveEntityPos(cb::MoveEntityPos {
+        entity_id: 5,
+        deltas: MoveDeltas::Linear([20480, 0, 0]),
+        on_ground: false,
+    }));
+    end_tick_once(&mut r);
+    assert_eq!(r.session.player.state.pos, DVec3::new(45.0, 69.5875, 40.0));
+    // Dismount: the list replaces the previous one and no longer names us.
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 5,
+        passengers: vec![],
+    }));
+    assert_eq!(r.session.player.vehicle(), None);
+    // Normal physics resumes from where we are. The fake world has no chunk loaded at the
+    // player's chunk, so vanilla's unloaded-chunk step (`Player.aiStep`'s `travelInAir`
+    // pin) moves it down by the unloaded-chunk fall speed this tick; x and z stay.
+    end_tick_once(&mut r);
+    assert_eq!(
+        r.session.player.state.pos,
+        DVec3::new(
+            45.0,
+            69.5875 + crate::player::UNLOADED_CHUNK_FALL_SPEED,
+            40.0
+        ),
+        "normal physics resumes, falling at the unloaded-chunk rate"
+    );
+}
+
+#[test]
+fn a_set_passengers_for_another_vehicle_does_not_dismount_us() {
+    let mut r = Rig::new();
+    r.apply(spawn_packet_kind(5, DVec3::ZERO, 1));
+    r.apply(spawn_packet_kind(6, DVec3::ZERO, 1));
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 5,
+        passengers: vec![7],
+    }));
+    // Another vehicle's list, without us: we keep riding 5.
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 6,
+        passengers: vec![9, 10],
+    }));
+    assert_eq!(r.session.player.vehicle(), Some(EntityId(5)));
+}
+
+#[test]
+fn removing_our_vehicle_dismounts_us() {
+    let mut r = Rig::new();
+    r.apply(spawn_packet(5, DVec3::ZERO));
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 5,
+        passengers: vec![7],
+    }));
+    assert_eq!(r.session.player.vehicle(), Some(EntityId(5)));
+    r.apply(ClientboundPlay::RemoveEntities(cb::RemoveEntities {
+        entity_ids: vec![5],
+    }));
+    assert_eq!(r.session.player.vehicle(), None);
+    assert!(!r.entities.riding.contains_key(&EntityId(5)));
+}
+
+#[test]
+fn the_seat_offset_comes_from_the_entity_type() {
+    let mut r = Rig::new();
+    // Registry: index 4 is horse.
+    r.session
+        .set_entity_type_names(names(&["player", "zombie", "minecart", "pig", "horse"]));
+    r.apply(spawn_packet_kind(5, DVec3::new(0.0, 64.0, 0.0), 4));
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 5,
+        passengers: vec![7],
+    }));
+    r.apply(teleport(1, DVec3::new(0.0, 64.0, 0.0), 0));
+    end_tick_once(&mut r);
+    end_tick_once(&mut r);
+    end_tick_once(&mut r);
+    // The horse's seat: `passengerAttachments(1.44375)` minus the player's own 0.6 is 0.84375
+    // above its position (not its 1.8 default-box height).
+    assert!((r.session.player.state.pos.y - 64.84375).abs() < 1e-6);
+}
+
+#[test]
+fn riding_sends_rotation_and_input_only() {
+    let mut r = Rig::new();
+    r.apply(spawn_packet(5, DVec3::new(1.0, 2.0, 3.0)));
+    // Join: teleport, accept, loaded.
+    r.apply(teleport(1, DVec3::new(1.0, 2.0, 3.0), 0));
+    end_tick_once(&mut r);
+    end_tick_once(&mut r);
+    r.out.clear();
+    // Mount.
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 5,
+        passengers: vec![7],
+    }));
+    // Look changes and a key is held while riding: input (the vehicle's steering keys) and
+    // rotation only, never a position packet.
+    let look = haste_core::input::InputState {
+        yaw: 90.0,
+        forward: true,
+        ..Default::default()
+    };
+    let mut out = Vec::new();
+    let mut world = std::mem::take(&mut r.world);
+    let entities = std::mem::take(&mut r.entities);
+    r.session.end_tick(&look, &mut world, &entities, &mut out);
+    r.world = world;
+    r.entities = entities;
+    let names: Vec<&str> = out
+        .iter()
+        .map(|p| match p {
+            ServerboundPlay::MovePlayerPosRot(_) => "pos_rot",
+            ServerboundPlay::MovePlayerPos(_) => "pos",
+            ServerboundPlay::MovePlayerRot(_) => "rot",
+            ServerboundPlay::MovePlayerStatusOnly(_) => "status",
+            ServerboundPlay::PlayerInput(_) => "input",
+            ServerboundPlay::ClientTickEnd(_) => "tick_end",
+            _ => "other",
+        })
+        .collect();
+    // While riding, the vehicle's position is ours; only rotation packets go out.
+    assert_eq!(names, ["input", "rot", "tick_end"]);
+    // Sneak while riding: player_input carries the shift (sneak) flag, the server answers
+    // with set_passengers to dismount.
+    let sneak = haste_core::input::InputState {
+        yaw: 90.0,
+        sneak: true,
+        ..Default::default()
+    };
+    let mut out = Vec::new();
+    let mut world = std::mem::take(&mut r.world);
+    let entities = std::mem::take(&mut r.entities);
+    r.session.end_tick(&sneak, &mut world, &entities, &mut out);
+    r.world = world;
+    r.entities = entities;
+    let input = out.iter().find_map(|p| match p {
+        ServerboundPlay::PlayerInput(i) => Some(i.flags),
+        _ => None,
+    });
+    assert_eq!(
+        input,
+        Some(haste_protocol::packets::play::serverbound::input_flags::SNEAK)
+    );
 }

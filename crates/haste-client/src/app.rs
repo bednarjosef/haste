@@ -65,8 +65,33 @@ const DOUBLE_TAP: Duration = Duration::from_millis(350);
 /// Wall time the render thread may spend capturing sections for the mesher per frame.
 /// Sections handed to the mesh workers per frame (they capture the snapshots themselves).
 const SUBMIT_PER_FRAME: usize = 512;
-/// Vanilla's "GUI scale" (the auto option is not wired; 2 is a common choice at 1080p).
-const GUI_SCALE: u32 = 2;
+/// The GUI scale the option asks for: 0 means auto (vanilla: `Options.AUTO_GUI_SCALE`).
+/// Like `Minecraft.resizeGui`, auto and any fixed scale both go through
+/// [`gui_scale_for`] (vanilla: `Window.calculateScale`).
+pub fn resolve_gui_scale(option: u32, width: u32, height: u32) -> u32 {
+    gui_scale_for(option.min(4), width, height)
+}
+
+/// The scale vanilla would use for the option at the window's framebuffer size
+/// (vanilla: `Window.calculateScale`; `max_scale` 0 grows it while the framebuffer
+/// keeps at least 320x240 GUI pixels).
+pub fn gui_scale_for(max_scale: u32, width: u32, height: u32) -> u32 {
+    let mut scale = 1;
+    while scale != max_scale
+        && scale < width
+        && scale < height
+        && width / (scale + 1) >= 320
+        && height / (scale + 1) >= 240
+    {
+        scale += 1;
+    }
+    scale
+}
+
+/// The GUI-scaled size at `scale` (vanilla: `Window.setGuiScale` uses ceil division).
+pub fn gui_scaled_size(width: u32, height: u32, scale: u32) -> (u32, u32) {
+    (width.div_ceil(scale.max(1)), height.div_ceil(scale.max(1)))
+}
 
 /// A joined game: runtime, game thread and shared state.
 struct Session {
@@ -111,10 +136,21 @@ impl Session {
         // own view distance (login packet) caps what we mesh below.
         opts.client_information.view_distance = options.render_distance as i8;
         let driver: NetDriver = rt.block_on(NetDriver::connect(opts))?;
-        let regs = driver.connection().registries();
-        let biomes = net::synced_biome_count(regs).unwrap_or(64);
-        let biome_climates = biomes::biome_climates(regs);
-        let login = driver.login();
+        let (biomes, biome_climates, type_names, sounds) = {
+            let regs = driver.connection().registries();
+            let sounds = if sound {
+                open_sounds(regs, &data, &options.sound)
+            } else {
+                None
+            };
+            (
+                net::synced_biome_count(regs).unwrap_or(64),
+                biomes::biome_climates(regs),
+                net::entity_type_names(regs, &data),
+                sounds,
+            )
+        };
+        let login = driver.login().clone();
         let local = (login.entity_id, login.profile.uuid.as_u128());
         tracing::info!(
             "joined {address} as {}: {:?}, dimension {}, view distance {}",
@@ -125,6 +161,8 @@ impl Session {
         );
         let world = World::new_with_biomes(login.dimension.clone(), data.clone(), biomes);
         let entity_types = data.registries.len("minecraft:entity_type");
+        let mut driver = driver;
+        driver.session.set_entity_type_names(type_names);
         let view_distance = login.view_distance.min(options.render_distance as i32);
         let shared = Arc::new(Shared::new(
             data,
@@ -133,8 +171,8 @@ impl Session {
             view_distance,
             haste_render::default_skin(login.profile.uuid.as_u128()),
         ));
-        if sound {
-            *shared.sound.lock() = open_sounds(regs, &shared.data, &options.sound);
+        if sounds.is_some() {
+            *shared.sound.lock() = sounds;
         }
         let handle = rt.handle().clone();
         let sh = shared.clone();
@@ -275,16 +313,15 @@ impl WorldFeed {
         self.batch = batch;
     }
 
-    /// Copies the interpolated entity instances.
     /// Copies the interpolated entity instances, gives players their default skin and samples
-    /// each entity's light for the renderer. In the third-person perspectives the local
-    /// player's own model is included (the server does not spawn us as an entity, so it is
-    /// built here from the shared view).
+    /// each entity's light for the renderer. The local player's own model is always included
+    /// (the server does not spawn us as an entity, so it is built here from the shared view):
+    /// the GUI's inventory preview needs it in first person too, and the caller tells the
+    /// renderer not to draw it in the world then (`FrameInput::camera_entity`).
     fn entities(
         &mut self,
         shared: &Shared,
         renderer: &mut Renderer,
-        perspective: game::Perspective,
         local: (EntityId, u128),
         partial: f32,
     ) -> &[EntityInstance] {
@@ -301,7 +338,7 @@ impl WorldFeed {
                 }
             }
         }
-        if perspective.draws_player() {
+        {
             let view = *shared.view.lock();
             self.instances
                 .push(game::player_instance(local.0, local.1, &view, partial));
@@ -978,7 +1015,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         last_camera = camera;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         feed.set_first_person(&shared, &mut renderer, perspective);
-        let entities = feed.entities(&shared, &mut renderer, perspective, session.local, partial);
+        let entities = feed.entities(&shared, &mut renderer, session.local, partial);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
         // The HUD, like the window: waiting for the JVM, then one `Ui` for this render thread.
@@ -989,15 +1026,13 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             }
         }
         if let Some(u) = &mut ui {
-            gui = u
-                .frame(
-                    args.width / GUI_SCALE,
-                    args.height / GUI_SCALE,
-                    GUI_SCALE,
-                    (0.0, 0.0),
-                    partial,
-                )
-                .clone();
+            let scale = resolve_gui_scale(
+                u32::from(session.options.gui_scale),
+                args.width,
+                args.height,
+            );
+            let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
+            gui = u.frame(gw, gh, scale, (0.0, 0.0), partial).clone();
         }
         let frame = FrameInput {
             camera,
@@ -1007,6 +1042,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             partial_tick: partial,
             block_target,
             breaking: &breaking,
+            camera_entity: (!perspective.draws_player()).then_some(session.local.0),
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -1208,13 +1244,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             Instant::now(),
         );
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
-        let entities = feed.entities(
-            &shared,
-            &mut renderer,
-            game::Perspective::FirstPerson,
-            session.local,
-            partial,
-        );
+        let entities = feed.entities(&shared, &mut renderer, session.local, partial);
         let block_target = view.block_target;
         let breaking = shared.breaking.lock().clone();
         if ui.is_none() {
@@ -1224,15 +1254,13 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             }
         }
         if let Some(u) = &mut ui {
-            gui = u
-                .frame(
-                    args.width / GUI_SCALE,
-                    args.height / GUI_SCALE,
-                    GUI_SCALE,
-                    input.mouse,
-                    partial,
-                )
-                .clone();
+            let scale = resolve_gui_scale(
+                u32::from(session.options.gui_scale),
+                args.width,
+                args.height,
+            );
+            let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
+            gui = u.frame(gw, gh, scale, input.mouse, partial).clone();
         }
         let frame = FrameInput {
             camera,
@@ -1242,6 +1270,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             partial_tick: partial,
             block_target,
             breaking: &breaking,
+            camera_entity: Some(session.local.0),
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -1532,13 +1561,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         vd = v;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         feed.set_first_person(&shared, &mut renderer, game::Perspective::FirstPerson);
-        let entities = feed.entities(
-            &shared,
-            &mut renderer,
-            game::Perspective::FirstPerson,
-            session.local,
-            partial,
-        );
+        let entities = feed.entities(&shared, &mut renderer, session.local, partial);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
         let frame = FrameInput {
@@ -1549,6 +1572,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             partial_tick: partial,
             block_target,
             breaking: &breaking,
+            camera_entity: Some(session.local.0),
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -1608,13 +1632,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         let feed_start = Instant::now();
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         let feed_ms = feed_start.elapsed().as_secs_f32() * 1000.0;
-        let entities = feed.entities(
-            &shared,
-            &mut renderer,
-            game::Perspective::FirstPerson,
-            session.local,
-            partial_tick,
-        );
+        let entities = feed.entities(&shared, &mut renderer, session.local, partial_tick);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
         let frame = FrameInput {
@@ -1625,6 +1643,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             partial_tick,
             block_target,
             breaking: &breaking,
+            camera_entity: Some(session.local.0),
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -1869,13 +1888,9 @@ impl App {
         let t1 = Instant::now();
         self.feed
             .set_first_person(&self.shared, renderer, self.perspective);
-        let entities = self.feed.entities(
-            &self.shared,
-            renderer,
-            self.perspective,
-            self.local,
-            partial,
-        );
+        let entities = self
+            .feed
+            .entities(&self.shared, renderer, self.local, partial);
         let block_target = self.shared.view.lock().block_target;
         self.breaking.clear();
         self.breaking
@@ -1909,9 +1924,9 @@ impl App {
         }
         if let Some(ui) = &mut self.ui {
             let mouse = self.input.mouse;
-            self.gui = ui
-                .frame(w / GUI_SCALE, h / GUI_SCALE, GUI_SCALE, mouse, partial)
-                .clone();
+            let scale = resolve_gui_scale(u32::from(self.options.gui_scale), w, h);
+            let (gw, gh) = gui_scaled_size(w, h, scale);
+            self.gui = ui.frame(gw, gh, scale, mouse, partial).clone();
         }
         let frame = FrameInput {
             camera,
@@ -1921,6 +1936,7 @@ impl App {
             partial_tick: partial,
             block_target,
             breaking: &self.breaking,
+            camera_entity: (!self.perspective.draws_player()).then_some(self.local.0),
         };
         // Outline boxes of the target and the states of breaking blocks (one short read lock).
         renderer.sample_world(&*self.shared.world.read(), &self.shared.data.shapes, &frame);
@@ -2008,10 +2024,18 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::CursorMoved { position, .. } => {
-                // GUI-scaled pixels: physical size divided by the GUI scale.
-                let s = f64::from(GUI_SCALE);
-                self.input
-                    .mouse_moved(position.x / s, position.y / s, self.ui.as_ref());
+                // GUI-scaled pixels: physical size divided by the GUI scale. The scale is
+                // recomputed from the current framebuffer (the renderer knows the size;
+                // vanilla updates it the same way on every resize: `Minecraft.resizeGui`).
+                if let Some(r) = &self.renderer {
+                    let s = f64::from(resolve_gui_scale(
+                        u32::from(self.options.gui_scale),
+                        r.size().0,
+                        r.size().1,
+                    ));
+                    self.input
+                        .mouse_moved(position.x / s, position.y / s, self.ui.as_ref());
+                }
             }
             WindowEvent::Resized(size) => {
                 if let Some(r) = &mut self.renderer {
@@ -2270,6 +2294,41 @@ mod tests {
         assert_eq!(look_deg_per_pixel(0.0), 0.0096);
         // Max sensitivity: 0.8^3 * 8 * 0.15.
         assert!((look_deg_per_pixel(1.0) - 0.6144).abs() < 1e-6);
+    }
+
+    #[test]
+    fn auto_gui_scale_matches_vanilla_resolutions() {
+        // `Window.calculateScale(0, ...)` at vanilla's default window and common
+        // resolutions: the scale grows while the framebuffer keeps >= 320x240 GUI
+        // pixels. Computed by hand from the vanilla method's conditions.
+        assert_eq!(gui_scale_for(0, 854, 480), 2);
+        assert_eq!(gui_scale_for(0, 1280, 720), 3);
+        assert_eq!(gui_scale_for(0, 1920, 1080), 4);
+        assert_eq!(gui_scale_for(0, 2560, 1440), 6);
+        assert_eq!(gui_scale_for(0, 3840, 2160), 9);
+    }
+
+    #[test]
+    fn fixed_gui_scale_is_honoured_and_clamped() {
+        // A fixed option stops there (vanilla: `calculateScale(maxScale, ...)`); a value
+        // too large for the framebuffer is still bounded by the 320x240 rule.
+        assert_eq!(gui_scale_for(1, 1920, 1080), 1);
+        assert_eq!(gui_scale_for(3, 1920, 1080), 3);
+        assert_eq!(gui_scale_for(4, 854, 480), 2);
+        // The option is clamped to 0..=4 like `Options.sanitized`.
+        assert_eq!(resolve_gui_scale(9, 1920, 1080), 4);
+        assert_eq!(resolve_gui_scale(0, 1920, 1080), 4);
+        // Tiny framebuffers still get scale 1 (the loop stops immediately).
+        assert_eq!(gui_scale_for(0, 320, 240), 1);
+        assert_eq!(gui_scale_for(0, 100, 100), 1);
+    }
+
+    #[test]
+    fn gui_scaled_size_uses_ceiling_division() {
+        // `Window.setGuiScale` ceils, so the GUI covers the whole framebuffer.
+        assert_eq!(gui_scaled_size(854, 480, 2), (427, 240));
+        assert_eq!(gui_scaled_size(853, 479, 2), (427, 240));
+        assert_eq!(gui_scaled_size(1920, 1080, 4), (480, 270));
     }
 
     #[test]

@@ -5,6 +5,7 @@ use haste_core::input::InputState;
 use haste_core::view::{BlockView, CollisionShapes};
 use haste_core::{Aabb, BlockPos, BlockStateId, DVec3};
 
+use crate::block_effects;
 use crate::collision::{collide_with_step, no_collision, supporting_block};
 use crate::{fluids, flying, trig, BlockPhysics, PlayerAttributes, PlayerState, Pose, TickResult};
 
@@ -29,10 +30,13 @@ pub const VERTICAL_DRAG: f32 = 0.98;
 pub const SPRINT_JUMP_BOOST: f32 = 0.2;
 /// Ticks between jumps while jump stays held (wiki "Jumping": half a second delay).
 pub const JUMP_COOLDOWN_TICKS: u8 = 10;
-/// Sneak edge back-off step (assumption, not on a public page; to be settled by traces).
+/// Sneak edge back-off step (vanilla `Player.maybeBackOffFromEdge`: 0.05).
 pub const EDGE_BACKOFF_STEP: f64 = 0.05;
 /// Offset below the feet used to find the block whose friction/jump factor applies (assumption).
 pub const BLOCK_BELOW_OFFSET: f64 = 0.5;
+/// By how much the pose-fit and edge-probe boxes are shrunk (vanilla
+/// `Player.canPlayerFitWithinBlocksAndEntitiesWhen` and `Player.canFallAtLeast`: 1.0E-7).
+pub const POSE_TEST_EPSILON: f64 = 1.0e-7;
 
 /// Movement impulse for this tick: (strafe, forward), already scaled.
 #[derive(Clone, Copy, Debug, Default)]
@@ -67,10 +71,13 @@ pub fn tick(
         }
     }
 
-    // Fluid contact, sneak/sprint flags, pose.
+    // Fluid contact and sneak/sprint flags (vanilla `Entity.baseTick` sets the fluid and
+    // swimming state before `LivingEntity.aiStep` looks at the keys).
     let eyes_in_water = fluids::update_fluid_state(state, attrs, world, blocks);
     state.eyes_in_water = eyes_in_water;
-    update_flags_and_pose(state, input, attrs, eyes_in_water, world, shapes);
+    // Water currents (vanilla Entity.updateFluidInteraction, before the move).
+    block_effects::apply_water_currents(state, attrs, world, blocks);
+    update_flags(state, input, attrs, eyes_in_water, world, shapes);
 
     if state.jump_cooldown > 0 {
         state.jump_cooldown -= 1;
@@ -88,6 +95,8 @@ pub fn tick(
         state.jump_cooldown = 0;
     }
 
+    // The movement uses the pose box from the END of the last tick: vanilla runs
+    // `Player.updatePlayerPose` after `LivingEntity.aiStep`'s travel, inside `Player.tick`.
     let impulse = impulse(state, input, attrs);
 
     if state.flying {
@@ -100,6 +109,13 @@ pub fn tick(
         travel_normal(state, impulse, attrs, world, shapes, blocks);
     }
 
+    // Slime stepOn, honey slide, stuck-in-block multipliers (vanilla applyEffectsFromBlocks).
+    block_effects::apply_end_of_tick_effects(state, attrs, world, shapes, blocks);
+    // Vanilla `Player.tick` ends with `updatePlayerPose`: the new pose's box applies from
+    // the next tick's movement, and the camera picks up its eye height the tick after that
+    // (vanilla `Camera.tick` runs before the player's tick).
+    update_player_pose(state, attrs, world, shapes);
+
     TickResult {
         moved: state.pos != old_pos,
         rotated,
@@ -108,7 +124,10 @@ pub fn tick(
     }
 }
 
-fn update_flags_and_pose(
+/// The input-driven flags for this tick's movement: `sneaking` (raw shift key), the sprint
+/// state and `crouching` (vanilla `LocalPlayer.aiStep` computes its `crouching` field from the
+/// CURRENT box, i.e. the pose the last tick ended with, before the player moves).
+fn update_flags(
     state: &mut PlayerState,
     input: &InputState,
     attrs: &PlayerAttributes,
@@ -118,6 +137,12 @@ fn update_flags_and_pose(
 ) {
     state.sneaking = input.sneak;
     let forward = input.forward && !input.back;
+    // Crouching (vanilla `LocalPlayer.aiStep`): not flying, not swimming, the crouching box
+    // fits, and shift is held or standing does not fit (forced crouch under a low ceiling).
+    state.crouching = !state.flying
+        && !state.swimming
+        && fits_pose(state, attrs, Pose::Crouching, world, shapes)
+        && (state.sneaking || !fits_pose(state, attrs, Pose::Standing, world, shapes));
     // Sprint: needs forward; ends on horizontal collision (wiki "Sprinting": collision at more than
     // 8 degrees ends it; the angle test is not modelled) or when forward is released; releasing
     // the sprint key alone does not end it. Hunger and blindness are the caller's business.
@@ -125,17 +150,56 @@ fn update_flags_and_pose(
         if !forward || state.horizontal_collision {
             state.sprinting = false;
         }
-    } else if input.sprint
-        && forward
-        && state.pose != Pose::Crouching
-        && !state.horizontal_collision
-    {
+    } else if input.sprint && forward && !state.crouching && !state.horizontal_collision {
         // Not restarted while still pushing into a wall (assumption; avoids on/off flapping).
         state.sprinting = true;
     }
     state.swimming =
         state.sprinting && state.in_water && (eyes_in_water || state.swimming) && !state.flying;
+}
 
+/// Whether the box of `pose` at the current position fits (vanilla
+/// `Player.canPlayerFitWithinBlocksAndEntitiesWhen`: the test box is deflated by 1.0E-7).
+fn fits_pose(
+    state: &PlayerState,
+    attrs: &PlayerAttributes,
+    pose: Pose,
+    world: &dyn BlockView,
+    shapes: &dyn CollisionShapes,
+) -> bool {
+    no_collision(
+        &deflate(&Aabb::entity(
+            state.pos,
+            attrs.box_width(),
+            attrs.height_for(pose),
+        )),
+        world,
+        shapes,
+    )
+}
+
+/// Shrinks a box on every side (vanilla `AABB.deflate`).
+fn deflate(aabb: &Aabb) -> Aabb {
+    Aabb {
+        min: aabb.min + DVec3::splat(POSE_TEST_EPSILON),
+        max: aabb.max - DVec3::splat(POSE_TEST_EPSILON),
+    }
+}
+
+/// Vanilla `Player.updatePlayerPose`, run at the end of `Player.tick` (after the movement):
+/// the new pose's box applies from the next tick. When even the swimming box does not fit
+/// (inside a block), the pose is left alone.
+fn update_player_pose(
+    state: &mut PlayerState,
+    attrs: &PlayerAttributes,
+    world: &dyn BlockView,
+    shapes: &dyn CollisionShapes,
+) {
+    let fits = |p: Pose| fits_pose(state, attrs, p, world, shapes);
+    if !fits(Pose::Swimming) {
+        return;
+    }
+    // Vanilla `Player.getDesiredPose` (the physics subset: swimming, crouch, standing).
     let desired = if state.swimming {
         Pose::Swimming
     } else if state.sneaking && !state.flying {
@@ -143,32 +207,22 @@ fn update_flags_and_pose(
     } else {
         Pose::Standing
     };
-    // Keep a smaller pose if the desired one does not fit (e.g. crouching under a 1.5 high ceiling).
-    let fits = |p: Pose| {
-        no_collision(
-            &Aabb::entity(state.pos, attrs.box_width(), attrs.height_for(p)),
-            world,
-            shapes,
-        )
-    };
     state.pose = if fits(desired) {
         desired
-    } else if desired == Pose::Standing && fits(Pose::Crouching) {
+    } else if fits(Pose::Crouching) {
         Pose::Crouching
-    } else if desired != Pose::Swimming && !fits(Pose::Crouching) {
-        Pose::Swimming
     } else {
-        state.pose
+        Pose::Swimming
     };
 }
 
 fn impulse(state: &PlayerState, input: &InputState, attrs: &PlayerAttributes) -> Impulse {
     let mut forward = (input.forward as i32 - input.back as i32) as f32;
     let mut strafe = (input.left as i32 - input.right as i32) as f32;
-    // Slowed while crouching or crawling (swimming pose outside water), not normalised:
-    // wiki "Sneaking": 1.3 m/s straight, 1.8 m/s diagonal.
-    let slow = !state.flying
-        && (state.pose == Pose::Crouching || (state.pose == Pose::Swimming && !state.in_water));
+    // Slowed while crouching or crawling (vanilla `LocalPlayer.isMovingSlowly`:
+    // `isCrouching() || isVisuallyCrawling()`, the latter being the swimming pose outside
+    // water). Wiki "Sneaking": 1.3 m/s straight, 1.8 m/s diagonal.
+    let slow = state.crouching || (state.pose == Pose::Swimming && !state.in_water);
     if slow {
         forward *= attrs.sneaking_speed as f32;
         strafe *= attrs.sneaking_speed as f32;
@@ -210,7 +264,7 @@ fn block_below(state: &PlayerState) -> BlockPos {
 
 /// Block whose friction/jump factor applies: the block half a block below the feet, or, when that
 /// has no collision (standing on an edge), the closest supporting block.
-fn ground_block(
+pub(crate) fn ground_block(
     state: &PlayerState,
     attrs: &PlayerAttributes,
     world: &dyn BlockView,
@@ -284,7 +338,7 @@ fn travel_normal(
     };
     accelerate(state, imp, speed);
     let motion = state.velocity;
-    move_entity(state, attrs, motion, world, shapes);
+    move_entity(state, attrs, motion, world, shapes, blocks);
     apply_speed_factor(state, world, blocks);
     state.velocity.y -= attrs.gravity;
     state.velocity.y *= VERTICAL_DRAG as f64;
@@ -310,15 +364,20 @@ pub(crate) fn apply_speed_factor(
 
 /// Moves by `motion` with sneak edge back-off and step-up, updates position, collision flags,
 /// on-ground, fall distance and zeroes velocity on collided axes. Returns the actual movement.
+///
+/// The edge back-off is vanilla `Player.maybeBackOffFromEdge` (shift held, not flying, not
+/// moving up, `Player.isStayingOnGroundSurface` and `Player.isAboveGround`): the horizontal
+/// motion is shrunk in 0.05 steps until the player would no longer fall.
 pub(crate) fn move_entity(
     state: &mut PlayerState,
     attrs: &PlayerAttributes,
     motion: DVec3,
     world: &dyn BlockView,
     shapes: &dyn CollisionShapes,
+    blocks: &dyn BlockPhysics,
 ) -> DVec3 {
     let aabb = state.aabb(attrs);
-    let mut motion = motion;
+    let mut motion = block_effects::consume_stuck_multiplier(state, motion);
     if state.sneaking
         && !state.flying
         && motion.y <= 0.0
@@ -348,7 +407,17 @@ pub(crate) fn move_entity(
         state.velocity.z = 0.0;
     }
     if state.vertical_collision {
-        state.velocity.y = 0.0;
+        // Slime bounce (Entity.restituteMovementAfterCollisions) or zero.
+        let ground = ground_block(state, attrs, world, shapes);
+        state.velocity.y = block_effects::vertical_collision_velocity(
+            state,
+            blocks,
+            ground,
+            motion.y,
+            moved.y,
+            attrs.gravity,
+            VERTICAL_DRAG as f64,
+        );
     }
 
     if state.on_ground || state.flying || state.in_water {
@@ -359,8 +428,9 @@ pub(crate) fn move_entity(
     moved
 }
 
-/// On ground, or less than a step above ground (wiki "Sneaking": edge protection works "up to 0.6
-/// blocks above the ground" since 1.16.2).
+/// Vanilla `Player.isAboveGround`: on the ground, or fallen less than a step and unable to fall
+/// the rest of it (wiki "Sneaking": edge protection works "up to 0.6 blocks above the ground"
+/// since 1.16.2).
 fn above_ground(
     state: &PlayerState,
     aabb: &Aabb,
@@ -370,27 +440,47 @@ fn above_ground(
 ) -> bool {
     state.on_ground
         || ((state.fall_distance as f64) < attrs.step_height
-            && !no_collision(
-                &aabb.offset(DVec3::new(
-                    0.0,
-                    state.fall_distance as f64 - attrs.step_height,
-                    0.0,
-                )),
+            && !can_fall_at_least(
+                aabb,
+                0.0,
+                0.0,
+                attrs.step_height - f64::from(state.fall_distance),
                 world,
                 shapes,
             ))
 }
 
-fn toward_zero(v: f64) -> f64 {
-    if v.abs() <= EDGE_BACKOFF_STEP {
-        0.0
-    } else {
-        v - EDGE_BACKOFF_STEP * v.signum()
-    }
+/// Vanilla `Player.canFallAtLeast`: the XZ footprint moved by `(dx, dz)` and shrunk by 1.0E-7,
+/// between a hair below the feet and `height` below them, hits nothing the player can stand on.
+fn can_fall_at_least(
+    aabb: &Aabb,
+    dx: f64,
+    dz: f64,
+    height: f64,
+    world: &dyn BlockView,
+    shapes: &dyn CollisionShapes,
+) -> bool {
+    no_collision(
+        &Aabb {
+            min: DVec3::new(
+                aabb.min.x + POSE_TEST_EPSILON + dx,
+                aabb.min.y - height - POSE_TEST_EPSILON,
+                aabb.min.z + POSE_TEST_EPSILON + dz,
+            ),
+            max: DVec3::new(
+                aabb.max.x - POSE_TEST_EPSILON + dx,
+                aabb.min.y,
+                aabb.max.z - POSE_TEST_EPSILON + dz,
+            ),
+        },
+        world,
+        shapes,
+    )
 }
 
-/// Shrinks horizontal motion in `EDGE_BACKOFF_STEP` steps until the box, moved and lowered by the
-/// step height, still has something under it: X alone, Z alone, then both together.
+/// Shrinks horizontal motion in `EDGE_BACKOFF_STEP` steps (vanilla
+/// `Player.maybeBackOffFromEdge`): X alone, Z alone, then both together, until the player can no
+/// longer fall at least the step height below.
 fn back_off_from_edge(
     aabb: &Aabb,
     motion: DVec3,
@@ -399,17 +489,34 @@ fn back_off_from_edge(
     shapes: &dyn CollisionShapes,
 ) -> DVec3 {
     let (mut x, mut z) = (motion.x, motion.z);
-    let free =
-        |dx: f64, dz: f64| no_collision(&aabb.offset(DVec3::new(dx, -step, dz)), world, shapes);
-    while x != 0.0 && free(x, 0.0) {
-        x = toward_zero(x);
+    let step_x = 0.05 * x.signum();
+    let step_z = 0.05 * z.signum();
+    let falls = |dx: f64, dz: f64| can_fall_at_least(aabb, dx, dz, step, world, shapes);
+    while x != 0.0 && falls(x, 0.0) {
+        if x.abs() <= EDGE_BACKOFF_STEP {
+            x = 0.0;
+            break;
+        }
+        x -= step_x;
     }
-    while z != 0.0 && free(0.0, z) {
-        z = toward_zero(z);
+    while z != 0.0 && falls(0.0, z) {
+        if z.abs() <= EDGE_BACKOFF_STEP {
+            z = 0.0;
+            break;
+        }
+        z -= step_z;
     }
-    while x != 0.0 && z != 0.0 && free(x, z) {
-        x = toward_zero(x);
-        z = toward_zero(z);
+    while x != 0.0 && z != 0.0 && falls(x, z) {
+        if x.abs() <= EDGE_BACKOFF_STEP {
+            x = 0.0;
+        } else {
+            x -= step_x;
+        }
+        if z.abs() <= EDGE_BACKOFF_STEP {
+            z = 0.0;
+        } else {
+            z -= step_z;
+        }
     }
     DVec3::new(x, motion.y, z)
 }
