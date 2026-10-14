@@ -42,6 +42,8 @@ public final class Proxies {
     public static net.minecraft.client.tutorial.Tutorial tutorial;
     public static net.minecraft.client.multiplayer.chat.ChatListener chatListener;
     public static net.minecraft.world.entity.ai.attributes.AttributeMap attributes;
+    /** The server's advancements (real vanilla Java over the forwarded packets). */
+    public static net.minecraft.client.multiplayer.ClientAdvancements advancements;
 
     static void create() {
         minecraft = make(Minecraft.class);
@@ -131,6 +133,12 @@ public final class Proxies {
         hud = new net.minecraft.client.gui.Hud(minecraft);
         set(gui, "hud", net.minecraft.client.gui.Hud.class, hud);
         chatListener = new net.minecraft.client.multiplayer.chat.ChatListener(minecraft);
+        // the server's advancements; telemetry is disabled (Haste sends none), like vanilla with
+        // telemetry off: only the toast path would use it
+        advancements = new net.minecraft.client.multiplayer.ClientAdvancements(minecraft,
+            new net.minecraft.client.telemetry.WorldSessionTelemetryManager(
+                net.minecraft.client.telemetry.TelemetryEventSender.DISABLED, false, null, null,
+                java.util.UUID.randomUUID()));
         // the player's own menu is real vanilla Java over the real Inventory
         var menu = new net.minecraft.world.inventory.InventoryMenu(inventory, true, player);
         set(player, "inventoryMenu", net.minecraft.world.inventory.InventoryMenu.class, menu);

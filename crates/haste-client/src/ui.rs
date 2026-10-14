@@ -89,6 +89,8 @@ const FORWARDED: &[&str] = &[
     "minecraft:set_player_team",
     "minecraft:commands",
     "minecraft:command_suggestions",
+    "minecraft:update_advancements",
+    "minecraft:select_advancements_tab",
     "minecraft:open_screen",
     "minecraft:container_set_content",
     "minecraft:container_set_slot",
@@ -1154,6 +1156,58 @@ mod tests {
         let unimpl = c.ui.host.unimplemented().unwrap();
         eprintln!("Unimplemented: {unimpl:#?}");
         assert_no_refusals(&c.ui.host);
+        c.disconnect();
+    }
+
+    /// The pause menu's Advancements screen: the server's update_advancements packets feed
+    /// vanilla's ClientAdvancements (its tree and progress), the screen opens with the server's
+    /// tabs (a vanilla server sends at least the "Minecraft" story root) and asks the server for
+    /// the selected tab (seen_advancements).
+    #[test]
+    #[ignore = "needs cache/ and a test server (HASTE_TEST_SERVER, default 127.0.0.1:25614) where 'haste' is an operator; run with --test-threads=1"]
+    fn advancements_screen() {
+        let mut c = TestClient::join();
+        c.spawn();
+        c.run(40);
+        assert!(
+            c.received.contains(&"minecraft:update_advancements"),
+            "no update_advancements from the server: {:?}",
+            c.received
+        );
+        c.press(keys::ESCAPE);
+        c.click("Advancements");
+        assert_eq!(
+            c.ui.gui().screen_class().as_deref(),
+            Some("net.minecraft.client.gui.screens.advancements.AdvancementsScreen"),
+            "{:?}",
+            c.ui.gui().take_last_error()
+        );
+        let f = c.frame((0.0, 0.0));
+        let t = texts(&f);
+        // the vanilla server's story root: the "Minecraft" tab title and the window's title
+        assert!(
+            t.iter().any(|x| x == "Advancements"),
+            "missing title: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x == "Minecraft"),
+            "missing the story tab: {t:?}"
+        );
+        c.press(keys::ESCAPE);
+        c.run(5);
+        assert!(!c.ui.screen_open());
+        // the screen told the server it closed the tab (vanilla sends seen_advancements)
+        assert!(
+            c.sent
+                .iter()
+                .any(|p| matches!(p, ServerboundPlay::SeenAdvancements(_))),
+            "no seen_advancements: {:?}",
+            c.sent
+        );
+        let unimpl = c.ui.host.unimplemented().unwrap();
+        eprintln!("Unimplemented: {unimpl:#?}");
+        assert_no_refusals(&c.ui.host);
+        assert!(c.kicked.is_none(), "kicked: {:?}", c.kicked);
         c.disconnect();
     }
 

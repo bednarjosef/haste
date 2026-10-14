@@ -57,6 +57,7 @@ pub const ALLOW_CLASSES: &[&str] = &[
     "net/minecraft/client/multiplayer/PlayerInfo",
     "net/minecraft/client/multiplayer/SessionSearchTrees",
     "net/minecraft/client/multiplayer/ClientLevel$ClientLevelData",
+    "net/minecraft/client/multiplayer/ClientAdvancements",
     "net/minecraft/client/multiplayer/CommonListenerCookie",
     "net/minecraft/client/StringSplitter",
     "net/minecraft/client/InputType",

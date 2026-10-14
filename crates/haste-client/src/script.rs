@@ -311,6 +311,8 @@ pub enum Step {
     MouseMove(i32, i32),
     /// Click a button at GUI coordinates.
     Click(MouseButton, i32, i32),
+    /// Click the button whose label is `text` (resolved against the current frame).
+    ClickText(String),
     /// Press and hold a mouse button (attack/use while a screen is closed).
     MouseDown(MouseButton),
     /// Release a held mouse button.
@@ -331,6 +333,8 @@ pub enum Action {
     Text(String),
     MouseMove(i32, i32),
     Click(MouseButton, i32, i32),
+    /// Click the widget labelled `text` in the current frame (a missing label fails the run).
+    ClickText(String),
     MouseDown(MouseButton),
     MouseUp(MouseButton),
     Scroll(i32),
@@ -454,6 +458,12 @@ pub fn parse(text: &str) -> Result<Vec<Step>, ScriptError> {
                 Step::Look(parse_f32(yaw, line)?, parse_f32(pitch, line)?)
             }
             "screenshot" => Step::Screenshot(first_token(rest, "screenshot", line)?.to_owned()),
+            "click_text" => {
+                if rest.is_empty() {
+                    return Err(missing("click_text", line));
+                }
+                Step::ClickText(rest.to_owned())
+            }
             _ => {
                 return Err(ScriptError::UnknownCommand {
                     command: command.to_owned(),
@@ -634,6 +644,10 @@ impl Runner {
                             self.advance();
                             return vec![Action::Click(button, x, y)];
                         }
+                        Step::ClickText(label) => {
+                            self.advance();
+                            return vec![Action::ClickText(label)];
+                        }
                         Step::MouseDown(button) => {
                             self.advance();
                             return vec![Action::MouseDown(button)];
@@ -684,6 +698,7 @@ mod tests {
             "type hello world",
             "mouse 160 90",
             "click right 10 20",
+            "click_text Statistics",
             "mouse_down left",
             "mouse_up left",
             "scroll -1",
@@ -706,6 +721,7 @@ mod tests {
                 Step::Text("hello world".to_owned()),
                 Step::MouseMove(160, 90),
                 Step::Click(MouseButton::Right, 10, 20),
+                Step::ClickText("Statistics".to_owned()),
                 Step::MouseDown(MouseButton::Left),
                 Step::MouseUp(MouseButton::Left),
                 Step::Scroll(-1),
@@ -713,6 +729,17 @@ mod tests {
                 Step::Screenshot("name1".to_owned()),
             ]
         );
+    }
+
+    #[test]
+    fn click_text_takes_the_rest_of_the_line() {
+        let steps = parse("click_text World Options...").unwrap();
+        assert_eq!(steps, vec![Step::ClickText("World Options...".to_owned())]);
+        // A label with two leading spaces still trims; an empty label is an error
+        assert!(parse("click_text  ")
+            .unwrap_err()
+            .to_string()
+            .contains("line 1"));
     }
 
     #[test]

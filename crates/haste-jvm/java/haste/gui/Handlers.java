@@ -241,6 +241,18 @@ public final class Handlers {
         Proxies.player.getEntityData().assignValues(p.packedItems());
     }
 
+    // ---- advancements ----
+
+    /** The server's advancement tree and progress, like ClientPacketListener.handleUpdateAdvancementsPacket. */
+    public static void handleUpdateAdvancementsPacket(ClientPacketListener c, ClientboundUpdateAdvancementsPacket p) {
+        Proxies.advancements.update(p);
+    }
+
+    /** The server picked the tab to show (login and world change). */
+    public static void handleSelectAdvancementsTab(ClientPacketListener c, ClientboundSelectAdvancementsTabPacket p) {
+        Proxies.advancements.setSelectedTab(p.getTab() == null ? null : Proxies.advancements.get(p.getTab()), false);
+    }
+
     // ---- commands ----
     public static void handleCommands(ClientPacketListener c, ClientboundCommandsPacket p) {
         var ctx = net.minecraft.commands.CommandBuildContext.simple(Registries.access(), LevelImpl.enabledFeatures(Proxies.level));

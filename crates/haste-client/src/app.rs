@@ -1605,6 +1605,32 @@ fn log_script_frame(frame: &GuiFrame, name: &str) {
     );
 }
 
+/// Where a text label is drawn, in absolute GUI pixels (translations applied): the point to click
+/// for `click_text` (inside the widget the label belongs to). `None` when the frame does not draw
+/// the label.
+fn text_pos(f: &GuiFrame, want: &str) -> Option<(i32, i32)> {
+    let mut stack: Vec<(f32, f32)> = vec![(0.0, 0.0)];
+    for c in &f.commands {
+        match c {
+            GuiCommand::TranslatePush { dx, dy, .. } => {
+                let (x, y) = *stack.last().unwrap();
+                stack.push((x + dx, y + dy));
+            }
+            GuiCommand::TranslatePop => {
+                stack.pop();
+            }
+            GuiCommand::Text { text, x, y, .. } | GuiCommand::StyledText { text, x, y, .. }
+                if text == want =>
+            {
+                let (dx, dy) = *stack.last().unwrap();
+                return Some((x + dx as i32, y + dy as i32));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// `--script FILE`: join like `--screenshot`, then drive the parsed script's actions every
 /// game tick (20 Hz) through the same input routing the window uses (`InputRouter`: the UI
 /// first, then the game), rendering every frame offscreen. `screenshot NAME` actions save
@@ -1703,6 +1729,23 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                         // A click is a press and a release on the same tick.
                         input.mouse_button(b, true, x, y, ui.as_ref());
                         input.mouse_button(b, false, x, y, ui.as_ref());
+                    }
+                    script::Action::ClickText(label) => {
+                        // The label's position comes from the last rendered frame (its layout is
+                        // stable while the screen is open); a click just inside the label hits the
+                        // widget it belongs to.
+                        match text_pos(&gui, &label).map(|(x, y)| (x + 1, y + 1)) {
+                            Some((x, y)) => {
+                                let (x, y) = (f64::from(x), f64::from(y));
+                                input.mouse_moved(x, y, ui.as_ref());
+                                input.mouse_button(1, true, x, y, ui.as_ref());
+                                input.mouse_button(1, false, x, y, ui.as_ref());
+                            }
+                            None => {
+                                last_err = Some(format!("click_text: no {label:?} in the frame"));
+                                break 'run;
+                            }
+                        }
                     }
                     script::Action::MouseDown(button) => {
                         let (x, y) = input.mouse;

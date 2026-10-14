@@ -71,6 +71,9 @@ public final class ConnectionImpl {
         return Handlers.commands;
     }
 
+    /** The server's advancements (real vanilla Java, fed by the update_advancements packets). */
+    public static net.minecraft.client.multiplayer.ClientAdvancements getAdvancements(ClientPacketListener c) { return Proxies.advancements; }
+
     /** The scoreboard is the client's own (scoreboard packets, see {@link Handlers}). */
     public static net.minecraft.world.scores.Scoreboard scoreboard(ClientPacketListener c) { return Handlers.SCOREBOARD; }
 
