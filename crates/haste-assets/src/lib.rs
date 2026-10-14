@@ -25,7 +25,7 @@ pub use bake::{BakedBlockModels, BlocksJsonStates, RenderLayer};
 pub use font::{
     for_each_formatted, BitmapFont, Glyph, GlyphKind, HexGlyph, TextFormat, LEGACY_COLORS,
 };
-pub use item::{ItemGeometry, ItemModel, ItemModelPart, PartTransformation};
+pub use item::{GeneratedLayer, ItemGeometry, ItemModel, ItemModelPart, PartTransformation};
 pub use model::{BakedQuad, Direction, DisplayTransform, ModelRef};
 pub use multipart::{BlockStateDefinition, MultipartCase, MultipartCondition, VariantEntry};
 pub use particle::{ParticleAtlas, ParticleDefinition};
