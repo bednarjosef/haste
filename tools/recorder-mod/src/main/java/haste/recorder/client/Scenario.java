@@ -72,7 +72,7 @@ public final class Scenario {
             String rest = line.substring(op.length()).strip();
             String[] args = rest.isEmpty() ? new String[0] : rest.split("\\s+");
             switch (op) {
-                case "wait", "wait_world", "cmd", "look", "hud", "screen", "chat", "screenshot",
+                case "wait", "fps", "wait_world", "cmd", "look", "hud", "screen", "chat", "screenshot",
                      "record", "slot", "quit", "log", "dump_models", "dump_block_sounds" -> {}
                 default -> throw new IOException(file + ":" + n + ": unknown step '" + op + "'");
             }
@@ -144,6 +144,15 @@ public final class Scenario {
             }
             case "wait" -> {
                 return stepTicks + 1 >= Integer.parseInt(a[0]);
+            }
+            case "fps" -> {
+                // Logs the game's own FPS counter once a second for <seconds> seconds (a quick
+                // performance reference for Haste's numbers; the camera stays where it is).
+                if (stepTicks % 20 == 19) {
+                    RecorderIO.LOGGER.info("haste-recorder: fps {} framebuffer {}x{}", mc.getFps(),
+                        mc.getWindow().getWidth(), mc.getWindow().getHeight());
+                }
+                return stepTicks + 1 >= Integer.parseInt(a[0]) * 20;
             }
             case "wait_world" -> {
                 // Ready = no screen, the player's own chunk is loaded, every visible section is
