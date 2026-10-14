@@ -226,10 +226,9 @@ impl EntitySink for EntityStore {
             .map(|e| haste_core::Aabb::entity(e.pos, e.dimensions.0 as f64, e.dimensions.1 as f64))
     }
     fn clear(&mut self) {
-        // EntityStore has no clear(); a fresh store re-reads the (small, optional) dimensions
-        // oracle. The tab list (`player_info`) is lost with it, which vanilla keeps across a
-        // respawn: requested `EntityStore::clear()` that keeps players.
-        *self = new_entity_store(0);
+        // Keeps the dimensions oracle, player info and painting variants (vanilla keeps the tab
+        // list across a respawn; the registries are not resent on reconfigure).
+        EntityStore::clear_entities(self);
     }
     fn tick(&mut self) {
         EntityStore::tick(self)
@@ -259,6 +258,40 @@ pub fn entity_type_names(regs: &SyncedRegistries, data: &GameData) -> Vec<Identi
                 .cloned()
         })
         .collect()
+}
+
+/// The synced `minecraft:painting_variant` registry (id -> width/height/asset) for the
+/// `PaintingRenderer`: the server sends every variant's data in `registry_data`
+/// (`RegistryDataLoader.SYNCHRONIZED_REGISTRIES`), so paintings get their size and sprite
+/// without a hard-coded table. Empty when the server sent none (unknown -> back texture).
+pub fn painting_variants(regs: &SyncedRegistries) -> HashMap<u32, haste_entity::PaintingVariant> {
+    let name = Identifier::minecraft("painting_variant");
+    let mut out = HashMap::new();
+    if let Some(entries) = regs.entries(&name) {
+        for i in 0..entries.len() {
+            let Some(nbt) = regs.entry_nbt(&name, i) else {
+                continue;
+            };
+            let (Some(width), Some(height), Some(asset)) = (
+                nbt.get_int("width"),
+                nbt.get_int("height"),
+                nbt.get_string("asset_id"),
+            ) else {
+                continue;
+            };
+            if let Ok(asset) = Identifier::parse(asset) {
+                out.insert(
+                    i as u32,
+                    haste_entity::PaintingVariant {
+                        width: width.clamp(1, 16) as u8,
+                        height: height.clamp(1, 16) as u8,
+                        asset,
+                    },
+                );
+            }
+        }
+    }
+    out
 }
 
 /// Loads the game data (block states, registries, shapes) once for the whole client.
