@@ -181,6 +181,7 @@ impl App {
             block_target: None,
             breaking: &[],
             camera_entity: None,
+            spin: None,
         };
         let stats = renderer.render(&frame).expect("render");
         let dt = self.last_frame.elapsed().as_secs_f32() * 1000.0;

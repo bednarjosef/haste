@@ -339,7 +339,7 @@ impl WorldFeed {
             }
         }
         {
-            let view = *shared.view.lock();
+            let view = shared.view.lock().clone();
             self.instances
                 .push(game::player_instance(local.0, local.1, &view, partial));
         }
@@ -395,7 +395,7 @@ fn frame_view(
     fov_deg: f32,
     now: Instant,
 ) -> (Camera, SkyState, f32, i32, u64) {
-    let view = *shared.view.lock();
+    let view = shared.view.lock().clone();
     let partial = game::partial_tick(view.tick_at, now);
     let eye = game::interpolate(view.prev_eye, view.eye, partial);
     let look = (
@@ -1003,7 +1003,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             Instant::now(),
         );
         if let Some(pos) = want_pos {
-            let view = *shared.view.lock();
+            let view = shared.view.lock().clone();
             let eye = pos + DVec3::new(0.0, view.eye_height, 0.0);
             camera.pos = if perspective.draws_player() {
                 let (world, shapes) = (shared.world.read(), &shared.data.shapes);
@@ -1034,6 +1034,21 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
             gui = u.frame(gw, gh, scale, (0.0, 0.0), partial).clone();
         }
+        // The screen effects around the HUD frame, like the window draws them.
+        let spin = {
+            let view = shared.view.lock().clone();
+            crate::screen_effects::Frame {
+                width: gui.width,
+                height: gui.height,
+                first_person: !perspective.draws_player(),
+                effects: &view.screen,
+                partial_tick: partial,
+                look: (camera.yaw, camera.pitch),
+                scope_scale: 1.125,
+            }
+            .append_to(&mut gui.commands);
+            view.screen.spin_warp(partial)
+        };
         let frame = FrameInput {
             camera,
             entities,
@@ -1043,6 +1058,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             block_target,
             breaking: &breaking,
             camera_entity: (!perspective.draws_player()).then_some(session.local.0),
+            spin,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -1056,7 +1072,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             );
         }
         if let Some(pos) = want_pos {
-            let view = *shared.view.lock();
+            let view = shared.view.lock().clone();
             let reached = placed && (view.feet - pos).length() <= 0.5;
             if !reached {
                 if Instant::now() > deadline {
@@ -1096,7 +1112,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         .save(file)
         .with_context(|| format!("saving {}", file.display()))?;
     let c = last_camera;
-    let view = *shared.view.lock();
+    let view = shared.view.lock().clone();
     let entities = feed.instances.len();
     println!(
         "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} entity instances (perspective {}, local player {}), target {:?}",
@@ -1134,6 +1150,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("reading script {}", file.display()))?;
     let steps = script::parse(&text).map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut runner = script::Runner::new(steps);
+    let perspective = game::Perspective::parse(&args.perspective)?;
     let session = Session::join(args, false)?;
     let shared = session.shared.clone();
     let mut assets = open_assets()?;
@@ -1162,7 +1179,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     'run: loop {
         // The look the player is rendered with: the input layer's (the script's `look`
         // actions write it) plus the server's rotation offset, like the window.
-        let mut view = *shared.view.lock();
+        let mut view = shared.view.lock().clone();
         let look = (input.yaw, input.pitch);
         // One game tick's actions whenever it is time (`wait_until settled` uses the same
         // quiet test as the screenshot mode, plus the HUD's JVM being up or known-failed: a
@@ -1225,7 +1242,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             }
             // The actions may have changed what the game thread sees this tick.
             input.sample(&shared);
-            view = *shared.view.lock();
+            view = shared.view.lock().clone();
         }
         if shared.is_closed() {
             anyhow::bail!(
@@ -1235,8 +1252,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         }
         // Render the frame like the screenshot mode does (the HUD and any open screen via
         // `Ui::frame`), so `screenshot` actions capture exactly what the window would show.
-        let (camera, sky, partial, vd, animation_tick) = frame_view(
-            &shared,
+        let (camera, sky, partial, vd, animation_tick) = frame_view(            &shared,
             game::Perspective::FirstPerson,
             look.0,
             look.1,
@@ -1262,6 +1278,21 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
             gui = u.frame(gw, gh, scale, input.mouse, partial).clone();
         }
+        // The screen effects around the HUD frame, like the window draws them.
+        let spin = {
+            let screen = view.screen.clone();
+            crate::screen_effects::Frame {
+                width: gui.width,
+                height: gui.height,
+                first_person: !perspective.draws_player(),
+                effects: &screen,
+                partial_tick: partial,
+                look,
+                scope_scale: 1.125,
+            }
+            .append_to(&mut gui.commands);
+            screen.spin_warp(partial)
+        };
         let frame = FrameInput {
             camera,
             entities,
@@ -1271,6 +1302,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             block_target,
             breaking: &breaking,
             camera_entity: Some(session.local.0),
+            spin,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -1573,6 +1605,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             block_target,
             breaking: &breaking,
             camera_entity: Some(session.local.0),
+            spin: None,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -1644,6 +1677,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             block_target,
             breaking: &breaking,
             camera_entity: Some(session.local.0),
+            spin: None,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -1732,6 +1766,8 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         error: None,
         seconds: args.window_seconds,
         screenshot: false,
+        scope: 0.5,
+        frame_at: Instant::now(),
         started: Instant::now(),
     };
     event_loop.run_app(&mut app)?;
@@ -1780,6 +1816,10 @@ struct App {
     /// F2 pressed: the next frame is captured for a screenshot; once its async readback
     /// lands (a few frames later), `take_capture` hands it to a save thread.
     screenshot: bool,
+    /// The spyglass scope's growth (`Hud.scopeScale`) and the time of the previous frame, which
+    /// its per-frame easing is measured against.
+    scope: f32,
+    frame_at: Instant,
     started: Instant,
 }
 
@@ -1864,6 +1904,21 @@ impl App {
         look_deg_per_pixel(self.options.mouse_sensitivity)
     }
 
+    /// The spyglass scope's growth for this frame, as vanilla's `Hud.extractCameraOverlays`
+    /// moves it: every frame the scale eases towards 1.125 by half the frame's ticks
+    /// (`Mth.lerp(0.5 * gameTimeDeltaTicks, scopeScale, 1.125)`), and while we are not scoping
+    /// (in first person) it is reset to 0.5.
+    fn scope_scale(&mut self, scoping: bool, at: Instant) -> f32 {
+        let delta_ticks = 20.0 * at.saturating_duration_since(self.frame_at).as_secs_f32();
+        self.frame_at = at;
+        self.scope = if scoping && !self.perspective.draws_player() {
+            crate::screen_effects::lerp(0.5 * delta_ticks, self.scope, 1.125)
+        } else {
+            0.5
+        };
+        self.scope
+    }
+
     fn draw(&mut self, event_loop: &ActiveEventLoop) {
         if self.renderer.is_none() {
             return;
@@ -1873,15 +1928,21 @@ impl App {
         // and "Disconnect" ends the run.
         self.sync_grab();
         self.take_disconnect(event_loop);
-        let renderer = self.renderer.as_mut().expect("checked above");
         let t0 = Instant::now();
+        // The spyglass scope's per-frame easing, before the renderer borrows `self` for the
+        // rest of the frame (it reads one flag of the view under a short lock).
+        let scope = {
+            let scoping = self.shared.view.lock().screen.scoping;
+            self.scope_scale(scoping, t0)
+        };
+        let renderer = self.renderer.as_mut().expect("checked above");
         let (camera, sky, partial, vd, animation_tick) = frame_view(
             &self.shared,
             self.perspective,
             self.input.yaw,
             self.input.pitch,
             self.options.fov as f32,
-            Instant::now(),
+            t0,
         );
         self.feed
             .feed(&self.shared, renderer, camera_section(&camera), vd);
@@ -1906,10 +1967,10 @@ impl App {
             }
         }
         let (w, h) = renderer.size();
+        let view = self.shared.view.lock().clone();
         if let Some(ui) = &self.ui {
             // F3's numbers and the water overlay's flag, every frame (cheap: short mutexes,
             // no allocation). The section counts are the previous frame's.
-            let view = *self.shared.view.lock();
             let stats = self.frame_stats;
             ui.set_debug(haste_jvm::DebugInfo {
                 fps: self.fps.fps as i32,
@@ -1928,6 +1989,24 @@ impl App {
             let (gw, gh) = gui_scaled_size(w, h, scale);
             self.gui = ui.frame(gw, gh, scale, mouse, partial).clone();
         }
+        // The screen effects around the HUD frame (vanilla's `ScreenEffectRenderer.submit`'s
+        // level-pass overlays and `Hud.extractCameraOverlays`'s own).
+        {
+            let frame = crate::screen_effects::Frame {
+                width: self.gui.width,
+                height: self.gui.height,
+                first_person: !self.perspective.draws_player(),
+                effects: &view.screen,
+                partial_tick: partial,
+                // The look the frame's camera uses, which the water overlay scrolls by.
+                look: (
+                    self.input.yaw + view.look_offset.0,
+                    (self.input.pitch + view.look_offset.1).clamp(-90.0, 90.0),
+                ),
+                scope_scale: scope,
+            };
+            frame.append_to(&mut self.gui.commands);
+        }
         let frame = FrameInput {
             camera,
             entities,
@@ -1937,6 +2016,7 @@ impl App {
             block_target,
             breaking: &self.breaking,
             camera_entity: (!self.perspective.draws_player()).then_some(self.local.0),
+            spin: view.screen.spin_warp(partial),
         };
         // Outline boxes of the target and the states of breaking blocks (one short read lock).
         renderer.sample_world(&*self.shared.world.read(), &self.shared.data.shapes, &frame);

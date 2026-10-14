@@ -212,7 +212,7 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
 }
 
 /// What the render thread needs each frame, copied out under a short lock.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ViewState {
     /// Player eye position at the start of the last tick (`LocalPlayer::camera(0.0)`).
     pub prev_eye: DVec3,
@@ -257,6 +257,10 @@ pub struct ViewState {
     /// Body pose metadata for the own model (`None`: the physics pose only knows standing,
     /// crouching and swimming).
     pub pose: Option<haste_core::entity::Pose>,
+    /// This tick's screen effects (`screen_effects`): the block the camera is inside, the
+    /// worn head item's overlay, on fire, freeze ticks, portal and nausea, the light at the
+    /// eye and whether we are scoping a spyglass.
+    pub screen: crate::screen_effects::ViewEffects,
 }
 
 /// The per-tick part of the first-person hand: the held item, the light at the eye and this
@@ -424,6 +428,7 @@ impl Shared {
                 look: (0.0, 0.0),
                 prev_feet: DVec3::ZERO,
                 pose: None,
+                screen: crate::screen_effects::ViewEffects::default(),
             }),
             breaking: Mutex::new(Vec::new()),
             input: Mutex::new(SharedInput::default()),
@@ -706,6 +711,26 @@ fn tick_once(
         // Write lock: the player's breaking predicts block changes into the world.
         let mut world = shared.world.write();
         let mut entities = shared.entities.write();
+        // The world probe for the screen effects (vanilla's
+        // `NetherPortalBlock.entityInside` and `LevelExtractor.getViewBlockingState`): the
+        // portal under our feet feeds the portal effect's tick below, and the block the
+        // camera is inside plus the eye's light go into this tick's view.
+        {
+            let p = &driver.session.player;
+            let probe = crate::screen_effects::Probe {
+                world: &*world,
+                shapes: &shared.data.shapes,
+                blocks: &shared.data.blocks,
+                tags: p.int.block_tags(),
+                eye: p.camera(1.0).0,
+                feet: p.state.pos,
+                bb_width: p.attrs.box_width(),
+                scale: f64::from(p.attrs.scale),
+            }
+            .sample();
+            driver.session.screen.set_inside_portal(probe.in_portal);
+            driver.session.screen_probe = probe;
+        }
         driver.end_tick(&input, &mut *world, &mut *entities)?;
         let mut dirty = world.take_dirty_sections();
         if !dirty.is_empty() {
@@ -792,10 +817,36 @@ fn tick_once(
     view.time_of_day = s.time_of_day.unwrap_or(6000);
     view.has_sky = s.dimension.has_skylight;
     view.block_target = s.player.target();
-    view.eye_in_water = s.player.state.eyes_in_water;
     view.held_slot = s.player.held_slot;
     view.first_person = first_person;
     view.hurt_tilt = s.hurt_tilt_degrees();
+    // The screen effects, from this tick's world probe (the block the camera is inside, the
+    // eye's light), the own entity's flags and freeze ticks, the worn head item and the active
+    // effects. The eyes being in water comes from the physics' fluid at the eye position.
+    let head_item = s.head_item().and_then(|i| {
+        shared
+            .data
+            .registries
+            .name("minecraft:item", i)
+            .cloned()
+            .and_then(|name| crate::screen_effects::camera_overlay(&name))
+    });
+    let screen = s.screen_effects();
+    let eye_in_water = s.player.state.eyes_in_water;
+    view.eye_in_water = eye_in_water;
+    view.screen = crate::screen_effects::ViewEffects {
+        block_overlay: s.screen_probe.block_overlay.clone(),
+        eye_in_water,
+        eye_light: s.screen_probe.eye_light,
+        on_fire: s.own_flags().on_fire,
+        camera_overlay: head_item,
+        frozen_ticks: s.own_flags().frozen_ticks,
+        scoping: s.player.scoping(&shared.data),
+        portal: (screen.prev_portal(), screen.portal()),
+        nausea: s.player.int.nausea_blend_pair(),
+        spinning_time: screen.spinning_time(),
+        spinning_speed: screen.spinning_speed(),
+    };
     Ok(())
 }
 

@@ -746,6 +746,9 @@ impl LocalPlayer {
         self.prev_eye = self.eye_height();
         self.last_input_look = (input.yaw, input.pitch);
         self.flush_pending_accept(out);
+        // The effects' tick, in vanilla's `LivingEntity.baseTick` order (before the position
+        // check below): their durations and blend states drive the screen effects.
+        self.int.tick_effects();
         if !(self.has_position && self.loaded) {
             return;
         }

@@ -34,6 +34,10 @@ use crate::player::{LocalPlayer, VehiclePose};
 
 /// Hurt-tilt camera roll duration in ticks (vanilla's `hurtTime` runs to 10).
 pub const HURT_TILT_TICKS: u32 = 10;
+/// The head equipment slot of `set_equipment` (`EquipmentSlot.values()`: 0 main hand, 1 off
+/// hand, 2 boots, 3 leggings, 4 chestplate, 5 helmet, 6 body, 7 saddle). The item worn there
+/// can hide the screen behind a camera overlay (the carved pumpkin's blur).
+pub const HEAD_SLOT: u8 = 5;
 
 /// What the driver needs from the world (`haste_world::World`).
 pub trait WorldSink {
@@ -339,10 +343,34 @@ pub struct Session {
     /// nobody drains them (headless). Reused, so a tick without sound packets allocates
     /// nothing.
     pub sound_requests: Vec<crate::sound::SoundRequest>,
+    /// The portal and spinning screen effects (`LocalPlayer.portalEffectIntensity`, the
+    /// spinning effect time and speed), ticked in `end_tick`.
+    pub screen: crate::screen_effects::PortalEffects,
+    /// This tick's world probe for the screen effects: the block the camera is inside, the
+    /// portal under our feet and the eye position's light (vanilla's
+    /// `LevelExtractor.getViewBlockingState` and `NetherPortalBlock.entityInside`).
+    pub screen_probe: crate::screen_effects::WorldProbe,
+    /// Our own entity's bits the screen effects need, from our own `set_entity_data`:
+    /// the on-fire shared flag (bit 0) and `DATA_TICKS_FROZEN` (metadata index 7).
+    own_flags: OwnFlags,
+    /// The item we wear on the head (equipment slot 5), for the carved pumpkin's camera
+    /// overlay; `None` when the slot is empty.
+    head_item: Option<haste_core::RegistryIndex>,
     /// Ticks of hurt-tilt camera roll left (10 per hit on our own entity).
     hurt_tilt_ticks: u32,
     /// Direction of the tilt: +1 rolls one way, -1 the other (from the damage yaw).
     hurt_tilt_dir: f32,
+}
+
+/// The own entity's screen-effect bits, from our own `set_entity_data`: the shared flags
+/// byte's on-fire flag and the freeze ticks.
+#[derive(Clone, Debug, Default)]
+pub struct OwnFlags {
+    /// `Entity.isOnFire` on the client: shared flag 0 (`DATA_SHARED_FLAGS_ID`).
+    pub on_fire: bool,
+    /// `Entity.getTicksFrozen` (metadata index 7, `DATA_TICKS_FROZEN`), the powder-snow
+    /// outline's alpha.
+    pub frozen_ticks: i32,
 }
 
 impl Session {
@@ -363,6 +391,10 @@ impl Session {
             new_world_pending: false,
             entity_type_names: Vec::new(),
             sound_requests: Vec::new(),
+            screen: crate::screen_effects::PortalEffects::default(),
+            screen_probe: crate::screen_effects::WorldProbe::default(),
+            own_flags: OwnFlags::default(),
+            head_item: None,
             hurt_tilt_ticks: 0,
             hurt_tilt_dir: 0.0,
         }
@@ -640,10 +672,29 @@ impl Session {
             P::SetEntityData(d) => {
                 if EntityId(d.entity_id) != own {
                     entities.set_metadata(EntityId(d.entity_id), &d.metadata);
+                } else {
+                    // Our own entity's data: the player reads its own air supply, and the
+                    // screen effects need the shared flags byte (bit 0 = on fire) and the
+                    // freeze ticks (metadata index 7).
+                    for e in &d.metadata {
+                        match (e.index, &e.value) {
+                            (0, haste_core::entity::MetadataValue::Byte(b)) => {
+                                self.own_flags.on_fire = *b & 0x01 != 0;
+                            }
+                            (7, haste_core::entity::MetadataValue::VarInt(t)) => {
+                                self.own_flags.frozen_ticks = *t;
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
             P::SetEquipment(e) => {
                 for (slot, item) in e.equipment {
+                    if EntityId(e.entity_id) == own && slot == HEAD_SLOT {
+                        // Our own head slot: the carved pumpkin's camera overlay reads it.
+                        self.head_item = item.item;
+                    }
                     entities.set_equipment(EntityId(e.entity_id), slot, item);
                 }
             }
@@ -733,7 +784,28 @@ impl Session {
         for (pos, state) in self.player.take_world_edits() {
             world.set_block(pos, state);
         }
+        // The screen effects' tick, in vanilla's `LocalPlayer.tick` order: the portal
+        // transition effect (`portalProcess.isInsidePortalThisTick`, set by the game thread's
+        // world probe through [`Session::screen`]) and the spinning effect, which read the
+        // nausea blend factor at the end of the tick.
+        let nausea = self.player.int.nausea_factor(1.0);
+        self.screen.tick(true, nausea);
         self.tick_hurt_tilt();
+    }
+
+    /// The item worn on the head (equipment slot 5), if any.
+    pub fn head_item(&self) -> Option<haste_core::RegistryIndex> {
+        self.head_item
+    }
+
+    /// Our own entity's screen-effect bits (on fire, freeze ticks).
+    pub fn own_flags(&self) -> &OwnFlags {
+        &self.own_flags
+    }
+
+    /// The portal and spinning screen effects, ticked in `end_tick`.
+    pub fn screen_effects(&self) -> &crate::screen_effects::PortalEffects {
+        &self.screen
     }
 
     /// Break cracks to draw: other players' (`block_destruction`) and our own.

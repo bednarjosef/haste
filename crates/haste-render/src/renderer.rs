@@ -38,6 +38,27 @@ pub struct SkyState {
     pub fog_end: f32,
 }
 
+/// Vanilla's nausea/portal screen warp (`GameRenderer.renderLevel`): while the player spins
+/// (nausea or a portal), the level's projection matrix is rotated about (0, √2/2, √2/2) by the
+/// spinning angle and squeezed in x by `1 / skew`, which is what makes the world wobble.
+/// The hand and the screen effects keep the plain projection, as in vanilla (`render3dHud`
+/// sets the HUD projection before the screen effects are submitted).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SpinWarp {
+    /// `LocalPlayer.getSpinningEffectAngle`, in degrees.
+    pub angle_deg: f32,
+    /// `max(portalEffectIntensity, nauseaEffectIntensity) * screenEffectScale²`.
+    pub intensity: f32,
+}
+
+impl SpinWarp {
+    /// Vanilla's `5.0 / (I² + 5.0) - 0.04 * I`, squared: the squeeze factor.
+    pub fn skew(&self) -> f32 {
+        let skew = 5.0 / (self.intensity * self.intensity + 5.0) - self.intensity * 0.04;
+        skew * skew
+    }
+}
+
 /// Per-frame render statistics (docs/INTERFACES.md FrameStats).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameStats {
@@ -69,6 +90,8 @@ pub struct FrameInput<'a> {
     /// detached). `None` in third person, where the player model is drawn; the GUI pass still
     /// finds the instance in `entities` (the inventory's player preview).
     pub camera_entity: Option<haste_core::EntityId>,
+    /// The nausea/portal screen warp for this frame (`None`: no warp).
+    pub spin: Option<SpinWarp>,
 }
 
 #[cfg(test)]
@@ -159,6 +182,7 @@ mod tests {
             block_target: None,
             breaking: &[],
             camera_entity: None,
+            spin: None,
         };
         // The section visibility walk runs off the render thread and lands a frame later
         // (vanilla draws the previous graph until the async update is swapped in), so keep
@@ -1211,8 +1235,20 @@ impl Renderer {
     /// Build the view-projection matrix (right-handed, OpenGL-style depth like
     /// wgpu's default reverse... wgpu uses 0..1 z; glam's perspective_rh
     /// produces -1..1, so use perspective_infinite_rh style correction).
-    fn view_projection(camera: &Camera, aspect: f32) -> glam::Mat4 {
-        let proj = glam::Mat4::perspective_rh(camera.fov_deg.to_radians(), aspect, 0.05, 4096.0);
+    fn view_projection(camera: &Camera, aspect: f32, spin: Option<SpinWarp>) -> glam::Mat4 {
+        let mut proj = glam::Mat4::perspective_rh(camera.fov_deg.to_radians(), aspect, 0.05, 4096.0);
+        if let Some(spin) = spin {
+            // Vanilla's `GameRenderer.renderLevel`: rotate the projection about
+            // (0, √2/2, √2/2) by the spinning angle, squeeze x by 1/skew, rotate back. The
+            // multiplications are right-to-left in effect, so this is
+            // P * R(axis, angle) * S(1/skew, 1, 1) * R(axis, -angle).
+            let axis = glam::Vec3::new(0.0, std::f32::consts::SQRT_2 / 2.0, std::f32::consts::SQRT_2 / 2.0);
+            let angle = spin.angle_deg.to_radians();
+            let skew = spin.skew();
+            proj *= glam::Mat4::from_axis_angle(axis, angle);
+            proj *= glam::Mat4::from_diagonal(glam::Vec4::new(1.0 / skew, 1.0, 1.0, 1.0));
+            proj *= glam::Mat4::from_axis_angle(axis, -angle);
+        }
         let yaw = camera.yaw.to_radians();
         let pitch = camera.pitch.to_radians();
         // Minecraft: yaw 0 = +z (south), pitch positive = down.
@@ -1271,7 +1307,7 @@ impl Renderer {
             d
         };
         let aspect = self.size.0 as f32 / self.size.1 as f32;
-        let view_proj = Self::view_projection(&frame.camera, aspect);
+        let view_proj = Self::view_projection(&frame.camera, aspect, frame.spin);
         self.entity.prepare(
             frame.entities,
             frame.camera_entity,
@@ -1326,7 +1362,24 @@ impl Renderer {
                 ..frame.camera
             },
             aspect,
+            frame.spin,
         );
+        // The same matrix without the warp: the hand is drawn with the HUD projection in
+        // vanilla (`GameRenderer.render3dHud` sets it before `renderItemInHand`), so it keeps
+        // the plain projection while the world wobbles. The warp is a pure projection
+        // multiplication, so an absent one leaves the matrix exactly as it was.
+        let rot_view_proj_plain = if frame.spin.is_some() {
+            Self::view_projection(
+                &Camera {
+                    pos: glam::DVec3::ZERO,
+                    ..frame.camera
+                },
+                aspect,
+                None,
+            )
+        } else {
+            rot_view_proj
+        };
         // Vanilla fog: the overworld's clear-air environment; other dimensions keep the
         // sky-state approximation until their own fog task (vanilla picks per dimension
         // attributes there, not per environment).
@@ -1373,7 +1426,7 @@ impl Renderer {
             fog_srgb,
         );
         let fog_color = crate::sky::linear(fog_srgb);
-        let camera_uniform = CameraUniform {
+        let mut camera_uniform = CameraUniform {
             cam_pos: [
                 frame.camera.pos.x as f32,
                 frame.camera.pos.y as f32,
@@ -1702,6 +1755,14 @@ impl Renderer {
         // sinks into walls.
         if self.entity.has_hand() {
             ran[1] = true;
+            // Without the warp: the hand is drawn with the HUD projection in vanilla, which
+            // the screen warp never touches.
+            if rot_view_proj_plain != rot_view_proj {
+                camera_uniform.view_proj = rot_view_proj_plain.to_cols_array_2d();
+                self.gpu
+                    .queue
+                    .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&camera_uniform));
+            }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("hand"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
