@@ -22,7 +22,7 @@ pub(crate) fn travel(
     attrs: &PlayerAttributes,
     world: &dyn BlockView,
     shapes: &dyn CollisionShapes,
-    _blocks: &dyn BlockPhysics,
+    blocks: &dyn BlockPhysics,
 ) {
     let vertical = attrs.flying_speed as f64 * VERTICAL_FLY_FACTOR;
     if input.jump {
@@ -39,13 +39,14 @@ pub(crate) fn travel(
         };
     accelerate(state, imp, speed);
     let motion = state.velocity;
-    move_entity(state, attrs, motion, world, shapes);
+    move_entity(state, attrs, motion, world, shapes, blocks);
     let drag = HORIZONTAL_DRAG as f64;
     state.velocity.x *= drag;
     state.velocity.z *= drag;
     state.velocity.y *= VERTICAL_FLY_DRAG;
-    // Landing ends creative flight (observed behaviour; assumption about the exact condition).
-    if state.on_ground {
+    // Landing ends creative flight, except for spectators (vanilla `LocalPlayer.aiStep`:
+    // `onGround() && abilities.flying && !gameMode.isSpectator()`).
+    if state.on_ground && !state.spectating {
         state.flying = false;
     }
 }

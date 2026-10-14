@@ -66,6 +66,7 @@ impl App {
                 pitch: 50.0,
                 fov_deg: 70.0,
                 roll_deg: 0.0,
+                bob: haste_render::ViewBob::default(),
             },
             dirty: (-distance..=distance)
                 .flat_map(|x| (-distance..=distance).map(move |z| SectionPos::new(x, 0, z)))
@@ -169,6 +170,7 @@ impl App {
         let frame = haste_render::FrameInput {
             camera: self.cam,
             entities: &[],
+            block_entities: &[],
             gui: &haste_core::gui::GuiFrame::default(),
             sky: haste_render::SkyState {
                 time_of_day: 6000,

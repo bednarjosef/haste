@@ -73,8 +73,10 @@ fn main() -> anyhow::Result<()> {
             pitch: 55.0,
             fov_deg: 70.0,
             roll_deg: 0.0,
+            bob: haste_render::ViewBob::default(),
         },
         entities: &[],
+        block_entities: &[],
         gui: &haste_core::gui::GuiFrame::default(),
         sky: haste_render::SkyState {
             time_of_day: 6000,

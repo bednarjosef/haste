@@ -19,6 +19,7 @@ step, on a disconnect, or when the join never happens (120 s).
 | `record <name>` | run the scripted physics sequences, traces to `cache/oracle/26.3/traces/` |
 | `dump_models` | write every baked model layer's geometry to `cache/oracle/26.3/entity_models.json` |
 | `dump_block_sounds` | write every block's SoundType (break/step/place/hit/fall sounds, volume, pitch) to `cache/oracle/26.3/block_sounds.json` |
+| `fps <seconds>` | log the game's FPS counter once a second for that many seconds |
 | `log <text>` | write a line to the client log |
 | `quit` | close the game now |
 

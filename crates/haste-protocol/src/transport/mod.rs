@@ -146,6 +146,10 @@ pub struct TcpNetworkDecoder<R: AsyncRead + Unpin> {
     reader: Option<DecryptionReader<R>>,
     compression: Option<CompressionThreshold>,
     payload_scratch: BytesMut,
+    /// The last packet handed out: `(id, frame length, payload length)`. A
+    /// desync shows up in the frame AFTER the one that caused it, so framing
+    /// errors name this packet; that usually identifies the culprit.
+    last_packet: Option<(i32, u64, usize)>,
 }
 
 impl<R: AsyncRead + Unpin> TcpNetworkDecoder<R> {
@@ -154,6 +158,7 @@ impl<R: AsyncRead + Unpin> TcpNetworkDecoder<R> {
             reader: Some(DecryptionReader::None(reader)),
             compression: None,
             payload_scratch: BytesMut::new(),
+            last_packet: None,
         }
     }
 
@@ -216,6 +221,16 @@ impl<R: AsyncRead + Unpin> TcpNetworkDecoder<R> {
     }
 
     pub async fn get_raw_packet(&mut self) -> Result<RawPacket, PacketDecodeError> {
+        // Captured before the reader borrow: framing errors below name it.
+        let last_packet = self.last_packet;
+        let framing_error = |err: PacketDecodeError| {
+            match last_packet {
+                Some((id, frame_len, payload_len)) => PacketDecodeError::Message(format!(
+                    "{err}; previous packet: id {id}, frame {frame_len} bytes, payload {payload_len} bytes"
+                )),
+                None => err,
+            }
+        };
         let reader = self
             .reader
             .as_mut()
@@ -223,12 +238,12 @@ impl<R: AsyncRead + Unpin> TcpNetworkDecoder<R> {
 
         let packet_len = VarInt::decode_async(reader)
             .await
-            .map_err(|err| PacketDecodeError::MalformedLength(err.to_string()))?;
+            .map_err(|err| framing_error(PacketDecodeError::MalformedLength(err.to_string())))?;
 
         let packet_len = packet_len.0 as u64;
 
         if !(0..=MAX_PACKET_SIZE).contains(&packet_len) {
-            Err(PacketDecodeError::OutOfBounds)?;
+            Err(framing_error(PacketDecodeError::OutOfBounds))?;
         }
 
         let mut bounded_reader = reader.take(packet_len);
@@ -242,7 +257,7 @@ impl<R: AsyncRead + Unpin> TcpNetworkDecoder<R> {
             let decompressed_length = decompressed_length.0 as usize;
 
             if !(0..=MAX_PACKET_DATA_SIZE).contains(&decompressed_length) {
-                Err(PacketDecodeError::TooLong)?;
+                Err(framing_error(PacketDecodeError::TooLong))?;
             }
 
             if decompressed_length > 0 {
@@ -256,7 +271,7 @@ impl<R: AsyncRead + Unpin> TcpNetworkDecoder<R> {
             } else {
                 // Validate that we are not less than the compression threshold
                 if raw_packet_length > threshold as u64 {
-                    Err(PacketDecodeError::NotCompressed)?;
+                    Err(framing_error(PacketDecodeError::NotCompressed))?;
                 }
 
                 expected_packet_data_len = raw_packet_length as usize;
@@ -268,7 +283,7 @@ impl<R: AsyncRead + Unpin> TcpNetworkDecoder<R> {
 
         let (packet_id, packet_id_len) = VarInt::decode_async_sized(&mut reader)
             .await
-            .map_err(|_| PacketDecodeError::DecodeID)?;
+            .map_err(|_| framing_error(PacketDecodeError::DecodeID))?;
 
         let payload_len_hint = expected_packet_data_len.saturating_sub(packet_id_len);
         self.payload_scratch.clear();
@@ -311,6 +326,7 @@ impl<R: AsyncRead + Unpin> TcpNetworkDecoder<R> {
             .split_to(self.payload_scratch.len())
             .freeze();
 
+        self.last_packet = Some((packet_id.0, packet_len, payload.len()));
         Ok(RawPacket {
             id: packet_id.0,
             payload,
@@ -1135,10 +1151,18 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         const THRESHOLD: usize = 256;
         // Sizes around the compression threshold and around read-buffer
-        // boundaries, like chunk sections and small packets during a join.
+        // boundaries, like chunk sections and small packets during a join, up
+        // to a whole chunk-burst frame at view distance 32 (a
+        // ClientboundLevelChunkWithLightPacket with light data reaches ~2 MiB,
+        // the protocol's maximum frame length).
         let sizes = [
             0usize, 1, 5, 100, 255, 256, 257, 300, 1_000, 4_000, 8_191, 8_192, 8_193, 16_384,
             40_000, 150_000, 300_000,
+            // A frame near the 2 MiB protocol maximum, split across many
+            // reads: the chunk burst at render distance 32 sends these back to
+            // back, and one unread trailer byte used to desync the next
+            // frame's length VarInt ("failed to decode packet ID").
+            2_000_000,
         ];
         let mut expected: Vec<(i32, Bytes)> = Vec::new();
         let mut wire = Vec::new();
@@ -1182,6 +1206,36 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    /// A framing error names the previous packet (id, frame length, payload
+    /// length): a desync shows up in the frame AFTER the one that caused it,
+    /// so that line is what pinpoints the culprit packet.
+    #[tokio::test]
+    async fn framing_error_names_the_previous_packet() -> Result<(), Box<dyn std::error::Error>> {
+        const THRESHOLD: usize = 256;
+        let mut wire = frame(&body(9, b"fine"), THRESHOLD)?;
+        // Garbage that decodes as no valid VarInt id (EOF mid-varint).
+        wire.extend_from_slice(&[0x80]);
+
+        let mut decoder = TcpNetworkDecoder::new(SplitReader::new(wire, usize::MAX, 8192));
+        decoder.set_compression(THRESHOLD);
+        let p = decoder.get_raw_packet().await?;
+        assert_eq!(p.id, 9);
+        let Err(err) = decoder.get_raw_packet().await else {
+            panic!("the truncated frame must fail");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("id 9"), "message lacks the packet id: {msg}");
+        assert!(
+            msg.contains("frame"),
+            "message lacks the frame length: {msg}"
+        );
+        assert!(
+            msg.contains("payload 4 bytes"),
+            "message lacks the payload length: {msg}"
+        );
         Ok(())
     }
 

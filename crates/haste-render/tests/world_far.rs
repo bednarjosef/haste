@@ -90,8 +90,10 @@ fn terrain_far_from_origin() {
                 pitch,
                 fov_deg: 70.0,
                 roll_deg: 0.0,
+                bob: haste_render::ViewBob::default(),
             },
             entities: &[],
+            block_entities: &[],
             gui: &gui,
             sky: SkyState {
                 time_of_day: 6000,
@@ -209,8 +211,10 @@ fn sky_times_of_day() {
                 pitch,
                 fov_deg: 70.0,
                 roll_deg: 0.0,
+                bob: haste_render::ViewBob::default(),
             },
             entities: &[],
+            block_entities: &[],
             gui: &gui,
             sky: SkyState {
                 time_of_day: time,
@@ -290,8 +294,10 @@ fn outline_and_cracks() {
                 pitch: 50.0,
                 fov_deg: 70.0,
                 roll_deg: 0.0,
+                bob: haste_render::ViewBob::default(),
             },
             entities: &[],
+            block_entities: &[],
             gui: &gui,
             sky: SkyState {
                 time_of_day: 6000,

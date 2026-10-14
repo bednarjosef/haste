@@ -24,8 +24,31 @@ pub struct Camera {
     pub yaw: f32,
     pub pitch: f32,
     pub fov_deg: f32,
-    /// Camera roll in degrees (hurt tilt; positive rolls the horizon clockwise on screen).
+    /// Camera roll in degrees (a plain horizon roll around the view forward axis).
     pub roll_deg: f32,
+    /// The hurt/death tilts and the view bobbing (vanilla's `GameRenderer.bobHurt`/`bobView`),
+    /// applied in view space between the projection and the view.
+    pub bob: ViewBob,
+}
+
+/// Per-frame view-space camera effects: the pose stack vanilla's `GameRenderer` multiplies
+/// onto the projection matrix (hurt tilt, death roll, then the view-bob translation and
+/// wobble), plus the camera's plain [`Camera::roll_deg`] roll.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ViewBob {
+    /// `bobHurt`: the hurt roll in degrees, applied around the view z-axis rotated
+    /// `hurt_dir_deg` toward the damage direction (vanilla's `hurtDir`).
+    pub hurt_tilt_deg: f32,
+    /// `bobHurt`: the damage direction in degrees.
+    pub hurt_dir_deg: f32,
+    /// `bobHurt`: the death roll in degrees, a plain z-axis rotation.
+    pub death_roll_deg: f32,
+    /// `bobView`: the translation in the camera plane (x right, y up).
+    pub x: f32,
+    pub y: f32,
+    /// `bobView`: the roll and pitch wobble in degrees.
+    pub roll_deg: f32,
+    pub pitch_deg: f32,
 }
 
 /// Sky/fog state for one frame.
@@ -38,6 +61,7 @@ pub struct SkyState {
     pub fog_end: f32,
 }
 
+// MERGE(effects side):
 /// Vanilla's nausea/portal screen warp (`GameRenderer.renderLevel`): while the player spins
 /// (nausea or a portal), the level's projection matrix is rotated about (0, √2/2, √2/2) by the
 /// spinning angle and squeezed in x by `1 / skew`, which is what makes the world wobble.
@@ -57,6 +81,23 @@ impl SpinWarp {
         let skew = 5.0 / (self.intensity * self.intensity + 5.0) - self.intensity * 0.04;
         skew * skew
     }
+// MERGE(main side):
+/// The lightmap inputs that change every frame and are not part of the sky or the dimension:
+/// the block-light flicker (`LightmapRenderStateExtractor.blockLightFlicker`), the brightness
+/// option, the night-vision intensity, the darkness-effect scale and the boss-overlay world
+/// darkening. `lightning_flash` forces the sky factor to 1.0 (`ClientLevel`'s
+/// `SKY_LIGHT_FACTOR` layer while `skyFlashTime > 0`). The renderer folds these into the
+/// dimension's [`crate::lightmap::LightmapInputs`] once per frame; the client sets them with
+/// [`Renderer::set_lightmap_frame`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LightmapFrame {
+    pub block_light_flicker: f32,
+    pub gamma: f32,
+    pub night_vision: f32,
+    pub darkness: f32,
+    pub boss_overlay_darkening: f32,
+    pub lightning_flash: bool,
+// MERGE end
 }
 
 /// Per-frame render statistics (docs/INTERFACES.md FrameStats).
@@ -67,6 +108,8 @@ pub struct FrameStats {
     pub chunk_sections_total: u32,
     pub meshes_pending: u32,
     pub draw_calls: u32,
+    /// Block entities drawn this frame (chests, shulker boxes; one batched draw with entities).
+    pub block_entities_drawn: u32,
     /// Section meshes uploaded this frame (one per finished mesh written to the arenas).
     pub uploads: u32,
     /// Vertex+index bytes written by this frame's uploads.
@@ -77,6 +120,8 @@ pub struct FrameStats {
 pub struct FrameInput<'a> {
     pub camera: Camera,
     pub entities: &'a [haste_core::model::EntityInstance],
+    /// Block entities to draw (chests, shulker boxes; see `blockentity`).
+    pub block_entities: &'a [crate::blockentity::BlockEntityInstance],
     pub gui: &'a haste_core::gui::GuiFrame,
     pub sky: SkyState,
     pub partial_tick: f32,
@@ -168,8 +213,10 @@ mod tests {
                 pitch: 60.0,
                 fov_deg: 70.0,
                 roll_deg: 0.0,
+                bob: ViewBob::default(),
             },
             entities: &[],
+            block_entities: &[],
             gui: &haste_core::gui::GuiFrame::default(),
             sky: SkyState {
                 time_of_day: 6000,
@@ -249,6 +296,84 @@ mod tests {
         assert_eq!(flag.get(), CapturePhase::Ready);
         flag.clone().set(CapturePhase::Failed);
         assert_eq!(flag.get(), CapturePhase::Failed);
+    }
+
+    fn camera_with(bob: ViewBob, roll: f32) -> Camera {
+        Camera {
+            pos: glam::DVec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.0,
+            fov_deg: 70.0,
+            roll_deg: roll,
+            bob,
+        }
+    }
+
+    /// The look direction (Minecraft: yaw 0 = +z, pitch +90 = straight down) lands on view -Z
+    /// at every angle, including straight up and down, where a look-at would degenerate.
+    #[test]
+    fn view_rotation_looks_along_minus_z_at_every_pitch() {
+        for &(yaw, pitch) in &[
+            (0.0f32, 0.0f32),
+            (90.0, 30.0),
+            (-135.0, -60.0),
+            (37.0, 90.0),
+            (37.0, -90.0),
+            (180.0, 89.9),
+        ] {
+            let mut cam = camera_with(ViewBob::default(), 0.0);
+            cam.yaw = yaw;
+            cam.pitch = pitch;
+            let (y, p) = (yaw.to_radians(), pitch.to_radians());
+            let forward = glam::Vec3::new(-p.cos() * y.sin(), -p.sin(), p.cos() * y.cos());
+            let v = Renderer::view_rotation(&cam).transform_vector3(forward);
+            assert!(
+                (v - glam::Vec3::NEG_Z).length() < 1e-5,
+                "{yaw} {pitch}: {v}"
+            );
+            // The camera's right never flips: at yaw 0 the player's left (+x) is view -X.
+            let left = glam::Vec3::new(y.cos(), 0.0, y.sin());
+            let l = Renderer::view_rotation(&cam).transform_vector3(left);
+            assert!(
+                (l - glam::Vec3::NEG_X).length() < 1e-5,
+                "{yaw} {pitch}: {l}"
+            );
+        }
+    }
+
+    #[test]
+    fn view_transform_is_identity_without_effects() {
+        let m = Renderer::view_transform(&camera_with(ViewBob::default(), 0.0));
+        assert!(m.abs_diff_eq(glam::Mat4::IDENTITY, 1e-6));
+    }
+
+    #[test]
+    fn view_transform_bobs_in_the_camera_plane() {
+        // `bobView` translates x right / y up in view space, then rolls about Z and pitches
+        // about X. With only a translation the matrix is that translation.
+        let bob = ViewBob {
+            x: 0.25,
+            y: -0.5,
+            ..ViewBob::default()
+        };
+        let m = Renderer::view_transform(&camera_with(bob, 0.0));
+        let want = glam::Mat4::from_translation(glam::Vec3::new(0.25, -0.5, 0.0));
+        assert!(m.abs_diff_eq(want, 1e-6));
+    }
+
+    #[test]
+    fn view_transform_hurt_tilt_turns_the_roll_axis_by_hurt_dir() {
+        // `bobHurt` rotates the z-roll axis by `-hurtDir`, rolls, then turns back. A 90
+        // degree hurtDir turns the z-roll into a roll about the (rotated) axis.
+        let bob = ViewBob {
+            hurt_tilt_deg: 30.0,
+            hurt_dir_deg: 90.0,
+            ..ViewBob::default()
+        };
+        let m = Renderer::view_transform(&camera_with(bob, 0.0));
+        let r = |axis: glam::Vec3, deg: f32| glam::Mat4::from_axis_angle(axis, deg.to_radians());
+        let want = r(glam::Vec3::Y, -90.0) * r(glam::Vec3::Z, 30.0) * r(glam::Vec3::Y, 90.0);
+        assert!(m.abs_diff_eq(want, 1e-6));
     }
 }
 
@@ -350,6 +475,14 @@ pub struct Renderer {
     camera_bind_group_layout: wgpu::BindGroupLayout,
     camera_bind_group: wgpu::BindGroup,
     atlas_bind_group_layout: wgpu::BindGroupLayout,
+    /// The vanilla light texture (`lightmap`), bound at group 2 by terrain and entities.
+    lightmap: crate::lightmap::LightmapTexture,
+    /// The dimension's fixed lightmap inputs (`set_dimension`); `render` folds the frame's
+    /// [`LightmapFrame`] and the sky factor into a copy of these.
+    lightmap_base: crate::lightmap::LightmapInputs,
+    /// This frame's dynamic lightmap inputs (`set_lightmap_frame`).
+    lightmap_frame: LightmapFrame,
+    lightmap_bind_group: wgpu::BindGroup,
     atlas_bind_group: wgpu::BindGroup,
     pipeline_solid: wgpu::RenderPipeline,
     pipeline_cutout: wgpu::RenderPipeline,
@@ -365,6 +498,8 @@ pub struct Renderer {
     sky: crate::sky::SkyRenderer,
     /// Selection outline and break cracks.
     overlay: crate::overlay::OverlayRenderer,
+    /// Particles (`FrameInput::particles`).
+    particles: crate::particles::ParticleRenderer,
     /// Timings of the last frame and the GPU timestamp reader.
     timings: crate::timing::FrameTimings,
     timer: Option<crate::timing::GpuTimer>,
@@ -387,6 +522,8 @@ pub struct Renderer {
     surface_copy: bool,
     /// Whether the F2 capture path of this surface was logged (once per renderer).
     surface_copy_logged: bool,
+    /// Block entities posed into the entity stream this frame (chests, shulker boxes).
+    block_entities_drawn: u32,
 }
 
 /// An in-flight screenshot readback: the copy is submitted and `map_async` posted, the
@@ -596,8 +733,50 @@ impl Renderer {
             ],
         });
 
-        // Pipelines: one per render pass family (solid+cutout_mipped opaque
-        // with mips; cutout discard; translucent blend, no depth write).
+        // The vanilla light texture (LightTexture): one 16x16 texel map for all terrain and
+        // entity shading, re-uploaded when its inputs change.
+        let lightmap = crate::lightmap::LightmapTexture::new(
+            &gpu.device,
+            &gpu.queue,
+            crate::lightmap::LightmapInputs::overworld_noon(),
+        );
+        let lightmap_bind_group_layout =
+            gpu.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("lightmap-layout"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                    ],
+                });
+        let lightmap_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lightmap-bind"),
+            layout: &lightmap_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(lightmap.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(lightmap.sampler()),
+                },
+            ],
+        });
         let shader = gpu
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -618,6 +797,7 @@ impl Renderer {
                             bind_group_layouts: &[
                                 Some(&camera_bind_group_layout),
                                 Some(&atlas_bind_group_layout),
+                                Some(&lightmap_bind_group_layout),
                             ],
                             immediate_size: 0,
                         },
@@ -718,6 +898,7 @@ impl Renderer {
             gpu.queue.clone(),
             surface_format,
             &camera_bind_group_layout,
+            &lightmap_bind_group_layout,
         );
         let sky = crate::sky::SkyRenderer::new(
             gpu.device.clone(),
@@ -731,6 +912,13 @@ impl Renderer {
             surface_format,
             &camera_bind_group_layout,
             assets,
+        );
+        let particles = crate::particles::ParticleRenderer::new(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            surface_format,
+            &camera_bind_group_layout,
+            &lightmap_bind_group_layout,
         );
         let mut gui_assets = assets.reopen()?;
         gui.preload_sprites(&mut gui_assets, crate::gui::HUD_SPRITES);
@@ -775,6 +963,10 @@ impl Renderer {
             camera_bind_group_layout,
             camera_bind_group,
             atlas_bind_group_layout,
+            lightmap,
+            lightmap_base: crate::lightmap::LightmapInputs::overworld_noon(),
+            lightmap_frame: LightmapFrame::default(),
+            lightmap_bind_group,
             atlas_bind_group,
             pipeline_solid,
             pipeline_cutout,
@@ -786,6 +978,7 @@ impl Renderer {
             entity,
             sky,
             overlay,
+            particles,
             first_person: None,
             timings: Default::default(),
             last_uploads: (0, 0),
@@ -796,6 +989,7 @@ impl Renderer {
             capture: None,
             surface_copy: false,
             surface_copy_logged: false,
+            block_entities_drawn: 0,
         })
     }
 
@@ -859,6 +1053,15 @@ impl Renderer {
     /// The dimension being drawn: picks the sky (overworld, End, or fog colour only).
     pub fn set_dimension(&mut self, dim: &haste_core::game::DimensionInfo) {
         self.sky.kind = crate::sky::SkyKind::of(dim);
+        // The dimension's fixed lightmap inputs (Nether/End ambient colours, no sky term);
+        // `render` folds this frame's dynamic inputs into a copy each frame.
+        self.lightmap_base = if dim.has_skylight {
+            crate::lightmap::LightmapInputs::overworld_noon()
+        } else if dim.name.path() == "the_end" {
+            crate::lightmap::end()
+        } else {
+            crate::lightmap::nether()
+        };
         self.min_section = dim.min_section();
         self.section_count = dim.section_count() as i32;
         self.section_vis.lock().clear();
@@ -866,6 +1069,31 @@ impl Renderer {
         self.scheduled_for = None;
         self.walk_in_flight = false;
         self.bonus.clear();
+    }
+
+    /// This frame's dynamic lightmap inputs (flicker, brightness, night vision, darkness, boss
+    /// overlay darkening, lightning flash), set by the client before `render`.
+    pub fn set_lightmap_frame(&mut self, frame: LightmapFrame) {
+        self.lightmap_frame = frame;
+    }
+
+    /// Uploads the particle atlas of `types` as the particle texture (call after
+    /// `ParticleTypes::build`, once).
+    pub fn set_particle_types(&mut self, types: &Arc<crate::particles::ParticleTypes>) {
+        self.particles.set_types(types);
+    }
+
+    /// Poses this frame's particles (billboards, interpolated at `partial`) and samples their
+    /// light from `world`. Like [`Self::sample_world`]: call before `render` with the frame
+    /// you are about to render (the renderer holds no world).
+    pub fn prepare_particles(
+        &mut self,
+        particles: &mut crate::particles::Particles,
+        world: &dyn BlockView,
+        camera: Camera,
+        partial: f32,
+    ) {
+        self.particles.prepare(particles, camera, partial, world);
     }
 
     /// Sky and block light at each entity's position, sampled from the world by the caller
@@ -944,6 +1172,17 @@ impl Renderer {
     /// Counters of the last GUI frame.
     pub fn gui_stats(&self) -> crate::gui::GuiStats {
         self.gui.stats
+    }
+
+    /// Particles posed in the last frame (debug: also logged once a second at debug level).
+    pub fn particles_drawn(&self) -> u32 {
+        self.particles.drawn
+    }
+
+    /// Entity instances that posed geometry in the last frame (models, decorations and
+    /// dropped items; `FrameInput::entities` instances without geometry do not count).
+    pub fn entities_drawn(&self) -> u32 {
+        self.entity.drawn
     }
 
     fn make_origin_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
@@ -1211,6 +1450,26 @@ impl Renderer {
         }
     }
 
+    /// The pose stack vanilla's `GameRenderer` multiplies onto the projection matrix
+    /// (`renderLevel`: bobHurt, then bobView), plus the camera's plain roll. In view space
+    /// (x right, y up, z back), as rotations about +Z roll the horizon one way.
+    pub(crate) fn view_transform(camera: &Camera) -> glam::Mat4 {
+        let b = camera.bob;
+        let z = glam::Vec3::Z;
+        let y = glam::Vec3::Y;
+        // The plain roll, then the death roll (a plain z-axis rotation), then the hurt
+        // tilt around the z-axis turned by the damage direction.
+        let m = glam::Mat4::from_axis_angle(z, camera.roll_deg.to_radians())
+            * glam::Mat4::from_axis_angle(z, b.death_roll_deg.to_radians())
+            * glam::Mat4::from_axis_angle(y, -b.hurt_dir_deg.to_radians())
+            * glam::Mat4::from_axis_angle(z, b.hurt_tilt_deg.to_radians())
+            * glam::Mat4::from_axis_angle(y, b.hurt_dir_deg.to_radians());
+        // The view bobbing: translate in the camera plane, then roll, then pitch.
+        m * glam::Mat4::from_translation(glam::Vec3::new(b.x, b.y, 0.0))
+            * glam::Mat4::from_axis_angle(z, b.roll_deg.to_radians())
+            * glam::Mat4::from_axis_angle(glam::Vec3::X, b.pitch_deg.to_radians())
+    }
+
     /// A newly uploaded section is drawn until the async walk catches up when a
     /// face-neighbour is in the current mask: vanilla seeds newly loaded
     /// sections into the propagation queue, so they appear before the next
@@ -1237,6 +1496,7 @@ impl Renderer {
     /// Build the view-projection matrix (right-handed, OpenGL-style depth like
     /// wgpu's default reverse... wgpu uses 0..1 z; glam's perspective_rh
     /// produces -1..1, so use perspective_infinite_rh style correction).
+// MERGE(effects side):
     fn view_projection(camera: &Camera, aspect: f32, spin: Option<SpinWarp>) -> glam::Mat4 {
         let mut proj = glam::Mat4::perspective_rh(camera.fov_deg.to_radians(), aspect, 0.05, 4096.0);
         if let Some(spin) = spin {
@@ -1266,13 +1526,26 @@ impl Renderer {
         } else {
             glam::Quat::from_axis_angle(forward, camera.roll_deg.to_radians()) * glam::Vec3::Y
         };
+// MERGE(main side):
+    fn view_projection(camera: &Camera, aspect: f32) -> glam::Mat4 {
+        let proj = glam::Mat4::perspective_rh(camera.fov_deg.to_radians(), aspect, 0.05, 4096.0);
+// MERGE end
         let eye = glam::Vec3::new(
             camera.pos.x as f32,
             camera.pos.y as f32,
             camera.pos.z as f32,
         );
-        let view = glam::Mat4::look_to_rh(eye, forward, up);
-        proj * view
+        let view = Self::view_rotation(camera) * glam::Mat4::from_translation(-eye);
+        proj * Self::view_transform(camera) * view
+    }
+
+    /// The camera's rotation as vanilla builds it (`Camera.setRotation`: a YXZ rotation from yaw
+    /// and pitch, plus the roll), so looking straight up or down (pitch +-90) is exact and never
+    /// flips, unlike a look-at with a fixed up vector. View space looks along -Z.
+    fn view_rotation(camera: &Camera) -> glam::Mat4 {
+        glam::Mat4::from_rotation_z(-camera.roll_deg.to_radians())
+            * glam::Mat4::from_rotation_x(camera.pitch.to_radians())
+            * glam::Mat4::from_rotation_y((camera.yaw + 180.0).to_radians())
     }
 
     /// Frustum culling of sections (Pomme cull.comp reference; CPU here).
@@ -1320,24 +1593,13 @@ impl Renderer {
             // The hand is drawn in view space, like vanilla's `renderItemInHand` from the
             // camera's own view matrix: the hurt tilt roll is included, so the hand rolls with
             // the world (vanilla applies `bobHurt` to the hand as well).
-            let yaw = frame.camera.yaw.to_radians();
-            let pitch = frame.camera.pitch.to_radians();
-            let forward = glam::Vec3::new(
-                -pitch.cos() * yaw.sin(),
-                -pitch.sin(),
-                pitch.cos() * yaw.cos(),
-            )
-            .normalize();
-            let up = if frame.camera.roll_deg == 0.0 {
-                glam::Vec3::Y
-            } else {
-                glam::Quat::from_axis_angle(forward, frame.camera.roll_deg.to_radians())
-                    * glam::Vec3::Y
-            };
-            let view = glam::Mat4::look_to_rh(glam::Vec3::ZERO, forward, up);
+            let view = Self::view_rotation(&frame.camera);
+            // The hand gets the same pose stack as the world view (vanilla's
+            // `renderItemInHand` applies bobHurt and bobView to it too).
+            let m = Self::view_transform(&frame.camera);
             self.entity.prepare_hand(
                 self.first_person.as_ref(),
-                view.inverse(),
+                view.inverse() * m,
                 (frame.camera.yaw, frame.camera.pitch),
                 frame.partial_tick,
                 &mut self.assets,
@@ -1450,6 +1712,29 @@ impl Renderer {
         self.gpu
             .queue
             .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&camera_uniform));
+
+        // The light texture's inputs for this frame (LightmapRenderStateExtractor.extract):
+        // the dimension's fixed colours with the timeline's sky factor (and the rain blend,
+        // WeatherAttributes.RAIN moving SKY_LIGHT_FACTOR towards 0.24 by rain level) plus the
+        // frame's flicker, brightness, night vision, darkness, boss darkening and lightning.
+        let mut inputs = self.lightmap_base;
+        if frame.sky.dimension_has_sky {
+            let mut factor = crate::lightmap::overworld_sky_factor(frame.sky.time_of_day);
+            let rain = frame.sky.rain.clamp(0.0, 1.0);
+            factor += (0.24 - factor) * rain * 0.3125;
+            // ClientLevel's time-based SKY_LIGHT_FACTOR layer: a lightning flash is full sky.
+            if self.lightmap_frame.lightning_flash {
+                factor = 1.0;
+            }
+            inputs.sky_darken = 1.0 - factor;
+        }
+        inputs.block_light_flicker = self.lightmap_frame.block_light_flicker;
+        inputs.gamma = self.lightmap_frame.gamma;
+        inputs.night_vision = self.lightmap_frame.night_vision;
+        inputs.darkness = self.lightmap_frame.darkness;
+        inputs.boss_overlay_darkening = self.lightmap_frame.boss_overlay_darkening;
+        self.lightmap.set_inputs(inputs);
+        self.lightmap.upload(&self.gpu.queue);
 
         // Which target are we drawing into?
         // The acquired SurfaceTexture must outlive the pass (it presents on drop
@@ -1643,6 +1928,39 @@ impl Renderer {
             }
         }
 
+        // Block entities (chests, shulker boxes) join the entity vertex stream, culled like the
+        // sections: the frustum plus the visible mask (and the newly uploaded bonus sections)
+        // decide; vanilla compiles block entities into their section's render lists the same way.
+        if !frame.block_entities.is_empty() {
+            let planes_ref = &planes;
+            let bonus = &self.bonus;
+            let min_section = self.min_section;
+            let column = |c: ChunkPos| self.visible_mask.column(c);
+            self.block_entities_drawn = self.entity.append_block_entities(
+                frame.block_entities,
+                cam,
+                |inst| {
+                    let pos = inst.pos;
+                    let lo = [
+                        pos.x as f32 - cam.x as f32,
+                        pos.y as f32 - cam.y as f32,
+                        pos.z as f32 - cam.z as f32,
+                    ];
+                    let hi = [lo[0] + 1.0, lo[1] + 1.0, lo[2] + 1.0];
+                    if !Self::aabb_visible(planes_ref, lo, hi) {
+                        return false;
+                    }
+                    let section = pos.section();
+                    let si = section.y - min_section;
+                    let c = ChunkPos::new(section.x, section.z);
+                    column(c) & (1u32 << si) != 0 || bonus.contains(&(c, si))
+                },
+                &mut self.assets,
+            );
+        } else {
+            self.block_entities_drawn = 0;
+        }
+
         self.timings.cull_ms = lap(&mut mark);
         let mut ran = [false; 3];
         let mut draw_calls = 0u32;
@@ -1685,6 +2003,7 @@ impl Renderer {
             draw_calls += self.sky.draw_background(&mut pass);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+            pass.set_bind_group(2, &self.lightmap_bind_group, &[]);
 
             // Layered draw order (RenderLayer Ord: Solid < Cutout < CutoutMipped
             // < Translucent). Section origins come from the instance-rate origin buffer, one
@@ -1749,6 +2068,7 @@ impl Renderer {
             if !entities_drawn {
                 draw_calls += self.entity.draw(&mut pass);
             }
+            draw_calls += self.particles.draw(&mut pass);
             draw_calls += self.overlay.draw(&mut pass);
             draw_calls += self.sky.draw_overlays(&mut pass);
         }
@@ -1789,6 +2109,7 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            pass.set_bind_group(2, &self.lightmap_bind_group, &[]);
             draw_calls += self.entity.draw_hand(&mut pass);
         }
 
@@ -1864,6 +2185,7 @@ impl Renderer {
             uploads: self.last_uploads.0,
             upload_bytes: self.last_uploads.1,
             draw_calls,
+            block_entities_drawn: self.block_entities_drawn,
         })
     }
 

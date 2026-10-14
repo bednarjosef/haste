@@ -1,8 +1,13 @@
 //! Dense entity storage: `Vec`-backed slots with a free list, `EntityId -> slot` in an ahash map.
 //! No per-tick allocation.
+use std::collections::HashMap;
+
 use ahash::AHashMap;
-use haste_core::entity::{EntitySpawn, ItemStackData, MetadataEntry, PlayerInfo, Pose};
+use haste_core::entity::{
+    EntitySpawn, ItemStackData, MetadataEntry, MetadataValue, PlayerInfo, Pose,
+};
 use haste_core::ids::{EntityId, RegistryIndex};
+use haste_core::math::Vec3;
 use haste_core::model::EntityInstance;
 use haste_core::DVec3;
 use uuid::Uuid;
@@ -16,6 +21,164 @@ use crate::riding::Riding;
 pub const HURT_TICKS: u32 = 10;
 /// Death animation duration in ticks (vanilla's `deathTime` runs to 20).
 pub const DEATH_TICKS: u32 = 20;
+/// `Creeper.DEFAULT_MAX_SWELL` (the `Fuse` component can change it; the default is all the client
+/// usually sees).
+pub const CREEPER_MAX_SWELL: i32 = 30;
+
+/// `Mth.lerp`.
+fn lerp(delta: f32, start: f32, end: f32) -> f32 {
+    start + delta * (end - start)
+}
+
+/// `Mth.wrapDegrees`.
+pub(crate) fn wrap_degrees(mut v: f32) -> f32 {
+    v %= 360.0;
+    if v >= 180.0 {
+        v -= 360.0;
+    }
+    if v < -180.0 {
+        v += 360.0;
+    }
+    v
+}
+
+/// Vanilla `WalkAnimationState`: the smoothed horizontal speed and the position that accumulates
+/// it, which drive the limb swing. `LivingEntity.calculateEntityAnimation` feeds it the per-tick
+/// horizontal distance x 4 (capped at 1) with a 0.4 smoothing factor
+/// (`LivingEntity.updateWalkAnimation`); the renderer reads `position`/`speed` with the partial
+/// tick.
+#[derive(Clone, Copy, Debug)]
+pub struct WalkAnimationState {
+    speed_old: f32,
+    speed: f32,
+    position: f32,
+    position_scale: f32,
+}
+
+impl Default for WalkAnimationState {
+    fn default() -> Self {
+        WalkAnimationState {
+            speed_old: 0.0,
+            speed: 0.0,
+            position: 0.0,
+            position_scale: 1.0,
+        }
+    }
+}
+
+impl WalkAnimationState {
+    /// `WalkAnimationState.update`.
+    pub fn update(&mut self, target_speed: f32, factor: f32, position_scale: f32) {
+        self.speed_old = self.speed;
+        self.speed += (target_speed - self.speed) * factor;
+        self.position += self.speed;
+        self.position_scale = position_scale;
+    }
+
+    /// `WalkAnimationState.stop`.
+    pub fn stop(&mut self) {
+        self.speed_old = 0.0;
+        self.speed = 0.0;
+        self.position = 0.0;
+    }
+
+    /// `WalkAnimationState.speed(partialTicks)`.
+    pub fn speed(&self, partial: f32) -> f32 {
+        lerp(partial, self.speed_old, self.speed).min(1.0)
+    }
+
+    /// `WalkAnimationState.position(partialTicks)`.
+    pub fn position(&self, partial: f32) -> f32 {
+        (self.position - self.speed * (1.0 - partial)) * self.position_scale
+    }
+
+    /// `WalkAnimationState.isMoving`.
+    pub fn is_moving(&self) -> bool {
+        self.speed > 1.0e-5
+    }
+}
+
+/// `LivingEntity.SwingState`: which hand swings, with which animation type and duration, and how
+/// far the swing has progressed. `swing_animation` packets start it
+/// (`ClientPacketListener.handleSwingAnimation` -> `LivingEntity.swing`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SwingState {
+    active: bool,
+    hand: i32,
+    animation: i32,
+    duration: i32,
+    ticks: i32,
+    progress: f32,
+    old_progress: f32,
+}
+
+impl SwingState {
+    /// `LivingEntity.swing` -> `SwingState.startIfAble`.
+    pub fn start(&mut self, hand: i32, animation: i32, duration: i32) {
+        if self.active && self.ticks > 0 && self.ticks <= self.duration / 2 {
+            return;
+        }
+        if !self.active
+            || self.hand != hand
+            || self.animation != animation
+            || self.duration != duration
+        {
+            self.old_progress = 0.0;
+            self.progress = 0.0;
+        }
+        self.hand = hand;
+        self.animation = animation;
+        self.duration = duration;
+        self.active = true;
+        self.ticks = 0;
+    }
+
+    /// `SwingState.tick`.
+    pub fn tick(&mut self) {
+        self.old_progress = self.progress;
+        if self.active {
+            if self.duration > 0 {
+                self.progress = (self.ticks as f32 / self.duration as f32).min(1.0);
+            }
+            if self.ticks > self.duration {
+                self.active = false;
+                self.progress = 0.0;
+            } else {
+                self.ticks += 1;
+            }
+        } else {
+            self.progress = 0.0;
+        }
+    }
+
+    /// `LivingEntity.getSwingAnimation` -> `SwingState.getAnimation`.
+    pub fn animation(&self, partial: f32) -> f32 {
+        if self.progress >= self.old_progress {
+            lerp(partial, self.old_progress, self.progress)
+        } else {
+            lerp(partial, self.old_progress, self.progress + 1.0)
+        }
+    }
+
+    pub fn is_swinging(&self) -> bool {
+        self.active
+    }
+
+    /// `SwingState.animation` (the raw progress, used by `LivingEntity.tick`'s body yaw).
+    pub fn progress(&self) -> f32 {
+        self.progress
+    }
+
+    /// The swinging hand (0 main, 1 off).
+    pub fn hand(&self) -> i32 {
+        self.hand
+    }
+
+    /// The swing animation type (0 none, 1 whack, 2 stab).
+    pub fn animation_type(&self) -> i32 {
+        self.animation
+    }
+}
 
 /// One tracked entity.
 pub struct Entity {
@@ -24,6 +187,9 @@ pub struct Entity {
     pub kind: RegistryIndex,
     pub pos: DVec3,
     pub prev_pos: DVec3,
+    /// The `add_entity` data field: hanging entities carry their facing direction here
+    /// (`ItemFrame.recreateFromPacket` -> `Direction.from3DDataValue(packet.getData())`).
+    pub data: i32,
     pub yaw: f32,
     pub pitch: f32,
     pub head_yaw: f32,
@@ -42,14 +208,46 @@ pub struct Entity {
     /// use the heuristic: an entity whose UUID matches a player-info entry (other players), plus
     /// the caller can set this for remote players seen before their info arrives.
     pub is_player_type: bool,
-    /// Limb-swing phase (accumulates horizontal distance travelled).
-    pub limb_swing: f32,
-    /// Smoothed horizontal speed (amplitude of the limb swing).
-    pub limb_speed: f32,
+    /// Limb swing phase and amplitude (`LivingEntity.walkAnimation`).
+    pub walk: WalkAnimationState,
+    /// Body yaw (`LivingEntity.yBodyRot`), following movement; the whole model turns with it.
+    pub body_yaw: f32,
+    /// Body yaw at the end of the previous tick (`LivingEntity.yBodyRotO`), for interpolation.
+    pub prev_body_yaw: f32,
+    /// Head yaw at the previous tick (`LivingEntity.yHeadRotO`), for interpolation.
+    prev_head_yaw: f32,
+    /// Whether a `rotate_head` packet moved `head_yaw` since the last tick.
+    head_yaw_dirty: bool,
+    /// The hand swing state (`LivingEntity.swingState`, started by `swing_animation`).
+    pub swing: SwingState,
+    /// Smoothed swimming amount (`LivingEntity.swimAmount` / `swimAmountO`), 0..1.
+    pub swim_amount: f32,
+    pub swim_amount_o: f32,
+    /// `LivingEntity.fallFlyTicks`: increments each tick while the fall-flying flag is set
+    /// (`LivingEntity.tick`), driving `AvatarRenderState.fallFlyingScale`.
+    pub fall_flying_ticks: u32,
+    /// Ticks since spawn (`Entity.tickCount`), for `ageInTicks`.
+    pub tick_count: u64,
+    /// Chicken wing flap state (`Chicken.flap` / `oFlap` / `flapSpeed` / `oFlapSpeed`).
+    pub flap: f32,
+    pub o_flap: f32,
+    pub flap_speed: f32,
+    pub o_flap_speed: f32,
+    flapping: f32,
     /// Ticks of hurt animation left (10 per hit; `hurt_animation`/`damage_event` restart it).
     pub hurt_ticks: u32,
     /// Set on the death event: holds the hurt tint instead of easing out.
     pub dead: bool,
+    /// `Creeper.swell`/`oldSwell`: the client-side swell count advanced by `Creeper.tick` from
+    /// the synced swell direction, interpolated for `getSwelling(partial)`.
+    pub swell: i32,
+    pub old_swell: i32,
+    /// `IronGolem.attackAnimationTick`: set to 10 by entity event 4, decremented each tick.
+    pub attack_ticks: i32,
+    /// A dropped item entity's stack (metadata index 9, `Item`), if its metadata named one.
+    pub item: Option<ItemStackData>,
+    /// Ticks since spawn: drives the dropped items' spin and bob.
+    pub age: u32,
 }
 
 impl Entity {
@@ -60,6 +258,7 @@ impl Entity {
             kind: s.kind,
             pos: s.pos,
             prev_pos: s.pos,
+            data: s.data,
             yaw: s.yaw,
             pitch: s.pitch,
             head_yaw: s.head_yaw,
@@ -72,12 +271,133 @@ impl Entity {
             lerp: LerpState::new(s.pos),
             nametag: None,
             is_player_type: false,
-            limb_swing: 0.0,
-            limb_speed: 0.0,
+            walk: WalkAnimationState::default(),
+            body_yaw: s.yaw,
+            prev_body_yaw: s.yaw,
+            prev_head_yaw: s.head_yaw,
+            head_yaw_dirty: false,
+            swing: SwingState::default(),
+            swim_amount: 0.0,
+            swim_amount_o: 0.0,
+            fall_flying_ticks: 0,
+            tick_count: 0,
+            flap: 0.0,
+            o_flap: 0.0,
+            flap_speed: 0.0,
+            o_flap_speed: 0.0,
+            flapping: 1.0,
             hurt_ticks: 0,
             dead: false,
+            swell: 0,
+            old_swell: 0,
+            attack_ticks: 0,
+            item: None,
+            age: 0,
         }
     }
+
+    /// Body yaw between the last two ticks (`Mth.rotLerp(partial, yBodyRotO, yBodyRot)`).
+    pub fn body_yaw_at(&self, partial: f32) -> f32 {
+        self.prev_body_yaw + partial * wrap_degrees(self.body_yaw - self.prev_body_yaw)
+    }
+
+    /// Head yaw between the last two ticks (`Mth.rotLerp(partial, yHeadRotO, yHeadRot)`).
+    pub fn head_yaw_at(&self, partial: f32) -> f32 {
+        self.prev_head_yaw + partial * wrap_degrees(self.head_yaw - self.prev_head_yaw)
+    }
+}
+
+/// `LivingEntity.tick`'s body-rotation step: follow the horizontal movement direction, then
+/// `tickHeadTurn` (0.3 lerp, 50 degree head/body split).
+fn update_body_yaw(e: &mut Entity, d: DVec3) {
+    let mut target = e.body_yaw;
+    let side_dist = (d.x * d.x + d.z * d.z) as f32;
+    if side_dist > 0.002_500_000_2 {
+        let walk_direction = (d.z.atan2(d.x) as f32).to_degrees() - 90.0;
+        let diff = (wrap_degrees(e.yaw) - walk_direction).abs();
+        target = if 95.0 < diff && diff < 265.0 {
+            walk_direction - 180.0
+        } else {
+            walk_direction
+        };
+    }
+    if e.swing.progress() > 0.0 {
+        target = e.yaw;
+    }
+    let body_delta = wrap_degrees(target - e.body_yaw);
+    e.body_yaw += body_delta * 0.3;
+    let head_diff = wrap_degrees(e.yaw - e.body_yaw);
+    let max_head = 50.0;
+    if head_diff.abs() > max_head {
+        e.body_yaw += head_diff - head_diff.signum() * max_head;
+    }
+}
+
+/// The `EntityInstance::item` entry for a tracked entity: the stack of a dropped item entity
+/// (count included; the renderer draws 1-5 copies from it), aged by the partial tick.
+fn item_of(e: &Entity, partial_tick: f32) -> Option<haste_core::model::DroppedItem> {
+    let stack = e.item.as_ref()?;
+    let item = stack.item?;
+    Some(haste_core::model::DroppedItem {
+        item,
+        count: stack.count,
+        age: e.age as f32 + partial_tick,
+    })
+}
+
+/// Whether a model has a part with this name (humanoid models carry `right_arm`, which only the
+/// armed/armoured layers need).
+fn model_has_part(part: &haste_core::model::ModelPart, name: &str) -> bool {
+    part.name == name || part.children.iter().any(|c| model_has_part(c, name))
+}
+
+/// The hands, equipment layers and custom head item of an entity: the item in each hand (main
+/// hand -> right, off hand -> left), every armour piece whose item's `equippable` component names
+/// the same slot (vanilla `HumanoidArmorLayer.shouldRender`), and the head-slot item when it is
+/// not armour (vanilla `CustomHeadLayer`: pumpkins, heads). The equipment asset id comes from the
+/// item's default `equippable` component; the dye from the stack's `dyed_color` patch.
+fn equipment_of(
+    e: &Entity,
+    components: &haste_data::ItemComponents,
+) -> (
+    [Option<RegistryIndex>; 2],
+    Vec<haste_core::model::EquipmentPiece>,
+    Option<RegistryIndex>,
+) {
+    use haste_core::model::{EquipmentPiece, EquipmentSlot};
+    let mut hands = [None, None];
+    let mut equipment = Vec::new();
+    let mut head_item = None;
+    for (wire, stack) in &e.equipment {
+        if stack.is_empty() {
+            continue;
+        }
+        let Some(item) = stack.item else { continue };
+        match EquipmentSlot::from_wire(*wire) {
+            Some(EquipmentSlot::MainHand) => hands[0] = Some(item),
+            Some(EquipmentSlot::OffHand) => hands[1] = Some(item),
+            Some(slot) if slot.is_armor() => {
+                let equippable = components.equippable(item);
+                let is_armor = equippable.map(|x| x.slot) == Some(slot);
+                if slot == EquipmentSlot::Head && !is_armor {
+                    // Not a helmet: `CustomHeadLayer` draws it on the head instead.
+                    head_item = Some(item);
+                    continue;
+                }
+                if !is_armor {
+                    continue;
+                }
+                equipment.push(EquipmentPiece {
+                    slot,
+                    item: Some(item),
+                    asset: equippable.and_then(|x| x.asset.clone()),
+                    dye: components.dyed_color(&stack.components_raw),
+                });
+            }
+            _ => {}
+        }
+    }
+    (hands, equipment, head_item)
 }
 
 pub struct EntityStore {
@@ -88,6 +408,18 @@ pub struct EntityStore {
     players: AHashMap<Uuid, PlayerInfo>,
     /// Who rides whom (`set_passengers`).
     riding: Riding,
+    /// The synced `minecraft:painting_variant` registry (id -> size/asset), set at join from
+    /// the server's `registry_data`; empty when the server sent none.
+    painting_variants: HashMap<u32, crate::decoration::PaintingVariant>,
+    /// The synced variant registries (cat/wolf/frog/pig/cow/chicken), set at join from the
+    /// server's `registry_data`; empty when the server sent none.
+    mob_variants: crate::variants::MobVariants,
+    /// The world age of the last `set_time` (`NeutralMob.isAngry` compares anger end times
+    /// against it); 0 before one arrives.
+    world_age: i64,
+    /// Item default components (the `equippable` component armour reads), from the datagen
+    /// report; empty when absent (armour then draws nothing).
+    item_components: haste_data::ItemComponents,
 }
 
 /// Hurt flash strength for an entity's remaining hurt ticks, eased out (quadratic, like
@@ -116,7 +448,43 @@ impl EntityStore {
             dims,
             players: AHashMap::new(),
             riding: Riding::new(),
+            painting_variants: HashMap::new(),
+            mob_variants: crate::variants::MobVariants::empty(),
+            world_age: 0,
+            item_components: haste_data::ItemComponents::default(),
         }
+    }
+
+    /// Sets the item default-components table (the `equippable` component armour reads), loaded
+    /// from the datagen report at startup.
+    pub fn set_item_components(&mut self, components: haste_data::ItemComponents) {
+        self.item_components = components;
+    }
+
+    /// Sets the synced `minecraft:painting_variant` table (id -> size/asset), from the server's
+    /// `registry_data` at join. Paintings whose variant is absent draw the back only.
+    pub fn set_painting_variants(
+        &mut self,
+        variants: HashMap<u32, crate::decoration::PaintingVariant>,
+    ) {
+        self.painting_variants = variants;
+    }
+
+    /// Sets one synced variant registry's table (id -> assets), from the server's
+    /// `registry_data` at join (see `haste-client`'s `net::mob_variants`). Registries no
+    /// variant mob reads are ignored.
+    pub fn set_mob_variants(
+        &mut self,
+        registry: &str,
+        entries: Vec<Option<crate::variants::VariantAssets>>,
+    ) {
+        self.mob_variants.insert(registry, entries);
+    }
+
+    /// The world age from `set_time` (the bee's anger end time compares against it,
+    /// `NeutralMob.isAngry`).
+    pub fn set_world_age(&mut self, world_age: i64) {
+        self.world_age = world_age;
     }
 
     fn slot(&self, id: EntityId) -> Option<u32> {
@@ -145,6 +513,16 @@ impl EntityStore {
             }
         }
         self.by_id.insert(s.id, slot);
+    }
+
+    /// Clears every entity but keeps the per-connection configuration (the dimensions oracle,
+    /// player info and the painting-variant table): a respawn or reconfiguration does not resend
+    /// the registries, and vanilla keeps the tab list across a respawn.
+    pub fn clear_entities(&mut self) {
+        self.slots.clear();
+        self.free.clear();
+        self.by_id.clear();
+        self.riding = Riding::new();
     }
 
     pub fn remove(&mut self, ids: &[EntityId]) {
@@ -219,7 +597,13 @@ impl EntityStore {
     pub fn set_head_yaw(&mut self, id: EntityId, yaw: f32) {
         if let Some(i) = self.slot(id) {
             if let Some(e) = &mut self.slots[i as usize] {
+                // `LivingEntity.baseTick` sets `yHeadRotO = yHeadRot` before the packet handler
+                // runs; capture the previous value once per tick for the render interpolation.
+                if !e.head_yaw_dirty {
+                    e.prev_head_yaw = e.head_yaw;
+                }
                 e.head_yaw = yaw;
+                e.head_yaw_dirty = true;
             }
         }
     }
@@ -252,12 +636,31 @@ impl EntityStore {
         }
     }
 
+    /// Entity event 4: a melee attack animation (`IronGolem.handleEntityEvent` sets
+    /// `attackAnimationTick = 10`; several mobs share the status).
+    pub fn mark_attack(&mut self, id: EntityId) {
+        if let Some(i) = self.slot(id) {
+            if let Some(e) = &mut self.slots[i as usize] {
+                e.attack_ticks = 10;
+            }
+        }
+    }
+
     pub fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]) {
         let Some(i) = self.slot(id) else { return };
         let Some(e) = &mut self.slots[i as usize] else {
             return;
         };
         e.metadata.apply(entries);
+        // A dropped item entity's stack: `ItemEntity.DATA_ITEM`, the first slot after
+        // Entity's eight synched fields (indices 0-7), so index 8. An emptied stack
+        // clears the drop.
+        if let Some(entry) = e.metadata.get(8) {
+            e.item = match &entry.value {
+                MetadataValue::ItemStack(s) if !s.is_empty() => Some(s.clone()),
+                _ => None,
+            };
+        }
         if let Some(pose) = e.metadata.pose {
             if pose != e.pose {
                 e.pose = pose;
@@ -294,16 +697,73 @@ impl EntityStore {
     }
 
     /// One 20 Hz tick: advance the lerp windows so `prev_pos`/`pos` bracket this tick's step,
-    /// and update the limb-swing phase/amplitude from this tick's horizontal distance.
+    /// update the walk animation, the body yaw (`LivingEntity.tick` -> `calculateEntityAnimation`
+    /// and `tickHeadTurn`) and the swing/swim/chicken timers.
     pub fn tick(&mut self) {
-        for slot in self.slots.iter_mut().flatten() {
+        let EntityStore { slots, riding, .. } = self;
+        for slot in slots.iter_mut().flatten() {
+            slot.tick_count += 1;
+            slot.prev_body_yaw = slot.body_yaw;
+            if !slot.head_yaw_dirty {
+                slot.prev_head_yaw = slot.head_yaw;
+            }
+            slot.head_yaw_dirty = false;
             slot.lerp.tick(&mut slot.pos, &mut slot.prev_pos);
             let d = slot.pos - slot.prev_pos;
             let dist = f32::sqrt((d.x * d.x + d.z * d.z) as f32);
-            slot.limb_swing += dist * 0.5;
-            // Vanilla smooths the amplitude towards distance x 4 by 0.4 each tick.
-            slot.limb_speed += (dist * 4.0 - slot.limb_speed) * 0.4;
+            // `LivingEntity.calculateEntityAnimation`: passengers and the dead stop walking.
+            let passenger = riding.vehicle_of(slot.id).is_some();
+            if !passenger && !slot.dead {
+                let target = (dist * 4.0).min(1.0);
+                slot.walk.update(target, 0.4, 1.0);
+            } else {
+                slot.walk.stop();
+            }
+            update_body_yaw(slot, d);
+            // `LivingEntity.updateSwimAmount` (smoothed 0.09 per tick).
+            slot.swim_amount_o = slot.swim_amount;
+            if slot.pose == Pose::Swimming {
+                slot.swim_amount = (slot.swim_amount + 0.09).min(1.0);
+            } else {
+                slot.swim_amount = (slot.swim_amount - 0.09).max(0.0);
+            }
+            // `Chicken.aiStep`'s flap timers (harmless for every other model).
+            slot.o_flap = slot.flap;
+            slot.o_flap_speed = slot.flap_speed;
+            slot.flap_speed += (if slot.on_ground { -1.0 } else { 4.0 }) * 0.3;
+            slot.flap_speed = slot.flap_speed.clamp(0.0, 1.0);
+            if !slot.on_ground && slot.flapping < 1.0 {
+                slot.flapping = 1.0;
+            }
+            slot.flapping *= 0.9;
+            slot.flap += slot.flapping * 2.0;
+            slot.swing.tick();
             slot.hurt_ticks = slot.hurt_ticks.saturating_sub(1);
+            // `Creeper.tick`: the client advances its own swell count from the synced direction
+            // (an ignited creeper forces it to 1), clamped to [0, maxSwell].
+            slot.old_swell = slot.swell;
+            if slot.metadata.creeper_ignited {
+                slot.metadata.creeper_swell_dir = 1;
+            }
+            slot.swell = (slot.swell + slot.metadata.creeper_swell_dir).clamp(0, CREEPER_MAX_SWELL);
+            // `IronGolem.tick`: the attack animation tick counts down.
+            slot.attack_ticks = slot.attack_ticks.saturating_sub(1);
+            // `LivingEntity.tick`: fallFlyTicks counts while the fall-flying flag is set.
+            if slot.metadata.shared.elytra_flying {
+                slot.fall_flying_ticks = slot.fall_flying_ticks.saturating_add(1);
+            } else {
+                slot.fall_flying_ticks = 0;
+            }
+            slot.age = slot.age.saturating_add(1);
+        }
+    }
+
+    /// `swing_animation`: an entity swung a hand.
+    pub fn swing(&mut self, id: EntityId, hand: i32, animation: i32, duration: i32) {
+        if let Some(i) = self.slot(id) {
+            if let Some(e) = &mut self.slots[i as usize] {
+                e.swing.start(hand, animation, duration);
+            }
         }
     }
 
@@ -321,44 +781,121 @@ impl EntityStore {
 
     /// Interpolated draw list for the renderer (renderer). Players get the humanoid model (classic
     /// layout; skins arrive with renderer's texture work), known mob types the model the recorder
-    /// dumped for their vanilla layer (rest pose; animation is a later task), everything else a
-    /// generic box from its current dimensions. The head yaw/pitch override only applies where a
-    /// part named "head" exists (humanoids and dumped models both have one; the box has none).
+    /// dumped for their vanilla layer, everything else a generic box from its current dimensions;
+    /// a dropped item entity draws as the item itself. Each model's `setupAnim` (walk swing, head
+    /// aim, attack, pose) is applied by part name; models with no "head" part (the box) get no
+    /// overrides.
     pub fn render_instances(&self, partial_tick: f32, out: &mut Vec<EntityInstance>) {
         for slot in self.slots.iter().flatten() {
-            let pos = slot.prev_pos.lerp(slot.pos, partial_tick as f64);
+            // Hanging entities (item frames, paintings) are drawn specially, and the client
+            // moved them to the bounding-box centre vanilla's `recalculateBoundingBox` computes
+            // (the spawn packet carries the block position, not the render origin).
+            let decoration = crate::decoration::build(
+                slot.kind,
+                slot.data,
+                &slot.metadata,
+                &self.painting_variants,
+            );
+            let pos = if decoration.is_some() {
+                crate::decoration::render_center(
+                    slot.kind,
+                    slot.data,
+                    slot.pos,
+                    &slot.metadata,
+                    &self.painting_variants,
+                )
+            } else {
+                slot.prev_pos.lerp(slot.pos, partial_tick as f64)
+            };
             let (model, has_head) = if slot.is_player_type {
                 (crate::models::humanoid(false), true)
             } else {
                 // Registry table first (shared per type, head flag precomputed), then the box.
-                match crate::registry::model_entry(slot.kind) {
-                    Some((head, m)) => (m, head),
-                    None => (
+                // Babies use the row's baby layer, like vanilla's AgeableMobRenderer.submit.
+                // Variant mobs (cat/wolf/frog/pig/cow/chicken) instead resolve their look from
+                // the synced variant registry through the entity's metadata, falling back to
+                // the table's default row when the variant is unknown or absent.
+                let baby = crate::registry::is_baby(&slot.metadata);
+                let variant =
+                    crate::variants::model_for(slot.kind, &self.mob_variants, &slot.metadata, baby)
+                        .or_else(|| {
+                            // Metadata-driven variants (axolotl/rabbit/horse/llama/panda/
+                            // parrot/fox/bee/strider/mooshroom): the same layer, the variant's
+                            // texture.
+                            crate::variants::metadata_model_for(
+                                slot.kind,
+                                &slot.metadata,
+                                baby,
+                                slot.nametag.as_deref(),
+                                self.world_age,
+                            )
+                        });
+                let entry = crate::registry::model_entry(slot.kind);
+                match (variant, entry) {
+                    // A variant model (already the baby's when `baby`); all six variant mobs
+                    // have a head part, so the head aim stays on.
+                    (Some(v), _) => (v, true),
+                    (None, Some((head, m))) => {
+                        let baby_model = crate::registry::entity_type_name(slot.kind)
+                            .filter(|_| baby)
+                            .and_then(|n| crate::registry::baby_model_for_name(&n));
+                        (baby_model.unwrap_or(m), head)
+                    }
+                    (None, None) => (
                         crate::models::box_for(slot.dimensions.0, slot.dimensions.1),
                         false,
                     ),
                 }
             };
-            let pose = if slot.is_player_type {
-                crate::animation::pose_overrides(slot, partial_tick)
-            } else if has_head {
-                // Aim the head at (head_yaw, pitch) relative to the body; same clamp as players.
-                crate::animation::head_only(slot)
+            let is_passenger = self.riding.vehicle_of(slot.id).is_some();
+            let pose =
+                crate::animation::setup_anim(slot, &model, has_head, partial_tick, is_passenger);
+            let texture = model.texture.path();
+            let body = crate::animation::body_transform(
+                slot,
+                partial_tick,
+                texture.contains("iron_golem"),
+            );
+            // `CreeperRenderer.scale`'s swell wobble; every other model is uniformly scaled.
+            let body_scale = if texture.contains("creeper") {
+                crate::animation::creeper_scale(slot, partial_tick)
             } else {
-                haste_core::model::PoseOverrides::default()
+                Vec3::ONE
+            };
+            // Living models turn with their body yaw; a non-living box follows its packet yaw.
+            let yaw = if has_head {
+                slot.body_yaw_at(partial_tick)
+            } else {
+                slot.yaw
+            };
+            // Equipment layers (held items, armour) are only drawn on humanoid models
+            // (vanilla adds `ItemInHandLayer`/`HumanoidArmorLayer` per renderer type).
+            let humanoid = has_head && model_has_part(&model.root, "right_arm");
+            let (hands, equipment, head_item) = if humanoid {
+                equipment_of(slot, &self.item_components)
+            } else {
+                ([None, None], Vec::new(), None)
             };
             out.push(EntityInstance {
                 id: slot.id,
                 model,
                 pos,
-                yaw: slot.yaw,
+                yaw,
                 pitch: slot.pitch,
                 head_yaw: slot.head_yaw,
-                scale: 1.0,
+                // Slime/magma cube size (`AbstractCubeMob.ID_SIZE`); 1.0 for everything else.
+                scale: crate::variants::scale_for(slot.kind, &slot.metadata),
                 pose,
+                body,
+                body_scale,
                 skin: None,
                 nametag: slot.nametag.clone(),
                 hurt: hurt_strength(slot),
+                item: item_of(slot, partial_tick),
+                decoration,
+                hands,
+                equipment,
+                head_item,
             });
         }
     }

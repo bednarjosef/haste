@@ -37,7 +37,9 @@ use haste_jvm::{GameState, GuiPipeline, JvmHost, ScreenKind};
 use haste_protocol::haste_core::game::GameMode;
 use haste_protocol::haste_core::gui::{GuiFrame, TextMetrics};
 use haste_protocol::haste_core::Component;
-use haste_protocol::packets::configuration::clientbound::{RegistryData, UpdateTags};
+use haste_protocol::packets::configuration::clientbound::{
+    RegistryData, ServerLinkLabel, UpdateTags,
+};
 use haste_protocol::packets::play::serverbound as sb;
 use haste_protocol::packets::{Decoded, Direction, Dispatch, Packet, ProtocolTables, State};
 use haste_protocol::wire::Writer;
@@ -45,6 +47,27 @@ use haste_protocol::{ClientboundPlay, Connection, Login, ServerboundPlay};
 use parking_lot::Mutex;
 
 pub use haste_jvm::keys;
+
+/// The bit values of `haste.gui.OptionBridge`'s game-input and click masks (the Java constants
+/// are the source; keep these in step with them).
+pub mod bits {
+    /// The movement and action `KeyMapping`s' down state (`Bridge.gameInput`).
+    pub const B_FORWARD: i32 = 1;
+    pub const B_BACK: i32 = 1 << 1;
+    pub const B_LEFT: i32 = 1 << 2;
+    pub const B_RIGHT: i32 = 1 << 3;
+    pub const B_JUMP: i32 = 1 << 4;
+    pub const B_SNEAK: i32 = 1 << 5;
+    pub const B_SPRINT: i32 = 1 << 6;
+    pub const B_ATTACK: i32 = 1 << 7;
+    pub const B_USE: i32 = 1 << 8;
+
+    /// Clicks of the action `KeyMapping`s not yet consumed (`Bridge.consumeClicks`).
+    pub const C_HOTBAR_0: i32 = 1;
+    pub const C_DROP: i32 = 1 << 9;
+    pub const C_SWAP_OFFHAND: i32 = 1 << 10;
+    pub const C_JUMP: i32 = 1 << 11;
+}
 
 /// The HUD and the vanilla screens of one client. See the module documentation.
 #[derive(Clone)]
@@ -89,6 +112,10 @@ const FORWARDED: &[&str] = &[
     "minecraft:set_player_team",
     "minecraft:commands",
     "minecraft:command_suggestions",
+    "minecraft:update_advancements",
+    "minecraft:select_advancements_tab",
+    "minecraft:award_stats",
+    "minecraft:game_rule_values",
     "minecraft:open_screen",
     "minecraft:container_set_content",
     "minecraft:container_set_slot",
@@ -109,6 +136,27 @@ const FORWARDED_LOCAL: &[&str] = &[
     "minecraft:player_combat_kill",
 ];
 
+/// Whether [`Ui::handle`] uses this packet (tier-2 state or a forwarded tier-3 packet). The
+/// HUD JVM boots for seconds while play packets already arrive; `NetDriver` keeps these packets
+/// until the `Ui` exists so a fresh join's tab list, boss bars and scoreboard are not lost.
+pub fn ui_handles(p: &ClientboundPlay) -> bool {
+    use ClientboundPlay as P;
+    matches!(
+        p,
+        P::SetHealth(_)
+            | P::SetExperience(_)
+            | P::PlayerAbilities(_)
+            | P::GameEvent(_)
+            | P::PlayerCombatKill(_)
+            | P::Respawn(_)
+            | P::SetHeldSlot(_)
+            | P::EntityEvent(_)
+            | P::SetTime(_)
+    ) || p
+        .name()
+        .is_some_and(|n| FORWARDED.contains(&n) || FORWARDED_LOCAL.contains(&n))
+}
+
 impl Ui {
     /// A UI over a started JVM (`JvmHost::start`; start it early, on its own thread: vanilla's
     /// bootstrap takes seconds).
@@ -128,8 +176,41 @@ impl Ui {
         }
     }
 
-    fn gui(&self) -> &GuiPipeline {
+    /// The GUI pipeline (screens, ticks, frames; menu mode drives it before a session exists).
+    pub fn gui(&self) -> &GuiPipeline {
         self.host.gui()
+    }
+
+    /// Opens a real vanilla screen (menu mode's title screen, tests).
+    pub fn open_screen(&self, kind: ScreenKind) -> anyhow::Result<()> {
+        self.gui().open_screen(kind)
+    }
+
+    /// The multiplayer screen's Join: the address to connect to, if any was clicked since the
+    /// last call (menu mode; the connection itself is Rust's).
+    pub fn take_join_request(&self) -> Option<String> {
+        self.gui().take_join_request()
+    }
+
+    /// The connecting screen's Cancel since the last call: drop a join still in progress.
+    pub fn take_join_cancelled(&self) -> bool {
+        self.gui().take_join_cancelled()
+    }
+
+    /// The title screen's Quit Game since the last call: close the client.
+    pub fn take_quit_request(&self) -> bool {
+        self.gui().take_quit_request()
+    }
+
+    /// The world list's "Play Selected World" since the last call: the world folder to start
+    /// the local server for and join.
+    pub fn take_open_world_request(&self) -> Option<String> {
+        self.gui().take_open_world_request()
+    }
+
+    /// The create screen's "Create New World" since the last call: the world to make.
+    pub fn take_create_world_request(&self) -> Option<haste_jvm::CreateWorldRequest> {
+        self.gui().take_create_world_request()
     }
 
     /// The renderer's text metrics (`Renderer::text_metrics`): vanilla's `Font` measures with them.
@@ -166,6 +247,20 @@ impl Ui {
         self.gui().finish_configuration()?;
         let features: Vec<String> = regs.features.iter().map(|f| f.to_string()).collect();
         self.gui().set_features(&features)?;
+        // the pause menu's server links (b = built-in label id, c = custom label flattened to text)
+        let links: Vec<String> = regs
+            .server_links
+            .iter()
+            .map(|l| match &l.label {
+                ServerLinkLabel::BuiltIn(id) => {
+                    format!("b\t{id}\t{}", l.url)
+                }
+                ServerLinkLabel::Custom(c) => {
+                    format!("c\t{}\t{}", c.to_plain(&|_| None), l.url)
+                }
+            })
+            .collect();
+        self.gui().set_server_links(&links)?;
         let entity = login.entity_id.0;
         self.shared.local_entity.store(entity, Ordering::Relaxed);
         self.gui()
@@ -302,8 +397,7 @@ impl Ui {
         }
     }
 
-    /// Everything the UI sends this tick, in order: packets vanilla code sent, chat and commands
-    /// typed in the chat screen, the selected hotbar slot when it changed.
+    /// Everything the UI sends this tick, in order: packets vanilla code sent, chat and commands    /// typed in the chat screen, the selected hotbar slot when it changed.
     pub fn drain_outgoing(&self, out: &mut Vec<ServerboundPlay>) {
         let (packets, chat, slot) =
             self.state(|s| (s.take_outgoing(), s.take_sent(), s.selected_slot));
@@ -341,6 +435,38 @@ impl Ui {
         }
     }
 
+    /// The option changes vanilla screens made since the last call, as options.txt key/value
+    /// pairs, oldest first. The client applies each to its live options (FOV, render distance,
+    /// volumes, key binds, ...); `haste.gui.OptionBridge` reports them from vanilla's own
+    /// `OptionInstance.onValueUpdate` callbacks.
+    pub fn drain_option_changes(&self) -> Vec<(String, String)> {
+        self.state(|s| s.take_option_changes())
+    }
+
+    /// A game key event (no screen open, SDL3 scancode) mirrored into the vanilla `KeyMapping`s,
+    /// vanilla's `KeyboardHandler.keyPress` (press sets the down state and counts a click).
+    pub fn game_key(&self, scancode: i32, pressed: bool) {
+        self.gui().game_key(scancode, pressed);
+    }
+
+    /// A game mouse button (no screen open, vanilla numbering) mirrored into the vanilla
+    /// `KeyMapping`s, vanilla's `MouseHandler.onPress`.
+    pub fn game_mouse(&self, button: i32, pressed: bool) {
+        self.gui().game_mouse(button, pressed);
+    }
+
+    /// The down state of the movement and action `KeyMapping`s as a [`bits`] mask: the controls
+    /// the client reads are the player's own bindings.
+    pub fn game_input(&self) -> i32 {
+        self.gui().game_input()
+    }
+
+    /// Consumes the action `KeyMapping` clicks (hotbar, drop, swap offhand, jump) since the last
+    /// call as a [`bits`] mask, one bit per click.
+    pub fn consume_clicks(&self) -> i32 {
+        self.gui().consume_clicks()
+    }
+
     fn next_salt(&self) -> i64 {
         // SplitMix64 over a counter: unpredictable enough for an unsigned message's salt
         let mut z = self
@@ -362,6 +488,10 @@ impl Ui {
             gui.key(key, keycode, mods, pressed);
             return true;
         }
+        // No screen: vanilla's `KeyboardHandler.keyPress` sets the `KeyMapping`s (`handlesGameInput`),
+        // including the HUD's own keys, which are KeyMappings in vanilla too. The client reads the
+        // movement and action mappings back through `game_input`/`consume_clicks`.
+        gui.game_key(key, pressed);
         if key == keys::TAB {
             self.shared.tab_down.store(pressed, Ordering::Relaxed);
             gui.set_tab_list_visible(pressed);
@@ -413,10 +543,13 @@ impl Ui {
 
     /// A mouse button (vanilla numbering: 1 left, 2 middle, 3 right) at (x, y) in GUI pixels.
     pub fn mouse_button(&self, x: f64, y: f64, button: i32, pressed: bool) -> bool {
-        if !self.gui().is_open() {
+        let gui = self.gui();
+        if !gui.is_open() {
+            // No screen: vanilla's `MouseHandler.onPress` sets the mouse `KeyMapping`s.
+            gui.game_mouse(button, pressed);
             return false;
         }
-        self.gui().mouse(x, y, Some((button, pressed)));
+        gui.mouse(x, y, Some((button, pressed)));
         true
     }
 
@@ -458,6 +591,11 @@ impl Ui {
     /// Whether a screen is open (the client releases the mouse and stops game input).
     pub fn screen_open(&self) -> bool {
         self.gui().is_open()
+    }
+
+    /// Whether the F3 debug overlay is on (its strings are only built then).
+    pub fn debug_shown(&self) -> bool {
+        self.gui().debug_shown()
     }
 
     /// Whether vanilla code wants the mouse grabbed (e.g. after "Back to Game").
@@ -588,6 +726,29 @@ mod tests {
         for n in FORWARDED_LOCAL {
             assert!(!FORWARDED.contains(n), "{n}");
         }
+    }
+
+    #[test]
+    fn ui_handles_tier2_state_and_forwarded_packets_only() {
+        use haste_protocol::packets::play::clientbound as cb;
+        // Tier-2 state (health) and a forwarded tier-3 packet (the sidebar display) are kept for
+        // the HUD; a plain world packet is not (the boot backlog must stay small).
+        let health = ClientboundPlay::SetHealth(cb::SetHealth {
+            health: 1.0,
+            food: 2,
+            saturation: 0.0,
+        });
+        assert!(ui_handles(&health));
+        let display = ClientboundPlay::SetDisplayObjective(cb::SetDisplayObjective {
+            position: 1,
+            name: "s".to_owned(),
+        });
+        assert!(ui_handles(&display));
+        let block = ClientboundPlay::BlockUpdate(cb::BlockUpdate {
+            pos: haste_protocol::haste_core::BlockPos::new(0, 0, 0),
+            state: 1,
+        });
+        assert!(!ui_handles(&block));
     }
 
     // ---- tests against a server (ignored: need cache/ and the test server) ----
@@ -1105,6 +1266,58 @@ mod tests {
         let unimpl = c.ui.host.unimplemented().unwrap();
         eprintln!("Unimplemented: {unimpl:#?}");
         assert_no_refusals(&c.ui.host);
+        c.disconnect();
+    }
+
+    /// The pause menu's Advancements screen: the server's update_advancements packets feed
+    /// vanilla's ClientAdvancements (its tree and progress), the screen opens with the server's
+    /// tabs (a vanilla server sends at least the "Minecraft" story root) and asks the server for
+    /// the selected tab (seen_advancements).
+    #[test]
+    #[ignore = "needs cache/ and a test server (HASTE_TEST_SERVER, default 127.0.0.1:25614) where 'haste' is an operator; run with --test-threads=1"]
+    fn advancements_screen() {
+        let mut c = TestClient::join();
+        c.spawn();
+        c.run(40);
+        assert!(
+            c.received.contains(&"minecraft:update_advancements"),
+            "no update_advancements from the server: {:?}",
+            c.received
+        );
+        c.press(keys::ESCAPE);
+        c.click("Advancements");
+        assert_eq!(
+            c.ui.gui().screen_class().as_deref(),
+            Some("net.minecraft.client.gui.screens.advancements.AdvancementsScreen"),
+            "{:?}",
+            c.ui.gui().take_last_error()
+        );
+        let f = c.frame((0.0, 0.0));
+        let t = texts(&f);
+        // the vanilla server's story root: the "Minecraft" tab title and the window's title
+        assert!(
+            t.iter().any(|x| x == "Advancements"),
+            "missing title: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x == "Minecraft"),
+            "missing the story tab: {t:?}"
+        );
+        c.press(keys::ESCAPE);
+        c.run(5);
+        assert!(!c.ui.screen_open());
+        // the screen told the server it closed the tab (vanilla sends seen_advancements)
+        assert!(
+            c.sent
+                .iter()
+                .any(|p| matches!(p, ServerboundPlay::SeenAdvancements(_))),
+            "no seen_advancements: {:?}",
+            c.sent
+        );
+        let unimpl = c.ui.host.unimplemented().unwrap();
+        eprintln!("Unimplemented: {unimpl:#?}");
+        assert_no_refusals(&c.ui.host);
+        assert!(c.kicked.is_none(), "kicked: {:?}", c.kicked);
         c.disconnect();
     }
 

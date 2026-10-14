@@ -1,0 +1,36 @@
+# Feature 4: spectator walks through a wall; adventure cannot break a block.
+# The runner builds a platform and a wall, switches game modes and re-places the target
+# block (RCON) when each marker screenshot appears. The player stands on the platform at
+# (0, 100, 0) facing +Z; the wall is at z=2 and the target block at (0, 101, 2).
+wait_until joined
+wait_until settled
+# --- spectator: walk through the wall ---
+look 0 0
+wait 20
+screenshot gm-spectator-setup
+wait 40
+key_down W
+wait 40
+key_up W
+wait 10
+screenshot gm-spectator-wall
+# --- creative sanity: the same aim breaks the block ---
+screenshot gm-creative-setup
+wait 40
+look 0 0
+wait 5
+mouse_down left
+wait 40
+mouse_up left
+wait 10
+screenshot gm-creative-broken
+# --- adventure: the same aim cannot break the block ---
+screenshot gm-adventure-setup
+wait 40
+look 0 0
+wait 5
+mouse_down left
+wait 60
+mouse_up left
+wait 10
+screenshot gm-adventure-attack
