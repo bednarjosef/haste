@@ -625,6 +625,98 @@ fn camera_interpolates_and_adds_eye_height() {
     assert!(eye1.z > eye0.z, "yaw 0 walks towards +z");
 }
 
+/// Vanilla `Camera.tick`: the camera halves its distance to the pose's eye height each tick,
+/// and the pose only changes after the movement (`Player.updatePlayerPose` at the end of
+/// `Player.tick`), so the eye height at the END of the tick shift is pressed in is still the
+/// standing one, and the following ticks approach 1.27 (vanilla `Avatar.POSES` crouching eye
+/// height) by halving: 1.62, 1.445, 1.3575, 1.31375, 1.291875, ... The values are the f32
+/// arithmetic vanilla does (`eyeHeight += (getEyeHeight() - eyeHeight) * 0.5F`).
+#[test]
+fn camera_eye_height_halves_towards_the_crouching_eye_height() {
+    let (mut p, _) = spawned();
+    let shift = InputState {
+        sneak: true,
+        ..Default::default()
+    };
+    // t is the tick count since shift was pressed; the target seen by the camera pair is the
+    // pose at the end of the previous tick, so the sequence starts one tick late.
+    let mut expected_eye = 1.62f32;
+    for t in 0..5 {
+        tick(&mut p, &shift);
+        if t > 0 {
+            expected_eye += (1.27f32 - expected_eye) * 0.5;
+        }
+        assert_eq!(p.state.pose, haste_physics::Pose::Crouching);
+        let (eye_end, _, _) = p.camera(1.0);
+        // The camera pair brackets the smoothed value: start of the tick is the last one.
+        assert_eq!(eye_end.y - p.state.pos.y, f64::from(expected_eye));
+    }
+    // Releasing shift mirrors it back towards 1.62, again one tick late: the first tick
+    // after release still halves towards 1.27 (the pose was crouching when the camera
+    // ticked), the second one towards 1.62.
+    let stand = InputState::default();
+    for t in 0..3 {
+        tick(&mut p, &stand);
+        let target = if t == 0 { 1.27f32 } else { 1.62f32 };
+        expected_eye += (target - expected_eye) * 0.5;
+        let (eye_end, _, _) = p.camera(1.0);
+        assert_eq!(eye_end.y - p.state.pos.y, f64::from(expected_eye));
+    }
+}
+
+/// The partial-tick interpolation runs between the camera's old and new eye height (vanilla
+/// `Camera.setup`: `Mth.lerp(partialTicks, eyeHeightOld, eyeHeight)`), a smooth ramp within
+/// each tick rather than a jump.
+#[test]
+fn camera_eye_height_interpolates_within_the_tick() {
+    let (mut p, _) = spawned();
+    let shift = InputState {
+        sneak: true,
+        ..Default::default()
+    };
+    tick(&mut p, &shift); // pose -> Crouching, camera pair still 1.62 -> 1.62
+    tick(&mut p, &shift); // camera pair 1.62 -> 1.445
+    let y0 = p.camera(0.0).0.y - p.state.pos.y;
+    let half = p.camera(0.5).0.y - p.state.pos.y;
+    let y1 = p.camera(1.0).0.y - p.state.pos.y;
+    assert_eq!(y0, f64::from(1.62f32));
+    assert_eq!(y1, f64::from(1.62f32 + (1.27f32 - 1.62f32) * 0.5));
+    // The lerp is vanilla's f32 `Mth.lerp`; allow its rounding against the f64 mean.
+    assert!(
+        (half - (y0 + y1) * 0.5).abs() < 1e-6,
+        "half {half} vs mean {}",
+        (y0 + y1) * 0.5
+    );
+}
+
+/// Pressing shift sends `player_input` with the SNEAK bit, releasing it sends it cleared
+/// (vanilla `LocalPlayer.sendChanges` sends `ServerboundPlayerInputPacket` when the held keys
+/// changed).
+#[test]
+fn shift_sends_player_input_with_the_sneak_bit() {
+    let (mut p, _) = spawned();
+    let shift = InputState {
+        sneak: true,
+        ..Default::default()
+    };
+    let out = tick(&mut p, &shift);
+    assert_eq!(names(&out), ["input", "status", "tick_end"]);
+    match &out[0] {
+        ServerboundPlay::PlayerInput(i) => {
+            assert_eq!(i.flags, input_flags::SNEAK);
+        }
+        _ => unreachable!(),
+    }
+    // Held: nothing more. Released: the bit clears.
+    assert_eq!(names(&tick(&mut p, &shift)), ["tick_end"]);
+    let out = tick(&mut p, &InputState::default());
+    assert_eq!(names(&out), ["input", "tick_end"]);
+    match &out[0] {
+        ServerboundPlay::PlayerInput(i) => assert_eq!(i.flags, 0),
+        _ => unreachable!(),
+    }
+}
+
 #[test]
 fn respawn_waits_for_a_new_position() {
     let (mut p, mut out) = spawned();

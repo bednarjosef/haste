@@ -385,6 +385,101 @@ fn crouch_kept_under_low_ceiling() {
     assert_eq!(s.state.pose, Pose::Crouching);
 }
 
+/// Per-tick crouch speed from the tick shift is pressed (vanilla `LocalPlayer.modifyInput`:
+/// the input vector is scaled by 0.98 and the sneaking_speed attribute, 0.3 by default
+/// (vanilla `Attributes.SNEAKING_SPEED`), so the first tick's impulse is
+/// 0.98 x 0.3 = 0.294 forward; each tick adds `impulse x movement_speed` (0.1 on stone) and
+/// keeps `0.6 friction x 0.91 drag` = 0.546 of it: move(n) = move(n-1) x 0.546 + 0.0294.
+/// The slowdown applies on the very first tick (vanilla computes its `crouching` field before
+/// the movement), while the pose (and its smaller box) only changes after it.
+#[test]
+fn crouch_speed_per_tick_from_pressing_shift() {
+    let mut s = Sim::new(TestWorld::flat(0, STONE), DVec3::new(0.5, 0.0, 0.5));
+    let input = InputState {
+        forward: true,
+        sneak: true,
+        ..Default::default()
+    };
+    let mut expected = 0.0f64; // blocks per tick, forwards (+z at yaw 0)
+    for t in 0..5 {
+        let d = s.step(&input);
+        // The impulse and speed are computed in f32 (input 0.98 x 0.3, speed 0.1) and added in
+        // f64 by `accelerate`, so each term is the f32 product cast up; the kept velocity is
+        // dragged by the f32 product 0.6 x 0.91 in f64.
+        expected = expected * f64::from(0.6f32 * 0.91f32) + f64::from(0.98f32 * 0.3f32) * 0.1;
+        assert!(
+            (d.z - expected).abs() < 1e-9,
+            "tick {t}: moved {} expected {expected}",
+            d.z
+        );
+        assert_eq!(d.x, 0.0);
+        assert!(s.state.crouching, "slow from the first tick");
+        // The pose is updated at the end of the tick (vanilla `Player.updatePlayerPose`
+        // runs after the movement).
+        assert_eq!(s.state.pose, Pose::Crouching);
+    }
+    // Steady state: with the f32 constants above, 0.029400001 / (1 - 0.546) blocks per tick
+    // = 1.295 m/s, the documented sneaking speed (wiki "Sneaking").
+    s.run(&input, 100);
+    let d = s.step(&input);
+    assert!((d.z - 0.0647577).abs() < 1e-6, "{}", d.z);
+    assert!((d.z * 20.0 - 1.295).abs() < 0.001, "{} m/s", d.z * 20.0);
+    // Releasing shift: the input stops being scaled (one tick of crouching pose remains).
+    let stand = InputState {
+        forward: true,
+        ..Default::default()
+    };
+    s.step(&stand);
+    assert!(!s.state.crouching);
+    let d = s.step(&stand);
+    assert!(
+        d.z > 0.0647577 + 1e-6,
+        "walks faster once shift is released: {}",
+        d.z
+    );
+}
+
+/// Vanilla `Player.updatePlayerPose` only leaves the pose alone when even the swimming box does
+/// not fit; otherwise an unfit desired pose falls back to crouching, then swimming.
+#[test]
+fn pose_fallback_chain_matches_update_player_pose() {
+    // Shift held in the open: crouch.
+    let mut s = Sim::new(TestWorld::flat(0, STONE), DVec3::new(0.5, 0.0, 0.5));
+    s.run(
+        &InputState {
+            sneak: true,
+            ..Default::default()
+        },
+        2,
+    );
+    assert_eq!(s.state.pose, Pose::Crouching);
+    // Shift held while flying: standing (vanilla `Player.getDesiredPose`); flight is kept
+    // because the player hovers (vertical drag, no ground contact).
+    let mut s = Sim::new(TestWorld::new(), DVec3::new(0.5, 80.0, 0.5));
+    s.state.flying = true;
+    s.state.on_ground = false;
+    s.run(
+        &InputState {
+            sneak: true,
+            ..Default::default()
+        },
+        2,
+    );
+    assert_eq!(s.state.pose, Pose::Standing);
+    // A 1.0-high gap: crouching (1.5) does not fit, so the pose falls back to swimming.
+    let mut w = TestWorld::flat(0, STONE);
+    w.fill((-2, 1, -2), (2, 1, 2), STONE); // ceiling at y = 1
+    let mut s = Sim::new(w, DVec3::new(0.5, 0.0, 0.5));
+    s.run(
+        &InputState {
+            sneak: true,
+            ..Default::default()
+        },
+        2,
+    );
+    assert_eq!(s.state.pose, Pose::Swimming);
+}
+
 // ---- fluids ----------------------------------------------------------------------------------
 
 fn pool(floor: haste_core::BlockStateId, fluid: haste_core::BlockStateId, depth: i32) -> TestWorld {

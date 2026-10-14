@@ -217,7 +217,11 @@ pub struct LocalPlayer {
     /// Counters for tests and the headless printout.
     pub teleports: u64,
     prev_pos: DVec3,
-    prev_eye: f64,
+    /// The camera's smoothed eye height and its last-tick value (vanilla `Camera.eyeHeight`/
+    /// `eyeHeightOld`, f32 like vanilla). The camera, not the player, smooths: each tick it
+    /// halves the distance to the pose's eye height, and the render lerps the two values.
+    camera_eye: f32,
+    camera_eye_old: f32,
     look_offset: (f32, f32),
     last_input_look: (f32, f32),
     sent: Sent,
@@ -271,7 +275,8 @@ impl LocalPlayer {
             pending_accept_age: 0,
             teleports: 0,
             prev_pos: DVec3::ZERO,
-            prev_eye: 0.0,
+            camera_eye: 0.0,
+            camera_eye_old: 0.0,
             look_offset: (0.0, 0.0),
             last_input_look: (0.0, 0.0),
             sent: Sent::default(),
@@ -287,7 +292,13 @@ impl LocalPlayer {
             hand: hand::Hand::new(),
         };
         p.state.on_ground = true;
-        p.prev_eye = p.eye_height();
+        // Vanilla's camera starts its eye height at 0 and rises on the first level tick; here
+        // the first position has not arrived yet, so the pair starts at the standing eye height
+        // and the smoothing takes over from there (the rise would otherwise show before the
+        // player even exists).
+        let eye = p.eye_height() as f32;
+        p.camera_eye = eye;
+        p.camera_eye_old = eye;
         p
     }
 
@@ -326,13 +337,15 @@ impl LocalPlayer {
         self.attrs.eye_height_for(self.state.pose)
     }
 
-    /// Eye position and look angles interpolated by partial tick, for the camera.
+    /// Eye position and look angles interpolated by partial tick, for the camera. The eye
+    /// height is the camera's own smoothed pair (vanilla `Camera.setup` lerps
+    /// `eyeHeightOld`/`eyeHeight`, not the entity's eye height).
     pub fn camera(&self, partial_tick: f32) -> (DVec3, f32, f32) {
-        let t = partial_tick.clamp(0.0, 1.0) as f64;
-        let pos = self.prev_pos.lerp(self.state.pos, t);
-        let eye = self.prev_eye + (self.eye_height() - self.prev_eye) * t;
+        let t = partial_tick.clamp(0.0, 1.0);
+        let pos = self.prev_pos.lerp(self.state.pos, t as f64);
+        let eye = self.camera_eye_old + (self.camera_eye - self.camera_eye_old) * t;
         (
-            pos + DVec3::new(0.0, eye, 0.0),
+            pos + DVec3::new(0.0, f64::from(eye), 0.0),
             self.state.yaw,
             self.state.pitch,
         )
@@ -497,7 +510,8 @@ impl LocalPlayer {
         self.set_look(yaw, pitch);
         tracing::debug!("after teleport {:?}", self.state);
         self.prev_pos = self.state.pos;
-        self.prev_eye = self.eye_height();
+        // The camera's smoothed eye height is not reset by a teleport (vanilla `Camera` keeps
+        // it; only the position jumps, and prev_pos above already pins the interpolation).
         self.has_position = true;
         self.teleports += 1;
     }
@@ -743,8 +757,13 @@ impl LocalPlayer {
     ) {
         self.apply_attributes();
         self.prev_pos = self.state.pos;
-        self.prev_eye = self.eye_height();
         self.last_input_look = (input.yaw, input.pitch);
+        // Vanilla `Camera.tick` runs at the start of the client tick, before the player's own
+        // tick (so the target is the pose's eye height as the last tick ended it), and even
+        // while the player has no position yet: the camera halves its distance to the target
+        // each tick (`eyeHeight += (getEyeHeight() - eyeHeight) * 0.5`).
+        self.camera_eye_old = self.camera_eye;
+        self.camera_eye += (self.eye_height() as f32 - self.camera_eye) * 0.5;
         self.flush_pending_accept(out);
         if !(self.has_position && self.loaded) {
             return;
