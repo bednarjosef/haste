@@ -139,7 +139,7 @@ impl Session {
         opts.client_information.view_distance = options.render_distance as i8;
         let mut driver: NetDriver = rt.block_on(NetDriver::connect(opts))?;
         driver.session.fov_effect_scale = options.fov_effect_scale;
-        let (biomes, biome_climates, type_names, sounds) = {
+        let (biomes, biome_climates, type_names, sounds, painting_variants) = {
             let regs = driver.connection().registries();
             let sounds = if sound {
                 open_sounds(regs, &data, &options.sound)
@@ -151,6 +151,7 @@ impl Session {
                 biomes::biome_climates(regs),
                 net::entity_type_names(regs, &data),
                 sounds,
+                net::painting_variants(regs),
             )
         };
         let login = driver.login().clone();
@@ -181,10 +182,13 @@ impl Session {
             haste_render::ParticleTypes::build(&mut open_assets()?, &particle_ids)
                 .context("building the particle atlas")?,
         );
+        let mut entities = net::new_entity_store(entity_types);
+        tracing::info!("synced painting variants: {}", painting_variants.len());
+        entities.set_painting_variants(painting_variants);
         let shared = Arc::new(Shared::new(
             data,
             world,
-            net::new_entity_store(entity_types),
+            entities,
             view_distance,
             haste_render::Particles::new(particle_types.clone()),
             haste_render::default_skin(login.profile.uuid.as_u128()),
