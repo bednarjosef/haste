@@ -462,6 +462,12 @@ impl Session {
             haste_render::Particles::new(particle_types.clone()),
             haste_render::default_skin(login.profile.uuid.as_u128()),
         ));
+        if args.hud != "on" && args.hud != "off" {
+            anyhow::bail!("--hud must be \"on\" or \"off\" (vanilla's F1)");
+        }
+        shared
+            .hud_enabled
+            .store(args.hud == "on", std::sync::atomic::Ordering::Relaxed);
         if sounds.is_some() {
             *shared.sound.lock() = sounds;
         }
@@ -1424,8 +1430,10 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         .map(|v| DVec3::new(v[0], v[1], v[2]));
     // The HUD's JVM (started by the game thread) gets this long to be ready; the shot then
     // waits for it past the world settling, so the HUD is in the picture whenever it can be.
+    // With `--hud off` there is no JVM at all and nothing to wait for.
+    let hud_on = shared.hud_enabled.load(Ordering::Relaxed);
     let jvm_deadline = Instant::now() + Duration::from_secs(args.seconds.min(30));
-    let mut wait_for_hud = true;
+    let mut wait_for_hud = hud_on;
     let mut frames = 0u32;
     let mut stats;
     let mut last_camera;
@@ -1463,7 +1471,9 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         }
         last_camera = camera;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
-        feed.set_first_person(&shared, &mut renderer, perspective);
+        if hud_on {
+            feed.set_first_person(&shared, &mut renderer, perspective);
+        }
         let entities = feed.entities(&shared, &mut renderer, session.local, partial);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
@@ -1489,7 +1499,9 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             gui: &gui,
             sky,
             partial_tick: partial,
-            block_target,
+            // Vanilla's F1 hides the block outline too (`GameRenderer
+            // .shouldRenderBlockOutline` checks `hud.isHidden`).
+            block_target: hud_on.then_some(block_target).flatten(),
             breaking: &breaking,
             camera_entity: (!perspective.draws_player()).then_some(session.local.0),
         };

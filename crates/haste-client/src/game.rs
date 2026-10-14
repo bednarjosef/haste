@@ -426,6 +426,12 @@ pub struct Shared {
     pub ui: Mutex<Option<Ui>>,
     /// The HUD's JVM failed to start (no JDK, missing cache): there will be no HUD, ever.
     pub hud_failed: AtomicBool,
+    /// The HUD is off for this run (vanilla's F1: no HUD, no hand). The game thread then
+    /// never starts the JVM, so `hud_failed` never becomes true and nobody waits for it.
+    /// Vanilla's F1 also hides the block outline (`GameRenderer.shouldRenderBlockOutline`
+    /// checks `hud.isHidden`) and the first-person hand (`GameRenderer.renderItemInHand`);
+    /// the render thread reads this instead of receiving a flag per frame.
+    pub hud_enabled: AtomicBool,
     /// F3's tps line: packets sent per second (f64 bits), updated once per second by the game
     /// thread from the connection's counters.
     pub debug_tx: AtomicU64,
@@ -495,6 +501,7 @@ impl Shared {
             skin,
             ui: Mutex::new(None),
             hud_failed: AtomicBool::new(false),
+            hud_enabled: AtomicBool::new(true),
             debug_tx: AtomicU64::new(0),
             debug_rx: AtomicU64::new(0),
         }
@@ -589,8 +596,13 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>) {
     let mut last_out = 0u64;
     // The JVM for the HUD takes tens of seconds to start: on its own thread, in parallel with
     // joining (the connection would time out if we waited here). One warning, no retries: a
-    // client without a JDK or cache keeps playing without a HUD.
-    let mut jvm = spawn_jvm(&shared);
+    // client without a JDK or cache keeps playing without a HUD. With the HUD off (`--hud
+    // off`, vanilla's F1), it is never started.
+    let mut jvm = if shared.hud_enabled.load(Ordering::Relaxed) {
+        spawn_jvm(&shared)
+    } else {
+        JvmSlot { rx: None }
+    };
     let reason = loop {
         if shared.stop.load(Ordering::Relaxed) {
             break "left the game".to_string();

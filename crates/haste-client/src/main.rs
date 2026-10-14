@@ -49,6 +49,10 @@ pub struct Args {
     /// (`--seconds` bounds the wait).
     #[arg(long)]
     pub screenshot: Option<std::path::PathBuf>,
+    /// The HUD, hand and block outline (vanilla's F1, `Hud.toggle`): `off` hides them for
+    /// this run — the whole JVM stays down, so offscreen shots match vanilla's F1 reference.
+    #[arg(long, default_value = "on")]
+    pub hud: String,
     /// Input script for the offscreen client: runs the steps every game tick through the
     /// same routing as the window (needs `--server`; `--seconds` bounds the run).
     #[arg(long)]

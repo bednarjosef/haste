@@ -37,7 +37,7 @@ print(c["pos"][0], c["pos"][1] - 1.62, c["pos"][2], c["yaw"], c["pitch"], d["wid
       sleep 0.25
     done ) &
   TP=$!
-  "$HASTE" --server "127.0.0.1:$PORT" --screenshot "$OUT/$name.haste.png" \
+  "$HASTE" --server "127.0.0.1:$PORT" --screenshot "$OUT/$name.haste.png" --hud off \
     --pos "$X" "$Y" "$Z" --width "$W" --height "$H" --yaw "$YAW" --pitch "$PITCH" --seconds 40 \
     > "$OUT/$name.haste.log" 2>&1 || echo "haste failed for $name (see $OUT/$name.haste.log)" >&2
   kill "$TP" 2>/dev/null || true; wait "$TP" 2>/dev/null || true
