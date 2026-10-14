@@ -259,6 +259,7 @@ fn gui_frame_offscreen() {
             pitch: 0.0,
             fov_deg: 70.0,
             roll_deg: 0.0,
+            bob: haste_render::ViewBob::default(),
         },
         entities: &[],
         gui: &gui,
@@ -272,6 +273,7 @@ fn gui_frame_offscreen() {
         partial_tick: 0.0,
         block_target: None,
         breaking: &[],
+        camera_entity: None,
     };
     let stats = renderer.render(&input).unwrap();
     // Second frame: everything resident, measure.

@@ -274,12 +274,10 @@ fn horizontal_len_sq(v: DVec3) -> f64 {
     v.x * v.x + v.z * v.z
 }
 
-/// Sweep with step-up: when the plain sweep is blocked horizontally and the mover is on ground
-/// (or lands during this movement), try rising by `step_height`, moving horizontally, and settling
-/// back down; keep that result if it covers more horizontal distance.
-///
-/// Approximation: one candidate height (the full `step_height`, clipped by ceilings). Whether
-/// vanilla 26.3 tries several candidate heights is not determined; stairs/slab traces will tell.
+/// Sweep with step-up (vanilla `Entity.collide`): when the plain sweep is blocked horizontally and
+/// the mover is on ground (or lands during this movement), try every candidate step height from
+/// the collider Y coordinates below the max step, ascending, sweeping from the grounded position
+/// and keeping the first that covers more horizontal distance than the plain sweep.
 pub fn collide_with_step(
     aabb: Aabb,
     movement: DVec3,
@@ -313,20 +311,71 @@ fn sweep_with_step(
     if step_height <= 0.0 || !blocked_h || !(on_ground || landed) {
         return plain;
     }
-    let up = clip(src, &aabb, Axis::Y, step_height);
-    if up <= 0.0 {
-        return plain;
-    }
-    let raised = aabb.offset(DVec3::new(0.0, up, 0.0));
-    let h = sweep(src, raised, DVec3::new(movement.x, 0.0, movement.z));
-    let moved = raised.offset(DVec3::new(h.x, 0.0, h.z));
-    let down = clip(src, &moved, Axis::Y, -up + movement.y.min(0.0));
-    let stepped = DVec3::new(h.x, up + down, h.z);
-    if horizontal_len_sq(stepped) > horizontal_len_sq(plain) {
-        stepped
+    // vanilla `Entity.collide`: the box as it was after the plain sweep (lowered when it landed),
+    // and the region the step-up colliders are gathered from (extended down 1e-5 when the mover
+    // was already on ground rather than landing).
+    let grounded = if landed {
+        aabb.offset(DVec3::new(0.0, plain.y, 0.0))
     } else {
-        plain
+        aabb
+    };
+    let mut region = stretch(&grounded, DVec3::new(movement.x, step_height, movement.z));
+    if !landed {
+        region.min.y -= COLLISION_EPSILON;
     }
+    let mut candidates = step_candidates(src, &region, &grounded, step_height, plain.y);
+    candidates.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    candidates.dedup();
+    for c in candidates {
+        let h = sweep(src, grounded, DVec3::new(movement.x, c, movement.z));
+        if horizontal_len_sq(h) > horizontal_len_sq(plain) {
+            return DVec3::new(h.x, h.y + grounded.min.y - aabb.min.y, h.z);
+        }
+    }
+    plain
+}
+
+/// Candidate step-up heights: for every collider touching `region`, its Y coordinates relative
+/// to `grounded.min.y`, kept when within [0, step_height] and not the height the plain sweep
+/// already used (`skip`). vanilla `Entity.collectCandidateStepUpHeights`.
+fn step_candidates(
+    src: Source,
+    region: &Aabb,
+    grounded: &Aabb,
+    step_height: f64,
+    skip: f64,
+) -> Vec<f64> {
+    let grown = region.expand(DVec3::splat(COLLISION_EPSILON));
+    let mut out: Vec<f64> = Vec::new();
+    let consider = |out: &mut Vec<f64>, b: &Aabb| {
+        for coord in [b.min.y, b.max.y] {
+            let rel = coord - grounded.min.y;
+            if rel >= 0.0 && rel != skip && rel <= step_height {
+                out.push(rel);
+            }
+        }
+    };
+    match src {
+        Source::List(boxes) => {
+            for b in boxes {
+                if b.intersects(&grown) {
+                    consider(&mut out, b);
+                }
+            }
+        }
+        Source::World(world, shapes) => {
+            for_each_shape(&grown, world, shapes, |origin, boxes| {
+                for local in boxes {
+                    let b = local.offset(origin);
+                    if b.intersects(&grown) {
+                        consider(&mut out, &b);
+                    }
+                }
+                true
+            });
+        }
+    }
+    out
 }
 
 /// True when `aabb` intersects no collision box in the world.
