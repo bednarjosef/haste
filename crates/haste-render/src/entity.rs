@@ -761,7 +761,7 @@ fn push_world_quad(
 }
 
 /// Light level brightness, the same curve as the terrain shader (`chunk.wgsl::lightmap`).
-fn lightmap(sky: u8, block: u8) -> f32 {
+pub(crate) fn lightmap(sky: u8, block: u8) -> f32 {
     let f = |l: u8| (l.min(15) as f32 / 15.0).powf(1.55) * 0.95 + 0.05;
     f(sky).max(f(block))
 }

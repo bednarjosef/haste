@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use glam::DVec3;
-use haste_protocol::haste_core::gui::GuiFrame;
+use haste_protocol::haste_core::gui::{GuiCommand, GuiFrame};
 use haste_protocol::haste_core::input::InputState;
 use haste_protocol::haste_core::model::EntityInstance;
 use haste_protocol::haste_core::{ChunkPos, EntityId, SectionPos};
@@ -105,6 +105,8 @@ struct Session {
     options: Options,
     /// The local player's entity id and UUID (`login`), for its own model in third person.
     local: (EntityId, u128),
+    /// The particle atlas types (uploaded to the renderer once it exists).
+    particle_types: std::sync::Arc<haste_render::ParticleTypes>,
 }
 
 impl Session {
@@ -165,11 +167,26 @@ impl Session {
         let mut driver = driver;
         driver.session.set_entity_type_names(type_names);
         let view_distance = login.view_distance.min(options.render_distance as i32);
+        // The particle types of the datagen registry (the synced one has no data we need):
+        // one atlas built once, shared by the pool (name resolution) and the renderer.
+        let particle_ids: Vec<haste_protocol::haste_core::Identifier> =
+            (0..data.registries.len("minecraft:particle_type") as u32)
+                .filter_map(|i| {
+                    data.registries
+                        .name("minecraft:particle_type", haste_core::RegistryIndex(i))
+                        .cloned()
+                })
+                .collect();
+        let particle_types = std::sync::Arc::new(
+            haste_render::ParticleTypes::build(&mut open_assets()?, &particle_ids)
+                .context("building the particle atlas")?,
+        );
         let shared = Arc::new(Shared::new(
             data,
             world,
             net::new_entity_store(entity_types),
             view_distance,
+            haste_render::Particles::new(particle_types.clone()),
             haste_render::default_skin(login.profile.uuid.as_u128()),
         ));
         if sounds.is_some() {
@@ -190,6 +207,7 @@ impl Session {
             biomes: biome_climates,
             options,
             local,
+            particle_types,
         })
     }
 
@@ -1070,6 +1088,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
     renderer.set_biomes(&session.biomes);
+    renderer.set_particle_types(&session.particle_types);
     let mut gui = GuiFrame::default();
     let mut ui: Option<crate::ui::Ui> = None;
     let mut feed = WorldFeed::default();
@@ -1154,6 +1173,11 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        {
+            let world = shared.world.read();
+            let mut particles = shared.particles.lock();
+            renderer.prepare_particles(&mut particles, &*world, camera, partial);
+        }
         stats = renderer.render(&frame)?;
         frames += 1;
         let placed = shared.view.lock().has_position;
@@ -1207,7 +1231,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let view = *shared.view.lock();
     let entities = feed.instances.len();
     println!(
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} entity instances (perspective {}, local player {}), target {:?}",
+        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} entity instances (perspective {}, local player {}), {} particles drawn, target {:?}",
         file.display(),
         image.width(),
         image.height(),
@@ -1223,10 +1247,39 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         entities,
         args.perspective,
         perspective.draws_player(),
+        renderer.particles_drawn(),
         view.block_target
     );
     drop(session);
     Ok(())
+}
+
+/// A script mouse button in vanilla's numbering (1 left, 2 middle, 3 right).
+fn mouse_button_id(button: script::MouseButton) -> i32 {
+    match button {
+        script::MouseButton::Left => 1,
+        script::MouseButton::Middle => 2,
+        script::MouseButton::Right => 3,
+    }
+}
+
+/// Prints the text and HUD-sprite facts of a script screenshot's frame. The check scripts grep
+/// these lines as evidence instead of opening the PNGs.
+fn log_script_frame(frame: &GuiFrame, name: &str) {
+    let mut hotbar = false;
+    for c in &frame.commands {
+        match c {
+            GuiCommand::Text { text, .. } | GuiCommand::StyledText { text, .. } => {
+                println!("script text[{name}]: {text}");
+            }
+            GuiCommand::Sprite { sprite, .. } if sprite.path() == "hud/hotbar" => hotbar = true,
+            _ => {}
+        }
+    }
+    println!(
+        "script frame[{name}]: hotbar={}",
+        if hotbar { "yes" } else { "no" }
+    );
 }
 
 /// `--script FILE`: join like `--screenshot`, then drive the parsed script's actions every
@@ -1267,6 +1320,8 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     // Screenshot actions of this tick, saved after the frame is rendered (the readback must
     // include the frame the actions just produced: an open screen, the typed chat).
     let mut shots: Vec<String> = Vec::new();
+    // An F2 press this tick: save the frame to the config screenshots dir after it is rendered.
+    let mut f2_pending = false;
     'run: loop {
         // The look the player is rendered with: the input layer's (the script's `look`
         // actions write it) plus the server's rotation offset, like the window.
@@ -1289,6 +1344,11 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             for action in runner.tick(&state) {
                 match action {
                     script::Action::KeyDown(k) => {
+                        // F2 is the window-only screenshot key (the UI never takes it): capture
+                        // the next frame, like the windowed event loop does.
+                        if k == script::Key::F2 {
+                            f2_pending = true;
+                        }
                         input.key(winit_key(k), true, false, None, ui.as_ref());
                     }
                     script::Action::KeyUp(k) => {
@@ -1305,15 +1365,19 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                         input.mouse_moved(f64::from(x), f64::from(y), ui.as_ref());
                     }
                     script::Action::Click(button, x, y) => {
-                        let b = match button {
-                            script::MouseButton::Left => 1,
-                            script::MouseButton::Middle => 2,
-                            script::MouseButton::Right => 3,
-                        };
+                        let b = mouse_button_id(button);
                         let (x, y) = (f64::from(x), f64::from(y));
                         // A click is a press and a release on the same tick.
                         input.mouse_button(b, true, x, y, ui.as_ref());
                         input.mouse_button(b, false, x, y, ui.as_ref());
+                    }
+                    script::Action::MouseDown(button) => {
+                        let (x, y) = input.mouse;
+                        input.mouse_button(mouse_button_id(button), true, x, y, ui.as_ref());
+                    }
+                    script::Action::MouseUp(button) => {
+                        let (x, y) = input.mouse;
+                        input.mouse_button(mouse_button_id(button), false, x, y, ui.as_ref());
                     }
                     script::Action::Scroll(n) => {
                         let (x, y) = input.mouse;
@@ -1387,11 +1451,14 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         }
         frames += 1;
         // This tick's screenshot actions: the frame they caused is now on the GPU.
-        if !shots.is_empty() {
+        if !shots.is_empty() || f2_pending {
             let image = renderer
                 .read_back()
                 .context("reading the frame back for the script screenshots")?;
+            // Log what the frame drew (the check scripts grep this as evidence; images are not
+            // opened). The hotbar sprite is the visible proof a HUD element is hidden or shown.
             for name in shots.drain(..) {
+                log_script_frame(&gui, &name);
                 let path = std::path::Path::new("target/shots").join(format!("script-{name}.png"));
                 if let Some(dir) = path.parent() {
                     std::fs::create_dir_all(dir)
@@ -1401,6 +1468,19 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                     .save(&path)
                     .with_context(|| format!("saving {}", path.display()))?;
                 println!("script screenshot saved to {}", path.display());
+            }
+            if std::mem::take(&mut f2_pending) {
+                log_script_frame(&gui, "f2");
+                // Vanilla's F2: the frame goes to the config dir's `screenshots/` folder.
+                match crate::screenshots::save(image.clone()) {
+                    Ok(name) => {
+                        let dir = crate::screenshots::dir()
+                            .map(|d| d.display().to_string())
+                            .unwrap_or_default();
+                        println!("script F2 screenshot saved to {dir}/{name}");
+                    }
+                    Err(e) => tracing::warn!("F2 screenshot failed: {e:#}"),
+                }
             }
         }
         if Instant::now() > deadline {
@@ -1649,6 +1729,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
     renderer.set_biomes(&session.biomes);
+    renderer.set_particle_types(&session.particle_types);
     let gui = GuiFrame::default();
     let mut feed = WorldFeed::default();
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
@@ -1686,6 +1767,11 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        {
+            let world = shared.world.read();
+            let mut particles = shared.particles.lock();
+            renderer.prepare_particles(&mut particles, &*world, camera, partial);
+        }
         stats = renderer.render(&frame)?;
         if shared.is_closed() {
             anyhow::bail!(
@@ -1757,6 +1843,11 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        {
+            let world = shared.world.read();
+            let mut particles = shared.particles.lock();
+            renderer.prepare_particles(&mut particles, &*world, camera, partial_tick);
+        }
         let stats = renderer.render(&frame)?;
         let prev_drawn = samples.last().map_or(0, |s| s.sections_drawn);
         samples.push(BenchSample {
@@ -1822,6 +1913,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
     let mut app = App {
         shared: session.shared.clone(),
         biomes: session.biomes.clone(),
+        particle_types: session.particle_types.clone(),
         // The flag wins over the saved option; without it, the saved option decides.
         vsync: args.vsync.unwrap_or(session.options.vsync),
         options: session.options.clone(),
@@ -1859,6 +1951,8 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
 struct App {
     shared: Arc<Shared>,
     biomes: Vec<haste_render::BiomeClimate>,
+    /// The particle atlas types (uploaded to the renderer once it exists).
+    particle_types: std::sync::Arc<haste_render::ParticleTypes>,
     vsync: bool,
     /// Saved options (FOV for rendering, sensitivity for mouse look).
     options: Options,
@@ -2050,6 +2144,11 @@ impl App {
         };
         // Outline boxes of the target and the states of breaking blocks (one short read lock).
         renderer.sample_world(&*self.shared.world.read(), &self.shared.data.shapes, &frame);
+        {
+            let world = self.shared.world.read();
+            let mut particles = self.shared.particles.lock();
+            renderer.prepare_particles(&mut particles, &*world, camera, partial);
+        }
         renderer.set_animation_tick(animation_tick);
         if self.screenshot {
             self.screenshot = false;
@@ -2114,6 +2213,7 @@ impl ApplicationHandler for App {
                 Renderer::new(window.clone(), &mut assets, &self.shared.data.blocks)?;
             renderer.set_item_registry(&self.shared.data.registries);
             renderer.set_biomes(&self.biomes);
+            renderer.set_particle_types(&self.particle_types);
             Ok((window, renderer))
         })();
         match result {

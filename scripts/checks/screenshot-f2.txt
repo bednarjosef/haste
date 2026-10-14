@@ -1,0 +1,6 @@
+# Feature 5: F2 saves a screenshot into the game's screenshots folder.
+wait_until joined
+wait_until settled
+wait 20
+key F2
+wait 40

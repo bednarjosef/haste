@@ -609,3 +609,35 @@ fn creative_flying_speed() {
     );
     assert!(s.state.pos.y > y + 1.0);
 }
+
+#[test]
+fn spectator_no_physics_walks_through_a_wall() {
+    // Vanilla `Player.tick` sets `noPhysics = isSpectator()`; `Entity.move` then adds the
+    // motion without collision. A wall that stops a normal flying player is passed through.
+    let mut wall = TestWorld::new();
+    wall.fill((-1, 99, 2), (1, 101, 2), STONE);
+    let mut normal = Sim::new(wall, DVec3::new(0.5, 100.0, 0.5));
+    normal.state = PlayerState::at(DVec3::new(0.5, 100.0, 0.5));
+    normal.state.flying = true;
+    normal.run(&forward(), 40);
+    assert!(
+        normal.state.pos.z < 2.0,
+        "the wall should stop a colliding player: z={}",
+        normal.state.pos.z
+    );
+    assert!(normal.state.horizontal_collision);
+
+    let mut ghost = TestWorld::new();
+    ghost.fill((-1, 99, 2), (1, 101, 2), STONE);
+    let mut spectator = Sim::new(ghost, DVec3::new(0.5, 100.0, 0.5));
+    spectator.state = PlayerState::at(DVec3::new(0.5, 100.0, 0.5));
+    spectator.state.flying = true;
+    spectator.state.no_physics = true;
+    spectator.run(&forward(), 40);
+    assert!(
+        spectator.state.pos.z > 2.0,
+        "spectator should pass through the wall: z={}",
+        spectator.state.pos.z
+    );
+    assert!(!spectator.state.horizontal_collision);
+}

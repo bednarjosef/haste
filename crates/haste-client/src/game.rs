@@ -31,6 +31,11 @@ use parking_lot::{Mutex, RwLock};
 use crate::net::{NetDriver, WorldSink};
 use crate::ui::Ui;
 
+/// The particle pool: filled from `level_particles` packets (the renderer's atlas-backed
+/// particle types, so unknown/mod types are skipped there), ticked at 20 Hz by the game
+/// thread. The render thread reads it per frame under this lock (no GPU state inside).
+pub type SharedParticles = Mutex<haste_render::Particles>;
+
 /// How far the third-person camera sits from the eye when nothing is in the way (vanilla's
 /// `Camera` max zoom, minecraft.wiki "Perspective"). Vanilla's `Camera.alignWithEntity` scales
 /// this by the entity's scale and its `CAMERA_DISTANCE` attribute (default 4.0); haste reads
@@ -388,6 +393,9 @@ pub struct Shared {
     pub view: Mutex<ViewState>,
     /// Break cracks to draw (`Session::breaking_stages`), copied once per tick.
     pub breaking: Mutex<Vec<(BlockPos, u8)>>,
+    /// Particles (`level_particles`): the game thread spawns and ticks them, the render
+    /// thread draws them.
+    pub particles: SharedParticles,
     /// Input for the next tick.
     pub input: Mutex<SharedInput>,
     /// The sound and music output (None until the client sets it up; headless leaves it
@@ -415,6 +423,7 @@ impl Shared {
         world: World,
         entities: EntityStore,
         view_distance: i32,
+        particles: haste_render::Particles,
         skin: (Identifier, bool),
     ) -> Self {
         let has_sky = world.dimension().has_skylight;
@@ -455,6 +464,7 @@ impl Shared {
                 pose: None,
             }),
             breaking: Mutex::new(Vec::new()),
+            particles: Mutex::new(particles),
             input: Mutex::new(SharedInput::default()),
             sound: Mutex::new(None),
             stop: AtomicBool::new(false),
@@ -649,19 +659,39 @@ fn tick_once(
     // Once the JVM arrives (the session joined before the game thread started): build the
     // `Ui` and give the JVM the registries, tags and the local player.
     if let Some(host) = jvm.take() {
-        let mut slot = shared.ui.lock();
-        if slot.is_none() {
-            let ui = Ui::new(host);
-            let t = Instant::now();
-            match ui.joined(driver.connection(), driver.login()) {
-                Ok(()) => {
-                    tracing::info!(
-                        "HUD joined in {:.0} ms; the vanilla HUD and chat are live",
-                        t.elapsed().as_secs_f64() * 1000.0
-                    );
-                    *slot = Some(ui);
+        let mut created = false;
+        {
+            let mut slot = shared.ui.lock();
+            if slot.is_none() {
+                let ui = Ui::new(host);
+                let t = Instant::now();
+                match ui.joined(driver.connection(), driver.login()) {
+                    Ok(()) => {
+                        tracing::info!(
+                            "HUD joined in {:.0} ms; the vanilla HUD and chat are live",
+                            t.elapsed().as_secs_f64() * 1000.0
+                        );
+                        *slot = Some(ui);
+                        created = true;
+                    }
+                    Err(e) => tracing::warn!("no HUD: joining the UI failed: {e:#}"),
                 }
-                Err(e) => tracing::warn!("no HUD: joining the UI failed: {e:#}"),
+            }
+        }
+        // Play packets arrived while the JVM booted; give them to the HUD now, in order, so a
+        // fresh join's tab list, boss bars and scoreboard are not lost.
+        if created {
+            let backlog = driver.take_ui_backlog();
+            if !backlog.is_empty() {
+                tracing::info!(
+                    "HUD catching up on {} packets from the JVM boot",
+                    backlog.len()
+                );
+                if let Some(ui) = shared.ui.lock().as_ref() {
+                    for p in backlog {
+                        ui.handle(&p);
+                    }
+                }
             }
         }
     }
@@ -761,6 +791,18 @@ fn tick_once(
         let mut breaking = shared.breaking.lock();
         breaking.clear();
         driver.session.breaking_stages(&mut breaking);
+    }
+    // Particles: spawn what the packets brought, then one 20 Hz simulation step. The camera
+    // for `ClientLevel.doAddParticle`'s 32-block limiter is the player's eye.
+    {
+        let mut particles = shared.particles.lock();
+        let camera = driver.session.player.camera(1.0).0;
+        let spawns = std::mem::take(&mut driver.session.particle_spawns);
+        for s in &spawns {
+            particles.spawn(s, camera);
+        }
+        driver.session.particle_spawned = spawns.len();
+        particles.tick();
     }
     if let Some(ui) = shared.ui.lock().as_ref() {
         // The hotbar authority is the player (the client picks with 1-9 and the wheel and tells
