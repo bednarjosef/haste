@@ -83,6 +83,7 @@ fn gui_slots_draw_flat_items_with_the_item_model() {
         partial_tick: 0.0,
         block_target: None,
         breaking: &[],
+        camera_entity: None,
     };
     renderer.render(&input).unwrap();
     let img = renderer.read_back().unwrap();
@@ -161,6 +162,7 @@ fn held_item_draws_the_item_model_not_the_block_model() {
                 partial_tick: 0.0,
                 block_target: None,
                 breaking: &[],
+                camera_entity: None,
             })
             .unwrap();
         renderer.read_back().unwrap()
@@ -176,6 +178,12 @@ fn held_item_draws_the_item_model_not_the_block_model() {
             slim: false,
             item: Some(item_index(&data, name)),
             light: (15, 0),
+            attack: haste_render::TickPair::fixed(0.0),
+            equip: haste_render::TickPair::fixed(1.0),
+            x_bob: haste_render::TickPair::fixed(0.0),
+            y_bob: haste_render::TickPair::fixed(0.0),
+            bob: haste_render::TickPair::fixed(0.0),
+            walk_dist: haste_render::TickPair::fixed(0.0),
         }));
         let hand = render(&mut renderer);
         let changed = base
