@@ -136,8 +136,61 @@ pub struct Interaction {
     /// The held main-hand stack's decoded data and the stack it was decoded from (re-decoded
     /// when the slot's stack changes; a decode failure leaves it `None`).
     components: Option<HeldItem>,
+    /// The item currently being used (`LivingEntity.useItem`/`useItemRemaining`), set when a
+    /// use starts and cleared on release, an item change or death.
+    using: Option<UsingItem>,
     /// Last blocks we sent actions for (debug logging of their server updates).
     recent: Vec<BlockPos>,
+}
+
+/// `ItemUseAnimation` (vanilla's order).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UseAnimation {
+    None,
+    Eat,
+    Drink,
+    Block,
+    Bow,
+    Trident,
+    Crossbow,
+    Spyglass,
+    TootHorn,
+    Brush,
+    Bundle,
+    Spear,
+}
+
+impl UseAnimation {
+    fn from_id(id: i32) -> Self {
+        match id {
+            0 => UseAnimation::None,
+            2 => UseAnimation::Drink,
+            3 => UseAnimation::Block,
+            4 => UseAnimation::Bow,
+            5 => UseAnimation::Trident,
+            6 => UseAnimation::Crossbow,
+            7 => UseAnimation::Spyglass,
+            8 => UseAnimation::TootHorn,
+            9 => UseAnimation::Brush,
+            10 => UseAnimation::Bundle,
+            11 => UseAnimation::Spear,
+            // `eat` (1) and unknown ids.
+            _ => UseAnimation::Eat,
+        }
+    }
+}
+
+/// The item being used and how long is left (`LivingEntity.useItem`/`useItemRemaining`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UsingItem {
+    /// The item type this use started with (`ItemStack.isSameItem` check each tick).
+    pub item: Option<RegistryIndex>,
+    /// `getUseDuration` (ticks).
+    pub duration: i32,
+    /// `useItemRemainingTicks`, decremented each tick.
+    pub remaining: i32,
+    /// `getUseAnimation`.
+    pub animation: UseAnimation,
 }
 
 /// The held main-hand stack's decoded components the game logic reads: what it mines
@@ -219,6 +272,11 @@ impl Interaction {
         self.tools = Some(tools);
     }
 
+    /// Replaces the item default components (tests, without the data generator cache).
+    pub fn set_item_components(&mut self, item_components: Arc<haste_data::ItemComponents>) {
+        self.item_components = Some(item_components);
+    }
+
     /// Decodes the held main-hand stack's component patch once, when the slot's stack changes
     /// (`ItemStack.get(DataComponents.TOOL)` / the Efficiency enchantment's attribute effect).
     fn refresh_components(&mut self, stack: ItemStackData, data: &haste_data::GameData) {
@@ -277,11 +335,41 @@ impl Interaction {
         }
     }
 
+    /// `Item.getUseDuration` / `Item.getUseAnimation` for a held stack: the `minecraft:consumable`
+    /// component when present, else the item classes that override them. `None` when the item is
+    /// not used over time (duration 0, animation `NONE`).
+    fn use_data(
+        &self,
+        stack: &ItemStackData,
+        data: &haste_data::GameData,
+    ) -> Option<(i32, UseAnimation)> {
+        let item = stack
+            .item
+            .and_then(|i| data.registries.name("minecraft:item", i))?;
+        if let Some(ic) = &self.item_components {
+            if let Some(c) = ic.consumable(item) {
+                return Some((c.consume_ticks(), UseAnimation::from_id(c.animation)));
+            }
+        }
+        // Items whose class overrides `getUseDuration`/`getUseAnimation`
+        // (`BowItem`/`CrossbowItem`/`TridentItem`/`SpyglassItem`/`ShieldItem`); a shield's
+        // `minecraft:blocks_attacks` makes the default `Item` return 72000 and `BLOCK`.
+        match item.path() {
+            "bow" => Some((72000, UseAnimation::Bow)),
+            "crossbow" => Some((72000, UseAnimation::Crossbow)),
+            "trident" => Some((72000, UseAnimation::Trident)),
+            "spyglass" => Some((1200, UseAnimation::Spyglass)),
+            "shield" => Some((72000, UseAnimation::Block)),
+            _ => None,
+        }
+    }
+
     pub(super) fn respawned(&mut self) {
         self.destroying = None;
         self.progress = 0.0;
         self.target = None;
         self.effects.clear();
+        self.using = None;
     }
 
     fn next_sequence(&mut self) -> i32 {
@@ -429,6 +517,31 @@ impl LocalPlayer {
     /// `Player.resetOnlyAttackStrengthTicker` (`Player.onAttack`).
     pub fn reset_only_attack_strength_ticker(&mut self) {
         self.hand.reset_only_attack_strength_ticker();
+    }
+
+    /// `LivingEntity.isUsingItem`: an item is being used over time.
+    pub fn is_using_item(&self) -> bool {
+        self.int.using.is_some()
+    }
+
+    /// `LivingEntity.getUseItemRemainingTicks`.
+    pub fn use_item_remaining(&self) -> i32 {
+        self.int.using.map_or(0, |u| u.remaining)
+    }
+
+    /// `LivingEntity.getUseItem`'s duration (`Item.getUseDuration`), 0 when not using.
+    pub fn use_duration(&self) -> i32 {
+        self.int.using.map_or(0, |u| u.duration)
+    }
+
+    /// `Item.getUseAnimation` of the item being used.
+    pub fn use_animation(&self) -> UseAnimation {
+        self.int.using.map_or(UseAnimation::None, |u| u.animation)
+    }
+
+    /// `LivingEntity.getTicksUsingItem`: how long the current use has run.
+    pub fn ticks_using_item(&self) -> i32 {
+        self.int.using.map_or(0, |u| u.duration - u.remaining)
     }
 
     /// Predicted block changes to apply to the world now (breaking), and server states released
@@ -623,12 +736,35 @@ impl LocalPlayer {
         if self.int.use_delay > 0 {
             self.int.use_delay -= 1;
         }
+        // `Minecraft.handleKeybinds`: while an item is being used, releasing the use key sends
+        // `release_use_item`; a different item in the hand stops the use without a packet
+        // (`LivingEntity.updatingUsingItem`).
+        if let Some(u) = self.int.using {
+            if !input.use_item {
+                out.push(ServerboundPlay::PlayerAction(sb::PlayerAction {
+                    status: action::RELEASE_USE_ITEM,
+                    pos: BlockPos::new(0, 0, 0),
+                    face: 0,
+                    sequence: 0,
+                }));
+                self.int.using = None;
+            } else if self.main_hand().item != u.item {
+                self.int.using = None;
+            }
+        }
         let use_now = input.use_item
             && (!last.use_item || self.int.use_delay == 0)
-            && self.int.destroying.is_none();
+            && self.int.destroying.is_none()
+            && self.int.using.is_none();
         if use_now {
             self.int.use_delay = USE_DELAY;
             self.use_item(look, env, out);
+        }
+        // `LivingEntity.tick` -> `updateUsingItem`: the remaining time ticks down each game tick,
+        // including the tick the use started on.
+        if let Some(mut u) = self.int.using {
+            u.remaining -= 1;
+            self.int.using = Some(u);
         }
 
         // 5. Pick block.
@@ -735,6 +871,17 @@ impl LocalPlayer {
                         yaw: look.0,
                         pitch: look.1,
                     }));
+                    // `LivingEntity.startUsingItem`: an item with a use duration starts using
+                    // (`Item.getUseDuration` from the consumable component or the item class).
+                    let stack = self.main_hand().clone();
+                    if let Some((duration, animation)) = self.int.use_data(&stack, env.data) {
+                        self.int.using = Some(UsingItem {
+                            item: stack.item,
+                            duration,
+                            remaining: duration,
+                            animation,
+                        });
+                    }
                 }
             }
         }

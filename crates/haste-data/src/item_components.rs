@@ -33,10 +33,28 @@ impl AttributeModifier {
     }
 }
 
+/// An item's `minecraft:consumable` component (`world/item/component/Consumable`): how long the
+/// item is used and the animation played while it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Consumable {
+    /// `consume_seconds` (1.6 by default).
+    pub consume_seconds: f32,
+    /// `ItemUseAnimation` id (`animation`, `eat` by default).
+    pub animation: i32,
+}
+
+impl Consumable {
+    /// `Consumable.consumeTicks`: the use duration in ticks.
+    pub fn consume_ticks(&self) -> i32 {
+        (self.consume_seconds * 20.0) as i32
+    }
+}
+
 /// The item default components game logic reads, by item.
 #[derive(Default)]
 pub struct ItemComponents {
     attributes: HashMap<Identifier, Vec<AttributeModifier>>,
+    consumables: HashMap<Identifier, Consumable>,
 }
 
 impl ItemComponents {
@@ -44,6 +62,7 @@ impl ItemComponents {
     pub fn load(reports: &Path) -> anyhow::Result<ItemComponents> {
         let dir = reports.join("minecraft/components/item");
         let mut attributes = HashMap::new();
+        let mut consumables = HashMap::new();
         for e in std::fs::read_dir(&dir).map_err(|e| anyhow::anyhow!("{}: {e}", dir.display()))? {
             let path = e?.path();
             if path.extension().is_none_or(|x| x != "json") {
@@ -53,14 +72,21 @@ impl ItemComponents {
                 continue;
             };
             let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
-            if let Some(a) = v
-                .get("components")
-                .and_then(|c| c.get("minecraft:attribute_modifiers"))
-            {
-                attributes.insert(Identifier::minecraft(stem), parse_modifiers(a));
+            let Some(components) = v.get("components") else {
+                continue;
+            };
+            let item = Identifier::minecraft(stem);
+            if let Some(a) = components.get("minecraft:attribute_modifiers") {
+                attributes.insert(item.clone(), parse_modifiers(a));
+            }
+            if let Some(c) = components.get("minecraft:consumable") {
+                consumables.insert(item, parse_consumable(c));
             }
         }
-        Ok(ItemComponents { attributes })
+        Ok(ItemComponents {
+            attributes,
+            consumables,
+        })
     }
 
     /// From the default cache location (`haste_core::paths::datagen_reports`).
@@ -72,9 +98,19 @@ impl ItemComponents {
         self.attributes.insert(item, modifiers);
     }
 
+    /// Sets an item's default `minecraft:consumable` (tests and tools).
+    pub fn insert_consumable(&mut self, item: Identifier, consumable: Consumable) {
+        self.consumables.insert(item, consumable);
+    }
+
     /// The item's default `minecraft:attribute_modifiers`.
     pub fn attribute_modifiers(&self, item: &Identifier) -> &[AttributeModifier] {
         self.attributes.get(item).map_or(&[], Vec::as_slice)
+    }
+
+    /// The item's default `minecraft:consumable`, if it has one.
+    pub fn consumable(&self, item: &Identifier) -> Option<Consumable> {
+        self.consumables.get(item).copied()
     }
 
     /// `ItemAttributeModifiers.compute` for the main hand: `base` plus every main-hand modifier
@@ -143,6 +179,37 @@ fn operation_id(name: Option<&str>) -> i32 {
         Some("add_multiplied_base") => 1,
         Some("add_multiplied_total") => 2,
         _ => 0,
+    }
+}
+
+/// Parses `minecraft:consumable` (`Consumable.CODEC`): `consume_seconds` and `animation` with
+/// their defaults.
+fn parse_consumable(v: &serde_json::Value) -> Consumable {
+    Consumable {
+        consume_seconds: v
+            .get("consume_seconds")
+            .and_then(|s| s.as_f64())
+            .unwrap_or(1.6) as f32,
+        animation: use_animation_id(v.get("animation").and_then(|a| a.as_str())),
+    }
+}
+
+/// `ItemUseAnimation` name -> id.
+fn use_animation_id(name: Option<&str>) -> i32 {
+    match name {
+        Some("none") => 0,
+        Some("drink") => 2,
+        Some("block") => 3,
+        Some("bow") => 4,
+        Some("trident") => 5,
+        Some("crossbow") => 6,
+        Some("spyglass") => 7,
+        Some("toot_horn") => 8,
+        Some("brush") => 9,
+        Some("bundle") => 10,
+        Some("spear") => 11,
+        // `eat` and any unknown name are vanilla's default.
+        _ => 1,
     }
 }
 
@@ -217,8 +284,25 @@ mod tests {
     }
 
     #[test]
-    fn operation_order_matches_vanilla() {
-        let mut c = ItemComponents::default();
+    fn parses_consumables_with_defaults() {
+        // `Consumable.CODEC` defaults: 1.6 s and `eat`.
+        assert_eq!(
+            parse_consumable(&serde_json::json!({})),
+            Consumable {
+                consume_seconds: 1.6,
+                animation: 1,
+            }
+        );
+        // A drink with its own time: `consumeTicks` = seconds * 20.
+        let drink = parse_consumable(&serde_json::json!({
+            "consume_seconds": 1.6, "animation": "drink"
+        }));
+        assert_eq!(drink.animation, 2);
+        assert_eq!(drink.consume_ticks(), 32);
+    }
+
+    #[test]
+    fn operation_order_matches_vanilla() {        let mut c = ItemComponents::default();
         c.insert(
             attr("test_item"),
             vec![
@@ -261,5 +345,10 @@ mod tests {
         let sword = c.main_hand_attribute(&attr("diamond_sword"), &speed, 4.0);
         assert!((sword - 1.6).abs() < 1e-6, "diamond sword {sword}");
         assert!(c.len() > 30, "{} items", c.len());
+        // Food and drink carry a `minecraft:consumable`.
+        let apple = c.consumable(&attr("apple")).expect("apple consumable");
+        assert_eq!((apple.animation, apple.consume_ticks()), (1, 32));
+        let potion = c.consumable(&attr("potion")).expect("potion consumable");
+        assert_eq!(potion.animation, 2);
     }
 }
