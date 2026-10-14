@@ -12,6 +12,8 @@ use haste_protocol::wire::particle::Particle;
 struct FakeWorld {
     log: Vec<String>,
     chunks: Vec<ChunkPos>,
+    /// Block states the lid tests place (the `WorldSink` reads them).
+    states: HashMap<BlockPos, BlockStateId>,
 }
 
 impl WorldSink for FakeWorld {
@@ -39,6 +41,9 @@ impl WorldSink for FakeWorld {
             "be {} {} {} {} {:?}",
             pos.x, pos.y, pos.z, data.kind, data.nbt
         ));
+    }
+    fn block_state_at(&self, pos: BlockPos) -> BlockStateId {
+        self.states.get(&pos).copied().unwrap_or(BlockStateId::AIR)
     }
     fn reset(&mut self, dim: &DimensionInfo) {
         self.chunks.clear();
@@ -288,6 +293,84 @@ fn block_entity_data_reaches_the_world() {
         nbt: nbt.clone(),
     }));
     assert_eq!(r.world.log, [format!("be 17 64 33 7 {:?}", nbt)]);
+}
+
+/// A chest's lid: `block_event` action 1 opens it, the animation steps 0.1 per tick
+/// (vanilla `ChestLidController`), the snapshot lerps by partial tick, and closing runs
+/// back down. Other actions and non-lid blocks (pistons use action 1 too) are ignored.
+#[test]
+fn block_events_drive_chest_lids() {
+    let mut r = Rig::new();
+    let chest = BlockPos::new(2, 64, 3);
+    let piston = BlockPos::new(5, 64, 3);
+    // The session knows the chest's state is a lid; the piston's is not.
+    r.world.states.insert(chest, BlockStateId(9));
+    r.session
+        .set_lid_states(std::iter::once(BlockStateId(9)).collect());
+    let event = |pos, action, param| {
+        ClientboundPlay::BlockEvent(cb::BlockEvent {
+            pos,
+            action,
+            param,
+            block: 0,
+        })
+    };
+    // Not a lid block: no entry ever.
+    r.apply(event(piston, 1, 1));
+    assert!(r.session.lids.is_empty());
+    // Other actions on the chest are ignored too.
+    r.apply(event(chest, 0, 1));
+    assert!(r.session.lids.is_empty());
+    // Open: one player. The lid starts stepping on the next end_tick.
+    r.apply(event(chest, 1, 1));
+    let tick = |r: &mut Rig| {
+        r.session.end_tick(
+            &InputState::default(),
+            &mut r.world,
+            &r.entities,
+            &mut r.out,
+        );
+    };
+    tick(&mut r);
+    let mut lids = Vec::new();
+    r.session.lid_states(&mut lids);
+    assert_eq!(lids.len(), 1);
+    let pair = lids[0];
+    assert_eq!(pair.0, chest);
+    let near = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() < 1e-5 && (a.1 - b.1).abs() < 1e-5;
+    assert!(near(pair.1, (0.0, 0.1)), "{:?}", pair.1);
+    // Ten open ticks reach fully open; the lerp pair then brackets 1.
+    for _ in 0..9 {
+        tick(&mut r);
+    }
+    lids.clear();
+    r.session.lid_states(&mut lids);
+    assert!(near(lids[0].1, (0.9, 1.0)), "{:?}", lids[0].1);
+    tick(&mut r);
+    lids.clear();
+    r.session.lid_states(&mut lids);
+    assert!(near(lids[0].1, (1.0, 1.0)), "{:?}", lids[0].1);
+    // Close: count 0.
+    r.apply(event(chest, 1, 0));
+    tick(&mut r);
+    lids.clear();
+    r.session.lid_states(&mut lids);
+    assert!(near(lids[0].1, (1.0, 0.9)), "{:?}", lids[0].1);
+    for _ in 0..10 {
+        tick(&mut r);
+    }
+    // At rest closed, the snapshot stops listing it (nothing to draw).
+    lids.clear();
+    r.session.lid_states(&mut lids);
+    assert!(lids.is_empty());
+    assert_eq!(r.session.lids[&chest].value, 0.0);
+    // A block update drops the lid with the chest.
+    r.apply(event(chest, 1, 1));
+    r.apply(ClientboundPlay::BlockUpdate(cb::BlockUpdate {
+        pos: chest,
+        state: 0,
+    }));
+    assert!(!r.session.lids.contains_key(&chest));
 }
 
 #[test]
@@ -1048,4 +1131,78 @@ fn an_attached_firework_boosts_the_gliding_player() {
         entity_ids: vec![20],
     }));
     assert_eq!(r.session.attached_firework, None);
+}
+
+#[test]
+fn lightmap_boss_darkening_follows_the_vanilla_ramp() {
+    // GameRenderer.tick: +0.05/tick while a boss bar asks to darken (cap 1), -0.0125/tick
+    // otherwise. The per-frame value interpolates boss_darkening_o -> boss_darkening.
+    let mut s = LightmapState::default();
+    s.boss_bars.insert(1, true);
+    s.tick();
+    assert!((s.boss_darkening - 0.05).abs() < 1e-6);
+    assert_eq!(s.boss_darkening_o, 0.0);
+    for _ in 0..40 {
+        s.tick();
+    }
+    assert_eq!(s.boss_darkening, 1.0);
+    // BossEvent.setDarkenScreen / removal through the packet action.
+    s.boss_bars.insert(7, false);
+    s.boss_event(7, &cb::BossEventAction::UpdateFlags(0x01));
+    assert!(s.boss_bars[&7]);
+    s.boss_event(7, &cb::BossEventAction::Remove);
+    assert!(!s.boss_bars.contains_key(&7));
+    // Clearing the flag ramps back down by 0.0125.
+    s.boss_bars.insert(1, false);
+    s.tick();
+    assert!((s.boss_darkening - (1.0 - 0.0125)).abs() < 1e-6);
+}
+
+#[test]
+fn lightmap_effects_and_flicker_tick() {
+    let ids = crate::player::interact::LightmapEffectIds {
+        night_vision: Some(1),
+        darkness: Some(2),
+    };
+    let mut s = LightmapState::default();
+    s.update_effect(ids, 1, 100);
+    s.update_effect(ids, 2, 50);
+    assert_eq!(s.night_vision, Some(100));
+    assert_eq!(s.darkness, Some(50));
+    // An unrelated effect changes nothing.
+    s.update_effect(ids, 9, 10);
+    assert_eq!(s.night_vision, Some(100));
+    s.tick();
+    // MobEffectInstance.tickClient decrements both durations by one.
+    assert_eq!(s.night_vision, Some(99));
+    assert_eq!(s.darkness, Some(49));
+    // Darkness blends in over 22 ticks (one step per tick); its factor brackets the frame.
+    assert!((s.darkness_blend.factor(1.0) - 1.0 / 22.0).abs() < 1e-6);
+    // Infinite durations stay -1.
+    s.update_effect(ids, 1, -1);
+    s.tick();
+    assert_eq!(s.night_vision, Some(-1));
+    // A finite effect that reaches 0 is removed (LivingEntity.tickEffects).
+    s.update_effect(ids, 1, 1);
+    s.tick();
+    assert_eq!(s.night_vision, None);
+    s.remove_effect(ids, 2);
+    assert_eq!(s.darkness, None);
+    // The flicker random walk stays in a sane range.
+    assert!(s.flicker.abs() < 1.0);
+}
+
+#[test]
+fn lightmap_lightning_flashes_for_two_ticks() {
+    // LightningBolt.tick on the client -> ClientLevel.setSkyFlashTime(2), which ClientLevel.tick
+    // decrements by one each tick.
+    let mut s = LightmapState::default();
+    s.lightning();
+    assert_eq!(s.sky_flash_time, 2);
+    s.tick();
+    assert_eq!(s.sky_flash_time, 1);
+    s.tick();
+    assert_eq!(s.sky_flash_time, 0);
+    s.tick();
+    assert_eq!(s.sky_flash_time, 0);
 }

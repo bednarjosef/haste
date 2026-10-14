@@ -1,0 +1,23 @@
+# Change settings in the vanilla Options screens and check the client applies them live.
+# The pause menu's "Options..." opens the main options screen (its FOV slider is in the
+# header); "Video Settings..." has the render distance slider. `click_text` finds each
+# widget by its label in the rendered frame (GUI-scale independent); the offset moves the
+# click off the centred label onto the slider's track. The client's log must show
+# "applied option fov = ..." and "applied option renderDistance = ..." (haste-client's
+# game thread logs one line per option a screen changed).
+wait_until joined
+wait_until settled
+wait 10
+key Escape
+wait_until screen_open
+wait 2
+click_text "Options..."
+wait 2
+click_text "FOV" 90 5
+wait 2
+click_text "Video Settings..."
+wait 2
+click_text "Render Distance" 90 5
+wait 2
+screenshot options-apply
+wait 2

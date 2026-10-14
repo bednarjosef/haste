@@ -93,6 +93,7 @@ fn terrain_far_from_origin() {
                 bob: haste_render::ViewBob::default(),
             },
             entities: &[],
+            block_entities: &[],
             gui: &gui,
             sky: SkyState {
                 time_of_day: 6000,
@@ -212,6 +213,7 @@ fn sky_times_of_day() {
                 bob: haste_render::ViewBob::default(),
             },
             entities: &[],
+            block_entities: &[],
             gui: &gui,
             sky: SkyState {
                 time_of_day: time,
@@ -293,6 +295,7 @@ fn outline_and_cracks() {
                 bob: haste_render::ViewBob::default(),
             },
             entities: &[],
+            block_entities: &[],
             gui: &gui,
             sky: SkyState {
                 time_of_day: 6000,

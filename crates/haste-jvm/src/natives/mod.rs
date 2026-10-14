@@ -78,6 +78,11 @@ pub(crate) fn register(env: &mut Env) -> Result<()> {
                 jni_str!("([B)V"),
                 state::send_packet as *mut _,
             ),
+            NativeMethod::from_raw_parts(
+                jni_str!("optionsChanged"),
+                jni_str!("(Ljava/lang/String;Ljava/lang/String;)V"),
+                state::options_changed as *mut _,
+            ),
         ]
     };
     // Safety: see above.

@@ -3,8 +3,11 @@
 use std::collections::HashMap;
 
 use ahash::AHashMap;
-use haste_core::entity::{EntitySpawn, ItemStackData, MetadataEntry, PlayerInfo, Pose};
+use haste_core::entity::{
+    EntitySpawn, ItemStackData, MetadataEntry, MetadataValue, PlayerInfo, Pose,
+};
 use haste_core::ids::{EntityId, RegistryIndex};
+use haste_core::math::Vec3;
 use haste_core::model::EntityInstance;
 use haste_core::DVec3;
 use uuid::Uuid;
@@ -18,6 +21,9 @@ use crate::riding::Riding;
 pub const HURT_TICKS: u32 = 10;
 /// Death animation duration in ticks (vanilla's `deathTime` runs to 20).
 pub const DEATH_TICKS: u32 = 20;
+/// `Creeper.DEFAULT_MAX_SWELL` (the `Fuse` component can change it; the default is all the client
+/// usually sees).
+pub const CREEPER_MAX_SWELL: i32 = 30;
 
 /// `Mth.lerp`.
 fn lerp(delta: f32, start: f32, end: f32) -> f32 {
@@ -217,6 +223,9 @@ pub struct Entity {
     /// Smoothed swimming amount (`LivingEntity.swimAmount` / `swimAmountO`), 0..1.
     pub swim_amount: f32,
     pub swim_amount_o: f32,
+    /// `LivingEntity.fallFlyTicks`: increments each tick while the fall-flying flag is set
+    /// (`LivingEntity.tick`), driving `AvatarRenderState.fallFlyingScale`.
+    pub fall_flying_ticks: u32,
     /// Ticks since spawn (`Entity.tickCount`), for `ageInTicks`.
     pub tick_count: u64,
     /// Chicken wing flap state (`Chicken.flap` / `oFlap` / `flapSpeed` / `oFlapSpeed`).
@@ -229,6 +238,16 @@ pub struct Entity {
     pub hurt_ticks: u32,
     /// Set on the death event: holds the hurt tint instead of easing out.
     pub dead: bool,
+    /// `Creeper.swell`/`oldSwell`: the client-side swell count advanced by `Creeper.tick` from
+    /// the synced swell direction, interpolated for `getSwelling(partial)`.
+    pub swell: i32,
+    pub old_swell: i32,
+    /// `IronGolem.attackAnimationTick`: set to 10 by entity event 4, decremented each tick.
+    pub attack_ticks: i32,
+    /// A dropped item entity's stack (metadata index 9, `Item`), if its metadata named one.
+    pub item: Option<ItemStackData>,
+    /// Ticks since spawn: drives the dropped items' spin and bob.
+    pub age: u32,
 }
 
 impl Entity {
@@ -260,6 +279,7 @@ impl Entity {
             swing: SwingState::default(),
             swim_amount: 0.0,
             swim_amount_o: 0.0,
+            fall_flying_ticks: 0,
             tick_count: 0,
             flap: 0.0,
             o_flap: 0.0,
@@ -268,6 +288,11 @@ impl Entity {
             flapping: 1.0,
             hurt_ticks: 0,
             dead: false,
+            swell: 0,
+            old_swell: 0,
+            attack_ticks: 0,
+            item: None,
+            age: 0,
         }
     }
 
@@ -306,6 +331,18 @@ fn update_body_yaw(e: &mut Entity, d: DVec3) {
     if head_diff.abs() > max_head {
         e.body_yaw += head_diff - head_diff.signum() * max_head;
     }
+}
+
+/// The `EntityInstance::item` entry for a tracked entity: the stack of a dropped item entity
+/// (count included; the renderer draws 1-5 copies from it), aged by the partial tick.
+fn item_of(e: &Entity, partial_tick: f32) -> Option<haste_core::model::DroppedItem> {
+    let stack = e.item.as_ref()?;
+    let item = stack.item?;
+    Some(haste_core::model::DroppedItem {
+        item,
+        count: stack.count,
+        age: e.age as f32 + partial_tick,
+    })
 }
 
 pub struct EntityStore {
@@ -534,12 +571,31 @@ impl EntityStore {
         }
     }
 
+    /// Entity event 4: a melee attack animation (`IronGolem.handleEntityEvent` sets
+    /// `attackAnimationTick = 10`; several mobs share the status).
+    pub fn mark_attack(&mut self, id: EntityId) {
+        if let Some(i) = self.slot(id) {
+            if let Some(e) = &mut self.slots[i as usize] {
+                e.attack_ticks = 10;
+            }
+        }
+    }
+
     pub fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]) {
         let Some(i) = self.slot(id) else { return };
         let Some(e) = &mut self.slots[i as usize] else {
             return;
         };
         e.metadata.apply(entries);
+        // A dropped item entity's stack: `ItemEntity.DATA_ITEM`, the first slot after
+        // Entity's eight synched fields (indices 0-7), so index 8. An emptied stack
+        // clears the drop.
+        if let Some(entry) = e.metadata.get(8) {
+            e.item = match &entry.value {
+                MetadataValue::ItemStack(s) if !s.is_empty() => Some(s.clone()),
+                _ => None,
+            };
+        }
         if let Some(pose) = e.metadata.pose {
             if pose != e.pose {
                 e.pose = pose;
@@ -618,6 +674,22 @@ impl EntityStore {
             slot.flap += slot.flapping * 2.0;
             slot.swing.tick();
             slot.hurt_ticks = slot.hurt_ticks.saturating_sub(1);
+            // `Creeper.tick`: the client advances its own swell count from the synced direction
+            // (an ignited creeper forces it to 1), clamped to [0, maxSwell].
+            slot.old_swell = slot.swell;
+            if slot.metadata.creeper_ignited {
+                slot.metadata.creeper_swell_dir = 1;
+            }
+            slot.swell = (slot.swell + slot.metadata.creeper_swell_dir).clamp(0, CREEPER_MAX_SWELL);
+            // `IronGolem.tick`: the attack animation tick counts down.
+            slot.attack_ticks = slot.attack_ticks.saturating_sub(1);
+            // `LivingEntity.tick`: fallFlyTicks counts while the fall-flying flag is set.
+            if slot.metadata.shared.elytra_flying {
+                slot.fall_flying_ticks = slot.fall_flying_ticks.saturating_add(1);
+            } else {
+                slot.fall_flying_ticks = 0;
+            }
+            slot.age = slot.age.saturating_add(1);
         }
     }
 
@@ -644,9 +716,10 @@ impl EntityStore {
 
     /// Interpolated draw list for the renderer (renderer). Players get the humanoid model (classic
     /// layout; skins arrive with renderer's texture work), known mob types the model the recorder
-    /// dumped for their vanilla layer, everything else a generic box from its current dimensions.
-    /// Each model's `setupAnim` (walk swing, head aim, attack, pose) is applied by part name;
-    /// models with no "head" part (the box) get no overrides.
+    /// dumped for their vanilla layer, everything else a generic box from its current dimensions;
+    /// a dropped item entity draws as the item itself. Each model's `setupAnim` (walk swing, head
+    /// aim, attack, pose) is applied by part name; models with no "head" part (the box) get no
+    /// overrides.
     pub fn render_instances(&self, partial_tick: f32, out: &mut Vec<EntityInstance>) {
         for slot in self.slots.iter().flatten() {
             // Hanging entities (item frames, paintings) are drawn specially, and the client
@@ -712,6 +785,18 @@ impl EntityStore {
             let is_passenger = self.riding.vehicle_of(slot.id).is_some();
             let pose =
                 crate::animation::setup_anim(slot, &model, has_head, partial_tick, is_passenger);
+            let texture = model.texture.path();
+            let body = crate::animation::body_transform(
+                slot,
+                partial_tick,
+                texture.contains("iron_golem"),
+            );
+            // `CreeperRenderer.scale`'s swell wobble; every other model is uniformly scaled.
+            let body_scale = if texture.contains("creeper") {
+                crate::animation::creeper_scale(slot, partial_tick)
+            } else {
+                Vec3::ONE
+            };
             // Living models turn with their body yaw; a non-living box follows its packet yaw.
             let yaw = if has_head {
                 slot.body_yaw_at(partial_tick)
@@ -728,9 +813,12 @@ impl EntityStore {
                 // Slime/magma cube size (`AbstractCubeMob.ID_SIZE`); 1.0 for everything else.
                 scale: crate::variants::scale_for(slot.kind, &slot.metadata),
                 pose,
+                body,
+                body_scale,
                 skin: None,
                 nametag: slot.nametag.clone(),
                 hurt: hurt_strength(slot),
+                item: item_of(slot, partial_tick),
                 decoration,
             });
         }

@@ -311,6 +311,10 @@ pub enum Step {
     MouseMove(i32, i32),
     /// Click a button at GUI coordinates.
     Click(MouseButton, i32, i32),
+    /// Click the widget whose label is `text`, at the label's position plus `(dx, dy)`. The label
+    /// is matched exactly or as `text: value` (a slider's dynamic label); the offset lets a
+    /// script hit a slider's track rather than its centred label.
+    ClickText(String, i32, i32),
     /// Press and hold a mouse button (attack/use while a screen is closed).
     MouseDown(MouseButton),
     /// Release a held mouse button.
@@ -331,6 +335,7 @@ pub enum Action {
     Text(String),
     MouseMove(i32, i32),
     Click(MouseButton, i32, i32),
+    ClickText(String, i32, i32),
     MouseDown(MouseButton),
     MouseUp(MouseButton),
     Scroll(i32),
@@ -438,6 +443,19 @@ pub fn parse(text: &str) -> Result<Vec<Step>, ScriptError> {
                 let button = MouseButton::parse(button, line)?;
                 Step::Click(button, parse_i32(x, line)?, parse_i32(y, line)?)
             }
+            "click_text" => {
+                let (text, rest) = parse_quoted(rest, "click_text", line)?;
+                let mut parts = rest.split_whitespace();
+                let dx = match parts.next() {
+                    Some(s) => parse_i32(s, line)?,
+                    None => 0,
+                };
+                let dy = match parts.next() {
+                    Some(s) => parse_i32(s, line)?,
+                    None => 0,
+                };
+                Step::ClickText(text, dx, dy)
+            }
             "mouse_down" => Step::MouseDown(MouseButton::parse(
                 first_token(rest, "mouse_down", line)?,
                 line,
@@ -477,6 +495,28 @@ fn first_token<'a>(
     rest.split_whitespace()
         .next()
         .ok_or_else(|| missing(command, line))
+}
+
+/// The first argument of a command: a `"quoted string"` (so it may contain spaces and a `:`) or a
+/// single bare word. Returns it and the rest of the line.
+fn parse_quoted<'a>(
+    rest: &'a str,
+    command: &'static str,
+    line: usize,
+) -> Result<(String, &'a str), ScriptError> {
+    let rest = rest.trim_start();
+    let Some(after) = rest.strip_prefix('"') else {
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let word = parts
+            .next()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| missing(command, line))?;
+        return Ok((word.to_owned(), parts.next().unwrap_or("")));
+    };
+    let end = after
+        .find('"')
+        .ok_or(ScriptError::MissingArgument { command, line })?;
+    Ok((after[..end].to_owned(), &after[end + 1..]))
 }
 
 fn parse_key(name: &str, line: usize) -> Result<Key, ScriptError> {
@@ -634,6 +674,10 @@ impl Runner {
                             self.advance();
                             return vec![Action::Click(button, x, y)];
                         }
+                        Step::ClickText(text, dx, dy) => {
+                            self.advance();
+                            return vec![Action::ClickText(text, dx, dy)];
+                        }
                         Step::MouseDown(button) => {
                             self.advance();
                             return vec![Action::MouseDown(button)];
@@ -684,6 +728,8 @@ mod tests {
             "type hello world",
             "mouse 160 90",
             "click right 10 20",
+            "click_text \"FOV\" 90 5",
+            "click_text Video",
             "mouse_down left",
             "mouse_up left",
             "scroll -1",
@@ -706,6 +752,8 @@ mod tests {
                 Step::Text("hello world".to_owned()),
                 Step::MouseMove(160, 90),
                 Step::Click(MouseButton::Right, 10, 20),
+                Step::ClickText("FOV".to_owned(), 90, 5),
+                Step::ClickText("Video".to_owned(), 0, 0),
                 Step::MouseDown(MouseButton::Left),
                 Step::MouseUp(MouseButton::Left),
                 Step::Scroll(-1),
