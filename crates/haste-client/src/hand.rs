@@ -154,6 +154,11 @@ pub struct Equip {
     prev_height: f32,
     /// `Player.itemSwapTicker`, reset when the held item's type changes.
     swap_ticker: u32,
+    /// `Player.attackStrengthTicker`, reset on an attack and on an item type change
+    /// (`Player.getAttackStrengthScale`); the HUD attack indicator reads it.
+    attack_strength_ticker: u32,
+    /// The held item's `minecraft:attack_speed` this tick (for the scale's delay).
+    attack_speed: f64,
     /// `Player.lastItemInMainHand`, the type seen last tick.
     last_item: Option<RegistryIndex>,
 }
@@ -167,6 +172,8 @@ impl Default for Equip {
             height: 0.0,
             prev_height: 0.0,
             swap_ticker: 0,
+            attack_strength_ticker: 0,
+            attack_speed: DEFAULT_ATTACK_SPEED,
             last_item: None,
         }
     }
@@ -178,10 +185,13 @@ impl Equip {
     /// `minecraft:attack_speed` attribute.
     pub fn tick(&mut self, item: Option<RegistryIndex>, attack_speed: f64) {
         self.prev_height = self.height;
-        // `Player.tick`: both tickers advance, and a different item type resets them.
+        self.attack_speed = attack_speed;
+        // `Player.tick`: both tickers advance, and a different item type resets both.
         self.swap_ticker += 1;
+        self.attack_strength_ticker += 1;
         if self.last_item != item {
             self.swap_ticker = 0;
+            self.attack_strength_ticker = 0;
         }
         self.last_item = item;
         // `shouldInstantlyReplaceVisibleItem`: the same item type is shown at once; a different
@@ -221,6 +231,26 @@ impl Equip {
     /// The item type the hand shows (the renderer draws the arm while it is `None`).
     pub fn item(&self) -> Option<RegistryIndex> {
         self.item
+    }
+
+    /// `Player.getAttackStrengthScale(a)`: the attack charge 0..1 over the held item's delay.
+    pub fn attack_strength_scale(&self, a: f32) -> f32 {
+        clamp(
+            (self.attack_strength_ticker as f32 + a) / swap_delay(self.attack_speed),
+            0.0,
+            1.0,
+        )
+    }
+
+    /// `Player.resetAttackStrengthTicker`: both tickers (`MultiPlayerGameMode.stopDestroyBlock`).
+    pub fn reset_attack_strength_ticker(&mut self) {
+        self.attack_strength_ticker = 0;
+        self.swap_ticker = 0;
+    }
+
+    /// `Player.resetOnlyAttackStrengthTicker` (`Player.onAttack`).
+    pub fn reset_only_attack_strength_ticker(&mut self) {
+        self.attack_strength_ticker = 0;
     }
 }
 
@@ -413,6 +443,21 @@ impl Hand {
     /// The swing progress lerped by partial tick, for a test or the HUD.
     pub fn animation(&self, partial: f32) -> f32 {
         self.swing.animation(partial)
+    }
+
+    /// The attack charge 0..1 for the HUD attack indicator (`Player.getAttackStrengthScale`).
+    pub fn attack_strength_scale(&self, a: f32) -> f32 {
+        self.equip.attack_strength_scale(a)
+    }
+
+    /// `Player.resetAttackStrengthTicker` (abort breaking, item change).
+    pub fn reset_attack_strength_ticker(&mut self) {
+        self.equip.reset_attack_strength_ticker();
+    }
+
+    /// `Player.resetOnlyAttackStrengthTicker` (`Player.onAttack`).
+    pub fn reset_only_attack_strength_ticker(&mut self) {
+        self.equip.reset_only_attack_strength_ticker();
     }
 
     /// Whether the main hand is swinging.
@@ -643,6 +688,35 @@ mod tests {
         assert!((h.x_bob().1 - want_pitch).abs() < 1e-4);
         // The pair is the previous tick's value and this one's.
         assert!((h.y_bob().0 - 60.078_125).abs() < 1e-4, "{}", h.y_bob().0);
+    }
+
+    #[test]
+    fn attack_strength_charges_over_the_item_delay_and_resets() {
+        // `Player.attackStrengthTicker` advances each tick and `getAttackStrengthScale` is
+        // (ticker + a) / (20 / attack_speed), clamped. The bare hand's attack speed 4 gives a
+        // 5 tick delay; a diamond sword's 1.6 gives 12.5.
+        let mut h = Hand::new();
+        let mut scale = Vec::new();
+        for _ in 0..6 {
+            tick(&mut h, 0.0);
+            scale.push(h.attack_strength_scale(0.0));
+        }
+        // None -> None on the first tick (no item type change), so the ticker runs 1..6.
+        for (got, want) in scale.iter().zip([0.2, 0.4, 0.6, 0.8, 1.0, 1.0]) {
+            assert!((got - want).abs() < 1e-6, "{got} != {want}");
+        }
+        // `Player.onAttack` resets only the attack ticker.
+        h.reset_only_attack_strength_ticker();
+        tick(&mut h, 0.0);
+        assert!((h.attack_strength_scale(0.0) - 0.2).abs() < 1e-6);
+        // An item type change resets it (`Player.tick`).
+        h.tick(0.0, (0.0, 0.0), true, false, stone(), 1.6);
+        assert_eq!(h.attack_strength_scale(0.0), 0.0);
+        // The sword's slower attack speed: 12 ticks -> 12 / 12.5 = 0.96.
+        for _ in 0..12 {
+            h.tick(0.0, (0.0, 0.0), true, false, stone(), 1.6);
+        }
+        assert!((h.attack_strength_scale(0.0) - 0.96).abs() < 1e-6);
     }
 
     #[test]

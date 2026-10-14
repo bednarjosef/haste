@@ -131,6 +131,8 @@ pub struct Interaction {
     /// `minecraft:data_component_type` names by protocol id, for decoding the held stack's
     /// component patch (`haste_protocol::wire::components::read_patch`).
     component_tables: Option<Arc<haste_protocol::packets::ProtocolTables>>,
+    /// The item default components (`minecraft:attribute_modifiers`) from the data generator.
+    item_components: Option<Arc<haste_data::ItemComponents>>,
     /// The held main-hand stack's decoded data and the stack it was decoded from (re-decoded
     /// when the slot's stack changes; a decode failure leaves it `None`).
     components: Option<HeldItem>,
@@ -139,8 +141,9 @@ pub struct Interaction {
 }
 
 /// The held main-hand stack's decoded components the game logic reads: what it mines
-/// (`minecraft:tool`) and the Efficiency enchantment's `mining_efficiency` contribution
-/// (`Enchantments.EFFICIENCY`'s `LevelsSquared(1.0)` effect = level^2 + 1).
+/// (`minecraft:tool`), the Efficiency enchantment's `mining_efficiency` contribution
+/// (`Enchantments.EFFICIENCY`'s `LevelsSquared(1.0)` effect = level^2 + 1), and the
+/// `minecraft:attack_speed` its attribute modifiers grant.
 #[derive(Clone, Debug)]
 struct HeldItem {
     /// The stack this was decoded from (re-decode when it changes).
@@ -149,6 +152,9 @@ struct HeldItem {
     tool: Option<haste_physics::mining::Tool>,
     /// `minecraft:mining_efficiency` from the stack's Efficiency enchantment (0 if none).
     efficiency: f64,
+    /// The player's `minecraft:attack_speed` with this item held
+    /// (`Player.getCurrentItemAttackStrengthDelay`).
+    attack_speed: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -192,6 +198,13 @@ impl Interaction {
                 ),
             ));
         }
+        if self.item_components.is_none() {
+            let c = haste_data::ItemComponents::load_default().unwrap_or_else(|e| {
+                tracing::warn!("no item attribute modifiers (attack speed from the server): {e:#}");
+                haste_data::ItemComponents::default()
+            });
+            self.item_components = Some(Arc::new(c));
+        }
     }
 
     pub fn has_block_tags(&self) -> bool {
@@ -229,11 +242,39 @@ impl Interaction {
         };
         let tool = patch.tool().map(|t| tool_from_component(t, data));
         let efficiency = efficiency_from_enchantments(&patch, data);
+        let attack_speed = self.item_attack_speed(&stack, data);
         self.components = Some(HeldItem {
             stack,
             tool,
             efficiency,
+            attack_speed,
         });
+    }
+
+    /// The player's `minecraft:attack_speed` with `stack` held: the base 4.0 plus the item's
+    /// main-hand `attack_speed` attribute modifiers, as `ItemAttributeModifiers.compute` does.
+    /// Falls back to the server-synced attribute for an item without any such modifier.
+    fn item_attack_speed(&self, stack: &ItemStackData, data: &haste_data::GameData) -> f64 {
+        let fallback = self.attrs.attack_speed;
+        let Some(item) = stack
+            .item
+            .and_then(|i| data.registries.name("minecraft:item", i))
+        else {
+            return fallback;
+        };
+        let attr = Identifier::minecraft("attack_speed");
+        let Some(ic) = &self.item_components else {
+            return fallback;
+        };
+        if ic
+            .attribute_modifiers(item)
+            .iter()
+            .any(|m| m.attribute == attr && m.applies_to_main_hand())
+        {
+            ic.main_hand_attribute(item, &attr, crate::hand::DEFAULT_ATTACK_SPEED)
+        } else {
+            fallback
+        }
     }
 
     pub(super) fn respawned(&mut self) {
@@ -360,6 +401,34 @@ impl LocalPlayer {
     /// The held main-hand stack.
     pub fn main_hand(&self) -> &ItemStackData {
         &self.int.hotbar[self.held_slot.clamp(0, 8) as usize]
+    }
+
+    /// The player's `minecraft:attack_speed` with the held item (base 4.0 plus the item's
+    /// attribute modifiers; the server-synced attribute when the item has none). Used by
+    /// `Player.getCurrentItemAttackStrengthDelay` for the equip and the attack indicator.
+    pub fn held_attack_speed(&self) -> f64 {
+        let stack = self.main_hand();
+        self.int
+            .components
+            .as_ref()
+            .filter(|h| h.stack == *stack)
+            .map_or(self.int.attrs.attack_speed, |h| h.attack_speed)
+    }
+
+    /// `Player.getAttackStrengthScale`: how charged the attack is (0..1) after
+    /// `attackStrengthTicker` ticks with the held item's delay.
+    pub fn attack_strength_scale(&self, partial: f32) -> f32 {
+        self.hand.attack_strength_scale(partial)
+    }
+
+    /// `Player.resetAttackStrengthTicker` (abort breaking, item change).
+    pub fn reset_attack_strength_ticker(&mut self) {
+        self.hand.reset_attack_strength_ticker();
+    }
+
+    /// `Player.resetOnlyAttackStrengthTicker` (`Player.onAttack`).
+    pub fn reset_only_attack_strength_ticker(&mut self) {
+        self.hand.reset_only_attack_strength_ticker();
     }
 
     /// Predicted block changes to apply to the world now (breaking), and server states released
@@ -521,12 +590,18 @@ impl LocalPlayer {
                 Some(Target::Entity { id, .. }) => {
                     out.push(ServerboundPlay::Attack(sb::Attack { entity_id: id.0 }));
                     out.push(ServerboundPlay::Punch(sb::Punch {}));
+                    // `MultiPlayerGameMode.attack` -> `Player.attack`/`resetAttackStrengthTicker`.
+                    self.reset_attack_strength_ticker();
                 }
                 Some(Target::Block(h)) => {
                     self.start_destroy(h, world, env, out);
                     out.push(ServerboundPlay::Punch(sb::Punch {}));
                 }
-                None => out.push(ServerboundPlay::Punch(sb::Punch {})),
+                None => {
+                    out.push(ServerboundPlay::Punch(sb::Punch {}));
+                    // `Minecraft.startAttack`'s MISS branch resets the attack ticker.
+                    self.reset_only_attack_strength_ticker();
+                }
             }
         }
         if input.attack {
@@ -888,6 +963,8 @@ impl LocalPlayer {
                 sequence: 0,
             }));
             self.int.progress = 0.0;
+            // `MultiPlayerGameMode.stopDestroyBlock` resets both tickers.
+            self.reset_attack_strength_ticker();
         }
     }
 

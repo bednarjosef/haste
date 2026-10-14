@@ -3,6 +3,7 @@
 //! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
 
 mod blocks;
+mod item_components;
 mod physics;
 mod registries;
 mod shapes;
@@ -11,6 +12,7 @@ mod sounds;
 use std::path::Path;
 
 pub use blocks::BlockStates;
+pub use item_components::{AttributeModifier, ItemComponents};
 pub use physics::{BlockProperties, BlockProps};
 pub use registries::Registries;
 pub use shapes::BlockShapes;

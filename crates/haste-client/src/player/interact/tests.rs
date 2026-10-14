@@ -523,6 +523,33 @@ fn held_stack_components_drive_mining_speed() {
     assert_eq!(p.ticks_to_break(), Some(2));
 }
 
+/// The held item's `minecraft:attack_speed` comes from its attribute modifiers
+/// (`Player.getCurrentItemAttackStrengthDelay`): base 4.0, diamond sword -2.4 -> 1.6, diamond
+/// pickaxe -2.8 -> 1.2, an item without the modifier keeps the base.
+#[test]
+fn held_item_attack_speed_comes_from_its_attribute_modifiers() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.p.int.prepare(data());
+    assert!((r.p.held_attack_speed() - 4.0).abs() < 1e-6, "bare hand");
+    r.p.int.hotbar[0] = item(2); // diamond_sword
+    r.tick(InteractInput::default());
+    assert!(
+        (r.p.held_attack_speed() - 1.6).abs() < 1e-6,
+        "diamond sword {}",
+        r.p.held_attack_speed()
+    );
+    r.p.int.hotbar[0] = item(1); // diamond_pickaxe
+    r.tick(InteractInput::default());
+    assert!(
+        (r.p.held_attack_speed() - 1.2).abs() < 1e-6,
+        "diamond pickaxe {}",
+        r.p.held_attack_speed()
+    );
+    r.p.int.hotbar[0] = item(3); // stick: no attack_speed modifier
+    r.tick(InteractInput::default());
+    assert!((r.p.held_attack_speed() - 4.0).abs() < 1e-6, "stick");
+}
+
 #[test]
 fn drop_item_key_sends_status_5_once_per_press() {    let mut r = Rig::new(GameMode::Survival);
     let q = InteractInput {
