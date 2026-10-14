@@ -27,6 +27,8 @@ public final class Native {
 
     /** Fills the mirror arrays with Rust's primitive player and debug state (layout: haste.gui.Mirror). */
     public static native void mirror(int[] ints, double[] doubles);
+    /** The F3 overlay's string values as "key value" lines (see Rust's GameState::debug_text). */
+    public static native String debugText();
 
     // ---- Java -> Rust ----
     /**
@@ -41,6 +43,7 @@ public final class Native {
     /** Called when a screen sends a chat message or command (Rust signs and sends it). */
     public static native void sendChat(String message, boolean command);
 
+// MERGE(menu side):
     // ---- menu mode (the connection is Rust's; the screens ask for it) ----
     /** The multiplayer screen's Join was clicked: connect to this "host[:port]" (Rust owns the connection). */
     public static native void requestJoin(String address);
@@ -69,4 +72,12 @@ public final class Native {
         boolean hardcore, boolean allowCommands, String seed, boolean generateStructures, String levelType);
     /** Whether the local singleplayer server is running (the pause screen's button label). */
     public static native boolean localWorldRunning();
+// MERGE(main side):
+    // ---- options bridge (haste.gui.OptionBridge) ----
+    /**
+     * An option changed in a vanilla options screen: the options.txt key and value, exactly as
+     * Options.save would write them. Rust applies them live (one call per change).
+     */
+    public static native void optionsChanged(String key, String value);
+// MERGE end
 }

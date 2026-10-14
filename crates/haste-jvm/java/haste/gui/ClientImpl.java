@@ -75,10 +75,15 @@ public final class ClientImpl {
     }
     public static Window getWindow(Minecraft m) { return Proxies.window; }
     public static SoundManager getSoundManager(Minecraft m) { return Proxies.sound; }
+// MERGE(menu side):
     /** The texture manager: the GPU's textures are Rust's, so registration is recorded only (see TextureImpl). */
     public static net.minecraft.client.renderer.texture.TextureManager getTextureManager(Minecraft m) {
         return TextureImpl.textures();
     }
+// MERGE(main side):
+    /** No audio device is opened in Haste, so none is available to pick (the sound options list the default only). */
+    public static java.util.List<String> getAvailableSoundDevices(SoundManager s) { return java.util.List.of(); }
+// MERGE end
     /** No narrator: a no-op proxy (isActive() is false). */
     public static net.minecraft.client.GameNarrator getNarrator(Minecraft m) { return Proxies.service(net.minecraft.client.GameNarrator.class); }
     /** No player reporting: a no-op proxy (no draft report). */
@@ -98,6 +103,42 @@ public final class ClientImpl {
     public static boolean isMultiplayerServer(Minecraft m) { return true; }
     public static net.minecraft.client.multiplayer.ServerData getCurrentServer(Minecraft m) { return null; }
     public static boolean isPaused(Minecraft m) { return false; }
+
+    /**
+     * Real vanilla Java ({@code Minecraft} builds it in its constructor). Its reload listener never runs
+     * (Haste loads no resource packs into it), so it reports no warnings, like vanilla on a GPU that is
+     * not on {@code minecraft:gpu_warnlist.json}.
+     */
+    private static final net.minecraft.client.renderer.GpuWarnlistManager GPU_WARNLIST = new net.minecraft.client.renderer.GpuWarnlistManager();
+    public static net.minecraft.client.renderer.GpuWarnlistManager getGpuWarnlistManager(Minecraft m) { return GPU_WARNLIST; }
+
+    /**
+     * Real vanilla Java, built like {@code Minecraft}'s constructor does (its reload listener never runs,
+     * so the language list is vanilla's default: en_us only). LanguageSelectScreen reads and sets the
+     * selected code on it, which {@code Options} saves as {@code lang}.
+     */
+    private static net.minecraft.client.resources.language.LanguageManager languages;
+    public static net.minecraft.client.resources.language.LanguageManager getLanguageManager(Minecraft m) {
+        if (languages == null) {
+            languages = new net.minecraft.client.resources.language.LanguageManager(m, Proxies.options.languageCode, l -> {});
+        }
+        return languages;
+    }
+
+    /**
+     * The pack repository the Resource Packs screen browses: real vanilla Java with no sources (Haste
+     * loads no resource packs yet), so it lists none and selects none. {@code Options} saves the
+     * selection it reports.
+     */
+    private static final net.minecraft.server.packs.repository.PackRepository PACKS =
+        new net.minecraft.server.packs.repository.PackRepository();
+    public static net.minecraft.server.packs.repository.PackRepository getResourcePackRepository(Minecraft m) { return PACKS; }
+    /** The player's {@code resourcepacks/} folder inside the JVM game directory (created on demand). */
+    public static java.nio.file.Path getResourcePackDirectory(Minecraft m) {
+        java.io.File dir = new java.io.File(System.getProperty("haste.minecraftDir", "."), "resourcepacks");
+        dir.mkdirs();
+        return dir.toPath();
+    }
     /** False while the canonical proxies are built (option changes then skip their side effects, like vanilla at startup). */
     static boolean running;
     public static boolean isRunning(Minecraft m) { return running; }
@@ -159,7 +200,10 @@ public final class ClientImpl {
     /** No player is blocked or restricted (Haste has no social/block list yet). */
     public static boolean isBlocked(Minecraft m, java.util.UUID id) { return false; }
     public static boolean isFriendOnlyRestricted(Minecraft m, java.util.UUID id) { return false; }
-    /** Haste sends no telemetry: no telemetry button, no telemetry screen (the options screen asks). */
+    /** Vanilla's forceUnicodeFont option (the gui-scale list accounts for its wider font). */
+    public static boolean isEnforceUnicode(Minecraft m) { return Proxies.options.forceUnicodeFont().get(); }
+    /** Re-derives the GUI scale like Minecraft.resizeGui; the Rust window picks the real size up. */
+    public static void resizeGui(Minecraft m) { scale = calculateScale(Proxies.window, Proxies.options.guiScale().get(), isEnforceUnicode(m)); }    /** Haste sends no telemetry: no telemetry button, no telemetry screen (the options screen asks). */
     public static boolean allowsTelemetry(Minecraft m) { return false; }
     /** Haste filters no chat text: the options the screen saves report unfiltered (no player reporting yet). */
     public static boolean isTextFilteringEnabled(Minecraft m) { return false; }
@@ -231,9 +275,22 @@ public final class ClientImpl {
     public static java.util.Optional<com.mojang.blaze3d.platform.VideoMode> getPreferredFullscreenVideoMode(Window w) {
         return java.util.Optional.empty();
     }
+    /** Window.calculateScale: the largest scale that keeps 320x240 GUI pixels (unicode font rounds up). */
+    public static int calculateScale(Window w, int maxScale, boolean enforceUnicode) {
+        int ww = GfxImpl.width * scale, hh = GfxImpl.height * scale, s = 1;
+        while (s != maxScale && s < ww && s < hh && ww / (s + 1) >= 320 && hh / (s + 1) >= 240) s++;
+        if (enforceUnicode && s % 2 != 0) s++;
+        return s;
+    }
+    /** The Rust window owns the real size; the requested scale is recorded for getGuiScale. */
+    public static void setGuiScale(Window w, int s) { scale = s; }
     public static int getWidth(Window w) { return GfxImpl.width * scale; }
     public static int getHeight(Window w) { return GfxImpl.height * scale; }
     public static int getScreenWidth(Window w) { return GfxImpl.width * scale; }
     public static int getScreenHeight(Window w) { return GfxImpl.height * scale; }
     public static boolean isFocused(Window w) { return true; }
+    /** The display is Rust's (winit): no vanilla `Monitor` objects, so no monitor is "best". */
+    public static com.mojang.blaze3d.platform.Monitor findBestMonitor(Window w) { return null; }
+    /** Fullscreen is Rust's window policy; nothing to change when leaving Video Settings. */
+    public static void changeFullscreenVideoMode(Window w) {}
 }

@@ -370,10 +370,18 @@ public final class GfxImpl {
             net.minecraft.client.gui.screens.inventory.tooltip.ClientTooltipPositioner pos, int x, int y, boolean focused) {
         setTooltipForNextFrame(g, f, lines, x, y);
     }
+// MERGE(menu side):
     public static void setTooltipForNextFrame(GuiGraphicsExtractor g, Font f, List<FormattedCharSequence> lines,
             java.util.Optional<net.minecraft.world.inventory.tooltip.TooltipComponent> image,
             net.minecraft.client.gui.screens.inventory.tooltip.ClientTooltipPositioner pos,
             int x, int y, boolean replaceExisting, Identifier style) {
+// MERGE(main side):
+    /** Item tooltips hovered through {@code setTooltipForNextFrame(Font, ItemStack, ...)} land here with a positioner. */
+    public static void setTooltipForNextFrame(GuiGraphicsExtractor g, Font f, List<FormattedCharSequence> lines,
+            java.util.Optional<net.minecraft.world.inventory.tooltip.TooltipComponent> image,
+            net.minecraft.client.gui.screens.inventory.tooltip.ClientTooltipPositioner pos, int x, int y, boolean focused,
+            Identifier style) {
+// MERGE end
         setTooltipForNextFrame(g, f, lines, x, y);
     }
     public static void setTooltipForNextFrame(GuiGraphicsExtractor g, List<FormattedCharSequence> lines, int x, int y) {

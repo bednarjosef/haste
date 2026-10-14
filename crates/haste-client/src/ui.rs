@@ -46,6 +46,27 @@ use parking_lot::Mutex;
 
 pub use haste_jvm::keys;
 
+/// The bit values of `haste.gui.OptionBridge`'s game-input and click masks (the Java constants
+/// are the source; keep these in step with them).
+pub mod bits {
+    /// The movement and action `KeyMapping`s' down state (`Bridge.gameInput`).
+    pub const B_FORWARD: i32 = 1;
+    pub const B_BACK: i32 = 1 << 1;
+    pub const B_LEFT: i32 = 1 << 2;
+    pub const B_RIGHT: i32 = 1 << 3;
+    pub const B_JUMP: i32 = 1 << 4;
+    pub const B_SNEAK: i32 = 1 << 5;
+    pub const B_SPRINT: i32 = 1 << 6;
+    pub const B_ATTACK: i32 = 1 << 7;
+    pub const B_USE: i32 = 1 << 8;
+
+    /// Clicks of the action `KeyMapping`s not yet consumed (`Bridge.consumeClicks`).
+    pub const C_HOTBAR_0: i32 = 1;
+    pub const C_DROP: i32 = 1 << 9;
+    pub const C_SWAP_OFFHAND: i32 = 1 << 10;
+    pub const C_JUMP: i32 = 1 << 11;
+}
+
 /// The HUD and the vanilla screens of one client. See the module documentation.
 #[derive(Clone)]
 pub struct Ui {
@@ -356,8 +377,7 @@ impl Ui {
         }
     }
 
-    /// Everything the UI sends this tick, in order: packets vanilla code sent, chat and commands
-    /// typed in the chat screen, the selected hotbar slot when it changed.
+    /// Everything the UI sends this tick, in order: packets vanilla code sent, chat and commands    /// typed in the chat screen, the selected hotbar slot when it changed.
     pub fn drain_outgoing(&self, out: &mut Vec<ServerboundPlay>) {
         let (packets, chat, slot) =
             self.state(|s| (s.take_outgoing(), s.take_sent(), s.selected_slot));
@@ -395,6 +415,38 @@ impl Ui {
         }
     }
 
+    /// The option changes vanilla screens made since the last call, as options.txt key/value
+    /// pairs, oldest first. The client applies each to its live options (FOV, render distance,
+    /// volumes, key binds, ...); `haste.gui.OptionBridge` reports them from vanilla's own
+    /// `OptionInstance.onValueUpdate` callbacks.
+    pub fn drain_option_changes(&self) -> Vec<(String, String)> {
+        self.state(|s| s.take_option_changes())
+    }
+
+    /// A game key event (no screen open, SDL3 scancode) mirrored into the vanilla `KeyMapping`s,
+    /// vanilla's `KeyboardHandler.keyPress` (press sets the down state and counts a click).
+    pub fn game_key(&self, scancode: i32, pressed: bool) {
+        self.gui().game_key(scancode, pressed);
+    }
+
+    /// A game mouse button (no screen open, vanilla numbering) mirrored into the vanilla
+    /// `KeyMapping`s, vanilla's `MouseHandler.onPress`.
+    pub fn game_mouse(&self, button: i32, pressed: bool) {
+        self.gui().game_mouse(button, pressed);
+    }
+
+    /// The down state of the movement and action `KeyMapping`s as a [`bits`] mask: the controls
+    /// the client reads are the player's own bindings.
+    pub fn game_input(&self) -> i32 {
+        self.gui().game_input()
+    }
+
+    /// Consumes the action `KeyMapping` clicks (hotbar, drop, swap offhand, jump) since the last
+    /// call as a [`bits`] mask, one bit per click.
+    pub fn consume_clicks(&self) -> i32 {
+        self.gui().consume_clicks()
+    }
+
     fn next_salt(&self) -> i64 {
         // SplitMix64 over a counter: unpredictable enough for an unsigned message's salt
         let mut z = self
@@ -416,6 +468,10 @@ impl Ui {
             gui.key(key, keycode, mods, pressed);
             return true;
         }
+        // No screen: vanilla's `KeyboardHandler.keyPress` sets the `KeyMapping`s (`handlesGameInput`),
+        // including the HUD's own keys, which are KeyMappings in vanilla too. The client reads the
+        // movement and action mappings back through `game_input`/`consume_clicks`.
+        gui.game_key(key, pressed);
         if key == keys::TAB {
             self.shared.tab_down.store(pressed, Ordering::Relaxed);
             gui.set_tab_list_visible(pressed);
@@ -467,10 +523,13 @@ impl Ui {
 
     /// A mouse button (vanilla numbering: 1 left, 2 middle, 3 right) at (x, y) in GUI pixels.
     pub fn mouse_button(&self, x: f64, y: f64, button: i32, pressed: bool) -> bool {
-        if !self.gui().is_open() {
+        let gui = self.gui();
+        if !gui.is_open() {
+            // No screen: vanilla's `MouseHandler.onPress` sets the mouse `KeyMapping`s.
+            gui.game_mouse(button, pressed);
             return false;
         }
-        self.gui().mouse(x, y, Some((button, pressed)));
+        gui.mouse(x, y, Some((button, pressed)));
         true
     }
 
@@ -512,6 +571,11 @@ impl Ui {
     /// Whether a screen is open (the client releases the mouse and stops game input).
     pub fn screen_open(&self) -> bool {
         self.gui().is_open()
+    }
+
+    /// Whether the F3 debug overlay is on (its strings are only built then).
+    pub fn debug_shown(&self) -> bool {
+        self.gui().debug_shown()
     }
 
     /// Whether vanilla code wants the mouse grabbed (e.g. after "Back to Game").

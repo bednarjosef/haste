@@ -6,10 +6,12 @@
 
 pub mod animation;
 pub mod arena;
+pub mod blockentity;
 pub mod entity;
 pub mod fluid;
 pub mod fog;
 pub mod gui;
+pub mod lightmap;
 pub mod mesher;
 pub mod occlusion;
 pub mod overlay;
@@ -21,6 +23,10 @@ pub mod timing;
 pub mod tint;
 pub mod vertex;
 
+pub use blockentity::{
+    chest_texture, kind_of, shulker_texture, xmas_textures, BlockEntityInstance, BlockEntityKind,
+    ChestHalf, ChestMaterial,
+};
 pub use entity::{default_skin, EntityRenderer, FirstPerson, Nametag, TickPair};
 pub use fog::{setup_fog, FogData, FogEnvironment};
 pub use gui::{GuiRenderer, GuiStats, ScreenNametag};
@@ -30,7 +36,7 @@ pub use particles::{
     DustOption, ParticleRenderer, ParticleSpawn, ParticleTypes, Particles, MAX_PARTICLES,
 };
 pub use pipeline::{upload_atlas, upload_section, Gpu, SectionGpuMesh};
-pub use renderer::{Camera, FrameInput, FrameStats, Renderer, SkyState, ViewBob};
+pub use renderer::{Camera, FrameInput, FrameStats, LightmapFrame, Renderer, SkyState, ViewBob};
 pub use sky::{SkyColors, SkyKind};
 pub use timing::FrameTimings;
 pub use tint::{BiomeClimate, BiomeColors, BiomeSource, Colormaps, GrassModifier};

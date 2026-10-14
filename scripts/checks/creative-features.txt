@@ -1,0 +1,9 @@
+# The creative inventory: every tab's items are built from the server's enabled features
+# (isFeatureEnabled), so chest and oak_door appear in the Building/Functional Blocks tabs.
+wait_until joined
+wait_until settled
+key E
+wait_until screen_open
+screenshot creative-features
+key E
+wait_until screen_closed

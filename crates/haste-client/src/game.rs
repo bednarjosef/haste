@@ -8,7 +8,7 @@
 //! entity render instances, never across `Renderer::render`. Everything else the render thread
 //! needs per frame is a small `Copy` value in [`Shared::view`].
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -20,7 +20,7 @@ use haste_protocol::haste_core::chunk::{BlockEntityData, ChunkData, LightData};
 use haste_protocol::haste_core::game::{DimensionInfo, GameMode, TICK_SECONDS};
 use haste_protocol::haste_core::input::{InputState, InteractInput};
 use haste_protocol::haste_core::math::Vec3;
-use haste_protocol::haste_core::model::{EntityInstance, PoseOverrides};
+use haste_protocol::haste_core::model::{BodyTransform, EntityInstance, PoseOverrides};
 use haste_protocol::haste_core::view::{BlockView, CollisionShapes, DirtyTracker};
 use haste_protocol::haste_core::{
     BlockPos, BlockStateId, ChunkPos, Direction, EntityId, Identifier, RegistryIndex, SectionPos,
@@ -206,6 +206,8 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
         head_yaw: yaw,
         scale: 1.0,
         pose,
+        body: BodyTransform::default(),
+        body_scale: Vec3::ONE,
         // The skin servers send for other players is not synced for ourselves; the renderer's
         // default skin for our UUID is what vanilla shows without a downloaded skin.
         skin: Some(haste_render::default_skin(uuid).0),
@@ -214,6 +216,7 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
         // tick of the hit, fading over the 10 hurt ticks (vanilla's hurtTime / hurtDuration).
         hurt: (view.hurt_ticks.min(crate::net::HURT_TILT_TICKS) as f32
             / crate::net::HURT_TILT_TICKS as f32),
+        item: None,
         decoration: None,
     }
 }
@@ -281,6 +284,16 @@ pub struct ViewState {
     /// Body pose metadata for the own model (`None`: the physics pose only knows standing,
     /// crouching and swimming).
     pub pose: Option<haste_core::entity::Pose>,
+    /// Lightmap per-tick state the render thread folds into the lightmap by partial tick:
+    /// the block-light flicker, the night-vision effect duration (`None` without it), the
+    /// darkness effect's blend state, the boss-overlay world darkening (this tick and the
+    /// last), the lightning sky flash, and the player's tick count for the darkness pulse.
+    pub lightmap_flicker: f32,
+    pub lightmap_night_vision: Option<i32>,
+    pub lightmap_darkness_blend: haste_render::lightmap::BlendState,
+    pub lightmap_boss_darkening: (f32, f32),
+    pub lightmap_lightning: bool,
+    pub lightmap_tick_count: i32,
 }
 
 /// The per-tick part of the first-person hand: the held item, the light at the eye and this
@@ -395,6 +408,13 @@ pub struct Shared {
     pub view: Mutex<ViewState>,
     /// Break cracks to draw (`Session::breaking_stages`), copied once per tick.
     pub breaking: Mutex<Vec<(BlockPos, u8)>>,
+    /// Lid animations to draw (`Session::lid_states`): (position, open value at the last
+    /// tick's start and end), copied once per tick; the render thread lerps by partial tick.
+    pub block_entity_lids: Mutex<Vec<(BlockPos, (f32, f32))>>,
+    /// Block entity type names by synced registry id (`minecraft:block_entity_type`), for
+    /// resolving what each stored block entity is; the static registry's order when the server
+    /// did not sync one (vanilla servers' ids agree with the data generator's).
+    pub block_entity_names: Vec<haste_core::Identifier>,
     /// Particles (`level_particles`): the game thread spawns and ticks them, the render
     /// thread draws them.
     pub particles: SharedParticles,
@@ -416,10 +436,24 @@ pub struct Shared {
     pub ui: Mutex<Option<Ui>>,
     /// The HUD's JVM failed to start (no JDK, missing cache): there will be no HUD, ever.
     pub hud_failed: AtomicBool,
+    /// The options the game is running with right now: loaded at join, then updated live from
+    /// the vanilla options screens through the option bridge ([`crate::ui::Ui`]). The render
+    /// thread copies it once per frame; the game thread is the only writer.
+    pub live_options: Mutex<haste_setup::options::Options>,
+    /// Bumped every time [`Shared::live_options`] changes, so the render thread copies the
+    /// options only when they changed (never a per-frame clone).
+    pub options_version: AtomicU64,
+    /// F3's tps line: packets sent per second (f64 bits), updated once per second by the game
+    /// thread from the connection's counters.
+    pub debug_tx: AtomicU64,
+    /// Packets received per second (f64 bits).
+    pub debug_rx: AtomicU64,
 }
 
 impl Shared {
-    /// Shared state for a fresh connection.
+    /// Shared state for a fresh connection. `block_entity_names` are the
+    /// `minecraft:block_entity_type` names by synced id (see [`Shared::block_entity_names`]).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         data: Arc<GameData>,
         world: World,
@@ -427,6 +461,8 @@ impl Shared {
         view_distance: i32,
         particles: haste_render::Particles,
         skin: (Identifier, bool),
+        block_entity_names: Vec<Identifier>,
+        options: haste_setup::options::Options,
     ) -> Self {
         let has_sky = world.dimension().has_skylight;
         Self {
@@ -464,8 +500,16 @@ impl Shared {
                 look: (0.0, 0.0),
                 prev_feet: DVec3::ZERO,
                 pose: None,
+                lightmap_flicker: 0.0,
+                lightmap_night_vision: None,
+                lightmap_darkness_blend: Default::default(),
+                lightmap_boss_darkening: (0.0, 0.0),
+                lightmap_lightning: false,
+                lightmap_tick_count: 0,
             }),
             breaking: Mutex::new(Vec::new()),
+            block_entity_lids: Mutex::new(Vec::new()),
+            block_entity_names,
             particles: Mutex::new(particles),
             input: Mutex::new(SharedInput::default()),
             sound: Mutex::new(None),
@@ -474,6 +518,10 @@ impl Shared {
             skin,
             ui: Mutex::new(None),
             hud_failed: AtomicBool::new(false),
+            live_options: Mutex::new(options),
+            options_version: AtomicU64::new(1),
+            debug_tx: AtomicU64::new(0),
+            debug_rx: AtomicU64::new(0),
         }
     }
 
@@ -530,6 +578,9 @@ impl WorldSink for TrackedWorld<'_> {
     fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData) {
         WorldSink::set_block_entity(self.world, pos, data)
     }
+    fn block_state_at(&self, pos: BlockPos) -> BlockStateId {
+        WorldSink::block_state_at(self.world, pos)
+    }
     fn reset(&mut self, dim: &DimensionInfo) {
         let loaded: Vec<ChunkPos> = self.world.loaded_chunks().collect();
         for c in loaded {
@@ -562,6 +613,11 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>, existing_ui: Option<Ui>) 
     let tick = Duration::from_secs_f64(TICK_SECONDS);
     let mut next = Instant::now();
     let mut gone = Vec::new();
+    // F3's tx/rx rates: the connection's counters sampled once per second (vanilla's
+    // `Connection.getAverageSentPackets` is a 1 s window too).
+    let mut stats_second = Instant::now();
+    let mut last_in = 0u64;
+    let mut last_out = 0u64;
     // The JVM for the HUD takes tens of seconds to start: on its own thread, in parallel with
     // joining (the connection would time out if we waited here). One warning, no retries: a
     // client without a JDK or cache keeps playing without a HUD.
@@ -579,6 +635,20 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>, existing_ui: Option<Ui>) 
         }
         if let Err(e) = tick_once(&mut driver, &shared, &mut gone, &mut jvm) {
             break format!("tick failed: {e:#}");
+        }
+        if stats_second.elapsed() >= Duration::from_secs(1) {
+            let s = driver.stats();
+            shared.debug_tx.store(
+                ((s.packets_out - last_out) as f64).to_bits(),
+                Ordering::Relaxed,
+            );
+            shared.debug_rx.store(
+                ((s.packets_in - last_in) as f64).to_bits(),
+                Ordering::Relaxed,
+            );
+            last_out = s.packets_out;
+            last_in = s.packets_in;
+            stats_second = Instant::now();
         }
         if driver.is_closed() {
             break driver
@@ -600,8 +670,48 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>, existing_ui: Option<Ui>) 
     driver.disconnect();
 }
 
-/// Starts the JVM for the HUD on its own thread (tens of seconds; the connection would time
-/// out if the game thread waited). On failure: one warning and `shared.hud_failed` set, then
+/// Applies the option changes a vanilla screen made to the running client: the shared live
+/// options (FOV, GUI scale, mouse sensitivity, volumes, ... the render thread reads them), the
+/// render distance the mesher uses (capped by the server's view distance, like at join) and the
+/// sound volumes. One info log line per applied option, the way vanilla applies each change the
+/// moment the player makes it (`OptionInstance.set` -> `onValueUpdate`).
+fn apply_option_changes(shared: &Shared, driver: &NetDriver, changes: Vec<(String, String)>) {
+    let mut sound_changed = false;
+    let mut render_distance = None;
+    let mut applied = false;
+    {
+        let mut live = shared.live_options.lock();
+        for (key, value) in changes {
+            if !live.apply_one(&key, &value) {
+                continue;
+            }
+            tracing::info!("applied option {key} = {value}");
+            applied = true;
+            sound_changed |= key.starts_with("soundCategory_");
+            if key == "renderDistance" {
+                render_distance = Some(live.render_distance as i32);
+            }
+        }
+    }
+    if !applied {
+        return;
+    }
+    // Bumped after the lock is released: a reader that sees the new version will see the new
+    // options when it locks.
+    shared.options_version.fetch_add(1, Ordering::Relaxed);
+    if let Some(rd) = render_distance {
+        // The server's view distance still caps what we mesh, like at join.
+        shared.view.lock().view_distance = driver.login().view_distance.min(rd);
+    }
+    if sound_changed {
+        let volumes = shared.live_options.lock().sound;
+        if let Some(sounds) = shared.sound.lock().as_mut() {
+            sounds.set_volumes(&volumes);
+        }
+    }
+}
+
+/// Starts the JVM for the HUD on its own thread (tens of seconds; the connection would time/// out if the game thread waited). On failure: one warning and `shared.hud_failed` set, then
 /// the client keeps running without a HUD.
 fn spawn_jvm(shared: &Arc<Shared>) -> HudSlot {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -760,6 +870,10 @@ fn tick_once(
         // Held buttons stay; the press-only middle click, drop/swap presses and the hotbar choice
         // are consumed.
         let mut interact = shared_input.interact;
+        // The click counts (vanilla's KeyMapping.clickCount) are drained into the player, which
+        // consumes them in `Minecraft.handleKeybinds`' consumeClick loops.
+        let attack_clicks = std::mem::take(&mut shared_input.interact.attack_clicks);
+        let use_clicks = std::mem::take(&mut shared_input.interact.use_clicks);
         shared_input.interact.pick_block = false;
         shared_input.interact.drop_item = false;
         shared_input.interact.drop_stack = false;
@@ -779,6 +893,12 @@ fn tick_once(
             }
         }
         driver.session.player.set_interact(interact);
+        for _ in 0..attack_clicks {
+            driver.session.player.queue_attack_click();
+        }
+        for _ in 0..use_clicks {
+            driver.session.player.queue_use_click();
+        }
         SharedInput {
             toggle_flight: shared_input.toggle_flight,
             interact: shared_input.interact,
@@ -815,6 +935,12 @@ fn tick_once(
         breaking.clear();
         driver.session.breaking_stages(&mut breaking);
     }
+    // The lids' open targets (vanilla routes `block_event` to the block entity).
+    {
+        let mut lids = shared.block_entity_lids.lock();
+        lids.clear();
+        driver.session.lid_states(&mut lids);
+    }
     // Particles: spawn what the packets brought, then one 20 Hz simulation step. The camera
     // for `ClientLevel.doAddParticle`'s 32-block limiter is the player's eye.
     {
@@ -833,6 +959,12 @@ fn tick_once(
         // a second time). The server's `set_held_slot` reaches both sides alike.
         ui.set_selected_slot(driver.session.player.held_slot);
         ui.tick();
+        // Every option a vanilla screen changed this tick reaches the running client live
+        // (vanilla's `OptionInstance.onValueUpdate` callbacks, reported through the bridge).
+        let changes = ui.drain_option_changes();
+        if !changes.is_empty() {
+            apply_option_changes(shared, driver, changes);
+        }
         ui.drain_outgoing(&mut ui_out);
     }
     for p in ui_out {
@@ -844,6 +976,8 @@ fn tick_once(
     driver
         .session
         .tick_camera(Some(shared.data.as_ref()), input.first_person);
+    // The lightmap's per-tick state (vanilla `GameRenderer.tick` + the effect durations).
+    driver.session.lightmap.tick();
     // The first-person hand's tick, in vanilla's order (`LivingEntity.baseTick`, then
     // `Player.tick`, then `FirstPersonHandsAndItems.tick`, with the walk bob in `aiStep` before
     // them); the interaction step above ran the attacks and uses that started the swings. In
@@ -893,6 +1027,13 @@ fn tick_once(
     view.has_position = s.player.has_position;
     view.feet = feet;
     view.pose = player_pose(s);
+    let lm = &s.lightmap;
+    view.lightmap_flicker = lm.flicker;
+    view.lightmap_night_vision = lm.night_vision;
+    view.lightmap_darkness_blend = lm.darkness_blend;
+    view.lightmap_boss_darkening = (lm.boss_darkening_o, lm.boss_darkening);
+    view.lightmap_lightning = lm.sky_flash_time > 0;
+    view.lightmap_tick_count = lm.tick_count;
     view.eye_height = s.player.eye_height();
     view.time_of_day = s.time_of_day.unwrap_or(6000);
     view.has_sky = s.dimension.has_skylight;

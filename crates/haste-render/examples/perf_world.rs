@@ -153,6 +153,7 @@ fn measure(
             bob: haste_render::ViewBob::default(),
         },
         entities: &[],
+        block_entities: &[],
         gui: &gui,
         sky,
         partial_tick: 0.0,
