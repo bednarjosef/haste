@@ -127,6 +127,69 @@ pub(crate) extern "system" fn request_quit<'l>(_env: EnvUnowned<'l>, _c: JClass<
     with_state(|s| s.quit_requested = true);
 }
 
+/// The world list's "Play Selected World": the world folder to start the local server for.
+pub(crate) extern "system" fn request_open_world<'l>(
+    mut env: EnvUnowned<'l>,
+    _c: JClass<'l>,
+    level_id: JString<'l>,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let level_id = level_id.try_to_string(env)?;
+        tracing::info!("singleplayer world requested by the world list: {level_id}");
+        with_state(|s| {
+            s.open_world_requested = Some(level_id);
+            s.join_cancelled = false;
+        });
+        Ok(())
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// The create screen's "Create New World": the world to make with these settings.
+#[allow(clippy::too_many_arguments)]
+pub(crate) extern "system" fn request_create_world<'l>(
+    mut env: EnvUnowned<'l>,
+    _c: JClass<'l>,
+    folder: JString<'l>,
+    name: JString<'l>,
+    game_mode: jint,
+    difficulty: jint,
+    hardcore: jboolean,
+    allow_commands: jboolean,
+    seed: JString<'l>,
+    generate_structures: jboolean,
+    level_type: JString<'l>,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let request = crate::proxies::CreateWorldRequest {
+            folder: folder.try_to_string(env)?,
+            name: name.try_to_string(env)?,
+            game_mode,
+            difficulty,
+            hardcore,
+            allow_commands,
+            seed: seed.try_to_string(env)?,
+            generate_structures,
+            level_type: level_type.try_to_string(env)?,
+        };
+        tracing::info!("world creation requested by the create screen: {request:?}");
+        with_state(|s| {
+            s.create_world_requested = Some(request);
+            s.join_cancelled = false;
+        });
+        Ok(())
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Whether the local singleplayer server is running (the pause screen's button label).
+pub(crate) extern "system" fn local_world_running<'l>(
+    _env: EnvUnowned<'l>,
+    _c: JClass<'l>,
+) -> jboolean {
+    with_state(|s| s.local_world_running)
+}
+
 /// Server-list ping through haste-protocol on its own thread (vanilla pings from a thread pool;
 /// the result reaches Java on the next `takePingResults`). One thread per address, like the
 /// vanilla pinger's one connection per address; a screen holds at most a handful of entries.

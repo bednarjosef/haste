@@ -84,6 +84,21 @@ pub(crate) fn register(env: &mut Env) -> Result<()> {
                 state::request_quit as *mut _,
             ),
             NativeMethod::from_raw_parts(
+                jni_str!("requestOpenWorld"),
+                jni_str!("(Ljava/lang/String;)V"),
+                state::request_open_world as *mut _,
+            ),
+            NativeMethod::from_raw_parts(
+                jni_str!("requestCreateWorld"),
+                jni_str!("(Ljava/lang/String;Ljava/lang/String;IIZZLjava/lang/String;ZLjava/lang/String;)V"),
+                state::request_create_world as *mut _,
+            ),
+            NativeMethod::from_raw_parts(
+                jni_str!("localWorldRunning"),
+                jni_str!("()Z"),
+                state::local_world_running as *mut _,
+            ),
+            NativeMethod::from_raw_parts(
                 jni_str!("startPing"),
                 jni_str!("(Ljava/lang/String;)V"),
                 state::start_ping as *mut _,

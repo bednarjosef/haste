@@ -676,32 +676,17 @@ fn tick_once(
     jvm: &mut HudSlot,
 ) -> anyhow::Result<()> {
     // Once the JVM arrives (the session joined before the game thread started): build the
-// MERGE(menu side):
     // `Ui` and give the JVM the registries, tags and the local player. Menu mode's UI arrives
     // pre-built (its JVM opened the title screen); only `joined` runs for it.
     if let Some(ui) = jvm.take_ui() {
-        let mut slot = shared.ui.lock();
-        if slot.is_none() {
-            let ui = match ui {
-                HudArrival::Fresh(host) => Ui::new(host),
-                HudArrival::Menu(ui) => ui,
-            };
-            let t = Instant::now();
-            match ui.joined(driver.connection(), driver.login()) {
-                Ok(()) => {
-                    tracing::info!(
-                        "HUD joined in {:.0} ms; the vanilla HUD and chat are live",
-                        t.elapsed().as_secs_f64() * 1000.0
-                    );
-                    *slot = Some(ui);
-// MERGE(main side):
-    // `Ui` and give the JVM the registries, tags and the local player.
-    if let Some(host) = jvm.take() {
         let mut created = false;
         {
             let mut slot = shared.ui.lock();
             if slot.is_none() {
-                let ui = Ui::new(host);
+                let ui = match ui {
+                    HudArrival::Fresh(host) => Ui::new(host),
+                    HudArrival::Menu(ui) => ui,
+                };
                 let t = Instant::now();
                 match ui.joined(driver.connection(), driver.login()) {
                     Ok(()) => {
@@ -729,7 +714,6 @@ fn tick_once(
                     for p in backlog {
                         ui.handle(&p);
                     }
-// MERGE end
                 }
             }
         }

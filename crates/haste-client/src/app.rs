@@ -1112,10 +1112,14 @@ impl Menu {
                     )?;
                     // Vanilla reads and writes its own files (servers.dat, options.txt) in the
                     // game directory: Haste's config directory, where the saved server list
-                    // already lives (haste-setup's servers.dat).
+                    // already lives (haste-setup's servers.dat). Singleplayer worlds live next
+                    // to it (haste-setup's worlds module); the world list reads that dir.
                     cfg.game_dir = haste_setup::servers::path()
                         .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
                         .unwrap_or(cfg.game_dir);
+                    if let Some(dir) = haste_setup::worlds::worlds_dir() {
+                        cfg.singleplayer_dir = dir;
+                    }
                     JvmHost::start(cfg).map_err(|e| anyhow::anyhow!("{e}"))
                 })();
                 match result {
@@ -1166,6 +1170,7 @@ fn menu_screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut renderer = Renderer::new_offscreen(args.width, args.height, &mut assets, &data.blocks)?;
     renderer.set_item_registry(&data.registries);
     let deadline = Instant::now() + Duration::from_secs(args.seconds.max(60));
+    let options = load_options();
     let input = InputRouter::default();
     let mut ui: Option<crate::ui::Ui> = None;
     let mut frames = 0u32;
@@ -1177,7 +1182,7 @@ fn menu_screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             }
         }
         if let Some(u) = ui.as_mut() {
-            let (gui, camera, sky, partial) = menu_frame(u, &mut renderer, &input);
+            let (gui, camera, sky, partial) = menu_frame(u, &mut renderer, &input, &options);
             let frame = FrameInput {
                 camera,
                 entities: &[],
@@ -1186,6 +1191,7 @@ fn menu_screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
                 partial_tick: partial,
                 block_target: None,
                 breaking: &[],
+                camera_entity: None,
             };
             renderer.render(&frame)?;
             frames += 1;
@@ -1220,11 +1226,12 @@ fn menu_frame(
     ui: &mut crate::ui::Ui,
     renderer: &mut Renderer,
     input: &InputRouter,
+    options: &Options,
 ) -> (GuiFrame, Camera, SkyState, f32) {
     let (w, h) = renderer.size();
-    let gui = ui
-        .frame(w / GUI_SCALE, h / GUI_SCALE, GUI_SCALE, input.mouse, 0.0)
-        .clone();
+    let scale = resolve_gui_scale(u32::from(options.gui_scale), w, h);
+    let (gw, gh) = gui_scaled_size(w, h, scale);
+    let gui = ui.frame(gw, gh, scale, input.mouse, 0.0).clone();
     (gui, menu_camera(), menu_sky(), 0.0)
 }
 
@@ -1236,6 +1243,7 @@ fn menu_camera() -> Camera {
         pitch: 0.0,
         fov_deg: 70.0,
         roll_deg: 0.0,
+        bob: haste_render::ViewBob::default(),
     }
 }
 
@@ -1438,16 +1446,6 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-// MERGE(menu side):
-/// `--script FILE`: with `--server`, join like `--screenshot` and drive the parsed script's
-/// actions every game tick (20 Hz) through the same input routing the window uses
-/// (`InputRouter`: the UI first, then the game). Without one, menu mode: the title screen in
-/// the same offscreen window, the script clicks through it (Multiplayer, the server list,
-/// Join) and the join the screen requests creates the session, carrying the UI into the game.
-/// `screenshot NAME` actions save the frame (HUD and open screens included) as
-/// `target/shots/script-NAME.png`. `Error` actions (a `wait_until` timeout) and `Finished` end
-/// the run; an error exits non-zero.
-// MERGE(main side):
 /// A script mouse button in vanilla's numbering (1 left, 2 middle, 3 right).
 fn mouse_button_id(button: script::MouseButton) -> i32 {
     match button {
@@ -1476,12 +1474,14 @@ fn log_script_frame(frame: &GuiFrame, name: &str) {
     );
 }
 
-/// `--script FILE`: join like `--screenshot`, then drive the parsed script's actions every
-/// game tick (20 Hz) through the same input routing the window uses (`InputRouter`: the UI
-/// first, then the game), rendering every frame offscreen. `screenshot NAME` actions save
-/// the frame (HUD and open screens included) as `target/shots/script-NAME.png`. `Error`
-/// actions (a `wait_until` timeout) and `Finished` end the run; an error exits non-zero.
-// MERGE end
+/// `--script FILE`: with `--server`, join like `--screenshot` and drive the parsed script's
+/// actions every game tick (20 Hz) through the same input routing the window uses
+/// (`InputRouter`: the UI first, then the game). Without one, menu mode: the title screen in
+/// the same offscreen window, the script clicks through it (Singleplayer, the world list, the
+/// create screen, or Multiplayer) and the join the screens request creates the session,
+/// carrying the UI into the game. `screenshot NAME` actions save the frame (HUD and open
+/// screens included) as `target/shots/script-NAME.png`. `Error` actions (a `wait_until`
+/// timeout) and `Finished` end the run; an error exits non-zero.
 pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     let text = std::fs::read_to_string(file)
         .with_context(|| format!("reading script {}", file.display()))?;
@@ -1505,6 +1505,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     };
     let mut shared = session.as_ref().map(|s| s.shared.clone());
     let mut assets = open_assets()?;
+    let options = load_options();
     let data = net::load_game_data()?;
     let mut renderer = Renderer::new_offscreen(args.width, args.height, &mut assets, &data.blocks)?;
     if let Some(s) = &session {
@@ -1529,13 +1530,10 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     // Screenshot actions of this tick, saved after the frame is rendered (the readback must
     // include the frame the actions just produced: an open screen, the typed chat).
     let mut shots: Vec<String> = Vec::new();
-// MERGE(menu side):
     // The last rendered GUI frame (click_text finds its label in it).
     let mut last_gui = GuiFrame::default();
-// MERGE(main side):
     // An F2 press this tick: save the frame to the config screenshots dir after it is rendered.
     let mut f2_pending = false;
-// MERGE end
     'run: loop {
         // Menu mode: the open screen ticks at 20 Hz, and the join the multiplayer screen
         // requests creates the session (its game thread takes a clone of the UI over).
@@ -1559,7 +1557,6 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         // false until the multiplayer screen's join creates the session).
         if Instant::now() >= next_tick {
             next_tick += tick;
-// MERGE(menu side):
             let mut arrived: Option<Session> = None;
             {
                 let shared = shared.as_ref();
@@ -1594,6 +1591,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                                 Ok(s) => {
                                     renderer.set_item_registry(&s.shared.data.registries);
                                     renderer.set_biomes(&s.biomes);
+                                    renderer.set_particle_types(&s.particle_types);
                                     arrived = Some(s);
                                 }
                                 Err(e) => {
@@ -1610,6 +1608,11 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 for action in runner.tick(&state) {
                     match action {
                         script::Action::KeyDown(k) => {
+                            // F2 is the window-only screenshot key (the UI never takes it):
+                            // capture the next frame, like the windowed event loop does.
+                            if k == script::Key::F2 {
+                                f2_pending = true;
+                            }
                             input.key(winit_key(k), true, false, None, ui.as_ref());
                         }
                         script::Action::KeyUp(k) => {
@@ -1626,15 +1629,19 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                             input.mouse_moved(f64::from(x), f64::from(y), ui.as_ref());
                         }
                         script::Action::Click(button, x, y) => {
-                            let b = match button {
-                                script::MouseButton::Left => 1,
-                                script::MouseButton::Middle => 2,
-                                script::MouseButton::Right => 3,
-                            };
+                            let b = mouse_button_id(button);
                             let (x, y) = (f64::from(x), f64::from(y));
                             // A click is a press and a release on the same tick.
                             input.mouse_button(b, true, x, y, ui.as_ref());
                             input.mouse_button(b, false, x, y, ui.as_ref());
+                        }
+                        script::Action::MouseDown(button) => {
+                            let (x, y) = input.mouse;
+                            input.mouse_button(mouse_button_id(button), true, x, y, ui.as_ref());
+                        }
+                        script::Action::MouseUp(button) => {
+                            let (x, y) = input.mouse;
+                            input.mouse_button(mouse_button_id(button), false, x, y, ui.as_ref());
                         }
                         // A click on the widget whose label is `text`: where the last rendered
                         // frame drew it (the screen is static between ticks, so the previous
@@ -1670,68 +1677,6 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                             finished = true;
                             break 'run;
                         }
-// MERGE(main side):
-            let hud_ready = ui.is_some() || shared.hud_failed.load(Ordering::Relaxed);
-            let settled = view.has_position
-                && hud_ready
-                && feed.settled(&last_stats, Duration::from_millis(1500));
-            let state = script::ScriptState {
-                joined: view.has_position,
-                settled,
-                screen_open: ui.as_ref().is_some_and(|u| u.screen_open()),
-            };
-            for action in runner.tick(&state) {
-                match action {
-                    script::Action::KeyDown(k) => {
-                        // F2 is the window-only screenshot key (the UI never takes it): capture
-                        // the next frame, like the windowed event loop does.
-                        if k == script::Key::F2 {
-                            f2_pending = true;
-                        }
-                        input.key(winit_key(k), true, false, None, ui.as_ref());
-                    }
-                    script::Action::KeyUp(k) => {
-                        input.key(winit_key(k), false, false, None, ui.as_ref());
-                    }
-                    script::Action::Text(t) => {
-                        if let Some(ui) = &ui {
-                            for c in t.chars() {
-                                ui.char_typed(c, 0);
-                            }
-                        }
-                    }
-                    script::Action::MouseMove(x, y) => {
-                        input.mouse_moved(f64::from(x), f64::from(y), ui.as_ref());
-                    }
-                    script::Action::Click(button, x, y) => {
-                        let b = mouse_button_id(button);
-                        let (x, y) = (f64::from(x), f64::from(y));
-                        // A click is a press and a release on the same tick.
-                        input.mouse_button(b, true, x, y, ui.as_ref());
-                        input.mouse_button(b, false, x, y, ui.as_ref());
-                    }
-                    script::Action::MouseDown(button) => {
-                        let (x, y) = input.mouse;
-                        input.mouse_button(mouse_button_id(button), true, x, y, ui.as_ref());
-                    }
-                    script::Action::MouseUp(button) => {
-                        let (x, y) = input.mouse;
-                        input.mouse_button(mouse_button_id(button), false, x, y, ui.as_ref());
-                    }
-                    script::Action::Scroll(n) => {
-                        let (x, y) = input.mouse;
-                        input.wheel(0.0, f64::from(n), x, y, ui.as_ref(), &shared);
-                    }
-                    script::Action::Look(yaw, pitch) => input.look(yaw, pitch),
-                    script::Action::Screenshot(name) => shots.push(name),
-                    script::Action::Error(e) => {
-                        last_err = Some(e);
-                        break 'run;
-                    }
-                    script::Action::Finished => {
-                        finished = true;
-                        break 'run;
-// MERGE end
                     }
                 }
             }
@@ -1743,15 +1688,10 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 menu = None;
             }
             // The actions may have changed what the game thread sees this tick.
-// MERGE(menu side):
             if let Some(shared) = shared.as_ref() {
-                input.sample(shared);
+                input.sample(shared, game::Perspective::FirstPerson);
                 view = Some(*shared.view.lock());
             }
-// MERGE(main side):
-            input.sample(&shared, game::Perspective::FirstPerson);
-            view = *shared.view.lock();
-// MERGE end
         }
         if let Some(shared) = shared.as_ref() {
             if shared.is_closed() {
@@ -1766,15 +1706,13 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         // Menu mode renders the open screen over the plain background (no world yet).
         if session.is_none() {
             if let Some(u) = ui.as_mut() {
-                gui = u
-                    .frame(
-                        args.width / GUI_SCALE,
-                        args.height / GUI_SCALE,
-                        GUI_SCALE,
-                        input.mouse,
-                        0.0,
-                    )
-                    .clone();
+                let scale = resolve_gui_scale(
+                    u32::from(options.gui_scale),
+                    args.width,
+                    args.height,
+                );
+                let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
+                gui = u.frame(gw, gh, scale, input.mouse, 0.0).clone();
                 last_gui = gui.clone();
             }
             let frame = FrameInput {
@@ -1785,6 +1723,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 partial_tick: 0.0,
                 block_target: None,
                 breaking: &[],
+                camera_entity: None,
             };
             renderer.render(&frame)?;
             frames += 1;
@@ -1809,36 +1748,18 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             continue;
         }
         let shared = shared.as_ref().expect("the session exists");
-        let fov = session.as_ref().map_or(70.0, |s| s.options.fov as f32);
+        let session_ref = session.as_ref().expect("the session exists");
         let (camera, sky, partial, vd, animation_tick) = frame_view(
             shared,
             game::Perspective::FirstPerson,
             look.0,
             look.1,
-// MERGE(menu side):
-            fov,
+            &session_ref.options,
             Instant::now(),
         );
         feed.feed(shared, &mut renderer, camera_section(&camera), vd);
-        let entities = feed.entities(
-            shared,
-            &mut renderer,
-            game::Perspective::FirstPerson,
-            session
-                .as_ref()
-                .map(|s| s.local)
-                .unwrap_or((EntityId(0), 0)),
-            partial,
-        );
+        let entities = feed.entities(shared, &mut renderer, session_ref.local, partial);
         let block_target = view.and_then(|v| v.block_target);
-// MERGE(main side):
-            &session.options,
-            Instant::now(),
-        );
-        feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
-        let entities = feed.entities(&shared, &mut renderer, session.local, partial);
-        let block_target = view.block_target;
-// MERGE end
         let breaking = shared.breaking.lock().clone();
         if ui.is_none() {
             ui = shared.ui.lock().clone();
@@ -1847,26 +1768,14 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             }
         }
         if let Some(u) = &mut ui {
-// MERGE(menu side):
-            gui = u
-                .frame(
-                    args.width / GUI_SCALE,
-                    args.height / GUI_SCALE,
-                    GUI_SCALE,
-                    input.mouse,
-                    partial,
-                )
-                .clone();
-            last_gui = gui.clone();
-// MERGE(main side):
             let scale = resolve_gui_scale(
-                u32::from(session.options.gui_scale),
+                u32::from(session_ref.options.gui_scale),
                 args.width,
                 args.height,
             );
             let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
             gui = u.frame(gw, gh, scale, input.mouse, partial).clone();
-// MERGE end
+            last_gui = gui.clone();
         }
         let frame = FrameInput {
             camera,
@@ -1876,7 +1785,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             partial_tick: partial,
             block_target,
             breaking: &breaking,
-            camera_entity: Some(session.local.0),
+            camera_entity: Some(session_ref.local.0),
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -1892,9 +1801,6 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             // Log what the frame drew (the check scripts grep this as evidence; images are not
             // opened). The hotbar sprite is the visible proof a HUD element is hidden or shown.
             for name in shots.drain(..) {
-// MERGE(menu side):
-                save_script_shot(&image, &name)?;
-// MERGE(main side):
                 log_script_frame(&gui, &name);
                 let path = std::path::Path::new("target/shots").join(format!("script-{name}.png"));
                 if let Some(dir) = path.parent() {
@@ -1905,7 +1811,6 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                     .save(&path)
                     .with_context(|| format!("saving {}", path.display()))?;
                 println!("script screenshot saved to {}", path.display());
-// MERGE end
             }
             if std::mem::take(&mut f2_pending) {
                 log_script_frame(&gui, "f2");
@@ -2404,18 +2309,13 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         .as_ref()
         .map_or_else(load_options, |s| s.options.clone());
     let mut app = App {
-// MERGE(menu side):
         username: args.username.clone(),
         render_distance: args.render_distance,
         session,
         menu,
         // A join the screens asked for, connecting on its own thread (the window stays live).
         joining: None,
-// MERGE(main side):
-        shared: session.shared.clone(),
-        biomes: session.biomes.clone(),
-        particle_types: session.particle_types.clone(),
-// MERGE end
+        local_server: None,
         // The flag wins over the saved option; without it, the saved option decides.
         vsync: args.vsync.unwrap_or(options.vsync),
         options,
@@ -2452,7 +2352,6 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
 }
 
 struct App {
-// MERGE(menu side):
     /// The offline username joins use (menu mode: from `--username`).
     username: String,
     /// `--render-distance`, overriding the saved option for this run.
@@ -2463,12 +2362,8 @@ struct App {
     menu: Option<Menu>,
     /// The join the screens requested, connecting on its own thread (the address).
     joining: Option<(String, std::sync::mpsc::Receiver<anyhow::Result<Session>>)>,
-// MERGE(main side):
-    shared: Arc<Shared>,
-    biomes: Vec<haste_render::BiomeClimate>,
-    /// The particle atlas types (uploaded to the renderer once it exists).
-    particle_types: std::sync::Arc<haste_render::ParticleTypes>,
-// MERGE end
+    /// The local singleplayer server of the joined world (stopped when the world is left).
+    local_server: Option<haste_setup::server::LocalServer>,
     vsync: bool,
     /// Saved options (FOV for rendering, sensitivity for mouse look).
     options: Options,
@@ -2697,13 +2592,9 @@ impl App {
 
     fn release_keys(&mut self) {
         self.input.release();
-// MERGE(menu side):
         if let Some(session) = &self.session {
-            self.input.sample(&session.shared);
+            self.input.sample(&session.shared, self.perspective);
         }
-// MERGE(main side):
-        self.input.sample(&self.shared, self.perspective);
-// MERGE end
     }
 
     /// Mouse look speed from the saved sensitivity.
@@ -2718,7 +2609,7 @@ impl App {
             return;
         };
         let (gui, camera, sky, partial) = match &mut self.ui {
-            Some(ui) => menu_frame(ui, renderer, &self.input),
+            Some(ui) => menu_frame(ui, renderer, &self.input, &self.options),
             None => (GuiFrame::default(), menu_camera(), menu_sky(), 0.0),
         };
         self.gui = gui;
@@ -2730,6 +2621,7 @@ impl App {
             partial_tick: partial,
             block_target: None,
             breaking: &[],
+            camera_entity: None,
         };
         if let Err(e) = renderer.render(&frame) {
             self.error = Some(e.context("render"));
@@ -2740,10 +2632,6 @@ impl App {
         if self.renderer.is_none() {
             return;
         }
-// MERGE(menu side):
-// MERGE(main side):
-        self.input.sample(&self.shared, self.perspective);
-// MERGE end
         // The screen that opened or closed since the last frame takes or frees the cursor,
         // and "Disconnect" leaves the server (back to the multiplayer screen, like vanilla).
         self.sync_grab();
@@ -2758,7 +2646,8 @@ impl App {
             return;
         }
         let session = self.session.as_ref().expect("checked above");
-        self.input.sample(&session.shared);
+        self.input
+            .sample(&session.shared, self.perspective);
         let renderer = self.renderer.as_mut().expect("checked above");
         let t0 = Instant::now();
         let (camera, sky, partial, vd, animation_tick) = frame_view(
@@ -2773,23 +2662,11 @@ impl App {
             .feed(&session.shared, renderer, camera_section(&camera), vd);
         let t1 = Instant::now();
         self.feed
-// MERGE(menu side):
             .set_first_person(&session.shared, renderer, self.perspective);
-        let entities = self.feed.entities(
-            &session.shared,
-            renderer,
-            self.perspective,
-            session.local,
-            partial,
-        );
-        let block_target = session.shared.view.lock().block_target;
-// MERGE(main side):
-            .set_first_person(&self.shared, renderer, self.perspective);
         let entities = self
             .feed
-            .entities(&self.shared, renderer, self.local, partial);
-        let block_target = self.shared.view.lock().block_target;
-// MERGE end
+            .entities(&session.shared, renderer, session.local, partial);
+        let block_target = session.shared.view.lock().block_target;
         self.breaking.clear();
         self.breaking
             .extend_from_slice(&session.shared.breaking.lock());
@@ -2834,24 +2711,24 @@ impl App {
             partial_tick: partial,
             block_target,
             breaking: &self.breaking,
-            camera_entity: (!self.perspective.draws_player()).then_some(self.local.0),
+            camera_entity: (!self
+                .perspective
+                .draws_player())
+            .then_some(session.local.0),
         };
-        // Outline boxes of the target and the states of breaking blocks (one short read lock).
-// MERGE(menu side):
+        // Outline boxes of the target and the states of breaking blocks (one short read lock),
+        // then the particles (one short read lock).
         let session = self.session.as_ref().expect("the game path above");
         renderer.sample_world(
             &*session.shared.world.read(),
             &session.shared.data.shapes,
             &frame,
         );
-// MERGE(main side):
-        renderer.sample_world(&*self.shared.world.read(), &self.shared.data.shapes, &frame);
         {
-            let world = self.shared.world.read();
-            let mut particles = self.shared.particles.lock();
+            let world = session.shared.world.read();
+            let mut particles = session.shared.particles.lock();
             renderer.prepare_particles(&mut particles, &*world, camera, partial);
         }
-// MERGE end
         renderer.set_animation_tick(animation_tick);
         if self.screenshot {
             self.screenshot = false;
@@ -2912,20 +2789,13 @@ impl ApplicationHandler for App {
         let result = (|| -> anyhow::Result<(Arc<Window>, Renderer)> {
             let window = Arc::new(event_loop.create_window(attrs)?);
             let mut assets = open_assets()?;
-// MERGE(menu side):
             let data = net::load_game_data()?;
             let mut renderer = Renderer::new(window.clone(), &mut assets, &data.blocks)?;
             if let Some(session) = &self.session {
                 renderer.set_item_registry(&session.shared.data.registries);
                 renderer.set_biomes(&session.biomes);
+                renderer.set_particle_types(&session.particle_types);
             }
-// MERGE(main side):
-            let mut renderer =
-                Renderer::new(window.clone(), &mut assets, &self.shared.data.blocks)?;
-            renderer.set_item_registry(&self.shared.data.registries);
-            renderer.set_biomes(&self.biomes);
-            renderer.set_particle_types(&self.particle_types);
-// MERGE end
             Ok((window, renderer))
         })();
         match result {

@@ -665,6 +665,7 @@ impl Runner {
                         Step::ClickText(text) => {
                             self.advance();
                             return vec![Action::ClickText(text)];
+                        }
                         Step::MouseDown(button) => {
                             self.advance();
                             return vec![Action::MouseDown(button)];

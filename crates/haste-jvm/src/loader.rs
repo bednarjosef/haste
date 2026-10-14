@@ -146,6 +146,10 @@ pub const REPLACEMENTS: &[&str] = &[
     // connection is tier 1 (haste-protocol, Rust). The replacement shows vanilla's connecting
     // screen and hands the address to Rust, which joins and takes over the window.
     "net/minecraft/client/gui/screens/ConnectScreen",
+    // Vanilla's WorldOpenFlows plays a world through the integrated server; Haste's singleplayer
+    // is haste-setup's local dedicated server (Rust owns the process). The replacement keeps the
+    // screen flow and hands the world (and creation settings) to Rust.
+    "net/minecraft/client/gui/screens/worldselection/WorldOpenFlows",
 ];
 
 /// How the game class loader resolved a class (or why it did not).

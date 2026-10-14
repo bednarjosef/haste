@@ -42,6 +42,9 @@ pub enum ScreenKind {
     /// `net.minecraft.client.gui.screens.multiplayer.JoinMultiplayerScreen`, whose parent is a
     /// `TitleScreen`.
     Multiplayer,
+    /// `net.minecraft.client.gui.screens.worldselection.SelectWorldScreen`, whose parent is a
+    /// `TitleScreen` (the title screen's Singleplayer button).
+    SelectWorld,
 }
 
 impl ScreenKind {
@@ -54,6 +57,7 @@ impl ScreenKind {
             ScreenKind::Title => 4,
             ScreenKind::Options => 5,
             ScreenKind::Multiplayer => 6,
+            ScreenKind::SelectWorld => 7,
         }
     }
 }
@@ -537,6 +541,24 @@ impl GuiPipeline {
     /// The title screen's Quit Game was clicked (the client should exit).
     pub fn take_quit_request(&self) -> bool {
         self.with_state(|s| std::mem::take(&mut s.quit_requested))
+    }
+
+    /// The world list's "Play Selected World": the world folder to start the local server for
+    /// and join, if any was clicked since the last call.
+    pub fn take_open_world_request(&self) -> Option<String> {
+        self.with_state(|s| s.open_world_requested.take())
+    }
+
+    /// The create screen's "Create New World": the world to create, if requested since the last
+    /// call.
+    pub fn take_create_world_request(&self) -> Option<crate::proxies::CreateWorldRequest> {
+        self.with_state(|s| s.create_world_requested.take())
+    }
+
+    /// Tells the screens whether the local singleplayer server is running (the pause screen's
+    /// "Save and Quit" label). Set when the client starts/stops it.
+    pub fn set_local_world_running(&self, running: bool) {
+        self.with_state(|s| s.local_world_running = running);
     }
 
     /// [`Self::disconnected`] with the reason as a text component in its JSON form, e.g.

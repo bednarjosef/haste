@@ -22,9 +22,23 @@ pub struct LocalServer {
 impl LocalServer {
     /// Starts the vanilla server jar in `cache/singleplayer/<world-name>/` (created if missing):
     /// `eula=true`, `online-mode=false`, `server-ip=127.0.0.1`, a random free port,
-    /// `pause-when-empty-seconds=-1`, `nogui`. Logs are captured next to the world dir and also
-    /// scanned for the `Done` line (timeout 120 s).
+    /// `pause-when-empty-seconds=-1`, `nogui`. The world data lands directly in `world_dir`
+    /// (`--universe ..` with `level-name=<world-name>`: the server puts the level at
+    /// `<universe>/<level-name>`, so the level dir is `world_dir` itself, and the world list
+    /// (`LevelStorageSource` over the parent) sees one folder per world). Logs are captured next
+    /// to the world dir and also scanned for the `Done` line (timeout 120 s).
     pub async fn start(world_dir: &Path, port: u16) -> anyhow::Result<LocalServer> {
+        Self::start_with(world_dir, port, &WorldSettings::for_dir(world_dir)?).await
+    }
+
+    /// [`LocalServer::start`] with explicit world settings (the create-world screen's choices:
+    /// name, game mode, difficulty, cheats, seed, world type). They go into `server.properties`,
+    /// which the server reads when it creates a missing world.
+    pub async fn start_with(
+        world_dir: &Path,
+        port: u16,
+        settings: &WorldSettings,
+    ) -> anyhow::Result<LocalServer> {
         let server_jar = paths::server_jar();
         anyhow::ensure!(
             server_jar.is_file(),
@@ -39,9 +53,14 @@ impl LocalServer {
             .and_then(|n| n.to_str())
             .ok_or_else(|| anyhow!("world dir must have a final component"))?
             .to_string();
+        anyhow::ensure!(
+            settings.level_name == world_name,
+            "level-name must be the world dir's name ({world_name}), got {}",
+            settings.level_name
+        );
 
         tokio::fs::write(world_dir.join("eula.txt"), "eula=true\n").await?;
-        let properties = server_properties(&world_name, port);
+        let properties = server_properties(settings, port);
         tokio::fs::write(world_dir.join("server.properties"), properties).await?;
 
         let log_path = world_dir.join("server.log");
@@ -54,6 +73,10 @@ impl LocalServer {
             .arg("-Xmx2G")
             .arg("-jar")
             .arg(&server_jar)
+            // The level lands at `<universe>/<level-name>`; `..` makes that `world_dir` itself
+            // (see `start`), so the world data is directly in the world's folder.
+            .arg("--universe")
+            .arg("..")
             .arg("nogui")
             .current_dir(world_dir)
             .stdin(std::process::Stdio::piped())
@@ -132,22 +155,81 @@ pub fn free_port() -> anyhow::Result<u16> {
     Ok(listener.local_addr()?.port())
 }
 
+/// The settings a singleplayer world is created with (vanilla's CreateWorldScreen choices that
+/// the dedicated server can express in `server.properties`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorldSettings {
+    /// `level-name`: the world folder's name (the server creates the level at
+    /// `<universe>/<level-name>`); also the name a fresh world's `level.dat` gets.
+    pub level_name: String,
+    /// `gamemode` (0 survival, 1 creative, 2 adventure, 3 spectator).
+    pub game_mode: i32,
+    /// `difficulty` (0 peaceful .. 3 hard).
+    pub difficulty: i32,
+    /// `hardcore`.
+    pub hardcore: bool,
+    /// Cheats (`allowCommands` in vanilla): the joining player is written into `ops.json` with
+    /// level 4 so they may use commands, like vanilla singleplayer with cheats on.
+    pub allow_commands: bool,
+    /// `level-seed` (empty = random).
+    pub seed: String,
+    /// `generate-structures`.
+    pub generate_structures: bool,
+    /// `level-type` (a world-preset id like `minecraft:normal`, or a legacy name).
+    pub level_type: String,
+}
+
+impl WorldSettings {
+    /// The defaults for playing an existing world: the server reads the real settings from the
+    /// world's `level.dat`; these only fill the properties it needs anyway.
+    pub fn for_dir(world_dir: &Path) -> anyhow::Result<WorldSettings> {
+        let level_name = world_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow!("world dir must have a final component"))?
+            .to_string();
+        Ok(WorldSettings {
+            level_name,
+            game_mode: 0,
+            difficulty: 1,
+            hardcore: false,
+            allow_commands: false,
+            seed: String::new(),
+            generate_structures: true,
+            level_type: "minecraft:normal".into(),
+        })
+    }
+}
+
 /// The `server.properties` contents for a singleplayer world. Vanilla singleplayer has no
 /// whitelist, and the 26.3 server defaults `white-list=true` when the property is absent, so it
 /// is set to false explicitly (the server would otherwise refuse every join with
 /// `multiplayer.disconnect.not_whitelisted`).
-fn server_properties(world_name: &str, port: u16) -> String {
+fn server_properties(settings: &WorldSettings, port: u16) -> String {
     format!(
         "online-mode=false\n\
          server-ip=127.0.0.1\n\
          server-port={port}\n\
-         level-name={world_name}\n\
+         level-name={}\n\
+         gamemode={}\n\
+         difficulty={}\n\
+         hardcore={}\n\
+         level-seed={}\n\
+         generate-structures={}\n\
+         level-type={}\n\
          pause-when-empty-seconds=-1\n\
          spawn-protection=0\n\
          sync-chunk-writes=false\n\
          white-list=false\n\
          enforce-whitelist=false\n\
-         motd=haste\n"
+         motd=haste\n",
+        settings.level_name,
+        settings.game_mode,
+        settings.difficulty,
+        settings.hardcore,
+        settings.seed,
+        settings.generate_structures,
+        settings.level_type
     )
 }
 
@@ -157,7 +239,7 @@ mod tests {
 
     #[test]
     fn properties_disable_the_whitelist() {
-        let properties = server_properties("gltest", 25565);
+        let properties = server_properties(&WorldSettings::for_dir(Path::new("saves/gltest")).unwrap(), 25565);
         assert!(properties.contains("white-list=false\n"));
         assert!(properties.contains("enforce-whitelist=false\n"));
         assert!(!properties.contains("white-list=true"));
@@ -165,6 +247,27 @@ mod tests {
         assert!(properties.contains("online-mode=false\n"));
         assert!(properties.contains("server-port=25565\n"));
         assert!(properties.contains("level-name=gltest\n"));
+    }
+
+    #[test]
+    fn properties_carry_the_create_screen_choices() {
+        let settings = WorldSettings {
+            level_name: "Haste_World".into(),
+            game_mode: 1,
+            difficulty: 3,
+            hardcore: false,
+            allow_commands: true,
+            seed: "12345".into(),
+            generate_structures: false,
+            level_type: "minecraft:flat".into(),
+        };
+        let properties = server_properties(&settings, 25600);
+        assert!(properties.contains("gamemode=1\n"));
+        assert!(properties.contains("difficulty=3\n"));
+        assert!(properties.contains("level-seed=12345\n"));
+        assert!(properties.contains("generate-structures=false\n"));
+        assert!(properties.contains("level-type=minecraft:flat\n"));
+        assert!(properties.contains("level-name=Haste_World\n"));
     }
 
     #[test]

@@ -55,4 +55,18 @@ public final class Native {
      * status-json means the ping failed). One call drains the queue.
      */
     public static native String[] takePingResults();
+
+    // ---- singleplayer (the local server is Rust's; the screens ask for it) ----
+    /** The world list's "Play Selected World": start the local server for this world folder and join it. */
+    public static native void requestOpenWorld(String levelId);
+    /**
+     * The create screen's "Create New World": make the world with these settings on the local
+     * server and join it. {@code gameMode}/{@code difficulty} are vanilla's ids (0-3),
+     * {@code levelType} a world-preset id like "minecraft:normal", {@code seed} the decimal seed
+     * (the world folder is the target; an empty seed means random).
+     */
+    public static native void requestCreateWorld(String folder, String name, int gameMode, int difficulty,
+        boolean hardcore, boolean allowCommands, String seed, boolean generateStructures, String levelType);
+    /** Whether the local singleplayer server is running (the pause screen's button label). */
+    public static native boolean localWorldRunning();
 }
