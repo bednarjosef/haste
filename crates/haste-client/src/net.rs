@@ -276,6 +276,8 @@ pub struct NetCounters {
     pub chat: Vec<String>,
     /// `sound`, `sound_entity` and `stop_sound` packets seen.
     pub sound_packets: u64,
+    /// Own block sounds the player produced (steps, mining, placing, landing).
+    pub own_sounds: u64,
 }
 
 /// Client-side session state the packets drive (everything except world and entities).
@@ -594,6 +596,13 @@ impl Session {
         // Sound requests nobody drained (headless) are dropped here; the game thread
         // drains them between `receive` and `end_tick`.
         self.sound_requests.clear();
+        // The player's own block sounds this tick (footsteps, mining, placing): played
+        // through the same request channel the packets use, so the game thread's
+        // `Sounds::apply` picks them up; headless only counts them.
+        for request in self.player.take_own_sound_requests() {
+            self.counters.own_sounds += 1;
+            self.sound_requests.push(request);
+        }
         self.entity_boxes.clear();
         for id in &self.entity_ids {
             if let Some(b) = entities.hitbox(*id) {
