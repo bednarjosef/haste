@@ -86,6 +86,7 @@ fn gui_slots_draw_flat_items_with_the_item_model() {
         block_target: None,
         breaking: &[],
         camera_entity: None,
+        spin: None,
     };
     renderer.render(&input).unwrap();
     let img = renderer.read_back().unwrap();
@@ -167,6 +168,7 @@ fn held_item_draws_the_item_model_not_the_block_model() {
                 block_target: None,
                 breaking: &[],
                 camera_entity: None,
+                spin: None,
             })
             .unwrap();
         renderer.read_back().unwrap()

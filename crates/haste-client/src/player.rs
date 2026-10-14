@@ -421,28 +421,21 @@ impl LocalPlayer {
             }
             P::SetHeldSlot(s) => self.held_slot = s.slot,
             P::SetEntityData(d) if EntityId(d.entity_id) == self.entity_id => {
-// MERGE(effects side):
-                // Wiki "Entity metadata": index 1 is the air supply (VarInt); the screen effects
-                // also read index 0's shared flags (bit 0 = on fire, `Entity.isOnFire`) and
-                // index 7's `DATA_TICKS_FROZEN` (the powder-snow outline's alpha).
-// MERGE(main side):
-                // Wiki "Entity metadata": index 0 is the shared flags byte (bit 0x80 = fall
-                // flying, `Entity.FLAG_FALL_FLYING` = 7), index 1 the air supply (VarInt).
-// MERGE end
+                // Wiki "Entity metadata": index 0 is the shared flags byte (bit 0 = on fire,
+                // `Entity.isOnFire`; bit 0x80 = fall flying, `Entity.FLAG_FALL_FLYING` = 7),
+                // index 1 the air supply (VarInt), index 7 `DATA_TICKS_FROZEN` (the
+                // powder-snow outline's alpha).
                 for e in &d.metadata {
                     match (e.index, &e.value) {
                         (1, haste_core::entity::MetadataValue::VarInt(v)) => self.air_supply = *v,
                         (0, haste_core::entity::MetadataValue::Byte(b)) => {
-// MERGE(effects side):
                             self.own_flags.on_fire = *b & 0x01 != 0;
-                        }
-                        (7, haste_core::entity::MetadataValue::VarInt(t)) => {
-                            self.own_flags.frozen_ticks = *t;
-// MERGE(main side):
                             // The server owns the flag: it confirms a glide we started and
                             // clears it when the glide ends (landing, no glider).
                             self.state.fall_flying = *b as u8 & 0x80 != 0;
-// MERGE end
+                        }
+                        (7, haste_core::entity::MetadataValue::VarInt(t)) => {
+                            self.own_flags.frozen_ticks = *t;
                         }
                         _ => {}
                     }

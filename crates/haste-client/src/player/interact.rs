@@ -33,10 +33,7 @@
 //! nothing, the state from before our prediction) is put back. Observed on the vanilla server:
 //! a break it rejects gets an ack and no block update, so without the revert our world would keep
 //! a block the server still has.
-// MERGE(effects side):
-// MERGE(main side):
 use std::collections::{HashMap, HashSet};
-// MERGE end
 use std::sync::Arc;
 
 use glam::DVec3;
@@ -152,25 +149,16 @@ pub struct Interaction {
     /// Hotbar 0..=8 and off hand.
     pub hotbar: [ItemStackData; 9],
     pub offhand: ItemStackData,
-// MERGE(effects side):
-    /// The item in the head armor slot (player inventory menu slot 5), for the worn item's
-    /// camera overlay (`Hud.extractCameraOverlays` reads `getItemBySlot(HEAD)`). The server
-    /// sends our own armor through `container_set_slot`/`container_set_content`, not
-    /// `set_equipment` (that goes to other players).
-    pub head_item: Option<haste_core::RegistryIndex>,
-    /// Active effects on us (`minecraft:mob_effect` index), with the vanilla blend state the
-    /// screen effects need (`screen_effects`).
-    pub effects: crate::screen_effects::Effects,
-// MERGE(main side):
     /// Armor, indexed helmet 0, chest 1, legs 2, boots 3 (player inventory menu 5..=8 and
-    /// `set_player_inventory` 36..=39). The chest slot answers the glider check.
+    /// `set_player_inventory` 36..=39). The chest slot answers the glider check; the helmet is
+    /// the worn item whose camera overlay `Hud.extractCameraOverlays` reads.
     pub armor: [ItemStackData; 4],
     /// Item registry indices whose default components carry `minecraft:glider`
     /// (`LivingEntity.canGlideUsing`), resolved from the item component reports in `prepare`.
     pub(crate) glider_items: Option<HashSet<RegistryIndex>>,
-    /// Active effects on us: `minecraft:mob_effect` index -> amplifier and remaining ticks.
+    /// Active effects on us: `minecraft:mob_effect` index -> amplifier, remaining ticks and the
+    /// vanilla `MobEffectInstance.BlendState` the screen effects read.
     pub effects: HashMap<i32, EffectData>,
-// MERGE end
     tools: Option<Arc<ToolTable>>,
     tags: Option<BlockTags>,
     effect_ids: Option<EffectIds>,
@@ -201,13 +189,9 @@ pub(crate) struct LightmapEffectIds {
     pub(crate) darkness: Option<i32>,
 }
 
-/// One active effect on us (vanilla `MobEffectInstance`): its amplifier and remaining ticks
-/// (`-1` infinite). The lightmap reads the night-vision and darkness durations from here.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EffectData {
-    pub amplifier: i32,
-    pub duration: i32,
-}
+/// One active effect on us: the vanilla `MobEffectInstance` the screen effects and the lightmap
+/// read (amplifier, remaining ticks and the `BlendState`).
+pub use crate::screen_effects::Effect as EffectData;
 
 impl Interaction {
     /// Loads the tool table (once; reads the data generator's item component reports) and the
@@ -241,7 +225,13 @@ impl Interaction {
                     .index("minecraft:mob_effect", &Identifier::minecraft(n))
                     .map(|i| i.0 as i32)
             };
-            if let (Some(haste), Some(conduit_power), Some(mining_fatigue), Some(nausea), Some(darkness)) = (
+            if let (
+                Some(haste),
+                Some(conduit_power),
+                Some(mining_fatigue),
+                Some(nausea),
+                Some(darkness),
+            ) = (
                 id("haste"),
                 id("conduit_power"),
                 id("mining_fatigue"),
@@ -280,7 +270,6 @@ impl Interaction {
         self.tools = Some(tools);
     }
 
-// MERGE(effects side):
     /// The `minecraft:mob_effect` index of nausea, the effect whose blend factor drives the
     /// nausea overlay and the screen warp (`MobEffects.NAUSEA`).
     fn nausea_id(&self) -> Option<i32> {
@@ -296,26 +285,30 @@ impl Interaction {
     /// (`LivingEntity.getEffectBlendFactor`).
     pub fn nausea_factor(&self, partial_tick: f32) -> f32 {
         self.nausea_id()
-            .map_or(0.0, |id| self.effects.blend_factor(id, partial_tick))
+            .and_then(|id| self.effects.get(&id))
+            .map_or(0.0, |e| e.blend_factor(partial_tick))
     }
 
     /// The nausea blend factor pair (the previous frame's and this tick's), for the frame's
     /// lerp (`BlendState.factorPreviousFrame`, `.factor`).
     pub fn nausea_blend_pair(&self) -> (f32, f32) {
         self.nausea_id()
-            .map_or((0.0, 0.0), |id| self.effects.blend_pair(id))
+            .and_then(|id| self.effects.get(&id))
+            .map_or((0.0, 0.0), |e| e.blend_pair())
     }
 
     /// One tick of the active effects (`LivingEntity.tickEffects`: each instance ticks its
     /// duration and its vanilla blend state on the client).
     pub(super) fn tick_effects(&mut self) {
-        self.effects.tick();
-// MERGE(main side):
+        for e in self.effects.values_mut() {
+            e.tick();
+        }
+    }
+
     /// Test/script hook for the item-in-use state (vanilla: `player.isUsingItem()`; eating blocks
     /// attack and use and releasing the button then sends `release_use_item`).
     pub fn set_using_item(&mut self, using: bool) {
         self.is_using_item = using;
-// MERGE end
     }
 
     pub(super) fn respawned(&mut self) {
@@ -356,7 +349,6 @@ impl LocalPlayer {
         self.int.input = input;
     }
 
-// MERGE(effects side):
     /// Whether we are scoping with a spyglass this tick: vanilla's `Player.isScoping` (using an
     /// item, and the item being used is a spyglass). The use state is the held "use" button
     /// (`use_item` is re-sent every 4 ticks while it stays held, so a held button is a use in
@@ -365,11 +357,13 @@ impl LocalPlayer {
         if !self.int.last.use_item {
             return false;
         }
-        let name = self.main_hand()
+        let name = self
+            .main_hand()
             .item
             .and_then(|i| data.registries.name("minecraft:item", i));
         crate::screen_effects::is_spyglass(name)
-// MERGE(main side):
+    }
+
     /// Queues one left click for the next tick (vanilla's `keyAttack.clickCount++` /
     /// `KeyMapping.consumeClick`): every press counts, even several within one tick. The input
     /// layer queues one per mouse press on the game thread next to [`LocalPlayer::set_interact`];
@@ -381,7 +375,6 @@ impl LocalPlayer {
     /// Queues one right click for the next tick (`keyUse.clickCount++`).
     pub fn queue_use_click(&mut self) {
         self.int.use_clicks = self.int.use_clicks.saturating_add(1);
-// MERGE end
     }
 
     /// Block under the crosshair and the face hit.
@@ -482,24 +475,22 @@ impl LocalPlayer {
                 _ => {}
             },
             P::UpdateMobEffect(e) if e.entity_id == me => {
-// MERGE(effects side):
                 // Vanilla's blend durations per effect (`MobEffects`): only nausea and
                 // darkness set them, everything else blends at once.
+                use crate::screen_effects as se;
                 let (blend_in, blend_out, blend_out_advance) =
                     if Some(e.effect) == self.int.nausea_id() {
-                    use crate::screen_effects as se;
-                    (
-                        se::NAUSEA_BLEND_IN,
-                        se::NAUSEA_BLEND_OUT,
-                        se::NAUSEA_BLEND_OUT_ADVANCE,
-                    )
-                } else if self.int.darkness_id(e.effect) {
-                    use crate::screen_effects as se;
-                    (se::DARKNESS_BLEND, se::DARKNESS_BLEND, se::DARKNESS_BLEND)
-                } else {
-                    (0, 0, 0)
-                };
-                let effect = crate::screen_effects::Effect::new(
+                        (
+                            se::NAUSEA_BLEND_IN,
+                            se::NAUSEA_BLEND_OUT,
+                            se::NAUSEA_BLEND_OUT_ADVANCE,
+                        )
+                    } else if self.int.darkness_id(e.effect) {
+                        (se::DARKNESS_BLEND, se::DARKNESS_BLEND, se::DARKNESS_BLEND)
+                    } else {
+                        (0, 0, 0)
+                    };
+                let mut effect = EffectData::new(
                     e.amplifier,
                     e.duration,
                     e.flags & 0x08 != 0,
@@ -507,19 +498,14 @@ impl LocalPlayer {
                     blend_out,
                     blend_out_advance,
                 );
+                // `LivingEntity.forceAddEffect` copies the previous instance's blend state.
+                if let Some(prev) = self.int.effects.get(&e.effect) {
+                    effect.copy_blend_from(prev);
+                }
                 self.int.effects.insert(e.effect, effect);
-// MERGE(main side):
-                self.int.effects.insert(
-                    e.effect,
-                    EffectData {
-                        amplifier: e.amplifier,
-                        duration: e.duration,
-                    },
-                );
-// MERGE end
             }
             P::RemoveMobEffect(e) if e.entity_id == me => {
-                self.int.effects.remove(e.effect);
+                self.int.effects.remove(&e.effect);
             }
             _ => return false,
         }
@@ -530,12 +516,7 @@ impl LocalPlayer {
     /// 36..=44 hotbar, 45 off hand (wiki "Inventory" slot numbering).
     fn set_inventory_menu_slot(&mut self, slot: i32, item: &ItemStackData) {
         match slot {
-// MERGE(effects side):
-            // Player inventory menu: 5..=8 armor (5 head), 36..=44 hotbar, 45 off hand.
-            5 => self.int.head_item = item.item,
-// MERGE(main side):
             5..=8 => self.int.armor[(slot - 5) as usize] = item.clone(),
-// MERGE end
             36..=44 => self.int.hotbar[(slot - 36) as usize] = item.clone(),
             45 => self.int.offhand = item.clone(),
             _ => {}
@@ -1168,13 +1149,8 @@ impl LocalPlayer {
             })
             .unwrap_or((1.0, None));
         let level = |id: Option<i32>| {
-// MERGE(effects side):
-            id.and_then(|i| self.int.effects.amplifier(i))
-                .map_or(0, |a| (a + 1).max(0) as u32)
-// MERGE(main side):
             id.and_then(|i| self.int.effects.get(&i))
                 .map_or(0, |e| (e.amplifier + 1).max(0) as u32)
-// MERGE end
         };
         let e = self.int.effect_ids;
         let a = self.int.attrs;

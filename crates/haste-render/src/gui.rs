@@ -20,8 +20,8 @@ use std::sync::Arc;
 
 use glam::{Mat3, Mat4, Quat, Vec3};
 use haste_assets::{
-    for_each_formatted, frame_at, Animation, Assets, BitmapFont, GlyphKind, ItemGeometry, ItemModel,
-    SpriteMeta, TextFormat,
+    for_each_formatted, frame_at, Animation, Assets, BitmapFont, GlyphKind, ItemGeometry,
+    ItemModel, SpriteMeta, TextFormat,
 };
 use haste_core::gui::{GuiBlend, GuiCommand, GuiFrame, TextStyle};
 use haste_core::Identifier;

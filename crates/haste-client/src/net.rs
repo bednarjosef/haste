@@ -648,7 +648,6 @@ pub struct Session {
     /// nobody drains them (headless). Reused, so a tick without sound packets allocates
     /// nothing.
     pub sound_requests: Vec<crate::sound::SoundRequest>,
-// MERGE(effects side):
     /// The portal and spinning screen effects (`LocalPlayer.portalEffectIntensity`, the
     /// spinning effect time and speed), ticked in `end_tick`.
     pub screen: crate::screen_effects::PortalEffects,
@@ -656,11 +655,6 @@ pub struct Session {
     /// portal under our feet and the eye position's light (vanilla's
     /// `LevelExtractor.getViewBlockingState` and `NetherPortalBlock.entityInside`).
     pub screen_probe: crate::screen_effects::WorldProbe,
-    /// Ticks of hurt-tilt camera roll left (10 per hit on our own entity).
-    hurt_tilt_ticks: u32,
-    /// Direction of the tilt: +1 rolls one way, -1 the other (from the damage yaw).
-    hurt_tilt_dir: f32,
-// MERGE(main side):
     /// The `fovEffectScale` option this run uses (set by the window from its saved options;
     /// the headless path leaves the vanilla default).
     pub fov_effect_scale: f32,
@@ -688,7 +682,6 @@ pub struct Session {
     particle_names: std::sync::Arc<Vec<Identifier>>,
     /// The per-tick lightmap state (flicker, effects, boss darkening, lightning).
     pub lightmap: LightmapState,
-// MERGE end
 }
 
 impl Session {
@@ -721,12 +714,8 @@ impl Session {
             new_world_pending: false,
             entity_type_names: Vec::new(),
             sound_requests: Vec::new(),
-// MERGE(effects side):
             screen: crate::screen_effects::PortalEffects::default(),
             screen_probe: crate::screen_effects::WorldProbe::default(),
-            hurt_tilt_ticks: 0,
-            hurt_tilt_dir: 0.0,
-// MERGE(main side):
             fov_effect_scale: 1.0,
             fov_modifier: 0.0,
             old_fov_modifier: 0.0,
@@ -739,7 +728,6 @@ impl Session {
             particle_spawned: 0,
             particle_names,
             lightmap: LightmapState::default(),
-// MERGE end
         }
     }
 
@@ -1211,7 +1199,7 @@ impl Session {
                         // Our own head slot, if the server sends it this way (vanilla sends our
                         // own armor through `container_set_slot`): the worn item's camera
                         // overlay reads it.
-                        self.player.int.head_item = item.item;
+                        self.player.int.armor[0] = item.clone();
                     }
                     entities.set_equipment(EntityId(e.entity_id), slot, item);
                 }
@@ -1326,21 +1314,17 @@ impl Session {
         for lid in self.lids.values_mut() {
             lid.tick();
         }
-// MERGE(effects side):
         // The screen effects' tick, in vanilla's `LocalPlayer.tick` order: the portal
         // transition effect (`portalProcess.isInsidePortalThisTick`, set by the game thread's
         // world probe through [`Session::screen`]) and the spinning effect, which read the
         // nausea blend factor at the end of the tick.
         let nausea = self.player.int.nausea_factor(1.0);
         self.screen.tick(true, nausea);
-        self.tick_hurt_tilt();
-// MERGE(main side):
-// MERGE end
     }
 
-    /// The item worn on the head (player inventory slot 5), if any.
+    /// The item worn on the head (the helmet armor slot), if any.
     pub fn head_item(&self) -> Option<haste_core::RegistryIndex> {
-        self.player.int.head_item
+        self.player.int.armor[0].item
     }
 
     /// Our own entity's screen-effect bits (on fire, freeze ticks), parsed by `LocalPlayer`.

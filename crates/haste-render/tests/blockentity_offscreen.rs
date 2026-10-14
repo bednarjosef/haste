@@ -62,6 +62,7 @@ fn render(
         block_target: None,
         breaking: &[],
         camera_entity: None,
+        spin: None,
     };
     renderer.render(&frame).unwrap();
     renderer.read_back().unwrap()

@@ -61,7 +61,6 @@ pub struct SkyState {
     pub fog_end: f32,
 }
 
-// MERGE(effects side):
 /// Vanilla's nausea/portal screen warp (`GameRenderer.renderLevel`): while the player spins
 /// (nausea or a portal), the level's projection matrix is rotated about (0, √2/2, √2/2) by the
 /// spinning angle and squeezed in x by `1 / skew`, which is what makes the world wobble.
@@ -81,7 +80,8 @@ impl SpinWarp {
         let skew = 5.0 / (self.intensity * self.intensity + 5.0) - self.intensity * 0.04;
         skew * skew
     }
-// MERGE(main side):
+}
+
 /// The lightmap inputs that change every frame and are not part of the sky or the dimension:
 /// the block-light flicker (`LightmapRenderStateExtractor.blockLightFlicker`), the brightness
 /// option, the night-vision intensity, the darkness-effect scale and the boss-overlay world
@@ -97,7 +97,6 @@ pub struct LightmapFrame {
     pub darkness: f32,
     pub boss_overlay_darkening: f32,
     pub lightning_flash: bool,
-// MERGE end
 }
 
 /// Per-frame render statistics (docs/INTERFACES.md FrameStats).
@@ -1496,40 +1495,25 @@ impl Renderer {
     /// Build the view-projection matrix (right-handed, OpenGL-style depth like
     /// wgpu's default reverse... wgpu uses 0..1 z; glam's perspective_rh
     /// produces -1..1, so use perspective_infinite_rh style correction).
-// MERGE(effects side):
     fn view_projection(camera: &Camera, aspect: f32, spin: Option<SpinWarp>) -> glam::Mat4 {
-        let mut proj = glam::Mat4::perspective_rh(camera.fov_deg.to_radians(), aspect, 0.05, 4096.0);
+        let mut proj =
+            glam::Mat4::perspective_rh(camera.fov_deg.to_radians(), aspect, 0.05, 4096.0);
         if let Some(spin) = spin {
             // Vanilla's `GameRenderer.renderLevel`: rotate the projection about
             // (0, √2/2, √2/2) by the spinning angle, squeeze x by 1/skew, rotate back. The
             // multiplications are right-to-left in effect, so this is
             // P * R(axis, angle) * S(1/skew, 1, 1) * R(axis, -angle).
-            let axis = glam::Vec3::new(0.0, std::f32::consts::SQRT_2 / 2.0, std::f32::consts::SQRT_2 / 2.0);
+            let axis = glam::Vec3::new(
+                0.0,
+                std::f32::consts::SQRT_2 / 2.0,
+                std::f32::consts::SQRT_2 / 2.0,
+            );
             let angle = spin.angle_deg.to_radians();
             let skew = spin.skew();
             proj *= glam::Mat4::from_axis_angle(axis, angle);
             proj *= glam::Mat4::from_diagonal(glam::Vec4::new(1.0 / skew, 1.0, 1.0, 1.0));
             proj *= glam::Mat4::from_axis_angle(axis, -angle);
         }
-        let yaw = camera.yaw.to_radians();
-        let pitch = camera.pitch.to_radians();
-        // Minecraft: yaw 0 = +z (south), pitch positive = down.
-        let forward = glam::Vec3::new(
-            -pitch.cos() * yaw.sin(),
-            -pitch.sin(),
-            pitch.cos() * yaw.cos(),
-        )
-        .normalize();
-        // Roll (hurt tilt): rotate the up vector around the forward axis.
-        let up = if camera.roll_deg == 0.0 {
-            glam::Vec3::Y
-        } else {
-            glam::Quat::from_axis_angle(forward, camera.roll_deg.to_radians()) * glam::Vec3::Y
-        };
-// MERGE(main side):
-    fn view_projection(camera: &Camera, aspect: f32) -> glam::Mat4 {
-        let proj = glam::Mat4::perspective_rh(camera.fov_deg.to_radians(), aspect, 0.05, 4096.0);
-// MERGE end
         let eye = glam::Vec3::new(
             camera.pos.x as f32,
             camera.pos.y as f32,
@@ -2081,9 +2065,11 @@ impl Renderer {
             // the screen warp never touches.
             if rot_view_proj_plain != rot_view_proj {
                 camera_uniform.view_proj = rot_view_proj_plain.to_cols_array_2d();
-                self.gpu
-                    .queue
-                    .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&camera_uniform));
+                self.gpu.queue.write_buffer(
+                    &self.camera_uniform,
+                    0,
+                    bytemuck::bytes_of(&camera_uniform),
+                );
             }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("hand"),

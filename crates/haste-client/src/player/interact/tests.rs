@@ -53,7 +53,6 @@ fn data() -> &'static haste_data::GameData {
                     "minecraft:entity_type": {{"entries": {{{}}}}}}}"#,
                 entries(&names),
                 entries(&["air", "diamond_pickaxe", "diamond_sword", "stick"]),
-// MERGE(effects side):
                 entries(&[
                     "speed",
                     "haste",
@@ -61,8 +60,7 @@ fn data() -> &'static haste_data::GameData {
                     "conduit_power",
                     "nausea",
                     "darkness",
-// MERGE(main side):
-                entries(&["speed", "haste", "mining_fatigue", "conduit_power"]),
+                ]),
                 entries(&[
                     "item",
                     "experience_orb",
@@ -76,7 +74,6 @@ fn data() -> &'static haste_data::GameData {
                     "fireball",
                     "wind_charge",
                     "shulker_bullet",
-// MERGE end
                 ]),
             ),
         )

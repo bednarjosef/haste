@@ -114,7 +114,7 @@ fn debug_info(
     use haste_core::view::{BlockPhysics as _, BlockView};
     use haste_protocol::haste_core::BlockPos;
     use haste_render::BiomeSource as _;
-    let view = *shared.view.lock();
+    let view = shared.view.lock().clone();
     let world = shared.world.read();
     // The full look the player is rendered with (input look plus the server's offset), like
     // frame_view; vanilla's F3 shows the entity's rotation.
@@ -788,7 +788,7 @@ impl WorldFeed {
         let xmas = haste_render::xmas_textures();
         // Only the chunks the camera can see carry drawable block entities; skipping the
         // rest keeps the per-frame walk short on big worlds with nothing in them.
-        let view = *shared.view.lock();
+        let view = shared.view.lock().clone();
         let cam_chunk = ChunkPos::new(
             view.feet.x.floor() as i32 >> 4,
             view.feet.z.floor() as i32 >> 4,
@@ -1031,13 +1031,8 @@ fn frame_view(
     pitch: f32,
     options: &Options,
     now: Instant,
-// MERGE(effects side):
-) -> (Camera, SkyState, f32, i32, u64) {
-    let view = shared.view.lock().clone();
-// MERGE(main side):
 ) -> (Camera, SkyState, LightmapFrame, f32, i32, u64) {
-    let view = *shared.view.lock();
-// MERGE end
+    let view = shared.view.lock().clone();
     let partial = game::partial_tick(view.tick_at, now);
     let eye = game::interpolate(view.prev_eye, view.eye, partial);
     let look = (
@@ -1890,6 +1885,7 @@ fn menu_screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
                 block_target: None,
                 breaking: &[],
                 camera_entity: None,
+                spin: None,
             };
             renderer.render(&frame)?;
             frames += 1;
@@ -2141,11 +2137,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let view = shared.view.lock().clone();
     let entities = feed.instances.len();
     println!(
-// MERGE(effects side):
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} gui commands, {} entity instances (perspective {}, local player {}), target {:?}",
-// MERGE(main side):
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} entity instances ({} drew geometry; perspective {}, local player {}), {} particles drawn, {} block entities, target {:?}",
-// MERGE end
+        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} gui commands, {} entity instances ({} drew geometry; perspective {}, local player {}), {} particles drawn, {} block entities, target {:?}",
         file.display(),
         image.width(),
         image.height(),
@@ -2220,11 +2212,6 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("reading script {}", file.display()))?;
     let steps = script::parse(&text).map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut runner = script::Runner::new(steps);
-// MERGE(effects side):
-    let perspective = game::Perspective::parse(&args.perspective)?;
-    let session = Session::join(args, false)?;
-    let shared = session.shared.clone();
-// MERGE(main side):
     // The session (with `--server` at once; in menu mode once the multiplayer screen joins).
     let mut session: Option<Session> = match &args.server {
         Some(address) => Some(Session::join(
@@ -2245,7 +2232,6 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     // a world; `menu` above only covers the boot, so this outlives it).
     let mut in_menu = session.is_none();
     let mut shared = session.as_ref().map(|s| s.shared.clone());
-// MERGE end
     let mut assets = open_assets()?;
     let data = net::load_game_data()?;
     let mut renderer = Renderer::new_offscreen(args.width, args.height, &mut assets, &data.blocks)?;
@@ -2322,14 +2308,9 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             }
         }
         // The look the player is rendered with: the input layer's (the script's `look`
-// MERGE(effects side):
-        // actions write it) plus the server's rotation offset, like the window.
-        let mut view = shared.view.lock().clone();
-// MERGE(main side):
         // actions write it) plus the server's rotation offset, like the window. In menu
         // mode there is no view yet: `joined`/`settled` read as false.
-        let mut view = shared.as_ref().map(|s| *s.view.lock());
-// MERGE end
+        let mut view = shared.as_ref().map(|s| s.view.lock().clone());
         let look = (input.yaw, input.pitch);
         // Pick up a live option change (the options bridge) within a frame.
         if let Some(shared) = shared.as_ref() {
@@ -2351,13 +2332,16 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 let shared = shared.as_ref();
                 let hud_ready =
                     ui.is_some() || shared.is_some_and(|s| s.hud_failed.load(Ordering::Relaxed));
-                let at_pos =
-                    want_pos.is_none_or(|p| view.is_some_and(|v| (v.feet - p).length() <= 0.5));
-                let settled = view.is_some_and(|v| v.has_position)
+                let at_pos = want_pos
+                    .is_none_or(|p| view.as_ref().is_some_and(|v| (v.feet - p).length() <= 0.5));
+                let settled = view.as_ref().is_some_and(|v| v.has_position)
                     && at_pos
                     && hud_ready
                     && feed.settled(&last_stats, Duration::from_millis(1500));
-                if !settled && view.is_some_and(|v| v.has_position) && frames.is_multiple_of(40) {
+                if !settled
+                    && view.as_ref().is_some_and(|v| v.has_position)
+                    && frames.is_multiple_of(40)
+                {
                     tracing::info!(
                         "waiting to settle: queue {} pending {} arrival {:?}",
                         feed.queue.len(),
@@ -2367,7 +2351,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 }
                 let screen_class = ui.as_ref().and_then(|u| u.gui().screen_class());
                 let state = script::ScriptState {
-                    joined: view.is_some_and(|v| v.has_position),
+                    joined: view.as_ref().is_some_and(|v| v.has_position),
                     settled,
                     screen_open: ui.as_ref().is_some_and(|u| u.screen_open()),
                     screen_class,
@@ -2549,15 +2533,10 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 }
             }
             // The actions may have changed what the game thread sees this tick.
-// MERGE(effects side):
-            input.sample(&shared);
-            view = shared.view.lock().clone();
-// MERGE(main side):
             if let Some(shared) = shared.as_ref() {
                 input.sample(shared, ui.as_ref(), game::Perspective::FirstPerson);
-                view = Some(*shared.view.lock());
+                view = Some(shared.view.lock().clone());
             }
-// MERGE end
         }
         // Leaving the world: the pause screen's "Save and Quit" (or the death screen's "Title
         // Screen") asked to disconnect — like the window, the client drops the session, stops
@@ -2598,9 +2577,6 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         }
         // Render the frame like the screenshot mode does (the HUD and any open screen via
         // `Ui::frame`), so `screenshot` actions capture exactly what the window would show.
-// MERGE(effects side):
-        let (camera, sky, partial, vd, animation_tick) = frame_view(            &shared,
-// MERGE(main side):
         // Menu mode renders the open screen over the plain background (no world yet).
         if session.is_none() {
             if let Some(u) = ui.as_mut() {
@@ -2620,6 +2596,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 block_target: None,
                 breaking: &[],
                 camera_entity: None,
+                spin: None,
             };
             renderer.render(&frame)?;
             frames += 1;
@@ -2650,7 +2627,6 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         let session_ref = session.as_ref().expect("the session exists");
         let (camera, sky, lightmap, partial, vd, animation_tick) = frame_view(
             shared,
-// MERGE end
             game::Perspective::FirstPerson,
             look.0,
             look.1,
@@ -2660,7 +2636,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         feed.feed(shared, &mut renderer, camera_section(&camera), vd);
         let (entities, block_entities) =
             feed.entities(shared, &mut renderer, session_ref.local, partial);
-        let block_target = view.and_then(|v| v.block_target);
+        let block_target = view.as_ref().and_then(|v| v.block_target);
         let breaking = shared.breaking.lock().clone();
         if ui.is_none() {
             ui = shared.ui.lock().clone();
@@ -2691,11 +2667,11 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         }
         // The screen effects around the HUD frame, like the window draws them.
         let spin = {
-            let screen = view.screen.clone();
+            let screen = view.as_ref().map(|v| v.screen.clone()).unwrap_or_default();
             crate::screen_effects::Frame {
                 width: gui.width,
                 height: gui.height,
-                first_person: !perspective.draws_player(),
+                first_person: true,
                 effects: &screen,
                 partial_tick: partial,
                 look,
@@ -2713,12 +2689,8 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             partial_tick: partial,
             block_target,
             breaking: &breaking,
-// MERGE(effects side):
-            camera_entity: Some(session.local.0),
-            spin,
-// MERGE(main side):
             camera_entity: Some(session_ref.local.0),
-// MERGE end
+            spin,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -3654,7 +3626,6 @@ impl App {
         look_deg_per_pixel(self.options.mouse_sensitivity)
     }
 
-// MERGE(effects side):
     /// The spyglass scope's growth for this frame, as vanilla's `Hud.extractCameraOverlays`
     /// moves it: every frame the scale eases towards 1.125 by half the frame's ticks
     /// (`Mth.lerp(0.5 * gameTimeDeltaTicks, scopeScale, 1.125)`), and while we are not scoping
@@ -3668,7 +3639,8 @@ impl App {
             0.5
         };
         self.scope
-// MERGE(main side):
+    }
+
     /// Menu mode's frame: the open screen over the plain background the renderer draws
     /// without a world (vanilla draws the rotating panorama there; not yet in Haste).
     fn draw_menu(&mut self) {
@@ -3690,11 +3662,11 @@ impl App {
             block_target: None,
             breaking: &[],
             camera_entity: None,
+            spin: None,
         };
         if let Err(e) = renderer.render(&frame) {
             self.error = Some(e.context("render"));
         }
-// MERGE end
     }
 
     fn draw(&mut self, event_loop: &ActiveEventLoop) {
@@ -3705,23 +3677,6 @@ impl App {
         // and "Disconnect" leaves the server (back to the multiplayer screen, like vanilla).
         self.sync_grab();
         self.take_disconnect(event_loop);
-// MERGE(effects side):
-        let t0 = Instant::now();
-        // The spyglass scope's per-frame easing, before the renderer borrows `self` for the
-        // rest of the frame (it reads one flag of the view under a short lock).
-        let scope = {
-            let scoping = self.shared.view.lock().screen.scoping;
-            self.scope_scale(scoping, t0)
-        };
-        let renderer = self.renderer.as_mut().expect("checked above");
-        let (camera, sky, partial, vd, animation_tick) = frame_view(
-            &self.shared,
-            self.perspective,
-            self.input.yaw,
-            self.input.pitch,
-            self.options.fov as f32,
-            t0,
-// MERGE(main side):
         if self.session.is_none() {
             // Menu mode: the screens tick here, the join the multiplayer screen requested
             // connects on its own thread, and the frame is the open screen over the plain
@@ -3731,6 +3686,16 @@ impl App {
             self.draw_menu();
             return;
         }
+        // The spyglass scope's per-frame easing, before the renderer borrows `self` for the
+        // rest of the frame (it reads one flag of the view under a short lock).
+        let t0 = Instant::now();
+        let scope = {
+            let scoping = self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.shared.view.lock().screen.scoping);
+            self.scope_scale(scoping, t0)
+        };
         let session = self.session.as_ref().expect("checked above");
         // The options the player just changed in a vanilla screen: the game thread applied
         // them to `live_options` and bumped its version; copy them here so FOV, GUI scale and
@@ -3758,15 +3723,13 @@ impl App {
         self.input
             .sample(&session.shared, self.ui.as_ref(), self.perspective);
         let renderer = self.renderer.as_mut().expect("checked above");
-        let t0 = Instant::now();
         let (camera, sky, lightmap, partial, vd, animation_tick) = frame_view(
             &session.shared,
             self.perspective,
             self.input.yaw,
             self.input.pitch,
             &self.options,
-            Instant::now(),
-// MERGE end
+            t0,
         );
         self.feed
             .feed(&session.shared, renderer, camera_section(&camera), vd);
@@ -3791,15 +3754,11 @@ impl App {
             }
         }
         let (w, h) = renderer.size();
-        let view = self.shared.view.lock().clone();
+        let view = session.shared.view.lock().clone();
         if let Some(ui) = &self.ui {
             // F3's numbers and the water overlay's flag, every frame (cheap: short mutexes,
-// MERGE(effects side):
-            // no allocation). The section counts are the previous frame's.
-// MERGE(main side):
             // no allocation while the overlay is off). The section counts are the previous
             // frame's.
-// MERGE end
             let stats = self.frame_stats;
             let gpu = gpu_info(renderer);
             ui.set_debug(debug_info(
@@ -3813,7 +3772,7 @@ impl App {
                 resolve_gui_scale(u32::from(self.options.gui_scale), w, h),
                 &gpu,
             ));
-            let view = *session.shared.view.lock();
+            let view = session.shared.view.lock().clone();
             ui.set_eye_in_water(view.eye_in_water);
         }
         if let Some(ui) = &mut self.ui {
@@ -3849,12 +3808,8 @@ impl App {
             partial_tick: partial,
             block_target,
             breaking: &self.breaking,
-// MERGE(effects side):
-            camera_entity: (!self.perspective.draws_player()).then_some(self.local.0),
-            spin: view.screen.spin_warp(partial),
-// MERGE(main side):
             camera_entity: (!self.perspective.draws_player()).then_some(session.local.0),
-// MERGE end
+            spin: view.screen.spin_warp(partial),
         };
         // Outline boxes of the target and the states of breaking blocks (one short read lock),
         // then the particles (one short read lock).

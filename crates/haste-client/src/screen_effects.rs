@@ -15,8 +15,6 @@
 //! `set_equipment`, the mob effects from `update_mob_effect`, and the block around the eye.
 //! Every constant names the vanilla source it comes from; nothing is guessed.
 
-use std::collections::HashMap;
-
 use haste_protocol::haste_core::gui::{GuiBlend, GuiCommand};
 use haste_protocol::haste_core::Identifier;
 
@@ -83,7 +81,14 @@ pub struct Effect {
 impl Effect {
     /// A new instance from `update_mob_effect`: the vanilla default blend durations are 0 and
     /// only nausea and darkness set them (`MobEffects`), which the caller resolves.
-    pub fn new(amplifier: i32, duration: i32, blend: bool, blend_in: i32, blend_out: i32, blend_out_advance: i32) -> Effect {
+    pub fn new(
+        amplifier: i32,
+        duration: i32,
+        blend: bool,
+        blend_in: i32,
+        blend_out: i32,
+        blend_out_advance: i32,
+    ) -> Effect {
         // A packet without the blend flag means `skipBlending`: the factor starts at its
         // target (`ClientPacketListener.handleUpdateMobEffect`).
         let instant = if blend { 0.0 } else { 1.0 };
@@ -98,6 +103,14 @@ impl Effect {
         }
     }
 
+    /// Copies the previous instance's blend state (`LivingEntity.forceAddEffect` ->
+    /// `newEffect.copyBlendState(previousEffect)`), so a refreshing packet does not restart the
+    /// blend from scratch.
+    pub fn copy_blend_from(&mut self, previous: &Effect) {
+        self.factor = previous.factor;
+        self.prev_factor = previous.prev_factor;
+    }
+
     /// One client tick: `MobEffectInstance.tickClient` ticks the duration down, then the blend
     /// state eases the factor towards `!endsWithin(blendOutAdvance)`.
     pub fn tick(&mut self) {
@@ -108,7 +121,11 @@ impl Effect {
         let has_effect = !self.ends_within(self.blend_out_advance);
         let target = f32::from(has_effect);
         if self.factor != target {
-            let blend_duration = if has_effect { self.blend_in } else { self.blend_out };
+            let blend_duration = if has_effect {
+                self.blend_in
+            } else {
+                self.blend_out
+            };
             if blend_duration == 0 {
                 self.factor = target;
             } else {
@@ -132,59 +149,6 @@ impl Effect {
     /// The frame's two endpoints of the blend (`BlendState.factorPreviousFrame`, `.factor`).
     pub fn blend_pair(&self) -> (f32, f32) {
         (self.prev_factor, self.factor)
-    }
-}
-
-/// The active mob effects on us, by `minecraft:mob_effect` index.
-#[derive(Clone, Debug, Default)]
-pub struct Effects(HashMap<i32, Effect>);
-
-impl Effects {
-    /// `update_mob_effect` for us: vanilla's `LivingEntity.forceAddEffect` puts the new instance
-    /// in the map, and when one was already there it copies that one's blend state onto the new
-    /// instance (`newEffect.copyBlendState(previousEffect)`) — which is why a refreshing packet
-    /// does not restart the blend from scratch.
-    pub fn insert(&mut self, effect: i32, mut e: Effect) {
-        if let Some(prev) = self.0.get(&effect) {
-            e.factor = prev.factor;
-            e.prev_factor = prev.prev_factor;
-        }
-        self.0.insert(effect, e);
-    }
-
-    /// `remove_mob_effect` for us: the instance is gone, so its blend state is gone with it
-    /// (no blend-out; only the last 60 ticks of the duration ease out).
-    pub fn remove(&mut self, effect: i32) {
-        self.0.remove(&effect);
-    }
-
-    pub fn clear(&mut self) {
-        self.0.clear();
-    }
-
-    /// Amplifier of an active effect, for the mining speed (level = amplifier + 1).
-    pub fn amplifier(&self, effect: i32) -> Option<i32> {
-        self.0.get(&effect).map(|e| e.amplifier)
-    }
-
-    /// Every effect's tick (`LivingEntity.tickEffects` -> `tickClient`).
-    pub fn tick(&mut self) {
-        for e in self.0.values_mut() {
-            e.tick();
-        }
-    }
-
-    /// The blend factor of `effect` at `partial_tick` (0 when we do not have it).
-    pub fn blend_factor(&self, effect: i32, partial_tick: f32) -> f32 {
-        self.0
-            .get(&effect)
-            .map_or(0.0, |e| e.blend_factor(partial_tick))
-    }
-
-    /// The blend factor pair (`factorPreviousFrame`, `factor`) of `effect`, for the frame's
-    /// lerp between two ticks.
-    pub fn blend_pair(&self, effect: i32) -> (f32, f32) {
-        self.0.get(&effect).map_or((0.0, 0.0), |e| e.blend_pair())
     }
 }
 
@@ -237,8 +201,7 @@ impl PortalEffects {
         if self.portal <= 0.0 && nausea <= 0.0 {
             self.spinning_speed = 0.0;
         } else {
-            self.spinning_speed =
-                (self.portal * 20.0 + nausea * 7.0) / (self.portal + nausea);
+            self.spinning_speed = (self.portal * 20.0 + nausea * 7.0) / (self.portal + nausea);
             self.spinning_time += self.spinning_speed;
         }
     }
@@ -311,7 +274,8 @@ pub fn is_portal_block(block: &Identifier) -> bool {
 /// vanilla item that sets one (`Blocks.CARVED_PUMPKIN` -> `textures/misc/pumpkinblur.png`).
 /// Ids we do not know draw nothing.
 pub fn camera_overlay(item: &Identifier) -> Option<Identifier> {
-    (item.path() == "carved_pumpkin").then(|| Identifier::minecraft("textures/misc/pumpkinblur.png"))
+    (item.path() == "carved_pumpkin")
+        .then(|| Identifier::minecraft("textures/misc/pumpkinblur.png"))
 }
 
 /// The spyglass item's name (`Player.isScoping`: `getUseItem().is(Items.SPYGLASS)`).
@@ -397,12 +361,11 @@ impl Probe<'_> {
         }
         // The block at the feet is a nether portal (`Entity.setAsInsidePortal` fires from the
         // portal block's `entityInside`).
-        let feet_pos =
-            haste_core::BlockPos::new(
-                self.feet.x.floor() as i32,
-                self.feet.y.floor() as i32,
-                self.feet.z.floor() as i32,
-            );
+        let feet_pos = haste_core::BlockPos::new(
+            self.feet.x.floor() as i32,
+            self.feet.y.floor() as i32,
+            self.feet.z.floor() as i32,
+        );
         let feet_state = self.world.block_state(feet_pos);
         let in_portal = is_portal_block(self.blocks.block_of(feet_state));
         // Whether any fire block overlaps our bounding box: the local player's client-side
@@ -571,12 +534,7 @@ impl ViewEffects {
     /// screenEffectScale²`, `None` when nothing is spinning.
     pub fn spin_warp(&self, partial_tick: f32) -> Option<SpinWarp> {
         let nausea = self.nausea(partial_tick);
-        let intensity = (lerp(
-            partial_tick,
-            self.portal.0,
-            self.portal.1,
-        )
-        .max(nausea))
+        let intensity = (lerp(partial_tick, self.portal.0, self.portal.1).max(nausea))
             * SCREEN_EFFECT_SCALE
             * SCREEN_EFFECT_SCALE;
         (intensity > 0.0).then_some(SpinWarp {
@@ -628,7 +586,11 @@ impl Frame<'_> {
             self.effects.portal.0,
             self.effects.portal.1,
         );
-        let nausea = lerp(self.partial_tick, self.effects.nausea.0, self.effects.nausea.1);
+        let nausea = lerp(
+            self.partial_tick,
+            self.effects.nausea.0,
+            self.effects.nausea.1,
+        );
         if portal > 0.0 {
             out.insert(0, self.portal_overlay(portal));
         } else if nausea > 0.0 && SCREEN_EFFECT_SCALE < 1.0 {
@@ -994,7 +956,11 @@ mod tests {
     fn nausea_blends_in_one_150th_per_tick() {
         let mut e = nausea(true, 600);
         e.tick();
-        assert!((e.blend_pair().1 - 1.0 / 150.0).abs() < 1e-6, "{}", e.blend_pair().1);
+        assert!(
+            (e.blend_pair().1 - 1.0 / 150.0).abs() < 1e-6,
+            "{}",
+            e.blend_pair().1
+        );
         // The previous tick's factor is the frame's start (`BlendState.factorPreviousFrame`).
         assert_eq!(e.blend_pair().0, 0.0);
         assert!((e.blend_factor(0.5) - 1.0 / 300.0).abs() < 1e-6);
@@ -1002,7 +968,11 @@ mod tests {
         for _ in 0..149 {
             e.tick();
         }
-        assert!((e.blend_pair().1 - 1.0).abs() < 1e-6, "{}", e.blend_pair().1);
+        assert!(
+            (e.blend_pair().1 - 1.0).abs() < 1e-6,
+            "{}",
+            e.blend_pair().1
+        );
     }
 
     #[test]
@@ -1014,7 +984,11 @@ mod tests {
         for _ in 0..149 {
             e.tick();
         }
-        assert!((e.blend_pair().1 - 149.0 / 150.0).abs() < 1e-6, "{}", e.blend_pair().1);
+        assert!(
+            (e.blend_pair().1 - 149.0 / 150.0).abs() < 1e-6,
+            "{}",
+            e.blend_pair().1
+        );
         // The 150th tick brings the duration to 60, so the effect starts ending and the blend
         // state eases out by 1/20 per tick, not the blend-in's 1/150.
         e.tick();
@@ -1099,7 +1073,10 @@ mod tests {
         let expected = (0.45 * 20.0 + 0.5 * 7.0) / (0.45 + 0.5);
         let (speed, time) = at(0.5, 0.5);
         assert!((speed - expected).abs() < 1e-6, "{speed}");
-        assert!((time - expected).abs() < 1e-6, "the angle advances by the speed");
+        assert!(
+            (time - expected).abs() < 1e-6,
+            "the angle advances by the speed"
+        );
         // No portal and no nausea: no spin at all.
         assert_eq!(at(0.0, 0.0), (0.0, 0.0));
     }
@@ -1252,7 +1229,10 @@ mod tests {
         let tint = 25 << 24 | channel << 16 | channel << 8 | channel;
         let mut seen = 0;
         for c in &out {
-            if let GuiCommand::Texture { texture, tint: t, .. } = c {
+            if let GuiCommand::Texture {
+                texture, tint: t, ..
+            } = c
+            {
                 if texture.path() == "textures/misc/underwater.png" {
                     assert_eq!(*t, tint);
                     seen += 1;
@@ -1276,8 +1256,14 @@ mod tests {
         let (mut min_x, mut max_x, mut min_y, mut max_y) = (i32::MAX, 0, i32::MAX, 0);
         for &(x, y, w, h, _u, _v, uw, vh) in &tiles {
             assert!(w > 0 && h > 0, "a tile has area");
-            assert!((-1.0 - 1e-6..=1e-6).contains(&uw), "u spans a period or less");
-            assert!((-1e-6..=1.0 + 1e-6).contains(&vh), "v spans a period or less");
+            assert!(
+                (-1.0 - 1e-6..=1e-6).contains(&uw),
+                "u spans a period or less"
+            );
+            assert!(
+                (-1e-6..=1.0 + 1e-6).contains(&vh),
+                "v spans a period or less"
+            );
             min_x = min_x.min(x);
             max_x = max_x.max(x + w);
             min_y = min_y.min(y);
@@ -1309,14 +1295,20 @@ mod tests {
         let tile = H as f32 / (hud_fov(true).to_radians() * 0.5).tan() * 0.5;
         let raw = -128.0 / 64.0 + 2.0 - (0.0 - W as f32 * 0.5) / tile;
         let expected = raw - (raw.ceil() - 1.0);
-        let left = tiles.iter().find(|t| t.0 == 0).expect("a tile at the left edge");
+        let left = tiles
+            .iter()
+            .find(|t| t.0 == 0)
+            .expect("a tile at the left edge");
         assert!((left.4 - expected).abs() < 1e-4, "{} vs {expected}", left.4);
         // A different yaw scrolls the texture: the left edge samples a different uv.
         let mut turned = f;
         turned.look = (96.0, -64.0);
         let turned_left = water_tiles(&turned);
         let t_left = turned_left.iter().find(|t| t.0 == 0).unwrap();
-        assert!((t_left.4 - left.4).abs() > 1e-3, "the look scrolls the water");
+        assert!(
+            (t_left.4 - left.4).abs() > 1e-3,
+            "the look scrolls the water"
+        );
     }
 
     #[test]
@@ -1367,7 +1359,7 @@ mod tests {
         // One animation frame, mirrored in x, upright in y (`buildSpriteQuad`).
         assert_eq!(texture.path(), "block/fire_1");
         assert_eq!((*u, *v, *uw, *vh), (1.0, 0.0, -1.0, 1.0));
-        assert!((( H as f32 / 2.0 - 0.2 * scale) - *y0 as f32).abs() <= 1.0);
+        assert!(((H as f32 / 2.0 - 0.2 * scale) - *y0 as f32).abs() <= 1.0);
         assert!((*h0 as f32 - scale).abs() <= 1.0);
         // 1 view unit is the height / tan(fov/2): a 480x270 window at 70 degrees has its quad
         // top at 135 - 0.2 * 386 = 58 pixels, 386 tall.
@@ -1414,7 +1406,9 @@ mod tests {
         frame(0.5, e).append_to(&mut out);
         out.iter()
             .find_map(|c| match c {
-                GuiCommand::Texture { texture, h, .. } if texture.path() == "block/fire_1" => Some(*h),
+                GuiCommand::Texture { texture, h, .. } if texture.path() == "block/fire_1" => {
+                    Some(*h)
+                }
                 _ => None,
             })
             .expect("a fire quad")
@@ -1430,10 +1424,7 @@ mod tests {
         });
         let mut out = Vec::new();
         frame(0.5, &e).append_to(&mut out);
-        let GuiCommand::Texture {
-            texture, tint, ..
-        } = &out[0]
-        else {
+        let GuiCommand::Texture { texture, tint, .. } = &out[0] else {
             panic!("expected the block overlay")
         };
         assert_eq!(texture.path(), "block/dirt");
@@ -1451,7 +1442,10 @@ mod tests {
         );
         // Every other head item (and every unknown id) draws nothing.
         assert_eq!(camera_overlay(&Identifier::minecraft("player_head")), None);
-        assert_eq!(camera_overlay(&Identifier::minecraft("turtle_helmet")), None);
+        assert_eq!(
+            camera_overlay(&Identifier::minecraft("turtle_helmet")),
+            None
+        );
     }
 
     #[test]
@@ -1462,10 +1456,7 @@ mod tests {
         });
         let mut out = Vec::new();
         frame(0.5, &e).append_to(&mut out);
-        let GuiCommand::Texture {
-            texture, tint, ..
-        } = &out[0]
-        else {
+        let GuiCommand::Texture { texture, tint, .. } = &out[0] else {
             panic!("expected the pumpkin overlay")
         };
         assert_eq!(texture.path(), "textures/misc/pumpkinblur.png");
@@ -1484,10 +1475,7 @@ mod tests {
         frame(0.5, &e).append_to(&mut out);
         assert_eq!(out.len(), 5, "the scope texture plus four black fills");
         // `min(w, h) * 1.125`, centred.
-        let GuiCommand::Texture {
-            x, y, w, h, ..
-        } = &out[0]
-        else {
+        let GuiCommand::Texture { x, y, w, h, .. } = &out[0] else {
             panic!("expected the scope texture")
         };
         let size = ((W.min(H)) as f32 * 1.125).floor() as i32;
