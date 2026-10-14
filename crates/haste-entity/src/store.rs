@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use ahash::AHashMap;
 use haste_core::entity::{EntitySpawn, ItemStackData, MetadataEntry, PlayerInfo, Pose};
 use haste_core::ids::{EntityId, RegistryIndex};
+use haste_core::math::Vec3;
 use haste_core::model::EntityInstance;
 use haste_core::DVec3;
 use uuid::Uuid;
@@ -18,6 +19,9 @@ use crate::riding::Riding;
 pub const HURT_TICKS: u32 = 10;
 /// Death animation duration in ticks (vanilla's `deathTime` runs to 20).
 pub const DEATH_TICKS: u32 = 20;
+/// `Creeper.DEFAULT_MAX_SWELL` (the `Fuse` component can change it; the default is all the client
+/// usually sees).
+pub const CREEPER_MAX_SWELL: i32 = 30;
 
 /// `Mth.lerp`.
 fn lerp(delta: f32, start: f32, end: f32) -> f32 {
@@ -229,6 +233,12 @@ pub struct Entity {
     pub hurt_ticks: u32,
     /// Set on the death event: holds the hurt tint instead of easing out.
     pub dead: bool,
+    /// `Creeper.swell`/`oldSwell`: the client-side swell count advanced by `Creeper.tick` from
+    /// the synced swell direction, interpolated for `getSwelling(partial)`.
+    pub swell: i32,
+    pub old_swell: i32,
+    /// `IronGolem.attackAnimationTick`: set to 10 by entity event 4, decremented each tick.
+    pub attack_ticks: i32,
 }
 
 impl Entity {
@@ -269,6 +279,9 @@ impl Entity {
             flapping: 1.0,
             hurt_ticks: 0,
             dead: false,
+            swell: 0,
+            old_swell: 0,
+            attack_ticks: 0,
         }
     }
 
@@ -510,6 +523,16 @@ impl EntityStore {
         }
     }
 
+    /// Entity event 4: a melee attack animation (`IronGolem.handleEntityEvent` sets
+    /// `attackAnimationTick = 10`; several mobs share the status).
+    pub fn mark_attack(&mut self, id: EntityId) {
+        if let Some(i) = self.slot(id) {
+            if let Some(e) = &mut self.slots[i as usize] {
+                e.attack_ticks = 10;
+            }
+        }
+    }
+
     pub fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]) {
         let Some(i) = self.slot(id) else { return };
         let Some(e) = &mut self.slots[i as usize] else {
@@ -594,6 +617,16 @@ impl EntityStore {
             slot.flap += slot.flapping * 2.0;
             slot.swing.tick();
             slot.hurt_ticks = slot.hurt_ticks.saturating_sub(1);
+            // `Creeper.tick`: the client advances its own swell count from the synced direction
+            // (an ignited creeper forces it to 1), clamped to [0, maxSwell].
+            slot.old_swell = slot.swell;
+            if slot.metadata.creeper_ignited {
+                slot.metadata.creeper_swell_dir = 1;
+            }
+            slot.swell =
+                (slot.swell + slot.metadata.creeper_swell_dir).clamp(0, CREEPER_MAX_SWELL);
+            // `IronGolem.tick`: the attack animation tick counts down.
+            slot.attack_ticks = slot.attack_ticks.saturating_sub(1);
             // `LivingEntity.tick`: fallFlyTicks counts while the fall-flying flag is set.
             if slot.metadata.shared.elytra_flying {
                 slot.fall_flying_ticks = slot.fall_flying_ticks.saturating_add(1);
@@ -666,7 +699,15 @@ impl EntityStore {
             let is_passenger = self.riding.vehicle_of(slot.id).is_some();
             let pose =
                 crate::animation::setup_anim(slot, &model, has_head, partial_tick, is_passenger);
-            let body = crate::animation::body_transform(slot, partial_tick);
+            let texture = model.texture.path();
+            let body =
+                crate::animation::body_transform(slot, partial_tick, texture.contains("iron_golem"));
+            // `CreeperRenderer.scale`'s swell wobble; every other model is uniformly scaled.
+            let body_scale = if texture.contains("creeper") {
+                crate::animation::creeper_scale(slot, partial_tick)
+            } else {
+                Vec3::ONE
+            };
             // Living models turn with their body yaw; a non-living box follows its packet yaw.
             let yaw = if has_head {
                 slot.body_yaw_at(partial_tick)
@@ -683,6 +724,7 @@ impl EntityStore {
                 scale: 1.0,
                 pose,
                 body,
+                body_scale,
                 skin: None,
                 nametag: slot.nametag.clone(),
                 hurt: hurt_strength(slot),

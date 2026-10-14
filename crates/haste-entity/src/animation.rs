@@ -73,6 +73,9 @@ enum ModelKind {
     Quadruped,
     Spider,
     Chicken,
+    Villager,
+    Illager,
+    IronGolem,
     None,
 }
 
@@ -90,10 +93,12 @@ fn model_kind(model: &CubeModel) -> ModelKind {
     } else if part_exists(&model.root, "right_hind_leg") {
         // QuadrupedModel and CreeperModel share the same leg/head setupAnim.
         ModelKind::Quadruped
+    } else if part_exists(&model.root, "arms") && !part_exists(&model.root, "right_arm") {
+        // VillagerModel: a single "arms" part (crossed arms) and no separate arms.
+        ModelKind::Villager
     } else if part_exists(&model.root, "right_arm") {
-        // HumanoidModel subclasses: the player/humanoid texture, zombies and skeletons (the
-        // texture the registry set tells them apart). Other arm models (villager, illager) use
-        // their own setupAnim and are left on the head aim only.
+        // HumanoidModel subclasses plus the arm models with their own setupAnim, told apart by
+        // the texture the registry set.
         let texture = model.texture.path();
         if texture.contains("humanoid") || texture.contains("enderman") || texture.contains("piglin")
         {
@@ -102,6 +107,10 @@ fn model_kind(model: &CubeModel) -> ModelKind {
             ModelKind::Zombie
         } else if texture.contains("skeleton") {
             ModelKind::Skeleton
+        } else if texture.contains("illager") {
+            ModelKind::Illager
+        } else if texture.contains("iron_golem") {
+            ModelKind::IronGolem
         } else {
             ModelKind::None
         }
@@ -167,6 +176,22 @@ pub(crate) fn setup_anim(
             push_head(&mut o, e, pitch, head_rel, partial, false);
         }
         ModelKind::Chicken => chicken(&mut o, e, partial, walk_pos, walk_speed),
+        ModelKind::Villager => villager(&mut o, e, pitch, head_rel, walk_pos, walk_speed, age),
+        ModelKind::Illager => illager(
+            &mut o,
+            e,
+            pitch,
+            head_rel,
+            walk_pos,
+            walk_speed,
+            swing,
+            age,
+            is_passenger,
+            model.texture.path(),
+        ),
+        ModelKind::IronGolem => {
+            iron_golem(&mut o, e, pitch, head_rel, partial, walk_pos, walk_speed)
+        }
         ModelKind::None => {
             if has_head {
                 push_head(&mut o, e, pitch, head_rel, partial, false);
@@ -220,7 +245,7 @@ fn fall_flying_scale(ticks: u32) -> f32 {
 /// `LivingEntityRenderer.setupRotations` plus `AvatarRenderer.setupRotations` (players only):
 /// the whole-model rotations the renderer applies between the body yaw and the model scale
 /// (death tilt, sleeping, upside-down, and the player flying/swimming pitch).
-pub(crate) fn body_transform(e: &Entity, partial: f32) -> BodyTransform {
+pub(crate) fn body_transform(e: &Entity, partial: f32, iron_golem: bool) -> BodyTransform {
     let mut b = BodyTransform::default();
     let age = e.tick_count as f32 + partial;
     // `extractRenderState` negates the look pitch for an upside-down entity.
@@ -250,6 +275,18 @@ pub(crate) fn body_transform(e: &Entity, partial: f32) -> BodyTransform {
             0.0,
         )));
         b.push(BodyOp::RotateZ(PI));
+    }
+
+    // `IronGolemRenderer.setupRotations`: while walking, the whole golem rocks side to side on a
+    // 13-tick triangle wave.
+    if iron_golem {
+        let speed = e.walk.speed(partial);
+        // Vanilla: `if (!(state.walkAnimationSpeed < 0.01))`.
+        if speed.is_nan() || speed >= 0.01 {
+            let wp = e.walk.position(partial) + 6.0;
+            let triangle = ((wp % 13.0 - 6.5).abs() - 3.25) / 3.25;
+            b.push(BodyOp::RotateZ((6.5 * triangle).to_radians()));
+        }
     }
 
     // `AvatarRenderer.setupRotations` (players only), applied after the base rotations above.
@@ -449,6 +486,185 @@ fn skeleton_aggressive_arms(o: &mut PoseOverrides, swing: f32, age: f32) {
     la += bob(age, -1.0);
     set_rotation(o, "right_arm", ra);
     set_rotation(o, "left_arm", la);
+}
+
+/// `Mth.triangleWave`.
+fn triangle_wave(index: f32, period: f32) -> f32 {
+    ((index % period - period * 0.5).abs() - period * 0.25) / (period * 0.25)
+}
+
+/// `VillagerModel.setupAnim`: head aim, the unhappy head shake, and the legs (note the walk
+/// amplitude is halved, unlike the humanoid). The crossed arms are the model's base pose.
+fn villager(
+    o: &mut PoseOverrides,
+    e: &Entity,
+    pitch: f32,
+    head_rel: f32,
+    walk_pos: f32,
+    walk_speed: f32,
+    age: f32,
+) {
+    let mut head = Vec3::new(pitch, head_rel.to_radians(), 0.0);
+    if e.metadata.villager_unhappy {
+        head.z = 0.3 * (0.45 * age).sin();
+        head.x = 0.4;
+    }
+    o.rotations.push(("head".into(), head));
+    o.rotations.push((
+        "right_leg".into(),
+        Vec3::new((walk_pos * 0.6662).cos() * 1.4 * walk_speed * 0.5, 0.0, 0.0),
+    ));
+    o.rotations.push((
+        "left_leg".into(),
+        Vec3::new(
+            (walk_pos * 0.6662 + PI).cos() * 1.4 * walk_speed * 0.5,
+            0.0,
+            0.0,
+        ),
+    ));
+}
+
+/// `AbstractIllager.IllagerArmPose`, as far as the client can tell without item resolution:
+/// attacking illagers, and the crossed/neutral arms otherwise.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IllagerArmPose {
+    Crossed,
+    Neutral,
+    Attacking,
+}
+
+/// `AbstractIllager.getArmPose` for the types whose pose depends only on `isAggressive`: a
+/// vindicator attacks when aggressive and crosses its arms otherwise; a pillager goes neutral
+/// when calm (its crossbow poses need the main-hand item); an evoker/illusioner crosses its arms
+/// (their spell/bow poses need more synced state).
+fn illager_arm_pose(e: &Entity, texture: &str) -> IllagerArmPose {
+    if e.metadata.mob.aggressive {
+        if texture.contains("vindicator") || texture.contains("pillager") {
+            IllagerArmPose::Attacking
+        } else {
+            IllagerArmPose::Crossed
+        }
+    } else if texture.contains("pillager") {
+        IllagerArmPose::Neutral
+    } else {
+        IllagerArmPose::Crossed
+    }
+}
+
+/// `IllagerModel.setupAnim`: head aim, the walk swing (arms and legs, amplitude halved like the
+/// villager), the riding pose, and the arm pose (`IllagerArmPose`). The crossed "arms" part and
+/// the separate arms are shown/hidden per pose.
+#[allow(clippy::too_many_arguments)]
+fn illager(
+    o: &mut PoseOverrides,
+    e: &Entity,
+    pitch: f32,
+    head_rel: f32,
+    walk_pos: f32,
+    walk_speed: f32,
+    swing: f32,
+    age: f32,
+    is_passenger: bool,
+    texture: &str,
+) {
+    o.rotations
+        .push(("head".into(), Vec3::new(pitch, head_rel.to_radians(), 0.0)));
+    let mut ra = Vec3::ZERO;
+    let mut la = Vec3::ZERO;
+    let mut rl = Vec3::ZERO;
+    let mut ll = Vec3::ZERO;
+    if is_passenger {
+        ra.x = -PI / 5.0;
+        la.x = -PI / 5.0;
+        rl = Vec3::new(-1.4137167, PI / 10.0, 0.07853982);
+        ll = Vec3::new(-1.4137167, -PI / 10.0, -0.07853982);
+    } else {
+        ra.x = (walk_pos * 0.6662 + PI).cos() * 2.0 * walk_speed * 0.5;
+        la.x = (walk_pos * 0.6662).cos() * 2.0 * walk_speed * 0.5;
+        rl.x = (walk_pos * 0.6662).cos() * 1.4 * walk_speed * 0.5;
+        ll.x = (walk_pos * 0.6662 + PI).cos() * 1.4 * walk_speed * 0.5;
+    }
+    let pose = illager_arm_pose(e, texture);
+    if pose == IllagerArmPose::Attacking {
+        // `AnimationUtils.animateZombieArms(..., aggressive = true)` for an empty main hand,
+        // then `bobArms` (the weapon branch needs the main-hand item, which is not resolved).
+        let arm_drop = -PI / 1.5;
+        let attack_y = (swing * PI).sin();
+        let attack_x = ((1.0 - (1.0 - swing) * (1.0 - swing)) * PI).sin();
+        let x = arm_drop + attack_y * 1.2 - attack_x * 0.4;
+        let y = 0.1 - attack_y * 0.6;
+        ra = Vec3::new(x, -y, 0.0) + bob(age, 1.0);
+        la = Vec3::new(x, y, 0.0) + bob(age, -1.0);
+    }
+    o.rotations.push(("right_arm".into(), ra));
+    o.rotations.push(("left_arm".into(), la));
+    o.rotations.push(("right_leg".into(), rl));
+    o.rotations.push(("left_leg".into(), ll));
+    // `crossedArms` toggles the "arms" part against the two separate arms.
+    if pose == IllagerArmPose::Crossed {
+        o.hidden.push("right_arm".into());
+        o.hidden.push("left_arm".into());
+    } else {
+        o.hidden.push("arms".into());
+    }
+}
+
+/// `IronGolemModel.setupAnim`: the arms swing on a triangle wave (or the 10-tick attack
+/// animation), the legs on the same wave, and the head aims.
+fn iron_golem(
+    o: &mut PoseOverrides,
+    e: &Entity,
+    pitch: f32,
+    head_rel: f32,
+    partial: f32,
+    walk_pos: f32,
+    walk_speed: f32,
+) {
+    // `IronGolemRenderer.extractRenderState`: attackTicksRemaining = tick > 0 ? tick - partial : 0.
+    let attack = if e.attack_ticks > 0 {
+        e.attack_ticks as f32 - partial
+    } else {
+        0.0
+    };
+    let (ra, la) = if attack > 0.0 {
+        let t = triangle_wave(attack, 10.0);
+        (-2.0 + 1.5 * t, -2.0 + 1.5 * t)
+    } else {
+        let t = triangle_wave(walk_pos, 13.0);
+        (
+            (-0.2 + 1.5 * t) * walk_speed,
+            (-0.2 - 1.5 * t) * walk_speed,
+        )
+    };
+    o.rotations.push(("right_arm".into(), Vec3::new(ra, 0.0, 0.0)));
+    o.rotations.push(("left_arm".into(), Vec3::new(la, 0.0, 0.0)));
+    o.rotations
+        .push(("head".into(), Vec3::new(pitch, head_rel.to_radians(), 0.0)));
+    let t = triangle_wave(walk_pos, 13.0) * walk_speed;
+    o.rotations
+        .push(("right_leg".into(), Vec3::new(-1.5 * t, 0.0, 0.0)));
+    o.rotations
+        .push(("left_leg".into(), Vec3::new(1.5 * t, 0.0, 0.0)));
+}
+
+/// `CreeperRenderer.scale`: the swell-driven wobble and the cubed swell, as a per-axis scale
+/// (x/z on `s`, y on `hs`). `swelling = lerp(partial, oldSwell, swell) / (maxSwell - 2)`.
+pub(crate) fn creeper_scale(e: &Entity, partial: f32) -> Vec3 {
+    let swelling = lerp(
+        partial,
+        e.old_swell as f32,
+        e.swell as f32,
+    ) / (crate::store::CREEPER_MAX_SWELL - 2) as f32;
+    let mut g = swelling;
+    let wobble = 1.0 + (g * 100.0).sin() * g * 0.01;
+    g = g.clamp(0.0, 1.0);
+    g *= g;
+    g *= g;
+    Vec3::new(
+        (1.0 + g * 0.4) * wobble,
+        (1.0 + g * 0.1) / wobble,
+        (1.0 + g * 0.4) * wobble,
+    )
 }
 
 /// `QuadrupedModel.setupAnim` (also `CreeperModel.setupAnim`).

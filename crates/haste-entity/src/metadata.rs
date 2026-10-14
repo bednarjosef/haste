@@ -62,6 +62,15 @@ pub struct Metadata {
     pub mob: MobFlags,
     /// `Entity.DATA_CUSTOM_NAME` (index 2): the entity's custom name, for the upside-down check.
     pub custom_name: Option<Component>,
+    /// `Creeper.DATA_SWELL_DIR` (index 16, an int: `AgeableMob` defines none for a creeper, so
+    /// `Mob`'s 15 is followed by `Creeper`'s first accessor). The client advances its own swell
+    /// count from this (`Creeper.tick`).
+    pub creeper_swell_dir: i32,
+    /// `Creeper.DATA_IS_IGNITED` (index 18, a bool).
+    pub creeper_ignited: bool,
+    /// `AbstractVillager.DATA_UNHAPPY_COUNTER` (index 18, an int: `AgeableMob`'s two accessors
+    /// sit at 16/17, then `AbstractVillager`'s). `> 0` means the villager shakes its head.
+    pub villager_unhappy: bool,
     /// All entries (including the shared ones), kept so later consumers can read the rest.
     entries: std::vec::Vec<MetadataEntry>,
 }
@@ -81,6 +90,13 @@ impl Metadata {
                 (2, MetadataValue::OptionalComponent(c)) => self.custom_name = c.clone(),
                 (6, MetadataValue::Pose(p)) => self.pose = Some(*p),
                 (15, MetadataValue::Byte(b)) => self.mob = MobFlags::from_byte(*b),
+                // Index 16 is `Creeper.DATA_SWELL_DIR` (int); `AgeableMob`'s baby flag at 16 is a
+                // bool, so the wire type keeps the two apart.
+                (16, MetadataValue::VarInt(v)) => self.creeper_swell_dir = *v,
+                // Index 18 is `Creeper.DATA_IS_IGNITED` (bool) or `AbstractVillager`'s unhappy
+                // counter (int).
+                (18, MetadataValue::Boolean(b)) => self.creeper_ignited = *b,
+                (18, MetadataValue::VarInt(v)) => self.villager_unhappy = *v > 0,
                 _ => {}
             }
         }

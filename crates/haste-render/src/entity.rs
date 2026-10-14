@@ -415,10 +415,17 @@ impl EntityRenderer {
                 Mat4::from_rotation_y((180.0 - e.yaw).to_radians())
             };
             let origin = e.pos - camera + e.body.pre_translate.as_dvec3();
+            // The subclass scale (`EntityRenderer.scale`) folds into the model scale: it is
+            // diagonal, so it commutes with the flip and matches vanilla's order.
+            let s = Vec3::new(
+                -scale * e.body_scale.x,
+                -scale * e.body_scale.y,
+                scale * e.body_scale.z,
+            );
             let root = Mat4::from_translation(origin.as_vec3())
                 * yaw
                 * body_matrix(&e.body)
-                * Mat4::from_scale(Vec3::new(-scale, -scale, scale) / 16.0);
+                * Mat4::from_scale(s / 16.0);
             let start = self.vertices.len();
             emit_part(
                 &mut self.vertices,

@@ -207,6 +207,7 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
         scale: 1.0,
         pose,
         body: BodyTransform::default(),
+        body_scale: Vec3::ONE,
         // The skin servers send for other players is not synced for ourselves; the renderer's
         // default skin for our UUID is what vanilla shows without a downloaded skin.
         skin: Some(haste_render::default_skin(uuid).0),

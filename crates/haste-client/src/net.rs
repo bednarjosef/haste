@@ -115,6 +115,10 @@ pub trait EntitySink {
     fn mark_hurt(&mut self, id: EntityId);
     /// `EntityStore::mark_dead`.
     fn mark_dead(&mut self, id: EntityId);
+    /// `EntityStore::mark_attack`: entity event 4 (a melee attack animation).
+    fn mark_attack(&mut self, id: EntityId) {
+        let _ = id;
+    }
     /// `EntityStore::set_metadata`.
     fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]);
     /// `EntityStore::set_equipment`.
@@ -211,6 +215,9 @@ impl EntitySink for EntityStore {
     }
     fn mark_dead(&mut self, id: EntityId) {
         EntityStore::mark_dead(self, id)
+    }
+    fn mark_attack(&mut self, id: EntityId) {
+        EntityStore::mark_attack(self, id)
     }
     fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]) {
         EntityStore::set_metadata(self, id, entries)
@@ -849,6 +856,8 @@ impl Session {
                 entities.mark_hurt(EntityId(d.entity_id));
             }
             P::EntityEvent(e) if e.status == 3 => entities.mark_dead(EntityId(e.entity_id)),
+            // Entity status 4 is the melee attack animation (IronGolem.handleEntityEvent).
+            P::EntityEvent(e) if e.status == 4 => entities.mark_attack(EntityId(e.entity_id)),
             P::SetEntityData(d) => {
                 if EntityId(d.entity_id) != own {
                     let id = EntityId(d.entity_id);

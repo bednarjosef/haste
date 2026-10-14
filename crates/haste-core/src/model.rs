@@ -108,6 +108,9 @@ pub struct EntityInstance {
     /// upside-down, player flying/swimming pitch), applied by the renderer between the body yaw
     /// and the model scale.
     pub body: BodyTransform,
+    /// Per-axis subclass scale (`EntityRenderer.scale`, e.g. `CreeperRenderer.scale`'s swell
+    /// wobble), multiplied into the model scale. `Vec3::ONE` for most entities.
+    pub body_scale: Vec3,
     pub skin: Option<Identifier>,
     pub nametag: Option<String>,
     /// Hurt flash strength in 0..1 (1 just after the hit, easing to 0 over the 10 hurt
