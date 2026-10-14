@@ -608,6 +608,8 @@ fn tick_once(
         }
     }
     // This tick's sound packets, played through the output (when the client set one up).
+    // This runs again after `end_tick` below to pick up the player's own block sounds
+    // (footsteps, mining, placing) that the player's tick just produced.
     {
         let requests = &mut driver.session.sound_requests;
         let mut sound = shared.sound.lock();
@@ -659,6 +661,15 @@ fn tick_once(
         let mut dirty = world.take_dirty_sections();
         if !dirty.is_empty() {
             shared.dirty.lock().append(&mut dirty);
+        }
+    }
+    // The player's own block sounds this tick (footsteps, mining, placing), played through
+    // the same output the packets went through above.
+    {
+        let requests = &mut driver.session.sound_requests;
+        let mut sound = shared.sound.lock();
+        if let Some(sounds) = sound.as_mut() {
+            sounds.apply(requests, |_| None);
         }
     }
     {
