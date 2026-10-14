@@ -5,6 +5,7 @@ use haste_core::input::InputState;
 use haste_core::view::{BlockView, CollisionShapes};
 use haste_core::{Aabb, BlockPos, BlockStateId, DVec3};
 
+use crate::block_effects;
 use crate::collision::{collide_with_step, no_collision, supporting_block};
 use crate::{fluids, flying, trig, BlockPhysics, PlayerAttributes, PlayerState, Pose, TickResult};
 
@@ -74,6 +75,8 @@ pub fn tick(
     // swimming state before `LivingEntity.aiStep` looks at the keys).
     let eyes_in_water = fluids::update_fluid_state(state, attrs, world, blocks);
     state.eyes_in_water = eyes_in_water;
+    // Water currents (vanilla Entity.updateFluidInteraction, before the move).
+    block_effects::apply_water_currents(state, attrs, world, blocks);
     update_flags(state, input, attrs, eyes_in_water, world, shapes);
 
     if state.jump_cooldown > 0 {
@@ -106,6 +109,8 @@ pub fn tick(
         travel_normal(state, impulse, attrs, world, shapes, blocks);
     }
 
+    // Slime stepOn, honey slide, stuck-in-block multipliers (vanilla applyEffectsFromBlocks).
+    block_effects::apply_end_of_tick_effects(state, attrs, world, shapes, blocks);
     // Vanilla `Player.tick` ends with `updatePlayerPose`: the new pose's box applies from
     // the next tick's movement, and the camera picks up its eye height the tick after that
     // (vanilla `Camera.tick` runs before the player's tick).
@@ -259,7 +264,7 @@ fn block_below(state: &PlayerState) -> BlockPos {
 
 /// Block whose friction/jump factor applies: the block half a block below the feet, or, when that
 /// has no collision (standing on an edge), the closest supporting block.
-fn ground_block(
+pub(crate) fn ground_block(
     state: &PlayerState,
     attrs: &PlayerAttributes,
     world: &dyn BlockView,
@@ -333,7 +338,7 @@ fn travel_normal(
     };
     accelerate(state, imp, speed);
     let motion = state.velocity;
-    move_entity(state, attrs, motion, world, shapes);
+    move_entity(state, attrs, motion, world, shapes, blocks);
     apply_speed_factor(state, world, blocks);
     state.velocity.y -= attrs.gravity;
     state.velocity.y *= VERTICAL_DRAG as f64;
@@ -369,9 +374,10 @@ pub(crate) fn move_entity(
     motion: DVec3,
     world: &dyn BlockView,
     shapes: &dyn CollisionShapes,
+    blocks: &dyn BlockPhysics,
 ) -> DVec3 {
     let aabb = state.aabb(attrs);
-    let mut motion = motion;
+    let mut motion = block_effects::consume_stuck_multiplier(state, motion);
     if state.sneaking
         && !state.flying
         && motion.y <= 0.0
@@ -401,7 +407,17 @@ pub(crate) fn move_entity(
         state.velocity.z = 0.0;
     }
     if state.vertical_collision {
-        state.velocity.y = 0.0;
+        // Slime bounce (Entity.restituteMovementAfterCollisions) or zero.
+        let ground = ground_block(state, attrs, world, shapes);
+        state.velocity.y = block_effects::vertical_collision_velocity(
+            state,
+            blocks,
+            ground,
+            motion.y,
+            moved.y,
+            attrs.gravity,
+            VERTICAL_DRAG as f64,
+        );
     }
 
     if state.on_ground || state.flying || state.in_water {

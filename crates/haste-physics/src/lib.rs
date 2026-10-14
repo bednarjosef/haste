@@ -8,6 +8,7 @@
 //! (trace replay harness), [`testing`] (in-memory world for tests).
 
 pub mod attributes;
+pub mod block_effects;
 pub mod collision;
 pub mod elytra;
 pub mod fluids;
@@ -55,6 +56,9 @@ pub struct PlayerState {
     pub vertical_collision: bool,
     /// Eyes under the water surface (last tick); slows mining, starts sprint-swimming.
     pub eyes_in_water: bool,
+    /// Stuck-in-block speed multiplier set by `makeStuckInBlock` (cobweb, powder snow, sweet
+    /// berry bush) at the end of the tick; consumed by the next move (vanilla `Entity.move`).
+    pub stuck_multiplier: DVec3,
     /// Gliding with an elytra (vanilla's shared flag 7). While set the player uses the
     /// fall-flying pose box and `elytra::travel` instead of the normal walk/fall.
     pub fall_flying: bool,
@@ -115,5 +119,13 @@ impl BlockPhysics for DefaultBlockPhysics {
     }
     fn is_opaque_full(&self, state: BlockStateId) -> bool {
         state != BlockStateId::AIR
+    }
+    fn water_flow(
+        &self,
+        _world: &dyn haste_core::view::BlockView,
+        _pos: haste_core::BlockPos,
+        _state: BlockStateId,
+    ) -> Option<DVec3> {
+        None
     }
 }

@@ -198,10 +198,12 @@ fn sprint_and_sneak_speeds() {
 
 #[test]
 fn speeds_on_special_blocks_match_wiki_walking_table() {
+    // Slime: the wiki's 3.040 m/s ignores SlimeBlock.stepOn (0.4 + |vy| x 0.2 every tick on
+    // the ground); vanilla 26.3 applies it, giving ~1.186 m/s. See haste-physics NOTES.md.
     for (block, expected) in [
         (ICE, 4.157),
         (BLUE_ICE, 4.376),
-        (SLIME, 3.040),
+        (SLIME, 1.1857),
         (SOUL_SAND, 2.508),
     ] {
         let (a, b) = steady_speed(block, forward());
