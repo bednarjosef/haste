@@ -1,7 +1,7 @@
 //! Read-only views over world state. `haste-world` implements them; meshing (`haste-render`),
 //! physics (`haste-physics`) and entities consume them. Implementations must be cheap to call in
 //! tight loops: no allocation per call, no locking per block if avoidable (take a section snapshot).
-use crate::{Aabb, BlockPos, BlockStateId, ChunkPos, SectionPos};
+use crate::{Aabb, BlockStateId, BlockPos, ChunkPos, DVec3, SectionPos};
 
 pub trait BlockView {
     /// `BlockStateId::AIR` for unloaded chunks and out-of-range y.
@@ -42,6 +42,47 @@ pub trait BlockPhysics {
     fn is_air(&self, state: BlockStateId) -> bool;
     /// Opaque full cube (vanilla `isSolidRender`): occludes neighbours' faces and light.
     fn is_opaque_full(&self, state: BlockStateId) -> bool;
+
+    // Block identity for the movement effects (vanilla `Block.entityInside` blocks,
+    // `Block.getBounceRestitution`, `FluidState.getFlow`). Implementors answer from their
+    // block tables (registry names); the defaults match "not one of these blocks".
+    /// Cobweb: `Entity.makeStuckInBlock` (0.25, 0.05, 0.25) in `WebBlock.entityInside`.
+    fn is_cobweb(&self, state: BlockStateId) -> bool {
+        let _ = state;
+        false
+    }
+    /// Powder snow: `PowderSnowBlock.entityInside` sticks entities whose in-block state is powder snow.
+    fn is_powder_snow(&self, state: BlockStateId) -> bool {
+        let _ = state;
+        false
+    }
+    /// Sweet berry bush: slows living entities (not foxes/bees) in `SweetBerryBushBlock.entityInside`.
+    fn is_sweet_berry_bush(&self, state: BlockStateId) -> bool {
+        let _ = state;
+        false
+    }
+    /// Slime block: bounces in `Entity.restituteMovementAfterCollisions` and slows in `stepOn`.
+    fn is_slime(&self, state: BlockStateId) -> bool {
+        let _ = state;
+        false
+    }
+    /// Honey block: slide slowdown on its sides (`HoneyBlock.entityInside`).
+    fn is_honey(&self, state: BlockStateId) -> bool {
+        let _ = state;
+        false
+    }
+    /// Vanilla `Block.getBounceRestitution`: 1.0 for slime, 0.0 otherwise.
+    fn bounce_restitution(&self, state: BlockStateId) -> f32 {
+        let _ = state;
+        0.0
+    }
+    /// Vanilla `FluidState.getFlow` for the fluid cell `state`: the horizontal flow vector,
+    /// `None` when the cell carries no flow information. World-dependent; implementors with
+    /// fluid data answer here.
+    fn water_flow(&self, state: BlockStateId) -> Option<DVec3> {
+        let _ = state;
+        None
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]

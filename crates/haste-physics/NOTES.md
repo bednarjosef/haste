@@ -34,7 +34,7 @@ Nothing here was taken from decompiled Minecraft code or from Pomme's `physics/`
 | terminal velocity | 3.92 b/t (78.4 m/s) | documented: wiki "Entity"/"Transportation"; test `free_fall_*` |
 | horizontal drag | slipperiness x 0.91 (f32 product), 0.91 in air | documented: wiki "Entity" |
 | default slipperiness | 0.6; ice 0.98, blue ice 0.989, slime 0.8 | documented: wiki "Entity"; oracle block_properties.json |
-| ground acceleration | movement_speed x (0.6 / slip)³ | mcpk.wiki; derived check: wiki "Walking" table speeds on ice 4.157, blue ice 4.376, slime 3.040 m/s all reproduced to 1e-3 |
+| ground acceleration | movement_speed x (0.6 / slip)³ | mcpk.wiki; derived check: wiki "Walking" table speeds on ice 4.157, blue ice 4.376 reproduced to 1e-3; slime 3.040 m/s **not** reproduced — see slime stepOn row |
 | air acceleration | 0.02 (x1.3 sprinting) | mcpk.wiki; derived check: sprint-jump average 7.127 m/s reproduced |
 | input scale | 0.98 per key impulse | mcpk.wiki ("Default 0.98"); derived: walking 4.317 m/s = 20 x 0.098 / (1 - 0.546) |
 | input normalisation | vector normalised only if longer than 1 | derived: wiki "Walking" (45° walking is faster), wiki "Sneaking" (1.3 m/s straight, 1.8 diagonal) |
@@ -66,16 +66,28 @@ Nothing here was taken from decompiled Minecraft code or from Pomme's `physics/`
 | collision epsilon | 1e-7 | assumption (typical f64 voxel sweep value) |
 | sneak edge back-off step | 0.05 | assumption |
 | box half-width | 0.6f32 / 2 widened to f64 | entity dimensions are floats; consequence: against a wall the player stops at x.69999998808, not x.7 (test `walking_into_a_full_block_stops`) |
+| cobweb stuck multiplier | (0.25, 0.05, 0.25) | `Entity.makeStuckInBlock` via `WebBlock.entityInside`; set end of tick, consumed (x motion, velocity zeroed) at next `Entity.move`; resets fall distance |
+| powder snow stuck multiplier | (0.9, 1.5, 0.9) | `PowderSnowBlock.entityInside`; only when the feet block is also powder snow |
+| sweet berry bush stuck multiplier | (0.8, 0.75, 0.8) | `SweetBerryBushBlock.entityInside`; living entities only (not foxes/bees) |
+| slime bounce restitution | 1.0 (`Block.getBounceRestitution`) | `Entity.restituteMovementAfterCollisions`: bounce only when falling faster than gravity (`-vy > 0.08`) and not sneaking; formula in `block_effects::vertical_collision_velocity` |
+| slime stepOn scale | 0.4 + \|vy\| x 0.2 | `SlimeBlock.stepOn`: on ground, not sneaking, \|vy\| < 0.1; applied to horizontal velocity after drag at end of tick. Steady walk speed on slime: 1.1857 m/s (not the wiki's 3.040 which ignores stepOn) |
+| honey slide | see `block_effects` constants | `HoneyBlock.isSlidingDown`/`doSlideMovement`: `getOldDeltaY(vy) = vy/0.98 + 0.08`; slide when < -0.08; horizontal slowdown when < -0.13; vertical throttled to `getNewDeltaY(-0.05) = -0.1274`; side overlap > 0.4375 + width/2 |
+| honey speed/jump factor | 0.4 / 0.5 | oracle block_properties.json (already in table above) |
+| water current push | 0.014 x average flow | `Entity.updateFluidHeightAndDoFluidPushing` -> `EntityFluidInteraction`; nearly stationary (\|v\| < 0.003) gets normalized 0.0045; flow scaled by fluid height < 0.4; min accumulated length² 1e-5 |
 
 ## Tick order (as implemented)
 
 1. Rotation from input. 2. Zero |v| < 0.003. 3. Fluid contact (shrunk box vs fluid surface),
 sprint/sneak flags, pose (keeps crouching/swimming if the bigger pose does not fit).
+Water currents (0.014 push) applied here (vanilla `baseTick` -> `updateFluidHeightAndDoFluidPushing`).
 4. Jump cooldown; jump (on ground) or swim up (in fluid). 5. Impulse: keys -> ±1, x sneaking
 speed when crouching/crawling, x 0.98. 6. Travel: normal / water / lava / flying:
-accelerate (rotated by yaw, sine table) -> move (sneak edge back-off, sweep with step-up) ->
+accelerate (rotated by yaw, sine table) -> move (sneak edge back-off, sweep with step-up;
+stuck-in-block multiplier consumed at move start; slime bounce on vertical collision) ->
 zero velocity on collided axes, on_ground = vertical collision while moving down, fall distance ->
 block speed factor -> gravity, vertical drag -> horizontal drag.
+7. End of tick (`Entity.applyEffectsFromBlocks`): slime stepOn, then the entityInside scan
+(honey slide, stuck-in-block multipliers for cobweb / powder snow / sweet berry bush).
 
 ## Approximate / not modelled
 
@@ -89,10 +101,9 @@ block speed factor -> gravity, vertical drag -> horizontal drag.
 - Sneak edge protection near (not on) ground follows the wiki's "up to 0.6 blocks above ground"
   via `fall_distance < step_height` and a probe box; exact condition not determined.
 - Swimming: pitch-steered vertical swimming, surface bobbing (wiki 2.20 m/s at the surface),
-  the climb-out-of-water boost, water currents (1.39 m/s push), bubble columns, depth strider,
+  the climb-out-of-water boost, bubble columns, depth strider,
   dolphin's grace: not implemented.
-- Not implemented: ladders/vines (climbing), cobweb/berry bush/powder snow slowdowns, slime
-  bounce, honey sliding, elytra, levitation/slow falling/jump boost/speed effects, world border,
+- Not implemented: ladders/vines (climbing), elytra, levitation/slow falling/jump boost/speed effects, world border,
   unloaded-chunk freeze, entity pushing, knockback. `PlayerAttributes` carries no effect state yet.
 - Landing ends creative flight (assumption about the exact condition). Double-tap to fly and
   double-tap sprint are input-layer concerns (haste-client).

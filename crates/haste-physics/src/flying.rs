@@ -22,7 +22,7 @@ pub(crate) fn travel(
     attrs: &PlayerAttributes,
     world: &dyn BlockView,
     shapes: &dyn CollisionShapes,
-    _blocks: &dyn BlockPhysics,
+    blocks: &dyn BlockPhysics,
 ) {
     let vertical = attrs.flying_speed as f64 * VERTICAL_FLY_FACTOR;
     if input.jump {
@@ -39,7 +39,7 @@ pub(crate) fn travel(
         };
     accelerate(state, imp, speed);
     let motion = state.velocity;
-    move_entity(state, attrs, motion, world, shapes);
+    move_entity(state, attrs, motion, world, shapes, blocks);
     let drag = HORIZONTAL_DRAG as f64;
     state.velocity.x *= drag;
     state.velocity.z *= drag;

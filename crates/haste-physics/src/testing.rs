@@ -25,7 +25,19 @@ pub mod states {
     pub const SOUL_SAND: BlockStateId = BlockStateId(9);
     pub const WATER_SOURCE: BlockStateId = BlockStateId(10);
     pub const LAVA_SOURCE: BlockStateId = BlockStateId(11);
-    pub const COUNT: usize = 12;
+    /// No collision; sticks entities at (0.25, 0.05, 0.25) (WebBlock.entityInside).
+    pub const COBWEB: BlockStateId = BlockStateId(12);
+    /// No collision; sticks entities whose in-block state is powder snow at (0.9, 1.5, 0.9).
+    pub const POWDER_SNOW: BlockStateId = BlockStateId(13);
+    /// No collision; slows living entities at (0.8, 0.75, 0.8).
+    pub const SWEET_BERRY_BUSH: BlockStateId = BlockStateId(14);
+    /// No collision in these tests; slide slowdown on its sides.
+    pub const HONEY: BlockStateId = BlockStateId(15);
+    /// Water with a unit east flow vector (for water current tests).
+    pub const FLOWING_WATER: BlockStateId = BlockStateId(16);
+    /// Water with a small east flow vector (minimum-impulse test).
+    pub const FLOWING_WATER_SLOW: BlockStateId = BlockStateId(17);
+    pub const COUNT: usize = 18;
 }
 
 /// Shapes and per-block physics properties for the ids in [`states`].
@@ -56,6 +68,7 @@ impl Default for TestShapes {
         boxes[states::BLUE_ICE.0 as usize] = full.clone();
         boxes[states::SLIME.0 as usize] = full.clone();
         boxes[states::SOUL_SAND.0 as usize] = vec![bx(0.0, 0.0, 0.0, 1.0, 0.875, 1.0)];
+        // Cobweb, powder snow, sweet berry bush and honey have no collision in these tests.
         Self { boxes }
     }
 }
@@ -82,9 +95,6 @@ impl BlockPhysics for TestShapes {
             _ => 0.6,
         }
     }
-    fn jump_factor(&self, _s: BlockStateId) -> f32 {
-        1.0
-    }
     fn light_emission(&self, s: BlockStateId) -> u8 {
         if s == states::LAVA_SOURCE {
             15
@@ -99,8 +109,15 @@ impl BlockPhysics for TestShapes {
         matches!(s, states::STONE | states::ICE | states::BLUE_ICE)
     }
     fn speed_factor(&self, s: BlockStateId) -> f32 {
-        if s == states::SOUL_SAND {
-            0.4
+        match s {
+            states::SOUL_SAND => 0.4,
+            states::HONEY => 0.4,
+            _ => 1.0,
+        }
+    }
+    fn jump_factor(&self, s: BlockStateId) -> f32 {
+        if s == states::HONEY {
+            0.5
         } else {
             1.0
         }
@@ -111,10 +128,43 @@ impl BlockPhysics for TestShapes {
                 kind: FluidKind::Water,
                 height: 8.0 / 9.0,
             }),
+            states::FLOWING_WATER | states::FLOWING_WATER_SLOW => Some(FluidInfo {
+                kind: FluidKind::Water,
+                height: 8.0 / 9.0,
+            }),
             states::LAVA_SOURCE => Some(FluidInfo {
                 kind: FluidKind::Lava,
                 height: 8.0 / 9.0,
             }),
+            _ => None,
+        }
+    }
+    fn is_cobweb(&self, s: BlockStateId) -> bool {
+        s == states::COBWEB
+    }
+    fn is_powder_snow(&self, s: BlockStateId) -> bool {
+        s == states::POWDER_SNOW
+    }
+    fn is_sweet_berry_bush(&self, s: BlockStateId) -> bool {
+        s == states::SWEET_BERRY_BUSH
+    }
+    fn is_slime(&self, s: BlockStateId) -> bool {
+        s == states::SLIME
+    }
+    fn is_honey(&self, s: BlockStateId) -> bool {
+        s == states::HONEY
+    }
+    fn bounce_restitution(&self, s: BlockStateId) -> f32 {
+        if s == states::SLIME {
+            1.0
+        } else {
+            0.0
+        }
+    }
+    fn water_flow(&self, s: BlockStateId) -> Option<DVec3> {
+        match s {
+            states::FLOWING_WATER => Some(DVec3::new(1.0, 0.0, 0.0)),
+            states::FLOWING_WATER_SLOW => Some(DVec3::new(0.5, 0.0, 0.0)),
             _ => None,
         }
     }

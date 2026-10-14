@@ -106,7 +106,7 @@ pub(crate) fn travel_water(
     };
     accelerate(state, imp, FLUID_ACCELERATION);
     let motion = state.velocity;
-    move_entity(state, attrs, motion, world, shapes);
+    move_entity(state, attrs, motion, world, shapes, blocks);
     apply_speed_factor(state, world, blocks);
     state.velocity.x *= h_drag;
     state.velocity.y *= WATER_DRAG;
@@ -127,7 +127,7 @@ pub(crate) fn travel_lava(
 ) {
     accelerate(state, imp, FLUID_ACCELERATION);
     let motion = state.velocity;
-    move_entity(state, attrs, motion, world, shapes);
+    move_entity(state, attrs, motion, world, shapes, blocks);
     apply_speed_factor(state, world, blocks);
     state.velocity *= LAVA_DRAG;
     state.velocity.y -= attrs.gravity / LAVA_GRAVITY_DIVISOR;

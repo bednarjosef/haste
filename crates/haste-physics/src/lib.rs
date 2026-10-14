@@ -8,6 +8,7 @@
 //! [`testing`] (in-memory world for tests).
 
 pub mod attributes;
+pub mod block_effects;
 pub mod collision;
 pub mod fluids;
 pub mod flying;
@@ -50,6 +51,9 @@ pub struct PlayerState {
     pub vertical_collision: bool,
     /// Eyes under the water surface (last tick); slows mining, starts sprint-swimming.
     pub eyes_in_water: bool,
+    /// Stuck-in-block speed multiplier set by `makeStuckInBlock` (cobweb, powder snow, sweet
+    /// berry bush) at the end of the tick; consumed by the next move (vanilla `Entity.move`).
+    pub stuck_multiplier: DVec3,
 }
 
 impl PlayerState {
