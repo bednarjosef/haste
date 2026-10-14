@@ -1409,7 +1409,7 @@ impl GuiRenderer {
         tris.clear();
         // GUI inventory preview: full block and sky light (vanilla's GUI entity light
         // 0xF000F0), so the model renders at full brightness.
-        crate::entity::emit_part(
+        crate::entity::emit_part_tinted(
             &mut tris,
             &e.model,
             &e.model.root,
@@ -1418,6 +1418,7 @@ impl GuiRenderer {
             rect,
             (15, 15),
             0.0,
+            [1.0; 3],
         );
         // Back faces off, then back to front.
         let mut order: Vec<(f32, usize)> = tris
