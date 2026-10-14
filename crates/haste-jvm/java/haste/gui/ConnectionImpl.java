@@ -31,6 +31,17 @@ public final class ConnectionImpl {
     static final net.minecraft.client.multiplayer.chat.ChatLog CHAT_LOG = new net.minecraft.client.multiplayer.chat.ChatLog(1024);
     public static net.minecraft.client.multiplayer.chat.ChatLog chatLog(net.minecraft.client.multiplayer.chat.report.ReportingContext r) { return CHAT_LOG; }
 
+    /**
+     * The pause screen's Disconnect / "Save and Quit" goes through the report draft check
+     * (vanilla: a draft asks whether to discard it first). Haste has no report drafts, so the
+     * action runs at once, like vanilla's no-draft path.
+     */
+    public static void draftReportHandled(net.minecraft.client.multiplayer.chat.report.ReportingContext r,
+        net.minecraft.client.Minecraft minecraft, net.minecraft.client.gui.screens.Screen lastScreen,
+        Runnable onDiscard, boolean quitToTitle) {
+        onDiscard.run();
+    }
+
     public static net.minecraft.world.flag.FeatureFlagSet enabledFeatures(ClientPacketListener c) { return LevelImpl.features; }
 
     /**
