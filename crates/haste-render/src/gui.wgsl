@@ -95,3 +95,9 @@ fn fs_main_multiply(in: VertexOut) -> @location(0) vec4<f32> {
 fn fs_main_invert(in: VertexOut) -> @location(0) vec4<f32> {
     return gui_color(in, false);
 }
+
+// Vanilla's GUI_TEXT_HIGHLIGHT (BlendFunction.ADDITIVE: ONE, ONE): adds the stored value.
+@fragment
+fn fs_main_additive(in: VertexOut) -> @location(0) vec4<f32> {
+    return gui_color(in, false);
+}

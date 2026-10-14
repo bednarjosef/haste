@@ -194,6 +194,8 @@ pub fn upload_atlas(
         offset += bytes;
     }
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    // Vanilla's block-atlas sampler for terrain (GlSampler: NEAREST_MIPMAP_LINEAR):
+    // nearest within a level, linear blend between the two nearest mip levels.
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("atlas-sampler"),
         address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -201,7 +203,7 @@ pub fn upload_atlas(
         address_mode_w: wgpu::AddressMode::ClampToEdge,
         mag_filter: wgpu::FilterMode::Nearest,
         min_filter: wgpu::FilterMode::Nearest,
-        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        mipmap_filter: wgpu::MipmapFilterMode::Linear,
         ..Default::default()
     });
     let rects = atlas.rects();

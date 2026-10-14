@@ -12,12 +12,20 @@ struct Sky {
     sunrise_color: vec4<f32>,
     // xyz: horizontal direction of the sunrise glow, w: star brightness.
     sunrise_dir: vec4<f32>,
-    // xyz: camera position, w: fog start.
+    // xyz: camera position, w: unused.
     cam_pos: vec4<f32>,
-    // x: fog end, y: cloud offset (blocks), z: cloud height, w: sky kind (0 overworld, 1 none, 2 end).
+    // x: cloud offset (blocks), y: fog end (blocks, cloud plane extent), z: cloud height,
+    // w: sky kind (0 overworld, 1 none, 2 end).
     params: vec4<f32>,
     // x: cloud brightness, y: cloud alpha.
     clouds: vec4<f32>,
+    // Vanilla fog bands for the sky dome and weather: environmental start/end,
+    // render distance start/end.
+    fog_bands: vec4<f32>,
+    // x: sky fog end, y: cloud fog end.
+    fog_bands2: vec4<f32>,
+    // The sunrise/sunset fan's rotation (camera rotation frame).
+    sunrise_matrix: mat4x4<f32>,
     // End sky texture rectangle in the atlas, clouds rectangle.
     end_rect: vec4<u32>,
     cloud_rect: vec4<u32>,
@@ -35,11 +43,25 @@ fn fetch(uv: vec2<f32>, rect: vec4<u32>) -> vec4<f32> {
     return textureLoad(atlas, texel, 0);
 }
 
-fn fog_factor(dist: f32) -> f32 {
-    if (dist <= sky.cam_pos.w) {
+// Vanilla fog.glsl `linear_fog_value`.
+fn linear_fog_value(dist: f32, start: f32, end: f32) -> f32 {
+    if (dist <= start) {
         return 0.0;
     }
-    return clamp((dist - sky.cam_pos.w) / max(sky.params.x - sky.cam_pos.w, 0.001), 0.0, 1.0);
+    if (dist >= end) {
+        return 1.0;
+    }
+    return (dist - start) / (end - start);
+}
+
+// The terrain fog bands (vanilla `total_fog_value`) for the weather columns.
+fn fog_factor(pos: vec3<f32>) -> f32 {
+    let spherical = length(pos);
+    let cylindrical = max(length(pos.xz), abs(pos.y));
+    return max(
+        linear_fog_value(spherical, sky.fog_bands.x, sky.fog_bands.y),
+        linear_fog_value(cylindrical, sky.fog_bands.z, sky.fog_bands.w),
+    );
 }
 
 // ---- background: full-screen triangle ----
@@ -79,17 +101,56 @@ fn fs_background(in: BackgroundOut) -> @location(0) vec4<f32> {
         let c = fetch(vec2<f32>(sky.end_rect.xy) + texel, sky.end_rect);
         return vec4<f32>(c.rgb * sky.sky_color.rgb, 1.0);
     }
-    if (kind == 1u) {
-        return vec4<f32>(sky.fog_color.rgb, 1.0);
+    // Skyless dimensions: flat fog colour (the overworld dome is the disc fan).
+    return vec4<f32>(sky.fog_color.rgb, 1.0);
+}
+
+// ---- sky disc: the dome fan, fogged by spherical distance over the sky fog end ----
+
+struct DiscOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) fog: f32,
+};
+
+@vertex
+fn vs_disc(v: VertexIn) -> DiscOut {
+    var out: DiscOut;
+    // Positions are in the camera's rotation frame already (radius 512 around it).
+    let clip = sky.rot_view_proj * vec4<f32>(v.pos, 1.0);
+    out.clip = vec4<f32>(clip.xy, clip.w * 0.99999, clip.w);
+    // Vanilla sky.fsh: max(linear(spherical, 0, skyEnd), linear(cylindrical, skyEnd,
+    // skyEnd)); the cylindrical term is 1 only past the ring where the spherical is too.
+    out.fog = linear_fog_value(length(v.pos), 0.0, sky.fog_bands2.x);
+    return out;
+}
+
+@fragment
+fn fs_disc(in: DiscOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(mix(sky.sky_color.rgb, sky.fog_color.rgb, in.fog), 1.0);
+}
+
+// ---- sunrise/sunset fan: translucent timeline colour, alpha ramping center to ring ----
+
+@vertex
+fn vs_sunrise(v: VertexIn) -> VertexOut {
+    var out: VertexOut;
+    let world = sky.sunrise_matrix * vec4<f32>(v.pos, 1.0);
+    let clip = sky.rot_view_proj * vec4<f32>(world.xyz, 1.0);
+    out.clip = vec4<f32>(clip.xy, clip.w * 0.99999, clip.w);
+    out.uv = v.uv;
+    out.color = v.color;
+    out.rect = v.rect;
+    out.fog = 0.0;
+    return out;
+}
+
+@fragment
+fn fs_sunrise(in: VertexOut) -> @location(0) vec4<f32> {
+    let a = in.color.a * sky.sunrise_color.a;
+    if (a <= 0.0) {
+        discard;
     }
-    // Overworld: sky colour overhead fading into the fog colour at the horizon, the sunrise
-    // glow low in the sun's direction.
-    let up = smoothstep(-0.02, 0.45, dir.y);
-    var color = mix(sky.fog_color.rgb, sky.sky_color.rgb, up);
-    let glow = sky.sunrise_color.a * pow(max(dot(normalize(vec3<f32>(dir.x, 0.0, dir.z) + vec3<f32>(0.0, 0.0001, 0.0)), sky.sunrise_dir.xyz), 0.0), 3.0)
-        * (1.0 - smoothstep(0.0, 0.55, abs(dir.y)));
-    color = mix(color, sky.sunrise_color.rgb, clamp(glow, 0.0, 1.0));
-    return vec4<f32>(color, 1.0);
+    return vec4<f32>(sky.sunrise_color.rgb, a);
 }
 
 // ---- celestial: sun, moon, stars in the camera's rotation frame, additive ----
@@ -144,7 +205,7 @@ fn vs_world(v: VertexIn) -> VertexOut {
     out.uv = v.uv;
     out.color = v.color;
     out.rect = v.rect;
-    out.fog = fog_factor(length(v.pos - sky.cam_pos.xyz));
+    out.fog = fog_factor(v.pos - sky.cam_pos.xyz);
     return out;
 }
 
@@ -170,7 +231,9 @@ fn vs_clouds(@builtin(vertex_index) i: u32) -> CloudOut {
         vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
         vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0),
     )[i];
-    let extent = max(sky.params.x * 2.0, 256.0);
+    // The plane reaches past the cloud fog end (vanilla renders real cloud cells out to the
+    // cloud range option).
+    let extent = max(sky.fog_bands2.y, 256.0);
     let world = vec3<f32>(sky.cam_pos.x + corner.x * extent, sky.params.z, sky.cam_pos.z + corner.y * extent);
     var out: CloudOut;
     out.clip = sky.view_proj * vec4<f32>(world, 1.0);
@@ -180,16 +243,13 @@ fn vs_clouds(@builtin(vertex_index) i: u32) -> CloudOut {
 
 @fragment
 fn fs_clouds(in: CloudOut) -> @location(0) vec4<f32> {
-    let cell = floor(vec2<f32>(in.world.x + sky.params.y, in.world.z) / 12.0);
+    let cell = floor(vec2<f32>(in.world.x + sky.params.x, in.world.z) / 12.0);
     let c = fetch(vec2<f32>(sky.cloud_rect.xy) + cell + vec2<f32>(0.5, 0.5), sky.cloud_rect);
     if (c.a < 0.5) {
         discard;
     }
-    // Clouds have their own range (they sit far above the terrain fog): fade out toward the
-    // edge of the cloud plane by horizontal distance.
-    let extent = max(sky.params.x * 2.0, 256.0);
-    let hdist = length(in.world.xz - sky.cam_pos.xz);
-    let fade = 1.0 - smoothstep(extent * 0.5, extent, hdist);
-    let rgb = mix(sky.fog_color.rgb, vec3<f32>(sky.clouds.x), fade);
-    return vec4<f32>(rgb, sky.clouds.y * fade);
+    // Vanilla clouds.fsh: alpha *= 1 - linear_fog_value(spherical distance, 0, cloud end).
+    let rel = in.world - sky.cam_pos.xyz;
+    let fade = 1.0 - linear_fog_value(length(rel), 0.0, sky.fog_bands2.y);
+    return vec4<f32>(vec3<f32>(sky.clouds.x), sky.clouds.y * fade);
 }
