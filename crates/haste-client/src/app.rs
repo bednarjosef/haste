@@ -407,7 +407,7 @@ impl Session {
         opts.client_information.view_distance = options.render_distance as i8;
         let mut driver: NetDriver = rt.block_on(NetDriver::connect(opts))?;
         driver.session.fov_effect_scale = options.fov_effect_scale;
-        let (biomes, biome_climates, type_names, sounds, painting_variants) = {
+        let (biomes, biome_climates, type_names, sounds, painting_variants, mob_variants) = {
             let regs = driver.connection().registries();
             let sounds = if sound {
                 open_sounds(regs, &data, &options.sound)
@@ -420,6 +420,7 @@ impl Session {
                 net::entity_type_names(regs, &data),
                 sounds,
                 net::painting_variants(regs),
+                net::mob_variants(regs),
             )
         };
         let login = driver.login().clone();
@@ -454,6 +455,14 @@ impl Session {
         let mut entities = net::new_entity_store(entity_types);
         tracing::info!("synced painting variants: {}", painting_variants.len());
         entities.set_painting_variants(painting_variants);
+        for (registry, table) in mob_variants {
+            tracing::info!(
+                "synced {}: {} entries",
+                registry,
+                table.iter().filter(|e| e.is_some()).count()
+            );
+            entities.set_mob_variants(&registry, table);
+        }
         let shared = Arc::new(Shared::new(
             data,
             world,
