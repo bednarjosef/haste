@@ -124,6 +124,8 @@ proxies are generated per checkout (`cache/proxies/26.3-<hash>`). `ItemStack`, `
 `OptionInstance`, `KeyMapping`, `Hud`, `ChatComponent` are no longer proxies. The session-1 list below is history.
 76 classes, 4024 methods: 190 impl, 338 no-op, the rest logging stubs. Implemented methods and why:
 - `Minecraft` (ClientImpl): `getInstance` (canonical proxy), `getWindow`, `getSoundManager`, `getConnection`,
+  `getFixerUpper` (vanilla's `DataFixers.getDataFixer()`, built once like the constructor does: options.txt
+  loads through `Options.dataFix`),
   `getNarrator`, `getPlayerSocialManager`, `getReportingContext`, `getEntityRenderDispatcher`, `textInputManager`
   (canonical service proxies); `isDemo/isLocalServer/hasSingleplayerServer/getSingleplayerServer/
   getCurrentServer/isOfflineDeveloperMode` false/null and `isMultiplayerServer` true (Haste always talks to a
@@ -161,7 +163,8 @@ proxies are generated per checkout (`cache/proxies/26.3-<hash>`). `ItemStack`, `
 - `ClientPacketListener`: `sendChat/sendCommand` -> Rust `GameState::sent`; `registryAccess` -> every registry
   exists and is empty (EmptyRegistries); `getSuggestionsProvider` -> vanilla's real ClientSuggestionProvider
   with no permissions; `getCommands` -> empty dispatcher (the command tree is not bridged); online players empty;
-  `serverLinks` EMPTY.
+  `serverLinks` EMPTY; `searchTrees` -> vanilla's real `SessionSearchTrees` (allowed class; the creative
+  inventory's search, empty until a reload populates it).
 - `ChatComponent`: typed-line history (Java, 100 lines, like vanilla's recent chat), `isChatFocused`,
   `extractRenderState` draws Rust's `chat_lines` above the input (approximate layout: 320 px wide, 9 px lines,
   50% black backdrop, 10/20 lines unfocused/focused; no fading, no styles).

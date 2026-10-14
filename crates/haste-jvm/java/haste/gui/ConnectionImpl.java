@@ -38,6 +38,7 @@ public final class ConnectionImpl {
     /** Waypoints (the locator bar) are not forwarded yet: vanilla's manager, empty. */
     static final net.minecraft.client.waypoints.ClientWaypointManager WAYPOINTS = new net.minecraft.client.waypoints.ClientWaypointManager();
     public static net.minecraft.client.waypoints.ClientWaypointManager getWaypointManager(ClientPacketListener c) { return WAYPOINTS; }
+
     /** Signed-chat bookkeeping (last-seen acknowledgements) is Rust's: nothing to do here. */
     public static void markMessageAsProcessed(ClientPacketListener c, net.minecraft.network.chat.MessageSignature s, boolean acknowledged) {}
     /** Offline-mode servers are what Haste tests against; online mode is not told to Java yet. */

@@ -50,6 +50,10 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
             "entity_type",
         ))
         .map_or_else(|| data.registries.len("minecraft:entity_type"), |e| e.len());
+    // The entity-type names the seat offset is resolved with (the synced registry when the
+    // server sent one, else the static one).
+    let type_names = net::entity_type_names(regs, &data);
+    driver.session.set_entity_type_names(type_names);
     let mut world = World::new_with_biomes(
         driver.login().dimension.clone(),
         data.clone(),
@@ -161,6 +165,10 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
     let counters = driver.session.counters.clone();
     let chunks = world.chunk_count();
     tracing::debug!("sound packets: {}", counters.sound_packets);
+    println!(
+        "own block sounds produced while walking: {}",
+        counters.own_sounds
+    );
     println!("--- summary after {:.1} s", t0.elapsed().as_secs_f64());
     println!(
         "packets in {} ({} bytes), out {}; chunks loaded {} (unloaded {}, refused by world {}), now loaded {} with {} non-empty sections, entities {}, teleports {}",

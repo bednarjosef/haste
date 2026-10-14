@@ -9,6 +9,7 @@ pub mod metadata;
 pub mod model_dump;
 pub mod models;
 pub mod registry;
+pub mod riding;
 pub mod store;
 
 #[cfg(test)]
@@ -16,4 +17,5 @@ mod tests;
 
 pub use dims::{Dimensions, EntityDimensions};
 pub use metadata::{Metadata, SharedFlags};
+pub use riding::{passenger_seat, PassengerKind, SeatPoint, SeatQuery};
 pub use store::{Entity, EntityStore};

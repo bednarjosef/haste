@@ -1,8 +1,9 @@
 # Open the pause menu with Escape, screenshot it, close it again.
 wait_until joined
 wait_until settled
-key ESCAPE
+wait 10
+key Escape
 wait_until screen_open
 screenshot pause
-key ESCAPE
+key Escape
 wait_until screen_closed

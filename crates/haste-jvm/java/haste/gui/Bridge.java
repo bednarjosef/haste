@@ -121,6 +121,11 @@ public final class Bridge {
         }
         s = ClientImpl.screen;
         if (s != null) s.extractRenderStateWithTooltipAndSubtitles(Proxies.graphics, (int) mouseX, (int) mouseY, partial);
+        // vanilla Gui.extractRenderState draws the F3 debug overlay after the screen (unless the debug
+        // options screen is up, which draws its own copy); it is the topmost HUD element.
+        if (!(s instanceof net.minecraft.client.gui.screens.debug.DebugOptionsScreen)) {
+            Proxies.hud.extractDebugOverlay(Proxies.graphics);
+        }
         GfxImpl.end();
         return GuiBatch.frame(GfxImpl.cursor);
     }
