@@ -332,19 +332,6 @@ pub fn mesh_section(
     mesh_section_with(snapshot, baked, atlas, &MeshTables::default(), pos)
 }
 
-/// How far a decal quad (one that repeats a face an earlier quad of the same
-/// state already covers) is pushed out along that face's normal, in blocks.
-///
-/// Vanilla draws both quads: its terrain depth test accepts equal depth
-/// (`DepthStencilState.DEFAULT`, `CompareOp.GREATER_THAN_OR_EQUAL`), so the
-/// later quad - the tinted overlay of the grass block's side - lands on top of
-/// the side texture. Haste's terrain pipelines compare `Less`, so an exactly
-/// coplanar quad is dropped at once instead of sharing the depth. This outset
-/// (well under vanilla's 1/16 block model step, invisible in play) puts the
-/// decal measurably in front of the face it decorates, which is what vanilla's
-/// overdraw achieves without any offset.
-const DECAL_OUTSET: f32 = 0.02;
-
 /// The blended tint of `kind` at block `p` from the snapshot's biome cells.
 fn block_tint(
     snapshot: &MeshSnapshot,
@@ -470,10 +457,6 @@ impl<'a> MeshContext<'a> {
             self.states.resize(idx + 1, None);
         }
         if self.states[idx].is_none() {
-            // Face planes this state's quads occupy, each with how many quads already
-            // lie on it, so a quad that duplicates a plane (a decal overlay) is pushed
-            // in front of the ones under it.
-            let mut covered: Vec<(haste_assets::Direction, [[f32; 3]; 4], usize)> = Vec::new();
             let quads: Vec<EmitQuad> = self
                 .baked
                 .quads(state)
@@ -486,28 +469,9 @@ impl<'a> MeshContext<'a> {
                     let uvs = quad
                         .uvs
                         .map(|t| [(t[0] - rx) / rw.max(1.0), (t[1] - ry) / rh.max(1.0)]);
-                    // A quad that lies exactly on a face other quads already cover is vanilla's
-                    // decal overlay (the grass block's tinted side overlay over its side
-                    // texture): keep it in front of them so it draws over them.
-                    let mut positions = quad.positions;
-                    let occupied = covered
-                        .iter_mut()
-                        .find(|(dir, plane, _)| *dir == quad.direction && *plane == quad.positions);
-                    if let Some((.., depth)) = occupied {
-                        *depth += 1;
-                        let n = quad.direction.offset();
-                        let outset = *depth as f32 * DECAL_OUTSET;
-                        for p in &mut positions {
-                            p[0] += n[0] as f32 * outset;
-                            p[1] += n[1] as f32 * outset;
-                            p[2] += n[2] as f32 * outset;
-                        }
-                    } else {
-                        covered.push((quad.direction, positions, 0));
-                    }
                     EmitQuad {
                         uvs,
-                        positions,
+                        positions: quad.positions,
                         cullface: quad.cullface,
                         shade_face: quad.shade_face,
                         direction: quad.direction,
@@ -1307,9 +1271,14 @@ mod tests {
         assert!(tinted >= 4 && untinted >= 4, "both kinds must be meshed");
     }
 
+    /// The grass block's side overlay is the model's second element: four quads
+    /// lying exactly on the side faces, one tintindex over the same plane the side
+    /// texture covers. The mesher must emit it unchanged (vanilla draws both
+    /// quads; the terrain depth test lets them share a depth), or the side loses
+    /// the biome tint the overlay carries.
     #[test]
     #[ignore = "needs the client jar and datagen reports in the cache"]
-    fn decal_quad_sits_in_front_of_the_face_it_covers() {
+    fn side_overlay_quad_is_meshed_on_the_faces_plane() {
         let Some((states, baked, atlas)) = load_baked() else {
             return;
         };
@@ -1322,8 +1291,8 @@ mod tests {
         let snapshot = MeshSnapshot::capture(&world, pos);
         let mesh = mesh_section_with(&snapshot, &baked, &atlas, &MeshTables::default(), pos);
 
-        // The packed position, back to section-local blocks (one quantization step is
-        // far smaller than the outset, so this recovers the exact quad).
+        // The packed position, back to section-local blocks (a quantization step is
+        // far below any model feature, so this recovers the exact quad).
         let decode = |p: [u16; 4]| {
             std::array::from_fn(|i| {
                 f32::from(p[i]) / 65535.0 * crate::vertex::POS_RANGE - crate::vertex::POS_BIAS
@@ -1334,16 +1303,10 @@ mod tests {
                 .zip(b)
                 .all(|(x, y)| (x - y).abs() < 2.0 / 65535.0 * crate::vertex::POS_RANGE)
         };
-        // The block at local (0, 0, 0): its north face at z = 0 carries the side
-        // texture and, on the same plane, the tinted overlay.
-        let north = haste_assets::Direction::North;
-        let at = |quad: &haste_assets::BakedQuad| {
-            quad.direction == north
-                && quad
-                    .positions
-                    .iter()
-                    .all(|p| p[2].abs() < 1e-4 && p[0] < 1.0 + 1e-4)
-        };
+        let sprite_of = |texture: &str| atlas.region(texture).sprite as u16;
+        let overlay_sprite = sprite_of("minecraft:block/grass_block_side_overlay");
+        let side_sprite = sprite_of("minecraft:block/grass_block_side");
+        let at = |quad: &haste_assets::BakedQuad| quad.direction == haste_assets::Direction::North;
         let base = baked
             .quads(grass)
             .iter()
@@ -1354,65 +1317,28 @@ mod tests {
             .iter()
             .find(|q| at(q) && q.tint_index.is_some())
             .expect("the grass block's tinted side overlay quad");
-        let sprite_of = |texture: &str| atlas.region(texture).sprite as u16;
-        let (side_sprite, overlay_sprite) = (
-            sprite_of("minecraft:block/grass_block_side"),
-            sprite_of("minecraft:block/grass_block_side_overlay"),
-        );
-        let at_pos = |v: &PackedVertex, want: [f32; 3]| close(decode(v.pos), want);
-        let quad_vertices = |q: &haste_assets::BakedQuad, outset: f32| {
-            let n = q.direction.offset();
-            q.positions.map(|p| {
-                [
-                    p[0] + n[0] as f32 * outset,
-                    p[1] + n[1] as f32 * outset,
-                    p[2] + n[2] as f32 * outset,
-                ]
-            })
-        };
+        // The model's two elements share the face plane: same direction, same four
+        // vertices. The mesh must keep the overlay on that plane, untouched.
+        assert_eq!(overlay.positions, base.positions, "coplanar model elements");
 
-        // The base side quad stays on the block face ...
-        for want in quad_vertices(base, 0.0) {
+        for want in base.positions {
             assert!(
                 mesh.vertices
                     .iter()
-                    .any(|v| v.sprite == side_sprite && at_pos(v, want)),
-                "base side quad on the face: {want:?} is not in the mesh"
+                    .any(|v| v.sprite == side_sprite && close(decode(v.pos), want)),
+                "the side quad on the face: {want:?} is not in the mesh"
             );
-        }
-        // ... and every overlay vertex sits exactly the outset in front of that
-        // face, along its normal, so the tinted overlay draws over the side texture.
-        for want in quad_vertices(overlay, DECAL_OUTSET) {
             assert!(
                 mesh.vertices
                     .iter()
-                    .any(|v| v.sprite == overlay_sprite && at_pos(v, want)),
-                "overlay vertex {want:?} is not {} in front of the face",
-                DECAL_OUTSET
+                    .any(|v| v.sprite == overlay_sprite && close(decode(v.pos), want)),
+                "the overlay quad shares the face plane, but {want:?} is not in the mesh"
             );
         }
         assert!(
-            !mesh.vertices.iter().any(|v| v.sprite == overlay_sprite
-                && quad_vertices(overlay, 0.0)
-                    .iter()
-                    .any(|want| at_pos(v, *want))),
-            "the overlay must not stay coplanar with the side texture"
+            mesh.vertices.iter().any(|v| v.sprite == overlay_sprite),
+            "the grass block's side overlay must be meshed"
         );
-        // Quads that cover no other quad keep their baked position (the top face).
-        let up = baked
-            .quads(grass)
-            .iter()
-            .find(|q| q.direction == haste_assets::Direction::Up)
-            .expect("the grass block's top quad");
-        let top_sprite = sprite_of("minecraft:block/grass_block_top");
-        for want in quad_vertices(up, 0.0) {
-            assert!(
-                mesh.vertices
-                    .iter()
-                    .any(|v| v.sprite == top_sprite && at_pos(v, want)),
-                "the top quad keeps its baked position, but {want:?} is not in the mesh"
-            );
-        }
     }
 
     #[test]

@@ -603,7 +603,13 @@ impl Renderer {
                     depth_stencil: Some(wgpu::DepthStencilState {
                         format: wgpu::TextureFormat::Depth24Plus,
                         depth_write_enabled: Some(true),
-                        depth_compare: Some(wgpu::CompareFunction::Less),
+                        // Vanilla's terrain depth test: TERRAIN_SNIPPET inherits
+                        // `DepthStencilState.DEFAULT` (GREATER_THAN_OR_EQUAL), drawn
+                        // against a depth cleared to 0. Haste clears to 1, so the
+                        // same rule is LessEqual: a quad may share a depth (vanilla's
+                        // coplanar model elements, e.g. the grass block's side
+                        // overlay over its side texture, both draw).
+                        depth_compare: Some(wgpu::CompareFunction::LessEqual),
                         stencil: Default::default(),
                         bias: Default::default(),
                     }),

@@ -380,10 +380,10 @@ fn mesher_output_stable() {
     // Expected: computed with the original mesher (commit on branch meshing-speed before
     // the meshing-speed changes). Update ONLY when the mesher's output is intentionally
     // changed (then recompute with the original code and justify it).
-    // grass-overlay-tint: decal quads (the grass block's side overlay) are pushed
-    // `DECAL_OUTSET` out of the face plane they cover, so their vertices moved. The
-    // quad and vertex counts are unchanged (verified with DECAL_OUTSET = 0.0).
-    let expected: u64 = 4_348_415_658_727_084_039;
+    // The grass block's side overlay is emitted exactly as the model has it (coplanar
+    // with the side face), so this hash is the original one: the fix for the missing
+    // overlay is the terrain depth test (LessEqual), not the geometry.
+    let expected: u64 = 10_530_433_279_199_709_875;
     assert_eq!(hash.finish(), expected, "mesher output changed");
     assert!(quads > 100_000, "suspiciously few quads: {quads}");
     eprintln!("{quads} quads, hash {:016x}", hash.finish());
