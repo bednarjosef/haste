@@ -128,8 +128,30 @@ impl Ui {
         }
     }
 
-    fn gui(&self) -> &GuiPipeline {
+    /// The GUI pipeline (screens, ticks, frames; menu mode drives it before a session exists).
+    pub fn gui(&self) -> &GuiPipeline {
         self.host.gui()
+    }
+
+    /// Opens a real vanilla screen (menu mode's title screen, tests).
+    pub fn open_screen(&self, kind: ScreenKind) -> anyhow::Result<()> {
+        self.gui().open_screen(kind)
+    }
+
+    /// The multiplayer screen's Join: the address to connect to, if any was clicked since the
+    /// last call (menu mode; the connection itself is Rust's).
+    pub fn take_join_request(&self) -> Option<String> {
+        self.gui().take_join_request()
+    }
+
+    /// The connecting screen's Cancel since the last call: drop a join still in progress.
+    pub fn take_join_cancelled(&self) -> bool {
+        self.gui().take_join_cancelled()
+    }
+
+    /// The title screen's Quit Game since the last call: close the client.
+    pub fn take_quit_request(&self) -> bool {
+        self.gui().take_quit_request()
     }
 
     /// The renderer's text metrics (`Renderer::text_metrics`): vanilla's `Font` measures with them.

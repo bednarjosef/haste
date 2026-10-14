@@ -240,21 +240,38 @@ impl MouseButton {
 }
 
 /// A `wait_until` condition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Condition {
     Joined,
     Settled,
     ScreenOpen,
     ScreenClosed,
+    /// The open screen's class simple name is this (`TitleScreen`,
+    /// `JoinMultiplayerScreen`, ...); no screen open matches nothing.
+    Screen(String),
 }
 
 impl Condition {
-    fn parse(name: &str, line: usize) -> Result<Condition, ScriptError> {
+    /// Parses the arguments of a `wait_until` line: one of the four named conditions, or
+    /// `screen <SimpleName>`.
+    fn parse(rest: &str, line: usize) -> Result<Condition, ScriptError> {
+        let name = rest.split_whitespace().next().unwrap_or_default();
         match name {
             "joined" => Ok(Condition::Joined),
             "settled" => Ok(Condition::Settled),
             "screen_open" => Ok(Condition::ScreenOpen),
             "screen_closed" => Ok(Condition::ScreenClosed),
+            "screen" => {
+                let class = rest.split_whitespace().nth(1).ok_or_else(|| {
+                    ScriptError::UnknownCondition {
+                        name: rest.to_owned(),
+                        line,
+                    }
+                })?;
+                Ok(Condition::Screen(
+                    class.rsplit('.').next().unwrap_or(class).to_owned(),
+                ))
+            }
             _ => Err(ScriptError::UnknownCondition {
                 name: name.to_owned(),
                 line,
@@ -268,15 +285,20 @@ impl Condition {
             Condition::Settled => state.settled,
             Condition::ScreenOpen => state.screen_open,
             Condition::ScreenClosed => !state.screen_open,
+            Condition::Screen(want) => state
+                .screen_class
+                .as_deref()
+                .is_some_and(|open| open.rsplit('.').next() == Some(want.as_str())),
         }
     }
 
-    fn name(&self) -> &'static str {
+    fn name(&self) -> String {
         match self {
-            Condition::Joined => "joined",
-            Condition::Settled => "settled",
-            Condition::ScreenOpen => "screen_open",
-            Condition::ScreenClosed => "screen_closed",
+            Condition::Joined => "joined".into(),
+            Condition::Settled => "settled".into(),
+            Condition::ScreenOpen => "screen_open".into(),
+            Condition::ScreenClosed => "screen_closed".into(),
+            Condition::Screen(s) => format!("screen {s}"),
         }
     }
 }
@@ -301,6 +323,8 @@ pub enum Step {
     MouseMove(i32, i32),
     /// Click a button at GUI coordinates.
     Click(MouseButton, i32, i32),
+    /// Click the widget whose label is this text (the button "Multiplayer", a server's name).
+    ClickText(String),
     /// Turn the wheel by `n` notches (may be negative).
     Scroll(i32),
     /// Set the camera yaw and pitch in degrees.
@@ -317,6 +341,7 @@ pub enum Action {
     Text(String),
     MouseMove(i32, i32),
     Click(MouseButton, i32, i32),
+    ClickText(String),
     Scroll(i32),
     Look(f32, f32),
     Screenshot(String),
@@ -327,11 +352,13 @@ pub enum Action {
 }
 
 /// The per-tick game state the runner reads for `wait_until`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ScriptState {
     pub joined: bool,
     pub settled: bool,
     pub screen_open: bool,
+    /// The open screen's class name (`wait_until screen <SimpleName>`), if any.
+    pub screen_class: Option<String>,
 }
 
 /// A parse error. Every variant carries the 1-based source line it came from.
@@ -400,8 +427,7 @@ pub fn parse(text: &str) -> Result<Vec<Step>, ScriptError> {
                 Step::Wait(parse_u32(n, line)?)
             }
             "wait_until" => {
-                let name = first_token(rest, "wait_until", line)?;
-                let condition = Condition::parse(name, line)?;
+                let condition = Condition::parse(rest, line)?;
                 Step::WaitUntil { condition, line }
             }
             "key" => Step::Key(parse_key(first_token(rest, "key", line)?, line)?),
@@ -423,6 +449,8 @@ pub fn parse(text: &str) -> Result<Vec<Step>, ScriptError> {
                 Step::Click(button, parse_i32(x, line)?, parse_i32(y, line)?)
             }
             "scroll" => Step::Scroll(parse_i32(first_token(rest, "scroll", line)?, line)?),
+            // Click the widget whose label this is (where the last frame drew the text).
+            "click_text" => Step::ClickText(rest.to_owned()),
             "look" => {
                 let mut parts = rest.split_whitespace();
                 let yaw = parts.next().ok_or_else(|| missing("look", line))?;
@@ -610,6 +638,10 @@ impl Runner {
                             self.advance();
                             return vec![Action::Click(button, x, y)];
                         }
+                        Step::ClickText(text) => {
+                            self.advance();
+                            return vec![Action::ClickText(text)];
+                        }
                         Step::Scroll(n) => {
                             self.advance();
                             return vec![Action::Scroll(n)];
@@ -652,6 +684,7 @@ mod tests {
             "type hello world",
             "mouse 160 90",
             "click right 10 20",
+            "click_text Multiplayer",
             "scroll -1",
             "look 90 10",
             "screenshot name1",
@@ -672,10 +705,20 @@ mod tests {
                 Step::Text("hello world".to_owned()),
                 Step::MouseMove(160, 90),
                 Step::Click(MouseButton::Right, 10, 20),
+                Step::ClickText("Multiplayer".to_owned()),
                 Step::Scroll(-1),
                 Step::Look(90.0, 10.0),
                 Step::Screenshot("name1".to_owned()),
             ]
+        );
+        // The screen condition takes a class simple name (the package part is trimmed).
+        let steps = parse("wait_until screen multiplayer.JoinMultiplayerScreen").unwrap();
+        assert_eq!(
+            steps,
+            vec![Step::WaitUntil {
+                condition: Condition::Screen("JoinMultiplayerScreen".to_owned()),
+                line: 1,
+            }]
         );
     }
 

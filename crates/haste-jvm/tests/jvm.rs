@@ -247,6 +247,31 @@ fn render(h: &JvmHost, mouse: (f64, f64)) -> haste_core::gui::GuiFrame {
     }
 }
 
+/// Where a text is drawn, in absolute GUI pixels (translations applied).
+fn text_pos(f: &haste_core::gui::GuiFrame, want: &str) -> Option<(i32, i32)> {
+    use haste_core::gui::GuiCommand;
+    let mut stack: Vec<(f32, f32)> = vec![(0.0, 0.0)];
+    for c in &f.commands {
+        match c {
+            GuiCommand::TranslatePush { dx, dy, .. } => {
+                let (x, y) = *stack.last().unwrap();
+                stack.push((x + dx, y + dy));
+            }
+            GuiCommand::TranslatePop => {
+                stack.pop();
+            }
+            GuiCommand::Text { text, x, y, .. } | GuiCommand::StyledText { text, x, y, .. }
+                if text == want =>
+            {
+                let (dx, dy) = *stack.last().unwrap();
+                return Some((x + dx as i32, y + dy as i32));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// A pipeline Haste did not build, the way a mod registers one: a location of the mod's own and a blend
 /// function of four blend factors (src colour, dst colour, src alpha, dst alpha), on vanilla's builder.
 fn mod_pipeline<'local>(
@@ -595,12 +620,18 @@ fn options_screen() {
 }
 
 #[test]
-#[ignore = "JoinMultiplayerScreen.<init> throws NoClassDefFoundError: net/minecraft/client/multiplayer/ServerStatusPinger is deny-listed (its init then needs ServerList too), see crates/haste-jvm/src/loader.rs DENY"]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
 fn multiplayer_screen() {
     let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
     let h = host();
     let gui = h.gui();
+    reset(gui);
     h.clear_unimplemented().unwrap();
+    // One saved server (vanilla's ServerList reads servers.dat from the game directory, which
+    // for tests is the JVM's cache/jvm-game): the entry shows and Join requests its address.
+    let game_dir = h.config().game_dir.clone();
+    let saved = game_dir.join("servers.dat");
+    std::fs::write(&saved, servers_dat("Haste Test", "127.0.0.1:25691")).unwrap();
     open(&h, haste_jvm::ScreenKind::Multiplayer);
     assert!(gui.is_open());
     assert_eq!(
@@ -616,6 +647,8 @@ fn multiplayer_screen() {
         "Direct Connection",
         "Add Server",
         "Back",
+        // the saved entry
+        "Haste Test",
     ] {
         assert!(t.iter().any(|x| x == want), "missing {want:?} in {t:?}");
     }
@@ -624,6 +657,99 @@ fn multiplayer_screen() {
         unimpl.is_empty(),
         "Unimplemented log for JoinMultiplayerScreen: {unimpl:#?}"
     );
+    // Selecting the entry and clicking Join goes through vanilla's join() into Haste's
+    // ConnectScreen replacement, which hands the address to Rust.
+    let p = text_pos(&f, "Haste Test").expect("the saved entry's position");
+    gui.mouse(f64::from(p.0 + 2), f64::from(p.1 + 2), Some((1, true)));
+    gui.mouse(f64::from(p.0 + 2), f64::from(p.1 + 2), Some((1, false)));
+    let join = text_pos(&render(&h, (0.0, 0.0)), "Join Server").expect("the Join button");
+    gui.mouse(
+        f64::from(join.0 + 2),
+        f64::from(join.1 + 2),
+        Some((1, true)),
+    );
+    gui.mouse(
+        f64::from(join.0 + 2),
+        f64::from(join.1 + 2),
+        Some((1, false)),
+    );
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.ConnectScreen"),
+        "Haste's connecting screen is open"
+    );
+    if let Some(e) = gui.take_last_error() {
+        panic!("clicking Join failed: {e}");
+    }
+    assert_eq!(
+        gui.take_join_request().as_deref(),
+        Some("127.0.0.1:25691"),
+        "the address was handed to Rust"
+    );
+    assert_no_refusals(&h);
+    gui.close_screen();
+    std::fs::remove_file(&saved).unwrap();
+}
+
+/// The title screen's Quit Game asks Rust to quit (the window closes).
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn title_screen_quit() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    reset(gui);
+    h.clear_unimplemented().unwrap();
+    open(&h, haste_jvm::ScreenKind::Title);
+    let f = render(&h, (0.0, 0.0));
+    let p = text_pos(&f, "Quit Game").expect("the Quit button");
+    gui.mouse(f64::from(p.0 + 2), f64::from(p.1 + 2), Some((1, true)));
+    gui.mouse(f64::from(p.0 + 2), f64::from(p.1 + 2), Some((1, false)));
+    assert!(gui.take_quit_request(), "Quit Game set the quit flag");
+    assert!(!gui.take_quit_request(), "the flag is cleared by taking it");
+    gui.close_screen();
+}
+
+/// Every refused class of the screens this test covers is known and harmless.
+fn assert_no_refusals(h: &JvmHost) {
+    let known = [
+        "com.mojang.renderpearl.api.pipeline.RenderPipeline", // a parameter type of draw calls
+        "net.minecraft.client.multiplayer.ServerStatusPinger", // Haste's proxy (pings in Rust)
+        "jakarta.servlet.Servlet",                            // log4j probes
+        "javax.servlet.Servlet",
+        "net.minecraft.client.sounds.MusicManager", // option callbacks (no music)
+    ];
+    let log = h.class_log().unwrap();
+    let bad: Vec<_> = log
+        .refused()
+        .into_iter()
+        .filter(|(n, _)| !known.contains(n))
+        .collect();
+    assert!(bad.is_empty(), "classes refused: {bad:#?}");
+}
+
+/// A minimal `servers.dat` (vanilla's format: uncompressed NBT, one entry) for the multiplayer
+/// screen tests. Built by hand: TAG_Compound "": { TAG_List "servers": [ TAG_Compound { ... } ] }.
+fn servers_dat(name: &str, ip: &str) -> Vec<u8> {
+    fn string(bytes: &mut Vec<u8>, s: &str) {
+        bytes.extend_from_slice(&(s.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(s.as_bytes());
+    }
+    let mut b = vec![0x0a];
+    string(&mut b, "");
+    b.extend_from_slice(&[0x09]); // TAG_List
+    string(&mut b, "servers");
+    b.push(0x0a); // of compounds
+    b.extend_from_slice(&1i32.to_be_bytes()); // one entry
+    b.extend_from_slice(&[0x08]); // TAG_String ip
+    string(&mut b, "ip");
+    string(&mut b, ip);
+    b.extend_from_slice(&[0x08]); // TAG_String name
+    string(&mut b, "name");
+    string(&mut b, name);
+    b.push(0x00); // end of the entry
+    b.push(0x00); // end of the root
+    b
 }
 
 #[test]

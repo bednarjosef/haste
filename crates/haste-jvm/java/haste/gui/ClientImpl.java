@@ -25,6 +25,10 @@ public final class ClientImpl {
     }
     public static Window getWindow(Minecraft m) { return Proxies.window; }
     public static SoundManager getSoundManager(Minecraft m) { return Proxies.sound; }
+    /** The texture manager: the GPU's textures are Rust's, so registration is recorded only (see TextureImpl). */
+    public static net.minecraft.client.renderer.texture.TextureManager getTextureManager(Minecraft m) {
+        return TextureImpl.textures();
+    }
     /** No narrator: a no-op proxy (isActive() is false). */
     public static net.minecraft.client.GameNarrator getNarrator(Minecraft m) { return Proxies.service(net.minecraft.client.GameNarrator.class); }
     /** No player reporting: a no-op proxy (no draft report). */
@@ -112,6 +116,17 @@ public final class ClientImpl {
     public static void disconnectFromWorld(Minecraft m, net.minecraft.network.chat.Component reason) { haste.rt.Native.requestDisconnect(); }
     public static void disconnectWithSavingScreen(Minecraft m) { haste.rt.Native.requestDisconnect(); }
     public static boolean allowsMultiplayer(Minecraft m) { return true; }
+    /** Quitting the game (the title screen's Quit Game): Rust closes the client. */
+    public static void stop(Minecraft m) { haste.rt.Native.requestQuit(); }
+    /**
+     * Run a task on the client thread (vanilla queues it; Haste's callers are already there:
+     * the screen's own code and the ping callbacks the pinger applies on its tick), so it runs
+     * at once. Declared on BlockableEventLoop (the generated super chain of the Minecraft
+     * proxy) because Minecraft itself does not override execute.
+     */
+    public static void execute(net.minecraft.util.thread.BlockableEventLoop<?> loop, Runnable task) {
+        task.run();
+    }
 
     /** Reduced debug info (the server's game rule, entity events 22/23): not forwarded yet, full info. */
     public static boolean showOnlyReducedInfo(Minecraft m) { return false; }

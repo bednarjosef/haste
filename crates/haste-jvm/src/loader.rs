@@ -52,6 +52,22 @@ pub const ALLOW_CLASSES: &[&str] = &[
     "net/minecraft/client/multiplayer/RegistryDataCollector",
     "net/minecraft/client/multiplayer/ClientRegistryLayer",
     "net/minecraft/client/multiplayer/PlayerInfo",
+    // the multiplayer screen's own data (tier 3: no hot game state). ServerList reads/writes
+    // servers.dat in the game directory, ServerData is its entry value type, and the resolver
+    // package is the address parsing the screen's join and direct-connect field use.
+    "net/minecraft/client/multiplayer/ServerList",
+    "net/minecraft/client/multiplayer/ServerData",
+    "net/minecraft/client/multiplayer/resolver/",
+    // the netty event-loop holder the server list's ping lambda builds before every ping
+    // (Haste's pinger proxy ignores it; see java/haste/gui/PingerImpl)
+    "net/minecraft/server/network/EventLoopGroupHolder",
+    // the status ping's player sample record (ServerStatus.Players): a value type the
+    // server list's tooltip shows
+    "net/minecraft/server/players/NameAndId",
+    // LAN server detection (a multicast listener thread); the screen starts it in init and
+    // stops it in removed, exactly vanilla's lifecycle
+    "net/minecraft/client/server/LanServerDetection",
+    "net/minecraft/client/server/LanServer",
     "net/minecraft/client/multiplayer/ClientLevel$ClientLevelData",
     "net/minecraft/client/multiplayer/CommonListenerCookie",
     "net/minecraft/client/StringSplitter",
@@ -109,6 +125,10 @@ pub const DENY: &[&str] = &[
     "net/minecraft/client/gui/render/",
     "net/minecraft/server/",
     "com/mojang/",
+    // one class out of the otherwise-allowed screens package: vanilla's ConnectScreen starts
+    // its own netty connection, but the connection is tier 1 (Rust owns it). Haste's
+    // replacement (see REPLACEMENTS) hands the address to Rust instead.
+    "net/minecraft/client/gui/screens/ConnectScreen",
 ];
 
 /// Haste-written replacement classes (sources: `java/haste/replace/<internal>.java`), served from the
@@ -121,6 +141,10 @@ pub const REPLACEMENTS: &[&str] = &[
     // The title screen builds one in `init()` and ticks, renders and clicks it. Haste has no Realms, so
     // the notification bell is a plain `Screen` that draws nothing.
     "com/mojang/realmsclient/gui/screens/RealmsNotificationsScreen",
+    // Vanilla's ConnectScreen opens its own netty connection in a Java thread; in Haste the
+    // connection is tier 1 (haste-protocol, Rust). The replacement shows vanilla's connecting
+    // screen and hands the address to Rust, which joins and takes over the window.
+    "net/minecraft/client/gui/screens/ConnectScreen",
 ];
 
 /// How the game class loader resolved a class (or why it did not).

@@ -69,6 +69,31 @@ pub(crate) fn register(env: &mut Env) -> Result<()> {
                 state::request_disconnect as *mut _,
             ),
             NativeMethod::from_raw_parts(
+                jni_str!("requestJoin"),
+                jni_str!("(Ljava/lang/String;)V"),
+                state::request_join as *mut _,
+            ),
+            NativeMethod::from_raw_parts(
+                jni_str!("cancelJoin"),
+                jni_str!("()V"),
+                state::cancel_join as *mut _,
+            ),
+            NativeMethod::from_raw_parts(
+                jni_str!("requestQuit"),
+                jni_str!("()V"),
+                state::request_quit as *mut _,
+            ),
+            NativeMethod::from_raw_parts(
+                jni_str!("startPing"),
+                jni_str!("(Ljava/lang/String;)V"),
+                state::start_ping as *mut _,
+            ),
+            NativeMethod::from_raw_parts(
+                jni_str!("takePingResults"),
+                jni_str!("()[Ljava/lang/String;"),
+                state::take_ping_results as *mut _,
+            ),
+            NativeMethod::from_raw_parts(
                 jni_str!("sendPacket"),
                 jni_str!("([B)V"),
                 state::send_packet as *mut _,

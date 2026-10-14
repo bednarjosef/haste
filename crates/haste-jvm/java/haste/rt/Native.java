@@ -40,4 +40,19 @@ public final class Native {
     public static native void requestDisconnect();
     /** Called when a screen sends a chat message or command (Rust signs and sends it). */
     public static native void sendChat(String message, boolean command);
+
+    // ---- menu mode (the connection is Rust's; the screens ask for it) ----
+    /** The multiplayer screen's Join was clicked: connect to this "host[:port]" (Rust owns the connection). */
+    public static native void requestJoin(String address);
+    /** The connecting screen's Cancel: Rust drops a join still in progress. */
+    public static native void cancelJoin();
+    /** Vanilla code asked to quit the game (the title screen's Quit Game). */
+    public static native void requestQuit();
+    /** Ask Rust to server-list-ping this "host[:port]" (haste-protocol); the result arrives through {@link #takePingResults}. */
+    public static native void startPing(String address);
+    /**
+     * Finished ping results, oldest first, as "address\nstatus-json\nping-millis" lines (an empty
+     * status-json means the ping failed). One call drains the queue.
+     */
+    public static native String[] takePingResults();
 }

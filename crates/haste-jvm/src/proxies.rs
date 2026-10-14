@@ -221,6 +221,12 @@ pub struct GameState {
     /// Vanilla code asked to leave the server (pause screen "Disconnect"); the client disconnects
     /// and clears this.
     pub disconnect_requested: bool,
+    /// The multiplayer screen's Join: the address to connect to, until the client takes it.
+    pub join_requested: Option<String>,
+    /// The connecting screen's Cancel: a join still in progress must be dropped.
+    pub join_cancelled: bool,
+    /// Vanilla code asked to quit the game (the title screen's Quit Game).
+    pub quit_requested: bool,
     /// Serverbound play packets vanilla code sent (VarInt id + body, vanilla's encoding), oldest first.
     pub outgoing: Vec<Vec<u8>>,
 }
@@ -243,6 +249,9 @@ impl Default for GameState {
             day_time: 0,
             outgoing: Vec::new(),
             disconnect_requested: false,
+            join_requested: None,
+            join_cancelled: false,
+            quit_requested: false,
         }
     }
 }

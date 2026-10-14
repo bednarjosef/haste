@@ -203,6 +203,33 @@ Session 3 (title-screens branch; the Title, Options and Multiplayer screens of t
   `JoinMultiplayerScreen.<init>`; `net/minecraft/client/multiplayer/` is deny-listed, its `init` needs
   `ServerList` too) - roadmap L1e.
 
+Session 4 (menu-mode-window branch; the multiplayer screen and the join seam):
+- `loader` allow-list: `ServerList`, `ServerData`, `resolver/` (the server list's own data, tier 3:
+  vanilla reads and writes servers.dat in the game directory, which the client points at Haste's
+  config directory so haste-setup's servers.dat and Java's are one file), `EventLoopGroupHolder`
+  (built by the ping lambda before every ping; the proxy no-ops it, no netty loads),
+  `LanServerDetection`/`LanServer` (the multicast LAN listener the screen starts and stops itself),
+  `NameAndId` (the status ping's player sample record).
+- `ServerStatusPinger` is a tier-2 proxy (`haste.gui.PingerImpl`): the status ping runs through
+  `haste_protocol::ping` on a Rust thread (`Native.startPing`), and the results (status JSON +
+  latency) are applied to the `ServerData` fields on the screen's tick (`Native.takePingResults`),
+  the same fields vanilla's ping callbacks set. The favicons' `TextureManager` is a proxy too
+  (`haste.gui.TextureImpl`): locations are recorded, no pixel is uploaded (the GPU is Rust's).
+- `Minecraft.execute(Runnable)` runs the task at once: the ping callbacks call it from the tick
+  that applied them, already on the client thread (declared on `BlockableEventLoop`, the generated
+  super of the Minecraft proxy, because Minecraft itself does not override execute).
+- `Minecraft.stop` -> `Native.requestQuit` (the title screen's Quit Game; the client polls the flag).
+- `Bridge.disconnected` picks the parent for the disconnect screen: in menu mode (not in a world)
+  the connecting screen's parent (the server list), like vanilla's ConnectScreen failure path;
+  in-world kicks keep the old behaviour (no parent).
+- The join seam: `net/minecraft/client/gui/screens/ConnectScreen` is denied and replaced
+  (REPLACEMENTS). Vanilla's opens its own netty connection; Haste's shows vanilla's connecting
+  screen (connecting text, Cancel that asks Rust to drop the join) and hands the address to Rust
+  (`Native.requestJoin`), which creates the session (`Session::join`) with a clone of the menu's
+  UI - its game thread then runs `Ui::joined` on it, so screens and chat history survive into the
+  game. A proxy cannot stand in for the class (a `class` line regenerates the super chain and
+  would shadow the real `Screen`), so the replacement extends `Screen` directly.
+
 ## Replacements (`java/haste/replace`)
 
 Haste-written stand-ins for vanilla classes that must not run here (deny-listed) but which vanilla code

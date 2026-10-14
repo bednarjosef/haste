@@ -522,6 +522,23 @@ impl GuiPipeline {
         self.disconnected_json(&serde_json::to_string(reason)?)
     }
 
+    /// The multiplayer screen's Join: the address to connect to, if any was clicked since the
+    /// last call (menu mode; the connection is Rust's).
+    pub fn take_join_request(&self) -> Option<String> {
+        self.with_state(|s| s.join_requested.take())
+    }
+
+    /// Whether the connecting screen's Cancel was clicked since the last call (a join still in
+    /// progress must be dropped).
+    pub fn take_join_cancelled(&self) -> bool {
+        self.with_state(|s| std::mem::take(&mut s.join_cancelled))
+    }
+
+    /// The title screen's Quit Game was clicked (the client should exit).
+    pub fn take_quit_request(&self) -> bool {
+        self.with_state(|s| std::mem::take(&mut s.quit_requested))
+    }
+
     /// [`Self::disconnected`] with the reason as a text component in its JSON form, e.g.
     /// `{"text":"Kicked"}` or `{"translate":"disconnect.timeout"}`.
     pub fn disconnected_json(&self, reason_json: &str) -> anyhow::Result<()> {

@@ -170,13 +170,17 @@ public final class Bridge {
 
     /**
      * The connection was lost or the server kicked us: vanilla's disconnect screen with the reason (a text component
-     * in its JSON form).
+     * in its JSON form). In menu mode the open screen (the connecting screen's parent, e.g. the server list) is the
+     * parent, so the screen's button returns there like vanilla's ConnectScreen failure path.
      */
     public void disconnected(String reasonJson) {
         net.minecraft.network.chat.Component reason = net.minecraft.network.chat.ComponentSerialization.CODEC
             .parse(com.mojang.serialization.JsonOps.INSTANCE, com.google.gson.JsonParser.parseString(reasonJson))
             .result().orElse(net.minecraft.network.chat.Component.literal(reasonJson));
-        Proxies.gui.setScreen(new net.minecraft.client.gui.screens.DisconnectedScreen(null,
+        Screen parent = Mirror.inWorld() ? null
+            : ClientImpl.screen instanceof net.minecraft.client.gui.screens.ConnectScreen c ? c.parent
+            : ClientImpl.screen;
+        Proxies.gui.setScreen(new net.minecraft.client.gui.screens.DisconnectedScreen(parent,
             net.minecraft.network.chat.Component.translatable("disconnect.lost"), reason));
     }
 
