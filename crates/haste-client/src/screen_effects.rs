@@ -478,18 +478,22 @@ pub fn tick_frozen(current: i32, in_powder_snow: bool, in_fire: bool) -> i32 {
     }
 }
 
-/// Whether `block` is a fire block (`BaseFireBlock`: the `minecraft:fire` tag, or the two
-/// vanilla blocks by name when the server sent no tags).
+/// Whether `block` sets the player on fire when inside it: a `BaseFireBlock` (fire, soul fire)
+/// or lava. Both apply the fire inside-block effect (`FIRE_IGNITE` / `LAVA_IGNITE`), which is
+/// what makes the local player's `isOnFire` true on the client.
 fn is_fire_block(
     block: &Identifier,
     blocks: &haste_data::BlockStates,
     tags: Option<&haste_physics::mining::BlockTags>,
 ) -> bool {
-    if block.namespace() == "minecraft" && matches!(block.path(), "fire" | "soul_fire") {
+    if block.namespace() == "minecraft" && matches!(block.path(), "fire" | "soul_fire" | "lava") {
         return true;
     }
     match (tags, blocks.block_index(block)) {
-        (Some(tags), Some(index)) => tags.contains(&Identifier::minecraft("fire"), index.0),
+        (Some(tags), Some(index)) => {
+            tags.contains(&Identifier::minecraft("fire"), index.0)
+                || tags.contains(&Identifier::minecraft("lava"), index.0)
+        }
         _ => false,
     }
 }
