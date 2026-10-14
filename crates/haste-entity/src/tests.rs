@@ -1376,7 +1376,6 @@ fn baby_flag_and_baby_layers() {
     assert!(!crate::registry::is_baby(
         &crate::metadata::Metadata::default()
     ));
-
 }
 
 /// Baby layers come from the recorder's model dump, which CI does not have.
