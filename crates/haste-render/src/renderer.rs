@@ -24,6 +24,9 @@ pub struct Camera {
     pub yaw: f32,
     pub pitch: f32,
     pub fov_deg: f32,
+    /// The first-person hand's own FOV (`Camera.calculateHudFov`: the fixed 70 base with
+    /// only the death and fluid modifiers, never the FOV option or its modifier), in degrees.
+    pub hand_fov_deg: f32,
     /// Camera roll in degrees (a plain horizon roll around the view forward axis).
     pub roll_deg: f32,
     /// The hurt/death tilts and the view bobbing (vanilla's `GameRenderer.bobHurt`/`bobView`),
@@ -188,6 +191,7 @@ mod tests {
                 yaw: 0.0,
                 pitch: 60.0,
                 fov_deg: 70.0,
+                hand_fov_deg: 70.0,
                 roll_deg: 0.0,
                 bob: ViewBob::default(),
             },
@@ -279,6 +283,7 @@ mod tests {
             yaw: 0.0,
             pitch: 0.0,
             fov_deg: 70.0,
+            hand_fov_deg: 70.0,
             roll_deg: roll,
             bob,
         }
@@ -449,6 +454,11 @@ pub struct Renderer {
     camera_uniform: wgpu::Buffer,
     camera_bind_group_layout: wgpu::BindGroupLayout,
     camera_bind_group: wgpu::BindGroup,
+    /// The first-person hand's own camera uniform: the hand projection (vanilla's
+    /// `hudProjection`, fixed-base FOV) over the bob transform, identity view — the hand is
+    /// submitted in view space (`renderItemInHand`'s view rotation and its inverse cancel).
+    hand_camera_uniform: wgpu::Buffer,
+    hand_camera_bind_group: wgpu::BindGroup,
     atlas_bind_group_layout: wgpu::BindGroupLayout,
     /// The vanilla light texture (`lightmap`), bound at group 2 by terrain and entities.
     lightmap: crate::lightmap::LightmapTexture,
@@ -652,6 +662,22 @@ impl Renderer {
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: camera_uniform.as_entire_binding(),
+            }],
+        });
+        // The hand's own uniform, same layout (drawn by the entity pipeline in its own pass).
+        let hand_camera_uniform = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("hand-camera"),
+                contents: &[0; std::mem::size_of::<CameraUniform>()],
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        let hand_camera_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("hand-camera-bind"),
+            layout: &camera_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: hand_camera_uniform.as_entire_binding(),
             }],
         });
 
@@ -937,6 +963,8 @@ impl Renderer {
             camera_uniform,
             camera_bind_group_layout,
             camera_bind_group,
+            hand_camera_uniform,
+            hand_camera_bind_group,
             atlas_bind_group_layout,
             lightmap,
             lightmap_base: crate::lightmap::LightmapInputs::overworld_noon(),
@@ -1427,13 +1455,22 @@ impl Renderer {
     /// (`renderLevel`: bobHurt, then bobView), plus the camera's plain roll. In view space
     /// (x right, y up, z back), as rotations about +Z roll the horizon one way.
     pub(crate) fn view_transform(camera: &Camera) -> glam::Mat4 {
+        // The plain roll sits in front of everything else (`Camera.setRotation`).
+        glam::Mat4::from_axis_angle(glam::Vec3::Z, camera.roll_deg.to_radians())
+            * Self::bob_transform(camera)
+    }
+
+    /// The same stack without the plain camera roll: the death roll, the hurt tilt and the
+    /// view bobbing (`GameRenderer.bobHurt` + `bobView`). Vanilla's `renderItemInHand` puts
+    /// exactly this onto the hand's pose stack, after the view rotation and its inverse have
+    /// cancelled, so the hand bobs with the world but never takes the camera's plain roll.
+    pub(crate) fn bob_transform(camera: &Camera) -> glam::Mat4 {
         let b = camera.bob;
         let z = glam::Vec3::Z;
         let y = glam::Vec3::Y;
-        // The plain roll, then the death roll (a plain z-axis rotation), then the hurt
-        // tilt around the z-axis turned by the damage direction.
-        let m = glam::Mat4::from_axis_angle(z, camera.roll_deg.to_radians())
-            * glam::Mat4::from_axis_angle(z, b.death_roll_deg.to_radians())
+        // The death roll (a plain z-axis rotation), then the hurt tilt around the z-axis
+        // turned by the damage direction.
+        let m = glam::Mat4::from_axis_angle(z, b.death_roll_deg.to_radians())
             * glam::Mat4::from_axis_angle(y, -b.hurt_dir_deg.to_radians())
             * glam::Mat4::from_axis_angle(z, b.hurt_tilt_deg.to_radians())
             * glam::Mat4::from_axis_angle(y, b.hurt_dir_deg.to_radians());
@@ -1531,16 +1568,14 @@ impl Renderer {
             &mut self.assets,
         );
         {
-            // The hand is drawn in view space, like vanilla's `renderItemInHand` from the
-            // camera's own view matrix: the hurt tilt roll is included, so the hand rolls with
-            // the world (vanilla applies `bobHurt` to the hand as well).
-            let view = Self::view_rotation(&frame.camera);
-            // The hand gets the same pose stack as the world view (vanilla's
-            // `renderItemInHand` applies bobHurt and bobView to it too).
-            let m = Self::view_transform(&frame.camera);
+            // The hand is drawn in view space: vanilla's `renderItemInHand` multiplies the
+            // view rotation and its inverse into the pose, so they cancel and the hand's own
+            // pose stack starts with `bobHurt` and `bobView` — the same bob the world's
+            // projection carries, so hand and world wobble together. The plain camera roll
+            // cancels with the view rotation and must not appear here.
             self.entity.prepare_hand(
                 self.first_person.as_ref(),
-                view.inverse() * m,
+                Self::bob_transform(&frame.camera),
                 (frame.camera.yaw, frame.camera.pitch),
                 frame.partial_tick,
                 &mut self.assets,
@@ -1636,6 +1671,40 @@ impl Renderer {
         self.gpu
             .queue
             .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&camera_uniform));
+
+        // The hand's own camera uniform, written only when the hand is drawn: vanilla's
+        // `render3dHud` gives the hand its own projection (`hudProjection`: the fixed-base
+        // hand FOV, near 0.05) with no bob, because `renderItemInHand` puts the bob onto the
+        // hand's pose stack instead — the same bob the world's projection carries. The hand
+        // is submitted in view space, so there is no view matrix. The fog fields stay the
+        // world's: the hand is under a metre from the eye, so like vanilla's own hand it
+        // never reaches the first fog band.
+        if self.entity.has_hand() {
+            let hand_proj = glam::Mat4::perspective_rh(
+                frame.camera.hand_fov_deg.to_radians(),
+                aspect,
+                0.05,
+                4096.0,
+            ) * Self::bob_transform(&frame.camera);
+            let hand_uniform = CameraUniform {
+                cam_pos: [0.0; 4],
+                view_proj: hand_proj.to_cols_array_2d(),
+                fog_color: [fog_color[0], fog_color[1], fog_color[2], 0.0],
+                fog_env_start: fog_data.environmental_start,
+                fog_env_end: fog_data.environmental_end,
+                fog_rd_start: fog_data.render_distance_start,
+                fog_rd_end: fog_data.render_distance_end,
+                fog_sky_end: fog_data.sky_end,
+                fog_cloud_end: fog_data.cloud_end,
+                daylight: self.sky.daylight(),
+                _pad: 0.0,
+            };
+            self.gpu.queue.write_buffer(
+                &self.hand_camera_uniform,
+                0,
+                bytemuck::bytes_of(&hand_uniform),
+            );
+        }
 
         // The light texture's inputs for this frame (LightmapRenderStateExtractor.extract):
         // the dimension's fixed colours with the timeline's sky factor (and the rain blend,
@@ -2024,7 +2093,7 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            pass.set_bind_group(0, &self.hand_camera_bind_group, &[]);
             pass.set_bind_group(2, &self.lightmap_bind_group, &[]);
             draw_calls += self.entity.draw_hand(&mut pass);
         }

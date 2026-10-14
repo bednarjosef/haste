@@ -190,6 +190,7 @@ fn entities_offscreen() {
         yaw: 0.0,
         pitch: 5.0,
         fov_deg: 70.0,
+        hand_fov_deg: 70.0,
         roll_deg: 0.0,
         bob: haste_render::ViewBob::default(),
     };
@@ -284,8 +285,6 @@ fn entities_offscreen() {
         equip: haste_render::TickPair::fixed(1.0),
         x_bob: haste_render::TickPair::fixed(0.0),
         y_bob: haste_render::TickPair::fixed(0.0),
-        bob: haste_render::TickPair::fixed(0.0),
-        walk_dist: haste_render::TickPair::fixed(0.0),
     };
     for (name, held) in [
         ("hand", None),
@@ -384,6 +383,7 @@ fn dropped_items_offscreen() {
         yaw: 0.0,
         pitch: 10.0,
         fov_deg: 70.0,
+        hand_fov_deg: 70.0,
         roll_deg: 0.0,
         bob: haste_render::ViewBob::default(),
     };
@@ -521,6 +521,7 @@ fn frames_and_paintings_offscreen() {
         yaw: 0.0,
         pitch: 5.0,
         fov_deg: 70.0,
+        hand_fov_deg: 70.0,
         roll_deg: 0.0,
         bob: haste_render::ViewBob::default(),
     };
@@ -706,6 +707,7 @@ fn equipment_offscreen() {
         yaw: 0.0,
         pitch: 5.0,
         fov_deg: 70.0,
+        hand_fov_deg: 70.0,
         roll_deg: 0.0,
         bob: haste_render::ViewBob::default(),
     };

@@ -211,10 +211,6 @@ pub struct FirstPerson {
     pub x_bob: TickPair,
     /// Hand lag behind the camera turn, in degrees (`LocalPlayer.yBob`/`yBobO`).
     pub y_bob: TickPair,
-    /// Walk bob amplitude (`ClientAvatarState.bob`).
-    pub bob: TickPair,
-    /// Distance walked in blocks, the bob's phase (`ClientAvatarState.walkDist`).
-    pub walk_dist: TickPair,
 }
 
 /// A name tag to draw: world anchor (above the head) and the text.
@@ -1075,20 +1071,22 @@ impl EntityRenderer {
     }
 
     /// Builds the first-person arm or held item, following vanilla's
-    /// `FirstPersonHandsAndItemsRenderer.submitHandsWithItems`: the walk bob
-    /// (`GameRenderer.bobView`) and the hand's lag behind the camera turn are applied to the
-    /// whole hand in view space, then per hand vanilla's own transform, then the model.
+    /// `FirstPersonHandsAndItemsRenderer.submitHandsWithItems`: the hurt tilt and walk bob
+    /// (`GameRenderer.renderItemInHand`'s pose stack) and the hand's lag behind the camera
+    /// turn are applied to the whole hand in view space, then per hand vanilla's own
+    /// transform, then the model.
     ///
-    /// `view_to_world` rotates view space (x right, y up, -z forward) into the camera-relative
-    /// world, `view` is the camera's look (yaw, pitch) in degrees and `partial` the partial
-    /// tick; the per-tick animation values live in `fp` and are only lerped here.
+    /// `prefix` is the pose stack the hand is submitted under (view space stays view space:
+    /// x right, y up, -z forward), `view` is the camera's look (yaw, pitch) in degrees and
+    /// `partial` the partial tick; the per-tick animation values live in `fp` and are only
+    /// lerped here.
     ///
     /// Nothing is allocated per frame: the arm model is cached by `slim` and the vertices go
     /// into the reused hand buffer.
     pub fn prepare_hand(
         &mut self,
         fp: Option<&FirstPerson>,
-        view_to_world: Mat4,
+        prefix: Mat4,
         view: (f32, f32),
         partial: f32,
         assets: &mut Assets,
@@ -1101,7 +1099,7 @@ impl EntityRenderer {
         let light = (fp.light.1, fp.light.0);
         let item = fp.item.and_then(|i| self.item_model_for(i, assets));
         let mut out = std::mem::take(&mut self.hand);
-        let root = view_to_world * hand_root_matrix(fp, view, partial);
+        let root = prefix * hand_root_matrix(fp, view, partial);
         match item {
             Some(model) => {
                 let root = root * item_arm_matrix(fp, partial);
@@ -1392,23 +1390,13 @@ pub(crate) fn painting_transform(facing: haste_core::Direction) -> Mat4 {
     Mat4::from_rotation_y((180.0 - facing.to_2d_data_value() as f32 * 90.0).to_radians())
 }
 
-/// `FirstPersonHandsAndItemsRenderer.submitHandsWithItems`'s outer transforms, in view space:
-/// `GameRenderer.bobView`'s walk bob, then the hand's lag behind the camera turn
-/// (`(viewXRot - xBob) * 0.1`, `(viewYRot - yBob) * 0.1`).
+/// `FirstPersonHandsAndItemsRenderer.submitHandsWithItems`'s outer transforms, in view
+/// space: the hand's lag behind the camera turn (`(viewXRot - xBob) * 0.1`,
+/// `(viewYRot - yBob) * 0.1`). The walk bob is NOT here: vanilla applies `bobHurt` and
+/// `bobView` to the whole hand pose stack in `GameRenderer.renderItemInHand` (the renderer
+/// passes them as the prefix matrix), once, like the world's projection carries them.
 pub(crate) fn hand_root_matrix(fp: &FirstPerson, view: (f32, f32), partial: f32) -> Mat4 {
-    // `ClientAvatarState.getBackwardsInterpolatedWalkDistance`.
-    let walk = fp.walk_dist;
-    let backwards = -(walk.at(partial) + (walk.end - walk.start) * partial);
-    let bob = fp.bob.at(partial);
-    // `GameRenderer.bobView`: x right, y up, the camera at the origin.
-    let s = (backwards * std::f32::consts::PI).sin() * bob;
-    let c = (backwards * std::f32::consts::PI).cos() * bob;
-    let roll_x = ((backwards * std::f32::consts::PI - 0.2).cos() * bob).abs();
-    let bob_matrix = Mat4::from_translation(Vec3::new(s * 0.5, -c.abs(), 0.0))
-        * Mat4::from_rotation_z((s * 3.0).to_radians())
-        * Mat4::from_rotation_x((roll_x * 5.0).to_radians());
-    bob_matrix
-        * Mat4::from_rotation_x(((view.1 - fp.x_bob.at(partial)) * 0.1).to_radians())
+    Mat4::from_rotation_x(((view.1 - fp.x_bob.at(partial)) * 0.1).to_radians())
         * Mat4::from_rotation_y(((view.0 - fp.y_bob.at(partial)) * 0.1).to_radians())
 }
 
@@ -2379,8 +2367,6 @@ mod tests {
             equip: TickPair::fixed(1.0),
             x_bob: TickPair::fixed(0.0),
             y_bob: TickPair::fixed(0.0),
-            bob: TickPair::fixed(0.0),
-            walk_dist: TickPair::fixed(0.0),
         }
     }
 
@@ -2587,47 +2573,23 @@ mod tests {
     }
 
     #[test]
-    fn the_walk_bob_moves_and_rolls_the_hand() {
-        // `GameRenderer.bobView` over a walk cycle that walked 0.75 blocks this tick (0.6 the
-        // tick before) with the bob amplitude at 0.1. The phase is the backwards interpolated
-        // walk distance: -(walkDist + (walkDist - walkDistO) * partial) = -0.9 at the end of the
-        // tick, so the translation is (sin(-0.9PI) * 0.1 * 0.5, -|cos(-0.9PI) * 0.1|, 0) =
-        // (-0.0154508, -0.0951057, 0), with a 3 deg roll and a 5 deg tilt from the same phase.
+    fn the_walk_bob_is_carried_by_the_prefix_not_the_hand_root() {
+        // Vanilla applies `bobView` to the hand exactly once, on `renderItemInHand`'s pose
+        // stack (`GameRenderer.bobView`, the same stack the world's projection carries); the
+        // hand's own root (`submitHandsWithItems`) has only the view-lag rotations. The
+        // prefix is the renderer's `bob_transform`, so with a bobbing prefix the hand root
+        // must not add, remove or reorder anything: the prefix is all there is.
         let mut h = still_hand();
-        h.walk_dist = TickPair {
-            start: 0.6,
-            end: 0.75,
-        };
-        h.bob = TickPair::fixed(0.1);
-        let pi = std::f32::consts::PI;
-        // The phase is the backwards interpolated walk distance, extrapolated by one tick.
-        let phase = -(0.75 + (0.75 - 0.6) * 1.0);
-        let m = hand_root_matrix(&h, (0.0, 0.0), 1.0);
-        let t = m.transform_point3(Vec3::ZERO);
-        assert!((t.x - -0.015450852).abs() < 1e-6, "{}", t.x);
-        assert!((t.y - -0.09510567).abs() < 1e-6, "{}", t.y);
-        assert_eq!(t.z, 0.0);
-        // The roll (Z) and the tilt (X) are rotations from the same phase, so the hand's up axis
-        // leans by them: sin(-0.9PI) * 0.1 * 3 = -0.0927 deg and |cos(-0.9PI - 0.2) * 0.1| * 5.
-        let rolled = m.transform_vector3(Vec3::Y);
-        let roll_deg = (phase * pi).sin() * 0.1 * 3.0;
-        let tilt_deg = ((phase * pi - 0.2).cos() * 0.1).abs() * 5.0;
-        assert!(
-            (rolled.x + roll_deg.to_radians().sin()).abs() < 1e-6,
-            "{rolled:?} (roll {roll_deg} deg)"
-        );
-        assert!(
-            (rolled.z - tilt_deg.to_radians().sin()).abs() < 1e-6,
-            "{rolled:?}"
-        );
-        // Half a tick later the phase is -0.825, so the hand is somewhere else.
-        let mid = hand_root_matrix(&h, (0.0, 0.0), 0.5).transform_point3(Vec3::ZERO);
-        assert!((mid - t).length() > 0.01, "{mid:?} vs {t:?}");
-        // Standing still: no bob, so no walk bob either.
-        assert_eq!(
-            hand_root_matrix(&still_hand(), (0.0, 0.0), 1.0),
-            Mat4::IDENTITY
-        );
+        h.x_bob = TickPair::fixed(20.0);
+        let lag = hand_root_matrix(&h, (25.0, 35.0), 0.5);
+        // A pure view-bob prefix (translation only): the composed matrix is the prefix
+        // times the lag rotations, never the translation twice.
+        let prefix = Mat4::from_translation(Vec3::new(0.25, -0.5, 0.0));
+        let m = prefix * lag;
+        assert!(close(m, prefix * hand_root_matrix(&h, (25.0, 35.0), 0.5), 1e-7));
+        assert!((m.transform_point3(Vec3::ZERO) - Vec3::new(0.25, -0.5, 0.0)).length() < 1e-6);
+        // `hand_root_matrix` with nothing animated is the identity: the bob lives outside.
+        assert_eq!(hand_root_matrix(&still_hand(), (0.0, 0.0), 1.0), Mat4::IDENTITY);
     }
 
     #[test]
