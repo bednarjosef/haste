@@ -143,14 +143,15 @@ fn camera_pullback(
     eye + dir * camera_dist
 }
 
-/// The local player's pose for its own model: the physics pose's render equivalent (sleeping,
-/// elytra and other metadata-only poses are not modelled yet).
+/// The local player's pose for its own model: the physics pose's render equivalent (sleeping and
+/// other metadata-only poses are not modelled yet).
 fn player_pose(s: &crate::net::Session) -> Option<haste_core::entity::Pose> {
     use haste_physics::Pose as PhysicsPose;
     match s.player.state.pose {
         PhysicsPose::Standing => None,
         PhysicsPose::Crouching => Some(haste_core::entity::Pose::Crouching),
         PhysicsPose::Swimming => Some(haste_core::entity::Pose::Swimming),
+        PhysicsPose::FallFlying => Some(haste_core::entity::Pose::FallFlying),
     }
 }
 
