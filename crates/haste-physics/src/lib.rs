@@ -37,6 +37,9 @@ pub struct PlayerState {
     pub on_ground: bool,
     pub sprinting: bool,
     pub sneaking: bool,
+    /// Shift is held and the crouching box fits, or standing does not (vanilla
+    /// `LocalPlayer.aiStep`'s `crouching` field, `LocalPlayer.isCrouching`): slows the input.
+    pub crouching: bool,
     pub in_water: bool,
     pub flying: bool,
     pub fall_distance: f32,

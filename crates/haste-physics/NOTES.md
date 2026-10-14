@@ -73,18 +73,24 @@ copied from Pomme's `physics/`/`player/`.
 | sine table | 65536 f32 entries, index = (int)(rad x 10430.378) & 65535, cos = +16384 | mcpk.wiki "Angles"; assumption that 26.3 still does this (`trig::USE_TABLE`) |
 | deg -> rad | (deg x π) / 180 in f32; sprint-jump uses deg x 0.017453292 | mcpk.wiki "Angles" (1.8-era); assumption |
 | collision epsilon | 1e-7 | assumption (typical f64 voxel sweep value) |
-| sneak edge back-off step | 0.05 | assumption |
+| sneak edge back-off step | 0.05 | vanilla `Player.maybeBackOffFromEdge` (also its loop structure and the thin-slab `canFallAtLeast` probe, shrunk 1.0E-7) |
+| pose-fit / edge probe shrink | 1.0E-7 | vanilla `Player.canPlayerFitWithinBlocksAndEntitiesWhen` / `Player.canFallAtLeast` |
 | box half-width | 0.6f32 / 2 widened to f64 | entity dimensions are floats; consequence: against a wall the player stops at x.69999998808, not x.7 (test `walking_into_a_full_block_stops`) |
 
 ## Tick order (as implemented)
 
 1. Rotation from input. 2. Zero |v| < 0.003. 3. Fluid contact (shrunk box vs fluid surface),
-sprint/sneak flags, pose (keeps crouching/swimming if the bigger pose does not fit).
-4. Jump cooldown; jump (on ground) or swim up (in fluid). 5. Impulse: keys -> ±1, x sneaking
-speed when crouching/crawling, x 0.98. 6. Travel: normal / water / lava / flying:
+sprint/sneak flags, `crouching` (vanilla `LocalPlayer.aiStep`: from the pose box the last tick
+ended with). 4. Jump cooldown; jump (on ground) or swim up (in fluid). 5. Impulse: keys -> ±1,
+x sneaking speed when crouching/crawling, x 0.98. 6. Travel: normal / water / lava / flying
+(vanilla runs the movement with the pose box from the END of the last tick):
 accelerate (rotated by yaw, sine table) -> move (sneak edge back-off, sweep with step-up) ->
 zero velocity on collided axes, on_ground = vertical collision while moving down, fall distance ->
 block speed factor -> gravity, vertical drag -> horizontal drag.
+7. Pose (vanilla `Player.updatePlayerPose` at the end of `Player.tick`: desired pose from
+shift/swimming, crouching fallback, swimming fallback; left alone when even swimming does not
+fit). The camera eye height follows the pose one tick later still (vanilla `Camera.tick` runs
+before the player's tick; see haste-client).
 In water the tick starts with the sneak sink, then the sprint-swim steering (`Player.travel`),
 and ends with `jump_out_of_fluid`; in lava the shallow/deep branch (depth after the move) picks
 the drags, then gravity/4, then the same `jump_out_of_fluid`.
@@ -98,8 +104,8 @@ the drags, then gravity/4, then the same `jump_out_of_fluid`.
 - Speed/jump factor block: the block at the feet if non-default, else the one 0.5 below.
 - Sprint stop on collision ignores the wiki's "> 8 degrees" angle condition; sprint is not
   restarted while still colliding (assumption). Hunger/blindness: caller clears `input.sprint`.
-- Sneak edge protection near (not on) ground follows the wiki's "up to 0.6 blocks above ground"
-  via `fall_distance < step_height` and a probe box; exact condition not determined.
+- Sneak edge protection near (not on) ground: vanilla `Player.isAboveGround` (on ground, or
+  `fallDistance < maxUpStep` and the box cannot fall the rest of the step below).
 - Swimming: surface bobbing (wiki 2.20 m/s at the surface), water currents (1.39 m/s push),
   bubble columns, depth strider, dolphin's grace: not implemented. Pitch steering and the
   climb-out boost are in (`fluids.rs`); the jump section's choice between `jumpFromGround`,

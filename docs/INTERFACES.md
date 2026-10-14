@@ -195,7 +195,10 @@ pub fn tick(state: &mut PlayerState, input: &InputState, attrs: &PlayerAttribute
 pub struct TickResult { pub moved: bool, pub rotated: bool, pub on_ground_changed: bool, pub collided_horizontally: bool }
 pub fn collide(aabb: Aabb, movement: DVec3, world: &dyn BlockView, shapes: &dyn CollisionShapes) -> DVec3;   // pure axis sweep, tested in isolation
 pub fn collide_with_step(aabb: Aabb, movement: DVec3, step_height: f64, on_ground: bool, world: &dyn BlockView, shapes: &dyn CollisionShapes) -> DVec3;
-// PlayerState also carries: in_lava, swimming, pose: Pose, jump_cooldown: u8, horizontal_collision, vertical_collision.
+// PlayerState also carries: in_lava, swimming, crouching (vanilla LocalPlayer.isCrouching; the
+// input slowdown), pose: Pose, jump_cooldown: u8, horizontal_collision, vertical_collision.
+// The pose is updated at the END of the tick (vanilla Player.updatePlayerPose), so the
+// movement runs with the previous tick's pose box.
 // PlayerAttributes also carries: sneaking_speed, flying_speed: f32, crouching_height, swimming_height.
 // `haste_data::GameData` implements `BlockPhysics` (from block_properties.json + block_shapes.json).
 ```
