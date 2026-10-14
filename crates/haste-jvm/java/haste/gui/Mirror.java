@@ -17,11 +17,15 @@ final class Mirror {
     private Mirror() {}
 
     static final int I_SELECTED = 0, I_GAME_MODE = 1, I_PERMISSION = 2, I_FOOD = 3, I_XP_LEVEL = 4, I_XP_TOTAL = 5,
-        I_FLAGS = 6, I_FPS = 7, I_CHUNKS = 8, I_SECTIONS_DRAWN = 9, I_SECTIONS_TOTAL = 10, I_ENTITIES = 11, INTS = 12;
+        I_FLAGS = 6, I_FPS = 7, I_CHUNKS = 8, I_SECTIONS_DRAWN = 9, I_SECTIONS_TOTAL = 10, I_ENTITIES = 11,
+        I_ENTITIES_RENDERED = 12, I_SIMULATION_DISTANCE = 13, I_VIEW_DISTANCE = 14, I_FRAMERATE_LIMIT = 15,
+        I_REFRESH_RATE = 16, I_DISPLAY_W = 17, I_DISPLAY_H = 18, I_GUI_SCALE = 19, I_LIGHT_SKY = 20, I_LIGHT_BLOCK = 21,
+        INTS = 22;
     static final int D_HEALTH = 0, D_SATURATION = 1, D_XP_PROGRESS = 2, D_FLY_SPEED = 3, D_WALK_SPEED = 4, D_X = 5,
-        D_Y = 6, D_Z = 7, D_YAW = 8, D_PITCH = 9, D_GAME_TIME = 10, D_DAY_TIME = 11, DOUBLES = 12;
+        D_Y = 6, D_Z = 7, D_YAW = 8, D_PITCH = 9, D_GAME_TIME = 10, D_DAY_TIME = 11, D_TX_PER_S = 12, D_RX_PER_S = 13,
+        DOUBLES = 14;
     static final int F_HARDCORE = 1, F_EYE_IN_WATER = 2, F_INVULNERABLE = 4, F_FLYING = 8, F_MAY_FLY = 16,
-        F_INSTABUILD = 32, F_IN_WORLD = 64, F_IMMEDIATE_RESPAWN = 128;
+        F_INSTABUILD = 32, F_IN_WORLD = 64, F_IMMEDIATE_RESPAWN = 128, F_DEBUG_SHOWN = 256;
 
     static final int[] I = new int[INTS];
     static final double[] D = new double[DOUBLES];

@@ -1,0 +1,13 @@
+# Feature 1: player list (Tab held), boss bar, sidebar, title and action bar.
+# The runner sends the server setup over RCON when each marker screenshot appears
+# (the player is not an operator, so the script never sends a command).
+wait_until joined
+wait_until settled
+screenshot hud-setup-bars
+wait 40
+screenshot hud-setup-title
+wait 20
+key_down TAB
+wait 20
+screenshot hud-elements
+key_up TAB

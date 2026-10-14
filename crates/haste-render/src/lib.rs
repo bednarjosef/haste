@@ -10,9 +10,11 @@ pub mod entity;
 pub mod fluid;
 pub mod fog;
 pub mod gui;
+pub mod lightmap;
 pub mod mesher;
 pub mod occlusion;
 pub mod overlay;
+pub mod particles;
 pub mod pipeline;
 pub mod renderer;
 pub mod sky;
@@ -25,8 +27,11 @@ pub use fog::{setup_fog, FogData, FogEnvironment};
 pub use gui::{GuiRenderer, GuiStats, ScreenNametag};
 pub use mesher::{mesh_section, MeshSnapshot, Mesher, SectionMesh, SnapshotSource};
 pub use occlusion::{compute_visible_mask, section_visibility, Face, VisibilitySet};
+pub use particles::{
+    DustOption, ParticleRenderer, ParticleSpawn, ParticleTypes, Particles, MAX_PARTICLES,
+};
 pub use pipeline::{upload_atlas, upload_section, Gpu, SectionGpuMesh};
-pub use renderer::{Camera, FrameInput, FrameStats, Renderer, SkyState};
+pub use renderer::{Camera, FrameInput, FrameStats, LightmapFrame, Renderer, SkyState, ViewBob};
 pub use sky::{SkyColors, SkyKind};
 pub use timing::FrameTimings;
 pub use tint::{BiomeClimate, BiomeColors, BiomeSource, Colormaps, GrassModifier};

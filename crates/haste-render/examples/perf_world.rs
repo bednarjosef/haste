@@ -150,6 +150,7 @@ fn measure(
             pitch: 10.0,
             fov_deg: 70.0,
             roll_deg: 0.0,
+            bob: haste_render::ViewBob::default(),
         },
         entities: &[],
         gui: &gui,
@@ -157,6 +158,7 @@ fn measure(
         partial_tick: 0.0,
         block_target: None,
         breaking: &[],
+        camera_entity: None,
     };
     // Mesh everything (drain uploads frame by frame) until the resident section count has not
     // changed for a second.

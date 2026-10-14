@@ -10,6 +10,7 @@ use haste_core::DVec3;
 use uuid::Uuid;
 
 use crate::dims::EntityDimensions;
+use crate::riding::{passenger_seat, PassengerKind, SeatPoint, SeatQuery};
 use crate::store::{Entity, EntityStore};
 
 fn store() -> EntityStore {
@@ -456,22 +457,27 @@ fn walking_animation_zero_at_rest_and_bounded() {
         skin_texture_url: None,
     }]);
     s.spawn(&sp);
-    // A few idle ticks: no limb rotation at all (only the head aim remains).
+    // A few idle ticks: the walk swing (the arm/leg x rotation) stays zero; only the constant
+    // leg yaw/z and the idle arm bob (`AnimationUtils.bobModelPart`, <= 0.05) remain.
     for _ in 0..5 {
         s.tick();
     }
     let mut out = Vec::new();
     s.render_instances(0.5, &mut out);
-    let limbs: Vec<_> = out[0]
-        .pose
-        .rotations
-        .iter()
-        .filter(|(n, _)| n.ends_with("arm") || n.ends_with("leg"))
-        .collect();
-    assert!(limbs.is_empty(), "limb rotations at rest: {limbs:?}");
-    // Walking: constant 0.1-block deltas each tick; amplitude is smoothed, bounded < pi/4.
-    for _ in 0..20 {
-        s.move_delta(EntityId(1), DVec3::new(0.1, 0.0, 0.0), true);
+    let rot: std::collections::HashMap<_, _> = out[0].pose.rotations.iter().cloned().collect();
+    for limb in ["right_leg", "left_leg"] {
+        let r = rot.get(limb).expect(limb);
+        assert!(r.x.abs() < 1e-3, "{limb} swings at rest: {}", r.x);
+    }
+    for limb in ["right_arm", "left_arm"] {
+        let r = rot.get(limb).expect(limb);
+        assert!(r.x.abs() <= 0.05, "{limb} swings at rest: {}", r.x);
+    }
+    // Walking: constant 0.2-block steps each tick; the swing amplitude is bounded < pi/2.
+    for i in 1..=20 {
+        if i == 1 || i == 4 {
+            s.move_delta(EntityId(1), DVec3::new(0.6, 0.0, 0.0), true);
+        }
         s.tick();
     }
     let mut out = Vec::new();
@@ -498,6 +504,185 @@ fn walking_animation_zero_at_rest_and_bounded() {
         (arm.x - left).abs() > 1e-6 || arm.x.abs() < 1e-6,
         "arms in lockstep"
     );
+}
+
+/// A humanoid player walking at exactly 0.2 blocks/tick (a 0.6-block delta lands over the 3-tick
+/// lerp window): after 5 ticks the walk position/speed are vanilla's, and the leg swing is
+/// `cos(position * 0.6662) * 1.4 * speed` (`HumanoidModel.setupAnim`). The expected numbers come
+/// from the vanilla recurrence `speed += (0.8 - speed) * 0.4; position += speed`.
+#[test]
+fn walk_leg_angle_after_five_ticks_at_point_two() {
+    let mut s = store();
+    let sp = spawn(1, DVec3::ZERO);
+    let uuid = sp.uuid;
+    s.player_info(&[PlayerInfo {
+        uuid,
+        name: "Walker".into(),
+        display_name: None,
+        latency: 20,
+        game_mode: Some(GameMode::Survival),
+        listed: true,
+        skin_texture_url: None,
+    }]);
+    s.spawn(&sp);
+    for i in 1..=5 {
+        if i == 1 || i == 4 {
+            s.move_delta(EntityId(1), DVec3::new(0.6, 0.0, 0.0), true);
+        }
+        s.tick();
+    }
+    let mut out = Vec::new();
+    s.render_instances(1.0, &mut out);
+    let rot: std::collections::HashMap<_, _> = out[0].pose.rotations.iter().cloned().collect();
+    let rl = rot.get("right_leg").unwrap();
+    let ll = rot.get("left_leg").unwrap();
+    assert!(
+        (rl.x - -0.360_702_3).abs() < 2e-3,
+        "right leg {} != -0.36070",
+        rl.x
+    );
+    assert!(
+        (ll.x - 0.360_702_3).abs() < 2e-3,
+        "left leg {} != 0.36070",
+        ll.x
+    );
+}
+
+/// A player mid-attack: a 6-tick swing (`SwingAnimation.DEFAULT`) advanced 4 ticks is at 0.5,
+/// and `HumanoidModel.setupAttackAnimation` (WHACK, main hand right, pitch 0, age 5) leaves the
+/// right arm at x -0.7427, y -0.5783, z -0.3050 (walk swing zero, idle bob included).
+#[test]
+fn attack_arm_angle_mid_swing() {
+    let mut s = store();
+    let sp = spawn(1, DVec3::ZERO);
+    let uuid = sp.uuid;
+    s.player_info(&[PlayerInfo {
+        uuid,
+        name: "Attacker".into(),
+        display_name: None,
+        latency: 20,
+        game_mode: Some(GameMode::Survival),
+        listed: true,
+        skin_texture_url: None,
+    }]);
+    s.spawn(&sp);
+    s.swing(EntityId(1), 0, 1, 6);
+    for _ in 0..4 {
+        s.tick();
+    }
+    let mut out = Vec::new();
+    s.render_instances(1.0, &mut out);
+    let rot: std::collections::HashMap<_, _> = out[0].pose.rotations.iter().cloned().collect();
+    let ra = rot.get("right_arm").unwrap();
+    assert!(
+        (ra.x - -0.742_670).abs() < 2e-3,
+        "arm x {} != -0.74267",
+        ra.x
+    );
+    assert!(
+        (ra.y - -0.578_342).abs() < 2e-3,
+        "arm y {} != -0.57834",
+        ra.y
+    );
+    assert!(
+        (ra.z - -0.304_978).abs() < 2e-3,
+        "arm z {} != -0.30498",
+        ra.z
+    );
+}
+
+/// `AnimationUtils.animateZombieArms`: a zombie holds its arms forward even at rest
+/// (`-PI / 2.25`), overriding the humanoid walk swing. A `minecraft:zombie` model is recognised
+/// from its texture; here the parts/texture are built directly.
+#[test]
+fn zombie_arms_are_forward_at_rest() {
+    let model = mob_model(
+        "minecraft:entity/zombie/zombie",
+        &["head", "right_arm", "left_arm"],
+    );
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    let e = s.get(EntityId(1)).unwrap();
+    let pose = crate::animation::setup_anim(e, &model, true, 0.0, false);
+    let rot: std::collections::HashMap<_, _> = pose.rotations.iter().cloned().collect();
+    let ra = rot.get("right_arm").unwrap();
+    assert!(
+        (ra.x - -1.396_263_4).abs() < 1e-4,
+        "zombie right arm {} != -1.39626",
+        ra.x
+    );
+    assert!(
+        (ra.y - -0.1).abs() < 1e-4,
+        "zombie right arm y {} != -0.1",
+        ra.y
+    );
+    // The idle arm bob (age 0) adds 0.1 to z on top of the zombie pose.
+    assert!(
+        (ra.z - 0.1).abs() < 1e-4,
+        "zombie right arm z {} != 0.1",
+        ra.z
+    );
+}
+
+/// A quadruped model (pig/cow/sheep: `right_hind_leg`/`left_front_leg` parts) gets
+/// `QuadrupedModel.setupAnim`: the hind and front legs on one side are out of phase.
+#[test]
+fn quadruped_legs_swing_out_of_phase() {
+    let model = mob_model(
+        "minecraft:entity/pig/pig_temperate",
+        &[
+            "head",
+            "right_hind_leg",
+            "left_hind_leg",
+            "right_front_leg",
+            "left_front_leg",
+        ],
+    );
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    for _ in 0..10 {
+        s.move_delta(EntityId(1), DVec3::new(0.1, 0.0, 0.0), true);
+        s.tick();
+    }
+    let e = s.get(EntityId(1)).unwrap();
+    let pose = crate::animation::setup_anim(e, &model, true, 1.0, false);
+    let rot: std::collections::HashMap<_, _> = pose.rotations.iter().cloned().collect();
+    let rh = rot.get("right_hind_leg").unwrap();
+    let rf = rot.get("right_front_leg").unwrap();
+    let lh = rot.get("left_hind_leg").unwrap();
+    assert!(rh.x.abs() > 1e-3, "hind leg not swinging");
+    // Opposite phase: the right hind and right front legs have opposite sign here.
+    assert!(rh.x * rf.x <= 0.0, "hind {} front {} in phase", rh.x, rf.x);
+    assert!((lh.x + rh.x).abs() < 1e-4, "left/right hind not mirrored");
+}
+
+/// Builds a minimal `CubeModel` whose root has one cube-less child per `parts` name, so the
+/// animation classification (by part name) and setupAnim can be exercised without the dump.
+fn mob_model(texture: &str, parts: &[&str]) -> CubeModel {
+    let children = parts
+        .iter()
+        .map(|name| ModelPart {
+            name: (*name).to_owned(),
+            pivot: glam::Vec3::ZERO,
+            rotation: glam::Vec3::ZERO,
+            visible: true,
+            cubes: Vec::new(),
+            children: Vec::new(),
+        })
+        .collect();
+    CubeModel {
+        texture: haste_core::Identifier::minecraft(texture),
+        tex_width: 64,
+        tex_height: 64,
+        root: ModelPart {
+            name: "root".to_owned(),
+            pivot: glam::Vec3::ZERO,
+            rotation: glam::Vec3::ZERO,
+            visible: true,
+            cubes: Vec::new(),
+            children,
+        },
+    }
 }
 
 #[test]
@@ -599,6 +784,235 @@ fn death_holds_the_tint_for_20_ticks() {
     // ...then nothing more.
     s.tick();
     assert_eq!(strength(&s), 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// Riding: set_passengers bookkeeping and the seat offset.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn set_passengers_mounts_replaces_and_dismounts() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO)); // vehicle
+    s.spawn(&spawn(2, DVec3::ZERO));
+    s.spawn(&spawn(3, DVec3::ZERO));
+    // Mount two passengers.
+    s.set_passengers(EntityId(1), &[EntityId(2), EntityId(3)]);
+    assert_eq!(s.vehicle_of(EntityId(2)), Some(EntityId(1)));
+    assert_eq!(s.vehicle_of(EntityId(3)), Some(EntityId(1)));
+    assert_eq!(
+        s.passengers_of(EntityId(1)).unwrap(),
+        &[EntityId(2), EntityId(3)]
+    );
+    // A passenger list replaces the previous one: 3 stays, 2 is dropped.
+    s.set_passengers(EntityId(1), &[EntityId(3)]);
+    assert_eq!(s.vehicle_of(EntityId(2)), None);
+    assert_eq!(s.vehicle_of(EntityId(3)), Some(EntityId(1)));
+    assert_eq!(s.passengers_of(EntityId(1)).unwrap(), &[EntityId(3)]);
+    // An empty list dismounts everyone.
+    s.set_passengers(EntityId(1), &[]);
+    assert_eq!(s.vehicle_of(EntityId(3)), None);
+    assert!(s.passengers_of(EntityId(1)).is_none());
+    // A vehicle's list can also name entities never spawned: the bookkeeping holds them
+    // (the server does this between the spawn and the set_passengers arriving).
+    s.set_passengers(EntityId(1), &[EntityId(9)]);
+    assert_eq!(s.vehicle_of(EntityId(9)), Some(EntityId(1)));
+}
+
+#[test]
+fn removed_entities_drop_out_of_riding_on_both_sides() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.spawn(&spawn(2, DVec3::ZERO));
+    s.spawn(&spawn(3, DVec3::ZERO));
+    s.set_passengers(EntityId(1), &[EntityId(2)]);
+    s.set_passengers(EntityId(3), &[EntityId(1)]);
+    // The vehicle is removed: its passengers are freed, and it stops riding entity 3.
+    s.remove(&[EntityId(1)]);
+    assert_eq!(s.vehicle_of(EntityId(2)), None);
+    assert_eq!(s.vehicle_of(EntityId(1)), None);
+    assert!(s.passengers_of(EntityId(3)).is_none());
+    // A passenger removed from the store also vanishes from its vehicle's list.
+    s.set_passengers(EntityId(3), &[EntityId(2)]);
+    s.remove(&[EntityId(2)]);
+    assert!(s.passengers_of(EntityId(3)).is_none());
+}
+
+/// Vanilla keeps attachment points as `float` and widens them to `double` when they become a
+/// position (`Entity.positionRider`), so the exact value is the `float` rounding of the decimal
+/// one: compare against that, within a float rounding.
+fn assert_close(got: f64, want: f64) {
+    assert!(
+        (got - f64::from(want as f32)).abs() < 1e-6,
+        "{got} is not {want}"
+    );
+}
+
+/// The local player's seat on `vehicle_type`: the numbers vanilla produces for a player, whose
+/// own vehicle attachment point is 0.6 below the seat (`Avatar.DEFAULT_VEHICLE_ATTACHMENT`).
+fn seat(vehicle_type: &str, seat: usize, passengers: usize) -> SeatPoint {
+    passenger_seat(SeatQuery {
+        vehicle_type,
+        vehicle_dims: (0.6, 1.8),
+        seat,
+        passengers,
+        passenger: PassengerKind::Player,
+        passenger_type: "player",
+    })
+}
+
+/// The same, for a passenger that is not the local player (its own attachment point differs).
+fn seat_of(
+    vehicle_type: &str,
+    seat: usize,
+    passengers: usize,
+    passenger: PassengerKind,
+    passenger_type: &str,
+) -> SeatPoint {
+    passenger_seat(SeatQuery {
+        vehicle_type,
+        vehicle_dims: (0.6, 1.8),
+        seat,
+        passengers,
+        passenger,
+        passenger_type,
+    })
+}
+
+#[test]
+fn a_minecart_seat_is_vanillas_passenger_attachment() {
+    // `passengerAttachments(0.1875F)`, and the player's own 0.6 below it.
+    let s = seat("minecart", 0, 1);
+    assert_eq!(s.x, 0.0);
+    assert_eq!(s.z, 0.0);
+    assert_close(s.y, 0.1875 - 0.6);
+    // Every minecart variant shares the seat.
+    for name in [
+        "chest_minecart",
+        "furnace_minecart",
+        "tnt_minecart",
+        "hopper_minecart",
+        "spawner_minecart",
+        "command_block_minecart",
+    ] {
+        assert_eq!(seat(name, 0, 1), s, "{name}");
+    }
+}
+
+#[test]
+fn boat_seats_follow_abstract_boat() {
+    // `Boat.rideHeight`: height / 3 = 0.1875, minus the player's 0.6.
+    let s = seat("oak_boat", 0, 1);
+    assert_close(s.y, 0.5625 / 3.0 - 0.6);
+    assert_eq!(s.x, 0.0);
+    // Two passengers: the driver sits 0.2 to one side, the second 0.6 to the other.
+    let driver = seat("oak_boat", 0, 2);
+    let behind = seat("oak_boat", 1, 2);
+    assert_eq!(driver.x, 0.2);
+    assert_eq!(behind.x, -0.6);
+    assert_eq!(driver.y, s.y);
+    // A chest boat's lone passenger sits 0.15 to the side
+    // (`AbstractChestBoat.getSinglePassengerXOffset`).
+    assert_eq!(seat("oak_chest_boat", 0, 1).x, 0.15);
+    // `Raft.rideHeight`: height * 0.8888889 = 0.5, and the bamboo raft is the only raft.
+    assert_close(seat("bamboo_raft", 0, 1).y, 0.5625 * 0.8888889 - 0.6);
+    assert_eq!(seat("bamboo_chest_raft", 0, 1).x, 0.15);
+    // Every wood shares the boat seat.
+    for name in [
+        "spruce_boat",
+        "birch_boat",
+        "jungle_boat",
+        "acacia_boat",
+        "dark_oak_boat",
+        "mangrove_boat",
+        "cherry_boat",
+        "pale_oak_boat",
+        "poplar_boat",
+    ] {
+        assert_eq!(seat(name, 0, 1), s, "{name}");
+    }
+    // An animal in the second seat is pushed a further 0.2 out.
+    let animal = seat_of("oak_boat", 1, 2, PassengerKind::Animal, "cow");
+    assert_eq!(animal.x, -0.6 + 0.2);
+}
+
+#[test]
+fn horse_family_seats_are_the_saddle() {
+    // `passengerAttachments(1.44375F)` on `sized(1.3964844F, 1.6F)`.
+    assert_close(seat("horse", 0, 1).y, 1.44375 - 0.6);
+    // `passengerAttachments(1.1125F)`, `sized(1.3964844F, 1.5F)`.
+    assert_close(seat("donkey", 0, 1).y, 1.1125 - 0.6);
+    // Mule: 1.2125 on a 1.6-tall box; both undead horses: 1.31875.
+    assert_close(seat("mule", 0, 1).y, 1.2125 - 0.6);
+    for name in ["skeleton_horse", "zombie_horse"] {
+        assert_close(seat(name, 0, 1).y, 1.31875 - 0.6);
+    }
+}
+
+#[test]
+fn a_pig_seat_is_vanillas() {
+    // `passengerAttachments(0.86875F)`, `sized(0.9F, 0.9F)`.
+    let s = seat("pig", 0, 1);
+    assert_close(s.y, 0.86875 - 0.6);
+    assert_eq!((s.x, s.z), (0.0, 0.0));
+}
+
+#[test]
+fn camel_seats_come_from_camel() {
+    // Standing adult: the body anchor is `height - 0.375` = 2.0, minus the player's 0.6.
+    let driver = seat("camel", 0, 1);
+    assert_close(driver.y, 2.0 - 0.6);
+    // The driver sits 0.5 forward; a second passenger 0.7 back.
+    assert_eq!(driver.x, 0.5);
+    assert_eq!(seat("camel", 1, 2).x, -0.7);
+    // `CamelHusk extends Camel`: the same seat.
+    assert_eq!(seat("camel_husk", 0, 1), driver);
+    // An animal in the second seat is pushed 0.2 forward of it.
+    assert_eq!(
+        seat_of("camel", 1, 2, PassengerKind::Animal, "cow").x,
+        -0.7 + 0.2
+    );
+}
+
+#[test]
+fn a_strider_seat_is_its_own_height() {
+    // The strider attaches no points, and its client-side walk animation is idle when it
+    // stands: vanilla's `AT_HEIGHT` fallback on `sized(0.9F, 1.7F)`.
+    assert_close(seat("strider", 0, 1).y, 1.7 - 0.6);
+}
+
+#[test]
+fn unknown_vehicles_fall_back_to_their_own_box() {
+    // A type the table does not carry (a mod's vehicle): vanilla's fallback on the box the
+    // caller knows it by, minus the passenger's own attachment.
+    let s = passenger_seat(SeatQuery {
+        vehicle_type: "somemod:walker",
+        vehicle_dims: (1.0, 2.5),
+        seat: 0,
+        passengers: 1,
+        passenger: PassengerKind::Player,
+        passenger_type: "player",
+    });
+    assert_close(s.y, 2.5 - 0.6);
+    // A zombie in a minecart rides at the cart's own position (`AbstractMinecart`).
+    let s = seat_of("minecart", 0, 1, PassengerKind::Villager, "villager");
+    assert_eq!(s, SeatPoint::ZERO);
+    // A zombie riding a boat uses its own `ridingOffset(-0.7F)` point, which lifts it 0.7 above
+    // the seat: 0.1875 - 0.7.
+    let s = seat_of("oak_boat", 0, 1, PassengerKind::Player, "zombie");
+    assert_close(s.y, 0.5625 / 3.0 - 0.7);
+}
+
+#[test]
+fn the_vehicle_yaw_turns_the_seat() {
+    // A boat's second seat sits 0.6 to one side of the boat. `EntityAttachments.transformPoint`
+    // (`Vec3.yRot`) turns that with the vehicle's yaw: at yaw 0 it is a -x offset, at yaw 90 a
+    // -z one.
+    let s = seat("oak_boat", 1, 2);
+    let d0 = s.rotated(0.0);
+    assert!((d0.x + 0.6).abs() < 1e-6 && d0.z.abs() < 1e-6, "{d0:?}");
+    let d90 = s.rotated(90.0);
+    assert!(d90.x.abs() < 1e-6 && (d90.z + 0.6).abs() < 1e-6, "{d90:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -807,4 +1221,228 @@ fn real_dump_pig_has_head_body_and_four_legs() {
     // Also spot-check a scaled layer (villager, 0.9375) resolves.
     let villager = lib.get("minecraft:villager#main", 0.9375);
     assert!(villager.is_some(), "villager layer missing");
+}
+
+// ---------------------------------------------------------------------------
+// Table coverage and baby variants.
+// ---------------------------------------------------------------------------
+
+/// Every living entity type vanilla registers a mob renderer for (EntityRenderers.java's
+/// PROVIDERS, minus the player/mannequin handled separately, minus non-living types).
+/// A type appearing here but not in the table (and not in NON_LIVING) fails the coverage
+/// test, so new mob types cannot silently fall back to the box.
+const LIVING_TYPES: &[&str] = &[
+    "minecraft:allay",
+    "minecraft:armadillo",
+    "minecraft:axolotl",
+    "minecraft:bat",
+    "minecraft:bee",
+    "minecraft:blaze",
+    "minecraft:bogged",
+    "minecraft:breeze",
+    "minecraft:camel",
+    "minecraft:camel_husk",
+    "minecraft:cat",
+    "minecraft:cave_spider",
+    "minecraft:chicken",
+    "minecraft:cod",
+    "minecraft:copper_golem",
+    "minecraft:cow",
+    "minecraft:creaking",
+    "minecraft:creeper",
+    "minecraft:dolphin",
+    "minecraft:donkey",
+    "minecraft:drowned",
+    "minecraft:elder_guardian",
+    "minecraft:ender_dragon",
+    "minecraft:enderman",
+    "minecraft:endermite",
+    "minecraft:evoker",
+    "minecraft:fox",
+    "minecraft:frog",
+    "minecraft:ghast",
+    "minecraft:giant",
+    "minecraft:glow_squid",
+    "minecraft:goat",
+    "minecraft:guardian",
+    "minecraft:happy_ghast",
+    "minecraft:hoglin",
+    "minecraft:horse",
+    "minecraft:husk",
+    "minecraft:illusioner",
+    "minecraft:iron_golem",
+    "minecraft:llama",
+    "minecraft:magma_cube",
+    "minecraft:mooshroom",
+    "minecraft:mule",
+    "minecraft:nautilus",
+    "minecraft:ocelot",
+    "minecraft:panda",
+    "minecraft:parched",
+    "minecraft:parrot",
+    "minecraft:phantom",
+    "minecraft:pig",
+    "minecraft:piglin",
+    "minecraft:piglin_brute",
+    "minecraft:pillager",
+    "minecraft:polar_bear",
+    "minecraft:pufferfish",
+    "minecraft:rabbit",
+    "minecraft:ravager",
+    "minecraft:salmon",
+    "minecraft:sheep",
+    "minecraft:shulker",
+    "minecraft:silverfish",
+    "minecraft:skeleton",
+    "minecraft:skeleton_horse",
+    "minecraft:slime",
+    "minecraft:sniffer",
+    "minecraft:snow_golem",
+    "minecraft:spider",
+    "minecraft:squid",
+    "minecraft:stray",
+    "minecraft:strider",
+    "minecraft:sulfur_cube",
+    "minecraft:tadpole",
+    "minecraft:trader_llama",
+    "minecraft:tropical_fish",
+    "minecraft:turtle",
+    "minecraft:vex",
+    "minecraft:villager",
+    "minecraft:vindicator",
+    "minecraft:wandering_trader",
+    "minecraft:warden",
+    "minecraft:witch",
+    "minecraft:wither",
+    "minecraft:wither_skeleton",
+    "minecraft:wolf",
+    "minecraft:zoglin",
+    "minecraft:zombie",
+    "minecraft:zombie_horse",
+    "minecraft:zombie_nautilus",
+    "minecraft:zombie_villager",
+    "minecraft:zombified_piglin",
+];
+
+/// Entity types with renderers but no living-model layer: projectiles, vehicles, block-like
+/// and UI entities (out of scope; drawn as boxes) plus the player (its own model path).
+#[allow(dead_code)] // documents what the table deliberately leaves out
+const NON_LIVING: &[&str] = &[
+    "boat-like: *_boat, *_chest_boat, *_raft",
+    "minecart-like: minecart, *_minecart, tnt_minecart",
+    "projectiles: arrow, egg, ender_pearl, trident, fireball(s), snowball, potions,",
+    "  dragon_fireball, evoker_fangs, llama_spit, shulker_bullet, wind_charge(s),",
+    "  experience_bottle, eye_of_ender, fishing_bobber, wither_skull",
+    "object entities: area_effect_cloud, armor_stand, block/item/text_display, cushion,",
+    "  end_crystal, falling_block, firework_rocket, interaction, item, item_frame(s),",
+    "  leash_knot, lightning_bolt, mannequin, marker, ominous_item_spawner, painting,",
+    "  player, tnt, experience_orb",
+];
+
+/// Every living entity type has a table row (so it gets its vanilla model, or an explicit
+/// pending entry). Runs without the cache: it checks the table, not the dump.
+#[test]
+fn table_covers_every_living_entity_type() {
+    for name in LIVING_TYPES {
+        assert!(
+            crate::registry::table_entry(name).is_some(),
+            "{name} has no model table row"
+        );
+    }
+    // And nothing in the table references a type outside the known set (typos).
+    let covered = crate::registry::table_textures().count();
+    assert!(
+        covered >= LIVING_TYPES.len(),
+        "table smaller than living set"
+    );
+}
+
+/// The baby rows point at real `*_baby` layers and the baby metadata flag flips them
+/// (`AgeableMob.DATA_BABY_ID` = index 16; `Zombie`/`Zoglin`/`Piglin` put theirs on the same
+/// slot through the same super-chain, Entity 0-7 -> LivingEntity 8-14 -> Mob 15).
+#[test]
+fn baby_flag_and_baby_layers() {
+    // The flag: metadata index 16, boolean true.
+    let baby_meta = |v: bool| {
+        let mut m = crate::metadata::Metadata::default();
+        m.apply(&[MetadataEntry {
+            index: crate::registry::BABY_METADATA_INDEX,
+            value: MetadataValue::Boolean(v),
+        }]);
+        m
+    };
+    assert!(crate::registry::is_baby(&baby_meta(true)));
+    assert!(!crate::registry::is_baby(&baby_meta(false)));
+    assert!(!crate::registry::is_baby(
+        &crate::metadata::Metadata::default()
+    ));
+}
+
+/// Baby layers come from the recorder's model dump, which CI does not have.
+#[test]
+#[ignore = "needs cache/oracle/26.3/entity_models.json"]
+fn baby_layers_from_the_dump() {
+    // Rows whose renderer has a baby model (AgeableMobRenderer and friends) name it.
+    // Vanilla types with a baby layer but none in our table yet would fail here.
+    for (name, has_baby) in [
+        ("minecraft:pig", true),
+        ("minecraft:villager", true),
+        ("minecraft:zombie", true),
+        ("minecraft:horse", true),
+        ("minecraft:sniffer", true),
+        ("minecraft:creeper", false), // MobRenderer only
+        ("minecraft:spider", false),
+        ("minecraft:bat", false),
+    ] {
+        let baby = crate::registry::baby_model_for_name(name);
+        assert_eq!(
+            baby.is_some(),
+            has_baby,
+            "{name} baby layer presence mismatch"
+        );
+    }
+    // With the dump present, the baby model differs from the adult and carries the baby
+    // texture; without it both are None and the store falls back to the box.
+    if let (Some(adult), Some(baby)) = (
+        crate::registry::model_for_name("minecraft:pig"),
+        crate::registry::baby_model_for_name("minecraft:pig"),
+    ) {
+        let adult_head = find_part(&adult.root, "head").unwrap();
+        let baby_head = find_part(&baby.root, "head").unwrap();
+        assert_ne!(adult_head.pivot, baby_head.pivot);
+        assert_eq!(baby.texture.path(), "entity/pig/pig_temperate_baby");
+    }
+    // The sniffer's baby texture is "snifflet", not "sniffer_baby" (SnifferRenderer).
+    if let Some(baby) = crate::registry::baby_model_for_name("minecraft:sniffer") {
+        assert_eq!(baby.texture.path(), "entity/sniffer/snifflet");
+    }
+}
+
+/// Every table texture exists in the client jar as `assets/minecraft/textures/<path>.png`.
+/// Needs the installation (client jar + asset index) from `haste setup`.
+#[test]
+#[ignore = "needs the client jar and assets index (HASTE_CACHE; from `haste setup`)"]
+fn table_textures_exist_in_jar() {
+    let jar = haste_core::paths::client_jar();
+    let file = std::fs::File::open(&jar).unwrap_or_else(|e| {
+        panic!(
+            "opening {}: {e} (run `haste setup` or set HASTE_CACHE)",
+            jar.display()
+        )
+    });
+    let zip = zip::ZipArchive::new(file).expect("reading client jar zip");
+    let names: std::collections::HashSet<String> =
+        zip.file_names().map(|s| s.to_string()).collect();
+    let mut missing = Vec::new();
+    for texture in crate::registry::table_textures() {
+        let key = format!("assets/minecraft/textures/{texture}.png");
+        if !names.contains(&key) {
+            missing.push(key);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "{} table textures missing from the jar: {missing:?}",
+        missing.len()
+    );
 }
