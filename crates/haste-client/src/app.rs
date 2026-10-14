@@ -567,6 +567,8 @@ pub struct WorldFeed {
             std::sync::Arc<haste_render::blockentity::BannerData>,
         ),
     >,
+    /// The skull animations by position for this frame (reused lookup scratch).
+    skull_anims: HashMap<BlockPos, (f32, f32)>,
     /// The shared world as the mesh workers see it (created on the first feed).
     source: Option<Arc<dyn haste_render::SnapshotSource>>,
     /// Sections submitted this frame (reused).
@@ -714,6 +716,11 @@ impl WorldFeed {
             self.lid_map.clear();
             self.lid_map.extend(lids.iter().copied());
         }
+        {
+            let anims = shared.skull_anims.lock();
+            self.skull_anims.clear();
+            self.skull_anims.extend(anims.iter().copied());
+        }
         let names = &shared.block_entity_names;
         let blocks = &shared.data.blocks;
         let xmas = haste_render::xmas_textures();
@@ -778,14 +785,20 @@ impl WorldFeed {
                         );
                     }
                 }
-                // Signs and banners: the yaw angle the transform turns by (vanilla
-                // `StandingSignRenderer`/`BannerRenderer` picking the block state's `rotation`
-                // segment or the wall `facing`), the sign's cached text, the banner's wave
-                // phase and its cached patterns.
-                let (sign_angle, text, banner_phase, banner) = match kind {
+                // Signs, banners and skulls: the yaw angle the transform turns by (vanilla
+                // `StandingSignRenderer`/`BannerRenderer`/`SkullBlockRenderer` picking the
+                // block state's `rotation` segment or the wall `facing`), the sign's cached
+                // text, the banner's wave phase and cached patterns, the skull's animation.
+                let (mut sign_angle, text, banner_phase, banner, skull_anim) = match kind {
                     haste_render::BlockEntityKind::Sign { hanging } => {
                         let angle = rotation_or_facing(blocks, state, facing);
-                        (angle, self.sign_text(pos, be, hanging), 0.0, None)
+                        (
+                            angle,
+                            self.sign_text(pos, be, hanging),
+                            0.0,
+                            None,
+                            haste_render::TickPair::fixed(0.0),
+                        )
                     }
                     haste_render::BlockEntityKind::Banner { .. } => {
                         let angle = rotation_or_facing(blocks, state, facing);
@@ -797,10 +810,44 @@ impl WorldFeed {
                             view.world_age,
                             partial,
                         );
-                        (angle, None, phase, self.banner_data(pos, be, block))
+                        (
+                            angle,
+                            None,
+                            phase,
+                            self.banner_data(pos, be, block),
+                            haste_render::TickPair::fixed(0.0),
+                        )
                     }
-                    _ => (0.0, None, 0.0, None),
+                    haste_render::BlockEntityKind::Skull { .. } => {
+                        // The ground rotation angle (wall skulls read `facing` instead) and
+                        // the powered animation's tick ends.
+                        let angle = rotation_or_facing(blocks, state, facing);
+                        let anim = self.skull_anims.get(&pos).copied().unwrap_or((0.0, 0.0));
+                        (
+                            angle,
+                            None,
+                            0.0,
+                            None,
+                            haste_render::TickPair {
+                                start: anim.0,
+                                end: anim.1,
+                            },
+                        )
+                    }
+                    _ => (0.0, None, 0.0, None, haste_render::TickPair::fixed(0.0)),
                 };
+                // Wall skulls turn by the wall `facing` (their transform reads it); the
+                // rotation segment is only for the ground ones.
+                if matches!(
+                    kind,
+                    haste_render::BlockEntityKind::Skull {
+                        wall: true,
+                        kind: _
+                    }
+                ) && blocks.property_value(state, "rotation").is_none()
+                {
+                    sign_angle = 0.0;
+                }
                 self.be_instances.push(haste_render::BlockEntityInstance {
                     pos,
                     facing,
@@ -815,6 +862,7 @@ impl WorldFeed {
                     text,
                     banner_phase,
                     banner,
+                    skull_anim,
                 });
             }
         }

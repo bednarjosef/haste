@@ -108,6 +108,24 @@ pub enum BlockEntityKind {
     Banner {
         wall: bool,
     },
+    /// A skull/head on the floor or a wall (vanilla `SkullBlockRenderer`; the wall flag comes
+    /// from the block id like the type does).
+    Skull {
+        kind: SkullKind,
+        wall: bool,
+    },
+}
+
+/// The head types vanilla renders (vanilla `SkullBlock.Types`); the block id picks one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkullKind {
+    Skeleton,
+    WitherSkeleton,
+    Zombie,
+    Creeper,
+    Dragon,
+    Piglin,
+    Player,
 }
 
 /// One drawable block entity instance handed to the renderer each frame. `open` is the lid
@@ -136,6 +154,10 @@ pub struct BlockEntityInstance {
     pub banner_phase: f32,
     /// Banner patterns, for `BlockEntityKind::Banner`.
     pub banner: Option<std::sync::Arc<BannerData>>,
+    /// The skull's animation tick as the ends of the last tick (vanilla
+    /// `SkullBlockEntity.getAnimation`, counting while the block is powered), for
+    /// `BlockEntityKind::Skull`.
+    pub skull_anim: TickPair,
 }
 
 /// Resolves a block entity type name (from the synced `minecraft:block_entity_type` registry)
@@ -165,8 +187,36 @@ pub fn kind_of(be_type: &Identifier, block: &Identifier, xmas: bool) -> Option<B
         "banner" => Some(BlockEntityKind::Banner {
             wall: block.path().ends_with("_wall_banner"),
         }),
+        "skull" => skull_kind_of(block),
         _ => None,
     }
+}
+
+/// The head kind and wall flag from a skull block id (vanilla `SkullBlock.Types`'s blocks:
+/// `skeleton_skull`, `wither_skeleton_skull`, `zombie_head`, `creeper_head`, `dragon_head`,
+/// `piglin_head`, `player_head`; the wall variants insert `_wall_`, e.g.
+/// `creeper_wall_head`).
+fn skull_kind_of(block: &Identifier) -> Option<BlockEntityKind> {
+    if block.namespace() != "minecraft" {
+        return None;
+    }
+    let path = block.path();
+    let (name, wall) = match path.split_once("_wall_") {
+        // `skeleton_wall_skull` -> `skeleton_skull`, `creeper_wall_head` -> `creeper_head`.
+        Some((head, tail)) => (format!("{head}_{tail}"), true),
+        None => (path.to_string(), false),
+    };
+    let kind = match name.as_str() {
+        "skeleton_skull" => SkullKind::Skeleton,
+        "wither_skeleton_skull" => SkullKind::WitherSkeleton,
+        "zombie_head" => SkullKind::Zombie,
+        "creeper_head" => SkullKind::Creeper,
+        "dragon_head" => SkullKind::Dragon,
+        "piglin_head" => SkullKind::Piglin,
+        "player_head" => SkullKind::Player,
+        _ => return None,
+    };
+    Some(BlockEntityKind::Skull { kind, wall })
 }
 
 /// Whether `block` is one of the blocks whose `block_event` action 1 drives a lid (used by the
@@ -694,6 +744,296 @@ pub fn banner_wave_phase(pos: BlockPos, game_time: i64, partial: f32) -> f32 {
     (hash.wrapping_add(game_time as i32).rem_euclid(100) as f32 + partial) / 100.0
 }
 
+/// The texture a head kind is drawn with (vanilla `SkullBlockRenderer.SKIN_BY_TYPE`; the
+/// player head uses the default skin, custom profiles are not modelled yet).
+pub fn skull_texture(kind: SkullKind) -> Identifier {
+    match kind {
+        SkullKind::Skeleton => Identifier::minecraft("entity/skeleton/skeleton"),
+        SkullKind::WitherSkeleton => Identifier::minecraft("entity/skeleton/wither_skeleton"),
+        SkullKind::Zombie => Identifier::minecraft("entity/zombie/zombie"),
+        SkullKind::Creeper => Identifier::minecraft("entity/creeper/creeper"),
+        SkullKind::Dragon => Identifier::minecraft("entity/enderdragon/dragon"),
+        SkullKind::Piglin => Identifier::minecraft("entity/piglin/piglin"),
+        SkullKind::Player => Identifier::minecraft("entity/player/wide/steve"),
+    }
+}
+
+/// The head models as data. Skeleton, wither skeleton and creeper share `SkullModel`'s
+/// mob head layer (one cube, 64x32 texture); the player and zombie add the hat cube on the
+/// humanoid head layer (64x64); the piglin head has its own part set with the ears (64x64);
+/// the dragon head is scaled 0.75 with the jaw child (256x256).
+fn skull_model(kind: SkullKind) -> &'static CubeModel {
+    static MOB: OnceLock<CubeModel> = OnceLock::new();
+    static HUMANOID: OnceLock<CubeModel> = OnceLock::new();
+    static PIGLIN: OnceLock<CubeModel> = OnceLock::new();
+    static DRAGON: OnceLock<CubeModel> = OnceLock::new();
+    let slot = match kind {
+        SkullKind::Skeleton | SkullKind::WitherSkeleton | SkullKind::Creeper => &MOB,
+        SkullKind::Zombie | SkullKind::Player => &HUMANOID,
+        SkullKind::Piglin => &PIGLIN,
+        SkullKind::Dragon => &DRAGON,
+    };
+    slot.get_or_init(|| {
+        let part =
+            |name: &str, pivot: Vec3, cubes: Vec<Cube>, children: Vec<ModelPart>| ModelPart {
+                name: name.into(),
+                pivot,
+                rotation: Vec3::ZERO,
+                visible: true,
+                cubes,
+                children,
+            };
+        let cube = |origin: Vec3, size: Vec3, uv: [u32; 2], inflate: f32| Cube {
+            origin,
+            size,
+            inflate,
+            uv,
+            mirror: false,
+        };
+        match kind {
+            // SkullModel.createMobHeadLayer: head only, 64x32.
+            SkullKind::Skeleton | SkullKind::WitherSkeleton | SkullKind::Creeper => CubeModel {
+                texture: Identifier::minecraft("entity/skeleton/skeleton"),
+                tex_width: 64,
+                tex_height: 32,
+                root: part(
+                    "root",
+                    Vec3::ZERO,
+                    Vec::new(),
+                    vec![part(
+                        "head",
+                        Vec3::ZERO,
+                        vec![cube(
+                            Vec3::new(-4.0, -8.0, -4.0),
+                            Vec3::new(8.0, 8.0, 8.0),
+                            [0, 0],
+                            0.0,
+                        )],
+                        Vec::new(),
+                    )],
+                ),
+            },
+            // SkullModel.createHumanoidHeadLayer: head + hat, 64x64.
+            SkullKind::Zombie | SkullKind::Player => CubeModel {
+                texture: Identifier::minecraft("entity/player/wide/steve"),
+                tex_width: 64,
+                tex_height: 64,
+                root: part(
+                    "root",
+                    Vec3::ZERO,
+                    Vec::new(),
+                    vec![part(
+                        "head",
+                        Vec3::ZERO,
+                        vec![
+                            cube(
+                                Vec3::new(-4.0, -8.0, -4.0),
+                                Vec3::new(8.0, 8.0, 8.0),
+                                [0, 0],
+                                0.0,
+                            ),
+                            cube(
+                                Vec3::new(-4.0, -8.0, -4.0),
+                                Vec3::new(8.0, 8.0, 8.0),
+                                [32, 0],
+                                0.25,
+                            ),
+                        ],
+                        Vec::new(),
+                    )],
+                ),
+            },
+            // AbstractPiglinModel.addHead: the head with snout and nostrils, the ears on
+            // their pivots (their z rotation is `PiglinHeadModel.setupAnim`'s, applied per
+            // instance — it replaces the layer's ±30-degree base), 64x64.
+            SkullKind::Piglin => CubeModel {
+                texture: Identifier::minecraft("entity/piglin/piglin"),
+                tex_width: 64,
+                tex_height: 64,
+                root: part(
+                    "root",
+                    Vec3::ZERO,
+                    Vec::new(),
+                    vec![part(
+                        "head",
+                        Vec3::ZERO,
+                        vec![
+                            cube(
+                                Vec3::new(-5.0, -8.0, -4.0),
+                                Vec3::new(10.0, 8.0, 8.0),
+                                [0, 0],
+                                0.0,
+                            ),
+                            cube(
+                                Vec3::new(-2.0, -4.0, -5.0),
+                                Vec3::new(4.0, 4.0, 1.0),
+                                [31, 1],
+                                0.0,
+                            ),
+                            cube(
+                                Vec3::new(2.0, -2.0, -5.0),
+                                Vec3::new(1.0, 2.0, 1.0),
+                                [2, 4],
+                                0.0,
+                            ),
+                            cube(
+                                Vec3::new(-3.0, -2.0, -5.0),
+                                Vec3::new(1.0, 2.0, 1.0),
+                                [2, 0],
+                                0.0,
+                            ),
+                        ],
+                        vec![
+                            part(
+                                "left_ear",
+                                Vec3::new(4.5, -6.0, 0.0),
+                                vec![cube(
+                                    Vec3::new(0.0, 0.0, -2.0),
+                                    Vec3::new(1.0, 5.0, 4.0),
+                                    [51, 6],
+                                    0.0,
+                                )],
+                                Vec::new(),
+                            ),
+                            part(
+                                "right_ear",
+                                Vec3::new(-4.5, -6.0, 0.0),
+                                vec![cube(
+                                    Vec3::new(-1.0, 0.0, -2.0),
+                                    Vec3::new(1.0, 5.0, 4.0),
+                                    [39, 6],
+                                    0.0,
+                                )],
+                                Vec::new(),
+                            ),
+                        ],
+                    )],
+                ),
+            },
+            // DragonHeadModel.createHeadLayer: head at PartPose.offset(0, -7.986666, 0) scaled
+            // 0.75, the jaw a child at (0, 4, -8), 256x256. The scale cubes are mirrored in
+            // vanilla (mirror(true) before the first scale/nostril pair); Haste's Cube mirror
+            // swaps the side UVs, which for these single-face boxes is the same drawing.
+            SkullKind::Dragon => {
+                let head_cubes = vec![
+                    cube(
+                        Vec3::new(-6.0, -1.0, -24.0),
+                        Vec3::new(12.0, 5.0, 16.0),
+                        [176, 44],
+                        0.0,
+                    ),
+                    cube(
+                        Vec3::new(-8.0, -8.0, -10.0),
+                        Vec3::new(16.0, 16.0, 16.0),
+                        [112, 30],
+                        0.0,
+                    ),
+                    cube(
+                        Vec3::new(-5.0, -12.0, -4.0),
+                        Vec3::new(2.0, 4.0, 6.0),
+                        [0, 0],
+                        0.0,
+                    ),
+                    cube(
+                        Vec3::new(-5.0, -3.0, -22.0),
+                        Vec3::new(2.0, 2.0, 4.0),
+                        [112, 0],
+                        0.0,
+                    ),
+                    cube(
+                        Vec3::new(3.0, -12.0, -4.0),
+                        Vec3::new(2.0, 4.0, 6.0),
+                        [0, 0],
+                        0.0,
+                    ),
+                    cube(
+                        Vec3::new(3.0, -3.0, -22.0),
+                        Vec3::new(2.0, 2.0, 4.0),
+                        [112, 0],
+                        0.0,
+                    ),
+                ];
+                CubeModel {
+                    texture: Identifier::minecraft("entity/enderdragon/dragon"),
+                    tex_width: 256,
+                    tex_height: 256,
+                    root: part(
+                        "root",
+                        Vec3::ZERO,
+                        Vec::new(),
+                        vec![part(
+                            "head",
+                            // `PartPose.offset(0, -7.986666, 0).scaled(0.75)`.
+                            Vec3::new(0.0, -7.986_666 * 0.75, 0.0),
+                            head_cubes,
+                            vec![part(
+                                "jaw",
+                                Vec3::new(0.0, 4.0, -8.0),
+                                vec![cube(
+                                    Vec3::new(-6.0, 0.0, -16.0),
+                                    Vec3::new(12.0, 4.0, 16.0),
+                                    [176, 65],
+                                    0.0,
+                                )],
+                                Vec::new(),
+                            )],
+                        )],
+                    ),
+                }
+            }
+        }
+    })
+}
+
+/// Vanilla `SkullBlockRenderer.createWallTransformation` / `createGroundTransformation`:
+/// wall: translate `(0.5 - stepX*0.25, 0.25, 0.5 - stepZ*0.25)`, rotate
+/// `-opposite(facing).toYRot()`, scale (-1, -1, 1); ground: translate (0.5, 0, 0.5), rotate
+/// `-RotationSegment.convertToDegrees(rotation)`, the same scale. The model renderer's 1/16
+/// (pixels to blocks) is folded in after, like the other block entity models.
+fn skull_root(
+    pos: BlockPos,
+    kind_wall: bool,
+    facing: Direction,
+    rotation_segment: i32,
+    camera: glam::DVec3,
+) -> Mat4 {
+    let p = pos.as_dvec3() - camera;
+    let flip = Mat4::from_scale(Vec3::new(-1.0 / 16.0, -1.0 / 16.0, 1.0 / 16.0));
+    if kind_wall {
+        // `facing` is the wall `facing` property; the head looks out of the wall, i.e. the
+        // opposite direction's yaw.
+        let opposite = facing.opposite();
+        let (sx, sz) = (facing.step_x(), facing.step_z());
+        Mat4::from_translation(
+            p.as_vec3() + Vec3::new(0.5 - sx as f32 * 0.25, 0.25, 0.5 - sz as f32 * 0.25),
+        ) * Mat4::from_rotation_y((-to_y_rot(opposite)).to_radians())
+            * flip
+    } else {
+        // `RotationSegment.convertToDegrees`, wrapped from 180 to -180.
+        let d = rotation_segment.rem_euclid(16) as f32 * 22.5;
+        let d = if d >= 180.0 { d - 360.0 } else { d };
+        Mat4::from_translation(p.as_vec3() + Vec3::new(0.5, 0.0, 0.5))
+            * Mat4::from_rotation_y((-d).to_radians())
+            * flip
+    }
+}
+
+/// Vanilla `DragonHeadModel.setupAnim`'s jaw: `(sin(anim * PI * 0.2) + 1) * 0.2` radians
+/// about x.
+pub fn skull_dragon_jaw_rotation(anim: f32) -> f32 {
+    ((anim * std::f32::consts::PI * 0.2).sin() + 1.0) * 0.2
+}
+
+/// Vanilla `PiglinHeadModel.setupAnim`'s ears: the left
+/// `-(cos(anim * PI * 0.2 * 1.2) + 2.5) * 0.2` and the right
+/// `(cos(anim * PI * 0.2) + 2.5) * 0.2` radians about z (replacing the layer's base ±30
+/// degrees).
+pub fn skull_piglin_ear_rotations(anim: f32) -> (f32, f32) {
+    let left = -((anim * std::f32::consts::PI * 0.2 * 1.2).cos() + 2.5) * 0.2;
+    let right = ((anim * std::f32::consts::PI * 0.2).cos() + 2.5) * 0.2;
+    (left, right)
+}
+
 /// Poses one block entity into `out` (camera-relative, the entity stream's convention).
 /// `rect` is the texture's atlas rectangle, `light` the lightmap coordinates (block, sky).
 pub(crate) fn emit_block_entity(
@@ -765,6 +1105,37 @@ pub(crate) fn emit_block_entity(
         // Banners likewise draw per-pattern layers with a tint, handled by
         // `EntityRenderer::emit_banner`.
         BlockEntityKind::Banner { .. } => {}
+        BlockEntityKind::Skull { kind, wall } => {
+            let model = skull_model(kind);
+            let mut pose = PoseOverrides::default();
+            // The animation value: vanilla lerps `animationTickCount + partial`; the
+            // tick's end value is used here (the chest lids' precedent).
+            let anim = inst.skull_anim.end;
+            match kind {
+                SkullKind::Dragon => {
+                    // The jaw swings about its pivot.
+                    pose.rotations.push((
+                        "jaw".into(),
+                        Vec3::new(skull_dragon_jaw_rotation(anim), 0.0, 0.0),
+                    ));
+                }
+                SkullKind::Piglin => {
+                    let (left, right) = skull_piglin_ear_rotations(anim);
+                    pose.rotations
+                        .push(("left_ear".into(), Vec3::new(0.0, 0.0, left)));
+                    pose.rotations
+                        .push(("right_ear".into(), Vec3::new(0.0, 0.0, right)));
+                }
+                _ => {}
+            }
+            // The ground rotation angle rides in `sign_angle` (degrees, vanilla's
+            // `RotationSegment.convertToDegrees`).
+            let segment = (inst.sign_angle / 22.5).round() as i32;
+            let root = skull_root(inst.pos, wall, inst.facing, segment, camera);
+            for part in &model.root.children {
+                emit_part(out, model, part, &pose, root, rect, light);
+            }
+        }
     }
 }
 
@@ -855,6 +1226,7 @@ mod tests {
             text: None,
             banner_phase: 0.0,
             banner: None,
+            skull_anim: TickPair::fixed(0.0),
         }
     }
 
@@ -870,6 +1242,7 @@ mod tests {
             text: None,
             banner_phase: 0.0,
             banner: None,
+            skull_anim: TickPair::fixed(0.0),
         }
     }
 
@@ -1036,6 +1409,43 @@ mod tests {
             ),
             Some(BlockEntityKind::Banner { wall: true })
         );
+        // Skulls: every kind from its block id, standing and wall.
+        for (block, kind) in [
+            ("skeleton_skull", SkullKind::Skeleton),
+            ("wither_skeleton_skull", SkullKind::WitherSkeleton),
+            ("zombie_head", SkullKind::Zombie),
+            ("creeper_head", SkullKind::Creeper),
+            ("dragon_head", SkullKind::Dragon),
+            ("piglin_head", SkullKind::Piglin),
+            ("player_head", SkullKind::Player),
+        ] {
+            assert_eq!(
+                kind_of(
+                    &Identifier::minecraft("skull"),
+                    &Identifier::minecraft(block),
+                    false
+                ),
+                Some(BlockEntityKind::Skull { kind, wall: false }),
+                "{block}"
+            );
+            let wall_block = block
+                .replace("_wall_", "_wall_")
+                .replace("_skull", "_wall_skull");
+            let wall_block = if block.ends_with("_skull") {
+                wall_block
+            } else {
+                block.replace("_head", "_wall_head")
+            };
+            assert_eq!(
+                kind_of(
+                    &Identifier::minecraft("skull"),
+                    &Identifier::minecraft(&wall_block),
+                    false
+                ),
+                Some(BlockEntityKind::Skull { kind, wall: true }),
+                "{wall_block}"
+            );
+        }
         // Unknown and out of scope.
         assert_eq!(
             kind_of(&Identifier::minecraft("copper_chest"), &block, false),
@@ -1045,6 +1455,83 @@ mod tests {
             kind_of(&Identifier::new("mod", "chest"), &block, false),
             None
         );
+    }
+
+    /// The skull models follow vanilla's layers: the mob head is one cube on 64x32, the
+    /// humanoid head adds the hat on 64x64, the piglin head has snout and ears on 64x64, the
+    /// dragon head is the 0.75-scaled part set with the jaw on 256x256.
+    #[test]
+    fn skull_models_match_vanilla_layers() {
+        let mob = skull_model(SkullKind::Skeleton);
+        assert_eq!((mob.tex_width, mob.tex_height), (64, 32));
+        assert_eq!(mob.root.children.len(), 1);
+        let head = &mob.root.children[0];
+        assert_eq!(head.cubes.len(), 1);
+        assert_eq!(head.cubes[0].origin, Vec3::new(-4.0, -8.0, -4.0));
+        assert_eq!(head.cubes[0].size, Vec3::new(8.0, 8.0, 8.0));
+
+        let humanoid = skull_model(SkullKind::Player);
+        assert_eq!((humanoid.tex_width, humanoid.tex_height), (64, 64));
+        // Head + hat.
+        assert_eq!(humanoid.root.children[0].cubes.len(), 2);
+        assert_eq!(humanoid.root.children[0].cubes[1].uv, [32, 0]);
+        assert_eq!(humanoid.root.children[0].cubes[1].inflate, 0.25);
+
+        let piglin = skull_model(SkullKind::Piglin);
+        assert_eq!((piglin.tex_width, piglin.tex_height), (64, 64));
+        let phead = &piglin.root.children[0];
+        // Head, snout and two nostrils.
+        assert_eq!(phead.cubes.len(), 4);
+        // The ears on their pivots.
+        assert_eq!(phead.children.len(), 2);
+        assert_eq!(phead.children[0].pivot, Vec3::new(4.5, -6.0, 0.0));
+
+        let dragon = skull_model(SkullKind::Dragon);
+        assert_eq!((dragon.tex_width, dragon.tex_height), (256, 256));
+        let dhead = &dragon.root.children[0];
+        // The pivot scaled 0.75: -7.986666 * 0.75.
+        assert!((dhead.pivot.y - -5.99).abs() < 0.01, "{}", dhead.pivot.y);
+        assert_eq!(dhead.cubes.len(), 6);
+        // The jaw child at (0, 4, -8).
+        assert_eq!(dhead.children[0].pivot, Vec3::new(0.0, 4.0, -8.0));
+    }
+
+    /// The skull transform: a ground skull sits in the block's bottom half (the head cube's
+    /// y -8..0 maps to 0..0.5 blocks); a north-wall skull is offset 0.25 into the block and
+    /// turned to look away from the wall.
+    #[test]
+    fn skull_root_places_the_head() {
+        let pos = BlockPos::new(0, 0, 0);
+        // Ground, rotation 0 (south): the head's centre (0, -4, 0 in model space) lands at
+        // (0.5, 0.25, 0.5) — the block centre, a quarter up.
+        let m = skull_root(pos, false, Direction::South, 0, glam::DVec3::ZERO);
+        let p = m.transform_point3(Vec3::new(0.0, -4.0, 0.0));
+        assert!((p.x - 0.5).abs() < 1e-6, "x: {}", p.x);
+        assert!((p.y - 0.25).abs() < 1e-6, "y: {}", p.y);
+        assert!((p.z - 0.5).abs() < 1e-6, "z: {}", p.z);
+        // The head's top (model y -8) is at 0.5 blocks.
+        let top = m.transform_point3(Vec3::new(0.0, -8.0, 0.0));
+        assert!((top.y - 0.5).abs() < 1e-6, "top: {}", top.y);
+        // A south wall (the skull hangs on the south wall of the block behind it, facing
+        // north): the origin is 0.25 off the wall.
+        let w = skull_root(pos, true, Direction::South, 0, glam::DVec3::ZERO);
+        let q = w.transform_point3(Vec3::new(0.0, -4.0, 0.0));
+        // The wall's facing points south (+z): the offset moves the head north
+        // (0.5 - 1*0.25 = 0.25), and it sits 0.25 + 0.25 up.
+        assert!((q.x - 0.5).abs() < 1e-6, "wx: {}", q.x);
+        assert!((q.z - 0.25).abs() < 1e-6, "wz: {}", q.z);
+        assert!((q.y - 0.5).abs() < 1e-6, "wy: {}", q.y);
+    }
+
+    /// The dragon jaw and piglin ear animations match vanilla's formulas.
+    #[test]
+    fn skull_animations_match_vanilla() {
+        // Jaw at anim 0: (sin(0) + 1) * 0.2 = 0.2.
+        assert!((skull_dragon_jaw_rotation(0.0) - 0.2).abs() < 1e-6);
+        // Ears at anim 0: left -(cos(0) + 2.5) * 0.2 = -0.7, right (cos(0) + 2.5) * 0.2 = 0.7.
+        let (l, r) = skull_piglin_ear_rotations(0.0);
+        assert!((l - -0.7).abs() < 1e-6, "left: {l}");
+        assert!((r - 0.7).abs() < 1e-6, "right: {r}");
     }
 
     /// The calendar rule is December 24..26 (vanilla `SpecialDates.isExtendedChristmas`);

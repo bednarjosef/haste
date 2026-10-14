@@ -1039,6 +1039,9 @@ impl EntityRenderer {
                 crate::blockentity::BlockEntityKind::Shulker(c) => {
                     crate::blockentity::shulker_texture(c)
                 }
+                crate::blockentity::BlockEntityKind::Skull { kind, .. } => {
+                    crate::blockentity::skull_texture(kind)
+                }
                 crate::blockentity::BlockEntityKind::Sign { .. } => unreachable!(),
                 crate::blockentity::BlockEntityKind::Banner { .. } => unreachable!(),
             };
