@@ -872,7 +872,7 @@ impl Renderer {
             gpu.device.clone(),
             gpu.queue.clone(),
             Self::gui_format_for(&gpu, surface_format),
-            font,
+            font.clone(),
         );
         let entity = crate::entity::EntityRenderer::new(
             gpu.device.clone(),
@@ -880,6 +880,7 @@ impl Renderer {
             surface_format,
             &camera_bind_group_layout,
             &lightmap_bind_group_layout,
+            font.clone(),
         );
         let sky = crate::sky::SkyRenderer::new(
             gpu.device.clone(),

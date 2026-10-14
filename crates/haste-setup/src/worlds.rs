@@ -44,9 +44,15 @@ pub fn world_dir(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// `worlds_dir` reads `HASTE_SINGLEPLAYER_DIR`; the env test sets it, so the tests that read
+    /// the dir must not run while it does (they run in parallel by default).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn world_dir_is_under_singleplayer() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let dir = world_dir("gltest").expect("config dir exists on this system");
         let expected = std::path::Path::new("singleplayer").join("gltest");
         assert!(dir.ends_with(&expected));
@@ -55,6 +61,7 @@ mod tests {
 
     #[test]
     fn env_var_overrides_the_dir() {
+        let _guard = ENV_LOCK.lock().unwrap();
         // SAFETY: one env var, set and restored around the calls (tests run in parallel
         // processes of this crate's test binary, but within it serially; the var is ours).
         let key = "HASTE_SINGLEPLAYER_DIR";
