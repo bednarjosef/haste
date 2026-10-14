@@ -657,6 +657,35 @@ mod tests {
             d.shapes.is_oracle_backed(),
             dt
         );
+        // The recorder mod's block sound dump (dump_block_sounds): stone steps, the
+        // decorated pot's uncracked default (state override) differs from its cracked
+        // variant (the block default, the shatter type). Present only when the oracle
+        // dump was recorded (the headless walk check needs it).
+        if d.sounds.is_loaded() {
+            let stone = d
+                .blocks
+                .default_state(&Identifier::minecraft("stone"))
+                .unwrap();
+            assert_eq!(
+                d.block_sound_type(stone).unwrap().step_sound,
+                "minecraft:block.stone.step"
+            );
+            let pot = Identifier::minecraft("decorated_pot");
+            // The pot's default state is uncracked (the state override, normal sounds).
+            let uncracked = d.blocks.default_state(&pot).unwrap();
+            assert_eq!(
+                d.block_sound_type(uncracked).unwrap().break_sound,
+                "minecraft:block.decorated_pot.break"
+            );
+            let cracked = d
+                .blocks
+                .with_property(uncracked, "cracked", "true")
+                .unwrap();
+            assert_eq!(
+                d.block_sound_type(cracked).unwrap().break_sound,
+                "minecraft:block.decorated_pot.shatter"
+            );
+        }
     }
 
     /// `block_sounds.json` (the recorder mod's `dump_block_sounds` dump): per-block
