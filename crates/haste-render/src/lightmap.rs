@@ -19,16 +19,20 @@ pub struct Color(pub [f32; 3]);
 /// The inputs `LightmapRenderStateExtractor.extract` gathers from the world and player.
 /// `sky_darken` is 1 - SKY_LIGHT_FACTOR (0 day .. 1 night, the "sky darken factor" the brief
 /// names); `block_light_flicker` is `LightmapRenderStateExtractor.blockLightFlicker` (0 for a
-/// steady lightmap); `gamma` is the brightness option (0..1); `night_vision` its effect
-/// intensity, 0 without it. `ambient_light` is `DimensionType.ambientLight` (0 overworld, 0.1
-/// Nether, 0.25 End); `has_sky_light` is false in the Nether and the End, whose fixed sky light
-/// and ambient colours replace the sky term.
+/// steady lightmap); `gamma` is the brightness option minus the darkness brightness modifier
+/// (`LightmapRenderState.brightness`, 0..1); `night_vision` its effect intensity, 0 without it;
+/// `darkness` is `LightmapRenderState.darknessEffectScale` (the darkness-effect pulse); and
+/// `boss_overlay_darkening` is `LightmapRenderState.bossOverlayWorldDarkening`. `ambient_light`
+/// is `DimensionType.ambientLight` (0 overworld, 0.1 Nether, 0.25 End); `has_sky_light` is false
+/// in the Nether and the End, whose fixed sky light and ambient colours replace the sky term.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LightmapInputs {
     pub sky_darken: f32,
     pub block_light_flicker: f32,
     pub gamma: f32,
     pub night_vision: f32,
+    pub darkness: f32,
+    pub boss_overlay_darkening: f32,
     pub ambient_light: f32,
     pub has_sky_light: bool,
 }
@@ -41,9 +45,82 @@ impl LightmapInputs {
             block_light_flicker: 0.0,
             gamma: 0.0,
             night_vision: 0.0,
+            darkness: 0.0,
+            boss_overlay_darkening: 0.0,
             ambient_light: 0.0,
             has_sky_light: true,
         }
+    }
+}
+
+/// `GameRenderer.nightVisionScale`: full strength unless the night-vision effect ends within
+/// 200 ticks, in which case it blinks as `0.7 + sin((duration - partialTick) * PI * 0.2) * 0.3`.
+/// `duration` is the effect's remaining ticks (-1 for an infinite effect).
+pub fn night_vision_scale(duration: i32, partial_tick: f32) -> f32 {
+    let ends_within_200 = duration != -1 && duration <= 200;
+    if !ends_within_200 {
+        1.0
+    } else {
+        0.7 + ((duration as f32 - partial_tick) * std::f32::consts::PI * 0.2).sin() * 0.3
+    }
+}
+
+/// `LightmapRenderStateExtractor.calculateDarknessScale`:
+/// `max(0, cos((tickCount - partialTick) * PI * 0.025) * 0.45 * darknessGamma)`.
+pub fn darkness_scale(tick_count: i32, darkness_gamma: f32, partial_tick: f32) -> f32 {
+    let darkness = 0.45 * darkness_gamma;
+    ((tick_count as f32 - partial_tick) * std::f32::consts::PI * 0.025)
+        .cos()
+        .mul_add(darkness, 0.0)
+        .max(0.0)
+}
+
+/// `LightmapRenderStateExtractor.extract`: the shader's brightness factor,
+/// `max(0, gamma - darknessBrightnessModifier)`.
+pub fn brightness(gamma: f32, darkness_brightness_modifier: f32) -> f32 {
+    (gamma - darkness_brightness_modifier).max(0.0)
+}
+
+/// `LightmapRenderStateExtractor.tick`: one tick of the block-light flicker random walk.
+/// The four samples are `RandomSource.nextFloat()` values in 0..1 (vanilla draws four).
+pub fn block_light_flicker_tick(flicker: f32, r1: f32, r2: f32, r3: f32, r4: f32) -> f32 {
+    (flicker + (r1 - r2) * r3 * r4 * 0.1) * 0.9
+}
+
+/// `MobEffectInstance.BlendState`: the per-tick ramp of an effect's strength (0..1), with the
+/// previous tick's value kept so a frame can interpolate by partial tick. Darkness uses it (22
+/// ticks in and out); the other effects in the lightmap read their duration directly.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BlendState {
+    factor: f32,
+    factor_previous_frame: f32,
+}
+
+impl BlendState {
+    /// `MobEffectInstance.BlendState.setImmediate` (`skipBlending`): snap to `has_effect`.
+    pub fn set_immediate(&mut self, has_effect: bool) {
+        self.factor = if has_effect { 1.0 } else { 0.0 };
+        self.factor_previous_frame = self.factor;
+    }
+
+    /// `MobEffectInstance.BlendState.tick`: ramp `factor` towards 1 while the effect is active
+    /// and towards 0 when it is not, at most `1 / blend_duration` per tick.
+    pub fn tick(&mut self, has_effect: bool, blend_duration: i32) {
+        self.factor_previous_frame = self.factor;
+        let target = if has_effect { 1.0 } else { 0.0 };
+        if self.factor != target {
+            if blend_duration == 0 {
+                self.factor = target;
+            } else {
+                let max_delta = 1.0 / blend_duration as f32;
+                self.factor += (target - self.factor).clamp(-max_delta, max_delta);
+            }
+        }
+    }
+
+    /// `MobEffectInstance.BlendState.getFactor`: `lerp(partialTick, previous, current)`.
+    pub fn factor(&self, partial_tick: f32) -> f32 {
+        self.factor_previous_frame + (self.factor - self.factor_previous_frame) * partial_tick
     }
 }
 
@@ -91,6 +168,8 @@ pub fn nether() -> LightmapInputs {
         block_light_flicker: 0.0,
         gamma: 0.0,
         night_vision: 0.0,
+        darkness: 0.0,
+        boss_overlay_darkening: 0.0,
         ambient_light: 0.1,
         has_sky_light: false,
     }
@@ -103,6 +182,8 @@ pub fn end() -> LightmapInputs {
         block_light_flicker: 0.0,
         gamma: 0.0,
         night_vision: 0.0,
+        darkness: 0.0,
+        boss_overlay_darkening: 0.0,
         ambient_light: 0.25,
         has_sky_light: false,
     }
@@ -232,6 +313,18 @@ fn texel(
     // `DimensionType.ambientLight` itself feeds vanilla's `LightTexture.getBrightness`, not
     // this shader.)
 
+    // Boss overlay world darkening (lightmap.fsh: `mix(color, color * vec3(0.7, 0.6, 0.6),
+    // BossOverlayWorldDarkeningFactor)`).
+    let boss = inputs.boss_overlay_darkening.clamp(0.0, 1.0);
+    for (c, tint) in color.iter_mut().zip(BOSS_OVERLAY_TINT) {
+        *c += (*c * tint - *c) * boss;
+    }
+
+    // Darkness effect (lightmap.fsh: `color = color - vec3(DarknessScale)`), before the clamp.
+    for c in &mut color {
+        *c -= inputs.darkness;
+    }
+
     // Brightness option (the gamma mix) on the clamped colour.
     let brightness = inputs.gamma.max(0.0);
     let clamped = [
@@ -265,6 +358,8 @@ fn ambient_color(inputs: &LightmapInputs) -> [f32; 3] {
 const NIGHT_VISION_COLOR: [f32; 3] = [153.0 / 255.0; 3];
 /// BLOCK_LIGHT_TINT default (ARGB.vector3fFromRGB24(-10100) = rgb 255, 216, 140).
 const BLOCK_LIGHT_TINT: [f32; 3] = [1.0, 216.0 / 255.0, 140.0 / 255.0];
+/// lightmap.fsh's boss-overlay darkening tint (a fixed `vec3(0.7, 0.6, 0.6)`).
+const BOSS_OVERLAY_TINT: [f32; 3] = [0.7, 0.6, 0.6];
 
 /// The light texture on the GPU: a 16x16 RGBA8 (linear, like vanilla's lightmap target)
 /// re-uploaded only when the inputs change, plus the reused staging bytes. Vanilla keeps one
@@ -555,5 +650,135 @@ mod tests {
         let right = tex(&night, 14, 0);
         let up = tex(&night, 0, 14);
         assert!(right[0] > up[0] + 0.1, "{right:?} vs {up:?}");
+    }
+
+    #[test]
+    fn night_vision_scale_is_full_until_the_last_200_ticks() {
+        // GameRenderer.nightVisionScale: >200 ticks left is a flat 1.0 (infinite too).
+        assert_eq!(night_vision_scale(300, 0.0), 1.0);
+        assert_eq!(night_vision_scale(201, 0.0), 1.0);
+        assert_eq!(night_vision_scale(-1, 0.0), 1.0);
+        // At exactly 200 the blink starts: sin(200 * PI * 0.2) = sin(40 PI) = 0.
+        assert!((night_vision_scale(200, 0.0) - 0.7).abs() < 1e-4);
+        // 102 ticks, no partial: sin(102 * PI * 0.2) = sin(20.4 PI) = sin(0.4 PI) = 0.9511.
+        let expected = 0.7 + (102.0f32 * std::f32::consts::PI * 0.2).sin() * 0.3;
+        assert!((night_vision_scale(102, 0.0) - expected).abs() < 1e-6);
+        // The partial tick advances the sine phase backwards (duration - partial).
+        let at_partial = night_vision_scale(102, 0.5);
+        assert!(
+            (at_partial - (0.7 + (101.5f32 * std::f32::consts::PI * 0.2).sin() * 0.3)).abs() < 1e-6
+        );
+    }
+
+    #[test]
+    fn darkness_scale_pulses_on_the_cosine() {
+        // calculateDarknessScale: cos((tickCount - partial) * PI * 0.025) * 0.45 * gamma.
+        assert!((darkness_scale(0, 1.0, 0.0) - 0.45).abs() < 1e-6);
+        // cos(PI) = -1, clamped to 0.
+        assert_eq!(darkness_scale(40, 1.0, 0.0), 0.0);
+        // Half gamma halves the pulse.
+        assert!((darkness_scale(0, 0.5, 0.0) - 0.225).abs() < 1e-6);
+        // Partial tick shifts the phase: tickCount 0, partial 40 is cos(-PI) -> 0.
+        assert_eq!(darkness_scale(0, 1.0, 40.0), 0.0);
+    }
+
+    #[test]
+    fn brightness_is_the_option_minus_the_darkness_modifier() {
+        assert!((brightness(0.5, 0.2) - 0.3).abs() < 1e-6);
+        assert_eq!(brightness(0.1, 0.3), 0.0);
+        assert!((brightness(1.0, 0.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn block_light_flicker_follows_the_random_walk() {
+        // One tick with all samples equal is a pure decay by 0.9.
+        assert!((block_light_flicker_tick(1.0, 0.5, 0.5, 0.5, 0.5) - 0.9).abs() < 1e-6);
+        // (r1 - r2) * r3 * r4 * 0.1 then * 0.9.
+        let expected = (0.0 + (0.9 - 0.1) * 0.5 * 0.5 * 0.1) * 0.9;
+        assert!((block_light_flicker_tick(0.0, 0.9, 0.1, 0.5, 0.5) - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn darkness_blend_ramps_at_one_over_twenty_two() {
+        // MobEffectInstance.BlendState.tick with the darkness effect's 22-tick blend.
+        // `factor(partial)` is `lerp(partial, previousTick, thisTick)`, so at partial 0 it is
+        // last tick's value and at partial 1 this tick's.
+        let mut b = BlendState::default();
+        assert_eq!(b.factor(0.0), 0.0);
+        b.tick(true, 22);
+        assert_eq!(b.factor(0.0), 0.0);
+        assert!((b.factor(1.0) - 1.0 / 22.0).abs() < 1e-6);
+        for _ in 0..21 {
+            b.tick(true, 22);
+        }
+        assert!((b.factor(1.0) - 1.0).abs() < 1e-6);
+        assert!((b.factor(0.0) - 21.0 / 22.0).abs() < 1e-6);
+        // Leaving the effect ramps back down, again by 1/22.
+        b.tick(false, 22);
+        assert!((b.factor(0.0) - 1.0).abs() < 1e-6);
+        assert!((b.factor(1.0) - 21.0 / 22.0).abs() < 1e-6);
+        assert!((b.factor(0.5) - (1.0 - 0.5 / 22.0)).abs() < 1e-6);
+        // setImmediate snaps (skipBlending).
+        b.set_immediate(false);
+        assert_eq!(b.factor(0.5), 0.0);
+    }
+
+    #[test]
+    fn darkness_subtracts_from_every_channel() {
+        // lightmap.fsh: color - vec3(DarknessScale) before the clamp. Midnight block 14 has a
+        // warm bright texel; darkness 0.2 lowers all three channels.
+        let night = LightmapInputs {
+            sky_darken: 1.0,
+            ..LightmapInputs::overworld_noon()
+        };
+        let dark = LightmapInputs {
+            darkness: 0.2,
+            ..night
+        };
+        let lit = tex(&night, 14, 0);
+        let dimmed = tex(&dark, 14, 0);
+        for c in 0..3 {
+            assert!(dimmed[c] < lit[c] + 1e-4, "c{c}: {dimmed:?} vs {lit:?}");
+        }
+        // The darkest texel (ambient 10/255) clamps to 0.
+        assert_eq!(tex(&dark, 0, 0), [0.0; 3]);
+    }
+
+    #[test]
+    fn boss_overlay_tints_towards_seventy_thirty() {
+        // lightmap.fsh: mix(color, color * vec3(0.7, 0.6, 0.6), factor), applied before the
+        // clamp. Block 4 at night is dim enough to stay unclamped, so the mix is exact.
+        let base = LightmapInputs {
+            sky_darken: 1.0,
+            ..LightmapInputs::overworld_noon()
+        };
+        let lit = tex(&base, 4, 0);
+        let boss = LightmapInputs {
+            boss_overlay_darkening: 1.0,
+            ..base
+        };
+        let dimmed = tex(&boss, 4, 0);
+        assert!(
+            (dimmed[0] - lit[0] * 0.7).abs() < 2.0 / 255.0,
+            "{dimmed:?} vs {lit:?}"
+        );
+        assert!(
+            (dimmed[1] - lit[1] * 0.6).abs() < 2.0 / 255.0,
+            "{dimmed:?} vs {lit:?}"
+        );
+        assert!(
+            (dimmed[2] - lit[2] * 0.6).abs() < 2.0 / 255.0,
+            "{dimmed:?} vs {lit:?}"
+        );
+        // Half strength is a half mix.
+        let half = LightmapInputs {
+            boss_overlay_darkening: 0.5,
+            ..base
+        };
+        let h = tex(&half, 4, 0);
+        assert!(
+            (h[0] - lit[0] * 0.85).abs() < 2.0 / 255.0,
+            "{h:?} vs {lit:?}"
+        );
     }
 }

@@ -61,6 +61,23 @@ pub struct SkyState {
     pub fog_end: f32,
 }
 
+/// The lightmap inputs that change every frame and are not part of the sky or the dimension:
+/// the block-light flicker (`LightmapRenderStateExtractor.blockLightFlicker`), the brightness
+/// option, the night-vision intensity, the darkness-effect scale and the boss-overlay world
+/// darkening. `lightning_flash` forces the sky factor to 1.0 (`ClientLevel`'s
+/// `SKY_LIGHT_FACTOR` layer while `skyFlashTime > 0`). The renderer folds these into the
+/// dimension's [`crate::lightmap::LightmapInputs`] once per frame; the client sets them with
+/// [`Renderer::set_lightmap_frame`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LightmapFrame {
+    pub block_light_flicker: f32,
+    pub gamma: f32,
+    pub night_vision: f32,
+    pub darkness: f32,
+    pub boss_overlay_darkening: f32,
+    pub lightning_flash: bool,
+}
+
 /// Per-frame render statistics (docs/INTERFACES.md FrameStats).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameStats {
@@ -430,6 +447,11 @@ pub struct Renderer {
     atlas_bind_group_layout: wgpu::BindGroupLayout,
     /// The vanilla light texture (`lightmap`), bound at group 2 by terrain and entities.
     lightmap: crate::lightmap::LightmapTexture,
+    /// The dimension's fixed lightmap inputs (`set_dimension`); `render` folds the frame's
+    /// [`LightmapFrame`] and the sky factor into a copy of these.
+    lightmap_base: crate::lightmap::LightmapInputs,
+    /// This frame's dynamic lightmap inputs (`set_lightmap_frame`).
+    lightmap_frame: LightmapFrame,
     lightmap_bind_group: wgpu::BindGroup,
     atlas_bind_group: wgpu::BindGroup,
     pipeline_solid: wgpu::RenderPipeline,
@@ -910,6 +932,8 @@ impl Renderer {
             camera_bind_group,
             atlas_bind_group_layout,
             lightmap,
+            lightmap_base: crate::lightmap::LightmapInputs::overworld_noon(),
+            lightmap_frame: LightmapFrame::default(),
             lightmap_bind_group,
             atlas_bind_group,
             pipeline_solid,
@@ -994,14 +1018,15 @@ impl Renderer {
     /// The dimension being drawn: picks the sky (overworld, End, or fog colour only).
     pub fn set_dimension(&mut self, dim: &haste_core::game::DimensionInfo) {
         self.sky.kind = crate::sky::SkyKind::of(dim);
-        // The dimension's fixed lightmap (Nether/End ambient colours, no sky term).
-        self.lightmap.set_inputs(if dim.has_skylight {
+        // The dimension's fixed lightmap inputs (Nether/End ambient colours, no sky term);
+        // `render` folds this frame's dynamic inputs into a copy each frame.
+        self.lightmap_base = if dim.has_skylight {
             crate::lightmap::LightmapInputs::overworld_noon()
         } else if dim.name.path() == "the_end" {
             crate::lightmap::end()
         } else {
             crate::lightmap::nether()
-        });
+        };
         self.min_section = dim.min_section();
         self.section_count = dim.section_count() as i32;
         self.section_vis.lock().clear();
@@ -1009,6 +1034,12 @@ impl Renderer {
         self.scheduled_for = None;
         self.walk_in_flight = false;
         self.bonus.clear();
+    }
+
+    /// This frame's dynamic lightmap inputs (flicker, brightness, night vision, darkness, boss
+    /// overlay darkening, lightning flash), set by the client before `render`.
+    pub fn set_lightmap_frame(&mut self, frame: LightmapFrame) {
+        self.lightmap_frame = frame;
     }
 
     /// Uploads the particle atlas of `types` as the particle texture (call after
@@ -1593,17 +1624,26 @@ impl Renderer {
             .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&camera_uniform));
 
         // The light texture's inputs for this frame (LightmapRenderStateExtractor.extract):
-        // the timeline's sky factor with the rain blend (WeatherAttributes.RAIN moves
-        // SKY_LIGHT_FACTOR towards 0.24 by rain level), the gamma option where the client
-        // will set it. Skyless dimensions keep the inputs `set_dimension` chose.
+        // the dimension's fixed colours with the timeline's sky factor (and the rain blend,
+        // WeatherAttributes.RAIN moving SKY_LIGHT_FACTOR towards 0.24 by rain level) plus the
+        // frame's flicker, brightness, night vision, darkness, boss darkening and lightning.
+        let mut inputs = self.lightmap_base;
         if frame.sky.dimension_has_sky {
             let mut factor = crate::lightmap::overworld_sky_factor(frame.sky.time_of_day);
             let rain = frame.sky.rain.clamp(0.0, 1.0);
             factor += (0.24 - factor) * rain * 0.3125;
-            let mut inputs = crate::lightmap::LightmapInputs::overworld_noon();
+            // ClientLevel's time-based SKY_LIGHT_FACTOR layer: a lightning flash is full sky.
+            if self.lightmap_frame.lightning_flash {
+                factor = 1.0;
+            }
             inputs.sky_darken = 1.0 - factor;
-            self.lightmap.set_inputs(inputs);
         }
+        inputs.block_light_flicker = self.lightmap_frame.block_light_flicker;
+        inputs.gamma = self.lightmap_frame.gamma;
+        inputs.night_vision = self.lightmap_frame.night_vision;
+        inputs.darkness = self.lightmap_frame.darkness;
+        inputs.boss_overlay_darkening = self.lightmap_frame.boss_overlay_darkening;
+        self.lightmap.set_inputs(inputs);
         self.lightmap.upload(&self.gpu.queue);
 
         // Which target are we drawing into?
