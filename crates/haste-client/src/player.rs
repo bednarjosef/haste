@@ -49,10 +49,14 @@ pub const JUMP_DOUBLE_TAP_TICKS: u8 = 7;
 /// world's minimum), with the 0.98 vertical drag applied on top.
 pub const UNLOADED_CHUNK_FALL_SPEED: f64 = -0.1 * VERTICAL_DRAG as f64;
 
-/// `player_command` actions (wiki "Player Command").
+/// `player_command` actions (wiki "Player Command"; ordinals from the 26.3
+/// `ServerboundPlayerCommandPacket.Action` enum: STOP_SLEEPING 0, START_SPRINTING 1,
+/// STOP_SPRINTING 2, START_RIDING_JUMP 3, STOP_RIDING_JUMP 4, OPEN_INVENTORY 5,
+/// START_FALL_FLYING 6).
 pub mod command {
     pub const START_SPRINTING: i32 = 1;
     pub const STOP_SPRINTING: i32 = 2;
+    pub const START_FALL_FLYING: i32 = 6;
 }
 
 /// `player_abilities` flag bits (clientbound and serverbound).
@@ -217,7 +221,11 @@ pub struct LocalPlayer {
     /// Counters for tests and the headless printout.
     pub teleports: u64,
     prev_pos: DVec3,
-    prev_eye: f64,
+    /// The camera's smoothed eye height and its last-tick value (vanilla `Camera.eyeHeight`/
+    /// `eyeHeightOld`, f32 like vanilla). The camera, not the player, smooths: each tick it
+    /// halves the distance to the pose's eye height, and the render lerps the two values.
+    camera_eye: f32,
+    camera_eye_old: f32,
     look_offset: (f32, f32),
     last_input_look: (f32, f32),
     sent: Sent,
@@ -271,7 +279,8 @@ impl LocalPlayer {
             pending_accept_age: 0,
             teleports: 0,
             prev_pos: DVec3::ZERO,
-            prev_eye: 0.0,
+            camera_eye: 0.0,
+            camera_eye_old: 0.0,
             look_offset: (0.0, 0.0),
             last_input_look: (0.0, 0.0),
             sent: Sent::default(),
@@ -287,7 +296,13 @@ impl LocalPlayer {
             hand: hand::Hand::new(),
         };
         p.state.on_ground = true;
-        p.prev_eye = p.eye_height();
+        // Vanilla's camera starts its eye height at 0 and rises on the first level tick; here
+        // the first position has not arrived yet, so the pair starts at the standing eye height
+        // and the smoothing takes over from there (the rise would otherwise show before the
+        // player even exists).
+        let eye = p.eye_height() as f32;
+        p.camera_eye = eye;
+        p.camera_eye_old = eye;
         p
     }
 
@@ -326,13 +341,15 @@ impl LocalPlayer {
         self.attrs.eye_height_for(self.state.pose)
     }
 
-    /// Eye position and look angles interpolated by partial tick, for the camera.
+    /// Eye position and look angles interpolated by partial tick, for the camera. The eye
+    /// height is the camera's own smoothed pair (vanilla `Camera.setup` lerps
+    /// `eyeHeightOld`/`eyeHeight`, not the entity's eye height).
     pub fn camera(&self, partial_tick: f32) -> (DVec3, f32, f32) {
-        let t = partial_tick.clamp(0.0, 1.0) as f64;
-        let pos = self.prev_pos.lerp(self.state.pos, t);
-        let eye = self.prev_eye + (self.eye_height() - self.prev_eye) * t;
+        let t = partial_tick.clamp(0.0, 1.0);
+        let pos = self.prev_pos.lerp(self.state.pos, t as f64);
+        let eye = self.camera_eye_old + (self.camera_eye - self.camera_eye_old) * t;
         (
-            pos + DVec3::new(0.0, eye, 0.0),
+            pos + DVec3::new(0.0, f64::from(eye), 0.0),
             self.state.yaw,
             self.state.pitch,
         )
@@ -400,10 +417,17 @@ impl LocalPlayer {
             }
             P::SetHeldSlot(s) => self.held_slot = s.slot,
             P::SetEntityData(d) if EntityId(d.entity_id) == self.entity_id => {
-                // Wiki "Entity metadata": index 1 is the air supply (VarInt).
+                // Wiki "Entity metadata": index 0 is the shared flags byte (bit 0x80 = fall
+                // flying, `Entity.FLAG_FALL_FLYING` = 7), index 1 the air supply (VarInt).
                 for e in &d.metadata {
-                    if let (1, haste_core::entity::MetadataValue::VarInt(v)) = (e.index, &e.value) {
-                        self.air_supply = *v;
+                    match (e.index, &e.value) {
+                        (1, haste_core::entity::MetadataValue::VarInt(v)) => self.air_supply = *v,
+                        (0, haste_core::entity::MetadataValue::Byte(b)) => {
+                            // The server owns the flag: it confirms a glide we started and
+                            // clears it when the glide ends (landing, no glider).
+                            self.state.fall_flying = *b as u8 & 0x80 != 0;
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -497,7 +521,8 @@ impl LocalPlayer {
         self.set_look(yaw, pitch);
         tracing::debug!("after teleport {:?}", self.state);
         self.prev_pos = self.state.pos;
-        self.prev_eye = self.eye_height();
+        // The camera's smoothed eye height is not reset by a teleport (vanilla `Camera` keeps
+        // it; only the position jumps, and prev_pos above already pins the interpolation).
         self.has_position = true;
         self.teleports += 1;
     }
@@ -629,9 +654,13 @@ impl LocalPlayer {
         out: &mut Vec<ServerboundPlay>,
     ) {
         self.prepare(data);
+        // No entity data on this path (no entity store here): every entity type is unknown and
+        // so pickable, which vanilla would only mean for mod types. The driver fills
+        // `InteractEnv::entity_types` from the store (`docs/INTERFACES.md`, `entity_box`).
         let env = interact::InteractEnv {
             data,
             entities: &[],
+            entity_types: &[],
         };
         self.tick_interact(input, world, &env, None, out);
     }
@@ -743,8 +772,13 @@ impl LocalPlayer {
     ) {
         self.apply_attributes();
         self.prev_pos = self.state.pos;
-        self.prev_eye = self.eye_height();
         self.last_input_look = (input.yaw, input.pitch);
+        // Vanilla `Camera.tick` runs at the start of the client tick, before the player's own
+        // tick (so the target is the pose's eye height as the last tick ended it), and even
+        // while the player has no position yet: the camera halves its distance to the target
+        // each tick (`eyeHeight += (getEyeHeight() - eyeHeight) * 0.5`).
+        self.camera_eye_old = self.camera_eye;
+        self.camera_eye += (self.eye_height() as f32 - self.camera_eye) * 0.5;
         self.flush_pending_accept(out);
         if !(self.has_position && self.loaded) {
             return;
@@ -780,7 +814,12 @@ impl LocalPlayer {
 
         // 3. Physics. The player does not move while its chunk is not loaded; vanilla's
         // `Player.aiStep` counts the double-tap jump window down before `LocalPlayer.aiStep`
-        // looks at the keys.
+        // looks at the keys. Vanilla `Player.tick` sets `noPhysics = isSpectator()` and clears
+        // on-ground for spectators before the travel step.
+        self.state.no_physics = self.game_mode == GameMode::Spectator;
+        if self.state.no_physics {
+            self.state.on_ground = false;
+        }
         if self.jump_trigger_time > 0 {
             self.jump_trigger_time -= 1;
         }
@@ -803,11 +842,13 @@ impl LocalPlayer {
         let double_tap = std::mem::take(&mut self.toggle_flight);
         let pressed = input.jump && !self.jump_held;
         self.jump_held = input.jump;
+        let mut just_toggled_creative_flight = false;
         if self.abilities.may_fly && (pressed || double_tap) {
             if armed {
                 if !self.state.swimming {
                     self.jump_trigger_time = 0;
                     self.state.flying = !self.state.flying;
+                    just_toggled_creative_flight = true;
                     if self.state.flying && self.state.on_ground {
                         self.jump_from_ground(ctx.world, ctx.blocks);
                     }
@@ -818,6 +859,22 @@ impl LocalPlayer {
         }
         if !self.abilities.may_fly {
             self.state.flying = false;
+        }
+        // Vanilla `LocalPlayer.aiStep`: a fresh jump press in the air with a glider equipped and
+        // no liquid starts gliding (`tryToStartFallFlying` -> `START_FALL_FLYING`), skipped on
+        // the press that just toggled creative flight. The flag is set locally so this tick
+        // already glides; the server confirms it through the shared flag 7 and clears it when the
+        // glide ends. The climbable check (`!onClimbable`) is not modelled (no climbable tag).
+        if pressed
+            && !just_toggled_creative_flight
+            && self.state.can_start_fall_flying(self.has_glider())
+        {
+            self.state.start_fall_flying();
+            out.push(ServerboundPlay::PlayerCommand(sb::PlayerCommand {
+                entity_id: self.entity_id.0,
+                action: command::START_FALL_FLYING,
+                jump_boost: 0,
+            }));
         }
         if self.state.flying != was_flying {
             self.own_sounds.reset_steps();

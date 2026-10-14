@@ -901,8 +901,8 @@ pub fn table_textures() -> impl Iterator<Item = &'static str> {
 /// `minecraft:entity_type` names by protocol id, from the data-generator reports
 /// (`haste_core::paths::datagen_reports`, owned by world-and-data). haste-entity reads the one
 /// registry it needs itself: haste-data's `Registries::parse` is not exported and pulling all
-/// of `GameData` in here would duplicate the client's load. Only the entity ids the table
-/// covers are kept.
+/// of `GameData` in here would duplicate the client's load. Every entity type is kept (the
+/// decoration kinds need names the model table does not cover); `model_entry` filters.
 fn load_entity_type_names() -> Option<HashMap<RegistryIndex, String>> {
     let path = haste_core::paths::datagen_reports().join("registries.json");
     let bytes = std::fs::read(path).ok()?;
@@ -910,11 +910,32 @@ fn load_entity_type_names() -> Option<HashMap<RegistryIndex, String>> {
     let reg = registries.get("minecraft:entity_type")?;
     let mut names = HashMap::with_capacity(reg.entries.len());
     for (name, e) in &reg.entries {
-        if TABLE.iter().any(|(n, _)| n == name) {
-            names.insert(RegistryIndex(e.protocol_id), (*name).to_owned());
-        }
+        names.insert(RegistryIndex(e.protocol_id), (*name).to_owned());
     }
     Some(names)
+}
+
+/// What special renderer (if any) an entity type takes: `ItemFrame(glow)` or `Painting`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecorationKind {
+    ItemFrame { glow: bool },
+    Painting,
+}
+
+/// The decoration kind of an entity type (`minecraft:item_frame`, `glow_item_frame`,
+/// `painting`); `None` for every other type. Warm lookups are a map probe, never an allocation
+/// (called per entity per frame).
+pub fn decoration_kind(kind: RegistryIndex) -> Option<DecorationKind> {
+    static NAMES: OnceLock<HashMap<RegistryIndex, String>> = OnceLock::new();
+    let name = NAMES
+        .get_or_init(|| load_entity_type_names().unwrap_or_default())
+        .get(&kind)?;
+    match name.as_str() {
+        "minecraft:item_frame" => Some(DecorationKind::ItemFrame { glow: false }),
+        "minecraft:glow_item_frame" => Some(DecorationKind::ItemFrame { glow: true }),
+        "minecraft:painting" => Some(DecorationKind::Painting),
+        _ => None,
+    }
 }
 
 #[derive(Deserialize)]
