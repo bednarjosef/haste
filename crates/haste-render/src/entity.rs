@@ -962,6 +962,31 @@ fn placeholder_texture() -> image::RgbaImage {
 mod tests {
     use super::*;
 
+    /// Every texture haste-entity's model table names must exist in the client jar (the
+    /// renderer loads them on demand by identifier; a typo would draw the placeholder at
+    /// runtime with only a log line). Cross-crate on purpose: haste-render owns the jar.
+    #[test]
+    #[ignore = "needs the client jar in the cache"]
+    fn entity_table_textures_exist_in_the_jar() {
+        let jar = haste_core::paths::client_jar();
+        if !jar.exists() {
+            eprintln!("ignored: needs the client jar in the cache");
+            return;
+        }
+        let mut assets = haste_assets::Assets::open(
+            &jar,
+            &haste_core::paths::cache_dir().join("assets"),
+            "26.3",
+        )
+        .unwrap();
+        for texture in haste_entity::registry::table_textures() {
+            let id = Identifier::minecraft(texture);
+            assets
+                .texture_any(&id)
+                .unwrap_or_else(|e| panic!("table texture {texture}: {e:#}"));
+        }
+    }
+
     #[test]
     fn default_skin_follows_the_uuid_hash() {
         // hashCode of the all-zero UUID is 0 -> first slim skin.
