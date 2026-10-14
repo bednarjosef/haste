@@ -304,6 +304,10 @@ pub struct NetCounters {
     pub respawns: u64,
     /// Last chat/system lines (most recent last, at most 20).
     pub chat: Vec<String>,
+    /// `sound`, `sound_entity` and `stop_sound` packets seen.
+    pub sound_packets: u64,
+    /// Own block sounds the player produced (steps, mining, placing, landing).
+    pub own_sounds: u64,
 }
 
 /// Client-side session state the packets drive (everything except world and entities).
@@ -330,6 +334,11 @@ pub struct Session {
     /// server sent one, else the static one from the data generator reports): resolves the
     /// vehicle's type index to its name, for the passenger seat offset.
     pub entity_type_names: Vec<Identifier>,
+    /// Sound packets recorded this tick ([`crate::sound::record`]), drained by the game
+    /// thread's sound output ([`crate::sound::Sounds::apply`]); cleared at `end_tick` when
+    /// nobody drains them (headless). Reused, so a tick without sound packets allocates
+    /// nothing.
+    pub sound_requests: Vec<crate::sound::SoundRequest>,
     /// Ticks of hurt-tilt camera roll left (10 per hit on our own entity).
     hurt_tilt_ticks: u32,
     /// Direction of the tilt: +1 rolls one way, -1 the other (from the damage yaw).
@@ -353,6 +362,7 @@ impl Session {
             time_of_day: None,
             new_world_pending: false,
             entity_type_names: Vec::new(),
+            sound_requests: Vec::new(),
             hurt_tilt_ticks: 0,
             hurt_tilt_dir: 0.0,
         }
@@ -657,6 +667,12 @@ impl Session {
             P::Disconnect(d) => {
                 tracing::warn!("server disconnected us: {}", d.reason.to_plain(&|_| None))
             }
+            P::Sound(_) | P::SoundEntity(_) | P::StopSound(_) => {
+                if let Some(request) = crate::sound::record(&p) {
+                    self.counters.sound_packets += 1;
+                    self.sound_requests.push(request);
+                }
+            }
             _ => {}
         }
     }
@@ -671,6 +687,16 @@ impl Session {
         entities: &E,
         out: &mut Vec<ServerboundPlay>,
     ) {
+        // Sound requests nobody drained (headless) are dropped here; the game thread
+        // drains them between `receive` and `end_tick`.
+        self.sound_requests.clear();
+        // The player's own block sounds this tick (footsteps, mining, placing): played
+        // through the same request channel the packets use, so the game thread's
+        // `Sounds::apply` picks them up; headless only counts them.
+        for request in self.player.take_own_sound_requests() {
+            self.counters.own_sounds += 1;
+            self.sound_requests.push(request);
+        }
         self.entity_boxes.clear();
         for id in &self.entity_ids {
             if let Some(b) = entities.hitbox(*id) {

@@ -21,12 +21,14 @@
 // The windowed client (client-app) uses the parts the headless driver does not.
 #![allow(dead_code)]
 
+use crate::hand;
 use glam::DVec3;
 use haste_core::game::GameMode;
 use haste_core::input::InputState;
 use haste_core::view::{BlockPhysics, BlockView, CollisionShapes};
 use haste_core::{BlockPos, EntityId, Identifier};
 use haste_entity::riding::SeatPoint;
+use haste_physics::movement::{BLOCK_BELOW_OFFSET, SPRINT_JUMP_BOOST, VERTICAL_DRAG};
 use haste_physics::{PlayerAttributes, PlayerState};
 use haste_protocol::packets::play::clientbound::{self as cb, teleport_flags};
 use haste_protocol::packets::play::serverbound::{self as sb, input_flags, move_flags};
@@ -38,6 +40,14 @@ pub const POSITION_THRESHOLD_SQ: f64 = 2.0e-4 * 2.0e-4;
 pub const POSITION_REMINDER_TICKS: u32 = 20;
 /// Food level at or below which the player cannot sprint (wiki "Sprinting"; not in creative).
 pub const SPRINT_FOOD_LEVEL: i32 = 6;
+/// Ticks a double tap of jump stays armed: vanilla `LocalPlayer` sets its `jumpTriggerTime` to 7
+/// on the first press and `Player.aiStep` counts it down, so a second press toggles creative
+/// flight while it is still above zero (the second press lands up to 6 ticks after the first).
+pub const JUMP_DOUBLE_TAP_TICKS: u8 = 7;
+/// Vertical movement while the chunk below is not loaded: vanilla `LivingEntity.travelInAir`
+/// skips gravity on the client and pins the vertical movement to -0.1 (0.0 at or below the
+/// world's minimum), with the 0.98 vertical drag applied on top.
+pub const UNLOADED_CHUNK_FALL_SPEED: f64 = -0.1 * VERTICAL_DRAG as f64;
 
 /// `player_command` actions (wiki "Player Command").
 pub mod command {
@@ -101,6 +111,9 @@ pub struct AttributeIds {
     pub submerged_mining_speed: i32,
     pub block_interaction_range: i32,
     pub entity_interaction_range: i32,
+    /// `attack_speed`: how fast the equip progress returns after an item switch
+    /// (`Player.getCurrentItemAttackStrengthDelay`).
+    pub attack_speed: i32,
 }
 
 impl AttributeIds {
@@ -118,6 +131,7 @@ impl AttributeIds {
             submerged_mining_speed: index("submerged_mining_speed")?,
             block_interaction_range: index("block_interaction_range")?,
             entity_interaction_range: index("entity_interaction_range")?,
+            attack_speed: index("attack_speed")?,
         })
     }
 
@@ -211,9 +225,24 @@ pub struct LocalPlayer {
     /// Last `update_attributes` value per attribute id (base + modifiers).
     attributes: Vec<cb::AttributeProperty>,
     attributes_dirty: bool,
+    /// Set by the input layer when it saw a double tap of jump (the windowed client has its own
+    /// wall-clock detector); the tick-accurate window is [`LocalPlayer::jump_trigger_time`].
     toggle_flight: bool,
+    /// The local player's own block sounds (client-side rules, sound.rs).
+    pub(crate) own_sounds: crate::sound::OwnBlockSounds,
+    /// Own-sound requests this tick, drained into `Session::sound_requests` by `end_tick`.
+    pub(crate) sound_out: Vec<crate::sound::SoundRequest>,
+    /// Ticks left in the double-tap jump window: vanilla `LocalPlayer.jumpTriggerTime` (7 on the
+    /// first press, counted down by `Player.aiStep` before the keys are looked at).
+    jump_trigger_time: u8,
+    /// Jump key state of the previous tick, so a fresh press is a rising edge (vanilla reads
+    /// `input.keyPresses.jump()` before `input.tick()`).
+    jump_held: bool,
     /// Breaking, placing, using, attacking, hotbar and inventory (player/interact.rs).
     pub(crate) int: interact::Interaction,
+    /// The first-person hand's per-tick animation state (player/hand.rs): swing, equip
+    /// progress and bob, filled for the render state at the end of each tick.
+    pub hand: hand::Hand,
 }
 
 impl LocalPlayer {
@@ -250,7 +279,12 @@ impl LocalPlayer {
             attributes: Vec::new(),
             attributes_dirty: false,
             toggle_flight: false,
+            own_sounds: crate::sound::OwnBlockSounds::new(),
+            sound_out: Vec::new(),
+            jump_trigger_time: 0,
+            jump_held: false,
             int: interact::Interaction::default(),
+            hand: hand::Hand::new(),
         };
         p.state.on_ground = true;
         p.prev_eye = p.eye_height();
@@ -262,7 +296,16 @@ impl LocalPlayer {
         self.look_offset
     }
 
-    /// Double-tap jump (creative/spectator): toggles flight on the next tick if allowed.
+    /// Own-sound requests accumulated this tick (footsteps, mining, placing),
+    /// for the caller to drain into its sound output or headless counters.
+    pub fn take_own_sound_requests(&mut self) -> std::vec::Drain<'_, crate::sound::SoundRequest> {
+        self.sound_out.drain(..)
+    }
+
+    /// The input layer saw a double tap of jump (creative/spectator). Vanilla keeps the window
+    /// itself (`LocalPlayer.jumpTriggerTime`, [`JUMP_DOUBLE_TAP_TICKS`] ticks): the first press
+    /// arms it, the second one inside it toggles flight and jumps when flight turns on while the
+    /// player stands on the ground. Both are checked in [`LocalPlayer::tick_inner`].
     pub fn toggle_flight(&mut self) {
         self.toggle_flight = true;
     }
@@ -397,6 +440,8 @@ impl LocalPlayer {
                 self.pending_accept = None;
                 self.pending_accept_age = 0;
                 self.sent = Sent::default();
+                self.jump_trigger_time = 0;
+                self.jump_held = false;
                 self.int.respawned();
             }
             other => return self.handle_interact_packet(other),
@@ -448,6 +493,7 @@ impl LocalPlayer {
             pick(teleport_flags::VEL_Z, v.z, p.velocity.z),
         );
         s.fall_distance = 0.0;
+        self.own_sounds.reset_steps();
         self.set_look(yaw, pitch);
         tracing::debug!("after teleport {:?}", self.state);
         self.prev_pos = self.state.pos;
@@ -503,6 +549,30 @@ impl LocalPlayer {
         self.sent.reminder = 0;
     }
 
+    /// Vanilla `LivingEntity.jumpFromGround`: the vertical movement becomes the jump strength
+    /// (scaled by the jump factor of the block the player stands in or on) unless it is already
+    /// higher, and a sprinting player also gets the horizontal boost. `LocalPlayer.aiStep` calls
+    /// it when the double tap turns creative flight on while the player is on the ground.
+    fn jump_from_ground(&mut self, world: &dyn BlockView, blocks: &dyn BlockPhysics) {
+        let at_feet = blocks.jump_factor(world.block_state(BlockPos::from_dvec3(self.state.pos)));
+        let factor = if at_feet != 1.0 {
+            at_feet
+        } else {
+            let below =
+                BlockPos::from_dvec3(self.state.pos - DVec3::new(0.0, BLOCK_BELOW_OFFSET, 0.0));
+            blocks.jump_factor(world.block_state(below))
+        };
+        let power = self.attrs.jump_strength * f64::from(factor);
+        if power > 1.0e-5 {
+            self.state.velocity.y = self.state.velocity.y.max(power);
+        }
+        if self.state.sprinting {
+            let angle = f64::from(self.state.yaw) * 0.017_453_292;
+            self.state.velocity.x -= angle.sin() * f64::from(SPRINT_JUMP_BOOST);
+            self.state.velocity.z += angle.cos() * f64::from(SPRINT_JUMP_BOOST);
+        }
+    }
+
     fn apply_attributes(&mut self) {
         let Some(ids) = self.attribute_ids else {
             return;
@@ -546,6 +616,7 @@ impl LocalPlayer {
             ),
             block_reach: get(ids.block_interaction_range, r.block_reach, false),
             entity_reach: get(ids.entity_interaction_range, r.entity_reach, false),
+            attack_speed: get(ids.attack_speed, r.attack_speed, false),
         };
     }
 
@@ -707,7 +778,12 @@ impl LocalPlayer {
             return;
         }
 
-        // 3. Physics. The player does not move while its chunk is not loaded.
+        // 3. Physics. The player does not move while its chunk is not loaded; vanilla's
+        // `Player.aiStep` counts the double-tap jump window down before `LocalPlayer.aiStep`
+        // looks at the keys.
+        if self.jump_trigger_time > 0 {
+            self.jump_trigger_time -= 1;
+        }
         let mut phys_input = *input;
         phys_input.yaw = input.yaw + self.look_offset.0;
         phys_input.pitch = (input.pitch + self.look_offset.1).clamp(-90.0, 90.0);
@@ -716,11 +792,35 @@ impl LocalPlayer {
             self.state.sprinting = false;
         }
         let was_flying = self.state.flying;
-        if std::mem::take(&mut self.toggle_flight) && self.abilities.may_fly {
-            self.state.flying = !self.state.flying;
+        let was_on_ground = self.state.on_ground;
+        let pre_tick_pos = self.state.pos;
+        let pre_tick_fall = self.state.fall_distance;
+        // Vanilla's double tap: while the window is armed a fresh press of jump (or the input
+        // layer's own double-tap signal) toggles flight; without it a press arms the window for
+        // 7 ticks. Vanilla keeps the window while the player swims, and skips the toggle on a
+        // vehicle the player cannot jump (haste has no vehicles).
+        let armed = self.jump_trigger_time > 0;
+        let double_tap = std::mem::take(&mut self.toggle_flight);
+        let pressed = input.jump && !self.jump_held;
+        self.jump_held = input.jump;
+        if self.abilities.may_fly && (pressed || double_tap) {
+            if armed {
+                if !self.state.swimming {
+                    self.jump_trigger_time = 0;
+                    self.state.flying = !self.state.flying;
+                    if self.state.flying && self.state.on_ground {
+                        self.jump_from_ground(world, blocks);
+                    }
+                }
+            } else {
+                self.jump_trigger_time = JUMP_DOUBLE_TAP_TICKS;
+            }
         }
         if !self.abilities.may_fly {
             self.state.flying = false;
+        }
+        if self.state.flying != was_flying {
+            self.own_sounds.reset_steps();
         }
         let chunk = BlockPos::from_dvec3(self.state.pos).chunk();
         if ctx.world.is_chunk_loaded(chunk) {
@@ -732,9 +832,47 @@ impl LocalPlayer {
                 ctx.shapes,
                 ctx.blocks,
             );
+            // Own block sounds of moving: the step rule on the block below the
+            // feet, the fall sound on a hard landing (vanilla plays both on
+            // the client; the server excludes the acting player).
+            let movement = self.state.pos - pre_tick_pos;
+            let sound_type = env.and_then(|e| {
+                supporting_block_state(self.state.pos, world)
+                    .and_then(|s| e.data.block_sound_type(s))
+            });
+            self.own_sounds
+                .after_move(movement, self.state.pos, sound_type, &mut self.sound_out);
+            if !was_on_ground
+                && self.state.on_ground
+                && pre_tick_fall > SAFE_FALL_DISTANCE
+                && !self.state.in_water
+                && !self.state.flying
+            {
+                if let Some(t) = sound_type {
+                    self.own_sounds
+                        .landed_hard(self.state.pos, t, &mut self.sound_out);
+                }
+            }
         } else {
             self.state.yaw = phys_input.yaw;
             self.state.pitch = phys_input.pitch;
+            // Vanilla `LivingEntity.travelInAir` (which `Player.travel` calls even while flying,
+            // then keeps the flying player's own vertical movement): with the chunk below not
+            // loaded the client skips gravity and pins the vertical movement to -0.1 while the
+            // player is above the world's minimum, with the 0.98 vertical drag on top. At or below
+            // the minimum it is 0.0, so the player is left exactly where it was.
+            if !self.state.flying {
+                let falling = self.state.pos.y > f64::from(world.min_y());
+                self.state.velocity.y = if falling {
+                    UNLOADED_CHUNK_FALL_SPEED
+                } else {
+                    0.0
+                };
+                if falling {
+                    self.state.pos.y += self.state.velocity.y;
+                    self.state.on_ground = false;
+                }
+            }
         }
 
         // 4. Flight started or stopped (toggle or landing).
@@ -857,6 +995,22 @@ impl LocalPlayer {
         self.sent.on_ground = s.on_ground;
         self.sent.horizontal_collision = s.horizontal_collision;
     }
+}
+
+/// Vanilla's safe fall distance (the `SAFE_FALL_DISTANCE` attribute's default):
+/// a landing from above this plays the block's fall sound; below it, nothing.
+pub const SAFE_FALL_DISTANCE: f32 = 3.0;
+
+/// The block supporting the player at `pos` (vanilla `Entity.getOnPosLegacy`:
+/// the block at feet y minus 0.2), for step and fall sounds.
+fn supporting_block_state(pos: DVec3, world: &dyn BlockView) -> Option<haste_core::BlockStateId> {
+    let p = BlockPos::new(
+        pos.x.floor() as i32,
+        (pos.y - 0.2).floor() as i32,
+        pos.z.floor() as i32,
+    );
+    let state = world.block_state(p);
+    (state != haste_core::BlockStateId::AIR).then_some(state)
 }
 
 /// `player_input` flags for the held keys.

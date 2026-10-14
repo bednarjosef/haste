@@ -41,6 +41,32 @@ fn host() -> JvmHost {
     h
 }
 
+/// The JVM of the process (and everything vanilla state in it) is shared by every test below, so no
+/// test starts from a clean slate unless it asks for one: `bench_hud_and_screen` leaves stone 64 in
+/// hotbar slot 0 and a chat line, which would draw over the chat input this test measures.
+fn reset(gui: &haste_jvm::GuiPipeline) {
+    gui.reset_for_test();
+    // Java's own `Inventory` keeps the stacks the mirror only follows: clear it there too.
+    for slot in 0..haste_jvm::INVENTORY_SIZE {
+        gui.set_inventory_slot(slot as i32, &haste_jvm::empty_stack())
+            .unwrap();
+    }
+    gui.with_state(|s| {
+        s.inventory = vec![haste_jvm::empty_stack(); haste_jvm::INVENTORY_SIZE];
+        s.carried = haste_jvm::empty_stack();
+        s.selected_slot = 0;
+        s.sent.clear();
+        s.outgoing.clear();
+        s.vitals = haste_jvm::PlayerVitals::default();
+        s.debug = haste_jvm::DebugInfo::default();
+        s.game_mode = haste_core::game::GameMode::Survival;
+        s.permission_level = 0;
+        s.game_time = 0;
+        s.day_time = 0;
+        s.disconnect_requested = false;
+    });
+}
+
 #[test]
 #[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
 fn tier3_value_types_from_the_jar() {
@@ -221,6 +247,175 @@ fn render(h: &JvmHost, mouse: (f64, f64)) -> haste_core::gui::GuiFrame {
     }
 }
 
+/// A pipeline Haste did not build, the way a mod registers one: a location of the mod's own and a blend
+/// function of four blend factors (src colour, dst colour, src alpha, dst alpha), on vanilla's builder.
+fn mod_pipeline<'local>(
+    h: &JvmHost,
+    env: &mut jni::Env<'local>,
+    location: &str,
+    factors: [&str; 4],
+) -> Result<JObject<'local>, haste_jvm::JvmError> {
+    let bf = h.load_class(env, "com.mojang.renderpearl.api.pipeline.BlendFactor")?;
+    let function = h.load_class(env, "com.mojang.renderpearl.api.pipeline.BlendFunction")?;
+    let target_class = h.load_class(env, "com.mojang.renderpearl.api.pipeline.ColorTargetState")?;
+    let snippet = h.load_class(
+        env,
+        "com.mojang.renderpearl.api.pipeline.RenderPipeline$Snippet",
+    )?;
+    let pipeline = h.load_class(env, "com.mojang.renderpearl.api.pipeline.RenderPipeline")?;
+    let topology_class =
+        h.load_class(env, "com.mojang.renderpearl.api.pipeline.PrimitiveTopology")?;
+    let mut factor_objects = Vec::with_capacity(4);
+    for name in factors {
+        let name = jni::strings::JNIString::new(name);
+        factor_objects.push(
+            env.get_static_field(
+                &bf,
+                &name,
+                jni_sig!("Lcom/mojang/renderpearl/api/pipeline/BlendFactor;"),
+            )?
+            .l()?,
+        );
+    }
+    let factor_args: Vec<JValue> = factor_objects.iter().map(JValue::Object).collect();
+    let blend = env.new_object(
+        &function,
+        jni_sig!("(Lcom/mojang/renderpearl/api/pipeline/BlendFactor;Lcom/mojang/renderpearl/api/pipeline/BlendFactor;Lcom/mojang/renderpearl/api/pipeline/BlendFactor;Lcom/mojang/renderpearl/api/pipeline/BlendFactor;)V"),
+        &factor_args,
+    )?;
+    let target = env.new_object(
+        &target_class,
+        jni_sig!("(Lcom/mojang/renderpearl/api/pipeline/BlendFunction;)V"),
+        &[JValue::Object(&blend)],
+    )?;
+    let snippets = env.new_object_array(0, &snippet, JObject::null())?;
+    let builder = env
+        .call_static_method(
+            &pipeline,
+            jni_str!("builder"),
+            jni_sig!("([Lcom/mojang/renderpearl/api/pipeline/RenderPipeline$Snippet;)Lcom/mojang/renderpearl/api/pipeline/RenderPipeline$Builder;"),
+            &[JValue::Object(&snippets)],
+        )?
+        .l()?;
+    let shader = JString::from_str(env, location)?;
+    let _ = env.call_method(
+        &builder,
+        jni_str!("withLocation"),
+        jni_sig!(
+            "(Ljava/lang/String;)Lcom/mojang/renderpearl/api/pipeline/RenderPipeline$Builder;"
+        ),
+        &[JValue::Object(&shader)],
+    )?;
+    let _ = env.call_method(
+        &builder,
+        jni_str!("withVertexShader"),
+        jni_sig!(
+            "(Ljava/lang/String;)Lcom/mojang/renderpearl/api/pipeline/RenderPipeline$Builder;"
+        ),
+        &[JValue::Object(&shader)],
+    )?;
+    let _ = env.call_method(
+        &builder,
+        jni_str!("withFragmentShader"),
+        jni_sig!(
+            "(Ljava/lang/String;)Lcom/mojang/renderpearl/api/pipeline/RenderPipeline$Builder;"
+        ),
+        &[JValue::Object(&shader)],
+    )?;
+    let _ = env.call_method(
+        &builder,
+        jni_str!("withColorTargetState"),
+        jni_sig!("(Lcom/mojang/renderpearl/api/pipeline/ColorTargetState;)Lcom/mojang/renderpearl/api/pipeline/RenderPipeline$Builder;"),
+        &[JValue::Object(&target)],
+    )?;
+    let topology = env
+        .get_static_field(
+            &topology_class,
+            jni_str!("QUADS"),
+            jni_sig!("Lcom/mojang/renderpearl/api/pipeline/PrimitiveTopology;"),
+        )?
+        .l()?;
+    let _ = env.call_method(
+        &builder,
+        jni_str!("withPrimitiveTopology"),
+        jni_sig!("(Lcom/mojang/renderpearl/api/pipeline/PrimitiveTopology;)Lcom/mojang/renderpearl/api/pipeline/RenderPipeline$Builder;"),
+        &[JValue::Object(&topology)],
+    )?;
+    let p = env
+        .call_method(
+            &builder,
+            jni_str!("build"),
+            jni_sig!("()Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;"),
+            &[],
+        )?
+        .l()?;
+    Ok(unsafe { JObject::from_raw(env, p.into_raw()) })
+}
+
+/// The blend mode `haste.gui.Pipelines` maps a pipeline to (0 normal, 1 multiply, 2 invert).
+fn blend_of(h: &JvmHost, env: &mut jni::Env, p: &JObject) -> i32 {
+    let cls = h.load_class(env, "haste.gui.Pipelines").expect("Pipelines");
+    env.call_static_method(
+        &cls,
+        jni_str!("blendOf"),
+        jni_sig!("(Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;)I"),
+        &[JValue::Object(p)],
+    )
+    .expect("blendOf")
+    .i()
+    .expect("blendOf returns an int")
+}
+
+/// A mod's own pipeline maps by its blend function, not by its name: the vignette's multiplies, the
+/// crosshair's inverts, the text selection highlight's additive (vanilla's GUI_TEXT_HIGHLIGHT,
+/// BlendFunction.ADDITIVE).
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn pipeline_blend_maps_by_blend_function() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    h.with_env(|env| -> Result<(), haste_jvm::JvmError> {
+        let vignette = mod_pipeline(
+            &h,
+            env,
+            "test_mod_vignette",
+            ["ZERO", "ONE_MINUS_SRC_COLOR", "ZERO", "ONE"],
+        )?;
+        assert_eq!(blend_of(&h, env, &vignette), 1);
+        let crosshair = mod_pipeline(
+            &h,
+            env,
+            "test_mod_crosshair",
+            ["ONE_MINUS_DST_COLOR", "ONE_MINUS_SRC_COLOR", "ONE", "ZERO"],
+        )?;
+        assert_eq!(blend_of(&h, env, &crosshair), 2);
+        let highlight = mod_pipeline(
+            &h,
+            env,
+            "test_mod_text_highlight",
+            ["ONE", "ONE", "ONE", "ONE"],
+        )?;
+        assert_eq!(blend_of(&h, env, &highlight), 3);
+        // vanilla's own additive pipelines: the edit box's text selection highlight and the nausea
+        // overlay, both built with BlendFunction.ADDITIVE
+        let pipelines = h.load_class(env, "net.minecraft.client.renderer.RenderPipelines")?;
+        for field in ["GUI_TEXT_HIGHLIGHT", "GUI_NAUSEA_OVERLAY"] {
+            let name = jni::strings::JNIString::new(field);
+            let p = env
+                .get_static_field(
+                    &pipelines,
+                    &name,
+                    jni_sig!("Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;"),
+                )?
+                .l()?;
+            assert!(!p.is_null(), "the GUI's pipelines are installed");
+            assert_eq!(blend_of(&h, env, &p), 3, "{field} blends additively");
+        }
+        Ok(())
+    })
+    .expect("pipeline blend mapping");
+}
+
 #[test]
 #[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
 fn pause_screen() {
@@ -228,6 +423,7 @@ fn pause_screen() {
     let h = host();
     let gui = h.gui();
     h.clear_unimplemented().unwrap();
+    reset(gui);
     open(&h, haste_jvm::ScreenKind::Pause);
     assert!(gui.is_open());
     assert_eq!(
@@ -325,10 +521,117 @@ fn pause_screen() {
 }
 
 #[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn title_screen() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    h.clear_unimplemented().unwrap();
+    open(&h, haste_jvm::ScreenKind::Title);
+    assert!(gui.is_open());
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.TitleScreen")
+    );
+    let f = render(&h, (0.0, 0.0));
+    dump(&f);
+    let t = texts(&f);
+    for want in [
+        "Singleplayer",
+        "Multiplayer",
+        "Minecraft Realms",
+        "Options...",
+        "Quit Game",
+        "Copyright Mojang AB. Do not distribute!",
+    ] {
+        assert!(t.iter().any(|x| x == want), "missing {want:?} in {t:?}");
+    }
+    // the realms notification bell is Haste's replacement (it must draw nothing), never vanilla's
+    assert_eq!(
+        h.class_log()
+            .unwrap()
+            .classes
+            .get("com.mojang.realmsclient.gui.screens.RealmsNotificationsScreen"),
+        Some(&ClassSource::Replacement)
+    );
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for TitleScreen: {unimpl:#?}"
+    );
+}
+
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn options_screen() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    h.clear_unimplemented().unwrap();
+    open(&h, haste_jvm::ScreenKind::Options);
+    assert!(gui.is_open());
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.options.OptionsScreen")
+    );
+    let f = render(&h, (0.0, 0.0));
+    dump(&f);
+    let t = texts(&f);
+    for want in [
+        "Options",
+        "Done",
+        // the FOV slider at the default value, and two of the setting buttons
+        "FOV: Normal",
+        "Skin Customization...",
+        "Music & Sounds...",
+    ] {
+        assert!(t.iter().any(|x| x == want), "missing {want:?} in {t:?}");
+    }
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for OptionsScreen: {unimpl:#?}"
+    );
+}
+
+#[test]
+#[ignore = "JoinMultiplayerScreen.<init> throws NoClassDefFoundError: net/minecraft/client/multiplayer/ServerStatusPinger is deny-listed (its init then needs ServerList too), see crates/haste-jvm/src/loader.rs DENY"]
+fn multiplayer_screen() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    h.clear_unimplemented().unwrap();
+    open(&h, haste_jvm::ScreenKind::Multiplayer);
+    assert!(gui.is_open());
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.multiplayer.JoinMultiplayerScreen")
+    );
+    let f = render(&h, (0.0, 0.0));
+    dump(&f);
+    let t = texts(&f);
+    for want in [
+        "Play Multiplayer",
+        "Join Server",
+        "Direct Connection",
+        "Add Server",
+        "Back",
+    ] {
+        assert!(t.iter().any(|x| x == want), "missing {want:?} in {t:?}");
+    }
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for JoinMultiplayerScreen: {unimpl:#?}"
+    );
+}
+
+#[test]
 #[ignore = "needs cache/ (JDK, client jar, libraries, ASM); run with --release for the number"]
 fn bench_pause_render() {
     let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
     let h = host();
+    reset(h.gui());
     open(&h, haste_jvm::ScreenKind::Pause);
     let gui = h.gui();
     for _ in 0..3000 {
@@ -407,6 +710,7 @@ fn chat_screen() {
     let h = host();
     let gui = h.gui();
     h.clear_unimplemented().unwrap();
+    reset(gui);
     // received chat goes through vanilla's chat pipeline into the HUD's chat, which the open chat screen shows
     gui.with_state(|s| {
         s.in_world = true;
@@ -714,8 +1018,8 @@ fn hud_frame() {
     let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
     let h = host();
     let gui = h.gui();
-    gui.close_screen();
     h.clear_unimplemented().unwrap();
+    reset(gui);
     for slot in 0..41 {
         gui.set_inventory_slot(slot, &haste_jvm::empty_stack())
             .unwrap();
@@ -790,6 +1094,53 @@ fn hud_frame() {
     gui.with_state(|s| s.in_world = false);
 }
 
+/// F3: the debug overlay is drawn over the HUD in every frame while it is on (vanilla
+/// `Gui.extractRenderState` draws it after the screen, `Gui.java:200`), and stops when toggled off.
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM, data generator reports)"]
+fn debug_overlay_f3() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    h.clear_unimplemented().unwrap();
+    reset(gui);
+    gui.with_state(|s| {
+        s.in_world = true;
+        s.game_mode = haste_core::game::GameMode::Survival;
+    });
+    let before = render(&h, (0.0, 0.0));
+    let count_before = texts(&before).len();
+    gui.toggle_debug();
+    let after = render(&h, (0.0, 0.0));
+    let t = texts(&after);
+    eprintln!(
+        "debug_overlay_f3: {count_before} text commands before F3, {} after",
+        t.len()
+    );
+    // the stub's first lines (DebugImpl.lines)
+    assert!(
+        t.iter().any(|x| x.starts_with("Minecraft ")),
+        "version line: {t:?}"
+    );
+    assert!(t.iter().any(|x| x.ends_with(" fps")), "fps line: {t:?}");
+    assert!(
+        t.iter().any(|x| x.starts_with("XYZ: ")),
+        "position line: {t:?}"
+    );
+    assert!(
+        t.len() > count_before,
+        "F3 added no text: {count_before} before, {} after",
+        t.len()
+    );
+    // toggled off: the overlay's lines are gone
+    gui.toggle_debug();
+    let off = render(&h, (0.0, 0.0));
+    assert_eq!(texts(&off).len(), count_before);
+    let unimpl = h.unimplemented().unwrap();
+    assert!(unimpl.is_empty(), "Unimplemented log for F3: {unimpl:#?}");
+    gui.with_state(|s| s.in_world = false);
+}
+
 /// Serverbound play packet id from the data generator's `packets.json`.
 fn serverbound_id(name: &str) -> i32 {
     let reports = cache().join("datagen/26.3/reports/packets.json");
@@ -845,6 +1196,7 @@ fn bench_hud_and_screen() {
     let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
     let h = host();
     let gui = h.gui();
+    reset(gui);
     gui.set_inventory_slot(0, &stack("minecraft:stone", 64))
         .unwrap();
     gui.with_state(|s| {

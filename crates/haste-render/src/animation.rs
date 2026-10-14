@@ -87,11 +87,33 @@ impl SpriteAnimator {
                                 }
                             }
                             let rect = sprite.region.pixel_rect;
+                            let [x, y, w, h] = rect;
                             scratch[0].clear();
                             scratch[0].extend_from_slice(&sprite.frame_pixels(target));
-                            let levels = 1 + downsample_region(&mut scratch, rect);
+                            // Cutout sprites (fire): the same level-0 treatment
+                            // the atlas chain applies (solidify or darken, then
+                            // coverage-matched alpha per level).
+                            match sprite.mipmap_strategy {
+                                haste_assets::atlas::MipmapStrategy::Cutout
+                                | haste_assets::atlas::MipmapStrategy::StrictCutout => {
+                                    haste_assets::atlas::solidify(&mut scratch[0], w, [0, 0, w, h]);
+                                }
+                                haste_assets::atlas::MipmapStrategy::DarkCutout => {
+                                    haste_assets::atlas::fill_empty_with_dark(
+                                        &mut scratch[0],
+                                        w,
+                                        [0, 0, w, h],
+                                    );
+                                }
+                                haste_assets::atlas::MipmapStrategy::Mean => {}
+                            }
+                            let levels = 1 + downsample_region(
+                                &mut scratch,
+                                rect,
+                                sprite.mipmap_strategy,
+                                sprite.alpha_cutoff_bias,
+                            );
                             for level in 0..levels as u32 {
-                                let [x, y, w, h] = rect;
                                 write_region(
                                     &queue,
                                     &texture,
@@ -204,9 +226,22 @@ fn write_region(
 /// divisible by the level's texel size — the packer's mip alignment holds for
 /// atlas sprites) and as `levels` holds; returns the number of downsampled
 /// levels written. The filter is the atlas chain's: an iterated plain 2x2 box
-/// filter per level.
-fn downsample_region(levels: &mut [Vec<u8>], rect: [u32; 4]) -> usize {
+/// filter per level, following the sprite's mipmap strategy (cutout sprites
+/// skip transparent texels and get coverage-matched alpha, like
+/// `haste_assets::atlas::build_mip_chain`).
+fn downsample_region(
+    levels: &mut [Vec<u8>],
+    rect: [u32; 4],
+    strategy: haste_assets::atlas::MipmapStrategy,
+    alpha_cutoff_bias: f32,
+) -> usize {
     let [x, y, w, h] = rect;
+    // Coverage target of level 0 for cutout sprites (constant across levels).
+    let cutout_desired = if strategy.is_cutout() {
+        haste_assets::atlas::coverage_of(&levels[0], w, [0, 0, w, h], strategy.cutout_ref())
+    } else {
+        0.0
+    };
     let mut written = 0;
     for level in 1..levels.len() {
         let step = 1u32 << level;
@@ -229,8 +264,23 @@ fn downsample_region(levels: &mut [Vec<u8>], rect: [u32; 4]) -> usize {
                     let s = (((py * 2 + oy) * sw + px * 2 + ox) * 4) as usize;
                     quad[i].copy_from_slice(&src[s..s + 4]);
                 }
-                dst.extend_from_slice(&haste_assets::mean_linear(quad));
+                let mixed = if matches!(strategy, haste_assets::atlas::MipmapStrategy::DarkCutout) {
+                    haste_assets::atlas::darkened_alpha_blend(quad)
+                } else {
+                    haste_assets::mean_linear(quad)
+                };
+                dst.extend_from_slice(&mixed);
             }
+        }
+        if strategy.is_cutout() {
+            haste_assets::atlas::scale_alpha_to_coverage(
+                dst,
+                dw,
+                [0, 0, dw, dh],
+                cutout_desired,
+                strategy.cutout_ref(),
+                alpha_cutoff_bias,
+            );
         }
         written = level;
     }
@@ -322,7 +372,12 @@ mod tests {
         assert_eq!(&read_region(&gpu, &texture, x, y, w, h, 0), frame1);
         let mut levels = vec![Vec::new(); atlas.mip_levels() as usize + 1];
         levels[0] = frame1.to_vec();
-        let written = downsample_region(&mut levels, sprite.region.pixel_rect);
+        let written = downsample_region(
+            &mut levels,
+            sprite.region.pixel_rect,
+            sprite.mipmap_strategy,
+            sprite.alpha_cutoff_bias,
+        );
         assert!(written >= 1, "expected at least one downsampled level");
         assert_eq!(
             &read_region(&gpu, &texture, x / 2, y / 2, w / 2, h / 2, 1),

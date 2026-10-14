@@ -37,6 +37,10 @@ type JsonState = (String, Vec<(String, String)>, Option<Identifier>);
 
 pub struct BlocksJsonStates {
     states: Vec<JsonState>,
+    /// Placeholder for ids outside the table: `minecraft:stone`'s default state id.
+    /// Vanilla has no "missing block"; a modded server can send ids past the end of
+    /// the table, and every lookup resolves them here.
+    placeholder: BlockStateId,
 }
 
 impl BlocksJsonStates {
@@ -46,6 +50,7 @@ impl BlocksJsonStates {
             serde_json::from_slice(&bytes).with_context(|| "parsing blocks.json")?;
         let mut states: Vec<JsonState> = Vec::new();
         let mut by_id: Vec<StateEntry> = Vec::new();
+        let mut placeholder = None;
         for (name, block) in &blocks {
             for state in &block.states {
                 let props = state
@@ -61,6 +66,9 @@ impl BlocksJsonStates {
                     })
                     .unwrap_or_default();
                 by_id.push((state.id as usize, name.clone(), props));
+                if name == "minecraft:stone" && state.default && placeholder.is_none() {
+                    placeholder = Some(state.id);
+                }
             }
         }
         by_id.sort_by_key(|(id, _, _)| *id);
@@ -70,7 +78,11 @@ impl BlocksJsonStates {
             let ident = Identifier::parse(&name).ok();
             states.push((name, props, ident));
         }
-        Ok(BlocksJsonStates { states })
+        Ok(BlocksJsonStates {
+            states,
+            // No stone in a hand-written table: fall back to air (0).
+            placeholder: BlockStateId(placeholder.unwrap_or(0)),
+        })
     }
 }
 
@@ -80,6 +92,9 @@ impl haste_core::view::BlockStateTable for BlocksJsonStates {
     }
     fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+    fn placeholder_state(&self) -> BlockStateId {
+        self.placeholder
     }
     fn block_of(&self, s: BlockStateId) -> &Identifier {
         self.states[s.0 as usize]
@@ -110,6 +125,8 @@ struct BlocksJsonBlock {
 struct BlocksJsonState {
     id: u32,
     #[serde(default)]
+    default: bool,
+    #[serde(default)]
     properties: Option<HashMap<String, String>>,
 }
 
@@ -121,6 +138,11 @@ pub struct BakedBlockModels {
     full_opaque: Vec<bool>,
     /// State id -> render layer.
     layer: Vec<RenderLayer>,
+    /// Placeholder for ids outside the table (modded servers): out-of-range lookups
+    /// resolve to this state's entry, so unknown blocks render as the placeholder
+    /// (stone) and match their collision. Set by `bake` from the table's
+    /// `placeholder_state` — that is how it gets here.
+    placeholder: BlockStateId,
 }
 
 impl BakedBlockModels {
@@ -135,6 +157,8 @@ impl BakedBlockModels {
         atlas: &mut AtlasBuilder,
     ) -> Result<BakedBlockModels> {
         let n = states.len();
+        // Out-of-range ids (modded servers) resolve to the placeholder state's entry.
+        let placeholder = states.placeholder_state();
         let mut quads: Vec<Vec<BakedQuad>> = vec![Vec::new(); n];
         let mut full_opaque = vec![false; n];
         let mut layer = vec![RenderLayer::Solid; n];
@@ -237,23 +261,37 @@ impl BakedBlockModels {
             quads,
             full_opaque,
             layer,
+            placeholder,
         })
     }
 
+    /// Table row for `state`: the id itself when in range, else the placeholder's row.
+    /// One bounds check, no allocation.
+    fn row(&self, s: BlockStateId) -> usize {
+        let id = s.0 as usize;
+        if id < self.quads.len() {
+            id
+        } else {
+            self.placeholder.0 as usize
+        }
+    }
+
+    /// Quads of `s`; ids outside the table return the placeholder state's quads (stone),
+    /// so unknown blocks are visible and match their collision.
     pub fn quads(&self, s: BlockStateId) -> &[BakedQuad] {
         self.quads
-            .get(s.0 as usize)
+            .get(self.row(s))
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
 
     pub fn is_full_opaque(&self, s: BlockStateId) -> bool {
-        self.full_opaque.get(s.0 as usize).copied().unwrap_or(false)
+        self.full_opaque.get(self.row(s)).copied().unwrap_or(false)
     }
 
     pub fn render_layer(&self, s: BlockStateId) -> RenderLayer {
         self.layer
-            .get(s.0 as usize)
+            .get(self.row(s))
             .copied()
             .unwrap_or(RenderLayer::Solid)
     }
@@ -544,6 +582,27 @@ mod tests {
         // Same order, not just the same set: `ElementDef.faces` was a HashMap, so the
         // quad order (and the mesher's vertex order) differed per process.
         assert_eq!(first, second);
+    }
+
+    /// A modded server can send ids past the end of the table: every accessor resolves
+    /// them to the placeholder state's entry (stone: one quad, full opaque, solid layer).
+    #[test]
+    fn out_of_range_ids_resolve_to_the_placeholder() {
+        let quad = BakedQuad::from_element(Direction::Up, [0.0; 3], [1.0; 3], None, None);
+        let baked = BakedBlockModels {
+            quads: vec![Vec::new(), vec![quad.clone()]],
+            full_opaque: vec![false, true],
+            layer: vec![RenderLayer::Solid, RenderLayer::Solid],
+            placeholder: BlockStateId(1),
+        };
+        assert!(baked.quads(BlockStateId(0)).is_empty());
+        assert_eq!(baked.quads(BlockStateId(1)), std::slice::from_ref(&quad));
+        for id in [2u32, 100, u32::MAX] {
+            let s = BlockStateId(id);
+            assert_eq!(baked.quads(s), std::slice::from_ref(&quad));
+            assert!(baked.is_full_opaque(s));
+            assert_eq!(baked.render_layer(s), RenderLayer::Solid);
+        }
     }
 
     #[test]

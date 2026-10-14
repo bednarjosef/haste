@@ -1,0 +1,15 @@
+# The creative inventory opens (searchTrees implemented), is centred like vanilla, and its
+# search box takes typed text without the screen failing.
+wait_until joined
+wait_until settled
+key E
+wait_until screen_open
+screenshot creative
+# The search box: click it (top right of the centred panel in a 480x270 GUI) and type.
+mouse 330 90
+click left 330 90
+type stone
+wait 10
+screenshot creative-search
+key E
+wait_until screen_closed

@@ -124,6 +124,8 @@ proxies are generated per checkout (`cache/proxies/26.3-<hash>`). `ItemStack`, `
 `OptionInstance`, `KeyMapping`, `Hud`, `ChatComponent` are no longer proxies. The session-1 list below is history.
 76 classes, 4024 methods: 190 impl, 338 no-op, the rest logging stubs. Implemented methods and why:
 - `Minecraft` (ClientImpl): `getInstance` (canonical proxy), `getWindow`, `getSoundManager`, `getConnection`,
+  `getFixerUpper` (vanilla's `DataFixers.getDataFixer()`, built once like the constructor does: options.txt
+  loads through `Options.dataFix`),
   `getNarrator`, `getPlayerSocialManager`, `getReportingContext`, `getEntityRenderDispatcher`, `textInputManager`
   (canonical service proxies); `isDemo/isLocalServer/hasSingleplayerServer/getSingleplayerServer/
   getCurrentServer/isOfflineDeveloperMode` false/null and `isMultiplayerServer` true (Haste always talks to a
@@ -161,7 +163,8 @@ proxies are generated per checkout (`cache/proxies/26.3-<hash>`). `ItemStack`, `
 - `ClientPacketListener`: `sendChat/sendCommand` -> Rust `GameState::sent`; `registryAccess` -> every registry
   exists and is empty (EmptyRegistries); `getSuggestionsProvider` -> vanilla's real ClientSuggestionProvider
   with no permissions; `getCommands` -> empty dispatcher (the command tree is not bridged); online players empty;
-  `serverLinks` EMPTY.
+  `serverLinks` EMPTY; `searchTrees` -> vanilla's real `SessionSearchTrees` (allowed class; the creative
+  inventory's search, empty until a reload populates it).
 - `ChatComponent`: typed-line history (Java, 100 lines, like vanilla's recent chat), `isChatFocused`,
   `extractRenderState` draws Rust's `chat_lines` above the input (approximate layout: 320 px wide, 9 px lines,
   50% black backdrop, 10/20 lines unfocused/focused; no fading, no styles).
@@ -185,6 +188,37 @@ proxies are generated per checkout (`cache/proxies/26.3-<hash>`). `ItemStack`, `
   constants null), ServerPlayer.
 - Generated superclasses that shadow allowed classes: `ReentrantBlockableEventLoop`, `BlockableEventLoop`
   (Minecraft's), `RecipeBookComponent`.
+
+Session 3 (title-screens branch; the Title, Options and Multiplayer screens of the menu):
+- `Panorama` is a tier-2 proxy (one canonical instance, `GameRenderer.panorama()`): `startSpin/holdSpin`
+  keep the spin state, `extractRenderState` contributes nothing to a frame - Rust's renderer draws the
+  rotating cube map later.
+- `Minecraft`: `allowsTelemetry` false (Haste sends no telemetry), `isTextFilteringEnabled` false (no
+  player reporting; the options screen saves its settings through it), `checkModStatus`
+  `ModCheck(PROBABLY_NOT, "haste")` (no mods in phase 1), `splashManager` a real `SplashManager` with no
+  user - Haste runs no resource reload, so no splash object and the title screen draws no splash text yet.
+- `Window`: `getPreferredFullscreenVideoMode` empty (the display mode is Rust's decision).
+- `loader`: `net/minecraft/client/resources/SplashManager` allow-listed (a helper the GUI reaches).
+- `Bridge.open` is atomic: a screen whose `init` throws is dropped before the exception reaches Rust
+  (`Gui.setScreen` leaves the new screen set even when `init` throws, so the next open would call
+  `removed()` on half of it).
+- Still blocking the multiplayer screen: `ServerStatusPinger` (`NoClassDefFoundError` from
+  `JoinMultiplayerScreen.<init>`; `net/minecraft/client/multiplayer/` is deny-listed, its `init` needs
+  `ServerList` too) - roadmap L1e.
+
+## Replacements (`java/haste/replace`)
+
+Haste-written stand-ins for vanilla classes that must not run here (deny-listed) but which vanilla code
+instantiates unconditionally. `loader::REPLACEMENTS` lists the internal names; the class loader serves them
+from the game build under their vanilla name, whatever the allow/deny policy says, and logs them as
+`ClassSource::Replacement` (`title_screen` checks it). Each one extends the real vanilla class it stands in
+for and reduces what vanilla calls to no-ops.
+- `com/mojang/realmsclient/gui/screens/RealmsNotificationsScreen`: TitleScreen.init builds one and ticks,
+  renders and clicks it. Vanilla's builds a realms client to look for notifications; Haste has no Realms, so
+  it is a plain `Screen` that draws nothing and the bell never appears. Allow-listing the real class instead
+  starts `RealmsAvailability`'s async availability check, which dies on the denied `RealmsClient` and whose
+  exception surfaces through `Bridge.render`; a tier-2 proxy cannot cover it, because a `class` line
+  generates the whole super chain (`RealmsScreen` -> `Screen`) and would replace every real vanilla screen.
 
 ## Canonical proxies and handles
 Java keeps one proxy per Rust object for the JVM's lifetime (`haste.gui.Proxies`): singletons for Minecraft, Gui,

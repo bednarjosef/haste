@@ -38,6 +38,7 @@ public final class ConnectionImpl {
     /** Waypoints (the locator bar) are not forwarded yet: vanilla's manager, empty. */
     static final net.minecraft.client.waypoints.ClientWaypointManager WAYPOINTS = new net.minecraft.client.waypoints.ClientWaypointManager();
     public static net.minecraft.client.waypoints.ClientWaypointManager getWaypointManager(ClientPacketListener c) { return WAYPOINTS; }
+
     /** Signed-chat bookkeeping (last-seen acknowledgements) is Rust's: nothing to do here. */
     public static void markMessageAsProcessed(ClientPacketListener c, net.minecraft.network.chat.MessageSignature s, boolean acknowledged) {}
     /** Offline-mode servers are what Haste tests against; online mode is not told to Java yet. */
@@ -78,4 +79,22 @@ public final class ConnectionImpl {
 
     /** Command (without the leading slash). */
     public static void sendCommand(ClientPacketListener c, String command) { Native.sendChat(command, true); }
+
+    /**
+     * The settings an option change must tell the server (vanilla re-sends its client information). Haste's own
+     * settings already went to the server at configuration time, and they are Rust's, not the vanilla options
+     * the screens edit: nothing to send yet.
+     */
+    public static void broadcastClientInformation(ClientPacketListener c, net.minecraft.server.level.ClientInformation information) {}
+
+    /**
+     * The creative inventory's search trees: vanilla's own object with empty trees. The creative search
+     * finds nothing (the index would need the synced item registry's display names and tags, forwarded to
+     * Java like other registry data — later), but the screen opens and browsing works. Reloads are no-ops:
+     * vanilla's `reloaders` start empty and nothing fills them.
+     */
+    public static net.minecraft.client.multiplayer.SessionSearchTrees searchTrees(ClientPacketListener c) {
+        return SEARCH_TREES;
+    }
+    private static final net.minecraft.client.multiplayer.SessionSearchTrees SEARCH_TREES = new net.minecraft.client.multiplayer.SessionSearchTrees();
 }

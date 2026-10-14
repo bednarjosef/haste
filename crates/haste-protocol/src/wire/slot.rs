@@ -146,7 +146,9 @@ pub fn skip_exact_components(r: &mut Reader<'_>) -> DecodeResult<()> {
     Ok(())
 }
 
-fn component_name<'a>(r: &Reader<'a>, ty: i32) -> DecodeResult<&'a str> {
+/// Resolves a data component type id to its `minecraft:data_component_type`
+/// name (used when reading and when skipping a patch).
+pub(crate) fn component_name<'a>(r: &Reader<'a>, ty: i32) -> DecodeResult<&'a str> {
     let tables = r.tables().ok_or_else(|| {
         DecodeError::Invalid(format!("data component {ty} needs registry tables"))
     })?;

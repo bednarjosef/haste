@@ -7,6 +7,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use anyhow::{bail, Result};
+use serde::Deserialize;
 
 use haste_core::Identifier;
 
@@ -48,6 +49,89 @@ impl AtlasRegion {
 
 const MISSING_TILE: u32 = 16;
 
+/// How a sprite's mip chain treats transparent texels (vanilla
+/// `MipmapStrategy` from the texture's `.mcmeta` `texture` section; `auto`
+/// picks per the sprite's own alpha).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MipmapStrategy {
+    /// Average everything as-is (opaque or translucent sprites).
+    Mean,
+    /// Solidify first, then keep the alpha-test coverage of level 0 (cutout).
+    Cutout,
+    /// Like `Cutout` but against a stricter alpha reference of 0.3.
+    StrictCutout,
+    /// Transparent texels are filled with a darkened colour first (leaves).
+    DarkCutout,
+}
+
+impl MipmapStrategy {
+    /// Resolve `auto` from the sprite's pixels: any fully transparent texel
+    /// makes it cutout (vanilla `Transparency.hasTransparent`).
+    fn auto(data: &[u8]) -> Self {
+        let has_transparent = data.as_chunks::<4>().0.iter().any(|px| px[3] == 0);
+        if has_transparent {
+            MipmapStrategy::Cutout
+        } else {
+            MipmapStrategy::Mean
+        }
+    }
+
+    /// Whether the strategy treats the sprite as cutout (public for the
+    /// renderer's animated-sprite updates).
+    pub fn is_cutout(&self) -> bool {
+        !matches!(self, MipmapStrategy::Mean)
+    }
+
+    /// The alpha-test reference the coverage match aims for (vanilla
+    /// `cutoutRef`: strict uses 0.3, the rest 0.5).
+    pub fn cutout_ref(&self) -> f32 {
+        if matches!(self, MipmapStrategy::StrictCutout) {
+            0.3
+        } else {
+            0.5
+        }
+    }
+}
+
+/// `texture` section of a texture's `.mcmeta` (vanilla `TextureMetadataSection`).
+#[derive(Deserialize, Default)]
+struct TextureMipmapMeta {
+    #[serde(default)]
+    texture: Option<TextureMipmapMetaTexture>,
+}
+
+#[derive(Deserialize, Default)]
+struct TextureMipmapMetaTexture {
+    #[serde(default)]
+    mipmap_strategy: Option<String>,
+    #[serde(default)]
+    alpha_cutoff_bias: Option<f32>,
+}
+
+/// The mip strategy and alpha cutoff bias of a texture, from its `.mcmeta`
+/// `texture` section (vanilla `SpriteContents` reads the same). `auto`
+/// resolves per the sprite's pixels.
+fn mipmap_meta(assets: &mut Assets, id: &Identifier, data: &[u8]) -> (MipmapStrategy, f32) {
+    let fallback = (MipmapStrategy::auto(data), 0.0);
+    let Ok(Some(bytes)) =
+        assets.try_read_asset(&crate::assets::asset_key(id, "textures", ".png.mcmeta"))
+    else {
+        return fallback;
+    };
+    let Ok(meta) = serde_json::from_slice::<TextureMipmapMeta>(&bytes) else {
+        return fallback;
+    };
+    let texture = meta.texture.unwrap_or_default();
+    let strategy = match texture.mipmap_strategy.as_deref() {
+        Some("mean") => MipmapStrategy::Mean,
+        Some("cutout") => MipmapStrategy::Cutout,
+        Some("strict_cutout") => MipmapStrategy::StrictCutout,
+        Some("dark_cutout") => MipmapStrategy::DarkCutout,
+        _ => MipmapStrategy::auto(data),
+    };
+    (strategy, texture.alpha_cutoff_bias.unwrap_or(0.0))
+}
+
 /// An animated sprite packed into the atlas: the region its current frame occupies
 /// (all frames share it), the frames' RGBA pixels in schedule-index order, and the
 /// playback schedule. The renderer re-uploads the region's texels each tick from
@@ -61,6 +145,10 @@ pub struct AnimatedSprite {
     /// Frames in schedule-index order; sizes match `region`.
     pub frames: Vec<image::RgbaImage>,
     pub schedule: AnimationSchedule,
+    /// Mip treatment for the per-frame mip updates (vanilla `MipmapStrategy`).
+    pub mipmap_strategy: MipmapStrategy,
+    /// Alpha boost added when matching coverage (vanilla `alpha_cutoff_bias`).
+    pub alpha_cutoff_bias: f32,
 }
 
 impl AnimatedSprite {
@@ -217,6 +305,8 @@ impl AtlasBuilder {
                             region,
                             frames: animation.frames.clone(),
                             schedule: animation.schedule.clone(),
+                            mipmap_strategy: src.mipmap_strategy,
+                            alpha_cutoff_bias: src.alpha_cutoff_bias,
                         });
                     }
                     regions.insert(src.name.clone(), region);
@@ -240,7 +330,21 @@ impl AtlasBuilder {
         };
 
         let pixels = if mip_levels > 0 {
-            build_mip_chain(atlas_pixels, atlas_size, mip_levels)
+            // Sprite list for the mip chain: the missing tile plus every
+            // placed sprite, with its mip treatment (vanilla generates mips
+            // per sprite, so cutout sprites never average in their
+            // neighbours or the transparent-black texels).
+            let mut mip_sprites = vec![(missing_region.pixel_rect, MipmapStrategy::Mean, 0.0f32)];
+            for src in &sources {
+                if let Some((cx, cy)) = placements.get(src.name.as_str()).copied().flatten() {
+                    mip_sprites.push((
+                        [cx, cy, src.w, src.h],
+                        src.mipmap_strategy,
+                        src.alpha_cutoff_bias,
+                    ));
+                }
+            }
+            build_mip_chain(atlas_pixels, atlas_size, mip_levels, &mip_sprites)
         } else {
             atlas_pixels
         };
@@ -309,6 +413,10 @@ struct Source {
     h: u32,
     opaque: bool,
     translucent: bool,
+    /// Mip treatment (vanilla `MipmapStrategy`, `auto` resolved from pixels).
+    mipmap_strategy: MipmapStrategy,
+    /// Alpha boost for the coverage match (vanilla `alpha_cutoff_bias`).
+    alpha_cutoff_bias: f32,
     /// The full animation, when the texture has an `.mcmeta` one.
     animation: Option<Animation>,
 }
@@ -333,12 +441,15 @@ fn load_source(assets: &mut Assets, id: &Identifier) -> Source {
             h: 0,
             opaque: false,
             translucent: false,
+            mipmap_strategy: MipmapStrategy::Mean,
+            alpha_cutoff_bias: 0.0,
             animation: None,
         };
     };
     let (w, h) = image.dimensions();
     let data = image.into_raw();
     let (opaque, translucent) = sprite_transparency(&data);
+    let (mipmap_strategy, alpha_cutoff_bias) = mipmap_meta(assets, id, &data);
     Source {
         name,
         data,
@@ -346,6 +457,8 @@ fn load_source(assets: &mut Assets, id: &Identifier) -> Source {
         h,
         opaque,
         translucent,
+        mipmap_strategy,
+        alpha_cutoff_bias,
         animation,
     }
 }
@@ -402,36 +515,325 @@ fn pack(sources: &[Source], atlas_size: u32, mip_align: u32) -> (PackResult, boo
     ((placements, missing_region), all_fit)
 }
 
-/// Concatenated mip chain: plain 2x2 box filter per level (Pomme `build_mip_chain`
-/// without the per-texture strategies; cutout sprites get nearest-preserving alpha
-/// through `mean_linear`, which is linear-light averaging of RGB plus alpha mean).
-fn build_mip_chain(mut level0: Vec<u8>, size: u32, mip_levels: u32) -> Vec<u8> {
+/// Concatenated mip chain, built per sprite (vanilla `MipmapGenerator`: mips
+/// never cross a sprite boundary, and each sprite's chain follows its
+/// `MipmapStrategy` — `Mean` is the plain linear-light 2x2 box filter; the
+/// cutout variants solidify or darken level 0 first, then rescale each level's
+/// alpha so the alpha-test coverage of level 0 survives the averaging).
+/// `sprites` are level-0 rects with their strategy and cutoff bias; regions
+/// outside sprites stay zero (never sampled).
+fn build_mip_chain(
+    mut level0: Vec<u8>,
+    size: u32,
+    mip_levels: u32,
+    sprites: &[([u32; 4], MipmapStrategy, f32)],
+) -> Vec<u8> {
+    // Level 0 pre-treatment per sprite, in place: cutout sprites get their
+    // transparent texels' RGB replaced (alpha stays 0, so level 0 rendering
+    // is unchanged — only the mip averages see the new colours).
+    for (rect, strategy, _) in sprites {
+        match strategy {
+            MipmapStrategy::Cutout | MipmapStrategy::StrictCutout => {
+                solidify(&mut level0, size, *rect);
+            }
+            MipmapStrategy::DarkCutout => {
+                fill_empty_with_dark(&mut level0, size, *rect);
+            }
+            MipmapStrategy::Mean => {}
+        }
+    }
+
     let mut levels = Vec::with_capacity((mip_levels + 1) as usize);
-    levels.push(level0.clone());
-    let mut current = size;
-    for _ in 1..=mip_levels {
-        let next = current / 2;
+    levels.push(level0);
+    for level in 1..=mip_levels {
+        let next = size >> level;
         let mut mip = vec![0u8; (next * next * 4) as usize];
-        for y in 0..next {
-            for x in 0..next {
-                let mut pixels = [[0u8; 4]; 4];
-                for (i, (ox, oy)) in [(0u32, 0u32), (1, 0), (0, 1), (1, 1)]
-                    .into_iter()
-                    .enumerate()
-                {
-                    let src = (((y * 2 + oy) * current + x * 2 + ox) * 4) as usize;
-                    pixels[i].copy_from_slice(&level0[src..src + 4]);
+        for (rect, strategy, bias) in sprites {
+            let [x, y, w, h] = *rect;
+            // The sprite's slot at the previous and this level (the packer's
+            // mip alignment keeps both exact). Rows of the previous level are
+            // atlas-wide, so the source stride is that level's size.
+            let stride = size >> (level - 1);
+            let (sx, sy) = (x >> (level - 1), y >> (level - 1));
+            let (dx, dy, dw, dh) = (x >> level, y >> level, w >> level, h >> level);
+            let previous = &levels[(level - 1) as usize];
+            for py in 0..dh {
+                for px in 0..dw {
+                    let mut quad = [[0u8; 4]; 4];
+                    for (i, (ox, oy)) in [(0u32, 0u32), (1, 0), (0, 1), (1, 1)]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let src = (((sy + py * 2 + oy) * stride + sx + px * 2 + ox) * 4) as usize;
+                        quad[i].copy_from_slice(&previous[src..src + 4]);
+                    }
+                    let color = if matches!(strategy, MipmapStrategy::DarkCutout) {
+                        darkened_alpha_blend(quad)
+                    } else {
+                        mean_linear(quad)
+                    };
+                    let dst = (((dy + py) * next + dx + px) * 4) as usize;
+                    mip[dst..dst + 4].copy_from_slice(&color);
                 }
-                let color = mean_linear(pixels);
-                let dst = ((y * next + x) * 4) as usize;
-                mip[dst..dst + 4].copy_from_slice(&color);
+            }
+            // Cutout chains: keep the alpha-test coverage of level 0.
+            if strategy.is_cutout() {
+                let desired = coverage_of(&levels[0], size, *rect, strategy.cutout_ref());
+                scale_alpha_to_coverage(
+                    &mut mip,
+                    next,
+                    [dx, dy, dw, dh],
+                    desired,
+                    strategy.cutout_ref(),
+                    *bias,
+                );
             }
         }
-        levels.push(mip.clone());
-        level0 = mip;
-        current = next;
+        levels.push(mip);
     }
     levels.concat()
+}
+
+/// Nearest-opaque-colour fill of transparent texels within `rect` (vanilla
+/// `TextureUtil.solidify`: a BFS from every non-transparent texel; ties pick
+/// whichever colour reached the texel first). Alpha is left untouched.
+/// Public so the renderer can treat animated cutout sprites (fire) the same.
+pub fn solidify(pixels: &mut [u8], size: u32, rect: [u32; 4]) {
+    let [x, y, w, h] = rect;
+    let index = |px: u32, py: u32| ((py * size + px) * 4) as usize;
+    // Distance (in BFS steps) and colour of the nearest opaque texel.
+    let mut distances = vec![u32::MAX; (w * h) as usize];
+    let mut nearest = vec![[0u8; 3]; (w * h) as usize];
+    let mut queue = std::collections::VecDeque::new();
+    for py in 0..h {
+        for px in 0..w {
+            let at = (py * w + px) as usize;
+            let alpha = pixels[index(x + px, y + py) + 3];
+            if alpha != 0 {
+                distances[at] = 0;
+                nearest[at] = [
+                    pixels[index(x + px, y + py)],
+                    pixels[index(x + px, y + py) + 1],
+                    pixels[index(x + px, y + py) + 2],
+                ];
+                queue.push_back((px, py));
+            }
+        }
+    }
+    while let Some((px, py)) = queue.pop_front() {
+        let at = (py * w + px) as usize;
+        for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+            let (nx, ny) = (px as i32 + dx, py as i32 + dy);
+            if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                continue;
+            }
+            let (nx, ny) = (nx as u32, ny as u32);
+            let nat = (ny * w + nx) as usize;
+            if distances[nat] > distances[at] + 1 {
+                distances[nat] = distances[at] + 1;
+                nearest[nat] = nearest[at];
+                queue.push_back((nx, ny));
+            }
+        }
+    }
+    for py in 0..h {
+        for px in 0..w {
+            let at = (py * w + px) as usize;
+            if pixels[index(x + px, y + py) + 3] == 0 {
+                let base = index(x + px, y + py);
+                pixels[base..base + 3].copy_from_slice(&nearest[at]);
+            }
+        }
+    }
+}
+
+/// Fill of transparent texels with the sprite's darkest colour, darkened to
+/// 3/4 (vanilla `TextureUtil.fillEmptyAreasWithDarkColor`).
+/// Public for the renderer's animated-sprite updates.
+pub fn fill_empty_with_dark(pixels: &mut [u8], size: u32, rect: [u32; 4]) {
+    let [x, y, w, h] = rect;
+    let index = |px: u32, py: u32| ((py * size + px) * 4) as usize;
+    let mut darkest = None;
+    let mut min_brightness = u32::MAX;
+    for py in 0..h {
+        for px in 0..w {
+            let at = index(x + px, y + py);
+            if pixels[at + 3] != 0 {
+                let brightness =
+                    u32::from(pixels[at]) + u32::from(pixels[at + 1]) + u32::from(pixels[at + 2]);
+                if brightness < min_brightness {
+                    min_brightness = brightness;
+                    darkest = Some([pixels[at], pixels[at + 1], pixels[at + 2]]);
+                }
+            }
+        }
+    }
+    let Some(darkest) = darkest else { return };
+    // vanilla TextureUtil: 3 * channel / 4 in int arithmetic (u8 would overflow)
+    let dark = |c: u8| (3 * u16::from(c) / 4) as u8;
+    let darkened = [dark(darkest[0]), dark(darkest[1]), dark(darkest[2])];
+    for py in 0..h {
+        for px in 0..w {
+            let at = index(x + px, y + py);
+            if pixels[at + 3] == 0 {
+                pixels[at..at + 3].copy_from_slice(&darkened);
+            }
+        }
+    }
+}
+
+/// 2x2 alpha blend that skips transparent texels entirely (vanilla
+/// `MipmapGenerator.darkenedAlphaBlend`): each channel — alpha included — is
+/// averaged in linear light over the four slots, with transparent texels
+/// contributing nothing, then converted back.
+/// Public for the renderer's animated-sprite updates.
+pub fn darkened_alpha_blend(quad: [[u8; 4]; 4]) -> [u8; 4] {
+    let mut totals = [0f32; 4];
+    for pixel in quad {
+        if pixel[3] != 0 {
+            for channel in 0..4 {
+                totals[channel] += srgb_to_linear_f32(pixel[channel]);
+            }
+        }
+    }
+    let mut out = [0u8; 4];
+    for channel in 0..4 {
+        out[channel] = linear_to_srgb_f32(totals[channel] / 4.0);
+    }
+    out
+}
+
+/// sRGB channel value (0..=255) as a linear float in [0, 1] (vanilla
+/// `ARGB.srgbToLinearChannel` over the 10-bit table).
+fn srgb_to_linear_f32(channel: u8) -> f32 {
+    f32::from(srgb_to_linear_10(channel)) / 1023.0
+}
+
+/// Linear float back to an sRGB byte (vanilla `ARGB.linearToSrgbChannel`).
+fn linear_to_srgb_f32(linear: f32) -> u8 {
+    let index = (linear * 1023.0).floor().clamp(0.0, 1023.0) as u16;
+    linear_10_to_srgb(index)
+}
+
+/// Fraction of a sprite's area that passes an alpha test at `reference`
+/// (vanilla `MipmapGenerator.alphaTestCoverage`: 4x4 subsamples of the
+/// bilinear interpolation of each 2x2 block, alpha at the reference or above
+/// counts; averaged over the blocks).
+/// Public for the renderer's animated-sprite updates.
+pub fn coverage_of(pixels: &[u8], size: u32, rect: [u32; 4], reference: f32) -> f32 {
+    let [x, y, w, h] = rect;
+    if w < 2 || h < 2 {
+        return f32::NAN; // vanilla divides by (w-1)*(h-1) and gets NaN
+    }
+    let alpha = |px: u32, py: u32| f32::from(pixels[((py * size + px) * 4 + 3) as usize]) / 255.0;
+    let mut coverage = 0.0f32;
+    for py in 0..h - 1 {
+        for px in 0..w - 1 {
+            let a00 = alpha(x + px, y + py);
+            let a10 = alpha(x + px + 1, y + py);
+            let a01 = alpha(x + px, y + py + 1);
+            let a11 = alpha(x + px + 1, y + py + 1);
+            let mut block_coverage = 0.0f32;
+            for sy in 0..4u32 {
+                let fy = (sy as f32 + 0.5) / 4.0;
+                for sx in 0..4u32 {
+                    let fx = (sx as f32 + 0.5) / 4.0;
+                    let interpolated = a00 * (1.0 - fx) * (1.0 - fy)
+                        + a10 * fx * (1.0 - fy)
+                        + a01 * (1.0 - fx) * fy
+                        + a11 * fx * fy;
+                    if interpolated > reference {
+                        block_coverage += 1.0;
+                    }
+                }
+            }
+            coverage += block_coverage / 16.0;
+        }
+    }
+    coverage / ((w - 1) * (h - 1)) as f32
+}
+
+/// Rescale the alpha of a mip region so its alpha-test coverage at `reference`
+/// matches `desired` (vanilla `MipmapGenerator.scaleAlphaToCoverage`: a
+/// 5-step bisection on a multiply-and-bias; degenerate 1-texel regions skip
+/// the search, matching vanilla's NaN break).
+/// Public for the renderer's animated-sprite updates.
+pub fn scale_alpha_to_coverage(
+    pixels: &mut [u8],
+    size: u32,
+    rect: [u32; 4],
+    desired: f32,
+    reference: f32,
+    bias: f32,
+) {
+    let [x, y, w, h] = rect;
+    let index = |px: u32, py: u32| ((py * size + px) * 4 + 3) as usize;
+    let mut min_scale = 0.0f32;
+    let mut max_scale = 4.0f32;
+    let mut scale = 1.0f32;
+    let mut best_scale = 1.0f32;
+    let mut best_error = f32::MAX;
+    for _ in 0..5 {
+        let current = coverage_of_rect(pixels, size, rect, reference, scale);
+        let error = (current - desired).abs();
+        if error < best_error {
+            best_error = error;
+            best_scale = scale;
+        }
+        if current < desired {
+            min_scale = scale;
+        } else if current > desired {
+            max_scale = scale;
+        } else {
+            break;
+        }
+        scale = (min_scale + max_scale) * 0.5;
+    }
+    for py in 0..h {
+        for px in 0..w {
+            let at = index(x + px, y + py);
+            let mut alpha = f32::from(pixels[at]) / 255.0;
+            alpha = (alpha * best_scale + bias + 0.025).clamp(0.0, 1.0);
+            pixels[at] = (alpha * 255.0).floor() as u8;
+        }
+    }
+}
+
+/// `coverage_of` with every alpha pre-scaled (vanilla passes an `alphaScale`
+/// through `Math.clamp(alpha * scale, 0, 1)`).
+fn coverage_of_rect(pixels: &[u8], size: u32, rect: [u32; 4], reference: f32, scale: f32) -> f32 {
+    let [x, y, w, h] = rect;
+    if w < 2 || h < 2 {
+        return f32::NAN;
+    }
+    let alpha = |px: u32, py: u32| {
+        (f32::from(pixels[((py * size + px) * 4 + 3) as usize]) / 255.0 * scale).clamp(0.0, 1.0)
+    };
+    let mut coverage = 0.0f32;
+    for py in 0..h - 1 {
+        for px in 0..w - 1 {
+            let a00 = alpha(x + px, y + py);
+            let a10 = alpha(x + px + 1, y + py);
+            let a01 = alpha(x + px, y + py + 1);
+            let a11 = alpha(x + px + 1, y + py + 1);
+            let mut block_coverage = 0.0f32;
+            for sy in 0..4u32 {
+                let fy = (sy as f32 + 0.5) / 4.0;
+                for sx in 0..4u32 {
+                    let fx = (sx as f32 + 0.5) / 4.0;
+                    let interpolated = a00 * (1.0 - fx) * (1.0 - fy)
+                        + a10 * fx * (1.0 - fy)
+                        + a01 * (1.0 - fx) * fy
+                        + a11 * fx * fy;
+                    if interpolated > reference {
+                        block_coverage += 1.0;
+                    }
+                }
+            }
+            coverage += block_coverage / 16.0;
+        }
+    }
+    coverage / ((w - 1) * (h - 1)) as f32
 }
 
 /// sRGB-correct 2x2 average (Pomme `mean_linear` via 10-bit linear tables).
@@ -530,6 +932,8 @@ mod tests {
                 h: 16,
                 opaque: true,
                 translucent: false,
+                mipmap_strategy: MipmapStrategy::Mean,
+                alpha_cutoff_bias: 0.0,
                 animation: None,
             },
             Source {
@@ -539,6 +943,8 @@ mod tests {
                 h: 16,
                 opaque: true,
                 translucent: false,
+                mipmap_strategy: MipmapStrategy::Mean,
+                alpha_cutoff_bias: 0.0,
                 animation: None,
             },
             Source {
@@ -548,6 +954,8 @@ mod tests {
                 h: 32,
                 opaque: true,
                 translucent: false,
+                mipmap_strategy: MipmapStrategy::Mean,
+                alpha_cutoff_bias: 0.0,
                 animation: None,
             },
         ];
@@ -572,13 +980,119 @@ mod tests {
     #[test]
     fn mip_chain_concatenates_levels() {
         let pixels = vec![255u8; 32 * 32 * 4];
-        let chain = build_mip_chain(pixels.clone(), 32, 2);
+        let sprites = [([0, 0, 32, 32], MipmapStrategy::Mean, 0.0f32)];
+        let chain = build_mip_chain(pixels.clone(), 32, 2, &sprites);
         assert_eq!(chain.len(), (32 * 32 + 16 * 16 + 8 * 8) * 4);
         assert_eq!(&chain[..pixels.len()], &pixels[..]);
         // every level is solid white
         for px in chain.as_chunks::<4>().0 {
             assert_eq!(px, &[255, 255, 255, 255]);
         }
+    }
+
+    /// An 8x8 cutout sprite (an "E" of green on transparent) placed next to
+    /// an opaque red sprite in a 16x16 atlas, with a 2-level mip chain: the
+    /// exact situation of grass tufts bleeding their neighbour's colour.
+    fn cutout_next_to_red() -> Vec<u8> {
+        let mut level0 = vec![0u8; 16 * 16 * 4];
+        let mut put = |x: u32, y: u32, color: [u8; 4]| {
+            let at = ((y * 16 + x) * 4) as usize;
+            level0[at..at + 4].copy_from_slice(&color);
+        };
+        // Opaque red sprite at (8, 0)-(15, 7).
+        for y in 0..8 {
+            for x in 8..16 {
+                put(x, y, [200, 20, 20, 255]);
+            }
+        }
+        // Cutout sprite at (0, 0)-(7, 7): green texels with alpha 255 in an
+        // E shape, transparent (alpha 0) around.
+        for y in 0..8 {
+            for x in 0..8 {
+                let solid = x < 2 || (y == 0 || y == 3 || y == 7) && x < 6;
+                put(
+                    x,
+                    y,
+                    if solid {
+                        [20, 180, 40, 255]
+                    } else {
+                        [0, 0, 0, 0]
+                    },
+                );
+            }
+        }
+        let sprites = [
+            ([0, 0, 8, 8], MipmapStrategy::Cutout, 0.0f32),
+            ([8, 0, 8, 8], MipmapStrategy::Mean, 0.0f32),
+        ];
+        build_mip_chain(level0, 16, 2, &sprites)
+    }
+
+    /// No mip texel of the cutout sprite contains the red neighbour's colour:
+    /// the per-sprite chain never averages across the sprite boundary.
+    #[test]
+    fn cutout_mips_never_blend_the_red_neighbour() {
+        let chain = cutout_next_to_red();
+        // Level 1 (8x8) starts after the 16x16 level 0; level 2 (4x4) after that.
+        let level1 = &chain[16 * 16 * 4..][..8 * 8 * 4];
+        let level2 = &chain[(16 * 16 + 8 * 8) * 4..][..4 * 4 * 4];
+        for (level, dim) in [(level1, 8u32), (level2, 4u32)] {
+            let half = dim / 2; // the cutout sprite's slot is the left half
+            for y in 0..dim {
+                for x in 0..half {
+                    let at = ((y * dim + x) * 4) as usize;
+                    // Not the red of the neighbouring sprite (and not a mix
+                    // that keeps most of it).
+                    let [r, _, _, _] = [level[at], level[at + 1], level[at + 2], level[at + 3]];
+                    assert!(
+                        r < 100,
+                        "cutout mip texel ({x},{y}) is reddish: {r} — neighbour bled in"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The cutout sprite's edge texels are not darkened: after solidify, the
+    /// mip average of a transparent texel and its opaque neighbours is at
+    /// least as bright as the darkest neighbour's channel (no black leaking
+    /// from the transparent texel).
+    #[test]
+    fn cutout_mip_edges_are_not_darkened() {
+        let chain = cutout_next_to_red();
+        let level0 = &chain[..16 * 16 * 4];
+        let level1 = &chain[16 * 16 * 4..][..8 * 8 * 4];
+        // Every fully-opaque texel of level 0 within the cutout sprite.
+        for y in 0..8u32 {
+            for x in 0..8u32 {
+                let at = ((y * 16 + x) * 4) as usize;
+                if level0[at + 3] != 255 {
+                    continue;
+                }
+                // Its level-1 covering texel keeps the green channel: a
+                // darkened edge (transparent black mixed in) would sag well
+                // below the opaque neighbours' green.
+                let mip = ((y / 2) * 8 + x / 2) as usize * 4;
+                let (g_opaque, g_mip) = (level0[at + 1], level1[mip + 1]);
+                assert!(
+                    g_mip as u32 + 20 > g_opaque as u32 / 2,
+                    "texel ({x},{y}) green {g_opaque} -> mip {g_mip}: edge darkened"
+                );
+            }
+        }
+    }
+
+    /// Solidify alone: transparent texels take the nearest opaque colour.
+    #[test]
+    fn solidify_fills_transparent_with_nearest_colour() {
+        let mut pixels = vec![0u8; 4 * 4 * 4];
+        let index = |x: u32, y: u32| ((y * 4 + x) * 4) as usize;
+        pixels[index(0, 0)..index(0, 0) + 4].copy_from_slice(&[10, 200, 30, 255]);
+        solidify(&mut pixels, 4, [0, 0, 4, 4]);
+        // The far corner is 3 steps away but still gets the colour (alpha 0).
+        let at = index(3, 3);
+        assert_eq!(&pixels[at..at + 3], &[10, 200, 30]);
+        assert_eq!(pixels[at + 3], 0);
     }
 
     #[test]
@@ -598,6 +1112,8 @@ mod tests {
                 ],
                 interpolate: true,
             },
+            mipmap_strategy: MipmapStrategy::Mean,
+            alpha_cutoff_bias: 0.0,
         };
         // Not interpolating at blend 0: the exact frame, borrowed.
         assert_eq!(&*sprite.frame_pixels(0), &[0, 0, 0, 255]);
@@ -615,6 +1131,33 @@ mod tests {
         assert_eq!(
             sprite.initial_frame().get_pixel(0, 0),
             &image::Rgba([0, 0, 0, 255])
+        );
+    }
+
+    /// Build time of the real block atlas with its mip chain (the renderer pays
+    /// this once at startup). Needs the client jar and datagen reports in the
+    /// cache (source scripts/env.sh).
+    #[test]
+    #[ignore = "needs the client jar and datagen reports in the cache"]
+    fn perf_jar_atlas_build_time() {
+        let jar = haste_core::paths::client_jar();
+        if !jar.exists() {
+            eprintln!("ignored: needs the client jar in the cache");
+            return;
+        }
+        let mut assets =
+            Assets::open(&jar, &haste_core::paths::cache_dir().join("assets"), "26.3").unwrap();
+        let reports = haste_core::paths::datagen_reports();
+        let states = crate::bake::BlocksJsonStates::load(&reports.join("blocks.json")).unwrap();
+        let mut atlas = AtlasBuilder::build(&mut assets, &[], true).unwrap();
+        let started = std::time::Instant::now();
+        crate::bake::BakedBlockModels::bake(&mut assets, &states, &mut atlas).unwrap();
+        let elapsed = started.elapsed();
+        eprintln!(
+            "atlas {}x{}, {} regions: bake pass + mip build {elapsed:?}",
+            atlas.size(),
+            atlas.size(),
+            atlas.regions.len()
         );
     }
 

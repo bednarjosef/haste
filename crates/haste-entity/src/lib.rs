@@ -6,7 +6,9 @@ pub mod animation;
 pub mod dims;
 pub mod lerp;
 pub mod metadata;
+pub mod model_dump;
 pub mod models;
+pub mod registry;
 pub mod riding;
 pub mod store;
 

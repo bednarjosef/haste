@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use haste_core::game::DimensionInfo;
 use haste_core::view::{BlockView, DirtyTracker};
-use haste_core::{BiomeId, BlockPos, BlockStateId, ChunkPos, SectionPos};
+use haste_core::BlockPos;
+use haste_core::{BiomeId, BlockStateId, ChunkPos, Identifier, SectionPos};
 use haste_data::GameData;
 use haste_world::chunk::synthetic_chunk_data;
 use haste_world::World;
@@ -201,6 +202,64 @@ fn load_chunk_dirties_diagonal_neighbours() {
         }
     }
     assert_eq!(dirty.len(), 9 * 24);
+}
+
+/// The dirty bitset lives per chunk: re-marking a chunk that is already dirty does not
+/// duplicate its sections in the drain, and a chunk replaced or unloaded while dirty
+/// still reports exactly its own sections once.
+#[test]
+fn dirty_bitset_dedups_and_survives_reload() {
+    let mut w = World::new(overworld(), game_data());
+    let load = |w: &mut World| {
+        let cd = synthetic_chunk_data(ChunkPos::new(0, 0), -4, 24, |_si, _x, _y, _z| STONE);
+        w.load_chunk(&cd).unwrap();
+    };
+    load(&mut w);
+    // a block change marks one section of an already-dirty chunk
+    w.set_block(BlockPos::new(5, 8, 5), DIRT);
+    let _ = w.take_dirty_sections();
+    assert!(w.take_dirty_sections().is_empty());
+
+    // reload (replace) the chunk: 24 sections, each exactly once
+    load(&mut w);
+    w.set_block(BlockPos::new(5, 8, 5), DIRT);
+    let mut dirty = w.take_dirty_sections();
+    assert_eq!(
+        dirty
+            .iter()
+            .filter(|p| **p == SectionPos::new(0, 0, 0))
+            .count(),
+        1
+    );
+    dirty.retain(|p| *p != SectionPos::new(0, 0, 0));
+    assert_eq!(dirty.len(), 23);
+
+    // unloaded before the drain: its sections are gone, the neighbours' stay
+    load(&mut w);
+    w.unload_chunk(ChunkPos::new(0, 0));
+    let dirty = w.take_dirty_sections();
+    assert!(dirty.iter().all(|p| p.chunk() != ChunkPos::new(0, 0)));
+}
+
+/// A section marked in a chunk that is not loaded reaches the drain (as before the
+/// bitset: `set_block` on a border block marks the neighbour chunk's section).
+#[test]
+fn dirty_bitset_keeps_unloaded_neighbour_marks() {
+    let mut w = World::new(overworld(), game_data());
+    let cd = synthetic_chunk_data(ChunkPos::new(0, 0), -4, 24, |_si, _x, _y, _z| STONE);
+    w.load_chunk(&cd).unwrap();
+    let _ = w.take_dirty_sections();
+    w.set_block(BlockPos::new(0, 100, 5), DIRT);
+    // twice on the same border block: the unloaded section appears once
+    w.set_block(BlockPos::new(0, 100, 5), STONE);
+    let dirty = w.take_dirty_sections();
+    assert_eq!(dirty_set(dirty.clone()), {
+        let mut s = std::collections::HashSet::new();
+        s.insert(SectionPos::new(0, 6, 0));
+        s.insert(SectionPos::new(-1, 6, 0));
+        s
+    });
+    assert_eq!(dirty.len(), 2);
 }
 
 /// The exact dirty-section set a `set_block` at (x, y, z) must produce.
@@ -461,6 +520,35 @@ fn biome_read() {
     let chunk = w.chunk(ChunkPos::new(0, 0)).unwrap();
     let s = chunk.section(0).unwrap();
     assert_eq!(s.biome(0, 0, 0), BiomeId(0));
+}
+
+/// A modded server can send block-state ids past the end of the local table (the fixture has
+/// 3 states, 0..2). The chunk decodes, the raw id reads back unchanged, and every lookup
+/// resolves it to the placeholder (`minecraft:stone`) instead of panicking.
+#[test]
+fn chunk_with_unknown_block_state_id_decodes_as_placeholder() {
+    let mut w = World::new(overworld(), game_data());
+    let unknown = BlockStateId(42);
+    let cd = synthetic_chunk_data(ChunkPos::new(0, 0), -4, 24, |si, _x, y, _z| {
+        if si == 0 && y < 4 {
+            unknown
+        } else {
+            STONE
+        }
+    });
+    w.load_chunk(&cd).unwrap();
+    let chunk = w.chunk(ChunkPos::new(0, 0)).unwrap();
+    let s = chunk.section(-4).unwrap();
+    // the raw id is preserved ...
+    assert_eq!(s.get(0, 0, 0), unknown);
+    assert_eq!(s.get(15, 3, 15), unknown);
+    assert_eq!(s.get(0, 4, 0), STONE);
+    // ... and the lookups resolve it to the placeholder (stone)
+    let blocks = &w.game_data().blocks;
+    assert_eq!(blocks.block_of(unknown), &Identifier::minecraft("stone"));
+    assert_eq!(blocks.property_value(unknown, "snowy"), None);
+    assert!(blocks.properties(unknown).is_empty());
+    assert_eq!(blocks.with_property(unknown, "snowy", "true"), None);
 }
 
 /// Regression test for the data race in `chunk_of`'s chunk memo: the memo stored a

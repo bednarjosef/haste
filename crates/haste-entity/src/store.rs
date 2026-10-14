@@ -320,20 +320,32 @@ impl EntityStore {
     }
 
     /// Interpolated draw list for the renderer (renderer). Players get the humanoid model (classic
-    /// layout; skins arrive with renderer's texture work), everything else a generic box from its
-    /// current dimensions. Only humanoids get animation overrides (the box has no limbs).
+    /// layout; skins arrive with renderer's texture work), known mob types the model the recorder
+    /// dumped for their vanilla layer (rest pose; animation is a later task), everything else a
+    /// generic box from its current dimensions. The head yaw/pitch override only applies where a
+    /// part named "head" exists (humanoids and dumped models both have one; the box has none).
     pub fn render_instances(&self, partial_tick: f32, out: &mut Vec<EntityInstance>) {
         for slot in self.slots.iter().flatten() {
             let pos = slot.prev_pos.lerp(slot.pos, partial_tick as f64);
+            let (model, has_head) = if slot.is_player_type {
+                (crate::models::humanoid(false), true)
+            } else {
+                // Registry table first (shared per type, head flag precomputed), then the box.
+                match crate::registry::model_entry(slot.kind) {
+                    Some((head, m)) => (m, head),
+                    None => (
+                        crate::models::box_for(slot.dimensions.0, slot.dimensions.1),
+                        false,
+                    ),
+                }
+            };
             let pose = if slot.is_player_type {
                 crate::animation::pose_overrides(slot, partial_tick)
+            } else if has_head {
+                // Aim the head at (head_yaw, pitch) relative to the body; same clamp as players.
+                crate::animation::head_only(slot)
             } else {
                 haste_core::model::PoseOverrides::default()
-            };
-            let model = if slot.is_player_type {
-                crate::models::humanoid(false)
-            } else {
-                crate::models::box_for(slot.dimensions.0, slot.dimensions.1)
             };
             out.push(EntityInstance {
                 id: slot.id,
