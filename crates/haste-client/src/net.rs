@@ -468,11 +468,14 @@ pub struct LightmapState {
     pub darkness: Option<i32>,
     /// `MobEffectInstance.BlendState` for the darkness effect (22 ticks in and out).
     pub darkness_blend: haste_render::lightmap::BlendState,
-    /// Boss bars and their darken-screen flag (`BossEvent.darkenScreen`), keyed by uuid bits.
-    boss_bars: HashMap<u128, bool>,
+    /// Boss bars and their `(darkenScreen, createWorldFog)` flags (`BossEvent`), keyed by uuid
+    /// bits.
+    boss_bars: HashMap<u128, (bool, bool)>,
     /// `GameRenderer.bossOverlayWorldDarkening` and its value one tick ago.
     pub boss_darkening: f32,
     pub boss_darkening_o: f32,
+    /// `BossHealthOverlay.shouldCreateWorldFog()`: any bar asks for the thick boss fog.
+    pub boss_world_fog: bool,
     /// `ClientLevel.skyFlashTime`: a lightning strike raises the sky for 2 ticks.
     pub sky_flash_time: i32,
     /// The player's tick count (vanilla `LivingEntity.tickCount`), for the darkness pulse.
@@ -492,6 +495,7 @@ impl Default for LightmapState {
             boss_bars: HashMap::new(),
             boss_darkening: 0.0,
             boss_darkening_o: 0.0,
+            boss_world_fog: false,
             sky_flash_time: 0,
             tick_count: 0,
         }
@@ -540,11 +544,13 @@ impl LightmapState {
         // GameRenderer.tick: while any boss bar asks to darken the screen, rise by 0.05/tick
         // (capped at 1), else fall by 0.0125/tick.
         self.boss_darkening_o = self.boss_darkening;
-        if self.boss_bars.values().any(|&darken| darken) {
+        if self.boss_bars.values().any(|(darken, _)| *darken) {
             self.boss_darkening = (self.boss_darkening + 0.05).min(1.0);
         } else if self.boss_darkening > 0.0 {
             self.boss_darkening -= 0.0125;
         }
+        // `BossHealthOverlay.shouldCreateWorldFog`: any bar asks for the thick world fog.
+        self.boss_world_fog = self.boss_bars.values().any(|(_, fog)| *fog);
         if self.sky_flash_time > 0 {
             self.sky_flash_time -= 1;
         }
@@ -576,18 +582,20 @@ impl LightmapState {
         }
     }
 
-    /// A `boss_event`: `BossEvent.setDarkenScreen` (flags bit 0x01 on add/update flags).
+    /// A `boss_event`: `BossEvent` flags (bit 0x01 darkenScreen, bit 0x04 createWorldFog) on
+    /// add/update flags.
     fn boss_event(&mut self, id: u128, action: &cb::BossEventAction) {
+        let flags = |f: u8| (f & 0x01 != 0, f & 0x04 != 0);
         match action {
-            cb::BossEventAction::Add { flags, .. } => {
-                self.boss_bars.insert(id, flags & 0x01 != 0);
+            cb::BossEventAction::Add { flags: f, .. } => {
+                self.boss_bars.insert(id, flags(*f));
             }
             cb::BossEventAction::Remove => {
                 self.boss_bars.remove(&id);
             }
-            cb::BossEventAction::UpdateFlags(flags) => {
-                if let Some(darken) = self.boss_bars.get_mut(&id) {
-                    *darken = flags & 0x01 != 0;
+            cb::BossEventAction::UpdateFlags(f) => {
+                if let Some(entry) = self.boss_bars.get_mut(&id) {
+                    *entry = flags(*f);
                 }
             }
             _ => {}

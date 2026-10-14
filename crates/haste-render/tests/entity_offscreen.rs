@@ -98,6 +98,7 @@ fn render_with_gui_skip(
             dimension_has_sky: true,
             fog_start: 100.0,
             fog_end: 200.0,
+            ..Default::default()
         },
         partial_tick,
         block_target: None,

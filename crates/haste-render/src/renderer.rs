@@ -52,13 +52,16 @@ pub struct ViewBob {
 }
 
 /// Sky/fog state for one frame.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct SkyState {
     pub time_of_day: i64,
     pub rain: f32,
     pub dimension_has_sky: bool,
     pub fog_start: f32,
     pub fog_end: f32,
+    /// The fog environment inputs (`FogRenderer.setupFog`/`computeFogColor`): what the camera
+    /// is in, the player's effects, the dimension/biome attributes and the boss-overlay values.
+    pub fog: crate::fog::FogInputs,
 }
 
 /// The lightmap inputs that change every frame and are not part of the sky or the dimension:
@@ -200,6 +203,7 @@ mod tests {
                 dimension_has_sky: true,
                 fog_start: 100.0,
                 fog_end: 200.0,
+                ..Default::default()
             },
             partial_tick: 0.0,
             block_target: None,
@@ -499,6 +503,8 @@ pub struct Renderer {
     surface_copy_logged: bool,
     /// Block entities posed into the entity stream this frame (chests, shulker boxes).
     block_entities_drawn: u32,
+    /// The fog colour (sRGB) and distances of the last frame, for logging and tests.
+    last_fog: Option<([f32; 3], crate::fog::FogData)>,
 }
 
 /// An in-flight screenshot readback: the copy is submitted and `map_async` posted, the
@@ -965,6 +971,7 @@ impl Renderer {
             surface_copy: false,
             surface_copy_logged: false,
             block_entities_drawn: 0,
+            last_fog: None,
         })
     }
 
@@ -1156,6 +1163,11 @@ impl Renderer {
     /// dropped items; `FrameInput::entities` instances without geometry do not count).
     pub fn entities_drawn(&self) -> u32 {
         self.entity.drawn
+    }
+
+    /// The fog colour (sRGB) and distances of the last frame (`None` before the first render).
+    pub fn last_fog(&self) -> Option<([f32; 3], crate::fog::FogData)> {
+        self.last_fog
     }
 
     fn make_origin_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
@@ -1568,9 +1580,9 @@ impl Renderer {
             },
             aspect,
         );
-        // Vanilla fog: the overworld's clear-air environment; other dimensions keep the
-        // sky-state approximation until their own fog task (vanilla picks per dimension
-        // attributes there, not per environment).
+        // Vanilla fog: `FogRenderer.setupFog`/`computeFogColor` pick the environment from the
+        // camera's fluid, the player's effects and the dimension/biome attributes (all in
+        // `frame.sky.fog`); the same path covers the overworld, the Nether and the End.
         let camera_forward = {
             let yaw = frame.camera.yaw.to_radians();
             let pitch = frame.camera.pitch.to_radians();
@@ -1581,30 +1593,14 @@ impl Renderer {
             ]
         };
         let world_min_y = (self.min_section << 4) as f32;
-        let (fog_srgb, fog_data) = if frame.sky.dimension_has_sky {
-            crate::fog::frame_fog(
-                &frame.sky,
-                camera_forward,
-                frame.camera.pos.y as f32,
-                world_min_y,
-            )
-        } else {
-            let colors =
-                crate::sky::sky_colors(&frame.sky, self.sky.kind, frame.sky.fog_end / 16.0);
-            (
-                colors.fog,
-                crate::fog::FogData {
-                    // The previous single spherical band from the client.
-                    environmental_start: frame.sky.fog_start,
-                    environmental_end: frame.sky.fog_end,
-                    render_distance_start: f32::MAX,
-                    render_distance_end: f32::MAX,
-                    sky_end: frame.sky.fog_end,
-                    cloud_end: frame.sky.fog_end,
-                    environment: crate::fog::FogEnvironment::Atmospheric,
-                },
-            )
-        };
+        let (fog_srgb, fog_data) = crate::fog::frame_fog(
+            &frame.sky,
+            frame.partial_tick,
+            camera_forward,
+            frame.camera.pos.y as f32,
+            world_min_y,
+        );
+        self.last_fog = Some((fog_srgb, fog_data));
         self.sky.prepare(
             &frame.camera,
             &frame.sky,

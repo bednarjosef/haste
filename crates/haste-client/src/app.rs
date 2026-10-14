@@ -21,7 +21,10 @@ use haste_protocol::haste_core::{
     BlockPos, BlockStateId, ChunkPos, Direction, EntityId, Identifier, SectionPos,
 };
 use haste_protocol::{Account, ConnectOptions};
-use haste_render::{Camera, FrameInput, FrameStats, LightmapFrame, Renderer, SkyState};
+use haste_render::{
+    Camera, DimensionFog, FogInputs, FogType, FrameInput, FrameStats, LightmapFrame, Renderer,
+    SkyState,
+};
 use haste_setup::options::Options;
 use haste_world::World;
 use winit::application::ApplicationHandler;
@@ -488,6 +491,7 @@ impl Session {
             haste_render::Particles::new(particle_types.clone()),
             haste_render::default_skin(login.profile.uuid.as_u128()),
             block_entity_names,
+            biome_climates.clone(),
             options.clone(),
         ));
         if sounds.is_some() {
@@ -1039,11 +1043,18 @@ fn frame_view(
         yaw + view.look_offset.0,
         (pitch + view.look_offset.1).clamp(-90.0, 90.0),
     );
+    // The world is read for the third-person camera and the fog environment (the fluid and
+    // biome at the camera), held for the rest of this function.
+    let world = shared.world.read();
     let (pos, yaw, pitch) = if perspective.draws_player() {
-        // The world is read here (the outline shapes the crosshair raycast uses too), held
-        // only for the ray.
-        let (world, shapes) = (shared.world.read(), &shared.data.shapes);
-        game::third_person_camera(perspective, eye, look.0, look.1, &*world, shapes)
+        game::third_person_camera(
+            perspective,
+            eye,
+            look.0,
+            look.1,
+            &*world,
+            &shared.data.shapes,
+        )
     } else {
         (eye, look.0, look.1)
     };
@@ -1096,7 +1107,16 @@ fn frame_view(
         dimension_has_sky: view.has_sky,
         fog_start: fog_end * 0.75,
         fog_end,
+        fog: fog_inputs(
+            &world,
+            &shared.data,
+            &shared.biome_climates,
+            pos,
+            &view,
+            partial,
+        ),
     };
+    drop(world);
     // The lightmap inputs the extractor gathers per frame (LightmapRenderStateExtractor.extract):
     // the night-vision intensity, the darkness effect's brightness modifier and pulse, and the
     // boss-overlay darkening; the flicker and lightning come straight from the tick.
@@ -1127,6 +1147,88 @@ fn frame_view(
         view.view_distance,
         view.animation_tick,
     )
+}
+
+/// Vanilla `Camera.getFluidInCamera` -> `FogRenderer.getFogType`: the fluid at the camera
+/// block (water by its surface height, then lava), else powder snow. Vanilla probes the five
+/// near-plane points for lava and powder snow; Haste approximates them with the camera block
+/// (like `eye_in_lava`).
+fn camera_fog_type(world: &World, data: &haste_data::GameData, pos: DVec3) -> FogType {
+    use haste_core::view::{BlockPhysics, BlockView, FluidKind};
+    let p = BlockPos::new(pos.x.floor() as i32, pos.y.floor() as i32, pos.z.floor() as i32);
+    let state = world.block_state(p);
+    let surface = |kind| match data.fluid(state) {
+        Some(f) if f.kind == kind => {
+            let full = data
+                .fluid(world.block_state(p.add(0, 1, 0)))
+                .is_some_and(|a| a.kind == kind);
+            Some(p.y as f64 + if full { 1.0 } else { f.height as f64 })
+        }
+        _ => None,
+    };
+    if surface(FluidKind::Water).is_some_and(|s| pos.y < s) {
+        return FogType::Water;
+    }
+    if surface(FluidKind::Lava).is_some_and(|s| pos.y <= s) {
+        return FogType::Lava;
+    }
+    if data.is_powder_snow(state) {
+        return FogType::PowderSnow;
+    }
+    FogType::Atmospheric
+}
+
+/// The `FogRenderer.setupFog`/`computeFogColor` inputs: the camera's fluid, the dimension
+/// defaults overlaid by the camera biome's attributes, and the player's per-tick effect state.
+fn fog_inputs(
+    world: &World,
+    data: &haste_data::GameData,
+    climates: &[haste_render::BiomeClimate],
+    pos: DVec3,
+    view: &game::ViewState,
+    partial: f32,
+) -> FogInputs {
+    use haste_render::BiomeSource;
+    let p = BlockPos::new(pos.x.floor() as i32, pos.y.floor() as i32, pos.z.floor() as i32);
+    let biome_id = self::biomes::WorldBiomes(world).biome(p).0 as usize;
+    let mut dimension = match world.dimension().name.path() {
+        "the_nether" => DimensionFog::nether(),
+        "the_end" => DimensionFog::end(),
+        _ => DimensionFog::overworld(),
+    };
+    let mut water_fog_color = haste_render::fog::WATER_FOG_COLOR;
+    let mut water_fog_start = haste_render::fog::WATER_FOG_START;
+    let mut water_fog_end = haste_render::fog::WATER_FOG_END;
+    if let Some(c) = climates.get(biome_id) {
+        dimension = dimension.with_biome(&c.fog);
+        if let Some(v) = c.fog.water_fog_color {
+            water_fog_color = haste_render::fog::rgb24(v as i32);
+        }
+        if let Some(v) = c.fog.water_fog_start {
+            water_fog_start = v;
+        }
+        if let Some(v) = c.fog.water_fog_end {
+            water_fog_end = v;
+        }
+    }
+    FogInputs {
+        fog_type: camera_fog_type(world, data, pos),
+        dimension,
+        water_fog_color,
+        water_fog_start,
+        water_fog_end,
+        water_vision: view.water_vision,
+        spectator: view.spectator,
+        fire_resistance: view.fire_resistance,
+        blindness: view.blindness,
+        darkness: view.lightmap_darkness,
+        darkness_blend: view.lightmap_darkness_blend.factor(partial),
+        night_vision: view.lightmap_night_vision,
+        boss_world_fog: view.boss_world_fog,
+        darken_world_amount: view.lightmap_boss_darkening.0
+            + (view.lightmap_boss_darkening.1 - view.lightmap_boss_darkening.0) * partial,
+        void_darkness_onset_range: 32.0,
+    }
 }
 
 /// Where a label is drawn in a GUI frame, in absolute GUI pixels (translation stack applied):
@@ -1948,6 +2050,7 @@ fn menu_sky() -> SkyState {
         dimension_has_sky: true,
         fog_start: 1000.0,
         fog_end: 1000.0,
+        ..Default::default()
     }
 }
 
@@ -2141,6 +2244,21 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         stats.block_entities_drawn,
         view.block_target
     );
+    if let Some((color, fog)) = renderer.last_fog() {
+        println!(
+            "fog environment {:?} color ({:.3}, {:.3}, {:.3}) env {:.2}..{:.2} rd {:.2}..{:.2} sky {:.2} cloud {:.2}",
+            fog.environment,
+            color[0],
+            color[1],
+            color[2],
+            fog.environmental_start,
+            fog.environmental_end,
+            fog.render_distance_start,
+            fog.render_distance_end,
+            fog.sky_end,
+            fog.cloud_end
+        );
+    }
     drop(session);
     Ok(())
 }
