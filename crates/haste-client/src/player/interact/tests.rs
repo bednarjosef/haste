@@ -774,7 +774,6 @@ fn player_action_status_values_match_the_jar() {
     assert_eq!(action::STAB, 8);
 }
 
-// MERGE(interaction side):
 #[test]
 fn is_pickable_matches_vanilla_classes() {
     // EntitySelector.CAN_BE_PICKED = Entity::isPickable, per entity class, by type name.
@@ -931,7 +930,8 @@ fn an_entity_wins_only_when_it_is_strictly_closer_than_the_block() {
     );
     let out = r.tick(ATTACK);
     assert_eq!(actions(&out), [(action::START_DESTROY, 1)]);
-// MERGE(main side):
+}
+
 /// Vanilla's `Minecraft.continueAttack`: while the block is breaking the arm swings every tick,
 /// but `LivingEntity.SwingState.startIfAble` refuses a restart less than half way through the
 /// 6 tick swing, so the swing runs 1/6, 2/6, 3/6, then starts over.
@@ -994,5 +994,4 @@ fn a_use_swings_the_hand_and_drops_it() {
         "{}",
         r.p.hand.equip().1
     );
-// MERGE end
 }
