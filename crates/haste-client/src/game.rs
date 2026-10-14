@@ -216,6 +216,7 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
         // tick of the hit, fading over the 10 hurt ticks (vanilla's hurtTime / hurtDuration).
         hurt: (view.hurt_ticks.min(crate::net::HURT_TILT_TICKS) as f32
             / crate::net::HURT_TILT_TICKS as f32),
+        overlays: Default::default(),
         item: None,
         decoration: None,
         hands: [None, None],
@@ -225,7 +226,7 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
 }
 
 /// What the render thread needs each frame, copied out under a short lock.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ViewState {
     /// Player eye position at the start of the last tick (`LocalPlayer::camera(0.0)`).
     pub prev_eye: DVec3,
@@ -260,6 +261,16 @@ pub struct ViewState {
     /// Whether the camera is under the lava surface at the eye's block (vanilla's
     /// `Camera.getFluidInCamera` lava rule), for the submerged FOV.
     pub eye_in_lava: bool,
+    /// Blindness effect remaining ticks (`None` without it), for the fog environment.
+    pub blindness: Option<i32>,
+    /// `LocalPlayer.getWaterVision()` (0 out of water), for the underwater fog distance.
+    pub water_vision: f32,
+    /// Whether we are a spectator (`Entity.isSpectator`), for the lava/powder-snow fog.
+    pub spectator: bool,
+    /// Whether we have fire resistance, for the lava fog distance.
+    pub fire_resistance: bool,
+    /// `BossHealthOverlay.shouldCreateWorldFog()`, for the thick boss fog.
+    pub boss_world_fog: bool,
     /// Selected hotbar slot (`LocalPlayer::held_slot`), for the scroll wheel.
     pub held_slot: i32,
     /// What the first-person view holds this tick (`None` draws no hand: spectator, not yet
@@ -290,12 +301,18 @@ pub struct ViewState {
     /// Body pose metadata for the own model (`None`: the physics pose only knows standing,
     /// crouching and swimming).
     pub pose: Option<haste_core::entity::Pose>,
+    /// This tick's screen effects (`screen_effects`): the block the camera is inside, the
+    /// worn head item's overlay, on fire, freeze ticks, portal and nausea, the light at the
+    /// eye and whether we are scoping a spyglass.
+    pub screen: crate::screen_effects::ViewEffects,
     /// Lightmap per-tick state the render thread folds into the lightmap by partial tick:
     /// the block-light flicker, the night-vision effect duration (`None` without it), the
     /// darkness effect's blend state, the boss-overlay world darkening (this tick and the
     /// last), the lightning sky flash, and the player's tick count for the darkness pulse.
     pub lightmap_flicker: f32,
     pub lightmap_night_vision: Option<i32>,
+    /// Darkness effect remaining ticks (`None` without it), for the fog environment.
+    pub lightmap_darkness: Option<i32>,
     pub lightmap_darkness_blend: haste_render::lightmap::BlendState,
     pub lightmap_boss_darkening: (f32, f32),
     pub lightmap_lightning: bool,
@@ -425,6 +442,9 @@ pub struct Shared {
     /// resolving what each stored block entity is; the static registry's order when the server
     /// did not sync one (vanilla servers' ids agree with the data generator's).
     pub block_entity_names: Vec<haste_core::Identifier>,
+    /// Biome climates of the synced registry (index = biome id), for the fog's per-biome
+    /// environment attributes (`FogRenderer` resolves them from the camera biome).
+    pub biome_climates: Vec<haste_render::BiomeClimate>,
     /// Particles (`level_particles`): the game thread spawns and ticks them, the render
     /// thread draws them.
     pub particles: SharedParticles,
@@ -472,6 +492,7 @@ impl Shared {
         particles: haste_render::Particles,
         skin: (Identifier, bool),
         block_entity_names: Vec<Identifier>,
+        biome_climates: Vec<haste_render::BiomeClimate>,
         options: haste_setup::options::Options,
     ) -> Self {
         let has_sky = world.dimension().has_skylight;
@@ -496,6 +517,11 @@ impl Shared {
                 block_target: None,
                 eye_in_water: false,
                 eye_in_lava: false,
+                blindness: None,
+                water_vision: 0.0,
+                spectator: false,
+                fire_resistance: false,
+                boss_world_fog: false,
                 held_slot: 0,
                 first_person: None,
                 fov_modifier: 0.0,
@@ -511,8 +537,10 @@ impl Shared {
                 look: (0.0, 0.0),
                 prev_feet: DVec3::ZERO,
                 pose: None,
+                screen: crate::screen_effects::ViewEffects::default(),
                 lightmap_flicker: 0.0,
                 lightmap_night_vision: None,
+                lightmap_darkness: None,
                 lightmap_darkness_blend: Default::default(),
                 lightmap_boss_darkening: (0.0, 0.0),
                 lightmap_lightning: false,
@@ -522,6 +550,7 @@ impl Shared {
             block_entity_lids: Mutex::new(Vec::new()),
             skull_anims: Mutex::new(Vec::new()),
             block_entity_names,
+            biome_climates,
             particles: Mutex::new(particles),
             input: Mutex::new(SharedInput::default()),
             sound: Mutex::new(None),
@@ -618,7 +647,10 @@ impl WorldSink for TrackedWorld<'_> {
 
 /// Runs the 20 Hz game loop until the connection closes or `shared.stop` is set, then closes
 /// the connection. Must run inside the tokio runtime's context (the connection's tasks).
-pub fn run(mut driver: NetDriver, shared: Arc<Shared>) {
+/// `existing_ui`: a UI over an already-started JVM (menu mode joins through the title screen's
+/// multiplayer list, whose JVM and UI stay for the whole run); without one the HUD's JVM starts
+/// on its own thread in parallel with joining.
+pub fn run(mut driver: NetDriver, shared: Arc<Shared>, existing_ui: Option<Ui>) {
     let tick = Duration::from_secs_f64(TICK_SECONDS);
     let mut next = Instant::now();
     let mut gone = Vec::new();
@@ -630,7 +662,14 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>) {
     // The JVM for the HUD takes tens of seconds to start: on its own thread, in parallel with
     // joining (the connection would time out if we waited here). One warning, no retries: a
     // client without a JDK or cache keeps playing without a HUD.
-    let mut jvm = spawn_jvm(&shared);
+    let mut jvm = existing_ui
+        .map(|ui| {
+            // The menu already ticked this Ui; the game thread takes it over from here.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _ = tx.send(Some(HudArrival::Menu(ui)));
+            HudSlot { rx: Some(rx) }
+        })
+        .unwrap_or_else(|| spawn_jvm(&shared));
     let reason = loop {
         if shared.stop.load(Ordering::Relaxed) {
             break "left the game".to_string();
@@ -715,7 +754,7 @@ fn apply_option_changes(shared: &Shared, driver: &NetDriver, changes: Vec<(Strin
 
 /// Starts the JVM for the HUD on its own thread (tens of seconds; the connection would time/// out if the game thread waited). On failure: one warning and `shared.hud_failed` set, then
 /// the client keeps running without a HUD.
-fn spawn_jvm(shared: &Arc<Shared>) -> JvmSlot {
+fn spawn_jvm(shared: &Arc<Shared>) -> HudSlot {
     let (tx, rx) = std::sync::mpsc::channel();
     let shared = shared.clone();
     std::thread::Builder::new()
@@ -733,22 +772,29 @@ fn spawn_jvm(shared: &Arc<Shared>) -> JvmSlot {
                         t.elapsed().as_secs_f32(),
                         host.proxy_summary()
                     );
-                    let _ = tx.send(Some(host));
+                    let _ = tx.send(Some(HudArrival::Fresh(host)));
                 }
                 Err(e) => {
                     tracing::warn!("no HUD: the JVM did not start: {e:#}");
                     shared.hud_failed.store(true, Ordering::Relaxed);
-                    let _ = tx.send(None);
                 }
             }
         })
         .expect("spawning the JVM thread");
-    JvmSlot { rx: Some(rx) }
+    HudSlot { rx: Some(rx) }
 }
 
-/// The JVM arriving on its own thread: `take()` once, at the start of a game tick.
-struct JvmSlot {
-    rx: Option<std::sync::mpsc::Receiver<Option<JvmHost>>>,
+/// What the HUD's slot delivers: a freshly started JVM, or menu mode's already-built UI.
+enum HudArrival {
+    /// The JVM thread started one (spawn_jvm): the `Ui` is built around it here.
+    Fresh(JvmHost),
+    /// Menu mode's UI (title screen, registries already loaded in Java).
+    Menu(Ui),
+}
+
+/// The JVM (or menu UI) arriving on its own thread: `take()` once, at the start of a game tick.
+struct HudSlot {
+    rx: Option<std::sync::mpsc::Receiver<Option<HudArrival>>>,
 }
 
 /// Takes `item` from a slot that a background thread fills once: `None` while it is still
@@ -766,10 +812,10 @@ fn take_slot<T>(rx: &mut Option<std::sync::mpsc::Receiver<Option<T>>>) -> Option
     }
 }
 
-impl JvmSlot {
-    /// The started JVM, if it arrived since the last tick. `None` while it is still starting
-    /// (or after it failed or was taken).
-    fn take(&mut self) -> Option<JvmHost> {
+impl HudSlot {
+    /// The JVM (or menu UI), if it arrived since the last tick. `None` while it is still
+    /// starting (or after it failed or was taken).
+    fn take_ui(&mut self) -> Option<HudArrival> {
         take_slot(&mut self.rx)
     }
 }
@@ -778,18 +824,26 @@ fn tick_once(
     driver: &mut NetDriver,
     shared: &Shared,
     gone: &mut Vec<SectionPos>,
-    jvm: &mut JvmSlot,
+    jvm: &mut HudSlot,
 ) -> anyhow::Result<()> {
     // Once the JVM arrives (the session joined before the game thread started): build the
-    // `Ui` and give the JVM the registries, tags and the local player.
-    if let Some(host) = jvm.take() {
+    // `Ui` and give the JVM the registries, tags and the local player. Menu mode's UI arrives
+    // pre-built (its JVM opened the title screen); only `joined` runs for it.
+    if let Some(ui) = jvm.take_ui() {
         let mut created = false;
         {
             let mut slot = shared.ui.lock();
             if slot.is_none() {
-                let ui = Ui::new(host);
+                let ui = match ui {
+                    HudArrival::Fresh(host) => Ui::new(host),
+                    HudArrival::Menu(ui) => ui,
+                };
                 let t = Instant::now();
-                match ui.joined(driver.connection(), driver.login()) {
+                match ui.joined(
+                    driver.connection(),
+                    driver.login(),
+                    driver.session.player.game_mode,
+                ) {
                     Ok(()) => {
                         tracing::info!(
                             "HUD joined in {:.0} ms; the vanilla HUD and chat are live",
@@ -904,6 +958,34 @@ fn tick_once(
         // Write lock: the player's breaking predicts block changes into the world.
         let mut world = shared.world.write();
         let mut entities = shared.entities.write();
+        // The world probe for the screen effects (vanilla's
+        // `NetherPortalBlock.entityInside` and `LevelExtractor.getViewBlockingState`): the
+        // portal under our feet feeds the portal effect's tick below, and the block the
+        // camera is inside plus the eye's light go into this tick's view.
+        {
+            let p = &driver.session.player;
+            let probe = crate::screen_effects::Probe {
+                world: &*world,
+                shapes: &shared.data.shapes,
+                blocks: &shared.data.blocks,
+                tags: p.int.block_tags(),
+                eye: p.camera(1.0).0,
+                feet: p.state.pos,
+                bb_width: p.attrs.box_width(),
+                bb_height: p.attrs.height_for(p.state.pose),
+                scale: f64::from(p.attrs.scale),
+            }
+            .sample();
+            driver.session.screen.set_inside_portal(probe.in_portal);
+            // The local player's freeze ticks are client-predicted (the server does not send the
+            // owner their own metadata): powder snow adds one, fire clears them.
+            driver.session.player.own_flags.frozen_ticks = crate::screen_effects::tick_frozen(
+                driver.session.player.own_flags.frozen_ticks,
+                probe.in_powder_snow,
+                probe.in_fire,
+            );
+            driver.session.screen_probe = probe;
+        }
         driver.end_tick(&input.state, &mut *world, &mut *entities)?;
         let mut dirty = world.take_dirty_sections();
         if !dirty.is_empty() {
@@ -1071,6 +1153,7 @@ fn tick_once(
     let lm = &s.lightmap;
     view.lightmap_flicker = lm.flicker;
     view.lightmap_night_vision = lm.night_vision;
+    view.lightmap_darkness = lm.darkness;
     view.lightmap_darkness_blend = lm.darkness_blend;
     view.lightmap_boss_darkening = (lm.boss_darkening_o, lm.boss_darkening);
     view.lightmap_lightning = lm.sky_flash_time > 0;
@@ -1082,6 +1165,18 @@ fn tick_once(
     view.block_target = s.player.target();
     view.eye_in_water = s.player.state.eyes_in_water;
     view.eye_in_lava = eye_in_lava(&shared.world.read(), &shared.data, eye);
+    // The fog environment's player state (vanilla `FogRenderer.setupFog` reads these off the
+    // entity): blindness and fire resistance from the active effects, spectator from the mode,
+    // the water-vision ramp, and the boss overlay's world fog.
+    let eff = |id: Option<i32>| {
+        id.and_then(|i| s.player.int.effects.get(&i))
+            .map(|e| e.duration)
+    };
+    view.blindness = eff(s.player.int.lightmap_effect_ids.blindness);
+    view.fire_resistance = eff(s.player.int.lightmap_effect_ids.fire_resistance).is_some();
+    view.spectator = s.player.game_mode == GameMode::Spectator;
+    view.water_vision = s.player.get_water_vision();
+    view.boss_world_fog = s.lightmap.boss_world_fog;
     view.held_slot = s.player.held_slot;
     view.first_person = first_person;
     view.fov_modifier = s.fov_modifier;
@@ -1097,6 +1192,34 @@ fn tick_once(
     view.hurt_ticks = s.hurt_ticks;
     view.hurt_dir = s.hurt_dir;
     view.death_ticks = s.death_ticks;
+    // The screen effects, from this tick's world probe (the block the camera is inside, the
+    // eye's light), the own entity's flags and freeze ticks, the worn head item and the active
+    // effects. The eyes being in water comes from the physics' fluid at the eye position.
+    let head_item = s.head_item().and_then(|i| {
+        shared
+            .data
+            .registries
+            .name("minecraft:item", i)
+            .cloned()
+            .and_then(|name| crate::screen_effects::camera_overlay(&name))
+    });
+    let screen = s.screen_effects();
+    view.screen = crate::screen_effects::ViewEffects {
+        block_overlay: s.screen_probe.block_overlay.clone(),
+        eye_in_water: view.eye_in_water,
+        eye_light: s.screen_probe.eye_light,
+        // The client predicts its own fire from the fire block it overlaps
+        // (`BaseFireBlock.fireIgnite`); the server never sends the owner their own
+        // `set_entity_data`, so `own_flags.on_fire` stays false and the probe carries it.
+        on_fire: s.own_flags().on_fire || s.screen_probe.in_fire,
+        camera_overlay: head_item,
+        frozen_ticks: s.own_flags().frozen_ticks,
+        scoping: s.player.scoping(&shared.data),
+        portal: (screen.prev_portal(), screen.portal()),
+        nausea: s.player.int.nausea_blend_pair(),
+        spinning_time: screen.spinning_time(),
+        spinning_speed: screen.spinning_speed(),
+    };
     Ok(())
 }
 

@@ -1138,7 +1138,7 @@ fn lightmap_boss_darkening_follows_the_vanilla_ramp() {
     // GameRenderer.tick: +0.05/tick while a boss bar asks to darken (cap 1), -0.0125/tick
     // otherwise. The per-frame value interpolates boss_darkening_o -> boss_darkening.
     let mut s = LightmapState::default();
-    s.boss_bars.insert(1, true);
+    s.boss_bars.insert(1, (true, false));
     s.tick();
     assert!((s.boss_darkening - 0.05).abs() < 1e-6);
     assert_eq!(s.boss_darkening_o, 0.0);
@@ -1146,16 +1146,19 @@ fn lightmap_boss_darkening_follows_the_vanilla_ramp() {
         s.tick();
     }
     assert_eq!(s.boss_darkening, 1.0);
-    // BossEvent.setDarkenScreen / removal through the packet action.
-    s.boss_bars.insert(7, false);
-    s.boss_event(7, &cb::BossEventAction::UpdateFlags(0x01));
-    assert!(s.boss_bars[&7]);
+    // BossEvent.setDarkenScreen / createWorldFog / removal through the packet action.
+    s.boss_bars.insert(7, (false, false));
+    s.boss_event(7, &cb::BossEventAction::UpdateFlags(0x05));
+    assert_eq!(s.boss_bars[&7], (true, true));
+    s.tick();
+    assert!(s.boss_world_fog);
     s.boss_event(7, &cb::BossEventAction::Remove);
     assert!(!s.boss_bars.contains_key(&7));
     // Clearing the flag ramps back down by 0.0125.
-    s.boss_bars.insert(1, false);
+    s.boss_bars.insert(1, (false, false));
     s.tick();
     assert!((s.boss_darkening - (1.0 - 0.0125)).abs() < 1e-6);
+    assert!(!s.boss_world_fog);
 }
 
 #[test]
@@ -1163,6 +1166,7 @@ fn lightmap_effects_and_flicker_tick() {
     let ids = crate::player::interact::LightmapEffectIds {
         night_vision: Some(1),
         darkness: Some(2),
+        ..Default::default()
     };
     let mut s = LightmapState::default();
     s.update_effect(ids, 1, 100);

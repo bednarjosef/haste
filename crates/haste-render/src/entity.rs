@@ -570,7 +570,7 @@ impl EntityRenderer {
                 * body_matrix(&e.body)
                 * Mat4::from_scale(s / 16.0);
             let start = self.vertices.len();
-            emit_part(
+            emit_part_tinted(
                 &mut self.vertices,
                 &e.model,
                 &e.model.root,
@@ -579,7 +579,24 @@ impl EntityRenderer {
                 rect,
                 light,
                 e.hurt,
+                [1.0; 3],
             );
+            // Overlay layers: the same transform and pose, each with its own texture and
+            // tint (vanilla's RenderLayers, e.g. SheepWoolLayer's dyed copy of the model).
+            for overlay in e.overlays.iter().flatten() {
+                let orect = self.texture_rect(&overlay.model.texture, assets);
+                emit_part_tinted(
+                    &mut self.vertices,
+                    &overlay.model,
+                    &overlay.model.root,
+                    &e.pose,
+                    root,
+                    orect,
+                    light,
+                    e.hurt,
+                    overlay.tint,
+                );
+            }
             self.emit_equipment(e, root, light, assets);
             if self.vertices.len() > start {
                 self.drawn += 1;
@@ -1356,7 +1373,7 @@ impl EntityRenderer {
                 // Vanilla's `ModelPart` scales its pivot by 1/16 (the model is in pixels), and
                 // `AvatarRenderer.renderHand` gives the right arm its 0.1 rad z tilt.
                 let m = root * arm_matrix(fp, partial) * Mat4::from_scale(Vec3::splat(1.0 / 16.0));
-                emit_part(
+                emit_part_tinted(
                     &mut out,
                     &model,
                     &model.root,
@@ -1365,6 +1382,7 @@ impl EntityRenderer {
                     rect,
                     light,
                     0.0,
+                    [1.0; 3],
                 );
             }
         }
@@ -1820,7 +1838,8 @@ pub(crate) fn part_matrix(
 }
 
 /// Child pivots are relative to the parent (vanilla `PartPose`); rotation is Z * Y * X around
-/// the pivot, pose overrides add to the base rotation. `hurt` (0..1) tints the part red.
+/// the pivot, pose overrides add to the base rotation. `hurt` (0..1) tints the part red;
+/// `tint` multiplies the colour per channel (dyed overlay layers).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_part(
     out: &mut Vec<EntityVertex>,
@@ -2456,7 +2475,7 @@ mod tests {
         };
         let mut out = Vec::new();
         let root = Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0) / 16.0);
-        emit_part(
+        emit_part_tinted(
             &mut out,
             &model,
             &model.root,
@@ -2465,6 +2484,7 @@ mod tests {
             [0, 0, 64, 64],
             (15, 15),
             0.0,
+            [1.0; 3],
         );
         assert_eq!(out.len(), 36);
         // Every triangle faces away from the cube centre (0, 0.25, 0).
@@ -2648,7 +2668,7 @@ mod tests {
         let m = arm_matrix(&still_hand(), 0.0) * Mat4::from_scale(Vec3::splat(1.0 / 16.0));
         let model = arm_model(false);
         let mut out = Vec::new();
-        emit_part(
+        emit_part_tinted(
             &mut out,
             &model,
             &model.root,
@@ -2657,6 +2677,7 @@ mod tests {
             [0, 0, 64, 64],
             (15, 15),
             0.0,
+            [1.0; 3],
         );
         // The arm and its sleeve, six faces of six vertices each.
         assert_eq!(out.len(), 72);
@@ -2679,7 +2700,7 @@ mod tests {
         swung_hand.attack = TickPair::fixed(0.25);
         let swung = arm_matrix(&swung_hand, 0.0) * Mat4::from_scale(Vec3::splat(1.0 / 16.0));
         let mut out2 = Vec::new();
-        emit_part(
+        emit_part_tinted(
             &mut out2,
             &arm_model(false),
             &arm_model(false).root,
@@ -2688,6 +2709,7 @@ mod tests {
             [0, 0, 64, 64],
             (15, 15),
             0.0,
+            [1.0; 3],
         );
         let moved = out
             .iter()

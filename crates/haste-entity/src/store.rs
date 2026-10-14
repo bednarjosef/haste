@@ -807,8 +807,8 @@ impl EntityStore {
             } else {
                 slot.prev_pos.lerp(slot.pos, partial_tick as f64)
             };
-            let (model, has_head) = if slot.is_player_type {
-                (crate::models::humanoid(false), true)
+            let (model, has_head, overlays) = if slot.is_player_type {
+                (crate::models::humanoid(false), true, Default::default())
             } else {
                 // Registry table first (shared per type, head flag precomputed), then the box.
                 // Babies use the row's baby layer, like vanilla's AgeableMobRenderer.submit.
@@ -830,20 +830,52 @@ impl EntityStore {
                                 self.world_age,
                             )
                         });
+                // The tropical fish's shape follows its packed pattern; the shulker's base
+                // texture follows its colour byte. Both are plain model swaps, and both
+                // must be gated on the entity's own type: their metadata slots (17, 18)
+                // collide with other mobs' fields (e.g. a sheep's wool byte sits where a
+                // shulker's colour byte would).
+                let type_name = crate::registry::entity_type_name(slot.kind);
+                let variant = variant.or_else(|| {
+                    if type_name.as_deref() == Some("minecraft:tropical_fish") {
+                        crate::variants::tropical_fish_model(&slot.metadata)
+                    } else {
+                        None
+                    }
+                });
+                let variant = match type_name.as_deref() {
+                    Some("minecraft:shulker") => {
+                        match crate::variants::shulker_texture(&slot.metadata) {
+                            Some(texture) => crate::registry::model_for_name("minecraft:shulker")
+                                .map(|mut m| {
+                                    if m.texture != texture {
+                                        let mut c = (*m).clone();
+                                        c.texture = texture.clone();
+                                        m = std::sync::Arc::new(c);
+                                    }
+                                    m
+                                }),
+                            None => variant,
+                        }
+                    }
+                    _ => variant,
+                };
                 let entry = crate::registry::model_entry(slot.kind);
+                let overlays = crate::variants::overlays_for(slot.kind, &slot.metadata, baby);
                 match (variant, entry) {
                     // A variant model (already the baby's when `baby`); all six variant mobs
                     // have a head part, so the head aim stays on.
-                    (Some(v), _) => (v, true),
+                    (Some(v), _) => (v, true, overlays),
                     (None, Some((head, m))) => {
                         let baby_model = crate::registry::entity_type_name(slot.kind)
                             .filter(|_| baby)
                             .and_then(|n| crate::registry::baby_model_for_name(&n));
-                        (baby_model.unwrap_or(m), head)
+                        (baby_model.unwrap_or(m), head, overlays)
                     }
                     (None, None) => (
                         crate::models::box_for(slot.dimensions.0, slot.dimensions.1),
                         false,
+                        overlays,
                     ),
                 }
             };
@@ -891,6 +923,9 @@ impl EntityStore {
                 skin: None,
                 nametag: slot.nametag.clone(),
                 hurt: hurt_strength(slot),
+                // Overlay layers (sheep wool, horse markings, collars, the fish pattern):
+                // drawn with the same transform and pose after the base model.
+                overlays,
                 item: item_of(slot, partial_tick),
                 decoration,
                 hands,

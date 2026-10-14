@@ -197,6 +197,9 @@ pub struct LocalPlayer {
     pub saturation: f32,
     /// Air supply in ticks (entity metadata index 1; 300 when not under water).
     pub air_supply: i32,
+    /// Our own entity's screen-effect bits from our own `set_entity_data`: the on-fire shared
+    /// flag (index 0) and the freeze ticks (index 7).
+    pub own_flags: crate::screen_effects::OwnFlags,
     /// Selected hotbar slot (0..8).
     pub held_slot: i32,
     /// Whether a `player_position` arrived since login/respawn.
@@ -246,6 +249,9 @@ pub struct LocalPlayer {
     /// Jump key state of the previous tick, so a fresh press is a rising edge (vanilla reads
     /// `input.keyPresses.jump()` before `input.tick()`).
     jump_held: bool,
+    /// Vanilla `LocalPlayer.waterVisionTime` (0..600): ramps up underwater and back down out of
+    /// it; `get_water_vision` turns it into the underwater fog visibility (`getWaterVision`).
+    water_vision_time: i32,
     /// Breaking, placing, using, attacking, hotbar and inventory (player/interact.rs).
     pub(crate) int: interact::Interaction,
     /// The first-person hand's per-tick animation state (player/hand.rs): swing, equip
@@ -270,6 +276,7 @@ impl LocalPlayer {
             food: 20,
             saturation: 5.0,
             air_supply: 300,
+            own_flags: crate::screen_effects::OwnFlags::default(),
             held_slot: 0,
             has_position: false,
             loaded: false,
@@ -292,6 +299,7 @@ impl LocalPlayer {
             sound_out: Vec::new(),
             jump_trigger_time: 0,
             jump_held: false,
+            water_vision_time: 0,
             int: interact::Interaction::default(),
             hand: hand::Hand::new(),
         };
@@ -339,6 +347,25 @@ impl LocalPlayer {
     /// Eye height for the current pose (the camera sits this far above the feet).
     pub fn eye_height(&self) -> f64 {
         self.attrs.eye_height_for(self.state.pose)
+    }
+
+    /// Vanilla `LocalPlayer.getWaterVision`: 0 out of water, ramping to 1 over 30 s underwater
+    /// (a 0.6 ramp over the first 5 s and 0.4 more over the next 25 s).
+    pub fn get_water_vision(&self) -> f32 {
+        if !self.state.eyes_in_water {
+            return 0.0;
+        }
+        let t = self.water_vision_time as f32;
+        if t >= 600.0 {
+            return 1.0;
+        }
+        let a = (t / 100.0).clamp(0.0, 1.0);
+        let b = if t < 100.0 {
+            0.0
+        } else {
+            ((t - 100.0) / 500.0).clamp(0.0, 1.0)
+        };
+        a * 0.6 + b * 0.39999998
     }
 
     /// Eye position and look angles interpolated by partial tick, for the camera. The eye
@@ -417,15 +444,21 @@ impl LocalPlayer {
             }
             P::SetHeldSlot(s) => self.held_slot = s.slot,
             P::SetEntityData(d) if EntityId(d.entity_id) == self.entity_id => {
-                // Wiki "Entity metadata": index 0 is the shared flags byte (bit 0x80 = fall
-                // flying, `Entity.FLAG_FALL_FLYING` = 7), index 1 the air supply (VarInt).
+                // Wiki "Entity metadata": index 0 is the shared flags byte (bit 0 = on fire,
+                // `Entity.isOnFire`; bit 0x80 = fall flying, `Entity.FLAG_FALL_FLYING` = 7),
+                // index 1 the air supply (VarInt), index 7 `DATA_TICKS_FROZEN` (the
+                // powder-snow outline's alpha).
                 for e in &d.metadata {
                     match (e.index, &e.value) {
                         (1, haste_core::entity::MetadataValue::VarInt(v)) => self.air_supply = *v,
                         (0, haste_core::entity::MetadataValue::Byte(b)) => {
+                            self.own_flags.on_fire = *b & 0x01 != 0;
                             // The server owns the flag: it confirms a glide we started and
                             // clears it when the glide ends (landing, no glider).
                             self.state.fall_flying = *b as u8 & 0x80 != 0;
+                        }
+                        (7, haste_core::entity::MetadataValue::VarInt(t)) => {
+                            self.own_flags.frozen_ticks = *t;
                         }
                         _ => {}
                     }
@@ -780,6 +813,9 @@ impl LocalPlayer {
         self.camera_eye_old = self.camera_eye;
         self.camera_eye += (self.eye_height() as f32 - self.camera_eye) * 0.5;
         self.flush_pending_accept(out);
+        // The effects' tick, in vanilla's `LivingEntity.baseTick` order (before the position
+        // check below): their durations and blend states drive the screen effects.
+        self.int.tick_effects();
         if !(self.has_position && self.loaded) {
             return;
         }
@@ -930,6 +966,19 @@ impl LocalPlayer {
                     self.state.on_ground = false;
                 }
             }
+        }
+
+        // Vanilla `LocalPlayer.aiStep`: the water-vision ramp, +1/tick with the eyes in water
+        // (spectators +10), -10/tick once out of it, both clamped to 0..600.
+        if self.state.eyes_in_water {
+            let speed = if self.game_mode == GameMode::Spectator {
+                10
+            } else {
+                1
+            };
+            self.water_vision_time = (self.water_vision_time + speed).clamp(0, 600);
+        } else if self.water_vision_time > 0 {
+            self.water_vision_time = (self.water_vision_time - 10).clamp(0, 600);
         }
 
         // 4. Flight started or stopped (toggle or landing).

@@ -1,0 +1,17 @@
+# The creative inventory's Saved Hotbars tab: opens in creative mode, shows the saved-hotbar
+# placeholder items (hotbar.nbt empty on a fresh game dir: paper items named for their key).
+# Run with the player in creative mode (the harness sets it over RCON).
+# GUI 480x270; the tab row: the saved-hotbars tab is top row, column 5, right-aligned
+# (leftPos 142 + imageWidth 195 - 27*(7-5) + 1 = 284, top row y 35..67).
+wait_until joined
+wait_until settled
+wait 60
+key E
+wait_until screen_open
+wait 5
+screenshot creative
+click left 297 51
+wait 5
+screenshot saved-hotbars
+key Escape
+wait_until screen_closed
