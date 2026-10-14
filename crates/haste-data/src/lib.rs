@@ -3,6 +3,7 @@
 //! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
 
 mod blocks;
+mod components;
 mod physics;
 mod registries;
 mod shapes;
@@ -11,6 +12,7 @@ mod sounds;
 use std::path::Path;
 
 pub use blocks::BlockStates;
+pub use components::{ItemComponents, ItemEquippable};
 pub use physics::{BlockProperties, BlockProps};
 pub use registries::Registries;
 pub use shapes::BlockShapes;
@@ -23,13 +25,46 @@ pub struct GameData {
     pub shapes: BlockShapes,
     pub physics: BlockProperties,
     pub sounds: BlockSoundTypes,
+    /// Item default components (the `equippable` component armour needs), from the report's
+    /// `minecraft/components/item` directory. Empty when the report is absent.
+    pub item_components: ItemComponents,
+}
+
+/// The data-generator reports the client reads at runtime, as paths relative to the reports
+/// directory (`haste_core::paths::datagen_reports`). `haste setup` must produce all of them
+/// (`haste_setup::install::REQUIRED_REPORTS`); without `minecraft/components/item` armour and
+/// item data draw nothing. `minecraft/components/item` is a directory.
+pub const RUNTIME_REPORTS: &[&str] = &[
+    "blocks.json",
+    "registries.json",
+    "minecraft/components/item",
+];
+
+/// The entries of [`RUNTIME_REPORTS`] missing under `reports` (a directory counts as present).
+pub fn missing_reports(reports: &Path) -> Vec<&'static str> {
+    RUNTIME_REPORTS
+        .iter()
+        .copied()
+        .filter(|r| !reports.join(r).exists())
+        .collect()
 }
 
 impl GameData {
-    /// Loads `datagen/26.3/reports/{blocks,registries}.json` and `oracle/26.3/block_shapes.json`
-    /// (optional, fallback shapes otherwise) from `haste_core::paths`.
+    /// Loads `datagen/26.3/reports/{blocks,registries}.json`, the item components report and
+    /// `oracle/26.3/block_shapes.json` (optional, fallback shapes otherwise) from
+    /// `haste_core::paths`. Warns once, naming `haste setup`, for every [`RUNTIME_REPORTS`] entry
+    /// missing (so a report-less install fails loudly instead of drawing nothing).
     pub fn load() -> anyhow::Result<GameData> {
         let reports = haste_core::paths::datagen_reports();
+        let missing = missing_reports(&reports);
+        if !missing.is_empty() {
+            tracing::warn!(
+                "data generator report(s) missing under {}: {} — run `haste setup` \
+                 (armour and item data draw nothing without the item components report)",
+                reports.display(),
+                missing.join(", ")
+            );
+        }
         let oracle = haste_core::paths::oracle_dir().join("block_shapes.json");
         let oracle = if oracle.is_file() { Some(oracle) } else { None };
         Self::load_from(&reports, oracle.as_deref())
@@ -60,12 +95,17 @@ impl GameData {
             }
             _ => BlockSoundTypes::empty(&blocks),
         };
+        let item_components = ItemComponents::load(
+            &reports.join("minecraft").join("components").join("item"),
+            &registries,
+        );
         Ok(Self {
             blocks,
             registries,
             shapes,
             physics,
             sounds,
+            item_components,
         })
     }
 }
@@ -74,6 +114,43 @@ impl GameData {
 mod tests {
     use super::*;
     use haste_core::Identifier;
+
+    /// The runtime report list is exactly the files the loader reads; a missing components
+    /// report must be reported (the client warns and armour draws nothing).
+    #[test]
+    fn runtime_reports_are_the_files_the_loader_reads() {
+        assert_eq!(
+            RUNTIME_REPORTS,
+            &[
+                "blocks.json",
+                "registries.json",
+                "minecraft/components/item"
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_reports_lists_absent_runtime_reports() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "haste-missing-reports-{}-{}",
+            std::process::id(),
+            n
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Everything missing.
+        assert_eq!(missing_reports(&dir), RUNTIME_REPORTS.to_vec());
+        // Only the components report missing.
+        std::fs::write(dir.join("blocks.json"), "{}").unwrap();
+        std::fs::write(dir.join("registries.json"), "{}").unwrap();
+        assert_eq!(missing_reports(&dir), vec!["minecraft/components/item"]);
+        // The components report is a directory; creating it clears the list.
+        std::fs::create_dir_all(dir.join("minecraft/components/item")).unwrap();
+        assert!(missing_reports(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Tiny hand-written fixture: a few blocks and two registries.
     const BLOCKS_JSON: &str = r#"{

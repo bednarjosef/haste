@@ -1409,7 +1409,7 @@ impl GuiRenderer {
         tris.clear();
         // GUI inventory preview: full block and sky light (vanilla's GUI entity light
         // 0xF000F0), so the model renders at full brightness.
-        crate::entity::emit_part(
+        crate::entity::emit_part_tinted(
             &mut tris,
             &e.model,
             &e.model.root,
@@ -1523,6 +1523,11 @@ fn hex_image(g: &haste_assets::HexGlyph) -> image::RgbaImage {
             image::Rgba([0, 0, 0, 0])
         }
     })
+}
+
+/// [`hex_image`] for callers outside the GUI (the entity renderer's sign text).
+pub(crate) fn hex_image_public(g: &haste_assets::HexGlyph) -> image::RgbaImage {
+    hex_image(g)
 }
 
 // ---- GUI item geometry and lighting ----
@@ -1830,6 +1835,9 @@ mod tests {
                     scale: [0.625; 3],
                 },
                 firstperson: haste_assets::DisplayTransform::IDENTITY,
+                thirdperson: haste_assets::DisplayTransform::IDENTITY,
+                head: haste_assets::DisplayTransform::IDENTITY,
+                ground: haste_assets::DisplayTransform::IDENTITY,
                 fixed: haste_assets::DisplayTransform::IDENTITY,
                 gui_light_front: false,
                 transformation: None,

@@ -73,6 +73,7 @@ fn gui_slots_draw_flat_items_with_the_item_model() {
     let input = FrameInput {
         camera,
         entities: &[],
+        block_entities: &[],
         gui: &gui,
         sky: SkyState {
             time_of_day: 6000,
@@ -153,6 +154,7 @@ fn held_item_draws_the_item_model_not_the_block_model() {
             .render(&FrameInput {
                 camera,
                 entities: &[],
+                block_entities: &[],
                 gui: &empty_gui,
                 sky: SkyState {
                     time_of_day: 6000,

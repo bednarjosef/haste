@@ -155,11 +155,13 @@ pub struct Interaction {
     /// Item registry indices whose default components carry `minecraft:glider`
     /// (`LivingEntity.canGlideUsing`), resolved from the item component reports in `prepare`.
     pub(crate) glider_items: Option<HashSet<RegistryIndex>>,
-    /// Active effects on us: `minecraft:mob_effect` index -> amplifier.
-    pub effects: HashMap<i32, i32>,
+    /// Active effects on us: `minecraft:mob_effect` index -> amplifier and remaining ticks.
+    pub effects: HashMap<i32, EffectData>,
     tools: Option<Arc<ToolTable>>,
     tags: Option<BlockTags>,
     effect_ids: Option<EffectIds>,
+    /// Night-vision and darkness effect indices for the lightmap (`prepare`).
+    pub(crate) lightmap_effect_ids: LightmapEffectIds,
     /// Last blocks we sent actions for (debug logging of their server updates).
     recent: Vec<BlockPos>,
 }
@@ -169,6 +171,23 @@ struct EffectIds {
     haste: i32,
     conduit_power: i32,
     mining_fatigue: i32,
+}
+
+/// The `minecraft:mob_effect` indices the lightmap needs (night vision and darkness), resolved
+/// from the game data. `None` until [`Interaction::prepare`] finds them (mod registries, or a
+/// report without them, leave the lightmap without those effects).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct LightmapEffectIds {
+    pub(crate) night_vision: Option<i32>,
+    pub(crate) darkness: Option<i32>,
+}
+
+/// One active effect on us (vanilla `MobEffectInstance`): its amplifier and remaining ticks
+/// (`-1` infinite). The lightmap reads the night-vision and darkness durations from here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EffectData {
+    pub amplifier: i32,
+    pub duration: i32,
 }
 
 impl Interaction {
@@ -212,6 +231,10 @@ impl Interaction {
                     mining_fatigue,
                 });
             }
+            self.lightmap_effect_ids = LightmapEffectIds {
+                night_vision: id("night_vision"),
+                darkness: id("darkness"),
+            };
         }
     }
 
@@ -382,7 +405,13 @@ impl LocalPlayer {
                 _ => {}
             },
             P::UpdateMobEffect(e) if e.entity_id == me => {
-                self.int.effects.insert(e.effect, e.amplifier);
+                self.int.effects.insert(
+                    e.effect,
+                    EffectData {
+                        amplifier: e.amplifier,
+                        duration: e.duration,
+                    },
+                );
             }
             P::RemoveMobEffect(e) if e.entity_id == me => {
                 self.int.effects.remove(&e.effect);
@@ -1030,7 +1059,7 @@ impl LocalPlayer {
             .unwrap_or((1.0, None));
         let level = |id: Option<i32>| {
             id.and_then(|i| self.int.effects.get(&i))
-                .map_or(0, |a| (*a + 1).max(0) as u32)
+                .map_or(0, |e| (e.amplifier + 1).max(0) as u32)
         };
         let e = self.int.effect_ids;
         let a = self.int.attrs;

@@ -388,12 +388,29 @@ fn strip_first_component(path: &str) -> Option<String> {
     }
 }
 
+/// The data-generator reports `haste setup` must produce, as paths relative to the reports
+/// directory (`haste_core::paths::datagen_reports`). The client reads `blocks.json`,
+/// `registries.json` and `minecraft/components/item` (the item default components report, one
+/// file per item — armour's `equippable` and item `tool`/`glider` data, `RegistryComponentsReport`
+/// in vanilla); the tests read `packets.json`. `minecraft/components/item` is a directory.
+pub const REQUIRED_REPORTS: &[&str] = &[
+    "blocks.json",
+    "registries.json",
+    "packets.json",
+    "minecraft/components/item",
+];
+
 /// Runs the data generator: `java -DbundlerMainClass=net.minecraft.data.Main -jar server.jar
-/// --reports --all` with cwd `cache/datagen/26.3`, producing `reports/*.json`.
-/// Skipped when `reports/{blocks,registries,packets}.json` all exist.
+/// --reports --output <reports_dir.parent()>` with cwd `cache/datagen/26.3`, so every
+/// [`REQUIRED_REPORTS`] entry lands in `reports_dir`. Vanilla's `PackOutput` resolves
+/// `Target.REPORTS` under the `--output` folder, so without `--output` the reports go to the
+/// default `generated/reports` and are lost; `--reports` alone is enough (all report providers
+/// are on the reports pack, `Main.addServerDefinitionProviders`). Skipped when every entry exists.
 pub async fn run_datagen(java: &Path, server_jar: &Path, reports_dir: &Path) -> anyhow::Result<()> {
-    let required = ["blocks.json", "registries.json", "packets.json"];
-    if required.iter().all(|f| reports_dir.join(f).is_file()) {
+    if REQUIRED_REPORTS
+        .iter()
+        .all(|f| reports_dir.join(f).exists())
+    {
         return Ok(());
     }
     let cwd = reports_dir
@@ -409,7 +426,8 @@ pub async fn run_datagen(java: &Path, server_jar: &Path, reports_dir: &Path) -> 
         .arg("-jar")
         .arg(server_jar)
         .arg("--reports")
-        .arg("--all")
+        .arg("--output")
+        .arg(cwd)
         .current_dir(cwd)
         .stdout(std::process::Stdio::from(log))
         .stderr(std::process::Stdio::null())
@@ -421,8 +439,12 @@ pub async fn run_datagen(java: &Path, server_jar: &Path, reports_dir: &Path) -> 
         "data generator exited with {status} (log: {})",
         log_path.display()
     );
-    for f in required {
-        anyhow::ensure!(reports_dir.join(f).is_file(), "datagen did not produce {f}");
+    for f in REQUIRED_REPORTS {
+        anyhow::ensure!(
+            reports_dir.join(f).exists(),
+            "datagen did not produce {f} under {}",
+            reports_dir.display()
+        );
     }
     Ok(())
 }
@@ -737,13 +759,33 @@ mod tests {
         assert!(text.contains("25"), "unexpected version output: {text}");
     }
 
+    /// The required-report list is exactly the reports the client and tests read; a missing
+    /// `minecraft/components/item` must not be skipped (that was the armour-draws-nothing bug).
+    #[test]
+    fn required_reports_cover_every_report_the_client_reads() {
+        for f in [
+            "blocks.json",
+            "registries.json",
+            "packets.json",
+            "minecraft/components/item",
+        ] {
+            assert!(REQUIRED_REPORTS.contains(&f), "missing {f}");
+        }
+        assert_eq!(REQUIRED_REPORTS.len(), 4);
+    }
+
     #[tokio::test]
     async fn datagen_skips_when_reports_exist() {
         let dir = tempfile::tempdir().unwrap();
         let reports = dir.path().join("reports");
         std::fs::create_dir_all(&reports).unwrap();
-        for f in ["blocks.json", "registries.json", "packets.json"] {
-            std::fs::write(reports.join(f), "{}").unwrap();
+        for f in REQUIRED_REPORTS {
+            let p = reports.join(f);
+            if f.ends_with(".json") {
+                std::fs::write(p, "{}").unwrap();
+            } else {
+                std::fs::create_dir_all(p).unwrap();
+            }
         }
         // a nonexistent java would fail if it tried to run; skipping means no run
         run_datagen(
@@ -753,6 +795,66 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    /// A missing components report (all the flat reports present) must make `run_datagen` run
+    /// again, not skip.
+    #[tokio::test]
+    async fn datagen_runs_when_only_the_components_report_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let reports = dir.path().join("reports");
+        std::fs::create_dir_all(&reports).unwrap();
+        for f in ["blocks.json", "registries.json", "packets.json"] {
+            std::fs::write(reports.join(f), "{}").unwrap();
+        }
+        let err = run_datagen(
+            Path::new("/nonexistent-java"),
+            Path::new("/nonexistent.jar"),
+            &reports,
+        )
+        .await
+        .unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("datagen") || chain.contains("spawn") || chain.contains("No such file"),
+            "got: {chain}"
+        );
+    }
+
+    /// The real data generator into a fresh temp dir produces every [`REQUIRED_REPORTS`] entry,
+    /// including the item default components report (`minecraft/components/item`, one file per
+    /// item — armour's `equippable`). Needs the shared cache (server jar + JDK); run with
+    /// `cargo test -p haste-setup -- --ignored`.
+    #[tokio::test]
+    #[ignore = "needs cache/versions/26.3/server.jar and cache/jdk (run via haste setup)"]
+    async fn fresh_datagen_produces_the_item_components_report() {
+        let server = paths::server_jar();
+        let Some(java) = resolve_cached_java() else {
+            eprintln!("skipped: no cached JDK at cache/jdk (run haste setup)");
+            return;
+        };
+        if !server.is_file() {
+            eprintln!("skipped: no server jar at {}", server.display());
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let reports = dir.path().join("reports");
+        run_datagen(&java, &server, &reports).await.unwrap();
+        for f in REQUIRED_REPORTS {
+            assert!(reports.join(f).exists(), "datagen did not produce {f}");
+        }
+        let item_dir = reports.join("minecraft/components/item");
+        let n = std::fs::read_dir(&item_dir).unwrap().count();
+        assert!(
+            n > 100,
+            "only {n} component files under {}",
+            item_dir.display()
+        );
+        assert!(
+            item_dir.join("diamond_chestplate.json").is_file(),
+            "no diamond_chestplate.json in {}",
+            item_dir.display()
+        );
     }
 
     #[tokio::test]
@@ -807,6 +909,7 @@ mod integration_tests {
         assert!(inst.reports_dir.join("packets.json").is_file());
         assert!(inst.reports_dir.join("blocks.json").is_file());
         assert!(inst.reports_dir.join("registries.json").is_file());
+        assert!(inst.reports_dir.join("minecraft/components/item").is_dir());
         assert!(inst
             .assets_dir
             .join("indexes")

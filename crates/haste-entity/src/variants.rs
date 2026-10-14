@@ -1085,6 +1085,21 @@ fn texture_model_cache() -> &'static TextureModelCache {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Test helper: apply another metadata set's entries on top.
+#[cfg(test)]
+trait ApplyExtra {
+    fn apply_extra(self, other: Metadata) -> Metadata;
+}
+#[cfg(test)]
+impl ApplyExtra for Metadata {
+    fn apply_extra(mut self, other: Metadata) -> Metadata {
+        use haste_core::entity::MetadataEntry;
+        let entries: Vec<MetadataEntry> = other.iter().cloned().collect();
+        self.apply(&entries);
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1755,20 +1770,5 @@ mod tests {
         );
         assert_eq!(markings.tint, [1.0; 3]);
         assert!(none.is_none());
-    }
-}
-
-/// Test helper: apply another metadata set's entries on top.
-#[cfg(test)]
-trait ApplyExtra {
-    fn apply_extra(self, other: Metadata) -> Metadata;
-}
-#[cfg(test)]
-impl ApplyExtra for Metadata {
-    fn apply_extra(mut self, other: Metadata) -> Metadata {
-        use haste_core::entity::MetadataEntry;
-        let entries: Vec<MetadataEntry> = other.iter().cloned().collect();
-        self.apply(&entries);
-        self
     }
 }
