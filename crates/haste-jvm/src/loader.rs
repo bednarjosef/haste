@@ -28,6 +28,9 @@ pub const ALLOW_PACKAGES: &[&str] = &[
     "net/minecraft/client/renderer/entity/state/",
     "net/minecraft/client/renderer/state/",
     "net/minecraft/client/resources/language/",
+    // the Telemetry Data screen's event list is real vanilla Java over these value types; Haste sends
+    // no telemetry (allowsTelemetry false), so the button is greyed like vanilla's, but the screen loads
+    "net/minecraft/client/telemetry/",
     "net/minecraft/server/packs/",
     "net/minecraft/server/permissions/",
     "net/minecraft/server/dialog/",
@@ -81,6 +84,8 @@ pub const ALLOW_CLASSES: &[&str] = &[
     "com/mojang/blaze3d/platform/MacosUtil",
     "com/mojang/blaze3d/buffers/Std140SizeCalculator",
     "com/mojang/blaze3d/platform/VideoMode",
+    // Window.findBestMonitor's return type (Video Settings holds one; Haste has no monitors, so null)
+    "com/mojang/blaze3d/platform/Monitor",
     "com/mojang/blaze3d/font/GlyphProvider",
     "net/minecraft/client/PresenceSharing",
     "net/minecraft/client/sounds/MusicManager$MusicFrequency",

@@ -1235,3 +1235,114 @@ fn bench_hud_and_screen() {
     gui.close_screen();
     gui.with_state(|s| s.in_world = false);
 }
+
+/// Every options sub-screen opens and closes without Unimplemented entries or Java exceptions,
+/// like scripts/checks/options-all.txt does through the whole client (which needs a server; this
+/// is the JVM-only half). GUI 480x270 at scale 2, the offscreen script client's size; the button
+/// coordinates are vanilla's layout (verified against the dumped text positions).
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn options_screens_open_and_close() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    reset(gui);
+    h.clear_unimplemented().unwrap();
+    open(&h, haste_jvm::ScreenKind::Pause);
+    // the script client renders at 480x270 (960x540 at gui scale 2); a first frame also
+    // re-lays the pause menu out for that size before the clicks
+    gui.render(480, 270, 2, (-1.0, -1.0), 0.5).unwrap();
+    // "Options..." (pause menu row 5, left column)
+    click(gui, 165.0, 158.0);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.options.OptionsScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    // Every sub-screen: (button centre, class simple name). The Telemetry Data button stays out:
+    // vanilla greys it out while telemetry is unavailable (Haste sends none) and its tooltip shows.
+    for (x, y, want) in [
+        (320.0, 44.0, "OnlineOptionsScreen"),
+        (160.0, 102.0, "SkinCustomizationScreen"),
+        (336.0, 102.0, "SoundOptionsScreen"),
+        (160.0, 126.0, "VideoSettingsScreen"),
+        (336.0, 126.0, "ControlsScreen"),
+        (160.0, 150.0, "LanguageSelectScreen"),
+        (336.0, 150.0, "ChatOptionsScreen"),
+        (160.0, 174.0, "PackSelectionScreen"),
+        (336.0, 174.0, "AccessibilityOptionsScreen"),
+        (336.0, 198.0, "CreditsAndAttributionScreen"),
+    ] {
+        click(gui, x, y);
+        let got = gui.screen_class();
+        assert_eq!(
+            got.as_deref().map(|c| c.rsplit('.').next().unwrap_or(c)),
+            Some(want),
+            "click at {x},{y}: {got:?} (last error {:?})",
+            gui.take_last_error()
+        );
+        // one frame of it, with the mouse over the button (tooltip)
+        gui.render(480, 270, 2, (x, y), 0.5).unwrap();
+        escape(gui);
+        assert_eq!(
+            gui.screen_class().as_deref(),
+            Some("net.minecraft.client.gui.screens.options.OptionsScreen"),
+            "Escape from {want}: {:?} (last error {:?})",
+            gui.screen_class(),
+            gui.take_last_error()
+        );
+    }
+    // Key Binds and Mouse Settings from the Controls screen (its top row). A list's buttons get
+    // their positions during rendering (OptionsList.Entry.extractContent, like vanilla's frame
+    // loop), so render one frame of the Controls screen before clicking them.
+    click(gui, 336.0, 126.0);
+    gui.render(480, 270, 2, (336.0, 126.0), 0.5).unwrap();
+    for (x, want) in [(160.0, "MouseSettingsScreen"), (336.0, "KeyBindsScreen")] {
+        click(gui, x, 48.0);
+        let got = gui.screen_class();
+        assert_eq!(
+            got.as_deref().map(|c| c.rsplit('.').next().unwrap_or(c)),
+            Some(want),
+            "Controls sub-screen at {x}: {got:?} (last error {:?})",
+            gui.take_last_error()
+        );
+        escape(gui);
+    }
+    escape(gui);
+    // and the Options screen closes back to the pause menu, which closes
+    escape(gui);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.PauseScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    escape(gui);
+    assert!(!gui.is_open(), "{:?}", gui.take_last_error());
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for the options screens: {unimpl:#?}"
+    );
+}
+
+fn click(gui: &haste_jvm::GuiPipeline, x: f64, y: f64) {
+    gui.mouse(x, y, Some((haste_jvm::keys::MOUSE_LEFT, true)));
+    gui.mouse(x, y, Some((haste_jvm::keys::MOUSE_LEFT, false)));
+}
+
+fn escape(gui: &haste_jvm::GuiPipeline) {
+    gui.key(
+        haste_jvm::keys::ESCAPE,
+        haste_jvm::keys::keycode(haste_jvm::keys::ESCAPE),
+        0,
+        true,
+    );
+    gui.key(
+        haste_jvm::keys::ESCAPE,
+        haste_jvm::keys::keycode(haste_jvm::keys::ESCAPE),
+        0,
+        false,
+    );
+}
