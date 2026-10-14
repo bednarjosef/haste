@@ -1152,6 +1152,12 @@ impl Renderer {
         self.particles.drawn
     }
 
+    /// Entity instances that posed geometry in the last frame (models, decorations and
+    /// dropped items; `FrameInput::entities` instances without geometry do not count).
+    pub fn entities_drawn(&self) -> u32 {
+        self.entity.drawn
+    }
+
     fn make_origin_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("section-origins"),

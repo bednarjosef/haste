@@ -42,4 +42,11 @@ public final class Native {
     public static native void requestDisconnect();
     /** Called when a screen sends a chat message or command (Rust signs and sends it). */
     public static native void sendChat(String message, boolean command);
+
+    // ---- options bridge (haste.gui.OptionBridge) ----
+    /**
+     * An option changed in a vanilla options screen: the options.txt key and value, exactly as
+     * Options.save would write them. Rust applies them live (one call per change).
+     */
+    public static native void optionsChanged(String key, String value);
 }

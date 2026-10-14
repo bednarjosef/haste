@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 
 use ahash::AHashMap;
-use haste_core::entity::{EntitySpawn, ItemStackData, MetadataEntry, PlayerInfo, Pose};
+use haste_core::entity::{
+    EntitySpawn, ItemStackData, MetadataEntry, MetadataValue, PlayerInfo, Pose,
+};
 use haste_core::ids::{EntityId, RegistryIndex};
 use haste_core::model::EntityInstance;
 use haste_core::DVec3;
@@ -229,6 +231,10 @@ pub struct Entity {
     pub hurt_ticks: u32,
     /// Set on the death event: holds the hurt tint instead of easing out.
     pub dead: bool,
+    /// A dropped item entity's stack (metadata index 9, `Item`), if its metadata named one.
+    pub item: Option<ItemStackData>,
+    /// Ticks since spawn: drives the dropped items' spin and bob.
+    pub age: u32,
 }
 
 impl Entity {
@@ -268,6 +274,8 @@ impl Entity {
             flapping: 1.0,
             hurt_ticks: 0,
             dead: false,
+            item: None,
+            age: 0,
         }
     }
 
@@ -306,6 +314,18 @@ fn update_body_yaw(e: &mut Entity, d: DVec3) {
     if head_diff.abs() > max_head {
         e.body_yaw += head_diff - head_diff.signum() * max_head;
     }
+}
+
+/// The `EntityInstance::item` entry for a tracked entity: the stack of a dropped item entity
+/// (count included; the renderer draws 1-5 copies from it), aged by the partial tick.
+fn item_of(e: &Entity, partial_tick: f32) -> Option<haste_core::model::DroppedItem> {
+    let stack = e.item.as_ref()?;
+    let item = stack.item?;
+    Some(haste_core::model::DroppedItem {
+        item,
+        count: stack.count,
+        age: e.age as f32 + partial_tick,
+    })
 }
 
 pub struct EntityStore {
@@ -515,6 +535,15 @@ impl EntityStore {
             return;
         };
         e.metadata.apply(entries);
+        // A dropped item entity's stack: `ItemEntity.DATA_ITEM`, the first slot after
+        // Entity's eight synched fields (indices 0-7), so index 8. An emptied stack
+        // clears the drop.
+        if let Some(entry) = e.metadata.get(8) {
+            e.item = match &entry.value {
+                MetadataValue::ItemStack(s) if !s.is_empty() => Some(s.clone()),
+                _ => None,
+            };
+        }
         if let Some(pose) = e.metadata.pose {
             if pose != e.pose {
                 e.pose = pose;
@@ -593,6 +622,7 @@ impl EntityStore {
             slot.flap += slot.flapping * 2.0;
             slot.swing.tick();
             slot.hurt_ticks = slot.hurt_ticks.saturating_sub(1);
+            slot.age = slot.age.saturating_add(1);
         }
     }
 
@@ -619,9 +649,10 @@ impl EntityStore {
 
     /// Interpolated draw list for the renderer (renderer). Players get the humanoid model (classic
     /// layout; skins arrive with renderer's texture work), known mob types the model the recorder
-    /// dumped for their vanilla layer, everything else a generic box from its current dimensions.
-    /// Each model's `setupAnim` (walk swing, head aim, attack, pose) is applied by part name;
-    /// models with no "head" part (the box) get no overrides.
+    /// dumped for their vanilla layer, everything else a generic box from its current dimensions;
+    /// a dropped item entity draws as the item itself. Each model's `setupAnim` (walk swing, head
+    /// aim, attack, pose) is applied by part name; models with no "head" part (the box) get no
+    /// overrides.
     pub fn render_instances(&self, partial_tick: f32, out: &mut Vec<EntityInstance>) {
         for slot in self.slots.iter().flatten() {
             // Hanging entities (item frames, paintings) are drawn specially, and the client
@@ -681,6 +712,7 @@ impl EntityStore {
                 skin: None,
                 nametag: slot.nametag.clone(),
                 hurt: hurt_strength(slot),
+                item: item_of(slot, partial_tick),
                 decoration,
             });
         }

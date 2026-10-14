@@ -471,6 +471,7 @@ impl Session {
             haste_render::Particles::new(particle_types.clone()),
             haste_render::default_skin(login.profile.uuid.as_u128()),
             block_entity_names,
+            options.clone(),
         ));
         if sounds.is_some() {
             *shared.sound.lock() = sounds;
@@ -1021,8 +1022,36 @@ fn frame_view(
     )
 }
 
-/// The SDL3 scancode (USB HID usage id, `InputConstants.KEY_*` in 26.3) of a winit `KeyCode`.
-/// `haste_jvm::keys` documents the numbering; letters, digits and punctuation take the
+/// Where a label is drawn in a GUI frame, in absolute GUI pixels (translation stack applied):
+/// an exact text, or a slider's dynamic `label: value`. The first match. Used by the script
+/// runner's `click_text`.
+fn gui_text_pos(frame: &GuiFrame, want: &str) -> Option<(i32, i32)> {
+    use haste_protocol::haste_core::gui::GuiCommand;
+    let matches =
+        |text: &str| text == want || text.strip_prefix(want).is_some_and(|r| r.starts_with(':'));
+    let mut stack: Vec<(f32, f32)> = vec![(0.0, 0.0)];
+    for c in &frame.commands {
+        match c {
+            GuiCommand::TranslatePush { dx, dy, .. } => {
+                let (x, y) = *stack.last().unwrap();
+                stack.push((x + dx, y + dy));
+            }
+            GuiCommand::TranslatePop => {
+                stack.pop();
+            }
+            GuiCommand::Text { text, x, y, .. } | GuiCommand::StyledText { text, x, y, .. }
+                if matches(text) =>
+            {
+                let (dx, dy) = *stack.last().unwrap();
+                return Some((x + dx as i32, y + dy as i32));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The SDL3 scancode (USB HID usage id, `InputConstants.KEY_*` in 26.3) of a winit `KeyCode`./// `haste_jvm::keys` documents the numbering; letters, digits and punctuation take the
 /// consecutive HID ranges, everything else is one entry per key.
 fn sdl_scancode(code: KeyCode) -> Option<i32> {
     use haste_jvm::keys as sdl;
@@ -1347,7 +1376,11 @@ impl InputRouter {
             self.keys.remove(&code);
             return true;
         }
-        if pressed && !repeat {
+        // The game's own keyboard actions. Once the JVM is up the controls come from the vanilla
+        // `KeyMapping`s instead (mirrored in `Ui::key`, read in `sample`), so these raw
+        // `KeyCode` bindings are the fallback for the seconds before the JVM starts (or when it
+        // failed): a rebind in the controls screen then changes what the keys do.
+        if pressed && !repeat && ui.is_none() {
             match code {
                 KeyCode::Escape => {
                     // Not consumed by the UI (no screen): vanilla's Escape has no game
@@ -1486,11 +1519,21 @@ impl InputRouter {
     }
 
     /// Copy the sampled state into the shared input the game thread reads each tick, and
-    /// consume the press-only actions. `perspective` is the camera's own: the game thread's
-    /// camera effects that are gated on it (the spyglass FOV) only apply in first person.
-    fn sample(&mut self, shared: &Shared, perspective: game::Perspective) {
+    /// consume the press-only actions. With a `Ui` (the JVM is up) the movement and action
+    /// controls come from the vanilla `KeyMapping`s (`Ui::game_input`/`consume_clicks`), so a
+    /// rebind in the controls screen changes what the keys do, exactly like vanilla; without
+    /// one (the JVM still starting, or failed) the raw `KeyCode`s are the fallback.
+    /// `perspective` is the camera's own: the game thread's camera effects that are gated on it
+    /// (the spyglass FOV) only apply in first person.
+    fn sample(
+        &mut self,
+        shared: &Shared,
+        ui: Option<&crate::ui::Ui>,
+        perspective: game::Perspective,
+    ) {
+        use crate::ui::bits;
         let k = |c: KeyCode| self.keys.contains(&c);
-        let state = InputState {
+        let mut state = InputState {
             forward: k(KeyCode::KeyW),
             back: k(KeyCode::KeyS),
             left: k(KeyCode::KeyA),
@@ -1501,28 +1544,56 @@ impl InputRouter {
             yaw: self.yaw,
             pitch: self.pitch,
         };
+        if let Some(ui) = ui {
+            let b = ui.game_input();
+            state.forward = b & bits::B_FORWARD != 0;
+            state.back = b & bits::B_BACK != 0;
+            state.left = b & bits::B_LEFT != 0;
+            state.right = b & bits::B_RIGHT != 0;
+            state.jump = b & bits::B_JUMP != 0;
+            state.sneak = b & bits::B_SNEAK != 0;
+            state.sprint = b & bits::B_SPRINT != 0;
+        }
         let mut shared_input = shared.input.lock();
         shared_input.state = state;
         shared_input.first_person = matches!(perspective, game::Perspective::FirstPerson);
-        shared_input.toggle_flight |= std::mem::take(&mut self.toggle_flight);
-        let i = &mut shared_input.interact;
-        i.attack = self.attack;
-        i.use_item = self.use_item;
-        // The click counts accumulate across samples (the render thread may sample several
-        // times per tick); the game thread drains them once per tick.
-        i.attack_clicks = i
-            .attack_clicks
-            .saturating_add(std::mem::take(&mut self.attack_clicks));
-        i.use_clicks = i
-            .use_clicks
-            .saturating_add(std::mem::take(&mut self.use_clicks));
-        i.pick_block |= std::mem::take(&mut self.pick_block);
-        i.drop_item |= std::mem::take(&mut self.drop_item);
-        i.drop_stack |= std::mem::take(&mut self.drop_stack);
-        i.swap_offhand |= std::mem::take(&mut self.swap_offhand);
-        if let Some(slot) = self.hotbar.take() {
-            i.hotbar = Some(slot);
+        {
+            let i = &mut shared_input.interact;
+            i.attack = self.attack;
+            i.use_item = self.use_item;
+            // The click counts accumulate across samples (the render thread may sample several
+            // times per tick); the game thread drains them once per tick.
+            i.attack_clicks = i
+                .attack_clicks
+                .saturating_add(std::mem::take(&mut self.attack_clicks));
+            i.use_clicks = i
+                .use_clicks
+                .saturating_add(std::mem::take(&mut self.use_clicks));
+            i.pick_block |= std::mem::take(&mut self.pick_block);
+            if let Some(ui) = ui {
+                // The action mappings' clicks (hotbar, drop, swap, jump), consumed once per
+                // frame and handed to the game thread through the shared input.
+                let c = ui.consume_clicks();
+                for slot in 0..9 {
+                    if c & (bits::C_HOTBAR_0 << slot) != 0 {
+                        i.hotbar = Some(slot as u8);
+                    }
+                }
+                i.drop_item |= c & bits::C_DROP != 0;
+                i.swap_offhand |= c & bits::C_SWAP_OFFHAND != 0;
+                if c & bits::C_JUMP != 0 {
+                    self.jump_pressed(Instant::now());
+                }
+            }
+            i.drop_item |= std::mem::take(&mut self.drop_item);
+            i.drop_stack |= std::mem::take(&mut self.drop_stack);
+            i.swap_offhand |= std::mem::take(&mut self.swap_offhand);
+            if let Some(slot) = self.hotbar.take() {
+                i.hotbar = Some(slot);
+            }
         }
+        // After the jump clicks above, so a double tap seen here reaches the game this frame.
+        shared_input.toggle_flight |= std::mem::take(&mut self.toggle_flight);
     }
 }
 
@@ -1755,7 +1826,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let view = *shared.view.lock();
     let entities = feed.instances.len();
     println!(
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} entity instances (perspective {}, local player {}), {} particles drawn, {} block entities, target {:?}",
+        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} entity instances ({} drew geometry; perspective {}, local player {}), {} particles drawn, {} block entities, target {:?}",
         file.display(),
         image.width(),
         image.height(),
@@ -1769,6 +1840,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         stats.chunk_sections_total,
         stats.draw_calls,
         entities,
+        renderer.entities_drawn(),
         args.perspective,
         perspective.draws_player(),
         renderer.particles_drawn(),
@@ -1788,22 +1860,30 @@ fn mouse_button_id(button: script::MouseButton) -> i32 {
     }
 }
 
-/// Prints the text and HUD-sprite facts of a script screenshot's frame. The check scripts grep
-/// these lines as evidence instead of opening the PNGs.
-fn log_script_frame(frame: &GuiFrame, name: &str) {
+/// Prints the text, item and HUD-sprite facts of a script screenshot's frame. The check scripts
+/// grep these lines as evidence instead of opening the PNGs.
+fn log_script_frame(frame: &GuiFrame, name: &str, item_names: &[Identifier]) {
     let mut hotbar = false;
+    let mut items = Vec::new();
     for c in &frame.commands {
         match c {
             GuiCommand::Text { text, .. } | GuiCommand::StyledText { text, .. } => {
                 println!("script text[{name}]: {text}");
             }
             GuiCommand::Sprite { sprite, .. } if sprite.path() == "hud/hotbar" => hotbar = true,
+            GuiCommand::Item { item, .. } => {
+                // The item's registry name (creative inventory checks grep for these).
+                if let Some(id) = item_names.get(item.0 as usize) {
+                    items.push(id.to_string());
+                }
+            }
             _ => {}
         }
     }
     println!(
-        "script frame[{name}]: hotbar={}",
-        if hotbar { "yes" } else { "no" }
+        "script frame[{name}]: hotbar={}, items=[{}]",
+        if hotbar { "yes" } else { "no" },
+        items.join(",")
     );
 }
 
@@ -1822,11 +1902,29 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut runner = script::Runner::new(steps);
     let session = Session::join(args, false)?;
     let shared = session.shared.clone();
+    // The live options, refreshed when a vanilla screen changed one (the options bridge): FOV
+    // and GUI scale follow the change within a frame, like the windowed client.
+    let mut options = session.options.clone();
+    let mut options_version = shared.options_version.load(Ordering::Relaxed);
     let mut assets = open_assets()?;
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
     renderer.set_biomes(&session.biomes);
+    // Item names by protocol id, so `log_script_frame` can name the items a frame drew.
+    let item_names: Vec<Identifier> = (0..shared.data.registries.len("minecraft:item") as u32)
+        .map(|i| {
+            shared
+                .data
+                .registries
+                .name(
+                    "minecraft:item",
+                    haste_protocol::haste_core::RegistryIndex(i),
+                )
+                .cloned()
+                .unwrap_or_else(|| Identifier::minecraft("air"))
+        })
+        .collect();
     renderer.set_dimension(shared.world.read().dimension());
     let mut gui = GuiFrame::default();
     let mut ui: Option<crate::ui::Ui> = None;
@@ -1862,6 +1960,12 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         // actions write it) plus the server's rotation offset, like the window.
         let mut view = *shared.view.lock();
         let look = (input.yaw, input.pitch);
+        // Pick up a live option change (the options bridge) within a frame.
+        let version = shared.options_version.load(Ordering::Relaxed);
+        if version != options_version {
+            options_version = version;
+            options = shared.live_options.lock().clone();
+        }
         // One game tick's actions whenever it is time (`wait_until settled` uses the same
         // quiet test as the screenshot mode, plus the HUD's JVM being up or known-failed: a
         // script's keys go to the UI, so pressing them before it exists would lose them).
@@ -1916,6 +2020,19 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                         input.mouse_button(b, true, x, y, ui.as_ref());
                         input.mouse_button(b, false, x, y, ui.as_ref());
                     }
+                    script::Action::ClickText(text, dx, dy) => {
+                        // The label's position in the last rendered frame, so the check does not
+                        // depend on the GUI scale or window size. A slider's label is centred, so
+                        // `(dx, dy)` moves the click onto its track.
+                        match gui_text_pos(&gui, &text) {
+                            Some((x, y)) => {
+                                let (x, y) = (f64::from(x + dx), f64::from(y + dy));
+                                input.mouse_button(1, true, x, y, ui.as_ref());
+                                input.mouse_button(1, false, x, y, ui.as_ref());
+                            }
+                            None => tracing::warn!("script click_text {text:?}: no such label"),
+                        }
+                    }
                     script::Action::MouseDown(button) => {
                         let (x, y) = input.mouse;
                         input.mouse_button(mouse_button_id(button), true, x, y, ui.as_ref());
@@ -1941,7 +2058,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 }
             }
             // The actions may have changed what the game thread sees this tick.
-            input.sample(&shared, game::Perspective::FirstPerson);
+            input.sample(&shared, ui.as_ref(), game::Perspective::FirstPerson);
             view = *shared.view.lock();
         }
         if shared.is_closed() {
@@ -1957,7 +2074,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             game::Perspective::FirstPerson,
             look.0,
             look.1,
-            &session.options,
+            &options,
             Instant::now(),
         );
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
@@ -1991,11 +2108,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             ));
         }
         if let Some(u) = &mut ui {
-            let scale = resolve_gui_scale(
-                u32::from(session.options.gui_scale),
-                args.width,
-                args.height,
-            );
+            let scale = resolve_gui_scale(u32::from(options.gui_scale), args.width, args.height);
             let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
             gui = u.frame(gw, gh, scale, input.mouse, partial).clone();
         }
@@ -2026,7 +2139,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             // Log what the frame drew (the check scripts grep this as evidence; images are not
             // opened). The hotbar sprite is the visible proof a HUD element is hidden or shown.
             for name in shots.drain(..) {
-                log_script_frame(&gui, &name);
+                log_script_frame(&gui, &name, &item_names);
                 let path = std::path::Path::new("target/shots").join(format!("script-{name}.png"));
                 if let Some(dir) = path.parent() {
                     std::fs::create_dir_all(dir)
@@ -2057,7 +2170,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 .with_context(|| "writing the screenshot's text")?;
             }
             if std::mem::take(&mut f2_pending) {
-                log_script_frame(&gui, "f2");
+                log_script_frame(&gui, "f2", &item_names);
                 // Vanilla's F2: the frame goes to the config dir's `screenshots/` folder.
                 match crate::screenshots::save(image.clone()) {
                     Ok(name) => {
@@ -2509,9 +2622,12 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         biomes: session.biomes.clone(),
         debug_env: session.debug_env.clone(),
         particle_types: session.particle_types.clone(),
-        // The flag wins over the saved option; without it, the saved option decides.
+        // The flag wins over the saved option; without it, the saved option decides (and a
+        // change in the options screen applies live, like vanilla's Vsync option).
         vsync: args.vsync.unwrap_or(session.options.vsync),
+        vsync_forced: args.vsync,
         options: session.options.clone(),
+        options_version: session.shared.options_version.load(Ordering::Relaxed),
         local: session.local,
         perspective: game::Perspective::default(),
         window: None,
@@ -2550,8 +2666,14 @@ struct App {
     /// The particle atlas types (uploaded to the renderer once it exists).
     particle_types: std::sync::Arc<haste_render::ParticleTypes>,
     vsync: bool,
-    /// Saved options (FOV for rendering, sensitivity for mouse look).
+    /// `--vsync` forced the mode: a change in the options screen must not override it.
+    vsync_forced: Option<bool>,
+    /// The options the game is running with: refreshed from [`Shared::live_options`] whenever
+    /// its version changes (not every frame), so a change in a vanilla options screen takes
+    /// effect immediately (FOV, GUI scale, mouse sensitivity, fullscreen, vsync).
     options: Options,
+    /// The `Shared::options_version` [`App::options`] was copied from.
+    options_version: u64,
     /// The local player's entity id and UUID, for its own model in third person.
     local: (EntityId, u128),
     /// Current perspective (F5 cycles it).
@@ -2656,7 +2778,8 @@ impl App {
 
     fn release_keys(&mut self) {
         self.input.release();
-        self.input.sample(&self.shared, self.perspective);
+        self.input
+            .sample(&self.shared, self.ui.as_ref(), self.perspective);
     }
 
     /// Mouse look speed from the saved sensitivity.
@@ -2668,7 +2791,31 @@ impl App {
         if self.renderer.is_none() {
             return;
         }
-        self.input.sample(&self.shared, self.perspective);
+        // The options the player just changed in a vanilla screen: the game thread applied
+        // them to `live_options` and bumped its version; copy them here so FOV, GUI scale and
+        // sensitivity follow this frame (vanilla reads its Options object live too).
+        let version = self.shared.options_version.load(Ordering::Relaxed);
+        if version != self.options_version {
+            self.options_version = version;
+            self.options = self.shared.live_options.lock().clone();
+            // The two options the window itself owns (vanilla's Fullscreen/Vsync callbacks touch
+            // the window and the swapchain): apply them to this client's window and renderer.
+            if let Some(w) = &self.window {
+                let want = self.options.fullscreen;
+                if w.fullscreen().is_some() != want {
+                    w.set_fullscreen(want.then_some(Fullscreen::Borderless(None)));
+                }
+            }
+            let want_vsync = self.vsync_forced.unwrap_or(self.options.vsync);
+            if want_vsync != self.vsync {
+                self.vsync = want_vsync;
+                if let Some(r) = &mut self.renderer {
+                    r.set_vsync(want_vsync);
+                }
+            }
+        }
+        self.input
+            .sample(&self.shared, self.ui.as_ref(), self.perspective);
         // The screen that opened or closed since the last frame takes or frees the cursor,
         // and "Disconnect" ends the run.
         self.sync_grab();
@@ -3090,6 +3237,41 @@ mod tests {
     use super::*;
 
     const DPP: f32 = 0.15; // vanilla's default sensitivity (50%) value
+
+    #[test]
+    fn gui_text_pos_finds_labels_and_slider_values() {
+        use haste_protocol::haste_core::gui::{GuiCommand, GuiFrame};
+        let frame = GuiFrame {
+            commands: vec![
+                GuiCommand::Text {
+                    x: 10,
+                    y: 20,
+                    text: "Done".into(),
+                    color: 0xffff_ffff,
+                    shadow: true,
+                },
+                GuiCommand::TranslatePush {
+                    dx: 5.0,
+                    dy: 7.0,
+                    dz: 0.0,
+                },
+                GuiCommand::Text {
+                    x: 10,
+                    y: 20,
+                    text: "Render Distance: 12".into(),
+                    color: 0xffff_ffff,
+                    shadow: true,
+                },
+                GuiCommand::TranslatePop,
+            ],
+            ..GuiFrame::default()
+        };
+        // An exact label, in the frame's coordinates.
+        assert_eq!(gui_text_pos(&frame, "Done"), Some((10, 20)));
+        // A slider's dynamic `label: value`, with the translation stack applied.
+        assert_eq!(gui_text_pos(&frame, "Render Distance"), Some((15, 27)));
+        assert_eq!(gui_text_pos(&frame, "FOV"), None);
+    }
 
     #[test]
     fn mouse_look_clamps_pitch() {

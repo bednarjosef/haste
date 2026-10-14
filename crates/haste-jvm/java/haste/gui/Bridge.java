@@ -65,6 +65,7 @@ public final class Bridge {
         };
         try {
             Proxies.gui.setScreen(s);
+            OptionBridge.releaseAll();
         } catch (Throwable t) {
             // Gui.setScreen leaves the new screen set even when its init throws: a screen that could not
             // open must not stay half-open (the next open would call removed() on it, and options
@@ -76,7 +77,10 @@ public final class Bridge {
         }
     }
 
-    public void close() { Proxies.gui.setScreen(null); }
+    public void close() {
+        Proxies.gui.setScreen(null);
+        OptionBridge.restoreToggles();
+    }
 
     /**
      * Drops everything a test (or a disconnecting client) leaves behind: the chat log and its scroll
@@ -133,6 +137,7 @@ public final class Bridge {
     /** One 20 Hz client tick: the HUD (chat fade, titles, overlay message), the chat queue and the open screen. */
     public void tick() {
         Mirror.update();
+        OptionBridge.tick();
         if (Mirror.inWorld()) {
             // a dead player (killed, or joined while dead) sees the death screen
             if (Mirror.health() <= 0f && !Mirror.flag(Mirror.F_IMMEDIATE_RESPAWN)
@@ -238,6 +243,20 @@ public final class Bridge {
 
     /** Whether a screen asked for the mouse to be grabbed (e.g. "Back to Game") and not released since. */
     public boolean mouseGrabbed() { return MouseImpl.grabbed; }
+
+    // ---- game input through the KeyMappings (haste.gui.OptionBridge) ----
+
+    /** A game key event (SDL3 scancode) mirrored into the KeyMappings; no screen may be open. */
+    public void gameKey(int scancode, boolean pressed) { OptionBridge.gameKey(scancode, pressed); }
+
+    /** A game mouse button (vanilla numbering) mirrored into the KeyMappings. */
+    public void gameMouse(int button, boolean pressed) { OptionBridge.gameMouse(button, pressed); }
+
+    /** The down state of the movement and action KeyMappings as a bitmask (OptionBridge.B_*). */
+    public int gameInput() { return OptionBridge.gameInput(); }
+
+    /** Clicks of the action KeyMappings not yet consumed, as a bitmask (OptionBridge.C_*). */
+    public int consumeClicks() { return OptionBridge.consumeClicks(); }
 
     /** Rust grabbed/released the mouse itself (e.g. on opening a screen). */
     public void setMouseGrabbed(boolean g) { MouseImpl.grabbed = g; }
