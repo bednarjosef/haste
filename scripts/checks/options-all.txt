@@ -1,0 +1,158 @@
+# Open every options sub-screen from the pause menu's Options..., screenshot each,
+# hover a button in each (tooltip), and close everything again.
+# GUI 480x270 (960x540 at gui scale 2); coordinates verified against the dumped layout.
+wait_until joined
+wait_until settled
+wait 10
+key Escape
+wait_until screen_open
+screenshot pause
+
+# Options... (pause menu row 5, left column)
+mouse 165 158
+click left 165 158
+wait_until screen_open
+screenshot options
+
+# Online... (the header row, right of the FOV slider)
+mouse 320 44
+click left 320 44
+wait_until screen_open
+screenshot online
+mouse 320 44
+wait 5
+screenshot online-hover
+key Escape
+wait_until screen_open
+
+# Skin Customization... (row 1 left)
+mouse 160 102
+click left 160 102
+wait_until screen_open
+screenshot skin
+mouse 160 102
+wait 5
+screenshot skin-hover
+key Escape
+wait_until screen_open
+
+# Music & Sounds... (row 1 right)
+mouse 336 102
+click left 336 102
+wait_until screen_open
+screenshot sound
+mouse 336 102
+wait 5
+screenshot sound-hover
+key Escape
+wait_until screen_open
+
+# Video Settings... (row 2 left)
+mouse 160 126
+click left 160 126
+wait_until screen_open
+screenshot video-settings
+mouse 160 126
+wait 5
+screenshot video-settings-hover
+key Escape
+wait_until screen_open
+
+# Controls... (row 2 right)
+mouse 336 126
+click left 336 126
+wait_until screen_open
+screenshot controls
+mouse 336 126
+wait 5
+screenshot controls-hover
+
+# Key Binds (Controls screen's top row, right column)
+mouse 336 48
+click left 336 48
+wait_until screen_open
+screenshot keybinds
+mouse 336 48
+wait 5
+screenshot keybinds-hover
+key Escape
+wait_until screen_open
+
+# Mouse Settings (Controls screen's top row, left column)
+mouse 160 48
+click left 160 48
+wait_until screen_open
+screenshot mouse-settings
+mouse 160 48
+wait 5
+screenshot mouse-settings-hover
+key Escape
+wait_until screen_open
+key Escape
+wait_until screen_open
+
+# Language... (row 3 left)
+mouse 160 150
+click left 160 150
+wait_until screen_open
+screenshot language
+mouse 160 150
+wait 5
+screenshot language-hover
+key Escape
+wait_until screen_open
+
+# Chat Settings... (row 3 right)
+mouse 336 150
+click left 336 150
+wait_until screen_open
+screenshot chat
+mouse 336 150
+wait 5
+screenshot chat-hover
+key Escape
+wait_until screen_open
+
+# Resource Packs... (row 4 left)
+mouse 160 174
+click left 160 174
+wait_until screen_open
+screenshot resource-packs
+mouse 160 174
+wait 5
+screenshot resource-packs-hover
+key Escape
+wait_until screen_open
+
+# Accessibility Settings... (row 4 right)
+mouse 336 174
+click left 336 174
+wait_until screen_open
+screenshot accessibility
+mouse 336 174
+wait 5
+screenshot accessibility-hover
+key Escape
+wait_until screen_open
+
+# Telemetry Data (row 5 left): inactive while Haste sends no telemetry (vanilla greys it
+# out too); hover it for its "telemetry disabled" tooltip
+mouse 160 198
+wait 5
+screenshot telemetry-hover
+
+# Credits & Attribution (row 5 right)
+mouse 336 198
+click left 336 198
+wait_until screen_open
+screenshot credits
+mouse 336 198
+wait 5
+screenshot credits-hover
+key Escape
+wait_until screen_open
+# Options... closes back to the pause menu, Escape closes that
+key Escape
+wait_until screen_open
+key Escape
+wait_until screen_closed
