@@ -564,6 +564,26 @@ impl GuiPipeline {
         Ok(())
     }
 
+    /// The pause-menu server links from the configuration phase's `server_links` packet, one
+    /// string per link: `"<b|c>\t<label>\t<url>"` (b = built-in label id, c = custom label text).
+    pub fn set_server_links(&self, links: &[String]) -> anyhow::Result<()> {
+        self.with_bridge(|env, bridge| {
+            let arr = JObjectArray::<JString>::new(env, links.len(), JString::null())?;
+            for (i, l) in links.iter().enumerate() {
+                let s = JString::from_str(env, l)?;
+                arr.set_element(env, i, &s)?;
+            }
+            env.call_method(
+                bridge,
+                jni_str!("setServerLinks"),
+                jni_sig!("([Ljava/lang/String;)V"),
+                &[(&arr).into()],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     /// Tab held or released: vanilla's player list overlay is shown while it is down.
     pub fn set_tab_list_visible(&self, visible: bool) {
         if let Err(e) = self.with_bridge(|env, bridge| {

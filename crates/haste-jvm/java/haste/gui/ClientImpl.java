@@ -27,6 +27,20 @@ public final class ClientImpl {
     public static com.mojang.datafixers.DataFixer getFixerUpper(Minecraft m) { return FIXER; }
 
     /**
+     * The creative inventory's saved hotbars: real vanilla Java over {@code hotbar.nbt} in the JVM
+     * game directory, like vanilla's (its working directory); the DataFixer is the one above.
+     */
+    private static net.minecraft.client.HotbarManager hotbars;
+    public static net.minecraft.client.HotbarManager getHotbarManager(Minecraft m) {
+        if (hotbars == null) {
+            java.io.File dir = new java.io.File(System.getProperty("haste.minecraftDir", "."));
+            dir.mkdirs();
+            hotbars = new net.minecraft.client.HotbarManager(dir.toPath(), FIXER);
+        }
+        return hotbars;
+    }
+
+    /**
      * The world storage (vanilla: built once in {@code Minecraft}'s constructor over
      * {@code <game dir>/saves}). Haste's singleplayer worlds live in the directory Rust gave in
      * {@code haste.singleplayerDir} (haste-setup's worlds module: {@code <config>/singleplayer},
@@ -91,6 +105,16 @@ public final class ClientImpl {
         return Proxies.service(net.minecraft.client.renderer.entity.EntityRenderDispatcher.class);
     }
     public static PlayerSocialManager getPlayerSocialManager(Minecraft m) { return Proxies.service(PlayerSocialManager.class); }
+    /** The skin manager: offline mode — every player shows their default skin, nothing is fetched. */
+    public static net.minecraft.client.resources.SkinManager getSkinManager(Minecraft m) {
+        return Proxies.service(net.minecraft.client.resources.SkinManager.class);
+    }
+    /** Vanilla's createLookup with no network: the profile's default skin, always (offline mode). */
+    public static java.util.function.Supplier<net.minecraft.world.entity.player.PlayerSkin> createLookup(
+        net.minecraft.client.resources.SkinManager s, com.mojang.authlib.GameProfile profile, boolean requireSecure) {
+        net.minecraft.world.entity.player.PlayerSkin skin = net.minecraft.client.resources.DefaultPlayerSkin.get(profile);
+        return () -> skin;
+    }
     /** Haste always plays through a server connection (singleplayer = a local vanilla server process, setup). */
     public static boolean isDemo(Minecraft m) { return false; }
     /** A local singleplayer server is running (Rust starts/stops it; the pause screen labels the button "Save and Quit"). */
@@ -197,6 +221,10 @@ public final class ClientImpl {
     /** No player is blocked or restricted (Haste has no social/block list yet). */
     public static boolean isBlocked(Minecraft m, java.util.UUID id) { return false; }
     public static boolean isFriendOnlyRestricted(Minecraft m, java.util.UUID id) { return false; }
+    /** Whether a profile id is the local player's (vanilla: the user's profile id). */
+    public static boolean isLocalPlayer(Minecraft m, java.util.UUID id) {
+        return id.equals(Proxies.player.getGameProfile().id());
+    }
     /** Vanilla's forceUnicodeFont option (the gui-scale list accounts for its wider font). */
     public static boolean isEnforceUnicode(Minecraft m) { return Proxies.options.forceUnicodeFont().get(); }
     /** Re-derives the GUI scale like Minecraft.resizeGui; the Rust window picks the real size up. */
