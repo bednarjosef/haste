@@ -9,8 +9,8 @@ use std::sync::Arc;
 use glam::{Mat3, Mat4, Vec3};
 use haste_assets::Assets;
 use haste_core::model::{
-    CubeModel, Decoration, DroppedItem, EntityInstance, ItemFrameDecoration, ModelPart,
-    PaintingDecoration, PoseOverrides,
+    BodyOp, BodyTransform, CubeModel, Decoration, DroppedItem, EntityInstance, ItemFrameDecoration,
+    ModelPart, PaintingDecoration, PoseOverrides,
 };
 use haste_core::{EntityId, Identifier};
 
@@ -149,6 +149,21 @@ pub(crate) fn texture_and_scale(e: &EntityInstance) -> (Identifier, f32) {
         (None, false) => e.model.texture.clone(),
     };
     (texture, e.scale * if humanoid { PLAYER_SCALE } else { 1.0 })
+}
+
+/// The whole-model transform `LivingEntityRenderer.setupRotations` builds: the ops compose left
+/// to right (`poseStack` calls), so the first op is outermost, exactly like vanilla.
+fn body_matrix(b: &BodyTransform) -> Mat4 {
+    let mut m = Mat4::IDENTITY;
+    for op in b.iter() {
+        m *= match op {
+            BodyOp::RotateX(a) => Mat4::from_rotation_x(*a),
+            BodyOp::RotateY(a) => Mat4::from_rotation_y(*a),
+            BodyOp::RotateZ(a) => Mat4::from_rotation_z(*a),
+            BodyOp::Translate(t) => Mat4::from_translation(*t),
+        };
+    }
+    m
 }
 
 /// A per-tick value the renderer lerps by partial tick, the way a vanilla render state
@@ -484,9 +499,27 @@ impl EntityRenderer {
             }
             let (texture, scale) = texture_and_scale(e);
             let rect = self.texture_rect(&texture, assets);
-            let root = Mat4::from_translation((e.pos - camera).as_vec3())
-                * Mat4::from_rotation_y((180.0 - e.yaw).to_radians())
-                * Mat4::from_scale(Vec3::new(-scale, -scale, scale) / 16.0);
+            // `LivingEntityRenderer.setupRotations`: the body yaw turns the whole model, except a
+            // sleeping entity, whose pose replaces that yaw with its own rotation sequence. The
+            // body transform (death tilt, sleeping, upside-down, player flying/swimming pitch) is
+            // applied between the yaw and the model scale.
+            let yaw = if e.body.suppress_yaw {
+                Mat4::IDENTITY
+            } else {
+                Mat4::from_rotation_y((180.0 - e.yaw).to_radians())
+            };
+            let origin = e.pos - camera + e.body.pre_translate.as_dvec3();
+            // The subclass scale (`EntityRenderer.scale`) folds into the model scale: it is
+            // diagonal, so it commutes with the flip and matches vanilla's order.
+            let s = Vec3::new(
+                -scale * e.body_scale.x,
+                -scale * e.body_scale.y,
+                scale * e.body_scale.z,
+            );
+            let root = Mat4::from_translation(origin.as_vec3())
+                * yaw
+                * body_matrix(&e.body)
+                * Mat4::from_scale(s / 16.0);
             let start = self.vertices.len();
             emit_part(
                 &mut self.vertices,
@@ -894,6 +927,58 @@ impl EntityRenderer {
     pub fn set_item_names(&mut self, names: Vec<Identifier>) {
         self.item_names = names;
         self.item_models.clear();
+    }
+
+    /// Poses the frame's block entities (chests, shulker boxes) into the same vertex stream as
+    /// the entities, after `prepare`: one draw call covers both, and each texture lands in the
+    /// shared atlas on first use (the per-vertex `rect` picks it). `visible` decides per
+    /// instance whether it is drawn (frustum and section culling are the caller's, like the
+    /// terrain's); returns how many were posed.
+    pub fn append_block_entities(
+        &mut self,
+        instances: &[crate::blockentity::BlockEntityInstance],
+        camera: glam::DVec3,
+        visible: impl Fn(&crate::blockentity::BlockEntityInstance) -> bool,
+        assets: &mut Assets,
+    ) -> u32 {
+        let start = self.vertices.len();
+        let mut drawn = 0;
+        for inst in instances {
+            if !visible(inst) {
+                continue;
+            }
+            let texture = match inst.kind {
+                crate::blockentity::BlockEntityKind::Chest(m) => {
+                    crate::blockentity::chest_texture(m, inst.half)
+                }
+                crate::blockentity::BlockEntityKind::Shulker(c) => {
+                    crate::blockentity::shulker_texture(c)
+                }
+            };
+            let rect = self.texture_rect(&texture, assets);
+            let out = &mut self.vertices;
+            let emit = |out: &mut Vec<EntityVertex>,
+                        model: &CubeModel,
+                        part: &ModelPart,
+                        pose: &PoseOverrides,
+                        m: Mat4,
+                        rect: [u32; 4],
+                        light: (u8, u8)| {
+                emit_part(out, model, part, pose, m, rect, light, 0.0);
+            };
+            crate::blockentity::emit_block_entity(out, inst, camera, rect, &emit);
+            drawn += 1;
+        }
+        if self.vertices.len() > self.vertex_capacity {
+            self.vertex_capacity = self.vertices.len().next_power_of_two();
+            self.vertex_buffer = make_vertex_buffer(&self.device, self.vertex_capacity);
+        }
+        if self.vertices.len() > start && !self.vertices.is_empty() {
+            self.queue
+                .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
+        }
+        self.drawn += drawn;
+        drawn
     }
 
     /// The item model of a registry index, loaded once and cached (`air` and unknown ids map to
@@ -1940,6 +2025,24 @@ fn placeholder_texture() -> image::RgbaImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `body_matrix` composes the ops left to right like `LivingEntityRenderer.setupRotations`
+    /// (`poseStack` calls): `rotateZ(90); translate(0, 2, 0)` maps the origin to (-2, 0, 0).
+    #[test]
+    fn body_matrix_applies_ops_in_vanilla_order() {
+        let mut b = BodyTransform::default();
+        b.push(BodyOp::RotateZ(std::f32::consts::FRAC_PI_2));
+        b.push(BodyOp::Translate(Vec3::new(0.0, 2.0, 0.0)));
+        let m = body_matrix(&b);
+        let p = m.transform_point3(Vec3::ZERO);
+        assert!((p.x - -2.0).abs() < 1e-5, "x {}", p.x);
+        assert!(p.y.abs() < 1e-5, "y {}", p.y);
+        // A single X rotation: (0, 1, 0) -> (0, 0, 1).
+        let mut b = BodyTransform::default();
+        b.push(BodyOp::RotateX(std::f32::consts::FRAC_PI_2));
+        let p = body_matrix(&b).transform_point3(Vec3::Y);
+        assert!((p.z - 1.0).abs() < 1e-5, "z {}", p.z);
+    }
 
     /// Every texture haste-entity's model table names must exist in the client jar (the
     /// renderer loads them on demand by identifier; a typo would draw the placeholder at

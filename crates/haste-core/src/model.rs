@@ -45,6 +45,55 @@ pub struct PoseOverrides {
     pub hidden: Vec<String>,
 }
 
+/// One step of the whole-model transform `LivingEntityRenderer.setupRotations` builds (plus
+/// `AvatarRenderer`'s flying/swimming pitch), in the order vanilla applies it (`poseStack` calls
+/// compose left to right, so the first op is outermost).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BodyOp {
+    RotateX(f32),
+    RotateY(f32),
+    RotateZ(f32),
+    /// A translation in blocks, in the pre-scale (world-oriented) space.
+    Translate(Vec3),
+}
+
+/// The whole-model transform applied between the body yaw and the model scale. Fixed-size and
+/// `Copy`: no per-frame allocation (`setupRotations` never emits more than four steps).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BodyTransform {
+    pub ops: [BodyOp; 4],
+    pub len: u8,
+    /// `LivingEntityRenderer.setupRotations`: a sleeping entity skips the `180 - bodyRot` yaw and
+    /// uses its own rotation sequence instead.
+    pub suppress_yaw: bool,
+    /// A translation applied before the yaw (sleeping's bed offset), in blocks.
+    pub pre_translate: Vec3,
+}
+
+impl Default for BodyTransform {
+    fn default() -> Self {
+        BodyTransform {
+            ops: [BodyOp::RotateY(0.0); 4],
+            len: 0,
+            suppress_yaw: false,
+            pre_translate: Vec3::ZERO,
+        }
+    }
+}
+
+impl BodyTransform {
+    pub fn push(&mut self, op: BodyOp) {
+        if (self.len as usize) < self.ops.len() {
+            self.ops[self.len as usize] = op;
+            self.len += 1;
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &BodyOp> {
+        self.ops[..self.len as usize].iter()
+    }
+}
+
 /// One drawable entity instance handed to the renderer each frame (already interpolated).
 #[derive(Clone, Debug)]
 pub struct EntityInstance {
@@ -56,6 +105,13 @@ pub struct EntityInstance {
     pub head_yaw: f32,
     pub scale: f32,
     pub pose: PoseOverrides,
+    /// Whole-model rotations (`LivingEntityRenderer.setupRotations`: death tilt, sleeping,
+    /// upside-down, player flying/swimming pitch), applied by the renderer between the body yaw
+    /// and the model scale.
+    pub body: BodyTransform,
+    /// Per-axis subclass scale (`EntityRenderer.scale`, e.g. `CreeperRenderer.scale`'s swell
+    /// wobble), multiplied into the model scale. `Vec3::ONE` for most entities.
+    pub body_scale: Vec3,
     pub skin: Option<Identifier>,
     pub nametag: Option<String>,
     /// Hurt flash strength in 0..1 (1 just after the hit, easing to 0 over the 10 hurt
@@ -173,5 +229,4 @@ pub struct PaintingDecoration {
     pub height: u8,
     /// The front sprite's texture id, `None` for a variant we do not know (draw the back only).
     pub front: Option<Identifier>,
-    // MERGE end
 }
