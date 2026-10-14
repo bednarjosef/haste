@@ -929,6 +929,112 @@ fn inventory_screen() {
     );
 }
 
+/// The creative inventory: vanilla's `CreativeModeInventoryScreen` over the connection's
+/// feature flags and search trees. In creative mode E opens it, the tabs are built for the
+/// server's enabled features (chest and oak_door appear), the search tab filters by typed
+/// text, and picking an item from a tab sends `set_creative_slot` (which vanilla's kept
+/// `handleCreativeModeItemAdd` gates on `isFeatureEnabled`).
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM, data generator reports)"]
+fn creative_inventory_and_search() {
+    use haste_core::gui::GuiCommand;
+    use haste_jvm::keys;
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    h.clear_unimplemented().unwrap();
+    reset(gui);
+    gui.with_state(|s| {
+        s.in_world = true;
+        s.game_mode = haste_core::game::GameMode::Creative;
+        s.permission_level = 0;
+    });
+    // One frame first: the mirror arrays (game mode) are filled per render/tick, and the
+    // inventory screen's init asks hasInfiniteMaterials while opening.
+    let _ = render(&h, (0.0, 0.0));
+    // E opens the inventory, whose init swaps in the creative screen (vanilla:
+    // InventoryScreen.init when hasInfiniteMaterials)
+    open(&h, haste_jvm::ScreenKind::Inventory);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen"),
+        "the creative screen replaces the inventory screen"
+    );
+    // The default tab is Building Blocks: its items are the ones the enabled features allow
+    // (the 195x136 panel is centred in the 320x240 GUI: leftPos 62, topPos 52).
+    let f = render(&h, (0.0, 0.0));
+    let items = |f: &haste_core::gui::GuiFrame| {
+        f.commands
+            .iter()
+            .filter_map(|c| match c {
+                GuiCommand::Item { item, .. } => Some(item.0),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let tab_items = items(&f);
+    assert!(
+        tab_items.contains(&item_id("minecraft:chest")),
+        "chest in the tab items (enabled features): first frame's {:?}",
+        tab_items.iter().take(5).collect::<Vec<_>>()
+    );
+    // Click the search tab (the rightmost top tab: getTabX for the aligned-right column 6 is
+    // 195-27+1 = 169, so x 62+169..62+195 = 231..257, y 52-32 = 20..52 in GUI pixels) and type
+    // "stone": the results are the stone family.
+    assert!(
+        gui.mouse(244.0, 36.0, Some((keys::MOUSE_LEFT, true))),
+        "clicking the search tab"
+    );
+    assert!(gui.mouse(244.0, 36.0, Some((keys::MOUSE_LEFT, false))));
+    for c in "stone".chars() {
+        assert!(
+            gui.char_typed(c, 0),
+            "typing {c:?}: {:?}",
+            gui.take_last_error()
+        );
+    }
+    let f = render(&h, (0.0, 0.0));
+    let found = items(&f);
+    assert!(
+        found.contains(&item_id("minecraft:stone")),
+        "stone in the search results: {found:?}"
+    );
+    assert!(
+        found.contains(&item_id("minecraft:cobblestone")),
+        "cobblestone in the search results: {found:?}"
+    );
+    assert!(
+        !found.contains(&item_id("minecraft:oak_planks")),
+        "oak planks not in the stone results: {found:?}"
+    );
+    // The tab strip is still drawn (the search tab's icon is the compass)
+    assert!(found.contains(&item_id("minecraft:compass")));
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for CreativeModeInventoryScreen: {unimpl:#?}"
+    );
+    // Escape closes the screen through vanilla's onClose -> closeContainer, which restores the
+    // player's containerMenu (the creative screen replaced it with its item picker menu) and
+    // sends container_close for the picker's window id. (E would type into the focused search
+    // box: the search tab captures it, so vanilla closes this screen with Escape.)
+    assert!(press(&h, keys::ESCAPE));
+    assert!(!gui.is_open());
+    assert!(
+        outgoing(&h)
+            .iter()
+            .any(|(id, _)| *id == serverbound_id("minecraft:container_close")),
+        "container_close sent"
+    );
+    gui.with_state(|s| {
+        s.game_mode = haste_core::game::GameMode::Survival;
+        s.in_world = false;
+    });
+    // The mirror arrays only refresh on render/tick: update them so the game mode is back
+    // before any later test opens a screen.
+    gui.tick();
+}
+
 /// `minecraft:item` registry id of an item, from the data generator's report (Rust's numbering).
 fn item_id(name: &str) -> u32 {
     let reports = cache().join("datagen/26.3/reports/registries.json");

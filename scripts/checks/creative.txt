@@ -5,7 +5,11 @@ wait_until settled
 key E
 wait_until screen_open
 screenshot creative
-# The search box: click it (top right of the centred panel in a 480x270 GUI) and type.
+# The search box: select the search tab first (top right of the centred panel in a 480x270
+# GUI), then click inside the box and type.
+mouse 324 50
+click left 324 50
+wait 5
 mouse 330 90
 click left 330 90
 type stone
