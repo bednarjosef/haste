@@ -59,11 +59,16 @@ impl SpriteAnimator {
                 let stats = stats.clone();
                 move || {
                     let sprites = atlas.animated_sprites();
+                    let padding = atlas.padding();
                     // One scratch per mip level (level 0 included), reused
                     // across sprites and ticks: `write_texture` stages its
                     // data before returning, so the buffers are free to reuse
                     // once the call is done.
                     let mut scratch: Vec<Vec<u8>> =
+                        vec![Vec::new(); atlas.mip_levels() as usize + 1];
+                    // The same sprites with their padding border filled in,
+                    // one buffer per level: what a region write puts on the GPU.
+                    let mut padded: Vec<Vec<u8>> =
                         vec![Vec::new(); atlas.mip_levels() as usize + 1];
                     // The tick whose pixels are on the GPU; `None` until the
                     // first prepared tick (the GPU starts on the sprites'
@@ -114,12 +119,25 @@ impl SpriteAnimator {
                                 sprite.alpha_cutoff_bias,
                             );
                             for level in 0..levels as u32 {
+                                // Write the whole slot — content plus the
+                                // border extension of this frame's own edges, so
+                                // the border never shows the previous frame.
+                                let border = padding >> level;
+                                let (cx, cy) = (x >> level, y >> level);
+                                let (cw, ch) = (w >> level, h >> level);
+                                pad_frame(
+                                    &mut padded[level as usize],
+                                    &scratch[level as usize],
+                                    cw,
+                                    ch,
+                                    border,
+                                );
                                 write_region(
                                     &queue,
                                     &texture,
                                     level,
-                                    [x >> level, y >> level, w >> level, h >> level],
-                                    &scratch[level as usize],
+                                    [cx - border, cy - border, cw + 2 * border, ch + 2 * border],
+                                    &padded[level as usize],
                                 );
                             }
                         }
@@ -187,6 +205,40 @@ impl Drop for SpriteAnimator {
         self.tick_tx.take();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
+        }
+    }
+}
+
+/// Edge-extends one mip level of an animated sprite's frame (`content`, a
+/// tight `w` x `h` RGBA image) into the `border`-texel padding around it, the
+/// same clamp-to-edge extension vanilla's atlas blit gives every sprite: each
+/// border texel — corners included — is a copy of the nearest edge texel of the
+/// frame. The padded image (tight, `(w + 2 * border)` rows of `content`) goes
+/// to `dst`, whose capacity is reused across frames.
+fn pad_frame(dst: &mut Vec<u8>, content: &[u8], w: u32, h: u32, border: u32) {
+    dst.clear();
+    let texel = |px: u32, py: u32| {
+        let at = ((py * w + px) * 4) as usize;
+        [
+            content[at],
+            content[at + 1],
+            content[at + 2],
+            content[at + 3],
+        ]
+    };
+    for out_y in 0..h + 2 * border {
+        // Padding rows above copy the first content row, below the last one.
+        let row = out_y.saturating_sub(border).min(h - 1);
+        let left = texel(0, row);
+        let right = texel(w - 1, row);
+        for _ in 0..border {
+            dst.extend_from_slice(&left);
+        }
+        for px in 0..w {
+            dst.extend_from_slice(&texel(px, row));
+        }
+        for _ in 0..border {
+            dst.extend_from_slice(&right);
         }
     }
 }
@@ -356,6 +408,7 @@ mod tests {
             return;
         };
         let atlas = Arc::new(synthetic_atlas());
+        let size = atlas.size();
         let (texture, _view, _sampler, _rects, _len) =
             crate::pipeline::upload_atlas(&gpu.device, &gpu.queue, &atlas).unwrap();
         let mut animator =
@@ -368,6 +421,7 @@ mod tests {
         }
         let sprite = &atlas.animated_sprites()[0];
         let [x, y, w, h] = sprite.region.pixel_rect;
+        let padding = atlas.padding();
         let frame1 = sprite.frames[1].as_raw();
         assert_eq!(&read_region(&gpu, &texture, x, y, w, h, 0), frame1);
         let mut levels = vec![Vec::new(); atlas.mip_levels() as usize + 1];
@@ -383,6 +437,49 @@ mod tests {
             &read_region(&gpu, &texture, x / 2, y / 2, w / 2, h / 2, 1),
             &levels[1]
         );
+        // The border around the content holds the frame's own edges, so a mip
+        // average at the sprite's edge stays inside the sprite.
+        for level in 0..=written as u32 {
+            // The slot (content plus border) at this level, clipped to what
+            // the atlas holds: the leftmost sprites' outer border falls
+            // outside the atlas, as in vanilla's clamped blit.
+            let border = padding >> level;
+            let (cx, cy) = (x >> level, y >> level);
+            let (cw, ch) = ((w >> level) + 2 * border, (h >> level) + 2 * border);
+            let (col0, row0) = (border.saturating_sub(cx), border.saturating_sub(cy));
+            let level_size = size >> level;
+            let (slot_w, slot_h) = (
+                (cw - col0).min(level_size.saturating_sub(cx - border + col0)),
+                (ch - row0).min(level_size.saturating_sub(cy - border + row0)),
+            );
+            let mut expected = Vec::new();
+            pad_frame(
+                &mut expected,
+                &levels[level as usize],
+                w >> level,
+                h >> level,
+                border,
+            );
+            let window: Vec<u8> = (row0..row0 + slot_h)
+                .flat_map(|row| {
+                    let start = ((row * cw + col0) * 4) as usize;
+                    expected[start..start + (slot_w * 4) as usize].to_vec()
+                })
+                .collect();
+            assert_eq!(
+                read_region(
+                    &gpu,
+                    &texture,
+                    cx - border + col0,
+                    cy - border + row0,
+                    slot_w,
+                    slot_h,
+                    level
+                ),
+                window,
+                "level {level} slot (content plus border)"
+            );
+        }
     }
 
     /// Copies an RGBA rectangle out of one mip level of `texture` and maps it

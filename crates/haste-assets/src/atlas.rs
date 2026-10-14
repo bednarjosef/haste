@@ -16,7 +16,10 @@ use crate::assets::{frame_at, Animation, AnimationSchedule, Assets};
 /// A sprite's placement in the atlas.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AtlasRegion {
-    /// Level-0 content rectangle `(x, y, width, height)` in atlas texels.
+    /// Level-0 content rectangle `(x, y, width, height)` in atlas texels: the
+    /// sprite itself, inset by the atlas's border from either side (vanilla
+    /// `TextureAtlasSprite`: `u0 = (x + padding) / atlasWidth`). The border
+    /// around it is the sprite's own edge texels, never sampled by UVs.
     pub pixel_rect: [u32; 4],
     /// Index into the atlas's sprite list; 0 is always the missing tile.
     pub sprite: u32,
@@ -200,6 +203,15 @@ const MAX_ATLAS_SIZE: u32 = 8192;
 /// Vanilla's block-atlas mip chain depth (4 levels).
 pub const MAX_MIP_LEVEL: u32 = 4;
 
+/// Border width vanilla puts around every sprite in an atlas with `mip_levels`
+/// levels (`Stitcher`: `padding = 1 << mipLevel`, with no anisotropic
+/// filtering). The border holds the sprite's own edge texels, so a texel fetch
+/// or a mip average at the sprite's edge stays inside the sprite instead of
+/// pulling in the neighbour's.
+pub const fn sprite_padding(mip_levels: u32) -> u32 {
+    1 << mip_levels
+}
+
 /// Region lookup over a built atlas (so baking and tests can share it).
 pub trait AtlasRegions {
     fn region_of(&self, texture_id: &str) -> AtlasRegion;
@@ -222,6 +234,8 @@ pub struct AtlasBuilder {
     pixels: Vec<u8>,
     size: u32,
     mip_levels: u32,
+    /// Border width around every sprite's content (vanilla `Stitcher.padding`).
+    padding: u32,
     missing: AtlasRegion,
     /// Sprites with an `.mcmeta` animation; packed with their first frame.
     animated: Vec<AnimatedSprite>,
@@ -243,18 +257,34 @@ impl AtlasBuilder {
         // Sort by height descending for the shelf packer (Pomme).
         sources.sort_by_key(|s| std::cmp::Reverse(s.h.max(MISSING_TILE)));
 
-        let mip_align = if with_mips { 1 << MAX_MIP_LEVEL } else { 1 };
-        let mut total_area: u64 = (MISSING_TILE * MISSING_TILE) as u64;
+        // Vanilla `SpriteLoader.stitch` picks the atlas mip level from the
+        // smallest sprite before stitching; the `Stitcher` then derives every
+        // sprite's border from it (`padding = 1 << mipLevel`), which doubles as
+        // the mip alignment: both the border and the sprite then divide exactly
+        // at every mip level.
+        let mip_levels = if with_mips {
+            let level = sources
+                .iter()
+                .filter(|s| !s.data.is_empty())
+                .fold(MAX_MIP_LEVEL, |level, s| {
+                    level.min(s.w.trailing_zeros().min(s.h.trailing_zeros()))
+                });
+            level.min(MAX_MIP_LEVEL)
+        } else {
+            0
+        };
+        let padding = sprite_padding(mip_levels);
+        let mut total_area: u64 = u64::from((MISSING_TILE + 2 * padding).pow(2));
         for source in &sources {
             if !source.data.is_empty() {
-                total_area += u64::from(source.w.next_multiple_of(mip_align))
-                    * u64::from(source.h.next_multiple_of(mip_align));
+                total_area += u64::from((source.w + 2 * padding).next_multiple_of(padding))
+                    * u64::from(source.h + 2 * padding);
             }
         }
         let mut atlas_size = (((total_area as f64) * 1.4).sqrt().ceil() as u32).next_power_of_two();
 
         let (placements, missing_region) = loop {
-            let (result, all_fit) = pack(&sources, atlas_size, mip_align);
+            let (result, all_fit) = pack(&sources, atlas_size, padding);
             if all_fit || atlas_size >= MAX_ATLAS_SIZE {
                 if !all_fit {
                     tracing::warn!(
@@ -267,7 +297,9 @@ impl AtlasBuilder {
         };
 
         let mut atlas_pixels = vec![0u8; (atlas_size * atlas_size * 4) as usize];
-        // Vanilla `MissingTextureAtlasSprite.generateMissingImage`.
+        // Vanilla `MissingTextureAtlasSprite.generateMissingImage`, written at
+        // the missing tile's content rect (its own border is filled with its
+        // own edge texels below, like every other sprite's).
         for py in 0..MISSING_TILE {
             for px in 0..MISSING_TILE {
                 let pink = (py < MISSING_TILE / 2) ^ (px < MISSING_TILE / 2);
@@ -276,7 +308,7 @@ impl AtlasBuilder {
                 } else {
                     [0, 0, 0, 255]
                 };
-                let idx = ((py * atlas_size + px) * 4) as usize;
+                let idx = (((py + padding) * atlas_size + px + padding) * 4) as usize;
                 atlas_pixels[idx..idx + 4].copy_from_slice(&color);
             }
         }
@@ -329,28 +361,25 @@ impl AtlasBuilder {
             0
         };
 
-        let pixels = if mip_levels > 0 {
-            // Sprite list for the mip chain: the missing tile plus every
-            // placed sprite, with its mip treatment (vanilla generates mips
-            // per sprite, so cutout sprites never average in their
-            // neighbours or the transparent-black texels).
-            let mut mip_sprites = vec![(missing_region.pixel_rect, MipmapStrategy::Mean, 0.0f32)];
-            for src in &sources {
-                if let Some((cx, cy)) = placements.get(src.name.as_str()).copied().flatten() {
-                    mip_sprites.push((
-                        [cx, cy, src.w, src.h],
-                        src.mipmap_strategy,
-                        src.alpha_cutoff_bias,
-                    ));
-                }
+        // Sprite list for the mip chain: the missing tile plus every placed
+        // sprite, with its mip treatment (vanilla generates mips per sprite, so
+        // cutout sprites never average in their neighbours or the
+        // transparent-black texels). Without mips the chain is level 0 alone,
+        // still with each sprite's border filled in.
+        let mut mip_sprites = vec![(missing_region.pixel_rect, MipmapStrategy::Mean, 0.0f32)];
+        for src in &sources {
+            if let Some((cx, cy)) = placements.get(src.name.as_str()).copied().flatten() {
+                mip_sprites.push((
+                    [cx, cy, src.w, src.h],
+                    src.mipmap_strategy,
+                    src.alpha_cutoff_bias,
+                ));
             }
-            build_mip_chain(atlas_pixels, atlas_size, mip_levels, &mip_sprites)
-        } else {
-            atlas_pixels
-        };
+        }
+        let pixels = build_mip_chain(atlas_pixels, atlas_size, mip_levels, padding, &mip_sprites);
 
         tracing::info!(
-            "Atlas built: {atlas_size}x{atlas_size}, mip levels {mip_levels}, {} regions",
+            "Atlas built: {atlas_size}x{atlas_size}, mip levels {mip_levels}, border {padding}, {} regions",
             regions.len()
         );
 
@@ -360,6 +389,7 @@ impl AtlasBuilder {
             pixels,
             size: atlas_size,
             mip_levels,
+            padding,
             missing: missing_region,
             animated,
         })
@@ -396,6 +426,15 @@ impl AtlasBuilder {
 
     pub fn mip_levels(&self) -> u32 {
         self.mip_levels
+    }
+
+    /// Border width around every sprite's content, in level-0 texels (vanilla
+    /// `Stitcher.padding`). A sprite's slot in the atlas is its content rect
+    /// grown by this much on all four sides; the border holds the sprite's own
+    /// edge texels. For animated sprites, a region write must cover the whole
+    /// slot so the border follows the new frame's edges.
+    pub fn padding(&self) -> u32 {
+        self.padding
     }
 
     /// Sprites with an `.mcmeta` animation, packed with their initial display frame;
@@ -486,33 +525,95 @@ fn pixel_region(x: u32, y: u32, w: u32, h: u32) -> AtlasRegion {
 }
 
 /// Shelf packer (Pomme `pack`): rows sorted by height, mip-aligned positions.
-fn pack(sources: &[Source], atlas_size: u32, mip_align: u32) -> (PackResult, bool) {
+/// `padding` is vanilla's `Stitcher.padding` and doubles as the mip alignment
+/// (both are `1 << mipLevel`): every sprite gets a `padding`-wide border on all
+/// four sides, and both the slot origin and the content origin (slot + border)
+/// stay aligned to `padding`, so a sprite's content and border divide exactly
+/// at every mip level.
+/// Placements hold the content origin (`slot + border`).
+fn pack(sources: &[Source], atlas_size: u32, padding: u32) -> (PackResult, bool) {
     let mut placements: HashMap<String, Option<(u32, u32)>> = HashMap::new();
-    let missing_region = pixel_region(0, 0, MISSING_TILE, MISSING_TILE);
-    let mut cursor_x = MISSING_TILE;
+    // The missing tile is always placed, at the atlas origin, with its border.
+    let missing_region = pixel_region(padding, padding, MISSING_TILE, MISSING_TILE);
+    let missing_slot = MISSING_TILE + 2 * padding;
+    let mut cursor_x = missing_slot;
     let mut cursor_y = 0;
-    let mut shelf_h = MISSING_TILE;
+    let mut shelf_h = missing_slot;
     let mut all_fit = true;
     for src in sources {
         if src.data.is_empty() {
             placements.insert(src.name.clone(), None);
             continue;
         }
-        if cursor_x + src.w > atlas_size {
-            cursor_y = (cursor_y + shelf_h).next_multiple_of(mip_align);
+        // The slot: content plus the border on both sides (vanilla
+        // `Stitcher.Holder` = `smallestFittingMinTexel(w + padding * 2)`).
+        let (slot_w, slot_h) = (src.w + 2 * padding, src.h + 2 * padding);
+        if cursor_x + slot_w > atlas_size {
+            cursor_y = (cursor_y + shelf_h).next_multiple_of(padding);
             cursor_x = 0;
             shelf_h = 0;
         }
-        if cursor_y + src.h > atlas_size {
+        if cursor_y + slot_h > atlas_size {
             all_fit = false;
             placements.insert(src.name.clone(), None);
             continue;
         }
-        placements.insert(src.name.clone(), Some((cursor_x, cursor_y)));
-        cursor_x = (cursor_x + src.w).next_multiple_of(mip_align);
-        shelf_h = shelf_h.max(src.h);
+        placements.insert(
+            src.name.clone(),
+            Some((cursor_x + padding, cursor_y + padding)),
+        );
+        cursor_x = (cursor_x + slot_w).next_multiple_of(padding);
+        shelf_h = shelf_h.max(slot_h);
     }
     ((placements, missing_region), all_fit)
+}
+
+/// Writes a sprite's own edge texels into the `border` texels around its
+/// content at one mip level (vanilla `TextureAtlas.uploadInitialContents`: each
+/// sprite is blitted into its padded slot through a clamp-to-edge sampler, so
+/// every border texel — corners included — is a copy of the nearest edge texel
+/// of the sprite's own mip level, never of a neighbouring sprite).
+/// `content` is the sprite's rect at this level; `level_size` is the atlas side
+/// at this level.
+fn extend_border(pixels: &mut [u8], level_size: u32, content: [u32; 4], border: u32) {
+    let [cx, cy, cw, ch] = content;
+    if border == 0 || cw == 0 || ch == 0 || cx < border || cy < border {
+        return;
+    }
+    let read = |pixels: &[u8], px: u32, py: u32| -> [u8; 4] {
+        let at = ((py * level_size + px) * 4) as usize;
+        [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
+    };
+    // Rows above and below: the content's first / last row, edge-extended
+    // sideways (so the corners are the corner texel, like the clamped sample).
+    for offset in 0..border {
+        for (row, to) in [(cy, cy - border + offset), (cy + ch - 1, cy + ch + offset)] {
+            let left = read(pixels, cx, row);
+            let right = read(pixels, cx + cw - 1, row);
+            for step in 0..border {
+                write_texel(pixels, level_size, cx - border + step, to, left);
+                write_texel(pixels, level_size, cx + cw + step, to, right);
+            }
+            for px in 0..cw {
+                let color = read(pixels, cx + px, row);
+                write_texel(pixels, level_size, cx + px, to, color);
+            }
+        }
+    }
+    // Columns beside the content rows.
+    for py in 0..ch {
+        let left = read(pixels, cx, cy + py);
+        let right = read(pixels, cx + cw - 1, cy + py);
+        for step in 0..border {
+            write_texel(pixels, level_size, cx - border + step, cy + py, left);
+            write_texel(pixels, level_size, cx + cw + step, cy + py, right);
+        }
+    }
+}
+
+fn write_texel(pixels: &mut [u8], size: u32, px: u32, py: u32, color: [u8; 4]) {
+    let at = ((py * size + px) * 4) as usize;
+    pixels[at..at + 4].copy_from_slice(&color);
 }
 
 /// Concatenated mip chain, built per sprite (vanilla `MipmapGenerator`: mips
@@ -520,12 +621,17 @@ fn pack(sources: &[Source], atlas_size: u32, mip_align: u32) -> (PackResult, boo
 /// `MipmapStrategy` — `Mean` is the plain linear-light 2x2 box filter; the
 /// cutout variants solidify or darken level 0 first, then rescale each level's
 /// alpha so the alpha-test coverage of level 0 survives the averaging).
-/// `sprites` are level-0 rects with their strategy and cutoff bias; regions
-/// outside sprites stay zero (never sampled).
+/// `padding` is the border width around each sprite (vanilla `Stitcher.padding`);
+/// at every level the border is filled with the sprite's own edge texels
+/// (`extend_border`), which is what keeps a mip average at the sprite's edge
+/// from pulling in the neighbour. `sprites` are level-0 content rects with
+/// their strategy and cutoff bias; regions outside the sprites' slots stay
+/// zero (never sampled).
 fn build_mip_chain(
     mut level0: Vec<u8>,
     size: u32,
     mip_levels: u32,
+    padding: u32,
     sprites: &[([u32; 4], MipmapStrategy, f32)],
 ) -> Vec<u8> {
     // Level 0 pre-treatment per sprite, in place: cutout sprites get their
@@ -545,6 +651,11 @@ fn build_mip_chain(
 
     let mut levels = Vec::with_capacity((mip_levels + 1) as usize);
     levels.push(level0);
+    // Every level's border is the edge extension of that level's content, so
+    // the border is written after the level's own content is final.
+    for (rect, _, _) in sprites {
+        extend_border(&mut levels[0], size, *rect, padding);
+    }
     for level in 1..=mip_levels {
         let next = size >> level;
         let mut mip = vec![0u8; (next * next * 4) as usize];
@@ -588,6 +699,15 @@ fn build_mip_chain(
                     *bias,
                 );
             }
+        }
+        for (rect, _, _) in sprites {
+            let [x, y, w, h] = *rect;
+            extend_border(
+                &mut mip,
+                next,
+                [x >> level, y >> level, w >> level, h >> level],
+                padding >> level,
+            );
         }
         levels.push(mip);
     }
@@ -669,7 +789,14 @@ pub fn fill_empty_with_dark(pixels: &mut [u8], size: u32, rect: [u32; 4]) {
         }
     }
     let Some(darkest) = darkest else { return };
-    let darkened = [3 * darkest[0] / 4, 3 * darkest[1] / 4, 3 * darkest[2] / 4];
+    // Vanilla computes `3 * channel / 4` in `int`
+    // (TextureUtil.fillEmptyAreasWithDarkColor); widen here so the multiply
+    // cannot overflow a byte before the division.
+    let darkened = [
+        (3 * u32::from(darkest[0]) / 4) as u8,
+        (3 * u32::from(darkest[1]) / 4) as u8,
+        (3 * u32::from(darkest[2]) / 4) as u8,
+    ];
     for py in 0..h {
         for px in 0..w {
             let at = index(x + px, y + py);
@@ -957,7 +1084,11 @@ mod tests {
                 animation: None,
             },
         ];
-        let ((placements, _), all_fit) = pack(&sources, 64, 1);
+        // A 4-level mip chain: a 16-texel border on every side of each sprite
+        // (vanilla `Stitcher.padding = 1 << mipLevel`), which is also the mip
+        // alignment, so the content origin stays a multiple of it.
+        let padding = sprite_padding(4);
+        let ((placements, _), all_fit) = pack(&sources, 128, padding);
         assert!(all_fit);
         let rects: Vec<(u32, u32)> = sources
             .iter()
@@ -967,19 +1098,30 @@ mod tests {
             for j in i + 1..rects.len() {
                 let (ax, ay) = rects[i];
                 let (bx, by) = rects[j];
-                let (aw, ah) = (sources[i].w, sources[i].h);
-                let (bw, bh) = (sources[j].w, sources[j].h);
+                // Slots (content grown by the border) must not overlap either:
+                // the border is what keeps a mip average inside the sprite.
+                let (aw, ah) = (sources[i].w + 2 * padding, sources[i].h + 2 * padding);
+                let (bw, bh) = (sources[j].w + 2 * padding, sources[j].h + 2 * padding);
                 let overlap = ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah;
-                assert!(!overlap, "sprites {i} and {j} overlap");
+                assert!(!overlap, "sprites {i} and {j} overlap (border included)");
             }
+        }
+        // Content rects are inset by the border from the slot, and stay
+        // multiples of it, so content and border divide exactly at every mip
+        // level (vanilla `TextureAtlasSprite`: `u0 = (x + padding) / width`).
+        for (x, y) in &rects {
+            assert_eq!(x % padding, 0, "content x={x} is not border aligned");
+            assert_eq!(y % padding, 0, "content y={y} is not border aligned");
         }
     }
 
     #[test]
     fn mip_chain_concatenates_levels() {
         let pixels = vec![255u8; 32 * 32 * 4];
-        let sprites = [([0, 0, 32, 32], MipmapStrategy::Mean, 0.0f32)];
-        let chain = build_mip_chain(pixels.clone(), 32, 2, &sprites);
+        // One 24x24 sprite with a 4-texel border in a 32x32 atlas: slot and
+        // content divide exactly at both mip levels.
+        let sprites = [([4, 4, 24, 24], MipmapStrategy::Mean, 0.0f32)];
+        let chain = build_mip_chain(pixels.clone(), 32, 2, 4, &sprites);
         assert_eq!(chain.len(), (32 * 32 + 16 * 16 + 8 * 8) * 4);
         assert_eq!(&chain[..pixels.len()], &pixels[..]);
         // every level is solid white
@@ -988,30 +1130,43 @@ mod tests {
         }
     }
 
-    /// An 8x8 cutout sprite (an "E" of green on transparent) placed next to
-    /// an opaque red sprite in a 16x16 atlas, with a 2-level mip chain: the
-    /// exact situation of grass tufts bleeding their neighbour's colour.
+    /// Atlas side of the two-sprite test atlas below.
+    const PAIR_ATLAS: u32 = 32;
+    /// Border width of the two-sprite test atlas (a 2-level mip chain).
+    const PAIR_PADDING: u32 = 4;
+    /// Content rects of the two sprites in `PAIR_ATLAS` (their slots are these
+    /// grown by `PAIR_PADDING` on all sides).
+    const PAIR_CUTOUT: [u32; 4] = [4, 4, 8, 8];
+    const PAIR_RED: [u32; 4] = [20, 4, 8, 8];
+
+    /// An 8x8 cutout sprite (an "E" of green on transparent) placed next to an
+    /// opaque red sprite, each with a 4-texel border, in a 32x32 atlas with a
+    /// 2-level mip chain: the exact situation of grass tufts bleeding their
+    /// neighbour's colour.
     fn cutout_next_to_red() -> Vec<u8> {
-        let mut level0 = vec![0u8; 16 * 16 * 4];
+        let mut level0 = vec![0u8; (PAIR_ATLAS * PAIR_ATLAS * 4) as usize];
         let mut put = |x: u32, y: u32, color: [u8; 4]| {
-            let at = ((y * 16 + x) * 4) as usize;
+            let at = ((y * PAIR_ATLAS + x) * 4) as usize;
             level0[at..at + 4].copy_from_slice(&color);
         };
-        // Opaque red sprite at (8, 0)-(15, 7).
+        // Opaque red sprite.
         for y in 0..8 {
-            for x in 8..16 {
+            for x in 20..28 {
                 put(x, y, [200, 20, 20, 255]);
             }
         }
-        // Cutout sprite at (0, 0)-(7, 7): green texels with alpha 255 in an
-        // E shape, transparent (alpha 0) around.
-        for y in 0..8 {
-            for x in 0..8 {
-                let solid = x < 2 || (y == 0 || y == 3 || y == 7) && x < 6;
+        // Cutout sprite: green texels with alpha 255 in an E shape, transparent
+        // (alpha 0) around, and a black first column so each mip level's edge
+        // colour differs per column.
+        for y in 4..12 {
+            for x in 4..12 {
+                let solid = x < 6 || (y == 4 || y == 7 || y == 11) && x < 10;
                 put(
                     x,
                     y,
-                    if solid {
+                    if x == 4 {
+                        [20, 20, 20, 255]
+                    } else if solid {
                         [20, 180, 40, 255]
                     } else {
                         [0, 0, 0, 0]
@@ -1020,10 +1175,21 @@ mod tests {
             }
         }
         let sprites = [
-            ([0, 0, 8, 8], MipmapStrategy::Cutout, 0.0f32),
-            ([8, 0, 8, 8], MipmapStrategy::Mean, 0.0f32),
+            (PAIR_CUTOUT, MipmapStrategy::Cutout, 0.0f32),
+            (PAIR_RED, MipmapStrategy::Mean, 0.0f32),
         ];
-        build_mip_chain(level0, 16, 2, &sprites)
+        build_mip_chain(level0, PAIR_ATLAS, 2, PAIR_PADDING, &sprites)
+    }
+
+    /// The mip chain's level `level` as `(bytes, side)`.
+    fn chain_level(chain: &[u8], level: u32) -> (&[u8], u32) {
+        let side = PAIR_ATLAS >> level;
+        let mut start = 0usize;
+        for below in 0..level {
+            let dim = PAIR_ATLAS >> below;
+            start += (dim * dim * 4) as usize;
+        }
+        (&chain[start..start + (side * side * 4) as usize], side)
     }
 
     /// No mip texel of the cutout sprite contains the red neighbour's colour:
@@ -1031,21 +1197,59 @@ mod tests {
     #[test]
     fn cutout_mips_never_blend_the_red_neighbour() {
         let chain = cutout_next_to_red();
-        // Level 1 (8x8) starts after the 16x16 level 0; level 2 (4x4) after that.
-        let level1 = &chain[16 * 16 * 4..][..8 * 8 * 4];
-        let level2 = &chain[(16 * 16 + 8 * 8) * 4..][..4 * 4 * 4];
-        for (level, dim) in [(level1, 8u32), (level2, 4u32)] {
-            let half = dim / 2; // the cutout sprite's slot is the left half
-            for y in 0..dim {
-                for x in 0..half {
-                    let at = ((y * dim + x) * 4) as usize;
-                    // Not the red of the neighbouring sprite (and not a mix
-                    // that keeps most of it).
-                    let [r, _, _, _] = [level[at], level[at + 1], level[at + 2], level[at + 3]];
+        for level in 0..=2u32 {
+            let (pixels, side) = chain_level(&chain, level);
+            // The sprite's slot: content plus the border on all sides.
+            let (sw, sh) = (
+                (PAIR_CUTOUT[2] + 2 * PAIR_PADDING) >> level,
+                (PAIR_CUTOUT[3] + 2 * PAIR_PADDING) >> level,
+            );
+            for y in 0..sh {
+                for x in 0..sw {
+                    let at = ((y * side + x) * 4) as usize;
+                    let [r, _, _, _] = [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]];
                     assert!(
                         r < 100,
-                        "cutout mip texel ({x},{y}) is reddish: {r} — neighbour bled in"
+                        "level {level} cutout texel ({x},{y}) is reddish: {r} — neighbour bled in"
                     );
+                }
+            }
+        }
+    }
+
+    /// Every border texel of a sprite, at every mip level, is the sprite's own
+    /// edge texel — the same clamp-to-edge extension vanilla's atlas blit
+    /// produces — so a texel fetch or a mip average at a sprite's edge sees
+    /// that sprite's edge and never its neighbour's.
+    #[test]
+    fn border_texels_equal_the_sprites_own_edges_at_every_mip_level() {
+        let chain = cutout_next_to_red();
+        for level in 0..=2u32 {
+            let (pixels, side) = chain_level(&chain, level);
+            let border = PAIR_PADDING >> level;
+            for [cx, cy, cw, ch] in [PAIR_CUTOUT, PAIR_RED] {
+                let (content, size) = ([cx >> level, cy >> level, cw >> level, ch >> level], side);
+                for py in 0..(content[3] + 2 * border) {
+                    for px in 0..(content[2] + 2 * border) {
+                        let (bx, by) = (content[0] - border + px, content[1] - border + py);
+                        let in_content = (content[0]..content[0] + content[2]).contains(&bx)
+                            && (content[1]..content[1] + content[3]).contains(&by);
+                        if in_content {
+                            continue;
+                        }
+                        // The nearest edge texel of this level's content.
+                        let ex = bx.clamp(content[0], content[0] + content[2] - 1);
+                        let ey = by.clamp(content[1], content[1] + content[3] - 1);
+                        let read = |px: u32, py: u32| {
+                            let at = ((py * size + px) * 4) as usize;
+                            [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
+                        };
+                        assert_eq!(
+                            read(bx, by),
+                            read(ex, ey),
+                            "level {level} border texel ({bx},{by}) of sprite at ({cx},{cy}) is not the sprite's own edge"
+                        );
+                    }
                 }
             }
         }
@@ -1058,19 +1262,19 @@ mod tests {
     #[test]
     fn cutout_mip_edges_are_not_darkened() {
         let chain = cutout_next_to_red();
-        let level0 = &chain[..16 * 16 * 4];
-        let level1 = &chain[16 * 16 * 4..][..8 * 8 * 4];
+        let (level0, side0) = chain_level(&chain, 0);
+        let (level1, side1) = chain_level(&chain, 1);
         // Every fully-opaque texel of level 0 within the cutout sprite.
-        for y in 0..8u32 {
-            for x in 0..8u32 {
-                let at = ((y * 16 + x) * 4) as usize;
+        for y in PAIR_CUTOUT[1]..PAIR_CUTOUT[1] + PAIR_CUTOUT[3] {
+            for x in PAIR_CUTOUT[0]..PAIR_CUTOUT[0] + PAIR_CUTOUT[2] {
+                let at = ((y * side0 + x) * 4) as usize;
                 if level0[at + 3] != 255 {
                     continue;
                 }
                 // Its level-1 covering texel keeps the green channel: a
                 // darkened edge (transparent black mixed in) would sag well
                 // below the opaque neighbours' green.
-                let mip = ((y / 2) * 8 + x / 2) as usize * 4;
+                let mip = (((y >> 1) * side1 + (x >> 1)) * 4) as usize;
                 let (g_opaque, g_mip) = (level0[at + 1], level1[mip + 1]);
                 assert!(
                     g_mip as u32 + 20 > g_opaque as u32 / 2,
