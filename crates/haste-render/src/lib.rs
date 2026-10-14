@@ -24,7 +24,9 @@ pub use entity::{default_skin, EntityRenderer, FirstPerson, Nametag};
 pub use gui::{GuiRenderer, GuiStats, ScreenNametag};
 pub use mesher::{mesh_section, MeshSnapshot, Mesher, SectionMesh, SnapshotSource};
 pub use occlusion::{compute_visible_mask, section_visibility, Face, VisibilitySet};
-pub use particles::{ParticleRenderer, ParticleSpawn, ParticleTypes, Particles, MAX_PARTICLES};
+pub use particles::{
+    DustOption, ParticleRenderer, ParticleSpawn, ParticleTypes, Particles, MAX_PARTICLES,
+};
 pub use pipeline::{upload_atlas, upload_section, Gpu, SectionGpuMesh};
 pub use renderer::{Camera, FrameInput, FrameStats, Renderer, SkyState};
 pub use sky::{SkyColors, SkyKind};

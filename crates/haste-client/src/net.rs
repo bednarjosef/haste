@@ -632,7 +632,8 @@ impl Session {
 
     /// `level_particles`: resolve the particle type against the static registry's names and
     /// queue the spawn (see the renderer's particles module for the semantics; unknown types
-    /// are skipped there, logged once). The type-specific `data` is not used yet.
+    /// are skipped there, logged once). `minecraft:dust`'s option data (colour, size) is the
+    /// one type-specific payload the renderer reads.
     fn push_particles(&mut self, p: &cb::LevelParticles, _regs: &SyncedRegistries) {
         let Some(kind) = self
             .particle_names
@@ -641,12 +642,16 @@ impl Session {
         else {
             return;
         };
+        let dust = dust_option(&kind, &p.particle.data);
         self.particle_spawns.push(haste_render::ParticleSpawn {
             kind,
             pos: p.pos,
             offset: [p.offset_x, p.offset_y, p.offset_z],
             max_speed: [p.max_speed_x, p.max_speed_y, p.max_speed_z],
             count: p.count,
+            randomization: p.randomization.max(0) as u32,
+            override_limiter: p.override_limiter,
+            dust,
         });
     }
 
@@ -657,6 +662,24 @@ impl Session {
             self.counters.chat.remove(0);
         }
     }
+}
+
+/// `DustParticleOptions` from a particle's raw data (the ARGB colour int, then the size
+/// scale f32); `None` for every other type and for a malformed payload.
+fn dust_option(kind: &Identifier, data: &[u8]) -> Option<haste_render::DustOption> {
+    if kind.path() != "dust" || data.len() < 8 {
+        return None;
+    }
+    let argb = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+    let scale = f32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+    Some(haste_render::DustOption {
+        color: [
+            ((argb >> 16) & 0xFF) as f32 / 255.0,
+            ((argb >> 8) & 0xFF) as f32 / 255.0,
+            (argb & 0xFF) as f32 / 255.0,
+        ],
+        scale,
+    })
 }
 
 /// Owns the connection and the session state; world and entities are borrowed per tick.

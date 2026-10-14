@@ -580,12 +580,14 @@ fn tick_once(
         breaking.clear();
         driver.session.breaking_stages(&mut breaking);
     }
-    // Particles: spawn what the packets brought, then one 20 Hz simulation step.
+    // Particles: spawn what the packets brought, then one 20 Hz simulation step. The camera
+    // for `ClientLevel.doAddParticle`'s 32-block limiter is the player's eye.
     {
         let mut particles = shared.particles.lock();
+        let camera = driver.session.player.camera(1.0).0;
         let spawns = std::mem::take(&mut driver.session.particle_spawns);
         for s in &spawns {
-            particles.spawn(s);
+            particles.spawn(s, camera);
         }
         driver.session.particle_spawned = spawns.len();
         particles.tick();
