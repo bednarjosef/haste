@@ -1,0 +1,27 @@
+# Elytra live check (scripts/elytra-check.sh). The server equips an elytra and teleports us into
+# the air over RCON while this runs; a fresh jump press that lands while we are airborne starts
+# gliding (vanilla LocalPlayer.aiStep -> Player.tryToStartFallFlying -> START_FALL_FLYING).
+# Presses are 12 ticks apart so the creative double-tap window (7 ticks) never toggles flight.
+# The final wait keeps the connection up while RCON reads FallFlying back.
+wait 40
+hold 1 jump
+wait 12
+hold 1 jump
+wait 12
+hold 1 jump
+wait 12
+hold 1 jump
+wait 12
+hold 1 jump
+wait 12
+hold 1 jump
+wait 12
+hold 1 jump
+wait 12
+hold 1 jump
+wait 12
+hold 1 jump
+wait 12
+hold 1 jump
+wait 200
+mark done

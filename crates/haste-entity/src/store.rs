@@ -1,5 +1,7 @@
 //! Dense entity storage: `Vec`-backed slots with a free list, `EntityId -> slot` in an ahash map.
 //! No per-tick allocation.
+use std::collections::HashMap;
+
 use ahash::AHashMap;
 use haste_core::entity::{EntitySpawn, ItemStackData, MetadataEntry, PlayerInfo, Pose};
 use haste_core::ids::{EntityId, RegistryIndex};
@@ -10,6 +12,7 @@ use uuid::Uuid;
 use crate::dims::EntityDimensions;
 use crate::lerp::LerpState;
 use crate::metadata::Metadata;
+use crate::riding::Riding;
 
 /// Hurt flash duration in ticks (vanilla's `hurtTime` runs to 10).
 pub const HURT_TICKS: u32 = 10;
@@ -23,6 +26,9 @@ pub struct Entity {
     pub kind: RegistryIndex,
     pub pos: DVec3,
     pub prev_pos: DVec3,
+    /// The `add_entity` data field: hanging entities carry their facing direction here
+    /// (`ItemFrame.recreateFromPacket` -> `Direction.from3DDataValue(packet.getData())`).
+    pub data: i32,
     pub yaw: f32,
     pub pitch: f32,
     pub head_yaw: f32,
@@ -59,6 +65,7 @@ impl Entity {
             kind: s.kind,
             pos: s.pos,
             prev_pos: s.pos,
+            data: s.data,
             yaw: s.yaw,
             pitch: s.pitch,
             head_yaw: s.head_yaw,
@@ -85,6 +92,11 @@ pub struct EntityStore {
     by_id: AHashMap<EntityId, u32>,
     dims: EntityDimensions,
     players: AHashMap<Uuid, PlayerInfo>,
+    /// Who rides whom (`set_passengers`).
+    riding: Riding,
+    /// The synced `minecraft:painting_variant` registry (id -> size/asset), set at join from
+    /// the server's `registry_data`; empty when the server sent none.
+    painting_variants: HashMap<u32, crate::decoration::PaintingVariant>,
 }
 
 /// Hurt flash strength for an entity's remaining hurt ticks, eased out (quadratic, like
@@ -112,7 +124,18 @@ impl EntityStore {
             by_id: AHashMap::new(),
             dims,
             players: AHashMap::new(),
+            riding: Riding::new(),
+            painting_variants: HashMap::new(),
         }
+    }
+
+    /// Sets the synced `minecraft:painting_variant` table (id -> size/asset), from the server's
+    /// `registry_data` at join. Paintings whose variant is absent draw the back only.
+    pub fn set_painting_variants(
+        &mut self,
+        variants: HashMap<u32, crate::decoration::PaintingVariant>,
+    ) {
+        self.painting_variants = variants;
     }
 
     fn slot(&self, id: EntityId) -> Option<u32> {
@@ -143,6 +166,16 @@ impl EntityStore {
         self.by_id.insert(s.id, slot);
     }
 
+    /// Clears every entity but keeps the per-connection configuration (the dimensions oracle,
+    /// player info and the painting-variant table): a respawn or reconfiguration does not resend
+    /// the registries, and vanilla keeps the tab list across a respawn.
+    pub fn clear_entities(&mut self) {
+        self.slots.clear();
+        self.free.clear();
+        self.by_id.clear();
+        self.riding = Riding::new();
+    }
+
     pub fn remove(&mut self, ids: &[EntityId]) {
         for id in ids {
             if let Some(i) = self.by_id.remove(id) {
@@ -150,6 +183,31 @@ impl EntityStore {
                 self.free.push(i);
             }
         }
+        // A removed entity drops out of riding on both sides: its own passengers, and any
+        // vehicle it was riding.
+        self.riding.on_removed(ids);
+    }
+
+    /// `set_passengers` for one vehicle: the list replaces the previous one. Passengers that
+    /// dropped out lose their vehicle entry; every listed passenger gains this vehicle.
+    pub fn set_passengers(&mut self, vehicle: EntityId, passengers: &[EntityId]) {
+        self.riding.set_passengers(vehicle, passengers);
+    }
+
+    /// The vehicle an entity rides, if any.
+    pub fn vehicle_of(&self, id: EntityId) -> Option<EntityId> {
+        self.riding.vehicle_of(id)
+    }
+
+    /// The passengers of a vehicle, in seat order.
+    pub fn passengers_of(&self, id: EntityId) -> Option<&[EntityId]> {
+        self.riding.passengers_of(id)
+    }
+
+    /// An entity's type index and current dimensions: what a passenger's seat offset is
+    /// computed from (`riding::passenger_seat`).
+    pub fn entity_type_info(&self, id: EntityId) -> Option<(RegistryIndex, (f32, f32))> {
+        self.get(id).map(|e| (e.kind, e.dimensions))
     }
 
     /// Short delta move (`delta` already converted from 1/4096-block units by the caller).
@@ -291,20 +349,51 @@ impl EntityStore {
     }
 
     /// Interpolated draw list for the renderer (renderer). Players get the humanoid model (classic
-    /// layout; skins arrive with renderer's texture work), everything else a generic box from its
-    /// current dimensions. Only humanoids get animation overrides (the box has no limbs).
+    /// layout; skins arrive with renderer's texture work), known mob types the model the recorder
+    /// dumped for their vanilla layer (rest pose; animation is a later task), everything else a
+    /// generic box from its current dimensions. The head yaw/pitch override only applies where a
+    /// part named "head" exists (humanoids and dumped models both have one; the box has none).
     pub fn render_instances(&self, partial_tick: f32, out: &mut Vec<EntityInstance>) {
         for slot in self.slots.iter().flatten() {
-            let pos = slot.prev_pos.lerp(slot.pos, partial_tick as f64);
+            // Hanging entities (item frames, paintings) are drawn specially, and the client
+            // moved them to the bounding-box centre vanilla's `recalculateBoundingBox` computes
+            // (the spawn packet carries the block position, not the render origin).
+            let decoration = crate::decoration::build(
+                slot.kind,
+                slot.data,
+                &slot.metadata,
+                &self.painting_variants,
+            );
+            let pos = if decoration.is_some() {
+                crate::decoration::render_center(
+                    slot.kind,
+                    slot.data,
+                    slot.pos,
+                    &slot.metadata,
+                    &self.painting_variants,
+                )
+            } else {
+                slot.prev_pos.lerp(slot.pos, partial_tick as f64)
+            };
+            let (model, has_head) = if slot.is_player_type {
+                (crate::models::humanoid(false), true)
+            } else {
+                // Registry table first (shared per type, head flag precomputed), then the box.
+                match crate::registry::model_entry(slot.kind) {
+                    Some((head, m)) => (m, head),
+                    None => (
+                        crate::models::box_for(slot.dimensions.0, slot.dimensions.1),
+                        false,
+                    ),
+                }
+            };
             let pose = if slot.is_player_type {
                 crate::animation::pose_overrides(slot, partial_tick)
+            } else if has_head {
+                // Aim the head at (head_yaw, pitch) relative to the body; same clamp as players.
+                crate::animation::head_only(slot)
             } else {
                 haste_core::model::PoseOverrides::default()
-            };
-            let model = if slot.is_player_type {
-                crate::models::humanoid(false)
-            } else {
-                crate::models::box_for(slot.dimensions.0, slot.dimensions.1)
             };
             out.push(EntityInstance {
                 id: slot.id,
@@ -318,6 +407,7 @@ impl EntityStore {
                 skin: None,
                 nametag: slot.nametag.clone(),
                 hurt: hurt_strength(slot),
+                decoration,
             });
         }
     }

@@ -25,7 +25,7 @@
 //! nothing, the state from before our prediction) is put back. Observed on the vanilla server:
 //! a break it rejects gets an ack and no block update, so without the revert our world would keep
 //! a block the server still has.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use glam::DVec3;
@@ -70,6 +70,8 @@ pub struct InteractAttributes {
     pub submerged_mining_speed: f64,
     pub block_reach: f64,
     pub entity_reach: f64,
+    /// `attack_speed`: the equip progress returns over 20 / this many ticks.
+    pub attack_speed: f64,
 }
 
 impl Default for InteractAttributes {
@@ -81,6 +83,7 @@ impl Default for InteractAttributes {
             submerged_mining_speed: 0.2,
             block_reach: 4.5,
             entity_reach: 3.0,
+            attack_speed: crate::hand::DEFAULT_ATTACK_SPEED,
         }
     }
 }
@@ -120,6 +123,12 @@ pub struct Interaction {
     /// Hotbar 0..=8 and off hand.
     pub hotbar: [ItemStackData; 9],
     pub offhand: ItemStackData,
+    /// Armor, indexed helmet 0, chest 1, legs 2, boots 3 (player inventory menu 5..=8 and
+    /// `set_player_inventory` 36..=39). The chest slot answers the glider check.
+    pub armor: [ItemStackData; 4],
+    /// Item registry indices whose default components carry `minecraft:glider`
+    /// (`LivingEntity.canGlideUsing`), resolved from the item component reports in `prepare`.
+    pub(crate) glider_items: Option<HashSet<RegistryIndex>>,
     /// Active effects on us: `minecraft:mob_effect` index -> amplifier.
     pub effects: HashMap<i32, i32>,
     tools: Option<Arc<ToolTable>>,
@@ -146,6 +155,21 @@ impl Interaction {
                 ToolTable::default()
             });
             self.tools = Some(Arc::new(t));
+        }
+        if self.glider_items.is_none() {
+            // The glider items the reports name, as `minecraft:item` registry indices (the
+            // chest stack only carries its index).
+            self.glider_items = Some(
+                self.tools
+                    .as_ref()
+                    .map(|t| {
+                        t.gliders()
+                            .iter()
+                            .filter_map(|n| data.registries.index("minecraft:item", n))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            );
         }
         if self.effect_ids.is_none() {
             let id = |n: &str| {
@@ -294,6 +318,8 @@ impl LocalPlayer {
             }
             P::SetPlayerInventory(s) => match s.slot {
                 0..=8 => self.int.hotbar[s.slot as usize] = s.item.clone(),
+                // `Inventory` indices: 36 feet, 37 legs, 38 chest, 39 head, 40 off hand.
+                36..=39 => self.int.armor[(39 - s.slot) as usize] = s.item.clone(),
                 40 => self.int.offhand = s.item.clone(),
                 _ => {}
             },
@@ -308,14 +334,32 @@ impl LocalPlayer {
         true
     }
 
-    /// Slot of the player inventory menu (window 0): 36..=44 hotbar, 45 off hand
-    /// (wiki "Inventory" slot numbering).
+    /// Slot of the player inventory menu (window 0): 5..=8 armor (helmet, chest, legs, boots),
+    /// 36..=44 hotbar, 45 off hand (wiki "Inventory" slot numbering).
     fn set_inventory_menu_slot(&mut self, slot: i32, item: &ItemStackData) {
         match slot {
+            5..=8 => self.int.armor[(slot - 5) as usize] = item.clone(),
             36..=44 => self.int.hotbar[(slot - 36) as usize] = item.clone(),
             45 => self.int.offhand = item.clone(),
             _ => {}
         }
+    }
+
+    /// Whether the chest armor is a usable glider: vanilla `LivingEntity.canGlide` ->
+    /// `canGlideUsing` (a `minecraft:glider` component in the matching equippable slot, not about
+    /// to break). The `nextDamageWillBreak` half needs the stack's damage component, which the
+    /// client does not decode yet (see NOTES), so a nearly-broken elytra still reads as usable.
+    pub fn has_glider(&self) -> bool {
+        let chest = &self.int.armor[1];
+        let Some(index) = chest.item else {
+            return false;
+        };
+        chest.count > 0
+            && self
+                .int
+                .glider_items
+                .as_ref()
+                .is_some_and(|s| s.contains(&index))
     }
 
     fn eye(&self) -> DVec3 {
@@ -392,6 +436,8 @@ impl LocalPlayer {
         // 3. Attack / break.
         let pressed = input.attack && !last.attack;
         if pressed {
+            // `Minecraft.startAttack` swings on every attack, whatever the crosshair is on.
+            self.hand.swing();
             match self.int.target {
                 Some(Target::Entity { id, .. }) => {
                     out.push(ServerboundPlay::Attack(sb::Attack { entity_id: id.0 }));
@@ -408,6 +454,8 @@ impl LocalPlayer {
             match self.int.target {
                 Some(Target::Block(h)) => {
                     if self.continue_destroy(h, world, env, out) {
+                        // `Minecraft.continueAttack` swings each tick the breaking continues.
+                        self.hand.swing();
                         out.push(ServerboundPlay::Punch(sb::Punch {}));
                     }
                 }
@@ -426,7 +474,7 @@ impl LocalPlayer {
             && self.int.destroying.is_none();
         if use_now {
             self.int.use_delay = USE_DELAY;
-            self.use_item(look, out);
+            self.use_item(look, env, out);
         }
 
         // 5. Pick block.
@@ -478,8 +526,16 @@ impl LocalPlayer {
         self.int.input.hotbar = None;
     }
 
-    fn use_item(&mut self, look: (f32, f32), out: &mut Vec<ServerboundPlay>) {
+    fn use_item(
+        &mut self,
+        look: (f32, f32),
+        env: &InteractEnv<'_>,
+        out: &mut Vec<ServerboundPlay>,
+    ) {
         let holding = !self.main_hand().is_empty();
+        // `Minecraft.startUseItem`: a use whose result is `InteractionResult.SUCCESS`
+        // (vanilla's swing source PREDICTED) swings the hand.
+        self.hand.swing();
         match self.int.target {
             Some(Target::Block(h)) => {
                 let seq = self.int.next_sequence();
@@ -497,7 +553,16 @@ impl LocalPlayer {
                 }));
                 if holding {
                     out.push(ServerboundPlay::Punch(sb::Punch {}));
+                    // `Minecraft.startUseItem` calls `player.itemUsed(hand)` for a use that
+                    // changed the held stack, which puts the hand down for the item switch.
+                    self.hand.item_used();
                 }
+                // The place sound, played when we place against a block while holding a
+                // block item (vanilla: BlockItem.place runs on the client too and plays
+                // it; the server's copy excludes us). We cannot know the placed state
+                // yet, so the held block item's block decides; unknown items (not a
+                // block, a mod) play nothing.
+                self.own_place_sound(h.pos, env);
             }
             Some(Target::Entity { id, location }) => {
                 out.push(ServerboundPlay::Interact(sb::Interact {
@@ -517,6 +582,34 @@ impl LocalPlayer {
                         pitch: look.1,
                     }));
                 }
+            }
+        }
+    }
+
+    /// The held item's block, if it is a block item (item id = block id in vanilla,
+    /// `BlockItemId.create(name)`; the 14 crop pairs with differing names are missing
+    /// here — placing crops is rare and the server confirms anyway).
+    fn held_block<'d>(&self, data: &'d haste_data::GameData) -> Option<&'d haste_core::Identifier> {
+        let item = self.main_hand();
+        let index = item.item?;
+        data.registries
+            .name("minecraft:item", index)
+            .and_then(|id| data.blocks.default_state(id).map(|_| id))
+    }
+
+    /// The place sound for a `use_item_on` with a block item held (see `use_item`).
+    fn own_place_sound(&mut self, pos: BlockPos, env: &InteractEnv<'_>) {
+        let Some(block) = self.held_block(env.data) else {
+            return;
+        };
+        let state = env.data.blocks.default_state(block);
+        if let Some(state) = state {
+            if let Some(t) = env.data.block_sound_type(state) {
+                self.own_sounds.block_placed(
+                    pos.as_dvec3() + DVec3::new(0.5, 0.5, 0.5),
+                    t,
+                    &mut self.sound_out,
+                );
             }
         }
     }
@@ -601,6 +694,7 @@ impl LocalPlayer {
                 return;
             }
             self.int.destroy_delay = DESTROY_DELAY;
+            self.own_mining_hit(h.pos, state, env);
             self.send_destroy(action::START_DESTROY, h, state, true, env, out);
             return;
         }
@@ -614,10 +708,26 @@ impl LocalPlayer {
         let d = params.progress_per_tick();
         tracing::debug!("start breaking {:?}: {params:?} -> {d} per tick", h.pos);
         let instant = d >= 1.0;
+        // The start tick's hit sound (vanilla: addBreakingBlockEffects with playSound=true;
+        // the follow-up hits every 4 ticks are the server's 2020 level events).
+        self.own_mining_hit(h.pos, state, env);
         self.send_destroy(action::START_DESTROY, h, state, instant, env, out);
         if !instant {
             self.int.destroying = Some((h.pos, h.face));
             self.int.progress = 0.0;
+        }
+    }
+
+    /// The mining hit sound of a block we start breaking (vanilla plays it
+    /// client-side on the start tick; the block's type comes from the
+    /// `block_sounds.json` dump). Unknown blocks play nothing.
+    fn own_mining_hit(&mut self, pos: BlockPos, state: BlockStateId, env: &InteractEnv<'_>) {
+        if let Some(t) = env.data.block_sound_type(state) {
+            self.own_sounds.mining_hit(
+                pos.as_dvec3() + DVec3::new(0.5, 0.5, 0.5),
+                t,
+                &mut self.sound_out,
+            );
         }
     }
 
@@ -719,6 +829,15 @@ impl LocalPlayer {
             // server's update.
             let to = env.data.fluid(state).is_none().then_some(BlockStateId::AIR);
             self.int.predict(seq, h.pos, state, to);
+            // The break sound, played the moment the block goes for us (vanilla's client
+            // gets it as the server's level_event 2001, which we do not decode yet).
+            if let Some(t) = env.data.block_sound_type(state) {
+                self.own_sounds.block_broken(
+                    h.pos.as_dvec3() + DVec3::new(0.5, 0.5, 0.5),
+                    t,
+                    &mut self.sound_out,
+                );
+            }
         }
     }
 }

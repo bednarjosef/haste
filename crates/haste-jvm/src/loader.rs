@@ -68,6 +68,7 @@ pub const ALLOW_CLASSES: &[&str] = &[
     // stops it in removed, exactly vanilla's lifecycle
     "net/minecraft/client/server/LanServerDetection",
     "net/minecraft/client/server/LanServer",
+    "net/minecraft/client/multiplayer/SessionSearchTrees",
     "net/minecraft/client/multiplayer/ClientLevel$ClientLevelData",
     "net/minecraft/client/multiplayer/CommonListenerCookie",
     "net/minecraft/client/StringSplitter",

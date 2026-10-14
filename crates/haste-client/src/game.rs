@@ -31,6 +31,11 @@ use parking_lot::{Mutex, RwLock};
 use crate::net::{NetDriver, WorldSink};
 use crate::ui::Ui;
 
+/// The particle pool: filled from `level_particles` packets (the renderer's atlas-backed
+/// particle types, so unknown/mod types are skipped there), ticked at 20 Hz by the game
+/// thread. The render thread reads it per frame under this lock (no GPU state inside).
+pub type SharedParticles = Mutex<haste_render::Particles>;
+
 /// How far the third-person camera sits from the eye when nothing is in the way (vanilla's
 /// `Camera` max zoom, minecraft.wiki "Perspective"). Vanilla's `Camera.alignWithEntity` scales
 /// this by the entity's scale and its `CAMERA_DISTANCE` attribute (default 4.0); haste reads
@@ -138,14 +143,15 @@ fn camera_pullback(
     eye + dir * camera_dist
 }
 
-/// The local player's pose for its own model: the physics pose's render equivalent (sleeping,
-/// elytra and other metadata-only poses are not modelled yet).
+/// The local player's pose for its own model: the physics pose's render equivalent (sleeping and
+/// other metadata-only poses are not modelled yet).
 fn player_pose(s: &crate::net::Session) -> Option<haste_core::entity::Pose> {
     use haste_physics::Pose as PhysicsPose;
     match s.player.state.pose {
         PhysicsPose::Standing => None,
         PhysicsPose::Crouching => Some(haste_core::entity::Pose::Crouching),
         PhysicsPose::Swimming => Some(haste_core::entity::Pose::Swimming),
+        PhysicsPose::FallFlying => Some(haste_core::entity::Pose::FallFlying),
     }
 }
 
@@ -204,10 +210,11 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
         // default skin for our UUID is what vanilla shows without a downloaded skin.
         skin: Some(haste_render::default_skin(uuid).0),
         nametag: None,
-        // Our own model flashes red in third person like other entities: the hurt tilt follows
-        // the same 10-tick ease-out curve, so its size (out of the 14-degree peak) is the
-        // hurt strength.
-        hurt: (view.hurt_tilt.abs() / 14.0).clamp(0.0, 1.0),
+        // Our own model flashes red in third person like other entities: full strength on the
+        // tick of the hit, fading over the 10 hurt ticks (vanilla's hurtTime / hurtDuration).
+        hurt: (view.hurt_ticks.min(crate::net::HURT_TILT_TICKS) as f32
+            / crate::net::HURT_TILT_TICKS as f32),
+        decoration: None,
     }
 }
 
@@ -241,13 +248,30 @@ pub struct ViewState {
     /// Whether the player's eyes are in water (`PlayerState::eyes_in_water`), for the HUD's
     /// air bubbles and the water overlay.
     pub eye_in_water: bool,
+    /// Whether the camera is under the lava surface at the eye's block (vanilla's
+    /// `Camera.getFluidInCamera` lava rule), for the submerged FOV.
+    pub eye_in_lava: bool,
     /// Selected hotbar slot (`LocalPlayer::held_slot`), for the scroll wheel.
     pub held_slot: i32,
     /// What the first-person view holds this tick (`None` draws no hand: spectator, not yet
     /// placed). The skin it is drawn with is [`Shared::skin`], set once at join.
     pub first_person: Option<FirstPersonView>,
-    /// Hurt-tilt camera roll in degrees (`Session::hurt_tilt_degrees`).
-    pub hurt_tilt: f32,
+    /// The smoothed FOV modifier, last tick's value and this tick's (`Session::fov_modifier`
+    /// / `old_fov_modifier`), interpolated per frame.
+    pub fov_modifier: f32,
+    pub fov_modifier_old: f32,
+    /// Walk distance bracketing the last tick (`Session::walk_dist` / `walk_dist_o`).
+    pub walk_dist: f32,
+    pub walk_dist_o: f32,
+    /// The bob amount bracketing the last tick (`Session::bob` / `bob_o`).
+    pub bob: f32,
+    pub bob_o: f32,
+    /// Hurt ticks left and the damage direction in degrees (`Session::hurt_ticks` /
+    /// `hurt_dir`).
+    pub hurt_ticks: u32,
+    pub hurt_dir: f32,
+    /// Ticks since the local player died (`Session::death_ticks`).
+    pub death_ticks: u32,
     /// Look angles (yaw, pitch) before and after the last tick, for the player's own model in
     /// third person.
     pub prev_look: (f32, f32),
@@ -259,14 +283,29 @@ pub struct ViewState {
     pub pose: Option<haste_core::entity::Pose>,
 }
 
-/// The per-tick part of the first-person hand: the held item and the light at the eye. The skin
-/// lives in [`Shared::skin`] because it never changes during a connection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The per-tick part of the first-person hand: the held item, the light at the eye and this
+/// tick's hand animation (swing, equip progress, bob). Every animated value is the pair of the
+/// value at the start and at the end of the tick; the renderer lerps them by partial tick, the
+/// way vanilla's `FirstPersonHandsAndItems.extractRenderState` does. The skin lives in
+/// [`Shared::skin`] because it never changes during a connection.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FirstPersonView {
     /// The main-hand stack's item (`None` draws the bare arm).
     pub item: Option<RegistryIndex>,
     /// (sky light, block light) at the eye position, `FirstPerson::light`'s order.
     pub light: (u8, u8),
+    /// Swing progress 0..1 over the swing's ticks (0 when the hand does not swing).
+    pub attack: (f32, f32),
+    /// Equip progress: 1 held, 0 while the item switches.
+    pub equip: (f32, f32),
+    /// The hand's pitch lag (`LocalPlayer.xBob`), in degrees.
+    pub x_bob: (f32, f32),
+    /// The hand's yaw lag (`LocalPlayer.yBob`), in degrees.
+    pub y_bob: (f32, f32),
+    /// Walk bob amplitude.
+    pub bob: (f32, f32),
+    /// Distance walked in blocks, the bob's phase.
+    pub walk_dist: (f32, f32),
 }
 
 impl FirstPersonView {
@@ -281,7 +320,24 @@ impl FirstPersonView {
         FirstPersonView {
             item,
             light: (world.sky_light(p), world.block_light(p)),
+            attack: (0.0, 0.0),
+            equip: (1.0, 1.0),
+            x_bob: (0.0, 0.0),
+            y_bob: (0.0, 0.0),
+            bob: (0.0, 0.0),
+            walk_dist: (0.0, 0.0),
         }
+    }
+
+    /// This tick's hand animation from the player's [`crate::hand::Hand`].
+    pub fn with_hand(&mut self, hand: &crate::hand::Hand) {
+        self.item = hand.shown_item();
+        self.attack = hand.attack();
+        self.equip = hand.equip();
+        self.x_bob = hand.x_bob();
+        self.y_bob = hand.y_bob();
+        self.bob = hand.bob();
+        self.walk_dist = hand.walk_dist();
     }
 
     /// The renderer's first-person hand for this view drawn with `skin` (the connection's
@@ -293,7 +349,21 @@ impl FirstPersonView {
             slim: skin.1,
             item: self.item,
             light: self.light,
+            attack: pair(self.attack),
+            equip: pair(self.equip),
+            x_bob: pair(self.x_bob),
+            y_bob: pair(self.y_bob),
+            bob: pair(self.bob),
+            walk_dist: pair(self.walk_dist),
         }
+    }
+}
+
+/// A per-tick pair into the renderer's [`haste_render::TickPair`].
+fn pair(v: (f32, f32)) -> haste_render::TickPair {
+    haste_render::TickPair {
+        start: v.0,
+        end: v.1,
     }
 }
 
@@ -306,6 +376,9 @@ pub struct SharedInput {
     pub toggle_flight: bool,
     /// Mouse buttons held, middle click and hotbar selection since the last tick.
     pub interact: InteractInput,
+    /// The current perspective is first person (vanilla's camera type; the spyglass FOV
+    /// zoom only applies in first person).
+    pub first_person: bool,
 }
 
 /// State shared between the game thread and the render thread.
@@ -322,6 +395,9 @@ pub struct Shared {
     pub view: Mutex<ViewState>,
     /// Break cracks to draw (`Session::breaking_stages`), copied once per tick.
     pub breaking: Mutex<Vec<(BlockPos, u8)>>,
+    /// Particles (`level_particles`): the game thread spawns and ticks them, the render
+    /// thread draws them.
+    pub particles: SharedParticles,
     /// Input for the next tick.
     pub input: Mutex<SharedInput>,
     /// The sound and music output (None until the client sets it up; headless leaves it
@@ -349,6 +425,7 @@ impl Shared {
         world: World,
         entities: EntityStore,
         view_distance: i32,
+        particles: haste_render::Particles,
         skin: (Identifier, bool),
     ) -> Self {
         let has_sky = world.dimension().has_skylight;
@@ -371,15 +448,25 @@ impl Shared {
                 view_distance,
                 block_target: None,
                 eye_in_water: false,
+                eye_in_lava: false,
                 held_slot: 0,
                 first_person: None,
-                hurt_tilt: 0.0,
+                fov_modifier: 0.0,
+                fov_modifier_old: 0.0,
+                walk_dist: 0.0,
+                walk_dist_o: 0.0,
+                bob: 0.0,
+                bob_o: 0.0,
+                hurt_ticks: 0,
+                hurt_dir: 0.0,
+                death_ticks: 0,
                 prev_look: (0.0, 0.0),
                 look: (0.0, 0.0),
                 prev_feet: DVec3::ZERO,
                 pose: None,
             }),
             breaking: Mutex::new(Vec::new()),
+            particles: Mutex::new(particles),
             input: Mutex::new(SharedInput::default()),
             sound: Mutex::new(None),
             stop: AtomicBool::new(false),
@@ -589,6 +676,7 @@ fn tick_once(
     jvm: &mut HudSlot,
 ) -> anyhow::Result<()> {
     // Once the JVM arrives (the session joined before the game thread started): build the
+// MERGE(menu side):
     // `Ui` and give the JVM the registries, tags and the local player. Menu mode's UI arrives
     // pre-built (its JVM opened the title screen); only `joined` runs for it.
     if let Some(ui) = jvm.take_ui() {
@@ -606,8 +694,43 @@ fn tick_once(
                         t.elapsed().as_secs_f64() * 1000.0
                     );
                     *slot = Some(ui);
+// MERGE(main side):
+    // `Ui` and give the JVM the registries, tags and the local player.
+    if let Some(host) = jvm.take() {
+        let mut created = false;
+        {
+            let mut slot = shared.ui.lock();
+            if slot.is_none() {
+                let ui = Ui::new(host);
+                let t = Instant::now();
+                match ui.joined(driver.connection(), driver.login()) {
+                    Ok(()) => {
+                        tracing::info!(
+                            "HUD joined in {:.0} ms; the vanilla HUD and chat are live",
+                            t.elapsed().as_secs_f64() * 1000.0
+                        );
+                        *slot = Some(ui);
+                        created = true;
+                    }
+                    Err(e) => tracing::warn!("no HUD: joining the UI failed: {e:#}"),
                 }
-                Err(e) => tracing::warn!("no HUD: joining the UI failed: {e:#}"),
+            }
+        }
+        // Play packets arrived while the JVM booted; give them to the HUD now, in order, so a
+        // fresh join's tab list, boss bars and scoreboard are not lost.
+        if created {
+            let backlog = driver.take_ui_backlog();
+            if !backlog.is_empty() {
+                tracing::info!(
+                    "HUD catching up on {} packets from the JVM boot",
+                    backlog.len()
+                );
+                if let Some(ui) = shared.ui.lock().as_ref() {
+                    for p in backlog {
+                        ui.handle(&p);
+                    }
+// MERGE end
+                }
             }
         }
     }
@@ -629,6 +752,8 @@ fn tick_once(
         }
     }
     // This tick's sound packets, played through the output (when the client set one up).
+    // This runs again after `end_tick` below to pick up the player's own block sounds
+    // (footsteps, mining, placing) that the player's tick just produced.
     {
         let requests = &mut driver.session.sound_requests;
         let mut sound = shared.sound.lock();
@@ -670,22 +795,53 @@ fn tick_once(
             }
         }
         driver.session.player.set_interact(interact);
-        shared_input.state
+        SharedInput {
+            toggle_flight: shared_input.toggle_flight,
+            interact: shared_input.interact,
+            first_person: shared_input.first_person,
+            state: shared_input.state,
+        }
     };
-    {
+    // The horizontal distance travelled this tick, for the hand's walk bob: vanilla's
+    // `LocalPlayer.move` adds `length(dx, dz) * 0.6` to `ClientAvatarState.walkDist`.
+    let tick_moved = {
+        let tick_start = driver.session.player.state.pos;
         // Write lock: the player's breaking predicts block changes into the world.
         let mut world = shared.world.write();
         let mut entities = shared.entities.write();
-        driver.end_tick(&input, &mut *world, &mut *entities)?;
+        driver.end_tick(&input.state, &mut *world, &mut *entities)?;
         let mut dirty = world.take_dirty_sections();
         if !dirty.is_empty() {
             shared.dirty.lock().append(&mut dirty);
+        }
+        let moved = driver.session.player.state.pos - tick_start;
+        ((moved.x * moved.x + moved.z * moved.z).sqrt()) as f32
+    };
+    // The player's own block sounds this tick (footsteps, mining, placing), played through
+    // the same output the packets went through above.
+    {
+        let requests = &mut driver.session.sound_requests;
+        let mut sound = shared.sound.lock();
+        if let Some(sounds) = sound.as_mut() {
+            sounds.apply(requests, |_| None);
         }
     }
     {
         let mut breaking = shared.breaking.lock();
         breaking.clear();
         driver.session.breaking_stages(&mut breaking);
+    }
+    // Particles: spawn what the packets brought, then one 20 Hz simulation step. The camera
+    // for `ClientLevel.doAddParticle`'s 32-block limiter is the player's eye.
+    {
+        let mut particles = shared.particles.lock();
+        let camera = driver.session.player.camera(1.0).0;
+        let spawns = std::mem::take(&mut driver.session.particle_spawns);
+        for s in &spawns {
+            particles.spawn(s, camera);
+        }
+        driver.session.particle_spawned = spawns.len();
+        particles.tick();
     }
     if let Some(ui) = shared.ui.lock().as_ref() {
         // The hotbar authority is the player (the client picks with 1-9 and the wheel and tells
@@ -698,18 +854,37 @@ fn tick_once(
     for p in ui_out {
         driver.queue(p);
     }
+    // The per-tick camera effects (FOV modifier smoothing and the hurt and death counters;
+    // the render thread interpolates them per frame). The view bobbing's walk distance and
+    // bob are the hand's own, ticked below (vanilla's one `ClientAvatarState` serves both).
+    driver
+        .session
+        .tick_camera(Some(shared.data.as_ref()), input.first_person);
+    // The first-person hand's tick, in vanilla's order (`LivingEntity.baseTick`, then
+    // `Player.tick`, then `FirstPersonHandsAndItems.tick`, with the walk bob in `aiStep` before
+    // them); the interaction step above ran the attacks and uses that started the swings. In
+    // spectator the hand is not drawn at all (vanilla hides it there), so it does not advance.
+    let first_person = if driver.session.player.game_mode == GameMode::Spectator {
+        None
+    } else {
+        let p = &mut driver.session.player;
+        p.hand.tick(
+            tick_moved,
+            (p.state.yaw, p.state.pitch),
+            p.state.on_ground,
+            matches!(p.state.pose, haste_physics::Pose::Swimming),
+            p.main_hand().item,
+            p.int.attrs.attack_speed,
+        );
+        let eye = p.camera(1.0).0;
+        let hand = &p.hand;
+        let mut fp = FirstPersonView::sample(&*shared.world.read(), eye, hand.shown_item());
+        fp.with_hand(hand);
+        Some(fp)
+    };
     let s = &driver.session;
     let (prev_eye, prev_yaw, prev_pitch) = s.player.camera(0.0);
     let (eye, yaw, pitch) = s.player.camera(1.0);
-    // The first-person hand this tick: hidden in spectator (vanilla hides it there), otherwise
-    // the main-hand item lit like entities are. Sampled under the world's read lock, like the
-    // breaking stages above; the render thread only reads the copy in the view state.
-    let first_person = if s.player.game_mode == GameMode::Spectator {
-        None
-    } else {
-        let item = s.player.main_hand().item;
-        Some(FirstPersonView::sample(&*shared.world.read(), eye, item))
-    };
     // The sound output's tick: listener from the eye, music situation, then 20 Hz tick.
     {
         let mut sound = shared.sound.lock();
@@ -739,10 +914,49 @@ fn tick_once(
     view.has_sky = s.dimension.has_skylight;
     view.block_target = s.player.target();
     view.eye_in_water = s.player.state.eyes_in_water;
+    view.eye_in_lava = eye_in_lava(&shared.world.read(), &shared.data, eye);
     view.held_slot = s.player.held_slot;
     view.first_person = first_person;
-    view.hurt_tilt = s.hurt_tilt_degrees();
+    view.fov_modifier = s.fov_modifier;
+    view.fov_modifier_old = s.old_fov_modifier;
+    // The view bobbing's walk distance and bob are the hand's own (vanilla's one
+    // `ClientAvatarState` ticks both).
+    let (walk_dist_o, walk_dist) = s.player.hand.walk_dist();
+    view.walk_dist = walk_dist;
+    view.walk_dist_o = walk_dist_o;
+    let (bob_o, bob) = s.player.hand.bob();
+    view.bob = bob;
+    view.bob_o = bob_o;
+    view.hurt_ticks = s.hurt_ticks;
+    view.hurt_dir = s.hurt_dir;
+    view.death_ticks = s.death_ticks;
     Ok(())
+}
+
+/// Whether the camera is under the lava surface (vanilla's `Camera.getFluidInCamera` lava
+/// rule: lava at the eye's block whose surface reaches the eye). The surface is the fluid's
+/// own height, or the full block when lava sits directly above (vanilla's `getHeight`); the
+/// comparison is `<=` as vanilla's `offsetPos.y <= height + y`. Vanilla probes the five
+/// near-plane points rather than the eye block alone; that near-plane fan (which needs the
+/// view direction and aspect) is not modelled.
+fn eye_in_lava(world: &World, data: &GameData, eye: DVec3) -> bool {
+    use haste_core::view::{BlockPhysics, FluidKind};
+    let p = BlockPos::new(
+        eye.x.floor() as i32,
+        eye.y.floor() as i32,
+        eye.z.floor() as i32,
+    );
+    let Some(f) = data.fluid(world.block_state(p)) else {
+        return false;
+    };
+    if f.kind != FluidKind::Lava {
+        return false;
+    }
+    let full = data
+        .fluid(world.block_state(p.add(0, 1, 0)))
+        .is_some_and(|a| a.kind == FluidKind::Lava);
+    let surface = p.y as f64 + if full { 1.0 } else { f.height as f64 };
+    eye.y <= surface
 }
 
 #[cfg(test)]
@@ -758,14 +972,9 @@ mod tests {
             haste_core::Identifier::minecraft("entity/player/wide/steve"),
             false,
         );
-        let a = FirstPersonView {
-            item: Some(RegistryIndex(5)),
-            light: (15, 0),
-        };
-        let b = FirstPersonView {
-            item: None,
-            light: (15, 0),
-        };
+        let a = FirstPersonView::sample(&lit(), DVec3::ZERO, Some(RegistryIndex(5)));
+        let mut b = a;
+        b.item = None;
         assert_eq!(a, a);
         assert_ne!(a, b);
         let ha = a.with_skin(&skin);
@@ -775,14 +984,60 @@ mod tests {
         assert_eq!(ha.skin, Some(skin.0.clone()));
         assert!(!ha.slim);
         assert_eq!(ha.item, Some(RegistryIndex(5)));
+        // Sampled at full sky light.
         assert_eq!(ha.light, (15, 0));
         // A differing light also differs (the eye moved into shade).
-        let c = FirstPersonView {
-            item: Some(RegistryIndex(5)),
-            light: (4, 7),
-        };
+        let mut c = a;
+        c.light = (4, 7);
         assert_ne!(a, c);
         assert_ne!(ha, c.with_skin(&skin));
+    }
+
+    /// A world at full sky light, for sampling the hand's light.
+    fn lit() -> LightWorld {
+        LightWorld {
+            sky: 15,
+            block: 0,
+            asked: parking_lot::Mutex::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn the_view_carries_the_hand_animation_to_the_renderer() {
+        // The per-tick pairs go through to the renderer's hand unchanged, so a swinging hand
+        // (or a dipping equip progress, or the walk bob) is a different hand each tick.
+        let skin = (
+            haste_core::Identifier::minecraft("entity/player/wide/steve"),
+            true,
+        );
+        let mut hand = crate::hand::Hand::new();
+        hand.swing();
+        let mut v = FirstPersonView::sample(&lit(), DVec3::ZERO, None);
+        // Two ticks of walking 0.2 blocks with the look at (10, 5) and the hand swinging.
+        for _ in 0..2 {
+            hand.tick(0.2, (10.0, 5.0), true, false, None, 4.0);
+        }
+        v.with_hand(&hand);
+        let moving = v.with_skin(&skin);
+        // The skin's slim arm is passed through.
+        assert!(moving.slim);
+        // The swing is `SwingState.ticks / 6` through: 0 on the attack tick, 1/6 on the next.
+        assert_eq!(v.attack, (0.0, 1.0 / 6.0));
+        assert_eq!(moving.attack.start, 0.0);
+        assert!((moving.attack.end - 1.0 / 6.0).abs() < 1e-7);
+        // Walking: walkDist is 0.6 * distance, its bob is 0.4 per tick towards min(0.2, 0.1),
+        // one tick behind.
+        assert!((v.walk_dist.1 - 0.24).abs() < 1e-6);
+        assert!((v.bob.1 - 0.04).abs() < 1e-6);
+        // The hand lags behind the look by half the remaining angle each tick.
+        assert!((v.y_bob.1 - 7.5).abs() < 1e-6);
+        assert!((v.x_bob.1 - 3.75).abs() < 1e-6);
+        // The next tick's step is a different hand, so the renderer is told again.
+        hand.tick(0.2, (10.0, 5.0), true, false, None, 4.0);
+        let mut next = v;
+        next.with_hand(&hand);
+        assert_ne!(next, v);
+        assert_ne!(next.with_skin(&skin), moving);
     }
 
     #[test]
@@ -802,6 +1057,7 @@ mod tests {
     }
 
     /// A world that answers one sky/block light pair and records where it was asked.
+    #[derive(Default)]
     struct LightWorld {
         sky: u8,
         block: u8,

@@ -5,6 +5,13 @@
 //! [`Action`]s the client must perform each game tick (20 ticks per second). This module is pure
 //! logic only: no window, renderer or network; the `--script FILE` offscreen client wires it up
 //! (app.rs `script_run`).
+//!
+//! Mouse buttons (`click`, `mouse_down`, `mouse_up`) are `left`, `middle` or `right`; a `click`
+//! is a press and a release on the same tick, while `mouse_down`/`mouse_up` hold a button (e.g.
+//! attack while the target is aimed). Key names (`key`, `key_down`, `key_up`) are
+//! case-insensitive: letters `A`..`Z`, digits
+//! `0`..`9`, function keys `F1`..`F12`, and `Escape`, `Enter`, `Tab`, `Space`, `Backspace`,
+//! `Up`, `Down`, `Left`, `Right`, `LShift`/`LeftShift`, `LCtrl`/`LeftCtrl`, `LAlt`/`LeftAlt`.
 
 use std::fmt;
 
@@ -74,11 +81,14 @@ pub enum Key {
 }
 
 impl Key {
-    /// Parses a key name exactly as written in a script (`A`..`Z`, `0`..`9`, `F1`..`F12` and the
-    /// upper-case names). Returns `None` for anything else.
+    /// Parses a key name as written in a script. Case-insensitive, so `Escape`, `escape` and
+    /// `ESCAPE` are the same key: digits are `0`..`9`, letters `A`..`Z`, the rest are the
+    /// obvious words (`F1`..`F12`, `Escape`, `Enter`, `Tab`, `Space`, `Backspace`, `Up`, `Down`,
+    /// `Left`, `Right`, `LShift`/`LeftShift`, `LCtrl`/`LeftCtrl`, `LAlt`/`LeftAlt`).
+    /// Returns `None` for anything else.
     pub fn from_name(name: &str) -> Option<Key> {
         use Key::*;
-        Some(match name {
+        Some(match name.to_ascii_uppercase().as_str() {
             "A" => A,
             "B" => B,
             "C" => C,
@@ -136,9 +146,9 @@ impl Key {
             "DOWN" => Down,
             "LEFT" => Left,
             "RIGHT" => Right,
-            "LSHIFT" => LeftShift,
-            "LCTRL" => LeftCtrl,
-            "LALT" => LeftAlt,
+            "LSHIFT" | "LEFTSHIFT" => LeftShift,
+            "LCTRL" | "LEFTCTRL" => LeftCtrl,
+            "LALT" | "LEFTALT" => LeftAlt,
             _ => return None,
         })
     }
@@ -325,6 +335,10 @@ pub enum Step {
     Click(MouseButton, i32, i32),
     /// Click the widget whose label is this text (the button "Multiplayer", a server's name).
     ClickText(String),
+    /// Press and hold a mouse button (attack/use while a screen is closed).
+    MouseDown(MouseButton),
+    /// Release a held mouse button.
+    MouseUp(MouseButton),
     /// Turn the wheel by `n` notches (may be negative).
     Scroll(i32),
     /// Set the camera yaw and pitch in degrees.
@@ -342,6 +356,8 @@ pub enum Action {
     MouseMove(i32, i32),
     Click(MouseButton, i32, i32),
     ClickText(String),
+    MouseDown(MouseButton),
+    MouseUp(MouseButton),
     Scroll(i32),
     Look(f32, f32),
     Screenshot(String),
@@ -448,6 +464,14 @@ pub fn parse(text: &str) -> Result<Vec<Step>, ScriptError> {
                 let button = MouseButton::parse(button, line)?;
                 Step::Click(button, parse_i32(x, line)?, parse_i32(y, line)?)
             }
+            "mouse_down" => Step::MouseDown(MouseButton::parse(
+                first_token(rest, "mouse_down", line)?,
+                line,
+            )?),
+            "mouse_up" => Step::MouseUp(MouseButton::parse(
+                first_token(rest, "mouse_up", line)?,
+                line,
+            )?),
             "scroll" => Step::Scroll(parse_i32(first_token(rest, "scroll", line)?, line)?),
             // Click the widget whose label this is (where the last frame drew the text).
             "click_text" => Step::ClickText(rest.to_owned()),
@@ -641,6 +665,13 @@ impl Runner {
                         Step::ClickText(text) => {
                             self.advance();
                             return vec![Action::ClickText(text)];
+                        Step::MouseDown(button) => {
+                            self.advance();
+                            return vec![Action::MouseDown(button)];
+                        }
+                        Step::MouseUp(button) => {
+                            self.advance();
+                            return vec![Action::MouseUp(button)];
                         }
                         Step::Scroll(n) => {
                             self.advance();
@@ -685,6 +716,8 @@ mod tests {
             "mouse 160 90",
             "click right 10 20",
             "click_text Multiplayer",
+            "mouse_down left",
+            "mouse_up left",
             "scroll -1",
             "look 90 10",
             "screenshot name1",
@@ -706,6 +739,8 @@ mod tests {
                 Step::MouseMove(160, 90),
                 Step::Click(MouseButton::Right, 10, 20),
                 Step::ClickText("Multiplayer".to_owned()),
+                Step::MouseDown(MouseButton::Left),
+                Step::MouseUp(MouseButton::Left),
                 Step::Scroll(-1),
                 Step::Look(90.0, 10.0),
                 Step::Screenshot("name1".to_owned()),
@@ -836,6 +871,40 @@ mod tests {
     }
 
     #[test]
+    fn key_names_parse_in_any_case() {
+        // The canonical names round-trip; other casings parse to the same key.
+        for (written, want) in [
+            ("Escape", Key::Escape),
+            ("escape", Key::Escape),
+            ("ESCAPE", Key::Escape),
+            ("E", Key::E),
+            ("e", Key::E),
+            ("F3", Key::F3),
+            ("f3", Key::F3),
+            ("f12", Key::F12),
+            ("Tab", Key::Tab),
+            ("Enter", Key::Enter),
+            ("Space", Key::Space),
+            ("Backspace", Key::Backspace),
+            ("LeftShift", Key::LeftShift),
+            ("lshift", Key::LeftShift),
+            ("LShift", Key::LeftShift),
+            ("LeftCtrl", Key::LeftCtrl),
+            ("LeftAlt", Key::LeftAlt),
+            ("Up", Key::Up),
+            ("Down", Key::Down),
+            ("Left", Key::Left),
+            ("Right", Key::Right),
+            ("W", Key::W),
+            ("5", Key::Num5),
+        ] {
+            assert_eq!(Key::from_name(written), Some(want), "key {written}");
+        }
+        // Still one key per name: casings do not create duplicates.
+        assert_eq!(Key::from_name("Escape"), Key::from_name("ESCAPE"));
+    }
+
+    #[test]
     fn wait_counts_ticks() {
         let mut runner = Runner::new(parse("wait 3\nscreenshot x").unwrap());
         let state = ScriptState::default();
@@ -874,6 +943,21 @@ mod tests {
         let state = ScriptState::default();
         assert_eq!(runner.tick(&state), vec![Action::KeyDown(Key::Space)]);
         assert_eq!(runner.tick(&state), vec![Action::KeyUp(Key::Space)]);
+    }
+
+    #[test]
+    fn mouse_down_and_mouse_up_are_single_actions() {
+        let mut runner = Runner::new(parse("mouse_down left\nmouse_up left").unwrap());
+        let state = ScriptState::default();
+        assert_eq!(
+            runner.tick(&state),
+            vec![Action::MouseDown(MouseButton::Left)]
+        );
+        assert_eq!(
+            runner.tick(&state),
+            vec![Action::MouseUp(MouseButton::Left)]
+        );
+        assert_eq!(runner.tick(&state), vec![Action::Finished]);
     }
 
     #[test]

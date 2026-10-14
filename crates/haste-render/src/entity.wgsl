@@ -5,8 +5,13 @@ struct Camera {
     cam_pos: vec4<f32>,
     view_proj: mat4x4<f32>,
     fog_color: vec4<f32>,
-    fog_start: f32,
-    fog_end: f32,
+    // Vanilla fog bands (see chunk.wgsl).
+    fog_env_start: f32,
+    fog_env_end: f32,
+    fog_rd_start: f32,
+    fog_rd_end: f32,
+    fog_sky_end: f32,
+    fog_cloud_end: f32,
     daylight: f32,
     _pad: f32,
 };
@@ -30,6 +35,17 @@ struct VertexOut {
     @location(3) fog: f32,
 };
 
+// Vanilla fog.glsl `linear_fog_value`.
+fn linear_fog_value(dist: f32, start: f32, end: f32) -> f32 {
+    if (dist <= start) {
+        return 0.0;
+    }
+    if (dist >= end) {
+        return 1.0;
+    }
+    return (dist - start) / (end - start);
+}
+
 @vertex
 fn vs_main(v: VertexIn) -> VertexOut {
     var out: VertexOut;
@@ -37,13 +53,13 @@ fn vs_main(v: VertexIn) -> VertexOut {
     out.uv = v.uv;
     out.color = v.color;
     out.rect = v.rect;
-    // Positions are camera-relative.
-    let dist = length(v.pos);
-    var fog = 0.0;
-    if (dist > camera.fog_start) {
-        fog = clamp((dist - camera.fog_start) / max(camera.fog_end - camera.fog_start, 0.001), 0.0, 1.0);
-    }
-    out.fog = fog;
+    // Positions are camera-relative; vanilla's two fog bands (see chunk.wgsl).
+    let spherical = length(v.pos);
+    let cylindrical = max(length(v.pos.xz), abs(v.pos.y));
+    out.fog = max(
+        linear_fog_value(spherical, camera.fog_env_start, camera.fog_env_end),
+        linear_fog_value(cylindrical, camera.fog_rd_start, camera.fog_rd_end),
+    );
     return out;
 }
 

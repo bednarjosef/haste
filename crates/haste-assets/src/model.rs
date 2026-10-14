@@ -112,6 +112,8 @@ pub struct ResolvedModel {
     pub(crate) gui_display: Option<DisplayTransform>,
     /// `display.firstperson_righthand`, likewise.
     pub(crate) firstperson_display: Option<DisplayTransform>,
+    /// `display.fixed` (item frames and other fixed mounts), likewise.
+    pub(crate) fixed_display: Option<DisplayTransform>,
 }
 
 /// A model `display` entry: rotation (degrees, applied X then Y then Z), translation (in

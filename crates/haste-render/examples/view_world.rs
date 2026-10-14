@@ -66,6 +66,7 @@ impl App {
                 pitch: 50.0,
                 fov_deg: 70.0,
                 roll_deg: 0.0,
+                bob: haste_render::ViewBob::default(),
             },
             dirty: (-distance..=distance)
                 .flat_map(|x| (-distance..=distance).map(move |z| SectionPos::new(x, 0, z)))
@@ -180,6 +181,7 @@ impl App {
             partial_tick: 0.0,
             block_target: None,
             breaking: &[],
+            camera_entity: None,
         };
         let stats = renderer.render(&frame).expect("render");
         let dt = self.last_frame.elapsed().as_secs_f32() * 1000.0;

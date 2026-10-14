@@ -147,7 +147,7 @@ pub(crate) fn travel_water(
     };
     accelerate(state, imp, FLUID_ACCELERATION);
     let motion = state.velocity;
-    move_entity(state, attrs, motion, world, shapes);
+    move_entity(state, attrs, motion, world, shapes, blocks);
     apply_speed_factor(state, world, blocks);
     state.velocity.x *= h_drag;
     state.velocity.y *= WATER_DRAG;
@@ -174,7 +174,7 @@ pub(crate) fn travel_lava(
     let old_y = state.pos.y;
     accelerate(state, imp, FLUID_ACCELERATION);
     let motion = state.velocity;
-    move_entity(state, attrs, motion, world, shapes);
+    move_entity(state, attrs, motion, world, shapes, blocks);
     apply_speed_factor(state, world, blocks);
     // Vanilla reads the fluid height after the move (the trackers are refreshed inside `move`),
     // so the shallow/deep branch is decided from the position the player ended up in.

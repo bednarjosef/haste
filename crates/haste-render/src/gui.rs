@@ -2,6 +2,15 @@
 // lazily filled GUI atlas (sprites, textures, font pages, unifont glyphs, item textures), drawn
 // in command order with one draw call per scissor change.
 //
+// Colour space: vanilla composites its GUI onto its main target (RGBA8_UNORM, an sRGB-unaware
+// framebuffer) with the GUI_TEXTURED pipeline's BlendFunction.TRANSLUCENT on the *stored*
+// sRGB-encoded bytes -- what it writes is what it blends. This renderer gives the GUI a
+// non-sRGB view of its sRGB target, so the hardware keeps the stored bytes raw and blends them
+// exactly the same way. Backends whose surface cannot be viewed as non-sRGB (GL) leave only the
+// sRGB view: the GUI then emits linear colour, which keeps opaque pixels on vanilla's value but
+// blends translucent ones in linear space instead. See `blend_gui_pixel` /
+// `blend_gui_pixel_linear` and the tests below for the numbers.
+//
 // The GUI item lighting (`items_3d_lights`, `items_flat_lights`, `lambert_shade`,
 // `transform_gui_normal`) is derived from Pomme (https://github.com/PommeMC/Client),
 // pomme-client/src/world/block/model.rs, reused under GPL-3.0; see THIRD_PARTY.md.
@@ -40,6 +49,66 @@ pub const HUD_SPRITES: &[&str] = &[
 /// Side of the square GUI atlas texture.
 pub const GUI_ATLAS_SIZE: u32 = 4096;
 
+/// Whether the GUI's shader has to emit linear colour for `format`: only when the target itself is
+/// sRGB-encoded (no non-sRGB view on this backend), because then the hardware encodes whatever
+/// the GUI writes. On a non-sRGB view nothing converts and the GUI's colours are written raw,
+/// which is what vanilla does (its main target and GUI atlas are both RGBA8_UNORM).
+pub fn gui_writes_linear(format: wgpu::TextureFormat) -> bool {
+    format.is_srgb()
+}
+
+/// The sRGB transfer function (WGSL `to_linear`), byte in, linear in 0..1.
+fn srgb_to_linear(byte: u8) -> f32 {
+    let c = byte as f32 / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// The inverse of [`srgb_to_linear`], linear in 0..1 to a byte.
+fn linear_to_srgb(x: f32) -> u8 {
+    let x = x.clamp(0.0, 1.0);
+    let c = if x <= 0.0031308 {
+        x * 12.92
+    } else {
+        1.055 * x.powf(1.0 / 2.4) - 0.055
+    };
+    (c * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+/// Vanilla's GUI blend of the sprite pixel `src` over the background pixel `dst`, in 0..255
+/// bytes: the GUI_TEXTURED pipeline's BlendFunction.TRANSLUCENT (colour SRC_ALPHA,
+/// ONE_MINUS_SRC_ALPHA; alpha ONE, ONE_MINUS_SRC_ALPHA) applied to the *stored* values, which is
+/// what the GUI pipelines do on the non-sRGB view of the target.
+pub fn blend_gui_pixel(src: [u8; 4], dst: [u8; 3]) -> [u8; 4] {
+    let a = src[3] as u32;
+    let ia = 255 - a;
+    let rgb: [u8; 3] =
+        std::array::from_fn(|i| ((a * src[i] as u32 + ia * dst[i] as u32 + 127) / 255) as u8);
+    [rgb[0], rgb[1], rgb[2], 255]
+}
+
+/// Vanilla's GUI alpha blend (alpha equation ONE, ONE_MINUS_SRC_ALPHA) of the sprite alpha `src`
+/// over the background alpha `dst`, both 0..255. Colour-space independent: alpha is not encoded.
+pub fn blend_gui_alpha(src: u8, dst: u8) -> u8 {
+    let a = src as u32;
+    ((255 * a + (255 - a) * dst as u32 + 127) / 255) as u8
+}
+
+/// What the same blend produces when the GUI's target is sRGB-encoded (the GL fallback): the
+/// hardware decodes the destination, blends in linear space and encodes the result. Opaque pixels
+/// are unchanged (encode(decode(x)) == x), translucent ones drift towards the destination's own
+/// encoding; multiplicative and inverting pipelines are worse still, so `fs_main_multiply` and
+/// `fs_main_invert` do not linearize.
+pub fn blend_gui_pixel_linear(src: [u8; 4], dst: [u8; 3]) -> [u8; 4] {
+    let a = src[3] as f32 / 255.0;
+    let ia = 1.0 - a;
+    let mix = |i: usize| linear_to_srgb(a * srgb_to_linear(src[i]) + ia * srgb_to_linear(dst[i]));
+    [mix(0), mix(1), mix(2), 255]
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GuiVertex {
@@ -67,7 +136,8 @@ impl GuiVertex {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct GuiUniforms {
     size: [f32; 2],
-    _pad: [f32; 2],
+    /// x: 1 when the GUI writes linear colour (an sRGB-encoded target, no non-sRGB view).
+    flags: [f32; 2],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -293,7 +363,8 @@ fn blend_state(mode: GuiBlend) -> wgpu::BlendState {
                 wgpu::BlendFactor::OneMinusDst,
                 wgpu::BlendFactor::OneMinusSrc,
             ),
-            alpha: equation(wgpu::BlendFactor::One, wgpu::BlendFactor::OneMinusSrcAlpha),
+            // vanilla BlendFunction.INVERT: alpha ONE, ZERO
+            alpha: equation(wgpu::BlendFactor::One, wgpu::BlendFactor::Zero),
         },
         GuiBlend::Additive => wgpu::BlendState {
             color: equation(wgpu::BlendFactor::One, wgpu::BlendFactor::One),
@@ -380,8 +451,9 @@ impl GuiRenderer {
         });
         // One pipeline per blend mode: vanilla's GUI pipelines (RenderPipelines.GUI_TEXTURED and
         // friends blend normally; VIGNETTE multiplies; CROSSHAIR inverts the destination;
-        // GUI_TEXT_HIGHLIGHT adds to it).
-        let make_pipeline = |label, blend: Option<wgpu::BlendState>| {
+        // GUI_TEXT_HIGHLIGHT adds to it). Each has its own fragment entry point so only the
+        // normal blend converts to linear on an sRGB-encoded target (`gui_color` in gui.wgsl).
+        let make_pipeline = |label, blend: Option<wgpu::BlendState>, fs: &str| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&pipeline_layout),
@@ -393,7 +465,7 @@ impl GuiRenderer {
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: Some("fs_main"),
+                    entry_point: Some(fs),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: target_format,
@@ -416,13 +488,44 @@ impl GuiRenderer {
         // edges), so its blend multiplies the destination by it: unchanged in the centre,
         // darkened towards the edges.
         let pipelines = [
-            make_pipeline("gui-normal", Some(blend_state(GuiBlend::Normal))),
-            make_pipeline("gui-multiply", Some(blend_state(GuiBlend::Multiply))),
-            make_pipeline("gui-invert", Some(blend_state(GuiBlend::Invert))),
-            make_pipeline("gui-additive", Some(blend_state(GuiBlend::Additive))),
+            make_pipeline("gui-normal", Some(blend_state(GuiBlend::Normal)), "fs_main"),
+            make_pipeline(
+                "gui-multiply",
+                Some(blend_state(GuiBlend::Multiply)),
+                "fs_main_multiply",
+            ),
+            make_pipeline(
+                "gui-invert",
+                Some(blend_state(GuiBlend::Invert)),
+                "fs_main_invert",
+            ),
+            make_pipeline(
+                "gui-additive",
+                Some(blend_state(GuiBlend::Additive)),
+                "fs_main_additive",
+            ),
         ];
         let vertex_capacity = 16 * 1024;
         let vertex_buffer = Self::make_vertex_buffer(&device, vertex_capacity);
+        // An sRGB target (no non-sRGB view on this backend) forces the shader to emit linear
+        // colour; warn with the concrete deviation that causes for translucent GUI pixels.
+        let linear_output = gui_writes_linear(target_format);
+        if linear_output {
+            let src = [128u8, 128, 128, 140];
+            let dst = [200u8, 80, 40];
+            let vanilla = blend_gui_pixel(src, dst);
+            let fallback = blend_gui_pixel_linear(src, dst);
+            tracing::warn!(
+                "no non-sRGB view of the GUI target {:?}: translucent GUI pixels blend in linear space \
+                 (a 55% grey over rgb({},{},{}) lands on {:?} instead of vanilla's {:?})",
+                target_format,
+                dst[0],
+                dst[1],
+                dst[2],
+                fallback,
+                vanilla
+            );
+        }
         let mut gui = GuiRenderer {
             device,
             queue,
@@ -443,7 +546,7 @@ impl GuiRenderer {
             batches: Vec::new(),
             entity_scratch: Vec::new(),
             rng: 0x9E37_79B9,
-            linear_output: target_format.is_srgb(),
+            linear_output,
             stats: GuiStats::default(),
         };
         // The missing texture is entry 0 so lookups can always fall back to it.
@@ -613,7 +716,7 @@ impl GuiRenderer {
         let scale = frame.scale.max(1) as f32;
         let uniforms = GuiUniforms {
             size: [target.0 as f32 / scale, target.1 as f32 / scale],
-            _pad: [if self.linear_output { 1.0 } else { 0.0 }, 0.0],
+            flags: [if self.linear_output { 1.0 } else { 0.0 }, 0.0],
         };
         self.queue
             .write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
@@ -1510,17 +1613,24 @@ fn prepare_item(model: &ItemModel) -> PreparedItem {
         match &part.geometry {
             ItemGeometry::None => {}
             ItemGeometry::Generated { layers } => {
-                // The front face of the extruded sprite (the only one visible in a slot).
-                let z = 8.5 / 16.0;
+                // The extruded sprite's front face and the 1/16-deep sides at its opaque
+                // edges (`haste_assets`'s `generated_layer_quads`, vanilla's
+                // `ItemModelGenerator`); the mirrored back face never shows in a slot.
                 for (i, layer) in layers.iter().enumerate() {
-                    push(
-                        [[0.0, 1.0, z], [0.0, 0.0, z], [1.0, 0.0, z], [1.0, 1.0, z]],
-                        [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]],
-                        Vec3::Z,
-                        layer.clone(),
-                        tint(Some(i as u32)),
-                        i as f32 * 1e-3,
-                    );
+                    for q in &layer.quads {
+                        if q.direction == haste_assets::Direction::North {
+                            continue;
+                        }
+                        let o = q.direction.offset();
+                        push(
+                            q.positions,
+                            q.uvs,
+                            Vec3::new(o[0] as f32, o[1] as f32, o[2] as f32),
+                            layer.texture.clone(),
+                            tint(q.tint_index),
+                            i as f32 * 1e-3,
+                        );
+                    }
                 }
             }
             ItemGeometry::Elements(list) => {
@@ -1547,6 +1657,81 @@ fn prepare_item(model: &ItemModel) -> PreparedItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Vanilla's hotbar panel interior over a mid blue: 0.729 * 39/255 + 0.271 * 48/255 = 41.4,
+    /// and the same in the other two channels (48.6, 55.6) -> 41, 49, 56.
+    #[test]
+    fn blend_gui_pixel_matches_vanilla_srgb_math() {
+        assert_eq!(
+            blend_gui_pixel([39, 37, 5, 186], [48, 80, 192]),
+            [41, 49, 56, 255]
+        );
+        // A fully opaque sprite pixel is copied through.
+        assert_eq!(
+            blend_gui_pixel([10, 20, 30, 255], [48, 80, 192]),
+            [10, 20, 30, 255]
+        );
+        // A fully transparent one leaves the background alone.
+        assert_eq!(
+            blend_gui_pixel([255, 255, 255, 0], [48, 80, 192]),
+            [48, 80, 192, 255]
+        );
+        // Alpha: dst_a' = a + (1 - a) * dst_a, so a semi-transparent pixel over transparency
+        // only reaches its own alpha.
+        assert_eq!(blend_gui_alpha(128, 0), 128);
+        assert_eq!(blend_gui_alpha(128, 51), 153);
+        assert_eq!(blend_gui_alpha(0, 200), 200);
+        assert_eq!(blend_gui_alpha(255, 200), 255);
+    }
+
+    /// The review's case: a 55 % alpha grey over a coloured background. Vanilla mixes the stored
+    /// bytes: 0.549 * 128/255 + 0.451 * 200/255 = 0.629 -> 160, 0.417 -> 106, 0.345 -> 88.
+    #[test]
+    fn blend_gui_pixel_55_percent_grey_over_colour() {
+        assert_eq!(
+            blend_gui_pixel([128, 128, 128, 140], [200, 80, 40]),
+            [160, 106, 88, 255]
+        );
+        // Half-way grey over the same background.
+        assert_eq!(
+            blend_gui_pixel([128, 128, 128, 128], [200, 80, 40]),
+            [164, 104, 84, 255]
+        );
+    }
+
+    /// The sRGB-target fallback blends in linear space instead, which is not vanilla: the same
+    /// 55 % grey lands 6/255 brighter in red and 12 brighter in blue (0.549 * lin(128/255) +
+    /// 0.451 * lin(200/255) = 0.379 -> 166), so every translucent GUI pixel (the hotbar panel,
+    /// the vignette) takes on the background's encoding. On the GPU the drift is far larger: the
+    /// hotbar panel texel over a blue sky measured 106 in blue against vanilla's 55.
+    #[test]
+    fn blend_gui_pixel_linear_is_not_vanilla() {
+        assert_eq!(
+            blend_gui_pixel_linear([128, 128, 128, 140], [200, 80, 40]),
+            [166, 110, 100, 255]
+        );
+        assert_ne!(
+            blend_gui_pixel([128, 128, 128, 140], [200, 80, 40]),
+            blend_gui_pixel_linear([128, 128, 128, 140], [200, 80, 40])
+        );
+        // Opaque pixels survive the fallback exactly: encode(decode(x)) == x.
+        for c in [0u8, 1, 17, 64, 128, 200, 254, 255] {
+            assert_eq!(
+                blend_gui_pixel_linear([c, c, c, 255], [c, c, c]),
+                [c, c, c, 255]
+            );
+        }
+    }
+
+    /// The GUI only converts colour when its target is sRGB-encoded; with a non-sRGB view it
+    /// writes vanilla's stored values directly.
+    #[test]
+    fn gui_writes_linear_only_for_srgb_targets() {
+        assert!(gui_writes_linear(wgpu::TextureFormat::Bgra8UnormSrgb));
+        assert!(gui_writes_linear(wgpu::TextureFormat::Rgba8UnormSrgb));
+        assert!(!gui_writes_linear(wgpu::TextureFormat::Bgra8Unorm));
+        assert!(!gui_writes_linear(wgpu::TextureFormat::Rgba8Unorm));
+    }
 
     #[test]
     fn shadow_colour_is_a_quarter() {
@@ -1633,6 +1818,7 @@ mod tests {
                     scale: [0.625; 3],
                 },
                 firstperson: haste_assets::DisplayTransform::IDENTITY,
+                fixed: haste_assets::DisplayTransform::IDENTITY,
                 gui_light_front: false,
                 transformation: None,
             }],
