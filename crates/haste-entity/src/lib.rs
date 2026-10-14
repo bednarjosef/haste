@@ -3,6 +3,7 @@
 //! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
 
 pub mod animation;
+pub mod decoration;
 pub mod dims;
 pub mod lerp;
 pub mod metadata;
@@ -15,6 +16,7 @@ pub mod store;
 #[cfg(test)]
 mod tests;
 
+pub use decoration::PaintingVariant;
 pub use dims::{Dimensions, EntityDimensions};
 pub use metadata::{Metadata, SharedFlags};
 pub use riding::{passenger_seat, PassengerKind, SeatPoint, SeatQuery};

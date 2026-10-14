@@ -39,6 +39,8 @@ pub struct ItemModelPart {
     pub gui: DisplayTransform,
     /// `display.firstperson_righthand` (identity when the chain has none).
     pub firstperson: DisplayTransform,
+    /// `display.fixed` (identity when the chain has none): item frames and other fixed mounts.
+    pub fixed: DisplayTransform,
     /// `gui_light: front` (flat items) instead of the default side lighting.
     pub gui_light_front: bool,
     /// Composite `transformation` applied to the geometry before the display transform.
@@ -109,6 +111,7 @@ impl Assets {
                 tints,
                 gui: DisplayTransform::IDENTITY,
                 firstperson: DisplayTransform::IDENTITY,
+                fixed: DisplayTransform::IDENTITY,
                 gui_light_front: false,
                 transformation: leaf.transformation,
             });
@@ -118,6 +121,7 @@ impl Assets {
         let firstperson = resolved
             .firstperson_display
             .unwrap_or(DisplayTransform::IDENTITY);
+        let fixed = resolved.fixed_display.unwrap_or(DisplayTransform::IDENTITY);
         let geometry = if leaf.special {
             ItemGeometry::None
         } else if resolved.elements.is_empty() {
@@ -145,9 +149,18 @@ impl Assets {
             tints,
             gui,
             firstperson,
+            fixed,
             gui_light_front: resolved.gui_light,
             transformation: leaf.transformation,
         })
+    }
+
+    /// A block model's element faces as quads (positions in 0..1 block units, face-local 0..1
+    /// UVs, the texture id each face samples), without blockstate rotation or atlas UVs. For
+    /// entity renderers that draw a block model through their own atlas (item frames).
+    pub fn model_quads(&mut self, id: &Identifier) -> Result<Vec<BakedQuad>> {
+        let resolved = self.resolve_model(id)?;
+        Ok(bake_elements(&resolved))
     }
 
     fn tint_color(&mut self, tint: &serde_json::Value) -> u32 {

@@ -109,6 +109,27 @@ const FORWARDED_LOCAL: &[&str] = &[
     "minecraft:player_combat_kill",
 ];
 
+/// Whether [`Ui::handle`] uses this packet (tier-2 state or a forwarded tier-3 packet). The
+/// HUD JVM boots for seconds while play packets already arrive; `NetDriver` keeps these packets
+/// until the `Ui` exists so a fresh join's tab list, boss bars and scoreboard are not lost.
+pub fn ui_handles(p: &ClientboundPlay) -> bool {
+    use ClientboundPlay as P;
+    matches!(
+        p,
+        P::SetHealth(_)
+            | P::SetExperience(_)
+            | P::PlayerAbilities(_)
+            | P::GameEvent(_)
+            | P::PlayerCombatKill(_)
+            | P::Respawn(_)
+            | P::SetHeldSlot(_)
+            | P::EntityEvent(_)
+            | P::SetTime(_)
+    ) || p
+        .name()
+        .is_some_and(|n| FORWARDED.contains(&n) || FORWARDED_LOCAL.contains(&n))
+}
+
 impl Ui {
     /// A UI over a started JVM (`JvmHost::start`; start it early, on its own thread: vanilla's
     /// bootstrap takes seconds).
@@ -593,6 +614,29 @@ mod tests {
         for n in FORWARDED_LOCAL {
             assert!(!FORWARDED.contains(n), "{n}");
         }
+    }
+
+    #[test]
+    fn ui_handles_tier2_state_and_forwarded_packets_only() {
+        use haste_protocol::packets::play::clientbound as cb;
+        // Tier-2 state (health) and a forwarded tier-3 packet (the sidebar display) are kept for
+        // the HUD; a plain world packet is not (the boot backlog must stay small).
+        let health = ClientboundPlay::SetHealth(cb::SetHealth {
+            health: 1.0,
+            food: 2,
+            saturation: 0.0,
+        });
+        assert!(ui_handles(&health));
+        let display = ClientboundPlay::SetDisplayObjective(cb::SetDisplayObjective {
+            position: 1,
+            name: "s".to_owned(),
+        });
+        assert!(ui_handles(&display));
+        let block = ClientboundPlay::BlockUpdate(cb::BlockUpdate {
+            pos: haste_protocol::haste_core::BlockPos::new(0, 0, 0),
+            state: 1,
+        });
+        assert!(!ui_handles(&block));
     }
 
     // ---- tests against a server (ignored: need cache/ and the test server) ----

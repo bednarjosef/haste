@@ -901,3 +901,134 @@ fn dismount_resumes_physics_from_the_seat() {
         )
     }));
 }
+
+// ---------------------------------------------------------------------------
+// Elytra flight (vanilla `Player.tryToStartFallFlying`, shared flag 7).
+// ---------------------------------------------------------------------------
+
+/// Equips a glider in the chest slot: item registry index `index` is marked as a glider item
+/// (the reports' `minecraft:glider` component) and put in the chest armor slot.
+fn equip_glider(p: &mut LocalPlayer, index: u32) {
+    let item = haste_core::RegistryIndex(index);
+    p.int.glider_items = Some([item].into_iter().collect());
+    p.int.armor[1] = haste_core::entity::ItemStackData {
+        count: 1,
+        item: Some(item),
+        components_raw: Default::default(),
+    };
+}
+
+/// Put the loaded player in the air with no velocity.
+fn airborne(p: &mut LocalPlayer) {
+    p.state.pos = DVec3::new(0.5, 100.0, 0.5);
+    p.state.on_ground = false;
+    p.state.velocity = DVec3::ZERO;
+}
+
+#[test]
+fn jump_in_the_air_with_a_glider_starts_falling_flying() {
+    let (mut p, _) = spawned();
+    equip_glider(&mut p, 42);
+    airborne(&mut p);
+    let out = tick(
+        &mut p,
+        &InputState {
+            jump: true,
+            ..Default::default()
+        },
+    );
+    assert!(p.state.fall_flying, "the local flag is set at once");
+    assert!(
+        out.iter().any(|m| matches!(
+            m,
+            ServerboundPlay::PlayerCommand(c) if c.action == command::START_FALL_FLYING
+        )),
+        "START_FALL_FLYING is sent: {out:?}"
+    );
+    // Vanilla `Player.getDesiredPose` -> FALL_FLYING; the pose's eye height is 0.4.
+    assert_eq!(p.state.pose, haste_physics::Pose::FallFlying);
+    assert!((p.eye_height() - 0.4).abs() < 1e-6, "{}", p.eye_height());
+    // The glide already moves this tick (it sinks from the look-ahead pitch 0).
+    assert!(p.state.pos.y < 100.0, "{}", p.state.pos);
+}
+
+#[test]
+fn jump_in_the_air_without_a_glider_does_not_start() {
+    let (mut p, _) = spawned();
+    airborne(&mut p);
+    let out = tick(
+        &mut p,
+        &InputState {
+            jump: true,
+            ..Default::default()
+        },
+    );
+    assert!(!p.state.fall_flying);
+    assert!(!out
+        .iter()
+        .any(|m| matches!(m, ServerboundPlay::PlayerCommand(_))));
+    assert_ne!(p.state.pose, haste_physics::Pose::FallFlying);
+}
+
+#[test]
+fn a_glider_in_the_chest_only_helps_with_the_glider_component() {
+    let (mut p, _) = spawned();
+    // A plain chest item (not in the glider set): no start.
+    p.int.armor[1] = haste_core::entity::ItemStackData {
+        count: 1,
+        item: Some(haste_core::RegistryIndex(42)),
+        components_raw: Default::default(),
+    };
+    assert!(!p.has_glider());
+    // The same item once the reports mark it as a glider.
+    p.int.glider_items = Some([haste_core::RegistryIndex(42)].into_iter().collect());
+    assert!(p.has_glider());
+    // An empty stack is never a glider.
+    p.int.armor[1] = Default::default();
+    assert!(!p.has_glider());
+}
+
+#[test]
+fn server_shared_flag_7_sets_and_clears_fall_flying() {
+    use haste_core::entity::{MetadataEntry, MetadataValue};
+    let (mut p, mut out) = spawned();
+    let set = |b: i8| {
+        ClientboundPlay::SetEntityData(cb::SetEntityData {
+            entity_id: ME.0,
+            metadata: vec![MetadataEntry {
+                index: 0,
+                value: MetadataValue::Byte(b),
+            }],
+        })
+    };
+    assert!(p.handle(&set(0x80u8 as i8), &mut out));
+    assert!(p.state.fall_flying);
+    assert_eq!(
+        p.state.pose,
+        haste_physics::Pose::Standing,
+        "pose follows next tick"
+    );
+    p.handle(&set(0), &mut out);
+    assert!(!p.state.fall_flying);
+}
+
+#[test]
+fn landing_ends_the_glide_and_the_pose() {
+    let (mut p, _) = spawned();
+    p.state.fall_flying = true;
+    p.state.pos = DVec3::new(0.5, 1.5, 0.5);
+    p.state.on_ground = false;
+    p.state.velocity = DVec3::new(0.0, -0.5, 0.0);
+    for _ in 0..200 {
+        tick(&mut p, &InputState::default());
+        if p.state.on_ground {
+            break;
+        }
+    }
+    assert!(p.state.on_ground, "{}", p.state.pos);
+    assert!(
+        !p.state.fall_flying,
+        "vanilla `LivingEntity.travelFallFlying`"
+    );
+    assert_ne!(p.state.pose, haste_physics::Pose::FallFlying);
+}

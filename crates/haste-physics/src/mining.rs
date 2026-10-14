@@ -127,6 +127,10 @@ impl Tool {
 #[derive(Default)]
 pub struct ToolTable {
     by_item: HashMap<Identifier, Tool>,
+    /// Items whose default components include `minecraft:glider` (vanilla
+    /// `LivingEntity.canGlideUsing`'s `DataComponents.GLIDER`); the elytra and any mod item that
+    /// carries the component.
+    gliders: HashSet<Identifier>,
 }
 
 impl ToolTable {
@@ -134,6 +138,7 @@ impl ToolTable {
     pub fn load(reports: &Path) -> anyhow::Result<ToolTable> {
         let dir = reports.join("minecraft/components/item");
         let mut by_item = HashMap::new();
+        let mut gliders = HashSet::new();
         for e in std::fs::read_dir(&dir).map_err(|e| anyhow::anyhow!("{}: {e}", dir.display()))? {
             let path = e?.path();
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
@@ -143,11 +148,15 @@ impl ToolTable {
                 continue;
             }
             let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
-            if let Some(t) = v.get("components").and_then(|c| c.get("minecraft:tool")) {
+            let components = v.get("components");
+            if let Some(t) = components.and_then(|c| c.get("minecraft:tool")) {
                 by_item.insert(Identifier::minecraft(stem), Tool::from_json(t)?);
             }
+            if components.is_some_and(|c| c.get("minecraft:glider").is_some()) {
+                gliders.insert(Identifier::minecraft(stem));
+            }
         }
-        Ok(ToolTable { by_item })
+        Ok(ToolTable { by_item, gliders })
     }
 
     /// From the default cache location (`haste_core::paths::datagen_reports`).
@@ -157,6 +166,21 @@ impl ToolTable {
 
     pub fn insert(&mut self, item: Identifier, tool: Tool) {
         self.by_item.insert(item, tool);
+    }
+
+    /// Records `item` as a glider (`minecraft:glider` in its default components).
+    pub fn insert_glider(&mut self, item: Identifier) {
+        self.gliders.insert(item);
+    }
+
+    /// Whether `item`'s default components carry the glider component.
+    pub fn is_glider(&self, item: &Identifier) -> bool {
+        self.gliders.contains(item)
+    }
+
+    /// The glider item names (for resolving them to registry indices).
+    pub fn gliders(&self) -> &HashSet<Identifier> {
+        &self.gliders
     }
 
     pub fn get(&self, item: &Identifier) -> Option<&Tool> {
@@ -504,5 +528,8 @@ mod tests {
         assert!(!sword.can_destroy_blocks_in_creative);
         assert!(t.get(&Identifier::minecraft("stick")).is_none());
         assert!(t.len() > 30, "{} tools", t.len());
+        // The elytra's default components carry `minecraft:glider`; a stick does not.
+        assert!(t.is_glider(&Identifier::minecraft("elytra")));
+        assert!(!t.is_glider(&Identifier::minecraft("stick")));
     }
 }

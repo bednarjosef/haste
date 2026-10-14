@@ -24,8 +24,31 @@ pub struct Camera {
     pub yaw: f32,
     pub pitch: f32,
     pub fov_deg: f32,
-    /// Camera roll in degrees (hurt tilt; positive rolls the horizon clockwise on screen).
+    /// Camera roll in degrees (a plain horizon roll around the view forward axis).
     pub roll_deg: f32,
+    /// The hurt/death tilts and the view bobbing (vanilla's `GameRenderer.bobHurt`/`bobView`),
+    /// applied in view space between the projection and the view.
+    pub bob: ViewBob,
+}
+
+/// Per-frame view-space camera effects: the pose stack vanilla's `GameRenderer` multiplies
+/// onto the projection matrix (hurt tilt, death roll, then the view-bob translation and
+/// wobble), plus the camera's plain [`Camera::roll_deg`] roll.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ViewBob {
+    /// `bobHurt`: the hurt roll in degrees, applied around the view z-axis rotated
+    /// `hurt_dir_deg` toward the damage direction (vanilla's `hurtDir`).
+    pub hurt_tilt_deg: f32,
+    /// `bobHurt`: the damage direction in degrees.
+    pub hurt_dir_deg: f32,
+    /// `bobHurt`: the death roll in degrees, a plain z-axis rotation.
+    pub death_roll_deg: f32,
+    /// `bobView`: the translation in the camera plane (x right, y up).
+    pub x: f32,
+    pub y: f32,
+    /// `bobView`: the roll and pitch wobble in degrees.
+    pub roll_deg: f32,
+    pub pitch_deg: f32,
 }
 
 /// Sky/fog state for one frame.
@@ -145,6 +168,7 @@ mod tests {
                 pitch: 60.0,
                 fov_deg: 70.0,
                 roll_deg: 0.0,
+                bob: ViewBob::default(),
             },
             entities: &[],
             gui: &haste_core::gui::GuiFrame::default(),
@@ -225,6 +249,52 @@ mod tests {
         assert_eq!(flag.get(), CapturePhase::Ready);
         flag.clone().set(CapturePhase::Failed);
         assert_eq!(flag.get(), CapturePhase::Failed);
+    }
+
+    fn camera_with(bob: ViewBob, roll: f32) -> Camera {
+        Camera {
+            pos: glam::DVec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.0,
+            fov_deg: 70.0,
+            roll_deg: roll,
+            bob,
+        }
+    }
+
+    #[test]
+    fn view_transform_is_identity_without_effects() {
+        let m = Renderer::view_transform(&camera_with(ViewBob::default(), 0.0));
+        assert!(m.abs_diff_eq(glam::Mat4::IDENTITY, 1e-6));
+    }
+
+    #[test]
+    fn view_transform_bobs_in_the_camera_plane() {
+        // `bobView` translates x right / y up in view space, then rolls about Z and pitches
+        // about X. With only a translation the matrix is that translation.
+        let bob = ViewBob {
+            x: 0.25,
+            y: -0.5,
+            ..ViewBob::default()
+        };
+        let m = Renderer::view_transform(&camera_with(bob, 0.0));
+        let want = glam::Mat4::from_translation(glam::Vec3::new(0.25, -0.5, 0.0));
+        assert!(m.abs_diff_eq(want, 1e-6));
+    }
+
+    #[test]
+    fn view_transform_hurt_tilt_turns_the_roll_axis_by_hurt_dir() {
+        // `bobHurt` rotates the z-roll axis by `-hurtDir`, rolls, then turns back. A 90
+        // degree hurtDir turns the z-roll into a roll about the (rotated) axis.
+        let bob = ViewBob {
+            hurt_tilt_deg: 30.0,
+            hurt_dir_deg: 90.0,
+            ..ViewBob::default()
+        };
+        let m = Renderer::view_transform(&camera_with(bob, 0.0));
+        let r = |axis: glam::Vec3, deg: f32| glam::Mat4::from_axis_angle(axis, deg.to_radians());
+        let want = r(glam::Vec3::Y, -90.0) * r(glam::Vec3::Z, 30.0) * r(glam::Vec3::Y, 90.0);
+        assert!(m.abs_diff_eq(want, 1e-6));
     }
 }
 
@@ -341,6 +411,8 @@ pub struct Renderer {
     sky: crate::sky::SkyRenderer,
     /// Selection outline and break cracks.
     overlay: crate::overlay::OverlayRenderer,
+    /// Particles (`FrameInput::particles`).
+    particles: crate::particles::ParticleRenderer,
     /// Timings of the last frame and the GPU timestamp reader.
     timings: crate::timing::FrameTimings,
     timer: Option<crate::timing::GpuTimer>,
@@ -708,6 +780,12 @@ impl Renderer {
             &camera_bind_group_layout,
             assets,
         );
+        let particles = crate::particles::ParticleRenderer::new(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            surface_format,
+            &camera_bind_group_layout,
+        );
         let mut gui_assets = assets.reopen()?;
         gui.preload_sprites(&mut gui_assets, crate::gui::HUD_SPRITES);
 
@@ -762,6 +840,7 @@ impl Renderer {
             entity,
             sky,
             overlay,
+            particles,
             first_person: None,
             timings: Default::default(),
             last_uploads: (0, 0),
@@ -842,6 +921,25 @@ impl Renderer {
         self.bonus.clear();
     }
 
+    /// Uploads the particle atlas of `types` as the particle texture (call after
+    /// `ParticleTypes::build`, once).
+    pub fn set_particle_types(&mut self, types: &Arc<crate::particles::ParticleTypes>) {
+        self.particles.set_types(types);
+    }
+
+    /// Poses this frame's particles (billboards, interpolated at `partial`) and samples their
+    /// light from `world`. Like [`Self::sample_world`]: call before `render` with the frame
+    /// you are about to render (the renderer holds no world).
+    pub fn prepare_particles(
+        &mut self,
+        particles: &mut crate::particles::Particles,
+        world: &dyn BlockView,
+        camera: Camera,
+        partial: f32,
+    ) {
+        self.particles.prepare(particles, camera, partial, world);
+    }
+
     /// Sky and block light at each entity's position, sampled from the world by the caller
     /// (the renderer holds no world reference). Call before `render`; entities without an
     /// entry are drawn at full sky light.
@@ -918,6 +1016,11 @@ impl Renderer {
     /// Counters of the last GUI frame.
     pub fn gui_stats(&self) -> crate::gui::GuiStats {
         self.gui.stats
+    }
+
+    /// Particles posed in the last frame (debug: also logged once a second at debug level).
+    pub fn particles_drawn(&self) -> u32 {
+        self.particles.drawn
     }
 
     fn make_origin_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
@@ -1185,6 +1288,26 @@ impl Renderer {
         }
     }
 
+    /// The pose stack vanilla's `GameRenderer` multiplies onto the projection matrix
+    /// (`renderLevel`: bobHurt, then bobView), plus the camera's plain roll. In view space
+    /// (x right, y up, z back), as rotations about +Z roll the horizon one way.
+    pub(crate) fn view_transform(camera: &Camera) -> glam::Mat4 {
+        let b = camera.bob;
+        let z = glam::Vec3::Z;
+        let y = glam::Vec3::Y;
+        // The plain roll, then the death roll (a plain z-axis rotation), then the hurt
+        // tilt around the z-axis turned by the damage direction.
+        let m = glam::Mat4::from_axis_angle(z, camera.roll_deg.to_radians())
+            * glam::Mat4::from_axis_angle(z, b.death_roll_deg.to_radians())
+            * glam::Mat4::from_axis_angle(y, -b.hurt_dir_deg.to_radians())
+            * glam::Mat4::from_axis_angle(z, b.hurt_tilt_deg.to_radians())
+            * glam::Mat4::from_axis_angle(y, b.hurt_dir_deg.to_radians());
+        // The view bobbing: translate in the camera plane, then roll, then pitch.
+        m * glam::Mat4::from_translation(glam::Vec3::new(b.x, b.y, 0.0))
+            * glam::Mat4::from_axis_angle(z, b.roll_deg.to_radians())
+            * glam::Mat4::from_axis_angle(glam::Vec3::X, b.pitch_deg.to_radians())
+    }
+
     /// A newly uploaded section is drawn until the async walk catches up when a
     /// face-neighbour is in the current mask: vanilla seeds newly loaded
     /// sections into the propagation queue, so they appear before the next
@@ -1222,19 +1345,13 @@ impl Renderer {
             pitch.cos() * yaw.cos(),
         )
         .normalize();
-        // Roll (hurt tilt): rotate the up vector around the forward axis.
-        let up = if camera.roll_deg == 0.0 {
-            glam::Vec3::Y
-        } else {
-            glam::Quat::from_axis_angle(forward, camera.roll_deg.to_radians()) * glam::Vec3::Y
-        };
         let eye = glam::Vec3::new(
             camera.pos.x as f32,
             camera.pos.y as f32,
             camera.pos.z as f32,
         );
-        let view = glam::Mat4::look_to_rh(eye, forward, up);
-        proj * view
+        let view = glam::Mat4::look_to_rh(eye, forward, glam::Vec3::Y);
+        proj * Self::view_transform(camera) * view
     }
 
     /// Frustum culling of sections (Pomme cull.comp reference; CPU here).
@@ -1297,9 +1414,12 @@ impl Renderer {
                     * glam::Vec3::Y
             };
             let view = glam::Mat4::look_to_rh(glam::Vec3::ZERO, forward, up);
+            // The hand gets the same pose stack as the world view (vanilla's
+            // `renderItemInHand` applies bobHurt and bobView to it too).
+            let m = Self::view_transform(&frame.camera);
             self.entity.prepare_hand(
                 self.first_person.as_ref(),
-                view.inverse(),
+                view.inverse() * m,
                 (frame.camera.yaw, frame.camera.pitch),
                 frame.partial_tick,
                 &mut self.assets,
@@ -1694,6 +1814,7 @@ impl Renderer {
             if !entities_drawn {
                 draw_calls += self.entity.draw(&mut pass);
             }
+            draw_calls += self.particles.draw(&mut pass);
             draw_calls += self.overlay.draw(&mut pass);
             draw_calls += self.sky.draw_overlays(&mut pass);
         }
