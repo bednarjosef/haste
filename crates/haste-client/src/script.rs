@@ -3,9 +3,12 @@
 //! A script is a list of steps, one per line. `#` starts a comment and blank lines are ignored.
 //! `parse` turns the text into `Vec<Step>`; a [`Runner`] drives those steps and returns the
 //! [`Action`]s the client must perform each game tick (20 ticks per second). This module is pure
-//! logic only: no window, renderer or network. The `--script FILE` wiring comes later.
-
-#![allow(dead_code)] // the runner API is not called from `main` yet (wired up in a later step)
+//! logic only: no window, renderer or network; the `--script FILE` offscreen client wires it up
+//! (app.rs `script_run`).
+//!
+//! Key names (`key`, `key_down`, `key_up`) are case-insensitive: letters `A`..`Z`, digits
+//! `0`..`9`, function keys `F1`..`F12`, and `Escape`, `Enter`, `Tab`, `Space`, `Backspace`,
+//! `Up`, `Down`, `Left`, `Right`, `LShift`/`LeftShift`, `LCtrl`/`LeftCtrl`, `LAlt`/`LeftAlt`.
 
 use std::fmt;
 
@@ -75,11 +78,14 @@ pub enum Key {
 }
 
 impl Key {
-    /// Parses a key name exactly as written in a script (`A`..`Z`, `0`..`9`, `F1`..`F12` and the
-    /// upper-case names). Returns `None` for anything else.
+    /// Parses a key name as written in a script. Case-insensitive, so `Escape`, `escape` and
+    /// `ESCAPE` are the same key: digits are `0`..`9`, letters `A`..`Z`, the rest are the
+    /// obvious words (`F1`..`F12`, `Escape`, `Enter`, `Tab`, `Space`, `Backspace`, `Up`, `Down`,
+    /// `Left`, `Right`, `LShift`/`LeftShift`, `LCtrl`/`LeftCtrl`, `LAlt`/`LeftAlt`).
+    /// Returns `None` for anything else.
     pub fn from_name(name: &str) -> Option<Key> {
         use Key::*;
-        Some(match name {
+        Some(match name.to_ascii_uppercase().as_str() {
             "A" => A,
             "B" => B,
             "C" => C,
@@ -137,9 +143,9 @@ impl Key {
             "DOWN" => Down,
             "LEFT" => Left,
             "RIGHT" => Right,
-            "LSHIFT" => LeftShift,
-            "LCTRL" => LeftCtrl,
-            "LALT" => LeftAlt,
+            "LSHIFT" | "LEFTSHIFT" => LeftShift,
+            "LCTRL" | "LEFTCTRL" => LeftCtrl,
+            "LALT" | "LEFTALT" => LeftAlt,
             _ => return None,
         })
     }
@@ -518,6 +524,9 @@ impl Runner {
         }
     }
 
+    /// Whether the script has finished (an `Action::Finished` also reports it; this is the
+    /// query form, used by tests).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_finished(&self) -> bool {
         self.finished
     }
@@ -788,6 +797,40 @@ mod tests {
         }
         assert!(Key::from_name("zz").is_none());
         assert!(Key::from_name("F13").is_none());
+    }
+
+    #[test]
+    fn key_names_parse_in_any_case() {
+        // The canonical names round-trip; other casings parse to the same key.
+        for (written, want) in [
+            ("Escape", Key::Escape),
+            ("escape", Key::Escape),
+            ("ESCAPE", Key::Escape),
+            ("E", Key::E),
+            ("e", Key::E),
+            ("F3", Key::F3),
+            ("f3", Key::F3),
+            ("f12", Key::F12),
+            ("Tab", Key::Tab),
+            ("Enter", Key::Enter),
+            ("Space", Key::Space),
+            ("Backspace", Key::Backspace),
+            ("LeftShift", Key::LeftShift),
+            ("lshift", Key::LeftShift),
+            ("LShift", Key::LeftShift),
+            ("LeftCtrl", Key::LeftCtrl),
+            ("LeftAlt", Key::LeftAlt),
+            ("Up", Key::Up),
+            ("Down", Key::Down),
+            ("Left", Key::Left),
+            ("Right", Key::Right),
+            ("W", Key::W),
+            ("5", Key::Num5),
+        ] {
+            assert_eq!(Key::from_name(written), Some(want), "key {written}");
+        }
+        // Still one key per name: casings do not create duplicates.
+        assert_eq!(Key::from_name("Escape"), Key::from_name("ESCAPE"));
     }
 
     #[test]

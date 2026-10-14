@@ -20,6 +20,30 @@ use crate::store::Entity;
 /// Vanilla's head/body split clamp, in radians (75 degrees).
 const HEAD_CLAMP: f32 = 75.0_f32.to_radians();
 
+/// Head-only aim for non-player models with a "head" part (the dumped mob layers): the look
+/// direction relative to the body yaw, like `pose_overrides`'s head entry without the limbs
+/// (mob walk animation is a later task). One rotation entry, allocated once per frame per
+/// entity - the same cost the player path already has.
+pub(crate) fn head_only(e: &Entity) -> PoseOverrides {
+    let mut rel = (e.head_yaw - e.yaw).to_radians();
+    while rel > std::f32::consts::PI {
+        rel -= std::f32::consts::TAU;
+    }
+    while rel < -std::f32::consts::PI {
+        rel += std::f32::consts::TAU;
+    }
+    let mut o = PoseOverrides::default();
+    o.rotations.push((
+        "head".into(),
+        Vec3::new(
+            e.pitch.to_radians(),
+            rel.clamp(-HEAD_CLAMP, HEAD_CLAMP),
+            0.0,
+        ),
+    ));
+    o
+}
+
 pub(crate) fn pose_overrides(e: &Entity, partial_tick: f32) -> PoseOverrides {
     let mut o = PoseOverrides::default();
     let swing = e.limb_swing + e.limb_speed * partial_tick;
