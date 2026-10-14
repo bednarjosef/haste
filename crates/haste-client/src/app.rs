@@ -275,16 +275,15 @@ impl WorldFeed {
         self.batch = batch;
     }
 
-    /// Copies the interpolated entity instances.
     /// Copies the interpolated entity instances, gives players their default skin and samples
-    /// each entity's light for the renderer. In the third-person perspectives the local
-    /// player's own model is included (the server does not spawn us as an entity, so it is
-    /// built here from the shared view).
+    /// each entity's light for the renderer. The local player's own model is always included
+    /// (the server does not spawn us as an entity, so it is built here from the shared view):
+    /// the GUI's inventory preview needs it in first person too, and the caller tells the
+    /// renderer not to draw it in the world then (`FrameInput::camera_entity`).
     fn entities(
         &mut self,
         shared: &Shared,
         renderer: &mut Renderer,
-        perspective: game::Perspective,
         local: (EntityId, u128),
         partial: f32,
     ) -> &[EntityInstance] {
@@ -301,7 +300,7 @@ impl WorldFeed {
                 }
             }
         }
-        if perspective.draws_player() {
+        {
             let view = *shared.view.lock();
             self.instances
                 .push(game::player_instance(local.0, local.1, &view, partial));
@@ -978,7 +977,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         last_camera = camera;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         feed.set_first_person(&shared, &mut renderer, perspective);
-        let entities = feed.entities(&shared, &mut renderer, perspective, session.local, partial);
+        let entities = feed.entities(&shared, &mut renderer, session.local, partial);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
         // The HUD, like the window: waiting for the JVM, then one `Ui` for this render thread.
@@ -1007,6 +1006,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             partial_tick: partial,
             block_target,
             breaking: &breaking,
+            camera_entity: (!perspective.draws_player()).then_some(session.local.0),
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -1208,13 +1208,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             Instant::now(),
         );
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
-        let entities = feed.entities(
-            &shared,
-            &mut renderer,
-            game::Perspective::FirstPerson,
-            session.local,
-            partial,
-        );
+        let entities = feed.entities(&shared, &mut renderer, session.local, partial);
         let block_target = view.block_target;
         let breaking = shared.breaking.lock().clone();
         if ui.is_none() {
@@ -1242,6 +1236,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             partial_tick: partial,
             block_target,
             breaking: &breaking,
+            camera_entity: Some(session.local.0),
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -1532,13 +1527,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         vd = v;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         feed.set_first_person(&shared, &mut renderer, game::Perspective::FirstPerson);
-        let entities = feed.entities(
-            &shared,
-            &mut renderer,
-            game::Perspective::FirstPerson,
-            session.local,
-            partial,
-        );
+        let entities = feed.entities(&shared, &mut renderer, session.local, partial);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
         let frame = FrameInput {
@@ -1549,6 +1538,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             partial_tick: partial,
             block_target,
             breaking: &breaking,
+            camera_entity: Some(session.local.0),
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -1608,13 +1598,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         let feed_start = Instant::now();
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         let feed_ms = feed_start.elapsed().as_secs_f32() * 1000.0;
-        let entities = feed.entities(
-            &shared,
-            &mut renderer,
-            game::Perspective::FirstPerson,
-            session.local,
-            partial_tick,
-        );
+        let entities = feed.entities(&shared, &mut renderer, session.local, partial_tick);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
         let frame = FrameInput {
@@ -1625,6 +1609,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             partial_tick,
             block_target,
             breaking: &breaking,
+            camera_entity: Some(session.local.0),
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -1869,13 +1854,9 @@ impl App {
         let t1 = Instant::now();
         self.feed
             .set_first_person(&self.shared, renderer, self.perspective);
-        let entities = self.feed.entities(
-            &self.shared,
-            renderer,
-            self.perspective,
-            self.local,
-            partial,
-        );
+        let entities = self
+            .feed
+            .entities(&self.shared, renderer, self.local, partial);
         let block_target = self.shared.view.lock().block_target;
         self.breaking.clear();
         self.breaking
@@ -1921,6 +1902,7 @@ impl App {
             partial_tick: partial,
             block_target,
             breaking: &self.breaking,
+            camera_entity: (!self.perspective.draws_player()).then_some(self.local.0),
         };
         // Outline boxes of the target and the states of breaking blocks (one short read lock).
         renderer.sample_world(&*self.shared.world.read(), &self.shared.data.shapes, &frame);

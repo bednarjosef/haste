@@ -64,6 +64,11 @@ pub struct FrameInput<'a> {
     pub block_target: Option<(haste_core::BlockPos, haste_core::Direction)>,
     /// Crack overlays: our own break progress plus other players' stages (0..=9).
     pub breaking: &'a [(haste_core::BlockPos, u8)],
+    /// The entity the camera is, when the world pass must not draw it (vanilla
+    /// `LevelExtractor.extractVisibleEntities` skips the camera entity unless the camera is
+    /// detached). `None` in third person, where the player model is drawn; the GUI pass still
+    /// finds the instance in `entities` (the inventory's player preview).
+    pub camera_entity: Option<haste_core::EntityId>,
 }
 
 #[cfg(test)]
@@ -153,6 +158,7 @@ mod tests {
             partial_tick: 0.0,
             block_target: None,
             breaking: &[],
+            camera_entity: None,
         };
         let stats = renderer.render(&frame).unwrap();
         eprintln!(
@@ -1243,8 +1249,12 @@ impl Renderer {
         };
         let aspect = self.size.0 as f32 / self.size.1 as f32;
         let view_proj = Self::view_projection(&frame.camera, aspect);
-        self.entity
-            .prepare(frame.entities, None, frame.camera.pos, &mut self.assets);
+        self.entity.prepare(
+            frame.entities,
+            frame.camera_entity,
+            frame.camera.pos,
+            &mut self.assets,
+        );
         {
             let yaw = frame.camera.yaw.to_radians();
             let pitch = frame.camera.pitch.to_radians();

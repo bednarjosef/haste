@@ -59,6 +59,18 @@ fn render_with_gui(
     camera: Camera,
     gui: &haste_core::gui::GuiFrame,
 ) -> image::RgbaImage {
+    render_with_gui_skip(renderer, world, entities, camera, gui, None)
+}
+
+/// Like [`render_with_gui`], with `FrameInput::camera_entity` (the world pass skips it).
+fn render_with_gui_skip(
+    renderer: &mut Renderer,
+    world: &Flat,
+    entities: &[EntityInstance],
+    camera: Camera,
+    gui: &haste_core::gui::GuiFrame,
+    camera_entity: Option<haste_core::EntityId>,
+) -> image::RgbaImage {
     renderer.sample_entity_lights(world, entities);
     let frame = FrameInput {
         camera,
@@ -74,6 +86,7 @@ fn render_with_gui(
         partial_tick: 0.0,
         block_target: None,
         breaking: &[],
+        camera_entity,
     };
     renderer.render(&frame).unwrap();
     renderer.read_back().unwrap()
@@ -204,6 +217,23 @@ fn entities_offscreen() {
     assert!(inside
         .into_iter()
         .any(|(x, y)| img.get_pixel(x, y).0 != [0, 0, 0, 255]));
+    assert_eq!(renderer.gui_stats().unsupported, 0);
+
+    // First person with the same entities: `camera_entity` skips the player in the world pass
+    // (the centre shows floor, not the body), and the GUI entity still draws it in its box.
+    let first = render_with_gui_skip(
+        &mut renderer,
+        &world,
+        &entities,
+        camera,
+        &gui,
+        Some(EntityId(1)),
+    );
+    assert_eq!(first.get_pixel(320, 230).0, empty.get_pixel(320, 230).0);
+    let gui_inside = (20..140).flat_map(|y| (20..140).map(move |x| (x, y)));
+    assert!(gui_inside
+        .into_iter()
+        .any(|(x, y)| first.get_pixel(x, y).0 != [0, 0, 0, 255]));
     assert_eq!(renderer.gui_stats().unsupported, 0);
 
     // First person: the empty hand, then a held sword and a held stone block.
