@@ -150,6 +150,7 @@ fn measure(
             pitch: 10.0,
             fov_deg: 70.0,
             roll_deg: 0.0,
+            bob: haste_render::ViewBob::default(),
         },
         entities: &[],
         gui: &gui,

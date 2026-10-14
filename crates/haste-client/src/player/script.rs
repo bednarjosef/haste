@@ -264,9 +264,9 @@ impl Runner {
         for m in &t.marks {
             let s = &player.state;
             println!(
-                "[tick {tick}] mark {m}: pos ({:.5}, {:.5}, {:.5}) v ({:.4}, {:.4}, {:.4}) ground {} sprint {} sneak {} fly {} water {} health {} air {} fall {:.3}",
+                "[tick {tick}] mark {m}: pos ({:.5}, {:.5}, {:.5}) v ({:.4}, {:.4}, {:.4}) ground {} sprint {} sneak {} fly {} gliding {} water {} health {} air {} fall {:.3}",
                 s.pos.x, s.pos.y, s.pos.z, s.velocity.x, s.velocity.y, s.velocity.z, s.on_ground,
-                s.sprinting, s.sneaking, s.flying, s.in_water, player.health, player.air_supply, s.fall_distance,
+                s.sprinting, s.sneaking, s.flying, s.fall_flying, s.in_water, player.health, player.air_supply, s.fall_distance,
             );
         }
         for p in &t.checks {

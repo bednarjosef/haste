@@ -137,7 +137,8 @@ impl Session {
         // The saved render distance is what we advertise in client_information; the server's
         // own view distance (login packet) caps what we mesh below.
         opts.client_information.view_distance = options.render_distance as i8;
-        let driver: NetDriver = rt.block_on(NetDriver::connect(opts))?;
+        let mut driver: NetDriver = rt.block_on(NetDriver::connect(opts))?;
+        driver.session.fov_effect_scale = options.fov_effect_scale;
         let (biomes, biome_climates, type_names, sounds, painting_variants) = {
             let regs = driver.connection().registries();
             let sounds = if sound {
@@ -405,16 +406,84 @@ impl WorldFeed {
     }
 }
 
+/// `Camera.calculateFov` + `Camera.modifyFovBasedOnDeathOrFluid` (vanilla): the saved FOV
+/// times the interpolated smoothed modifier, then the death and fluid adjustments (in that
+/// order, as vanilla applies them).
+pub fn frame_fov(
+    base_fov: f32,
+    old_modifier: f32,
+    new_modifier: f32,
+    partial: f32,
+    submerged: bool,
+    death_ticks: u32,
+    effect_scale: f32,
+) -> f32 {
+    let mut fov = base_fov * (old_modifier + (new_modifier - old_modifier) * partial);
+    if death_ticks > 0 {
+        let duration = (death_ticks as f32 + partial).min(20.0);
+        fov /= (1.0 - 500.0 / (duration + 500.0)) * 2.0 + 1.0;
+    }
+    if submerged {
+        fov *= 1.0 + (0.85714287 - 1.0) * effect_scale;
+    }
+    fov
+}
+
+/// `GameRenderer.bobHurt` (vanilla): the hurt-tilt roll in degrees. The render state's hurt
+/// time is `hurtTime - partialTicks`; the roll is `-sin(h^4 * PI) * 14 * strength` with
+/// `h = hurtTime / hurtDuration` (10), and 0 once the hurt time runs out.
+pub fn hurt_tilt_degrees(hurt_ticks: u32, partial: f32, strength: f32) -> f32 {
+    let hurt_time = hurt_ticks as f32 - partial;
+    if hurt_time < 0.0 {
+        return 0.0;
+    }
+    let h = hurt_time / crate::net::HURT_TILT_TICKS as f32;
+    -(h * h * h * h * std::f32::consts::PI).sin() * 14.0 * strength
+}
+
+/// `GameRenderer.bobHurt` (vanilla): the death tilt in degrees, `40 - 8000/(deathTime + 200)`
+/// with `deathTime` interpolated and clamped at 20.
+pub fn death_roll_degrees(death_ticks: u32, partial: f32) -> f32 {
+    let duration = (death_ticks as f32 + partial).min(20.0);
+    40.0 - 8000.0 / (duration + 200.0)
+}
+
+/// `GameRenderer.bobView` (vanilla): the view-bob offsets for this frame — the translation
+/// in the camera plane (x right, y up) and the roll/pitch wobble in degrees — from the
+/// backwards-interpolated walk distance and the interpolated bob amount.
+pub fn view_bob(
+    walk_dist: f32,
+    walk_dist_o: f32,
+    bob: f32,
+    bob_o: f32,
+    partial: f32,
+) -> (f32, f32, f32, f32) {
+    // ClientAvatarState.getBackwardsInterpolatedWalkDistance / getInterpolatedBob.
+    let walk = -(walk_dist + (walk_dist - walk_dist_o) * partial);
+    let bob = bob_o + (bob - bob_o) * partial;
+    let s = (walk * std::f32::consts::PI).sin() * bob;
+    let c = (walk * std::f32::consts::PI).cos() * bob;
+    (
+        s * 0.5,
+        -c.abs(),
+        s * 3.0,
+        ((walk * std::f32::consts::PI - 0.2).cos() * bob).abs() * 5.0,
+    )
+}
+
 /// Builds this frame's camera and sky from the shared view at `now`. `yaw`/`pitch` are the
 /// input layer's look; the player's server rotation offset is added here so mouse look is
 /// smooth at frame rate while the player itself turns once per tick. In the third-person
-/// perspectives the camera is moved off the eye (`game::third_person_camera`).
+/// perspectives the camera is moved off the eye (`game::third_person_camera`). The FOV is the
+/// saved option with vanilla's per-tick FOV modifier interpolated, then the submerged and
+/// death adjustments; the hurt/death tilts and the view bobbing come from the view's per-tick
+/// state (vanilla's `Camera.calculateFov` and `GameRenderer.bobHurt`/`bobView`).
 fn frame_view(
     shared: &Shared,
     perspective: game::Perspective,
     yaw: f32,
     pitch: f32,
-    fov_deg: f32,
+    options: &Options,
     now: Instant,
 ) -> (Camera, SkyState, f32, i32, u64) {
     let view = *shared.view.lock();
@@ -432,12 +501,47 @@ fn frame_view(
     } else {
         (eye, look.0, look.1)
     };
+    let fov_deg = frame_fov(
+        options.fov as f32,
+        view.fov_modifier_old,
+        view.fov_modifier,
+        partial,
+        view.eye_in_water || view.eye_in_lava,
+        view.death_ticks,
+        options.fov_effect_scale,
+    );
+    let hurt_tilt = hurt_tilt_degrees(view.hurt_ticks, partial, options.damage_tilt_strength);
+    let death_roll = if view.death_ticks > 0 {
+        death_roll_degrees(view.death_ticks, partial)
+    } else {
+        0.0
+    };
+    let (bob_x, bob_y, bob_roll, bob_pitch) = if options.bob_view {
+        view_bob(
+            view.walk_dist,
+            view.walk_dist_o,
+            view.bob,
+            view.bob_o,
+            partial,
+        )
+    } else {
+        (0.0, 0.0, 0.0, 0.0)
+    };
     let camera = Camera {
         pos,
         yaw,
         pitch,
         fov_deg,
-        roll_deg: view.hurt_tilt,
+        roll_deg: 0.0,
+        bob: haste_render::ViewBob {
+            hurt_tilt_deg: hurt_tilt,
+            hurt_dir_deg: view.hurt_dir,
+            death_roll_deg: death_roll,
+            x: bob_x,
+            y: bob_y,
+            roll_deg: bob_roll,
+            pitch_deg: bob_pitch,
+        },
     };
     let fog_end = (view.view_distance.max(2) * 16) as f32;
     let sky = SkyState {
@@ -905,8 +1009,9 @@ impl InputRouter {
     }
 
     /// Copy the sampled state into the shared input the game thread reads each tick, and
-    /// consume the press-only actions.
-    fn sample(&mut self, shared: &Shared) {
+    /// consume the press-only actions. `perspective` is the camera's own: the game thread's
+    /// camera effects that are gated on it (the spyglass FOV) only apply in first person.
+    fn sample(&mut self, shared: &Shared, perspective: game::Perspective) {
         let k = |c: KeyCode| self.keys.contains(&c);
         let state = InputState {
             forward: k(KeyCode::KeyW),
@@ -921,6 +1026,7 @@ impl InputRouter {
         };
         let mut shared_input = shared.input.lock();
         shared_input.state = state;
+        shared_input.first_person = matches!(perspective, game::Perspective::FirstPerson);
         shared_input.toggle_flight |= std::mem::take(&mut self.toggle_flight);
         let i = &mut shared_input.interact;
         i.attack = self.attack;
@@ -979,6 +1085,8 @@ fn open_sounds(
 pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let session = Session::join(args, false)?;
     let shared = session.shared.clone();
+    // The shot is first person: the game thread's camera effects take that perspective.
+    shared.input.lock().first_person = true;
     let mut assets = open_assets()?;
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
@@ -1022,7 +1130,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             perspective,
             look.0 - offset.0,
             look.1 - offset.1,
-            session.options.fov as f32,
+            &session.options,
             Instant::now(),
         );
         if let Some(pos) = want_pos {
@@ -1292,7 +1400,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 }
             }
             // The actions may have changed what the game thread sees this tick.
-            input.sample(&shared);
+            input.sample(&shared, game::Perspective::FirstPerson);
             view = *shared.view.lock();
         }
         if shared.is_closed() {
@@ -1308,7 +1416,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             game::Perspective::FirstPerson,
             look.0,
             look.1,
-            session.options.fov as f32,
+            &session.options,
             Instant::now(),
         );
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
@@ -1618,6 +1726,8 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     };
     let session = Session::join(args, false)?;
     let shared = session.shared.clone();
+    // The bench camera is first person: the game thread's camera effects take that perspective.
+    shared.input.lock().first_person = true;
     let mut assets = open_assets()?;
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
@@ -1637,7 +1747,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             game::Perspective::FirstPerson,
             0.0,
             0.0,
-            session.options.fov as f32,
+            &session.options,
             Instant::now(),
         );
         camera.yaw = args.yaw.unwrap_or(camera.yaw);
@@ -1712,7 +1822,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             game::Perspective::FirstPerson,
             0.0,
             0.0,
-            session.options.fov as f32,
+            &session.options,
             Instant::now(),
         );
         let camera = bench_camera(elapsed / total, &base, total);
@@ -1954,7 +2064,7 @@ impl App {
 
     fn release_keys(&mut self) {
         self.input.release();
-        self.input.sample(&self.shared);
+        self.input.sample(&self.shared, self.perspective);
     }
 
     /// Mouse look speed from the saved sensitivity.
@@ -1966,7 +2076,7 @@ impl App {
         if self.renderer.is_none() {
             return;
         }
-        self.input.sample(&self.shared);
+        self.input.sample(&self.shared, self.perspective);
         // The screen that opened or closed since the last frame takes or frees the cursor,
         // and "Disconnect" ends the run.
         self.sync_grab();
@@ -1978,7 +2088,7 @@ impl App {
             self.perspective,
             self.input.yaw,
             self.input.pitch,
-            self.options.fov as f32,
+            &self.options,
             Instant::now(),
         );
         self.feed
@@ -2721,6 +2831,7 @@ mod tests {
             pitch: 10.0,
             fov_deg: 70.0,
             roll_deg: 0.0,
+            bob: haste_render::ViewBob::default(),
         };
         // t = 0: at the base, unturned.
         let c = bench_camera(0.0, &base, 60.0);
@@ -2748,5 +2859,56 @@ mod tests {
         let c = bench_camera(0.75, &base, 60.0);
         assert!((c.pos.x - 250.0).abs() < 1e-4, "{}", c.pos.x);
         assert!((c.pos.y - 84.0).abs() < 1e-4, "{}", c.pos.y);
+    }
+
+    #[test]
+    fn frame_fov_matches_vanilla_calculate_fov() {
+        // `Camera.calculateFov`: base FOV times the interpolated modifier.
+        assert_eq!(frame_fov(70.0, 1.0, 1.0, 0.5, false, 0, 1.0), 70.0);
+        assert_eq!(frame_fov(70.0, 1.0, 1.5, 0.5, false, 0, 1.0), 70.0 * 1.25);
+        // Under water/lava: `lerp(effectScale, 1.0, 0.85714287)`.
+        assert!((frame_fov(70.0, 1.0, 1.0, 0.0, true, 0, 1.0) - 60.0).abs() < 1e-3);
+        assert!((frame_fov(70.0, 1.0, 1.0, 0.0, true, 0, 0.5) - 65.0).abs() < 1e-4);
+        // The effect scale off leaves it alone.
+        assert_eq!(frame_fov(70.0, 1.0, 1.0, 0.0, true, 0, 0.0), 70.0);
+        // Death: `fov /= (1 - 500/(duration+500))*2 + 1`, deathTime clamped at 20.
+        assert!((frame_fov(70.0, 1.0, 1.0, 0.0, false, 20, 1.0) - 65.0).abs() < 1e-4);
+        assert!((frame_fov(70.0, 1.0, 1.0, 0.0, false, 200, 1.0) - 65.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn hurt_tilt_matches_bob_hurt_quartic_curve() {
+        // `GameRenderer.bobHurt`: `-sin(h^4 * PI) * 14 * strength`, h = hurtTime / 10.
+        // hurtTime = 5, partial 0 => h = 0.5, h^4 = 0.0625.
+        assert!((hurt_tilt_degrees(5, 0.0, 1.0) + 2.73127).abs() < 1e-4);
+        // hurtTime = 9 (10 ticks, partial 1) => h = 0.9, h^4 = 0.6561.
+        assert!((hurt_tilt_degrees(10, 1.0, 1.0) + 12.3500).abs() < 1e-3);
+        // The peak is 14 degrees where h^4 = 0.5, not at the start (the curve is quartic).
+        assert!(hurt_tilt_degrees(10, 0.0, 1.0).abs() < 1e-4);
+        // Strength scales it; the hurt time running out (hurtTime - partial < 0) is 0.
+        assert!((hurt_tilt_degrees(5, 0.0, 0.5) + 1.36564).abs() < 1e-4);
+        assert_eq!(hurt_tilt_degrees(0, 0.5, 1.0), 0.0);
+    }
+
+    #[test]
+    fn death_roll_matches_bob_hurt_death_curve() {
+        // `GameRenderer.bobHurt`: `40 - 8000/(deathTime + 200)`, deathTime clamped at 20.
+        assert_eq!(death_roll_degrees(0, 0.0), 0.0);
+        assert!((death_roll_degrees(20, 0.0) - 3.6363636).abs() < 1e-4);
+        assert!((death_roll_degrees(200, 0.0) - 3.6363636).abs() < 1e-4);
+        assert!((death_roll_degrees(0, 10.0) - 1.9047619).abs() < 1e-4);
+    }
+
+    #[test]
+    fn view_bob_matches_bob_view() {
+        // `GameRenderer.bobView` with walk*PI = 3*PI/2 (walk = -1.5) and bob interpolated to
+        // 0.5: translation (0.25, 0), roll 1.5 degrees, pitch 0.49667 degrees.
+        let (x, y, roll, pitch) = view_bob(1.0, 0.0, 1.0, 0.0, 0.5);
+        assert!((x - 0.25).abs() < 1e-4, "{x}");
+        assert!(y.abs() < 1e-4, "{y}");
+        assert!((roll - 1.5).abs() < 1e-4, "{roll}");
+        assert!((pitch - 0.49667).abs() < 1e-4, "{pitch}");
+        // No walk distance and no bob: nothing moves.
+        assert_eq!(view_bob(0.0, 0.0, 0.0, 0.0, 0.5), (0.0, 0.0, 0.0, 0.0));
     }
 }

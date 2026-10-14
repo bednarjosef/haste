@@ -158,6 +158,12 @@ pub struct Options {
     pub gui_scale: u8,
     pub fullscreen: bool,
     pub vsync: bool,
+    /// Vanilla's "View Bobbing" accessibility option (default on).
+    pub bob_view: bool,
+    /// Vanilla's "FOV Effects" accessibility option, 0.0..=1.0 (default 1.0).
+    pub fov_effect_scale: f32,
+    /// Vanilla's "Damage Tilt Strength" accessibility option, 0.0..=1.0 (default 1.0).
+    pub damage_tilt_strength: f32,
     /// 260 means "unlimited", as in vanilla's framerate limit.
     pub max_fps: u32,
     pub sound: SoundVolumes,
@@ -174,6 +180,9 @@ impl Default for Options {
             gui_scale: 0,
             fullscreen: false,
             vsync: true,
+            bob_view: true,
+            fov_effect_scale: 1.0,
+            damage_tilt_strength: 1.0,
             max_fps: 120,
             sound: SoundVolumes::default(),
             keys: Keybinds::default(),
@@ -191,6 +200,8 @@ impl Options {
         self.fov = self.fov.clamp(30, 110);
         self.mouse_sensitivity = self.mouse_sensitivity.clamp(0.0, 1.0);
         self.gui_scale = self.gui_scale.clamp(0, 4);
+        self.fov_effect_scale = self.fov_effect_scale.clamp(0.0, 1.0);
+        self.damage_tilt_strength = self.damage_tilt_strength.clamp(0.0, 1.0);
         self.max_fps = self.max_fps.clamp(10, 260);
         self.sound.clamped();
         for (action, key) in &Keybinds::vanilla().bindings {
@@ -252,6 +263,23 @@ impl Options {
                 "vsync" => {
                     if let Ok(v) = value.parse::<bool>() {
                         opts.vsync = v;
+                    }
+                }
+                "bobView" => {
+                    if let Ok(v) = value.parse::<bool>() {
+                        opts.bob_view = v;
+                    }
+                }
+                // Vanilla's option codec squares the slider value before storing it, so the
+                // effective scale is the square root of what is in the file.
+                "fovEffectScale" => {
+                    if let Ok(v) = value.parse::<f32>() {
+                        opts.fov_effect_scale = v.sqrt();
+                    }
+                }
+                "damageTiltStrength" => {
+                    if let Ok(v) = value.parse::<f32>() {
+                        opts.damage_tilt_strength = v;
                     }
                 }
                 // framerateLimit is the current name, maxFps the pre-1.20.5 one.
@@ -326,6 +354,34 @@ mod tests {
         assert_eq!(opts.keys.get("key.hotbar.9"), Some("key.keyboard.9"));
         assert_eq!(opts.keys.get("key.playerlist"), Some("key.keyboard.tab"));
         assert_eq!(opts.keys.get("key.swapOffhand"), Some("key.keyboard.f"));
+        assert!(opts.bob_view);
+        assert_eq!(opts.fov_effect_scale, 1.0);
+        assert_eq!(opts.damage_tilt_strength, 1.0);
+    }
+
+    #[test]
+    fn camera_options_clamp_into_range() {
+        let opts = Options {
+            fov_effect_scale: 4.0,
+            damage_tilt_strength: -2.0,
+            ..Options::default()
+        }
+        .sanitized();
+        assert_eq!(opts.fov_effect_scale, 1.0);
+        assert_eq!(opts.damage_tilt_strength, 0.0);
+    }
+
+    #[test]
+    fn camera_options_import_from_vanilla_options_txt() {
+        // fovEffectScale is stored squared by vanilla's option codec: 0.25 in the file is a
+        // 0.5 effective scale.
+        let opts = Options::import_vanilla(
+            "bobView:false\nfovEffectScale:0.25\ndamageTiltStrength:0.5\nfov:75\n",
+        );
+        assert!(!opts.bob_view);
+        assert!((opts.fov_effect_scale - 0.5).abs() < 1e-9);
+        assert_eq!(opts.damage_tilt_strength, 0.5);
+        assert_eq!(opts.fov, 75);
     }
 
     #[test]
@@ -338,6 +394,9 @@ mod tests {
             gui_scale: 3,
             fullscreen: true,
             vsync: false,
+            bob_view: false,
+            fov_effect_scale: 0.5,
+            damage_tilt_strength: 0.75,
             max_fps: 60,
             sound: SoundVolumes {
                 master: 0.8,
