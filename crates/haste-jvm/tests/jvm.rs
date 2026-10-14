@@ -758,7 +758,10 @@ fn select_world_screen() {
         "Haste Test World (",
         "Creative Mode, Version: ",
     ] {
-        assert!(t.iter().any(|x| x.starts_with(want)), "missing {want:?} in {t:?}");
+        assert!(
+            t.iter().any(|x| x.starts_with(want)),
+            "missing {want:?} in {t:?}"
+        );
     }
     let unimpl = h.unimplemented().unwrap();
     assert!(
@@ -773,8 +776,16 @@ fn select_world_screen() {
     gui.mouse(f64::from(p.0 + 2), f64::from(p.1 + 2), Some((1, true)));
     gui.mouse(f64::from(p.0 + 2), f64::from(p.1 + 2), Some((1, false)));
     let play = text_pos(&render(&h, (0.0, 0.0)), "Play Selected World").expect("the Play button");
-    gui.mouse(f64::from(play.0 + 2), f64::from(play.1 + 2), Some((1, true)));
-    gui.mouse(f64::from(play.0 + 2), f64::from(play.1 + 2), Some((1, false)));
+    gui.mouse(
+        f64::from(play.0 + 2),
+        f64::from(play.1 + 2),
+        Some((1, true)),
+    );
+    gui.mouse(
+        f64::from(play.0 + 2),
+        f64::from(play.1 + 2),
+        Some((1, false)),
+    );
     if let Some(e) = gui.take_last_error() {
         panic!("clicking Play failed: {e}");
     }
@@ -844,9 +855,16 @@ fn world_data_version(h: &JvmHost) -> i32 {
             )?
             .l()?;
         let v = env
-            .call_method(&v, jni_str!("dataVersion"), jni_sig!("()Lnet/minecraft/world/level/storage/DataVersion;"), &[])?
+            .call_method(
+                &v,
+                jni_str!("dataVersion"),
+                jni_sig!("()Lnet/minecraft/world/level/storage/DataVersion;"),
+                &[],
+            )?
             .l()?;
-        let n = env.call_method(&v, jni_str!("version"), jni_sig!("()I"), &[])?.i()?;
+        let n = env
+            .call_method(&v, jni_str!("version"), jni_sig!("()I"), &[])?
+            .i()?;
         Ok(n)
     })
     .unwrap()

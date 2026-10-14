@@ -239,6 +239,96 @@ impl Drop for Session {
     }
 }
 
+/// A running singleplayer world: the local server and the runtime that spawned it. The
+/// server's stdin/stdout pipes are tied to that runtime's reactor (tokio ties a spawned
+/// child to the runtime that spawned it), so it stays alive until the world is left; `stop`
+/// saves the world and ends the process.
+struct LocalWorld {
+    _rt: tokio::runtime::Runtime,
+    server: haste_setup::server::LocalServer,
+}
+
+impl LocalWorld {
+    /// Starts (or creates) the world's local server, with its own runtime. Blocking (the
+    /// server's "Done" line can take tens of seconds on a fresh world).
+    fn start(
+        dir: &Path,
+        create: Option<&haste_jvm::CreateWorldRequest>,
+        username: &str,
+    ) -> anyhow::Result<LocalWorld> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let server = rt
+            .block_on(async {
+                let port = haste_setup::server::free_port()?;
+                match create {
+                    None => haste_setup::server::LocalServer::start(dir, port).await,
+                    Some(create) => {
+                        let settings = local_server_settings(dir, create);
+                        write_ops_json(dir, username, create.allow_commands);
+                        haste_setup::server::LocalServer::start_with(dir, port, &settings).await
+                    }
+                }
+            })
+            .map_err(|e| anyhow::anyhow!("starting the local server: {e:#}"))?;
+        Ok(LocalWorld { _rt: rt, server })
+    }
+
+    /// The `host:port` the client joins.
+    fn address(&self) -> String {
+        self.server.address()
+    }
+
+    /// Saves the world and ends the server process.
+    fn stop(self) {
+        self._rt.block_on(self.server.stop());
+        println!("singleplayer server stopped");
+    }
+}
+
+/// The local-server settings for a world the create screen asked to make: vanilla's
+/// CreateWorldScreen choices mapped onto `server.properties` (the server creates the world
+/// from them). `level-name` must be the folder's name (the server puts the level at
+/// `<universe>/<level-name>`, and the world dir is the universe's `..`/name).
+fn local_server_settings(
+    dir: &Path,
+    create: &haste_jvm::CreateWorldRequest,
+) -> haste_setup::server::WorldSettings {
+    let level_name = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&create.folder)
+        .to_string();
+    haste_setup::server::WorldSettings {
+        level_name,
+        game_mode: create.game_mode,
+        difficulty: create.difficulty,
+        hardcore: create.hardcore,
+        allow_commands: create.allow_commands,
+        seed: create.seed.clone(),
+        generate_structures: create.generate_structures,
+        level_type: create.level_type.clone(),
+    }
+}
+
+/// Cheats on a created world (`allowCommands`): vanilla singleplayer gives the player operator
+/// permissions; Haste's world runs on a local dedicated server, so the joining player is
+/// written into its `ops.json` with level 4 (an offline-mode UUID, like the server computes).
+/// `allow_commands` false clears a leftover file (the world dir may be reused).
+fn write_ops_json(dir: &Path, username: &str, allow_commands: bool) {
+    let path = dir.join("ops.json");
+    if !allow_commands {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    let uuid = haste_setup::launch::offline_uuid(username);
+    let ops = format!("[{{\"uuid\":\"{uuid}\",\"name\":\"{username}\",\"level\":4,\"bypassesPlayerLimit\":false}}]\n");
+    if let Err(e) = std::fs::write(&path, ops) {
+        tracing::warn!("writing {}: {e:#}", path.display());
+    }
+}
+
 /// Feeds dirty sections to the renderer within a per-frame time budget, nearest first, and
 /// skips sections that are empty and were never meshed (nothing to draw, nothing to clear).
 #[derive(Default)]
@@ -1503,6 +1593,9 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     } else {
         None
     };
+    // Whether the screens are ticked here (menu mode: before a join, and again after leaving
+    // a world; `menu` above only covers the boot, so this outlives it).
+    let mut in_menu = session.is_none();
     let mut shared = session.as_ref().map(|s| s.shared.clone());
     let mut assets = open_assets()?;
     let options = load_options();
@@ -1534,6 +1627,9 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut last_gui = GuiFrame::default();
     // An F2 press this tick: save the frame to the config screenshots dir after it is rendered.
     let mut f2_pending = false;
+    // The local singleplayer world of the joined session (stopped when the world is left and
+    // at the end of the script, whatever it ended with).
+    let mut local_server: Option<LocalWorld> = None;
     'run: loop {
         // Menu mode: the open screen ticks at 20 Hz, and the join the multiplayer screen
         // requests creates the session (its game thread takes a clone of the UI over).
@@ -1572,13 +1668,21 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                     screen_open: ui.as_ref().is_some_and(|u| u.screen_open()),
                     screen_class,
                 };
-                // Menu mode's screen tick and the join the multiplayer screen requested (the
-                // session takes a clone of the UI over; its game thread ticks from now on).
-                if menu.is_some() {
+                // Menu mode's screen tick and the join the screens requested — the multiplayer
+                // list's Join (a plain address), the world list's Play or the create screen's
+                // Create (a local server first) — the session takes a clone of the UI over;
+                // its game thread ticks from now on.
+                if in_menu {
                     if let Some(u) = ui.as_ref() {
                         u.tick();
                         let cancelled = u.take_join_cancelled();
                         let address = u.take_join_request().filter(|_| !cancelled);
+                        let open_world = u.take_open_world_request().filter(|_| !cancelled);
+                        let create_world = u.take_create_world_request().filter(|_| !cancelled);
+                        if cancelled && (open_world.is_some() || create_world.is_some()) {
+                            last_err = Some("the local world join was cancelled".into());
+                            break 'run;
+                        }
                         if let Some(address) = address {
                             let for_game = u.clone();
                             match Session::join(
@@ -1596,9 +1700,53 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                                 }
                                 Err(e) => {
                                     // Vanilla shows its disconnect screen with the reason; a
-                                    // script ends with the error instead (the next action would
-                                    // just miss).
+                                    // script ends with the error instead (the next action
+                                    // would just miss).
                                     last_err = Some(format!("joining {address}: {e:#}"));
+                                    break 'run;
+                                }
+                            }
+                        } else if open_world.is_some() || create_world.is_some() {
+                            // Singleplayer: start (or create) the local server, then join it
+                            // through the same seam. The script blocks on this tick: the
+                            // server's first start takes tens of seconds (world creation),
+                            // and a GenericMessageScreen ("Preparing world data...") is up.
+                            let create = create_world;
+                            let world = open_world.unwrap_or_else(|| {
+                                create
+                                    .as_ref()
+                                    .map(|c| c.folder.clone())
+                                    .unwrap_or_default()
+                            });
+                            let dir = haste_setup::worlds::world_dir(&world)
+                                .unwrap_or_else(|| std::path::PathBuf::from(&world));
+                            match LocalWorld::start(&dir, create.as_ref(), &args.username) {
+                                Ok(world) => {
+                                    let address = world.address();
+                                    u.gui().set_local_world_running(true);
+                                    local_server = Some(world);
+                                    let for_game = u.clone();
+                                    match Session::join(
+                                        &args.username,
+                                        args.render_distance,
+                                        &address,
+                                        false,
+                                        Some(for_game),
+                                    ) {
+                                        Ok(s) => {
+                                            renderer.set_item_registry(&s.shared.data.registries);
+                                            renderer.set_biomes(&s.biomes);
+                                            renderer.set_particle_types(&s.particle_types);
+                                            arrived = Some(s);
+                                        }
+                                        Err(e) => {
+                                            last_err = Some(format!("joining {address}: {e:#}"));
+                                            break 'run;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    last_err = Some(format!("{e:#}"));
                                     break 'run;
                                 }
                             }
@@ -1686,11 +1834,46 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 session = Some(s);
                 shared = session.as_ref().map(|s| s.shared.clone());
                 menu = None;
+                in_menu = false;
+                if let Some(u) = &ui {
+                    // The screens close like vanilla's ConnectScreen does when the level is
+                    // ready (the connecting or preparing screen); the HUD takes over.
+                    u.gui().close_screen();
+                }
             }
             // The actions may have changed what the game thread sees this tick.
             if let Some(shared) = shared.as_ref() {
                 input.sample(shared, game::Perspective::FirstPerson);
                 view = Some(*shared.view.lock());
+            }
+        }
+        // Leaving the world: the pause screen's "Save and Quit" (or the death screen's "Title
+        // Screen") asked to disconnect — like the window, the client drops the session, stops
+        // the local server (saving the world) and returns to the title screen. A connection
+        // the server closed instead ends the script with the reason.
+        if let Some(mut s) = session.take() {
+            if s.shared.is_closed() {
+                let reason = s.shared.closed.lock().clone().unwrap_or_default();
+                anyhow::bail!("disconnected: {reason}");
+            }
+            if ui.as_ref().is_some_and(|u| u.take_disconnect_request()) {
+                tracing::info!("disconnect requested by the UI (script)");
+                s.leave();
+                if let Some(world) = local_server.take() {
+                    if let Some(u) = &ui {
+                        u.gui().set_local_world_running(false);
+                    }
+                    world.stop();
+                }
+                if let Some(u) = &ui {
+                    u.gui().set_local_world_running(false);
+                    u.open_screen(haste_jvm::ScreenKind::Title)?;
+                }
+                shared = None;
+                in_menu = true;
+                input.release();
+            } else {
+                session = Some(s);
             }
         }
         if let Some(shared) = shared.as_ref() {
@@ -1706,11 +1889,8 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         // Menu mode renders the open screen over the plain background (no world yet).
         if session.is_none() {
             if let Some(u) = ui.as_mut() {
-                let scale = resolve_gui_scale(
-                    u32::from(options.gui_scale),
-                    args.width,
-                    args.height,
-                );
+                let scale =
+                    resolve_gui_scale(u32::from(options.gui_scale), args.width, args.height);
                 let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
                 gui = u.frame(gw, gh, scale, input.mouse, 0.0).clone();
                 last_gui = gui.clone();
@@ -1732,6 +1912,9 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                     .read_back()
                     .context("reading the frame back for the script screenshots")?;
                 for name in shots.drain(..) {
+                    // Log what the frame drew (the check scripts grep this as evidence), like
+                    // the in-game branch does.
+                    log_script_frame(&gui, &name);
                     save_script_shot(&image, &name)?;
                 }
             }
@@ -1840,6 +2023,12 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     }
     let _ = frames;
     drop(session);
+    // The local singleplayer server outlives the session: stop it whatever ended the script
+    // (finished, error, timeout), or the java process would keep running and hold the world's
+    // lock. Its `stop` saves the world first.
+    if let Some(world) = local_server.take() {
+        world.stop();
+    }
     if let Some(e) = last_err {
         anyhow::bail!("script failed: {e}");
     }
@@ -2351,6 +2540,14 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A join the screens requested, connecting on its own thread: what to show as the target
+/// (the address, or the world folder of a local world) and where the session (with its local
+/// world, for singleplayer) arrives.
+struct JoinInProgress {
+    target: String,
+    rx: std::sync::mpsc::Receiver<anyhow::Result<(Session, Option<LocalWorld>)>>,
+}
+
 struct App {
     /// The offline username joins use (menu mode: from `--username`).
     username: String,
@@ -2360,10 +2557,12 @@ struct App {
     session: Option<Session>,
     /// Menu mode's JVM boot (`--server` omitted): delivers the UI, then nothing.
     menu: Option<Menu>,
-    /// The join the screens requested, connecting on its own thread (the address).
-    joining: Option<(String, std::sync::mpsc::Receiver<anyhow::Result<Session>>)>,
-    /// The local singleplayer server of the joined world (stopped when the world is left).
-    local_server: Option<haste_setup::server::LocalServer>,
+    /// The join the screens requested, connecting on its own thread: what to show as the
+    /// target (the address, or the world folder for a local world) and where the session
+    /// (and the local world, for singleplayer) arrives.
+    joining: Option<JoinInProgress>,
+    /// The local singleplayer world of the joined session (stopped when the world is left).
+    local_server: Option<LocalWorld>,
     vsync: bool,
     /// Saved options (FOV for rendering, sensitivity for mouse look).
     options: Options,
@@ -2457,10 +2656,11 @@ impl App {
         self.ui.as_ref().is_some_and(|ui| ui.screen_open())
     }
 
-    /// Once per frame (in `draw`): whether the pause screen's "Disconnect" (or the death
-    /// screen's "Title Screen") was clicked since the last frame. With a session the client
-    /// leaves the server and (like vanilla's pause screen) returns to the multiplayer screen;
-    /// without one it is the connecting screen's dead parent and just closes the screen.
+    /// Once per frame (in `draw`): whether the pause screen's "Disconnect" / "Save and Quit"
+    /// (or the death screen's "Title Screen") was clicked since the last frame. With a session
+    /// the client leaves the server and, like vanilla's pause screen, returns to the screen it
+    /// came from: the title screen for a singleplayer world, the server list for multiplayer.
+    /// Without a session it is the connecting screen's dead parent and just closes the screen.
     fn take_disconnect(&mut self, _event_loop: &ActiveEventLoop) {
         if self
             .ui
@@ -2468,12 +2668,20 @@ impl App {
             .is_some_and(|ui| ui.take_disconnect_request())
         {
             if self.session.is_some() {
+                let was_local = self.local_server.is_some();
                 tracing::info!("disconnect requested by the UI");
                 self.leave_server();
                 if let Some(ui) = &self.ui {
-                    // Vanilla: leaving a multiplayer server shows the server list.
-                    if let Err(e) = ui.open_screen(haste_jvm::ScreenKind::Multiplayer) {
-                        tracing::warn!("opening the multiplayer screen: {e:#}");
+                    let kind = if was_local {
+                        haste_jvm::ScreenKind::Title
+                    } else {
+                        haste_jvm::ScreenKind::Multiplayer
+                    };
+                    if let Err(e) = ui.open_screen(kind) {
+                        tracing::warn!(
+                            "opening the {} screen: {e:#}",
+                            if was_local { "title" } else { "multiplayer" }
+                        );
                     }
                 }
             } else if let Some(ui) = &self.ui {
@@ -2482,8 +2690,9 @@ impl App {
         }
     }
 
-    /// Drops the session (stopping its game thread and closing the connection); the UI stays,
-    /// menu mode resumes around whatever screen the disconnect showed.
+    /// Drops the session (stopping its game thread and closing the connection) and the local
+    /// singleplayer server, if one runs (its `stop` saves the world); the UI stays, menu mode
+    /// resumes around whatever screen the disconnect showed.
     fn leave_server(&mut self) {
         if let Some(session) = self.session.take() {
             session.shared.stop.store(true, Ordering::Relaxed);
@@ -2492,6 +2701,12 @@ impl App {
             if let Some(r) = reason {
                 println!("connection ended: {r}");
             }
+        }
+        if let Some(world) = self.local_server.take() {
+            if let Some(ui) = &self.ui {
+                ui.gui().set_local_world_running(false);
+            }
+            world.stop();
         }
         self.input.release();
     }
@@ -2514,7 +2729,7 @@ impl App {
             return;
         }
         self.menu_next = now + tick;
-        let Some(ui) = &self.ui else { return };
+        let Some(ui) = self.ui.clone() else { return };
         ui.tick();
         let cancelled = ui.take_join_cancelled();
         if cancelled {
@@ -2525,27 +2740,23 @@ impl App {
             return;
         }
         let address = ui.take_join_request();
+        let open_world = ui.take_open_world_request();
+        let create_world = ui.take_create_world_request();
         if self.joining.is_none() && self.session.is_none() {
             if let Some(address) = address {
                 tracing::info!("joining {address} (from the multiplayer screen)");
-                let (tx, rx) = std::sync::mpsc::channel();
-                let for_game = ui.clone();
-                let username = self.username.clone();
-                let render_distance = self.render_distance;
-                let joined_address = address.clone();
-                std::thread::Builder::new()
-                    .name("haste-join".into())
-                    .spawn(move || {
-                        let _ = tx.send(Session::join(
-                            &username,
-                            render_distance,
-                            &joined_address,
-                            true,
-                            Some(for_game),
-                        ));
-                    })
-                    .expect("spawning the join thread");
-                self.joining = Some((address, rx));
+                self.spawn_join(address, None);
+            } else if let Some(world) = open_world {
+                tracing::info!("opening singleplayer world {world} (from the world list)");
+                let dir = haste_setup::worlds::world_dir(&world);
+                self.spawn_join(world, Some((dir, None)));
+            } else if let Some(create) = create_world {
+                tracing::info!(
+                    "creating singleplayer world {} (from the create screen)",
+                    create.name
+                );
+                let dir = haste_setup::worlds::world_dir(&create.folder);
+                self.spawn_join(create.folder.clone(), Some((dir, Some(create))));
             }
         }
         // The title screen's Quit Game closes the window.
@@ -2555,24 +2766,95 @@ impl App {
         }
     }
 
+    /// Spawns the join thread for `target` (shown in logs): either a plain address, or a
+    /// singleplayer world (its dir; `Some` settings mean the world is created first, the create
+    /// screen's choices). The thread starts the local server when there is one, joins, and
+    /// sends back the session with the server for the client to stop when the world is left.
+    fn spawn_join(
+        &mut self,
+        target: String,
+        local: Option<(
+            Option<std::path::PathBuf>,
+            Option<haste_jvm::CreateWorldRequest>,
+        )>,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let Some(ui) = &self.ui else { return };
+        let for_game = ui.clone();
+        let username = self.username.clone();
+        let render_distance = self.render_distance;
+        let plain_address = target.clone();
+        std::thread::Builder::new()
+            .name("haste-join".into())
+            .spawn(move || {
+                // A singleplayer world: start (or create) the local server first; its address
+                // is what gets joined.
+                let is_local = local.is_some();
+                let world = local.and_then(|(dir, create)| {
+                    let dir = dir.unwrap_or_else(|| {
+                        create
+                            .as_ref()
+                            .map(|c| {
+                                haste_setup::worlds::world_dir(&c.folder)
+                                    .unwrap_or_else(|| std::path::PathBuf::from(&c.folder))
+                            })
+                            .unwrap_or_default()
+                    });
+                    match LocalWorld::start(&dir, create.as_ref(), &username) {
+                        Ok(world) => Some(world),
+                        Err(e) => {
+                            let _ = tx.send(Err(anyhow::anyhow!(
+                                "starting the local server for {}: {e:#}",
+                                dir.display()
+                            )));
+                            None
+                        }
+                    }
+                });
+                if is_local && world.is_none() {
+                    // The failure was already sent; nothing to join.
+                    return;
+                }
+                let address = world
+                    .as_ref()
+                    .map(|w| w.address())
+                    .unwrap_or_else(|| plain_address.clone());
+                let _ = tx.send(
+                    Session::join(&username, render_distance, &address, true, Some(for_game))
+                        .map(|s| (s, world)),
+                );
+            })
+            .expect("spawning the join thread");
+        self.joining = Some(JoinInProgress { target, rx });
+    }
+
     /// Takes the session once the join thread finished it; a failed join shows vanilla's
     /// disconnect screen with the reason (the connecting screen's parent gets the back button).
     fn poll_join(&mut self) {
         let result = match self.joining.as_ref() {
-            Some((_, rx)) => match rx.try_recv() {
+            Some(j) => match j.rx.try_recv() {
                 Ok(result) => result,
                 Err(_) => return,
             },
             None => return,
         };
-        let (address, _) = self.joining.take().expect("checked above");
+        let target = self.joining.take().expect("checked above").target;
         match result {
-            Ok(session) => {
-                self.options = session.options.clone();
+            Ok((session, server)) => {
                 if let Some(r) = self.renderer.as_mut() {
                     r.set_item_registry(&session.shared.data.registries);
                     r.set_biomes(&session.biomes);
+                    r.set_particle_types(&session.particle_types);
                 }
+                // A singleplayer world: keep its local server (stopped when the world is
+                // left) and tell the screens (the pause screen's "Save and Quit" label).
+                if let Some(server) = server {
+                    self.local_server = Some(server);
+                    if let Some(ui) = &self.ui {
+                        ui.gui().set_local_world_running(true);
+                    }
+                }
+                self.options = session.options.clone();
                 self.session = Some(session);
                 if let Some(ui) = &self.ui {
                     // The screens close like vanilla's ConnectScreen does when the level is
@@ -2581,7 +2863,7 @@ impl App {
                 }
             }
             Err(e) => {
-                tracing::warn!("joining {address} failed: {e:#}");
+                tracing::warn!("joining {target} failed: {e:#}");
                 if let Some(ui) = &self.ui {
                     let reason = haste_protocol::haste_core::Component::text(format!("{e:#}"));
                     ui.disconnected(&reason);
@@ -2646,8 +2928,7 @@ impl App {
             return;
         }
         let session = self.session.as_ref().expect("checked above");
-        self.input
-            .sample(&session.shared, self.perspective);
+        self.input.sample(&session.shared, self.perspective);
         let renderer = self.renderer.as_mut().expect("checked above");
         let t0 = Instant::now();
         let (camera, sky, partial, vd, animation_tick) = frame_view(
@@ -2711,10 +2992,7 @@ impl App {
             partial_tick: partial,
             block_target,
             breaking: &self.breaking,
-            camera_entity: (!self
-                .perspective
-                .draws_player())
-            .then_some(session.local.0),
+            camera_entity: (!self.perspective.draws_player()).then_some(session.local.0),
         };
         // Outline boxes of the target and the states of breaking blocks (one short read lock),
         // then the particles (one short read lock).

@@ -370,6 +370,12 @@ public final class GfxImpl {
             net.minecraft.client.gui.screens.inventory.tooltip.ClientTooltipPositioner pos, int x, int y, boolean focused) {
         setTooltipForNextFrame(g, f, lines, x, y);
     }
+    public static void setTooltipForNextFrame(GuiGraphicsExtractor g, Font f, List<FormattedCharSequence> lines,
+            java.util.Optional<net.minecraft.world.inventory.tooltip.TooltipComponent> image,
+            net.minecraft.client.gui.screens.inventory.tooltip.ClientTooltipPositioner pos,
+            int x, int y, boolean replaceExisting, Identifier style) {
+        setTooltipForNextFrame(g, f, lines, x, y);
+    }
     public static void setTooltipForNextFrame(GuiGraphicsExtractor g, List<FormattedCharSequence> lines, int x, int y) {
         tooltip = new ArrayList<>(lines); tooltipX = x; tooltipY = y;
     }

@@ -82,7 +82,8 @@ public final class Bridge {
     /**
      * Drops everything a test (or a disconnecting client) leaves behind: the chat log and its scroll
      * position (the history stays), the held mouse button and its position, the screen currently open
-     * and whether vanilla code still believes the mouse is grabbed.
+     * and whether vanilla code still believes the mouse is grabbed. The FOV option goes back to its
+     * default (an options.txt a real run saved in the game directory would otherwise leak in).
      */
     public void resetForTest() {
         this.pressedButton = -1;
@@ -95,6 +96,7 @@ public final class Bridge {
         Proxies.hud.getChat().resetChatScroll();
         Proxies.gui.setScreen(null);
         MouseImpl.grabbed = false;
+        Proxies.options.fov().set(70);
     }
 
     public boolean isOpen() { return ClientImpl.screen != null; }

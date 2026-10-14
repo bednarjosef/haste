@@ -239,7 +239,10 @@ mod tests {
 
     #[test]
     fn properties_disable_the_whitelist() {
-        let properties = server_properties(&WorldSettings::for_dir(Path::new("saves/gltest")).unwrap(), 25565);
+        let properties = server_properties(
+            &WorldSettings::for_dir(Path::new("saves/gltest")).unwrap(),
+            25565,
+        );
         assert!(properties.contains("white-list=false\n"));
         assert!(properties.contains("enforce-whitelist=false\n"));
         assert!(!properties.contains("white-list=true"));

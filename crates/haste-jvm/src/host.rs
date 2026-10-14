@@ -412,7 +412,10 @@ fn boot_config(cfg: &JvmConfig) -> String {
     kv("proxiesConf", &cfg.proxies_conf.display().to_string());
     kv("verbose", if cfg.verbose { "true" } else { "false" });
     kv("minecraftDir", &cfg.game_dir.display().to_string());
-    kv("singleplayerDir", &cfg.singleplayer_dir.display().to_string());
+    kv(
+        "singleplayerDir",
+        &cfg.singleplayer_dir.display().to_string(),
+    );
     for l in &cfg.libraries {
         kv("lib", &l.display().to_string());
     }

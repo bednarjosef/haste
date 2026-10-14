@@ -175,6 +175,17 @@ impl Ui {
         self.gui().take_quit_request()
     }
 
+    /// The world list's "Play Selected World" since the last call: the world folder to start
+    /// the local server for and join.
+    pub fn take_open_world_request(&self) -> Option<String> {
+        self.gui().take_open_world_request()
+    }
+
+    /// The create screen's "Create New World" since the last call: the world to make.
+    pub fn take_create_world_request(&self) -> Option<haste_jvm::CreateWorldRequest> {
+        self.gui().take_create_world_request()
+    }
+
     /// The renderer's text metrics (`Renderer::text_metrics`): vanilla's `Font` measures with them.
     pub fn set_text_metrics(&self, m: Arc<dyn TextMetrics>) {
         self.gui().set_text_metrics(m);

@@ -58,6 +58,27 @@ pub const ALLOW_CLASSES: &[&str] = &[
     "net/minecraft/client/multiplayer/ServerList",
     "net/minecraft/client/multiplayer/ServerData",
     "net/minecraft/client/multiplayer/resolver/",
+    // the create-world screen's data loading (vanilla's CreateWorldScreen.openFresh loads the
+    // vanilla data pack into registries before the screen shows). Pure data code from the
+    // server package: no server thread, no world; the integrated server itself stays denied
+    // (Haste plays singleplayer through haste-setup's local server process).
+    "net/minecraft/server/WorldLoader",
+    "net/minecraft/server/WorldStem",
+    "net/minecraft/server/RegistryLayer",
+    "net/minecraft/server/ReloadableServerResources",
+    "net/minecraft/server/ReloadableServerRegistries",
+    "net/minecraft/server/ServerFunctionLibrary",
+    "net/minecraft/server/ServerAdvancementManager",
+    // only its static members are used by the data loading (configurePackRepository picks the
+    // vanilla pack; DEFAULT_GAME_RULES); the server object itself is never instantiated here
+    "net/minecraft/server/MinecraftServer",
+    // the status interface MinecraftServer implements (a parameter type of the allow-list's
+    // class loading, never implemented here)
+    "net/minecraft/server/ServerInfo",
+    // the command implementations the data loading's ReloadableServerResources registers
+    // (brigadier trees over the allowed commands package; executing them needs a server, which
+    // never runs here)
+    "net/minecraft/server/commands/",
     // the netty event-loop holder the server list's ping lambda builds before every ping
     // (Haste's pinger proxy ignores it; see java/haste/gui/PingerImpl)
     "net/minecraft/server/network/EventLoopGroupHolder",

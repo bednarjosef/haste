@@ -136,8 +136,7 @@ pub async fn start_singleplayer(
 
 /// Where singleplayer worlds live: `<config dir>/singleplayer/<world>`.
 fn singleplayer_world_dir(world: &str) -> std::path::PathBuf {
-    haste_setup::worlds::world_dir(world)
-        .expect("platform config dir exists on this system")
+    haste_setup::worlds::world_dir(world).expect("platform config dir exists on this system")
 }
 
 /// Ctrl-C handler: stopping the server cleanly on exit lets the world save.

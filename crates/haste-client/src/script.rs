@@ -256,14 +256,15 @@ pub enum Condition {
     Settled,
     ScreenOpen,
     ScreenClosed,
-    /// The open screen's class simple name is this (`TitleScreen`,
-    /// `JoinMultiplayerScreen`, ...); no screen open matches nothing.
-    Screen(String),
+    /// The open screen's class simple name is one of these (`TitleScreen`,
+    /// `JoinMultiplayerScreen`, ...; `screen A|B` waits for either); no screen open matches
+    /// nothing.
+    Screen(Vec<String>),
 }
 
 impl Condition {
     /// Parses the arguments of a `wait_until` line: one of the four named conditions, or
-    /// `screen <SimpleName>`.
+    /// `screen <SimpleName>` (alternatives separated by `|`).
     fn parse(rest: &str, line: usize) -> Result<Condition, ScriptError> {
         let name = rest.split_whitespace().next().unwrap_or_default();
         match name {
@@ -279,7 +280,10 @@ impl Condition {
                     }
                 })?;
                 Ok(Condition::Screen(
-                    class.rsplit('.').next().unwrap_or(class).to_owned(),
+                    class
+                        .split('|')
+                        .map(|c| c.rsplit('.').next().unwrap_or(c).to_owned())
+                        .collect(),
                 ))
             }
             _ => Err(ScriptError::UnknownCondition {
@@ -295,10 +299,11 @@ impl Condition {
             Condition::Settled => state.settled,
             Condition::ScreenOpen => state.screen_open,
             Condition::ScreenClosed => !state.screen_open,
-            Condition::Screen(want) => state
-                .screen_class
-                .as_deref()
-                .is_some_and(|open| open.rsplit('.').next() == Some(want.as_str())),
+            Condition::Screen(want) => state.screen_class.as_deref().is_some_and(|open| {
+                open.rsplit('.')
+                    .next()
+                    .is_some_and(|n| want.iter().any(|w| w == n))
+            }),
         }
     }
 
@@ -308,7 +313,7 @@ impl Condition {
             Condition::Settled => "settled".into(),
             Condition::ScreenOpen => "screen_open".into(),
             Condition::ScreenClosed => "screen_closed".into(),
-            Condition::Screen(s) => format!("screen {s}"),
+            Condition::Screen(s) => format!("screen {}", s.join("|")),
         }
     }
 }
@@ -747,12 +752,24 @@ mod tests {
                 Step::Screenshot("name1".to_owned()),
             ]
         );
-        // The screen condition takes a class simple name (the package part is trimmed).
+        // The screen condition takes a class simple name (the package part is trimmed), or
+        // several separated by `|` (either matches).
         let steps = parse("wait_until screen multiplayer.JoinMultiplayerScreen").unwrap();
         assert_eq!(
             steps,
             vec![Step::WaitUntil {
-                condition: Condition::Screen("JoinMultiplayerScreen".to_owned()),
+                condition: Condition::Screen(vec!["JoinMultiplayerScreen".to_owned()]),
+                line: 1,
+            }]
+        );
+        let steps = parse("wait_until screen TitleScreen|CreateWorldScreen").unwrap();
+        assert_eq!(
+            steps,
+            vec![Step::WaitUntil {
+                condition: Condition::Screen(vec![
+                    "TitleScreen".to_owned(),
+                    "CreateWorldScreen".to_owned()
+                ]),
                 line: 1,
             }]
         );

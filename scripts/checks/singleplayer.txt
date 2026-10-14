@@ -1,0 +1,52 @@
+# Singleplayer from the title screen: the world list, create world, play, save and quit.
+# Run without --server (menu mode starts at the title screen); the client starts its own
+# local server for the world it creates and joins it:
+#   target/debug/haste --script scripts/checks/singleplayer.txt --seconds 300
+# Steady state (scripts/checks/singleplayer-check.sh primes it on a first run): the config
+# dir's singleplayer/ holds a sentinel world and this check's world ("Haste SP Check").
+# The script deletes the check world through the world list (the sentinel keeps the list
+# non-empty, so no auto-jump), creates the world again, plays, and quits — leaving the same
+# steady state behind.
+wait_until screen TitleScreen
+screenshot sp-title
+# the title screen fades its widgets in over 2 s; wait past it before clicking
+wait 40
+click_text Singleplayer
+wait_until screen SelectWorldScreen
+# the world list loads its entries a moment after the screen opens; wait for them
+wait 40
+screenshot sp-worlds
+# clean start: delete the previous run's world through the world list's own Delete
+click_text Haste SP Check
+click_text Delete
+wait_until screen ConfirmScreen
+screenshot sp-delete-confirm
+click_text Delete
+# back on the world list (the sentinel world keeps it non-empty); open the create screen
+wait_until screen SelectWorldScreen
+wait 20
+click_text Create New World
+wait_until screen CreateWorldScreen
+screenshot sp-create
+# the name field is pre-filled with vanilla's "New World" (selectWorld.newWorld); clear it
+key BACKSPACE
+key BACKSPACE
+key BACKSPACE
+key BACKSPACE
+key BACKSPACE
+key BACKSPACE
+key BACKSPACE
+key BACKSPACE
+key BACKSPACE
+type Haste SP Check
+click_text Create New World
+wait_until joined
+# a fresh world takes a while to mesh; give it room before the shot
+wait 200
+screenshot sp-ingame
+key ESCAPE
+wait_until screen_open
+screenshot sp-pause
+click_text Save and Quit to Title
+wait_until screen TitleScreen
+screenshot sp-back-at-title

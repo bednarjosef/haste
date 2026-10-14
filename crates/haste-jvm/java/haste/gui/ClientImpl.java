@@ -45,6 +45,19 @@ public final class ClientImpl {
     }
 
     /**
+     * The directory validator (vanilla: {@code LevelStorageSource.parseValidator(<game
+     * dir>/allowed_symlinks.txt)} over the level source's base dir): the create screen builds
+     * its pack repository with it. No symlink allow-list: none allowed, like vanilla without
+     * the file.
+     */
+    private static final net.minecraft.world.level.validation.DirectoryValidator DIR_VALIDATOR =
+        new net.minecraft.world.level.validation.DirectoryValidator(p -> false);
+    @SuppressWarnings("UnstableApiUsage")
+    public static net.minecraft.world.level.validation.DirectoryValidator directoryValidator(Minecraft m) {
+        return DIR_VALIDATOR;
+    }
+
+    /**
      * The world open flows (vanilla: {@code new WorldOpenFlows(this, this.levelSource)}). The
      * class is Haste's replacement (see {@code haste/replace/.../WorldOpenFlows.java}): playing
      * or creating a world starts haste-setup's local server through Rust, not the integrated
