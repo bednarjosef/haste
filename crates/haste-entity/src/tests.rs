@@ -1527,9 +1527,10 @@ fn dump_loader_converts_nested_parts_to_feet_at_zero() {
     assert!((head.rotation.x - 0.1).abs() < 1e-6);
     assert!((head.rotation.y - 0.2).abs() < 1e-6);
     assert!((head.rotation.z - 0.3).abs() < 1e-6);
-    // The nested child hangs off the head with its own pivot, also shifted.
+    // The nested child hangs off the head with its own parent-relative pivot, NOT shifted:
+    // a child's PartPose is relative to its parent, not to the ground plane.
     let snout = find_part(&model.root, "snout").unwrap();
-    assert!((snout.pivot.y - (16.0 - 24.0)).abs() < 1e-6);
+    assert!((snout.pivot.y - 16.0).abs() < 1e-6);
     assert!((snout.pivot.z - -14.0).abs() < 1e-6);
     assert_eq!(snout.cubes.len(), 1);
     assert_eq!(snout.cubes[0].uv, [16, 16]);

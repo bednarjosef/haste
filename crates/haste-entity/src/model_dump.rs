@@ -108,7 +108,7 @@ impl ModelLibrary {
                     rotation: glam::Vec3::ZERO,
                     visible: true,
                     cubes: Vec::new(),
-                    children: l.parts.into_iter().map(convert_part).collect(),
+                    children: l.parts.into_iter().map(convert_root_part).collect(),
                 },
             };
             layers.insert(
@@ -149,13 +149,22 @@ impl ModelLibrary {
     }
 }
 
-/// Converts one dump part (pivots shifted to the feet-at-0 convention; rotations are already
-/// radians in vanilla x/y/z order). A part scale other than 1 is folded into its cubes'
-/// inflate as a mean and skipped for the pivot: vanilla uses part scales almost exclusively
-/// for whole-part effects (spinning arrows, end-crystal cores) that rest-pose rendering does
-/// not need to reproduce exactly.
+/// Converts one of the root's direct children: its pivot is in absolute model space, where the
+/// ground plane sits at y = 24 model units, so the y is shifted to the feet-at-0 convention.
+/// Every part below it keeps its parent-relative pivot unchanged (vanilla `PartPose` of a child
+/// is relative to its parent, and the dump already stored it that way).
+fn convert_root_part(p: PartJson) -> ModelPart {
+    let mut part = convert_part(p);
+    part.pivot.y -= GROUND_Y;
+    part
+}
+
+/// Converts one dump part (rotations are already radians in vanilla x/y/z order). A part scale
+/// other than 1 is folded into its cubes' inflate as a mean and skipped for the pivot: vanilla
+/// uses part scales almost exclusively for whole-part effects (spinning arrows, end-crystal
+/// cores) that rest-pose rendering does not need to reproduce exactly.
 fn convert_part(p: PartJson) -> ModelPart {
-    let pivot = glam::Vec3::new(p.pivot[0], p.pivot[1] - GROUND_Y, p.pivot[2]);
+    let pivot = glam::Vec3::new(p.pivot[0], p.pivot[1], p.pivot[2]);
     let rotation = glam::Vec3::new(p.rotation[0], p.rotation[1], p.rotation[2]);
     let uniform = (p.scale[0] + p.scale[1] + p.scale[2]) / 3.0;
     let cubes = p
