@@ -161,7 +161,12 @@ impl BlockPhysics for TestShapes {
             0.0
         }
     }
-    fn water_flow(&self, s: BlockStateId) -> Option<DVec3> {
+    fn water_flow(
+        &self,
+        _world: &dyn haste_core::view::BlockView,
+        _pos: haste_core::BlockPos,
+        s: BlockStateId,
+    ) -> Option<DVec3> {
         match s {
             states::FLOWING_WATER => Some(DVec3::new(1.0, 0.0, 0.0)),
             states::FLOWING_WATER_SLOW => Some(DVec3::new(0.5, 0.0, 0.0)),

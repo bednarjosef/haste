@@ -1,7 +1,7 @@
 //! Read-only views over world state. `haste-world` implements them; meshing (`haste-render`),
 //! physics (`haste-physics`) and entities consume them. Implementations must be cheap to call in
 //! tight loops: no allocation per call, no locking per block if avoidable (take a section snapshot).
-use crate::{Aabb, BlockStateId, BlockPos, ChunkPos, DVec3, SectionPos};
+use crate::{Aabb, BlockPos, BlockStateId, ChunkPos, DVec3, SectionPos};
 
 pub trait BlockView {
     /// `BlockStateId::AIR` for unloaded chunks and out-of-range y.
@@ -76,11 +76,17 @@ pub trait BlockPhysics {
         let _ = state;
         0.0
     }
-    /// Vanilla `FluidState.getFlow` for the fluid cell `state`: the horizontal flow vector,
-    /// `None` when the cell carries no flow information. World-dependent; implementors with
-    /// fluid data answer here.
-    fn water_flow(&self, state: BlockStateId) -> Option<DVec3> {
-        let _ = state;
+    /// Vanilla `FluidState.getFlow` (`FlowingFluid.getFlow`) for the fluid cell `state` at `pos`:
+    /// the horizontal flow vector, `None` when the cell carries no flow information. The vector is
+    /// world-dependent (neighbour fluid heights decide the direction), so the world is passed in;
+    /// `haste-data` computes it from the block states.
+    fn water_flow(
+        &self,
+        world: &dyn BlockView,
+        pos: BlockPos,
+        state: BlockStateId,
+    ) -> Option<DVec3> {
+        let _ = (world, pos, state);
         None
     }
 }

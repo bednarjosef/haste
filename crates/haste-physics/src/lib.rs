@@ -106,4 +106,12 @@ impl BlockPhysics for DefaultBlockPhysics {
     fn is_opaque_full(&self, state: BlockStateId) -> bool {
         state != BlockStateId::AIR
     }
+    fn water_flow(
+        &self,
+        _world: &dyn haste_core::view::BlockView,
+        _pos: haste_core::BlockPos,
+        _state: BlockStateId,
+    ) -> Option<DVec3> {
+        None
+    }
 }

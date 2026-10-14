@@ -179,8 +179,12 @@ fn apply_inside_block_effects(
         }
     }
     if let Some(m) = stuck {
-        state.stuck_multiplier = m;
-        state.fall_distance = 0.0;
+        // `Player.makeStuckInBlock` only sets the multiplier (and resets the fall distance) when
+        // the player is not flying (creative flight).
+        if !state.flying {
+            state.stuck_multiplier = m;
+            state.fall_distance = 0.0;
+        }
     }
 }
 
@@ -274,7 +278,8 @@ pub(crate) fn apply_water_currents(
                     continue;
                 }
                 height = height.max(fluid_top - entity_y);
-                let Some(flow) = blocks.water_flow(s) else {
+                let cell = BlockPos::new(x, y, z);
+                let Some(flow) = blocks.water_flow(world, cell, s) else {
                     continue;
                 };
                 let flow = if height < WATER_CURRENT_HEIGHT_CUTOFF {
@@ -374,6 +379,19 @@ mod tests {
         assert_eq!(state.velocity, DVec3::new(0.0, vy, 0.0));
         assert_eq!(state.stuck_multiplier, COBWEB_MULTIPLIER);
         assert_eq!(state.fall_distance, 0.0);
+    }
+
+    #[test]
+    fn stuck_multiplier_not_set_while_flying() {
+        // Player.makeStuckInBlock skips the multiplier (and the fall-distance reset) while flying.
+        let mut world = TestWorld::new();
+        world.set(0, 0, 0, states::COBWEB);
+        let shapes = TestShapes::default();
+        let attrs = attrs();
+        let mut state = PlayerState::at(DVec3::new(0.5, 0.5, 0.5));
+        state.flying = true;
+        state = tick_from(&world, &shapes, &attrs, state);
+        assert_eq!(state.stuck_multiplier, DVec3::ZERO);
     }
 
     #[test]
