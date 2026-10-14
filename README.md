@@ -9,7 +9,7 @@ with the mod architecture designed in. Licensed GPL-3.0-or-later.
 What a player needs to play Haste like the original game, without noticing a difference.
 Fabric mod support (Phase 2) is not counted here.
 
-**19 of 62 done, 32 partly done, 11 not started (about 56 %, counting partly done as half).**
+**19 of 62 done, 33 partly done, 10 not started (about 57 %, counting partly done as half).**
 
 ✅ done: works in the game window today, checked against a real server.
 🟡 partly done: some of it exists (in a library, or working without a window) but a player cannot use it fully yet.
@@ -40,7 +40,7 @@ Fabric mod support (Phase 2) is not counted here.
 - ✅ Biomes and their grass, foliage and water colours
 - ✅ Dimensions: Overworld, Nether, End, respawn and dimension changes
 - ✅ Day and night, weather, sun, moon, stars and clouds
-- 🟡 Block entities (chests, signs, beds, banners, ...): stored with their chunks and kept up to date; not drawn yet
+- 🟡 Block entities (chests, signs, beds, banners, ...): stored with their chunks and kept up to date; chests, ender/trapped chests and shulker boxes are drawn (with their lid animation), the rest not yet
 
 ### Rendering
 - ✅ Textured blocks and block models
@@ -57,7 +57,7 @@ Fabric mod support (Phase 2) is not counted here.
 - 🟡 Performance: `haste --bench` measures about 900-980 FPS (1.0-1.1 ms per frame) at 1920x1080, render distance 12, on the development laptop's integrated GPU; not yet compared with vanilla and Sodium
 - 🟡 Screen effects: damage tilt, red flash on hit entities and the vignette work; underwater and fire overlays, nausea and pumpkin do not
 - 🟡 Dropped items drawn as themselves with vanilla's bob, spin and stack copies; item frames and paintings not yet
-- ⬜ Block entities drawn: chests, signs with text, beds, banners, heads, shulker boxes
+- 🟡 Block entities drawn: chests, ender/trapped chests and shulker boxes (lid animation included); signs with text, beds, banners, heads not yet
 - ⬜ Entity animation (walking, attacking, swimming)
 - ⬜ Downloaded player skins and capes
 - ⬜ Armour and held items on mobs and players
