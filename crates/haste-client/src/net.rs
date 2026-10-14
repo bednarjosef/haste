@@ -20,7 +20,7 @@ use haste_entity::{EntityDimensions, EntityStore};
 use haste_protocol::haste_core::chunk::{BlockEntityData, ChunkData, LightData};
 use haste_protocol::haste_core::entity::{EntitySpawn, ItemStackData, MetadataEntry, PlayerInfo};
 use haste_protocol::haste_core::game::{DimensionInfo, GameMode};
-use haste_protocol::haste_core::{BlockPos, BlockStateId, ChunkPos, EntityId, Identifier};
+use haste_protocol::haste_core::{BlockPos, BlockStateId, ChunkPos, EntityId, Identifier, RegistryIndex};
 use haste_protocol::packets::play::clientbound as cb;
 use haste_protocol::packets::play::clientbound::teleport_flags;
 use haste_protocol::{
@@ -324,6 +324,12 @@ pub struct Session {
     /// Entities the server spawned and has not removed (crosshair targets).
     entity_ids: HashSet<EntityId>,
     entity_boxes: Vec<(EntityId, haste_core::Aabb)>,
+    /// Firework rockets the server spawned and has not removed (their metadata index 9 is the
+    /// attached-to entity id, `FireworkRocketEntity.DATA_ATTACHED_TO_TARGET`).
+    fireworks: HashSet<EntityId>,
+    /// The firework rocket currently attached to us: vanilla `FireworkRocketEntity.tick` pushes a
+    /// fall-flying player it is attached to every tick (see [`Session::end_tick`]).
+    attached_firework: Option<EntityId>,
     /// Time of day in ticks from the first world clock of the last `set_time` (approximate:
     /// that the first clock is the day clock is not verified).
     pub time_of_day: Option<i64>,
@@ -373,6 +379,8 @@ impl Session {
             breaking: HashMap::new(),
             entity_ids: HashSet::new(),
             entity_boxes: Vec::new(),
+            fireworks: HashSet::new(),
+            attached_firework: None,
             time_of_day: None,
             new_world_pending: false,
             entity_type_names: Vec::new(),
@@ -391,6 +399,13 @@ impl Session {
     /// types are unknown here and ride on the default seat, never a panic.
     pub fn set_entity_type_names(&mut self, names: Vec<Identifier>) {
         self.entity_type_names = names;
+    }
+
+    /// Whether a spawned entity's registry index names the firework rocket type.
+    fn is_firework_type(&self, kind: RegistryIndex) -> bool {
+        self.entity_type_names
+            .get(kind.0 as usize)
+            .is_some_and(|n| n.path() == "firework_rocket")
     }
 
     /// The hurt-tilt camera roll in degrees for the remaining tilt ticks, easing out over
@@ -466,6 +481,8 @@ impl Session {
                     });
                 world.reset(&dim);
                 entities.clear();
+                self.fireworks.clear();
+                self.attached_firework = None;
                 self.dimension = dim;
                 self.entity_id = EntityId(l.entity_id);
                 let mode = GameMode::from_id(l.spawn.game_mode).unwrap_or(self.player.game_mode);
@@ -512,6 +529,8 @@ impl Session {
                 entities.clear();
                 self.entity_ids.clear();
                 self.breaking.clear();
+                self.fireworks.clear();
+                self.attached_firework = None;
                 self.dimension = dim;
                 // A respawn is a new body: no vehicle, no riding.
                 self.player.set_vehicle(None, SeatPoint::ZERO);
@@ -574,6 +593,9 @@ impl Session {
             P::AddEntity(a) => {
                 let s = a.spawn();
                 self.entity_ids.insert(s.id);
+                if self.is_firework_type(s.kind) {
+                    self.fireworks.insert(s.id);
+                }
                 entities.spawn(&s)
             }
             P::RemoveEntities(r) => {
@@ -585,6 +607,10 @@ impl Session {
                 }
                 for id in &ids {
                     self.entity_ids.remove(id);
+                    self.fireworks.remove(id);
+                    if self.attached_firework == Some(*id) {
+                        self.attached_firework = None;
+                    }
                 }
                 entities.remove(&ids);
             }
@@ -657,7 +683,19 @@ impl Session {
             P::EntityEvent(e) if e.status == 3 => entities.mark_dead(EntityId(e.entity_id)),
             P::SetEntityData(d) => {
                 if EntityId(d.entity_id) != own {
-                    entities.set_metadata(EntityId(d.entity_id), &d.metadata);
+                    let id = EntityId(d.entity_id);
+                    entities.set_metadata(id, &d.metadata);
+                    // A firework rocket's attached-to target (index 9): remember it while it is
+                    // attached to us, so `end_tick` can apply its push.
+                    if self.fireworks.contains(&id) {
+                        if let Some(attached) = firework_attached_target(&d.metadata) {
+                            if attached == Some(own) {
+                                self.attached_firework = Some(id);
+                            } else if self.attached_firework == Some(id) {
+                                self.attached_firework = None;
+                            }
+                        }
+                    }
                 }
             }
             P::SetEquipment(e) => {
@@ -730,6 +768,15 @@ impl Session {
             .vehicle
             .and_then(|v| entities.pose(v))
             .map(|(pos, yaw, _)| VehiclePose { pos, yaw });
+        // The attached firework rocket's push, vanilla `FireworkRocketEntity.tick`: while the
+        // rocket is attached to us and we are fall flying, each tick our velocity becomes
+        // `v + look * 0.1 + (look * 1.5 - v) * 0.5`. The rocket ticked before the player in the
+        // client's own order (`NetDriver::end_tick` ticks entities first), so the push lands
+        // before this tick's glide update.
+        if self.attached_firework.is_some() && self.player.state.fall_flying {
+            let s = &mut self.player.state;
+            s.velocity = haste_physics::elytra::firework_boost(s.velocity, s.yaw, s.pitch);
+        }
         match world.physics() {
             Some((view, data)) => {
                 self.player.prepare(data);
@@ -810,6 +857,44 @@ fn dust_option(kind: &Identifier, data: &[u8]) -> Option<haste_render::DustOptio
         ],
         scale,
     })
+}
+
+/// Entity metadata serializer type id of `OPTIONAL_UNSIGNED_INT` (the wire type of
+/// `FireworkRocketEntity.DATA_ATTACHED_TO_TARGET`; `EntityDataSerializers`' registration order).
+const OPTIONAL_UNSIGNED_INT: i32 = 19;
+
+/// The firework rocket's attached-to entity id from a metadata update: index 9
+/// (`DATA_ATTACHED_TO_TARGET`), an `OPTIONAL_UNSIGNED_INT` (VarInt, 0 = empty, else id + 1).
+/// `None` when this update does not carry the entry (metadata updates are partial).
+fn firework_attached_target(metadata: &[MetadataEntry]) -> Option<Option<EntityId>> {
+    let e = metadata.iter().find(|e| e.index == 9)?;
+    let haste_protocol::haste_core::entity::MetadataValue::Other { type_id, raw } = &e.value
+    else {
+        return None;
+    };
+    if *type_id != OPTIONAL_UNSIGNED_INT {
+        return None;
+    }
+    let v = read_var_int(raw)?;
+    Some(if v == 0 {
+        None
+    } else {
+        Some(EntityId(v - 1))
+    })
+}
+
+/// A VarInt as the wire writes it (LEB128, at most 5 bytes for an i32).
+fn read_var_int(mut b: &[u8]) -> Option<i32> {
+    let mut value = 0u32;
+    for i in 0..5 {
+        let byte = *b.first()?;
+        b = &b[1..];
+        value |= u32::from(byte & 0x7F) << (7 * i);
+        if byte & 0x80 == 0 {
+            return Some(value as i32);
+        }
+    }
+    None
 }
 
 /// Owns the connection and the session state; world and entities are borrowed per tick.
