@@ -68,6 +68,7 @@ fn gui_slots_draw_flat_items_with_the_item_model() {
         pitch: 0.0,
         fov_deg: 70.0,
         roll_deg: 0.0,
+        bob: haste_render::ViewBob::default(),
     };
     let input = FrameInput {
         camera,
@@ -138,6 +139,7 @@ fn held_item_draws_the_item_model_not_the_block_model() {
         pitch: 0.0,
         fov_deg: 70.0,
         roll_deg: 0.0,
+        bob: haste_render::ViewBob::default(),
     };
     let empty_gui = GuiFrame {
         commands: vec![],

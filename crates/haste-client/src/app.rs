@@ -19,7 +19,7 @@ use haste_protocol::haste_core::input::InputState;
 use haste_protocol::haste_core::model::EntityInstance;
 use haste_protocol::haste_core::{ChunkPos, EntityId, SectionPos};
 use haste_protocol::{Account, ConnectOptions};
-use haste_render::{Camera, FrameInput, FrameStats, Renderer, SkyState};
+use haste_render::{Camera, FrameInput, FrameStats, LightmapFrame, Renderer, SkyState};
 use haste_setup::options::Options;
 use haste_world::World;
 use winit::application::ApplicationHandler;
@@ -93,6 +93,222 @@ pub fn gui_scaled_size(width: u32, height: u32, scale: u32) -> (u32, u32) {
     (width.div_ceil(scale.max(1)), height.div_ceil(scale.max(1)))
 }
 
+/// F3's numbers for this frame: the cheap part (position, counts) always; the strings (biome,
+/// targeted block/fluid with properties and tags) only while the overlay is on, like vanilla
+/// building its lines only then. `look` is the yaw/pitch the player is rendered with.
+#[allow(clippy::too_many_arguments)]
+fn debug_info(
+    env: &DebugEnv,
+    shared: &Shared,
+    renderer: &Renderer,
+    look: (f32, f32),
+    fps: i32,
+    stats: &FrameStats,
+    entities_rendered: i32,
+    gui_scale: u32,
+    gpu: &str,
+) -> haste_jvm::DebugInfo {
+    use haste_core::view::{BlockPhysics as _, BlockView};
+    use haste_protocol::haste_core::BlockPos;
+    use haste_render::BiomeSource as _;
+    let view = *shared.view.lock();
+    let world = shared.world.read();
+    // The full look the player is rendered with (input look plus the server's offset), like
+    // frame_view; vanilla's F3 shows the entity's rotation.
+    let look = (
+        look.0 + view.look_offset.0,
+        (look.1 + view.look_offset.1).clamp(-90.0, 90.0),
+    );
+    let mut d = haste_jvm::DebugInfo {
+        fps,
+        pos: [view.feet.x, view.feet.y, view.feet.z],
+        rot: [look.0, look.1],
+        chunks: world.loaded_chunks().count() as i32,
+        sections_drawn: stats.chunk_sections_drawn as i32,
+        sections_total: stats.chunk_sections_total as i32,
+        entities: shared.entities.read().len() as i32,
+        entities_rendered,
+        simulation_distance: env.simulation_distance,
+        view_distance: view.view_distance,
+        framerate_limit: 260,
+        refresh_rate: 0,
+        display_size: [renderer.size().0 as i32, renderer.size().1 as i32],
+        gui_scale: gui_scale as i32,
+        light: [0, 0],
+        ..Default::default()
+    };
+    if !shared.ui.lock().as_ref().is_some_and(|ui| ui.debug_shown()) {
+        return d;
+    }
+    d.gpu = gpu.to_owned();
+    d.cpu = cpu_info();
+    d.dimension = world.dimension().name.to_string();
+    // Biome and light at the feet position (vanilla DebugEntryBiome/DebugEntryLight).
+    let feet = BlockPos::new(
+        view.feet.x.floor() as i32,
+        view.feet.y.floor() as i32,
+        view.feet.z.floor() as i32,
+    );
+    d.biome = {
+        let id = self::biomes::WorldBiomes(&world).biome(feet).0 as usize;
+        env.biome_names
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| "minecraft:plains".to_owned())
+    };
+    d.light = [
+        i32::from(world.sky_light(feet)),
+        i32::from(world.block_light(feet)),
+    ];
+    // The looking-at block/fluid (vanilla Entity.pick, 20 blocks, block without fluids, fluid
+    // with them): both rays from the interpolated eye along the look direction.
+    let partial = game::partial_tick(view.tick_at, Instant::now());
+    let eye = game::interpolate(view.prev_eye, view.eye, partial);
+    let dir = haste_physics::raycast::look_vector(look.0, look.1);
+    let data = &shared.data;
+    if let Some(hit) = haste_physics::raycast::raycast_blocks(eye, dir, 20.0, &*world, &data.shapes)
+    {
+        let state = world.block_state(hit.pos);
+        d.target_block = Some(haste_jvm::TargetedState {
+            name: data.blocks.block_of(state).to_string(),
+            pos: [hit.pos.x, hit.pos.y, hit.pos.z],
+            properties: data.blocks.properties(state),
+            tags: data
+                .blocks
+                .block_index(data.blocks.block_of(state))
+                .and_then(|r| env.block_tags.get(&r.0))
+                .cloned()
+                .unwrap_or_default(),
+        });
+    }
+    d.target_fluid = raycast_fluid(eye, dir, 20.0, &world, data).map(|(state, pos)| {
+        let info = data.fluid(state).expect("checked: has a fluid");
+        let name = match info.kind {
+            haste_core::view::FluidKind::Water => "minecraft:water",
+            haste_core::view::FluidKind::Lava => "minecraft:lava",
+        };
+        haste_jvm::TargetedState {
+            name: name.to_owned(),
+            pos: [pos.x, pos.y, pos.z],
+            properties: data
+                .blocks
+                .properties(state)
+                .into_iter()
+                .filter(|(k, _)| k == "level")
+                .collect(),
+            tags: haste_protocol::haste_core::Identifier::parse(name)
+                .ok()
+                .and_then(|n| data.registries.index("minecraft:fluid", &n))
+                .and_then(|r| env.fluid_tags.get(&r.0))
+                .cloned()
+                .unwrap_or_default(),
+        }
+    });
+    d.tx_per_s = f64::from_bits(shared.debug_tx.load(Ordering::Relaxed));
+    d.rx_per_s = f64::from_bits(shared.debug_rx.load(Ordering::Relaxed));
+    d.brand = "vanilla".to_owned();
+    d
+}
+
+/// The first fluid cell the segment `from .. from + dir * reach` touches (vanilla
+/// `Entity.pick(withLiquids)`: the first block whose fluid state is non-empty). Returns the
+/// block state (it carries the fluid and its `level` property) and the cell position.
+fn raycast_fluid(
+    from: DVec3,
+    dir: DVec3,
+    reach: f64,
+    world: &World,
+    data: &haste_data::GameData,
+) -> Option<(
+    haste_protocol::haste_core::BlockStateId,
+    haste_protocol::haste_core::BlockPos,
+)> {
+    use haste_core::view::{BlockPhysics as _, BlockView};
+    let delta = dir * reach;
+    let mut cell = from.floor().as_ivec3();
+    let end = (from + delta).floor().as_ivec3();
+    let step = delta.signum().as_ivec3();
+    let mut t_max = DVec3::ZERO;
+    let mut t_delta = DVec3::ZERO;
+    for a in 0..3 {
+        if delta[a] == 0.0 {
+            t_max[a] = f64::INFINITY;
+            t_delta[a] = f64::INFINITY;
+        } else {
+            let next = if delta[a] > 0.0 {
+                cell[a] as f64 + 1.0
+            } else {
+                cell[a] as f64
+            };
+            t_max[a] = (next - from[a]) / delta[a];
+            t_delta[a] = 1.0 / delta[a].abs();
+        }
+    }
+    let max_cells = (end - cell).abs().element_sum() + 1;
+    for _ in 0..=max_cells {
+        let pos = haste_protocol::haste_core::BlockPos::new(cell.x, cell.y, cell.z);
+        let state = world.block_state(pos);
+        if data.fluid(state).is_some() {
+            return Some((state, pos));
+        }
+        if cell == end {
+            break;
+        }
+        let a = if t_max.x < t_max.y {
+            if t_max.x < t_max.z {
+                0
+            } else {
+                2
+            }
+        } else if t_max.y < t_max.z {
+            1
+        } else {
+            2
+        };
+        if t_max[a] > 1.0 {
+            break;
+        }
+        cell[a] += step[a];
+        t_max[a] += t_delta[a];
+    }
+    None
+}
+
+/// CPU as vanilla's DebugEntrySystemSpecs prints it ("<logical>x <model name>"), read once.
+fn cpu_info() -> String {
+    static CPU: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CPU.get_or_init(|| {
+        let model = std::fs::read_to_string("/proc/cpuinfo")
+            .ok()
+            .and_then(|c| {
+                c.lines().find_map(|l| {
+                    l.strip_prefix("model name")
+                        .and_then(|r| r.split_once(':'))
+                        .map(|(_, n)| n.trim().to_owned())
+                })
+            })
+            .unwrap_or_else(|| "unknown".to_owned());
+        format!(
+            "{}x {}",
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
+            model
+        )
+    })
+    .clone()
+}
+
+/// The GPU as F3's system group prints it ("name (backend)"), read from the adapter once.
+fn gpu_info(renderer: &Renderer) -> String {
+    static GPU: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    GPU.get_or_init(|| {
+        let i = renderer.adapter_info();
+        format!("{} ({})", i.name, i.backend)
+    })
+    .clone()
+}
+
 /// A joined game: runtime, game thread and shared state.
 struct Session {
     /// Kept alive for the connection's tasks; dropped after the game thread.
@@ -101,12 +317,64 @@ struct Session {
     game_thread: Option<std::thread::JoinHandle<()>>,
     /// Biome colours of the synced biome registry (index = biome id), for the renderer.
     biomes: Vec<haste_render::BiomeClimate>,
+    /// What the F3 overlay needs that only the connection phase knows (biome names, tags).
+    debug_env: DebugEnv,
     /// The saved options this run uses (loaded once).
     options: Options,
     /// The local player's entity id and UUID (`login`), for its own model in third person.
     local: (EntityId, u128),
     /// The particle atlas types (uploaded to the renderer once it exists).
     particle_types: std::sync::Arc<haste_render::ParticleTypes>,
+}
+
+/// Connection-phase data the F3 overlay shows: biome names of the synced registry (index = the
+/// biome id the world's sections store) and the block/fluid tags (registry id -> "#tag" names),
+/// both fixed for the connection; plus the server's simulation distance.
+#[derive(Clone, Default)]
+struct DebugEnv {
+    biome_names: Vec<String>,
+    /// Block registry id -> tags.
+    block_tags: std::collections::HashMap<u32, Vec<String>>,
+    /// Fluid registry id -> tags.
+    fluid_tags: std::collections::HashMap<u32, Vec<String>>,
+    simulation_distance: i32,
+}
+
+impl DebugEnv {
+    fn new(regs: &haste_protocol::SyncedRegistries, simulation_distance: i32) -> Self {
+        use haste_protocol::haste_core::Identifier;
+        let biome_names = regs
+            .entries(&Identifier::minecraft("worldgen/biome"))
+            .map(|es| es.iter().map(|e| e.id.to_string()).collect())
+            .unwrap_or_default();
+        // Tag entries are registry ids; invert tag -> ids into id -> tags for both registries the
+        // looking-at entries print.
+        let invert = |registry: &str, out: &mut std::collections::HashMap<u32, Vec<String>>| {
+            for rt in regs
+                .tags
+                .iter()
+                .filter(|t| t.registry == Identifier::minecraft(registry))
+            {
+                for tag in &rt.tags {
+                    for &id in &tag.entries {
+                        out.entry(u32::try_from(id).unwrap_or(u32::MAX))
+                            .or_default()
+                            .push(format!("#{}", tag.name));
+                    }
+                }
+            }
+        };
+        let mut block_tags = std::collections::HashMap::new();
+        let mut fluid_tags = std::collections::HashMap::new();
+        invert("block", &mut block_tags);
+        invert("fluid", &mut fluid_tags);
+        Self {
+            biome_names,
+            block_tags,
+            fluid_tags,
+            simulation_distance,
+        }
+    }
 }
 
 impl Session {
@@ -137,8 +405,9 @@ impl Session {
         // The saved render distance is what we advertise in client_information; the server's
         // own view distance (login packet) caps what we mesh below.
         opts.client_information.view_distance = options.render_distance as i8;
-        let driver: NetDriver = rt.block_on(NetDriver::connect(opts))?;
-        let (biomes, biome_climates, type_names, sounds) = {
+        let mut driver: NetDriver = rt.block_on(NetDriver::connect(opts))?;
+        driver.session.fov_effect_scale = options.fov_effect_scale;
+        let (biomes, biome_climates, type_names, sounds, painting_variants) = {
             let regs = driver.connection().registries();
             let sounds = if sound {
                 open_sounds(regs, &data, &options.sound)
@@ -150,9 +419,11 @@ impl Session {
                 biomes::biome_climates(regs),
                 net::entity_type_names(regs, &data),
                 sounds,
+                net::painting_variants(regs),
             )
         };
         let login = driver.login().clone();
+        let debug_env = DebugEnv::new(driver.connection().registries(), login.simulation_distance);
         let local = (login.entity_id, login.profile.uuid.as_u128());
         tracing::info!(
             "joined {address} as {}: {:?}, dimension {}, view distance {}",
@@ -180,10 +451,13 @@ impl Session {
             haste_render::ParticleTypes::build(&mut open_assets()?, &particle_ids)
                 .context("building the particle atlas")?,
         );
+        let mut entities = net::new_entity_store(entity_types);
+        tracing::info!("synced painting variants: {}", painting_variants.len());
+        entities.set_painting_variants(painting_variants);
         let shared = Arc::new(Shared::new(
             data,
             world,
-            net::new_entity_store(entity_types),
+            entities,
             view_distance,
             haste_render::Particles::new(particle_types.clone()),
             haste_render::default_skin(login.profile.uuid.as_u128()),
@@ -204,6 +478,7 @@ impl Session {
             shared,
             game_thread: Some(game_thread),
             biomes: biome_climates,
+            debug_env,
             options,
             local,
             particle_types,
@@ -401,18 +676,86 @@ impl WorldFeed {
     }
 }
 
+/// `Camera.calculateFov` + `Camera.modifyFovBasedOnDeathOrFluid` (vanilla): the saved FOV
+/// times the interpolated smoothed modifier, then the death and fluid adjustments (in that
+/// order, as vanilla applies them).
+pub fn frame_fov(
+    base_fov: f32,
+    old_modifier: f32,
+    new_modifier: f32,
+    partial: f32,
+    submerged: bool,
+    death_ticks: u32,
+    effect_scale: f32,
+) -> f32 {
+    let mut fov = base_fov * (old_modifier + (new_modifier - old_modifier) * partial);
+    if death_ticks > 0 {
+        let duration = (death_ticks as f32 + partial).min(20.0);
+        fov /= (1.0 - 500.0 / (duration + 500.0)) * 2.0 + 1.0;
+    }
+    if submerged {
+        fov *= 1.0 + (0.85714287 - 1.0) * effect_scale;
+    }
+    fov
+}
+
+/// `GameRenderer.bobHurt` (vanilla): the hurt-tilt roll in degrees. The render state's hurt
+/// time is `hurtTime - partialTicks`; the roll is `-sin(h^4 * PI) * 14 * strength` with
+/// `h = hurtTime / hurtDuration` (10), and 0 once the hurt time runs out.
+pub fn hurt_tilt_degrees(hurt_ticks: u32, partial: f32, strength: f32) -> f32 {
+    let hurt_time = hurt_ticks as f32 - partial;
+    if hurt_time < 0.0 {
+        return 0.0;
+    }
+    let h = hurt_time / crate::net::HURT_TILT_TICKS as f32;
+    -(h * h * h * h * std::f32::consts::PI).sin() * 14.0 * strength
+}
+
+/// `GameRenderer.bobHurt` (vanilla): the death tilt in degrees, `40 - 8000/(deathTime + 200)`
+/// with `deathTime` interpolated and clamped at 20.
+pub fn death_roll_degrees(death_ticks: u32, partial: f32) -> f32 {
+    let duration = (death_ticks as f32 + partial).min(20.0);
+    40.0 - 8000.0 / (duration + 200.0)
+}
+
+/// `GameRenderer.bobView` (vanilla): the view-bob offsets for this frame — the translation
+/// in the camera plane (x right, y up) and the roll/pitch wobble in degrees — from the
+/// backwards-interpolated walk distance and the interpolated bob amount.
+pub fn view_bob(
+    walk_dist: f32,
+    walk_dist_o: f32,
+    bob: f32,
+    bob_o: f32,
+    partial: f32,
+) -> (f32, f32, f32, f32) {
+    // ClientAvatarState.getBackwardsInterpolatedWalkDistance / getInterpolatedBob.
+    let walk = -(walk_dist + (walk_dist - walk_dist_o) * partial);
+    let bob = bob_o + (bob - bob_o) * partial;
+    let s = (walk * std::f32::consts::PI).sin() * bob;
+    let c = (walk * std::f32::consts::PI).cos() * bob;
+    (
+        s * 0.5,
+        -c.abs(),
+        s * 3.0,
+        ((walk * std::f32::consts::PI - 0.2).cos() * bob).abs() * 5.0,
+    )
+}
+
 /// Builds this frame's camera and sky from the shared view at `now`. `yaw`/`pitch` are the
 /// input layer's look; the player's server rotation offset is added here so mouse look is
 /// smooth at frame rate while the player itself turns once per tick. In the third-person
-/// perspectives the camera is moved off the eye (`game::third_person_camera`).
+/// perspectives the camera is moved off the eye (`game::third_person_camera`). The FOV is the
+/// saved option with vanilla's per-tick FOV modifier interpolated, then the submerged and
+/// death adjustments; the hurt/death tilts and the view bobbing come from the view's per-tick
+/// state (vanilla's `Camera.calculateFov` and `GameRenderer.bobHurt`/`bobView`).
 fn frame_view(
     shared: &Shared,
     perspective: game::Perspective,
     yaw: f32,
     pitch: f32,
-    fov_deg: f32,
+    options: &Options,
     now: Instant,
-) -> (Camera, SkyState, f32, i32, u64) {
+) -> (Camera, SkyState, LightmapFrame, f32, i32, u64) {
     let view = *shared.view.lock();
     let partial = game::partial_tick(view.tick_at, now);
     let eye = game::interpolate(view.prev_eye, view.eye, partial);
@@ -428,12 +771,47 @@ fn frame_view(
     } else {
         (eye, look.0, look.1)
     };
+    let fov_deg = frame_fov(
+        options.fov as f32,
+        view.fov_modifier_old,
+        view.fov_modifier,
+        partial,
+        view.eye_in_water || view.eye_in_lava,
+        view.death_ticks,
+        options.fov_effect_scale,
+    );
+    let hurt_tilt = hurt_tilt_degrees(view.hurt_ticks, partial, options.damage_tilt_strength);
+    let death_roll = if view.death_ticks > 0 {
+        death_roll_degrees(view.death_ticks, partial)
+    } else {
+        0.0
+    };
+    let (bob_x, bob_y, bob_roll, bob_pitch) = if options.bob_view {
+        view_bob(
+            view.walk_dist,
+            view.walk_dist_o,
+            view.bob,
+            view.bob_o,
+            partial,
+        )
+    } else {
+        (0.0, 0.0, 0.0, 0.0)
+    };
     let camera = Camera {
         pos,
         yaw,
         pitch,
         fov_deg,
-        roll_deg: view.hurt_tilt,
+        roll_deg: 0.0,
+        bob: haste_render::ViewBob {
+            hurt_tilt_deg: hurt_tilt,
+            hurt_dir_deg: view.hurt_dir,
+            death_roll_deg: death_roll,
+            x: bob_x,
+            y: bob_y,
+            roll_deg: bob_roll,
+            pitch_deg: bob_pitch,
+        },
     };
     let fog_end = (view.view_distance.max(2) * 16) as f32;
     let sky = SkyState {
@@ -443,9 +821,32 @@ fn frame_view(
         fog_start: fog_end * 0.75,
         fog_end,
     };
+    // The lightmap inputs the extractor gathers per frame (LightmapRenderStateExtractor.extract):
+    // the night-vision intensity, the darkness effect's brightness modifier and pulse, and the
+    // boss-overlay darkening; the flicker and lightning come straight from the tick.
+    let night_vision = match view.lightmap_night_vision {
+        Some(duration) => haste_render::lightmap::night_vision_scale(duration, partial),
+        None => 0.0,
+    };
+    let darkness_blend = view.lightmap_darkness_blend.factor(partial);
+    let darkness_modifier = darkness_blend * options.darkness_effect_scale;
+    let lightmap = LightmapFrame {
+        block_light_flicker: view.lightmap_flicker,
+        gamma: haste_render::lightmap::brightness(options.gamma, darkness_modifier),
+        night_vision,
+        darkness: haste_render::lightmap::darkness_scale(
+            view.lightmap_tick_count,
+            darkness_modifier,
+            partial,
+        ) * options.darkness_effect_scale,
+        boss_overlay_darkening: view.lightmap_boss_darkening.0
+            + (view.lightmap_boss_darkening.1 - view.lightmap_boss_darkening.0) * partial,
+        lightning_flash: view.lightmap_lightning,
+    };
     (
         camera,
         sky,
+        lightmap,
         partial,
         view.view_distance,
         view.animation_tick,
@@ -700,6 +1101,10 @@ struct InputRouter {
     /// last sample.
     attack: bool,
     use_item: bool,
+    /// Left / right clicks queued since the last sample (vanilla's `KeyMapping.clickCount`:
+    /// one per press). Drained into the shared input by `sample`.
+    attack_clicks: u8,
+    use_clicks: u8,
     pick_block: bool,
     drop_item: bool,
     drop_stack: bool,
@@ -724,6 +1129,8 @@ impl Default for InputRouter {
             toggle_flight: false,
             attack: false,
             use_item: false,
+            attack_clicks: 0,
+            use_clicks: 0,
             pick_block: false,
             drop_item: false,
             drop_stack: false,
@@ -834,8 +1241,18 @@ impl InputRouter {
             return false;
         }
         match button {
-            1 => self.attack = pressed,
-            3 => self.use_item = pressed,
+            1 => {
+                self.attack = pressed;
+                if pressed {
+                    self.attack_clicks = self.attack_clicks.saturating_add(1);
+                }
+            }
+            3 => {
+                self.use_item = pressed;
+                if pressed {
+                    self.use_clicks = self.use_clicks.saturating_add(1);
+                }
+            }
             2 if pressed => self.pick_block = true,
             _ => {}
         }
@@ -901,8 +1318,9 @@ impl InputRouter {
     }
 
     /// Copy the sampled state into the shared input the game thread reads each tick, and
-    /// consume the press-only actions.
-    fn sample(&mut self, shared: &Shared) {
+    /// consume the press-only actions. `perspective` is the camera's own: the game thread's
+    /// camera effects that are gated on it (the spyglass FOV) only apply in first person.
+    fn sample(&mut self, shared: &Shared, perspective: game::Perspective) {
         let k = |c: KeyCode| self.keys.contains(&c);
         let state = InputState {
             forward: k(KeyCode::KeyW),
@@ -917,10 +1335,19 @@ impl InputRouter {
         };
         let mut shared_input = shared.input.lock();
         shared_input.state = state;
+        shared_input.first_person = matches!(perspective, game::Perspective::FirstPerson);
         shared_input.toggle_flight |= std::mem::take(&mut self.toggle_flight);
         let i = &mut shared_input.interact;
         i.attack = self.attack;
         i.use_item = self.use_item;
+        // The click counts accumulate across samples (the render thread may sample several
+        // times per tick); the game thread drains them once per tick.
+        i.attack_clicks = i
+            .attack_clicks
+            .saturating_add(std::mem::take(&mut self.attack_clicks));
+        i.use_clicks = i
+            .use_clicks
+            .saturating_add(std::mem::take(&mut self.use_clicks));
         i.pick_block |= std::mem::take(&mut self.pick_block);
         i.drop_item |= std::mem::take(&mut self.drop_item);
         i.drop_stack |= std::mem::take(&mut self.drop_stack);
@@ -975,12 +1402,15 @@ fn open_sounds(
 pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let session = Session::join(args, false)?;
     let shared = session.shared.clone();
+    // The shot is first person: the game thread's camera effects take that perspective.
+    shared.input.lock().first_person = true;
     let mut assets = open_assets()?;
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
     renderer.set_biomes(&session.biomes);
     renderer.set_particle_types(&session.particle_types);
+    renderer.set_dimension(shared.world.read().dimension());
     let mut gui = GuiFrame::default();
     let mut ui: Option<crate::ui::Ui> = None;
     let mut feed = WorldFeed::default();
@@ -1013,12 +1443,12 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             input.state.yaw = look.0 - offset.0;
             input.state.pitch = (look.1 - offset.1).clamp(-90.0, 90.0);
         }
-        let (mut camera, sky, partial, vd, animation_tick) = frame_view(
+        let (mut camera, sky, lightmap, partial, vd, animation_tick) = frame_view(
             &shared,
             perspective,
             look.0 - offset.0,
             look.1 - offset.1,
-            session.options.fov as f32,
+            &session.options,
             Instant::now(),
         );
         if let Some(pos) = want_pos {
@@ -1065,6 +1495,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        renderer.set_lightmap_frame(lightmap);
         {
             let world = shared.world.read();
             let mut particles = shared.particles.lock();
@@ -1194,6 +1625,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
     renderer.set_biomes(&session.biomes);
+    renderer.set_dimension(shared.world.read().dimension());
     let mut gui = GuiFrame::default();
     let mut ui: Option<crate::ui::Ui> = None;
     let mut feed = WorldFeed::default();
@@ -1207,6 +1639,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut next_tick = Instant::now();
     let mut frames = 0u32;
     let mut last_stats = FrameStats::default();
+    let mut fps = FpsCounter::new();
     let mut last_err: Option<String> = None;
     let mut finished = false;
     // Screenshot actions of this tick, saved after the frame is rendered (the readback must
@@ -1228,6 +1661,14 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             let settled = view.has_position
                 && hud_ready
                 && feed.settled(&last_stats, Duration::from_millis(1500));
+            if !settled && frames.is_multiple_of(40) {
+                tracing::info!(
+                    "waiting to settle: queue {} pending {} arrival {:?}",
+                    feed.queue.len(),
+                    last_stats.meshes_pending,
+                    feed.last_arrival.map(|t| t.elapsed())
+                );
+            }
             let state = script::ScriptState {
                 joined: view.has_position,
                 settled,
@@ -1288,7 +1729,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 }
             }
             // The actions may have changed what the game thread sees this tick.
-            input.sample(&shared);
+            input.sample(&shared, game::Perspective::FirstPerson);
             view = *shared.view.lock();
         }
         if shared.is_closed() {
@@ -1299,12 +1740,12 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         }
         // Render the frame like the screenshot mode does (the HUD and any open screen via
         // `Ui::frame`), so `screenshot` actions capture exactly what the window would show.
-        let (camera, sky, partial, vd, animation_tick) = frame_view(
+        let (camera, sky, lightmap, partial, vd, animation_tick) = frame_view(
             &shared,
             game::Perspective::FirstPerson,
             look.0,
             look.1,
-            session.options.fov as f32,
+            &session.options,
             Instant::now(),
         );
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
@@ -1316,6 +1757,25 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             if let Some(u) = &ui {
                 u.set_text_metrics(renderer.text_metrics());
             }
+        }
+        if let Some(u) = &ui {
+            // F3's numbers every frame, like the window's `draw` (cheap: short mutexes; the
+            // overlay's strings are only built while it is on).
+            u.set_debug(debug_info(
+                &session.debug_env,
+                &shared,
+                &renderer,
+                look,
+                fps.fps as i32,
+                &last_stats,
+                entities.len() as i32,
+                resolve_gui_scale(
+                    u32::from(session.options.gui_scale),
+                    args.width,
+                    args.height,
+                ),
+                &gpu_info(&renderer),
+            ));
         }
         if let Some(u) = &mut ui {
             let scale = resolve_gui_scale(
@@ -1338,8 +1798,10 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        renderer.set_lightmap_frame(lightmap);
         if let Ok(stats) = renderer.render(&frame) {
             last_stats = stats;
+            fps.frame(&stats);
         }
         frames += 1;
         // This tick's screenshot actions: the frame they caused is now on the GPU.
@@ -1360,6 +1822,25 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                     .save(&path)
                     .with_context(|| format!("saving {}", path.display()))?;
                 println!("script screenshot saved to {}", path.display());
+                // The frame's text, next to the PNG: the checks' lines to read without OCR.
+                let mut txt = path.clone().into_os_string();
+                txt.push(".txt");
+                std::fs::write(
+                    std::path::PathBuf::from(txt),
+                    gui.commands
+                        .iter()
+                        .filter_map(|c| match c {
+                            haste_protocol::haste_core::gui::GuiCommand::Text { text, .. }
+                            | haste_protocol::haste_core::gui::GuiCommand::StyledText {
+                                text,
+                                ..
+                            } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+                .with_context(|| "writing the screenshot's text")?;
             }
             if std::mem::take(&mut f2_pending) {
                 log_script_frame(&gui, "f2");
@@ -1614,12 +2095,15 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     };
     let session = Session::join(args, false)?;
     let shared = session.shared.clone();
+    // The bench camera is first person: the game thread's camera effects take that perspective.
+    shared.input.lock().first_person = true;
     let mut assets = open_assets()?;
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
     renderer.set_biomes(&session.biomes);
     renderer.set_particle_types(&session.particle_types);
+    renderer.set_dimension(shared.world.read().dimension());
     let gui = GuiFrame::default();
     let mut feed = WorldFeed::default();
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
@@ -1628,12 +2112,12 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let mut vd;
     // Settle phase: identical to the screenshot path (wait for position, meshing done, quiet).
     loop {
-        let (mut camera, sky, partial, v, animation_tick) = frame_view(
+        let (mut camera, sky, lightmap, partial, v, animation_tick) = frame_view(
             &shared,
             game::Perspective::FirstPerson,
             0.0,
             0.0,
-            session.options.fov as f32,
+            &session.options,
             Instant::now(),
         );
         camera.yaw = args.yaw.unwrap_or(camera.yaw);
@@ -1657,6 +2141,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        renderer.set_lightmap_frame(lightmap);
         {
             let world = shared.world.read();
             let mut particles = shared.particles.lock();
@@ -1703,12 +2188,12 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         }
         // The bench camera follows its fixed path; the sky and entities come from the live view
         // (time of day moves, the player stays where the server put it).
-        let (_, mut sky, partial_tick, _, animation_tick) = frame_view(
+        let (_, mut sky, lightmap, partial_tick, _, animation_tick) = frame_view(
             &shared,
             game::Perspective::FirstPerson,
             0.0,
             0.0,
-            session.options.fov as f32,
+            &session.options,
             Instant::now(),
         );
         let camera = bench_camera(elapsed / total, &base, total);
@@ -1733,6 +2218,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        renderer.set_lightmap_frame(lightmap);
         {
             let world = shared.world.read();
             let mut particles = shared.particles.lock();
@@ -1803,6 +2289,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
     let mut app = App {
         shared: session.shared.clone(),
         biomes: session.biomes.clone(),
+        debug_env: session.debug_env.clone(),
         particle_types: session.particle_types.clone(),
         // The flag wins over the saved option; without it, the saved option decides.
         vsync: args.vsync.unwrap_or(session.options.vsync),
@@ -1841,6 +2328,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
 struct App {
     shared: Arc<Shared>,
     biomes: Vec<haste_render::BiomeClimate>,
+    debug_env: DebugEnv,
     /// The particle atlas types (uploaded to the renderer once it exists).
     particle_types: std::sync::Arc<haste_render::ParticleTypes>,
     vsync: bool,
@@ -1950,7 +2438,7 @@ impl App {
 
     fn release_keys(&mut self) {
         self.input.release();
-        self.input.sample(&self.shared);
+        self.input.sample(&self.shared, self.perspective);
     }
 
     /// Mouse look speed from the saved sensitivity.
@@ -1962,19 +2450,19 @@ impl App {
         if self.renderer.is_none() {
             return;
         }
-        self.input.sample(&self.shared);
+        self.input.sample(&self.shared, self.perspective);
         // The screen that opened or closed since the last frame takes or frees the cursor,
         // and "Disconnect" ends the run.
         self.sync_grab();
         self.take_disconnect(event_loop);
         let renderer = self.renderer.as_mut().expect("checked above");
         let t0 = Instant::now();
-        let (camera, sky, partial, vd, animation_tick) = frame_view(
+        let (camera, sky, lightmap, partial, vd, animation_tick) = frame_view(
             &self.shared,
             self.perspective,
             self.input.yaw,
             self.input.pitch,
-            self.options.fov as f32,
+            &self.options,
             Instant::now(),
         );
         self.feed
@@ -2002,18 +2490,22 @@ impl App {
         let (w, h) = renderer.size();
         if let Some(ui) = &self.ui {
             // F3's numbers and the water overlay's flag, every frame (cheap: short mutexes,
-            // no allocation). The section counts are the previous frame's.
-            let view = *self.shared.view.lock();
+            // no allocation while the overlay is off). The section counts are the previous
+            // frame's.
             let stats = self.frame_stats;
-            ui.set_debug(haste_jvm::DebugInfo {
-                fps: self.fps.fps as i32,
-                pos: [view.feet.x, view.feet.y, view.feet.z],
-                rot: [self.input.yaw, self.input.pitch],
-                chunks: self.shared.world.read().loaded_chunks().count() as i32,
-                sections_drawn: stats.chunk_sections_drawn as i32,
-                sections_total: stats.chunk_sections_total as i32,
-                entities: self.shared.entities.read().len() as i32,
-            });
+            let gpu = gpu_info(renderer);
+            ui.set_debug(debug_info(
+                &self.debug_env,
+                &self.shared,
+                renderer,
+                (self.input.yaw, self.input.pitch),
+                self.fps.fps as i32,
+                &stats,
+                entities.len() as i32,
+                resolve_gui_scale(u32::from(self.options.gui_scale), w, h),
+                &gpu,
+            ));
+            let view = *self.shared.view.lock();
             ui.set_eye_in_water(view.eye_in_water);
         }
         if let Some(ui) = &mut self.ui {
@@ -2040,6 +2532,7 @@ impl App {
             renderer.prepare_particles(&mut particles, &*world, camera, partial);
         }
         renderer.set_animation_tick(animation_tick);
+        renderer.set_lightmap_frame(lightmap);
         if self.screenshot {
             self.screenshot = false;
             renderer.request_capture();
@@ -2104,6 +2597,7 @@ impl ApplicationHandler for App {
             renderer.set_item_registry(&self.shared.data.registries);
             renderer.set_biomes(&self.biomes);
             renderer.set_particle_types(&self.particle_types);
+            renderer.set_dimension(self.shared.world.read().dimension());
             Ok((window, renderer))
         })();
         match result {
@@ -2717,6 +3211,7 @@ mod tests {
             pitch: 10.0,
             fov_deg: 70.0,
             roll_deg: 0.0,
+            bob: haste_render::ViewBob::default(),
         };
         // t = 0: at the base, unturned.
         let c = bench_camera(0.0, &base, 60.0);
@@ -2744,5 +3239,56 @@ mod tests {
         let c = bench_camera(0.75, &base, 60.0);
         assert!((c.pos.x - 250.0).abs() < 1e-4, "{}", c.pos.x);
         assert!((c.pos.y - 84.0).abs() < 1e-4, "{}", c.pos.y);
+    }
+
+    #[test]
+    fn frame_fov_matches_vanilla_calculate_fov() {
+        // `Camera.calculateFov`: base FOV times the interpolated modifier.
+        assert_eq!(frame_fov(70.0, 1.0, 1.0, 0.5, false, 0, 1.0), 70.0);
+        assert_eq!(frame_fov(70.0, 1.0, 1.5, 0.5, false, 0, 1.0), 70.0 * 1.25);
+        // Under water/lava: `lerp(effectScale, 1.0, 0.85714287)`.
+        assert!((frame_fov(70.0, 1.0, 1.0, 0.0, true, 0, 1.0) - 60.0).abs() < 1e-3);
+        assert!((frame_fov(70.0, 1.0, 1.0, 0.0, true, 0, 0.5) - 65.0).abs() < 1e-4);
+        // The effect scale off leaves it alone.
+        assert_eq!(frame_fov(70.0, 1.0, 1.0, 0.0, true, 0, 0.0), 70.0);
+        // Death: `fov /= (1 - 500/(duration+500))*2 + 1`, deathTime clamped at 20.
+        assert!((frame_fov(70.0, 1.0, 1.0, 0.0, false, 20, 1.0) - 65.0).abs() < 1e-4);
+        assert!((frame_fov(70.0, 1.0, 1.0, 0.0, false, 200, 1.0) - 65.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn hurt_tilt_matches_bob_hurt_quartic_curve() {
+        // `GameRenderer.bobHurt`: `-sin(h^4 * PI) * 14 * strength`, h = hurtTime / 10.
+        // hurtTime = 5, partial 0 => h = 0.5, h^4 = 0.0625.
+        assert!((hurt_tilt_degrees(5, 0.0, 1.0) + 2.73127).abs() < 1e-4);
+        // hurtTime = 9 (10 ticks, partial 1) => h = 0.9, h^4 = 0.6561.
+        assert!((hurt_tilt_degrees(10, 1.0, 1.0) + 12.3500).abs() < 1e-3);
+        // The peak is 14 degrees where h^4 = 0.5, not at the start (the curve is quartic).
+        assert!(hurt_tilt_degrees(10, 0.0, 1.0).abs() < 1e-4);
+        // Strength scales it; the hurt time running out (hurtTime - partial < 0) is 0.
+        assert!((hurt_tilt_degrees(5, 0.0, 0.5) + 1.36564).abs() < 1e-4);
+        assert_eq!(hurt_tilt_degrees(0, 0.5, 1.0), 0.0);
+    }
+
+    #[test]
+    fn death_roll_matches_bob_hurt_death_curve() {
+        // `GameRenderer.bobHurt`: `40 - 8000/(deathTime + 200)`, deathTime clamped at 20.
+        assert_eq!(death_roll_degrees(0, 0.0), 0.0);
+        assert!((death_roll_degrees(20, 0.0) - 3.6363636).abs() < 1e-4);
+        assert!((death_roll_degrees(200, 0.0) - 3.6363636).abs() < 1e-4);
+        assert!((death_roll_degrees(0, 10.0) - 1.9047619).abs() < 1e-4);
+    }
+
+    #[test]
+    fn view_bob_matches_bob_view() {
+        // `GameRenderer.bobView` with walk*PI = 3*PI/2 (walk = -1.5) and bob interpolated to
+        // 0.5: translation (0.25, 0), roll 1.5 degrees, pitch 0.49667 degrees.
+        let (x, y, roll, pitch) = view_bob(1.0, 0.0, 1.0, 0.0, 0.5);
+        assert!((x - 0.25).abs() < 1e-4, "{x}");
+        assert!(y.abs() < 1e-4, "{y}");
+        assert!((roll - 1.5).abs() < 1e-4, "{roll}");
+        assert!((pitch - 0.49667).abs() < 1e-4, "{pitch}");
+        // No walk distance and no bob: nothing moves.
+        assert_eq!(view_bob(0.0, 0.0, 0.0, 0.0, 0.5), (0.0, 0.0, 0.0, 0.0));
     }
 }

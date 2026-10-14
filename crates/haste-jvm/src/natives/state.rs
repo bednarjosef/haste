@@ -87,6 +87,16 @@ pub(crate) extern "system" fn mirror<'l>(
     .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// The F3 overlay's string values (see `GameState::debug_text`), one call per frame while on.
+pub(crate) extern "system" fn debug_text<'l>(
+    mut env: EnvUnowned<'l>,
+    _c: JClass<'l>,
+) -> JString<'l> {
+    let text = with_state(|s| s.debug_text());
+    env.with_env(|env| -> jni::errors::Result<JString<'l>> { JString::from_str(env, text) })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 pub(crate) extern "system" fn request_disconnect<'l>(_env: EnvUnowned<'l>, _c: JClass<'l>) {
     with_state(|s| s.disconnect_requested = true);
 }

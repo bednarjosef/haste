@@ -10,8 +10,10 @@
 //! - [`PlayerState::can_start_fall_flying`] is vanilla `Player.tryToStartFallFlying` under
 //!   `LocalPlayer.aiStep`'s jump condition; [`PlayerState::should_stop_fall_flying`] is the
 //!   `LivingEntity.updateFallFlying` stop check (`canGlide` no longer true).
-//! - Firework boosts are entity side (`FireworkRocketEntity` pushes the player it is attached to
-//!   every tick) and are not modelled here; see NOTES.md.
+//! - [`firework_boost`] is the velocity push vanilla's `FireworkRocketEntity.tick` applies to a
+//!   fall-flying entity it is attached to, once per tick. The rocket entity itself (its
+//!   attached-to id in entity data, its position following the player's hand) is the client's to
+//!   track; the boost is applied from the client's tick (see `haste-client`'s net driver).
 use haste_core::view::{BlockPhysics, BlockView, CollisionShapes};
 use haste_core::DVec3;
 
@@ -42,6 +44,25 @@ pub fn look_angle(yaw: f32, pitch: f32) -> DVec3 {
         (y_sin * x_cos) as f64,
         (-x_sin) as f64,
         (y_cos * x_cos) as f64,
+    )
+}
+
+/// One tick of the attached firework rocket's push, vanilla `FireworkRocketEntity.tick` while
+/// the rocket is attached to a fall-flying entity:
+///
+/// ```text
+/// v += look * 0.1 + (look * 1.5 - v) * 0.5        (per component)
+/// ```
+///
+/// i.e. half the old velocity plus 0.85 x the look vector (`0.1 + 1.5 * 0.5`). All doubles, the
+/// same order of operations as vanilla's `Vec3.add`. The caller applies this once per tick while
+/// a firework rocket attached to the local player is tracked and `state.fall_flying` is set.
+pub fn firework_boost(velocity: DVec3, yaw: f32, pitch: f32) -> DVec3 {
+    let look = look_angle(yaw, pitch);
+    DVec3::new(
+        velocity.x + look.x * 0.1 + (look.x * 1.5 - velocity.x) * 0.5,
+        velocity.y + look.y * 0.1 + (look.y * 1.5 - velocity.y) * 0.5,
+        velocity.z + look.z * 0.1 + (look.z * 1.5 - velocity.z) * 0.5,
     )
 }
 
@@ -443,6 +464,48 @@ mod tests {
         assert!(state.on_ground, "{}", state.pos);
         assert!(!state.fall_flying, "still gliding after landing");
         assert!((state.pos.y - 100.0).abs() < 1e-9, "{}", state.pos);
+    }
+
+    /// The attached firework rocket's push, vanilla `FireworkRocketEntity.tick`: each tick
+    /// `v = 0.5 v + 0.85 look` (per component), so from rest the speed reaches the fixed point
+    /// 0.85 / (1 - 0.5) = 1.7 blocks/tick along the look vector.
+    #[test]
+    fn firework_boost_pushes_towards_the_look() {
+        // Yaw 0, pitch 0: look = (0, 0, 1) exactly. From rest the boost is (0, 0, 0.85).
+        let first = firework_boost(DVec3::ZERO, 0.0, 0.0);
+        assert!(first.x.abs() < TOL, "{first}");
+        assert!(first.y.abs() < TOL, "{first}");
+        assert!((first.z - 0.85).abs() < TOL, "{first}");
+        // v_{n+1} = 0.5 v_n + 0.85: 0.85, 1.275, 1.4875, ... -> 1.7 (1 - 0.5^n).
+        let mut v = DVec3::ZERO;
+        for n in 1..=10u32 {
+            v = firework_boost(v, 0.0, 0.0);
+            let want = 1.7 * (1.0 - 0.5f64.powi(n as i32));
+            assert!((v.z - want).abs() < 1e-12, "tick {n}: {} vs {want}", v.z);
+        }
+        assert!((v.z - 1.7).abs() < 2e-3, "{v}");
+        // A dive (pitch 60) sends the push down and forward along the look.
+        let dive = firework_boost(DVec3::ZERO, 0.0, 60.0);
+        let look = look_angle(0.0, 60.0);
+        for (got, want) in [(dive.x, look.x), (dive.y, look.y), (dive.z, look.z)] {
+            assert!((got - want * 0.85).abs() < 1e-9, "{dive} vs {look}");
+        }
+        // Half the old velocity is kept.
+        let kept = firework_boost(DVec3::new(0.4, -0.2, 0.8), 0.0, 0.0);
+        assert!((kept.x - 0.2).abs() < TOL, "{kept}");
+        assert!((kept.y + 0.1).abs() < TOL, "{kept}");
+        assert!((kept.z - (0.4 + 0.85)).abs() < TOL, "{kept}");
+    }
+
+    /// The fall-flying pose's eye height (0.4) and box height (0.6), from `Avatar`'s pose
+    /// dimensions; the glider box in `aabb` already uses 0.6.
+    #[test]
+    fn fall_flying_pose_dimensions() {
+        let attrs = PlayerAttributes::default();
+        assert!((attrs.eye_height_for(Pose::FallFlying) - 0.4).abs() < 1e-6);
+        assert!((attrs.height_for(Pose::FallFlying) - 0.6).abs() < 1e-6);
+        assert_eq!(Pose::from_name("fall_flying"), Some(Pose::FallFlying));
+        assert_eq!(Pose::FallFlying.name(), "fall_flying");
     }
 
     /// Start/stop predicates, mirroring Player.tryToStartFallFlying and LivingEntity.canGlide.

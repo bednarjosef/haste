@@ -481,6 +481,11 @@ impl Ui {
         self.gui().is_open()
     }
 
+    /// Whether the F3 debug overlay is on (its strings are only built then).
+    pub fn debug_shown(&self) -> bool {
+        self.gui().debug_shown()
+    }
+
     /// Whether vanilla code wants the mouse grabbed (e.g. after "Back to Game").
     pub fn wants_mouse_grabbed(&self) -> bool {
         self.gui().mouse_grabbed()

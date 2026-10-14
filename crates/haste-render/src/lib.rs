@@ -10,6 +10,7 @@ pub mod entity;
 pub mod fluid;
 pub mod fog;
 pub mod gui;
+pub mod lightmap;
 pub mod mesher;
 pub mod occlusion;
 pub mod overlay;
@@ -30,7 +31,7 @@ pub use particles::{
     DustOption, ParticleRenderer, ParticleSpawn, ParticleTypes, Particles, MAX_PARTICLES,
 };
 pub use pipeline::{upload_atlas, upload_section, Gpu, SectionGpuMesh};
-pub use renderer::{Camera, FrameInput, FrameStats, Renderer, SkyState};
+pub use renderer::{Camera, FrameInput, FrameStats, LightmapFrame, Renderer, SkyState, ViewBob};
 pub use sky::{SkyColors, SkyKind};
 pub use timing::FrameTimings;
 pub use tint::{BiomeClimate, BiomeColors, BiomeSource, Colormaps, GrassModifier};
