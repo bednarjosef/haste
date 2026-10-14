@@ -64,6 +64,11 @@ struct BlockDesc {
 }
 
 /// Dense block-state tables built from `blocks.json`. See docs/INTERFACES.md.
+///
+/// Every lookup by state id is total: an id at or above `state_block.len()` (a modded server
+/// can send ids past the end of our data-generator table) resolves to the placeholder,
+/// `minecraft:stone`'s default state — solid, colliding, drawn with stone's model. Vanilla
+/// has no "missing block" state.
 pub struct BlockStates {
     strings: Strings,
     blocks: Vec<BlockDesc>,
@@ -75,6 +80,10 @@ pub struct BlockStates {
     state_props: Vec<(u32, u32)>,
     /// `ns:path` -> index into `blocks`.
     by_name: ahash::HashMap<Box<str>, u32>,
+    /// Placeholder for ids outside the table: `minecraft:stone`'s default state id.
+    placeholder_state: BlockStateId,
+    /// Index into `blocks` of the placeholder block.
+    placeholder_block: u32,
 }
 
 impl BlockStates {
@@ -194,6 +203,12 @@ impl BlockStates {
             }
         }
 
+        // Out-of-range ids (modded servers) resolve to a documented placeholder: stone's
+        // default state — a solid, colliding full cube. Fall back to block 0 (air) only if
+        // stone itself is missing from a hand-written table.
+        let placeholder_block = by_name.get("minecraft:stone").copied().unwrap_or(0);
+        let placeholder_state = BlockStateId(blocks[placeholder_block as usize].default_state);
+
         Ok(Self {
             strings,
             blocks,
@@ -201,6 +216,8 @@ impl BlockStates {
             state_prop_range,
             state_props,
             by_name,
+            placeholder_state,
+            placeholder_block,
         })
     }
 
@@ -219,26 +236,41 @@ impl BlockStates {
         self.blocks.len()
     }
 
+    /// The placeholder state for ids outside the table (`minecraft:stone`'s default state).
+    pub fn placeholder_state(&self) -> BlockStateId {
+        self.placeholder_state
+    }
+
     /// Internal block-table index of `name` (e.g. "minecraft:ice"), for per-block tables that
     /// parallel ours. None if unknown.
     pub(crate) fn block_index_by_name(&self, name: &str) -> Option<u32> {
         self.by_name.get(name).copied()
     }
 
-    /// Internal block-table index of the block owning `state`.
+    /// Internal block-table index of the block owning `state`. Ids outside the table (modded
+    /// servers) resolve to the placeholder block; one bounds check, no panic.
     pub(crate) fn block_index_of_state(&self, s: BlockStateId) -> u32 {
-        self.state_block[s.0 as usize]
+        if (s.0 as usize) < self.state_block.len() {
+            self.state_block[s.0 as usize]
+        } else {
+            self.placeholder_block
+        }
     }
 
-    /// Block owning state `s`. Panics if `s` is out of range (ids are dense at load).
+    /// Block owning state `s`. Ids outside the table resolve to the placeholder block.
     pub fn block_of(&self, s: BlockStateId) -> &Identifier {
-        &self.blocks[self.state_block[s.0 as usize] as usize].name
+        &self.blocks[self.block_index_of_state(s) as usize].name
     }
 
     /// Properties of state `s` as interned `(name id, value id)` pairs in blocks.json order
-    /// (which is name-sorted for all but 12 blocks).
+    /// (which is name-sorted for all but 12 blocks). Ids outside the table resolve to the
+    /// placeholder's property list (`minecraft:stone` has none).
     fn prop_ids(&self, s: BlockStateId) -> &[(u32, u32)] {
-        let (start, len) = self.state_prop_range[s.0 as usize];
+        let (start, len) = if (s.0 as usize) < self.state_prop_range.len() {
+            self.state_prop_range[s.0 as usize]
+        } else {
+            self.state_prop_range[self.placeholder_state.0 as usize]
+        };
         &self.state_props[start as usize..(start + len) as usize]
     }
 
@@ -303,9 +335,14 @@ impl BlockStates {
     }
 
     /// State `s` with property `name` set to `value` (the other properties unchanged).
+    /// Ids outside the table resolve to `None`: we cannot compute a new id for a state we
+    /// have no table for.
     pub fn with_property(&self, s: BlockStateId, name: &str, value: &str) -> Option<BlockStateId> {
         if self.property_value(s, name) == Some(value) {
             return Some(s);
+        }
+        if (s.0 as usize) >= self.state_block.len() {
+            return None;
         }
         let b = self.state_block[s.0 as usize] as usize;
         let desc = &self.blocks[b];
@@ -567,5 +604,26 @@ mod tests {
             ),
             Some(BlockStateId(21))
         );
+    }
+
+    /// A modded server can send ids past the end of the table: every lookup resolves them to
+    /// the placeholder (`minecraft:stone`'s default state, id 1 in this fixture) instead of
+    /// panicking.
+    #[test]
+    fn out_of_range_ids_resolve_to_the_placeholder() {
+        let bs = BlockStates::parse(&stone_json(), None).unwrap();
+        assert_eq!(bs.placeholder_state(), BlockStateId(1));
+        for id in [6u32, 7, 100, u32::MAX] {
+            let s = BlockStateId(id);
+            assert_eq!(bs.block_of(s), &Identifier::minecraft("stone"), "id {id}");
+            assert_eq!(
+                bs.block_index_of_state(s),
+                bs.block_index_of_state(BlockStateId(1)),
+                "id {id}"
+            );
+            assert_eq!(bs.property_value(s, "facing"), None, "id {id}");
+            assert!(bs.properties(s).is_empty(), "id {id}");
+            assert_eq!(bs.with_property(s, "facing", "north"), None, "id {id}");
+        }
     }
 }
