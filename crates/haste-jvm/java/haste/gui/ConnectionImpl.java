@@ -31,7 +31,33 @@ public final class ConnectionImpl {
     static final net.minecraft.client.multiplayer.chat.ChatLog CHAT_LOG = new net.minecraft.client.multiplayer.chat.ChatLog(1024);
     public static net.minecraft.client.multiplayer.chat.ChatLog chatLog(net.minecraft.client.multiplayer.chat.report.ReportingContext r) { return CHAT_LOG; }
 
+    /**
+     * No reports can be sent from Haste (offline mode, like vanilla's {@code UserApiService.OFFLINE}:
+     * {@code canSendReports} is false). The social interactions screen asks the sender before
+     * offering the report button; {@code send} is never called while disabled.
+     */
+    private static final net.minecraft.client.multiplayer.chat.report.AbuseReportSender SENDER =
+        new net.minecraft.client.multiplayer.chat.report.AbuseReportSender() {
+            @Override public java.util.concurrent.CompletableFuture<com.mojang.datafixers.util.Unit> send(
+                java.util.UUID id, net.minecraft.client.multiplayer.chat.report.ReportType type,
+                com.mojang.authlib.minecraft.report.AbuseReport report) {
+                throw new UnsupportedOperationException("no reporting in Haste");
+            }
+            @Override public boolean isEnabled() { return false; }
+        };
+    public static net.minecraft.client.multiplayer.chat.report.AbuseReportSender sender(
+        net.minecraft.client.multiplayer.chat.report.ReportingContext r) { return SENDER; }
+
+    /** No draft report is ever kept (Haste has no reporting UI): the callback runs at once. */
+    public static void draftReportHandled(net.minecraft.client.multiplayer.chat.report.ReportingContext r,
+        net.minecraft.client.Minecraft m, net.minecraft.client.gui.screens.Screen lastScreen,
+        Runnable onDiscard, boolean quitToTitle) { onDiscard.run(); }
+
     public static net.minecraft.world.flag.FeatureFlagSet enabledFeatures(ClientPacketListener c) { return LevelImpl.features; }
+    /** Whether the server's feature flags include these (vanilla: ClientPacketListener.isFeatureEnabled). */
+    public static boolean isFeatureEnabled(ClientPacketListener c, net.minecraft.world.flag.FeatureFlagSet required) {
+        return required.isSubsetOf(LevelImpl.features);
+    }
     /** Players seen this session (social interactions screen): not tracked yet. */
     public static java.util.Map<java.util.UUID, net.minecraft.client.multiplayer.PlayerInfo> getSeenPlayers(ClientPacketListener c) { return java.util.Map.of(); }
 
@@ -47,9 +73,10 @@ public final class ConnectionImpl {
     /** Serverbound packets from vanilla code: encoded with vanilla's codec and sent by Rust. */
     public static void send(net.minecraft.client.multiplayer.ClientCommonPacketListenerImpl c, net.minecraft.network.protocol.Packet<?> p) { Packets.send(p); }
 
-    /** Server links (custom pause-menu links) are not received by Rust yet: none. */
+    /** Server links (custom pause-menu links) from the configuration phase; set by Bridge.setServerLinks. */
+    static net.minecraft.server.ServerLinks SERVER_LINKS = net.minecraft.server.ServerLinks.EMPTY;
     public static net.minecraft.server.ServerLinks serverLinks(net.minecraft.client.multiplayer.ClientCommonPacketListenerImpl c) {
-        return net.minecraft.server.ServerLinks.EMPTY;
+        return SERVER_LINKS;
     }
 
     private static net.minecraft.client.multiplayer.ClientSuggestionProvider suggestions;

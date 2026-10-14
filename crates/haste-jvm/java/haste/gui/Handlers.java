@@ -253,6 +253,23 @@ public final class Handlers {
         Proxies.advancements.setSelectedTab(p.getTab() == null ? null : Proxies.advancements.get(p.getTab()), false);
     }
 
+    /** The server's answer to REQUEST_STATS, like ClientPacketListener.handleAwardStats. */
+    public static void handleAwardStats(ClientPacketListener c, ClientboundAwardStatsPacket p) {
+        for (var e : p.stats().object2IntEntrySet()) {
+            Proxies.player.getStats().setValue(Proxies.player, e.getKey(), e.getIntValue());
+        }
+        if (ClientImpl.screen instanceof net.minecraft.client.gui.screens.achievement.StatsScreen s) {
+            s.onStatsUpdated();
+        }
+    }
+
+    /** The server's game rule values, like ClientPacketListener.handleGameRuleValues. */
+    public static void handleGameRuleValues(ClientPacketListener c, ClientboundGameRuleValuesPacket p) {
+        if (ClientImpl.screen instanceof net.minecraft.client.gui.screens.options.InWorldGameRulesScreen s) {
+            s.onGameRuleValuesUpdated(p.values());
+        }
+    }
+
     // ---- commands ----
     public static void handleCommands(ClientPacketListener c, ClientboundCommandsPacket p) {
         var ctx = net.minecraft.commands.CommandBuildContext.simple(Registries.access(), LevelImpl.enabledFeatures(Proxies.level));

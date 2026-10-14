@@ -60,6 +60,9 @@ public final class Proxies {
         set(player, "equipment", net.minecraft.world.entity.EntityEquipment.class, equipment);
         inventory = new Inventory(player, equipment);
         set(player, "inventory", Inventory.class, inventory);
+        // the statistics counter the Stats screen reads and award_stats fills (vanilla's is built
+        // with the LocalPlayer; the proxy never runs that constructor)
+        set(player, "stats", net.minecraft.stats.StatsCounter.class, new net.minecraft.stats.StatsCounter());
 
         set(font, "lineHeight", int.class, haste.rt.Native.lineHeight());
         set(minecraft, "font", Font.class, font);

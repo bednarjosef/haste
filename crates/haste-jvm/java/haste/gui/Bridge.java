@@ -167,6 +167,37 @@ public final class Bridge {
         LevelImpl.features = net.minecraft.world.flag.FeatureFlags.REGISTRY.fromNames(l, id -> {});
     }
 
+    /**
+     * The pause-menu server links (configuration phase), one string per link:
+     * {@code "<b|c>\t<label>\t<url>"} (b = built-in label id, c = custom label text — flattened;
+     * the wire carries a component). Built like ClientCommonPacketListenerImpl.handleServerLinks:
+     * untrusted strings are parsed as URIs, invalid ones dropped.
+     */
+    public void setServerLinks(String[] links) {
+        java.util.List<net.minecraft.server.ServerLinks.Entry> entries = new java.util.ArrayList<>();
+        for (String l : links) {
+            String[] parts = l.split("\t", 3);
+            if (parts.length != 3) continue;
+            try {
+                java.net.URI uri = new java.net.URI(parts[2]);
+                com.mojang.datafixers.util.Either<net.minecraft.server.ServerLinks.KnownLinkType, net.minecraft.network.chat.Component> type;
+                if (parts[0].equals("b")) {
+                    int id = Integer.parseInt(parts[1]);
+                    net.minecraft.server.ServerLinks.KnownLinkType[] all = net.minecraft.server.ServerLinks.KnownLinkType.values();
+                    // continuous ids (ByIdMap.ZERO out-of-bounds strategy): index, clamped to the first
+                    net.minecraft.server.ServerLinks.KnownLinkType known = all[Math.floorMod(id, all.length)];
+                    type = com.mojang.datafixers.util.Either.left(known);
+                } else {
+                    type = com.mojang.datafixers.util.Either.right(net.minecraft.network.chat.Component.literal(parts[1]));
+                }
+                entries.add(new net.minecraft.server.ServerLinks.Entry(type, uri));
+            } catch (java.net.URISyntaxException | NumberFormatException e) {
+                // like vanilla: an invalid link is dropped with a warning
+            }
+        }
+        ConnectionImpl.SERVER_LINKS = new net.minecraft.server.ServerLinks(java.util.List.copyOf(entries));
+    }
+
     /** Tab held: the player list overlay is shown while the key is down (vanilla's tab list). */
     public void setTabListVisible(boolean visible) {
         Proxies.options.keyPlayerList.setDown(visible);

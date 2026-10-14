@@ -37,7 +37,9 @@ use haste_jvm::{GameState, GuiPipeline, JvmHost, ScreenKind};
 use haste_protocol::haste_core::game::GameMode;
 use haste_protocol::haste_core::gui::{GuiFrame, TextMetrics};
 use haste_protocol::haste_core::Component;
-use haste_protocol::packets::configuration::clientbound::{RegistryData, UpdateTags};
+use haste_protocol::packets::configuration::clientbound::{
+    RegistryData, ServerLinkLabel, UpdateTags,
+};
 use haste_protocol::packets::play::serverbound as sb;
 use haste_protocol::packets::{Decoded, Direction, Dispatch, Packet, ProtocolTables, State};
 use haste_protocol::wire::Writer;
@@ -91,6 +93,8 @@ const FORWARDED: &[&str] = &[
     "minecraft:command_suggestions",
     "minecraft:update_advancements",
     "minecraft:select_advancements_tab",
+    "minecraft:award_stats",
+    "minecraft:game_rule_values",
     "minecraft:open_screen",
     "minecraft:container_set_content",
     "minecraft:container_set_slot",
@@ -189,6 +193,20 @@ impl Ui {
         self.gui().finish_configuration()?;
         let features: Vec<String> = regs.features.iter().map(|f| f.to_string()).collect();
         self.gui().set_features(&features)?;
+        // the pause menu's server links (b = built-in label id, c = custom label flattened to text)
+        let links: Vec<String> = regs
+            .server_links
+            .iter()
+            .map(|l| match &l.label {
+                ServerLinkLabel::BuiltIn(id) => {
+                    format!("b\t{id}\t{}", l.url)
+                }
+                ServerLinkLabel::Custom(c) => {
+                    format!("c\t{}\t{}", c.to_plain(&|_| None), l.url)
+                }
+            })
+            .collect();
+        self.gui().set_server_links(&links)?;
         let entity = login.entity_id.0;
         self.shared.local_entity.store(entity, Ordering::Relaxed);
         self.gui()
