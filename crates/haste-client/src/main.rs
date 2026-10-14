@@ -64,6 +64,11 @@ pub struct Args {
     /// Render distance in chunks, overriding the saved option (like `--vsync`).
     #[arg(long)]
     pub render_distance: Option<u8>,
+    /// Where singleplayer worlds live, overriding the config dir's `singleplayer/`
+    /// (the feature checks point this at a scratch dir so their worlds never land in the
+    /// player's real saves).
+    #[arg(long)]
+    pub singleplayer_dir: Option<std::path::PathBuf>,
     /// Screenshot width in pixels.
     #[arg(long, default_value_t = 960)]
     pub width: u32,
@@ -102,6 +107,9 @@ fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let args = Args::parse();
+    if let Some(dir) = &args.singleplayer_dir {
+        haste_setup::worlds::set_dir(dir.clone());
+    }
     if let Some(cmd) = args.command {
         return launch::run(cmd, &args.username);
     }

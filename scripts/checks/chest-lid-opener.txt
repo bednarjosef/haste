@@ -1,0 +1,45 @@
+# Chest lid animation, opener (client B): stand north of the chest on the glass platform at
+# (300, 101, 300), looking south and down at it (a positive pitch looks down), then open
+# and close the chest in slow cycles while the photographer (chest-lid-photographer.txt)
+# shoots every tick; some cycle always falls inside its burst however long this client took
+# to join. Each open holds the container screen; Escape closes it and the lid follows.
+look 0 16
+wait_until joined
+wait 60
+click right 160 120
+screenshot opener-opened
+wait 30
+key Escape
+wait 30
+click right 160 120
+wait 30
+key Escape
+wait 30
+click right 160 120
+wait 30
+key Escape
+wait 30
+click right 160 120
+wait 30
+key Escape
+wait 30
+click right 160 120
+wait 30
+key Escape
+wait 30
+click right 160 120
+wait 30
+key Escape
+wait 30
+click right 160 120
+wait 30
+key Escape
+wait 30
+click right 160 120
+wait 30
+key Escape
+wait 30
+click right 160 120
+wait 30
+key Escape
+wait 30

@@ -12,6 +12,8 @@ use haste_protocol::wire::particle::Particle;
 struct FakeWorld {
     log: Vec<String>,
     chunks: Vec<ChunkPos>,
+    /// Block states the lid tests place (the `WorldSink` reads them).
+    states: HashMap<BlockPos, BlockStateId>,
 }
 
 impl WorldSink for FakeWorld {
@@ -39,6 +41,9 @@ impl WorldSink for FakeWorld {
             "be {} {} {} {} {:?}",
             pos.x, pos.y, pos.z, data.kind, data.nbt
         ));
+    }
+    fn block_state_at(&self, pos: BlockPos) -> BlockStateId {
+        self.states.get(&pos).copied().unwrap_or(BlockStateId::AIR)
     }
     fn reset(&mut self, dim: &DimensionInfo) {
         self.chunks.clear();
@@ -288,6 +293,84 @@ fn block_entity_data_reaches_the_world() {
         nbt: nbt.clone(),
     }));
     assert_eq!(r.world.log, [format!("be 17 64 33 7 {:?}", nbt)]);
+}
+
+/// A chest's lid: `block_event` action 1 opens it, the animation steps 0.1 per tick
+/// (vanilla `ChestLidController`), the snapshot lerps by partial tick, and closing runs
+/// back down. Other actions and non-lid blocks (pistons use action 1 too) are ignored.
+#[test]
+fn block_events_drive_chest_lids() {
+    let mut r = Rig::new();
+    let chest = BlockPos::new(2, 64, 3);
+    let piston = BlockPos::new(5, 64, 3);
+    // The session knows the chest's state is a lid; the piston's is not.
+    r.world.states.insert(chest, BlockStateId(9));
+    r.session
+        .set_lid_states(std::iter::once(BlockStateId(9)).collect());
+    let event = |pos, action, param| {
+        ClientboundPlay::BlockEvent(cb::BlockEvent {
+            pos,
+            action,
+            param,
+            block: 0,
+        })
+    };
+    // Not a lid block: no entry ever.
+    r.apply(event(piston, 1, 1));
+    assert!(r.session.lids.is_empty());
+    // Other actions on the chest are ignored too.
+    r.apply(event(chest, 0, 1));
+    assert!(r.session.lids.is_empty());
+    // Open: one player. The lid starts stepping on the next end_tick.
+    r.apply(event(chest, 1, 1));
+    let tick = |r: &mut Rig| {
+        r.session.end_tick(
+            &InputState::default(),
+            &mut r.world,
+            &r.entities,
+            &mut r.out,
+        );
+    };
+    tick(&mut r);
+    let mut lids = Vec::new();
+    r.session.lid_states(&mut lids);
+    assert_eq!(lids.len(), 1);
+    let pair = lids[0];
+    assert_eq!(pair.0, chest);
+    let near = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() < 1e-5 && (a.1 - b.1).abs() < 1e-5;
+    assert!(near(pair.1, (0.0, 0.1)), "{:?}", pair.1);
+    // Ten open ticks reach fully open; the lerp pair then brackets 1.
+    for _ in 0..9 {
+        tick(&mut r);
+    }
+    lids.clear();
+    r.session.lid_states(&mut lids);
+    assert!(near(lids[0].1, (0.9, 1.0)), "{:?}", lids[0].1);
+    tick(&mut r);
+    lids.clear();
+    r.session.lid_states(&mut lids);
+    assert!(near(lids[0].1, (1.0, 1.0)), "{:?}", lids[0].1);
+    // Close: count 0.
+    r.apply(event(chest, 1, 0));
+    tick(&mut r);
+    lids.clear();
+    r.session.lid_states(&mut lids);
+    assert!(near(lids[0].1, (1.0, 0.9)), "{:?}", lids[0].1);
+    for _ in 0..10 {
+        tick(&mut r);
+    }
+    // At rest closed, the snapshot stops listing it (nothing to draw).
+    lids.clear();
+    r.session.lid_states(&mut lids);
+    assert!(lids.is_empty());
+    assert_eq!(r.session.lids[&chest].value, 0.0);
+    // A block update drops the lid with the chest.
+    r.apply(event(chest, 1, 1));
+    r.apply(ClientboundPlay::BlockUpdate(cb::BlockUpdate {
+        pos: chest,
+        state: 0,
+    }));
+    assert!(!r.session.lids.contains_key(&chest));
 }
 
 #[test]
