@@ -809,7 +809,7 @@ impl LocalPlayer {
                     self.jump_trigger_time = 0;
                     self.state.flying = !self.state.flying;
                     if self.state.flying && self.state.on_ground {
-                        self.jump_from_ground(world, blocks);
+                        self.jump_from_ground(ctx.world, ctx.blocks);
                     }
                 }
             } else {
@@ -836,8 +836,8 @@ impl LocalPlayer {
             // feet, the fall sound on a hard landing (vanilla plays both on
             // the client; the server excludes the acting player).
             let movement = self.state.pos - pre_tick_pos;
-            let sound_type = env.and_then(|e| {
-                supporting_block_state(self.state.pos, world)
+            let sound_type = ctx.env.and_then(|e| {
+                supporting_block_state(self.state.pos, ctx.world)
                     .and_then(|s| e.data.block_sound_type(s))
             });
             self.own_sounds
@@ -862,7 +862,7 @@ impl LocalPlayer {
             // player is above the world's minimum, with the 0.98 vertical drag on top. At or below
             // the minimum it is 0.0, so the player is left exactly where it was.
             if !self.state.flying {
-                let falling = self.state.pos.y > f64::from(world.min_y());
+                let falling = self.state.pos.y > f64::from(ctx.world.min_y());
                 self.state.velocity.y = if falling {
                     UNLOADED_CHUNK_FALL_SPEED
                 } else {

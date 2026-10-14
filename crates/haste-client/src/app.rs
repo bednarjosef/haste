@@ -136,12 +136,18 @@ impl Session {
         // own view distance (login packet) caps what we mesh below.
         opts.client_information.view_distance = options.render_distance as i8;
         let driver: NetDriver = rt.block_on(NetDriver::connect(opts))?;
-        let (biomes, biome_climates, type_names) = {
+        let (biomes, biome_climates, type_names, sounds) = {
             let regs = driver.connection().registries();
+            let sounds = if sound {
+                open_sounds(regs, &data, &options.sound)
+            } else {
+                None
+            };
             (
                 net::synced_biome_count(regs).unwrap_or(64),
                 biomes::biome_climates(regs),
                 net::entity_type_names(regs, &data),
+                sounds,
             )
         };
         let login = driver.login().clone();
@@ -165,8 +171,8 @@ impl Session {
             view_distance,
             haste_render::default_skin(login.profile.uuid.as_u128()),
         ));
-        if sound {
-            *shared.sound.lock() = open_sounds(regs, &shared.data, &options.sound);
+        if sounds.is_some() {
+            *shared.sound.lock() = sounds;
         }
         let handle = rt.handle().clone();
         let sh = shared.clone();

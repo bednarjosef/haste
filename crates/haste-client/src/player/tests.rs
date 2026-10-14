@@ -481,6 +481,7 @@ fn unloaded_chunk_below_falls_at_vanillas_rate() {
         &w,
         &TestShapes::default(),
         &TestShapes::default(),
+        None,
         &mut out,
     );
     assert_eq!(p.state.velocity.y, UNLOADED_CHUNK_FALL_SPEED);
@@ -492,6 +493,7 @@ fn unloaded_chunk_below_falls_at_vanillas_rate() {
             &w,
             &TestShapes::default(),
             &TestShapes::default(),
+            None,
             &mut out,
         );
     }
@@ -505,6 +507,7 @@ fn unloaded_chunk_below_falls_at_vanillas_rate() {
         &w,
         &TestShapes::default(),
         &TestShapes::default(),
+        None,
         &mut out,
     );
     assert_eq!(p.state.velocity.y, 0.0);
