@@ -15,12 +15,12 @@ use glam::DVec3;
 use haste_core::input::InputState;
 use haste_core::view::{BlockView, CollisionShapes};
 use haste_data::GameData;
+use haste_entity::riding::{passenger_seat, PassengerKind, SeatPoint, SeatQuery};
 use haste_entity::{EntityDimensions, EntityStore};
 use haste_protocol::haste_core::chunk::{BlockEntityData, ChunkData, LightData};
 use haste_protocol::haste_core::entity::{EntitySpawn, ItemStackData, MetadataEntry, PlayerInfo};
 use haste_protocol::haste_core::game::{DimensionInfo, GameMode};
 use haste_protocol::haste_core::{BlockPos, BlockStateId, ChunkPos, EntityId, Identifier};
-#[cfg(test)]
 use haste_protocol::packets::play::clientbound as cb;
 use haste_protocol::packets::play::clientbound::teleport_flags;
 use haste_protocol::{
@@ -29,7 +29,7 @@ use haste_protocol::{
 };
 use haste_world::World;
 
-use crate::player::LocalPlayer;
+use crate::player::{LocalPlayer, VehiclePose};
 
 /// Hurt-tilt camera roll duration in ticks (vanilla's `hurtTime` runs to 10).
 pub const HURT_TILT_TICKS: u32 = 10;
@@ -115,6 +115,12 @@ pub trait EntitySink {
     fn set_equipment(&mut self, id: EntityId, slot: u8, item: ItemStackData);
     /// `EntityStore::player_info`.
     fn player_info(&mut self, info: &[PlayerInfo]);
+    /// `EntityStore::set_passengers`: the vehicle's passenger list is replaced by `passengers`.
+    fn set_passengers(&mut self, vehicle: EntityId, passengers: &[EntityId]);
+    /// `EntityStore::entity_type_info`: registry index and dimensions, for the seat offset.
+    fn entity_type_info(&self, _id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
+        None
+    }
     /// Position and rotation of an entity.
     fn pose(&self, id: EntityId) -> Option<(DVec3, f32, f32)>;
     /// Hit box of an entity, for the crosshair (none in fakes by default).
@@ -211,6 +217,12 @@ impl EntitySink for EntityStore {
     fn player_info(&mut self, info: &[PlayerInfo]) {
         EntityStore::player_info(self, info)
     }
+    fn set_passengers(&mut self, vehicle: EntityId, passengers: &[EntityId]) {
+        EntityStore::set_passengers(self, vehicle, passengers)
+    }
+    fn entity_type_info(&self, id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
+        EntityStore::entity_type_info(self, id)
+    }
     fn pose(&self, id: EntityId) -> Option<(DVec3, f32, f32)> {
         self.get(id).map(|e| (e.pos, e.yaw, e.pitch))
     }
@@ -238,6 +250,23 @@ impl EntitySink for EntityStore {
 /// The entity store (dimensions oracle when present).
 pub fn new_entity_store(entity_types: usize) -> EntityStore {
     EntityStore::new(EntityDimensions::from_registry_len(entity_types))
+}
+
+/// The `minecraft:entity_type` registry entries in id order: the synced registry's when the
+/// server sent one (its entry order defines the ids), else the static one from the game data
+/// (`registries.json`, the data generator's own order; the two agree on vanilla servers).
+pub fn entity_type_names(regs: &SyncedRegistries, data: &GameData) -> Vec<Identifier> {
+    if let Some(entries) = regs.entries(&Identifier::minecraft("entity_type")) {
+        return entries.iter().map(|e| e.id.clone()).collect();
+    }
+    let n = data.registries.len("minecraft:entity_type");
+    (0..n)
+        .filter_map(|i| {
+            data.registries
+                .name("minecraft:entity_type", haste_core::RegistryIndex(i as u32))
+                .cloned()
+        })
+        .collect()
 }
 
 /// Loads the game data (block states, registries, shapes) once for the whole client.
@@ -284,6 +313,8 @@ pub struct NetCounters {
     pub chat: Vec<String>,
     /// `sound`, `sound_entity` and `stop_sound` packets seen.
     pub sound_packets: u64,
+    /// Own block sounds the player produced (steps, mining, placing, landing).
+    pub own_sounds: u64,
 }
 
 /// Client-side session state the packets drive (everything except world and entities).
@@ -309,6 +340,10 @@ pub struct Session {
     pub time_of_day: Option<i64>,
     /// Set by `start_configuration` or `transfer`: the next `login` starts a new world.
     pub new_world_pending: bool,
+    /// `minecraft:entity_type` registry entries in id order (the synced registry's when the
+    /// server sent one, else the static one from the data generator reports): resolves the
+    /// vehicle's type index to its name, for the passenger seat offset.
+    pub entity_type_names: Vec<Identifier>,
     /// Sound packets recorded this tick ([`crate::sound::record`]), drained by the game
     /// thread's sound output ([`crate::sound::Sounds::apply`]); cleared at `end_tick` when
     /// nobody drains them (headless). Reused, so a tick without sound packets allocates
@@ -318,11 +353,26 @@ pub struct Session {
     hurt_tilt_ticks: u32,
     /// Direction of the tilt: +1 rolls one way, -1 the other (from the damage yaw).
     hurt_tilt_dir: f32,
+    /// Particle spawns queued by `level_particles` since the last tick (drained by the game
+    /// thread into the shared pool).
+    pub particle_spawns: Vec<haste_render::ParticleSpawn>,
+    /// Particle spawns the game thread took over the whole session (counters).
+    pub particle_spawned: usize,
+    /// `minecraft:particle_type` names by protocol id (the static registry the packet's
+    /// numeric ids index; the synced registry is not authoritative for it).
+    particle_names: std::sync::Arc<Vec<Identifier>>,
 }
 
 impl Session {
     /// Fresh state after `Connection::connect` (from the `Login` it returned).
-    pub fn new(entity_id: EntityId, game_mode: GameMode, dimension: DimensionInfo) -> Self {
+    /// `particle_names` is the static `minecraft:particle_type` registry by protocol id
+    /// (the connection's `ProtocolTables`).
+    pub fn new(
+        entity_id: EntityId,
+        game_mode: GameMode,
+        dimension: DimensionInfo,
+        particle_names: std::sync::Arc<Vec<Identifier>>,
+    ) -> Self {
         Self {
             player: LocalPlayer::with_entity(entity_id, game_mode),
             counters: NetCounters {
@@ -337,10 +387,22 @@ impl Session {
             entity_types: Vec::new(),
             time_of_day: None,
             new_world_pending: false,
+            entity_type_names: Vec::new(),
             sound_requests: Vec::new(),
             hurt_tilt_ticks: 0,
             hurt_tilt_dir: 0.0,
+            particle_spawns: Vec::new(),
+            particle_spawned: 0,
+            particle_names,
         }
+    }
+
+    /// Sets the `minecraft:entity_type` registry entries in id order: the synced registry when
+    /// the server sent one, else the static one from the game data (`registries.json`). The
+    /// two agree on vanilla servers (both are the registry's own order); mods that add entity
+    /// types are unknown here and ride on the default seat, never a panic.
+    pub fn set_entity_type_names(&mut self, names: Vec<Identifier>) {
+        self.entity_type_names = names;
     }
 
     /// The hurt-tilt camera roll in degrees for the remaining tilt ticks, easing out over
@@ -364,6 +426,33 @@ impl Session {
     /// One 20 Hz tick of the hurt tilt (called from `end_tick`).
     fn tick_hurt_tilt(&mut self) {
         self.hurt_tilt_ticks = self.hurt_tilt_ticks.saturating_sub(1);
+    }
+
+    /// Our seat on `vehicle` if this passenger list names us, else `None` (we are not riding
+    /// it): vanilla's `Entity.positionRider` for the local player. The seat order comes from
+    /// the list, and the vehicle's attachment points from its type in the entity_type registry.
+    fn seat_of<E: EntitySink + ?Sized>(
+        &self,
+        vehicle: EntityId,
+        passengers: &[EntityId],
+        entities: &E,
+    ) -> Option<SeatPoint> {
+        let seat = passengers.iter().position(|p| *p == self.entity_id)?;
+        let (kind, dims) = entities.entity_type_info(vehicle)?;
+        let vehicle_type = self
+            .entity_type_names
+            .get(kind.0 as usize)
+            .map_or("?", |id| id.path());
+        Some(passenger_seat(SeatQuery {
+            vehicle_type,
+            vehicle_dims: dims,
+            seat,
+            passengers: passengers.len(),
+            passenger: PassengerKind::Player,
+            // The passenger is us: `Avatar.DEFAULT_VEHICLE_ATTACHMENT` (0.6 below the seat),
+            // which is `minecraft:player`'s own vehicle attachment point.
+            passenger_type: "player",
+        }))
     }
 
     /// Applies one clientbound packet; serverbound replies go to `out`.
@@ -436,8 +525,11 @@ impl Session {
                 self.entity_ids.clear();
                 self.breaking.clear();
                 self.dimension = dim;
+                // A respawn is a new body: no vehicle, no riding.
+                self.player.set_vehicle(None, SeatPoint::ZERO);
             }
             P::PlayerPosition(_) => self.counters.teleports += 1,
+            P::LevelParticles(p) => self.push_particles(&p, regs),
             _ if player_packet => {}
             P::LevelChunkWithLight(c) => match world.load_chunk(&c.chunk) {
                 Ok(()) => self.counters.chunks_loaded += 1,
@@ -498,10 +590,32 @@ impl Session {
             }
             P::RemoveEntities(r) => {
                 let ids: Vec<EntityId> = r.entity_ids.iter().map(|i| EntityId(*i)).collect();
+                // If our vehicle is removed, we dismount (the store's riding bookkeeping drops
+                // us too, as a passenger of the removed vehicle).
+                if self.player.vehicle.is_some_and(|v| ids.contains(&v)) {
+                    self.player.set_vehicle(None, SeatPoint::ZERO);
+                }
                 for id in &ids {
                     self.entity_ids.remove(id);
                 }
                 entities.remove(&ids);
+            }
+            P::SetPassengers(s) => {
+                let vehicle = EntityId(s.vehicle);
+                let passengers: Vec<EntityId> = s.passengers.iter().map(|i| EntityId(*i)).collect();
+                entities.set_passengers(vehicle, &passengers);
+                // Mount, re-seat, or dismount. The seat comes from the vehicle's type through
+                // vanilla's attachment rules (`haste_entity::passenger_seat`), which also names
+                // our own seat index: a boat's second passenger sits elsewhere than the first.
+                match self.seat_of(vehicle, &passengers, entities) {
+                    Some(seat) => self.player.set_vehicle(Some(vehicle), seat),
+                    None if self.player.vehicle() == Some(vehicle) => {
+                        // Dismount: our vehicle's new list no longer names us. Sneak's shift
+                        // flag in player_input is what made the server send this.
+                        self.player.set_vehicle(None, SeatPoint::ZERO);
+                    }
+                    None => {}
+                }
             }
             P::MoveEntityPos(m) => {
                 entities.move_delta(EntityId(m.entity_id), m.deltas.total(), m.on_ground)
@@ -606,6 +720,13 @@ impl Session {
         // Sound requests nobody drained (headless) are dropped here; the game thread
         // drains them between `receive` and `end_tick`.
         self.sound_requests.clear();
+        // The player's own block sounds this tick (footsteps, mining, placing): played
+        // through the same request channel the packets use, so the game thread's
+        // `Sounds::apply` picks them up; headless only counts them.
+        for request in self.player.take_own_sound_requests() {
+            self.counters.own_sounds += 1;
+            self.sound_requests.push(request);
+        }
         self.entity_boxes.clear();
         self.entity_types.clear();
         for id in &self.entity_ids {
@@ -619,6 +740,15 @@ impl Session {
                 );
             }
         }
+        // The vehicle's position this tick, for the passenger tick (`ride_tick`). A vehicle we
+        // do not track (removed before its set_passengers, spawn not yet arrived) leaves the
+        // passenger at its last position. The yaw comes with it: the seat's sideways offset
+        // turns with the vehicle (`Entity.positionRider` runs every tick).
+        let vehicle = self
+            .player
+            .vehicle
+            .and_then(|v| entities.pose(v))
+            .map(|(pos, yaw, _)| VehiclePose { pos, yaw });
         match world.physics() {
             Some((view, data)) => {
                 self.player.prepare(data);
@@ -627,13 +757,14 @@ impl Session {
                     entities: &self.entity_boxes,
                     entity_types: &self.entity_types,
                 };
-                self.player.tick_interact(input, view, &env, out)
+                self.player.tick_interact(input, view, &env, vehicle, out)
             }
             None => self.player.tick_with(
                 input,
                 &NoBlocks,
                 &NoBlocks,
                 &haste_physics::DefaultBlockPhysics,
+                vehicle,
                 out,
             ),
         }
@@ -649,6 +780,31 @@ impl Session {
         out.extend(self.player.break_progress());
     }
 
+    /// `level_particles`: resolve the particle type against the static registry's names and
+    /// queue the spawn (see the renderer's particles module for the semantics; unknown types
+    /// are skipped there, logged once). `minecraft:dust`'s option data (colour, size) is the
+    /// one type-specific payload the renderer reads.
+    fn push_particles(&mut self, p: &cb::LevelParticles, _regs: &SyncedRegistries) {
+        let Some(kind) = self
+            .particle_names
+            .get(usize::try_from(p.particle.kind).ok().unwrap_or(usize::MAX))
+            .cloned()
+        else {
+            return;
+        };
+        let dust = dust_option(&kind, &p.particle.data);
+        self.particle_spawns.push(haste_render::ParticleSpawn {
+            kind,
+            pos: p.pos,
+            offset: [p.offset_x, p.offset_y, p.offset_z],
+            max_speed: [p.max_speed_x, p.max_speed_y, p.max_speed_z],
+            count: p.count,
+            randomization: p.randomization.max(0) as u32,
+            override_limiter: p.override_limiter,
+            dust,
+        });
+    }
+
     fn push_chat(&mut self, line: String) {
         tracing::info!("chat: {line}");
         self.counters.chat.push(line);
@@ -656,6 +812,24 @@ impl Session {
             self.counters.chat.remove(0);
         }
     }
+}
+
+/// `DustParticleOptions` from a particle's raw data (the ARGB colour int, then the size
+/// scale f32); `None` for every other type and for a malformed payload.
+fn dust_option(kind: &Identifier, data: &[u8]) -> Option<haste_render::DustOption> {
+    if kind.path() != "dust" || data.len() < 8 {
+        return None;
+    }
+    let argb = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+    let scale = f32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+    Some(haste_render::DustOption {
+        color: [
+            ((argb >> 16) & 0xFF) as f32 / 255.0,
+            ((argb >> 8) & 0xFF) as f32 / 255.0,
+            (argb & 0xFF) as f32 / 255.0,
+        ],
+        scale,
+    })
 }
 
 /// Owns the connection and the session state; world and entities are borrowed per tick.
@@ -671,7 +845,20 @@ impl NetDriver {
     /// Connects (handshake, login, configuration) and returns in the play state.
     pub async fn connect(opts: ConnectOptions) -> anyhow::Result<Self> {
         let (conn, login) = Connection::connect(opts).await.context("connecting")?;
-        let session = Session::new(login.entity_id, login.game_mode, login.dimension.clone());
+        // The static `minecraft:particle_type` registry by protocol id, from the same
+        // tables the packet decoder resolves particle names with.
+        let particle_names = std::sync::Arc::new(
+            (0..)
+                .map_while(|i| conn.tables().particle_name(i).map(|s| s.to_string()))
+                .map(|s| Identifier::parse(&s).expect("registry names are valid identifiers"))
+                .collect::<Vec<_>>(),
+        );
+        let session = Session::new(
+            login.entity_id,
+            login.game_mode,
+            login.dimension.clone(),
+            particle_names,
+        );
         Ok(Self {
             conn,
             login,

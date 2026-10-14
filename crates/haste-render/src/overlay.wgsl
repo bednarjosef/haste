@@ -6,8 +6,13 @@ struct Camera {
     cam_pos: vec4<f32>,
     view_proj: mat4x4<f32>,
     fog_color: vec4<f32>,
-    fog_start: f32,
-    fog_end: f32,
+    // Vanilla fog bands (see chunk.wgsl).
+    fog_env_start: f32,
+    fog_env_end: f32,
+    fog_rd_start: f32,
+    fog_rd_end: f32,
+    fog_sky_end: f32,
+    fog_cloud_end: f32,
     daylight: f32,
     _pad: f32,
 };

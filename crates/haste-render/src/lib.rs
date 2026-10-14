@@ -8,10 +8,12 @@ pub mod animation;
 pub mod arena;
 pub mod entity;
 pub mod fluid;
+pub mod fog;
 pub mod gui;
 pub mod mesher;
 pub mod occlusion;
 pub mod overlay;
+pub mod particles;
 pub mod pipeline;
 pub mod renderer;
 pub mod sky;
@@ -19,10 +21,14 @@ pub mod timing;
 pub mod tint;
 pub mod vertex;
 
-pub use entity::{default_skin, EntityRenderer, FirstPerson, Nametag};
+pub use entity::{default_skin, EntityRenderer, FirstPerson, Nametag, TickPair};
+pub use fog::{setup_fog, FogData, FogEnvironment};
 pub use gui::{GuiRenderer, GuiStats, ScreenNametag};
 pub use mesher::{mesh_section, MeshSnapshot, Mesher, SectionMesh, SnapshotSource};
 pub use occlusion::{compute_visible_mask, section_visibility, Face, VisibilitySet};
+pub use particles::{
+    DustOption, ParticleRenderer, ParticleSpawn, ParticleTypes, Particles, MAX_PARTICLES,
+};
 pub use pipeline::{upload_atlas, upload_section, Gpu, SectionGpuMesh};
 pub use renderer::{Camera, FrameInput, FrameStats, Renderer, SkyState};
 pub use sky::{SkyColors, SkyKind};

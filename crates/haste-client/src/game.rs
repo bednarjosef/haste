@@ -31,12 +31,16 @@ use parking_lot::{Mutex, RwLock};
 use crate::net::{NetDriver, WorldSink};
 use crate::ui::Ui;
 
+/// The particle pool: filled from `level_particles` packets (the renderer's atlas-backed
+/// particle types, so unknown/mod types are skipped there), ticked at 20 Hz by the game
+/// thread. The render thread reads it per frame under this lock (no GPU state inside).
+pub type SharedParticles = Mutex<haste_render::Particles>;
+
 /// How far the third-person camera sits from the eye when nothing is in the way (vanilla's
-/// `Camera` max zoom, minecraft.wiki "Perspective").
+/// `Camera` max zoom, minecraft.wiki "Perspective"). Vanilla's `Camera.alignWithEntity` scales
+/// this by the entity's scale and its `CAMERA_DISTANCE` attribute (default 4.0); haste reads
+/// neither yet, so the constant is the whole distance.
 pub const THIRD_PERSON_DISTANCE: f64 = 4.0;
-/// The camera stops this far before the first solid block along the ray, so it does not clip
-/// into it (vanilla's behaviour of pulling the camera closer against a wall).
-pub const OBSTRUCTION_CLEARANCE: f64 = 0.1;
 
 /// The perspective F5 cycles through (vanilla's three: first person, third person behind,
 /// third person in front).
@@ -79,9 +83,8 @@ impl Perspective {
 
 /// Camera position and look for a perspective: at the eye in first person; otherwise
 /// [`THIRD_PERSON_DISTANCE`] blocks from the eye along the view direction (in front mode the
-/// camera faces back: yaw + 180, pitch negated), pulled closer when a block outline is in the
-/// way (the same raycast the crosshair's block picking uses, so a wall that blocks the view
-/// also stops the camera).
+/// camera faces back: yaw + 180, pitch negated), pulled closer when a block is in the way
+/// (vanilla's `Camera.getMaxZoom`, see [`camera_pullback`]).
 pub fn third_person_camera(
     perspective: Perspective,
     eye: DVec3,
@@ -107,22 +110,37 @@ pub fn third_person_camera(
     }
 }
 
-/// `eye + dir * d` for the largest `d` that keeps the camera [`OBSTRUCTION_CLEARANCE`] blocks
-/// before the first block outline along the ray (at most [`THIRD_PERSON_DISTANCE`]). A hit the
-/// ray starts inside (the eye in a block, e.g. a snow layer) is not an obstruction.
+/// `eye + dir * d` for the largest `d` no block along the way beats (at most
+/// [`THIRD_PERSON_DISTANCE`]), vanilla's `Camera.getMaxZoom`: 8 rays from the eye's ±0.1
+/// corners along `dir`, each cast up to the current best `d`, and every hit whose straight-line
+/// distance from the eye is smaller shrinks it. The distance is measured from the eye, not
+/// along the ray, and no clearance margin is subtracted: on a flat wall the camera stops
+/// epsilon inside the face, and a block the eye is inside counts as a hit at the corner and
+/// pulls the camera to sqrt(0.03) ≈ 0.173 blocks out.
 fn camera_pullback(
     eye: DVec3,
     dir: DVec3,
     world: &dyn BlockView,
     shapes: &dyn CollisionShapes,
 ) -> DVec3 {
-    let reach = THIRD_PERSON_DISTANCE + OBSTRUCTION_CLEARANCE;
-    let hit = haste_physics::raycast::raycast_blocks(eye, dir, reach, world, shapes);
-    let d = match hit {
-        Some(h) if !h.inside => (h.distance - OBSTRUCTION_CLEARANCE).max(0.0),
-        _ => THIRD_PERSON_DISTANCE,
-    };
-    eye + dir * d
+    let mut camera_dist = THIRD_PERSON_DISTANCE;
+    for i in 0..8i32 {
+        // The eight corners of the 0.2 cube around the eye (vanilla's jitter offsets).
+        let corner = eye
+            + DVec3::new(
+                ((i & 1) * 2 - 1) as f64 * 0.1,
+                ((i >> 1 & 1) * 2 - 1) as f64 * 0.1,
+                ((i >> 2 & 1) * 2 - 1) as f64 * 0.1,
+            );
+        let hit = haste_physics::raycast::raycast_blocks(corner, dir, camera_dist, world, shapes);
+        if let Some(h) = hit {
+            let d = (h.location - eye).length();
+            if d < camera_dist {
+                camera_dist = d;
+            }
+        }
+    }
+    eye + dir * camera_dist
 }
 
 /// The local player's pose for its own model: the physics pose's render equivalent (sleeping,
@@ -246,14 +264,29 @@ pub struct ViewState {
     pub pose: Option<haste_core::entity::Pose>,
 }
 
-/// The per-tick part of the first-person hand: the held item and the light at the eye. The skin
-/// lives in [`Shared::skin`] because it never changes during a connection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The per-tick part of the first-person hand: the held item, the light at the eye and this
+/// tick's hand animation (swing, equip progress, bob). Every animated value is the pair of the
+/// value at the start and at the end of the tick; the renderer lerps them by partial tick, the
+/// way vanilla's `FirstPersonHandsAndItems.extractRenderState` does. The skin lives in
+/// [`Shared::skin`] because it never changes during a connection.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FirstPersonView {
     /// The main-hand stack's item (`None` draws the bare arm).
     pub item: Option<RegistryIndex>,
     /// (sky light, block light) at the eye position, `FirstPerson::light`'s order.
     pub light: (u8, u8),
+    /// Swing progress 0..1 over the swing's ticks (0 when the hand does not swing).
+    pub attack: (f32, f32),
+    /// Equip progress: 1 held, 0 while the item switches.
+    pub equip: (f32, f32),
+    /// The hand's pitch lag (`LocalPlayer.xBob`), in degrees.
+    pub x_bob: (f32, f32),
+    /// The hand's yaw lag (`LocalPlayer.yBob`), in degrees.
+    pub y_bob: (f32, f32),
+    /// Walk bob amplitude.
+    pub bob: (f32, f32),
+    /// Distance walked in blocks, the bob's phase.
+    pub walk_dist: (f32, f32),
 }
 
 impl FirstPersonView {
@@ -268,7 +301,24 @@ impl FirstPersonView {
         FirstPersonView {
             item,
             light: (world.sky_light(p), world.block_light(p)),
+            attack: (0.0, 0.0),
+            equip: (1.0, 1.0),
+            x_bob: (0.0, 0.0),
+            y_bob: (0.0, 0.0),
+            bob: (0.0, 0.0),
+            walk_dist: (0.0, 0.0),
         }
+    }
+
+    /// This tick's hand animation from the player's [`crate::hand::Hand`].
+    pub fn with_hand(&mut self, hand: &crate::hand::Hand) {
+        self.item = hand.shown_item();
+        self.attack = hand.attack();
+        self.equip = hand.equip();
+        self.x_bob = hand.x_bob();
+        self.y_bob = hand.y_bob();
+        self.bob = hand.bob();
+        self.walk_dist = hand.walk_dist();
     }
 
     /// The renderer's first-person hand for this view drawn with `skin` (the connection's
@@ -280,7 +330,21 @@ impl FirstPersonView {
             slim: skin.1,
             item: self.item,
             light: self.light,
+            attack: pair(self.attack),
+            equip: pair(self.equip),
+            x_bob: pair(self.x_bob),
+            y_bob: pair(self.y_bob),
+            bob: pair(self.bob),
+            walk_dist: pair(self.walk_dist),
         }
+    }
+}
+
+/// A per-tick pair into the renderer's [`haste_render::TickPair`].
+fn pair(v: (f32, f32)) -> haste_render::TickPair {
+    haste_render::TickPair {
+        start: v.0,
+        end: v.1,
     }
 }
 
@@ -309,6 +373,9 @@ pub struct Shared {
     pub view: Mutex<ViewState>,
     /// Break cracks to draw (`Session::breaking_stages`), copied once per tick.
     pub breaking: Mutex<Vec<(BlockPos, u8)>>,
+    /// Particles (`level_particles`): the game thread spawns and ticks them, the render
+    /// thread draws them.
+    pub particles: SharedParticles,
     /// Input for the next tick.
     pub input: Mutex<SharedInput>,
     /// The sound and music output (None until the client sets it up; headless leaves it
@@ -336,6 +403,7 @@ impl Shared {
         world: World,
         entities: EntityStore,
         view_distance: i32,
+        particles: haste_render::Particles,
         skin: (Identifier, bool),
     ) -> Self {
         let has_sky = world.dimension().has_skylight;
@@ -367,6 +435,7 @@ impl Shared {
                 pose: None,
             }),
             breaking: Mutex::new(Vec::new()),
+            particles: Mutex::new(particles),
             input: Mutex::new(SharedInput::default()),
             sound: Mutex::new(None),
             stop: AtomicBool::new(false),
@@ -595,6 +664,8 @@ fn tick_once(
         }
     }
     // This tick's sound packets, played through the output (when the client set one up).
+    // This runs again after `end_tick` below to pick up the player's own block sounds
+    // (footsteps, mining, placing) that the player's tick just produced.
     {
         let requests = &mut driver.session.sound_requests;
         let mut sound = shared.sound.lock();
@@ -638,7 +709,10 @@ fn tick_once(
         driver.session.player.set_interact(interact);
         shared_input.state
     };
-    {
+    // The horizontal distance travelled this tick, for the hand's walk bob: vanilla's
+    // `LocalPlayer.move` adds `length(dx, dz) * 0.6` to `ClientAvatarState.walkDist`.
+    let tick_moved = {
+        let tick_start = driver.session.player.state.pos;
         // Write lock: the player's breaking predicts block changes into the world.
         let mut world = shared.world.write();
         let mut entities = shared.entities.write();
@@ -647,11 +721,34 @@ fn tick_once(
         if !dirty.is_empty() {
             shared.dirty.lock().append(&mut dirty);
         }
+        let moved = driver.session.player.state.pos - tick_start;
+        ((moved.x * moved.x + moved.z * moved.z).sqrt()) as f32
+    };
+    // The player's own block sounds this tick (footsteps, mining, placing), played through
+    // the same output the packets went through above.
+    {
+        let requests = &mut driver.session.sound_requests;
+        let mut sound = shared.sound.lock();
+        if let Some(sounds) = sound.as_mut() {
+            sounds.apply(requests, |_| None);
+        }
     }
     {
         let mut breaking = shared.breaking.lock();
         breaking.clear();
         driver.session.breaking_stages(&mut breaking);
+    }
+    // Particles: spawn what the packets brought, then one 20 Hz simulation step. The camera
+    // for `ClientLevel.doAddParticle`'s 32-block limiter is the player's eye.
+    {
+        let mut particles = shared.particles.lock();
+        let camera = driver.session.player.camera(1.0).0;
+        let spawns = std::mem::take(&mut driver.session.particle_spawns);
+        for s in &spawns {
+            particles.spawn(s, camera);
+        }
+        driver.session.particle_spawned = spawns.len();
+        particles.tick();
     }
     if let Some(ui) = shared.ui.lock().as_ref() {
         // The hotbar authority is the player (the client picks with 1-9 and the wheel and tells
@@ -664,18 +761,31 @@ fn tick_once(
     for p in ui_out {
         driver.queue(p);
     }
+    // The first-person hand's tick, in vanilla's order (`LivingEntity.baseTick`, then
+    // `Player.tick`, then `FirstPersonHandsAndItems.tick`, with the walk bob in `aiStep` before
+    // them); the interaction step above ran the attacks and uses that started the swings. In
+    // spectator the hand is not drawn at all (vanilla hides it there), so it does not advance.
+    let first_person = if driver.session.player.game_mode == GameMode::Spectator {
+        None
+    } else {
+        let p = &mut driver.session.player;
+        p.hand.tick(
+            tick_moved,
+            (p.state.yaw, p.state.pitch),
+            p.state.on_ground,
+            matches!(p.state.pose, haste_physics::Pose::Swimming),
+            p.main_hand().item,
+            p.int.attrs.attack_speed,
+        );
+        let eye = p.camera(1.0).0;
+        let hand = &p.hand;
+        let mut fp = FirstPersonView::sample(&*shared.world.read(), eye, hand.shown_item());
+        fp.with_hand(hand);
+        Some(fp)
+    };
     let s = &driver.session;
     let (prev_eye, prev_yaw, prev_pitch) = s.player.camera(0.0);
     let (eye, yaw, pitch) = s.player.camera(1.0);
-    // The first-person hand this tick: hidden in spectator (vanilla hides it there), otherwise
-    // the main-hand item lit like entities are. Sampled under the world's read lock, like the
-    // breaking stages above; the render thread only reads the copy in the view state.
-    let first_person = if s.player.game_mode == GameMode::Spectator {
-        None
-    } else {
-        let item = s.player.main_hand().item;
-        Some(FirstPersonView::sample(&*shared.world.read(), eye, item))
-    };
     // The sound output's tick: listener from the eye, music situation, then 20 Hz tick.
     {
         let mut sound = shared.sound.lock();
@@ -724,14 +834,9 @@ mod tests {
             haste_core::Identifier::minecraft("entity/player/wide/steve"),
             false,
         );
-        let a = FirstPersonView {
-            item: Some(RegistryIndex(5)),
-            light: (15, 0),
-        };
-        let b = FirstPersonView {
-            item: None,
-            light: (15, 0),
-        };
+        let a = FirstPersonView::sample(&lit(), DVec3::ZERO, Some(RegistryIndex(5)));
+        let mut b = a;
+        b.item = None;
         assert_eq!(a, a);
         assert_ne!(a, b);
         let ha = a.with_skin(&skin);
@@ -741,14 +846,60 @@ mod tests {
         assert_eq!(ha.skin, Some(skin.0.clone()));
         assert!(!ha.slim);
         assert_eq!(ha.item, Some(RegistryIndex(5)));
+        // Sampled at full sky light.
         assert_eq!(ha.light, (15, 0));
         // A differing light also differs (the eye moved into shade).
-        let c = FirstPersonView {
-            item: Some(RegistryIndex(5)),
-            light: (4, 7),
-        };
+        let mut c = a;
+        c.light = (4, 7);
         assert_ne!(a, c);
         assert_ne!(ha, c.with_skin(&skin));
+    }
+
+    /// A world at full sky light, for sampling the hand's light.
+    fn lit() -> LightWorld {
+        LightWorld {
+            sky: 15,
+            block: 0,
+            asked: parking_lot::Mutex::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn the_view_carries_the_hand_animation_to_the_renderer() {
+        // The per-tick pairs go through to the renderer's hand unchanged, so a swinging hand
+        // (or a dipping equip progress, or the walk bob) is a different hand each tick.
+        let skin = (
+            haste_core::Identifier::minecraft("entity/player/wide/steve"),
+            true,
+        );
+        let mut hand = crate::hand::Hand::new();
+        hand.swing();
+        let mut v = FirstPersonView::sample(&lit(), DVec3::ZERO, None);
+        // Two ticks of walking 0.2 blocks with the look at (10, 5) and the hand swinging.
+        for _ in 0..2 {
+            hand.tick(0.2, (10.0, 5.0), true, false, None, 4.0);
+        }
+        v.with_hand(&hand);
+        let moving = v.with_skin(&skin);
+        // The skin's slim arm is passed through.
+        assert!(moving.slim);
+        // The swing is `SwingState.ticks / 6` through: 0 on the attack tick, 1/6 on the next.
+        assert_eq!(v.attack, (0.0, 1.0 / 6.0));
+        assert_eq!(moving.attack.start, 0.0);
+        assert!((moving.attack.end - 1.0 / 6.0).abs() < 1e-7);
+        // Walking: walkDist is 0.6 * distance, its bob is 0.4 per tick towards min(0.2, 0.1),
+        // one tick behind.
+        assert!((v.walk_dist.1 - 0.24).abs() < 1e-6);
+        assert!((v.bob.1 - 0.04).abs() < 1e-6);
+        // The hand lags behind the look by half the remaining angle each tick.
+        assert!((v.y_bob.1 - 7.5).abs() < 1e-6);
+        assert!((v.x_bob.1 - 3.75).abs() < 1e-6);
+        // The next tick's step is a different hand, so the renderer is told again.
+        hand.tick(0.2, (10.0, 5.0), true, false, None, 4.0);
+        let mut next = v;
+        next.with_hand(&hand);
+        assert_ne!(next, v);
+        assert_ne!(next.with_skin(&skin), moving);
     }
 
     #[test]
@@ -768,6 +919,7 @@ mod tests {
     }
 
     /// A world that answers one sky/block light pair and records where it was asked.
+    #[derive(Default)]
     struct LightWorld {
         sky: u8,
         block: u8,
@@ -877,21 +1029,43 @@ mod tests {
     }
 
     #[test]
-    fn behind_stops_one_point_nine_at_a_wall_at_two_blocks() {
+    fn behind_wall_distance_is_measured_straight_line_from_the_eye() {
         let mut w = TestWorld::new();
         // Looking west, so the behind camera goes east; stone cell (2, 0, 0) puts its
-        // outline's west face at x = 2 ("a wall at 2 blocks").
+        // outline's west face at x = 2, 1.5 blocks ahead of the eye.
         w.set(2, 0, 0, states::STONE);
         let s = TestShapes::default();
         let (pos, yaw, _) =
             third_person_camera(Perspective::ThirdPersonBehind, EYE, 90.0, 0.0, &w, &s);
         assert_eq!(yaw, 90.0);
-        // The camera stops 0.1 blocks before the outline: x = 2 - 0.1 = 1.9.
-        assert!((pos.x - 1.9).abs() < EPS, "{pos:?}");
+        // All eight corner rays hit the face: the hit is 1.5 blocks along the ray but
+        // sqrt(1.5^2 + 0.1^2 + 0.1^2) = sqrt(2.27) from the eye, and no clearance margin is
+        // subtracted, so the camera stops epsilon inside the wall (vanilla's
+        // `Camera.getMaxZoom`).
+        let want = 0.5 + (2.27f64).sqrt();
+        assert!((pos.x - want).abs() < EPS, "{pos:?}");
+        assert!(pos.x > 2.0, "{pos:?}");
         assert!(
             (pos.y - 0.5).abs() < EPS && (pos.z - 0.5).abs() < EPS,
             "{pos:?}"
         );
+    }
+
+    #[test]
+    fn diagonal_wall_takes_the_shortest_of_the_eight_corner_rays() {
+        let mut w = TestWorld::new();
+        // A diagonal wall one cell behind and to the side: every corner ray meets its x = 1
+        // face, but at straight-line distances from the eye of sqrt(0.75), sqrt(0.99) and
+        // sqrt(1.31) — the shortest wins.
+        w.set(1, 0, 1, states::STONE);
+        let s = TestShapes::default();
+        let eye = DVec3::new(0.3, 0.5, 0.7);
+        let (pos, yaw, pitch) =
+            third_person_camera(Perspective::ThirdPersonBehind, eye, 135.0, 0.0, &w, &s);
+        assert_eq!((yaw, pitch), (135.0, 0.0));
+        let back = -haste_physics::raycast::look_vector(135.0, 0.0);
+        let want = eye + back * (0.75f64).sqrt();
+        assert!((pos - want).length() < 1e-5, "{pos:?} != {want:?}");
     }
 
     #[test]
@@ -910,14 +1084,14 @@ mod tests {
     }
 
     #[test]
-    fn a_block_the_eye_starts_inside_is_not_an_obstruction() {
+    fn a_block_the_eye_starts_inside_pulls_the_camera_to_its_corner() {
         let mut w = TestWorld::new();
-        // The eye is inside this block's outline (an `inside` hit): the pullback ignores it.
+        // The eye is inside this block: all eight corner rays start inside its outline, and
+        // vanilla counts that as a hit at the corner, 0.1 * sqrt(3) from the eye.
         w.set(0, 0, 0, states::STONE);
         let s = TestShapes::default();
         let (pos, _, _) =
             third_person_camera(Perspective::ThirdPersonBehind, EYE, -90.0, 0.0, &w, &s);
-        // No further hit, so the full distance.
-        assert!((pos.x - 0.5 + THIRD_PERSON_DISTANCE).abs() < EPS, "{pos:?}");
+        assert!((pos.x - (0.5 - (0.03f64).sqrt())).abs() < EPS, "{pos:?}");
     }
 }

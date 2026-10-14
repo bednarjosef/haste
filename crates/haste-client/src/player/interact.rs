@@ -80,6 +80,8 @@ pub struct InteractAttributes {
     pub submerged_mining_speed: f64,
     pub block_reach: f64,
     pub entity_reach: f64,
+    /// `attack_speed`: the equip progress returns over 20 / this many ticks.
+    pub attack_speed: f64,
 }
 
 impl Default for InteractAttributes {
@@ -91,6 +93,7 @@ impl Default for InteractAttributes {
             submerged_mining_speed: 0.2,
             block_reach: 4.5,
             entity_reach: 3.0,
+            attack_speed: crate::hand::DEFAULT_ATTACK_SPEED,
         }
     }
 }
@@ -526,6 +529,7 @@ impl LocalPlayer {
             return;
         }
 
+// MERGE(interaction side):
         // 3. Minecraft.handleKeybinds: the click loops, the held use, then continueAttack.
         // `KeyMapping.consumeClick` returns once per queued press, so several clicks in one tick
         // each run. A driver that only reports the held button (no click queue) still gets one
@@ -544,6 +548,35 @@ impl LocalPlayer {
             // button releases the item (MultiPlayerGameMode.releaseUsingItem).
             if !input.use_item {
                 self.release_using_item(out);
+// MERGE(main side):
+        // 3. Attack / break.
+        let pressed = input.attack && !last.attack;
+        if pressed {
+            // `Minecraft.startAttack` swings on every attack, whatever the crosshair is on.
+            self.hand.swing();
+            match self.int.target {
+                Some(Target::Entity { id, .. }) => {
+                    out.push(ServerboundPlay::Attack(sb::Attack { entity_id: id.0 }));
+                    out.push(ServerboundPlay::Punch(sb::Punch {}));
+                }
+                Some(Target::Block(h)) => {
+                    self.start_destroy(h, world, env, out);
+                    out.push(ServerboundPlay::Punch(sb::Punch {}));
+                }
+                None => out.push(ServerboundPlay::Punch(sb::Punch {})),
+            }
+        }
+        if input.attack {
+            match self.int.target {
+                Some(Target::Block(h)) => {
+                    if self.continue_destroy(h, world, env, out) {
+                        // `Minecraft.continueAttack` swings each tick the breaking continues.
+                        self.hand.swing();
+                        out.push(ServerboundPlay::Punch(sb::Punch {}));
+                    }
+                }
+                _ => self.abort_destroy(out),
+// MERGE end
             }
         } else {
             // while (keyAttack.consumeClick()) instantAttack |= startAttack();
@@ -556,9 +589,22 @@ impl LocalPlayer {
             }
         }
 
+// MERGE(interaction side):
         // if (keyUse.isDown() && rightClickDelay == 0 && !player.isUsingItem()) startUseItem();
         if input.use_item && self.int.use_delay == 0 && !self.int.is_using_item {
             self.start_use_item(look, out);
+// MERGE(main side):
+        // 4. Use.
+        if self.int.use_delay > 0 {
+            self.int.use_delay -= 1;
+        }
+        let use_now = input.use_item
+            && (!last.use_item || self.int.use_delay == 0)
+            && self.int.destroying.is_none();
+        if use_now {
+            self.int.use_delay = USE_DELAY;
+            self.use_item(look, env, out);
+// MERGE end
         }
 
         // continueAttack(screen == null && !instantAttack && keyAttack.isDown() && grabbed).
@@ -621,6 +667,7 @@ impl LocalPlayer {
         self.int.input.hotbar = None;
     }
 
+// MERGE(interaction side):
     /// `Minecraft.startAttack`: one left click. Returns vanilla's `endAttack` — the block broke
     /// at once (creative, or a survival block with progress >= 1 in one tick), so
     /// `continueAttack` is skipped for this tick.
@@ -638,6 +685,18 @@ impl LocalPlayer {
         if self.int.is_using_item {
             return false;
         }
+// MERGE(main side):
+    fn use_item(
+        &mut self,
+        look: (f32, f32),
+        env: &InteractEnv<'_>,
+        out: &mut Vec<ServerboundPlay>,
+    ) {
+        let holding = !self.main_hand().is_empty();
+        // `Minecraft.startUseItem`: a use whose result is `InteractionResult.SUCCESS`
+        // (vanilla's swing source PREDICTED) swings the hand.
+        self.hand.swing();
+// MERGE end
         match self.int.target {
             Some(Target::Entity { id, .. }) => {
                 // gameMode.attack, then the swing (below). No missTime, no attack-strength
@@ -688,7 +747,16 @@ impl LocalPlayer {
             Some(Target::Block(h)) if !env.data.is_air(world.block_state(h.pos)) => {
                 if self.continue_destroy(h, world, env, out) {
                     out.push(ServerboundPlay::Punch(sb::Punch {}));
+                    // `Minecraft.startUseItem` calls `player.itemUsed(hand)` for a use that
+                    // changed the held stack, which puts the hand down for the item switch.
+                    self.hand.item_used();
                 }
+                // The place sound, played when we place against a block while holding a
+                // block item (vanilla: BlockItem.place runs on the client too and plays
+                // it; the server's copy excludes us). We cannot know the placed state
+                // yet, so the held block item's block decides; unknown items (not a
+                // block, a mod) play nothing.
+                self.own_place_sound(h.pos, env);
             }
             // An entity, nothing, or an already-air block: stop breaking.
             _ => self.stop_destroy(out),
@@ -754,6 +822,7 @@ impl LocalPlayer {
         }
     }
 
+// MERGE(interaction side):
     /// `MultiPlayerGameMode.releaseUsingItem`: `player_action` release_use_item with a zeroed
     /// pos, then the player stops using the item.
     fn release_using_item(&mut self, out: &mut Vec<ServerboundPlay>) {
@@ -913,6 +982,33 @@ impl LocalPlayer {
                 sequence: 0,
             }));
             self.int.progress = 0.0;
+// MERGE(main side):
+    /// The held item's block, if it is a block item (item id = block id in vanilla,
+    /// `BlockItemId.create(name)`; the 14 crop pairs with differing names are missing
+    /// here — placing crops is rare and the server confirms anyway).
+    fn held_block<'d>(&self, data: &'d haste_data::GameData) -> Option<&'d haste_core::Identifier> {
+        let item = self.main_hand();
+        let index = item.item?;
+        data.registries
+            .name("minecraft:item", index)
+            .and_then(|id| data.blocks.default_state(id).map(|_| id))
+    }
+
+    /// The place sound for a `use_item_on` with a block item held (see `use_item`).
+    fn own_place_sound(&mut self, pos: BlockPos, env: &InteractEnv<'_>) {
+        let Some(block) = self.held_block(env.data) else {
+            return;
+        };
+        let state = env.data.blocks.default_state(block);
+        if let Some(state) = state {
+            if let Some(t) = env.data.block_sound_type(state) {
+                self.own_sounds.block_placed(
+                    pos.as_dvec3() + DVec3::new(0.5, 0.5, 0.5),
+                    t,
+                    &mut self.sound_out,
+                );
+            }
+// MERGE end
         }
     }
 
@@ -967,12 +1063,144 @@ impl LocalPlayer {
         self.int.tools.as_ref()?.get(name)
     }
 
+// MERGE(interaction side):
     /// `Item.canDestroyBlock` for the main hand in creative: a tool whose
     /// `can_destroy_blocks_in_creative` is false cannot break blocks; anything else can.
     fn can_break_in_creative(&self, data: &haste_data::GameData) -> bool {
         !self
             .held_tool(data)
             .is_some_and(|t| !t.can_destroy_blocks_in_creative)
+// MERGE(main side):
+    fn start_destroy(
+        &mut self,
+        h: BlockHit,
+        world: &dyn BlockView,
+        env: &InteractEnv<'_>,
+        out: &mut Vec<ServerboundPlay>,
+    ) {
+        let state = world.block_state(h.pos);
+        // A block we broke this tick (or whose break the server has not acknowledged yet) is
+        // gone for us even if the world has not applied the edit yet.
+        let predicted_gone = self.int.predictions.iter().any(|p| p.1 == h.pos);
+        if env.data.is_air(state) || predicted_gone {
+            return;
+        }
+        if self.game_mode == GameMode::Adventure {
+            // Breaking in adventure depends on the held item's can_break predicate (not decoded).
+            return;
+        }
+        if self.game_mode == GameMode::Creative {
+            if self.int.destroy_delay > 0 {
+                return;
+            }
+            if self
+                .held_tool(env.data)
+                .is_some_and(|t| !t.can_destroy_blocks_in_creative)
+            {
+                return;
+            }
+            self.int.destroy_delay = DESTROY_DELAY;
+            self.own_mining_hit(h.pos, state, env);
+            self.send_destroy(action::START_DESTROY, h, state, true, env, out);
+            return;
+        }
+        if self.int.destroying.is_some_and(|d| d.0 == h.pos) {
+            return;
+        }
+        if self.int.destroying.is_some() {
+            self.abort_destroy(out);
+        }
+        let params = self.mining_params(state, env);
+        let d = params.progress_per_tick();
+        tracing::debug!("start breaking {:?}: {params:?} -> {d} per tick", h.pos);
+        let instant = d >= 1.0;
+        // The start tick's hit sound (vanilla: addBreakingBlockEffects with playSound=true;
+        // the follow-up hits every 4 ticks are the server's 2020 level events).
+        self.own_mining_hit(h.pos, state, env);
+        self.send_destroy(action::START_DESTROY, h, state, instant, env, out);
+        if !instant {
+            self.int.destroying = Some((h.pos, h.face));
+            self.int.progress = 0.0;
+        }
+    }
+
+    /// The mining hit sound of a block we start breaking (vanilla plays it
+    /// client-side on the start tick; the block's type comes from the
+    /// `block_sounds.json` dump). Unknown blocks play nothing.
+    fn own_mining_hit(&mut self, pos: BlockPos, state: BlockStateId, env: &InteractEnv<'_>) {
+        if let Some(t) = env.data.block_sound_type(state) {
+            self.own_sounds.mining_hit(
+                pos.as_dvec3() + DVec3::new(0.5, 0.5, 0.5),
+                t,
+                &mut self.sound_out,
+            );
+        }
+    }
+
+    /// One tick of held attack on a block; true if the arm swings this tick.
+    fn continue_destroy(
+        &mut self,
+        h: BlockHit,
+        world: &dyn BlockView,
+        env: &InteractEnv<'_>,
+        out: &mut Vec<ServerboundPlay>,
+    ) -> bool {
+        if self.int.destroy_delay > 0 {
+            self.int.destroy_delay -= 1;
+            return true;
+        }
+        if self.game_mode == GameMode::Creative {
+            self.start_destroy(h, world, env, out);
+            return true;
+        }
+        if self.game_mode == GameMode::Adventure {
+            return false;
+        }
+        match self.int.destroying {
+            Some((pos, face)) if pos == h.pos => {
+                if face != h.face {
+                    // Same block, another face under the crosshair (new in 26.3).
+                    out.push(ServerboundPlay::PlayerAction(sb::PlayerAction {
+                        status: action::CHANGE_DESTROY_DIRECTION,
+                        pos,
+                        face: h.face as u8,
+                        sequence: 0,
+                    }));
+                    self.int.destroying = Some((pos, h.face));
+                }
+                let state = world.block_state(pos);
+                if env.data.is_air(state) {
+                    self.int.destroying = None;
+                    return false;
+                }
+                self.int.progress += self.mining_params(state, env).progress_per_tick();
+                if self.int.progress >= 1.0 {
+                    self.send_destroy(action::STOP_DESTROY, h, state, true, env, out);
+                    self.int.destroying = None;
+                    self.int.progress = 0.0;
+                    self.int.destroy_delay = DESTROY_DELAY;
+                }
+                true
+            }
+            _ => {
+                self.start_destroy(h, world, env, out);
+                true
+            }
+        }
+    }
+
+    fn abort_destroy(&mut self, out: &mut Vec<ServerboundPlay>) {
+        if let Some((pos, face)) = self.int.destroying.take() {
+            // Abort carries no prediction (sequence 0).
+            out.push(ServerboundPlay::PlayerAction(sb::PlayerAction {
+                status: action::ABORT_DESTROY,
+                pos,
+                face: face as u8,
+                sequence: 0,
+            }));
+            self.int.progress = 0.0;
+        }
+// MERGE end
     }
 
     fn send_destroy(
@@ -1008,6 +1236,15 @@ impl LocalPlayer {
             // server's update.
             let to = env.data.fluid(state).is_none().then_some(BlockStateId::AIR);
             self.int.predict(seq, h.pos, state, to);
+            // The break sound, played the moment the block goes for us (vanilla's client
+            // gets it as the server's level_event 2001, which we do not decode yet).
+            if let Some(t) = env.data.block_sound_type(state) {
+                self.own_sounds.block_broken(
+                    h.pos.as_dvec3() + DVec3::new(0.5, 0.5, 0.5),
+                    t,
+                    &mut self.sound_out,
+                );
+            }
         }
     }
 }

@@ -36,6 +36,7 @@ mod biomes;
 
 use crate::game::{self, Shared};
 use crate::net::{self, NetDriver};
+use crate::script;
 use crate::ui::keys;
 use crate::Args;
 
@@ -64,8 +65,33 @@ const DOUBLE_TAP: Duration = Duration::from_millis(350);
 /// Wall time the render thread may spend capturing sections for the mesher per frame.
 /// Sections handed to the mesh workers per frame (they capture the snapshots themselves).
 const SUBMIT_PER_FRAME: usize = 512;
-/// Vanilla's "GUI scale" (the auto option is not wired; 2 is a common choice at 1080p).
-const GUI_SCALE: u32 = 2;
+/// The GUI scale the option asks for: 0 means auto (vanilla: `Options.AUTO_GUI_SCALE`).
+/// Like `Minecraft.resizeGui`, auto and any fixed scale both go through
+/// [`gui_scale_for`] (vanilla: `Window.calculateScale`).
+pub fn resolve_gui_scale(option: u32, width: u32, height: u32) -> u32 {
+    gui_scale_for(option.min(4), width, height)
+}
+
+/// The scale vanilla would use for the option at the window's framebuffer size
+/// (vanilla: `Window.calculateScale`; `max_scale` 0 grows it while the framebuffer
+/// keeps at least 320x240 GUI pixels).
+pub fn gui_scale_for(max_scale: u32, width: u32, height: u32) -> u32 {
+    let mut scale = 1;
+    while scale != max_scale
+        && scale < width
+        && scale < height
+        && width / (scale + 1) >= 320
+        && height / (scale + 1) >= 240
+    {
+        scale += 1;
+    }
+    scale
+}
+
+/// The GUI-scaled size at `scale` (vanilla: `Window.setGuiScale` uses ceil division).
+pub fn gui_scaled_size(width: u32, height: u32, scale: u32) -> (u32, u32) {
+    (width.div_ceil(scale.max(1)), height.div_ceil(scale.max(1)))
+}
 
 /// A joined game: runtime, game thread and shared state.
 struct Session {
@@ -79,6 +105,8 @@ struct Session {
     options: Options,
     /// The local player's entity id and UUID (`login`), for its own model in third person.
     local: (EntityId, u128),
+    /// The particle atlas types (uploaded to the renderer once it exists).
+    particle_types: std::sync::Arc<haste_render::ParticleTypes>,
 }
 
 impl Session {
@@ -110,10 +138,21 @@ impl Session {
         // own view distance (login packet) caps what we mesh below.
         opts.client_information.view_distance = options.render_distance as i8;
         let driver: NetDriver = rt.block_on(NetDriver::connect(opts))?;
-        let regs = driver.connection().registries();
-        let biomes = net::synced_biome_count(regs).unwrap_or(64);
-        let biome_climates = biomes::biome_climates(regs);
-        let login = driver.login();
+        let (biomes, biome_climates, type_names, sounds) = {
+            let regs = driver.connection().registries();
+            let sounds = if sound {
+                open_sounds(regs, &data, &options.sound)
+            } else {
+                None
+            };
+            (
+                net::synced_biome_count(regs).unwrap_or(64),
+                biomes::biome_climates(regs),
+                net::entity_type_names(regs, &data),
+                sounds,
+            )
+        };
+        let login = driver.login().clone();
         let local = (login.entity_id, login.profile.uuid.as_u128());
         tracing::info!(
             "joined {address} as {}: {:?}, dimension {}, view distance {}",
@@ -124,16 +163,33 @@ impl Session {
         );
         let world = World::new_with_biomes(login.dimension.clone(), data.clone(), biomes);
         let entity_types = data.registries.len("minecraft:entity_type");
+        let mut driver = driver;
+        driver.session.set_entity_type_names(type_names);
         let view_distance = login.view_distance.min(options.render_distance as i32);
+        // The particle types of the datagen registry (the synced one has no data we need):
+        // one atlas built once, shared by the pool (name resolution) and the renderer.
+        let particle_ids: Vec<haste_protocol::haste_core::Identifier> =
+            (0..data.registries.len("minecraft:particle_type") as u32)
+                .filter_map(|i| {
+                    data.registries
+                        .name("minecraft:particle_type", haste_core::RegistryIndex(i))
+                        .cloned()
+                })
+                .collect();
+        let particle_types = std::sync::Arc::new(
+            haste_render::ParticleTypes::build(&mut open_assets()?, &particle_ids)
+                .context("building the particle atlas")?,
+        );
         let shared = Arc::new(Shared::new(
             data,
             world,
             net::new_entity_store(entity_types),
             view_distance,
+            haste_render::Particles::new(particle_types.clone()),
             haste_render::default_skin(login.profile.uuid.as_u128()),
         ));
-        if sound {
-            *shared.sound.lock() = open_sounds(regs, &shared.data, &options.sound);
+        if sounds.is_some() {
+            *shared.sound.lock() = sounds;
         }
         let handle = rt.handle().clone();
         let sh = shared.clone();
@@ -150,6 +206,7 @@ impl Session {
             biomes: biome_climates,
             options,
             local,
+            particle_types,
         })
     }
 
@@ -274,16 +331,15 @@ impl WorldFeed {
         self.batch = batch;
     }
 
-    /// Copies the interpolated entity instances.
     /// Copies the interpolated entity instances, gives players their default skin and samples
-    /// each entity's light for the renderer. In the third-person perspectives the local
-    /// player's own model is included (the server does not spawn us as an entity, so it is
-    /// built here from the shared view).
+    /// each entity's light for the renderer. The local player's own model is always included
+    /// (the server does not spawn us as an entity, so it is built here from the shared view):
+    /// the GUI's inventory preview needs it in first person too, and the caller tells the
+    /// renderer not to draw it in the world then (`FrameInput::camera_entity`).
     fn entities(
         &mut self,
         shared: &Shared,
         renderer: &mut Renderer,
-        perspective: game::Perspective,
         local: (EntityId, u128),
         partial: f32,
     ) -> &[EntityInstance] {
@@ -300,7 +356,7 @@ impl WorldFeed {
                 }
             }
         }
-        if perspective.draws_player() {
+        {
             let view = *shared.view.lock();
             self.instances
                 .push(game::player_instance(local.0, local.1, &view, partial));
@@ -530,6 +586,74 @@ fn game_uses_key(ui_used: bool, screen_open: bool) -> bool {
     !ui_used && !screen_open
 }
 
+/// A script key in winit's numbering (the windowed client's events and the script runner's
+/// actions go through the same `KeyCode`-keyed routing).
+fn winit_key(key: crate::script::Key) -> KeyCode {
+    use crate::script::Key as K;
+    match key {
+        K::A => KeyCode::KeyA,
+        K::B => KeyCode::KeyB,
+        K::C => KeyCode::KeyC,
+        K::D => KeyCode::KeyD,
+        K::E => KeyCode::KeyE,
+        K::F => KeyCode::KeyF,
+        K::G => KeyCode::KeyG,
+        K::H => KeyCode::KeyH,
+        K::I => KeyCode::KeyI,
+        K::J => KeyCode::KeyJ,
+        K::K => KeyCode::KeyK,
+        K::L => KeyCode::KeyL,
+        K::M => KeyCode::KeyM,
+        K::N => KeyCode::KeyN,
+        K::O => KeyCode::KeyO,
+        K::P => KeyCode::KeyP,
+        K::Q => KeyCode::KeyQ,
+        K::R => KeyCode::KeyR,
+        K::S => KeyCode::KeyS,
+        K::T => KeyCode::KeyT,
+        K::U => KeyCode::KeyU,
+        K::V => KeyCode::KeyV,
+        K::W => KeyCode::KeyW,
+        K::X => KeyCode::KeyX,
+        K::Y => KeyCode::KeyY,
+        K::Z => KeyCode::KeyZ,
+        K::Num0 => KeyCode::Digit0,
+        K::Num1 => KeyCode::Digit1,
+        K::Num2 => KeyCode::Digit2,
+        K::Num3 => KeyCode::Digit3,
+        K::Num4 => KeyCode::Digit4,
+        K::Num5 => KeyCode::Digit5,
+        K::Num6 => KeyCode::Digit6,
+        K::Num7 => KeyCode::Digit7,
+        K::Num8 => KeyCode::Digit8,
+        K::Num9 => KeyCode::Digit9,
+        K::F1 => KeyCode::F1,
+        K::F2 => KeyCode::F2,
+        K::F3 => KeyCode::F3,
+        K::F4 => KeyCode::F4,
+        K::F5 => KeyCode::F5,
+        K::F6 => KeyCode::F6,
+        K::F7 => KeyCode::F7,
+        K::F8 => KeyCode::F8,
+        K::F9 => KeyCode::F9,
+        K::F10 => KeyCode::F10,
+        K::F11 => KeyCode::F11,
+        K::F12 => KeyCode::F12,
+        K::Escape => KeyCode::Escape,
+        K::Enter => KeyCode::Enter,
+        K::Tab => KeyCode::Tab,
+        K::Space => KeyCode::Space,
+        K::Backspace => KeyCode::Backspace,
+        K::Up => KeyCode::ArrowUp,
+        K::Down => KeyCode::ArrowDown,
+        K::Left => KeyCode::ArrowLeft,
+        K::Right => KeyCode::ArrowRight,
+        K::LeftShift => KeyCode::ShiftLeft,
+        K::LeftCtrl => KeyCode::ControlLeft,
+        K::LeftAlt => KeyCode::AltLeft,
+    }
+}
+
 /// Number keys 1-9 select hotbar slots 0-8.
 fn hotbar_key(code: KeyCode) -> Option<u8> {
     Some(match code {
@@ -549,6 +673,262 @@ fn hotbar_key(code: KeyCode) -> Option<u8> {
 fn camera_section(c: &Camera) -> SectionPos {
     let p = c.pos.floor().as_ivec3();
     SectionPos::new(p.x >> 4, p.y >> 4, p.z >> 4)
+}
+
+/// The input half of the client: everything between winit (or a script) and the game. The
+/// windowed client's `App` and the offscreen script runner both drive one `InputRouter`, so
+/// a scripted key is indistinguishable from a real one: the UI (open screen or HUD) sees it
+/// first, and only a `false` return reaches the game's own handling (movement keys, hotbar,
+/// attack/use, jump double-tap, drops, swap).
+struct InputRouter {
+    /// Keys currently held (movement reads them each tick).
+    keys: HashSet<KeyCode>,
+    /// The look angles in degrees (mouse motion and `look` actions write them).
+    yaw: f32,
+    pitch: f32,
+    /// SDL keymod bits of the currently held Ctrl/Shift/Alt keys, for the UI's key events.
+    mods: (bool, bool, bool),
+    /// The cursor in GUI-scaled pixels (`frame`'s and every mouse event's coordinates).
+    mouse: (f64, f64),
+    /// Whether the window is focused and the cursor grabbed (the game input gates).
+    focused: bool,
+    grabbed: bool,
+    /// Jump double-tap window (`last_jump_press`); a second press toggles flight.
+    last_jump_press: Option<Instant>,
+    toggle_flight: bool,
+    /// Left / right mouse button held (attack / use) and the press-only actions since the
+    /// last sample.
+    attack: bool,
+    use_item: bool,
+    pick_block: bool,
+    drop_item: bool,
+    drop_stack: bool,
+    swap_offhand: bool,
+    /// Hotbar slot chosen since the last sample.
+    hotbar: Option<u8>,
+    /// Scroll wheel steps not yet turned into a slot change.
+    scroll: f64,
+}
+
+impl Default for InputRouter {
+    fn default() -> Self {
+        InputRouter {
+            keys: HashSet::new(),
+            yaw: 0.0,
+            pitch: 0.0,
+            mods: (false, false, false),
+            mouse: (0.0, 0.0),
+            focused: true,
+            grabbed: false,
+            last_jump_press: None,
+            toggle_flight: false,
+            attack: false,
+            use_item: false,
+            pick_block: false,
+            drop_item: false,
+            drop_stack: false,
+            swap_offhand: false,
+            hotbar: None,
+            scroll: 0.0,
+        }
+    }
+}
+
+impl InputRouter {
+    /// A key press or release. `ui` is the HUD/screens when they are up, `text` the typed
+    /// character winit decoded (if any). Returns `true` when the UI used the key.
+    fn key(
+        &mut self,
+        code: KeyCode,
+        pressed: bool,
+        repeat: bool,
+        text: Option<&str>,
+        ui: Option<&crate::ui::Ui>,
+    ) -> bool {
+        // Track the keymod bits first: they go into the same event's mods.
+        match code {
+            KeyCode::ControlLeft | KeyCode::ControlRight => self.mods.0 = pressed,
+            KeyCode::ShiftLeft | KeyCode::ShiftRight => self.mods.1 = pressed,
+            KeyCode::AltLeft | KeyCode::AltRight => self.mods.2 = pressed,
+            _ => {}
+        }
+        let mods = sdl_keymod(self.mods.0, self.mods.1, self.mods.2);
+        // The UI goes first: an open screen takes every key and typed character, including
+        // repeats (held Backspace in the chat box); with no screen it takes the HUD's keys,
+        // first press only. Only a false return falls through to the game handling below.
+        let screen_open = ui.is_some_and(|ui| ui.screen_open());
+        if let (Some(ui), Some(sc)) = (ui, sdl_scancode(code)) {
+            let forward = key_goes_to_ui(repeat, screen_open);
+            let used = forward && ui.key(sc, keys::keycode(sc), mods, pressed);
+            if let (Some(c), true) = (typed_char_of(text), pressed) {
+                ui.char_typed(c, mods);
+            }
+            if !game_uses_key(used, screen_open) {
+                // The UI took it: whatever the game thought was held must go.
+                self.keys.remove(&code);
+                return true;
+            }
+        } else if screen_open {
+            self.keys.remove(&code);
+            return true;
+        }
+        if pressed && !repeat {
+            match code {
+                KeyCode::Escape => {
+                    // Not consumed by the UI (no screen): vanilla's Escape has no game
+                    // meaning beyond opening the pause menu, so this only frees the cursor
+                    // for the pre-UI behaviour.
+                    self.release();
+                }
+                KeyCode::Space if self.grabbed && self.focused => self.jump_pressed(Instant::now()),
+                _ if self.grabbed && self.focused && hotbar_key(code).is_some() => {
+                    self.hotbar = hotbar_key(code);
+                }
+                KeyCode::KeyQ if self.grabbed && self.focused => {
+                    // Ctrl+Q drops the whole stack, plain Q one item.
+                    if self.keys.contains(&KeyCode::ControlLeft) {
+                        self.drop_stack = true;
+                    } else {
+                        self.drop_item = true;
+                    }
+                }
+                KeyCode::KeyF if self.grabbed && self.focused => {
+                    self.swap_offhand = true;
+                }
+                _ => {}
+            }
+        }
+        if self.focused && self.grabbed && pressed {
+            self.keys.insert(code);
+        } else if !pressed {
+            self.keys.remove(&code);
+        }
+        false
+    }
+
+    /// The mouse moved to GUI-scaled `(x, y)`.
+    fn mouse_moved(&mut self, x: f64, y: f64, ui: Option<&crate::ui::Ui>) {
+        self.mouse = (x, y);
+        if let Some(ui) = ui {
+            ui.mouse_moved(x, y);
+        }
+    }
+
+    /// A mouse button press or release (vanilla numbering: 1 left, 2 middle, 3 right) at
+    /// GUI-scaled `(x, y)`. Returns `true` when the UI used it.
+    fn mouse_button(
+        &mut self,
+        button: i32,
+        pressed: bool,
+        x: f64,
+        y: f64,
+        ui: Option<&crate::ui::Ui>,
+    ) -> bool {
+        self.mouse = (x, y);
+        if let Some(ui) = ui {
+            if ui.mouse_button(x, y, button, pressed) {
+                return true;
+            }
+        }
+        if !self.grabbed {
+            return false;
+        }
+        match button {
+            1 => self.attack = pressed,
+            3 => self.use_item = pressed,
+            2 if pressed => self.pick_block = true,
+            _ => {}
+        }
+        false
+    }
+
+    /// The wheel moved by `(dx, dy)` notches at GUI-scaled `(x, y)`. Returns `true` when the
+    /// UI used it.
+    fn wheel(
+        &mut self,
+        dx: f64,
+        dy: f64,
+        x: f64,
+        y: f64,
+        ui: Option<&crate::ui::Ui>,
+        shared: &Shared,
+    ) -> bool {
+        self.mouse = (x, y);
+        if let Some(ui) = ui {
+            if ui.scroll(x, y, dx, dy) {
+                return true;
+            }
+        }
+        if !self.grabbed {
+            return false;
+        }
+        self.scroll += dy;
+        let steps = self.scroll.trunc() as i32;
+        if steps != 0 {
+            self.scroll -= steps as f64;
+            // Scrolling down (negative) moves to the next slot, wrapping 0..=8.
+            let current = self
+                .hotbar
+                .map_or(shared.view.lock().held_slot, |s| s as i32);
+            self.hotbar = Some((current - steps).rem_euclid(9) as u8);
+        }
+        true
+    }
+
+    /// A look change (mouse motion deltas while grabbed, or a script's `look`).
+    fn look(&mut self, yaw: f32, pitch: f32) {
+        self.yaw = yaw;
+        self.pitch = pitch;
+    }
+
+    /// Jump pressed: a second press within vanilla's 7-tick window toggles flight.
+    fn jump_pressed(&mut self, now: Instant) {
+        match self.last_jump_press {
+            Some(t) if now.duration_since(t) < DOUBLE_TAP => {
+                self.toggle_flight = true;
+                self.last_jump_press = None;
+            }
+            _ => self.last_jump_press = Some(now),
+        }
+    }
+
+    /// Nothing is held anymore (focus lost, a screen opened, the script ended).
+    fn release(&mut self) {
+        self.keys.clear();
+        self.attack = false;
+        self.use_item = false;
+        self.last_jump_press = None;
+    }
+
+    /// Copy the sampled state into the shared input the game thread reads each tick, and
+    /// consume the press-only actions.
+    fn sample(&mut self, shared: &Shared) {
+        let k = |c: KeyCode| self.keys.contains(&c);
+        let state = InputState {
+            forward: k(KeyCode::KeyW),
+            back: k(KeyCode::KeyS),
+            left: k(KeyCode::KeyA),
+            right: k(KeyCode::KeyD),
+            jump: k(KeyCode::Space),
+            sneak: k(KeyCode::ShiftLeft),
+            sprint: k(KeyCode::ControlLeft),
+            yaw: self.yaw,
+            pitch: self.pitch,
+        };
+        let mut shared_input = shared.input.lock();
+        shared_input.state = state;
+        shared_input.toggle_flight |= std::mem::take(&mut self.toggle_flight);
+        let i = &mut shared_input.interact;
+        i.attack = self.attack;
+        i.use_item = self.use_item;
+        i.pick_block |= std::mem::take(&mut self.pick_block);
+        i.drop_item |= std::mem::take(&mut self.drop_item);
+        i.drop_stack |= std::mem::take(&mut self.drop_stack);
+        i.swap_offhand |= std::mem::take(&mut self.swap_offhand);
+        if let Some(slot) = self.hotbar.take() {
+            i.hotbar = Some(slot);
+        }
+    }
 }
 
 fn open_assets() -> anyhow::Result<haste_assets::Assets> {
@@ -600,6 +980,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
     renderer.set_biomes(&session.biomes);
+    renderer.set_particle_types(&session.particle_types);
     let mut gui = GuiFrame::default();
     let mut ui: Option<crate::ui::Ui> = None;
     let mut feed = WorldFeed::default();
@@ -653,7 +1034,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         last_camera = camera;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         feed.set_first_person(&shared, &mut renderer, perspective);
-        let entities = feed.entities(&shared, &mut renderer, perspective, session.local, partial);
+        let entities = feed.entities(&shared, &mut renderer, session.local, partial);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
         // The HUD, like the window: waiting for the JVM, then one `Ui` for this render thread.
@@ -664,15 +1045,13 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             }
         }
         if let Some(u) = &mut ui {
-            gui = u
-                .frame(
-                    args.width / GUI_SCALE,
-                    args.height / GUI_SCALE,
-                    GUI_SCALE,
-                    (0.0, 0.0),
-                    partial,
-                )
-                .clone();
+            let scale = resolve_gui_scale(
+                u32::from(session.options.gui_scale),
+                args.width,
+                args.height,
+            );
+            let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
+            gui = u.frame(gw, gh, scale, (0.0, 0.0), partial).clone();
         }
         let frame = FrameInput {
             camera,
@@ -682,9 +1061,15 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             partial_tick: partial,
             block_target,
             breaking: &breaking,
+            camera_entity: (!perspective.draws_player()).then_some(session.local.0),
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        {
+            let world = shared.world.read();
+            let mut particles = shared.particles.lock();
+            renderer.prepare_particles(&mut particles, &*world, camera, partial);
+        }
         stats = renderer.render(&frame)?;
         frames += 1;
         let placed = shared.view.lock().has_position;
@@ -738,7 +1123,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let view = *shared.view.lock();
     let entities = feed.instances.len();
     println!(
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} entity instances (perspective {}, local player {}), target {:?}",
+        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} entity instances (perspective {}, local player {}), {} particles drawn, target {:?}",
         file.display(),
         image.width(),
         image.height(),
@@ -754,9 +1139,207 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         entities,
         args.perspective,
         perspective.draws_player(),
+        renderer.particles_drawn(),
         view.block_target
     );
     drop(session);
+    Ok(())
+}
+
+/// `--script FILE`: join like `--screenshot`, then drive the parsed script's actions every
+/// game tick (20 Hz) through the same input routing the window uses (`InputRouter`: the UI
+/// first, then the game), rendering every frame offscreen. `screenshot NAME` actions save
+/// the frame (HUD and open screens included) as `target/shots/script-NAME.png`. `Error`
+/// actions (a `wait_until` timeout) and `Finished` end the run; an error exits non-zero.
+pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
+    let Some(_server) = args.server.as_ref() else {
+        anyhow::bail!("--script needs --server <host[:port]>");
+    };
+    let text = std::fs::read_to_string(file)
+        .with_context(|| format!("reading script {}", file.display()))?;
+    let steps = script::parse(&text).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut runner = script::Runner::new(steps);
+    let session = Session::join(args, false)?;
+    let shared = session.shared.clone();
+    let mut assets = open_assets()?;
+    let mut renderer =
+        Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
+    renderer.set_item_registry(&shared.data.registries);
+    renderer.set_biomes(&session.biomes);
+    let mut gui = GuiFrame::default();
+    let mut ui: Option<crate::ui::Ui> = None;
+    let mut feed = WorldFeed::default();
+    // The script's client is "grabbed" (game input goes through, like an active window).
+    let mut input = InputRouter {
+        grabbed: true,
+        ..InputRouter::default()
+    };
+    let deadline = Instant::now() + Duration::from_secs(args.seconds);
+    let tick = Duration::from_secs_f64(haste_protocol::haste_core::game::TICK_SECONDS);
+    let mut next_tick = Instant::now();
+    let mut frames = 0u32;
+    let mut last_stats = FrameStats::default();
+    let mut last_err: Option<String> = None;
+    let mut finished = false;
+    // Screenshot actions of this tick, saved after the frame is rendered (the readback must
+    // include the frame the actions just produced: an open screen, the typed chat).
+    let mut shots: Vec<String> = Vec::new();
+    'run: loop {
+        // The look the player is rendered with: the input layer's (the script's `look`
+        // actions write it) plus the server's rotation offset, like the window.
+        let mut view = *shared.view.lock();
+        let look = (input.yaw, input.pitch);
+        // One game tick's actions whenever it is time (`wait_until settled` uses the same
+        // quiet test as the screenshot mode, plus the HUD's JVM being up or known-failed: a
+        // script's keys go to the UI, so pressing them before it exists would lose them).
+        if Instant::now() >= next_tick {
+            next_tick += tick;
+            let hud_ready = ui.is_some() || shared.hud_failed.load(Ordering::Relaxed);
+            let settled = view.has_position
+                && hud_ready
+                && feed.settled(&last_stats, Duration::from_millis(1500));
+            let state = script::ScriptState {
+                joined: view.has_position,
+                settled,
+                screen_open: ui.as_ref().is_some_and(|u| u.screen_open()),
+            };
+            for action in runner.tick(&state) {
+                match action {
+                    script::Action::KeyDown(k) => {
+                        input.key(winit_key(k), true, false, None, ui.as_ref());
+                    }
+                    script::Action::KeyUp(k) => {
+                        input.key(winit_key(k), false, false, None, ui.as_ref());
+                    }
+                    script::Action::Text(t) => {
+                        if let Some(ui) = &ui {
+                            for c in t.chars() {
+                                ui.char_typed(c, 0);
+                            }
+                        }
+                    }
+                    script::Action::MouseMove(x, y) => {
+                        input.mouse_moved(f64::from(x), f64::from(y), ui.as_ref());
+                    }
+                    script::Action::Click(button, x, y) => {
+                        let b = match button {
+                            script::MouseButton::Left => 1,
+                            script::MouseButton::Middle => 2,
+                            script::MouseButton::Right => 3,
+                        };
+                        let (x, y) = (f64::from(x), f64::from(y));
+                        // A click is a press and a release on the same tick.
+                        input.mouse_button(b, true, x, y, ui.as_ref());
+                        input.mouse_button(b, false, x, y, ui.as_ref());
+                    }
+                    script::Action::Scroll(n) => {
+                        let (x, y) = input.mouse;
+                        input.wheel(0.0, f64::from(n), x, y, ui.as_ref(), &shared);
+                    }
+                    script::Action::Look(yaw, pitch) => input.look(yaw, pitch),
+                    script::Action::Screenshot(name) => shots.push(name),
+                    script::Action::Error(e) => {
+                        last_err = Some(e);
+                        break 'run;
+                    }
+                    script::Action::Finished => {
+                        finished = true;
+                        break 'run;
+                    }
+                }
+            }
+            // The actions may have changed what the game thread sees this tick.
+            input.sample(&shared);
+            view = *shared.view.lock();
+        }
+        if shared.is_closed() {
+            anyhow::bail!(
+                "disconnected: {}",
+                shared.closed.lock().clone().unwrap_or_default()
+            );
+        }
+        // Render the frame like the screenshot mode does (the HUD and any open screen via
+        // `Ui::frame`), so `screenshot` actions capture exactly what the window would show.
+        let (camera, sky, partial, vd, animation_tick) = frame_view(
+            &shared,
+            game::Perspective::FirstPerson,
+            look.0,
+            look.1,
+            session.options.fov as f32,
+            Instant::now(),
+        );
+        feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
+        let entities = feed.entities(&shared, &mut renderer, session.local, partial);
+        let block_target = view.block_target;
+        let breaking = shared.breaking.lock().clone();
+        if ui.is_none() {
+            ui = shared.ui.lock().clone();
+            if let Some(u) = &ui {
+                u.set_text_metrics(renderer.text_metrics());
+            }
+        }
+        if let Some(u) = &mut ui {
+            let scale = resolve_gui_scale(
+                u32::from(session.options.gui_scale),
+                args.width,
+                args.height,
+            );
+            let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
+            gui = u.frame(gw, gh, scale, input.mouse, partial).clone();
+        }
+        let frame = FrameInput {
+            camera,
+            entities,
+            gui: &gui,
+            sky,
+            partial_tick: partial,
+            block_target,
+            breaking: &breaking,
+            camera_entity: Some(session.local.0),
+        };
+        renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
+        renderer.set_animation_tick(animation_tick);
+        if let Ok(stats) = renderer.render(&frame) {
+            last_stats = stats;
+        }
+        frames += 1;
+        // This tick's screenshot actions: the frame they caused is now on the GPU.
+        if !shots.is_empty() {
+            let image = renderer
+                .read_back()
+                .context("reading the frame back for the script screenshots")?;
+            for name in shots.drain(..) {
+                let path = std::path::Path::new("target/shots").join(format!("script-{name}.png"));
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir)
+                        .with_context(|| format!("creating {}", dir.display()))?;
+                }
+                image
+                    .save(&path)
+                    .with_context(|| format!("saving {}", path.display()))?;
+                println!("script screenshot saved to {}", path.display());
+            }
+        }
+        if Instant::now() > deadline {
+            tracing::warn!("--seconds elapsed before the script finished; stopping early");
+            break;
+        }
+        // Never busy-spin: sleep to the next tick, catching up if we fell behind.
+        let now = Instant::now();
+        if now < next_tick {
+            std::thread::sleep((next_tick - now).min(Duration::from_millis(5)));
+        } else {
+            next_tick = now;
+        }
+    }
+    let _ = frames;
+    drop(session);
+    if let Some(e) = last_err {
+        anyhow::bail!("script failed: {e}");
+    }
+    if !finished {
+        anyhow::bail!("script did not finish before --seconds elapsed");
+    }
     Ok(())
 }
 
@@ -981,6 +1564,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
     renderer.set_biomes(&session.biomes);
+    renderer.set_particle_types(&session.particle_types);
     let gui = GuiFrame::default();
     let mut feed = WorldFeed::default();
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
@@ -1003,13 +1587,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         vd = v;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         feed.set_first_person(&shared, &mut renderer, game::Perspective::FirstPerson);
-        let entities = feed.entities(
-            &shared,
-            &mut renderer,
-            game::Perspective::FirstPerson,
-            session.local,
-            partial,
-        );
+        let entities = feed.entities(&shared, &mut renderer, session.local, partial);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
         let frame = FrameInput {
@@ -1020,9 +1598,15 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             partial_tick: partial,
             block_target,
             breaking: &breaking,
+            camera_entity: Some(session.local.0),
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        {
+            let world = shared.world.read();
+            let mut particles = shared.particles.lock();
+            renderer.prepare_particles(&mut particles, &*world, camera, partial);
+        }
         stats = renderer.render(&frame)?;
         if shared.is_closed() {
             anyhow::bail!(
@@ -1079,13 +1663,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         let feed_start = Instant::now();
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         let feed_ms = feed_start.elapsed().as_secs_f32() * 1000.0;
-        let entities = feed.entities(
-            &shared,
-            &mut renderer,
-            game::Perspective::FirstPerson,
-            session.local,
-            partial_tick,
-        );
+        let entities = feed.entities(&shared, &mut renderer, session.local, partial_tick);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
         let frame = FrameInput {
@@ -1096,9 +1674,15 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             partial_tick,
             block_target,
             breaking: &breaking,
+            camera_entity: Some(session.local.0),
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        {
+            let world = shared.world.read();
+            let mut particles = shared.particles.lock();
+            renderer.prepare_particles(&mut particles, &*world, camera, partial_tick);
+        }
         let stats = renderer.render(&frame)?;
         let prev_drawn = samples.last().map_or(0, |s| s.sections_drawn);
         samples.push(BenchSample {
@@ -1164,6 +1748,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
     let mut app = App {
         shared: session.shared.clone(),
         biomes: session.biomes.clone(),
+        particle_types: session.particle_types.clone(),
         // The flag wins over the saved option; without it, the saved option decides.
         vsync: args.vsync.unwrap_or(session.options.vsync),
         options: session.options.clone(),
@@ -1174,25 +1759,10 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         feed: WorldFeed::default(),
         ui: None,
         gui: GuiFrame::default(),
-        mouse: (0.0, 0.0),
-        mods: (false, false, false),
+        input: InputRouter::default(),
         grabbed: false,
         screen_was_open: false,
         focused: true,
-        yaw: 0.0,
-        pitch: 0.0,
-        keys: HashSet::new(),
-        input: InputState::default(),
-        last_jump_press: None,
-        toggle_flight: false,
-        attack: false,
-        use_item: false,
-        pick_block: false,
-        drop_item: false,
-        drop_stack: false,
-        swap_offhand: false,
-        hotbar: None,
-        scroll: 0.0,
         breaking: Vec::new(),
         frame_stats: FrameStats::default(),
         fps: FpsCounter::new(),
@@ -1216,6 +1786,8 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
 struct App {
     shared: Arc<Shared>,
     biomes: Vec<haste_render::BiomeClimate>,
+    /// The particle atlas types (uploaded to the renderer once it exists).
+    particle_types: std::sync::Arc<haste_render::ParticleTypes>,
     vsync: bool,
     /// Saved options (FOV for rendering, sensitivity for mouse look).
     options: Options,
@@ -1230,33 +1802,13 @@ struct App {
     /// to start); `gui` stays the empty default until then.
     ui: Option<crate::ui::Ui>,
     gui: GuiFrame,
-    /// The cursor in GUI-scaled pixels (`frame`'s mouse argument; the game keeps the mouse
-    /// grabbed, so this stays where the grab began).
-    mouse: (f64, f64),
-    /// SDL keymod bits of the currently held Ctrl/Shift/Alt keys, for the UI's key events.
-    mods: (bool, bool, bool),
+    /// The input half: keys, mouse, look and the routing to the UI and the game. `mouse`
+    /// for the GUI frame comes from it (`input.mouse`).
+    input: InputRouter,
     grabbed: bool,
     /// A screen was open in the last `sync_grab` (its closing re-grabs the cursor).
     screen_was_open: bool,
     focused: bool,
-    yaw: f32,
-    pitch: f32,
-    keys: HashSet<KeyCode>,
-    /// Movement keys and look as of this frame (the game thread reads it each tick).
-    input: InputState,
-    last_jump_press: Option<Instant>,
-    toggle_flight: bool,
-    /// Left / right mouse held (attack / use), middle click and hotbar choice since the last
-    /// sample.
-    attack: bool,
-    use_item: bool,
-    pick_block: bool,
-    drop_item: bool,
-    drop_stack: bool,
-    swap_offhand: bool,
-    hotbar: Option<u8>,
-    /// Scroll wheel steps not yet turned into a slot change.
-    scroll: f64,
     breaking: Vec<(haste_protocol::haste_core::BlockPos, u8)>,
     /// The previous frame's statistics (F3 reads them between frames).
     frame_stats: FrameStats,
@@ -1280,10 +1832,12 @@ impl App {
                 .is_ok();
             w.set_cursor_visible(!ok);
             self.grabbed = ok;
+            self.input.grabbed = ok;
         } else {
             let _ = w.set_cursor_grab(CursorGrabMode::None);
             w.set_cursor_visible(true);
             self.grabbed = false;
+            self.input.grabbed = false;
         }
     }
 
@@ -1340,50 +1894,8 @@ impl App {
     }
 
     fn release_keys(&mut self) {
-        self.keys.clear();
-        self.attack = false;
-        self.use_item = false;
-        self.last_jump_press = None;
-        self.sample_input();
-    }
-
-    fn sample_input(&mut self) {
-        let k = |c| self.keys.contains(&c);
-        self.input = InputState {
-            forward: k(KeyCode::KeyW),
-            back: k(KeyCode::KeyS),
-            left: k(KeyCode::KeyA),
-            right: k(KeyCode::KeyD),
-            jump: k(KeyCode::Space),
-            sneak: k(KeyCode::ShiftLeft),
-            sprint: k(KeyCode::ControlLeft),
-            yaw: self.yaw,
-            pitch: self.pitch,
-        };
-        let mut shared = self.shared.input.lock();
-        shared.state = self.input;
-        shared.toggle_flight |= std::mem::take(&mut self.toggle_flight);
-        let i = &mut shared.interact;
-        i.attack = self.attack;
-        i.use_item = self.use_item;
-        i.pick_block |= std::mem::take(&mut self.pick_block);
-        i.drop_item |= std::mem::take(&mut self.drop_item);
-        i.drop_stack |= std::mem::take(&mut self.drop_stack);
-        i.swap_offhand |= std::mem::take(&mut self.swap_offhand);
-        if let Some(slot) = self.hotbar.take() {
-            i.hotbar = Some(slot);
-        }
-    }
-
-    /// Jump pressed: a second press within vanilla's 7-tick window toggles flight.
-    fn jump_pressed(&mut self, now: Instant) {
-        match self.last_jump_press {
-            Some(t) if now.duration_since(t) < DOUBLE_TAP => {
-                self.toggle_flight = true;
-                self.last_jump_press = None;
-            }
-            _ => self.last_jump_press = Some(now),
-        }
+        self.input.release();
+        self.input.sample(&self.shared);
     }
 
     /// Mouse look speed from the saved sensitivity.
@@ -1395,7 +1907,7 @@ impl App {
         if self.renderer.is_none() {
             return;
         }
-        self.sample_input();
+        self.input.sample(&self.shared);
         // The screen that opened or closed since the last frame takes or frees the cursor,
         // and "Disconnect" ends the run.
         self.sync_grab();
@@ -1405,8 +1917,8 @@ impl App {
         let (camera, sky, partial, vd, animation_tick) = frame_view(
             &self.shared,
             self.perspective,
-            self.yaw,
-            self.pitch,
+            self.input.yaw,
+            self.input.pitch,
             self.options.fov as f32,
             Instant::now(),
         );
@@ -1415,13 +1927,9 @@ impl App {
         let t1 = Instant::now();
         self.feed
             .set_first_person(&self.shared, renderer, self.perspective);
-        let entities = self.feed.entities(
-            &self.shared,
-            renderer,
-            self.perspective,
-            self.local,
-            partial,
-        );
+        let entities = self
+            .feed
+            .entities(&self.shared, renderer, self.local, partial);
         let block_target = self.shared.view.lock().block_target;
         self.breaking.clear();
         self.breaking
@@ -1445,7 +1953,7 @@ impl App {
             ui.set_debug(haste_jvm::DebugInfo {
                 fps: self.fps.fps as i32,
                 pos: [view.feet.x, view.feet.y, view.feet.z],
-                rot: [self.yaw, self.pitch],
+                rot: [self.input.yaw, self.input.pitch],
                 chunks: self.shared.world.read().loaded_chunks().count() as i32,
                 sections_drawn: stats.chunk_sections_drawn as i32,
                 sections_total: stats.chunk_sections_total as i32,
@@ -1454,9 +1962,10 @@ impl App {
             ui.set_eye_in_water(view.eye_in_water);
         }
         if let Some(ui) = &mut self.ui {
-            self.gui = ui
-                .frame(w / GUI_SCALE, h / GUI_SCALE, GUI_SCALE, self.mouse, partial)
-                .clone();
+            let mouse = self.input.mouse;
+            let scale = resolve_gui_scale(u32::from(self.options.gui_scale), w, h);
+            let (gw, gh) = gui_scaled_size(w, h, scale);
+            self.gui = ui.frame(gw, gh, scale, mouse, partial).clone();
         }
         let frame = FrameInput {
             camera,
@@ -1466,9 +1975,15 @@ impl App {
             partial_tick: partial,
             block_target,
             breaking: &self.breaking,
+            camera_entity: (!self.perspective.draws_player()).then_some(self.local.0),
         };
         // Outline boxes of the target and the states of breaking blocks (one short read lock).
         renderer.sample_world(&*self.shared.world.read(), &self.shared.data.shapes, &frame);
+        {
+            let world = self.shared.world.read();
+            let mut particles = self.shared.particles.lock();
+            renderer.prepare_particles(&mut particles, &*world, camera, partial);
+        }
         renderer.set_animation_tick(animation_tick);
         if self.screenshot {
             self.screenshot = false;
@@ -1533,6 +2048,7 @@ impl ApplicationHandler for App {
                 Renderer::new(window.clone(), &mut assets, &self.shared.data.blocks)?;
             renderer.set_item_registry(&self.shared.data.registries);
             renderer.set_biomes(&self.biomes);
+            renderer.set_particle_types(&self.particle_types);
             Ok((window, renderer))
         })();
         match result {
@@ -1553,11 +2069,17 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::CursorMoved { position, .. } => {
-                // GUI-scaled pixels: physical size divided by the GUI scale.
-                let s = f64::from(GUI_SCALE);
-                self.mouse = (position.x / s, position.y / s);
-                if let Some(ui) = &self.ui {
-                    ui.mouse_moved(self.mouse.0, self.mouse.1);
+                // GUI-scaled pixels: physical size divided by the GUI scale. The scale is
+                // recomputed from the current framebuffer (the renderer knows the size;
+                // vanilla updates it the same way on every resize: `Minecraft.resizeGui`).
+                if let Some(r) = &self.renderer {
+                    let s = f64::from(resolve_gui_scale(
+                        u32::from(self.options.gui_scale),
+                        r.size().0,
+                        r.size().1,
+                    ));
+                    self.input
+                        .mouse_moved(position.x / s, position.y / s, self.ui.as_ref());
                 }
             }
             WindowEvent::Resized(size) => {
@@ -1567,6 +2089,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Focused(f) => {
                 self.focused = f;
+                self.input.focused = f;
                 if !f {
                     self.release_keys();
                     self.set_grab(false);
@@ -1579,49 +2102,18 @@ impl ApplicationHandler for App {
             } if !self.grabbed && !self.screen_open() => self.set_grab(true),
             WindowEvent::MouseInput { state, button, .. } if self.focused => {
                 let pressed = state == ElementState::Pressed;
-                // A screen takes the click at its GUI-scaled position; the first click into a
-                // just-opened screen also serves as the "click to focus" of the pre-screen era.
-                if let Some(ui) = &self.ui {
-                    if ui.mouse_button(self.mouse.0, self.mouse.1, vanilla_button(button), pressed)
-                    {
-                        return;
-                    }
-                }
-                if !self.grabbed {
-                    return;
-                }
-                match button {
-                    MouseButton::Left => self.attack = pressed,
-                    MouseButton::Right => self.use_item = pressed,
-                    MouseButton::Middle if pressed => self.pick_block = true,
-                    _ => {}
-                }
+                let (x, y) = self.input.mouse;
+                self.input
+                    .mouse_button(vanilla_button(button), pressed, x, y, self.ui.as_ref());
             }
             WindowEvent::MouseWheel { delta, .. } if self.focused => {
                 let (dx, dy) = match delta {
                     MouseScrollDelta::LineDelta(x, y) => (x as f64, y as f64),
                     MouseScrollDelta::PixelDelta(p) => (p.x / 40.0, p.y / 40.0),
                 };
-                // A screen scrolls at its GUI-scaled position; the HUD's hotbar wheel needs
-                // whole notches (like vanilla: one slot per notch).
-                if let Some(ui) = &self.ui {
-                    if ui.scroll(self.mouse.0, self.mouse.1, dx, dy) {
-                        return;
-                    }
-                }
-                if !self.grabbed {
-                    return;
-                }
-                self.scroll += dy;
-                let steps = self.scroll.trunc() as i32;
-                if steps != 0 {
-                    self.scroll -= steps as f64;
-                    // Scrolling down (negative) moves to the next slot, wrapping 0..=8.
-                    let current = self
-                        .hotbar
-                        .map_or(self.shared.view.lock().held_slot, |s| s as i32);
-                    self.hotbar = Some((current - steps).rem_euclid(9) as u8);
-                }
+                let (x, y) = self.input.mouse;
+                self.input
+                    .wheel(dx, dy, x, y, self.ui.as_ref(), &self.shared);
             }
             WindowEvent::KeyboardInput {
                 event:
@@ -1635,60 +2127,12 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 let pressed = state == ElementState::Pressed;
-                // Track the keymod bits first: they go into the same event's mods.
-                match code {
-                    KeyCode::ControlLeft | KeyCode::ControlRight => self.mods.0 = pressed,
-                    KeyCode::ShiftLeft | KeyCode::ShiftRight => self.mods.1 = pressed,
-                    KeyCode::AltLeft | KeyCode::AltRight => self.mods.2 = pressed,
-                    _ => {}
-                }
-                let mods = sdl_keymod(self.mods.0, self.mods.1, self.mods.2);
-                // The UI goes first: an open screen takes every key and typed character
-                // (Escape, the chat's typing, the inventory's search box), including key
-                // repeats (held Backspace in the chat box); with no screen it takes the HUD's
-                // keys (T, /, E, Escape, F1, F3, Tab, the hotbar digits), first press only.
-                // Only a false return falls through to the game's own handling below.
-                if let (Some(ui), Some(sc)) = (&self.ui, sdl_scancode(code)) {
-                    let forward = key_goes_to_ui(repeat, self.screen_open());
-                    let used = forward && ui.key(sc, keys::keycode(sc), mods, pressed);
-                    if let (Some(c), true) = (typed_char_of(text.as_deref()), pressed) {
-                        ui.char_typed(c, mods);
-                    }
-                    if !game_uses_key(used, self.screen_open()) {
-                        // The UI took it: whatever the game thought was held must go.
-                        self.keys.remove(&code);
-                        return;
-                    }
-                } else if self.screen_open() {
-                    self.keys.remove(&code);
-                    return;
-                }
-                if pressed && !repeat {
+                // The shared routing (UI first, then the game). Its Escape branch frees the
+                // cursor; the window-only keys (F5/F11/F2) stay here.
+                self.input
+                    .key(code, pressed, repeat, text.as_deref(), self.ui.as_ref());
+                if pressed && !repeat && self.focused {
                     match code {
-                        KeyCode::Escape => {
-                            // Not consumed by the UI (no screen): vanilla's Escape has no
-                            // game meaning beyond opening the pause menu, so this only frees
-                            // the cursor for the pre-UI behaviour.
-                            self.set_grab(false);
-                            self.release_keys();
-                        }
-                        KeyCode::Space if self.grabbed && self.focused => {
-                            self.jump_pressed(Instant::now())
-                        }
-                        _ if self.grabbed && self.focused && hotbar_key(code).is_some() => {
-                            self.hotbar = hotbar_key(code);
-                        }
-                        KeyCode::KeyQ if self.grabbed && self.focused => {
-                            // Ctrl+Q drops the whole stack, plain Q one item.
-                            if self.keys.contains(&KeyCode::ControlLeft) {
-                                self.drop_stack = true;
-                            } else {
-                                self.drop_item = true;
-                            }
-                        }
-                        KeyCode::KeyF if self.grabbed && self.focused => {
-                            self.swap_offhand = true;
-                        }
                         KeyCode::F11 => {
                             if let Some(w) = &self.window {
                                 let full = w.fullscreen().is_some();
@@ -1711,11 +2155,6 @@ impl ApplicationHandler for App {
                         _ => {}
                     }
                 }
-                if self.focused && self.grabbed && pressed {
-                    self.keys.insert(code);
-                } else if !pressed {
-                    self.keys.remove(&code);
-                }
             }
             WindowEvent::RedrawRequested => self.draw(event_loop),
             _ => {}
@@ -1725,10 +2164,13 @@ impl ApplicationHandler for App {
     fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
         if let DeviceEvent::MouseMotion { delta } = event {
             if self.grabbed && self.focused {
-                let (yaw, pitch) =
-                    apply_mouse(self.yaw, self.pitch, delta, self.look_deg_per_pixel());
-                self.yaw = yaw;
-                self.pitch = pitch;
+                let (yaw, pitch) = apply_mouse(
+                    self.input.yaw,
+                    self.input.pitch,
+                    delta,
+                    self.look_deg_per_pixel(),
+                );
+                self.input.look(yaw, pitch);
             }
         }
     }
@@ -1900,6 +2342,41 @@ mod tests {
     }
 
     #[test]
+    fn auto_gui_scale_matches_vanilla_resolutions() {
+        // `Window.calculateScale(0, ...)` at vanilla's default window and common
+        // resolutions: the scale grows while the framebuffer keeps >= 320x240 GUI
+        // pixels. Computed by hand from the vanilla method's conditions.
+        assert_eq!(gui_scale_for(0, 854, 480), 2);
+        assert_eq!(gui_scale_for(0, 1280, 720), 3);
+        assert_eq!(gui_scale_for(0, 1920, 1080), 4);
+        assert_eq!(gui_scale_for(0, 2560, 1440), 6);
+        assert_eq!(gui_scale_for(0, 3840, 2160), 9);
+    }
+
+    #[test]
+    fn fixed_gui_scale_is_honoured_and_clamped() {
+        // A fixed option stops there (vanilla: `calculateScale(maxScale, ...)`); a value
+        // too large for the framebuffer is still bounded by the 320x240 rule.
+        assert_eq!(gui_scale_for(1, 1920, 1080), 1);
+        assert_eq!(gui_scale_for(3, 1920, 1080), 3);
+        assert_eq!(gui_scale_for(4, 854, 480), 2);
+        // The option is clamped to 0..=4 like `Options.sanitized`.
+        assert_eq!(resolve_gui_scale(9, 1920, 1080), 4);
+        assert_eq!(resolve_gui_scale(0, 1920, 1080), 4);
+        // Tiny framebuffers still get scale 1 (the loop stops immediately).
+        assert_eq!(gui_scale_for(0, 320, 240), 1);
+        assert_eq!(gui_scale_for(0, 100, 100), 1);
+    }
+
+    #[test]
+    fn gui_scaled_size_uses_ceiling_division() {
+        // `Window.setGuiScale` ceils, so the GUI covers the whole framebuffer.
+        assert_eq!(gui_scaled_size(854, 480, 2), (427, 240));
+        assert_eq!(gui_scaled_size(853, 479, 2), (427, 240));
+        assert_eq!(gui_scaled_size(1920, 1080, 4), (480, 270));
+    }
+
+    #[test]
     fn sdl_scancodes_match_the_hid_usage_table() {
         use haste_jvm::keys as sdl;
         // Letters, digits and punctuation: the consecutive HID ranges.
@@ -1995,6 +2472,114 @@ mod tests {
         // A screen is open: no game input even for keys the screen ignored (movement stops
         // while chat or the inventory is up).
         assert!(!game_uses_key(false, true));
+    }
+
+    #[test]
+    fn script_keys_map_to_their_winit_codes() {
+        // The script's key names and winit's KeyCodes must be one-to-one, so a scripted key
+        // and a windowed key press route identically.
+        use crate::script::Key as K;
+        assert_eq!(winit_key(K::T), KeyCode::KeyT);
+        assert_eq!(winit_key(K::E), KeyCode::KeyE);
+        assert_eq!(winit_key(K::Escape), KeyCode::Escape);
+        assert_eq!(winit_key(K::Enter), KeyCode::Enter);
+        assert_eq!(winit_key(K::LeftShift), KeyCode::ShiftLeft);
+        assert_eq!(winit_key(K::Num1), KeyCode::Digit1);
+        // Every script key must reach the SDL numbering (the scancode lookup must not miss).
+        let all = [
+            K::A,
+            K::B,
+            K::C,
+            K::D,
+            K::E,
+            K::F,
+            K::G,
+            K::H,
+            K::I,
+            K::J,
+            K::K,
+            K::L,
+            K::M,
+            K::N,
+            K::O,
+            K::P,
+            K::Q,
+            K::R,
+            K::S,
+            K::T,
+            K::U,
+            K::V,
+            K::W,
+            K::X,
+            K::Y,
+            K::Z,
+            K::Num0,
+            K::Num1,
+            K::Num2,
+            K::Num3,
+            K::Num4,
+            K::Num5,
+            K::Num6,
+            K::Num7,
+            K::Num8,
+            K::Num9,
+            K::F1,
+            K::F2,
+            K::F3,
+            K::F4,
+            K::F5,
+            K::F6,
+            K::F7,
+            K::F8,
+            K::F9,
+            K::F10,
+            K::F11,
+            K::F12,
+            K::Escape,
+            K::Enter,
+            K::Tab,
+            K::Space,
+            K::Backspace,
+            K::Up,
+            K::Down,
+            K::Left,
+            K::Right,
+            K::LeftShift,
+            K::LeftCtrl,
+            K::LeftAlt,
+        ];
+        for k in all {
+            assert!(sdl_scancode(winit_key(k)).is_some(), "{k:?}");
+        }
+    }
+
+    #[test]
+    fn script_actions_route_like_window_events() {
+        // The scripted walk key and a held windowed walk key both end up in the movement
+        // input (the InputRouter is the same code path); a grab is what a script starts with.
+        let mut r = InputRouter {
+            grabbed: true,
+            ..InputRouter::default()
+        };
+        r.key(KeyCode::KeyW, true, false, None, None);
+        r.key(KeyCode::Space, true, false, None, None);
+        let k = |c: KeyCode| r.keys.contains(&c);
+        assert!(k(KeyCode::KeyW) && k(KeyCode::Space));
+        // Release clears it.
+        r.key(KeyCode::KeyW, false, false, None, None);
+        assert!(!r.keys.contains(&KeyCode::KeyW));
+        // Without the grab (a screen is open in the windowed client), the game key never
+        // lands: that is what keeps a scripted movement key from moving while chat is open.
+        let mut r2 = InputRouter::default();
+        r2.key(KeyCode::KeyW, true, false, None, None);
+        assert!(!r2.keys.contains(&KeyCode::KeyW));
+        // The hotbar digits and the wheel go through the interact path.
+        let mut r3 = InputRouter {
+            grabbed: true,
+            ..InputRouter::default()
+        };
+        r3.key(KeyCode::Digit5, true, false, None, None);
+        assert_eq!(r3.hotbar, Some(4));
     }
 
     fn sample(frame_ms: f32) -> BenchSample {
