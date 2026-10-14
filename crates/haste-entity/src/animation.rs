@@ -53,6 +53,16 @@ fn bob(age: f32, scale: f32) -> Vec3 {
     )
 }
 
+/// Replace (or insert) a part's additive rotation, for the models that run after the humanoid
+/// walk swing and override it (`SkeletonModel.setupAnim`).
+fn set_rotation(o: &mut PoseOverrides, name: &str, rot: Vec3) {
+    if let Some(slot) = o.rotations.iter_mut().find(|(n, _)| n == name) {
+        slot.1 = rot;
+    } else {
+        o.rotations.push((name.into(), rot));
+    }
+}
+
 /// Which `setupAnim` a dumped model uses, recognised from its part names (the model layer is the
 /// oracle, so this needs no entity-type table).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,9 +141,13 @@ pub(crate) fn setup_anim(
         ModelKind::Skeleton => {
             humanoid(&mut o, e, partial, walk_pos, walk_speed, swing, age, is_passenger, false);
             push_head(&mut o, e, head_rel, partial, true);
-            // `SkeletonModel.setupAnim`'s aggressive bow-ready arms need `isAggressive`, which is
-            // `Mob.getTarget() != null` on the server and is not packet-synced, so the arms stay
-            // at the humanoid walk swing.
+            // `SkeletonModel.setupAnim` (26.3 client): an aggressive skeleton not holding a bow
+            // raises both arms straight ahead, overriding the humanoid walk swing. The
+            // `!isHoldingBow` half needs the main-hand item, which this crate does not resolve
+            // yet; without it the aggressive arms are used (the common case).
+            if e.metadata.mob.aggressive {
+                skeleton_aggressive_arms(&mut o, swing, age);
+            }
         }
         ModelKind::Quadruped => {
             quadruped(&mut o, walk_pos, walk_speed);
@@ -223,9 +237,9 @@ fn humanoid(
         ra.z += (swing * PI).sin() * -0.4;
     }
     if zombie {
-        // `AnimationUtils.animateZombieArms`: arms forward, the drop shallower when aggressive
-        // (`isAggressive` is server-only state, so the adult non-aggressive drop is used).
-        let arm_drop = -PI / 2.25;
+        // `AnimationUtils.animateZombieArms`: arms forward; `armDrop = -PI / (aggressive ? 1.5 :
+        // 2.25)` (the adult raiseArms branch; `isAggressive` is `Mob.DATA_MOB_FLAGS_ID` bit 4).
+        let arm_drop = -PI / if e.metadata.mob.aggressive { 1.5 } else { 2.25 };
         let attack_y = (swing * PI).sin();
         let attack_x = ((1.0 - (1.0 - swing) * (1.0 - swing)) * PI).sin();
         let x = arm_drop + attack_y * 1.2 - attack_x * 0.4;
@@ -311,6 +325,20 @@ fn setup_swim(
     }
     ll.x = lerp(swim, ll.x, 0.3 * (walk_pos * 0.33333334 + PI).cos());
     rl.x = lerp(swim, rl.x, 0.3 * (walk_pos * 0.33333334).cos());
+}
+
+/// `SkeletonModel.setupAnim`'s aggressive arms (26.3 client): both arms raised to `-PI/2` and
+/// pushed by the swing, replacing the humanoid walk swing. `swing` is `state.swingAnimation`.
+fn skeleton_aggressive_arms(o: &mut PoseOverrides, swing: f32, age: f32) {
+    let swing2 = (swing * PI).sin();
+    let swing_x = ((1.0 - (1.0 - swing) * (1.0 - swing)) * PI).sin();
+    let x = -FRAC_PI_2 - swing2 * 1.2 + swing_x * 0.4;
+    let mut ra = Vec3::new(x, -0.1 + swing2 * 0.6, 0.0);
+    let mut la = Vec3::new(x, 0.1 - swing2 * 0.6, 0.0);
+    ra += bob(age, 1.0);
+    la += bob(age, -1.0);
+    set_rotation(o, "right_arm", ra);
+    set_rotation(o, "left_arm", la);
 }
 
 /// `QuadrupedModel.setupAnim` (also `CreeperModel.setupAnim`).

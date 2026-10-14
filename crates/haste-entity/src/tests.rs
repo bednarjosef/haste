@@ -605,6 +605,95 @@ fn zombie_arms_are_forward_at_rest() {
     assert!((ra.z - 0.1).abs() < 1e-4, "zombie right arm z {} != 0.1", ra.z);
 }
 
+/// `Mob.DATA_MOB_FLAGS_ID` is metadata index 15 (Entity's 8 + LivingEntity's 7); bit 2 is
+/// left-handed, bit 4 aggressive (`Mob.isLeftHanded`/`isAggressive`).
+#[test]
+fn mob_flags_byte_aggressive_and_left_handed() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: 15,
+            value: MetadataValue::Byte(0x04 | 0x02),
+        }],
+    );
+    let m = &s.get(EntityId(1)).unwrap().metadata;
+    assert!(m.mob.aggressive);
+    assert!(m.mob.left_handed);
+    // Clearing the byte clears both bits.
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: 15,
+            value: MetadataValue::Byte(0),
+        }],
+    );
+    let m = &s.get(EntityId(1)).unwrap().metadata;
+    assert!(!m.mob.aggressive);
+    assert!(!m.mob.left_handed);
+}
+
+/// `AnimationUtils.animateZombieArms` with `aggressive = true`: `armDrop = -PI / 1.5`
+/// (`-2.09440`), the adult raiseArms branch, at rest with age 0 (idle bob adds z 0.1).
+#[test]
+fn aggressive_zombie_arms_are_raised() {
+    let model = mob_model("minecraft:entity/zombie/zombie", &["head", "right_arm", "left_arm"]);
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: 15,
+            value: MetadataValue::Byte(0x04),
+        }],
+    );
+    let e = s.get(EntityId(1)).unwrap();
+    let pose = crate::animation::setup_anim(e, &model, true, 0.0, false);
+    let rot: std::collections::HashMap<_, _> = pose.rotations.iter().cloned().collect();
+    let ra = rot.get("right_arm").unwrap();
+    assert!(
+        (ra.x - -2.094_395_2).abs() < 1e-4,
+        "aggressive zombie right arm {} != -2.09440",
+        ra.x
+    );
+    assert!((ra.y - -0.1).abs() < 1e-4);
+    assert!((ra.z - 0.1).abs() < 1e-4);
+}
+
+/// `SkeletonModel.setupAnim`: an aggressive skeleton not holding a bow raises both arms to
+/// `-PI/2` (with the swing offsets) and bobs them; this replaces the humanoid walk swing.
+#[test]
+fn aggressive_skeleton_arms_raised() {
+    let model = mob_model(
+        "minecraft:entity/skeleton/skeleton",
+        &["head", "right_arm", "left_arm"],
+    );
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: 15,
+            value: MetadataValue::Byte(0x04),
+        }],
+    );
+    let e = s.get(EntityId(1)).unwrap();
+    let pose = crate::animation::setup_anim(e, &model, true, 0.0, false);
+    let rot: std::collections::HashMap<_, _> = pose.rotations.iter().cloned().collect();
+    let ra = rot.get("right_arm").unwrap();
+    let la = rot.get("left_arm").unwrap();
+    assert!(
+        (ra.x - -std::f32::consts::FRAC_PI_2).abs() < 1e-4,
+        "skeleton right arm {} != -PI/2",
+        ra.x
+    );
+    assert!((ra.y - -0.1).abs() < 1e-4);
+    assert!((ra.z - 0.1).abs() < 1e-4);
+    assert!((la.y - 0.1).abs() < 1e-4);
+    assert!((la.z - -0.1).abs() < 1e-4);
+}
+
 /// A quadruped model (pig/cow/sheep: `right_hind_leg`/`left_front_leg` parts) gets
 /// `QuadrupedModel.setupAnim`: the hind and front legs on one side are out of phase.
 #[test]

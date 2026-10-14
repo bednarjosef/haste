@@ -32,11 +32,33 @@ impl SharedFlags {
     }
 }
 
+/// `Mob.DATA_MOB_FLAGS_ID` (index 15: `Entity`'s 8 slots 0..7, `LivingEntity`'s 7 slots 8..14,
+/// then `Mob`'s own first `defineId`; `Mob.java:101`). Only the bits the client reads are kept:
+/// `MOB_FLAG_LEFTHANDED = 2` and `MOB_FLAG_AGGRESSIVE = 4` (`Mob.isLeftHanded`/`isAggressive`,
+/// `Mob.java:1326-1332`).
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct MobFlags {
+    pub aggressive: bool,
+    pub left_handed: bool,
+}
+
+impl MobFlags {
+    fn from_byte(b: i8) -> MobFlags {
+        let b = b as u8;
+        MobFlags {
+            aggressive: b & 0x04 != 0,
+            left_handed: b & 0x02 != 0,
+        }
+    }
+}
+
 /// Per-entity metadata: interpreted shared fields plus every raw entry, indexed.
 #[derive(Default)]
 pub struct Metadata {
     pub shared: SharedFlags,
     pub pose: Option<Pose>,
+    /// The `Mob` flags byte (index 15): aggressive / left-handed.
+    pub mob: MobFlags,
     /// All entries (including the shared ones), kept so later consumers can read the rest.
     entries: std::vec::Vec<MetadataEntry>,
 }
@@ -54,6 +76,7 @@ impl Metadata {
             match (e.index, &e.value) {
                 (0, MetadataValue::Byte(b)) => self.shared = SharedFlags::from_byte(*b),
                 (6, MetadataValue::Pose(p)) => self.pose = Some(*p),
+                (15, MetadataValue::Byte(b)) => self.mob = MobFlags::from_byte(*b),
                 _ => {}
             }
         }
