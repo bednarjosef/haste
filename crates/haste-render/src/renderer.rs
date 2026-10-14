@@ -546,7 +546,7 @@ impl Renderer {
             .as_ref()
             .map(|(_, f)| *f)
             .unwrap_or(wgpu::TextureFormat::Rgba8UnormSrgb);
-        let make_pipeline = |label: &str, blend: Option<wgpu::BlendState>| {
+        let make_pipeline = |label: &str, fragment: &str, blend: Option<wgpu::BlendState>| {
             gpu.device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(label),
@@ -571,7 +571,7 @@ impl Renderer {
                     },
                     fragment: Some(wgpu::FragmentState {
                         module: &shader,
-                        entry_point: Some("fs_main"),
+                        entry_point: Some(fragment),
                         compilation_options: Default::default(),
                         targets: &[Some(wgpu::ColorTargetState {
                             format: surface_format,
@@ -596,10 +596,11 @@ impl Renderer {
                     cache: None,
                 })
         };
-        let pipeline_solid = make_pipeline("chunk-solid", None);
-        let pipeline_cutout = make_pipeline("chunk-cutout", None);
+        let pipeline_solid = make_pipeline("chunk-solid", "fs_main", None);
+        let pipeline_cutout = make_pipeline("chunk-cutout", "fs_main", None);
         let pipeline_translucent = make_pipeline(
             "chunk-translucent",
+            "fs_translucent",
             Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
         );
 

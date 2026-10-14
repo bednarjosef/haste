@@ -125,6 +125,18 @@ fn vs_main(in: VertexIn, @builtin(vertex_index) vi: u32) -> VertexOut {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    return shade(in, 0.5);
+}
+
+// Translucent terrain (water, glass) keeps vanilla's lower cutout: 26.3's
+// TRANSLUCENT_TERRAIN pipeline defines ALPHA_CUTOUT 0.1 where CUTOUT_TERRAIN
+// uses 0.5.
+@fragment
+fn fs_translucent(in: VertexOut) -> @location(0) vec4<f32> {
+    return shade(in, 0.1);
+}
+
+fn shade(in: VertexOut, alpha_cutoff: f32) -> vec4<f32> {
     let rect = sprite_rects[in.sprite];
     let sprite_size = vec2<f32>(rect.zw);
     let atlas_size = vec2<f32>(textureDimensions(atlas_texture));
@@ -134,7 +146,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // atlas_sprite.glsl): fract for repeats, then map into the atlas.
     let uv = (origin + fract(in.sprite_uv) * sprite_size) / atlas_size;
     let color = textureSample(atlas_texture, atlas_sampler, uv);
-    if (color.a < 0.5) {
+    if (color.a < alpha_cutoff) {
         discard;
     }
     // sRGB-ish: tint and light are applied in linear-ish space like Pomme's
