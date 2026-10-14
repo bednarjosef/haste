@@ -4766,9 +4766,8 @@ mod tests {
     /// component forms both work, and missing sides are `SignText.EMPTY`.
     #[test]
     fn sign_nbt_parses_both_sides() {
-        use haste_protocol::nbt::deserializer::NbtReadHelper;
         use haste_protocol::nbt::serializer::{NbtWriteHelper, NbtWriteHelperJava};
-        use haste_protocol::nbt::{Nbt, NbtCompound, NbtTag, COMPOUND_ID};
+        use haste_protocol::nbt::{NbtCompound, NbtTag, COMPOUND_ID};
         let mut front = NbtCompound::new();
         front.put_list(
             "messages",
