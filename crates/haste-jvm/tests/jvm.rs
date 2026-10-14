@@ -710,6 +710,83 @@ fn title_screen_quit() {
     gui.close_screen();
 }
 
+/// The singleplayer world list: SelectWorldScreen opens, lists the worlds of the singleplayer
+/// dir (vanilla's own LevelStorageSource reading each world's `level.dat`), and "Play Selected
+/// World" goes through Haste's WorldOpenFlows replacement, which hands the world to Rust.
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn select_world_screen() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    reset(gui);
+    h.clear_unimplemented().unwrap();
+    // One world in the JVM's singleplayer dir (the config dir in menu mode; cache/jvm-game here):
+    // a level.dat with the fields the summary reads (name, game mode, version, last played).
+    let saves = h.config().singleplayer_dir.clone();
+    let world = saves.join("Haste Test World");
+    std::fs::create_dir_all(&world).unwrap();
+    std::fs::write(world.join("level.dat"), level_dat("Haste Test World", 1)).unwrap();
+    open(&h, haste_jvm::ScreenKind::SelectWorld);
+    assert!(gui.is_open());
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.worldselection.SelectWorldScreen")
+    );
+    // The list loads on the render poll: render until the entry shows (the summary is read on
+    // a background future).
+    let mut t = Vec::new();
+    for _ in 0..100 {
+        let f = render(&h, (0.0, 0.0));
+        t = texts(&f);
+        if t.iter().any(|x| x == "Haste Test World") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    dump(&render(&h, (0.0, 0.0)));
+    for want in [
+        "Select World",
+        "Play Selected World",
+        "Create New World",
+        "Edit",
+        "Delete",
+        "Re-Create",
+        "Back",
+        // the world's entry: name, folder (with last-played date), game-mode line
+        "Haste Test World",
+        "Haste Test World (",
+        "Creative Mode, Version: ",
+    ] {
+        assert!(t.iter().any(|x| x.starts_with(want)), "missing {want:?} in {t:?}");
+    }
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for SelectWorldScreen: {unimpl:#?}"
+    );
+    assert_no_refusals(&h);
+    // Selecting the entry and clicking Play goes through vanilla's joinWorld into Haste's
+    // WorldOpenFlows replacement, which hands the world folder to Rust.
+    let f = render(&h, (0.0, 0.0));
+    let p = text_pos(&f, "Haste Test World").expect("the world entry's position");
+    gui.mouse(f64::from(p.0 + 2), f64::from(p.1 + 2), Some((1, true)));
+    gui.mouse(f64::from(p.0 + 2), f64::from(p.1 + 2), Some((1, false)));
+    let play = text_pos(&render(&h, (0.0, 0.0)), "Play Selected World").expect("the Play button");
+    gui.mouse(f64::from(play.0 + 2), f64::from(play.1 + 2), Some((1, true)));
+    gui.mouse(f64::from(play.0 + 2), f64::from(play.1 + 2), Some((1, false)));
+    if let Some(e) = gui.take_last_error() {
+        panic!("clicking Play failed: {e}");
+    }
+    assert_eq!(
+        gui.take_open_world_request().as_deref(),
+        Some("Haste Test World"),
+        "the world was handed to Rust"
+    );
+    gui.close_screen();
+    std::fs::remove_dir_all(&world).unwrap();
+}
+
 /// Every refused class of the screens this test covers is known and harmless.
 fn assert_no_refusals(h: &JvmHost) {
     let known = [
@@ -750,6 +827,82 @@ fn servers_dat(name: &str, ip: &str) -> Vec<u8> {
     b.push(0x00); // end of the entry
     b.push(0x00); // end of the root
     b
+}
+
+/// The current world data version as Java sees it (`SharedConstants.getCurrentVersion()`, the
+/// version.json of the player's jar): a world's `level.dat` carries it so the world list does
+/// not mark a test world as needing a file fix.
+fn world_data_version(h: &JvmHost) -> i32 {
+    h.with_env(|env| {
+        let cls = h.load_class(env, "net.minecraft.SharedConstants")?;
+        let v = env
+            .call_static_method(
+                &cls,
+                jni_str!("getCurrentVersion"),
+                jni_sig!("()Lnet/minecraft/WorldVersion;"),
+                &[],
+            )?
+            .l()?;
+        let v = env
+            .call_method(&v, jni_str!("dataVersion"), jni_sig!("()Lnet/minecraft/world/level/storage/DataVersion;"), &[])?
+            .l()?;
+        let n = env.call_method(&v, jni_str!("version"), jni_sig!("()I"), &[])?.i()?;
+        Ok(n)
+    })
+    .unwrap()
+}
+
+/// A minimal world `level.dat` (vanilla's format: gzip'd NBT) with the fields the world list's
+/// summary reads: name, game mode, difficulty, the version block and last-played time.
+fn level_dat(name: &str, game_type: i32) -> Vec<u8> {
+    fn tag(bytes: &mut Vec<u8>, id: u8, name: &str) {
+        bytes.push(id);
+        bytes.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(name.as_bytes());
+    }
+    fn string(bytes: &mut Vec<u8>, id: u8, name: &str, value: &str) {
+        tag(bytes, id, name);
+        bytes.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(value.as_bytes());
+    }
+    fn int(bytes: &mut Vec<u8>, name: &str, value: i32) {
+        tag(bytes, 0x03, name);
+        bytes.extend_from_slice(&value.to_be_bytes());
+    }
+    fn long(bytes: &mut Vec<u8>, name: &str, value: i64) {
+        tag(bytes, 0x04, name);
+        bytes.extend_from_slice(&value.to_be_bytes());
+    }
+    let h = host();
+    let version = world_data_version(&h);
+    let mut b = Vec::new();
+    tag(&mut b, 0x0a, ""); // root compound
+    tag(&mut b, 0x0a, "Data");
+    int(&mut b, "version", 19133);
+    int(&mut b, "DataVersion", version);
+    long(&mut b, "LastPlayed", 1_600_000_000_000);
+    string(&mut b, 0x08, "LevelName", name);
+    int(&mut b, "GameType", game_type);
+    int(&mut b, "allowCommands", 0);
+    tag(&mut b, 0x0a, "difficulty_settings");
+    string(&mut b, 0x08, "difficulty", "normal");
+    tag(&mut b, 0x01, "hardcore");
+    b.push(0);
+    tag(&mut b, 0x01, "locked");
+    b.push(0);
+    b.push(0x00); // end of difficulty_settings
+    tag(&mut b, 0x0a, "Version");
+    string(&mut b, 0x08, "Name", "26.3");
+    int(&mut b, "Id", version);
+    string(&mut b, 0x08, "Series", "main");
+    tag(&mut b, 0x01, "Snapshot");
+    b.push(0);
+    b.push(0x00); // end of Version
+    b.push(0x00); // end of Data
+    b.push(0x00); // end of the root
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut gz, &b).unwrap();
+    gz.finish().unwrap()
 }
 
 #[test]
