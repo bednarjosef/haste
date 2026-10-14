@@ -237,7 +237,10 @@ fn fog_underwater_and_nether() {
 
 /// The `(r, g, b)` after `color (` in a client fog line.
 fn color_of(line: &str) -> [f32; 3] {
-    let inside = line.split("color (").nth(1).and_then(|s| s.split(')').next());
+    let inside = line
+        .split("color (")
+        .nth(1)
+        .and_then(|s| s.split(')').next());
     let v: Vec<f32> = inside
         .unwrap_or("")
         .split(',')
@@ -249,7 +252,10 @@ fn color_of(line: &str) -> [f32; 3] {
 
 /// The environmental end distance after `env ` in a client fog line.
 fn end_of(line: &str) -> f32 {
-    let inside = line.split("env ").nth(1).and_then(|s| s.split_whitespace().next());
+    let inside = line
+        .split("env ")
+        .nth(1)
+        .and_then(|s| s.split_whitespace().next());
     inside
         .and_then(|s| s.split("..").nth(1))
         .and_then(|s| s.parse().ok())

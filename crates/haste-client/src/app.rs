@@ -1353,7 +1353,11 @@ fn frame_view(
 /// (like `eye_in_lava`).
 fn camera_fog_type(world: &World, data: &haste_data::GameData, pos: DVec3) -> FogType {
     use haste_core::view::{BlockPhysics, BlockView, FluidKind};
-    let p = BlockPos::new(pos.x.floor() as i32, pos.y.floor() as i32, pos.z.floor() as i32);
+    let p = BlockPos::new(
+        pos.x.floor() as i32,
+        pos.y.floor() as i32,
+        pos.z.floor() as i32,
+    );
     let state = world.block_state(p);
     let surface = |kind| match data.fluid(state) {
         Some(f) if f.kind == kind => {
@@ -1387,7 +1391,11 @@ fn fog_inputs(
     partial: f32,
 ) -> FogInputs {
     use haste_render::BiomeSource;
-    let p = BlockPos::new(pos.x.floor() as i32, pos.y.floor() as i32, pos.z.floor() as i32);
+    let p = BlockPos::new(
+        pos.x.floor() as i32,
+        pos.y.floor() as i32,
+        pos.z.floor() as i32,
+    );
     let biome_id = self::biomes::WorldBiomes(world).biome(p).0 as usize;
     let mut dimension = match world.dimension().name.path() {
         "the_nether" => DimensionFog::nether(),

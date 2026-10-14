@@ -914,7 +914,10 @@ mod tests {
         // Brightening lerps toward the normalised colour (max channel -> 1).
         f.water_vision = 1.0;
         let bright = compute_fog_color(&f, 6000, 12, 0.0, [0.0, 0.0, -1.0], 64.0, -64.0);
-        let scale = 1.0 / WATER_FOG_COLOR[0].max(WATER_FOG_COLOR[1]).max(WATER_FOG_COLOR[2]);
+        let scale = 1.0
+            / WATER_FOG_COLOR[0]
+                .max(WATER_FOG_COLOR[1])
+                .max(WATER_FOG_COLOR[2]);
         assert!(close3(
             bright,
             [
@@ -1112,10 +1115,7 @@ mod tests {
         f.darken_world_amount = 1.0;
         let base = atmospheric_fog_color(6000, 12, [0.0, 0.0, -1.0], 64.0, -64.0);
         let c = compute_fog_color(&f, 6000, 12, 0.0, [0.0, 0.0, -1.0], 64.0, -64.0);
-        assert!(close3(
-            c,
-            [base[0] * 0.7, base[1] * 0.6, base[2] * 0.6]
-        ));
+        assert!(close3(c, [base[0] * 0.7, base[1] * 0.6, base[2] * 0.6]));
     }
 
     #[test]
@@ -1125,7 +1125,10 @@ mod tests {
         let base = atmospheric_fog_color(6000, 12, [0.0, 0.0, -1.0], 64.0, -64.0);
         let c = compute_fog_color(&f, 6000, 12, 0.0, [0.0, 0.0, -1.0], 64.0, -64.0);
         let scale = 1.0 / base[0].max(base[1]).max(base[2]);
-        assert!(close3(c, [base[0] * scale, base[1] * scale, base[2] * scale]));
+        assert!(close3(
+            c,
+            [base[0] * scale, base[1] * scale, base[2] * scale]
+        ));
         // With darkness too, the night-vision branch is skipped.
         f.darkness = Some(400);
         f.darkness_blend = 0.0;
