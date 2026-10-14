@@ -90,6 +90,7 @@ fn render_with_gui_skip(
     let frame = FrameInput {
         camera,
         entities,
+        block_entities: &[],
         gui,
         sky: SkyState {
             time_of_day: 6000,

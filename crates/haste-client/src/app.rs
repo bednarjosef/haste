@@ -6,7 +6,7 @@
 //! interpolated player position and renders. `--screenshot <file>` renders the same frame
 //! offscreen once the world has finished meshing, saves it and exits.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -17,7 +17,9 @@ use glam::DVec3;
 use haste_protocol::haste_core::gui::{GuiCommand, GuiFrame};
 use haste_protocol::haste_core::input::InputState;
 use haste_protocol::haste_core::model::EntityInstance;
-use haste_protocol::haste_core::{ChunkPos, EntityId, Identifier, SectionPos};
+use haste_protocol::haste_core::{
+    BlockPos, BlockStateId, ChunkPos, Direction, EntityId, Identifier, SectionPos,
+};
 use haste_protocol::{Account, ConnectOptions};
 use haste_render::{Camera, FrameInput, FrameStats, LightmapFrame, Renderer, SkyState};
 use haste_setup::options::Options;
@@ -437,6 +439,13 @@ impl Session {
         let mut driver = driver;
         driver.session.set_entity_type_names(type_names);
         let view_distance = login.view_distance.min(options.render_distance as i32);
+        // Block entity type names by synced registry id (the static registry's order when the
+        // server did not sync one), and the block states whose lids `block_event` drives.
+        let block_entity_names = {
+            let regs = driver.connection().registries();
+            block_entity_type_names(regs, &data)
+        };
+        let lid_states = lid_block_states(&data);
         // The particle types of the datagen registry (the synced one has no data we need):
         // one atlas built once, shared by the pool (name resolution) and the renderer.
         let particle_ids: Vec<haste_protocol::haste_core::Identifier> =
@@ -461,11 +470,13 @@ impl Session {
             view_distance,
             haste_render::Particles::new(particle_types.clone()),
             haste_render::default_skin(login.profile.uuid.as_u128()),
+            block_entity_names,
             options.clone(),
         ));
         if sounds.is_some() {
             *shared.sound.lock() = sounds;
         }
+        driver.session.set_lid_states(lid_states);
         let handle = rt.handle().clone();
         let sh = shared.clone();
         let game_thread = std::thread::Builder::new()
@@ -516,6 +527,12 @@ pub struct WorldFeed {
     last_arrival: Option<Instant>,
     /// Entity instances for this frame (reused).
     instances: Vec<EntityInstance>,
+    /// Block entity instances for this frame (reused).
+    be_instances: Vec<haste_render::BlockEntityInstance>,
+    /// Block entity types already logged as undrawable (log once per type).
+    unknown_be_types: HashSet<String>,
+    /// Lid animations by position for this frame (reused lookup scratch).
+    lid_map: HashMap<BlockPos, (f32, f32)>,
     /// The shared world as the mesh workers see it (created on the first feed).
     source: Option<Arc<dyn haste_render::SnapshotSource>>,
     /// Sections submitted this frame (reused).
@@ -611,14 +628,16 @@ impl WorldFeed {
     /// each entity's light for the renderer. The local player's own model is always included
     /// (the server does not spawn us as an entity, so it is built here from the shared view):
     /// the GUI's inventory preview needs it in first person too, and the caller tells the
-    /// renderer not to draw it in the world then (`FrameInput::camera_entity`).
+    /// renderer not to draw it in the world then (`FrameInput::camera_entity`). The frame's
+    /// block entity instances are built first, so one call returns both slices the frame draws.
     fn entities(
         &mut self,
         shared: &Shared,
         renderer: &mut Renderer,
         local: (EntityId, u128),
         partial: f32,
-    ) -> &[EntityInstance] {
+    ) -> (&[EntityInstance], &[haste_render::BlockEntityInstance]) {
+        self.block_entities(shared);
         self.instances.clear();
         {
             let store = shared.entities.read();
@@ -638,7 +657,102 @@ impl WorldFeed {
                 .push(game::player_instance(local.0, local.1, &view, partial));
         }
         renderer.sample_entity_lights(&*shared.world.read(), &self.instances);
-        &self.instances
+        (&self.instances, &self.be_instances)
+    }
+
+    /// Builds this frame's block entity instances (chests, ender chests, trapped chests,
+    /// shulker boxes) from the world's stored block entities: resolves the type name to what
+    /// to draw, reads facing and double-chest half from the block state, combines the lid
+    /// animation over a double chest's halves (vanilla `ChestBlock.opennessCombiner`'s max,
+    /// `BrightnessCombiner`'s max light) and samples the block light. Types Haste cannot
+    /// draw are logged once and skipped. The result is `self.be_instances` (read it after
+    /// this call; `entities` borrows the feed too).
+    fn block_entities(&mut self, shared: &Shared) {
+        use haste_core::view::BlockView as _;
+        self.be_instances.clear();
+        let world = shared.world.read();
+        {
+            let lids = shared.block_entity_lids.lock();
+            self.lid_map.clear();
+            self.lid_map.extend(lids.iter().copied());
+        }
+        let names = &shared.block_entity_names;
+        let blocks = &shared.data.blocks;
+        let xmas = haste_render::xmas_textures();
+        // Only the chunks the camera can see carry drawable block entities; skipping the
+        // rest keeps the per-frame walk short on big worlds with nothing in them.
+        let view = *shared.view.lock();
+        let cam_chunk = ChunkPos::new(
+            view.feet.x.floor() as i32 >> 4,
+            view.feet.z.floor() as i32 >> 4,
+        );
+        let r = view.view_distance.max(1);
+        for chunk in world.loaded_chunks() {
+            if chunk.x < cam_chunk.x - r
+                || chunk.x > cam_chunk.x + r
+                || chunk.z < cam_chunk.z - r
+                || chunk.z > cam_chunk.z + r
+            {
+                continue;
+            }
+            for (pos, be) in world.block_entities_in(chunk) {
+                let Some(type_name) = names.get(be.kind as usize) else {
+                    if self.unknown_be_types.insert(format!("#{}", be.kind)) {
+                        tracing::warn!(
+                            "block entity type id {} is outside the registry; not drawn",
+                            be.kind
+                        );
+                    }
+                    continue;
+                };
+                let state = world.block_state(pos);
+                let block = blocks.block_of(state);
+                let Some(kind) = haste_render::blockentity::kind_of(type_name, block, xmas) else {
+                    if self.unknown_be_types.insert(type_name.to_string()) {
+                        tracing::warn!("no renderer for block entity type {type_name}; not drawn");
+                    }
+                    continue;
+                };
+                let facing = blocks
+                    .property_value(state, "facing")
+                    .and_then(direction_of_property)
+                    .unwrap_or(Direction::South);
+                let half = match blocks.property_value(state, "type") {
+                    Some("left") => haste_render::ChestHalf::Left,
+                    Some("right") => haste_render::ChestHalf::Right,
+                    _ => haste_render::ChestHalf::Single,
+                };
+                // Lid and light: a double chest uses the max over both halves (vanilla's
+                // combiners); the neighbour is the block the connected direction points at
+                // (`ChestBlock.getConnectedDirection`).
+                let mut open = self.lid_map.get(&pos).copied().unwrap_or((0.0, 0.0));
+                let mut light = (world.sky_light(pos), world.block_light(pos));
+                if half != haste_render::ChestHalf::Single {
+                    let connected = connected_direction(facing, half);
+                    let neighbour = pos.offset(connected);
+                    if is_double_chest_half(blocks, &world, neighbour, half, facing) {
+                        if let Some(n) = self.lid_map.get(&neighbour) {
+                            open = (open.0.max(n.0), open.1.max(n.1));
+                        }
+                        light = (
+                            light.0.max(world.sky_light(neighbour)),
+                            light.1.max(world.block_light(neighbour)),
+                        );
+                    }
+                }
+                self.be_instances.push(haste_render::BlockEntityInstance {
+                    pos,
+                    facing,
+                    half,
+                    kind,
+                    open: haste_render::TickPair {
+                        start: open.0,
+                        end: open.1,
+                    },
+                    light,
+                });
+            }
+        }
     }
 
     /// Hands the renderer the first-person hand (`Renderer::set_first_person`) when the view's
@@ -675,6 +789,60 @@ impl WorldFeed {
             && stats.meshes_pending == 0
             && self.last_arrival.is_some_and(|t| t.elapsed() >= quiet)
     }
+}
+
+/// A block state `facing` property value as a `Direction`.
+fn direction_of_property(v: &str) -> Option<Direction> {
+    Direction::ALL.iter().find(|d| d.name() == v).copied()
+}
+
+/// Where a double chest's other half is (vanilla `ChestBlock.getConnectedDirection`:
+/// the LEFT half's neighbour is clockwise of the facing, the RIGHT half's counter-clockwise).
+fn connected_direction(facing: Direction, half: haste_render::ChestHalf) -> Direction {
+    let clockwise = |d: Direction| match d {
+        Direction::North => Direction::East,
+        Direction::East => Direction::South,
+        Direction::South => Direction::West,
+        Direction::West => Direction::North,
+        Direction::Down | Direction::Up => d,
+    };
+    match half {
+        haste_render::ChestHalf::Left => clockwise(facing),
+        _ => clockwise(facing).opposite(),
+    }
+}
+
+/// Whether `pos` holds the matching other half of our double chest: a chest/trapped chest of
+/// the opposite half, the same facing, whose connected direction points back at us (vanilla's
+/// `DoubleBlockCombiner` accepts exactly that neighbour).
+fn is_double_chest_half(
+    blocks: &haste_data::BlockStates,
+    world: &World,
+    pos: BlockPos,
+    our_half: haste_render::ChestHalf,
+    facing: Direction,
+) -> bool {
+    use haste_core::view::BlockView as _;
+    let state = world.block_state(pos);
+    let block = blocks.block_of(state);
+    if block.namespace() != "minecraft" || !matches!(block.path(), "chest" | "trapped_chest") {
+        return false;
+    }
+    let neighbour_half = match blocks.property_value(state, "type") {
+        Some("left") => haste_render::ChestHalf::Left,
+        Some("right") => haste_render::ChestHalf::Right,
+        _ => return false,
+    };
+    let Some(neighbour_facing) = blocks
+        .property_value(state, "facing")
+        .and_then(direction_of_property)
+    else {
+        return false;
+    };
+    neighbour_facing == facing
+        && neighbour_half == our_half.other()
+        && connected_direction(neighbour_facing, neighbour_half).opposite()
+            == connected_direction(facing, our_half)
 }
 
 /// `Camera.calculateFov` + `Camera.modifyFovBasedOnDeathOrFluid` (vanilla): the saved FOV
@@ -1439,6 +1607,37 @@ fn open_assets() -> anyhow::Result<haste_assets::Assets> {
     .with_context(|| format!("opening assets from {}", jar.display()))
 }
 
+/// `minecraft:block_entity_type` names by synced registry id (stored block entities carry that
+/// id); the static registry from the data generator when the server did not sync one, whose
+/// ids are the same on vanilla servers.
+fn block_entity_type_names(
+    regs: &haste_protocol::SyncedRegistries,
+    data: &haste_data::GameData,
+) -> Vec<Identifier> {
+    let registry = Identifier::minecraft("block_entity_type");
+    if let Some(entries) = regs.entries(&registry) {
+        return entries.iter().map(|e| e.id.clone()).collect();
+    }
+    let n = data.registries.len("minecraft:block_entity_type");
+    (0..n as u32)
+        .map(|i| {
+            data.registries
+                .name("minecraft:block_entity_type", haste_core::RegistryIndex(i))
+                .cloned()
+                .unwrap_or_else(|| Identifier::minecraft("air"))
+        })
+        .collect()
+}
+
+/// The block states whose `block_event` action 1 drives a lid (chests, ender chests, trapped
+/// chests, shulker boxes; copper chests are not drawn yet), for the session's event filter.
+fn lid_block_states(data: &haste_data::GameData) -> std::collections::HashSet<BlockStateId> {
+    (0..data.blocks.len() as u32)
+        .map(BlockStateId)
+        .filter(|s| haste_render::blockentity::is_lid_block(data.blocks.block_of(*s)))
+        .collect()
+}
+
 /// The sound output for a joined game: `sounds.json` parsed from the real assets, the
 /// sound-event name table (the server's synced registry or the static one), played
 /// through the default device with the saved volumes. Without an audio device it stays
@@ -1535,7 +1734,8 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         last_camera = camera;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         feed.set_first_person(&shared, &mut renderer, perspective);
-        let entities = feed.entities(&shared, &mut renderer, session.local, partial);
+        let (entities, block_entities) =
+            feed.entities(&shared, &mut renderer, session.local, partial);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
         // The HUD, like the window: waiting for the JVM, then one `Ui` for this render thread.
@@ -1557,6 +1757,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         let frame = FrameInput {
             camera,
             entities,
+            block_entities,
             gui: &gui,
             sky,
             partial_tick: partial,
@@ -1625,7 +1826,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let view = *shared.view.lock();
     let entities = feed.instances.len();
     println!(
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} entity instances ({} drew geometry; perspective {}, local player {}), {} particles drawn, target {:?}",
+        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} entity instances ({} drew geometry; perspective {}, local player {}), {} particles drawn, {} block entities, target {:?}",
         file.display(),
         image.width(),
         image.height(),
@@ -1643,6 +1844,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         args.perspective,
         perspective.draws_player(),
         renderer.particles_drawn(),
+        stats.block_entities_drawn,
         view.block_target
     );
     drop(session);
@@ -1740,6 +1942,14 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut fps = FpsCounter::new();
     let mut last_err: Option<String> = None;
     let mut finished = false;
+    // With `--pos`, the script's `wait_until settled` also waits for the server to have
+    // teleported the player to these feet coordinates (the caller teleports over RCON while
+    // we join, like the screenshot mode's `--pos`).
+    let want_pos = args
+        .pos
+        .as_ref()
+        .filter(|v| v.len() == 3)
+        .map(|v| DVec3::new(v[0], v[1], v[2]));
     // Screenshot actions of this tick, saved after the frame is rendered (the readback must
     // include the frame the actions just produced: an open screen, the typed chat).
     let mut shots: Vec<String> = Vec::new();
@@ -1762,7 +1972,9 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         if Instant::now() >= next_tick {
             next_tick += tick;
             let hud_ready = ui.is_some() || shared.hud_failed.load(Ordering::Relaxed);
+            let at_pos = want_pos.is_none_or(|p| (view.feet - p).length() <= 0.5);
             let settled = view.has_position
+                && at_pos
                 && hud_ready
                 && feed.settled(&last_stats, Duration::from_millis(1500));
             if !settled && frames.is_multiple_of(40) {
@@ -1866,7 +2078,8 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             Instant::now(),
         );
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
-        let entities = feed.entities(&shared, &mut renderer, session.local, partial);
+        let (entities, block_entities) =
+            feed.entities(&shared, &mut renderer, session.local, partial);
         let block_target = view.block_target;
         let breaking = shared.breaking.lock().clone();
         if ui.is_none() {
@@ -1902,6 +2115,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         let frame = FrameInput {
             camera,
             entities,
+            block_entities,
             gui: &gui,
             sky,
             partial_tick: partial,
@@ -2239,12 +2453,14 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         vd = v;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         feed.set_first_person(&shared, &mut renderer, game::Perspective::FirstPerson);
-        let entities = feed.entities(&shared, &mut renderer, session.local, partial);
+        let (entities, block_entities) =
+            feed.entities(&shared, &mut renderer, session.local, partial);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
         let frame = FrameInput {
             camera,
             entities,
+            block_entities,
             gui: &gui,
             sky,
             partial_tick: partial,
@@ -2316,12 +2532,14 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         let feed_start = Instant::now();
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         let feed_ms = feed_start.elapsed().as_secs_f32() * 1000.0;
-        let entities = feed.entities(&shared, &mut renderer, session.local, partial_tick);
+        let (entities, block_entities) =
+            feed.entities(&shared, &mut renderer, session.local, partial_tick);
         let block_target = shared.view.lock().block_target;
         let breaking = shared.breaking.lock().clone();
         let frame = FrameInput {
             camera,
             entities,
+            block_entities,
             gui: &gui,
             sky,
             partial_tick,
@@ -2617,9 +2835,9 @@ impl App {
         let t1 = Instant::now();
         self.feed
             .set_first_person(&self.shared, renderer, self.perspective);
-        let entities = self
-            .feed
-            .entities(&self.shared, renderer, self.local, partial);
+        let (entities, block_entities) =
+            self.feed
+                .entities(&self.shared, renderer, self.local, partial);
         let block_target = self.shared.view.lock().block_target;
         self.breaking.clear();
         self.breaking
@@ -2664,6 +2882,7 @@ impl App {
         let frame = FrameInput {
             camera,
             entities,
+            block_entities,
             gui: &self.gui,
             sky,
             partial_tick: partial,

@@ -48,6 +48,12 @@ pub trait WorldSink {
     fn apply_light(&mut self, pos: ChunkPos, light: &LightData);
     /// `World::set_block_entity`.
     fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData);
+    /// The block state at `pos` (`World::block_state`; `AIR` by default for fakes). Named
+    /// differently from the `BlockView` method so `World` (which has both) stays unambiguous.
+    fn block_state_at(&self, pos: BlockPos) -> BlockStateId {
+        let _ = pos;
+        BlockStateId::AIR
+    }
     /// Drops every chunk and switches to `dim` (respawn / dimension change).
     fn reset(&mut self, dim: &DimensionInfo);
     /// Number of loaded chunks.
@@ -165,6 +171,9 @@ impl WorldSink for World {
     }
     fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData) {
         World::set_block_entity(self, pos, data)
+    }
+    fn block_state_at(&self, pos: BlockPos) -> BlockStateId {
+        World::block_state(self, pos)
     }
     fn reset(&mut self, dim: &DimensionInfo) {
         let biomes = 1usize << self.biome_bits();
@@ -366,6 +375,35 @@ pub struct NetCounters {
     pub own_sounds: u64,
 }
 
+/// One block entity's lid animation (vanilla `ChestLidController` for chests and ender chests,
+/// `ShulkerBoxBlockEntity.updateAnimation`'s progress for shulker boxes: both step their value
+/// by 0.1 per tick towards the open target). `old` is the value at the start of the last tick,
+/// for the partial-tick lerp.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LidAnim {
+    pub old: f32,
+    pub value: f32,
+    pub open: bool,
+}
+
+impl LidAnim {
+    /// One 20 Hz tick (vanilla `ChestLidController.tickLid`: 0.1 steps, clamped at 0 and 1).
+    fn tick(&mut self) {
+        self.old = self.value;
+        let target = if self.open { 1.0 } else { 0.0 };
+        if self.value < target {
+            self.value = (self.value + 0.1).min(target);
+        } else if self.value > target {
+            self.value = (self.value - 0.1).max(target);
+        }
+    }
+
+    /// Whether the lid is at rest closed (nothing left to animate, no need to copy it out).
+    fn at_rest_closed(&self) -> bool {
+        !self.open && self.value == 0.0
+    }
+}
+
 /// The client's per-tick lightmap state: vanilla `LightmapRenderStateExtractor` (the
 /// block-light flicker random walk, the effect-driven night vision and darkness) plus
 /// `GameRenderer`'s boss-overlay world darkening and `ClientLevel`'s lightning sky flash. The
@@ -523,6 +561,12 @@ pub struct Session {
     pub dimension: DimensionInfo,
     /// Counters.
     pub counters: NetCounters,
+    /// Lid animations by block position, driven by `block_event` action 1 (chest and shulker
+    /// box lids; entries only exist while the block is one of `lid_states`).
+    pub lids: HashMap<BlockPos, LidAnim>,
+    /// The block states whose `block_event` action 1 belongs to a lid (chest family, shulker
+    /// boxes; copper chests are not drawn yet), filled from the game data at join.
+    lid_states: Option<HashSet<BlockStateId>>,
     /// Other players' break progress (`block_destruction`): breaker id -> (block, stage 0..=9).
     pub breaking: HashMap<i32, (BlockPos, u8)>,
     /// Entities the server spawned and has not removed (crosshair targets).
@@ -599,6 +643,8 @@ impl Session {
             entity_id,
             dimension,
             breaking: HashMap::new(),
+            lids: HashMap::new(),
+            lid_states: None,
             entity_ids: HashSet::new(),
             entity_boxes: Vec::new(),
             entity_types: Vec::new(),
@@ -797,6 +843,13 @@ impl Session {
         }))
     }
 
+    /// The block states that carry a lid (chest family, shulker boxes), from the game data;
+    /// call once at join so `block_event` can tell lid events from other blocks' (pistons use
+    /// the same action id).
+    pub fn set_lid_states(&mut self, states: HashSet<BlockStateId>) {
+        self.lid_states = Some(states);
+    }
+
     /// Applies one clientbound packet; serverbound replies go to `out`.
     pub fn apply<W: WorldSink + ?Sized, E: EntitySink + ?Sized>(
         &mut self,
@@ -826,6 +879,8 @@ impl Session {
                 self.entity_id = EntityId(l.entity_id);
                 let mode = GameMode::from_id(l.spawn.game_mode).unwrap_or(self.player.game_mode);
                 self.player = LocalPlayer::with_entity(self.entity_id, mode);
+                self.breaking.clear();
+                self.lids.clear();
                 self.counters.respawns += 1;
             }
         }
@@ -868,6 +923,7 @@ impl Session {
                 entities.clear();
                 self.entity_ids.clear();
                 self.breaking.clear();
+                self.lids.clear();
                 self.fireworks.clear();
                 self.attached_firework = None;
                 self.dimension = dim;
@@ -899,13 +955,29 @@ impl Session {
                 }
             },
             P::ForgetLevelChunk(f) => {
+                // The chunk's block entities (and their lids) are gone with it.
+                self.lids.retain(|pos, _| pos.chunk() != f.pos);
                 world.unload_chunk(f.pos);
                 self.counters.chunks_unloaded += 1;
             }
             P::BlockUpdate(b) => {
                 let c = b.change();
+                self.lids.remove(&c.pos);
                 if !self.player.defer_block_update(c.pos, c.state) {
                     world.set_block(c.pos, c.state);
+                }
+            }
+            // A lid's open target (vanilla routes `block_event` to the block entity's
+            // `triggerEvent`: action 1, the opener count; chests use `count > 0`, shulker
+            // boxes 0 to close and 1 to open, which `> 0` matches exactly).
+            P::BlockEvent(b) if b.action == 1 => {
+                let is_lid = self
+                    .lid_states
+                    .as_ref()
+                    .is_some_and(|s| s.contains(&world.block_state_at(b.pos)));
+                if is_lid {
+                    let lid = self.lids.entry(b.pos).or_default();
+                    lid.open = b.param > 0;
                 }
             }
             P::BlockEntityData(b) => {
@@ -1163,6 +1235,12 @@ impl Session {
         }
         for (pos, state) in self.player.take_world_edits() {
             world.set_block(pos, state);
+            self.lids.remove(&pos);
+        }
+        // Every lid's animation step (vanilla ticks each chest's `ChestLidController` and each
+        // shulker box's `updateAnimation` once per client tick).
+        for lid in self.lids.values_mut() {
+            lid.tick();
         }
     }
 
@@ -1170,6 +1248,18 @@ impl Session {
     pub fn breaking_stages(&self, out: &mut Vec<(BlockPos, u8)>) {
         out.extend(self.breaking.values().copied());
         out.extend(self.player.break_progress());
+    }
+
+    /// Lid animations to draw this frame, as (position, value at the last tick's start and
+    /// end) pairs for the partial-tick lerp. Only open or animating lids are listed (a closed
+    /// chest at rest draws the same as no entry).
+    pub fn lid_states(&self, out: &mut Vec<(BlockPos, (f32, f32))>) {
+        out.extend(
+            self.lids
+                .iter()
+                .filter(|(_, l)| !l.at_rest_closed())
+                .map(|(pos, l)| (*pos, (l.old, l.value))),
+        );
     }
 
     /// `level_particles`: resolve the particle type against the static registry's names and
