@@ -23,6 +23,7 @@ fn ids() -> AttributeIds {
         submerged_mining_speed: 34,
         block_interaction_range: 8,
         entity_interaction_range: 13,
+        attack_speed: 3,
     }
 }
 
@@ -100,12 +101,22 @@ impl BlockView for Unloaded {
 }
 
 fn tick(p: &mut LocalPlayer, input: &InputState) -> Vec<ServerboundPlay> {
+    tick_riding(p, input, None)
+}
+
+/// One tick that knows where the vehicle we ride is (the passenger tick follows it).
+fn tick_riding(
+    p: &mut LocalPlayer,
+    input: &InputState,
+    vehicle: Option<VehiclePose>,
+) -> Vec<ServerboundPlay> {
     let mut out = Vec::new();
     p.tick_with(
         input,
         &world(),
         &TestShapes::default(),
         &TestShapes::default(),
+        vehicle,
         &mut out,
     );
     out
@@ -139,6 +150,7 @@ fn first_teleport_accepts_one_tick_later_then_reports_loaded() {
         &world(),
         &TestShapes::default(),
         &TestShapes::default(),
+        None,
         &mut out,
     );
     assert!(out.is_empty());
@@ -303,6 +315,7 @@ fn first_move_after_join_carries_the_server_position() {
         &floor,
         &TestShapes::default(),
         &TestShapes::default(),
+        None,
         &mut out,
     );
     assert!(out.is_empty());
@@ -311,6 +324,7 @@ fn first_move_after_join_carries_the_server_position() {
         &floor,
         &TestShapes::default(),
         &TestShapes::default(),
+        None,
         &mut out,
     );
     // accept (with the server's position) + player_loaded, then the per-tick packets.
@@ -467,6 +481,7 @@ fn unloaded_chunk_below_falls_at_vanillas_rate() {
         &w,
         &TestShapes::default(),
         &TestShapes::default(),
+        None,
         &mut out,
     );
     assert_eq!(p.state.velocity.y, UNLOADED_CHUNK_FALL_SPEED);
@@ -478,6 +493,7 @@ fn unloaded_chunk_below_falls_at_vanillas_rate() {
             &w,
             &TestShapes::default(),
             &TestShapes::default(),
+            None,
             &mut out,
         );
     }
@@ -491,6 +507,7 @@ fn unloaded_chunk_below_falls_at_vanillas_rate() {
         &w,
         &TestShapes::default(),
         &TestShapes::default(),
+        None,
         &mut out,
     );
     assert_eq!(p.state.velocity.y, 0.0);
@@ -608,6 +625,98 @@ fn camera_interpolates_and_adds_eye_height() {
     assert!(eye1.z > eye0.z, "yaw 0 walks towards +z");
 }
 
+/// Vanilla `Camera.tick`: the camera halves its distance to the pose's eye height each tick,
+/// and the pose only changes after the movement (`Player.updatePlayerPose` at the end of
+/// `Player.tick`), so the eye height at the END of the tick shift is pressed in is still the
+/// standing one, and the following ticks approach 1.27 (vanilla `Avatar.POSES` crouching eye
+/// height) by halving: 1.62, 1.445, 1.3575, 1.31375, 1.291875, ... The values are the f32
+/// arithmetic vanilla does (`eyeHeight += (getEyeHeight() - eyeHeight) * 0.5F`).
+#[test]
+fn camera_eye_height_halves_towards_the_crouching_eye_height() {
+    let (mut p, _) = spawned();
+    let shift = InputState {
+        sneak: true,
+        ..Default::default()
+    };
+    // t is the tick count since shift was pressed; the target seen by the camera pair is the
+    // pose at the end of the previous tick, so the sequence starts one tick late.
+    let mut expected_eye = 1.62f32;
+    for t in 0..5 {
+        tick(&mut p, &shift);
+        if t > 0 {
+            expected_eye += (1.27f32 - expected_eye) * 0.5;
+        }
+        assert_eq!(p.state.pose, haste_physics::Pose::Crouching);
+        let (eye_end, _, _) = p.camera(1.0);
+        // The camera pair brackets the smoothed value: start of the tick is the last one.
+        assert_eq!(eye_end.y - p.state.pos.y, f64::from(expected_eye));
+    }
+    // Releasing shift mirrors it back towards 1.62, again one tick late: the first tick
+    // after release still halves towards 1.27 (the pose was crouching when the camera
+    // ticked), the second one towards 1.62.
+    let stand = InputState::default();
+    for t in 0..3 {
+        tick(&mut p, &stand);
+        let target = if t == 0 { 1.27f32 } else { 1.62f32 };
+        expected_eye += (target - expected_eye) * 0.5;
+        let (eye_end, _, _) = p.camera(1.0);
+        assert_eq!(eye_end.y - p.state.pos.y, f64::from(expected_eye));
+    }
+}
+
+/// The partial-tick interpolation runs between the camera's old and new eye height (vanilla
+/// `Camera.setup`: `Mth.lerp(partialTicks, eyeHeightOld, eyeHeight)`), a smooth ramp within
+/// each tick rather than a jump.
+#[test]
+fn camera_eye_height_interpolates_within_the_tick() {
+    let (mut p, _) = spawned();
+    let shift = InputState {
+        sneak: true,
+        ..Default::default()
+    };
+    tick(&mut p, &shift); // pose -> Crouching, camera pair still 1.62 -> 1.62
+    tick(&mut p, &shift); // camera pair 1.62 -> 1.445
+    let y0 = p.camera(0.0).0.y - p.state.pos.y;
+    let half = p.camera(0.5).0.y - p.state.pos.y;
+    let y1 = p.camera(1.0).0.y - p.state.pos.y;
+    assert_eq!(y0, f64::from(1.62f32));
+    assert_eq!(y1, f64::from(1.62f32 + (1.27f32 - 1.62f32) * 0.5));
+    // The lerp is vanilla's f32 `Mth.lerp`; allow its rounding against the f64 mean.
+    assert!(
+        (half - (y0 + y1) * 0.5).abs() < 1e-6,
+        "half {half} vs mean {}",
+        (y0 + y1) * 0.5
+    );
+}
+
+/// Pressing shift sends `player_input` with the SNEAK bit, releasing it sends it cleared
+/// (vanilla `LocalPlayer.sendChanges` sends `ServerboundPlayerInputPacket` when the held keys
+/// changed).
+#[test]
+fn shift_sends_player_input_with_the_sneak_bit() {
+    let (mut p, _) = spawned();
+    let shift = InputState {
+        sneak: true,
+        ..Default::default()
+    };
+    let out = tick(&mut p, &shift);
+    assert_eq!(names(&out), ["input", "status", "tick_end"]);
+    match &out[0] {
+        ServerboundPlay::PlayerInput(i) => {
+            assert_eq!(i.flags, input_flags::SNEAK);
+        }
+        _ => unreachable!(),
+    }
+    // Held: nothing more. Released: the bit clears.
+    assert_eq!(names(&tick(&mut p, &shift)), ["tick_end"]);
+    let out = tick(&mut p, &InputState::default());
+    assert_eq!(names(&out), ["input", "tick_end"]);
+    match &out[0] {
+        ServerboundPlay::PlayerInput(i) => assert_eq!(i.flags, 0),
+        _ => unreachable!(),
+    }
+}
+
 #[test]
 fn respawn_waits_for_a_new_position() {
     let (mut p, mut out) = spawned();
@@ -642,4 +751,284 @@ fn respawn_waits_for_a_new_position() {
         ["accept", "loaded"]
     );
     assert!(p.loaded);
+}
+
+// ---------------------------------------------------------------------------
+// Riding: the passenger tick (vanilla `rideTick`).
+// ---------------------------------------------------------------------------
+
+/// A vehicle at `pos` facing yaw 0 (the yaw matters only in `the_seat_turns_with_the_vehicle`).
+fn vehicle_at(pos: DVec3) -> VehiclePose {
+    VehiclePose { pos, yaw: 0.0 }
+}
+
+/// Mounted on a vehicle at (0.5, 64, 0.5) with a seat 0.1 above it, after the join flow.
+fn riding() -> LocalPlayer {
+    let (mut p, _) = spawned();
+    p.set_vehicle(
+        Some(EntityId(9)),
+        SeatPoint {
+            x: 0.0,
+            y: 0.1,
+            z: 0.0,
+        },
+    );
+    p
+}
+
+#[test]
+fn the_passenger_sits_at_the_seat_and_follows_the_vehicle() {
+    let mut p = riding();
+    let pose = vehicle_at(DVec3::new(10.0, 64.0, 10.0));
+    let out = tick_riding(&mut p, &InputState::default(), Some(pose));
+    assert_eq!(p.state.pos, DVec3::new(10.0, 64.1, 10.0));
+    // Rotation only; never a position packet.
+    assert_eq!(names(&out), ["tick_end"]);
+    // The vehicle moves: the passenger moves with it, and the camera follows (prev_pos
+    // brackets the tick like always).
+    let out = tick_riding(
+        &mut p,
+        &InputState::default(),
+        Some(vehicle_at(DVec3::new(11.0, 64.0, 10.0))),
+    );
+    assert_eq!(p.state.pos, DVec3::new(11.0, 64.1, 10.0));
+    assert_eq!(p.prev_pos, DVec3::new(10.0, 64.1, 10.0));
+    let (eye, _, _) = p.camera(0.5);
+    assert!((eye.x - 10.5).abs() < 1e-9, "{eye:?}");
+    assert_eq!(names(&out), ["tick_end"]);
+    // An untracked vehicle leaves the passenger where it was.
+    tick_riding(&mut p, &InputState::default(), None);
+    assert_eq!(p.state.pos, DVec3::new(11.0, 64.1, 10.0));
+}
+
+#[test]
+fn the_seat_turns_with_the_vehicle() {
+    let mut p = riding();
+    // A seat 0.2 to one side of the vehicle: at yaw 0 that offset is along x, at yaw 90 along
+    // z (`Entity.positionRider` runs every tick, so the seat follows the vehicle).
+    p.set_vehicle(
+        Some(EntityId(9)),
+        SeatPoint {
+            x: 0.2,
+            y: 0.0,
+            z: 0.0,
+        },
+    );
+    let pose = VehiclePose {
+        pos: DVec3::new(10.0, 64.0, 10.0),
+        yaw: 90.0,
+    };
+    tick_riding(&mut p, &InputState::default(), Some(pose));
+    let d = p.state.pos - pose.pos;
+    assert!(d.x.abs() < 1e-6 && (d.z - 0.2).abs() < 1e-6, "{d:?}");
+}
+
+#[test]
+fn a_passenger_looks_freely_and_sends_rotation_only() {
+    let mut p = riding();
+    let look = InputState {
+        yaw: 30.0,
+        pitch: 10.0,
+        ..Default::default()
+    };
+    let out = tick_riding(
+        &mut p,
+        &look,
+        Some(vehicle_at(DVec3::new(10.0, 64.0, 10.0))),
+    );
+    assert_eq!((p.state.yaw, p.state.pitch), (30.0, 10.0));
+    // The look changed: one rotation packet, no position (the keys have not changed, so no
+    // player_input with it).
+    assert_eq!(names(&out), ["rot", "tick_end"]);
+    // Same look again: nothing but the tick end.
+    let out = tick_riding(
+        &mut p,
+        &look,
+        Some(vehicle_at(DVec3::new(10.0, 64.0, 10.0))),
+    );
+    assert_eq!(names(&out), ["tick_end"]);
+}
+
+#[test]
+fn sneak_while_riding_sets_the_shift_flag_in_player_input() {
+    let mut p = riding();
+    let sneak = InputState {
+        sneak: true,
+        ..Default::default()
+    };
+    let out = tick_riding(
+        &mut p,
+        &sneak,
+        Some(vehicle_at(DVec3::new(10.0, 64.0, 10.0))),
+    );
+    let flags = out.iter().find_map(|p| match p {
+        ServerboundPlay::PlayerInput(i) => Some(i.flags),
+        _ => None,
+    });
+    assert_eq!(
+        flags,
+        Some(haste_protocol::packets::play::serverbound::input_flags::SNEAK)
+    );
+    // Still mounted: the server answers the shift flag with set_passengers (not our doing).
+    assert_eq!(p.vehicle(), Some(EntityId(9)));
+}
+
+#[test]
+fn dismount_resumes_physics_from_the_seat() {
+    let mut p = riding();
+    tick_riding(
+        &mut p,
+        &InputState::default(),
+        Some(vehicle_at(DVec3::new(0.5, 64.0, 0.5))),
+    );
+    assert_eq!(p.state.pos, DVec3::new(0.5, 64.1, 0.5));
+    // Dismount: gravity takes over from the seat position. The first tick after it builds
+    // velocity (the ride zeroed it); the fall starts the tick after.
+    p.set_vehicle(None, SeatPoint::ZERO);
+    tick_riding(&mut p, &InputState::default(), None);
+    assert_eq!(p.state.pos, DVec3::new(0.5, 64.1, 0.5));
+    let out = tick_riding(&mut p, &InputState::default(), None);
+    assert!(
+        p.state.pos.y < 64.1 && p.state.pos.y > 63.9,
+        "gravity resumed: {}",
+        p.state.pos.y
+    );
+    // And movement packets are position packets again.
+    assert!(out.iter().any(|p| {
+        matches!(
+            p,
+            ServerboundPlay::MovePlayerPos(_) | ServerboundPlay::MovePlayerPosRot(_)
+        )
+    }));
+}
+
+// ---------------------------------------------------------------------------
+// Elytra flight (vanilla `Player.tryToStartFallFlying`, shared flag 7).
+// ---------------------------------------------------------------------------
+
+/// Equips a glider in the chest slot: item registry index `index` is marked as a glider item
+/// (the reports' `minecraft:glider` component) and put in the chest armor slot.
+fn equip_glider(p: &mut LocalPlayer, index: u32) {
+    let item = haste_core::RegistryIndex(index);
+    p.int.glider_items = Some([item].into_iter().collect());
+    p.int.armor[1] = haste_core::entity::ItemStackData {
+        count: 1,
+        item: Some(item),
+        components_raw: Default::default(),
+    };
+}
+
+/// Put the loaded player in the air with no velocity.
+fn airborne(p: &mut LocalPlayer) {
+    p.state.pos = DVec3::new(0.5, 100.0, 0.5);
+    p.state.on_ground = false;
+    p.state.velocity = DVec3::ZERO;
+}
+
+#[test]
+fn jump_in_the_air_with_a_glider_starts_falling_flying() {
+    let (mut p, _) = spawned();
+    equip_glider(&mut p, 42);
+    airborne(&mut p);
+    let out = tick(
+        &mut p,
+        &InputState {
+            jump: true,
+            ..Default::default()
+        },
+    );
+    assert!(p.state.fall_flying, "the local flag is set at once");
+    assert!(
+        out.iter().any(|m| matches!(
+            m,
+            ServerboundPlay::PlayerCommand(c) if c.action == command::START_FALL_FLYING
+        )),
+        "START_FALL_FLYING is sent: {out:?}"
+    );
+    // Vanilla `Player.getDesiredPose` -> FALL_FLYING; the pose's eye height is 0.4.
+    assert_eq!(p.state.pose, haste_physics::Pose::FallFlying);
+    assert!((p.eye_height() - 0.4).abs() < 1e-6, "{}", p.eye_height());
+    // The glide already moves this tick (it sinks from the look-ahead pitch 0).
+    assert!(p.state.pos.y < 100.0, "{}", p.state.pos);
+}
+
+#[test]
+fn jump_in_the_air_without_a_glider_does_not_start() {
+    let (mut p, _) = spawned();
+    airborne(&mut p);
+    let out = tick(
+        &mut p,
+        &InputState {
+            jump: true,
+            ..Default::default()
+        },
+    );
+    assert!(!p.state.fall_flying);
+    assert!(!out
+        .iter()
+        .any(|m| matches!(m, ServerboundPlay::PlayerCommand(_))));
+    assert_ne!(p.state.pose, haste_physics::Pose::FallFlying);
+}
+
+#[test]
+fn a_glider_in_the_chest_only_helps_with_the_glider_component() {
+    let (mut p, _) = spawned();
+    // A plain chest item (not in the glider set): no start.
+    p.int.armor[1] = haste_core::entity::ItemStackData {
+        count: 1,
+        item: Some(haste_core::RegistryIndex(42)),
+        components_raw: Default::default(),
+    };
+    assert!(!p.has_glider());
+    // The same item once the reports mark it as a glider.
+    p.int.glider_items = Some([haste_core::RegistryIndex(42)].into_iter().collect());
+    assert!(p.has_glider());
+    // An empty stack is never a glider.
+    p.int.armor[1] = Default::default();
+    assert!(!p.has_glider());
+}
+
+#[test]
+fn server_shared_flag_7_sets_and_clears_fall_flying() {
+    use haste_core::entity::{MetadataEntry, MetadataValue};
+    let (mut p, mut out) = spawned();
+    let set = |b: i8| {
+        ClientboundPlay::SetEntityData(cb::SetEntityData {
+            entity_id: ME.0,
+            metadata: vec![MetadataEntry {
+                index: 0,
+                value: MetadataValue::Byte(b),
+            }],
+        })
+    };
+    assert!(p.handle(&set(0x80u8 as i8), &mut out));
+    assert!(p.state.fall_flying);
+    assert_eq!(
+        p.state.pose,
+        haste_physics::Pose::Standing,
+        "pose follows next tick"
+    );
+    p.handle(&set(0), &mut out);
+    assert!(!p.state.fall_flying);
+}
+
+#[test]
+fn landing_ends_the_glide_and_the_pose() {
+    let (mut p, _) = spawned();
+    p.state.fall_flying = true;
+    p.state.pos = DVec3::new(0.5, 1.5, 0.5);
+    p.state.on_ground = false;
+    p.state.velocity = DVec3::new(0.0, -0.5, 0.0);
+    for _ in 0..200 {
+        tick(&mut p, &InputState::default());
+        if p.state.on_ground {
+            break;
+        }
+    }
+    assert!(p.state.on_ground, "{}", p.state.pos);
+    assert!(
+        !p.state.fall_flying,
+        "vanilla `LivingEntity.travelFallFlying`"
+    );
+    assert_ne!(p.state.pose, haste_physics::Pose::FallFlying);
 }

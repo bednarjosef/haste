@@ -154,7 +154,10 @@ pub struct FrameInput<'a> { pub camera: Camera, pub entities: &'a [haste_core::m
     /// Block under the crosshair and the face hit: drawn as the outline of its outline shape.
     pub block_target: Option<(BlockPos, Direction)>,
     /// Crack overlays: our own break progress plus other players' `block_destruction` stages (0..=9).
-    pub breaking: &'a [(BlockPos, u8)] }
+    pub breaking: &'a [(BlockPos, u8)],
+    /// The entity the camera is, when the world pass must not draw it (first person; the GUI
+    /// pass still finds the instance in `entities` for the inventory's player preview).
+    pub camera_entity: Option<EntityId> }
 pub struct Camera { pub pos: DVec3, pub yaw: f32, pub pitch: f32, pub fov_deg: f32, pub roll_deg: f32 /* hurt tilt, degrees */ }
 pub struct SkyState { pub time_of_day: i64, pub rain: f32, pub dimension_has_sky: bool, pub fog_start: f32, pub fog_end: f32 }
 pub struct FrameStats { pub frame_ms: f32, pub chunk_sections_drawn: u32, pub chunk_sections_total: u32, pub meshes_pending: u32, pub draw_calls: u32, pub uploads: u32, pub upload_bytes: u64 }
@@ -195,7 +198,10 @@ pub fn tick(state: &mut PlayerState, input: &InputState, attrs: &PlayerAttribute
 pub struct TickResult { pub moved: bool, pub rotated: bool, pub on_ground_changed: bool, pub collided_horizontally: bool }
 pub fn collide(aabb: Aabb, movement: DVec3, world: &dyn BlockView, shapes: &dyn CollisionShapes) -> DVec3;   // pure axis sweep, tested in isolation
 pub fn collide_with_step(aabb: Aabb, movement: DVec3, step_height: f64, on_ground: bool, world: &dyn BlockView, shapes: &dyn CollisionShapes) -> DVec3;
-// PlayerState also carries: in_lava, swimming, pose: Pose, jump_cooldown: u8, horizontal_collision, vertical_collision.
+// PlayerState also carries: in_lava, swimming, crouching (vanilla LocalPlayer.isCrouching; the
+// input slowdown), pose: Pose, jump_cooldown: u8, horizontal_collision, vertical_collision.
+// The pose is updated at the END of the tick (vanilla Player.updatePlayerPose), so the
+// movement runs with the previous tick's pose box.
 // PlayerAttributes also carries: sneaking_speed, flying_speed: f32, crouching_height, swimming_height.
 // `haste_data::GameData` implements `BlockPhysics` (from block_properties.json + block_shapes.json).
 ```

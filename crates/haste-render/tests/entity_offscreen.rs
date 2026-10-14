@@ -2,8 +2,10 @@
 //! pose and a name tag, and a generic box entity. Saves `target/render-checks/entities.png`.
 //! Needs the client jar, the datagen reports and a Vulkan driver (source scripts/env.sh).
 
-use haste_core::model::{EntityInstance, PoseOverrides};
-use haste_core::{BlockPos, BlockStateId, ChunkPos, EntityId, SectionPos};
+use haste_core::model::{
+    Decoration, EntityInstance, ItemFrameDecoration, PaintingDecoration, PoseOverrides,
+};
+use haste_core::{BlockPos, BlockStateId, ChunkPos, Direction, EntityId, Identifier, SectionPos};
 use haste_render::{Camera, FrameInput, Renderer, SkyState};
 
 struct Flat {
@@ -45,11 +47,21 @@ fn render_scene(
     entities: &[EntityInstance],
     camera: Camera,
 ) -> image::RgbaImage {
+    render_scene_at(renderer, world, entities, camera, 0.0)
+}
+
+fn render_scene_at(
+    renderer: &mut Renderer,
+    world: &Flat,
+    entities: &[EntityInstance],
+    camera: Camera,
+    partial_tick: f32,
+) -> image::RgbaImage {
     let gui = haste_core::gui::GuiFrame {
         scale: 2,
         ..Default::default()
     };
-    render_with_gui(renderer, world, entities, camera, &gui)
+    render_with_gui(renderer, world, entities, camera, &gui, partial_tick)
 }
 
 fn render_with_gui(
@@ -58,6 +70,20 @@ fn render_with_gui(
     entities: &[EntityInstance],
     camera: Camera,
     gui: &haste_core::gui::GuiFrame,
+    partial_tick: f32,
+) -> image::RgbaImage {
+    render_with_gui_skip(renderer, world, entities, camera, gui, partial_tick, None)
+}
+
+/// Like [`render_with_gui`], with `FrameInput::camera_entity` (the world pass skips it).
+fn render_with_gui_skip(
+    renderer: &mut Renderer,
+    world: &Flat,
+    entities: &[EntityInstance],
+    camera: Camera,
+    gui: &haste_core::gui::GuiFrame,
+    partial_tick: f32,
+    camera_entity: Option<haste_core::EntityId>,
 ) -> image::RgbaImage {
     renderer.sample_entity_lights(world, entities);
     let frame = FrameInput {
@@ -71,9 +97,10 @@ fn render_with_gui(
             fog_start: 100.0,
             fog_end: 200.0,
         },
-        partial_tick: 0.0,
+        partial_tick,
         block_target: None,
         breaking: &[],
+        camera_entity,
     };
     renderer.render(&frame).unwrap();
     renderer.read_back().unwrap()
@@ -127,7 +154,11 @@ fn entities_offscreen() {
         skin: Some(skin.clone()),
         nametag: Some("Steve".into()),
         hurt: 0.0,
+// MERGE(item-entities side):
         item: None,
+// MERGE(main side):
+        decoration: None,
+// MERGE end
     };
     let boxed = EntityInstance {
         id: EntityId(2),
@@ -141,7 +172,11 @@ fn entities_offscreen() {
         skin: None,
         nametag: None,
         hurt: 0.0,
+// MERGE(item-entities side):
         item: None,
+// MERGE(main side):
+        decoration: None,
+// MERGE end
     };
     let entities = vec![player, boxed];
     let camera = Camera {
@@ -150,6 +185,7 @@ fn entities_offscreen() {
         pitch: 5.0,
         fov_deg: 70.0,
         roll_deg: 0.0,
+        bob: haste_render::ViewBob::default(),
     };
     let img = render_scene(&mut renderer, &world, &entities, camera);
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
@@ -198,7 +234,7 @@ fn entities_offscreen() {
         height: 240,
         cursor: None,
     };
-    let img = render_with_gui(&mut renderer, &world, &entities, camera, &gui);
+    let img = render_with_gui(&mut renderer, &world, &entities, camera, &gui, 0.0);
     img.save(out.join("entities_gui.png")).unwrap();
     // Something other than the black box inside it (the model), nothing outside the box edge
     // rows beyond the clip.
@@ -208,6 +244,24 @@ fn entities_offscreen() {
         .any(|(x, y)| img.get_pixel(x, y).0 != [0, 0, 0, 255]));
     assert_eq!(renderer.gui_stats().unsupported, 0);
 
+    // First person with the same entities: `camera_entity` skips the player in the world pass
+    // (the centre shows floor, not the body), and the GUI entity still draws it in its box.
+    let first = render_with_gui_skip(
+        &mut renderer,
+        &world,
+        &entities,
+        camera,
+        &gui,
+        1.0,
+        Some(EntityId(1)),
+    );
+    assert_eq!(first.get_pixel(320, 230).0, empty.get_pixel(320, 230).0);
+    let gui_inside = (20..140).flat_map(|y| (20..140).map(move |x| (x, y)));
+    assert!(gui_inside
+        .into_iter()
+        .any(|(x, y)| first.get_pixel(x, y).0 != [0, 0, 0, 255]));
+    assert_eq!(renderer.gui_stats().unsupported, 0);
+
     // First person: the empty hand, then a held sword and a held stone block.
     renderer.set_item_registry(&data.registries);
     let item = |n: &str| {
@@ -215,17 +269,24 @@ fn entities_offscreen() {
             .index("minecraft:item", &haste_core::Identifier::minecraft(n))
     };
     let base = render_scene(&mut renderer, &world, &[], camera);
+    let hand = |held: Option<haste_core::RegistryIndex>| haste_render::FirstPerson {
+        skin: None,
+        slim: false,
+        item: held,
+        light: (15, 0),
+        attack: haste_render::TickPair::fixed(0.0),
+        equip: haste_render::TickPair::fixed(1.0),
+        x_bob: haste_render::TickPair::fixed(0.0),
+        y_bob: haste_render::TickPair::fixed(0.0),
+        bob: haste_render::TickPair::fixed(0.0),
+        walk_dist: haste_render::TickPair::fixed(0.0),
+    };
     for (name, held) in [
         ("hand", None),
         ("sword", item("diamond_sword")),
         ("stone", item("stone")),
     ] {
-        renderer.set_first_person(Some(haste_render::FirstPerson {
-            skin: None,
-            slim: false,
-            item: held,
-            light: (15, 0),
-        }));
+        renderer.set_first_person(Some(hand(held)));
         let img = render_scene(&mut renderer, &world, &[], camera);
         img.save(out.join(format!("first_person_{name}.png")))
             .unwrap();
@@ -239,15 +300,57 @@ fn entities_offscreen() {
             "{name}: first-person view drew {changed} pixels"
         );
     }
+    // A swing moves the hand: the same hand at the swing's start, middle and end (the swing runs
+    // over 6 ticks, so partial 0.33 and 0.66 are its second and fourth ticks).
+    renderer.set_first_person(Some(hand(item("diamond_sword"))));
+    let still = render_scene(&mut renderer, &world, &[], camera);
+    renderer.set_first_person(Some(haste_render::FirstPerson {
+        attack: haste_render::TickPair::fixed(0.33),
+        ..hand(item("diamond_sword"))
+    }));
+    let swung = render_scene_at(&mut renderer, &world, &[], camera, 0.33);
+    let moved = still
+        .pixels()
+        .zip(swung.pixels())
+        .filter(|(a, b)| a.0 != b.0)
+        .count();
+    assert!(moved > 500, "the swing moved {moved} pixels");
     renderer.set_first_person(None);
 }
 
+// MERGE(item-entities side):
 /// Dropped item entities draw the item itself (the GUI item model path), flat and block
 /// items both, spinning and bobbing; an unknown item draws the missing texture instead
 /// of the box placeholder. Saves target/render-checks/items.png.
 #[test]
 #[ignore = "needs the client jar, datagen reports, and a Vulkan driver (source scripts/env.sh)"]
 fn dropped_items_offscreen() {
+// MERGE(main side):
+/// A hanging decoration instance (the model is unused; the renderer draws the decoration).
+fn decoration(id: i32, pos: glam::DVec3, decoration: Decoration) -> EntityInstance {
+    EntityInstance {
+        id: EntityId(id),
+        model: haste_entity::models::box_for(1.0, 1.0),
+        pos,
+        yaw: 0.0,
+        pitch: 0.0,
+        head_yaw: 0.0,
+        scale: 1.0,
+        pose: PoseOverrides::default(),
+        skin: None,
+        nametag: None,
+        hurt: 0.0,
+        decoration: Some(decoration),
+    }
+}
+
+/// Item frames (one with a diamond, one glow) and a 2x2 painting drawn offscreen: the same
+/// scene as the RCON screenshot but deterministic (no server). Saves
+/// `target/render-checks/frames.png`.
+#[test]
+#[ignore = "needs the client jar, datagen reports and a Vulkan driver (source scripts/env.sh)"]
+fn frames_and_paintings_offscreen() {
+// MERGE end
     let jar = haste_core::paths::client_jar();
     let mut assets =
         haste_assets::Assets::open(&jar, &haste_core::paths::assets_dir(), "26.3").unwrap();
@@ -268,6 +371,7 @@ fn dropped_items_offscreen() {
         renderer.update_world(&world, &[], ChunkPos::new(0, 0), 4);
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+// MERGE(item-entities side):
     let item = |n: &str| {
         data.registries
             .index("minecraft:item", &haste_core::Identifier::minecraft(n))
@@ -374,5 +478,64 @@ fn dropped_items_offscreen() {
         diff(&b, &c) > 40,
         "ages 10 and 20 look the same: {}",
         diff(&b, &c)
+// MERGE(main side):
+    let camera = Camera {
+        pos: glam::DVec3::new(0.0, 2.2, -4.0),
+        yaw: 0.0,
+        pitch: 5.0,
+        fov_deg: 70.0,
+        roll_deg: 0.0,
+        bob: haste_render::ViewBob::default(),
+    };
+    let diamond = data
+        .registries
+        .index("minecraft:item", &Identifier::minecraft("diamond"))
+        .expect("diamond item");
+    let entities = vec![
+        decoration(
+            1,
+            glam::DVec3::new(0.0, 1.5, 0.5),
+            Decoration::ItemFrame(ItemFrameDecoration {
+                facing: Direction::North,
+                rotation: 1,
+                glow: false,
+                item: Some(diamond),
+            }),
+        ),
+        decoration(
+            2,
+            glam::DVec3::new(1.6, 1.5, 0.5),
+            Decoration::ItemFrame(ItemFrameDecoration {
+                facing: Direction::North,
+                rotation: 0,
+                glow: true,
+                item: None,
+            }),
+        ),
+        decoration(
+            3,
+            glam::DVec3::new(-2.0, 1.5, 0.5),
+            Decoration::Painting(PaintingDecoration {
+                facing: Direction::North,
+                width: 2,
+                height: 2,
+                front: Some(Identifier::minecraft("painting/match")),
+            }),
+        ),
+    ];
+    let base = render_scene(&mut renderer, &world, &[], camera);
+    let img = render_scene(&mut renderer, &world, &entities, camera);
+    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
+    std::fs::create_dir_all(&out).unwrap();
+    img.save(out.join("frames.png")).unwrap();
+    let changed = base
+        .pixels()
+        .zip(img.pixels())
+        .filter(|(a, b)| a.0 != b.0)
+        .count();
+    assert!(
+        changed > 2000,
+        "the decorations changed {changed} pixels (item frame, glow frame, painting)"
+// MERGE end
     );
 }

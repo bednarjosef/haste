@@ -379,7 +379,11 @@ impl Assets {
         let mut gui_light: Option<bool> = None;
         let mut gui_display: Option<crate::model::DisplayTransform> = None;
         let mut firstperson_display: Option<crate::model::DisplayTransform> = None;
+// MERGE(item-entities side):
         let mut ground_display: Option<crate::model::DisplayTransform> = None;
+// MERGE(main side):
+        let mut fixed_display: Option<crate::model::DisplayTransform> = None;
+// MERGE end
         let mut current = id.clone();
 
         for _ in 0..20 {
@@ -407,10 +411,17 @@ impl Assets {
                     .get("gui")
                     .and_then(crate::model::DisplayTransform::parse);
             }
+// MERGE(item-entities side):
             if ground_display.is_none() {
                 ground_display = model
                     .display
                     .get("ground")
+// MERGE(main side):
+            if fixed_display.is_none() {
+                fixed_display = model
+                    .display
+                    .get("fixed")
+// MERGE end
                     .and_then(crate::model::DisplayTransform::parse);
             }
             if gui_light.is_none() && model.gui_light.is_some() {
@@ -443,7 +454,11 @@ impl Assets {
             gui_light: gui_light.unwrap_or(false),
             gui_display,
             firstperson_display,
+// MERGE(item-entities side):
             ground_display,
+// MERGE(main side):
+            fixed_display,
+// MERGE end
         })
     }
 

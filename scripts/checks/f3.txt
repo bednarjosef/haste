@@ -1,0 +1,8 @@
+# Open the F3 debug overlay, screenshot it, close it again.
+wait_until joined
+wait_until settled
+wait 10
+key F3
+wait 10
+screenshot f3
+key F3

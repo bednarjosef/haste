@@ -19,6 +19,13 @@ public final class ClientImpl {
     // ---- Minecraft ----
     public static Minecraft getInstance() { return Proxies.minecraft; }
 
+    /**
+     * The DataFixer every saved file goes through (vanilla builds {@code DataFixers.getDataFixer()} once in
+     * {@code Minecraft}'s constructor). Real vanilla Java: options.txt loads through it ({@code Options.dataFix}).
+     */
+    private static final com.mojang.datafixers.DataFixer FIXER = net.minecraft.util.datafix.DataFixers.getDataFixer();
+    public static com.mojang.datafixers.DataFixer getFixerUpper(Minecraft m) { return FIXER; }
+
     /** The mod check of the title screen and the debug overlay: Haste is the vanilla client rebuilt, no mods. */
     public static net.minecraft.util.ModCheck checkModStatus() {
         return new net.minecraft.util.ModCheck(net.minecraft.util.ModCheck.Confidence.PROBABLY_NOT, "haste");
@@ -43,6 +50,14 @@ public final class ClientImpl {
     public static boolean isMultiplayerServer(Minecraft m) { return true; }
     public static net.minecraft.client.multiplayer.ServerData getCurrentServer(Minecraft m) { return null; }
     public static boolean isPaused(Minecraft m) { return false; }
+
+    /**
+     * Real vanilla Java ({@code Minecraft} builds it in its constructor). Its reload listener never runs
+     * (Haste loads no resource packs into it), so it reports no warnings, like vanilla on a GPU that is
+     * not on {@code minecraft:gpu_warnlist.json}.
+     */
+    private static final net.minecraft.client.renderer.GpuWarnlistManager GPU_WARNLIST = new net.minecraft.client.renderer.GpuWarnlistManager();
+    public static net.minecraft.client.renderer.GpuWarnlistManager getGpuWarnlistManager(Minecraft m) { return GPU_WARNLIST; }
     /** False while the canonical proxies are built (option changes then skip their side effects, like vanilla at startup). */
     static boolean running;
     public static boolean isRunning(Minecraft m) { return running; }

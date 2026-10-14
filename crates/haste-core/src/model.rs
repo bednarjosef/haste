@@ -62,6 +62,7 @@ pub struct EntityInstance {
     /// ticks; death holds it at 1 for the 20-tick death animation). The renderer mixes
     /// red into the entity's colour for values above 0.
     pub hurt: f32,
+// MERGE(item-entities side):
     /// A dropped item entity (`minecraft:item`) drawn as the item itself (spinning and
     /// bobbing); the model above is ignored for these.
     pub item: Option<DroppedItem>,
@@ -75,4 +76,42 @@ pub struct DroppedItem {
     pub item: RegistryIndex,
     pub count: i32,
     pub age: f32,
+// MERGE(main side):
+    /// Set for hanging decorations (item frames, paintings): drawn specially instead of from
+    /// `model` (vanilla's `ItemFrameRenderer` / `PaintingRenderer`). `None` for every other
+    /// entity, which the renderer draws from its cube model.
+    pub decoration: Option<Decoration>,
+}
+
+/// A hanging decoration the renderer draws itself rather than from a cube model.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Decoration {
+    ItemFrame(ItemFrameDecoration),
+    Painting(PaintingDecoration),
+}
+
+/// The state `ItemFrameRenderer.extractRenderState` collects for an item frame.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ItemFrameDecoration {
+    /// The direction the frame faces (`ItemFrame.getDirection`, from the spawn packet's data).
+    pub facing: crate::Direction,
+    /// `ItemFrame.getRotation` 0..7; the item turns `rotation * 45` degrees.
+    pub rotation: u8,
+    /// Glow item frames light the frame at least block-light 5 and the item full-bright.
+    pub glow: bool,
+    /// The framed item (`DATA_ITEM`), by item registry index.
+    pub item: Option<crate::RegistryIndex>,
+}
+
+/// The state `PaintingRenderer.extractRenderState` collects for a painting.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PaintingDecoration {
+    /// The direction the painting faces (`Painting.getDirection`).
+    pub facing: crate::Direction,
+    /// The variant's size in blocks (`PaintingVariant.width`/`height`).
+    pub width: u8,
+    pub height: u8,
+    /// The front sprite's texture id, `None` for a variant we do not know (draw the back only).
+    pub front: Option<Identifier>,
+// MERGE end
 }

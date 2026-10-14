@@ -563,6 +563,7 @@ mod tests {
             gui_display: None,
             ground_display: None,
             firstperson_display: None,
+            fixed_display: None,
         };
         let mut resolved_models = HashMap::new();
         resolved_models.insert("minecraft:block/cube".to_string(), resolved);
