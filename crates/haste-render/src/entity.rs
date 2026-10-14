@@ -44,10 +44,17 @@ pub(crate) fn item_entity_lift(bbox_min_y: f32) -> f32 {
 
 /// Which of vanilla's `ItemDisplayContext`s an item is drawn through: the `display`
 /// section of the model it names (firstperson_righthand for the held item, fixed for
-/// item frames, ground for dropped items).
+/// item frames, ground for dropped items, thirdperson for held items on mobs and players).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ItemDisplay {
     FirstPerson,
+    /// `thirdperson_righthand` (`ItemInHandLayer`, the right hand).
+    ThirdPersonRight,
+    /// `thirdperson_lefthand`: the same transform with vanilla's left-hand fix (translation.x
+    /// and rotation.y/z negated), `ItemTransform.apply(true, ...)`.
+    ThirdPersonLeft,
+    /// `head` (`CustomHeadLayer`: heads and hats worn on the head).
+    Head,
     Fixed,
     Ground,
 }
@@ -229,6 +236,9 @@ pub struct EntityRenderer {
     arm_models: [Option<Arc<CubeModel>>; 2],
     /// The item frame block model quads, by `(glow, map)`, built once on first use.
     frame_models: HashMap<(bool, bool), Arc<Vec<haste_assets::BakedQuad>>>,
+    /// Equipment asset info (`equipment/<asset>.json`), by asset id, loaded once (`None` for an
+    /// asset that failed to load, so it is not retried every frame).
+    equipment_infos: HashMap<Identifier, Option<Arc<haste_assets::EquipmentInfo>>>,
     pub drawn: u32,
 }
 
@@ -348,6 +358,7 @@ impl EntityRenderer {
             item_models: HashMap::new(),
             arm_models: [None, None],
             frame_models: HashMap::new(),
+            equipment_infos: HashMap::new(),
             drawn: 0,
         }
     }
@@ -487,6 +498,7 @@ impl EntityRenderer {
                 light,
                 e.hurt,
             );
+            self.emit_equipment(e, root, light, assets);
             if self.vertices.len() > start {
                 self.drawn += 1;
             }
@@ -505,6 +517,82 @@ impl EntityRenderer {
         if !self.vertices.is_empty() {
             self.queue
                 .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
+        }
+    }
+
+    /// Draws an entity's equipment on top of its model (already emitted at `root`): the held
+    /// items (`ItemInHandLayer`) and armour (`HumanoidArmorLayer`). Unknown items and equipment
+    /// draw nothing. The vertex buffer is reused (taken out and put back) so nothing allocates
+    /// per frame.
+    fn emit_equipment(
+        &mut self,
+        e: &EntityInstance,
+        root: Mat4,
+        light: (u8, u8),
+        assets: &mut Assets,
+    ) {
+        // Held items: vanilla draws the right hand first, then the left.
+        for (i, item) in e.hands.iter().enumerate() {
+            let Some(idx) = *item else { continue };
+            let Some(model) = self.item_model_for(idx, assets) else {
+                continue;
+            };
+            let left = i == 1;
+            let arm = if left { "left_arm" } else { "right_arm" };
+            let Some(arm_m) = part_matrix(&e.model.root, &e.pose, Mat4::IDENTITY, arm) else {
+                continue;
+            };
+            let item_root = root * arm_m * held_item_layer_matrix(left);
+            let display = if left {
+                ItemDisplay::ThirdPersonLeft
+            } else {
+                ItemDisplay::ThirdPersonRight
+            };
+            let mut out = std::mem::take(&mut self.vertices);
+            self.emit_item(&mut out, &model, item_root, light, display, assets);
+            self.vertices = out;
+        }
+        // Armour, in vanilla's order (`HumanoidArmorLayer.submit`: chest, legs, feet, head).
+        for slot in [
+            haste_core::model::EquipmentSlot::Chest,
+            haste_core::model::EquipmentSlot::Legs,
+            haste_core::model::EquipmentSlot::Feet,
+            haste_core::model::EquipmentSlot::Head,
+        ] {
+            let Some(piece) = e.equipment.iter().find(|p| p.slot == slot) else {
+                continue;
+            };
+            let Some(asset) = &piece.asset else { continue };
+            let Some(info) = self.equipment_info(asset, assets) else {
+                continue;
+            };
+            // `HumanoidArmorLayer`: leggings use the inner (leggings) layer, the rest the
+            // humanoid one (babies are not modelled).
+            let layer_type = if slot == haste_core::model::EquipmentSlot::Legs {
+                "humanoid_leggings"
+            } else {
+                "humanoid"
+            };
+            let model = humanoid_armor(slot);
+            let mut out = std::mem::take(&mut self.vertices);
+            for layer in info.layers_of(layer_type) {
+                // `EquipmentLayerRenderer.getColorForLayer`: the stack's dye, else the layer's
+                // undyed colour, else no tint.
+                let tint = piece.dye.or(layer.dyeable).map(argb_linear).unwrap_or([1.0; 3]);
+                let rect = self.texture_rect(&layer.texture, assets);
+                emit_part_tinted(
+                    &mut out,
+                    &model,
+                    &model.root,
+                    &e.pose,
+                    root,
+                    rect,
+                    light,
+                    e.hurt,
+                    tint,
+                );
+            }
+            self.vertices = out;
         }
     }
 
@@ -828,6 +916,24 @@ impl EntityRenderer {
         arc
     }
 
+    /// The equipment asset info, loaded once and cached (`None` for an unknown asset, never a
+    /// panic and never a re-read).
+    fn equipment_info(
+        &mut self,
+        asset: &Identifier,
+        assets: &mut Assets,
+    ) -> Option<Arc<haste_assets::EquipmentInfo>> {
+        if let Some(info) = self.equipment_infos.get(asset) {
+            return info.clone();
+        }
+        let info = assets.equipment_info(asset).ok().map(Arc::new);
+        if info.is_none() {
+            tracing::warn!("equipment asset {asset} not found");
+        }
+        self.equipment_infos.insert(asset.clone(), info.clone());
+        info
+    }
+
     /// The empty hand's arm model for the skin's arm width, built once (no per-frame work).
     fn arm_model(&mut self, slim: bool) -> Arc<CubeModel> {
         let slot = &mut self.arm_models[usize::from(slim)];
@@ -920,12 +1026,15 @@ impl EntityRenderer {
         assets: &mut Assets,
     ) {
         for part in &model.parts {
-            let display = match display {
-                ItemDisplay::FirstPerson => &part.firstperson,
-                ItemDisplay::Fixed => &part.fixed,
-                ItemDisplay::Ground => &part.ground,
+            let (display, left) = match display {
+                ItemDisplay::FirstPerson => (&part.firstperson, false),
+                ItemDisplay::ThirdPersonRight => (&part.thirdperson, false),
+                ItemDisplay::ThirdPersonLeft => (&part.thirdperson, true),
+                ItemDisplay::Head => (&part.head, false),
+                ItemDisplay::Fixed => (&part.fixed, false),
+                ItemDisplay::Ground => (&part.ground, false),
             };
-            let m = root * item_display_matrix(part, display);
+            let m = root * item_display_matrix(part, display, left);
             let nm = Mat3::from_mat4(m).inverse().transpose();
             let tint = |i: Option<u32>| -> [f32; 3] {
                 i.and_then(|i| part.tints.get(i as usize))
@@ -1058,14 +1167,45 @@ pub(crate) fn arm_model(slim: bool) -> CubeModel {
     }
 }
 
-/// A held item's model matrix: its `display.firstperson_righthand` transform and composite
+/// `ItemInHandLayer.submitArmWithItem`'s transform after `ArmedModel.translateToHand`: rotate X
+/// -90 degrees, rotate Y 180 degrees, then the hand offset (`(±1, 2, -10)/16` for adults; a
+/// left-hand item is offset to -1). The item then draws through `thirdperson_righthand`.
+pub(crate) fn held_item_layer_matrix(left: bool) -> Mat4 {
+    Mat4::from_rotation_x((-90.0f32).to_radians())
+        * Mat4::from_rotation_y(180.0f32.to_radians())
+        * Mat4::from_translation(Vec3::new(
+            if left { -1.0 } else { 1.0 } / 16.0,
+            2.0 / 16.0,
+            -10.0 / 16.0,
+        ))
+}
+
+/// An ARGB colour (armour dye / undyed fallback) as a linear-RGB vertex multiplier, the same
+/// conversion the GUI item tints use (`sky::linear`).
+pub(crate) fn argb_linear(c: u32) -> [f32; 3] {
+    let f = |s: u32| crate::sky::linear([((c >> s) & 0xFF) as f32 / 255.0; 3])[0];
+    [f(16), f(8), f(0)]
+}
+
+/// A held item's model matrix: its `display.<context>` transform and composite
 /// `transformation`, then the recentring vanilla's `ItemTransform.apply` ends with
-/// (the model's unit cube is drawn around the origin).
+/// (the model's unit cube is drawn around the origin). `left` applies vanilla's left-hand fix
+/// (`ItemTransform.apply(true, ...)`: translation.x and rotation.y/z negated).
 pub(crate) fn item_display_matrix(
     part: &haste_assets::ItemModelPart,
     display: &haste_assets::DisplayTransform,
+    left: bool,
 ) -> Mat4 {
-    crate::gui::display_matrix(display)
+    let display = if left {
+        haste_assets::DisplayTransform {
+            rotation: [display.rotation[0], -display.rotation[1], -display.rotation[2]],
+            translation: [-display.translation[0], display.translation[1], display.translation[2]],
+            scale: display.scale,
+        }
+    } else {
+        *display
+    };
+    crate::gui::display_matrix(&display)
         * crate::gui::part_matrix(&part.transformation)
         * Mat4::from_translation(Vec3::splat(-0.5))
 }
@@ -1271,6 +1411,30 @@ fn pose_rotation(pose: &PoseOverrides, name: &str) -> Option<Vec3> {
         .map(|(_, r)| *r)
 }
 
+/// The accumulated model matrix of a named part, the same transform `emit_part` gives it
+/// (`parent * translate(pivot) * R(z) R(y) R(x)`, pose overrides added to the base rotation), so
+/// a held item attaches to the animated arm (vanilla `ArmedModel.translateToHand`). `None` when
+/// the model has no such part.
+pub(crate) fn part_matrix(
+    part: &ModelPart,
+    pose: &PoseOverrides,
+    parent: Mat4,
+    name: &str,
+) -> Option<Mat4> {
+    let rot = part.rotation + pose_rotation(pose, &part.name).unwrap_or(Vec3::ZERO);
+    let m = parent
+        * Mat4::from_translation(part.pivot)
+        * Mat4::from_rotation_z(rot.z)
+        * Mat4::from_rotation_y(rot.y)
+        * Mat4::from_rotation_x(rot.x);
+    if part.name == name {
+        return Some(m);
+    }
+    part.children
+        .iter()
+        .find_map(|c| part_matrix(c, pose, m, name))
+}
+
 /// Child pivots are relative to the parent (vanilla `PartPose`); rotation is Z * Y * X around
 /// the pivot, pose overrides add to the base rotation. `hurt` (0..1) tints the part red.
 #[allow(clippy::too_many_arguments)]
@@ -1283,6 +1447,23 @@ pub(crate) fn emit_part(
     rect: [u32; 4],
     light: (u8, u8),
     hurt: f32,
+) {
+    emit_part_tinted(out, model, part, pose, parent, rect, light, hurt, [1.0; 3]);
+}
+
+/// [`emit_part`] with a colour multiplier (vanilla's `submitModel` `color` parameter): armour
+/// dye. The tint multiplies the shade/hurt colour.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_part_tinted(
+    out: &mut Vec<EntityVertex>,
+    model: &CubeModel,
+    part: &ModelPart,
+    pose: &PoseOverrides,
+    parent: Mat4,
+    rect: [u32; 4],
+    light: (u8, u8),
+    hurt: f32,
+    tint: [f32; 3],
 ) {
     if !part.visible || pose.hidden.iter().any(|h| h == &part.name) {
         return;
@@ -1389,7 +1570,7 @@ pub(crate) fn emit_part(
             let nw = (normal_matrix * n).normalize_or_zero();
             let s = entity_shade(nw);
             let [r, g, b] = hurt_color(s, hurt);
-            let color = [r, g, b, 1.0];
+            let color = [r * tint[0], g * tint[1], b * tint[2], 1.0];
             let uv = [
                 [uvr[0], uvr[1]],
                 [uvr[0], uvr[3]],
@@ -1416,7 +1597,7 @@ pub(crate) fn emit_part(
         }
     }
     for child in &part.children {
-        emit_part(out, model, child, pose, m, rect, light, hurt);
+        emit_part_tinted(out, model, child, pose, m, rect, light, hurt, tint);
     }
 }
 
@@ -1465,8 +1646,136 @@ fn item_model_bbox(model: &haste_assets::ItemModel) -> (Vec3, Vec3) {
     }
 }
 
-/// The missing item model vanilla's `ModelBakery.MissingModels` bakes (`MissingCuboidModel`):
-/// a unit cube with the missingno texture and no display transforms, so it draws centred on
+/// The humanoid armour model for one slot (vanilla `HumanoidModel.createArmorMeshSet` +
+/// `ArmorModelSet`, the 64x32 armour texture layout). Built once per slot; the renderer draws it
+/// with the equipment asset's layer texture and the entity's own pose, so armour animates with
+/// the body. The outer deformation is 1.0, the inner (leggings) 0.5, and leg cubes 0.1 less.
+pub(crate) fn humanoid_armor(slot: haste_core::model::EquipmentSlot) -> Arc<CubeModel> {
+    use haste_core::model::EquipmentSlot;
+    static MODELS: std::sync::OnceLock<[Arc<CubeModel>; 4]> = std::sync::OnceLock::new();
+    let models = MODELS.get_or_init(|| {
+        [
+            EquipmentSlot::Head,
+            EquipmentSlot::Chest,
+            EquipmentSlot::Legs,
+            EquipmentSlot::Feet,
+        ]
+        .map(build_armor_model)
+    });
+    let i = match slot {
+        EquipmentSlot::Head => 0,
+        EquipmentSlot::Chest => 1,
+        EquipmentSlot::Legs => 2,
+        EquipmentSlot::Feet => 3,
+        _ => 1,
+    };
+    models[i].clone()
+}
+
+/// The armour model for one slot. `head`/`hat` (outer), `body`/arms (outer), `body`+legs
+/// (inner) and the legs (outer), per `HumanoidModel.ADULT_ARMOR_PARTS_PER_SLOT`.
+fn build_armor_model(slot: haste_core::model::EquipmentSlot) -> Arc<CubeModel> {
+    use haste_core::model::EquipmentSlot;
+    use haste_core::model::{Cube, ModelPart};
+    let outer = 1.0f32;
+    let inner = 0.5f32;
+    let cube = |origin: [f32; 3], size: [f32; 3], uv: [u32; 2], inflate: f32, mirror: bool| Cube {
+        origin: origin.into(),
+        size: size.into(),
+        inflate,
+        uv,
+        mirror,
+    };
+    let part = |name: &str, pivot: [f32; 3], cubes: Vec<Cube>, children: Vec<ModelPart>| ModelPart {
+        name: name.to_owned(),
+        pivot: pivot.into(),
+        rotation: Vec3::ZERO,
+        visible: true,
+        cubes,
+        children,
+    };
+    let head = || {
+        part(
+            "head",
+            [0.0, -24.0, 0.0],
+            vec![cube([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [0, 0], outer, false)],
+            vec![part(
+                "hat",
+                [0.0, 0.0, 0.0],
+                vec![cube(
+                    [-4.0, -8.0, -4.0],
+                    [8.0, 8.0, 8.0],
+                    [32, 0],
+                    outer + 0.5,
+                    false,
+                )],
+                Vec::new(),
+            )],
+        )
+    };
+    let body = |inflate: f32| {
+        part(
+            "body",
+            [0.0, -24.0, 0.0],
+            vec![cube([-4.0, 0.0, -2.0], [8.0, 12.0, 4.0], [16, 16], inflate, false)],
+            Vec::new(),
+        )
+    };
+    let arms = || {
+        vec![
+            part(
+                "right_arm",
+                [-5.0, -22.0, 0.0],
+                vec![cube([-3.0, -2.0, -2.0], [4.0, 12.0, 4.0], [40, 16], outer, false)],
+                Vec::new(),
+            ),
+            part(
+                "left_arm",
+                [5.0, -22.0, 0.0],
+                vec![cube([-1.0, -2.0, -2.0], [4.0, 12.0, 4.0], [40, 16], outer, true)],
+                Vec::new(),
+            ),
+        ]
+    };
+    let legs = |inflate: f32| {
+        vec![
+            part(
+                "right_leg",
+                [-1.9, -12.0, 0.0],
+                vec![cube([-2.0, 0.0, -2.0], [4.0, 12.0, 4.0], [0, 16], inflate, false)],
+                Vec::new(),
+            ),
+            part(
+                "left_leg",
+                [1.9, -12.0, 0.0],
+                vec![cube([-2.0, 0.0, -2.0], [4.0, 12.0, 4.0], [0, 16], inflate, true)],
+                Vec::new(),
+            ),
+        ]
+    };
+    let mut children = Vec::new();
+    match slot {
+        EquipmentSlot::Head => children.push(head()),
+        EquipmentSlot::Chest => {
+            children.push(body(outer));
+            children.extend(arms());
+        }
+        EquipmentSlot::Legs => {
+            children.push(body(inner));
+            children.extend(legs(inner - 0.1));
+        }
+        EquipmentSlot::Feet => children.extend(legs(outer - 0.1)),
+        _ => {}
+    }
+    Arc::new(CubeModel {
+        texture: Identifier::new("haste", "entity/armor"),
+        tex_width: 64,
+        tex_height: 32,
+        root: part("root", [0.0, 0.0, 0.0], Vec::new(), children),
+    })
+}
+
+/// The missing item model vanilla's `ModelBakery.MissingModels` bakes (`MissingCuboidModel`):/// a unit cube with the missingno texture and no display transforms, so it draws centred on
 /// the origin like any `NO_TRANSFORM` item. Built once; unknown items are rare (modded ids).
 fn missing_item_model() -> std::sync::Arc<haste_assets::ItemModel> {
     static MISSING: std::sync::OnceLock<std::sync::Arc<haste_assets::ItemModel>> =
@@ -1495,6 +1804,8 @@ fn missing_item_model() -> std::sync::Arc<haste_assets::ItemModel> {
                     tints: vec![],
                     gui: haste_assets::DisplayTransform::IDENTITY,
                     firstperson: haste_assets::DisplayTransform::IDENTITY,
+                    thirdperson: haste_assets::DisplayTransform::IDENTITY,
+                    head: haste_assets::DisplayTransform::IDENTITY,
                     ground: haste_assets::DisplayTransform::IDENTITY,
                     fixed: haste_assets::DisplayTransform::IDENTITY,
                     gui_light_front: false,
@@ -2106,6 +2417,133 @@ mod tests {
         let slim = arm_model(true);
         assert_eq!(slim.root.cubes[0].origin, Vec3::new(-2.0, -2.0, -2.0));
         assert_eq!(slim.root.cubes[0].size, Vec3::new(3.0, 12.0, 4.0));
+    }
+
+    /// `ItemInHandLayer.submitArmWithItem`: rotate X -90, rotate Y 180, translate
+    /// (±1, 2, -10)/16 (adult). The left hand is the right hand offset to -1 in x.
+    #[test]
+    fn the_held_item_layer_transform_is_vanillas() {
+        let deg = |d: f32| d.to_radians();
+        let right = held_item_layer_matrix(false);
+        let mut want = Mat4::from_rotation_x(deg(-90.0));
+        want *= Mat4::from_rotation_y(deg(180.0));
+        want *= Mat4::from_translation(Vec3::new(1.0 / 16.0, 2.0 / 16.0, -10.0 / 16.0));
+        assert!(close(right, want, 1e-6));
+        let left = held_item_layer_matrix(true);
+        let mut want_left = Mat4::from_rotation_x(deg(-90.0));
+        want_left *= Mat4::from_rotation_y(deg(180.0));
+        want_left *= Mat4::from_translation(Vec3::new(-1.0 / 16.0, 2.0 / 16.0, -10.0 / 16.0));
+        assert!(close(left, want_left, 1e-6));
+    }
+
+    /// `ItemTransform.apply(true, ...)`: the left-hand item negates translation.x and
+    /// rotation.y/z of the third-person transform.
+    #[test]
+    fn the_left_hand_fixes_the_third_person_transform() {
+        let part = haste_assets::ItemModelPart {
+            geometry: haste_assets::ItemGeometry::None,
+            tints: vec![],
+            gui: haste_assets::DisplayTransform::IDENTITY,
+            firstperson: haste_assets::DisplayTransform::IDENTITY,
+            thirdperson: haste_assets::DisplayTransform::IDENTITY,
+            head: haste_assets::DisplayTransform::IDENTITY,
+            ground: haste_assets::DisplayTransform::IDENTITY,
+            fixed: haste_assets::DisplayTransform::IDENTITY,
+            gui_light_front: false,
+            transformation: None,
+        };
+        let d = haste_assets::DisplayTransform {
+            rotation: [10.0, 20.0, 30.0],
+            translation: [0.1, 0.2, 0.3],
+            scale: [0.5, 0.5, 0.5],
+        };
+        let want = item_display_matrix(
+            &part,
+            &haste_assets::DisplayTransform {
+                rotation: [10.0, -20.0, -30.0],
+                translation: [-0.1, 0.2, 0.3],
+                scale: [0.5, 0.5, 0.5],
+            },
+            false,
+        );
+        assert!(close(item_display_matrix(&part, &d, true), want, 1e-6));
+    }
+
+    /// `ArmedModel.translateToHand` -> `part_matrix` gives the arm's animated matrix: the arm's
+    /// pivot and rotation plus the pose override, under the entity root.
+    #[test]
+    fn part_matrix_places_the_hand_at_the_animated_arm() {
+        let model = haste_entity_test_humanoid();
+        let mut pose = PoseOverrides::default();
+        let rest = part_matrix(&model.root, &pose, Mat4::IDENTITY, "right_arm").unwrap();
+        // The right arm's own pivot (no override): (-5, -22, 0).
+        assert_eq!(rest.transform_point3(Vec3::ZERO), Vec3::new(-5.0, -22.0, 0.0));
+        // A pose override rotates the arm about its pivot.
+        pose.rotations.push((
+            "right_arm".into(),
+            Vec3::new(0.0, 0.0, std::f32::consts::FRAC_PI_2),
+        ));
+        let swung = part_matrix(&model.root, &pose, Mat4::IDENTITY, "right_arm").unwrap();
+        let p = swung.transform_point3(Vec3::new(0.0, 10.0, 0.0));
+        assert!(
+            (p.x - -15.0).abs() < 1e-4 && (p.y - -22.0).abs() < 1e-4,
+            "{p:?}"
+        );
+        assert!(part_matrix(&model.root, &pose, Mat4::IDENTITY, "nope").is_none());
+    }
+
+    /// The armour model has the parts vanilla retains per slot, with the right deformations.
+    #[test]
+    fn armour_models_keep_vanillas_parts() {
+        use haste_core::model::EquipmentSlot as S;
+        let head = humanoid_armor(S::Head);
+        assert!(head.root.children.iter().any(|c| c.name == "head"));
+        assert_eq!(head.tex_width, 64);
+        assert_eq!(head.tex_height, 32);
+        let chest = humanoid_armor(S::Chest);
+        assert_eq!(chest.root.children.len(), 3);
+        assert!(chest.root.children.iter().any(|c| c.name == "left_arm"));
+        let legs = humanoid_armor(S::Legs);
+        let body = legs.root.children.iter().find(|c| c.name == "body").unwrap();
+        assert_eq!(body.cubes[0].inflate, 0.5);
+        let feet = humanoid_armor(S::Feet);
+        assert_eq!(feet.root.children.len(), 2);
+        assert_eq!(feet.root.children[0].cubes[0].inflate, 0.9);
+        // The left arm/leg mirror their texture.
+        assert!(
+            chest
+                .root
+                .children
+                .iter()
+                .find(|c| c.name == "left_arm")
+                .unwrap()
+                .cubes[0]
+                .mirror
+        );
+    }
+
+    /// A humanoid model for the tests above (the renderer cannot depend on haste-entity).
+    fn haste_entity_test_humanoid() -> CubeModel {
+        CubeModel {
+            texture: Identifier::minecraft("x"),
+            tex_width: 64,
+            tex_height: 64,
+            root: ModelPart {
+                name: "root".into(),
+                pivot: Vec3::ZERO,
+                rotation: Vec3::ZERO,
+                visible: true,
+                cubes: vec![],
+                children: vec![ModelPart {
+                    name: "right_arm".into(),
+                    pivot: Vec3::new(-5.0, -22.0, 0.0),
+                    rotation: Vec3::ZERO,
+                    visible: true,
+                    cubes: vec![],
+                    children: vec![],
+                }],
+            },
+        }
     }
 
     #[test]

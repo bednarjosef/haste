@@ -328,6 +328,52 @@ fn item_of(e: &Entity, partial_tick: f32) -> Option<haste_core::model::DroppedIt
     })
 }
 
+/// Whether a model has a part with this name (humanoid models carry `right_arm`, which only the
+/// armed/armoured layers need).
+fn model_has_part(part: &haste_core::model::ModelPart, name: &str) -> bool {
+    part.name == name || part.children.iter().any(|c| model_has_part(c, name))
+}
+
+/// The hands and equipment layers of an entity: the item in each hand (main hand -> right,
+/// off hand -> left) and every armour piece whose item's `equippable` component names the same
+/// slot (vanilla `HumanoidArmorLayer.shouldRender`). The equipment asset id comes from the item's
+/// default `equippable` component; the dye from the stack's `dyed_color` patch.
+fn equipment_of(
+    e: &Entity,
+    components: &haste_data::ItemComponents,
+) -> (
+    [Option<RegistryIndex>; 2],
+    Vec<haste_core::model::EquipmentPiece>,
+) {
+    use haste_core::model::{EquipmentPiece, EquipmentSlot};
+    let mut hands = [None, None];
+    let mut equipment = Vec::new();
+    for (wire, stack) in &e.equipment {
+        if stack.is_empty() {
+            continue;
+        }
+        let Some(item) = stack.item else { continue };
+        match EquipmentSlot::from_wire(*wire) {
+            Some(EquipmentSlot::MainHand) => hands[0] = Some(item),
+            Some(EquipmentSlot::OffHand) => hands[1] = Some(item),
+            Some(slot) if slot.is_armor() => {
+                let equippable = components.equippable(item);
+                if equippable.map(|x| x.slot) != Some(slot) {
+                    continue;
+                }
+                equipment.push(EquipmentPiece {
+                    slot,
+                    item: Some(item),
+                    asset: equippable.and_then(|x| x.asset.clone()),
+                    dye: components.dyed_color(&stack.components_raw),
+                });
+            }
+            _ => {}
+        }
+    }
+    (hands, equipment)
+}
+
 pub struct EntityStore {
     slots: Vec<Option<Entity>>,
     free: Vec<u32>,
@@ -339,6 +385,9 @@ pub struct EntityStore {
     /// The synced `minecraft:painting_variant` registry (id -> size/asset), set at join from
     /// the server's `registry_data`; empty when the server sent none.
     painting_variants: HashMap<u32, crate::decoration::PaintingVariant>,
+    /// Item default components (the `equippable` component armour reads), from the datagen
+    /// report; empty when absent (armour then draws nothing).
+    item_components: haste_data::ItemComponents,
 }
 
 /// Hurt flash strength for an entity's remaining hurt ticks, eased out (quadratic, like
@@ -368,7 +417,14 @@ impl EntityStore {
             players: AHashMap::new(),
             riding: Riding::new(),
             painting_variants: HashMap::new(),
+            item_components: haste_data::ItemComponents::default(),
         }
+    }
+
+    /// Sets the item default-components table (the `equippable` component armour reads), loaded
+    /// from the datagen report at startup.
+    pub fn set_item_components(&mut self, components: haste_data::ItemComponents) {
+        self.item_components = components;
     }
 
     /// Sets the synced `minecraft:painting_variant` table (id -> size/asset), from the server's
@@ -700,6 +756,14 @@ impl EntityStore {
             } else {
                 slot.yaw
             };
+            // Equipment layers (held items, armour) are only drawn on humanoid models
+            // (vanilla adds `ItemInHandLayer`/`HumanoidArmorLayer` per renderer type).
+            let humanoid = has_head && model_has_part(&model.root, "right_arm");
+            let (hands, equipment) = if humanoid {
+                equipment_of(slot, &self.item_components)
+            } else {
+                ([None, None], Vec::new())
+            };
             out.push(EntityInstance {
                 id: slot.id,
                 model,
@@ -714,6 +778,8 @@ impl EntityStore {
                 hurt: hurt_strength(slot),
                 item: item_of(slot, partial_tick),
                 decoration,
+                hands,
+                equipment,
             });
         }
     }

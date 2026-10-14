@@ -156,6 +156,8 @@ fn entities_offscreen() {
         hurt: 0.0,
         item: None,
         decoration: None,
+        hands: [None, None],
+        equipment: Vec::new(),
     };
     let boxed = EntityInstance {
         id: EntityId(2),
@@ -171,6 +173,8 @@ fn entities_offscreen() {
         hurt: 0.0,
         item: None,
         decoration: None,
+        hands: [None, None],
+        equipment: Vec::new(),
     };
     let entities = vec![player, boxed];
     let camera = Camera {
@@ -361,6 +365,8 @@ fn dropped_items_offscreen() {
             age: 0.0,
         }),
         decoration: None,
+        hands: [None, None],
+        equipment: Vec::new(),
     };
     let camera = Camera {
         pos: glam::DVec3::new(0.0, 1.7, -2.5),
@@ -465,6 +471,8 @@ fn decoration(id: i32, pos: glam::DVec3, decoration: Decoration) -> EntityInstan
         hurt: 0.0,
         item: None,
         decoration: Some(decoration),
+        hands: [None, None],
+        equipment: Vec::new(),
     }
 }
 
@@ -552,4 +560,114 @@ fn frames_and_paintings_offscreen() {
         changed > 2000,
         "the decorations changed {changed} pixels (item frame, glow frame, painting)"
     );
+}
+
+/// A humanoid with a held iron sword and a full set of iron armour drawn offscreen: the
+/// equipment layers change the pixels (and are drawn in the same entity pass). Saves
+/// `target/render-checks/equipment.png`. Needs the client jar, the datagen reports (including
+/// `reports/components/item`) and a Vulkan driver.
+#[test]
+#[ignore = "needs the client jar, datagen reports and a Vulkan driver (source scripts/env.sh)"]
+fn equipment_offscreen() {
+    use haste_core::model::{EquipmentPiece, EquipmentSlot};
+
+    let jar = haste_core::paths::client_jar();
+    let mut assets =
+        haste_assets::Assets::open(&jar, &haste_core::paths::assets_dir(), "26.3").unwrap();
+    let data = haste_data::GameData::load().unwrap();
+    let mut renderer = Renderer::new_offscreen(640, 480, &mut assets, &data.blocks).unwrap();
+    let world = Flat {
+        stone: data
+            .blocks
+            .default_state(&haste_core::Identifier::minecraft("stone"))
+            .unwrap(),
+    };
+    let dirty: Vec<SectionPos> = (-1..=1)
+        .flat_map(|x| (-1..=1).map(move |z| SectionPos::new(x, 0, z)))
+        .collect();
+    renderer.update_world(&world, &dirty, ChunkPos::new(0, 0), 4);
+    for _ in 0..200 {
+        renderer.update_world(&world, &[], ChunkPos::new(0, 0), 4);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    let item = |n: &str| data.registries.index("minecraft:item", &Identifier::minecraft(n));
+    let sword = item("iron_sword").expect("iron_sword in the item registry");
+    // The iron equipment asset resolves and its humanoid layer texture is in the jar.
+    let info = assets
+        .equipment_info(&Identifier::minecraft("iron"))
+        .expect("equipment/iron.json");
+    let layers: Vec<_> = info.layers_of("humanoid").collect();
+    assert!(!layers.is_empty(), "iron has a humanoid layer");
+    for l in &layers {
+        assets
+            .texture_any(&l.texture)
+            .unwrap_or_else(|e| panic!("equipment texture {}: {e:#}", l.texture));
+    }
+    let mut equipment = Vec::new();
+    for (name, slot) in [
+        ("iron_helmet", EquipmentSlot::Head),
+        ("iron_chestplate", EquipmentSlot::Chest),
+        ("iron_leggings", EquipmentSlot::Legs),
+        ("iron_boots", EquipmentSlot::Feet),
+    ] {
+        let idx = item(name).unwrap_or_else(|| panic!("{name} in the item registry"));
+        let eq = data
+            .item_components
+            .equippable(idx)
+            .unwrap_or_else(|| panic!("{name} has an equippable component (is the report cached?)"));
+        assert_eq!(eq.slot, slot);
+        equipment.push(EquipmentPiece {
+            slot,
+            item: Some(idx),
+            asset: eq.asset.clone(),
+            dye: None,
+        });
+    }
+
+    let bare = EntityInstance {
+        id: EntityId(1),
+        model: haste_entity::models::humanoid(false),
+        pos: glam::DVec3::new(0.0, 1.0, 0.0),
+        yaw: 180.0,
+        pitch: 0.0,
+        head_yaw: 180.0,
+        scale: 1.0,
+        pose: PoseOverrides::default(),
+        skin: None,
+        nametag: None,
+        hurt: 0.0,
+        item: None,
+        decoration: None,
+        hands: [None, None],
+        equipment: Vec::new(),
+    };
+    let mut armed = bare.clone();
+    armed.hands = [Some(sword), None];
+    armed.equipment = equipment;
+
+    let camera = Camera {
+        pos: glam::DVec3::new(0.0, 2.2, -4.0),
+        yaw: 0.0,
+        pitch: 5.0,
+        fov_deg: 70.0,
+        roll_deg: 0.0,
+        bob: haste_render::ViewBob::default(),
+    };
+    let base = render_scene(&mut renderer, &world, std::slice::from_ref(&bare), camera);
+    let img = render_scene(&mut renderer, &world, std::slice::from_ref(&armed), camera);
+    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
+    std::fs::create_dir_all(&out).unwrap();
+    img.save(out.join("equipment.png")).unwrap();
+    let changed = base
+        .pixels()
+        .zip(img.pixels())
+        .filter(|(a, b)| a.0 != b.0)
+        .count();
+    eprintln!("equipment drew into {} pixels; entities_drawn={}", changed, renderer.entities_drawn());
+    assert!(
+        changed > 200,
+        "the held sword and armour changed {changed} pixels"
+    );
+    assert_eq!(renderer.entities_drawn(), 1);
 }

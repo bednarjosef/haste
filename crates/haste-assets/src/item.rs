@@ -39,6 +39,11 @@ pub struct ItemModelPart {
     pub gui: DisplayTransform,
     /// `display.firstperson_righthand` (identity when the chain has none).
     pub firstperson: DisplayTransform,
+    /// `display.thirdperson_righthand` (identity when the chain has none): held items on mobs
+    /// and other players (the left hand uses the same transform with the left-hand fix).
+    pub thirdperson: DisplayTransform,
+    /// `display.head` (identity when the chain has none): heads and hats worn on the head.
+    pub head: DisplayTransform,
     /// `display.ground` (identity when the chain has none): dropped item entities.
     pub ground: DisplayTransform,
     /// `display.fixed` (identity when the chain has none): item frames and other fixed mounts.
@@ -113,6 +118,8 @@ impl Assets {
                 tints,
                 gui: DisplayTransform::IDENTITY,
                 firstperson: DisplayTransform::IDENTITY,
+                thirdperson: DisplayTransform::IDENTITY,
+                head: DisplayTransform::IDENTITY,
                 ground: DisplayTransform::IDENTITY,
                 fixed: DisplayTransform::IDENTITY,
                 gui_light_front: false,
@@ -123,6 +130,12 @@ impl Assets {
         let gui = resolved.gui_display.unwrap_or(DisplayTransform::IDENTITY);
         let firstperson = resolved
             .firstperson_display
+            .unwrap_or(DisplayTransform::IDENTITY);
+        let thirdperson = resolved
+            .thirdperson_display
+            .unwrap_or(DisplayTransform::IDENTITY);
+        let head = resolved
+            .head_display
             .unwrap_or(DisplayTransform::IDENTITY);
         let ground = resolved
             .ground_display
@@ -155,6 +168,8 @@ impl Assets {
             tints,
             gui,
             firstperson,
+            thirdperson,
+            head,
             ground,
             fixed,
             gui_light_front: resolved.gui_light,
