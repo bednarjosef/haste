@@ -278,6 +278,12 @@ pub struct WorldProbe {
     pub block_overlay: Option<Identifier>,
     /// Whether the block at our feet is a nether portal (`NetherPortalBlock.entityInside`).
     pub in_portal: bool,
+    /// Whether our bounding box overlaps a fire block (`BaseFireBlock.entityInside` applies
+    /// `FIRE_IGNITE`, which is what sets the local player's fire ticks on the client).
+    pub in_fire: bool,
+    /// Whether our bounding box overlaps powder snow (`PowderSnowBlock.entityInside` applies
+    /// `FREEZE`, which is what sets the local player's freeze ticks on the client).
+    pub in_powder_snow: bool,
     /// The brighter of the sky and block light at the eye position
     /// (`Level.getMaxLocalRawBrightness`, overworld: no sky darkening).
     pub eye_light: u8,
@@ -360,8 +366,10 @@ pub struct Probe<'a> {
     /// The interpolated eye position and the feet, for the eye's block and the portal check.
     pub eye: glam::DVec3,
     pub feet: glam::DVec3,
-    /// The player's box width and scale, for the view-blocking sample points.
+    /// The player's box width, height and scale: the width and scale for the view-blocking
+    /// sample points, all three for the fire block overlap.
     pub bb_width: f64,
+    pub bb_height: f64,
     pub scale: f64,
 }
 
@@ -397,6 +405,27 @@ impl Probe<'_> {
             );
         let feet_state = self.world.block_state(feet_pos);
         let in_portal = is_portal_block(self.blocks.block_of(feet_state));
+        // Whether any fire block overlaps our bounding box: the local player's client-side
+        // `BaseFireBlock.entityInside` -> `FIRE_IGNITE` is what sets its own fire ticks (the
+        // server does not send the owner their own `set_entity_data`).
+        let mut in_fire = false;
+        let mut in_powder_snow = false;
+        let half = self.bb_width * 0.5;
+        let min = self.feet - glam::DVec3::new(half, 0.0, half);
+        let max = self.feet + glam::DVec3::new(half, self.bb_height, half);
+        let (x0, x1) = (min.x.floor() as i32, (max.x - 1e-7).floor() as i32);
+        let (y0, y1) = (min.y.floor() as i32, (max.y - 1e-7).floor() as i32);
+        let (z0, z1) = (min.z.floor() as i32, (max.z - 1e-7).floor() as i32);
+        for x in x0..=x1 {
+            for y in y0..=y1 {
+                for z in z0..=z1 {
+                    let pos = haste_core::BlockPos::new(x, y, z);
+                    let block = self.blocks.block_of(self.world.block_state(pos));
+                    in_fire |= is_fire_block(block, self.blocks, self.tags);
+                    in_powder_snow |= is_powder_snow_block(block, self.blocks, self.tags);
+                }
+            }
+        }
         // The eye position's brightest light channel (`getMaxLocalRawBrightness`: the
         // overworld's sky light is not darkened by the time of day here, so the raw values).
         let eye_pos = haste_core::BlockPos::new(
@@ -411,8 +440,57 @@ impl Probe<'_> {
         WorldProbe {
             block_overlay,
             in_portal,
+            in_fire,
+            in_powder_snow,
             eye_light,
         }
+    }
+}
+
+/// Whether `block` is powder snow (`PowderSnowBlock` applies the `FREEZE` inside-block effect).
+fn is_powder_snow_block(
+    block: &Identifier,
+    blocks: &haste_data::BlockStates,
+    tags: Option<&haste_physics::mining::BlockTags>,
+) -> bool {
+    if block.namespace() == "minecraft" && block.path() == "powder_snow" {
+        return true;
+    }
+    // `BlockTags.POWDER_SNOW` (`minecraft:powder_snow`) covers it and any modded snow.
+    match (tags, blocks.block_index(block)) {
+        (Some(tags), Some(index)) => tags.contains(&Identifier::minecraft("powder_snow"), index.0),
+        _ => false,
+    }
+}
+
+/// One tick of the local player's freeze ticks, as the client predicts them: powder snow's
+/// `FREEZE` adds one (`InsideBlockEffectType.FREEZE`, capped at `getTicksRequiredToFreeze`),
+/// fire's `CLEAR_FREEZE` zeroes them, and outside powder snow the server's rule eases them out
+/// by two per tick (`LivingEntity.aiStep`). The server never sends the owner their own
+/// `set_entity_data` (`ChunkMap.TrackedEntity.updatePlayer` skips self), so Haste predicts it.
+pub fn tick_frozen(current: i32, in_powder_snow: bool, in_fire: bool) -> i32 {
+    if in_fire {
+        0
+    } else if in_powder_snow {
+        (current + 1).min(FREEZE_TICKS)
+    } else {
+        (current - 2).max(0)
+    }
+}
+
+/// Whether `block` is a fire block (`BaseFireBlock`: the `minecraft:fire` tag, or the two
+/// vanilla blocks by name when the server sent no tags).
+fn is_fire_block(
+    block: &Identifier,
+    blocks: &haste_data::BlockStates,
+    tags: Option<&haste_physics::mining::BlockTags>,
+) -> bool {
+    if block.namespace() == "minecraft" && matches!(block.path(), "fire" | "soul_fire") {
+        return true;
+    }
+    match (tags, blocks.block_index(block)) {
+        (Some(tags), Some(index)) => tags.contains(&Identifier::minecraft("fire"), index.0),
+        _ => false,
     }
 }
 
@@ -442,6 +520,17 @@ pub fn hud_fov(eye_in_water: bool) -> f32 {
     } else {
         70.0
     }
+}
+
+/// Our own entity's bits the screen effects need, from our own `set_entity_data` (vanilla's
+/// `Entity.entityData`): the shared flags byte's on-fire flag and `DATA_TICKS_FROZEN`.
+#[derive(Clone, Debug, Default)]
+pub struct OwnFlags {
+    /// `Entity.isOnFire` on the client: shared flag 0 (`DATA_SHARED_FLAGS_ID`, metadata index 0).
+    pub on_fire: bool,
+    /// `Entity.getTicksFrozen` (metadata index 7, `DATA_TICKS_FROZEN`), the powder-snow
+    /// outline's alpha.
+    pub frozen_ticks: i32,
 }
 
 /// The screen-effect state for one tick, copied out of the game thread's state.
@@ -1028,6 +1117,24 @@ mod tests {
         // Fully frozen (140) and past it both read 1.
         assert_eq!(percent_frozen(140), 1.0);
         assert_eq!(percent_frozen(999), 1.0);
+    }
+
+    #[test]
+    fn the_freeze_ticks_rise_in_powder_snow_and_fall_outside_it() {
+        // Powder snow's `FREEZE` adds one per tick, capped at `getTicksRequiredToFreeze`.
+        let mut ticks = 0;
+        for _ in 0..FREEZE_TICKS {
+            ticks = tick_frozen(ticks, true, false);
+        }
+        assert_eq!(ticks, FREEZE_TICKS);
+        // It never goes above the cap.
+        assert_eq!(tick_frozen(FREEZE_TICKS, true, false), FREEZE_TICKS);
+        // Outside, the server's rule eases them out by two per tick, never below zero.
+        assert_eq!(tick_frozen(10, false, false), 8);
+        assert_eq!(tick_frozen(1, false, false), 0);
+        assert_eq!(tick_frozen(0, false, false), 0);
+        // Fire's `CLEAR_FREEZE` zeroes them at once.
+        assert_eq!(tick_frozen(120, false, true), 0);
     }
 
     // ---- the water overlay -------------------------------------------------------

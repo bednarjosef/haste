@@ -725,10 +725,18 @@ fn tick_once(
                 eye: p.camera(1.0).0,
                 feet: p.state.pos,
                 bb_width: p.attrs.box_width(),
+                bb_height: p.attrs.height_for(p.state.pose),
                 scale: f64::from(p.attrs.scale),
             }
             .sample();
             driver.session.screen.set_inside_portal(probe.in_portal);
+            // The local player's freeze ticks are client-predicted (the server does not send the
+            // owner their own metadata): powder snow adds one, fire clears them.
+            driver.session.player.own_flags.frozen_ticks = crate::screen_effects::tick_frozen(
+                driver.session.player.own_flags.frozen_ticks,
+                probe.in_powder_snow,
+                probe.in_fire,
+            );
             driver.session.screen_probe = probe;
         }
         driver.end_tick(&input, &mut *world, &mut *entities)?;
@@ -838,7 +846,10 @@ fn tick_once(
         block_overlay: s.screen_probe.block_overlay.clone(),
         eye_in_water,
         eye_light: s.screen_probe.eye_light,
-        on_fire: s.own_flags().on_fire,
+        // The client predicts its own fire from the fire block it overlaps
+        // (`BaseFireBlock.fireIgnite`); the server never sends the owner their own
+        // `set_entity_data`, so `own_flags.on_fire` stays false and the probe carries it.
+        on_fire: s.own_flags().on_fire || s.screen_probe.in_fire,
         camera_overlay: head_item,
         frozen_ticks: s.own_flags().frozen_ticks,
         scoping: s.player.scoping(&shared.data),

@@ -193,6 +193,9 @@ pub struct LocalPlayer {
     pub saturation: f32,
     /// Air supply in ticks (entity metadata index 1; 300 when not under water).
     pub air_supply: i32,
+    /// Our own entity's screen-effect bits from our own `set_entity_data`: the on-fire shared
+    /// flag (index 0) and the freeze ticks (index 7).
+    pub own_flags: crate::screen_effects::OwnFlags,
     /// Selected hotbar slot (0..8).
     pub held_slot: i32,
     /// Whether a `player_position` arrived since login/respawn.
@@ -262,6 +265,7 @@ impl LocalPlayer {
             food: 20,
             saturation: 5.0,
             air_supply: 300,
+            own_flags: crate::screen_effects::OwnFlags::default(),
             held_slot: 0,
             has_position: false,
             loaded: false,
@@ -400,10 +404,19 @@ impl LocalPlayer {
             }
             P::SetHeldSlot(s) => self.held_slot = s.slot,
             P::SetEntityData(d) if EntityId(d.entity_id) == self.entity_id => {
-                // Wiki "Entity metadata": index 1 is the air supply (VarInt).
+                // Wiki "Entity metadata": index 1 is the air supply (VarInt); the screen effects
+                // also read index 0's shared flags (bit 0 = on fire, `Entity.isOnFire`) and
+                // index 7's `DATA_TICKS_FROZEN` (the powder-snow outline's alpha).
                 for e in &d.metadata {
-                    if let (1, haste_core::entity::MetadataValue::VarInt(v)) = (e.index, &e.value) {
-                        self.air_supply = *v;
+                    match (e.index, &e.value) {
+                        (1, haste_core::entity::MetadataValue::VarInt(v)) => self.air_supply = *v,
+                        (0, haste_core::entity::MetadataValue::Byte(b)) => {
+                            self.own_flags.on_fire = *b & 0x01 != 0;
+                        }
+                        (7, haste_core::entity::MetadataValue::VarInt(t)) => {
+                            self.own_flags.frozen_ticks = *t;
+                        }
+                        _ => {}
                     }
                 }
             }

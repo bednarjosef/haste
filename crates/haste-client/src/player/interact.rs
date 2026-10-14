@@ -122,6 +122,11 @@ pub struct Interaction {
     /// Hotbar 0..=8 and off hand.
     pub hotbar: [ItemStackData; 9],
     pub offhand: ItemStackData,
+    /// The item in the head armor slot (player inventory menu slot 5), for the worn item's
+    /// camera overlay (`Hud.extractCameraOverlays` reads `getItemBySlot(HEAD)`). The server
+    /// sends our own armor through `container_set_slot`/`container_set_content`, not
+    /// `set_equipment` (that goes to other players).
+    pub head_item: Option<haste_core::RegistryIndex>,
     /// Active effects on us (`minecraft:mob_effect` index), with the vanilla blend state the
     /// screen effects need (`screen_effects`).
     pub effects: crate::screen_effects::Effects,
@@ -400,6 +405,8 @@ impl LocalPlayer {
     /// (wiki "Inventory" slot numbering).
     fn set_inventory_menu_slot(&mut self, slot: i32, item: &ItemStackData) {
         match slot {
+            // Player inventory menu: 5..=8 armor (5 head), 36..=44 hotbar, 45 off hand.
+            5 => self.int.head_item = item.item,
             36..=44 => self.int.hotbar[(slot - 36) as usize] = item.clone(),
             45 => self.int.offhand = item.clone(),
             _ => {}

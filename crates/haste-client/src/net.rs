@@ -350,27 +350,10 @@ pub struct Session {
     /// portal under our feet and the eye position's light (vanilla's
     /// `LevelExtractor.getViewBlockingState` and `NetherPortalBlock.entityInside`).
     pub screen_probe: crate::screen_effects::WorldProbe,
-    /// Our own entity's bits the screen effects need, from our own `set_entity_data`:
-    /// the on-fire shared flag (bit 0) and `DATA_TICKS_FROZEN` (metadata index 7).
-    own_flags: OwnFlags,
-    /// The item we wear on the head (equipment slot 5), for the carved pumpkin's camera
-    /// overlay; `None` when the slot is empty.
-    head_item: Option<haste_core::RegistryIndex>,
     /// Ticks of hurt-tilt camera roll left (10 per hit on our own entity).
     hurt_tilt_ticks: u32,
     /// Direction of the tilt: +1 rolls one way, -1 the other (from the damage yaw).
     hurt_tilt_dir: f32,
-}
-
-/// The own entity's screen-effect bits, from our own `set_entity_data`: the shared flags
-/// byte's on-fire flag and the freeze ticks.
-#[derive(Clone, Debug, Default)]
-pub struct OwnFlags {
-    /// `Entity.isOnFire` on the client: shared flag 0 (`DATA_SHARED_FLAGS_ID`).
-    pub on_fire: bool,
-    /// `Entity.getTicksFrozen` (metadata index 7, `DATA_TICKS_FROZEN`), the powder-snow
-    /// outline's alpha.
-    pub frozen_ticks: i32,
 }
 
 impl Session {
@@ -393,8 +376,6 @@ impl Session {
             sound_requests: Vec::new(),
             screen: crate::screen_effects::PortalEffects::default(),
             screen_probe: crate::screen_effects::WorldProbe::default(),
-            own_flags: OwnFlags::default(),
-            head_item: None,
             hurt_tilt_ticks: 0,
             hurt_tilt_dir: 0.0,
         }
@@ -670,30 +651,20 @@ impl Session {
             }
             P::EntityEvent(e) if e.status == 3 => entities.mark_dead(EntityId(e.entity_id)),
             P::SetEntityData(d) => {
+                // Our own entity's data is handled by the player (`LocalPlayer::handle`: the air
+                // supply and the screen effects' on-fire and freeze ticks), and `_ if
+                // player_packet` above already swallowed it; only others go to the store.
                 if EntityId(d.entity_id) != own {
                     entities.set_metadata(EntityId(d.entity_id), &d.metadata);
-                } else {
-                    // Our own entity's data: the player reads its own air supply, and the
-                    // screen effects need the shared flags byte (bit 0 = on fire) and the
-                    // freeze ticks (metadata index 7).
-                    for e in &d.metadata {
-                        match (e.index, &e.value) {
-                            (0, haste_core::entity::MetadataValue::Byte(b)) => {
-                                self.own_flags.on_fire = *b & 0x01 != 0;
-                            }
-                            (7, haste_core::entity::MetadataValue::VarInt(t)) => {
-                                self.own_flags.frozen_ticks = *t;
-                            }
-                            _ => {}
-                        }
-                    }
                 }
             }
             P::SetEquipment(e) => {
                 for (slot, item) in e.equipment {
                     if EntityId(e.entity_id) == own && slot == HEAD_SLOT {
-                        // Our own head slot: the carved pumpkin's camera overlay reads it.
-                        self.head_item = item.item;
+                        // Our own head slot, if the server sends it this way (vanilla sends our
+                        // own armor through `container_set_slot`): the worn item's camera
+                        // overlay reads it.
+                        self.player.int.head_item = item.item;
                     }
                     entities.set_equipment(EntityId(e.entity_id), slot, item);
                 }
@@ -793,14 +764,14 @@ impl Session {
         self.tick_hurt_tilt();
     }
 
-    /// The item worn on the head (equipment slot 5), if any.
+    /// The item worn on the head (player inventory slot 5), if any.
     pub fn head_item(&self) -> Option<haste_core::RegistryIndex> {
-        self.head_item
+        self.player.int.head_item
     }
 
-    /// Our own entity's screen-effect bits (on fire, freeze ticks).
-    pub fn own_flags(&self) -> &OwnFlags {
-        &self.own_flags
+    /// Our own entity's screen-effect bits (on fire, freeze ticks), parsed by `LocalPlayer`.
+    pub fn own_flags(&self) -> &crate::screen_effects::OwnFlags {
+        &self.player.own_flags
     }
 
     /// The portal and spinning screen effects, ticked in `end_tick`.

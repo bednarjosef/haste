@@ -1115,7 +1115,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let view = shared.view.lock().clone();
     let entities = feed.instances.len();
     println!(
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} entity instances (perspective {}, local player {}), target {:?}",
+        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} gui commands, {} entity instances (perspective {}, local player {}), target {:?}",
         file.display(),
         image.width(),
         image.height(),
@@ -1128,6 +1128,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         stats.chunk_sections_drawn,
         stats.chunk_sections_total,
         stats.draw_calls,
+        gui.commands.len(),
         entities,
         args.perspective,
         perspective.draws_player(),
