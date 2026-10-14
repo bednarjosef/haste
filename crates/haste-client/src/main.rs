@@ -3,6 +3,9 @@
 //! - `net`     (protocol): connection task, packet -> world/entity/player calls, outgoing packets.
 //! - `app`     (renderer): window, render loop, frame timing.
 //! - `player`  (physics): input sampling, physics tick, movement packets.
+//! - `screen_effects`: the overlays vanilla's `ScreenEffectRenderer` and `Hud` draw over the
+//!   world (water, fire, in-wall, pumpkin, powder snow, spyglass, portal, nausea), driven by
+//!   the real state.
 //! - `ui`      (jvm-host): HUD + tier-3 screens through the batched GUI pipeline.
 //! - `launch`  (setup): CLI args, config, setup checks, singleplayer server lifecycle.
 //! - `headless`: join milestone mode, no window: joins, tracks world/entities, prints stats.
@@ -18,6 +21,7 @@ mod headless;
 mod launch;
 mod net;
 mod player;
+mod screen_effects;
 mod screenshots;
 mod script;
 mod sound;

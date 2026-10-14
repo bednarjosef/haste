@@ -226,7 +226,7 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
 }
 
 /// What the render thread needs each frame, copied out under a short lock.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ViewState {
     /// Player eye position at the start of the last tick (`LocalPlayer::camera(0.0)`).
     pub prev_eye: DVec3,
@@ -298,6 +298,10 @@ pub struct ViewState {
     /// Body pose metadata for the own model (`None`: the physics pose only knows standing,
     /// crouching and swimming).
     pub pose: Option<haste_core::entity::Pose>,
+    /// This tick's screen effects (`screen_effects`): the block the camera is inside, the
+    /// worn head item's overlay, on fire, freeze ticks, portal and nausea, the light at the
+    /// eye and whether we are scoping a spyglass.
+    pub screen: crate::screen_effects::ViewEffects,
     /// Lightmap per-tick state the render thread folds into the lightmap by partial tick:
     /// the block-light flicker, the night-vision effect duration (`None` without it), the
     /// darkness effect's blend state, the boss-overlay world darkening (this tick and the
@@ -525,6 +529,7 @@ impl Shared {
                 look: (0.0, 0.0),
                 prev_feet: DVec3::ZERO,
                 pose: None,
+                screen: crate::screen_effects::ViewEffects::default(),
                 lightmap_flicker: 0.0,
                 lightmap_night_vision: None,
                 lightmap_darkness: None,
@@ -944,6 +949,34 @@ fn tick_once(
         // Write lock: the player's breaking predicts block changes into the world.
         let mut world = shared.world.write();
         let mut entities = shared.entities.write();
+        // The world probe for the screen effects (vanilla's
+        // `NetherPortalBlock.entityInside` and `LevelExtractor.getViewBlockingState`): the
+        // portal under our feet feeds the portal effect's tick below, and the block the
+        // camera is inside plus the eye's light go into this tick's view.
+        {
+            let p = &driver.session.player;
+            let probe = crate::screen_effects::Probe {
+                world: &*world,
+                shapes: &shared.data.shapes,
+                blocks: &shared.data.blocks,
+                tags: p.int.block_tags(),
+                eye: p.camera(1.0).0,
+                feet: p.state.pos,
+                bb_width: p.attrs.box_width(),
+                bb_height: p.attrs.height_for(p.state.pose),
+                scale: f64::from(p.attrs.scale),
+            }
+            .sample();
+            driver.session.screen.set_inside_portal(probe.in_portal);
+            // The local player's freeze ticks are client-predicted (the server does not send the
+            // owner their own metadata): powder snow adds one, fire clears them.
+            driver.session.player.own_flags.frozen_ticks = crate::screen_effects::tick_frozen(
+                driver.session.player.own_flags.frozen_ticks,
+                probe.in_powder_snow,
+                probe.in_fire,
+            );
+            driver.session.screen_probe = probe;
+        }
         driver.end_tick(&input.state, &mut *world, &mut *entities)?;
         let mut dirty = world.take_dirty_sections();
         if !dirty.is_empty() {
@@ -1099,6 +1132,34 @@ fn tick_once(
     view.hurt_ticks = s.hurt_ticks;
     view.hurt_dir = s.hurt_dir;
     view.death_ticks = s.death_ticks;
+    // The screen effects, from this tick's world probe (the block the camera is inside, the
+    // eye's light), the own entity's flags and freeze ticks, the worn head item and the active
+    // effects. The eyes being in water comes from the physics' fluid at the eye position.
+    let head_item = s.head_item().and_then(|i| {
+        shared
+            .data
+            .registries
+            .name("minecraft:item", i)
+            .cloned()
+            .and_then(|name| crate::screen_effects::camera_overlay(&name))
+    });
+    let screen = s.screen_effects();
+    view.screen = crate::screen_effects::ViewEffects {
+        block_overlay: s.screen_probe.block_overlay.clone(),
+        eye_in_water: view.eye_in_water,
+        eye_light: s.screen_probe.eye_light,
+        // The client predicts its own fire from the fire block it overlaps
+        // (`BaseFireBlock.fireIgnite`); the server never sends the owner their own
+        // `set_entity_data`, so `own_flags.on_fire` stays false and the probe carries it.
+        on_fire: s.own_flags().on_fire || s.screen_probe.in_fire,
+        camera_overlay: head_item,
+        frozen_ticks: s.own_flags().frozen_ticks,
+        scoping: s.player.scoping(&shared.data),
+        portal: (screen.prev_portal(), screen.portal()),
+        nausea: s.player.int.nausea_blend_pair(),
+        spinning_time: screen.spinning_time(),
+        spinning_speed: screen.spinning_speed(),
+    };
     Ok(())
 }
 

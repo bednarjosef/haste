@@ -104,6 +104,7 @@ fn render_with_gui_skip(
         block_target: None,
         breaking: &[],
         camera_entity,
+        spin: None,
     };
     renderer.render(&frame).unwrap();
     renderer.read_back().unwrap()

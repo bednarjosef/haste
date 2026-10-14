@@ -53,7 +53,14 @@ fn data() -> &'static haste_data::GameData {
                     "minecraft:entity_type": {{"entries": {{{}}}}}}}"#,
                 entries(&names),
                 entries(&["air", "diamond_pickaxe", "diamond_sword", "stick"]),
-                entries(&["speed", "haste", "mining_fatigue", "conduit_power"]),
+                entries(&[
+                    "speed",
+                    "haste",
+                    "mining_fatigue",
+                    "conduit_power",
+                    "nausea",
+                    "darkness",
+                ]),
                 entries(&[
                     "item",
                     "experience_orb",

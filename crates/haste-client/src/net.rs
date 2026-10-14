@@ -36,6 +36,10 @@ use crate::player::{LocalPlayer, VehiclePose};
 
 /// Hurt-tilt camera roll duration in ticks (vanilla's `hurtTime` runs to 10).
 pub const HURT_TILT_TICKS: u32 = 10;
+/// The head equipment slot of `set_equipment` (`EquipmentSlot.values()`: 0 main hand, 1 off
+/// hand, 2 boots, 3 leggings, 4 chestplate, 5 helmet, 6 body, 7 saddle). The item worn there
+/// can hide the screen behind a camera overlay (the carved pumpkin's blur).
+pub const HEAD_SLOT: u8 = 5;
 
 /// What the driver needs from the world (`haste_world::World`).
 pub trait WorldSink {
@@ -652,6 +656,13 @@ pub struct Session {
     /// nobody drains them (headless). Reused, so a tick without sound packets allocates
     /// nothing.
     pub sound_requests: Vec<crate::sound::SoundRequest>,
+    /// The portal and spinning screen effects (`LocalPlayer.portalEffectIntensity`, the
+    /// spinning effect time and speed), ticked in `end_tick`.
+    pub screen: crate::screen_effects::PortalEffects,
+    /// This tick's world probe for the screen effects: the block the camera is inside, the
+    /// portal under our feet and the eye position's light (vanilla's
+    /// `LevelExtractor.getViewBlockingState` and `NetherPortalBlock.entityInside`).
+    pub screen_probe: crate::screen_effects::WorldProbe,
     /// The `fovEffectScale` option this run uses (set by the window from its saved options;
     /// the headless path leaves the vanilla default).
     pub fov_effect_scale: f32,
@@ -711,6 +722,8 @@ impl Session {
             new_world_pending: false,
             entity_type_names: Vec::new(),
             sound_requests: Vec::new(),
+            screen: crate::screen_effects::PortalEffects::default(),
+            screen_probe: crate::screen_effects::WorldProbe::default(),
             fov_effect_scale: 1.0,
             fov_modifier: 0.0,
             old_fov_modifier: 0.0,
@@ -1169,6 +1182,9 @@ impl Session {
             // Entity status 4 is the melee attack animation (IronGolem.handleEntityEvent).
             P::EntityEvent(e) if e.status == 4 => entities.mark_attack(EntityId(e.entity_id)),
             P::SetEntityData(d) => {
+                // Our own entity's data is handled by the player (`LocalPlayer::handle`: the air
+                // supply and the screen effects' on-fire and freeze ticks), and `_ if
+                // player_packet` above already swallowed it; only others go to the store.
                 if EntityId(d.entity_id) != own {
                     let id = EntityId(d.entity_id);
                     entities.set_metadata(id, &d.metadata);
@@ -1187,6 +1203,12 @@ impl Session {
             }
             P::SetEquipment(e) => {
                 for (slot, item) in e.equipment {
+                    if EntityId(e.entity_id) == own && slot == HEAD_SLOT {
+                        // Our own head slot, if the server sends it this way (vanilla sends our
+                        // own armor through `container_set_slot`): the worn item's camera
+                        // overlay reads it.
+                        self.player.int.armor[0] = item.clone();
+                    }
                     entities.set_equipment(EntityId(e.entity_id), slot, item);
                 }
             }
@@ -1300,6 +1322,27 @@ impl Session {
         for lid in self.lids.values_mut() {
             lid.tick();
         }
+        // The screen effects' tick, in vanilla's `LocalPlayer.tick` order: the portal
+        // transition effect (`portalProcess.isInsidePortalThisTick`, set by the game thread's
+        // world probe through [`Session::screen`]) and the spinning effect, which read the
+        // nausea blend factor at the end of the tick.
+        let nausea = self.player.int.nausea_factor(1.0);
+        self.screen.tick(true, nausea);
+    }
+
+    /// The item worn on the head (the helmet armor slot), if any.
+    pub fn head_item(&self) -> Option<haste_core::RegistryIndex> {
+        self.player.int.armor[0].item
+    }
+
+    /// Our own entity's screen-effect bits (on fire, freeze ticks), parsed by `LocalPlayer`.
+    pub fn own_flags(&self) -> &crate::screen_effects::OwnFlags {
+        &self.player.own_flags
+    }
+
+    /// The portal and spinning screen effects, ticked in `end_tick`.
+    pub fn screen_effects(&self) -> &crate::screen_effects::PortalEffects {
+        &self.screen
     }
 
     /// Break cracks to draw: other players' (`block_destruction`) and our own.
