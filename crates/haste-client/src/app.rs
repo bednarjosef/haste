@@ -113,6 +113,12 @@ fn debug_info(
     use haste_render::BiomeSource as _;
     let view = *shared.view.lock();
     let world = shared.world.read();
+    // The full look the player is rendered with (input look plus the server's offset), like
+    // frame_view; vanilla's F3 shows the entity's rotation.
+    let look = (
+        look.0 + view.look_offset.0,
+        (look.1 + view.look_offset.1).clamp(-90.0, 90.0),
+    );
     let mut d = haste_jvm::DebugInfo {
         fps,
         pos: [view.feet.x, view.feet.y, view.feet.z],
@@ -156,7 +162,8 @@ fn debug_info(
     ];
     // The looking-at block/fluid (vanilla Entity.pick, 20 blocks, block without fluids, fluid
     // with them): both rays from the interpolated eye along the look direction.
-    let eye = game::interpolate(view.prev_eye, view.eye, 0.0);
+    let partial = game::partial_tick(view.tick_at, Instant::now());
+    let eye = game::interpolate(view.prev_eye, view.eye, partial);
     let dir = haste_physics::raycast::look_vector(look.0, look.1);
     let data = &shared.data;
     if let Some(hit) = haste_physics::raycast::raycast_blocks(eye, dir, 20.0, &*world, &data.shapes)
@@ -189,7 +196,12 @@ fn debug_info(
                 .into_iter()
                 .filter(|(k, _)| k == "level")
                 .collect(),
-            tags: env.fluid_tags.get(&0).cloned().unwrap_or_default(),
+            tags: haste_protocol::haste_core::Identifier::parse(name)
+                .ok()
+                .and_then(|n| data.registries.index("minecraft:fluid", &n))
+                .and_then(|r| env.fluid_tags.get(&r.0))
+                .cloned()
+                .unwrap_or_default(),
         }
     });
     d.tx_per_s = f64::from_bits(shared.debug_tx.load(Ordering::Relaxed));
@@ -1432,6 +1444,14 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             let settled = view.has_position
                 && hud_ready
                 && feed.settled(&last_stats, Duration::from_millis(1500));
+            if !settled && frames.is_multiple_of(40) {
+                tracing::info!(
+                    "waiting to settle: queue {} pending {} arrival {:?}",
+                    feed.queue.len(),
+                    last_stats.meshes_pending,
+                    feed.last_arrival.map(|t| t.elapsed())
+                );
+            }
             let state = script::ScriptState {
                 joined: view.has_position,
                 settled,
@@ -1572,6 +1592,25 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                     .save(&path)
                     .with_context(|| format!("saving {}", path.display()))?;
                 println!("script screenshot saved to {}", path.display());
+                // The frame's text, next to the PNG: the checks' lines to read without OCR.
+                let mut txt = path.clone().into_os_string();
+                txt.push(".txt");
+                std::fs::write(
+                    std::path::PathBuf::from(txt),
+                    gui.commands
+                        .iter()
+                        .filter_map(|c| match c {
+                            haste_protocol::haste_core::gui::GuiCommand::Text { text, .. }
+                            | haste_protocol::haste_core::gui::GuiCommand::StyledText {
+                                text,
+                                ..
+                            } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+                .with_context(|| "writing the screenshot's text")?;
             }
         }
         if Instant::now() > deadline {
