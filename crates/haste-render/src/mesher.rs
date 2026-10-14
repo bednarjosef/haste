@@ -1166,6 +1166,181 @@ mod tests {
         assert_eq!(quads, 256 + 256 + 256 + 256, "culled grass slab");
     }
 
+    /// The client jar's baked models and atlas (None without the cache: the caller
+    /// returns, so the test is skipped rather than failed).
+    fn load_baked() -> Option<(
+        haste_assets::BlocksJsonStates,
+        haste_assets::BakedBlockModels,
+        haste_assets::AtlasBuilder,
+    )> {
+        let jar = haste_core::paths::client_jar();
+        if !jar.exists() {
+            eprintln!("ignored: needs the client jar in the cache");
+            return None;
+        }
+        let mut assets = haste_assets::Assets::open(
+            &jar,
+            &haste_core::paths::cache_dir().join("assets"),
+            "26.3",
+        )
+        .unwrap();
+        let states = haste_assets::BlocksJsonStates::load(
+            &haste_core::paths::datagen_reports().join("blocks.json"),
+        )
+        .unwrap();
+        let mut atlas = haste_assets::AtlasBuilder::build(&mut assets, &[], false).unwrap();
+        let baked = haste_assets::BakedBlockModels::bake(&mut assets, &states, &mut atlas).unwrap();
+        Some((states, baked, atlas))
+    }
+
+    /// `minecraft:grass_block`'s non-snowy state.
+    fn grass_state(states: &haste_assets::BlocksJsonStates) -> BlockStateId {
+        use haste_core::view::BlockStateTable;
+        (0..states.len() as u32)
+            .map(BlockStateId)
+            .find(|s| {
+                states.block_of(*s).path() == "grass_block"
+                    && states.property_value(*s, "snowy") == Some("false")
+            })
+            .expect("grass_block in blocks.json")
+    }
+
+    /// One vertex's tint (0xRRGGBB), unpacked from the packed bytes.
+    fn vertex_tint(v: &PackedVertex) -> u32 {
+        ((v.light[2] as u32) << 16) | ((v.light[3] as u32) << 8) | v.tint_b[0] as u32
+    }
+
+    #[test]
+    #[ignore = "needs the client jar and datagen reports in the cache"]
+    fn every_tinted_quad_of_a_block_takes_its_blended_colour() {
+        let Some((states, baked, atlas)) = load_baked() else {
+            return;
+        };
+        // A snowy biome's grass colour: explicit, and nothing like the default green.
+        let mut snowy = crate::tint::BiomeClimate::plains();
+        snowy.grass_color = Some(0x3A7D5C);
+        let tables = MeshTables::new(
+            Arc::new(crate::tint::TintTable::new(&states)),
+            Arc::new(
+                crate::tint::BiomeColors::new(&[snowy], &crate::tint::Colormaps::uniform(0x91BD59))
+                    .with_radius(0),
+            ),
+            Arc::new(crate::fluid::FluidTable::empty()),
+        );
+        struct Snowy;
+        impl crate::tint::BiomeSource for Snowy {
+            fn biome(&self, _pos: BlockPos) -> haste_core::BiomeId {
+                haste_core::BiomeId(0)
+            }
+        }
+        let grass = grass_state(&states);
+        let world = FlatWorld {
+            ground: grass,
+            layers: 1,
+        };
+        let pos = SectionPos::new(0, 0, 0);
+        let snapshot = MeshSnapshot::capture_with_biomes(&world, Some(&Snowy), 0, pos);
+        let mesh = mesh_section_with(&snapshot, &baked, &atlas, &tables, pos);
+
+        let sprite = |texture: &str| atlas.region(texture).sprite as u16;
+        let (top, side, overlay, bottom) = (
+            sprite("minecraft:block/grass_block_top"),
+            sprite("minecraft:block/grass_block_side"),
+            sprite("minecraft:block/grass_block_side_overlay"),
+            sprite("minecraft:block/dirt"),
+        );
+        // Every quad with a tint index (the top face and the side overlay, both
+        // tintindex 0 in block/grass_block) takes the block's blended grass colour;
+        // the untinted side and bottom quads stay white.
+        let mut tinted = 0usize;
+        let mut untinted = 0usize;
+        for v in &mesh.vertices {
+            let tint = vertex_tint(v);
+            match v.sprite {
+                s if s == top || s == overlay => {
+                    assert_eq!(tint, 0x3A7D5C, "tinted quad's colour");
+                    tinted += 1;
+                }
+                s if s == side || s == bottom => {
+                    assert_eq!(tint, TINT_WHITE, "untinted quad's colour");
+                    untinted += 1;
+                }
+                _ => {}
+            }
+        }
+        assert!(tinted >= 4 && untinted >= 4, "both kinds must be meshed");
+    }
+
+    /// The grass block's side overlay is the model's second element: four quads
+    /// lying exactly on the side faces, one tintindex over the same plane the side
+    /// texture covers. The mesher must emit it unchanged (vanilla draws both
+    /// quads; the terrain depth test lets them share a depth), or the side loses
+    /// the biome tint the overlay carries.
+    #[test]
+    #[ignore = "needs the client jar and datagen reports in the cache"]
+    fn side_overlay_quad_is_meshed_on_the_faces_plane() {
+        let Some((states, baked, atlas)) = load_baked() else {
+            return;
+        };
+        let grass = grass_state(&states);
+        let world = FlatWorld {
+            ground: grass,
+            layers: 1,
+        };
+        let pos = SectionPos::new(0, 0, 0);
+        let snapshot = MeshSnapshot::capture(&world, pos);
+        let mesh = mesh_section_with(&snapshot, &baked, &atlas, &MeshTables::default(), pos);
+
+        // The packed position, back to section-local blocks (a quantization step is
+        // far below any model feature, so this recovers the exact quad).
+        let decode = |p: [u16; 4]| {
+            std::array::from_fn(|i| {
+                f32::from(p[i]) / 65535.0 * crate::vertex::POS_RANGE - crate::vertex::POS_BIAS
+            })
+        };
+        let close = |a: [f32; 3], b: [f32; 3]| {
+            a.iter()
+                .zip(b)
+                .all(|(x, y)| (x - y).abs() < 2.0 / 65535.0 * crate::vertex::POS_RANGE)
+        };
+        let sprite_of = |texture: &str| atlas.region(texture).sprite as u16;
+        let overlay_sprite = sprite_of("minecraft:block/grass_block_side_overlay");
+        let side_sprite = sprite_of("minecraft:block/grass_block_side");
+        let at = |quad: &haste_assets::BakedQuad| quad.direction == haste_assets::Direction::North;
+        let base = baked
+            .quads(grass)
+            .iter()
+            .find(|q| at(q) && q.tint_index.is_none())
+            .expect("the grass block's untinted side quad");
+        let overlay = baked
+            .quads(grass)
+            .iter()
+            .find(|q| at(q) && q.tint_index.is_some())
+            .expect("the grass block's tinted side overlay quad");
+        // The model's two elements share the face plane: same direction, same four
+        // vertices. The mesh must keep the overlay on that plane, untouched.
+        assert_eq!(overlay.positions, base.positions, "coplanar model elements");
+
+        for want in base.positions {
+            assert!(
+                mesh.vertices
+                    .iter()
+                    .any(|v| v.sprite == side_sprite && close(decode(v.pos), want)),
+                "the side quad on the face: {want:?} is not in the mesh"
+            );
+            assert!(
+                mesh.vertices
+                    .iter()
+                    .any(|v| v.sprite == overlay_sprite && close(decode(v.pos), want)),
+                "the overlay quad shares the face plane, but {want:?} is not in the mesh"
+            );
+        }
+        assert!(
+            mesh.vertices.iter().any(|v| v.sprite == overlay_sprite),
+            "the grass block's side overlay must be meshed"
+        );
+    }
+
     #[test]
     fn table_generations_are_unique() {
         // Every constructed set takes the next counter value: two sets never

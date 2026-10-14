@@ -1,0 +1,8 @@
+# The pause menu's "Game Menu" title: white like vanilla (not the inactive-widget grey).
+wait_until joined
+wait_until settled
+key ESCAPE
+wait_until screen_open
+screenshot pause-title
+key ESCAPE
+wait_until screen_closed

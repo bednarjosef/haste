@@ -78,6 +78,24 @@ public final class Bridge {
 
     public void close() { Proxies.gui.setScreen(null); }
 
+    /**
+     * Drops everything a test (or a disconnecting client) leaves behind: the chat log and its scroll
+     * position (the history stays), the held mouse button and its position, the screen currently open
+     * and whether vanilla code still believes the mouse is grabbed.
+     */
+    public void resetForTest() {
+        this.pressedButton = -1;
+        this.lastX = 0.0;
+        this.lastY = 0.0;
+        MouseImpl.pressed = -1;
+        MouseImpl.x = 0.0;
+        MouseImpl.y = 0.0;
+        Proxies.hud.getChat().clearMessages(false);
+        Proxies.hud.getChat().resetChatScroll();
+        Proxies.gui.setScreen(null);
+        MouseImpl.grabbed = false;
+    }
+
     public boolean isOpen() { return ClientImpl.screen != null; }
 
     /** Name of the open screen's class (tests), or null. */
@@ -103,6 +121,11 @@ public final class Bridge {
         }
         s = ClientImpl.screen;
         if (s != null) s.extractRenderStateWithTooltipAndSubtitles(Proxies.graphics, (int) mouseX, (int) mouseY, partial);
+        // vanilla Gui.extractRenderState draws the F3 debug overlay after the screen (unless the debug
+        // options screen is up, which draws its own copy); it is the topmost HUD element.
+        if (!(s instanceof net.minecraft.client.gui.screens.debug.DebugOptionsScreen)) {
+            Proxies.hud.extractDebugOverlay(Proxies.graphics);
+        }
         GfxImpl.end();
         return GuiBatch.frame(GfxImpl.cursor);
     }

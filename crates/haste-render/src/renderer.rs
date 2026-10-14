@@ -9,6 +9,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use haste_core::view::BlockView;
 use haste_core::{ChunkPos, SectionPos};
+use parking_lot::Mutex;
 use wgpu::util::DeviceExt;
 
 use crate::arena::{MeshArenas, ResidentSection};
@@ -86,6 +87,11 @@ pub struct FrameInput<'a> {
     pub block_target: Option<(haste_core::BlockPos, haste_core::Direction)>,
     /// Crack overlays: our own break progress plus other players' stages (0..=9).
     pub breaking: &'a [(haste_core::BlockPos, u8)],
+    /// The entity the camera is, when the world pass must not draw it (vanilla
+    /// `LevelExtractor.extractVisibleEntities` skips the camera entity unless the camera is
+    /// detached). `None` in third person, where the player model is drawn; the GUI pass still
+    /// finds the instance in `entities` (the inventory's player preview).
+    pub camera_entity: Option<haste_core::EntityId>,
 }
 
 #[cfg(test)]
@@ -176,8 +182,19 @@ mod tests {
             partial_tick: 0.0,
             block_target: None,
             breaking: &[],
+            camera_entity: None,
         };
-        let stats = renderer.render(&frame).unwrap();
+        // The section visibility walk runs off the render thread and lands a frame later
+        // (vanilla draws the previous graph until the async update is swapped in), so keep
+        // rendering until its mask arrives instead of asserting on the empty first frame.
+        let mut stats = renderer.render(&frame).unwrap();
+        for _ in 0..200 {
+            if stats.chunk_sections_drawn > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            stats = renderer.render(&frame).unwrap();
+        }
         eprintln!(
             "offscreen frame: {:.2} ms, {} drawn / {} sections, {} draw calls",
             stats.frame_ms,
@@ -287,8 +304,14 @@ struct CameraUniform {
     cam_pos: [f32; 4],
     view_proj: [[f32; 4]; 4],
     fog_color: [f32; 4],
-    fog_start: f32,
-    fog_end: f32,
+    /// Fog bands (vanilla FogData): environmental (spherical) and render distance
+    /// (cylindrical) start/end, sky fog end, cloud fog end.
+    fog_env_start: f32,
+    fog_env_end: f32,
+    fog_rd_start: f32,
+    fog_rd_end: f32,
+    fog_sky_end: f32,
+    fog_cloud_end: f32,
     /// Sky light multiplier by time of day (`chunk.wgsl`).
     daylight: f32,
     _pad: f32,
@@ -330,13 +353,28 @@ pub struct Renderer {
     sections: ahash::AHashMap<SectionPos, ResidentSection>,
     /// Shared vertex/index buffers the section meshes live in.
     arenas: MeshArenas,
-    /// Cave culling: per-section sightlines (also for sections without geometry), the visible
-    /// sections from the last walk, and when to walk again.
-    section_vis: ahash::AHashMap<(ChunkPos, i32), crate::occlusion::VisibilitySet>,
+    /// Cave culling: per-section sightline data (shared with the occlusion
+    /// worker), the visible sections from the last completed walk, and the
+    /// scheduling state. The walk runs on a worker thread; the render thread
+    /// collects a finished mask, schedules a new walk, and draws the previous
+    /// mask until the new one arrives (vanilla `SectionOcclusionGraph` does the
+    /// same with its background full update).
+    section_vis: Arc<Mutex<ahash::AHashMap<(ChunkPos, i32), crate::occlusion::VisibilitySet>>>,
     visible_mask: crate::occlusion::VisibleMask,
-    /// Camera section and render distance of the last walk; None forces a new walk.
+    /// Camera section and render distance `visible_mask` was computed for.
     visible_for: Option<(SectionPos, i32)>,
-    /// Sightline data changed since the last walk; walks for that are at most 4 per second.
+    /// Camera section and render distance the in-flight walk is computing.
+    scheduled_for: Option<(SectionPos, i32)>,
+    /// A walk is scheduled and not yet collected.
+    walk_in_flight: bool,
+    /// Newly uploaded sections next to a visible one, drawn until the new mask
+    /// arrives (vanilla propagates from newly loaded sections on the render
+    /// thread). Reused across frames.
+    bonus: ahash::AHashSet<(ChunkPos, i32)>,
+    /// The worker thread running the walks.
+    walk: crate::occlusion::AsyncOcclusionWalker,
+    /// Sightline data changed since the last schedule; walks for that are at
+    /// most 4 per second.
     vis_dirty: bool,
     last_walk: std::time::Instant,
     /// World vertical extent in sections (`set_dimension`).
@@ -616,7 +654,7 @@ impl Renderer {
             .as_ref()
             .map(|(_, f)| *f)
             .unwrap_or(wgpu::TextureFormat::Rgba8UnormSrgb);
-        let make_pipeline = |label: &str, blend: Option<wgpu::BlendState>| {
+        let make_pipeline = |label: &str, fragment: &str, blend: Option<wgpu::BlendState>| {
             gpu.device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(label),
@@ -641,7 +679,7 @@ impl Renderer {
                     },
                     fragment: Some(wgpu::FragmentState {
                         module: &shader,
-                        entry_point: Some("fs_main"),
+                        entry_point: Some(fragment),
                         compilation_options: Default::default(),
                         targets: &[Some(wgpu::ColorTargetState {
                             format: surface_format,
@@ -657,7 +695,13 @@ impl Renderer {
                     depth_stencil: Some(wgpu::DepthStencilState {
                         format: wgpu::TextureFormat::Depth24Plus,
                         depth_write_enabled: Some(true),
-                        depth_compare: Some(wgpu::CompareFunction::Less),
+                        // Vanilla's terrain depth test: TERRAIN_SNIPPET inherits
+                        // `DepthStencilState.DEFAULT` (GREATER_THAN_OR_EQUAL), drawn
+                        // against a depth cleared to 0. Haste clears to 1, so the
+                        // same rule is LessEqual: a quad may share a depth (vanilla's
+                        // coplanar model elements, e.g. the grass block's side
+                        // overlay over its side texture, both draw).
+                        depth_compare: Some(wgpu::CompareFunction::LessEqual),
                         stencil: Default::default(),
                         bias: Default::default(),
                     }),
@@ -666,10 +710,11 @@ impl Renderer {
                     cache: None,
                 })
         };
-        let pipeline_solid = make_pipeline("chunk-solid", None);
-        let pipeline_cutout = make_pipeline("chunk-cutout", None);
+        let pipeline_solid = make_pipeline("chunk-solid", "fs_main", None);
+        let pipeline_cutout = make_pipeline("chunk-cutout", "fs_main", None);
         let pipeline_translucent = make_pipeline(
             "chunk-translucent",
+            "fs_translucent",
             Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
         );
 
@@ -736,6 +781,9 @@ impl Renderer {
         let mut gui_assets = assets.reopen()?;
         gui.preload_sprites(&mut gui_assets, crate::gui::HUD_SPRITES);
 
+        let section_vis = Arc::new(Mutex::new(ahash::AHashMap::new()));
+        let walk = crate::occlusion::AsyncOcclusionWalker::new(section_vis.clone())?;
+
         Ok(Renderer {
             gpu,
             surface: surface.map(|(s, _)| s),
@@ -750,9 +798,13 @@ impl Renderer {
             colormaps,
             sections: ahash::AHashMap::new(),
             arenas,
-            section_vis: ahash::AHashMap::new(),
+            section_vis,
             visible_mask: Default::default(),
             visible_for: None,
+            scheduled_for: None,
+            walk_in_flight: false,
+            bonus: ahash::AHashSet::new(),
+            walk,
             vis_dirty: false,
             last_walk: std::time::Instant::now(),
             min_section: -4,
@@ -853,8 +905,11 @@ impl Renderer {
         self.sky.kind = crate::sky::SkyKind::of(dim);
         self.min_section = dim.min_section();
         self.section_count = dim.section_count() as i32;
-        self.section_vis.clear();
+        self.section_vis.lock().clear();
         self.visible_for = None;
+        self.scheduled_for = None;
+        self.walk_in_flight = false;
+        self.bonus.clear();
     }
 
     /// Sky and block light at each entity's position, sampled from the world by the caller
@@ -1185,11 +1240,12 @@ impl Renderer {
     fn upload_mesh(&mut self, mesh: SectionMesh) {
         let pos = mesh.pos;
         let si = pos.y - self.min_section;
-        let prev = self
-            .section_vis
-            .insert((ChunkPos::new(pos.x, pos.z), si), mesh.visibility);
+        let mut vis = self.section_vis.lock();
+        let prev = vis.insert((ChunkPos::new(pos.x, pos.z), si), mesh.visibility);
+        drop(vis);
         if prev != Some(mesh.visibility) {
             self.vis_dirty = true;
+            self.add_to_bonus(pos, si);
         }
         if let Some(old) = self.sections.remove(&pos) {
             self.arenas.free(&old);
@@ -1199,6 +1255,7 @@ impl Renderer {
         }
     }
 
+// MERGE(camera-fov-bob side):
     /// The pose stack vanilla's `GameRenderer` multiplies onto the projection matrix
     /// (`renderLevel`: bobHurt, then bobView), plus the camera's plain roll. In view space
     /// (x right, y up, z back), as rotations about +Z roll the horizon one way.
@@ -1217,6 +1274,29 @@ impl Renderer {
         m * glam::Mat4::from_translation(glam::Vec3::new(b.x, b.y, 0.0))
             * glam::Mat4::from_axis_angle(z, b.roll_deg.to_radians())
             * glam::Mat4::from_axis_angle(glam::Vec3::X, b.pitch_deg.to_radians())
+// MERGE(main side):
+    /// A newly uploaded section is drawn until the async walk catches up when a
+    /// face-neighbour is in the current mask: vanilla seeds newly loaded
+    /// sections into the propagation queue, so they appear before the next
+    /// full update. The bonus is cleared when the new mask arrives.
+    fn add_to_bonus(&mut self, pos: SectionPos, si: i32) {
+        if !(0..32).contains(&si) {
+            return;
+        }
+        for face in crate::occlusion::Face::ALL {
+            let (dx, dy, dz) = face.offset();
+            let (nx, nsy, nz) = (pos.x + dx, pos.y + dy, pos.z + dz);
+            let nsi = nsy - self.min_section;
+            if !(0..32).contains(&nsi) {
+                continue;
+            }
+            let column = self.visible_mask.column(ChunkPos::new(nx, nz));
+            if column & (1u32 << nsi) != 0 {
+                self.bonus.insert((ChunkPos::new(pos.x, pos.z), si));
+                return;
+            }
+        }
+// MERGE end
     }
 
     /// Build the view-projection matrix (right-handed, OpenGL-style depth like
@@ -1277,16 +1357,39 @@ impl Renderer {
         };
         let aspect = self.size.0 as f32 / self.size.1 as f32;
         let view_proj = Self::view_projection(&frame.camera, aspect);
-        self.entity
-            .prepare(frame.entities, None, frame.camera.pos, &mut self.assets);
+        self.entity.prepare(
+            frame.entities,
+            frame.camera_entity,
+            frame.camera.pos,
+            &mut self.assets,
+        );
         {
+            // The hand is drawn in view space, like vanilla's `renderItemInHand` from the
+            // camera's own view matrix: the hurt tilt roll is included, so the hand rolls with
+            // the world (vanilla applies `bobHurt` to the hand as well).
             let yaw = frame.camera.yaw.to_radians();
             let pitch = frame.camera.pitch.to_radians();
             let forward = glam::Vec3::new(
                 -pitch.cos() * yaw.sin(),
                 -pitch.sin(),
                 pitch.cos() * yaw.cos(),
+            )
+            .normalize();
+            let up = if frame.camera.roll_deg == 0.0 {
+                glam::Vec3::Y
+            } else {
+                glam::Quat::from_axis_angle(forward, frame.camera.roll_deg.to_radians())
+                    * glam::Vec3::Y
+            };
+            let view = glam::Mat4::look_to_rh(glam::Vec3::ZERO, forward, up);
+            self.entity.prepare_hand(
+                self.first_person.as_ref(),
+                view.inverse(),
+                (frame.camera.yaw, frame.camera.pitch),
+                frame.partial_tick,
+                &mut self.assets,
             );
+// MERGE(camera-fov-bob side):
             let view = glam::Mat4::look_to_rh(glam::Vec3::ZERO, forward, glam::Vec3::Y);
             // The hand gets the same pose stack as the world view (vanilla's
             // `renderItemInHand` applies bobHurt and bobView to it too).
@@ -1296,6 +1399,8 @@ impl Renderer {
                 view.inverse() * m,
                 &mut self.assets,
             );
+// MERGE(main side):
+// MERGE end
         }
         self.overlay.prepare(
             frame.camera.pos,
@@ -1319,9 +1424,52 @@ impl Renderer {
             },
             aspect,
         );
-        self.sky
-            .prepare(&frame.camera, &frame.sky, view_proj, rot_view_proj);
-        let fog_color = self.sky.fog_linear();
+        // Vanilla fog: the overworld's clear-air environment; other dimensions keep the
+        // sky-state approximation until their own fog task (vanilla picks per dimension
+        // attributes there, not per environment).
+        let camera_forward = {
+            let yaw = frame.camera.yaw.to_radians();
+            let pitch = frame.camera.pitch.to_radians();
+            [
+                -pitch.cos() * yaw.sin(),
+                -pitch.sin(),
+                pitch.cos() * yaw.cos(),
+            ]
+        };
+        let world_min_y = (self.min_section << 4) as f32;
+        let (fog_srgb, fog_data) = if frame.sky.dimension_has_sky {
+            crate::fog::frame_fog(
+                &frame.sky,
+                camera_forward,
+                frame.camera.pos.y as f32,
+                world_min_y,
+            )
+        } else {
+            let colors =
+                crate::sky::sky_colors(&frame.sky, self.sky.kind, frame.sky.fog_end / 16.0);
+            (
+                colors.fog,
+                crate::fog::FogData {
+                    // The previous single spherical band from the client.
+                    environmental_start: frame.sky.fog_start,
+                    environmental_end: frame.sky.fog_end,
+                    render_distance_start: f32::MAX,
+                    render_distance_end: f32::MAX,
+                    sky_end: frame.sky.fog_end,
+                    cloud_end: frame.sky.fog_end,
+                    environment: crate::fog::FogEnvironment::Atmospheric,
+                },
+            )
+        };
+        self.sky.prepare(
+            &frame.camera,
+            &frame.sky,
+            view_proj,
+            rot_view_proj,
+            &fog_data,
+            fog_srgb,
+        );
+        let fog_color = crate::sky::linear(fog_srgb);
         let camera_uniform = CameraUniform {
             cam_pos: [
                 frame.camera.pos.x as f32,
@@ -1332,8 +1480,12 @@ impl Renderer {
             // Camera-relative: the shaders subtract cam_pos from world positions.
             view_proj: rot_view_proj.to_cols_array_2d(),
             fog_color: [fog_color[0], fog_color[1], fog_color[2], 0.0],
-            fog_start: frame.sky.fog_start,
-            fog_end: frame.sky.fog_end,
+            fog_env_start: fog_data.environmental_start,
+            fog_env_end: fog_data.environmental_end,
+            fog_rd_start: fog_data.render_distance_start,
+            fog_rd_end: fog_data.render_distance_end,
+            fog_sky_end: fog_data.sky_end,
+            fog_cloud_end: fog_data.cloud_end,
             daylight: self.sky.daylight(),
             _pad: 0.0,
         };
@@ -1413,59 +1565,45 @@ impl Renderer {
         // reused draw list.
         let planes = Self::frustum_planes(&rot_view_proj);
         let cam = frame.camera.pos;
-        // Cave culling: walk the section graph again when the camera changed section or new
-        // sightline data arrived.
+        // Cave culling: the walk runs on a worker thread (vanilla's
+        // SectionOcclusionGraph full update runs on a background executor).
+        // Collect a finished mask first, then schedule a new walk when the
+        // camera moved or new sightline data arrived and none is in flight.
+        // Until the new mask arrives the previous one is drawn, plus newly
+        // uploaded sections next to visible ones (`bonus`).
+        if let Some(mask) = self.walk.poll() {
+            self.visible_mask = mask;
+            self.visible_for = self.scheduled_for.take();
+            self.walk_in_flight = false;
+            self.bonus.clear();
+        }
         let cam_section = SectionPos::new(
             (cam.x.floor() as i32) >> 4,
             (cam.y.floor() as i32) >> 4,
             (cam.z.floor() as i32) >> 4,
         );
-        if self.visible_for != Some((cam_section, self.view_distance))
-            || (self.vis_dirty && self.last_walk.elapsed() > std::time::Duration::from_millis(250))
-        {
+        let need_walk = self.visible_for != Some((cam_section, self.view_distance))
+            || (self.vis_dirty && self.last_walk.elapsed() > std::time::Duration::from_millis(250));
+        if need_walk && !self.walk_in_flight {
+            self.walk.schedule(
+                cam_section,
+                self.view_distance,
+                self.section_count,
+                self.min_section,
+                cam,
+            );
+            self.scheduled_for = Some((cam_section, self.view_distance));
+            self.walk_in_flight = true;
             self.vis_dirty = false;
             self.last_walk = std::time::Instant::now();
-            // Dense per-grid copy of the section visibility sets: the walk reads
-            // each visited section's set once, and a slice index beats an
-            // ahash probe per node.
-            let r = self.view_distance + 1;
-            let w = 2 * r + 1;
-            let h = self.section_count;
-            let mut dense = vec![crate::occlusion::VisibilitySet::all(); (w * w * h) as usize];
-            for ((c, si), v) in &self.section_vis {
-                let dx = c.x - cam_section.x + r;
-                let dz = c.z - cam_section.z + r;
-                if dx < 0 || dz < 0 || dx >= w || dz >= w || *si < 0 || *si >= h {
-                    continue;
-                }
-                dense[((dx * w + dz) * h + *si) as usize] = *v;
-            }
-            let cx = cam_section.x;
-            let cz = cam_section.z;
-            self.visible_mask = crate::occlusion::compute_visible_mask(
-                move |c, si| {
-                    let dx = c.x - cx + r;
-                    let dz = c.z - cz + r;
-                    if dx < 0 || dz < 0 || dx >= w || dz >= w || si < 0 || si >= h {
-                        return None;
-                    }
-                    Some(dense[((dx * w + dz) * h + si) as usize])
-                },
-                ChunkPos::new(cx, cz),
-                cam_section.y - self.min_section,
-                cam,
-                self.min_section * 16,
-                self.section_count,
-                r,
-            );
-            self.visible_for = Some((cam_section, self.view_distance));
         }
         let mut draws = std::mem::take(&mut self.draw_list);
         draws.clear();
         for s in self.sections.values() {
             let si = s.pos.y - self.min_section;
             let column = self.visible_mask.column(ChunkPos::new(s.pos.x, s.pos.z));
-            if !(0..32).contains(&si) || column & (1u32 << si) == 0 {
+            let bonus = self.bonus.contains(&(ChunkPos::new(s.pos.x, s.pos.z), si));
+            if !(0..32).contains(&si) || (column & (1u32 << si) == 0 && !bonus) {
                 continue;
             }
             let lo = [

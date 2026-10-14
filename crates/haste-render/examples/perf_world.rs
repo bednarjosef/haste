@@ -158,6 +158,7 @@ fn measure(
         partial_tick: 0.0,
         block_target: None,
         breaking: &[],
+        camera_entity: None,
     };
     // Mesh everything (drain uploads frame by frame) until the resident section count has not
     // changed for a second.

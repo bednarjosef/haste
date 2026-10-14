@@ -273,6 +273,7 @@ fn gui_frame_offscreen() {
         partial_tick: 0.0,
         block_target: None,
         breaking: &[],
+        camera_entity: None,
     };
     let stats = renderer.render(&input).unwrap();
     // Second frame: everything resident, measure.
