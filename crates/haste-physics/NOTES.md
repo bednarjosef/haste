@@ -75,13 +75,112 @@ copied from Pomme's `physics/`/`player/`.
 | collision epsilon | 1e-7 | assumption (typical f64 voxel sweep value) |
 | sneak edge back-off step | 0.05 | assumption |
 | box half-width | 0.6f32 / 2 widened to f64 | entity dimensions are floats; consequence: against a wall the player stops at x.69999998808, not x.7 (test `walking_into_a_full_block_stops`) |
+| glide drag | 0.99 horizontal, 0.98 vertical per tick | vanilla 26.3 `LivingEntity.updateFallFlyingMovement` (read in the decompiled client: the drag is the last thing in the function, on all three components) |
+| glide lift | cos²(lean), lean = pitch in radians | same vanilla function |
+| glide gravity term | gravity x (-1 + 0.75 x lift) | same |
+| glide descent exchange | velocity.y x -0.1 x lift, routed along the look direction | same |
+| glide pull-up (pitch < 0) | horizontal speed x -sin(lean) x 0.04 on y, x 3.2 | same |
+| glide steering | 0.1 of the way to the look direction, keeping the length | same |
+| slow falling gravity | min(gravity, 0.01) while `deltaMovement.y <= 0` | vanilla `LivingEntity.getEffectiveGravity` |
+| gliding fall distance | clamped to 1.0 per tick | vanilla `Entity.checkFallDistanceAccumulation`, called from `updateFallFlying` |
+| fall-flying box | 0.6 x 0.6 | vanilla's fall_flying entity dimensions (eye height 0.4) |
+
+## Elytra flight (`src/elytra.rs`)
+
+Vanilla 26.3, read in the decompiled client (never copied): `LivingEntity.updateFallFlyingMovement`,
+`LivingEntity.travelFallFlying`, `LivingEntity.getEffectiveGravity`, `LivingEntity.canGlide` /
+`canGlideUsing`, `LivingEntity.updateFallFlying`, `Player.tryToStartFallFlying` /
+`Player.startFallFlying` / `LivingEntity.stopFallFlying` (shared flag 7) and
+`LocalPlayer.aiStep`'s jump condition (`jump && !wasJumping && !onClimbable`).
+
+- `glide_velocity(velocity, yaw, pitch, gravity) -> velocity` is the pure velocity update. The
+  look vector is vanilla `Entity.calculateViewVector` (f32 table sine/cosine, two f32 products per
+  component, then widened); the lift uses `cos²(lean)` with the double `cos` of the f32 angle,
+  while the pitch-up branch uses the table `sin`. Both are spelled out in the code comments.
+- `elytra::travel(state, attrs, world, shapes, slow_falling)` is `travelFallFlying`: the clamp of
+  the fall distance, the velocity update, the move/collide step, and gliding ends when the player
+  lands. It ignores the movement input entirely (gliding is steered with the look angles only), so
+  the sneak edge back-off of the shared move step is skipped while it runs.
+- Collision damage (`handleFallFlyingCollisions`) is server-side and not modelled; so is the
+  elytra's durability loss every 10 ticks (`updateFallFlying`). Both noted in the module docs.
+- Not modelled: firework boosts (see below), several glider equipment slots (`EquipmentSlot.VALUES`
+  is scanned in vanilla; we take the caller's `has_glider` for the chest), the passenger and
+  levitation conditions of `canGlide` (no `PlayerState` field yet), and the climbable case
+  (`travelFallFlying` falls back to air travel and stops gliding on a ladder).
+- The glide never turns into a fall: the fall distance is clamped to 1.0 per tick (test
+  `landing_ends_the_glide`), and landing ends the flag.
+
+### The call the movement tick must make
+
+In `movement::tick`'s travel dispatch (`src/movement.rs:93`), after the flying branch and before
+the fluid branches (vanilla's `LivingEntity.travel` checks the fluid state first, then the
+fall-flying flag):
+
+    } else if state.fall_flying && !climbable {
+        elytra::travel(state, attrs, world, shapes, slow_falling);
+    }
+
+- `climbable` is the caller's check on the block state at the player's position
+  (`LivingEntity.onClimbable`): on a ladder vanilla takes the air branch and stops gliding. The
+  block view needed for it is already in scope. `climbable` may be `false` for now if the tag is
+  not available yet (then a ladder keeps gliding, which is wrong but harmless).
+- `slow_falling` is the slow falling effect: `PlayerAttributes` has no effect state, so it is a
+  parameter. Without effects it is `false`.
+- The gliding branch must come **before** `state.in_water` / `state.in_lava`: vanilla takes the
+  fluid branch first, and `should_stop_fall_flying` also reports the fluids for the client's flag
+  bookkeeping.
+- The jump-to-start wiring (client side, later): on a freshly pressed jump key, with
+  `can_start_fall_flying(has_glider)` true (plus the caller's not-a-passenger, no-levitation and
+  not-on-a-climbable checks), call `state.start_fall_flying()` and send the player command
+  `START_FALL_FLYING` (packet id 2 in 26.3, carried by the connection, not by this crate).
+- The stop wiring: `state.stop_fall_flying()` when `should_stop_fall_flying(has_glider)` is true
+  (the server also clears the flag through entity metadata; the client follows it).
+
+### Interface requests for the lead
+
+- `PlayerState.aabb` now returns the 0.6 x 0.6 box while `fall_flying` is set (`src/lib.rs`). The
+  pose enum is unchanged, so `haste_core::entity::Pose` still has no fall-flying variant and the
+  client's `player_pose` keeps compiling. If a fall-flying pose is wanted (eye height 0.4 while
+  gliding, the model's elytra animation), add `Pose::FallFlying` in `attributes.rs` and map it in
+  `crates/haste-client/src/game.rs:130`; the physics side only needs the box.
+- The eye height while gliding is still the standing 1.62 (the pose is `Standing`), so the
+  crosshair ray and the camera eye sit 1.22 blocks too high during a glide. Same fix as above.
+
+### Firework boost (not implemented, entity side)
+
+Vanilla `FireworkRocketEntity.tick`: while the rocket is attached to a living entity that is fall
+flying, each tick the entity's velocity gets
+
+    v += look.x * 0.1 + (look.x * 1.5 - v.x) * 0.5   (same for y and z)
+
+i.e. a third of the way from the current velocity towards 1.5x the look vector, plus a 0.1 nudge
+along the look. The client needs: the firework entity tracked (spawned by the server, its
+attached-to entity id in its entity data, `FireworkRocketEntity.isAttachedToEntity`), and a pure
+`firework_boost(velocity, yaw, pitch) -> velocity` on `elytra` (the same body as the formula above,
+using `look_angle`) called once per tick from the movement tick while such a rocket is attached to
+the local player and `state.fall_flying` is set. The rocket's own position follows the player's
+firework-holding hand (`getHandHoldingItemAngle`), which is a render concern.
+
+### Sine table details
+
+`trig::sin_d` / `trig::cos_d` index the table the way vanilla's `Mth.sin(double)` /
+`Mth.cos(double)` do: the angle is multiplied by the double `10430.378350470453` and cast to long
+*with the 0.98-quarter-turn offset added first for the cosine*, then masked with 65535. The f32
+`units_per_radian` used by the movement direction multiplies in f32 and can land one entry away;
+the elytra uses the double form. How much vanilla's own `Mth.sin` for angles differs from the
+movement path's is **not determined** (assumption, as before).
+
+Assumption also that Rust's `f64::cos` matches Java's `Math.cos` bit for bit on the f32 angle; a
+difference of an ulp would move the lift term by ~1e-16, far below the table's own 5e-5 error at
+60/-30 degrees (which is why the tests' hand-computed multi-tick values carry 1e-3 tolerances).
 
 ## Tick order (as implemented)
 
 1. Rotation from input. 2. Zero |v| < 0.003. 3. Fluid contact (shrunk box vs fluid surface),
 sprint/sneak flags, pose (keeps crouching/swimming if the bigger pose does not fit).
 4. Jump cooldown; jump (on ground) or swim up (in fluid). 5. Impulse: keys -> ±1, x sneaking
-speed when crouching/crawling, x 0.98. 6. Travel: normal / water / lava / flying:
+speed when crouching/crawling, x 0.98. 6. Travel: normal / water / lava / flying / **gliding**
+(`elytra::travel` when `state.fall_flying` is set - see below):
 accelerate (rotated by yaw, sine table) -> move (sneak edge back-off, sweep with step-up) ->
 zero velocity on collided axes, on_ground = vertical collision while moving down, fall distance ->
 block speed factor -> gravity, vertical drag -> horizontal drag.
@@ -107,8 +206,11 @@ the drags, then gravity/4, then the same `jump_out_of_fluid`.
   simplified to "jump held in a fluid -> swim up". The `horizontalCollision && onClimbable()`
   y = 0.2 branch of `travelInWater` is out until ladders exist.
 - Not implemented: ladders/vines (climbing), cobweb/berry bush/powder snow slowdowns, slime
-  bounce, honey sliding, elytra, levitation/slow falling/jump boost/speed effects, world border,
-  unloaded-chunk freeze, entity pushing, knockback. `PlayerAttributes` carries no effect state yet.
+  bounce, honey sliding, levitation/slow falling/jump boost/speed effects, world border,
+  unloaded-chunk freeze, entity pushing, knockback. `PlayerAttributes` carries no effect state yet
+  (the slow-falling clamp of the elytra takes the effect as a parameter).
+- Elytra: implemented in `elytra.rs` (see its section); not modelled there are the firework boost
+  and the server-side collision damage and durability loss.
 - Landing ends creative flight (assumption about the exact condition). Double-tap to fly and
   double-tap sprint are input-layer concerns (haste-client).
 - `fall_distance` is f32 (interface); vanilla's type not determined.
