@@ -668,7 +668,7 @@ impl Frame<'_> {
             }
         }
         if self.effects.eye_in_water && self.first_person {
-            out.insert(0, self.water_overlay());
+            self.water_overlay(out);
         }
         if let Some(texture) = &self.effects.block_overlay {
             out.insert(
@@ -780,8 +780,9 @@ impl Frame<'_> {
             let right = shift - half * cos + z * sin;
             let x0 = (cx + left.min(right) * s).round() as i32;
             let x1 = (cx + left.max(right) * s).round() as i32;
-            // `buildSpriteQuad` samples the sprite by its (u1, v1) corner, so the whole texture
-            // comes in mirrored in both axes.
+            // `buildSpriteQuad` passes (u1, v1) at the quad's bottom-left corner and (u0, v0) at
+            // the top-right, so u runs high-to-low left-to-right and v low-to-high top-to-bottom
+            // (the sprite is mirrored in x only, not flipped in y).
             GuiCommand::Texture {
                 texture: fire_sprite(),
                 x: x0,
@@ -789,9 +790,9 @@ impl Frame<'_> {
                 w: x1 - x0,
                 h: (1.0 * s).round() as i32,
                 u: 1.0,
-                v: 1.0,
+                v: 0.0,
                 uw: -1.0,
-                vh: -1.0,
+                vh: 1.0,
                 tex_w: 1,
                 tex_h: 1,
                 tint: FIRE_TINT,
@@ -803,27 +804,84 @@ impl Frame<'_> {
         [quad(0.24, -turn), quad(-0.24, turn)]
     }
 
-    /// `LevelExtractor.extractPlayerState`'s water overlay: the underwater texture over the
-    /// whole screen, alpha 0.1, the lightmap brightness at the eye as the colour and a 4-texel
-    /// window scrolled by the look (`-yRot / 64`, `xRot / 64`).
-    fn water_overlay(&self) -> GuiCommand {
+    /// `ScreenEffectRenderer.submitWater` over `LevelExtractor.extractPlayerState`'s overlay:
+    /// the underwater texture over the whole screen, alpha 0.1 and the lightmap brightness at
+    /// the eye as the colour, its uv `(u0+4, v0+4)..(u0, v0)` scrolled by the look
+    /// (`uOffset = -yRot / 64`, `vOffset = xRot / 64`) and repeated (the vanilla sampler is
+    /// `REPEAT`). Haste's GUI atlas is texel-fetched (no sampler), so the same REPEAT is drawn
+    /// as one quad per uv period: each tile samples the whole texture once, and the tiles
+    /// together cover exactly the uv window vanilla's single quad would.
+    fn water_overlay(&self, out: &mut Vec<GuiCommand>) {
+        let (w, h) = (self.width as f32, self.height as f32);
+        // Pixels per view unit at z = -0.5: the HUD projection maps view x to `x * h / tan(fov/2)`.
+        let s = h / (hud_fov(self.effects.eye_in_water).to_radians() * 0.5).tan();
+        // One uv period spans half the quad's 2 view units, i.e. `s / 2` pixels.
+        let tile = s * 0.5;
+        let u_off = -self.look.0 / 64.0;
+        let v_off = self.look.1 / 64.0;
         let brightness = light_brightness(self.effects.eye_light, 0.0);
-        let u = -self.look.0 / 64.0;
-        let v = self.look.1 / 64.0;
-        GuiCommand::Texture {
-            texture: underwater(),
-            x: 0,
-            y: 0,
-            w: self.width as i32,
-            h: self.height as i32,
-            u: u / 16.0,
-            v: v / 16.0,
-            uw: 4.0 / 16.0,
-            vh: 4.0 / 16.0,
-            tex_w: 1,
-            tex_h: 1,
-            tint: argb(0.1, brightness, brightness, brightness),
-            blend: GuiBlend::Normal,
+        let tint = argb(0.1, brightness, brightness, brightness);
+        // Screen pixel where the uv `base + slope * (pixel - centre) / tile` crosses an integer.
+        let edges = |size: f32, centre: f32, base: f32, slope: f32, out: &mut [f32; 24]| -> usize {
+            let mut n = 1;
+            out[0] = 0.0;
+            let near = base + slope * (0.0 - centre) / tile;
+            let far = base + slope * (size - centre) / tile;
+            let (lo, hi) = (near.min(far), near.max(far));
+            let mut k = lo.ceil();
+            while k <= hi && n < out.len() - 1 {
+                let p = centre + (k - base) * tile / slope;
+                if p > 0.0 && p < size {
+                    out[n] = p;
+                    n += 1;
+                }
+                k += 1.0;
+            }
+            out[n] = size;
+            n += 1;
+            out[..n].sort_by(|a, b| a.partial_cmp(b).unwrap());
+            n
+        };
+        let mut xs = [0.0f32; 24];
+        let mut ys = [0.0f32; 24];
+        // u decreases as x grows (vanilla samples u1 at the left), v increases downward.
+        let nx = edges(w, w * 0.5, u_off + 2.0, -1.0, &mut xs);
+        let ny = edges(h, h * 0.5, v_off + 2.0, 1.0, &mut ys);
+        // The texture coordinate of a boundary: `frac_hi` keeps an exact integer at the end of
+        // a period (1.0) so a full-period tile runs 1..0, `frac_lo` puts the start at 0.
+        let frac_lo = |v: f32| v - v.floor();
+        let frac_hi = |v: f32| v - (v.ceil() - 1.0);
+        let u_at = |px: f32| u_off + 2.0 - (px - w * 0.5) / tile;
+        let v_at = |py: f32| v_off + 2.0 + (py - h * 0.5) / tile;
+        // All tiles are the same texture and blend, so they batch into one draw call. They are
+        // prepended back to front, but never overlap, so their order among themselves is free.
+        for yi in (0..ny - 1).rev() {
+            for xi in (0..nx - 1).rev() {
+                let (x0, x1) = (xs[xi], xs[xi + 1]);
+                let (y0, y1) = (ys[yi], ys[yi + 1]);
+                let u_left = frac_hi(u_at(x0));
+                let u_right = frac_lo(u_at(x1));
+                let v_top = frac_lo(v_at(y0));
+                let v_bottom = frac_hi(v_at(y1));
+                out.insert(
+                    0,
+                    GuiCommand::Texture {
+                        texture: underwater(),
+                        x: x0.round() as i32,
+                        y: y0.round() as i32,
+                        w: (x1 - x0).round() as i32,
+                        h: (y1 - y0).round() as i32,
+                        u: u_left,
+                        v: v_top,
+                        uw: u_right - u_left,
+                        vh: v_bottom - v_top,
+                        tex_w: 1,
+                        tex_h: 1,
+                        tint,
+                        blend: GuiBlend::Normal,
+                    },
+                );
+            }
         }
     }
 }
@@ -1143,6 +1201,33 @@ mod tests {
 
     // ---- the water overlay -------------------------------------------------------
 
+    /// The water overlay's tile quads: `(x, y, w, h, u, v, uw, vh)`.
+    type WaterTile = (i32, i32, i32, i32, f32, f32, f32, f32);
+
+    fn water_tiles(f: &Frame) -> Vec<WaterTile> {
+        let mut out = Vec::new();
+        f.append_to(&mut out);
+        out.iter()
+            .filter_map(|c| match c {
+                GuiCommand::Texture {
+                    texture,
+                    x,
+                    y,
+                    w,
+                    h,
+                    u,
+                    v,
+                    uw,
+                    vh,
+                    ..
+                } if texture.path() == "textures/misc/underwater.png" => {
+                    Some((*x, *y, *w, *h, *u, *v, *uw, *vh))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn the_water_overlay_is_alpha_tenth_with_the_eyes_light() {
         // `ARGB.colorFromFloat(0.1, brightness, brightness, brightness)` with the eye at
@@ -1162,24 +1247,50 @@ mod tests {
             shadow: false,
         }];
         frame(0.5, &e).append_to(&mut out);
-        let water = &out[0];
-        let GuiCommand::Texture {
-            tint, vh, uw, ..
-        } = water
-        else {
-            panic!("expected the water overlay first, got {water:?}")
-        };
-        assert!((*vh - 0.25).abs() < 1e-6);
-        assert!((*uw - 0.25).abs() < 1e-6);
-        let channel = 0.17948 * 255.0;
-        assert_eq!(
-            *tint,
-            25 << 24 | (channel as u32) << 16 | (channel as u32) << 8 | channel as u32
-        );
+        // Every tile carries the alpha-0.1 tint of the eye's light.
+        let channel = (0.17948 * 255.0) as u32;
+        let tint = 25 << 24 | channel << 16 | channel << 8 | channel;
+        let mut seen = 0;
+        for c in &out {
+            if let GuiCommand::Texture { texture, tint: t, .. } = c {
+                if texture.path() == "textures/misc/underwater.png" {
+                    assert_eq!(*t, tint);
+                    seen += 1;
+                }
+            }
+        }
+        assert!(seen >= 1, "the water tiles");
+    }
+
+    #[test]
+    fn the_water_overlay_tiles_the_texture_across_the_screen() {
+        // Vanilla draws one quad over the whole screen with a uv span of 4 and a REPEAT
+        // sampler; the tiles must cover the screen with each tile a period of the texture.
+        let e = view(ViewEffects {
+            eye_in_water: true,
+            eye_light: 15,
+            ..Default::default()
+        });
+        let tiles = water_tiles(&frame(0.5, &e));
+        assert!(tiles.len() > 1, "the texture tiles, not one stretched quad");
+        let (mut min_x, mut max_x, mut min_y, mut max_y) = (i32::MAX, 0, i32::MAX, 0);
+        for &(x, y, w, h, _u, _v, uw, vh) in &tiles {
+            assert!(w > 0 && h > 0, "a tile has area");
+            assert!((-1.0 - 1e-6..=1e-6).contains(&uw), "u spans a period or less");
+            assert!((-1e-6..=1.0 + 1e-6).contains(&vh), "v spans a period or less");
+            min_x = min_x.min(x);
+            max_x = max_x.max(x + w);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y + h);
+        }
+        assert_eq!((min_x, min_y), (0, 0));
+        assert_eq!((max_x, max_y), (W as i32, H as i32));
     }
 
     #[test]
     fn the_water_overlay_scrolls_by_the_look() {
+        // The uv at a screen pixel is vanilla's `u = uOffset + 2 - (px - w/2) / tile` (in
+        // periods), with `uOffset = -yRot / 64`; the leftmost tile samples it at `px = 0`.
         let e = view(ViewEffects {
             eye_in_water: true,
             eye_light: 15,
@@ -1191,17 +1302,21 @@ mod tests {
             first_person: true,
             effects: &e,
             partial_tick: 0.5,
-            // `-yRot / 64`, `xRot / 64`, in sixteenths of the texture.
             look: (128.0, -64.0),
             scope_scale: 1.125,
         };
-        let mut out = Vec::new();
-        f.append_to(&mut out);
-        let GuiCommand::Texture { u, v, .. } = &out[0] else {
-            panic!("expected the water overlay")
-        };
-        assert!((u - (-2.0 / 16.0)).abs() < 1e-6);
-        assert!((v - (-1.0 / 16.0)).abs() < 1e-6);
+        let tiles = water_tiles(&f);
+        let tile = H as f32 / (hud_fov(true).to_radians() * 0.5).tan() * 0.5;
+        let raw = -128.0 / 64.0 + 2.0 - (0.0 - W as f32 * 0.5) / tile;
+        let expected = raw - (raw.ceil() - 1.0);
+        let left = tiles.iter().find(|t| t.0 == 0).expect("a tile at the left edge");
+        assert!((left.4 - expected).abs() < 1e-4, "{} vs {expected}", left.4);
+        // A different yaw scrolls the texture: the left edge samples a different uv.
+        let mut turned = f;
+        turned.look = (96.0, -64.0);
+        let turned_left = water_tiles(&turned);
+        let t_left = turned_left.iter().find(|t| t.0 == 0).unwrap();
+        assert!((t_left.4 - left.4).abs() > 1e-3, "the look scrolls the water");
     }
 
     #[test]
@@ -1235,15 +1350,23 @@ mod tests {
         // one view unit tall (`ScreenEffectRenderer.submitFire`'s quad is 1x1 at z = -0.5,
         // translated to y = -0.3).
         let GuiCommand::Texture {
+            texture,
             x: x0,
             y: y0,
             w: w0,
             h: h0,
+            u,
+            v,
+            uw,
+            vh,
             ..
         } = &out[0]
         else {
             panic!("expected a fire quad")
         };
+        // One animation frame, mirrored in x, upright in y (`buildSpriteQuad`).
+        assert_eq!(texture.path(), "block/fire_1");
+        assert_eq!((*u, *v, *uw, *vh), (1.0, 0.0, -1.0, 1.0));
         assert!((( H as f32 / 2.0 - 0.2 * scale) - *y0 as f32).abs() <= 1.0);
         assert!((*h0 as f32 - scale).abs() <= 1.0);
         // 1 view unit is the height / tan(fov/2): a 480x270 window at 70 degrees has its quad
@@ -1483,23 +1606,26 @@ mod tests {
                 other => other_variant(other),
             })
             .collect();
-        assert_eq!(
-            names,
-            [
-                "block/sand",
-                "textures/misc/underwater.png",
-                "block/fire_1",
-                "block/fire_1",
-                "textures/misc/spyglass_scope.png",
-                "black fill",
-                "black fill",
-                "black fill",
-                "black fill",
-                "textures/misc/powder_snow_outline.png",
-                "block/nether_portal",
-                "hud",
-            ]
-        );
+        // The water is drawn as several consecutive tile quads.
+        let water = names
+            .iter()
+            .filter(|n| **n == "textures/misc/underwater.png")
+            .count();
+        let mut expected = vec!["block/sand"];
+        expected.extend(std::iter::repeat_n("textures/misc/underwater.png", water));
+        expected.extend([
+            "block/fire_1",
+            "block/fire_1",
+            "textures/misc/spyglass_scope.png",
+            "black fill",
+            "black fill",
+            "black fill",
+            "black fill",
+            "textures/misc/powder_snow_outline.png",
+            "block/nether_portal",
+            "hud",
+        ]);
+        assert_eq!(names, expected);
     }
 
     /// Scoping hides the worn item's overlay, as vanilla's `extractCameraOverlays` picks the

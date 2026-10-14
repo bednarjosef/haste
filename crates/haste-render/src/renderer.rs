@@ -824,6 +824,8 @@ impl Renderer {
     /// re-uploads every changed sprite region.
     pub fn set_animation_tick(&mut self, tick: u64) {
         self.animation.set_tick(tick);
+        // The GUI's own animated textures (the fire and nether-portal overlays) share the tick.
+        self.gui.set_animation_tick(tick);
     }
 
     /// The first-person view: arm (empty hand) or held item; None draws nothing (third person,
