@@ -94,6 +94,7 @@ pub const ALLOW_CLASSES: &[&str] = &[
     "net/minecraft/client/server/LanServer",
     "net/minecraft/client/multiplayer/SessionSearchTrees",
     "net/minecraft/client/multiplayer/ClientLevel$ClientLevelData",
+    "net/minecraft/client/multiplayer/ClientAdvancements",
     "net/minecraft/client/multiplayer/CommonListenerCookie",
     "net/minecraft/client/StringSplitter",
     "net/minecraft/client/InputType",
@@ -103,6 +104,13 @@ pub const ALLOW_CLASSES: &[&str] = &[
     "net/minecraft/client/ScrollWheelHandler",
     // the title screen asks the HUD for the splash text; its reload listener does not run in Haste
     "net/minecraft/client/resources/SplashManager",
+    // the default player skins (the social interactions screen's entries; offline mode always
+    // shows them): a table of PlayerSkin value objects, no manager state
+    "net/minecraft/client/resources/DefaultPlayerSkin",
+    // the creative inventory's saved hotbars: real vanilla Java over hotbar.nbt in the JVM game
+    // directory (loads and saves exactly like vanilla's)
+    "net/minecraft/client/HotbarManager",
+    "net/minecraft/client/player/inventory/Hotbar",
     "net/minecraft/client/Options",
     "net/minecraft/client/OptionInstance",
     "net/minecraft/client/ToggleKeyMapping",

@@ -1746,6 +1746,103 @@ fn options_screens_open_and_close() {
     );
 }
 
+/// Every pause-menu screen opens and closes without Unimplemented entries or Java exceptions,
+/// like scripts/checks/pause-all.txt does through the whole client (which needs a server). GUI
+/// 480x270 at scale 2; the button coordinates are vanilla's layout (see the script).
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn pause_screens_open_and_close() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    reset(gui);
+    h.clear_unimplemented().unwrap();
+    open(&h, haste_jvm::ScreenKind::Pause);
+    // every frame at the script client's size: a render at another size re-lays the widgets out
+    let frame = |mouse: (f64, f64)| -> haste_core::gui::GuiFrame {
+        gui.render(480, 270, 2, mouse, 0.5)
+            .unwrap_or_else(|e| panic!("render: {e}"))
+    };
+    frame((-1.0, -1.0));
+    // Advancements (row 1 left): no server has sent the tree, so vanilla's empty label shows
+    click(gui, 187.0, 110.0);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.advancements.AdvancementsScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    let f = frame((0.0, 0.0));
+    assert!(
+        texts(&f).iter().any(|x| x == "Advancements"),
+        "{:?}",
+        texts(&f)
+    );
+    escape(gui);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.PauseScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    // Statistics (row 1 right): the loading tabs (the server's values never arrive here)
+    click(gui, 293.0, 110.0);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.achievement.StatsScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    escape(gui);
+    // the icon row: report bugs (a link confirmation), player reporting (social interactions)
+    click(gui, 204.0, 134.0);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.ConfirmLinkScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    escape(gui);
+    click(gui, 276.0, 134.0);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.social.SocialInteractionsScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    escape(gui);
+    // World Options (row 5 right): the dedicated-server rows (no integrated server)
+    click(gui, 293.0, 158.0);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.WorldOptionsScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    let f = frame((0.0, 0.0));
+    for want in ["Difficulty", "Edit Game Rules...", "Restrictions..."] {
+        assert!(
+            texts(&f).iter().any(|x| x.contains(want)),
+            "missing {want:?} in {:?}",
+            texts(&f)
+        );
+    }
+    escape(gui);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.PauseScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    escape(gui);
+    assert!(!gui.is_open(), "{:?}", gui.take_last_error());
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for the pause screens: {unimpl:#?}"
+    );
+}
+
 fn click(gui: &haste_jvm::GuiPipeline, x: f64, y: f64) {
     gui.mouse(x, y, Some((haste_jvm::keys::MOUSE_LEFT, true)));
     gui.mouse(x, y, Some((haste_jvm::keys::MOUSE_LEFT, false)));

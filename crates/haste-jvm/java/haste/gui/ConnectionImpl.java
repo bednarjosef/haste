@@ -32,6 +32,23 @@ public final class ConnectionImpl {
     public static net.minecraft.client.multiplayer.chat.ChatLog chatLog(net.minecraft.client.multiplayer.chat.report.ReportingContext r) { return CHAT_LOG; }
 
     /**
+     * No reports can be sent from Haste (offline mode, like vanilla's {@code UserApiService.OFFLINE}:
+     * {@code canSendReports} is false). The social interactions screen asks the sender before
+     * offering the report button; {@code send} is never called while disabled.
+     */
+    private static final net.minecraft.client.multiplayer.chat.report.AbuseReportSender SENDER =
+        new net.minecraft.client.multiplayer.chat.report.AbuseReportSender() {
+            @Override public java.util.concurrent.CompletableFuture<com.mojang.datafixers.util.Unit> send(
+                java.util.UUID id, net.minecraft.client.multiplayer.chat.report.ReportType type,
+                com.mojang.authlib.minecraft.report.AbuseReport report) {
+                throw new UnsupportedOperationException("no reporting in Haste");
+            }
+            @Override public boolean isEnabled() { return false; }
+        };
+    public static net.minecraft.client.multiplayer.chat.report.AbuseReportSender sender(
+        net.minecraft.client.multiplayer.chat.report.ReportingContext r) { return SENDER; }
+
+    /**
      * The pause screen's Disconnect / "Save and Quit" goes through the report draft check
      * (vanilla: a draft asks whether to discard it first). Haste has no report drafts, so the
      * action runs at once, like vanilla's no-draft path.
@@ -67,9 +84,10 @@ public final class ConnectionImpl {
     /** Serverbound packets from vanilla code: encoded with vanilla's codec and sent by Rust. */
     public static void send(net.minecraft.client.multiplayer.ClientCommonPacketListenerImpl c, net.minecraft.network.protocol.Packet<?> p) { Packets.send(p); }
 
-    /** Server links (custom pause-menu links) are not received by Rust yet: none. */
+    /** Server links (custom pause-menu links) from the configuration phase; set by Bridge.setServerLinks. */
+    static net.minecraft.server.ServerLinks SERVER_LINKS = net.minecraft.server.ServerLinks.EMPTY;
     public static net.minecraft.server.ServerLinks serverLinks(net.minecraft.client.multiplayer.ClientCommonPacketListenerImpl c) {
-        return net.minecraft.server.ServerLinks.EMPTY;
+        return SERVER_LINKS;
     }
 
     private static net.minecraft.client.multiplayer.ClientSuggestionProvider suggestions;
@@ -90,6 +108,9 @@ public final class ConnectionImpl {
     public static com.mojang.brigadier.CommandDispatcher<net.minecraft.client.multiplayer.ClientSuggestionProvider> getCommands(ClientPacketListener c) {
         return Handlers.commands;
     }
+
+    /** The server's advancements (real vanilla Java, fed by the update_advancements packets). */
+    public static net.minecraft.client.multiplayer.ClientAdvancements getAdvancements(ClientPacketListener c) { return Proxies.advancements; }
 
     /** The scoreboard is the client's own (scoreboard packets, see {@link Handlers}). */
     public static net.minecraft.world.scores.Scoreboard scoreboard(ClientPacketListener c) { return Handlers.SCOREBOARD; }
