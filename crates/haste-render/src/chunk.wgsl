@@ -7,8 +7,14 @@ struct Camera {
     cam_pos: vec4<f32>,
     view_proj: mat4x4<f32>,
     fog_color: vec4<f32>,
-    fog_start: f32,
-    fog_end: f32,
+    // Vanilla fog bands: environmental (spherical distance) and render distance
+    // (cylindrical: max of horizontal distance and |y|), then the sky and cloud fades.
+    fog_env_start: f32,
+    fog_env_end: f32,
+    fog_rd_start: f32,
+    fog_rd_end: f32,
+    fog_sky_end: f32,
+    fog_cloud_end: f32,
     // Sky light multiplier by time of day (1 at day, 0 at night; block light is unaffected).
     daylight: f32,
     _pad: f32,
@@ -44,6 +50,17 @@ struct VertexOut {
 const POS_RANGE: f32 = 24.0;
 const POS_BIAS: f32 = 4.0;
 const UV_FIXED_SCALE: f32 = 4095.0;
+
+// Vanilla fog.glsl `linear_fog_value`.
+fn linear_fog_value(dist: f32, start: f32, end: f32) -> f32 {
+    if (dist <= start) {
+        return 0.0;
+    }
+    if (dist >= end) {
+        return 1.0;
+    }
+    return (dist - start) / (end - start);
+}
 
 fn face_shade(index: u32) -> f32 {
     // vanilla CardinalLighting: down .5, up 1, north/south .8, west/east .6,
@@ -108,14 +125,16 @@ fn vs_main(in: VertexIn, @builtin(vertex_index) vi: u32) -> VertexOut {
         tint_srgb <= vec3<f32>(0.04045),
     );
 
-    // Fog: spherical distance bands.
-    let dist = length(rel);
-    out.world_dist = dist;
-    var fog = 0.0;
-    if (dist > camera.fog_start) {
-        fog = clamp((dist - camera.fog_start) / max(camera.fog_end - camera.fog_start, 0.001), 0.0, 1.0);
-    }
-    out.fog = fog;
+    // Fog: vanilla's two linear bands, both per-vertex like its vertex-shader varyings —
+    // the environmental band on the spherical distance, the render distance band on the
+    // cylindrical distance (max of horizontal and |y|); the fragment takes their max.
+    let spherical = length(rel);
+    let cylindrical = max(length(rel.xz), abs(rel.y));
+    out.world_dist = spherical;
+    out.fog = max(
+        linear_fog_value(spherical, camera.fog_env_start, camera.fog_env_end),
+        linear_fog_value(cylindrical, camera.fog_rd_start, camera.fog_rd_end),
+    );
     return out;
 }
 

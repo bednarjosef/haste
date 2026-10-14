@@ -15,6 +15,7 @@ use haste_assets::Assets;
 use haste_core::game::DimensionInfo;
 use haste_core::Identifier;
 
+use crate::fog::FogData;
 use crate::{Camera, SkyState};
 
 const ATLAS_SIZE: u32 = 512;
@@ -46,6 +47,12 @@ struct SkyUniforms {
     cam_pos: [f32; 4],
     params: [f32; 4],
     clouds: [f32; 4],
+    /// Vanilla fog bands for the sky dome (0..sky_end on both distances) and the weather
+    /// columns (the terrain bands): env start/end, rd start/end, sky end, cloud end.
+    fog_bands: [f32; 4],
+    fog_bands2: [f32; 4],
+    /// The sunrise/sunset fan's rotation (camera rotation frame).
+    sunrise_matrix: [[f32; 4]; 4],
     end_rect: [u32; 4],
     cloud_rect: [u32; 4],
 }
@@ -227,8 +234,16 @@ pub struct SkyRenderer {
     celestial: wgpu::RenderPipeline,
     world: wgpu::RenderPipeline,
     clouds: wgpu::RenderPipeline,
+    /// The sky disc fan (vanilla `SkyRenderer.renderSkyDisc`).
+    disc: wgpu::RenderPipeline,
+    /// The sunrise/sunset fan (vanilla `renderSunriseAndSunset`).
+    sunrise: wgpu::RenderPipeline,
     stars: wgpu::Buffer,
     star_vertices: u32,
+    disc_buffer: wgpu::Buffer,
+    disc_vertices: u32,
+    sunrise_fan: wgpu::Buffer,
+    sunrise_fan_vertices: u32,
     dynamic: wgpu::Buffer,
     dynamic_capacity: usize,
     vertices: Vec<SkyVertex>,
@@ -460,12 +475,46 @@ impl SkyRenderer {
             wgpu::BlendState::ALPHA_BLENDING,
             true,
         );
+        let disc = make(
+            "sky-disc",
+            "vs_disc",
+            "fs_disc",
+            &[Some(SkyVertex::LAYOUT)],
+            wgpu::BlendState::REPLACE,
+            false,
+        );
+        let sunrise = make(
+            "sky-sunrise",
+            "vs_sunrise",
+            "fs_sunrise",
+            &[Some(SkyVertex::LAYOUT)],
+            wgpu::BlendState::ALPHA_BLENDING,
+            false,
+        );
         let star_list = star_vertices();
         let stars = wgpu::util::DeviceExt::create_buffer_init(
             device.as_ref(),
             &wgpu::util::BufferInitDescriptor {
                 label: Some("stars"),
                 contents: bytemuck::cast_slice(&star_list),
+                usage: wgpu::BufferUsages::VERTEX,
+            },
+        );
+        let disc_list = disc_vertices();
+        let disc_buffer = wgpu::util::DeviceExt::create_buffer_init(
+            device.as_ref(),
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("sky-disc"),
+                contents: bytemuck::cast_slice(&disc_list),
+                usage: wgpu::BufferUsages::VERTEX,
+            },
+        );
+        let sunrise_list = sunrise_fan_vertices();
+        let sunrise_fan = wgpu::util::DeviceExt::create_buffer_init(
+            device.as_ref(),
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("sunrise-fan"),
+                contents: bytemuck::cast_slice(&sunrise_list),
                 usage: wgpu::BufferUsages::VERTEX,
             },
         );
@@ -480,8 +529,14 @@ impl SkyRenderer {
             celestial,
             world,
             clouds,
+            disc,
+            sunrise,
             stars,
             star_vertices: star_list.len() as u32,
+            disc_buffer,
+            disc_vertices: disc_list.len() as u32,
+            sunrise_fan,
+            sunrise_fan_vertices: sunrise_list.len() as u32,
             dynamic,
             dynamic_capacity,
             vertices: Vec::new(),
@@ -503,13 +558,16 @@ impl SkyRenderer {
         }
     }
 
-    /// Computes this frame's colours and geometry and uploads the uniforms.
+    /// Computes this frame's colours and geometry and uploads the uniforms. `fog` is the
+    /// frame's vanilla fog data (renderer.rs `frame_fog`), `fog_color` its sRGB colour.
     pub fn prepare(
         &mut self,
         camera: &Camera,
         sky: &SkyState,
         view_proj: Mat4,
         rot_view_proj: Mat4,
+        fog: &FogData,
+        fog_color: [f32; 3],
     ) {
         let kind = if sky.dimension_has_sky || self.kind != SkyKind::Overworld {
             self.kind
@@ -517,6 +575,17 @@ impl SkyRenderer {
             SkyKind::None
         };
         let colors = sky_colors(sky, kind, sky.fog_end / 16.0);
+        // Overworld sky/fog colours take the vanilla timeline values (the fog colour is
+        // the exact environment colour; the dome colours keep our sunrise approximation
+        // fed with the exact tint and strength).
+        let mut colors = colors;
+        if kind == SkyKind::Overworld {
+            colors.fog = fog_color;
+            let glow = crate::fog::sunrise_sunset_color(sky.time_of_day);
+            colors.sunrise = [glow[0], glow[1], glow[2], glow[3]];
+            colors.sunrise_side = crate::fog::sun_glow_side(sky.time_of_day);
+            colors.sky = crate::fog::overworld_sky_color(sky.time_of_day);
+        }
         self.colors = colors;
         let rain = sky.rain.clamp(0.0, 1.0);
         let cam = camera.pos.as_vec3();
@@ -577,12 +646,12 @@ impl SkyRenderer {
             fog_color: lin(colors.fog),
             sunrise_color: [sunrise[0], sunrise[1], sunrise[2], colors.sunrise[3]],
             sunrise_dir: [colors.sunrise_side, 0.0, 0.0, colors.star_brightness],
-            cam_pos: [cam.x, cam.y, cam.z, sky.fog_start],
+            cam_pos: [cam.x, cam.y, cam.z, 0.0],
             params: [
-                sky.fog_end,
                 // Clouds drift east at 0.03 blocks per tick (approximate: world time stands in
                 // for game time).
                 (sky.time_of_day as f64 * 0.03).rem_euclid(256.0 * 12.0) as f32,
+                sky.fog_end,
                 CLOUD_HEIGHT,
                 match kind {
                     SkyKind::Overworld => 0.0,
@@ -591,6 +660,15 @@ impl SkyRenderer {
                 },
             ],
             clouds: [cloud_brightness, 0.8, 0.0, 0.0],
+            fog_bands: [
+                fog.environmental_start,
+                fog.environmental_end,
+                fog.render_distance_start,
+                fog.render_distance_end,
+            ],
+            fog_bands2: [fog.sky_end, fog.cloud_end, 0.0, 0.0],
+            sunrise_matrix: sunrise_matrix(colors.sunrise_side, colors.sunrise[3])
+                .to_cols_array_2d(),
             end_rect: self.rects.end_sky,
             cloud_rect: self.rects.clouds,
         };
@@ -614,10 +692,14 @@ impl SkyRenderer {
     /// Background, stars, sun and moon: first in the main pass, before terrain.
     pub fn draw_background<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) -> u32 {
         pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_pipeline(&self.background);
-        pass.draw(0..3, 0..1);
-        let mut calls = 1;
+        let mut calls = 0;
         if self.kind == SkyKind::Overworld {
+            // The sky disc fan over the fog-coloured clear; then sun, moon, stars and the
+            // sunrise/sunset fan (vanilla order: disc, glow, celestial bodies).
+            pass.set_pipeline(&self.disc);
+            pass.set_vertex_buffer(0, self.disc_buffer.slice(..));
+            pass.draw(0..self.disc_vertices, 0..1);
+            calls += 1;
             pass.set_pipeline(&self.celestial);
             if self.colors.star_brightness > 0.0 {
                 pass.set_vertex_buffer(0, self.stars.slice(..));
@@ -629,6 +711,16 @@ impl SkyRenderer {
                 pass.draw(0..self.celestial_count, 0..1);
                 calls += 1;
             }
+            if self.colors.sunrise[3] > 0.001 {
+                pass.set_pipeline(&self.sunrise);
+                pass.set_vertex_buffer(0, self.sunrise_fan.slice(..));
+                pass.draw(0..self.sunrise_fan_vertices, 0..1);
+                calls += 1;
+            }
+        } else {
+            pass.set_pipeline(&self.background);
+            pass.draw(0..3, 0..1);
+            calls += 1;
         }
         calls
     }
@@ -727,6 +819,70 @@ fn star_vertices() -> Vec<SkyVertex> {
         }
     }
     out
+}
+
+/// The sky disc: a triangle fan (center (0, 16, 0), ring of radius 512 at eight compass
+/// points, vanilla `SkyRenderer.buildSkyDisc`). The fragment fog is the spherical distance
+/// over the sky fog end, interpolated per vertex like vanilla's varyings.
+fn disc_vertices() -> Vec<SkyVertex> {
+    let mut out = Vec::with_capacity(8 * 6);
+    let center = [0.0f32, 16.0, 0.0];
+    for i in 0..8 {
+        let a0 = (i as f32 - 2.0) * std::f32::consts::FRAC_PI_4;
+        let a1 = (i as f32 - 1.0) * std::f32::consts::FRAC_PI_4;
+        // Vanilla's ring runs i = -180..=180 step 45 with x = +512 (top disc): the same
+        // eight segments, in radians.
+        let r = |a: f32| [512.0 * a.cos(), 16.0, 512.0 * a.sin()];
+        let corners = [center, r(a0), r(a1)];
+        for j in [0usize, 1, 2] {
+            out.push(SkyVertex {
+                pos: corners[j],
+                uv: [0.0; 2],
+                color: [1.0; 4],
+                rect: [0; 4],
+            });
+        }
+    }
+    out
+}
+
+/// The sunrise/sunset fan: center (0, 100, 0), sixteen ring vertices at radius 120 flattened
+/// to 40 in z (vanilla `SkyRenderer.buildSunriseFan`), white alpha ramping 1 at the center
+/// to 0 at the ring; the fragment multiplies in the timeline colour.
+fn sunrise_fan_vertices() -> Vec<SkyVertex> {
+    let mut out = Vec::with_capacity(16 * 6);
+    let center = SkyVertex {
+        pos: [0.0, 100.0, 0.0],
+        uv: [0.0; 2],
+        color: [1.0, 1.0, 1.0, 1.0],
+        rect: [0; 4],
+    };
+    let ring = |i: usize| {
+        let a = i as f32 * std::f32::consts::TAU / 16.0;
+        SkyVertex {
+            pos: [a.sin() * 120.0, a.cos() * 120.0, -a.cos() * 40.0],
+            uv: [0.0; 2],
+            color: [1.0, 1.0, 1.0, 0.0],
+            rect: [0; 4],
+        }
+    };
+    for i in 0..16 {
+        let corners = [center, ring(i), ring(i + 1)];
+        for j in [0usize, 1, 2] {
+            out.push(corners[j]);
+        }
+    }
+    out
+}
+
+/// The sunrise/sunset fan's pose (vanilla `renderSunriseAndSunset`): rotate 90 degrees about
+/// X, then 90 (glow west, sun descending) or 270 (glow east, sun rising) about Z. The
+/// z-thickness is scaled by the glow's alpha.
+fn sunrise_matrix(side: f32, alpha: f32) -> Mat4 {
+    let z_angle = if side < 0.0 { 90.0f32 } else { 270.0 };
+    Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2)
+        * Mat4::from_rotation_z(z_angle.to_radians())
+        * Mat4::from_scale(Vec3::new(1.0, 1.0, alpha.max(0.001)))
 }
 
 /// Rain columns in a radius of 5 blocks around the camera, 15 blocks tall, scrolling down.
