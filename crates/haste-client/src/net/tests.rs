@@ -958,3 +958,78 @@ fn level_particles_with_an_unknown_type_id_are_dropped() {
     r.apply(level_particles(7, 10));
     assert_eq!(r.session.particle_spawns.len(), 0);
 }
+
+/// The attached firework rocket's push (vanilla `FireworkRocketEntity.tick`): the rocket is
+/// tracked by its entity data (index 9, the attached-to id) and its push is applied before the
+/// gliding player's tick.
+#[test]
+fn an_attached_firework_boosts_the_gliding_player() {
+    use haste_core::entity::MetadataValue;
+    let mut r = Rig::new();
+    r.session
+        .set_entity_type_names(names(&["player", "firework_rocket"]));
+    r.apply(spawn_packet_kind(20, DVec3::new(0.0, 100.0, 0.0), 1)); // firework_rocket
+                                                                    // The rocket's attached-to target is us (entity 7): `OPTIONAL_UNSIGNED_INT` (type 19), a
+                                                                    // VarInt of id + 1 = 8.
+    r.apply(ClientboundPlay::SetEntityData(cb::SetEntityData {
+        entity_id: 20,
+        metadata: vec![MetadataEntry {
+            index: 9,
+            value: MetadataValue::Other {
+                type_id: 19,
+                raw: bytes::Bytes::from(vec![8u8]),
+            },
+        }],
+    }));
+    assert_eq!(r.session.attached_firework, Some(EntityId(20)));
+
+    // Gliding: the push is `v = look * 0.85` from rest = (0, 0, 0.85) at yaw 0, pitch 0. The
+    // player is not loaded, so the physics step does not run to change it.
+    r.session.player.state.fall_flying = true;
+    r.session.player.state.velocity = DVec3::ZERO;
+    r.session.player.state.yaw = 0.0;
+    r.session.player.state.pitch = 0.0;
+    end_tick_once(&mut r);
+    assert!(
+        (r.session.player.state.velocity.z - 0.85).abs() < 1e-9,
+        "{:?}",
+        r.session.player.state.velocity
+    );
+
+    // Attached but not gliding: vanilla applies no push.
+    r.session.player.state.velocity = DVec3::ZERO;
+    r.session.player.state.fall_flying = false;
+    end_tick_once(&mut r);
+    assert_eq!(r.session.player.state.velocity.z, 0.0);
+
+    // A rocket that is not ours (attached-to id 0 = empty) does not attach to us.
+    r.session.attached_firework = None;
+    r.apply(ClientboundPlay::SetEntityData(cb::SetEntityData {
+        entity_id: 20,
+        metadata: vec![MetadataEntry {
+            index: 9,
+            value: MetadataValue::Other {
+                type_id: 19,
+                raw: bytes::Bytes::from(vec![0u8]),
+            },
+        }],
+    }));
+    assert_eq!(r.session.attached_firework, None);
+
+    // Removing the rocket clears the attachment.
+    r.apply(ClientboundPlay::SetEntityData(cb::SetEntityData {
+        entity_id: 20,
+        metadata: vec![MetadataEntry {
+            index: 9,
+            value: MetadataValue::Other {
+                type_id: 19,
+                raw: bytes::Bytes::from(vec![8u8]),
+            },
+        }],
+    }));
+    assert_eq!(r.session.attached_firework, Some(EntityId(20)));
+    r.apply(ClientboundPlay::RemoveEntities(cb::RemoveEntities {
+        entity_ids: vec![20],
+    }));
+    assert_eq!(r.session.attached_firework, None);
+}
