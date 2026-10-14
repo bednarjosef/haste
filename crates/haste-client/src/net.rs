@@ -107,6 +107,10 @@ pub trait EntitySink {
     fn set_head_yaw(&mut self, id: EntityId, yaw: f32);
     /// `EntityStore::set_velocity`.
     fn set_velocity(&mut self, id: EntityId, v: DVec3);
+    /// `EntityStore::swing`: an entity swung a hand (`swing_animation` packet). Default no-op.
+    fn swing(&mut self, id: EntityId, hand: i32, animation: i32, duration: i32) {
+        let _ = (id, hand, animation, duration);
+    }
     /// `EntityStore::mark_hurt`.
     fn mark_hurt(&mut self, id: EntityId);
     /// `EntityStore::mark_dead`.
@@ -198,6 +202,9 @@ impl EntitySink for EntityStore {
     }
     fn set_velocity(&mut self, id: EntityId, v: DVec3) {
         EntityStore::set_velocity(self, id, v)
+    }
+    fn swing(&mut self, id: EntityId, hand: i32, animation: i32, duration: i32) {
+        EntityStore::swing(self, id, hand, animation, duration)
     }
     fn mark_hurt(&mut self, id: EntityId) {
         EntityStore::mark_hurt(self, id)
@@ -792,6 +799,12 @@ impl Session {
                 entities.teleport(id, pos, yaw, pitch, t.on_ground);
             }
             P::RotateHead(h) => entities.set_head_yaw(EntityId(h.entity_id), h.head_yaw),
+            P::SwingAnimation(s) => entities.swing(
+                EntityId(s.entity_id),
+                s.hand,
+                s.animation,
+                s.duration,
+            ),
             P::SetEntityMotion(m) => entities.set_velocity(EntityId(m.entity_id), m.velocity),
             P::HurtAnimation(h) => {
                 entities.mark_hurt(EntityId(h.entity_id));
