@@ -31,4 +31,10 @@ pub struct InteractInput {
     pub swap_offhand: bool,
     /// Hotbar slot (0..=8) selected this tick by a number key or the scroll wheel.
     pub hotbar: Option<u8>,
+    /// Left clicks queued since the last tick (vanilla's `KeyMapping.clickCount` for keyAttack):
+    /// one per mouse press, consumed by `Minecraft.handleKeybinds`' `while (keyAttack.consumeClick())`.
+    /// The input layer adds one per press; the game thread drains them into the player.
+    pub attack_clicks: u8,
+    /// Right clicks queued since the last tick (`keyUse.clickCount`).
+    pub use_clicks: u8,
 }
