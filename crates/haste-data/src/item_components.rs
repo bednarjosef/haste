@@ -116,12 +116,7 @@ impl ItemComponents {
     /// `ItemAttributeModifiers.compute` for the main hand: `base` plus every main-hand modifier
     /// for `attribute`, in vanilla's operation order (add_value, then add_multiplied_base, then
     /// add_multiplied_total).
-    pub fn main_hand_attribute(
-        &self,
-        item: &Identifier,
-        attribute: &Identifier,
-        base: f64,
-    ) -> f64 {
+    pub fn main_hand_attribute(&self, item: &Identifier, attribute: &Identifier, base: f64) -> f64 {
         let mods = self
             .attribute_modifiers(item)
             .iter()
@@ -302,7 +297,8 @@ mod tests {
     }
 
     #[test]
-    fn operation_order_matches_vanilla() {        let mut c = ItemComponents::default();
+    fn operation_order_matches_vanilla() {
+        let mut c = ItemComponents::default();
         c.insert(
             attr("test_item"),
             vec![

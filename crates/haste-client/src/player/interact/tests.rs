@@ -654,7 +654,8 @@ fn using_an_item_ticks_down_and_releases_on_key_up() {
 }
 
 #[test]
-fn drop_item_key_sends_status_5_once_per_press() {    let mut r = Rig::new(GameMode::Survival);
+fn drop_item_key_sends_status_5_once_per_press() {
+    let mut r = Rig::new(GameMode::Survival);
     let q = InteractInput {
         drop_item: true,
         ..Default::default()
