@@ -669,7 +669,17 @@ impl EntityStore {
                 // the table's default row when the variant is unknown or absent.
                 let baby = crate::registry::is_baby(&slot.metadata);
                 let variant =
-                    crate::variants::model_for(slot.kind, &self.mob_variants, &slot.metadata, baby);
+                    crate::variants::model_for(slot.kind, &self.mob_variants, &slot.metadata, baby)
+                        .or_else(|| {
+                            // Metadata-driven variants (axolotl/rabbit/horse/llama/panda/
+                            // parrot/fox): the same layer, the variant's texture.
+                            crate::variants::metadata_model_for(
+                                slot.kind,
+                                &slot.metadata,
+                                baby,
+                                slot.nametag.as_deref(),
+                            )
+                        });
                 let entry = crate::registry::model_entry(slot.kind);
                 match (variant, entry) {
                     // A variant model (already the baby's when `baby`); all six variant mobs

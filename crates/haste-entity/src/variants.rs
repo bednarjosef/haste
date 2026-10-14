@@ -41,6 +41,30 @@ pub mod metadata_index {
     /// `Wolf.DATA_VARIANT_ID`: TamableAnimal 18-19, interested 20, collar 21, anger 22,
     /// variant 23 (Wolf.java).
     pub const WOLF: u8 = 23;
+    /// `Axolotl.DATA_VARIANT`: variant 18, playing dead 19, from bucket 20 (Axolotl.java).
+    pub const AXOLOTL: u8 = 18;
+    /// `Rabbit.DATA_TYPE_ID`: the rabbit's variant 18 (Rabbit.java).
+    pub const RABBIT: u8 = 18;
+    /// `Horse.DATA_ID_TYPE_VARIANT`: AbstractHorse's flags 18, then the packed
+    /// variant/markings int 19 (Horse.java: `variant = id & 0xFF`, `markings = id >> 8`).
+    pub const HORSE_TYPE_VARIANT: u8 = 19;
+    /// `Llama.DATA_VARIANT_ID`: AbstractHorse 18, AbstractChestedHorse's chest 19,
+    /// strength 20, variant 21 (Llama.java).
+    pub const LLAMA_VARIANT: u8 = 21;
+    /// `Parrot.DATA_VARIANT_ID`: TamableAnimal 18-19, variant 20 (Parrot.java).
+    pub const PARROT: u8 = 20;
+    /// `Fox.DATA_TYPE_ID`: variant 18, flags 19, then the two trusted ids 20-21 (Fox.java's
+    /// field declaration order — `defineId` numbers the fields, `defineSynchedData` only
+    /// gives defaults).
+    pub const FOX_TYPE: u8 = 18;
+    /// `Fox.DATA_FLAGS_ID` (sitting 1, crouching 4, interested 8, pouncing 16,
+    /// sleeping 32, faceplanted 64, defending 128).
+    pub const FOX_FLAGS: u8 = 19;
+    /// `Panda.MAIN_GENE_ID`: unhappy 18, sneeze 19, eat 20, main gene 21, hidden gene 22,
+    /// flags 23, eat counter 24 (Panda.java).
+    pub const PANDA_MAIN_GENE: u8 = 21;
+    /// `Panda.HIDDEN_GENE_ID`.
+    pub const PANDA_HIDDEN_GENE: u8 = 22;
 }
 
 /// Entity metadata serializer ids for the `Holder<XVariant>` fields (the registration order
@@ -355,6 +379,256 @@ fn model_cache() -> &'static ModelCache {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+// ---------------------------------------------------------------------------
+// Metadata-driven variants (int fields in synched data, no registry).
+// ---------------------------------------------------------------------------
+
+/// The texture a metadata-driven variant mob renders with: its renderer's texture table
+/// indexed by the variant field. Everything here comes from the vanilla renderer named in
+/// each `texture_for` arm; the model layer never changes with these variants (the same
+/// `AgeableMobRenderer` pair draws them all), only the texture does.
+///
+/// `None` (the model table's default row stands) when the type has no such variant or the
+/// metadata has no field yet. Unknown ids use the renderer's own fallback
+/// (`getOrDefault`-style) where vanilla has one, and the default texture where not.
+pub fn texture_for(
+    kind: RegistryIndex,
+    metadata: &Metadata,
+    baby: bool,
+    custom_name: Option<&str>,
+) -> Option<Identifier> {
+    let name = crate::registry::entity_type_name(kind)?;
+    let int = |index: u8| match metadata.get(index).map(|e| &e.value) {
+        Some(MetadataValue::VarInt(i)) => Some(*i),
+        _ => None,
+    };
+    let byte = |index: u8| match metadata.get(index).map(|e| &e.value) {
+        Some(MetadataValue::Byte(b)) => Some(*b),
+        _ => None,
+    };
+    let tex = |adult: &str, baby_tex: &str| {
+        Some(Identifier::minecraft(if baby { baby_tex } else { adult }))
+    };
+    match name.as_str() {
+        // AxolotlRenderer: axolotl_<variant name>.png / _baby.png, id clamped like
+        // `ByIdMap.continuous(OutOfBoundsStrategy.ZERO)` (unknown -> LUCY).
+        "minecraft:axolotl" => {
+            let id = int(metadata_index::AXOLOTL)?;
+            let variant = match id {
+                0..=4 => ["lucy", "wild", "gold", "cyan", "blue"][id as usize],
+                _ => "lucy",
+            };
+            Some(Identifier::minecraft(&format!(
+                "entity/axolotl/axolotl_{variant}{}",
+                if baby { "_baby" } else { "" }
+            )))
+        }
+        // FoxRenderer: red/snow with a sleep texture (the sleep flag is bit 32 of the fox's
+        // own flags byte at index 19).
+        "minecraft:fox" => {
+            let snow = int(metadata_index::FOX_TYPE)? == 1;
+            let sleeping = byte(metadata_index::FOX_FLAGS).is_some_and(|b| b & 32 != 0);
+            tex(
+                &fox_texture(snow, sleeping, false),
+                &fox_texture(snow, sleeping, true),
+            )
+        }
+        // RabbitRenderer: brown/white/black/white_splotched/gold/salt, id 99 the killer
+        // rabbit (caerbannog); a rabbit named "Toast" always shows the toast skin
+        // (`MobRenderer.checkMagicName`).
+        "minecraft:rabbit" => {
+            if custom_name == Some("Toast") {
+                return tex(
+                    "entity/rabbit/rabbit_toast",
+                    "entity/rabbit/rabbit_toast_baby",
+                );
+            }
+            let id = int(metadata_index::RABBIT)?;
+            let (adult, baby) = match id {
+                1 => (
+                    "entity/rabbit/rabbit_white",
+                    "entity/rabbit/rabbit_white_baby",
+                ),
+                2 => (
+                    "entity/rabbit/rabbit_black",
+                    "entity/rabbit/rabbit_black_baby",
+                ),
+                3 => (
+                    "entity/rabbit/rabbit_white_splotched",
+                    "entity/rabbit/rabbit_white_splotched_baby",
+                ),
+                4 => (
+                    "entity/rabbit/rabbit_gold",
+                    "entity/rabbit/rabbit_gold_baby",
+                ),
+                5 => (
+                    "entity/rabbit/rabbit_salt",
+                    "entity/rabbit/rabbit_salt_baby",
+                ),
+                99 => (
+                    "entity/rabbit/rabbit_caerbannog",
+                    "entity/rabbit/rabbit_caerbannog_baby",
+                ),
+                // Sparse byId: unknown ids are the default BROWN.
+                _ => (
+                    "entity/rabbit/rabbit_brown",
+                    "entity/rabbit/rabbit_brown_baby",
+                ),
+            };
+            tex(adult, baby)
+        }
+        // HorseRenderer LOCATION_BY_VARIANT, id wrapped like `ByIdMap.continuous(WRAP)`.
+        "minecraft:horse" => {
+            let v = int(metadata_index::HORSE_TYPE_VARIANT)? & 0xff;
+            let (adult, baby) = match v {
+                1 => (
+                    "entity/horse/horse_creamy",
+                    "entity/horse/horse_creamy_baby",
+                ),
+                2 => (
+                    "entity/horse/horse_chestnut",
+                    "entity/horse/horse_chestnut_baby",
+                ),
+                3 => ("entity/horse/horse_brown", "entity/horse/horse_brown_baby"),
+                4 => ("entity/horse/horse_black", "entity/horse/horse_black_baby"),
+                5 => ("entity/horse/horse_gray", "entity/horse/horse_gray_baby"),
+                6 => (
+                    "entity/horse/horse_darkbrown",
+                    "entity/horse/horse_darkbrown_baby",
+                ),
+                _ => ("entity/horse/horse_white", "entity/horse/horse_white_baby"),
+            };
+            tex(adult, baby)
+        }
+        // LlamaRenderer TEXTURES (same table for trader llamas: the renderer is shared).
+        "minecraft:llama" | "minecraft:trader_llama" => {
+            let v = int(metadata_index::LLAMA_VARIANT)?.rem_euclid(4);
+            let (adult, baby) = match v {
+                1 => ("entity/llama/llama_white", "entity/llama/llama_white_baby"),
+                2 => ("entity/llama/llama_brown", "entity/llama/llama_brown_baby"),
+                3 => ("entity/llama/llama_gray", "entity/llama/llama_gray_baby"),
+                _ => (
+                    "entity/llama/llama_creamy",
+                    "entity/llama/llama_creamy_baby",
+                ),
+            };
+            tex(adult, baby)
+        }
+        // PandaRenderer: the shown gene comes from the main and hidden genes
+        // (`Gene.getVariantFromGenes`: a recessive main gene shows only when the hidden gene
+        // matches, else NORMAL; a dominant main gene always shows).
+        "minecraft:panda" => {
+            let (main, hidden) = (
+                byte(metadata_index::PANDA_MAIN_GENE)?,
+                byte(metadata_index::PANDA_HIDDEN_GENE)?,
+            );
+            let (main, hidden) = (
+                main.unsigned_abs().rem_euclid(7),
+                hidden.unsigned_abs().rem_euclid(7),
+            );
+            // Recessive: brown (4) and weak (5).
+            let shown = if main == 4 || main == 5 {
+                if main == hidden {
+                    main
+                } else {
+                    0
+                }
+            } else {
+                main
+            };
+            let name = [
+                "panda",
+                "lazy_panda",
+                "worried_panda",
+                "playful_panda",
+                "brown_panda",
+                "weak_panda",
+                "aggressive_panda",
+            ][shown as usize];
+            tex(
+                &format!("entity/panda/{name}"),
+                &format!("entity/panda/{name}_baby"),
+            )
+        }
+        // ParrotRenderer.getVariantTexture.
+        "minecraft:parrot" => {
+            let v = int(metadata_index::PARROT)?.clamp(0, 4);
+            tex(
+                [
+                    "entity/parrot/parrot_red_blue",
+                    "entity/parrot/parrot_blue",
+                    "entity/parrot/parrot_green",
+                    "entity/parrot/parrot_yellow_blue",
+                    "entity/parrot/parrot_grey",
+                ][v as usize],
+                [
+                    "entity/parrot/parrot_red_blue",
+                    "entity/parrot/parrot_blue",
+                    "entity/parrot/parrot_green",
+                    "entity/parrot/parrot_yellow_blue",
+                    "entity/parrot/parrot_grey",
+                ][v as usize],
+            )
+        }
+        _ => None,
+    }
+}
+
+/// A fox's texture (`FoxRenderer.TEXTURES_BY_VARIANT`): snow/red, sleep/idle, baby/adult.
+fn fox_texture(snow: bool, sleeping: bool, baby: bool) -> String {
+    match (snow, sleeping, baby) {
+        (false, false, false) => "entity/fox/fox".into(),
+        (false, false, true) => "entity/fox/fox_baby".into(),
+        (false, true, false) => "entity/fox/fox_sleep".into(),
+        (false, true, true) => "entity/fox/fox_sleep_baby".into(),
+        (true, false, false) => "entity/fox/fox_snow".into(),
+        (true, false, true) => "entity/fox/fox_snow_baby".into(),
+        (true, true, false) => "entity/fox/fox_snow_sleep".into(),
+        (true, true, true) => "entity/fox/fox_snow_sleep_baby".into(),
+    }
+}
+
+/// The metadata-driven model for an entity: the type's layer from the model table with the
+/// variant texture. Cached per (type, texture, baby) — the texture set is small, so warm
+/// lookups are a map probe. `None` when there is no variant in play (the default row).
+pub fn metadata_model_for(
+    kind: RegistryIndex,
+    metadata: &Metadata,
+    baby: bool,
+    custom_name: Option<&str>,
+) -> Option<Arc<CubeModel>> {
+    let name = crate::registry::entity_type_name(kind)?;
+    let texture = texture_for(kind, metadata, baby, custom_name)?;
+    let key = (kind, texture.to_string(), baby);
+    let cache: &TextureModelCache = texture_model_cache();
+    if let Some(hit) = cache.lock().unwrap().get(&key) {
+        return hit.clone();
+    }
+    // The layer comes from the model table's row for this type (adult or baby column).
+    let model = (if baby {
+        crate::registry::baby_model_for_name(&name)
+    } else {
+        crate::registry::model_for_name(&name)
+    })
+    .map(|mut m| {
+        if m.texture != texture {
+            let mut c = (*m).clone();
+            c.texture = texture.clone();
+            m = Arc::new(c);
+        }
+        m
+    });
+    cache.lock().unwrap().insert(key, model.clone());
+    model
+}
+
+type TextureModelCache = Mutex<HashMap<(RegistryIndex, String, bool), Option<Arc<CubeModel>>>>;
+
+fn texture_model_cache() -> &'static TextureModelCache {
+    static CACHE: OnceLock<TextureModelCache> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +646,43 @@ mod tests {
         m
     }
 
+    fn int_metadata(entries: &[(u8, i32)]) -> Metadata {
+        let mut m = Metadata::default();
+        m.apply(
+            &entries
+                .iter()
+                .map(|(i, v)| MetadataEntry {
+                    index: *i,
+                    value: MetadataValue::VarInt(*v),
+                })
+                .collect::<Vec<_>>(),
+        );
+        m
+    }
+
+    fn byte_metadata(entries: &[(u8, i8)]) -> Metadata {
+        let mut m = Metadata::default();
+        m.apply(
+            &entries
+                .iter()
+                .map(|(i, v)| MetadataEntry {
+                    index: *i,
+                    value: MetadataValue::Byte(*v),
+                })
+                .collect::<Vec<_>>(),
+        );
+        m
+    }
+
+    /// The kind of an entity type name, through the real registries.json (None without the
+    /// cache: these tests are skipped there).
+    fn kind_of(name: &str) -> Option<RegistryIndex> {
+        crate::registry::entity_type_names()?
+            .iter()
+            .find(|(_, n)| n.as_str() == name)
+            .map(|(k, _)| *k)
+    }
+
     /// The variant field's index is the synched-data chain's next slot after the super
     /// classes' fields (Entity 0-7, LivingEntity 8-14, Mob 15, AgeableMob 16-17).
     #[test]
@@ -382,6 +693,15 @@ mod tests {
         assert_eq!(metadata_index::FROG, 18);
         assert_eq!(metadata_index::CAT, 20); // TamableAnimal 18-19
         assert_eq!(metadata_index::WOLF, 23); // TamableAnimal 18-19, wolf 20-22
+        assert_eq!(metadata_index::AXOLOTL, 18);
+        assert_eq!(metadata_index::RABBIT, 18);
+        assert_eq!(metadata_index::HORSE_TYPE_VARIANT, 19); // AbstractHorse flags 18
+        assert_eq!(metadata_index::LLAMA_VARIANT, 21); // flags 18, chest 19, strength 20
+        assert_eq!(metadata_index::PARROT, 20); // TamableAnimal 18-19
+        assert_eq!(metadata_index::FOX_TYPE, 18); // then flags 19, trusted 20-21
+        assert_eq!(metadata_index::FOX_FLAGS, 19);
+        assert_eq!(metadata_index::PANDA_MAIN_GENE, 21); // unhappy 18, sneeze 19, eat 20
+        assert_eq!(metadata_index::PANDA_HIDDEN_GENE, 22);
     }
 
     /// A VarInt registry id is read from the field; a wrong serializer or a leftover byte
@@ -564,5 +884,144 @@ mod tests {
         );
         // No variant in play: nothing, the store keeps the table's row.
         assert!(model_for(kind, &variants, &Metadata::default(), false).is_none());
+    }
+
+    /// The metadata-driven variant textures: each renderer's own table, including the
+    /// fallbacks vanilla applies for unknown ids (and the killer rabbit's 99). Needs
+    /// registries.json for the kind lookup.
+    #[test]
+    #[ignore = "needs cache/datagen (registries.json; HASTE_CACHE overrides)"]
+    fn metadata_variant_textures_match_the_renderers() {
+        let cases: Vec<(&str, Metadata, bool, Option<&str>, &str)> = vec![
+            // Axolotl: variant 3 (cyan), and an unknown id falls back to LUCY.
+            (
+                "minecraft:axolotl",
+                int_metadata(&[(metadata_index::AXOLOTL, 3)]),
+                false,
+                None,
+                "entity/axolotl/axolotl_cyan",
+            ),
+            (
+                "minecraft:axolotl",
+                int_metadata(&[(metadata_index::AXOLOTL, 9)]),
+                true,
+                None,
+                "entity/axolotl/axolotl_lucy_baby",
+            ),
+            // Fox: snow variant sleeping (flags bit 32), baby.
+            (
+                "minecraft:fox",
+                int_metadata(&[(metadata_index::FOX_TYPE, 1)])
+                    .apply_extra(byte_metadata(&[(metadata_index::FOX_FLAGS, 32)])),
+                true,
+                None,
+                "entity/fox/fox_snow_sleep_baby",
+            ),
+            // Rabbit: the killer rabbit (99), Toast's magic name, and the default.
+            (
+                "minecraft:rabbit",
+                int_metadata(&[(metadata_index::RABBIT, 99)]),
+                false,
+                None,
+                "entity/rabbit/rabbit_caerbannog",
+            ),
+            (
+                "minecraft:rabbit",
+                int_metadata(&[(metadata_index::RABBIT, 0)]),
+                false,
+                Some("Toast"),
+                "entity/rabbit/rabbit_toast",
+            ),
+            (
+                "minecraft:rabbit",
+                int_metadata(&[(metadata_index::RABBIT, 42)]),
+                true,
+                None,
+                "entity/rabbit/rabbit_brown_baby",
+            ),
+            // Horse: variant 4 (black).
+            (
+                "minecraft:horse",
+                int_metadata(&[(metadata_index::HORSE_TYPE_VARIANT, 4)]),
+                false,
+                None,
+                "entity/horse/horse_black",
+            ),
+            // Llama: variant 3 (gray), baby.
+            (
+                "minecraft:llama",
+                int_metadata(&[(metadata_index::LLAMA_VARIANT, 3)]),
+                true,
+                None,
+                "entity/llama/llama_gray_baby",
+            ),
+            // Parrot: variant 2 (green).
+            (
+                "minecraft:parrot",
+                int_metadata(&[(metadata_index::PARROT, 2)]),
+                false,
+                None,
+                "entity/parrot/parrot_green",
+            ),
+            // Panda: main brown (4) with hidden brown shows brown; with a different hidden
+            // gene it shows normal.
+            (
+                "minecraft:panda",
+                byte_metadata(&[
+                    (metadata_index::PANDA_MAIN_GENE, 4),
+                    (metadata_index::PANDA_HIDDEN_GENE, 4),
+                ]),
+                false,
+                None,
+                "entity/panda/brown_panda",
+            ),
+            (
+                "minecraft:panda",
+                byte_metadata(&[
+                    (metadata_index::PANDA_MAIN_GENE, 4),
+                    (metadata_index::PANDA_HIDDEN_GENE, 0),
+                ]),
+                true,
+                None,
+                "entity/panda/panda_baby",
+            ),
+        ];
+        for (name, meta, baby, custom, want) in cases {
+            let Some(kind) = kind_of(name) else {
+                eprintln!("skipped: {name} not in registries.json");
+                return;
+            };
+            let got = texture_for(kind, &meta, baby, custom).unwrap();
+            assert_eq!(
+                got,
+                Identifier::minecraft(want),
+                "{name} baby={baby} custom={custom:?}"
+            );
+        }
+        // A type with no metadata variant: nothing.
+        if let Some(pig) = kind_of("minecraft:pig") {
+            assert!(texture_for(
+                pig,
+                &int_metadata(&[(metadata_index::RABBIT, 1)]),
+                false,
+                None
+            )
+            .is_none());
+        }
+    }
+}
+
+/// Test helper: apply another metadata set's entries on top.
+#[cfg(test)]
+trait ApplyExtra {
+    fn apply_extra(self, other: Metadata) -> Metadata;
+}
+#[cfg(test)]
+impl ApplyExtra for Metadata {
+    fn apply_extra(mut self, other: Metadata) -> Metadata {
+        use haste_core::entity::MetadataEntry;
+        let entries: Vec<MetadataEntry> = other.iter().cloned().collect();
+        self.apply(&entries);
+        self
     }
 }
