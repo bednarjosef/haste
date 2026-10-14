@@ -124,6 +124,11 @@ pub trait EntitySink {
     fn player_info(&mut self, info: &[PlayerInfo]);
     /// `EntityStore::set_passengers`: the vehicle's passenger list is replaced by `passengers`.
     fn set_passengers(&mut self, vehicle: EntityId, passengers: &[EntityId]);
+    /// `EntityStore::set_world_age` (from `set_time`); the bee's anger end time compares
+    /// against it. Default no-op.
+    fn set_world_age(&mut self, world_age: i64) {
+        let _ = world_age;
+    }
     /// `EntityStore::entity_type_info`: registry index and dimensions, for the seat offset.
     fn entity_type_info(&self, _id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
         None
@@ -229,6 +234,9 @@ impl EntitySink for EntityStore {
     }
     fn set_passengers(&mut self, vehicle: EntityId, passengers: &[EntityId]) {
         EntityStore::set_passengers(self, vehicle, passengers)
+    }
+    fn set_world_age(&mut self, world_age: i64) {
+        EntityStore::set_world_age(self, world_age)
     }
     fn entity_type_info(&self, id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
         EntityStore::entity_type_info(self, id)
@@ -923,6 +931,7 @@ impl Session {
             }
             P::PlayerInfoUpdate(u) => entities.player_info(&u.infos()),
             P::SetTime(t) => {
+                entities.set_world_age(t.world_age);
                 if let Some(c) = t.clocks.first() {
                     self.time_of_day = Some(c.time);
                 }

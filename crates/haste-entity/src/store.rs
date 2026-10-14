@@ -322,6 +322,9 @@ pub struct EntityStore {
     /// The synced variant registries (cat/wolf/frog/pig/cow/chicken), set at join from the
     /// server's `registry_data`; empty when the server sent none.
     mob_variants: crate::variants::MobVariants,
+    /// The world age of the last `set_time` (`NeutralMob.isAngry` compares anger end times
+    /// against it); 0 before one arrives.
+    world_age: i64,
 }
 
 /// Hurt flash strength for an entity's remaining hurt ticks, eased out (quadratic, like
@@ -352,6 +355,7 @@ impl EntityStore {
             riding: Riding::new(),
             painting_variants: HashMap::new(),
             mob_variants: crate::variants::MobVariants::empty(),
+            world_age: 0,
         }
     }
 
@@ -373,6 +377,12 @@ impl EntityStore {
         entries: Vec<Option<crate::variants::VariantAssets>>,
     ) {
         self.mob_variants.insert(registry, entries);
+    }
+
+    /// The world age from `set_time` (the bee's anger end time compares against it,
+    /// `NeutralMob.isAngry`).
+    pub fn set_world_age(&mut self, world_age: i64) {
+        self.world_age = world_age;
     }
 
     fn slot(&self, id: EntityId) -> Option<u32> {
@@ -672,12 +682,14 @@ impl EntityStore {
                     crate::variants::model_for(slot.kind, &self.mob_variants, &slot.metadata, baby)
                         .or_else(|| {
                             // Metadata-driven variants (axolotl/rabbit/horse/llama/panda/
-                            // parrot/fox): the same layer, the variant's texture.
+                            // parrot/fox/bee/strider/mooshroom): the same layer, the variant's
+                            // texture.
                             crate::variants::metadata_model_for(
                                 slot.kind,
                                 &slot.metadata,
                                 baby,
                                 slot.nametag.as_deref(),
+                                self.world_age,
                             )
                         });
                 let entry = crate::registry::model_entry(slot.kind);
@@ -713,7 +725,8 @@ impl EntityStore {
                 yaw,
                 pitch: slot.pitch,
                 head_yaw: slot.head_yaw,
-                scale: 1.0,
+                // Slime/magma cube size (`AbstractCubeMob.ID_SIZE`); 1.0 for everything else.
+                scale: crate::variants::scale_for(slot.kind, &slot.metadata),
                 pose,
                 skin: None,
                 nametag: slot.nametag.clone(),

@@ -65,6 +65,16 @@ pub mod metadata_index {
     pub const PANDA_MAIN_GENE: u8 = 21;
     /// `Panda.HIDDEN_GENE_ID`.
     pub const PANDA_HIDDEN_GENE: u8 = 22;
+    /// `AbstractCubeMob.ID_SIZE` (slime, magma cube): AgeableMob 16-17, size 18.
+    pub const CUBE_SIZE: u8 = 18;
+    /// `Bee.DATA_FLAGS_ID`: flags 18 (nectar 8), anger end time 19.
+    pub const BEE_FLAGS: u8 = 18;
+    /// `Bee.DATA_ANGER_END_TIME` (game-time tick the anger ends, -1 when calm).
+    pub const BEE_ANGER_END: u8 = 19;
+    /// `Strider.DATA_SUFFOCATING`: boost time 18, suffocating (cold) 19.
+    pub const STRIDER_SUFFOCATING: u8 = 19;
+    /// `MushroomCow.DATA_TYPE`: variant 18 (red 0, brown 1; AbstractCow adds nothing).
+    pub const MOOSHROOM_TYPE: u8 = 18;
 }
 
 /// Entity metadata serializer ids for the `Holder<XVariant>` fields (the registration order
@@ -388,6 +398,10 @@ fn model_cache() -> &'static ModelCache {
 /// each `texture_for` arm; the model layer never changes with these variants (the same
 /// `AgeableMobRenderer` pair draws them all), only the texture does.
 ///
+/// `world_age` is the world time the bee's anger end time compares against
+/// (`NeutralMob.isAngry`); callers that have no clock yet pass 0 (the bee then shows calm
+/// for any end time in the past, which is right until the first `set_time`).
+///
 /// `None` (the model table's default row stands) when the type has no such variant or the
 /// metadata has no field yet. Unknown ids use the renderer's own fallback
 /// (`getOrDefault`-style) where vanilla has one, and the default texture where not.
@@ -396,6 +410,7 @@ pub fn texture_for(
     metadata: &Metadata,
     baby: bool,
     custom_name: Option<&str>,
+    world_age: i64,
 ) -> Option<Identifier> {
     let name = crate::registry::entity_type_name(kind)?;
     let int = |index: u8| match metadata.get(index).map(|e| &e.value) {
@@ -420,6 +435,29 @@ pub fn texture_for(
             };
             Some(Identifier::minecraft(&format!(
                 "entity/axolotl/axolotl_{variant}{}",
+                if baby { "_baby" } else { "" }
+            )))
+        }
+        // BeeRenderer: angry x nectar x baby, four textures each age. Nectar is bit 8 of the
+        // bee's flags; angry is the anger end time past the world age
+        // (`NeutralMob.isAngry`).
+        "minecraft:bee" => {
+            let nectar = byte(metadata_index::BEE_FLAGS).is_some_and(|b| b & 8 != 0);
+            let angry = match metadata
+                .get(metadata_index::BEE_ANGER_END)
+                .map(|e| &e.value)
+            {
+                Some(MetadataValue::VarLong(end)) => *end > 0 && *end > world_age,
+                _ => false,
+            };
+            let state = match (angry, nectar) {
+                (true, true) => "_angry_nectar",
+                (true, false) => "_angry",
+                (false, true) => "_nectar",
+                (false, false) => "",
+            };
+            Some(Identifier::minecraft(&format!(
+                "entity/bee/bee{state}{}",
                 if baby { "_baby" } else { "" }
             )))
         }
@@ -570,8 +608,58 @@ pub fn texture_for(
                 ][v as usize],
             )
         }
+        // MushroomCowRenderer TEXTURES (the mushroom block layer on top is an overlay,
+        // pending the EntityInstance overlay interface).
+        "minecraft:mooshroom" => {
+            let brown = int(metadata_index::MOOSHROOM_TYPE)? == 1;
+            tex("entity/cow/mooshroom_red", "entity/cow/mooshroom_red_baby")
+                .filter(|_| !brown)
+                .or_else(|| {
+                    tex(
+                        "entity/cow/mooshroom_brown",
+                        "entity/cow/mooshroom_brown_baby",
+                    )
+                })
+        }
+        // StriderRenderer: suffocating (cold) swaps to the cold texture pair.
+        "minecraft:strider" => {
+            let cold = matches!(
+                metadata
+                    .get(metadata_index::STRIDER_SUFFOCATING)
+                    .map(|e| &e.value),
+                Some(MetadataValue::Boolean(true))
+            );
+            if cold {
+                tex(
+                    "entity/strider/strider_cold",
+                    "entity/strider/strider_cold_baby",
+                )
+            } else {
+                tex("entity/strider/strider", "entity/strider/strider_baby")
+            }
+        }
         _ => None,
     }
+}
+
+/// The rest-pose scale of a slime or magma cube (`AbstractCubeMobRenderer.applySizeAndSquish`
+/// with no squish: uniform `size`), or 1.0 for every other type. The squish animation's
+/// non-uniform wobble is part of the animation task, not the variant.
+///
+/// Cheap on the frame path: the metadata probe comes first, so every non-cube entity (the
+/// common case) returns without a registry lookup.
+pub fn scale_for(kind: RegistryIndex, metadata: &Metadata) -> f32 {
+    let size = match metadata.get(metadata_index::CUBE_SIZE).map(|e| &e.value) {
+        Some(MetadataValue::VarInt(i)) if *i > 0 => *i,
+        _ => return 1.0,
+    };
+    let Some(name) = crate::registry::entity_type_name(kind) else {
+        return 1.0;
+    };
+    if !matches!(name.as_str(), "minecraft:slime" | "minecraft:magma_cube") {
+        return 1.0;
+    }
+    size as f32
 }
 
 /// A fox's texture (`FoxRenderer.TEXTURES_BY_VARIANT`): snow/red, sleep/idle, baby/adult.
@@ -591,14 +679,16 @@ fn fox_texture(snow: bool, sleeping: bool, baby: bool) -> String {
 /// The metadata-driven model for an entity: the type's layer from the model table with the
 /// variant texture. Cached per (type, texture, baby) — the texture set is small, so warm
 /// lookups are a map probe. `None` when there is no variant in play (the default row).
+/// `world_age` feeds the bee's anger end time (`texture_for`).
 pub fn metadata_model_for(
     kind: RegistryIndex,
     metadata: &Metadata,
     baby: bool,
     custom_name: Option<&str>,
+    world_age: i64,
 ) -> Option<Arc<CubeModel>> {
     let name = crate::registry::entity_type_name(kind)?;
-    let texture = texture_for(kind, metadata, baby, custom_name)?;
+    let texture = texture_for(kind, metadata, baby, custom_name, world_age)?;
     let key = (kind, texture.to_string(), baby);
     let cache: &TextureModelCache = texture_model_cache();
     if let Some(hit) = cache.lock().unwrap().get(&key) {
@@ -668,6 +758,34 @@ mod tests {
                 .map(|(i, v)| MetadataEntry {
                     index: *i,
                     value: MetadataValue::Byte(*v),
+                })
+                .collect::<Vec<_>>(),
+        );
+        m
+    }
+
+    fn bool_metadata(entries: &[(u8, bool)]) -> Metadata {
+        let mut m = Metadata::default();
+        m.apply(
+            &entries
+                .iter()
+                .map(|(i, v)| MetadataEntry {
+                    index: *i,
+                    value: MetadataValue::Boolean(*v),
+                })
+                .collect::<Vec<_>>(),
+        );
+        m
+    }
+
+    fn long_metadata(entries: &[(u8, i64)]) -> Metadata {
+        let mut m = Metadata::default();
+        m.apply(
+            &entries
+                .iter()
+                .map(|(i, v)| MetadataEntry {
+                    index: *i,
+                    value: MetadataValue::VarLong(*v),
                 })
                 .collect::<Vec<_>>(),
         );
@@ -985,13 +1103,32 @@ mod tests {
                 None,
                 "entity/panda/panda_baby",
             ),
+            // Mooshroom: variant 1 (brown).
+            (
+                "minecraft:mooshroom",
+                int_metadata(&[(metadata_index::MOOSHROOM_TYPE, 1)]),
+                true,
+                None,
+                "entity/cow/mooshroom_brown_baby",
+            ),
+            // Strider: suffocating (cold) boolean at 19.
+            (
+                "minecraft:strider",
+                Metadata::default().apply_extra(bool_metadata(&[(
+                    metadata_index::STRIDER_SUFFOCATING,
+                    true,
+                )])),
+                false,
+                None,
+                "entity/strider/strider_cold",
+            ),
         ];
         for (name, meta, baby, custom, want) in cases {
             let Some(kind) = kind_of(name) else {
                 eprintln!("skipped: {name} not in registries.json");
                 return;
             };
-            let got = texture_for(kind, &meta, baby, custom).unwrap();
+            let got = texture_for(kind, &meta, baby, custom, 0).unwrap();
             assert_eq!(
                 got,
                 Identifier::minecraft(want),
@@ -1004,10 +1141,86 @@ mod tests {
                 pig,
                 &int_metadata(&[(metadata_index::RABBIT, 1)]),
                 false,
-                None
+                None,
+                0
             )
             .is_none());
         }
+    }
+
+    /// The bee's texture: nectar (flags bit 8) x anger (end time past the world age) x baby
+    /// (`BeeRenderer.getTextureLocation`); the anger end time in the past means calm.
+    #[test]
+    #[ignore = "needs cache/datagen (registries.json; HASTE_CACHE overrides)"]
+    fn bee_textures_angry_nectar_and_age() {
+        let Some(bee) = kind_of("minecraft:bee") else {
+            eprintln!("skipped: no registries.json in the cache");
+            return;
+        };
+        let bee_meta = |flags: i8, anger_end: i64| {
+            bool_metadata(&[(0, false)])
+                .apply_extra(long_metadata(&[(metadata_index::BEE_ANGER_END, anger_end)]))
+                .apply_extra(byte_metadata(&[(metadata_index::BEE_FLAGS, flags)]))
+        };
+        // Calm, no nectar.
+        assert_eq!(
+            texture_for(bee, &bee_meta(0, -1), false, None, 100).unwrap(),
+            Identifier::minecraft("entity/bee/bee")
+        );
+        // Nectar only.
+        assert_eq!(
+            texture_for(bee, &bee_meta(8, -1), false, None, 100).unwrap(),
+            Identifier::minecraft("entity/bee/bee_nectar")
+        );
+        // Angry (end time 200 > age 100), nectar, baby.
+        assert_eq!(
+            texture_for(bee, &bee_meta(8, 200), true, None, 100).unwrap(),
+            Identifier::minecraft("entity/bee/bee_angry_nectar_baby")
+        );
+        // The anger already ended: calm.
+        assert_eq!(
+            texture_for(bee, &bee_meta(0, 50), false, None, 100).unwrap(),
+            Identifier::minecraft("entity/bee/bee")
+        );
+        // Angry without nectar.
+        assert_eq!(
+            texture_for(bee, &bee_meta(0, 200), false, None, 100).unwrap(),
+            Identifier::minecraft("entity/bee/bee_angry")
+        );
+    }
+
+    /// The slime and magma cube scale: `AbstractCubeMob.ID_SIZE` at index 18, everything
+    /// else 1.0.
+    #[test]
+    #[ignore = "needs cache/datagen (registries.json; HASTE_CACHE overrides)"]
+    fn cube_size_scales_the_model() {
+        let Some(slime) = kind_of("minecraft:slime") else {
+            eprintln!("skipped: no registries.json in the cache");
+            return;
+        };
+        let size = |i: i32| int_metadata(&[(metadata_index::CUBE_SIZE, i)]);
+        assert_eq!(scale_for(slime, &Metadata::default()), 1.0);
+        assert_eq!(scale_for(slime, &size(4)), 4.0);
+        // Non-positive sizes render at the minimum (vanilla never sends them).
+        assert_eq!(scale_for(slime, &size(0)), 1.0);
+        if let Some(pig) = kind_of("minecraft:pig") {
+            assert_eq!(scale_for(pig, &size(4)), 1.0);
+        }
+    }
+
+    /// A strider that is not suffocating keeps the plain texture (the boolean defaults
+    /// false when absent).
+    #[test]
+    #[ignore = "needs cache/datagen (registries.json; HASTE_CACHE overrides)"]
+    fn strider_plain_when_not_suffocating() {
+        let Some(strider) = kind_of("minecraft:strider") else {
+            eprintln!("skipped: no registries.json in the cache");
+            return;
+        };
+        assert_eq!(
+            texture_for(strider, &Metadata::default(), false, None, 0).unwrap(),
+            Identifier::minecraft("entity/strider/strider")
+        );
     }
 }
 
