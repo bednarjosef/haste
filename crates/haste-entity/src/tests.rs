@@ -1377,6 +1377,12 @@ fn baby_flag_and_baby_layers() {
         &crate::metadata::Metadata::default()
     ));
 
+}
+
+/// Baby layers come from the recorder's model dump, which CI does not have.
+#[test]
+#[ignore = "needs cache/oracle/26.3/entity_models.json"]
+fn baby_layers_from_the_dump() {
     // Rows whose renderer has a baby model (AgeableMobRenderer and friends) name it.
     // Vanilla types with a baby layer but none in our table yet would fail here.
     for (name, has_baby) in [
