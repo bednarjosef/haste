@@ -85,7 +85,9 @@ fn model_kind(model: &CubeModel) -> ModelKind {
         // texture the registry set tells them apart). Other arm models (villager, illager) use
         // their own setupAnim and are left on the head aim only.
         let texture = model.texture.path();
-        if texture.contains("humanoid") || texture.contains("enderman") || texture.contains("piglin")
+        if texture.contains("humanoid")
+            || texture.contains("enderman")
+            || texture.contains("piglin")
         {
             ModelKind::Humanoid
         } else if texture.contains("zombie") {
@@ -121,15 +123,45 @@ pub(crate) fn setup_anim(
 
     match model_kind(model) {
         ModelKind::Humanoid => {
-            humanoid(&mut o, e, partial, walk_pos, walk_speed, swing, age, is_passenger, false);
+            humanoid(
+                &mut o,
+                e,
+                partial,
+                walk_pos,
+                walk_speed,
+                swing,
+                age,
+                is_passenger,
+                false,
+            );
             push_head(&mut o, e, head_rel, partial, true);
         }
         ModelKind::Zombie => {
-            humanoid(&mut o, e, partial, walk_pos, walk_speed, swing, age, is_passenger, true);
+            humanoid(
+                &mut o,
+                e,
+                partial,
+                walk_pos,
+                walk_speed,
+                swing,
+                age,
+                is_passenger,
+                true,
+            );
             push_head(&mut o, e, head_rel, partial, true);
         }
         ModelKind::Skeleton => {
-            humanoid(&mut o, e, partial, walk_pos, walk_speed, swing, age, is_passenger, false);
+            humanoid(
+                &mut o,
+                e,
+                partial,
+                walk_pos,
+                walk_speed,
+                swing,
+                age,
+                is_passenger,
+                false,
+            );
             push_head(&mut o, e, head_rel, partial, true);
             // `SkeletonModel.setupAnim`'s aggressive bow-ready arms need `isAggressive`, which is
             // `Mob.getTarget() != null` on the server and is not packet-synced, so the arms stay
@@ -192,11 +224,7 @@ fn humanoid(
     // Walk swing (`cos(animationPos * 0.6662) * 2 * speed * 0.5` for arms, `* 1.4` for legs).
     let mut ra = Vec3::new((walk_pos * 0.6662 + PI).cos() * walk_speed, 0.0, 0.0);
     let mut la = Vec3::new((walk_pos * 0.6662).cos() * walk_speed, 0.0, 0.0);
-    let mut rl = Vec3::new(
-        (walk_pos * 0.6662).cos() * 1.4 * walk_speed,
-        0.005,
-        0.005,
-    );
+    let mut rl = Vec3::new((walk_pos * 0.6662).cos() * 1.4 * walk_speed, 0.005, 0.005);
     let mut ll = Vec3::new(
         (walk_pos * 0.6662 + PI).cos() * 1.4 * walk_speed,
         -0.005,
@@ -317,7 +345,8 @@ fn setup_swim(
 fn quadruped(o: &mut PoseOverrides, walk_pos: f32, walk_speed: f32) {
     let c = (walk_pos * 0.6662).cos() * 1.4 * walk_speed;
     let c2 = (walk_pos * 0.6662 + PI).cos() * 1.4 * walk_speed;
-    o.rotations.push(("right_hind_leg".into(), Vec3::new(c, 0.0, 0.0)));
+    o.rotations
+        .push(("right_hind_leg".into(), Vec3::new(c, 0.0, 0.0)));
     o.rotations
         .push(("left_hind_leg".into(), Vec3::new(c2, 0.0, 0.0)));
     o.rotations
@@ -343,10 +372,14 @@ fn spider(o: &mut PoseOverrides, walk_pos: f32, walk_speed: f32) {
         .push(("right_hind_leg".into(), leg(swing_hind, step_hind)));
     o.rotations
         .push(("left_hind_leg".into(), leg(-swing_hind, -step_hind)));
-    o.rotations
-        .push(("right_middle_hind_leg".into(), leg(swing_mid_hind, step_mid_hind)));
-    o.rotations
-        .push(("left_middle_hind_leg".into(), leg(-swing_mid_hind, -step_mid_hind)));
+    o.rotations.push((
+        "right_middle_hind_leg".into(),
+        leg(swing_mid_hind, step_mid_hind),
+    ));
+    o.rotations.push((
+        "left_middle_hind_leg".into(),
+        leg(-swing_mid_hind, -step_mid_hind),
+    ));
     o.rotations.push((
         "right_middle_front_leg".into(),
         leg(swing_mid_front, step_mid_front),
@@ -372,11 +405,7 @@ fn chicken(o: &mut PoseOverrides, e: &Entity, partial: f32, walk_pos: f32, walk_
     ));
     o.rotations.push((
         "left_leg".into(),
-        Vec3::new(
-            (walk_pos * 0.6662 + PI).cos() * 1.4 * walk_speed,
-            0.0,
-            0.0,
-        ),
+        Vec3::new((walk_pos * 0.6662 + PI).cos() * 1.4 * walk_speed, 0.0, 0.0),
     ));
     o.rotations
         .push(("right_wing".into(), Vec3::new(0.0, 0.0, flap_angle)));

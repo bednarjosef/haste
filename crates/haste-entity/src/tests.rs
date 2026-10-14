@@ -574,9 +574,21 @@ fn attack_arm_angle_mid_swing() {
     s.render_instances(1.0, &mut out);
     let rot: std::collections::HashMap<_, _> = out[0].pose.rotations.iter().cloned().collect();
     let ra = rot.get("right_arm").unwrap();
-    assert!((ra.x - -0.742_670).abs() < 2e-3, "arm x {} != -0.74267", ra.x);
-    assert!((ra.y - -0.578_342).abs() < 2e-3, "arm y {} != -0.57834", ra.y);
-    assert!((ra.z - -0.304_978).abs() < 2e-3, "arm z {} != -0.30498", ra.z);
+    assert!(
+        (ra.x - -0.742_670).abs() < 2e-3,
+        "arm x {} != -0.74267",
+        ra.x
+    );
+    assert!(
+        (ra.y - -0.578_342).abs() < 2e-3,
+        "arm y {} != -0.57834",
+        ra.y
+    );
+    assert!(
+        (ra.z - -0.304_978).abs() < 2e-3,
+        "arm z {} != -0.30498",
+        ra.z
+    );
 }
 
 /// `AnimationUtils.animateZombieArms`: a zombie holds its arms forward even at rest
@@ -584,7 +596,10 @@ fn attack_arm_angle_mid_swing() {
 /// from its texture; here the parts/texture are built directly.
 #[test]
 fn zombie_arms_are_forward_at_rest() {
-    let model = mob_model("minecraft:entity/zombie/zombie", &["head", "right_arm", "left_arm"]);
+    let model = mob_model(
+        "minecraft:entity/zombie/zombie",
+        &["head", "right_arm", "left_arm"],
+    );
     let mut s = store();
     s.spawn(&spawn(1, DVec3::ZERO));
     let e = s.get(EntityId(1)).unwrap();
@@ -602,7 +617,11 @@ fn zombie_arms_are_forward_at_rest() {
         ra.y
     );
     // The idle arm bob (age 0) adds 0.1 to z on top of the zombie pose.
-    assert!((ra.z - 0.1).abs() < 1e-4, "zombie right arm z {} != 0.1", ra.z);
+    assert!(
+        (ra.z - 0.1).abs() < 1e-4,
+        "zombie right arm z {} != 0.1",
+        ra.z
+    );
 }
 
 /// A quadruped model (pig/cow/sheep: `right_hind_leg`/`left_front_leg` parts) gets

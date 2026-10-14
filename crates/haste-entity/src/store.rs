@@ -112,7 +112,10 @@ impl SwingState {
         if self.active && self.ticks > 0 && self.ticks <= self.duration / 2 {
             return;
         }
-        if !self.active || self.hand != hand || self.animation != animation || self.duration != duration
+        if !self.active
+            || self.hand != hand
+            || self.animation != animation
+            || self.duration != duration
         {
             self.old_progress = 0.0;
             self.progress = 0.0;

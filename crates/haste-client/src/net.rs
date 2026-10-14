@@ -832,12 +832,9 @@ impl Session {
                 entities.teleport(id, pos, yaw, pitch, t.on_ground);
             }
             P::RotateHead(h) => entities.set_head_yaw(EntityId(h.entity_id), h.head_yaw),
-            P::SwingAnimation(s) => entities.swing(
-                EntityId(s.entity_id),
-                s.hand,
-                s.animation,
-                s.duration,
-            ),
+            P::SwingAnimation(s) => {
+                entities.swing(EntityId(s.entity_id), s.hand, s.animation, s.duration)
+            }
             P::SetEntityMotion(m) => entities.set_velocity(EntityId(m.entity_id), m.velocity),
             P::HurtAnimation(h) => {
                 entities.mark_hurt(EntityId(h.entity_id));
