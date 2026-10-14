@@ -39,9 +39,6 @@ public final class ConnectionImpl {
     static final net.minecraft.client.waypoints.ClientWaypointManager WAYPOINTS = new net.minecraft.client.waypoints.ClientWaypointManager();
     public static net.minecraft.client.waypoints.ClientWaypointManager getWaypointManager(ClientPacketListener c) { return WAYPOINTS; }
 
-    /** Vanilla's session search trees (creative inventory search); real tier-3 Java, empty until populated. */
-    static final net.minecraft.client.multiplayer.SessionSearchTrees SEARCH_TREES = new net.minecraft.client.multiplayer.SessionSearchTrees();
-    public static net.minecraft.client.multiplayer.SessionSearchTrees searchTrees(ClientPacketListener c) { return SEARCH_TREES; }
     /** Signed-chat bookkeeping (last-seen acknowledgements) is Rust's: nothing to do here. */
     public static void markMessageAsProcessed(ClientPacketListener c, net.minecraft.network.chat.MessageSignature s, boolean acknowledged) {}
     /** Offline-mode servers are what Haste tests against; online mode is not told to Java yet. */
