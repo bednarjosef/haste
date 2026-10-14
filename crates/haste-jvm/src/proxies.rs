@@ -223,6 +223,9 @@ pub struct GameState {
     pub disconnect_requested: bool,
     /// Serverbound play packets vanilla code sent (VarInt id + body, vanilla's encoding), oldest first.
     pub outgoing: Vec<Vec<u8>>,
+    /// Option changes vanilla screens made, as options.txt key/value pairs, oldest first. The
+    /// client drains them once per tick and applies them live (render distance, sound volumes, ...).
+    pub option_changes: Vec<(String, String)>,
 }
 
 impl Default for GameState {
@@ -243,6 +246,7 @@ impl Default for GameState {
             day_time: 0,
             outgoing: Vec::new(),
             disconnect_requested: false,
+            option_changes: Vec::new(),
         }
     }
 }
@@ -286,6 +290,11 @@ impl GameState {
     /// Drains the serverbound packets vanilla code sent (VarInt id + body each).
     pub fn take_outgoing(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.outgoing)
+    }
+    /// Drains the option changes vanilla screens made (options.txt key/value pairs each), the
+    /// way `haste.gui.OptionBridge` reported them.
+    pub fn take_option_changes(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.option_changes)
     }
 }
 

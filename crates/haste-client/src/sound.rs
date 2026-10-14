@@ -405,9 +405,9 @@ pub struct Sounds {
     unknown_logged: HashSet<String>,
 }
 
-/// The saved per-category volumes onto the system (vanilla's `soundCategory_*` option
-/// keys), each scaled by the master volume.
-fn apply_volumes(system: &mut SoundSystem, volumes: &haste_setup::options::SoundVolumes) {
+    /// The saved per-category volumes onto the system (vanilla's `soundCategory_*` option
+    /// keys), each scaled by the master volume.
+    fn apply_volumes(system: &mut SoundSystem, volumes: &haste_setup::options::SoundVolumes) {
     let v = volumes;
     system.set_volume(SoundSource::Master, v.master);
     system.set_volume(SoundSource::Music, v.music);
@@ -450,6 +450,12 @@ impl Sounds {
             music_event: None,
             unknown_logged: HashSet::new(),
         }
+    }
+
+    /// Re-applies the per-category volumes live, the moment the player moves a sound slider
+    /// (vanilla's `SoundEngine.refreshCategoryVolume` for every `soundCategory_*` option).
+    pub fn set_volumes(&mut self, volumes: &haste_setup::options::SoundVolumes) {
+        apply_volumes(&mut self.system, volumes);
     }
 
     /// Plays the requests this tick's packets recorded. `entity_pos` resolves a

@@ -202,6 +202,102 @@ impl Options {
         self
     }
 
+    /// Applies one vanilla `options.txt` entry (`key:value`) to `options.txt`'s own fields.
+    /// Returns whether the key is one haste uses. Malformed values leave the field
+    /// untouched, like vanilla's load skipping them.
+    pub fn apply_one(&mut self, key: &str, value: &str) -> bool {
+        match key {
+            "renderDistance" => {
+                if let Ok(v) = value.parse::<u8>() {
+                    self.render_distance = v;
+                }
+                true
+            }
+            "simulationDistance" => {
+                if let Ok(v) = value.parse::<u8>() {
+                    self.simulation_distance = v;
+                }
+                true
+            }
+            "fov" => {
+                if let Ok(v) = value.parse::<f32>() {
+                    // vanilla's option value is degrees (30..=110, "Normal" 70); options.txt
+                    // stores the normalized slider 0.0..=1.0 that 26.3 maps to 70°..110°
+                    // (`Codec.DOUBLE.xmap(v -> v * 40 + 70, ...)`, `Options.fov`).
+                    self.fov = if v <= 1.0 { 70.0 + v * 40.0 } else { v } as u8;
+                }
+                true
+            }
+            "mouseSensitivity" => {
+                if let Ok(v) = value.parse::<f32>() {
+                    self.mouse_sensitivity = v;
+                }
+                true
+            }
+            "guiScale" => {
+                if let Ok(v) = value.parse::<u8>() {
+                    self.gui_scale = v;
+                }
+                true
+            }
+            "fullscreen" => {
+                if let Ok(v) = value.parse::<bool>() {
+                    self.fullscreen = v;
+                }
+                true
+            }
+            "vsync" | "enableVsync" => {
+                if let Ok(v) = value.parse::<bool>() {
+                    self.vsync = v;
+                }
+                true
+            }
+            // framerateLimit is the current name, maxFps the pre-1.20.5 one.
+            "framerateLimit" | "maxFps" => {
+                if let Ok(v) = value.parse::<u32>() {
+                    self.max_fps = v;
+                }
+                true
+            }
+            _ => {
+                if let Some(action) = key.strip_prefix("soundCategory_") {
+                    let volume = match value.parse::<f32>() {
+                        Ok(v) => v.clamp(0.0, 1.0),
+                        Err(_) => return true,
+                    };
+                    match action {
+                        "master" => self.sound.master = volume,
+                        "music" => self.sound.music = volume,
+                        "record" => self.sound.record = volume,
+                        "weather" => self.sound.weather = volume,
+                        "block" => self.sound.block = volume,
+                        "hostile" => self.sound.hostile = volume,
+                        "neutral" => self.sound.neutral = volume,
+                        "player" => self.sound.player = volume,
+                        "ambient" => self.sound.ambient = volume,
+                        "voice" => self.sound.voice = volume,
+                        "ui" => self.sound.ui = volume,
+                        _ => {}
+                    }
+                    true
+                } else if let Some(action) = key.strip_prefix("key_key.") {
+                    // Normalize vanilla's playerList casing to haste's key.playerlist.
+                    let action = if action == "playerList" {
+                        "playerlist"
+                    } else {
+                        action
+                    };
+                    self.keys
+                        .bindings
+                        .insert(format!("key.{action}"), value.to_owned());
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
     /// Parses a vanilla `options.txt` (`key:value` lines) into `Options`, starting from
     /// defaults. Keys haste does not use are ignored; malformed lines are skipped rather
     /// than failing the import; values are clamped via [`Options::sanitized`]. Keybind
@@ -216,84 +312,7 @@ impl Options {
             let Some((key, value)) = line.split_once(':') else {
                 continue;
             };
-            match key {
-                "renderDistance" => {
-                    if let Ok(v) = value.parse::<u8>() {
-                        opts.render_distance = v;
-                    }
-                }
-                "simulationDistance" => {
-                    if let Ok(v) = value.parse::<u8>() {
-                        opts.simulation_distance = v;
-                    }
-                }
-                "fov" => {
-                    if let Ok(v) = value.parse::<f32>() {
-                        // Older vanilla stores a normalized 0.0..1.0 slider position
-                        // (30°..110°, "Normal" 70° at 0.5); newer stores degrees.
-                        opts.fov = if v <= 1.0 { 30.0 + v * 80.0 } else { v } as u8;
-                    }
-                }
-                "mouseSensitivity" => {
-                    if let Ok(v) = value.parse::<f32>() {
-                        opts.mouse_sensitivity = v;
-                    }
-                }
-                "guiScale" => {
-                    if let Ok(v) = value.parse::<u8>() {
-                        opts.gui_scale = v;
-                    }
-                }
-                "fullscreen" => {
-                    if let Ok(v) = value.parse::<bool>() {
-                        opts.fullscreen = v;
-                    }
-                }
-                "vsync" => {
-                    if let Ok(v) = value.parse::<bool>() {
-                        opts.vsync = v;
-                    }
-                }
-                // framerateLimit is the current name, maxFps the pre-1.20.5 one.
-                "framerateLimit" | "maxFps" => {
-                    if let Ok(v) = value.parse::<u32>() {
-                        opts.max_fps = v;
-                    }
-                }
-                _ => {
-                    if let Some(action) = key.strip_prefix("soundCategory_") {
-                        let volume = match value.parse::<f32>() {
-                            Ok(v) => v.clamp(0.0, 1.0),
-                            Err(_) => continue,
-                        };
-                        let sound = &mut opts.sound;
-                        match action {
-                            "master" => sound.master = volume,
-                            "music" => sound.music = volume,
-                            "record" => sound.record = volume,
-                            "weather" => sound.weather = volume,
-                            "block" => sound.block = volume,
-                            "hostile" => sound.hostile = volume,
-                            "neutral" => sound.neutral = volume,
-                            "player" => sound.player = volume,
-                            "ambient" => sound.ambient = volume,
-                            "voice" => sound.voice = volume,
-                            "ui" => sound.ui = volume,
-                            _ => {}
-                        }
-                    } else if let Some(action) = key.strip_prefix("key_key.") {
-                        // Normalize vanilla's playerList casing to haste's key.playerlist.
-                        let action = if action == "playerList" {
-                            "playerlist"
-                        } else {
-                            action
-                        };
-                        opts.keys
-                            .bindings
-                            .insert(format!("key.{action}"), value.to_owned());
-                    }
-                }
-            }
+            opts.apply_one(key, value);
         }
         opts.sanitized()
     }
@@ -421,6 +440,35 @@ fov = 70.0
     }
 
     #[test]
+    fn apply_one_maps_vanilla_keys_live() {
+        // The option bridge reports vanilla's own keys; apply_one is the single mapping
+        // both the options.txt import and the live bridge go through.
+        let mut opts = Options::default();
+        assert!(opts.apply_one("fov", "0.75"));
+        assert_eq!(opts.fov, 100);
+        assert!(opts.apply_one("fov", "90"));
+        assert_eq!(opts.fov, 90);
+        assert!(opts.apply_one("renderDistance", "14"));
+        assert_eq!(opts.render_distance, 14);
+        assert!(opts.apply_one("mouseSensitivity", "0.25"));
+        assert!((opts.mouse_sensitivity - 0.25).abs() < 1e-6);
+        assert!(opts.apply_one("soundCategory_master", "0.8"));
+        assert!((opts.sound.master - 0.8).abs() < 1e-6);
+        assert!(opts.apply_one("enableVsync", "false"));
+        assert!(!opts.vsync);
+        assert!(opts.apply_one("key_key.forward", "key.keyboard.up"));
+        assert_eq!(opts.keys.get("key.forward"), Some("key.keyboard.up"));
+        assert!(opts.apply_one("key_key.playerList", "key.keyboard.n"));
+        assert_eq!(opts.keys.get("key.playerlist"), Some("key.keyboard.n"));
+        // Unknown keys are ignored, not fatal.
+        assert!(!opts.apply_one("gamma", "1.0"));
+        assert!(!opts.apply_one("skipMultiplayerWarning", "true"));
+        // Malformed values leave the field untouched.
+        assert!(opts.apply_one("renderDistance", "abc"));
+        assert_eq!(opts.render_distance, 14);
+    }
+
+    #[test]
     fn imports_vanilla_options_txt() {
         let text = "\
 version:4574
@@ -445,7 +493,7 @@ skipMultiplayerWarning:true
         let opts = Options::import_vanilla(text);
         assert_eq!(opts.render_distance, 8);
         assert_eq!(opts.simulation_distance, 6);
-        assert_eq!(opts.fov, 90);
+        assert_eq!(opts.fov, 100);
         assert_eq!(opts.mouse_sensitivity, 0.25);
         assert_eq!(opts.gui_scale, 2);
         assert!(!opts.fullscreen);

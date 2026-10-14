@@ -75,6 +75,10 @@ struct Methods {
     blend_debug: jni::objects::JMethodID,
     mouse_grabbed: jni::objects::JMethodID,
     set_mouse_grabbed: jni::objects::JMethodID,
+    game_key: jni::objects::JMethodID,
+    game_mouse: jni::objects::JMethodID,
+    game_input: jni::objects::JMethodID,
+    consume_clicks: jni::objects::JMethodID,
 }
 
 /// Drives real vanilla screens through the bridge. All calls are serialised (the Java side is
@@ -128,6 +132,14 @@ impl GuiPipeline {
                 jni_str!("setMouseGrabbed"),
                 jni_sig!("(Z)V"),
             )?,
+            game_key: env.get_method_id(&cls, jni_str!("gameKey"), jni_sig!("(IZ)V"))?,
+            game_mouse: env.get_method_id(&cls, jni_str!("gameMouse"), jni_sig!("(IZ)V"))?,
+            game_input: env.get_method_id(&cls, jni_str!("gameInput"), jni_sig!("()I"))?,
+            consume_clicks: env.get_method_id(
+                &cls,
+                jni_str!("consumeClicks"),
+                jni_sig!("()I"),
+            )?,
         };
         Ok(GuiPipeline {
             bridge,
@@ -167,7 +179,16 @@ impl GuiPipeline {
 
     fn failed(&self, what: &str, e: JvmError) {
         tracing::warn!("GuiPipeline::{what}: {e}");
-        *self.last_error.lock() = Some(format!("{what}: {e}"));
+    }
+
+    fn call_int(&self, what: &str, method: jni::objects::JMethodID, args: &[jvalue]) -> i32 {
+        match self.call(method, JavaType::Primitive(Primitive::Int), args, |_, v| Ok(v.i()?)) {
+            Ok(i) => i,
+            Err(e) => {
+                self.failed(what, e);
+                0
+            }
+        }
     }
 
     /// The last error swallowed by a method that cannot return one (input, close, tick), if any.
@@ -287,6 +308,45 @@ impl GuiPipeline {
         ) {
             self.failed("set_mouse_grabbed", e);
         }
+    }
+
+    /// A game key event (no screen open) mirrored into the vanilla `KeyMapping`s, vanilla's
+    /// `KeyboardHandler.keyPress`: press sets the down state and counts a click, release clears it.
+    /// `scancode` is the SDL3 scancode the key mappings match.
+    pub fn game_key(&self, scancode: i32, pressed: bool) {
+        if let Err(e) = self.call(
+            self.m.game_key,
+            VOID,
+            &[jvalue { i: scancode }, jvalue { z: pressed }],
+            |_, _| Ok(()),
+        ) {
+            self.failed("game_key", e);
+        }
+    }
+
+    /// A game mouse button (no screen open, vanilla numbering 1 left / 2 middle / 3 right)
+    /// mirrored into the vanilla `KeyMapping`s, vanilla's `MouseHandler.onPress`.
+    pub fn game_mouse(&self, button: i32, pressed: bool) {
+        if let Err(e) = self.call(
+            self.m.game_mouse,
+            VOID,
+            &[jvalue { i: button }, jvalue { z: pressed }],
+            |_, _| Ok(()),
+        ) {
+            self.failed("game_mouse", e);
+        }
+    }
+
+    /// The down state of the movement and action `KeyMapping`s as a bitmask (the bit values are
+    /// `haste.gui.OptionBridge.B_*`, mirrored in [`crate::keys`]'s callers).
+    pub fn game_input(&self) -> i32 {
+        self.call_int("game_input", self.m.game_input, &[])
+    }
+
+    /// Consumes the clicks of the action `KeyMapping`s (hotbar, drop, swap offhand, jump) as a
+    /// bitmask (the `haste.gui.OptionBridge.C_*` bits), one bit per click since the last call.
+    pub fn consume_clicks(&self) -> i32 {
+        self.call_int("consume_clicks", self.m.consume_clicks, &[])
     }
 
     /// One 20 Hz client tick (call from the game thread's tick, like vanilla): the HUD's timers

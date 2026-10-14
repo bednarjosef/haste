@@ -170,6 +170,7 @@ impl Session {
             net::new_entity_store(entity_types),
             view_distance,
             haste_render::default_skin(login.profile.uuid.as_u128()),
+            options.clone(),
         ));
         if sounds.is_some() {
             *shared.sound.lock() = sounds;
@@ -754,7 +755,11 @@ impl InputRouter {
             self.keys.remove(&code);
             return true;
         }
-        if pressed && !repeat {
+        // The game's own keyboard actions. Once the JVM is up the controls come from the vanilla
+        // `KeyMapping`s instead (mirrored in `Ui::key`, read in `sample`), so these raw
+        // `KeyCode` bindings are the fallback for the seconds before the JVM starts (or when it
+        // failed): a rebind in the controls screen then changes what the keys do.
+        if pressed && !repeat && ui.is_none() {
             match code {
                 KeyCode::Escape => {
                     // Not consumed by the UI (no screen): vanilla's Escape has no game
@@ -883,10 +888,14 @@ impl InputRouter {
     }
 
     /// Copy the sampled state into the shared input the game thread reads each tick, and
-    /// consume the press-only actions.
-    fn sample(&mut self, shared: &Shared) {
+    /// consume the press-only actions. With a `Ui` (the JVM is up) the movement and action
+    /// controls come from the vanilla `KeyMapping`s (`Ui::game_input`/`consume_clicks`), so a
+    /// rebind in the controls screen changes what the keys do, exactly like vanilla; without
+    /// one (the JVM still starting, or failed) the raw `KeyCode`s are the fallback.
+    fn sample(&mut self, shared: &Shared, ui: Option<&crate::ui::Ui>) {
+        use crate::ui::bits;
         let k = |c: KeyCode| self.keys.contains(&c);
-        let state = InputState {
+        let mut state = InputState {
             forward: k(KeyCode::KeyW),
             back: k(KeyCode::KeyS),
             left: k(KeyCode::KeyA),
@@ -897,19 +906,47 @@ impl InputRouter {
             yaw: self.yaw,
             pitch: self.pitch,
         };
+        if let Some(ui) = ui {
+            let b = ui.game_input();
+            state.forward = b & bits::B_FORWARD != 0;
+            state.back = b & bits::B_BACK != 0;
+            state.left = b & bits::B_LEFT != 0;
+            state.right = b & bits::B_RIGHT != 0;
+            state.jump = b & bits::B_JUMP != 0;
+            state.sneak = b & bits::B_SNEAK != 0;
+            state.sprint = b & bits::B_SPRINT != 0;
+        }
         let mut shared_input = shared.input.lock();
         shared_input.state = state;
-        shared_input.toggle_flight |= std::mem::take(&mut self.toggle_flight);
-        let i = &mut shared_input.interact;
-        i.attack = self.attack;
-        i.use_item = self.use_item;
-        i.pick_block |= std::mem::take(&mut self.pick_block);
-        i.drop_item |= std::mem::take(&mut self.drop_item);
-        i.drop_stack |= std::mem::take(&mut self.drop_stack);
-        i.swap_offhand |= std::mem::take(&mut self.swap_offhand);
-        if let Some(slot) = self.hotbar.take() {
-            i.hotbar = Some(slot);
+        {
+            let i = &mut shared_input.interact;
+            i.attack = self.attack;
+            i.use_item = self.use_item;
+            i.pick_block |= std::mem::take(&mut self.pick_block);
+            if let Some(ui) = ui {
+                // The action mappings' clicks (hotbar, drop, swap, jump), consumed once per
+                // frame and handed to the game thread through the shared input.
+                let c = ui.consume_clicks();
+                for slot in 0..9 {
+                    if c & (bits::C_HOTBAR_0 << slot) != 0 {
+                        i.hotbar = Some(slot as u8);
+                    }
+                }
+                i.drop_item |= c & bits::C_DROP != 0;
+                i.swap_offhand |= c & bits::C_SWAP_OFFHAND != 0;
+                if c & bits::C_JUMP != 0 {
+                    self.jump_pressed(Instant::now());
+                }
+            }
+            i.drop_item |= std::mem::take(&mut self.drop_item);
+            i.drop_stack |= std::mem::take(&mut self.drop_stack);
+            i.swap_offhand |= std::mem::take(&mut self.swap_offhand);
+            if let Some(slot) = self.hotbar.take() {
+                i.hotbar = Some(slot);
+            }
         }
+        // After the jump clicks above, so a double tap seen here reaches the game this frame.
+        shared_input.toggle_flight |= std::mem::take(&mut self.toggle_flight);
     }
 }
 
@@ -1136,6 +1173,10 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut runner = script::Runner::new(steps);
     let session = Session::join(args, false)?;
     let shared = session.shared.clone();
+    // The live options, refreshed when a vanilla screen changed one (the options bridge): FOV
+    // and GUI scale follow the change within a frame, like the windowed client.
+    let mut options = session.options.clone();
+    let mut options_version = shared.options_version.load(Ordering::Relaxed);
     let mut assets = open_assets()?;
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
@@ -1164,6 +1205,12 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         // actions write it) plus the server's rotation offset, like the window.
         let mut view = *shared.view.lock();
         let look = (input.yaw, input.pitch);
+        // Pick up a live option change (the options bridge) within a frame.
+        let version = shared.options_version.load(Ordering::Relaxed);
+        if version != options_version {
+            options_version = version;
+            options = shared.live_options.lock().clone();
+        }
         // One game tick's actions whenever it is time (`wait_until settled` uses the same
         // quiet test as the screenshot mode, plus the HUD's JVM being up or known-failed: a
         // script's keys go to the UI, so pressing them before it exists would lose them).
@@ -1224,7 +1271,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 }
             }
             // The actions may have changed what the game thread sees this tick.
-            input.sample(&shared);
+            input.sample(&shared, ui.as_ref());
             view = *shared.view.lock();
         }
         if shared.is_closed() {
@@ -1240,7 +1287,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             game::Perspective::FirstPerson,
             look.0,
             look.1,
-            session.options.fov as f32,
+            options.fov as f32,
             Instant::now(),
         );
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
@@ -1255,7 +1302,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         }
         if let Some(u) = &mut ui {
             let scale = resolve_gui_scale(
-                u32::from(session.options.gui_scale),
+                u32::from(options.gui_scale),
                 args.width,
                 args.height,
             );
@@ -1712,9 +1759,12 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
     let mut app = App {
         shared: session.shared.clone(),
         biomes: session.biomes.clone(),
-        // The flag wins over the saved option; without it, the saved option decides.
+        // The flag wins over the saved option; without it, the saved option decides (and a
+        // change in the options screen applies live, like vanilla's Vsync option).
         vsync: args.vsync.unwrap_or(session.options.vsync),
+        vsync_forced: args.vsync,
         options: session.options.clone(),
+        options_version: session.shared.options_version.load(Ordering::Relaxed),
         local: session.local,
         perspective: game::Perspective::default(),
         window: None,
@@ -1750,8 +1800,14 @@ struct App {
     shared: Arc<Shared>,
     biomes: Vec<haste_render::BiomeClimate>,
     vsync: bool,
-    /// Saved options (FOV for rendering, sensitivity for mouse look).
+    /// `--vsync` forced the mode: a change in the options screen must not override it.
+    vsync_forced: Option<bool>,
+    /// The options the game is running with: refreshed from [`Shared::live_options`] whenever
+    /// its version changes (not every frame), so a change in a vanilla options screen takes
+    /// effect immediately (FOV, GUI scale, mouse sensitivity, fullscreen, vsync).
     options: Options,
+    /// The `Shared::options_version` [`App::options`] was copied from.
+    options_version: u64,
     /// The local player's entity id and UUID, for its own model in third person.
     local: (EntityId, u128),
     /// Current perspective (F5 cycles it).
@@ -1856,7 +1912,7 @@ impl App {
 
     fn release_keys(&mut self) {
         self.input.release();
-        self.input.sample(&self.shared);
+        self.input.sample(&self.shared, self.ui.as_ref());
     }
 
     /// Mouse look speed from the saved sensitivity.
@@ -1868,7 +1924,30 @@ impl App {
         if self.renderer.is_none() {
             return;
         }
-        self.input.sample(&self.shared);
+        // The options the player just changed in a vanilla screen: the game thread applied
+        // them to `live_options` and bumped its version; copy them here so FOV, GUI scale and
+        // sensitivity follow this frame (vanilla reads its Options object live too).
+        let version = self.shared.options_version.load(Ordering::Relaxed);
+        if version != self.options_version {
+            self.options_version = version;
+            self.options = self.shared.live_options.lock().clone();
+            // The two options the window itself owns (vanilla's Fullscreen/Vsync callbacks touch
+            // the window and the swapchain): apply them to this client's window and renderer.
+            if let Some(w) = &self.window {
+                let want = self.options.fullscreen;
+                if w.fullscreen().is_some() != want {
+                    w.set_fullscreen(want.then_some(Fullscreen::Borderless(None)));
+                }
+            }
+            let want_vsync = self.vsync_forced.unwrap_or(self.options.vsync);
+            if want_vsync != self.vsync {
+                self.vsync = want_vsync;
+                if let Some(r) = &mut self.renderer {
+                    r.set_vsync(want_vsync);
+                }
+            }
+        }
+        self.input.sample(&self.shared, self.ui.as_ref());
         // The screen that opened or closed since the last frame takes or frees the cursor,
         // and "Disconnect" ends the run.
         self.sync_grab();
