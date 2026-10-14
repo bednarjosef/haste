@@ -7,6 +7,8 @@
 //! - [`connection`]: [`Connection`] (resolve, handshake, login, configuration,
 //!   play task with channels), [`ping`] (server list ping).
 //! - [`auth`]: encryption handshake helpers and the Mojang session join.
+//! - [`chat`]: signed chat (online mode): sessions, message signing,
+//!   last-seen acknowledgement tracking.
 //! - [`packets`]: packet ids from `packets.json` ([`PacketIds`]) and one struct
 //!   per packet, grouped by state and direction.
 //! - [`metadata`]: entity metadata into `haste_core::entity::MetadataEntry`.
@@ -17,6 +19,7 @@
 //!   from Pumpkin (GPL-3.0).
 
 pub mod auth;
+pub mod chat;
 pub mod connection;
 pub mod metadata;
 pub mod nbt;
@@ -29,6 +32,7 @@ pub mod wire;
 pub use haste_core;
 
 pub use auth::MsaTokens;
+pub use chat::{ChatSigner, LastSeenMessages, MessageSignature};
 pub use connection::{
     ping, resource_pack_status, Account, ConnectOptions, Connection, CookieJar, Login,
     ProtocolError, ResourcePackPolicy, ServerStatus, StatsSnapshot, SyncedRegistries,

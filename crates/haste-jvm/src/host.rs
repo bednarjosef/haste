@@ -420,6 +420,10 @@ fn boot_config(cfg: &JvmConfig) -> String {
     for d in loader::DENY {
         kv("deny", d);
     }
+    for r in loader::REPLACEMENTS {
+        // internal names in the policy list, binary names on the wire
+        kv("replacement", &r.replace('/', "."));
+    }
     s
 }
 
@@ -433,7 +437,10 @@ fn build_java(cfg: &JvmConfig) -> Result<bool> {
     // game classes compile against the boot classes and the client jar
     let game_stamp = format!(
         "{}\n{boot_stamp}",
-        source_stamp(&[java.join("gui")], &[&script, &cfg.client_jar])
+        source_stamp(
+            &[java.join("gui"), java.join("replace")],
+            &[&script, &cfg.client_jar,]
+        )
     );
     let built_game = build_one(cfg, "game", &game_stamp)?;
     Ok(built_boot || built_game)

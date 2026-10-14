@@ -64,6 +64,10 @@ pub trait BlockStateTable {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    /// The placeholder state for ids outside the table: vanilla has no "missing block",
+    /// so tables resolve out-of-range ids (modded servers) to this — haste-data uses
+    /// `minecraft:stone`'s default state. Every lookup by state id must be total.
+    fn placeholder_state(&self) -> BlockStateId;
     fn block_of(&self, state: BlockStateId) -> &crate::Identifier;
     /// Property name/value pairs, sorted by name (owned: implementations intern names and values).
     /// Startup/baking use only; hot paths use `property_value`.

@@ -7,8 +7,9 @@ pub type Argb = u32;
 
 /// How a texture is blended over what is already there. Vanilla's GUI pipelines choose one per
 /// draw call; almost everything is `Normal` alpha blending, but the vignette multiplies (only
-/// darkens the edges, src ZERO / dst ONE_MINUS_SRC_COLOR) and the crosshair inverts the colour
-/// behind it (src ONE_MINUS_DST_COLOR / dst ONE_MINUS_SRC_COLOR).
+/// darkens the edges, src ZERO / dst ONE_MINUS_SRC_COLOR), the crosshair inverts the colour
+/// behind it (src ONE_MINUS_DST_COLOR / dst ONE_MINUS_SRC_COLOR) and the text selection highlight
+/// adds to what is already there (src ONE / dst ONE).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GuiBlend {
     /// Vanilla's `gui_textured`: straight alpha blending.
@@ -18,6 +19,8 @@ pub enum GuiBlend {
     Multiply,
     /// Vanilla's `crosshair`: the source inverts the colour behind it.
     Invert,
+    /// Vanilla's `gui_text_highlight`: the source is added over the destination (brightens).
+    Additive,
 }
 
 #[derive(Clone, Debug, PartialEq)]

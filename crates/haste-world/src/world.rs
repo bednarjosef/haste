@@ -1,6 +1,5 @@
 //! The world: chunk map, block get/set, light, dirty tracking, section snapshots.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use haste_core::chunk::{BlockEntityData, ChunkData};
@@ -17,9 +16,14 @@ pub struct World {
     dim: DimensionInfo,
     data: Arc<GameData>,
     chunks: ahash::HashMap<i64, Chunk>,
-    /// Sections needing remesh (set_block and light updates mark them).
-    dirty: Vec<SectionPos>,
-    dirty_dedup: HashSet<SectionPos>,
+    /// Chunk keys (packed positions) with at least one dirty section, in mark order.
+    /// A key can appear twice (a chunk replaced while dirty); the second drain reads
+    /// bits that were already cleared.
+    dirty_chunks: Vec<i64>,
+    /// Sections marked dirty whose chunk is not loaded (a `set_block`/`apply_light` on a
+    /// border block can reach into a neighbour chunk that has not arrived yet). Rare, so
+    /// they live in a plain list that is deduplicated on drain instead of in a hash set.
+    dirty_unloaded: Vec<SectionPos>,
     /// Bits for direct-encoded block containers: ceil(log2(state count)), min 4.
     direct_bits: u8,
     /// Bits for direct-encoded biome containers: ceil(log2(synced biome registry size)).
@@ -43,13 +47,15 @@ impl World {
     ) -> World {
         let biome_bits = ceil_log2(biome_registry_len);
         let states = data.blocks.len();
+        // Local table width only: matching a modded server's wider bit width needs registry
+        // sync (a Phase 2 task), not a bigger local table.
         let direct_bits = (u32::BITS - (states as u32).leading_zeros()).max(4) as u8;
         World {
             dim,
             data,
             chunks: ahash::HashMap::with_hasher(ahash::RandomState::default()),
-            dirty: Vec::new(),
-            dirty_dedup: HashSet::new(),
+            dirty_chunks: Vec::new(),
+            dirty_unloaded: Vec::new(),
             direct_bits,
             biome_bits,
         }
@@ -71,35 +77,28 @@ impl World {
     /// Loads (or replaces) a chunk from `level_chunk_with_light` payload.
     pub fn load_chunk(&mut self, data: &ChunkData) -> Result<(), WorldError> {
         let section_count = self.dim.section_count();
-        let chunk = Chunk::decode(
+        let mut chunk = Chunk::decode(
             data,
             self.dim.min_section(),
             section_count,
             self.direct_bits,
             self.biome_bits,
+            self.data.blocks.len() as u32,
         )
         .map_err(WorldError::Palette)?;
-        self.chunks.insert(data.pos.to_packed(), chunk);
+        let key = data.pos.to_packed();
+        chunk.mark_all_dirty();
+        self.chunks.insert(key, chunk);
+        self.dirty_chunks.push(key);
         // a new chunk dirties all its sections and the borders of its neighbours,
         // including the diagonal chunks (their corner columns sample the new chunk)
-        for sy in 0..section_count as i32 {
-            self.mark_dirty(SectionPos::new(
-                data.pos.x,
-                self.dim.min_section() + sy,
-                data.pos.z,
-            ));
-        }
         for dx in -1..=1 {
             for dz in -1..=1 {
                 if dx == 0 && dz == 0 {
                     continue;
                 }
                 let n = ChunkPos::new(data.pos.x + dx, data.pos.z + dz);
-                if self.chunks.contains_key(&n.to_packed()) {
-                    for sy in 0..section_count as i32 {
-                        self.mark_dirty(SectionPos::new(n.x, self.dim.min_section() + sy, n.z));
-                    }
-                }
+                self.mark_chunk_all_dirty(n);
             }
         }
         Ok(())
@@ -115,11 +114,18 @@ impl World {
                     continue;
                 }
                 let n = ChunkPos::new(pos.x + dx, pos.z + dz);
-                if self.chunks.contains_key(&n.to_packed()) {
-                    for sy in 0..self.dim.section_count() as i32 {
-                        self.mark_dirty(SectionPos::new(n.x, self.dim.min_section() + sy, n.z));
-                    }
-                }
+                self.mark_chunk_all_dirty(n);
+            }
+        }
+    }
+
+    /// Marks every section of the loaded chunk at `pos` dirty (no-op for an unloaded
+    /// chunk: nothing of it can be meshed anyway).
+    fn mark_chunk_all_dirty(&mut self, pos: ChunkPos) {
+        let key = pos.to_packed();
+        if let Some(chunk) = self.chunks.get_mut(&key) {
+            if chunk.mark_all_dirty() {
+                self.dirty_chunks.push(key);
             }
         }
     }
@@ -340,9 +346,18 @@ impl World {
         }))
     }
 
+    /// Marks one section dirty. A section whose chunk is not loaded goes to the
+    /// world's unloaded list instead (a `set_block` on a border block reaches into a
+    /// neighbour chunk that may not have arrived yet).
     fn mark_dirty(&mut self, pos: SectionPos) {
-        if self.dirty_dedup.insert(pos) {
-            self.dirty.push(pos);
+        let key = pos.chunk().to_packed();
+        if let Some(chunk) = self.chunks.get_mut(&key) {
+            let idx = pos.y - chunk.min_section;
+            if idx >= 0 && chunk.mark_dirty(idx as usize) {
+                self.dirty_chunks.push(key);
+            }
+        } else {
+            self.dirty_unloaded.push(pos);
         }
     }
 
@@ -413,8 +428,18 @@ impl BlockView for World {
 
 impl DirtyTracker for World {
     fn take_dirty_sections(&mut self) -> Vec<SectionPos> {
-        self.dirty_dedup.clear();
-        std::mem::take(&mut self.dirty)
+        let mut out = std::mem::take(&mut self.dirty_unloaded);
+        if out.len() > 1 {
+            // the same unloaded section can be marked repeatedly before a drain
+            out.sort_unstable_by_key(|p| (p.x, p.y, p.z));
+            out.dedup_by_key(|p| (p.x, p.y, p.z));
+        }
+        for key in self.dirty_chunks.drain(..) {
+            if let Some(chunk) = self.chunks.get_mut(&key) {
+                chunk.take_dirty(&mut out);
+            }
+        }
+        out
     }
 }
 

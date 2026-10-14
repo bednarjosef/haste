@@ -283,13 +283,14 @@ pub enum SoundSource { Master, Music, Record, Weather, Block, Hostile, Neutral, 
 impl SourceVolumes { pub fn get(&self, source: SoundSource) -> f32; pub fn set(&mut self, source: SoundSource, volume: f32); pub fn effective(&self, source: SoundSource) -> f32 }   // master * source
 impl SilentEngine {   // Default
     pub fn new() -> Self;
-    pub fn play(&mut self, variant: &SoundVariant, source: SoundSource, pos: Option<DVec3>, volume: f32, pitch: f32);   // pos None = global, centred
+    pub fn play(&mut self, variant: &SoundVariant, source: SoundSource, pos: Option<DVec3>, volume: f32, pitch: f32, event: Arc<str>);   // pos None = global, centred; event = the sound event it plays
     pub fn set_listener(&mut self, pos: DVec3, yaw_deg: f32);   // vanilla yaw: 0 = +Z, clockwise from above
     pub fn set_volume(&mut self, source: SoundSource, volume: f32);
-    pub fn stop(&mut self, source: Option<SoundSource>, path: Option<&str>);   // None on an axis matches everything
+    pub fn stop(&mut self, source: Option<SoundSource>, event: Option<&str>);   // by sound event name (namespace optional), None on an axis matches everything (vanilla SoundEngine.stop)
     pub fn remove(&mut self, index: usize);                    // for finished sounds, like Vec::remove
     pub fn tick(&mut self);                                    // recomputes gains from the listener and volumes
-    pub fn playing(&self) -> usize; pub fn gains(&self) -> impl Iterator<Item = (f32, f32)>; pub fn pitches(&self) -> impl Iterator<Item = f32>   // in play order
+    pub fn playing(&self) -> usize; pub fn playing_in(&self, source: SoundSource) -> usize; pub fn is_event_playing(&self, event: &str) -> bool;
+    pub fn gains(&self) -> impl Iterator<Item = (f32, f32)>; pub fn pitches(&self) -> impl Iterator<Item = f32>   // in play order
 }
 // spatial.rs: pure math.
 pub fn attenuation(distance: f64, volume: f32, attenuation_distance: u32) -> f32;   // linear falloff to 0 at distance * max(volume, 1)
@@ -298,16 +299,16 @@ pub fn stereo_gains(gain: f32, pan: f32) -> (f32, f32);                         
 pub fn clamp_pitch(p: f32) -> f32;                                                   // 0.5..=2.0
 // output.rs: the device and its decode worker, plus the engine + assets facade.
 pub struct AudioOutput { .. }   // no channel = silent fallback, logged once; `open` never fails
-impl AudioOutput { pub fn open() -> AudioOutput; pub fn is_live(&self) -> bool }
+impl AudioOutput { pub fn open() -> AudioOutput; pub fn silent() -> AudioOutput; pub fn is_live(&self) -> bool }   // silent: never opens a device (tests)
 impl SoundSystem {
     pub fn new(events: SoundEvents, assets: haste_assets::Assets) -> Self;   // opens the default device, or stays silent
     pub fn with_output(events: SoundEvents, assets: haste_assets::Assets, output: AudioOutput) -> Self;
     pub fn play(&mut self, event: &str, source: SoundSource, pos: Option<DVec3>, volume: f32, pitch: f32, seed: i64);   // unknown event = nothing
-    pub fn play_variant(&mut self, variant: &SoundVariant, source: SoundSource, pos: Option<DVec3>, volume: f32, pitch: f32);
-    pub fn stop(&mut self, source: Option<SoundSource>, path: Option<&str>);
+    pub fn play_variant(&mut self, variant: &SoundVariant, source: SoundSource, pos: Option<DVec3>, volume: f32, pitch: f32, event: &str);   // event names interned once
+    pub fn stop(&mut self, source: Option<SoundSource>, event: Option<&str>);   // like SilentEngine::stop
     pub fn set_listener(&mut self, pos: DVec3, yaw_deg: f32); pub fn set_volume(&mut self, source: SoundSource, volume: f32);
     pub fn tick(&mut self);                                                   // 20 Hz, no allocation when nothing started
-    pub fn playing(&self) -> usize;
+    pub fn playing(&self) -> usize; pub fn playing_in(&self, source: SoundSource) -> usize; pub fn is_event_playing(&self, event: &str) -> bool;
 }
 // music.rs: decides when background music plays, owns no output.
 pub enum MusicSituation { Menu, Game, Creative, UnderWater, End, Dragon, Credits, Biome { event: String, min_delay: u32, max_delay: u32, replace: bool } }

@@ -177,6 +177,44 @@ impl<R: AsyncRead + Unpin> TcpNetworkDecoder<R> {
         Ok(())
     }
 
+    /// Reads and discards whatever the current frame still holds: the reads in
+    /// [`Self::get_raw_packet`] stop as soon as the packet's declared contents
+    /// are there, so a compressed frame can leave bytes unread (a zlib decoder
+    /// produces its last output byte before reading the checksum trailer that
+    /// follows it). Left in the socket, they would be decoded as the next
+    /// frame's length VarInt. Vanilla's `Varint21FrameDecoder` hands the
+    /// compression step exactly the frame's bytes, so it never has this gap.
+    async fn consume_rest_of_frame<S: AsyncRead + Unpin>(
+        reader: &mut DecompressionReader<S>,
+    ) -> Result<(), PacketDecodeError> {
+        use tokio::io::AsyncReadExt;
+        let mut discard = [0u8; 1024];
+        loop {
+            let n = reader
+                .read(&mut discard)
+                .await
+                .map_err(|err| PacketDecodeError::FailedDecompression(err.to_string()))?;
+            if n == 0 {
+                break;
+            }
+        }
+        // The zlib decoder stops at the end of its stream, so bytes the frame
+        // holds after it have not been read from the socket either.
+        if let DecompressionReader::Decompress(zlib) = reader {
+            loop {
+                let n = zlib
+                    .get_mut()
+                    .read(&mut discard)
+                    .await
+                    .map_err(|err| PacketDecodeError::FailedDecompression(err.to_string()))?;
+                if n == 0 {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub async fn get_raw_packet(&mut self) -> Result<RawPacket, PacketDecodeError> {
         let reader = self
             .reader
@@ -198,8 +236,9 @@ impl<R: AsyncRead + Unpin> TcpNetworkDecoder<R> {
         let mut expected_uncompressed_packet_data_len = None;
 
         let mut reader = if let Some(threshold) = self.compression {
-            let decompressed_length = VarInt::decode_async(&mut bounded_reader).await?;
-            let raw_packet_length = packet_len - decompressed_length.written_size() as u64;
+            let (decompressed_length, decompressed_length_size) =
+                VarInt::decode_async_sized(&mut bounded_reader).await?;
+            let raw_packet_length = packet_len - decompressed_length_size as u64;
             let decompressed_length = decompressed_length.0 as usize;
 
             if !(0..=MAX_PACKET_DATA_SIZE).contains(&decompressed_length) {
@@ -227,11 +266,9 @@ impl<R: AsyncRead + Unpin> TcpNetworkDecoder<R> {
             DecompressionReader::None(bounded_reader)
         };
 
-        let packet_id = VarInt::decode_async(&mut reader)
+        let (packet_id, packet_id_len) = VarInt::decode_async_sized(&mut reader)
             .await
-            .map_err(|_| PacketDecodeError::DecodeID)?
-            .0;
-        let packet_id_len = VarInt(packet_id).written_size();
+            .map_err(|_| PacketDecodeError::DecodeID)?;
 
         let payload_len_hint = expected_packet_data_len.saturating_sub(packet_id_len);
         self.payload_scratch.clear();
@@ -249,6 +286,17 @@ impl<R: AsyncRead + Unpin> TcpNetworkDecoder<R> {
             total_read += bytes_read;
         }
 
+        // A frame must be consumed whole: the reads above stop as soon as the
+        // declared contents are there, and a zlib decoder hands out its last
+        // output byte before it has read the frame's remaining bytes (the zlib
+        // checksum trailer, and anything a server appends after it). Those
+        // bytes would then be read as the next frame's length VarInt and the
+        // stream would desynchronise ("failed to decode packet ID", or a
+        // bogus VarInt while reading the next frame's data length). Vanilla's
+        // frame decoder hands the compression step exactly the frame's bytes,
+        // so the tail is always consumed there too.
+        Self::consume_rest_of_frame(&mut reader).await?;
+
         if let Some(expected_uncompressed_packet_data_len) = expected_uncompressed_packet_data_len {
             let decoded_packet_data_len = packet_id_len + self.payload_scratch.len();
             if decoded_packet_data_len != expected_uncompressed_packet_data_len {
@@ -264,7 +312,7 @@ impl<R: AsyncRead + Unpin> TcpNetworkDecoder<R> {
             .freeze();
 
         Ok(RawPacket {
-            id: packet_id,
+            id: packet_id.0,
             payload,
         })
     }
@@ -929,6 +977,212 @@ mod tests {
         let raw = decoder.get_raw_packet().await.unwrap();
         assert_eq!(raw.id, 7);
         assert!(raw.payload.is_empty());
+    }
+
+    /// A reader that hands out a fixed byte stream in randomly sized pieces,
+    /// like TCP would. Deterministic (LCG) so failures reproduce.
+    struct ChunkedReader {
+        data: Vec<u8>,
+        pos: usize,
+        rng: u64,
+        max_chunk: usize,
+    }
+
+    impl ChunkedReader {
+        fn new(data: Vec<u8>, seed: u64, max_chunk: usize) -> Self {
+            Self {
+                data,
+                pos: 0,
+                rng: seed | 1,
+                max_chunk,
+            }
+        }
+
+        fn next_chunk(&mut self) -> usize {
+            // xorshift64*, mapped into 1..=max_chunk (also likes tiny reads).
+            let mut x = self.rng;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.rng = x;
+            let spread = x.wrapping_mul(0x2545_F491_4F6C_DD1D) % self.max_chunk as u64;
+            let n = spread as usize + 1;
+            // Every eighth read is tiny, to split varints across reads.
+            if self.rng.is_multiple_of(8) {
+                1
+            } else {
+                n
+            }
+        }
+    }
+
+    impl tokio::io::AsyncRead for ChunkedReader {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if self.pos >= self.data.len() {
+                return std::task::Poll::Ready(Ok(()));
+            }
+            let n = self.next_chunk().min(self.data.len() - self.pos);
+            let n = n.min(buf.remaining());
+            let start = self.pos;
+            self.pos += n;
+            buf.put_slice(&self.data[start..start + n]);
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Builds one frame (optionally compressed when the body reaches the
+    /// threshold) exactly as a vanilla server does.
+    fn frame(body: &[u8], threshold: usize) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut inner = Vec::new();
+        if body.len() >= threshold {
+            let compressed = compress_zlib(body)?;
+            VarInt(body.len() as i32).encode(&mut inner)?;
+            inner.extend_from_slice(&compressed);
+        } else {
+            VarInt(0).encode(&mut inner)?;
+            inner.extend_from_slice(body);
+        }
+        let mut out = Vec::new();
+        VarInt(inner.len() as i32).encode(&mut out)?;
+        out.extend_from_slice(&inner);
+        Ok(out)
+    }
+
+    /// One body as id + payload (what the decoder must return).
+    fn body(packet_id: i32, payload: &[u8]) -> Bytes {
+        let mut v = Vec::new();
+        VarInt(packet_id).encode(&mut v).unwrap();
+        v.extend_from_slice(payload);
+        v.into()
+    }
+
+    /// A reader that hands out a fixed byte stream in blocks, but forces one
+    /// read boundary at `split_at`: the read that would cross it stops there
+    /// and the rest follows in the next read. This is how TCP splits a frame.
+    struct SplitReader {
+        data: Vec<u8>,
+        pos: usize,
+        split_at: usize,
+        block: usize,
+    }
+
+    impl SplitReader {
+        fn new(data: Vec<u8>, split_at: usize, block: usize) -> Self {
+            Self {
+                data,
+                pos: 0,
+                split_at,
+                block,
+            }
+        }
+    }
+
+    impl tokio::io::AsyncRead for SplitReader {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if self.pos >= self.data.len() {
+                return std::task::Poll::Ready(Ok(()));
+            }
+            let mut n = self.block.min(self.data.len() - self.pos);
+            if self.pos < self.split_at {
+                n = n.min(self.split_at - self.pos);
+            }
+            let n = n.min(buf.remaining());
+            let start = self.pos;
+            self.pos += n;
+            buf.put_slice(&self.data[start..start + n]);
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// A compressed frame ends with the zlib checksum trailer. The decoder
+    /// stops reading once it has the packet's bytes, so a read that ends
+    /// between the deflate data and the trailer must not leave the trailer
+    /// for the next frame's length VarInt to be decoded from.
+    #[tokio::test]
+    async fn compressed_frame_trailer_is_consumed_before_the_next_frame(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const THRESHOLD: usize = 256;
+        let payload: Vec<u8> = (0..2_000u32).map(|i| (i % 251) as u8).collect();
+        let mut wire = frame(&body(9, &payload), THRESHOLD)?;
+        let trailer_start = wire.len() - 4;
+        // A small frame after it: if the trailer is left unread, its length
+        // VarInt is decoded from trailer bytes.
+        wire.extend_from_slice(&frame(&body(10, b"tail"), THRESHOLD)?);
+
+        let mut decoder = TcpNetworkDecoder::new(SplitReader::new(wire, trailer_start, 8192));
+        decoder.set_compression(THRESHOLD);
+        let p = decoder.get_raw_packet().await?;
+        assert_eq!(p.id, 9);
+        assert_eq!(&p.payload[..], &payload[..]);
+        let p = decoder.get_raw_packet().await?;
+        assert_eq!(p.id, 10);
+        assert_eq!(&p.payload[..], b"tail");
+        Ok(())
+    }
+
+    /// Every frame in a burst of mixed sizes must come out identical, whatever
+    /// sizes the stream is handed to the decoder in.
+    #[tokio::test]
+    async fn decodes_burst_of_mixed_frames_in_random_read_sizes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const THRESHOLD: usize = 256;
+        // Sizes around the compression threshold and around read-buffer
+        // boundaries, like chunk sections and small packets during a join.
+        let sizes = [
+            0usize, 1, 5, 100, 255, 256, 257, 300, 1_000, 4_000, 8_191, 8_192, 8_193, 16_384,
+            40_000, 150_000, 300_000,
+        ];
+        let mut expected: Vec<(i32, Bytes)> = Vec::new();
+        let mut wire = Vec::new();
+        let mut id = 1;
+        for pass in 0..3 {
+            for &size in &sizes {
+                let mut payload = Vec::with_capacity(size);
+                for i in 0..size {
+                    // Both compressible and incompressible stretches.
+                    payload.push(if pass == 0 {
+                        b'a'
+                    } else {
+                        (i.wrapping_mul(2_654_435_761) >> 13) as u8
+                    });
+                }
+                let p = if id < 0 { id - 1 } else { id + 1 };
+                id = p;
+                let b = body(p, &payload);
+                wire.extend_from_slice(&frame(&b, THRESHOLD)?);
+                expected.push((p, payload.clone().into()));
+            }
+        }
+
+        for seed in [1u64, 7, 42, 1234, 999_999] {
+            for max_chunk in [1usize, 2, 3, 5, 64, 8_192, 64 * 1_024] {
+                let reader = ChunkedReader::new(wire.clone(), seed, max_chunk);
+                let mut decoder = TcpNetworkDecoder::new(reader);
+                decoder.set_compression(THRESHOLD);
+                for (idx, (want_id, want_body)) in expected.iter().enumerate() {
+                    let raw = decoder.get_raw_packet().await.unwrap_or_else(|e| {
+                        panic!("seed {seed} chunk {max_chunk} frame {idx} (id {want_id}): {e}")
+                    });
+                    assert_eq!(raw.id, *want_id, "seed {seed} chunk {max_chunk}");
+                    assert_eq!(&raw.payload, want_body, "seed {seed} chunk {max_chunk}");
+                }
+                // Nothing left: the next read must hit clean EOF.
+                let end = decoder.get_raw_packet().await;
+                assert!(
+                    end.is_err(),
+                    "seed {seed} chunk {max_chunk}: stream not exhausted"
+                );
+            }
+        }
+        Ok(())
     }
 
     #[tokio::test]
