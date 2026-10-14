@@ -648,8 +648,12 @@ impl EntityStore {
                 (crate::models::humanoid(false), true)
             } else {
                 // Registry table first (shared per type, head flag precomputed), then the box.
+                // Babies use the row's baby layer, like vanilla's AgeableMobRenderer.submit.
+                let baby = crate::registry::entity_type_name(slot.kind)
+                    .filter(|_| crate::registry::is_baby(&slot.metadata))
+                    .and_then(|n| crate::registry::baby_model_for_name(&n));
                 match crate::registry::model_entry(slot.kind) {
-                    Some((head, m)) => (m, head),
+                    Some((head, m)) => (baby.unwrap_or(m), head),
                     None => (
                         crate::models::box_for(slot.dimensions.0, slot.dimensions.1),
                         false,
