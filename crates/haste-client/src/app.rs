@@ -472,6 +472,7 @@ impl Session {
             );
             entities.set_mob_variants(&registry, table);
         }
+        entities.set_item_components(data.item_components.clone());
         let shared = Arc::new(Shared::new(
             data,
             world,

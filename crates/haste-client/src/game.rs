@@ -218,6 +218,9 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
             / crate::net::HURT_TILT_TICKS as f32),
         item: None,
         decoration: None,
+        hands: [None, None],
+        equipment: Vec::new(),
+        head_item: None,
     }
 }
 
