@@ -6,6 +6,7 @@
 //! older layouts differ). Anything a specific entity class adds is stored raw and interpreted
 //! later by whoever needs it.
 use haste_core::entity::{MetadataEntry, MetadataValue, Pose};
+use haste_core::Component;
 
 /// The shared flags byte (metadata index 0).
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
@@ -59,6 +60,8 @@ pub struct Metadata {
     pub pose: Option<Pose>,
     /// The `Mob` flags byte (index 15): aggressive / left-handed.
     pub mob: MobFlags,
+    /// `Entity.DATA_CUSTOM_NAME` (index 2): the entity's custom name, for the upside-down check.
+    pub custom_name: Option<Component>,
     /// All entries (including the shared ones), kept so later consumers can read the rest.
     entries: std::vec::Vec<MetadataEntry>,
 }
@@ -75,6 +78,7 @@ impl Metadata {
         for e in entries {
             match (e.index, &e.value) {
                 (0, MetadataValue::Byte(b)) => self.shared = SharedFlags::from_byte(*b),
+                (2, MetadataValue::OptionalComponent(c)) => self.custom_name = c.clone(),
                 (6, MetadataValue::Pose(p)) => self.pose = Some(*p),
                 (15, MetadataValue::Byte(b)) => self.mob = MobFlags::from_byte(*b),
                 _ => {}

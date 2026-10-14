@@ -14,7 +14,7 @@
 //! parent's rotation, exactly like vanilla's part tree.
 use haste_core::entity::Pose;
 use haste_core::math::Vec3;
-use haste_core::model::{CubeModel, ModelPart, PoseOverrides};
+use haste_core::model::{BodyOp, BodyTransform, CubeModel, ModelPart, PoseOverrides};
 
 use crate::store::{wrap_degrees, Entity};
 
@@ -123,7 +123,16 @@ pub(crate) fn setup_anim(
 ) -> PoseOverrides {
     let mut o = PoseOverrides::default();
     let body_yaw = e.body_yaw_at(partial);
-    let head_rel = wrap_degrees(e.head_yaw_at(partial) - body_yaw);
+    let mut head_rel = wrap_degrees(e.head_yaw_at(partial) - body_yaw);
+    // `LivingEntityRenderer.extractRenderState`: an upside-down entity (Dinnerbone/Grumm) has its
+    // look pitch and head yaw negated before any model setup runs.
+    let upside = is_upside_down(e);
+    let mut pitch = e.pitch;
+    if upside {
+        pitch = -pitch;
+        head_rel = -head_rel;
+    }
+    let pitch = pitch.to_radians();
     let walk_pos = e.walk.position(partial);
     let walk_speed = e.walk.speed(partial);
     let swing = e.swing.animation(partial);
@@ -131,16 +140,16 @@ pub(crate) fn setup_anim(
 
     match model_kind(model) {
         ModelKind::Humanoid => {
-            humanoid(&mut o, e, partial, walk_pos, walk_speed, swing, age, is_passenger, false);
-            push_head(&mut o, e, head_rel, partial, true);
+            humanoid(&mut o, e, pitch, partial, walk_pos, walk_speed, swing, age, is_passenger, false);
+            push_head(&mut o, e, pitch, head_rel, partial, true);
         }
         ModelKind::Zombie => {
-            humanoid(&mut o, e, partial, walk_pos, walk_speed, swing, age, is_passenger, true);
-            push_head(&mut o, e, head_rel, partial, true);
+            humanoid(&mut o, e, pitch, partial, walk_pos, walk_speed, swing, age, is_passenger, true);
+            push_head(&mut o, e, pitch, head_rel, partial, true);
         }
         ModelKind::Skeleton => {
-            humanoid(&mut o, e, partial, walk_pos, walk_speed, swing, age, is_passenger, false);
-            push_head(&mut o, e, head_rel, partial, true);
+            humanoid(&mut o, e, pitch, partial, walk_pos, walk_speed, swing, age, is_passenger, false);
+            push_head(&mut o, e, pitch, head_rel, partial, true);
             // `SkeletonModel.setupAnim` (26.3 client): an aggressive skeleton not holding a bow
             // raises both arms straight ahead, overriding the humanoid walk swing. The
             // `!isHoldingBow` half needs the main-hand item, which this crate does not resolve
@@ -151,26 +160,127 @@ pub(crate) fn setup_anim(
         }
         ModelKind::Quadruped => {
             quadruped(&mut o, walk_pos, walk_speed);
-            push_head(&mut o, e, head_rel, partial, false);
+            push_head(&mut o, e, pitch, head_rel, partial, false);
         }
         ModelKind::Spider => {
             spider(&mut o, walk_pos, walk_speed);
-            push_head(&mut o, e, head_rel, partial, false);
+            push_head(&mut o, e, pitch, head_rel, partial, false);
         }
         ModelKind::Chicken => chicken(&mut o, e, partial, walk_pos, walk_speed),
         ModelKind::None => {
             if has_head {
-                push_head(&mut o, e, head_rel, partial, false);
+                push_head(&mut o, e, pitch, head_rel, partial, false);
             }
         }
     }
     o
 }
 
-/// The head aim: `state.xRot` (look pitch, degrees) and `state.yRot` (head yaw relative to the
+/// `LivingEntityRenderer.isEntityUpsideDown` / `AvatarRenderer.isEntityUpsideDown`: a mob named
+/// `Dinnerbone` or `Grumm` (custom name) is drawn upside down; a player uses its profile name
+/// (the cape is shown by default, so the check is not gated on the model part here).
+fn is_upside_down(e: &Entity) -> bool {
+    if e.is_player_type {
+        e.nametag.as_deref().is_some_and(is_upside_down_name)
+    } else {
+        e.metadata
+            .custom_name
+            .as_ref()
+            .map(|c| c.to_plain(&|_| None))
+            .is_some_and(|s| is_upside_down_name(&s))
+    }
+}
+
+/// `LivingEntityRenderer.isUpsideDownName`.
+fn is_upside_down_name(name: &str) -> bool {
+    name == "Dinnerbone" || name == "Grumm"
+}
+
+/// `LivingEntityRenderer.extractRenderState`: `deathTime = entity.deathTime + partialTicks`
+/// (`entity.deathTime` is 0 until the first death tick, then counts up; here it is derived from
+/// the 20-tick death counter).
+fn death_time(e: &Entity, partial: f32) -> f32 {
+    if !e.dead {
+        return 0.0;
+    }
+    let ticks = crate::store::DEATH_TICKS.saturating_sub(e.hurt_ticks) as f32;
+    if ticks > 0.0 {
+        ticks + partial
+    } else {
+        0.0
+    }
+}
+
+/// `AvatarRenderState.fallFlyingScale`: `clamp(fallFlyingTimeInTicks^2 / 100, 0, 1)`.
+fn fall_flying_scale(ticks: u32) -> f32 {
+    let t = ticks as f32;
+    (t * t / 100.0).clamp(0.0, 1.0)
+}
+
+/// `LivingEntityRenderer.setupRotations` plus `AvatarRenderer.setupRotations` (players only):
+/// the whole-model rotations the renderer applies between the body yaw and the model scale
+/// (death tilt, sleeping, upside-down, and the player flying/swimming pitch).
+pub(crate) fn body_transform(e: &Entity, partial: f32) -> BodyTransform {
+    let mut b = BodyTransform::default();
+    let age = e.tick_count as f32 + partial;
+    // `extractRenderState` negates the look pitch for an upside-down entity.
+    let x_rot = if is_upside_down(e) { -e.pitch } else { e.pitch };
+
+    let death = death_time(e, partial);
+    if death > 0.0 {
+        // `fall = (deathTime - 1) / 20 * 1.6`, `sqrt`, clamp 1, rotate Z by `fall * 90`.
+        let mut fall = (death - 1.0) / 20.0 * 1.6;
+        fall = fall.sqrt().min(1.0);
+        b.push(BodyOp::RotateZ((fall * 90.0).to_radians()));
+    } else if e.pose == Pose::SpinAttack {
+        b.push(BodyOp::RotateX((-90.0 - x_rot).to_radians()));
+        b.push(BodyOp::RotateY((age * -75.0).to_radians()));
+    } else if e.pose == Pose::Sleeping {
+        // The bed orientation is not tracked: vanilla falls back to `bodyRot` when it is null and
+        // skips the bed head offset, which is what this branch does.
+        b.suppress_yaw = true;
+        b.push(BodyOp::RotateY(e.body_yaw_at(partial).to_radians()));
+        b.push(BodyOp::RotateZ(90.0f32.to_radians()));
+        b.push(BodyOp::RotateY(270.0f32.to_radians()));
+    } else if is_upside_down(e) {
+        // `translate(0, (boundingBoxHeight + 0.1) / scale, 0)`, then rotate Z 180.
+        b.push(BodyOp::Translate(Vec3::new(
+            0.0,
+            e.dimensions.1 + 0.1,
+            0.0,
+        )));
+        b.push(BodyOp::RotateZ(PI));
+    }
+
+    // `AvatarRenderer.setupRotations` (players only), applied after the base rotations above.
+    if e.is_player_type {
+        if e.metadata.shared.elytra_flying {
+            let scale = fall_flying_scale(e.fall_flying_ticks);
+            if e.pose != Pose::SpinAttack {
+                b.push(BodyOp::RotateX((scale * (-90.0 - x_rot)).to_radians()));
+            }
+        } else {
+            let swim = lerp(partial, e.swim_amount_o, e.swim_amount);
+            if swim > 0.0 {
+                let target = if e.pose == Pose::Swimming {
+                    -90.0 - x_rot
+                } else {
+                    -90.0
+                };
+                b.push(BodyOp::RotateX((swim * target).to_radians()));
+                if e.pose == Pose::Swimming {
+                    b.push(BodyOp::Translate(Vec3::new(0.0, -1.0, 0.3)));
+                }
+            }
+        }
+    }
+    b
+}
+
+/// The head aim: `state.xRot` (look pitch, radians) and `state.yRot` (head yaw relative to the
 /// body). `humanoid` adds the fall-flying/swimming head tip (`HumanoidModel.setupAnim`).
-fn push_head(o: &mut PoseOverrides, e: &Entity, head_rel: f32, partial: f32, humanoid: bool) {
-    let mut head = Vec3::new(e.pitch.to_radians(), head_rel.to_radians(), 0.0);
+fn push_head(o: &mut PoseOverrides, e: &Entity, pitch: f32, head_rel: f32, partial: f32, humanoid: bool) {
+    let mut head = Vec3::new(pitch, head_rel.to_radians(), 0.0);
     if humanoid {
         head.x = head_x_rot(e, head.x, partial);
     }
@@ -194,6 +304,7 @@ fn head_x_rot(e: &Entity, mut x: f32, partial: f32) -> f32 {
 fn humanoid(
     o: &mut PoseOverrides,
     e: &Entity,
+    pitch: f32,
     partial: f32,
     walk_pos: f32,
     walk_speed: f32,
@@ -202,7 +313,6 @@ fn humanoid(
     is_passenger: bool,
     zombie: bool,
 ) {
-    let pitch = e.pitch.to_radians();
     // Walk swing (`cos(animationPos * 0.6662) * 2 * speed * 0.5` for arms, `* 1.4` for legs).
     let mut ra = Vec3::new((walk_pos * 0.6662 + PI).cos() * walk_speed, 0.0, 0.0);
     let mut la = Vec3::new((walk_pos * 0.6662).cos() * walk_speed, 0.0, 0.0);

@@ -20,7 +20,7 @@ use haste_protocol::haste_core::chunk::{BlockEntityData, ChunkData, LightData};
 use haste_protocol::haste_core::game::{DimensionInfo, GameMode, TICK_SECONDS};
 use haste_protocol::haste_core::input::{InputState, InteractInput};
 use haste_protocol::haste_core::math::Vec3;
-use haste_protocol::haste_core::model::{EntityInstance, PoseOverrides};
+use haste_protocol::haste_core::model::{BodyTransform, EntityInstance, PoseOverrides};
 use haste_protocol::haste_core::view::{BlockView, CollisionShapes, DirtyTracker};
 use haste_protocol::haste_core::{
     BlockPos, BlockStateId, ChunkPos, Direction, EntityId, Identifier, RegistryIndex, SectionPos,
@@ -206,6 +206,7 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
         head_yaw: yaw,
         scale: 1.0,
         pose,
+        body: BodyTransform::default(),
         // The skin servers send for other players is not synced for ourselves; the renderer's
         // default skin for our UUID is what vanilla shows without a downloaded skin.
         skin: Some(haste_render::default_skin(uuid).0),

@@ -214,6 +214,9 @@ pub struct Entity {
     /// Smoothed swimming amount (`LivingEntity.swimAmount` / `swimAmountO`), 0..1.
     pub swim_amount: f32,
     pub swim_amount_o: f32,
+    /// `LivingEntity.fallFlyTicks`: increments each tick while the fall-flying flag is set
+    /// (`LivingEntity.tick`), driving `AvatarRenderState.fallFlyingScale`.
+    pub fall_flying_ticks: u32,
     /// Ticks since spawn (`Entity.tickCount`), for `ageInTicks`.
     pub tick_count: u64,
     /// Chicken wing flap state (`Chicken.flap` / `oFlap` / `flapSpeed` / `oFlapSpeed`).
@@ -257,6 +260,7 @@ impl Entity {
             swing: SwingState::default(),
             swim_amount: 0.0,
             swim_amount_o: 0.0,
+            fall_flying_ticks: 0,
             tick_count: 0,
             flap: 0.0,
             o_flap: 0.0,
@@ -590,6 +594,12 @@ impl EntityStore {
             slot.flap += slot.flapping * 2.0;
             slot.swing.tick();
             slot.hurt_ticks = slot.hurt_ticks.saturating_sub(1);
+            // `LivingEntity.tick`: fallFlyTicks counts while the fall-flying flag is set.
+            if slot.metadata.shared.elytra_flying {
+                slot.fall_flying_ticks = slot.fall_flying_ticks.saturating_add(1);
+            } else {
+                slot.fall_flying_ticks = 0;
+            }
         }
     }
 
@@ -656,6 +666,7 @@ impl EntityStore {
             let is_passenger = self.riding.vehicle_of(slot.id).is_some();
             let pose =
                 crate::animation::setup_anim(slot, &model, has_head, partial_tick, is_passenger);
+            let body = crate::animation::body_transform(slot, partial_tick);
             // Living models turn with their body yaw; a non-living box follows its packet yaw.
             let yaw = if has_head {
                 slot.body_yaw_at(partial_tick)
@@ -671,6 +682,7 @@ impl EntityStore {
                 head_yaw: slot.head_yaw,
                 scale: 1.0,
                 pose,
+                body,
                 skin: None,
                 nametag: slot.nametag.clone(),
                 hurt: hurt_strength(slot),

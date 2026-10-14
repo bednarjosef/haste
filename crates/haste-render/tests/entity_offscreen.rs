@@ -3,7 +3,8 @@
 //! Needs the client jar, the datagen reports and a Vulkan driver (source scripts/env.sh).
 
 use haste_core::model::{
-    Decoration, EntityInstance, ItemFrameDecoration, PaintingDecoration, PoseOverrides,
+    BodyTransform, Decoration, EntityInstance, ItemFrameDecoration, PaintingDecoration,
+    PoseOverrides,
 };
 use haste_core::{BlockPos, BlockStateId, ChunkPos, Direction, EntityId, Identifier, SectionPos};
 use haste_render::{Camera, FrameInput, Renderer, SkyState};
@@ -151,6 +152,7 @@ fn entities_offscreen() {
         head_yaw: 180.0,
         scale: 1.0,
         pose: walk,
+        body: BodyTransform::default(),
         skin: Some(skin.clone()),
         nametag: Some("Steve".into()),
         hurt: 0.0,
@@ -165,6 +167,7 @@ fn entities_offscreen() {
         head_yaw: 30.0,
         scale: 1.0,
         pose: PoseOverrides::default(),
+        body: BodyTransform::default(),
         skin: None,
         nametag: None,
         hurt: 0.0,
@@ -321,6 +324,7 @@ fn decoration(id: i32, pos: glam::DVec3, decoration: Decoration) -> EntityInstan
         head_yaw: 0.0,
         scale: 1.0,
         pose: PoseOverrides::default(),
+        body: BodyTransform::default(),
         skin: None,
         nametag: None,
         hurt: 0.0,

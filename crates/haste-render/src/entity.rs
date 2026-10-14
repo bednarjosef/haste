@@ -9,8 +9,8 @@ use std::sync::Arc;
 use glam::{Mat3, Mat4, Vec3};
 use haste_assets::Assets;
 use haste_core::model::{
-    CubeModel, Decoration, EntityInstance, ItemFrameDecoration, ModelPart, PaintingDecoration,
-    PoseOverrides,
+    BodyOp, BodyTransform, CubeModel, Decoration, EntityInstance, ItemFrameDecoration, ModelPart,
+    PaintingDecoration, PoseOverrides,
 };
 use haste_core::{EntityId, Identifier};
 
@@ -73,6 +73,21 @@ pub(crate) fn texture_and_scale(e: &EntityInstance) -> (Identifier, f32) {
         (None, false) => e.model.texture.clone(),
     };
     (texture, e.scale * if humanoid { PLAYER_SCALE } else { 1.0 })
+}
+
+/// The whole-model transform `LivingEntityRenderer.setupRotations` builds: the ops compose left
+/// to right (`poseStack` calls), so the first op is outermost, exactly like vanilla.
+fn body_matrix(b: &BodyTransform) -> Mat4 {
+    let mut m = Mat4::IDENTITY;
+    for op in b.iter() {
+        m *= match op {
+            BodyOp::RotateX(a) => Mat4::from_rotation_x(*a),
+            BodyOp::RotateY(a) => Mat4::from_rotation_y(*a),
+            BodyOp::RotateZ(a) => Mat4::from_rotation_z(*a),
+            BodyOp::Translate(t) => Mat4::from_translation(*t),
+        };
+    }
+    m
 }
 
 /// A per-tick value the renderer lerps by partial tick, the way a vanilla render state
@@ -390,8 +405,19 @@ impl EntityRenderer {
             let (texture, scale) = texture_and_scale(e);
             let rect = self.texture_rect(&texture, assets);
             let light = lightmap(sky, block);
-            let root = Mat4::from_translation((e.pos - camera).as_vec3())
-                * Mat4::from_rotation_y((180.0 - e.yaw).to_radians())
+            // `LivingEntityRenderer.setupRotations`: the body yaw turns the whole model, except a
+            // sleeping entity, whose pose replaces that yaw with its own rotation sequence. The
+            // body transform (death tilt, sleeping, upside-down, player flying/swimming pitch) is
+            // applied between the yaw and the model scale.
+            let yaw = if e.body.suppress_yaw {
+                Mat4::IDENTITY
+            } else {
+                Mat4::from_rotation_y((180.0 - e.yaw).to_radians())
+            };
+            let origin = e.pos - camera + e.body.pre_translate.as_dvec3();
+            let root = Mat4::from_translation(origin.as_vec3())
+                * yaw
+                * body_matrix(&e.body)
                 * Mat4::from_scale(Vec3::new(-scale, -scale, scale) / 16.0);
             let start = self.vertices.len();
             emit_part(
@@ -1270,6 +1296,24 @@ fn placeholder_texture() -> image::RgbaImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `body_matrix` composes the ops left to right like `LivingEntityRenderer.setupRotations`
+    /// (`poseStack` calls): `rotateZ(90); translate(0, 2, 0)` maps the origin to (-2, 0, 0).
+    #[test]
+    fn body_matrix_applies_ops_in_vanilla_order() {
+        let mut b = BodyTransform::default();
+        b.push(BodyOp::RotateZ(std::f32::consts::FRAC_PI_2));
+        b.push(BodyOp::Translate(Vec3::new(0.0, 2.0, 0.0)));
+        let m = body_matrix(&b);
+        let p = m.transform_point3(Vec3::ZERO);
+        assert!((p.x - -2.0).abs() < 1e-5, "x {}", p.x);
+        assert!(p.y.abs() < 1e-5, "y {}", p.y);
+        // A single X rotation: (0, 1, 0) -> (0, 0, 1).
+        let mut b = BodyTransform::default();
+        b.push(BodyOp::RotateX(std::f32::consts::FRAC_PI_2));
+        let p = body_matrix(&b).transform_point3(Vec3::Y);
+        assert!((p.z - 1.0).abs() < 1e-5, "z {}", p.z);
+    }
 
     /// Every texture haste-entity's model table names must exist in the client jar (the
     /// renderer loads them on demand by identifier; a typo would draw the placeholder at
