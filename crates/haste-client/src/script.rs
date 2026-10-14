@@ -907,8 +907,14 @@ mod tests {
     fn mouse_down_and_mouse_up_are_single_actions() {
         let mut runner = Runner::new(parse("mouse_down left\nmouse_up left").unwrap());
         let state = ScriptState::default();
-        assert_eq!(runner.tick(&state), vec![Action::MouseDown(MouseButton::Left)]);
-        assert_eq!(runner.tick(&state), vec![Action::MouseUp(MouseButton::Left)]);
+        assert_eq!(
+            runner.tick(&state),
+            vec![Action::MouseDown(MouseButton::Left)]
+        );
+        assert_eq!(
+            runner.tick(&state),
+            vec![Action::MouseUp(MouseButton::Left)]
+        );
         assert_eq!(runner.tick(&state), vec![Action::Finished]);
     }
 

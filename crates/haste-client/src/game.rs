@@ -654,7 +654,10 @@ fn tick_once(
         if created {
             let backlog = driver.take_ui_backlog();
             if !backlog.is_empty() {
-                tracing::info!("HUD catching up on {} packets from the JVM boot", backlog.len());
+                tracing::info!(
+                    "HUD catching up on {} packets from the JVM boot",
+                    backlog.len()
+                );
                 if let Some(ui) = shared.ui.lock().as_ref() {
                     for p in backlog {
                         ui.handle(&p);
