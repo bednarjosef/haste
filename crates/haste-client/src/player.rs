@@ -264,6 +264,12 @@ impl LocalPlayer {
         self.attrs.eye_height_for(self.state.pose)
     }
 
+    /// Feet position at the start of this tick (the camera's walk distance is the
+    /// displacement from here to `state.pos`, vanilla's `move` delta).
+    pub fn prev_pos(&self) -> DVec3 {
+        self.prev_pos
+    }
+
     /// Eye position and look angles interpolated by partial tick, for the camera.
     pub fn camera(&self, partial_tick: f32) -> (DVec3, f32, f32) {
         let t = partial_tick.clamp(0.0, 1.0) as f64;

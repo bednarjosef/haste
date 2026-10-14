@@ -450,7 +450,7 @@ fn real_world_through_the_sink() {
 }
 
 #[test]
-fn hurt_animation_marks_and_tilts() {
+fn hurt_animation_marks_and_starts_the_hurt_ticks() {
     let mut r = Rig::new();
     // Another entity's hurt: marked, no camera tilt.
     r.apply(ClientboundPlay::HurtAnimation(cb::HurtAnimation {
@@ -458,52 +458,230 @@ fn hurt_animation_marks_and_tilts() {
         yaw: 0.0,
     }));
     assert!(r.entities.log.iter().any(|l| l == "hurt 42"));
-    assert_eq!(r.session.hurt_tilt_degrees(), 0.0);
-    // Our own hurt (session id 7): the tilt starts and eases out over 10 ticks.
+    assert_eq!(r.session.hurt_ticks, 0);
+    // Our own hurt (session id 7): the hurt time starts at 10 and counts down per tick.
     r.apply(ClientboundPlay::HurtAnimation(cb::HurtAnimation {
         entity_id: 7,
         yaw: 0.0,
     }));
-    assert_eq!(r.session.hurt_tilt_degrees().abs(), 14.0);
-    // 5 ticks in: (5/10)^2 of 14 degrees.
+    assert_eq!(r.session.hurt_ticks, 10);
     for _ in 0..5 {
         end_tick_once(&mut r);
     }
-    let half = r.session.hurt_tilt_degrees().abs();
-    assert!((half - 14.0 * 0.25).abs() < 1e-6, "{half}");
-    // 10 ticks in: gone.
+    assert_eq!(r.session.hurt_ticks, 5);
     for _ in 0..5 {
         end_tick_once(&mut r);
     }
-    assert_eq!(r.session.hurt_tilt_degrees(), 0.0);
-    // A second hurt restarts the tilt.
+    assert_eq!(r.session.hurt_ticks, 0);
+    // A second hurt restarts it.
     r.apply(ClientboundPlay::HurtAnimation(cb::HurtAnimation {
         entity_id: 7,
         yaw: 0.0,
     }));
-    assert_eq!(r.session.hurt_tilt_degrees().abs(), 14.0);
+    assert_eq!(r.session.hurt_ticks, 10);
 }
 
 #[test]
 fn hurt_tilt_direction_follows_the_damage_yaw() {
     let mut r = Rig::new();
-    // Damage from the player's right (yaw 90 degrees off our facing) rolls the other way
-    // than damage from the left.
-    r.session.player.state.yaw = 0.0;
+    // The packet's yaw is the roll axis direction, taken as-is (vanilla's hurtDir).
     r.apply(ClientboundPlay::HurtAnimation(cb::HurtAnimation {
         entity_id: 7,
         yaw: 90.0,
     }));
-    let right = r.session.hurt_tilt_degrees();
+    assert_eq!(r.session.hurt_dir, 90.0);
     let mut r2 = Rig::new();
-    r2.session.player.state.yaw = 0.0;
     r2.apply(ClientboundPlay::HurtAnimation(cb::HurtAnimation {
         entity_id: 7,
         yaw: -90.0,
     }));
-    let left = r2.session.hurt_tilt_degrees();
-    assert!(right * left < 0.0, "opposite rolls: {right} vs {left}");
-    assert!((right.abs() - 14.0).abs() < 1e-6);
+    assert_eq!(r2.session.hurt_dir, -90.0);
+}
+
+#[test]
+fn death_ticks_count_while_health_is_zero() {
+    let mut r = Rig::new();
+    r.apply(ClientboundPlay::SetHealth(cb::SetHealth {
+        health: 0.0,
+        food: 20,
+        saturation: 5.0,
+    }));
+    end_tick_once(&mut r);
+    assert_eq!(r.session.death_ticks, 1);
+    end_tick_once(&mut r);
+    assert_eq!(r.session.death_ticks, 2);
+    // Healing resets the counter.
+    r.apply(ClientboundPlay::SetHealth(cb::SetHealth {
+        health: 20.0,
+        food: 20,
+        saturation: 5.0,
+    }));
+    end_tick_once(&mut r);
+    assert_eq!(r.session.death_ticks, 0);
+}
+
+#[test]
+fn fov_modifier_target_matches_vanilla() {
+    use crate::net::UseItemKind as K;
+    // Walking: the attribute equals the walking speed.
+    assert_eq!(
+        fov_modifier_target(false, 0.1, 0.1, None, 0, false, 1.0),
+        1.0
+    );
+    // Sprinting: the attribute carries the x1.3 sprinting modifier.
+    assert_eq!(
+        fov_modifier_target(false, 0.13, 0.1, None, 0, false, 1.0),
+        1.15
+    );
+    // Flying: x1.1; sprint-flying compounds.
+    assert_eq!(
+        fov_modifier_target(true, 0.1, 0.1, None, 0, false, 1.0),
+        1.1
+    );
+    assert_eq!(
+        fov_modifier_target(true, 0.13, 0.1, None, 0, false, 1.0),
+        1.265
+    );
+    // The effect scale lerps between 1 and the modifier.
+    assert_eq!(
+        fov_modifier_target(false, 0.13, 0.1, None, 0, false, 0.5),
+        1.075
+    );
+    assert_eq!(
+        fov_modifier_target(false, 0.13, 0.1, None, 0, false, 0.0),
+        1.0
+    );
+    // A zero walking speed skips the speed factor (vanilla's guard).
+    assert_eq!(
+        fov_modifier_target(false, 0.13, 0.0, None, 0, false, 1.0),
+        1.0
+    );
+    // The bow draw: 1 - min(ticks/20, 1)^2 * 0.15.
+    assert!(
+        (fov_modifier_target(false, 0.1, 0.1, Some(K::Bow), 20, false, 1.0) - 0.85).abs() < 1e-6
+    );
+    assert!(
+        (fov_modifier_target(false, 0.1, 0.1, Some(K::Bow), 10, false, 1.0) - (1.0 - 0.25 * 0.15))
+            .abs()
+            < 1e-6
+    );
+    // The spyglass is a full 0.1 in first person, whatever the effect scale; in third
+    // person it does nothing.
+    assert_eq!(
+        fov_modifier_target(false, 0.1, 0.1, Some(K::Spyglass), 5, true, 1.0),
+        0.1
+    );
+    assert_eq!(
+        fov_modifier_target(false, 0.1, 0.1, Some(K::Spyglass), 5, true, 0.0),
+        0.1
+    );
+    assert_eq!(
+        fov_modifier_target(false, 0.1, 0.1, Some(K::Spyglass), 5, false, 1.0),
+        1.0
+    );
+}
+
+#[test]
+fn fov_modifier_smooths_by_half_a_tick_and_clamps() {
+    let mut r = Rig::new();
+    // From vanilla's initial 0: 0.5, 0.75, 0.875, ... towards the walking target of 1.
+    for want in [0.5, 0.75, 0.875] {
+        end_tick_once(&mut r);
+        assert!(
+            (r.session.fov_modifier - want).abs() < 1e-6,
+            "{}",
+            r.session.fov_modifier
+        );
+    }
+    // Sprinting (target 1.15) from 1.0: 1.075.
+    r.session.fov_modifier = 1.0;
+    r.session.old_fov_modifier = 1.0;
+    r.session.player.attrs.movement_speed = 0.13;
+    end_tick_once(&mut r);
+    assert!((r.session.fov_modifier - 1.075).abs() < 1e-6);
+    // The clamp holds the upper bound however large the target.
+    r.session.player.attrs.movement_speed = 100.0;
+    for _ in 0..50 {
+        end_tick_once(&mut r);
+    }
+    assert_eq!(r.session.fov_modifier, 1.5);
+    // A zero movement speed gives speedFactor 0, so the target is (0/0.1 + 1)/2 = 0.5, not 0:
+    // smoothing approaches 0.5 (the lower clamp 0.1 only matters for the spyglass target).
+    r.session.player.attrs.movement_speed = 0.0;
+    for _ in 0..50 {
+        end_tick_once(&mut r);
+    }
+    assert!(
+        (r.session.fov_modifier - 0.5).abs() < 1e-6,
+        "{}",
+        r.session.fov_modifier
+    );
+}
+
+#[test]
+fn bob_follows_horizontal_speed_on_the_ground_only() {
+    let mut r = Rig::new();
+    // On the ground moving at 0.05: the bob eases towards min(0.1, 0.05) by 0.4 per tick.
+    r.session.player.state.on_ground = true;
+    r.session.player.state.velocity = glam::DVec3::new(0.03, 0.0, 0.04);
+    end_tick_once(&mut r);
+    assert!((r.session.bob - 0.02).abs() < 1e-6, "{}", r.session.bob);
+    assert_eq!(r.session.bob_o, 0.0);
+    // In the air the target is 0.
+    r.session.player.state.on_ground = false;
+    end_tick_once(&mut r);
+    assert!((r.session.bob - 0.012).abs() < 1e-6, "{}", r.session.bob);
+    // Swimming also stops it.
+    r.session.player.state.on_ground = true;
+    r.session.player.state.swimming = true;
+    end_tick_once(&mut r);
+    assert!((r.session.bob - 0.0072).abs() < 1e-6, "{}", r.session.bob);
+}
+
+#[test]
+fn walk_distance_grows_by_sixtenths_of_the_tick_displacement() {
+    let mut r = Rig::new();
+    // The tick snapshots the start position into `prev_pos`; the camera step that follows the
+    // move (the game thread's order) sees the displacement. A tick in place adds nothing.
+    r.session.player.state.pos = glam::DVec3::new(3.0, 64.0, 0.0);
+    end_tick_once(&mut r);
+    assert_eq!(r.session.walk_dist, 0.0);
+    r.session.player.state.pos = glam::DVec3::new(6.0, 64.0, 0.0);
+    r.session.tick_camera(None, false);
+    assert!(
+        (r.session.walk_dist - 1.8).abs() < 1e-6,
+        "{}",
+        r.session.walk_dist
+    );
+    assert_eq!(r.session.walk_dist_o, 0.0);
+}
+
+#[test]
+fn use_ticks_count_the_held_draw_and_reset_on_release_or_item_change() {
+    let mut r = Rig::new();
+    use haste_core::input::InteractInput;
+    r.session.player.set_interact(InteractInput {
+        use_item: true,
+        ..Default::default()
+    });
+    r.session.player.int.hotbar[0].item = Some(RegistryIndex(3));
+    r.session.player.held_slot = 0;
+    end_tick_once(&mut r);
+    assert_eq!(r.session.use_ticks, 1);
+    end_tick_once(&mut r);
+    assert_eq!(r.session.use_ticks, 2);
+    // Releasing the button ends the draw.
+    r.session.player.set_interact(InteractInput::default());
+    end_tick_once(&mut r);
+    assert_eq!(r.session.use_ticks, 0);
+    // Holding again with a different item restarts it.
+    r.session.player.set_interact(InteractInput {
+        use_item: true,
+        ..Default::default()
+    });
+    r.session.player.int.hotbar[0].item = Some(RegistryIndex(4));
+    end_tick_once(&mut r);
+    assert_eq!(r.session.use_ticks, 1);
 }
 
 #[test]
@@ -524,7 +702,8 @@ fn damage_event_and_death_mark_entities() {
     assert!(r.entities.log.iter().any(|l| l == "dead 42"));
 }
 
-/// One session tick (the part of `NetDriver::end_tick` that lives in `Session`).
+/// One session tick: the driver's `end_tick` part that lives in `Session`, then the per-tick
+/// camera effects (`tick_camera`; the game thread's `tick_once` does the same two steps).
 fn end_tick_once(r: &mut Rig) {
     let mut out = Vec::new();
     let mut world = std::mem::take(&mut r.world);
@@ -535,6 +714,7 @@ fn end_tick_once(r: &mut Rig) {
         &entities,
         &mut out,
     );
+    r.session.tick_camera(None, false);
     r.world = world;
     r.entities = entities;
 }

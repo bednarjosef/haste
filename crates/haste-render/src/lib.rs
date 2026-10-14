@@ -24,7 +24,7 @@ pub use gui::{GuiRenderer, GuiStats, ScreenNametag};
 pub use mesher::{mesh_section, MeshSnapshot, Mesher, SectionMesh, SnapshotSource};
 pub use occlusion::{compute_visible_mask, section_visibility, Face, VisibilitySet};
 pub use pipeline::{upload_atlas, upload_section, Gpu, SectionGpuMesh};
-pub use renderer::{Camera, FrameInput, FrameStats, Renderer, SkyState};
+pub use renderer::{Camera, FrameInput, FrameStats, Renderer, SkyState, ViewBob};
 pub use sky::{SkyColors, SkyKind};
 pub use timing::FrameTimings;
 pub use tint::{BiomeClimate, BiomeColors, BiomeSource, Colormaps, GrassModifier};

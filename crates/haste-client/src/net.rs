@@ -19,7 +19,9 @@ use haste_entity::{EntityDimensions, EntityStore};
 use haste_protocol::haste_core::chunk::{BlockEntityData, ChunkData, LightData};
 use haste_protocol::haste_core::entity::{EntitySpawn, ItemStackData, MetadataEntry, PlayerInfo};
 use haste_protocol::haste_core::game::{DimensionInfo, GameMode};
-use haste_protocol::haste_core::{BlockPos, BlockStateId, ChunkPos, EntityId, Identifier};
+use haste_protocol::haste_core::{
+    BlockPos, BlockStateId, ChunkPos, EntityId, Identifier, RegistryIndex,
+};
 #[cfg(test)]
 use haste_protocol::packets::play::clientbound as cb;
 use haste_protocol::packets::play::clientbound::teleport_flags;
@@ -303,10 +305,30 @@ pub struct Session {
     /// nobody drains them (headless). Reused, so a tick without sound packets allocates
     /// nothing.
     pub sound_requests: Vec<crate::sound::SoundRequest>,
-    /// Ticks of hurt-tilt camera roll left (10 per hit on our own entity).
-    hurt_tilt_ticks: u32,
-    /// Direction of the tilt: +1 rolls one way, -1 the other (from the damage yaw).
-    hurt_tilt_dir: f32,
+    /// The `fovEffectScale` option this run uses (set by the window from its saved options;
+    /// the headless path leaves the vanilla default).
+    pub fov_effect_scale: f32,
+    /// The smoothed FOV modifier and its value one tick ago (vanilla's `Camera.fovModifier`
+    /// and `oldFovModifier`; both start at 0, so the FOV widens over the first ticks).
+    pub fov_modifier: f32,
+    pub old_fov_modifier: f32,
+    /// Walk distance and its value one tick ago (vanilla's `ClientAvatarState.walkDist` /
+    /// `walkDistO`), for the view bobbing.
+    pub walk_dist: f32,
+    pub walk_dist_o: f32,
+    /// The bob amount and its value one tick ago (vanilla's `ClientAvatarState.bob` / `bobO`).
+    pub bob: f32,
+    pub bob_o: f32,
+    /// Hurt ticks left (vanilla's `hurtTime`, 10 per hit) and the damage direction in degrees
+    /// (vanilla's `hurtDir`, the `hurt_animation` packet's yaw).
+    pub hurt_ticks: u32,
+    pub hurt_dir: f32,
+    /// Ticks since the local player died (vanilla's `deathTime`, 0 while alive).
+    pub death_ticks: u32,
+    /// Ticks the current use item has been held (vanilla's `getTicksUsingItem`), and the held
+    /// stack's item while it is drawn (a change of item restarts the draw).
+    pub use_ticks: u32,
+    pub use_item: Option<RegistryIndex>,
 }
 
 impl Session {
@@ -326,34 +348,162 @@ impl Session {
             time_of_day: None,
             new_world_pending: false,
             sound_requests: Vec::new(),
-            hurt_tilt_ticks: 0,
-            hurt_tilt_dir: 0.0,
+            fov_effect_scale: 1.0,
+            fov_modifier: 0.0,
+            old_fov_modifier: 0.0,
+            walk_dist: 0.0,
+            walk_dist_o: 0.0,
+            bob: 0.0,
+            bob_o: 0.0,
+            hurt_ticks: 0,
+            hurt_dir: 0.0,
+            death_ticks: 0,
+            use_ticks: 0,
+            use_item: None,
         }
     }
 
-    /// The hurt-tilt camera roll in degrees for the remaining tilt ticks, easing out over
-    /// the 10 ticks from vanilla's maximum of 14 degrees. 0 after 10 ticks.
-    pub fn hurt_tilt_degrees(&self) -> f32 {
-        const MAX_DEGREES: f32 = 14.0;
-        let left = self.hurt_tilt_ticks.min(crate::net::HURT_TILT_TICKS) as f32
-            / crate::net::HURT_TILT_TICKS as f32;
-        self.hurt_tilt_dir * MAX_DEGREES * left * left
+    /// `hurt_animation` for our own entity id: the hurt tilt runs for 10 ticks, its roll axis
+    /// turned by the packet's damage-direction yaw (vanilla's `animateHurt` setting `hurtDir`).
+    fn start_hurt_tilt(&mut self, damage_yaw: f32) {
+        self.hurt_dir = damage_yaw;
+        self.hurt_ticks = crate::net::HURT_TILT_TICKS;
     }
 
-    /// `hurt_animation` for our own entity id: roll the camera for 10 ticks. The packet's
-    /// damage-direction yaw picks the roll's side (vanilla's view bobbing on damage).
-    fn start_hurt_tilt(&mut self, damage_yaw: f32, player_yaw: f32) {
-        // The damage comes from the direction the yaw points at; the roll goes away from it.
-        let rel = (damage_yaw - player_yaw + 180.0).rem_euclid(360.0) - 180.0;
-        self.hurt_tilt_dir = if rel >= 0.0 { 1.0 } else { -1.0 };
-        self.hurt_tilt_ticks = crate::net::HURT_TILT_TICKS;
-    }
+    /// One 20 Hz tick of the camera effects (vanilla's `Camera.tick`, `ClientAvatarState.tick`,
+    /// `Player.aiStep`'s bob update and `LivingEntity.tick`'s hurt/death counters): the FOV
+    /// modifier target and its smoothing, the walk distance and bob for the view bobbing, and
+    /// the hurt and death counters. Called by the game thread after `end_tick` (the headless
+    /// path has no camera and skips it).
+    pub fn tick_camera(&mut self, data: Option<&GameData>, first_person: bool) {
+        let p = &self.player;
+        // The drawn item: the held stack while the use button is down. A change of the held
+        // stack restarts the draw (vanilla stops the use when the item in hand changes).
+        let held = p.int.input.use_item.then(|| p.main_hand().item).flatten();
+        if held != self.use_item {
+            self.use_ticks = 0;
+        }
+        self.use_item = held;
+        if held.is_some() {
+            self.use_ticks += 1;
+        }
+        let using = if self.use_ticks > 0 {
+            held.and_then(|h| UseItemKind::classify(data, h))
+        } else {
+            None
+        };
+        let sprinting = if p.state.sprinting {
+            // Vanilla adds the hardcoded "sprinting" attribute modifier (x1.3,
+            // ADD_MULTIPLIED_TOTAL) while the player sprints and `getFieldOfViewModifier`
+            // reads the attribute with it; haste's physics applies sprinting itself and
+            // strips that modifier from its own copy of the attribute.
+            1.3
+        } else {
+            1.0
+        };
+        let movement_speed = p.attrs.movement_speed * sprinting;
+        let target = fov_modifier_target(
+            p.state.flying,
+            movement_speed,
+            p.abilities.fov_modifier,
+            using,
+            self.use_ticks,
+            first_person,
+            self.fov_effect_scale,
+        );
+        self.old_fov_modifier = self.fov_modifier;
+        self.fov_modifier =
+            (self.fov_modifier + (target - self.fov_modifier) * 0.5).clamp(0.1, 1.5);
 
-    /// One 20 Hz tick of the hurt tilt (called from `end_tick`).
-    fn tick_hurt_tilt(&mut self) {
-        self.hurt_tilt_ticks = self.hurt_tilt_ticks.saturating_sub(1);
-    }
+        // Walk distance: vanilla adds |deltaX, deltaZ| * 0.6 per move (LocalPlayer.move).
+        let prev = p.prev_pos();
+        let dx = p.state.pos.x - prev.x;
+        let dz = p.state.pos.z - prev.z;
+        self.walk_dist_o = self.walk_dist;
+        self.walk_dist += (dx * dx + dz * dz).sqrt() as f32 * 0.6;
 
+        // Bob: min(0.1, horizontal speed) on the ground while alive and not swimming, else 0,
+        // eased towards by 0.4 per tick (AbstractClientPlayer.aiStep's updateBob).
+        let t_bob = if p.state.on_ground && p.health > 0.0 && !p.state.swimming {
+            let v = p.state.velocity;
+            (v.x * v.x + v.z * v.z).sqrt().min(0.1)
+        } else {
+            0.0
+        };
+        self.bob_o = self.bob;
+        self.bob += (t_bob as f32 - self.bob) * 0.4;
+
+        // Hurt and death counters (LivingEntity.tick / tickDeath).
+        self.hurt_ticks = self.hurt_ticks.saturating_sub(1);
+        if p.health <= 0.0 {
+            self.death_ticks = self.death_ticks.saturating_add(1);
+        } else {
+            self.death_ticks = 0;
+        }
+    }
+}
+
+/// An item whose use affects the FOV (vanilla's `getFieldOfViewModifier` only looks at the
+/// bow and the spyglass; every other use item leaves the modifier alone).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UseItemKind {
+    Bow,
+    Spyglass,
+}
+
+impl UseItemKind {
+    /// Classifies the held stack by `minecraft:item` registry id; `Other` for everything
+    /// else (and whenever the game data is not at hand, e.g. the recording test fakes).
+    pub fn classify(data: Option<&GameData>, item: RegistryIndex) -> Option<Self> {
+        let data = data?;
+        let id = |name: &str| {
+            data.registries
+                .index("minecraft:item", &Identifier::minecraft(name))
+        };
+        if Some(item) == id("bow") {
+            Some(Self::Bow)
+        } else if Some(item) == id("spyglass") {
+            Some(Self::Spyglass)
+        } else {
+            None
+        }
+    }
+}
+
+/// `AbstractClientPlayer.getFieldOfViewModifier` (vanilla): the per-tick FOV modifier from
+/// the movement speed against the walking speed, the flying bonus, the bow draw and the
+/// spyglass, scaled by the `fovEffectScale` option. `movement_speed` is the attribute value
+/// *with* the sprinting modifier (vanilla reads the attribute with it).
+pub fn fov_modifier_target(
+    flying: bool,
+    movement_speed: f64,
+    walking_speed: f32,
+    use_item: Option<UseItemKind>,
+    use_ticks: u32,
+    first_person: bool,
+    effect_scale: f32,
+) -> f32 {
+    let mut modifier: f64 = 1.0;
+    if flying {
+        modifier *= 1.1;
+    }
+    if walking_speed != 0.0 {
+        let speed_factor = movement_speed / walking_speed as f64;
+        modifier *= (speed_factor + 1.0) / 2.0;
+    }
+    if let Some(kind) = use_item {
+        if kind == UseItemKind::Bow {
+            let scale = (use_ticks as f32 / 20.0).min(1.0) as f64;
+            modifier *= 1.0 - scale * scale * 0.15;
+        } else if first_person && kind == UseItemKind::Spyglass {
+            // Vanilla returns before the effect-scale lerp: scoping is a full 0.1.
+            return 0.1;
+        }
+    }
+    (1.0 + (modifier - 1.0) * effect_scale as f64) as f32
+}
+
+impl Session {
     /// Applies one clientbound packet; serverbound replies go to `out`.
     pub fn apply<W: WorldSink + ?Sized, E: EntitySink + ?Sized>(
         &mut self,
@@ -534,7 +684,7 @@ impl Session {
             P::HurtAnimation(h) => {
                 entities.mark_hurt(EntityId(h.entity_id));
                 if EntityId(h.entity_id) == own {
-                    self.start_hurt_tilt(h.yaw, self.player.state.yaw);
+                    self.start_hurt_tilt(h.yaw);
                 }
             }
             P::DamageEvent(d) => {
@@ -620,7 +770,6 @@ impl Session {
         for (pos, state) in self.player.take_world_edits() {
             world.set_block(pos, state);
         }
-        self.tick_hurt_tilt();
     }
 
     /// Break cracks to draw: other players' (`block_destruction`) and our own.
