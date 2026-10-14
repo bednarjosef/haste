@@ -121,6 +121,11 @@ pub trait EntitySink {
     fn hitbox(&self, _id: EntityId) -> Option<haste_core::Aabb> {
         None
     }
+    /// `minecraft:entity_type` registry index of an entity, for the crosshair's pickability
+    /// filter (`Entity.isPickable`); none in fakes, which the picker treats as a mod type.
+    fn entity_type(&self, _id: EntityId) -> Option<haste_core::RegistryIndex> {
+        None
+    }
     /// Forgets every entity (respawn / dimension change).
     fn clear(&mut self);
     /// `EntityStore::tick`.
@@ -213,6 +218,9 @@ impl EntitySink for EntityStore {
         self.get(id)
             .map(|e| haste_core::Aabb::entity(e.pos, e.dimensions.0 as f64, e.dimensions.1 as f64))
     }
+    fn entity_type(&self, id: EntityId) -> Option<haste_core::RegistryIndex> {
+        self.get(id).map(|e| e.kind)
+    }
     fn clear(&mut self) {
         // EntityStore has no clear(); a fresh store re-reads the (small, optional) dimensions
         // oracle. The tab list (`player_info`) is lost with it, which vanilla keeps across a
@@ -293,6 +301,9 @@ pub struct Session {
     /// Entities the server spawned and has not removed (crosshair targets).
     entity_ids: HashSet<EntityId>,
     entity_boxes: Vec<(EntityId, haste_core::Aabb)>,
+    /// `minecraft:entity_type` registry index per `entity_boxes` entry (same order), for the
+    /// crosshair's pickability filter. A sentinel (`u32::MAX`) means unknown (mod) type.
+    entity_types: Vec<haste_core::RegistryIndex>,
     /// Time of day in ticks from the first world clock of the last `set_time` (approximate:
     /// that the first clock is the day clock is not verified).
     pub time_of_day: Option<i64>,
@@ -323,6 +334,7 @@ impl Session {
             breaking: HashMap::new(),
             entity_ids: HashSet::new(),
             entity_boxes: Vec::new(),
+            entity_types: Vec::new(),
             time_of_day: None,
             new_world_pending: false,
             sound_requests: Vec::new(),
@@ -595,21 +607,25 @@ impl Session {
         // drains them between `receive` and `end_tick`.
         self.sound_requests.clear();
         self.entity_boxes.clear();
+        self.entity_types.clear();
         for id in &self.entity_ids {
             if let Some(b) = entities.hitbox(*id) {
                 self.entity_boxes.push((*id, b));
+                // Unknown (fakes, mod types) -> sentinel, which the picker treats as pickable.
+                self.entity_types.push(
+                    entities
+                        .entity_type(*id)
+                        .unwrap_or(haste_core::RegistryIndex(u32::MAX)),
+                );
             }
         }
         match world.physics() {
             Some((view, data)) => {
                 self.player.prepare(data);
-                // No per-entity `minecraft:entity_type` data yet: every type is unknown and so
-                // pickable. Filling this from the store (`entity_box` per
-                // docs/INTERFACES.md) is the missing wiring — see the player workstream's report.
                 let env = crate::player::interact::InteractEnv {
                     data,
                     entities: &self.entity_boxes,
-                    entity_types: &[],
+                    entity_types: &self.entity_types,
                 };
                 self.player.tick_interact(input, view, &env, out)
             }

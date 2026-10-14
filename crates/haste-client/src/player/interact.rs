@@ -127,6 +127,11 @@ pub struct Interaction {
     progress: f32,
     destroy_delay: u8,
     use_delay: u8,
+    /// Left/right clicks queued since the last tick (vanilla's `KeyMapping.consumeClick`): each
+    /// press counts, even several in one tick. The driver adds one per mouse press; a driver
+    /// that only reports the held boolean gets one click on the press edge instead.
+    attack_clicks: u8,
+    use_clicks: u8,
     /// `missTime` ticks left: 10 after a miss outside creative.
     miss_time: u8,
     /// True while the player is using an item (vanilla sets it when a consumable's use starts;
@@ -211,6 +216,8 @@ impl Interaction {
         self.effects.clear();
         self.miss_time = 0;
         self.is_using_item = false;
+        self.attack_clicks = 0;
+        self.use_clicks = 0;
     }
 
     fn next_sequence(&mut self) -> i32 {
@@ -238,6 +245,18 @@ impl LocalPlayer {
     /// This tick's mouse buttons and hotbar selection (applied inside the next tick).
     pub fn set_interact(&mut self, input: InteractInput) {
         self.int.input = input;
+    }
+
+    /// Queues one left click for the next tick (vanilla's `keyAttack.clickCount++` /
+    /// `KeyMapping.consumeClick`): every press counts, even several within one tick. The driver
+    /// calls this from the mouse handler next to [`LocalPlayer::set_interact`].
+    pub fn queue_attack_click(&mut self) {
+        self.int.attack_clicks = self.int.attack_clicks.saturating_add(1);
+    }
+
+    /// Queues one right click for the next tick (`keyUse.clickCount++`).
+    pub fn queue_use_click(&mut self) {
+        self.int.use_clicks = self.int.use_clicks.saturating_add(1);
     }
 
     /// Block under the crosshair and the face hit.
@@ -365,9 +384,11 @@ impl LocalPlayer {
     /// `ProjectileUtil.getEntityHitResult`'s `EntitySelector.CAN_BE_PICKED` filter.
     ///
     /// Block outlines are searched out to the larger of the two interaction ranges and then
-    /// filtered back to `block_interaction_range` (`filterHitResult`); when a block is hit the
-    /// entity search is clamped to the block's distance, and an entity only wins when it is
-    /// strictly closer. Entities are never searched beyond `entity_interaction_range`.
+    /// filtered back to `block_interaction_range` (`filterHitResult`); the entity segment reaches
+    /// the block's distance when a block is hit, else the larger range, and an entity only wins
+    /// when it is strictly closer than the block. The winner is filtered to
+    /// `entity_interaction_range`, so an entity just out of reach makes the pick a miss rather
+    /// than showing the block behind it.
     pub(super) fn pick(
         &self,
         look: (f32, f32),
@@ -505,6 +526,17 @@ impl LocalPlayer {
         }
 
         // 3. Minecraft.handleKeybinds: the click loops, the held use, then continueAttack.
+        // `KeyMapping.consumeClick` returns once per queued press, so several clicks in one tick
+        // each run. A driver that only reports the held button (no click queue) still gets one
+        // click on the press edge, as consumeClick would on a fresh press.
+        let mut attack_clicks = std::mem::take(&mut self.int.attack_clicks);
+        let mut use_clicks = std::mem::take(&mut self.int.use_clicks);
+        if attack_clicks == 0 && input.attack && !last.attack {
+            attack_clicks = 1;
+        }
+        if use_clicks == 0 && input.use_item && !last.use_item {
+            use_clicks = 1;
+        }
         let mut instant_attack = false;
         if self.int.is_using_item {
             // While an item is in use the clicks are consumed and do nothing; releasing the
@@ -514,11 +546,11 @@ impl LocalPlayer {
             }
         } else {
             // while (keyAttack.consumeClick()) instantAttack |= startAttack();
-            if input.attack && !last.attack {
+            for _ in 0..attack_clicks {
                 instant_attack |= self.start_attack(world, env, out);
             }
             // while (keyUse.consumeClick()) startUseItem();
-            if input.use_item && !last.use_item {
+            for _ in 0..use_clicks {
                 self.start_use_item(look, out);
             }
         }
@@ -980,18 +1012,20 @@ impl LocalPlayer {
 }
 
 /// Vanilla's per-class `Entity.isPickable` (what `EntitySelector.CAN_BE_PICKED` tests in
-/// `ProjectileUtil.getEntityHitResult`), as a rule over `minecraft:entity_type` names.
-/// Classes returning false: ItemEntity and ExperienceOrb (Entity's default), Marker,
-/// AreaEffectCloud, LightningBolt, EyeOfEnder, EvokerFangs and OminousItemSpawner (Entity default),
-/// EnderDragon (explicit false), AbstractArrow's arrow, spectral_arrow and trident
-/// (`!isInGround` aside), and the Projectile types outside the redirectable_projectile tag
-/// (small_fireball, dragon_fireball, wither_skull, egg, snowball, ender_pearl, potion,
-/// experience_bottle, firework_rocket, llama_spit, fishing_hook — the tag holds fireball,
-/// wind_charge and breeze_wind_charge). Everything else — LivingEntity's `!isRemoved`, Player's
-/// `!isSpectator`, the boats, minecarts, item frames, paintings, leash knot, end crystal, TNT,
-/// falling blocks, the interaction entity, shulker bullets — is pickable, as is any unknown
-/// (mod) type. Arrows stuck in the ground (`AbstractArrow.isInGround`) stay pickable here: the
-/// box alone cannot tell.
+/// `ProjectileUtil.getEntityHitResult`), as a rule over `minecraft:entity_type` names. The type
+/// names are the registry ids from `EntityTypeIds` (ItemEntity's type is `item`, FishingHook's is
+/// `fishing_bobber`, the thrown potions are `splash_potion`/`lingering_potion`).
+/// Classes returning false: ItemEntity, ExperienceOrb, Marker, AreaEffectCloud, LightningBolt,
+/// EyeOfEnder, EvokerFangs and OminousItemSpawner (Entity's default `isPickable`), the Display
+/// entities (block/item/text_display, also Entity's default), EnderDragon (explicit false),
+/// AbstractArrow's arrow, spectral_arrow and trident (`!isInGround` aside), and the Projectile
+/// types outside the redirectable_projectile tag (small_fireball, dragon_fireball, wither_skull,
+/// egg, snowball, ender_pearl, splash_potion, lingering_potion, experience_bottle,
+/// firework_rocket, llama_spit, fishing_bobber — the tag holds fireball, wind_charge and
+/// breeze_wind_charge). Everything else — LivingEntity's `!isRemoved`, Player's `!isSpectator`,
+/// the boats, minecarts, item frames, paintings, leash knot, end crystal, TNT, falling blocks,
+/// the interaction entity, shulker bullets — is pickable, as is any unknown (mod) type. Arrows
+/// stuck in the ground (`AbstractArrow.isInGround`) stay pickable here: the box alone cannot tell.
 pub fn is_pickable(t: &Identifier) -> bool {
     if t.namespace() != "minecraft" {
         return true;
@@ -999,7 +1033,7 @@ pub fn is_pickable(t: &Identifier) -> bool {
     let p = t.path();
     !matches!(
         p,
-        "item_entity"
+        "item"
             | "experience_orb"
             | "marker"
             | "area_effect_cloud"
@@ -1007,6 +1041,9 @@ pub fn is_pickable(t: &Identifier) -> bool {
             | "eye_of_ender"
             | "evoker_fangs"
             | "ominous_item_spawner"
+            | "block_display"
+            | "item_display"
+            | "text_display"
             | "ender_dragon"
             | "trident"
             | "small_fireball"
@@ -1015,11 +1052,12 @@ pub fn is_pickable(t: &Identifier) -> bool {
             | "egg"
             | "snowball"
             | "ender_pearl"
-            | "potion"
+            | "splash_potion"
+            | "lingering_potion"
             | "experience_bottle"
             | "firework_rocket"
             | "llama_spit"
-            | "fishing_hook"
+            | "fishing_bobber"
     ) && p != "arrow"
         && !p.ends_with("_arrow")
 }

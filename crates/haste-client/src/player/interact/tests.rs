@@ -55,7 +55,7 @@ fn data() -> &'static haste_data::GameData {
                 entries(&["air", "diamond_pickaxe", "diamond_sword", "stick"]),
                 entries(&["speed", "haste", "mining_fatigue", "conduit_power"]),
                 entries(&[
-                    "item_entity",
+                    "item",
                     "experience_orb",
                     "arrow",
                     "spectral_arrow",
@@ -409,6 +409,57 @@ fn releasing_the_attack_button_clears_miss_time() {
 }
 
 #[test]
+fn spam_clicking_at_20_cps_on_air_swings_every_tick() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.w = TestWorld::new();
+    // One press+release per tick (20 cps): each fresh press is a miss and swings; the release
+    // clears missTime (Minecraft.continueAttack(false)) so the next click is not swallowed by
+    // the 10-tick freeze.
+    for _ in 0..5 {
+        assert!(matches!(r.tick(ATTACK)[0], ServerboundPlay::Punch(_)));
+        assert!(r.tick(InteractInput::default()).is_empty());
+    }
+}
+
+#[test]
+fn several_queued_attack_clicks_in_one_tick_each_count() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.add_entity(
+        EntityId(42),
+        Aabb::entity(DVec3::new(0.5, 0.0, 0.5), 0.6, 0.5),
+        ZOMBIE,
+    );
+    // KeyMapping.consumeClick: two clicks queued in one tick run startAttack twice.
+    r.p.queue_attack_click();
+    r.p.queue_attack_click();
+    let out = r.tick(ATTACK);
+    let attacks = out
+        .iter()
+        .filter(|p| matches!(p, ServerboundPlay::Attack(_)))
+        .count();
+    assert_eq!(attacks, 2, "{out:?}");
+}
+
+#[test]
+fn several_queued_use_clicks_in_one_tick_each_count() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.p.int.hotbar[0] = item(3);
+    // Two right clicks in one tick: startUseItem twice (the consumeClick loop does not wait for
+    // rightClickDelay).
+    r.p.queue_use_click();
+    r.p.queue_use_click();
+    let out = r.tick(InteractInput {
+        use_item: true,
+        ..Default::default()
+    });
+    let uses = out
+        .iter()
+        .filter(|p| matches!(p, ServerboundPlay::UseItemOn(_)))
+        .count();
+    assert_eq!(uses, 2, "{out:?}");
+}
+
+#[test]
 fn a_miss_delays_the_start_of_a_break_by_ten_ticks() {
     let mut r = Rig::new(GameMode::Survival);
     r.w = TestWorld::new();
@@ -756,7 +807,7 @@ fn is_pickable_matches_vanilla_classes() {
         );
     }
     let not_pickable = [
-        "item_entity",
+        "item",
         "experience_orb",
         "arrow",
         "spectral_arrow",
@@ -768,17 +819,21 @@ fn is_pickable_matches_vanilla_classes() {
         "eye_of_ender",
         "evoker_fangs",
         "ominous_item_spawner",
+        "block_display",
+        "item_display",
+        "text_display",
         "small_fireball",
         "dragon_fireball",
         "wither_skull",
         "egg",
         "snowball",
         "ender_pearl",
-        "potion",
+        "splash_potion",
+        "lingering_potion",
         "experience_bottle",
         "firework_rocket",
         "llama_spit",
-        "fishing_hook",
+        "fishing_bobber",
     ];
     for p in not_pickable {
         assert!(
@@ -797,7 +852,7 @@ fn is_pickable_matches_vanilla_classes() {
 #[test]
 fn non_pickable_entities_in_the_crosshair_are_never_attacked() {
     for (idx, name) in [
-        (ITEM_ENTITY, "item_entity"),
+        (ITEM_ENTITY, "item"),
         (EXPERIENCE_ORB, "experience_orb"),
         (ARROW, "arrow"),
         (SPECTRAL_ARROW, "spectral_arrow"),
