@@ -8,6 +8,9 @@ pub enum Pose {
     Standing,
     Crouching,
     Swimming,
+    /// Gliding (`Player.getDesiredPose` returns `Pose.FALL_FLYING` while the shared flag 7 is
+    /// set): 0.6 x 0.6, eye height 0.4 (`Avatar`'s pose dimensions).
+    FallFlying,
 }
 
 impl Pose {
@@ -17,6 +20,7 @@ impl Pose {
             Pose::Standing => "standing",
             Pose::Crouching => "crouching",
             Pose::Swimming => "swimming",
+            Pose::FallFlying => "fall_flying",
         }
     }
     pub fn from_name(s: &str) -> Option<Pose> {
@@ -24,6 +28,7 @@ impl Pose {
             "standing" => Pose::Standing,
             "crouching" => Pose::Crouching,
             "swimming" => Pose::Swimming,
+            "fall_flying" => Pose::FallFlying,
             _ => return None,
         })
     }
@@ -75,23 +80,25 @@ impl Default for PlayerAttributes {
 }
 
 impl PlayerAttributes {
-    /// Eye height per pose (entity_dimensions.json: standing 1.62, crouching 1.27, swimming 0.4).
-    /// Scaled by the `scale` attribute (in f32, as entity dimensions are floats).
+    /// Eye height per pose (entity_dimensions.json: standing 1.62, crouching 1.27, swimming 0.4,
+    /// fall_flying 0.4). Scaled by the `scale` attribute (in f32, as entity dimensions are floats).
     pub fn eye_height_for(&self, pose: Pose) -> f64 {
         let eye: f32 = match pose {
             Pose::Standing => 1.62,
             Pose::Crouching => 1.27,
             Pose::Swimming => 0.4,
+            Pose::FallFlying => 0.4,
         };
         (eye * self.scale) as f64
     }
 
-    /// Box height for a pose, scaled by the `scale` attribute.
+    /// Box height for a pose, scaled by the `scale` attribute. The fall-flying pose is the same
+    /// 0.6 x 0.6 as swimming (`Avatar`'s pose dimensions), so it shares `swimming_height`.
     pub fn height_for(&self, pose: Pose) -> f64 {
         let h = match pose {
             Pose::Standing => self.height,
             Pose::Crouching => self.crouching_height,
-            Pose::Swimming => self.swimming_height,
+            Pose::Swimming | Pose::FallFlying => self.swimming_height,
         };
         (h * self.scale) as f64
     }

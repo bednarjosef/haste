@@ -49,10 +49,14 @@ pub const JUMP_DOUBLE_TAP_TICKS: u8 = 7;
 /// world's minimum), with the 0.98 vertical drag applied on top.
 pub const UNLOADED_CHUNK_FALL_SPEED: f64 = -0.1 * VERTICAL_DRAG as f64;
 
-/// `player_command` actions (wiki "Player Command").
+/// `player_command` actions (wiki "Player Command"; ordinals from the 26.3
+/// `ServerboundPlayerCommandPacket.Action` enum: STOP_SLEEPING 0, START_SPRINTING 1,
+/// STOP_SPRINTING 2, START_RIDING_JUMP 3, STOP_RIDING_JUMP 4, OPEN_INVENTORY 5,
+/// START_FALL_FLYING 6).
 pub mod command {
     pub const START_SPRINTING: i32 = 1;
     pub const STOP_SPRINTING: i32 = 2;
+    pub const START_FALL_FLYING: i32 = 6;
 }
 
 /// `player_abilities` flag bits (clientbound and serverbound).
@@ -413,10 +417,17 @@ impl LocalPlayer {
             }
             P::SetHeldSlot(s) => self.held_slot = s.slot,
             P::SetEntityData(d) if EntityId(d.entity_id) == self.entity_id => {
-                // Wiki "Entity metadata": index 1 is the air supply (VarInt).
+                // Wiki "Entity metadata": index 0 is the shared flags byte (bit 0x80 = fall
+                // flying, `Entity.FLAG_FALL_FLYING` = 7), index 1 the air supply (VarInt).
                 for e in &d.metadata {
-                    if let (1, haste_core::entity::MetadataValue::VarInt(v)) = (e.index, &e.value) {
-                        self.air_supply = *v;
+                    match (e.index, &e.value) {
+                        (1, haste_core::entity::MetadataValue::VarInt(v)) => self.air_supply = *v,
+                        (0, haste_core::entity::MetadataValue::Byte(b)) => {
+                            // The server owns the flag: it confirms a glide we started and
+                            // clears it when the glide ends (landing, no glider).
+                            self.state.fall_flying = *b as u8 & 0x80 != 0;
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -799,7 +810,12 @@ impl LocalPlayer {
 
         // 3. Physics. The player does not move while its chunk is not loaded; vanilla's
         // `Player.aiStep` counts the double-tap jump window down before `LocalPlayer.aiStep`
-        // looks at the keys.
+        // looks at the keys. Vanilla `Player.tick` sets `noPhysics = isSpectator()` and clears
+        // on-ground for spectators before the travel step.
+        self.state.no_physics = self.game_mode == GameMode::Spectator;
+        if self.state.no_physics {
+            self.state.on_ground = false;
+        }
         if self.jump_trigger_time > 0 {
             self.jump_trigger_time -= 1;
         }
@@ -822,11 +838,13 @@ impl LocalPlayer {
         let double_tap = std::mem::take(&mut self.toggle_flight);
         let pressed = input.jump && !self.jump_held;
         self.jump_held = input.jump;
+        let mut just_toggled_creative_flight = false;
         if self.abilities.may_fly && (pressed || double_tap) {
             if armed {
                 if !self.state.swimming {
                     self.jump_trigger_time = 0;
                     self.state.flying = !self.state.flying;
+                    just_toggled_creative_flight = true;
                     if self.state.flying && self.state.on_ground {
                         self.jump_from_ground(ctx.world, ctx.blocks);
                     }
@@ -837,6 +855,22 @@ impl LocalPlayer {
         }
         if !self.abilities.may_fly {
             self.state.flying = false;
+        }
+        // Vanilla `LocalPlayer.aiStep`: a fresh jump press in the air with a glider equipped and
+        // no liquid starts gliding (`tryToStartFallFlying` -> `START_FALL_FLYING`), skipped on
+        // the press that just toggled creative flight. The flag is set locally so this tick
+        // already glides; the server confirms it through the shared flag 7 and clears it when the
+        // glide ends. The climbable check (`!onClimbable`) is not modelled (no climbable tag).
+        if pressed
+            && !just_toggled_creative_flight
+            && self.state.can_start_fall_flying(self.has_glider())
+        {
+            self.state.start_fall_flying();
+            out.push(ServerboundPlay::PlayerCommand(sb::PlayerCommand {
+                entity_id: self.entity_id.0,
+                action: command::START_FALL_FLYING,
+                jump_boost: 0,
+            }));
         }
         if self.state.flying != was_flying {
             self.own_sounds.reset_steps();
