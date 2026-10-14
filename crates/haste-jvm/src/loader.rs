@@ -72,6 +72,9 @@ pub const ALLOW_CLASSES: &[&str] = &[
     "net/minecraft/client/InactivityFpsLimit",
     "net/minecraft/client/PreferredGraphicsApi",
     "net/minecraft/client/PrioritizeChunkUpdates",
+    // the Video Settings screen holds one (Minecraft.getGpuWarnlistManager): a real vanilla object
+    // whose reload listener never runs here, so it always reports no warnings
+    "net/minecraft/client/renderer/GpuWarnlistManager",
     "net/minecraft/client/TextureFilteringMethod",
     "net/minecraft/client/AttackIndicatorStatus",
     "com/mojang/blaze3d/platform/InputConstants",
