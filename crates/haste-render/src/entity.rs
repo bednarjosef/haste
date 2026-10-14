@@ -420,18 +420,24 @@ impl EntityRenderer {
                     match &part.geometry {
                         haste_assets::ItemGeometry::None => {}
                         haste_assets::ItemGeometry::Generated { layers } => {
+                            // The extruded sprite: front face, mirrored back face and the
+                            // 1/16-deep sides at its opaque edges (vanilla `ItemModelGenerator`).
                             for (i, layer) in layers.iter().enumerate() {
-                                let rect = self.texture_rect(&parse_tex(layer), assets);
+                                let rect = self.texture_rect(&parse_tex(&layer.texture), assets);
                                 let t = tint(Some(i as u32));
-                                for (z, n) in [(8.5 / 16.0, Vec3::Z), (7.5 / 16.0, Vec3::NEG_Z)] {
-                                    let p = [
-                                        Vec3::new(0.0, 1.0, z),
-                                        Vec3::new(0.0, 0.0, z),
-                                        Vec3::new(1.0, 0.0, z),
-                                        Vec3::new(1.0, 1.0, z),
-                                    ];
-                                    let uv = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
-                                    push_world_quad(&mut out, m, nm, p, uv, n, t, light, rect);
+                                for q in &layer.quads {
+                                    let o = q.direction.offset();
+                                    push_world_quad(
+                                        &mut out,
+                                        m,
+                                        nm,
+                                        q.positions.map(Vec3::from),
+                                        q.uvs,
+                                        Vec3::new(o[0] as f32, o[1] as f32, o[2] as f32),
+                                        t,
+                                        light,
+                                        rect,
+                                    );
                                 }
                             }
                         }
