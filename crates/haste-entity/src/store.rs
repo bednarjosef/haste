@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::dims::EntityDimensions;
 use crate::lerp::LerpState;
 use crate::metadata::Metadata;
+use crate::riding::Riding;
 
 /// Hurt flash duration in ticks (vanilla's `hurtTime` runs to 10).
 pub const HURT_TICKS: u32 = 10;
@@ -85,6 +86,8 @@ pub struct EntityStore {
     by_id: AHashMap<EntityId, u32>,
     dims: EntityDimensions,
     players: AHashMap<Uuid, PlayerInfo>,
+    /// Who rides whom (`set_passengers`).
+    riding: Riding,
 }
 
 /// Hurt flash strength for an entity's remaining hurt ticks, eased out (quadratic, like
@@ -112,6 +115,7 @@ impl EntityStore {
             by_id: AHashMap::new(),
             dims,
             players: AHashMap::new(),
+            riding: Riding::new(),
         }
     }
 
@@ -150,6 +154,31 @@ impl EntityStore {
                 self.free.push(i);
             }
         }
+        // A removed entity drops out of riding on both sides: its own passengers, and any
+        // vehicle it was riding.
+        self.riding.on_removed(ids);
+    }
+
+    /// `set_passengers` for one vehicle: the list replaces the previous one. Passengers that
+    /// dropped out lose their vehicle entry; every listed passenger gains this vehicle.
+    pub fn set_passengers(&mut self, vehicle: EntityId, passengers: &[EntityId]) {
+        self.riding.set_passengers(vehicle, passengers);
+    }
+
+    /// The vehicle an entity rides, if any.
+    pub fn vehicle_of(&self, id: EntityId) -> Option<EntityId> {
+        self.riding.vehicle_of(id)
+    }
+
+    /// The passengers of a vehicle, in seat order.
+    pub fn passengers_of(&self, id: EntityId) -> Option<&[EntityId]> {
+        self.riding.passengers_of(id)
+    }
+
+    /// An entity's type index and current dimensions: what a passenger's seat offset is
+    /// computed from (`riding::passenger_seat`).
+    pub fn entity_type_info(&self, id: EntityId) -> Option<(RegistryIndex, (f32, f32))> {
+        self.get(id).map(|e| (e.kind, e.dimensions))
     }
 
     /// Short delta move (`delta` already converted from 1/4096-block units by the caller).
