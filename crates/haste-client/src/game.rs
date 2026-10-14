@@ -618,13 +618,21 @@ fn tick_once(
     jvm: &mut JvmSlot,
 ) -> anyhow::Result<()> {
     // Once the JVM arrives (the session joined before the game thread started): build the
-    // `Ui` and give the JVM the registries, tags and the local player.
+    // `Ui` and give the JVM the registries, tags and the local player. The game mode is the
+    // session's, not the `login` packet's: mode changes that arrived while the JVM was
+    // starting (the first seconds of a join) never reached the UI's packet handler, and where
+    // vanilla stores the local mode (`MultiPlayerGameMode.localMode`) is the mode the server
+    // last told us, not the one the login carried.
     if let Some(host) = jvm.take() {
         let mut slot = shared.ui.lock();
         if slot.is_none() {
             let ui = Ui::new(host);
             let t = Instant::now();
-            match ui.joined(driver.connection(), driver.login()) {
+            match ui.joined(
+                driver.connection(),
+                driver.login(),
+                driver.session.player.game_mode,
+            ) {
                 Ok(()) => {
                     tracing::info!(
                         "HUD joined in {:.0} ms; the vanilla HUD and chat are live",
