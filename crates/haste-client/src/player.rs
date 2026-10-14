@@ -539,9 +539,13 @@ impl LocalPlayer {
         out: &mut Vec<ServerboundPlay>,
     ) {
         self.prepare(data);
+        // No entity data on this path (no entity store here): every entity type is unknown and
+        // so pickable, which vanilla would only mean for mod types. The driver fills
+        // `InteractEnv::entity_types` from the store (`docs/INTERFACES.md`, `entity_box`).
         let env = interact::InteractEnv {
             data,
             entities: &[],
+            entity_types: &[],
         };
         self.tick_interact(input, world, &env, out);
     }

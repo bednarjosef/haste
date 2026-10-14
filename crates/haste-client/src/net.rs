@@ -603,9 +603,13 @@ impl Session {
         match world.physics() {
             Some((view, data)) => {
                 self.player.prepare(data);
+                // No per-entity `minecraft:entity_type` data yet: every type is unknown and so
+                // pickable. Filling this from the store (`entity_box` per
+                // docs/INTERFACES.md) is the missing wiring — see the player workstream's report.
                 let env = crate::player::interact::InteractEnv {
                     data,
                     entities: &self.entity_boxes,
+                    entity_types: &[],
                 };
                 self.player.tick_interact(input, view, &env, out)
             }
