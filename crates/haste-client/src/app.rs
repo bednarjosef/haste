@@ -1316,7 +1316,10 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             shared
                 .data
                 .registries
-                .name("minecraft:item", haste_protocol::haste_core::RegistryIndex(i))
+                .name(
+                    "minecraft:item",
+                    haste_protocol::haste_core::RegistryIndex(i),
+                )
                 .cloned()
                 .unwrap_or_else(|| Identifier::minecraft("air"))
         })
