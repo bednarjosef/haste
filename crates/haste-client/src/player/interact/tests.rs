@@ -186,7 +186,7 @@ impl Rig {
             pitch: 90.0,
             ..Default::default()
         };
-        self.p.tick_interact(&input, &self.w, &env, &mut out);
+        self.p.tick_interact(&input, &self.w, &env, None, &mut out);
         for (pos, s) in self.p.take_world_edits().collect::<Vec<_>>() {
             self.w.set(pos.x, pos.y, pos.z, s);
         }
