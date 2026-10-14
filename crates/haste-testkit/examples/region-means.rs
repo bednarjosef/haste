@@ -72,5 +72,66 @@ fn main() -> Result<()> {
             hb - vb
         );
     }
+    // A coarse 8x8 grid of the mean per-channel delta per cell, to localize the worst
+    // areas (row 0 = top of the image).
+    if args.get(2).map(|a| a == "--grid").unwrap_or(false) {
+        let g = 8u32;
+        println!("grid: mean delta-R per cell (rows top to bottom)");
+        for gy in 0..g {
+            let mut row = String::new();
+            for gx in 0..g {
+                let x0 = gx * w / g;
+                let x1 = (gx + 1) * w / g;
+                let y0 = gy * h / g;
+                let y1 = (gy + 1) * h / g;
+                let (vr, vg, vb, _, _) = grid_means(&vanilla, x0, x1, y0, y1);
+                let (hr, hg, hb, _, _) = grid_means(&haste, x0, x1, y0, y1);
+                let d = ((hr - vr) + (hg - vg) + (hb - vb)) / 3.0;
+                row.push_str(&format!("{d:+6.1}"));
+            }
+            println!("{row}");
+        }
+    }
     Ok(())
+}
+
+fn grid_means(
+    img: &image::RgbaImage,
+    x0: u32,
+    x1: u32,
+    y0: u32,
+    y1: u32,
+) -> (f64, f64, f64, f64, u64) {
+    band_means_rect(img, x0, x1, y0, y1)
+}
+
+fn band_means_rect(
+    img: &image::RgbaImage,
+    x0: u32,
+    x1: u32,
+    y0: u32,
+    y1: u32,
+) -> (f64, f64, f64, f64, u64) {
+    let (mut r, mut g, mut b, mut a) = (0u64, 0u64, 0u64, 0u64);
+    let mut n = 0u64;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let p = img.get_pixel(x, y);
+            r += p[0] as u64;
+            g += p[1] as u64;
+            b += p[2] as u64;
+            a += p[3] as u64;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return (0.0, 0.0, 0.0, 0.0, 0);
+    }
+    (
+        r as f64 / n as f64,
+        g as f64 / n as f64,
+        b as f64 / n as f64,
+        a as f64 / n as f64,
+        n,
+    )
 }
