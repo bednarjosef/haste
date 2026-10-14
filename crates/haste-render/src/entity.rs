@@ -1016,6 +1016,22 @@ impl EntityRenderer {
                 drawn += 1;
                 continue;
             }
+            if let crate::blockentity::BlockEntityKind::Banner { .. } = inst.kind {
+                // The banner's angle is the same rule as the sign's (rotation segment or
+                // wall facing) and lives in `sign_angle`.
+                let mut out = std::mem::take(&mut self.vertices);
+                let me = &mut *self;
+                crate::blockentity::emit_banner(
+                    &mut out,
+                    inst,
+                    camera,
+                    inst.sign_angle,
+                    &mut |texture| me.texture_rect(texture, assets),
+                );
+                self.vertices = out;
+                drawn += 1;
+                continue;
+            }
             let texture = match inst.kind {
                 crate::blockentity::BlockEntityKind::Chest(m) => {
                     crate::blockentity::chest_texture(m, inst.half)
@@ -1024,6 +1040,7 @@ impl EntityRenderer {
                     crate::blockentity::shulker_texture(c)
                 }
                 crate::blockentity::BlockEntityKind::Sign { .. } => unreachable!(),
+                crate::blockentity::BlockEntityKind::Banner { .. } => unreachable!(),
             };
             let rect = self.texture_rect(&texture, assets);
             let out = &mut self.vertices;

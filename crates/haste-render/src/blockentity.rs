@@ -72,6 +72,26 @@ pub struct SignTextData {
     pub back: SignSideText,
 }
 
+/// One banner pattern layer (vanilla `BannerPatternLayers.Layer`): the pattern's registry
+/// id (its texture is `entity/banner/<path>.png`) and the dye it is drawn in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BannerLayer {
+    /// The pattern's registry id, e.g. `minecraft:stripe_bottom`.
+    pub pattern: Identifier,
+    /// The dye colour id, vanilla `DyeColor` order.
+    pub color: u8,
+}
+
+/// A banner's render data: the base colour (from the block id, vanilla `BannerBlock.getColor`)
+/// and up to 16 pattern layers (vanilla draws at most `MAX_PATTERNS`).
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct BannerData {
+    /// The base dye colour id.
+    pub base: u8,
+    /// The pattern layers, in order.
+    pub layers: Vec<BannerLayer>,
+}
+
 /// What to draw for one block entity (the per-type registry's rows; later renderers for beds
 /// and heads plug in here).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,6 +102,11 @@ pub enum BlockEntityKind {
     /// text. `hanging` picks `HangingSignRenderer`'s transform and line metrics.
     Sign {
         hanging: bool,
+    },
+    /// A banner: `wall` picks `WallBannerBlock`'s transform (the bar without the pole,
+    /// offset to the wall) over the standing one.
+    Banner {
+        wall: bool,
     },
 }
 
@@ -106,6 +131,11 @@ pub struct BlockEntityInstance {
     pub sign_angle: f32,
     /// Sign text (both sides), for `BlockEntityKind::Sign`.
     pub text: Option<std::sync::Arc<SignTextData>>,
+    /// The banner's wave phase (vanilla `BannerRenderer.extractRenderState`: the position hash
+    /// plus game time, over 100), for `BlockEntityKind::Banner`.
+    pub banner_phase: f32,
+    /// Banner patterns, for `BlockEntityKind::Banner`.
+    pub banner: Option<std::sync::Arc<BannerData>>,
 }
 
 /// Resolves a block entity type name (from the synced `minecraft:block_entity_type` registry)
@@ -132,6 +162,9 @@ pub fn kind_of(be_type: &Identifier, block: &Identifier, xmas: bool) -> Option<B
         "shulker_box" => Some(BlockEntityKind::Shulker(shulker_color(block))),
         "sign" => Some(BlockEntityKind::Sign { hanging: false }),
         "hanging_sign" => Some(BlockEntityKind::Sign { hanging: true }),
+        "banner" => Some(BlockEntityKind::Banner {
+            wall: block.path().ends_with("_wall_banner"),
+        }),
         _ => None,
     }
 }
@@ -480,6 +513,12 @@ const DYE_TEXT_COLOR: [u32; 16] = [
 /// The outline colour vanilla uses for black glowing text (`AbstractSignRenderer.BLACK_TEXT_OUTLINE_COLOR`).
 const BLACK_TEXT_OUTLINE_COLOR: u32 = 0xFFF0_EBCC;
 
+/// Vanilla `DyeColor.getTextureDiffuseColor` (the dye's map colour), by dye id.
+pub const DYE_DIFFUSE_COLOR: [u32; 16] = [
+    16383998, 16351261, 13061821, 3847130, 16701501, 8439583, 15961002, 4673362, 10329495, 1481884,
+    8991416, 3949738, 8606770, 6192150, 11546150, 1908001,
+];
+
 /// Vanilla `AbstractSignRenderer.getDarkColor`: the colour non-glowing text is drawn with —
 /// the dye colour scaled by 0.4 (per channel, clamped), except black glowing text which keeps
 /// its special outline colour instead of scaling to near-black.
@@ -550,6 +589,111 @@ pub(crate) fn sign_line_metrics(hanging: bool) -> (i32, i32) {
     }
 }
 
+/// Vanilla `BannerModel.createBodyLayer` + `BannerFlagModel.createFlagLayer` as one model per
+/// attachment: standing has the pole (texOffs 44,0) and the bar at y -44; wall banners drop
+/// the pole and hang the bar at y -20.5, z 9.5. The flag (texOffs 0,0) hangs from its pivot
+/// (standing (0, -44, 0), wall (0, -20.5, 10.5)) and waves by `BannerFlagModel.setupAnim`.
+fn banner_model(wall: bool) -> &'static CubeModel {
+    static STANDING: OnceLock<CubeModel> = OnceLock::new();
+    static WALL: OnceLock<CubeModel> = OnceLock::new();
+    let model = if wall { &WALL } else { &STANDING };
+    model.get_or_init(|| {
+        let mut children = Vec::new();
+        if !wall {
+            children.push(ModelPart {
+                name: "pole".into(),
+                pivot: Vec3::ZERO,
+                rotation: Vec3::ZERO,
+                visible: true,
+                // addBox(-1, -42, -1, 2, 42, 2), texOffs(44, 0)
+                cubes: vec![Cube {
+                    origin: Vec3::new(-1.0, -42.0, -1.0),
+                    size: Vec3::new(2.0, 42.0, 2.0),
+                    inflate: 0.0,
+                    uv: [44, 0],
+                    mirror: false,
+                }],
+                children: Vec::new(),
+            });
+        }
+        let bar_y = if wall { -20.5 } else { -44.0 };
+        let bar_z = if wall { 9.5 } else { -1.0 };
+        children.push(ModelPart {
+            name: "bar".into(),
+            pivot: Vec3::ZERO,
+            rotation: Vec3::ZERO,
+            visible: true,
+            // addBox(-10, bar_y, bar_z, 20, 2, 2), texOffs(0, 42)
+            cubes: vec![Cube {
+                origin: Vec3::new(-10.0, bar_y, bar_z),
+                size: Vec3::new(20.0, 2.0, 2.0),
+                inflate: 0.0,
+                uv: [0, 42],
+                mirror: false,
+            }],
+            children: Vec::new(),
+        });
+        let flag_pivot = if wall {
+            Vec3::new(0.0, -20.5, 10.5)
+        } else {
+            Vec3::new(0.0, -44.0, 0.0)
+        };
+        children.push(ModelPart {
+            name: "flag".into(),
+            pivot: flag_pivot,
+            rotation: Vec3::ZERO,
+            visible: true,
+            // addBox(-10, 0, -2, 20, 40, 1), texOffs(0, 0)
+            cubes: vec![Cube {
+                origin: Vec3::new(-10.0, 0.0, -2.0),
+                size: Vec3::new(20.0, 40.0, 1.0),
+                inflate: 0.0,
+                uv: [0, 0],
+                mirror: false,
+            }],
+            children: Vec::new(),
+        });
+        CubeModel {
+            texture: Identifier::minecraft("entity/banner/banner_base"),
+            tex_width: 64,
+            tex_height: 64,
+            root: ModelPart {
+                name: "root".into(),
+                pivot: Vec3::ZERO,
+                rotation: Vec3::ZERO,
+                visible: true,
+                cubes: Vec::new(),
+                children,
+            },
+        }
+    })
+}
+
+/// Vanilla `BannerRenderer.modelTransformation`: translate (0.5, 0, 0.5), rotate `-angle`
+/// about y, scale (2/3, -2/3, -2/3) — the y/z flip maps the model's y-down entity convention
+/// onto the world — and the model renderer's 1/16 from pixels to blocks. `angle` is the
+/// `rotation` segment (standing) or the wall `facing.toYRot()`.
+fn banner_root(pos: BlockPos, angle: f32, camera: glam::DVec3) -> Mat4 {
+    let p = pos.as_dvec3() - camera;
+    Mat4::from_translation(p.as_vec3() + Vec3::new(0.5, 0.0, 0.5))
+        * Mat4::from_rotation_y((-angle).to_radians())
+        * Mat4::from_scale(Vec3::new(2.0 / 3.0, -2.0 / 3.0, -2.0 / 3.0))
+        * Mat4::from_scale(Vec3::splat(1.0 / 16.0))
+}
+
+/// Vanilla `BannerFlagModel.setupAnim`: the flag swings by
+/// `(-0.0125 + 0.01 * cos(2 * PI * phase)) * PI` radians about its pivot's x axis.
+pub fn banner_flag_rotation(phase: f32) -> f32 {
+    (-0.0125 + 0.01 * (std::f32::consts::TAU * phase).cos()) * std::f32::consts::PI
+}
+
+/// Vanilla `BannerRenderer.extractRenderState`'s phase:
+/// `(floorMod(x*7 + y*9 + z*13 + gameTime, 100) + partial) / 100`.
+pub fn banner_wave_phase(pos: BlockPos, game_time: i64, partial: f32) -> f32 {
+    let hash = pos.x * 7 + pos.y * 9 + pos.z * 13;
+    (hash.wrapping_add(game_time as i32).rem_euclid(100) as f32 + partial) / 100.0
+}
+
 /// Poses one block entity into `out` (camera-relative, the entity stream's convention).
 /// `rect` is the texture's atlas rectangle, `light` the lightmap coordinates (block, sky).
 pub(crate) fn emit_block_entity(
@@ -618,6 +762,64 @@ pub(crate) fn emit_block_entity(
         // Signs draw no cubes here: the board is the chunk's block model and the text goes
         // through the entity renderer's glyph pass (`emit_sign_text`), which needs the font.
         BlockEntityKind::Sign { .. } => {}
+        // Banners likewise draw per-pattern layers with a tint, handled by
+        // `EntityRenderer::emit_banner`.
+        BlockEntityKind::Banner { .. } => {}
+    }
+}
+
+/// Poses one banner's layers, following vanilla `BannerRenderer.submitBanner`: the model
+/// (pole, bar, flag) through `modelTransformation`, the flag waving by the phase, then one
+/// pass per pattern layer (the base sprite untinted, the `base` pattern in the banner's
+/// colour, then up to 16 patterns in their own), each through the same geometry with its
+/// texture and diffuse tint. Draw order is back to front: bar and pole first, then the flag.
+pub(crate) fn emit_banner(
+    out: &mut Vec<EntityVertex>,
+    inst: &BlockEntityInstance,
+    camera: glam::DVec3,
+    angle: f32,
+    rect_of: &mut dyn FnMut(&Identifier) -> [u32; 4],
+) {
+    use crate::entity::emit_part_tinted;
+    let wall = matches!(inst.kind, BlockEntityKind::Banner { wall: true });
+    let model = banner_model(wall);
+    let (sky, block) = inst.light;
+    let light = (block, sky);
+    let mut pose = PoseOverrides::default();
+    pose.rotations.push((
+        "flag".into(),
+        Vec3::new(banner_flag_rotation(inst.banner_phase), 0.0, 0.0),
+    ));
+    let root = banner_root(inst.pos, angle, camera);
+    let Some(data) = inst.banner.clone() else {
+        return;
+    };
+    // (texture, tint as linear rgb) per layer, vanilla's submitBanner then submitPatterns.
+    let mut layers: Vec<(Identifier, [f32; 3])> = Vec::new();
+    let diffuse = |c: u32| {
+        [
+            ((c >> 16) & 0xFF) as f32 / 255.0,
+            ((c >> 8) & 0xFF) as f32 / 255.0,
+            (c & 0xFF) as f32 / 255.0,
+        ]
+    };
+    // The base sprite (banner_base) is drawn white; the `base` pattern in the banner colour.
+    layers.push((model.texture.clone(), [1.0; 3]));
+    layers.push((
+        Identifier::minecraft("entity/banner/base"),
+        diffuse(DYE_DIFFUSE_COLOR[data.base as usize % 16]),
+    ));
+    for layer in data.layers.iter().take(16) {
+        // The pattern's texture is `entity/banner/<asset id>`; the registry id's path is the
+        // asset id for every vanilla pattern.
+        let tex = Identifier::minecraft(&format!("entity/banner/{}", layer.pattern.path()));
+        layers.push((tex, diffuse(DYE_DIFFUSE_COLOR[layer.color as usize % 16])));
+    }
+    for (texture, tint) in &layers {
+        let rect = rect_of(texture);
+        for part in &model.root.children {
+            emit_part_tinted(out, model, part, &pose, root, rect, light, 0.0, *tint);
+        }
     }
 }
 
@@ -651,6 +853,8 @@ mod tests {
             light: (15, 0),
             sign_angle: 0.0,
             text: None,
+            banner_phase: 0.0,
+            banner: None,
         }
     }
 
@@ -664,6 +868,8 @@ mod tests {
             light: (15, 0),
             sign_angle: 0.0,
             text: None,
+            banner_phase: 0.0,
+            banner: None,
         }
     }
 
@@ -813,6 +1019,23 @@ mod tests {
             kind_of(&Identifier::minecraft("hanging_sign"), &block, false),
             Some(BlockEntityKind::Sign { hanging: true })
         );
+        // Banners: standing and wall (the wall from the block id).
+        assert_eq!(
+            kind_of(
+                &Identifier::minecraft("banner"),
+                &Identifier::minecraft("red_banner"),
+                false
+            ),
+            Some(BlockEntityKind::Banner { wall: false })
+        );
+        assert_eq!(
+            kind_of(
+                &Identifier::minecraft("banner"),
+                &Identifier::minecraft("blue_wall_banner"),
+                false
+            ),
+            Some(BlockEntityKind::Banner { wall: true })
+        );
         // Unknown and out of scope.
         assert_eq!(
             kind_of(&Identifier::minecraft("copper_chest"), &block, false),
@@ -850,6 +1073,83 @@ mod tests {
             color,
             glowing,
         }
+    }
+
+    /// A standing banner's model spans the block: the pole rises from the ground to y = 42/24
+    /// blocks (scale 2/3: 42 pixels * 2/3 / 16 = 1.75), the flag hangs below the bar.
+    #[test]
+    fn banner_model_standing_geometry() {
+        let model = banner_model(false);
+        assert_eq!(model.root.children.len(), 3);
+        let names: Vec<&str> = model.root.children.iter().map(|p| &*p.name).collect();
+        assert_eq!(names, vec!["pole", "bar", "flag"]);
+        // The pole: addBox(-1, -42, -1, 2, 42, 2).
+        let pole = &model.root.children[0];
+        assert_eq!(pole.cubes[0].origin, Vec3::new(-1.0, -42.0, -1.0));
+        assert_eq!(pole.cubes[0].size, Vec3::new(2.0, 42.0, 2.0));
+        // The bar: addBox(-10, -44, -1, 20, 2, 2).
+        let bar = &model.root.children[1];
+        assert_eq!(bar.cubes[0].origin, Vec3::new(-10.0, -44.0, -1.0));
+        assert_eq!(bar.cubes[0].size, Vec3::new(20.0, 2.0, 2.0));
+        // The flag: pivot (0, -44, 0), addBox(-10, 0, -2, 20, 40, 1).
+        let flag = &model.root.children[2];
+        assert_eq!(flag.pivot, Vec3::new(0.0, -44.0, 0.0));
+        assert_eq!(flag.cubes[0].origin, Vec3::new(-10.0, 0.0, -2.0));
+        assert_eq!(flag.cubes[0].size, Vec3::new(20.0, 40.0, 1.0));
+        // The wall banner drops the pole and hangs the bar and flag on the wall's z.
+        let wall = banner_model(true);
+        assert_eq!(wall.root.children.len(), 2);
+        assert_eq!(wall.root.children[0].cubes[0].origin.y, -20.5);
+        assert_eq!(wall.root.children[0].cubes[0].origin.z, 9.5);
+        assert_eq!(wall.root.children[1].pivot, Vec3::new(0.0, -20.5, 10.5));
+    }
+
+    /// Vanilla `BannerRenderer.modelTransformation`: translate (0.5, 0, 0.5), rotate -angle,
+    /// scale (2/3, -2/3, -2/3) then 1/16 (model pixels to blocks). The ground point of the
+    /// pole (0, 0, 0 in model space) maps to the block centre at floor level.
+    #[test]
+    fn banner_root_places_the_block_centre() {
+        let pos = BlockPos::new(0, 0, 0);
+        let m = banner_root(pos, 0.0, glam::DVec3::ZERO);
+        // Model point (0, 0, 0): the pole's ground point.
+        let p = m.transform_point3(Vec3::ZERO);
+        assert!((p.x - 0.5).abs() < 1e-6 && p.y.abs() < 1e-6 && (p.z - 0.5).abs() < 1e-6);
+        // The pole top (model y -42, flipped up by the scale) rises 42 * 2/3 / 16 = 1.75
+        // blocks above the block's floor.
+        let top = m.transform_point3(Vec3::new(0.0, -42.0, 0.0));
+        assert!((top.y - 1.75).abs() < 1e-6, "pole top: {}", top.y);
+        // The flag's x extents (±10 pixels) map to ±10 * 2/3 / 16 = ±0.4167.
+        let left = m.transform_point3(Vec3::new(-10.0, -44.0, 0.0));
+        assert!((left.x - (0.5 - 10.0 * 2.0 / 3.0 / 16.0)).abs() < 1e-6);
+    }
+
+    /// Vanilla `BannerFlagModel.setupAnim`'s swing and `BannerRenderer`'s phase:
+    /// `(-0.0125 + 0.01 * cos(2 * PI * phase)) * PI` about x, phase over position hash and
+    /// game time mod 100.
+    #[test]
+    fn banner_wave_matches_vanilla() {
+        // phase 0: cos(0) = 1 -> (-0.0125 + 0.01) * PI = -0.0025 * PI.
+        assert!(
+            (banner_flag_rotation(0.0) - (-0.0025 * std::f32::consts::PI)).abs() < 1e-6,
+            "{}",
+            banner_flag_rotation(0.0)
+        );
+        // phase 0.5: cos(PI) = -1 -> (-0.0125 - 0.01) * PI = -0.0225 * PI.
+        assert!(
+            (banner_flag_rotation(0.5) - (-0.0225 * std::f32::consts::PI)).abs() < 1e-6,
+            "{}",
+            banner_flag_rotation(0.5)
+        );
+        // The phase: floorMod(x*7 + y*9 + z*13 + gameTime, 100), over 100, plus partial.
+        let a = banner_wave_phase(BlockPos::new(0, 0, 0), 0, 0.0);
+        assert_eq!(a, 0.0);
+        let b = banner_wave_phase(BlockPos::new(1, 0, 0), 0, 0.0);
+        assert_eq!(b, 0.07);
+        let c = banner_wave_phase(BlockPos::new(0, 0, 0), 50, 0.5);
+        assert_eq!(c, 0.505);
+        // Negative positions wrap (floorMod).
+        let d = banner_wave_phase(BlockPos::new(-1, 0, 0), 0, 0.0);
+        assert_eq!(d, 0.93);
     }
 
     /// Vanilla `AbstractSignRenderer.getDarkColor`: non-glowing text is the dye colour scaled

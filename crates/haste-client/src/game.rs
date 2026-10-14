@@ -245,6 +245,9 @@ pub struct ViewState {
     pub eye_height: f64,
     /// Time of day in ticks (first world clock of `set_time`; 6000 = noon until one arrives).
     pub time_of_day: i64,
+    /// World age in ticks (`set_time`'s `world_age`), for game-time-keyed animations
+    /// (vanilla `Level.getGameTime`: `BannerRenderer`'s wave phase).
+    pub world_age: i64,
     /// Whether the current dimension has a sky.
     pub has_sky: bool,
     /// Server view distance in chunks.
@@ -483,6 +486,7 @@ impl Shared {
                 feet: DVec3::ZERO,
                 eye_height: 0.0,
                 time_of_day: 6000,
+                world_age: 0,
                 has_sky,
                 view_distance,
                 block_target: None,
@@ -1018,6 +1022,7 @@ fn tick_once(
     view.lightmap_tick_count = lm.tick_count;
     view.eye_height = s.player.eye_height();
     view.time_of_day = s.time_of_day.unwrap_or(6000);
+    view.world_age = s.world_age;
     view.has_sky = s.dimension.has_skylight;
     view.block_target = s.player.target();
     view.eye_in_water = s.player.state.eyes_in_water;
