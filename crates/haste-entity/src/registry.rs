@@ -868,7 +868,7 @@ pub fn entity_type_name(kind: RegistryIndex) -> Option<String> {
 /// The table-covered entity type names by protocol id (loaded lazily, once per process).
 pub fn entity_type_names() -> Option<&'static HashMap<RegistryIndex, String>> {
     static NAMES: OnceLock<Option<HashMap<RegistryIndex, String>>> = OnceLock::new();
-    NAMES.get_or_init(|| load_entity_type_names()).as_ref()
+    NAMES.get_or_init(load_entity_type_names).as_ref()
 }
 
 /// Whether the tree contains a part named "head" (computed once per type, not per frame).
