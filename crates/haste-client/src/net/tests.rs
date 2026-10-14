@@ -102,6 +102,10 @@ impl EntitySink for FakeEntities {
     fn set_velocity(&mut self, id: EntityId, v: DVec3) {
         self.log.push(format!("velocity {} {}", id.0, v.y));
     }
+    fn swing(&mut self, id: EntityId, hand: i32, animation: i32, duration: i32) {
+        self.log
+            .push(format!("swing {} {hand} {animation} {duration}", id.0));
+    }
     fn mark_hurt(&mut self, id: EntityId) {
         self.log.push(format!("hurt {}", id.0));
     }
@@ -332,6 +336,18 @@ fn entity_packets_reach_the_store() {
         entity_ids: vec![3],
     }));
     assert_eq!(r.entities.len(), 0);
+}
+
+#[test]
+fn swing_animation_reaches_the_store() {
+    let mut r = Rig::new();
+    r.apply(ClientboundPlay::SwingAnimation(cb::SwingAnimation {
+        entity_id: 3,
+        hand: 0,
+        animation: 1,
+        duration: 6,
+    }));
+    assert_eq!(r.entities.log, ["swing 3 0 1 6"]);
 }
 
 #[test]
@@ -1032,4 +1048,78 @@ fn an_attached_firework_boosts_the_gliding_player() {
         entity_ids: vec![20],
     }));
     assert_eq!(r.session.attached_firework, None);
+}
+
+#[test]
+fn lightmap_boss_darkening_follows_the_vanilla_ramp() {
+    // GameRenderer.tick: +0.05/tick while a boss bar asks to darken (cap 1), -0.0125/tick
+    // otherwise. The per-frame value interpolates boss_darkening_o -> boss_darkening.
+    let mut s = LightmapState::default();
+    s.boss_bars.insert(1, true);
+    s.tick();
+    assert!((s.boss_darkening - 0.05).abs() < 1e-6);
+    assert_eq!(s.boss_darkening_o, 0.0);
+    for _ in 0..40 {
+        s.tick();
+    }
+    assert_eq!(s.boss_darkening, 1.0);
+    // BossEvent.setDarkenScreen / removal through the packet action.
+    s.boss_bars.insert(7, false);
+    s.boss_event(7, &cb::BossEventAction::UpdateFlags(0x01));
+    assert!(s.boss_bars[&7]);
+    s.boss_event(7, &cb::BossEventAction::Remove);
+    assert!(!s.boss_bars.contains_key(&7));
+    // Clearing the flag ramps back down by 0.0125.
+    s.boss_bars.insert(1, false);
+    s.tick();
+    assert!((s.boss_darkening - (1.0 - 0.0125)).abs() < 1e-6);
+}
+
+#[test]
+fn lightmap_effects_and_flicker_tick() {
+    let ids = crate::player::interact::LightmapEffectIds {
+        night_vision: Some(1),
+        darkness: Some(2),
+    };
+    let mut s = LightmapState::default();
+    s.update_effect(ids, 1, 100);
+    s.update_effect(ids, 2, 50);
+    assert_eq!(s.night_vision, Some(100));
+    assert_eq!(s.darkness, Some(50));
+    // An unrelated effect changes nothing.
+    s.update_effect(ids, 9, 10);
+    assert_eq!(s.night_vision, Some(100));
+    s.tick();
+    // MobEffectInstance.tickClient decrements both durations by one.
+    assert_eq!(s.night_vision, Some(99));
+    assert_eq!(s.darkness, Some(49));
+    // Darkness blends in over 22 ticks (one step per tick); its factor brackets the frame.
+    assert!((s.darkness_blend.factor(1.0) - 1.0 / 22.0).abs() < 1e-6);
+    // Infinite durations stay -1.
+    s.update_effect(ids, 1, -1);
+    s.tick();
+    assert_eq!(s.night_vision, Some(-1));
+    // A finite effect that reaches 0 is removed (LivingEntity.tickEffects).
+    s.update_effect(ids, 1, 1);
+    s.tick();
+    assert_eq!(s.night_vision, None);
+    s.remove_effect(ids, 2);
+    assert_eq!(s.darkness, None);
+    // The flicker random walk stays in a sane range.
+    assert!(s.flicker.abs() < 1.0);
+}
+
+#[test]
+fn lightmap_lightning_flashes_for_two_ticks() {
+    // LightningBolt.tick on the client -> ClientLevel.setSkyFlashTime(2), which ClientLevel.tick
+    // decrements by one each tick.
+    let mut s = LightmapState::default();
+    s.lightning();
+    assert_eq!(s.sky_flash_time, 2);
+    s.tick();
+    assert_eq!(s.sky_flash_time, 1);
+    s.tick();
+    assert_eq!(s.sky_flash_time, 0);
+    s.tick();
+    assert_eq!(s.sky_flash_time, 0);
 }

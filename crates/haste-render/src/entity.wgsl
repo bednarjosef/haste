@@ -18,13 +18,19 @@ struct Camera {
 
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var atlas: texture_2d<f32>;
+// The vanilla light texture (LightTexture), shared with the terrain: block light on u,
+// sky light on v, sampled at texel centres like vanilla's sample_lightmap.
+@group(2) @binding(0) var lightmap_texture: texture_2d<f32>;
+@group(2) @binding(1) var lightmap_sampler: sampler;
 
 struct VertexIn {
     @location(0) pos: vec3<f32>,
     @location(1) uv: vec2<f32>,
-    // Linear RGB multiplier (light x shade x tint) and alpha.
+    // Linear RGB multiplier (shade x tint) and alpha.
     @location(2) color: vec4<f32>,
     @location(3) rect: vec4<u32>,
+    // Light levels for the light texture: block, sky.
+    @location(4) light: vec4<u32>,
 };
 
 struct VertexOut {
@@ -33,6 +39,7 @@ struct VertexOut {
     @location(1) color: vec4<f32>,
     @location(2) @interpolate(flat) rect: vec4<u32>,
     @location(3) fog: f32,
+    @location(4) light_color: vec3<f32>,
 };
 
 // Vanilla fog.glsl `linear_fog_value`.
@@ -53,6 +60,10 @@ fn vs_main(v: VertexIn) -> VertexOut {
     out.uv = v.uv;
     out.color = v.color;
     out.rect = v.rect;
+    // The vanilla light texture at the entity's (block, sky) light; vertex stage, so an
+    // explicit LOD 0 (the level is constant over the entity like vanilla's UV2).
+    let light_uv = (vec2<f32>(f32(v.light.x), f32(v.light.y)) + 0.5) / 16.0;
+    out.light_color = textureSampleLevel(lightmap_texture, lightmap_sampler, light_uv, 0.0).rgb;
     // Positions are camera-relative; vanilla's two fog bands (see chunk.wgsl).
     let spherical = length(v.pos);
     let cylindrical = max(length(v.pos.xz), abs(v.pos.y));
@@ -72,6 +83,6 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if (c.a < 0.1) {
         discard;
     }
-    let lit = c.rgb * in.color.rgb;
+    let lit = c.rgb * in.color.rgb * in.light_color;
     return vec4<f32>(mix(lit, camera.fog_color.rgb, in.fog), c.a * in.color.a);
 }

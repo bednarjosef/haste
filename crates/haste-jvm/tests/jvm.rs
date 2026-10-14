@@ -1223,15 +1223,31 @@ fn debug_overlay_f3() {
         "debug_overlay_f3: {count_before} text commands before F3, {} after",
         t.len()
     );
-    // the stub's first lines (DebugImpl.lines)
+    // the overlay's vanilla-format lines (DebugScreenEntries' defaults)
     assert!(
         t.iter().any(|x| x.starts_with("Minecraft ")),
         "version line: {t:?}"
     );
-    assert!(t.iter().any(|x| x.ends_with(" fps")), "fps line: {t:?}");
+    assert!(t.iter().any(|x| x.contains(" fps T: ")), "fps line: {t:?}");
     assert!(
         t.iter().any(|x| x.starts_with("XYZ: ")),
         "position line: {t:?}"
+    );
+    assert!(
+        t.iter().any(|x| x.starts_with("Chunk: ")),
+        "chunk line: {t:?}"
+    );
+    assert!(
+        t.iter().any(|x| x.starts_with("Facing: ")),
+        "facing line: {t:?}"
+    );
+    assert!(
+        t.iter().any(|x| x.starts_with("Mem: ")),
+        "memory line: {t:?}"
+    );
+    assert!(
+        t.iter().any(|x| x.starts_with("Java: ")),
+        "system spec line: {t:?}"
     );
     assert!(
         t.len() > count_before,

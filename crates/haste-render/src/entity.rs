@@ -8,7 +8,10 @@ use std::sync::Arc;
 
 use glam::{Mat3, Mat4, Vec3};
 use haste_assets::Assets;
-use haste_core::model::{CubeModel, EntityInstance, ModelPart, PoseOverrides};
+use haste_core::model::{
+    CubeModel, Decoration, EntityInstance, ItemFrameDecoration, ModelPart, PaintingDecoration,
+    PoseOverrides,
+};
 use haste_core::{EntityId, Identifier};
 
 use crate::gui::Shelf;
@@ -25,11 +28,13 @@ pub struct EntityVertex {
     pub uv: [f32; 2],
     pub color: [f32; 4],
     pub rect: [u16; 4],
+    /// Light levels for the vanilla light texture: block, sky, unused, unused.
+    pub light: [u16; 4],
 }
 
 impl EntityVertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
-        0 => Float32x3, 1 => Float32x2, 2 => Float32x4, 3 => Uint16x4
+    const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+        0 => Float32x3, 1 => Float32x2, 2 => Float32x4, 3 => Uint16x4, 4 => Uint16x4
     ];
     pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<EntityVertex>() as u64,
@@ -155,6 +160,8 @@ pub struct EntityRenderer {
     item_models: HashMap<u32, Option<Arc<haste_assets::ItemModel>>>,
     /// The first-person arm model, by [`FirstPerson::slim`] (built once on first use).
     arm_models: [Option<Arc<CubeModel>>; 2],
+    /// The item frame block model quads, by `(glow, map)`, built once on first use.
+    frame_models: HashMap<(bool, bool), Arc<Vec<haste_assets::BakedQuad>>>,
     pub drawn: u32,
 }
 
@@ -164,6 +171,7 @@ impl EntityRenderer {
         queue: Arc<wgpu::Queue>,
         target_format: wgpu::TextureFormat,
         camera_layout: &wgpu::BindGroupLayout,
+        lightmap_layout: &wgpu::BindGroupLayout,
     ) -> EntityRenderer {
         let atlas = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("entity-atlas"),
@@ -208,7 +216,7 @@ impl EntityRenderer {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("entity-pipeline-layout"),
-            bind_group_layouts: &[Some(camera_layout), Some(&layout)],
+            bind_group_layouts: &[Some(camera_layout), Some(&layout), Some(lightmap_layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -272,6 +280,7 @@ impl EntityRenderer {
             item_names: Vec::new(),
             item_models: HashMap::new(),
             arm_models: [None, None],
+            frame_models: HashMap::new(),
             drawn: 0,
         }
     }
@@ -367,10 +376,24 @@ impl EntityRenderer {
             if Some(e.id) == skip {
                 continue;
             }
+            let (sky, block) = self.lights.get(&e.id).copied().unwrap_or((15, 0));
+            if let Some(d) = &e.decoration {
+                let start = self.vertices.len();
+                match d {
+                    Decoration::ItemFrame(f) => {
+                        self.emit_item_frame(e, f, camera, sky, block, assets)
+                    }
+                    Decoration::Painting(p) => self.emit_painting(e, p, camera, sky, block, assets),
+                }
+                if self.vertices.len() > start {
+                    self.drawn += 1;
+                }
+                continue;
+            }
             let (texture, scale) = texture_and_scale(e);
             let rect = self.texture_rect(&texture, assets);
-            let (sky, block) = self.lights.get(&e.id).copied().unwrap_or((15, 0));
-            let light = lightmap(sky, block);
+            // The map is (sky, block); the vertex wants (block, sky).
+            let light = (block, sky);
             let root = Mat4::from_translation((e.pos - camera).as_vec3())
                 * Mat4::from_rotation_y((180.0 - e.yaw).to_radians())
                 * Mat4::from_scale(Vec3::new(-scale, -scale, scale) / 16.0);
@@ -406,10 +429,250 @@ impl EntityRenderer {
         }
     }
 
+    /// One item frame, following vanilla's `ItemFrameRenderer.submit`: the frame block model at
+    /// `direction * 0.46875` turned to face `direction`, then the framed item rotated by
+    /// `rotation * 45` degrees at scale 0.5. Glow frames light the frame at least block-light 5
+    /// and draw the item full-bright.
+    fn emit_item_frame(
+        &mut self,
+        e: &EntityInstance,
+        f: &ItemFrameDecoration,
+        camera: glam::DVec3,
+        sky: u8,
+        block: u8,
+        assets: &mut Assets,
+    ) {
+        let base =
+            Mat4::from_translation((e.pos - camera).as_vec3()) * item_frame_transform(f.facing);
+
+        let map = f
+            .item
+            .and_then(|i| self.item_names.get(i.0 as usize))
+            .is_some_and(|n| n.path() == "filled_map");
+        let quads = self.frame_quads(f.glow, map, assets);
+        // `ItemFrameRenderer.getBlockLightLevel`: glow frames are at least block-light 5.
+        let frame_light = if f.glow {
+            (block.max(5), sky)
+        } else {
+            (block, sky)
+        };
+        let model = base * Mat4::from_translation(Vec3::splat(-0.5));
+        let nm = Mat3::from_mat4(model).inverse().transpose();
+        let mut out = std::mem::take(&mut self.vertices);
+        for q in quads.iter() {
+            let rect = self.texture_rect(&parse_tex(&q.texture), assets);
+            let o = q.direction.offset();
+            push_world_quad(
+                &mut out,
+                model,
+                nm,
+                q.positions.map(Vec3::from),
+                q.uvs,
+                Vec3::new(o[0] as f32, o[1] as f32, o[2] as f32),
+                [1.0; 3],
+                frame_light,
+                rect,
+            );
+        }
+        if let Some(idx) = f.item {
+            if let Some(item) = self.item_model_for(idx, assets) {
+                // Glow frames draw the item full-bright (`getLightCoords(isGlowFrame, 15728880)`,
+                // block 15 / sky 15); otherwise the frame's own (block, sky) light.
+                let item_light = if f.glow { (15, 15) } else { (block, sky) };
+                let root = base * item_frame_item_transform(f.rotation);
+                self.emit_item(&mut out, &item, root, item_light, true, assets);
+            }
+        }
+        self.vertices = out;
+    }
+
+    /// One painting, following vanilla's `PaintingRenderer`: a `width` x `height` grid of front
+    /// quads at z = -1/32 with the variant's sprite, a mirrored back at z = +1/32 and the edge
+    /// strips, all turned by `180 - direction.get2DDataValue() * 90`. An unknown variant draws
+    /// the back sprite on the front too (never a panic).
+    fn emit_painting(
+        &mut self,
+        e: &EntityInstance,
+        p: &PaintingDecoration,
+        camera: glam::DVec3,
+        sky: u8,
+        block: u8,
+        assets: &mut Assets,
+    ) {
+        let base =
+            Mat4::from_translation((e.pos - camera).as_vec3()) * painting_transform(p.facing);
+        // Paintings use the entity's own light (`PaintingRenderer` draws with `state.lightCoords`).
+        let light = (block, sky);
+        let width = p.width.max(1) as i32;
+        let height = p.height.max(1) as i32;
+        let back = self.texture_rect(&Identifier::minecraft("painting/back"), assets);
+        let front = p
+            .front
+            .as_ref()
+            .map(|id| self.texture_rect(id, assets))
+            .unwrap_or(back);
+        let nm = Mat3::from_mat4(base).inverse().transpose();
+        let mut out = std::mem::take(&mut self.vertices);
+        let (ox, oy) = (-(width as f32) / 2.0, -(height as f32) / 2.0);
+        let (du, dv) = (1.0 / width as f32, 1.0 / height as f32);
+        const Z: f32 = 0.03125;
+        // The edge strips sample the back sprite's top/bottom 1/16 and left/right 1/16.
+        let (edge_v, edge_u) = (0.0625f32, 0.0625f32);
+        let quad = |out: &mut Vec<EntityVertex>, p: [Vec3; 4], uv: [[f32; 2]; 4], n: Vec3, rect| {
+            push_world_quad(out, base, nm, p, uv, n, [1.0; 3], light, rect);
+        };
+        for sx in 0..width {
+            for sy in 0..height {
+                let x0 = ox + (sx + 1) as f32;
+                let x1 = ox + sx as f32;
+                let y0 = oy + (sy + 1) as f32;
+                let y1 = oy + sy as f32;
+                let fu0 = du * (width - sx) as f32;
+                let fu1 = du * (width - (sx + 1)) as f32;
+                let fv0 = dv * (height - sy) as f32;
+                let fv1 = dv * (height - (sy + 1)) as f32;
+                quad(
+                    &mut out,
+                    [
+                        Vec3::new(x0, y1, -Z),
+                        Vec3::new(x1, y1, -Z),
+                        Vec3::new(x1, y0, -Z),
+                        Vec3::new(x0, y0, -Z),
+                    ],
+                    [[fu1, fv0], [fu0, fv0], [fu0, fv1], [fu1, fv1]],
+                    Vec3::new(0.0, 0.0, -1.0),
+                    front,
+                );
+                quad(
+                    &mut out,
+                    [
+                        Vec3::new(x0, y0, Z),
+                        Vec3::new(x1, y0, Z),
+                        Vec3::new(x1, y1, Z),
+                        Vec3::new(x0, y1, Z),
+                    ],
+                    [[1.0, 0.0], [0.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+                    Vec3::new(0.0, 0.0, 1.0),
+                    back,
+                );
+                if sy == height - 1 {
+                    quad(
+                        &mut out,
+                        [
+                            Vec3::new(x0, y0, -Z),
+                            Vec3::new(x1, y0, -Z),
+                            Vec3::new(x1, y0, Z),
+                            Vec3::new(x0, y0, Z),
+                        ],
+                        [[0.0, 0.0], [1.0, 0.0], [1.0, edge_v], [0.0, edge_v]],
+                        Vec3::new(0.0, 1.0, 0.0),
+                        back,
+                    );
+                }
+                if sy == 0 {
+                    quad(
+                        &mut out,
+                        [
+                            Vec3::new(x0, y1, Z),
+                            Vec3::new(x1, y1, Z),
+                            Vec3::new(x1, y1, -Z),
+                            Vec3::new(x0, y1, -Z),
+                        ],
+                        [[0.0, 0.0], [1.0, 0.0], [1.0, edge_v], [0.0, edge_v]],
+                        Vec3::new(0.0, -1.0, 0.0),
+                        back,
+                    );
+                }
+                if sx == width - 1 {
+                    quad(
+                        &mut out,
+                        [
+                            Vec3::new(x0, y0, Z),
+                            Vec3::new(x0, y1, Z),
+                            Vec3::new(x0, y1, -Z),
+                            Vec3::new(x0, y0, -Z),
+                        ],
+                        [[edge_u, 0.0], [edge_u, 1.0], [0.0, 1.0], [0.0, 0.0]],
+                        Vec3::new(-1.0, 0.0, 0.0),
+                        back,
+                    );
+                }
+                if sx == 0 {
+                    quad(
+                        &mut out,
+                        [
+                            Vec3::new(x1, y0, -Z),
+                            Vec3::new(x1, y1, -Z),
+                            Vec3::new(x1, y1, Z),
+                            Vec3::new(x1, y0, Z),
+                        ],
+                        [[edge_u, 0.0], [edge_u, 1.0], [0.0, 1.0], [0.0, 0.0]],
+                        Vec3::new(1.0, 0.0, 0.0),
+                        back,
+                    );
+                }
+            }
+        }
+        self.vertices = out;
+    }
+
     /// Item registry names by protocol id (for the held item).
     pub fn set_item_names(&mut self, names: Vec<Identifier>) {
         self.item_names = names;
         self.item_models.clear();
+    }
+
+    /// The item model of a registry index, loaded once and cached (`air` and unknown ids map to
+    /// `None`, never a panic).
+    fn item_model_for(
+        &mut self,
+        i: haste_core::RegistryIndex,
+        assets: &mut Assets,
+    ) -> Option<Arc<haste_assets::ItemModel>> {
+        if let Some(m) = self.item_models.get(&i.0) {
+            return m.clone();
+        }
+        let m = self
+            .item_names
+            .get(i.0 as usize)
+            .filter(|n| n.path() != "air")
+            .and_then(|n| assets.item_model(n).ok())
+            .map(Arc::new);
+        self.item_models.insert(i.0, m.clone());
+        m
+    }
+
+    /// The item frame block model quads for a `(glow, map)` combination, resolved from the jar's
+    /// `item_frame` / `glow_item_frame` blockstate (`BlockModelResolver.updateForItemFrame`) once
+    /// and cached. An unreadable model yields no quads, never a panic.
+    fn frame_quads(
+        &mut self,
+        glow: bool,
+        map: bool,
+        assets: &mut Assets,
+    ) -> Arc<Vec<haste_assets::BakedQuad>> {
+        if let Some(q) = self.frame_models.get(&(glow, map)) {
+            return q.clone();
+        }
+        let block = if glow {
+            "glow_item_frame"
+        } else {
+            "item_frame"
+        };
+        let mut quads = Vec::new();
+        if let Ok(def) = assets.blockstate(&Identifier::minecraft(block)) {
+            let props = vec![("map".to_string(), map.to_string())];
+            for r in def.model_refs_for(&props) {
+                if let Ok(id) = Identifier::parse(&r.model) {
+                    if let Ok(mut q) = assets.model_quads(&id) {
+                        quads.append(&mut q);
+                    }
+                }
+            }
+        }
+        let arc = Arc::new(quads);
+        self.frame_models.insert((glow, map), arc.clone());
+        arc
     }
 
     /// The empty hand's arm model for the skin's arm width, built once (no per-frame work).
@@ -442,80 +705,15 @@ impl EntityRenderer {
         let Some(fp) = fp else {
             return;
         };
-        let light = lightmap(fp.light.0, fp.light.1);
-        let item = fp.item.and_then(|i| {
-            if let Some(m) = self.item_models.get(&i.0) {
-                return m.clone();
-            }
-            let m = self
-                .item_names
-                .get(i.0 as usize)
-                .filter(|n| n.path() != "air")
-                .and_then(|n| assets.item_model(n).ok())
-                .map(Arc::new);
-            self.item_models.insert(i.0, m.clone());
-            m
-        });
+        // `FirstPerson::light` is (sky, block); the vertex wants (block, sky).
+        let light = (fp.light.1, fp.light.0);
+        let item = fp.item.and_then(|i| self.item_model_for(i, assets));
         let mut out = std::mem::take(&mut self.hand);
         let root = view_to_world * hand_root_matrix(fp, view, partial);
         match item {
             Some(model) => {
-                for part in &model.parts {
-                    let m = root * item_arm_matrix(fp, partial) * item_display_matrix(part);
-                    let nm = Mat3::from_mat4(m).inverse().transpose();
-                    let tint = |i: Option<u32>| -> [f32; 3] {
-                        i.and_then(|i| part.tints.get(i as usize))
-                            .map(|c| {
-                                let f = |s: u32| {
-                                    crate::sky::linear([((c >> s) & 0xFF) as f32 / 255.0; 3])[0]
-                                };
-                                [f(16), f(8), f(0)]
-                            })
-                            .unwrap_or([1.0; 3])
-                    };
-                    match &part.geometry {
-                        haste_assets::ItemGeometry::None => {}
-                        haste_assets::ItemGeometry::Generated { layers } => {
-                            // The extruded sprite: front face, mirrored back face and the
-                            // 1/16-deep sides at its opaque edges (vanilla `ItemModelGenerator`).
-                            for (i, layer) in layers.iter().enumerate() {
-                                let rect = self.texture_rect(&parse_tex(&layer.texture), assets);
-                                let t = tint(Some(i as u32));
-                                for q in &layer.quads {
-                                    let o = q.direction.offset();
-                                    push_world_quad(
-                                        &mut out,
-                                        m,
-                                        nm,
-                                        q.positions.map(Vec3::from),
-                                        q.uvs,
-                                        Vec3::new(o[0] as f32, o[1] as f32, o[2] as f32),
-                                        t,
-                                        light,
-                                        rect,
-                                    );
-                                }
-                            }
-                        }
-                        haste_assets::ItemGeometry::Elements(quads) => {
-                            for q in quads {
-                                let rect = self.texture_rect(&parse_tex(&q.texture), assets);
-                                let o = q.direction.offset();
-                                push_world_quad(
-                                    &mut out,
-                                    m,
-                                    nm,
-                                    q.positions.map(Vec3::from),
-                                    q.uvs,
-                                    Vec3::new(o[0] as f32, o[1] as f32, o[2] as f32),
-                                    tint(q.tint_index),
-                                    light,
-                                    rect,
-                                );
-                            }
-                        }
-                    }
-                }
+                let root = root * item_arm_matrix(fp, partial);
+                self.emit_item(&mut out, &model, root, light, false, assets);
             }
             None => {
                 let steve = Identifier::minecraft("entity/player/wide/steve");
@@ -545,6 +743,80 @@ impl EntityRenderer {
         if !self.hand.is_empty() {
             self.queue
                 .write_buffer(&self.hand_buffer, 0, bytemuck::cast_slice(&self.hand));
+        }
+    }
+
+    /// Emits an item model's geometry through `root` (model space, 0..1 blocks, through the
+    /// part's display transform) into `out`. `use_fixed` picks vanilla's `fixed` display context
+    /// (item frames) instead of `firstperson_righthand`.
+    fn emit_item(
+        &mut self,
+        out: &mut Vec<EntityVertex>,
+        model: &haste_assets::ItemModel,
+        root: Mat4,
+        light: (u8, u8),
+        use_fixed: bool,
+        assets: &mut Assets,
+    ) {
+        for part in &model.parts {
+            let display = if use_fixed {
+                &part.fixed
+            } else {
+                &part.firstperson
+            };
+            let m = root * item_display_matrix(part, display);
+            let nm = Mat3::from_mat4(m).inverse().transpose();
+            let tint = |i: Option<u32>| -> [f32; 3] {
+                i.and_then(|i| part.tints.get(i as usize))
+                    .map(|c| {
+                        let f =
+                            |s: u32| crate::sky::linear([((c >> s) & 0xFF) as f32 / 255.0; 3])[0];
+                        [f(16), f(8), f(0)]
+                    })
+                    .unwrap_or([1.0; 3])
+            };
+            match &part.geometry {
+                haste_assets::ItemGeometry::None => {}
+                haste_assets::ItemGeometry::Generated { layers } => {
+                    // The extruded sprite: front face, mirrored back face and the 1/16-deep
+                    // sides at its opaque edges (vanilla `ItemModelGenerator`).
+                    for (i, layer) in layers.iter().enumerate() {
+                        let rect = self.texture_rect(&parse_tex(&layer.texture), assets);
+                        let t = tint(Some(i as u32));
+                        for q in &layer.quads {
+                            let o = q.direction.offset();
+                            push_world_quad(
+                                out,
+                                m,
+                                nm,
+                                q.positions.map(Vec3::from),
+                                q.uvs,
+                                Vec3::new(o[0] as f32, o[1] as f32, o[2] as f32),
+                                t,
+                                light,
+                                rect,
+                            );
+                        }
+                    }
+                }
+                haste_assets::ItemGeometry::Elements(quads) => {
+                    for q in quads {
+                        let rect = self.texture_rect(&parse_tex(&q.texture), assets);
+                        let o = q.direction.offset();
+                        push_world_quad(
+                            out,
+                            m,
+                            nm,
+                            q.positions.map(Vec3::from),
+                            q.uvs,
+                            Vec3::new(o[0] as f32, o[1] as f32, o[2] as f32),
+                            tint(q.tint_index),
+                            light,
+                            rect,
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -628,10 +900,45 @@ pub(crate) fn arm_model(slim: bool) -> CubeModel {
 /// A held item's model matrix: its `display.firstperson_righthand` transform and composite
 /// `transformation`, then the recentring vanilla's `ItemTransform.apply` ends with
 /// (the model's unit cube is drawn around the origin).
-pub(crate) fn item_display_matrix(part: &haste_assets::ItemModelPart) -> Mat4 {
-    crate::gui::display_matrix(&part.firstperson)
+pub(crate) fn item_display_matrix(
+    part: &haste_assets::ItemModelPart,
+    display: &haste_assets::DisplayTransform,
+) -> Mat4 {
+    crate::gui::display_matrix(display)
         * crate::gui::part_matrix(&part.transformation)
         * Mat4::from_translation(Vec3::splat(-0.5))
+}
+
+/// `ItemFrameRenderer.submit`'s frame transform: translate to `direction * 0.46875`, then the
+/// rotations that turn the block model to face `direction` (horizontal: yaw `180 - toYRot`;
+/// vertical: pitch `-90 * axisStep` then yaw 180).
+pub(crate) fn item_frame_transform(facing: haste_core::Direction) -> Mat4 {
+    let (fx, fy, fz) = (
+        facing.step_x() as f32,
+        facing.step_y() as f32,
+        facing.step_z() as f32,
+    );
+    let (x_rot, y_rot) = if facing.is_horizontal() {
+        (0.0, 180.0 - facing.to_y_rot())
+    } else {
+        (-90.0 * facing.axis_direction_step() as f32, 180.0)
+    };
+    Mat4::from_translation(Vec3::new(fx, fy, fz) * 0.46875)
+        * Mat4::from_rotation_x(x_rot.to_radians())
+        * Mat4::from_rotation_y(y_rot.to_radians())
+}
+
+/// `ItemFrameRenderer.submit`'s item transform: forward to the frame's face, `rotation * 45`
+/// degrees around Z, then scale 0.5.
+pub(crate) fn item_frame_item_transform(rotation: u8) -> Mat4 {
+    Mat4::from_translation(Vec3::new(0.0, 0.0, 0.4375))
+        * Mat4::from_rotation_z((rotation as f32 * 45.0).to_radians())
+        * Mat4::from_scale(Vec3::splat(0.5))
+}
+
+/// `PaintingRenderer.submit`'s rotation: yaw `180 - direction.get2DDataValue() * 90`.
+pub(crate) fn painting_transform(facing: haste_core::Direction) -> Mat4 {
+    Mat4::from_rotation_y((180.0 - facing.to_2d_data_value() as f32 * 90.0).to_radians())
 }
 
 /// `FirstPersonHandsAndItemsRenderer.submitHandsWithItems`'s outer transforms, in view space:
@@ -730,12 +1037,12 @@ fn push_world_quad(
     uv: [[f32; 2]; 4],
     n: Vec3,
     tint: [f32; 3],
-    light: f32,
+    light: (u8, u8),
     rect: [u32; 4],
 ) {
     let p = p.map(|v| m.transform_point3(v));
     let nw = (normal_matrix * n).normalize_or_zero();
-    let s = entity_shade(nw) * light;
+    let s = entity_shade(nw);
     let color = [tint[0] * s, tint[1] * s, tint[2] * s, 1.0];
     let uv = uv.map(|t| {
         [
@@ -756,14 +1063,9 @@ fn push_world_quad(
             uv: uv[i],
             color,
             rect: r16,
+            light: [light.0 as u16, light.1 as u16, 0, 0],
         });
     }
-}
-
-/// Light level brightness, the same curve as the terrain shader (`chunk.wgsl::lightmap`).
-pub(crate) fn lightmap(sky: u8, block: u8) -> f32 {
-    let f = |l: u8| (l.min(15) as f32 / 15.0).powf(1.55) * 0.95 + 0.05;
-    f(sky).max(f(block))
 }
 
 /// World-space entity shading: two directional lights at 0.6 and 0.4 ambient (the same
@@ -818,7 +1120,7 @@ pub(crate) fn emit_part(
     pose: &PoseOverrides,
     parent: Mat4,
     rect: [u32; 4],
-    light: f32,
+    light: (u8, u8),
     hurt: f32,
 ) {
     if !part.visible || pose.hidden.iter().any(|h| h == &part.name) {
@@ -924,7 +1226,7 @@ pub(crate) fn emit_part(
         for (corners, uvr, n) in faces {
             let p = corners.map(|c| m.transform_point3(c));
             let nw = (normal_matrix * n).normalize_or_zero();
-            let s = entity_shade(nw) * light;
+            let s = entity_shade(nw);
             let [r, g, b] = hurt_color(s, hurt);
             let color = [r, g, b, 1.0];
             let uv = [
@@ -947,6 +1249,7 @@ pub(crate) fn emit_part(
                     uv: uv[i],
                     color,
                     rect: r16,
+                    light: [light.0 as u16, light.1 as u16, 0, 0],
                 });
             }
         }
@@ -993,6 +1296,55 @@ mod tests {
             assets
                 .texture_any(&id)
                 .unwrap_or_else(|e| panic!("table texture {texture}: {e:#}"));
+        }
+    }
+
+    /// The item frame block models and the painting sprites this renderer loads must exist in
+    /// the client jar (a typo would only show as placeholder quads at runtime).
+    #[test]
+    #[ignore = "needs the client jar in the cache"]
+    fn frame_and_painting_assets_exist_in_the_jar() {
+        let jar = haste_core::paths::client_jar();
+        if !jar.exists() {
+            eprintln!("ignored: needs the client jar in the cache");
+            return;
+        }
+        let mut assets = haste_assets::Assets::open(
+            &jar,
+            &haste_core::paths::cache_dir().join("assets"),
+            "26.3",
+        )
+        .unwrap();
+        // `BlockModelResolver.updateForItemFrame` -> `item_frame` / `glow_item_frame`.
+        for (block, map) in [
+            ("item_frame", false),
+            ("item_frame", true),
+            ("glow_item_frame", false),
+            ("glow_item_frame", true),
+        ] {
+            let def = assets
+                .blockstate(&Identifier::minecraft(block))
+                .unwrap_or_else(|e| panic!("blockstate {block}: {e:#}"));
+            let refs = def.model_refs_for(&[("map".to_string(), map.to_string())]);
+            assert!(!refs.is_empty(), "{block} map={map} has no model");
+            for r in refs {
+                let id = Identifier::parse(&r.model).unwrap();
+                let quads = assets
+                    .model_quads(&id)
+                    .unwrap_or_else(|e| panic!("model {}: {e:#}", r.model));
+                assert!(!quads.is_empty(), "{} has no quads", r.model);
+                for q in &quads {
+                    assets
+                        .texture_any(&parse_tex(&q.texture))
+                        .unwrap_or_else(|e| panic!("frame texture {}: {e:#}", q.texture));
+                }
+            }
+        }
+        // The painting front sprite and the back sprite (the `paintings` atlas directory).
+        for sprite in ["painting/back", "painting/match", "painting/kebab"] {
+            assets
+                .texture_any(&Identifier::minecraft(sprite))
+                .unwrap_or_else(|e| panic!("painting texture {sprite}: {e:#}"));
         }
     }
 
@@ -1043,7 +1395,7 @@ mod tests {
             &PoseOverrides::default(),
             root,
             [0, 0, 64, 64],
-            1.0,
+            (15, 15),
             0.0,
         );
         assert_eq!(out.len(), 36);
@@ -1157,7 +1509,7 @@ mod tests {
             &PoseOverrides::default(),
             m,
             [0, 0, 64, 64],
-            1.0,
+            (15, 15),
             0.0,
         );
         // The arm and its sleeve, six faces of six vertices each.
@@ -1188,7 +1540,7 @@ mod tests {
             &PoseOverrides::default(),
             swung,
             [0, 0, 64, 64],
-            1.0,
+            (15, 15),
             0.0,
         );
         let moved = out
@@ -1419,5 +1771,99 @@ mod tests {
         let slim = arm_model(true);
         assert_eq!(slim.root.cubes[0].origin, Vec3::new(-2.0, -2.0, -2.0));
         assert_eq!(slim.root.cubes[0].size, Vec3::new(3.0, 12.0, 4.0));
+    }
+
+    #[test]
+    fn item_frame_facing_transform_matches_vanilla() {
+        use haste_core::Direction as D;
+        let deg = |d: f32| d.to_radians();
+        // `ItemFrameRenderer.submit`: translate to `direction * 0.46875`, then the rotations.
+        assert!(close(
+            item_frame_transform(D::North),
+            Mat4::from_translation(Vec3::new(0.0, 0.0, -0.46875)),
+            1e-6
+        ));
+        assert!(close(
+            item_frame_transform(D::South),
+            Mat4::from_translation(Vec3::new(0.0, 0.0, 0.46875))
+                * Mat4::from_rotation_y(deg(180.0)),
+            1e-6
+        ));
+        assert!(close(
+            item_frame_transform(D::West),
+            Mat4::from_translation(Vec3::new(-0.46875, 0.0, 0.0))
+                * Mat4::from_rotation_y(deg(90.0)),
+            1e-6
+        ));
+        assert!(close(
+            item_frame_transform(D::East),
+            Mat4::from_translation(Vec3::new(0.46875, 0.0, 0.0))
+                * Mat4::from_rotation_y(deg(-90.0)),
+            1e-6
+        ));
+        assert!(close(
+            item_frame_transform(D::Up),
+            Mat4::from_translation(Vec3::new(0.0, 0.46875, 0.0))
+                * Mat4::from_rotation_x(deg(-90.0))
+                * Mat4::from_rotation_y(deg(180.0)),
+            1e-6
+        ));
+        assert!(close(
+            item_frame_transform(D::Down),
+            Mat4::from_translation(Vec3::new(0.0, -0.46875, 0.0))
+                * Mat4::from_rotation_x(deg(90.0))
+                * Mat4::from_rotation_y(deg(180.0)),
+            1e-6
+        ));
+    }
+
+    #[test]
+    fn item_frame_item_rotates_45_degrees_per_step_at_half_scale() {
+        // `ItemFrameRenderer.submit`: `rotateDegrees(ZP, rotation * 45)`, then scale 0.5.
+        let rest = item_frame_item_transform(0);
+        assert!(close(
+            rest,
+            Mat4::from_translation(Vec3::new(0.0, 0.0, 0.4375))
+                * Mat4::from_scale(Vec3::splat(0.5)),
+            1e-6
+        ));
+        let one = item_frame_item_transform(1);
+        assert!(close(
+            one,
+            Mat4::from_translation(Vec3::new(0.0, 0.0, 0.4375))
+                * Mat4::from_rotation_z((45.0f32).to_radians())
+                * Mat4::from_scale(Vec3::splat(0.5)),
+            1e-6
+        ));
+        // The model's x axis turns 45 degrees and shrinks to half.
+        let x = one.transform_vector3(Vec3::X);
+        assert!((x.length() - 0.5).abs() < 1e-6, "{x:?}");
+        assert!(
+            (x.x - 0.5 * (45.0f32).to_radians().cos()).abs() < 1e-6
+                && (x.y - 0.5 * (45.0f32).to_radians().sin()).abs() < 1e-6,
+            "{x:?}"
+        );
+    }
+
+    #[test]
+    fn painting_facing_transform_matches_vanilla() {
+        use haste_core::Direction as D;
+        let deg = |d: f32| d.to_radians();
+        assert!(close(painting_transform(D::North), Mat4::IDENTITY, 1e-6));
+        assert!(close(
+            painting_transform(D::South),
+            Mat4::from_rotation_y(deg(180.0)),
+            1e-6
+        ));
+        assert!(close(
+            painting_transform(D::West),
+            Mat4::from_rotation_y(deg(90.0)),
+            1e-6
+        ));
+        assert!(close(
+            painting_transform(D::East),
+            Mat4::from_rotation_y(deg(-90.0)),
+            1e-6
+        ));
     }
 }

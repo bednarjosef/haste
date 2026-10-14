@@ -50,6 +50,14 @@ public final class ClientImpl {
     public static boolean isMultiplayerServer(Minecraft m) { return true; }
     public static net.minecraft.client.multiplayer.ServerData getCurrentServer(Minecraft m) { return null; }
     public static boolean isPaused(Minecraft m) { return false; }
+
+    /**
+     * Real vanilla Java ({@code Minecraft} builds it in its constructor). Its reload listener never runs
+     * (Haste loads no resource packs into it), so it reports no warnings, like vanilla on a GPU that is
+     * not on {@code minecraft:gpu_warnlist.json}.
+     */
+    private static final net.minecraft.client.renderer.GpuWarnlistManager GPU_WARNLIST = new net.minecraft.client.renderer.GpuWarnlistManager();
+    public static net.minecraft.client.renderer.GpuWarnlistManager getGpuWarnlistManager(Minecraft m) { return GPU_WARNLIST; }
     /** False while the canonical proxies are built (option changes then skip their side effects, like vanilla at startup). */
     static boolean running;
     public static boolean isRunning(Minecraft m) { return running; }
