@@ -108,6 +108,26 @@ pub fn end() -> LightmapInputs {
     }
 }
 
+/// The overworld SKY_LIGHT_FACTOR at a time of day (ticks, 0..24000, wrapping): the
+/// OVERWORLD_DAY timeline's multiplier track, sampled like vanilla's `KeyframeTrackSampler`
+/// with its period wrap — the segment between the last keyframe (22860, 0.24) and the first
+/// (730, 1.0) starts at 22860 - 24000, so the dawn ramp covers ticks -11140..730.
+pub fn overworld_sky_factor(time_of_day: i64) -> f32 {
+    let t = time_of_day.rem_euclid(24000) as f32;
+    if t < 730.0 {
+        // Wrap segment: alpha over (-11140, 730).
+        0.24 + 0.76 * ((t + 11140.0) / 11870.0)
+    } else if t < 11270.0 {
+        1.0
+    } else if t < 13140.0 {
+        1.0 - 0.76 * ((t - 11270.0) / 1870.0)
+    } else if t < 22860.0 {
+        0.24
+    } else {
+        0.24 + 0.76 * ((t - 22860.0) / 1870.0)
+    }
+}
+
 /// The sky-light factor for `sky_darken` with the ambient-light lerp vanilla's
 /// `LightTexture.getBrightness` uses in its own callers: the factor itself is simply
 /// 1 - sky_darken here (the environment attribute), with the dimension's fixed sky light
@@ -246,6 +266,109 @@ const NIGHT_VISION_COLOR: [f32; 3] = [153.0 / 255.0; 3];
 /// BLOCK_LIGHT_TINT default (ARGB.vector3fFromRGB24(-10100) = rgb 255, 216, 140).
 const BLOCK_LIGHT_TINT: [f32; 3] = [1.0, 216.0 / 255.0, 140.0 / 255.0];
 
+/// The light texture on the GPU: a 16x16 RGBA8 (linear, like vanilla's lightmap target)
+/// re-uploaded only when the inputs change, plus the reused staging bytes. Vanilla keeps one
+/// texture and rerenders it when `LightmapRenderState.needsUpdate`; this does the same with a
+/// `queue.write_texture`.
+pub struct LightmapTexture {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    sampler: wgpu::Sampler,
+    inputs: LightmapInputs,
+    dirty: bool,
+    staging: [u8; LIGHTMAP_BYTES],
+}
+
+impl LightmapTexture {
+    /// Creates the texture and uploads the map for `inputs` (so the first frame is lit even
+    /// before `set_inputs` runs).
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, inputs: LightmapInputs) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("lightmap"),
+            size: wgpu::Extent3d {
+                width: LIGHTMAP_SIZE as u32,
+                height: LIGHTMAP_SIZE as u32,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        // Vanilla's sample_lightmap samples texel centres ((level + 0.5) / 16), a filtering
+        // sampler on the same layout.
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("lightmap-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let mut out = Self {
+            texture,
+            view,
+            sampler,
+            inputs,
+            dirty: true,
+            staging: [255; LIGHTMAP_BYTES],
+        };
+        out.upload(queue);
+        out
+    }
+
+    /// The inputs for the next frame; the texture re-uploads only when they change (vanilla's
+    /// `needsUpdate` tick flag collapses to this comparison).
+    pub fn set_inputs(&mut self, inputs: LightmapInputs) {
+        if inputs != self.inputs {
+            self.inputs = inputs;
+            self.dirty = true;
+        }
+    }
+
+    /// Uploads the map when dirty; call once per frame before the passes that sample it.
+    pub fn upload(&mut self, queue: &wgpu::Queue) {
+        if !self.dirty {
+            return;
+        }
+        compute_lightmap(&self.inputs, &mut self.staging);
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &self.staging,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some((LIGHTMAP_SIZE * 4) as u32),
+                rows_per_image: Some(LIGHTMAP_SIZE as u32),
+            },
+            wgpu::Extent3d {
+                width: LIGHTMAP_SIZE as u32,
+                height: LIGHTMAP_SIZE as u32,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.dirty = false;
+    }
+
+    /// Bind group entry resources for the terrain and entity pipelines.
+    pub fn view(&self) -> &wgpu::TextureView {
+        &self.view
+    }
+
+    pub fn sampler(&self) -> &wgpu::Sampler {
+        &self.sampler
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +466,23 @@ mod tests {
         assert!((t[0] - 63.0 / 255.0).abs() < 1.0 / 255.0, "{t:?}");
         assert!((t[1] - 71.0 / 255.0).abs() < 1.0 / 255.0);
         assert!((t[2] - 63.0 / 255.0).abs() < 1.0 / 255.0);
+    }
+
+    #[test]
+    fn overworld_sky_factor_follows_the_timeline() {
+        // Keyframe values and the wrap segment's long dawn ramp (see the function doc).
+        assert!((overworld_sky_factor(0) - (0.24 + 0.76 * 11140.0 / 11870.0)).abs() < 1e-4);
+        assert!((overworld_sky_factor(730) - 1.0).abs() < 1e-4);
+        assert!((overworld_sky_factor(6000) - 1.0).abs() < 1e-4);
+        assert!((overworld_sky_factor(11270) - 1.0).abs() < 1e-4);
+        // Halfway down the dusk ramp: 1 - 0.76/2 = 0.62.
+        assert!((overworld_sky_factor(12205) - 0.62).abs() < 1e-4);
+        assert!((overworld_sky_factor(18000) - 0.24).abs() < 1e-4);
+        // Halfway up the dawn ramp after 22860: 0.24 + 0.38 = 0.62.
+        assert!((overworld_sky_factor(23795) - 0.62).abs() < 1e-4);
+        assert!((overworld_sky_factor(23999) - (0.24 + 0.76 * 1139.0 / 1870.0)).abs() < 1e-4);
+        // Wraps: 24000 + 6000 is noon again.
+        assert!((overworld_sky_factor(30000) - 1.0).abs() < 1e-4);
     }
 
     #[test]
