@@ -77,7 +77,10 @@ impl Default for PlayerVitals {
     }
 }
 
-/// What the F3 overlay shows (a Haste stub, see `NOTES.md`): filled by the client every frame.
+/// What the F3 overlay shows (vanilla's default debug entries, see `NOTES.md`): filled by the
+/// client every frame. The numbers go through the mirror arrays; the strings
+/// ([`DebugInfo::biome`], [`DebugInfo::target_block`], ...) through `Native.debugText`, pulled by
+/// Java only while the overlay is on.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DebugInfo {
     /// Frames per second.
@@ -94,6 +97,52 @@ pub struct DebugInfo {
     pub sections_total: i32,
     /// Entities tracked.
     pub entities: i32,
+    /// Entity instances drawn this frame (`E:`'s first number).
+    pub entities_rendered: i32,
+    /// Server simulation distance (`E:`'s `SD:`).
+    pub simulation_distance: i32,
+    /// Server view distance (`C:`'s `D:`).
+    pub view_distance: i32,
+    /// Framerate limit as vanilla prints it in the fps line (260 prints as "inf").
+    pub framerate_limit: i32,
+    /// Refresh rate in Hz of the mode in use (0 when there is no window: offscreen runs).
+    pub refresh_rate: i32,
+    /// Display size in pixels (the window's framebuffer size; 0x0 offscreen).
+    pub display_size: [i32; 2],
+    /// GUI scale the HUD runs at.
+    pub gui_scale: i32,
+    /// GPU name and backend ("Radeon ... (Vulkan)").
+    pub gpu: String,
+    /// CPU as vanilla prints it ("16x AMD Ryzen ...").
+    pub cpu: String,
+    /// Biome at the feet position, e.g. "minecraft:plains".
+    pub biome: String,
+    /// Dimension id, e.g. "minecraft:overworld".
+    pub dimension: String,
+    /// Sky and block light at the feet position.
+    pub light: [i32; 2],
+    /// Server brand ("vanilla", "fabric", ...).
+    pub brand: String,
+    /// Packets sent/received per second.
+    pub tx_per_s: f64,
+    pub rx_per_s: f64,
+    /// The block under the crosshair (20 blocks reach, vanilla `Entity.pick` without liquids).
+    pub target_block: Option<TargetedState>,
+    /// The fluid under the crosshair (vanilla `Entity.pick` with liquids).
+    pub target_fluid: Option<TargetedState>,
+}
+
+/// A block or fluid the crosshair points at: what vanilla's looking-at entries print.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TargetedState {
+    /// Registry name, e.g. "minecraft:water".
+    pub name: String,
+    /// Block position.
+    pub pos: [i32; 3],
+    /// State properties as `name: value` pairs, sorted by name (vanilla's order).
+    pub properties: Vec<(String, String)>,
+    /// Tags the block/fluid is in, as "#ns:name" strings.
+    pub tags: Vec<String>,
 }
 
 /// Layout of the per-frame mirror arrays (`haste.gui.Mirror` in Java has the same numbers).
@@ -110,7 +159,17 @@ pub(crate) mod mirror {
     pub const I_SECTIONS_DRAWN: usize = 9;
     pub const I_SECTIONS_TOTAL: usize = 10;
     pub const I_ENTITIES: usize = 11;
-    pub const INTS: usize = 12;
+    pub const I_ENTITIES_RENDERED: usize = 12;
+    pub const I_SIMULATION_DISTANCE: usize = 13;
+    pub const I_VIEW_DISTANCE: usize = 14;
+    pub const I_FRAMERATE_LIMIT: usize = 15;
+    pub const I_REFRESH_RATE: usize = 16;
+    pub const I_DISPLAY_W: usize = 17;
+    pub const I_DISPLAY_H: usize = 18;
+    pub const I_GUI_SCALE: usize = 19;
+    pub const I_LIGHT_SKY: usize = 20;
+    pub const I_LIGHT_BLOCK: usize = 21;
+    pub const INTS: usize = 22;
     pub const D_HEALTH: usize = 0;
     pub const D_SATURATION: usize = 1;
     pub const D_XP_PROGRESS: usize = 2;
@@ -123,7 +182,9 @@ pub(crate) mod mirror {
     pub const D_PITCH: usize = 9;
     pub const D_GAME_TIME: usize = 10;
     pub const D_DAY_TIME: usize = 11;
-    pub const DOUBLES: usize = 12;
+    pub const D_TX_PER_S: usize = 12;
+    pub const D_RX_PER_S: usize = 13;
+    pub const DOUBLES: usize = 14;
     pub const F_HARDCORE: i32 = 1;
     pub const F_EYE_IN_WATER: i32 = 2;
     pub const F_INVULNERABLE: i32 = 4;
@@ -132,6 +193,7 @@ pub(crate) mod mirror {
     pub const F_INSTABUILD: i32 = 32;
     pub const F_IN_WORLD: i32 = 64;
     pub const F_IMMEDIATE_RESPAWN: i32 = 128;
+    pub const F_DEBUG_SHOWN: i32 = 256;
 }
 
 impl GameState {
@@ -155,24 +217,38 @@ impl GameState {
             | flag(v.may_fly, F_MAY_FLY)
             | flag(v.instabuild, F_INSTABUILD)
             | flag(self.in_world, F_IN_WORLD)
-            | flag(self.immediate_respawn, F_IMMEDIATE_RESPAWN);
-        i[I_FPS] = self.debug.fps;
-        i[I_CHUNKS] = self.debug.chunks;
-        i[I_SECTIONS_DRAWN] = self.debug.sections_drawn;
-        i[I_SECTIONS_TOTAL] = self.debug.sections_total;
-        i[I_ENTITIES] = self.debug.entities;
+            | flag(self.immediate_respawn, F_IMMEDIATE_RESPAWN)
+            | flag(self.debug_shown, F_DEBUG_SHOWN);
+        let dbg = &self.debug;
+        i[I_FPS] = dbg.fps;
+        i[I_CHUNKS] = dbg.chunks;
+        i[I_SECTIONS_DRAWN] = dbg.sections_drawn;
+        i[I_SECTIONS_TOTAL] = dbg.sections_total;
+        i[I_ENTITIES] = dbg.entities;
+        i[I_ENTITIES_RENDERED] = dbg.entities_rendered;
+        i[I_SIMULATION_DISTANCE] = dbg.simulation_distance;
+        i[I_VIEW_DISTANCE] = dbg.view_distance;
+        i[I_FRAMERATE_LIMIT] = dbg.framerate_limit;
+        i[I_REFRESH_RATE] = dbg.refresh_rate;
+        i[I_DISPLAY_W] = dbg.display_size[0];
+        i[I_DISPLAY_H] = dbg.display_size[1];
+        i[I_GUI_SCALE] = dbg.gui_scale;
+        i[I_LIGHT_SKY] = dbg.light[0];
+        i[I_LIGHT_BLOCK] = dbg.light[1];
         d[D_HEALTH] = f64::from(v.health);
         d[D_SATURATION] = f64::from(v.saturation);
         d[D_XP_PROGRESS] = f64::from(v.xp_progress);
         d[D_FLY_SPEED] = f64::from(v.fly_speed);
         d[D_WALK_SPEED] = f64::from(v.walk_speed);
-        d[D_X] = self.debug.pos[0];
-        d[D_Y] = self.debug.pos[1];
-        d[D_Z] = self.debug.pos[2];
-        d[D_YAW] = f64::from(self.debug.rot[0]);
-        d[D_PITCH] = f64::from(self.debug.rot[1]);
+        d[D_X] = dbg.pos[0];
+        d[D_Y] = dbg.pos[1];
+        d[D_Z] = dbg.pos[2];
+        d[D_YAW] = f64::from(dbg.rot[0]);
+        d[D_PITCH] = f64::from(dbg.rot[1]);
         d[D_GAME_TIME] = self.game_time as f64;
         d[D_DAY_TIME] = self.day_time as f64;
+        d[D_TX_PER_S] = dbg.tx_per_s;
+        d[D_RX_PER_S] = dbg.rx_per_s;
         (i, d)
     }
 }
@@ -210,6 +286,9 @@ pub struct GameState {
     pub vitals: PlayerVitals,
     /// What the F3 overlay shows.
     pub debug: DebugInfo,
+    /// Whether the F3 overlay is on (vanilla's `DebugScreenEntryList.isOverlayVisible`; the
+    /// client toggles it, Java reads it from the mirror so both sides agree).
+    pub debug_shown: bool,
     /// Joined a world (the HUD is drawn; before that only screens).
     pub in_world: bool,
     /// The server respawns dead players at once (no death screen: `login`, `game_event` 11).
@@ -237,6 +316,7 @@ impl Default for GameState {
             permission_level: 0,
             vitals: PlayerVitals::default(),
             debug: DebugInfo::default(),
+            debug_shown: false,
             in_world: false,
             immediate_respawn: false,
             game_time: 0,
@@ -286,6 +366,38 @@ impl GameState {
     /// Drains the serverbound packets vanilla code sent (VarInt id + body each).
     pub fn take_outgoing(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.outgoing)
+    }
+    /// The F3 overlay's string values as `\n`-joined `key value` lines for `Native.debugText`
+    /// (`biome`, `dimension`, `brand`, `cpu`, `gpu`, then `block`/`fluid` with `pos`, `prop` and
+    /// `tag` lines). Only pulled while the overlay is on, so it allocates on demand.
+    pub fn debug_text(&self) -> String {
+        let d = &self.debug;
+        let mut s = String::with_capacity(160);
+        let mut line = |k: &str, v: &str| {
+            s.push_str(k);
+            s.push(' ');
+            s.push_str(v);
+            s.push('\n');
+        };
+        line("biome", &d.biome);
+        line("dimension", &d.dimension);
+        line("brand", &d.brand);
+        line("cpu", &d.cpu);
+        line("gpu", &d.gpu);
+        for (k, t) in [("block", &d.target_block), ("fluid", &d.target_fluid)] {
+            let Some(t) = t else { continue };
+            line(
+                k,
+                &format!("{} {} {} {}", t.name, t.pos[0], t.pos[1], t.pos[2]),
+            );
+            for (pk, pv) in &t.properties {
+                line(&format!("{k}prop"), &format!("{pk}: {pv}"));
+            }
+            for tag in &t.tags {
+                line(&format!("{k}tag"), tag);
+            }
+        }
+        s
     }
 }
 
