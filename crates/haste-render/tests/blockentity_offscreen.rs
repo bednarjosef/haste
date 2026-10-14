@@ -99,6 +99,8 @@ fn block_entities_offscreen() {
         kind: BlockEntityKind::Chest(ChestMaterial::Normal),
         open: TickPair::fixed(0.0),
         light: (15, 0),
+        sign_angle: 0.0,
+        text: None,
     };
     let shulker = BlockEntityInstance {
         pos: BlockPos::new(2, 1, 0),
@@ -107,6 +109,41 @@ fn block_entities_offscreen() {
         kind: BlockEntityKind::Shulker(None),
         open: TickPair::fixed(0.0),
         light: (15, 0),
+        sign_angle: 0.0,
+        text: None,
+    };
+    // A sign on the floor at (0, 2, 2), facing the camera: the front text is drawn with the
+    // default font into the entity stream. The board itself is the chunk's block model (drawn
+    // by the mesher when the block is there; here only the text is drawn, the block below the
+    // sign is a placeholder floor in this synthetic scene).
+    let sign_text = std::sync::Arc::new(haste_render::blockentity::SignTextData {
+        front: haste_render::blockentity::SignSideText {
+            lines: [
+                "Haste".to_string(),
+                "signs work".to_string(),
+                String::new(),
+                "line 4".to_string(),
+            ],
+            color: 0,
+            glowing: false,
+        },
+        back: haste_render::blockentity::SignSideText {
+            lines: std::array::from_fn(|_| String::new()),
+            color: 15,
+            glowing: false,
+        },
+    });
+    let sign = BlockEntityInstance {
+        pos: BlockPos::new(-2, 1, 0),
+        facing: Direction::South,
+        half: ChestHalf::Single,
+        kind: BlockEntityKind::Sign { hanging: false },
+        open: TickPair::fixed(0.0),
+        light: (15, 0),
+        // Rotation segment 8 = 180 degrees: the front faces north, toward the camera (which
+        // looks south from z = -4).
+        sign_angle: 180.0,
+        text: Some(sign_text),
     };
     // The camera looks at the chest's centre from four blocks south and 1.5 up: the chest
     // lands mid-frame.
@@ -125,12 +162,33 @@ fn block_entities_offscreen() {
         render(&mut renderer, &world, &[], camera);
     }
 
-    let closed = render(&mut renderer, &world, &[chest, shulker], camera);
+    let closed = render(
+        &mut renderer,
+        &world,
+        &[chest.clone(), shulker.clone()],
+        camera,
+    );
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
     std::fs::create_dir_all(&out).unwrap();
     closed.save(out.join("chest.png")).unwrap();
     let empty = render(&mut renderer, &world, &[], camera);
     empty.save(out.join("chest-empty.png")).unwrap();
+
+    // The sign's text: drawn through the entity stream (one more block entity in the same
+    // draw call). Its pixels differ from the empty scene where the text is.
+    let signed = render(&mut renderer, &world, &[sign], camera);
+    signed.save(out.join("sign.png")).unwrap();
+    let mut sign_pixels = 0;
+    for (x, y, p) in signed.enumerate_pixels() {
+        if *p != *empty.get_pixel(x, y) {
+            let _ = (x, y);
+            sign_pixels += 1;
+        }
+    }
+    assert!(
+        sign_pixels > 30,
+        "sign text draws {sign_pixels} differing pixels"
+    );
 
     // The chest sits at the frame centre (the camera looks at it): its pixels there differ
     // from the empty scene, and they are the chest's brown, not the sky above it.
@@ -157,9 +215,14 @@ fn block_entities_offscreen() {
 
     // The open chest: the lid swings up, so the frame differs from the closed one around the
     // chest (and the lid rises above the block, into what was sky).
-    let mut open = chest;
+    let mut open = chest.clone();
     open.open = TickPair::fixed(0.5);
-    let half = render(&mut renderer, &world, &[open, shulker], camera);
+    let half = render(
+        &mut renderer,
+        &world,
+        &[open.clone(), shulker.clone()],
+        camera,
+    );
     half.save(out.join("chest-open.png")).unwrap();
     let mut differing = 0;
     for (x, y, p) in closed.enumerate_pixels() {
@@ -176,7 +239,12 @@ fn block_entities_offscreen() {
 
     // Fully open: more of the lid has moved up than at half open.
     open.open = TickPair::fixed(1.0);
-    let full = render(&mut renderer, &world, &[open, shulker], camera);
+    let full = render(
+        &mut renderer,
+        &world,
+        &[open.clone(), shulker.clone()],
+        camera,
+    );
     let mut differing_full = 0;
     for (x, y, p) in closed.enumerate_pixels() {
         if p != full.get_pixel(x, y) {

@@ -1524,6 +1524,11 @@ fn hex_image(g: &haste_assets::HexGlyph) -> image::RgbaImage {
     })
 }
 
+/// [`hex_image`] for callers outside the GUI (the entity renderer's sign text).
+pub(crate) fn hex_image_public(g: &haste_assets::HexGlyph) -> image::RgbaImage {
+    hex_image(g)
+}
+
 // ---- GUI item geometry and lighting ----
 
 /// Pomme `items_3d_lights`: the two GUI light directions for side-lit (3D) items, in the
