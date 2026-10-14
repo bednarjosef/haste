@@ -261,6 +261,7 @@ fn gui_frame_offscreen() {
             roll_deg: 0.0,
         },
         entities: &[],
+        block_entities: &[],
         gui: &gui,
         sky: SkyState {
             time_of_day: 6000,

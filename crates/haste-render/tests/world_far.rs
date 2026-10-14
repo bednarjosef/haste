@@ -92,6 +92,7 @@ fn terrain_far_from_origin() {
                 roll_deg: 0.0,
             },
             entities: &[],
+            block_entities: &[],
             gui: &gui,
             sky: SkyState {
                 time_of_day: 6000,
@@ -209,6 +210,7 @@ fn sky_times_of_day() {
                 roll_deg: 0.0,
             },
             entities: &[],
+            block_entities: &[],
             gui: &gui,
             sky: SkyState {
                 time_of_day: time,
@@ -288,6 +290,7 @@ fn outline_and_cracks() {
                 roll_deg: 0.0,
             },
             entities: &[],
+            block_entities: &[],
             gui: &gui,
             sky: SkyState {
                 time_of_day: 6000,

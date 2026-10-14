@@ -169,6 +169,7 @@ impl App {
         let frame = haste_render::FrameInput {
             camera: self.cam,
             entities: &[],
+            block_entities: &[],
             gui: &haste_core::gui::GuiFrame::default(),
             sky: haste_render::SkyState {
                 time_of_day: 6000,

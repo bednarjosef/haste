@@ -152,6 +152,7 @@ fn measure(
             roll_deg: 0.0,
         },
         entities: &[],
+        block_entities: &[],
         gui: &gui,
         sky,
         partial_tick: 0.0,

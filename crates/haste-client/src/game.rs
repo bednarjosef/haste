@@ -368,6 +368,13 @@ pub struct Shared {
     pub view: Mutex<ViewState>,
     /// Break cracks to draw (`Session::breaking_stages`), copied once per tick.
     pub breaking: Mutex<Vec<(BlockPos, u8)>>,
+    /// Lid animations to draw (`Session::lid_states`): (position, open value at the last
+    /// tick's start and end), copied once per tick; the render thread lerps by partial tick.
+    pub block_entity_lids: Mutex<Vec<(BlockPos, (f32, f32))>>,
+    /// Block entity type names by synced registry id (`minecraft:block_entity_type`), for
+    /// resolving what each stored block entity is; the static registry's order when the server
+    /// did not sync one (vanilla servers' ids agree with the data generator's).
+    pub block_entity_names: Vec<haste_core::Identifier>,
     /// Input for the next tick.
     pub input: Mutex<SharedInput>,
     /// The sound and music output (None until the client sets it up; headless leaves it
@@ -389,13 +396,15 @@ pub struct Shared {
 }
 
 impl Shared {
-    /// Shared state for a fresh connection.
+    /// Shared state for a fresh connection. `block_entity_names` are the
+    /// `minecraft:block_entity_type` names by synced id (see [`Shared::block_entity_names`]).
     pub fn new(
         data: Arc<GameData>,
         world: World,
         entities: EntityStore,
         view_distance: i32,
         skin: (Identifier, bool),
+        block_entity_names: Vec<Identifier>,
     ) -> Self {
         let has_sky = world.dimension().has_skylight;
         Self {
@@ -426,6 +435,8 @@ impl Shared {
                 pose: None,
             }),
             breaking: Mutex::new(Vec::new()),
+            block_entity_lids: Mutex::new(Vec::new()),
+            block_entity_names,
             input: Mutex::new(SharedInput::default()),
             sound: Mutex::new(None),
             stop: AtomicBool::new(false),
@@ -488,6 +499,9 @@ impl WorldSink for TrackedWorld<'_> {
     }
     fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData) {
         WorldSink::set_block_entity(self.world, pos, data)
+    }
+    fn block_state_at(&self, pos: BlockPos) -> BlockStateId {
+        WorldSink::block_state_at(self.world, pos)
     }
     fn reset(&mut self, dim: &DimensionInfo) {
         let loaded: Vec<ChunkPos> = self.world.loaded_chunks().collect();
@@ -727,6 +741,11 @@ fn tick_once(
         let mut breaking = shared.breaking.lock();
         breaking.clear();
         driver.session.breaking_stages(&mut breaking);
+    }
+    {
+        let mut lids = shared.block_entity_lids.lock();
+        lids.clear();
+        driver.session.lid_states(&mut lids);
     }
     if let Some(ui) = shared.ui.lock().as_ref() {
         // The hotbar authority is the player (the client picks with 1-9 and the wheel and tells
