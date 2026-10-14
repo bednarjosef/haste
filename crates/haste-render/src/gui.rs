@@ -1407,7 +1407,18 @@ impl GuiRenderer {
             * Mat4::from_scale(Vec3::new(-model_scale, -model_scale, model_scale) / 16.0);
         let mut tris = std::mem::take(&mut self.entity_scratch);
         tris.clear();
-        crate::entity::emit_part(&mut tris, &e.model, &e.model.root, &pose, m, rect, 1.0, 0.0);
+        // GUI inventory preview: full block and sky light (vanilla's GUI entity light
+        // 0xF000F0), so the model renders at full brightness.
+        crate::entity::emit_part(
+            &mut tris,
+            &e.model,
+            &e.model.root,
+            &pose,
+            m,
+            rect,
+            (15, 15),
+            0.0,
+        );
         // Back faces off, then back to front.
         let mut order: Vec<(f32, usize)> = tris
             .chunks(3)

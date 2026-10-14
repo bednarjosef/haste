@@ -10,6 +10,7 @@ pub mod entity;
 pub mod fluid;
 pub mod fog;
 pub mod gui;
+pub mod lightmap;
 pub mod mesher;
 pub mod occlusion;
 pub mod overlay;

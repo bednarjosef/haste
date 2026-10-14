@@ -28,11 +28,13 @@ pub struct EntityVertex {
     pub uv: [f32; 2],
     pub color: [f32; 4],
     pub rect: [u16; 4],
+    /// Light levels for the vanilla light texture: block, sky, unused, unused.
+    pub light: [u16; 4],
 }
 
 impl EntityVertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
-        0 => Float32x3, 1 => Float32x2, 2 => Float32x4, 3 => Uint16x4
+    const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+        0 => Float32x3, 1 => Float32x2, 2 => Float32x4, 3 => Uint16x4, 4 => Uint16x4
     ];
     pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<EntityVertex>() as u64,
@@ -169,6 +171,7 @@ impl EntityRenderer {
         queue: Arc<wgpu::Queue>,
         target_format: wgpu::TextureFormat,
         camera_layout: &wgpu::BindGroupLayout,
+        lightmap_layout: &wgpu::BindGroupLayout,
     ) -> EntityRenderer {
         let atlas = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("entity-atlas"),
@@ -213,7 +216,7 @@ impl EntityRenderer {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("entity-pipeline-layout"),
-            bind_group_layouts: &[Some(camera_layout), Some(&layout)],
+            bind_group_layouts: &[Some(camera_layout), Some(&layout), Some(lightmap_layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -389,7 +392,8 @@ impl EntityRenderer {
             }
             let (texture, scale) = texture_and_scale(e);
             let rect = self.texture_rect(&texture, assets);
-            let light = lightmap(sky, block);
+            // The map is (sky, block); the vertex wants (block, sky).
+            let light = (block, sky);
             let root = Mat4::from_translation((e.pos - camera).as_vec3())
                 * Mat4::from_rotation_y((180.0 - e.yaw).to_radians())
                 * Mat4::from_scale(Vec3::new(-scale, -scale, scale) / 16.0);
@@ -448,9 +452,9 @@ impl EntityRenderer {
         let quads = self.frame_quads(f.glow, map, assets);
         // `ItemFrameRenderer.getBlockLightLevel`: glow frames are at least block-light 5.
         let frame_light = if f.glow {
-            lightmap(sky, block.max(5))
+            (block.max(5), sky)
         } else {
-            lightmap(sky, block)
+            (block, sky)
         };
         let model = base * Mat4::from_translation(Vec3::splat(-0.5));
         let nm = Mat3::from_mat4(model).inverse().transpose();
@@ -472,8 +476,9 @@ impl EntityRenderer {
         }
         if let Some(idx) = f.item {
             if let Some(item) = self.item_model_for(idx, assets) {
-                // Glow frames draw the item full-bright (`getLightCoords(isGlowFrame, 15728880)`).
-                let item_light = if f.glow { 1.0 } else { lightmap(sky, block) };
+                // Glow frames draw the item full-bright (`getLightCoords(isGlowFrame, 15728880)`,
+                // block 15 / sky 15); otherwise the frame's own (block, sky) light.
+                let item_light = if f.glow { (15, 15) } else { (block, sky) };
                 let root = base * item_frame_item_transform(f.rotation);
                 self.emit_item(&mut out, &item, root, item_light, true, assets);
             }
@@ -496,7 +501,8 @@ impl EntityRenderer {
     ) {
         let base =
             Mat4::from_translation((e.pos - camera).as_vec3()) * painting_transform(p.facing);
-        let light = lightmap(sky, block);
+        // Paintings use the entity's own light (`PaintingRenderer` draws with `state.lightCoords`).
+        let light = (block, sky);
         let width = p.width.max(1) as i32;
         let height = p.height.max(1) as i32;
         let back = self.texture_rect(&Identifier::minecraft("painting/back"), assets);
@@ -699,7 +705,8 @@ impl EntityRenderer {
         let Some(fp) = fp else {
             return;
         };
-        let light = lightmap(fp.light.0, fp.light.1);
+        // `FirstPerson::light` is (sky, block); the vertex wants (block, sky).
+        let light = (fp.light.1, fp.light.0);
         let item = fp.item.and_then(|i| self.item_model_for(i, assets));
         let mut out = std::mem::take(&mut self.hand);
         let root = view_to_world * hand_root_matrix(fp, view, partial);
@@ -747,7 +754,7 @@ impl EntityRenderer {
         out: &mut Vec<EntityVertex>,
         model: &haste_assets::ItemModel,
         root: Mat4,
-        light: f32,
+        light: (u8, u8),
         use_fixed: bool,
         assets: &mut Assets,
     ) {
@@ -1030,12 +1037,12 @@ fn push_world_quad(
     uv: [[f32; 2]; 4],
     n: Vec3,
     tint: [f32; 3],
-    light: f32,
+    light: (u8, u8),
     rect: [u32; 4],
 ) {
     let p = p.map(|v| m.transform_point3(v));
     let nw = (normal_matrix * n).normalize_or_zero();
-    let s = entity_shade(nw) * light;
+    let s = entity_shade(nw);
     let color = [tint[0] * s, tint[1] * s, tint[2] * s, 1.0];
     let uv = uv.map(|t| {
         [
@@ -1056,14 +1063,9 @@ fn push_world_quad(
             uv: uv[i],
             color,
             rect: r16,
+            light: [light.0 as u16, light.1 as u16, 0, 0],
         });
     }
-}
-
-/// Light level brightness, the same curve as the terrain shader (`chunk.wgsl::lightmap`).
-pub(crate) fn lightmap(sky: u8, block: u8) -> f32 {
-    let f = |l: u8| (l.min(15) as f32 / 15.0).powf(1.55) * 0.95 + 0.05;
-    f(sky).max(f(block))
 }
 
 /// World-space entity shading: two directional lights at 0.6 and 0.4 ambient (the same
@@ -1118,7 +1120,7 @@ pub(crate) fn emit_part(
     pose: &PoseOverrides,
     parent: Mat4,
     rect: [u32; 4],
-    light: f32,
+    light: (u8, u8),
     hurt: f32,
 ) {
     if !part.visible || pose.hidden.iter().any(|h| h == &part.name) {
@@ -1224,7 +1226,7 @@ pub(crate) fn emit_part(
         for (corners, uvr, n) in faces {
             let p = corners.map(|c| m.transform_point3(c));
             let nw = (normal_matrix * n).normalize_or_zero();
-            let s = entity_shade(nw) * light;
+            let s = entity_shade(nw);
             let [r, g, b] = hurt_color(s, hurt);
             let color = [r, g, b, 1.0];
             let uv = [
@@ -1247,6 +1249,7 @@ pub(crate) fn emit_part(
                     uv: uv[i],
                     color,
                     rect: r16,
+                    light: [light.0 as u16, light.1 as u16, 0, 0],
                 });
             }
         }
@@ -1392,7 +1395,7 @@ mod tests {
             &PoseOverrides::default(),
             root,
             [0, 0, 64, 64],
-            1.0,
+            (15, 15),
             0.0,
         );
         assert_eq!(out.len(), 36);
@@ -1506,7 +1509,7 @@ mod tests {
             &PoseOverrides::default(),
             m,
             [0, 0, 64, 64],
-            1.0,
+            (15, 15),
             0.0,
         );
         // The arm and its sleeve, six faces of six vertices each.
@@ -1537,7 +1540,7 @@ mod tests {
             &PoseOverrides::default(),
             swung,
             [0, 0, 64, 64],
-            1.0,
+            (15, 15),
             0.0,
         );
         let moved = out

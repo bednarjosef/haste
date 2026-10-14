@@ -1,7 +1,7 @@
 // Chunk terrain shader (WGSL port of Pomme's chunk.vert/chunk.frag design;
 // sprite-rect atlas wrapping from its atlas_sprite.glsl — see THIRD_PARTY.md).
-// Light is sky/block nibbles resolved through a lightmap uniform here, so
-// time-of-day darkening never triggers a remesh.
+// Light is sky/block nibbles resolved through the vanilla light texture
+// (group 2, see lightmap.rs), so time-of-day darkening never triggers a remesh.
 
 struct Camera {
     cam_pos: vec4<f32>,
@@ -40,7 +40,7 @@ struct VertexIn {
 struct VertexOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) sprite_uv: vec2<f32>,
-    @location(1) light: f32,
+    @location(1) light: vec3<f32>,
     @location(2) tint: vec3<f32>,
     @location(3) fog: f32,
     @location(4) @interpolate(flat) sprite: u32,
@@ -72,20 +72,16 @@ fn face_shade(index: u32) -> f32 {
     return 1.0;
 }
 
-fn lightmap(sky: u32, block: u32) -> f32 {
-    // Two-band lightmap row lookup. Sky uses camera.light_sky (packed 4x f32
-    // per row, 16 levels => expand via arrays below).
-    // For simplicity the rows are passed as two vec4s each holding 4 levels
-    // is not enough; instead compute the vanilla brightness curve directly:
-    // brightness = 0.8^(15-level) style curve approximated by Pomme's table.
-    // Pomme LIGHT_TABLE (26.2): index by level.
-    let s = f32(sky) / 15.0;
-    let b = f32(block) / 15.0;
-    // Vanilla light texture: sky fades with time of day; here daylight=1.
-    // Use the standard gamma-ish response.
-    let sky_l = (pow(s, 1.55) * 0.95 + 0.05) * (0.15 + 0.85 * camera.daylight);
-    let block_l = pow(b, 1.55) * 0.95 + 0.05;
-    return max(sky_l, block_l);
+// The vanilla light texture (LightTexture), uploaded by the renderer when its inputs
+// change: block light on u, sky light on v, sampled at texel centres like vanilla's
+// sample_lightmap ((uv + 0.5) / 16). Vertex stage, so explicit LOD 0 (levels are per
+// vertex anyway, like vanilla's vertex-shader lightmap sample).
+@group(2) @binding(0) var lightmap_texture: texture_2d<f32>;
+@group(2) @binding(1) var lightmap_sampler: sampler;
+
+fn light_color(sky: u32, block: u32) -> vec3<f32> {
+    let uv = (vec2<f32>(f32(block), f32(sky)) + 0.5) / 16.0;
+    return textureSampleLevel(lightmap_texture, lightmap_sampler, uv, 0.0).rgb;
 }
 
 @vertex
@@ -113,7 +109,7 @@ fn vs_main(in: VertexIn, @builtin(vertex_index) vi: u32) -> VertexOut {
     let ao_level = ao_shade_packed & 3u;
     let shade_index = (ao_shade_packed >> 2u) & 7u;
     let ao = 0.4 + 0.2 * f32(ao_level); // AO_BRIGHTNESS [0.4, 0.6, 0.8, 1.0]
-    out.light = lightmap(sky, block) * ao * face_shade(shade_index);
+    out.light = light_color(sky, block) * ao * face_shade(shade_index);
 
     // Per-vertex biome/block tint. Vanilla multiplies sRGB texel by sRGB tint; the atlas is
     // sampled linear here, so the tint is linearized too (the product of the two

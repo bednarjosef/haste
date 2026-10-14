@@ -428,6 +428,9 @@ pub struct Renderer {
     camera_bind_group_layout: wgpu::BindGroupLayout,
     camera_bind_group: wgpu::BindGroup,
     atlas_bind_group_layout: wgpu::BindGroupLayout,
+    /// The vanilla light texture (`lightmap`), bound at group 2 by terrain and entities.
+    lightmap: crate::lightmap::LightmapTexture,
+    lightmap_bind_group: wgpu::BindGroup,
     atlas_bind_group: wgpu::BindGroup,
     pipeline_solid: wgpu::RenderPipeline,
     pipeline_cutout: wgpu::RenderPipeline,
@@ -676,8 +679,50 @@ impl Renderer {
             ],
         });
 
-        // Pipelines: one per render pass family (solid+cutout_mipped opaque
-        // with mips; cutout discard; translucent blend, no depth write).
+        // The vanilla light texture (LightTexture): one 16x16 texel map for all terrain and
+        // entity shading, re-uploaded when its inputs change.
+        let lightmap = crate::lightmap::LightmapTexture::new(
+            &gpu.device,
+            &gpu.queue,
+            crate::lightmap::LightmapInputs::overworld_noon(),
+        );
+        let lightmap_bind_group_layout =
+            gpu.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("lightmap-layout"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                    ],
+                });
+        let lightmap_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lightmap-bind"),
+            layout: &lightmap_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(lightmap.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(lightmap.sampler()),
+                },
+            ],
+        });
         let shader = gpu
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -698,6 +743,7 @@ impl Renderer {
                             bind_group_layouts: &[
                                 Some(&camera_bind_group_layout),
                                 Some(&atlas_bind_group_layout),
+                                Some(&lightmap_bind_group_layout),
                             ],
                             immediate_size: 0,
                         },
@@ -798,6 +844,7 @@ impl Renderer {
             gpu.queue.clone(),
             surface_format,
             &camera_bind_group_layout,
+            &lightmap_bind_group_layout,
         );
         let sky = crate::sky::SkyRenderer::new(
             gpu.device.clone(),
@@ -817,6 +864,7 @@ impl Renderer {
             gpu.queue.clone(),
             surface_format,
             &camera_bind_group_layout,
+            &lightmap_bind_group_layout,
         );
         let mut gui_assets = assets.reopen()?;
         gui.preload_sprites(&mut gui_assets, crate::gui::HUD_SPRITES);
@@ -861,6 +909,8 @@ impl Renderer {
             camera_bind_group_layout,
             camera_bind_group,
             atlas_bind_group_layout,
+            lightmap,
+            lightmap_bind_group,
             atlas_bind_group,
             pipeline_solid,
             pipeline_cutout,
@@ -944,6 +994,14 @@ impl Renderer {
     /// The dimension being drawn: picks the sky (overworld, End, or fog colour only).
     pub fn set_dimension(&mut self, dim: &haste_core::game::DimensionInfo) {
         self.sky.kind = crate::sky::SkyKind::of(dim);
+        // The dimension's fixed lightmap (Nether/End ambient colours, no sky term).
+        self.lightmap.set_inputs(if dim.has_skylight {
+            crate::lightmap::LightmapInputs::overworld_noon()
+        } else if dim.name.path() == "the_end" {
+            crate::lightmap::end()
+        } else {
+            crate::lightmap::nether()
+        });
         self.min_section = dim.min_section();
         self.section_count = dim.section_count() as i32;
         self.section_vis.lock().clear();
@@ -1534,6 +1592,20 @@ impl Renderer {
             .queue
             .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&camera_uniform));
 
+        // The light texture's inputs for this frame (LightmapRenderStateExtractor.extract):
+        // the timeline's sky factor with the rain blend (WeatherAttributes.RAIN moves
+        // SKY_LIGHT_FACTOR towards 0.24 by rain level), the gamma option where the client
+        // will set it. Skyless dimensions keep the inputs `set_dimension` chose.
+        if frame.sky.dimension_has_sky {
+            let mut factor = crate::lightmap::overworld_sky_factor(frame.sky.time_of_day);
+            let rain = frame.sky.rain.clamp(0.0, 1.0);
+            factor += (0.24 - factor) * rain * 0.3125;
+            let mut inputs = crate::lightmap::LightmapInputs::overworld_noon();
+            inputs.sky_darken = 1.0 - factor;
+            self.lightmap.set_inputs(inputs);
+        }
+        self.lightmap.upload(&self.gpu.queue);
+
         // Which target are we drawing into?
         // The acquired SurfaceTexture must outlive the pass (it presents on drop
         // after submit); hold it alongside the views.
@@ -1768,6 +1840,7 @@ impl Renderer {
             draw_calls += self.sky.draw_background(&mut pass);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+            pass.set_bind_group(2, &self.lightmap_bind_group, &[]);
 
             // Layered draw order (RenderLayer Ord: Solid < Cutout < CutoutMipped
             // < Translucent). Section origins come from the instance-rate origin buffer, one
@@ -1865,6 +1938,7 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            pass.set_bind_group(2, &self.lightmap_bind_group, &[]);
             draw_calls += self.entity.draw_hand(&mut pass);
         }
 
