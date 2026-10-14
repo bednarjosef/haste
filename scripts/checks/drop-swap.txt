@@ -1,0 +1,19 @@
+# Feature 3: drop one item (Q), drop the whole stack (Ctrl+Q) and swap to the off hand (F).
+# The runner gives 10 stone in the hotbar and 3 torches in the off hand before the first drop.
+wait_until joined
+wait_until settled
+screenshot drop-setup
+wait 60
+screenshot drop-before
+key Q
+wait 20
+screenshot drop-one
+key_down LCTRL
+key Q
+key_up LCTRL
+wait 20
+screenshot drop-stack
+key F
+wait 20
+screenshot drop-swap
+wait 60
