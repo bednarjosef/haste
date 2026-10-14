@@ -25,14 +25,6 @@ pub mod states {
     pub const SOUL_SAND: BlockStateId = BlockStateId(9);
     pub const WATER_SOURCE: BlockStateId = BlockStateId(10);
     pub const LAVA_SOURCE: BlockStateId = BlockStateId(11);
-// MERGE(jump-sprint side):
-    /// Block whose top is at 0.3: a step-up candidate height vanilla's loop tries.
-    pub const STEP_03: BlockStateId = BlockStateId(12);
-    /// Block whose top is exactly 0.6 below a player standing at y = 0: the sneak edge probe
-    /// (`Player.canFallAtLeast`, depth step + 1e-7) reaches it.
-    pub const LEDGE_0_6: BlockStateId = BlockStateId(13);
-    pub const COUNT: usize = 14;
-// MERGE(main side):
     /// No collision; sticks entities at (0.25, 0.05, 0.25) (WebBlock.entityInside).
     pub const COBWEB: BlockStateId = BlockStateId(12);
     /// No collision; sticks entities whose in-block state is powder snow at (0.9, 1.5, 0.9).
@@ -45,8 +37,12 @@ pub mod states {
     pub const FLOWING_WATER: BlockStateId = BlockStateId(16);
     /// Water with a small east flow vector (minimum-impulse test).
     pub const FLOWING_WATER_SLOW: BlockStateId = BlockStateId(17);
-    pub const COUNT: usize = 18;
-// MERGE end
+    /// Block whose top is at 0.3: a step-up candidate height vanilla's loop tries.
+    pub const STEP_03: BlockStateId = BlockStateId(18);
+    /// Block whose top is exactly 0.6 below a player standing at y = 0: the sneak edge probe
+    /// (`Player.canFallAtLeast`, depth step + 1e-7) reaches it.
+    pub const LEDGE_0_6: BlockStateId = BlockStateId(19);
+    pub const COUNT: usize = 20;
 }
 
 /// Shapes and per-block physics properties for the ids in [`states`].
@@ -77,12 +73,9 @@ impl Default for TestShapes {
         boxes[states::BLUE_ICE.0 as usize] = full.clone();
         boxes[states::SLIME.0 as usize] = full.clone();
         boxes[states::SOUL_SAND.0 as usize] = vec![bx(0.0, 0.0, 0.0, 1.0, 0.875, 1.0)];
-// MERGE(jump-sprint side):
+        // Cobweb, powder snow, sweet berry bush and honey have no collision in these tests.
         boxes[states::STEP_03.0 as usize] = vec![bx(0.0, -0.7, 0.0, 1.0, 0.3, 1.0)];
         boxes[states::LEDGE_0_6.0 as usize] = vec![bx(0.0, -1.6, 0.0, 1.0, -0.6, 1.0)];
-// MERGE(main side):
-        // Cobweb, powder snow, sweet berry bush and honey have no collision in these tests.
-// MERGE end
         Self { boxes }
     }
 }

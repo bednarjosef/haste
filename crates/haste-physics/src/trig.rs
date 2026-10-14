@@ -48,8 +48,6 @@ pub(crate) fn deg_to_rad(deg: f32) -> f32 {
     deg * std::f32::consts::PI / 180.0
 }
 
-// MERGE(jump-sprint side):
-// MERGE(main side):
 /// `(float)(Math.PI / 180.0)`, the f32 constant vanilla multiplies its angles by.
 pub(crate) const DEG_TO_RAD_F32: f32 = (std::f64::consts::PI / 180.0) as f32;
 
@@ -76,14 +74,6 @@ pub(crate) fn cos_d(rad: f64) -> f32 {
     table()[((rad * SIN_SCALE + COS_OFFSET) as i64 & SIN_MASK) as usize]
 }
 
-/// Degrees to radians for the sprint-jump boost: `deg * 0.017453292` (mcpk.wiki "Angles" notes the
-/// sprint jump uses this other constant). Assumption pending traces.
-#[inline]
-pub(crate) fn deg_to_rad_jump(deg: f32) -> f32 {
-    deg * 0.017_453_292
-}
-
-// MERGE end
 #[cfg(test)]
 mod tests {
     #[test]

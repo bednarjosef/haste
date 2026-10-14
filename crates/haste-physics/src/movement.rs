@@ -5,19 +5,14 @@ use haste_core::input::InputState;
 use haste_core::view::{BlockView, CollisionShapes};
 use haste_core::{Aabb, BlockPos, BlockStateId, DVec3};
 
-// MERGE(jump-sprint side):
-use crate::collision::{collide_with_step, no_collision, supporting_block, COLLISION_EPSILON};
+use crate::block_effects;
+use crate::collision::{collide_with_step, no_collision, supporting_block};
 use crate::{
     fluids, flying, trig, BlockPhysics, FluidKind, PlayerAttributes, PlayerState, Pose, TickResult,
 };
 
 /// Box shrink before measuring fluid contact (assumption, as in `fluids`).
 const FLUID_CONTACT_SHRINK: f64 = 0.001;
-// MERGE(main side):
-use crate::block_effects;
-use crate::collision::{collide_with_step, no_collision, supporting_block};
-use crate::{fluids, flying, trig, BlockPhysics, PlayerAttributes, PlayerState, Pose, TickResult};
-// MERGE end
 
 /// Velocity components with a smaller magnitude are zeroed at the start of the tick
 /// (mcpk.wiki "Horizontal/Vertical Movement Formulas": 0.003 in 1.9+).
@@ -45,18 +40,13 @@ pub const SPRINT_JUMP_BOOST: f32 = 0.2;
 pub const JUMP_COOLDOWN_TICKS: u8 = 10;
 /// Sneak edge back-off step (vanilla `Player.maybeBackOffFromEdge`: 0.05).
 pub const EDGE_BACKOFF_STEP: f64 = 0.05;
-// MERGE(jump-sprint side):
 /// Offset below the feet for the block that affects movement (verified:
 /// `Entity.getBlockPosBelowThatAffectsMyMovement` = `getOnPos(0.500001F)`; the 0.500001 makes a
 /// player standing on a half slab attribute the movement to the block under the slab).
 pub const BLOCK_BELOW_OFFSET: f64 = 0.500001;
-// MERGE(main side):
-/// Offset below the feet used to find the block whose friction/jump factor applies (assumption).
-pub const BLOCK_BELOW_OFFSET: f64 = 0.5;
 /// By how much the pose-fit and edge-probe boxes are shrunk (vanilla
 /// `Player.canPlayerFitWithinBlocksAndEntitiesWhen` and `Player.canFallAtLeast`: 1.0E-7).
 pub const POSE_TEST_EPSILON: f64 = 1.0e-7;
-// MERGE end
 
 /// Movement impulse for this tick: (strafe, forward), already scaled.
 #[derive(Clone, Copy, Debug, Default)]
@@ -198,24 +188,22 @@ pub fn tick(
         travel_normal(state, impulse, attrs, world, shapes, blocks);
     }
 
-// MERGE(jump-sprint side):
-    // vanilla `LocalPlayer.isHorizontalCollisionMinor`: the flag next tick's
-    // `shouldStopRunSprinting` reads - whether the input direction and the movement that
-    // actually resulted (the velocity after the move, its collided axes zeroed) were within
-    // 8 degrees. The post-move drags only scale the velocity, so the direction is unchanged.
+    // vanilla `Entity.move`: the flag next tick's `shouldStopRunSprinting` reads - whether the
+    // input direction and the movement that actually resulted (the velocity after the move, its
+    // collided axes zeroed) were within 8 degrees (`LocalPlayer.isHorizontalCollisionMinor`).
+    // The post-move drags only scale the velocity, so the direction is unchanged.
     state.minor_horizontal_collision = if state.horizontal_collision {
         minor_horizontal_collision(state, &impulse, state.velocity)
     } else {
         false
     };
-// MERGE(main side):
-    // Slime stepOn, honey slide, stuck-in-block multipliers (vanilla applyEffectsFromBlocks).
+    // End of tick (vanilla `LivingEntity.aiStep` -> `Entity.applyEffectsFromBlocks`): slime
+    // stepOn first, then the entityInside scan (honey slide, stuck-in-block multipliers).
     block_effects::apply_end_of_tick_effects(state, attrs, world, shapes, blocks);
     // Vanilla `Player.tick` ends with `updatePlayerPose`: the new pose's box applies from
     // the next tick's movement, and the camera picks up its eye height the tick after that
     // (vanilla `Camera.tick` runs before the player's tick).
     update_player_pose(state, attrs, world, shapes);
-// MERGE end
 
     TickResult {
         moved: state.pos != old_pos,
@@ -225,9 +213,9 @@ pub fn tick(
     }
 }
 
-/// The input-driven flags for this tick's movement: `sneaking` (raw shift key), the sprint
-/// state and `crouching` (vanilla `LocalPlayer.aiStep` computes its `crouching` field from the
-/// CURRENT box, i.e. the pose the last tick ended with, before the player moves).
+/// The input-driven flags for this tick's movement: `sneaking` (raw shift key), `crouching` and
+/// the sprint state (vanilla `LocalPlayer.aiStep`, in that order, from the CURRENT box, i.e. the
+/// pose the last tick ended with, before the player moves).
 fn update_flags(
     state: &mut PlayerState,
     input: &InputState,
@@ -238,36 +226,24 @@ fn update_flags(
 ) {
     state.sneaking = input.sneak;
     let forward = input.forward && !input.back;
-// MERGE(jump-sprint side):
-    // Sprint (vanilla `LocalPlayer.shouldStopRunSprinting` / `canStartSprinting`): starting needs
-    // the forward impulse and not crawling on land (`isMovingSlowly`: crouching or the swimming
-    // pose out of water, unless under water), with no collision condition; a horizontal collision
-    // ends it only when the collision is not minor (the input direction and the actual movement
-    // within 8 degrees, `isHorizontalCollisionMinor`). The stop is evaluated after the start so a
-    // persistent collision keeps the sprint off instead of restarting it every other tick.
-    // Releasing the sprint key alone does not end it. Hunger and blindness are the caller's
-    // business.
-    let moving_slowly =
-        state.pose == Pose::Crouching || (state.pose == Pose::Swimming && !state.in_water);
-    let under_water = state.eyes_in_water && state.in_water;
-    if !state.sprinting && input.sprint && forward && (!moving_slowly || under_water) {
-// MERGE(main side):
     // Crouching (vanilla `LocalPlayer.aiStep`): not flying, not swimming, the crouching box
     // fits, and shift is held or standing does not fit (forced crouch under a low ceiling).
+    // Riding and sleeping are not modelled.
     state.crouching = !state.flying
         && !state.swimming
         && fits_pose(state, attrs, Pose::Crouching, world, shapes)
         && (state.sneaking || !fits_pose(state, attrs, Pose::Standing, world, shapes));
-    // Sprint: needs forward; ends on horizontal collision (wiki "Sprinting": collision at more than
-    // 8 degrees ends it; the angle test is not modelled) or when forward is released; releasing
-    // the sprint key alone does not end it. Hunger and blindness are the caller's business.
-    if state.sprinting {
-        if !forward || state.horizontal_collision {
-            state.sprinting = false;
-        }
-    } else if input.sprint && forward && !state.crouching && !state.horizontal_collision {
-        // Not restarted while still pushing into a wall (assumption; avoids on/off flapping).
-// MERGE end
+    // Sprint (vanilla `LocalPlayer.aiStep`, `canStartSprinting` / `shouldStopRunSprinting`):
+    // starting needs the forward impulse and not moving slowly (`isMovingSlowly`: crouching or
+    // the swimming pose out of water, unless under water), with no collision condition; a
+    // horizontal collision ends it only when the collision is not minor (the input direction and
+    // the actual movement within 8 degrees, `isHorizontalCollisionMinor`). The stop is evaluated
+    // after the start so a persistent collision keeps the sprint off instead of restarting it
+    // every other tick. Releasing the sprint key alone does not end it. Hunger and blindness
+    // are the caller's business.
+    let moving_slowly = state.crouching || (state.pose == Pose::Swimming && !state.in_water);
+    let under_water = state.eyes_in_water && state.in_water;
+    if !state.sprinting && input.sprint && forward && (!moving_slowly || under_water) {
         state.sprinting = true;
     }
     if state.sprinting
@@ -275,6 +251,8 @@ fn update_flags(
     {
         state.sprinting = false;
     }
+    // Sprint-swimming state (vanilla `Entity.updateSwimming`: sprinting in water with the eyes
+    // in it, or already swimming; never while flying).
     state.swimming =
         state.sprinting && state.in_water && (eyes_in_water || state.swimming) && !state.flying;
 }
@@ -383,18 +361,12 @@ fn block_below(state: &PlayerState) -> BlockPos {
     ))
 }
 
-// MERGE(jump-sprint side):
 /// The block whose friction/jump/speed factor applies: vanilla
 /// `Entity.getBlockPosBelowThatAffectsMyMovement` = `getOnPos(0.500001F)` (Entity.java:1090).
 /// On the ground, the supporting block's X/Z with `floor(y - 0.500001)` (a wall or fence gate
 /// keeps the supporting pos - the same cell while the player stands on its 1.5 tall top - and a
 /// fence lands on that same cell either way); airborne or unsupported, `floor(pos - 0.500001)`.
-fn ground_block(
-// MERGE(main side):
-/// Block whose friction/jump factor applies: the block half a block below the feet, or, when that
-/// has no collision (standing on an edge), the closest supporting block.
 pub(crate) fn ground_block(
-// MERGE end
     state: &PlayerState,
     attrs: &PlayerAttributes,
     world: &dyn BlockView,
@@ -514,14 +486,19 @@ fn travel_normal(
 /// The factor block is the block at the feet if non-default, else the block below (vanilla
 /// `Entity.getBlockSpeedFactor` -> `getOnPos(0.500001F)`; the fluids path keeps this function's
 /// signature, so the below block here is `floor(pos - 0.500001)` without the supporting-block
-/// refinement - see NOTES.md).
+/// refinement - see NOTES.md). While the feet are in water (or a bubble column) vanilla returns
+/// the feet factor alone, so a soul sand floor underwater does not slow the player.
 pub(crate) fn apply_speed_factor(
     state: &mut PlayerState,
     world: &dyn BlockView,
     blocks: &dyn BlockPhysics,
 ) {
-    let at = blocks.speed_factor(world.block_state(BlockPos::from_dvec3(state.pos)));
-    let f = if at != 1.0 {
+    let feet = world.block_state(BlockPos::from_dvec3(state.pos));
+    let at = blocks.speed_factor(feet);
+    let in_water = blocks
+        .fluid(feet)
+        .is_some_and(|f| f.kind == FluidKind::Water);
+    let f = if in_water || at != 1.0 {
         at
     } else {
         blocks.speed_factor(world.block_state(block_below(state)))
@@ -648,15 +625,9 @@ fn can_fall_at_least(
     )
 }
 
-// MERGE(jump-sprint side):
-/// Shrinks horizontal motion in `EDGE_BACKOFF_STEP` steps until the probe below the feet is
-/// free: X alone, Z alone, then both together. The probe is vanilla `Player.canFallAtLeast`: only
-/// the slab below the feet of the moved box (X/Z shrunk 1e-7), not the whole body shifted down.
-// MERGE(main side):
 /// Shrinks horizontal motion in `EDGE_BACKOFF_STEP` steps (vanilla
 /// `Player.maybeBackOffFromEdge`): X alone, Z alone, then both together, until the player can no
 /// longer fall at least the step height below.
-// MERGE end
 fn back_off_from_edge(
     aabb: &Aabb,
     motion: DVec3,
@@ -665,25 +636,6 @@ fn back_off_from_edge(
     shapes: &dyn CollisionShapes,
 ) -> DVec3 {
     let (mut x, mut z) = (motion.x, motion.z);
-// MERGE(jump-sprint side):
-    let free = |dx: f64, dz: f64| {
-        let probe = Aabb {
-            min: DVec3::new(
-                aabb.min.x + COLLISION_EPSILON + dx,
-                aabb.min.y - step - COLLISION_EPSILON,
-                aabb.min.z + COLLISION_EPSILON + dz,
-            ),
-            max: DVec3::new(
-                aabb.max.x - COLLISION_EPSILON + dx,
-                aabb.min.y,
-                aabb.max.z - COLLISION_EPSILON + dz,
-            ),
-        };
-        no_collision(&probe, world, shapes)
-    };
-    while x != 0.0 && free(x, 0.0) {
-        x = toward_zero(x);
-// MERGE(main side):
     let step_x = 0.05 * x.signum();
     let step_z = 0.05 * z.signum();
     let falls = |dx: f64, dz: f64| can_fall_at_least(aabb, dx, dz, step, world, shapes);
@@ -693,7 +645,6 @@ fn back_off_from_edge(
             break;
         }
         x -= step_x;
-// MERGE end
     }
     while z != 0.0 && falls(0.0, z) {
         if z.abs() <= EDGE_BACKOFF_STEP {
