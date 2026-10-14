@@ -6,7 +6,10 @@
 //! logic only: no window, renderer or network; the `--script FILE` offscreen client wires it up
 //! (app.rs `script_run`).
 //!
-//! Key names (`key`, `key_down`, `key_up`) are case-insensitive: letters `A`..`Z`, digits
+//! Mouse buttons (`click`, `mouse_down`, `mouse_up`) are `left`, `middle` or `right`; a `click`
+//! is a press and a release on the same tick, while `mouse_down`/`mouse_up` hold a button (e.g.
+//! attack while the target is aimed). Key names (`key`, `key_down`, `key_up`) are
+//! case-insensitive: letters `A`..`Z`, digits
 //! `0`..`9`, function keys `F1`..`F12`, and `Escape`, `Enter`, `Tab`, `Space`, `Backspace`,
 //! `Up`, `Down`, `Left`, `Right`, `LShift`/`LeftShift`, `LCtrl`/`LeftCtrl`, `LAlt`/`LeftAlt`.
 
@@ -312,6 +315,10 @@ pub enum Step {
     /// is matched exactly or as `text: value` (a slider's dynamic label); the offset lets a
     /// script hit a slider's track rather than its centred label.
     ClickText(String, i32, i32),
+    /// Press and hold a mouse button (attack/use while a screen is closed).
+    MouseDown(MouseButton),
+    /// Release a held mouse button.
+    MouseUp(MouseButton),
     /// Turn the wheel by `n` notches (may be negative).
     Scroll(i32),
     /// Set the camera yaw and pitch in degrees.
@@ -329,6 +336,8 @@ pub enum Action {
     MouseMove(i32, i32),
     Click(MouseButton, i32, i32),
     ClickText(String, i32, i32),
+    MouseDown(MouseButton),
+    MouseUp(MouseButton),
     Scroll(i32),
     Look(f32, f32),
     Screenshot(String),
@@ -447,6 +456,14 @@ pub fn parse(text: &str) -> Result<Vec<Step>, ScriptError> {
                 };
                 Step::ClickText(text, dx, dy)
             }
+            "mouse_down" => Step::MouseDown(MouseButton::parse(
+                first_token(rest, "mouse_down", line)?,
+                line,
+            )?),
+            "mouse_up" => Step::MouseUp(MouseButton::parse(
+                first_token(rest, "mouse_up", line)?,
+                line,
+            )?),
             "scroll" => Step::Scroll(parse_i32(first_token(rest, "scroll", line)?, line)?),
             "look" => {
                 let mut parts = rest.split_whitespace();
@@ -661,6 +678,14 @@ impl Runner {
                             self.advance();
                             return vec![Action::ClickText(text, dx, dy)];
                         }
+                        Step::MouseDown(button) => {
+                            self.advance();
+                            return vec![Action::MouseDown(button)];
+                        }
+                        Step::MouseUp(button) => {
+                            self.advance();
+                            return vec![Action::MouseUp(button)];
+                        }
                         Step::Scroll(n) => {
                             self.advance();
                             return vec![Action::Scroll(n)];
@@ -705,6 +730,8 @@ mod tests {
             "click right 10 20",
             "click_text \"FOV\" 90 5",
             "click_text Video",
+            "mouse_down left",
+            "mouse_up left",
             "scroll -1",
             "look 90 10",
             "screenshot name1",
@@ -727,6 +754,8 @@ mod tests {
                 Step::Click(MouseButton::Right, 10, 20),
                 Step::ClickText("FOV".to_owned(), 90, 5),
                 Step::ClickText("Video".to_owned(), 0, 0),
+                Step::MouseDown(MouseButton::Left),
+                Step::MouseUp(MouseButton::Left),
                 Step::Scroll(-1),
                 Step::Look(90.0, 10.0),
                 Step::Screenshot("name1".to_owned()),
@@ -920,6 +949,21 @@ mod tests {
         let state = ScriptState::default();
         assert_eq!(runner.tick(&state), vec![Action::KeyDown(Key::Space)]);
         assert_eq!(runner.tick(&state), vec![Action::KeyUp(Key::Space)]);
+    }
+
+    #[test]
+    fn mouse_down_and_mouse_up_are_single_actions() {
+        let mut runner = Runner::new(parse("mouse_down left\nmouse_up left").unwrap());
+        let state = ScriptState::default();
+        assert_eq!(
+            runner.tick(&state),
+            vec![Action::MouseDown(MouseButton::Left)]
+        );
+        assert_eq!(
+            runner.tick(&state),
+            vec![Action::MouseUp(MouseButton::Left)]
+        );
+        assert_eq!(runner.tick(&state), vec![Action::Finished]);
     }
 
     #[test]

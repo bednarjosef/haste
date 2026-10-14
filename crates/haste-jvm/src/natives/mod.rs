@@ -64,6 +64,11 @@ pub(crate) fn register(env: &mut Env) -> Result<()> {
                 state::mirror as *mut _,
             ),
             NativeMethod::from_raw_parts(
+                jni_str!("debugText"),
+                jni_str!("()Ljava/lang/String;"),
+                state::debug_text as *mut _,
+            ),
+            NativeMethod::from_raw_parts(
                 jni_str!("requestDisconnect"),
                 jni_str!("()V"),
                 state::request_disconnect as *mut _,

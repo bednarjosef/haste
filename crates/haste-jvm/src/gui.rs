@@ -605,12 +605,15 @@ impl GuiPipeline {
         }
     }
 
-    /// F3: shows or hides the debug overlay (Haste's stub: FPS, position, chunk and entity counts
-    /// from [`GameState::debug`]).
+    /// F3: shows or hides the debug overlay (vanilla `DebugScreenEntryList.toggleDebugOverlay`).
+    /// The state lives in Rust (`GameState::debug_shown`); Java reads it from the mirror.
     pub fn toggle_debug(&self) {
-        if let Err(e) = self.call_void("toggleDebug") {
-            self.failed("toggle_debug", e);
-        }
+        with_state(|s| s.debug_shown = !s.debug_shown);
+    }
+
+    /// Whether the F3 overlay is on.
+    pub fn debug_shown(&self) -> bool {
+        with_state(|s| s.debug_shown)
     }
 
     fn call_void(&self, name: &'static str) -> Result<()> {

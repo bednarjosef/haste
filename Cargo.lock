@@ -1203,6 +1203,7 @@ name = "haste-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "clap",
  "crossbeam-channel",
  "glam",
@@ -1265,6 +1266,7 @@ dependencies = [
  "serde_json",
  "tracing",
  "uuid",
+ "zip",
 ]
 
 [[package]]

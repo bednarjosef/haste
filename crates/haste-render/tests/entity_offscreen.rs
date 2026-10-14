@@ -2,8 +2,10 @@
 //! pose and a name tag, and a generic box entity. Saves `target/render-checks/entities.png`.
 //! Needs the client jar, the datagen reports and a Vulkan driver (source scripts/env.sh).
 
-use haste_core::model::{EntityInstance, PoseOverrides};
-use haste_core::{BlockPos, BlockStateId, ChunkPos, EntityId, SectionPos};
+use haste_core::model::{
+    Decoration, EntityInstance, ItemFrameDecoration, PaintingDecoration, PoseOverrides,
+};
+use haste_core::{BlockPos, BlockStateId, ChunkPos, Direction, EntityId, Identifier, SectionPos};
 use haste_render::{Camera, FrameInput, Renderer, SkyState};
 
 struct Flat {
@@ -152,6 +154,7 @@ fn entities_offscreen() {
         skin: Some(skin.clone()),
         nametag: Some("Steve".into()),
         hurt: 0.0,
+        decoration: None,
     };
     let boxed = EntityInstance {
         id: EntityId(2),
@@ -165,6 +168,7 @@ fn entities_offscreen() {
         skin: None,
         nametag: None,
         hurt: 0.0,
+        decoration: None,
     };
     let entities = vec![player, boxed];
     let camera = Camera {
@@ -173,6 +177,7 @@ fn entities_offscreen() {
         pitch: 5.0,
         fov_deg: 70.0,
         roll_deg: 0.0,
+        bob: haste_render::ViewBob::default(),
     };
     let img = render_scene(&mut renderer, &world, &entities, camera);
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
@@ -303,4 +308,108 @@ fn entities_offscreen() {
         .count();
     assert!(moved > 500, "the swing moved {moved} pixels");
     renderer.set_first_person(None);
+}
+
+/// A hanging decoration instance (the model is unused; the renderer draws the decoration).
+fn decoration(id: i32, pos: glam::DVec3, decoration: Decoration) -> EntityInstance {
+    EntityInstance {
+        id: EntityId(id),
+        model: haste_entity::models::box_for(1.0, 1.0),
+        pos,
+        yaw: 0.0,
+        pitch: 0.0,
+        head_yaw: 0.0,
+        scale: 1.0,
+        pose: PoseOverrides::default(),
+        skin: None,
+        nametag: None,
+        hurt: 0.0,
+        decoration: Some(decoration),
+    }
+}
+
+/// Item frames (one with a diamond, one glow) and a 2x2 painting drawn offscreen: the same
+/// scene as the RCON screenshot but deterministic (no server). Saves
+/// `target/render-checks/frames.png`.
+#[test]
+#[ignore = "needs the client jar, datagen reports and a Vulkan driver (source scripts/env.sh)"]
+fn frames_and_paintings_offscreen() {
+    let jar = haste_core::paths::client_jar();
+    let mut assets =
+        haste_assets::Assets::open(&jar, &haste_core::paths::assets_dir(), "26.3").unwrap();
+    let data = haste_data::GameData::load().unwrap();
+    let mut renderer = Renderer::new_offscreen(640, 480, &mut assets, &data.blocks).unwrap();
+    renderer.set_item_registry(&data.registries);
+    let world = Flat {
+        stone: data
+            .blocks
+            .default_state(&haste_core::Identifier::minecraft("stone"))
+            .unwrap(),
+    };
+    let dirty: Vec<SectionPos> = (-1..=1)
+        .flat_map(|x| (-1..=1).map(move |z| SectionPos::new(x, 0, z)))
+        .collect();
+    renderer.update_world(&world, &dirty, ChunkPos::new(0, 0), 4);
+    for _ in 0..200 {
+        renderer.update_world(&world, &[], ChunkPos::new(0, 0), 4);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let camera = Camera {
+        pos: glam::DVec3::new(0.0, 2.2, -4.0),
+        yaw: 0.0,
+        pitch: 5.0,
+        fov_deg: 70.0,
+        roll_deg: 0.0,
+        bob: haste_render::ViewBob::default(),
+    };
+    let diamond = data
+        .registries
+        .index("minecraft:item", &Identifier::minecraft("diamond"))
+        .expect("diamond item");
+    let entities = vec![
+        decoration(
+            1,
+            glam::DVec3::new(0.0, 1.5, 0.5),
+            Decoration::ItemFrame(ItemFrameDecoration {
+                facing: Direction::North,
+                rotation: 1,
+                glow: false,
+                item: Some(diamond),
+            }),
+        ),
+        decoration(
+            2,
+            glam::DVec3::new(1.6, 1.5, 0.5),
+            Decoration::ItemFrame(ItemFrameDecoration {
+                facing: Direction::North,
+                rotation: 0,
+                glow: true,
+                item: None,
+            }),
+        ),
+        decoration(
+            3,
+            glam::DVec3::new(-2.0, 1.5, 0.5),
+            Decoration::Painting(PaintingDecoration {
+                facing: Direction::North,
+                width: 2,
+                height: 2,
+                front: Some(Identifier::minecraft("painting/match")),
+            }),
+        ),
+    ];
+    let base = render_scene(&mut renderer, &world, &[], camera);
+    let img = render_scene(&mut renderer, &world, &entities, camera);
+    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
+    std::fs::create_dir_all(&out).unwrap();
+    img.save(out.join("frames.png")).unwrap();
+    let changed = base
+        .pixels()
+        .zip(img.pixels())
+        .filter(|(a, b)| a.0 != b.0)
+        .count();
+    assert!(
+        changed > 2000,
+        "the decorations changed {changed} pixels (item frame, glow frame, painting)"
+    );
 }

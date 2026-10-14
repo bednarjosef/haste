@@ -27,6 +27,8 @@ public final class Native {
 
     /** Fills the mirror arrays with Rust's primitive player and debug state (layout: haste.gui.Mirror). */
     public static native void mirror(int[] ints, double[] doubles);
+    /** The F3 overlay's string values as "key value" lines (see Rust's GameState::debug_text). */
+    public static native String debugText();
 
     // ---- Java -> Rust ----
     /**

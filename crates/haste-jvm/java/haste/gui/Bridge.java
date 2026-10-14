@@ -193,9 +193,6 @@ public final class Bridge {
     /** F1: hides or shows the HUD (vanilla's toggle). */
     public void toggleHud() { Proxies.hud.toggle(); }
 
-    /** F3: shows or hides the debug overlay (Haste's stub). */
-    public void toggleDebug() { DebugImpl.shown = !DebugImpl.shown; }
-
     public boolean key(int key, int keycode, int mods, boolean pressed) {
         ClientImpl.mods = mods;
         Screen s = ClientImpl.screen;
