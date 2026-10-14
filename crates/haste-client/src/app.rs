@@ -859,7 +859,8 @@ fn frame_view(
 /// runner's `click_text`.
 fn gui_text_pos(frame: &GuiFrame, want: &str) -> Option<(i32, i32)> {
     use haste_protocol::haste_core::gui::GuiCommand;
-    let matches = |text: &str| text == want || text.strip_prefix(want).is_some_and(|r| r.starts_with(':'));
+    let matches =
+        |text: &str| text == want || text.strip_prefix(want).is_some_and(|r| r.starts_with(':'));
     let mut stack: Vec<(f32, f32)> = vec![(0.0, 0.0)];
     for c in &frame.commands {
         match c {
@@ -1356,7 +1357,12 @@ impl InputRouter {
     /// one (the JVM still starting, or failed) the raw `KeyCode`s are the fallback.
     /// `perspective` is the camera's own: the game thread's camera effects that are gated on it
     /// (the spyglass FOV) only apply in first person.
-    fn sample(&mut self, shared: &Shared, ui: Option<&crate::ui::Ui>, perspective: game::Perspective) {
+    fn sample(
+        &mut self,
+        shared: &Shared,
+        ui: Option<&crate::ui::Ui>,
+        perspective: game::Perspective,
+    ) {
         use crate::ui::bits;
         let k = |c: KeyCode| self.keys.contains(&c);
         let mut state = InputState {
@@ -1866,11 +1872,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             ));
         }
         if let Some(u) = &mut ui {
-            let scale = resolve_gui_scale(
-                u32::from(options.gui_scale),
-                args.width,
-                args.height,
-            );
+            let scale = resolve_gui_scale(u32::from(options.gui_scale), args.width, args.height);
             let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
             gui = u.frame(gw, gh, scale, input.mouse, partial).clone();
         }
@@ -2535,7 +2537,8 @@ impl App {
 
     fn release_keys(&mut self) {
         self.input.release();
-        self.input.sample(&self.shared, self.ui.as_ref(), self.perspective);
+        self.input
+            .sample(&self.shared, self.ui.as_ref(), self.perspective);
     }
 
     /// Mouse look speed from the saved sensitivity.
@@ -3029,7 +3032,8 @@ mod tests {
     }
 
     #[test]
-    fn mouse_look_clamps_pitch() {        let (yaw, pitch) = apply_mouse(0.0, 0.0, (100.0, 0.0), DPP);
+    fn mouse_look_clamps_pitch() {
+        let (yaw, pitch) = apply_mouse(0.0, 0.0, (100.0, 0.0), DPP);
         assert!((yaw - 15.0).abs() < 1e-4 && pitch == 0.0, "{yaw} {pitch}");
         assert_eq!(apply_mouse(0.0, 80.0, (0.0, 200.0), DPP), (0.0, 90.0));
         assert_eq!(apply_mouse(10.0, -80.0, (0.0, -200.0), DPP), (10.0, -90.0));

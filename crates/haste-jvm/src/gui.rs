@@ -135,11 +135,7 @@ impl GuiPipeline {
             game_key: env.get_method_id(&cls, jni_str!("gameKey"), jni_sig!("(IZ)V"))?,
             game_mouse: env.get_method_id(&cls, jni_str!("gameMouse"), jni_sig!("(IZ)V"))?,
             game_input: env.get_method_id(&cls, jni_str!("gameInput"), jni_sig!("()I"))?,
-            consume_clicks: env.get_method_id(
-                &cls,
-                jni_str!("consumeClicks"),
-                jni_sig!("()I"),
-            )?,
+            consume_clicks: env.get_method_id(&cls, jni_str!("consumeClicks"), jni_sig!("()I"))?,
         };
         Ok(GuiPipeline {
             bridge,
@@ -182,7 +178,9 @@ impl GuiPipeline {
     }
 
     fn call_int(&self, what: &str, method: jni::objects::JMethodID, args: &[jvalue]) -> i32 {
-        match self.call(method, JavaType::Primitive(Primitive::Int), args, |_, v| Ok(v.i()?)) {
+        match self.call(method, JavaType::Primitive(Primitive::Int), args, |_, v| {
+            Ok(v.i()?)
+        }) {
             Ok(i) => i,
             Err(e) => {
                 self.failed(what, e);

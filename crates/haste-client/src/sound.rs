@@ -405,9 +405,9 @@ pub struct Sounds {
     unknown_logged: HashSet<String>,
 }
 
-    /// The saved per-category volumes onto the system (vanilla's `soundCategory_*` option
-    /// keys), each scaled by the master volume.
-    fn apply_volumes(system: &mut SoundSystem, volumes: &haste_setup::options::SoundVolumes) {
+/// The saved per-category volumes onto the system (vanilla's `soundCategory_*` option
+/// keys), each scaled by the master volume.
+fn apply_volumes(system: &mut SoundSystem, volumes: &haste_setup::options::SoundVolumes) {
     let v = volumes;
     system.set_volume(SoundSource::Master, v.master);
     system.set_volume(SoundSource::Music, v.music);

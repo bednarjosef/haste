@@ -414,7 +414,8 @@ impl Ui {
         self.gui().consume_clicks()
     }
 
-    fn next_salt(&self) -> i64 {        // SplitMix64 over a counter: unpredictable enough for an unsigned message's salt
+    fn next_salt(&self) -> i64 {
+        // SplitMix64 over a counter: unpredictable enough for an unsigned message's salt
         let mut z = self
             .shared
             .salt
