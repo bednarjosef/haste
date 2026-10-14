@@ -15,5 +15,5 @@ mod tests;
 
 pub use dims::{Dimensions, EntityDimensions};
 pub use metadata::{Metadata, SharedFlags};
-pub use riding::passenger_offset;
+pub use riding::{passenger_seat, PassengerKind, SeatPoint, SeatQuery};
 pub use store::{Entity, EntityStore};

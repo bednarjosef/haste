@@ -15,6 +15,7 @@ use glam::DVec3;
 use haste_core::input::InputState;
 use haste_core::view::{BlockView, CollisionShapes};
 use haste_data::GameData;
+use haste_entity::riding::{passenger_seat, PassengerKind, SeatPoint, SeatQuery};
 use haste_entity::{EntityDimensions, EntityStore};
 use haste_protocol::haste_core::chunk::{BlockEntityData, ChunkData, LightData};
 use haste_protocol::haste_core::entity::{EntitySpawn, ItemStackData, MetadataEntry, PlayerInfo};
@@ -29,7 +30,7 @@ use haste_protocol::{
 };
 use haste_world::World;
 
-use crate::player::LocalPlayer;
+use crate::player::{LocalPlayer, VehiclePose};
 
 /// Hurt-tilt camera roll duration in ticks (vanilla's `hurtTime` runs to 10).
 pub const HURT_TILT_TICKS: u32 = 10;
@@ -388,6 +389,33 @@ impl Session {
         self.hurt_tilt_ticks = self.hurt_tilt_ticks.saturating_sub(1);
     }
 
+    /// Our seat on `vehicle` if this passenger list names us, else `None` (we are not riding
+    /// it): vanilla's `Entity.positionRider` for the local player. The seat order comes from
+    /// the list, and the vehicle's attachment points from its type in the entity_type registry.
+    fn seat_of<E: EntitySink + ?Sized>(
+        &self,
+        vehicle: EntityId,
+        passengers: &[EntityId],
+        entities: &E,
+    ) -> Option<SeatPoint> {
+        let seat = passengers.iter().position(|p| *p == self.entity_id)?;
+        let (kind, dims) = entities.entity_type_info(vehicle)?;
+        let vehicle_type = self
+            .entity_type_names
+            .get(kind.0 as usize)
+            .map_or("?", |id| id.path());
+        Some(passenger_seat(SeatQuery {
+            vehicle_type,
+            vehicle_dims: dims,
+            seat,
+            passengers: passengers.len(),
+            passenger: PassengerKind::Player,
+            // The passenger is us: `Avatar.DEFAULT_VEHICLE_ATTACHMENT` (0.6 below the seat),
+            // which is `minecraft:player`'s own vehicle attachment point.
+            passenger_type: "player",
+        }))
+    }
+
     /// Applies one clientbound packet; serverbound replies go to `out`.
     pub fn apply<W: WorldSink + ?Sized, E: EntitySink + ?Sized>(
         &mut self,
@@ -459,7 +487,7 @@ impl Session {
                 self.breaking.clear();
                 self.dimension = dim;
                 // A respawn is a new body: no vehicle, no riding.
-                self.player.set_vehicle(None, 0.0);
+                self.player.set_vehicle(None, SeatPoint::ZERO);
             }
             P::PlayerPosition(_) => self.counters.teleports += 1,
             _ if player_packet => {}
@@ -525,7 +553,7 @@ impl Session {
                 // If our vehicle is removed, we dismount (the store's riding bookkeeping drops
                 // us too, as a passenger of the removed vehicle).
                 if self.player.vehicle.is_some_and(|v| ids.contains(&v)) {
-                    self.player.set_vehicle(None, 0.0);
+                    self.player.set_vehicle(None, SeatPoint::ZERO);
                 }
                 for id in &ids {
                     self.entity_ids.remove(id);
@@ -536,24 +564,17 @@ impl Session {
                 let vehicle = EntityId(s.vehicle);
                 let passengers: Vec<EntityId> = s.passengers.iter().map(|i| EntityId(*i)).collect();
                 entities.set_passengers(vehicle, &passengers);
-                let own = self.entity_id;
-                if passengers.contains(&own) {
-                    // Mount (or re-seat): the seat offset comes from the vehicle's type.
-                    let seat = entities
-                        .entity_type_info(vehicle)
-                        .map(|(kind, dims)| {
-                            let name = self
-                                .entity_type_names
-                                .get(kind.0 as usize)
-                                .map_or("?", |id| id.path());
-                            haste_entity::passenger_offset(name, dims)
-                        })
-                        .unwrap_or(0.0);
-                    self.player.set_vehicle(Some(vehicle), seat);
-                } else if self.player.vehicle == Some(vehicle) {
-                    // Dismount: our vehicle's new list no longer names us. Sneak's shift flag
-                    // in player_input is what made the server send this.
-                    self.player.set_vehicle(None, 0.0);
+                // Mount, re-seat, or dismount. The seat comes from the vehicle's type through
+                // vanilla's attachment rules (`haste_entity::passenger_seat`), which also names
+                // our own seat index: a boat's second passenger sits elsewhere than the first.
+                match self.seat_of(vehicle, &passengers, entities) {
+                    Some(seat) => self.player.set_vehicle(Some(vehicle), seat),
+                    None if self.player.vehicle() == Some(vehicle) => {
+                        // Dismount: our vehicle's new list no longer names us. Sneak's shift
+                        // flag in player_input is what made the server send this.
+                        self.player.set_vehicle(None, SeatPoint::ZERO);
+                    }
+                    None => {}
                 }
             }
             P::MoveEntityPos(m) => {
@@ -658,11 +679,13 @@ impl Session {
         }
         // The vehicle's position this tick, for the passenger tick (`ride_tick`). A vehicle we
         // do not track (removed before its set_passengers, spawn not yet arrived) leaves the
-        // passenger at its last position.
-        let vehicle_pos = self
+        // passenger at its last position. The yaw comes with it: the seat's sideways offset
+        // turns with the vehicle (`Entity.positionRider` runs every tick).
+        let vehicle = self
             .player
             .vehicle
-            .and_then(|v| entities.pose(v).map(|p| p.0));
+            .and_then(|v| entities.pose(v))
+            .map(|(pos, yaw, _)| VehiclePose { pos, yaw });
         match world.physics() {
             Some((view, data)) => {
                 self.player.prepare(data);
@@ -670,15 +693,14 @@ impl Session {
                     data,
                     entities: &self.entity_boxes,
                 };
-                self.player
-                    .tick_interact(input, view, &env, vehicle_pos, out)
+                self.player.tick_interact(input, view, &env, vehicle, out)
             }
             None => self.player.tick_with(
                 input,
                 &NoBlocks,
                 &NoBlocks,
                 &haste_physics::DefaultBlockPhysics,
-                vehicle_pos,
+                vehicle,
                 out,
             ),
         }

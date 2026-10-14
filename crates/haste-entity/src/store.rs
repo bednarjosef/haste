@@ -176,7 +176,7 @@ impl EntityStore {
     }
 
     /// An entity's type index and current dimensions: what a passenger's seat offset is
-    /// computed from (`riding::passenger_offset`).
+    /// computed from (`riding::passenger_seat`).
     pub fn entity_type_info(&self, id: EntityId) -> Option<(RegistryIndex, (f32, f32))> {
         self.get(id).map(|e| (e.kind, e.dimensions))
     }

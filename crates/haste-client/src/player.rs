@@ -26,6 +26,7 @@ use haste_core::game::GameMode;
 use haste_core::input::InputState;
 use haste_core::view::{BlockPhysics, BlockView, CollisionShapes};
 use haste_core::{BlockPos, EntityId, Identifier};
+use haste_entity::riding::SeatPoint;
 use haste_physics::{PlayerAttributes, PlayerState};
 use haste_protocol::packets::play::clientbound::{self as cb, teleport_flags};
 use haste_protocol::packets::play::serverbound::{self as sb, input_flags, move_flags};
@@ -50,6 +51,14 @@ pub mod ability_flags {
     pub const FLYING: i8 = 0x02;
     pub const MAY_FLY: i8 = 0x04;
     pub const INSTABUILD: i8 = 0x08;
+}
+
+/// The vehicle we ride this tick: its position, and its yaw, which turns the seat's sideways
+/// and forward offsets as the vehicle turns under us (`Entity.positionRider`).
+#[derive(Clone, Copy)]
+pub struct VehiclePose {
+    pub pos: DVec3,
+    pub yaw: f32,
 }
 
 /// What `player_abilities` last said.
@@ -180,8 +189,10 @@ pub struct LocalPlayer {
     /// the player's own physics does not run: each tick its position is the vehicle's position
     /// plus the seat offset ([`LocalPlayer::ride_tick`]).
     pub vehicle: Option<EntityId>,
-    /// Where our feet sit above the vehicle's position while riding (set on mount).
-    seat_offset: f64,
+    /// Where our feet sit on the vehicle while riding (set on mount), in the vehicle's own
+    /// frame: the vehicle's passenger attachment point minus our own vehicle attachment point
+    /// (`haste_entity::passenger_seat`).
+    seat: SeatPoint,
     /// Teleport id awaiting its `accept_teleportation`; the accept waits one full tick
     /// after the teleport arrived (see [`LocalPlayer::flush_pending_accept`]). The server
     /// queues further teleports until the accept, so one slot is enough.
@@ -226,7 +237,7 @@ impl LocalPlayer {
             has_position: false,
             loaded: false,
             vehicle: None,
-            seat_offset: 0.0,
+            seat: SeatPoint::ZERO,
             pending_accept: None,
             pending_accept_age: 0,
             teleports: 0,
@@ -565,15 +576,15 @@ impl LocalPlayer {
     }
 
     /// One 20 Hz tick over any world view without interactions (tests use
-    /// `haste_physics::testing`). `vehicle_pos` is the position of the vehicle we ride, if any,
-    /// this tick ([`LocalPlayer::ride_tick`]).
+    /// `haste_physics::testing`). `vehicle` is the pose of the vehicle we ride, if any, this tick
+    /// ([`LocalPlayer::ride_tick`]).
     pub fn tick_with(
         &mut self,
         input: &InputState,
         world: &dyn BlockView,
         shapes: &dyn CollisionShapes,
         blocks: &dyn BlockPhysics,
-        vehicle_pos: Option<DVec3>,
+        vehicle: Option<VehiclePose>,
         out: &mut Vec<ServerboundPlay>,
     ) {
         self.tick_inner(
@@ -584,20 +595,20 @@ impl LocalPlayer {
                 blocks,
                 env: None,
             },
-            vehicle_pos,
+            vehicle,
             out,
         );
     }
 
     /// One 20 Hz tick with the interactions set by [`LocalPlayer::set_interact`] first (hotbar,
     /// attack/break, use/place, pick block), then movement, as a vanilla client orders them.
-    /// `vehicle_pos` is the position of the vehicle we ride, if any, this tick.
+    /// `vehicle` is the pose of the vehicle we ride, if any, this tick.
     pub fn tick_interact(
         &mut self,
         input: &InputState,
         world: &dyn BlockView,
         env: &interact::InteractEnv<'_>,
-        vehicle_pos: Option<DVec3>,
+        vehicle: Option<VehiclePose>,
         out: &mut Vec<ServerboundPlay>,
     ) {
         self.tick_inner(
@@ -608,18 +619,18 @@ impl LocalPlayer {
                 blocks: env.data,
                 env: Some(env),
             },
-            vehicle_pos,
+            vehicle,
             out,
         );
     }
 
-    /// Mounts or dismounts (`set_passengers`): `seat` is where our feet sit above the vehicle's
-    /// position each tick (the vehicle type's passenger attachment, see
-    /// `haste_entity::riding::passenger_offset`). On a dismount, normal physics resumes from
-    /// where the player is.
-    pub fn set_vehicle(&mut self, vehicle: Option<EntityId>, seat: f64) {
+    /// Mounts or dismounts (`set_passengers`): `seat` is where our feet sit on the vehicle each
+    /// tick, in the vehicle's frame (the vehicle's passenger attachment point minus our own,
+    /// `haste_entity::passenger_seat`). On a dismount, normal physics resumes from where the
+    /// player is.
+    pub fn set_vehicle(&mut self, vehicle: Option<EntityId>, seat: SeatPoint) {
         if vehicle.is_some() {
-            self.seat_offset = seat;
+            self.seat = seat;
         }
         self.vehicle = vehicle;
     }
@@ -629,15 +640,20 @@ impl LocalPlayer {
         self.vehicle
     }
 
+    /// The seat we ride in while mounted, in the vehicle's own frame (for tests).
+    pub fn seat(&self) -> SeatPoint {
+        self.seat
+    }
+
     /// The passenger tick, vanilla's `rideTick`: a separate seam next to the movement tick, not
     /// a branch inside it. The passenger's own physics does not run; its position is the
-    /// vehicle's position plus the seat offset, and only its look is free (`look` is the
-    /// player's look for this tick, look offset already applied). `vehicle_pos` is `None` when
-    /// the vehicle is not tracked (removed, or its spawn not yet arrived): the passenger keeps
-    /// its last position.
-    pub fn ride_tick(&mut self, look: (f32, f32), vehicle_pos: Option<DVec3>) {
-        if let Some(pos) = vehicle_pos {
-            self.state.pos = pos + DVec3::new(0.0, self.seat_offset, 0.0);
+    /// vehicle's position plus the seat offset turned by the vehicle's yaw (vanilla's
+    /// `Entity.positionRider`), and only its look is free (`look` is the player's look for this
+    /// tick, look offset already applied). `vehicle` is `None` when the vehicle is not tracked
+    /// (removed, or its spawn not yet arrived): the passenger keeps its last position.
+    pub fn ride_tick(&mut self, look: (f32, f32), vehicle: Option<VehiclePose>) {
+        if let Some(v) = vehicle {
+            self.state.pos = v.pos + self.seat.rotated(v.yaw);
         }
         self.state.velocity = DVec3::ZERO;
         self.state.fall_distance = 0.0;
@@ -651,7 +667,7 @@ impl LocalPlayer {
         &mut self,
         input: &InputState,
         ctx: &TickCtx<'_>,
-        vehicle_pos: Option<DVec3>,
+        vehicle: Option<VehiclePose>,
         out: &mut Vec<ServerboundPlay>,
     ) {
         self.apply_attributes();
@@ -685,7 +701,7 @@ impl LocalPlayer {
         // 2. The passenger tick (vanilla `rideTick`) replaces physics: a passenger sends
         // rotation only, never position packets (the server owns a passenger's position).
         if self.vehicle.is_some() {
-            self.ride_tick(look, vehicle_pos);
+            self.ride_tick(look, vehicle);
             self.send_rotation(out);
             out.push(ServerboundPlay::ClientTickEnd(sb::ClientTickEnd {}));
             return;

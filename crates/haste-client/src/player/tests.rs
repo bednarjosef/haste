@@ -59,7 +59,7 @@ fn tick(p: &mut LocalPlayer, input: &InputState) -> Vec<ServerboundPlay> {
 fn tick_riding(
     p: &mut LocalPlayer,
     input: &InputState,
-    vehicle_pos: Option<DVec3>,
+    vehicle: Option<VehiclePose>,
 ) -> Vec<ServerboundPlay> {
     let mut out = Vec::new();
     p.tick_with(
@@ -67,7 +67,7 @@ fn tick_riding(
         &world(),
         &TestShapes::default(),
         &TestShapes::default(),
-        vehicle_pos,
+        vehicle,
         &mut out,
     );
     out
@@ -502,18 +502,30 @@ fn respawn_waits_for_a_new_position() {
 // Riding: the passenger tick (vanilla `rideTick`).
 // ---------------------------------------------------------------------------
 
-/// Mounted on a vehicle at (0.5, 64, 0.5) with a seat offset of 0.1, after the join flow.
+/// A vehicle at `pos` facing yaw 0 (the yaw matters only in `the_seat_turns_with_the_vehicle`).
+fn vehicle_at(pos: DVec3) -> VehiclePose {
+    VehiclePose { pos, yaw: 0.0 }
+}
+
+/// Mounted on a vehicle at (0.5, 64, 0.5) with a seat 0.1 above it, after the join flow.
 fn riding() -> LocalPlayer {
     let (mut p, _) = spawned();
-    p.set_vehicle(Some(EntityId(9)), 0.1);
+    p.set_vehicle(
+        Some(EntityId(9)),
+        SeatPoint {
+            x: 0.0,
+            y: 0.1,
+            z: 0.0,
+        },
+    );
     p
 }
 
 #[test]
 fn the_passenger_sits_at_the_seat_and_follows_the_vehicle() {
     let mut p = riding();
-    let pos = DVec3::new(10.0, 64.0, 10.0);
-    let out = tick_riding(&mut p, &InputState::default(), Some(pos));
+    let pose = vehicle_at(DVec3::new(10.0, 64.0, 10.0));
+    let out = tick_riding(&mut p, &InputState::default(), Some(pose));
     assert_eq!(p.state.pos, DVec3::new(10.0, 64.1, 10.0));
     // Rotation only; never a position packet.
     assert_eq!(names(&out), ["tick_end"]);
@@ -522,7 +534,7 @@ fn the_passenger_sits_at_the_seat_and_follows_the_vehicle() {
     let out = tick_riding(
         &mut p,
         &InputState::default(),
-        Some(DVec3::new(11.0, 64.0, 10.0)),
+        Some(vehicle_at(DVec3::new(11.0, 64.0, 10.0))),
     );
     assert_eq!(p.state.pos, DVec3::new(11.0, 64.1, 10.0));
     assert_eq!(p.prev_pos, DVec3::new(10.0, 64.1, 10.0));
@@ -535,6 +547,28 @@ fn the_passenger_sits_at_the_seat_and_follows_the_vehicle() {
 }
 
 #[test]
+fn the_seat_turns_with_the_vehicle() {
+    let mut p = riding();
+    // A seat 0.2 to one side of the vehicle: at yaw 0 that offset is along x, at yaw 90 along
+    // z (`Entity.positionRider` runs every tick, so the seat follows the vehicle).
+    p.set_vehicle(
+        Some(EntityId(9)),
+        SeatPoint {
+            x: 0.2,
+            y: 0.0,
+            z: 0.0,
+        },
+    );
+    let pose = VehiclePose {
+        pos: DVec3::new(10.0, 64.0, 10.0),
+        yaw: 90.0,
+    };
+    tick_riding(&mut p, &InputState::default(), Some(pose));
+    let d = p.state.pos - pose.pos;
+    assert!(d.x.abs() < 1e-6 && (d.z - 0.2).abs() < 1e-6, "{d:?}");
+}
+
+#[test]
 fn a_passenger_looks_freely_and_sends_rotation_only() {
     let mut p = riding();
     let look = InputState {
@@ -542,13 +576,21 @@ fn a_passenger_looks_freely_and_sends_rotation_only() {
         pitch: 10.0,
         ..Default::default()
     };
-    let out = tick_riding(&mut p, &look, Some(DVec3::new(10.0, 64.0, 10.0)));
+    let out = tick_riding(
+        &mut p,
+        &look,
+        Some(vehicle_at(DVec3::new(10.0, 64.0, 10.0))),
+    );
     assert_eq!((p.state.yaw, p.state.pitch), (30.0, 10.0));
     // The look changed: one rotation packet, no position (the keys have not changed, so no
     // player_input with it).
     assert_eq!(names(&out), ["rot", "tick_end"]);
     // Same look again: nothing but the tick end.
-    let out = tick_riding(&mut p, &look, Some(DVec3::new(10.0, 64.0, 10.0)));
+    let out = tick_riding(
+        &mut p,
+        &look,
+        Some(vehicle_at(DVec3::new(10.0, 64.0, 10.0))),
+    );
     assert_eq!(names(&out), ["tick_end"]);
 }
 
@@ -559,7 +601,11 @@ fn sneak_while_riding_sets_the_shift_flag_in_player_input() {
         sneak: true,
         ..Default::default()
     };
-    let out = tick_riding(&mut p, &sneak, Some(DVec3::new(10.0, 64.0, 10.0)));
+    let out = tick_riding(
+        &mut p,
+        &sneak,
+        Some(vehicle_at(DVec3::new(10.0, 64.0, 10.0))),
+    );
     let flags = out.iter().find_map(|p| match p {
         ServerboundPlay::PlayerInput(i) => Some(i.flags),
         _ => None,
@@ -578,12 +624,12 @@ fn dismount_resumes_physics_from_the_seat() {
     tick_riding(
         &mut p,
         &InputState::default(),
-        Some(DVec3::new(0.5, 64.0, 0.5)),
+        Some(vehicle_at(DVec3::new(0.5, 64.0, 0.5))),
     );
     assert_eq!(p.state.pos, DVec3::new(0.5, 64.1, 0.5));
     // Dismount: gravity takes over from the seat position. The first tick after it builds
     // velocity (the ride zeroed it); the fall starts the tick after.
-    p.set_vehicle(None, 0.0);
+    p.set_vehicle(None, SeatPoint::ZERO);
     tick_riding(&mut p, &InputState::default(), None);
     assert_eq!(p.state.pos, DVec3::new(0.5, 64.1, 0.5));
     let out = tick_riding(&mut p, &InputState::default(), None);

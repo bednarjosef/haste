@@ -593,16 +593,18 @@ fn set_passengers_mounts_and_dismounts_the_local_player() {
         r.entities.riding.get(&EntityId(5)).unwrap(),
         &vec![EntityId(7)]
     );
-    // The seat offset for a minecart is 0.1 above the vehicle's position. The ride tick runs
-    // once the join is through (accept, player_loaded: two ticks after the teleport); the
-    // player's own teleport position is irrelevant while riding: the vehicle's position is.
+    // The minecart's seat: `passengerAttachments(0.1875)` minus the player's own vehicle
+    // attachment (`Avatar.DEFAULT_VEHICLE_ATTACHMENT`, 0.6) is 0.4125 *below* the cart's
+    // position. The ride tick runs once the join is through (accept, player_loaded: two ticks
+    // after the teleport); the player's own teleport position is irrelevant while riding: the
+    // vehicle's position is.
     r.apply(teleport(1, DVec3::new(40.0, 71.0, 40.0), 0));
     end_tick_once(&mut r);
     end_tick_once(&mut r);
     end_tick_once(&mut r);
     assert_eq!(
         r.session.player.state.pos,
-        DVec3::new(40.0, 70.1, 40.0),
+        DVec3::new(40.0, 69.5875, 40.0),
         "the passenger sits at the vehicle's position plus the seat offset"
     );
     // The passenger follows the vehicle's moves.
@@ -612,7 +614,7 @@ fn set_passengers_mounts_and_dismounts_the_local_player() {
         on_ground: false,
     }));
     end_tick_once(&mut r);
-    assert_eq!(r.session.player.state.pos, DVec3::new(45.0, 70.1, 40.0));
+    assert_eq!(r.session.player.state.pos, DVec3::new(45.0, 69.5875, 40.0));
     // Dismount: the list replaces the previous one and no longer names us.
     r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
         vehicle: 5,
@@ -622,7 +624,7 @@ fn set_passengers_mounts_and_dismounts_the_local_player() {
     // Normal physics resumes from where we are (the fake world has no physics data, so the
     // player stays put at the last seat position).
     end_tick_once(&mut r);
-    assert_eq!(r.session.player.state.pos, DVec3::new(45.0, 70.1, 40.0));
+    assert_eq!(r.session.player.state.pos, DVec3::new(45.0, 69.5875, 40.0));
 }
 
 #[test]
@@ -673,8 +675,9 @@ fn the_seat_offset_comes_from_the_entity_type() {
     end_tick_once(&mut r);
     end_tick_once(&mut r);
     end_tick_once(&mut r);
-    // The horse's seat is 0.6 above its position (not its 1.8 default-box height).
-    assert!((r.session.player.state.pos.y - 64.6).abs() < 1e-6);
+    // The horse's seat: `passengerAttachments(1.44375)` minus the player's own 0.6 is 0.84375
+    // above its position (not its 1.8 default-box height).
+    assert!((r.session.player.state.pos.y - 64.84375).abs() < 1e-6);
 }
 
 #[test]
