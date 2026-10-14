@@ -427,6 +427,13 @@ pub struct Shared {
     pub ui: Mutex<Option<Ui>>,
     /// The HUD's JVM failed to start (no JDK, missing cache): there will be no HUD, ever.
     pub hud_failed: AtomicBool,
+    /// The options the game is running with right now: loaded at join, then updated live from
+    /// the vanilla options screens through the option bridge ([`crate::ui::Ui`]). The render
+    /// thread copies it once per frame; the game thread is the only writer.
+    pub live_options: Mutex<haste_setup::options::Options>,
+    /// Bumped every time [`Shared::live_options`] changes, so the render thread copies the
+    /// options only when they changed (never a per-frame clone).
+    pub options_version: AtomicU64,
     /// F3's tps line: packets sent per second (f64 bits), updated once per second by the game
     /// thread from the connection's counters.
     pub debug_tx: AtomicU64,
@@ -443,6 +450,7 @@ impl Shared {
         view_distance: i32,
         particles: haste_render::Particles,
         skin: (Identifier, bool),
+        options: haste_setup::options::Options,
     ) -> Self {
         let has_sky = world.dimension().has_skylight;
         Self {
@@ -496,6 +504,8 @@ impl Shared {
             skin,
             ui: Mutex::new(None),
             hud_failed: AtomicBool::new(false),
+            live_options: Mutex::new(options),
+            options_version: AtomicU64::new(1),
             debug_tx: AtomicU64::new(0),
             debug_rx: AtomicU64::new(0),
         }
@@ -633,8 +643,48 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>) {
     driver.disconnect();
 }
 
-/// Starts the JVM for the HUD on its own thread (tens of seconds; the connection would time
-/// out if the game thread waited). On failure: one warning and `shared.hud_failed` set, then
+/// Applies the option changes a vanilla screen made to the running client: the shared live
+/// options (FOV, GUI scale, mouse sensitivity, volumes, ... the render thread reads them), the
+/// render distance the mesher uses (capped by the server's view distance, like at join) and the
+/// sound volumes. One info log line per applied option, the way vanilla applies each change the
+/// moment the player makes it (`OptionInstance.set` -> `onValueUpdate`).
+fn apply_option_changes(shared: &Shared, driver: &NetDriver, changes: Vec<(String, String)>) {
+    let mut sound_changed = false;
+    let mut render_distance = None;
+    let mut applied = false;
+    {
+        let mut live = shared.live_options.lock();
+        for (key, value) in changes {
+            if !live.apply_one(&key, &value) {
+                continue;
+            }
+            tracing::info!("applied option {key} = {value}");
+            applied = true;
+            sound_changed |= key.starts_with("soundCategory_");
+            if key == "renderDistance" {
+                render_distance = Some(live.render_distance as i32);
+            }
+        }
+    }
+    if !applied {
+        return;
+    }
+    // Bumped after the lock is released: a reader that sees the new version will see the new
+    // options when it locks.
+    shared.options_version.fetch_add(1, Ordering::Relaxed);
+    if let Some(rd) = render_distance {
+        // The server's view distance still caps what we mesh, like at join.
+        shared.view.lock().view_distance = driver.login().view_distance.min(rd);
+    }
+    if sound_changed {
+        let volumes = shared.live_options.lock().sound;
+        if let Some(sounds) = shared.sound.lock().as_mut() {
+            sounds.set_volumes(&volumes);
+        }
+    }
+}
+
+/// Starts the JVM for the HUD on its own thread (tens of seconds; the connection would time/// out if the game thread waited). On failure: one warning and `shared.hud_failed` set, then
 /// the client keeps running without a HUD.
 fn spawn_jvm(shared: &Arc<Shared>) -> JvmSlot {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -865,6 +915,12 @@ fn tick_once(
         // a second time). The server's `set_held_slot` reaches both sides alike.
         ui.set_selected_slot(driver.session.player.held_slot);
         ui.tick();
+        // Every option a vanilla screen changed this tick reaches the running client live
+        // (vanilla's `OptionInstance.onValueUpdate` callbacks, reported through the bridge).
+        let changes = ui.drain_option_changes();
+        if !changes.is_empty() {
+            apply_option_changes(shared, driver, changes);
+        }
         ui.drain_outgoing(&mut ui_out);
     }
     for p in ui_out {
