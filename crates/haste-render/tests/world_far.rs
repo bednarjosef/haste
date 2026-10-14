@@ -103,6 +103,7 @@ fn terrain_far_from_origin() {
             partial_tick: 0.0,
             block_target: None,
             breaking: &[],
+            camera_entity: None,
         };
         // The section visibility walk runs off the render thread and lands a frame later
         // (vanilla draws the previous graph until the async update is swapped in), so keep
@@ -220,6 +221,7 @@ fn sky_times_of_day() {
             partial_tick: 0.0,
             block_target: None,
             breaking: &[],
+            camera_entity: None,
         };
         renderer.render(&frame).unwrap();
         let img = renderer.read_back().unwrap();
@@ -299,6 +301,7 @@ fn outline_and_cracks() {
             partial_tick: 0.0,
             block_target: with.then_some((target, haste_core::Direction::Up)),
             breaking: if with { &breaking } else { &[] },
+            camera_entity: None,
         };
         renderer.sample_world(&world, &data.shapes, &frame);
         let stats = renderer.render(&frame).unwrap();
