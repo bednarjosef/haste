@@ -470,6 +470,7 @@ impl Session {
         let mut entities = net::new_entity_store(entity_types);
         tracing::info!("synced painting variants: {}", painting_variants.len());
         entities.set_painting_variants(painting_variants);
+        entities.set_item_components(data.item_components.clone());
         let shared = Arc::new(Shared::new(
             data,
             world,

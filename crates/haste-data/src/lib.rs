@@ -3,6 +3,7 @@
 //! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
 
 mod blocks;
+mod components;
 mod physics;
 mod registries;
 mod shapes;
@@ -11,6 +12,7 @@ mod sounds;
 use std::path::Path;
 
 pub use blocks::BlockStates;
+pub use components::{ItemComponents, ItemEquippable};
 pub use physics::{BlockProperties, BlockProps};
 pub use registries::Registries;
 pub use shapes::BlockShapes;
@@ -23,6 +25,9 @@ pub struct GameData {
     pub shapes: BlockShapes,
     pub physics: BlockProperties,
     pub sounds: BlockSoundTypes,
+    /// Item default components (the `equippable` component armour needs), from the report's
+    /// `components/item` directory. Empty when the report is absent.
+    pub item_components: ItemComponents,
 }
 
 impl GameData {
@@ -60,12 +65,17 @@ impl GameData {
             }
             _ => BlockSoundTypes::empty(&blocks),
         };
+        let item_components = ItemComponents::load(
+            &reports.join("minecraft").join("components").join("item"),
+            &registries,
+        );
         Ok(Self {
             blocks,
             registries,
             shapes,
             physics,
             sounds,
+            item_components,
         })
     }
 }
