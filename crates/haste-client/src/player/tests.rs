@@ -1003,7 +1003,11 @@ fn server_shared_flag_7_sets_and_clears_fall_flying() {
     };
     assert!(p.handle(&set(0x80u8 as i8), &mut out));
     assert!(p.state.fall_flying);
-    assert_eq!(p.state.pose, haste_physics::Pose::Standing, "pose follows next tick");
+    assert_eq!(
+        p.state.pose,
+        haste_physics::Pose::Standing,
+        "pose follows next tick"
+    );
     p.handle(&set(0), &mut out);
     assert!(!p.state.fall_flying);
 }
@@ -1022,6 +1026,9 @@ fn landing_ends_the_glide_and_the_pose() {
         }
     }
     assert!(p.state.on_ground, "{}", p.state.pos);
-    assert!(!p.state.fall_flying, "vanilla `LivingEntity.travelFallFlying`");
+    assert!(
+        !p.state.fall_flying,
+        "vanilla `LivingEntity.travelFallFlying`"
+    );
     assert_ne!(p.state.pose, haste_physics::Pose::FallFlying);
 }

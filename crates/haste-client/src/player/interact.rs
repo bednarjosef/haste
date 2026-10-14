@@ -354,7 +354,12 @@ impl LocalPlayer {
         let Some(index) = chest.item else {
             return false;
         };
-        chest.count > 0 && self.int.glider_items.as_ref().is_some_and(|s| s.contains(&index))
+        chest.count > 0
+            && self
+                .int
+                .glider_items
+                .as_ref()
+                .is_some_and(|s| s.contains(&index))
     }
 
     fn eye(&self) -> DVec3 {

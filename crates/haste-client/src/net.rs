@@ -20,7 +20,9 @@ use haste_entity::{EntityDimensions, EntityStore};
 use haste_protocol::haste_core::chunk::{BlockEntityData, ChunkData, LightData};
 use haste_protocol::haste_core::entity::{EntitySpawn, ItemStackData, MetadataEntry, PlayerInfo};
 use haste_protocol::haste_core::game::{DimensionInfo, GameMode};
-use haste_protocol::haste_core::{BlockPos, BlockStateId, ChunkPos, EntityId, Identifier, RegistryIndex};
+use haste_protocol::haste_core::{
+    BlockPos, BlockStateId, ChunkPos, EntityId, Identifier, RegistryIndex,
+};
 use haste_protocol::packets::play::clientbound as cb;
 use haste_protocol::packets::play::clientbound::teleport_flags;
 use haste_protocol::{
@@ -868,19 +870,14 @@ const OPTIONAL_UNSIGNED_INT: i32 = 19;
 /// `None` when this update does not carry the entry (metadata updates are partial).
 fn firework_attached_target(metadata: &[MetadataEntry]) -> Option<Option<EntityId>> {
     let e = metadata.iter().find(|e| e.index == 9)?;
-    let haste_protocol::haste_core::entity::MetadataValue::Other { type_id, raw } = &e.value
-    else {
+    let haste_protocol::haste_core::entity::MetadataValue::Other { type_id, raw } = &e.value else {
         return None;
     };
     if *type_id != OPTIONAL_UNSIGNED_INT {
         return None;
     }
     let v = read_var_int(raw)?;
-    Some(if v == 0 {
-        None
-    } else {
-        Some(EntityId(v - 1))
-    })
+    Some(if v == 0 { None } else { Some(EntityId(v - 1)) })
 }
 
 /// A VarInt as the wire writes it (LEB128, at most 5 bytes for an i32).
@@ -896,6 +893,9 @@ fn read_var_int(mut b: &[u8]) -> Option<i32> {
     }
     None
 }
+/// Cap on the packets kept for a still-starting HUD (a server spamming the UI channel must not
+/// grow the buffer without bound; the real backlog during JVM boot is a handful of packets).
+const UI_BACKLOG_LIMIT: usize = 8192;
 
 /// Owns the connection and the session state; world and entities are borrowed per tick.
 pub struct NetDriver {
@@ -904,6 +904,9 @@ pub struct NetDriver {
     /// Session state.
     pub session: Session,
     out: Vec<ServerboundPlay>,
+    /// Packets the UI would use, seen while the HUD JVM was still starting (replayed by the
+    /// game thread once the `Ui` exists; see `crate::ui::ui_handles`).
+    ui_backlog: Vec<ClientboundPlay>,
 }
 
 impl NetDriver {
@@ -929,6 +932,7 @@ impl NetDriver {
             login,
             session,
             out: Vec::new(),
+            ui_backlog: Vec::new(),
         })
     }
 
@@ -940,6 +944,13 @@ impl NetDriver {
     /// What `login` said (the dimension may since have changed: `session.dimension`).
     pub fn login(&self) -> &Login {
         &self.login
+    }
+
+    /// UI-bound packets seen before the HUD JVM was up, in order; the game thread replays them
+    /// into the new `Ui` once it exists so a fresh join's tab list, boss bars and scoreboard
+    /// survive the boot.
+    pub fn take_ui_backlog(&mut self) -> Vec<ClientboundPlay> {
+        std::mem::take(&mut self.ui_backlog)
     }
 
     /// Connection counters.
@@ -968,11 +979,17 @@ impl NetDriver {
         while let Some(p) = self.conn.try_recv() {
             let regs = self.conn.registries();
             // The HUD sees every packet after the client's own handling, in order; cloning only
-            // when there is a UI to show it (the session takes the original).
-            let for_ui = ui.is_some().then(|| p.clone());
+            // when there is a UI to show it (the session takes the original). While the HUD JVM
+            // is still starting the UI-bound packets are kept and replayed once it is up.
+            let keep = ui.is_some() || crate::ui::ui_handles(&p);
+            let for_ui = keep.then(|| p.clone());
             self.session.apply(p, world, entities, regs, &mut self.out);
-            if let (Some(ui), Some(p)) = (ui, for_ui) {
-                ui.handle(&p);
+            match (ui, for_ui) {
+                (Some(ui), Some(p)) => ui.handle(&p),
+                (None, Some(p)) if self.ui_backlog.len() < UI_BACKLOG_LIMIT => {
+                    self.ui_backlog.push(p)
+                }
+                _ => {}
             }
         }
         self.flush()

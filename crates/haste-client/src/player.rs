@@ -810,7 +810,12 @@ impl LocalPlayer {
 
         // 3. Physics. The player does not move while its chunk is not loaded; vanilla's
         // `Player.aiStep` counts the double-tap jump window down before `LocalPlayer.aiStep`
-        // looks at the keys.
+        // looks at the keys. Vanilla `Player.tick` sets `noPhysics = isSpectator()` and clears
+        // on-ground for spectators before the travel step.
+        self.state.no_physics = self.game_mode == GameMode::Spectator;
+        if self.state.no_physics {
+            self.state.on_ground = false;
+        }
         if self.jump_trigger_time > 0 {
             self.jump_trigger_time -= 1;
         }

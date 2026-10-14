@@ -827,8 +827,8 @@ fn an_attached_firework_boosts_the_gliding_player() {
     r.session
         .set_entity_type_names(names(&["player", "firework_rocket"]));
     r.apply(spawn_packet_kind(20, DVec3::new(0.0, 100.0, 0.0), 1)); // firework_rocket
-    // The rocket's attached-to target is us (entity 7): `OPTIONAL_UNSIGNED_INT` (type 19), a
-    // VarInt of id + 1 = 8.
+                                                                    // The rocket's attached-to target is us (entity 7): `OPTIONAL_UNSIGNED_INT` (type 19), a
+                                                                    // VarInt of id + 1 = 8.
     r.apply(ClientboundPlay::SetEntityData(cb::SetEntityData {
         entity_id: 20,
         metadata: vec![MetadataEntry {
