@@ -55,7 +55,9 @@ impl GameData {
             _ => BlockProperties::defaults(&blocks),
         };
         let sounds = match sibling("block_sounds.json") {
-            Some(p) if p.is_file() => BlockSoundTypes::parse(&std::fs::read_to_string(p)?, &blocks)?,
+            Some(p) if p.is_file() => {
+                BlockSoundTypes::parse(&std::fs::read_to_string(p)?, &blocks)?
+            }
             _ => BlockSoundTypes::empty(&blocks),
         };
         Ok(Self {
@@ -715,12 +717,8 @@ mod tests {
 }"#;
         // (Minimal block_shapes oracle content; the sibling lookup only needs the file.)
         let shapes = r#"{ "version": 1, "states": [] }"#;
-        let (reports, oracle_path) = write_fixture_with(
-            blocks_json,
-            registries_json,
-            Some(shapes),
-            Some(sounds),
-        );
+        let (reports, oracle_path) =
+            write_fixture_with(blocks_json, registries_json, Some(shapes), Some(sounds));
         let d = GameData::load_from(&reports, oracle_path.as_deref()).unwrap();
         let stone = d
             .blocks
@@ -737,16 +735,16 @@ mod tests {
             d.block_sound_type(cracked).unwrap().break_sound,
             "minecraft:block.ghast.shatter"
         );
-        let uncracked = d
-            .blocks
-            .state(&pot, &[("cracked", "false")])
-            .unwrap();
+        let uncracked = d.blocks.state(&pot, &[("cracked", "false")]).unwrap();
         assert_eq!(
             d.block_sound_type(uncracked).unwrap().break_sound,
             "minecraft:block.stone.break"
         );
         // Air is in the dump's blocks (nothing): no sound type.
-        let air = d.blocks.default_state(&Identifier::minecraft("air")).unwrap();
+        let air = d
+            .blocks
+            .default_state(&Identifier::minecraft("air"))
+            .unwrap();
         assert!(d.block_sound_type(air).is_none());
         // Water (in blocks.json but not in the dump): no sound type, no panic.
         let water = d

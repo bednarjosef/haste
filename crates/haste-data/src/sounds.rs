@@ -75,8 +75,8 @@ impl BlockSoundTypes {
     /// order to index by; unknown blocks in the dump are skipped (a newer
     /// dump against older reports must not fail the load).
     pub(crate) fn parse(json: &str, blocks: &BlockStates) -> anyhow::Result<Self> {
-        let file: SoundsFile = serde_json::from_str(json)
-            .map_err(|e| anyhow::anyhow!("block_sounds.json: {e}"))?;
+        let file: SoundsFile =
+            serde_json::from_str(json).map_err(|e| anyhow::anyhow!("block_sounds.json: {e}"))?;
         let types: Vec<BlockSoundType> = file
             .sound_types
             .iter()

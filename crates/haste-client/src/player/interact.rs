@@ -478,7 +478,12 @@ impl LocalPlayer {
         self.int.input.hotbar = None;
     }
 
-    fn use_item(&mut self, look: (f32, f32), env: &InteractEnv<'_>, out: &mut Vec<ServerboundPlay>) {
+    fn use_item(
+        &mut self,
+        look: (f32, f32),
+        env: &InteractEnv<'_>,
+        out: &mut Vec<ServerboundPlay>,
+    ) {
         let holding = !self.main_hand().is_empty();
         match self.int.target {
             Some(Target::Block(h)) => {
@@ -664,8 +669,11 @@ impl LocalPlayer {
     /// `block_sounds.json` dump). Unknown blocks play nothing.
     fn own_mining_hit(&mut self, pos: BlockPos, state: BlockStateId, env: &InteractEnv<'_>) {
         if let Some(t) = env.data.block_sound_type(state) {
-            self.own_sounds
-                .mining_hit(pos.as_dvec3() + DVec3::new(0.5, 0.5, 0.5), t, &mut self.sound_out);
+            self.own_sounds.mining_hit(
+                pos.as_dvec3() + DVec3::new(0.5, 0.5, 0.5),
+                t,
+                &mut self.sound_out,
+            );
         }
     }
 

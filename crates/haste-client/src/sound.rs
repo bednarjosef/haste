@@ -895,7 +895,12 @@ mod tests {
         // Walk to md 0.6 (no fire yet) and teleport.
         for _ in 0..5 {
             let mut requests = Vec::new();
-            own.after_move(DVec3::new(0.2, 0.0, 0.0), DVec3::ZERO, Some(&stone), &mut requests);
+            own.after_move(
+                DVec3::new(0.2, 0.0, 0.0),
+                DVec3::ZERO,
+                Some(&stone),
+                &mut requests,
+            );
             assert!(requests.is_empty());
         }
         own.reset_steps();
@@ -905,13 +910,26 @@ mod tests {
         // the reset (md 1.08 > 1.0).
         let mut requests = Vec::new();
         for _ in 0..5 {
-            own.after_move(DVec3::new(0.2, 0.0, 0.0), DVec3::ZERO, Some(&stone), &mut requests);
+            own.after_move(
+                DVec3::new(0.2, 0.0, 0.0),
+                DVec3::ZERO,
+                Some(&stone),
+                &mut requests,
+            );
         }
-        assert!(requests.is_empty(), "no step within half a block of the teleport");
+        assert!(
+            requests.is_empty(),
+            "no step within half a block of the teleport"
+        );
         let mut fired = 0;
         for _ in 0..5 {
             let mut requests = Vec::new();
-            own.after_move(DVec3::new(0.2, 0.0, 0.0), DVec3::ZERO, Some(&stone), &mut requests);
+            own.after_move(
+                DVec3::new(0.2, 0.0, 0.0),
+                DVec3::ZERO,
+                Some(&stone),
+                &mut requests,
+            );
             fired += requests.len();
         }
         assert_eq!(fired, 1, "the step comes a block after the teleport");
@@ -964,7 +982,12 @@ mod tests {
         quiet.step_sound = "minecraft:intentionally_empty".to_owned();
         let mut own = OwnBlockSounds::new();
         let mut requests = Vec::new();
-        own.after_move(DVec3::new(0.2, 0.0, 0.0), DVec3::ZERO, Some(&quiet), &mut requests);
+        own.after_move(
+            DVec3::new(0.2, 0.0, 0.0),
+            DVec3::ZERO,
+            Some(&quiet),
+            &mut requests,
+        );
         assert!(requests.is_empty());
     }
 

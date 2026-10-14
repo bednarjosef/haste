@@ -251,9 +251,7 @@ impl LocalPlayer {
 
     /// Own-sound requests accumulated this tick (footsteps, mining, placing),
     /// for the caller to drain into its sound output or headless counters.
-    pub fn take_own_sound_requests(
-        &mut self,
-    ) -> std::vec::Drain<'_, crate::sound::SoundRequest> {
+    pub fn take_own_sound_requests(&mut self) -> std::vec::Drain<'_, crate::sound::SoundRequest> {
         self.sound_out.drain(..)
     }
 
@@ -679,7 +677,8 @@ impl LocalPlayer {
                 && !self.state.flying
             {
                 if let Some(t) = sound_type {
-                    self.own_sounds.landed_hard(self.state.pos, t, &mut self.sound_out);
+                    self.own_sounds
+                        .landed_hard(self.state.pos, t, &mut self.sound_out);
                 }
             }
         } else {
