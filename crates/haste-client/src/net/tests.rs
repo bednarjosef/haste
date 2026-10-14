@@ -102,6 +102,10 @@ impl EntitySink for FakeEntities {
     fn set_velocity(&mut self, id: EntityId, v: DVec3) {
         self.log.push(format!("velocity {} {}", id.0, v.y));
     }
+    fn swing(&mut self, id: EntityId, hand: i32, animation: i32, duration: i32) {
+        self.log
+            .push(format!("swing {} {hand} {animation} {duration}", id.0));
+    }
     fn mark_hurt(&mut self, id: EntityId) {
         self.log.push(format!("hurt {}", id.0));
     }
@@ -332,6 +336,18 @@ fn entity_packets_reach_the_store() {
         entity_ids: vec![3],
     }));
     assert_eq!(r.entities.len(), 0);
+}
+
+#[test]
+fn swing_animation_reaches_the_store() {
+    let mut r = Rig::new();
+    r.apply(ClientboundPlay::SwingAnimation(cb::SwingAnimation {
+        entity_id: 3,
+        hand: 0,
+        animation: 1,
+        duration: 6,
+    }));
+    assert_eq!(r.entities.log, ["swing 3 0 1 6"]);
 }
 
 #[test]
