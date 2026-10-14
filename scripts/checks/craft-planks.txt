@@ -1,0 +1,26 @@
+# Feature 6: survival crafting. One oak log in the 2x2 grid becomes 4 oak planks.
+# The inventory screen is 176x166 centred in the 480x270 GUI, so its origin is (152, 52).
+#   hotbar slot 0 (menu slot 36)  -> (152+8+8,  52+142+8) = (168, 202)
+#   crafting grid (menu slot 1)   -> (152+98+8, 52+18+8)  = (258, 78)
+#   result slot (menu slot 0)     -> (152+154+8,52+28+8)  = (314, 88)
+#   hotbar slot 1 (menu slot 37)  -> (186, 202)
+# The runner gives one oak log before the script runs.
+wait_until joined
+wait_until settled
+screenshot craft-setup
+wait 60
+key E
+wait_until screen_open
+wait 20
+click left 168 202
+wait 10
+click left 258 78
+wait 20
+click left 314 88
+wait 20
+click left 186 202
+wait 20
+key E
+wait_until screen_closed
+screenshot craft-final
+wait 60

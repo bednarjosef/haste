@@ -1,0 +1,28 @@
+# Menu mode: from the vanilla title screen through the multiplayer screen into the game.
+# Run without --server (menu mode starts at the title screen), against a server on
+# 127.0.0.1:25691 (scripts/test-server.sh <name> 25691):
+#   target/debug/haste --script scripts/checks/menu-join.txt --seconds 120
+# The script adds the server through the screen's own Add Server (vanilla's ServerList then
+# writes servers.dat in Haste's config directory), selects it and joins. Each run adds the
+# entry again (vanilla's add always appends); delete old ones from the list by hand.
+wait_until screen TitleScreen
+screenshot menu-title
+click_text Multiplayer
+# vanilla's first-time multiplayer safety warning
+wait_until screen SafetyScreen
+click_text Proceed
+wait_until screen JoinMultiplayerScreen
+screenshot menu-multiplayer
+click_text Add Server
+wait_until screen ManageServerScreen
+type Haste Check
+key TAB
+type 127.0.0.1:25691
+click_text Done
+wait_until screen JoinMultiplayerScreen
+screenshot menu-list
+click_text Haste Check
+click_text Join Server
+wait_until joined
+wait_until settled
+screenshot menu-ingame

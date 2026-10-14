@@ -50,12 +50,24 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
             "entity_type",
         ))
         .map_or_else(|| data.registries.len("minecraft:entity_type"), |e| e.len());
+    // The entity-type names the seat offset is resolved with (the synced registry when the
+    // server sent one, else the static one).
+    let type_names = net::entity_type_names(regs, &data);
+    let mob_variants = net::mob_variants(regs);
+    driver.session.set_entity_type_names(type_names);
     let mut world = World::new_with_biomes(
         driver.login().dimension.clone(),
         data.clone(),
         biomes.unwrap_or(64),
     );
     let mut entities = net::new_entity_store(entity_types);
+    for (registry, table) in mob_variants {
+        println!(
+            "synced {registry}: {} variants",
+            table.iter().filter(|e| e.is_some()).count()
+        );
+        entities.set_mob_variants(&registry, table);
+    }
     let login = driver.login();
     println!(
         "joined {address} as {} in {:.0} ms: entity {:?}, {:?}, dimension {} (min_y {}, height {}), view distance {}, biomes {} ({} direct bits)",

@@ -42,6 +42,8 @@ public final class Proxies {
     public static net.minecraft.client.tutorial.Tutorial tutorial;
     public static net.minecraft.client.multiplayer.chat.ChatListener chatListener;
     public static net.minecraft.world.entity.ai.attributes.AttributeMap attributes;
+    /** The server's advancements (real vanilla Java over the forwarded packets). */
+    public static net.minecraft.client.multiplayer.ClientAdvancements advancements;
 
     static void create() {
         minecraft = make(Minecraft.class);
@@ -58,6 +60,9 @@ public final class Proxies {
         set(player, "equipment", net.minecraft.world.entity.EntityEquipment.class, equipment);
         inventory = new Inventory(player, equipment);
         set(player, "inventory", Inventory.class, inventory);
+        // the statistics counter the Stats screen reads and award_stats fills (vanilla's is built
+        // with the LocalPlayer; the proxy never runs that constructor)
+        set(player, "stats", net.minecraft.stats.StatsCounter.class, new net.minecraft.stats.StatsCounter());
 
         set(font, "lineHeight", int.class, haste.rt.Native.lineHeight());
         set(minecraft, "font", Font.class, font);
@@ -74,6 +79,8 @@ public final class Proxies {
         // Haste plays no music: never show the now-playing toast
         options.musicToast().set(net.minecraft.client.MusicToastDisplayState.NEVER);
         set(minecraft, "options", Options.class, options);
+        // every option change (and key binding, polled per tick) reaches Rust live
+        OptionBridge.install();
         // which F3 entries are on (vanilla's list; the HUD's crosshair asks it)
         set(minecraft, "debugEntries", net.minecraft.client.gui.components.debug.DebugScreenEntryList.class,
             new net.minecraft.client.gui.components.debug.DebugScreenEntryList(gameDir, net.minecraft.util.datafix.DataFixers.getDataFixer()));
@@ -131,6 +138,12 @@ public final class Proxies {
         hud = new net.minecraft.client.gui.Hud(minecraft);
         set(gui, "hud", net.minecraft.client.gui.Hud.class, hud);
         chatListener = new net.minecraft.client.multiplayer.chat.ChatListener(minecraft);
+        // the server's advancements; telemetry is disabled (Haste sends none), like vanilla with
+        // telemetry off: only the toast path would use it
+        advancements = new net.minecraft.client.multiplayer.ClientAdvancements(minecraft,
+            new net.minecraft.client.telemetry.WorldSessionTelemetryManager(
+                net.minecraft.client.telemetry.TelemetryEventSender.DISABLED, false, null, null,
+                java.util.UUID.randomUUID()));
         // the player's own menu is real vanilla Java over the real Inventory
         var menu = new net.minecraft.world.inventory.InventoryMenu(inventory, true, player);
         set(player, "inventoryMenu", net.minecraft.world.inventory.InventoryMenu.class, menu);

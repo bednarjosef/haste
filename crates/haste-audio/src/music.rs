@@ -301,7 +301,11 @@ mod tests {
     }
 
     /// Ticks until the manager returns anything but `None`.
-    fn until_command(manager: &mut MusicManager, rng: &mut MusicRng, is_playing: bool) -> MusicCommand {
+    fn until_command(
+        manager: &mut MusicManager,
+        rng: &mut MusicRng,
+        is_playing: bool,
+    ) -> MusicCommand {
         for _ in 1..=60_000usize {
             if let Some(command) = manager.tick(rng, is_playing) {
                 return command;
@@ -318,7 +322,10 @@ mod tests {
         let mut rng = MusicRng::new(1);
         let (ticks, event) = until_play(&mut manager, &mut rng, false);
         assert_eq!(event, "minecraft:music.menu");
-        assert_eq!(ticks, STARTING_DELAY as usize, "the first track starts after the starting delay");
+        assert_eq!(
+            ticks, STARTING_DELAY as usize,
+            "the first track starts after the starting delay"
+        );
     }
 
     #[test]
@@ -368,11 +375,17 @@ mod tests {
             assert_eq!(manager.tick(&mut rng, true), None);
         }
         manager.set_situation(MusicSituation::End);
-        assert_eq!(until_command(&mut manager, &mut rng, true), MusicCommand::Stop);
+        assert_eq!(
+            until_command(&mut manager, &mut rng, true),
+            MusicCommand::Stop
+        );
         // The replacement gets a short countdown (vanilla: nextInt(0, minDelay / 2)).
         let (ticks, event) = until_play(&mut manager, &mut rng, false);
         assert_eq!(event, "minecraft:music.end");
-        assert!(ticks <= 3_000, "end music followed within minDelay/2 ticks, took {ticks}");
+        assert!(
+            ticks <= 3_000,
+            "end music followed within minDelay/2 ticks, took {ticks}"
+        );
     }
 
     #[test]

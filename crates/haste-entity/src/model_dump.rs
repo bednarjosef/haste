@@ -137,6 +137,13 @@ impl ModelLibrary {
         self.layers.len()
     }
 
+    /// Every layer id in the dump, sorted; for tests and the `list_layers` example.
+    pub fn layer_ids(&self) -> Vec<&str> {
+        let mut ids: Vec<&str> = self.layers.keys().map(|s| s.as_str()).collect();
+        ids.sort_unstable();
+        ids
+    }
+
     pub fn is_empty(&self) -> bool {
         self.layers.is_empty()
     }

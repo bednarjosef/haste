@@ -1,0 +1,14 @@
+# Feature 2: the death screen appears and Respawn brings the player back.
+# The runner kills the player (RCON) when hud-setup is taken; the death screen's Respawn
+# button sits at (240, 149) in the 480x270 GUI (vanilla DeathScreen: width/2-100, height/4+72,
+# 200x20).
+wait_until joined
+wait_until settled
+screenshot death-setup
+wait 60
+screenshot death-screen
+wait 20
+click left 240 149
+wait 60
+screenshot death-after
+wait 60

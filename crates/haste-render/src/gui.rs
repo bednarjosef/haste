@@ -1407,7 +1407,18 @@ impl GuiRenderer {
             * Mat4::from_scale(Vec3::new(-model_scale, -model_scale, model_scale) / 16.0);
         let mut tris = std::mem::take(&mut self.entity_scratch);
         tris.clear();
-        crate::entity::emit_part(&mut tris, &e.model, &e.model.root, &pose, m, rect, 1.0, 0.0);
+        // GUI inventory preview: full block and sky light (vanilla's GUI entity light
+        // 0xF000F0), so the model renders at full brightness.
+        crate::entity::emit_part(
+            &mut tris,
+            &e.model,
+            &e.model.root,
+            &pose,
+            m,
+            rect,
+            (15, 15),
+            0.0,
+        );
         // Back faces off, then back to front.
         let mut order: Vec<(f32, usize)> = tris
             .chunks(3)
@@ -1613,17 +1624,24 @@ fn prepare_item(model: &ItemModel) -> PreparedItem {
         match &part.geometry {
             ItemGeometry::None => {}
             ItemGeometry::Generated { layers } => {
-                // The front face of the extruded sprite (the only one visible in a slot).
-                let z = 8.5 / 16.0;
+                // The extruded sprite's front face and the 1/16-deep sides at its opaque
+                // edges (`haste_assets`'s `generated_layer_quads`, vanilla's
+                // `ItemModelGenerator`); the mirrored back face never shows in a slot.
                 for (i, layer) in layers.iter().enumerate() {
-                    push(
-                        [[0.0, 1.0, z], [0.0, 0.0, z], [1.0, 0.0, z], [1.0, 1.0, z]],
-                        [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]],
-                        Vec3::Z,
-                        layer.clone(),
-                        tint(Some(i as u32)),
-                        i as f32 * 1e-3,
-                    );
+                    for q in &layer.quads {
+                        if q.direction == haste_assets::Direction::North {
+                            continue;
+                        }
+                        let o = q.direction.offset();
+                        push(
+                            q.positions,
+                            q.uvs,
+                            Vec3::new(o[0] as f32, o[1] as f32, o[2] as f32),
+                            layer.texture.clone(),
+                            tint(q.tint_index),
+                            i as f32 * 1e-3,
+                        );
+                    }
                 }
             }
             ItemGeometry::Elements(list) => {
@@ -1811,6 +1829,10 @@ mod tests {
                     scale: [0.625; 3],
                 },
                 firstperson: haste_assets::DisplayTransform::IDENTITY,
+                thirdperson: haste_assets::DisplayTransform::IDENTITY,
+                head: haste_assets::DisplayTransform::IDENTITY,
+                ground: haste_assets::DisplayTransform::IDENTITY,
+                fixed: haste_assets::DisplayTransform::IDENTITY,
                 gui_light_front: false,
                 transformation: None,
             }],
