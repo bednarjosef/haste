@@ -40,10 +40,14 @@ fn data() -> &'static haste_data::GameData {
             format!(
                 r#"{{"minecraft:block": {{"entries": {{{}}}}},
                     "minecraft:item": {{"entries": {{{}}}}},
-                    "minecraft:mob_effect": {{"entries": {{{}}}}}}}"#,
+                    "minecraft:mob_effect": {{"entries": {{{}}}}},
+                    "minecraft:data_component_type": {{"entries": {{{}}}}},
+                    "minecraft:enchantment": {{"entries": {{{}}}}}}}"#,
                 entries(&names),
                 entries(&["air", "diamond_pickaxe", "diamond_sword", "stick"]),
                 entries(&["speed", "haste", "mining_fatigue", "conduit_power"]),
+                entries(&["tool", "enchantments"]),
+                entries(&["efficiency", "sharpness"]),
             ),
         )
         .unwrap();
@@ -477,9 +481,50 @@ fn inventory_and_effects_from_packets() {
     );
 }
 
+/// The held stack's own `minecraft:tool` component and Efficiency enchantment drive the mining
+/// speed (`ItemStack.getDestroySpeed` / `Player.getDestroySpeed`): a stack with a speed-8 tool
+/// rule on `mineable/pickaxe` and Efficiency V (level^2 + 1 = 26) gives 8 + 26 = 34.
 #[test]
-fn drop_item_key_sends_status_5_once_per_press() {
+fn held_stack_components_drive_mining_speed() {
+    use haste_protocol::wire::{IdSet, Writer};
     let mut r = Rig::new(GameMode::Survival);
+    r.p.int.prepare(data());
+    let mut tool = Writer::new();
+    tool.var_int(1);
+    tool.write(&IdSet::Tag(Identifier::minecraft("mineable/pickaxe")));
+    tool.option(&Some(8.0f32), |w, v| w.f32(*v));
+    tool.option(&Some(true), |w, v| w.bool(*v));
+    tool.f32(1.0);
+    tool.var_int(1);
+    tool.bool(true);
+    let mut patch = Writer::new();
+    patch.len_prefix(2);
+    patch.len_prefix(0);
+    patch.var_int(0); // minecraft:tool
+    patch.bytes(&tool.buf);
+    patch.var_int(1); // minecraft:enchantments
+    patch.var_int(1); // one enchantment
+    patch.var_int(0); // minecraft:efficiency
+    patch.var_int(5); // level V
+    r.p.int.hotbar[0] = ItemStackData {
+        count: 1,
+        item: Some(RegistryIndex(1)),
+        components_raw: patch.into_inner().into(),
+    };
+    r.tick(InteractInput::default());
+    let env = InteractEnv {
+        data: data(),
+        entities: &[],
+    };
+    let p = r.p.mining_params(STONE, &env);
+    assert_eq!((p.tool_speed, p.tool_correct), (8.0, Some(true)));
+    assert_eq!(p.mining_efficiency, 26.0);
+    // (8 + 26) / 1.5 / 30 = 0.755 per tick: 2 ticks (wiki: Efficiency V diamond pickaxe).
+    assert_eq!(p.ticks_to_break(), Some(2));
+}
+
+#[test]
+fn drop_item_key_sends_status_5_once_per_press() {    let mut r = Rig::new(GameMode::Survival);
     let q = InteractInput {
         drop_item: true,
         ..Default::default()

@@ -128,8 +128,27 @@ pub struct Interaction {
     tools: Option<Arc<ToolTable>>,
     tags: Option<BlockTags>,
     effect_ids: Option<EffectIds>,
+    /// `minecraft:data_component_type` names by protocol id, for decoding the held stack's
+    /// component patch (`haste_protocol::wire::components::read_patch`).
+    component_tables: Option<Arc<haste_protocol::packets::ProtocolTables>>,
+    /// The held main-hand stack's decoded data and the stack it was decoded from (re-decoded
+    /// when the slot's stack changes; a decode failure leaves it `None`).
+    components: Option<HeldItem>,
     /// Last blocks we sent actions for (debug logging of their server updates).
     recent: Vec<BlockPos>,
+}
+
+/// The held main-hand stack's decoded components the game logic reads: what it mines
+/// (`minecraft:tool`) and the Efficiency enchantment's `mining_efficiency` contribution
+/// (`Enchantments.EFFICIENCY`'s `LevelsSquared(1.0)` effect = level^2 + 1).
+#[derive(Clone, Debug)]
+struct HeldItem {
+    /// The stack this was decoded from (re-decode when it changes).
+    stack: ItemStackData,
+    /// The stack's own `minecraft:tool` component, if it overrides the item default.
+    tool: Option<haste_physics::mining::Tool>,
+    /// `minecraft:mining_efficiency` from the stack's Efficiency enchantment (0 if none).
+    efficiency: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -166,6 +185,13 @@ impl Interaction {
                 });
             }
         }
+        if self.component_tables.is_none() {
+            self.component_tables = Some(Arc::new(
+                haste_protocol::packets::ProtocolTables::with_data_components(
+                    data.registries.data_component_names(),
+                ),
+            ));
+        }
     }
 
     pub fn has_block_tags(&self) -> bool {
@@ -178,6 +204,36 @@ impl Interaction {
 
     pub fn set_tools(&mut self, tools: Arc<ToolTable>) {
         self.tools = Some(tools);
+    }
+
+    /// Decodes the held main-hand stack's component patch once, when the slot's stack changes
+    /// (`ItemStack.get(DataComponents.TOOL)` / the Efficiency enchantment's attribute effect).
+    fn refresh_components(&mut self, stack: ItemStackData, data: &haste_data::GameData) {
+        if self.components.as_ref().is_some_and(|h| h.stack == stack) {
+            return;
+        }
+        let Some(tables) = self.component_tables.clone() else {
+            return;
+        };
+        let patch = if stack.is_empty() || stack.components_raw.is_empty() {
+            haste_protocol::wire::components::ComponentPatch::default()
+        } else {
+            match haste_protocol::wire::components::read_patch(&stack.components_raw, &tables) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::debug!("held stack component patch did not decode: {e}");
+                    self.components = None;
+                    return;
+                }
+            }
+        };
+        let tool = patch.tool().map(|t| tool_from_component(t, data));
+        let efficiency = efficiency_from_enchantments(&patch, data);
+        self.components = Some(HeldItem {
+            stack,
+            tool,
+            efficiency,
+        });
     }
 
     pub(super) fn respawned(&mut self) {
@@ -206,6 +262,68 @@ impl Interaction {
             self.world_edits.push((pos, s));
         }
     }
+}
+
+/// Converts a stack's `minecraft:tool` component (protocol `IdSet`s) into the physics tool the
+/// mining code matches against block tags and names.
+fn tool_from_component(
+    t: &haste_protocol::wire::components::Tool,
+    data: &haste_data::GameData,
+) -> haste_physics::mining::Tool {
+    use haste_physics::mining::{BlockSet, ToolRule};
+    use haste_protocol::wire::IdSet;
+    let rules = t
+        .rules
+        .iter()
+        .map(|r| {
+            let blocks = match &r.blocks {
+                IdSet::Tag(tag) => BlockSet::Tag(tag.clone()),
+                IdSet::Ids(ids) => BlockSet::List(
+                    ids.iter()
+                        .filter_map(|i| {
+                            data.registries
+                                .name("minecraft:block", RegistryIndex(*i as u32))
+                                .cloned()
+                        })
+                        .collect(),
+                ),
+            };
+            ToolRule {
+                blocks,
+                speed: r.speed,
+                correct_for_drops: r.correct_for_drops,
+            }
+        })
+        .collect();
+    haste_physics::mining::Tool {
+        rules,
+        default_mining_speed: t.default_mining_speed,
+        damage_per_block: t.damage_per_block,
+        can_destroy_blocks_in_creative: t.can_destroy_blocks_in_creative,
+    }
+}
+
+/// The `minecraft:mining_efficiency` a stack's Efficiency enchantment grants
+/// (`Enchantments.EFFICIENCY`, `LevelsSquared(1.0)` = level^2 + 1; ids from
+/// `minecraft:enchantment`).
+fn efficiency_from_enchantments(
+    patch: &haste_protocol::wire::components::ComponentPatch,
+    data: &haste_data::GameData,
+) -> f64 {
+    let Some(ench) = patch.enchantments() else {
+        return 0.0;
+    };
+    ench.iter()
+        .filter_map(|e| {
+            let name = data
+                .registries
+                .name("minecraft:enchantment", RegistryIndex(e.id as u32))?;
+            (name.namespace() == "minecraft" && name.path() == "efficiency").then(|| {
+                let l = f64::from(e.level);
+                l * l + 1.0
+            })
+        })
+        .sum()
 }
 
 impl LocalPlayer {
@@ -382,6 +500,8 @@ impl LocalPlayer {
         }
 
         // 2. Target.
+        let held = self.main_hand().clone();
+        self.int.refresh_components(held, env.data);
         self.int.target = if self.game_mode == GameMode::Spectator {
             None
         } else {
@@ -595,12 +715,21 @@ impl LocalPlayer {
         };
         let e = self.int.effect_ids;
         let a = self.int.attrs;
+        // Vanilla's `speed += getAttributeValue(MINING_EFFICIENCY)`. The server syncs the
+        // attribute, but the value comes from the held stack's Efficiency enchantment, which the
+        // client also decodes itself; take whichever is present (they agree in real play).
+        let stack_efficiency = self
+            .int
+            .components
+            .as_ref()
+            .filter(|h| h.stack == *self.main_hand())
+            .map_or(0.0, |h| h.efficiency);
         MiningParams {
             hardness: data.destroy_time(state),
             requires_correct_tool: data.requires_correct_tool(state),
             tool_speed,
             tool_correct,
-            mining_efficiency: a.mining_efficiency,
+            mining_efficiency: a.mining_efficiency.max(stack_efficiency),
             haste_level: level(e.map(|e| e.haste)).max(level(e.map(|e| e.conduit_power))),
             fatigue_level: level(e.map(|e| e.mining_fatigue)),
             block_break_speed: a.block_break_speed,
@@ -610,6 +739,8 @@ impl LocalPlayer {
         }
     }
 
+    /// The held stack's `minecraft:tool` component (`ItemStack.get(DataComponents.TOOL)`) when
+    /// the stack overrides it, else the item's default from the data generator's reports.
     fn held_tool<'t>(
         &'t self,
         data: &haste_data::GameData,
@@ -617,6 +748,11 @@ impl LocalPlayer {
         let item = self.main_hand();
         if item.is_empty() {
             return None;
+        }
+        if let Some(h) = self.int.components.as_ref().filter(|h| h.stack == *item) {
+            if h.tool.is_some() {
+                return h.tool.as_ref();
+            }
         }
         let name = data
             .registries

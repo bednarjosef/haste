@@ -326,6 +326,7 @@ mod tests {
         BlockTags::new([
             (Identifier::minecraft("mineable/pickaxe"), vec![1, 2]),
             (Identifier::minecraft("incorrect_for_wooden_tool"), vec![2]),
+            (Identifier::minecraft("incorrect_for_iron_tool"), vec![2]),
             (Identifier::minecraft("incorrect_for_diamond_tool"), vec![]),
         ])
     }
@@ -388,6 +389,11 @@ mod tests {
             params(Some(&diamond), "obsidian", 2, 50.0, true).ticks_to_break(),
             Some(188)
         );
+        // An iron pickaxe is the wrong tier for obsidian: not correct for drops.
+        let iron = pickaxe(6.0, "incorrect_for_iron_tool");
+        let p = params(Some(&iron), "obsidian", 2, 50.0, true);
+        assert!(!p.can_harvest());
+        assert_eq!((p.tool_speed, p.tool_correct), (6.0, Some(false)));
     }
 
     #[test]
@@ -417,6 +423,8 @@ mod tests {
             mining_efficiency: 26.0,
             ..base
         };
+        // Efficiency V adds level^2 + 1 = 26 to the fitting tool: 8 + 26 = 34.
+        assert!((eff.speed() - 34.0).abs() < 1e-5);
         assert_eq!(eff.ticks_to_break(), Some(2));
         assert_eq!(
             MiningParams {
