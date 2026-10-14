@@ -247,6 +247,8 @@ const ATTACK: InteractInput = InteractInput {
     drop_stack: false,
     swap_offhand: false,
     hotbar: None,
+    attack_clicks: 0,
+    use_clicks: 0,
 };
 
 fn actions(out: &[ServerboundPlay]) -> Vec<(i32, i32)> {
@@ -438,6 +440,27 @@ fn several_queued_attack_clicks_in_one_tick_each_count() {
         .filter(|p| matches!(p, ServerboundPlay::Attack(_)))
         .count();
     assert_eq!(attacks, 2, "{out:?}");
+}
+
+#[test]
+fn three_clicks_in_one_tick_run_start_attack_three_times() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.add_entity(
+        EntityId(42),
+        Aabb::entity(DVec3::new(0.5, 0.0, 0.5), 0.6, 0.5),
+        ZOMBIE,
+    );
+    // Three presses between ticks (faster than the 20 Hz tick): each consumeClick in
+    // `while (keyAttack.consumeClick()) instantAttack |= startAttack()` runs startAttack.
+    r.p.queue_attack_click();
+    r.p.queue_attack_click();
+    r.p.queue_attack_click();
+    let out = r.tick(ATTACK);
+    let attacks = out
+        .iter()
+        .filter(|p| matches!(p, ServerboundPlay::Attack(_)))
+        .count();
+    assert_eq!(attacks, 3, "{out:?}");
 }
 
 #[test]
