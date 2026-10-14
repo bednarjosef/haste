@@ -27,6 +27,7 @@ use haste_core::game::GameMode;
 use haste_core::input::InputState;
 use haste_core::view::{BlockPhysics, BlockView, CollisionShapes};
 use haste_core::{BlockPos, EntityId, Identifier};
+use haste_entity::riding::SeatPoint;
 use haste_physics::movement::{BLOCK_BELOW_OFFSET, SPRINT_JUMP_BOOST, VERTICAL_DRAG};
 use haste_physics::{PlayerAttributes, PlayerState};
 use haste_protocol::packets::play::clientbound::{self as cb, teleport_flags};
@@ -60,6 +61,14 @@ pub mod ability_flags {
     pub const FLYING: i8 = 0x02;
     pub const MAY_FLY: i8 = 0x04;
     pub const INSTABUILD: i8 = 0x08;
+}
+
+/// The vehicle we ride this tick: its position, and its yaw, which turns the seat's sideways
+/// and forward offsets as the vehicle turns under us (`Entity.positionRider`).
+#[derive(Clone, Copy)]
+pub struct VehiclePose {
+    pub pos: DVec3,
+    pub yaw: f32,
 }
 
 /// What `player_abilities` last said.
@@ -190,6 +199,14 @@ pub struct LocalPlayer {
     pub has_position: bool,
     /// Whether `player_loaded` was sent since login/respawn (movement is sent only after).
     pub loaded: bool,
+    /// The vehicle the server has us riding (`set_passengers`); `None` when on foot. While set,
+    /// the player's own physics does not run: each tick its position is the vehicle's position
+    /// plus the seat offset ([`LocalPlayer::ride_tick`]).
+    pub vehicle: Option<EntityId>,
+    /// Where our feet sit on the vehicle while riding (set on mount), in the vehicle's own
+    /// frame: the vehicle's passenger attachment point minus our own vehicle attachment point
+    /// (`haste_entity::passenger_seat`).
+    seat: SeatPoint,
     /// Teleport id awaiting its `accept_teleportation`; the accept waits one full tick
     /// after the teleport arrived (see [`LocalPlayer::flush_pending_accept`]). The server
     /// queues further teleports until the accept, so one slot is enough.
@@ -248,6 +265,8 @@ impl LocalPlayer {
             held_slot: 0,
             has_position: false,
             loaded: false,
+            vehicle: None,
+            seat: SeatPoint::ZERO,
             pending_accept: None,
             pending_accept_age: 0,
             teleports: 0,
@@ -614,7 +633,7 @@ impl LocalPlayer {
             data,
             entities: &[],
         };
-        self.tick_interact(input, world, &env, out);
+        self.tick_interact(input, world, &env, None, out);
     }
 
     /// Resolves what the player needs from the game data once (attribute ids, tool table).
@@ -628,37 +647,98 @@ impl LocalPlayer {
     }
 
     /// One 20 Hz tick over any world view without interactions (tests use
-    /// `haste_physics::testing`).
+    /// `haste_physics::testing`). `vehicle` is the pose of the vehicle we ride, if any, this tick
+    /// ([`LocalPlayer::ride_tick`]).
     pub fn tick_with(
         &mut self,
         input: &InputState,
         world: &dyn BlockView,
         shapes: &dyn CollisionShapes,
         blocks: &dyn BlockPhysics,
+        vehicle: Option<VehiclePose>,
         out: &mut Vec<ServerboundPlay>,
     ) {
-        self.tick_inner(input, world, shapes, blocks, None, out);
+        self.tick_inner(
+            input,
+            &TickCtx {
+                world,
+                shapes,
+                blocks,
+                env: None,
+            },
+            vehicle,
+            out,
+        );
     }
 
     /// One 20 Hz tick with the interactions set by [`LocalPlayer::set_interact`] first (hotbar,
     /// attack/break, use/place, pick block), then movement, as a vanilla client orders them.
+    /// `vehicle` is the pose of the vehicle we ride, if any, this tick.
     pub fn tick_interact(
         &mut self,
         input: &InputState,
         world: &dyn BlockView,
         env: &interact::InteractEnv<'_>,
+        vehicle: Option<VehiclePose>,
         out: &mut Vec<ServerboundPlay>,
     ) {
-        self.tick_inner(input, world, &env.data.shapes, env.data, Some(env), out);
+        self.tick_inner(
+            input,
+            &TickCtx {
+                world,
+                shapes: &env.data.shapes,
+                blocks: env.data,
+                env: Some(env),
+            },
+            vehicle,
+            out,
+        );
+    }
+
+    /// Mounts or dismounts (`set_passengers`): `seat` is where our feet sit on the vehicle each
+    /// tick, in the vehicle's frame (the vehicle's passenger attachment point minus our own,
+    /// `haste_entity::passenger_seat`). On a dismount, normal physics resumes from where the
+    /// player is.
+    pub fn set_vehicle(&mut self, vehicle: Option<EntityId>, seat: SeatPoint) {
+        if vehicle.is_some() {
+            self.seat = seat;
+        }
+        self.vehicle = vehicle;
+    }
+
+    /// The vehicle we ride, if any.
+    pub fn vehicle(&self) -> Option<EntityId> {
+        self.vehicle
+    }
+
+    /// The seat we ride in while mounted, in the vehicle's own frame (for tests).
+    pub fn seat(&self) -> SeatPoint {
+        self.seat
+    }
+
+    /// The passenger tick, vanilla's `rideTick`: a separate seam next to the movement tick, not
+    /// a branch inside it. The passenger's own physics does not run; its position is the
+    /// vehicle's position plus the seat offset turned by the vehicle's yaw (vanilla's
+    /// `Entity.positionRider`), and only its look is free (`look` is the player's look for this
+    /// tick, look offset already applied). `vehicle` is `None` when the vehicle is not tracked
+    /// (removed, or its spawn not yet arrived): the passenger keeps its last position.
+    pub fn ride_tick(&mut self, look: (f32, f32), vehicle: Option<VehiclePose>) {
+        if let Some(v) = vehicle {
+            self.state.pos = v.pos + self.seat.rotated(v.yaw);
+        }
+        self.state.velocity = DVec3::ZERO;
+        self.state.fall_distance = 0.0;
+        self.state.on_ground = false;
+        self.state.horizontal_collision = false;
+        self.state.yaw = look.0;
+        self.state.pitch = look.1;
     }
 
     fn tick_inner(
         &mut self,
         input: &InputState,
-        world: &dyn BlockView,
-        shapes: &dyn CollisionShapes,
-        blocks: &dyn BlockPhysics,
-        env: Option<&interact::InteractEnv<'_>>,
+        ctx: &TickCtx<'_>,
+        vehicle: Option<VehiclePose>,
         out: &mut Vec<ServerboundPlay>,
     ) {
         self.apply_attributes();
@@ -676,18 +756,29 @@ impl LocalPlayer {
             input.yaw + self.look_offset.0,
             (input.pitch + self.look_offset.1).clamp(-90.0, 90.0),
         );
-        if let Some(env) = env {
-            self.interact_step(look, world, env, out);
+        if let Some(env) = ctx.env {
+            self.interact_step(look, ctx.world, env, out);
         }
 
-        // 1. player_input when the held keys change (raw keys, as pressed).
+        // 1. player_input when the held keys change (raw keys, as pressed). While riding this
+        // is how the vehicle learns our keys (steering, and sneak to dismount: the shift flag
+        // makes the server answer with a set_passengers that removes us).
         let flags = input_bits(input);
         if self.sent.input != Some(flags) {
             out.push(ServerboundPlay::PlayerInput(sb::PlayerInput { flags }));
             self.sent.input = Some(flags);
         }
 
-        // 2. Physics. The player does not move while its chunk is not loaded; vanilla's
+        // 2. The passenger tick (vanilla `rideTick`) replaces physics: a passenger sends
+        // rotation only, never position packets (the server owns a passenger's position).
+        if self.vehicle.is_some() {
+            self.ride_tick(look, vehicle);
+            self.send_rotation(out);
+            out.push(ServerboundPlay::ClientTickEnd(sb::ClientTickEnd {}));
+            return;
+        }
+
+        // 3. Physics. The player does not move while its chunk is not loaded; vanilla's
         // `Player.aiStep` counts the double-tap jump window down before `LocalPlayer.aiStep`
         // looks at the keys.
         if self.jump_trigger_time > 0 {
@@ -718,7 +809,7 @@ impl LocalPlayer {
                     self.jump_trigger_time = 0;
                     self.state.flying = !self.state.flying;
                     if self.state.flying && self.state.on_ground {
-                        self.jump_from_ground(world, blocks);
+                        self.jump_from_ground(ctx.world, ctx.blocks);
                     }
                 }
             } else {
@@ -732,21 +823,21 @@ impl LocalPlayer {
             self.own_sounds.reset_steps();
         }
         let chunk = BlockPos::from_dvec3(self.state.pos).chunk();
-        if world.is_chunk_loaded(chunk) {
+        if ctx.world.is_chunk_loaded(chunk) {
             haste_physics::tick(
                 &mut self.state,
                 &phys_input,
                 &self.attrs,
-                world,
-                shapes,
-                blocks,
+                ctx.world,
+                ctx.shapes,
+                ctx.blocks,
             );
             // Own block sounds of moving: the step rule on the block below the
             // feet, the fall sound on a hard landing (vanilla plays both on
             // the client; the server excludes the acting player).
             let movement = self.state.pos - pre_tick_pos;
-            let sound_type = env.and_then(|e| {
-                supporting_block_state(self.state.pos, world)
+            let sound_type = ctx.env.and_then(|e| {
+                supporting_block_state(self.state.pos, ctx.world)
                     .and_then(|s| e.data.block_sound_type(s))
             });
             self.own_sounds
@@ -771,7 +862,7 @@ impl LocalPlayer {
             // player is above the world's minimum, with the 0.98 vertical drag on top. At or below
             // the minimum it is 0.0, so the player is left exactly where it was.
             if !self.state.flying {
-                let falling = self.state.pos.y > f64::from(world.min_y());
+                let falling = self.state.pos.y > f64::from(ctx.world.min_y());
                 self.state.velocity.y = if falling {
                     UNLOADED_CHUNK_FALL_SPEED
                 } else {
@@ -784,7 +875,7 @@ impl LocalPlayer {
             }
         }
 
-        // 3. Flight started or stopped (toggle or landing).
+        // 4. Flight started or stopped (toggle or landing).
         if self.state.flying != was_flying {
             let mut f = 0;
             if self.state.flying {
@@ -795,7 +886,7 @@ impl LocalPlayer {
             }));
         }
 
-        // 4. Sprint state.
+        // 5. Sprint state.
         if self.state.sprinting != self.sent.sprinting {
             out.push(ServerboundPlay::PlayerCommand(sb::PlayerCommand {
                 entity_id: self.entity_id.0,
@@ -809,11 +900,48 @@ impl LocalPlayer {
             self.sent.sprinting = self.state.sprinting;
         }
 
-        // 5. Movement.
+        // 6. Movement.
         self.send_movement(out);
 
         // 6. End of tick.
         out.push(ServerboundPlay::ClientTickEnd(sb::ClientTickEnd {}));
+    }
+
+    /// Movement send while riding (a passenger never sends position packets: the server owns
+    /// its position): rotation when it changed, else a status-only packet when on-ground or
+    /// collision changed. Sneak dismounts arrive as `player_input`'s shift flag, answered by
+    /// the server with `set_passengers`.
+    fn send_rotation(&mut self, out: &mut Vec<ServerboundPlay>) {
+        let s = &self.state;
+        if !(s.yaw.is_finite() && s.pitch.is_finite()) {
+            tracing::error!("non-finite player state, not sent: {s:?}");
+            return;
+        }
+        let rot_changed = s.yaw != self.sent.yaw || s.pitch != self.sent.pitch;
+        let mut flags = 0;
+        if s.on_ground {
+            flags |= move_flags::ON_GROUND;
+        }
+        if s.horizontal_collision {
+            flags |= move_flags::HORIZONTAL_COLLISION;
+        }
+        let status_changed = s.on_ground != self.sent.on_ground
+            || s.horizontal_collision != self.sent.horizontal_collision;
+        if rot_changed {
+            out.push(ServerboundPlay::MovePlayerRot(sb::MovePlayerRot {
+                yaw: s.yaw,
+                pitch: s.pitch,
+                flags,
+            }));
+            self.sent.yaw = s.yaw;
+            self.sent.pitch = s.pitch;
+        } else if status_changed {
+            out.push(ServerboundPlay::MovePlayerStatusOnly(
+                sb::MovePlayerStatusOnly { flags },
+            ));
+        }
+        self.sent.on_ground = s.on_ground;
+        self.sent.horizontal_collision = s.horizontal_collision;
     }
 
     fn send_movement(&mut self, out: &mut Vec<ServerboundPlay>) {
@@ -902,6 +1030,16 @@ pub fn input_bits(i: &InputState) -> u8 {
         }
     }
     f
+}
+
+/// What one player tick runs against: the world and its physics tables, and the interactions
+/// environment when the tick has interactions (the client's real path; `None` in tests that
+/// only move).
+struct TickCtx<'a> {
+    world: &'a dyn BlockView,
+    shapes: &'a dyn CollisionShapes,
+    blocks: &'a dyn BlockPhysics,
+    env: Option<&'a interact::InteractEnv<'a>>,
 }
 
 pub mod interact;

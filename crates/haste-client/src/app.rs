@@ -136,10 +136,21 @@ impl Session {
         // own view distance (login packet) caps what we mesh below.
         opts.client_information.view_distance = options.render_distance as i8;
         let driver: NetDriver = rt.block_on(NetDriver::connect(opts))?;
-        let regs = driver.connection().registries();
-        let biomes = net::synced_biome_count(regs).unwrap_or(64);
-        let biome_climates = biomes::biome_climates(regs);
-        let login = driver.login();
+        let (biomes, biome_climates, type_names, sounds) = {
+            let regs = driver.connection().registries();
+            let sounds = if sound {
+                open_sounds(regs, &data, &options.sound)
+            } else {
+                None
+            };
+            (
+                net::synced_biome_count(regs).unwrap_or(64),
+                biomes::biome_climates(regs),
+                net::entity_type_names(regs, &data),
+                sounds,
+            )
+        };
+        let login = driver.login().clone();
         let local = (login.entity_id, login.profile.uuid.as_u128());
         tracing::info!(
             "joined {address} as {}: {:?}, dimension {}, view distance {}",
@@ -150,6 +161,8 @@ impl Session {
         );
         let world = World::new_with_biomes(login.dimension.clone(), data.clone(), biomes);
         let entity_types = data.registries.len("minecraft:entity_type");
+        let mut driver = driver;
+        driver.session.set_entity_type_names(type_names);
         let view_distance = login.view_distance.min(options.render_distance as i32);
         let shared = Arc::new(Shared::new(
             data,
@@ -158,8 +171,8 @@ impl Session {
             view_distance,
             haste_render::default_skin(login.profile.uuid.as_u128()),
         ));
-        if sound {
-            *shared.sound.lock() = open_sounds(regs, &shared.data, &options.sound);
+        if sounds.is_some() {
+            *shared.sound.lock() = sounds;
         }
         let handle = rt.handle().clone();
         let sh = shared.clone();
