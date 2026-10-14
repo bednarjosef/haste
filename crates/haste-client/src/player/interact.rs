@@ -248,8 +248,9 @@ impl LocalPlayer {
     }
 
     /// Queues one left click for the next tick (vanilla's `keyAttack.clickCount++` /
-    /// `KeyMapping.consumeClick`): every press counts, even several within one tick. The driver
-    /// calls this from the mouse handler next to [`LocalPlayer::set_interact`].
+    /// `KeyMapping.consumeClick`): every press counts, even several within one tick. The input
+    /// layer queues one per mouse press on the game thread next to [`LocalPlayer::set_interact`];
+    /// a driver that only reports the held boolean still gets one click on the press edge.
     pub fn queue_attack_click(&mut self) {
         self.int.attack_clicks = self.int.attack_clicks.saturating_add(1);
     }
