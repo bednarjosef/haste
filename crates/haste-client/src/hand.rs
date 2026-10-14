@@ -9,10 +9,10 @@
 //! Use animations (eat, drink, bow, shield, brush, spear, crossbow) are a later task as well:
 //! `FirstPersonHandsAndItemsRenderer.submitArmWithItem`'s use branches need, per hand,
 //! `isUsingItem`, `useItemRemainingTicks` and `useDuration` (`getUseDuration`, from the held
-//! item's `use_duration` component) plus the item's `use_animation` component, and the client
-//! has none of them yet: `interact_step` only sends the packets and tracks no "using item"
-//! state, so `release_use_item` is never sent and the use ticks are not counted. The hand state
-//! here has room for them (`Hand::item_used` is the hook the use dip goes through).
+//! item's `use_duration` component) plus the item's `use_animation` component. The interaction
+//! step tracks the state now (`Interaction::is_using_item`/`using`, driven by the
+//! `minecraft:consumable` component and `release_use_item`), but the hand here still draws no
+//! use dip: `Hand::item_used` is the hook it would go through.
 //!
 //! A few accessors are for the tests and the later use-animation work (the swing's lerped
 //! progress, `isSwinging`), so they are unused for now.

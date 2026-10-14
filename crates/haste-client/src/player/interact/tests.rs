@@ -50,12 +50,9 @@ fn data() -> &'static haste_data::GameData {
                 r#"{{"minecraft:block": {{"entries": {{{}}}}},
                     "minecraft:item": {{"entries": {{{}}}}},
                     "minecraft:mob_effect": {{"entries": {{{}}}}},
-// MERGE(item-data side):
                     "minecraft:data_component_type": {{"entries": {{{}}}}},
-                    "minecraft:enchantment": {{"entries": {{{}}}}}}}"#,
-// MERGE(main side):
+                    "minecraft:enchantment": {{"entries": {{{}}}}},
                     "minecraft:entity_type": {{"entries": {{{}}}}}}}"#,
-// MERGE end
                 entries(&names),
                 entries(&[
                     "air",
@@ -71,10 +68,8 @@ fn data() -> &'static haste_data::GameData {
                     "potion",
                 ]),
                 entries(&["speed", "haste", "mining_fatigue", "conduit_power"]),
-// MERGE(item-data side):
                 entries(&["tool", "enchantments"]),
                 entries(&["efficiency", "sharpness"]),
-// MERGE(main side):
                 entries(&[
                     "item",
                     "experience_orb",
@@ -89,7 +84,6 @@ fn data() -> &'static haste_data::GameData {
                     "wind_charge",
                     "shulker_bullet",
                 ]),
-// MERGE end
             ),
         )
         .unwrap();
@@ -802,6 +796,7 @@ fn held_stack_components_drive_mining_speed() {
     let env = InteractEnv {
         data: data(),
         entities: &[],
+        entity_types: &[],
     };
     let p = r.p.mining_params(STONE, &env);
     assert_eq!((p.tool_speed, p.tool_correct), (8.0, Some(true)));
@@ -848,6 +843,7 @@ fn use_duration_and_animation_come_from_the_item() {
     let env = InteractEnv {
         data: data(),
         entities: &[],
+        entity_types: &[],
     };
     let d = |i: u32| r.p.int.use_data(&item(i), env.data);
     // Bow/crossbow/trident/shield: 72000 ticks; spyglass 1200.

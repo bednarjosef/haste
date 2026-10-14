@@ -22,7 +22,9 @@
 //!   entity interact, block use, item use; nothing at all while a block is being destroyed;
 //!   while the button is held, one use every 4 ticks (`handleKeybinds`); the item in progress
 //!   blocks both attack and use, and releasing the button sends
-//!   `MultiPlayerGameMode.releaseUsingItem`'s `release_use_item`.
+//!   `MultiPlayerGameMode.releaseUsingItem`'s `release_use_item`. An item with a use duration
+//!   (`Item.getUseDuration` from the `minecraft:consumable` component or the item class) starts
+//!   `LivingEntity.useItem`/`useItemRemaining`, whose animation is `Item.getUseAnimation`.
 //!
 //! Per tick (vanilla's order): hotbar, target, then the key handling (clicks, held use,
 //! continueAttack, `missTime`--), then pick block, then drop / off-hand swap.
@@ -137,9 +139,14 @@ pub struct Interaction {
     use_clicks: u8,
     /// `missTime` ticks left: 10 after a miss outside creative.
     miss_time: u8,
-    /// True while the player is using an item (vanilla sets it when a consumable's use starts;
-    /// haste has no consumable-item data yet, so nothing sets it — see `set_using_item`).
+    /// True while the player is using an item (`LivingEntity.isUsingItem`): set when a use with
+    /// a duration starts, cleared on release, an item change or death. `using` carries the
+    /// component-driven duration and animation.
     is_using_item: bool,
+    /// The item currently being used (`LivingEntity.useItem`/`useItemRemaining`): the
+    /// `minecraft:consumable` component's `use_duration`/`use_animation` (or the item class's
+    /// own), ticked down each game tick. Set together with `is_using_item`.
+    using: Option<UsingItem>,
     /// Last sequence number used for a prediction.
     sequence: i32,
     /// Predicted blocks: (sequence, pos, the server's state: before the prediction, then the
@@ -160,22 +167,17 @@ pub struct Interaction {
     tools: Option<Arc<ToolTable>>,
     tags: Option<BlockTags>,
     effect_ids: Option<EffectIds>,
-// MERGE(item-data side):
     /// `minecraft:data_component_type` names by protocol id, for decoding the held stack's
     /// component patch (`haste_protocol::wire::components::read_patch`).
     component_tables: Option<Arc<haste_protocol::packets::ProtocolTables>>,
-    /// The item default components (`minecraft:attribute_modifiers`) from the data generator.
+    /// The item default components (`minecraft:attribute_modifiers`, `minecraft:consumable`)
+    /// from the data generator.
     item_components: Option<Arc<haste_data::ItemComponents>>,
     /// The held main-hand stack's decoded data and the stack it was decoded from (re-decoded
     /// when the slot's stack changes; a decode failure leaves it `None`).
     components: Option<HeldItem>,
-    /// The item currently being used (`LivingEntity.useItem`/`useItemRemaining`), set when a
-    /// use starts and cleared on release, an item change or death.
-    using: Option<UsingItem>,
-// MERGE(main side):
     /// Night-vision and darkness effect indices for the lightmap (`prepare`).
     pub(crate) lightmap_effect_ids: LightmapEffectIds,
-// MERGE end
     /// Last blocks we sent actions for (debug logging of their server updates).
     recent: Vec<BlockPos>,
 }
@@ -345,7 +347,6 @@ impl Interaction {
         self.tools = Some(tools);
     }
 
-// MERGE(item-data side):
     /// Replaces the item default components (tests, without the data generator cache).
     pub fn set_item_components(&mut self, item_components: Arc<haste_data::ItemComponents>) {
         self.item_components = Some(item_components);
@@ -436,12 +437,12 @@ impl Interaction {
             "shield" => Some((72000, UseAnimation::Block)),
             _ => None,
         }
-// MERGE(main side):
+    }
+
     /// Test/script hook for the item-in-use state (vanilla: `player.isUsingItem()`; eating blocks
     /// attack and use and releasing the button then sends `release_use_item`).
     pub fn set_using_item(&mut self, using: bool) {
         self.is_using_item = using;
-// MERGE end
     }
 
     pub(super) fn respawned(&mut self) {
@@ -449,14 +450,11 @@ impl Interaction {
         self.progress = 0.0;
         self.target = None;
         self.effects.clear();
-// MERGE(item-data side):
-        self.using = None;
-// MERGE(main side):
         self.miss_time = 0;
         self.is_using_item = false;
+        self.using = None;
         self.attack_clicks = 0;
         self.use_clicks = 0;
-// MERGE end
     }
 
     fn next_sequence(&mut self) -> i32 {
@@ -591,7 +589,6 @@ impl LocalPlayer {
         &self.int.hotbar[self.held_slot.clamp(0, 8) as usize]
     }
 
-// MERGE(item-data side):
     /// The player's `minecraft:attack_speed` with the held item (base 4.0 plus the item's
     /// attribute modifiers; the server-synced attribute when the item has none). Used by
     /// `Player.getCurrentItemAttackStrengthDelay` for the equip and the attack indicator.
@@ -622,7 +619,7 @@ impl LocalPlayer {
 
     /// `LivingEntity.isUsingItem`: an item is being used over time.
     pub fn is_using_item(&self) -> bool {
-        self.int.using.is_some()
+        self.int.is_using_item
     }
 
     /// `LivingEntity.getUseItemRemainingTicks`.
@@ -643,7 +640,8 @@ impl LocalPlayer {
     /// `LivingEntity.getTicksUsingItem`: how long the current use has run.
     pub fn ticks_using_item(&self) -> i32 {
         self.int.using.map_or(0, |u| u.duration - u.remaining)
-// MERGE(main side):
+    }
+
     /// The stack of hand `i` (0 main, 1 off), as `InteractionHand.values()` numbers them.
     fn hand(&self, hand: i32) -> &ItemStackData {
         if hand == 1 {
@@ -651,7 +649,6 @@ impl LocalPlayer {
         } else {
             self.main_hand()
         }
-// MERGE end
     }
 
     /// Predicted block changes to apply to the world now (breaking), and server states released
@@ -889,13 +886,11 @@ impl LocalPlayer {
             }
         }
 
-// MERGE(item-data side):
-        // 2. Target.
+        // 2. The crosshair target (Minecraft.pick). The held stack's components are decoded once
+        // per stack change; nothing in the pick reads them, but the decode belongs with the
+        // per-tick held-item upkeep.
         let held = self.main_hand().clone();
         self.int.refresh_components(held, env.data);
-// MERGE(main side):
-        // 2. The crosshair target (Minecraft.pick).
-// MERGE end
         self.int.target = if self.game_mode == GameMode::Spectator {
             None
         } else {
@@ -913,30 +908,6 @@ impl LocalPlayer {
             return;
         }
 
-// MERGE(item-data side):
-        // 3. Attack / break.
-        let pressed = input.attack && !last.attack;
-        if pressed {
-            // `Minecraft.startAttack` swings on every attack, whatever the crosshair is on.
-            self.hand.swing();
-            match self.int.target {
-                Some(Target::Entity { id, .. }) => {
-                    out.push(ServerboundPlay::Attack(sb::Attack { entity_id: id.0 }));
-                    out.push(ServerboundPlay::Punch(sb::Punch {}));
-                    // `MultiPlayerGameMode.attack` -> `Player.attack`/`resetAttackStrengthTicker`.
-                    self.reset_attack_strength_ticker();
-                }
-                Some(Target::Block(h)) => {
-                    self.start_destroy(h, world, env, out);
-                    out.push(ServerboundPlay::Punch(sb::Punch {}));
-                }
-                None => {
-                    out.push(ServerboundPlay::Punch(sb::Punch {}));
-                    // `Minecraft.startAttack`'s MISS branch resets the attack ticker.
-                    self.reset_only_attack_strength_ticker();
-                }
-            }
-// MERGE(main side):
         // 3. Minecraft.handleKeybinds: the click loops, the held use, then continueAttack.
         // `KeyMapping.consumeClick` returns once per queued press, so several clicks in one tick
         // each run. A driver that only reports the held button (no click queue) still gets one
@@ -945,7 +916,6 @@ impl LocalPlayer {
         let mut use_clicks = std::mem::take(&mut self.int.use_clicks);
         if attack_clicks == 0 && input.attack && !last.attack {
             attack_clicks = 1;
-// MERGE end
         }
         if use_clicks == 0 && input.use_item && !last.use_item {
             use_clicks = 1;
@@ -953,9 +923,19 @@ impl LocalPlayer {
         let mut instant_attack = false;
         if self.int.is_using_item {
             // While an item is in use the clicks are consumed and do nothing; releasing the
-            // button releases the item (MultiPlayerGameMode.releaseUsingItem).
+            // button releases the item (MultiPlayerGameMode.releaseUsingItem), and a different
+            // item in the hand stops the use without a packet
+            // (`LivingEntity.updatingUsingItem`).
             if !input.use_item {
                 self.release_using_item(out);
+            } else if self
+                .int
+                .using
+                .as_ref()
+                .is_some_and(|u| self.main_hand().item != u.item)
+            {
+                self.int.using = None;
+                self.int.is_using_item = false;
             }
         } else {
             // while (keyAttack.consumeClick()) instantAttack |= startAttack();
@@ -964,44 +944,15 @@ impl LocalPlayer {
             }
             // while (keyUse.consumeClick()) startUseItem();
             for _ in 0..use_clicks {
-                self.start_use_item(look, out);
+                self.start_use_item(look, env, out);
             }
         }
 
-// MERGE(item-data side):
-        // 4. Use.
-        if self.int.use_delay > 0 {
-            self.int.use_delay -= 1;
-        }
-        // `Minecraft.handleKeybinds`: while an item is being used, releasing the use key sends
-        // `release_use_item`; a different item in the hand stops the use without a packet
-        // (`LivingEntity.updatingUsingItem`).
-        if let Some(u) = self.int.using {
-            if !input.use_item {
-                out.push(ServerboundPlay::PlayerAction(sb::PlayerAction {
-                    status: action::RELEASE_USE_ITEM,
-                    pos: BlockPos::new(0, 0, 0),
-                    face: 0,
-                    sequence: 0,
-                }));
-                self.int.using = None;
-            } else if self.main_hand().item != u.item {
-                self.int.using = None;
-            }
-        }
-        let use_now = input.use_item
-            && (!last.use_item || self.int.use_delay == 0)
-            && self.int.destroying.is_none()
-            && self.int.using.is_none();
-        if use_now {
-            self.int.use_delay = USE_DELAY;
-            self.use_item(look, env, out);
-// MERGE(main side):
         // if (keyUse.isDown() && rightClickDelay == 0 && !player.isUsingItem()) startUseItem();
         if input.use_item && self.int.use_delay == 0 && !self.int.is_using_item {
-            self.start_use_item(look, out);
-// MERGE end
+            self.start_use_item(look, env, out);
         }
+
         // `LivingEntity.tick` -> `updateUsingItem`: the remaining time ticks down each game tick,
         // including the tick the use started on.
         if let Some(mut u) = self.int.using {
@@ -1151,35 +1102,6 @@ impl LocalPlayer {
                 // block, a mod) play nothing.
                 self.own_place_sound(h.pos, env);
             }
-// MERGE(item-data side):
-            Some(Target::Entity { id, location }) => {
-                out.push(ServerboundPlay::Interact(sb::Interact {
-                    entity_id: id.0,
-                    hand: 0,
-                    target_offset: location - self.eye(),
-                    sneaking: self.state.sneaking,
-                }));
-            }
-            None => {
-                if holding {
-                    let seq = self.int.next_sequence();
-                    out.push(ServerboundPlay::UseItem(sb::UseItem {
-                        hand: 0,
-                        sequence: seq,
-                        yaw: look.0,
-                        pitch: look.1,
-                    }));
-                    // `LivingEntity.startUsingItem`: an item with a use duration starts using
-                    // (`Item.getUseDuration` from the consumable component or the item class).
-                    let stack = self.main_hand().clone();
-                    if let Some((duration, animation)) = self.int.use_data(&stack, env.data) {
-                        self.int.using = Some(UsingItem {
-                            item: stack.item,
-                            duration,
-                            remaining: duration,
-                            animation,
-                        });
-// MERGE(main side):
             // An entity, nothing, or an already-air block: stop breaking.
             _ => self.stop_destroy(out),
         }
@@ -1188,7 +1110,12 @@ impl LocalPlayer {
     /// `Minecraft.startUseItem`: `rightClickDelay` 4, then per hand (main first, then off
     /// hand, `InteractionHand.values()`): entity interact, block use, item use. Nothing at all
     /// while a block is being destroyed (`!gameMode.isDestroying()`).
-    fn start_use_item(&mut self, look: (f32, f32), out: &mut Vec<ServerboundPlay>) {
+    fn start_use_item(
+        &mut self,
+        look: (f32, f32),
+        env: &InteractEnv<'_>,
+        out: &mut Vec<ServerboundPlay>,
+    ) {
         if self.int.destroying.is_none() {
             self.int.use_delay = USE_DELAY;
             if !self.int.is_using_item {
@@ -1242,8 +1169,20 @@ impl LocalPlayer {
                             pitch: look.1,
                         }));
                         self.hand.swing();
+                        // `LivingEntity.startUsingItem`: an item with a use duration starts
+                        // using (`Item.getUseDuration`/`getUseAnimation` from the consumable
+                        // component or the item class).
+                        let stack = self.hand(hand).clone();
+                        if let Some((duration, animation)) = self.int.use_data(&stack, env.data) {
+                            self.int.using = Some(UsingItem {
+                                item: stack.item,
+                                duration,
+                                remaining: duration,
+                                animation,
+                            });
+                            self.int.is_using_item = true;
+                        }
                         return;
-// MERGE end
                     }
                 }
             }
@@ -1260,6 +1199,7 @@ impl LocalPlayer {
             sequence: 0,
         }));
         self.int.is_using_item = false;
+        self.int.using = None;
     }
 
     /// `MultiPlayerGameMode.startDestroyBlock`: creative breaks at once (with `destroyDelay` 5,
@@ -1534,76 +1474,6 @@ impl LocalPlayer {
         }
     }
 
-// MERGE(item-data side):
-    /// One tick of held attack on a block; true if the arm swings this tick.
-    fn continue_destroy(
-        &mut self,
-        h: BlockHit,
-        world: &dyn BlockView,
-        env: &InteractEnv<'_>,
-        out: &mut Vec<ServerboundPlay>,
-    ) -> bool {
-        if self.int.destroy_delay > 0 {
-            self.int.destroy_delay -= 1;
-            return true;
-        }
-        if self.game_mode == GameMode::Creative {
-            self.start_destroy(h, world, env, out);
-            return true;
-        }
-        if self.game_mode == GameMode::Adventure {
-            return false;
-        }
-        match self.int.destroying {
-            Some((pos, face)) if pos == h.pos => {
-                if face != h.face {
-                    // Same block, another face under the crosshair (new in 26.3).
-                    out.push(ServerboundPlay::PlayerAction(sb::PlayerAction {
-                        status: action::CHANGE_DESTROY_DIRECTION,
-                        pos,
-                        face: h.face as u8,
-                        sequence: 0,
-                    }));
-                    self.int.destroying = Some((pos, h.face));
-                }
-                let state = world.block_state(pos);
-                if env.data.is_air(state) {
-                    self.int.destroying = None;
-                    return false;
-                }
-                self.int.progress += self.mining_params(state, env).progress_per_tick();
-                if self.int.progress >= 1.0 {
-                    self.send_destroy(action::STOP_DESTROY, h, state, true, env, out);
-                    self.int.destroying = None;
-                    self.int.progress = 0.0;
-                    self.int.destroy_delay = DESTROY_DELAY;
-                }
-                true
-            }
-            _ => {
-                self.start_destroy(h, world, env, out);
-                true
-            }
-        }
-    }
-
-    fn abort_destroy(&mut self, out: &mut Vec<ServerboundPlay>) {
-        if let Some((pos, face)) = self.int.destroying.take() {
-            // Abort carries no prediction (sequence 0).
-            out.push(ServerboundPlay::PlayerAction(sb::PlayerAction {
-                status: action::ABORT_DESTROY,
-                pos,
-                face: face as u8,
-                sequence: 0,
-            }));
-            self.int.progress = 0.0;
-            // `MultiPlayerGameMode.stopDestroyBlock` resets both tickers.
-            self.reset_attack_strength_ticker();
-        }
-    }
-
-// MERGE(main side):
-// MERGE end
     fn send_destroy(
         &mut self,
         status: i32,
