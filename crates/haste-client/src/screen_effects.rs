@@ -68,7 +68,7 @@ pub struct Effect {
     /// Amplifier (level - 1).
     pub amplifier: i32,
     /// Ticks left; `-1` is infinite (`isInfiniteDuration`).
-    duration: i32,
+    pub duration: i32,
     /// `MobEffectInstance.BlendState.factor` and the one before this tick's, for the frame's
     /// `Mth.lerp(partialTicks, factorPreviousFrame, factor)`.
     factor: f32,

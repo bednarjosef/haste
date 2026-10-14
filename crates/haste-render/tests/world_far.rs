@@ -101,6 +101,7 @@ fn terrain_far_from_origin() {
                 dimension_has_sky: true,
                 fog_start: 48.0,
                 fog_end: 64.0,
+                ..Default::default()
             },
             partial_tick: 0.0,
             block_target: None,
@@ -222,6 +223,7 @@ fn sky_times_of_day() {
                 dimension_has_sky: true,
                 fog_start: 48.0,
                 fog_end: 64.0,
+                ..Default::default()
             },
             partial_tick: 0.0,
             block_target: None,
@@ -305,6 +307,7 @@ fn outline_and_cracks() {
                 dimension_has_sky: true,
                 fog_start: 48.0,
                 fog_end: 64.0,
+                ..Default::default()
             },
             partial_tick: 0.0,
             block_target: with.then_some((target, haste_core::Direction::Up)),

@@ -257,6 +257,16 @@ pub struct ViewState {
     /// Whether the camera is under the lava surface at the eye's block (vanilla's
     /// `Camera.getFluidInCamera` lava rule), for the submerged FOV.
     pub eye_in_lava: bool,
+    /// Blindness effect remaining ticks (`None` without it), for the fog environment.
+    pub blindness: Option<i32>,
+    /// `LocalPlayer.getWaterVision()` (0 out of water), for the underwater fog distance.
+    pub water_vision: f32,
+    /// Whether we are a spectator (`Entity.isSpectator`), for the lava/powder-snow fog.
+    pub spectator: bool,
+    /// Whether we have fire resistance, for the lava fog distance.
+    pub fire_resistance: bool,
+    /// `BossHealthOverlay.shouldCreateWorldFog()`, for the thick boss fog.
+    pub boss_world_fog: bool,
     /// Selected hotbar slot (`LocalPlayer::held_slot`), for the scroll wheel.
     pub held_slot: i32,
     /// What the first-person view holds this tick (`None` draws no hand: spectator, not yet
@@ -297,6 +307,8 @@ pub struct ViewState {
     /// last), the lightning sky flash, and the player's tick count for the darkness pulse.
     pub lightmap_flicker: f32,
     pub lightmap_night_vision: Option<i32>,
+    /// Darkness effect remaining ticks (`None` without it), for the fog environment.
+    pub lightmap_darkness: Option<i32>,
     pub lightmap_darkness_blend: haste_render::lightmap::BlendState,
     pub lightmap_boss_darkening: (f32, f32),
     pub lightmap_lightning: bool,
@@ -422,6 +434,9 @@ pub struct Shared {
     /// resolving what each stored block entity is; the static registry's order when the server
     /// did not sync one (vanilla servers' ids agree with the data generator's).
     pub block_entity_names: Vec<haste_core::Identifier>,
+    /// Biome climates of the synced registry (index = biome id), for the fog's per-biome
+    /// environment attributes (`FogRenderer` resolves them from the camera biome).
+    pub biome_climates: Vec<haste_render::BiomeClimate>,
     /// Particles (`level_particles`): the game thread spawns and ticks them, the render
     /// thread draws them.
     pub particles: SharedParticles,
@@ -469,6 +484,7 @@ impl Shared {
         particles: haste_render::Particles,
         skin: (Identifier, bool),
         block_entity_names: Vec<Identifier>,
+        biome_climates: Vec<haste_render::BiomeClimate>,
         options: haste_setup::options::Options,
     ) -> Self {
         let has_sky = world.dimension().has_skylight;
@@ -492,6 +508,11 @@ impl Shared {
                 block_target: None,
                 eye_in_water: false,
                 eye_in_lava: false,
+                blindness: None,
+                water_vision: 0.0,
+                spectator: false,
+                fire_resistance: false,
+                boss_world_fog: false,
                 held_slot: 0,
                 first_person: None,
                 fov_modifier: 0.0,
@@ -510,6 +531,7 @@ impl Shared {
                 screen: crate::screen_effects::ViewEffects::default(),
                 lightmap_flicker: 0.0,
                 lightmap_night_vision: None,
+                lightmap_darkness: None,
                 lightmap_darkness_blend: Default::default(),
                 lightmap_boss_darkening: (0.0, 0.0),
                 lightmap_lightning: false,
@@ -518,6 +540,7 @@ impl Shared {
             breaking: Mutex::new(Vec::new()),
             block_entity_lids: Mutex::new(Vec::new()),
             block_entity_names,
+            biome_climates,
             particles: Mutex::new(particles),
             input: Mutex::new(SharedInput::default()),
             sound: Mutex::new(None),
@@ -806,7 +829,11 @@ fn tick_once(
                     HudArrival::Menu(ui) => ui,
                 };
                 let t = Instant::now();
-                match ui.joined(driver.connection(), driver.login()) {
+                match ui.joined(
+                    driver.connection(),
+                    driver.login(),
+                    driver.session.player.game_mode,
+                ) {
                     Ok(()) => {
                         tracing::info!(
                             "HUD joined in {:.0} ms; the vanilla HUD and chat are live",
@@ -1066,6 +1093,7 @@ fn tick_once(
     let lm = &s.lightmap;
     view.lightmap_flicker = lm.flicker;
     view.lightmap_night_vision = lm.night_vision;
+    view.lightmap_darkness = lm.darkness;
     view.lightmap_darkness_blend = lm.darkness_blend;
     view.lightmap_boss_darkening = (lm.boss_darkening_o, lm.boss_darkening);
     view.lightmap_lightning = lm.sky_flash_time > 0;
@@ -1076,6 +1104,18 @@ fn tick_once(
     view.block_target = s.player.target();
     view.eye_in_water = s.player.state.eyes_in_water;
     view.eye_in_lava = eye_in_lava(&shared.world.read(), &shared.data, eye);
+    // The fog environment's player state (vanilla `FogRenderer.setupFog` reads these off the
+    // entity): blindness and fire resistance from the active effects, spectator from the mode,
+    // the water-vision ramp, and the boss overlay's world fog.
+    let eff = |id: Option<i32>| {
+        id.and_then(|i| s.player.int.effects.get(&i))
+            .map(|e| e.duration)
+    };
+    view.blindness = eff(s.player.int.lightmap_effect_ids.blindness);
+    view.fire_resistance = eff(s.player.int.lightmap_effect_ids.fire_resistance).is_some();
+    view.spectator = s.player.game_mode == GameMode::Spectator;
+    view.water_vision = s.player.get_water_vision();
+    view.boss_world_fog = s.lightmap.boss_world_fog;
     view.held_slot = s.player.held_slot;
     view.first_person = first_person;
     view.fov_modifier = s.fov_modifier;

@@ -187,6 +187,10 @@ struct EffectIds {
 pub(crate) struct LightmapEffectIds {
     pub(crate) night_vision: Option<i32>,
     pub(crate) darkness: Option<i32>,
+    /// The blindness effect (fog environment `BlindnessFogEnvironment`).
+    pub(crate) blindness: Option<i32>,
+    /// The fire-resistance effect (lava fog distance `LavaFogEnvironment`).
+    pub(crate) fire_resistance: Option<i32>,
 }
 
 /// One active effect on us: the vanilla `MobEffectInstance` the screen effects and the lightmap
@@ -249,6 +253,8 @@ impl Interaction {
             self.lightmap_effect_ids = LightmapEffectIds {
                 night_vision: id("night_vision"),
                 darkness: id("darkness"),
+                blindness: id("blindness"),
+                fire_resistance: id("fire_resistance"),
             };
         }
     }

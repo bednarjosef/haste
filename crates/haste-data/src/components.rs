@@ -1,9 +1,9 @@
 //! Item default data components, from the data generator's `RegistryComponentsReport`
-//! (`reports/components/item/<name>.json`, one file per item that has any non-empty default
-//! components). The client needs the item's `equippable` component to know which equipment
-//! asset an armour piece draws and in which slot (`HumanoidArmorLayer` / `WingsLayer` read it
-//! from the stack, whose default components the built-in item registry carries). Haste does not
-//! run vanilla's Java item registry, so it reads the report instead.
+//! (`reports/minecraft/components/item/<name>.json`, one file per item that has any non-empty
+//! default components). The client needs the item's `equippable` component to know which
+//! equipment asset an armour piece draws and in which slot (`HumanoidArmorLayer` / `WingsLayer`
+//! read it from the stack, whose default components the built-in item registry carries). Haste
+//! does not run vanilla's Java item registry, so it reads the report instead.
 
 use std::path::Path;
 
@@ -58,10 +58,11 @@ impl ItemComponents {
         r.i32().map(|c| c as u32)
     }
 
-    /// Loads every `reports/components/item/*.json` under `components_dir` (the report's
-    /// `components/item` directory), mapping each file's name through `registries`. A missing
-    /// directory or unreadable file yields an empty table (armour then draws nothing), never an
-    /// error: the components report is optional data.
+    /// Loads every `reports/minecraft/components/item/*.json` under `components_dir` (the
+    /// report's `minecraft/components/item` directory), mapping each file's name through
+    /// `registries`. A missing directory or unreadable file yields an empty table (armour then
+    /// draws nothing), never an error: the components report is optional data. `GameData::load`
+    /// warns (naming `haste setup`) when the directory is absent.
     pub fn load(components_dir: &Path, registries: &Registries) -> ItemComponents {
         let mut by_name: AHashMap<String, ItemEquippable> = AHashMap::new();
         let Ok(entries) = std::fs::read_dir(components_dir) else {
