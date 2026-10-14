@@ -693,21 +693,34 @@ impl EntityStore {
                             )
                         });
                 // The tropical fish's shape follows its packed pattern; the shulker's base
-                // texture follows its colour byte. Both are plain model swaps.
-                let variant =
-                    variant.or_else(|| crate::variants::tropical_fish_model(&slot.metadata));
-                let variant = match crate::variants::shulker_texture(&slot.metadata) {
-                    Some(texture) => {
-                        crate::registry::model_for_name("minecraft:shulker").map(|mut m| {
-                            if m.texture != texture {
-                                let mut c = (*m).clone();
-                                c.texture = texture.clone();
-                                m = std::sync::Arc::new(c);
-                            }
-                            m
-                        })
+                // texture follows its colour byte. Both are plain model swaps, and both
+                // must be gated on the entity's own type: their metadata slots (17, 18)
+                // collide with other mobs' fields (e.g. a sheep's wool byte sits where a
+                // shulker's colour byte would).
+                let type_name = crate::registry::entity_type_name(slot.kind);
+                let variant = variant.or_else(|| {
+                    if type_name.as_deref() == Some("minecraft:tropical_fish") {
+                        crate::variants::tropical_fish_model(&slot.metadata)
+                    } else {
+                        None
                     }
-                    None => variant,
+                });
+                let variant = match type_name.as_deref() {
+                    Some("minecraft:shulker") => {
+                        match crate::variants::shulker_texture(&slot.metadata) {
+                            Some(texture) => crate::registry::model_for_name("minecraft:shulker")
+                                .map(|mut m| {
+                                    if m.texture != texture {
+                                        let mut c = (*m).clone();
+                                        c.texture = texture.clone();
+                                        m = std::sync::Arc::new(c);
+                                    }
+                                    m
+                                }),
+                            None => variant,
+                        }
+                    }
+                    _ => variant,
                 };
                 let entry = crate::registry::model_entry(slot.kind);
                 let overlays = crate::variants::overlays_for(slot.kind, &slot.metadata, baby);

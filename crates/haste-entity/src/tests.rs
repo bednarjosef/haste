@@ -1526,3 +1526,39 @@ fn render_instances_picks_up_variant_models() {
     s.render_instances(0.5, &mut out);
     assert_eq!(out[0].model.texture.path(), "entity/pig/pig_temperate");
 }
+
+/// A sheep keeps its sheep model with wool metadata set: the wool byte sits at metadata 18,
+/// the same slot a shulker's colour byte occupies, so the shulker texture swap must be
+/// gated on the entity type (regression: a red-wool sheep used to come out as a red
+/// shulker). Needs registries.json + the dump.
+#[test]
+#[ignore = "needs cache/oracle/26.3 (registries.json + model dump; HASTE_CACHE overrides)"]
+fn sheep_with_wool_metadata_is_not_a_shulker() {
+    let Some(names) = crate::registry::entity_type_names() else {
+        eprintln!("skipped: no registries.json in the cache");
+        return;
+    };
+    let Some((kind, _)) = names.iter().find(|(_, n)| n.as_str() == "minecraft:sheep") else {
+        eprintln!("skipped: minecraft:sheep not in the registry");
+        return;
+    };
+    let mut s = store();
+    let mut sp = spawn(1, DVec3::ZERO);
+    sp.kind = *kind;
+    s.spawn(&sp);
+    // Red wool, exactly the byte that is a red shulker's colour.
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: crate::variants::metadata_index::SHEEP_WOOL,
+            value: MetadataValue::Byte(14),
+        }],
+    );
+    let mut out = Vec::new();
+    s.render_instances(0.5, &mut out);
+    assert_eq!(out[0].model.texture.path(), "entity/sheep/sheep");
+    // The wool overlay is there, tinted red.
+    let wool = out[0].overlays[0].as_ref().expect("wool overlay");
+    assert_eq!(wool.model.texture.path(), "entity/sheep/sheep_wool");
+    assert_eq!(wool.tint, crate::variants::dye_tint(14));
+}
