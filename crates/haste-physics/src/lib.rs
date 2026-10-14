@@ -54,6 +54,13 @@ pub struct PlayerState {
     pub jump_cooldown: u8,
     pub horizontal_collision: bool,
     pub vertical_collision: bool,
+    /// Last tick's collision was minor (input and movement within 8 degrees;
+    /// `LocalPlayer.isHorizontalCollisionMinor`). Keeps sprinting.
+    #[serde(default)]
+    pub minor_horizontal_collision: bool,
+    /// Spectator game mode: landing does not end creative flight (`LocalPlayer.aiStep`).
+    #[serde(default)]
+    pub spectating: bool,
     /// Eyes under the water surface (last tick); slows mining, starts sprint-swimming.
     pub eyes_in_water: bool,
     /// Stuck-in-block speed multiplier set by `makeStuckInBlock` (cobweb, powder snow, sweet
