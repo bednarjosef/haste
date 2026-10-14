@@ -48,6 +48,7 @@ public final class ConnectionImpl {
     public static net.minecraft.client.multiplayer.chat.report.AbuseReportSender sender(
         net.minecraft.client.multiplayer.chat.report.ReportingContext r) { return SENDER; }
 
+    /**
      * The pause screen's Disconnect / "Save and Quit" goes through the report draft check
      * (vanilla: a draft asks whether to discard it first). Haste has no report drafts, so the
      * action runs at once, like vanilla's no-draft path.

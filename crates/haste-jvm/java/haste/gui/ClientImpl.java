@@ -39,6 +39,8 @@ public final class ClientImpl {
         }
         return hotbars;
     }
+
+    /**
      * The world storage (vanilla: built once in {@code Minecraft}'s constructor over
      * {@code <game dir>/saves}). Haste's singleplayer worlds live in the directory Rust gave in
      * {@code haste.singleplayerDir} (haste-setup's worlds module: {@code <config>/singleplayer},
