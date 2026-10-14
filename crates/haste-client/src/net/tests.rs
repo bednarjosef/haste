@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use super::*;
 use haste_protocol::nbt::{Nbt, NbtCompound};
 use haste_protocol::packets::play::clientbound::{MoveDeltas, SpawnInfo};
+use haste_protocol::wire::particle::Particle;
 
 #[derive(Default)]
 struct FakeWorld {
@@ -152,10 +153,24 @@ struct Rig {
     out: Vec<ServerboundPlay>,
 }
 
+/// The static particle registry the test sessions resolve ids against (id 0 `flame`, 1
+/// `smoke`).
+fn test_particle_names() -> std::sync::Arc<Vec<Identifier>> {
+    std::sync::Arc::new(vec![
+        Identifier::minecraft("flame"),
+        Identifier::minecraft("smoke"),
+    ])
+}
+
 impl Rig {
     fn new() -> Self {
         Self {
-            session: Session::new(EntityId(7), GameMode::Creative, DimensionInfo::overworld()),
+            session: Session::new(
+                EntityId(7),
+                GameMode::Creative,
+                DimensionInfo::overworld(),
+                test_particle_names(),
+            ),
             world: FakeWorld::default(),
             entities: FakeEntities::default(),
             regs: SyncedRegistries::default(),
@@ -442,7 +457,7 @@ fn real_world_through_the_sink() {
         dim.section_count(),
         |s, _, _, _| if s < 2 { stone } else { BlockStateId::AIR },
     );
-    let mut s = Session::new(EntityId(1), GameMode::Creative, dim);
+    let mut s = Session::new(EntityId(1), GameMode::Creative, dim, test_particle_names());
     let mut ents = new_entity_store(0);
     let mut out = Vec::new();
     s.apply(
@@ -751,4 +766,53 @@ fn riding_sends_rotation_and_input_only() {
         input,
         Some(haste_protocol::packets::play::serverbound::input_flags::SNEAK)
     );
+}
+
+/// A `level_particles` packet (flame by default).
+fn level_particles(kind: i32, count: i32) -> ClientboundPlay {
+    ClientboundPlay::LevelParticles(cb::LevelParticles {
+        particle: Particle {
+            kind,
+            data: bytes::Bytes::new(),
+        },
+        override_limiter: false,
+        always_visible: false,
+        pos: DVec3::new(10.0, 64.0, -5.0),
+        offset_x: 0.5,
+        offset_y: 0.0,
+        offset_z: 0.25,
+        max_speed_x: 0.1,
+        max_speed_y: 0.0,
+        max_speed_z: 0.05,
+        count,
+        randomization: 0,
+    })
+}
+
+#[test]
+fn level_particles_queue_a_spawn_per_packet() {
+    let mut r = Rig::new();
+    // The ids come from the session's static particle registry (flame 0, smoke 1).
+    r.apply(level_particles(0, 10));
+    r.apply(level_particles(1, 0));
+    assert_eq!(r.session.particle_spawns.len(), 2);
+    let first = &r.session.particle_spawns[0];
+    assert_eq!(first.kind, Identifier::minecraft("flame"));
+    assert_eq!(first.pos, DVec3::new(10.0, 64.0, -5.0));
+    assert_eq!(first.offset, [0.5, 0.0, 0.25]);
+    assert_eq!(first.max_speed, [0.1, 0.0, 0.05]);
+    assert_eq!(first.count, 10);
+    assert_eq!(
+        r.session.particle_spawns[1].kind,
+        Identifier::minecraft("smoke")
+    );
+    assert_eq!(r.session.particle_spawns[1].count, 0);
+}
+
+#[test]
+fn level_particles_with_an_unknown_type_id_are_dropped() {
+    let mut r = Rig::new();
+    // No id 7 in the static registry: dropped silently (no panic, nothing queued).
+    r.apply(level_particles(7, 10));
+    assert_eq!(r.session.particle_spawns.len(), 0);
 }

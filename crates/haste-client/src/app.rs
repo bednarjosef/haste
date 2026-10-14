@@ -105,6 +105,8 @@ struct Session {
     options: Options,
     /// The local player's entity id and UUID (`login`), for its own model in third person.
     local: (EntityId, u128),
+    /// The particle atlas types (uploaded to the renderer once it exists).
+    particle_types: std::sync::Arc<haste_render::ParticleTypes>,
 }
 
 impl Session {
@@ -164,11 +166,26 @@ impl Session {
         let mut driver = driver;
         driver.session.set_entity_type_names(type_names);
         let view_distance = login.view_distance.min(options.render_distance as i32);
+        // The particle types of the datagen registry (the synced one has no data we need):
+        // one atlas built once, shared by the pool (name resolution) and the renderer.
+        let particle_ids: Vec<haste_protocol::haste_core::Identifier> =
+            (0..data.registries.len("minecraft:particle_type") as u32)
+                .filter_map(|i| {
+                    data.registries
+                        .name("minecraft:particle_type", haste_core::RegistryIndex(i))
+                        .cloned()
+                })
+                .collect();
+        let particle_types = std::sync::Arc::new(
+            haste_render::ParticleTypes::build(&mut open_assets()?, &particle_ids)
+                .context("building the particle atlas")?,
+        );
         let shared = Arc::new(Shared::new(
             data,
             world,
             net::new_entity_store(entity_types),
             view_distance,
+            haste_render::Particles::new(particle_types.clone()),
             haste_render::default_skin(login.profile.uuid.as_u128()),
         ));
         if sounds.is_some() {
@@ -189,6 +206,7 @@ impl Session {
             biomes: biome_climates,
             options,
             local,
+            particle_types,
         })
     }
 
@@ -962,6 +980,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
     renderer.set_biomes(&session.biomes);
+    renderer.set_particle_types(&session.particle_types);
     let mut gui = GuiFrame::default();
     let mut ui: Option<crate::ui::Ui> = None;
     let mut feed = WorldFeed::default();
@@ -1046,6 +1065,11 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        {
+            let world = shared.world.read();
+            let mut particles = shared.particles.lock();
+            renderer.prepare_particles(&mut particles, &*world, camera, partial);
+        }
         stats = renderer.render(&frame)?;
         frames += 1;
         let placed = shared.view.lock().has_position;
@@ -1099,7 +1123,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let view = *shared.view.lock();
     let entities = feed.instances.len();
     println!(
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} entity instances (perspective {}, local player {}), target {:?}",
+        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} entity instances (perspective {}, local player {}), {} particles drawn, target {:?}",
         file.display(),
         image.width(),
         image.height(),
@@ -1115,6 +1139,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         entities,
         args.perspective,
         perspective.draws_player(),
+        renderer.particles_drawn(),
         view.block_target
     );
     drop(session);
@@ -1539,6 +1564,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
     renderer.set_biomes(&session.biomes);
+    renderer.set_particle_types(&session.particle_types);
     let gui = GuiFrame::default();
     let mut feed = WorldFeed::default();
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
@@ -1576,6 +1602,11 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        {
+            let world = shared.world.read();
+            let mut particles = shared.particles.lock();
+            renderer.prepare_particles(&mut particles, &*world, camera, partial);
+        }
         stats = renderer.render(&frame)?;
         if shared.is_closed() {
             anyhow::bail!(
@@ -1647,6 +1678,11 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        {
+            let world = shared.world.read();
+            let mut particles = shared.particles.lock();
+            renderer.prepare_particles(&mut particles, &*world, camera, partial_tick);
+        }
         let stats = renderer.render(&frame)?;
         let prev_drawn = samples.last().map_or(0, |s| s.sections_drawn);
         samples.push(BenchSample {
@@ -1712,6 +1748,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
     let mut app = App {
         shared: session.shared.clone(),
         biomes: session.biomes.clone(),
+        particle_types: session.particle_types.clone(),
         // The flag wins over the saved option; without it, the saved option decides.
         vsync: args.vsync.unwrap_or(session.options.vsync),
         options: session.options.clone(),
@@ -1749,6 +1786,8 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
 struct App {
     shared: Arc<Shared>,
     biomes: Vec<haste_render::BiomeClimate>,
+    /// The particle atlas types (uploaded to the renderer once it exists).
+    particle_types: std::sync::Arc<haste_render::ParticleTypes>,
     vsync: bool,
     /// Saved options (FOV for rendering, sensitivity for mouse look).
     options: Options,
@@ -1940,6 +1979,11 @@ impl App {
         };
         // Outline boxes of the target and the states of breaking blocks (one short read lock).
         renderer.sample_world(&*self.shared.world.read(), &self.shared.data.shapes, &frame);
+        {
+            let world = self.shared.world.read();
+            let mut particles = self.shared.particles.lock();
+            renderer.prepare_particles(&mut particles, &*world, camera, partial);
+        }
         renderer.set_animation_tick(animation_tick);
         if self.screenshot {
             self.screenshot = false;
@@ -2004,6 +2048,7 @@ impl ApplicationHandler for App {
                 Renderer::new(window.clone(), &mut assets, &self.shared.data.blocks)?;
             renderer.set_item_registry(&self.shared.data.registries);
             renderer.set_biomes(&self.biomes);
+            renderer.set_particle_types(&self.particle_types);
             Ok((window, renderer))
         })();
         match result {

@@ -21,7 +21,6 @@ use haste_protocol::haste_core::chunk::{BlockEntityData, ChunkData, LightData};
 use haste_protocol::haste_core::entity::{EntitySpawn, ItemStackData, MetadataEntry, PlayerInfo};
 use haste_protocol::haste_core::game::{DimensionInfo, GameMode};
 use haste_protocol::haste_core::{BlockPos, BlockStateId, ChunkPos, EntityId, Identifier};
-#[cfg(test)]
 use haste_protocol::packets::play::clientbound as cb;
 use haste_protocol::packets::play::clientbound::teleport_flags;
 use haste_protocol::{
@@ -343,11 +342,26 @@ pub struct Session {
     hurt_tilt_ticks: u32,
     /// Direction of the tilt: +1 rolls one way, -1 the other (from the damage yaw).
     hurt_tilt_dir: f32,
+    /// Particle spawns queued by `level_particles` since the last tick (drained by the game
+    /// thread into the shared pool).
+    pub particle_spawns: Vec<haste_render::ParticleSpawn>,
+    /// Particle spawns the game thread took over the whole session (counters).
+    pub particle_spawned: usize,
+    /// `minecraft:particle_type` names by protocol id (the static registry the packet's
+    /// numeric ids index; the synced registry is not authoritative for it).
+    particle_names: std::sync::Arc<Vec<Identifier>>,
 }
 
 impl Session {
     /// Fresh state after `Connection::connect` (from the `Login` it returned).
-    pub fn new(entity_id: EntityId, game_mode: GameMode, dimension: DimensionInfo) -> Self {
+    /// `particle_names` is the static `minecraft:particle_type` registry by protocol id
+    /// (the connection's `ProtocolTables`).
+    pub fn new(
+        entity_id: EntityId,
+        game_mode: GameMode,
+        dimension: DimensionInfo,
+        particle_names: std::sync::Arc<Vec<Identifier>>,
+    ) -> Self {
         Self {
             player: LocalPlayer::with_entity(entity_id, game_mode),
             counters: NetCounters {
@@ -365,6 +379,9 @@ impl Session {
             sound_requests: Vec::new(),
             hurt_tilt_ticks: 0,
             hurt_tilt_dir: 0.0,
+            particle_spawns: Vec::new(),
+            particle_spawned: 0,
+            particle_names,
         }
     }
 
@@ -500,6 +517,7 @@ impl Session {
                 self.player.set_vehicle(None, SeatPoint::ZERO);
             }
             P::PlayerPosition(_) => self.counters.teleports += 1,
+            P::LevelParticles(p) => self.push_particles(&p, regs),
             _ if player_packet => {}
             P::LevelChunkWithLight(c) => match world.load_chunk(&c.chunk) {
                 Ok(()) => self.counters.chunks_loaded += 1,
@@ -742,6 +760,31 @@ impl Session {
         out.extend(self.player.break_progress());
     }
 
+    /// `level_particles`: resolve the particle type against the static registry's names and
+    /// queue the spawn (see the renderer's particles module for the semantics; unknown types
+    /// are skipped there, logged once). `minecraft:dust`'s option data (colour, size) is the
+    /// one type-specific payload the renderer reads.
+    fn push_particles(&mut self, p: &cb::LevelParticles, _regs: &SyncedRegistries) {
+        let Some(kind) = self
+            .particle_names
+            .get(usize::try_from(p.particle.kind).ok().unwrap_or(usize::MAX))
+            .cloned()
+        else {
+            return;
+        };
+        let dust = dust_option(&kind, &p.particle.data);
+        self.particle_spawns.push(haste_render::ParticleSpawn {
+            kind,
+            pos: p.pos,
+            offset: [p.offset_x, p.offset_y, p.offset_z],
+            max_speed: [p.max_speed_x, p.max_speed_y, p.max_speed_z],
+            count: p.count,
+            randomization: p.randomization.max(0) as u32,
+            override_limiter: p.override_limiter,
+            dust,
+        });
+    }
+
     fn push_chat(&mut self, line: String) {
         tracing::info!("chat: {line}");
         self.counters.chat.push(line);
@@ -749,6 +792,24 @@ impl Session {
             self.counters.chat.remove(0);
         }
     }
+}
+
+/// `DustParticleOptions` from a particle's raw data (the ARGB colour int, then the size
+/// scale f32); `None` for every other type and for a malformed payload.
+fn dust_option(kind: &Identifier, data: &[u8]) -> Option<haste_render::DustOption> {
+    if kind.path() != "dust" || data.len() < 8 {
+        return None;
+    }
+    let argb = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+    let scale = f32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+    Some(haste_render::DustOption {
+        color: [
+            ((argb >> 16) & 0xFF) as f32 / 255.0,
+            ((argb >> 8) & 0xFF) as f32 / 255.0,
+            (argb & 0xFF) as f32 / 255.0,
+        ],
+        scale,
+    })
 }
 
 /// Owns the connection and the session state; world and entities are borrowed per tick.
@@ -764,7 +825,20 @@ impl NetDriver {
     /// Connects (handshake, login, configuration) and returns in the play state.
     pub async fn connect(opts: ConnectOptions) -> anyhow::Result<Self> {
         let (conn, login) = Connection::connect(opts).await.context("connecting")?;
-        let session = Session::new(login.entity_id, login.game_mode, login.dimension.clone());
+        // The static `minecraft:particle_type` registry by protocol id, from the same
+        // tables the packet decoder resolves particle names with.
+        let particle_names = std::sync::Arc::new(
+            (0..)
+                .map_while(|i| conn.tables().particle_name(i).map(|s| s.to_string()))
+                .map(|s| Identifier::parse(&s).expect("registry names are valid identifiers"))
+                .collect::<Vec<_>>(),
+        );
+        let session = Session::new(
+            login.entity_id,
+            login.game_mode,
+            login.dimension.clone(),
+            particle_names,
+        );
         Ok(Self {
             conn,
             login,
