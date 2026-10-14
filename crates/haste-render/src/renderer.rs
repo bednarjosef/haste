@@ -864,6 +864,7 @@ impl Renderer {
             gpu.queue.clone(),
             surface_format,
             &camera_bind_group_layout,
+            &lightmap_bind_group_layout,
         );
         let mut gui_assets = assets.reopen()?;
         gui.preload_sprites(&mut gui_assets, crate::gui::HUD_SPRITES);

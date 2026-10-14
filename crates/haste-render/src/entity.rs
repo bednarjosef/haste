@@ -392,7 +392,8 @@ impl EntityRenderer {
             }
             let (texture, scale) = texture_and_scale(e);
             let rect = self.texture_rect(&texture, assets);
-            let light = self.lights.get(&e.id).copied().unwrap_or((15, 0));
+            // The map is (sky, block); the vertex wants (block, sky).
+            let light = (block, sky);
             let root = Mat4::from_translation((e.pos - camera).as_vec3())
                 * Mat4::from_rotation_y((180.0 - e.yaw).to_radians())
                 * Mat4::from_scale(Vec3::new(-scale, -scale, scale) / 16.0);
@@ -475,8 +476,9 @@ impl EntityRenderer {
         }
         if let Some(idx) = f.item {
             if let Some(item) = self.item_model_for(idx, assets) {
-                // Glow frames draw the item full-bright (`getLightCoords(isGlowFrame, 15728880)`).
-                let item_light = if f.glow { 1.0 } else { lightmap(sky, block) };
+                // Glow frames draw the item full-bright (`getLightCoords(isGlowFrame, 15728880)`,
+                // block 15 / sky 15); otherwise the frame's own (block, sky) light.
+                let item_light = if f.glow { (15, 15) } else { (block, sky) };
                 let root = base * item_frame_item_transform(f.rotation);
                 self.emit_item(&mut out, &item, root, item_light, true, assets);
             }
@@ -499,7 +501,8 @@ impl EntityRenderer {
     ) {
         let base =
             Mat4::from_translation((e.pos - camera).as_vec3()) * painting_transform(p.facing);
-        let light = lightmap(sky, block);
+        // Paintings use the entity's own light (`PaintingRenderer` draws with `state.lightCoords`).
+        let light = (block, sky);
         let width = p.width.max(1) as i32;
         let height = p.height.max(1) as i32;
         let back = self.texture_rect(&Identifier::minecraft("painting/back"), assets);
@@ -702,7 +705,8 @@ impl EntityRenderer {
         let Some(fp) = fp else {
             return;
         };
-        let light = fp.light;
+        // `FirstPerson::light` is (sky, block); the vertex wants (block, sky).
+        let light = (fp.light.1, fp.light.0);
         let item = fp.item.and_then(|i| self.item_model_for(i, assets));
         let mut out = std::mem::take(&mut self.hand);
         let root = view_to_world * hand_root_matrix(fp, view, partial);
@@ -750,7 +754,7 @@ impl EntityRenderer {
         out: &mut Vec<EntityVertex>,
         model: &haste_assets::ItemModel,
         root: Mat4,
-        light: f32,
+        light: (u8, u8),
         use_fixed: bool,
         assets: &mut Assets,
     ) {

@@ -1152,6 +1152,7 @@ impl ParticleRenderer {
         queue: Arc<wgpu::Queue>,
         target_format: wgpu::TextureFormat,
         camera_layout: &wgpu::BindGroupLayout,
+        lightmap_layout: &wgpu::BindGroupLayout,
     ) -> ParticleRenderer {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("particle-layout"),
@@ -1172,7 +1173,7 @@ impl ParticleRenderer {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("particle-pipeline-layout"),
-            bind_group_layouts: &[Some(camera_layout), Some(&layout)],
+            bind_group_layouts: &[Some(camera_layout), Some(&layout), Some(lightmap_layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1324,12 +1325,9 @@ impl ParticleRenderer {
                 (p.block_light, p.sky_light)
             };
             let alpha = p.behaviour.alpha.unwrap_or(1.0);
-            let color = [
-                light * p.color[0],
-                light * p.color[1],
-                light * p.color[2],
-                alpha,
-            ];
+            // The light is applied by the shader from the light texture, not multiplied into
+            // the colour here (that would light twice).
+            let color = [p.color[0], p.color[1], p.color[2], alpha];
             let rel = (pos.as_dvec3() - camera.pos).as_vec3();
             // The quad size the behaviour rolled at spawn, grown for its age
             // (`SingleQuadParticle.getQuadSize`).
@@ -1352,6 +1350,7 @@ impl ParticleRenderer {
                     uv: uvs[i],
                     color,
                     rect: rect16,
+                    light: [light.0 as u16, light.1 as u16, 0, 0],
                 });
             }
             self.drawn += 1;
