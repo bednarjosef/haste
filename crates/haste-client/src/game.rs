@@ -403,11 +403,8 @@ impl Shared {
         world: World,
         entities: EntityStore,
         view_distance: i32,
-// MERGE(particles side):
         particles: haste_render::Particles,
-// MERGE(main side):
         skin: (Identifier, bool),
-// MERGE end
     ) -> Self {
         let has_sky = world.dimension().has_skylight;
         Self {

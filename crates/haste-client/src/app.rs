@@ -185,11 +185,8 @@ impl Session {
             world,
             net::new_entity_store(entity_types),
             view_distance,
-// MERGE(particles side):
             haste_render::Particles::new(particle_types.clone()),
-// MERGE(main side):
             haste_render::default_skin(login.profile.uuid.as_u128()),
-// MERGE end
         ));
         if sounds.is_some() {
             *shared.sound.lock() = sounds;
