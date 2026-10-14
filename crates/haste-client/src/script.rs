@@ -338,15 +338,11 @@ pub enum Step {
     MouseMove(i32, i32),
     /// Click a button at GUI coordinates.
     Click(MouseButton, i32, i32),
-// MERGE(menu side):
-    /// Click the widget whose label is this text (the button "Multiplayer", a server's name).
-    ClickText(String),
-// MERGE(main side):
     /// Click the widget whose label is `text`, at the label's position plus `(dx, dy)`. The label
-    /// is matched exactly or as `text: value` (a slider's dynamic label); the offset lets a
-    /// script hit a slider's track rather than its centred label.
+    /// is matched exactly, as `text: value` (a slider's dynamic label) or as one of `|`
+    /// alternatives; the offset lets a script hit a slider's track rather than its centred
+    /// label.
     ClickText(String, i32, i32),
-// MERGE end
     /// Press and hold a mouse button (attack/use while a screen is closed).
     MouseDown(MouseButton),
     /// Release a held mouse button.
@@ -367,11 +363,7 @@ pub enum Action {
     Text(String),
     MouseMove(i32, i32),
     Click(MouseButton, i32, i32),
-// MERGE(menu side):
-    ClickText(String),
-// MERGE(main side):
     ClickText(String, i32, i32),
-// MERGE end
     MouseDown(MouseButton),
     MouseUp(MouseButton),
     Scroll(i32),
@@ -481,17 +473,29 @@ pub fn parse(text: &str) -> Result<Vec<Step>, ScriptError> {
                 Step::Click(button, parse_i32(x, line)?, parse_i32(y, line)?)
             }
             "click_text" => {
+                // A quoted label may carry `dx dy` after it (a slider's track); an unquoted
+                // one is the whole rest of the line (multi-word labels, no offsets).
+                let quoted = rest.trim_start().starts_with('"');
                 let (text, rest) = parse_quoted(rest, "click_text", line)?;
-                let mut parts = rest.split_whitespace();
-                let dx = match parts.next() {
-                    Some(s) => parse_i32(s, line)?,
-                    None => 0,
-                };
-                let dy = match parts.next() {
-                    Some(s) => parse_i32(s, line)?,
-                    None => 0,
-                };
-                Step::ClickText(text, dx, dy)
+                if quoted {
+                    let mut parts = rest.split_whitespace();
+                    let dx = match parts.next() {
+                        Some(s) => parse_i32(s, line)?,
+                        None => 0,
+                    };
+                    let dy = match parts.next() {
+                        Some(s) => parse_i32(s, line)?,
+                        None => 0,
+                    };
+                    Step::ClickText(text, dx, dy)
+                } else {
+                    // Re-join the words `parse_quoted` split off (it takes the first word only).
+                    let label = match rest.is_empty() {
+                        true => text,
+                        false => format!("{text} {rest}"),
+                    };
+                    Step::ClickText(label, 0, 0)
+                }
             }
             "mouse_down" => Step::MouseDown(MouseButton::parse(
                 first_token(rest, "mouse_down", line)?,
@@ -502,8 +506,6 @@ pub fn parse(text: &str) -> Result<Vec<Step>, ScriptError> {
                 line,
             )?),
             "scroll" => Step::Scroll(parse_i32(first_token(rest, "scroll", line)?, line)?),
-            // Click the widget whose label this is (where the last frame drew the text).
-            "click_text" => Step::ClickText(rest.to_owned()),
             "look" => {
                 let mut parts = rest.split_whitespace();
                 let yaw = parts.next().ok_or_else(|| missing("look", line))?;
@@ -713,15 +715,9 @@ impl Runner {
                             self.advance();
                             return vec![Action::Click(button, x, y)];
                         }
-// MERGE(menu side):
-                        Step::ClickText(text) => {
-                            self.advance();
-                            return vec![Action::ClickText(text)];
-// MERGE(main side):
                         Step::ClickText(text, dx, dy) => {
                             self.advance();
                             return vec![Action::ClickText(text, dx, dy)];
-// MERGE end
                         }
                         Step::MouseDown(button) => {
                             self.advance();
@@ -773,12 +769,9 @@ mod tests {
             "type hello world",
             "mouse 160 90",
             "click right 10 20",
-// MERGE(menu side):
             "click_text Multiplayer",
-// MERGE(main side):
             "click_text \"FOV\" 90 5",
             "click_text Video",
-// MERGE end
             "mouse_down left",
             "mouse_up left",
             "scroll -1",
@@ -801,12 +794,9 @@ mod tests {
                 Step::Text("hello world".to_owned()),
                 Step::MouseMove(160, 90),
                 Step::Click(MouseButton::Right, 10, 20),
-// MERGE(menu side):
-                Step::ClickText("Multiplayer".to_owned()),
-// MERGE(main side):
+                Step::ClickText("Multiplayer".to_owned(), 0, 0),
                 Step::ClickText("FOV".to_owned(), 90, 5),
                 Step::ClickText("Video".to_owned(), 0, 0),
-// MERGE end
                 Step::MouseDown(MouseButton::Left),
                 Step::MouseUp(MouseButton::Left),
                 Step::Scroll(-1),

@@ -3,9 +3,10 @@
 # New World -> Create -> in game -> pause -> Save and Quit to Title, through the real local
 # server. usage: scripts/checks/singleplayer-check.sh
 #
-# Steady state: the config dir's singleplayer/ holds a sentinel world ("Haste SP Sentinel",
-# never deleted — it keeps the world list non-empty so vanilla never auto-jumps to the
-# create screen) and this check's world ("Haste SP Check", deleted and recreated every run).
+# The check's worlds live in a scratch dir (HASTE_SINGLEPLAYER_DIR), never in the player's
+# real saves; the steady state inside it: a sentinel world ("Haste SP Sentinel", never
+# deleted — it keeps the world list non-empty so vanilla never auto-jumps to the create
+# screen) and this check's world ("Haste SP Check", deleted and recreated every run).
 # A first run on a machine without them primes them here through the real flow first.
 #
 # Evidence: the client log (screens seen, "joined", "singleplayer server stopped") is grepped
@@ -13,11 +14,18 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BIN="${HASTE_BIN:-$ROOT/target/debug/haste}"
-SP="$HOME/.config/haste/singleplayer"
+SP="${HASTE_SINGLEPLAYER_DIR:-$ROOT/target/feature-checks/singleplayer-worlds}"
 WORLD="Haste SP Check"
 SENTINEL="Haste SP Sentinel"
 LOG="$ROOT/target/feature-checks/singleplayer.log"
 mkdir -p "$ROOT/target/feature-checks" "$SP"
+# The check's worlds live in the scratch dir (--singleplayer-dir), never the real saves.
+RUN=(--singleplayer-dir "$SP")
+
+# The worlds this check used to keep in the real saves (~/.config/haste/singleplayer) before
+# it moved to the scratch dir: gone from there for good.
+rm -rf "$HOME/.config/haste/singleplayer/$WORLD" "$HOME/.config/haste/singleplayer/$SENTINEL" \
+  "$HOME/.config/haste/singleplayer/Haste SP Check (1)" 2>/dev/null || true
 
 # Creates `$1` through the real flow (create screen -> local server -> join -> Save and
 # Quit), leaving it in the world list. `first` skips the Create New World click: on a
@@ -47,7 +55,7 @@ prime() { # name [first]
     echo "click_text Save and Quit to Title"
     echo "wait_until screen TitleScreen"
   } >"$script"
-  timeout 300 "$BIN" --script "$script" --seconds 280 >"$LOG.prime" 2>&1
+  timeout 300 "$BIN" "${RUN[@]}" --script "$script" --seconds 280 >"$LOG.prime" 2>&1
 }
 
 # The steady state: sentinel first (on an empty dir the empty-list auto-jump opens the
@@ -55,7 +63,7 @@ prime() { # name [first]
 [ -f "$SP/$SENTINEL/level.dat" ] || prime "$SENTINEL" first
 [ -f "$SP/$WORLD/level.dat" ] || prime "$WORLD"
 
-timeout 300 "$BIN" --script "$ROOT/scripts/checks/singleplayer.txt" --seconds 280 >"$LOG" 2>&1
+timeout 300 "$BIN" "${RUN[@]}" --script "$ROOT/scripts/checks/singleplayer.txt" --seconds 280 >"$LOG" 2>&1
 RC=$?
 
 echo "== client exit: $RC"

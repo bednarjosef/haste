@@ -365,16 +365,13 @@ impl Default for GameState {
             day_time: 0,
             outgoing: Vec::new(),
             disconnect_requested: false,
-// MERGE(menu side):
             join_requested: None,
             join_cancelled: false,
             quit_requested: false,
             open_world_requested: None,
             create_world_requested: None,
             local_world_running: false,
-// MERGE(main side):
             option_changes: Vec::new(),
-// MERGE end
         }
     }
 }

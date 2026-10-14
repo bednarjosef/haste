@@ -75,15 +75,12 @@ public final class ClientImpl {
     }
     public static Window getWindow(Minecraft m) { return Proxies.window; }
     public static SoundManager getSoundManager(Minecraft m) { return Proxies.sound; }
-// MERGE(menu side):
     /** The texture manager: the GPU's textures are Rust's, so registration is recorded only (see TextureImpl). */
     public static net.minecraft.client.renderer.texture.TextureManager getTextureManager(Minecraft m) {
         return TextureImpl.textures();
     }
-// MERGE(main side):
     /** No audio device is opened in Haste, so none is available to pick (the sound options list the default only). */
     public static java.util.List<String> getAvailableSoundDevices(SoundManager s) { return java.util.List.of(); }
-// MERGE end
     /** No narrator: a no-op proxy (isActive() is false). */
     public static net.minecraft.client.GameNarrator getNarrator(Minecraft m) { return Proxies.service(net.minecraft.client.GameNarrator.class); }
     /** No player reporting: a no-op proxy (no draft report). */

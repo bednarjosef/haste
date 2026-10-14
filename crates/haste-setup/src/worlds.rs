@@ -4,10 +4,28 @@
 //! and Java's `LevelStorageSource` (listing worlds, whose base dir is
 //! [`worlds_dir`], read through the `haste.singleplayerDir` system property).
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
-/// The directory that holds one folder per singleplayer world.
+static OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Points the singleplayer worlds somewhere else (`--singleplayer-dir`, the feature checks:
+/// their worlds never land in the player's real saves). Before the first [`worlds_dir`].
+pub fn set_dir(dir: PathBuf) {
+    let _ = OVERRIDE.set(dir);
+}
+
+/// The directory that holds one folder per singleplayer world: the override when one was
+/// set, else `$HASTE_SINGLEPLAYER_DIR`, else `<config dir>/singleplayer`.
 #[must_use]
 pub fn worlds_dir() -> Option<PathBuf> {
+    if let Some(dir) = OVERRIDE.get() {
+        return Some(dir.clone());
+    }
+    if let Some(dir) = std::env::var_os("HASTE_SINGLEPLAYER_DIR") {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
     Some(
         crate::servers::path()?
             .parent()
@@ -33,5 +51,28 @@ mod tests {
         let expected = std::path::Path::new("singleplayer").join("gltest");
         assert!(dir.ends_with(&expected));
         assert_ne!(world_dir("other"), Some(dir));
+    }
+
+    #[test]
+    fn env_var_overrides_the_dir() {
+        // SAFETY: one env var, set and restored around the calls (tests run in parallel
+        // processes of this crate's test binary, but within it serially; the var is ours).
+        let key = "HASTE_SINGLEPLAYER_DIR";
+        let prev = std::env::var_os(key);
+        unsafe {
+            std::env::set_var(key, "/tmp/haste-test-singleplayer");
+        }
+        assert_eq!(
+            worlds_dir().as_deref(),
+            Some(std::path::Path::new("/tmp/haste-test-singleplayer"))
+        );
+        match prev {
+            Some(v) => unsafe {
+                std::env::set_var(key, v);
+            },
+            None => unsafe {
+                std::env::remove_var(key);
+            },
+        }
     }
 }

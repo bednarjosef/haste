@@ -1124,8 +1124,13 @@ fn frame_view(
 /// runner's `click_text`.
 fn gui_text_pos(frame: &GuiFrame, want: &str) -> Option<(i32, i32)> {
     use haste_protocol::haste_core::gui::GuiCommand;
-    let matches =
-        |text: &str| text == want || text.strip_prefix(want).is_some_and(|r| r.starts_with(':'));
+    // Each `|`-separated alternative matches exactly or as a slider's dynamic `label: value`.
+    let wants: Vec<&str> = want.split('|').collect();
+    let matches = |text: &str| {
+        wants
+            .iter()
+            .any(|w| text == *w || text.strip_prefix(*w).is_some_and(|r| r.starts_with(':')))
+    };
     let mut stack: Vec<(f32, f32)> = vec![(0.0, 0.0)];
     for c in &frame.commands {
         match c {
@@ -1863,6 +1868,7 @@ fn menu_screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             let frame = FrameInput {
                 camera,
                 entities: &[],
+                block_entities: &[],
                 gui: &gui,
                 sky,
                 partial_tick: partial,
@@ -2178,7 +2184,6 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("reading script {}", file.display()))?;
     let steps = script::parse(&text).map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut runner = script::Runner::new(steps);
-// MERGE(menu side):
     // The session (with `--server` at once; in menu mode once the multiplayer screen joins).
     let mut session: Option<Session> = match &args.server {
         Some(address) => Some(Session::join(
@@ -2200,31 +2205,27 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut in_menu = session.is_none();
     let mut shared = session.as_ref().map(|s| s.shared.clone());
     let mut assets = open_assets()?;
-    let options = load_options();
     let data = net::load_game_data()?;
     let mut renderer = Renderer::new_offscreen(args.width, args.height, &mut assets, &data.blocks)?;
     if let Some(s) = &session {
         renderer.set_item_registry(&s.shared.data.registries);
         renderer.set_biomes(&s.biomes);
+        renderer.set_particle_types(&s.particle_types);
+        renderer.set_dimension(s.shared.world.read().dimension());
     }
-// MERGE(main side):
-    let session = Session::join(args, false)?;
-    let shared = session.shared.clone();
     // The live options, refreshed when a vanilla screen changed one (the options bridge): FOV
-    // and GUI scale follow the change within a frame, like the windowed client.
-    let mut options = session.options.clone();
-    let mut options_version = shared.options_version.load(Ordering::Relaxed);
-    let mut assets = open_assets()?;
-    let mut renderer =
-        Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
-    renderer.set_item_registry(&shared.data.registries);
-    renderer.set_biomes(&session.biomes);
+    // and GUI scale follow the change within a frame, like the windowed client. In menu mode
+    // the saved ones stand in until a session arrives with its own.
+    let mut options = session
+        .as_ref()
+        .map_or_else(load_options, |s| s.options.clone());
+    let mut options_version = shared
+        .as_ref()
+        .map_or(0, |s| s.options_version.load(Ordering::Relaxed));
     // Item names by protocol id, so `log_script_frame` can name the items a frame drew.
-    let item_names: Vec<Identifier> = (0..shared.data.registries.len("minecraft:item") as u32)
+    let item_names: Vec<Identifier> = (0..data.registries.len("minecraft:item") as u32)
         .map(|i| {
-            shared
-                .data
-                .registries
+            data.registries
                 .name(
                     "minecraft:item",
                     haste_protocol::haste_core::RegistryIndex(i),
@@ -2233,8 +2234,6 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 .unwrap_or_else(|| Identifier::minecraft("air"))
         })
         .collect();
-    renderer.set_dimension(shared.world.read().dimension());
-// MERGE end
     let mut gui = GuiFrame::default();
     let mut ui: Option<crate::ui::Ui> = None;
     let mut feed = WorldFeed::default();
@@ -2286,10 +2285,12 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         let mut view = shared.as_ref().map(|s| *s.view.lock());
         let look = (input.yaw, input.pitch);
         // Pick up a live option change (the options bridge) within a frame.
-        let version = shared.options_version.load(Ordering::Relaxed);
-        if version != options_version {
-            options_version = version;
-            options = shared.live_options.lock().clone();
+        if let Some(shared) = shared.as_ref() {
+            let version = shared.options_version.load(Ordering::Relaxed);
+            if version != options_version {
+                options_version = version;
+                options = shared.live_options.lock().clone();
+            }
         }
         // One game tick's actions whenever it is time (`wait_until settled` uses the same
         // quiet test as the screenshot mode, plus the HUD's JVM being up or known-failed: a
@@ -2298,15 +2299,25 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         // false until the multiplayer screen's join creates the session).
         if Instant::now() >= next_tick {
             next_tick += tick;
-// MERGE(menu side):
             let mut arrived: Option<Session> = None;
             {
                 let shared = shared.as_ref();
                 let hud_ready =
                     ui.is_some() || shared.is_some_and(|s| s.hud_failed.load(Ordering::Relaxed));
+                let at_pos =
+                    want_pos.is_none_or(|p| view.is_some_and(|v| (v.feet - p).length() <= 0.5));
                 let settled = view.is_some_and(|v| v.has_position)
+                    && at_pos
                     && hud_ready
                     && feed.settled(&last_stats, Duration::from_millis(1500));
+                if !settled && view.is_some_and(|v| v.has_position) && frames.is_multiple_of(40) {
+                    tracing::info!(
+                        "waiting to settle: queue {} pending {} arrival {:?}",
+                        feed.queue.len(),
+                        last_stats.meshes_pending,
+                        feed.last_arrival.map(|t| t.elapsed())
+                    );
+                }
                 let screen_class = ui.as_ref().and_then(|u| u.gui().screen_class());
                 let state = script::ScriptState {
                     joined: view.is_some_and(|v| v.has_position),
@@ -2328,34 +2339,6 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                         if cancelled && (open_world.is_some() || create_world.is_some()) {
                             last_err = Some("the local world join was cancelled".into());
                             break 'run;
-// MERGE(main side):
-            let hud_ready = ui.is_some() || shared.hud_failed.load(Ordering::Relaxed);
-            let at_pos = want_pos.is_none_or(|p| (view.feet - p).length() <= 0.5);
-            let settled = view.has_position
-                && at_pos
-                && hud_ready
-                && feed.settled(&last_stats, Duration::from_millis(1500));
-            if !settled && frames.is_multiple_of(40) {
-                tracing::info!(
-                    "waiting to settle: queue {} pending {} arrival {:?}",
-                    feed.queue.len(),
-                    last_stats.meshes_pending,
-                    feed.last_arrival.map(|t| t.elapsed())
-                );
-            }
-            let state = script::ScriptState {
-                joined: view.has_position,
-                settled,
-                screen_open: ui.as_ref().is_some_and(|u| u.screen_open()),
-            };
-            for action in runner.tick(&state) {
-                match action {
-                    script::Action::KeyDown(k) => {
-                        // F2 is the window-only screenshot key (the UI never takes it): capture
-                        // the next frame, like the windowed event loop does.
-                        if k == script::Key::F2 {
-                            f2_pending = true;
-// MERGE end
                         }
                         if let Some(address) = address {
                             let for_game = u.clone();
@@ -2426,7 +2409,6 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                             }
                         }
                     }
-// MERGE(menu side):
                 }
                 for action in runner.tick(&state) {
                     match action {
@@ -2466,22 +2448,25 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                             let (x, y) = input.mouse;
                             input.mouse_button(mouse_button_id(button), false, x, y, ui.as_ref());
                         }
-                        // A click on the widget whose label is `text`: where the last rendered
-                        // frame drew it (the screen is static between ticks, so the previous
-                        // frame's position is exact).
-                        script::Action::ClickText(text) => match text_position(&last_gui, &text) {
-                            Some((x, y)) => {
-                                let (x, y) = (f64::from(x) + 1.0, f64::from(y) + 1.0);
-                                input.mouse_moved(x, y, ui.as_ref());
-                                input.mouse_button(1, true, x, y, ui.as_ref());
-                                input.mouse_button(1, false, x, y, ui.as_ref());
+                        // A click on the widget whose label is `text`, at the label's position
+                        // plus `(dx, dy)`: the label's place in the last rendered frame, so the
+                        // check does not depend on the GUI scale or window size. A slider's
+                        // label is centred, so `(dx, dy)` moves the click onto its track.
+                        script::Action::ClickText(text, dx, dy) => {
+                            match gui_text_pos(&last_gui, &text) {
+                                Some((x, y)) => {
+                                    let (x, y) = (f64::from(x + dx), f64::from(y + dy));
+                                    input.mouse_moved(x, y, ui.as_ref());
+                                    input.mouse_button(1, true, x, y, ui.as_ref());
+                                    input.mouse_button(1, false, x, y, ui.as_ref());
+                                }
+                                None => {
+                                    last_err =
+                                        Some(format!("no {text:?} to click in the current frame"));
+                                    break 'run;
+                                }
                             }
-                            None => {
-                                last_err =
-                                    Some(format!("no {text:?} to click in the current frame"));
-                                break 'run;
-                            }
-                        },
+                        }
                         script::Action::Scroll(n) => {
                             let (x, y) = input.mouse;
                             if let Some(shared) = shared.as_ref() {
@@ -2500,52 +2485,6 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                             finished = true;
                             break 'run;
                         }
-// MERGE(main side):
-                    script::Action::MouseMove(x, y) => {
-                        input.mouse_moved(f64::from(x), f64::from(y), ui.as_ref());
-                    }
-                    script::Action::Click(button, x, y) => {
-                        let b = mouse_button_id(button);
-                        let (x, y) = (f64::from(x), f64::from(y));
-                        // A click is a press and a release on the same tick.
-                        input.mouse_button(b, true, x, y, ui.as_ref());
-                        input.mouse_button(b, false, x, y, ui.as_ref());
-                    }
-                    script::Action::ClickText(text, dx, dy) => {
-                        // The label's position in the last rendered frame, so the check does not
-                        // depend on the GUI scale or window size. A slider's label is centred, so
-                        // `(dx, dy)` moves the click onto its track.
-                        match gui_text_pos(&gui, &text) {
-                            Some((x, y)) => {
-                                let (x, y) = (f64::from(x + dx), f64::from(y + dy));
-                                input.mouse_button(1, true, x, y, ui.as_ref());
-                                input.mouse_button(1, false, x, y, ui.as_ref());
-                            }
-                            None => tracing::warn!("script click_text {text:?}: no such label"),
-                        }
-                    }
-                    script::Action::MouseDown(button) => {
-                        let (x, y) = input.mouse;
-                        input.mouse_button(mouse_button_id(button), true, x, y, ui.as_ref());
-                    }
-                    script::Action::MouseUp(button) => {
-                        let (x, y) = input.mouse;
-                        input.mouse_button(mouse_button_id(button), false, x, y, ui.as_ref());
-                    }
-                    script::Action::Scroll(n) => {
-                        let (x, y) = input.mouse;
-                        input.wheel(0.0, f64::from(n), x, y, ui.as_ref(), &shared);
-                    }
-                    script::Action::Look(yaw, pitch) => input.look(yaw, pitch),
-                    script::Action::Screenshot(name) => shots.push(name),
-                    script::Action::Error(e) => {
-                        last_err = Some(e);
-                        break 'run;
-                    }
-                    script::Action::Finished => {
-                        finished = true;
-                        break 'run;
-// MERGE end
                     }
                 }
             }
@@ -2563,15 +2502,10 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 }
             }
             // The actions may have changed what the game thread sees this tick.
-// MERGE(menu side):
             if let Some(shared) = shared.as_ref() {
-                input.sample(shared, game::Perspective::FirstPerson);
+                input.sample(shared, ui.as_ref(), game::Perspective::FirstPerson);
                 view = Some(*shared.view.lock());
             }
-// MERGE(main side):
-            input.sample(&shared, ui.as_ref(), game::Perspective::FirstPerson);
-            view = *shared.view.lock();
-// MERGE end
         }
         // Leaving the world: the pause screen's "Save and Quit" (or the death screen's "Title
         // Screen") asked to disconnect — like the window, the client drops the session, stops
@@ -2612,7 +2546,6 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         }
         // Render the frame like the screenshot mode does (the HUD and any open screen via
         // `Ui::frame`), so `screenshot` actions capture exactly what the window would show.
-// MERGE(menu side):
         // Menu mode renders the open screen over the plain background (no world yet).
         if session.is_none() {
             if let Some(u) = ui.as_mut() {
@@ -2625,6 +2558,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             let frame = FrameInput {
                 camera: menu_camera(),
                 entities: &[],
+                block_entities: &[],
                 gui: &gui,
                 sky: menu_sky(),
                 partial_tick: 0.0,
@@ -2641,7 +2575,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 for name in shots.drain(..) {
                     // Log what the frame drew (the check scripts grep this as evidence), like
                     // the in-game branch does.
-                    log_script_frame(&gui, &name);
+                    log_script_frame(&gui, &name, &item_names);
                     save_script_shot(&image, &name)?;
                 }
             }
@@ -2659,31 +2593,18 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         }
         let shared = shared.as_ref().expect("the session exists");
         let session_ref = session.as_ref().expect("the session exists");
-        let (camera, sky, partial, vd, animation_tick) = frame_view(
-            shared,
-            game::Perspective::FirstPerson,
-            look.0,
-            look.1,
-            &session_ref.options,
-            Instant::now(),
-        );
-        feed.feed(shared, &mut renderer, camera_section(&camera), vd);
-        let entities = feed.entities(shared, &mut renderer, session_ref.local, partial);
-        let block_target = view.and_then(|v| v.block_target);
-// MERGE(main side):
         let (camera, sky, lightmap, partial, vd, animation_tick) = frame_view(
-            &shared,
+            shared,
             game::Perspective::FirstPerson,
             look.0,
             look.1,
             &options,
             Instant::now(),
         );
-        feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
+        feed.feed(shared, &mut renderer, camera_section(&camera), vd);
         let (entities, block_entities) =
-            feed.entities(&shared, &mut renderer, session.local, partial);
-        let block_target = view.block_target;
-// MERGE end
+            feed.entities(shared, &mut renderer, session_ref.local, partial);
+        let block_target = view.and_then(|v| v.block_target);
         let breaking = shared.breaking.lock().clone();
         if ui.is_none() {
             ui = shared.ui.lock().clone();
@@ -2695,31 +2616,19 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             // F3's numbers every frame, like the window's `draw` (cheap: short mutexes; the
             // overlay's strings are only built while it is on).
             u.set_debug(debug_info(
-                &session.debug_env,
-                &shared,
+                &session_ref.debug_env,
+                shared,
                 &renderer,
                 look,
                 fps.fps as i32,
                 &last_stats,
                 entities.len() as i32,
-                resolve_gui_scale(
-                    u32::from(session.options.gui_scale),
-                    args.width,
-                    args.height,
-                ),
+                resolve_gui_scale(u32::from(options.gui_scale), args.width, args.height),
                 &gpu_info(&renderer),
             ));
         }
         if let Some(u) = &mut ui {
-// MERGE(menu side):
-            let scale = resolve_gui_scale(
-                u32::from(session_ref.options.gui_scale),
-                args.width,
-                args.height,
-            );
-// MERGE(main side):
             let scale = resolve_gui_scale(u32::from(options.gui_scale), args.width, args.height);
-// MERGE end
             let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
             gui = u.frame(gw, gh, scale, input.mouse, partial).clone();
             last_gui = gui.clone();
@@ -2835,32 +2744,6 @@ fn save_script_shot(image: &image::RgbaImage, name: &str) -> anyhow::Result<()> 
         .with_context(|| format!("saving {}", path.display()))?;
     println!("script screenshot saved to {}", path.display());
     Ok(())
-}
-
-/// Where a label is drawn in a GUI frame, in GUI pixels (translations applied): where a
-/// `click_text` action clicks. The first match wins, like a player scanning the screen.
-fn text_position(frame: &GuiFrame, want: &str) -> Option<(i32, i32)> {
-    use haste_protocol::haste_core::gui::GuiCommand;
-    let mut stack: Vec<(f32, f32)> = vec![(0.0, 0.0)];
-    for c in &frame.commands {
-        match c {
-            GuiCommand::TranslatePush { dx, dy, .. } => {
-                let (x, y) = *stack.last().unwrap();
-                stack.push((x + dx, y + dy));
-            }
-            GuiCommand::TranslatePop => {
-                stack.pop();
-            }
-            GuiCommand::Text { text, x, y, .. } | GuiCommand::StyledText { text, x, y, .. }
-                if text == want =>
-            {
-                let (dx, dy) = *stack.last().unwrap();
-                return Some((x + dx as i32, y + dy as i32));
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 /// The bench camera at normalised time `t` in 0..=1 (t is elapsed/total). The first half is a
@@ -3291,7 +3174,6 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         .as_ref()
         .map_or_else(load_options, |s| s.options.clone());
     let mut app = App {
-// MERGE(menu side):
         username: args.username.clone(),
         render_distance: args.render_distance,
         session,
@@ -3299,22 +3181,12 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         // A join the screens asked for, connecting on its own thread (the window stays live).
         joining: None,
         local_server: None,
-        // The flag wins over the saved option; without it, the saved option decides.
-        vsync: args.vsync.unwrap_or(options.vsync),
-        options,
-// MERGE(main side):
-        shared: session.shared.clone(),
-        biomes: session.biomes.clone(),
-        debug_env: session.debug_env.clone(),
-        particle_types: session.particle_types.clone(),
         // The flag wins over the saved option; without it, the saved option decides (and a
         // change in the options screen applies live, like vanilla's Vsync option).
-        vsync: args.vsync.unwrap_or(session.options.vsync),
+        vsync: args.vsync.unwrap_or(options.vsync),
         vsync_forced: args.vsync,
-        options: session.options.clone(),
-        options_version: session.shared.options_version.load(Ordering::Relaxed),
-        local: session.local,
-// MERGE end
+        options,
+        options_version: 0,
         perspective: game::Perspective::default(),
         window: None,
         renderer: None,
@@ -3356,7 +3228,6 @@ struct JoinInProgress {
 }
 
 struct App {
-// MERGE(menu side):
     /// The offline username joins use (menu mode: from `--username`).
     username: String,
     /// `--render-distance`, overriding the saved option for this run.
@@ -3371,13 +3242,6 @@ struct App {
     joining: Option<JoinInProgress>,
     /// The local singleplayer world of the joined session (stopped when the world is left).
     local_server: Option<LocalWorld>,
-// MERGE(main side):
-    shared: Arc<Shared>,
-    biomes: Vec<haste_render::BiomeClimate>,
-    debug_env: DebugEnv,
-    /// The particle atlas types (uploaded to the renderer once it exists).
-    particle_types: std::sync::Arc<haste_render::ParticleTypes>,
-// MERGE end
     vsync: bool,
     /// `--vsync` forced the mode: a change in the options screen must not override it.
     vsync_forced: Option<bool>,
@@ -3385,13 +3249,8 @@ struct App {
     /// its version changes (not every frame), so a change in a vanilla options screen takes
     /// effect immediately (FOV, GUI scale, mouse sensitivity, fullscreen, vsync).
     options: Options,
-// MERGE(menu side):
-// MERGE(main side):
-    /// The `Shared::options_version` [`App::options`] was copied from.
+    /// The `Shared::options_version` [`App::options`] was copied from (0 until a session).
     options_version: u64,
-    /// The local player's entity id and UUID, for its own model in third person.
-    local: (EntityId, u128),
-// MERGE end
     /// Current perspective (F5 cycles it).
     perspective: game::Perspective,
     window: Option<Arc<Window>>,
@@ -3700,14 +3559,10 @@ impl App {
 
     fn release_keys(&mut self) {
         self.input.release();
-// MERGE(menu side):
         if let Some(session) = &self.session {
-            self.input.sample(&session.shared, self.perspective);
+            self.input
+                .sample(&session.shared, self.ui.as_ref(), self.perspective);
         }
-// MERGE(main side):
-        self.input
-            .sample(&self.shared, self.ui.as_ref(), self.perspective);
-// MERGE end
     }
 
     /// Mouse look speed from the saved sensitivity.
@@ -3729,6 +3584,7 @@ impl App {
         let frame = FrameInput {
             camera,
             entities: &[],
+            block_entities: &[],
             gui: &self.gui,
             sky,
             partial_tick: partial,
@@ -3745,15 +3601,27 @@ impl App {
         if self.renderer.is_none() {
             return;
         }
-// MERGE(menu side):
-// MERGE(main side):
+        // The screen that opened or closed since the last frame takes or frees the cursor,
+        // and "Disconnect" leaves the server (back to the multiplayer screen, like vanilla).
+        self.sync_grab();
+        self.take_disconnect(event_loop);
+        if self.session.is_none() {
+            // Menu mode: the screens tick here, the join the multiplayer screen requested
+            // connects on its own thread, and the frame is the open screen over the plain
+            // background (no world). The session arriving switches to the game path below.
+            self.menu_tick();
+            self.poll_join();
+            self.draw_menu();
+            return;
+        }
+        let session = self.session.as_ref().expect("checked above");
         // The options the player just changed in a vanilla screen: the game thread applied
         // them to `live_options` and bumped its version; copy them here so FOV, GUI scale and
         // sensitivity follow this frame (vanilla reads its Options object live too).
-        let version = self.shared.options_version.load(Ordering::Relaxed);
+        let version = session.shared.options_version.load(Ordering::Relaxed);
         if version != self.options_version {
             self.options_version = version;
-            self.options = self.shared.live_options.lock().clone();
+            self.options = session.shared.live_options.lock().clone();
             // The two options the window itself owns (vanilla's Fullscreen/Vsync callbacks touch
             // the window and the swapchain): apply them to this client's window and renderer.
             if let Some(w) = &self.window {
@@ -3771,32 +3639,11 @@ impl App {
             }
         }
         self.input
-            .sample(&self.shared, self.ui.as_ref(), self.perspective);
-// MERGE end
-        // The screen that opened or closed since the last frame takes or frees the cursor,
-        // and "Disconnect" leaves the server (back to the multiplayer screen, like vanilla).
-        self.sync_grab();
-        self.take_disconnect(event_loop);
-        if self.session.is_none() {
-            // Menu mode: the screens tick here, the join the multiplayer screen requested
-            // connects on its own thread, and the frame is the open screen over the plain
-            // background (no world). The session arriving switches to the game path below.
-            self.menu_tick();
-            self.poll_join();
-            self.draw_menu();
-            return;
-        }
-        let session = self.session.as_ref().expect("checked above");
-        self.input.sample(&session.shared, self.perspective);
+            .sample(&session.shared, self.ui.as_ref(), self.perspective);
         let renderer = self.renderer.as_mut().expect("checked above");
         let t0 = Instant::now();
-// MERGE(menu side):
-        let (camera, sky, partial, vd, animation_tick) = frame_view(
-            &session.shared,
-// MERGE(main side):
         let (camera, sky, lightmap, partial, vd, animation_tick) = frame_view(
-            &self.shared,
-// MERGE end
+            &session.shared,
             self.perspective,
             self.input.yaw,
             self.input.pitch,
@@ -3807,19 +3654,11 @@ impl App {
             .feed(&session.shared, renderer, camera_section(&camera), vd);
         let t1 = Instant::now();
         self.feed
-// MERGE(menu side):
             .set_first_person(&session.shared, renderer, self.perspective);
-        let entities = self
-            .feed
-            .entities(&session.shared, renderer, session.local, partial);
-        let block_target = session.shared.view.lock().block_target;
-// MERGE(main side):
-            .set_first_person(&self.shared, renderer, self.perspective);
         let (entities, block_entities) =
             self.feed
-                .entities(&self.shared, renderer, self.local, partial);
-        let block_target = self.shared.view.lock().block_target;
-// MERGE end
+                .entities(&session.shared, renderer, session.local, partial);
+        let block_target = session.shared.view.lock().block_target;
         self.breaking.clear();
         self.breaking
             .extend_from_slice(&session.shared.breaking.lock());
@@ -3836,27 +3675,13 @@ impl App {
         let (w, h) = renderer.size();
         if let Some(ui) = &self.ui {
             // F3's numbers and the water overlay's flag, every frame (cheap: short mutexes,
-// MERGE(menu side):
-            // no allocation). The section counts are the previous frame's.
-            let view = *session.shared.view.lock();
-            let stats = self.frame_stats;
-            ui.set_debug(haste_jvm::DebugInfo {
-                fps: self.fps.fps as i32,
-                pos: [view.feet.x, view.feet.y, view.feet.z],
-                rot: [self.input.yaw, self.input.pitch],
-                chunks: session.shared.world.read().loaded_chunks().count() as i32,
-                sections_drawn: stats.chunk_sections_drawn as i32,
-                sections_total: stats.chunk_sections_total as i32,
-                entities: session.shared.entities.read().len() as i32,
-            });
-// MERGE(main side):
             // no allocation while the overlay is off). The section counts are the previous
             // frame's.
             let stats = self.frame_stats;
             let gpu = gpu_info(renderer);
             ui.set_debug(debug_info(
-                &self.debug_env,
-                &self.shared,
+                &session.debug_env,
+                &session.shared,
                 renderer,
                 (self.input.yaw, self.input.pitch),
                 self.fps.fps as i32,
@@ -3865,8 +3690,7 @@ impl App {
                 resolve_gui_scale(u32::from(self.options.gui_scale), w, h),
                 &gpu,
             ));
-            let view = *self.shared.view.lock();
-// MERGE end
+            let view = *session.shared.view.lock();
             ui.set_eye_in_water(view.eye_in_water);
         }
         if let Some(ui) = &mut self.ui {
@@ -3960,22 +3784,14 @@ impl ApplicationHandler for App {
         let result = (|| -> anyhow::Result<(Arc<Window>, Renderer)> {
             let window = Arc::new(event_loop.create_window(attrs)?);
             let mut assets = open_assets()?;
-// MERGE(menu side):
             let data = net::load_game_data()?;
             let mut renderer = Renderer::new(window.clone(), &mut assets, &data.blocks)?;
             if let Some(session) = &self.session {
                 renderer.set_item_registry(&session.shared.data.registries);
                 renderer.set_biomes(&session.biomes);
                 renderer.set_particle_types(&session.particle_types);
+                renderer.set_dimension(session.shared.world.read().dimension());
             }
-// MERGE(main side):
-            let mut renderer =
-                Renderer::new(window.clone(), &mut assets, &self.shared.data.blocks)?;
-            renderer.set_item_registry(&self.shared.data.registries);
-            renderer.set_biomes(&self.biomes);
-            renderer.set_particle_types(&self.particle_types);
-            renderer.set_dimension(self.shared.world.read().dimension());
-// MERGE end
             Ok((window, renderer))
         })();
         match result {
