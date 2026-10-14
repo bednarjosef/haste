@@ -173,6 +173,7 @@ fn entities_offscreen() {
         pitch: 5.0,
         fov_deg: 70.0,
         roll_deg: 0.0,
+        bob: haste_render::ViewBob::default(),
     };
     let img = render_scene(&mut renderer, &world, &entities, camera);
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");

@@ -210,10 +210,10 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
         // default skin for our UUID is what vanilla shows without a downloaded skin.
         skin: Some(haste_render::default_skin(uuid).0),
         nametag: None,
-        // Our own model flashes red in third person like other entities: the hurt tilt follows
-        // the same 10-tick ease-out curve, so its size (out of the 14-degree peak) is the
-        // hurt strength.
-        hurt: (view.hurt_tilt.abs() / 14.0).clamp(0.0, 1.0),
+        // Our own model flashes red in third person like other entities: full strength on the
+        // tick of the hit, fading over the 10 hurt ticks (vanilla's hurtTime / hurtDuration).
+        hurt: (view.hurt_ticks.min(crate::net::HURT_TILT_TICKS) as f32
+            / crate::net::HURT_TILT_TICKS as f32),
     }
 }
 
@@ -247,13 +247,30 @@ pub struct ViewState {
     /// Whether the player's eyes are in water (`PlayerState::eyes_in_water`), for the HUD's
     /// air bubbles and the water overlay.
     pub eye_in_water: bool,
+    /// Whether the camera is under the lava surface at the eye's block (vanilla's
+    /// `Camera.getFluidInCamera` lava rule), for the submerged FOV.
+    pub eye_in_lava: bool,
     /// Selected hotbar slot (`LocalPlayer::held_slot`), for the scroll wheel.
     pub held_slot: i32,
     /// What the first-person view holds this tick (`None` draws no hand: spectator, not yet
     /// placed). The skin it is drawn with is [`Shared::skin`], set once at join.
     pub first_person: Option<FirstPersonView>,
-    /// Hurt-tilt camera roll in degrees (`Session::hurt_tilt_degrees`).
-    pub hurt_tilt: f32,
+    /// The smoothed FOV modifier, last tick's value and this tick's (`Session::fov_modifier`
+    /// / `old_fov_modifier`), interpolated per frame.
+    pub fov_modifier: f32,
+    pub fov_modifier_old: f32,
+    /// Walk distance bracketing the last tick (`Session::walk_dist` / `walk_dist_o`).
+    pub walk_dist: f32,
+    pub walk_dist_o: f32,
+    /// The bob amount bracketing the last tick (`Session::bob` / `bob_o`).
+    pub bob: f32,
+    pub bob_o: f32,
+    /// Hurt ticks left and the damage direction in degrees (`Session::hurt_ticks` /
+    /// `hurt_dir`).
+    pub hurt_ticks: u32,
+    pub hurt_dir: f32,
+    /// Ticks since the local player died (`Session::death_ticks`).
+    pub death_ticks: u32,
     /// Look angles (yaw, pitch) before and after the last tick, for the player's own model in
     /// third person.
     pub prev_look: (f32, f32),
@@ -358,6 +375,9 @@ pub struct SharedInput {
     pub toggle_flight: bool,
     /// Mouse buttons held, middle click and hotbar selection since the last tick.
     pub interact: InteractInput,
+    /// The current perspective is first person (vanilla's camera type; the spyglass FOV
+    /// zoom only applies in first person).
+    pub first_person: bool,
 }
 
 /// State shared between the game thread and the render thread.
@@ -427,9 +447,18 @@ impl Shared {
                 view_distance,
                 block_target: None,
                 eye_in_water: false,
+                eye_in_lava: false,
                 held_slot: 0,
                 first_person: None,
-                hurt_tilt: 0.0,
+                fov_modifier: 0.0,
+                fov_modifier_old: 0.0,
+                walk_dist: 0.0,
+                walk_dist_o: 0.0,
+                bob: 0.0,
+                bob_o: 0.0,
+                hurt_ticks: 0,
+                hurt_dir: 0.0,
+                death_ticks: 0,
                 prev_look: (0.0, 0.0),
                 look: (0.0, 0.0),
                 prev_feet: DVec3::ZERO,
@@ -728,7 +757,12 @@ fn tick_once(
             }
         }
         driver.session.player.set_interact(interact);
-        shared_input.state
+        SharedInput {
+            toggle_flight: shared_input.toggle_flight,
+            interact: shared_input.interact,
+            first_person: shared_input.first_person,
+            state: shared_input.state,
+        }
     };
     // The horizontal distance travelled this tick, for the hand's walk bob: vanilla's
     // `LocalPlayer.move` adds `length(dx, dz) * 0.6` to `ClientAvatarState.walkDist`.
@@ -737,7 +771,7 @@ fn tick_once(
         // Write lock: the player's breaking predicts block changes into the world.
         let mut world = shared.world.write();
         let mut entities = shared.entities.write();
-        driver.end_tick(&input, &mut *world, &mut *entities)?;
+        driver.end_tick(&input.state, &mut *world, &mut *entities)?;
         let mut dirty = world.take_dirty_sections();
         if !dirty.is_empty() {
             shared.dirty.lock().append(&mut dirty);
@@ -782,6 +816,12 @@ fn tick_once(
     for p in ui_out {
         driver.queue(p);
     }
+    // The per-tick camera effects (FOV modifier smoothing and the hurt and death counters;
+    // the render thread interpolates them per frame). The view bobbing's walk distance and
+    // bob are the hand's own, ticked below (vanilla's one `ClientAvatarState` serves both).
+    driver
+        .session
+        .tick_camera(Some(shared.data.as_ref()), input.first_person);
     // The first-person hand's tick, in vanilla's order (`LivingEntity.baseTick`, then
     // `Player.tick`, then `FirstPersonHandsAndItems.tick`, with the walk bob in `aiStep` before
     // them); the interaction step above ran the attacks and uses that started the swings. In
@@ -836,10 +876,49 @@ fn tick_once(
     view.has_sky = s.dimension.has_skylight;
     view.block_target = s.player.target();
     view.eye_in_water = s.player.state.eyes_in_water;
+    view.eye_in_lava = eye_in_lava(&shared.world.read(), &shared.data, eye);
     view.held_slot = s.player.held_slot;
     view.first_person = first_person;
-    view.hurt_tilt = s.hurt_tilt_degrees();
+    view.fov_modifier = s.fov_modifier;
+    view.fov_modifier_old = s.old_fov_modifier;
+    // The view bobbing's walk distance and bob are the hand's own (vanilla's one
+    // `ClientAvatarState` ticks both).
+    let (walk_dist_o, walk_dist) = s.player.hand.walk_dist();
+    view.walk_dist = walk_dist;
+    view.walk_dist_o = walk_dist_o;
+    let (bob_o, bob) = s.player.hand.bob();
+    view.bob = bob;
+    view.bob_o = bob_o;
+    view.hurt_ticks = s.hurt_ticks;
+    view.hurt_dir = s.hurt_dir;
+    view.death_ticks = s.death_ticks;
     Ok(())
+}
+
+/// Whether the camera is under the lava surface (vanilla's `Camera.getFluidInCamera` lava
+/// rule: lava at the eye's block whose surface reaches the eye). The surface is the fluid's
+/// own height, or the full block when lava sits directly above (vanilla's `getHeight`); the
+/// comparison is `<=` as vanilla's `offsetPos.y <= height + y`. Vanilla probes the five
+/// near-plane points rather than the eye block alone; that near-plane fan (which needs the
+/// view direction and aspect) is not modelled.
+fn eye_in_lava(world: &World, data: &GameData, eye: DVec3) -> bool {
+    use haste_core::view::{BlockPhysics, FluidKind};
+    let p = BlockPos::new(
+        eye.x.floor() as i32,
+        eye.y.floor() as i32,
+        eye.z.floor() as i32,
+    );
+    let Some(f) = data.fluid(world.block_state(p)) else {
+        return false;
+    };
+    if f.kind != FluidKind::Lava {
+        return false;
+    }
+    let full = data
+        .fluid(world.block_state(p.add(0, 1, 0)))
+        .is_some_and(|a| a.kind == FluidKind::Lava);
+    let surface = p.y as f64 + if full { 1.0 } else { f.height as f64 };
+    eye.y <= surface
 }
 
 #[cfg(test)]
