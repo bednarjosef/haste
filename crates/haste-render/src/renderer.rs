@@ -24,8 +24,31 @@ pub struct Camera {
     pub yaw: f32,
     pub pitch: f32,
     pub fov_deg: f32,
-    /// Camera roll in degrees (hurt tilt; positive rolls the horizon clockwise on screen).
+    /// Camera roll in degrees (a plain horizon roll around the view forward axis).
     pub roll_deg: f32,
+    /// The hurt/death tilts and the view bobbing (vanilla's `GameRenderer.bobHurt`/`bobView`),
+    /// applied in view space between the projection and the view.
+    pub bob: ViewBob,
+}
+
+/// Per-frame view-space camera effects: the pose stack vanilla's `GameRenderer` multiplies
+/// onto the projection matrix (hurt tilt, death roll, then the view-bob translation and
+/// wobble), plus the camera's plain [`Camera::roll_deg`] roll.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ViewBob {
+    /// `bobHurt`: the hurt roll in degrees, applied around the view z-axis rotated
+    /// `hurt_dir_deg` toward the damage direction (vanilla's `hurtDir`).
+    pub hurt_tilt_deg: f32,
+    /// `bobHurt`: the damage direction in degrees.
+    pub hurt_dir_deg: f32,
+    /// `bobHurt`: the death roll in degrees, a plain z-axis rotation.
+    pub death_roll_deg: f32,
+    /// `bobView`: the translation in the camera plane (x right, y up).
+    pub x: f32,
+    pub y: f32,
+    /// `bobView`: the roll and pitch wobble in degrees.
+    pub roll_deg: f32,
+    pub pitch_deg: f32,
 }
 
 /// Sky/fog state for one frame.
@@ -145,6 +168,7 @@ mod tests {
                 pitch: 60.0,
                 fov_deg: 70.0,
                 roll_deg: 0.0,
+                bob: ViewBob::default(),
             },
             entities: &[],
             gui: &haste_core::gui::GuiFrame::default(),
@@ -225,6 +249,84 @@ mod tests {
         assert_eq!(flag.get(), CapturePhase::Ready);
         flag.clone().set(CapturePhase::Failed);
         assert_eq!(flag.get(), CapturePhase::Failed);
+    }
+
+    fn camera_with(bob: ViewBob, roll: f32) -> Camera {
+        Camera {
+            pos: glam::DVec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.0,
+            fov_deg: 70.0,
+            roll_deg: roll,
+            bob,
+        }
+    }
+
+    /// The look direction (Minecraft: yaw 0 = +z, pitch +90 = straight down) lands on view -Z
+    /// at every angle, including straight up and down, where a look-at would degenerate.
+    #[test]
+    fn view_rotation_looks_along_minus_z_at_every_pitch() {
+        for &(yaw, pitch) in &[
+            (0.0f32, 0.0f32),
+            (90.0, 30.0),
+            (-135.0, -60.0),
+            (37.0, 90.0),
+            (37.0, -90.0),
+            (180.0, 89.9),
+        ] {
+            let mut cam = camera_with(ViewBob::default(), 0.0);
+            cam.yaw = yaw;
+            cam.pitch = pitch;
+            let (y, p) = (yaw.to_radians(), pitch.to_radians());
+            let forward = glam::Vec3::new(-p.cos() * y.sin(), -p.sin(), p.cos() * y.cos());
+            let v = Renderer::view_rotation(&cam).transform_vector3(forward);
+            assert!(
+                (v - glam::Vec3::NEG_Z).length() < 1e-5,
+                "{yaw} {pitch}: {v}"
+            );
+            // The camera's right never flips: at yaw 0 the player's left (+x) is view -X.
+            let left = glam::Vec3::new(y.cos(), 0.0, y.sin());
+            let l = Renderer::view_rotation(&cam).transform_vector3(left);
+            assert!(
+                (l - glam::Vec3::NEG_X).length() < 1e-5,
+                "{yaw} {pitch}: {l}"
+            );
+        }
+    }
+
+    #[test]
+    fn view_transform_is_identity_without_effects() {
+        let m = Renderer::view_transform(&camera_with(ViewBob::default(), 0.0));
+        assert!(m.abs_diff_eq(glam::Mat4::IDENTITY, 1e-6));
+    }
+
+    #[test]
+    fn view_transform_bobs_in_the_camera_plane() {
+        // `bobView` translates x right / y up in view space, then rolls about Z and pitches
+        // about X. With only a translation the matrix is that translation.
+        let bob = ViewBob {
+            x: 0.25,
+            y: -0.5,
+            ..ViewBob::default()
+        };
+        let m = Renderer::view_transform(&camera_with(bob, 0.0));
+        let want = glam::Mat4::from_translation(glam::Vec3::new(0.25, -0.5, 0.0));
+        assert!(m.abs_diff_eq(want, 1e-6));
+    }
+
+    #[test]
+    fn view_transform_hurt_tilt_turns_the_roll_axis_by_hurt_dir() {
+        // `bobHurt` rotates the z-roll axis by `-hurtDir`, rolls, then turns back. A 90
+        // degree hurtDir turns the z-roll into a roll about the (rotated) axis.
+        let bob = ViewBob {
+            hurt_tilt_deg: 30.0,
+            hurt_dir_deg: 90.0,
+            ..ViewBob::default()
+        };
+        let m = Renderer::view_transform(&camera_with(bob, 0.0));
+        let r = |axis: glam::Vec3, deg: f32| glam::Mat4::from_axis_angle(axis, deg.to_radians());
+        let want = r(glam::Vec3::Y, -90.0) * r(glam::Vec3::Z, 30.0) * r(glam::Vec3::Y, 90.0);
+        assert!(m.abs_diff_eq(want, 1e-6));
     }
 }
 
@@ -1218,6 +1320,26 @@ impl Renderer {
         }
     }
 
+    /// The pose stack vanilla's `GameRenderer` multiplies onto the projection matrix
+    /// (`renderLevel`: bobHurt, then bobView), plus the camera's plain roll. In view space
+    /// (x right, y up, z back), as rotations about +Z roll the horizon one way.
+    pub(crate) fn view_transform(camera: &Camera) -> glam::Mat4 {
+        let b = camera.bob;
+        let z = glam::Vec3::Z;
+        let y = glam::Vec3::Y;
+        // The plain roll, then the death roll (a plain z-axis rotation), then the hurt
+        // tilt around the z-axis turned by the damage direction.
+        let m = glam::Mat4::from_axis_angle(z, camera.roll_deg.to_radians())
+            * glam::Mat4::from_axis_angle(z, b.death_roll_deg.to_radians())
+            * glam::Mat4::from_axis_angle(y, -b.hurt_dir_deg.to_radians())
+            * glam::Mat4::from_axis_angle(z, b.hurt_tilt_deg.to_radians())
+            * glam::Mat4::from_axis_angle(y, b.hurt_dir_deg.to_radians());
+        // The view bobbing: translate in the camera plane, then roll, then pitch.
+        m * glam::Mat4::from_translation(glam::Vec3::new(b.x, b.y, 0.0))
+            * glam::Mat4::from_axis_angle(z, b.roll_deg.to_radians())
+            * glam::Mat4::from_axis_angle(glam::Vec3::X, b.pitch_deg.to_radians())
+    }
+
     /// A newly uploaded section is drawn until the async walk catches up when a
     /// face-neighbour is in the current mask: vanilla seeds newly loaded
     /// sections into the propagation queue, so they appear before the next
@@ -1246,28 +1368,22 @@ impl Renderer {
     /// produces -1..1, so use perspective_infinite_rh style correction).
     fn view_projection(camera: &Camera, aspect: f32) -> glam::Mat4 {
         let proj = glam::Mat4::perspective_rh(camera.fov_deg.to_radians(), aspect, 0.05, 4096.0);
-        let yaw = camera.yaw.to_radians();
-        let pitch = camera.pitch.to_radians();
-        // Minecraft: yaw 0 = +z (south), pitch positive = down.
-        let forward = glam::Vec3::new(
-            -pitch.cos() * yaw.sin(),
-            -pitch.sin(),
-            pitch.cos() * yaw.cos(),
-        )
-        .normalize();
-        // Roll (hurt tilt): rotate the up vector around the forward axis.
-        let up = if camera.roll_deg == 0.0 {
-            glam::Vec3::Y
-        } else {
-            glam::Quat::from_axis_angle(forward, camera.roll_deg.to_radians()) * glam::Vec3::Y
-        };
         let eye = glam::Vec3::new(
             camera.pos.x as f32,
             camera.pos.y as f32,
             camera.pos.z as f32,
         );
-        let view = glam::Mat4::look_to_rh(eye, forward, up);
-        proj * view
+        let view = Self::view_rotation(camera) * glam::Mat4::from_translation(-eye);
+        proj * Self::view_transform(camera) * view
+    }
+
+    /// The camera's rotation as vanilla builds it (`Camera.setRotation`: a YXZ rotation from yaw
+    /// and pitch, plus the roll), so looking straight up or down (pitch +-90) is exact and never
+    /// flips, unlike a look-at with a fixed up vector. View space looks along -Z.
+    fn view_rotation(camera: &Camera) -> glam::Mat4 {
+        glam::Mat4::from_rotation_z(-camera.roll_deg.to_radians())
+            * glam::Mat4::from_rotation_x(camera.pitch.to_radians())
+            * glam::Mat4::from_rotation_y((camera.yaw + 180.0).to_radians())
     }
 
     /// Frustum culling of sections (Pomme cull.comp reference; CPU here).
@@ -1315,24 +1431,13 @@ impl Renderer {
             // The hand is drawn in view space, like vanilla's `renderItemInHand` from the
             // camera's own view matrix: the hurt tilt roll is included, so the hand rolls with
             // the world (vanilla applies `bobHurt` to the hand as well).
-            let yaw = frame.camera.yaw.to_radians();
-            let pitch = frame.camera.pitch.to_radians();
-            let forward = glam::Vec3::new(
-                -pitch.cos() * yaw.sin(),
-                -pitch.sin(),
-                pitch.cos() * yaw.cos(),
-            )
-            .normalize();
-            let up = if frame.camera.roll_deg == 0.0 {
-                glam::Vec3::Y
-            } else {
-                glam::Quat::from_axis_angle(forward, frame.camera.roll_deg.to_radians())
-                    * glam::Vec3::Y
-            };
-            let view = glam::Mat4::look_to_rh(glam::Vec3::ZERO, forward, up);
+            let view = Self::view_rotation(&frame.camera);
+            // The hand gets the same pose stack as the world view (vanilla's
+            // `renderItemInHand` applies bobHurt and bobView to it too).
+            let m = Self::view_transform(&frame.camera);
             self.entity.prepare_hand(
                 self.first_person.as_ref(),
-                view.inverse(),
+                view.inverse() * m,
                 (frame.camera.yaw, frame.camera.pitch),
                 frame.partial_tick,
                 &mut self.assets,

@@ -7,6 +7,7 @@ use haste_core::{Aabb, BlockPos, BlockStateId, DVec3};
 
 use crate::block_effects;
 use crate::collision::{collide_with_step, no_collision, supporting_block};
+use crate::elytra;
 use crate::{
     fluids, flying, trig, BlockPhysics, FluidKind, PlayerAttributes, PlayerState, Pose, TickResult,
 };
@@ -181,9 +182,15 @@ pub fn tick(
     if state.flying {
         flying::travel(state, input, impulse, attrs, world, shapes, blocks);
     } else if state.in_water {
+        // vanilla `LivingEntity.travel`: the fluid branch wins over gliding (entering water
+        // switches a glider to swim physics; the server clears the flag separately).
         fluids::travel_water(state, input, impulse, attrs, world, shapes, blocks);
     } else if state.in_lava {
         fluids::travel_lava(state, input, impulse, attrs, world, shapes, blocks);
+    } else if state.fall_flying {
+        // vanilla `LivingEntity.travel` -> `travelFallFlying`. No effects are modelled, so the
+        // slow-falling gravity clamp is passed `false` (see `elytra`).
+        elytra::travel(state, attrs, world, shapes, blocks, false);
     } else {
         travel_normal(state, impulse, attrs, world, shapes, blocks);
     }
@@ -298,9 +305,12 @@ fn update_player_pose(
     if !fits(Pose::Swimming) {
         return;
     }
-    // Vanilla `Player.getDesiredPose` (the physics subset: swimming, crouch, standing).
+    // Vanilla `Player.getDesiredPose` (the physics subset: swimming, fall flying, crouch,
+    // standing): swimming wins, then the shared flag 7's fall-flying pose, then the crouch.
     let desired = if state.swimming {
         Pose::Swimming
+    } else if state.fall_flying {
+        Pose::FallFlying
     } else if state.sneaking && !state.flying {
         Pose::Crouching
     } else {
@@ -523,6 +533,14 @@ pub(crate) fn move_entity(
     shapes: &dyn CollisionShapes,
     blocks: &dyn BlockPhysics,
 ) -> DVec3 {
+    // Vanilla `Entity.move`'s noPhysics branch (`Player.tick` sets it in spectator): add the
+    // motion without collision and report no collisions.
+    if state.no_physics {
+        state.pos += motion;
+        state.horizontal_collision = false;
+        state.vertical_collision = false;
+        return motion;
+    }
     let aabb = state.aabb(attrs);
     let mut motion = block_effects::consume_stuck_multiplier(state, motion);
     if state.sneaking

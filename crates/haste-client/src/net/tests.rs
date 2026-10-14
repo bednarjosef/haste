@@ -102,6 +102,10 @@ impl EntitySink for FakeEntities {
     fn set_velocity(&mut self, id: EntityId, v: DVec3) {
         self.log.push(format!("velocity {} {}", id.0, v.y));
     }
+    fn swing(&mut self, id: EntityId, hand: i32, animation: i32, duration: i32) {
+        self.log
+            .push(format!("swing {} {hand} {animation} {duration}", id.0));
+    }
     fn mark_hurt(&mut self, id: EntityId) {
         self.log.push(format!("hurt {}", id.0));
     }
@@ -335,6 +339,18 @@ fn entity_packets_reach_the_store() {
 }
 
 #[test]
+fn swing_animation_reaches_the_store() {
+    let mut r = Rig::new();
+    r.apply(ClientboundPlay::SwingAnimation(cb::SwingAnimation {
+        entity_id: 3,
+        hand: 0,
+        animation: 1,
+        duration: 6,
+    }));
+    assert_eq!(r.entities.log, ["swing 3 0 1 6"]);
+}
+
+#[test]
 fn teleport_is_accepted_one_tick_later_then_movement_follows() {
     let mut r = Rig::new();
     // Nothing is sent before the first teleport.
@@ -496,7 +512,7 @@ fn real_world_through_the_sink() {
 }
 
 #[test]
-fn hurt_animation_marks_and_tilts() {
+fn hurt_animation_marks_and_starts_the_hurt_ticks() {
     let mut r = Rig::new();
     // Another entity's hurt: marked, no camera tilt.
     r.apply(ClientboundPlay::HurtAnimation(cb::HurtAnimation {
@@ -504,52 +520,192 @@ fn hurt_animation_marks_and_tilts() {
         yaw: 0.0,
     }));
     assert!(r.entities.log.iter().any(|l| l == "hurt 42"));
-    assert_eq!(r.session.hurt_tilt_degrees(), 0.0);
-    // Our own hurt (session id 7): the tilt starts and eases out over 10 ticks.
+    assert_eq!(r.session.hurt_ticks, 0);
+    // Our own hurt (session id 7): the hurt time starts at 10 and counts down per tick.
     r.apply(ClientboundPlay::HurtAnimation(cb::HurtAnimation {
         entity_id: 7,
         yaw: 0.0,
     }));
-    assert_eq!(r.session.hurt_tilt_degrees().abs(), 14.0);
-    // 5 ticks in: (5/10)^2 of 14 degrees.
+    assert_eq!(r.session.hurt_ticks, 10);
     for _ in 0..5 {
         end_tick_once(&mut r);
     }
-    let half = r.session.hurt_tilt_degrees().abs();
-    assert!((half - 14.0 * 0.25).abs() < 1e-6, "{half}");
-    // 10 ticks in: gone.
+    assert_eq!(r.session.hurt_ticks, 5);
     for _ in 0..5 {
         end_tick_once(&mut r);
     }
-    assert_eq!(r.session.hurt_tilt_degrees(), 0.0);
-    // A second hurt restarts the tilt.
+    assert_eq!(r.session.hurt_ticks, 0);
+    // A second hurt restarts it.
     r.apply(ClientboundPlay::HurtAnimation(cb::HurtAnimation {
         entity_id: 7,
         yaw: 0.0,
     }));
-    assert_eq!(r.session.hurt_tilt_degrees().abs(), 14.0);
+    assert_eq!(r.session.hurt_ticks, 10);
 }
 
 #[test]
 fn hurt_tilt_direction_follows_the_damage_yaw() {
     let mut r = Rig::new();
-    // Damage from the player's right (yaw 90 degrees off our facing) rolls the other way
-    // than damage from the left.
-    r.session.player.state.yaw = 0.0;
+    // The packet's yaw is the roll axis direction, taken as-is (vanilla's hurtDir).
     r.apply(ClientboundPlay::HurtAnimation(cb::HurtAnimation {
         entity_id: 7,
         yaw: 90.0,
     }));
-    let right = r.session.hurt_tilt_degrees();
+    assert_eq!(r.session.hurt_dir, 90.0);
     let mut r2 = Rig::new();
-    r2.session.player.state.yaw = 0.0;
     r2.apply(ClientboundPlay::HurtAnimation(cb::HurtAnimation {
         entity_id: 7,
         yaw: -90.0,
     }));
-    let left = r2.session.hurt_tilt_degrees();
-    assert!(right * left < 0.0, "opposite rolls: {right} vs {left}");
-    assert!((right.abs() - 14.0).abs() < 1e-6);
+    assert_eq!(r2.session.hurt_dir, -90.0);
+}
+
+#[test]
+fn death_ticks_count_while_health_is_zero() {
+    let mut r = Rig::new();
+    r.apply(ClientboundPlay::SetHealth(cb::SetHealth {
+        health: 0.0,
+        food: 20,
+        saturation: 5.0,
+    }));
+    end_tick_once(&mut r);
+    assert_eq!(r.session.death_ticks, 1);
+    end_tick_once(&mut r);
+    assert_eq!(r.session.death_ticks, 2);
+    // Healing resets the counter.
+    r.apply(ClientboundPlay::SetHealth(cb::SetHealth {
+        health: 20.0,
+        food: 20,
+        saturation: 5.0,
+    }));
+    end_tick_once(&mut r);
+    assert_eq!(r.session.death_ticks, 0);
+}
+
+#[test]
+fn fov_modifier_target_matches_vanilla() {
+    use crate::net::UseItemKind as K;
+    // Walking: the attribute equals the walking speed.
+    assert_eq!(
+        fov_modifier_target(false, 0.1, 0.1, None, 0, false, 1.0),
+        1.0
+    );
+    // Sprinting: the attribute carries the x1.3 sprinting modifier.
+    assert_eq!(
+        fov_modifier_target(false, 0.13, 0.1, None, 0, false, 1.0),
+        1.15
+    );
+    // Flying: x1.1; sprint-flying compounds.
+    assert_eq!(
+        fov_modifier_target(true, 0.1, 0.1, None, 0, false, 1.0),
+        1.1
+    );
+    assert_eq!(
+        fov_modifier_target(true, 0.13, 0.1, None, 0, false, 1.0),
+        1.265
+    );
+    // The effect scale lerps between 1 and the modifier.
+    assert_eq!(
+        fov_modifier_target(false, 0.13, 0.1, None, 0, false, 0.5),
+        1.075
+    );
+    assert_eq!(
+        fov_modifier_target(false, 0.13, 0.1, None, 0, false, 0.0),
+        1.0
+    );
+    // A zero walking speed skips the speed factor (vanilla's guard).
+    assert_eq!(
+        fov_modifier_target(false, 0.13, 0.0, None, 0, false, 1.0),
+        1.0
+    );
+    // The bow draw: 1 - min(ticks/20, 1)^2 * 0.15.
+    assert!(
+        (fov_modifier_target(false, 0.1, 0.1, Some(K::Bow), 20, false, 1.0) - 0.85).abs() < 1e-6
+    );
+    assert!(
+        (fov_modifier_target(false, 0.1, 0.1, Some(K::Bow), 10, false, 1.0) - (1.0 - 0.25 * 0.15))
+            .abs()
+            < 1e-6
+    );
+    // The spyglass is a full 0.1 in first person, whatever the effect scale; in third
+    // person it does nothing.
+    assert_eq!(
+        fov_modifier_target(false, 0.1, 0.1, Some(K::Spyglass), 5, true, 1.0),
+        0.1
+    );
+    assert_eq!(
+        fov_modifier_target(false, 0.1, 0.1, Some(K::Spyglass), 5, true, 0.0),
+        0.1
+    );
+    assert_eq!(
+        fov_modifier_target(false, 0.1, 0.1, Some(K::Spyglass), 5, false, 1.0),
+        1.0
+    );
+}
+
+#[test]
+fn fov_modifier_smooths_by_half_a_tick_and_clamps() {
+    let mut r = Rig::new();
+    // From vanilla's initial 0: 0.5, 0.75, 0.875, ... towards the walking target of 1.
+    for want in [0.5, 0.75, 0.875] {
+        end_tick_once(&mut r);
+        assert!(
+            (r.session.fov_modifier - want).abs() < 1e-6,
+            "{}",
+            r.session.fov_modifier
+        );
+    }
+    // Sprinting (target 1.15) from 1.0: 1.075.
+    r.session.fov_modifier = 1.0;
+    r.session.old_fov_modifier = 1.0;
+    r.session.player.attrs.movement_speed = 0.13;
+    end_tick_once(&mut r);
+    assert!((r.session.fov_modifier - 1.075).abs() < 1e-6);
+    // The clamp holds the upper bound however large the target.
+    r.session.player.attrs.movement_speed = 100.0;
+    for _ in 0..50 {
+        end_tick_once(&mut r);
+    }
+    assert_eq!(r.session.fov_modifier, 1.5);
+    // A zero movement speed gives speedFactor 0, so the target is (0/0.1 + 1)/2 = 0.5, not 0:
+    // smoothing approaches 0.5 (the lower clamp 0.1 only matters for the spyglass target).
+    r.session.player.attrs.movement_speed = 0.0;
+    for _ in 0..50 {
+        end_tick_once(&mut r);
+    }
+    assert!(
+        (r.session.fov_modifier - 0.5).abs() < 1e-6,
+        "{}",
+        r.session.fov_modifier
+    );
+}
+
+#[test]
+fn use_ticks_count_the_held_draw_and_reset_on_release_or_item_change() {
+    let mut r = Rig::new();
+    use haste_core::input::InteractInput;
+    r.session.player.set_interact(InteractInput {
+        use_item: true,
+        ..Default::default()
+    });
+    r.session.player.int.hotbar[0].item = Some(RegistryIndex(3));
+    r.session.player.held_slot = 0;
+    end_tick_once(&mut r);
+    assert_eq!(r.session.use_ticks, 1);
+    end_tick_once(&mut r);
+    assert_eq!(r.session.use_ticks, 2);
+    // Releasing the button ends the draw.
+    r.session.player.set_interact(InteractInput::default());
+    end_tick_once(&mut r);
+    assert_eq!(r.session.use_ticks, 0);
+    // Holding again with a different item restarts it.
+    r.session.player.set_interact(InteractInput {
+        use_item: true,
+        ..Default::default()
+    });
+    r.session.player.int.hotbar[0].item = Some(RegistryIndex(4));
+    end_tick_once(&mut r);
+    assert_eq!(r.session.use_ticks, 1);
 }
 
 #[test]
@@ -570,7 +726,8 @@ fn damage_event_and_death_mark_entities() {
     assert!(r.entities.log.iter().any(|l| l == "dead 42"));
 }
 
-/// One session tick (the part of `NetDriver::end_tick` that lives in `Session`).
+/// One session tick: the driver's `end_tick` part that lives in `Session`, then the per-tick
+/// camera effects (`tick_camera`; the game thread's `tick_once` does the same two steps).
 fn end_tick_once(r: &mut Rig) {
     let mut out = Vec::new();
     let mut world = std::mem::take(&mut r.world);
@@ -581,6 +738,7 @@ fn end_tick_once(r: &mut Rig) {
         &entities,
         &mut out,
     );
+    r.session.tick_camera(None, false);
     r.world = world;
     r.entities = entities;
     r.out.extend(out);
@@ -815,4 +973,79 @@ fn level_particles_with_an_unknown_type_id_are_dropped() {
     // No id 7 in the static registry: dropped silently (no panic, nothing queued).
     r.apply(level_particles(7, 10));
     assert_eq!(r.session.particle_spawns.len(), 0);
+}
+
+/// The attached firework rocket's push (vanilla `FireworkRocketEntity.tick`): the rocket is
+/// tracked by its entity data (index 9, the attached-to id) and its push is applied before the
+/// gliding player's tick.
+#[test]
+fn an_attached_firework_boosts_the_gliding_player() {
+    use haste_core::entity::MetadataValue;
+    let mut r = Rig::new();
+    r.session
+        .set_entity_type_names(names(&["player", "firework_rocket"]));
+    r.apply(spawn_packet_kind(20, DVec3::new(0.0, 100.0, 0.0), 1)); // firework_rocket
+                                                                    // The rocket's attached-to target is us (entity 7): `OPTIONAL_UNSIGNED_INT` (type 19), a
+                                                                    // VarInt of id + 1 = 8.
+    r.apply(ClientboundPlay::SetEntityData(cb::SetEntityData {
+        entity_id: 20,
+        metadata: vec![MetadataEntry {
+            index: 9,
+            value: MetadataValue::Other {
+                type_id: 19,
+                raw: bytes::Bytes::from(vec![8u8]),
+            },
+        }],
+    }));
+    assert_eq!(r.session.attached_firework, Some(EntityId(20)));
+
+    // Gliding: the push is `v = look * 0.85` from rest = (0, 0, 0.85) at yaw 0, pitch 0. The
+    // player is not loaded, so the physics step does not run to change it.
+    r.session.player.state.fall_flying = true;
+    r.session.player.state.velocity = DVec3::ZERO;
+    r.session.player.state.yaw = 0.0;
+    r.session.player.state.pitch = 0.0;
+    end_tick_once(&mut r);
+    assert!(
+        (r.session.player.state.velocity.z - 0.85).abs() < 1e-9,
+        "{:?}",
+        r.session.player.state.velocity
+    );
+
+    // Attached but not gliding: vanilla applies no push.
+    r.session.player.state.velocity = DVec3::ZERO;
+    r.session.player.state.fall_flying = false;
+    end_tick_once(&mut r);
+    assert_eq!(r.session.player.state.velocity.z, 0.0);
+
+    // A rocket that is not ours (attached-to id 0 = empty) does not attach to us.
+    r.session.attached_firework = None;
+    r.apply(ClientboundPlay::SetEntityData(cb::SetEntityData {
+        entity_id: 20,
+        metadata: vec![MetadataEntry {
+            index: 9,
+            value: MetadataValue::Other {
+                type_id: 19,
+                raw: bytes::Bytes::from(vec![0u8]),
+            },
+        }],
+    }));
+    assert_eq!(r.session.attached_firework, None);
+
+    // Removing the rocket clears the attachment.
+    r.apply(ClientboundPlay::SetEntityData(cb::SetEntityData {
+        entity_id: 20,
+        metadata: vec![MetadataEntry {
+            index: 9,
+            value: MetadataValue::Other {
+                type_id: 19,
+                raw: bytes::Bytes::from(vec![8u8]),
+            },
+        }],
+    }));
+    assert_eq!(r.session.attached_firework, Some(EntityId(20)));
+    r.apply(ClientboundPlay::RemoveEntities(cb::RemoveEntities {
+        entity_ids: vec![20],
+    }));
+    assert_eq!(r.session.attached_firework, None);
 }
