@@ -348,13 +348,6 @@ pub struct Session {
     /// and `oldFovModifier`; both start at 0, so the FOV widens over the first ticks).
     pub fov_modifier: f32,
     pub old_fov_modifier: f32,
-    /// Walk distance and its value one tick ago (vanilla's `ClientAvatarState.walkDist` /
-    /// `walkDistO`), for the view bobbing.
-    pub walk_dist: f32,
-    pub walk_dist_o: f32,
-    /// The bob amount and its value one tick ago (vanilla's `ClientAvatarState.bob` / `bobO`).
-    pub bob: f32,
-    pub bob_o: f32,
     /// Hurt ticks left (vanilla's `hurtTime`, 10 per hit) and the damage direction in degrees
     /// (vanilla's `hurtDir`, the `hurt_animation` packet's yaw).
     pub hurt_ticks: u32,
@@ -388,10 +381,6 @@ impl Session {
             fov_effect_scale: 1.0,
             fov_modifier: 0.0,
             old_fov_modifier: 0.0,
-            walk_dist: 0.0,
-            walk_dist_o: 0.0,
-            bob: 0.0,
-            bob_o: 0.0,
             hurt_ticks: 0,
             hurt_dir: 0.0,
             death_ticks: 0,
@@ -400,13 +389,13 @@ impl Session {
         }
     }
 
-// MERGE(camera-fov-bob side):
     /// `hurt_animation` for our own entity id: the hurt tilt runs for 10 ticks, its roll axis
     /// turned by the packet's damage-direction yaw (vanilla's `animateHurt` setting `hurtDir`).
     fn start_hurt_tilt(&mut self, damage_yaw: f32) {
         self.hurt_dir = damage_yaw;
         self.hurt_ticks = crate::net::HURT_TILT_TICKS;
-// MERGE(main side):
+    }
+
     /// Sets the `minecraft:entity_type` registry entries in id order: the synced registry when
     /// the server sent one, else the static one from the game data (`registries.json`). The
     /// two agree on vanilla servers (both are the registry's own order); mods that add entity
@@ -415,21 +404,12 @@ impl Session {
         self.entity_type_names = names;
     }
 
-    /// The hurt-tilt camera roll in degrees for the remaining tilt ticks, easing out over
-    /// the 10 ticks from vanilla's maximum of 14 degrees. 0 after 10 ticks.
-    pub fn hurt_tilt_degrees(&self) -> f32 {
-        const MAX_DEGREES: f32 = 14.0;
-        let left = self.hurt_tilt_ticks.min(crate::net::HURT_TILT_TICKS) as f32
-            / crate::net::HURT_TILT_TICKS as f32;
-        self.hurt_tilt_dir * MAX_DEGREES * left * left
-// MERGE end
-    }
-
-    /// One 20 Hz tick of the camera effects (vanilla's `Camera.tick`, `ClientAvatarState.tick`,
-    /// `Player.aiStep`'s bob update and `LivingEntity.tick`'s hurt/death counters): the FOV
-    /// modifier target and its smoothing, the walk distance and bob for the view bobbing, and
-    /// the hurt and death counters. Called by the game thread after `end_tick` (the headless
-    /// path has no camera and skips it).
+    /// One 20 Hz tick of the camera effects (vanilla's `Camera.tick`, plus `LivingEntity.tick` /
+    /// `tickDeath`'s hurt and death counters): the FOV modifier target and its smoothing, and
+    /// the hurt and death counters. The walk distance and bob for the view bobbing are the
+    /// player hand's own (vanilla's one `ClientAvatarState` serves the hand and the camera
+    /// alike). Called by the game thread after `end_tick` (the headless path has no camera and
+    /// skips it).
     pub fn tick_camera(&mut self, data: Option<&GameData>, first_person: bool) {
         let p = &self.player;
         // The drawn item: the held stack while the use button is down. A change of the held
@@ -469,25 +449,6 @@ impl Session {
         self.old_fov_modifier = self.fov_modifier;
         self.fov_modifier =
             (self.fov_modifier + (target - self.fov_modifier) * 0.5).clamp(0.1, 1.5);
-
-        // Walk distance: vanilla adds |deltaX, deltaZ| * 0.6 per move (LocalPlayer.move).
-        let prev = p.prev_pos();
-        let dx = p.state.pos.x - prev.x;
-        let dz = p.state.pos.z - prev.z;
-        self.walk_dist_o = self.walk_dist;
-        self.walk_dist += (dx * dx + dz * dz).sqrt() as f32 * 0.6;
-
-// MERGE(camera-fov-bob side):
-        // Bob: min(0.1, horizontal speed) on the ground while alive and not swimming, else 0,
-        // eased towards by 0.4 per tick (AbstractClientPlayer.aiStep's updateBob).
-        let t_bob = if p.state.on_ground && p.health > 0.0 && !p.state.swimming {
-            let v = p.state.velocity;
-            (v.x * v.x + v.z * v.z).sqrt().min(0.1)
-        } else {
-            0.0
-        };
-        self.bob_o = self.bob;
-        self.bob += (t_bob as f32 - self.bob) * 0.4;
 
         // Hurt and death counters (LivingEntity.tick / tickDeath).
         self.hurt_ticks = self.hurt_ticks.saturating_sub(1);
@@ -560,7 +521,6 @@ pub fn fov_modifier_target(
 }
 
 impl Session {
-// MERGE(main side):
     /// Our seat on `vehicle` if this passenger list names us, else `None` (we are not riding
     /// it): vanilla's `Entity.positionRider` for the local player. The seat order comes from
     /// the list, and the vehicle's attachment points from its type in the entity_type registry.
@@ -588,7 +548,6 @@ impl Session {
         }))
     }
 
-// MERGE end
     /// Applies one clientbound packet; serverbound replies go to `out`.
     pub fn apply<W: WorldSink + ?Sized, E: EntitySink + ?Sized>(
         &mut self,

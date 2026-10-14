@@ -650,44 +650,6 @@ fn fov_modifier_smooths_by_half_a_tick_and_clamps() {
 }
 
 #[test]
-fn bob_follows_horizontal_speed_on_the_ground_only() {
-    let mut r = Rig::new();
-    // On the ground moving at 0.05: the bob eases towards min(0.1, 0.05) by 0.4 per tick.
-    r.session.player.state.on_ground = true;
-    r.session.player.state.velocity = glam::DVec3::new(0.03, 0.0, 0.04);
-    end_tick_once(&mut r);
-    assert!((r.session.bob - 0.02).abs() < 1e-6, "{}", r.session.bob);
-    assert_eq!(r.session.bob_o, 0.0);
-    // In the air the target is 0.
-    r.session.player.state.on_ground = false;
-    end_tick_once(&mut r);
-    assert!((r.session.bob - 0.012).abs() < 1e-6, "{}", r.session.bob);
-    // Swimming also stops it.
-    r.session.player.state.on_ground = true;
-    r.session.player.state.swimming = true;
-    end_tick_once(&mut r);
-    assert!((r.session.bob - 0.0072).abs() < 1e-6, "{}", r.session.bob);
-}
-
-#[test]
-fn walk_distance_grows_by_sixtenths_of_the_tick_displacement() {
-    let mut r = Rig::new();
-    // The tick snapshots the start position into `prev_pos`; the camera step that follows the
-    // move (the game thread's order) sees the displacement. A tick in place adds nothing.
-    r.session.player.state.pos = glam::DVec3::new(3.0, 64.0, 0.0);
-    end_tick_once(&mut r);
-    assert_eq!(r.session.walk_dist, 0.0);
-    r.session.player.state.pos = glam::DVec3::new(6.0, 64.0, 0.0);
-    r.session.tick_camera(None, false);
-    assert!(
-        (r.session.walk_dist - 1.8).abs() < 1e-6,
-        "{}",
-        r.session.walk_dist
-    );
-    assert_eq!(r.session.walk_dist_o, 0.0);
-}
-
-#[test]
 fn use_ticks_count_the_held_draw_and_reset_on_release_or_item_change() {
     let mut r = Rig::new();
     use haste_core::input::InteractInput;

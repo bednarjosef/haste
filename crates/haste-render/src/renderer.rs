@@ -1255,7 +1255,6 @@ impl Renderer {
         }
     }
 
-// MERGE(camera-fov-bob side):
     /// The pose stack vanilla's `GameRenderer` multiplies onto the projection matrix
     /// (`renderLevel`: bobHurt, then bobView), plus the camera's plain roll. In view space
     /// (x right, y up, z back), as rotations about +Z roll the horizon one way.
@@ -1274,7 +1273,8 @@ impl Renderer {
         m * glam::Mat4::from_translation(glam::Vec3::new(b.x, b.y, 0.0))
             * glam::Mat4::from_axis_angle(z, b.roll_deg.to_radians())
             * glam::Mat4::from_axis_angle(glam::Vec3::X, b.pitch_deg.to_radians())
-// MERGE(main side):
+    }
+
     /// A newly uploaded section is drawn until the async walk catches up when a
     /// face-neighbour is in the current mask: vanilla seeds newly loaded
     /// sections into the propagation queue, so they appear before the next
@@ -1296,7 +1296,6 @@ impl Renderer {
                 return;
             }
         }
-// MERGE end
     }
 
     /// Build the view-projection matrix (right-handed, OpenGL-style depth like
@@ -1382,25 +1381,16 @@ impl Renderer {
                     * glam::Vec3::Y
             };
             let view = glam::Mat4::look_to_rh(glam::Vec3::ZERO, forward, up);
-            self.entity.prepare_hand(
-                self.first_person.as_ref(),
-                view.inverse(),
-                (frame.camera.yaw, frame.camera.pitch),
-                frame.partial_tick,
-                &mut self.assets,
-            );
-// MERGE(camera-fov-bob side):
-            let view = glam::Mat4::look_to_rh(glam::Vec3::ZERO, forward, glam::Vec3::Y);
             // The hand gets the same pose stack as the world view (vanilla's
             // `renderItemInHand` applies bobHurt and bobView to it too).
             let m = Self::view_transform(&frame.camera);
             self.entity.prepare_hand(
                 self.first_person.as_ref(),
                 view.inverse() * m,
+                (frame.camera.yaw, frame.camera.pitch),
+                frame.partial_tick,
                 &mut self.assets,
             );
-// MERGE(main side):
-// MERGE end
         }
         self.overlay.prepare(
             frame.camera.pos,

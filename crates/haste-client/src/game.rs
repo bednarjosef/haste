@@ -773,13 +773,12 @@ fn tick_once(
     for p in ui_out {
         driver.queue(p);
     }
-// MERGE(camera-fov-bob side):
-    // The per-tick camera effects (FOV modifier smoothing, walk distance and bob, hurt and
-    // death counters); the render thread interpolates them per frame.
+    // The per-tick camera effects (FOV modifier smoothing and the hurt and death counters;
+    // the render thread interpolates them per frame). The view bobbing's walk distance and
+    // bob are the hand's own, ticked below (vanilla's one `ClientAvatarState` serves both).
     driver
         .session
         .tick_camera(Some(shared.data.as_ref()), input.first_person);
-// MERGE(main side):
     // The first-person hand's tick, in vanilla's order (`LivingEntity.baseTick`, then
     // `Player.tick`, then `FirstPersonHandsAndItems.tick`, with the walk bob in `aiStep` before
     // them); the interaction step above ran the attacks and uses that started the swings. In
@@ -802,7 +801,6 @@ fn tick_once(
         fp.with_hand(hand);
         Some(fp)
     };
-// MERGE end
     let s = &driver.session;
     let (prev_eye, prev_yaw, prev_pitch) = s.player.camera(0.0);
     let (eye, yaw, pitch) = s.player.camera(1.0);
@@ -840,10 +838,14 @@ fn tick_once(
     view.first_person = first_person;
     view.fov_modifier = s.fov_modifier;
     view.fov_modifier_old = s.old_fov_modifier;
-    view.walk_dist = s.walk_dist;
-    view.walk_dist_o = s.walk_dist_o;
-    view.bob = s.bob;
-    view.bob_o = s.bob_o;
+    // The view bobbing's walk distance and bob are the hand's own (vanilla's one
+    // `ClientAvatarState` ticks both).
+    let (walk_dist_o, walk_dist) = s.player.hand.walk_dist();
+    view.walk_dist = walk_dist;
+    view.walk_dist_o = walk_dist_o;
+    let (bob_o, bob) = s.player.hand.bob();
+    view.bob = bob;
+    view.bob_o = bob_o;
     view.hurt_ticks = s.hurt_ticks;
     view.hurt_dir = s.hurt_dir;
     view.death_ticks = s.death_ticks;

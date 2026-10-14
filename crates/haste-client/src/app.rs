@@ -135,15 +135,8 @@ impl Session {
         // The saved render distance is what we advertise in client_information; the server's
         // own view distance (login packet) caps what we mesh below.
         opts.client_information.view_distance = options.render_distance as i8;
-// MERGE(camera-fov-bob side):
         let mut driver: NetDriver = rt.block_on(NetDriver::connect(opts))?;
         driver.session.fov_effect_scale = options.fov_effect_scale;
-        let regs = driver.connection().registries();
-        let biomes = net::synced_biome_count(regs).unwrap_or(64);
-        let biome_climates = biomes::biome_climates(regs);
-        let login = driver.login();
-// MERGE(main side):
-        let driver: NetDriver = rt.block_on(NetDriver::connect(opts))?;
         let (biomes, biome_climates, type_names, sounds) = {
             let regs = driver.connection().registries();
             let sounds = if sound {
@@ -159,7 +152,6 @@ impl Session {
             )
         };
         let login = driver.login().clone();
-// MERGE end
         let local = (login.entity_id, login.profile.uuid.as_u128());
         tracing::info!(
             "joined {address} as {}: {:?}, dimension {}, view distance {}",
@@ -995,8 +987,9 @@ impl InputRouter {
     }
 
     /// Copy the sampled state into the shared input the game thread reads each tick, and
-    /// consume the press-only actions.
-    fn sample(&mut self, shared: &Shared) {
+    /// consume the press-only actions. `perspective` is the camera's own: the game thread's
+    /// camera effects that are gated on it (the spyglass FOV) only apply in first person.
+    fn sample(&mut self, shared: &Shared, perspective: game::Perspective) {
         let k = |c: KeyCode| self.keys.contains(&c);
         let state = InputState {
             forward: k(KeyCode::KeyW),
@@ -1011,6 +1004,7 @@ impl InputRouter {
         };
         let mut shared_input = shared.input.lock();
         shared_input.state = state;
+        shared_input.first_person = matches!(perspective, game::Perspective::FirstPerson);
         shared_input.toggle_flight |= std::mem::take(&mut self.toggle_flight);
         let i = &mut shared_input.interact;
         i.attack = self.attack;
@@ -1338,7 +1332,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 }
             }
             // The actions may have changed what the game thread sees this tick.
-            input.sample(&shared);
+            input.sample(&shared, game::Perspective::FirstPerson);
             view = *shared.view.lock();
         }
         if shared.is_closed() {
@@ -1354,7 +1348,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             game::Perspective::FirstPerson,
             look.0,
             look.1,
-            session.options.fov as f32,
+            &session.options,
             Instant::now(),
         );
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
@@ -1971,56 +1965,8 @@ impl App {
     }
 
     fn release_keys(&mut self) {
-// MERGE(camera-fov-bob side):
-        self.keys.clear();
-        self.attack = false;
-        self.use_item = false;
-        self.last_jump_press = None;
-        self.sample_input();
-    }
-
-    fn sample_input(&mut self) {
-        let k = |c| self.keys.contains(&c);
-        self.input = InputState {
-            forward: k(KeyCode::KeyW),
-            back: k(KeyCode::KeyS),
-            left: k(KeyCode::KeyA),
-            right: k(KeyCode::KeyD),
-            jump: k(KeyCode::Space),
-            sneak: k(KeyCode::ShiftLeft),
-            sprint: k(KeyCode::ControlLeft),
-            yaw: self.yaw,
-            pitch: self.pitch,
-        };
-        let mut shared = self.shared.input.lock();
-        shared.state = self.input;
-        shared.first_person = matches!(self.perspective, game::Perspective::FirstPerson);
-        shared.toggle_flight |= std::mem::take(&mut self.toggle_flight);
-        let i = &mut shared.interact;
-        i.attack = self.attack;
-        i.use_item = self.use_item;
-        i.pick_block |= std::mem::take(&mut self.pick_block);
-        i.drop_item |= std::mem::take(&mut self.drop_item);
-        i.drop_stack |= std::mem::take(&mut self.drop_stack);
-        i.swap_offhand |= std::mem::take(&mut self.swap_offhand);
-        if let Some(slot) = self.hotbar.take() {
-            i.hotbar = Some(slot);
-        }
-    }
-
-    /// Jump pressed: a second press within vanilla's 7-tick window toggles flight.
-    fn jump_pressed(&mut self, now: Instant) {
-        match self.last_jump_press {
-            Some(t) if now.duration_since(t) < DOUBLE_TAP => {
-                self.toggle_flight = true;
-                self.last_jump_press = None;
-            }
-            _ => self.last_jump_press = Some(now),
-        }
-// MERGE(main side):
         self.input.release();
-        self.input.sample(&self.shared);
-// MERGE end
+        self.input.sample(&self.shared, self.perspective);
     }
 
     /// Mouse look speed from the saved sensitivity.
@@ -2032,7 +1978,7 @@ impl App {
         if self.renderer.is_none() {
             return;
         }
-        self.input.sample(&self.shared);
+        self.input.sample(&self.shared, self.perspective);
         // The screen that opened or closed since the last frame takes or frees the cursor,
         // and "Disconnect" ends the run.
         self.sync_grab();
@@ -2042,15 +1988,9 @@ impl App {
         let (camera, sky, partial, vd, animation_tick) = frame_view(
             &self.shared,
             self.perspective,
-// MERGE(camera-fov-bob side):
-            self.yaw,
-            self.pitch,
-            &self.options,
-// MERGE(main side):
             self.input.yaw,
             self.input.pitch,
-            self.options.fov as f32,
-// MERGE end
+            &self.options,
             Instant::now(),
         );
         self.feed
