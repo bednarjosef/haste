@@ -86,6 +86,8 @@ pub struct FrameStats {
     pub chunk_sections_total: u32,
     pub meshes_pending: u32,
     pub draw_calls: u32,
+    /// Block entities drawn this frame (chests, shulker boxes; one batched draw with entities).
+    pub block_entities_drawn: u32,
     /// Section meshes uploaded this frame (one per finished mesh written to the arenas).
     pub uploads: u32,
     /// Vertex+index bytes written by this frame's uploads.
@@ -96,6 +98,8 @@ pub struct FrameStats {
 pub struct FrameInput<'a> {
     pub camera: Camera,
     pub entities: &'a [haste_core::model::EntityInstance],
+    /// Block entities to draw (chests, shulker boxes; see `blockentity`).
+    pub block_entities: &'a [crate::blockentity::BlockEntityInstance],
     pub gui: &'a haste_core::gui::GuiFrame,
     pub sky: SkyState,
     pub partial_tick: f32,
@@ -188,6 +192,7 @@ mod tests {
                 bob: ViewBob::default(),
             },
             entities: &[],
+            block_entities: &[],
             gui: &haste_core::gui::GuiFrame::default(),
             sky: SkyState {
                 time_of_day: 6000,
@@ -492,6 +497,8 @@ pub struct Renderer {
     surface_copy: bool,
     /// Whether the F2 capture path of this surface was logged (once per renderer).
     surface_copy_logged: bool,
+    /// Block entities posed into the entity stream this frame (chests, shulker boxes).
+    block_entities_drawn: u32,
 }
 
 /// An in-flight screenshot readback: the copy is submitted and `map_async` posted, the
@@ -957,6 +964,7 @@ impl Renderer {
             capture: None,
             surface_copy: false,
             surface_copy_logged: false,
+            block_entities_drawn: 0,
         })
     }
 
@@ -1844,6 +1852,39 @@ impl Renderer {
             }
         }
 
+        // Block entities (chests, shulker boxes) join the entity vertex stream, culled like the
+        // sections: the frustum plus the visible mask (and the newly uploaded bonus sections)
+        // decide; vanilla compiles block entities into their section's render lists the same way.
+        if !frame.block_entities.is_empty() {
+            let planes_ref = &planes;
+            let bonus = &self.bonus;
+            let min_section = self.min_section;
+            let column = |c: ChunkPos| self.visible_mask.column(c);
+            self.block_entities_drawn = self.entity.append_block_entities(
+                frame.block_entities,
+                cam,
+                |inst| {
+                    let pos = inst.pos;
+                    let lo = [
+                        pos.x as f32 - cam.x as f32,
+                        pos.y as f32 - cam.y as f32,
+                        pos.z as f32 - cam.z as f32,
+                    ];
+                    let hi = [lo[0] + 1.0, lo[1] + 1.0, lo[2] + 1.0];
+                    if !Self::aabb_visible(planes_ref, lo, hi) {
+                        return false;
+                    }
+                    let section = pos.section();
+                    let si = section.y - min_section;
+                    let c = ChunkPos::new(section.x, section.z);
+                    column(c) & (1u32 << si) != 0 || bonus.contains(&(c, si))
+                },
+                &mut self.assets,
+            );
+        } else {
+            self.block_entities_drawn = 0;
+        }
+
         self.timings.cull_ms = lap(&mut mark);
         let mut ran = [false; 3];
         let mut draw_calls = 0u32;
@@ -2060,6 +2101,7 @@ impl Renderer {
             uploads: self.last_uploads.0,
             upload_bytes: self.last_uploads.1,
             draw_calls,
+            block_entities_drawn: self.block_entities_drawn,
         })
     }
 

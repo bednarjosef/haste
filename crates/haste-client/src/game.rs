@@ -406,6 +406,13 @@ pub struct Shared {
     pub view: Mutex<ViewState>,
     /// Break cracks to draw (`Session::breaking_stages`), copied once per tick.
     pub breaking: Mutex<Vec<(BlockPos, u8)>>,
+    /// Lid animations to draw (`Session::lid_states`): (position, open value at the last
+    /// tick's start and end), copied once per tick; the render thread lerps by partial tick.
+    pub block_entity_lids: Mutex<Vec<(BlockPos, (f32, f32))>>,
+    /// Block entity type names by synced registry id (`minecraft:block_entity_type`), for
+    /// resolving what each stored block entity is; the static registry's order when the server
+    /// did not sync one (vanilla servers' ids agree with the data generator's).
+    pub block_entity_names: Vec<haste_core::Identifier>,
     /// Particles (`level_particles`): the game thread spawns and ticks them, the render
     /// thread draws them.
     pub particles: SharedParticles,
@@ -442,7 +449,9 @@ pub struct Shared {
 }
 
 impl Shared {
-    /// Shared state for a fresh connection.
+    /// Shared state for a fresh connection. `block_entity_names` are the
+    /// `minecraft:block_entity_type` names by synced id (see [`Shared::block_entity_names`]).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         data: Arc<GameData>,
         world: World,
@@ -450,6 +459,7 @@ impl Shared {
         view_distance: i32,
         particles: haste_render::Particles,
         skin: (Identifier, bool),
+        block_entity_names: Vec<Identifier>,
         options: haste_setup::options::Options,
     ) -> Self {
         let has_sky = world.dimension().has_skylight;
@@ -496,6 +506,8 @@ impl Shared {
                 lightmap_tick_count: 0,
             }),
             breaking: Mutex::new(Vec::new()),
+            block_entity_lids: Mutex::new(Vec::new()),
+            block_entity_names,
             particles: Mutex::new(particles),
             input: Mutex::new(SharedInput::default()),
             sound: Mutex::new(None),
@@ -563,6 +575,9 @@ impl WorldSink for TrackedWorld<'_> {
     }
     fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData) {
         WorldSink::set_block_entity(self.world, pos, data)
+    }
+    fn block_state_at(&self, pos: BlockPos) -> BlockStateId {
+        WorldSink::block_state_at(self.world, pos)
     }
     fn reset(&mut self, dim: &DimensionInfo) {
         let loaded: Vec<ChunkPos> = self.world.loaded_chunks().collect();
@@ -896,6 +911,12 @@ fn tick_once(
         let mut breaking = shared.breaking.lock();
         breaking.clear();
         driver.session.breaking_stages(&mut breaking);
+    }
+    // The lids' open targets (vanilla routes `block_event` to the block entity).
+    {
+        let mut lids = shared.block_entity_lids.lock();
+        lids.clear();
+        driver.session.lid_states(&mut lids);
     }
     // Particles: spawn what the packets brought, then one 20 Hz simulation step. The camera
     // for `ClientLevel.doAddParticle`'s 32-block limiter is the player's eye.

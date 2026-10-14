@@ -775,6 +775,58 @@ impl EntityRenderer {
         self.item_models.clear();
     }
 
+    /// Poses the frame's block entities (chests, shulker boxes) into the same vertex stream as
+    /// the entities, after `prepare`: one draw call covers both, and each texture lands in the
+    /// shared atlas on first use (the per-vertex `rect` picks it). `visible` decides per
+    /// instance whether it is drawn (frustum and section culling are the caller's, like the
+    /// terrain's); returns how many were posed.
+    pub fn append_block_entities(
+        &mut self,
+        instances: &[crate::blockentity::BlockEntityInstance],
+        camera: glam::DVec3,
+        visible: impl Fn(&crate::blockentity::BlockEntityInstance) -> bool,
+        assets: &mut Assets,
+    ) -> u32 {
+        let start = self.vertices.len();
+        let mut drawn = 0;
+        for inst in instances {
+            if !visible(inst) {
+                continue;
+            }
+            let texture = match inst.kind {
+                crate::blockentity::BlockEntityKind::Chest(m) => {
+                    crate::blockentity::chest_texture(m, inst.half)
+                }
+                crate::blockentity::BlockEntityKind::Shulker(c) => {
+                    crate::blockentity::shulker_texture(c)
+                }
+            };
+            let rect = self.texture_rect(&texture, assets);
+            let out = &mut self.vertices;
+            let emit = |out: &mut Vec<EntityVertex>,
+                        model: &CubeModel,
+                        part: &ModelPart,
+                        pose: &PoseOverrides,
+                        m: Mat4,
+                        rect: [u32; 4],
+                        light: (u8, u8)| {
+                emit_part(out, model, part, pose, m, rect, light, 0.0);
+            };
+            crate::blockentity::emit_block_entity(out, inst, camera, rect, &emit);
+            drawn += 1;
+        }
+        if self.vertices.len() > self.vertex_capacity {
+            self.vertex_capacity = self.vertices.len().next_power_of_two();
+            self.vertex_buffer = make_vertex_buffer(&self.device, self.vertex_capacity);
+        }
+        if self.vertices.len() > start && !self.vertices.is_empty() {
+            self.queue
+                .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
+        }
+        self.drawn += drawn;
+        drawn
+    }
+
     /// The item model of a registry index, loaded once and cached (`air` and unknown ids map to
     /// `None`, never a panic).
     fn item_model_for(

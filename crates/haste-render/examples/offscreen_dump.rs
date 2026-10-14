@@ -76,6 +76,7 @@ fn main() -> anyhow::Result<()> {
             bob: haste_render::ViewBob::default(),
         },
         entities: &[],
+        block_entities: &[],
         gui: &haste_core::gui::GuiFrame::default(),
         sky: haste_render::SkyState {
             time_of_day: 6000,
