@@ -178,6 +178,7 @@ impl App {
                 dimension_has_sky: true,
                 fog_start: 100.0,
                 fog_end: (self.distance as f32) * 16.0,
+                ..Default::default()
             },
             partial_tick: 0.0,
             block_target: None,
