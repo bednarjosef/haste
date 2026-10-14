@@ -2,8 +2,11 @@
 
 Vanilla 26.3 player movement and collision. Status of every rule: **documented** (a public page
 states it), **derived** (follows from documented numbers; a test checks the derivation),
-**assumption** (needed to write the code, not on a public page; the traces must settle it).
-Nothing here was taken from decompiled Minecraft code or from Pomme's `physics/`/`player/`.
+**assumption** (needed to write the code, not on a public page; the traces must settle it),
+**verified** (read in the 26.3 client source in `cache/source/26.3/client` and re-implemented -
+the method name is cited, no vanilla code is copied). Rows for fluids were settled that way in
+October 2026 (lava shallow branch, gravity divisors, climb out, swim steering). Nothing here was
+copied from Pomme's `physics/`/`player/`.
 
 ## Sources
 
@@ -52,12 +55,18 @@ Nothing here was taken from decompiled Minecraft code or from Pomme's `physics/`
 | jump factor | honey 0.5 (oracle) | value: oracle. Not checked: wiki "Jumping" says honey jumps reach 3/16 block, our model gives more; **not determined**, see open questions |
 | water drag | 0.8 (all axes) | derived: wiki "Walking" water 1.960 m/s = 20 x 0.0196 / 0.2 |
 | water drag sprint-swimming | 0.9 horizontal | derived: wiki "Swimming" 3.918 m/s ≈ 20 x 0.0196 / 0.1 |
-| lava drag | 0.5 (all axes) | derived: wiki "Walking" lava 0.784 m/s |
-| fluid acceleration | 0.02 | assumption consistent with the water/lava derivations (one equation, two unknowns) |
-| water gravity | gravity / 16 | **UNVERIFIED assumption** |
-| lava gravity | gravity / 4 | **UNVERIFIED assumption** |
-| swim up (jump in fluid) | +0.04 / tick | **UNVERIFIED assumption** |
-| swim down (sneak in water) | -0.04 / tick | **UNVERIFIED assumption** (wiki only says "sinks faster") |
+| lava drag, deep | 0.5 on every axis | derived: wiki "Walking" lava 0.784 m/s |
+| lava drag, shallow (depth ≤ 0.4) | 0.5 horizontal, 0.8 vertical | verified: 26.3 `LivingEntity.travelInLava` shallow branch |
+| fluid acceleration | 0.02 | assumption consistent with the water/lava derivations (one equation, two unknowns); matches `travelInLava` |
+| water gravity | gravity / 16 | verified: `LivingEntity.getFluidFallingAdjustedMovement`; skipped while sprinting (any pose); the isFalling clamp (0.005 / -0.003) is unreachable at gravity 0.08 (the two y windows do not overlap) |
+| lava gravity, deep | gravity / 4 | verified: `LivingEntity.travelInLava` (`baseGravity != 0`) |
+| lava gravity, shallow | gravity / 16, then the same gravity / 4 | verified: same two vanilla methods applied in order |
+| swim up (jump in fluid) | +0.04 / tick | verified: `LivingEntity.jumpInLiquid`; the trigger conditions in `movement.rs` (which fluid, on ground, shallow/deep) are still an approximation of vanilla's jump section |
+| swim down (sneak in water) | -0.04 / tick | verified: `LivingEntity.goDownInWater`, called from `LocalPlayer.aiStep` when in water and sneaking |
+| fluid jump threshold | 0.4 (0 when the eye height is below 0.4) | verified: `Entity.getFluidJumpThreshold`; decides lava shallow vs deep |
+| fluid depth | max fluid surface above the feet over the cells the shrunk box touches | verified: `EntityFluidInteraction.update` -> `Entity.getFluidHeight`; lava reads it after the move (vanilla refreshes the trackers inside `move`) |
+| climb out of fluid | y = 0.3, probe 0.6 above | verified: `LivingEntity.jumpOutOfFluid` - horizontal collision in a fluid plus a block- and liquid-free box lifted by velocity.y + 0.6 |
+| swim steering | 0.085 diving, else 0.06; dive below look y -0.2 | verified: `Player.travel` - sprint-swimming pulls y toward `-sin(pitch)`; skipped when looking up, not jumping and the block 0.9 above the feet is air |
 | fluid height | level 0: 8/9, level L: (8-L)/9, falling: 8/9, 1.0 with same fluid above | documented: wiki "Water"; falling level 8 = 8/9 checked on the vanilla server (below) |
 | flying acceleration | flying_speed 0.05 (x2 sprinting) | derived: wiki "Flying" 10.92 m/s (we get 10.89) and 21.6 (we get 21.78) |
 | flying vertical | ±3 x flying_speed per tick, vertical drag 0.6 | **UNVERIFIED assumption** |
@@ -175,6 +184,9 @@ speed when crouching/crawling, x 0.98. 6. Travel: normal / water / lava / flying
 accelerate (rotated by yaw, sine table) -> move (sneak edge back-off, sweep with step-up) ->
 zero velocity on collided axes, on_ground = vertical collision while moving down, fall distance ->
 block speed factor -> gravity, vertical drag -> horizontal drag.
+In water the tick starts with the sneak sink, then the sprint-swim steering (`Player.travel`),
+and ends with `jump_out_of_fluid`; in lava the shallow/deep branch (depth after the move) picks
+the drags, then gravity/4, then the same `jump_out_of_fluid`.
 
 ## Approximate / not modelled
 
@@ -187,9 +199,12 @@ block speed factor -> gravity, vertical drag -> horizontal drag.
   restarted while still colliding (assumption). Hunger/blindness: caller clears `input.sprint`.
 - Sneak edge protection near (not on) ground follows the wiki's "up to 0.6 blocks above ground"
   via `fall_distance < step_height` and a probe box; exact condition not determined.
-- Swimming: pitch-steered vertical swimming, surface bobbing (wiki 2.20 m/s at the surface),
-  the climb-out-of-water boost, water currents (1.39 m/s push), bubble columns, depth strider,
-  dolphin's grace: not implemented.
+- Swimming: surface bobbing (wiki 2.20 m/s at the surface), water currents (1.39 m/s push),
+  bubble columns, depth strider, dolphin's grace: not implemented. Pitch steering and the
+  climb-out boost are in (`fluids.rs`); the jump section's choice between `jumpFromGround`,
+  `jumpInLiquid` and nothing (fluid depth vs 0.4, on ground) is still `movement.rs` business and
+  simplified to "jump held in a fluid -> swim up". The `horizontalCollision && onClimbable()`
+  y = 0.2 branch of `travelInWater` is out until ladders exist.
 - Not implemented: ladders/vines (climbing), cobweb/berry bush/powder snow slowdowns, slime
   bounce, honey sliding, levitation/slow falling/jump boost/speed effects, world border,
   unloaded-chunk freeze, entity pushing, knockback. `PlayerAttributes` carries no effect state yet
@@ -206,7 +221,8 @@ block speed factor -> gravity, vertical drag -> horizontal drag.
 - Sprint-jump gap: we cross a 3-block gap (jump onto the 4th block); a 4-air-block gap fails in
   our model without 45° strafing. The wiki's "jump across up to four blocks" does not settle
   which is meant.
-- Water/lava vertical constants, flying vertical constants (UNVERIFIED rows above).
+- Flying vertical constants (UNVERIFIED row above); the water/lava vertical constants were settled
+  against the 26.3 client source, see the constants table.
 - Sine table and the two degree-to-radian constants.
 - Trace input alignment (does `ticks[i].input` produce `ticks[i].pos`?): `replay::InputAlignment`.
 

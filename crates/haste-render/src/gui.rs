@@ -178,7 +178,7 @@ pub struct GuiRenderer {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     /// One pipeline per blend mode, indexed like [`GuiBlend`] discriminants (normal first).
-    pipelines: [wgpu::RenderPipeline; 3],
+    pipelines: [wgpu::RenderPipeline; 4],
     bind_group: wgpu::BindGroup,
     uniforms: wgpu::Buffer,
     atlas: wgpu::Texture,
@@ -265,6 +265,43 @@ fn tint_or_white(tint: u32) -> u32 {
     }
 }
 
+/// The wgpu blend state of a GUI blend mode. Normal is vanilla's `gui_textured` (straight alpha),
+/// Multiply the vignette's (dst * (1 - src colour)), Invert the crosshair's (the source inverts the
+/// colour behind it) and Additive the text selection highlight's (src ONE / dst ONE, both equations:
+/// `BlendFunction.ADDITIVE`).
+fn blend_state(mode: GuiBlend) -> wgpu::BlendState {
+    let equation =
+        |src_factor: wgpu::BlendFactor, dst_factor: wgpu::BlendFactor| wgpu::BlendComponent {
+            src_factor,
+            dst_factor,
+            operation: wgpu::BlendOperation::Add,
+        };
+    match mode {
+        GuiBlend::Normal => wgpu::BlendState {
+            color: equation(
+                wgpu::BlendFactor::SrcAlpha,
+                wgpu::BlendFactor::OneMinusSrcAlpha,
+            ),
+            alpha: equation(wgpu::BlendFactor::One, wgpu::BlendFactor::OneMinusSrcAlpha),
+        },
+        GuiBlend::Multiply => wgpu::BlendState {
+            color: equation(wgpu::BlendFactor::Zero, wgpu::BlendFactor::OneMinusSrc),
+            alpha: equation(wgpu::BlendFactor::Zero, wgpu::BlendFactor::One),
+        },
+        GuiBlend::Invert => wgpu::BlendState {
+            color: equation(
+                wgpu::BlendFactor::OneMinusDst,
+                wgpu::BlendFactor::OneMinusSrc,
+            ),
+            alpha: equation(wgpu::BlendFactor::One, wgpu::BlendFactor::OneMinusSrcAlpha),
+        },
+        GuiBlend::Additive => wgpu::BlendState {
+            color: equation(wgpu::BlendFactor::One, wgpu::BlendFactor::One),
+            alpha: equation(wgpu::BlendFactor::One, wgpu::BlendFactor::One),
+        },
+    }
+}
+
 impl GuiRenderer {
     pub fn new(
         device: Arc<wgpu::Device>,
@@ -342,7 +379,8 @@ impl GuiRenderer {
             immediate_size: 0,
         });
         // One pipeline per blend mode: vanilla's GUI pipelines (RenderPipelines.GUI_TEXTURED and
-        // friends blend normally; VIGNETTE multiplies; CROSSHAIR inverts the destination).
+        // friends blend normally; VIGNETTE multiplies; CROSSHAIR inverts the destination;
+        // GUI_TEXT_HIGHLIGHT adds to it).
         let make_pipeline = |label, blend: Option<wgpu::BlendState>| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
@@ -374,50 +412,14 @@ impl GuiRenderer {
                 cache: None,
             })
         };
-        let normal = Some(wgpu::BlendState {
-            color: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::SrcAlpha,
-                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                operation: wgpu::BlendOperation::Add,
-            },
-            alpha: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::One,
-                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                operation: wgpu::BlendOperation::Add,
-            },
-        });
-        // Vanilla's vignette: src ZERO, dst ONE_MINUS_SRC_COLOR — the vignette texture is an
-        // opaque grayscale radial gradient (black centre, bright edges), so this multiplies
-        // the destination by it: unchanged in the centre, darkened towards the edges.
-        let multiply = Some(wgpu::BlendState {
-            color: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::Zero,
-                dst_factor: wgpu::BlendFactor::OneMinusSrc,
-                operation: wgpu::BlendOperation::Add,
-            },
-            alpha: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::Zero,
-                dst_factor: wgpu::BlendFactor::One,
-                operation: wgpu::BlendOperation::Add,
-            },
-        });
-        // Vanilla's crosshair: src ONE_MINUS_DST_COLOR, dst ONE_MINUS_SRC_COLOR.
-        let invert = Some(wgpu::BlendState {
-            color: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::OneMinusDst,
-                dst_factor: wgpu::BlendFactor::OneMinusSrc,
-                operation: wgpu::BlendOperation::Add,
-            },
-            alpha: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::One,
-                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                operation: wgpu::BlendOperation::Add,
-            },
-        });
+        // The vignette texture is an opaque grayscale radial gradient (black centre, bright
+        // edges), so its blend multiplies the destination by it: unchanged in the centre,
+        // darkened towards the edges.
         let pipelines = [
-            make_pipeline("gui-normal", normal),
-            make_pipeline("gui-multiply", multiply),
-            make_pipeline("gui-invert", invert),
+            make_pipeline("gui-normal", Some(blend_state(GuiBlend::Normal))),
+            make_pipeline("gui-multiply", Some(blend_state(GuiBlend::Multiply))),
+            make_pipeline("gui-invert", Some(blend_state(GuiBlend::Invert))),
+            make_pipeline("gui-additive", Some(blend_state(GuiBlend::Additive))),
         ];
         let vertex_capacity = 16 * 1024;
         let vertex_buffer = Self::make_vertex_buffer(&device, vertex_capacity);
@@ -1550,6 +1552,31 @@ mod tests {
     fn shadow_colour_is_a_quarter() {
         assert_eq!(shadow_color(0xFFFF_FFFF), 0xFF3F_3F3F);
         assert_eq!(shadow_color(0x80FF_8040), 0x803F_2010);
+    }
+
+    #[test]
+    fn additive_blend_adds_source_to_destination() {
+        // Vanilla's BlendFunction.ADDITIVE: ONE, ONE, both the colour and the alpha equation.
+        let a = blend_state(GuiBlend::Additive);
+        assert_eq!(a.color.src_factor, wgpu::BlendFactor::One);
+        assert_eq!(a.color.dst_factor, wgpu::BlendFactor::One);
+        assert_eq!(a.color.operation, wgpu::BlendOperation::Add);
+        assert_eq!(a.alpha.src_factor, wgpu::BlendFactor::One);
+        assert_eq!(a.alpha.dst_factor, wgpu::BlendFactor::One);
+        assert_eq!(a.alpha.operation, wgpu::BlendOperation::Add);
+        // The other modes are unchanged.
+        assert_eq!(
+            blend_state(GuiBlend::Normal).color.src_factor,
+            wgpu::BlendFactor::SrcAlpha
+        );
+        assert_eq!(
+            blend_state(GuiBlend::Multiply).color.dst_factor,
+            wgpu::BlendFactor::OneMinusSrc
+        );
+        assert_eq!(
+            blend_state(GuiBlend::Invert).color.src_factor,
+            wgpu::BlendFactor::OneMinusDst
+        );
     }
 
     #[test]
