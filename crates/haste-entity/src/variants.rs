@@ -719,6 +719,21 @@ fn texture_model_cache() -> &'static TextureModelCache {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Test helper: apply another metadata set's entries on top.
+#[cfg(test)]
+trait ApplyExtra {
+    fn apply_extra(self, other: Metadata) -> Metadata;
+}
+#[cfg(test)]
+impl ApplyExtra for Metadata {
+    fn apply_extra(mut self, other: Metadata) -> Metadata {
+        use haste_core::entity::MetadataEntry;
+        let entries: Vec<MetadataEntry> = other.iter().cloned().collect();
+        self.apply(&entries);
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1221,20 +1236,5 @@ mod tests {
             texture_for(strider, &Metadata::default(), false, None, 0).unwrap(),
             Identifier::minecraft("entity/strider/strider")
         );
-    }
-}
-
-/// Test helper: apply another metadata set's entries on top.
-#[cfg(test)]
-trait ApplyExtra {
-    fn apply_extra(self, other: Metadata) -> Metadata;
-}
-#[cfg(test)]
-impl ApplyExtra for Metadata {
-    fn apply_extra(mut self, other: Metadata) -> Metadata {
-        use haste_core::entity::MetadataEntry;
-        let entries: Vec<MetadataEntry> = other.iter().cloned().collect();
-        self.apply(&entries);
-        self
     }
 }
