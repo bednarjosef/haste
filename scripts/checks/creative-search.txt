@@ -1,0 +1,17 @@
+# The creative inventory search: the search tab is selected (top right, the compass icon) and
+# typing "stone" filters the items to the stone family.
+wait_until joined
+wait_until settled
+key E
+wait_until screen_open
+# The search tab: the tab strip is one row of 26x32 buttons above the 195x136 panel centred
+# in the 480x270 GUI (leftPos 142, topPos 67); the search tab is the rightmost (column 6,
+# aligned right: x = 195-27*(7-6)+1 = 169 -> screen 311..337, y = 67-32 = 35..67).
+mouse 324 50
+click left 324 50
+wait 5
+type stone
+wait 20
+screenshot creative-search
+key E
+wait_until screen_closed

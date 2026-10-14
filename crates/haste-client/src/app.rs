@@ -17,7 +17,7 @@ use glam::DVec3;
 use haste_protocol::haste_core::gui::{GuiCommand, GuiFrame};
 use haste_protocol::haste_core::input::InputState;
 use haste_protocol::haste_core::model::EntityInstance;
-use haste_protocol::haste_core::{ChunkPos, EntityId, SectionPos};
+use haste_protocol::haste_core::{ChunkPos, EntityId, Identifier, SectionPos};
 use haste_protocol::{Account, ConnectOptions};
 use haste_render::{Camera, FrameInput, FrameStats, Renderer, SkyState};
 use haste_setup::options::Options;
@@ -1263,22 +1263,30 @@ fn mouse_button_id(button: script::MouseButton) -> i32 {
     }
 }
 
-/// Prints the text and HUD-sprite facts of a script screenshot's frame. The check scripts grep
-/// these lines as evidence instead of opening the PNGs.
-fn log_script_frame(frame: &GuiFrame, name: &str) {
+/// Prints the text, item and HUD-sprite facts of a script screenshot's frame. The check scripts
+/// grep these lines as evidence instead of opening the PNGs.
+fn log_script_frame(frame: &GuiFrame, name: &str, item_names: &[Identifier]) {
     let mut hotbar = false;
+    let mut items = Vec::new();
     for c in &frame.commands {
         match c {
             GuiCommand::Text { text, .. } | GuiCommand::StyledText { text, .. } => {
                 println!("script text[{name}]: {text}");
             }
             GuiCommand::Sprite { sprite, .. } if sprite.path() == "hud/hotbar" => hotbar = true,
+            GuiCommand::Item { item, .. } => {
+                // The item's registry name (creative inventory checks grep for these).
+                if let Some(id) = item_names.get(item.0 as usize) {
+                    items.push(id.to_string());
+                }
+            }
             _ => {}
         }
     }
     println!(
-        "script frame[{name}]: hotbar={}",
-        if hotbar { "yes" } else { "no" }
+        "script frame[{name}]: hotbar={}, items=[{}]",
+        if hotbar { "yes" } else { "no" },
+        items.join(",")
     );
 }
 
@@ -1302,6 +1310,17 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
     renderer.set_biomes(&session.biomes);
+    // Item names by protocol id, so `log_script_frame` can name the items a frame drew.
+    let item_names: Vec<Identifier> = (0..shared.data.registries.len("minecraft:item") as u32)
+        .map(|i| {
+            shared
+                .data
+                .registries
+                .name("minecraft:item", haste_protocol::haste_core::RegistryIndex(i))
+                .cloned()
+                .unwrap_or_else(|| Identifier::minecraft("air"))
+        })
+        .collect();
     let mut gui = GuiFrame::default();
     let mut ui: Option<crate::ui::Ui> = None;
     let mut feed = WorldFeed::default();
@@ -1458,7 +1477,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             // Log what the frame drew (the check scripts grep this as evidence; images are not
             // opened). The hotbar sprite is the visible proof a HUD element is hidden or shown.
             for name in shots.drain(..) {
-                log_script_frame(&gui, &name);
+                log_script_frame(&gui, &name, &item_names);
                 let path = std::path::Path::new("target/shots").join(format!("script-{name}.png"));
                 if let Some(dir) = path.parent() {
                     std::fs::create_dir_all(dir)
@@ -1470,7 +1489,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 println!("script screenshot saved to {}", path.display());
             }
             if std::mem::take(&mut f2_pending) {
-                log_script_frame(&gui, "f2");
+                log_script_frame(&gui, "f2", &item_names);
                 // Vanilla's F2: the frame goes to the config dir's `screenshots/` folder.
                 match crate::screenshots::save(image.clone()) {
                     Ok(name) => {
