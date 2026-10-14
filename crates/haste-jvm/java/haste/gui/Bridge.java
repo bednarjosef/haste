@@ -19,7 +19,7 @@ import net.minecraft.client.input.MouseButtonInfo;
  * method runs vanilla screen code with the 26.3 signatures.
  */
 public final class Bridge {
-    public static final int CHAT = 0, PAUSE = 1, INVENTORY = 2, COMMAND = 3, TITLE = 4, OPTIONS = 5, MULTIPLAYER = 6;
+    public static final int CHAT = 0, PAUSE = 1, INVENTORY = 2, COMMAND = 3, TITLE = 4, OPTIONS = 5, MULTIPLAYER = 6, SELECT_WORLD = 7;
 
     private int pressedButton = -1;
     private double lastX, lastY;
@@ -61,6 +61,7 @@ public final class Bridge {
             case TITLE -> new TitleScreen();
             case OPTIONS -> new OptionsScreen(ClientImpl.screen, Proxies.options);
             case MULTIPLAYER -> new JoinMultiplayerScreen(new TitleScreen());
+            case SELECT_WORLD -> new net.minecraft.client.gui.screens.worldselection.SelectWorldScreen(new TitleScreen());
             default -> throw new IllegalArgumentException("screen kind " + kind);
         };
         try {
@@ -85,7 +86,8 @@ public final class Bridge {
     /**
      * Drops everything a test (or a disconnecting client) leaves behind: the chat log and its scroll
      * position (the history stays), the held mouse button and its position, the screen currently open
-     * and whether vanilla code still believes the mouse is grabbed.
+     * and whether vanilla code still believes the mouse is grabbed. The FOV option goes back to its
+     * default (an options.txt a real run saved in the game directory would otherwise leak in).
      */
     public void resetForTest() {
         this.pressedButton = -1;
@@ -98,6 +100,7 @@ public final class Bridge {
         Proxies.hud.getChat().resetChatScroll();
         Proxies.gui.setScreen(null);
         MouseImpl.grabbed = false;
+        Proxies.options.fov().set(70);
     }
 
     public boolean isOpen() { return ClientImpl.screen != null; }
@@ -180,13 +183,17 @@ public final class Bridge {
 
     /**
      * The connection was lost or the server kicked us: vanilla's disconnect screen with the reason (a text component
-     * in its JSON form).
+     * in its JSON form). In menu mode the open screen (the connecting screen's parent, e.g. the server list) is the
+     * parent, so the screen's button returns there like vanilla's ConnectScreen failure path.
      */
     public void disconnected(String reasonJson) {
         net.minecraft.network.chat.Component reason = net.minecraft.network.chat.ComponentSerialization.CODEC
             .parse(com.mojang.serialization.JsonOps.INSTANCE, com.google.gson.JsonParser.parseString(reasonJson))
             .result().orElse(net.minecraft.network.chat.Component.literal(reasonJson));
-        Proxies.gui.setScreen(new net.minecraft.client.gui.screens.DisconnectedScreen(null,
+        Screen parent = Mirror.inWorld() ? null
+            : ClientImpl.screen instanceof net.minecraft.client.gui.screens.ConnectScreen c ? c.parent
+            : ClientImpl.screen;
+        Proxies.gui.setScreen(new net.minecraft.client.gui.screens.DisconnectedScreen(parent,
             net.minecraft.network.chat.Component.translatable("disconnect.lost"), reason));
     }
 

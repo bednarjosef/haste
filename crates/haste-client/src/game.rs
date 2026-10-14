@@ -609,7 +609,10 @@ impl WorldSink for TrackedWorld<'_> {
 
 /// Runs the 20 Hz game loop until the connection closes or `shared.stop` is set, then closes
 /// the connection. Must run inside the tokio runtime's context (the connection's tasks).
-pub fn run(mut driver: NetDriver, shared: Arc<Shared>) {
+/// `existing_ui`: a UI over an already-started JVM (menu mode joins through the title screen's
+/// multiplayer list, whose JVM and UI stay for the whole run); without one the HUD's JVM starts
+/// on its own thread in parallel with joining.
+pub fn run(mut driver: NetDriver, shared: Arc<Shared>, existing_ui: Option<Ui>) {
     let tick = Duration::from_secs_f64(TICK_SECONDS);
     let mut next = Instant::now();
     let mut gone = Vec::new();
@@ -621,7 +624,14 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>) {
     // The JVM for the HUD takes tens of seconds to start: on its own thread, in parallel with
     // joining (the connection would time out if we waited here). One warning, no retries: a
     // client without a JDK or cache keeps playing without a HUD.
-    let mut jvm = spawn_jvm(&shared);
+    let mut jvm = existing_ui
+        .map(|ui| {
+            // The menu already ticked this Ui; the game thread takes it over from here.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _ = tx.send(Some(HudArrival::Menu(ui)));
+            HudSlot { rx: Some(rx) }
+        })
+        .unwrap_or_else(|| spawn_jvm(&shared));
     let reason = loop {
         if shared.stop.load(Ordering::Relaxed) {
             break "left the game".to_string();
@@ -706,7 +716,7 @@ fn apply_option_changes(shared: &Shared, driver: &NetDriver, changes: Vec<(Strin
 
 /// Starts the JVM for the HUD on its own thread (tens of seconds; the connection would time/// out if the game thread waited). On failure: one warning and `shared.hud_failed` set, then
 /// the client keeps running without a HUD.
-fn spawn_jvm(shared: &Arc<Shared>) -> JvmSlot {
+fn spawn_jvm(shared: &Arc<Shared>) -> HudSlot {
     let (tx, rx) = std::sync::mpsc::channel();
     let shared = shared.clone();
     std::thread::Builder::new()
@@ -724,22 +734,29 @@ fn spawn_jvm(shared: &Arc<Shared>) -> JvmSlot {
                         t.elapsed().as_secs_f32(),
                         host.proxy_summary()
                     );
-                    let _ = tx.send(Some(host));
+                    let _ = tx.send(Some(HudArrival::Fresh(host)));
                 }
                 Err(e) => {
                     tracing::warn!("no HUD: the JVM did not start: {e:#}");
                     shared.hud_failed.store(true, Ordering::Relaxed);
-                    let _ = tx.send(None);
                 }
             }
         })
         .expect("spawning the JVM thread");
-    JvmSlot { rx: Some(rx) }
+    HudSlot { rx: Some(rx) }
 }
 
-/// The JVM arriving on its own thread: `take()` once, at the start of a game tick.
-struct JvmSlot {
-    rx: Option<std::sync::mpsc::Receiver<Option<JvmHost>>>,
+/// What the HUD's slot delivers: a freshly started JVM, or menu mode's already-built UI.
+enum HudArrival {
+    /// The JVM thread started one (spawn_jvm): the `Ui` is built around it here.
+    Fresh(JvmHost),
+    /// Menu mode's UI (title screen, registries already loaded in Java).
+    Menu(Ui),
+}
+
+/// The JVM (or menu UI) arriving on its own thread: `take()` once, at the start of a game tick.
+struct HudSlot {
+    rx: Option<std::sync::mpsc::Receiver<Option<HudArrival>>>,
 }
 
 /// Takes `item` from a slot that a background thread fills once: `None` while it is still
@@ -757,10 +774,10 @@ fn take_slot<T>(rx: &mut Option<std::sync::mpsc::Receiver<Option<T>>>) -> Option
     }
 }
 
-impl JvmSlot {
-    /// The started JVM, if it arrived since the last tick. `None` while it is still starting
-    /// (or after it failed or was taken).
-    fn take(&mut self) -> Option<JvmHost> {
+impl HudSlot {
+    /// The JVM (or menu UI), if it arrived since the last tick. `None` while it is still
+    /// starting (or after it failed or was taken).
+    fn take_ui(&mut self) -> Option<HudArrival> {
         take_slot(&mut self.rx)
     }
 }
@@ -769,16 +786,20 @@ fn tick_once(
     driver: &mut NetDriver,
     shared: &Shared,
     gone: &mut Vec<SectionPos>,
-    jvm: &mut JvmSlot,
+    jvm: &mut HudSlot,
 ) -> anyhow::Result<()> {
     // Once the JVM arrives (the session joined before the game thread started): build the
-    // `Ui` and give the JVM the registries, tags and the local player.
-    if let Some(host) = jvm.take() {
+    // `Ui` and give the JVM the registries, tags and the local player. Menu mode's UI arrives
+    // pre-built (its JVM opened the title screen); only `joined` runs for it.
+    if let Some(ui) = jvm.take_ui() {
         let mut created = false;
         {
             let mut slot = shared.ui.lock();
             if slot.is_none() {
-                let ui = Ui::new(host);
+                let ui = match ui {
+                    HudArrival::Fresh(host) => Ui::new(host),
+                    HudArrival::Menu(ui) => ui,
+                };
                 let t = Instant::now();
                 match ui.joined(driver.connection(), driver.login()) {
                     Ok(()) => {

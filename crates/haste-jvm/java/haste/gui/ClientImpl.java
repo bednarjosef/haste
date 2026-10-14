@@ -26,12 +26,59 @@ public final class ClientImpl {
     private static final com.mojang.datafixers.DataFixer FIXER = net.minecraft.util.datafix.DataFixers.getDataFixer();
     public static com.mojang.datafixers.DataFixer getFixerUpper(Minecraft m) { return FIXER; }
 
+    /**
+     * The world storage (vanilla: built once in {@code Minecraft}'s constructor over
+     * {@code <game dir>/saves}). Haste's singleplayer worlds live in the directory Rust gave in
+     * {@code haste.singleplayerDir} (haste-setup's worlds module: {@code <config>/singleplayer},
+     * the same dirs the local server plays), falling back to {@code <game dir>/saves}. Real
+     * vanilla Java: the world list reads {@code level.dat} of every folder in the base dir.
+     */
+    private static final net.minecraft.world.level.storage.LevelStorageSource LEVEL_SOURCE = createLevelSource();
+    public static net.minecraft.world.level.storage.LevelStorageSource getLevelSource(Minecraft m) {
+        return LEVEL_SOURCE;
+    }
+    private static net.minecraft.world.level.storage.LevelStorageSource createLevelSource() {
+        String dir = System.getProperty("haste.singleplayerDir", "");
+        java.nio.file.Path base = !dir.isEmpty() ? java.nio.file.Path.of(dir)
+            : new java.io.File(System.getProperty("haste.minecraftDir", "."), "saves").toPath();
+        return net.minecraft.world.level.storage.LevelStorageSource.createDefault(base);
+    }
+
+    /**
+     * The directory validator (vanilla: {@code LevelStorageSource.parseValidator(<game
+     * dir>/allowed_symlinks.txt)} over the level source's base dir): the create screen builds
+     * its pack repository with it. No symlink allow-list: none allowed, like vanilla without
+     * the file.
+     */
+    private static final net.minecraft.world.level.validation.DirectoryValidator DIR_VALIDATOR =
+        new net.minecraft.world.level.validation.DirectoryValidator(p -> false);
+    @SuppressWarnings("UnstableApiUsage")
+    public static net.minecraft.world.level.validation.DirectoryValidator directoryValidator(Minecraft m) {
+        return DIR_VALIDATOR;
+    }
+
+    /**
+     * The world open flows (vanilla: {@code new WorldOpenFlows(this, this.levelSource)}). The
+     * class is Haste's replacement (see {@code haste/replace/.../WorldOpenFlows.java}): playing
+     * or creating a world starts haste-setup's local server through Rust, not the integrated
+     * server.
+     */
+    private static final net.minecraft.client.gui.screens.worldselection.WorldOpenFlows WORLD_FLOWS =
+        new net.minecraft.client.gui.screens.worldselection.WorldOpenFlows(Proxies.minecraft, LEVEL_SOURCE);
+    public static net.minecraft.client.gui.screens.worldselection.WorldOpenFlows createWorldOpenFlows(Minecraft m) {
+        return WORLD_FLOWS;
+    }
+
     /** The mod check of the title screen and the debug overlay: Haste is the vanilla client rebuilt, no mods. */
     public static net.minecraft.util.ModCheck checkModStatus() {
         return new net.minecraft.util.ModCheck(net.minecraft.util.ModCheck.Confidence.PROBABLY_NOT, "haste");
     }
     public static Window getWindow(Minecraft m) { return Proxies.window; }
     public static SoundManager getSoundManager(Minecraft m) { return Proxies.sound; }
+    /** The texture manager: the GPU's textures are Rust's, so registration is recorded only (see TextureImpl). */
+    public static net.minecraft.client.renderer.texture.TextureManager getTextureManager(Minecraft m) {
+        return TextureImpl.textures();
+    }
     /** No audio device is opened in Haste, so none is available to pick (the sound options list the default only). */
     public static java.util.List<String> getAvailableSoundDevices(SoundManager s) { return java.util.List.of(); }
     /** No narrator: a no-op proxy (isActive() is false). */
@@ -46,8 +93,9 @@ public final class ClientImpl {
     public static PlayerSocialManager getPlayerSocialManager(Minecraft m) { return Proxies.service(PlayerSocialManager.class); }
     /** Haste always plays through a server connection (singleplayer = a local vanilla server process, setup). */
     public static boolean isDemo(Minecraft m) { return false; }
-    public static boolean isLocalServer(Minecraft m) { return false; }
-    public static boolean hasSingleplayerServer(Minecraft m) { return false; }
+    /** A local singleplayer server is running (Rust starts/stops it; the pause screen labels the button "Save and Quit"). */
+    public static boolean isLocalServer(Minecraft m) { return haste.rt.Native.localWorldRunning(); }
+    public static boolean hasSingleplayerServer(Minecraft m) { return haste.rt.Native.localWorldRunning(); }
     public static net.minecraft.client.server.IntegratedServer getSingleplayerServer(Minecraft m) { return null; }
     public static boolean isMultiplayerServer(Minecraft m) { return true; }
     public static net.minecraft.client.multiplayer.ServerData getCurrentServer(Minecraft m) { return null; }
@@ -160,6 +208,17 @@ public final class ClientImpl {
     public static void disconnectFromWorld(Minecraft m, net.minecraft.network.chat.Component reason) { haste.rt.Native.requestDisconnect(); }
     public static void disconnectWithSavingScreen(Minecraft m) { haste.rt.Native.requestDisconnect(); }
     public static boolean allowsMultiplayer(Minecraft m) { return true; }
+    /** Quitting the game (the title screen's Quit Game): Rust closes the client. */
+    public static void stop(Minecraft m) { haste.rt.Native.requestQuit(); }
+    /**
+     * Run a task on the client thread (vanilla queues it; Haste's callers are already there:
+     * the screen's own code and the ping callbacks the pinger applies on its tick), so it runs
+     * at once. Declared on BlockableEventLoop (the generated super chain of the Minecraft
+     * proxy) because Minecraft itself does not override execute.
+     */
+    public static void execute(net.minecraft.util.thread.BlockableEventLoop<?> loop, Runnable task) {
+        task.run();
+    }
 
     /** Reduced debug info (the server's game rule, entity events 22/23): not forwarded yet, full info. */
     public static boolean showOnlyReducedInfo(Minecraft m) { return false; }
@@ -171,6 +230,24 @@ public final class ClientImpl {
 
     /** Vanilla's toast manager (advancement, recipe and system toasts), real tier-3 Java. */
     public static net.minecraft.client.gui.components.toasts.ToastManager toastManager(Gui g) { return Proxies.toasts; }
+
+    /**
+     * Blocks until {@code isDone} holds (vanilla pumps the render loop meanwhile). The world
+     * creation screens call this while the data pack loads (a background future); busy-waiting
+     * is enough for them: the loading screen was already set, and the future completes on its
+     * own executor threads. Declared on {@code BlockableEventLoop} (the generated super chain of
+     * the {@code Minecraft} proxy), like {@code execute}.
+     */
+    public static void managedBlock(net.minecraft.util.thread.BlockableEventLoop<?> loop, java.util.function.BooleanSupplier isDone) {
+        while (!isDone.getAsBoolean()) {
+            Thread.onSpinWait();
+        }
+    }
+
+    /** Sets the screen and (vanilla renders a frame; the next {@code render} call does) shows it. */
+    public static void setScreenAndShow(Minecraft m, Screen s) {
+        Proxies.gui.setScreen(s);
+    }
 
     /** Vanilla's chat message pipeline (decoration, delays, the chat log), real tier-3 Java. */
     public static net.minecraft.client.multiplayer.chat.ChatListener chatListener(Gui g) { return Proxies.chatListener; }
