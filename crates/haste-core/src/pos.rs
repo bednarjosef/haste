@@ -136,6 +136,59 @@ impl Direction {
     pub fn from_ordinal(i: u8) -> Option<Direction> {
         Self::ALL.get(i as usize).copied()
     }
+    /// `Direction.get3DDataValue` (the ordinal).
+    pub fn to_3d_data_value(&self) -> i32 {
+        *self as i32
+    }
+    /// `Direction.get2DDataValue`: NORTH=2, SOUTH=0, WEST=1, EAST=3; -1 for vertical.
+    pub fn to_2d_data_value(&self) -> i32 {
+        match self {
+            Direction::South => 0,
+            Direction::West => 1,
+            Direction::North => 2,
+            Direction::East => 3,
+            Direction::Down | Direction::Up => -1,
+        }
+    }
+    /// `Direction.toYRot`: the horizontal yaw in degrees (180 for NORTH, 0 SOUTH, 90 WEST,
+    /// 270 EAST).
+    pub fn to_y_rot(&self) -> f32 {
+        (self.to_2d_data_value() & 3) as f32 * 90.0
+    }
+    /// `Direction.getCounterClockWise` for a horizontal direction.
+    pub fn counter_clock_wise(&self) -> Direction {
+        match self {
+            Direction::North => Direction::West,
+            Direction::South => Direction::East,
+            Direction::West => Direction::South,
+            Direction::East => Direction::North,
+            Direction::Down | Direction::Up => *self,
+        }
+    }
+    /// `Direction.Axis.isHorizontal`.
+    pub fn is_horizontal(&self) -> bool {
+        matches!(
+            self,
+            Direction::North | Direction::South | Direction::West | Direction::East
+        )
+    }
+    /// `Direction.AxisDirection.getStep`: +1 for UP, -1 for DOWN, 0 for horizontal.
+    pub fn axis_direction_step(&self) -> i32 {
+        match self {
+            Direction::Up => 1,
+            Direction::Down => -1,
+            _ => 0,
+        }
+    }
+    pub fn step_x(&self) -> i32 {
+        self.offset().x
+    }
+    pub fn step_y(&self) -> i32 {
+        self.offset().y
+    }
+    pub fn step_z(&self) -> i32 {
+        self.offset().z
+    }
     pub fn name(&self) -> &'static str {
         match self {
             Direction::Down => "down",
