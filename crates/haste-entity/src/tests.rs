@@ -1865,3 +1865,89 @@ fn table_textures_exist_in_jar() {
         missing.len()
     );
 }
+
+/// `render_instances` resolves a variant mob's look through the synced variant table: the
+/// metadata's variant id picks the assets, the model comes from the variant's model type,
+/// and without a variant in play the model table's default row stands. Needs the dump and
+/// registries.json (the kind is resolved through the real entity-type names).
+#[test]
+#[ignore = "needs cache/oracle/26.3 (recorder mod dump + registries.json; HASTE_CACHE overrides)"]
+fn render_instances_picks_up_variant_models() {
+    let Some(names) = crate::registry::entity_type_names() else {
+        eprintln!("skipped: no registries.json in the cache");
+        return;
+    };
+    let Some((kind, _)) = names.iter().find(|(_, n)| n.as_str() == "minecraft:pig") else {
+        eprintln!("skipped: minecraft:pig not in the registry");
+        return;
+    };
+    let mut s = store();
+    let mut sp = spawn(1, DVec3::ZERO);
+    sp.kind = *kind;
+    s.spawn(&sp);
+    // No variant table set: the default (temperate) pig model.
+    let mut out = Vec::new();
+    s.render_instances(0.5, &mut out);
+    let default = out[0].model.clone();
+    if crate::registry::model_for_name("minecraft:pig").is_none() {
+        eprintln!("skipped: no entity model dump in the cache");
+        return;
+    }
+    assert_eq!(
+        default.texture.path(),
+        "entity/pig/pig_temperate",
+        "the default pig row"
+    );
+    // A cold pig variant (registry id 2 in vanilla's order: temperate, warm, cold).
+    s.set_mob_variants(
+        "minecraft:pig_variant",
+        vec![
+            Some(
+                crate::variants::VariantAssets::from_assets(
+                    "minecraft:entity/pig/pig_temperate",
+                    Some("minecraft:entity/pig/pig_temperate_baby"),
+                    None,
+                )
+                .unwrap(),
+            ),
+            None,
+            Some(
+                crate::variants::VariantAssets::from_assets(
+                    "minecraft:entity/pig/pig_cold",
+                    Some("minecraft:entity/pig/pig_cold_baby"),
+                    Some("cold"),
+                )
+                .unwrap(),
+            ),
+        ],
+    );
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: crate::variants::metadata_index::PIG,
+            value: MetadataValue::Other {
+                type_id: crate::variants::serializer_id::PIG_VARIANT,
+                raw: vec![2].into(),
+            },
+        }],
+    );
+    let mut out = Vec::new();
+    s.render_instances(0.5, &mut out);
+    let cold = out[0].model.clone();
+    assert_eq!(cold.texture.path(), "entity/pig/pig_cold");
+    assert_ne!(cold.root, default.root, "the cold layer differs");
+    // An unknown variant id (a mod's registry): the default row stands.
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: crate::variants::metadata_index::PIG,
+            value: MetadataValue::Other {
+                type_id: crate::variants::serializer_id::PIG_VARIANT,
+                raw: vec![7].into(),
+            },
+        }],
+    );
+    let mut out = Vec::new();
+    s.render_instances(0.5, &mut out);
+    assert_eq!(out[0].model.texture.path(), "entity/pig/pig_temperate");
+}

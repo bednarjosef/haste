@@ -23,6 +23,7 @@ use haste_protocol::haste_core::game::{DimensionInfo, GameMode};
 use haste_protocol::haste_core::{
     BlockPos, BlockStateId, ChunkPos, EntityId, Identifier, RegistryIndex,
 };
+use haste_protocol::nbt::NbtCompound;
 use haste_protocol::packets::play::clientbound as cb;
 use haste_protocol::packets::play::clientbound::teleport_flags;
 use haste_protocol::{
@@ -133,6 +134,11 @@ pub trait EntitySink {
     fn player_info(&mut self, info: &[PlayerInfo]);
     /// `EntityStore::set_passengers`: the vehicle's passenger list is replaced by `passengers`.
     fn set_passengers(&mut self, vehicle: EntityId, passengers: &[EntityId]);
+    /// `EntityStore::set_world_age` (from `set_time`); the bee's anger end time compares
+    /// against it. Default no-op.
+    fn set_world_age(&mut self, world_age: i64) {
+        let _ = world_age;
+    }
     /// `EntityStore::entity_type_info`: registry index and dimensions, for the seat offset.
     fn entity_type_info(&self, _id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
         None
@@ -245,6 +251,9 @@ impl EntitySink for EntityStore {
     fn set_passengers(&mut self, vehicle: EntityId, passengers: &[EntityId]) {
         EntityStore::set_passengers(self, vehicle, passengers)
     }
+    fn set_world_age(&mut self, world_age: i64) {
+        EntityStore::set_world_age(self, world_age)
+    }
     fn entity_type_info(&self, id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
         EntityStore::entity_type_info(self, id)
     }
@@ -323,6 +332,46 @@ pub fn painting_variants(regs: &SyncedRegistries) -> HashMap<u32, haste_entity::
                 );
             }
         }
+    }
+    out
+}
+
+/// The variant registries the variant mobs read (`haste_entity::VARIANT_REGISTRIES`), each
+/// parsed into haste-entity's per-id asset table: `asset_id`/`baby_asset_id` (and `model`
+/// for pig/cow/chicken; wolf nests `assets`/`baby_assets` with `wild`/`tame`/`angry` — the
+/// wild texture is what an untamed, calm mob shows). An entry whose NBT is absent (a known
+/// pack) or does not parse stays `None`: the mob keeps the model table's default look.
+/// Returns the registry name and its table, one per registry the server sent.
+pub fn mob_variants(
+    regs: &SyncedRegistries,
+) -> Vec<(String, Vec<Option<haste_entity::VariantAssets>>)> {
+    let parse = |nbt: &NbtCompound| -> Option<haste_entity::VariantAssets> {
+        if nbt.get_string("asset_id").is_some() {
+            haste_entity::VariantAssets::from_assets(
+                nbt.get_string("asset_id").unwrap(),
+                nbt.get_string("baby_asset_id"),
+                nbt.get_string("model"),
+            )
+        } else {
+            // Wolf: assets/baby_assets, each with wild/tame/angry; batch 1 reads the wild
+            // texture (tame/angry are TamableAnimal flag textures, a later task).
+            let wild = nbt.get_compound("assets")?.get_string("wild")?;
+            let baby_wild = nbt.get_compound("baby_assets")?.get_string("wild")?;
+            haste_entity::VariantAssets::from_assets(wild, Some(baby_wild), None)
+        }
+    };
+    let mut out = Vec::new();
+    for wanted in haste_entity::VARIANT_REGISTRIES {
+        let Some(registry) = regs.names().find(|n| n.to_string() == *wanted) else {
+            continue;
+        };
+        let Some(entries) = regs.entries(registry) else {
+            continue;
+        };
+        let table = (0..entries.len())
+            .map(|i| regs.entry_nbt(registry, i).as_ref().and_then(parse))
+            .collect();
+        out.push(((*wanted).to_owned(), table));
     }
     out
 }
@@ -1135,6 +1184,7 @@ impl Session {
             }
             P::PlayerInfoUpdate(u) => entities.player_info(&u.infos()),
             P::SetTime(t) => {
+                entities.set_world_age(t.world_age);
                 if let Some(c) = t.clocks.first() {
                     self.time_of_day = Some(c.time);
                 }

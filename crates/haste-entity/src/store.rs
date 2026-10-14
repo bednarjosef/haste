@@ -411,6 +411,12 @@ pub struct EntityStore {
     /// The synced `minecraft:painting_variant` registry (id -> size/asset), set at join from
     /// the server's `registry_data`; empty when the server sent none.
     painting_variants: HashMap<u32, crate::decoration::PaintingVariant>,
+    /// The synced variant registries (cat/wolf/frog/pig/cow/chicken), set at join from the
+    /// server's `registry_data`; empty when the server sent none.
+    mob_variants: crate::variants::MobVariants,
+    /// The world age of the last `set_time` (`NeutralMob.isAngry` compares anger end times
+    /// against it); 0 before one arrives.
+    world_age: i64,
     /// Item default components (the `equippable` component armour reads), from the datagen
     /// report; empty when absent (armour then draws nothing).
     item_components: haste_data::ItemComponents,
@@ -443,6 +449,8 @@ impl EntityStore {
             players: AHashMap::new(),
             riding: Riding::new(),
             painting_variants: HashMap::new(),
+            mob_variants: crate::variants::MobVariants::empty(),
+            world_age: 0,
             item_components: haste_data::ItemComponents::default(),
         }
     }
@@ -460,6 +468,23 @@ impl EntityStore {
         variants: HashMap<u32, crate::decoration::PaintingVariant>,
     ) {
         self.painting_variants = variants;
+    }
+
+    /// Sets one synced variant registry's table (id -> assets), from the server's
+    /// `registry_data` at join (see `haste-client`'s `net::mob_variants`). Registries no
+    /// variant mob reads are ignored.
+    pub fn set_mob_variants(
+        &mut self,
+        registry: &str,
+        entries: Vec<Option<crate::variants::VariantAssets>>,
+    ) {
+        self.mob_variants.insert(registry, entries);
+    }
+
+    /// The world age from `set_time` (the bee's anger end time compares against it,
+    /// `NeutralMob.isAngry`).
+    pub fn set_world_age(&mut self, world_age: i64) {
+        self.world_age = world_age;
     }
 
     fn slot(&self, id: EntityId) -> Option<u32> {
@@ -787,12 +812,36 @@ impl EntityStore {
             } else {
                 // Registry table first (shared per type, head flag precomputed), then the box.
                 // Babies use the row's baby layer, like vanilla's AgeableMobRenderer.submit.
-                let baby = crate::registry::entity_type_name(slot.kind)
-                    .filter(|_| crate::registry::is_baby(&slot.metadata))
-                    .and_then(|n| crate::registry::baby_model_for_name(&n));
-                match crate::registry::model_entry(slot.kind) {
-                    Some((head, m)) => (baby.unwrap_or(m), head),
-                    None => (
+                // Variant mobs (cat/wolf/frog/pig/cow/chicken) instead resolve their look from
+                // the synced variant registry through the entity's metadata, falling back to
+                // the table's default row when the variant is unknown or absent.
+                let baby = crate::registry::is_baby(&slot.metadata);
+                let variant =
+                    crate::variants::model_for(slot.kind, &self.mob_variants, &slot.metadata, baby)
+                        .or_else(|| {
+                            // Metadata-driven variants (axolotl/rabbit/horse/llama/panda/
+                            // parrot/fox/bee/strider/mooshroom): the same layer, the variant's
+                            // texture.
+                            crate::variants::metadata_model_for(
+                                slot.kind,
+                                &slot.metadata,
+                                baby,
+                                slot.nametag.as_deref(),
+                                self.world_age,
+                            )
+                        });
+                let entry = crate::registry::model_entry(slot.kind);
+                match (variant, entry) {
+                    // A variant model (already the baby's when `baby`); all six variant mobs
+                    // have a head part, so the head aim stays on.
+                    (Some(v), _) => (v, true),
+                    (None, Some((head, m))) => {
+                        let baby_model = crate::registry::entity_type_name(slot.kind)
+                            .filter(|_| baby)
+                            .and_then(|n| crate::registry::baby_model_for_name(&n));
+                        (baby_model.unwrap_or(m), head)
+                    }
+                    (None, None) => (
                         crate::models::box_for(slot.dimensions.0, slot.dimensions.1),
                         false,
                     ),
@@ -834,7 +883,8 @@ impl EntityStore {
                 yaw,
                 pitch: slot.pitch,
                 head_yaw: slot.head_yaw,
-                scale: 1.0,
+                // Slime/magma cube size (`AbstractCubeMob.ID_SIZE`); 1.0 for everything else.
+                scale: crate::variants::scale_for(slot.kind, &slot.metadata),
                 pose,
                 body,
                 body_scale,

@@ -12,6 +12,7 @@ pub mod models;
 pub mod registry;
 pub mod riding;
 pub mod store;
+pub mod variants;
 
 #[cfg(test)]
 mod tests;
@@ -21,3 +22,4 @@ pub use dims::{Dimensions, EntityDimensions};
 pub use metadata::{Metadata, MobFlags, SharedFlags};
 pub use riding::{passenger_seat, PassengerKind, SeatPoint, SeatQuery};
 pub use store::{Entity, EntityStore};
+pub use variants::{MobVariants, VariantAssets, VariantModel, VARIANT_REGISTRIES};
