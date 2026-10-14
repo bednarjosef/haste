@@ -195,6 +195,10 @@ pub struct LocalPlayer {
     attributes: Vec<cb::AttributeProperty>,
     attributes_dirty: bool,
     toggle_flight: bool,
+    /// The local player's own block sounds (client-side rules, sound.rs).
+    pub(crate) own_sounds: crate::sound::OwnBlockSounds,
+    /// Own-sound requests this tick, drained into `Session::sound_requests` by `end_tick`.
+    pub(crate) sound_out: Vec<crate::sound::SoundRequest>,
     /// Breaking, placing, using, attacking, hotbar and inventory (player/interact.rs).
     pub(crate) int: interact::Interaction,
 }
@@ -231,6 +235,8 @@ impl LocalPlayer {
             attributes: Vec::new(),
             attributes_dirty: false,
             toggle_flight: false,
+            own_sounds: crate::sound::OwnBlockSounds::new(),
+            sound_out: Vec::new(),
             int: interact::Interaction::default(),
         };
         p.state.on_ground = true;
@@ -241,6 +247,14 @@ impl LocalPlayer {
     /// Server rotations as an offset to add to the input layer's yaw/pitch (degrees).
     pub fn look_offset(&self) -> (f32, f32) {
         self.look_offset
+    }
+
+    /// Own-sound requests accumulated this tick (footsteps, mining, placing),
+    /// for the caller to drain into its sound output or headless counters.
+    pub fn take_own_sound_requests(
+        &mut self,
+    ) -> std::vec::Drain<'_, crate::sound::SoundRequest> {
+        self.sound_out.drain(..)
     }
 
     /// Double-tap jump (creative/spectator): toggles flight on the next tick if allowed.
@@ -429,6 +443,7 @@ impl LocalPlayer {
             pick(teleport_flags::VEL_Z, v.z, p.velocity.z),
         );
         s.fall_distance = 0.0;
+        self.own_sounds.reset_steps();
         self.set_look(yaw, pitch);
         tracing::debug!("after teleport {:?}", self.state);
         self.prev_pos = self.state.pos;
@@ -625,11 +640,17 @@ impl LocalPlayer {
             self.state.sprinting = false;
         }
         let was_flying = self.state.flying;
+        let was_on_ground = self.state.on_ground;
+        let pre_tick_pos = self.state.pos;
+        let pre_tick_fall = self.state.fall_distance;
         if std::mem::take(&mut self.toggle_flight) && self.abilities.may_fly {
             self.state.flying = !self.state.flying;
         }
         if !self.abilities.may_fly {
             self.state.flying = false;
+        }
+        if self.state.flying != was_flying {
+            self.own_sounds.reset_steps();
         }
         let chunk = BlockPos::from_dvec3(self.state.pos).chunk();
         if world.is_chunk_loaded(chunk) {
@@ -641,6 +662,26 @@ impl LocalPlayer {
                 shapes,
                 blocks,
             );
+            // Own block sounds of moving: the step rule on the block below the
+            // feet, the fall sound on a hard landing (vanilla plays both on
+            // the client; the server excludes the acting player).
+            let movement = self.state.pos - pre_tick_pos;
+            let sound_type = env.and_then(|e| {
+                supporting_block_state(self.state.pos, world)
+                    .and_then(|s| e.data.block_sound_type(s))
+            });
+            self.own_sounds
+                .after_move(movement, self.state.pos, sound_type, &mut self.sound_out);
+            if !was_on_ground
+                && self.state.on_ground
+                && pre_tick_fall > SAFE_FALL_DISTANCE
+                && !self.state.in_water
+                && !self.state.flying
+            {
+                if let Some(t) = sound_type {
+                    self.own_sounds.landed_hard(self.state.pos, t, &mut self.sound_out);
+                }
+            }
         } else {
             self.state.yaw = phys_input.yaw;
             self.state.pitch = phys_input.pitch;
@@ -729,6 +770,22 @@ impl LocalPlayer {
         self.sent.on_ground = s.on_ground;
         self.sent.horizontal_collision = s.horizontal_collision;
     }
+}
+
+/// Vanilla's safe fall distance (the `SAFE_FALL_DISTANCE` attribute's default):
+/// a landing from above this plays the block's fall sound; below it, nothing.
+pub const SAFE_FALL_DISTANCE: f32 = 3.0;
+
+/// The block supporting the player at `pos` (vanilla `Entity.getOnPosLegacy`:
+/// the block at feet y minus 0.2), for step and fall sounds.
+fn supporting_block_state(pos: DVec3, world: &dyn BlockView) -> Option<haste_core::BlockStateId> {
+    let p = BlockPos::new(
+        pos.x.floor() as i32,
+        (pos.y - 0.2).floor() as i32,
+        pos.z.floor() as i32,
+    );
+    let state = world.block_state(p);
+    (state != haste_core::BlockStateId::AIR).then_some(state)
 }
 
 /// `player_input` flags for the held keys.

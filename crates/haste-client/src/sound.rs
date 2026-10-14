@@ -189,6 +189,202 @@ pub enum SoundRequest {
     Stop(StopRequest),
 }
 
+/// The local player's own block sounds (vanilla plays these client-side: the
+/// server excludes the acting player from its broadcasts, so a client that
+/// waits for packets stays silent while walking, mining, placing).
+///
+/// The rules are vanilla's, read from the 26.3 client:
+/// - footsteps: `Entity.applyMovementEmissionAndPlaySound` — the horizontal
+///   distance moved (clipped by collision, times 0.6) accumulates in
+///   `moveDist`; a step sound fires when it passes `nextStep`
+///   (`(int)moveDist + 1`, so about every 1.67 blocks walked) and the block
+///   below is not air. Volume is the sound type's times 0.15, pitch
+///   unchanged;
+/// - mining hit: `MultiPlayerGameMode.startDestroyBlock` /
+///   `continueDestroyBlock` call `addBreakingBlockEffects(playSound=true)`
+///   on the *start* tick only (the server broadcasts the 2020 follow-ups
+///   itself, every 4th tick: `ServerPlayerGameMode`). Hit volume is the
+///   sound type's `(v + 1) / 8`, pitch `p * 0.5`;
+/// - break: the server's `level_event` 2001 broadcast excludes nobody, so the
+///   client gets it as a packet — but it does not decode that packet yet, so
+///   we play it ourselves at the moment we predict the block gone: volume
+///   `(v + 1) / 2`, pitch `p * 0.8` (`LevelEventHandler` case 2001);
+/// - place: `BlockItem.place` plays on both sides; the client plays it when
+///   it sends `use_item_on` with a block item (the server's copy never
+///   reaches us — same `playSound(player, ...)` exclusion). Volume
+///   `(v + 1) / 2`, pitch `p * 0.8`;
+/// - fall/landing: `LivingEntity.causeFallDamage` → `playBlockFallSound`
+///   plays the block's fall sound (volume `v * 0.5`, pitch `p * 0.75`) when
+///   fall damage lands (dmg > 0), alongside the hurt sound. We play it when
+///   landing with `fall_distance` above vanilla's safe distance.
+///
+/// Blocks whose sound type the dump does not know (mods) play nothing — no
+/// guess, no panic. Every request goes through the normal `SoundRequest`
+/// path, so headless counts them and the game thread plays them through
+/// `Sounds::apply` with the category volumes applied.
+pub struct OwnBlockSounds {
+    /// Accumulated horizontal distance (vanilla `moveDist`), times 0.6.
+    move_dist: f32,
+    /// Distance at which the next step plays (vanilla `nextStep`).
+    next_step: f32,
+}
+
+/// `SoundSource.PLAYERS`, the category vanilla's `Player.getSoundSource()`
+/// uses for its own sounds (index 7 in the packet's category order).
+const CATEGORY_PLAYERS: i32 = 7;
+/// `SoundSource.BLOCKS` for the block-driven ones (mining hit, break, place).
+const CATEGORY_BLOCKS: i32 = 4;
+
+impl OwnBlockSounds {
+    pub fn new() -> Self {
+        Self {
+            move_dist: 0.0,
+            next_step: 1.0,
+        }
+    }
+
+    /// One tick's movement, after physics: accumulates the walked distance
+    /// and plays a step sound when the rule fires. `movement` is the
+    /// position change the player actually made this tick (vanilla passes
+    /// the collision-clipped movement; the horizontal part counts unless
+    /// climbing).
+    pub fn after_move(
+        &mut self,
+        movement: DVec3,
+        player_pos: DVec3,
+        supporting: Option<&haste_data::BlockSoundType>,
+        requests: &mut Vec<SoundRequest>,
+    ) {
+        // Vanilla accumulates `movement.horizontalDistance() * 0.6` (climbing uses the full
+        // length instead; we have no ladders yet).
+        let horiz = (movement.x * movement.x + movement.z * movement.z).sqrt() as f32 * 0.6;
+        self.move_dist += horiz;
+        if self.move_dist > self.next_step && supporting.is_some() {
+            self.next_step = self.move_dist as i32 as f32 + 1.0;
+            if let Some(t) = supporting {
+                // Entity.playStepSound: step at volume*0.15, pitch unchanged; PLAYER source.
+                play_event(
+                    &t.step_sound,
+                    CATEGORY_PLAYERS,
+                    player_pos,
+                    t.volume * 0.15,
+                    t.pitch,
+                    requests,
+                );
+            }
+        }
+    }
+
+    /// Reset the step accumulator (teleport, respawn, flight start).
+    pub fn reset_steps(&mut self) {
+        self.move_dist = 0.0;
+        self.next_step = 1.0;
+    }
+
+    /// A block break we predicted (the moment the block goes for us).
+    pub fn block_broken(
+        &self,
+        pos: DVec3,
+        t: &haste_data::BlockSoundType,
+        requests: &mut Vec<SoundRequest>,
+    ) {
+        // LevelEventHandler case 2001: break at (v+1)/2, pitch*0.8, BLOCKS source.
+        play_event(
+            &t.break_sound,
+            CATEGORY_BLOCKS,
+            pos,
+            (t.volume + 1.0) / 2.0,
+            t.pitch * 0.8,
+            requests,
+        );
+    }
+
+    /// The first hit of mining a block (start tick only).
+    pub fn mining_hit(
+        &self,
+        pos: DVec3,
+        t: &haste_data::BlockSoundType,
+        requests: &mut Vec<SoundRequest>,
+    ) {
+        // ClientLevel.playBreakingSound: hit at (v+1)/8, pitch*0.5, BLOCKS source.
+        play_event(
+            &t.hit_sound,
+            CATEGORY_BLOCKS,
+            pos,
+            (t.volume + 1.0) / 8.0,
+            t.pitch * 0.5,
+            requests,
+        );
+    }
+
+    /// A block placement we initiated (`use_item_on` with a block item).
+    pub fn block_placed(
+        &self,
+        pos: DVec3,
+        t: &haste_data::BlockSoundType,
+        requests: &mut Vec<SoundRequest>,
+    ) {
+        // BlockItem.place: place at (v+1)/2, pitch*0.8, BLOCKS source.
+        play_event(
+            &t.place_sound,
+            CATEGORY_BLOCKS,
+            pos,
+            (t.volume + 1.0) / 2.0,
+            t.pitch * 0.8,
+            requests,
+        );
+    }
+
+    /// Landed from a fall far enough to hurt: the block's fall sound.
+    pub fn landed_hard(
+        &self,
+        player_pos: DVec3,
+        t: &haste_data::BlockSoundType,
+        requests: &mut Vec<SoundRequest>,
+    ) {
+        // LivingEntity.playBlockFallSound: fall at v*0.5, pitch*0.75, PLAYER source.
+        play_event(
+            &t.fall_sound,
+            CATEGORY_PLAYERS,
+            player_pos,
+            t.volume * 0.5,
+            t.pitch * 0.75,
+            requests,
+        );
+    }
+}
+
+impl Default for OwnBlockSounds {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One own-sound request: an inline event name the normal `Sounds::apply`
+/// path resolves (known to `sounds.json` or dropped as unknown, logged once).
+/// The position is the player (vanilla plays its own sounds at itself); the
+/// break/place/hit ones are at the block, passed by the caller.
+fn play_event(
+    event: &str,
+    category: i32,
+    pos: DVec3,
+    volume: f32,
+    pitch: f32,
+    requests: &mut Vec<SoundRequest>,
+) {
+    if event == "minecraft:intentionally_empty" {
+        return; // vanilla's "no sound" event
+    }
+    requests.push(SoundRequest::Play(PlayRequest {
+        sound: SoundRef::Inline(event.to_owned()),
+        category,
+        pos: SoundPos::Fixed(pos),
+        volume,
+        pitch,
+        seed: 0,
+    }));
+}
+
 /// The sound and music output of one client, owned by the game thread (through
 /// `Shared::sound`). Everything here runs at 20 Hz or per packet; a tick with no sound
 /// started allocates nothing (`SoundSystem::tick` reuses its buffers).
@@ -599,6 +795,177 @@ mod tests {
         sounds.apply(&mut requests, |_| None);
         assert!(sounds.music_playing());
         assert_eq!(sounds.system.playing_in(SoundSource::Music), 1);
+    }
+
+    /// A stone sound type for the own-sound rule tests.
+    fn stone_type() -> haste_data::BlockSoundType {
+        haste_data::BlockSoundType {
+            break_sound: "minecraft:block.stone.break".to_owned(),
+            step_sound: "minecraft:block.stone.step".to_owned(),
+            place_sound: "minecraft:block.stone.place".to_owned(),
+            hit_sound: "minecraft:block.stone.hit".to_owned(),
+            fall_sound: "minecraft:block.stone.fall".to_owned(),
+            volume: 1.0,
+            pitch: 1.0,
+        }
+    }
+
+    fn step_request(r: &SoundRequest) -> (&str, f32, f32) {
+        match r {
+            SoundRequest::Play(p) => match &p.sound {
+                SoundRef::Inline(name) => (name, p.volume, p.pitch),
+                other => panic!("not an inline event: {other:?}"),
+            },
+            other => panic!("not a play: {other:?}"),
+        }
+    }
+
+    /// Vanilla's step-distance rule (`Entity.applyMovementEmissionAndPlaySound`):
+    /// the walked distance accumulates times 0.6 and a step plays when it passes
+    /// `nextStep` = `(int)moveDist + 1`. Walking 0.2 blocks per tick: the first
+    /// step fires when the accumulated 0.12-per-tick sum passes 1.0 (tick 9), the
+    /// next when it passes 2.0 (tick 17) — about every 1.67 blocks walked.
+    #[test]
+    fn step_distance_rule_fires_every_full_block_walked() {
+        let mut own = OwnBlockSounds::new();
+        let stone = stone_type();
+        let mut fired = 0;
+        for tick in 0..40 {
+            // 0.2 blocks per tick of horizontal movement.
+            let mut requests = Vec::new();
+            own.after_move(
+                DVec3::new(0.2, 0.0, 0.0),
+                DVec3::ZERO,
+                Some(&stone),
+                &mut requests,
+            );
+            if !requests.is_empty() {
+                fired += 1;
+                // Each firing is exactly one step sound at the stone step event,
+                // volume 1.0 * 0.15, pitch 1.0 (vanilla's factors).
+                assert_eq!(requests.len(), 1, "tick {tick}");
+                let (name, volume, pitch) = step_request(&requests[0]);
+                assert_eq!(name, "minecraft:block.stone.step");
+                assert!((volume - 0.15).abs() < 1e-6);
+                assert!((pitch - 1.0).abs() < 1e-6);
+            }
+        }
+        // 40 ticks * 0.2 blocks = 8 blocks = 4.8 accumulated: 4 steps (after 1.0, 2.0,
+        // 3.0, 4.0), not one per tick and not zero.
+        assert_eq!(fired, 4, "steps fired");
+    }
+
+    /// On air (no supporting block) no step plays, but the walked distance still
+    /// accumulates (vanilla's `moveDist` counts it; only the firing needs support):
+    /// landing after walking far over air fires one step per crossed block boundary,
+    /// in quick succession — exactly what vanilla does.
+    #[test]
+    fn no_step_over_air_then_boundaries_on_landing() {
+        let mut own = OwnBlockSounds::new();
+        let stone = stone_type();
+        // Walk 10 blocks over air: nothing fires, nextStep stays 1.0.
+        for _ in 0..50 {
+            let mut requests = Vec::new();
+            own.after_move(DVec3::new(0.2, 0.0, 0.0), DVec3::ZERO, None, &mut requests);
+            assert!(requests.is_empty());
+        }
+        assert!((own.next_step - 1.0).abs() < 1e-6);
+        // Land: the first tick (md 6.12) crosses boundary 1 and the accumulator
+        // catches nextStep up to 7; then 7.02 and 8.04 fire in the 20 ticks.
+        let mut fired = 0;
+        for _ in 0..20 {
+            let mut requests = Vec::new();
+            own.after_move(
+                DVec3::new(0.2, 0.0, 0.0),
+                DVec3::ZERO,
+                Some(&stone),
+                &mut requests,
+            );
+            fired += requests.len();
+        }
+        assert_eq!(fired, 3, "20 ticks on stone after 10 over air");
+    }
+
+    /// A teleport resets the accumulator (vanilla's `nextStep` starts at 1.0), so
+    /// the first step after one comes a full block of walking later.
+    #[test]
+    fn teleport_resets_the_step_accumulator() {
+        let mut own = OwnBlockSounds::new();
+        let stone = stone_type();
+        // Walk to md 0.6 (no fire yet) and teleport.
+        for _ in 0..5 {
+            let mut requests = Vec::new();
+            own.after_move(DVec3::new(0.2, 0.0, 0.0), DVec3::ZERO, Some(&stone), &mut requests);
+            assert!(requests.is_empty());
+        }
+        own.reset_steps();
+        assert!((own.next_step - 1.0).abs() < 1e-6);
+        assert!((own.move_dist - 0.0).abs() < 1e-6);
+        // 5 more ticks (md 0.6): still no step; the 9th would have fired without
+        // the reset (md 1.08 > 1.0).
+        let mut requests = Vec::new();
+        for _ in 0..5 {
+            own.after_move(DVec3::new(0.2, 0.0, 0.0), DVec3::ZERO, Some(&stone), &mut requests);
+        }
+        assert!(requests.is_empty(), "no step within half a block of the teleport");
+        let mut fired = 0;
+        for _ in 0..5 {
+            let mut requests = Vec::new();
+            own.after_move(DVec3::new(0.2, 0.0, 0.0), DVec3::ZERO, Some(&stone), &mut requests);
+            fired += requests.len();
+        }
+        assert_eq!(fired, 1, "the step comes a block after the teleport");
+    }
+
+    /// The mining hit's volume/pitch factors (`ClientLevel.playBreakingSound`:
+    /// (v+1)/8 and p*0.5) and the break's (`LevelEventHandler` case 2001:
+    /// (v+1)/2 and p*0.8). A loud metal type (volume 1.0, pitch 1.5) tells the
+    /// factors apart.
+    #[test]
+    fn mining_hit_and_break_volume_pitch_factors() {
+        let own = OwnBlockSounds::new();
+        let mut metal = stone_type();
+        metal.volume = 1.0;
+        metal.pitch = 1.5;
+        let mut requests = Vec::new();
+        own.mining_hit(DVec3::ZERO, &metal, &mut requests);
+        own.block_broken(DVec3::ZERO, &metal, &mut requests);
+        assert_eq!(requests.len(), 2);
+        let (_, hit_v, hit_p) = step_request(&requests[0]);
+        assert!((hit_v - 2.0 / 8.0).abs() < 1e-6, "hit volume {hit_v}");
+        assert!((hit_p - 0.75).abs() < 1e-6, "hit pitch {hit_p}");
+        let (_, break_v, break_p) = step_request(&requests[1]);
+        assert!((break_v - 1.0).abs() < 1e-6, "break volume {break_v}");
+        assert!((break_p - 1.2).abs() < 1e-6, "break pitch {break_p}");
+    }
+
+    /// The place (`BlockItem.place`: (v+1)/2, p*0.8) and fall
+    /// (`LivingEntity.playBlockFallSound`: v*0.5, p*0.75) factors, and vanilla's
+    /// "no sound" event (`intentionally_empty`) plays nothing.
+    #[test]
+    fn place_and_fall_factors_and_the_empty_event() {
+        let own = OwnBlockSounds::new();
+        let mut wool = stone_type();
+        wool.volume = 0.8;
+        wool.pitch = 1.2;
+        let mut requests = Vec::new();
+        own.block_placed(DVec3::ZERO, &wool, &mut requests);
+        own.landed_hard(DVec3::ZERO, &wool, &mut requests);
+        assert_eq!(requests.len(), 2);
+        let (_, place_v, place_p) = step_request(&requests[0]);
+        assert!((place_v - 0.9).abs() < 1e-6, "place volume {place_v}");
+        assert!((place_p - 0.96).abs() < 1e-6, "place pitch {place_p}");
+        let (_, fall_v, fall_p) = step_request(&requests[1]);
+        assert!((fall_v - 0.4).abs() < 1e-6, "fall volume {fall_v}");
+        assert!((fall_p - 0.9).abs() < 1e-6, "fall pitch {fall_p}");
+        // A sound type whose event is intentionally_empty (RED_SHRUB's step) plays
+        // nothing rather than a silent event.
+        let mut quiet = stone_type();
+        quiet.step_sound = "minecraft:intentionally_empty".to_owned();
+        let mut own = OwnBlockSounds::new();
+        let mut requests = Vec::new();
+        own.after_move(DVec3::new(0.2, 0.0, 0.0), DVec3::ZERO, Some(&quiet), &mut requests);
+        assert!(requests.is_empty());
     }
 
     #[test]

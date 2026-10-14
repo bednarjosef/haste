@@ -426,7 +426,7 @@ impl LocalPlayer {
             && self.int.destroying.is_none();
         if use_now {
             self.int.use_delay = USE_DELAY;
-            self.use_item(look, out);
+            self.use_item(look, env, out);
         }
 
         // 5. Pick block.
@@ -478,7 +478,7 @@ impl LocalPlayer {
         self.int.input.hotbar = None;
     }
 
-    fn use_item(&mut self, look: (f32, f32), out: &mut Vec<ServerboundPlay>) {
+    fn use_item(&mut self, look: (f32, f32), env: &InteractEnv<'_>, out: &mut Vec<ServerboundPlay>) {
         let holding = !self.main_hand().is_empty();
         match self.int.target {
             Some(Target::Block(h)) => {
@@ -498,6 +498,12 @@ impl LocalPlayer {
                 if holding {
                     out.push(ServerboundPlay::Punch(sb::Punch {}));
                 }
+                // The place sound, played when we place against a block while holding a
+                // block item (vanilla: BlockItem.place runs on the client too and plays
+                // it; the server's copy excludes us). We cannot know the placed state
+                // yet, so the held block item's block decides; unknown items (not a
+                // block, a mod) play nothing.
+                self.own_place_sound(h.pos, env);
             }
             Some(Target::Entity { id, location }) => {
                 out.push(ServerboundPlay::Interact(sb::Interact {
@@ -517,6 +523,34 @@ impl LocalPlayer {
                         pitch: look.1,
                     }));
                 }
+            }
+        }
+    }
+
+    /// The held item's block, if it is a block item (item id = block id in vanilla,
+    /// `BlockItemId.create(name)`; the 14 crop pairs with differing names are missing
+    /// here — placing crops is rare and the server confirms anyway).
+    fn held_block<'d>(&self, data: &'d haste_data::GameData) -> Option<&'d haste_core::Identifier> {
+        let item = self.main_hand();
+        let index = item.item?;
+        data.registries
+            .name("minecraft:item", index)
+            .and_then(|id| data.blocks.default_state(id).map(|_| id))
+    }
+
+    /// The place sound for a `use_item_on` with a block item held (see `use_item`).
+    fn own_place_sound(&mut self, pos: BlockPos, env: &InteractEnv<'_>) {
+        let Some(block) = self.held_block(env.data) else {
+            return;
+        };
+        let state = env.data.blocks.default_state(block);
+        if let Some(state) = state {
+            if let Some(t) = env.data.block_sound_type(state) {
+                self.own_sounds.block_placed(
+                    pos.as_dvec3() + DVec3::new(0.5, 0.5, 0.5),
+                    t,
+                    &mut self.sound_out,
+                );
             }
         }
     }
@@ -601,6 +635,7 @@ impl LocalPlayer {
                 return;
             }
             self.int.destroy_delay = DESTROY_DELAY;
+            self.own_mining_hit(h.pos, state, env);
             self.send_destroy(action::START_DESTROY, h, state, true, env, out);
             return;
         }
@@ -614,10 +649,23 @@ impl LocalPlayer {
         let d = params.progress_per_tick();
         tracing::debug!("start breaking {:?}: {params:?} -> {d} per tick", h.pos);
         let instant = d >= 1.0;
+        // The start tick's hit sound (vanilla: addBreakingBlockEffects with playSound=true;
+        // the follow-up hits every 4 ticks are the server's 2020 level events).
+        self.own_mining_hit(h.pos, state, env);
         self.send_destroy(action::START_DESTROY, h, state, instant, env, out);
         if !instant {
             self.int.destroying = Some((h.pos, h.face));
             self.int.progress = 0.0;
+        }
+    }
+
+    /// The mining hit sound of a block we start breaking (vanilla plays it
+    /// client-side on the start tick; the block's type comes from the
+    /// `block_sounds.json` dump). Unknown blocks play nothing.
+    fn own_mining_hit(&mut self, pos: BlockPos, state: BlockStateId, env: &InteractEnv<'_>) {
+        if let Some(t) = env.data.block_sound_type(state) {
+            self.own_sounds
+                .mining_hit(pos.as_dvec3() + DVec3::new(0.5, 0.5, 0.5), t, &mut self.sound_out);
         }
     }
 
@@ -719,6 +767,15 @@ impl LocalPlayer {
             // server's update.
             let to = env.data.fluid(state).is_none().then_some(BlockStateId::AIR);
             self.int.predict(seq, h.pos, state, to);
+            // The break sound, played the moment the block goes for us (vanilla's client
+            // gets it as the server's level_event 2001, which we do not decode yet).
+            if let Some(t) = env.data.block_sound_type(state) {
+                self.own_sounds.block_broken(
+                    h.pos.as_dvec3() + DVec3::new(0.5, 0.5, 0.5),
+                    t,
+                    &mut self.sound_out,
+                );
+            }
         }
     }
 }
