@@ -9,12 +9,8 @@ use std::sync::Arc;
 use glam::{Mat3, Mat4, Vec3};
 use haste_assets::Assets;
 use haste_core::model::{
-// MERGE(animations side):
-    BodyOp, BodyTransform, CubeModel, Decoration, EntityInstance, ItemFrameDecoration, ModelPart,
-// MERGE(main side):
-    CubeModel, Decoration, DroppedItem, EntityInstance, ItemFrameDecoration, ModelPart,
-// MERGE end
-    PaintingDecoration, PoseOverrides,
+    BodyOp, BodyTransform, CubeModel, Decoration, DroppedItem, EntityInstance, ItemFrameDecoration,
+    ModelPart, PaintingDecoration, PoseOverrides,
 };
 use haste_core::{EntityId, Identifier};
 
@@ -492,8 +488,6 @@ impl EntityRenderer {
             }
             let (texture, scale) = texture_and_scale(e);
             let rect = self.texture_rect(&texture, assets);
-// MERGE(animations side):
-            let light = lightmap(sky, block);
             // `LivingEntityRenderer.setupRotations`: the body yaw turns the whole model, except a
             // sleeping entity, whose pose replaces that yaw with its own rotation sequence. The
             // body transform (death tilt, sleeping, upside-down, player flying/swimming pitch) is
@@ -515,11 +509,6 @@ impl EntityRenderer {
                 * yaw
                 * body_matrix(&e.body)
                 * Mat4::from_scale(s / 16.0);
-// MERGE(main side):
-            let root = Mat4::from_translation((e.pos - camera).as_vec3())
-                * Mat4::from_rotation_y((180.0 - e.yaw).to_radians())
-                * Mat4::from_scale(Vec3::new(-scale, -scale, scale) / 16.0);
-// MERGE end
             let start = self.vertices.len();
             emit_part(
                 &mut self.vertices,

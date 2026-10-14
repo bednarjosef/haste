@@ -238,19 +238,16 @@ pub struct Entity {
     pub hurt_ticks: u32,
     /// Set on the death event: holds the hurt tint instead of easing out.
     pub dead: bool,
-// MERGE(animations side):
     /// `Creeper.swell`/`oldSwell`: the client-side swell count advanced by `Creeper.tick` from
     /// the synced swell direction, interpolated for `getSwelling(partial)`.
     pub swell: i32,
     pub old_swell: i32,
     /// `IronGolem.attackAnimationTick`: set to 10 by entity event 4, decremented each tick.
     pub attack_ticks: i32,
-// MERGE(main side):
     /// A dropped item entity's stack (metadata index 9, `Item`), if its metadata named one.
     pub item: Option<ItemStackData>,
     /// Ticks since spawn: drives the dropped items' spin and bob.
     pub age: u32,
-// MERGE end
 }
 
 impl Entity {
@@ -291,14 +288,11 @@ impl Entity {
             flapping: 1.0,
             hurt_ticks: 0,
             dead: false,
-// MERGE(animations side):
             swell: 0,
             old_swell: 0,
             attack_ticks: 0,
-// MERGE(main side):
             item: None,
             age: 0,
-// MERGE end
         }
     }
 
@@ -655,15 +649,13 @@ impl EntityStore {
             slot.flap += slot.flapping * 2.0;
             slot.swing.tick();
             slot.hurt_ticks = slot.hurt_ticks.saturating_sub(1);
-// MERGE(animations side):
             // `Creeper.tick`: the client advances its own swell count from the synced direction
             // (an ignited creeper forces it to 1), clamped to [0, maxSwell].
             slot.old_swell = slot.swell;
             if slot.metadata.creeper_ignited {
                 slot.metadata.creeper_swell_dir = 1;
             }
-            slot.swell =
-                (slot.swell + slot.metadata.creeper_swell_dir).clamp(0, CREEPER_MAX_SWELL);
+            slot.swell = (slot.swell + slot.metadata.creeper_swell_dir).clamp(0, CREEPER_MAX_SWELL);
             // `IronGolem.tick`: the attack animation tick counts down.
             slot.attack_ticks = slot.attack_ticks.saturating_sub(1);
             // `LivingEntity.tick`: fallFlyTicks counts while the fall-flying flag is set.
@@ -672,9 +664,7 @@ impl EntityStore {
             } else {
                 slot.fall_flying_ticks = 0;
             }
-// MERGE(main side):
             slot.age = slot.age.saturating_add(1);
-// MERGE end
         }
     }
 
@@ -747,8 +737,11 @@ impl EntityStore {
             let pose =
                 crate::animation::setup_anim(slot, &model, has_head, partial_tick, is_passenger);
             let texture = model.texture.path();
-            let body =
-                crate::animation::body_transform(slot, partial_tick, texture.contains("iron_golem"));
+            let body = crate::animation::body_transform(
+                slot,
+                partial_tick,
+                texture.contains("iron_golem"),
+            );
             // `CreeperRenderer.scale`'s swell wobble; every other model is uniformly scaled.
             let body_scale = if texture.contains("creeper") {
                 crate::animation::creeper_scale(slot, partial_tick)

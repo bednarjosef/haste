@@ -707,7 +707,10 @@ fn mob_flags_byte_aggressive_and_left_handed() {
 /// (`-2.09440`), the adult raiseArms branch, at rest with age 0 (idle bob adds z 0.1).
 #[test]
 fn aggressive_zombie_arms_are_raised() {
-    let model = mob_model("minecraft:entity/zombie/zombie", &["head", "right_arm", "left_arm"]);
+    let model = mob_model(
+        "minecraft:entity/zombie/zombie",
+        &["head", "right_arm", "left_arm"],
+    );
     let mut s = store();
     s.spawn(&spawn(1, DVec3::ZERO));
     s.set_metadata(
@@ -838,7 +841,9 @@ fn dinnerbone_is_upside_down() {
         EntityId(1),
         &[MetadataEntry {
             index: 2,
-            value: MetadataValue::OptionalComponent(Some(haste_core::Component::text("Dinnerbone"))),
+            value: MetadataValue::OptionalComponent(Some(haste_core::Component::text(
+                "Dinnerbone",
+            ))),
         }],
     );
     s.set_rotation(EntityId(1), 0.0, 30.0, true);
@@ -884,7 +889,9 @@ fn sleeping_pose_replaces_the_body_yaw() {
     let b = crate::animation::body_transform(e, 0.0, false);
     assert!(b.suppress_yaw);
     assert_eq!(b.len, 3);
-    assert!(matches!(b.ops[1], BodyOp::RotateZ(a) if (a - std::f32::consts::FRAC_PI_2).abs() < 1e-5));
+    assert!(
+        matches!(b.ops[1], BodyOp::RotateZ(a) if (a - std::f32::consts::FRAC_PI_2).abs() < 1e-5)
+    );
     assert!(matches!(b.ops[2], BodyOp::RotateY(a) if (a - 270.0f32.to_radians()).abs() < 1e-5));
 }
 
@@ -964,7 +971,11 @@ fn villager_unhappy_shakes_head_and_halves_walk() {
     let speed = e.walk.speed(0.0);
     let want = (pos * 0.6662).cos() * 1.4 * speed * 0.5;
     let rl = rot.get("right_leg").unwrap();
-    assert!((rl.x - want).abs() < 1e-5, "villager leg {} != {want}", rl.x);
+    assert!(
+        (rl.x - want).abs() < 1e-5,
+        "villager leg {} != {want}",
+        rl.x
+    );
 }
 
 /// `IllagerModel.setupAnim`: a calm vindicator crosses its arms (the "arms" part shown, the two
@@ -1014,7 +1025,14 @@ fn illager_crosses_arms_and_attacks_when_aggressive() {
 fn iron_golem_attack_arms() {
     let model = mob_model(
         "entity/iron_golem/iron_golem",
-        &["head", "body", "right_arm", "left_arm", "right_leg", "left_leg"],
+        &[
+            "head",
+            "body",
+            "right_arm",
+            "left_arm",
+            "right_leg",
+            "left_leg",
+        ],
     );
     let mut s = store();
     s.spawn(&spawn(1, DVec3::ZERO));

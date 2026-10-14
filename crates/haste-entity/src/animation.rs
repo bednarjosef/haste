@@ -151,25 +151,6 @@ pub(crate) fn setup_anim(
 
     match model_kind(model) {
         ModelKind::Humanoid => {
-// MERGE(animations side):
-            humanoid(&mut o, e, pitch, partial, walk_pos, walk_speed, swing, age, is_passenger, false);
-            push_head(&mut o, e, pitch, head_rel, partial, true);
-        }
-        ModelKind::Zombie => {
-            humanoid(&mut o, e, pitch, partial, walk_pos, walk_speed, swing, age, is_passenger, true);
-            push_head(&mut o, e, pitch, head_rel, partial, true);
-        }
-        ModelKind::Skeleton => {
-            humanoid(&mut o, e, pitch, partial, walk_pos, walk_speed, swing, age, is_passenger, false);
-            push_head(&mut o, e, pitch, head_rel, partial, true);
-            // `SkeletonModel.setupAnim` (26.3 client): an aggressive skeleton not holding a bow
-            // raises both arms straight ahead, overriding the humanoid walk swing. The
-            // `!isHoldingBow` half needs the main-hand item, which this crate does not resolve
-            // yet; without it the aggressive arms are used (the common case).
-            if e.metadata.mob.aggressive {
-                skeleton_aggressive_arms(&mut o, swing, age);
-            }
-// MERGE(main side):
             humanoid(
                 &mut o,
                 e,
@@ -210,18 +191,21 @@ pub(crate) fn setup_anim(
                 false,
             );
             push_head(&mut o, e, head_rel, partial, true);
-            // `SkeletonModel.setupAnim`'s aggressive bow-ready arms need `isAggressive`, which is
-            // `Mob.getTarget() != null` on the server and is not packet-synced, so the arms stay
-            // at the humanoid walk swing.
-// MERGE end
+            // `SkeletonModel.setupAnim` (26.3 client): an aggressive skeleton not holding a bow
+            // raises both arms straight ahead, overriding the humanoid walk swing. The
+            // `!isHoldingBow` half needs the main-hand item, which this crate does not resolve
+            // yet; without it the aggressive arms are used (the common case).
+            if e.metadata.mob.aggressive {
+                skeleton_aggressive_arms(&mut o, swing, age);
+            }
         }
         ModelKind::Quadruped => {
             quadruped(&mut o, walk_pos, walk_speed);
-            push_head(&mut o, e, pitch, head_rel, partial, false);
+            push_head(&mut o, e, head_rel, partial, false);
         }
         ModelKind::Spider => {
             spider(&mut o, walk_pos, walk_speed);
-            push_head(&mut o, e, pitch, head_rel, partial, false);
+            push_head(&mut o, e, head_rel, partial, false);
         }
         ModelKind::Chicken => chicken(&mut o, e, partial, walk_pos, walk_speed),
         ModelKind::Villager => villager(&mut o, e, pitch, head_rel, walk_pos, walk_speed, age),
@@ -242,7 +226,7 @@ pub(crate) fn setup_anim(
         }
         ModelKind::None => {
             if has_head {
-                push_head(&mut o, e, pitch, head_rel, partial, false);
+                push_head(&mut o, e, head_rel, partial, false);
             }
         }
     }
@@ -317,11 +301,7 @@ pub(crate) fn body_transform(e: &Entity, partial: f32, iron_golem: bool) -> Body
         b.push(BodyOp::RotateY(270.0f32.to_radians()));
     } else if is_upside_down(e) {
         // `translate(0, (boundingBoxHeight + 0.1) / scale, 0)`, then rotate Z 180.
-        b.push(BodyOp::Translate(Vec3::new(
-            0.0,
-            e.dimensions.1 + 0.1,
-            0.0,
-        )));
+        b.push(BodyOp::Translate(Vec3::new(0.0, e.dimensions.1 + 0.1, 0.0)));
         b.push(BodyOp::RotateZ(PI));
     }
 
@@ -362,10 +342,17 @@ pub(crate) fn body_transform(e: &Entity, partial: f32, iron_golem: bool) -> Body
     b
 }
 
+/// The look pitch in radians, negated for an upside-down entity
+/// (`LivingEntityRenderer.extractRenderState`).
+fn look_pitch(e: &Entity) -> f32 {
+    let pitch = if is_upside_down(e) { -e.pitch } else { e.pitch };
+    pitch.to_radians()
+}
+
 /// The head aim: `state.xRot` (look pitch, radians) and `state.yRot` (head yaw relative to the
 /// body). `humanoid` adds the fall-flying/swimming head tip (`HumanoidModel.setupAnim`).
-fn push_head(o: &mut PoseOverrides, e: &Entity, pitch: f32, head_rel: f32, partial: f32, humanoid: bool) {
-    let mut head = Vec3::new(pitch, head_rel.to_radians(), 0.0);
+fn push_head(o: &mut PoseOverrides, e: &Entity, head_rel: f32, partial: f32, humanoid: bool) {
+    let mut head = Vec3::new(look_pitch(e), head_rel.to_radians(), 0.0);
     if humanoid {
         head.x = head_x_rot(e, head.x, partial);
     }
@@ -389,7 +376,6 @@ fn head_x_rot(e: &Entity, mut x: f32, partial: f32) -> f32 {
 fn humanoid(
     o: &mut PoseOverrides,
     e: &Entity,
-    pitch: f32,
     partial: f32,
     walk_pos: f32,
     walk_speed: f32,
@@ -398,6 +384,7 @@ fn humanoid(
     is_passenger: bool,
     zombie: bool,
 ) {
+    let pitch = look_pitch(e);
     // Walk swing (`cos(animationPos * 0.6662) * 2 * speed * 0.5` for arms, `* 1.4` for legs).
     let mut ra = Vec3::new((walk_pos * 0.6662 + PI).cos() * walk_speed, 0.0, 0.0);
     let mut la = Vec3::new((walk_pos * 0.6662).cos() * walk_speed, 0.0, 0.0);
@@ -675,13 +662,12 @@ fn iron_golem(
         (-2.0 + 1.5 * t, -2.0 + 1.5 * t)
     } else {
         let t = triangle_wave(walk_pos, 13.0);
-        (
-            (-0.2 + 1.5 * t) * walk_speed,
-            (-0.2 - 1.5 * t) * walk_speed,
-        )
+        ((-0.2 + 1.5 * t) * walk_speed, (-0.2 - 1.5 * t) * walk_speed)
     };
-    o.rotations.push(("right_arm".into(), Vec3::new(ra, 0.0, 0.0)));
-    o.rotations.push(("left_arm".into(), Vec3::new(la, 0.0, 0.0)));
+    o.rotations
+        .push(("right_arm".into(), Vec3::new(ra, 0.0, 0.0)));
+    o.rotations
+        .push(("left_arm".into(), Vec3::new(la, 0.0, 0.0)));
     o.rotations
         .push(("head".into(), Vec3::new(pitch, head_rel.to_radians(), 0.0)));
     let t = triangle_wave(walk_pos, 13.0) * walk_speed;
@@ -694,11 +680,8 @@ fn iron_golem(
 /// `CreeperRenderer.scale`: the swell-driven wobble and the cubed swell, as a per-axis scale
 /// (x/z on `s`, y on `hs`). `swelling = lerp(partial, oldSwell, swell) / (maxSwell - 2)`.
 pub(crate) fn creeper_scale(e: &Entity, partial: f32) -> Vec3 {
-    let swelling = lerp(
-        partial,
-        e.old_swell as f32,
-        e.swell as f32,
-    ) / (crate::store::CREEPER_MAX_SWELL - 2) as f32;
+    let swelling = lerp(partial, e.old_swell as f32, e.swell as f32)
+        / (crate::store::CREEPER_MAX_SWELL - 2) as f32;
     let mut g = swelling;
     let wobble = 1.0 + (g * 100.0).sin() * g * 0.01;
     g = g.clamp(0.0, 1.0);

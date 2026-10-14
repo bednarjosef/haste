@@ -357,6 +357,8 @@ fn dropped_items_offscreen() {
         head_yaw: 0.0,
         scale: 1.0,
         pose: PoseOverrides::default(),
+        body: BodyTransform::default(),
+        body_scale: glam::Vec3::ONE,
         skin: None,
         nametag: None,
         hurt: 0.0,

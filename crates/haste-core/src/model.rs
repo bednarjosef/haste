@@ -167,5 +167,4 @@ pub struct PaintingDecoration {
     pub height: u8,
     /// The front sprite's texture id, `None` for a variant we do not know (draw the back only).
     pub front: Option<Identifier>,
-    // MERGE end
 }
