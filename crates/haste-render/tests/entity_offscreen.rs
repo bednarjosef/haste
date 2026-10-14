@@ -70,7 +70,7 @@ fn render_with_gui(
     gui: &haste_core::gui::GuiFrame,
     partial_tick: f32,
 ) -> image::RgbaImage {
-    render_with_gui_skip(renderer, world, entities, camera, gui, None)
+    render_with_gui_skip(renderer, world, entities, camera, gui, partial_tick, None)
 }
 
 /// Like [`render_with_gui`], with `FrameInput::camera_entity` (the world pass skips it).
@@ -80,6 +80,7 @@ fn render_with_gui_skip(
     entities: &[EntityInstance],
     camera: Camera,
     gui: &haste_core::gui::GuiFrame,
+    partial_tick: f32,
     camera_entity: Option<haste_core::EntityId>,
 ) -> image::RgbaImage {
     renderer.sample_entity_lights(world, entities);
@@ -238,6 +239,7 @@ fn entities_offscreen() {
         &entities,
         camera,
         &gui,
+        1.0,
         Some(EntityId(1)),
     );
     assert_eq!(first.get_pixel(320, 230).0, empty.get_pixel(320, 230).0);
