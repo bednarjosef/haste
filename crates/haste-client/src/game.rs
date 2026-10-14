@@ -246,14 +246,29 @@ pub struct ViewState {
     pub pose: Option<haste_core::entity::Pose>,
 }
 
-/// The per-tick part of the first-person hand: the held item and the light at the eye. The skin
-/// lives in [`Shared::skin`] because it never changes during a connection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The per-tick part of the first-person hand: the held item, the light at the eye and this
+/// tick's hand animation (swing, equip progress, bob). Every animated value is the pair of the
+/// value at the start and at the end of the tick; the renderer lerps them by partial tick, the
+/// way vanilla's `FirstPersonHandsAndItems.extractRenderState` does. The skin lives in
+/// [`Shared::skin`] because it never changes during a connection.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FirstPersonView {
     /// The main-hand stack's item (`None` draws the bare arm).
     pub item: Option<RegistryIndex>,
     /// (sky light, block light) at the eye position, `FirstPerson::light`'s order.
     pub light: (u8, u8),
+    /// Swing progress 0..1 over the swing's ticks (0 when the hand does not swing).
+    pub attack: (f32, f32),
+    /// Equip progress: 1 held, 0 while the item switches.
+    pub equip: (f32, f32),
+    /// The hand's pitch lag (`LocalPlayer.xBob`), in degrees.
+    pub x_bob: (f32, f32),
+    /// The hand's yaw lag (`LocalPlayer.yBob`), in degrees.
+    pub y_bob: (f32, f32),
+    /// Walk bob amplitude.
+    pub bob: (f32, f32),
+    /// Distance walked in blocks, the bob's phase.
+    pub walk_dist: (f32, f32),
 }
 
 impl FirstPersonView {
@@ -268,7 +283,24 @@ impl FirstPersonView {
         FirstPersonView {
             item,
             light: (world.sky_light(p), world.block_light(p)),
+            attack: (0.0, 0.0),
+            equip: (1.0, 1.0),
+            x_bob: (0.0, 0.0),
+            y_bob: (0.0, 0.0),
+            bob: (0.0, 0.0),
+            walk_dist: (0.0, 0.0),
         }
+    }
+
+    /// This tick's hand animation from the player's [`crate::hand::Hand`].
+    pub fn with_hand(&mut self, hand: &crate::hand::Hand) {
+        self.item = hand.shown_item();
+        self.attack = hand.attack();
+        self.equip = hand.equip();
+        self.x_bob = hand.x_bob();
+        self.y_bob = hand.y_bob();
+        self.bob = hand.bob();
+        self.walk_dist = hand.walk_dist();
     }
 
     /// The renderer's first-person hand for this view drawn with `skin` (the connection's
@@ -280,7 +312,21 @@ impl FirstPersonView {
             slim: skin.1,
             item: self.item,
             light: self.light,
+            attack: pair(self.attack),
+            equip: pair(self.equip),
+            x_bob: pair(self.x_bob),
+            y_bob: pair(self.y_bob),
+            bob: pair(self.bob),
+            walk_dist: pair(self.walk_dist),
         }
+    }
+}
+
+/// A per-tick pair into the renderer's [`haste_render::TickPair`].
+fn pair(v: (f32, f32)) -> haste_render::TickPair {
+    haste_render::TickPair {
+        start: v.0,
+        end: v.1,
     }
 }
 
@@ -638,7 +684,10 @@ fn tick_once(
         driver.session.player.set_interact(interact);
         shared_input.state
     };
-    {
+    // The horizontal distance travelled this tick, for the hand's walk bob: vanilla's
+    // `LocalPlayer.move` adds `length(dx, dz) * 0.6` to `ClientAvatarState.walkDist`.
+    let tick_moved = {
+        let tick_start = driver.session.player.state.pos;
         // Write lock: the player's breaking predicts block changes into the world.
         let mut world = shared.world.write();
         let mut entities = shared.entities.write();
@@ -647,7 +696,9 @@ fn tick_once(
         if !dirty.is_empty() {
             shared.dirty.lock().append(&mut dirty);
         }
-    }
+        let moved = driver.session.player.state.pos - tick_start;
+        ((moved.x * moved.x + moved.z * moved.z).sqrt()) as f32
+    };
     {
         let mut breaking = shared.breaking.lock();
         breaking.clear();
@@ -664,18 +715,31 @@ fn tick_once(
     for p in ui_out {
         driver.queue(p);
     }
+    // The first-person hand's tick, in vanilla's order (`LivingEntity.baseTick`, then
+    // `Player.tick`, then `FirstPersonHandsAndItems.tick`, with the walk bob in `aiStep` before
+    // them); the interaction step above ran the attacks and uses that started the swings. In
+    // spectator the hand is not drawn at all (vanilla hides it there), so it does not advance.
+    let first_person = if driver.session.player.game_mode == GameMode::Spectator {
+        None
+    } else {
+        let p = &mut driver.session.player;
+        p.hand.tick(
+            tick_moved,
+            (p.state.yaw, p.state.pitch),
+            p.state.on_ground,
+            matches!(p.state.pose, haste_physics::Pose::Swimming),
+            p.main_hand().item,
+            p.int.attrs.attack_speed,
+        );
+        let eye = p.camera(1.0).0;
+        let hand = &p.hand;
+        let mut fp = FirstPersonView::sample(&*shared.world.read(), eye, hand.shown_item());
+        fp.with_hand(hand);
+        Some(fp)
+    };
     let s = &driver.session;
     let (prev_eye, prev_yaw, prev_pitch) = s.player.camera(0.0);
     let (eye, yaw, pitch) = s.player.camera(1.0);
-    // The first-person hand this tick: hidden in spectator (vanilla hides it there), otherwise
-    // the main-hand item lit like entities are. Sampled under the world's read lock, like the
-    // breaking stages above; the render thread only reads the copy in the view state.
-    let first_person = if s.player.game_mode == GameMode::Spectator {
-        None
-    } else {
-        let item = s.player.main_hand().item;
-        Some(FirstPersonView::sample(&*shared.world.read(), eye, item))
-    };
     // The sound output's tick: listener from the eye, music situation, then 20 Hz tick.
     {
         let mut sound = shared.sound.lock();
@@ -724,14 +788,9 @@ mod tests {
             haste_core::Identifier::minecraft("entity/player/wide/steve"),
             false,
         );
-        let a = FirstPersonView {
-            item: Some(RegistryIndex(5)),
-            light: (15, 0),
-        };
-        let b = FirstPersonView {
-            item: None,
-            light: (15, 0),
-        };
+        let a = FirstPersonView::sample(&lit(), DVec3::ZERO, Some(RegistryIndex(5)));
+        let mut b = a;
+        b.item = None;
         assert_eq!(a, a);
         assert_ne!(a, b);
         let ha = a.with_skin(&skin);
@@ -741,14 +800,60 @@ mod tests {
         assert_eq!(ha.skin, Some(skin.0.clone()));
         assert!(!ha.slim);
         assert_eq!(ha.item, Some(RegistryIndex(5)));
+        // Sampled at full sky light.
         assert_eq!(ha.light, (15, 0));
         // A differing light also differs (the eye moved into shade).
-        let c = FirstPersonView {
-            item: Some(RegistryIndex(5)),
-            light: (4, 7),
-        };
+        let mut c = a;
+        c.light = (4, 7);
         assert_ne!(a, c);
         assert_ne!(ha, c.with_skin(&skin));
+    }
+
+    /// A world at full sky light, for sampling the hand's light.
+    fn lit() -> LightWorld {
+        LightWorld {
+            sky: 15,
+            block: 0,
+            asked: parking_lot::Mutex::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn the_view_carries_the_hand_animation_to_the_renderer() {
+        // The per-tick pairs go through to the renderer's hand unchanged, so a swinging hand
+        // (or a dipping equip progress, or the walk bob) is a different hand each tick.
+        let skin = (
+            haste_core::Identifier::minecraft("entity/player/wide/steve"),
+            true,
+        );
+        let mut hand = crate::hand::Hand::new();
+        hand.swing();
+        let mut v = FirstPersonView::sample(&lit(), DVec3::ZERO, None);
+        // Two ticks of walking 0.2 blocks with the look at (10, 5) and the hand swinging.
+        for _ in 0..2 {
+            hand.tick(0.2, (10.0, 5.0), true, false, None, 4.0);
+        }
+        v.with_hand(&hand);
+        let moving = v.with_skin(&skin);
+        // The skin's slim arm is passed through.
+        assert!(moving.slim);
+        // The swing is `SwingState.ticks / 6` through: 0 on the attack tick, 1/6 on the next.
+        assert_eq!(v.attack, (0.0, 1.0 / 6.0));
+        assert_eq!(moving.attack.start, 0.0);
+        assert!((moving.attack.end - 1.0 / 6.0).abs() < 1e-7);
+        // Walking: walkDist is 0.6 * distance, its bob is 0.4 per tick towards min(0.2, 0.1),
+        // one tick behind.
+        assert!((v.walk_dist.1 - 0.24).abs() < 1e-6);
+        assert!((v.bob.1 - 0.04).abs() < 1e-6);
+        // The hand lags behind the look by half the remaining angle each tick.
+        assert!((v.y_bob.1 - 7.5).abs() < 1e-6);
+        assert!((v.x_bob.1 - 3.75).abs() < 1e-6);
+        // The next tick's step is a different hand, so the renderer is told again.
+        hand.tick(0.2, (10.0, 5.0), true, false, None, 4.0);
+        let mut next = v;
+        next.with_hand(&hand);
+        assert_ne!(next, v);
+        assert_ne!(next.with_skin(&skin), moving);
     }
 
     #[test]
@@ -768,6 +873,7 @@ mod tests {
     }
 
     /// A world that answers one sky/block light pair and records where it was asked.
+    #[derive(Default)]
     struct LightWorld {
         sky: u8,
         block: u8,

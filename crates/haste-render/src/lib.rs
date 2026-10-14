@@ -19,7 +19,7 @@ pub mod timing;
 pub mod tint;
 pub mod vertex;
 
-pub use entity::{default_skin, EntityRenderer, FirstPerson, Nametag};
+pub use entity::{default_skin, EntityRenderer, FirstPerson, Nametag, TickPair};
 pub use gui::{GuiRenderer, GuiStats, ScreenNametag};
 pub use mesher::{mesh_section, MeshSnapshot, Mesher, SectionMesh, SnapshotSource};
 pub use occlusion::{compute_visible_mask, section_visibility, Face, VisibilitySet};

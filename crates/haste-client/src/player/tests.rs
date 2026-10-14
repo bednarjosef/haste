@@ -22,6 +22,7 @@ fn ids() -> AttributeIds {
         submerged_mining_speed: 34,
         block_interaction_range: 8,
         entity_interaction_range: 13,
+        attack_speed: 3,
     }
 }
 

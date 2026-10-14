@@ -70,6 +70,8 @@ pub struct InteractAttributes {
     pub submerged_mining_speed: f64,
     pub block_reach: f64,
     pub entity_reach: f64,
+    /// `attack_speed`: the equip progress returns over 20 / this many ticks.
+    pub attack_speed: f64,
 }
 
 impl Default for InteractAttributes {
@@ -81,6 +83,7 @@ impl Default for InteractAttributes {
             submerged_mining_speed: 0.2,
             block_reach: 4.5,
             entity_reach: 3.0,
+            attack_speed: crate::hand::DEFAULT_ATTACK_SPEED,
         }
     }
 }
@@ -392,6 +395,8 @@ impl LocalPlayer {
         // 3. Attack / break.
         let pressed = input.attack && !last.attack;
         if pressed {
+            // `Minecraft.startAttack` swings on every attack, whatever the crosshair is on.
+            self.hand.swing();
             match self.int.target {
                 Some(Target::Entity { id, .. }) => {
                     out.push(ServerboundPlay::Attack(sb::Attack { entity_id: id.0 }));
@@ -408,6 +413,8 @@ impl LocalPlayer {
             match self.int.target {
                 Some(Target::Block(h)) => {
                     if self.continue_destroy(h, world, env, out) {
+                        // `Minecraft.continueAttack` swings each tick the breaking continues.
+                        self.hand.swing();
                         out.push(ServerboundPlay::Punch(sb::Punch {}));
                     }
                 }
@@ -480,6 +487,9 @@ impl LocalPlayer {
 
     fn use_item(&mut self, look: (f32, f32), out: &mut Vec<ServerboundPlay>) {
         let holding = !self.main_hand().is_empty();
+        // `Minecraft.startUseItem`: a use whose result is `InteractionResult.SUCCESS`
+        // (vanilla's swing source PREDICTED) swings the hand.
+        self.hand.swing();
         match self.int.target {
             Some(Target::Block(h)) => {
                 let seq = self.int.next_sequence();
@@ -497,6 +507,9 @@ impl LocalPlayer {
                 }));
                 if holding {
                     out.push(ServerboundPlay::Punch(sb::Punch {}));
+                    // `Minecraft.startUseItem` calls `player.itemUsed(hand)` for a use that
+                    // changed the held stack, which puts the hand down for the item switch.
+                    self.hand.item_used();
                 }
             }
             Some(Target::Entity { id, location }) => {
