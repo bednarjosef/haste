@@ -8,7 +8,7 @@
 //! entity render instances, never across `Renderer::render`. Everything else the render thread
 //! needs per frame is a small `Copy` value in [`Shared::view`].
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -416,6 +416,11 @@ pub struct Shared {
     pub ui: Mutex<Option<Ui>>,
     /// The HUD's JVM failed to start (no JDK, missing cache): there will be no HUD, ever.
     pub hud_failed: AtomicBool,
+    /// F3's tps line: packets sent per second (f64 bits), updated once per second by the game
+    /// thread from the connection's counters.
+    pub debug_tx: AtomicU64,
+    /// Packets received per second (f64 bits).
+    pub debug_rx: AtomicU64,
 }
 
 impl Shared {
@@ -474,6 +479,8 @@ impl Shared {
             skin,
             ui: Mutex::new(None),
             hud_failed: AtomicBool::new(false),
+            debug_tx: AtomicU64::new(0),
+            debug_rx: AtomicU64::new(0),
         }
     }
 
@@ -559,6 +566,11 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>) {
     let tick = Duration::from_secs_f64(TICK_SECONDS);
     let mut next = Instant::now();
     let mut gone = Vec::new();
+    // F3's tx/rx rates: the connection's counters sampled once per second (vanilla's
+    // `Connection.getAverageSentPackets` is a 1 s window too).
+    let mut stats_second = Instant::now();
+    let mut last_in = 0u64;
+    let mut last_out = 0u64;
     // The JVM for the HUD takes tens of seconds to start: on its own thread, in parallel with
     // joining (the connection would time out if we waited here). One warning, no retries: a
     // client without a JDK or cache keeps playing without a HUD.
@@ -569,6 +581,20 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>) {
         }
         if let Err(e) = tick_once(&mut driver, &shared, &mut gone, &mut jvm) {
             break format!("tick failed: {e:#}");
+        }
+        if stats_second.elapsed() >= Duration::from_secs(1) {
+            let s = driver.stats();
+            shared.debug_tx.store(
+                ((s.packets_out - last_out) as f64).to_bits(),
+                Ordering::Relaxed,
+            );
+            shared.debug_rx.store(
+                ((s.packets_in - last_in) as f64).to_bits(),
+                Ordering::Relaxed,
+            );
+            last_out = s.packets_out;
+            last_in = s.packets_in;
+            stats_second = Instant::now();
         }
         if driver.is_closed() {
             break driver
@@ -739,6 +765,10 @@ fn tick_once(
         // Held buttons stay; the press-only middle click, drop/swap presses and the hotbar choice
         // are consumed.
         let mut interact = shared_input.interact;
+        // The click counts (vanilla's KeyMapping.clickCount) are drained into the player, which
+        // consumes them in `Minecraft.handleKeybinds`' consumeClick loops.
+        let attack_clicks = std::mem::take(&mut shared_input.interact.attack_clicks);
+        let use_clicks = std::mem::take(&mut shared_input.interact.use_clicks);
         shared_input.interact.pick_block = false;
         shared_input.interact.drop_item = false;
         shared_input.interact.drop_stack = false;
@@ -758,6 +788,12 @@ fn tick_once(
             }
         }
         driver.session.player.set_interact(interact);
+        for _ in 0..attack_clicks {
+            driver.session.player.queue_attack_click();
+        }
+        for _ in 0..use_clicks {
+            driver.session.player.queue_use_click();
+        }
         SharedInput {
             toggle_flight: shared_input.toggle_flight,
             interact: shared_input.interact,

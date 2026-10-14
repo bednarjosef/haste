@@ -1,0 +1,16 @@
+wait_until joined
+wait_until settled
+key Escape
+wait 10
+mouse 204 134
+wait 5
+screenshot tip1
+mouse 228 134
+wait 5
+mouse 251 134
+wait 5
+mouse 275 134
+wait 5
+screenshot tip2
+key Escape
+wait 5
