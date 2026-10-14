@@ -1,8 +1,9 @@
 # Open the inventory with E, screenshot it, close it again.
 wait_until joined
 wait_until settled
+wait 10
 key E
 wait_until screen_open
 screenshot inventory
-key E
+key Escape
 wait_until screen_closed
