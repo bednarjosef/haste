@@ -1,0 +1,9 @@
+# Beds draw as plain block models (vanilla 26.3 has no bed block entity renderer): head and
+# foot parts with their colour textures come from the blockstates. The runner places beds
+# over RCON and teleports the player here.
+wait_until joined
+wait_until settled
+wait 60
+look 180 25
+wait 5
+screenshot beds

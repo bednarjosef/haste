@@ -71,6 +71,23 @@ pub(crate) extern "system" fn send_chat<'l>(
     .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// An option changed in a vanilla options screen (`haste.gui.OptionBridge`): the options.txt key
+/// and value, exactly as `Options.save` would write them. Queued for the client to apply live.
+pub(crate) extern "system" fn options_changed<'l>(
+    mut env: EnvUnowned<'l>,
+    _c: JClass<'l>,
+    key: JString<'l>,
+    value: JString<'l>,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let key = key.try_to_string(env)?;
+        let value = value.try_to_string(env)?;
+        with_state(|s| s.option_changes.push((key, value)));
+        Ok(())
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// Copies the primitive player/debug state into Java's mirror arrays (one call per frame and tick).
 pub(crate) extern "system" fn mirror<'l>(
     mut env: EnvUnowned<'l>,

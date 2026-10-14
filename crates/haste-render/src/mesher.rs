@@ -759,16 +759,17 @@ fn vertex_light_for(
     let ao = vertex_ao_level(opaque(s1), opaque(s2), opaque(corner));
 
     // Smooth light: the face-adjacent cell's light plus the three AO-neighbour
-    // cells, averaged (vanilla), packed to nibbles. Neighbour offsets are
-    // applied on top of the face-adjacent cell (the original `vertex_light`
-    // semantics: `base = block_pos + n`, neighbours `base + d`).
+    // cells, averaged (vanilla). The corner table's offsets already carry the
+    // face normal (the AO cells, checked against vanilla's AdjacencyInfo by
+    // `face_corner_offsets_match_vanilla_adjacency`), so the neighbour cells are
+    // `block + d`, exactly the cells the AO reads above: sampling them one cell
+    // further out would make the light of two adjacent coplanar faces come from
+    // different cells and draw a line along every block edge.
     let n = dir.offset();
     let mut s = (ctx.cell(x + n[0], y + n[1], z + n[2]).light >> 4) as u32;
     let mut b = (ctx.cell(x + n[0], y + n[1], z + n[2]).light & 0xF) as u32;
     for d in [s1, s2, corner] {
-        let l = ctx
-            .cell(x + n[0] + d[0], y + n[1] + d[1], z + n[2] + d[2])
-            .light;
+        let l = ctx.cell(x + d[0], y + d[1], z + d[2]).light;
         s += (l >> 4) as u32;
         b += (l & 0xF) as u32;
     }
@@ -1433,5 +1434,109 @@ mod tests {
                 assert_eq!(mine_sides, ref_sides, "{dir:?} vertex {vi} side mismatch");
             }
         }
+    }
+
+    /// A world whose sky light is a function of y alone: 9 at y=1, 3 at y=2.
+    /// The smooth light of an up face must then be 9 (its four cells all sit at
+    /// y=1); sampling the neighbours one cell further out would average the y=2
+    /// cells in and give 5.
+    struct LitByHeight {
+        ground: BlockStateId,
+        layers: i32,
+    }
+
+    impl haste_core::view::BlockView for LitByHeight {
+        fn block_state(&self, pos: BlockPos) -> BlockStateId {
+            if (0..self.layers).contains(&pos.y)
+                && (0..16).contains(&pos.x)
+                && (0..16).contains(&pos.z)
+            {
+                self.ground
+            } else {
+                BlockStateId::AIR
+            }
+        }
+        fn is_chunk_loaded(&self, _pos: haste_core::ChunkPos) -> bool {
+            true
+        }
+        fn sky_light(&self, pos: BlockPos) -> u8 {
+            match pos.y {
+                1 => 9,
+                2 => 3,
+                _ => 15,
+            }
+        }
+        fn block_light(&self, _pos: BlockPos) -> u8 {
+            0
+        }
+        fn min_y(&self) -> i32 {
+            0
+        }
+        fn height(&self) -> i32 {
+            512
+        }
+    }
+
+    /// The vertex light's sky nibble, unpacked from the packed vertex.
+    fn vertex_sky(v: &PackedVertex) -> u8 {
+        v.light[0] >> 4
+    }
+
+    #[test]
+    #[ignore = "needs the client jar and datagen reports in the cache"]
+    fn smooth_light_reads_the_ao_neighbour_cells() {
+        let Some((states, baked, atlas)) = load_baked() else {
+            return;
+        };
+        let ground = grass_state(&states);
+        // One layer of opaque blocks, so the top faces' four cells all sit at
+        // y=1 (the plane above the blocks) and their light is 9.
+        let world = LitByHeight { ground, layers: 1 };
+        let pos = SectionPos::new(0, 0, 0);
+        let snapshot = MeshSnapshot::capture(&world, pos);
+        let mesh = mesh_section(&snapshot, &baked, &atlas, pos);
+        // The up faces take the shade index 1 and are tinted; find them through
+        // the tinted top sprite.
+        let up = atlas.region("minecraft:block/grass_block_top").sprite as u16;
+        let mut seen = 0;
+        for v in &mesh.vertices {
+            if v.sprite == up {
+                assert_eq!(vertex_sky(v), 9, "up face light samples the y=1 cells");
+                seen += 1;
+            }
+        }
+        assert!(seen > 0, "the section has top faces");
+    }
+
+    /// The same scene: the *side* faces of the layer must read the light of the
+    /// cells beside them. Their four cells per vertex are the face-adjacent
+    /// column's cell (light 15) and its row at y (15) and at y±1 (9 for the
+    /// upper corner cells), so the side faces carry 15 on the lower corners and
+    /// 12 on the upper ones. Sampling the neighbours one cell further out along
+    /// the face normal (as this code did before) would read the y=2 cells and
+    /// give 9 instead.
+    #[test]
+    #[ignore = "needs the client jar and datagen reports in the cache"]
+    fn smooth_light_of_side_faces_reads_the_adjacent_column() {
+        let Some((states, baked, atlas)) = load_baked() else {
+            return;
+        };
+        let ground = grass_state(&states);
+        let world = LitByHeight { ground, layers: 1 };
+        let pos = SectionPos::new(0, 0, 0);
+        let snapshot = MeshSnapshot::capture(&world, pos);
+        let mesh = mesh_section(&snapshot, &baked, &atlas, pos);
+        let side = atlas.region("minecraft:block/grass_block_side").sprite as u16;
+        let mut lights = std::collections::BTreeSet::new();
+        for v in &mesh.vertices {
+            if v.sprite == side {
+                lights.insert(vertex_sky(v));
+            }
+        }
+        assert_eq!(
+            lights.into_iter().collect::<Vec<_>>(),
+            vec![12, 15],
+            "side face light: the corner cells beside the face, not further out"
+        );
     }
 }
