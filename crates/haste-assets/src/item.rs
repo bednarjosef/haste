@@ -134,9 +134,7 @@ impl Assets {
         let thirdperson = resolved
             .thirdperson_display
             .unwrap_or(DisplayTransform::IDENTITY);
-        let head = resolved
-            .head_display
-            .unwrap_or(DisplayTransform::IDENTITY);
+        let head = resolved.head_display.unwrap_or(DisplayTransform::IDENTITY);
         let ground = resolved
             .ground_display
             .unwrap_or(DisplayTransform::IDENTITY);

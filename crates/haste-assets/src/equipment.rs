@@ -22,8 +22,13 @@ pub struct EquipmentInfo {
 impl EquipmentInfo {
     /// The layers of one `EquipmentClientInfo.LayerType` (`"humanoid"`, `"humanoid_leggings"`,
     /// `"wings"`, ...), in file order.
-    pub fn layers_of<'a>(&'a self, layer_type: &'a str) -> impl Iterator<Item = &'a EquipmentLayer> {
-        self.layers.iter().filter(move |l| l.layer_type == layer_type)
+    pub fn layers_of<'a>(
+        &'a self,
+        layer_type: &'a str,
+    ) -> impl Iterator<Item = &'a EquipmentLayer> {
+        self.layers
+            .iter()
+            .filter(move |l| l.layer_type == layer_type)
     }
 }
 
@@ -59,7 +64,9 @@ pub fn parse_equipment_info(bytes: &[u8]) -> Result<EquipmentInfo> {
         .context("equipment without `layers`")?;
     let mut layers = Vec::new();
     for (layer_type, list) in layers_json {
-        let Some(list) = list.as_array() else { continue };
+        let Some(list) = list.as_array() else {
+            continue;
+        };
         for l in list {
             let Some(texture) = l.get("texture").and_then(|t| t.as_str()) else {
                 continue;
@@ -115,7 +122,10 @@ mod tests {
             humanoid[0].texture,
             Identifier::minecraft("textures/entity/equipment/humanoid/leather.png")
         );
-        assert_eq!(humanoid[0].dyeable, Some((-6265536i64 as u32) | 0xFF00_0000));
+        assert_eq!(
+            humanoid[0].dyeable,
+            Some((-6265536i64 as u32) | 0xFF00_0000)
+        );
         let leggings: Vec<&EquipmentLayer> = info.layers_of("humanoid_leggings").collect();
         assert_eq!(
             leggings[0].texture,
