@@ -1,0 +1,8 @@
+# Idle FPS reference: stand still at a fixed spot and view, HUD on, and log vanilla's FPS counter
+# once a second for 30 s. Compare with `haste --bench` / the window's FPS line at the same spot.
+cmd time set 6000
+cmd tp @s 9.5 71 6.5 0 10
+wait 40
+wait_world
+fps 30
+quit
