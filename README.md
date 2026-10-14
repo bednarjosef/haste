@@ -9,7 +9,7 @@ with the mod architecture designed in. Licensed GPL-3.0-or-later.
 What a player needs to play Haste like the original game, without noticing a difference.
 Fabric mod support (Phase 2) is not counted here.
 
-**14 of 62 done, 26 partly done, 22 not started (about 44 %, counting partly done as half).**
+**17 of 62 done, 30 partly done, 15 not started (about 52 %, counting partly done as half).**
 
 ✅ done: works in the game window today, checked against a real server.
 🟡 partly done: some of it exists (in a library, or working without a window) but a player cannot use it fully yet.
@@ -21,9 +21,9 @@ Fabric mod support (Phase 2) is not counted here.
 - 🟡 Joining a server: `haste --server host:port` from the command line; no direct-connect screen
 - 🟡 Server list: status ping works (`haste --ping --server host:port`); no server list screen
 - 🟡 Microsoft account login: `haste login` / `haste logout` run the device-code flow and store the account, untested end to end (needs a Microsoft app id)
+- 🟡 Title screen: vanilla's title screen opens in the embedded UI (tested); not yet shown when `haste` starts
+- 🟡 Options screens: vanilla's options screen opens in the embedded UI (tested); not reachable from the game yet, and the sub-screens are untested
 - 🟡 Saved options: stored in the config with vanilla defaults; the client uses render distance, FOV, mouse sensitivity and vsync, not yet GUI scale, volumes or keybinds
-- ⬜ Title screen
-- ⬜ Options screens (video, controls, sound, skin, chat, accessibility)
 - ⬜ Keybind remapping (controls are fixed to the vanilla defaults)
 - ⬜ Resource packs (selection screen, applying server resource packs)
 - ⬜ Languages other than English
@@ -32,8 +32,8 @@ Fabric mod support (Phase 2) is not counted here.
 - ✅ Offline-mode vanilla and Fabric servers: join and stay connected on normal terrain, every packet decodes
 - ✅ Configuration phase, server transfers, cookies, resource pack answers
 - 🟡 Online-mode servers: encryption and session join need the Microsoft login above
-- 🟡 Item data: stacks with components decode and round-trip; names, enchantments, damage and the like are not decoded into typed values in Rust yet
-- ⬜ Signed chat (required by online-mode servers)
+- 🟡 Signed chat (required by online-mode servers): message and command signing match vanilla's format (unit-tested); used once online mode works
+- 🟡 Item data: stacks decode and round-trip, and names, enchantments, damage, rarity and tool rules read into typed values; the game logic does not use them yet
 
 ### World
 - ✅ Terrain: chunks, light, block and multi-block updates, chunk loading and unloading
@@ -48,31 +48,31 @@ Fabric mod support (Phase 2) is not counted here.
 - ✅ Block selection outline and break cracks
 - ✅ Fullscreen (F11)
 - ✅ Animated textures (water, lava, fire, portals), prepared off the render thread
-- 🟡 First-person hand and held item: the renderer draws them, but the client does not turn them on yet
+- ✅ Third-person view (F5)
+- ✅ First-person hand and held item (hidden in third person)
 - 🟡 Smooth lighting and ambient occlusion: present, but leaves, bark and grass sides are about 1.35x brighter than vanilla
 - 🟡 Fog: distance fog, not matched to vanilla
 - 🟡 Mobs and players: drawn as cube models with default skins and name tags, not vanilla's models
 - 🟡 Particles: particle textures load (114 particle types); no particles are drawn
-- 🟡 Performance: about 140 FPS windowed at render distance 12 on the development laptop; not yet measured against vanilla and Sodium
+- 🟡 Performance: `haste --bench` measures about 900-980 FPS (1.0-1.1 ms per frame) at 1920x1080, render distance 12, on the development laptop's integrated GPU; not yet compared with vanilla and Sodium
+- 🟡 Screen effects: damage tilt, red flash on hit entities and the vignette work; underwater and fire overlays, nausea and pumpkin do not
 - ⬜ Block entities drawn: chests, signs with text, beds, banners, heads, shulker boxes
 - ⬜ Entity animation (walking, attacking, swimming)
 - ⬜ Downloaded player skins and capes
 - ⬜ Armour and held items on mobs and players
 - ⬜ Dropped items, item frames and paintings drawn as themselves
-- ⬜ Third-person view (F5)
-- ⬜ Screen effects: damage tilt and red flash, underwater and fire overlays, nausea, vignette, pumpkin
 
 ### HUD and screens
-These run as the game's own Java code inside Haste and work against a real server, but are not shown in the game window yet.
-- 🟡 HUD: hotbar, health, hunger, armour, air, experience
-- 🟡 Chat: reading, typing, command suggestions
+These run as the game's own Java code inside Haste. The HUD is drawn in the game window; keyboard and mouse input to the screens is not connected yet.
+- ✅ HUD: hotbar, health, hunger, armour, air, experience
+- 🟡 Chat: messages are shown, and keyboard input now reaches the chat box; typing and sending not yet checked
 - 🟡 Player list (Tab), boss bars, scoreboard sidebar, titles and action bar
 - 🟡 Pause menu
 - 🟡 Player inventory and crafting grid
 - 🟡 Chests (clicks match vanilla byte for byte); furnace, crafting table, anvil, enchanting, brewing and trading are untested
 - 🟡 Death screen and respawn
+- 🟡 Debug screen (F3): opens with F3 and shows FPS, position, chunks, sections and entities; not yet checked on screen
 - ⬜ Creative inventory
-- ⬜ Debug screen (F3)
 - ⬜ Editing signs, books and command blocks
 - ⬜ Advancements and statistics screens
 - ⬜ Recipe book
@@ -82,14 +82,14 @@ These run as the game's own Java code inside Haste and work against a real serve
 - ✅ Breaking and placing blocks, using items, attacking, pick block, hotbar (mouse wheel and 1-9)
 - 🟡 Dropping items (Q, Ctrl+Q) and swapping to the off-hand (F): sent like vanilla; not yet checked by hand on a server
 - 🟡 Game modes: survival and creative work; spectator and adventure are untested
+- 🟡 Screenshot key (F2): saves to the screenshots folder; not yet checked by hand in the window
 - ⬜ Riding boats, minecarts, horses and pigs
 - ⬜ Elytra flight
-- ⬜ Screenshot key (F2)
 
 ### Sound
-- 🟡 Sound effects: sounds.json and the variant choice are done; no audio output yet
-- 🟡 3D sound: distance falloff and stereo panning are computed but not played
-- 🟡 Music: choosing tracks and pauses by situation is done; nothing is played
+- 🟡 Sound effects: the server's sounds play in the window (block, entity and stopped sounds, per-category volumes); not yet checked by ear
+- 🟡 3D sound: distance falloff and stereo panning from the player's eye, entity sounds follow the entity; not yet checked by ear
+- 🟡 Music: plays by situation (game, creative, underwater) with vanilla's pauses; not yet checked by ear
 - ⬜ Sounds of your own footsteps, block breaking and placing
 
 ## Try it
@@ -103,8 +103,8 @@ cargo run --release --bin haste -- --server host:port             # or join any 
 Any offline-mode 26.3 server works with `--server` (`--username NAME` sets the player name).
 Controls are vanilla's defaults: WASD, space, shift, ctrl, mouse to look, left click to break,
 right click to place or use, 1-9 and the mouse wheel for the hotbar, Q / Ctrl+Q to drop, F to
-swap hands, F11 for fullscreen. There is
-no HUD in the window yet, so health and inventory are not visible.
+swap hands, F11 for fullscreen. The HUD shows
+health, hunger and the hotbar; F5 switches to third person.
 
 ## Build
 

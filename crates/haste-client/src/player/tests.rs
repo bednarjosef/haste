@@ -1,3 +1,4 @@
+use haste_core::{BlockPos, BlockStateId, ChunkPos};
 use haste_physics::testing::{states, TestShapes, TestWorld};
 use haste_protocol::packets::play::clientbound::{AttributeModifier, AttributeProperty};
 
@@ -49,6 +50,53 @@ fn spawned() -> (LocalPlayer, Vec<ServerboundPlay>) {
         ["accept", "loaded", "input", "status", "tick_end"]
     );
     (p, out)
+}
+
+/// A creative player standing on the floor at (0.5, 0, 0.5), loaded, after its spawn accept.
+fn spawned_creative() -> LocalPlayer {
+    let mut p = LocalPlayer::with_entity(ME, GameMode::Creative);
+    p.set_attribute_ids(ids());
+    let mut out = Vec::new();
+    assert!(p.handle(&teleport(1, DVec3::new(0.5, 0.0, 0.5), 0.0, 0), &mut out));
+    tick(&mut p, &InputState::default());
+    tick(&mut p, &InputState::default());
+    p
+}
+
+/// The same floor as [`world`], but every chunk reports as not loaded.
+struct Unloaded {
+    floor: TestWorld,
+    min_y: i32,
+}
+
+impl Unloaded {
+    fn new(min_y: i32) -> Self {
+        Self {
+            floor: TestWorld::flat(0, states::STONE),
+            min_y,
+        }
+    }
+}
+
+impl BlockView for Unloaded {
+    fn block_state(&self, pos: BlockPos) -> BlockStateId {
+        self.floor.block_state(pos)
+    }
+    fn is_chunk_loaded(&self, _pos: ChunkPos) -> bool {
+        false
+    }
+    fn sky_light(&self, pos: BlockPos) -> u8 {
+        self.floor.sky_light(pos)
+    }
+    fn block_light(&self, pos: BlockPos) -> u8 {
+        self.floor.block_light(pos)
+    }
+    fn min_y(&self) -> i32 {
+        self.min_y
+    }
+    fn height(&self) -> i32 {
+        self.floor.height()
+    }
 }
 
 fn tick(p: &mut LocalPlayer, input: &InputState) -> Vec<ServerboundPlay> {
@@ -225,6 +273,16 @@ fn sprint_command_comes_before_the_move() {
     assert_eq!(names(&out)[..2], ["input", "command"]);
 }
 
+/// The `player_command` action ids this module sends, pinned to the declaration
+/// order of `ServerboundPlayerCommandPacket$Action` in the 26.3 client jar
+/// (STOP_SLEEPING=0, START_SPRINTING=1, STOP_SPRINTING=2, START_RIDING_JUMP=3,
+/// STOP_RIDING_JUMP=4, OPEN_INVENTORY=5, START_FALL_FLYING=6).
+#[test]
+fn player_command_action_values_match_the_jar() {
+    assert_eq!(command::START_SPRINTING, 1);
+    assert_eq!(command::STOP_SPRINTING, 2);
+}
+
 /// The first movement packet after the join teleport carries the server's position, so the
 /// server-side delta is ~0 (regression test for the join "moved too quickly!" whose logged
 /// delta equalled the whole spawn position).
@@ -320,22 +378,123 @@ fn falling_sends_on_ground_flag_on_landing() {
     assert_eq!(landed, Some(0.0));
 }
 
+/// Vanilla `LocalPlayer.aiStep` toggles creative flight on the second press of a double tap of
+/// jump inside a 7-tick window (`jumpTriggerTime`, counted down by `Player.aiStep`). The opposite
+/// sprint double tap uses `options.sprintWindow` (default 7 too, `Options.java`), which haste does
+/// not have: sprinting starts from the sprint key, matching vanilla's `keyPresses.sprint()` branch.
 #[test]
-fn creative_flight_toggle_sends_abilities() {
-    let mut p = LocalPlayer::with_entity(ME, GameMode::Creative);
-    let mut out = Vec::new();
-    p.handle(&teleport(1, DVec3::new(0.5, 0.0, 0.5), 0.0, 0), &mut out);
+fn creative_flight_needs_a_double_tap_within_seven_ticks() {
+    assert_eq!(JUMP_DOUBLE_TAP_TICKS, 7);
+    let mut p = spawned_creative();
+    // The first press arms the window only; no flight, no abilities packet.
     p.toggle_flight();
-    // The tick the teleport arrived in waits (no accept yet); the next sends the spawn
-    // accept, player_loaded, then the abilities.
-    assert!(tick(&mut p, &InputState::default()).is_empty());
     let out = tick(&mut p, &InputState::default());
-    assert_eq!(names(&out)[..4], ["accept", "loaded", "input", "abilities"]);
+    assert!(!names(&out).contains(&"abilities") && !p.state.flying);
+    // The second one inside the window turns flight on and reports the new ability.
+    p.toggle_flight();
+    let out = tick(&mut p, &InputState::default());
+    assert!(names(&out).contains(&"abilities"));
     assert!(p.state.flying);
-    // Survival cannot fly: toggling does nothing.
+    // Turning it off again is the same double tap.
+    p.toggle_flight();
+    tick(&mut p, &InputState::default());
+    p.toggle_flight();
+    let out = tick(&mut p, &InputState::default());
+    assert!(names(&out).contains(&"abilities"));
+    assert!(!p.state.flying);
+    // Survival cannot fly: the same double tap does nothing.
     let (mut s, _) = spawned();
     s.toggle_flight();
-    assert!(!names(&tick(&mut s, &InputState::default())).contains(&"abilities"));
+    tick(&mut s, &InputState::default());
+    s.toggle_flight();
+    let out = tick(&mut s, &InputState::default());
+    assert!(!names(&out).contains(&"abilities") && !s.state.flying);
+}
+
+#[test]
+fn the_double_tap_window_runs_out_after_seven_ticks() {
+    let press = InputState {
+        jump: true,
+        ..Default::default()
+    };
+    // A second press 5 ticks after the first is still inside the window; 6 ticks later the
+    // counter has reached zero and that press only arms it again.
+    for (idle, toggles) in [(5u32, true), (6, false)] {
+        let mut p = spawned_creative();
+        tick(&mut p, &press);
+        for _ in 0..idle {
+            tick(&mut p, &InputState::default());
+        }
+        let out = tick(&mut p, &press);
+        assert_eq!(p.state.flying, toggles, "idle {idle} ticks");
+        assert_eq!(names(&out).contains(&"abilities"), toggles, "idle {idle}");
+    }
+}
+
+/// Vanilla's toggle also calls `LivingEntity.jumpFromGround` when flight turns on while the
+/// player stands on the ground: the vertical movement becomes the jump strength (0.42).
+#[test]
+fn flight_turning_on_on_the_ground_jumps() {
+    let mut p = spawned_creative();
+    // One tick to settle on the floor after the spawn teleport.
+    tick(&mut p, &InputState::default());
+    assert!(p.state.on_ground);
+    p.toggle_flight();
+    tick(&mut p, &InputState::default());
+    p.toggle_flight();
+    let out = tick(&mut p, &InputState::default());
+    assert!(names(&out).contains(&"abilities"));
+    assert!(p.state.flying);
+    assert!(!p.state.on_ground);
+    // The tick after the jump carries the player up by the jump strength, exactly.
+    assert!((p.state.pos.y - 0.42).abs() < 1e-12);
+}
+
+/// Vanilla `LivingEntity.travelInAir`: with the chunk below not loaded the client skips gravity
+/// and pins the vertical movement to -0.1 (the 0.98 vertical drag on top of it) while the player
+/// is above the world's minimum; at or below the minimum it is 0.0.
+#[test]
+fn unloaded_chunk_below_falls_at_vanillas_rate() {
+    assert!((UNLOADED_CHUNK_FALL_SPEED + 0.098).abs() < 1.0e-8);
+    let (mut p, _) = spawned();
+    // One tick to settle on the floor after the spawn teleport.
+    tick(&mut p, &InputState::default());
+    assert!(p.state.on_ground);
+    let w = Unloaded::new(-64);
+    let mut out = Vec::new();
+    p.tick_with(
+        &InputState::default(),
+        &w,
+        &TestShapes::default(),
+        &TestShapes::default(),
+        &mut out,
+    );
+    assert_eq!(p.state.velocity.y, UNLOADED_CHUNK_FALL_SPEED);
+    assert!(!p.state.on_ground);
+    // Gravity stays skipped: the same step every tick, until the chunk is loaded again.
+    for _ in 0..3 {
+        p.tick_with(
+            &InputState::default(),
+            &w,
+            &TestShapes::default(),
+            &TestShapes::default(),
+            &mut out,
+        );
+    }
+    assert!((p.state.pos.y - 4.0 * UNLOADED_CHUNK_FALL_SPEED).abs() < 1.0e-12);
+
+    // At or below the world's minimum the vertical movement is 0.0: the player stays put.
+    let (mut p, mut out) = spawned();
+    assert!(p.handle(&teleport(2, DVec3::new(0.5, -65.0, 0.5), 0.0, 0), &mut out));
+    p.tick_with(
+        &InputState::default(),
+        &w,
+        &TestShapes::default(),
+        &TestShapes::default(),
+        &mut out,
+    );
+    assert_eq!(p.state.velocity.y, 0.0);
+    assert_eq!(p.state.pos.y, -65.0);
 }
 
 #[test]

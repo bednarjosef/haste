@@ -1,0 +1,9 @@
+# Open the chat with T, type a line, send it, screenshot the result.
+wait_until joined
+wait_until settled
+key T
+wait_until screen_open
+type hello from script
+key ENTER
+wait_until screen_closed
+screenshot chat

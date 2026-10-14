@@ -12,9 +12,7 @@ use anyhow::{Context, Result};
 use haste_core::Identifier;
 
 use crate::assets::Assets;
-use crate::model::{
-    apply_element_rotation, face_positions, face_uvs, BakedQuad, Direction, DisplayTransform,
-};
+use crate::model::{apply_element_rotation, face_positions, face_uvs, BakedQuad, DisplayTransform};
 
 /// Everything needed to draw one item in a GUI slot.
 #[derive(Clone, Debug, Default)]
@@ -308,45 +306,25 @@ fn bake_elements(resolved: &crate::model::ResolvedModel) -> Vec<BakedQuad> {
     for el in &resolved.elements {
         let from = el.from.map(|v| v / 16.0);
         let to = el.to.map(|v| v / 16.0);
-        // Deterministic face order (the file's map order is not kept).
-        for dir in [
-            Direction::Down,
-            Direction::Up,
-            Direction::North,
-            Direction::South,
-            Direction::West,
-            Direction::East,
-        ] {
-            let Some(face) = el.faces.get(dir_name(dir)) else {
-                continue;
-            };
+        // `faces` is keyed by direction in vanilla's fixed order (down, up, north,
+        // south, west, east), which the map iteration follows.
+        for (dir, face) in &el.faces {
             let Some(tex) = crate::bake::face_texture_id(&face.texture, &resolved.textures) else {
                 continue;
             };
-            let positions = apply_element_rotation(face_positions(dir, from, to), &el.rotation);
+            let positions = apply_element_rotation(face_positions(*dir, from, to), &el.rotation);
             quads.push(BakedQuad {
                 positions,
-                uvs: face_uvs(dir, from, to, face.uv.as_ref(), face.rotation),
+                uvs: face_uvs(*dir, from, to, face.uv.as_ref(), face.rotation),
                 texture: normalize_texture_id(&tex),
                 cullface: None,
-                shade_face: el.shade.then_some(dir),
+                shade_face: el.shade.then_some(*dir),
                 tint_index: face.tint_index.and_then(|i| u32::try_from(i).ok()),
-                direction: crate::model::direction_from_positions(&positions).unwrap_or(dir),
+                direction: crate::model::direction_from_positions(&positions).unwrap_or(*dir),
             });
         }
     }
     quads
-}
-
-fn dir_name(d: Direction) -> &'static str {
-    match d {
-        Direction::Down => "down",
-        Direction::Up => "up",
-        Direction::North => "north",
-        Direction::South => "south",
-        Direction::West => "west",
-        Direction::East => "east",
-    }
 }
 
 #[cfg(test)]
