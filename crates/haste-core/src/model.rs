@@ -61,10 +61,27 @@ pub struct EntityInstance {
     /// ticks; death holds it at 1 for the 20-tick death animation). The renderer mixes
     /// red into the entity's colour for values above 0.
     pub hurt: f32,
+    /// Overlay layers drawn on top of the base model with the same transform and pose
+    /// (vanilla's `RenderLayer`s: sheep wool and undercoat, horse markings, cat/wolf
+    /// collars, the tropical fish pattern). Fixed-size: sheep needs two, everything else
+    /// at most one; empty for almost every mob, so no per-frame allocation.
+    pub overlays: [Option<EntityOverlay>; 2],
     /// Set for hanging decorations (item frames, paintings): drawn specially instead of from
     /// `model` (vanilla's `ItemFrameRenderer` / `PaintingRenderer`). `None` for every other
     /// entity, which the renderer draws from its cube model.
     pub decoration: Option<Decoration>,
+}
+
+/// One overlay layer: the model (usually a copy of the base shape with its own texture,
+/// sometimes the base model itself with one, like vanilla's wolf collar and horse
+/// markings) and the tint vanilla multiplies into its vertex colours
+/// (`coloredCutoutModelCopyLayerRender`'s colour, `DyeColor.getTextureDiffuseColor` for
+/// dyed layers; white when the layer is untinted).
+#[derive(Clone, Debug)]
+pub struct EntityOverlay {
+    pub model: std::sync::Arc<CubeModel>,
+    /// Linear RGB multiplier, 0..1 per channel.
+    pub tint: [f32; 3],
 }
 
 /// A hanging decoration the renderer draws itself rather than from a cube model.

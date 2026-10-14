@@ -154,6 +154,7 @@ fn entities_offscreen() {
         skin: Some(skin.clone()),
         nametag: Some("Steve".into()),
         hurt: 0.0,
+        overlays: Default::default(),
         decoration: None,
     };
     let boxed = EntityInstance {
@@ -168,6 +169,7 @@ fn entities_offscreen() {
         skin: None,
         nametag: None,
         hurt: 0.0,
+        overlays: Default::default(),
         decoration: None,
     };
     let entities = vec![player, boxed];
@@ -324,6 +326,7 @@ fn decoration(id: i32, pos: glam::DVec3, decoration: Decoration) -> EntityInstan
         skin: None,
         nametag: None,
         hurt: 0.0,
+        overlays: Default::default(),
         decoration: Some(decoration),
     }
 }

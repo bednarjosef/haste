@@ -407,7 +407,24 @@ impl EntityRenderer {
                 rect,
                 light,
                 e.hurt,
+                [1.0; 3],
             );
+            // Overlay layers: the same transform and pose, each with its own texture and
+            // tint (vanilla's RenderLayers, e.g. SheepWoolLayer's dyed copy of the model).
+            for overlay in e.overlays.iter().flatten() {
+                let orect = self.texture_rect(&overlay.model.texture, assets);
+                emit_part(
+                    &mut self.vertices,
+                    &overlay.model,
+                    &overlay.model.root,
+                    &e.pose,
+                    root,
+                    orect,
+                    light,
+                    e.hurt,
+                    overlay.tint,
+                );
+            }
             if self.vertices.len() > start {
                 self.drawn += 1;
             }
@@ -732,6 +749,7 @@ impl EntityRenderer {
                     rect,
                     light,
                     0.0,
+                    [1.0; 3],
                 );
             }
         }
@@ -1111,7 +1129,8 @@ fn pose_rotation(pose: &PoseOverrides, name: &str) -> Option<Vec3> {
 }
 
 /// Child pivots are relative to the parent (vanilla `PartPose`); rotation is Z * Y * X around
-/// the pivot, pose overrides add to the base rotation. `hurt` (0..1) tints the part red.
+/// the pivot, pose overrides add to the base rotation. `hurt` (0..1) tints the part red;
+/// `tint` multiplies the colour per channel (dyed overlay layers).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_part(
     out: &mut Vec<EntityVertex>,
@@ -1122,6 +1141,7 @@ pub(crate) fn emit_part(
     rect: [u32; 4],
     light: (u8, u8),
     hurt: f32,
+    tint: [f32; 3],
 ) {
     if !part.visible || pose.hidden.iter().any(|h| h == &part.name) {
         return;
@@ -1228,7 +1248,7 @@ pub(crate) fn emit_part(
             let nw = (normal_matrix * n).normalize_or_zero();
             let s = entity_shade(nw);
             let [r, g, b] = hurt_color(s, hurt);
-            let color = [r, g, b, 1.0];
+            let color = [r * tint[0], g * tint[1], b * tint[2], 1.0];
             let uv = [
                 [uvr[0], uvr[1]],
                 [uvr[0], uvr[3]],
@@ -1255,7 +1275,7 @@ pub(crate) fn emit_part(
         }
     }
     for child in &part.children {
-        emit_part(out, model, child, pose, m, rect, light, hurt);
+        emit_part(out, model, child, pose, m, rect, light, hurt, tint);
     }
 }
 
@@ -1397,6 +1417,7 @@ mod tests {
             [0, 0, 64, 64],
             (15, 15),
             0.0,
+            [1.0; 3],
         );
         assert_eq!(out.len(), 36);
         // Every triangle faces away from the cube centre (0, 0.25, 0).
@@ -1511,6 +1532,7 @@ mod tests {
             [0, 0, 64, 64],
             (15, 15),
             0.0,
+            [1.0; 3],
         );
         // The arm and its sleeve, six faces of six vertices each.
         assert_eq!(out.len(), 72);
@@ -1542,6 +1564,7 @@ mod tests {
             [0, 0, 64, 64],
             (15, 15),
             0.0,
+            [1.0; 3],
         );
         let moved = out
             .iter()

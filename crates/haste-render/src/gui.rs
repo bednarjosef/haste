@@ -1418,6 +1418,7 @@ impl GuiRenderer {
             rect,
             (15, 15),
             0.0,
+            [1.0; 3],
         );
         // Back faces off, then back to front.
         let mut order: Vec<(f32, usize)> = tris
