@@ -1,0 +1,6 @@
+# Dump every block's SoundType (break/step/place/hit/fall sounds, volume, pitch) from the
+# running client's block registry into cache/oracle/26.3/block_sounds.json, then quit. No world
+# interaction is needed beyond being in one, so a plain wait is enough.
+wait 40
+dump_block_sounds
+quit

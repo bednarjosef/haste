@@ -6,6 +6,7 @@ mod blocks;
 mod physics;
 mod registries;
 mod shapes;
+mod sounds;
 
 use std::path::Path;
 
@@ -13,6 +14,7 @@ pub use blocks::BlockStates;
 pub use physics::{BlockProperties, BlockProps};
 pub use registries::Registries;
 pub use shapes::BlockShapes;
+pub use sounds::{BlockSoundType, BlockSoundTypes};
 
 /// All game data, loaded once at startup and shared (`Arc`) with the world, render, physics.
 pub struct GameData {
@@ -20,6 +22,7 @@ pub struct GameData {
     pub registries: Registries,
     pub shapes: BlockShapes,
     pub physics: BlockProperties,
+    pub sounds: BlockSoundTypes,
 }
 
 impl GameData {
@@ -33,7 +36,8 @@ impl GameData {
     }
 
     /// Loads from explicit paths. `oracle` is the `block_shapes.json` path, if present;
-    /// `block_properties.json` is looked up next to it when it exists.
+    /// `block_properties.json` and `block_sounds.json` are looked up next to it when they
+    /// exist.
     pub fn load_from(reports: &Path, oracle: Option<&Path>) -> anyhow::Result<GameData> {
         let blocks_json = std::fs::read_to_string(reports.join("blocks.json"))?;
         let registries_json = std::fs::read_to_string(reports.join("registries.json"))?;
@@ -43,18 +47,25 @@ impl GameData {
             Some(p) => BlockShapes::parse_oracle(&std::fs::read_to_string(p)?, &blocks)?,
             None => BlockShapes::fallback(&blocks),
         };
-        let props_path = oracle.map(|p| p.with_file_name("block_properties.json"));
-        let physics = match props_path {
+        let sibling = |name: &str| oracle.map(|p| p.with_file_name(name));
+        let physics = match sibling("block_properties.json") {
             Some(p) if p.is_file() => {
                 BlockProperties::parse(&std::fs::read_to_string(p)?, &blocks)?
             }
             _ => BlockProperties::defaults(&blocks),
+        };
+        let sounds = match sibling("block_sounds.json") {
+            Some(p) if p.is_file() => {
+                BlockSoundTypes::parse(&std::fs::read_to_string(p)?, &blocks)?
+            }
+            _ => BlockSoundTypes::empty(&blocks),
         };
         Ok(Self {
             blocks,
             registries,
             shapes,
             physics,
+            sounds,
         })
     }
 }
@@ -132,12 +143,26 @@ mod tests {
         registries: &str,
         oracle: Option<&str>,
     ) -> (std::path::PathBuf, Option<std::path::PathBuf>) {
+        write_fixture_with(blocks, registries, oracle, None)
+    }
+
+    /// Like [`write_fixture`], plus a `block_sounds.json` written next to the oracle
+    /// path when `sounds` is given (the sibling lookup `GameData::load_from` does).
+    fn write_fixture_with(
+        blocks: &str,
+        registries: &str,
+        oracle: Option<&str>,
+        sounds: Option<&str>,
+    ) -> (std::path::PathBuf, Option<std::path::PathBuf>) {
         let dir = write_fixture_dir(blocks, registries);
         let oracle_path = oracle.map(|o| {
             let p = dir.join("block_shapes.json");
             std::fs::write(&p, o).unwrap();
             p
         });
+        if let Some(s) = sounds {
+            std::fs::write(dir.join("block_sounds.json"), s).unwrap();
+        }
         (dir.join("reports"), oracle_path)
     }
 
@@ -847,5 +872,143 @@ mod tests {
             d.shapes.is_oracle_backed(),
             dt
         );
+        // The recorder mod's block sound dump (dump_block_sounds): stone steps, the
+        // decorated pot's uncracked default (state override) differs from its cracked
+        // variant (the block default, the shatter type). Present only when the oracle
+        // dump was recorded (the headless walk check needs it).
+        if d.sounds.is_loaded() {
+            let stone = d
+                .blocks
+                .default_state(&Identifier::minecraft("stone"))
+                .unwrap();
+            assert_eq!(
+                d.block_sound_type(stone).unwrap().step_sound,
+                "minecraft:block.stone.step"
+            );
+            let pot = Identifier::minecraft("decorated_pot");
+            // The pot's default state is uncracked (the state override, normal sounds).
+            let uncracked = d.blocks.default_state(&pot).unwrap();
+            assert_eq!(
+                d.block_sound_type(uncracked).unwrap().break_sound,
+                "minecraft:block.decorated_pot.break"
+            );
+            let cracked = d
+                .blocks
+                .with_property(uncracked, "cracked", "true")
+                .unwrap();
+            assert_eq!(
+                d.block_sound_type(cracked).unwrap().break_sound,
+                "minecraft:block.decorated_pot.shatter"
+            );
+        }
+    }
+
+    /// `block_sounds.json` (the recorder mod's `dump_block_sounds` dump): per-block
+    /// defaults, per-state overrides, unknown blocks skipped, absent file = `None`
+    /// everywhere.
+    #[test]
+    fn block_sounds_load_per_block_and_per_state() {
+        // Water has three states (0/1/2); stone one (3). Waterlogged stairs-like block
+        // triggers the per-state override path.
+        let blocks_json = r#"{
+  "minecraft:air": { "states": [ { "id": 0, "default": true } ] },
+  "minecraft:stone": { "states": [ { "id": 3, "default": true } ] },
+  "minecraft:water": {
+    "properties": { "level": ["0", "1", "2"] },
+    "states": [
+      { "id": 1, "default": true, "properties": { "level": "0" } },
+      { "id": 2, "properties": { "level": "1" } }
+    ]
+  },
+  "minecraft:decorated_pot": {
+    "properties": { "cracked": ["true", "false"] },
+    "states": [
+      { "id": 4, "default": true, "properties": { "cracked": "true" } },
+      { "id": 5, "properties": { "cracked": "false" } }
+    ]
+  }
+}"#;
+        let registries_json = r#"{
+  "minecraft:block": {
+    "default": "minecraft:air",
+    "entries": {
+      "minecraft:air": { "protocol_id": 0 },
+      "minecraft:water": { "protocol_id": 1 },
+      "minecraft:stone": { "protocol_id": 2 },
+      "minecraft:decorated_pot": { "protocol_id": 3 }
+    }
+  }
+}"#;
+        let sounds = r#"{
+  "version": 1,
+  "minecraft": "26.3",
+  "sound_types": [
+    { "break": "minecraft:block.stone.break", "step": "minecraft:block.stone.step",
+      "place": "minecraft:block.stone.place", "hit": "minecraft:block.stone.hit",
+      "fall": "minecraft:block.stone.fall", "volume": 1.0, "pitch": 1.0 },
+    { "break": "minecraft:block.ghast.shatter", "step": "minecraft:intentionally_empty",
+      "place": "minecraft:block.ghast.shatter", "hit": "minecraft:intentionally_empty",
+      "fall": "minecraft:intentionally_empty", "volume": 1.0, "pitch": 1.0 }
+  ],
+  "blocks": {
+    "minecraft:stone": { "sound": 0 },
+    "minecraft:decorated_pot": {
+      "sound": 1,
+      "states": [ { "properties": { "cracked": "false" }, "sound": 0 } ]
+    },
+    "minecraft:not_a_block": { "sound": 0 }
+  }
+}"#;
+        // (Minimal block_shapes oracle content; the sibling lookup only needs the file.)
+        let shapes = r#"{ "version": 1, "states": [] }"#;
+        let (reports, oracle_path) =
+            write_fixture_with(blocks_json, registries_json, Some(shapes), Some(sounds));
+        let d = GameData::load_from(&reports, oracle_path.as_deref()).unwrap();
+        let stone = d
+            .blocks
+            .default_state(&Identifier::minecraft("stone"))
+            .unwrap();
+        let t = d.block_sound_type(stone).unwrap();
+        assert_eq!(t.step_sound, "minecraft:block.stone.step");
+        assert!((t.volume - 1.0).abs() < 1e-6);
+        // The decorated pot: cracked (default state 4) uses the shatter type, the
+        // uncracked state 5 overrides to stone's.
+        let pot = Identifier::minecraft("decorated_pot");
+        let cracked = d.blocks.default_state(&pot).unwrap();
+        assert_eq!(
+            d.block_sound_type(cracked).unwrap().break_sound,
+            "minecraft:block.ghast.shatter"
+        );
+        let uncracked = d.blocks.state(&pot, &[("cracked", "false")]).unwrap();
+        assert_eq!(
+            d.block_sound_type(uncracked).unwrap().break_sound,
+            "minecraft:block.stone.break"
+        );
+        // Air is in the dump's blocks (nothing): no sound type.
+        let air = d
+            .blocks
+            .default_state(&Identifier::minecraft("air"))
+            .unwrap();
+        assert!(d.block_sound_type(air).is_none());
+        // Water (in blocks.json but not in the dump): no sound type, no panic.
+        let water = d
+            .blocks
+            .default_state(&Identifier::minecraft("water"))
+            .unwrap();
+        assert!(d.block_sound_type(water).is_none());
+    }
+
+    /// Without `block_sounds.json` every lookup is `None` (the client plays nothing).
+    #[test]
+    fn block_sounds_absent_file_is_all_none() {
+        let shapes = r#"{ "version": 1, "states": [] }"#;
+        let (reports, oracle_path) = write_fixture(BLOCKS_JSON, REGISTRIES_JSON, Some(shapes));
+        let d = GameData::load_from(&reports, oracle_path.as_deref()).unwrap();
+        assert!(!d.sounds.is_loaded());
+        let stone = d
+            .blocks
+            .default_state(&Identifier::minecraft("stone"))
+            .unwrap();
+        assert!(d.block_sound_type(stone).is_none());
     }
 }

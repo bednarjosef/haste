@@ -4,9 +4,14 @@
 // SectionOcclusionGraph walk). See THIRD_PARTY.md.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
+use std::thread::JoinHandle;
 
+use ahash::AHashMap;
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use glam::DVec3;
 use haste_core::{ChunkPos, SectionPos};
+use parking_lot::Mutex;
 
 /// The six section faces, ordinals matching vanilla Direction.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -213,7 +218,7 @@ const CEILED_SECTION_DIAGONAL: f64 = 28.0;
 const ADV_CULL_MIN_DIST_SQ: f64 = 3600.0;
 
 /// The sections the walk reached, per column, over the square of columns around the camera.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct VisibleMask {
     cx: i32,
     cz: i32,
@@ -436,6 +441,145 @@ fn ray_occluded(
         }
     }
     (false, None)
+}
+
+/// Snapshot the shared section visibility sets into a dense grid for the walk:
+/// the walk reads each visited section's set once, and a slice index beats a
+/// hash probe per node. Sections without an entry are see-through (`all`).
+pub fn dense_visibility_grid(
+    vis: &AHashMap<(ChunkPos, i32), VisibilitySet>,
+    cam: ChunkPos,
+    r: i32,
+    h: i32,
+) -> Vec<VisibilitySet> {
+    let w = 2 * r + 1;
+    let mut dense = vec![VisibilitySet::all(); (w * w * h) as usize];
+    for ((c, si), v) in vis.iter() {
+        let dx = c.x - cam.x + r;
+        let dz = c.z - cam.z + r;
+        if dx < 0 || dz < 0 || dx >= w || dz >= w || *si < 0 || *si >= h {
+            continue;
+        }
+        dense[((dx * w + dz) * h + *si) as usize] = *v;
+    }
+    dense
+}
+
+/// One walk request: the camera section and render distance the mask is
+/// computed for, plus the world vertical extent and the eye position. Runs on
+/// the worker: snapshot the visibility sets under the shared lock, then walk.
+#[derive(Clone, Copy)]
+struct WalkJob {
+    cam_section: SectionPos,
+    view_distance: i32,
+    section_count: i32,
+    min_section: i32,
+    eye: DVec3,
+}
+
+impl WalkJob {
+    fn run(&self, vis: &Mutex<AHashMap<(ChunkPos, i32), VisibilitySet>>) -> VisibleMask {
+        let r = self.view_distance + 1;
+        let h = self.section_count;
+        let cam = ChunkPos::new(self.cam_section.x, self.cam_section.z);
+        let dense = dense_visibility_grid(&vis.lock(), cam, r, h);
+        let w = 2 * r + 1;
+        compute_visible_mask(
+            |c, si| {
+                let dx = c.x - cam.x + r;
+                let dz = c.z - cam.z + r;
+                if dx < 0 || dz < 0 || dx >= w || dz >= w || si < 0 || si >= h {
+                    return None;
+                }
+                Some(dense[((dx * w + dz) * h + si) as usize])
+            },
+            cam,
+            self.cam_section.y - self.min_section,
+            self.eye,
+            self.min_section * 16,
+            h,
+            r,
+        )
+    }
+}
+
+/// The section visibility walk, off the render thread. Vanilla runs the full
+/// `SectionOcclusionGraph` update on a background executor and keeps drawing
+/// the previous graph until the new one is swapped in; this does the same: the
+/// render thread only schedules a walk (`schedule`) and collects the finished
+/// mask (`poll`), never walking itself. One dedicated worker thread runs the
+/// walks serially, so at most one is in flight.
+pub struct AsyncOcclusionWalker {
+    done_rx: Receiver<VisibleMask>,
+    job_tx: Option<Sender<WalkJob>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl AsyncOcclusionWalker {
+    /// Shares `vis` with the worker: the render thread inserts on upload, the
+    /// worker snapshots under the lock when a walk starts.
+    pub fn new(vis: Arc<Mutex<AHashMap<(ChunkPos, i32), VisibilitySet>>>) -> std::io::Result<Self> {
+        let (job_tx, job_rx) = unbounded::<WalkJob>();
+        let (done_tx, done_rx) = unbounded::<VisibleMask>();
+        let vis_worker = vis;
+        let worker = std::thread::Builder::new()
+            .name("haste-occlusion".into())
+            .spawn(move || {
+                while let Ok(job) = job_rx.recv() {
+                    let mask = job.run(&vis_worker);
+                    if done_tx.send(mask).is_err() {
+                        break;
+                    }
+                }
+            })?;
+        Ok(Self {
+            done_rx,
+            job_tx: Some(job_tx),
+            worker: Some(worker),
+        })
+    }
+
+    /// Ask the worker to walk for `cam_section` / `view_distance`. Cheap: a
+    /// channel send; the render thread never walks.
+    pub fn schedule(
+        &self,
+        cam_section: SectionPos,
+        view_distance: i32,
+        section_count: i32,
+        min_section: i32,
+        eye: DVec3,
+    ) {
+        let job = WalkJob {
+            cam_section,
+            view_distance,
+            section_count,
+            min_section,
+            eye,
+        };
+        if let Some(tx) = &self.job_tx {
+            let _ = tx.send(job);
+        }
+    }
+
+    /// Collect the newest finished mask, if any. Non-blocking: a walk that is
+    /// not done yet simply keeps the previous mask.
+    pub fn poll(&self) -> Option<VisibleMask> {
+        let mut latest = None;
+        while let Ok(mask) = self.done_rx.try_recv() {
+            latest = Some(mask);
+        }
+        latest
+    }
+}
+
+impl Drop for AsyncOcclusionWalker {
+    fn drop(&mut self) {
+        // Drop the request channel first so the worker exits; join it.
+        self.job_tx.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 /// Per-section visibility from a meshed snapshot's opacity grid, for the walk
@@ -746,5 +890,109 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The worker's mask must equal the synchronous walk over the same data:
+    /// the async path changes only where the walk runs, not what it computes.
+    #[test]
+    fn async_walk_matches_sync() {
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let mut map = AHashMap::new();
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let sc = 8i32;
+        let vd = 6i32;
+        for x in -vd..=vd {
+            for z in -vd..=vd {
+                for si in 0..sc {
+                    let v = match lcg(&mut state) % 4 {
+                        0 => VisibilitySet::none(),
+                        1 => VisibilitySet::all(),
+                        _ => VisibilitySet(lcg(&mut state) | (lcg(&mut state) << 32)),
+                    };
+                    map.insert((ChunkPos::new(x, z), si), v);
+                }
+            }
+        }
+        let vis = Arc::new(Mutex::new(map));
+        let walker = AsyncOcclusionWalker::new(vis.clone()).unwrap();
+        let cam = ChunkPos::new(1, -1);
+        let eye = DVec3::new(20.0, 70.0, -10.0);
+        walker.schedule(SectionPos::new(cam.x, 4, cam.z), vd, sc, 0, eye);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mask = loop {
+            if let Some(m) = walker.poll() {
+                break m;
+            }
+            assert!(Instant::now() < deadline, "worker never finished the walk");
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let sync = compute_visible_mask(
+            |c, si| vis.lock().get(&(c, si)).copied(),
+            cam,
+            4,
+            eye,
+            0,
+            sc,
+            vd + 1,
+        );
+        assert_eq!(mask, sync);
+    }
+
+    /// The render thread must never run the walk: `schedule` (a channel send)
+    /// and `poll` (a channel drain) cost microseconds even while a large walk is
+    /// in flight on the worker. The walk itself is ~ms; if either call blocked
+    /// on it, the per-call cost would be ~ms too.
+    #[test]
+    fn render_thread_never_walks() {
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let mut map = AHashMap::new();
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let sc = 24i32;
+        let vd = 32i32;
+        for x in -vd..=vd {
+            for z in -vd..=vd {
+                for si in 0..sc {
+                    let v = match lcg(&mut state) % 3 {
+                        0 => VisibilitySet::none(),
+                        1 => VisibilitySet::all(),
+                        _ => VisibilitySet(lcg(&mut state) | (lcg(&mut state) << 32)),
+                    };
+                    map.insert((ChunkPos::new(x, z), si), v);
+                }
+            }
+        }
+        let vis = Arc::new(Mutex::new(map));
+        let walker = AsyncOcclusionWalker::new(vis).unwrap();
+        let eye = DVec3::new(8.0, 72.0, 8.0);
+
+        let started = Instant::now();
+        walker.schedule(SectionPos::new(0, 4, 0), vd, sc, -4, eye);
+        let schedule_us = started.elapsed().as_secs_f64() * 1e6;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut poll_calls = 0u32;
+        let mut poll_total = Duration::ZERO;
+        let mask = loop {
+            let p = Instant::now();
+            let m = walker.poll();
+            poll_total += p.elapsed();
+            poll_calls += 1;
+            if let Some(m) = m {
+                break m;
+            }
+            assert!(Instant::now() < deadline, "worker never finished");
+            std::thread::sleep(Duration::from_micros(200));
+        };
+        let poll_us = poll_total.as_secs_f64() * 1e6 / poll_calls as f64;
+        eprintln!("schedule: {schedule_us:.2} us, poll: {poll_us:.2} us/call ({poll_calls} calls)");
+        assert!(schedule_us < 500.0, "schedule blocked the render thread");
+        assert!(poll_us < 500.0, "poll blocked the render thread");
+        assert!(
+            mask.column(ChunkPos::new(0, 0)) != 0,
+            "worker walked an empty mask"
+        );
     }
 }
