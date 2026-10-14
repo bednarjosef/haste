@@ -640,6 +640,20 @@ pub struct WorldFeed {
     unknown_be_types: HashSet<String>,
     /// Lid animations by position for this frame (reused lookup scratch).
     lid_map: HashMap<BlockPos, (f32, f32)>,
+    /// Parsed sign text by position, rebuilt only when the block entity's NBT changes (the
+    /// value is shared with the frame's instances, so no per-frame allocation). The key is the
+    /// NBT payload's (pointer, length): the server sends a fresh `Bytes` per update, so a
+    /// different payload always re-parses.
+    sign_texts: HashMap<
+        BlockPos,
+        (
+            usize,
+            usize,
+            std::sync::Arc<haste_render::blockentity::SignTextData>,
+        ),
+    >,
+    /// The renderer's text metrics (the font), for wrapping sign lines at parse time.
+    text_metrics: Option<std::sync::Arc<dyn haste_core::gui::TextMetrics>>,
     /// The shared world as the mesh workers see it (created on the first feed).
     source: Option<Arc<dyn haste_render::SnapshotSource>>,
     /// Sections submitted this frame (reused).
@@ -744,6 +758,10 @@ impl WorldFeed {
         local: (EntityId, u128),
         partial: f32,
     ) -> (&[EntityInstance], &[haste_render::BlockEntityInstance]) {
+        // The sign text parser needs the font for the wrap; grabbed once per connection.
+        if self.text_metrics.is_none() {
+            self.text_metrics = Some(renderer.text_metrics());
+        }
         self.block_entities(shared);
         self.instances.clear();
         {
@@ -847,6 +865,28 @@ impl WorldFeed {
                         );
                     }
                 }
+                // Signs: the yaw angle the text transform turns by (vanilla
+                // `StandingSignRenderer`/`HangingSignRenderer` picking the block state's
+                // `rotation` segment or the wall `facing`), and the cached parsed text.
+                let (sign_angle, text) = match kind {
+                    haste_render::BlockEntityKind::Sign { hanging } => {
+                        let angle = match blocks.property_value(state, "rotation") {
+                            // `RotationSegment.convertToDegrees`: `segment * 22.5`, wrapped
+                            // from 180 to -180.
+                            Some(rot) => rot.parse::<i32>().map_or(0.0, |r| {
+                                let d = r.rem_euclid(16) as f32 * 22.5;
+                                if d >= 180.0 {
+                                    d - 360.0
+                                } else {
+                                    d
+                                }
+                            }),
+                            None => to_y_rot(facing),
+                        };
+                        (angle, self.sign_text(pos, be, hanging))
+                    }
+                    _ => (0.0, None),
+                };
                 self.be_instances.push(haste_render::BlockEntityInstance {
                     pos,
                     facing,
@@ -857,9 +897,33 @@ impl WorldFeed {
                         end: open.1,
                     },
                     light,
+                    sign_angle,
+                    text,
                 });
             }
         }
+    }
+
+    /// The parsed sign text at `pos` (`SignBlockEntity`'s `front_text`/`back_text`), from the
+    /// block entity's NBT. Cached: the parse (and the wrap to the sign's line width) runs only
+    /// when the payload changes; the returned handle is shared with the frame's instances.
+    fn sign_text(
+        &mut self,
+        pos: BlockPos,
+        be: &haste_core::chunk::BlockEntityData,
+        hanging: bool,
+    ) -> Option<std::sync::Arc<haste_render::blockentity::SignTextData>> {
+        let key = (be.nbt.as_ptr() as usize, be.nbt.len());
+        if let Some((k, len, text)) = self.sign_texts.get(&pos) {
+            if (*k, *len) == key {
+                return Some(text.clone());
+            }
+        }
+        let metrics = self.text_metrics.clone()?;
+        let (_line_height, max_width) = haste_render::blockentity::sign_line_metrics_pub(hanging);
+        let parsed = parse_sign_nbt(&be.nbt, &*metrics, max_width)?;
+        self.sign_texts.insert(pos, (key.0, key.1, parsed.clone()));
+        Some(parsed)
     }
 
     /// Hands the renderer the first-person hand (`Renderer::set_first_person`) when the view's
@@ -901,6 +965,140 @@ impl WorldFeed {
 /// A block state `facing` property value as a `Direction`.
 fn direction_of_property(v: &str) -> Option<Direction> {
     Direction::ALL.iter().find(|d| d.name() == v).copied()
+}
+
+/// Vanilla `Direction.toYRot`: south 0, west 90, north 180, east 270.
+fn to_y_rot(d: Direction) -> f32 {
+    match d {
+        Direction::South => 0.0,
+        Direction::West => 90.0,
+        Direction::North => 180.0,
+        Direction::East => 270.0,
+        Direction::Down | Direction::Up => 0.0,
+    }
+}
+
+/// One sign side from its NBT compound (vanilla `SignText.CODEC`): `messages` (4 components as
+/// plain strings or `{"text": ...}` compounds), `color` (a `DyeColor` name) and
+/// `has_glowing_text`. Each line is wrapped to `max_width` like vanilla's render messages
+/// (`Font.split`, first wrapped line only). Missing fields keep vanilla's defaults (black,
+/// not glowing, empty).
+fn parse_sign_side(
+    c: &haste_protocol::nbt::NbtCompound,
+    metrics: &dyn haste_core::gui::TextMetrics,
+    max_width: i32,
+) -> haste_render::blockentity::SignSideText {
+    let mut lines: [String; 4] = Default::default();
+    if let Some(messages) = c.get_list("messages") {
+        for (i, m) in messages.iter().take(4).enumerate() {
+            let text = match m {
+                haste_protocol::nbt::NbtTag::String(s) => s.to_string(),
+                haste_protocol::nbt::NbtTag::Compound(cc) => {
+                    cc.get_string("text").unwrap_or_default().to_string()
+                }
+                _ => String::new(),
+            };
+            lines[i] = first_wrapped_line(&text, metrics, max_width).to_string();
+        }
+    }
+    const DYES: [&str; 16] = [
+        "white",
+        "orange",
+        "magenta",
+        "light_blue",
+        "yellow",
+        "lime",
+        "pink",
+        "gray",
+        "light_gray",
+        "cyan",
+        "purple",
+        "blue",
+        "brown",
+        "green",
+        "red",
+        "black",
+    ];
+    let color = c
+        .get_string("color")
+        .and_then(|n| DYES.iter().position(|d| *d == n))
+        .map_or(15, |i| i as u8);
+    let glowing = c.get_bool("has_glowing_text").unwrap_or(false);
+    haste_render::blockentity::SignSideText {
+        lines,
+        color,
+        glowing,
+    }
+}
+
+/// The first wrapped line of `text` at `max_width`, vanilla `StringSplitter.splitLines` for a
+/// plain string: characters accumulate their widths; past the limit the line breaks at the
+/// last space (dropping it), or right before the character that overflowed when there is
+/// none; a first character wider than the limit still yields one character (the
+/// `hadNonZeroWidthChar` guard). Newlines break there.
+fn first_wrapped_line<'a>(
+    text: &'a str,
+    metrics: &dyn haste_core::gui::TextMetrics,
+    max_width: i32,
+) -> &'a str {
+    let max_width = max_width.max(1);
+    let mut width = 0i32;
+    let mut had_non_zero = false;
+    let mut last_space: Option<usize> = None;
+    for (i, ch) in text.char_indices() {
+        match ch {
+            '\n' => return &text[..i],
+            ' ' => last_space = Some(i),
+            _ => {}
+        }
+        let char_width = metrics.width(ch.encode_utf8(&mut [0; 4]));
+        width += char_width;
+        if !had_non_zero || width <= max_width {
+            had_non_zero |= char_width != 0;
+        } else {
+            return match last_space {
+                // Break at the last space, dropping it.
+                Some(s) => &text[..s],
+                // No space: break before this character (at least one char: the guard above
+                // always accepts the first non-zero-width one).
+                None => &text[..i],
+            };
+        }
+    }
+    text
+}
+
+/// The whole sign's text (`front_text` / `back_text`), or `None` when the NBT does not parse.
+fn parse_sign_nbt(
+    nbt: &[u8],
+    metrics: &dyn haste_core::gui::TextMetrics,
+    max_width: i32,
+) -> Option<std::sync::Arc<haste_render::blockentity::SignTextData>> {
+    use haste_protocol::nbt::deserializer::NbtReadHelperJava;
+    let mut cursor = std::io::Cursor::new(nbt);
+    let mut helper = NbtReadHelperJava::new(&mut cursor);
+    let doc = haste_protocol::nbt::Nbt::read_unnamed(&mut helper).ok()?;
+    let root = &doc.root_tag;
+    let side = |name: &str| {
+        root.get_compound(name)
+            .map(|c| parse_sign_side(c, metrics, max_width))
+            .unwrap_or_else(empty_sign_side)
+    };
+    Some(std::sync::Arc::new(
+        haste_render::blockentity::SignTextData {
+            front: side("front_text"),
+            back: side("back_text"),
+        },
+    ))
+}
+
+/// Vanilla `SignText.EMPTY`: four empty lines, black, not glowing.
+fn empty_sign_side() -> haste_render::blockentity::SignSideText {
+    haste_render::blockentity::SignSideText {
+        lines: std::array::from_fn(|_| String::new()),
+        color: 15,
+        glowing: false,
+    }
 }
 
 /// Where a double chest's other half is (vanilla `ChestBlock.getConnectedDirection`:
@@ -4535,6 +4733,76 @@ mod tests {
         // Strength scales it; the hurt time running out (hurtTime - partial < 0) is 0.
         assert!((hurt_tilt_degrees(5, 0.0, 0.5) + 1.36564).abs() < 1e-4);
         assert_eq!(hurt_tilt_degrees(0, 0.5, 1.0), 0.0);
+    }
+
+    /// A fixed-width "font" for the wrap tests: every character is 6 wide, `i` is 2.
+    struct WrapFont;
+    impl haste_core::gui::TextMetrics for WrapFont {
+        fn width(&self, text: &str) -> i32 {
+            text.chars().map(|c| if c == 'i' { 2 } else { 6 }).sum()
+        }
+    }
+
+    /// The first wrapped line follows vanilla `StringSplitter.splitLines`: break at the last
+    /// space before the width runs out, hard-cut without one, always keep the first character.
+    #[test]
+    fn first_wrapped_line_breaks_at_spaces() {
+        let f = &WrapFont;
+        // 3 characters of 6 = 18 fits 20.
+        assert_eq!(first_wrapped_line("abc", f, 20), "abc");
+        // 4 characters of 6 = 24 > 20: no space, cut before the 4th.
+        assert_eq!(first_wrapped_line("abcd", f, 20), "abc");
+        // A space before the cut: the line ends at the space (dropped).
+        assert_eq!(first_wrapped_line("ab cd", f, 20), "ab");
+        // Newlines end the line.
+        assert_eq!(first_wrapped_line("ab\ncd", f, 100), "ab");
+        // The first character is kept even when wider than the limit.
+        assert_eq!(first_wrapped_line("abcd", f, 1), "a");
+        // Empty stays empty.
+        assert_eq!(first_wrapped_line("", f, 90), "");
+    }
+
+    /// Sign NBT parses to both sides' lines, colour and glow; the plain and the compound
+    /// component forms both work, and missing sides are `SignText.EMPTY`.
+    #[test]
+    fn sign_nbt_parses_both_sides() {
+        use haste_protocol::nbt::serializer::{NbtWriteHelper, NbtWriteHelperJava};
+        use haste_protocol::nbt::{NbtCompound, NbtTag, COMPOUND_ID};
+        let mut front = NbtCompound::new();
+        front.put_list(
+            "messages",
+            vec![
+                NbtTag::String("hello".into()),
+                NbtTag::Compound({
+                    let mut c = NbtCompound::new();
+                    c.put_string("text", "world".into());
+                    c
+                }),
+                NbtTag::String("".into()),
+                NbtTag::String("line4".into()),
+            ],
+        );
+        front.put_string("color", "red".into());
+        front.put_bool("has_glowing_text", true);
+        let mut root = NbtCompound::new();
+        root.put_compound("front_text", front);
+        // Network NBT: the type byte and payload with no root name.
+        let mut bytes = Vec::new();
+        {
+            let mut w = NbtWriteHelperJava::new(&mut bytes);
+            w.write_u8(COMPOUND_ID).unwrap();
+            root.clone().serialize_content(&mut w).unwrap();
+        }
+        let parsed = parse_sign_nbt(&bytes, &WrapFont, 90).unwrap();
+        assert_eq!(parsed.front.lines[0], "hello");
+        assert_eq!(parsed.front.lines[1], "world");
+        assert_eq!(parsed.front.lines[3], "line4");
+        assert_eq!(parsed.front.color, 14);
+        assert!(parsed.front.glowing);
+        // The back is missing: vanilla's empty default.
+        assert_eq!(parsed.back, empty_sign_side());
+        // Not NBT at all: None, never a panic.
+        assert!(parse_sign_nbt(&[1, 2, 3], &WrapFont, 90).is_none());
     }
 
     #[test]

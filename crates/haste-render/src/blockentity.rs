@@ -52,27 +52,60 @@ pub enum ChestMaterial {
     Ender,
 }
 
-/// What to draw for one block entity (the per-type registry's rows; later renderers for signs,
-/// beds, banners and heads plug in here).
+/// One side of a sign's text, vanilla `SignText`: up to 4 lines, a dye colour and the glowing
+/// flag. Lines are already the *rendered* strings: the caller applied vanilla's wrap rule
+/// (`Font.split` to the sign's max width, first wrapped line only) when parsing the NBT.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignSideText {
+    /// The rendered line (vanilla `SignText.getRenderMessages`, empty lines included).
+    pub lines: [String; 4],
+    /// The dye colour id, vanilla `DyeColor` order (sign NBT's `color`, default black = 15).
+    pub color: u8,
+    /// `has_glowing_text`.
+    pub glowing: bool,
+}
+
+/// Both sides of a sign (vanilla `SignBlockEntity.frontText` / `backText`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignTextData {
+    pub front: SignSideText,
+    pub back: SignSideText,
+}
+
+/// What to draw for one block entity (the per-type registry's rows; later renderers for beds
+/// and heads plug in here).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockEntityKind {
     Chest(ChestMaterial),
     Shulker(Option<u8>),
+    /// A sign or hanging sign: the board is the chunk's block model; the renderer draws the
+    /// text. `hanging` picks `HangingSignRenderer`'s transform and line metrics.
+    Sign {
+        hanging: bool,
+    },
 }
 
 /// One drawable block entity instance handed to the renderer each frame. `open` is the lid
 /// animation as the ends of the last tick (vanilla's `ChestLidController.getOpenness` /
 /// `ShulkerBoxBlockEntity.getProgress`), already combined over a double chest's halves;
-/// `light` is (sky, block) at the block.
-#[derive(Clone, Copy, Debug)]
+/// `light` is (sky, block) at the block. Signs carry their text as a shared handle (no
+/// per-frame allocation: the client caches one per block entity and re-clones the handle).
+#[derive(Clone, Debug)]
 pub struct BlockEntityInstance {
     pub pos: BlockPos,
-    /// The block's `facing` property (horizontal for chests, any for shulker boxes).
+    /// The block's `facing` property (horizontal for chests, any for shulker boxes); for
+    /// standing signs the `rotation` segment as a horizontal facing, wall signs the wall's
+    /// `facing`.
     pub facing: Direction,
     pub half: ChestHalf,
     pub kind: BlockEntityKind,
     pub open: TickPair,
     pub light: (u8, u8),
+    /// The sign's yaw in vanilla degrees (standing: `RotationSegment.convertToDegrees` of the
+    /// `rotation` property; wall: the wall `facing.toYRot()`), for `BlockEntityKind::Sign`.
+    pub sign_angle: f32,
+    /// Sign text (both sides), for `BlockEntityKind::Sign`.
+    pub text: Option<std::sync::Arc<SignTextData>>,
 }
 
 /// Resolves a block entity type name (from the synced `minecraft:block_entity_type` registry)
@@ -97,6 +130,8 @@ pub fn kind_of(be_type: &Identifier, block: &Identifier, xmas: bool) -> Option<B
         })),
         "ender_chest" => Some(BlockEntityKind::Chest(ChestMaterial::Ender)),
         "shulker_box" => Some(BlockEntityKind::Shulker(shulker_color(block))),
+        "sign" => Some(BlockEntityKind::Sign { hanging: false }),
+        "hanging_sign" => Some(BlockEntityKind::Sign { hanging: true }),
         _ => None,
     }
 }
@@ -422,6 +457,99 @@ pub(crate) type EmitPart<'a> = &'a dyn Fn(
     (u8, u8),
 );
 
+/// Vanilla `DyeColor.getTextColor` (the ARGB text colours), by dye id.
+const DYE_TEXT_COLOR: [u32; 16] = [
+    0xFFFF_FFFF,
+    0xFFFF_681F,
+    0xFFFF_00FF,
+    0xFF9A_C0CD,
+    0xFFFF_FF00,
+    0xFFBF_FF00,
+    0xFFFF_69B4,
+    0xFF80_8080,
+    0xFFD3_D3D3,
+    0xFF00_FFFF,
+    0xFFA0_20F0,
+    0xFF00_00FF,
+    0xFF8B_4513,
+    0xFF00_FF00,
+    0xFFFF_0000,
+    0xFF00_0000,
+];
+
+/// The outline colour vanilla uses for black glowing text (`AbstractSignRenderer.BLACK_TEXT_OUTLINE_COLOR`).
+const BLACK_TEXT_OUTLINE_COLOR: u32 = 0xFFF0_EBCC;
+
+/// Vanilla `AbstractSignRenderer.getDarkColor`: the colour non-glowing text is drawn with —
+/// the dye colour scaled by 0.4 (per channel, clamped), except black glowing text which keeps
+/// its special outline colour instead of scaling to near-black.
+pub fn sign_dark_color(side: &SignSideText) -> u32 {
+    let color = DYE_TEXT_COLOR[side.color as usize % 16];
+    if side.color == 15 && side.glowing {
+        BLACK_TEXT_OUTLINE_COLOR
+    } else {
+        let scale = |c: u32| ((c * 2) / 5).min(255);
+        0xFF00_0000
+            | scale((color >> 16) & 0xFF) << 16
+            | scale((color >> 8) & 0xFF) << 8
+            | scale(color & 0xFF)
+    }
+}
+
+/// The colour glowing text is drawn with (the dye's own text colour), vanilla
+/// `AbstractSignRenderer.submitSignText`.
+pub fn sign_glow_color(side: &SignSideText) -> u32 {
+    DYE_TEXT_COLOR[side.color as usize % 16]
+}
+
+/// Vanilla `StandingSignRenderer.textTransformation` / `HangingSignRenderer.textTransformation`:
+/// the matrix a side's text is drawn through. `angle` is the sign's yaw in vanilla degrees
+/// (standing: the `rotation` segment, wall: the wall's `facing.toYRot()`); `front` picks the
+/// side (the back adds vanilla's extra 180-degree turn).
+pub(crate) fn sign_text_transform(
+    hanging: bool,
+    angle: f32,
+    front: bool,
+    camera: glam::DVec3,
+    pos: BlockPos,
+) -> Mat4 {
+    let p = pos.as_dvec3() - camera;
+    let mut m = if hanging {
+        // Hanging: (0.5, 0.9375, 0.5), rotate -angle, translate (0, -0.3125, 0).
+        Mat4::from_translation(p.as_vec3() + Vec3::new(0.5, 0.9375, 0.5))
+            * Mat4::from_rotation_y((-angle).to_radians())
+            * Mat4::from_translation(Vec3::new(0.0, -0.3125, 0.0))
+    } else {
+        // Standing: (0.5, 0.5, 0.5), rotate -angle, wall signs drop to (0, -0.3125, -0.4375).
+        Mat4::from_translation(p.as_vec3() + Vec3::new(0.5, 0.5, 0.5))
+            * Mat4::from_rotation_y((-angle).to_radians())
+    };
+    if !front {
+        m *= Mat4::from_rotation_y(180.0f32.to_radians());
+    }
+    let s = if hanging { 0.0140625 } else { 0.010416667 };
+    let offset = if hanging {
+        Vec3::new(0.0, -0.32, 0.073)
+    } else {
+        Vec3::new(0.0, 1.0 / 3.0, 0.046666667)
+    };
+    m * Mat4::from_translation(offset) * Mat4::from_scale(Vec3::new(s, -s, s))
+}
+
+/// Vanilla `SignBlockEntity.getTextLineHeight` (10) and `HangingSignBlockEntity` (9);
+/// `getMaxTextLineWidth` is 90 standing, 60 hanging.
+pub fn sign_line_metrics_pub(hanging: bool) -> (i32, i32) {
+    sign_line_metrics(hanging)
+}
+
+pub(crate) fn sign_line_metrics(hanging: bool) -> (i32, i32) {
+    if hanging {
+        (9, 60)
+    } else {
+        (10, 90)
+    }
+}
+
 /// Poses one block entity into `out` (camera-relative, the entity stream's convention).
 /// `rect` is the texture's atlas rectangle, `light` the lightmap coordinates (block, sky).
 pub(crate) fn emit_block_entity(
@@ -487,6 +615,9 @@ pub(crate) fn emit_block_entity(
                 emit_part(out, model, part, &pose, parent, rect, light);
             }
         }
+        // Signs draw no cubes here: the board is the chunk's block model and the text goes
+        // through the entity renderer's glyph pass (`emit_sign_text`), which needs the font.
+        BlockEntityKind::Sign { .. } => {}
     }
 }
 
@@ -518,6 +649,8 @@ mod tests {
             kind: BlockEntityKind::Chest(ChestMaterial::Normal),
             open: TickPair::fixed(open),
             light: (15, 0),
+            sign_angle: 0.0,
+            text: None,
         }
     }
 
@@ -529,6 +662,8 @@ mod tests {
             kind: BlockEntityKind::Shulker(None),
             open: TickPair::fixed(progress),
             light: (15, 0),
+            sign_angle: 0.0,
+            text: None,
         }
     }
 
@@ -669,8 +804,16 @@ mod tests {
             ),
             Some(BlockEntityKind::Shulker(None))
         );
+        // Signs and hanging signs.
+        assert_eq!(
+            kind_of(&Identifier::minecraft("sign"), &block, false),
+            Some(BlockEntityKind::Sign { hanging: false })
+        );
+        assert_eq!(
+            kind_of(&Identifier::minecraft("hanging_sign"), &block, false),
+            Some(BlockEntityKind::Sign { hanging: true })
+        );
         // Unknown and out of scope.
-        assert_eq!(kind_of(&Identifier::minecraft("sign"), &block, false), None);
         assert_eq!(
             kind_of(&Identifier::minecraft("copper_chest"), &block, false),
             None
@@ -699,5 +842,73 @@ mod tests {
         assert_eq!(day(1_735_171_200), (12, 26)); // 2024-12-26
         assert_eq!(day(1_735_257_600), (12, 27)); // 2024-12-27
         assert_eq!(day(1_734_912_000), (12, 23)); // 2024-12-23
+    }
+
+    fn side(color: u8, glowing: bool) -> SignSideText {
+        SignSideText {
+            lines: std::array::from_fn(|_| String::new()),
+            color,
+            glowing,
+        }
+    }
+
+    /// Vanilla `AbstractSignRenderer.getDarkColor`: non-glowing text is the dye colour scaled
+    /// by 0.4 per channel; black glowing text keeps its special outline colour instead.
+    #[test]
+    fn sign_dark_color_scales_by_four_tenths() {
+        // White (0xFFFFFF) * 0.4 = 0x666666.
+        assert_eq!(sign_dark_color(&side(0, false)), 0xFF66_6666);
+        // Red (0xFF0000) * 0.4 = 0x660000.
+        assert_eq!(sign_dark_color(&side(14, false)), 0xFF66_0000);
+        // Black glowing keeps vanilla's outline colour.
+        assert_eq!(sign_dark_color(&side(15, true)), BLACK_TEXT_OUTLINE_COLOR);
+        // Glowing text is drawn with the dye's own colour.
+        assert_eq!(sign_glow_color(&side(0, true)), 0xFFFF_FFFF);
+    }
+
+    /// The sign text transform at yaw 0, south-facing front: text space is x right, y *up*
+    /// (vanilla's -s y scale), origin near the block centre. The front's text faces +z; the
+    /// back's matrix is the front's turned by 180 degrees.
+    #[test]
+    fn sign_text_transform_places_the_origin() {
+        let pos = BlockPos::new(0, 0, 0);
+        let front = sign_text_transform(false, 0.0, true, glam::DVec3::ZERO, pos);
+        let p = front.transform_point3(Vec3::ZERO);
+        // Standing sign: (0.5, 0.5, 0.5) + (0, 1/3, 1/21) — the text origin sits just north
+        // of the board's centre, one third up.
+        assert!((p.x - 0.5).abs() < 1e-6);
+        assert!((p.y - (0.5 + 1.0 / 3.0)).abs() < 1e-6, "y: {}", p.y);
+        assert!((p.z - (0.5 + 0.046666667)).abs() < 1e-6, "z: {}", p.z);
+        // Text x maps to world +x and text y to world -y (the -s scale).
+        let px = front.transform_point3(Vec3::new(1.0, 0.0, 0.0));
+        let py = front.transform_point3(Vec3::new(0.0, 1.0, 0.0));
+        assert!(px.x > p.x);
+        assert!(py.y < p.y, "text y is up: {}", py.y);
+        // The back is the front rotated 180 degrees about y.
+        let back = sign_text_transform(false, 0.0, false, glam::DVec3::ZERO, pos);
+        let pb = back.transform_point3(Vec3::ZERO);
+        assert!((pb.x - p.x).abs() < 1e-6 && (pb.y - p.y).abs() < 1e-6);
+        let pbx = back.transform_point3(Vec3::new(1.0, 0.0, 0.0));
+        assert!(pbx.x < pb.x, "back text x flips");
+    }
+
+    /// A hanging sign's text transform starts higher (0.9375 - 0.3125 - 0.32) and uses the
+    /// bigger 0.0140625 scale.
+    #[test]
+    fn hanging_sign_text_transform() {
+        let pos = BlockPos::new(0, 0, 0);
+        let m = sign_text_transform(true, 0.0, true, glam::DVec3::ZERO, pos);
+        let p = m.transform_point3(Vec3::ZERO);
+        assert!((p.x - 0.5).abs() < 1e-6);
+        assert!((p.y - (0.9375 - 0.3125 - 0.32)).abs() < 1e-6, "y: {}", p.y);
+        assert!((p.z - (0.5 + 0.073)).abs() < 1e-6, "z: {}", p.z);
+    }
+
+    /// Line metrics: standing 10/90 (`SignBlockEntity`), hanging 9/60
+    /// (`HangingSignBlockEntity`).
+    #[test]
+    fn sign_line_metrics_match_vanilla() {
+        assert_eq!(sign_line_metrics(false), (10, 90));
+        assert_eq!(sign_line_metrics(true), (9, 60));
     }
 }

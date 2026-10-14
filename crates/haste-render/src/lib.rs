@@ -25,7 +25,7 @@ pub mod vertex;
 
 pub use blockentity::{
     chest_texture, kind_of, shulker_texture, xmas_textures, BlockEntityInstance, BlockEntityKind,
-    ChestHalf, ChestMaterial,
+    ChestHalf, ChestMaterial, SignSideText, SignTextData,
 };
 pub use entity::{default_skin, EntityRenderer, FirstPerson, Nametag, TickPair};
 pub use fog::{setup_fog, FogData, FogEnvironment};
