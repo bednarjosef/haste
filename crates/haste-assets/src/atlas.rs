@@ -789,14 +789,9 @@ pub fn fill_empty_with_dark(pixels: &mut [u8], size: u32, rect: [u32; 4]) {
         }
     }
     let Some(darkest) = darkest else { return };
-    // Vanilla computes `3 * channel / 4` in `int`
-    // (TextureUtil.fillEmptyAreasWithDarkColor); widen here so the multiply
-    // cannot overflow a byte before the division.
-    let darkened = [
-        (3 * u32::from(darkest[0]) / 4) as u8,
-        (3 * u32::from(darkest[1]) / 4) as u8,
-        (3 * u32::from(darkest[2]) / 4) as u8,
-    ];
+    // vanilla TextureUtil: 3 * channel / 4 in int arithmetic (u8 would overflow)
+    let dark = |c: u8| (3 * u16::from(c) / 4) as u8;
+    let darkened = [dark(darkest[0]), dark(darkest[1]), dark(darkest[2])];
     for py in 0..h {
         for px in 0..w {
             let at = index(x + px, y + py);

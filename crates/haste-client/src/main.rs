@@ -13,6 +13,7 @@ use clap::Parser;
 
 mod app;
 mod game;
+mod hand;
 mod headless;
 mod launch;
 mod net;

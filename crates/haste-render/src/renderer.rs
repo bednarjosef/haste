@@ -609,7 +609,13 @@ impl Renderer {
                     depth_stencil: Some(wgpu::DepthStencilState {
                         format: wgpu::TextureFormat::Depth24Plus,
                         depth_write_enabled: Some(true),
-                        depth_compare: Some(wgpu::CompareFunction::Less),
+                        // Vanilla's terrain depth test: TERRAIN_SNIPPET inherits
+                        // `DepthStencilState.DEFAULT` (GREATER_THAN_OR_EQUAL), drawn
+                        // against a depth cleared to 0. Haste clears to 1, so the
+                        // same rule is LessEqual: a quad may share a depth (vanilla's
+                        // coplanar model elements, e.g. the grass block's side
+                        // overlay over its side texture, both draw).
+                        depth_compare: Some(wgpu::CompareFunction::LessEqual),
                         stencil: Default::default(),
                         bias: Default::default(),
                     }),
@@ -1253,16 +1259,31 @@ impl Renderer {
         self.entity
             .prepare(frame.entities, None, frame.camera.pos, &mut self.assets);
         {
+            // The hand is drawn in view space, like vanilla's `renderItemInHand` from the
+            // camera's own view matrix: the hurt tilt roll is included, so the hand rolls with
+            // the world (vanilla applies `bobHurt` to the hand as well).
             let yaw = frame.camera.yaw.to_radians();
             let pitch = frame.camera.pitch.to_radians();
             let forward = glam::Vec3::new(
                 -pitch.cos() * yaw.sin(),
                 -pitch.sin(),
                 pitch.cos() * yaw.cos(),
+            )
+            .normalize();
+            let up = if frame.camera.roll_deg == 0.0 {
+                glam::Vec3::Y
+            } else {
+                glam::Quat::from_axis_angle(forward, frame.camera.roll_deg.to_radians())
+                    * glam::Vec3::Y
+            };
+            let view = glam::Mat4::look_to_rh(glam::Vec3::ZERO, forward, up);
+            self.entity.prepare_hand(
+                self.first_person.as_ref(),
+                view.inverse(),
+                (frame.camera.yaw, frame.camera.pitch),
+                frame.partial_tick,
+                &mut self.assets,
             );
-            let view = glam::Mat4::look_to_rh(glam::Vec3::ZERO, forward, glam::Vec3::Y);
-            self.entity
-                .prepare_hand(self.first_person.as_ref(), view.inverse(), &mut self.assets);
         }
         self.overlay.prepare(
             frame.camera.pos,
