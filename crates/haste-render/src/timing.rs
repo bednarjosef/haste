@@ -2,11 +2,13 @@
 // (when the adapter has TIMESTAMP_QUERY). GPU results arrive a frame or two late; one readback
 // is in flight at a time.
 //
-// The main pass is further split into sub-passes (sky, opaque terrain, cutout, translucent,
-// entities, particles, overlays) with bracketing timestamp writes inside the pass, so a slow
-// main pass can be attributed without a profiler. Sub-pass times are wall-clock spans between
-// their begin/end timestamps and overlap nothing (they partition the pass's draw calls), but
-// their sum can exceed the pass span on tiled GPUs that reorder work; on RADV it matches.
+// The main pass is further split into sub-passes with bracketing timestamp writes inside the
+// pass, so a slow main pass can be attributed without a profiler. Sub-pass times are
+// wall-clock spans between their begin/end timestamps and overlap nothing (they partition
+// the pass's draw calls), but their sum can exceed the pass span on tiled GPUs that reorder
+// work; on RADV it matches. Solid and CutoutMipped terrain share a pipeline and are reported
+// together as "opaque"; a wgpu query may only be written once per pass, so each sub-pass
+// bracket must cover all its draws including arena re-runs.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -14,12 +16,15 @@ use std::sync::Arc;
 /// Passes with GPU timestamps, in query order (begin, end per pass).
 pub const PASSES: [&str; 3] = ["main", "hand", "gui"];
 
-/// Sub-passes of the main pass, in draw order: sky, opaque terrain, cutout terrain,
-/// translucent terrain, entities, particles, overlays (clouds and weather).
-pub const MAIN_SUBPASSES: [&str; 7] = [
+/// Sub-passes of the main pass. "solid" and "cutout_mipped" are separate brackets (a wgpu
+/// query may only be written once per pass; they interleave per arena in the layer-major
+/// draw order) but reported as one "opaque" phase in the bench summary, matching vanilla's
+/// ChunkSectionLayerGroup.OPAQUE.
+pub const MAIN_SUBPASSES: [&str; 8] = [
     "sky",
-    "opaque",
+    "solid",
     "cutout",
+    "cutout_mipped",
     "translucent",
     "entities",
     "particles",
@@ -45,7 +50,7 @@ pub struct FrameTimings {
     pub gpu_ms: [f32; 3],
     /// GPU time of the main pass's sub-passes (see [`MAIN_SUBPASSES`]); 0 without timestamps
     /// or when the sub-pass did not run.
-    pub gpu_sub_ms: [f32; 7],
+    pub gpu_sub_ms: [f32; 8],
 }
 
 pub struct GpuTimer {
@@ -58,9 +63,9 @@ pub struct GpuTimer {
     /// Which passes ran in the frame being read back.
     ran: [bool; 3],
     /// Which main-pass sub-passes ran in the frame being read back.
-    ran_sub: [bool; 7],
+    ran_sub: [bool; 8],
     pub latest: [f32; 3],
-    pub latest_sub: [f32; 7],
+    pub latest_sub: [f32; 8],
 }
 
 /// Total query slots: 2 per pass plus 2 per main-pass sub-pass bracket.
@@ -103,9 +108,9 @@ impl GpuTimer {
             in_flight: false,
             period_ns: queue.get_timestamp_period(),
             ran: [false; 3],
-            ran_sub: [false; 7],
+            ran_sub: [false; 8],
             latest: [0.0; 3],
-            latest_sub: [0.0; 7],
+            latest_sub: [0.0; 8],
         })
     }
 
@@ -140,7 +145,7 @@ impl GpuTimer {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         ran: [bool; 3],
-        ran_sub: [bool; 7],
+        ran_sub: [bool; 8],
     ) -> bool {
         if self.in_flight {
             return false;

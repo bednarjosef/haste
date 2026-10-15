@@ -1937,8 +1937,10 @@ struct BenchSummary {
     present_ms: f32,
     /// GPU time of the main, hand and GUI passes.
     gpu_ms: [f32; 3],
-    /// GPU time of the main pass's sub-passes (sky, opaque, cutout, translucent, entities,
-    /// particles, overlays).
+    /// GPU time of the main pass's sub-passes: sky, opaque terrain (solid + cutout-mipped),
+    /// cutout terrain, translucent terrain, entities, particles, overlays. Timing.rs carries
+    /// the solid and cutout-mipped phases separately (queries are written once per pass);
+    /// the bench reports them as one opaque phase like vanilla's ChunkSectionLayerGroup.
     gpu_sub_ms: [f32; 7],
 }
 
@@ -2078,6 +2080,8 @@ fn bench_summary(samples: &[BenchSample]) -> BenchSummary {
     }
     let t = |f: fn(&haste_render::FrameTimings) -> f32| sum(samples, n, |s| f(&s.timings));
     let gpu = |i: usize| sum(samples, n, |s| s.timings.gpu_ms[i]);
+    // Solid + cutout-mipped (renderer sub-passes 1 and 3) fold into "opaque".
+    let opaque = sum(samples, n, |s| s.timings.gpu_sub_ms[1] + s.timings.gpu_sub_ms[3]);
     let gpu_sub = |i: usize| sum(samples, n, |s| s.timings.gpu_sub_ms[i]);
     BenchSummary {
         frames: samples.len() as u32,
@@ -2094,7 +2098,15 @@ fn bench_summary(samples: &[BenchSample]) -> BenchSummary {
         submit_ms: t(|x| x.submit_ms),
         present_ms: t(|x| x.present_ms),
         gpu_ms: [gpu(0), gpu(1), gpu(2)],
-        gpu_sub_ms: std::array::from_fn(|i| gpu_sub(i)),
+        gpu_sub_ms: [
+            gpu_sub(0),
+            opaque,
+            gpu_sub(2),
+            gpu_sub(4),
+            gpu_sub(5),
+            gpu_sub(6),
+            gpu_sub(7),
+        ],
     }
 }
 
