@@ -658,6 +658,9 @@ pub struct Session {
     /// Time of day in ticks from the overworld clock of the last `set_time` (`clocks` arrives
     /// in HashMap order, so the overworld clock is looked up by registry id).
     pub time_of_day: Option<i64>,
+    /// World age in ticks (`set_time`'s `world_age`), for animations keyed to game time
+    /// (vanilla `Level.getGameTime`, e.g. `BannerRenderer`'s wave phase).
+    pub world_age: i64,
     /// Set by `start_configuration` or `transfer`: the next `login` starts a new world.
     pub new_world_pending: bool,
     /// `minecraft:entity_type` registry entries in id order (the synced registry's when the
@@ -732,6 +735,7 @@ impl Session {
             fireworks: HashSet::new(),
             attached_firework: None,
             time_of_day: None,
+            world_age: 0,
             new_world_pending: false,
             entity_type_names: Vec::new(),
             sound_requests: Vec::new(),
@@ -1228,6 +1232,7 @@ impl Session {
             P::PlayerInfoUpdate(u) => entities.player_info(&u.infos()),
             P::SetTime(t) => {
                 entities.set_world_age(t.world_age);
+                self.world_age = t.world_age;
                 // The day clock is `minecraft:overworld` of `minecraft:world_clock` (the
                 // End has its own); `clocks` comes in HashMap order, so look the id up.
                 if let Some(c) = t

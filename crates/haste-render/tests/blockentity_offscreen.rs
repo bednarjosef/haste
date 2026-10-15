@@ -103,6 +103,9 @@ fn block_entities_offscreen() {
         light: (15, 0),
         sign_angle: 0.0,
         text: None,
+        banner_phase: 0.0,
+        banner: None,
+        skull_anim: TickPair::fixed(0.0),
     };
     let shulker = BlockEntityInstance {
         pos: BlockPos::new(2, 1, 0),
@@ -113,6 +116,9 @@ fn block_entities_offscreen() {
         light: (15, 0),
         sign_angle: 0.0,
         text: None,
+        banner_phase: 0.0,
+        banner: None,
+        skull_anim: TickPair::fixed(0.0),
     };
     // A sign on the floor at (0, 2, 2), facing the camera: the front text is drawn with the
     // default font into the entity stream. The board itself is the chunk's block model (drawn
@@ -146,6 +152,49 @@ fn block_entities_offscreen() {
         // looks south from z = -4).
         sign_angle: 180.0,
         text: Some(sign_text),
+        banner_phase: 0.0,
+        banner: None,
+        skull_anim: TickPair::fixed(0.0),
+    };
+    // A standing banner next to the sign, red base with a blue stripe: pole, bar and waving
+    // flag with the base and pattern layers.
+    let banner = BlockEntityInstance {
+        pos: BlockPos::new(-4, 1, 0),
+        facing: Direction::South,
+        half: ChestHalf::Single,
+        kind: BlockEntityKind::Banner { wall: false },
+        open: TickPair::fixed(0.0),
+        light: (15, 0),
+        sign_angle: 180.0,
+        text: None,
+        banner_phase: 0.25,
+        banner: Some(std::sync::Arc::new(haste_render::blockentity::BannerData {
+            base: 14,
+            layers: vec![haste_render::blockentity::BannerLayer {
+                pattern: haste_core::Identifier::minecraft("stripe_bottom"),
+                color: 11,
+            }],
+        })),
+        skull_anim: TickPair::fixed(0.0),
+    };
+    // A skeleton skull on the floor between the sign and the banner, facing the camera: one
+    // head cube in the block's bottom half.
+    let skull = BlockEntityInstance {
+        pos: BlockPos::new(-3, 1, 0),
+        facing: Direction::South,
+        half: ChestHalf::Single,
+        kind: BlockEntityKind::Skull {
+            kind: haste_render::blockentity::SkullKind::Skeleton,
+            wall: false,
+        },
+        open: TickPair::fixed(0.0),
+        light: (15, 0),
+        // Rotation segment 8 = 180 degrees: the face points north, toward the camera.
+        sign_angle: 180.0,
+        text: None,
+        banner_phase: 0.0,
+        banner: None,
+        skull_anim: TickPair::fixed(0.0),
     };
     // The camera looks at the chest's centre from four blocks south and 1.5 up: the chest
     // lands mid-frame.
@@ -190,6 +239,48 @@ fn block_entities_offscreen() {
     assert!(
         sign_pixels > 30,
         "sign text draws {sign_pixels} differing pixels"
+    );
+
+    // The banner: the pole, bar and waving flag with the base and pattern layers, again one
+    // draw with everything. Its pixels differ from the empty scene, and the flag's red base
+    // dominates the banner's pixels (a red-dominant pixel count).
+    let with_banner = render(&mut renderer, &world, &[banner], camera);
+    with_banner.save(out.join("banner.png")).unwrap();
+    let mut banner_pixels = 0;
+    let mut red_pixels = 0;
+    for (x, y, p) in with_banner.enumerate_pixels() {
+        if *p != *empty.get_pixel(x, y) {
+            let _ = (x, y);
+            banner_pixels += 1;
+            let [r, g, b, _] = p.0;
+            if r as i32 - g.max(b) as i32 > 40 {
+                red_pixels += 1;
+            }
+        }
+    }
+    assert!(
+        banner_pixels > 500,
+        "banner draws {banner_pixels} differing pixels"
+    );
+    assert!(
+        red_pixels > 100,
+        "banner base is red: {red_pixels} red pixels"
+    );
+
+    // The skull: one head cube in the lower half of the block, drawn with the skeleton
+    // texture in the same entity draw call.
+    let with_skull = render(&mut renderer, &world, &[skull], camera);
+    with_skull.save(out.join("skull.png")).unwrap();
+    let mut skull_pixels = 0;
+    for (x, y, p) in with_skull.enumerate_pixels() {
+        if *p != *empty.get_pixel(x, y) {
+            let _ = (x, y);
+            skull_pixels += 1;
+        }
+    }
+    assert!(
+        skull_pixels > 200,
+        "skull draws {skull_pixels} differing pixels"
     );
 
     // The chest sits at the frame centre (the camera looks at it): its pixels there differ
