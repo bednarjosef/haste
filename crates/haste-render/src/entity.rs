@@ -302,10 +302,16 @@ impl EntityRenderer {
                 format: wgpu::TextureFormat::Depth24Plus,
                 depth_write_enabled: Some(false),
                 // Vanilla's `DepthStencilState(GREATER_THAN_OR_EQUAL, false)` (reverse-Z) is
-                // LessEqual against Haste's depth cleared to 1.
+                // LessEqual against Haste's depth cleared to 1. The shadow quad is coplanar
+                // with the block top, so a small bias towards the camera replaces vanilla's
+                // `VIEW_OFFSET_Z_LAYERING` polygon offset.
                 depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: Default::default(),
-                bias: Default::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: -1,
+                    slope_scale: 0.0,
+                    clamp: 0.0,
+                },
             }),
             multisample: Default::default(),
             multiview_mask: None,
