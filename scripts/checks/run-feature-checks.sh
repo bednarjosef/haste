@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs the feature check scripts in scripts/checks/ against the local test server.
 # usage: scripts/checks/run-feature-checks.sh [feature ...]
-#   features: hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock containers-crafting-table containers-furnace containers-anvil containers-enchanting-table containers-brewing-stand  (default: all)
+#   features: hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock containers-crafting-table containers-furnace containers-anvil containers-enchanting-table containers-brewing-stand containers-villager-trading  (default: all)
 # The client runs offscreen (`--script`); all server state is set up over RCON from here,
 # never from the script (the player is not an operator and the server kicks command spam).
 # Evidence is printed and grepped: frame text commands (not images), server log lines and
@@ -701,6 +701,44 @@ containers_brewing_stand() {
   check containers-brewing-stand "a water bottle and a nether wart (blaze powder fuel) became an awkward potion" "$r"
 }
 
+# The villager: trade with one. The runner summons a villager with one fixed offer
+# (1 emerald -> 5 arrows) at (129.5, 71, 5) in the check's own area, on its own stone
+# platform, the player 2.5 blocks north of it. Exactly one emerald is given, so the
+# shift-click result take buys one trade (vanilla AbstractContainerMenu.doClick's QUICK_MOVE
+# loop repeats while the result keeps refilling, which the single buy item ends).
+containers_villager_trading() {
+  local log="$LOGDIR/containers-villager-trading.log"
+  plain_client "$ROOT/scripts/checks/containers-villager-trading.txt" "$log" \
+    || { check containers-villager-trading "player never joined" 1; return; }
+  plain_setup "$log" ctrade-setup "129.5 71 2.5 0 0" \
+    "clear $NAME" \
+    "give $NAME minecraft:emerald 1" \
+    "fill 128 70 1 130 74 6 air replace" \
+    "fill 128 70 1 130 70 6 minecraft:stone replace" \
+    "summon minecraft:villager 129.5 71 5 {NoAI:1b,PersistenceRequired:1b,Offers:{Recipes:[{buy:{id:\"minecraft:emerald\",count:1},sell:{id:\"minecraft:arrow\",count:5}}]}}"
+  local before after
+  before=$(rcon "data get entity $NAME Inventory")
+  if wait_shot "$log" ctrade-closed 90; then
+    after=$(rcon "data get entity $NAME Inventory")
+  fi
+  wait_exit
+  # Our villager, removed while the chunks are still ours to touch (a named tag so the
+  # selector never matches another worker's villager on the shared server).
+  rcon "kill @e[type=villager,x=128,z=5,distance=..3]" >/dev/null
+  echo "--- villager trading evidence ---"
+  echo "Inventory before: $before"
+  echo "Inventory after:  $after"
+  local r=0
+  has "$before" "emerald" || { echo "no emeralds before"; r=1; }
+  has "$after" "arrow" || { echo "no arrows after"; r=1; }
+  has "$after" "count: 5" || { echo "not 5 arrows"; r=1; }
+  if grep -qE "haste proxy:|Java exception" "$log"; then
+    echo "proxy stubs or Java exceptions:"; grep -E "haste proxy:|Java exception" "$log" | head -5
+    r=1
+  fi
+  check containers-villager-trading "one trade was bought from a summoned villager (1 emerald -> 5 arrows)" "$r"
+}
+
 # ---- 10. Languages other than English ----
 language() {
   local log="$LOGDIR/language.log"
@@ -833,13 +871,13 @@ sprint() {
   check sprint "double-tapping W made the player cover ${dist} blocks/s (sprint speed)" "$r"
 }
 
-ALL=(hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock sprint containers-crafting-table containers-furnace containers-anvil containers-enchanting-table containers-brewing-stand)
+ALL=(hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock sprint containers-crafting-table containers-furnace containers-anvil containers-enchanting-table containers-brewing-stand containers-villager-trading)
 if [ $# -eq 0 ]; then
   set -- "${ALL[@]}"
 fi
 for f in "$@"; do
   case "$f" in
-    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | particles | recipe-book | sign | book | commandblock | sprint | containers-crafting-table | containers-furnace | containers-anvil | containers-enchanting-table | containers-brewing-stand) fn="${f//-/_}"; if declare -F "$fn" >/dev/null; then "$fn"; else check "$f" "no check function $fn" 1; fi ;;
+    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | particles | recipe-book | sign | book | commandblock | sprint | containers-crafting-table | containers-furnace | containers-anvil | containers-enchanting-table | containers-brewing-stand | containers-villager-trading) fn="${f//-/_}"; if declare -F "$fn" >/dev/null; then "$fn"; else check "$f" "no check function $fn" 1; fi ;;
     *) echo "unknown feature: $f" ;;
   esac
 done

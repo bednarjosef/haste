@@ -1,0 +1,56 @@
+# Container check: villager trading. The merchant screen is 276x166 centred in the 480x270
+# GUI, so its origin is ((480-276)/2, (270-166)/2) = (102, 52) and a slot's centre is its
+# menu position + 8 (vanilla MerchantMenu: buy A (136,37), buy B (162,37), result (220,37);
+# the player inventory sits at x = 108, not the usual 8 - vanilla
+# addStandardInventorySlots(inventory, 108, 84)).
+#   trade row 0 (a button, not a slot: MerchantScreen.init places it at (xo+5, yo+18),
+#   88x20)                     -> [107,195) x [70,90): centre (151, 79)
+#   buy A (menu slot 0)        -> (102+136+8, 52+37+8) = (246, 97)
+#   buy B (menu slot 1)        -> (102+162+8, 52+37+8) = (272, 97)
+#   result (menu slot 2)       -> (102+220+8, 52+37+8) = (330, 97)
+#   player inventory (slots 3+) -> (102+108+8, 52+84+8) = (218, 144), step 18
+#   hotbar (slots 30+)         -> (102+108+8, 52+142+8) = (218, 202), step 18
+# The runner tps us into the check's own area, gives 1 emerald and summons a villager with
+# one fixed offer (1 emerald -> 5 arrows) when the setup screenshot appears.
+wait_until joined
+wait_until settled
+screenshot ctrade-setup
+# The runner now tps us to (129.5, 71, 2.5) facing the villager, clears the inventory,
+# gives the emeralds and summons the villager at (129.5, 71, 5) with the offer. Waiting for
+# the hotbar absorbs the busy shared server.
+wait_until hotbar_item
+# Open the trade screen: look at the villager and use (the interaction sends the interact
+# packet; the server answers with open_screen for the merchant menu). From the eye at
+# (129.5, 72.62, 2.5), pitch 20 aims at the villager's body at z ~5.
+look 0 20
+wait 5
+mouse_down right
+wait 2
+mouse_up right
+wait_until screen_open
+wait 20
+screenshot ctrade-open
+# Click trade row 0: the screen's TradeOfferButton (MerchantScreen.postButtonClick ->
+# MerchantMenu.tryMoveItems pulls one emerald from the inventory into buy slot A, and
+# ServerboundSelectTradePacket tells the server the selected trade; the result slot fills
+# with the offer's arrows).
+click left 151 79
+wait 20
+screenshot ctrade-selected
+# Take the result: the 5 arrows, shift-click straight into the inventory
+# (MerchantResultSlot.onTake -> the server's own menu consumes the emerald).
+key_down LShift
+wait 2
+click left 330 97
+wait 2
+key_up LShift
+wait 10
+screenshot ctrade-taken
+# Close with E (the inventory key, vanilla's keyInventory path in keyPressed).
+key E
+wait 20
+wait_until screen_closed
+screenshot ctrade-closed
+# 10 s tail: the runner reads `data get entity ... Inventory` (the arrows, the emerald
+# spent) from this frame on.
+wait 200
