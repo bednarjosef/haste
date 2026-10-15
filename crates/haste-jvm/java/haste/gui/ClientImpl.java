@@ -341,6 +341,7 @@ public final class ClientImpl {
 
     /** Reduced debug info (the server's game rule, entity events 22/23): not forwarded yet, full info. */
     public static boolean showOnlyReducedInfo(Minecraft m) { return false; }
+
     /** Vanilla's tutorial (hints and toasts for new players); Haste starts it at the last step (no hints). */
     public static net.minecraft.client.tutorial.Tutorial getTutorial(Minecraft m) { return Proxies.tutorial; }
     /** Frames per second from Rust's render loop. */

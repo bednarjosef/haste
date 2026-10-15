@@ -161,10 +161,15 @@ public final class Bridge {
         Mirror.update();
         OptionBridge.tick();
         if (Mirror.inWorld()) {
-            // a dead player (killed, or joined while dead) sees the death screen
-            if (Mirror.health() <= 0f && !Mirror.flag(Mirror.F_IMMEDIATE_RESPAWN)
-                && !(ClientImpl.screen instanceof net.minecraft.client.gui.screens.DeathScreen)) {
-                Proxies.gui.setScreen(new net.minecraft.client.gui.screens.DeathScreen(null, Mirror.flag(Mirror.F_HARDCORE), Proxies.player));
+            // a dead player (killed, or joined while dead) sees the death screen; with immediate
+            // respawn on, vanilla's Gui.setScreen(null) calls player.respawn() instead
+            // (vanilla: Gui.tick -> setScreen(null) -> isDeadOrDying -> shouldShowDeathScreen)
+            if (Mirror.health() <= 0f && !(ClientImpl.screen instanceof net.minecraft.client.gui.screens.DeathScreen)) {
+                if (Mirror.flag(Mirror.F_IMMEDIATE_RESPAWN)) {
+                    Proxies.player.respawn();
+                } else {
+                    Proxies.gui.setScreen(new net.minecraft.client.gui.screens.DeathScreen(null, Mirror.flag(Mirror.F_HARDCORE), Proxies.player));
+                }
             }
             Proxies.hud.tick(false);
             Proxies.chatListener.tick();

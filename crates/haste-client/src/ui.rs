@@ -117,6 +117,7 @@ const FORWARDED: &[&str] = &[
     "minecraft:award_stats",
     "minecraft:game_rule_values",
     "minecraft:open_screen",
+    "minecraft:update_recipes",
     "minecraft:container_set_content",
     "minecraft:container_set_slot",
     "minecraft:container_set_data",
@@ -416,6 +417,13 @@ impl Ui {
         self.gui().with_state(f)
     }
 
+    /// Whether any hotbar slot (vanilla `Inventory` 0-8) holds an item. The check scripts wait
+    /// on this after the runner's RCON `give`: on a busy shared server the inventory sync can
+    /// lag seconds behind the command's answer.
+    pub fn hotbar_has_items(&self) -> bool {
+        self.state(|s| s.inventory.iter().take(9).any(|s| !s.is_empty()))
+    }
+
     /// One 20 Hz client tick (game thread).
     pub fn tick(&self) {
         self.gui().tick();
@@ -424,8 +432,11 @@ impl Ui {
         }
     }
 
-    /// Everything the UI sends this tick, in order: packets vanilla code sent, chat and commands    /// typed in the chat screen, the selected hotbar slot when it changed.
+    /// Everything the UI sends this tick, in order: packets vanilla code sent, chat and commands
+    /// typed in the chat screen, the selected hotbar slot when it changed, and the respawn a
+    /// dead player's immediate respawn queued (`PlayerCombatKill`).
     pub fn drain_outgoing(&self, out: &mut Vec<ServerboundPlay>) {
+        out.append(&mut self.shared.outbox.lock());
         let (packets, chat, slot) =
             self.state(|s| (s.take_outgoing(), s.take_sent(), s.selected_slot));
         if !packets.is_empty() {
@@ -434,7 +445,21 @@ impl Ui {
             if let (Some(tables), Some(dispatch)) = (tables, dispatch.as_ref()) {
                 for p in packets {
                     match decode_serverbound(dispatch, &tables, &p) {
-                        Ok(sp) => out.push(sp),
+                        Ok(sp) => {
+                            if let ServerboundPlay::ContainerClick(c) = &sp {
+                                tracing::info!(
+                                    "container_click: window {} slot {} button {} mode {} state {} changed {} carried {}",
+                                    c.window_id,
+                                    c.slot,
+                                    c.button,
+                                    c.mode,
+                                    c.state_id,
+                                    c.changed.len(),
+                                    c.carried.item.is_some()
+                                );
+                            }
+                            out.push(sp)
+                        }
                         Err(e) => tracing::warn!("packet from Java not sent: {e}"),
                     }
                 }

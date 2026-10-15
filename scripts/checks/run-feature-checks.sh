@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs the feature check scripts in scripts/checks/ against the local test server.
 # usage: scripts/checks/run-feature-checks.sh [feature ...]
-#   features: hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock  (default: all)
+#   features: hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock containers-crafting-table containers-furnace containers-anvil  (default: all)
 # The client runs offscreen (`--script`); all server state is set up over RCON from here,
 # never from the script (the player is not an operator and the server kicks command spam).
 # Evidence is printed and grepped: frame text commands (not images), server log lines and
@@ -19,6 +19,10 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PORT=25691
+# A fresh player name per run (a fresh player joins alive, empty, at the world spawn):
+# seeded from the PID so reruns never collide with a wedged player file.
+NAME=${HASTE_CHECK_NAME:-CChk$$}
+NAME=${NAME:0:16}
 BIN="${HASTE_BIN:-$ROOT/target/debug/haste}"
 LOGDIR="$ROOT/target/feature-checks"
 mkdir -p "$LOGDIR"
@@ -347,6 +351,82 @@ craft() {
   check craft "one oak log became 4 oak planks in the survival inventory" "$r"
 }
 
+# ---- 7. Containers: every container screen works like vanilla, with server evidence ----
+# One function per container. Each check owns a spot in this branch's area (x 120..130,
+# z 0..10 - never the shared spawn, where other workers' players block the crosshair):
+# the runner tps the player there over RCON, gives the items, places the block, and
+# reads `data get entity`/`data get block` back. The scripts click the vanilla slot
+# coordinates (menu position + 8 for a slot centre, screen origin (152, 52) for a
+# 176x166 screen centred in the 480x270 GUI).
+
+# Starts the client on `script` and waits for it to be online. The player name is fresh
+# per run (`ContainersChk$RANDOM`): a fresh player always joins alive, empty and at the
+# world spawn, which is the snowy plain. Returns 1 when the client never joined.
+plain_client() { # script log
+  client_start "$1" "$2"
+  wait_online || return 1
+  return 0
+}
+
+# The setup the container scripts trigger with their first screenshot (after the world
+# settled): the tp moves the player into this check's own area (x 120..130, z 0..10 - the
+# shared world spawn is never used: other workers' players stand there and an entity in
+# the crosshair eats the use click) and zeroes the look offset (an absolute-rotation
+# teleport, so the scripts' `look` angles are what the crosshair aims); the caller's
+# commands give the items and place the blocks. The commands are retried for as long as
+# the script's `wait_until hotbar_item` window (25 s): on a busy shared test server the
+# player entity lags the client's join by many seconds, RCON answers "No player was
+# found" until it is there, and the give's inventory sync can lag its answer again.
+plain_setup() { # log shot pos commands...
+  local log=$1 shot=$2 pos=$3
+  shift 3
+  if wait_shot "$log" "$shot" 90; then
+    local end=$((SECONDS + 25))
+    while [ $SECONDS -lt $end ]; do
+      rcon "gamemode survival $NAME" >/dev/null
+      rcon "tp $NAME $pos" >/dev/null
+      local c
+      for c in "$@"; do
+        rcon "$c" >/dev/null
+      done
+      # done when a `data get` answer names the player (the commands found it)
+      [ -n "$(rcon "data get entity $NAME Pos" 2>/dev/null | grep "$NAME")" ] && break
+      sleep 2
+    done
+  fi
+}
+
+# The crafting table: craft planks in the 3x3 grid, shift-click the result into the
+# inventory, then repeat with plain clicks (pick the result up, put it down). The table
+# sits in the check's own area; the player stands 2.5 blocks north of it.
+container_crafting_table() {
+  local log="$LOGDIR/containers-crafting-table.log"
+  plain_client "$ROOT/scripts/checks/containers-crafting-table.txt" "$log" \
+    || { check containers-crafting-table "player never joined" 1; return; }
+  plain_setup "$log" ccraft-setup "125.5 71 2.5 0 0" \
+    "clear $NAME" \
+    "give $NAME minecraft:oak_log 2" \
+    "fill 124 70 1 126 74 6 air replace" \
+    "fill 124 70 1 126 70 6 minecraft:stone replace" \
+    "setblock 125 71 5 minecraft:crafting_table"
+  local before after
+  before=$(rcon "data get entity $NAME Inventory")
+  if wait_shot "$log" ccraft-final 90; then
+    after=$(rcon "data get entity $NAME Inventory")
+  fi
+  wait_exit
+  echo "--- crafting table evidence ---"
+  echo "Inventory before: $before"
+  echo "Inventory after:  $after"
+  local r=0
+  has "$before" "oak_log" || { echo "no oak_log before"; r=1; }
+  # 2 logs -> 8 planks: shift-clicked straight into the inventory, then the second batch
+  # picked up and placed by hand.
+  has "$after" "oak_planks" || { echo "no oak_planks after"; r=1; }
+  has "$after" "count: 8" || { echo "not 8 planks"; r=1; }
+  check containers-crafting-table "2 oak logs became 8 oak planks (shift-click + hand-placed result)" "$r"
+}
+
 # ---- 11. Block particles: the client's own destroy grid and mining cracks ----
 particles() {
   local log="$LOGDIR/particles.log"
@@ -477,9 +557,66 @@ recipe_book() {
   wait_exit
   echo "--- recipe book evidence ---"
   echo "Inventory before: $before"
+
+# The furnace: smelt 1 raw iron with 1 coal, take the iron ingot. The furnace sits at
+# (128, 71, 5) in the check's own area, on its own stone platform, the player 2.5 blocks
+# north of it.
+container_furnace() {
+  local log="$LOGDIR/containers-furnace.log"
+  plain_client "$ROOT/scripts/checks/containers-furnace.txt" "$log" \
+    || { check containers-furnace "player never joined" 1; return; }
+  plain_setup "$log" cfurn-setup "128.5 71 2.5 0 0" \
+    "clear $NAME" \
+    "give $NAME minecraft:raw_iron 1" \
+    "give $NAME minecraft:coal 1" \
+    "fill 127 70 1 129 74 6 air replace" \
+    "fill 127 70 1 129 70 6 minecraft:stone replace" \
+    "setblock 128 71 5 minecraft:furnace"
+  local before after
+  before=$(rcon "data get entity $NAME Inventory")
+  if wait_shot "$log" cfurn-closed 90; then
+    after=$(rcon "data get entity $NAME Inventory")
+  fi
+  wait_exit
+  echo "--- furnace evidence ---"
+  echo "Inventory before: $before"
   echo "Inventory after:  $after"
   local r=0
-  has "$before" "oak_log" || { echo "no oak_log before"; r=1; }
+  has "$before" "raw_iron" || { echo "no raw_iron before"; r=1; }
+  has "$before" "coal" || { echo "no coal before"; r=1; }
+  has "$after" "iron_ingot" || { echo "no iron_ingot after"; r=1; }
+  check containers-furnace "1 raw iron smelted with 1 coal became 1 iron ingot" "$r"
+}
+
+# The anvil: rename a wooden sword with one XP level. The anvil sits at (122, 71, 5) in
+# the check's own area, on its own stone platform, the player 2.5 blocks north of it.
+container_anvil() {
+  local log="$LOGDIR/containers-anvil.log"
+  plain_client "$ROOT/scripts/checks/containers-anvil.txt" "$log" \
+    || { check containers-anvil "player never joined" 1; return; }
+  plain_setup "$log" canvil-setup "122.5 71 2.5 0 0" \
+    "clear $NAME" \
+    "give $NAME minecraft:wooden_sword 1" \
+    "xp add $NAME 1 levels" \
+    "fill 121 70 1 123 74 6 air replace" \
+    "fill 121 70 1 123 70 6 minecraft:stone replace" \
+    "setblock 122 71 5 minecraft:anvil"
+  local before after
+  before=$(rcon "data get entity $NAME Inventory")
+  if wait_shot "$log" canvil-closed 90; then
+    after=$(rcon "data get entity $NAME Inventory")
+  fi
+  wait_exit
+  echo "--- anvil evidence ---"
+  echo "Inventory before: $before"
+  echo "Inventory after:  $after"
+  local r=0
+  has "$before" "wooden_sword" || { echo "no wooden_sword before"; r=1; }
+  has "$after" "wooden_sword" || { echo "no renamed sword after"; r=1; }
+  has "$after" "RenamedSword" || { echo "no custom name RenamedSword"; r=1; }
+  check containers-anvil "a wooden sword was renamed to RenamedSword for 1 XP level" "$r"
+}
+
   has "$after" "oak_planks" || { echo "no oak_planks after"; r=1; }
   has "$after" "count: 4" || { echo "not 4 planks"; r=1; }
   if grep -qE "haste proxy:|Java exception" "$log"; then
@@ -621,13 +758,13 @@ sprint() {
   check sprint "double-tapping W made the player cover ${dist} blocks/s (sprint speed)" "$r"
 }
 
-ALL=(hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock sprint)
+ALL=(hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock sprint containers-crafting-table containers-furnace containers-anvil)
 if [ $# -eq 0 ]; then
   set -- "${ALL[@]}"
 fi
 for f in "$@"; do
   case "$f" in
-    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | particles | recipe-book | sign | book | commandblock | sprint) "${f//-/_}" ;;
+    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | particles | recipe-book | sign | book | commandblock | sprint | containers-crafting-table | containers-furnace | containers-anvil) "${f//-/_}" ;;
     *) echo "unknown feature: $f" ;;
   esac
 done

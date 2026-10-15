@@ -3574,6 +3574,8 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut fps = FpsCounter::new();
     let mut last_err: Option<String> = None;
     let mut finished = false;
+    // Whether a screen was open last tick, to release the held game input when one opens.
+    let mut script_screen_was_open = false;
     // With `--pos`, the script's `wait_until settled` also waits for the server to have
     // teleported the player to these feet coordinates (the caller teleports over RCON while
     // we join, like the screenshot mode's `--pos`).
@@ -3702,7 +3704,16 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                     screen_open: ui.as_ref().is_some_and(|u| u.screen_open()),
                     screen_class,
                     reloaded: resource_packs_reloaded,
+                    hotbar_item: ui.as_ref().is_some_and(|u| u.hotbar_has_items()),
                 };
+                // A screen opening takes the mouse (vanilla `Gui.setScreen` calls
+                // `MouseHandler.releaseMouse` and `KeyMapping.releaseAll`): nothing the game held
+                // stays held, or a use held from before would re-open the container the screen
+                // shows, server-side, the moment it closes.
+                if state.screen_open && !script_screen_was_open {
+                    input.release();
+                }
+                script_screen_was_open = state.screen_open;
                 // Menu mode's screen tick and the join the screens requested — the multiplayer
                 // list's Join (a plain address), the world list's Play or the create screen's
                 // Create (a local server first) — the session takes a clone of the UI over;
