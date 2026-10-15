@@ -101,14 +101,17 @@ fn vs_main(in: VertexIn, @builtin(vertex_index) vi: u32) -> VertexOut {
     out.sprite = in.sprite_packed;
 
     // Light nibbles -> lightmap. `light.x` = sky<<4 | block, `light.y` =
-    // ao (bits 0..1) | shade index (bits 2..4).
+    // ao occluder count (bits 0..2) | shade index (bits 3..5).
     let packed = in.light.x;
     let sky = packed >> 4u;
     let block = packed & 0xFu;
     let ao_shade_packed = in.light.y;
-    let ao_level = ao_shade_packed & 3u;
-    let shade_index = (ao_shade_packed >> 2u) & 7u;
-    let ao = 0.4 + 0.2 * f32(ao_level); // AO_BRIGHTNESS [0.4, 0.6, 0.8, 1.0]
+    let ao_count = ao_shade_packed & 7u;
+    let shade_index = (ao_shade_packed >> 3u) & 7u;
+    // Vanilla's per-vertex AO brightness: the average of four shade samples
+    // (two sides, the diagonal, the face cell), each 1.0 or 0.2 — i.e.
+    // 1 - 0.2 * occluders.
+    let ao = 1.0 - 0.2 * f32(ao_count);
     out.light = light_color(sky, block) * ao * face_shade(shade_index);
 
     // Per-vertex biome/block tint. Vanilla multiplies sRGB texel by sRGB tint; the atlas is

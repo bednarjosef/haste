@@ -100,10 +100,11 @@ pub fn pack_light(sky: u8, block: u8) -> u8 {
     ((sky & 0xF) << 4) | (block & 0xF)
 }
 
-/// `light[1]`: AO level (0 darkest..3) in bits 0..1, face shade index in
-/// bits 2..4 (0..5 = down/up/north/south/west/east, 6 = unshaded).
+/// `light[1]`: AO occluder count (0 unoccluded .. 4, brightness 1 - 0.2*count,
+/// vanilla's four-sample average) in bits 0..2, face shade index in bits 3..5
+/// (0..5 = down/up/north/south/west/east, 6 = unshaded).
 pub fn pack_ao_shade(ao_level: u8, shade_index: u8) -> u8 {
-    (ao_level & 3) | ((shade_index & 7) << 2)
+    (ao_level & 7) | ((shade_index & 7) << 3)
 }
 
 fn unorm_to_u16(x: f32) -> u16 {
@@ -199,7 +200,7 @@ mod tests {
             }
         }
         let packed = pack_ao_shade(2, 5);
-        assert_eq!(packed & 3, 2);
-        assert_eq!((packed >> 2) & 7, 5);
+        assert_eq!(packed & 7, 2);
+        assert_eq!((packed >> 3) & 7, 5);
     }
 }

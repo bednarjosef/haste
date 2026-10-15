@@ -379,13 +379,13 @@ fn mesher_output_stable() {
         "stability: {quads} quads, {vertices} vertices, sprite range {}..{}",
         sprites.0, sprites.1
     );
-    // Expected: the original mesher's output until the smooth-light neighbour
-    // cells were fixed to the AO cells (one cell out from the block instead of
-    // one cell further along the face normal): the light of every face vertex
-    // that has a neighbour above or below it changes, which removes the thin
-    // lines the old sampling drew along block edges. Quad count, vertices,
-    // sprites and AO are unchanged.
-    let expected: u64 = 1_593_019_514_260_049_155;
+    // Expected: the original mesher's output until the AO corner blend was
+    // ported from vanilla's BlockModelLighter (occluder count over four
+    // samples, the diagonal substituted by vanilla's side-0 cell when both
+    // side cells are non-permeable, and smoothBlend's zero-light fallbacks):
+    // every vertex's AO byte and lit corner change. Quad count, vertices and
+    // sprites are unchanged.
+    let expected: u64 = 2_526_463_744_587_925_612;
     assert_eq!(hash.finish(), expected, "mesher output changed");
     assert!(quads > 100_000, "suspiciously few quads: {quads}");
     eprintln!("{quads} quads, hash {:016x}", hash.finish());
