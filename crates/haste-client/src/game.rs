@@ -1178,13 +1178,14 @@ fn tick_once(
         None
     } else {
         let p = &mut driver.session.player;
+        let attack_speed = p.held_attack_speed();
         p.hand.tick(
             tick_moved,
             (p.state.yaw, p.state.pitch),
             p.state.on_ground,
             matches!(p.state.pose, haste_physics::Pose::Swimming),
             p.main_hand().item,
-            p.int.attrs.attack_speed,
+            attack_speed,
         );
         let eye = p.camera(1.0).0;
         let hand = &p.hand;

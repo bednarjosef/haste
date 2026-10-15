@@ -12,7 +12,7 @@ mod sounds;
 use std::path::Path;
 
 pub use blocks::BlockStates;
-pub use components::{ItemComponents, ItemEquippable};
+pub use components::{AttributeModifier, Consumable, ItemComponents, ItemEquippable};
 pub use physics::{BlockProperties, BlockProps};
 pub use registries::Registries;
 pub use shapes::BlockShapes;

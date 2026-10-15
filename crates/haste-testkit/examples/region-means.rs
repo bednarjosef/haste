@@ -59,6 +59,50 @@ fn main() -> Result<()> {
         );
     }
     let (w, h) = vanilla.dimensions();
+    // The 40 worst pixels (max channel error), sampled at least 8 apart so they spread
+    // over the image: position + both colours + the ratio per channel.
+    if args.get(2).map(|a| a == "--worst").unwrap_or(false) {
+        /// One sampled pixel: position, both colours, max channel error.
+        struct Worst {
+            x: u32,
+            y: u32,
+            a: [u8; 4],
+            b: [u8; 4],
+            e: u8,
+        }
+        let mut worst: Vec<Worst> = Vec::new();
+        for y in (0..h).step_by(8) {
+            for x in (0..w).step_by(8) {
+                let (a, b) = (vanilla.get_pixel(x, y), haste.get_pixel(x, y));
+                let e = (0..3)
+                    .map(|i| (a[i] as i32 - b[i] as i32).unsigned_abs() as u8)
+                    .max()
+                    .unwrap_or(0);
+                worst.push(Worst {
+                    x,
+                    y,
+                    a: a.0,
+                    b: b.0,
+                    e,
+                });
+            }
+        }
+        worst.sort_by_key(|w| std::cmp::Reverse(w.e));
+        for Worst { x, y, a, b, e } in worst.iter().take(40) {
+            let r = |i: usize| {
+                if a[i] > 8 {
+                    format!("{:.2}", b[i] as f32 / a[i] as f32)
+                } else {
+                    "-".to_string()
+                }
+            };
+            println!(
+                "({x:4},{y:4}) err {e:3} van ({:3},{:3},{:3}) haste ({:3},{:3},{:3}) ratio {} {} {}",
+                a[0], a[1], a[2], b[0], b[1], b[2], r(0), r(1), r(2)
+            );
+        }
+        return Ok(());
+    }
     println!("{w}x{h}: region        vanilla-RGB      haste-RGB       delta-RGB  pixels");
     for &(name, f0, f1) in BANDS {
         let y0 = (f0 * h as f32) as u32;
