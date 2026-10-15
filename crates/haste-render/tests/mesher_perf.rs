@@ -279,6 +279,8 @@ fn setup() -> Option<(
             &fluid::FluidRules::vanilla(),
             fluid::FluidSprites::from_atlas(&atlas),
         )),
+        // The bench world is full cubes: AO treats them all as occluders.
+        std::sync::Arc::new(haste_render::mesher::AoTable::all_solid(states.len())),
     );
     Some((states, baked, atlas, tables))
 }

@@ -2169,6 +2169,7 @@ fn menu_screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let data = net::load_game_data()?;
     let mut renderer = Renderer::new_offscreen(args.width, args.height, &mut assets, &data.blocks)?;
     renderer.set_item_registry(&data.registries);
+    renderer.set_ao_shapes(&data.blocks, &data.shapes);
     let deadline = Instant::now() + Duration::from_secs(args.seconds.max(60));
     let options = load_options();
     let input = InputRouter::default();
@@ -2282,6 +2283,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
+    renderer.set_ao_shapes(&shared.data.blocks, &shared.data.shapes);
     renderer.set_biomes(&session.biomes);
     renderer.set_particle_types(&session.particle_types);
     renderer.set_dimension(shared.world.read().dimension());
@@ -2561,6 +2563,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut renderer = Renderer::new_offscreen(args.width, args.height, &mut assets, &data.blocks)?;
     if let Some(s) = &session {
         renderer.set_item_registry(&s.shared.data.registries);
+        renderer.set_ao_shapes(&s.shared.data.blocks, &s.shared.data.shapes);
         renderer.set_biomes(&s.biomes);
         renderer.set_particle_types(&s.particle_types);
         renderer.set_dimension(s.shared.world.read().dimension());
@@ -2706,6 +2709,10 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                             ) {
                                 Ok(s) => {
                                     renderer.set_item_registry(&s.shared.data.registries);
+                                    renderer.set_ao_shapes(
+                                        &s.shared.data.blocks,
+                                        &s.shared.data.shapes,
+                                    );
                                     renderer.set_biomes(&s.biomes);
                                     renderer.set_particle_types(&s.particle_types);
                                     arrived = Some(s);
@@ -2747,6 +2754,10 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                                     ) {
                                         Ok(s) => {
                                             renderer.set_item_registry(&s.shared.data.registries);
+                                            renderer.set_ao_shapes(
+                                                &s.shared.data.blocks,
+                                                &s.shared.data.shapes,
+                                            );
                                             renderer.set_biomes(&s.biomes);
                                             renderer.set_particle_types(&s.particle_types);
                                             arrived = Some(s);
@@ -3340,6 +3351,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
+    renderer.set_ao_shapes(&shared.data.blocks, &shared.data.shapes);
     renderer.set_biomes(&session.biomes);
     renderer.set_particle_types(&session.particle_types);
     renderer.set_dimension(shared.world.read().dimension());
@@ -3908,6 +3920,7 @@ impl App {
             Ok((session, server)) => {
                 if let Some(r) = self.renderer.as_mut() {
                     r.set_item_registry(&session.shared.data.registries);
+                    r.set_ao_shapes(&session.shared.data.blocks, &session.shared.data.shapes);
                     r.set_biomes(&session.biomes);
                     r.set_particle_types(&session.particle_types);
                 }
@@ -4211,8 +4224,10 @@ impl ApplicationHandler for App {
             let mut assets = open_assets()?;
             let data = net::load_game_data()?;
             let mut renderer = Renderer::new(window.clone(), &mut assets, &data.blocks)?;
+            renderer.set_ao_shapes(&data.blocks, &data.shapes);
             if let Some(session) = &self.session {
                 renderer.set_item_registry(&session.shared.data.registries);
+                renderer.set_ao_shapes(&session.shared.data.blocks, &session.shared.data.shapes);
                 renderer.set_biomes(&session.biomes);
                 renderer.set_particle_types(&session.particle_types);
                 renderer.set_dimension(session.shared.world.read().dimension());

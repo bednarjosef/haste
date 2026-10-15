@@ -883,6 +883,9 @@ impl Renderer {
                 &crate::fluid::FluidRules::vanilla(),
                 crate::fluid::FluidSprites::from_atlas(&*atlas),
             )),
+            // No shape data at construction (the caller installs it with
+            // `set_ao_shapes`): no state occludes AO until then.
+            Arc::new(crate::mesher::AoTable::all_solid(0)),
         ));
         let arenas = MeshArenas::new(gpu.device.clone(), gpu.queue.clone());
         let timer = crate::timing::GpuTimer::new(&gpu.device, &gpu.queue);
@@ -1374,6 +1377,19 @@ impl Renderer {
     pub fn set_biome_blend(&mut self, radius: i32) {
         let mut tables = self.mesher.tables();
         tables.colors = Arc::new((*tables.colors).clone().with_radius(radius));
+        self.mesher.set_tables(tables);
+    }
+
+    /// The AO occluder table from haste-data's shape data (vanilla
+    /// `getShadeBrightness <= 0.2`). Applies to sections meshed afterwards:
+    /// call it before the first chunks.
+    pub fn set_ao_shapes(
+        &mut self,
+        states: &dyn haste_core::view::BlockStateTable,
+        shapes: &haste_data::BlockShapes,
+    ) {
+        let mut tables = self.mesher.tables();
+        tables.ao = Arc::new(crate::mesher::AoTable::from_shapes(states, shapes));
         self.mesher.set_tables(tables);
     }
 

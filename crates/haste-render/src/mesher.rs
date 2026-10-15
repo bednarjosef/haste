@@ -51,12 +51,57 @@ fn face_corners() -> &'static [[[[i32; 3]; 3]; 4]; 6] {
     FACE_CORNERS.get_or_init(face_corner_table)
 }
 
+/// Per-state ambient-occlusion occluder flag (vanilla `getShadeBrightness <=
+/// 0.2`): whether the state's collision shape is a full cube, minus the glass
+/// family whose class overrides the brightness to 1.0. Built from
+/// `haste_data::BlockShapes`; the fallback treats every state as a full cube
+/// except air and fluids (approximate like all fallback shapes).
+#[derive(Clone)]
+pub struct AoTable {
+    solid: Vec<bool>,
+}
+
+impl AoTable {
+    /// From haste-data's shape data (oracle-backed when the dump exists).
+    pub fn from_shapes(
+        states: &dyn haste_core::view::BlockStateTable,
+        shapes: &haste_data::BlockShapes,
+    ) -> AoTable {
+        let mut solid = Vec::with_capacity(states.len());
+        for id in 0..states.len() as u32 {
+            solid.push(shapes.is_ao_solid(BlockStateId(id)));
+        }
+        AoTable { solid }
+    }
+
+    /// Fallback with no shape data (tests, before the game data is known):
+    /// every in-range state occludes (stone-like), ids past the table read as
+    /// non-occluding.
+    pub fn all_solid(n: usize) -> AoTable {
+        AoTable {
+            solid: vec![true; n],
+        }
+    }
+
+    /// Whether `state` darkens its neighbours' AO. Out-of-table ids (modded
+    /// servers) read as non-occluding rather than panicking; the placeholder
+    /// resolution the other tables do needs the state table, which tests
+    /// without one cannot provide, and an unknown block that renders should
+    /// not darken either (vanilla resolves it to stone, but the difference is
+    /// one AO corner on an unseen block).
+    pub fn is_solid(&self, state: BlockStateId) -> bool {
+        self.solid.get(state.0 as usize).copied().unwrap_or(false)
+    }
+}
+
 /// Per-block-state and per-biome tables the mesher reads (shared with the workers).
 #[derive(Clone)]
 pub struct MeshTables {
     pub tints: Arc<crate::tint::TintTable>,
     pub colors: Arc<crate::tint::BiomeColors>,
     pub fluids: Arc<crate::fluid::FluidTable>,
+    /// AO occluder test per state (vanilla collision-shape rule).
+    pub ao: Arc<AoTable>,
     /// Set identity for the mesher's per-state cache: a fresh value per
     /// constructed set (monotonic counter), so a new Renderer's tables
     /// never alias a previous set's pointer identities after a reconnect.
@@ -73,11 +118,13 @@ impl MeshTables {
         tints: Arc<crate::tint::TintTable>,
         colors: Arc<crate::tint::BiomeColors>,
         fluids: Arc<crate::fluid::FluidTable>,
+        ao: Arc<AoTable>,
     ) -> MeshTables {
         MeshTables {
             tints,
             colors,
             fluids,
+            ao,
             generation: TABLE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
@@ -89,6 +136,8 @@ impl Default for MeshTables {
             Arc::new(crate::tint::TintTable::empty()),
             Arc::new(crate::tint::BiomeColors::default()),
             Arc::new(crate::fluid::FluidTable::empty()),
+            // No shape data known: no state occludes AO (flat lighting).
+            Arc::new(AoTable::all_solid(0)),
         )
     }
 }
@@ -577,8 +626,9 @@ pub fn mesh_section_with(
                             .positions
                             .map(|p| [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]]);
 
-                        // Per-vertex light: face-adjacent cell + the vertex's AO
-                        // neighbours, averaged (smooth lighting).
+                        // Per-vertex light, following vanilla
+                        // ModelBlockRenderer.AmbientOcclusionFace: face-adjacent
+                        // cell + the vertex's AO neighbours, blended.
                         let lights: [[u8; 2]; 4] = core::array::from_fn(|vi| {
                             let (ao_level, light) =
                                 vertex_light_for(&ctx, lx, ly, lz, quad.direction, vi);
@@ -752,11 +802,15 @@ fn vertex_light_for(
     let [s1, s2, corner] = corners;
     let (x, y, z) = (lx + 1, ly + 1, lz + 1);
 
-    let opaque = |d: [i32; 3]| -> bool {
-        ctx.baked
-            .is_full_opaque(ctx.cell(x + d[0], y + d[1], z + d[2]).state)
+    // Vanilla's AO occluder test (`BlockBehaviour.getShadeBrightness`, which
+    // `BlockModelLighter` averages per corner): a full collision cube darkens,
+    // not texture opacity — glass and slabs keep their neighbours bright.
+    let occludes = |d: [i32; 3]| -> bool {
+        ctx.tables
+            .ao
+            .is_solid(ctx.cell(x + d[0], y + d[1], z + d[2]).state)
     };
-    let ao = vertex_ao_level(opaque(s1), opaque(s2), opaque(corner));
+    let ao = vertex_ao_level(occludes(s1), occludes(s2), occludes(corner));
 
     // Smooth light: the face-adjacent cell's light plus the three AO-neighbour
     // cells, averaged (vanilla). The corner table's offsets already carry the
@@ -1217,6 +1271,7 @@ mod tests {
         let Some((states, baked, atlas)) = load_baked() else {
             return;
         };
+        use haste_core::view::BlockStateTable as _;
         // A snowy biome's grass colour: explicit, and nothing like the default green.
         let mut snowy = crate::tint::BiomeClimate::plains();
         snowy.grass_color = Some(0x3A7D5C);
@@ -1227,6 +1282,7 @@ mod tests {
                     .with_radius(0),
             ),
             Arc::new(crate::fluid::FluidTable::empty()),
+            Arc::new(AoTable::all_solid(states.len())),
         );
         struct Snowy;
         impl crate::tint::BiomeSource for Snowy {
@@ -1354,6 +1410,7 @@ mod tests {
             Arc::new(crate::tint::TintTable::empty()),
             Arc::new(crate::tint::BiomeColors::default()),
             Arc::new(crate::fluid::FluidTable::empty()),
+            Arc::new(AoTable::all_solid(0)),
         );
         assert_ne!(a.generation, c.generation);
         assert_ne!(b.generation, c.generation);
