@@ -71,6 +71,12 @@ pub struct Args {
     /// Bench mode: write the summary as JSON to this file.
     #[arg(long)]
     pub bench_out: Option<std::path::PathBuf>,
+    /// Windowed bench mode (needs `--server`): like `--bench`, but a real window at
+    /// `--width`x`--height` with vsync off (unless `--vsync`), so the number includes
+    /// the present and is comparable with a windowed vanilla client. The window opens
+    /// for the duration of the run and closes by itself.
+    #[arg(long)]
+    pub bench_window: Option<u64>,
     /// Bench mode: hold the settle camera still instead of the flight path (isolates one view,
     /// e.g. the screenshot comparison spot).
     #[arg(long)]
@@ -148,6 +154,9 @@ fn main() -> anyhow::Result<()> {
     }
     if let Some(seconds) = args.bench {
         return app::bench(&args, seconds);
+    }
+    if let Some(seconds) = args.bench_window {
+        return app::bench_window(&args, seconds);
     }
     app::run(&args)
 }
