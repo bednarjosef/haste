@@ -197,6 +197,9 @@ pub struct LocalPlayer {
     pub saturation: f32,
     /// Air supply in ticks (entity metadata index 1; 300 when not under water).
     pub air_supply: i32,
+    /// Our own entity's screen-effect bits from our own `set_entity_data`: the on-fire shared
+    /// flag (index 0) and the freeze ticks (index 7).
+    pub own_flags: crate::screen_effects::OwnFlags,
     /// Selected hotbar slot (0..8).
     pub held_slot: i32,
     /// Whether a `player_position` arrived since login/respawn.
@@ -273,6 +276,7 @@ impl LocalPlayer {
             food: 20,
             saturation: 5.0,
             air_supply: 300,
+            own_flags: crate::screen_effects::OwnFlags::default(),
             held_slot: 0,
             has_position: false,
             loaded: false,
@@ -440,15 +444,21 @@ impl LocalPlayer {
             }
             P::SetHeldSlot(s) => self.held_slot = s.slot,
             P::SetEntityData(d) if EntityId(d.entity_id) == self.entity_id => {
-                // Wiki "Entity metadata": index 0 is the shared flags byte (bit 0x80 = fall
-                // flying, `Entity.FLAG_FALL_FLYING` = 7), index 1 the air supply (VarInt).
+                // Wiki "Entity metadata": index 0 is the shared flags byte (bit 0 = on fire,
+                // `Entity.isOnFire`; bit 0x80 = fall flying, `Entity.FLAG_FALL_FLYING` = 7),
+                // index 1 the air supply (VarInt), index 7 `DATA_TICKS_FROZEN` (the
+                // powder-snow outline's alpha).
                 for e in &d.metadata {
                     match (e.index, &e.value) {
                         (1, haste_core::entity::MetadataValue::VarInt(v)) => self.air_supply = *v,
                         (0, haste_core::entity::MetadataValue::Byte(b)) => {
+                            self.own_flags.on_fire = *b & 0x01 != 0;
                             // The server owns the flag: it confirms a glide we started and
                             // clears it when the glide ends (landing, no glider).
                             self.state.fall_flying = *b as u8 & 0x80 != 0;
+                        }
+                        (7, haste_core::entity::MetadataValue::VarInt(t)) => {
+                            self.own_flags.frozen_ticks = *t;
                         }
                         _ => {}
                     }
@@ -803,6 +813,9 @@ impl LocalPlayer {
         self.camera_eye_old = self.camera_eye;
         self.camera_eye += (self.eye_height() as f32 - self.camera_eye) * 0.5;
         self.flush_pending_accept(out);
+        // The effects' tick, in vanilla's `LivingEntity.baseTick` order (before the position
+        // check below): their durations and blend states drive the screen effects.
+        self.int.tick_effects();
         if !(self.has_position && self.loaded) {
             return;
         }

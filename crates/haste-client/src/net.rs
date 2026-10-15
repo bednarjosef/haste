@@ -36,6 +36,10 @@ use crate::player::{LocalPlayer, VehiclePose};
 
 /// Hurt-tilt camera roll duration in ticks (vanilla's `hurtTime` runs to 10).
 pub const HURT_TILT_TICKS: u32 = 10;
+/// The head equipment slot of `set_equipment` (`EquipmentSlot.values()`: 0 main hand, 1 off
+/// hand, 2 boots, 3 leggings, 4 chestplate, 5 helmet, 6 body, 7 saddle). The item worn there
+/// can hide the screen behind a camera overlay (the carved pumpkin's blur).
+pub const HEAD_SLOT: u8 = 5;
 
 /// What the driver needs from the world (`haste_world::World`).
 pub trait WorldSink {
@@ -397,6 +401,19 @@ pub fn synced_biome_count(regs: &SyncedRegistries) -> Option<usize> {
         .map(|e| e.len())
 }
 
+/// Registry id of `minecraft:overworld` in `minecraft:world_clock` (the day clock; the End
+/// has `minecraft:the_end`). 0 (the overworld clock, first registered) when the server sent
+/// no such registry.
+pub fn overworld_clock_id(regs: &SyncedRegistries) -> i32 {
+    regs.entries(&Identifier::minecraft("world_clock"))
+        .and_then(|entries| {
+            entries
+                .iter()
+                .position(|e| e.id == Identifier::minecraft("overworld"))
+        })
+        .map_or(0, |i| i as i32)
+}
+
 /// Per-connection counters for the HUD/headless printout.
 #[derive(Clone, Debug, Default)]
 pub struct NetCounters {
@@ -638,9 +655,12 @@ pub struct Session {
     /// The firework rocket currently attached to us: vanilla `FireworkRocketEntity.tick` pushes a
     /// fall-flying player it is attached to every tick (see [`Session::end_tick`]).
     attached_firework: Option<EntityId>,
-    /// Time of day in ticks from the first world clock of the last `set_time` (approximate:
-    /// that the first clock is the day clock is not verified).
+    /// Time of day in ticks from the overworld clock of the last `set_time` (`clocks` arrives
+    /// in HashMap order, so the overworld clock is looked up by registry id).
     pub time_of_day: Option<i64>,
+    /// World age in ticks (`set_time`'s `world_age`), for animations keyed to game time
+    /// (vanilla `Level.getGameTime`, e.g. `BannerRenderer`'s wave phase).
+    pub world_age: i64,
     /// Set by `start_configuration` or `transfer`: the next `login` starts a new world.
     pub new_world_pending: bool,
     /// `minecraft:entity_type` registry entries in id order (the synced registry's when the
@@ -652,6 +672,13 @@ pub struct Session {
     /// nobody drains them (headless). Reused, so a tick without sound packets allocates
     /// nothing.
     pub sound_requests: Vec<crate::sound::SoundRequest>,
+    /// The portal and spinning screen effects (`LocalPlayer.portalEffectIntensity`, the
+    /// spinning effect time and speed), ticked in `end_tick`.
+    pub screen: crate::screen_effects::PortalEffects,
+    /// This tick's world probe for the screen effects: the block the camera is inside, the
+    /// portal under our feet and the eye position's light (vanilla's
+    /// `LevelExtractor.getViewBlockingState` and `NetherPortalBlock.entityInside`).
+    pub screen_probe: crate::screen_effects::WorldProbe,
     /// The `fovEffectScale` option this run uses (set by the window from its saved options;
     /// the headless path leaves the vanilla default).
     pub fov_effect_scale: f32,
@@ -708,9 +735,12 @@ impl Session {
             fireworks: HashSet::new(),
             attached_firework: None,
             time_of_day: None,
+            world_age: 0,
             new_world_pending: false,
             entity_type_names: Vec::new(),
             sound_requests: Vec::new(),
+            screen: crate::screen_effects::PortalEffects::default(),
+            screen_probe: crate::screen_effects::WorldProbe::default(),
             fov_effect_scale: 1.0,
             fov_modifier: 0.0,
             old_fov_modifier: 0.0,
@@ -1169,6 +1199,9 @@ impl Session {
             // Entity status 4 is the melee attack animation (IronGolem.handleEntityEvent).
             P::EntityEvent(e) if e.status == 4 => entities.mark_attack(EntityId(e.entity_id)),
             P::SetEntityData(d) => {
+                // Our own entity's data is handled by the player (`LocalPlayer::handle`: the air
+                // supply and the screen effects' on-fire and freeze ticks), and `_ if
+                // player_packet` above already swallowed it; only others go to the store.
                 if EntityId(d.entity_id) != own {
                     let id = EntityId(d.entity_id);
                     entities.set_metadata(id, &d.metadata);
@@ -1187,13 +1220,27 @@ impl Session {
             }
             P::SetEquipment(e) => {
                 for (slot, item) in e.equipment {
+                    if EntityId(e.entity_id) == own && slot == HEAD_SLOT {
+                        // Our own head slot, if the server sends it this way (vanilla sends our
+                        // own armor through `container_set_slot`): the worn item's camera
+                        // overlay reads it.
+                        self.player.int.armor[0] = item.clone();
+                    }
                     entities.set_equipment(EntityId(e.entity_id), slot, item);
                 }
             }
             P::PlayerInfoUpdate(u) => entities.player_info(&u.infos()),
             P::SetTime(t) => {
                 entities.set_world_age(t.world_age);
-                if let Some(c) = t.clocks.first() {
+                self.world_age = t.world_age;
+                // The day clock is `minecraft:overworld` of `minecraft:world_clock` (the
+                // End has its own); `clocks` comes in HashMap order, so look the id up.
+                if let Some(c) = t
+                    .clocks
+                    .iter()
+                    .find(|c| c.clock == overworld_clock_id(regs))
+                    .or_else(|| t.clocks.first())
+                {
                     self.time_of_day = Some(c.time);
                 }
             }
@@ -1300,6 +1347,27 @@ impl Session {
         for lid in self.lids.values_mut() {
             lid.tick();
         }
+        // The screen effects' tick, in vanilla's `LocalPlayer.tick` order: the portal
+        // transition effect (`portalProcess.isInsidePortalThisTick`, set by the game thread's
+        // world probe through [`Session::screen`]) and the spinning effect, which read the
+        // nausea blend factor at the end of the tick.
+        let nausea = self.player.int.nausea_factor(1.0);
+        self.screen.tick(true, nausea);
+    }
+
+    /// The item worn on the head (the helmet armor slot), if any.
+    pub fn head_item(&self) -> Option<haste_core::RegistryIndex> {
+        self.player.int.armor[0].item
+    }
+
+    /// Our own entity's screen-effect bits (on fire, freeze ticks), parsed by `LocalPlayer`.
+    pub fn own_flags(&self) -> &crate::screen_effects::OwnFlags {
+        &self.player.own_flags
+    }
+
+    /// The portal and spinning screen effects, ticked in `end_tick`.
+    pub fn screen_effects(&self) -> &crate::screen_effects::PortalEffects {
+        &self.screen
     }
 
     /// Break cracks to draw: other players' (`block_destruction`) and our own.

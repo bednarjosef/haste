@@ -113,11 +113,33 @@ pub struct EntityInstance {
     /// wobble), multiplied into the model scale. `Vec3::ONE` for most entities.
     pub body_scale: Vec3,
     pub skin: Option<Identifier>,
+    /// The name tag's text when it should show (`EntityRenderer.extractNameTags`: within 64
+    /// blocks and `shouldShowName`), `None` otherwise. For players this is the player name.
     pub nametag: Option<String>,
+    /// The scoreboard's below-name line (`Entity.belowNameDisplay`), drawn under the name tag.
+    pub below_name: Option<String>,
+    /// `EntityRenderer.shadowRadius` for this entity's renderer, already scaled by the age
+    /// (`MobRenderer.getShadowRadius` * `ageScale`) or living scale; 0 draws no shadow.
+    pub shadow_radius: f32,
+    /// `EntityRenderer.shadowStrength` (1.0, or 0.75 for items/experience orbs).
+    pub shadow_strength: f32,
+    /// `Entity.isInvisible()`: no shadow (`extractShadow` skips it) and no name tag.
+    pub invisible: bool,
+    /// `Entity.isDiscrete()` (crouching): the name tag hides past 32 blocks and drops the
+    /// see-through pass (`LivingEntityRenderer.shouldShowName`, `submitNameTag`).
+    pub is_discrete: bool,
+    /// The name tag's anchor above the entity's feet: `EntityAttachment.NAME_TAG`'s fallback
+    /// `AT_HEIGHT` (`Entity.getBbHeight`, 2.05 for the sniffer).
+    pub name_tag_y: f32,
     /// Hurt flash strength in 0..1 (1 just after the hit, easing to 0 over the 10 hurt
     /// ticks; death holds it at 1 for the 20-tick death animation). The renderer mixes
     /// red into the entity's colour for values above 0.
     pub hurt: f32,
+    /// Overlay layers drawn on top of the base model with the same transform and pose
+    /// (vanilla's `RenderLayer`s: sheep wool and undercoat, horse markings, cat/wolf
+    /// collars, the tropical fish pattern). Fixed-size: sheep needs two, everything else
+    /// at most one; empty for almost every mob, so no per-frame allocation.
+    pub overlays: [Option<EntityOverlay>; 2],
     /// A dropped item entity (`minecraft:item`) drawn as the item itself (spinning and
     /// bobbing); the model above is ignored for these.
     pub item: Option<DroppedItem>,
@@ -197,6 +219,18 @@ pub struct DroppedItem {
     pub item: RegistryIndex,
     pub count: i32,
     pub age: f32,
+}
+
+/// One overlay layer: the model (usually a copy of the base shape with its own texture,
+/// sometimes the base model itself with one, like vanilla's wolf collar and horse
+/// markings) and the tint vanilla multiplies into its vertex colours
+/// (`coloredCutoutModelCopyLayerRender`'s colour, `DyeColor.getTextureDiffuseColor` for
+/// dyed layers; white when the layer is untinted).
+#[derive(Clone, Debug)]
+pub struct EntityOverlay {
+    pub model: std::sync::Arc<CubeModel>,
+    /// Linear RGB multiplier, 0..1 per channel.
+    pub tint: [f32; 3],
 }
 
 /// A hanging decoration the renderer draws itself rather than from a cube model.

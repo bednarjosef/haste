@@ -72,6 +72,7 @@ fn main() -> anyhow::Result<()> {
             yaw: 45.0,
             pitch: 55.0,
             fov_deg: 70.0,
+            hand_fov_deg: 70.0,
             roll_deg: 0.0,
             bob: haste_render::ViewBob::default(),
         },
@@ -90,6 +91,7 @@ fn main() -> anyhow::Result<()> {
         block_target: None,
         breaking: &[],
         camera_entity: None,
+        spin: None,
     };
     // Warm up the meshing pipeline: keep calling update_world (drain budget
     // 32/frame) until all sections are uploaded, then measure steady state.

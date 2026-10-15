@@ -315,13 +315,33 @@ creative_hotbars() {
   check creative-hotbars "the creative inventory's Saved Hotbars tab shows the saved hotbars" "$r"
 }
 
-ALL=(hud death drop modes f2 craft pause creative-hotbars)
+# ---- 9. Languages other than English ----
+language() {
+  local log="$LOGDIR/language.log"
+  client_start "$ROOT/scripts/checks/language.txt" "$log"
+  wait_online || { check language "player never joined" 1; return; }
+  wait_exit
+  local ev="$LOGDIR/language.evidence"
+  grep -E "script text\[" "$log" >"$ev"
+  echo "--- language evidence (pause menu after switching to de_de) ---"
+  grep -E "script text\[pause-de\]" "$log"
+  local r=0
+  has "$(grep -E 'script text\[pause-de\]' "$log")" "Zurück zum Spiel" \
+    || { echo "pause menu not in German after switching"; r=1; }
+  if grep -qE "haste proxy:|Java exception" "$log"; then
+    echo "proxy stubs or Java exceptions:"; grep -E "haste proxy:|Java exception" "$log" | head -5
+    r=1
+  fi
+  check language "Options > Language switched to de_de and the pause menu drew in German" "$r"
+}
+
+ALL=(hud death drop modes f2 craft pause creative-hotbars language)
 if [ $# -eq 0 ]; then
   set -- "${ALL[@]}"
 fi
 for f in "$@"; do
   case "$f" in
-    hud | death | drop | modes | f2 | craft | pause | creative-hotbars) "$f" ;;
+    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language) "$f" ;;
     *) echo "unknown feature: $f" ;;
   esac
 done

@@ -26,10 +26,16 @@ printf '%-32s %10s %10s %6s\n' shot differing% mean-err max > "$SUMMARY"
 shopt -s nullglob
 for json in "$SHOTS/$PREFIX"*.json; do
   name=$(basename "$json" .json)
-  read -r X Y Z YAW PITCH W H < <(python3 -I -c '
+  read -r X Y Z YAW PITCH W H RD TOD < <(python3 -I -c '
 import json, sys
 d = json.load(open(sys.argv[1])); c = d["camera"]
-print(c["pos"][0], c["pos"][1] - 1.62, c["pos"][2], c["yaw"], c["pitch"], d["width"], d["height"])' "$json")
+print(c["pos"][0], c["pos"][1] - 1.62, c["pos"][2], c["yaw"], c["pitch"], d["width"], d["height"], d.get("render_distance", 8), d.get("time_of_day", 6000))' "$json")
+  # Match the shot's clock: the reference server is frozen at noon, so any other
+  # recorded time would need the server moved; warn instead of silently comparing
+  # different times of day.
+  if [ "$TOD" != 6000 ]; then
+    echo "note: $name was recorded at time $TOD, not noon (server is frozen at 6000)" >&2
+  fi
   # Keep teleporting Haste to the spot while it joins and settles (a tp to the same spot
   # does not reload anything once it is there).
   ( for _ in $(seq 40); do
@@ -37,8 +43,9 @@ print(c["pos"][0], c["pos"][1] - 1.62, c["pos"][2], c["yaw"], c["pitch"], d["wid
       sleep 0.25
     done ) &
   TP=$!
-  "$HASTE" --server "127.0.0.1:$PORT" --screenshot "$OUT/$name.haste.png" \
-    --pos "$X" "$Y" "$Z" --width "$W" --height "$H" --yaw "$YAW" --pitch "$PITCH" --seconds 40 \
+  "$HASTE" --server "127.0.0.1:$PORT" --screenshot "$OUT/$name.haste.png" --hud off \
+    --pos "$X" "$Y" "$Z" --width "$W" --height "$H" --yaw "$YAW" --pitch "$PITCH" \
+    --render-distance "$RD" --seconds 40 \
     > "$OUT/$name.haste.log" 2>&1 || echo "haste failed for $name (see $OUT/$name.haste.log)" >&2
   kill "$TP" 2>/dev/null || true; wait "$TP" 2>/dev/null || true
   grep -h '^screenshot ' "$OUT/$name.haste.log" || true
