@@ -148,14 +148,6 @@ public final class Proxies {
         // ClientCommonPacketListenerImpl.minecraft: the kept handlers' thread check reads its packetProcessor
         // (and handleUpdateRecipes and the other recipe-book handlers reach the client through it)
         set(connection, "minecraft", Minecraft.class, minecraft);
-        // RecipeBookComponent's static RECIPE_BUTTON_SPRITES is set in its <clinit>, which the
-        // proxy setup bypasses; InventoryScreen's toggle button needs the two sprites that
-        // exist in the jar under textures/gui/sprites/recipe_book/
-        setStatic(net.minecraft.client.gui.screens.recipebook.RecipeBookComponent.class, "RECIPE_BUTTON_SPRITES",
-            net.minecraft.client.gui.components.WidgetSprites.class,
-            new net.minecraft.client.gui.components.WidgetSprites(
-                net.minecraft.resources.Identifier.withDefaultNamespace("recipe_book/button"),
-                net.minecraft.resources.Identifier.withDefaultNamespace("recipe_book/button_highlighted")));
         // the HUD and the chat pipeline are real vanilla Java (tier 3) over the proxies
         toasts = new net.minecraft.client.gui.components.toasts.ToastManager(minecraft, options);
         tutorial = new net.minecraft.client.tutorial.Tutorial(minecraft, options);
