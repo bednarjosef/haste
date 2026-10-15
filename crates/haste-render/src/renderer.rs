@@ -1096,6 +1096,11 @@ impl Renderer {
         self.entity_shadows = on;
     }
 
+    /// Number of shadow quads batched for the last frame (tests/reporting).
+    pub fn shadow_quad_count(&self) -> usize {
+        self.entity.shadow_quad_count()
+    }
+
     /// Extracts and batches the entity shadows for `frame` (vanilla
     /// `EntityRenderer.extractShadow`/`finalizeRenderState`). Called by [`Self::sample_world`];
     /// call it directly when you render without `sample_world` (tests) and want shadows.

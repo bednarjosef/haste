@@ -476,8 +476,7 @@ impl EntityRenderer {
                 // reach here (haste-entity drops their tag). The anchor is the NAME_TAG
                 // attachment (bb height) plus 0.5.
                 let dist_sq = (e.pos - camera).length_squared();
-                let discrete_hidden = e.is_discrete && dist_sq >= 32.0 * 32.0;
-                if dist_sq < 64.0 * 64.0 && !discrete_hidden {
+                if name_tag_visible(dist_sq, e.is_discrete) {
                     self.nametags.push(Nametag {
                         anchor: e.pos + glam::DVec3::new(0.0, e.name_tag_y as f64 + 0.5, 0.0),
                         text: name.clone(),
@@ -624,6 +623,11 @@ impl EntityRenderer {
         pass.set_vertex_buffer(0, self.shadow_buffer.slice(..));
         pass.draw(0..self.shadow_vertices.len() as u32, 0..1);
         1
+    }
+
+    /// Number of shadow quads batched for the last frame (6 vertices each); tests/reporting.
+    pub fn shadow_quad_count(&self) -> usize {
+        self.shadow_vertices.len() / 6
     }
 
     /// One item frame, following vanilla's `ItemFrameRenderer.submit`: the frame block model at
@@ -1314,6 +1318,12 @@ pub(crate) fn max_local_raw_brightness(
     block.max(sky)
 }
 
+/// `EntityRenderer.extractNameTags` + `LivingEntityRenderer.shouldShowName`: a name tag shows
+/// within 64 blocks, and only within 32 while crouching (`isDiscrete`, distanceSq >= 1024).
+pub fn name_tag_visible(dist_sq: f64, is_discrete: bool) -> bool {
+    dist_sq < 64.0 * 64.0 && !(is_discrete && dist_sq >= 32.0 * 32.0)
+}
+
 /// `Lightmap.getBrightness(dimensionType, level)`: the curved light curve
 /// `v / (4 - 3v)` with the dimension's ambient light floor, `lerp(ambient, curved, 1)`.
 pub fn lightmap_brightness(ambient: f32, level: i32) -> f32 {
@@ -1526,6 +1536,51 @@ fn placeholder_texture() -> image::RgbaImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `EntityRenderer.extractShadowPiece`: the shadow alpha fades with height above the
+    /// block (`powerAtDepth = pow - (entity.y - pos.y) * 0.5`, then `* 0.5 * brightness`).
+    #[test]
+    fn shadow_alpha_fades_with_height_above_the_block() {
+        // pow = 1: no camera distance falloff and shadow strength 1; the entity's feet at y=1.5.
+        let pow = 1.0f32;
+        let feet = 1.5f32;
+        let alpha_at = |block_y: i32| {
+            let power_at_depth = pow - (feet - block_y as f32) * 0.5;
+            shadow_piece_alpha(power_at_depth, lightmap_brightness(0.0, 15))
+        };
+        // The block under the feet is strongest, one lower is a quarter as strong, two lower
+        // is negative and clamps to zero.
+        assert!((alpha_at(1) - 0.375).abs() < 1e-6, "{}", alpha_at(1));
+        assert!((alpha_at(0) - 0.125).abs() < 1e-6, "{}", alpha_at(0));
+        assert_eq!(alpha_at(-1), 0.0);
+        // The alpha is clamped to 1.
+        assert_eq!(shadow_piece_alpha(4.0, 1.0), 1.0);
+    }
+
+    /// `Lightmap.getBrightness`: the curved `v / (4 - 3v)` curve with the dimension's ambient
+    /// light floor.
+    #[test]
+    fn lightmap_brightness_is_the_vanilla_curve() {
+        assert_eq!(lightmap_brightness(0.0, 15), 1.0);
+        assert_eq!(lightmap_brightness(0.0, 0), 0.0);
+        // 7 / (15 * (4 - 3 * 7/15)) = 7/39.
+        assert!((lightmap_brightness(0.0, 7) - 7.0 / 39.0).abs() < 1e-6);
+        // Nether ambient 0.1 lifts every level towards 1.
+        assert!((lightmap_brightness(0.1, 0) - 0.1).abs() < 1e-6);
+    }
+
+    /// `EntityRenderer.extractNameTags`/`LivingEntityRenderer.shouldShowName`: 64 blocks, 32
+    /// while crouching (distanceSq >= 1024 hides it).
+    #[test]
+    fn name_tag_culls_at_64_and_32_when_crouching() {
+        assert!(name_tag_visible(63.9 * 63.9, false));
+        assert!(!name_tag_visible(64.1 * 64.1, false));
+        assert!(name_tag_visible(31.9 * 31.9, true));
+        assert!(!name_tag_visible(32.0 * 32.0, true));
+        assert!(!name_tag_visible(40.0 * 40.0, true));
+        // Standing is not affected by the 32 limit.
+        assert!(name_tag_visible(40.0 * 40.0, false));
+    }
 
     /// Every texture haste-entity's model table names must exist in the client jar (the
     /// renderer loads them on demand by identifier; a typo would draw the placeholder at

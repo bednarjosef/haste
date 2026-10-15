@@ -1027,13 +1027,19 @@ pub fn shadow_radius_for_name(name: &str) -> f32 {
         "minecraft:dolphin" => 0.7,
         "minecraft:donkey" | "minecraft:mule" => 0.75,
         // DrownedRenderer / HuskRenderer / ZombieRenderer 0.5 (AbstractZombieRenderer)
-        "minecraft:drowned" | "minecraft:husk" | "minecraft:zombie" | "minecraft:zombie_villager" => 0.5,
+        "minecraft:drowned"
+        | "minecraft:husk"
+        | "minecraft:zombie"
+        | "minecraft:zombie_villager" => 0.5,
         // EnderDragonRenderer 0.5, EndermanRenderer 0.5, EndermiteRenderer 0.3
         "minecraft:ender_dragon" => 0.5,
         "minecraft:enderman" => 0.5,
         "minecraft:endermite" => 0.3,
         // EvokerRenderer / IllusionerRenderer / PillagerRenderer / VindicatorRenderer 0.5
-        "minecraft:evoker" | "minecraft:illusioner" | "minecraft:pillager" | "minecraft:vindicator" => 0.5,
+        "minecraft:evoker"
+        | "minecraft:illusioner"
+        | "minecraft:pillager"
+        | "minecraft:vindicator" => 0.5,
         // FoxRenderer 0.4, FrogRenderer 0.3, GhastRenderer 1.5
         "minecraft:fox" => 0.4,
         "minecraft:frog" => 0.3,
@@ -1066,7 +1072,10 @@ pub fn shadow_radius_for_name(name: &str) -> f32 {
         "minecraft:shulker" => 0.0,
         "minecraft:silverfish" => 0.3,
         // Skeleton family 0.5 (AbstractSkeletonRenderer), Slime/MagmaCube 0.25, Sniffer 1.1
-        "minecraft:skeleton" | "minecraft:stray" | "minecraft:bogged" | "minecraft:wither_skeleton" => 0.5,
+        "minecraft:skeleton"
+        | "minecraft:stray"
+        | "minecraft:bogged"
+        | "minecraft:wither_skeleton" => 0.5,
         "minecraft:slime" | "minecraft:magma_cube" => 0.25,
         "minecraft:sniffer" => 1.1,
         // SnowGolemRenderer 0.5, SpiderRenderer 0.8, Squid/GlowSquid 0.7, Strider 0.5
@@ -1093,16 +1102,31 @@ pub fn shadow_radius_for_name(name: &str) -> f32 {
         // ExperienceOrbRenderer 0.15, AbstractBoatRenderer 0.8, AbstractMinecartRenderer 0.7,
         // TntRenderer 0.5, FallingBlockRenderer 0.5, EndCrystalRenderer 0.5.
         "minecraft:item" | "minecraft:experience_orb" => 0.15,
-        "minecraft:oak_boat" | "minecraft:spruce_boat" | "minecraft:birch_boat"
-        | "minecraft:jungle_boat" | "minecraft:acacia_boat" | "minecraft:cherry_boat"
-        | "minecraft:dark_oak_boat" | "minecraft:mangrove_boat" | "minecraft:pale_oak_boat"
-        | "minecraft:bamboo_raft" | "minecraft:oak_chest_boat" | "minecraft:spruce_chest_boat"
-        | "minecraft:birch_chest_boat" | "minecraft:jungle_chest_boat"
-        | "minecraft:acacia_chest_boat" | "minecraft:cherry_chest_boat"
-        | "minecraft:dark_oak_chest_boat" | "minecraft:mangrove_chest_boat"
-        | "minecraft:pale_oak_chest_boat" | "minecraft:bamboo_chest_raft" => 0.8,
-        "minecraft:minecart" | "minecraft:chest_minecart" | "minecraft:furnace_minecart"
-        | "minecraft:hopper_minecart" | "minecraft:tnt_minecart"
+        "minecraft:oak_boat"
+        | "minecraft:spruce_boat"
+        | "minecraft:birch_boat"
+        | "minecraft:jungle_boat"
+        | "minecraft:acacia_boat"
+        | "minecraft:cherry_boat"
+        | "minecraft:dark_oak_boat"
+        | "minecraft:mangrove_boat"
+        | "minecraft:pale_oak_boat"
+        | "minecraft:bamboo_raft"
+        | "minecraft:oak_chest_boat"
+        | "minecraft:spruce_chest_boat"
+        | "minecraft:birch_chest_boat"
+        | "minecraft:jungle_chest_boat"
+        | "minecraft:acacia_chest_boat"
+        | "minecraft:cherry_chest_boat"
+        | "minecraft:dark_oak_chest_boat"
+        | "minecraft:mangrove_chest_boat"
+        | "minecraft:pale_oak_chest_boat"
+        | "minecraft:bamboo_chest_raft" => 0.8,
+        "minecraft:minecart"
+        | "minecraft:chest_minecart"
+        | "minecraft:furnace_minecart"
+        | "minecraft:hopper_minecart"
+        | "minecraft:tnt_minecart"
         | "minecraft:command_block_minecart" => 0.7,
         "minecraft:tnt" | "minecraft:falling_block" | "minecraft:end_crystal" => 0.5,
         _ if TABLE.iter().any(|(n, _)| *n == name) => 0.5,

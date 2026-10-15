@@ -431,3 +431,159 @@ fn frames_and_paintings_offscreen() {
         "the decorations changed {changed} pixels (item frame, glow frame, painting)"
     );
 }
+
+/// A pig and a named zombie on a stone floor, with their vanilla shadows (the RCON screenshot
+/// scene without a server). Saves `target/render-checks/entity_shadows.png` and reports the
+/// shadow quad and draw-call counts.
+#[test]
+#[ignore = "needs the client jar, datagen reports and a Vulkan driver (source scripts/env.sh)"]
+fn entity_shadows_offscreen() {
+    let jar = haste_core::paths::client_jar();
+    let mut assets =
+        haste_assets::Assets::open(&jar, &haste_core::paths::assets_dir(), "26.3").unwrap();
+    let data = haste_data::GameData::load().unwrap();
+    let mut renderer = Renderer::new_offscreen(640, 480, &mut assets, &data.blocks).unwrap();
+    let world = Flat {
+        stone: data
+            .blocks
+            .default_state(&haste_core::Identifier::minecraft("stone"))
+            .unwrap(),
+    };
+    let dirty: Vec<SectionPos> = (-1..=1)
+        .flat_map(|x| (-1..=1).map(move |z| SectionPos::new(x, 0, z)))
+        .collect();
+    renderer.update_world(&world, &dirty, ChunkPos::new(0, 0), 4);
+    for _ in 0..200 {
+        renderer.update_world(&world, &[], ChunkPos::new(0, 0), 4);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // A pig (shadowRadius 0.7, bb height 0.9) and a named zombie (0.5, 1.95) facing the camera.
+    let model = |name: &str, w: f32, h: f32| {
+        haste_entity::registry::model_for_name(name)
+            .unwrap_or_else(|| haste_entity::models::box_for(w, h))
+    };
+    let pig = EntityInstance {
+        id: EntityId(1),
+        model: model("minecraft:pig", 0.9, 0.9),
+        pos: glam::DVec3::new(1.5, 1.0, 0.5),
+        yaw: 180.0,
+        pitch: 0.0,
+        head_yaw: 180.0,
+        scale: 1.0,
+        pose: PoseOverrides::default(),
+        skin: None,
+        nametag: None,
+        below_name: None,
+        shadow_radius: 0.7,
+        shadow_strength: 1.0,
+        invisible: false,
+        is_discrete: false,
+        name_tag_y: 0.9,
+        hurt: 0.0,
+        decoration: None,
+    };
+    let zombie = EntityInstance {
+        id: EntityId(2),
+        model: model("minecraft:zombie", 0.6, 1.95),
+        pos: glam::DVec3::new(-1.5, 1.0, 0.5),
+        yaw: 180.0,
+        pitch: 0.0,
+        head_yaw: 180.0,
+        scale: 1.0,
+        pose: PoseOverrides::default(),
+        skin: None,
+        nametag: Some("Bob".into()),
+        below_name: Some("5".into()),
+        shadow_radius: 0.5,
+        shadow_strength: 1.0,
+        invisible: false,
+        is_discrete: false,
+        name_tag_y: 1.95,
+        hurt: 0.0,
+        decoration: None,
+    };
+    let entities = vec![pig, zombie];
+    let camera = Camera {
+        pos: glam::DVec3::new(0.0, 3.2, -4.0),
+        yaw: 0.0,
+        pitch: 32.0,
+        fov_deg: 70.0,
+        roll_deg: 0.0,
+        bob: haste_render::ViewBob::default(),
+    };
+    let gui = haste_core::gui::GuiFrame {
+        scale: 2,
+        ..Default::default()
+    };
+    let frame = FrameInput {
+        camera,
+        entities: &entities,
+        gui: &gui,
+        sky: SkyState {
+            time_of_day: 6000,
+            rain: 0.0,
+            dimension_has_sky: true,
+            fog_start: 100.0,
+            fog_end: 200.0,
+        },
+        partial_tick: 0.0,
+        block_target: None,
+        breaking: &[],
+        camera_entity: None,
+    };
+    // `sample_world` extracts the shadows and samples entity light. A couple of warm-up frames
+    // (lazy texture/atlas loads settle on the first render) before the captured one.
+    for _ in 0..3 {
+        renderer.sample_world(&world, &data.shapes, &frame);
+        renderer.render(&frame).unwrap();
+        let _ = renderer.read_back().unwrap();
+    }
+    renderer.sample_world(&world, &data.shapes, &frame);
+    let stats = renderer.render(&frame).unwrap();
+    let img = renderer.read_back().unwrap();
+    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
+    std::fs::create_dir_all(&out).unwrap();
+    img.save(out.join("entity_shadows.png")).unwrap();
+    let quads = renderer.shadow_quad_count();
+    eprintln!(
+        "entity shadows: {quads} shadow quads, {} draw calls, {} entities",
+        stats.draw_calls,
+        entities.len()
+    );
+    assert!(quads > 0, "the entities cast shadows");
+
+    // Determinism check: the same frame again is identical.
+    renderer.sample_world(&world, &data.shapes, &frame);
+    renderer.render(&frame).unwrap();
+    let again = renderer.read_back().unwrap();
+    let same = img
+        .pixels()
+        .zip(again.pixels())
+        .filter(|(a, b)| a.0 != b.0)
+        .count();
+    eprintln!("on-vs-on changed {same} pixels");
+
+    // The same frame with the entity-shadows option off draws no shadow quads and differs only
+    // on the ground under the entities (the shadow pixels).
+    renderer.set_entity_shadows(false);
+    renderer.sample_world(&world, &data.shapes, &frame);
+    renderer.render(&frame).unwrap();
+    let no_shadow = renderer.read_back().unwrap();
+    renderer.set_entity_shadows(true);
+    assert_eq!(renderer.shadow_quad_count(), 0, "shadows off draws none");
+    let changed = img
+        .pixels()
+        .zip(no_shadow.pixels())
+        .filter(|(a, b)| a.0 != b.0)
+        .count();
+    eprintln!("on-vs-off changed {changed} pixels");
+    assert!(
+        changed > 200,
+        "the shadows changed {changed} pixels of the floor"
+    );
+    // The shadows are small dark patches, not the whole frame.
+    assert!(
+        changed < (640 * 480) / 4,
+        "the shadows changed {changed} pixels"
+    );
+}
