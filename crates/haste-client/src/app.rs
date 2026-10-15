@@ -3433,11 +3433,11 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 // once per tick, so this is the switch's blocking cost plus up to one tick.
                 if screen_class != last_screen_class {
                     let now = Instant::now();
-                    if last_screen_at.is_some() {
+                    if let Some(since) = last_screen_at {
                         tracing::info!(
                             "screen {} after {} ms",
                             screen_class.as_deref().unwrap_or("(none)"),
-                            (now - last_screen_at.unwrap()).as_millis()
+                            (now - since).as_millis()
                         );
                     }
                     last_screen_class = screen_class.clone();
