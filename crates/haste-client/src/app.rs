@@ -2465,6 +2465,15 @@ fn game_uses_key(ui_used: bool, screen_open: bool) -> bool {
     !ui_used && !screen_open
 }
 
+/// The last routing decision: whether the typed character of a key press reaches the screen.
+/// Only one pressed while a screen was already open does. The press that *opens* a screen
+/// drops its character, like vanilla: `Gui.handleKeybinds` runs on the tick after the press,
+/// so its character event finds no screen and goes nowhere (T opens the chat empty; the
+/// command key's single "/" is the screen's own prefix, not a typed character).
+fn char_goes_to_screen(screen_open_before: bool) -> bool {
+    screen_open_before
+}
+
 /// A script key in winit's numbering (the windowed client's events and the script runner's
 /// actions go through the same `KeyCode`-keyed routing).
 fn winit_key(key: crate::script::Key) -> KeyCode {
@@ -2646,7 +2655,9 @@ impl InputRouter {
             let forward = key_goes_to_ui(repeat, screen_open);
             let used = forward && ui.key(sc, keys::keycode(sc), mods, pressed);
             if let (Some(c), true) = (typed_char_of(text), pressed) {
-                ui.char_typed(c, mods);
+                if char_goes_to_screen(screen_open) {
+                    ui.char_typed(c, mods);
+                }
             }
             if !game_uses_key(used, screen_open) {
                 // The UI took it: whatever the game thought was held must go.
@@ -5885,6 +5896,16 @@ mod tests {
         // A screen is open: no game input even for keys the screen ignored (movement stops
         // while chat or the inventory is up).
         assert!(!game_uses_key(false, true));
+    }
+
+    #[test]
+    fn key_routing_drops_the_char_that_opened_the_screen() {
+        // Vanilla: the key press that opens a screen (T, "/") drops its typed character —
+        // `Gui.handleKeybinds` opens the chat screen on the tick after the press, so the
+        // press's character event finds no screen. Only characters typed while a screen was
+        // already open reach it.
+        assert!(!char_goes_to_screen(false));
+        assert!(char_goes_to_screen(true));
     }
 
     #[test]
