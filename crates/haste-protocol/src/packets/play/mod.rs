@@ -1,4 +1,10 @@
 //! Play state.
+
+// The clientbound play packets live in `clientbound/mod.rs` and one file per
+// vanilla concept next to it. The module is named explicitly with `#[path]`
+// because the pre-split `clientbound.rs` (kept in git history) still sits at
+// the sibling path; delete that file and this attribute can go.
+#[path = "clientbound/mod.rs"]
 pub mod clientbound;
 pub mod serverbound;
 pub use clientbound::ClientboundPlay;
