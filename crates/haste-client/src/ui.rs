@@ -36,7 +36,7 @@ use std::sync::Arc;
 use haste_jvm::{GameState, GuiPipeline, JvmHost, ScreenKind};
 use haste_protocol::haste_core::game::GameMode;
 use haste_protocol::haste_core::gui::{GuiFrame, TextMetrics};
-use haste_protocol::haste_core::Component;
+use haste_protocol::haste_core::{BlockPos, BlockStateId, Component};
 use haste_protocol::packets::configuration::clientbound::{RegistryData, UpdateTags};
 use haste_protocol::packets::play::serverbound as sb;
 use haste_protocol::packets::{Decoded, Direction, Dispatch, Packet, ProtocolTables, State};
@@ -124,6 +124,8 @@ const FORWARDED: &[&str] = &[
     "minecraft:block_entity_data",
     "minecraft:open_sign_editor",
     "minecraft:open_book",
+    // the store drops the chunk's entities with the chunk (vanilla handleForgetLevelChunk)
+    "minecraft:forget_level_chunk",
 ];
 
 /// Packets about one entity: forwarded only when they are about the local player.
@@ -179,6 +181,13 @@ impl Ui {
         self.host.gui()
     }
 
+    /// Records the world's block state at a position (Rust's `BlockStateId`), for the block
+    /// entities the screens edit (see [`Ui::handle`]); the game thread calls it while it can
+    /// still read the world.
+    pub fn record_block_state(&self, pos: BlockPos, state: BlockStateId) {
+        self.gui().set_block_state(pos, state.0 as i32);
+    }
+
     /// The renderer's text metrics (`Renderer::text_metrics`): vanilla's `Font` measures with them.
     pub fn set_text_metrics(&self, m: Arc<dyn TextMetrics>) {
         self.gui().set_text_metrics(m);
@@ -230,9 +239,22 @@ impl Ui {
     }
 
     /// One clientbound play packet (call for every packet, in order, on the game thread).
-    pub fn handle(&self, p: &ClientboundPlay) {
+    /// `block_state` reads the world's block state at a position (the caller holds the world's
+    /// lock while draining packets; the callback must not call back into the JVM).
+    pub fn handle(&self, p: &ClientboundPlay, block_state: &dyn Fn(BlockPos) -> BlockStateId) {
         use ClientboundPlay as P;
         let local = self.shared.local_entity.load(Ordering::Relaxed);
+        // The block entities the screens edit are built from the real state (vanilla's chunks
+        // build them when the block state arrives, `LevelChunk.setBlockState`): record the
+        // positions this packet names a block entity at, before Java builds one.
+        if let Some(pos) = match p {
+            P::BlockEntityData(b) => Some(b.pos),
+            P::OpenSignEditor(o) => Some(o.pos),
+            _ => None,
+        } {
+            let id = block_state(pos).0 as i32;
+            self.gui().set_block_state(pos, id);
+        }
         match p {
             P::SetHealth(h) => self.state(|s| {
                 s.vitals.health = h.health;
@@ -301,6 +323,13 @@ impl Ui {
                     s.day_time = c.time;
                 }
             }),
+            // Vanilla drops a chunk's block entities with the chunk (the server forgets it):
+            // the Java-side store does the same through the forwarded packet; the states
+            // recorded for its positions go with them, so the map does not grow without bound.
+            P::ForgetLevelChunk(f) => {
+                let (cx, cz) = (f.pos.x, f.pos.z);
+                self.gui().forget_recorded_block_states(cx, cz);
+            }
             _ => {}
         }
         let Some(name) = p.name() else { return };
@@ -809,7 +838,7 @@ mod tests {
             let _rt = self.rt.enter();
             for _ in 0..n {
                 while let Some(p) = self.conn.as_mut().and_then(|c| c.try_recv()) {
-                    self.ui.handle(&p);
+                    self.ui.handle(&p, &|_| BlockStateId::AIR);
                     if let Some(n) = p.name() {
                         self.received.push(n);
                     }

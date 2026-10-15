@@ -803,8 +803,9 @@ fn tick_once(
                     backlog.len()
                 );
                 if let Some(ui) = shared.ui.lock().as_ref() {
+                    let world = shared.world.read();
                     for p in backlog {
-                        ui.handle(&p);
+                        ui.handle(&p, &|pos| WorldSink::block_state_at(&*world, pos));
                     }
                 }
             }
@@ -964,6 +965,10 @@ fn tick_once(
             Some(crate::player::interact::UsedScreen::CommandBlock(pos)) => {
                 let (creative, level) = ui.game_master_state();
                 if creative && level >= 2 {
+                    // The editor's entity is built from the real state (the use itself opens
+                    // no packet the block state would ride on; vanilla's chunk has it).
+                    let state = WorldSink::block_state_at(&*shared.world.read(), pos);
+                    ui.record_block_state(pos, state);
                     ui.open_used_command_block(pos);
                 }
             }

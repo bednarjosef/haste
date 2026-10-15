@@ -264,6 +264,14 @@ public final class Handlers {
     }
 
     /**
+     * {@code ClientPacketListener.handleForgetLevelChunk}: the chunk's block entities leave the store
+     * (vanilla unloads them with the chunk: {@code ClientLevel.unload} -> {@code LevelChunk.removeBlockEntity}).
+     */
+    public static void handleForgetLevelChunk(ClientPacketListener c, ClientboundForgetLevelChunkPacket p) {
+        BlockEntities.dropChunk(p.pos().x(), p.pos().z());
+    }
+
+    /**
      * {@code ClientPacketListener.handleBlockEntityData}: the store's entity is loaded from the packet, and an
      * open command-block editor picks the data up (vanilla's handler ends with {@code updateGui}, which
      * activates its buttons — the server sends this packet when the player uses a command block).

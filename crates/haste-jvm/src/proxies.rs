@@ -265,7 +265,6 @@ pub struct ChatMessage {
 /// The game state the proxies read. Owned by Rust; the client updates it (e.g. from packets) and
 /// screens see it immediately through the natives. Java writes back what vanilla code produced
 /// (inventory changes, chat, serverbound packets).
-#[derive(Debug)]
 pub struct GameState {
     /// Mirror of the player's inventory in vanilla `Inventory` numbering (0-8 hotbar, 9-35 main,
     /// 36-39 armour feet..head, 40 offhand, then any further equipment slots). Written by Java.
@@ -305,6 +304,13 @@ pub struct GameState {
     /// Option changes vanilla screens made, as options.txt key/value pairs, oldest first. The
     /// client drains them once per tick and applies them live (render distance, sound volumes, ...).
     pub option_changes: Vec<(String, String)>,
+    /// Block states of the positions whose block entities the screens edit, `[x, y, z] -> global
+    /// block state id` (`Block.BLOCK_STATE_REGISTRY`, which the data generator's blocks.json
+    /// numbers the same). The client records them from its world before forwarding the packets
+    /// that make Java build an entity (`block_entity_data`, `open_sign_editor`, a use of a
+    /// game-master block); Java builds the entity's real state from it (`Block.stateById`), like
+    /// vanilla's chunks build entities from the block state (`LevelChunk.setBlockState`).
+    pub block_states: std::collections::HashMap<[i32; 3], i32>,
 }
 
 impl Default for GameState {
@@ -327,6 +333,7 @@ impl Default for GameState {
             outgoing: Vec::new(),
             disconnect_requested: false,
             option_changes: Vec::new(),
+            block_states: std::collections::HashMap::new(),
         }
     }
 }
