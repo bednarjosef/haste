@@ -17,19 +17,19 @@ use crate::vertex::PackedVertex;
 const MAX_ARENA_VERTICES: u32 = 1 << 22;
 const MAX_ARENA_INDICES: u32 = 3 << 22;
 
-/// Size of arena number `n` (0-based): the pair starts at 16 MiB (vertices + indices)
-/// and doubles per arena up to [`MAX_ARENA_VERTICES`], so a small render distance (or
-/// the settle phase at rd 12, which draws ~380 of 5000 sections) never pays for the
-/// full 128 MiB pairs. Resident meshes that outgrow the last arena spill into a new
-/// one; a section mesh never exceeds the first-tier size times 2^n budget by design
-/// (one section is at most ~64k vertices).
-fn arena_vertices(n: usize) -> u32 {
-    let shift = n.min(3) as u32;
+/// Size of arena tier `t` (0-based): the pair starts at 16 MiB (vertices + indices)
+/// and doubles per tier up to [`MAX_ARENA_VERTICES`], so a small render distance never
+/// pays for the full 128 MiB pairs. A tier keeps opening same-sized arenas while its
+/// last one was less than half full (a mesh that just missed the tail is no reason to
+/// grow); a section mesh never exceeds the tier-0 size (one section is at most ~64k
+/// vertices, tier 0 holds 2^19).
+fn arena_vertices(t: usize) -> u32 {
+    let shift = t.min(3) as u32;
     (MAX_ARENA_VERTICES >> (3 - shift)).max(1 << 19)
 }
 
-fn arena_indices(n: usize) -> u32 {
-    let shift = n.min(3) as u32;
+fn arena_indices(t: usize) -> u32 {
+    let shift = t.min(3) as u32;
     (MAX_ARENA_INDICES >> (3 - shift)).max(3 << 19)
 }
 
@@ -86,6 +86,11 @@ impl RangeAlloc {
         let free: u32 = self.free.iter().map(|&(_, l)| l).sum();
         self.capacity - free
     }
+
+    /// Total capacity in entries.
+    pub(crate) fn total(&self) -> u32 {
+        self.capacity
+    }
 }
 
 pub(crate) struct Arena {
@@ -123,6 +128,8 @@ pub struct MeshArenas {
     queue: Arc<wgpu::Queue>,
     pub(crate) arenas: Vec<Arena>,
     scratch: Vec<u32>,
+    /// Current size tier (see [`arena_vertices`]).
+    tier: usize,
 }
 
 impl MeshArenas {
@@ -132,6 +139,7 @@ impl MeshArenas {
             queue,
             arenas: Vec::new(),
             scratch: Vec::new(),
+            tier: 0,
         }
     }
 
@@ -141,10 +149,9 @@ impl MeshArenas {
         let bytes = self
             .arenas
             .iter()
-            .enumerate()
-            .map(|(n, _a)| {
-                let v = arena_vertices(n) as u64 * std::mem::size_of::<PackedVertex>() as u64;
-                let i = arena_indices(n) as u64 * 4;
+            .map(|a| {
+                let v = a.vertices.total() as u64 * std::mem::size_of::<PackedVertex>() as u64;
+                let i = a.indices.total() as u64 * 4;
                 v + i
             })
             .sum();
@@ -161,9 +168,8 @@ impl MeshArenas {
     }
 
     fn new_arena(&mut self) -> u32 {
-        let n = self.arenas.len();
-        let vcount = arena_vertices(n);
-        let icount = arena_indices(n);
+        let vcount = arena_vertices(self.tier);
+        let icount = arena_indices(self.tier);
         let vertex = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("section-arena-vertices"),
             size: vcount as u64 * std::mem::size_of::<PackedVertex>() as u64,
@@ -192,9 +198,7 @@ impl MeshArenas {
         if vcount == 0 || icount == 0 {
             return None;
         }
-        let max_v = arena_vertices(self.arenas.len().saturating_sub(1)).max(1 << 19);
-        let max_i = arena_indices(self.arenas.len().saturating_sub(1)).max(3 << 19);
-        if vcount > max_v || icount > max_i {
+        if vcount > arena_vertices(0) || icount > arena_indices(0) {
             tracing::warn!("section {:?} mesh too large for an arena", mesh.pos);
             return None;
         }
@@ -213,6 +217,22 @@ impl MeshArenas {
         let (arena, base_vertex, index_start) = match found {
             Some(f) => f,
             None => {
+                // No live arena could fit the mesh: open one at the current tier. If
+                // the last arena of this tier was more than half full, the tier is
+                // too small for this world — double it for the arenas after this
+                // one (a big mesh that just missed the tail is not a reason to grow).
+                let same_tier = self
+                    .arenas
+                    .last()
+                    .is_some_and(|a| a.vertices.total() == arena_vertices(self.tier));
+                if same_tier {
+                    let last = self.arenas.last().unwrap();
+                    let v_used = last.vertices.used();
+                    let i_used = last.indices.used();
+                    if v_used * 2 > last.vertices.total() || i_used * 2 > last.indices.total() {
+                        self.tier += 1;
+                    }
+                }
                 let i = self.new_arena();
                 let a = &mut self.arenas[i as usize];
                 (
