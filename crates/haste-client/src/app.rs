@@ -383,6 +383,18 @@ impl DebugEnv {
     }
 }
 
+/// `--hud on|off` (vanilla's F1) for this run, set once from the arguments before any join.
+static HUD_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Applies `--hud`: "on" or "off" (vanilla's F1: no HUD, no hand, no block outline).
+pub fn set_hud_from_args(hud: &str) -> anyhow::Result<()> {
+    if hud != "on" && hud != "off" {
+        anyhow::bail!("--hud must be \"on\" or \"off\" (vanilla's F1)");
+    }
+    HUD_ENABLED.store(hud == "on", std::sync::atomic::Ordering::Relaxed);
+    Ok(())
+}
+
 impl Session {
     /// `sound`: open the audio output (the window only; screenshots and the benchmark stay
     /// silent so they neither make noise nor measure the audio thread). `address` is the server
@@ -494,6 +506,10 @@ impl Session {
             biome_climates.clone(),
             options.clone(),
         ));
+        shared.hud_enabled.store(
+            HUD_ENABLED.load(std::sync::atomic::Ordering::Relaxed),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         if sounds.is_some() {
             *shared.sound.lock() = sounds;
         }
@@ -2473,8 +2489,10 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         .map(|v| DVec3::new(v[0], v[1], v[2]));
     // The HUD's JVM (started by the game thread) gets this long to be ready; the shot then
     // waits for it past the world settling, so the HUD is in the picture whenever it can be.
+    // With `--hud off` there is no JVM at all and nothing to wait for.
+    let hud_on = shared.hud_enabled.load(Ordering::Relaxed);
     let jvm_deadline = Instant::now() + Duration::from_secs(args.seconds.min(30));
-    let mut wait_for_hud = true;
+    let mut wait_for_hud = hud_on;
     let mut frames = 0u32;
     let mut stats;
     let mut last_camera;
@@ -2512,7 +2530,9 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         }
         last_camera = camera;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
-        feed.set_first_person(&shared, &mut renderer, perspective);
+        if hud_on {
+            feed.set_first_person(&shared, &mut renderer, perspective);
+        }
         let (entities, block_entities) =
             feed.entities(&shared, &mut renderer, session.local, partial);
         let block_target = shared.view.lock().block_target;
@@ -2555,7 +2575,9 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             gui: &gui,
             sky,
             partial_tick: partial,
-            block_target,
+            // Vanilla's F1 hides the block outline too (`GameRenderer
+            // .shouldRenderBlockOutline` checks `hud.isHidden`).
+            block_target: hud_on.then_some(block_target).flatten(),
             breaking: &breaking,
             camera_entity: (!perspective.draws_player()).then_some(session.local.0),
             spin,

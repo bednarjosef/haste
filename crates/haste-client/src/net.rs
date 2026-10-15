@@ -401,6 +401,19 @@ pub fn synced_biome_count(regs: &SyncedRegistries) -> Option<usize> {
         .map(|e| e.len())
 }
 
+/// Registry id of `minecraft:overworld` in `minecraft:world_clock` (the day clock; the End
+/// has `minecraft:the_end`). 0 (the overworld clock, first registered) when the server sent
+/// no such registry.
+pub fn overworld_clock_id(regs: &SyncedRegistries) -> i32 {
+    regs.entries(&Identifier::minecraft("world_clock"))
+        .and_then(|entries| {
+            entries
+                .iter()
+                .position(|e| e.id == Identifier::minecraft("overworld"))
+        })
+        .map_or(0, |i| i as i32)
+}
+
 /// Per-connection counters for the HUD/headless printout.
 #[derive(Clone, Debug, Default)]
 pub struct NetCounters {
@@ -642,8 +655,8 @@ pub struct Session {
     /// The firework rocket currently attached to us: vanilla `FireworkRocketEntity.tick` pushes a
     /// fall-flying player it is attached to every tick (see [`Session::end_tick`]).
     attached_firework: Option<EntityId>,
-    /// Time of day in ticks from the first world clock of the last `set_time` (approximate:
-    /// that the first clock is the day clock is not verified).
+    /// Time of day in ticks from the overworld clock of the last `set_time` (`clocks` arrives
+    /// in HashMap order, so the overworld clock is looked up by registry id).
     pub time_of_day: Option<i64>,
     /// World age in ticks (`set_time`'s `world_age`), for animations keyed to game time
     /// (vanilla `Level.getGameTime`, e.g. `BannerRenderer`'s wave phase).
@@ -1220,7 +1233,14 @@ impl Session {
             P::SetTime(t) => {
                 entities.set_world_age(t.world_age);
                 self.world_age = t.world_age;
-                if let Some(c) = t.clocks.first() {
+                // The day clock is `minecraft:overworld` of `minecraft:world_clock` (the
+                // End has its own); `clocks` comes in HashMap order, so look the id up.
+                if let Some(c) = t
+                    .clocks
+                    .iter()
+                    .find(|c| c.clock == overworld_clock_id(regs))
+                    .or_else(|| t.clocks.first())
+                {
                     self.time_of_day = Some(c.time);
                 }
             }

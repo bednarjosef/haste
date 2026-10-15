@@ -53,6 +53,10 @@ pub struct Args {
     /// (`--seconds` bounds the wait).
     #[arg(long)]
     pub screenshot: Option<std::path::PathBuf>,
+    /// The HUD, hand and block outline (vanilla's F1, `Hud.toggle`): `off` hides them for
+    /// this run — the whole JVM stays down, so offscreen shots match vanilla's F1 reference.
+    #[arg(long, default_value = "on")]
+    pub hud: String,
     /// Input script for the offscreen client: runs the steps every game tick through the
     /// same routing as the window (needs `--server`; `--seconds` bounds the run).
     #[arg(long)]
@@ -114,6 +118,7 @@ fn main() -> anyhow::Result<()> {
     if let Some(dir) = &args.singleplayer_dir {
         haste_setup::worlds::set_dir(dir.clone());
     }
+    app::set_hud_from_args(&args.hud)?;
     if let Some(cmd) = args.command {
         return launch::run(cmd, &args.username);
     }
