@@ -882,7 +882,22 @@ impl Renderer {
         let pipeline_translucent = make_pipeline(
             "chunk-translucent",
             "fs_translucent",
-            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+            // Vanilla BlendFunction.TRANSLUCENT: (SRC_ALPHA, ONE_MINUS_SRC_ALPHA)
+            // both equations — the fragment colour is NOT premultiplied (block.fsh
+            // outputs the plain texel colour), so this and not the premultiplied
+            // state is the faithful blend.
+            Some(wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::SrcAlpha,
+                    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                    operation: wgpu::BlendOperation::Add,
+                },
+            }),
         );
 
         // Offscreen targets when windowless.
