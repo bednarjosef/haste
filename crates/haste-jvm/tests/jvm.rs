@@ -64,6 +64,7 @@ fn reset(gui: &haste_jvm::GuiPipeline) {
         s.game_time = 0;
         s.day_time = 0;
         s.disconnect_requested = false;
+        s.in_world = false;
     });
 }
 
@@ -449,6 +450,9 @@ fn pause_screen() {
     let gui = h.gui();
     h.clear_unimplemented().unwrap();
     reset(gui);
+    // the pause menu only exists in a world: closing it (`Gui.setScreen(null)`) must land on
+    // no screen, not the no-level title-screen fallback
+    gui.with_state(|s| s.in_world = true);
     open(&h, haste_jvm::ScreenKind::Pause);
     assert!(gui.is_open());
     assert_eq!(
@@ -1220,7 +1224,12 @@ fn inventory_screen() {
         .unwrap(); // hotbar slot 0
     gui.set_inventory_slot(9, &stack("minecraft:oak_planks", 3))
         .unwrap(); // first main slot
-    gui.with_state(|s| s.outgoing.clear());
+                   // an inventory only exists in a world: closing it with E (`Gui.setScreen(null)`) must land
+                   // on no screen, not the no-level title-screen fallback
+    gui.with_state(|s| {
+        s.in_world = true;
+        s.outgoing.clear();
+    });
     // Rust's mirror follows Java's inventory
     assert_eq!(
         gui.with_state(|s| s.slot(0).cloned()),
@@ -1230,16 +1239,17 @@ fn inventory_screen() {
     let f = render(&h, (0.0, 0.0));
     dump(&f);
     assert!(f.commands.iter().any(|c| matches!(c, GuiCommand::Texture { texture, .. } if texture.path() == "textures/gui/container/inventory.png")));
-    // the container is centred (176 px wide in a 320 px GUI) and slots are drawn relative to it
+    // the container is centred (176 px wide in a 320 px GUI) and slots are drawn relative to it;
+    // the HUD's own translates come first (a world is joined), so the container's push is the
+    // x=72 one, not the first
     let origin = f
         .commands
         .iter()
         .find_map(|c| match c {
-            GuiCommand::TranslatePush { dx, dy, .. } => Some((*dx, *dy)),
+            GuiCommand::TranslatePush { dx, dy, .. } if *dx == 72.0 => Some((*dx, *dy)),
             _ => None,
         })
-        .unwrap();
-    assert_eq!(origin.0, 72.0);
+        .expect("the container is centred at x=72");
     let items: Vec<_> = f
         .commands
         .iter()
@@ -1249,9 +1259,14 @@ fn inventory_screen() {
         })
         .collect();
     let (stone, planks) = (item_id("minecraft:stone"), item_id("minecraft:oak_planks"));
+    // the HUD is drawn too (a world is joined): the hotbar's slot 0 holds the stone
     assert_eq!(
         items,
-        vec![(planks, 8, 84, 3), (stone, 8, 142, 64)],
+        vec![
+            (stone, 72, 221, 64),
+            (planks, 8, 84, 3),
+            (stone, 8, 142, 64)
+        ],
         "items from the inventory as GuiCommand::Item"
     );
     let t = texts(&f);
@@ -1809,6 +1824,8 @@ fn options_screens_open_and_close() {
     let gui = h.gui();
     reset(gui);
     h.clear_unimplemented().unwrap();
+    // the pause menu the options screens open from only exists in a world
+    gui.with_state(|s| s.in_world = true);
     open(&h, haste_jvm::ScreenKind::Pause);
     // the script client renders at 480x270 (960x540 at gui scale 2); a first frame also
     // re-lays the pause menu out for that size before the clicks
@@ -1899,6 +1916,8 @@ fn pause_screens_open_and_close() {
     let gui = h.gui();
     reset(gui);
     h.clear_unimplemented().unwrap();
+    // the pause menu only exists in a world (its final Escape closes to no screen)
+    gui.with_state(|s| s.in_world = true);
     open(&h, haste_jvm::ScreenKind::Pause);
     // every frame at the script client's size: a render at another size re-lays the widgets out
     let frame = |mouse: (f64, f64)| -> haste_core::gui::GuiFrame {
@@ -2120,7 +2139,13 @@ fn pack_selection_screen_lists_folder_packs() {
         assert!(!entry_selected(&f), "the unselect click should move it out");
         let (x, y) = text_pos(&f, "Done").expect("the Done button renders");
         click(gui, x as f64, y as f64);
-        assert!(!gui.is_open(), "Done should close the screen");
+        // Done closes to the null parent, and outside a world that is the title screen
+        // (vanilla Gui.setScreen's no-level fallback)
+        assert_eq!(
+            gui.screen_class().as_deref(),
+            Some("net.minecraft.client.gui.screens.TitleScreen"),
+            "Done should close the screen to the title screen"
+        );
         assert_eq!(
             gui.take_resource_pack_ids(),
             Some(vec!["vanilla".to_string()]),

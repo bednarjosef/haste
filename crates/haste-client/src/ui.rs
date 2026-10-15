@@ -308,6 +308,13 @@ impl Ui {
             s.immediate_respawn = !login.packet.enable_respawn_screen;
             s.disconnect_requested = false;
         });
+        // Vanilla keeps the connecting/loading screen up until the level exists
+        // (`ClientPacketListener.handleLogin` -> `startWaitingForNewLevel`, the loading screen
+        // closing when the level is ready) — never `setScreen(null)` before that, or the
+        // no-level fallback opens the title screen over the join. The level exists from here.
+        if self.gui().is_open() {
+            self.gui().close_screen();
+        }
         Ok(())
     }
 
@@ -1488,6 +1495,16 @@ mod tests {
         assert!(
             t.iter().any(|x| x == "Minecraft"),
             "missing the story tab: {t:?}"
+        );
+        // Escape closes the advancements screen back to the pause menu it opened from
+        // (vanilla AdvancementsScreen.onClose -> setScreen(this.lastScreen)), and the second
+        // Escape closes the pause menu (in a world, so no title-screen fallback)
+        c.press(keys::ESCAPE);
+        c.run(5);
+        assert_eq!(
+            c.ui.gui().screen_class().as_deref(),
+            Some("net.minecraft.client.gui.screens.PauseScreen"),
+            "the advancements screen closes back to the pause menu"
         );
         c.press(keys::ESCAPE);
         c.run(5);
