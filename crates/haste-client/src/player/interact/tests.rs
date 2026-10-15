@@ -50,10 +50,33 @@ fn data() -> &'static haste_data::GameData {
                 r#"{{"minecraft:block": {{"entries": {{{}}}}},
                     "minecraft:item": {{"entries": {{{}}}}},
                     "minecraft:mob_effect": {{"entries": {{{}}}}},
+                    "minecraft:data_component_type": {{"entries": {{{}}}}},
+                    "minecraft:enchantment": {{"entries": {{{}}}}},
                     "minecraft:entity_type": {{"entries": {{{}}}}}}}"#,
                 entries(&names),
-                entries(&["air", "diamond_pickaxe", "diamond_sword", "stick"]),
-                entries(&["speed", "haste", "mining_fatigue", "conduit_power"]),
+                entries(&[
+                    "air",
+                    "diamond_pickaxe",
+                    "diamond_sword",
+                    "stick",
+                    "apple",
+                    "bow",
+                    "crossbow",
+                    "trident",
+                    "spyglass",
+                    "shield",
+                    "potion",
+                ]),
+                entries(&[
+                    "speed",
+                    "haste",
+                    "mining_fatigue",
+                    "conduit_power",
+                    "nausea",
+                    "darkness",
+                ]),
+                entries(&["tool", "enchantments"]),
+                entries(&["efficiency", "sharpness"]),
                 entries(&[
                     "item",
                     "experience_orb",
@@ -157,6 +180,35 @@ fn item(i: u32) -> ItemStackData {
         item: Some(RegistryIndex(i)),
         components_raw: Default::default(),
     }
+}
+
+/// Item default components for the tests, so they do not need the data generator cache.
+fn item_components() -> Arc<haste_data::ItemComponents> {
+    use haste_data::{AttributeModifier, Consumable, ItemComponents};
+    let speed = |amount: f64| AttributeModifier {
+        attribute: Identifier::minecraft("attack_speed"),
+        amount,
+        operation: 0,
+        slot: "mainhand".into(),
+    };
+    let mut c = ItemComponents::default();
+    c.insert(Identifier::minecraft("diamond_sword"), vec![speed(-2.4)]);
+    c.insert(Identifier::minecraft("diamond_pickaxe"), vec![speed(-2.8)]);
+    c.insert_consumable(
+        Identifier::minecraft("apple"),
+        Consumable {
+            consume_seconds: 1.6,
+            animation: 1,
+        },
+    );
+    c.insert_consumable(
+        Identifier::minecraft("potion"),
+        Consumable {
+            consume_seconds: 1.6,
+            animation: 2,
+        },
+    );
+    Arc::new(c)
 }
 
 struct Rig {
@@ -715,6 +767,139 @@ fn inventory_and_effects_from_packets() {
         (p.tool_speed, p.tool_correct, p.haste_level),
         (8.0, Some(true), 2)
     );
+}
+
+/// The held stack's own `minecraft:tool` component and Efficiency enchantment drive the mining
+/// speed (`ItemStack.getDestroySpeed` / `Player.getDestroySpeed`): a stack with a speed-8 tool
+/// rule on `mineable/pickaxe` and Efficiency V (level^2 + 1 = 26) gives 8 + 26 = 34.
+#[test]
+fn held_stack_components_drive_mining_speed() {
+    use haste_protocol::wire::{IdSet, Writer};
+    let mut r = Rig::new(GameMode::Survival);
+    r.p.int.prepare(data());
+    let mut tool = Writer::new();
+    tool.var_int(1);
+    tool.write(&IdSet::Tag(Identifier::minecraft("mineable/pickaxe")));
+    tool.option(&Some(8.0f32), |w, v| w.f32(*v));
+    tool.option(&Some(true), |w, v| w.bool(*v));
+    tool.f32(1.0);
+    tool.var_int(1);
+    tool.bool(true);
+    let mut patch = Writer::new();
+    patch.len_prefix(2);
+    patch.len_prefix(0);
+    patch.var_int(0); // minecraft:tool
+    patch.bytes(&tool.buf);
+    patch.var_int(1); // minecraft:enchantments
+    patch.var_int(1); // one enchantment
+    patch.var_int(0); // minecraft:efficiency
+    patch.var_int(5); // level V
+    r.p.int.hotbar[0] = ItemStackData {
+        count: 1,
+        item: Some(RegistryIndex(1)),
+        components_raw: patch.into_inner().into(),
+    };
+    r.tick(InteractInput::default());
+    let env = InteractEnv {
+        data: data(),
+        entities: &[],
+        entity_types: &[],
+    };
+    let p = r.p.mining_params(STONE, &env);
+    assert_eq!((p.tool_speed, p.tool_correct), (8.0, Some(true)));
+    assert_eq!(p.mining_efficiency, 26.0);
+    // (8 + 26) / 1.5 / 30 = 0.755 per tick: 2 ticks (wiki: Efficiency V diamond pickaxe).
+    assert_eq!(p.ticks_to_break(), Some(2));
+}
+
+/// The held item's `minecraft:attack_speed` comes from its attribute modifiers
+/// (`Player.getCurrentItemAttackStrengthDelay`): base 4.0, diamond sword -2.4 -> 1.6, diamond
+/// pickaxe -2.8 -> 1.2, an item without the modifier keeps the base.
+#[test]
+fn held_item_attack_speed_comes_from_its_attribute_modifiers() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.p.int.prepare(data());
+    r.p.int.set_item_components(item_components());
+    assert!((r.p.held_attack_speed() - 4.0).abs() < 1e-6, "bare hand");
+    r.p.int.hotbar[0] = item(2); // diamond_sword
+    r.tick(InteractInput::default());
+    assert!(
+        (r.p.held_attack_speed() - 1.6).abs() < 1e-6,
+        "diamond sword {}",
+        r.p.held_attack_speed()
+    );
+    r.p.int.hotbar[0] = item(1); // diamond_pickaxe
+    r.tick(InteractInput::default());
+    assert!(
+        (r.p.held_attack_speed() - 1.2).abs() < 1e-6,
+        "diamond pickaxe {}",
+        r.p.held_attack_speed()
+    );
+    r.p.int.hotbar[0] = item(3); // stick: no attack_speed modifier
+    r.tick(InteractInput::default());
+    assert!((r.p.held_attack_speed() - 4.0).abs() < 1e-6, "stick");
+}
+
+/// `Item.getUseDuration` / `Item.getUseAnimation`: the consumable component for food and drink,
+/// and the item classes that override them (bow/crossbow/trident/spyglass/shield).
+#[test]
+fn use_duration_and_animation_come_from_the_item() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.p.int.prepare(data());
+    r.p.int.set_item_components(item_components());
+    let env = InteractEnv {
+        data: data(),
+        entities: &[],
+        entity_types: &[],
+    };
+    let d = |i: u32| r.p.int.use_data(&item(i), env.data);
+    // Bow/crossbow/trident/shield: 72000 ticks; spyglass 1200.
+    assert_eq!(d(5), Some((72000, UseAnimation::Bow)));
+    assert_eq!(d(6), Some((72000, UseAnimation::Crossbow)));
+    assert_eq!(d(7), Some((72000, UseAnimation::Trident)));
+    assert_eq!(d(9), Some((72000, UseAnimation::Block)));
+    assert_eq!(d(8), Some((1200, UseAnimation::Spyglass)));
+    // Apple: `consume_seconds` 1.6 -> 32 ticks, `eat`; potion drinks.
+    assert_eq!(d(4), Some((32, UseAnimation::Eat)));
+    assert_eq!(d(10), Some((32, UseAnimation::Drink)));
+    // A tool is not used over time.
+    assert_eq!(d(1), None);
+    assert_eq!(d(3), None);
+}
+
+/// Starting a use sets `useItemRemainingTicks` and stops the 4-tick repeat; releasing the key
+/// sends `release_use_item` (`Minecraft.handleKeybinds` / `MultiPlayerGameMode.releaseUsingItem`).
+#[test]
+fn using_an_item_ticks_down_and_releases_on_key_up() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.p.int.prepare(data());
+    r.p.int.set_item_components(item_components());
+    r.p.int.hotbar[0] = item(5); // bow
+    r.w = TestWorld::new(); // look at nothing: the use_item path
+    let use_ = InteractInput {
+        use_item: true,
+        ..Default::default()
+    };
+    let out = r.tick(use_);
+    assert!(matches!(out[0], ServerboundPlay::UseItem(_)));
+    assert!(r.p.is_using_item());
+    assert_eq!(r.p.use_duration(), 72000);
+    assert_eq!(r.p.use_animation(), UseAnimation::Bow);
+    // The start tick already ticked the remaining time down (`LivingEntity.tick`).
+    assert_eq!(r.p.use_item_remaining(), 71999);
+    // Held: the use does not repeat and only the timer advances.
+    let out = r.tick(use_);
+    assert!(out.is_empty());
+    assert_eq!(r.p.use_item_remaining(), 71998);
+    assert_eq!(r.p.ticks_using_item(), 2);
+    // Key up: one release, the use ends.
+    let out = r.tick(InteractInput::default());
+    assert_eq!(actions(&out), [(action::RELEASE_USE_ITEM, 0)]);
+    assert!(!r.p.is_using_item());
+    // A new press starts a fresh use.
+    let out = r.tick(use_);
+    assert!(matches!(out[0], ServerboundPlay::UseItem(_)));
+    assert_eq!(r.p.use_item_remaining(), 71999);
 }
 
 #[test]

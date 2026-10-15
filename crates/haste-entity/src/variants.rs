@@ -75,6 +75,27 @@ pub mod metadata_index {
     pub const STRIDER_SUFFOCATING: u8 = 19;
     /// `MushroomCow.DATA_TYPE`: variant 18 (red 0, brown 1; AbstractCow adds nothing).
     pub const MOOSHROOM_TYPE: u8 = 18;
+    /// `Sheep.DATA_WOOL_ID`: AgeableMob 16-17, then the packed wool byte 18 (colour =
+    /// `byte & 15`, sheared = `byte & 16`).
+    pub const SHEEP_WOOL: u8 = 18;
+    /// `Horse.DATA_ID_TYPE_VARIANT`'s markings nibble: `id >> 8` (Markings.NONE 0, WHITE 1,
+    /// WHITE_FIELD 2, WHITE_DOTS 3, BLACK_DOTS 4).
+    pub const HORSE_MARKINGS_SHIFT: u32 = 8;
+    /// `Cat.DATA_COLLAR_COLOR`: variant 20, sound 21, lying 22, relax 23, collar 24; the
+    /// collar shows when the cat is tamed (TamableAnimal flags 18, bit 4).
+    pub const CAT_COLLAR: u8 = 24;
+    /// `Wolf.DATA_COLLAR_COLOR`: interested 20, collar 21, anger 22, variant 23 (tamed =
+    /// TamableAnimal flags 18, bit 4).
+    pub const WOLF_COLLAR: u8 = 21;
+    /// `Shulker.DATA_COLOR_ID`: attach face 16, peek 17, colour byte 18 (16 = none).
+    pub const SHULKER_COLOR: u8 = 18;
+    /// `TropicalFish.DATA_ID_TYPE_VARIANT`: AbstractFish from-bucket 16, then the packed
+    /// variant 17 (pattern `id & 0xFFFF`, base colour `id >> 16`, pattern colour `id >> 24`).
+    pub const TROPICAL_FISH_VARIANT: u8 = 17;
+    /// `TamableAnimal.DATA_FLAGS_ID` (tamed = bit 4, sitting = bit 1).
+    pub const TAME_FLAGS: u8 = 18;
+    /// Tamed bit of [`TAME_FLAGS`].
+    pub const TAME_FLAG_TAMED: i8 = 4;
 }
 
 /// Entity metadata serializer ids for the `Holder<XVariant>` fields (the registration order
@@ -662,6 +683,351 @@ pub fn scale_for(kind: RegistryIndex, metadata: &Metadata) -> f32 {
     size as f32
 }
 
+/// `DyeColor.getTextureDiffuseColor` (the third constructor argument), linear RGB in 0..1:
+/// the tint vanilla multiplies into dyed overlay layers. Order is the dye id (white 0 ..
+/// black 15).
+pub const DYE_COLORS: [[f32; 3]; 16] = {
+    // The vanilla constants are sRGB 0xRRGGBB; the vertex colour is a linear multiplier
+    // sampled against an sRGB atlas, so the raw 8-bit channels are what vanilla passes on.
+    let hex = [
+        0xF9FFFE, 0xF9801D, 0xC74EBD, 0x3AB3DA, 0xFED83D, 0x80C71F, 0xF38BAA, 0x474F52, 0x9D9D97,
+        0x169C9C, 0x8932B8, 0x3C44AA, 0x835432, 0x5E7C16, 0xB02E26, 0x1D1D21,
+    ];
+    let mut out = [[0.0f32; 3]; 16];
+    let mut i = 0;
+    while i < 16 {
+        out[i] = [
+            ((hex[i] >> 16) & 0xFF) as f32 / 255.0,
+            ((hex[i] >> 8) & 0xFF) as f32 / 255.0,
+            (hex[i] & 0xFF) as f32 / 255.0,
+        ];
+        i += 1;
+    }
+    out
+};
+
+/// The dye colour's linear tint (see [`DYE_COLORS`]); ids wrap like `DyeColor.byId`
+/// (`ByIdMap.continuous` with the zero strategy, so any id outside 0..15 is white).
+pub fn dye_tint(id: i32) -> [f32; 3] {
+    DYE_COLORS[id.rem_euclid(16) as usize]
+}
+
+/// The overlay layers of an entity (vanilla's `RenderLayer`s that draw a second model with
+/// the same transform): sheep wool and its undercoat, horse markings, tamed cat/wolf
+/// collars, the tropical fish pattern. The *base* texture changes for a shulker's colour,
+/// which is not an overlay — see [`shulker_texture`].
+///
+/// Results are cached per (type, the inputs that pick them: wool byte, markings, collar
+/// colour, packed fish variant); warm lookups are a map probe, and the returned array is
+/// copied into the `EntityInstance` (two `Option<Arc>` clones, no allocation beyond that).
+pub fn overlays_for(
+    kind: RegistryIndex,
+    metadata: &Metadata,
+    baby: bool,
+) -> [Option<haste_core::model::EntityOverlay>; 2] {
+    // The overlay mobs all carry their picker in one of five metadata slots; probing those
+    // first (a short Vec scan each) keeps entities without overlays — almost all of them —
+    // off the registry-name lookup entirely.
+    let has_picker = metadata.get(metadata_index::SHEEP_WOOL).is_some()
+        || metadata.get(metadata_index::HORSE_TYPE_VARIANT).is_some()
+        || metadata
+            .get(metadata_index::TROPICAL_FISH_VARIANT)
+            .is_some()
+        || metadata.get(metadata_index::CAT_COLLAR).is_some()
+        || metadata.get(metadata_index::WOLF_COLLAR).is_some();
+    if !has_picker {
+        return Default::default();
+    }
+    let int = |index: u8| match metadata.get(index).map(|e| &e.value) {
+        Some(MetadataValue::VarInt(i)) => Some(*i),
+        _ => None,
+    };
+    let byte = |index: u8| match metadata.get(index).map(|e| &e.value) {
+        Some(MetadataValue::Byte(b)) => Some(*b),
+        _ => None,
+    };
+    let tamed =
+        byte(metadata_index::TAME_FLAGS).is_some_and(|b| b & metadata_index::TAME_FLAG_TAMED != 0);
+    let Some(name) = crate::registry::entity_type_name(kind) else {
+        return Default::default();
+    };
+    match name.as_str() {
+        // SheepWoolLayer + SheepWoolUndercoatLayer: the wool byte packs the colour (low
+        // nibble) and the sheared bit (16); sheared sheep drop the wool layer, and the
+        // undercoat hides for white adults (it would be invisible under white wool).
+        "minecraft:sheep" => {
+            let Some(wool) = byte(metadata_index::SHEEP_WOOL) else {
+                return Default::default();
+            };
+            let color = wool & 15;
+            let sheared = wool & 16 != 0;
+            let tint = dye_tint(color as i32);
+            let mut out: [Option<haste_core::model::EntityOverlay>; 2] = Default::default();
+            if !sheared {
+                out[0] =
+                    wool_layer(baby).map(|model| haste_core::model::EntityOverlay { model, tint });
+            }
+            // `SheepWoolUndercoatLayer`: adults, and only when the wool is not already
+            // white (the same tint would be invisible); a sheared sheep keeps it.
+            if !baby && color != 0 {
+                out[1] = undercoat_layer(baby)
+                    .map(|model| haste_core::model::EntityOverlay { model, tint });
+            }
+            out
+        }
+        // HorseMarkingLayer: the base horse model again with a markings texture, no tint
+        // (NONE draws nothing).
+        "minecraft:horse" => {
+            let Some(v) = int(metadata_index::HORSE_TYPE_VARIANT) else {
+                return Default::default();
+            };
+            let markings = (v >> metadata_index::HORSE_MARKINGS_SHIFT) & 0xFF;
+            let (adult, baby_tex) = match markings {
+                1 => (
+                    "entity/horse/horse_markings_white",
+                    "entity/horse/horse_markings_white_baby",
+                ),
+                2 => (
+                    "entity/horse/horse_markings_whitefield",
+                    "entity/horse/horse_markings_whitefield_baby",
+                ),
+                3 => (
+                    "entity/horse/horse_markings_whitedots",
+                    "entity/horse/horse_markings_whitedots_baby",
+                ),
+                4 => (
+                    "entity/horse/horse_markings_blackdots",
+                    "entity/horse/horse_markings_blackdots_baby",
+                ),
+                _ => return Default::default(),
+            };
+            let model = parent_model_with_texture(kind, baby, if baby { baby_tex } else { adult });
+            [
+                model.map(|model| haste_core::model::EntityOverlay {
+                    model,
+                    tint: [1.0; 3],
+                }),
+                None,
+            ]
+        }
+        // CatCollarLayer: cat#collar layer, the collar dye's tint, tamed cats only.
+        "minecraft:cat" if tamed => {
+            let color = int(metadata_index::CAT_COLLAR).unwrap_or(14); // DyeColor.RED
+            let layer = if baby {
+                "minecraft:cat_baby#collar"
+            } else {
+                "minecraft:cat#collar"
+            };
+            let model = dump_layer_with_texture(layer, &collar_texture("cat", baby));
+            [
+                model.map(|model| haste_core::model::EntityOverlay {
+                    model,
+                    tint: dye_tint(color),
+                }),
+                None,
+            ]
+        }
+        // WolfCollarLayer: the base wolf model with the collar texture, tamed wolves only.
+        "minecraft:wolf" if tamed => {
+            let color = int(metadata_index::WOLF_COLLAR).unwrap_or(14); // DyeColor.RED
+            let model = parent_model_with_texture(kind, baby, &collar_texture("wolf", baby));
+            [
+                model.map(|model| haste_core::model::EntityOverlay {
+                    model,
+                    tint: dye_tint(color),
+                }),
+                None,
+            ]
+        }
+        // TropicalFishPatternLayer: the pattern layer of the fish's shape, the pattern
+        // colour's tint. The base model also switches shape (small/large) with the pattern's
+        // base and takes the base colour's tint — handled in `tropical_fish_model`.
+        "minecraft:tropical_fish" => {
+            let Some(packed) = int(metadata_index::TROPICAL_FISH_VARIANT) else {
+                return Default::default();
+            };
+            let pattern = packed & 0xFFFF;
+            let large = pattern >> 8 & 1 == 1;
+            let texture = tropical_pattern_texture(pattern);
+            let layer = if large {
+                "minecraft:tropical_fish_large#pattern"
+            } else {
+                "minecraft:tropical_fish_small#pattern"
+            };
+            let pattern_color = dye_tint(packed >> 24 & 0xFF);
+            let model = dump_layer_with_texture(layer, &texture);
+            [
+                model.map(|model| haste_core::model::EntityOverlay {
+                    model,
+                    tint: pattern_color,
+                }),
+                None,
+            ]
+        }
+        _ => Default::default(),
+    }
+}
+
+/// `textures/entity/<kind>/<kind>_collar[_baby].png`.
+fn collar_texture(kind: &str, baby: bool) -> String {
+    format!(
+        "entity/{kind}/{kind}_collar{}",
+        if baby { "_baby" } else { "" }
+    )
+}
+
+/// The tropical fish's base model: the shape its packed variant names (`Base.SMALL` uses
+/// `tropical_fish_small` with `tropical_a`, `Base.LARGE` the large shape with `tropical_b`)
+/// — `TropicalFishRenderer.submit` swaps the model with the pattern's base. The base colour
+/// tint (`getModelTint`) is not applied yet: the base draw has no tint slot, a later
+/// EntityInstance change; the pattern overlay carries its own colour today.
+pub fn tropical_fish_model(metadata: &Metadata) -> Option<Arc<CubeModel>> {
+    let packed = match metadata
+        .get(metadata_index::TROPICAL_FISH_VARIANT)
+        .map(|e| &e.value)
+    {
+        Some(MetadataValue::VarInt(i)) => *i,
+        _ => return None,
+    };
+    let large = packed >> 8 & 0xFF == 1;
+    let (layer, texture) = if large {
+        (
+            "minecraft:tropical_fish_large#main",
+            "entity/fish/tropical_b",
+        )
+    } else {
+        (
+            "minecraft:tropical_fish_small#main",
+            "entity/fish/tropical_a",
+        )
+    };
+    dump_layer_with_texture(layer, texture)
+}
+
+/// The base texture of a shulker (`ShulkerRenderer.getTextureLocation`): the dye's sheet
+/// sprite `entity/shulker/shulker_<name>`, or the plain `shulker` when the colour byte is
+/// 16 (or absent).
+pub fn shulker_texture(metadata: &Metadata) -> Option<Identifier> {
+    let color = match metadata
+        .get(metadata_index::SHULKER_COLOR)
+        .map(|e| &e.value)
+    {
+        Some(MetadataValue::Byte(b)) => *b,
+        _ => 16,
+    };
+    if color == 16 || !(0..=15).contains(&color) {
+        return None;
+    }
+    const NAMES: [&str; 16] = [
+        "white",
+        "orange",
+        "magenta",
+        "light_blue",
+        "yellow",
+        "lime",
+        "pink",
+        "gray",
+        "light_gray",
+        "cyan",
+        "purple",
+        "blue",
+        "brown",
+        "green",
+        "red",
+        "black",
+    ];
+    Some(Identifier::minecraft(&format!(
+        "entity/shulker/shulker_{}",
+        NAMES[color as usize]
+    )))
+}
+
+/// `TropicalFishPatternLayer`'s texture per packed pattern id (`base | index << 8`).
+fn tropical_pattern_texture(pattern: i32) -> String {
+    let index = pattern & 0xFF;
+    let large = pattern >> 8 & 1 == 1;
+    let (letter, index) = if large { ("b", index) } else { ("a", index) };
+    format!("entity/fish/tropical_{letter}_pattern_{}", index + 1)
+}
+
+/// The sheep wool layer with its (untinted) texture; the tint goes on the overlay.
+fn wool_layer(baby: bool) -> Option<Arc<CubeModel>> {
+    let layer = if baby {
+        "minecraft:sheep_baby#wool"
+    } else {
+        "minecraft:sheep#wool"
+    };
+    let texture = if baby {
+        "entity/sheep/sheep_wool_baby"
+    } else {
+        "entity/sheep/sheep_wool"
+    };
+    dump_layer_with_texture(layer, texture)
+}
+
+/// The sheep undercoat layer (adults only in vanilla; babies never get it).
+fn undercoat_layer(baby: bool) -> Option<Arc<CubeModel>> {
+    if baby {
+        return None;
+    }
+    dump_layer_with_texture(
+        "minecraft:sheep#wool_undercoat",
+        "entity/sheep/sheep_wool_undercoat",
+    )
+}
+
+/// A layer from the dump with a texture swapped in, cached per (layer, texture): the cache
+/// every overlay resolution shares.
+fn dump_layer_with_texture(layer: &str, texture: &str) -> Option<Arc<CubeModel>> {
+    let cache: &OverlayModelCache = overlay_model_cache();
+    let key = (layer.to_owned(), texture.to_owned());
+    if let Some(hit) = cache.lock().unwrap().get(&key) {
+        return hit.clone();
+    }
+    let model = model_dump::library()?.get(layer, 1.0).map(|mut m| {
+        let texture = Identifier::minecraft(texture);
+        if m.texture != texture {
+            let mut c = (*m).clone();
+            c.texture = texture.clone();
+            m = Arc::new(c);
+        }
+        m
+    });
+    cache.lock().unwrap().insert(key, model.clone());
+    model
+}
+
+/// The horse markings / wolf collar model: the parent model re-drawn with another texture
+/// (both vanilla layers use `getParentModel()`, so the shape is the base model's, adult or
+/// baby column of the model table as `baby` picks).
+fn parent_model_with_texture(
+    kind: RegistryIndex,
+    baby: bool,
+    texture: &str,
+) -> Option<Arc<CubeModel>> {
+    let name = crate::registry::entity_type_name(kind)?;
+    let model = if baby {
+        crate::registry::baby_model_for_name(&name)
+            .or_else(|| crate::registry::model_for_name(&name))?
+    } else {
+        crate::registry::model_for_name(&name)?
+    };
+    let texture = Identifier::minecraft(texture);
+    if model.texture == texture {
+        return Some(model);
+    }
+    let mut c = (*model).clone();
+    c.texture = texture;
+    Some(Arc::new(c))
+}
+
+type OverlayModelCache = Mutex<HashMap<(String, String), Option<Arc<CubeModel>>>>;
+
+fn overlay_model_cache() -> &'static OverlayModelCache {
+    static CACHE: OnceLock<OverlayModelCache> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// A fox's texture (`FoxRenderer.TEXTURES_BY_VARIANT`): snow/red, sleep/idle, baby/adult.
 fn fox_texture(snow: bool, sleeping: bool, baby: bool) -> String {
     match (snow, sleeping, baby) {
@@ -1236,5 +1602,173 @@ mod tests {
             texture_for(strider, &Metadata::default(), false, None, 0).unwrap(),
             Identifier::minecraft("entity/strider/strider")
         );
+    }
+
+    /// `DyeColor.getTextureDiffuseColor` for a few dyes, as linear 0..1 triples
+    /// (white, orange, black, red — the exact vanilla constants, channel / 255).
+    #[test]
+    fn dye_tints_match_vanilla() {
+        assert_eq!(dye_tint(0), [249.0 / 255.0, 1.0, 254.0 / 255.0]); // white 0xF9FFFE
+        assert_eq!(dye_tint(1), [249.0 / 255.0, 128.0 / 255.0, 29.0 / 255.0]); // orange 0xF9801D
+        assert_eq!(dye_tint(15), [29.0 / 255.0, 29.0 / 255.0, 33.0 / 255.0]); // black 0x1D1D21
+        assert_eq!(dye_tint(14), [176.0 / 255.0, 46.0 / 255.0, 38.0 / 255.0]); // red 0xB02E26
+                                                                               // Out-of-range ids wrap to a real dye like `DyeColor.byId`.
+        assert_eq!(dye_tint(16), dye_tint(0));
+        assert_eq!(dye_tint(-1), dye_tint(15));
+    }
+
+    /// The sheep's overlays from the packed wool byte: colour in the low nibble, sheared
+    /// bit 16; the undercoat only for non-white adults (SheepWoolUndercoatLayer).
+    #[test]
+    #[ignore = "needs cache/oracle/26.3 (registries.json + model dump; HASTE_CACHE overrides)"]
+    fn sheep_overlays_from_the_wool_byte() {
+        let Some(sheep) = kind_of("minecraft:sheep") else {
+            eprintln!("skipped: no registries.json in the cache");
+            return;
+        };
+        // Wool byte absent: no overlays (nothing to draw yet).
+        assert!(overlays_for(sheep, &Metadata::default(), false)
+            .iter()
+            .all(|o| o.is_none()));
+        // Red wool (colour 14): the wool layer and the undercoat, both tinted red.
+        let red = byte_metadata(&[(metadata_index::SHEEP_WOOL, 14)]);
+        let [wool, undercoat] = overlays_for(sheep, &red, false);
+        let wool = wool.expect("red wool layer");
+        assert_eq!(
+            wool.model.texture,
+            Identifier::minecraft("entity/sheep/sheep_wool")
+        );
+        assert_eq!(wool.tint, dye_tint(14));
+        let undercoat = undercoat.expect("undercoat for non-white wool");
+        assert_eq!(
+            undercoat.model.texture,
+            Identifier::minecraft("entity/sheep/sheep_wool_undercoat")
+        );
+        // White adult: the wool but no undercoat (the same white would be invisible).
+        let white = byte_metadata(&[(metadata_index::SHEEP_WOOL, 0)]);
+        let [wool, undercoat] = overlays_for(sheep, &white, false);
+        assert!(wool.is_some());
+        assert!(undercoat.is_none());
+        // Sheared (bit 16): no wool, but the undercoat keeps a non-white sheep visible.
+        let sheared_red = byte_metadata(&[(metadata_index::SHEEP_WOOL, 14 | 16)]);
+        let [wool, undercoat] = overlays_for(sheep, &sheared_red, false);
+        assert!(wool.is_none());
+        assert!(undercoat.is_some());
+        // A baby: wool only.
+        let [wool, undercoat] = overlays_for(sheep, &red, true);
+        assert!(wool.is_some());
+        assert!(undercoat.is_none());
+    }
+
+    /// Collars show only for tamed mobs (TamableAnimal flags bit 4), with the collar dye's
+    /// tint; the cat uses its collar layer, the wolf its own base model (WolfCollarLayer
+    /// re-draws the parent model).
+    #[test]
+    #[ignore = "needs cache/oracle/26.3 (registries.json + model dump; HASTE_CACHE overrides)"]
+    fn collars_only_when_tamed() {
+        let tamed =
+            || byte_metadata(&[(metadata_index::TAME_FLAGS, metadata_index::TAME_FLAG_TAMED)]);
+        let Some(cat) = kind_of("minecraft:cat") else {
+            eprintln!("skipped: no registries.json in the cache");
+            return;
+        };
+        // Untamed: no collar.
+        assert!(overlays_for(cat, &Metadata::default(), false)
+            .iter()
+            .all(|o| o.is_none()));
+        // Tamed with a blue collar (11): the cat collar layer, tinted blue.
+        let blue = tamed().apply_extra(int_metadata(&[(metadata_index::CAT_COLLAR, 11)]));
+        let [collar, none] = overlays_for(cat, &blue, false);
+        let collar = collar.expect("tamed cat collar");
+        assert_eq!(
+            collar.model.texture,
+            Identifier::minecraft("entity/cat/cat_collar")
+        );
+        assert_eq!(collar.tint, dye_tint(11));
+        assert!(none.is_none());
+        // The wolf collar re-draws the wolf's own shape with the collar texture.
+        let Some(wolf) = kind_of("minecraft:wolf") else {
+            eprintln!("skipped: minecraft:wolf not in the registry");
+            return;
+        };
+        let lime = tamed().apply_extra(int_metadata(&[(metadata_index::WOLF_COLLAR, 5)]));
+        let [collar, _] = overlays_for(wolf, &lime, false);
+        let collar = collar.expect("tamed wolf collar");
+        assert_eq!(
+            collar.model.texture,
+            Identifier::minecraft("entity/wolf/wolf_collar")
+        );
+        assert_eq!(collar.tint, dye_tint(5));
+    }
+
+    /// The tropical fish: the packed variant picks the shape (small/large), the pattern
+    /// texture and both dye tints; the shulker's colour byte picks its texture.
+    #[test]
+    #[ignore = "needs cache/oracle/26.3 (registries.json + model dump; HASTE_CACHE overrides)"]
+    fn tropical_fish_and_shulker_from_packed_metadata() {
+        // Packed variant: pattern flopper (LARGE base 1, index 0 -> 0x100), base colour
+        // magenta (2), pattern colour yellow (4).
+        let packed = 0x100 | 2 << 16 | 4 << 24;
+        let fish_meta = int_metadata(&[(metadata_index::TROPICAL_FISH_VARIANT, packed)]);
+        let model = tropical_fish_model(&fish_meta).expect("large fish model");
+        assert_eq!(
+            model.texture,
+            Identifier::minecraft("entity/fish/tropical_b")
+        );
+        let Some(fish) = kind_of("minecraft:tropical_fish") else {
+            eprintln!("skipped: no registries.json in the cache");
+            return;
+        };
+        let [pattern, none] = overlays_for(fish, &fish_meta, false);
+        let pattern = pattern.expect("pattern overlay");
+        assert_eq!(
+            pattern.model.texture,
+            Identifier::minecraft("entity/fish/tropical_b_pattern_1")
+        );
+        assert_eq!(pattern.tint, dye_tint(4));
+        assert!(none.is_none());
+        // A small-shape pattern (kob: base 0, index 0) uses the small layer and tropical_a.
+        let kob = int_metadata(&[(metadata_index::TROPICAL_FISH_VARIANT, 0)]);
+        let model = tropical_fish_model(&kob).expect("small fish model");
+        assert_eq!(
+            model.texture,
+            Identifier::minecraft("entity/fish/tropical_a")
+        );
+        // The shulker's colour byte: 16 (or absent) is the plain shulker, 0..15 the dyed
+        // sprite.
+        assert_eq!(shulker_texture(&Metadata::default()), None);
+        assert_eq!(
+            shulker_texture(&byte_metadata(&[(metadata_index::SHULKER_COLOR, 16)])),
+            None
+        );
+        assert_eq!(
+            shulker_texture(&byte_metadata(&[(metadata_index::SHULKER_COLOR, 9)])),
+            Some(Identifier::minecraft("entity/shulker/shulker_cyan"))
+        );
+    }
+
+    /// Horse markings: the same horse shape re-drawn with the markings texture, no tint;
+    /// NONE (0) draws nothing.
+    #[test]
+    #[ignore = "needs cache/oracle/26.3 (registries.json + model dump; HASTE_CACHE overrides)"]
+    fn horse_markings_layer() {
+        let Some(horse) = kind_of("minecraft:horse") else {
+            eprintln!("skipped: no registries.json in the cache");
+            return;
+        };
+        // No variant int: nothing (also what Markings.NONE gives).
+        assert!(overlays_for(horse, &Metadata::default(), false)
+            .iter()
+            .all(|o| o.is_none()));
+        // Variant 4 (black coat) with black dots markings (4 << 8).
+        let meta = int_metadata(&[(metadata_index::HORSE_TYPE_VARIANT, 4 | 4 << 8)]);
+        let [markings, none] = overlays_for(horse, &meta, false);
+        let markings = markings.expect("markings layer");
+        assert_eq!(
+            markings.model.texture,
+            Identifier::minecraft("entity/horse/horse_markings_blackdots")
+        );
+        assert_eq!(markings.tint, [1.0; 3]);
+        assert!(none.is_none());
     }
 }

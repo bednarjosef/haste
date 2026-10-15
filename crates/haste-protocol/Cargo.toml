@@ -30,3 +30,7 @@ tokio-util.workspace = true
 trust-dns-resolver.workspace = true
 reqwest.workspace = true
 glam.workspace = true
+filetime = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true

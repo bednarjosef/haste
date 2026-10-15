@@ -78,4 +78,13 @@ public final class Native {
      * Options.save would write them. Rust applies them live (one call per change).
      */
     public static native void optionsChanged(String key, String value);
+
+    // ---- resource packs (haste.gui.ClientImpl.reloadResourcePacks) ----
+    /**
+     * The resource pack selection changed and vanilla asked for a reload (the pack screen's Done:
+     * {@code Options.updateResourcePacks} saves, then {@code Minecraft.reloadResourcePacks} runs).
+     * The ids are the repository's selected ids, bottom first, as options.txt stores them
+     * ({@code resourcePacks}); Rust re-opens its asset stack and rebuilds the renderer.
+     */
+    public static native void resourcePacksChanged(String[] selectedIds);
 }

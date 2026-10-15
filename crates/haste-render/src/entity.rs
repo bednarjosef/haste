@@ -12,7 +12,8 @@ use haste_core::model::{
     BodyOp, BodyTransform, CubeModel, Decoration, DroppedItem, EntityInstance, ItemFrameDecoration,
     ModelPart, PaintingDecoration, PoseOverrides,
 };
-use haste_core::{EntityId, Identifier};
+use haste_core::view::{BlockView, CollisionShapes};
+use haste_core::{BlockPos, EntityId, Identifier};
 
 use crate::gui::Shelf;
 
@@ -211,10 +212,6 @@ pub struct FirstPerson {
     pub x_bob: TickPair,
     /// Hand lag behind the camera turn, in degrees (`LocalPlayer.yBob`/`yBobO`).
     pub y_bob: TickPair,
-    /// Walk bob amplitude (`ClientAvatarState.bob`).
-    pub bob: TickPair,
-    /// Distance walked in blocks, the bob's phase (`ClientAvatarState.walkDist`).
-    pub walk_dist: TickPair,
 }
 
 /// A name tag to draw: world anchor (above the head) and the text.
@@ -222,6 +219,11 @@ pub struct FirstPerson {
 pub struct Nametag {
     pub anchor: glam::DVec3,
     pub text: String,
+    /// `!state.isDiscrete`: draw the see-through pass as well as the solid one
+    /// (`SubmitNodeCollection.submitNameTag`).
+    pub see_through: bool,
+    /// The scoreboard below-name line (`Entity.belowNameDisplay`), drawn under the name.
+    pub below_name: Option<String>,
 }
 
 struct EntityTexture {
@@ -240,6 +242,12 @@ pub struct EntityRenderer {
     vertex_buffer: wgpu::Buffer,
     vertex_capacity: usize,
     vertices: Vec<EntityVertex>,
+    /// The entity-shadow pipeline: same atlas/vertex format as the entity pipeline, but
+    /// translucent with no depth write and no culling (vanilla `ENTITY_SHADOW`).
+    shadow_pipeline: wgpu::RenderPipeline,
+    shadow_buffer: wgpu::Buffer,
+    shadow_capacity: usize,
+    shadow_vertices: Vec<EntityVertex>,
     lights: HashMap<EntityId, (u8, u8)>,
     pub nametags: Vec<Nametag>,
     hand_buffer: wgpu::Buffer,
@@ -353,8 +361,57 @@ impl EntityRenderer {
             multiview_mask: None,
             cache: None,
         });
+        // `ENTITY_SHADOW` (RenderPipelines.ENTITY_SHADOW): same vertex format and atlas as the
+        // entity pipeline, but translucent with the depth test kept and no depth write
+        // (`DepthStencilState(GREATER_THAN_OR_EQUAL, false)`) and no back-face culling.
+        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("entity-shadow"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(EntityVertex::LAYOUT)],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24Plus,
+                depth_write_enabled: Some(false),
+                // Vanilla's `DepthStencilState(GREATER_THAN_OR_EQUAL, false)` (reverse-Z) is
+                // LessEqual against Haste's depth cleared to 1. The shadow quad is coplanar
+                // with the block top, so a small bias towards the camera replaces vanilla's
+                // `VIEW_OFFSET_Z_LAYERING` polygon offset.
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: -1,
+                    slope_scale: 0.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let vertex_capacity = 8192;
         let vertex_buffer = make_vertex_buffer(&device, vertex_capacity);
+        let shadow_capacity = 2048;
+        let shadow_buffer = make_vertex_buffer(&device, shadow_capacity);
         let hand_buffer = make_vertex_buffer(&device, 1024);
         EntityRenderer {
             device,
@@ -367,6 +424,10 @@ impl EntityRenderer {
             vertex_buffer,
             vertex_capacity,
             vertices: Vec::new(),
+            shadow_pipeline,
+            shadow_buffer,
+            shadow_capacity,
+            shadow_vertices: Vec::new(),
             lights: HashMap::new(),
             nametags: Vec::new(),
             hand_buffer,
@@ -513,6 +574,7 @@ impl EntityRenderer {
         entities: &[EntityInstance],
         skip: Option<EntityId>,
         camera: glam::DVec3,
+        frustum: &[glam::Vec4; 6],
         assets: &mut Assets,
     ) {
         self.vertices.clear();
@@ -520,6 +582,20 @@ impl EntityRenderer {
         self.drawn = 0;
         for e in entities {
             if Some(e.id) == skip {
+                continue;
+            }
+            // Vanilla `EntityRenderer.shouldRender`: skip entities beyond
+            // `64 * boundingBox.size` blocks (`Entity.shouldRenderAtSqrDistance`) or
+            // outside the camera frustum (the AABB inflated by 0.5, `Frustum.isVisible`).
+            // Same look: those entities would draw nothing visible anyway.
+            let (size, half) = model_extents(&e.model.root);
+            let rel = e.pos - camera;
+            let dist2 = rel.length_squared();
+            let limit = 64.0 * size.max(1.0) * e.scale;
+            if dist2 > f64::from(limit * limit) {
+                continue;
+            }
+            if !aabb_in_frustum(frustum, rel, half + 0.5) {
                 continue;
             }
             let (sky, block) = self.lights.get(&e.id).copied().unwrap_or((15, 0));
@@ -540,6 +616,9 @@ impl EntityRenderer {
                         self.emit_item_frame(e, f, camera, sky, block, assets)
                     }
                     Decoration::Painting(p) => self.emit_painting(e, p, camera, sky, block, assets),
+                    // The lightning bolt draws through the weather pass's own additive
+                    // pipeline (`RenderPipelines.LIGHTNING`); nothing here.
+                    Decoration::Lightning(_) => {}
                 }
                 if self.vertices.len() > start {
                     self.drawn += 1;
@@ -570,7 +649,7 @@ impl EntityRenderer {
                 * body_matrix(&e.body)
                 * Mat4::from_scale(s / 16.0);
             let start = self.vertices.len();
-            emit_part(
+            emit_part_tinted(
                 &mut self.vertices,
                 &e.model,
                 &e.model.root,
@@ -579,17 +658,42 @@ impl EntityRenderer {
                 rect,
                 light,
                 e.hurt,
+                [1.0; 3],
             );
+            // Overlay layers: the same transform and pose, each with its own texture and
+            // tint (vanilla's RenderLayers, e.g. SheepWoolLayer's dyed copy of the model).
+            for overlay in e.overlays.iter().flatten() {
+                let orect = self.texture_rect(&overlay.model.texture, assets);
+                emit_part_tinted(
+                    &mut self.vertices,
+                    &overlay.model,
+                    &overlay.model.root,
+                    &e.pose,
+                    root,
+                    orect,
+                    light,
+                    e.hurt,
+                    overlay.tint,
+                );
+            }
             self.emit_equipment(e, root, light, assets);
             if self.vertices.len() > start {
                 self.drawn += 1;
             }
             if let Some(name) = &e.nametag {
-                let top = model_top(&e.model.root, 0.0) * scale / 16.0;
-                self.nametags.push(Nametag {
-                    anchor: e.pos + glam::DVec3::new(0.0, top as f64 + 0.5, 0.0),
-                    text: name.clone(),
-                });
+                // `EntityRenderer.extractNameTags`: within 64 blocks, and past 32 when
+                // crouching (`LivingEntityRenderer.shouldShowName`). Invisible entities never
+                // reach here (haste-entity drops their tag). The anchor is the NAME_TAG
+                // attachment (bb height) plus 0.5.
+                let dist_sq = (e.pos - camera).length_squared();
+                if name_tag_visible(dist_sq, e.is_discrete) {
+                    self.nametags.push(Nametag {
+                        anchor: e.pos + glam::DVec3::new(0.0, e.name_tag_y as f64 + 0.5, 0.0),
+                        text: name.clone(),
+                        see_through: !e.is_discrete,
+                        below_name: e.below_name.clone(),
+                    });
+                }
             }
         }
         if self.vertices.len() > self.vertex_capacity {
@@ -600,6 +704,140 @@ impl EntityRenderer {
             self.queue
                 .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
         }
+    }
+
+    /// Vanilla `EntityRenderer.extractShadow`: the round `misc/shadow.png` quads on the full
+    /// top faces below each entity. For every entity the shadow is a `shadowRadius` (capped at
+    /// 32) disc, its power fading with camera distance (`1 - distSq/256`) times the renderer's
+    /// shadow strength, and with height above the block (`extractShadowPiece`); the alpha also
+    /// scales with the block's raw brightness through `Lightmap.getBrightness`. Skipped for
+    /// invisible entities and when the entity-shadows option is off. `sky_darken` is
+    /// `Level.getSkyDarken` (0..15) and `ambient_light` the dimension's `ambientLight`.
+    ///
+    /// Batched into one reused vertex buffer, no per-frame allocation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_shadows(
+        &mut self,
+        entities: &[EntityInstance],
+        skip: Option<EntityId>,
+        camera: glam::DVec3,
+        world: &dyn BlockView,
+        shapes: &dyn CollisionShapes,
+        sky_darken: i32,
+        ambient_light: f32,
+        entity_shadows: bool,
+        assets: &mut Assets,
+    ) {
+        self.shadow_vertices.clear();
+        if !entity_shadows {
+            return;
+        }
+        let rect = self.texture_rect(&Identifier::minecraft("misc/shadow"), assets);
+        for e in entities {
+            if Some(e.id) == skip || e.invisible || e.decoration.is_some() {
+                continue;
+            }
+            let radius = e.shadow_radius.min(32.0);
+            if radius <= 0.0 {
+                continue;
+            }
+            let dist_sq = (e.pos - camera).length_squared();
+            let pow = (1.0 - dist_sq / 256.0) as f32 * e.shadow_strength;
+            if pow <= 0.0 {
+                continue;
+            }
+            let x0 = (e.pos.x - radius as f64).floor() as i32;
+            let x1 = (e.pos.x + radius as f64).floor() as i32;
+            let z0 = (e.pos.z - radius as f64).floor() as i32;
+            let z1 = (e.pos.z + radius as f64).floor() as i32;
+            let depth = (pow / 0.5 - 1.0).min(radius);
+            let y0 = (e.pos.y - depth as f64).floor() as i32;
+            let y1 = e.pos.y.floor() as i32;
+            for z in z0..=z1 {
+                for x in x0..=x1 {
+                    for y in y0..=y1 {
+                        let pos = BlockPos::new(x, y, z);
+                        let power_at_depth = pow - (e.pos.y - y as f64) as f32 * 0.5;
+                        let below = BlockPos::new(x, y - 1, z);
+                        let below_state = world.block_state(below);
+                        // `isCollisionShapeFullBlock`: exactly one full 0..1 box.
+                        let boxes = shapes.collision_boxes(below_state);
+                        let full = boxes.len() == 1
+                            && boxes[0].min == glam::DVec3::ZERO
+                            && boxes[0].max == glam::DVec3::ONE;
+                        if !full {
+                            continue;
+                        }
+                        let brightness = max_local_raw_brightness(world, pos, sky_darken);
+                        if brightness <= 3 {
+                            continue;
+                        }
+                        let b = lightmap_brightness(ambient_light, brightness);
+                        let alpha = shadow_piece_alpha(power_at_depth, b);
+                        if alpha <= 0.0 {
+                            continue;
+                        }
+                        let r = 2.0 * radius as f64;
+                        let bx = x as f64;
+                        let bz = z as f64;
+                        let by = y as f64;
+                        let x01 = bx - e.pos.x;
+                        let x11 = bx + 1.0 - e.pos.x;
+                        let z01 = bz - e.pos.z;
+                        let z11 = bz + 1.0 - e.pos.z;
+                        let u0 = (-x01 / r) as f32 + 0.5;
+                        let u1 = (-x11 / r) as f32 + 0.5;
+                        let v0 = (-z01 / r) as f32 + 0.5;
+                        let v1 = (-z11 / r) as f32 + 0.5;
+                        let rel = |wx: f64, wy: f64, wz: f64| {
+                            Vec3::new(
+                                (wx - camera.x) as f32,
+                                (wy - camera.y) as f32,
+                                (wz - camera.z) as f32,
+                            )
+                        };
+                        // `ShadowFeatureRenderer.prepare`: (x01,z01), (x01,z11), (x11,z11),
+                        // (x11,z01), all at y01 = the block top.
+                        let p = [
+                            rel(bx, by, bz),
+                            rel(bx, by, bz + 1.0),
+                            rel(bx + 1.0, by, bz + 1.0),
+                            rel(bx + 1.0, by, bz),
+                        ];
+                        let uv = [[u0, v0], [u0, v1], [u1, v1], [u1, v0]];
+                        push_shadow_quad(&mut self.shadow_vertices, p, uv, alpha, rect);
+                    }
+                }
+            }
+        }
+        if self.shadow_vertices.len() > self.shadow_capacity {
+            self.shadow_capacity = self.shadow_vertices.len().next_power_of_two();
+            self.shadow_buffer = make_vertex_buffer(&self.device, self.shadow_capacity);
+        }
+        if !self.shadow_vertices.is_empty() {
+            self.queue.write_buffer(
+                &self.shadow_buffer,
+                0,
+                bytemuck::cast_slice(&self.shadow_vertices),
+            );
+        }
+    }
+
+    /// Draws the batched entity shadows; the camera and lightmap bind groups must be set.
+    pub fn draw_shadows<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) -> u32 {
+        if self.shadow_vertices.is_empty() {
+            return 0;
+        }
+        pass.set_pipeline(&self.shadow_pipeline);
+        pass.set_bind_group(1, &self.bind_group, &[]);
+        pass.set_vertex_buffer(0, self.shadow_buffer.slice(..));
+        pass.draw(0..self.shadow_vertices.len() as u32, 0..1);
+        1
+    }
+
+    /// Number of shadow quads batched for the last frame (6 vertices each); tests/reporting.
+    pub fn shadow_quad_count(&self) -> usize {
+        self.shadow_vertices.len() / 6
     }
 
     /// Draws an entity's equipment on top of its model (already emitted at `root`): the held
@@ -997,13 +1235,15 @@ impl EntityRenderer {
     /// the entities, after `prepare`: one draw call covers both, and each texture lands in the
     /// shared atlas on first use (the per-vertex `rect` picks it). `visible` decides per
     /// instance whether it is drawn (frustum and section culling are the caller's, like the
-    /// terrain's); returns how many were posed.
+    /// terrain's); returns how many were posed. `orientation` is the camera's orientation
+    /// quaternion, for the conduit's billboarded eye.
     pub fn append_block_entities(
         &mut self,
         instances: &[crate::blockentity::BlockEntityInstance],
         camera: glam::DVec3,
         visible: impl Fn(&crate::blockentity::BlockEntityInstance) -> bool,
         assets: &mut Assets,
+        orientation: glam::Quat,
     ) -> u32 {
         let start = self.vertices.len();
         let mut drawn = 0;
@@ -1016,6 +1256,60 @@ impl EntityRenderer {
                 drawn += 1;
                 continue;
             }
+            if let crate::blockentity::BlockEntityKind::Banner { .. } = inst.kind {
+                // The banner's angle is the same rule as the sign's (rotation segment or
+                // wall facing) and lives in `sign_angle`.
+                let mut out = std::mem::take(&mut self.vertices);
+                let me = &mut *self;
+                crate::blockentity::emit_banner(
+                    &mut out,
+                    inst,
+                    camera,
+                    inst.sign_angle,
+                    &mut |texture| me.texture_rect(texture, assets),
+                );
+                self.vertices = out;
+                drawn += 1;
+                continue;
+            }
+            if matches!(
+                inst.kind,
+                crate::blockentity::BlockEntityKind::Lectern
+                    | crate::blockentity::BlockEntityKind::EnchantTable
+                    | crate::blockentity::BlockEntityKind::Bell
+                    | crate::blockentity::BlockEntityKind::DecoratedPot
+                    | crate::blockentity::BlockEntityKind::Conduit
+            ) {
+                // The object-model block entities (books, bells, decorated pots, conduits):
+                // one part list each, their own texture per part through the same atlas.
+                let texture = match inst.kind {
+                    crate::blockentity::BlockEntityKind::Lectern => {
+                        crate::blockentity::book_texture()
+                    }
+                    crate::blockentity::BlockEntityKind::EnchantTable => {
+                        crate::blockentity::book_texture()
+                    }
+                    crate::blockentity::BlockEntityKind::Bell => crate::blockentity::bell_texture(),
+                    crate::blockentity::BlockEntityKind::DecoratedPot => {
+                        crate::blockentity::pot_base_texture()
+                    }
+                    _ => crate::blockentity::conduit_shell_texture(),
+                };
+                let rect = self.texture_rect(&texture, assets);
+                let mut out = std::mem::take(&mut self.vertices);
+                let me = &mut *self;
+                crate::blockentity::emit_model_block_entity(
+                    &mut out,
+                    inst,
+                    camera,
+                    orientation,
+                    rect,
+                    &mut |id| me.texture_rect(id, assets),
+                );
+                self.vertices = out;
+                drawn += 1;
+                continue;
+            }
             let texture = match inst.kind {
                 crate::blockentity::BlockEntityKind::Chest(m) => {
                     crate::blockentity::chest_texture(m, inst.half)
@@ -1023,7 +1317,16 @@ impl EntityRenderer {
                 crate::blockentity::BlockEntityKind::Shulker(c) => {
                     crate::blockentity::shulker_texture(c)
                 }
+                crate::blockentity::BlockEntityKind::Skull { kind, .. } => {
+                    crate::blockentity::skull_texture(kind)
+                }
                 crate::blockentity::BlockEntityKind::Sign { .. } => unreachable!(),
+                crate::blockentity::BlockEntityKind::Banner { .. } => unreachable!(),
+                crate::blockentity::BlockEntityKind::Lectern
+                | crate::blockentity::BlockEntityKind::EnchantTable
+                | crate::blockentity::BlockEntityKind::Bell
+                | crate::blockentity::BlockEntityKind::DecoratedPot
+                | crate::blockentity::BlockEntityKind::Conduit => unreachable!(),
             };
             let rect = self.texture_rect(&texture, assets);
             let out = &mut self.vertices;
@@ -1289,20 +1592,22 @@ impl EntityRenderer {
     }
 
     /// Builds the first-person arm or held item, following vanilla's
-    /// `FirstPersonHandsAndItemsRenderer.submitHandsWithItems`: the walk bob
-    /// (`GameRenderer.bobView`) and the hand's lag behind the camera turn are applied to the
-    /// whole hand in view space, then per hand vanilla's own transform, then the model.
+    /// `FirstPersonHandsAndItemsRenderer.submitHandsWithItems`: the hurt tilt and walk bob
+    /// (`GameRenderer.renderItemInHand`'s pose stack) and the hand's lag behind the camera
+    /// turn are applied to the whole hand in view space, then per hand vanilla's own
+    /// transform, then the model.
     ///
-    /// `view_to_world` rotates view space (x right, y up, -z forward) into the camera-relative
-    /// world, `view` is the camera's look (yaw, pitch) in degrees and `partial` the partial
-    /// tick; the per-tick animation values live in `fp` and are only lerped here.
+    /// `prefix` is the pose stack the hand is submitted under (view space stays view space:
+    /// x right, y up, -z forward), `view` is the camera's look (yaw, pitch) in degrees and
+    /// `partial` the partial tick; the per-tick animation values live in `fp` and are only
+    /// lerped here.
     ///
     /// Nothing is allocated per frame: the arm model is cached by `slim` and the vertices go
     /// into the reused hand buffer.
     pub fn prepare_hand(
         &mut self,
         fp: Option<&FirstPerson>,
-        view_to_world: Mat4,
+        prefix: Mat4,
         view: (f32, f32),
         partial: f32,
         assets: &mut Assets,
@@ -1315,7 +1620,7 @@ impl EntityRenderer {
         let light = (fp.light.1, fp.light.0);
         let item = fp.item.and_then(|i| self.item_model_for(i, assets));
         let mut out = std::mem::take(&mut self.hand);
-        let root = view_to_world * hand_root_matrix(fp, view, partial);
+        let root = prefix * hand_root_matrix(fp, view, partial);
         match item {
             Some(model) => {
                 let root = root * item_arm_matrix(fp, partial);
@@ -1336,7 +1641,7 @@ impl EntityRenderer {
                 // Vanilla's `ModelPart` scales its pivot by 1/16 (the model is in pixels), and
                 // `AvatarRenderer.renderHand` gives the right arm its 0.1 rad z tilt.
                 let m = root * arm_matrix(fp, partial) * Mat4::from_scale(Vec3::splat(1.0 / 16.0));
-                emit_part(
+                emit_part_tinted(
                     &mut out,
                     &model,
                     &model.root,
@@ -1345,6 +1650,7 @@ impl EntityRenderer {
                     rect,
                     light,
                     0.0,
+                    [1.0; 3],
                 );
             }
         }
@@ -1606,23 +1912,13 @@ pub(crate) fn painting_transform(facing: haste_core::Direction) -> Mat4 {
     Mat4::from_rotation_y((180.0 - facing.to_2d_data_value() as f32 * 90.0).to_radians())
 }
 
-/// `FirstPersonHandsAndItemsRenderer.submitHandsWithItems`'s outer transforms, in view space:
-/// `GameRenderer.bobView`'s walk bob, then the hand's lag behind the camera turn
-/// (`(viewXRot - xBob) * 0.1`, `(viewYRot - yBob) * 0.1`).
+/// `FirstPersonHandsAndItemsRenderer.submitHandsWithItems`'s outer transforms, in view
+/// space: the hand's lag behind the camera turn (`(viewXRot - xBob) * 0.1`,
+/// `(viewYRot - yBob) * 0.1`). The walk bob is NOT here: vanilla applies `bobHurt` and
+/// `bobView` to the whole hand pose stack in `GameRenderer.renderItemInHand` (the renderer
+/// passes them as the prefix matrix), once, like the world's projection carries them.
 pub(crate) fn hand_root_matrix(fp: &FirstPerson, view: (f32, f32), partial: f32) -> Mat4 {
-    // `ClientAvatarState.getBackwardsInterpolatedWalkDistance`.
-    let walk = fp.walk_dist;
-    let backwards = -(walk.at(partial) + (walk.end - walk.start) * partial);
-    let bob = fp.bob.at(partial);
-    // `GameRenderer.bobView`: x right, y up, the camera at the origin.
-    let s = (backwards * std::f32::consts::PI).sin() * bob;
-    let c = (backwards * std::f32::consts::PI).cos() * bob;
-    let roll_x = ((backwards * std::f32::consts::PI - 0.2).cos() * bob).abs();
-    let bob_matrix = Mat4::from_translation(Vec3::new(s * 0.5, -c.abs(), 0.0))
-        * Mat4::from_rotation_z((s * 3.0).to_radians())
-        * Mat4::from_rotation_x((roll_x * 5.0).to_radians());
-    bob_matrix
-        * Mat4::from_rotation_x(((view.1 - fp.x_bob.at(partial)) * 0.1).to_radians())
+    Mat4::from_rotation_x(((view.1 - fp.x_bob.at(partial)) * 0.1).to_radians())
         * Mat4::from_rotation_y(((view.0 - fp.y_bob.at(partial)) * 0.1).to_radians())
 }
 
@@ -1735,10 +2031,72 @@ fn push_world_quad(
 
 /// World-space entity shading: two directional lights at 0.6 and 0.4 ambient (the same
 /// lighting model as GUI items, with the light directions in world space).
-fn entity_shade(n: Vec3) -> f32 {
+pub(crate) fn entity_shade(n: Vec3) -> f32 {
     let l0 = Vec3::new(0.2, 1.0, -0.7).normalize();
     let l1 = Vec3::new(-0.2, 1.0, 0.7).normalize();
     ((n.dot(l0).max(0.0) + n.dot(l1).max(0.0)) * 0.6 + 0.4).min(1.0)
+}
+
+/// One shadow quad (four vertices, two triangles) with a flat white colour at `alpha`. The
+/// shadow texture is sampled at `uv` (0..1) inside `rect` in the entity atlas; the light is
+/// full-bright (vanilla's `15728880`), so `entity.wgsl` leaves the texture colour unchanged.
+fn push_shadow_quad(
+    out: &mut Vec<EntityVertex>,
+    p: [Vec3; 4],
+    uv: [[f32; 2]; 4],
+    alpha: f32,
+    rect: [u32; 4],
+) {
+    let color = [1.0, 1.0, 1.0, alpha];
+    let uv = uv.map(|t| {
+        [
+            rect[0] as f32 + t[0] * rect[2] as f32,
+            rect[1] as f32 + t[1] * rect[3] as f32,
+        ]
+    });
+    let r16 = rect.map(|v| v as u16);
+    for i in [0usize, 1, 2, 0, 2, 3] {
+        out.push(EntityVertex {
+            pos: p[i].to_array(),
+            uv: uv[i],
+            color,
+            rect: r16,
+            light: [15, 15, 0, 0],
+        });
+    }
+}
+
+/// `Level.getMaxLocalRawBrightness(pos)`: `max(blockLight, skyLight - skyDarken)`
+/// (`LevelLightEngine.getRawBrightness`). `sky_darken` is `Level.getSkyDarken`.
+pub(crate) fn max_local_raw_brightness(
+    world: &dyn BlockView,
+    pos: BlockPos,
+    sky_darken: i32,
+) -> i32 {
+    let block = world.block_light(pos) as i32;
+    let sky = world.sky_light(pos) as i32 - sky_darken;
+    block.max(sky)
+}
+
+/// `EntityRenderer.extractNameTags` + `LivingEntityRenderer.shouldShowName`: a name tag shows
+/// within 64 blocks, and only within 32 while crouching (`isDiscrete`, distanceSq >= 1024).
+pub fn name_tag_visible(dist_sq: f64, is_discrete: bool) -> bool {
+    dist_sq < 64.0 * 64.0 && !(is_discrete && dist_sq >= 32.0 * 32.0)
+}
+
+/// `Lightmap.getBrightness(dimensionType, level)`: the curved light curve
+/// `v / (4 - 3v)` with the dimension's ambient light floor, `lerp(ambient, curved, 1)`.
+pub fn lightmap_brightness(ambient: f32, level: i32) -> f32 {
+    let v = level as f32 / 15.0;
+    let curved = v / (4.0 - 3.0 * v);
+    curved + ambient * (1.0 - curved)
+}
+
+/// `EntityRenderer.extractShadowPiece`'s per-piece alpha:
+/// `clamp(powerAtDepth * 0.5 * brightness, 0, 1)` with
+/// `powerAtDepth = pow - (entity.y - pos.y) * 0.5`.
+pub fn shadow_piece_alpha(power_at_depth: f32, brightness: f32) -> f32 {
+    (power_at_depth * 0.5 * brightness).clamp(0.0, 1.0)
 }
 
 /// Hurt flash red overlay strength. Vanilla overlays red at about 30 % (`hurt` in
@@ -1768,7 +2126,50 @@ pub(crate) fn model_top(part: &ModelPart, parent_y: f32) -> f32 {
         .fold(own, f32::max)
 }
 
-fn pose_rotation(pose: &PoseOverrides, name: &str) -> Option<Vec3> {
+/// A model's render size and camera-relative half-extents in blocks, for vanilla's
+/// `Entity.shouldRenderAtSqrDistance` (`boundingBox.getSize()`) and the frustum test
+/// (`getBoundingBoxForCulling`, the model's static bounds: like vanilla's AABB it does
+/// not track animation). Model space is y-down, 1/16 block per unit; `emit_part` scales
+/// by 1/16 with x/y mirrored, so extents are symmetric and only the scale matters.
+pub(crate) fn model_extents(part: &ModelPart) -> (f32, f32) {
+    fn walk(part: &ModelPart, ox: f32, oy: f32, oz: f32, lo: &mut Vec3, hi: &mut Vec3) {
+        let (px, py, pz) = (ox + part.pivot.x, oy + part.pivot.y, oz + part.pivot.z);
+        for c in &part.cubes {
+            let (x0, y0, z0) = (px + c.origin.x, py + c.origin.y, pz + c.origin.z);
+            let (x1, y1, z1) = (x0 + c.size.x, y0 + c.size.y, z0 + c.size.z);
+            let i = c.inflate;
+            *lo = lo.min(Vec3::new(x0 - i, y0 - i, z0 - i));
+            *hi = hi.max(Vec3::new(x1 + i, y1 + i, z1 + i));
+        }
+        for child in &part.children {
+            walk(child, px, py, pz, lo, hi);
+        }
+    }
+    let mut lo = Vec3::splat(f32::MAX);
+    let mut hi = Vec3::splat(f32::MIN);
+    walk(part, 0.0, 0.0, 0.0, &mut lo, &mut hi);
+    let (w, h, d) = (
+        (hi.x - lo.x).abs(),
+        (hi.y - lo.y).abs(),
+        (hi.z - lo.z).abs(),
+    );
+    // `AABB.getSize()` is the diagonal's length; model space is 1/16 block, so / 16.
+    let size = ((w * w + h * h + d * d).sqrt() / 16.0).max(1.0);
+    let half = Vec3::new(w, h, d) / 16.0 / 2.0;
+    (size, half.length())
+}
+
+/// Conservative AABB-in-frustum test: the sphere around the entity (centre `rel` in
+/// camera-relative blocks, radius `r`) against the 6 planes (Gribb/Hartmann, the same
+/// plane form the terrain cull uses). The sphere contains the model's extents.
+pub(crate) fn aabb_in_frustum(planes: &[glam::Vec4; 6], rel: glam::DVec3, r: f32) -> bool {
+    let c = rel.as_vec3();
+    planes
+        .iter()
+        .all(|p| p.x * c.x + p.y * c.y + p.z * c.z + p.w >= -r)
+}
+
+pub(crate) fn pose_rotation(pose: &PoseOverrides, name: &str) -> Option<Vec3> {
     pose.rotations
         .iter()
         .find(|(n, _)| n == name)
@@ -1800,7 +2201,8 @@ pub(crate) fn part_matrix(
 }
 
 /// Child pivots are relative to the parent (vanilla `PartPose`); rotation is Z * Y * X around
-/// the pivot, pose overrides add to the base rotation. `hurt` (0..1) tints the part red.
+/// the pivot, pose overrides add to the base rotation. `hurt` (0..1) tints the part red;
+/// `tint` multiplies the colour per channel (dyed overlay layers).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_part(
     out: &mut Vec<EntityVertex>,
@@ -2304,6 +2706,118 @@ fn placeholder_texture() -> image::RgbaImage {
 mod tests {
     use super::*;
 
+    /// The frustum cull keeps entities inside the view and drops those behind the camera:
+    /// vanilla `EntityRenderer.shouldRender` (`Frustum.isVisible` on the inflated AABB).
+    /// A sphere around the model stands in for the AABB, so an entity half-in view stays.
+    /// The planes come from the renderer's own `frustum_planes` on a straight, level view.
+    #[test]
+    fn frustum_cull_keeps_visible_and_drops_behind() {
+        let camera = crate::Camera {
+            pos: glam::DVec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.0,
+            fov_deg: 70.0,
+            hand_fov_deg: 70.0,
+            roll_deg: 0.0,
+            bob: crate::ViewBob::default(),
+        };
+        let view_proj = crate::Renderer::view_projection(&camera, 1.0, None);
+        let planes = crate::Renderer::frustum_planes(&view_proj);
+        let r = 1.0;
+        // Straight ahead at 10 blocks (yaw 0 looks along +z): kept.
+        assert!(aabb_in_frustum(
+            &planes,
+            glam::DVec3::new(0.0, 0.0, 10.0),
+            r
+        ));
+        // Behind the camera: dropped.
+        assert!(!aabb_in_frustum(
+            &planes,
+            glam::DVec3::new(0.0, 0.0, -10.0),
+            r
+        ));
+        // Ahead but far outside the 70-degree fov: dropped.
+        assert!(!aabb_in_frustum(
+            &planes,
+            glam::DVec3::new(100.0, 0.0, 10.0),
+            r
+        ));
+    }
+
+    /// A model's render size (vanilla `Entity.shouldRenderAtSqrDistance` compares against
+    /// `64 * boundingBox.getSize()`): an 8x8x8-unit cube spans half a block each way, so
+    /// its diagonal is ~0.87 blocks (clamped to 1) and the sphere radius is the
+    /// half-diagonal, ~0.43 blocks.
+    #[test]
+    fn model_extents_from_a_cube() {
+        let part = ModelPart {
+            name: "root".into(),
+            pivot: Vec3::ZERO,
+            rotation: Vec3::ZERO,
+            visible: true,
+            cubes: vec![haste_core::model::Cube {
+                origin: Vec3::new(-4.0, 0.0, -4.0),
+                size: Vec3::new(8.0, 8.0, 8.0),
+                inflate: 0.0,
+                uv: [0, 0],
+                mirror: false,
+            }],
+            children: Vec::new(),
+        };
+        let (size, half) = model_extents(&part);
+        let diagonal = (3.0_f32 * 8.0 * 8.0).sqrt();
+        assert!(
+            (size - (diagonal / 16.0).max(1.0)).abs() < 1e-5,
+            "size {size}"
+        );
+        assert!((half - diagonal / 16.0 / 2.0).abs() < 1e-5, "half {half}");
+    }
+
+    /// `EntityRenderer.extractShadowPiece`: the shadow alpha fades with height above the
+    /// block (`powerAtDepth = pow - (entity.y - pos.y) * 0.5`, then `* 0.5 * brightness`).
+    #[test]
+    fn shadow_alpha_fades_with_height_above_the_block() {
+        // pow = 1: no camera distance falloff and shadow strength 1; the entity's feet at y=1.5.
+        let pow = 1.0f32;
+        let feet = 1.5f32;
+        let alpha_at = |block_y: i32| {
+            let power_at_depth = pow - (feet - block_y as f32) * 0.5;
+            shadow_piece_alpha(power_at_depth, lightmap_brightness(0.0, 15))
+        };
+        // The block under the feet is strongest, one lower is a quarter as strong, two lower
+        // is negative and clamps to zero.
+        assert!((alpha_at(1) - 0.375).abs() < 1e-6, "{}", alpha_at(1));
+        assert!((alpha_at(0) - 0.125).abs() < 1e-6, "{}", alpha_at(0));
+        assert_eq!(alpha_at(-1), 0.0);
+        // The alpha is clamped to 1.
+        assert_eq!(shadow_piece_alpha(4.0, 1.0), 1.0);
+    }
+
+    /// `Lightmap.getBrightness`: the curved `v / (4 - 3v)` curve with the dimension's ambient
+    /// light floor.
+    #[test]
+    fn lightmap_brightness_is_the_vanilla_curve() {
+        assert_eq!(lightmap_brightness(0.0, 15), 1.0);
+        assert_eq!(lightmap_brightness(0.0, 0), 0.0);
+        // 7 / (15 * (4 - 3 * 7/15)) = 7/39.
+        assert!((lightmap_brightness(0.0, 7) - 7.0 / 39.0).abs() < 1e-6);
+        // Nether ambient 0.1 lifts every level towards 1.
+        assert!((lightmap_brightness(0.1, 0) - 0.1).abs() < 1e-6);
+    }
+
+    /// `EntityRenderer.extractNameTags`/`LivingEntityRenderer.shouldShowName`: 64 blocks, 32
+    /// while crouching (distanceSq >= 1024 hides it).
+    #[test]
+    fn name_tag_culls_at_64_and_32_when_crouching() {
+        assert!(name_tag_visible(63.9 * 63.9, false));
+        assert!(!name_tag_visible(64.1 * 64.1, false));
+        assert!(name_tag_visible(31.9 * 31.9, true));
+        assert!(!name_tag_visible(32.0 * 32.0, true));
+        assert!(!name_tag_visible(40.0 * 40.0, true));
+        // Standing is not affected by the 32 limit.
+        assert!(name_tag_visible(40.0 * 40.0, false));
+    }
+
     /// `body_matrix` composes the ops left to right like `LivingEntityRenderer.setupRotations`
     /// (`poseStack` calls): `rotateZ(90); translate(0, 2, 0)` maps the origin to (-2, 0, 0).
     #[test]
@@ -2436,7 +2950,7 @@ mod tests {
         };
         let mut out = Vec::new();
         let root = Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0) / 16.0);
-        emit_part(
+        emit_part_tinted(
             &mut out,
             &model,
             &model.root,
@@ -2445,6 +2959,7 @@ mod tests {
             [0, 0, 64, 64],
             (15, 15),
             0.0,
+            [1.0; 3],
         );
         assert_eq!(out.len(), 36);
         // Every triangle faces away from the cube centre (0, 0.25, 0).
@@ -2593,8 +3108,6 @@ mod tests {
             equip: TickPair::fixed(1.0),
             x_bob: TickPair::fixed(0.0),
             y_bob: TickPair::fixed(0.0),
-            bob: TickPair::fixed(0.0),
-            walk_dist: TickPair::fixed(0.0),
         }
     }
 
@@ -2628,7 +3141,7 @@ mod tests {
         let m = arm_matrix(&still_hand(), 0.0) * Mat4::from_scale(Vec3::splat(1.0 / 16.0));
         let model = arm_model(false);
         let mut out = Vec::new();
-        emit_part(
+        emit_part_tinted(
             &mut out,
             &model,
             &model.root,
@@ -2637,6 +3150,7 @@ mod tests {
             [0, 0, 64, 64],
             (15, 15),
             0.0,
+            [1.0; 3],
         );
         // The arm and its sleeve, six faces of six vertices each.
         assert_eq!(out.len(), 72);
@@ -2659,7 +3173,7 @@ mod tests {
         swung_hand.attack = TickPair::fixed(0.25);
         let swung = arm_matrix(&swung_hand, 0.0) * Mat4::from_scale(Vec3::splat(1.0 / 16.0));
         let mut out2 = Vec::new();
-        emit_part(
+        emit_part_tinted(
             &mut out2,
             &arm_model(false),
             &arm_model(false).root,
@@ -2668,6 +3182,7 @@ mod tests {
             [0, 0, 64, 64],
             (15, 15),
             0.0,
+            [1.0; 3],
         );
         let moved = out
             .iter()
@@ -2734,7 +3249,7 @@ mod tests {
 
     #[test]
     fn the_empty_hands_transform_is_vanillas_render_player_arm() {
-        for (attack, equip) in [(0.0, 1.0), (0.25, 1.0), (0.5, 0.5), (1.0, 0.0)] {
+        for (attack, equip) in [(0.0, 1.0), (0.25, 1.0), (0.5, 0.5), (0.75, 1.0), (1.0, 0.0)] {
             let mut h = still_hand();
             h.attack = TickPair::fixed(attack);
             h.equip = TickPair::fixed(equip);
@@ -2752,7 +3267,7 @@ mod tests {
         // `applyItemArmTransform` + `swingArm`'s translate + `applyItemArmAttackTransform`, at a
         // quarter of the swing: -0.4 * sin(PI / 2) = -0.4 left and -0.2 * sin(PI / 4) =
         // -0.14142136 forward, plus the swing's rotations.
-        for (attack, equip) in [(0.0, 1.0), (0.25, 1.0), (0.5, 0.4), (1.0, 0.0)] {
+        for (attack, equip) in [(0.0, 1.0), (0.25, 1.0), (0.5, 0.4), (0.75, 1.0), (1.0, 0.0)] {
             let mut h = still_hand();
             h.attack = TickPair::fixed(attack);
             h.equip = TickPair::fixed(equip);
@@ -2781,6 +3296,40 @@ mod tests {
     }
 
     #[test]
+    fn the_swing_is_the_interpolated_attack_value() {
+        // A swing's tick pair lerps into the arm and item transforms at the partial tick
+        // (vanilla interpolates `swingAnimation` the same way before both transforms read it):
+        // mid-tick of a 0 -> 0.5 swing is the 0.25 matrix, not an average of matrices.
+        let mut h = still_hand();
+        h.attack = TickPair {
+            start: 0.0,
+            end: 0.5,
+        };
+        for partial in [0.25f32, 0.5, 0.75] {
+            let mut lerped = still_hand();
+            lerped.attack = TickPair::fixed(h.attack.at(partial));
+            assert!(
+                close(arm_matrix(&h, partial), arm_matrix(&lerped, 0.0), 1e-6),
+                "arm at partial {partial}"
+            );
+            assert!(
+                close(
+                    item_arm_matrix(&h, partial),
+                    item_arm_matrix(&lerped, 0.0),
+                    1e-6
+                ),
+                "item at partial {partial}"
+            );
+        }
+        // The mid-tick matrix is none of the ends' matrices.
+        assert!(!close(
+            arm_matrix(&h, 0.5),
+            arm_matrix(&still_hand(), 0.0),
+            1e-4
+        ));
+    }
+
+    #[test]
     fn a_lowered_equip_progress_drops_the_hand() {
         // `inverseArmHeight = 1 - equip` is inside the outermost translate, so dropping the
         // equip progress from 1 to 0 moves the arm (and the item) down by exactly 0.6 blocks:
@@ -2801,43 +3350,26 @@ mod tests {
     }
 
     #[test]
-    fn the_walk_bob_moves_and_rolls_the_hand() {
-        // `GameRenderer.bobView` over a walk cycle that walked 0.75 blocks this tick (0.6 the
-        // tick before) with the bob amplitude at 0.1. The phase is the backwards interpolated
-        // walk distance: -(walkDist + (walkDist - walkDistO) * partial) = -0.9 at the end of the
-        // tick, so the translation is (sin(-0.9PI) * 0.1 * 0.5, -|cos(-0.9PI) * 0.1|, 0) =
-        // (-0.0154508, -0.0951057, 0), with a 3 deg roll and a 5 deg tilt from the same phase.
+    fn the_walk_bob_is_carried_by_the_prefix_not_the_hand_root() {
+        // Vanilla applies `bobView` to the hand exactly once, on `renderItemInHand`'s pose
+        // stack (`GameRenderer.bobView`, the same stack the world's projection carries); the
+        // hand's own root (`submitHandsWithItems`) has only the view-lag rotations. The
+        // prefix is the renderer's `bob_transform`, so with a bobbing prefix the hand root
+        // must not add, remove or reorder anything: the prefix is all there is.
         let mut h = still_hand();
-        h.walk_dist = TickPair {
-            start: 0.6,
-            end: 0.75,
-        };
-        h.bob = TickPair::fixed(0.1);
-        let pi = std::f32::consts::PI;
-        // The phase is the backwards interpolated walk distance, extrapolated by one tick.
-        let phase = -(0.75 + (0.75 - 0.6) * 1.0);
-        let m = hand_root_matrix(&h, (0.0, 0.0), 1.0);
-        let t = m.transform_point3(Vec3::ZERO);
-        assert!((t.x - -0.015450852).abs() < 1e-6, "{}", t.x);
-        assert!((t.y - -0.09510567).abs() < 1e-6, "{}", t.y);
-        assert_eq!(t.z, 0.0);
-        // The roll (Z) and the tilt (X) are rotations from the same phase, so the hand's up axis
-        // leans by them: sin(-0.9PI) * 0.1 * 3 = -0.0927 deg and |cos(-0.9PI - 0.2) * 0.1| * 5.
-        let rolled = m.transform_vector3(Vec3::Y);
-        let roll_deg = (phase * pi).sin() * 0.1 * 3.0;
-        let tilt_deg = ((phase * pi - 0.2).cos() * 0.1).abs() * 5.0;
-        assert!(
-            (rolled.x + roll_deg.to_radians().sin()).abs() < 1e-6,
-            "{rolled:?} (roll {roll_deg} deg)"
-        );
-        assert!(
-            (rolled.z - tilt_deg.to_radians().sin()).abs() < 1e-6,
-            "{rolled:?}"
-        );
-        // Half a tick later the phase is -0.825, so the hand is somewhere else.
-        let mid = hand_root_matrix(&h, (0.0, 0.0), 0.5).transform_point3(Vec3::ZERO);
-        assert!((mid - t).length() > 0.01, "{mid:?} vs {t:?}");
-        // Standing still: no bob, so no walk bob either.
+        h.x_bob = TickPair::fixed(20.0);
+        let lag = hand_root_matrix(&h, (25.0, 35.0), 0.5);
+        // A pure view-bob prefix (translation only): the composed matrix is the prefix
+        // times the lag rotations, never the translation twice.
+        let prefix = Mat4::from_translation(Vec3::new(0.25, -0.5, 0.0));
+        let m = prefix * lag;
+        assert!(close(
+            m,
+            prefix * hand_root_matrix(&h, (25.0, 35.0), 0.5),
+            1e-7
+        ));
+        assert!((m.transform_point3(Vec3::ZERO) - Vec3::new(0.25, -0.5, 0.0)).length() < 1e-6);
+        // `hand_root_matrix` with nothing animated is the identity: the bob lives outside.
         assert_eq!(
             hand_root_matrix(&still_hand(), (0.0, 0.0), 1.0),
             Mat4::IDENTITY

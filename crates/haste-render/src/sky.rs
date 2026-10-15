@@ -230,9 +230,11 @@ pub struct SkyRenderer {
     device: Arc<wgpu::Device>,
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    /// The environment atlas's view (sun, moons, clouds, rain, snow, end sky), lent to the
+    /// weather pass at startup.
+    atlas_view: wgpu::TextureView,
     background: wgpu::RenderPipeline,
     celestial: wgpu::RenderPipeline,
-    world: wgpu::RenderPipeline,
     clouds: wgpu::RenderPipeline,
     /// The sky disc fan (vanilla `SkyRenderer.renderSkyDisc`).
     disc: wgpu::RenderPipeline,
@@ -247,13 +249,11 @@ pub struct SkyRenderer {
     dynamic: wgpu::Buffer,
     dynamic_capacity: usize,
     vertices: Vec<SkyVertex>,
-    /// Sun + moon vertex count at the start of `vertices`; rain follows.
+    /// Sun + moon vertex count at the start of `vertices`.
     celestial_count: u32,
     rects: AtlasRects,
     pub kind: SkyKind,
     pub colors: SkyColors,
-    /// Rain/snow columns drawn this frame (vertex range in `dynamic`).
-    weather: std::ops::Range<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -262,6 +262,7 @@ struct AtlasRects {
     moon: [[u32; 4]; 8],
     clouds: [u32; 4],
     rain: [u32; 4],
+    snow: [u32; 4],
     end_sky: [u32; 4],
 }
 
@@ -295,14 +296,17 @@ impl SkyRenderer {
             )
         });
         let rain = put("environment/rain", 288, 0);
-        let _snow = put("environment/snow", 352, 0);
-        let end_sky = put("environment/end_sky", 384, 0);
+        let snow = put("environment/snow", 352, 0);
+        // Past the weather tiles (rain 288..352, snow 352..416): the End sky must not
+        // overlap them, or the weather pass samples its purple where snow flakes should be.
+        let end_sky = put("environment/end_sky", 448, 0);
         let clouds = put("environment/clouds", 0, 256);
         let rects = AtlasRects {
             sun,
             moon,
             clouds,
             rain,
+            snow,
             end_sky,
         };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -364,6 +368,7 @@ impl SkyRenderer {
                 },
             ],
         });
+        let atlas_view = texture.create_view(&Default::default());
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("sky-bind"),
             layout: &layout,
@@ -374,9 +379,7 @@ impl SkyRenderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(
-                        &texture.create_view(&Default::default()),
-                    ),
+                    resource: wgpu::BindingResource::TextureView(&atlas_view),
                 },
             ],
         });
@@ -459,14 +462,6 @@ impl SkyRenderer {
             additive,
             false,
         );
-        let world = make(
-            "sky-weather",
-            "vs_world",
-            "fs_world",
-            &[Some(SkyVertex::LAYOUT)],
-            wgpu::BlendState::ALPHA_BLENDING,
-            true,
-        );
         let clouds = make(
             "sky-clouds",
             "vs_clouds",
@@ -525,9 +520,9 @@ impl SkyRenderer {
             device,
             uniforms,
             bind_group,
+            atlas_view,
             background,
             celestial,
-            world,
             clouds,
             disc,
             sunrise,
@@ -550,12 +545,23 @@ impl SkyRenderer {
                     dimension_has_sky: true,
                     fog_start: 0.0,
                     fog_end: 1.0,
+                    ..Default::default()
                 },
                 SkyKind::Overworld,
                 12.0,
             ),
-            weather: 0..0,
         }
+    }
+
+    /// The environment atlas's texture view (shared with the weather pass).
+    pub fn atlas_view(&self) -> &wgpu::TextureView {
+        &self.atlas_view
+    }
+
+    /// The rain and snow rectangles in the environment atlas (x, y, w, h), for the weather
+    /// pass.
+    pub fn weather_rects(&self) -> ([u32; 4], [u32; 4]) {
+        (self.rects.rain, self.rects.snow)
     }
 
     /// Computes this frame's colours and geometry and uploads the uniforms. `fog` is the
@@ -579,8 +585,10 @@ impl SkyRenderer {
         // the exact environment colour; the dome colours keep our sunrise approximation
         // fed with the exact tint and strength).
         let mut colors = colors;
+        // The horizon colour is the exact environment fog colour (all dimensions), so the dome
+        // and the terrain fog agree.
+        colors.fog = fog_color;
         if kind == SkyKind::Overworld {
-            colors.fog = fog_color;
             let glow = crate::fog::sunrise_sunset_color(sky.time_of_day);
             colors.sunrise = [glow[0], glow[1], glow[2], glow[3]];
             colors.sunrise_side = crate::fog::sun_glow_side(sky.time_of_day);
@@ -610,18 +618,6 @@ impl SkyRenderer {
             );
         }
         self.celestial_count = self.vertices.len() as u32;
-        let weather_start = self.vertices.len() as u32;
-        if rain > 0.0 && kind == SkyKind::Overworld {
-            push_rain(
-                &mut self.vertices,
-                cam,
-                sky.time_of_day,
-                rain,
-                colors.brightness,
-                self.rects.rain,
-            );
-        }
-        self.weather = weather_start..self.vertices.len() as u32;
         if self.vertices.len() > self.dynamic_capacity {
             self.dynamic_capacity = self.vertices.len().next_power_of_two();
             self.dynamic = make_buffer(&self.device, self.dynamic_capacity);
@@ -725,7 +721,8 @@ impl SkyRenderer {
         calls
     }
 
-    /// Clouds and weather: last in the main pass, after translucent terrain.
+    /// Clouds: last in the main pass, after translucent terrain (the weather columns follow
+    /// through the weather pass's own draw).
     pub fn draw_overlays<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) -> u32 {
         let mut calls = 0;
         if self.kind != SkyKind::Overworld {
@@ -735,12 +732,6 @@ impl SkyRenderer {
         pass.set_pipeline(&self.clouds);
         pass.draw(0..6, 0..1);
         calls += 1;
-        if !self.weather.is_empty() {
-            pass.set_pipeline(&self.world);
-            pass.set_vertex_buffer(0, self.dynamic.slice(..));
-            pass.draw(self.weather.clone(), 0..1);
-            calls += 1;
-        }
         calls
     }
 }
@@ -885,64 +876,6 @@ fn sunrise_matrix(side: f32, alpha: f32) -> Mat4 {
         * Mat4::from_scale(Vec3::new(1.0, 1.0, alpha.max(0.001)))
 }
 
-/// Rain columns in a radius of 5 blocks around the camera, 15 blocks tall, scrolling down.
-/// Approximate: without the heightmap the columns are not stopped by roofs.
-fn push_rain(
-    out: &mut Vec<SkyVertex>,
-    cam: Vec3,
-    time: i64,
-    rain: f32,
-    brightness: f32,
-    rect: [u32; 4],
-) {
-    let (bx, by, bz) = (cam.x.floor() as i32, cam.y.floor(), cam.z.floor() as i32);
-    let light = srgb_to_linear(brightness * 0.8 + 0.2);
-    let r = rect.map(|v| v as f32);
-    let rect16 = rect.map(|v| v as u16);
-    for dz in -5..=5 {
-        for dx in -5..=5 {
-            let (x, z) = (bx + dx, bz + dz);
-            let dist2 = (dx * dx + dz * dz) as f32;
-            if dist2 > 25.0 {
-                continue;
-            }
-            let hash = ((x.wrapping_mul(3121) + x.wrapping_mul(x).wrapping_mul(45238971))
-                ^ (z.wrapping_mul(418711) + z.wrapping_mul(13761)))
-            .unsigned_abs();
-            let centre = Vec3::new(x as f32 + 0.5, 0.0, z as f32 + 0.5);
-            let to_cam = Vec3::new(cam.x - centre.x, 0.0, cam.z - centre.z);
-            let side = if to_cam.length_squared() < 1e-4 {
-                Vec3::X * 0.5
-            } else {
-                Vec3::new(-to_cam.z, 0.0, to_cam.x).normalize() * 0.5
-            };
-            let (y0, y1) = (by - 5.0, by + 10.0);
-            // One quarter of rain.png per column, scrolling 3 texture rows per tick.
-            let u0 = r[0] + (hash % 4) as f32 * r[2] / 4.0;
-            let u1 = u0 + r[2] / 4.0;
-            let scroll = ((time.rem_euclid(1 << 20) as f32) * 3.0 + (hash % 97) as f32) % r[3];
-            let v0 = r[1] - scroll;
-            let v1 = v0 + (y1 - y0) * r[3] / 8.0;
-            let alpha = rain * (1.0 - dist2.sqrt() / 5.5).clamp(0.0, 1.0);
-            let color = [light, light, light, alpha];
-            let corners = [
-                (centre - side + Vec3::Y * y1, [u0, v0]),
-                (centre - side + Vec3::Y * y0, [u0, v1]),
-                (centre + side + Vec3::Y * y0, [u1, v1]),
-                (centre + side + Vec3::Y * y1, [u1, v0]),
-            ];
-            for i in [0usize, 1, 2, 0, 2, 3] {
-                out.push(SkyVertex {
-                    pos: corners[i].0.to_array(),
-                    uv: corners[i].1,
-                    color,
-                    rect: rect16,
-                });
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -954,6 +887,7 @@ mod tests {
             dimension_has_sky: true,
             fog_start: 0.0,
             fog_end: 192.0,
+            ..Default::default()
         }
     }
 

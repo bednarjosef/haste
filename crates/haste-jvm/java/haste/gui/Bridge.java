@@ -19,7 +19,7 @@ import net.minecraft.client.input.MouseButtonInfo;
  * method runs vanilla screen code with the 26.3 signatures.
  */
 public final class Bridge {
-    public static final int CHAT = 0, PAUSE = 1, INVENTORY = 2, COMMAND = 3, TITLE = 4, OPTIONS = 5, MULTIPLAYER = 6, SELECT_WORLD = 7;
+    public static final int CHAT = 0, PAUSE = 1, INVENTORY = 2, COMMAND = 3, TITLE = 4, OPTIONS = 5, MULTIPLAYER = 6, SELECT_WORLD = 7, PACKS = 8;
 
     private int pressedButton = -1;
     private double lastX, lastY;
@@ -44,6 +44,8 @@ public final class Bridge {
         GfxImpl.height = 240;
         Proxies.create();
         ClientImpl.running = true;
+        // the saved language (options.txt "lang") loads before the first frame, like vanilla's startup reload
+        ClientImpl.getLanguageManager(Proxies.minecraft);
         return new Bridge();
     }
 
@@ -60,6 +62,20 @@ public final class Bridge {
             case INVENTORY -> new InventoryScreen(Proxies.player);
             case TITLE -> new TitleScreen();
             case OPTIONS -> new OptionsScreen(ClientImpl.screen, Proxies.options);
+            case PACKS -> {
+                // the parent this pack screen returns to on Done (vanilla: the OptionsScreen
+                // that opened it; captured before the pack screen becomes the current one)
+                Screen parent = ClientImpl.screen;
+                yield new net.minecraft.client.gui.screens.packs.PackSelectionScreen(
+                    ClientImpl.getResourcePackRepository(Proxies.minecraft),
+                    // OptionsScreen.applyPacks: save the selection, reload, back to the opener
+                    repo -> {
+                        Proxies.options.updateResourcePacks(repo);
+                        Proxies.gui.setScreen(parent);
+                    },
+                    ClientImpl.getResourcePackDirectory(Proxies.minecraft),
+                    net.minecraft.network.chat.Component.translatable("resourcePack.title"));
+            }
             case MULTIPLAYER -> new JoinMultiplayerScreen(new TitleScreen());
             case SELECT_WORLD -> new net.minecraft.client.gui.screens.worldselection.SelectWorldScreen(new TitleScreen());
             default -> throw new IllegalArgumentException("screen kind " + kind);
@@ -163,6 +179,9 @@ public final class Bridge {
         Proxies.set(Proxies.player, "uuid", java.util.UUID.class, uuid);
         Proxies.set(Proxies.player, "stringUUID", String.class, uuid.toString());
         PlayerImpl.profile = new com.mojang.authlib.GameProfile(uuid, name);
+        // Player's own field (its constructor would set it; the proxy's is null without this):
+        // `Player.getName` reads it, e.g. the book's sign screen names the author.
+        Proxies.set(Proxies.player, "gameProfile", com.mojang.authlib.GameProfile.class, PlayerImpl.profile);
     }
 
     /** The joined world's dimension type (its id in the synchronised dimension_type registry). */
@@ -341,9 +360,18 @@ public final class Bridge {
         }
     }
 
+    /** A use opened the command block editor (vanilla `LocalPlayer.openCommandBlock`). */
+    public void openCommandBlock(int x, int y, int z) {
+        Handlers.openCommandBlock(x, y, z);
+    }
+
+    /** A use opened the writable book's editor (vanilla `LocalPlayer.openItemGui`). */
+    public void openItemGui(int hand) {
+        Handlers.openItemGui(hand);
+    }
+
     /** Names of the server's commands the local player may use (the root of the command tree), one per line. */
-    public String commandNames() {
-        var src = ConnectionImpl.getSuggestionsProvider(Proxies.connection);
+    public String commandNames() {        var src = ConnectionImpl.getSuggestionsProvider(Proxies.connection);
         StringBuilder sb = new StringBuilder();
         for (var n : Handlers.commands.getRoot().getChildren()) {
             if (n.canUse(src)) sb.append(n.getName()).append('\n');
