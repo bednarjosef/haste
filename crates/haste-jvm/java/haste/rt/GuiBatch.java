@@ -53,12 +53,14 @@ public final class GuiBatch {
     public static int length() { return len; }
 
     /**
-     * Returns {int[] commands, String[] strings, int[] {cursor}} for this frame and resets the buffer. The cursor
-     * code is the shape the screen asked for (0 default arrow, then CursorTypes' order: 1 arrow, 2 I-beam,
-     * 3 crosshair, 4 pointing hand, 5 resize north-south, 6 resize east-west, 7 resize all, 8 not allowed).
+     * Returns {int[] commands, String[] strings, int[] {cursor, blurAfter}} for this frame and resets the
+     * buffer. The cursor code is the shape the screen asked for (0 default arrow, then CursorTypes' order:
+     * 1 arrow, 2 I-beam, 3 crosshair, 4 pointing hand, 5 resize north-south, 6 resize east-west, 7 resize
+     * all, 8 not allowed). {@code blurAfter} is the command index the open screen's blur goes after
+     * (vanilla: {@code Screen.extractBlurredBackground}), or -1 when no screen asked for one.
      */
-    public static Object[] frame(int cursor) {
-        Object[] r = { Arrays.copyOf(buf, len), Arrays.copyOf(strings, nstrings), new int[] { cursor } };
+    public static Object[] frame(int cursor, int blurAfter) {
+        Object[] r = { Arrays.copyOf(buf, len), Arrays.copyOf(strings, nstrings), new int[] { cursor, blurAfter } };
         reset();
         return r;
     }

@@ -4031,6 +4031,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             renderer.prepare_particles(&mut particles, &*world, camera, partial);
         }
         renderer.set_lightmap_frame(lightmap);
+        renderer.set_menu_blur_radius(options.menu_background_blurriness);
         if let Ok(stats) = renderer.render(&frame) {
             last_stats = stats;
             fps.frame(&stats);
@@ -5282,6 +5283,7 @@ impl App {
         }
         renderer.set_animation_tick(animation_tick);
         renderer.set_lightmap_frame(lightmap);
+        renderer.set_menu_blur_radius(self.options.menu_background_blurriness);
         if self.screenshot {
             self.screenshot = false;
             renderer.request_capture();

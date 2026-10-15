@@ -150,7 +150,7 @@ public final class Bridge {
             Proxies.hud.extractDebugOverlay(Proxies.graphics);
         }
         GfxImpl.end();
-        return GuiBatch.frame(GfxImpl.cursor);
+        return GuiBatch.frame(GfxImpl.cursor, GfxImpl.blurAfter);
     }
 
     /** One 20 Hz client tick: the HUD (chat fade, titles, overlay message), the chat queue and the open screen. */

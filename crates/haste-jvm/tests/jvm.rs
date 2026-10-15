@@ -547,6 +547,33 @@ fn pause_screen() {
 
 #[test]
 #[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn pause_screen_marks_the_blur() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    reset(h.gui());
+    // The pause screen blurs the world behind it (vanilla: PauseScreen.extractBackground ->
+    // extractBlurredBackground -> blurBeforeThisStratum); the marker lands between the HUD's
+    // commands and the screen's own.
+    open(&h, haste_jvm::ScreenKind::Pause);
+    let f = render(&h, (0.0, 0.0));
+    assert!(
+        f.blur_after >= 0 && (f.blur_after as usize) < f.commands.len(),
+        "pause screen should mark the blur: blur_after {} of {} commands",
+        f.blur_after,
+        f.commands.len()
+    );
+    // The chat screen draws no blurred background (vanilla: ChatScreen.extractBackground is
+    // empty), and neither does the HUD-only frame with no screen open.
+    h.gui().close_screen();
+    let f = render(&h, (0.0, 0.0));
+    assert_eq!(f.blur_after, -1, "no screen: no blur");
+    open(&h, haste_jvm::ScreenKind::Chat);
+    let f = render(&h, (0.0, 0.0));
+    assert_eq!(f.blur_after, -1, "chat screen must not blur");
+}
+
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
 fn title_screen() {
     let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
     let h = host();

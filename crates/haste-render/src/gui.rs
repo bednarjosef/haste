@@ -799,12 +799,42 @@ impl GuiRenderer {
         target: (u32, u32),
         assets: &mut Assets,
     ) {
-        self.stats = GuiStats::default();
+        self.prepare_range(
+            frame,
+            entities,
+            nametags,
+            target,
+            assets,
+            0,
+            frame.commands.len(),
+            true,
+        );
+    }
+
+    /// [`Self::prepare`] over `commands[from..to]`, either resetting the buffers or appending
+    /// to what an earlier call this frame built (the screen's blurred background splits the GUI
+    /// in two: the part before the blur marker draws, the blur runs, then this appends the
+    /// rest). Name tags belong to the first (before-blur) part only.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_range(
+        &mut self,
+        frame: &GuiFrame,
+        entities: &[haste_core::model::EntityInstance],
+        nametags: &[ScreenNametag],
+        target: (u32, u32),
+        assets: &mut Assets,
+        from: usize,
+        to: usize,
+        reset: bool,
+    ) {
+        if reset {
+            self.stats = GuiStats::default();
+        }
         if self.entries[0].rect.is_none() {
             self.resident(0);
         }
         for attempt in 0..2 {
-            self.build(frame, entities, nametags, target, assets);
+            self.build(frame, entities, nametags, target, assets, from, to, reset);
             if !self.atlas_full {
                 break;
             }
@@ -854,6 +884,7 @@ impl GuiRenderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build(
         &mut self,
         frame: &GuiFrame,
@@ -861,33 +892,40 @@ impl GuiRenderer {
         nametags: &[ScreenNametag],
         target: (u32, u32),
         assets: &mut Assets,
+        from: usize,
+        to: usize,
+        reset: bool,
     ) {
-        self.vertices.clear();
-        self.batches.clear();
+        if reset {
+            self.vertices.clear();
+            self.batches.clear();
+        }
         // Name tags first, under the HUD, following `SubmitNodeCollection.submitNameTag`: a
         // black background box at `Options.textBackgroundOpacity` (0.25) and text at
         // `max((bg + 0.75) * 0.5, 0.5)` alpha. When not crouching (`see_through`) the opaque
         // solid pass is drawn on top; crouching keeps only the dimmer see-through pass, so a
         // sneaking player's tag is darker (`EntityRenderer.submitNameDisplay`).
-        for tag in nametags {
-            let start = self.vertices.len();
-            let bg: [u8; 4] = [0, 0, 0, 64];
-            let text_alpha = 0x80FF_FFFFu32;
-            // The see-through line: background + semi-transparent text.
-            self.nametag_line([0.0; 2], 0.0, &tag.text, text_alpha, bg, assets);
-            if tag.see_through {
-                self.nametag_line([0.0; 2], 0.0, &tag.text, 0xFFFF_FFFF, [0, 0, 0, 0], assets);
-            }
-            // The scoreboard below-name line, one text line (`9 * 1.15`) under the name.
-            if let Some(bn) = &tag.below_name {
-                let oy = 9.0 * 1.15;
-                self.nametag_line([0.0; 2], oy, bn, text_alpha, bg, assets);
+        if reset {
+            for tag in nametags {
+                let start = self.vertices.len();
+                let bg: [u8; 4] = [0, 0, 0, 64];
+                let text_alpha = 0x80FF_FFFFu32;
+                // The see-through line: background + semi-transparent text.
+                self.nametag_line([0.0; 2], 0.0, &tag.text, text_alpha, bg, assets);
                 if tag.see_through {
-                    self.nametag_line([0.0; 2], oy, bn, 0xFFFF_FFFF, [0, 0, 0, 0], assets);
+                    self.nametag_line([0.0; 2], 0.0, &tag.text, 0xFFFF_FFFF, [0, 0, 0, 0], assets);
                 }
-            }
-            for v in &mut self.vertices[start..] {
-                v.pos = [tag.x + v.pos[0] * tag.scale, tag.y + v.pos[1] * tag.scale];
+                // The scoreboard below-name line, one text line (`9 * 1.15`) under the name.
+                if let Some(bn) = &tag.below_name {
+                    let oy = 9.0 * 1.15;
+                    self.nametag_line([0.0; 2], oy, bn, text_alpha, bg, assets);
+                    if tag.see_through {
+                        self.nametag_line([0.0; 2], oy, bn, 0xFFFF_FFFF, [0, 0, 0, 0], assets);
+                    }
+                }
+                for v in &mut self.vertices[start..] {
+                    v.pos = [tag.x + v.pos[0] * tag.scale, tag.y + v.pos[1] * tag.scale];
+                }
             }
         }
         let scale = frame.scale.max(1) as f32;
@@ -896,8 +934,8 @@ impl GuiRenderer {
         let mut scissors: Vec<[f32; 4]> = Vec::new();
         let mut scissor: Option<[u32; 4]> = None;
         let mut blend = GuiBlend::Normal;
-        let mut batch_start = 0u32;
-        for cmd in &frame.commands {
+        let mut batch_start = self.vertices.len() as u32;
+        for cmd in &frame.commands[from.min(frame.commands.len())..to.min(frame.commands.len())] {
             match cmd {
                 GuiCommand::Fill {
                     x1,

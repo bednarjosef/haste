@@ -170,6 +170,9 @@ pub struct Options {
     /// Vanilla's "Darkness Pulsing" accessibility option, 0.0..=1.0 (default 1.0). Scales the
     /// darkness effect in the lightmap (`LightmapRenderState.darknessEffectScale`).
     pub darkness_effect_scale: f32,
+    /// Vanilla's "Menu Background Blurriness" accessibility option, 0..=10 (default 5). The
+    /// box-blur radius the open screen's blurred background uses (`Options.menuBackgroundBlurriness`).
+    pub menu_background_blurriness: u8,
     /// 260 means "unlimited", as in vanilla's framerate limit.
     pub max_fps: u32,
     pub sound: SoundVolumes,
@@ -191,6 +194,7 @@ impl Default for Options {
             damage_tilt_strength: 1.0,
             gamma: 0.5,
             darkness_effect_scale: 1.0,
+            menu_background_blurriness: 5,
             max_fps: 120,
             sound: SoundVolumes::default(),
             keys: Keybinds::default(),
@@ -212,6 +216,7 @@ impl Options {
         self.damage_tilt_strength = self.damage_tilt_strength.clamp(0.0, 1.0);
         self.gamma = self.gamma.clamp(0.0, 1.0);
         self.darkness_effect_scale = self.darkness_effect_scale.clamp(0.0, 1.0);
+        self.menu_background_blurriness = self.menu_background_blurriness.min(10);
         self.max_fps = self.max_fps.clamp(10, 260);
         self.sound.clamped();
         for (action, key) in &Keybinds::vanilla().bindings {
@@ -305,6 +310,13 @@ impl Options {
             "darknessEffectScale" => {
                 if let Ok(v) = value.parse::<f32>() {
                     self.darkness_effect_scale = v * v;
+                }
+                true
+            }
+            // An IntRange(0, 10) in vanilla; the blur's box-blur radius.
+            "menuBackgroundBlurriness" => {
+                if let Ok(v) = value.parse::<u8>() {
+                    self.menu_background_blurriness = v;
                 }
                 true
             }
@@ -406,6 +418,7 @@ mod tests {
         assert_eq!(opts.damage_tilt_strength, 1.0);
         assert_eq!(opts.gamma, 0.5);
         assert_eq!(opts.darkness_effect_scale, 1.0);
+        assert_eq!(opts.menu_background_blurriness, 5);
     }
 
     #[test]
@@ -451,6 +464,21 @@ mod tests {
     }
 
     #[test]
+    fn menu_blurriness_option_maps_vanilla_radius() {
+        // The blur's radius is the option as-is (default 5, IntRange 0..=10); the blur chain
+        // only runs from 1 up (Screen.extractBlurredBackground).
+        let opts = Options::import_vanilla("menuBackgroundBlurriness:8\n");
+        assert_eq!(opts.menu_background_blurriness, 8);
+        // Out-of-range values clamp into the vanilla range on load.
+        let opts = Options {
+            menu_background_blurriness: 11,
+            ..Options::default()
+        }
+        .sanitized();
+        assert_eq!(opts.menu_background_blurriness, 10);
+    }
+
+    #[test]
     fn roundtrips_through_toml() {
         let opts = Options {
             render_distance: 20,
@@ -465,6 +493,7 @@ mod tests {
             damage_tilt_strength: 0.75,
             gamma: 0.25,
             darkness_effect_scale: 0.5,
+            menu_background_blurriness: 7,
             max_fps: 60,
             sound: SoundVolumes {
                 master: 0.8,

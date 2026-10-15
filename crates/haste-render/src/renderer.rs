@@ -511,6 +511,12 @@ pub struct Renderer {
     size: (u32, u32),
     /// GUI batch drawing (`FrameInput::gui`) and its own handle on the assets for lazy loads.
     gui: crate::gui::GuiRenderer,
+    /// The menu background blur (vanilla: the `blur` post chain), when a screen asks for it.
+    blur: crate::blur::MenuBlur,
+    /// Vanilla `Options.menuBackgroundBlurriness` (the blur radius; 0 = off).
+    menu_blur_radius: u32,
+    /// The blur-unavailable warning (a surface without COPY_SRC) logged once.
+    blur_unavailable_logged: bool,
     assets: haste_assets::Assets,
     /// Entity cube models (`FrameInput::entities`).
     entity: crate::entity::EntityRenderer,
@@ -1000,6 +1006,15 @@ impl Renderer {
         let mut gui_assets = assets.reopen()?;
         gui.preload_sprites(&mut gui_assets, crate::gui::HUD_SPRITES);
 
+        // The menu background blur: its two internal textures use the non-sRGB view of the
+        // target format (vanilla blurs the stored sRGB bytes of its RGBA8_UNORM target);
+        // the frame's colour is copied in, so no bind group on the target itself.
+        let blur = crate::blur::MenuBlur::new(
+            &gpu.device,
+            Self::gui_format_for(&gpu, surface_format),
+            size,
+        );
+
         let section_vis = Arc::new(Mutex::new(ahash::AHashMap::new()));
         let walk = crate::occlusion::AsyncOcclusionWalker::new(section_vis.clone())?;
 
@@ -1054,6 +1069,9 @@ impl Renderer {
             depth: None,
             size,
             gui,
+            blur,
+            menu_blur_radius: 5,
+            blur_unavailable_logged: false,
             assets: gui_assets,
             entity,
             sky,
@@ -1161,6 +1179,12 @@ impl Renderer {
     /// overlay darkening, lightning flash), set by the client before `render`.
     pub fn set_lightmap_frame(&mut self, frame: LightmapFrame) {
         self.lightmap_frame = frame;
+    }
+
+    /// Vanilla `Options.menuBackgroundBlurriness`: the box-blur radius of an open screen's
+    /// blurred background (0 = off, 10 = maximum; vanilla default 5).
+    pub fn set_menu_blur_radius(&mut self, radius: u8) {
+        self.menu_blur_radius = crate::blur::blur_radius(radius);
     }
 
     /// Uploads the particle atlas of `types` as the particle texture (call after
@@ -1491,6 +1515,11 @@ impl Renderer {
         } else {
             self.configure_surface();
         }
+        self.blur.resize(
+            &self.gpu.device,
+            Self::gui_format_for(&self.gpu, self.surface_format),
+            self.size,
+        );
     }
 
     /// The biome table of the joined server (synced `minecraft:worldgen/biome` registry, index =
@@ -2427,34 +2456,113 @@ impl Renderer {
             draw_calls += self.entity.draw_hand(&mut pass);
         }
 
-        // GUI on top, in its own pass over the non-sRGB view (no depth).
+        // GUI on top, in its own pass over the non-sRGB view (no depth). When the open screen
+        // asks for a blurred background (vanilla: Screen.extractBlurredBackground marking the
+        // strata split), the commands before the marker draw, the blur post chain runs over
+        // the target (GameRenderer.processBlurEffect), then the rest draws over the result.
         if !frame.gui.commands.is_empty() || !self.nametags.is_empty() {
-            self.gui.prepare(
+            let blur_after = frame.gui.blur_after as usize;
+            let blur = frame.gui.blur_after >= 0
+                && blur_after < frame.gui.commands.len()
+                && self.menu_blur_radius > 0;
+            let split = if blur {
+                blur_after
+            } else {
+                frame.gui.commands.len()
+            };
+            self.gui.prepare_range(
                 frame.gui,
                 frame.entities,
                 &self.nametags,
                 self.size,
                 &mut self.assets,
+                0,
+                split,
+                true,
             );
             ran[2] = true;
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("gui"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &gui_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: self.timer.as_ref().and_then(|t| t.writes(2)),
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            self.gui.draw(&mut pass, self.size);
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("gui"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &gui_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: self.timer.as_ref().and_then(|t| t.writes(2)),
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                self.gui.draw(&mut pass, self.size);
+            }
             draw_calls += self.gui.stats.draw_calls;
+            if blur {
+                // The blur's input is the frame's colour target itself: copy it in (the
+                // surface's texture, or the offscreen/capture target), run the chain, the
+                // last pass lands back in the target the rest of the GUI draws over.
+                let copy_src = match (&held_surface_texture, &capture_color, &self.offscreen) {
+                    (Some(tex), _, _) => Some(tex.texture.as_image_copy()),
+                    (None, Some(color), _) => Some(color.as_image_copy()),
+                    (None, None, Some(off)) => Some(off.color.as_image_copy()),
+                    (None, None, None) => None,
+                };
+                // A windowed surface without COPY_SRC cannot feed the blur; leave the world
+                // sharp rather than dropping the screen (logged once). Vulkan has COPY_SRC.
+                let can_blur = copy_src.is_some()
+                    && (self.offscreen.is_some() || capture_color.is_some() || self.surface_copy);
+                if can_blur {
+                    let copy_src = copy_src.unwrap();
+                    self.blur.resize(
+                        &self.gpu.device,
+                        Self::gui_format_for(&self.gpu, self.surface_format),
+                        self.size,
+                    );
+                    self.blur.run(
+                        &mut encoder,
+                        &self.gpu.queue,
+                        self.menu_blur_radius,
+                        &gui_view,
+                        copy_src,
+                    );
+                    // The rest of the frame's commands, over the blurred target.
+                    self.gui.prepare_range(
+                        frame.gui,
+                        frame.entities,
+                        &self.nametags,
+                        self.size,
+                        &mut self.assets,
+                        blur_after,
+                        frame.gui.commands.len(),
+                        false,
+                    );
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("gui-after-blur"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &gui_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                            depth_slice: None,
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    self.gui.draw(&mut pass, self.size);
+                    draw_calls += self.gui.stats.draw_calls;
+                } else if !self.blur_unavailable_logged {
+                    self.blur_unavailable_logged = true;
+                    tracing::warn!("surface cannot be copied: menu background blur unavailable");
+                }
+            }
         }
 
         // Animated atlas textures: the animation worker writes each tick's
