@@ -36,6 +36,10 @@ use crate::player::{LocalPlayer, VehiclePose};
 
 /// Hurt-tilt camera roll duration in ticks (vanilla's `hurtTime` runs to 10).
 pub const HURT_TILT_TICKS: u32 = 10;
+/// The head equipment slot of `set_equipment` (`EquipmentSlot.values()`: 0 main hand, 1 off
+/// hand, 2 boots, 3 leggings, 4 chestplate, 5 helmet, 6 body, 7 saddle). The item worn there
+/// can hide the screen behind a camera overlay (the carved pumpkin's blur).
+pub const HEAD_SLOT: u8 = 5;
 
 /// What the driver needs from the world (`haste_world::World`).
 pub trait WorldSink {
@@ -397,6 +401,19 @@ pub fn synced_biome_count(regs: &SyncedRegistries) -> Option<usize> {
         .map(|e| e.len())
 }
 
+/// Registry id of `minecraft:overworld` in `minecraft:world_clock` (the day clock; the End
+/// has `minecraft:the_end`). 0 (the overworld clock, first registered) when the server sent
+/// no such registry.
+pub fn overworld_clock_id(regs: &SyncedRegistries) -> i32 {
+    regs.entries(&Identifier::minecraft("world_clock"))
+        .and_then(|entries| {
+            entries
+                .iter()
+                .position(|e| e.id == Identifier::minecraft("overworld"))
+        })
+        .map_or(0, |i| i as i32)
+}
+
 /// Per-connection counters for the HUD/headless printout.
 #[derive(Clone, Debug, Default)]
 pub struct NetCounters {
@@ -468,11 +485,14 @@ pub struct LightmapState {
     pub darkness: Option<i32>,
     /// `MobEffectInstance.BlendState` for the darkness effect (22 ticks in and out).
     pub darkness_blend: haste_render::lightmap::BlendState,
-    /// Boss bars and their darken-screen flag (`BossEvent.darkenScreen`), keyed by uuid bits.
-    boss_bars: HashMap<u128, bool>,
+    /// Boss bars and their `(darkenScreen, createWorldFog)` flags (`BossEvent`), keyed by uuid
+    /// bits.
+    boss_bars: HashMap<u128, (bool, bool)>,
     /// `GameRenderer.bossOverlayWorldDarkening` and its value one tick ago.
     pub boss_darkening: f32,
     pub boss_darkening_o: f32,
+    /// `BossHealthOverlay.shouldCreateWorldFog()`: any bar asks for the thick boss fog.
+    pub boss_world_fog: bool,
     /// `ClientLevel.skyFlashTime`: a lightning strike raises the sky for 2 ticks.
     pub sky_flash_time: i32,
     /// The player's tick count (vanilla `LivingEntity.tickCount`), for the darkness pulse.
@@ -492,6 +512,7 @@ impl Default for LightmapState {
             boss_bars: HashMap::new(),
             boss_darkening: 0.0,
             boss_darkening_o: 0.0,
+            boss_world_fog: false,
             sky_flash_time: 0,
             tick_count: 0,
         }
@@ -540,11 +561,13 @@ impl LightmapState {
         // GameRenderer.tick: while any boss bar asks to darken the screen, rise by 0.05/tick
         // (capped at 1), else fall by 0.0125/tick.
         self.boss_darkening_o = self.boss_darkening;
-        if self.boss_bars.values().any(|&darken| darken) {
+        if self.boss_bars.values().any(|(darken, _)| *darken) {
             self.boss_darkening = (self.boss_darkening + 0.05).min(1.0);
         } else if self.boss_darkening > 0.0 {
             self.boss_darkening -= 0.0125;
         }
+        // `BossHealthOverlay.shouldCreateWorldFog`: any bar asks for the thick world fog.
+        self.boss_world_fog = self.boss_bars.values().any(|(_, fog)| *fog);
         if self.sky_flash_time > 0 {
             self.sky_flash_time -= 1;
         }
@@ -576,18 +599,20 @@ impl LightmapState {
         }
     }
 
-    /// A `boss_event`: `BossEvent.setDarkenScreen` (flags bit 0x01 on add/update flags).
+    /// A `boss_event`: `BossEvent` flags (bit 0x01 darkenScreen, bit 0x04 createWorldFog) on
+    /// add/update flags.
     fn boss_event(&mut self, id: u128, action: &cb::BossEventAction) {
+        let flags = |f: u8| (f & 0x01 != 0, f & 0x04 != 0);
         match action {
-            cb::BossEventAction::Add { flags, .. } => {
-                self.boss_bars.insert(id, flags & 0x01 != 0);
+            cb::BossEventAction::Add { flags: f, .. } => {
+                self.boss_bars.insert(id, flags(*f));
             }
             cb::BossEventAction::Remove => {
                 self.boss_bars.remove(&id);
             }
-            cb::BossEventAction::UpdateFlags(flags) => {
-                if let Some(darken) = self.boss_bars.get_mut(&id) {
-                    *darken = flags & 0x01 != 0;
+            cb::BossEventAction::UpdateFlags(f) => {
+                if let Some(entry) = self.boss_bars.get_mut(&id) {
+                    *entry = flags(*f);
                 }
             }
             _ => {}
@@ -630,9 +655,12 @@ pub struct Session {
     /// The firework rocket currently attached to us: vanilla `FireworkRocketEntity.tick` pushes a
     /// fall-flying player it is attached to every tick (see [`Session::end_tick`]).
     attached_firework: Option<EntityId>,
-    /// Time of day in ticks from the first world clock of the last `set_time` (approximate:
-    /// that the first clock is the day clock is not verified).
+    /// Time of day in ticks from the overworld clock of the last `set_time` (`clocks` arrives
+    /// in HashMap order, so the overworld clock is looked up by registry id).
     pub time_of_day: Option<i64>,
+    /// World age in ticks (`set_time`'s `world_age`), for animations keyed to game time
+    /// (vanilla `Level.getGameTime`, e.g. `BannerRenderer`'s wave phase).
+    pub world_age: i64,
     /// Set by `start_configuration` or `transfer`: the next `login` starts a new world.
     pub new_world_pending: bool,
     /// `minecraft:entity_type` registry entries in id order (the synced registry's when the
@@ -644,6 +672,13 @@ pub struct Session {
     /// nobody drains them (headless). Reused, so a tick without sound packets allocates
     /// nothing.
     pub sound_requests: Vec<crate::sound::SoundRequest>,
+    /// The portal and spinning screen effects (`LocalPlayer.portalEffectIntensity`, the
+    /// spinning effect time and speed), ticked in `end_tick`.
+    pub screen: crate::screen_effects::PortalEffects,
+    /// This tick's world probe for the screen effects: the block the camera is inside, the
+    /// portal under our feet and the eye position's light (vanilla's
+    /// `LevelExtractor.getViewBlockingState` and `NetherPortalBlock.entityInside`).
+    pub screen_probe: crate::screen_effects::WorldProbe,
     /// The `fovEffectScale` option this run uses (set by the window from its saved options;
     /// the headless path leaves the vanilla default).
     pub fov_effect_scale: f32,
@@ -700,9 +735,12 @@ impl Session {
             fireworks: HashSet::new(),
             attached_firework: None,
             time_of_day: None,
+            world_age: 0,
             new_world_pending: false,
             entity_type_names: Vec::new(),
             sound_requests: Vec::new(),
+            screen: crate::screen_effects::PortalEffects::default(),
+            screen_probe: crate::screen_effects::WorldProbe::default(),
             fov_effect_scale: 1.0,
             fov_modifier: 0.0,
             old_fov_modifier: 0.0,
@@ -1161,6 +1199,9 @@ impl Session {
             // Entity status 4 is the melee attack animation (IronGolem.handleEntityEvent).
             P::EntityEvent(e) if e.status == 4 => entities.mark_attack(EntityId(e.entity_id)),
             P::SetEntityData(d) => {
+                // Our own entity's data is handled by the player (`LocalPlayer::handle`: the air
+                // supply and the screen effects' on-fire and freeze ticks), and `_ if
+                // player_packet` above already swallowed it; only others go to the store.
                 if EntityId(d.entity_id) != own {
                     let id = EntityId(d.entity_id);
                     entities.set_metadata(id, &d.metadata);
@@ -1179,13 +1220,27 @@ impl Session {
             }
             P::SetEquipment(e) => {
                 for (slot, item) in e.equipment {
+                    if EntityId(e.entity_id) == own && slot == HEAD_SLOT {
+                        // Our own head slot, if the server sends it this way (vanilla sends our
+                        // own armor through `container_set_slot`): the worn item's camera
+                        // overlay reads it.
+                        self.player.int.armor[0] = item.clone();
+                    }
                     entities.set_equipment(EntityId(e.entity_id), slot, item);
                 }
             }
             P::PlayerInfoUpdate(u) => entities.player_info(&u.infos()),
             P::SetTime(t) => {
                 entities.set_world_age(t.world_age);
-                if let Some(c) = t.clocks.first() {
+                self.world_age = t.world_age;
+                // The day clock is `minecraft:overworld` of `minecraft:world_clock` (the
+                // End has its own); `clocks` comes in HashMap order, so look the id up.
+                if let Some(c) = t
+                    .clocks
+                    .iter()
+                    .find(|c| c.clock == overworld_clock_id(regs))
+                    .or_else(|| t.clocks.first())
+                {
                     self.time_of_day = Some(c.time);
                 }
             }
@@ -1292,6 +1347,27 @@ impl Session {
         for lid in self.lids.values_mut() {
             lid.tick();
         }
+        // The screen effects' tick, in vanilla's `LocalPlayer.tick` order: the portal
+        // transition effect (`portalProcess.isInsidePortalThisTick`, set by the game thread's
+        // world probe through [`Session::screen`]) and the spinning effect, which read the
+        // nausea blend factor at the end of the tick.
+        let nausea = self.player.int.nausea_factor(1.0);
+        self.screen.tick(true, nausea);
+    }
+
+    /// The item worn on the head (the helmet armor slot), if any.
+    pub fn head_item(&self) -> Option<haste_core::RegistryIndex> {
+        self.player.int.armor[0].item
+    }
+
+    /// Our own entity's screen-effect bits (on fire, freeze ticks), parsed by `LocalPlayer`.
+    pub fn own_flags(&self) -> &crate::screen_effects::OwnFlags {
+        &self.player.own_flags
+    }
+
+    /// The portal and spinning screen effects, ticked in `end_tick`.
+    pub fn screen_effects(&self) -> &crate::screen_effects::PortalEffects {
+        &self.screen
     }
 
     /// Break cracks to draw: other players' (`block_destruction`) and our own.

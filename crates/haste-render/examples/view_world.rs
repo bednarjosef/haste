@@ -179,11 +179,13 @@ impl App {
                 dimension_has_sky: true,
                 fog_start: 100.0,
                 fog_end: (self.distance as f32) * 16.0,
+                ..Default::default()
             },
             partial_tick: 0.0,
             block_target: None,
             breaking: &[],
             camera_entity: None,
+            spin: None,
         };
         let stats = renderer.render(&frame).expect("render");
         let dt = self.last_frame.elapsed().as_secs_f32() * 1000.0;

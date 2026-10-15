@@ -196,8 +196,9 @@ pub fn end() -> LightmapInputs {
 pub fn overworld_sky_factor(time_of_day: i64) -> f32 {
     let t = time_of_day.rem_euclid(24000) as f32;
     if t < 730.0 {
-        // Wrap segment: alpha over (-11140, 730).
-        0.24 + 0.76 * ((t + 11140.0) / 11870.0)
+        // Wrap segment (KeyframeTrackSampler.bakeSegments): from the last keyframe one
+        // period earlier (22860 - 24000 = -1140) to the first (730), span 1870.
+        0.24 + 0.76 * ((t + 1140.0) / 1870.0)
     } else if t < 11270.0 {
         1.0
     } else if t < 13140.0 {
@@ -565,8 +566,10 @@ mod tests {
 
     #[test]
     fn overworld_sky_factor_follows_the_timeline() {
-        // Keyframe values and the wrap segment's long dawn ramp (see the function doc).
-        assert!((overworld_sky_factor(0) - (0.24 + 0.76 * 11140.0 / 11870.0)).abs() < 1e-4);
+        // Keyframe values, plus the wrap segment: the sampler's first segment runs from
+        // the last keyframe shifted one period back (22860 - 24000 = -1140) to the first
+        // (730), so the pre-dawn ramp is as short as the post-dusk one (span 1870).
+        assert!((overworld_sky_factor(0) - (0.24 + 0.76 * 1140.0 / 1870.0)).abs() < 1e-4);
         assert!((overworld_sky_factor(730) - 1.0).abs() < 1e-4);
         assert!((overworld_sky_factor(6000) - 1.0).abs() < 1e-4);
         assert!((overworld_sky_factor(11270) - 1.0).abs() < 1e-4);
@@ -576,6 +579,8 @@ mod tests {
         // Halfway up the dawn ramp after 22860: 0.24 + 0.38 = 0.62.
         assert!((overworld_sky_factor(23795) - 0.62).abs() < 1e-4);
         assert!((overworld_sky_factor(23999) - (0.24 + 0.76 * 1139.0 / 1870.0)).abs() < 1e-4);
+        // The wrap is continuous: tick 0 and tick 24000 are the same point.
+        assert!((overworld_sky_factor(0) - overworld_sky_factor(24000)).abs() < 1e-6);
         // Wraps: 24000 + 6000 is noon again.
         assert!((overworld_sky_factor(30000) - 1.0).abs() < 1e-4);
     }

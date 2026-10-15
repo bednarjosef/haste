@@ -1797,6 +1797,35 @@ fn baby_flag_and_baby_layers() {
     ));
 }
 
+/// The shadow radii are the values the 26.3 renderer constructors pass (a sample across the
+/// families), and a table-covered living type not named falls back to the usual 0.5.
+#[test]
+fn shadow_radius_table_matches_vanilla() {
+    use crate::registry::{shadow_radius_for_name, shadow_strength_for_name};
+    assert_eq!(shadow_radius_for_name("minecraft:pig"), 0.7);
+    assert_eq!(shadow_radius_for_name("minecraft:cow"), 0.7);
+    assert_eq!(shadow_radius_for_name("minecraft:zombie"), 0.5);
+    assert_eq!(shadow_radius_for_name("minecraft:creeper"), 0.5);
+    assert_eq!(shadow_radius_for_name("minecraft:item"), 0.15);
+    assert_eq!(shadow_radius_for_name("minecraft:experience_orb"), 0.15);
+    assert_eq!(shadow_radius_for_name("minecraft:armor_stand"), 0.0);
+    assert_eq!(shadow_radius_for_name("minecraft:ghast"), 1.5);
+    assert_eq!(shadow_radius_for_name("minecraft:bat"), 0.25);
+    // An unknown / non-rendered type casts no shadow.
+    assert_eq!(shadow_radius_for_name("minecraft:not_a_mob"), 0.0);
+    assert_eq!(shadow_strength_for_name("minecraft:item"), 0.75);
+    assert_eq!(shadow_strength_for_name("minecraft:pig"), 1.0);
+    // The name tag anchor: the bb height, or the sniffer's 2.05 override.
+    assert_eq!(
+        crate::registry::name_tag_offset_for_name("minecraft:pig", 0.9),
+        0.9
+    );
+    assert_eq!(
+        crate::registry::name_tag_offset_for_name("minecraft:sniffer", 1.75),
+        2.05
+    );
+}
+
 /// Baby layers come from the recorder's model dump, which CI does not have.
 #[test]
 #[ignore = "needs cache/oracle/26.3/entity_models.json"]
@@ -1950,4 +1979,40 @@ fn render_instances_picks_up_variant_models() {
     let mut out = Vec::new();
     s.render_instances(0.5, &mut out);
     assert_eq!(out[0].model.texture.path(), "entity/pig/pig_temperate");
+}
+
+/// A sheep keeps its sheep model with wool metadata set: the wool byte sits at metadata 18,
+/// the same slot a shulker's colour byte occupies, so the shulker texture swap must be
+/// gated on the entity type (regression: a red-wool sheep used to come out as a red
+/// shulker). Needs registries.json + the dump.
+#[test]
+#[ignore = "needs cache/oracle/26.3 (registries.json + model dump; HASTE_CACHE overrides)"]
+fn sheep_with_wool_metadata_is_not_a_shulker() {
+    let Some(names) = crate::registry::entity_type_names() else {
+        eprintln!("skipped: no registries.json in the cache");
+        return;
+    };
+    let Some((kind, _)) = names.iter().find(|(_, n)| n.as_str() == "minecraft:sheep") else {
+        eprintln!("skipped: minecraft:sheep not in the registry");
+        return;
+    };
+    let mut s = store();
+    let mut sp = spawn(1, DVec3::ZERO);
+    sp.kind = *kind;
+    s.spawn(&sp);
+    // Red wool, exactly the byte that is a red shulker's colour.
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: crate::variants::metadata_index::SHEEP_WOOL,
+            value: MetadataValue::Byte(14),
+        }],
+    );
+    let mut out = Vec::new();
+    s.render_instances(0.5, &mut out);
+    assert_eq!(out[0].model.texture.path(), "entity/sheep/sheep");
+    // The wool overlay is there, tinted red.
+    let wool = out[0].overlays[0].as_ref().expect("wool overlay");
+    assert_eq!(wool.model.texture.path(), "entity/sheep/sheep_wool");
+    assert_eq!(wool.tint, crate::variants::dye_tint(14));
 }

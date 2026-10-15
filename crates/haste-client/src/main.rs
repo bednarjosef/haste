@@ -3,6 +3,9 @@
 //! - `net`     (protocol): connection task, packet -> world/entity/player calls, outgoing packets.
 //! - `app`     (renderer): window, render loop, frame timing.
 //! - `player`  (physics): input sampling, physics tick, movement packets.
+//! - `screen_effects`: the overlays vanilla's `ScreenEffectRenderer` and `Hud` draw over the
+//!   world (water, fire, in-wall, pumpkin, powder snow, spyglass, portal, nausea), driven by
+//!   the real state.
 //! - `ui`      (jvm-host): HUD + tier-3 screens through the batched GUI pipeline.
 //! - `launch`  (setup): CLI args, config, setup checks, singleplayer server lifecycle.
 //! - `headless`: join milestone mode, no window: joins, tracks world/entities, prints stats.
@@ -18,6 +21,7 @@ mod headless;
 mod launch;
 mod net;
 mod player;
+mod screen_effects;
 mod screenshots;
 mod script;
 mod sound;
@@ -49,6 +53,10 @@ pub struct Args {
     /// (`--seconds` bounds the wait).
     #[arg(long)]
     pub screenshot: Option<std::path::PathBuf>,
+    /// The HUD, hand and block outline (vanilla's F1, `Hud.toggle`): `off` hides them for
+    /// this run — the whole JVM stays down, so offscreen shots match vanilla's F1 reference.
+    #[arg(long, default_value = "on")]
+    pub hud: String,
     /// Input script for the offscreen client: runs the steps every game tick through the
     /// same routing as the window (needs `--server`; `--seconds` bounds the run).
     #[arg(long)]
@@ -110,6 +118,7 @@ fn main() -> anyhow::Result<()> {
     if let Some(dir) = &args.singleplayer_dir {
         haste_setup::worlds::set_dir(dir.clone());
     }
+    app::set_hud_from_args(&args.hud)?;
     if let Some(cmd) = args.command {
         return launch::run(cmd, &args.username);
     }
