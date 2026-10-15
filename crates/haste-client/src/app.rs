@@ -4007,6 +4007,23 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     }
     // Measure phase. The buffer is sized up front: at most 1000 fps for the whole run, and it
     // grows once if the machine is faster than that (no allocation during steady-state frames).
+    {
+        // Memory diagnostics: terrain arenas (fixed-size GPU buffer pairs) and resident
+        // sections, plus this process's peak RSS so far (the settle phase meshes everything).
+        let (arenas, bytes, sections) = renderer.arena_memory();
+        let rss_kb = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("VmHWM"))
+                    .and_then(|l| l.split_whitespace().nth(1).map(|v| v.to_string()))
+            })
+            .unwrap_or_default();
+        println!(
+            "bench memory: peak RSS {rss_kb} kB, {arenas} arenas ({:.1} MiB vertex+index), {sections} resident sections",
+            bytes as f64 / (1024.0 * 1024.0)
+        );
+    }
     let mut samples: Vec<BenchSample> = Vec::with_capacity(seconds as usize * 1000);
     let total = seconds as f32;
     let adapter = {
