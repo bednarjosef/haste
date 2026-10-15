@@ -130,11 +130,17 @@ impl Swing {
 
     /// The swing progress at the ends of the last two ticks, 0 when the swing is not in the hand
     /// the renderer draws (`FirstPersonHandsAndItems.extractRenderState`'s `mainHandAttack`).
+    /// Like `SwingState.getAnimation`, a falling end (the tick the swing ends, or a restart
+    /// that keeps the progress) is wrapped past 1 (`animation + 1.0`), so the renderer's plain
+    /// lerp holds the rest pose instead of retracing the swing backwards.
     pub fn pair(&self) -> (f32, f32) {
-        if self.main_hand {
-            (self.prev_animation, self.animation)
+        if !self.main_hand {
+            return (0.0, 0.0);
+        }
+        if self.animation < self.prev_animation {
+            (self.prev_animation, self.animation + 1.0)
         } else {
-            (0.0, 0.0)
+            (self.prev_animation, self.animation)
         }
     }
 
@@ -501,10 +507,20 @@ mod tests {
             seen.push(h.attack());
             let (start, end) = *seen.last().unwrap();
             assert_eq!(start, h.swing.prev_animation, "start is the previous tick");
-            assert_eq!(end, h.swing.animation, "end is this tick");
+            // The end is this tick, wrapped past 1 when it fell (`getAnimation`).
+            assert_eq!(
+                end,
+                if h.swing.animation < h.swing.prev_animation {
+                    h.swing.animation + 1.0
+                } else {
+                    h.swing.animation
+                },
+                "end is this tick"
+            );
         }
         // progress = ticks / 6 at the end of each tick; the tick after the last clears it, and
-        // vanilla's `getAnimation` lerps 1 -> 1 over that tick so nothing jumps.
+        // the pair wraps the falling end past 1 (`SwingState.getAnimation`'s `animation + 1.0`)
+        // so that tick lerps 1 -> 1, the rest pose, and nothing jumps.
         for (got, want) in seen.iter().zip([
             (0.0, 0.0),
             (0.0, 1.0 / 6.0),
@@ -513,7 +529,7 @@ mod tests {
             (3.0 / 6.0, 4.0 / 6.0),
             (4.0 / 6.0, 5.0 / 6.0),
             (5.0 / 6.0, 1.0),
-            (1.0, 0.0),
+            (1.0, 1.0),
             (0.0, 0.0),
         ]) {
             assert!(
@@ -530,6 +546,76 @@ mod tests {
         assert!(start.abs() < 1e-7);
         assert!((end - 1.0 / 6.0).abs() < 1e-7);
         assert!((h.animation(0.5) - 1.0 / 12.0).abs() < 1e-7);
+    }
+
+    #[test]
+    fn the_interpolated_swing_never_jumps_back_up_after_it_ends() {
+        // Every tick of one swing (plus the tick after it ends), interpolated at the partials
+        // the renderer samples: the value rises monotonically to 1, holds 1 over the tick the
+        // swing ends (`getAnimation`'s wrap), then rests at 0 — the one-frame snap back to
+        // mid-swing the raw (1, 0) pair caused.
+        let mut h = Hand::new();
+        h.swing();
+        let mut frames = Vec::new();
+        for t in 0..9 {
+            tick(&mut h, 0.0);
+            for partial in [0.0, 0.5, 0.99] {
+                frames.push((t, partial, h.animation(partial)));
+            }
+        }
+        // Rising phase: partial 0 of tick t equals partial 1 of tick t-1.
+        for i in 1..frames.len() {
+            let (t, p, v) = frames[i];
+            let (pt, pp, pv) = frames[i - 1];
+            if t == pt && p > pp {
+                assert!(
+                    v >= pv,
+                    "partial {p} of tick {t} fell below partial {pp}: {v} < {pv}"
+                );
+            }
+        }
+        // The swing's frames rise from 0 to 1 over ticks 1..7 (ticks 0..8 sampled here; tick 7
+        // is the end tick, tick 8 the rest after it).
+        let at = |t: usize, p: f32| {
+            frames
+                .iter()
+                .find(|(ft, fp, _)| *ft == t && *fp == p)
+                .unwrap()
+                .2
+        };
+        for (t, want) in [
+            (1, 0.0),
+            (2, 1.0 / 6.0),
+            (3, 2.0 / 6.0),
+            (4, 3.0 / 6.0),
+            (5, 4.0 / 6.0),
+            (6, 5.0 / 6.0),
+            (7, 1.0),
+        ] {
+            let got = at(t, 0.0);
+            assert!(
+                (got - want).abs() < 1e-6,
+                "tick {t} partial 0: {got} != {want}"
+            );
+        }
+        // The end tick (7) holds the rest pose 1 at every partial: the wrap makes the pair
+        // (1, 1), where the raw pair (1, 0) would have shown 0.5 mid-tick (the snapped frame).
+        for p in [0.0, 0.5, 0.99] {
+            let got = at(7, p);
+            assert!((got - 1.0).abs() < 1e-6, "tick 7 partial {p}: {got} != 1");
+        }
+        // The tick after the swing has ended rests at 0 at every partial, for good.
+        for p in [0.0, 0.5, 0.99] {
+            let got = at(8, p);
+            assert!(got.abs() < 1e-6, "tick 8 partial {p}: {got} != 0");
+        }
+        // And the hand the renderer actually draws carries the same wrap.
+        let mut h = Hand::new();
+        h.swing();
+        for _ in 0..7 {
+            tick(&mut h, 0.0);
+        }
+        assert_eq!(h.attack(), (1.0, 1.0));
     }
 
     #[test]
