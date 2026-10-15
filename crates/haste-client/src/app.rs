@@ -2621,11 +2621,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let view = shared.view.lock().clone();
     let entities = feed.instances.len();
     println!(
-// MERGE(shadows side):
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} entity instances (perspective {}, local player {}), {} particles drawn, {} shadow quads, target {:?}",
-// MERGE(main side):
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} gui commands, {} entity instances ({} drew geometry; perspective {}, local player {}), {} particles drawn, {} block entities, target {:?}",
-// MERGE end
+        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} gui commands, {} entity instances ({} drew geometry; perspective {}, local player {}), {} particles drawn, {} shadow quads, {} block entities, target {:?}",
         file.display(),
         image.width(),
         image.height(),
@@ -2644,11 +2640,8 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         args.perspective,
         perspective.draws_player(),
         renderer.particles_drawn(),
-// MERGE(shadows side):
         renderer.shadow_quad_count(),
-// MERGE(main side):
         stats.block_entities_drawn,
-// MERGE end
         view.block_target
     );
     if let Some((color, fog)) = renderer.last_fog() {

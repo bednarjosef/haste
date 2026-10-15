@@ -692,7 +692,6 @@ impl EntityRenderer {
         }
     }
 
-// MERGE(shadows side):
     /// Vanilla `EntityRenderer.extractShadow`: the round `misc/shadow.png` quads on the full
     /// top faces below each entity. For every entity the shadow is a `shadowRadius` (capped at
     /// 32) disc, its power fading with camera distance (`1 - distSq/256`) times the renderer's
@@ -825,7 +824,8 @@ impl EntityRenderer {
     /// Number of shadow quads batched for the last frame (6 vertices each); tests/reporting.
     pub fn shadow_quad_count(&self) -> usize {
         self.shadow_vertices.len() / 6
-// MERGE(main side):
+    }
+
     /// Draws an entity's equipment on top of its model (already emitted at `root`): the held
     /// items (`ItemInHandLayer`) and armour (`HumanoidArmorLayer`). Unknown items and equipment
     /// draw nothing. The vertex buffer is reused (taken out and put back) so nothing allocates
@@ -1015,7 +1015,6 @@ impl EntityRenderer {
             self.emit_item(&mut out, &model, m, light, ItemDisplay::Ground, assets);
         }
         self.vertices = out;
-// MERGE end
     }
 
     /// One item frame, following vanilla's `ItemFrameRenderer.submit`: the frame block model at
@@ -2613,7 +2612,6 @@ fn placeholder_texture() -> image::RgbaImage {
 mod tests {
     use super::*;
 
-// MERGE(shadows side):
     /// `EntityRenderer.extractShadowPiece`: the shadow alpha fades with height above the
     /// block (`powerAtDepth = pow - (entity.y - pos.y) * 0.5`, then `* 0.5 * brightness`).
     #[test]
@@ -2657,7 +2655,8 @@ mod tests {
         assert!(!name_tag_visible(40.0 * 40.0, true));
         // Standing is not affected by the 32 limit.
         assert!(name_tag_visible(40.0 * 40.0, false));
-// MERGE(main side):
+    }
+
     /// `body_matrix` composes the ops left to right like `LivingEntityRenderer.setupRotations`
     /// (`poseStack` calls): `rotateZ(90); translate(0, 2, 0)` maps the origin to (-2, 0, 0).
     #[test]
@@ -2674,7 +2673,6 @@ mod tests {
         b.push(BodyOp::RotateX(std::f32::consts::FRAC_PI_2));
         let p = body_matrix(&b).transform_point3(Vec3::Y);
         assert!((p.z - 1.0).abs() < 1e-5, "z {}", p.z);
-// MERGE end
     }
 
     /// Every texture haste-entity's model table names must exist in the client jar (the

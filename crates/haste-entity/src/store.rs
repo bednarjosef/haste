@@ -807,22 +807,6 @@ impl EntityStore {
             } else {
                 slot.prev_pos.lerp(slot.pos, partial_tick as f64)
             };
-// MERGE(shadows side):
-            let type_name = crate::registry::entity_type_name(slot.kind);
-            let is_baby = !slot.is_player_type && crate::registry::is_baby(&slot.metadata);
-            let (model, has_head) = if slot.is_player_type {
-                (crate::models::humanoid(false), true)
-            } else {
-                // Registry table first (shared per type, head flag precomputed), then the box.
-                // Babies use the row's baby layer, like vanilla's AgeableMobRenderer.submit.
-                let baby = type_name
-                    .as_deref()
-                    .filter(|_| is_baby)
-                    .and_then(crate::registry::baby_model_for_name);
-                match crate::registry::model_entry(slot.kind) {
-                    Some((head, m)) => (baby.unwrap_or(m), head),
-                    None => (
-// MERGE(main side):
             let (model, has_head, overlays) = if slot.is_player_type {
                 (crate::models::humanoid(false), true, Default::default())
             } else {
@@ -889,7 +873,6 @@ impl EntityStore {
                         (baby_model.unwrap_or(m), head, overlays)
                     }
                     (None, None) => (
-// MERGE end
                         crate::models::box_for(slot.dimensions.0, slot.dimensions.1),
                         false,
                         overlays,
@@ -917,7 +900,8 @@ impl EntityStore {
             } else {
                 slot.yaw
             };
-// MERGE(shadows side):
+            let type_name = crate::registry::entity_type_name(slot.kind);
+            let is_baby = !slot.is_player_type && crate::registry::is_baby(&slot.metadata);
             // `LivingEntityRenderer.getShadowRadius`/`MobRenderer.getShadowRadius`: the
             // renderer's base radius times the living/age scale (0.5 for babies). The player's
             // `AvatarRenderer` uses 0.5.
@@ -953,7 +937,6 @@ impl EntityStore {
                 type_name.as_deref().unwrap_or(""),
                 slot.dimensions.1,
             );
-// MERGE(main side):
             // Equipment layers (held items, armour) are only drawn on humanoid models
             // (vanilla adds `ItemInHandLayer`/`HumanoidArmorLayer` per renderer type).
             let humanoid = has_head && model_has_part(&model.root, "right_arm");
@@ -962,7 +945,6 @@ impl EntityStore {
             } else {
                 ([None, None], Vec::new(), None)
             };
-// MERGE end
             out.push(EntityInstance {
                 id: slot.id,
                 model,
