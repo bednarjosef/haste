@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs the feature check scripts in scripts/checks/ against the local test server.
 # usage: scripts/checks/run-feature-checks.sh [feature ...]
-#   features: hud death drop modes f2 craft  (default: all)
+#   features: hud death drop modes f2 craft pause creative-hotbars recipe-book  (default: all)
 # The client runs offscreen (`--script`); all server state is set up over RCON from here,
 # never from the script (the player is not an operator and the server kicks command spam).
 # Evidence is printed and grepped: frame text commands (not images), server log lines and
@@ -315,13 +315,44 @@ creative_hotbars() {
   check creative-hotbars "the creative inventory's Saved Hotbars tab shows the saved hotbars" "$r"
 }
 
-ALL=(hud death drop modes f2 craft pause creative-hotbars)
+# ---- 9. The recipe book: open it, search, click a recipe, take the result ----
+recipe_book() {
+  local log="$LOGDIR/recipe-book.log"
+  client_start "$ROOT/scripts/checks/recipe-book.txt" "$log"
+  wait_online || { check recipe-book "player never joined" 1; return; }
+  rcon "gamemode survival $NAME" >/dev/null
+  if wait_shot "$log" recipe-book-open 90; then
+    rcon "clear $NAME" >/dev/null
+    rcon "give $NAME minecraft:oak_log 1" >/dev/null
+  fi
+  sleep 2
+  local before after
+  before=$(rcon "data get entity $NAME Inventory")
+  if wait_shot "$log" recipe-book-final 90; then
+    after=$(rcon "data get entity $NAME Inventory")
+  fi
+  wait_exit
+  echo "--- recipe book evidence ---"
+  echo "Inventory before: $before"
+  echo "Inventory after:  $after"
+  local r=0
+  has "$before" "oak_log" || { echo "no oak_log before"; r=1; }
+  has "$after" "oak_planks" || { echo "no oak_planks after"; r=1; }
+  has "$after" "count: 4" || { echo "not 4 planks"; r=1; }
+  if grep -qE "haste proxy:|Java exception" "$log"; then
+    echo "proxy stubs or Java exceptions:"; grep -E "haste proxy:|Java exception" "$log" | head -5
+    r=1
+  fi
+  check recipe-book "the book opens and lists recipes; searching finds oak planks; clicking it crafts 4 planks from one log" "$r"
+}
+
+ALL=(hud death drop modes f2 craft pause creative-hotbars recipe-book)
 if [ $# -eq 0 ]; then
   set -- "${ALL[@]}"
 fi
 for f in "$@"; do
   case "$f" in
-    hud | death | drop | modes | f2 | craft | pause | creative-hotbars) "$f" ;;
+    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | recipe-book) "$f" ;;
     *) echo "unknown feature: $f" ;;
   esac
 done

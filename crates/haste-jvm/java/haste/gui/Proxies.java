@@ -125,13 +125,15 @@ public final class Proxies {
         set(minecraft, "gameMode", net.minecraft.client.multiplayer.MultiPlayerGameMode.class, gameMode);
         set(player, "minecraft", Minecraft.class, minecraft);
         set(player, "connection", net.minecraft.client.multiplayer.ClientPacketListener.class, connection);
-        // the recipe book is a no-op proxy (no <clinit>), but InventoryScreen still shows its toggle button:
-        // the sprites are the two that exist in the jar under textures/gui/sprites/recipe_book/
-        setStatic(net.minecraft.client.gui.screens.recipebook.RecipeBookComponent.class, "RECIPE_BUTTON_SPRITES",
-            net.minecraft.client.gui.components.WidgetSprites.class,
-            new net.minecraft.client.gui.components.WidgetSprites(
-                net.minecraft.resources.Identifier.withDefaultNamespace("recipe_book/button"),
-                net.minecraft.resources.Identifier.withDefaultNamespace("recipe_book/button_highlighted")));
+        // the recipe book is real vanilla Java; the proxy never runs LocalPlayer's constructor, which is
+        // where vanilla builds the book, so the player's own ClientRecipeBook is set here (the kept
+        // recipe-book handlers read it through Player.getRecipeBook)
+        set(player, "recipeBook", net.minecraft.client.ClientRecipeBook.class, new net.minecraft.client.ClientRecipeBook());
+        // the connection's own fields its kept handlers touch (vanilla's constructor sets both): the
+        // search trees (the same object searchTrees() returns) and the level for SlotDisplayContext
+        set(connection, "searchTrees", net.minecraft.client.multiplayer.SessionSearchTrees.class,
+            ConnectionImpl.searchTrees(connection));
+        set(connection, "level", net.minecraft.client.multiplayer.ClientLevel.class, level);
         // the HUD and the chat pipeline are real vanilla Java (tier 3) over the proxies
         toasts = new net.minecraft.client.gui.components.toasts.ToastManager(minecraft, options);
         tutorial = new net.minecraft.client.tutorial.Tutorial(minecraft, options);

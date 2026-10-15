@@ -125,6 +125,13 @@ const FORWARDED: &[&str] = &[
     "minecraft:set_player_inventory",
     "minecraft:merchant_offers",
     "minecraft:update_tags",
+    // the recipe book (real vanilla Java over the forwarded packets): the book's displays and
+    // settings, the recipe container, and the ghost recipe the overlay shows on a right-click
+    "minecraft:recipe_book_add",
+    "minecraft:recipe_book_remove",
+    "minecraft:recipe_book_settings",
+    "minecraft:update_recipes",
+    "minecraft:place_ghost_recipe",
 ];
 
 /// Packets about one entity: forwarded only when they are about the local player.
