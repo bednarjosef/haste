@@ -67,7 +67,14 @@ fn data() -> &'static haste_data::GameData {
                     "shield",
                     "potion",
                 ]),
-                entries(&["speed", "haste", "mining_fatigue", "conduit_power"]),
+                entries(&[
+                    "speed",
+                    "haste",
+                    "mining_fatigue",
+                    "conduit_power",
+                    "nausea",
+                    "darkness",
+                ]),
                 entries(&["tool", "enchantments"]),
                 entries(&["efficiency", "sharpness"]),
                 entries(&[

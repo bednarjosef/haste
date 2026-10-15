@@ -157,12 +157,14 @@ pub struct Interaction {
     pub hotbar: [ItemStackData; 9],
     pub offhand: ItemStackData,
     /// Armor, indexed helmet 0, chest 1, legs 2, boots 3 (player inventory menu 5..=8 and
-    /// `set_player_inventory` 36..=39). The chest slot answers the glider check.
+    /// `set_player_inventory` 36..=39). The chest slot answers the glider check; the helmet is
+    /// the worn item whose camera overlay `Hud.extractCameraOverlays` reads.
     pub armor: [ItemStackData; 4],
     /// Item registry indices whose default components carry `minecraft:glider`
     /// (`LivingEntity.canGlideUsing`), resolved from the item component reports in `prepare`.
     pub(crate) glider_items: Option<HashSet<RegistryIndex>>,
-    /// Active effects on us: `minecraft:mob_effect` index -> amplifier and remaining ticks.
+    /// Active effects on us: `minecraft:mob_effect` index -> amplifier, remaining ticks and the
+    /// vanilla `MobEffectInstance.BlendState` the screen effects read.
     pub effects: HashMap<i32, EffectData>,
     tools: Option<Arc<ToolTable>>,
     tags: Option<BlockTags>,
@@ -254,6 +256,11 @@ struct EffectIds {
     haste: i32,
     conduit_power: i32,
     mining_fatigue: i32,
+    /// The two effects that blend, as vanilla's `MobEffects` builds them: nausea has a 150-tick
+    /// fade in and a 20-tick fade out that starts 60 ticks early, darkness a 22-tick one.
+    /// Their blend factors are what the screen effects read.
+    nausea: i32,
+    darkness: i32,
 }
 
 /// The `minecraft:mob_effect` indices the lightmap needs (night vision and darkness), resolved
@@ -263,15 +270,15 @@ struct EffectIds {
 pub(crate) struct LightmapEffectIds {
     pub(crate) night_vision: Option<i32>,
     pub(crate) darkness: Option<i32>,
+    /// The blindness effect (fog environment `BlindnessFogEnvironment`).
+    pub(crate) blindness: Option<i32>,
+    /// The fire-resistance effect (lava fog distance `LavaFogEnvironment`).
+    pub(crate) fire_resistance: Option<i32>,
 }
 
-/// One active effect on us (vanilla `MobEffectInstance`): its amplifier and remaining ticks
-/// (`-1` infinite). The lightmap reads the night-vision and darkness durations from here.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EffectData {
-    pub amplifier: i32,
-    pub duration: i32,
-}
+/// One active effect on us: the vanilla `MobEffectInstance` the screen effects and the lightmap
+/// read (amplifier, remaining ticks and the `BlendState`).
+pub use crate::screen_effects::Effect as EffectData;
 
 impl Interaction {
     /// Loads the tool table (once; reads the data generator's item component reports) and the
@@ -305,18 +312,32 @@ impl Interaction {
                     .index("minecraft:mob_effect", &Identifier::minecraft(n))
                     .map(|i| i.0 as i32)
             };
-            if let (Some(haste), Some(conduit_power), Some(mining_fatigue)) =
-                (id("haste"), id("conduit_power"), id("mining_fatigue"))
-            {
+            if let (
+                Some(haste),
+                Some(conduit_power),
+                Some(mining_fatigue),
+                Some(nausea),
+                Some(darkness),
+            ) = (
+                id("haste"),
+                id("conduit_power"),
+                id("mining_fatigue"),
+                id("nausea"),
+                id("darkness"),
+            ) {
                 self.effect_ids = Some(EffectIds {
                     haste,
                     conduit_power,
                     mining_fatigue,
+                    nausea,
+                    darkness,
                 });
             }
             self.lightmap_effect_ids = LightmapEffectIds {
                 night_vision: id("night_vision"),
                 darkness: id("darkness"),
+                blindness: id("blindness"),
+                fire_resistance: id("fire_resistance"),
             };
         }
         if self.component_tables.is_none() {
@@ -337,6 +358,11 @@ impl Interaction {
 
     pub fn has_block_tags(&self) -> bool {
         self.tags.is_some()
+    }
+
+    /// The block tags the server synced (`update_tags`, registry `minecraft:block`).
+    pub fn block_tags(&self) -> Option<&BlockTags> {
+        self.tags.as_ref()
     }
 
     pub fn set_block_tags(&mut self, tags: BlockTags) {
@@ -436,6 +462,41 @@ impl Interaction {
             "spyglass" => Some((1200, UseAnimation::Spyglass)),
             "shield" => Some((72000, UseAnimation::Block)),
             _ => None,
+        }
+    }
+
+    /// The `minecraft:mob_effect` index of nausea, the effect whose blend factor drives the
+    /// nausea overlay and the screen warp (`MobEffects.NAUSEA`).
+    fn nausea_id(&self) -> Option<i32> {
+        self.effect_ids.map(|e| e.nausea)
+    }
+
+    /// Whether `effect` is `MobEffects.DARKNESS`, the other effect with a blend duration.
+    fn darkness_id(&self, effect: i32) -> bool {
+        self.effect_ids.is_some_and(|e| e.darkness == effect)
+    }
+
+    /// The nausea blend factor between two frames, 0 without the effect
+    /// (`LivingEntity.getEffectBlendFactor`).
+    pub fn nausea_factor(&self, partial_tick: f32) -> f32 {
+        self.nausea_id()
+            .and_then(|id| self.effects.get(&id))
+            .map_or(0.0, |e| e.blend_factor(partial_tick))
+    }
+
+    /// The nausea blend factor pair (the previous frame's and this tick's), for the frame's
+    /// lerp (`BlendState.factorPreviousFrame`, `.factor`).
+    pub fn nausea_blend_pair(&self) -> (f32, f32) {
+        self.nausea_id()
+            .and_then(|id| self.effects.get(&id))
+            .map_or((0.0, 0.0), |e| e.blend_pair())
+    }
+
+    /// One tick of the active effects (`LivingEntity.tickEffects`: each instance ticks its
+    /// duration and its vanilla blend state on the client).
+    pub(super) fn tick_effects(&mut self) {
+        for e in self.effects.values_mut() {
+            e.tick();
         }
     }
 
@@ -544,6 +605,21 @@ impl LocalPlayer {
     /// This tick's mouse buttons and hotbar selection (applied inside the next tick).
     pub fn set_interact(&mut self, input: InteractInput) {
         self.int.input = input;
+    }
+
+    /// Whether we are scoping with a spyglass this tick: vanilla's `Player.isScoping` (using an
+    /// item, and the item being used is a spyglass). The use state is the held "use" button
+    /// (`use_item` is re-sent every 4 ticks while it stays held, so a held button is a use in
+    /// progress) and the item is the main hand's.
+    pub fn scoping(&self, data: &haste_data::GameData) -> bool {
+        if !self.int.last.use_item {
+            return false;
+        }
+        let name = self
+            .main_hand()
+            .item
+            .and_then(|i| data.registries.name("minecraft:item", i));
+        crate::screen_effects::is_spyglass(name)
     }
 
     /// Queues one left click for the next tick (vanilla's `keyAttack.clickCount++` /
@@ -710,13 +786,34 @@ impl LocalPlayer {
                 _ => {}
             },
             P::UpdateMobEffect(e) if e.entity_id == me => {
-                self.int.effects.insert(
-                    e.effect,
-                    EffectData {
-                        amplifier: e.amplifier,
-                        duration: e.duration,
-                    },
+                // Vanilla's blend durations per effect (`MobEffects`): only nausea and
+                // darkness set them, everything else blends at once.
+                use crate::screen_effects as se;
+                let (blend_in, blend_out, blend_out_advance) =
+                    if Some(e.effect) == self.int.nausea_id() {
+                        (
+                            se::NAUSEA_BLEND_IN,
+                            se::NAUSEA_BLEND_OUT,
+                            se::NAUSEA_BLEND_OUT_ADVANCE,
+                        )
+                    } else if self.int.darkness_id(e.effect) {
+                        (se::DARKNESS_BLEND, se::DARKNESS_BLEND, se::DARKNESS_BLEND)
+                    } else {
+                        (0, 0, 0)
+                    };
+                let mut effect = EffectData::new(
+                    e.amplifier,
+                    e.duration,
+                    e.flags & 0x08 != 0,
+                    blend_in,
+                    blend_out,
+                    blend_out_advance,
                 );
+                // `LivingEntity.forceAddEffect` copies the previous instance's blend state.
+                if let Some(prev) = self.int.effects.get(&e.effect) {
+                    effect.copy_blend_from(prev);
+                }
+                self.int.effects.insert(e.effect, effect);
             }
             P::RemoveMobEffect(e) if e.entity_id == me => {
                 self.int.effects.remove(&e.effect);

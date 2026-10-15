@@ -21,7 +21,10 @@ use haste_protocol::haste_core::{
     BlockPos, BlockStateId, ChunkPos, Direction, EntityId, Identifier, SectionPos,
 };
 use haste_protocol::{Account, ConnectOptions};
-use haste_render::{Camera, FrameInput, FrameStats, LightmapFrame, Renderer, SkyState};
+use haste_render::{
+    Camera, DimensionFog, FogInputs, FogType, FrameInput, FrameStats, LightmapFrame, Renderer,
+    SkyState,
+};
 use haste_setup::options::Options;
 use haste_world::World;
 use winit::application::ApplicationHandler;
@@ -114,7 +117,7 @@ fn debug_info(
     use haste_core::view::{BlockPhysics as _, BlockView};
     use haste_protocol::haste_core::BlockPos;
     use haste_render::BiomeSource as _;
-    let view = *shared.view.lock();
+    let view = shared.view.lock().clone();
     let world = shared.world.read();
     // The full look the player is rendered with (input look plus the server's offset), like
     // frame_view; vanilla's F3 shows the entity's rotation.
@@ -380,6 +383,18 @@ impl DebugEnv {
     }
 }
 
+/// `--hud on|off` (vanilla's F1) for this run, set once from the arguments before any join.
+static HUD_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Applies `--hud`: "on" or "off" (vanilla's F1: no HUD, no hand, no block outline).
+pub fn set_hud_from_args(hud: &str) -> anyhow::Result<()> {
+    if hud != "on" && hud != "off" {
+        anyhow::bail!("--hud must be \"on\" or \"off\" (vanilla's F1)");
+    }
+    HUD_ENABLED.store(hud == "on", std::sync::atomic::Ordering::Relaxed);
+    Ok(())
+}
+
 impl Session {
     /// `sound`: open the audio output (the window only; screenshots and the benchmark stay
     /// silent so they neither make noise nor measure the audio thread). `address` is the server
@@ -488,8 +503,13 @@ impl Session {
             haste_render::Particles::new(particle_types.clone()),
             haste_render::default_skin(login.profile.uuid.as_u128()),
             block_entity_names,
+            biome_climates.clone(),
             options.clone(),
         ));
+        shared.hud_enabled.store(
+            HUD_ENABLED.load(std::sync::atomic::Ordering::Relaxed),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         if sounds.is_some() {
             *shared.sound.lock() = sounds;
         }
@@ -654,6 +674,18 @@ pub struct WorldFeed {
     >,
     /// The renderer's text metrics (the font), for wrapping sign lines at parse time.
     text_metrics: Option<std::sync::Arc<dyn haste_core::gui::TextMetrics>>,
+    /// Parsed banner patterns by position, rebuilt only when the NBT changes (see
+    /// `sign_texts` for the caching scheme).
+    banner_texts: HashMap<
+        BlockPos,
+        (
+            usize,
+            usize,
+            std::sync::Arc<haste_render::blockentity::BannerData>,
+        ),
+    >,
+    /// The skull animations by position for this frame (reused lookup scratch).
+    skull_anims: HashMap<BlockPos, (f32, f32)>,
     /// The shared world as the mesh workers see it (created on the first feed).
     source: Option<Arc<dyn haste_render::SnapshotSource>>,
     /// Sections submitted this frame (reused).
@@ -762,7 +794,7 @@ impl WorldFeed {
         if self.text_metrics.is_none() {
             self.text_metrics = Some(renderer.text_metrics());
         }
-        self.block_entities(shared);
+        self.block_entities(shared, partial);
         self.instances.clear();
         {
             let store = shared.entities.read();
@@ -777,7 +809,7 @@ impl WorldFeed {
             }
         }
         {
-            let view = *shared.view.lock();
+            let view = shared.view.lock().clone();
             self.instances
                 .push(game::player_instance(local.0, local.1, &view, partial));
         }
@@ -792,7 +824,7 @@ impl WorldFeed {
     /// `BrightnessCombiner`'s max light) and samples the block light. Types Haste cannot
     /// draw are logged once and skipped. The result is `self.be_instances` (read it after
     /// this call; `entities` borrows the feed too).
-    fn block_entities(&mut self, shared: &Shared) {
+    fn block_entities(&mut self, shared: &Shared, partial: f32) {
         use haste_core::view::BlockView as _;
         self.be_instances.clear();
         let world = shared.world.read();
@@ -801,12 +833,17 @@ impl WorldFeed {
             self.lid_map.clear();
             self.lid_map.extend(lids.iter().copied());
         }
+        {
+            let anims = shared.skull_anims.lock();
+            self.skull_anims.clear();
+            self.skull_anims.extend(anims.iter().copied());
+        }
         let names = &shared.block_entity_names;
         let blocks = &shared.data.blocks;
         let xmas = haste_render::xmas_textures();
         // Only the chunks the camera can see carry drawable block entities; skipping the
         // rest keeps the per-frame walk short on big worlds with nothing in them.
-        let view = *shared.view.lock();
+        let view = shared.view.lock().clone();
         let cam_chunk = ChunkPos::new(
             view.feet.x.floor() as i32 >> 4,
             view.feet.z.floor() as i32 >> 4,
@@ -865,28 +902,69 @@ impl WorldFeed {
                         );
                     }
                 }
-                // Signs: the yaw angle the text transform turns by (vanilla
-                // `StandingSignRenderer`/`HangingSignRenderer` picking the block state's
-                // `rotation` segment or the wall `facing`), and the cached parsed text.
-                let (sign_angle, text) = match kind {
+                // Signs, banners and skulls: the yaw angle the transform turns by (vanilla
+                // `StandingSignRenderer`/`BannerRenderer`/`SkullBlockRenderer` picking the
+                // block state's `rotation` segment or the wall `facing`), the sign's cached
+                // text, the banner's wave phase and cached patterns, the skull's animation.
+                let (mut sign_angle, text, banner_phase, banner, skull_anim) = match kind {
                     haste_render::BlockEntityKind::Sign { hanging } => {
-                        let angle = match blocks.property_value(state, "rotation") {
-                            // `RotationSegment.convertToDegrees`: `segment * 22.5`, wrapped
-                            // from 180 to -180.
-                            Some(rot) => rot.parse::<i32>().map_or(0.0, |r| {
-                                let d = r.rem_euclid(16) as f32 * 22.5;
-                                if d >= 180.0 {
-                                    d - 360.0
-                                } else {
-                                    d
-                                }
-                            }),
-                            None => to_y_rot(facing),
-                        };
-                        (angle, self.sign_text(pos, be, hanging))
+                        let angle = rotation_or_facing(blocks, state, facing);
+                        (
+                            angle,
+                            self.sign_text(pos, be, hanging),
+                            0.0,
+                            None,
+                            haste_render::TickPair::fixed(0.0),
+                        )
                     }
-                    _ => (0.0, None),
+                    haste_render::BlockEntityKind::Banner { .. } => {
+                        let angle = rotation_or_facing(blocks, state, facing);
+                        // Vanilla `BannerRenderer.extractRenderState`'s phase: the position
+                        // hash plus the world age, over 100, plus the partial tick.
+                        let view = shared.view.lock();
+                        let phase = haste_render::blockentity::banner_wave_phase(
+                            pos,
+                            view.world_age,
+                            partial,
+                        );
+                        (
+                            angle,
+                            None,
+                            phase,
+                            self.banner_data(pos, be, block),
+                            haste_render::TickPair::fixed(0.0),
+                        )
+                    }
+                    haste_render::BlockEntityKind::Skull { .. } => {
+                        // The ground rotation angle (wall skulls read `facing` instead) and
+                        // the powered animation's tick ends.
+                        let angle = rotation_or_facing(blocks, state, facing);
+                        let anim = self.skull_anims.get(&pos).copied().unwrap_or((0.0, 0.0));
+                        (
+                            angle,
+                            None,
+                            0.0,
+                            None,
+                            haste_render::TickPair {
+                                start: anim.0,
+                                end: anim.1,
+                            },
+                        )
+                    }
+                    _ => (0.0, None, 0.0, None, haste_render::TickPair::fixed(0.0)),
                 };
+                // Wall skulls turn by the wall `facing` (their transform reads it); the
+                // rotation segment is only for the ground ones.
+                if matches!(
+                    kind,
+                    haste_render::BlockEntityKind::Skull {
+                        wall: true,
+                        kind: _
+                    }
+                ) && blocks.property_value(state, "rotation").is_none()
+                {
+                    sign_angle = 0.0;
+                }
                 self.be_instances.push(haste_render::BlockEntityInstance {
                     pos,
                     facing,
@@ -899,9 +977,33 @@ impl WorldFeed {
                     light,
                     sign_angle,
                     text,
+                    banner_phase,
+                    banner,
+                    skull_anim,
                 });
             }
         }
+    }
+
+    /// The parsed banner patterns at `pos` (`BannerBlockEntity`'s `patterns` NBT list) with
+    /// the base colour from the block id (vanilla `BannerBlock.getColor`). Cached like the
+    /// sign text: re-parsed only when the payload changes.
+    fn banner_data(
+        &mut self,
+        pos: BlockPos,
+        be: &haste_core::chunk::BlockEntityData,
+        block: &haste_core::Identifier,
+    ) -> Option<std::sync::Arc<haste_render::blockentity::BannerData>> {
+        let key = (be.nbt.as_ptr() as usize, be.nbt.len());
+        if let Some((k, len, data)) = self.banner_texts.get(&pos) {
+            if (*k, *len) == key {
+                return Some(data.clone());
+            }
+        }
+        let parsed = parse_banner_nbt(&be.nbt, block)?;
+        self.banner_texts
+            .insert(pos, (key.0, key.1, parsed.clone()));
+        Some(parsed)
     }
 
     /// The parsed sign text at `pos` (`SignBlockEntity`'s `front_text`/`back_text`), from the
@@ -976,6 +1078,99 @@ fn to_y_rot(d: Direction) -> f32 {
         Direction::East => 270.0,
         Direction::Down | Direction::Up => 0.0,
     }
+}
+
+/// The yaw a sign/banner turns by: the block state's `rotation` segment
+/// (`RotationSegment.convertToDegrees`: `segment * 22.5`, wrapped from 180 to -180), or the
+/// wall `facing`'s `toYRot()` when there is no rotation property.
+fn rotation_or_facing(
+    blocks: &haste_data::BlockStates,
+    state: haste_core::BlockStateId,
+    facing: Direction,
+) -> f32 {
+    match blocks.property_value(state, "rotation") {
+        Some(rot) => rot.parse::<i32>().map_or(0.0, |r| {
+            let d = r.rem_euclid(16) as f32 * 22.5;
+            if d >= 180.0 {
+                d - 360.0
+            } else {
+                d
+            }
+        }),
+        None => to_y_rot(facing),
+    }
+}
+
+/// A banner's patterns from its NBT (`BannerBlockEntity`'s `patterns`: a list of
+/// `{pattern: <registry id>, color: <dye name>}`) plus the base colour from the block id
+/// (`<colour>_banner`, vanilla `BannerBlock.getColor`). `None` when the NBT does not parse;
+/// a banner without a `patterns` tag is the plain base colour.
+fn parse_banner_nbt(
+    nbt: &[u8],
+    block: &haste_core::Identifier,
+) -> Option<std::sync::Arc<haste_render::blockentity::BannerData>> {
+    use haste_protocol::nbt::deserializer::NbtReadHelperJava;
+    use haste_protocol::nbt::NbtTag;
+    const DYES: [&str; 16] = [
+        "white",
+        "orange",
+        "magenta",
+        "light_blue",
+        "yellow",
+        "lime",
+        "pink",
+        "gray",
+        "light_gray",
+        "cyan",
+        "purple",
+        "blue",
+        "brown",
+        "green",
+        "red",
+        "black",
+    ];
+    let dye = |name: &str| {
+        DYES.iter()
+            .position(|d| *d == name)
+            .map(|i| i as u8)
+            .unwrap_or(15)
+    };
+    // The base colour: `<colour>_banner` / `<colour>_wall_banner` -> the dye id.
+    let base = block
+        .path()
+        .strip_suffix("_wall_banner")
+        .or_else(|| block.path().strip_suffix("_banner"))
+        .and_then(|c| DYES.iter().position(|d| *d == c))
+        .map_or(15, |i| i as u8);
+    let mut data = haste_render::blockentity::BannerData {
+        base,
+        layers: Vec::new(),
+    };
+    let mut cursor = std::io::Cursor::new(nbt);
+    let mut helper = NbtReadHelperJava::new(&mut cursor);
+    let doc = haste_protocol::nbt::Nbt::read_unnamed(&mut helper).ok()?;
+    if let Some(patterns) = doc.root_tag.get_list("patterns") {
+        for layer in patterns {
+            let NbtTag::Compound(c) = layer else {
+                continue;
+            };
+            // The pattern is the registry id (a string) or an inline `{asset_id: ...}` (a
+            // compound under `pattern`, or at the layer's top level for leniency).
+            let pattern = match c.get("pattern") {
+                Some(NbtTag::String(s)) => haste_core::Identifier::parse(s).ok()?,
+                Some(NbtTag::Compound(p)) => {
+                    haste_core::Identifier::parse(p.get_string("asset_id")?).ok()?
+                }
+                _ => c
+                    .get_string("asset_id")
+                    .and_then(|s| haste_core::Identifier::parse(s).ok())?,
+            };
+            let color = c.get_string("color").map(dye).unwrap_or(15);
+            data.layers
+                .push(haste_render::blockentity::BannerLayer { pattern, color });
+        }
+    }
+    Some(std::sync::Arc::new(data))
 }
 
 /// One sign side from its NBT compound (vanilla `SignText.CODEC`): `messages` (4 components as
@@ -1230,18 +1425,25 @@ fn frame_view(
     options: &Options,
     now: Instant,
 ) -> (Camera, SkyState, LightmapFrame, f32, i32, u64) {
-    let view = *shared.view.lock();
+    let view = shared.view.lock().clone();
     let partial = game::partial_tick(view.tick_at, now);
     let eye = game::interpolate(view.prev_eye, view.eye, partial);
     let look = (
         yaw + view.look_offset.0,
         (pitch + view.look_offset.1).clamp(-90.0, 90.0),
     );
+    // The world is read for the third-person camera and the fog environment (the fluid and
+    // biome at the camera), held for the rest of this function.
+    let world = shared.world.read();
     let (pos, yaw, pitch) = if perspective.draws_player() {
-        // The world is read here (the outline shapes the crosshair raycast uses too), held
-        // only for the ray.
-        let (world, shapes) = (shared.world.read(), &shared.data.shapes);
-        game::third_person_camera(perspective, eye, look.0, look.1, &*world, shapes)
+        game::third_person_camera(
+            perspective,
+            eye,
+            look.0,
+            look.1,
+            &*world,
+            &shared.data.shapes,
+        )
     } else {
         (eye, look.0, look.1)
     };
@@ -1249,6 +1451,17 @@ fn frame_view(
         options.fov as f32,
         view.fov_modifier_old,
         view.fov_modifier,
+        partial,
+        view.eye_in_water || view.eye_in_lava,
+        view.death_ticks,
+        options.fov_effect_scale,
+    );
+    // The hand's own FOV (`Camera.calculateHudFov`): the fixed 70 base with only the death
+    // and fluid adjustments — never the FOV option or its modifier, unlike the world FOV.
+    let hand_fov_deg = frame_fov(
+        70.0,
+        1.0,
+        1.0,
         partial,
         view.eye_in_water || view.eye_in_lava,
         view.death_ticks,
@@ -1276,6 +1489,7 @@ fn frame_view(
         yaw,
         pitch,
         fov_deg,
+        hand_fov_deg,
         roll_deg: 0.0,
         bob: haste_render::ViewBob {
             hurt_tilt_deg: hurt_tilt,
@@ -1294,7 +1508,16 @@ fn frame_view(
         dimension_has_sky: view.has_sky,
         fog_start: fog_end * 0.75,
         fog_end,
+        fog: fog_inputs(
+            &world,
+            &shared.data,
+            &shared.biome_climates,
+            pos,
+            &view,
+            partial,
+        ),
     };
+    drop(world);
     // The lightmap inputs the extractor gathers per frame (LightmapRenderStateExtractor.extract):
     // the night-vision intensity, the darkness effect's brightness modifier and pulse, and the
     // boss-overlay darkening; the flicker and lightning come straight from the tick.
@@ -1325,6 +1548,96 @@ fn frame_view(
         view.view_distance,
         view.animation_tick,
     )
+}
+
+/// Vanilla `Camera.getFluidInCamera` -> `FogRenderer.getFogType`: the fluid at the camera
+/// block (water by its surface height, then lava), else powder snow. Vanilla probes the five
+/// near-plane points for lava and powder snow; Haste approximates them with the camera block
+/// (like `eye_in_lava`).
+fn camera_fog_type(world: &World, data: &haste_data::GameData, pos: DVec3) -> FogType {
+    use haste_core::view::{BlockPhysics, BlockView, FluidKind};
+    let p = BlockPos::new(
+        pos.x.floor() as i32,
+        pos.y.floor() as i32,
+        pos.z.floor() as i32,
+    );
+    let state = world.block_state(p);
+    let surface = |kind| match data.fluid(state) {
+        Some(f) if f.kind == kind => {
+            let full = data
+                .fluid(world.block_state(p.add(0, 1, 0)))
+                .is_some_and(|a| a.kind == kind);
+            Some(p.y as f64 + if full { 1.0 } else { f.height as f64 })
+        }
+        _ => None,
+    };
+    if surface(FluidKind::Water).is_some_and(|s| pos.y < s) {
+        return FogType::Water;
+    }
+    if surface(FluidKind::Lava).is_some_and(|s| pos.y <= s) {
+        return FogType::Lava;
+    }
+    if data.is_powder_snow(state) {
+        return FogType::PowderSnow;
+    }
+    FogType::Atmospheric
+}
+
+/// The `FogRenderer.setupFog`/`computeFogColor` inputs: the camera's fluid, the dimension
+/// defaults overlaid by the camera biome's attributes, and the player's per-tick effect state.
+fn fog_inputs(
+    world: &World,
+    data: &haste_data::GameData,
+    climates: &[haste_render::BiomeClimate],
+    pos: DVec3,
+    view: &game::ViewState,
+    partial: f32,
+) -> FogInputs {
+    use haste_render::BiomeSource;
+    let p = BlockPos::new(
+        pos.x.floor() as i32,
+        pos.y.floor() as i32,
+        pos.z.floor() as i32,
+    );
+    let biome_id = self::biomes::WorldBiomes(world).biome(p).0 as usize;
+    let mut dimension = match world.dimension().name.path() {
+        "the_nether" => DimensionFog::nether(),
+        "the_end" => DimensionFog::end(),
+        _ => DimensionFog::overworld(),
+    };
+    let mut water_fog_color = haste_render::fog::WATER_FOG_COLOR;
+    let mut water_fog_start = haste_render::fog::WATER_FOG_START;
+    let mut water_fog_end = haste_render::fog::WATER_FOG_END;
+    if let Some(c) = climates.get(biome_id) {
+        dimension = dimension.with_biome(&c.fog);
+        if let Some(v) = c.fog.water_fog_color {
+            water_fog_color = haste_render::fog::rgb24(v as i32);
+        }
+        if let Some(v) = c.fog.water_fog_start {
+            water_fog_start = v;
+        }
+        if let Some(v) = c.fog.water_fog_end {
+            water_fog_end = v;
+        }
+    }
+    FogInputs {
+        fog_type: camera_fog_type(world, data, pos),
+        dimension,
+        water_fog_color,
+        water_fog_start,
+        water_fog_end,
+        water_vision: view.water_vision,
+        spectator: view.spectator,
+        fire_resistance: view.fire_resistance,
+        blindness: view.blindness,
+        darkness: view.lightmap_darkness,
+        darkness_blend: view.lightmap_darkness_blend.factor(partial),
+        night_vision: view.lightmap_night_vision,
+        boss_world_fog: view.boss_world_fog,
+        darken_world_amount: view.lightmap_boss_darkening.0
+            + (view.lightmap_boss_darkening.1 - view.lightmap_boss_darkening.0) * partial,
+        void_darkness_onset_range: 32.0,
+    }
 }
 
 /// Where a label is drawn in a GUI frame, in absolute GUI pixels (translation stack applied):
@@ -1909,12 +2222,40 @@ impl InputRouter {
 
 fn open_assets() -> anyhow::Result<haste_assets::Assets> {
     let jar = haste_protocol::haste_core::paths::client_jar();
-    haste_assets::Assets::open(
+    let mut assets = haste_assets::Assets::open(
         &jar,
         &haste_protocol::haste_core::paths::assets_dir(),
         "26.3",
     )
-    .with_context(|| format!("opening assets from {}", jar.display()))
+    .with_context(|| format!("opening assets from {}", jar.display()))?;
+    // Selected resource packs until the selection screen exists (Batch 2):
+    // `HASTE_RESOURCE_PACKS` = comma-separated pack ids (`file/<name>`,
+    // bottom first), `HASTE_RESOURCE_PACKS_DIR` = the folder holding them
+    // (default: the config dir's `resourcepacks`, vanilla's game-dir layout).
+    if let Ok(selection) = std::env::var("HASTE_RESOURCE_PACKS") {
+        let ids: Vec<String> = selection
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if !ids.is_empty() {
+            let dir = std::env::var("HASTE_RESOURCE_PACKS_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| default_resource_packs_dir());
+            tracing::info!("applying resource packs: {}", ids.join(", "));
+            assets.apply_packs(&dir, &ids);
+        }
+    }
+    Ok(assets)
+}
+
+/// `<config dir>/resourcepacks`: vanilla's `<game dir>/resourcepacks` in
+/// Haste's config-dir-as-game-dir layout (see `Menu::new`).
+fn default_resource_packs_dir() -> std::path::PathBuf {
+    haste_setup::servers::path()
+        .and_then(|p| p.parent().map(|d| d.join("resourcepacks")))
+        .unwrap_or_else(|| haste_protocol::haste_core::paths::cache_dir().join("resourcepacks"))
 }
 
 /// `minecraft:block_entity_type` names by synced registry id (stored block entities carry that
@@ -2083,6 +2424,7 @@ fn menu_screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
                 block_target: None,
                 breaking: &[],
                 camera_entity: None,
+                spin: None,
             };
             renderer.render(&frame)?;
             frames += 1;
@@ -2133,6 +2475,7 @@ fn menu_camera() -> Camera {
         yaw: 180.0,
         pitch: 0.0,
         fov_deg: 70.0,
+        hand_fov_deg: 70.0,
         roll_deg: 0.0,
         bob: haste_render::ViewBob::default(),
     }
@@ -2146,6 +2489,7 @@ fn menu_sky() -> SkyState {
         dimension_has_sky: true,
         fog_start: 1000.0,
         fog_end: 1000.0,
+        ..Default::default()
     }
 }
 
@@ -2186,8 +2530,10 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         .map(|v| DVec3::new(v[0], v[1], v[2]));
     // The HUD's JVM (started by the game thread) gets this long to be ready; the shot then
     // waits for it past the world settling, so the HUD is in the picture whenever it can be.
+    // With `--hud off` there is no JVM at all and nothing to wait for.
+    let hud_on = shared.hud_enabled.load(Ordering::Relaxed);
     let jvm_deadline = Instant::now() + Duration::from_secs(args.seconds.min(30));
-    let mut wait_for_hud = true;
+    let mut wait_for_hud = hud_on;
     let mut frames = 0u32;
     let mut stats;
     let mut last_camera;
@@ -2214,7 +2560,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             Instant::now(),
         );
         if let Some(pos) = want_pos {
-            let view = *shared.view.lock();
+            let view = shared.view.lock().clone();
             let eye = pos + DVec3::new(0.0, view.eye_height, 0.0);
             camera.pos = if perspective.draws_player() {
                 let (world, shapes) = (shared.world.read(), &shared.data.shapes);
@@ -2225,7 +2571,9 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         }
         last_camera = camera;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
-        feed.set_first_person(&shared, &mut renderer, perspective);
+        if hud_on {
+            feed.set_first_person(&shared, &mut renderer, perspective);
+        }
         let (entities, block_entities) =
             feed.entities(&shared, &mut renderer, session.local, partial);
         let block_target = shared.view.lock().block_target;
@@ -2246,6 +2594,21 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
             gui = u.frame(gw, gh, scale, (0.0, 0.0), partial).clone();
         }
+        // The screen effects around the HUD frame, like the window draws them.
+        let spin = {
+            let view = shared.view.lock().clone();
+            crate::screen_effects::Frame {
+                width: gui.width,
+                height: gui.height,
+                first_person: !perspective.draws_player(),
+                effects: &view.screen,
+                partial_tick: partial,
+                look: (camera.yaw, camera.pitch),
+                scope_scale: 1.125,
+            }
+            .append_to(&mut gui.commands);
+            view.screen.spin_warp(partial)
+        };
         let frame = FrameInput {
             camera,
             entities,
@@ -2253,9 +2616,12 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             gui: &gui,
             sky,
             partial_tick: partial,
-            block_target,
+            // Vanilla's F1 hides the block outline too (`GameRenderer
+            // .shouldRenderBlockOutline` checks `hud.isHidden`).
+            block_target: hud_on.then_some(block_target).flatten(),
             breaking: &breaking,
             camera_entity: (!perspective.draws_player()).then_some(session.local.0),
+            spin,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -2275,7 +2641,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             );
         }
         if let Some(pos) = want_pos {
-            let view = *shared.view.lock();
+            let view = shared.view.lock().clone();
             let reached = placed && (view.feet - pos).length() <= 0.5;
             if !reached {
                 if Instant::now() > deadline {
@@ -2315,10 +2681,10 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         .save(file)
         .with_context(|| format!("saving {}", file.display()))?;
     let c = last_camera;
-    let view = *shared.view.lock();
+    let view = shared.view.lock().clone();
     let entities = feed.instances.len();
     println!(
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} entity instances ({} drew geometry; perspective {}, local player {}), {} particles drawn, {} block entities, target {:?}",
+        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} gui commands, {} entity instances ({} drew geometry; perspective {}, local player {}), {} particles drawn, {} shadow quads, {} block entities, target {:?}",
         file.display(),
         image.width(),
         image.height(),
@@ -2331,14 +2697,31 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         stats.chunk_sections_drawn,
         stats.chunk_sections_total,
         stats.draw_calls,
+        gui.commands.len(),
         entities,
         renderer.entities_drawn(),
         args.perspective,
         perspective.draws_player(),
         renderer.particles_drawn(),
+        renderer.shadow_quad_count(),
         stats.block_entities_drawn,
         view.block_target
     );
+    if let Some((color, fog)) = renderer.last_fog() {
+        println!(
+            "fog environment {:?} color ({:.3}, {:.3}, {:.3}) env {:.2}..{:.2} rd {:.2}..{:.2} sky {:.2} cloud {:.2}",
+            fog.environment,
+            color[0],
+            color[1],
+            color[2],
+            fog.environmental_start,
+            fog.environmental_end,
+            fog.render_distance_start,
+            fog.render_distance_end,
+            fog.sky_end,
+            fog.cloud_end
+        );
+    }
     drop(session);
     Ok(())
 }
@@ -2490,7 +2873,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         // The look the player is rendered with: the input layer's (the script's `look`
         // actions write it) plus the server's rotation offset, like the window. In menu
         // mode there is no view yet: `joined`/`settled` read as false.
-        let mut view = shared.as_ref().map(|s| *s.view.lock());
+        let mut view = shared.as_ref().map(|s| s.view.lock().clone());
         let look = (input.yaw, input.pitch);
         // Pick up a live option change (the options bridge) within a frame.
         if let Some(shared) = shared.as_ref() {
@@ -2512,13 +2895,16 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 let shared = shared.as_ref();
                 let hud_ready =
                     ui.is_some() || shared.is_some_and(|s| s.hud_failed.load(Ordering::Relaxed));
-                let at_pos =
-                    want_pos.is_none_or(|p| view.is_some_and(|v| (v.feet - p).length() <= 0.5));
-                let settled = view.is_some_and(|v| v.has_position)
+                let at_pos = want_pos
+                    .is_none_or(|p| view.as_ref().is_some_and(|v| (v.feet - p).length() <= 0.5));
+                let settled = view.as_ref().is_some_and(|v| v.has_position)
                     && at_pos
                     && hud_ready
                     && feed.settled(&last_stats, Duration::from_millis(1500));
-                if !settled && view.is_some_and(|v| v.has_position) && frames.is_multiple_of(40) {
+                if !settled
+                    && view.as_ref().is_some_and(|v| v.has_position)
+                    && frames.is_multiple_of(40)
+                {
                     tracing::info!(
                         "waiting to settle: queue {} pending {} arrival {:?}",
                         feed.queue.len(),
@@ -2528,7 +2914,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 }
                 let screen_class = ui.as_ref().and_then(|u| u.gui().screen_class());
                 let state = script::ScriptState {
-                    joined: view.is_some_and(|v| v.has_position),
+                    joined: view.as_ref().is_some_and(|v| v.has_position),
                     settled,
                     screen_open: ui.as_ref().is_some_and(|u| u.screen_open()),
                     screen_class,
@@ -2712,7 +3098,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             // The actions may have changed what the game thread sees this tick.
             if let Some(shared) = shared.as_ref() {
                 input.sample(shared, ui.as_ref(), game::Perspective::FirstPerson);
-                view = Some(*shared.view.lock());
+                view = Some(shared.view.lock().clone());
             }
         }
         // Leaving the world: the pause screen's "Save and Quit" (or the death screen's "Title
@@ -2773,6 +3159,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 block_target: None,
                 breaking: &[],
                 camera_entity: None,
+                spin: None,
             };
             renderer.render(&frame)?;
             frames += 1;
@@ -2812,7 +3199,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         feed.feed(shared, &mut renderer, camera_section(&camera), vd);
         let (entities, block_entities) =
             feed.entities(shared, &mut renderer, session_ref.local, partial);
-        let block_target = view.and_then(|v| v.block_target);
+        let block_target = view.as_ref().and_then(|v| v.block_target);
         let breaking = shared.breaking.lock().clone();
         if ui.is_none() {
             ui = shared.ui.lock().clone();
@@ -2841,6 +3228,21 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             gui = u.frame(gw, gh, scale, input.mouse, partial).clone();
             last_gui = gui.clone();
         }
+        // The screen effects around the HUD frame, like the window draws them.
+        let spin = {
+            let screen = view.as_ref().map(|v| v.screen.clone()).unwrap_or_default();
+            crate::screen_effects::Frame {
+                width: gui.width,
+                height: gui.height,
+                first_person: true,
+                effects: &screen,
+                partial_tick: partial,
+                look,
+                scope_scale: 1.125,
+            }
+            .append_to(&mut gui.commands);
+            screen.spin_warp(partial)
+        };
         let frame = FrameInput {
             camera,
             entities,
@@ -2851,6 +3253,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             block_target,
             breaking: &breaking,
             camera_entity: Some(session_ref.local.0),
+            spin,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -3215,6 +3618,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             block_target,
             breaking: &breaking,
             camera_entity: Some(session.local.0),
+            spin: None,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -3294,6 +3698,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             block_target,
             breaking: &breaking,
             camera_entity: Some(session.local.0),
+            spin: None,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -3411,6 +3816,8 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         error: None,
         seconds: args.window_seconds,
         screenshot: false,
+        scope: 0.5,
+        frame_at: Instant::now(),
         started: Instant::now(),
         menu_next: Instant::now(),
         quitting: false,
@@ -3486,6 +3893,10 @@ struct App {
     /// F2 pressed: the next frame is captured for a screenshot; once its async readback
     /// lands (a few frames later), `take_capture` hands it to a save thread.
     screenshot: bool,
+    /// The spyglass scope's growth (`Hud.scopeScale`) and the time of the previous frame, which
+    /// its per-frame easing is measured against.
+    scope: f32,
+    frame_at: Instant,
     started: Instant,
     /// When the next 20 Hz menu tick runs (menu mode only).
     menu_next: Instant,
@@ -3778,6 +4189,21 @@ impl App {
         look_deg_per_pixel(self.options.mouse_sensitivity)
     }
 
+    /// The spyglass scope's growth for this frame, as vanilla's `Hud.extractCameraOverlays`
+    /// moves it: every frame the scale eases towards 1.125 by half the frame's ticks
+    /// (`Mth.lerp(0.5 * gameTimeDeltaTicks, scopeScale, 1.125)`), and while we are not scoping
+    /// (in first person) it is reset to 0.5.
+    fn scope_scale(&mut self, scoping: bool, at: Instant) -> f32 {
+        let delta_ticks = 20.0 * at.saturating_duration_since(self.frame_at).as_secs_f32();
+        self.frame_at = at;
+        self.scope = if scoping && !self.perspective.draws_player() {
+            crate::screen_effects::lerp(0.5 * delta_ticks, self.scope, 1.125)
+        } else {
+            0.5
+        };
+        self.scope
+    }
+
     /// Menu mode's frame: the open screen over the plain background the renderer draws
     /// without a world (vanilla draws the rotating panorama there; not yet in Haste).
     fn draw_menu(&mut self) {
@@ -3799,6 +4225,7 @@ impl App {
             block_target: None,
             breaking: &[],
             camera_entity: None,
+            spin: None,
         };
         if let Err(e) = renderer.render(&frame) {
             self.error = Some(e.context("render"));
@@ -3822,6 +4249,16 @@ impl App {
             self.draw_menu();
             return;
         }
+        // The spyglass scope's per-frame easing, before the renderer borrows `self` for the
+        // rest of the frame (it reads one flag of the view under a short lock).
+        let t0 = Instant::now();
+        let scope = {
+            let scoping = self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.shared.view.lock().screen.scoping);
+            self.scope_scale(scoping, t0)
+        };
         let session = self.session.as_ref().expect("checked above");
         // The options the player just changed in a vanilla screen: the game thread applied
         // them to `live_options` and bumped its version; copy them here so FOV, GUI scale and
@@ -3849,14 +4286,13 @@ impl App {
         self.input
             .sample(&session.shared, self.ui.as_ref(), self.perspective);
         let renderer = self.renderer.as_mut().expect("checked above");
-        let t0 = Instant::now();
         let (camera, sky, lightmap, partial, vd, animation_tick) = frame_view(
             &session.shared,
             self.perspective,
             self.input.yaw,
             self.input.pitch,
             &self.options,
-            Instant::now(),
+            t0,
         );
         self.feed
             .feed(&session.shared, renderer, camera_section(&camera), vd);
@@ -3881,6 +4317,7 @@ impl App {
             }
         }
         let (w, h) = renderer.size();
+        let view = session.shared.view.lock().clone();
         if let Some(ui) = &self.ui {
             // F3's numbers and the water overlay's flag, every frame (cheap: short mutexes,
             // no allocation while the overlay is off). The section counts are the previous
@@ -3898,7 +4335,7 @@ impl App {
                 resolve_gui_scale(u32::from(self.options.gui_scale), w, h),
                 &gpu,
             ));
-            let view = *session.shared.view.lock();
+            let view = session.shared.view.lock().clone();
             ui.set_eye_in_water(view.eye_in_water);
         }
         if let Some(ui) = &mut self.ui {
@@ -3906,6 +4343,24 @@ impl App {
             let scale = resolve_gui_scale(u32::from(self.options.gui_scale), w, h);
             let (gw, gh) = gui_scaled_size(w, h, scale);
             self.gui = ui.frame(gw, gh, scale, mouse, partial).clone();
+        }
+        // The screen effects around the HUD frame (vanilla's `ScreenEffectRenderer.submit`'s
+        // level-pass overlays and `Hud.extractCameraOverlays`'s own).
+        {
+            let frame = crate::screen_effects::Frame {
+                width: self.gui.width,
+                height: self.gui.height,
+                first_person: !self.perspective.draws_player(),
+                effects: &view.screen,
+                partial_tick: partial,
+                // The look the frame's camera uses, which the water overlay scrolls by.
+                look: (
+                    self.input.yaw + view.look_offset.0,
+                    (self.input.pitch + view.look_offset.1).clamp(-90.0, 90.0),
+                ),
+                scope_scale: scope,
+            };
+            frame.append_to(&mut self.gui.commands);
         }
         let frame = FrameInput {
             camera,
@@ -3917,6 +4372,7 @@ impl App {
             block_target,
             breaking: &self.breaking,
             camera_entity: (!self.perspective.draws_player()).then_some(session.local.0),
+            spin: view.screen.spin_warp(partial),
         };
         // Outline boxes of the target and the states of breaking blocks (one short read lock),
         // then the particles (one short read lock).
@@ -4675,6 +5131,7 @@ mod tests {
             yaw: 30.0,
             pitch: 10.0,
             fov_deg: 70.0,
+            hand_fov_deg: 70.0,
             roll_deg: 0.0,
             bob: haste_render::ViewBob::default(),
         };
@@ -4803,6 +5260,75 @@ mod tests {
         assert_eq!(parsed.back, empty_sign_side());
         // Not NBT at all: None, never a panic.
         assert!(parse_sign_nbt(&[1, 2, 3], &WrapFont, 90).is_none());
+    }
+
+    /// Banner NBT: the `patterns` list (registry id or inline `{asset_id}` form) and the base
+    /// colour from the block id; a banner without patterns is the plain base.
+    #[test]
+    fn banner_nbt_parses_patterns_and_base() {
+        use haste_protocol::nbt::serializer::{NbtWriteHelper, NbtWriteHelperJava};
+        use haste_protocol::nbt::{NbtCompound, NbtTag, COMPOUND_ID};
+        let nbt_bytes = |root: NbtCompound| {
+            let mut bytes = Vec::new();
+            let mut w = NbtWriteHelperJava::new(&mut bytes);
+            w.write_u8(COMPOUND_ID).unwrap();
+            root.clone().serialize_content(&mut w).unwrap();
+            bytes
+        };
+        // A red wall banner with two patterns.
+        let mut root = NbtCompound::new();
+        root.put_list(
+            "patterns",
+            vec![
+                NbtTag::Compound({
+                    let mut c = NbtCompound::new();
+                    c.put_string("pattern", "minecraft:stripe_bottom".into());
+                    c.put_string("color", "blue".into());
+                    c
+                }),
+                NbtTag::Compound({
+                    let mut c = NbtCompound::new();
+                    c.put_string("pattern", "minecraft:half_vertical".into());
+                    c.put_string("color", "white".into());
+                    c
+                }),
+            ],
+        );
+        let block = haste_core::Identifier::minecraft("red_wall_banner");
+        let data = parse_banner_nbt(&nbt_bytes(root), &block).unwrap();
+        assert_eq!(data.base, 14);
+        assert_eq!(data.layers.len(), 2);
+        assert_eq!(data.layers[0].pattern.path(), "stripe_bottom");
+        assert_eq!(data.layers[0].color, 11);
+        assert_eq!(data.layers[1].pattern.path(), "half_vertical");
+        assert_eq!(data.layers[1].color, 0);
+        // No patterns: the plain base (black from `minecraft:banner`).
+        let plain = parse_banner_nbt(
+            &nbt_bytes(NbtCompound::new()),
+            &haste_core::Identifier::minecraft("banner"),
+        )
+        .unwrap();
+        assert_eq!(plain.base, 15);
+        assert!(plain.layers.is_empty());
+        // The inline asset_id form.
+        let mut inline = NbtCompound::new();
+        inline.put_list(
+            "patterns",
+            vec![NbtTag::Compound({
+                let mut c = NbtCompound::new();
+                c.put_string("asset_id", "minecraft:cross".into());
+                c.put_string("color", "lime".into());
+                c
+            })],
+        );
+        let data = parse_banner_nbt(
+            &nbt_bytes(inline),
+            &haste_core::Identifier::minecraft("white_banner"),
+        )
+        .unwrap();
+        assert_eq!(data.layers.len(), 1);
+        assert_eq!(data.layers[0].pattern.path(), "cross");
+        assert_eq!(data.layers[0].color, 5);
     }
 
     #[test]

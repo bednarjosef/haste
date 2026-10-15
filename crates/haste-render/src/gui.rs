@@ -20,8 +20,8 @@ use std::sync::Arc;
 
 use glam::{Mat3, Mat4, Quat, Vec3};
 use haste_assets::{
-    for_each_formatted, Assets, BitmapFont, GlyphKind, ItemGeometry, ItemModel, SpriteMeta,
-    TextFormat,
+    for_each_formatted, frame_at, Animation, Assets, BitmapFont, GlyphKind, ItemGeometry,
+    ItemModel, SpriteMeta, TextFormat,
 };
 use haste_core::gui::{GuiBlend, GuiCommand, GuiFrame, TextStyle};
 use haste_core::Identifier;
@@ -158,6 +158,11 @@ struct TexEntry {
     meta: SpriteMeta,
     /// Atlas rectangle when resident.
     rect: Option<[u32; 4]>,
+    /// The `.mcmeta` animation of an animated texture (fire, nether portal); the atlas holds
+    /// one frame and the current frame is re-uploaded each game tick. `None` when static.
+    animation: Option<Animation>,
+    /// The animation frame currently uploaded to `rect` (re-uploaded when it changes).
+    frame: u32,
 }
 
 /// A slot item ready to draw: quads in GUI pixels relative to the slot's top-left corner,
@@ -181,6 +186,10 @@ pub struct ScreenNametag {
     pub y: f32,
     pub scale: f32,
     pub text: String,
+    /// `!state.isDiscrete`: also draw the opaque solid pass above the see-through one.
+    pub see_through: bool,
+    /// The scoreboard below-name line, drawn one text line under the name.
+    pub below_name: Option<String>,
 }
 
 /// Projects a world name tag to GUI space (vanilla draws tags at 0.025 blocks per text pixel).
@@ -219,6 +228,8 @@ pub fn project_nametag(
         y: fy,
         scale,
         text: tag.text.clone(),
+        see_through: tag.see_through,
+        below_name: tag.below_name.clone(),
     })
 }
 
@@ -270,6 +281,9 @@ pub struct GuiRenderer {
     rng: u32,
     /// The target is sRGB (no non-sRGB view available): the shader outputs linear colour.
     linear_output: bool,
+    /// The game tick animated GUI textures (fire, nether portal) show, so their current
+    /// frame is re-uploaded; set once per tick by the client.
+    animation_tick: u64,
     pub stats: GuiStats,
 }
 
@@ -547,6 +561,7 @@ impl GuiRenderer {
             entity_scratch: Vec::new(),
             rng: 0x9E37_79B9,
             linear_output,
+            animation_tick: 0,
             stats: GuiStats::default(),
         };
         // The missing texture is entry 0 so lookups can always fall back to it.
@@ -554,8 +569,15 @@ impl GuiRenderer {
             TexKey::Missing,
             Arc::new(missing_image()),
             SpriteMeta::Stretch,
+            None,
         );
         gui
+    }
+
+    /// The game tick the animated GUI textures (fire, nether portal) show. The next `prepare`
+    /// re-uploads every changed frame.
+    pub fn set_animation_tick(&mut self, tick: u64) {
+        self.animation_tick = tick;
     }
 
     fn make_vertex_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
@@ -579,12 +601,20 @@ impl GuiRenderer {
 
     // ---- textures ----
 
-    fn insert_entry(&mut self, key: TexKey, image: Arc<image::RgbaImage>, meta: SpriteMeta) -> u32 {
+    fn insert_entry(
+        &mut self,
+        key: TexKey,
+        image: Arc<image::RgbaImage>,
+        meta: SpriteMeta,
+        animation: Option<Animation>,
+    ) -> u32 {
         let index = self.entries.len() as u32;
         self.entries.push(TexEntry {
             image,
             meta,
             rect: None,
+            animation,
+            frame: 0,
         });
         self.keys.insert(key, index);
         index
@@ -595,27 +625,42 @@ impl GuiRenderer {
         if let Some(&i) = self.keys.get(key) {
             return i;
         }
-        let loaded: anyhow::Result<(image::RgbaImage, SpriteMeta)> = match key {
-            TexKey::Sprite(id) => assets.gui_sprite(id),
-            TexKey::Texture(id) => assets.texture_any(id).map(|i| (i, SpriteMeta::Stretch)),
+        let loaded: anyhow::Result<(image::RgbaImage, SpriteMeta, Option<Animation>)> = match key {
+            TexKey::Sprite(id) => assets.gui_sprite(id).map(|(i, m)| (i, m, None)),
+            TexKey::Texture(id) => {
+                // An animated texture (fire, nether portal): pack one frame and re-upload the
+                // current frame each tick, like vanilla's sprite animation.
+                match assets.animation(id) {
+                    Some(anim) => Ok((
+                        anim.initial_frame().clone(),
+                        SpriteMeta::Stretch,
+                        Some(anim),
+                    )),
+                    None => assets
+                        .texture_any(id)
+                        .map(|i| (i, SpriteMeta::Stretch, None)),
+                }
+            }
             TexKey::ItemTexture(id) => Identifier::parse(id)
                 .map_err(anyhow::Error::from)
                 .and_then(|id| assets.texture_first_frame(&id))
-                .map(|i| (i, SpriteMeta::Stretch)),
+                .map(|i| (i, SpriteMeta::Stretch, None)),
             TexKey::FontPage(p) => self
                 .font
                 .page(*p as usize)
-                .map(|img| (img.as_ref().clone(), SpriteMeta::Stretch))
+                .map(|img| (img.as_ref().clone(), SpriteMeta::Stretch, None))
                 .ok_or_else(|| anyhow::anyhow!("no font page {p}")),
             TexKey::Hex(index) => self
                 .font
                 .hex_glyph(*index)
-                .map(|g| (hex_image(g), SpriteMeta::Stretch))
+                .map(|g| (hex_image(g), SpriteMeta::Stretch, None))
                 .ok_or_else(|| anyhow::anyhow!("no unihex glyph {index}")),
-            TexKey::Missing => Ok((missing_image(), SpriteMeta::Stretch)),
+            TexKey::Missing => Ok((missing_image(), SpriteMeta::Stretch, None)),
         };
         match loaded {
-            Ok((image, meta)) => self.insert_entry(key.clone(), Arc::new(image), meta),
+            Ok((image, meta, animation)) => {
+                self.insert_entry(key.clone(), Arc::new(image), meta, animation)
+            }
             Err(e) => {
                 tracing::warn!("GUI texture {key:?} unavailable: {e:#}");
                 self.keys.insert(key.clone(), 0);
@@ -657,13 +702,70 @@ impl GuiRenderer {
             );
         }
         let rect = [x, y, w, h];
-        self.entries[index as usize].rect = Some(rect);
+        let e = &mut self.entries[index as usize];
+        e.rect = Some(rect);
+        // The initial frame just went in; `animate` re-uploads a different current frame.
+        e.frame = e
+            .animation
+            .as_ref()
+            .and_then(|a| a.schedule.frames.first().map(|f| f.index))
+            .unwrap_or(0);
         rect
     }
 
     fn lookup(&mut self, key: &TexKey, assets: &mut Assets) -> ([u32; 4], u32) {
         let i = self.entry(key, assets);
         (self.resident(i), i)
+    }
+
+    /// Re-uploads the current frame of every resident animated texture (fire, nether portal)
+    /// when the tick's frame changed, like vanilla's sprite animation.
+    fn animate(&mut self) {
+        let tick = self.animation_tick;
+        for i in 0..self.entries.len() {
+            let Some(rect) = self.entries[i].rect else {
+                continue;
+            };
+            let e = &self.entries[i];
+            let Some(anim) = &e.animation else {
+                continue;
+            };
+            // The screen-effect animations (fire, nether portal) do not interpolate, so the
+            // exact frame is what vanilla shows (`frame_at`'s blend is 0 for them).
+            let (index, _, _) = frame_at(&anim.schedule, tick);
+            if e.frame == index {
+                continue;
+            }
+            let Some(frame) = anim.frames.get(index as usize) else {
+                continue;
+            };
+            let pixels = frame.as_raw();
+            let (w, h) = (rect[2], rect[3]);
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.atlas,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: rect[0],
+                        y: rect[1],
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * w),
+                    rows_per_image: Some(h),
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+            self.entries[i].frame = index;
+        }
     }
 
     fn reset_atlas(&mut self) {
@@ -713,6 +815,8 @@ impl GuiRenderer {
                 tracing::warn!("GUI atlas too small for one frame's textures");
             }
         }
+        // Animated textures (fire, nether portal): bring the resident frames up to date.
+        self.animate();
         let scale = frame.scale.max(1) as f32;
         let uniforms = GuiUniforms {
             size: [target.0 as f32 / scale, target.1 as f32 / scale],
@@ -760,28 +864,28 @@ impl GuiRenderer {
     ) {
         self.vertices.clear();
         self.batches.clear();
-        // Name tags first, under the HUD: a 25% black background and white text, drawn at the
-        // origin and then moved and scaled into place.
+        // Name tags first, under the HUD, following `SubmitNodeCollection.submitNameTag`: a
+        // black background box at `Options.textBackgroundOpacity` (0.25) and text at
+        // `max((bg + 0.75) * 0.5, 0.5)` alpha. When not crouching (`see_through`) the opaque
+        // solid pass is drawn on top; crouching keeps only the dimmer see-through pass, so a
+        // sneaking player's tag is darker (`EntityRenderer.submitNameDisplay`).
         for tag in nametags {
             let start = self.vertices.len();
-            let w = self.font.width_f32(&tag.text);
-            let x = -(w / 2.0).floor();
-            self.solid(
-                [0.0; 2],
-                [x - 1.0, -1.0, x + w, 8.0],
-                [0, 0, 0, 64],
-                [0, 0, 0, 64],
-            );
-            self.text(
-                [0.0; 2],
-                x,
-                0.0,
-                &tag.text,
-                0xFFFF_FFFF,
-                false,
-                TextStyle::default(),
-                assets,
-            );
+            let bg: [u8; 4] = [0, 0, 0, 64];
+            let text_alpha = 0x80FF_FFFFu32;
+            // The see-through line: background + semi-transparent text.
+            self.nametag_line([0.0; 2], 0.0, &tag.text, text_alpha, bg, assets);
+            if tag.see_through {
+                self.nametag_line([0.0; 2], 0.0, &tag.text, 0xFFFF_FFFF, [0, 0, 0, 0], assets);
+            }
+            // The scoreboard below-name line, one text line (`9 * 1.15`) under the name.
+            if let Some(bn) = &tag.below_name {
+                let oy = 9.0 * 1.15;
+                self.nametag_line([0.0; 2], oy, bn, text_alpha, bg, assets);
+                if tag.see_through {
+                    self.nametag_line([0.0; 2], oy, bn, 0xFFFF_FFFF, [0, 0, 0, 0], assets);
+                }
+            }
             for v in &mut self.vertices[start..] {
                 v.pos = [tag.x + v.pos[0] * tag.scale, tag.y + v.pos[1] * tag.scale];
             }
@@ -1242,6 +1346,25 @@ impl GuiRenderer {
         self.text_pass(o, x, y, text, color, base, false, assets);
     }
 
+    /// One centred name tag line at local `(x, y)` in text pixels: the background box (when
+    /// `bg` has alpha) and the text. The caller places and scales the vertices.
+    fn nametag_line(
+        &mut self,
+        o: [f32; 2],
+        y: f32,
+        text: &str,
+        color: u32,
+        bg: [u8; 4],
+        assets: &mut Assets,
+    ) {
+        let w = self.font.width_f32(text);
+        let x = -(w / 2.0).floor();
+        if bg[3] != 0 {
+            self.solid(o, [x - 1.0, y - 1.0, x + w, y + 8.0], bg, bg);
+        }
+        self.text(o, x, y, text, color, false, TextStyle::default(), assets);
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn text_pass(
         &mut self,
@@ -1409,7 +1532,7 @@ impl GuiRenderer {
         tris.clear();
         // GUI inventory preview: full block and sky light (vanilla's GUI entity light
         // 0xF000F0), so the model renders at full brightness.
-        crate::entity::emit_part(
+        crate::entity::emit_part_tinted(
             &mut tris,
             &e.model,
             &e.model.root,
@@ -1418,6 +1541,7 @@ impl GuiRenderer {
             rect,
             (15, 15),
             0.0,
+            [1.0; 3],
         );
         // Back faces off, then back to front.
         let mut order: Vec<(f32, usize)> = tris

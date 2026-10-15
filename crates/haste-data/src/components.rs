@@ -1,6 +1,6 @@
 //! Item default data components, from the data generator's `RegistryComponentsReport`
-//! (`reports/components/item/<name>.json`, one file per item that has any non-empty default
-//! components). A stack's component patch only carries what differs from the item's prototype;
+//! (`reports/minecraft/components/item/<name>.json`, one file per item that has any non-empty
+//! default components). A stack's component patch only carries what differs from the item's prototype;
 //! the defaults live in the reports, and Haste does not run vanilla's Java item registry, so it
 //! reads the report instead.
 //!
@@ -282,10 +282,11 @@ impl ItemComponents {
         self.attributes.is_empty()
     }
 
-    /// Loads every `reports/components/item/*.json` under `components_dir` (the report's
-    /// `components/item` directory), mapping each file's name through `registries`. A missing
-    /// directory or unreadable file yields an empty table (armour then draws nothing), never an
-    /// error: the components report is optional data.
+    /// Loads every `reports/minecraft/components/item/*.json` under `components_dir` (the
+    /// report's `minecraft/components/item` directory), mapping each file's name through
+    /// `registries`. A missing directory or unreadable file yields an empty table (armour then
+    /// draws nothing), never an error: the components report is optional data. `GameData::load`
+    /// warns (naming `haste setup`) when the directory is absent.
     pub fn load(components_dir: &Path, registries: &Registries) -> ItemComponents {
         let mut by_name: AHashMap<String, ItemEquippable> = AHashMap::new();
         let mut attributes: HashMap<Identifier, Vec<AttributeModifier>> = HashMap::new();
