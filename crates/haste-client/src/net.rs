@@ -1017,8 +1017,6 @@ pub struct Session {
     aggregated_nanos_per_chunk: f64,
     /// `oldSamplesWeight` (capped at 49).
     old_samples_weight: i32,
-    /// Whether the first `set_chunk_cache_center` was logged (diagnostics).
-    cache_center_logged: bool,
 }
 
 impl Session {
@@ -1071,7 +1069,6 @@ impl Session {
             batch_started_at: None,
             aggregated_nanos_per_chunk: 2_000_000.0,
             old_samples_weight: 1,
-            cache_center_logged: false,
         }
     }
 
@@ -1350,13 +1347,10 @@ impl Session {
                 self.counters.teleports += 1;
             }
             // Vanilla `handleSetChunkCacheCenter` moves the ClientChunkCache's window; our
-            // world keeps every chunk it is given, so there is nothing to move — but log the
-            // first so the far-teleport diagnostics show the server re-centring.
+            // world keeps every chunk it is given, so there is nothing to move. Debug-logged:
+            // it fires on every chunk border crossing, which would flood long sessions.
             P::SetChunkCacheCenter(c) => {
-                if !self.cache_center_logged {
-                    self.cache_center_logged = true;
-                    tracing::info!("set_chunk_cache_center ({}, {})", c.x, c.z);
-                }
+                tracing::debug!("set_chunk_cache_center ({}, {})", c.x, c.z);
             }
             // The chunk batch flow control (vanilla `ClientPacketListener.handleChunkBatchStart`/
             // `handleChunkBatchFinished` + `ChunkBatchSizeCalculator`): time the batch, fold the
@@ -1364,11 +1358,11 @@ impl Session {
             // Without the reply the server never sends the next batch, so a teleport's new area
             // never arrives.
             P::ChunkBatchStart(_) => {
-                tracing::info!("chunk batch start");
+                tracing::debug!("chunk batch start");
                 self.batch_started_at = Some(std::time::Instant::now());
             }
             P::ChunkBatchFinished(b) => {
-                tracing::info!("chunk batch finished: {} chunks", b.batch_size);
+                tracing::debug!("chunk batch finished: {} chunks", b.batch_size);
                 if b.batch_size > 0 {
                     if let Some(start) = self.batch_started_at.take() {
                         let nanos_per_chunk =
