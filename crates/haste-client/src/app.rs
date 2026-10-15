@@ -383,6 +383,18 @@ impl DebugEnv {
     }
 }
 
+/// `--hud on|off` (vanilla's F1) for this run, set once from the arguments before any join.
+static HUD_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Applies `--hud`: "on" or "off" (vanilla's F1: no HUD, no hand, no block outline).
+pub fn set_hud_from_args(hud: &str) -> anyhow::Result<()> {
+    if hud != "on" && hud != "off" {
+        anyhow::bail!("--hud must be \"on\" or \"off\" (vanilla's F1)");
+    }
+    HUD_ENABLED.store(hud == "on", std::sync::atomic::Ordering::Relaxed);
+    Ok(())
+}
+
 impl Session {
     /// `sound`: open the audio output (the window only; screenshots and the benchmark stay
     /// silent so they neither make noise nor measure the audio thread). `address` is the server
@@ -494,12 +506,10 @@ impl Session {
             biome_climates.clone(),
             options.clone(),
         ));
-        if args.hud != "on" && args.hud != "off" {
-            anyhow::bail!("--hud must be \"on\" or \"off\" (vanilla's F1)");
-        }
-        shared
-            .hud_enabled
-            .store(args.hud == "on", std::sync::atomic::Ordering::Relaxed);
+        shared.hud_enabled.store(
+            HUD_ENABLED.load(std::sync::atomic::Ordering::Relaxed),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         if sounds.is_some() {
             *shared.sound.lock() = sounds;
         }

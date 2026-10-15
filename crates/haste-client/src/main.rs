@@ -118,6 +118,7 @@ fn main() -> anyhow::Result<()> {
     if let Some(dir) = &args.singleplayer_dir {
         haste_setup::worlds::set_dir(dir.clone());
     }
+    app::set_hud_from_args(&args.hud)?;
     if let Some(cmd) = args.command {
         return launch::run(cmd, &args.username);
     }
