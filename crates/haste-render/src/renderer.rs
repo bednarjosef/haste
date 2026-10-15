@@ -2057,6 +2057,7 @@ impl Renderer {
                     let c = ChunkPos::new(section.x, section.z);
                     column(c) & (1u32 << si) != 0 || bonus.contains(&(c, si))
                 },
+                frame.partial_tick,
                 &mut self.assets,
             );
         } else {

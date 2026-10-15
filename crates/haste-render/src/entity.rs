@@ -58,6 +58,8 @@ pub enum ItemDisplay {
     Head,
     Fixed,
     Ground,
+    /// `on_shelf` (`ShelfRenderer`: items on a shelf block, small and sunk into the board).
+    OnShelf,
 }
 
 /// How many copies of the item a stack draws: `ItemClusterRenderState
@@ -967,50 +969,77 @@ impl EntityRenderer {
         // `ItemEntity.bobOffs`: a per-entity random phase in [0, 2pi); ours is a hash of
         // the entity id (the player cannot tell the difference).
         let bob_offs = entity_phase(e.id);
-        // The model's bounding box (through the ground transform) decides the lift and
+        // The model's bounding box through the ground transform: it decides the lift and
         // whether the copies of a stack spread in 3D or line up flat
         // (`submitMultipleFromCount` branches on the z size).
-        let (bbox_min, bbox_max) = item_model_bbox(&model);
+        let (bbox_min, bbox_max) = item_model_bbox(&model, &ItemDisplay::Ground);
         let lift = item_entity_lift(bbox_min.y);
         let base = Mat4::from_translation(
             (e.pos - camera).as_vec3()
                 + Vec3::new(0.0, lift + item_entity_bob(dropped.age, bob_offs), 0.0),
         ) * Mat4::from_rotation_y(item_entity_spin(dropped.age, bob_offs));
-        let copies = item_entity_copies(dropped.count) as usize;
         // `ItemClusterRenderState.getSeedForItemStack`: the renderer reseeds its random
         // with the item each frame, so the copy offsets are stable per item type (ours
         // hashes the registry id and stream index; matching Java's Random is not needed).
         let rand = |i: u32| seeded_float(dropped.item.0, i);
-        // The copies: the first sits at the origin, each further one offset by
-        // `submitMultipleFromCount` (3D: +-0.15 in x, y and z; flat: spread along z by
-        // 1.5x the sprite depth, jittered +-0.075 in x and y).
+        let mut out = std::mem::take(&mut self.vertices);
+        self.emit_item_copies(
+            &mut out,
+            &model,
+            base,
+            item_entity_copies(dropped.count),
+            rand,
+            light,
+            ItemDisplay::Ground,
+            (bbox_min, bbox_max),
+            assets,
+        );
+        self.vertices = out;
+    }
+
+    /// The copies of an item stack, laid out like vanilla's
+    /// `ItemEntityRenderer.submitMultipleFromCount`: the first copy at `base`, then one per
+    /// extra copy of the stack, offset by `+-0.15` in all three axes when the model is thick,
+    /// or lined up along z (by 1.5x the model's depth, jittered `+-0.075` in x and y) when
+    /// it is flat. `rand` supplies the jitter in [0,1) by stream index; the block entities
+    /// that draw a stack (the vault) and the dropped items share this exact layout.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_item_copies(
+        &mut self,
+        out: &mut Vec<EntityVertex>,
+        model: &haste_assets::ItemModel,
+        base: Mat4,
+        copies: u32,
+        rand: impl Fn(u32) -> f32,
+        light: (u8, u8),
+        display: ItemDisplay,
+        bbox: (Vec3, Vec3),
+        assets: &mut Assets,
+    ) {
+        let (bbox_min, bbox_max) = bbox;
         let depth = bbox_max.z - bbox_min.z;
         let flat = depth <= 1.0 / 16.0;
         let step = depth * 1.5;
-        // Take the vertex buffer out so the texture lookup (`&mut self`) and the emission
-        // (the buffer) do not fight over the borrow.
-        let mut out = std::mem::take(&mut self.vertices);
         for copy in 0..copies {
             let mut off = Vec3::ZERO;
             if copy > 0 {
                 if flat {
                     off = Vec3::new(
-                        (rand(2 * copy as u32 - 2) * 2.0 - 1.0) * 0.075,
-                        (rand(2 * copy as u32 - 1) * 2.0 - 1.0) * 0.075,
-                        step * copy as f32 - step * (copies as f32 - 1.0) / 2.0,
+                        (rand(2 * copy - 2) * 2.0 - 1.0) * 0.075,
+                        (rand(2 * copy - 1) * 2.0 - 1.0) * 0.075,
+                        step * copy as f32 - step * (copies.saturating_sub(1)) as f32 / 2.0,
                     );
                 } else {
                     off = Vec3::new(
-                        (rand(3 * copy as u32 - 3) * 2.0 - 1.0) * 0.15,
-                        (rand(3 * copy as u32 - 2) * 2.0 - 1.0) * 0.15,
-                        (rand(3 * copy as u32 - 1) * 2.0 - 1.0) * 0.15,
+                        (rand(3 * copy - 3) * 2.0 - 1.0) * 0.15,
+                        (rand(3 * copy - 2) * 2.0 - 1.0) * 0.15,
+                        (rand(3 * copy - 1) * 2.0 - 1.0) * 0.15,
                     );
                 }
             }
             let m = base * Mat4::from_translation(off);
-            self.emit_item(&mut out, &model, m, light, ItemDisplay::Ground, assets);
+            self.emit_item(out, model, m, light, display, assets);
         }
-        self.vertices = out;
     }
 
     /// One item frame, following vanilla's `ItemFrameRenderer.submit`: the frame block model at
@@ -1223,6 +1252,7 @@ impl EntityRenderer {
         instances: &[crate::blockentity::BlockEntityInstance],
         camera: glam::DVec3,
         visible: impl Fn(&crate::blockentity::BlockEntityInstance) -> bool,
+        partial: f32,
         assets: &mut Assets,
     ) -> u32 {
         let start = self.vertices.len();
@@ -1252,6 +1282,125 @@ impl EntityRenderer {
                 drawn += 1;
                 continue;
             }
+            // The item and mob block entities draw through the item and cube emitters: the
+            // item models come from the same asset chain the held and dropped items use
+            // (cached per registry id, so a frame walks the cache, never the jar).
+            if let Some(kind) = crate::blockentity::item_kind(&inst.kind) {
+                let light = (inst.light.1, inst.light.0);
+                let mut out = std::mem::take(&mut self.vertices);
+                match kind {
+                    crate::blockentity::ItemBlockEntity::Campfire(campfire) => {
+                        for slot in 0..campfire.items.len() {
+                            let Some(item) = campfire.get(slot) else {
+                                continue;
+                            };
+                            let Some(model) = self.item_model_for(item, assets) else {
+                                continue;
+                            };
+                            let m = crate::blockentity::campfire_item_matrix(
+                                inst.pos, inst.facing, slot, camera,
+                            );
+                            self.emit_item(
+                                &mut out,
+                                &model,
+                                m,
+                                light,
+                                ItemDisplay::Fixed,
+                                assets,
+                            );
+                        }
+                    }
+                    crate::blockentity::ItemBlockEntity::Shelf(shelf) => {
+                        for slot in 0..shelf.items.len() {
+                            let Some(item) = shelf.get(slot) else {
+                                continue;
+                            };
+                            let Some(model) = self.item_model_for(item, assets) else {
+                                continue;
+                            };
+                            let bbox = item_model_bbox(&model, &ItemDisplay::OnShelf);
+                            let m = crate::blockentity::shelf_item_matrix(
+                                inst.pos,
+                                inst.facing,
+                                slot,
+                                shelf.align_to_bottom,
+                                crate::blockentity::shelf_item_offset_y(
+                                    bbox,
+                                    shelf.align_to_bottom,
+                                ),
+                                camera,
+                            );
+                            self.emit_item(
+                                &mut out,
+                                &model,
+                                m,
+                                light,
+                                ItemDisplay::OnShelf,
+                                assets,
+                            );
+                        }
+                    }
+                    crate::blockentity::ItemBlockEntity::Vault(vault) => {
+                        let copies = vault.copies();
+                        if copies > 0 {
+                            if let Some(model) = self.item_model_for(vault.item, assets) {
+                                let bbox = item_model_bbox(&model, &ItemDisplay::Ground);
+                                let base = crate::blockentity::vault_root(
+                                    inst.pos,
+                                    vault.spin.at(partial),
+                                    camera,
+                                );
+                                let rand = |i: u32| seeded_float(vault.item.0, i);
+                                self.emit_item_copies(
+                                    &mut out,
+                                    &model,
+                                    base,
+                                    copies,
+                                    rand,
+                                    light,
+                                    ItemDisplay::Ground,
+                                    bbox,
+                                    assets,
+                                );
+                            }
+                        }
+                    }
+                    crate::blockentity::ItemBlockEntity::Brushable(b) => {
+                        let Some(dir) = b.hit_direction else {
+                            continue;
+                        };
+                        let Some(model) = self.item_model_for(b.item, assets) else {
+                            continue;
+                        };
+                        let m = crate::blockentity::brushable_item_matrix(
+                            inst.pos, dir, b.dusted, camera,
+                        );
+                        self.emit_item(
+                            &mut out,
+                            &model,
+                            m,
+                            light,
+                            ItemDisplay::Fixed,
+                            assets,
+                        );
+                    }
+                }
+                self.vertices = out;
+                drawn += 1;
+                continue;
+            }
+            // A spawner's display entity is a cube model posed by the block entity's own
+            // transform (`emit_spawner`), not by the item emitters.
+            if let crate::blockentity::BlockEntityKind::Spawner(ref spawner) = inst.kind {
+                if let Some(model) = spawner.model.as_ref() {
+                    let rect = self.texture_rect(&model.texture, assets);
+                    let mut out = std::mem::take(&mut self.vertices);
+                    crate::blockentity::emit_spawner(&mut out, inst, model, rect, camera, partial);
+                    self.vertices = out;
+                    drawn += 1;
+                }
+                continue;
+            }
             let texture = match inst.kind {
                 crate::blockentity::BlockEntityKind::Chest(m) => {
                     crate::blockentity::chest_texture(m, inst.half)
@@ -1264,6 +1413,12 @@ impl EntityRenderer {
                 }
                 crate::blockentity::BlockEntityKind::Sign { .. } => unreachable!(),
                 crate::blockentity::BlockEntityKind::Banner { .. } => unreachable!(),
+                // The item and mob block entities left already.
+                crate::blockentity::BlockEntityKind::Campfire(_)
+                | crate::blockentity::BlockEntityKind::Spawner(_)
+                | crate::blockentity::BlockEntityKind::Vault(_)
+                | crate::blockentity::BlockEntityKind::Shelf(_)
+                | crate::blockentity::BlockEntityKind::Brushable(_) => unreachable!(),
             };
             let rect = self.texture_rect(&texture, assets);
             let out = &mut self.vertices;
@@ -1623,6 +1778,7 @@ impl EntityRenderer {
                 ItemDisplay::Head => (&part.head, false),
                 ItemDisplay::Fixed => (&part.fixed, false),
                 ItemDisplay::Ground => (&part.ground, false),
+                ItemDisplay::OnShelf => (&part.on_shelf, false),
             };
             let m = root * item_display_matrix(part, display, left);
             let nm = Mat3::from_mat4(m).inverse().transpose();
@@ -2261,12 +2417,13 @@ pub(crate) fn emit_part_tinted(
     }
 }
 
-/// The model's bounding box in the space `emit_item` draws it through the ground display
-/// (block units, after the -0.5 centring `ItemTransform.apply` ends with): the transformed
-/// element or extruded-sprite positions. Vanilla's `ItemStackRenderState.getModelBoundingBox`
-/// (which drives `ItemEntityRenderer.submit`'s lift and the stack-copy layout) computes
-/// exactly this; a model with no geometry gets vanilla's empty box (a point at the origin).
-fn item_model_bbox(model: &haste_assets::ItemModel) -> (Vec3, Vec3) {
+/// The model's bounding box in the space `emit_item` draws it through the given display
+/// transform (block units, after the -0.5 centring `ItemTransform.apply` ends with): the
+/// transformed element or extruded-sprite positions. Vanilla's
+/// `ItemStackRenderState.getModelBoundingBox` (which drives `ItemEntityRenderer.submit`'s
+/// lift, the stack-copy layout and `ShelfRenderer`'s vertical offset) computes exactly this;
+/// a model with no geometry gets vanilla's empty box (a point at the origin).
+fn item_model_bbox(model: &haste_assets::ItemModel, display: &ItemDisplay) -> (Vec3, Vec3) {
     let mut min = Vec3::splat(f32::INFINITY);
     let mut max = Vec3::splat(f32::NEG_INFINITY);
     let mut any = false;
@@ -2276,7 +2433,18 @@ fn item_model_bbox(model: &haste_assets::ItemModel) -> (Vec3, Vec3) {
         any = true;
     };
     for part in &model.parts {
-        let m = crate::gui::display_matrix(&part.ground)
+        // The composition `item_display_matrix` applies: the display transform, the model's
+        // composite transformation, then the -0.5 recentring (no left-hand fix here: block
+        // entities never draw an item in the left hand).
+        let display = match display {
+            ItemDisplay::FirstPerson => &part.firstperson,
+            ItemDisplay::ThirdPersonRight | ItemDisplay::ThirdPersonLeft => &part.thirdperson,
+            ItemDisplay::Head => &part.head,
+            ItemDisplay::Fixed => &part.fixed,
+            ItemDisplay::Ground => &part.ground,
+            ItemDisplay::OnShelf => &part.on_shelf,
+        };
+        let m = crate::gui::display_matrix(display)
             * crate::gui::part_matrix(&part.transformation)
             * Mat4::from_translation(Vec3::splat(-0.5));
         match &part.geometry {
@@ -2566,6 +2734,7 @@ fn missing_item_model() -> std::sync::Arc<haste_assets::ItemModel> {
                     head: haste_assets::DisplayTransform::IDENTITY,
                     ground: haste_assets::DisplayTransform::IDENTITY,
                     fixed: haste_assets::DisplayTransform::IDENTITY,
+                    on_shelf: haste_assets::DisplayTransform::IDENTITY,
                     gui_light_front: false,
                     transformation: None,
                 }],
@@ -3288,6 +3457,7 @@ mod tests {
             head: haste_assets::DisplayTransform::IDENTITY,
             ground: haste_assets::DisplayTransform::IDENTITY,
             fixed: haste_assets::DisplayTransform::IDENTITY,
+            on_shelf: haste_assets::DisplayTransform::IDENTITY,
             gui_light_front: false,
             transformation: None,
         };

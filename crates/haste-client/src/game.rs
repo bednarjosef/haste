@@ -436,6 +436,11 @@ pub struct Shared {
     /// end) for powered skulls (vanilla `SkullBlockEntity.animation`'s counter), copied
     /// once per tick.
     pub skull_anims: Mutex<Vec<(BlockPos, (f32, f32))>>,
+    /// Vault and spawner spins by block position: (spin at the last tick's start and end) in
+    /// degrees. Vanilla's `VaultClientData.updateDisplayItemSpin` (10 degrees a tick) and
+    /// `BaseSpawner.clientTick`'s / `TrialSpawner.tickClient`'s mob spin; the game tick
+    /// advances them, the renderer interpolates them.
+    pub block_entity_spins: Mutex<Vec<(BlockPos, (f32, f32))>>,
     /// Block entity type names by synced registry id (`minecraft:block_entity_type`), for
     /// resolving what each stored block entity is; the static registry's order when the server
     /// did not sync one (vanilla servers' ids agree with the data generator's).
@@ -553,6 +558,7 @@ impl Shared {
             breaking: Mutex::new(Vec::new()),
             block_entity_lids: Mutex::new(Vec::new()),
             skull_anims: Mutex::new(Vec::new()),
+            block_entity_spins: Mutex::new(Vec::new()),
             block_entity_names,
             biome_climates,
             particles: Mutex::new(particles),
@@ -1076,6 +1082,76 @@ fn tick_once(
             }
         }
     }
+    // The vaults' and spawners' spins (vanilla `VaultClientData.updateDisplayItemSpin` and
+    // the spawners' client tick): every vault's displayed item turns 10 degrees a tick, a
+    // spawner's display mob turns while a player is within its required player range.
+    {
+        let world = shared.world.read();
+        let blocks = &shared.data.blocks;
+        let names = &shared.block_entity_names;
+        let player = driver.session.player.state.pos;
+        let game_time = driver.session.world_age;
+        let mut spins = shared.block_entity_spins.lock();
+        spins.retain_mut(|(pos, spin)| {
+            let Some(be) = world.block_entity(*pos) else {
+                return false;
+            };
+            let Some(name) = names.get(be.kind as usize) else {
+                return false;
+            };
+            let minecraft = name.namespace() == "minecraft";
+            let rate =             if minecraft && name.path() == "vault" {
+                // `VaultClientData.ROTATION_SPEED` (10 degrees a tick, wrapped).
+                Some(10.0)
+            } else if minecraft && matches!(name.path(), "mob_spawner" | "trial_spawner") {
+                if spawner_spins(*pos, blocks, world.block_state(*pos), player) {
+                    Some(spawner_spin_rate(
+                        &be.nbt,
+                        name.path() == "trial_spawner",
+                        game_time,
+                        blocks
+                            .property_value(world.block_state(*pos), "trial_spawner_state")
+                            .unwrap_or(""),
+                    ))
+                } else {
+                    // No player in range: vanilla holds the spin (`oSpin = spin`).
+                    Some(0.0)
+                }
+            } else {
+                None
+            };
+            let Some(rate) = rate else {
+                return false;
+            };
+            spin.0 = spin.1;
+            if rate > 0.0 {
+                // Vanilla's `(spin + rate) % 360`; a blocked trial spawner holds at 0.
+                spin.1 = (spin.1 + rate).rem_euclid(360.0);
+            }
+            true
+        });
+        // New vaults and spawners start their spin at 0.
+        'outer: for chunk in world.loaded_chunks() {
+            for (pos, be) in world.block_entities_in(chunk) {
+                let Some(name) = names.get(be.kind as usize) else {
+                    continue;
+                };
+                if name.namespace() != "minecraft"
+                    || !matches!(
+                        name.path(),
+                        "vault" | "mob_spawner" | "trial_spawner"
+                    )
+                    || spins.iter().any(|(p, _)| p == &pos)
+                {
+                    continue;
+                }
+                spins.push((pos, (0.0, 0.0)));
+                if spins.len() > 1024 {
+                    break 'outer;
+                }
+            }
+        }
+    }
     // Particles: spawn what the packets brought, then one 20 Hz simulation step. The camera
     // for `ClientLevel.doAddParticle`'s 32-block limiter is the player's eye.
     {
@@ -1259,6 +1335,81 @@ fn eye_in_lava(world: &World, data: &GameData, eye: DVec3) -> bool {
         .is_some_and(|a| a.kind == FluidKind::Lava);
     let surface = p.y as f64 + if full { 1.0 } else { f.height as f64 };
     eye.y <= surface
+}
+
+/// Vanilla `BaseSpawner.isNearPlayer`: an alive player within the spawner's required player
+/// range (16 blocks) of its centre. The client has only its own player, so a spawner spins
+/// its mob exactly when the camera is close, like vanilla's single-player client.
+fn spawner_spins(
+    pos: BlockPos,
+    blocks: &haste_data::BlockStates,
+    state: haste_core::BlockStateId,
+    player: DVec3,
+) -> bool {
+    let centre = DVec3::new(pos.x as f64 + 0.5, pos.y as f64 + 0.5, pos.z as f64 + 0.5);
+    let range = blocks
+        .property_value(state, "required_player_range")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(16.0);
+    player.distance_squared(centre) <= range * range
+}
+
+/// The degrees a spawner's display mob turns in one tick, vanilla `BaseSpawner.clientTick`'s
+/// `1000 / (spawnDelay + 200)` and `TrialSpawner.tickClient`'s
+/// `spinningMobSpeed / (spawnDelay + 200)`. A trial spawner's spinning mob speed comes from
+/// its block state (`TrialSpawnerState`: 200 waiting for players, 1000 active, -1 for the
+/// states with no spinning mob) and its remaining spawn delay from `next_mob_spawns_at`.
+fn spawner_spin_rate(nbt: &[u8], trial: bool, game_time: i64, state: &str) -> f32 {
+    // The trial spawner's state decides whether a mob spins at all (vanilla
+    // `TrialSpawnerState.hasSpinningMob`).
+    let speed = if trial {
+        trial_spinning_mob_speed(state)
+    } else {
+        1000.0
+    };
+    if speed <= 0.0 {
+        return 0.0;
+    }
+    let delay = if trial {
+        trial_spawn_delay(nbt, game_time)
+    } else {
+        spawner_delay(nbt)
+    };
+    (speed / (delay.max(0) as f64 + 200.0)) as f32
+}
+
+/// Vanilla `BaseSpawner.spawnDelay`, from the block entity's `Delay` tag (a short, default 20).
+fn spawner_delay(nbt: &[u8]) -> i32 {
+    read_block_entity_nbt(nbt)
+        .and_then(|doc| doc.root_tag.get_short("Delay"))
+        .unwrap_or(20) as i32
+}
+
+/// Vanilla `TrialSpawnerStateData.nextMobSpawnsAt` as the remaining delay
+/// (`max(0, nextMobSpawnsAt - level.getGameTime())`).
+fn trial_spawn_delay(nbt: &[u8], game_time: i64) -> i32 {
+    read_block_entity_nbt(nbt)
+        .and_then(|doc| doc.root_tag.get_long("next_mob_spawns_at"))
+        .map(|at| (at - game_time).max(0) as i32)
+        .unwrap_or(0)
+}
+
+/// Vanilla `TrialSpawnerState.spinningMobSpeed` for the state the block is in: waiting for
+/// players 200, active 1000, every other state has no spinning mob (-1).
+fn trial_spinning_mob_speed(state: &str) -> f64 {
+    match state {
+        "waiting_for_players" => 200.0,
+        "active" => 1000.0,
+        _ => -1.0,
+    }
+}
+
+/// A block entity's NBT payload (the network variant `read_unnamed` reads), or `None`.
+fn read_block_entity_nbt(nbt: &[u8]) -> Option<haste_protocol::nbt::Nbt> {
+    use haste_protocol::nbt::deserializer::NbtReadHelperJava;
+    let mut cursor = std::io::Cursor::new(nbt);
+    let mut helper = NbtReadHelperJava::new(&mut cursor);
+    haste_protocol::nbt::Nbt::read_unnamed(&mut helper).ok()
 }
 
 #[cfg(test)]
