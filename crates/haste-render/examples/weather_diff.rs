@@ -26,11 +26,11 @@ fn main() {
     let mut sky_total = 0u64;
     let mut sum = 0u64;
     let total = (w as u64) * (h as u64);
-    for ((x, y, pa), (_, _, pb)) in a.enumerate_pixels().zip(b.enumerate_pixels()) {
+    for ((_x, y, pa), (_, _, pb)) in a.enumerate_pixels().zip(b.enumerate_pixels()) {
         let err =
             pa.0.iter()
                 .zip(&pb.0)
-                .map(|(ca, cb)| (*ca as i32 - *cb as i32).unsigned_abs() as u32)
+                .map(|(ca, cb)| (*ca as i32 - *cb as i32).unsigned_abs())
                 .max()
                 .unwrap_or(0);
         sum += err as u64;
