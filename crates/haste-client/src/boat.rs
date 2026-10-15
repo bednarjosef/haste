@@ -225,7 +225,7 @@ impl Boat {
                         continue;
                     };
                     if (y as f32 + height) as f64 > max_y {
-                        if height < SOURCE_HEIGHT {
+                        if !is_source(height) {
                             return Some(Status::UnderFlowingWater);
                         }
                         under_water = Some(Status::UnderWater);
@@ -424,8 +424,10 @@ impl Boat {
         let delta = self.delta;
         let movement = collide(self.aabb(), delta, env.world, env.shapes);
         self.pos += movement;
-        let x_collision = delta.x != movement.x;
-        let z_collision = delta.z != movement.z;
+        // Vanilla `Entity.move`: the horizontal collision flags compare with `Mth.equal` (a
+        // 1e-5 tolerance), the vertical one with plain `!=`, and on-ground is a downward one.
+        let x_collision = !mth_equal(delta.x, movement.x);
+        let z_collision = !mth_equal(delta.z, movement.z);
         self.horizontal_collision = x_collision || z_collision;
         // The side that simulates the boat also owns its vertical collision and on-ground flag.
         self.vertical_collision = delta.y != movement.y;
@@ -469,8 +471,43 @@ impl Boat {
 }
 
 /// A water source's surface height within its cell: the split between standing in water and
-/// under flowing water (`FluidState.getHeight`: level 0, and a waterlogged block, = 8/9).
+/// under flowing water (`FluidState.getHeight`: level 0, and a waterlogged block, = 8/9, and a
+/// falling column 1.0, which is not a source).
 const SOURCE_HEIGHT: f32 = 8.0 / 9.0;
+
+/// Whether a cell's water height means a source rather than a flow (`FluidState.isSource`, which
+/// `FluidInfo` does not carry: a source and a waterlogged block both sit at 8/9, and every other
+/// height, the falling column's 1.0 included, is a flow).
+fn is_source(height: f32) -> bool {
+    (height - SOURCE_HEIGHT).abs() < f32::EPSILON
+}
+
+/// How far a boat's passenger may look away from the boat's heading (vanilla's
+/// `AbstractBoat.clampRotation` 105 degrees for a passenger that is not a mob).
+const BOAT_LOOK_LIMIT: f32 = 105.0;
+
+/// The look a boat's passenger ends a tick with (vanilla `AbstractBoat.positionRider`): the
+/// boat's turn drags the look with it (`yRot + deltaRotation`), then `clampRotation` pulls it
+/// back to within 105 degrees of the boat's own heading.
+pub fn passenger_yaw(look: f32, boat: &Boat) -> f32 {
+    let mut yaw = look + boat.delta_rotation;
+    let delta = wrap_degrees(yaw - boat.yaw);
+    let target = delta.clamp(-BOAT_LOOK_LIMIT, BOAT_LOOK_LIMIT);
+    yaw += target - delta;
+    yaw
+}
+
+/// Vanilla `Mth.wrapDegrees`: the same angle, in (-180, 180).
+fn wrap_degrees(mut degrees: f32) -> f32 {
+    degrees %= 360.0;
+    if degrees >= 180.0 {
+        degrees - 360.0
+    } else if degrees < -180.0 {
+        degrees + 360.0
+    } else {
+        degrees
+    }
+}
 
 /// Whether a `minecraft:entity_type` registry path is vanilla's `AbstractBoat` family
 /// (`minecraft:oak_boat`, `minecraft:bamboo_raft`, `minecraft:oak_chest_boat`, ...). Only the
@@ -503,6 +540,12 @@ fn block_touches(env: &BoatEnv<'_>, x: i32, y: i32, z: i32, slab: &Aabb) -> bool
 
 fn floor(v: f64) -> i32 {
     v.floor() as i32
+}
+
+/// Vanilla `Mth.equal`: two doubles are the same movement component when they differ by less
+/// than `1.0E-5` (the constant is a float in vanilla, widened here).
+fn mth_equal(a: f64, b: f64) -> bool {
+    (b - a).abs() < f64::from(1.0e-5f32)
 }
 
 fn ceil(v: f64) -> i32 {
@@ -681,6 +724,29 @@ mod tests {
         // Only one paddle turns, and it is the right one: vanilla reports the opposite paddle's
         // state for a turn (`setPaddleState(inputRight && !inputLeft || inputUp, ...)`).
         assert!(!boat.paddle(0) && boat.paddle(1));
+    }
+
+    /// The passenger's look follows the boat's turn, and may not stray further than vanilla's
+    /// `clampRotation` 105 degrees from the boat's heading.
+    #[test]
+    fn the_passengers_look_is_clamped_to_the_boats_heading() {
+        let (world, shapes) = over_water();
+        let env = env(&world, &shapes);
+        let mut boat = Boat::new(DVec3::new(0.5, float_height(), 0.5), 0.0, BOAT, &env);
+        // Looking 200 degrees away from the boat (yaw 0) is pulled back, on the same side, to
+        // 105 degrees of it.
+        assert!(same_angle(passenger_yaw(200.0, &boat), -105.0));
+        // A look inside the limit is left where it is; the boat's turn drags it along.
+        assert!(same_angle(passenger_yaw(30.0, &boat), 30.0));
+        boat.delta_rotation = 10.0;
+        assert!(same_angle(passenger_yaw(30.0, &boat), 40.0));
+        // Looking backwards (180 degrees off) still ends 105 degrees off.
+        assert!(same_angle(passenger_yaw(-180.0, &boat), -105.0));
+    }
+
+    /// Two angles that name the same direction.
+    fn same_angle(a: f32, b: f32) -> bool {
+        (wrap_degrees(a - b)).abs() < 1.0e-6
     }
 
     /// A boat on land is on the land status with the block's friction, halved while a player

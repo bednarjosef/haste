@@ -832,7 +832,12 @@ impl LocalPlayer {
         self.state.fall_distance = 0.0;
         self.state.on_ground = false;
         self.state.horizontal_collision = false;
-        self.state.yaw = look.0;
+        // vanilla `AbstractBoat.positionRider`: a boat drags our look with its turn and keeps
+        // it within 105 degrees of its own heading; any other vehicle leaves the look alone.
+        self.state.yaw = match &self.boat {
+            Some(boat) => crate::boat::passenger_yaw(look.0, boat),
+            None => look.0,
+        };
         self.state.pitch = look.1;
     }
 
