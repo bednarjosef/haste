@@ -466,6 +466,12 @@ pub struct Shared {
     pub ui: Mutex<Option<Ui>>,
     /// The HUD's JVM failed to start (no JDK, missing cache): there will be no HUD, ever.
     pub hud_failed: AtomicBool,
+    /// The HUD is off for this run (vanilla's F1: no HUD, no hand). The game thread then
+    /// never starts the JVM, so `hud_failed` never becomes true and nobody waits for it.
+    /// Vanilla's F1 also hides the block outline (`GameRenderer.shouldRenderBlockOutline`
+    /// checks `hud.isHidden`) and the first-person hand (`GameRenderer.renderItemInHand`);
+    /// the render thread reads this instead of receiving a flag per frame.
+    pub hud_enabled: AtomicBool,
     /// The options the game is running with right now: loaded at join, then updated live from
     /// the vanilla options screens through the option bridge ([`crate::ui::Ui`]). The render
     /// thread copies it once per frame; the game thread is the only writer.
@@ -559,6 +565,7 @@ impl Shared {
             skin,
             ui: Mutex::new(None),
             hud_failed: AtomicBool::new(false),
+            hud_enabled: AtomicBool::new(true),
             live_options: Mutex::new(options),
             options_version: AtomicU64::new(1),
             debug_tx: AtomicU64::new(0),
@@ -661,7 +668,8 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>, existing_ui: Option<Ui>) 
     let mut last_out = 0u64;
     // The JVM for the HUD takes tens of seconds to start: on its own thread, in parallel with
     // joining (the connection would time out if we waited here). One warning, no retries: a
-    // client without a JDK or cache keeps playing without a HUD.
+    // client without a JDK or cache keeps playing without a HUD. With the HUD off (`--hud
+    // off`, vanilla's F1), it is never started.
     let mut jvm = existing_ui
         .map(|ui| {
             // The menu already ticked this Ui; the game thread takes it over from here.
@@ -669,7 +677,13 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>, existing_ui: Option<Ui>) 
             let _ = tx.send(Some(HudArrival::Menu(ui)));
             HudSlot { rx: Some(rx) }
         })
-        .unwrap_or_else(|| spawn_jvm(&shared));
+        .unwrap_or_else(|| {
+            if shared.hud_enabled.load(Ordering::Relaxed) {
+                spawn_jvm(&shared)
+            } else {
+                HudSlot { rx: None }
+            }
+        });
     let reason = loop {
         if shared.stop.load(Ordering::Relaxed) {
             break "left the game".to_string();
