@@ -4491,11 +4491,30 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
                     .and_then(|l| l.split_whitespace().nth(1).map(|v| v.to_string()))
             })
             .unwrap_or_default();
+        // smaps_rollup for the live (settled) picture: anonymous vs file-backed pages.
+        let rollup = std::fs::read_to_string("/proc/self/smaps_rollup")
+            .map(|s| {
+                let f = |key: &str| {
+                    s.lines()
+                        .find(|l| l.starts_with(key))
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .unwrap_or(0)
+                };
+                (f("Rss:"), f("Pss_Anon:"), f("Pss_File:"))
+            })
+            .unwrap_or((0, 0, 0));
         println!(
             "bench memory: peak RSS {rss_kb} kB ({:.1} MiB), {arenas} arenas ({:.1} MiB vertex+index, {:.1} used), {sections} resident sections",
             rss_kb.parse::<f64>().unwrap_or(0.0) / 1024.0,
             mib(arena_bytes),
             mib(arena_used),
+        );
+        println!(
+            "bench memory: settled Rss {:.1} MiB (Pss_Anon {:.1}, Pss_File {:.1})",
+            mib(rollup.0 * 1024),
+            mib(rollup.1 * 1024),
+            mib(rollup.2 * 1024),
         );
         println!(
             "bench memory: world {:.1} MiB (sections {:.1}, heightmaps {:.1}, light {:.1}, block entities {:.1}, {} non-empty), atlas+models {:.1} MiB, mesher queue {}",
