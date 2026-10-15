@@ -2506,7 +2506,7 @@ mod tests {
 
     #[test]
     fn the_empty_hands_transform_is_vanillas_render_player_arm() {
-        for (attack, equip) in [(0.0, 1.0), (0.25, 1.0), (0.5, 0.5), (1.0, 0.0)] {
+        for (attack, equip) in [(0.0, 1.0), (0.25, 1.0), (0.5, 0.5), (0.75, 1.0), (1.0, 0.0)] {
             let mut h = still_hand();
             h.attack = TickPair::fixed(attack);
             h.equip = TickPair::fixed(equip);
@@ -2524,7 +2524,7 @@ mod tests {
         // `applyItemArmTransform` + `swingArm`'s translate + `applyItemArmAttackTransform`, at a
         // quarter of the swing: -0.4 * sin(PI / 2) = -0.4 left and -0.2 * sin(PI / 4) =
         // -0.14142136 forward, plus the swing's rotations.
-        for (attack, equip) in [(0.0, 1.0), (0.25, 1.0), (0.5, 0.4), (1.0, 0.0)] {
+        for (attack, equip) in [(0.0, 1.0), (0.25, 1.0), (0.5, 0.4), (0.75, 1.0), (1.0, 0.0)] {
             let mut h = still_hand();
             h.attack = TickPair::fixed(attack);
             h.equip = TickPair::fixed(equip);
@@ -2550,6 +2550,40 @@ mod tests {
                 item_arm_matrix(&h, 0.0).to_cols_array_2d(),
             );
         }
+    }
+
+    #[test]
+    fn the_swing_is_the_interpolated_attack_value() {
+        // A swing's tick pair lerps into the arm and item transforms at the partial tick
+        // (vanilla interpolates `swingAnimation` the same way before both transforms read it):
+        // mid-tick of a 0 -> 0.5 swing is the 0.25 matrix, not an average of matrices.
+        let mut h = still_hand();
+        h.attack = TickPair {
+            start: 0.0,
+            end: 0.5,
+        };
+        for partial in [0.25f32, 0.5, 0.75] {
+            let mut lerped = still_hand();
+            lerped.attack = TickPair::fixed(h.attack.at(partial));
+            assert!(
+                close(arm_matrix(&h, partial), arm_matrix(&lerped, 0.0), 1e-6),
+                "arm at partial {partial}"
+            );
+            assert!(
+                close(
+                    item_arm_matrix(&h, partial),
+                    item_arm_matrix(&lerped, 0.0),
+                    1e-6
+                ),
+                "item at partial {partial}"
+            );
+        }
+        // The mid-tick matrix is none of the ends' matrices.
+        assert!(!close(
+            arm_matrix(&h, 0.5),
+            arm_matrix(&still_hand(), 0.0),
+            1e-4
+        ));
     }
 
     #[test]
@@ -2586,10 +2620,17 @@ mod tests {
         // times the lag rotations, never the translation twice.
         let prefix = Mat4::from_translation(Vec3::new(0.25, -0.5, 0.0));
         let m = prefix * lag;
-        assert!(close(m, prefix * hand_root_matrix(&h, (25.0, 35.0), 0.5), 1e-7));
+        assert!(close(
+            m,
+            prefix * hand_root_matrix(&h, (25.0, 35.0), 0.5),
+            1e-7
+        ));
         assert!((m.transform_point3(Vec3::ZERO) - Vec3::new(0.25, -0.5, 0.0)).length() < 1e-6);
         // `hand_root_matrix` with nothing animated is the identity: the bob lives outside.
-        assert_eq!(hand_root_matrix(&still_hand(), (0.0, 0.0), 1.0), Mat4::IDENTITY);
+        assert_eq!(
+            hand_root_matrix(&still_hand(), (0.0, 0.0), 1.0),
+            Mat4::IDENTITY
+        );
     }
 
     #[test]

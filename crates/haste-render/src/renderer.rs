@@ -665,13 +665,13 @@ impl Renderer {
             }],
         });
         // The hand's own uniform, same layout (drawn by the entity pipeline in its own pass).
-        let hand_camera_uniform = gpu
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("hand-camera"),
-                contents: &[0; std::mem::size_of::<CameraUniform>()],
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
+        let hand_camera_uniform =
+            gpu.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("hand-camera"),
+                    contents: &[0; std::mem::size_of::<CameraUniform>()],
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                });
         let hand_camera_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("hand-camera-bind"),
             layout: &camera_bind_group_layout,
@@ -1675,8 +1675,9 @@ impl Renderer {
         // The hand's own camera uniform, written only when the hand is drawn: vanilla's
         // `render3dHud` gives the hand its own projection (`hudProjection`: the fixed-base
         // hand FOV, near 0.05) with no bob, because `renderItemInHand` puts the bob onto the
-        // hand's pose stack instead — the same bob the world's projection carries. The hand
-        // is submitted in view space, so there is no view matrix. The fog fields stay the
+        // hand's pose stack instead (the `bob_transform` prefix `prepare_hand` receives) —
+        // the same bob the world's projection carries, applied exactly once. The hand is
+        // submitted in view space, so there is no view matrix. The fog fields stay the
         // world's: the hand is under a metre from the eye, so like vanilla's own hand it
         // never reaches the first fog band.
         if self.entity.has_hand() {
@@ -1685,7 +1686,7 @@ impl Renderer {
                 aspect,
                 0.05,
                 4096.0,
-            ) * Self::bob_transform(&frame.camera);
+            );
             let hand_uniform = CameraUniform {
                 cam_pos: [0.0; 4],
                 view_proj: hand_proj.to_cols_array_2d(),

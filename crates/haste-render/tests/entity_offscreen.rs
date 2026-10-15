@@ -44,7 +44,7 @@ impl haste_core::view::BlockView for Flat {
 
 fn render_scene(
     renderer: &mut Renderer,
-    world: &Flat,
+    world: &dyn haste_core::view::BlockView,
     entities: &[EntityInstance],
     camera: Camera,
 ) -> image::RgbaImage {
@@ -53,7 +53,7 @@ fn render_scene(
 
 fn render_scene_at(
     renderer: &mut Renderer,
-    world: &Flat,
+    world: &dyn haste_core::view::BlockView,
     entities: &[EntityInstance],
     camera: Camera,
     partial_tick: f32,
@@ -67,7 +67,7 @@ fn render_scene_at(
 
 fn render_with_gui(
     renderer: &mut Renderer,
-    world: &Flat,
+    world: &dyn haste_core::view::BlockView,
     entities: &[EntityInstance],
     camera: Camera,
     gui: &haste_core::gui::GuiFrame,
@@ -79,7 +79,7 @@ fn render_with_gui(
 /// Like [`render_with_gui`], with `FrameInput::camera_entity` (the world pass skips it).
 fn render_with_gui_skip(
     renderer: &mut Renderer,
-    world: &Flat,
+    world: &dyn haste_core::view::BlockView,
     entities: &[EntityInstance],
     camera: Camera,
     gui: &haste_core::gui::GuiFrame,
@@ -320,6 +320,142 @@ fn entities_offscreen() {
         .filter(|(a, b)| a.0 != b.0)
         .count();
     assert!(moved > 500, "the swing moved {moved} pixels");
+    renderer.set_first_person(None);
+}
+
+/// The first-person hand never sinks into blocks: pressed face-on against a stone wall, the
+/// hand must draw the same pixels as in open air (vanilla clears the depth buffer before
+/// `renderItemInHand`, GameRenderer.render3dHud's `clearDepthTexture`). Counts the hand's
+/// pixels (those that differ from the wall-only frame) in both scenes and compares the two.
+#[test]
+#[ignore = "needs the client jar, datagen reports and a Vulkan driver (source scripts/env.sh)"]
+fn first_person_hand_against_a_wall() {
+    let jar = haste_core::paths::client_jar();
+    let mut assets =
+        haste_assets::Assets::open(&jar, &haste_core::paths::assets_dir(), "26.3").unwrap();
+    let data = haste_data::GameData::load().unwrap();
+    let mut renderer = Renderer::new_offscreen(640, 480, &mut assets, &data.blocks).unwrap();
+    renderer.set_item_registry(&data.registries);
+    let sword = data
+        .registries
+        .index("minecraft:item", &Identifier::minecraft("diamond_sword"))
+        .unwrap();
+    let stone = data
+        .blocks
+        .default_state(&Identifier::minecraft("stone"))
+        .unwrap();
+    // A wall of stone filling the view one block in front of the camera: every column x,
+    // the row y = 1 (the camera's eye), at z = 1 while the camera sits at z = 0.5 looking
+    // north (+z). The floor is stone too, so nothing behind the wall can leak through.
+    struct Walled {
+        stone: BlockStateId,
+        wall_z: i32,
+    }
+    impl haste_core::view::BlockView for Walled {
+        fn block_state(&self, p: BlockPos) -> BlockStateId {
+            if p.y == 0 || p.z == self.wall_z {
+                self.stone
+            } else {
+                BlockStateId::AIR
+            }
+        }
+        fn is_chunk_loaded(&self, _: ChunkPos) -> bool {
+            true
+        }
+        fn sky_light(&self, p: BlockPos) -> u8 {
+            if p.y <= 0 {
+                0
+            } else {
+                15
+            }
+        }
+        fn block_light(&self, _: BlockPos) -> u8 {
+            0
+        }
+        fn min_y(&self) -> i32 {
+            -64
+        }
+        fn height(&self) -> i32 {
+            384
+        }
+    }
+    let world = Walled { stone, wall_z: 1 };
+    let dirty: Vec<SectionPos> = (-1..=1)
+        .flat_map(|x| (-1..=1).map(move |z| SectionPos::new(x, 0, z)))
+        .collect();
+    renderer.update_world(&world, &dirty, ChunkPos::new(0, 0), 4);
+    for _ in 0..200 {
+        renderer.update_world(&world, &[], ChunkPos::new(0, 0), 4);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let camera = Camera {
+        pos: glam::DVec3::new(0.5, 1.62, 0.5),
+        yaw: 0.0,
+        pitch: 0.0,
+        fov_deg: 70.0,
+        hand_fov_deg: 70.0,
+        roll_deg: 0.0,
+        bob: haste_render::ViewBob::default(),
+    };
+    let hand = |item: Option<haste_core::RegistryIndex>| haste_render::FirstPerson {
+        skin: None,
+        slim: false,
+        item,
+        light: (15, 0),
+        attack: haste_render::TickPair::fixed(0.0),
+        equip: haste_render::TickPair::fixed(1.0),
+        x_bob: haste_render::TickPair::fixed(0.0),
+        y_bob: haste_render::TickPair::fixed(0.0),
+    };
+    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
+    std::fs::create_dir_all(&out).unwrap();
+    for (name, held) in [("hand", None), ("sword", Some(sword))] {
+        // The wall without the hand, then with it: the hand's pixels are exactly the ones
+        // that differ.
+        renderer.set_first_person(None);
+        let bare = render_scene(&mut renderer, &world, &[], camera);
+        renderer.set_first_person(Some(hand(held)));
+        let with = render_scene(&mut renderer, &world, &[], camera);
+        with.save(out.join(format!("first_person_wall_{name}.png")))
+            .unwrap();
+        let wall_hand = bare
+            .pixels()
+            .zip(with.pixels())
+            .filter(|(a, b)| a.0 != b.0)
+            .count();
+        // The same hand in the open (no wall): the stone floor only.
+        let open = Flat { stone };
+        let open_dirty: Vec<SectionPos> = (-1..=1)
+            .flat_map(|x| (-1..=1).map(move |z| SectionPos::new(x, 0, z)))
+            .collect();
+        renderer.update_world(&open, &open_dirty, ChunkPos::new(0, 0), 4);
+        for _ in 0..200 {
+            renderer.update_world(&open, &[], ChunkPos::new(0, 0), 4);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        renderer.set_first_person(None);
+        let open_bare = render_scene(&mut renderer, &open, &[], camera);
+        renderer.set_first_person(Some(hand(held)));
+        let open_with = render_scene(&mut renderer, &open, &[], camera);
+        let open_hand = open_bare
+            .pixels()
+            .zip(open_with.pixels())
+            .filter(|(a, b)| a.0 != b.0)
+            .count();
+        // The hand must be fully drawn against the wall: at least 95 % of its open-air
+        // pixels (the two backgrounds differ, so a few edge pixels may anti-alias
+        // differently).
+        assert!(
+            wall_hand as f64 >= open_hand as f64 * 0.95,
+            "{name}: {wall_hand} pixels against the wall vs {open_hand} in the open"
+        );
+        // Restore the walled world for the next item.
+        renderer.update_world(&world, &dirty, ChunkPos::new(0, 0), 4);
+        for _ in 0..200 {
+            renderer.update_world(&world, &[], ChunkPos::new(0, 0), 4);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
     renderer.set_first_person(None);
 }
 
