@@ -609,6 +609,24 @@ fn atmospheric_base(
             }
         }
     }
+    // The FOG_COLOR weather layers (`WeatherAttributes.RAIN`/`THUNDER`, MULTIPLY_RGB):
+    // rain multiplies (0.5, 0.5, 0.6) by the rain level minus the thunder level, thunder
+    // (0.25, 0.25, 0.3) by the thunder level — the attribute system applies them to the
+    // probed fog colour before `AtmosphericFogEnvironment.getBaseColor` mixes toward the
+    // sky.
+    {
+        let rain_only = (f.rain_level - f.thunder_level).clamp(0.0, 1.0);
+        if rain_only > 0.0 {
+            let m = 1.0 - rain_only * 0.5;
+            let mb = 1.0 - rain_only * 0.4;
+            fog = [fog[0] * m, fog[1] * m, fog[2] * mb];
+        }
+        if f.thunder_level > 0.0 {
+            let m = 1.0 - f.thunder_level * 0.75;
+            let mb = 1.0 - f.thunder_level * 0.7;
+            fog = [fog[0] * m, fog[1] * m, fog[2] * mb];
+        }
+    }
     // Mix toward the sky colour, more the shorter the render distance.
     let mut sky = dim.sky_color;
     if dim.day_timeline {
@@ -867,6 +885,44 @@ mod tests {
         let low = atmospheric_fog_color(12300, 2, [-1.0, 0.0, 0.0], 64.0, -64.0);
         let low_east = atmospheric_fog_color(12300, 2, [1.0, 0.0, 0.0], 64.0, -64.0);
         assert!(close3(low, low_east));
+    }
+
+    #[test]
+    fn fog_colour_takes_the_weather_layers() {
+        // The FOG_COLOR weather layers (WeatherAttributes RAIN/THUNDER, MULTIPLY_RGB):
+        // rain (0.5, 0.5, 0.6) by rain minus thunder, thunder (0.25, 0.25, 0.3) by thunder —
+        // applied to the base fog colour before the sky mix, exactly where the attribute
+        // system delivers them. Full rain, no thunder: fog * (0.5, 0.5, 0.6).
+        let rain_fog = |inputs: &FogInputs| {
+            compute_fog_color(inputs, 6000, 32, 0.0, [0.0, 0.0, -1.0], 64.0, -64.0)
+        };
+        let mut inputs = FogInputs::default();
+        let clear = rain_fog(&inputs);
+        inputs.rain_level = 1.0;
+        let rain = rain_fog(&inputs);
+        for i in 0..3 {
+            let m = [0.5, 0.5, 0.6][i];
+            assert!(
+                close(rain[i], OVERWORLD_FOG_COLOR[i] * m),
+                "channel {i}: {}",
+                rain[i]
+            );
+        }
+        // rd 32: no sky mix, so the whole colour is the layered fog. Clear is the base.
+        assert!(close3(clear, OVERWORLD_FOG_COLOR));
+        // Full thunder (rain 1, thunder 1): the rain layer's weight is 0, the thunder layer
+        // multiplies (0.25, 0.25, 0.3) — darker than rain.
+        inputs.thunder_level = 1.0;
+        let thunder = rain_fog(&inputs);
+        for i in 0..3 {
+            let m = [0.25, 0.25, 0.3][i];
+            assert!(
+                close(thunder[i], OVERWORLD_FOG_COLOR[i] * m),
+                "channel {i}: {}",
+                thunder[i]
+            );
+            assert!(thunder[i] < rain[i], "thunder darkens channel {i}");
+        }
     }
 
     #[test]
