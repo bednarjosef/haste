@@ -1939,10 +1939,14 @@ impl Renderer {
                     bound_arena = u32::MAX;
                 }
                 if bound_layer != Some(d.layer) {
+                    // CutoutMipped (leaves, vines) shares the solid *pipeline* (same shader
+                    // state, mips differ in the sampler) but must keep the alpha discard:
+                    // its sprites have transparent texels by vanilla's per-sprite layer rule
+                    // (NativeImage.computeTransparency -> ChunkSectionLayer.byTransparency).
                     let (pipeline, sub) = match d.layer {
                         haste_assets::RenderLayer::Solid => (&self.pipeline_solid, 1),
                         haste_assets::RenderLayer::Cutout => (&self.pipeline_cutout, 2),
-                        haste_assets::RenderLayer::CutoutMipped => (&self.pipeline_solid, 3),
+                        haste_assets::RenderLayer::CutoutMipped => (&self.pipeline_cutout, 3),
                         haste_assets::RenderLayer::Translucent => (&self.pipeline_translucent, 4),
                     };
                     if let Some(t) = self.timer.as_ref() {
