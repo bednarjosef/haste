@@ -4012,12 +4012,16 @@ mod tests {
             ("bell", BlockEntityKind::Bell),
             ("decorated_pot", BlockEntityKind::DecoratedPot),
             ("conduit", BlockEntityKind::Conduit),
+            ("beacon", BlockEntityKind::Beacon),
+            ("end_portal", BlockEntityKind::EndPortal),
+            ("end_gateway", BlockEntityKind::EndGateway),
+            ("piston", BlockEntityKind::MovingPiston),
         ] {
             let block = Identifier::minecraft(be);
             assert_eq!(kind_of(&block, &block, false), Some(kind), "{be}");
         }
         // Not drawn (no vanilla renderer we have).
-        for be in ["furnace", "beacon", "hopper", "piston"] {
+        for be in ["furnace", "hopper"] {
             assert_eq!(
                 kind_of(
                     &Identifier::minecraft(be),
