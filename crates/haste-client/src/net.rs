@@ -14,6 +14,7 @@ use anyhow::Context;
 use glam::DVec3;
 use haste_core::input::InputState;
 use haste_core::view::{BlockView, CollisionShapes};
+use haste_core::Direction;
 use haste_data::GameData;
 use haste_entity::riding::{passenger_seat, PassengerKind, SeatPoint, SeatQuery};
 use haste_entity::{EntityDimensions, EntityStore};
@@ -23,8 +24,10 @@ use haste_protocol::haste_core::game::{DimensionInfo, GameMode};
 use haste_protocol::haste_core::{
     BlockPos, BlockStateId, ChunkPos, EntityId, Identifier, RegistryIndex,
 };
+use haste_protocol::nbt::NbtCompound;
 use haste_protocol::packets::play::clientbound as cb;
 use haste_protocol::packets::play::clientbound::teleport_flags;
+use haste_protocol::packets::play::serverbound as sb;
 use haste_protocol::{
     ClientboundPlay, ConnectOptions, Connection, Login, ServerboundPlay, StatsSnapshot,
     SyncedRegistries,
@@ -35,6 +38,13 @@ use crate::player::{LocalPlayer, VehiclePose};
 
 /// Hurt-tilt camera roll duration in ticks (vanilla's `hurtTime` runs to 10).
 pub const HURT_TILT_TICKS: u32 = 10;
+/// The server's correction of the vehicle we steer is only taken when it moved the boat this far
+/// (vanilla `ClientPacketListener.handleMoveVehicle` compares the distance to 1.0E-5).
+const VEHICLE_CORRECTION_EPSILON: f64 = 1.0e-5;
+/// The head equipment slot of `set_equipment` (`EquipmentSlot.values()`: 0 main hand, 1 off
+/// hand, 2 boots, 3 leggings, 4 chestplate, 5 helmet, 6 body, 7 saddle). The item worn there
+/// can hide the screen behind a camera overlay (the carved pumpkin's blur).
+pub const HEAD_SLOT: u8 = 5;
 
 /// What the driver needs from the world (`haste_world::World`).
 pub trait WorldSink {
@@ -68,6 +78,10 @@ pub trait WorldSink {
 
 /// A world with no chunks: the player does not move in it.
 struct NoBlocks;
+
+/// One shared instance of it, for the paths that need a `'static` block view.
+const NO_BLOCKS: NoBlocks = NoBlocks;
+
 impl BlockView for NoBlocks {
     fn block_state(&self, _pos: BlockPos) -> BlockStateId {
         BlockStateId::AIR
@@ -133,6 +147,11 @@ pub trait EntitySink {
     fn player_info(&mut self, info: &[PlayerInfo]);
     /// `EntityStore::set_passengers`: the vehicle's passenger list is replaced by `passengers`.
     fn set_passengers(&mut self, vehicle: EntityId, passengers: &[EntityId]);
+    /// `EntityStore::set_world_age` (from `set_time`); the bee's anger end time compares
+    /// against it. Default no-op.
+    fn set_world_age(&mut self, world_age: i64) {
+        let _ = world_age;
+    }
     /// `EntityStore::entity_type_info`: registry index and dimensions, for the seat offset.
     fn entity_type_info(&self, _id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
         None
@@ -245,6 +264,9 @@ impl EntitySink for EntityStore {
     fn set_passengers(&mut self, vehicle: EntityId, passengers: &[EntityId]) {
         EntityStore::set_passengers(self, vehicle, passengers)
     }
+    fn set_world_age(&mut self, world_age: i64) {
+        EntityStore::set_world_age(self, world_age)
+    }
     fn entity_type_info(&self, id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
         EntityStore::entity_type_info(self, id)
     }
@@ -327,6 +349,46 @@ pub fn painting_variants(regs: &SyncedRegistries) -> HashMap<u32, haste_entity::
     out
 }
 
+/// The variant registries the variant mobs read (`haste_entity::VARIANT_REGISTRIES`), each
+/// parsed into haste-entity's per-id asset table: `asset_id`/`baby_asset_id` (and `model`
+/// for pig/cow/chicken; wolf nests `assets`/`baby_assets` with `wild`/`tame`/`angry` — the
+/// wild texture is what an untamed, calm mob shows). An entry whose NBT is absent (a known
+/// pack) or does not parse stays `None`: the mob keeps the model table's default look.
+/// Returns the registry name and its table, one per registry the server sent.
+pub fn mob_variants(
+    regs: &SyncedRegistries,
+) -> Vec<(String, Vec<Option<haste_entity::VariantAssets>>)> {
+    let parse = |nbt: &NbtCompound| -> Option<haste_entity::VariantAssets> {
+        if nbt.get_string("asset_id").is_some() {
+            haste_entity::VariantAssets::from_assets(
+                nbt.get_string("asset_id").unwrap(),
+                nbt.get_string("baby_asset_id"),
+                nbt.get_string("model"),
+            )
+        } else {
+            // Wolf: assets/baby_assets, each with wild/tame/angry; batch 1 reads the wild
+            // texture (tame/angry are TamableAnimal flag textures, a later task).
+            let wild = nbt.get_compound("assets")?.get_string("wild")?;
+            let baby_wild = nbt.get_compound("baby_assets")?.get_string("wild")?;
+            haste_entity::VariantAssets::from_assets(wild, Some(baby_wild), None)
+        }
+    };
+    let mut out = Vec::new();
+    for wanted in haste_entity::VARIANT_REGISTRIES {
+        let Some(registry) = regs.names().find(|n| n.to_string() == *wanted) else {
+            continue;
+        };
+        let Some(entries) = regs.entries(registry) else {
+            continue;
+        };
+        let table = (0..entries.len())
+            .map(|i| regs.entry_nbt(registry, i).as_ref().and_then(parse))
+            .collect();
+        out.push(((*wanted).to_owned(), table));
+    }
+    out
+}
+
 /// Loads the game data (block states, registries, shapes) once for the whole client.
 pub fn load_game_data() -> anyhow::Result<Arc<GameData>> {
     let t = std::time::Instant::now();
@@ -346,6 +408,19 @@ pub fn load_game_data() -> anyhow::Result<Arc<GameData>> {
 pub fn synced_biome_count(regs: &SyncedRegistries) -> Option<usize> {
     regs.entries(&Identifier::minecraft("worldgen/biome"))
         .map(|e| e.len())
+}
+
+/// Registry id of `minecraft:overworld` in `minecraft:world_clock` (the day clock; the End
+/// has `minecraft:the_end`). 0 (the overworld clock, first registered) when the server sent
+/// no such registry.
+pub fn overworld_clock_id(regs: &SyncedRegistries) -> i32 {
+    regs.entries(&Identifier::minecraft("world_clock"))
+        .and_then(|entries| {
+            entries
+                .iter()
+                .position(|e| e.id == Identifier::minecraft("overworld"))
+        })
+        .map_or(0, |i| i as i32)
 }
 
 /// Per-connection counters for the HUD/headless printout.
@@ -419,11 +494,14 @@ pub struct LightmapState {
     pub darkness: Option<i32>,
     /// `MobEffectInstance.BlendState` for the darkness effect (22 ticks in and out).
     pub darkness_blend: haste_render::lightmap::BlendState,
-    /// Boss bars and their darken-screen flag (`BossEvent.darkenScreen`), keyed by uuid bits.
-    boss_bars: HashMap<u128, bool>,
+    /// Boss bars and their `(darkenScreen, createWorldFog)` flags (`BossEvent`), keyed by uuid
+    /// bits.
+    boss_bars: HashMap<u128, (bool, bool)>,
     /// `GameRenderer.bossOverlayWorldDarkening` and its value one tick ago.
     pub boss_darkening: f32,
     pub boss_darkening_o: f32,
+    /// `BossHealthOverlay.shouldCreateWorldFog()`: any bar asks for the thick boss fog.
+    pub boss_world_fog: bool,
     /// `ClientLevel.skyFlashTime`: a lightning strike raises the sky for 2 ticks.
     pub sky_flash_time: i32,
     /// The player's tick count (vanilla `LivingEntity.tickCount`), for the darkness pulse.
@@ -443,6 +521,7 @@ impl Default for LightmapState {
             boss_bars: HashMap::new(),
             boss_darkening: 0.0,
             boss_darkening_o: 0.0,
+            boss_world_fog: false,
             sky_flash_time: 0,
             tick_count: 0,
         }
@@ -491,11 +570,13 @@ impl LightmapState {
         // GameRenderer.tick: while any boss bar asks to darken the screen, rise by 0.05/tick
         // (capped at 1), else fall by 0.0125/tick.
         self.boss_darkening_o = self.boss_darkening;
-        if self.boss_bars.values().any(|&darken| darken) {
+        if self.boss_bars.values().any(|(darken, _)| *darken) {
             self.boss_darkening = (self.boss_darkening + 0.05).min(1.0);
         } else if self.boss_darkening > 0.0 {
             self.boss_darkening -= 0.0125;
         }
+        // `BossHealthOverlay.shouldCreateWorldFog`: any bar asks for the thick world fog.
+        self.boss_world_fog = self.boss_bars.values().any(|(_, fog)| *fog);
         if self.sky_flash_time > 0 {
             self.sky_flash_time -= 1;
         }
@@ -527,18 +608,20 @@ impl LightmapState {
         }
     }
 
-    /// A `boss_event`: `BossEvent.setDarkenScreen` (flags bit 0x01 on add/update flags).
+    /// A `boss_event`: `BossEvent` flags (bit 0x01 darkenScreen, bit 0x04 createWorldFog) on
+    /// add/update flags.
     fn boss_event(&mut self, id: u128, action: &cb::BossEventAction) {
+        let flags = |f: u8| (f & 0x01 != 0, f & 0x04 != 0);
         match action {
-            cb::BossEventAction::Add { flags, .. } => {
-                self.boss_bars.insert(id, flags & 0x01 != 0);
+            cb::BossEventAction::Add { flags: f, .. } => {
+                self.boss_bars.insert(id, flags(*f));
             }
             cb::BossEventAction::Remove => {
                 self.boss_bars.remove(&id);
             }
-            cb::BossEventAction::UpdateFlags(flags) => {
-                if let Some(darken) = self.boss_bars.get_mut(&id) {
-                    *darken = flags & 0x01 != 0;
+            cb::BossEventAction::UpdateFlags(f) => {
+                if let Some(entry) = self.boss_bars.get_mut(&id) {
+                    *entry = flags(*f);
                 }
             }
             _ => {}
@@ -548,6 +631,304 @@ impl LightmapState {
     /// `LightningBolt.tick` on the client: `ClientLevel.setSkyFlashTime(2)`.
     fn lightning(&mut self) {
         self.sky_flash_time = 2;
+    }
+}
+
+/// The client's weather state (vanilla `Level`'s rain/thunder levels plus
+/// `ClientLevel.tickWeatherEffects`): the levels bracket the tick so the render thread can
+/// lerp by partial tick (`Level.getRainLevel(a)`), and the tick spawns the rain splash
+/// particles and plays the rain sound every few ticks.
+#[derive(Clone, Debug)]
+pub struct WeatherState {
+    /// `Level.oRainLevel`: the rain level at the start of the tick.
+    pub rain_level_o: f32,
+    /// `Level.rainLevel`.
+    pub rain_level: f32,
+    /// `Level.oThunderLevel` (before the rain scaling `getThunderLevel` applies).
+    pub thunder_level_o: f32,
+    /// `Level.thunderLevel`.
+    pub thunder_level: f32,
+    /// `ClientLevel.rainSoundTime`: the rain sound's counter (`random.nextInt(3) <
+    /// rainSoundTime++` picks the tick it plays on).
+    rain_sound_time: i32,
+    /// The RNG of `tickWeatherEffects` (a thread-local random in vanilla; a fixed seed
+    /// keeps Haste's runs reproducible, and the sequence is not player-visible).
+    rng: u64,
+}
+
+impl Default for WeatherState {
+    fn default() -> Self {
+        Self {
+            rain_level_o: 0.0,
+            rain_level: 0.0,
+            thunder_level_o: 0.0,
+            thunder_level: 0.0,
+            rain_sound_time: 0,
+            rng: 0x9e37_79b9_7f4a_7c15,
+        }
+    }
+}
+
+impl WeatherState {
+    /// Uniform f32 in [0, 1) (the xorshift of `LightmapState`'s flicker RNG).
+    fn next_float(&mut self) -> f32 {
+        let mut x = self.rng;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.rng = x;
+        ((x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 40) as f32) / 16_777_216.0
+    }
+
+    /// `Level.setRainLevel`: clamps and writes both the bracketed level and the target.
+    pub fn set_rain_level(&mut self, level: f32) {
+        let l = level.clamp(0.0, 1.0);
+        self.rain_level_o = l;
+        self.rain_level = l;
+    }
+
+    /// `Level.setThunderLevel`.
+    pub fn set_thunder_level(&mut self, level: f32) {
+        let l = level.clamp(0.0, 1.0);
+        self.thunder_level_o = l;
+        self.thunder_level = l;
+    }
+
+    /// One tick: shifts the bracket (`ClientLevel.tick` moves the old level to the target
+    /// each tick; the packets set both, so the lerp only shows between the server's
+    /// `rain_level_change` steps).
+    pub fn tick(&mut self) {
+        self.rain_level_o = self.rain_level;
+        self.thunder_level_o = self.thunder_level;
+    }
+
+    /// `Level.getRainLevel(a)`: lerped by partial tick.
+    pub fn rain_level(&self, partial: f32) -> f32 {
+        self.rain_level_o + (self.rain_level - self.rain_level_o) * partial
+    }
+
+    /// Whether the dimension can have weather at all (`Level.canHaveWeather`: skylight, no
+    /// ceiling, not the End). `DimensionInfo` carries no ceiling flag, so the known
+    /// ceiling dimensions are excluded by name (the Nether); custom skyless dimensions are
+    /// already excluded by the skylight flag.
+    pub fn can_have_weather(dimension: &DimensionInfo) -> bool {
+        dimension.has_skylight
+            && !is_end(dimension)
+            && dimension.dimension_type.path() != "the_nether"
+            && dimension.name.path() != "the_nether"
+    }
+
+    /// `ClientLevel.tickWeatherEffects`: spawns the rain splash particles around the
+    /// camera and plays the rain sound every few ticks. The particle spawns and the sound
+    /// request are pushed onto the caller's reused vectors (the game thread routes them to
+    /// the particle pool and the sound output); `weather_radius` is the `weatherRadius`
+    /// option, `climates` the biome climate table. Called by the game thread after
+    /// `end_tick` (vanilla runs it inside `ClientLevel.tick`, after the player's tick).
+    #[allow(clippy::too_many_arguments)]
+    pub fn tick_effects(
+        &mut self,
+        camera: DVec3,
+        weather_radius: i32,
+        world: &World,
+        climates: &[haste_render::BiomeClimate],
+        sea_level: i32,
+        min_y: i32,
+        particles: &mut Vec<haste_render::ParticleSpawn>,
+        sounds: &mut Vec<crate::sound::SoundRequest>,
+    ) {
+        let rain_level = self.rain_level(1.0);
+        if rain_level <= 0.0 {
+            return;
+        }
+        let weather_diameter = 2 * weather_radius + 1;
+        let weather_area = weather_diameter * weather_diameter;
+        // Vanilla: (int)(0.225F * weatherArea * rainLevel^2) (particle status ALL; the
+        // decreased option halves it, minimal takes the first hit only — Haste runs all).
+        let rain_particles = (0.225_f32 * weather_area as f32 * rain_level * rain_level) as i32;
+        let camera_block = BlockPos::new(
+            camera.x.floor() as i32,
+            camera.y.floor() as i32,
+            camera.z.floor() as i32,
+        );
+        let mut rain_particle_position: Option<BlockPos> = None;
+        for _ in 0..rain_particles {
+            let x = (self.next_float() * weather_diameter as f32) as i32 - weather_radius;
+            let z = (self.next_float() * weather_diameter as f32) as i32 - weather_radius;
+            let column = camera_block.add(x, 0, z);
+            let Some(heightmap_position) = heightmap_pos(world, &column, min_y) else {
+                continue;
+            };
+            if heightmap_position.y > min_y
+                && heightmap_position.y <= camera_block.y + 10
+                && heightmap_position.y >= camera_block.y - 10
+                && precipitation_at(world, climates, &heightmap_position, sea_level)
+                    == Precipitation::Rain
+            {
+                let pos = heightmap_position.add(0, -1, 0);
+                rain_particle_position = Some(pos);
+                let block_x = self.next_float() as f64;
+                let block_z = self.next_float() as f64;
+                // The particle's y sits on the block's (or the fluid's) top surface; without
+                // the shape lookup here it is the block's own top (vanilla
+                // `VoxelShape.max`/`FluidState.getHeight` at the random x/z).
+                let particle_y = pos.y as f64 + 1.0;
+                particles.push(rain_particle(pos, block_x, particle_y, block_z));
+            }
+        }
+        // The rain sound: `random.nextInt(3) < rainSoundTime++` (the counter grows every
+        // tick it rains, so after a few ticks the sound fires and resets), at the last
+        // particle's position, above the camera when there is a roof over the player. The
+        // short-circuit means the random is only drawn when a particle landed.
+        let fires = rain_particle_position.is_some_and(|_| {
+            let next = (self.next_float() * 3.0) as i32;
+            let old = self.rain_sound_time;
+            self.rain_sound_time = old + 1;
+            next < old
+        });
+        if fires {
+            self.rain_sound_time = 0;
+            let pos = rain_particle_position.expect("checked above");
+            let above = pos.y > camera_block.y + 1
+                && heightmap_pos(world, &camera_block, min_y)
+                    .is_some_and(|h| h.y > camera.y.floor() as i32);
+            let (event, volume, pitch) = if above {
+                ("minecraft:weather.rain.above", 0.1, 0.5)
+            } else {
+                ("minecraft:weather.rain", 0.2, 1.0)
+            };
+            sounds.push(crate::sound::SoundRequest::Play(
+                crate::sound::PlayRequest {
+                    sound: crate::sound::SoundRef::Inline(event.to_string()),
+                    // `SoundSource.WEATHER` (the packet's category order: master 0, music 1,
+                    // records 2, weather 3).
+                    category: 3,
+                    pos: crate::sound::SoundPos::Fixed(DVec3::new(
+                        pos.x as f64,
+                        pos.y as f64,
+                        pos.z as f64,
+                    )),
+                    volume,
+                    pitch,
+                    seed: 0,
+                },
+            ));
+        }
+    }
+}
+
+/// A biome's precipitation at a position (vanilla `Biome.Precipitation`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Precipitation {
+    None,
+    Rain,
+    Snow,
+}
+
+/// The weather extraction's public lookup: the biome precipitation at a position (the
+/// render thread's per-column scan; see `precipitation_at`).
+pub fn precipitation_at_pos(
+    world: &World,
+    climates: &[haste_render::BiomeClimate],
+    pos: &BlockPos,
+    sea_level: i32,
+) -> Precipitation {
+    precipitation_at(world, climates, pos, sea_level)
+}
+
+/// The weather extraction's public lookup: a column's MOTION_BLOCKING height (0 below the
+/// world when the chunk is not loaded, matching `Level.getHeight`'s empty fallback).
+pub fn column_height(world: &World, x: i32, z: i32) -> i32 {
+    let column = BlockPos::new(x, 0, z);
+    let min_y = world.dimension().min_y;
+    heightmap_pos(world, &column, min_y)
+        .map(|p| p.y)
+        .unwrap_or(min_y)
+}
+
+/// Whether the dimension is the End (`Level.canHaveWeather` excludes it by id).
+fn is_end(dim: &DimensionInfo) -> bool {
+    dim.name.path() == "the_end" || dim.dimension_type.path() == "the_end"
+}
+
+/// `ClientLevel.getHeightmapPos` for the MOTION_BLOCKING heightmap (wire type 4): the
+/// heightmap the chunk sent, else a linear scan of the column (`Chunk.height_at`).
+fn heightmap_pos(world: &World, column: &BlockPos, min_y: i32) -> Option<BlockPos> {
+    let chunk = world.chunk(column.chunk())?;
+    let local_x = (column.x & 15) as u8;
+    let local_z = (column.z & 15) as u8;
+    let h = chunk
+        .heightmap(4)
+        .map(|h| h.get(local_x, local_z) + min_y)
+        .or_else(|| chunk.height_at(local_x, local_z).map(|y| y + 1))?;
+    Some(BlockPos::new(column.x, h, column.z))
+}
+
+/// `Biome.getPrecipitationAt` at a position: no precipitation where the biome has none,
+/// else snow when the height-adjusted temperature is below 0.15
+/// (`Biome.coldEnoughToSnow`/`warmEnoughToRain`). The height adjustment above the snow
+/// line (sea level + 17) subtracts `(noise + y - snowLevel) * 0.05 / 40`; the temperature
+/// noise (`Biome.TEMPERATURE_NOISE`, simplex seeded 1234) is approximated by a smooth
+/// hash of the column — its exact value differs from vanilla's, so the snow line wobbles
+/// slightly differently. Returns `None` when the column's chunk is not loaded (vanilla
+/// `getPrecipitationAt` returns NONE then).
+fn precipitation_at(
+    world: &World,
+    climates: &[haste_render::BiomeClimate],
+    pos: &BlockPos,
+    sea_level: i32,
+) -> Precipitation {
+    use haste_render::BiomeSource as _;
+    let biome = crate::app::biomes::WorldBiomes(world).biome(*pos).0 as usize;
+    let Some(climate) = climates.get(biome) else {
+        return Precipitation::None;
+    };
+    if !climate.has_precipitation {
+        return Precipitation::None;
+    }
+    let snow_level = sea_level + 17;
+    let mut temperature = climate.temperature;
+    if pos.y > snow_level {
+        // Approximation of TEMPERATURE_NOISE.get(x/8, z/8) * 8: a deterministic value in
+        // about -8..8 from the column (see the doc comment).
+        let v = temperature_noise(pos.x, pos.z);
+        temperature -= (v + (pos.y - snow_level) as f32) * 0.05 / 40.0;
+    }
+    if temperature >= 0.15 {
+        Precipitation::Rain
+    } else {
+        Precipitation::Snow
+    }
+}
+
+/// The temperature noise stand-in: a fixed pseudo-random value in about -8..8 per column,
+/// seeded from the coordinates (vanilla's simplex value at x/8, z/8).
+fn temperature_noise(x: i32, z: i32) -> f32 {
+    let mut h = (x as u32 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (z as u32 as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h ^= h >> 31;
+    h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
+    h ^= h >> 29;
+    ((h >> 40) as f32 / (1u32 << 24) as f32) * 16.0 - 8.0
+}
+
+/// One rain splash particle (`ParticleTypes.RAIN`, the `WaterDropParticle` the particle
+/// pool knows: gravity 0.06, lifetime 8/(r*0.8+0.2)).
+fn rain_particle(
+    pos: BlockPos,
+    block_x: f64,
+    particle_y: f64,
+    block_z: f64,
+) -> haste_render::ParticleSpawn {
+    haste_render::ParticleSpawn {
+        kind: haste_core::Identifier::minecraft("rain"),
+        pos: DVec3::new(pos.x as f64 + block_x, particle_y, pos.z as f64 + block_z),
+        offset: [0.0; 3],
+        max_speed: [0.0; 3],
+        count: 0,
+        randomization: 0,
+        override_limiter: false,
+        dust: None,
+        block_state: None,
     }
 }
 
@@ -567,6 +948,16 @@ pub struct Session {
     /// The block states whose `block_event` action 1 belongs to a lid (chest family, shulker
     /// boxes; copper chests are not drawn yet), filled from the game data at join.
     lid_states: Option<HashSet<BlockStateId>>,
+    /// The bell block states, for `block_event` action 1's ring events.
+    bell_states: Option<HashSet<BlockStateId>>,
+    /// The decorated pot block states, for `block_event` action 1's wobble events.
+    pot_states: Option<HashSet<BlockStateId>>,
+    /// Bell rings waiting to be drawn, by block position: the click direction vanilla
+    /// `BellBlockEntity.onHit` sends as the event's parameter.
+    pub bells: HashMap<BlockPos, Option<Direction>>,
+    /// Decorated pot wobbles waiting to be drawn, by block position: the game tick the wobble
+    /// started (`DecoratedPotBlockEntity.wobbleStartedAtTick`) and the style's duration.
+    pub pots: HashMap<BlockPos, (i64, u32)>,
     /// Other players' break progress (`block_destruction`): breaker id -> (block, stage 0..=9).
     pub breaking: HashMap<i32, (BlockPos, u8)>,
     /// Entities the server spawned and has not removed (crosshair targets).
@@ -581,9 +972,12 @@ pub struct Session {
     /// The firework rocket currently attached to us: vanilla `FireworkRocketEntity.tick` pushes a
     /// fall-flying player it is attached to every tick (see [`Session::end_tick`]).
     attached_firework: Option<EntityId>,
-    /// Time of day in ticks from the first world clock of the last `set_time` (approximate:
-    /// that the first clock is the day clock is not verified).
+    /// Time of day in ticks from the overworld clock of the last `set_time` (`clocks` arrives
+    /// in HashMap order, so the overworld clock is looked up by registry id).
     pub time_of_day: Option<i64>,
+    /// World age in ticks (`set_time`'s `world_age`), for animations keyed to game time
+    /// (vanilla `Level.getGameTime`, e.g. `BannerRenderer`'s wave phase).
+    pub world_age: i64,
     /// Set by `start_configuration` or `transfer`: the next `login` starts a new world.
     pub new_world_pending: bool,
     /// `minecraft:entity_type` registry entries in id order (the synced registry's when the
@@ -595,6 +989,13 @@ pub struct Session {
     /// nobody drains them (headless). Reused, so a tick without sound packets allocates
     /// nothing.
     pub sound_requests: Vec<crate::sound::SoundRequest>,
+    /// The portal and spinning screen effects (`LocalPlayer.portalEffectIntensity`, the
+    /// spinning effect time and speed), ticked in `end_tick`.
+    pub screen: crate::screen_effects::PortalEffects,
+    /// This tick's world probe for the screen effects: the block the camera is inside, the
+    /// portal under our feet and the eye position's light (vanilla's
+    /// `LevelExtractor.getViewBlockingState` and `NetherPortalBlock.entityInside`).
+    pub screen_probe: crate::screen_effects::WorldProbe,
     /// The `fovEffectScale` option this run uses (set by the window from its saved options;
     /// the headless path leaves the vanilla default).
     pub fov_effect_scale: f32,
@@ -615,6 +1016,12 @@ pub struct Session {
     /// Particle spawns queued by `level_particles` since the last tick (drained by the game
     /// thread into the shared pool).
     pub particle_spawns: Vec<haste_render::ParticleSpawn>,
+    /// Block particles queued since the last tick (our own break and mining start, and the
+    /// server's `level_event`s), drained by the game thread into the shared pool.
+    pub block_particle_requests: Vec<crate::block_particles::BlockParticleRequest>,
+    /// Ambient block particles of this tick's `animateTick` (reused buffer), spawned into
+    /// the pool by the game thread.
+    pub ambient_spawns: Vec<haste_render::ParticleSpawn>,
     /// Particle spawns the game thread took over the whole session (counters).
     pub particle_spawned: usize,
     /// `minecraft:particle_type` names by protocol id (the static registry the packet's
@@ -622,6 +1029,19 @@ pub struct Session {
     particle_names: std::sync::Arc<Vec<Identifier>>,
     /// The per-tick lightmap state (flicker, effects, boss darkening, lightning).
     pub lightmap: LightmapState,
+    /// The weather state (rain/thunder levels, the rain sound and splash particles).
+    pub weather: WeatherState,
+    /// `ClientLevel.seaLevel` (the spawn info's; biome precipitation's snow line).
+    pub sea_level: i32,
+    /// The chunk batch flow control (vanilla `ChunkBatchSizeCalculator`): the server sends
+    /// chunk batches and waits for our `chunk_batch_received` rate before the next, so a
+    /// client that never acknowledges gets one batch and then silence — a teleport's new
+    /// area never streams. `batch_started_at` is `onBatchStart`'s timestamp.
+    batch_started_at: Option<std::time::Instant>,
+    /// `aggregatedNanosPerChunk` (2 ms initially).
+    aggregated_nanos_per_chunk: f64,
+    /// `oldSamplesWeight` (capped at 49).
+    old_samples_weight: i32,
 }
 
 impl Session {
@@ -645,15 +1065,22 @@ impl Session {
             breaking: HashMap::new(),
             lids: HashMap::new(),
             lid_states: None,
+            bell_states: None,
+            pot_states: None,
+            bells: HashMap::new(),
+            pots: HashMap::new(),
             entity_ids: HashSet::new(),
             entity_boxes: Vec::new(),
             entity_types: Vec::new(),
             fireworks: HashSet::new(),
             attached_firework: None,
             time_of_day: None,
+            world_age: 0,
             new_world_pending: false,
             entity_type_names: Vec::new(),
             sound_requests: Vec::new(),
+            screen: crate::screen_effects::PortalEffects::default(),
+            screen_probe: crate::screen_effects::WorldProbe::default(),
             fov_effect_scale: 1.0,
             fov_modifier: 0.0,
             old_fov_modifier: 0.0,
@@ -663,9 +1090,16 @@ impl Session {
             use_ticks: 0,
             use_item: None,
             particle_spawns: Vec::new(),
+            block_particle_requests: Vec::new(),
+            ambient_spawns: Vec::new(),
             particle_spawned: 0,
             particle_names,
             lightmap: LightmapState::default(),
+            weather: WeatherState::default(),
+            sea_level: 63,
+            batch_started_at: None,
+            aggregated_nanos_per_chunk: 2_000_000.0,
+            old_samples_weight: 1,
         }
     }
 
@@ -843,11 +1277,71 @@ impl Session {
         }))
     }
 
+    /// The boat we steer, when the vehicle the server just seated us in is one we drive (the
+    /// first passenger of a `AbstractBoat`): vanilla's `Entity.isLocalClientAuthoritative`. Our
+    /// own simulation of the boat starts where the server last told us it was, with the
+    /// dimensions its registry entry carries; after that the state we simulate is the truth on
+    /// this side and the server follows our `move_vehicle` packets.
+    fn boat_at<W: WorldSink + ?Sized, E: EntitySink + ?Sized>(
+        &self,
+        vehicle: EntityId,
+        entities: &E,
+        world: &W,
+    ) -> Option<crate::boat::Boat> {
+        let kind = entities.entity_type(vehicle)?;
+        let path = self
+            .entity_type_names
+            .get(kind.0 as usize)
+            .map(|id| id.path())?;
+        if !crate::boat::is_boat_type(path) {
+            return None;
+        }
+        let (pos, yaw, _) = entities.pose(vehicle)?;
+        let (_, dims) = entities.entity_type_info(vehicle)?;
+        let env = match world.physics() {
+            Some((view, data)) => crate::boat::BoatEnv {
+                world: view,
+                shapes: &data.shapes,
+                blocks: data,
+            },
+            // A world without physics data (test fakes): a boat in a void has no water and no
+            // ground, so it starts in the air.
+            None => crate::boat::BoatEnv {
+                world: &NO_BLOCKS,
+                shapes: &NO_BLOCKS,
+                blocks: &haste_physics::DefaultBlockPhysics,
+            },
+        };
+        Some(crate::boat::Boat::new(pos, yaw, dims, &env))
+    }
+
     /// The block states that carry a lid (chest family, shulker boxes), from the game data;
     /// call once at join so `block_event` can tell lid events from other blocks' (pistons use
     /// the same action id).
     pub fn set_lid_states(&mut self, states: HashSet<BlockStateId>) {
         self.lid_states = Some(states);
+    }
+
+    /// The bell block states, for `block_event` action 1's ring events.
+    pub fn set_bell_states(&mut self, states: HashSet<BlockStateId>) {
+        self.bell_states = Some(states);
+    }
+
+    /// The decorated pot block states, for `block_event` action 1's wobble events.
+    pub fn set_pot_states(&mut self, states: HashSet<BlockStateId>) {
+        self.pot_states = Some(states);
+    }
+
+    /// The bell rings and decorated pot wobbles waiting to be drawn, as (position, click
+    /// direction) and (position, start tick, duration) pairs. The game thread turns them into
+    /// the animation state the renderer interpolates.
+    pub fn block_event_anims(
+        &self,
+        bells: &mut Vec<(BlockPos, Option<Direction>)>,
+        pots: &mut Vec<(BlockPos, i64, u32)>,
+    ) {
+        bells.extend(self.bells.iter().map(|(p, d)| (*p, *d)));
+        pots.extend(self.pots.iter().map(|(p, w)| (*p, w.0, w.1)));
     }
 
     /// Applies one clientbound packet; serverbound replies go to `out`.
@@ -881,6 +1375,8 @@ impl Session {
                 self.player = LocalPlayer::with_entity(self.entity_id, mode);
                 self.breaking.clear();
                 self.lids.clear();
+                self.bells.clear();
+                self.pots.clear();
                 self.counters.respawns += 1;
             }
         }
@@ -903,6 +1399,12 @@ impl Session {
             for (pos, state) in self.player.take_world_edits() {
                 world.set_block(pos, state);
             }
+            // The boat we steer is this side's authoritative instance of it (vanilla
+            // `Entity.isLocalInstanceAuthoritative`): the entity the world draws sits where our
+            // simulation put it, not where the server's move packets for it still have it.
+            if let (Some(vehicle), Some(boat)) = (self.player.vehicle(), self.player.boat()) {
+                entities.teleport(vehicle, boat.pos, boat.yaw, 0.0, boat.on_ground);
+            }
         }
         match p {
             P::StartConfiguration(_) | P::Transfer(_) => self.new_world_pending = true,
@@ -910,6 +1412,9 @@ impl Session {
                 self.counters.got_login = true;
                 self.player.game_mode =
                     GameMode::from_id(l.spawn.game_mode).unwrap_or(self.player.game_mode);
+                // `ClientLevel.seaLevel` comes with the spawn info (biome precipitation's
+                // snow line hangs off it).
+                self.sea_level = l.spawn.sea_level;
             }
             P::Respawn(r) => {
                 self.counters.respawns += 1;
@@ -919,19 +1424,80 @@ impl Session {
                         name: r.spawn.dimension.clone(),
                         ..DimensionInfo::overworld()
                     });
+                self.sea_level = r.spawn.sea_level;
                 world.reset(&dim);
                 entities.clear();
                 self.entity_ids.clear();
                 self.breaking.clear();
                 self.lids.clear();
+                self.bells.clear();
+                self.pots.clear();
                 self.fireworks.clear();
                 self.attached_firework = None;
                 self.dimension = dim;
                 // A respawn is a new body: no vehicle, no riding.
-                self.player.set_vehicle(None, SeatPoint::ZERO);
+                self.player.set_vehicle(None, SeatPoint::ZERO, None);
             }
-            P::PlayerPosition(_) => self.counters.teleports += 1,
+            P::PlayerPosition(p) => {
+                tracing::debug!(
+                    "player_position: teleport to ({:.1}, {:.1}, {:.1})",
+                    p.pos.x,
+                    p.pos.y,
+                    p.pos.z
+                );
+                self.counters.teleports += 1;
+            }
+            // Vanilla `handleSetChunkCacheCenter` moves the ClientChunkCache's window; our
+            // world keeps every chunk it is given, so there is nothing to move. Debug-logged:
+            // it fires on every chunk border crossing, which would flood long sessions.
+            P::SetChunkCacheCenter(c) => {
+                tracing::debug!("set_chunk_cache_center ({}, {})", c.x, c.z);
+            }
+            // The chunk batch flow control (vanilla `ClientPacketListener.handleChunkBatchStart`/
+            // `handleChunkBatchFinished` + `ChunkBatchSizeCalculator`): time the batch, fold the
+            // per-chunk duration into the running average, and tell the server the rate we want.
+            // Without the reply the server never sends the next batch, so a teleport's new area
+            // never arrives.
+            P::ChunkBatchStart(_) => {
+                tracing::debug!("chunk batch start");
+                self.batch_started_at = Some(std::time::Instant::now());
+            }
+            P::ChunkBatchFinished(b) => {
+                tracing::debug!("chunk batch finished: {} chunks", b.batch_size);
+                if b.batch_size > 0 {
+                    if let Some(start) = self.batch_started_at.take() {
+                        let nanos_per_chunk =
+                            start.elapsed().as_secs_f64() * 1e9 / b.batch_size as f64;
+                        // Clamp to a third..three times the running average, then the weighted
+                        // mean (vanilla `onBatchFinished`).
+                        let clamped = nanos_per_chunk.clamp(
+                            self.aggregated_nanos_per_chunk / 3.0,
+                            self.aggregated_nanos_per_chunk * 3.0,
+                        );
+                        self.aggregated_nanos_per_chunk = (self.aggregated_nanos_per_chunk
+                            * self.old_samples_weight as f64
+                            + clamped)
+                            / (self.old_samples_weight as f64 + 1.0);
+                        self.old_samples_weight = (self.old_samples_weight + 1).min(49);
+                    }
+                }
+                out.push(ServerboundPlay::ChunkBatchReceived(
+                    sb::ChunkBatchReceived {
+                        // Vanilla `getDesiredChunksPerTick`: 7 ms over the per-chunk duration.
+                        chunks_per_tick: (7_000_000.0 / self.aggregated_nanos_per_chunk) as f32,
+                    },
+                ));
+            }
             P::LevelParticles(p) => self.push_particles(&p, regs),
+            P::LevelEvent(e) => {
+                // The block-particle events (2001 break, 2019/2020 mining ticks); the
+                // rest of the level events are sounds and effects we do not decode.
+                if let Some(r) =
+                    crate::block_particles::request_from_level_event(e.event, e.pos, e.data)
+                {
+                    self.block_particle_requests.push(r);
+                }
+            }
             // The lightmap's effect inputs (night vision and darkness durations), boss-overlay
             // darkening and the lightning sky flash; these also ride the player's own handling.
             P::UpdateMobEffect(e) if e.entity_id == own.0 => {
@@ -943,6 +1509,14 @@ impl Session {
                 self.lightmap.remove_effect(ids, e.effect);
             }
             P::BossEvent(b) => self.lightmap.boss_event(b.id.as_u128(), &b.action),
+            // The weather game events (`ClientPacketListener.handleGameEvent`):
+            // start_raining resets the rain level to 0 (the server follows with
+            // rain_level_change steps that ramp it up), stop_raining sets it to 1 (the
+            // steps ramp it down), and the two level changes set rain/thunder directly.
+            P::GameEvent(g) if g.event == 1 => self.weather.set_rain_level(0.0),
+            P::GameEvent(g) if g.event == 2 => self.weather.set_rain_level(1.0),
+            P::GameEvent(g) if g.event == 7 => self.weather.set_rain_level(g.value),
+            P::GameEvent(g) if g.event == 8 => self.weather.set_thunder_level(g.value),
             _ if player_packet => {}
             P::LevelChunkWithLight(c) => match world.load_chunk(&c.chunk) {
                 Ok(()) => self.counters.chunks_loaded += 1,
@@ -957,27 +1531,41 @@ impl Session {
             P::ForgetLevelChunk(f) => {
                 // The chunk's block entities (and their lids) are gone with it.
                 self.lids.retain(|pos, _| pos.chunk() != f.pos);
+                self.bells.retain(|pos, _| pos.chunk() != f.pos);
+                self.pots.retain(|pos, _| pos.chunk() != f.pos);
                 world.unload_chunk(f.pos);
                 self.counters.chunks_unloaded += 1;
             }
             P::BlockUpdate(b) => {
                 let c = b.change();
                 self.lids.remove(&c.pos);
+                self.bells.remove(&c.pos);
+                self.pots.remove(&c.pos);
                 if !self.player.defer_block_update(c.pos, c.state) {
                     world.set_block(c.pos, c.state);
                 }
             }
-            // A lid's open target (vanilla routes `block_event` to the block entity's
-            // `triggerEvent`: action 1, the opener count; chests use `count > 0`, shulker
-            // boxes 0 to close and 1 to open, which `> 0` matches exactly).
+            // A block entity's `block_event` action 1: the opener count for a lid (chests use
+            // `count > 0`, shulker boxes 0 to close and 1 to open, which `> 0` matches
+            // exactly), the click direction for a bell (`BellBlockEntity.onHit`) and the wobble
+            // style for a decorated pot (`DecoratedPotBlockEntity.wobble`).
             P::BlockEvent(b) if b.action == 1 => {
-                let is_lid = self
-                    .lid_states
-                    .as_ref()
-                    .is_some_and(|s| s.contains(&world.block_state_at(b.pos)));
-                if is_lid {
+                let state = world.block_state_at(b.pos);
+                if self.lid_states.as_ref().is_some_and(|s| s.contains(&state)) {
                     let lid = self.lids.entry(b.pos).or_default();
                     lid.open = b.param > 0;
+                } else if self
+                    .bell_states
+                    .as_ref()
+                    .is_some_and(|s| s.contains(&state))
+                {
+                    // `Direction.from3DDataValue(b1)`; vertical values leave the shake
+                    // direction unset, which `BellModel.setupAnim` reads as no shake.
+                    self.bells.insert(b.pos, Direction::from_ordinal(b.param));
+                } else if self.pot_states.as_ref().is_some_and(|s| s.contains(&state)) {
+                    // `WobbleStyle.values()[data]`: POSITIVE 7 ticks, NEGATIVE 10.
+                    let duration = if b.param == 0 { 7 } else { 10 };
+                    self.pots.insert(b.pos, (self.world_age, duration));
                 }
             }
             P::BlockEntityData(b) => {
@@ -1028,7 +1616,7 @@ impl Session {
                 // If our vehicle is removed, we dismount (the store's riding bookkeeping drops
                 // us too, as a passenger of the removed vehicle).
                 if self.player.vehicle.is_some_and(|v| ids.contains(&v)) {
-                    self.player.set_vehicle(None, SeatPoint::ZERO);
+                    self.player.set_vehicle(None, SeatPoint::ZERO, None);
                 }
                 for id in &ids {
                     self.entity_ids.remove(id);
@@ -1043,17 +1631,41 @@ impl Session {
                 let vehicle = EntityId(s.vehicle);
                 let passengers: Vec<EntityId> = s.passengers.iter().map(|i| EntityId(*i)).collect();
                 entities.set_passengers(vehicle, &passengers);
+                // A boat we steer is simulated on our side from the mount on (see
+                // [`crate::boat`]); the correction below clears it on any dismount.
+                let boat = (passengers.first() == Some(&self.entity_id))
+                    .then(|| self.boat_at(vehicle, entities, world))
+                    .flatten();
                 // Mount, re-seat, or dismount. The seat comes from the vehicle's type through
                 // vanilla's attachment rules (`haste_entity::passenger_seat`), which also names
                 // our own seat index: a boat's second passenger sits elsewhere than the first.
                 match self.seat_of(vehicle, &passengers, entities) {
-                    Some(seat) => self.player.set_vehicle(Some(vehicle), seat),
+                    Some(seat) => self.player.set_vehicle(Some(vehicle), seat, boat),
                     None if self.player.vehicle() == Some(vehicle) => {
                         // Dismount: our vehicle's new list no longer names us. Sneak's shift
                         // flag in player_input is what made the server send this.
-                        self.player.set_vehicle(None, SeatPoint::ZERO);
+                        self.player.set_vehicle(None, SeatPoint::ZERO, None);
                     }
                     None => {}
+                }
+            }
+            // The server's correction of the vehicle we steer (vanilla
+            // `ClientPacketListener.handleMoveVehicle`): our simulation is snapped to where the
+            // server put the boat, and the answer carries it straight back as our next
+            // `move_vehicle`.
+            P::MoveVehicle(m) => {
+                if let Some(boat) = self.player.boat_mut() {
+                    if (m.pos - boat.pos).length() > VEHICLE_CORRECTION_EPSILON {
+                        boat.correct(m.pos, m.yaw);
+                    }
+                    out.push(ServerboundPlay::MoveVehicle(
+                        haste_protocol::packets::play::serverbound::MoveVehicle {
+                            pos: boat.pos,
+                            yaw: boat.yaw,
+                            pitch: 0.0,
+                            on_ground: boat.on_ground,
+                        },
+                    ));
                 }
             }
             P::MoveEntityPos(m) => {
@@ -1112,6 +1724,9 @@ impl Session {
             // Entity status 4 is the melee attack animation (IronGolem.handleEntityEvent).
             P::EntityEvent(e) if e.status == 4 => entities.mark_attack(EntityId(e.entity_id)),
             P::SetEntityData(d) => {
+                // Our own entity's data is handled by the player (`LocalPlayer::handle`: the air
+                // supply and the screen effects' on-fire and freeze ticks), and `_ if
+                // player_packet` above already swallowed it; only others go to the store.
                 if EntityId(d.entity_id) != own {
                     let id = EntityId(d.entity_id);
                     entities.set_metadata(id, &d.metadata);
@@ -1130,12 +1745,27 @@ impl Session {
             }
             P::SetEquipment(e) => {
                 for (slot, item) in e.equipment {
+                    if EntityId(e.entity_id) == own && slot == HEAD_SLOT {
+                        // Our own head slot, if the server sends it this way (vanilla sends our
+                        // own armor through `container_set_slot`): the worn item's camera
+                        // overlay reads it.
+                        self.player.int.armor[0] = item.clone();
+                    }
                     entities.set_equipment(EntityId(e.entity_id), slot, item);
                 }
             }
             P::PlayerInfoUpdate(u) => entities.player_info(&u.infos()),
             P::SetTime(t) => {
-                if let Some(c) = t.clocks.first() {
+                entities.set_world_age(t.world_age);
+                self.world_age = t.world_age;
+                // The day clock is `minecraft:overworld` of `minecraft:world_clock` (the
+                // End has its own); `clocks` comes in HashMap order, so look the id up.
+                if let Some(c) = t
+                    .clocks
+                    .iter()
+                    .find(|c| c.clock == overworld_clock_id(regs))
+                    .or_else(|| t.clocks.first())
+                {
                     self.time_of_day = Some(c.time);
                 }
             }
@@ -1183,6 +1813,9 @@ impl Session {
             self.counters.own_sounds += 1;
             self.sound_requests.push(request);
         }
+        // The player's own block particles this tick (break grid, mining cracks).
+        self.block_particle_requests
+            .extend(self.player.take_own_block_particles());
         self.entity_boxes.clear();
         self.entity_types.clear();
         for id in &self.entity_ids {
@@ -1236,12 +1869,35 @@ impl Session {
         for (pos, state) in self.player.take_world_edits() {
             world.set_block(pos, state);
             self.lids.remove(&pos);
+            self.bells.remove(&pos);
+            self.pots.remove(&pos);
         }
         // Every lid's animation step (vanilla ticks each chest's `ChestLidController` and each
         // shulker box's `updateAnimation` once per client tick).
         for lid in self.lids.values_mut() {
             lid.tick();
         }
+        // The screen effects' tick, in vanilla's `LocalPlayer.tick` order: the portal
+        // transition effect (`portalProcess.isInsidePortalThisTick`, set by the game thread's
+        // world probe through [`Session::screen`]) and the spinning effect, which read the
+        // nausea blend factor at the end of the tick.
+        let nausea = self.player.int.nausea_factor(1.0);
+        self.screen.tick(true, nausea);
+    }
+
+    /// The item worn on the head (the helmet armor slot), if any.
+    pub fn head_item(&self) -> Option<haste_core::RegistryIndex> {
+        self.player.int.armor[0].item
+    }
+
+    /// Our own entity's screen-effect bits (on fire, freeze ticks), parsed by `LocalPlayer`.
+    pub fn own_flags(&self) -> &crate::screen_effects::OwnFlags {
+        &self.player.own_flags
+    }
+
+    /// The portal and spinning screen effects, ticked in `end_tick`.
+    pub fn screen_effects(&self) -> &crate::screen_effects::PortalEffects {
+        &self.screen
     }
 
     /// Break cracks to draw: other players' (`block_destruction`) and our own.
@@ -1275,6 +1931,7 @@ impl Session {
             return;
         };
         let dust = dust_option(&kind, &p.particle.data);
+        let block_state = block_state_option(&kind, &p.particle.data);
         self.particle_spawns.push(haste_render::ParticleSpawn {
             kind,
             pos: p.pos,
@@ -1284,6 +1941,7 @@ impl Session {
             randomization: p.randomization.max(0) as u32,
             override_limiter: p.override_limiter,
             dust,
+            block_state,
         });
     }
 
@@ -1312,6 +1970,32 @@ fn dust_option(kind: &Identifier, data: &[u8]) -> Option<haste_render::DustOptio
         ],
         scale,
     })
+}
+
+/// `BlockParticleOption` from a particle's raw data (one VarInt block state id,
+/// `ByteBufCodecs.idMapper(Block.BLOCK_STATE_REGISTRY)`); `None` for every other
+/// type and for a malformed payload. The fall-damage landing particles
+/// (`LivingEntity.checkFallDamage` -> `sendParticles`) arrive this way.
+fn block_state_option(kind: &Identifier, data: &[u8]) -> Option<haste_core::BlockStateId> {
+    const BLOCK_KINDS: [&str; 5] = [
+        "block",
+        "block_marker",
+        "falling_dust",
+        "dust_pillar",
+        "block_crumble",
+    ];
+    if !BLOCK_KINDS.contains(&kind.path()) || data.is_empty() {
+        return None;
+    }
+    // The VarInt the encoder wrote (up to 5 bytes, little-endian groups).
+    let mut value = 0u32;
+    for (i, byte) in data.iter().take(5).enumerate() {
+        value |= u32::from(byte & 0x7F) << (7 * i);
+        if byte & 0x80 == 0 {
+            return Some(haste_core::BlockStateId(value));
+        }
+    }
+    None
 }
 
 /// Entity metadata serializer type id of `OPTIONAL_UNSIGNED_INT` (the wire type of
@@ -1422,21 +2106,32 @@ impl NetDriver {
     }
 
     /// Drains every queued packet into the session, world, entities and the UI (the HUD: every
-    /// packet in order, after the client's own handling), and sends the replies.
+    /// packet in order, after the client's own handling), and sends the replies. Packets queued
+    /// since the last drain are applied now (vanilla runs the packet queue every frame, before
+    /// the tick, `Minecraft.runTick` -> `packetProcessor.processQueuedPackets`).
     pub fn receive<W: WorldSink + ?Sized, E: EntitySink + ?Sized>(
         &mut self,
         world: &mut W,
         entities: &mut E,
         ui: Option<&crate::ui::Ui>,
     ) -> anyhow::Result<()> {
-        while let Some(p) = self.conn.try_recv() {
+        while let Some(a) = self.conn.try_recv_arrived() {
+            let waited_ms = a.at.elapsed().as_secs_f64() * 1000.0;
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                if let Some(name) = a.packet.name() {
+                    if name == "minecraft:container_set_slot" {
+                        tracing::debug!(wait_ms = waited_ms, "container_set_slot applied");
+                    }
+                }
+            }
             let regs = self.conn.registries();
             // The HUD sees every packet after the client's own handling, in order; cloning only
             // when there is a UI to show it (the session takes the original). While the HUD JVM
             // is still starting the UI-bound packets are kept and replayed once it is up.
-            let keep = ui.is_some() || crate::ui::ui_handles(&p);
-            let for_ui = keep.then(|| p.clone());
-            self.session.apply(p, world, entities, regs, &mut self.out);
+            let keep = ui.is_some() || crate::ui::ui_handles(&a.packet);
+            let for_ui = keep.then(|| a.packet.clone());
+            self.session
+                .apply(a.packet, world, entities, regs, &mut self.out);
             match (ui, for_ui) {
                 (Some(ui), Some(p)) => ui.handle(&p, &|pos| world.block_state_at(pos)),
                 (None, Some(p)) if self.ui_backlog.len() < UI_BACKLOG_LIMIT => {

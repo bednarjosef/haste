@@ -44,6 +44,10 @@ pub const SPRINT_FOOD_LEVEL: i32 = 6;
 /// on the first press and `Player.aiStep` counts it down, so a second press toggles creative
 /// flight while it is still above zero (the second press lands up to 6 ticks after the first).
 pub const JUMP_DOUBLE_TAP_TICKS: u8 = 7;
+/// Ticks a double tap of forward stays armed: vanilla `LocalPlayer.sprintTriggerTime`, set to
+/// `options.sprintWindow` (default 7, `Options.java`) on the first forward press with no
+/// impulse and counted down each `aiStep`, so a second press inside the window starts sprinting.
+pub const SPRINT_DOUBLE_TAP_TICKS: u8 = 7;
 /// Vertical movement while the chunk below is not loaded: vanilla `LivingEntity.travelInAir`
 /// skips gravity on the client and pins the vertical movement to -0.1 (0.0 at or below the
 /// world's minimum), with the 0.98 vertical drag applied on top.
@@ -197,6 +201,9 @@ pub struct LocalPlayer {
     pub saturation: f32,
     /// Air supply in ticks (entity metadata index 1; 300 when not under water).
     pub air_supply: i32,
+    /// Our own entity's screen-effect bits from our own `set_entity_data`: the on-fire shared
+    /// flag (index 0) and the freeze ticks (index 7).
+    pub own_flags: crate::screen_effects::OwnFlags,
     /// Selected hotbar slot (0..8).
     pub held_slot: i32,
     /// Whether a `player_position` arrived since login/respawn.
@@ -207,6 +214,10 @@ pub struct LocalPlayer {
     /// the player's own physics does not run: each tick its position is the vehicle's position
     /// plus the seat offset ([`LocalPlayer::ride_tick`]).
     pub vehicle: Option<EntityId>,
+    /// The boat we steer ([`crate::boat`]), set on mount together with `vehicle` and cleared on
+    /// any dismount: it holds the client's own authoritative simulation of a vehicle whose
+    /// controlling passenger we are (vanilla `Entity.isLocalInstanceAuthoritative`).
+    boat: Option<crate::boat::Boat>,
     /// Where our feet sit on the vehicle while riding (set on mount), in the vehicle's own
     /// frame: the vehicle's passenger attachment point minus our own vehicle attachment point
     /// (`haste_entity::passenger_seat`).
@@ -228,6 +239,9 @@ pub struct LocalPlayer {
     camera_eye_old: f32,
     look_offset: (f32, f32),
     last_input_look: (f32, f32),
+    /// The previous tick's forward impulse (`forward && !back`), for the sprint double tap's
+    /// rising edge (vanilla reads `hasForwardImpulse` before `input.tick()`).
+    last_input_forward: bool,
     sent: Sent,
     attribute_ids: Option<AttributeIds>,
     /// Last `update_attributes` value per attribute id (base + modifiers).
@@ -240,12 +254,22 @@ pub struct LocalPlayer {
     pub(crate) own_sounds: crate::sound::OwnBlockSounds,
     /// Own-sound requests this tick, drained into `Session::sound_requests` by `end_tick`.
     pub(crate) sound_out: Vec<crate::sound::SoundRequest>,
+    /// Own block particles this tick (our break prediction's destroy grid, the
+    /// mining start tick's crack), drained into `Session::block_particle_requests`.
+    pub(crate) block_particles_out: Vec<crate::block_particles::BlockParticleRequest>,
     /// Ticks left in the double-tap jump window: vanilla `LocalPlayer.jumpTriggerTime` (7 on the
     /// first press, counted down by `Player.aiStep` before the keys are looked at).
     jump_trigger_time: u8,
+    /// Ticks left in the double-tap sprint window: vanilla `LocalPlayer.sprintTriggerTime`
+    /// (`options.sprintWindow`, 7 on the first forward press with no impulse, counted down by
+    /// `aiStep` before the keys are looked at).
+    sprint_trigger_time: u8,
     /// Jump key state of the previous tick, so a fresh press is a rising edge (vanilla reads
     /// `input.keyPresses.jump()` before `input.tick()`).
     jump_held: bool,
+    /// Vanilla `LocalPlayer.waterVisionTime` (0..600): ramps up underwater and back down out of
+    /// it; `get_water_vision` turns it into the underwater fog visibility (`getWaterVision`).
+    water_vision_time: i32,
     /// Breaking, placing, using, attacking, hotbar and inventory (player/interact.rs).
     pub(crate) int: interact::Interaction,
     /// The first-person hand's per-tick animation state (player/hand.rs): swing, equip
@@ -270,10 +294,12 @@ impl LocalPlayer {
             food: 20,
             saturation: 5.0,
             air_supply: 300,
+            own_flags: crate::screen_effects::OwnFlags::default(),
             held_slot: 0,
             has_position: false,
             loaded: false,
             vehicle: None,
+            boat: None,
             seat: SeatPoint::ZERO,
             pending_accept: None,
             pending_accept_age: 0,
@@ -283,6 +309,7 @@ impl LocalPlayer {
             camera_eye_old: 0.0,
             look_offset: (0.0, 0.0),
             last_input_look: (0.0, 0.0),
+            last_input_forward: false,
             sent: Sent::default(),
             attribute_ids: None,
             attributes: Vec::new(),
@@ -290,8 +317,11 @@ impl LocalPlayer {
             toggle_flight: false,
             own_sounds: crate::sound::OwnBlockSounds::new(),
             sound_out: Vec::new(),
+            block_particles_out: Vec::new(),
             jump_trigger_time: 0,
+            sprint_trigger_time: 0,
             jump_held: false,
+            water_vision_time: 0,
             int: interact::Interaction::default(),
             hand: hand::Hand::new(),
         };
@@ -317,6 +347,14 @@ impl LocalPlayer {
         self.sound_out.drain(..)
     }
 
+    /// Own block particles accumulated this tick, for the caller to drain into the
+    /// session's request queue.
+    pub fn take_own_block_particles(
+        &mut self,
+    ) -> std::vec::Drain<'_, crate::block_particles::BlockParticleRequest> {
+        self.block_particles_out.drain(..)
+    }
+
     /// The input layer saw a double tap of jump (creative/spectator). Vanilla keeps the window
     /// itself (`LocalPlayer.jumpTriggerTime`, [`JUMP_DOUBLE_TAP_TICKS`] ticks): the first press
     /// arms it, the second one inside it toggles flight and jumps when flight turns on while the
@@ -339,6 +377,25 @@ impl LocalPlayer {
     /// Eye height for the current pose (the camera sits this far above the feet).
     pub fn eye_height(&self) -> f64 {
         self.attrs.eye_height_for(self.state.pose)
+    }
+
+    /// Vanilla `LocalPlayer.getWaterVision`: 0 out of water, ramping to 1 over 30 s underwater
+    /// (a 0.6 ramp over the first 5 s and 0.4 more over the next 25 s).
+    pub fn get_water_vision(&self) -> f32 {
+        if !self.state.eyes_in_water {
+            return 0.0;
+        }
+        let t = self.water_vision_time as f32;
+        if t >= 600.0 {
+            return 1.0;
+        }
+        let a = (t / 100.0).clamp(0.0, 1.0);
+        let b = if t < 100.0 {
+            0.0
+        } else {
+            ((t - 100.0) / 500.0).clamp(0.0, 1.0)
+        };
+        a * 0.6 + b * 0.39999998
     }
 
     /// Eye position and look angles interpolated by partial tick, for the camera. The eye
@@ -417,15 +474,21 @@ impl LocalPlayer {
             }
             P::SetHeldSlot(s) => self.held_slot = s.slot,
             P::SetEntityData(d) if EntityId(d.entity_id) == self.entity_id => {
-                // Wiki "Entity metadata": index 0 is the shared flags byte (bit 0x80 = fall
-                // flying, `Entity.FLAG_FALL_FLYING` = 7), index 1 the air supply (VarInt).
+                // Wiki "Entity metadata": index 0 is the shared flags byte (bit 0 = on fire,
+                // `Entity.isOnFire`; bit 0x80 = fall flying, `Entity.FLAG_FALL_FLYING` = 7),
+                // index 1 the air supply (VarInt), index 7 `DATA_TICKS_FROZEN` (the
+                // powder-snow outline's alpha).
                 for e in &d.metadata {
                     match (e.index, &e.value) {
                         (1, haste_core::entity::MetadataValue::VarInt(v)) => self.air_supply = *v,
                         (0, haste_core::entity::MetadataValue::Byte(b)) => {
+                            self.own_flags.on_fire = *b & 0x01 != 0;
                             // The server owns the flag: it confirms a glide we started and
                             // clears it when the glide ends (landing, no glider).
                             self.state.fall_flying = *b as u8 & 0x80 != 0;
+                        }
+                        (7, haste_core::entity::MetadataValue::VarInt(t)) => {
+                            self.own_flags.frozen_ticks = *t;
                         }
                         _ => {}
                     }
@@ -465,6 +528,7 @@ impl LocalPlayer {
                 self.pending_accept_age = 0;
                 self.sent = Sent::default();
                 self.jump_trigger_time = 0;
+                self.sprint_trigger_time = 0;
                 self.jump_held = false;
                 self.int.respawned();
             }
@@ -548,6 +612,12 @@ impl LocalPlayer {
             return;
         }
         let teleport_id = self.pending_accept.take().unwrap();
+        tracing::debug!(
+            "accept_teleportation {teleport_id} at ({:.1}, {:.1}, {:.1})",
+            self.state.pos.x,
+            self.state.pos.y,
+            self.state.pos.z
+        );
         out.push(ServerboundPlay::AcceptTeleportation(
             sb::AcceptTeleportation {
                 teleport_id,
@@ -726,18 +796,36 @@ impl LocalPlayer {
 
     /// Mounts or dismounts (`set_passengers`): `seat` is where our feet sit on the vehicle each
     /// tick, in the vehicle's frame (the vehicle's passenger attachment point minus our own,
-    /// `haste_entity::passenger_seat`). On a dismount, normal physics resumes from where the
-    /// player is.
-    pub fn set_vehicle(&mut self, vehicle: Option<EntityId>, seat: SeatPoint) {
+    /// `haste_entity::passenger_seat`), and `boat` the vehicle's client-side simulation when it
+    /// is a boat we steer (`None` for any other vehicle, and on a dismount). On a dismount,
+    /// normal physics resumes from where the player is.
+    pub fn set_vehicle(
+        &mut self,
+        vehicle: Option<EntityId>,
+        seat: SeatPoint,
+        boat: Option<crate::boat::Boat>,
+    ) {
         if vehicle.is_some() {
             self.seat = seat;
         }
         self.vehicle = vehicle;
+        self.boat = boat;
     }
 
     /// The vehicle we ride, if any.
     pub fn vehicle(&self) -> Option<EntityId> {
         self.vehicle
+    }
+
+    /// The boat we steer, if any (its simulated pose drives the seat and the `move_vehicle`
+    /// packets; for tests).
+    pub fn boat(&self) -> Option<&crate::boat::Boat> {
+        self.boat.as_ref()
+    }
+
+    /// The boat we steer, for the packets that steer it (the server's corrections).
+    pub fn boat_mut(&mut self) -> Option<&mut crate::boat::Boat> {
+        self.boat.as_mut()
     }
 
     /// The seat we ride in while mounted, in the vehicle's own frame (for tests).
@@ -749,18 +837,60 @@ impl LocalPlayer {
     /// a branch inside it. The passenger's own physics does not run; its position is the
     /// vehicle's position plus the seat offset turned by the vehicle's yaw (vanilla's
     /// `Entity.positionRider`), and only its look is free (`look` is the player's look for this
-    /// tick, look offset already applied). `vehicle` is `None` when the vehicle is not tracked
+    /// tick, look offset already applied). The boat we steer moves under us: the pose comes from
+    /// its own simulation, not from the packets, and `input` hands it the held keys vanilla's
+    /// `LocalPlayer.rideTick` does. `vehicle` is `None` when the vehicle is not tracked
     /// (removed, or its spawn not yet arrived): the passenger keeps its last position.
-    pub fn ride_tick(&mut self, look: (f32, f32), vehicle: Option<VehiclePose>) {
-        if let Some(v) = vehicle {
+    pub fn ride_tick(
+        &mut self,
+        input: &InputState,
+        look: (f32, f32),
+        vehicle: Option<VehiclePose>,
+    ) {
+        // vanilla `LocalPlayer.rideTick`: the passenger is a boat's rudder.
+        let posed = if let Some(boat) = &mut self.boat {
+            boat.set_input(crate::boat::BoatInput::from_input(input));
+            Some(VehiclePose {
+                pos: boat.pos,
+                yaw: boat.yaw,
+            })
+        } else {
+            vehicle
+        };
+        if let Some(v) = posed {
             self.state.pos = v.pos + self.seat.rotated(v.yaw);
         }
         self.state.velocity = DVec3::ZERO;
         self.state.fall_distance = 0.0;
         self.state.on_ground = false;
         self.state.horizontal_collision = false;
-        self.state.yaw = look.0;
+        // vanilla `AbstractBoat.positionRider`: a boat drags our look with its turn and keeps
+        // it within 105 degrees of its own heading; any other vehicle leaves the look alone.
+        self.state.yaw = match &self.boat {
+            Some(boat) => crate::boat::passenger_yaw(look.0, boat),
+            None => look.0,
+        };
         self.state.pitch = look.1;
+    }
+
+    /// The boat's own tick, which vanilla runs before its passenger's (`ClientLevel`
+    /// .tickNonPassenger` ticks the vehicle, then `tickPassenger` the passenger): the status,
+    /// the buoyancy and drag, the paddles and the swept move, then the `paddle_boat` packet the
+    /// client's own instance sends every tick.
+    fn boat_tick(&mut self, ctx: &TickCtx<'_>, out: &mut Vec<ServerboundPlay>) {
+        let Some(boat) = &mut self.boat else {
+            return;
+        };
+        let env = crate::boat::BoatEnv {
+            world: ctx.world,
+            shapes: ctx.shapes,
+            blocks: ctx.blocks,
+        };
+        boat.tick(&env);
+        out.push(ServerboundPlay::PaddleBoat(sb::PaddleBoat {
+            left: boat.paddle(0),
+            right: boat.paddle(1),
+        }));
     }
 
     fn tick_inner(
@@ -773,6 +903,8 @@ impl LocalPlayer {
         self.apply_attributes();
         self.prev_pos = self.state.pos;
         self.last_input_look = (input.yaw, input.pitch);
+        let last_input_forward = self.last_input_forward;
+        self.last_input_forward = input.forward && !input.back;
         // Vanilla `Camera.tick` runs at the start of the client tick, before the player's own
         // tick (so the target is the pose's eye height as the last tick ended it), and even
         // while the player has no position yet: the camera halves its distance to the target
@@ -780,8 +912,31 @@ impl LocalPlayer {
         self.camera_eye_old = self.camera_eye;
         self.camera_eye += (self.eye_height() as f32 - self.camera_eye) * 0.5;
         self.flush_pending_accept(out);
+        // The effects' tick, in vanilla's `LivingEntity.baseTick` order (before the position
+        // check below): their durations and blend states drive the screen effects.
+        self.int.tick_effects();
         if !(self.has_position && self.loaded) {
             return;
+        }
+
+        // Vanilla `Entity.baseTick` starts the tick with the sprint particle
+        // (`canSpawnSprintParticle`: sprinting, not in water/lava, not sneaking or
+        // spectating, alive) — the velocity is the one the previous tick ended with.
+        if self.state.sprinting
+            && !self.state.in_water
+            && !self.state.in_lava
+            && !self.state.sneaking
+            && self.game_mode != GameMode::Spectator
+            && self.health > 0.0
+            && ctx
+                .world
+                .is_chunk_loaded(BlockPos::from_dvec3(self.state.pos).chunk())
+        {
+            self.block_particles_out
+                .push(crate::block_particles::BlockParticleRequest::Sprint {
+                    feet: self.state.pos,
+                    velocity: self.state.velocity,
+                });
         }
 
         // 0. Hotbar, crosshair target and interactions (vanilla handles key bindings before
@@ -806,8 +961,22 @@ impl LocalPlayer {
         // 2. The passenger tick (vanilla `rideTick`) replaces physics: a passenger sends
         // rotation only, never position packets (the server owns a passenger's position).
         if self.vehicle.is_some() {
-            self.ride_tick(look, vehicle);
+            // The vehicle's own tick first (vanilla `ClientLevel.tickNonPassenger`), then the
+            // passenger's `rideTick` seats us on it, then `LocalPlayer.sendChanges`: the rotation
+            // and, for a vehicle we control, the `move_vehicle` that carries its simulation.
+            self.boat_tick(ctx, out);
+            self.ride_tick(input, look, vehicle);
             self.send_rotation(out);
+            if let Some(boat) = &self.boat {
+                if boat.pos.is_finite() && boat.yaw.is_finite() {
+                    out.push(ServerboundPlay::MoveVehicle(sb::MoveVehicle {
+                        pos: boat.pos,
+                        yaw: boat.yaw,
+                        pitch: 0.0,
+                        on_ground: boat.on_ground,
+                    }));
+                }
+            }
             out.push(ServerboundPlay::ClientTickEnd(sb::ClientTickEnd {}));
             return;
         }
@@ -823,12 +992,45 @@ impl LocalPlayer {
         if self.jump_trigger_time > 0 {
             self.jump_trigger_time -= 1;
         }
+        if self.sprint_trigger_time > 0 {
+            self.sprint_trigger_time -= 1;
+        }
         let mut phys_input = *input;
         phys_input.yaw = input.yaw + self.look_offset.0;
         phys_input.pitch = (input.pitch + self.look_offset.1).clamp(-90.0, 90.0);
         if self.food <= SPRINT_FOOD_LEVEL && !self.abilities.may_fly {
             phys_input.sprint = false;
             self.state.sprinting = false;
+        }
+        // Vanilla `LocalPlayer.aiStep`'s double tap of forward, after `Player.aiStep` counted
+        // `sprintTriggerTime` down above: sneak held, an item in use or the backward key
+        // cancels the window. `hasForwardImpulse` is read from the PREVIOUS tick's input
+        // (vanilla captures it before `input.tick()`), so the window arms on a tick without
+        // forward and starts the sprint on the fresh press inside it. `canStartSprinting` is
+        // evaluated on the current keys — not sprinting, a forward impulse, `isSprintingPossible`
+        // (enough food or may-fly; the not-blind gate is vanilla's `Player.isMobilityRestricted`,
+        // not modelled here), not slowed by an item in use and not moving slowly
+        // (`isMovingSlowly`: crouching or the swimming pose out of water) unless under water.
+        // The window lasts `options.sprintWindow` ticks (default 7). The sprint key branch
+        // (`keyPresses.sprint()`) is the physics tick's own `input.sprint` rule.
+        let forward_impulse = input.forward && !input.back;
+        if input.sneak || self.is_using_item() || input.back {
+            self.sprint_trigger_time = 0;
+        }
+        let moving_slowly = self.state.crouching
+            || (self.state.pose == haste_physics::Pose::Swimming && !self.state.in_water);
+        let under_water = self.state.eyes_in_water && self.state.in_water;
+        let can_start_sprinting = !self.state.sprinting
+            && forward_impulse
+            && (self.food > SPRINT_FOOD_LEVEL || self.abilities.may_fly)
+            && !self.is_using_item()
+            && (!moving_slowly || under_water);
+        if can_start_sprinting && !last_input_forward {
+            if self.sprint_trigger_time > 0 {
+                phys_input.sprint = true;
+            } else {
+                self.sprint_trigger_time = SPRINT_DOUBLE_TAP_TICKS;
+            }
         }
         let was_flying = self.state.flying;
         let was_on_ground = self.state.on_ground;
@@ -932,6 +1134,19 @@ impl LocalPlayer {
             }
         }
 
+        // Vanilla `LocalPlayer.aiStep`: the water-vision ramp, +1/tick with the eyes in water
+        // (spectators +10), -10/tick once out of it, both clamped to 0..600.
+        if self.state.eyes_in_water {
+            let speed = if self.game_mode == GameMode::Spectator {
+                10
+            } else {
+                1
+            };
+            self.water_vision_time = (self.water_vision_time + speed).clamp(0, 600);
+        } else if self.water_vision_time > 0 {
+            self.water_vision_time = (self.water_vision_time - 10).clamp(0, 600);
+        }
+
         // 4. Flight started or stopped (toggle or landing).
         if self.state.flying != was_flying {
             let mut f = 0;
@@ -1021,16 +1236,32 @@ impl LocalPlayer {
         let status_changed = s.on_ground != self.sent.on_ground
             || s.horizontal_collision != self.sent.horizontal_collision;
         match (pos_changed, rot_changed) {
-            (true, true) => out.push(ServerboundPlay::MovePlayerPosRot(sb::MovePlayerPosRot {
-                pos: s.pos,
-                yaw: s.yaw,
-                pitch: s.pitch,
-                flags,
-            })),
-            (true, false) => out.push(ServerboundPlay::MovePlayerPos(sb::MovePlayerPos {
-                pos: s.pos,
-                flags,
-            })),
+            (true, true) => {
+                tracing::debug!(
+                    "move_player_pos_rot to ({:.1}, {:.1}, {:.1})",
+                    s.pos.x,
+                    s.pos.y,
+                    s.pos.z
+                );
+                out.push(ServerboundPlay::MovePlayerPosRot(sb::MovePlayerPosRot {
+                    pos: s.pos,
+                    yaw: s.yaw,
+                    pitch: s.pitch,
+                    flags,
+                }));
+            }
+            (true, false) => {
+                tracing::debug!(
+                    "move_player_pos to ({:.1}, {:.1}, {:.1})",
+                    s.pos.x,
+                    s.pos.y,
+                    s.pos.z
+                );
+                out.push(ServerboundPlay::MovePlayerPos(sb::MovePlayerPos {
+                    pos: s.pos,
+                    flags,
+                }));
+            }
             (false, true) => out.push(ServerboundPlay::MovePlayerRot(sb::MovePlayerRot {
                 yaw: s.yaw,
                 pitch: s.pitch,

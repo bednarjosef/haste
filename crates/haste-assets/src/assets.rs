@@ -27,9 +27,18 @@ pub struct Assets {
     objects_dir: Option<PathBuf>,
     /// Parsed `<assets_dir>/indexes/<index>.json`, when present.
     index_hashes: HashMap<String, String>,
+    /// Selected resource packs layered on top of the jar (vanilla
+    /// `PackRepository` selection; empty = vanilla only).
+    packs: crate::packstack::PackStack,
+    /// Where the packs were read from (vanilla's `resourcepacks` folder).
+    packs_dir: PathBuf,
+    /// The server's downloaded packs layered above the selection.
+    server_packs: Vec<PathBuf>,
     model_cache: HashMap<String, Arc<ModelFile>>,
     /// Where this was opened from (`reopen`).
     source: (PathBuf, PathBuf, String),
+    /// The pack ids `reopen` re-applies (empty when opened plain).
+    pack_ids: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -232,14 +241,58 @@ impl Assets {
             jar,
             objects_dir,
             index_hashes,
+            packs: crate::packstack::PackStack::empty(),
+            packs_dir: PathBuf::new(),
+            server_packs: Vec::new(),
             model_cache: HashMap::new(),
             source,
+            pack_ids: Vec::new(),
         })
     }
 
     /// A second handle on the same jar and assets (the renderer keeps one for lazy loads).
+    /// Re-applies the same pack stack when one was applied.
     pub fn reopen(&self) -> Result<Assets> {
-        Assets::open(&self.source.0, &self.source.1, &self.source.2)
+        let mut assets = Assets::open(&self.source.0, &self.source.1, &self.source.2)?;
+        if !self.pack_ids.is_empty() || !self.server_packs.is_empty() {
+            assets.apply_server_packs(&self.packs_dir, &self.pack_ids, &self.server_packs);
+        }
+        Ok(assets)
+    }
+
+    /// Layers the selected resource packs on top of the jar (bottom first),
+    /// reading them from `packs_dir` (vanilla's `<game dir>/resourcepacks`).
+    /// Must be called before any asset is read; clears the model cache of
+    /// pack-provided models.
+    pub fn apply_packs(&mut self, packs_dir: &Path, ids: &[String]) {
+        self.apply_server_packs(packs_dir, ids, &[]);
+    }
+
+    /// [`Assets::apply_packs`] with the server's downloaded packs layered above
+    /// the selection (vanilla's `DownloadedPackSource` sits at the top of the
+    /// repository): the zips the server pushed, in push order.
+    pub fn apply_server_packs(&mut self, packs_dir: &Path, ids: &[String], server: &[PathBuf]) {
+        self.packs_dir = packs_dir.to_path_buf();
+        self.packs = crate::packstack::PackStack::open_with_server(packs_dir, ids, server);
+        self.pack_ids = ids.to_vec();
+        self.server_packs = server.to_vec();
+        self.model_cache.clear();
+    }
+
+    /// The pack ids currently layered (bottom first), as `apply_packs` got them.
+    pub fn pack_ids(&self) -> &[String] {
+        &self.pack_ids
+    }
+
+    /// The server packs currently layered above the selection, as
+    /// `apply_server_packs` got them.
+    pub fn server_packs(&self) -> &[PathBuf] {
+        &self.server_packs
+    }
+
+    /// The directory packs were layered from (vanilla's `resourcepacks` folder).
+    pub fn packs_dir(&self) -> &Path {
+        &self.packs_dir
     }
 
     /// `assets/<ns>/<path>` of a full texture id such as `minecraft:textures/gui/x.png`, or
@@ -356,7 +409,7 @@ impl Assets {
 
     /// File names directly under `dir` ending with `ext`, path relative to `dir`.
     fn names_under(&mut self, dir: &str, ext: &str) -> impl Iterator<Item = String> {
-        let names: Vec<String> = self
+        let mut names: Vec<String> = self
             .jar
             .file_names()
             .filter(|n| n.starts_with(dir) && n.ends_with(ext))
@@ -367,6 +420,20 @@ impl Assets {
                     .map(str::to_owned)
             })
             .collect();
+        // Packs add entries (vanilla `FallbackResourceManager.listResources`):
+        // union of all layers, deduped.
+        if !self.packs.is_empty() {
+            for key in self.packs.keys() {
+                if let Some(name) = key
+                    .strip_prefix(dir)
+                    .and_then(|rest| rest.strip_suffix(ext))
+                {
+                    if !name.contains('/') && !names.iter().any(|n| n == name) {
+                        names.push(name.to_owned());
+                    }
+                }
+            }
+        }
         names.into_iter()
     }
 
@@ -374,6 +441,10 @@ impl Assets {
 
     pub(crate) fn resolve_model(&mut self, id: &Identifier) -> Result<ResolvedModel> {
         let mut texture_map: HashMap<String, String> = HashMap::new();
+        // Sprite ids any model in the parent chain declares force_translucent; their
+        // atlas regions are marked translucent after the build (26.3 model field).
+        let mut force_translucent: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         let mut elements: Option<Vec<crate::model::ElementDef>> = None;
         let mut ambientocclusion: Option<bool> = None;
         let mut gui_light: Option<bool> = None;
@@ -383,10 +454,14 @@ impl Assets {
         let mut head_display: Option<crate::model::DisplayTransform> = None;
         let mut ground_display: Option<crate::model::DisplayTransform> = None;
         let mut fixed_display: Option<crate::model::DisplayTransform> = None;
+        let mut on_shelf_display: Option<crate::model::DisplayTransform> = None;
         let mut current = id.clone();
 
         for _ in 0..20 {
             let model = self.load_model(&current)?;
+            for sprite in &model.textures.force_translucent {
+                force_translucent.insert(sprite.clone());
+            }
             for (key, value) in &model.textures {
                 texture_map
                     .entry(key.clone())
@@ -434,6 +509,12 @@ impl Assets {
                     .get("fixed")
                     .and_then(crate::model::DisplayTransform::parse);
             }
+            if on_shelf_display.is_none() {
+                on_shelf_display = model
+                    .display
+                    .get("on_shelf")
+                    .and_then(crate::model::DisplayTransform::parse);
+            }
             if gui_light.is_none() && model.gui_light.is_some() {
                 gui_light = Some(model.gui_light.as_deref() == Some("front"));
             }
@@ -459,6 +540,7 @@ impl Assets {
 
         Ok(ResolvedModel {
             textures: resolved,
+            force_translucent,
             elements: elements.unwrap_or_default(),
             ambientocclusion: ambientocclusion.unwrap_or(true),
             gui_light: gui_light.unwrap_or(false),
@@ -468,6 +550,7 @@ impl Assets {
             head_display,
             ground_display,
             fixed_display,
+            on_shelf_display,
         })
     }
 
@@ -495,8 +578,14 @@ impl Assets {
 
     /// The downloaded assets (index + objects) take precedence over the jar: the jar carries
     /// stubs for what the launcher downloads (`font/include/unifont.json` is empty in the jar).
-    /// Index keys have no `assets/` prefix.
+    /// Index keys have no `assets/` prefix. Selected resource packs override both (vanilla
+    /// `FallbackResourceManager`: top of the stack wins).
     pub(crate) fn try_read_asset(&mut self, key: &str) -> Result<Option<Vec<u8>>> {
+        if !self.packs.is_empty() {
+            if let Some(bytes) = self.packs.read(key) {
+                return Ok(Some(bytes));
+            }
+        }
         let index_key = key.strip_prefix("assets/").unwrap_or(key);
         if let (Some(objects), Some(hash)) = (&self.objects_dir, self.index_hashes.get(index_key)) {
             let path = objects.join(&hash[..2]).join(hash);
@@ -854,6 +943,89 @@ pub(crate) mod tests {
             asset_key(&id, "textures", ".png"),
             "assets/minecraft/textures/stone.png"
         );
+    }
+
+    /// A tiny generated pack (folder form) overriding `block/stone.png` with a
+    /// red tile plus a new texture, layered under a zip pack adding another.
+    fn pack_fixture(assets_dir: &std::path::Path) -> Vec<String> {
+        use std::io::Write as _;
+        let packs_dir = assets_dir.join("resourcepacks");
+        let red = packs_dir.join("RedStone");
+        std::fs::create_dir_all(red.join("assets/minecraft/textures/block")).unwrap();
+        std::fs::write(
+            red.join("pack.mcmeta"),
+            r#"{"pack":{"min_format":97,"max_format":97,"description":"red stone"}}"#,
+        )
+        .unwrap();
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            16,
+            16,
+            image::Rgba([200, 30, 30, 255]),
+        ))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+        std::fs::write(red.join("assets/minecraft/textures/block/stone.png"), &png).unwrap();
+        let zip_path = packs_dir.join("Extra.zip");
+        {
+            let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(
+                std::fs::File::create(&zip_path).unwrap(),
+            ));
+            zip.start_file::<_, ()>("pack.mcmeta", Default::default())
+                .unwrap();
+            zip.write_all(br#"{"pack":{"min_format":97,"max_format":97,"description":"extra"}}"#)
+                .unwrap();
+            zip.start_file::<_, ()>(
+                "assets/minecraft/textures/block/haste_extra.png",
+                Default::default(),
+            )
+            .unwrap();
+            zip.write_all(&png).unwrap();
+            zip.finish().unwrap();
+        }
+        vec!["file/RedStone".to_string(), "file/Extra.zip".to_string()]
+    }
+
+    #[test]
+    #[ignore = "needs the client jar in the cache"]
+    fn pack_overrides_and_extends_jar() {
+        let mut assets = match open_assets() {
+            Some(a) => a,
+            None => {
+                eprintln!("ignored: needs the client jar in the cache");
+                return;
+            }
+        };
+        let packs = pack_fixture(&haste_core::paths::cache_dir().join("assets"));
+        let packs_dir = haste_core::paths::cache_dir()
+            .join("assets")
+            .join("resourcepacks");
+        assets.apply_packs(&packs_dir, &packs);
+        // The pack's red stone replaces the jar's.
+        let stone = assets
+            .texture(&Identifier::minecraft("block/stone"))
+            .unwrap();
+        assert_eq!(stone.get_pixel(0, 0), &image::Rgba([200, 30, 30, 255]));
+        // A new texture from the zip pack is readable (and listable).
+        let extra = assets
+            .texture(&Identifier::minecraft("block/haste_extra"))
+            .unwrap();
+        assert_eq!(extra.dimensions(), (16, 16));
+        let names = assets.block_texture_names();
+        assert!(names.iter().any(|n| n.path() == "block/haste_extra"));
+        // Untouched assets still come from the jar.
+        let dirt = assets
+            .texture(&Identifier::minecraft("block/dirt"))
+            .unwrap();
+        assert_eq!(dirt.dimensions(), (16, 16));
+        // reopen re-applies the same pack stack.
+        let mut reopened = assets.reopen().unwrap();
+        assert_eq!(reopened.pack_ids(), packs.as_slice());
+        assert_eq!(reopened.packs_dir(), packs_dir);
+        let stone = reopened
+            .texture(&Identifier::minecraft("block/stone"))
+            .unwrap();
+        assert_eq!(stone.get_pixel(0, 0), &image::Rgba([200, 30, 30, 255]));
     }
 
     #[test]

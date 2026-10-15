@@ -411,6 +411,12 @@ pub struct EntityStore {
     /// The synced `minecraft:painting_variant` registry (id -> size/asset), set at join from
     /// the server's `registry_data`; empty when the server sent none.
     painting_variants: HashMap<u32, crate::decoration::PaintingVariant>,
+    /// The synced variant registries (cat/wolf/frog/pig/cow/chicken), set at join from the
+    /// server's `registry_data`; empty when the server sent none.
+    mob_variants: crate::variants::MobVariants,
+    /// The world age of the last `set_time` (`NeutralMob.isAngry` compares anger end times
+    /// against it); 0 before one arrives.
+    world_age: i64,
     /// Item default components (the `equippable` component armour reads), from the datagen
     /// report; empty when absent (armour then draws nothing).
     item_components: haste_data::ItemComponents,
@@ -443,6 +449,8 @@ impl EntityStore {
             players: AHashMap::new(),
             riding: Riding::new(),
             painting_variants: HashMap::new(),
+            mob_variants: crate::variants::MobVariants::empty(),
+            world_age: 0,
             item_components: haste_data::ItemComponents::default(),
         }
     }
@@ -460,6 +468,23 @@ impl EntityStore {
         variants: HashMap<u32, crate::decoration::PaintingVariant>,
     ) {
         self.painting_variants = variants;
+    }
+
+    /// Sets one synced variant registry's table (id -> assets), from the server's
+    /// `registry_data` at join (see `haste-client`'s `net::mob_variants`). Registries no
+    /// variant mob reads are ignored.
+    pub fn set_mob_variants(
+        &mut self,
+        registry: &str,
+        entries: Vec<Option<crate::variants::VariantAssets>>,
+    ) {
+        self.mob_variants.insert(registry, entries);
+    }
+
+    /// The world age from `set_time` (the bee's anger end time compares against it,
+    /// `NeutralMob.isAngry`).
+    pub fn set_world_age(&mut self, world_age: i64) {
+        self.world_age = world_age;
     }
 
     fn slot(&self, id: EntityId) -> Option<u32> {
@@ -770,6 +795,7 @@ impl EntityStore {
                 slot.data,
                 &slot.metadata,
                 &self.painting_variants,
+                slot.id.0,
             );
             let pos = if decoration.is_some() {
                 crate::decoration::render_center(
@@ -782,19 +808,75 @@ impl EntityStore {
             } else {
                 slot.prev_pos.lerp(slot.pos, partial_tick as f64)
             };
-            let (model, has_head) = if slot.is_player_type {
-                (crate::models::humanoid(false), true)
+            let (model, has_head, overlays) = if slot.is_player_type {
+                (crate::models::humanoid(false), true, Default::default())
             } else {
                 // Registry table first (shared per type, head flag precomputed), then the box.
                 // Babies use the row's baby layer, like vanilla's AgeableMobRenderer.submit.
-                let baby = crate::registry::entity_type_name(slot.kind)
-                    .filter(|_| crate::registry::is_baby(&slot.metadata))
-                    .and_then(|n| crate::registry::baby_model_for_name(&n));
-                match crate::registry::model_entry(slot.kind) {
-                    Some((head, m)) => (baby.unwrap_or(m), head),
-                    None => (
+                // Variant mobs (cat/wolf/frog/pig/cow/chicken) instead resolve their look from
+                // the synced variant registry through the entity's metadata, falling back to
+                // the table's default row when the variant is unknown or absent.
+                let baby = crate::registry::is_baby(&slot.metadata);
+                let variant =
+                    crate::variants::model_for(slot.kind, &self.mob_variants, &slot.metadata, baby)
+                        .or_else(|| {
+                            // Metadata-driven variants (axolotl/rabbit/horse/llama/panda/
+                            // parrot/fox/bee/strider/mooshroom): the same layer, the variant's
+                            // texture.
+                            crate::variants::metadata_model_for(
+                                slot.kind,
+                                &slot.metadata,
+                                baby,
+                                slot.nametag.as_deref(),
+                                self.world_age,
+                            )
+                        });
+                // The tropical fish's shape follows its packed pattern; the shulker's base
+                // texture follows its colour byte. Both are plain model swaps, and both
+                // must be gated on the entity's own type: their metadata slots (17, 18)
+                // collide with other mobs' fields (e.g. a sheep's wool byte sits where a
+                // shulker's colour byte would).
+                let type_name = crate::registry::entity_type_name(slot.kind);
+                let variant = variant.or_else(|| {
+                    if type_name.as_deref() == Some("minecraft:tropical_fish") {
+                        crate::variants::tropical_fish_model(&slot.metadata)
+                    } else {
+                        None
+                    }
+                });
+                let variant = match type_name.as_deref() {
+                    Some("minecraft:shulker") => {
+                        match crate::variants::shulker_texture(&slot.metadata) {
+                            Some(texture) => crate::registry::model_for_name("minecraft:shulker")
+                                .map(|mut m| {
+                                    if m.texture != texture {
+                                        let mut c = (*m).clone();
+                                        c.texture = texture.clone();
+                                        m = std::sync::Arc::new(c);
+                                    }
+                                    m
+                                }),
+                            None => variant,
+                        }
+                    }
+                    _ => variant,
+                };
+                let entry = crate::registry::model_entry(slot.kind);
+                let overlays = crate::variants::overlays_for(slot.kind, &slot.metadata, baby);
+                match (variant, entry) {
+                    // A variant model (already the baby's when `baby`); all six variant mobs
+                    // have a head part, so the head aim stays on.
+                    (Some(v), _) => (v, true, overlays),
+                    (None, Some((head, m))) => {
+                        let baby_model = crate::registry::entity_type_name(slot.kind)
+                            .filter(|_| baby)
+                            .and_then(|n| crate::registry::baby_model_for_name(&n));
+                        (baby_model.unwrap_or(m), head, overlays)
+                    }
+                    (None, None) => (
                         crate::models::box_for(slot.dimensions.0, slot.dimensions.1),
                         false,
+                        overlays,
                     ),
                 }
             };
@@ -819,6 +901,43 @@ impl EntityStore {
             } else {
                 slot.yaw
             };
+            let type_name = crate::registry::entity_type_name(slot.kind);
+            let is_baby = !slot.is_player_type && crate::registry::is_baby(&slot.metadata);
+            // `LivingEntityRenderer.getShadowRadius`/`MobRenderer.getShadowRadius`: the
+            // renderer's base radius times the living/age scale (0.5 for babies). The player's
+            // `AvatarRenderer` uses 0.5.
+            let base_shadow = type_name
+                .as_deref()
+                .map(crate::registry::shadow_radius_for_name)
+                .unwrap_or(0.0);
+            let shadow_scale = if is_baby { 0.5 } else { 1.0 };
+            let shadow_radius = if slot.is_player_type {
+                0.5
+            } else {
+                base_shadow * shadow_scale
+            };
+            let shadow_strength = type_name
+                .as_deref()
+                .map(crate::registry::shadow_strength_for_name)
+                .unwrap_or(1.0);
+            let invisible = slot.metadata.shared.invisible;
+            // `EntityRenderer.extractNameTags`/`shouldShowName`: players always show their name
+            // (`Player.shouldShowName`), mobs only a visible custom name (`LivingEntity`), both
+            // hidden while invisible (`isVisibleToPlayer`).
+            let custom_name = slot.metadata.custom_name();
+            let nametag = if invisible {
+                None
+            } else if slot.is_player_type {
+                slot.nametag.clone()
+            } else if slot.metadata.custom_name_visible() {
+                custom_name.or_else(|| slot.nametag.clone())
+            } else {
+                None
+            };
+            let name_tag_y = crate::registry::name_tag_offset_for_name(
+                type_name.as_deref().unwrap_or(""),
+                slot.dimensions.1,
+            );
             // Equipment layers (held items, armour) are only drawn on humanoid models
             // (vanilla adds `ItemInHandLayer`/`HumanoidArmorLayer` per renderer type).
             let humanoid = has_head && model_has_part(&model.root, "right_arm");
@@ -834,13 +953,23 @@ impl EntityStore {
                 yaw,
                 pitch: slot.pitch,
                 head_yaw: slot.head_yaw,
-                scale: 1.0,
+                // Slime/magma cube size (`AbstractCubeMob.ID_SIZE`); 1.0 for everything else.
+                scale: crate::variants::scale_for(slot.kind, &slot.metadata),
                 pose,
                 body,
                 body_scale,
                 skin: None,
-                nametag: slot.nametag.clone(),
+                nametag,
+                below_name: None,
+                shadow_radius,
+                shadow_strength,
+                invisible,
+                is_discrete: slot.metadata.shared.crouching,
+                name_tag_y,
                 hurt: hurt_strength(slot),
+                // Overlay layers (sheep wool, horse markings, collars, the fish pattern):
+                // drawn with the same transform and pose after the base model.
+                overlays,
                 item: item_of(slot, partial_tick),
                 decoration,
                 hands,

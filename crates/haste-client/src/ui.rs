@@ -35,9 +35,11 @@ use std::sync::Arc;
 
 use haste_jvm::{GameState, GuiPipeline, JvmHost, ScreenKind};
 use haste_protocol::haste_core::game::GameMode;
-use haste_protocol::haste_core::gui::{GuiFrame, TextMetrics};
+use haste_protocol::haste_core::gui::{GuiCommand, GuiFrame, TextMetrics};
 use haste_protocol::haste_core::{BlockPos, BlockStateId, Component};
-use haste_protocol::packets::configuration::clientbound::{RegistryData, UpdateTags};
+use haste_protocol::packets::configuration::clientbound::{
+    RegistryData, ServerLinkLabel, UpdateTags,
+};
 use haste_protocol::packets::play::serverbound as sb;
 use haste_protocol::packets::{Decoded, Direction, Dispatch, Packet, ProtocolTables, State};
 use haste_protocol::wire::Writer;
@@ -110,7 +112,12 @@ const FORWARDED: &[&str] = &[
     "minecraft:set_player_team",
     "minecraft:commands",
     "minecraft:command_suggestions",
+    "minecraft:update_advancements",
+    "minecraft:select_advancements_tab",
+    "minecraft:award_stats",
+    "minecraft:game_rule_values",
     "minecraft:open_screen",
+    "minecraft:update_recipes",
     "minecraft:container_set_content",
     "minecraft:container_set_slot",
     "minecraft:container_set_data",
@@ -126,6 +133,13 @@ const FORWARDED: &[&str] = &[
     "minecraft:open_book",
     // the store drops the chunk's entities with the chunk (vanilla handleForgetLevelChunk)
     "minecraft:forget_level_chunk",
+    // the recipe book (real vanilla Java over the forwarded packets): the book's displays and
+    // settings, the recipe container, and the ghost recipe the overlay shows on a right-click
+    "minecraft:recipe_book_add",
+    "minecraft:recipe_book_remove",
+    "minecraft:recipe_book_settings",
+    "minecraft:update_recipes",
+    "minecraft:place_ghost_recipe",
 ];
 
 /// Packets about one entity: forwarded only when they are about the local player.
@@ -177,7 +191,8 @@ impl Ui {
         }
     }
 
-    fn gui(&self) -> &GuiPipeline {
+    /// The GUI pipeline (screens, ticks, frames; menu mode drives it before a session exists).
+    pub fn gui(&self) -> &GuiPipeline {
         self.host.gui()
     }
 
@@ -188,6 +203,44 @@ impl Ui {
         self.gui().set_block_state(pos, state.0 as i32);
     }
 
+    /// JVM memory diagnostics (`Boot.memoryStats`): `key=value` lines (heap, metaspace,
+    /// code cache, compressed class space), empty when the JVM failed to start.
+    pub fn jvm_memory(&self) -> String {
+        self.host.jvm_memory().unwrap_or_default()
+    }
+
+    /// Opens a real vanilla screen (menu mode's title screen, tests).
+    pub fn open_screen(&self, kind: ScreenKind) -> anyhow::Result<()> {
+        self.gui().open_screen(kind)
+    }
+
+    /// The multiplayer screen's Join: the address to connect to, if any was clicked since the
+    /// last call (menu mode; the connection itself is Rust's).
+    pub fn take_join_request(&self) -> Option<String> {
+        self.gui().take_join_request()
+    }
+
+    /// The connecting screen's Cancel since the last call: drop a join still in progress.
+    pub fn take_join_cancelled(&self) -> bool {
+        self.gui().take_join_cancelled()
+    }
+
+    /// The title screen's Quit Game since the last call: close the client.
+    pub fn take_quit_request(&self) -> bool {
+        self.gui().take_quit_request()
+    }
+
+    /// The world list's "Play Selected World" since the last call: the world folder to start
+    /// the local server for and join.
+    pub fn take_open_world_request(&self) -> Option<String> {
+        self.gui().take_open_world_request()
+    }
+
+    /// The create screen's "Create New World" since the last call: the world to make.
+    pub fn take_create_world_request(&self) -> Option<haste_jvm::CreateWorldRequest> {
+        self.gui().take_create_world_request()
+    }
+
     /// The renderer's text metrics (`Renderer::text_metrics`): vanilla's `Font` measures with them.
     pub fn set_text_metrics(&self, m: Arc<dyn TextMetrics>) {
         self.gui().set_text_metrics(m);
@@ -195,7 +248,22 @@ impl Ui {
 
     /// Joined a server (after `Connection::connect`): registries, tags and feature flags from the
     /// configuration phase, the local player from `login`.
-    pub fn joined(&self, conn: &Connection, login: &Login) -> anyhow::Result<()> {
+    ///
+    /// `game_mode` is the mode the client has actually seen (the session's, which follows every
+    /// packet since the `login`). The HUD's JVM takes seconds to start, and packets that arrive
+    /// before it (a server that switches a joining player's mode, a respawn with another mode)
+    /// never reach [`Ui::handle`]; without the session's mode the `login` packet's would win and
+    /// the HUD would show the mode of the world-loading screen (no hearts in survival, or hearts
+    /// in creative). Where vanilla stores the local mode is `MultiPlayerGameMode.localMode`
+    /// (`ClientPacketListener.handleGameEvent` -> `MultiPlayerGameMode.setLocalMode`); here the
+    /// equivalent store is [`haste_jvm::GameState::game_mode`], which every game mode change
+    /// writes: this call and [`Ui::handle`]'s `game_event` and respawn arms alike.
+    pub fn joined(
+        &self,
+        conn: &Connection,
+        login: &Login,
+        game_mode: GameMode,
+    ) -> anyhow::Result<()> {
         let tables = conn.tables().clone();
         *self.shared.serverbound.lock() = Some(Dispatch::new(
             &tables.packets,
@@ -222,6 +290,20 @@ impl Ui {
         self.gui().finish_configuration()?;
         let features: Vec<String> = regs.features.iter().map(|f| f.to_string()).collect();
         self.gui().set_features(&features)?;
+        // the pause menu's server links (b = built-in label id, c = custom label flattened to text)
+        let links: Vec<String> = regs
+            .server_links
+            .iter()
+            .map(|l| match &l.label {
+                ServerLinkLabel::BuiltIn(id) => {
+                    format!("b\t{id}\t{}", l.url)
+                }
+                ServerLinkLabel::Custom(c) => {
+                    format!("c\t{}\t{}", c.to_plain(&|_| None), l.url)
+                }
+            })
+            .collect();
+        self.gui().set_server_links(&links)?;
         let entity = login.entity_id.0;
         self.shared.local_entity.store(entity, Ordering::Relaxed);
         self.gui()
@@ -230,7 +312,7 @@ impl Ui {
             .set_dimension_type(login.packet.spawn.dimension_type);
         self.gui().with_state(|s| {
             s.in_world = true;
-            s.game_mode = login.game_mode;
+            s.game_mode = game_mode;
             s.vitals.hardcore = login.hardcore;
             s.immediate_respawn = !login.packet.enable_respawn_screen;
             s.disconnect_requested = false;
@@ -370,6 +452,13 @@ impl Ui {
         self.gui().with_state(f)
     }
 
+    /// Whether any hotbar slot (vanilla `Inventory` 0-8) holds an item. The check scripts wait
+    /// on this after the runner's RCON `give`: on a busy shared server the inventory sync can
+    /// lag seconds behind the command's answer.
+    pub fn hotbar_has_items(&self) -> bool {
+        self.state(|s| s.inventory.iter().take(9).any(|s| !s.is_empty()))
+    }
+
     /// One 20 Hz client tick (game thread).
     pub fn tick(&self) {
         self.gui().tick();
@@ -378,8 +467,11 @@ impl Ui {
         }
     }
 
-    /// Everything the UI sends this tick, in order: packets vanilla code sent, chat and commands    /// typed in the chat screen, the selected hotbar slot when it changed.
+    /// Everything the UI sends this tick, in order: packets vanilla code sent, chat and commands
+    /// typed in the chat screen, the selected hotbar slot when it changed, and the respawn a
+    /// dead player's immediate respawn queued (`PlayerCombatKill`).
     pub fn drain_outgoing(&self, out: &mut Vec<ServerboundPlay>) {
+        out.append(&mut self.shared.outbox.lock());
         let (packets, chat, slot) =
             self.state(|s| (s.take_outgoing(), s.take_sent(), s.selected_slot));
         if !packets.is_empty() {
@@ -388,7 +480,21 @@ impl Ui {
             if let (Some(tables), Some(dispatch)) = (tables, dispatch.as_ref()) {
                 for p in packets {
                     match decode_serverbound(dispatch, &tables, &p) {
-                        Ok(sp) => out.push(sp),
+                        Ok(sp) => {
+                            if let ServerboundPlay::ContainerClick(c) = &sp {
+                                tracing::info!(
+                                    "container_click: window {} slot {} button {} mode {} state {} changed {} carried {}",
+                                    c.window_id,
+                                    c.slot,
+                                    c.button,
+                                    c.mode,
+                                    c.state_id,
+                                    c.changed.len(),
+                                    c.carried.item.is_some()
+                                );
+                            }
+                            out.push(sp)
+                        }
                         Err(e) => tracing::warn!("packet from Java not sent: {e}"),
                     }
                 }
@@ -422,6 +528,21 @@ impl Ui {
     /// `OptionInstance.onValueUpdate` callbacks.
     pub fn drain_option_changes(&self) -> Vec<(String, String)> {
         self.state(|s| s.take_option_changes())
+    }
+
+    /// The inventory slots vanilla Java code changed since the last call (vanilla
+    /// `Inventory` numbering, oldest first): creative slot sets, menu clicks, pick block —
+    /// edits vanilla predicts client-side, which the server does not echo back (vanilla's
+    /// `handleSetCreativeModeSlot` marks the slot remote before `broadcastChanges`, so no
+    /// `container_set_slot`/`set_player_inventory` arrives for it).
+    pub fn drain_inventory_changes(&self) -> Vec<(i32, haste_core::entity::ItemStackData)> {
+        self.state(|s| s.take_inventory_changes())
+    }
+
+    /// The resource pack selection the pack screen committed since the last call (vanilla
+    /// `Minecraft.reloadResourcePacks` after Done): repository ids, bottom first.
+    pub fn take_resource_pack_selection(&self) -> Option<Vec<String>> {
+        self.gui().take_resource_pack_ids()
     }
 
     /// A game key event (no screen open, SDL3 scancode) mirrored into the vanilla `KeyMapping`s,
@@ -560,13 +681,40 @@ impl Ui {
         partial: f32,
     ) -> &GuiFrame {
         match self.gui().render(width, height, scale, mouse, partial) {
-            Ok(f) => self.frame = f,
+            Ok(f) => {
+                self.trace_vitals(&f);
+                self.frame = f;
+            }
             Err(e) => {
                 tracing::warn!("ui frame: {e:#}");
                 self.frame.commands.clear();
             }
         }
         &self.frame
+    }
+
+    /// What the HUD drew of the player's vitals, at debug level (the frame path stays clean
+    /// when debug logging is off): the game mode the HUD renders for and the heart and food
+    /// sprite counts, so a "no health, no hunger" report can be traced to the side that has
+    /// them wrong — the state, or the Java HUD that reads it (`Hud.extractHotbarAndDecorations`
+    /// draws them only while `gameMode.canHurtPlayer()`).
+    fn trace_vitals(&self, f: &GuiFrame) {
+        if !tracing::enabled!(tracing::Level::DEBUG) {
+            return;
+        }
+        let (hearts, food) = f.commands.iter().fold((0usize, 0usize), |(h, fd), c| {
+            if let GuiCommand::Sprite { sprite, .. } | GuiCommand::SpriteRegion { sprite, .. } = c {
+                let path = sprite.path();
+                (
+                    h + usize::from(path.starts_with("hud/heart")),
+                    fd + usize::from(path.starts_with("hud/food")),
+                )
+            } else {
+                (h, fd)
+            }
+        });
+        let mode = self.state(|s| s.game_mode);
+        tracing::debug!("hud frame: {mode:?} hearts {hearts} food {food}");
     }
 
     /// Whether a screen is open (the client releases the mouse and stops game input).
@@ -634,6 +782,13 @@ impl Ui {
         if let Err(e) = self.gui().disconnected(reason) {
             tracing::warn!("disconnect screen: {e:#}");
         }
+    }
+
+    /// The client left the world (pause screen "Disconnect", death screen "Title Screen"):
+    /// the HUD stops drawing (`Hud.extractRenderState` runs only while
+    /// [`GameState::in_world`] is set, like vanilla's `Gui` once its level is null).
+    pub fn left_world(&self) {
+        self.state(|s| s.in_world = false);
     }
 
     /// The F3 overlay's numbers (FPS, position, rotation, chunk and entity counts), every frame.
@@ -806,7 +961,8 @@ mod tests {
             );
             let (conn, login) = rt.block_on(Connection::connect(opts)).expect("connect");
             let t = std::time::Instant::now();
-            ui.joined(&conn, &login).expect("registries into Java");
+            ui.joined(&conn, &login, login.game_mode)
+                .expect("registries into Java");
             eprintln!(
                 "joined {addr}; {} synchronised registries into Java in {:?}",
                 conn.registries().names().count(),
@@ -1133,6 +1289,72 @@ mod tests {
         c.disconnect();
     }
 
+    /// The server's `game_event` CHANGE_GAME_MODE (an operator's `/gamemode`) reaches the Java
+    /// side where vanilla stores the local mode (`MultiPlayerGameMode.setLocalMode`): the HUD
+    /// shows the hearts and the hunger bar in survival and drops them again in creative.
+    #[test]
+    #[ignore = "needs cache/ (JDK, client jar, libraries, ASM, data generator reports)"]
+    fn game_mode_change_shows_and_hides_the_vitals() {
+        use haste_protocol::packets::play::clientbound as cb;
+        let mut ui = Ui::new(host());
+        ui.gui().with_state(|s| {
+            s.in_world = true;
+            s.game_mode = GameMode::Creative;
+            s.vitals.health = 20.0;
+            s.vitals.food = 20;
+        });
+        let vitals = |ui: &mut Ui| {
+            let f = ui.frame(320, 240, 2, (0.0, 0.0), 0.0);
+            let sprites: Vec<String> =
+                f.commands
+                    .iter()
+                    .filter_map(|c| match c {
+                        GuiCommand::Sprite { sprite, .. }
+                        | GuiCommand::SpriteRegion { sprite, .. } => Some(sprite.to_string()),
+                        _ => None,
+                    })
+                    .collect();
+            let count = |prefix: &str| sprites.iter().filter(|s| s.starts_with(prefix)).count();
+            (count("minecraft:hud/heart"), count("minecraft:hud/food"))
+        };
+        // creative: no health, no hunger
+        assert_eq!(vitals(&mut ui), (0, 0));
+        // CHANGE_GAME_MODE (event 3), the param is the GameType id: 0 = survival
+        ui.handle(&ClientboundPlay::GameEvent(cb::GameEvent {
+            event: 3,
+            value: 0.0,
+        }));
+        assert_eq!(ui.gui().with_state(|s| s.game_mode), GameMode::Survival);
+        let (hearts, food) = vitals(&mut ui);
+        assert!(hearts >= 10, "hearts: {hearts}");
+        assert!(food >= 10, "food: {food}");
+        // and back to creative (1): the hearts and the hunger bar go away again
+        ui.handle(&ClientboundPlay::GameEvent(cb::GameEvent {
+            event: 3,
+            value: 1.0,
+        }));
+        assert_eq!(vitals(&mut ui), (0, 0));
+        // the respawn packet carries the game mode too (a respawn in another mode)
+        ui.handle(&ClientboundPlay::Respawn(cb::Respawn {
+            spawn: cb::SpawnInfo {
+                dimension_type: 0,
+                dimension: "minecraft:overworld".parse().unwrap(),
+                hashed_seed: 0,
+                game_mode: 0,
+                previous_game_mode: 0,
+                is_debug: false,
+                is_flat: false,
+                death_location: None,
+                portal_cooldown: 0,
+                sea_level: 63,
+            },
+            data_kept: 0,
+        }));
+        let (hearts, food) = vitals(&mut ui);
+        assert!(hearts >= 10, "hearts after the respawn: {hearts}");
+        assert!(food >= 10, "food after the respawn: {food}");
+    }
+
     /// Dying opens vanilla's death screen; its Respawn button sends `client_command` and the
     /// server's respawn closes it.
     #[test]
@@ -1271,6 +1493,58 @@ mod tests {
         c.disconnect();
     }
 
+    /// The pause menu's Advancements screen: the server's update_advancements packets feed
+    /// vanilla's ClientAdvancements (its tree and progress), the screen opens with the server's
+    /// tabs (a vanilla server sends at least the "Minecraft" story root) and asks the server for
+    /// the selected tab (seen_advancements).
+    #[test]
+    #[ignore = "needs cache/ and a test server (HASTE_TEST_SERVER, default 127.0.0.1:25614) where 'haste' is an operator; run with --test-threads=1"]
+    fn advancements_screen() {
+        let mut c = TestClient::join();
+        c.spawn();
+        c.run(40);
+        assert!(
+            c.received.contains(&"minecraft:update_advancements"),
+            "no update_advancements from the server: {:?}",
+            c.received
+        );
+        c.press(keys::ESCAPE);
+        c.click("Advancements");
+        assert_eq!(
+            c.ui.gui().screen_class().as_deref(),
+            Some("net.minecraft.client.gui.screens.advancements.AdvancementsScreen"),
+            "{:?}",
+            c.ui.gui().take_last_error()
+        );
+        let f = c.frame((0.0, 0.0));
+        let t = texts(&f);
+        // the vanilla server's story root: the "Minecraft" tab title and the window's title
+        assert!(
+            t.iter().any(|x| x == "Advancements"),
+            "missing title: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x == "Minecraft"),
+            "missing the story tab: {t:?}"
+        );
+        c.press(keys::ESCAPE);
+        c.run(5);
+        assert!(!c.ui.screen_open());
+        // the screen told the server it closed the tab (vanilla sends seen_advancements)
+        assert!(
+            c.sent
+                .iter()
+                .any(|p| matches!(p, ServerboundPlay::SeenAdvancements(_))),
+            "no seen_advancements: {:?}",
+            c.sent
+        );
+        let unimpl = c.ui.host.unimplemented().unwrap();
+        eprintln!("Unimplemented: {unimpl:#?}");
+        assert_no_refusals(&c.ui.host);
+        assert!(c.kicked.is_none(), "kicked: {:?}", c.kicked);
+        c.disconnect();
+    }
+
     /// A kick shows vanilla's disconnect screen with the reason.
     #[test]
     #[ignore = "needs cache/ and a test server (HASTE_TEST_SERVER, default 127.0.0.1:25614) where 'haste' is an operator; run with --test-threads=1"]
@@ -1372,5 +1646,49 @@ mod tests {
         assert_no_refusals(&c.ui.host);
         assert!(c.kicked.is_none(), "kicked: {:?}", c.kicked);
         c.disconnect();
+    }
+
+    /// Leaving the server stops the HUD like vanilla `Minecraft.disconnectClient` (the pause
+    /// screen's "Disconnect"): after `left_world` the title screen draws without the hotbar,
+    /// hearts or crosshair, over the plain menu background instead of the last world frame.
+    #[test]
+    fn leaving_the_world_hides_the_hud() {
+        let mut ui = Ui::new(host());
+        ui.gui().with_state(|s| {
+            s.in_world = true;
+            s.game_mode = GameMode::Survival;
+            s.vitals.health = 20.0;
+            s.vitals.food = 20;
+        });
+        let in_world = ui.frame(320, 240, 2, (0.0, 0.0), 0.0).clone();
+        let sprites: Vec<String> = in_world
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                GuiCommand::Sprite { sprite, .. } | GuiCommand::SpriteRegion { sprite, .. } => {
+                    Some(sprite.to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            sprites
+                .iter()
+                .any(|s| s.starts_with("minecraft:hud/hotbar")),
+            "hotbar while in the world: {sprites:?}"
+        );
+        // the window's `leave_server` path
+        ui.left_world();
+        let left = ui.frame(320, 240, 2, (0.0, 0.0), 0.0).clone();
+        assert!(
+            !left.commands.iter().any(|c| match c {
+                GuiCommand::Sprite { sprite, .. } | GuiCommand::SpriteRegion { sprite, .. } => {
+                    sprite.path().starts_with("hud/")
+                }
+                _ => false,
+            }),
+            "no HUD sprites after leaving: {:?}",
+            texts(&left)
+        );
     }
 }

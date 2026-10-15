@@ -1,0 +1,24 @@
+# Feature: the client spawns block particles itself (vanilla's own destroy grid and
+# mining cracks). The runner teleports the player onto a stone platform in survival
+# with an iron pickaxe; we look straight down and hold attack: crack particles while
+# mining, the destroy grid the moment the block goes.
+wait_until joined
+# The runner teleports and sets up the platform and the pickaxe while we wait (the
+# settle wait is skipped: the shared test server is busy, and everything here happens
+# at the player's own feet).
+screenshot setup
+wait 300
+# Aim straight down at the block under our feet and start mining. Stone with an iron
+# pickaxe breaks on the 8th tick: cracks first, the destroy grid right after.
+look 0 90
+wait 5
+mouse_down left
+wait 6
+screenshot mining-cracks
+wait 3
+screenshot block-broken
+mouse_up left
+# Ambient block particles: the runner places torches around the player after the
+# break; the animateTick samples spawn their flames and smoke.
+wait 60
+screenshot ambient-torches

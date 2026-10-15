@@ -1,0 +1,79 @@
+# Boat steering on the test server (127.0.0.1:25691). Live evidence and the RCON setup the
+# driver runs; the two findings that block the evidence are recorded at the bottom.
+#
+# RIG (own area, x 370..394, z -2..46: ~400 blocks from the shared spawn floor x 3..16,
+# z 2..16, and far from the other workstreams' areas):
+#   fill 370 69 -2 394 69 46 stone     floor, top at y 70
+#   fill 376 70 6 386 70 42 water      water lane, water at y 70, surface at y 70.8889
+#   fill 378 71 2 382 71 6 stone       curb, top at y 72 (a block above the water line: a
+#                                      curb flush with it puts the driver half in the water,
+#                                      where the crosshair ray hits the block under their
+#                                      feet, measured on a run with the top at y 71)
+#   tp <name> 380.5 72 6.0 0 49        the player on that curb (eyes y 73.62)
+#   summon minecraft:oak_boat 380.5 73 8.5   the oak boat, dropped onto the water
+#   tp @e[type=oak_boat] 380.5 73 8.5  re-placed on the water just before the look, because
+#                                      a floating boat drifts about a block in 20 seconds
+#
+# EVIDENCE (RCON, own username BoatSteer, on 26.3, 2026-10-15):
+#   data get entity @e[type=oak_boat,limit=1,sort=nearest] Pos
+#     Oak Boat has the following entity data: [380.5d, 70.5232604980402d, 8.5d]
+#   ride BoatSteer mount @e[type=oak_boat,limit=1]
+#     BoatSteer started riding Oak Boat
+#   data get entity BoatSteer Pos     380.5d, 72.0d, 6.0d (on the curb, yaw 0 pitch 49)
+# The boat's resting y is the server's: 70.5232 = the water surface 70.8889 minus 0.65 of the
+# oak boat's height (0.5625), which is `AbstractBoat.floatBoat`'s equilibrium, so the pool
+# and the geometry below the driver are the vanilla ones.
+#
+# The mount hands the boat to this client: with a debug print in `boat_tick` the first tick
+# our client simulated started exactly at the server's position,
+#     pos DVec3(380.5, 70.523193359375, 8.5) status InWater delta DVec3(0.0, 0.0, 0.0)
+# and the `move_vehicle` and `paddle_boat` packets went out every tick after it. What is
+# wrong is the buoyancy, and with it the two things this check still needs:
+#
+# 1. The hull sinks. With the boat at rest, our client's `check_in_water` (boat.rs:241)
+#    measured the water surface as 70.637, not 70.8889, so `floatBoat`'s buoyancy came out
+#    0.203 instead of the 0.65 that cancels the gravity, and every tick carried a -0.0206
+#    vertical delta: 70.523 -> 70.503 -> 70.467 -> ... -> 70.0 (on the floor) in 128 ticks.
+#    The tests' world passes because its fluid height table is 8/9 for water, which is the
+#    live water block's height too; only the live path disagrees, so the height read in
+#    `water_height_at` (boat.rs:525) is what has to be checked next.
+# 2. A use-item click does not mount the boat. The pick runs with
+#    `(input.yaw + look_offset.0, input.pitch + look_offset.1)` (player.rs:898-901), and a
+#    scripted `look` jumps the input past the server's echoed rotation, which leaves that
+#    offset stale: the click tick's crosshair looked at pitch 90.0 instead of the scripted
+#    49 and hit the block under the driver's feet (printed on a run with a temporary debug
+#    line in interact.rs:708), so the four `click right` steps below all miss. The mount
+#    for the reading above therefore came from RCON, which is not what this check needs.
+#
+# Still unverified: the server log (it lives outside the worktree, in the shared cache the
+# shell here may not read), so the "no moved wrongly for the boat" line is not in this
+# file yet, and neither is the after-W Pos: with the hull sinking there was no forward
+# paddle to measure.
+#
+# The steps below drive the client: mount the oak boat with use-item (the crosshair aims at
+# it exactly now that a scripted `look` subtracts the server's rotation offset), hold it,
+# then W (60 ticks) and A (20). The driver stands wherever the join left them in the lane
+# (the server remembers the last logout spot; no teleport is needed, the boat is summoned
+# right in front of the driver over RCON), feet on the floor, eyes y 71.62, boat 3 blocks
+# ahead at pitch 15. The lane is a stone-rimmed pool: an unrimmed lane spreads flowing
+# water over its edge on the server's fluid ticks, whose current pushes a standing player
+# out of the pool before the clicks land.
+wait_until joined
+wait 400
+look 0 15
+wait 10
+click right 480 270
+wait 20
+click right 480 270
+wait 20
+click right 480 270
+wait 60
+click right 480 270
+wait 120
+key_down w
+wait 60
+key_up w
+key_down a
+wait 20
+key_up a
+wait 600

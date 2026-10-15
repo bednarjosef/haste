@@ -1,0 +1,73 @@
+# Every pause-menu button: open each screen, screenshot it, come back.
+# GUI 480x270 (960x540 at gui scale 2). Labeled buttons are clicked with click_text (by their
+# drawn label); the icon row has no labels, only tooltips, so it is clicked by coordinates
+# (report bugs 204, send feedback 228, friends 252, player reporting 276; row centre y 134).
+wait_until joined
+wait_until settled
+# The runner grants the player the advancements here: a player that never earned one only
+# ever gets the recipe tree, whose root has no display and so shows no tab at all.
+screenshot advance-setup
+wait 30
+wait 10
+key Escape
+wait_until screen_open
+wait 5
+screenshot pause
+
+# Advancements (the server's tree; the story root is always visible)
+click_text Advancements
+wait 20
+screenshot advancements
+# The tab row (only drawn with two or more tabs): hover the second tab so its title shows as
+# a tooltip — with one tab the window title is already the tab's name.
+mouse 166 55
+wait 10
+screenshot advancements-tab
+key Escape
+wait_until screen_open
+
+# Statistics (asks the server with client_command REQUEST_STATS; the values arrive)
+click_text Statistics
+wait 20
+screenshot statistics
+key Escape
+wait_until screen_open
+
+# the icon row: report bugs (a link confirmation; Cancel returns, nothing is opened)
+click left 204 134
+wait 5
+screenshot report-bugs
+key Escape
+wait_until screen_open
+
+# send feedback (the same link confirmation)
+click left 228 134
+wait 5
+screenshot send-feedback
+key Escape
+wait_until screen_open
+
+# friends (the friends-list confirmation; Haste has no friends list)
+click left 252 134
+wait 5
+screenshot friends
+key Escape
+wait_until screen_open
+
+# player reporting (social interactions; no players to report on a fresh server)
+click left 276 134
+wait 5
+screenshot player-reporting
+key Escape
+wait_until screen_open
+
+# World Options (dedicated-server rows: difficulty, game rules, restrictions)
+click_text World Options...
+wait 5
+screenshot world-options
+key Escape
+wait_until screen_open
+
+# close the pause menu through its button
+click_text Back to Game
+wait_until screen_closed

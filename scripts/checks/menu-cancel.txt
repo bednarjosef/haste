@@ -1,0 +1,32 @@
+# Menu mode: every way back to the title screen, with a screenshot after each return.
+# Run without --server (menu mode starts at the title screen):
+#   target/debug/haste --script scripts/checks/menu-cancel.txt --seconds 120
+# The title screen's buttons must come back after each Cancel/Done (the fade state resets:
+# a screen shown again after being removed re-runs its init).
+# Steady state (scripts/checks/singleplayer-check.sh primes it on a first run): the
+# singleplayer dir holds a sentinel world, so the world list opens instead of the create
+# screen auto-jumping on an empty list.
+wait_until screen TitleScreen
+screenshot menu-cancel-title
+click_text Singleplayer
+wait_until screen SelectWorldScreen
+screenshot menu-cancel-worldlist
+click_text Back
+wait_until screen TitleScreen
+screenshot menu-cancel-back1
+click_text Multiplayer
+# vanilla's first-time multiplayer safety warning (skipped when options.txt says so)
+wait_until screen_open
+screenshot menu-cancel-safety
+click_text Proceed
+wait_until screen JoinMultiplayerScreen
+screenshot menu-cancel-multiplayer
+click_text Back
+wait_until screen TitleScreen
+screenshot menu-cancel-back2
+click_text Options...
+wait_until screen OptionsScreen
+screenshot menu-cancel-options
+click_text Done
+wait_until screen TitleScreen
+screenshot menu-cancel-back3

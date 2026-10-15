@@ -188,23 +188,56 @@ pub fn sky_colors(sky: &SkyState, kind: SkyKind, view_distance: f32) -> SkyColor
             for i in 0..3 {
                 fog[i] += (sky_c[i] - fog[i]) * k;
             }
-            // Rain greys and darkens both.
-            if rain > 0.0 {
-                for col in [&mut sky_c, &mut fog] {
-                    let grey = (col[0] * 0.3 + col[1] * 0.59 + col[2] * 0.11) * 0.6;
-                    for v in col.iter_mut() {
-                        *v = (*v * (1.0 - rain * 0.75) + grey * rain * 0.75) * (1.0 - rain * 0.2);
-                    }
-                }
+            // The weather attribute layers (vanilla `WeatherAttributes.RAIN`/`THUNDER` over
+            // SKY_COLOR): rain blends the colour toward its greyscale times 0.6 by a factor
+            // of 0.75 (`ColorModifier.BLEND_TO_GRAY_RGB`), thunder toward the greyscale
+            // times 0.24 by 0.94. The rain layer's weight is the rain level minus the
+            // thunder level (which is itself scaled by the rain level), the thunder layer's
+            // the thunder level.
+            let thunder = (sky.thunder * rain).clamp(0.0, 1.0);
+            let rain_only = (rain - thunder).clamp(0.0, 1.0);
+            let blend_to_gray = |col: [f32; 3], brightness: f32, factor: f32| {
+                let grey = col[0] * 0.3 + col[1] * 0.59 + col[2] * 0.11;
+                [
+                    col[0] + (grey * brightness - col[0]) * factor,
+                    col[1] + (grey * brightness - col[1]) * factor,
+                    col[2] + (grey * brightness - col[2]) * factor,
+                ]
+            };
+            if rain_only > 0.0 {
+                let target = blend_to_gray(sky_c, 0.6, 0.75);
+                sky_c = [
+                    sky_c[0] + (target[0] - sky_c[0]) * rain_only,
+                    sky_c[1] + (target[1] - sky_c[1]) * rain_only,
+                    sky_c[2] + (target[2] - sky_c[2]) * rain_only,
+                ];
             }
+            if thunder > 0.0 {
+                let target = blend_to_gray(sky_c, 0.24, 0.94);
+                sky_c = [
+                    sky_c[0] + (target[0] - sky_c[0]) * thunder,
+                    sky_c[1] + (target[1] - sky_c[1]) * thunder,
+                    sky_c[2] + (target[2] - sky_c[2]) * thunder,
+                ];
+            }
+            // The sunrise/sunset colour's alpha takes the weather layers' RGB multiply
+            // (rain 0.6, thunder 0.3 on the alpha channel of the multipliers
+            // (0.5, 0.5, 0.6)/(0.25, 0.25, 0.3)).
+            let weather_a = 1.0 - rain_only * 0.4 - thunder * 0.7;
             let sunrise = if (-0.4..=0.4).contains(&c) {
                 let f = c / 0.4 * 0.5 + 0.5;
                 let a = (1.0 - (1.0 - (f * std::f32::consts::PI).sin()) * 0.99).powi(2);
-                [f * 0.3 + 0.7, f * f * 0.7 + 0.2, 0.2, a * (1.0 - rain)]
+                [f * 0.3 + 0.7, f * f * 0.7 + 0.2, 0.2, a * weather_a]
             } else {
                 [0.0; 4]
             };
             let s = (angle * std::f32::consts::TAU).sin();
+            // The weather layers also set the star brightness to 0 (`WeatherAttributes`
+            // `.set(STAR_BRIGHTNESS, 0)` applied by the levels).
+            let stars = (1.0 - (c * 2.0 + 0.25)).clamp(0.0, 1.0)
+                * 0.5
+                * (1.0 - rain_only)
+                * (1.0 - thunder);
             SkyColors {
                 celestial_angle: angle,
                 brightness,
@@ -212,7 +245,7 @@ pub fn sky_colors(sky: &SkyState, kind: SkyKind, view_distance: f32) -> SkyColor
                 fog,
                 sunrise,
                 sunrise_side: if s < 0.0 { 1.0 } else { -1.0 },
-                star_brightness: (1.0 - (c * 2.0 + 0.25)).clamp(0.0, 1.0) * 0.5 * (1.0 - rain),
+                star_brightness: stars,
                 moon_phase,
             }
         }
@@ -230,9 +263,11 @@ pub struct SkyRenderer {
     device: Arc<wgpu::Device>,
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    /// The environment atlas's view (sun, moons, clouds, rain, snow, end sky), lent to the
+    /// weather pass at startup.
+    atlas_view: wgpu::TextureView,
     background: wgpu::RenderPipeline,
     celestial: wgpu::RenderPipeline,
-    world: wgpu::RenderPipeline,
     clouds: wgpu::RenderPipeline,
     /// The sky disc fan (vanilla `SkyRenderer.renderSkyDisc`).
     disc: wgpu::RenderPipeline,
@@ -247,13 +282,11 @@ pub struct SkyRenderer {
     dynamic: wgpu::Buffer,
     dynamic_capacity: usize,
     vertices: Vec<SkyVertex>,
-    /// Sun + moon vertex count at the start of `vertices`; rain follows.
+    /// Sun + moon vertex count at the start of `vertices`.
     celestial_count: u32,
     rects: AtlasRects,
     pub kind: SkyKind,
     pub colors: SkyColors,
-    /// Rain/snow columns drawn this frame (vertex range in `dynamic`).
-    weather: std::ops::Range<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -262,6 +295,7 @@ struct AtlasRects {
     moon: [[u32; 4]; 8],
     clouds: [u32; 4],
     rain: [u32; 4],
+    snow: [u32; 4],
     end_sky: [u32; 4],
 }
 
@@ -295,14 +329,17 @@ impl SkyRenderer {
             )
         });
         let rain = put("environment/rain", 288, 0);
-        let _snow = put("environment/snow", 352, 0);
-        let end_sky = put("environment/end_sky", 384, 0);
+        let snow = put("environment/snow", 352, 0);
+        // Past the weather tiles (rain 288..352, snow 352..416): the End sky must not
+        // overlap them, or the weather pass samples its purple where snow flakes should be.
+        let end_sky = put("environment/end_sky", 448, 0);
         let clouds = put("environment/clouds", 0, 256);
         let rects = AtlasRects {
             sun,
             moon,
             clouds,
             rain,
+            snow,
             end_sky,
         };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -364,6 +401,7 @@ impl SkyRenderer {
                 },
             ],
         });
+        let atlas_view = texture.create_view(&Default::default());
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("sky-bind"),
             layout: &layout,
@@ -374,9 +412,7 @@ impl SkyRenderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(
-                        &texture.create_view(&Default::default()),
-                    ),
+                    resource: wgpu::BindingResource::TextureView(&atlas_view),
                 },
             ],
         });
@@ -459,14 +495,6 @@ impl SkyRenderer {
             additive,
             false,
         );
-        let world = make(
-            "sky-weather",
-            "vs_world",
-            "fs_world",
-            &[Some(SkyVertex::LAYOUT)],
-            wgpu::BlendState::ALPHA_BLENDING,
-            true,
-        );
         let clouds = make(
             "sky-clouds",
             "vs_clouds",
@@ -525,9 +553,9 @@ impl SkyRenderer {
             device,
             uniforms,
             bind_group,
+            atlas_view,
             background,
             celestial,
-            world,
             clouds,
             disc,
             sunrise,
@@ -550,12 +578,23 @@ impl SkyRenderer {
                     dimension_has_sky: true,
                     fog_start: 0.0,
                     fog_end: 1.0,
+                    ..Default::default()
                 },
                 SkyKind::Overworld,
                 12.0,
             ),
-            weather: 0..0,
         }
+    }
+
+    /// The environment atlas's texture view (shared with the weather pass).
+    pub fn atlas_view(&self) -> &wgpu::TextureView {
+        &self.atlas_view
+    }
+
+    /// The rain and snow rectangles in the environment atlas (x, y, w, h), for the weather
+    /// pass.
+    pub fn weather_rects(&self) -> ([u32; 4], [u32; 4]) {
+        (self.rects.rain, self.rects.snow)
     }
 
     /// Computes this frame's colours and geometry and uploads the uniforms. `fog` is the
@@ -579,12 +618,18 @@ impl SkyRenderer {
         // the exact environment colour; the dome colours keep our sunrise approximation
         // fed with the exact tint and strength).
         let mut colors = colors;
+        // The horizon colour is the exact environment fog colour (all dimensions), so the dome
+        // and the terrain fog agree.
+        colors.fog = fog_color;
         if kind == SkyKind::Overworld {
-            colors.fog = fog_color;
             let glow = crate::fog::sunrise_sunset_color(sky.time_of_day);
             colors.sunrise = [glow[0], glow[1], glow[2], glow[3]];
             colors.sunrise_side = crate::fog::sun_glow_side(sky.time_of_day);
-            colors.sky = crate::fog::overworld_sky_color(sky.time_of_day);
+            colors.sky = crate::fog::overworld_sky_color(
+                sky.time_of_day,
+                sky.rain.clamp(0.0, 1.0),
+                (sky.thunder * sky.rain.clamp(0.0, 1.0)).clamp(0.0, 1.0),
+            );
         }
         self.colors = colors;
         let rain = sky.rain.clamp(0.0, 1.0);
@@ -610,18 +655,6 @@ impl SkyRenderer {
             );
         }
         self.celestial_count = self.vertices.len() as u32;
-        let weather_start = self.vertices.len() as u32;
-        if rain > 0.0 && kind == SkyKind::Overworld {
-            push_rain(
-                &mut self.vertices,
-                cam,
-                sky.time_of_day,
-                rain,
-                colors.brightness,
-                self.rects.rain,
-            );
-        }
-        self.weather = weather_start..self.vertices.len() as u32;
         if self.vertices.len() > self.dynamic_capacity {
             self.dynamic_capacity = self.vertices.len().next_power_of_two();
             self.dynamic = make_buffer(&self.device, self.dynamic_capacity);
@@ -636,7 +669,15 @@ impl SkyRenderer {
             [l[0], l[1], l[2], 1.0]
         };
         let sunrise = linear([colors.sunrise[0], colors.sunrise[1], colors.sunrise[2]]);
-        let cloud_brightness = srgb_to_linear((colors.brightness * 0.9 + 0.1) * (1.0 - rain * 0.5));
+        // The clouds take their own weather layers (`WeatherAttributes`: blend to the
+        // greyscale times 0.6 by a factor of 0.5 in rain, times 0.095 by 0.94 in thunder).
+        // For the scalar brightness (a grey value) that is v * (1 - factor + factor *
+        // brightness): rain keeps 0.7 of it, thunder 0.2856.
+        let thunder = (sky.thunder * rain).clamp(0.0, 1.0);
+        let rain_only = (rain - thunder).clamp(0.0, 1.0);
+        let cloud_value = colors.brightness * 0.9 + 0.1;
+        let cloud_value = cloud_value * (1.0 - rain_only * 0.3) * (1.0 - thunder * 0.7144);
+        let cloud_brightness = srgb_to_linear(cloud_value);
         let u = SkyUniforms {
             view_proj: view_proj.to_cols_array_2d(),
             rot_view_proj: rot_view_proj.to_cols_array_2d(),
@@ -725,7 +766,8 @@ impl SkyRenderer {
         calls
     }
 
-    /// Clouds and weather: last in the main pass, after translucent terrain.
+    /// Clouds: last in the main pass, after translucent terrain (the weather columns follow
+    /// through the weather pass's own draw).
     pub fn draw_overlays<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) -> u32 {
         let mut calls = 0;
         if self.kind != SkyKind::Overworld {
@@ -735,12 +777,6 @@ impl SkyRenderer {
         pass.set_pipeline(&self.clouds);
         pass.draw(0..6, 0..1);
         calls += 1;
-        if !self.weather.is_empty() {
-            pass.set_pipeline(&self.world);
-            pass.set_vertex_buffer(0, self.dynamic.slice(..));
-            pass.draw(self.weather.clone(), 0..1);
-            calls += 1;
-        }
         calls
     }
 }
@@ -885,64 +921,6 @@ fn sunrise_matrix(side: f32, alpha: f32) -> Mat4 {
         * Mat4::from_scale(Vec3::new(1.0, 1.0, alpha.max(0.001)))
 }
 
-/// Rain columns in a radius of 5 blocks around the camera, 15 blocks tall, scrolling down.
-/// Approximate: without the heightmap the columns are not stopped by roofs.
-fn push_rain(
-    out: &mut Vec<SkyVertex>,
-    cam: Vec3,
-    time: i64,
-    rain: f32,
-    brightness: f32,
-    rect: [u32; 4],
-) {
-    let (bx, by, bz) = (cam.x.floor() as i32, cam.y.floor(), cam.z.floor() as i32);
-    let light = srgb_to_linear(brightness * 0.8 + 0.2);
-    let r = rect.map(|v| v as f32);
-    let rect16 = rect.map(|v| v as u16);
-    for dz in -5..=5 {
-        for dx in -5..=5 {
-            let (x, z) = (bx + dx, bz + dz);
-            let dist2 = (dx * dx + dz * dz) as f32;
-            if dist2 > 25.0 {
-                continue;
-            }
-            let hash = ((x.wrapping_mul(3121) + x.wrapping_mul(x).wrapping_mul(45238971))
-                ^ (z.wrapping_mul(418711) + z.wrapping_mul(13761)))
-            .unsigned_abs();
-            let centre = Vec3::new(x as f32 + 0.5, 0.0, z as f32 + 0.5);
-            let to_cam = Vec3::new(cam.x - centre.x, 0.0, cam.z - centre.z);
-            let side = if to_cam.length_squared() < 1e-4 {
-                Vec3::X * 0.5
-            } else {
-                Vec3::new(-to_cam.z, 0.0, to_cam.x).normalize() * 0.5
-            };
-            let (y0, y1) = (by - 5.0, by + 10.0);
-            // One quarter of rain.png per column, scrolling 3 texture rows per tick.
-            let u0 = r[0] + (hash % 4) as f32 * r[2] / 4.0;
-            let u1 = u0 + r[2] / 4.0;
-            let scroll = ((time.rem_euclid(1 << 20) as f32) * 3.0 + (hash % 97) as f32) % r[3];
-            let v0 = r[1] - scroll;
-            let v1 = v0 + (y1 - y0) * r[3] / 8.0;
-            let alpha = rain * (1.0 - dist2.sqrt() / 5.5).clamp(0.0, 1.0);
-            let color = [light, light, light, alpha];
-            let corners = [
-                (centre - side + Vec3::Y * y1, [u0, v0]),
-                (centre - side + Vec3::Y * y0, [u0, v1]),
-                (centre + side + Vec3::Y * y0, [u1, v1]),
-                (centre + side + Vec3::Y * y1, [u1, v0]),
-            ];
-            for i in [0usize, 1, 2, 0, 2, 3] {
-                out.push(SkyVertex {
-                    pos: corners[i].0.to_array(),
-                    uv: corners[i].1,
-                    color,
-                    rect: rect16,
-                });
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -954,6 +932,7 @@ mod tests {
             dimension_has_sky: true,
             fog_start: 0.0,
             fog_end: 192.0,
+            ..Default::default()
         }
     }
 
@@ -980,6 +959,64 @@ mod tests {
         assert_eq!(dawn.sunrise_side, 1.0, "dawn glow is in the east");
         let dusk = sky_colors(&state(12500), SkyKind::Overworld, 12.0);
         assert_eq!(dusk.sunrise_side, -1.0, "dusk glow is in the west");
+    }
+
+    #[test]
+    fn rain_greys_the_sky_like_the_weather_attributes() {
+        // `WeatherAttributes.RAIN` over SKY_COLOR: lerp(0.75, colour, grey * 0.6) applied
+        // by the rain level (rain minus thunder). At noon (0x78A7FF) with full rain and no
+        // thunder: grey = 0.3*0.4706 + 0.59*0.6549 + 0.11*1.0 = 0.6427.
+        let mut s = state(6000);
+        s.rain = 1.0;
+        let noon = sky_colors(&s, SkyKind::Overworld, 12.0);
+        let grey = 0.3 * (0x78 as f32 / 255.0) + 0.59 * (0xA7 as f32 / 255.0) + 0.11 * 1.0;
+        let target = grey * 0.6;
+        let expect: [f32; 3] = [
+            0.4706 + (target - 0.4706) * 0.75,
+            0.6549 + (target - 0.6549) * 0.75,
+            1.0 + (target - 1.0) * 0.75,
+        ];
+        for (i, (got, want)) in noon.sky.iter().zip(expect).enumerate() {
+            assert!((got - want).abs() < 1e-4, "channel {i}: {got} vs {want}");
+        }
+        // Stars are gone with any weather.
+        assert_eq!(noon.star_brightness, 0.0);
+    }
+
+    #[test]
+    fn thunder_darkens_the_sky_further() {
+        // `WeatherAttributes.THUNDER`: lerp(0.94, colour, grey * 0.24) by the thunder level
+        // (which the rain level scales). Full thunder implies rain 1: the rain layer first
+        // greys by the rain-minus-thunder level (0 at full thunder), then the thunder layer
+        // takes over. The thunder sky is darker than the rain sky.
+        let mut rain = state(6000);
+        rain.rain = 1.0;
+        let rain_sky = sky_colors(&rain, SkyKind::Overworld, 12.0).sky;
+        let mut storm = state(6000);
+        storm.rain = 1.0;
+        storm.thunder = 1.0;
+        let storm_sky = sky_colors(&storm, SkyKind::Overworld, 12.0).sky;
+        for i in 0..3 {
+            assert!(
+                storm_sky[i] < rain_sky[i] + 1e-6,
+                "thunder darkens channel {i}: {} vs {}",
+                storm_sky[i],
+                rain_sky[i]
+            );
+        }
+        // Full thunder at noon: the colour is the base blended to the grey times 0.24 by
+        // the 0.94 factor (the rain layer's weight is rain minus thunder = 0 here).
+        let base = rgb(0x78A7FF);
+        let grey = 0.3 * base[0] + 0.59 * base[1] + 0.11 * base[2];
+        let target = grey * 0.24;
+        for i in 0..3 {
+            let expect = base[i] + (target - base[i]) * 0.94;
+            assert!(
+                (storm_sky[i] - expect).abs() < 1e-4,
+                "channel {i}: {} vs {expect}",
+                storm_sky[i]
+            );
+        }
     }
 
     #[test]

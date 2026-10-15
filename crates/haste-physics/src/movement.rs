@@ -709,6 +709,31 @@ mod tests {
     }
 
     #[test]
+    fn a_player_at_a_pool_edge_is_not_pushed_out_of_the_water() {
+        // The live rig: a stone floor (top y 0) with source water z >= 1 and air z < 1. A
+        // player standing in the shallow water at the edge must stay put: vanilla's getFlow
+        // gives the edge cell no flow (the empty neighbour's below cell has no fluid), so
+        // `apply_water_currents` adds nothing.
+        let mut w = TestWorld::flat(0, STONE);
+        for x in -2..=2 {
+            for z in 1..=4 {
+                w.set(x, 0, z, WATER_SOURCE);
+            }
+        }
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let mut s = PlayerState::at(DVec3::new(0.5, 0.0, 1.5));
+        for _ in 0..100 {
+            tick(&mut s, &InputState::default(), &attrs, &w, &shapes, &shapes);
+        }
+        assert!(
+            (s.pos.z - 1.5).abs() < 1.0e-9,
+            "the player drifted to {s:?}"
+        );
+        assert!(s.pos.x == 0.5, "the player drifted to {s:?}");
+    }
+
+    #[test]
     fn jump_in_shallow_water_on_ground_is_a_normal_jump() {
         // vanilla `LivingEntity.aiStep`, "jump" section: on ground with the fluid no deeper than
         // the jump threshold, the player jumps normally instead of swimming up.

@@ -139,6 +139,11 @@ impl EntitySink for FakeEntities {
                 .map(|d| (haste_core::RegistryIndex(*k as u32), *d))
         })
     }
+    fn entity_type(&self, id: EntityId) -> Option<haste_core::RegistryIndex> {
+        self.kinds
+            .get(&id)
+            .map(|k| haste_core::RegistryIndex(*k as u32))
+    }
     fn pose(&self, id: EntityId) -> Option<(DVec3, f32, f32)> {
         self.poses.get(&id).copied()
     }
@@ -163,11 +168,12 @@ struct Rig {
 }
 
 /// The static particle registry the test sessions resolve ids against (id 0 `flame`, 1
-/// `smoke`).
+/// `smoke`, 2 `block`).
 fn test_particle_names() -> std::sync::Arc<Vec<Identifier>> {
     std::sync::Arc::new(vec![
         Identifier::minecraft("flame"),
         Identifier::minecraft("smoke"),
+        Identifier::minecraft("block"),
     ])
 }
 
@@ -892,6 +898,65 @@ fn set_passengers_mounts_and_dismounts_the_local_player() {
     );
 }
 
+/// Mounting a boat we drive gives us its client-side simulation (vanilla's
+/// `Entity.isLocalClientAuthoritative` for the vehicle whose controlling passenger is the local
+/// player): the paddles' keys go to our own boat, not to the server's copy of it, and the
+/// server's correction of it (`ClientboundMoveVehiclePacket`, vanilla's
+/// `ClientPacketListener.handleMoveVehicle`) is taken and answered straight back.
+#[test]
+fn mounting_a_boat_we_drive_starts_its_client_side_simulation() {
+    let mut r = Rig::new();
+    r.session
+        .set_entity_type_names(names(&["player", "oak_boat", "minecart"]));
+    r.apply(spawn_packet_kind(5, DVec3::new(40.0, 70.0, 40.0), 1)); // oak_boat
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 5,
+        passengers: vec![7],
+    }));
+    assert!(r.session.player.vehicle().is_some());
+    let start = r.session.player.boat().expect("the boat is ours").pos;
+    assert_eq!(start, DVec3::new(40.0, 70.0, 40.0));
+    // A vehicle we do not drive (the second passenger's view, or another craft) is not.
+    r.apply(spawn_packet_kind(6, DVec3::ZERO, 2));
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 6,
+        passengers: vec![9, 7],
+    }));
+    assert_eq!(r.session.player.vehicle(), Some(EntityId(6)));
+    assert!(
+        r.session.player.boat().is_none(),
+        "the second passenger of a boat does not simulate it"
+    );
+    // Back to the driver's seat of the first boat.
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 5,
+        passengers: vec![7],
+    }));
+    assert!(r.session.player.boat().is_some());
+    // The server's correction: our simulation is snapped where the server put the boat, and
+    // answered with a `move_vehicle` of that pose.
+    r.apply(ClientboundPlay::MoveVehicle(cb::MoveVehicle {
+        pos: DVec3::new(44.0, 70.0, 43.0),
+        yaw: 90.0,
+        pitch: 0.0,
+    }));
+    assert_eq!(
+        r.session.player.boat().expect("still ours").pos,
+        DVec3::new(44.0, 70.0, 43.0)
+    );
+    assert!(r.out.iter().any(|p| matches!(
+        p,
+        ServerboundPlay::MoveVehicle(m) if m.pos == DVec3::new(44.0, 70.0, 43.0) && m.yaw == 90.0
+    )));
+    // Dismounting drops the simulation with the mount.
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 5,
+        passengers: vec![],
+    }));
+    assert!(r.session.player.vehicle().is_none());
+    assert!(r.session.player.boat().is_none());
+}
+
 #[test]
 fn a_set_passengers_for_another_vehicle_does_not_dismount_us() {
     let mut r = Rig::new();
@@ -1030,6 +1095,16 @@ fn level_particles(kind: i32, count: i32) -> ClientboundPlay {
     })
 }
 
+/// A `level_event` packet.
+fn level_event(event: i32, pos: BlockPos, data: i32) -> ClientboundPlay {
+    ClientboundPlay::LevelEvent(cb::LevelEvent {
+        event,
+        pos,
+        data,
+        global: false,
+    })
+}
+
 #[test]
 fn level_particles_queue_a_spawn_per_packet() {
     let mut r = Rig::new();
@@ -1056,6 +1131,65 @@ fn level_particles_with_an_unknown_type_id_are_dropped() {
     // No id 7 in the static registry: dropped silently (no panic, nothing queued).
     r.apply(level_particles(7, 10));
     assert_eq!(r.session.particle_spawns.len(), 0);
+}
+
+/// A `minecraft:block` particle's `BlockParticleOption` (one VarInt state id): the
+/// landing particles (`LivingEntity.checkFallDamage` -> `sendParticles`) carry the
+/// block they land on.
+#[test]
+fn block_particle_option_carries_the_state() {
+    let mut r = Rig::new();
+    let mut p = level_particles(2, 20);
+    let ClientboundPlay::LevelParticles(ref mut lp) = p else {
+        unreachable!()
+    };
+    // VarInt 100 (0x64) and VarInt 1000 (0xE8 0x07).
+    lp.particle.data = bytes::Bytes::from(vec![100]);
+    r.apply(p);
+    let mut p = level_particles(2, 20);
+    let ClientboundPlay::LevelParticles(ref mut lp) = p else {
+        unreachable!()
+    };
+    lp.particle.data = bytes::Bytes::from(vec![0xE8, 0x07]);
+    r.apply(p);
+    // Other types never read the payload as a state.
+    r.apply(level_particles(0, 1));
+    let spawns = &r.session.particle_spawns;
+    assert_eq!(spawns[0].block_state, Some(haste_core::BlockStateId(100)));
+    assert_eq!(spawns[1].block_state, Some(haste_core::BlockStateId(1000)));
+    assert_eq!(spawns[2].block_state, None);
+}
+
+/// The block-particle level events: 2001 (a break, the payload the state), 2019/2020
+/// (a mining tick, the payload the face ordinal), anything else nothing.
+#[test]
+fn level_events_queue_block_particles() {
+    let mut r = Rig::new();
+    let pos = BlockPos::new(10, 64, -5);
+    r.apply(level_event(2001, pos, 100));
+    r.apply(level_event(2020, pos, 0));
+    r.apply(level_event(2019, pos, 5));
+    r.apply(level_event(2000, pos, 0));
+    let requests = &r.session.block_particle_requests;
+    assert_eq!(requests.len(), 3);
+    assert!(
+        matches!(
+            requests[0],
+            crate::block_particles::BlockParticleRequest::Destroy {
+                state: haste_core::BlockStateId(100),
+                ..
+            }
+        ),
+        "2001 queues the destroy grid"
+    );
+    assert!(matches!(
+        requests[1],
+        crate::block_particles::BlockParticleRequest::Crack { .. }
+    ));
+    assert!(matches!(
+        requests[2],
+        crate::block_particles::BlockParticleRequest::Crack { .. }
+    ));
 }
 
 /// The attached firework rocket's push (vanilla `FireworkRocketEntity.tick`): the rocket is
@@ -1138,7 +1272,7 @@ fn lightmap_boss_darkening_follows_the_vanilla_ramp() {
     // GameRenderer.tick: +0.05/tick while a boss bar asks to darken (cap 1), -0.0125/tick
     // otherwise. The per-frame value interpolates boss_darkening_o -> boss_darkening.
     let mut s = LightmapState::default();
-    s.boss_bars.insert(1, true);
+    s.boss_bars.insert(1, (true, false));
     s.tick();
     assert!((s.boss_darkening - 0.05).abs() < 1e-6);
     assert_eq!(s.boss_darkening_o, 0.0);
@@ -1146,16 +1280,19 @@ fn lightmap_boss_darkening_follows_the_vanilla_ramp() {
         s.tick();
     }
     assert_eq!(s.boss_darkening, 1.0);
-    // BossEvent.setDarkenScreen / removal through the packet action.
-    s.boss_bars.insert(7, false);
-    s.boss_event(7, &cb::BossEventAction::UpdateFlags(0x01));
-    assert!(s.boss_bars[&7]);
+    // BossEvent.setDarkenScreen / createWorldFog / removal through the packet action.
+    s.boss_bars.insert(7, (false, false));
+    s.boss_event(7, &cb::BossEventAction::UpdateFlags(0x05));
+    assert_eq!(s.boss_bars[&7], (true, true));
+    s.tick();
+    assert!(s.boss_world_fog);
     s.boss_event(7, &cb::BossEventAction::Remove);
     assert!(!s.boss_bars.contains_key(&7));
     // Clearing the flag ramps back down by 0.0125.
-    s.boss_bars.insert(1, false);
+    s.boss_bars.insert(1, (false, false));
     s.tick();
     assert!((s.boss_darkening - (1.0 - 0.0125)).abs() < 1e-6);
+    assert!(!s.boss_world_fog);
 }
 
 #[test]
@@ -1163,6 +1300,7 @@ fn lightmap_effects_and_flicker_tick() {
     let ids = crate::player::interact::LightmapEffectIds {
         night_vision: Some(1),
         darkness: Some(2),
+        ..Default::default()
     };
     let mut s = LightmapState::default();
     s.update_effect(ids, 1, 100);
@@ -1205,4 +1343,85 @@ fn lightmap_lightning_flashes_for_two_ticks() {
     assert_eq!(s.sky_flash_time, 0);
     s.tick();
     assert_eq!(s.sky_flash_time, 0);
+}
+
+#[test]
+fn weather_levels_follow_the_game_events() {
+    // handleGameEvent: start_raining resets to 0, stop_raining sets 1, the level changes set
+    // the level directly; both bracket the tick (Level.oRainLevel/rainLevel).
+    let dim = DimensionInfo::overworld();
+    let mut s = Session::new(EntityId(1), GameMode::Creative, dim, test_particle_names());
+    let mut world = FakeWorld::default();
+    let mut entities = new_entity_store(0);
+    let mut out = Vec::new();
+    let regs = SyncedRegistries::default();
+    let mut apply = |s: &mut Session, p: ClientboundPlay, out: &mut Vec<ServerboundPlay>| {
+        s.apply(p, &mut world, &mut entities, &regs, out);
+    };
+    apply(
+        &mut s,
+        ClientboundPlay::GameEvent(cb::GameEvent {
+            event: 7,
+            value: 0.5,
+        }),
+        &mut out,
+    );
+    assert_eq!(s.weather.rain_level, 0.5);
+    apply(
+        &mut s,
+        ClientboundPlay::GameEvent(cb::GameEvent {
+            event: 8,
+            value: 0.7,
+        }),
+        &mut out,
+    );
+    assert_eq!(s.weather.thunder_level, 0.7);
+    // Clamped like Level.setRainLevel.
+    apply(
+        &mut s,
+        ClientboundPlay::GameEvent(cb::GameEvent {
+            event: 7,
+            value: 2.0,
+        }),
+        &mut out,
+    );
+    assert_eq!(s.weather.rain_level, 1.0);
+    // The tick shifts the bracket; the lerp follows the partial tick.
+    s.weather.rain_level_o = 1.0;
+    s.weather.rain_level = 0.0;
+    assert!((s.weather.rain_level(0.5) - 0.5).abs() < 1e-6);
+}
+
+#[test]
+fn chunk_batches_are_acknowledged_with_the_vanilla_rate() {
+    // handleChunkBatchStart/Finished -> ServerboundChunkBatchReceived(getDesiredChunksPerTick):
+    // 7 ms over the aggregated per-chunk duration. Without the reply the server stops after
+    // the first batch, so a teleport's new area never streams (the far-teleport bug).
+    let dim = DimensionInfo::overworld();
+    let mut s = Session::new(EntityId(1), GameMode::Creative, dim, test_particle_names());
+    let mut world = FakeWorld::default();
+    let mut entities = new_entity_store(0);
+    let mut out = Vec::new();
+    let regs = SyncedRegistries::default();
+    // Without a batch start the timing origin is absent: the rate stays the default
+    // (7 ms / 2 ms per chunk = 3.5) and the reply is still sent — vanilla also replies when
+    // the batch size is zero or the start was missed.
+    s.apply(
+        ClientboundPlay::ChunkBatchFinished(cb::ChunkBatchFinished { batch_size: 10 }),
+        &mut world,
+        &mut entities,
+        &regs,
+        &mut out,
+    );
+    assert_eq!(out.len(), 1);
+    match &out[0] {
+        ServerboundPlay::ChunkBatchReceived(r) => {
+            assert!(
+                (r.chunks_per_tick - 3.5).abs() < 1e-3,
+                "{}",
+                r.chunks_per_tick
+            );
+        }
+        other => panic!("expected a chunk_batch_received, got {other:?}"),
+    }
 }

@@ -1,0 +1,89 @@
+# Feature: item data drives breaking and attacking like vanilla. The held stack's
+# minecraft:tool component (with the item defaults), the Efficiency enchantment's
+# mining_efficiency, the attribute modifiers' attack_speed and the consumable's use
+# duration all come from the server's item data; this script holds attack on a floating
+# block the runner places over RCON, and the log's "finished breaking ... after N
+# destroy ticks" lines are compared with vanilla's tick counts. The runner swaps the
+# main hand's item between cases while we look at the sky.
+#
+# Geometry: we stand at (145.5, 71, 4.5) on a stone floor, the target block floats at
+# (145, 72, 6) — one block above the floor line, air on every side along the ray, so
+# once it breaks the held attack hits nothing (out of the 4.5-block reach) and no
+# stray break starts. Eye at y 72.62, target centre (145.5, 72.5, 6.5): pitch 4.
+wait_until joined
+# Look at the sky first: nothing under the crosshair while the runner teleports us
+# and clears the corridor.
+look 0 -60
+wait 60
+screenshot item-data-setup
+# The runner now: tps us to the work area, survival, clears and refills the main
+# hand and places the first block (all over RCON), then we get ~3 s per case.
+#
+# ---- case 1: stone with the bare hand (151 destroy ticks) ----
+wait 60
+look 0 4
+wait 5
+mouse_down left
+wait 190
+mouse_up left
+look 0 -60
+screenshot case-hand-done
+# ---- case 2: stone with a wooden pickaxe (23) ----
+wait 60
+look 0 4
+wait 5
+mouse_down left
+wait 70
+mouse_up left
+look 0 -60
+screenshot case-wooden-done
+# ---- case 3: stone with a diamond pickaxe (6) ----
+wait 60
+look 0 4
+wait 5
+mouse_down left
+wait 50
+mouse_up left
+look 0 -60
+screenshot case-diamond-done
+# ---- case 4: stone with a diamond pickaxe with Efficiency V (2) ----
+wait 60
+look 0 4
+wait 5
+mouse_down left
+wait 45
+mouse_up left
+look 0 -60
+screenshot case-efficiency-done
+# ---- case 5: obsidian with a diamond pickaxe (188) ----
+wait 60
+look 0 4
+wait 5
+mouse_down left
+wait 235
+mouse_up left
+look 0 -60
+screenshot case-obsidian-done
+# ---- case 6: cobweb with a diamond sword (8) ----
+wait 60
+look 0 4
+wait 5
+mouse_down left
+wait 50
+mouse_up left
+look 0 -60
+screenshot case-sword-done
+# ---- case 7: cobweb with shears (8) ----
+wait 60
+look 0 4
+wait 5
+mouse_down left
+wait 50
+mouse_up left
+look 0 -60
+screenshot case-shears-done
+# ---- attack strength delay: a diamond axe held (the sword's line is in case 6;
+# Player.getCurrentItemAttackStrengthDelay = 20 / attack_speed) ----
+wait 60
+screenshot attack-speed-axe
+wait 20

@@ -402,6 +402,14 @@ impl AtlasBuilder {
             .unwrap_or(self.missing)
     }
 
+    /// Mark a sprite's region translucent (the 26.3 model `force_translucent` field:
+    /// a model can declare a sprite translucent whatever its texels say).
+    pub fn region_mut(&mut self, texture_id: &str) -> &mut AtlasRegion {
+        self.regions
+            .get_mut(texture_id)
+            .unwrap_or(&mut self.missing)
+    }
+
     pub fn has(&self, texture_id: &str) -> bool {
         self.regions.contains_key(texture_id)
     }
@@ -422,6 +430,19 @@ impl AtlasBuilder {
 
     pub fn size(&self) -> u32 {
         self.size
+    }
+
+    /// Heap bytes of the retained mip chain plus the animated sprites' frames.
+    pub fn pixel_bytes(&self) -> u64 {
+        let mut n = self.pixels.capacity() as u64;
+        for a in &self.animated {
+            n += a
+                .frames
+                .iter()
+                .map(|f| (f.width() * f.height() * 4) as u64)
+                .sum::<u64>();
+        }
+        n
     }
 
     pub fn mip_levels(&self) -> u32 {

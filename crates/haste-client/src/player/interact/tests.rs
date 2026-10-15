@@ -50,10 +50,33 @@ fn data() -> &'static haste_data::GameData {
                 r#"{{"minecraft:block": {{"entries": {{{}}}}},
                     "minecraft:item": {{"entries": {{{}}}}},
                     "minecraft:mob_effect": {{"entries": {{{}}}}},
+                    "minecraft:data_component_type": {{"entries": {{{}}}}},
+                    "minecraft:enchantment": {{"entries": {{{}}}}},
                     "minecraft:entity_type": {{"entries": {{{}}}}}}}"#,
                 entries(&names),
-                entries(&["air", "diamond_pickaxe", "diamond_sword", "stick"]),
-                entries(&["speed", "haste", "mining_fatigue", "conduit_power"]),
+                entries(&[
+                    "air",
+                    "diamond_pickaxe",
+                    "diamond_sword",
+                    "stick",
+                    "apple",
+                    "bow",
+                    "crossbow",
+                    "trident",
+                    "spyglass",
+                    "shield",
+                    "potion",
+                ]),
+                entries(&[
+                    "speed",
+                    "haste",
+                    "mining_fatigue",
+                    "conduit_power",
+                    "nausea",
+                    "darkness",
+                ]),
+                entries(&["tool", "enchantments"]),
+                entries(&["efficiency", "sharpness"]),
                 entries(&[
                     "item",
                     "experience_orb",
@@ -157,6 +180,35 @@ fn item(i: u32) -> ItemStackData {
         item: Some(RegistryIndex(i)),
         components_raw: Default::default(),
     }
+}
+
+/// Item default components for the tests, so they do not need the data generator cache.
+fn item_components() -> Arc<haste_data::ItemComponents> {
+    use haste_data::{AttributeModifier, Consumable, ItemComponents};
+    let speed = |amount: f64| AttributeModifier {
+        attribute: Identifier::minecraft("attack_speed"),
+        amount,
+        operation: 0,
+        slot: "mainhand".into(),
+    };
+    let mut c = ItemComponents::default();
+    c.insert(Identifier::minecraft("diamond_sword"), vec![speed(-2.4)]);
+    c.insert(Identifier::minecraft("diamond_pickaxe"), vec![speed(-2.8)]);
+    c.insert_consumable(
+        Identifier::minecraft("apple"),
+        Consumable {
+            consume_seconds: 1.6,
+            animation: 1,
+        },
+    );
+    c.insert_consumable(
+        Identifier::minecraft("potion"),
+        Consumable {
+            consume_seconds: 1.6,
+            animation: 2,
+        },
+    );
+    Arc::new(c)
 }
 
 struct Rig {
@@ -371,6 +423,60 @@ fn creative_breaks_at_once_then_every_six_ticks_and_not_with_a_sword() {
         assert_eq!(s.w.block_state(pos), STONE);
     }
     assert_eq!(starts, [1, 6, 12]);
+}
+
+#[test]
+fn creative_single_tick_click_destroys_even_while_destroy_delay_counts_down() {
+    // The bug: a quick click broke nothing because start_destroy refused while destroy_delay
+    // (set by the previous break) was still counting down. Vanilla startDestroyBlock has no
+    // destroyDelay check — a fresh click always breaks at once and re-arms the 5-tick delay
+    // (which only gates continueDestroyBlock while the button is held).
+    let mut r = Rig::new(GameMode::Creative);
+    let pos = BlockPos::new(0, -1, 0);
+    // First click breaks the block and leaves destroy_delay = 5 counting down.
+    let first = r.tick(ATTACK);
+    assert_eq!(actions(&first), [(action::START_DESTROY, 1)]);
+    assert_eq!(r.w.block_state(pos), BlockStateId::AIR);
+    // The server confirms the break, so the spot is air on both sides.
+    assert!(r.p.defer_block_update(pos, BlockStateId::AIR));
+    let mut out = Vec::new();
+    r.p.handle(
+        &ClientboundPlay::BlockChangedAck(
+            haste_protocol::packets::play::clientbound::BlockChangedAck { sequence: 1 },
+        ),
+        &mut out,
+    );
+    // Release for a few ticks: the delay never reaches 0 (it only counts down while the
+    // button is held, in continueDestroyBlock).
+    for _ in 0..3 {
+        assert!(r.tick(InteractInput::default()).is_empty());
+    }
+    // A fresh single-tick click on a new block at the same spot must break it at once and
+    // send START_DESTROY exactly once, despite the running delay.
+    r.w.set(0, -1, 0, STONE);
+    let out = r.tick(ATTACK);
+    assert_eq!(actions(&out), [(action::START_DESTROY, 2)]);
+    assert_eq!(r.w.block_state(pos), BlockStateId::AIR);
+    // And even on the very next tick after a break (delay still 5): click, release, click.
+    assert!(r.p.defer_block_update(pos, BlockStateId::AIR));
+    r.p.handle(
+        &ClientboundPlay::BlockChangedAck(
+            haste_protocol::packets::play::clientbound::BlockChangedAck { sequence: 2 },
+        ),
+        &mut Vec::new(),
+    );
+    // Apply the ack's world edit now instead of on the next tick, so the new stone below is
+    // not overwritten by it.
+    for (p, s) in r.p.take_world_edits().collect::<Vec<_>>() {
+        r.w.set(p.x, p.y, p.z, s);
+    }
+    r.w.set(0, -1, 0, STONE);
+    // Release (the fresh press needs its edge), then click again one tick later: the delay
+    // is still at 5 — it only counts down on held ticks.
+    assert!(r.tick(InteractInput::default()).is_empty());
+    let out = r.tick(ATTACK);
+    assert_eq!(actions(&out), [(action::START_DESTROY, 3)]);
+    assert_eq!(r.w.block_state(pos), BlockStateId::AIR);
 }
 
 #[test]
@@ -717,6 +823,168 @@ fn inventory_and_effects_from_packets() {
     );
 }
 
+/// A slot the Java side changed (creative inventory pick, menu click): the server never
+/// echoes those back, so the game thread applies the mirror's change queue through the
+/// same path as `set_player_inventory` — the first-person hand reads the result.
+#[test]
+fn inventory_slot_from_the_java_mirror_reaches_the_hand() {
+    let mut r = Rig::new(GameMode::Creative);
+    // Vanilla `Inventory` numbering: hotbar 0, armor 36..=39 (feet..head), off hand 40.
+    r.p.set_inventory_slot(0, &item(2)); // diamond_sword
+    assert_eq!(r.p.main_hand().item, Some(RegistryIndex(2)));
+    // The selected slot's stack change swaps the hand's item (the reported bug).
+    r.p.set_inventory_slot(0, &ItemStackData::default());
+    assert_eq!(
+        r.p.main_hand().item,
+        None,
+        "a creative pickup clears the slot"
+    );
+    r.p.set_inventory_slot(2, &item(3)); // stick
+    assert_eq!(r.p.int.hotbar[2].item, Some(RegistryIndex(3)));
+    r.p.held_slot = 2;
+    assert_eq!(r.p.main_hand().item, Some(RegistryIndex(3)));
+    // Armor (36 feet, 37 legs, 38 chest, 39 head) and the off hand keep their slots.
+    r.p.set_inventory_slot(38, &item(1));
+    assert_eq!(r.p.int.armor[1].item, Some(RegistryIndex(1)));
+    r.p.set_inventory_slot(40, &item(4));
+    assert_eq!(r.p.int.offhand.item, Some(RegistryIndex(4)));
+    // Main inventory (9..=35) is held nowhere yet: accepted, nothing panics.
+    r.p.set_inventory_slot(20, &item(1));
+}
+
+/// The held stack's own `minecraft:tool` component and Efficiency enchantment drive the mining
+/// speed (`ItemStack.getDestroySpeed` / `Player.getDestroySpeed`): a stack with a speed-8 tool
+/// rule on `mineable/pickaxe` and Efficiency V (level^2 + 1 = 26) gives 8 + 26 = 34.
+#[test]
+fn held_stack_components_drive_mining_speed() {
+    use haste_protocol::wire::{IdSet, Writer};
+    let mut r = Rig::new(GameMode::Survival);
+    r.p.int.prepare(data());
+    let mut tool = Writer::new();
+    tool.var_int(1);
+    tool.write(&IdSet::Tag(Identifier::minecraft("mineable/pickaxe")));
+    tool.option(&Some(8.0f32), |w, v| w.f32(*v));
+    tool.option(&Some(true), |w, v| w.bool(*v));
+    tool.f32(1.0);
+    tool.var_int(1);
+    tool.bool(true);
+    let mut patch = Writer::new();
+    patch.len_prefix(2);
+    patch.len_prefix(0);
+    patch.var_int(0); // minecraft:tool
+    patch.bytes(&tool.buf);
+    patch.var_int(1); // minecraft:enchantments
+    patch.var_int(1); // one enchantment
+    patch.var_int(0); // minecraft:efficiency
+    patch.var_int(5); // level V
+    r.p.int.hotbar[0] = ItemStackData {
+        count: 1,
+        item: Some(RegistryIndex(1)),
+        components_raw: patch.into_inner().into(),
+    };
+    r.tick(InteractInput::default());
+    let env = InteractEnv {
+        data: data(),
+        entities: &[],
+        entity_types: &[],
+    };
+    let p = r.p.mining_params(STONE, &env);
+    assert_eq!((p.tool_speed, p.tool_correct), (8.0, Some(true)));
+    assert_eq!(p.mining_efficiency, 26.0);
+    // (8 + 26) / 1.5 / 30 = 0.755 per tick: 2 ticks (wiki: Efficiency V diamond pickaxe).
+    assert_eq!(p.ticks_to_break(), Some(2));
+}
+
+/// The held item's `minecraft:attack_speed` comes from its attribute modifiers
+/// (`Player.getCurrentItemAttackStrengthDelay`): base 4.0, diamond sword -2.4 -> 1.6, diamond
+/// pickaxe -2.8 -> 1.2, an item without the modifier keeps the base.
+#[test]
+fn held_item_attack_speed_comes_from_its_attribute_modifiers() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.p.int.prepare(data());
+    r.p.int.set_item_components(item_components());
+    assert!((r.p.held_attack_speed() - 4.0).abs() < 1e-6, "bare hand");
+    r.p.int.hotbar[0] = item(2); // diamond_sword
+    r.tick(InteractInput::default());
+    assert!(
+        (r.p.held_attack_speed() - 1.6).abs() < 1e-6,
+        "diamond sword {}",
+        r.p.held_attack_speed()
+    );
+    r.p.int.hotbar[0] = item(1); // diamond_pickaxe
+    r.tick(InteractInput::default());
+    assert!(
+        (r.p.held_attack_speed() - 1.2).abs() < 1e-6,
+        "diamond pickaxe {}",
+        r.p.held_attack_speed()
+    );
+    r.p.int.hotbar[0] = item(3); // stick: no attack_speed modifier
+    r.tick(InteractInput::default());
+    assert!((r.p.held_attack_speed() - 4.0).abs() < 1e-6, "stick");
+}
+
+/// `Item.getUseDuration` / `Item.getUseAnimation`: the consumable component for food and drink,
+/// and the item classes that override them (bow/crossbow/trident/spyglass/shield).
+#[test]
+fn use_duration_and_animation_come_from_the_item() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.p.int.prepare(data());
+    r.p.int.set_item_components(item_components());
+    let env = InteractEnv {
+        data: data(),
+        entities: &[],
+        entity_types: &[],
+    };
+    let d = |i: u32| r.p.int.use_data(&item(i), env.data);
+    // Bow/crossbow/trident/shield: 72000 ticks; spyglass 1200.
+    assert_eq!(d(5), Some((72000, UseAnimation::Bow)));
+    assert_eq!(d(6), Some((72000, UseAnimation::Crossbow)));
+    assert_eq!(d(7), Some((72000, UseAnimation::Trident)));
+    assert_eq!(d(9), Some((72000, UseAnimation::Block)));
+    assert_eq!(d(8), Some((1200, UseAnimation::Spyglass)));
+    // Apple: `consume_seconds` 1.6 -> 32 ticks, `eat`; potion drinks.
+    assert_eq!(d(4), Some((32, UseAnimation::Eat)));
+    assert_eq!(d(10), Some((32, UseAnimation::Drink)));
+    // A tool is not used over time.
+    assert_eq!(d(1), None);
+    assert_eq!(d(3), None);
+}
+
+/// Starting a use sets `useItemRemainingTicks` and stops the 4-tick repeat; releasing the key
+/// sends `release_use_item` (`Minecraft.handleKeybinds` / `MultiPlayerGameMode.releaseUsingItem`).
+#[test]
+fn using_an_item_ticks_down_and_releases_on_key_up() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.p.int.prepare(data());
+    r.p.int.set_item_components(item_components());
+    r.p.int.hotbar[0] = item(5); // bow
+    r.w = TestWorld::new(); // look at nothing: the use_item path
+    let use_ = InteractInput {
+        use_item: true,
+        ..Default::default()
+    };
+    let out = r.tick(use_);
+    assert!(matches!(out[0], ServerboundPlay::UseItem(_)));
+    assert!(r.p.is_using_item());
+    assert_eq!(r.p.use_duration(), 72000);
+    assert_eq!(r.p.use_animation(), UseAnimation::Bow);
+    // The start tick already ticked the remaining time down (`LivingEntity.tick`).
+    assert_eq!(r.p.use_item_remaining(), 71999);
+    // Held: the use does not repeat and only the timer advances.
+    let out = r.tick(use_);
+    assert!(out.is_empty());
+    assert_eq!(r.p.use_item_remaining(), 71998);
+    assert_eq!(r.p.ticks_using_item(), 2);
+    // Key up: one release, the use ends.
+    let out = r.tick(InteractInput::default());
+    assert_eq!(actions(&out), [(action::RELEASE_USE_ITEM, 0)]);
+    assert!(!r.p.is_using_item());
+    // A new press starts a fresh use.
+    let out = r.tick(use_);
+    assert!(matches!(out[0], ServerboundPlay::UseItem(_)));
+    assert_eq!(r.p.use_item_remaining(), 71999);
+}
+
 #[test]
 fn drop_item_key_sends_status_5_once_per_press() {
     let mut r = Rig::new(GameMode::Survival);
@@ -972,12 +1240,14 @@ fn a_held_attack_swings_the_hand_every_tick() {
         r.p.hand.tick(0.0, (0.0, 90.0), true, false, item, 4.0);
         progress.push(r.p.hand.attack().1);
     }
+    // The restart tick's pair falls from 3/6 to 0, so `SwingState.getAnimation`'s wrap carries
+    // the drawn value past 1 (the rest pose); the raw progress restarts at 0.
     for (got, want) in progress.iter().zip([
         0.0,
         1.0 / 6.0,
         2.0 / 6.0,
         3.0 / 6.0,
-        0.0,
+        1.0,
         1.0 / 6.0,
         2.0 / 6.0,
         3.0 / 6.0,

@@ -3,6 +3,9 @@
 //! - `net`     (protocol): connection task, packet -> world/entity/player calls, outgoing packets.
 //! - `app`     (renderer): window, render loop, frame timing.
 //! - `player`  (physics): input sampling, physics tick, movement packets.
+//! - `screen_effects`: the overlays vanilla's `ScreenEffectRenderer` and `Hud` draw over the
+//!   world (water, fire, in-wall, pumpkin, powder snow, spyglass, portal, nausea), driven by
+//!   the real state.
 //! - `ui`      (jvm-host): HUD + tier-3 screens through the batched GUI pipeline.
 //! - `launch`  (setup): CLI args, config, setup checks, singleplayer server lifecycle.
 //! - `headless`: join milestone mode, no window: joins, tracks world/entities, prints stats.
@@ -11,13 +14,17 @@
 //! The lead owns this file. Add a module by adding one line here and your own file.
 use clap::Parser;
 
+mod ambient_particles;
 mod app;
+mod block_particles;
+mod boat;
 mod game;
 mod hand;
 mod headless;
 mod launch;
 mod net;
 mod player;
+mod screen_effects;
 mod screenshots;
 mod script;
 mod sound;
@@ -49,6 +56,10 @@ pub struct Args {
     /// (`--seconds` bounds the wait).
     #[arg(long)]
     pub screenshot: Option<std::path::PathBuf>,
+    /// The HUD, hand and block outline (vanilla's F1, `Hud.toggle`): `off` hides them for
+    /// this run — the whole JVM stays down, so offscreen shots match vanilla's F1 reference.
+    #[arg(long, default_value = "on")]
+    pub hud: String,
     /// Input script for the offscreen client: runs the steps every game tick through the
     /// same routing as the window (needs `--server`; `--seconds` bounds the run).
     #[arg(long)]
@@ -61,9 +72,30 @@ pub struct Args {
     /// Bench mode: write the summary as JSON to this file.
     #[arg(long)]
     pub bench_out: Option<std::path::PathBuf>,
+    /// Windowed bench mode (needs `--server`): like `--bench`, but a real window at
+    /// `--width`x`--height` with vsync off (unless `--vsync`), so the number includes
+    /// the present and is comparable with a windowed vanilla client. The window opens
+    /// for the duration of the run and closes by itself.
+    #[arg(long)]
+    pub bench_window: Option<u64>,
+    /// Force the window onto XWayland (the window system vanilla's client uses:
+    /// an X11 window gets a framebuffer of exactly `--width`x`--height`, no
+    /// desktop-scale doubling). Applies to the windowed bench and the normal
+    /// window.
+    #[arg(long)]
+    pub x11: bool,
+    /// Bench mode: hold the settle camera still instead of the flight path (isolates one view,
+    /// e.g. the screenshot comparison spot).
+    #[arg(long)]
+    pub bench_fixed: bool,
     /// Render distance in chunks, overriding the saved option (like `--vsync`).
     #[arg(long)]
     pub render_distance: Option<u8>,
+    /// Where singleplayer worlds live, overriding the config dir's `singleplayer/`
+    /// (the feature checks point this at a scratch dir so their worlds never land in the
+    /// player's real saves).
+    #[arg(long)]
+    pub singleplayer_dir: Option<std::path::PathBuf>,
     /// Screenshot width in pixels.
     #[arg(long, default_value_t = 960)]
     pub width: u32,
@@ -102,6 +134,10 @@ fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let args = Args::parse();
+    if let Some(dir) = &args.singleplayer_dir {
+        haste_setup::worlds::set_dir(dir.clone());
+    }
+    app::set_hud_from_args(&args.hud)?;
     if let Some(cmd) = args.command {
         return launch::run(cmd, &args.username);
     }
@@ -125,6 +161,9 @@ fn main() -> anyhow::Result<()> {
     }
     if let Some(seconds) = args.bench {
         return app::bench(&args, seconds);
+    }
+    if let Some(seconds) = args.bench_window {
+        return app::bench_window(&args, seconds);
     }
     app::run(&args)
 }

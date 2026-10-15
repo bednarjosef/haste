@@ -180,9 +180,16 @@ proxies are generated per checkout (`cache/proxies/26.3-<hash>`). `ItemStack`, `
   the handle -1 proxy.
 - `MultiPlayerGameMode`: `handleContainerInput` -> Rust `ContainerClick` (no client prediction).
 - `EntityRenderDispatcher/AvatarRenderer`: empty `EntityRenderState`s (entity rendering is Rust's).
-- `RecipeBookComponent` (closed, everything else no-op): `updateScreenPosition` centres the container,
-  `hasClickedOutside`, `narrationPriority` NONE. `RECIPE_BUTTON_SPRITES` set to the jar's
-  `recipe_book/button(_highlighted)` sprites.
+- The recipe book is real vanilla Java (tier 3): `RecipeBookComponent`/`CraftingRecipeBookComponent`
+  and the rest of `gui/screens/recipebook/` keep vanilla's bodies over the real `ClientRecipeBook`
+  that `Proxies.create` sets on the player proxy (LocalPlayer's constructor, which builds the book,
+  never runs on a proxy). The recipe-book packets are plain data, so their `ClientPacketListener`
+  handlers keep vanilla's bodies (`keep` lines): `handleRecipeBookAdd/Remove/Settings`,
+  `handleUpdateRecipes` (stores the real `ClientRecipeContainer`, allow-listed in the loader) and
+  `handlePlaceRecipe` (the ghost recipe). Their `ensureRunningOnSameThread` check runs against
+  `Minecraft.packetProcessor` (ClientImpl): a real `PacketProcessor` over the game thread, which
+  every packet handler runs on. `ConnectionImpl.recipes` reads the stored container off the proxy
+  (vanilla's field-initialiser value before the packet).
 - `Level`: `isClientSide` true. No-op classes: SoundManager, SimpleSoundInstance, GameNarrator,
   PlayerSocialManager, ReportingContext. Types only: RenderPipelines, SoundEvents, DataComponents (no <clinit>:
   constants null), ServerPlayer.
@@ -205,6 +212,33 @@ Session 3 (title-screens branch; the Title, Options and Multiplayer screens of t
 - Still blocking the multiplayer screen: `ServerStatusPinger` (`NoClassDefFoundError` from
   `JoinMultiplayerScreen.<init>`; `net/minecraft/client/multiplayer/` is deny-listed, its `init` needs
   `ServerList` too) - roadmap L1e.
+
+Session 4 (menu-mode-window branch; the multiplayer screen and the join seam):
+- `loader` allow-list: `ServerList`, `ServerData`, `resolver/` (the server list's own data, tier 3:
+  vanilla reads and writes servers.dat in the game directory, which the client points at Haste's
+  config directory so haste-setup's servers.dat and Java's are one file), `EventLoopGroupHolder`
+  (built by the ping lambda before every ping; the proxy no-ops it, no netty loads),
+  `LanServerDetection`/`LanServer` (the multicast LAN listener the screen starts and stops itself),
+  `NameAndId` (the status ping's player sample record).
+- `ServerStatusPinger` is a tier-2 proxy (`haste.gui.PingerImpl`): the status ping runs through
+  `haste_protocol::ping` on a Rust thread (`Native.startPing`), and the results (status JSON +
+  latency) are applied to the `ServerData` fields on the screen's tick (`Native.takePingResults`),
+  the same fields vanilla's ping callbacks set. The favicons' `TextureManager` is a proxy too
+  (`haste.gui.TextureImpl`): locations are recorded, no pixel is uploaded (the GPU is Rust's).
+- `Minecraft.execute(Runnable)` runs the task at once: the ping callbacks call it from the tick
+  that applied them, already on the client thread (declared on `BlockableEventLoop`, the generated
+  super of the Minecraft proxy, because Minecraft itself does not override execute).
+- `Minecraft.stop` -> `Native.requestQuit` (the title screen's Quit Game; the client polls the flag).
+- `Bridge.disconnected` picks the parent for the disconnect screen: in menu mode (not in a world)
+  the connecting screen's parent (the server list), like vanilla's ConnectScreen failure path;
+  in-world kicks keep the old behaviour (no parent).
+- The join seam: `net/minecraft/client/gui/screens/ConnectScreen` is denied and replaced
+  (REPLACEMENTS). Vanilla's opens its own netty connection; Haste's shows vanilla's connecting
+  screen (connecting text, Cancel that asks Rust to drop the join) and hands the address to Rust
+  (`Native.requestJoin`), which creates the session (`Session::join`) with a clone of the menu's
+  UI - its game thread then runs `Ui::joined` on it, so screens and chat history survive into the
+  game. A proxy cannot stand in for the class (a `class` line regenerates the super chain and
+  would shadow the real `Screen`), so the replacement extends `Screen` directly.
 
 ## Replacements (`java/haste/replace`)
 

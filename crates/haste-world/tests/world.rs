@@ -87,9 +87,10 @@ fn chunk_load_and_block_view() {
     assert_eq!(w.height(), 384);
     // chunk list
     assert_eq!(w.loaded_chunks().count(), 1);
-    // dirty: all sections of the chunk
+    // dirty: every section with blocks (the 8 stone sections; air sections mesh to
+    // nothing and are skipped, like vanilla's chunk cache)
     let dirty = w.take_dirty_sections();
-    assert_eq!(dirty.len(), sections);
+    assert_eq!(dirty.len(), 8);
     assert!(dirty.contains(&SectionPos::new(0, -4, 0)));
     assert!(w.take_dirty_sections().is_empty());
 }
@@ -382,8 +383,9 @@ fn light_apply_and_read() {
     assert_eq!(w.sky_light(BlockPos::new(2, 64, 0)), 2);
     assert_eq!(w.block_light(BlockPos::new(0, 64, 0)), 2);
     assert_eq!(w.block_light(BlockPos::new(1, 64, 0)), 1);
-    // cleared section: sky reads 15 (no data), block 0
-    assert_eq!(w.sky_light(BlockPos::new(0, 80, 0)), 15);
+    // cleared section: sky reads 0 (vanilla stores an all-zero DataLayer for an
+    // empty-marked section, ClientPacketListener.readSectionList), block 0
+    assert_eq!(w.sky_light(BlockPos::new(0, 80, 0)), 0);
     assert_eq!(w.block_light(BlockPos::new(0, 80, 0)), 0);
     // sections with no light data at all: sky 15, block 0
     assert_eq!(w.sky_light(BlockPos::new(0, 0, 0)), 15);

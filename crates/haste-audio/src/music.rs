@@ -1,16 +1,33 @@
 //! Background music scheduling: which music event fits the player's situation, and when to
 //! play it. Pure logic — the engine turns the [`MusicCommand`]s into actual output.
 //!
-//! Vanilla plays background music by situation with random pauses between tracks. The delays
-//! below come from minecraft.wiki, "Music": in-game tracks every 10-20 minutes (12000-24000
-//! ticks at 20 Hz), the main menu every 20-600 ticks, where menu music replaces whatever is
-//! playing; creative mode uses `music.creative` with the in-game delays; underwater
-//! `music.under_water` with the in-game delays; the End `music.end` 6000-24000; the dragon
-//! fight `music.dragon` and the credits `music.credits` with no delay and replacing the
-//! current music. Nether biomes and some overworld biomes carry their own music event in the
-//! biome's `music` field; resolving that needs biome data this crate does not have, so the
-//! caller looks up the biome and passes [`MusicSituation::Biome`] with the event and delays
-//! from the biome data.
+//! The rules are vanilla's `MusicManager` (net.minecraft.client.sounds) driven at 20 Hz from
+//! `Minecraft.tick`:
+//! - `nextSongDelay` starts at vanilla's `STARTING_DELAY` of 100 ticks, so the first track of
+//!   a session plays within about 5 seconds; the delay is picked fresh, from the situation's
+//!   own range, only after a track has ended (`MusicManager.MusicFrequency.getNextSongDelay`,
+//!   DEFAULT = 20 minutes, which caps both ends of the range);
+//! - the situation's `maxDelay` caps the running countdown every tick
+//!   (`nextSongDelay = Math.min(nextSongDelay, music.maxDelay())`);
+//! - a situation whose music replaces the current one stops the playing track and gets a short
+//!   new countdown (`Mth.nextInt(random, 0, music.minDelay() / 2)`), as in vanilla's
+//!   `canReplace` check;
+//! - while a track plays, nothing new starts (vanilla's `startPlaying` sets
+//!   `nextSongDelay = Integer.MAX_VALUE`).
+//!
+//! The situations map to vanilla's `Musics` constants (`Minecraft.getSituationalMusic`: the
+//! screen's background music, the End's boss music, else the biome's `BackgroundMusic`
+//! selected by `select(isCreative, isUnderwater)` — underwater first, then creative, then the
+//! biome's default).
+
+/// Vanilla's `STARTING_DELAY` (MusicManager): the countdown the manager starts with, so the
+/// first track of a session plays within 100 ticks (5 s) rather than after a track's long
+/// random pause.
+pub const STARTING_DELAY: i32 = 100;
+
+/// The `music_frequency` option's DEFAULT (`MusicFrequency.DEFAULT`: 20 minutes), in ticks:
+/// the maximum any pause between two tracks can be.
+const DEFAULT_MAX_FREQUENCY: u32 = 20 * 1200;
 
 /// The music event and timing rules for one situation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,7 +38,7 @@ pub struct MusicSpec {
     pub min_delay: u32,
     /// Ticks to wait after a track ends before playing the next one: upper bound.
     pub max_delay: u32,
-    /// Vanilla stops the current music when switching into this situation.
+    /// Vanilla stops the current music when switching into this situation (`replaceCurrentMusic`).
     pub replace_current: bool,
 }
 
@@ -36,7 +53,7 @@ pub enum MusicSituation {
     Creative,
     /// Underwater: `music.under_water`, in-game delays.
     UnderWater,
-    /// The End: `music.end`.
+    /// The End: `music.end`, replaces the current music (`Musics.END`).
     End,
     /// The dragon fight: `music.dragon`, no delay, replaces the current music.
     Dragon,
@@ -53,7 +70,7 @@ pub enum MusicSituation {
 }
 
 impl MusicSituation {
-    /// The music this situation plays, with vanilla's delays (see the module docs).
+    /// The music this situation plays, with vanilla's delays (the `Musics` constants).
     pub fn music(&self) -> MusicSpec {
         fn spec(event: &str, min_delay: u32, max_delay: u32, replace_current: bool) -> MusicSpec {
             MusicSpec {
@@ -70,7 +87,7 @@ impl MusicSituation {
             MusicSituation::UnderWater => {
                 spec("minecraft:music.under_water", 12_000, 24_000, false)
             }
-            MusicSituation::End => spec("minecraft:music.end", 6_000, 24_000, false),
+            MusicSituation::End => spec("minecraft:music.end", 6_000, 24_000, true),
             MusicSituation::Dragon => spec("minecraft:music.dragon", 0, 0, true),
             MusicSituation::Credits => spec("minecraft:music.credits", 0, 0, true),
             MusicSituation::Biome {
@@ -125,7 +142,8 @@ impl MusicRng {
         x.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
 
-    /// Uniformly distributed in `[min, max]` (inclusive); `max <= min` yields `min`.
+    /// Uniformly distributed in `[min, max]` (inclusive); `max <= min` yields `min`. The
+    /// counterpart of vanilla's `Mth.nextInt(RandomSource, int, int)`.
     pub fn range(&mut self, min: u32, max: u32) -> u32 {
         if max <= min {
             return min;
@@ -135,81 +153,53 @@ impl MusicRng {
     }
 }
 
-/// After a replacing situation change, vanilla starts the new track promptly; this is the
-/// approximation used here: the new track starts within this many ticks (capped further by the
-/// situation's own no-delay cases, the dragon fight and the credits).
-const REPLACE_PLAY_MAX: u32 = 100;
-
-/// If the output never confirms a `Play` within this many ticks of issuing it (missing file,
-/// failed decode, no audio device), the track is treated as ended: the manager clears it and
-/// waits a fresh countdown, so one bad track cannot silence music forever.
-const PLAY_CONFIRM_TIMEOUT: u32 = 100;
-
 /// Decides when background music plays, driven at 20 Hz. Owns no output: each tick it reports
-/// the next thing to do, or `None`.
+/// the next thing to do, or `None`. Follows vanilla's `MusicManager`.
 #[derive(Debug)]
 pub struct MusicManager {
     situation: MusicSituation,
-    /// Ticks left before the next track; `None` = pick a fresh delay when next needed.
-    countdown: Option<u32>,
-    /// A replacing situation change queued a `Stop` for the next tick.
-    stop_pending: bool,
-    /// The next countdown is the short one after replacing the current music.
-    replace_play: bool,
-    /// We sent `Play` and are waiting for the output to confirm it started.
-    play_issued: bool,
-    /// Ticks since `Play` was issued without the output confirming it started.
-    play_unconfirmed: u32,
-    /// The output confirmed our track and has not reported it finished yet.
-    track_live: bool,
-    /// Event of the track we believe is playing.
-    playing: Option<String>,
+    /// Vanilla's `nextSongDelay`: ticks until the next track starts; `i32::MAX` while a track
+    /// plays (vanilla's `startPlaying` sets `Integer.MAX_VALUE`).
+    next_song_delay: i32,
+    /// The event of the track we started and believe is playing (vanilla's `currentMusic`).
+    current: Option<String>,
+    /// The `music_frequency` option's cap in ticks (`MusicFrequency.DEFAULT`: 20 minutes).
+    max_frequency: u32,
+    /// Ticks this manager has run, for the diagnostic log (which track started when).
+    ticks: u64,
+}
+
+impl Default for MusicManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MusicManager {
-    /// New manager in the main menu (the client starts there).
+    /// New manager with the menu situation and vanilla's starting countdown of 100 ticks: the
+    /// first track of a session plays within 5 s (vanilla's `Minecraft` starts at the main menu
+    /// with the same countdown; haste's starts here at join, already in the game situation).
     pub fn new() -> Self {
         Self {
             situation: MusicSituation::Menu,
-            countdown: None,
-            stop_pending: false,
-            replace_play: false,
-            play_issued: false,
-            play_unconfirmed: 0,
-            track_live: false,
-            playing: None,
+            next_song_delay: STARTING_DELAY,
+            current: None,
+            max_frequency: DEFAULT_MAX_FREQUENCY,
+            ticks: 0,
         }
     }
 
-    /// Switches the situation (menu opened, world joined, biome entered, ...). A situation
-    /// whose music replaces the current one and differs from it stops the playing track: the
-    /// next [`MusicManager::tick`] returns that stop and the new track follows promptly. After
-    /// a non-replacing change the current track keeps playing and the pending countdown is
-    /// clamped to the new situation's maximum.
+    /// The `music_frequency` option's cap in ticks (vanilla's `setMinutesBetweenSongs`).
+    pub fn set_max_frequency(&mut self, ticks: u32) {
+        self.max_frequency = ticks;
+    }
+
+    /// Switches the situation (menu opened, world joined, biome entered, ...). The tick then
+    /// applies vanilla's rules for it, so a situation whose music replaces the current track
+    /// stops it and gets a short countdown, while a non-replacing change keeps the track and
+    /// only caps the running countdown.
     pub fn set_situation(&mut self, situation: MusicSituation) {
-        let new = situation.music();
-        if new == self.situation.music() {
-            self.situation = situation;
-            return;
-        }
-        let replaces = new.replace_current && self.playing.as_deref() != Some(new.event.as_str());
         self.situation = situation;
-        if replaces {
-            self.stop_pending = self.playing.is_some();
-            self.play_issued = false;
-            self.play_unconfirmed = 0;
-            self.track_live = false;
-            self.playing = None;
-            self.countdown = None;
-            self.replace_play = true;
-        } else {
-            self.replace_play = false;
-            if let Some(countdown) = &mut self.countdown {
-                // Clamp so the track still starts within the new situation's maximum: the
-                // countdown is one less than the remaining delay (the play tick counts).
-                *countdown = (*countdown).min(new.max_delay.saturating_sub(1));
-            }
-        }
     }
 
     /// The situation currently in effect.
@@ -219,87 +209,74 @@ impl MusicManager {
 
     /// The event of the track this manager started and believes is still playing.
     pub fn playing_event(&self) -> Option<&str> {
-        self.playing.as_deref()
+        self.current.as_deref()
     }
 
     /// One game tick (20 Hz). `is_playing` tells whether the music this manager started is
     /// still playing; while something plays, nothing new is started. `rng` drives the random
     /// pauses (a fixed seed replays exactly).
+    ///
+    /// Vanilla's `MusicManager.tick` order of steps: a replacing situation stops the playing
+    /// track; a track that is no longer playing picks a fresh pause; the situation's maximum
+    /// caps the countdown; the countdown ticks down and starts the track when it reaches zero.
     pub fn tick(&mut self, rng: &mut MusicRng, is_playing: bool) -> Option<MusicCommand> {
-        // A queued replacement stop goes out first.
-        if self.stop_pending {
-            self.stop_pending = false;
-            self.playing = None;
-            self.play_issued = false;
-            self.play_unconfirmed = 0;
-            self.track_live = false;
-            self.countdown = None;
-            return Some(MusicCommand::Stop);
-        }
-
-        // Follow the track we started: once the output confirms it, wait for it to end.
-        if self.play_issued && is_playing {
-            self.play_issued = false;
-            self.play_unconfirmed = 0;
-            self.track_live = true;
-        }
-        if self.play_issued && !is_playing {
-            self.play_unconfirmed += 1;
-            if self.play_unconfirmed >= PLAY_CONFIRM_TIMEOUT {
-                // The output never started our track (missing file, failed decode, no
-                // device): treat it as ended and pick a fresh countdown.
-                self.play_issued = false;
-                self.play_unconfirmed = 0;
-                self.playing = None;
-                self.countdown = None;
-            }
-        }
-        if self.track_live && !is_playing {
-            // The track ended: wait a fresh random pause before the next one.
-            self.track_live = false;
-            self.playing = None;
-            self.countdown = None;
-        }
-
-        // Nothing playing and nothing on the way: count down to the next track.
-        if !is_playing && !self.play_issued && self.playing.is_none() {
-            let spec = self.situation.music();
-            let countdown = match self.countdown {
-                Some(countdown) => countdown,
-                None => {
-                    let picked = if self.replace_play {
-                        let min = spec.min_delay.min(REPLACE_PLAY_MAX);
-                        rng.range(min, spec.max_delay.min(REPLACE_PLAY_MAX).max(min))
-                    } else {
-                        rng.range(spec.min_delay, spec.max_delay)
-                    };
-                    self.replace_play = false;
-                    // A delay of N ticks means the track starts N ticks from now, so this
-                    // very tick counts as the first one.
-                    if picked > 0 {
-                        self.countdown = Some(picked - 1);
-                    }
-                    picked
+        self.ticks += 1;
+        let spec = self.situation.music();
+        if let Some(current) = self.current.clone() {
+            if is_playing {
+                // The track is still playing: a situation with replacing music stops it and
+                // gets a short fresh countdown (vanilla's `canReplace`), otherwise nothing
+                // happens this tick (vanilla's `nextSongDelay` stays at Integer.MAX_VALUE).
+                if spec.replace_current && current != spec.event {
+                    self.current = None;
+                    self.next_song_delay = self.replace_delay(&spec, rng);
+                    tracing::info!(
+                        "music: tick {}: stopping {current} (situation {:?})",
+                        self.ticks,
+                        self.situation
+                    );
+                    return Some(MusicCommand::Stop);
                 }
-            };
-            if countdown == 0 {
-                self.play_issued = true;
-                self.playing = Some(spec.event.clone());
-                self.countdown = None;
-                Some(MusicCommand::Play(spec.event))
-            } else {
-                self.countdown = Some(countdown - 1);
-                None
+                return None;
             }
-        } else {
-            None
+            // The track ended: a fresh random pause before the next one, capped by the
+            // situation's maximum below.
+            self.current = None;
+            let fresh = self.get_next_song_delay(&spec, rng);
+            self.next_song_delay = self.next_song_delay.min(fresh as i32);
         }
+        // The situation's own maximum caps the running countdown every tick.
+        self.next_song_delay = self.next_song_delay.min(spec.max_delay as i32);
+        if self.next_song_delay > 0 {
+            self.next_song_delay -= 1;
+        }
+        if self.next_song_delay <= 0 {
+            self.current = Some(spec.event.clone());
+            self.next_song_delay = i32::MAX;
+            tracing::info!(
+                "music: tick {}: playing {} (situation {:?})",
+                self.ticks,
+                spec.event,
+                self.situation
+            );
+            return Some(MusicCommand::Play(spec.event));
+        }
+        None
     }
-}
 
-impl Default for MusicManager {
-    fn default() -> Self {
-        Self::new()
+    /// The countdown after a replacing situation change: vanilla's
+    /// `Mth.nextInt(this.random, 0, music.minDelay() / 2)`.
+    fn replace_delay(&self, spec: &MusicSpec, rng: &mut MusicRng) -> i32 {
+        rng.range(0, spec.min_delay / 2).min(i32::MAX as u32) as i32
+    }
+
+    /// A fresh pause after a track ended: vanilla's
+    /// `MusicFrequency.getNextSongDelay(music, random)` with the DEFAULT frequency — the
+    /// music's own range with both ends capped by the option's maximum.
+    fn get_next_song_delay(&self, spec: &MusicSpec, rng: &mut MusicRng) -> u32 {
+        let min = spec.min_delay.min(self.max_frequency);
+        let max = spec.max_delay.min(self.max_frequency);
+        rng.range(min, max)
     }
 }
 
@@ -323,63 +300,98 @@ mod tests {
         panic!("no Play within 60000 ticks");
     }
 
+    /// Ticks until the manager returns anything but `None`.
+    fn until_command(
+        manager: &mut MusicManager,
+        rng: &mut MusicRng,
+        is_playing: bool,
+    ) -> MusicCommand {
+        for _ in 1..=60_000usize {
+            if let Some(command) = manager.tick(rng, is_playing) {
+                return command;
+            }
+        }
+        panic!("no command within 60000 ticks");
+    }
+
     #[test]
-    fn menu_countdown_within_wiki_range() {
+    fn starts_with_vanillas_starting_delay() {
+        // Vanilla's `nextSongDelay` starts at 100 ticks, so the first track of a session plays
+        // within 5 seconds — not after a track's long random pause.
         let mut manager = MusicManager::new();
         let mut rng = MusicRng::new(1);
         let (ticks, event) = until_play(&mut manager, &mut rng, false);
         assert_eq!(event, "minecraft:music.menu");
-        assert!(
-            (20..=600).contains(&ticks),
-            "menu delay {ticks} outside 20..=600"
-        );
-    }
-
-    #[test]
-    fn plays_when_countdown_reaches_zero_and_nothing_plays() {
-        // The dragon fight has no delay and replaces: it plays at once.
-        let mut manager = MusicManager::new();
-        manager.set_situation(MusicSituation::Dragon);
-        let mut rng = MusicRng::new(2);
         assert_eq!(
-            manager.tick(&mut rng, false),
-            Some(MusicCommand::Play("minecraft:music.dragon".to_owned()))
+            ticks, STARTING_DELAY as usize,
+            "the first track starts after the starting delay"
         );
     }
 
     #[test]
-    fn no_play_while_playing() {
+    fn delays_follow_the_musics_constants() {
+        // After a track ends, the next one follows the situation's own range (the `Musics`
+        // constants), capped by the DEFAULT music frequency (20 minutes = 24000 ticks).
+        let mut manager = MusicManager::new();
+        manager.set_situation(MusicSituation::Game);
+        let mut rng = MusicRng::new(2);
+        let (_, event) = until_play(&mut manager, &mut rng, false);
+        assert_eq!(event, "minecraft:music.game");
+        // The track plays for a while and then ends.
+        for _ in 0..100 {
+            assert_eq!(manager.tick(&mut rng, true), None);
+        }
+        let (ticks, event) = until_play(&mut manager, &mut rng, false);
+        assert_eq!(event, "minecraft:music.game");
+        assert!(
+            (12_000..=24_000).contains(&ticks),
+            "game delay {ticks} outside 12000..=24000"
+        );
+    }
+
+    #[test]
+    fn no_second_track_while_ours_plays() {
         let mut manager = MusicManager::new();
         manager.set_situation(MusicSituation::Game);
         let mut rng = MusicRng::new(3);
-        for _ in 0..24_000 {
+        let (_, event) = until_play(&mut manager, &mut rng, false);
+        // while our track plays, no second one starts (vanilla's nextSongDelay stays at
+        // Integer.MAX_VALUE while the current music is active)
+        for _ in 0..60_000 {
             assert_eq!(manager.tick(&mut rng, true), None);
         }
+        assert_eq!(manager.playing_event(), Some(event.as_str()));
     }
 
     #[test]
-    fn menu_replaces_game_music() {
+    fn end_music_replaces_the_current_track() {
+        // `Musics.END` replaces the current music: the playing track is stopped first.
         let mut manager = MusicManager::new();
         manager.set_situation(MusicSituation::Game);
         let mut rng = MusicRng::new(4);
         let (_, event) = until_play(&mut manager, &mut rng, false);
         assert_eq!(event, "minecraft:music.game");
-        // The track plays for a while, then the menu opens.
         for _ in 0..10 {
             assert_eq!(manager.tick(&mut rng, true), None);
         }
-        manager.set_situation(MusicSituation::Menu);
-        assert_eq!(manager.tick(&mut rng, true), Some(MusicCommand::Stop));
+        manager.set_situation(MusicSituation::End);
+        assert_eq!(
+            until_command(&mut manager, &mut rng, true),
+            MusicCommand::Stop
+        );
+        // The replacement gets a short countdown (vanilla: nextInt(0, minDelay / 2)).
         let (ticks, event) = until_play(&mut manager, &mut rng, false);
-        assert_eq!(event, "minecraft:music.menu");
+        assert_eq!(event, "minecraft:music.end");
         assert!(
-            ticks <= REPLACE_PLAY_MAX as usize,
-            "menu music should follow within {REPLACE_PLAY_MAX} ticks, took {ticks}"
+            ticks <= 3_000,
+            "end music followed within minDelay/2 ticks, took {ticks}"
         );
     }
 
     #[test]
     fn game_to_creative_keeps_current_track() {
+        // `Musics.CREATIVE` does not replace the current music: the track keeps playing and the
+        // next one comes with the in-game delays.
         let mut manager = MusicManager::new();
         manager.set_situation(MusicSituation::Game);
         let mut rng = MusicRng::new(5);
@@ -392,7 +404,6 @@ mod tests {
         for _ in 0..100 {
             assert_eq!(manager.tick(&mut rng, true), None);
         }
-        // The game track ends; creative music follows with the in-game delays.
         let (ticks, event) = until_play(&mut manager, &mut rng, false);
         assert_eq!(event, "minecraft:music.creative");
         assert!(
@@ -402,11 +413,13 @@ mod tests {
     }
 
     #[test]
-    fn non_replacing_change_clamps_countdown() {
+    fn a_switching_biome_situation_caps_the_countdown() {
+        // The situation's own maximum caps the running countdown every tick (vanilla's
+        // `nextSongDelay = Math.min(nextSongDelay, music.maxDelay())`), so a track of a biome
+        // with a short range starts within that range.
         let mut manager = MusicManager::new();
         manager.set_situation(MusicSituation::Game);
         let mut rng = MusicRng::new(6);
-        // One tick picks the in-game countdown, somewhere in 12000..=24000.
         assert_eq!(manager.tick(&mut rng, false), None);
         manager.set_situation(MusicSituation::Biome {
             event: "minecraft:music.cherry_grove".to_owned(),
@@ -420,6 +433,20 @@ mod tests {
             ticks <= 40,
             "clamped countdown should fire within 40 ticks, took {ticks}"
         );
+    }
+
+    #[test]
+    fn dragon_and_credits_play_at_once_and_replace() {
+        for situation in [MusicSituation::Dragon, MusicSituation::Credits] {
+            let mut manager = MusicManager::new();
+            manager.set_situation(situation.clone());
+            let mut rng = MusicRng::new(7);
+            assert_eq!(
+                manager.tick(&mut rng, false),
+                Some(MusicCommand::Play(situation.music().event)),
+                "{situation:?} has no delay"
+            );
+        }
     }
 
     #[test]
@@ -459,33 +486,15 @@ mod tests {
     }
 
     #[test]
-    fn unconfirmed_play_times_out_and_music_recovers() {
+    fn the_track_event_is_followed_not_the_situation() {
         let mut manager = MusicManager::new();
-        manager.set_situation(MusicSituation::Dragon);
-        let mut rng = MusicRng::new(7);
-        // The dragon fight plays at once, but the output never confirms it.
-        assert_eq!(
-            manager.tick(&mut rng, false),
-            Some(MusicCommand::Play("minecraft:music.dragon".to_owned()))
-        );
-        // The menu replaces it; the new track follows promptly.
-        manager.set_situation(MusicSituation::Menu);
-        assert_eq!(manager.tick(&mut rng, false), Some(MusicCommand::Stop));
-        let (ticks, event) = until_play(&mut manager, &mut rng, false);
-        assert_eq!(event, "minecraft:music.menu");
-        assert!(
-            ticks <= REPLACE_PLAY_MAX as usize,
-            "menu music should follow within {REPLACE_PLAY_MAX} ticks, took {ticks}"
-        );
-        // The track never starts: the manager must time out and try again.
-        for _ in 0..PLAY_CONFIRM_TIMEOUT {
-            assert_eq!(manager.tick(&mut rng, false), None);
+        manager.set_situation(MusicSituation::Game);
+        let mut rng = MusicRng::new(8);
+        let (_, event) = until_play(&mut manager, &mut rng, false);
+        assert_eq!(manager.playing_event(), Some(event.as_str()));
+        for _ in 0..10 {
+            assert_eq!(manager.tick(&mut rng, true), None);
         }
-        let (ticks, event) = until_play(&mut manager, &mut rng, false);
-        assert_eq!(event, "minecraft:music.menu");
-        assert!(
-            ticks <= 600,
-            "fresh menu countdown after the timeout should stay within the wiki range, took {ticks}"
-        );
+        assert_eq!(manager.playing_event(), Some(event.as_str()));
     }
 }

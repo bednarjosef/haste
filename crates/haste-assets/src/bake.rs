@@ -132,8 +132,9 @@ struct BlocksJsonState {
 
 /// Per-block-state baked geometry, indexed by BlockStateId.
 pub struct BakedBlockModels {
-    /// State id -> quads (empty for states without models, e.g. air).
-    quads: Vec<Vec<BakedQuad>>,
+    /// State id -> quads (None for states without models, e.g. air). States whose
+    /// blockstates resolve to the same model refs share one `Arc` (bake dedup).
+    quads: Vec<Option<Arc<[BakedQuad]>>>,
     /// State id -> full opaque cube flag (face culling in the mesher).
     full_opaque: Vec<bool>,
     /// State id -> render layer.
@@ -146,6 +147,28 @@ pub struct BakedBlockModels {
 }
 
 impl BakedBlockModels {
+    /// Heap bytes of the baked quads and per-state tables (live allocations; the
+    /// `String` texture ids count their capacity). Shared `Arc`s count once.
+    pub fn memory_bytes(&self) -> u64 {
+        let mut seen: Vec<*const [BakedQuad]> = Vec::new();
+        let mut quads: u64 = 0;
+        for q in &self.quads {
+            let Some(q) = q else { continue };
+            let ptr: *const [BakedQuad] = Arc::as_ptr(q);
+            if seen.contains(&ptr) {
+                continue;
+            }
+            seen.push(ptr);
+            quads += q.len() as u64 * std::mem::size_of::<BakedQuad>() as u64
+                + q.iter()
+                    .map(|q| q.texture.capacity() as u64 + 24)
+                    .sum::<u64>();
+        }
+        quads
+            + self.quads.capacity() as u64 * std::mem::size_of::<Option<Arc<[BakedQuad]>>>() as u64
+            + (self.full_opaque.capacity() + self.layer.capacity()) as u64
+    }
+
     /// Bakes every state of every block in `states`, assigning atlas UVs. The
     /// atlas is rebuilt from every texture reachable from any blockstate file
     /// (all variants and all multipart applies). Blocks without a blockstate
@@ -159,7 +182,7 @@ impl BakedBlockModels {
         let n = states.len();
         // Out-of-range ids (modded servers) resolve to the placeholder state's entry.
         let placeholder = states.placeholder_state();
-        let mut quads: Vec<Vec<BakedQuad>> = vec![Vec::new(); n];
+        let mut quads: Vec<Option<Arc<[BakedQuad]>>> = vec![None; n];
         let mut full_opaque = vec![false; n];
         let mut layer = vec![RenderLayer::Solid; n];
 
@@ -168,9 +191,11 @@ impl BakedBlockModels {
 
         // Pass 1: every model ref reachable from each blockstate file, resolved
         // once, collecting textures (Pomme resolves per variant; we need all
-        // branches for texture coverage, including non-matching multipart cases).
+        // branches for texture coverage, including non-matching multipart cases)
+        // and the sprites models declare force_translucent (26.3 model field).
         let mut texture_ids: Vec<Identifier> = Vec::new();
         let mut seen_textures = HashSet::new();
+        let mut force_translucent: HashSet<String> = HashSet::new();
         let mut resolved_models: HashMap<String, ResolvedModel> = HashMap::new();
         for block in &block_names {
             let Ok(def) = assets.blockstate(block) else {
@@ -188,6 +213,9 @@ impl BakedBlockModels {
                         continue;
                     }
                 };
+                for sprite in &resolved.force_translucent {
+                    force_translucent.insert(sprite.clone());
+                }
                 for el in &resolved.elements {
                     for face in el.faces.values() {
                         if let Some(tex) = face_texture_id(&face.texture, &resolved.textures) {
@@ -217,10 +245,21 @@ impl BakedBlockModels {
         }
         texture_ids.sort();
         *atlas = AtlasBuilder::build(assets, &texture_ids, true)?;
+        // Sprites a model declares force_translucent render translucent whatever
+        // their texels say (vanilla's 26.3 model field: glass panes, redstone dust);
+        // classify_layer reads the region flag.
+        for sprite in &force_translucent {
+            if let Ok(id) = Identifier::parse(sprite) {
+                let region = atlas.region_mut(&id.to_string());
+                region.translucent = true;
+            }
+        }
 
         // Pass 2: per state, evaluate variants/multipart and bake with UVs.
         // Baked geometry is cached per unique (refs) tuple: many states share
-        // the same variant key.
+        // the same variant key, and the UV assignment depends only on the
+        // referenced textures, so the cache holds the finished quads and every
+        // state with the same key shares one allocation.
         let mut baked_cache: HashMap<String, Arc<[BakedQuad]>> = HashMap::new();
         for state in 0..n as u32 {
             let sid = BlockStateId(state);
@@ -237,23 +276,20 @@ impl BakedBlockModels {
             let baked = match baked_cache.get(&cache_key) {
                 Some(b) => b.clone(),
                 None => {
-                    let quads = bake_refs(&refs, &resolved_models)?;
-                    let baked: Arc<[BakedQuad]> = quads.into();
+                    let mut state_quads: Vec<BakedQuad> = bake_refs(&refs, &resolved_models)?;
+                    for quad in &mut state_quads {
+                        let region = atlas.region_of(&quad.texture);
+                        assign_atlas_uvs(quad, region);
+                    }
+                    let baked: Arc<[BakedQuad]> = state_quads.into();
                     baked_cache.insert(cache_key, baked.clone());
                     baked
                 }
             };
-            // Clone with atlas UVs assigned (UVs depend on the region, shared
-            // per texture, so the cache could hold them too; keep it simple).
-            let mut state_quads: Vec<BakedQuad> = baked.iter().cloned().collect();
-            for quad in &mut state_quads {
-                let region = atlas.region_of(&quad.texture);
-                assign_atlas_uvs(quad, region);
-            }
-            if !state_quads.is_empty() {
-                full_opaque[state as usize] = is_full_opaque(&state_quads, atlas);
-                layer[state as usize] = classify_layer(&state_quads, block, atlas);
-                quads[state as usize] = state_quads;
+            if !baked.is_empty() {
+                full_opaque[state as usize] = is_full_opaque(&baked, atlas);
+                layer[state as usize] = classify_layer(&baked, block, atlas);
+                quads[state as usize] = Some(baked);
             }
         }
 
@@ -281,7 +317,7 @@ impl BakedBlockModels {
     pub fn quads(&self, s: BlockStateId) -> &[BakedQuad] {
         self.quads
             .get(self.row(s))
-            .map(Vec::as_slice)
+            .and_then(|q| q.as_deref())
             .unwrap_or(&[])
     }
 
@@ -417,8 +453,10 @@ fn is_full_opaque(quads: &[BakedQuad], atlas: &dyn AtlasRegions) -> bool {
 
 /// Render layer heuristic. 26.3 block models carry no `render_type` field, so
 /// the layer comes from the known vanilla `ItemBlockRenderTypes` sets (by block
-/// name) with a texture-alpha fallback: any non-opaque texture -> cutout.
-/// Documented as approximate in NOTES.md.
+/// name) with a texture-alpha fallback following vanilla's per-sprite rule
+/// (`NativeImage.computeTransparency` -> `ChunkSectionLayer.byTransparency`):
+/// any sprite with partial-alpha texels -> translucent, any with alpha-0
+/// texels -> cutout, else solid. Documented as approximate in NOTES.md.
 fn classify_layer(
     quads: &[BakedQuad],
     block: &Identifier,
@@ -451,6 +489,12 @@ fn classify_layer(
     {
         return RenderLayer::CutoutMipped;
     }
+    if quads
+        .iter()
+        .any(|q| atlas.region_of(&q.texture).translucent)
+    {
+        return RenderLayer::Translucent;
+    }
     if quads.iter().any(|q| !atlas.region_of(&q.texture).opaque) {
         return RenderLayer::Cutout;
     }
@@ -465,8 +509,13 @@ mod tests {
     use crate::atlas::{AtlasRegion, AtlasRegions};
     use haste_core::view::BlockStateTable as _;
 
+    /// One sprite transparency class: fully opaque, cutout (alpha 0/255 only) or
+    /// translucent (partial alpha), as vanilla's `NativeImage.computeTransparency`
+    /// reports them.
+    #[derive(Clone, Copy)]
     struct TestRegions {
         opaque: bool,
+        translucent: bool,
     }
 
     impl AtlasRegions for TestRegions {
@@ -475,7 +524,7 @@ mod tests {
                 pixel_rect: [0, 0, 16, 16],
                 sprite: 1,
                 opaque: self.opaque,
-                translucent: !self.opaque,
+                translucent: self.translucent,
             }
         }
     }
@@ -486,8 +535,18 @@ mod tests {
 
     #[test]
     fn classify_layer_by_block_name_and_alpha() {
-        let opaque = TestRegions { opaque: true };
-        let transparent = TestRegions { opaque: false };
+        let opaque = TestRegions {
+            opaque: true,
+            translucent: false,
+        };
+        let cutout = TestRegions {
+            opaque: false,
+            translucent: false,
+        };
+        let translucent = TestRegions {
+            opaque: false,
+            translucent: true,
+        };
         let q = quad();
         assert_eq!(
             classify_layer(
@@ -525,9 +584,19 @@ mod tests {
             classify_layer(
                 std::slice::from_ref(&q),
                 &Identifier::minecraft("oak_sapling"),
-                &transparent
+                &cutout
             ),
             RenderLayer::Cutout
+        );
+        // A sprite with partial-alpha texels is translucent by vanilla's per-sprite
+        // scan, whatever the block is named.
+        assert_eq!(
+            classify_layer(
+                std::slice::from_ref(&q),
+                &Identifier::minecraft("oak_sapling"),
+                &translucent
+            ),
+            RenderLayer::Translucent
         );
     }
 
@@ -557,6 +626,7 @@ mod tests {
         textures.insert("all".to_string(), "minecraft:block/stone".to_string());
         let resolved = ResolvedModel {
             textures,
+            force_translucent: Default::default(),
             elements: file.elements,
             ambientocclusion: true,
             gui_light: false,
@@ -565,6 +635,7 @@ mod tests {
             firstperson_display: None,
             thirdperson_display: None,
             head_display: None,
+            on_shelf_display: None,
             fixed_display: None,
         };
         let mut resolved_models = HashMap::new();
@@ -594,7 +665,7 @@ mod tests {
     fn out_of_range_ids_resolve_to_the_placeholder() {
         let quad = BakedQuad::from_element(Direction::Up, [0.0; 3], [1.0; 3], None, None);
         let baked = BakedBlockModels {
-            quads: vec![Vec::new(), vec![quad.clone()]],
+            quads: vec![None, Some(vec![quad.clone()].into())],
             full_opaque: vec![false, true],
             layer: vec![RenderLayer::Solid, RenderLayer::Solid],
             placeholder: BlockStateId(1),
@@ -628,7 +699,10 @@ mod tests {
 
     #[test]
     fn full_opaque_requires_six_full_faces() {
-        let opaque = TestRegions { opaque: true };
+        let opaque = TestRegions {
+            opaque: true,
+            translucent: false,
+        };
         let quads: Vec<BakedQuad> = Direction::ALL
             .iter()
             .copied()
@@ -644,7 +718,10 @@ mod tests {
         partial[0].positions[0][1] = 0.5;
         assert!(!is_full_opaque(&partial, &opaque));
         // transparent texture -> not full opaque
-        let transparent = TestRegions { opaque: false };
+        let transparent = TestRegions {
+            opaque: false,
+            translucent: false,
+        };
         assert!(!is_full_opaque(&quads, &transparent));
         // 5 faces -> not full opaque
         assert!(!is_full_opaque(&quads[..5], &opaque));
@@ -747,6 +824,72 @@ mod tests {
         assert_eq!(baked.render_layer(stone), RenderLayer::Solid);
         let leaves = find_state(&states, "oak_leaves");
         assert_eq!(baked.render_layer(leaves), RenderLayer::CutoutMipped);
+
+        // The solid layer must only ever hold fully opaque sprites: vanilla picks the
+        // layer per sprite from its texel scan (NativeImage.computeTransparency ->
+        // ChunkSectionLayer.byTransparency: alpha 0 -> CUTOUT, partial -> TRANSLUCENT,
+        // all 255 -> SOLID), and our classify_layer's alpha fallback is what enforces
+        // it here. These are the blocks whose sprites are not fully opaque: anything
+        // landing in Solid with transparent texels would render them (no discard).
+        let cutout_expect = [
+            ("grass_block", RenderLayer::Cutout), // side overlay sprite has alpha 0
+            // The glass pane's sprites (glass_pane_top, glass) have partial-alpha
+            // texels, so vanilla's per-sprite scan puts it in translucent; ours now
+            // does too via the region's translucent flag.
+            ("glass_pane", RenderLayer::Translucent),
+            ("iron_bars", RenderLayer::Cutout),
+            ("tall_grass", RenderLayer::Cutout),
+            ("poppy", RenderLayer::Cutout),
+            ("vine", RenderLayer::CutoutMipped),
+        ];
+        for (name, want) in cutout_expect {
+            // grass_block's snowy=true state uses the fully-opaque snow sprite; the
+            // overlay (with its alpha-0 texels) is on snowy=false.
+            let s = if name == "grass_block" {
+                (0..states.len() as u32)
+                    .map(BlockStateId)
+                    .find(|s| {
+                        states.block_of(*s).path() == "grass_block"
+                            && states
+                                .property_value(*s, "snowy")
+                                .is_some_and(|v| v == "false")
+                    })
+                    .expect("grass_block snowy=false state")
+            } else {
+                find_state(&states, name)
+            };
+            assert_eq!(
+                baked.render_layer(s),
+                want,
+                "{name} must not land in the solid layer"
+            );
+        }
+        // And no solid-layer state may use a sprite with a transparent texel.
+        let mut solid_with_holes = Vec::new();
+        for id in 0..states.len() as u32 {
+            let s = BlockStateId(id);
+            if baked.render_layer(s) == RenderLayer::Solid {
+                for q in baked.quads(s) {
+                    if !atlas.region(&q.texture).opaque {
+                        solid_with_holes.push(format!("{} -> {}", states.block_of(s), q.texture));
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(
+            solid_with_holes.is_empty(),
+            "{} solid-layer states use non-opaque sprites: {:?}",
+            solid_with_holes.len(),
+            &solid_with_holes[..solid_with_holes.len().min(20)]
+        );
+        // The grass block's side overlay sprite must be non-opaque in the atlas:
+        // it is what keeps grass_block out of the solid layer.
+        let overlay = atlas.region("minecraft:block/grass_block_side_overlay");
+        assert!(
+            !overlay.opaque,
+            "grass_block_side_overlay must not be opaque"
+        );
     }
 
     fn find_state(states: &BlocksJsonStates, block: &str) -> BlockStateId {

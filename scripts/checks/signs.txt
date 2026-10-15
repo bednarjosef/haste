@@ -1,0 +1,9 @@
+# Signs and hanging signs draw their boards (chunk models) and their text (block entity
+# renderer): standing, wall and hanging, glowing and coloured text. The runner places the
+# signs over RCON (see run-feature-checks.sh's `signs`) and teleports the player here.
+wait_until joined
+wait_until settled
+wait 60
+look 180 25
+wait 5
+screenshot signs

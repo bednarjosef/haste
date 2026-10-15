@@ -196,7 +196,12 @@ fn apply_side(
                 }
             }
         } else if e && our_idx >= 0 && (our_idx as usize) < n_sections {
-            slots[our_idx as usize] = None; // explicitly cleared
+            // Explicitly cleared: all-zero light. Vanilla stores `new DataLayer()`
+            // (default 0) for an empty-marked section (ClientPacketListener
+            // .readSectionList), so sky reads 0 — NOT the 15 an absent section
+            // reads (SkyLightSectionStorage's null-layer fallback). An empty
+            // `NibbleArray` reads 0 per cell.
+            slots[our_idx as usize] = Some(NibbleArray::default());
         }
         // neither set nor empty: section keeps its current light (light_update partial semantics)
     }

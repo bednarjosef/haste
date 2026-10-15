@@ -24,6 +24,7 @@ pub mod connection;
 pub mod metadata;
 pub mod nbt;
 pub mod packets;
+pub mod serverpack;
 pub mod transport;
 pub mod wire;
 
@@ -34,7 +35,7 @@ pub use haste_core;
 pub use auth::MsaTokens;
 pub use chat::{ChatSigner, LastSeenMessages, MessageSignature};
 pub use connection::{
-    ping, resource_pack_status, Account, ConnectOptions, Connection, CookieJar, Login,
+    ping, resource_pack_status, Account, Arrived, ConnectOptions, Connection, CookieJar, Login,
     ProtocolError, ResourcePackPolicy, ServerStatus, StatsSnapshot, SyncedRegistries,
 };
 pub use packets::play::{ClientboundPlay, ServerboundPlay};

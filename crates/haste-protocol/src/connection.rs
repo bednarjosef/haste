@@ -70,7 +70,7 @@ impl Account {
 }
 
 /// Connection parameters.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ConnectOptions {
     /// `host`, `host:port` or `ip:port`. Without a port, `_minecraft._tcp`
     /// SRV is tried, then port 25565.
@@ -90,6 +90,12 @@ pub struct ConnectOptions {
     pub chunks_per_tick: f32,
     /// How to answer `resource_pack_push`.
     pub resource_packs: ResourcePackPolicy,
+    /// Where server resource packs download to (vanilla's `<game
+    /// dir>/downloads`, `DownloadQueue`'s cache). Set: pushed packs really
+    /// download (hash-checked) and reach the client through
+    /// [`Connection::take_downloaded_packs`]. Unset: the policy's canned
+    /// replies only.
+    pub downloads_dir: Option<std::path::PathBuf>,
     /// Cookies from `store_cookie`. Clones share the jar, so cookies survive
     /// a `transfer` (vanilla keeps them in memory for the session only).
     pub cookies: CookieJar,
@@ -154,6 +160,24 @@ impl CookieJar {
     }
 }
 
+impl std::fmt::Debug for ConnectOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The wake hook is not `Debug` (and says nothing useful): its presence is enough.
+        f.debug_struct("ConnectOptions")
+            .field("address", &self.address)
+            .field("account", &self.account)
+            .field("protocol_version", &self.protocol_version)
+            .field("client_information", &self.client_information)
+            .field("brand", &self.brand)
+            .field("tables", &self.tables)
+            .field("chunks_per_tick", &self.chunks_per_tick)
+            .field("resource_packs", &self.resource_packs)
+            .field("downloads_dir", &self.downloads_dir)
+            .field("cookies", &self.cookies)
+            .finish()
+    }
+}
+
 impl ConnectOptions {
     /// Defaults: protocol 777, `en_us`, view distance 10, brand `vanilla`
     /// (what the vanilla client sends; servers cannot tell us apart by it),
@@ -168,6 +192,7 @@ impl ConnectOptions {
             tables: None,
             chunks_per_tick: 64.0,
             resource_packs: ResourcePackPolicy::Accept,
+            downloads_dir: None,
             cookies: CookieJar::default(),
         }
     }
@@ -351,18 +376,44 @@ enum Outgoing {
 type Decoder = TcpNetworkDecoder<BufReader<OwnedReadHalf>>;
 type Encoder = TcpNetworkEncoder<OwnedWriteHalf>;
 
+/// The wake hook the client sets on a live connection (see [`Connection`]).
+type PacketWake = Arc<dyn Fn() + Send + Sync>;
+/// Where the hook lives so the reader task and the owner share it.
+type PacketWakeSlot = Arc<Mutex<Option<PacketWake>>>;
+
+/// One queued clientbound packet with the instant the reader task decoded it
+/// (vanilla's packets are handled on the render thread's queue the same frame
+/// they arrive; the timestamp is how the client measures that wait).
+pub struct Arrived {
+    pub packet: ClientboundPlay,
+    /// When the reader task decoded the packet (`Instant` on the reader's
+    /// clock; the game thread compares it with its own `Instant::now`).
+    pub at: std::time::Instant,
+}
+
 /// A live play-state connection.
 pub struct Connection {
-    rx: mpsc::UnboundedReceiver<ClientboundPlay>,
+    rx: mpsc::UnboundedReceiver<Arrived>,
     tx: mpsc::UnboundedSender<Outgoing>,
     registries: Arc<SyncedRegistries>,
     /// Registries from a reconfiguration or transfer, swapped in when the
     /// game dequeues the `login` that follows them.
     pending_registries: Arc<Mutex<Option<SyncedRegistries>>>,
+    /// Server resource packs downloaded on this connection (configuration and
+    /// play phase), until the client takes them to apply.
+    downloaded_packs: Arc<Mutex<Vec<crate::serverpack::DownloadedPack>>>,
+    /// Bumped on every change to the pack set (downloads, re-pushes, pops).
+    packs_version: Arc<std::sync::atomic::AtomicU64>,
     tables: Arc<ProtocolTables>,
     stats: Arc<Stats>,
     closed: Arc<Mutex<Option<String>>>,
     profile: GameProfile,
+    /// Called by the reader task after it queues a play packet, so the client
+    /// can wake whatever drains them (vanilla drains the packet queue every
+    /// frame; a 20 Hz tick alone leaves packets waiting up to 50 ms). Cheap
+    /// to call: a condvar notify. Set through [`Self::set_packet_wake`] once
+    /// the drainer (the game thread's `Shared`) exists.
+    packet_arrived: PacketWakeSlot,
     reader: tokio::task::JoinHandle<()>,
     writer: tokio::task::JoinHandle<()>,
 }
@@ -670,6 +721,7 @@ impl Connection {
             regs,
             login,
             early,
+            downloaded_packs,
         } = est;
         let dimension = regs.dimension_info(login.spawn.dimension_type, &login.spawn.dimension).unwrap_or_else(|| {
             tracing::warn!("dimension type {} not resolvable from synced registries; assuming overworld layout", login.spawn.dimension_type);
@@ -686,15 +738,29 @@ impl Connection {
             packet: login,
         };
         let (game_tx, game_rx) = mpsc::unbounded_channel();
+        let packet_arrived: PacketWakeSlot = Arc::new(Mutex::new(None));
+        let start = std::time::Instant::now();
         for p in early {
-            let _ = game_tx.send(p);
+            let _ = game_tx.send(Arrived {
+                packet: p,
+                at: start,
+            });
         }
-        let _ = game_tx.send(ClientboundPlay::Login(info.packet.clone()));
+        let _ = game_tx.send(Arrived {
+            packet: ClientboundPlay::Login(info.packet.clone()),
+            at: start,
+        });
 
         // Tasks.
         let (out_tx, out_rx) = mpsc::unbounded_channel();
         let closed = Arc::new(Mutex::new(None));
         let pending_registries = Arc::new(Mutex::new(None));
+        let initial_pack_count = downloaded_packs.len();
+        let downloaded_packs = Arc::new(Mutex::new(downloaded_packs));
+        // Version 1 = a set exists from the configuration phase; 0 = none ever.
+        let packs_version = Arc::new(std::sync::atomic::AtomicU64::new(u64::from(
+            initial_pack_count > 0,
+        )));
         let Io { dec, enc, .. } = io;
         let writer = tokio::spawn(writer_task(
             enc,
@@ -717,9 +783,12 @@ impl Connection {
             tables: tables.clone(),
             stats: stats.clone(),
             closed: closed.clone(),
+            downloaded_packs: downloaded_packs.clone(),
+            packs_version: packs_version.clone(),
             opts,
             regs: regs.clone(),
             pending_registries: pending_registries.clone(),
+            packet_arrived: packet_arrived.clone(),
         }));
         (
             Connection {
@@ -727,10 +796,13 @@ impl Connection {
                 tx: out_tx,
                 registries: Arc::new(regs),
                 pending_registries,
+                downloaded_packs,
+                packs_version,
                 tables,
                 stats,
                 closed,
                 profile,
+                packet_arrived,
                 reader,
                 writer,
             },
@@ -744,16 +816,47 @@ impl Connection {
     /// (`start_configuration`) or a `transfer`; when it is returned,
     /// [`Self::registries`] already holds the registries that came with it.
     pub fn try_recv(&mut self) -> Option<ClientboundPlay> {
-        let p = self.rx.try_recv().ok()?;
-        self.on_dequeue(&p);
-        Some(p)
+        let a = self.rx.try_recv().ok()?;
+        self.on_dequeue(&a.packet);
+        Some(a.packet)
+    }
+
+    /// Like [`Self::try_recv`], keeping the arrival timestamp (for the client's
+    /// arrival-to-apply timing log).
+    pub fn try_recv_arrived(&mut self) -> Option<Arrived> {
+        let a = self.rx.try_recv().ok()?;
+        self.on_dequeue(&a.packet);
+        Some(a)
+    }
+
+    /// The connection's live set of server resource packs (vanilla's
+    /// `ServerPackManager.packs`): pushes add (a re-push of an id replaces
+    /// its download), pops remove. The caller re-reads it whenever
+    /// [`Self::server_packs_version`] changes.
+    pub fn server_packs(&self) -> Vec<crate::serverpack::DownloadedPack> {
+        match self.downloaded_packs.lock() {
+            Ok(g) => g.clone(),
+            Err(e) => e.into_inner().clone(),
+        }
+    }
+
+    /// Bumped every time [`Self::server_packs`] changed (a download finished,
+    /// a re-push replaced a pack, or a pop arrived).
+    pub fn server_packs_version(&self) -> u64 {
+        self.packs_version.load(Ordering::Relaxed)
+    }
+
+    /// Next packet with its arrival timestamp; `None` once the connection is
+    /// closed and drained.
+    pub async fn recv_arrived(&mut self) -> Option<Arrived> {
+        let a = self.rx.recv().await?;
+        self.on_dequeue(&a.packet);
+        Some(a)
     }
 
     /// Next packet; `None` once the connection is closed and drained.
     pub async fn recv(&mut self) -> Option<ClientboundPlay> {
-        let p = self.rx.recv().await?;
-        self.on_dequeue(&p);
-        Some(p)
+        self.recv_arrived().await.map(|a| a.packet)
     }
 
     fn on_dequeue(&mut self, p: &ClientboundPlay) {
@@ -774,6 +877,14 @@ impl Connection {
         self.tx
             .send(Outgoing::Play(Box::new(p)))
             .map_err(|_| ProtocolError::Closed)
+    }
+
+    /// Sets the hook the reader task calls after queueing each play packet
+    /// (see [`Self::packet_arrived`]). Call once, right after connect.
+    pub fn set_packet_wake(&self, wake: PacketWake) {
+        if let Ok(mut g) = self.packet_arrived.lock() {
+            *g = Some(wake);
+        }
     }
 
     /// Registries from the configuration state.
@@ -859,6 +970,8 @@ struct Established {
     login: play::clientbound::Login,
     /// Play packets that arrived before `login`.
     early: Vec<ClientboundPlay>,
+    /// Server resource packs downloaded during configuration.
+    downloaded_packs: Vec<crate::serverpack::DownloadedPack>,
 }
 
 enum Handshaked {
@@ -900,7 +1013,9 @@ async fn establish(
     let profile = login_state(&mut io, opts).await?;
 
     let mut regs = SyncedRegistries::default();
-    if let Some(addr) = configuration_state(&mut io, opts, &mut regs).await? {
+    let mut downloaded_packs = Vec::new();
+    if let Some(addr) = configuration_state(&mut io, opts, &mut regs, &mut downloaded_packs).await?
+    {
         return Ok(Handshaked::Transfer(addr));
     }
 
@@ -941,6 +1056,7 @@ async fn establish(
         regs,
         login,
         early,
+        downloaded_packs,
     })))
 }
 
@@ -1154,6 +1270,18 @@ fn configuration_step(
     })
 }
 
+/// The download headers for a server pack (vanilla `createDownloadHeaders`): the
+/// player's name and UUID, this client's version and its resource pack format.
+fn pack_headers(opts: &ConnectOptions) -> Vec<(String, String)> {
+    crate::serverpack::download_headers(
+        opts.account.username(),
+        &opts.account.uuid().to_string(),
+        haste_core::paths::MC_VERSION,
+        haste_core::paths::MC_VERSION,
+        crate::serverpack::RESOURCE_PACK_FORMAT_MAJOR,
+    )
+}
+
 fn configuration_hello(
     tables: &ProtocolTables,
     opts: &ConnectOptions,
@@ -1178,6 +1306,7 @@ async fn configuration_state(
     io: &mut Io,
     opts: &ConnectOptions,
     regs: &mut SyncedRegistries,
+    downloaded_packs: &mut Vec<crate::serverpack::DownloadedPack>,
 ) -> Result<Option<String>, ProtocolError> {
     let tables = io.tables.clone();
     for b in configuration_hello(&tables, opts)? {
@@ -1195,6 +1324,46 @@ async fn configuration_state(
         let Some(p) = decode_with(&d, &raw, &tables, State::Configuration, &mut io.warned)? else {
             continue;
         };
+        // A server pack the client really applies: download inline (vanilla's
+        // statuses flow across the download; the server waits for neither), so the
+        // pack is in the cache before the play state starts.
+        if let ClientboundConfiguration::ResourcePackPush(r) = &p {
+            if let Some(dir) = &opts.downloads_dir {
+                let (results, pack) = crate::serverpack::handle_push(
+                    dir,
+                    opts.resource_packs == ResourcePackPolicy::Decline,
+                    r.id,
+                    &r.url,
+                    &r.hash,
+                    &pack_headers(opts),
+                )
+                .await;
+                for result in results {
+                    io.enc
+                        .write_packet(encode(
+                            &tables,
+                            State::Configuration,
+                            &cfg::serverbound::ResourcePack { id: r.id, result },
+                        )?)
+                        .await?;
+                    io.stats.packets_out.fetch_add(1, Ordering::Relaxed);
+                }
+                io.enc.flush().await?;
+                if let Some(pack) = pack {
+                    // A re-push of an id replaces its earlier download.
+                    downloaded_packs.retain(|p| p.id != pack.id);
+                    downloaded_packs.push(pack);
+                }
+                continue;
+            }
+        }
+        // Vanilla `handleResourcePackPop`: remove one pack (or all) from the set.
+        if let ClientboundConfiguration::ResourcePackPop(pop) = &p {
+            match pop.id {
+                Some(id) => downloaded_packs.retain(|p| p.id != id),
+                None => downloaded_packs.clear(),
+            }
+        }
         match configuration_step(p, &tables, opts, regs)? {
             ConfigStep::Reply(v) => {
                 for b in v {
@@ -1218,14 +1387,17 @@ async fn configuration_state(
 struct ReaderCtx {
     dec: Decoder,
     out: mpsc::UnboundedSender<Outgoing>,
-    game: mpsc::UnboundedSender<ClientboundPlay>,
+    game: mpsc::UnboundedSender<Arrived>,
     dispatch: Arc<Dispatch<ClientboundPlay>>,
     tables: Arc<ProtocolTables>,
     stats: Arc<Stats>,
     closed: Arc<Mutex<Option<String>>>,
+    downloaded_packs: Arc<Mutex<Vec<crate::serverpack::DownloadedPack>>>,
+    packs_version: Arc<std::sync::atomic::AtomicU64>,
     opts: ConnectOptions,
     regs: SyncedRegistries,
     pending_registries: Arc<Mutex<Option<SyncedRegistries>>>,
+    packet_arrived: PacketWakeSlot,
 }
 
 fn set_closed(closed: &Mutex<Option<String>>, reason: String) {
@@ -1378,12 +1550,56 @@ async fn reader_task(mut c: ReaderCtx) {
                     r.forced,
                     c.opts.resource_packs
                 );
-                for &result in c.opts.resource_packs.replies() {
-                    reply(
-                        &c.out,
-                        &c.tables,
-                        ServerboundPlay::ResourcePack(sb::ResourcePack { id: r.id, result }),
-                    );
+                if let Some(dir) = c.opts.downloads_dir.clone() {
+                    // Download off the reader (vanilla's DownloadQueue runs beside the
+                    // connection); the statuses flow as the download progresses.
+                    let out = c.out.clone();
+                    let tables = c.tables.clone();
+                    let declined = c.opts.resource_packs == ResourcePackPolicy::Decline;
+                    let headers = pack_headers(&c.opts);
+                    let packs = c.downloaded_packs.clone();
+                    let version = c.packs_version.clone();
+                    let (id, url, hash) = (r.id, r.url.clone(), r.hash.clone());
+                    tokio::spawn(async move {
+                        let (results, pack) = crate::serverpack::handle_push(
+                            &dir, declined, id, &url, &hash, &headers,
+                        )
+                        .await;
+                        for result in results {
+                            reply(
+                                &out,
+                                &tables,
+                                ServerboundPlay::ResourcePack(sb::ResourcePack { id, result }),
+                            );
+                        }
+                        if let Some(pack) = pack {
+                            if let Ok(mut packs) = packs.lock() {
+                                // A re-push of an id replaces its earlier download.
+                                packs.retain(|p| p.id != pack.id);
+                                packs.push(pack);
+                                version.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    });
+                } else {
+                    for &result in c.opts.resource_packs.replies() {
+                        reply(
+                            &c.out,
+                            &c.tables,
+                            ServerboundPlay::ResourcePack(sb::ResourcePack { id: r.id, result }),
+                        );
+                    }
+                }
+            }
+            // Vanilla `handleResourcePackPop`: remove one pack (or all) from the
+            // live set; the client re-applies without it.
+            ClientboundPlay::ResourcePackPop(p) => {
+                if let Ok(mut packs) = c.downloaded_packs.lock() {
+                    match p.id {
+                        Some(id) => packs.retain(|p| p.id != id),
+                        None => packs.clear(),
+                    }
+                    c.packs_version.fetch_add(1, Ordering::Relaxed);
                 }
             }
             ClientboundPlay::Transfer(t) => transfer_to = Some(transfer_address(&t.host, t.port)),
@@ -1414,8 +1630,21 @@ async fn reader_task(mut c: ReaderCtx) {
             _ => {}
         }
         let is_disconnect = matches!(packet, ClientboundPlay::Disconnect(_));
-        if c.game.send(packet).is_err() || is_disconnect {
+        if c.game
+            .send(Arrived {
+                packet,
+                at: std::time::Instant::now(),
+            })
+            .is_err()
+            || is_disconnect
+        {
             break;
+        }
+        // After the send, so a woken drainer always sees the packet.
+        if let Ok(g) = c.packet_arrived.lock() {
+            if let Some(wake) = g.as_ref() {
+                wake();
+            }
         }
         if let Some(addr) = transfer_to {
             if !transfer(&mut c, &addr).await {
@@ -1455,9 +1684,13 @@ async fn transfer(c: &mut ReaderCtx, addr: &str) -> bool {
                 *g = Some(regs.clone());
             }
             c.regs = regs;
-            let _ = c.game.send(ClientboundPlay::Login(login));
+            let at = std::time::Instant::now();
+            let _ = c.game.send(Arrived {
+                packet: ClientboundPlay::Login(login),
+                at,
+            });
             for p in early {
-                let _ = c.game.send(p);
+                let _ = c.game.send(Arrived { packet: p, at });
             }
             true
         }

@@ -9,10 +9,10 @@
 //! Use animations (eat, drink, bow, shield, brush, spear, crossbow) are a later task as well:
 //! `FirstPersonHandsAndItemsRenderer.submitArmWithItem`'s use branches need, per hand,
 //! `isUsingItem`, `useItemRemainingTicks` and `useDuration` (`getUseDuration`, from the held
-//! item's `use_duration` component) plus the item's `use_animation` component, and the client
-//! has none of them yet: `interact_step` only sends the packets and tracks no "using item"
-//! state, so `release_use_item` is never sent and the use ticks are not counted. The hand state
-//! here has room for them (`Hand::item_used` is the hook the use dip goes through).
+//! item's `use_duration` component) plus the item's `use_animation` component. The interaction
+//! step tracks the state now (`Interaction::is_using_item`/`using`, driven by the
+//! `minecraft:consumable` component and `release_use_item`), but the hand here still draws no
+//! use dip: `Hand::item_used` is the hook it would go through.
 //!
 //! A few accessors are for the tests and the later use-animation work (the swing's lerped
 //! progress, `isSwinging`), so they are unused for now.
@@ -130,11 +130,17 @@ impl Swing {
 
     /// The swing progress at the ends of the last two ticks, 0 when the swing is not in the hand
     /// the renderer draws (`FirstPersonHandsAndItems.extractRenderState`'s `mainHandAttack`).
+    /// Like `SwingState.getAnimation`, a falling end (the tick the swing ends, or a restart
+    /// that keeps the progress) is wrapped past 1 (`animation + 1.0`), so the renderer's plain
+    /// lerp holds the rest pose instead of retracing the swing backwards.
     pub fn pair(&self) -> (f32, f32) {
-        if self.main_hand {
-            (self.prev_animation, self.animation)
+        if !self.main_hand {
+            return (0.0, 0.0);
+        }
+        if self.animation < self.prev_animation {
+            (self.prev_animation, self.animation + 1.0)
         } else {
-            (0.0, 0.0)
+            (self.prev_animation, self.animation)
         }
     }
 
@@ -154,6 +160,11 @@ pub struct Equip {
     prev_height: f32,
     /// `Player.itemSwapTicker`, reset when the held item's type changes.
     swap_ticker: u32,
+    /// `Player.attackStrengthTicker`, reset on an attack and on an item type change
+    /// (`Player.getAttackStrengthScale`); the HUD attack indicator reads it.
+    attack_strength_ticker: u32,
+    /// The held item's `minecraft:attack_speed` this tick (for the scale's delay).
+    attack_speed: f64,
     /// `Player.lastItemInMainHand`, the type seen last tick.
     last_item: Option<RegistryIndex>,
 }
@@ -167,6 +178,8 @@ impl Default for Equip {
             height: 0.0,
             prev_height: 0.0,
             swap_ticker: 0,
+            attack_strength_ticker: 0,
+            attack_speed: DEFAULT_ATTACK_SPEED,
             last_item: None,
         }
     }
@@ -178,10 +191,13 @@ impl Equip {
     /// `minecraft:attack_speed` attribute.
     pub fn tick(&mut self, item: Option<RegistryIndex>, attack_speed: f64) {
         self.prev_height = self.height;
-        // `Player.tick`: both tickers advance, and a different item type resets them.
+        self.attack_speed = attack_speed;
+        // `Player.tick`: both tickers advance, and a different item type resets both.
         self.swap_ticker += 1;
+        self.attack_strength_ticker += 1;
         if self.last_item != item {
             self.swap_ticker = 0;
+            self.attack_strength_ticker = 0;
         }
         self.last_item = item;
         // `shouldInstantlyReplaceVisibleItem`: the same item type is shown at once; a different
@@ -221,6 +237,26 @@ impl Equip {
     /// The item type the hand shows (the renderer draws the arm while it is `None`).
     pub fn item(&self) -> Option<RegistryIndex> {
         self.item
+    }
+
+    /// `Player.getAttackStrengthScale(a)`: the attack charge 0..1 over the held item's delay.
+    pub fn attack_strength_scale(&self, a: f32) -> f32 {
+        clamp(
+            (self.attack_strength_ticker as f32 + a) / swap_delay(self.attack_speed),
+            0.0,
+            1.0,
+        )
+    }
+
+    /// `Player.resetAttackStrengthTicker`: both tickers (`MultiPlayerGameMode.stopDestroyBlock`).
+    pub fn reset_attack_strength_ticker(&mut self) {
+        self.attack_strength_ticker = 0;
+        self.swap_ticker = 0;
+    }
+
+    /// `Player.resetOnlyAttackStrengthTicker` (`Player.onAttack`).
+    pub fn reset_only_attack_strength_ticker(&mut self) {
+        self.attack_strength_ticker = 0;
     }
 }
 
@@ -415,6 +451,21 @@ impl Hand {
         self.swing.animation(partial)
     }
 
+    /// The attack charge 0..1 for the HUD attack indicator (`Player.getAttackStrengthScale`).
+    pub fn attack_strength_scale(&self, a: f32) -> f32 {
+        self.equip.attack_strength_scale(a)
+    }
+
+    /// `Player.resetAttackStrengthTicker` (abort breaking, item change).
+    pub fn reset_attack_strength_ticker(&mut self) {
+        self.equip.reset_attack_strength_ticker();
+    }
+
+    /// `Player.resetOnlyAttackStrengthTicker` (`Player.onAttack`).
+    pub fn reset_only_attack_strength_ticker(&mut self) {
+        self.equip.reset_only_attack_strength_ticker();
+    }
+
     /// Whether the main hand is swinging.
     pub fn is_swinging(&self) -> bool {
         self.swing.is_swinging()
@@ -456,10 +507,20 @@ mod tests {
             seen.push(h.attack());
             let (start, end) = *seen.last().unwrap();
             assert_eq!(start, h.swing.prev_animation, "start is the previous tick");
-            assert_eq!(end, h.swing.animation, "end is this tick");
+            // The end is this tick, wrapped past 1 when it fell (`getAnimation`).
+            assert_eq!(
+                end,
+                if h.swing.animation < h.swing.prev_animation {
+                    h.swing.animation + 1.0
+                } else {
+                    h.swing.animation
+                },
+                "end is this tick"
+            );
         }
         // progress = ticks / 6 at the end of each tick; the tick after the last clears it, and
-        // vanilla's `getAnimation` lerps 1 -> 1 over that tick so nothing jumps.
+        // the pair wraps the falling end past 1 (`SwingState.getAnimation`'s `animation + 1.0`)
+        // so that tick lerps 1 -> 1, the rest pose, and nothing jumps.
         for (got, want) in seen.iter().zip([
             (0.0, 0.0),
             (0.0, 1.0 / 6.0),
@@ -468,7 +529,7 @@ mod tests {
             (3.0 / 6.0, 4.0 / 6.0),
             (4.0 / 6.0, 5.0 / 6.0),
             (5.0 / 6.0, 1.0),
-            (1.0, 0.0),
+            (1.0, 1.0),
             (0.0, 0.0),
         ]) {
             assert!(
@@ -488,6 +549,62 @@ mod tests {
     }
 
     #[test]
+    fn the_interpolated_swing_never_jumps_back_up_after_it_ends() {
+        // Every tick of one swing plus the tick after it ends, at the partials a frame can
+        // sample. The swing rises over ticks 2..7, the tick it ends (8) holds the rest pose 1
+        // (`SwingState.getAnimation` wraps the falling end to `animation + 1.0`, so the pair is
+        // (1, 1) instead of the raw (1, 0)), and the tick after rests at 0. The raw pair would
+        // lerp 1 -> 0 over the end tick and put the hand back at mid-swing (0.5) for a frame.
+        let mut h = Hand::new();
+        h.swing();
+        let mut frames = Vec::new();
+        for t in 1..=9 {
+            tick(&mut h, 0.0);
+            for p in [0.0, 0.5, 0.99] {
+                frames.push((t, p, h.animation(p)));
+            }
+        }
+        let at = |t: i32, p: f32| {
+            frames
+                .iter()
+                .find(|(ft, fp, _)| *ft == t && *fp == p)
+                .unwrap()
+                .2
+        };
+        // Rising phase: within each tick, and from one tick's end into the next's start, the
+        // interpolated value never decreases (tick 2 rises 0 -> 1/6, ..., tick 7 5/6 -> 1).
+        for t in 2..=7 {
+            assert!(
+                at(t, 0.0) <= at(t, 0.5) + 1e-7 && at(t, 0.5) <= at(t, 0.99) + 1e-7,
+                "tick {t} falls within itself"
+            );
+            assert!(
+                at(t, 0.99) <= at(t + 1, 0.0) + 1e-7,
+                "tick {t} ends above tick {} starts",
+                t + 1
+            );
+        }
+        // The tick the swing ends holds the rest pose 1 at every partial: the wrap.
+        for p in [0.0, 0.5, 0.99] {
+            let got = at(8, p);
+            assert!((got - 1.0).abs() < 1e-6, "end tick partial {p}: {got} != 1");
+        }
+        // After the swing has ended nothing jumps back up towards mid-swing: the tick after
+        // rests at 0 at every partial.
+        for p in [0.0, 0.5, 0.99] {
+            let got = at(9, p);
+            assert!(got.abs() < 1e-6, "tick after partial {p}: {got} != 0");
+        }
+        // And the pair the renderer draws carries the same wrap.
+        let mut h = Hand::new();
+        h.swing();
+        for _ in 0..8 {
+            tick(&mut h, 0.0);
+        }
+        assert_eq!(h.attack(), (1.0, 1.0));
+    }
+
+    #[test]
     fn a_swing_less_than_half_way_is_not_restarted() {
         let mut h = Hand::new();
         h.swing();
@@ -499,10 +616,12 @@ mod tests {
         assert_eq!(h.attack().1, 2.0 / 6.0);
         tick(&mut h, 0.0);
         assert_eq!(h.attack().1, 3.0 / 6.0);
-        // Past the half way a new swing starts over from 0.
+        // Past the half way a new swing starts over. The same hand and duration keep the
+        // progress (`SwingState.start` resets only on a changed description), so the restart
+        // tick's pair falls from 3/6 to 0 and `getAnimation`'s wrap carries it past 1.
         h.swing();
         tick(&mut h, 0.0);
-        assert_eq!(h.attack(), (3.0 / 6.0, 0.0));
+        assert_eq!(h.attack(), (3.0 / 6.0, 1.0));
     }
 
     #[test]
@@ -643,6 +762,35 @@ mod tests {
         assert!((h.x_bob().1 - want_pitch).abs() < 1e-4);
         // The pair is the previous tick's value and this one's.
         assert!((h.y_bob().0 - 60.078_125).abs() < 1e-4, "{}", h.y_bob().0);
+    }
+
+    #[test]
+    fn attack_strength_charges_over_the_item_delay_and_resets() {
+        // `Player.attackStrengthTicker` advances each tick and `getAttackStrengthScale` is
+        // (ticker + a) / (20 / attack_speed), clamped. The bare hand's attack speed 4 gives a
+        // 5 tick delay; a diamond sword's 1.6 gives 12.5.
+        let mut h = Hand::new();
+        let mut scale = Vec::new();
+        for _ in 0..6 {
+            tick(&mut h, 0.0);
+            scale.push(h.attack_strength_scale(0.0));
+        }
+        // None -> None on the first tick (no item type change), so the ticker runs 1..6.
+        for (got, want) in scale.iter().zip([0.2, 0.4, 0.6, 0.8, 1.0, 1.0]) {
+            assert!((got - want).abs() < 1e-6, "{got} != {want}");
+        }
+        // `Player.onAttack` resets only the attack ticker.
+        h.reset_only_attack_strength_ticker();
+        tick(&mut h, 0.0);
+        assert!((h.attack_strength_scale(0.0) - 0.2).abs() < 1e-6);
+        // An item type change resets it (`Player.tick`).
+        h.tick(0.0, (0.0, 0.0), true, false, stone(), 1.6);
+        assert_eq!(h.attack_strength_scale(0.0), 0.0);
+        // The sword's slower attack speed: 12 ticks -> 12 / 12.5 = 0.96.
+        for _ in 0..12 {
+            h.tick(0.0, (0.0, 0.0), true, false, stone(), 1.6);
+        }
+        assert!((h.attack_strength_scale(0.0) - 0.96).abs() < 1e-6);
     }
 
     #[test]

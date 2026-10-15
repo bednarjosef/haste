@@ -42,12 +42,17 @@ pub enum GrassModifier {
 pub struct BiomeClimate {
     pub temperature: f32,
     pub downfall: f32,
+    /// `has_precipitation` (26.3's renamed `Biome.hasPrecipitation`): whether the biome has
+    /// weather at all (deserts do not).
+    pub has_precipitation: bool,
     /// 0xRRGGBB.
     pub water_color: u32,
     pub grass_color: Option<u32>,
     pub foliage_color: Option<u32>,
     pub dry_foliage_color: Option<u32>,
     pub grass_modifier: GrassModifier,
+    /// The biome's fog environment attributes (`attributes` map), for `FogRenderer`.
+    pub fog: crate::fog::BiomeFog,
 }
 
 impl BiomeClimate {
@@ -57,11 +62,13 @@ impl BiomeClimate {
         BiomeClimate {
             temperature: 0.8,
             downfall: 0.4,
+            has_precipitation: true,
             water_color: 0x3F76E4,
             grass_color: None,
             foliage_color: None,
             dry_foliage_color: None,
             grass_modifier: GrassModifier::None,
+            fog: crate::fog::BiomeFog::default(),
         }
     }
 }
