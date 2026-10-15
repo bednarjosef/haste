@@ -15,6 +15,7 @@
 use clap::Parser;
 
 mod app;
+mod boat;
 mod game;
 mod hand;
 mod headless;
