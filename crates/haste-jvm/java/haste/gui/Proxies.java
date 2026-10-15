@@ -129,6 +129,16 @@ public final class Proxies {
         // where vanilla builds the book, so the player's own ClientRecipeBook is set here (the kept
         // recipe-book handlers read it through Player.getRecipeBook)
         set(player, "recipeBook", net.minecraft.client.ClientRecipeBook.class, new net.minecraft.client.ClientRecipeBook());
+        // LocalPlayer.dropSpamThrottler (vanilla: new TickThrottler(20, 1280) in its constructor,
+        // which a proxy never runs): the kept canDropItems body the creative screen's slot clicks
+        // go through reads it
+        set(player, "dropSpamThrottler", net.minecraft.util.TickThrottler.class,
+            new net.minecraft.util.TickThrottler(20, 1280));
+        // LivingEntity.swingState (vanilla: new SwingState() in its constructor, which a proxy
+        // never runs): the kept drop/swing bodies the creative screen's slot clicks go through
+        // start the swing animation on it
+        set(player, "swingState", net.minecraft.world.entity.LivingEntity.SwingState.class,
+            new net.minecraft.world.entity.LivingEntity.SwingState());
         // the connection's own fields its kept handlers touch (vanilla's constructor sets both): the
         // search trees (the same object searchTrees() returns) and the level for SlotDisplayContext
         set(connection, "searchTrees", net.minecraft.client.multiplayer.SessionSearchTrees.class,

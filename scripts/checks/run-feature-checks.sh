@@ -160,7 +160,7 @@ drop() {
     rcon "item replace entity $NAME weapon.offhand with minecraft:torch 3" >/dev/null
   fi
   sleep 2
-  local before after items
+  local before="" after="" items=""
   before=$(rcon "data get entity $NAME SelectedItem")
   if wait_shot "$log" drop-swap 90; then
     after=$(rcon "data get entity $NAME SelectedItem")
@@ -183,7 +183,7 @@ modes() {
   local log="$LOGDIR/modes.log"
   client_start "$ROOT/scripts/checks/game-modes.txt" "$log"
   wait_online || { check modes "player never joined" 1; return; }
-  local spec_before spec_after creative_check adventure_check
+  local spec_before="" spec_after="" creative_check="" adventure_check=""
   if wait_shot "$log" gm-spectator-setup 90; then
     rcon "gamemode spectator $NAME" >/dev/null
     rcon "fill -8 99 -8 8 99 8 stone" >/dev/null
@@ -253,7 +253,7 @@ craft() {
     rcon "give $NAME minecraft:oak_log 1" >/dev/null
   fi
   sleep 2
-  local before after
+  local before="" after=""
   before=$(rcon "data get entity $NAME Inventory")
   if wait_shot "$log" craft-final 90; then
     after=$(rcon "data get entity $NAME Inventory")
@@ -320,13 +320,16 @@ recipe_book() {
   local log="$LOGDIR/recipe-book.log"
   client_start "$ROOT/scripts/checks/recipe-book.txt" "$log"
   wait_online || { check recipe-book "player never joined" 1; return; }
+  # the script's wait_until settled needs the player at the plain the camera shoots: the spawn
+  # point can be a wall (a suffocation death would kill the check)
+  rcon "tp $NAME 9.5 71 6.5" >/dev/null
   rcon "gamemode survival $NAME" >/dev/null
   if wait_shot "$log" recipe-book-open 90; then
     rcon "clear $NAME" >/dev/null
     rcon "give $NAME minecraft:oak_log 1" >/dev/null
   fi
   sleep 2
-  local before after
+  local before="" after=""
   before=$(rcon "data get entity $NAME Inventory")
   if wait_shot "$log" recipe-book-final 90; then
     after=$(rcon "data get entity $NAME Inventory")
