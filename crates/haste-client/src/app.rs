@@ -3583,7 +3583,9 @@ fn bench_summary(samples: &[BenchSample]) -> BenchSummary {
     let t = |f: fn(&haste_render::FrameTimings) -> f32| sum(samples, n, |s| f(&s.timings));
     let gpu = |i: usize| sum(samples, n, |s| s.timings.gpu_ms[i]);
     // Solid + cutout-mipped (renderer sub-passes 1 and 3) fold into "opaque".
-    let opaque = sum(samples, n, |s| s.timings.gpu_sub_ms[1] + s.timings.gpu_sub_ms[3]);
+    let opaque = sum(samples, n, |s| {
+        s.timings.gpu_sub_ms[1] + s.timings.gpu_sub_ms[3]
+    });
     let gpu_sub = |i: usize| sum(samples, n, |s| s.timings.gpu_sub_ms[i]);
     BenchSummary {
         frames: samples.len() as u32,
