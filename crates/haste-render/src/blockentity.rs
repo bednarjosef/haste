@@ -1428,9 +1428,7 @@ mod tests {
                 Some(BlockEntityKind::Skull { kind, wall: false }),
                 "{block}"
             );
-            let wall_block = block
-                .replace("_wall_", "_wall_")
-                .replace("_skull", "_wall_skull");
+            let wall_block = block.replace("_skull", "_wall_skull");
             let wall_block = if block.ends_with("_skull") {
                 wall_block
             } else {

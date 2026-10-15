@@ -5217,14 +5217,14 @@ mod tests {
             vec![
                 NbtTag::Compound({
                     let mut c = NbtCompound::new();
-                    c.put_string("pattern".into(), "minecraft:stripe_bottom".into());
-                    c.put_string("color".into(), "blue".into());
+                    c.put_string("pattern", "minecraft:stripe_bottom".into());
+                    c.put_string("color", "blue".into());
                     c
                 }),
                 NbtTag::Compound({
                     let mut c = NbtCompound::new();
-                    c.put_string("pattern".into(), "minecraft:half_vertical".into());
-                    c.put_string("color".into(), "white".into());
+                    c.put_string("pattern", "minecraft:half_vertical".into());
+                    c.put_string("color", "white".into());
                     c
                 }),
             ],
@@ -5251,8 +5251,8 @@ mod tests {
             "patterns",
             vec![NbtTag::Compound({
                 let mut c = NbtCompound::new();
-                c.put_string("asset_id".into(), "minecraft:cross".into());
-                c.put_string("color".into(), "lime".into());
+                c.put_string("asset_id", "minecraft:cross".into());
+                c.put_string("color", "lime".into());
                 c
             })],
         );
