@@ -179,6 +179,9 @@ public final class Bridge {
         Proxies.set(Proxies.player, "uuid", java.util.UUID.class, uuid);
         Proxies.set(Proxies.player, "stringUUID", String.class, uuid.toString());
         PlayerImpl.profile = new com.mojang.authlib.GameProfile(uuid, name);
+        // Player's own field (its constructor would set it; the proxy's is null without this):
+        // `Player.getName` reads it, e.g. the book's sign screen names the author.
+        Proxies.set(Proxies.player, "gameProfile", com.mojang.authlib.GameProfile.class, PlayerImpl.profile);
     }
 
     /** The joined world's dimension type (its id in the synchronised dimension_type registry). */
@@ -357,9 +360,18 @@ public final class Bridge {
         }
     }
 
+    /** A use opened the command block editor (vanilla `LocalPlayer.openCommandBlock`). */
+    public void openCommandBlock(int x, int y, int z) {
+        Handlers.openCommandBlock(x, y, z);
+    }
+
+    /** A use opened the writable book's editor (vanilla `LocalPlayer.openItemGui`). */
+    public void openItemGui(int hand) {
+        Handlers.openItemGui(hand);
+    }
+
     /** Names of the server's commands the local player may use (the root of the command tree), one per line. */
-    public String commandNames() {
-        var src = ConnectionImpl.getSuggestionsProvider(Proxies.connection);
+    public String commandNames() {        var src = ConnectionImpl.getSuggestionsProvider(Proxies.connection);
         StringBuilder sb = new StringBuilder();
         for (var n : Handlers.commands.getRoot().getChildren()) {
             if (n.canUse(src)) sb.append(n.getName()).append('\n');

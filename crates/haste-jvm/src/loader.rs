@@ -155,6 +155,11 @@ pub const ALLOW_CLASSES: &[&str] = &[
     // Window.findBestMonitor's return type (Video Settings holds one; Haste has no monitors, so null)
     "com/mojang/blaze3d/platform/Monitor",
     "com/mojang/blaze3d/font/GlyphProvider",
+    // the sign editor asks the renderer for the text's dark colour (AbstractSignRenderer.getDarkColor,
+    // a static formula over the SignText). Only that static method ever runs; the interface it
+    // implements is loaded with it, and nothing else of the block-entity renderer does.
+    "net/minecraft/client/renderer/blockentity/AbstractSignRenderer",
+    "net/minecraft/client/renderer/blockentity/BlockEntityRenderer",
     "net/minecraft/client/PresenceSharing",
     "net/minecraft/client/sounds/MusicManager$MusicFrequency",
     "net/minecraft/client/sounds/SoundEngine$PlayResult",

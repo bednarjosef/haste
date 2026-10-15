@@ -56,7 +56,8 @@ public final class Proxies {
         level = make(net.minecraft.client.multiplayer.ClientLevel.class);
         connection = service(net.minecraft.client.multiplayer.ClientPacketListener.class);
         // the player's inventory and equipment are real vanilla containers on the player proxy
-        equipment = new net.minecraft.world.entity.EntityEquipment();
+        // (PlayerEquipment, like Player.createEquipment: the main hand slot is the selected hotbar stack)
+        equipment = new net.minecraft.world.entity.player.PlayerEquipment(player);
         set(player, "equipment", net.minecraft.world.entity.EntityEquipment.class, equipment);
         inventory = new Inventory(player, equipment);
         set(player, "inventory", Inventory.class, inventory);

@@ -1,0 +1,46 @@
+# Feature: editing a command block. The check player is an operator on the test server
+# (ops.json), so the script stands at the check camera, sets a command block in front of it
+# and uses it (CommandBlock.useWithoutItem -> openCommandBlock: game-master blocks need
+# creative mode and permission level >= 2), types a command and presses Done
+# (ServerboundSetCommandBlockPacket). Evidence: `data get block` of the command block's
+# Command (the runner greps it).
+wait_until joined
+wait_until settled
+wait 60
+# stand at the check camera, creative (game-master blocks), and place the command block ahead
+key T
+wait_until screen_open
+type /gamemode creative @s
+key ENTER
+wait_until screen_closed
+wait 10
+key T
+wait_until screen_open
+type /tp @s 9.5 71 6.5 0 0
+key ENTER
+wait_until screen_closed
+wait 20
+key T
+wait_until screen_open
+type /setblock 9 71 9 minecraft:command_block
+key ENTER
+wait_until screen_closed
+wait 20
+# use the command block (looking down-forward at it)
+look 0 25
+wait 5
+mouse_down right
+wait 2
+mouse_up right
+wait 10
+wait_until screen_open
+screenshot command-block-editor
+wait 20
+type say hello
+wait 10
+screenshot command-block-typed
+# Done (gui.done) sends the set-command-block packet
+click_text "Done" 0 0
+wait_until screen_closed
+screenshot command-block-done
+wait 60

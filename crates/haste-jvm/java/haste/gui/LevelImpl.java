@@ -36,6 +36,11 @@ public final class LevelImpl {
     public static net.minecraft.world.entity.player.Player getPlayerByUUID(Level l, java.util.UUID id) {
         return id.equals(Proxies.player.getUUID()) ? Proxies.player : null;
     }
+
+    /** The level's players (vanilla {@code ClientLevel.players}): only the local player is here. */
+    public static java.util.List<net.minecraft.client.player.AbstractClientPlayer> players(net.minecraft.client.multiplayer.ClientLevel l) {
+        return java.util.List.of(Proxies.player);
+    }
     /** Difficulty and hardcore of the joined world (difficulty not forwarded yet: normal). */
     static net.minecraft.client.multiplayer.ClientLevel.ClientLevelData levelData;
     public static net.minecraft.client.multiplayer.ClientLevel.ClientLevelData getLevelData(net.minecraft.client.multiplayer.ClientLevel l) {
@@ -57,6 +62,24 @@ public final class LevelImpl {
     public static net.minecraft.world.level.block.state.BlockState getBlockState(Level l, net.minecraft.core.BlockPos p) {
         return net.minecraft.world.level.block.Blocks.AIR.defaultBlockState();
     }
+
+    /**
+     * The block entities the screens edit (see {@link BlockEntities}); the world's own block entities are
+     * Rust's and not mirrored — the store only holds what a screen reached (signs, command blocks, ...).
+     */
+    public static net.minecraft.world.level.block.entity.BlockEntity getBlockEntity(Level l, net.minecraft.core.BlockPos p) {
+        return BlockEntities.get(p);
+    }
+    public static net.minecraft.world.level.block.entity.BlockEntity getBlockEntity(net.minecraft.client.multiplayer.ClientLevel l, net.minecraft.core.BlockPos p) {
+        return getBlockEntity((Level) l, p);
+    }
+
+    // The world's change propagation is Rust's/server's; the block entities Java holds are for the
+    // screens (BlockEntities), so the updates a screen's edit marks are no-ops here.
+    public static void sendBlockUpdated(Level l, net.minecraft.core.BlockPos p, net.minecraft.world.level.block.state.BlockState old,
+                                         net.minecraft.world.level.block.state.BlockState cur, int flags) {}
+    public static void blockEntityChanged(Level l, net.minecraft.core.BlockPos p) {}
+    public static void updateNeighbourForOutputSignal(Level l, net.minecraft.core.BlockPos p, net.minecraft.world.level.block.Block b) {}
     public static int getMaxLocalRawBrightness(Level l, net.minecraft.core.BlockPos p) { return 15; }
     static final net.minecraft.world.level.lighting.LevelLightEngine LIGHT = Proxies.make(net.minecraft.world.level.lighting.LevelLightEngine.class);
     public static net.minecraft.world.level.lighting.LevelLightEngine getLightEngine(Level l) { return LIGHT; }

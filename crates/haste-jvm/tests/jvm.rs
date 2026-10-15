@@ -1406,6 +1406,41 @@ fn system_chat(text: &str, overlay: bool) -> Vec<u8> {
     b
 }
 
+/// `minecraft:block_entity_type` registry id, from the data generator's report.
+fn block_entity_id(name: &str) -> i32 {
+    let reports = cache().join("datagen/26.3/reports/registries.json");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(reports).unwrap()).unwrap();
+    v["minecraft:block_entity_type"]["entries"][name]["protocol_id"]
+        .as_i64()
+        .unwrap() as i32
+}
+
+/// `block_entity_data` for an empty entity of `kind` at `pos` (an empty network-NBT compound).
+fn block_entity_data(pos: haste_core::BlockPos, kind: i32) -> Vec<u8> {
+    let mut b = vec![packet_id("minecraft:block_entity_data")];
+    b.extend_from_slice(&pos.to_packed().to_be_bytes());
+    let mut k = kind as u32;
+    loop {
+        if k & !0x7f == 0 {
+            b.push(k as u8);
+            break;
+        }
+        b.push((k as u8 & 0x7f) | 0x80);
+        k >>= 7;
+    }
+    b.extend_from_slice(&[0x0a, 0x00]); // TAG_Compound with no entries (TAG_End)
+    b
+}
+
+/// `open_sign_editor` for the sign at `pos` (front slot).
+fn open_sign_editor(pos: haste_core::BlockPos) -> Vec<u8> {
+    let mut b = vec![packet_id("minecraft:open_sign_editor")];
+    b.extend_from_slice(&pos.to_packed().to_be_bytes());
+    b.push(1); // front slot (VarInt)
+    b
+}
+
 fn sprite_at(f: &haste_core::gui::GuiFrame, name: &str) -> Vec<(i32, i32, i32, i32)> {
     sprites(f)
         .into_iter()
@@ -2022,4 +2057,191 @@ fn escape(gui: &haste_jvm::GuiPipeline) {
         0,
         false,
     );
+}
+
+/// The sign editor: `block_entity_data` + `open_sign_editor` open vanilla's `SignEditScreen`,
+/// typing fills lines (Down moves to the next), and closing sends `sign_update` with the text.
+/// Mirrors scripts/checks/edit-sign.txt without a server (the packets are the same wire bytes).
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM, data generator reports)"]
+fn sign_editor_screen() {
+    use haste_jvm::keys;
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    reset(gui);
+    h.clear_unimplemented().unwrap();
+    gui.with_state(|s| {
+        s.in_world = true;
+        s.vitals.health = 20.0;
+    });
+    // a sign block entity exists (block_entity_data), and the server opens its editor
+    let pos = haste_core::BlockPos::new(1, 65, 2);
+    gui.packet(&block_entity_data(pos, block_entity_id("minecraft:sign")))
+        .unwrap();
+    gui.packet(&open_sign_editor(pos)).unwrap();
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.inventory.SignEditScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    // the editor draws its title and the Done button
+    let f = render(&h, (0.0, 0.0));
+    assert!(
+        texts(&f).contains(&"Edit Sign Message".to_string()),
+        "title: {:?}",
+        texts(&f)
+    );
+    // typing fills line 0; Down moves to line 1 and typing fills that
+    type_text(&h, "first line");
+    assert!(
+        texts(&render(&h, (0.0, 0.0))).contains(&"first line".to_string()),
+        "line 0 typed"
+    );
+    press(&h, keys::DOWN);
+    type_text(&h, "second line");
+    let t = texts(&render(&h, (0.0, 0.0)));
+    assert!(
+        t.contains(&"first line".to_string()) && t.contains(&"second line".to_string()),
+        "both lines: {t:?}"
+    );
+    // closing (Escape is Done) sends sign_update with the four lines and the front slot
+    press(&h, keys::ESCAPE);
+    assert!(!gui.is_open(), "{:?}", gui.take_last_error());
+    let out = outgoing(&h);
+    let sign_update = serverbound_id("minecraft:sign_update");
+    let (_, body) = out
+        .iter()
+        .find(|(id, _)| *id == sign_update)
+        .expect("sign_update sent");
+    let mut i = 0;
+    let got_pos = i64::from_be_bytes(body[i..i + 8].try_into().unwrap());
+    i += 8;
+    assert_eq!(haste_core::BlockPos::from_packed(got_pos), pos, "sign pos");
+    let line = |i: &mut usize| {
+        let len = var_int(body, i) as usize;
+        let s = String::from_utf8(body[*i..*i + len].to_vec()).unwrap();
+        *i += len;
+        s
+    };
+    assert_eq!(line(&mut i), "first line");
+    assert_eq!(line(&mut i), "second line");
+    assert_eq!(line(&mut i), "");
+    assert_eq!(line(&mut i), "");
+    assert_eq!(var_int(body, &mut i), 1, "front slot");
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for the sign editor: {unimpl:#?}"
+    );
+    gui.with_state(|s| s.in_world = false);
+}
+
+/// The book editor: `openItemGui` (a use of the held writable book) opens vanilla's
+/// BookEditScreen, typing fills the page, "Sign" opens BookSignScreen, the title is typed and
+/// "Sign and Close" sends the edit_book packet (slot, pages, title). Mirrors
+/// scripts/checks/edit-book.txt without a server.
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM, data generator reports)"]
+fn book_editor_screen() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    reset(gui);
+    h.clear_unimplemented().unwrap();
+    gui.with_state(|s| {
+        s.in_world = true;
+        s.selected_slot = 0;
+    });
+    // the local player as the login would have introduced it (the book's sign screen names
+    // the author from the profile)
+    gui.set_player(1, "SignAuthor", 0x0102_0304_0506_0708_090a_0b0c_0d0e)
+        .unwrap();
+    gui.set_inventory_slot(0, &stack("minecraft:writable_book", 1))
+        .unwrap();
+    // the use of the held writable book opens the editor (vanilla WritableBookItem.use)
+    gui.open_item_gui(0).unwrap();
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.inventory.BookEditScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    // the editor draws the page (page indicator "Page 1 of 1") and the buttons
+    type_text(&h, "Page one text");
+    let t = texts(&render(&h, (0.0, 0.0)));
+    assert!(
+        t.contains(&"Page one text".to_string()),
+        "typed page: {t:?}"
+    );
+    // "Sign" opens the sign screen (button bottom-left of the book gui)
+    let f = render(&h, (0.0, 0.0));
+    let sign = f
+        .commands
+        .iter()
+        .find_map(|c| match c {
+            haste_core::gui::GuiCommand::Text { text, x, y, .. } if text == "Sign" => {
+                Some((*x as f64, *y as f64))
+            }
+            _ => None,
+        })
+        .expect("the Sign button's label");
+    click(gui, sign.0, sign.1);
+    gui.render(320, 240, 2, sign, 0.5).unwrap();
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.inventory.BookSignScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    // the title is typed into the title box
+    type_text(&h, "MyBook");
+    let t = texts(&render(&h, (0.0, 0.0)));
+    assert!(t.contains(&"MyBook".to_string()), "typed title: {t:?}");
+    // "Sign and Close" sends the edit_book packet with slot, the page and the title
+    let f = render(&h, (0.0, 0.0));
+    let finalize = f
+        .commands
+        .iter()
+        .find_map(|c| match c {
+            haste_core::gui::GuiCommand::Text { text, x, y, .. } if text == "Sign and Close" => {
+                Some((*x as f64, *y as f64))
+            }
+            _ => None,
+        })
+        .expect("the Sign and Close button's label");
+    click(gui, finalize.0, finalize.1);
+    gui.render(320, 240, 2, finalize, 0.5).unwrap();
+    assert!(!gui.is_open(), "{:?}", gui.take_last_error());
+    let out = outgoing(&h);
+    let edit_book = serverbound_id("minecraft:edit_book");
+    let (_, body) = out
+        .iter()
+        .find(|(id, _)| *id == edit_book)
+        .expect("edit_book sent");
+    let mut i = 0;
+    assert_eq!(
+        var_int(body, &mut i),
+        0,
+        "slot 0 (the selected hotbar slot)"
+    );
+    let pages = var_int(body, &mut i);
+    assert_eq!(pages, 1, "one page");
+    let len = var_int(body, &mut i) as usize;
+    let page = String::from_utf8(body[i..i + len].to_vec()).unwrap();
+    i += len;
+    assert_eq!(page, "Page one text");
+    // the title is present (an Optional: a boolean byte, then the string)
+    assert_eq!(body[i], 1, "the title is present");
+    i += 1;
+    let tlen = var_int(body, &mut i) as usize;
+    let title = String::from_utf8(body[i..i + tlen].to_vec()).unwrap();
+    assert_eq!(title, "MyBook");
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for the book editor: {unimpl:#?}"
+    );
+    gui.with_state(|s| s.in_world = false);
 }

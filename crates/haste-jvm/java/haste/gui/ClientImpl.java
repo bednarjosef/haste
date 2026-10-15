@@ -295,6 +295,10 @@ public final class ClientImpl {
         screen = s;
         if (s != null) {
             s.added();
+            // vanilla Gui.setScreen: every key mapping is released when a screen opens, so a
+            // button held into the screen (whose release the screen consumes) does not repeat
+            // the use through the server's block editors once it closes
+            net.minecraft.client.KeyMapping.releaseAll();
             s.init(GfxImpl.width, GfxImpl.height);
         }
     }

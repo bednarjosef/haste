@@ -182,6 +182,8 @@ pub struct Interaction {
     pub(crate) lightmap_effect_ids: LightmapEffectIds,
     /// Last blocks we sent actions for (debug logging of their server updates).
     recent: Vec<BlockPos>,
+    /// The screen the last use opened (see [`UsedScreen`]), until the game thread takes it.
+    used_screen: Option<UsedScreen>,
 }
 
 /// `ItemUseAnimation` (vanilla's order).
@@ -274,6 +276,20 @@ pub(crate) struct LightmapEffectIds {
     pub(crate) blindness: Option<i32>,
     /// The fire-resistance effect (lava fog distance `LavaFogEnvironment`).
     pub(crate) fire_resistance: Option<i32>,
+}
+
+/// A screen a use opened (vanilla opens these in `MultiPlayerGameMode.performUseItemOn` /
+/// `useItem` on the client; the server sends no packet for them). The game thread hands it to
+/// the UI the same tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UsedScreen {
+    /// `CommandBlock.useWithoutItem` -> `LocalPlayer.openCommandBlock`: the command block being
+    /// used (game-master blocks need creative + permission level >= 2, like vanilla's
+    /// `Player.canUseGameMasterBlocks`).
+    CommandBlock(BlockPos),
+    /// `WritableBookItem.use` -> `LocalPlayer.openItemGui`: the hand holding the writable book
+    /// (0 main, 1 off, `InteractionHand.values()` numbering).
+    ItemGui(i32),
 }
 
 /// One active effect on us: the vanilla `MobEffectInstance` the screen effects and the lightmap
@@ -649,6 +665,11 @@ impl LocalPlayer {
             Some(Target::Entity { id, .. }) => Some(id),
             _ => None,
         }
+    }
+
+    /// The screen the last use opened (taken by the game thread, which hands it to the UI).
+    pub fn take_used_screen(&mut self) -> Option<UsedScreen> {
+        self.int.used_screen.take()
     }
 
     /// Our own breaking: block and crack stage 0..=9.
@@ -1041,13 +1062,13 @@ impl LocalPlayer {
             }
             // while (keyUse.consumeClick()) startUseItem();
             for _ in 0..use_clicks {
-                self.start_use_item(look, env, out);
+                self.start_use_item(look, world, env, out);
             }
         }
 
         // if (keyUse.isDown() && rightClickDelay == 0 && !player.isUsingItem()) startUseItem();
         if input.use_item && self.int.use_delay == 0 && !self.int.is_using_item {
-            self.start_use_item(look, env, out);
+            self.start_use_item(look, world, env, out);
         }
 
         // `LivingEntity.tick` -> `updateUsingItem`: the remaining time ticks down each game tick,
@@ -1210,6 +1231,7 @@ impl LocalPlayer {
     fn start_use_item(
         &mut self,
         look: (f32, f32),
+        world: &dyn BlockView,
         env: &InteractEnv<'_>,
         out: &mut Vec<ServerboundPlay>,
     ) {
@@ -1252,6 +1274,11 @@ impl LocalPlayer {
                                 out.push(ServerboundPlay::Punch(sb::Punch {}));
                             }
                             self.hand.swing();
+                            // The block's own use opens the game-master editors on the client
+                            // (`CommandBlock.useWithoutItem` -> `LocalPlayer.openCommandBlock`;
+                            // the book's `useItemOn` is never consumed, so `Minecraft.startUseItem`
+                            // falls through to `useItem` -> `WritableBookItem.use`).
+                            self.use_opens_screen(env, Some((h.pos, world)), hand);
                             return;
                         }
                         None => {}
@@ -1266,6 +1293,9 @@ impl LocalPlayer {
                             pitch: look.1,
                         }));
                         self.hand.swing();
+                        // `itemStack.use`: a writable book opens its editor
+                        // (`WritableBookItem.use` -> `LocalPlayer.openItemGui`).
+                        self.use_opens_screen(env, None, hand);
                         // `LivingEntity.startUsingItem`: an item with a use duration starts
                         // using (`Item.getUseDuration`/`getUseAnimation` from the consumable
                         // component or the item class).
@@ -1297,6 +1327,42 @@ impl LocalPlayer {
         }));
         self.int.is_using_item = false;
         self.int.using = None;
+    }
+
+    /// The screens a use opens client-side (vanilla `MultiPlayerGameMode.performUseItemOn` /
+    /// `useItem`): the command-block editor on its block (with `target`), the book editor for a
+    /// writable book in hand (also with `target`: no block consumes a book's use, so vanilla
+    /// falls through to `itemStack.use`). The game thread takes it and hands it to the UI.
+    fn use_opens_screen(
+        &mut self,
+        env: &InteractEnv<'_>,
+        target: Option<(BlockPos, &dyn BlockView)>,
+        hand: i32,
+    ) {
+        if let Some((pos, world)) = target {
+            let block = env.data.blocks.block_of(world.block_state(pos));
+            if [
+                Identifier::minecraft("command_block"),
+                Identifier::minecraft("chain_command_block"),
+                Identifier::minecraft("repeating_command_block"),
+            ]
+            .contains(block)
+            {
+                self.int.used_screen = Some(UsedScreen::CommandBlock(pos));
+                return;
+            }
+        }
+        let stack = self.hand(hand);
+        if stack.count > 0
+            && stack.item.is_some_and(|item| {
+                env.data
+                    .registries
+                    .name("minecraft:item", item)
+                    .is_some_and(|n| *n == Identifier::minecraft("writable_book"))
+            })
+        {
+            self.int.used_screen = Some(UsedScreen::ItemGui(hand));
+        }
     }
 
     /// `MultiPlayerGameMode.startDestroyBlock`: creative breaks at once (with `destroyDelay` 5,

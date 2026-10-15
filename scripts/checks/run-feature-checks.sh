@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs the feature check scripts in scripts/checks/ against the local test server.
 # usage: scripts/checks/run-feature-checks.sh [feature ...]
-#   features: hud death drop modes f2 craft pause creative-hotbars language particles recipe-book  (default: all)
+#   features: hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock  (default: all)
 # The client runs offscreen (`--script`); all server state is set up over RCON from here,
 # never from the script (the player is not an operator and the server kicks command spam).
 # Evidence is printed and grepped: frame text commands (not images), server log lines and
@@ -31,10 +31,12 @@ PASS=0
 FAIL=0
 FAILED=()
 
-client_start() { # script log
+client_start() { # script log [extra args...]
   : >"$2"
-  timeout 200 "$BIN" --server "127.0.0.1:$PORT" --username "$NAME" --script "$1" \
-    --seconds 120 >"$2" 2>&1 &
+  local script=$1 log=$2
+  shift 2
+  timeout 200 "$BIN" --server "127.0.0.1:$PORT" --username "$NAME" --script "$script" \
+    "$@" --seconds 120 >"$log" 2>&1 &
   CLIENT_PID=$!
 }
 
@@ -269,7 +271,7 @@ craft() {
   check craft "one oak log became 4 oak planks in the survival inventory" "$r"
 }
 
-# ---- 10. Block particles: the client's own destroy grid and mining cracks ----
+# ---- 11. Block particles: the client's own destroy grid and mining cracks ----
 particles() {
   local log="$LOGDIR/particles.log"
   # A name of our own: another agent's feature check may be running as $NAME on the
@@ -411,13 +413,82 @@ language() {
   check language "Options > Language switched to de_de and the pause menu drew in German" "$r"
 }
 
-ALL=(hud death drop modes f2 craft pause creative-hotbars language particles recipe-book)
+
+# ---- 12. Signs: place an oak sign, the edit screen opens, type two lines, Done ----
+# The script is self-contained (the check player is an operator, so it clears, teleports to
+# the camera and gives itself the sign through the chat); the runner only ops the player and
+# reads the evidence. Looking down-forward from the camera (9.5 71 6.5), the placement use
+# targets the ground block ahead: the sign lands at (9, 70, 7) with the typed lines.
+sign() {
+  local log="$LOGDIR/sign.log"
+  client_start "$ROOT/scripts/checks/edit-sign.txt" "$log" --pos 9.5 71 6.5
+  wait_online || { check sign "player never joined" 1; return; }
+  rcon "op $NAME" >/dev/null
+  wait_exit
+  echo "--- sign evidence ---"
+  local out
+  out=$(rcon "data get block 9 70 7 front_text")
+  echo "front_text: $out"
+  local r=0
+  has "$out" "LineOne" || { echo "missing line one"; r=1; }
+  has "$out" "LineTwo" || { echo "missing line two"; r=1; }
+  grep -E "haste proxy:|Java exception" "$log" && r=1
+  check sign "placed an oak sign, typed two lines, Escape (Done) sent the sign update" "$r"
+}
+
+# ---- 13. Books: use a writable book, type, sign ----
+# The script is self-contained (the check player is an operator); the runner ops the player
+# and reads the evidence while the player is still online (the entity's data is only
+# queryable while it exists: the final screenshot fires before the client leaves). Signing
+# the book makes the server replace the held writable book with a written book.
+book() {
+  local log="$LOGDIR/book.log"
+  client_start "$ROOT/scripts/checks/edit-book.txt" "$log"
+  wait_online || { check book "player never joined" 1; return; }
+  rcon "op $NAME" >/dev/null
+  local held=""
+  if wait_shot "$log" book-done 90; then
+    held=$(rcon "data get entity $NAME SelectedItem")
+  fi
+  wait_exit
+  echo "--- book evidence ---"
+  echo "SelectedItem: ${held:-<not read>}"
+  local r=0
+  has "$held" "written_book" || { echo "no written book after signing"; r=1; }
+  has "$held" "MyBook" || { echo "book title missing"; r=1; }
+  grep -E "haste proxy:|Java exception" "$log" && r=1
+  check book "used a writable book, typed, signed it into a written book" "$r"
+}
+
+# ---- 14. Command blocks: ops, place, use, type a command, Done ----
+# The script is self-contained (the check player is an operator: creative mode, its own command
+# block ahead of the camera, the use opens the editor); the runner ops the player and reads the
+# evidence. The server sends block_entity_data when the player uses the command block, which
+# activates the editor's buttons (vanilla ClientPacketListener.handleBlockEntityData).
+commandblock() {
+  local log="$LOGDIR/commandblock.log"
+  client_start "$ROOT/scripts/checks/edit-command-block.txt" "$log" --pos 9.5 71 6.5
+  wait_online || { check commandblock "player never joined" 1; return; }
+  rcon "op $NAME" >/dev/null
+  wait_exit
+  echo "--- command block evidence ---"
+  local out
+  out=$(rcon "data get block 9 71 9 Command")
+  echo "Command: $out"
+  local r=0
+  has "$out" "say hello" || { echo "command not set"; r=1; }
+  grep -E "haste proxy:|Java exception" "$log" && r=1
+  check commandblock "used the command block, typed a command, Done sent the update" "$r"
+}
+
+
+ALL=(hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock)
 if [ $# -eq 0 ]; then
   set -- "${ALL[@]}"
 fi
 for f in "$@"; do
   case "$f" in
-    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | particles | recipe-book) "${f//-/_}" ;;
+    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | particles | recipe-book | sign | book | commandblock) "${f//-/_}" ;;
     *) echo "unknown feature: $f" ;;
   esac
 done
