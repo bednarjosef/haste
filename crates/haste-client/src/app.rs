@@ -5585,11 +5585,15 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = if let Some(bench) = &self.bench {
-            // The windowed bench: an exact inner size in physical pixels, so the present
-            // cost is measured at the requested resolution whatever the desktop scale is.
+            // The windowed bench: a logical inner size (`--width`x`--height`), so the
+            // framebuffer is exactly the requested resolution times the desktop scale —
+            // the same window a vanilla client at `--width`x`--height` would get.
             Window::default_attributes()
                 .with_title("Haste bench")
-                .with_inner_size(winit::dpi::PhysicalSize::new(bench.size.0, bench.size.1))
+                .with_inner_size(winit::dpi::LogicalSize::new(
+                    f64::from(bench.size.0),
+                    f64::from(bench.size.1),
+                ))
         } else {
             Window::default_attributes()
                 .with_title("Haste")
