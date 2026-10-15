@@ -4025,6 +4025,10 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             &mut weather_guard,
         );
         feed.feed(shared, &mut renderer, camera_section(&camera), vd);
+        // The first-person hand, like the window and the screenshot path (`set_first_person`
+        // diffs the view's per-tick part and only touches the renderer on a change): without
+        // this the script's shots never show the held item.
+        feed.set_first_person(shared, &mut renderer, game::Perspective::FirstPerson);
         let (entities, block_entities) =
             feed.entities(shared, &mut renderer, session_ref.local, partial);
         let block_target = view.as_ref().and_then(|v| v.block_target);
