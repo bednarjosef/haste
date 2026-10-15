@@ -65,6 +65,21 @@ fn main() -> Result<()> {
         .transpose()?
         .unwrap_or(8);
     let vanilla = load_png(Path::new(&positional[0]))?;
+    // The reference's recorded metadata (same stem, .json): the time of day and
+    // render distance the vanilla shot was taken at (stderr: the summary line
+    // on stdout is parsed by scripts/compare-vanilla.sh).
+    if let Some(stem) = Path::new(&positional[0]).extension().and_then(|_| {
+        positional[0]
+            .strip_suffix(".png")
+            .map(|s| format!("{s}.json"))
+    }) {
+        if let Ok(meta) = haste_testkit::screenshots::ScreenshotMeta::load(Path::new(&stem)) {
+            eprintln!(
+                "meta: time_of_day {} render_distance {}",
+                meta.time_of_day, meta.render_distance
+            );
+        }
+    }
     let haste = load_png(Path::new(&positional[1]))?;
     let diff = compare_screenshot(&vanilla, &haste, tolerance)?;
     let (w, h) = vanilla.dimensions();
@@ -116,11 +131,24 @@ fn main() -> Result<()> {
             }
         }
         if count > 0 {
+            let mut channels = [0i64; 3];
+            for y in r.y..r.y.saturating_add(r.h).min(h) {
+                for x in r.x..r.x.saturating_add(r.w).min(w) {
+                    let pa = vanilla.get_pixel(x, y);
+                    let pb = haste.get_pixel(x, y);
+                    for (ch, (&a, &b)) in pa.0.iter().zip(pb.0.iter()).take(3).enumerate() {
+                        channels[ch] += b as i64 - a as i64;
+                    }
+                }
+            }
             println!(
-                "region {} mean {:.2} signed {:+.2}",
+                "region {} mean {:.2} signed {:+.2} (r{:+.1} g{:+.1} b{:+.1})",
                 r.label,
                 sum as f64 / count as f64,
-                signed as f64 / count as f64
+                signed as f64 / count as f64,
+                channels[0] as f64 / count as f64,
+                channels[1] as f64 / count as f64,
+                channels[2] as f64 / count as f64
             );
         }
     }
