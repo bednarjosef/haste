@@ -1,0 +1,6 @@
+wait_until joined
+wait 60
+screenshot probe-alive
+wait 100
+screenshot probe-late
+wait 100

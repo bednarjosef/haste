@@ -344,8 +344,11 @@ impl Ui {
         }
     }
 
-    /// Everything the UI sends this tick, in order: packets vanilla code sent, chat and commands    /// typed in the chat screen, the selected hotbar slot when it changed.
+    /// Everything the UI sends this tick, in order: packets vanilla code sent, chat and commands
+    /// typed in the chat screen, the selected hotbar slot when it changed, and the respawn a
+    /// dead player's immediate respawn queued (`PlayerCombatKill`).
     pub fn drain_outgoing(&self, out: &mut Vec<ServerboundPlay>) {
+        out.append(&mut self.shared.outbox.lock());
         let (packets, chat, slot) =
             self.state(|s| (s.take_outgoing(), s.take_sent(), s.selected_slot));
         if !packets.is_empty() {
@@ -354,7 +357,21 @@ impl Ui {
             if let (Some(tables), Some(dispatch)) = (tables, dispatch.as_ref()) {
                 for p in packets {
                     match decode_serverbound(dispatch, &tables, &p) {
-                        Ok(sp) => out.push(sp),
+                        Ok(sp) => {
+                            if let ServerboundPlay::ContainerClick(c) = &sp {
+                                tracing::info!(
+                                    "container_click: window {} slot {} button {} mode {} state {} changed {} carried {}",
+                                    c.window_id,
+                                    c.slot,
+                                    c.button,
+                                    c.mode,
+                                    c.state_id,
+                                    c.changed.len(),
+                                    c.carried.item.is_some()
+                                );
+                            }
+                            out.push(sp)
+                        }
                         Err(e) => tracing::warn!("packet from Java not sent: {e}"),
                     }
                 }

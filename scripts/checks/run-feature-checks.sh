@@ -9,7 +9,10 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PORT=25691
-NAME=ScriptCheck
+# A fresh player name per run (a fresh player joins alive, empty, at the world spawn):
+# seeded from the PID so reruns never collide with a wedged player file.
+NAME=${HASTE_CHECK_NAME:-CChk$$}
+NAME=${NAME:0:16}
 BIN="${HASTE_BIN:-$ROOT/target/debug/haste}"
 LOGDIR="$ROOT/target/feature-checks"
 mkdir -p "$LOGDIR"
@@ -269,13 +272,87 @@ craft() {
   check craft "one oak log became 4 oak planks in the survival inventory" "$r"
 }
 
-ALL=(hud death drop modes f2 craft)
+# ---- 7b. Temporary probe (not a check) ----
+container_probe() {
+  local log="$LOGDIR/container-probe.log"
+  plain_client "$ROOT/scripts/checks/probe-clicks.txt" "$log" \
+    || { check container-probe "player never joined" 1; return; }
+  plain_setup "$log" probe-setup "setblock 9 101 9 minecraft:crafting_table"
+  wait_exit
+  echo "--- probe done ---"
+}
+
+# ---- 7. Containers: every container screen works like vanilla, with server evidence ----
+# One function per container. All stand on the snowy plain: the camera joins at
+# (9.5, 71, 6.5) yaw 0 (looking south, +z) and the runner places the block 3 blocks ahead
+# (z 9-10) over RCON, gives the items, and reads `data get entity`/`data get block` back.
+# The scripts click the vanilla slot coordinates (menu position + 8 for a slot centre,
+# screen origin (152, 52) for a 176x166 screen centred in the 480x270 GUI).
+
+# Starts the client on `script` and waits for it to be online. The player name is fresh
+# per run (`ContainersChk$RANDOM`): a fresh player always joins alive, empty and at the
+# world spawn, which is the snowy plain. Returns 1 when the client never joined.
+plain_client() { # script log
+  client_start "$1" "$2"
+  wait_online || return 1
+  return 0
+}
+
+# The setup the container scripts trigger with their first screenshot (after the world
+# settled): the tp zeroes the look offset (an absolute-rotation teleport, so the scripts'
+# `look` angles are what the crosshair aims) and the caller's commands give the items and
+# place the blocks. The player stands at (9.5, 101, 6.5), the camera pose of the plain.
+plain_setup() { # log shot commands...
+  local log=$1 shot=$2
+  shift 2
+  if wait_shot "$log" "$shot" 90; then
+    rcon "gamemode survival $NAME" >/dev/null
+    rcon "tp $NAME 9.5 101 6.5 0 0" >/dev/null
+    local c
+    for c in "$@"; do
+      rcon "$c" >/dev/null
+    done
+    sleep 2
+  fi
+}
+
+# The crafting table: craft planks in the 3x3 grid, shift-click the result into the
+# inventory, then repeat with plain clicks (pick the result up, put it down).
+container_crafting_table() {
+  local log="$LOGDIR/containers-crafting-table.log"
+  plain_client "$ROOT/scripts/checks/containers-crafting-table.txt" "$log" \
+    || { check containers-crafting-table "player never joined" 1; return; }
+  plain_setup "$log" ccraft-setup \
+    "clear $NAME" \
+    "give $NAME minecraft:oak_log 2" \
+    "setblock 9 101 9 minecraft:crafting_table"
+  local before after
+  before=$(rcon "data get entity $NAME Inventory")
+  if wait_shot "$log" ccraft-final 90; then
+    after=$(rcon "data get entity $NAME Inventory")
+  fi
+  wait_exit
+  echo "--- crafting table evidence ---"
+  echo "Inventory before: $before"
+  echo "Inventory after:  $after"
+  local r=0
+  has "$before" "oak_log" || { echo "no oak_log before"; r=1; }
+  # 2 logs -> 8 planks: shift-clicked straight into the inventory, then the second batch
+  # picked up and placed by hand.
+  has "$after" "oak_planks" || { echo "no oak_planks after"; r=1; }
+  has "$after" "count: 8" || { echo "not 8 planks"; r=1; }
+  check containers-crafting-table "2 oak logs became 8 oak planks (shift-click + hand-placed result)" "$r"
+}
+
+ALL=(hud death drop modes f2 craft containers-crafting-table)
 if [ $# -eq 0 ]; then
   set -- "${ALL[@]}"
 fi
 for f in "$@"; do
   case "$f" in
     hud | death | drop | modes | f2 | craft) "$f" ;;
+    containers-crafting-table) container_crafting_table ;;
+    container-probe) container_probe ;;
     *) echo "unknown feature: $f" ;;
   esac
 done

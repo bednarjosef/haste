@@ -1,0 +1,1 @@
+# (Retired: superseded by containers-crafting-table.txt; kept empty.)

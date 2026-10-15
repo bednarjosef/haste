@@ -1,0 +1,15 @@
+wait_until joined
+wait_until settled
+screenshot probe-setup
+key F3
+wait 10
+look 0 20
+wait 5
+screenshot probe-look
+mouse_down right
+wait 2
+mouse_up right
+wait 20
+screenshot probe-use
+key F3
+wait 40

@@ -852,10 +852,30 @@ fn tick_once(
         // Held buttons stay; the press-only middle click, drop/swap presses and the hotbar choice
         // are consumed.
         let mut interact = shared_input.interact;
+        // Vanilla runs `Minecraft.handleKeybinds` (the attack/use clicks and the held use)
+        // only with no screen open (`Minecraft.tick`: `if (gui.overlay() == null &&
+        // gui.screen() == null)`). A screen taking the mouse also owns the buttons: a use
+        // held from before the screen opened must not keep firing (it would re-open the
+        // container the screen shows, server-side).
+        let screen_open = shared
+            .ui
+            .lock()
+            .as_ref()
+            .is_some_and(|ui| ui.screen_open());
         // The click counts (vanilla's KeyMapping.clickCount) are drained into the player, which
         // consumes them in `Minecraft.handleKeybinds`' consumeClick loops.
-        let attack_clicks = std::mem::take(&mut shared_input.interact.attack_clicks);
-        let use_clicks = std::mem::take(&mut shared_input.interact.use_clicks);
+        let (attack_clicks, use_clicks) = if screen_open {
+            (0, 0)
+        } else {
+            (
+                std::mem::take(&mut shared_input.interact.attack_clicks),
+                std::mem::take(&mut shared_input.interact.use_clicks),
+            )
+        };
+        if screen_open {
+            interact.attack = false;
+            interact.use_item = false;
+        }
         shared_input.interact.pick_block = false;
         shared_input.interact.drop_item = false;
         shared_input.interact.drop_stack = false;

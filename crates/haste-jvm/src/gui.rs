@@ -239,6 +239,7 @@ impl GuiPipeline {
     /// Backspace = 8; [`crate::keys::keycode`]); `mods` are SDL keymod bits. Returns whether the
     /// screen consumed it.
     pub fn key(&self, key: i32, scancode: i32, mods: i32, pressed: bool) -> bool {
+        tracing::info!("gui key: {} {}", key, pressed);
         self.call_bool(
             "key",
             self.m.key,

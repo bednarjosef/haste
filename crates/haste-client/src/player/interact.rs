@@ -785,6 +785,7 @@ impl LocalPlayer {
     /// hand, `InteractionHand.values()`): entity interact, block use, item use. Nothing at all
     /// while a block is being destroyed (`!gameMode.isDestroying()`).
     fn start_use_item(&mut self, look: (f32, f32), out: &mut Vec<ServerboundPlay>) {
+        tracing::info!("start_use_item: target {:?}", self.int.target);
         if self.int.destroying.is_none() {
             self.int.use_delay = USE_DELAY;
             if !self.int.is_using_item {
