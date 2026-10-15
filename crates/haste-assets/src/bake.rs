@@ -132,8 +132,9 @@ struct BlocksJsonState {
 
 /// Per-block-state baked geometry, indexed by BlockStateId.
 pub struct BakedBlockModels {
-    /// State id -> quads (empty for states without models, e.g. air).
-    quads: Vec<Vec<BakedQuad>>,
+    /// State id -> quads (None for states without models, e.g. air). States whose
+    /// blockstates resolve to the same model refs share one `Arc` (bake dedup).
+    quads: Vec<Option<Arc<[BakedQuad]>>>,
     /// State id -> full opaque cube flag (face culling in the mesher).
     full_opaque: Vec<bool>,
     /// State id -> render layer.
@@ -147,18 +148,22 @@ pub struct BakedBlockModels {
 
 impl BakedBlockModels {
     /// Heap bytes of the baked quads and per-state tables (live allocations; the
-    /// `String` texture ids count their capacity).
+    /// `String` texture ids count their capacity). Shared `Arc`s count once.
     pub fn memory_bytes(&self) -> u64 {
-        let quads: u64 = self
-            .quads
-            .iter()
-            .map(|v| {
-                v.capacity() as u64 * std::mem::size_of::<BakedQuad>() as u64
-                    + v.iter().map(|q| q.texture.capacity() as u64 + 24).sum::<u64>()
-            })
-            .sum();
+        let mut seen: Vec<*const [BakedQuad]> = Vec::new();
+        let mut quads: u64 = 0;
+        for q in &self.quads {
+            let Some(q) = q else { continue };
+            let ptr: *const [BakedQuad] = Arc::as_ptr(q);
+            if seen.contains(&ptr) {
+                continue;
+            }
+            seen.push(ptr);
+            quads += q.len() as u64 * std::mem::size_of::<BakedQuad>() as u64
+                + q.iter().map(|q| q.texture.capacity() as u64 + 24).sum::<u64>();
+        }
         quads
-            + self.quads.capacity() as u64 * std::mem::size_of::<Vec<BakedQuad>>() as u64
+            + self.quads.capacity() as u64 * std::mem::size_of::<Option<Arc<[BakedQuad]>>>() as u64
             + (self.full_opaque.capacity() + self.layer.capacity()) as u64
     }
 
@@ -175,7 +180,7 @@ impl BakedBlockModels {
         let n = states.len();
         // Out-of-range ids (modded servers) resolve to the placeholder state's entry.
         let placeholder = states.placeholder_state();
-        let mut quads: Vec<Vec<BakedQuad>> = vec![Vec::new(); n];
+        let mut quads: Vec<Option<Arc<[BakedQuad]>>> = vec![None; n];
         let mut full_opaque = vec![false; n];
         let mut layer = vec![RenderLayer::Solid; n];
 
@@ -250,7 +255,9 @@ impl BakedBlockModels {
 
         // Pass 2: per state, evaluate variants/multipart and bake with UVs.
         // Baked geometry is cached per unique (refs) tuple: many states share
-        // the same variant key.
+        // the same variant key, and the UV assignment depends only on the
+        // referenced textures, so the cache holds the finished quads and every
+        // state with the same key shares one allocation.
         let mut baked_cache: HashMap<String, Arc<[BakedQuad]>> = HashMap::new();
         for state in 0..n as u32 {
             let sid = BlockStateId(state);
@@ -267,23 +274,20 @@ impl BakedBlockModels {
             let baked = match baked_cache.get(&cache_key) {
                 Some(b) => b.clone(),
                 None => {
-                    let quads = bake_refs(&refs, &resolved_models)?;
-                    let baked: Arc<[BakedQuad]> = quads.into();
+                    let mut state_quads: Vec<BakedQuad> = bake_refs(&refs, &resolved_models)?;
+                    for quad in &mut state_quads {
+                        let region = atlas.region_of(&quad.texture);
+                        assign_atlas_uvs(quad, region);
+                    }
+                    let baked: Arc<[BakedQuad]> = state_quads.into();
                     baked_cache.insert(cache_key, baked.clone());
                     baked
                 }
             };
-            // Clone with atlas UVs assigned (UVs depend on the region, shared
-            // per texture, so the cache could hold them too; keep it simple).
-            let mut state_quads: Vec<BakedQuad> = baked.iter().cloned().collect();
-            for quad in &mut state_quads {
-                let region = atlas.region_of(&quad.texture);
-                assign_atlas_uvs(quad, region);
-            }
-            if !state_quads.is_empty() {
-                full_opaque[state as usize] = is_full_opaque(&state_quads, atlas);
-                layer[state as usize] = classify_layer(&state_quads, block, atlas);
-                quads[state as usize] = state_quads;
+            if !baked.is_empty() {
+                full_opaque[state as usize] = is_full_opaque(&baked, atlas);
+                layer[state as usize] = classify_layer(&baked, block, atlas);
+                quads[state as usize] = Some(baked);
             }
         }
 
@@ -311,7 +315,7 @@ impl BakedBlockModels {
     pub fn quads(&self, s: BlockStateId) -> &[BakedQuad] {
         self.quads
             .get(self.row(s))
-            .map(Vec::as_slice)
+            .and_then(|q| q.as_deref())
             .unwrap_or(&[])
     }
 
@@ -659,7 +663,7 @@ mod tests {
     fn out_of_range_ids_resolve_to_the_placeholder() {
         let quad = BakedQuad::from_element(Direction::Up, [0.0; 3], [1.0; 3], None, None);
         let baked = BakedBlockModels {
-            quads: vec![Vec::new(), vec![quad.clone()]],
+            quads: vec![None, Some(vec![quad.clone()].into())],
             full_opaque: vec![false, true],
             layer: vec![RenderLayer::Solid, RenderLayer::Solid],
             placeholder: BlockStateId(1),
