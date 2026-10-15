@@ -1,0 +1,35 @@
+# Key rebinding, run 1: open Options > Controls > Key Binds (vanilla's KeyBindsScreen),
+# click Jump's change button ("Space") and press J, click Drop Selected Item's ("Q") and
+# press K, close the screens; then press J (the server sees the player rise) and K with an
+# item in hand (the held stack drops by one). Leaves the rebinds in options.txt for the
+# restart run (scripts/checks/keybinds-check.sh resets them to defaults at the end).
+wait_until joined
+wait_until settled
+screenshot kb-joined
+# pause menu -> Options... -> Controls... -> Key Binds
+key ESCAPE
+wait_until screen_open
+click_text "Options..."
+click_text "Controls..."
+click_text "Key Binds"
+# Jump's change button is labeled with its current key ("Space"); click it, then press J
+# (KeyBindsScreen.keyPressed: selectedKey.setKey(InputConstants.getKey(event)))
+click_text "Space"
+key J
+# the Drop entry sits below the fold: scroll the list (the mouse is over it from the click
+# above) until its "Q" button is drawn, then click it and press K
+scroll 12
+click_text "Q"
+key K
+screenshot kb-rebound
+# close: Done (Key Binds -> Controls), then Escape x3 (Controls -> Options -> pause -> game)
+click_text "Done"
+key ESCAPE
+key ESCAPE
+key ESCAPE
+wait 10
+key J
+screenshot kb-jump
+wait 20
+key K
+screenshot kb-drop

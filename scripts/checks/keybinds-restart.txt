@@ -1,0 +1,19 @@
+# Key rebinding, run 2 (the restarted client): the bindings saved in options.txt by run 1
+# must load with the client (Options.load reads options.txt at startup) — pressing J must
+# still jump before anything is rebound again. Then open Key Binds and Reset All, which
+# writes the vanilla defaults back to options.txt (OptionsSubScreen.removed -> Options.save).
+wait_until joined
+wait_until settled
+screenshot r-joined
+wait 40
+screenshot r-stand
+key J
+screenshot r-jump
+key ESCAPE
+wait_until screen_open
+click_text "Options..."
+click_text "Controls..."
+click_text "Key Binds"
+click_text "Reset All"
+screenshot r-reset
+click_text "Done"
