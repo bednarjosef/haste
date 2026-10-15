@@ -27,6 +27,7 @@ use haste_protocol::haste_core::{
 use haste_protocol::nbt::NbtCompound;
 use haste_protocol::packets::play::clientbound as cb;
 use haste_protocol::packets::play::clientbound::teleport_flags;
+use haste_protocol::packets::play::serverbound as sb;
 use haste_protocol::{
     ClientboundPlay, ConnectOptions, Connection, Login, ServerboundPlay, StatsSnapshot,
     SyncedRegistries,
@@ -1025,6 +1026,17 @@ pub struct Session {
     pub weather: WeatherState,
     /// `ClientLevel.seaLevel` (the spawn info's; biome precipitation's snow line).
     pub sea_level: i32,
+    /// The chunk batch flow control (vanilla `ChunkBatchSizeCalculator`): the server sends
+    /// chunk batches and waits for our `chunk_batch_received` rate before the next, so a
+    /// client that never acknowledges gets one batch and then silence — a teleport's new
+    /// area never streams. `batch_started_at` is `onBatchStart`'s timestamp.
+    batch_started_at: Option<std::time::Instant>,
+    /// `aggregatedNanosPerChunk` (2 ms initially).
+    aggregated_nanos_per_chunk: f64,
+    /// `oldSamplesWeight` (capped at 49).
+    old_samples_weight: i32,
+    /// Whether the first `set_chunk_cache_center` was logged (diagnostics).
+    cache_center_logged: bool,
 }
 
 impl Session {
@@ -1080,6 +1092,10 @@ impl Session {
             lightmap: LightmapState::default(),
             weather: WeatherState::default(),
             sea_level: 63,
+            batch_started_at: None,
+            aggregated_nanos_per_chunk: 2_000_000.0,
+            old_samples_weight: 1,
+            cache_center_logged: false,
         }
     }
 
@@ -1374,7 +1390,59 @@ impl Session {
                 // A respawn is a new body: no vehicle, no riding.
                 self.player.set_vehicle(None, SeatPoint::ZERO);
             }
-            P::PlayerPosition(_) => self.counters.teleports += 1,
+            P::PlayerPosition(p) => {
+                tracing::debug!(
+                    "player_position: teleport to ({:.1}, {:.1}, {:.1})",
+                    p.pos.x,
+                    p.pos.y,
+                    p.pos.z
+                );
+                self.counters.teleports += 1;
+            }
+            // Vanilla `handleSetChunkCacheCenter` moves the ClientChunkCache's window; our
+            // world keeps every chunk it is given, so there is nothing to move — but log the
+            // first so the far-teleport diagnostics show the server re-centring.
+            P::SetChunkCacheCenter(c) => {
+                if !self.cache_center_logged {
+                    self.cache_center_logged = true;
+                    tracing::info!("set_chunk_cache_center ({}, {})", c.x, c.z);
+                }
+            }
+            // The chunk batch flow control (vanilla `ClientPacketListener.handleChunkBatchStart`/
+            // `handleChunkBatchFinished` + `ChunkBatchSizeCalculator`): time the batch, fold the
+            // per-chunk duration into the running average, and tell the server the rate we want.
+            // Without the reply the server never sends the next batch, so a teleport's new area
+            // never arrives.
+            P::ChunkBatchStart(_) => {
+                tracing::info!("chunk batch start");
+                self.batch_started_at = Some(std::time::Instant::now());
+            }
+            P::ChunkBatchFinished(b) => {
+                tracing::info!("chunk batch finished: {} chunks", b.batch_size);
+                if b.batch_size > 0 {
+                    if let Some(start) = self.batch_started_at.take() {
+                        let nanos_per_chunk =
+                            start.elapsed().as_secs_f64() * 1e9 / b.batch_size as f64;
+                        // Clamp to a third..three times the running average, then the weighted
+                        // mean (vanilla `onBatchFinished`).
+                        let clamped = nanos_per_chunk.clamp(
+                            self.aggregated_nanos_per_chunk / 3.0,
+                            self.aggregated_nanos_per_chunk * 3.0,
+                        );
+                        self.aggregated_nanos_per_chunk = (self.aggregated_nanos_per_chunk
+                            * self.old_samples_weight as f64
+                            + clamped)
+                            / (self.old_samples_weight as f64 + 1.0);
+                        self.old_samples_weight = (self.old_samples_weight + 1).min(49);
+                    }
+                }
+                out.push(ServerboundPlay::ChunkBatchReceived(
+                    sb::ChunkBatchReceived {
+                        // Vanilla `getDesiredChunksPerTick`: 7 ms over the per-chunk duration.
+                        chunks_per_tick: (7_000_000.0 / self.aggregated_nanos_per_chunk) as f32,
+                    },
+                ));
+            }
             P::LevelParticles(p) => self.push_particles(&p, regs),
             P::LevelEvent(e) => {
                 // The block-particle events (2001 break, 2019/2020 mining ticks); the

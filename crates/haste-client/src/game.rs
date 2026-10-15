@@ -539,6 +539,11 @@ pub struct Shared {
     pub debug_tx: AtomicU64,
     /// Packets received per second (f64 bits).
     pub debug_rx: AtomicU64,
+    /// Chunk packets received (`NetCounters.chunks_loaded`), copied once per second by the
+    /// game thread so diagnostics (the screenshot summary) can show them.
+    pub chunks_loaded: AtomicU64,
+    /// Chunk unload packets received.
+    pub chunks_unloaded: AtomicU64,
 }
 
 /// What a resource pack rebuild applies.
@@ -642,6 +647,8 @@ impl Shared {
             applied_server_packs: Mutex::new(Vec::new()),
             debug_tx: AtomicU64::new(0),
             debug_rx: AtomicU64::new(0),
+            chunks_loaded: AtomicU64::new(0),
+            chunks_unloaded: AtomicU64::new(0),
         }
     }
 
@@ -782,6 +789,13 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>, existing_ui: Option<Ui>) 
                 ((s.packets_in - last_in) as f64).to_bits(),
                 Ordering::Relaxed,
             );
+            let c = &driver.session.counters;
+            shared
+                .chunks_loaded
+                .store(c.chunks_loaded, Ordering::Relaxed);
+            shared
+                .chunks_unloaded
+                .store(c.chunks_unloaded, Ordering::Relaxed);
             last_out = s.packets_out;
             last_in = s.packets_in;
             stats_second = Instant::now();

@@ -1280,3 +1280,84 @@ fn lightmap_lightning_flashes_for_two_ticks() {
     s.tick();
     assert_eq!(s.sky_flash_time, 0);
 }
+
+#[test]
+fn weather_levels_follow_the_game_events() {
+    // handleGameEvent: start_raining resets to 0, stop_raining sets 1, the level changes set
+    // the level directly; both bracket the tick (Level.oRainLevel/rainLevel).
+    let dim = DimensionInfo::overworld();
+    let mut s = Session::new(EntityId(1), GameMode::Creative, dim, test_particle_names());
+    let mut world = FakeWorld::default();
+    let mut entities = new_entity_store(0);
+    let mut out = Vec::new();
+    let regs = SyncedRegistries::default();
+    let mut apply = |s: &mut Session, p: ClientboundPlay, out: &mut Vec<ServerboundPlay>| {
+        s.apply(p, &mut world, &mut entities, &regs, out);
+    };
+    apply(
+        &mut s,
+        ClientboundPlay::GameEvent(cb::GameEvent {
+            event: 7,
+            value: 0.5,
+        }),
+        &mut out,
+    );
+    assert_eq!(s.weather.rain_level, 0.5);
+    apply(
+        &mut s,
+        ClientboundPlay::GameEvent(cb::GameEvent {
+            event: 8,
+            value: 0.7,
+        }),
+        &mut out,
+    );
+    assert_eq!(s.weather.thunder_level, 0.7);
+    // Clamped like Level.setRainLevel.
+    apply(
+        &mut s,
+        ClientboundPlay::GameEvent(cb::GameEvent {
+            event: 7,
+            value: 2.0,
+        }),
+        &mut out,
+    );
+    assert_eq!(s.weather.rain_level, 1.0);
+    // The tick shifts the bracket; the lerp follows the partial tick.
+    s.weather.rain_level_o = 1.0;
+    s.weather.rain_level = 0.0;
+    assert!((s.weather.rain_level(0.5) - 0.5).abs() < 1e-6);
+}
+
+#[test]
+fn chunk_batches_are_acknowledged_with_the_vanilla_rate() {
+    // handleChunkBatchStart/Finished -> ServerboundChunkBatchReceived(getDesiredChunksPerTick):
+    // 7 ms over the aggregated per-chunk duration. Without the reply the server stops after
+    // the first batch, so a teleport's new area never streams (the far-teleport bug).
+    let dim = DimensionInfo::overworld();
+    let mut s = Session::new(EntityId(1), GameMode::Creative, dim, test_particle_names());
+    let mut world = FakeWorld::default();
+    let mut entities = new_entity_store(0);
+    let mut out = Vec::new();
+    let regs = SyncedRegistries::default();
+    // Without a batch start the timing origin is absent: the rate stays the default
+    // (7 ms / 2 ms per chunk = 3.5) and the reply is still sent — vanilla also replies when
+    // the batch size is zero or the start was missed.
+    s.apply(
+        ClientboundPlay::ChunkBatchFinished(cb::ChunkBatchFinished { batch_size: 10 }),
+        &mut world,
+        &mut entities,
+        &regs,
+        &mut out,
+    );
+    assert_eq!(out.len(), 1);
+    match &out[0] {
+        ServerboundPlay::ChunkBatchReceived(r) => {
+            assert!(
+                (r.chunks_per_tick - 3.5).abs() < 1e-3,
+                "{}",
+                r.chunks_per_tick
+            );
+        }
+        other => panic!("expected a chunk_batch_received, got {other:?}"),
+    }
+}
