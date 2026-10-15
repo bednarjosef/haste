@@ -877,7 +877,7 @@ fn flush_staged(staged: &mut [StagedQuad], sink: &mut MeshSink) {
         i += len as usize;
     }
     // Pass 2: stack runs with the same key, plane, u0 and u-length along v.
-    runs.sort_by(|a, b| (a.0, a.1, a.3, a.4, a.2).cmp(&(b.0, b.1, b.3, b.4, b.2)));
+    runs.sort_by_key(|r| (r.0, r.1, r.3, r.4, r.2));
     let mut rects: Vec<MergeRect> = Vec::new();
     let mut i = 0;
     while i < runs.len() {

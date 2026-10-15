@@ -77,6 +77,12 @@ pub struct Args {
     /// for the duration of the run and closes by itself.
     #[arg(long)]
     pub bench_window: Option<u64>,
+    /// Force the window onto XWayland (the window system vanilla's client uses:
+    /// an X11 window gets a framebuffer of exactly `--width`x`--height`, no
+    /// desktop-scale doubling). Applies to the windowed bench and the normal
+    /// window.
+    #[arg(long)]
+    pub x11: bool,
     /// Bench mode: hold the settle camera still instead of the flight path (isolates one view,
     /// e.g. the screenshot comparison spot).
     #[arg(long)]

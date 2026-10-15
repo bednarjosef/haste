@@ -4734,6 +4734,12 @@ pub fn bench_window(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let shared = session.shared.clone();
     // The bench camera is first person: the game thread's camera effects take that perspective.
     shared.input.lock().first_person = true;
+    // `--x11`: the same XWayland window vanilla's client gets (framebuffer exactly
+    // `--width`x`--height`; a Wayland window's is the desktop scale multiple).
+    if args.x11 {
+        std::env::set_var("WINIT_UNIX_BACKEND", "x11");
+        std::env::remove_var("WAYLAND_DISPLAY");
+    }
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let options = session.options.clone();
