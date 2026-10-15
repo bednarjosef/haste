@@ -269,13 +269,121 @@ craft() {
   check craft "one oak log became 4 oak planks in the survival inventory" "$r"
 }
 
-ALL=(hud death drop modes f2 craft)
+# ---- 10. Block particles: the client's own destroy grid and mining cracks ----
+particles() {
+  local log="$LOGDIR/particles.log"
+  # A name of our own: another agent's feature check may be running as $NAME on the
+  # shared server, and a duplicate login kicks our client mid-script.
+  local NAME=ParticlesCheck
+  client_start "$ROOT/scripts/checks/block-particles.txt" "$log"
+  wait_online || { check particles "player never joined" 1; return; }
+  # The script waits 15 s after its setup screenshot; set the stage in that window:
+  # survival, an empty hotbar, a stone platform under the player, an iron pickaxe.
+  # (`execute as/at` selectors: plain name arguments race other agents' players on
+  # the shared server; the selector forms resolve at run time.)
+  while ! grep -q "script-setup" "$log" 2>/dev/null; do
+    sleep 1
+    grep -q "game thread stopping" "$log" 2>/dev/null && break
+  done
+  rcon "execute as $NAME run tp @s 0 100 0 0 0" >/dev/null
+  rcon "execute as $NAME run gamemode survival @s" >/dev/null
+  rcon "execute as $NAME run clear @s" >/dev/null
+  rcon "execute at $NAME run fill ~-4 ~-1 ~-4 ~4 ~-1 ~4 stone" >/dev/null
+  rcon "execute at $NAME run fill ~-3 ~ ~-3 ~3 ~4 ~3 air" >/dev/null
+  rcon "execute as $NAME run give @s minecraft:iron_pickaxe 1" >/dev/null
+  # Torches around the player for the ambient animateTick particles (placed after
+  # the mining screenshots appear, so they do not get mined).
+  if wait_shot "$log" block-broken 60; then
+    rcon "execute at $NAME run setblock ~2 ~ ~2 torch" >/dev/null
+    rcon "execute at $NAME run setblock ~-2 ~ ~-1 torch" >/dev/null
+    rcon "execute at $NAME run setblock ~1 ~ ~-3 torch" >/dev/null
+  fi
+  wait_exit
+  echo "--- block particles evidence ---"
+  grep "particles drawn" "$log" | tail -4
+  local cracks broken ambient r=0
+  cracks=$(grep "script-mining-cracks" "$log" | grep -o '[0-9]* particles drawn' | grep -o '[0-9]*')
+  broken=$(grep "script-block-broken" "$log" | grep -o '[0-9]* particles drawn' | grep -o '[0-9]*')
+  ambient=$(grep "script-ambient-torches" "$log" | grep -o '[0-9]* particles drawn' | grep -o '[0-9]*')
+  [ -n "$cracks" ] && [ "$cracks" -gt 0 ] || { echo "no crack particles while mining"; r=1; }
+  [ -n "$broken" ] && [ "$broken" -gt 20 ] || { echo "no destroy grid on break"; r=1; }
+  [ -n "$ambient" ] && [ "$ambient" -gt 0 ] || { echo "no ambient torch particles"; r=1; }
+  check particles "mining drew crack particles ($cracks), the break the destroy grid ($broken), torches ambient particles ($ambient)" "$r"
+}
+
+# ---- 7. Every pause-menu screen ----
+pause() {
+  local log="$LOGDIR/pause.log"
+  client_start "$ROOT/scripts/checks/pause-all.txt" "$log"
+  wait_online || { check pause "player never joined" 1; return; }
+  wait_exit
+  local ev="$LOGDIR/pause.evidence"
+  grep -E "script text\[" "$log" >"$ev"
+  echo "--- pause evidence ---"; cat "$ev"
+  local r=0
+  local t
+  for t in advancements statistics report-bugs send-feedback friends player-reporting world-options; do
+    grep -q "script frame\[$t\]" "$log" || { echo "missing screenshot $t"; r=1; }
+  done
+  has "$(cat "$ev")" "Minecraft" || { echo "missing the Minecraft advancement tab"; r=1; }
+  # the stats screen's rows: the values arrive between the click and the screenshot
+  has "$(cat "$ev")" "Animals Bred" || { echo "statistics screen never showed its rows"; r=1; }
+  has "$(cat "$ev")" "Difficulty" || { echo "missing World Options difficulty row"; r=1; }
+  has "$(cat "$ev")" "Social Interactions" || { echo "missing player reporting screen"; r=1; }
+  has "$(cat "$ev")" "open this link" || { echo "missing the report-bugs link confirmation"; r=1; }
+  if grep -qE "haste proxy:|Java exception" "$log"; then
+    echo "proxy stubs or Java exceptions:"; grep -E "haste proxy:|Java exception" "$log" | head -5
+    r=1
+  fi
+  check pause "every pause-menu screen opens: advancements (with the server's tree), statistics, the icon buttons, world options" "$r"
+}
+
+# ---- 8. The creative inventory's Saved Hotbars tab ----
+creative_hotbars() {
+  local log="$LOGDIR/creative-hotbars.log"
+  client_start "$ROOT/scripts/checks/creative-hotbars.txt" "$log"
+  wait_online || { check creative-hotbars "player never joined" 1; return; }
+  rcon "gamemode creative $NAME" >/dev/null
+  wait_exit
+  local ev="$LOGDIR/creative-hotbars.evidence"
+  grep -E "script text\[" "$log" >"$ev"
+  echo "--- creative hotbars evidence ---"; cat "$ev"
+  local r=0
+  has "$(cat "$ev")" "Saved Hotbars" || { echo "missing the Saved Hotbars tab"; r=1; }
+  if grep -qE "haste proxy:|Java exception" "$log"; then
+    echo "proxy stubs or Java exceptions:"; grep -E "haste proxy:|Java exception" "$log" | head -5
+    r=1
+  fi
+  check creative-hotbars "the creative inventory's Saved Hotbars tab shows the saved hotbars" "$r"
+}
+
+# ---- 9. Languages other than English ----
+language() {
+  local log="$LOGDIR/language.log"
+  client_start "$ROOT/scripts/checks/language.txt" "$log"
+  wait_online || { check language "player never joined" 1; return; }
+  wait_exit
+  local ev="$LOGDIR/language.evidence"
+  grep -E "script text\[" "$log" >"$ev"
+  echo "--- language evidence (pause menu after switching to de_de) ---"
+  grep -E "script text\[pause-de\]" "$log"
+  local r=0
+  has "$(grep -E 'script text\[pause-de\]' "$log")" "Zurück zum Spiel" \
+    || { echo "pause menu not in German after switching"; r=1; }
+  if grep -qE "haste proxy:|Java exception" "$log"; then
+    echo "proxy stubs or Java exceptions:"; grep -E "haste proxy:|Java exception" "$log" | head -5
+    r=1
+  fi
+  check language "Options > Language switched to de_de and the pause menu drew in German" "$r"
+}
+
+ALL=(hud death drop modes f2 craft pause creative-hotbars language particles)
 if [ $# -eq 0 ]; then
   set -- "${ALL[@]}"
 fi
 for f in "$@"; do
   case "$f" in
-    hud | death | drop | modes | f2 | craft) "$f" ;;
+    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | particles) "$f" ;;
     *) echo "unknown feature: $f" ;;
   esac
 done

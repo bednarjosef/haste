@@ -10,10 +10,12 @@
 pub mod assets;
 pub mod atlas;
 pub mod bake;
+pub mod equipment;
 pub mod font;
 pub mod item;
 pub mod model;
 pub mod multipart;
+pub mod packstack;
 pub mod particle;
 
 pub use assets::{
@@ -22,10 +24,15 @@ pub use assets::{
 };
 pub use atlas::{mean_linear, AnimatedSprite, AtlasBuilder, AtlasRegion, AtlasRegions};
 pub use bake::{BakedBlockModels, BlocksJsonStates, RenderLayer};
+pub use equipment::{parse_equipment_info, EquipmentInfo, EquipmentLayer};
 pub use font::{
     for_each_formatted, BitmapFont, Glyph, GlyphKind, HexGlyph, TextFormat, LEGACY_COLORS,
 };
 pub use item::{GeneratedLayer, ItemGeometry, ItemModel, ItemModelPart, PartTransformation};
 pub use model::{BakedQuad, Direction, DisplayTransform, ModelRef};
 pub use multipart::{BlockStateDefinition, MultipartCase, MultipartCondition, VariantEntry};
+pub use packstack::{
+    discover_packs, pack_compatibility, PackCompatibility, PackInfo, PackStack,
+    RESOURCE_PACK_FORMAT,
+};
 pub use particle::{ParticleAtlas, ParticleDefinition};

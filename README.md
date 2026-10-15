@@ -9,7 +9,7 @@ with the mod architecture designed in. Licensed GPL-3.0-or-later.
 What a player needs to play Haste like the original game, without noticing a difference.
 Fabric mod support (Phase 2) is not counted here.
 
-**27 of 62 done, 25 partly done, 10 not started (about 64 %, counting partly done as half).**
+**43 of 62 done, 15 partly done, 4 not started (about 81 %, counting partly done as half).**
 
 ✅ done: works in the game window today, checked against a real server.
 🟡 partly done: some of it exists (in a library, or working without a window) but a player cannot use it fully yet.
@@ -17,16 +17,16 @@ Fabric mod support (Phase 2) is not counted here.
 
 ### Launching and setup
 - ✅ Install the game files (`haste setup`): downloads 26.3 from Mojang and runs the data generator; a second run is instant
-- 🟡 Singleplayer: `haste singleplayer --world NAME` starts a local world and opens the game in it; no world list or create-world screen
-- 🟡 Joining a server: `haste --server host:port` from the command line; no direct-connect screen
-- 🟡 Server list: status ping works (`haste --ping --server host:port`); no server list screen
+- ✅ Options screens: vanilla's options screen and every sub-screen open from the pause menu (checked by script)
+- ✅ Saved options: vanilla's options.txt; changes in the options screens apply live (FOV, render distance, sensitivity, max FPS, vsync, GUI scale, volumes)
+- ✅ Title screen: vanilla's title screen is shown when `haste` starts
+- ✅ Singleplayer: the world list, Create New World and Save and Quit to Title, played through a local server (checked by script); `haste singleplayer --world NAME` also works
+- ✅ Server list: vanilla's multiplayer screen with the saved servers, status pings, Add Server and Direct Connection
+- ✅ Joining a server: from the server list or Direct Connection, or `haste --server host:port`
+- ✅ Languages: every language of the game, switched live from Options > Language
 - 🟡 Microsoft account login: `haste login` / `haste logout` run the device-code flow and store the account, untested end to end (needs a Microsoft app id)
-- 🟡 Title screen: vanilla's title screen opens in the embedded UI (tested); not yet shown when `haste` starts
-- 🟡 Options screens: vanilla's options screen opens in the embedded UI (tested); not reachable from the game yet, and the sub-screens are untested
-- 🟡 Saved options: stored in the config with vanilla defaults; the client uses render distance, FOV, mouse sensitivity, vsync and GUI scale (Auto like vanilla), not yet volumes or keybinds
-- ⬜ Keybind remapping (controls are fixed to the vanilla defaults)
+- 🟡 Keybind remapping: the controls follow vanilla's key mappings (unit-tested); not yet checked by hand in the window
 - ⬜ Resource packs (selection screen, applying server resource packs)
-- ⬜ Languages other than English
 
 ### Connecting to servers
 - ✅ Offline-mode vanilla and Fabric servers: join and stay connected on normal terrain, every packet decodes
@@ -39,8 +39,8 @@ Fabric mod support (Phase 2) is not counted here.
 - ✅ Terrain: chunks, light, block and multi-block updates, chunk loading and unloading
 - ✅ Biomes and their grass, foliage and water colours
 - ✅ Dimensions: Overworld, Nether, End, respawn and dimension changes
-- ✅ Day and night, weather, sun, moon, stars and clouds
-- 🟡 Block entities (chests, signs, beds, banners, ...): stored with their chunks and kept up to date; not drawn yet
+- ✅ Block entities (chests, signs, banners, ...): stored with their chunks and kept up to date
+- 🟡 Day and night, sun, moon, stars and clouds work; rain, snow and thunder are not drawn yet
 
 ### Rendering
 - ✅ Textured blocks and block models
@@ -50,17 +50,17 @@ Fabric mod support (Phase 2) is not counted here.
 - ✅ Animated textures (water, lava, fire, portals), prepared off the render thread
 - ✅ Third-person view (F5)
 - ✅ First-person hand and held item (hidden in third person)
+- ✅ Dropped items, item frames and paintings drawn as themselves, with vanilla's bob, spin and stack copies
+- ✅ Fog: vanilla's distance fog, colours, sky disc and sunrise, and the water, lava, powder snow, Nether, End, blindness and darkness fog
+- ✅ Screen effects: damage tilt, red flash on hit entities, vignette, underwater, fire, in-wall, pumpkin, powder snow, spyglass, portal and nausea
+- ✅ Entity animation: walking, head and body turning, attack swings, aggressive arms, death tilt, sleeping, swimming and mob-specific poses
+- ✅ Armour, held items, heads and elytra on mobs and players
 - 🟡 Smooth lighting and ambient occlusion: present, but leaves, bark and grass sides are about 1.35x brighter than vanilla
-- 🟡 Fog: vanilla's distance fog, colours, sky disc and sunrise for the Overworld; water, lava, Nether and End fog not yet
-- 🟡 Mobs and players: vanilla's models for 51 mob types and players, default skins and name tags; other mobs are boxes; no walking animation yet
+- 🟡 Mobs and players: vanilla's models for all 91 mob types with babies, variants, sizes and states, default skins, name tags and shadows; a few models still have misplaced parts (horse heads)
 - 🟡 Particles: the server's particles are drawn with vanilla's per-type motion, size and lifetime; block-breaking and other client-side particles not yet
 - 🟡 Performance: `haste --bench` measures about 900-980 FPS (1.0-1.1 ms per frame) at 1920x1080, render distance 12, on the development laptop's integrated GPU; not yet compared with vanilla and Sodium
-- 🟡 Screen effects: damage tilt, red flash on hit entities and the vignette work; underwater and fire overlays, nausea and pumpkin do not
-- 🟡 Dropped items drawn as themselves with vanilla's bob, spin and stack copies; item frames and paintings not yet
-- ⬜ Block entities drawn: chests, signs with text, beds, banners, heads, shulker boxes
-- ⬜ Entity animation (walking, attacking, swimming)
+- 🟡 Block entities drawn: chests (lid animation), ender chests, shulker boxes, signs with text, banners and heads (beds are ordinary block models); lecterns, bells, campfire items, spawners and the other block entities not yet
 - ⬜ Downloaded player skins and capes
-- ⬜ Armour and held items on mobs and players
 
 ### HUD and screens
 These run as the game's own Java code inside Haste, with keyboard and mouse input. Checked with input scripts (`haste --script`, `scripts/checks/`) against a vanilla server.
@@ -70,11 +70,11 @@ These run as the game's own Java code inside Haste, with keyboard and mouse inpu
 - ✅ Player list (Tab), boss bars, scoreboard sidebar, titles and action bar
 - ✅ Player inventory and crafting grid, with the player model
 - ✅ Death screen and respawn
+- ✅ Debug screen (F3): vanilla's default entries with real values (checked against the server)
+- ✅ Creative inventory: every tab's items and search
+- ✅ Advancements and statistics screens, and every other pause-menu button
 - 🟡 Chests (clicks match vanilla byte for byte); furnace, crafting table, anvil, enchanting, brewing and trading are untested
-- 🟡 Debug screen (F3): opens with F3 and draws; the values (FPS, position, chunks) read zero in screenshot runs
-- 🟡 Creative inventory: opens centred with its tabs and items; search finds nothing yet
 - ⬜ Editing signs, books and command blocks
-- ⬜ Advancements and statistics screens
 - ⬜ Recipe book
 
 ### Playing
@@ -83,7 +83,7 @@ These run as the game's own Java code inside Haste, with keyboard and mouse inpu
 - ✅ Dropping items (Q, Ctrl+Q) and swapping to the off-hand (F)
 - ✅ Game modes: survival, creative, spectator (through walls) and adventure
 - ✅ Screenshot key (F2): saves to the screenshots folder
-- 🟡 Elytra flight: gliding physics ported from vanilla (tested); not yet started from the game
+- ✅ Elytra flight: gliding started from the game, firework boost (the server sees a normal glide)
 - 🟡 Riding: sitting in boats, minecarts, horses and pigs at vanilla's seat positions; steering vehicles not yet
 
 ### Sound
