@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs the feature check scripts in scripts/checks/ against the local test server.
 # usage: scripts/checks/run-feature-checks.sh [feature ...]
-#   features: hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock containers-crafting-table containers-furnace containers-anvil  (default: all)
+#   features: hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock containers-crafting-table containers-furnace containers-anvil containers-enchanting-table  (default: all)
 # The client runs offscreen (`--script`); all server state is set up over RCON from here,
 # never from the script (the player is not an operator and the server kicks command spam).
 # Evidence is printed and grepped: frame text commands (not images), server log lines and
@@ -399,7 +399,7 @@ plain_setup() { # log shot pos commands...
 # The crafting table: craft planks in the 3x3 grid, shift-click the result into the
 # inventory, then repeat with plain clicks (pick the result up, put it down). The table
 # sits in the check's own area; the player stands 2.5 blocks north of it.
-container_crafting_table() {
+containers_crafting_table() {
   local log="$LOGDIR/containers-crafting-table.log"
   plain_client "$ROOT/scripts/checks/containers-crafting-table.txt" "$log" \
     || { check containers-crafting-table "player never joined" 1; return; }
@@ -557,11 +557,22 @@ recipe_book() {
   wait_exit
   echo "--- recipe book evidence ---"
   echo "Inventory before: $before"
+  echo "Inventory after:  $after"
+  local r=0
+  has "$before" "oak_log" || { echo "no oak_log before"; r=1; }
+  has "$after" "oak_planks" || { echo "no oak_planks after"; r=1; }
+  has "$after" "count: 4" || { echo "not 4 planks"; r=1; }
+  if grep -qE "haste proxy:|Java exception" "$log"; then
+    echo "proxy stubs or Java exceptions:"; grep -E "haste proxy:|Java exception" "$log" | head -5
+    r=1
+  fi
+  check recipe-book "the book opens and lists recipes; searching finds oak planks; clicking it crafts 4 planks from one log" "$r"
+}
 
 # The furnace: smelt 1 raw iron with 1 coal, take the iron ingot. The furnace sits at
 # (128, 71, 5) in the check's own area, on its own stone platform, the player 2.5 blocks
 # north of it.
-container_furnace() {
+containers_furnace() {
   local log="$LOGDIR/containers-furnace.log"
   plain_client "$ROOT/scripts/checks/containers-furnace.txt" "$log" \
     || { check containers-furnace "player never joined" 1; return; }
@@ -590,7 +601,7 @@ container_furnace() {
 
 # The anvil: rename a wooden sword with one XP level. The anvil sits at (122, 71, 5) in
 # the check's own area, on its own stone platform, the player 2.5 blocks north of it.
-container_anvil() {
+containers_anvil() {
   local log="$LOGDIR/containers-anvil.log"
   plain_client "$ROOT/scripts/checks/containers-anvil.txt" "$log" \
     || { check containers-anvil "player never joined" 1; return; }
@@ -617,13 +628,41 @@ container_anvil() {
   check containers-anvil "a wooden sword was renamed to RenamedSword for 1 XP level" "$r"
 }
 
-  has "$after" "oak_planks" || { echo "no oak_planks after"; r=1; }
-  has "$after" "count: 4" || { echo "not 4 planks"; r=1; }
+# The enchanting table: enchant a wooden sword with lapis and levels. The table sits at
+# (124, 71, 5) in the check's own area, on its own stone platform, the player 2.5 blocks
+# north of it.
+containers_enchanting_table() {
+  local log="$LOGDIR/containers-enchanting-table.log"
+  plain_client "$ROOT/scripts/checks/containers-enchanting-table.txt" "$log" \
+    || { check containers-enchanting-table "player never joined" 1; return; }
+  plain_setup "$log" cench-setup "124.5 71 2.5 0 0" \
+    "clear $NAME" \
+    "give $NAME minecraft:wooden_sword 1" \
+    "give $NAME minecraft:lapis_lazuli 3" \
+    "xp add $NAME 5 levels" \
+    "fill 123 70 1 125 74 6 air replace" \
+    "fill 123 70 1 125 70 6 minecraft:stone replace" \
+    "setblock 124 71 5 minecraft:enchanting_table"
+  local before after
+  before=$(rcon "data get entity $NAME Inventory")
+  if wait_shot "$log" cench-closed 90; then
+    after=$(rcon "data get entity $NAME Inventory")
+  fi
+  wait_exit
+  echo "--- enchanting table evidence ---"
+  echo "Inventory before: $before"
+  echo "Inventory after:  $after"
+  local r=0
+  has "$before" "wooden_sword" || { echo "no wooden_sword before"; r=1; }
+  has "$before" "lapis_lazuli" || { echo "no lapis_lazuli before"; r=1; }
+  has "$after" "wooden_sword" || { echo "no enchanted sword after"; r=1; }
+  has "$after" "enchantments" || { echo "no enchantments component on the sword"; r=1; }
+  has "$after" "lapis_lazuli" || { echo "no leftover lapis after"; r=1; }
   if grep -qE "haste proxy:|Java exception" "$log"; then
     echo "proxy stubs or Java exceptions:"; grep -E "haste proxy:|Java exception" "$log" | head -5
     r=1
   fi
-  check recipe-book "the book opens and lists recipes; searching finds oak planks; clicking it crafts 4 planks from one log" "$r"
+  check containers-enchanting-table "a wooden sword was enchanted with 1 lapis and levels" "$r"
 }
 
 # ---- 10. Languages other than English ----
@@ -758,13 +797,13 @@ sprint() {
   check sprint "double-tapping W made the player cover ${dist} blocks/s (sprint speed)" "$r"
 }
 
-ALL=(hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock sprint containers-crafting-table containers-furnace containers-anvil)
+ALL=(hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock sprint containers-crafting-table containers-furnace containers-anvil containers-enchanting-table)
 if [ $# -eq 0 ]; then
   set -- "${ALL[@]}"
 fi
 for f in "$@"; do
   case "$f" in
-    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | particles | recipe-book | sign | book | commandblock | sprint | containers-crafting-table | containers-furnace | containers-anvil) "${f//-/_}" ;;
+    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | particles | recipe-book | sign | book | commandblock | sprint | containers-crafting-table | containers-furnace | containers-anvil | containers-enchanting-table) fn="${f//-/_}"; if declare -F "$fn" >/dev/null; then "$fn"; else check "$f" "no check function $fn" 1; fi ;;
     *) echo "unknown feature: $f" ;;
   esac
 done
