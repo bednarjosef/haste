@@ -221,6 +221,16 @@ impl JvmHost {
             ))
             .option("-Xshare:auto")
             .option("-Xss4m")
+            // Small-footprint JVM for the HUD: a 256 MiB heap cap (the GUI settles at
+            // ~110 MiB used; Bootstrap and the registries peak below 200), the serial GC
+            // (no collector threads or write barriers of the collectors meant for heaps
+            // 100x this size) and C1-only compilation (the GUI is not hot enough for C2
+            // to pay back its code cache and compile memory).
+            .option("-Xms32m")
+            .option("-Xmx256m")
+            .option("-XX:+UseSerialGC")
+            .option("-XX:TieredStopAtLevel=1")
+            .option("-XX:ReservedCodeCacheSize=32m")
             // Link game classes lazily: with verification on, the verifier loads every type a method
             // body could assign (all screens PauseScreen can open, their listeners, ...) before any of
             // it runs, and the first refused one fails the class. The vanilla classes are the player's
@@ -334,6 +344,12 @@ impl JvmHost {
                 "classLog",
             )?))
         })
+    }
+
+    /// JVM memory diagnostics (`Boot.memoryStats`): `key=value` lines with the heap
+    /// (committed/used/max), metaspace, code cache and compressed class space, in bytes.
+    pub fn jvm_memory(&self) -> Result<String> {
+        self.with_env(|env| call_static_string(env, &self.inner.boot, "memoryStats"))
     }
 
     /// Methods of generated proxies that were called without an implementation (sorted, distinct).

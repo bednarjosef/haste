@@ -154,7 +154,13 @@ enum TexKey {
 }
 
 struct TexEntry {
-    image: Arc<image::RgbaImage>,
+    /// The pixels while waiting for `rect` (dropped once uploaded: the GPU atlas is the
+    /// only copy; `dimensions` keeps what the UV math needs). Animated entries keep
+    /// theirs — `animate` re-uploads the current frame from them each tick.
+    image: Option<Arc<image::RgbaImage>>,
+    /// The image's size (kept after the upload; the UV math in `image` commands needs
+    /// it to scale face-local coordinates to the atlas rectangle).
+    dims: (u32, u32),
     meta: SpriteMeta,
     /// Atlas rectangle when resident.
     rect: Option<[u32; 4]>,
@@ -609,8 +615,10 @@ impl GuiRenderer {
         animation: Option<Animation>,
     ) -> u32 {
         let index = self.entries.len() as u32;
+        let dims = image.dimensions();
         self.entries.push(TexEntry {
-            image,
+            image: Some(image),
+            dims,
             meta,
             rect: None,
             animation,
@@ -675,12 +683,18 @@ impl GuiRenderer {
         if let Some(r) = e.rect {
             return r;
         }
-        let (w, h) = e.image.dimensions();
+        let (w, h) = e.dims;
         let Some([x, y]) = self.shelf.alloc(w.max(1), h.max(1)) else {
             self.atlas_full = true;
             return self.entries[0].rect.unwrap_or([0, 0, 0, 0]);
         };
         if w > 0 && h > 0 {
+            let e = &self.entries[index as usize];
+            let pixels = e
+                .image
+                .as_deref()
+                .map(|i| i.as_raw().clone())
+                .unwrap_or_else(|| vec![0u8; (w * h * 4) as usize]);
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &self.atlas,
@@ -688,7 +702,7 @@ impl GuiRenderer {
                     origin: wgpu::Origin3d { x, y, z: 0 },
                     aspect: wgpu::TextureAspect::All,
                 },
-                e.image.as_raw(),
+                &pixels,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(4 * w),
@@ -710,6 +724,11 @@ impl GuiRenderer {
             .as_ref()
             .and_then(|a| a.schedule.frames.first().map(|f| f.index))
             .unwrap_or(0);
+        // The GPU atlas is now the only copy a static entry needs: drop the CPU-side
+        // pixels (animated entries keep theirs for the per-tick re-upload).
+        if e.animation.is_none() {
+            e.image = None;
+        }
         rect
     }
 
@@ -1032,7 +1051,7 @@ impl GuiRenderer {
                     let cur = scissor;
                     self.switch(&mut scissor, &mut blend, cur, *cmd_blend, &mut batch_start);
                     let (rect, index) = self.lookup(&TexKey::Texture(texture.clone()), assets);
-                    let (iw, ih) = self.entries[index as usize].image.dimensions();
+                    let (iw, ih) = self.entries[index as usize].dims;
                     let kx = iw as f32 / (*tex_w).max(1) as f32;
                     let ky = ih as f32 / (*tex_h).max(1) as f32;
                     let u0 = rect[0] as f32 + u * kx;

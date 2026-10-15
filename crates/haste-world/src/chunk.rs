@@ -39,6 +39,11 @@ impl Section {
         self.block_count == 0
     }
 
+    /// Heap bytes of this section's block and biome containers (live allocations).
+    pub fn memory_bytes(&self) -> u64 {
+        self.blocks.memory_bytes() + self.biomes.memory_bytes()
+    }
+
     /// Biome at cell coordinates (0..4 within the section).
     pub fn biome(&self, x: u8, y: u8, z: u8) -> BiomeId {
         self.biomes.get_biome(x, y, z)
@@ -251,18 +256,24 @@ impl Chunk {
     }
 
     /// Appends this chunk's dirty sections to `out` (in section order), clearing the
-    /// bits as they go.
+    /// bits as they go. Sections with no blocks are skipped: they mesh to nothing and
+    /// their neighbours do not change with them (vanilla's chunk cache drops them the
+    /// same way, `LevelChunkSection.hasOnlyAir`).
     pub(crate) fn take_dirty(&mut self, out: &mut Vec<SectionPos>) {
         for (w, word) in self.dirty.iter_mut().enumerate() {
             let mut bits = *word;
             while bits != 0 {
                 let b = bits.trailing_zeros() as usize;
                 bits &= bits - 1;
-                out.push(SectionPos::new(
-                    self.pos.x,
-                    self.min_section + (w * 64 + b) as i32,
-                    self.pos.z,
-                ));
+                let y = self.min_section + (w * 64 + b) as i32;
+                if self
+                    .sections
+                    .get(w * 64 + b)
+                    .is_some_and(|s| s.block_count == 0)
+                {
+                    continue;
+                }
+                out.push(SectionPos::new(self.pos.x, y, self.pos.z));
             }
             *word = 0;
         }
@@ -283,14 +294,15 @@ pub fn synthetic_chunk_data(
 mod tests {
     use super::*;
 
-    /// A chunk with `sections` single-value air sections (the dirty bitset is what
-    /// these tests exercise; the contents do not matter).
+    /// A chunk with `sections` stone-filled sections (the dirty bitset is what these
+    /// tests exercise; the contents only need to be non-empty since `take_dirty`
+    /// skips air sections).
     fn chunk_with_sections(sections: usize, min_section: i32) -> Chunk {
         let cd = synthetic_chunk_data(
             ChunkPos::new(1, -2),
             min_section,
             sections,
-            |_si, _x, _y, _z| BlockStateId::AIR,
+            |_si, _x, _y, _z| BlockStateId(1),
         );
         Chunk::decode(&cd, min_section, sections, 15, 7, u32::MAX).unwrap()
     }

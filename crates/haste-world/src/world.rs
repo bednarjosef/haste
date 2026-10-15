@@ -8,8 +8,25 @@ use haste_core::view::{BlockView, DirtyTracker};
 use haste_core::{BiomeId, BlockPos, BlockStateId, ChunkPos, SectionPos};
 use haste_data::GameData;
 
-use crate::chunk::{Chunk, Section};
+use crate::chunk::{Chunk, Heightmap, Section};
 use crate::world_error::WorldError;
+
+/// Heap bytes of the loaded world, by storage (see [`World::memory_stats`]).
+#[derive(Default, Debug, Clone, Copy)]
+pub struct WorldMemoryStats {
+    /// The chunk map and its `Chunk` structs.
+    pub chunks: u64,
+    /// Block + biome containers of all sections.
+    pub sections: u64,
+    /// Decoded heightmaps.
+    pub heightmaps: u64,
+    /// Sky/block light nibble arrays.
+    pub light: u64,
+    /// Block entities (NBT payloads plus map entries).
+    pub block_entities: u64,
+    /// Sections with at least one non-air block.
+    pub non_empty_sections: u64,
+}
 
 /// The loaded world of one dimension.
 pub struct World {
@@ -257,6 +274,51 @@ impl World {
 
     pub fn loaded_chunks(&self) -> impl Iterator<Item = ChunkPos> + '_ {
         self.chunks.values().map(|c| c.pos)
+    }
+
+    /// Resident-world memory diagnostics (bytes): the chunk map's heap footprint split
+    /// into sections (blocks+biomes containers), heightmaps, light and block entities,
+    /// plus the number of non-empty sections. Counts live allocations (capacity of the
+    /// backing vectors), not allocator slack.
+    pub fn memory_stats(&self) -> WorldMemoryStats {
+        let mut stats = WorldMemoryStats {
+            chunks: self.chunks.len() as u64 * (std::mem::size_of::<Chunk>() as u64 + 16),
+            ..Default::default()
+        };
+        for chunk in self.chunks.values() {
+            stats.heightmaps += chunk
+                .heightmaps
+                .iter()
+                .map(|(_, h)| {
+                    h.longs.capacity() as u64 * 8 + std::mem::size_of::<Heightmap>() as u64
+                })
+                .sum::<u64>();
+            stats.block_entities += chunk
+                .block_entities
+                .values()
+                .map(|be| be.nbt.len() as u64 + std::mem::size_of::<BlockEntityData>() as u64 + 24)
+                .sum::<u64>();
+            for s in &chunk.sections {
+                stats.sections += s.memory_bytes();
+                if !s.is_empty() {
+                    stats.non_empty_sections += 1;
+                }
+            }
+            // Light: 2048-byte nibble arrays per present section, plus the Vec-of-Option
+            // slots and each NibbleArray's Bytes header (ref-counted slice: 16-byte fat
+            // pointer + the shared control block, counted once per array).
+            stats.light += chunk.light.sky.iter().flatten().count() as u64 * (2048 + 24)
+                + chunk
+                    .light
+                    .block
+                    .iter()
+                    .filter(|s| !s.all_zero() && !s.all_full())
+                    .count() as u64
+                    * (2048 + 24)
+                + (chunk.light.sky.capacity() + chunk.light.block.capacity()) as u64
+                    * std::mem::size_of::<Option<crate::light::NibbleArray>>() as u64;
+        }
+        stats
     }
 
     /// Immutable copy of a section (plus 1-block border from neighbours and its light) for
