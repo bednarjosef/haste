@@ -557,6 +557,17 @@ recipe_book() {
   wait_exit
   echo "--- recipe book evidence ---"
   echo "Inventory before: $before"
+  echo "Inventory after:  $after"
+  local r=0
+  has "$before" "oak_log" || { echo "no oak_log before"; r=1; }
+  has "$after" "oak_planks" || { echo "no oak_planks after"; r=1; }
+  has "$after" "count: 4" || { echo "not 4 planks"; r=1; }
+  if grep -qE "haste proxy:|Java exception" "$log"; then
+    echo "proxy stubs or Java exceptions:"; grep -E "haste proxy:|Java exception" "$log" | head -5
+    r=1
+  fi
+  check recipe-book "the book opens and lists recipes; searching finds oak planks; clicking it crafts 4 planks from one log" "$r"
+}
 
 # The furnace: smelt 1 raw iron with 1 coal, take the iron ingot. The furnace sits at
 # (128, 71, 5) in the check's own area, on its own stone platform, the player 2.5 blocks
@@ -615,15 +626,6 @@ containers_anvil() {
   has "$after" "wooden_sword" || { echo "no renamed sword after"; r=1; }
   has "$after" "RenamedSword" || { echo "no custom name RenamedSword"; r=1; }
   check containers-anvil "a wooden sword was renamed to RenamedSword for 1 XP level" "$r"
-}
-
-  has "$after" "oak_planks" || { echo "no oak_planks after"; r=1; }
-  has "$after" "count: 4" || { echo "not 4 planks"; r=1; }
-  if grep -qE "haste proxy:|Java exception" "$log"; then
-    echo "proxy stubs or Java exceptions:"; grep -E "haste proxy:|Java exception" "$log" | head -5
-    r=1
-  fi
-  check recipe-book "the book opens and lists recipes; searching finds oak planks; clicking it crafts 4 planks from one log" "$r"
 }
 
 # ---- 10. Languages other than English ----
