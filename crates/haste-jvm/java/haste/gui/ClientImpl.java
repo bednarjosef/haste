@@ -104,6 +104,22 @@ public final class ClientImpl {
     public static net.minecraft.client.renderer.entity.EntityRenderDispatcher getEntityRenderDispatcher(Minecraft m) {
         return Proxies.service(net.minecraft.client.renderer.entity.EntityRenderDispatcher.class);
     }
+
+    /**
+     * The entity models the GUI screens bake (vanilla: the model manager's reload builds every layer). Haste's
+     * GUI batch draws no models, so only the layers a screen constructs are provided — the enchanting table's
+     * book — as real vanilla geometry (an empty mesh: the book's draw call is a no-op, its shape is never read).
+     */
+    public static net.minecraft.client.model.geom.EntityModelSet getEntityModels(Minecraft m) {
+        if (ENTITY_MODELS == null) {
+            ENTITY_MODELS = new net.minecraft.client.model.geom.EntityModelSet(java.util.Map.of(
+                net.minecraft.client.model.geom.ModelLayers.BOOK,
+                net.minecraft.client.model.geom.builders.LayerDefinition.create(
+                    new net.minecraft.client.model.geom.builders.MeshDefinition(), 64, 32)));
+        }
+        return ENTITY_MODELS;
+    }
+    private static net.minecraft.client.model.geom.EntityModelSet ENTITY_MODELS;
     public static PlayerSocialManager getPlayerSocialManager(Minecraft m) { return Proxies.service(PlayerSocialManager.class); }
     /** The skin manager: offline mode — every player shows their default skin, nothing is fetched. */
     public static net.minecraft.client.resources.SkinManager getSkinManager(Minecraft m) {

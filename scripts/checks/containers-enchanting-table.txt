@@ -1,0 +1,64 @@
+# Container check: enchanting table. The enchanting screen is 176x166 centred in the 480x270
+# GUI, so its origin is (152, 52) and a slot's centre is its menu position + 8 (vanilla
+# EnchantmentMenu: item (15,47), lapis (35,47); the player inventory and hotbar are the
+# container screen's standard rows).
+#   item (menu slot 0)   -> (152+15+8, 52+47+8) = (175, 107)
+#   lapis (menu slot 1)  -> (152+35+8, 52+47+8) = (195, 107)
+#   player inventory (slots 2+) -> (152+8+8, 52+84+8) = (168, 144), step 18
+#   hotbar (slots 29+)   -> (152+8+8, 52+142+8) = (168, 202), step 18
+# The three enchant rows are not slots: EnchantmentScreen.mouseClicked treats a click in
+# x [60,168) y [14+19*i, 14+19*i+19) (menu coordinates) as row i's button; row 1 in GUI
+# coordinates is x [212,320), y [66,85), so its centre (266, 75) clicks it.
+# The runner tps us into the check's own area, gives a wooden sword, lapis and the levels
+# and places the table when the setup screenshot appears. With no bookshelves around, row
+# 1's cost is 1-2 levels and it always costs 1 lapis (vanilla EnchantmentMenu.clickMenuButton:
+# enchantmentCost = buttonId + 1).
+wait_until joined
+wait_until settled
+screenshot cench-setup
+# The runner now tps us to (124.5, 71, 2.5) facing the table, clears the inventory, gives the
+# sword, the lapis and the levels. Waiting for the hotbar absorbs the busy shared server.
+wait_until hotbar_item
+# Open the table: look at it and use (the runner placed it at (124, 71, 5), on this check's
+# own stone platform; from the eye at (124.5, 72.62, 2.5), pitch 20 aims at the face at
+# y ~71.7).
+look 0 20
+wait 5
+mouse_down right
+wait 2
+mouse_up right
+wait_until screen_open
+wait 10
+screenshot cench-open
+# The sword goes into the item slot (slot 0), the lapis into the lapis slot (slot 1): pick
+# each up from its own hotbar slot (0: 168 202, 1: 186 202) and drop it in.
+click left 168 202
+click left 175 107
+click left 186 202
+click left 195 107
+# The server sends the costs (container_set_data) once the item sits in the slot; wait for
+# the rows to fill in.
+wait 40
+screenshot cench-rows
+# Click row 1: one lapis and its level cost (vanilla EnchantmentScreen.mouseClicked ->
+# clickMenuButton -> gameMode.handleInventoryButtonClick sends container_button_click; the
+# server does the enchant and sends the slot update back).
+click left 266 75
+wait 40
+screenshot cench-enchanted
+# Take the enchanted sword out of the item slot, shift-click straight into the inventory.
+key_down LShift
+wait 2
+click left 175 107
+wait 2
+key_up LShift
+wait 10
+screenshot cench-taken
+# Close with E (the inventory key, vanilla's keyInventory path in keyPressed).
+key E
+wait 20
+wait_until screen_closed
+screenshot cench-closed
+# 10 s tail: the runner reads `data get entity ... Inventory` (the sword's enchantments)
+# from this frame on.
+wait 200

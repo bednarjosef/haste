@@ -438,4 +438,12 @@ public final class GfxImpl {
     }
 
     public static void setPreeditOverlay(GuiGraphicsExtractor g, Renderable r) {}
+
+    /**
+     * The enchanting table's book (vanilla: a 3D model in a GUI box, drawn by the entity renderer). Haste's
+     * GUI batch has no model rendering yet, so nothing is drawn; the book model the screen built is the
+     * replacement class ({@code haste/replace/.../BookModel.java}), whose shape matches this signature.
+     */
+    public static void book(GuiGraphicsExtractor g, net.minecraft.client.model.object.book.BookModel bookModel,
+                             Identifier texture, float scale, float open, float flip, int x0, int y0, int x1, int y1) {}
 }

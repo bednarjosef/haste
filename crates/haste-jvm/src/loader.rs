@@ -25,6 +25,9 @@ pub const ALLOW_PACKAGES: &[&str] = &[
     "net/minecraft/client/searchtree/",
     "net/minecraft/client/waypoints/",
     "net/minecraft/client/multiplayer/chat/",
+    // the model geometry the GUI screens bake (the enchanting table's book): pure data, built
+    // from cube lists; nothing here renders (the draw call is GfxImpl's)
+    "net/minecraft/client/model/geom/",
     "net/minecraft/client/renderer/entity/state/",
     "net/minecraft/client/renderer/state/",
     "net/minecraft/client/resources/language/",
@@ -115,6 +118,14 @@ pub const ALLOW_CLASSES: &[&str] = &[
     // stops it in removed, exactly vanilla's lifecycle
     "net/minecraft/client/server/LanServerDetection",
     "net/minecraft/client/server/LanServer",
+    // the enchanting table's book model: vanilla's extends Model, whose constructor binds a
+    // RenderTypes method reference (the renderer's own pipeline set, denied here). Haste's
+    // replacement (java/haste/replace/...) keeps only what the enchanting screen touches: it is
+    // constructed and handed to GuiGraphicsExtractor.book, which is a no-op (no book is drawn).
+    "net/minecraft/client/model/object/book/BookModel",
+    // a plain record of layer locations: ModelLayers' static initialiser builds one per armored
+    // mob (the model geometry itself is never touched here, only the layer names)
+    "net/minecraft/client/renderer/entity/ArmorModelSet",
     "net/minecraft/client/multiplayer/SessionSearchTrees",
     "net/minecraft/client/multiplayer/ClientLevel$ClientLevelData",
     "net/minecraft/client/multiplayer/ClientAdvancements",
@@ -294,6 +305,11 @@ pub const REPLACEMENTS: &[&str] = &[
     // is haste-setup's local dedicated server (Rust owns the process). The replacement keeps the
     // screen flow and hands the world (and creation settings) to Rust.
     "net/minecraft/client/gui/screens/worldselection/WorldOpenFlows",
+    // Vanilla's BookModel extends Model, whose constructor binds a RenderTypes method reference
+    // (the renderer's pipeline set, denied here). Haste's replacement keeps the shape the
+    // enchanting screen touches: constructed from a baked ModelPart, handed to
+    // GuiGraphicsExtractor.book (a no-op in Haste: no model rendering in the GUI batch yet).
+    "net/minecraft/client/model/object/book/BookModel",
 ];
 
 /// How the game class loader resolved a class (or why it did not).
