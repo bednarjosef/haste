@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs the feature check scripts in scripts/checks/ against the local test server.
 # usage: scripts/checks/run-feature-checks.sh [feature ...]
-#   features: hud death drop modes f2 craft  (default: all)
+#   features: hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock  (default: all)
 # The client runs offscreen (`--script`); all server state is set up over RCON from here,
 # never from the script (the player is not an operator and the server kicks command spam).
 # Evidence is printed and grepped: frame text commands (not images), server log lines and
@@ -31,10 +31,12 @@ PASS=0
 FAIL=0
 FAILED=()
 
-client_start() { # script log
+client_start() { # script log [extra args...]
   : >"$2"
-  timeout 200 "$BIN" --server "127.0.0.1:$PORT" --username "$NAME" --script "$1" \
-    --seconds 120 >"$2" 2>&1 &
+  local script=$1 log=$2
+  shift 2
+  timeout 200 "$BIN" --server "127.0.0.1:$PORT" --username "$NAME" --script "$script" \
+    "$@" --seconds 120 >"$log" 2>&1 &
   CLIENT_PID=$!
 }
 
@@ -160,7 +162,7 @@ drop() {
     rcon "item replace entity $NAME weapon.offhand with minecraft:torch 3" >/dev/null
   fi
   sleep 2
-  local before after items
+  local before="" after="" items=""
   before=$(rcon "data get entity $NAME SelectedItem")
   if wait_shot "$log" drop-swap 90; then
     after=$(rcon "data get entity $NAME SelectedItem")
@@ -183,7 +185,7 @@ modes() {
   local log="$LOGDIR/modes.log"
   client_start "$ROOT/scripts/checks/game-modes.txt" "$log"
   wait_online || { check modes "player never joined" 1; return; }
-  local spec_before spec_after creative_check adventure_check
+  local spec_before="" spec_after="" creative_check="" adventure_check=""
   if wait_shot "$log" gm-spectator-setup 90; then
     rcon "gamemode spectator $NAME" >/dev/null
     rcon "fill -8 99 -8 8 99 8 stone" >/dev/null
@@ -253,7 +255,7 @@ craft() {
     rcon "give $NAME minecraft:oak_log 1" >/dev/null
   fi
   sleep 2
-  local before after
+  local before="" after=""
   before=$(rcon "data get entity $NAME Inventory")
   if wait_shot "$log" craft-final 90; then
     after=$(rcon "data get entity $NAME Inventory")
@@ -269,13 +271,224 @@ craft() {
   check craft "one oak log became 4 oak planks in the survival inventory" "$r"
 }
 
-ALL=(hud death drop modes f2 craft)
+# ---- 11. Block particles: the client's own destroy grid and mining cracks ----
+particles() {
+  local log="$LOGDIR/particles.log"
+  # A name of our own: another agent's feature check may be running as $NAME on the
+  # shared server, and a duplicate login kicks our client mid-script.
+  local NAME=ParticlesCheck
+  client_start "$ROOT/scripts/checks/block-particles.txt" "$log"
+  wait_online || { check particles "player never joined" 1; return; }
+  # The script waits 15 s after its setup screenshot; set the stage in that window:
+  # survival, an empty hotbar, a stone platform under the player, an iron pickaxe.
+  # (`execute as/at` selectors: plain name arguments race other agents' players on
+  # the shared server; the selector forms resolve at run time.)
+  while ! grep -q "script-setup" "$log" 2>/dev/null; do
+    sleep 1
+    grep -q "game thread stopping" "$log" 2>/dev/null && break
+  done
+  rcon "execute as $NAME run tp @s 0 100 0 0 0" >/dev/null
+  rcon "execute as $NAME run gamemode survival @s" >/dev/null
+  rcon "execute as $NAME run clear @s" >/dev/null
+  rcon "execute at $NAME run fill ~-4 ~-1 ~-4 ~4 ~-1 ~4 stone" >/dev/null
+  rcon "execute at $NAME run fill ~-3 ~ ~-3 ~3 ~4 ~3 air" >/dev/null
+  rcon "execute as $NAME run give @s minecraft:iron_pickaxe 1" >/dev/null
+  # Torches around the player for the ambient animateTick particles (placed after
+  # the mining screenshots appear, so they do not get mined).
+  if wait_shot "$log" block-broken 60; then
+    rcon "execute at $NAME run setblock ~2 ~ ~2 torch" >/dev/null
+    rcon "execute at $NAME run setblock ~-2 ~ ~-1 torch" >/dev/null
+    rcon "execute at $NAME run setblock ~1 ~ ~-3 torch" >/dev/null
+  fi
+  wait_exit
+  echo "--- block particles evidence ---"
+  grep "particles drawn" "$log" | tail -4
+  local cracks broken ambient r=0
+  cracks=$(grep "script-mining-cracks" "$log" | grep -o '[0-9]* particles drawn' | grep -o '[0-9]*')
+  broken=$(grep "script-block-broken" "$log" | grep -o '[0-9]* particles drawn' | grep -o '[0-9]*')
+  ambient=$(grep "script-ambient-torches" "$log" | grep -o '[0-9]* particles drawn' | grep -o '[0-9]*')
+  [ -n "$cracks" ] && [ "$cracks" -gt 0 ] || { echo "no crack particles while mining"; r=1; }
+  [ -n "$broken" ] && [ "$broken" -gt 20 ] || { echo "no destroy grid on break"; r=1; }
+  [ -n "$ambient" ] && [ "$ambient" -gt 0 ] || { echo "no ambient torch particles"; r=1; }
+  check particles "mining drew crack particles ($cracks), the break the destroy grid ($broken), torches ambient particles ($ambient)" "$r"
+}
+
+# ---- 7. Every pause-menu screen ----
+pause() {
+  local log="$LOGDIR/pause.log"
+  client_start "$ROOT/scripts/checks/pause-all.txt" "$log"
+  wait_online || { check pause "player never joined" 1; return; }
+  wait_exit
+  local ev="$LOGDIR/pause.evidence"
+  grep -E "script text\[" "$log" >"$ev"
+  echo "--- pause evidence ---"; cat "$ev"
+  local r=0
+  local t
+  for t in advancements statistics report-bugs send-feedback friends player-reporting world-options; do
+    grep -q "script frame\[$t\]" "$log" || { echo "missing screenshot $t"; r=1; }
+  done
+  has "$(cat "$ev")" "Minecraft" || { echo "missing the Minecraft advancement tab"; r=1; }
+  # the stats screen's rows: the values arrive between the click and the screenshot
+  has "$(cat "$ev")" "Animals Bred" || { echo "statistics screen never showed its rows"; r=1; }
+  has "$(cat "$ev")" "Difficulty" || { echo "missing World Options difficulty row"; r=1; }
+  has "$(cat "$ev")" "Social Interactions" || { echo "missing player reporting screen"; r=1; }
+  has "$(cat "$ev")" "open this link" || { echo "missing the report-bugs link confirmation"; r=1; }
+  if grep -qE "haste proxy:|Java exception" "$log"; then
+    echo "proxy stubs or Java exceptions:"; grep -E "haste proxy:|Java exception" "$log" | head -5
+    r=1
+  fi
+  check pause "every pause-menu screen opens: advancements (with the server's tree), statistics, the icon buttons, world options" "$r"
+}
+
+# ---- 8. The creative inventory's Saved Hotbars tab ----
+creative_hotbars() {
+  local log="$LOGDIR/creative-hotbars.log"
+  client_start "$ROOT/scripts/checks/creative-hotbars.txt" "$log"
+  wait_online || { check creative-hotbars "player never joined" 1; return; }
+  rcon "gamemode creative $NAME" >/dev/null
+  wait_exit
+  local ev="$LOGDIR/creative-hotbars.evidence"
+  grep -E "script text\[" "$log" >"$ev"
+  echo "--- creative hotbars evidence ---"; cat "$ev"
+  local r=0
+  has "$(cat "$ev")" "Saved Hotbars" || { echo "missing the Saved Hotbars tab"; r=1; }
+  if grep -qE "haste proxy:|Java exception" "$log"; then
+    echo "proxy stubs or Java exceptions:"; grep -E "haste proxy:|Java exception" "$log" | head -5
+    r=1
+  fi
+  check creative-hotbars "the creative inventory's Saved Hotbars tab shows the saved hotbars" "$r"
+}
+
+# ---- 9. The recipe book: open it, search, click a recipe, take the result ----
+recipe_book() {
+  local log="$LOGDIR/recipe-book.log"
+  client_start "$ROOT/scripts/checks/recipe-book.txt" "$log"
+  wait_online || { check recipe-book "player never joined" 1; return; }
+  # the script's wait_until settled needs the player at the plain the camera shoots: the spawn
+  # point can be a wall (a suffocation death would kill the check)
+  rcon "tp $NAME 9.5 71 6.5" >/dev/null
+  rcon "gamemode survival $NAME" >/dev/null
+  if wait_shot "$log" recipe-book-open 90; then
+    rcon "clear $NAME" >/dev/null
+    rcon "give $NAME minecraft:oak_log 1" >/dev/null
+  fi
+  sleep 2
+  local before="" after=""
+  before=$(rcon "data get entity $NAME Inventory")
+  if wait_shot "$log" recipe-book-final 90; then
+    after=$(rcon "data get entity $NAME Inventory")
+  fi
+  wait_exit
+  echo "--- recipe book evidence ---"
+  echo "Inventory before: $before"
+  echo "Inventory after:  $after"
+  local r=0
+  has "$before" "oak_log" || { echo "no oak_log before"; r=1; }
+  has "$after" "oak_planks" || { echo "no oak_planks after"; r=1; }
+  has "$after" "count: 4" || { echo "not 4 planks"; r=1; }
+  if grep -qE "haste proxy:|Java exception" "$log"; then
+    echo "proxy stubs or Java exceptions:"; grep -E "haste proxy:|Java exception" "$log" | head -5
+    r=1
+  fi
+  check recipe-book "the book opens and lists recipes; searching finds oak planks; clicking it crafts 4 planks from one log" "$r"
+}
+
+# ---- 10. Languages other than English ----
+language() {
+  local log="$LOGDIR/language.log"
+  client_start "$ROOT/scripts/checks/language.txt" "$log"
+  wait_online || { check language "player never joined" 1; return; }
+  wait_exit
+  local ev="$LOGDIR/language.evidence"
+  grep -E "script text\[" "$log" >"$ev"
+  echo "--- language evidence (pause menu after switching to de_de) ---"
+  grep -E "script text\[pause-de\]" "$log"
+  local r=0
+  has "$(grep -E 'script text\[pause-de\]' "$log")" "Zurück zum Spiel" \
+    || { echo "pause menu not in German after switching"; r=1; }
+  if grep -qE "haste proxy:|Java exception" "$log"; then
+    echo "proxy stubs or Java exceptions:"; grep -E "haste proxy:|Java exception" "$log" | head -5
+    r=1
+  fi
+  check language "Options > Language switched to de_de and the pause menu drew in German" "$r"
+}
+
+
+# ---- 12. Signs: place an oak sign, the edit screen opens, type two lines, Done ----
+# The script is self-contained (the check player is an operator, so it clears, teleports to
+# the camera and gives itself the sign through the chat); the runner only ops the player and
+# reads the evidence. Looking down-forward from the camera (9.5 71 6.5), the placement use
+# targets the ground block ahead: the sign lands at (9, 70, 7) with the typed lines.
+sign() {
+  local log="$LOGDIR/sign.log"
+  client_start "$ROOT/scripts/checks/edit-sign.txt" "$log" --pos 9.5 71 6.5
+  wait_online || { check sign "player never joined" 1; return; }
+  rcon "op $NAME" >/dev/null
+  wait_exit
+  echo "--- sign evidence ---"
+  local out
+  out=$(rcon "data get block 9 70 7 front_text")
+  echo "front_text: $out"
+  local r=0
+  has "$out" "LineOne" || { echo "missing line one"; r=1; }
+  has "$out" "LineTwo" || { echo "missing line two"; r=1; }
+  grep -E "haste proxy:|Java exception" "$log" && r=1
+  check sign "placed an oak sign, typed two lines, Escape (Done) sent the sign update" "$r"
+}
+
+# ---- 13. Books: use a writable book, type, sign ----
+# The script is self-contained (the check player is an operator); the runner ops the player
+# and reads the evidence while the player is still online (the entity's data is only
+# queryable while it exists: the final screenshot fires before the client leaves). Signing
+# the book makes the server replace the held writable book with a written book.
+book() {
+  local log="$LOGDIR/book.log"
+  client_start "$ROOT/scripts/checks/edit-book.txt" "$log"
+  wait_online || { check book "player never joined" 1; return; }
+  rcon "op $NAME" >/dev/null
+  local held=""
+  if wait_shot "$log" book-done 90; then
+    held=$(rcon "data get entity $NAME SelectedItem")
+  fi
+  wait_exit
+  echo "--- book evidence ---"
+  echo "SelectedItem: ${held:-<not read>}"
+  local r=0
+  has "$held" "written_book" || { echo "no written book after signing"; r=1; }
+  has "$held" "MyBook" || { echo "book title missing"; r=1; }
+  grep -E "haste proxy:|Java exception" "$log" && r=1
+  check book "used a writable book, typed, signed it into a written book" "$r"
+}
+
+# ---- 14. Command blocks: ops, place, use, type a command, Done ----
+# The script is self-contained (the check player is an operator: creative mode, its own command
+# block ahead of the camera, the use opens the editor); the runner ops the player and reads the
+# evidence. The server sends block_entity_data when the player uses the command block, which
+# activates the editor's buttons (vanilla ClientPacketListener.handleBlockEntityData).
+commandblock() {
+  local log="$LOGDIR/commandblock.log"
+  client_start "$ROOT/scripts/checks/edit-command-block.txt" "$log" --pos 9.5 71 6.5
+  wait_online || { check commandblock "player never joined" 1; return; }
+  rcon "op $NAME" >/dev/null
+  wait_exit
+  echo "--- command block evidence ---"
+  local out
+  out=$(rcon "data get block 9 71 9 Command")
+  echo "Command: $out"
+  local r=0
+  has "$out" "say hello" || { echo "command not set"; r=1; }
+  grep -E "haste proxy:|Java exception" "$log" && r=1
+  check commandblock "used the command block, typed a command, Done sent the update" "$r"
+}
+
+
+ALL=(hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock)
 if [ $# -eq 0 ]; then
   set -- "${ALL[@]}"
 fi
 for f in "$@"; do
   case "$f" in
-    hud | death | drop | modes | f2 | craft) "$f" ;;
+    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | particles | recipe-book | sign | book | commandblock) "${f//-/_}" ;;
     *) echo "unknown feature: $f" ;;
   esac
 done

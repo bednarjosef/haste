@@ -65,6 +65,7 @@ impl App {
                 yaw: 45.0,
                 pitch: 50.0,
                 fov_deg: 70.0,
+                hand_fov_deg: 70.0,
                 roll_deg: 0.0,
                 bob: haste_render::ViewBob::default(),
             },
@@ -170,6 +171,7 @@ impl App {
         let frame = haste_render::FrameInput {
             camera: self.cam,
             entities: &[],
+            block_entities: &[],
             gui: &haste_core::gui::GuiFrame::default(),
             sky: haste_render::SkyState {
                 time_of_day: 6000,
@@ -177,11 +179,14 @@ impl App {
                 dimension_has_sky: true,
                 fog_start: 100.0,
                 fog_end: (self.distance as f32) * 16.0,
+                ..Default::default()
             },
             partial_tick: 0.0,
             block_target: None,
             breaking: &[],
             camera_entity: None,
+            spin: None,
+            weather: None,
         };
         let stats = renderer.render(&frame).expect("render");
         let dt = self.last_frame.elapsed().as_secs_f32() * 1000.0;

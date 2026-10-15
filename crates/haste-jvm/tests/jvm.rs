@@ -247,6 +247,31 @@ fn render(h: &JvmHost, mouse: (f64, f64)) -> haste_core::gui::GuiFrame {
     }
 }
 
+/// Where a text is drawn, in absolute GUI pixels (translations applied).
+fn text_pos(f: &haste_core::gui::GuiFrame, want: &str) -> Option<(i32, i32)> {
+    use haste_core::gui::GuiCommand;
+    let mut stack: Vec<(f32, f32)> = vec![(0.0, 0.0)];
+    for c in &f.commands {
+        match c {
+            GuiCommand::TranslatePush { dx, dy, .. } => {
+                let (x, y) = *stack.last().unwrap();
+                stack.push((x + dx, y + dy));
+            }
+            GuiCommand::TranslatePop => {
+                stack.pop();
+            }
+            GuiCommand::Text { text, x, y, .. } | GuiCommand::StyledText { text, x, y, .. }
+                if text == want =>
+            {
+                let (dx, dy) = *stack.last().unwrap();
+                return Some((x + dx as i32, y + dy as i32));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// A pipeline Haste did not build, the way a mod registers one: a location of the mod's own and a blend
 /// function of four blend factors (src colour, dst colour, src alpha, dst alpha), on vanilla's builder.
 fn mod_pipeline<'local>(
@@ -595,12 +620,18 @@ fn options_screen() {
 }
 
 #[test]
-#[ignore = "JoinMultiplayerScreen.<init> throws NoClassDefFoundError: net/minecraft/client/multiplayer/ServerStatusPinger is deny-listed (its init then needs ServerList too), see crates/haste-jvm/src/loader.rs DENY"]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
 fn multiplayer_screen() {
     let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
     let h = host();
     let gui = h.gui();
+    reset(gui);
     h.clear_unimplemented().unwrap();
+    // One saved server (vanilla's ServerList reads servers.dat from the game directory, which
+    // for tests is the JVM's cache/jvm-game): the entry shows and Join requests its address.
+    let game_dir = h.config().game_dir.clone();
+    let saved = game_dir.join("servers.dat");
+    std::fs::write(&saved, servers_dat("Haste Test", "127.0.0.1:25691")).unwrap();
     open(&h, haste_jvm::ScreenKind::Multiplayer);
     assert!(gui.is_open());
     assert_eq!(
@@ -616,6 +647,8 @@ fn multiplayer_screen() {
         "Direct Connection",
         "Add Server",
         "Back",
+        // the saved entry
+        "Haste Test",
     ] {
         assert!(t.iter().any(|x| x == want), "missing {want:?} in {t:?}");
     }
@@ -624,6 +657,270 @@ fn multiplayer_screen() {
         unimpl.is_empty(),
         "Unimplemented log for JoinMultiplayerScreen: {unimpl:#?}"
     );
+    // Selecting the entry and clicking Join goes through vanilla's join() into Haste's
+    // ConnectScreen replacement, which hands the address to Rust.
+    let p = text_pos(&f, "Haste Test").expect("the saved entry's position");
+    gui.mouse(f64::from(p.0 + 2), f64::from(p.1 + 2), Some((1, true)));
+    gui.mouse(f64::from(p.0 + 2), f64::from(p.1 + 2), Some((1, false)));
+    let join = text_pos(&render(&h, (0.0, 0.0)), "Join Server").expect("the Join button");
+    gui.mouse(
+        f64::from(join.0 + 2),
+        f64::from(join.1 + 2),
+        Some((1, true)),
+    );
+    gui.mouse(
+        f64::from(join.0 + 2),
+        f64::from(join.1 + 2),
+        Some((1, false)),
+    );
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.ConnectScreen"),
+        "Haste's connecting screen is open"
+    );
+    if let Some(e) = gui.take_last_error() {
+        panic!("clicking Join failed: {e}");
+    }
+    assert_eq!(
+        gui.take_join_request().as_deref(),
+        Some("127.0.0.1:25691"),
+        "the address was handed to Rust"
+    );
+    assert_no_refusals(&h);
+    gui.close_screen();
+    std::fs::remove_file(&saved).unwrap();
+}
+
+/// The title screen's Quit Game asks Rust to quit (the window closes).
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn title_screen_quit() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    reset(gui);
+    h.clear_unimplemented().unwrap();
+    open(&h, haste_jvm::ScreenKind::Title);
+    let f = render(&h, (0.0, 0.0));
+    let p = text_pos(&f, "Quit Game").expect("the Quit button");
+    gui.mouse(f64::from(p.0 + 2), f64::from(p.1 + 2), Some((1, true)));
+    gui.mouse(f64::from(p.0 + 2), f64::from(p.1 + 2), Some((1, false)));
+    assert!(gui.take_quit_request(), "Quit Game set the quit flag");
+    assert!(!gui.take_quit_request(), "the flag is cleared by taking it");
+    gui.close_screen();
+}
+
+/// The singleplayer world list: SelectWorldScreen opens, lists the worlds of the singleplayer
+/// dir (vanilla's own LevelStorageSource reading each world's `level.dat`), and "Play Selected
+/// World" goes through Haste's WorldOpenFlows replacement, which hands the world to Rust.
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn select_world_screen() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    reset(gui);
+    h.clear_unimplemented().unwrap();
+    // One world in the JVM's singleplayer dir (the config dir in menu mode; cache/jvm-game here):
+    // a level.dat with the fields the summary reads (name, game mode, version, last played).
+    let saves = h.config().singleplayer_dir.clone();
+    let world = saves.join("Haste Test World");
+    std::fs::create_dir_all(&world).unwrap();
+    std::fs::write(world.join("level.dat"), level_dat("Haste Test World", 1)).unwrap();
+    open(&h, haste_jvm::ScreenKind::SelectWorld);
+    assert!(gui.is_open());
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.worldselection.SelectWorldScreen")
+    );
+    // The list loads on the render poll: render until the entry shows (the summary is read on
+    // a background future).
+    let mut t = Vec::new();
+    for _ in 0..100 {
+        let f = render(&h, (0.0, 0.0));
+        t = texts(&f);
+        if t.iter().any(|x| x == "Haste Test World") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    dump(&render(&h, (0.0, 0.0)));
+    for want in [
+        "Select World",
+        "Play Selected World",
+        "Create New World",
+        "Edit",
+        "Delete",
+        "Re-Create",
+        "Back",
+        // the world's entry: name, folder (with last-played date), game-mode line
+        "Haste Test World",
+        "Haste Test World (",
+        "Creative Mode, Version: ",
+    ] {
+        assert!(
+            t.iter().any(|x| x.starts_with(want)),
+            "missing {want:?} in {t:?}"
+        );
+    }
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for SelectWorldScreen: {unimpl:#?}"
+    );
+    assert_no_refusals(&h);
+    // Selecting the entry and clicking Play goes through vanilla's joinWorld into Haste's
+    // WorldOpenFlows replacement, which hands the world folder to Rust.
+    let f = render(&h, (0.0, 0.0));
+    let p = text_pos(&f, "Haste Test World").expect("the world entry's position");
+    gui.mouse(f64::from(p.0 + 2), f64::from(p.1 + 2), Some((1, true)));
+    gui.mouse(f64::from(p.0 + 2), f64::from(p.1 + 2), Some((1, false)));
+    let play = text_pos(&render(&h, (0.0, 0.0)), "Play Selected World").expect("the Play button");
+    gui.mouse(
+        f64::from(play.0 + 2),
+        f64::from(play.1 + 2),
+        Some((1, true)),
+    );
+    gui.mouse(
+        f64::from(play.0 + 2),
+        f64::from(play.1 + 2),
+        Some((1, false)),
+    );
+    if let Some(e) = gui.take_last_error() {
+        panic!("clicking Play failed: {e}");
+    }
+    assert_eq!(
+        gui.take_open_world_request().as_deref(),
+        Some("Haste Test World"),
+        "the world was handed to Rust"
+    );
+    gui.close_screen();
+    std::fs::remove_dir_all(&world).unwrap();
+}
+
+/// Every refused class of the screens this test covers is known and harmless.
+fn assert_no_refusals(h: &JvmHost) {
+    let known = [
+        "com.mojang.renderpearl.api.pipeline.RenderPipeline", // a parameter type of draw calls
+        "net.minecraft.client.multiplayer.ServerStatusPinger", // Haste's proxy (pings in Rust)
+        "jakarta.servlet.Servlet",                            // log4j probes
+        "javax.servlet.Servlet",
+        "net.minecraft.client.sounds.MusicManager", // option callbacks (no music)
+    ];
+    let log = h.class_log().unwrap();
+    let bad: Vec<_> = log
+        .refused()
+        .into_iter()
+        .filter(|(n, _)| !known.contains(n))
+        .collect();
+    assert!(bad.is_empty(), "classes refused: {bad:#?}");
+}
+
+/// A minimal `servers.dat` (vanilla's format: uncompressed NBT, one entry) for the multiplayer
+/// screen tests. Built by hand: TAG_Compound "": { TAG_List "servers": [ TAG_Compound { ... } ] }.
+fn servers_dat(name: &str, ip: &str) -> Vec<u8> {
+    fn string(bytes: &mut Vec<u8>, s: &str) {
+        bytes.extend_from_slice(&(s.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(s.as_bytes());
+    }
+    let mut b = vec![0x0a];
+    string(&mut b, "");
+    b.extend_from_slice(&[0x09]); // TAG_List
+    string(&mut b, "servers");
+    b.push(0x0a); // of compounds
+    b.extend_from_slice(&1i32.to_be_bytes()); // one entry
+    b.extend_from_slice(&[0x08]); // TAG_String ip
+    string(&mut b, "ip");
+    string(&mut b, ip);
+    b.extend_from_slice(&[0x08]); // TAG_String name
+    string(&mut b, "name");
+    string(&mut b, name);
+    b.push(0x00); // end of the entry
+    b.push(0x00); // end of the root
+    b
+}
+
+/// The current world data version as Java sees it (`SharedConstants.getCurrentVersion()`, the
+/// version.json of the player's jar): a world's `level.dat` carries it so the world list does
+/// not mark a test world as needing a file fix.
+fn world_data_version(h: &JvmHost) -> i32 {
+    h.with_env(|env| {
+        let cls = h.load_class(env, "net.minecraft.SharedConstants")?;
+        let v = env
+            .call_static_method(
+                &cls,
+                jni_str!("getCurrentVersion"),
+                jni_sig!("()Lnet/minecraft/WorldVersion;"),
+                &[],
+            )?
+            .l()?;
+        let v = env
+            .call_method(
+                &v,
+                jni_str!("dataVersion"),
+                jni_sig!("()Lnet/minecraft/world/level/storage/DataVersion;"),
+                &[],
+            )?
+            .l()?;
+        let n = env
+            .call_method(&v, jni_str!("version"), jni_sig!("()I"), &[])?
+            .i()?;
+        Ok(n)
+    })
+    .unwrap()
+}
+
+/// A minimal world `level.dat` (vanilla's format: gzip'd NBT) with the fields the world list's
+/// summary reads: name, game mode, difficulty, the version block and last-played time.
+fn level_dat(name: &str, game_type: i32) -> Vec<u8> {
+    fn tag(bytes: &mut Vec<u8>, id: u8, name: &str) {
+        bytes.push(id);
+        bytes.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(name.as_bytes());
+    }
+    fn string(bytes: &mut Vec<u8>, id: u8, name: &str, value: &str) {
+        tag(bytes, id, name);
+        bytes.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(value.as_bytes());
+    }
+    fn int(bytes: &mut Vec<u8>, name: &str, value: i32) {
+        tag(bytes, 0x03, name);
+        bytes.extend_from_slice(&value.to_be_bytes());
+    }
+    fn long(bytes: &mut Vec<u8>, name: &str, value: i64) {
+        tag(bytes, 0x04, name);
+        bytes.extend_from_slice(&value.to_be_bytes());
+    }
+    let h = host();
+    let version = world_data_version(&h);
+    let mut b = Vec::new();
+    tag(&mut b, 0x0a, ""); // root compound
+    tag(&mut b, 0x0a, "Data");
+    int(&mut b, "version", 19133);
+    int(&mut b, "DataVersion", version);
+    long(&mut b, "LastPlayed", 1_600_000_000_000);
+    string(&mut b, 0x08, "LevelName", name);
+    int(&mut b, "GameType", game_type);
+    int(&mut b, "allowCommands", 0);
+    tag(&mut b, 0x0a, "difficulty_settings");
+    string(&mut b, 0x08, "difficulty", "normal");
+    tag(&mut b, 0x01, "hardcore");
+    b.push(0);
+    tag(&mut b, 0x01, "locked");
+    b.push(0);
+    b.push(0x00); // end of difficulty_settings
+    tag(&mut b, 0x0a, "Version");
+    string(&mut b, 0x08, "Name", "26.3");
+    int(&mut b, "Id", version);
+    string(&mut b, 0x08, "Series", "main");
+    tag(&mut b, 0x01, "Snapshot");
+    b.push(0);
+    b.push(0x00); // end of Version
+    b.push(0x00); // end of Data
+    b.push(0x00); // end of the root
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut gz, &b).unwrap();
+    gz.finish().unwrap()
 }
 
 #[test]
@@ -929,6 +1226,112 @@ fn inventory_screen() {
     );
 }
 
+/// The creative inventory: vanilla's `CreativeModeInventoryScreen` over the connection's
+/// feature flags and search trees. In creative mode E opens it, the tabs are built for the
+/// server's enabled features (chest and oak_door appear), the search tab filters by typed
+/// text, and picking an item from a tab sends `set_creative_slot` (which vanilla's kept
+/// `handleCreativeModeItemAdd` gates on `isFeatureEnabled`).
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM, data generator reports)"]
+fn creative_inventory_and_search() {
+    use haste_core::gui::GuiCommand;
+    use haste_jvm::keys;
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    h.clear_unimplemented().unwrap();
+    reset(gui);
+    gui.with_state(|s| {
+        s.in_world = true;
+        s.game_mode = haste_core::game::GameMode::Creative;
+        s.permission_level = 0;
+    });
+    // One frame first: the mirror arrays (game mode) are filled per render/tick, and the
+    // inventory screen's init asks hasInfiniteMaterials while opening.
+    let _ = render(&h, (0.0, 0.0));
+    // E opens the inventory, whose init swaps in the creative screen (vanilla:
+    // InventoryScreen.init when hasInfiniteMaterials)
+    open(&h, haste_jvm::ScreenKind::Inventory);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen"),
+        "the creative screen replaces the inventory screen"
+    );
+    // The default tab is Building Blocks: its items are the ones the enabled features allow
+    // (the 195x136 panel is centred in the 320x240 GUI: leftPos 62, topPos 52).
+    let f = render(&h, (0.0, 0.0));
+    let items = |f: &haste_core::gui::GuiFrame| {
+        f.commands
+            .iter()
+            .filter_map(|c| match c {
+                GuiCommand::Item { item, .. } => Some(item.0),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let tab_items = items(&f);
+    assert!(
+        tab_items.contains(&item_id("minecraft:chest")),
+        "chest in the tab items (enabled features): first frame's {:?}",
+        tab_items.iter().take(5).collect::<Vec<_>>()
+    );
+    // Click the search tab (the rightmost top tab: getTabX for the aligned-right column 6 is
+    // 195-27+1 = 169, so x 62+169..62+195 = 231..257, y 52-32 = 20..52 in GUI pixels) and type
+    // "stone": the results are the stone family.
+    assert!(
+        gui.mouse(244.0, 36.0, Some((keys::MOUSE_LEFT, true))),
+        "clicking the search tab"
+    );
+    assert!(gui.mouse(244.0, 36.0, Some((keys::MOUSE_LEFT, false))));
+    for c in "stone".chars() {
+        assert!(
+            gui.char_typed(c, 0),
+            "typing {c:?}: {:?}",
+            gui.take_last_error()
+        );
+    }
+    let f = render(&h, (0.0, 0.0));
+    let found = items(&f);
+    assert!(
+        found.contains(&item_id("minecraft:stone")),
+        "stone in the search results: {found:?}"
+    );
+    assert!(
+        found.contains(&item_id("minecraft:cobblestone")),
+        "cobblestone in the search results: {found:?}"
+    );
+    assert!(
+        !found.contains(&item_id("minecraft:oak_planks")),
+        "oak planks not in the stone results: {found:?}"
+    );
+    // The tab strip is still drawn (the search tab's icon is the compass)
+    assert!(found.contains(&item_id("minecraft:compass")));
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for CreativeModeInventoryScreen: {unimpl:#?}"
+    );
+    // Escape closes the screen through vanilla's onClose -> closeContainer, which restores the
+    // player's containerMenu (the creative screen replaced it with its item picker menu) and
+    // sends container_close for the picker's window id. (E would type into the focused search
+    // box: the search tab captures it, so vanilla closes this screen with Escape.)
+    assert!(press(&h, keys::ESCAPE));
+    assert!(!gui.is_open());
+    assert!(
+        outgoing(&h)
+            .iter()
+            .any(|(id, _)| *id == serverbound_id("minecraft:container_close")),
+        "container_close sent"
+    );
+    gui.with_state(|s| {
+        s.game_mode = haste_core::game::GameMode::Survival;
+        s.in_world = false;
+    });
+    // The mirror arrays only refresh on render/tick: update them so the game mode is back
+    // before any later test opens a screen.
+    gui.tick();
+}
+
 /// `minecraft:item` registry id of an item, from the data generator's report (Rust's numbering).
 fn item_id(name: &str) -> u32 {
     let reports = cache().join("datagen/26.3/reports/registries.json");
@@ -1000,6 +1403,41 @@ fn system_chat(text: &str, overlay: bool) -> Vec<u8> {
     b.extend_from_slice(&(text.len() as u16).to_be_bytes());
     b.extend_from_slice(text.as_bytes());
     b.push(u8::from(overlay));
+    b
+}
+
+/// `minecraft:block_entity_type` registry id, from the data generator's report.
+fn block_entity_id(name: &str) -> i32 {
+    let reports = cache().join("datagen/26.3/reports/registries.json");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(reports).unwrap()).unwrap();
+    v["minecraft:block_entity_type"]["entries"][name]["protocol_id"]
+        .as_i64()
+        .unwrap() as i32
+}
+
+/// `block_entity_data` for an empty entity of `kind` at `pos` (an empty network-NBT compound).
+fn block_entity_data(pos: haste_core::BlockPos, kind: i32) -> Vec<u8> {
+    let mut b = vec![packet_id("minecraft:block_entity_data")];
+    b.extend_from_slice(&pos.to_packed().to_be_bytes());
+    let mut k = kind as u32;
+    loop {
+        if k & !0x7f == 0 {
+            b.push(k as u8);
+            break;
+        }
+        b.push((k as u8 & 0x7f) | 0x80);
+        k >>= 7;
+    }
+    b.extend_from_slice(&[0x0a, 0x00]); // TAG_Compound with no entries (TAG_End)
+    b
+}
+
+/// `open_sign_editor` for the sign at `pos` (front slot).
+fn open_sign_editor(pos: haste_core::BlockPos) -> Vec<u8> {
+    let mut b = vec![packet_id("minecraft:open_sign_editor")];
+    b.extend_from_slice(&pos.to_packed().to_be_bytes());
+    b.push(1); // front slot (VarInt)
     b
 }
 
@@ -1249,5 +1687,561 @@ fn bench_hud_and_screen() {
         );
     }
     gui.close_screen();
+    gui.with_state(|s| s.in_world = false);
+}
+
+/// Every options sub-screen opens and closes without Unimplemented entries or Java exceptions,
+/// like scripts/checks/options-all.txt does through the whole client (which needs a server; this
+/// is the JVM-only half). GUI 480x270 at scale 2, the offscreen script client's size; the button
+/// coordinates are vanilla's layout (verified against the dumped text positions).
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn options_screens_open_and_close() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    reset(gui);
+    h.clear_unimplemented().unwrap();
+    open(&h, haste_jvm::ScreenKind::Pause);
+    // the script client renders at 480x270 (960x540 at gui scale 2); a first frame also
+    // re-lays the pause menu out for that size before the clicks
+    gui.render(480, 270, 2, (-1.0, -1.0), 0.5).unwrap();
+    // "Options..." (pause menu row 5, left column)
+    click(gui, 165.0, 158.0);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.options.OptionsScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    // Every sub-screen: (button centre, class simple name). The Telemetry Data button stays out:
+    // vanilla greys it out while telemetry is unavailable (Haste sends none) and its tooltip shows.
+    for (x, y, want) in [
+        (320.0, 44.0, "OnlineOptionsScreen"),
+        (160.0, 102.0, "SkinCustomizationScreen"),
+        (336.0, 102.0, "SoundOptionsScreen"),
+        (160.0, 126.0, "VideoSettingsScreen"),
+        (336.0, 126.0, "ControlsScreen"),
+        (160.0, 150.0, "LanguageSelectScreen"),
+        (336.0, 150.0, "ChatOptionsScreen"),
+        (160.0, 174.0, "PackSelectionScreen"),
+        (336.0, 174.0, "AccessibilityOptionsScreen"),
+        (336.0, 198.0, "CreditsAndAttributionScreen"),
+    ] {
+        click(gui, x, y);
+        let got = gui.screen_class();
+        assert_eq!(
+            got.as_deref().map(|c| c.rsplit('.').next().unwrap_or(c)),
+            Some(want),
+            "click at {x},{y}: {got:?} (last error {:?})",
+            gui.take_last_error()
+        );
+        // one frame of it, with the mouse over the button (tooltip)
+        gui.render(480, 270, 2, (x, y), 0.5).unwrap();
+        escape(gui);
+        assert_eq!(
+            gui.screen_class().as_deref(),
+            Some("net.minecraft.client.gui.screens.options.OptionsScreen"),
+            "Escape from {want}: {:?} (last error {:?})",
+            gui.screen_class(),
+            gui.take_last_error()
+        );
+    }
+    // Key Binds and Mouse Settings from the Controls screen (its top row). A list's buttons get
+    // their positions during rendering (OptionsList.Entry.extractContent, like vanilla's frame
+    // loop), so render one frame of the Controls screen before clicking them.
+    click(gui, 336.0, 126.0);
+    gui.render(480, 270, 2, (336.0, 126.0), 0.5).unwrap();
+    for (x, want) in [(160.0, "MouseSettingsScreen"), (336.0, "KeyBindsScreen")] {
+        click(gui, x, 48.0);
+        let got = gui.screen_class();
+        assert_eq!(
+            got.as_deref().map(|c| c.rsplit('.').next().unwrap_or(c)),
+            Some(want),
+            "Controls sub-screen at {x}: {got:?} (last error {:?})",
+            gui.take_last_error()
+        );
+        escape(gui);
+    }
+    escape(gui);
+    // and the Options screen closes back to the pause menu, which closes
+    escape(gui);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.PauseScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    escape(gui);
+    assert!(!gui.is_open(), "{:?}", gui.take_last_error());
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for the options screens: {unimpl:#?}"
+    );
+}
+
+/// Every pause-menu screen opens and closes without Unimplemented entries or Java exceptions,
+/// like scripts/checks/pause-all.txt does through the whole client (which needs a server). GUI
+/// 480x270 at scale 2; the button coordinates are vanilla's layout (see the script).
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn pause_screens_open_and_close() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    reset(gui);
+    h.clear_unimplemented().unwrap();
+    open(&h, haste_jvm::ScreenKind::Pause);
+    // every frame at the script client's size: a render at another size re-lays the widgets out
+    let frame = |mouse: (f64, f64)| -> haste_core::gui::GuiFrame {
+        gui.render(480, 270, 2, mouse, 0.5)
+            .unwrap_or_else(|e| panic!("render: {e}"))
+    };
+    frame((-1.0, -1.0));
+    // Advancements (row 1 left): no server has sent the tree, so vanilla's empty label shows
+    click(gui, 187.0, 110.0);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.advancements.AdvancementsScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    let f = frame((0.0, 0.0));
+    assert!(
+        texts(&f).iter().any(|x| x == "Advancements"),
+        "{:?}",
+        texts(&f)
+    );
+    escape(gui);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.PauseScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    // Statistics (row 1 right): the loading tabs (the server's values never arrive here)
+    click(gui, 293.0, 110.0);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.achievement.StatsScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    escape(gui);
+    // the icon row: report bugs (a link confirmation), player reporting (social interactions)
+    click(gui, 204.0, 134.0);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.ConfirmLinkScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    escape(gui);
+    click(gui, 276.0, 134.0);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.social.SocialInteractionsScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    escape(gui);
+    // World Options (row 5 right): the dedicated-server rows (no integrated server)
+    click(gui, 293.0, 158.0);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.WorldOptionsScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    let f = frame((0.0, 0.0));
+    for want in ["Difficulty", "Edit Game Rules...", "Restrictions..."] {
+        assert!(
+            texts(&f).iter().any(|x| x.contains(want)),
+            "missing {want:?} in {:?}",
+            texts(&f)
+        );
+    }
+    escape(gui);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.PauseScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    escape(gui);
+    assert!(!gui.is_open(), "{:?}", gui.take_last_error());
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for the pause screens: {unimpl:#?}"
+    );
+}
+
+/// Picking German in Options > Language reloads the client's de_de translations into vanilla's
+/// Language at once (LanguageManager's reload listener over the client's resources as
+/// CLIENT_RESOURCES), so every screen draws in German: the pause menu shows "Zurück zum Spiel".
+/// The whole-client version (with the saved options.txt) is scripts/checks/language.txt.
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn language_switch_german() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    reset(gui);
+    h.clear_unimplemented().unwrap();
+    open(&h, haste_jvm::ScreenKind::Pause);
+    let frame = |mouse: (f64, f64)| -> haste_core::gui::GuiFrame {
+        gui.render(480, 270, 2, mouse, 0.5)
+            .unwrap_or_else(|e| panic!("render: {e}"))
+    };
+    frame((-1.0, -1.0));
+    // Options... (row 5 left) then Language... (row 3 left), by coordinate (language-independent)
+    click(gui, 165.0, 158.0);
+    click(gui, 160.0, 150.0);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.options.LanguageSelectScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    // the client's pack.mcmeta language section lists every language (the list opens on en_us)
+    let f = frame((0.0, 0.0));
+    assert!(
+        texts(&f).iter().any(|x| x == "English (US)"),
+        "language list: {:?}",
+        texts(&f)
+    );
+    // the search box has initial focus: filter to German and pick Germany
+    for c in "deutsch".chars() {
+        gui.char_typed(c, 0);
+    }
+    let f = frame((0.0, 0.0));
+    let (ex, ey) = text_pos(&f, "Deutsch (Deutschland)").expect("German entry after the filter");
+    click(gui, f64::from(ex), f64::from(ey));
+    let f = frame((0.0, 0.0));
+    let (dx, dy) = text_pos(&f, "Done").expect("Done button");
+    click(gui, f64::from(dx), f64::from(dy));
+    // Done applied and reloaded; back to the pause menu, now German
+    escape(gui);
+    let f = frame((0.0, 0.0));
+    assert!(
+        texts(&f).iter().any(|x| x == "Zurück zum Spiel"),
+        "pause menu after switching to German: {:?}",
+        texts(&f)
+    );
+    // switch back to English so the shared JVM (and the saved options.txt) stay en_us
+    click(gui, 165.0, 158.0);
+    click(gui, 160.0, 150.0);
+    for c in "english".chars() {
+        gui.char_typed(c, 0);
+    }
+    let f = frame((0.0, 0.0));
+    let (ex, ey) = text_pos(&f, "English (US)").expect("English entry");
+    click(gui, f64::from(ex), f64::from(ey));
+    let f = frame((0.0, 0.0));
+    let (dx, dy) = text_pos(&f, "Fertig").expect("German Done button");
+    click(gui, f64::from(dx), f64::from(dy));
+    escape(gui);
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented for the language switch: {unimpl:#?}"
+    );
+}
+
+fn click(gui: &haste_jvm::GuiPipeline, x: f64, y: f64) {
+    gui.mouse(x, y, Some((haste_jvm::keys::MOUSE_LEFT, true)));
+    gui.mouse(x, y, Some((haste_jvm::keys::MOUSE_LEFT, false)));
+}
+
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn pack_selection_screen_lists_folder_packs() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    reset(gui);
+    h.clear_unimplemented().unwrap();
+    // A folder pack in the JVM game dir's resourcepacks (vanilla's FolderRepositorySource
+    // discovers it): the screen must list it under Available, and Done must commit the
+    // selection through Minecraft.reloadResourcePacks (the ClientImpl proxy).
+    let game_dir = h.config().game_dir.clone();
+    let pack = game_dir.join("resourcepacks/jvm-probe-pack");
+    std::fs::create_dir_all(pack.join("assets/minecraft/textures/block")).unwrap();
+    std::fs::write(
+        pack.join("pack.mcmeta"),
+        r#"{"pack":{"min_format":97,"max_format":97,"description":"probe"}}"#,
+    )
+    .unwrap();
+    open(&h, haste_jvm::ScreenKind::Packs);
+    assert!(gui.is_open());
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.packs.PackSelectionScreen")
+    );
+    let f = render(&h, (0.0, 0.0));
+    let t = texts(&f);
+    for want in ["Select Resource Packs", "Done"] {
+        assert!(t.iter().any(|x| x == want), "missing {want:?} in {t:?}");
+    }
+    assert!(
+        t.iter().any(|x| x == "jvm-probe-pack"),
+        "the folder pack should be listed: {t:?}"
+    );
+    // The entry's list by its x position: at 320 wide the Available (left) list renders
+    // around x < 160 and the Selected (right) one above it.
+    let entry_selected =
+        |f: &haste_core::gui::GuiFrame| text_pos(f, "jvm-probe-pack").is_some_and(|(x, _)| x > 160);
+    // Clicking the entry's 32x32 icon selects or unselects it (the title itself does
+    // nothing, TransferableSelectionList.PackEntry.mouseClicked); the title renders at
+    // the icon's right + 2, one pixel lower. Selecting takes a click anywhere on the
+    // icon; unselecting takes its left half (SelectableEntry.mouseOverLeftHalf).
+    let click_entry =
+        |gui: &haste_jvm::GuiPipeline, f: &haste_core::gui::GuiFrame, unselect: bool| {
+            let (x, y) = text_pos(f, "jvm-probe-pack").expect("the entry renders");
+            let dx = if unselect { -26 } else { -18 };
+            click(gui, f64::from(x + dx), f64::from(y + 15));
+        };
+    // A previous run may have committed the same selection already (the JVM's Options
+    // object persists for the process, and options.txt in its game dir across runs):
+    // unselect and commit first when needed, so the selection this test commits is a
+    // change (vanilla's Options.updateResourcePacks only reloads on a changed list).
+    if entry_selected(&f) {
+        click_entry(gui, &f, true);
+        let f = render(&h, (0.0, 0.0));
+        assert!(!entry_selected(&f), "the unselect click should move it out");
+        let (x, y) = text_pos(&f, "Done").expect("the Done button renders");
+        click(gui, x as f64, y as f64);
+        assert!(!gui.is_open(), "Done should close the screen");
+        assert_eq!(
+            gui.take_resource_pack_ids(),
+            Some(vec!["vanilla".to_string()]),
+            "the unselected commit should reload too"
+        );
+        open(&h, haste_jvm::ScreenKind::Packs);
+    }
+    let f = render(&h, (0.0, 0.0));
+    assert!(!entry_selected(&f), "the pack should start unselected");
+    click_entry(gui, &f, false);
+    let f = render(&h, (0.0, 0.0));
+    assert!(entry_selected(&f), "the entry click should select the pack");
+    let (x, y) = text_pos(&f, "Done").expect("the Done button renders");
+    click(gui, x as f64, y as f64);
+    let selected = gui.take_resource_pack_ids();
+    assert_eq!(
+        selected,
+        Some(vec![
+            "vanilla".to_string(),
+            "file/jvm-probe-pack".to_string()
+        ]),
+        "Done should commit the selection (bottom first)"
+    );
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for PackSelectionScreen: {unimpl:#?}"
+    );
+}
+
+fn escape(gui: &haste_jvm::GuiPipeline) {
+    gui.key(
+        haste_jvm::keys::ESCAPE,
+        haste_jvm::keys::keycode(haste_jvm::keys::ESCAPE),
+        0,
+        true,
+    );
+    gui.key(
+        haste_jvm::keys::ESCAPE,
+        haste_jvm::keys::keycode(haste_jvm::keys::ESCAPE),
+        0,
+        false,
+    );
+}
+
+/// The sign editor: `block_entity_data` + `open_sign_editor` open vanilla's `SignEditScreen`,
+/// typing fills lines (Down moves to the next), and closing sends `sign_update` with the text.
+/// Mirrors scripts/checks/edit-sign.txt without a server (the packets are the same wire bytes).
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM, data generator reports)"]
+fn sign_editor_screen() {
+    use haste_jvm::keys;
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    reset(gui);
+    h.clear_unimplemented().unwrap();
+    gui.with_state(|s| {
+        s.in_world = true;
+        s.vitals.health = 20.0;
+    });
+    // a sign block entity exists (block_entity_data), and the server opens its editor
+    let pos = haste_core::BlockPos::new(1, 65, 2);
+    gui.packet(&block_entity_data(pos, block_entity_id("minecraft:sign")))
+        .unwrap();
+    gui.packet(&open_sign_editor(pos)).unwrap();
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.inventory.SignEditScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    // the editor draws its title and the Done button
+    let f = render(&h, (0.0, 0.0));
+    assert!(
+        texts(&f).contains(&"Edit Sign Message".to_string()),
+        "title: {:?}",
+        texts(&f)
+    );
+    // typing fills line 0; Down moves to line 1 and typing fills that
+    type_text(&h, "first line");
+    assert!(
+        texts(&render(&h, (0.0, 0.0))).contains(&"first line".to_string()),
+        "line 0 typed"
+    );
+    press(&h, keys::DOWN);
+    type_text(&h, "second line");
+    let t = texts(&render(&h, (0.0, 0.0)));
+    assert!(
+        t.contains(&"first line".to_string()) && t.contains(&"second line".to_string()),
+        "both lines: {t:?}"
+    );
+    // closing (Escape is Done) sends sign_update with the four lines and the front slot
+    press(&h, keys::ESCAPE);
+    assert!(!gui.is_open(), "{:?}", gui.take_last_error());
+    let out = outgoing(&h);
+    let sign_update = serverbound_id("minecraft:sign_update");
+    let (_, body) = out
+        .iter()
+        .find(|(id, _)| *id == sign_update)
+        .expect("sign_update sent");
+    let mut i = 0;
+    let got_pos = i64::from_be_bytes(body[i..i + 8].try_into().unwrap());
+    i += 8;
+    assert_eq!(haste_core::BlockPos::from_packed(got_pos), pos, "sign pos");
+    let line = |i: &mut usize| {
+        let len = var_int(body, i) as usize;
+        let s = String::from_utf8(body[*i..*i + len].to_vec()).unwrap();
+        *i += len;
+        s
+    };
+    assert_eq!(line(&mut i), "first line");
+    assert_eq!(line(&mut i), "second line");
+    assert_eq!(line(&mut i), "");
+    assert_eq!(line(&mut i), "");
+    assert_eq!(var_int(body, &mut i), 1, "front slot");
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for the sign editor: {unimpl:#?}"
+    );
+    gui.with_state(|s| s.in_world = false);
+}
+
+/// The book editor: `openItemGui` (a use of the held writable book) opens vanilla's
+/// BookEditScreen, typing fills the page, "Sign" opens BookSignScreen, the title is typed and
+/// "Sign and Close" sends the edit_book packet (slot, pages, title). Mirrors
+/// scripts/checks/edit-book.txt without a server.
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM, data generator reports)"]
+fn book_editor_screen() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    reset(gui);
+    h.clear_unimplemented().unwrap();
+    gui.with_state(|s| {
+        s.in_world = true;
+        s.selected_slot = 0;
+    });
+    // the local player as the login would have introduced it (the book's sign screen names
+    // the author from the profile)
+    gui.set_player(1, "SignAuthor", 0x0102_0304_0506_0708_090a_0b0c_0d0e)
+        .unwrap();
+    gui.set_inventory_slot(0, &stack("minecraft:writable_book", 1))
+        .unwrap();
+    // the use of the held writable book opens the editor (vanilla WritableBookItem.use)
+    gui.open_item_gui(0).unwrap();
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.inventory.BookEditScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    // the editor draws the page (page indicator "Page 1 of 1") and the buttons
+    type_text(&h, "Page one text");
+    let t = texts(&render(&h, (0.0, 0.0)));
+    assert!(
+        t.contains(&"Page one text".to_string()),
+        "typed page: {t:?}"
+    );
+    // "Sign" opens the sign screen (button bottom-left of the book gui)
+    let f = render(&h, (0.0, 0.0));
+    let sign = f
+        .commands
+        .iter()
+        .find_map(|c| match c {
+            haste_core::gui::GuiCommand::Text { text, x, y, .. } if text == "Sign" => {
+                Some((*x as f64, *y as f64))
+            }
+            _ => None,
+        })
+        .expect("the Sign button's label");
+    click(gui, sign.0, sign.1);
+    gui.render(320, 240, 2, sign, 0.5).unwrap();
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.inventory.BookSignScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    // the title is typed into the title box
+    type_text(&h, "MyBook");
+    let t = texts(&render(&h, (0.0, 0.0)));
+    assert!(t.contains(&"MyBook".to_string()), "typed title: {t:?}");
+    // "Sign and Close" sends the edit_book packet with slot, the page and the title
+    let f = render(&h, (0.0, 0.0));
+    let finalize = f
+        .commands
+        .iter()
+        .find_map(|c| match c {
+            haste_core::gui::GuiCommand::Text { text, x, y, .. } if text == "Sign and Close" => {
+                Some((*x as f64, *y as f64))
+            }
+            _ => None,
+        })
+        .expect("the Sign and Close button's label");
+    click(gui, finalize.0, finalize.1);
+    gui.render(320, 240, 2, finalize, 0.5).unwrap();
+    assert!(!gui.is_open(), "{:?}", gui.take_last_error());
+    let out = outgoing(&h);
+    let edit_book = serverbound_id("minecraft:edit_book");
+    let (_, body) = out
+        .iter()
+        .find(|(id, _)| *id == edit_book)
+        .expect("edit_book sent");
+    let mut i = 0;
+    assert_eq!(
+        var_int(body, &mut i),
+        0,
+        "slot 0 (the selected hotbar slot)"
+    );
+    let pages = var_int(body, &mut i);
+    assert_eq!(pages, 1, "one page");
+    let len = var_int(body, &mut i) as usize;
+    let page = String::from_utf8(body[i..i + len].to_vec()).unwrap();
+    i += len;
+    assert_eq!(page, "Page one text");
+    // the title is present (an Optional: a boolean byte, then the string)
+    assert_eq!(body[i], 1, "the title is present");
+    i += 1;
+    let tlen = var_int(body, &mut i) as usize;
+    let title = String::from_utf8(body[i..i + tlen].to_vec()).unwrap();
+    assert_eq!(title, "MyBook");
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for the book editor: {unimpl:#?}"
+    );
     gui.with_state(|s| s.in_world = false);
 }

@@ -31,7 +31,44 @@ public final class ConnectionImpl {
     static final net.minecraft.client.multiplayer.chat.ChatLog CHAT_LOG = new net.minecraft.client.multiplayer.chat.ChatLog(1024);
     public static net.minecraft.client.multiplayer.chat.ChatLog chatLog(net.minecraft.client.multiplayer.chat.report.ReportingContext r) { return CHAT_LOG; }
 
+    /**
+     * No reports can be sent from Haste (offline mode, like vanilla's {@code UserApiService.OFFLINE}:
+     * {@code canSendReports} is false). The social interactions screen asks the sender before
+     * offering the report button; {@code send} is never called while disabled.
+     */
+    private static final net.minecraft.client.multiplayer.chat.report.AbuseReportSender SENDER =
+        new net.minecraft.client.multiplayer.chat.report.AbuseReportSender() {
+            @Override public java.util.concurrent.CompletableFuture<com.mojang.datafixers.util.Unit> send(
+                java.util.UUID id, net.minecraft.client.multiplayer.chat.report.ReportType type,
+                com.mojang.authlib.minecraft.report.AbuseReport report) {
+                throw new UnsupportedOperationException("no reporting in Haste");
+            }
+            @Override public boolean isEnabled() { return false; }
+        };
+    public static net.minecraft.client.multiplayer.chat.report.AbuseReportSender sender(
+        net.minecraft.client.multiplayer.chat.report.ReportingContext r) { return SENDER; }
+
+    /**
+     * The pause screen's Disconnect / "Save and Quit" goes through the report draft check
+     * (vanilla: a draft asks whether to discard it first). Haste has no report drafts, so the
+     * action runs at once, like vanilla's no-draft path.
+     */
+    public static void draftReportHandled(net.minecraft.client.multiplayer.chat.report.ReportingContext r,
+        net.minecraft.client.Minecraft minecraft, net.minecraft.client.gui.screens.Screen lastScreen,
+        Runnable onDiscard, boolean quitToTitle) {
+        onDiscard.run();
+    }
+
     public static net.minecraft.world.flag.FeatureFlagSet enabledFeatures(ClientPacketListener c) { return LevelImpl.features; }
+
+    /**
+     * Whether the joined server enables the given flags (vanilla: {@code ClientPacketListener.isFeatureEnabled},
+     * a subset test over the configuration phase's {@code update_enabled_features} set). Vanilla's kept
+     * game-mode bodies ask this before sending a creative slot's item ({@code handleCreativeModeItemAdd/Drop}).
+     */
+    public static boolean isFeatureEnabled(ClientPacketListener c, net.minecraft.world.flag.FeatureFlagSet required) {
+        return required.isSubsetOf(enabledFeatures(c));
+    }
     /** Players seen this session (social interactions screen): not tracked yet. */
     public static java.util.Map<java.util.UUID, net.minecraft.client.multiplayer.PlayerInfo> getSeenPlayers(ClientPacketListener c) { return java.util.Map.of(); }
 
@@ -47,9 +84,10 @@ public final class ConnectionImpl {
     /** Serverbound packets from vanilla code: encoded with vanilla's codec and sent by Rust. */
     public static void send(net.minecraft.client.multiplayer.ClientCommonPacketListenerImpl c, net.minecraft.network.protocol.Packet<?> p) { Packets.send(p); }
 
-    /** Server links (custom pause-menu links) are not received by Rust yet: none. */
+    /** Server links (custom pause-menu links) from the configuration phase; set by Bridge.setServerLinks. */
+    static net.minecraft.server.ServerLinks SERVER_LINKS = net.minecraft.server.ServerLinks.EMPTY;
     public static net.minecraft.server.ServerLinks serverLinks(net.minecraft.client.multiplayer.ClientCommonPacketListenerImpl c) {
-        return net.minecraft.server.ServerLinks.EMPTY;
+        return SERVER_LINKS;
     }
 
     private static net.minecraft.client.multiplayer.ClientSuggestionProvider suggestions;
@@ -71,6 +109,9 @@ public final class ConnectionImpl {
         return Handlers.commands;
     }
 
+    /** The server's advancements (real vanilla Java, fed by the update_advancements packets). */
+    public static net.minecraft.client.multiplayer.ClientAdvancements getAdvancements(ClientPacketListener c) { return Proxies.advancements; }
+
     /** The scoreboard is the client's own (scoreboard packets, see {@link Handlers}). */
     public static net.minecraft.world.scores.Scoreboard scoreboard(ClientPacketListener c) { return Handlers.SCOREBOARD; }
 
@@ -88,13 +129,42 @@ public final class ConnectionImpl {
     public static void broadcastClientInformation(ClientPacketListener c, net.minecraft.server.level.ClientInformation information) {}
 
     /**
-     * The creative inventory's search trees: vanilla's own object with empty trees. The creative search
-     * finds nothing (the index would need the synced item registry's display names and tags, forwarded to
-     * Java like other registry data — later), but the screen opens and browsing works. Reloads are no-ops:
-     * vanilla's `reloaders` start empty and nothing fills them.
+     * The creative inventory's search trees: vanilla's own object (tier 3, plain data holder). The screen
+     * fills it itself: the creative screen's constructor and per-tick tab refresh call
+     * {@code updateCreativeTooltips} and {@code updateCreativeTags} (vanilla:
+     * {@code CreativeModeInventoryScreen.tryRebuildTabContents}), and a play-phase {@code update_tags}
+     * rebuilds the tag tree (vanilla: {@code ClientPacketListener.handleUpdateTags}, see
+     * {@link Registries#tags}); both build on vanilla's background executor, off the render thread.
      */
     public static net.minecraft.client.multiplayer.SessionSearchTrees searchTrees(ClientPacketListener c) {
         return SEARCH_TREES;
     }
-    private static final net.minecraft.client.multiplayer.SessionSearchTrees SEARCH_TREES = new net.minecraft.client.multiplayer.SessionSearchTrees();
+    static final net.minecraft.client.multiplayer.SessionSearchTrees SEARCH_TREES = new net.minecraft.client.multiplayer.SessionSearchTrees();
+
+    /**
+     * The server's recipe data ({@code update_recipes}, whose kept handler stores it on the proxy):
+     * the real vanilla container, read off the proxy like vanilla's own field. Before the packet
+     * arrives it is vanilla's field-initialiser value (an empty container).
+     */
+    private static final java.lang.invoke.VarHandle RECIPES;
+    static {
+        try {
+            RECIPES = java.lang.invoke.MethodHandles.privateLookupIn(
+                net.minecraft.client.multiplayer.ClientPacketListener.class, java.lang.invoke.MethodHandles.lookup())
+                .findVarHandle(net.minecraft.client.multiplayer.ClientPacketListener.class, "recipes",
+                    net.minecraft.client.multiplayer.ClientRecipeContainer.class);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+    public static net.minecraft.client.multiplayer.ClientRecipeContainer recipes(ClientPacketListener c) {
+        net.minecraft.client.multiplayer.ClientRecipeContainer r =
+            (net.minecraft.client.multiplayer.ClientRecipeContainer) RECIPES.get(c);
+        if (r == null) {
+            r = new net.minecraft.client.multiplayer.ClientRecipeContainer(java.util.Map.of(),
+                net.minecraft.world.item.crafting.SelectableRecipe.SingleInputSet.empty());
+            RECIPES.set(c, r);
+        }
+        return r;
+    }
 }

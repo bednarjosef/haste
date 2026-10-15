@@ -19,7 +19,7 @@ import net.minecraft.client.input.MouseButtonInfo;
  * method runs vanilla screen code with the 26.3 signatures.
  */
 public final class Bridge {
-    public static final int CHAT = 0, PAUSE = 1, INVENTORY = 2, COMMAND = 3, TITLE = 4, OPTIONS = 5, MULTIPLAYER = 6;
+    public static final int CHAT = 0, PAUSE = 1, INVENTORY = 2, COMMAND = 3, TITLE = 4, OPTIONS = 5, MULTIPLAYER = 6, SELECT_WORLD = 7, PACKS = 8;
 
     private int pressedButton = -1;
     private double lastX, lastY;
@@ -44,6 +44,8 @@ public final class Bridge {
         GfxImpl.height = 240;
         Proxies.create();
         ClientImpl.running = true;
+        // the saved language (options.txt "lang") loads before the first frame, like vanilla's startup reload
+        ClientImpl.getLanguageManager(Proxies.minecraft);
         return new Bridge();
     }
 
@@ -60,11 +62,27 @@ public final class Bridge {
             case INVENTORY -> new InventoryScreen(Proxies.player);
             case TITLE -> new TitleScreen();
             case OPTIONS -> new OptionsScreen(ClientImpl.screen, Proxies.options);
+            case PACKS -> {
+                // the parent this pack screen returns to on Done (vanilla: the OptionsScreen
+                // that opened it; captured before the pack screen becomes the current one)
+                Screen parent = ClientImpl.screen;
+                yield new net.minecraft.client.gui.screens.packs.PackSelectionScreen(
+                    ClientImpl.getResourcePackRepository(Proxies.minecraft),
+                    // OptionsScreen.applyPacks: save the selection, reload, back to the opener
+                    repo -> {
+                        Proxies.options.updateResourcePacks(repo);
+                        Proxies.gui.setScreen(parent);
+                    },
+                    ClientImpl.getResourcePackDirectory(Proxies.minecraft),
+                    net.minecraft.network.chat.Component.translatable("resourcePack.title"));
+            }
             case MULTIPLAYER -> new JoinMultiplayerScreen(new TitleScreen());
+            case SELECT_WORLD -> new net.minecraft.client.gui.screens.worldselection.SelectWorldScreen(new TitleScreen());
             default -> throw new IllegalArgumentException("screen kind " + kind);
         };
         try {
             Proxies.gui.setScreen(s);
+            OptionBridge.releaseAll();
         } catch (Throwable t) {
             // Gui.setScreen leaves the new screen set even when its init throws: a screen that could not
             // open must not stay half-open (the next open would call removed() on it, and options
@@ -76,12 +94,16 @@ public final class Bridge {
         }
     }
 
-    public void close() { Proxies.gui.setScreen(null); }
+    public void close() {
+        Proxies.gui.setScreen(null);
+        OptionBridge.restoreToggles();
+    }
 
     /**
      * Drops everything a test (or a disconnecting client) leaves behind: the chat log and its scroll
      * position (the history stays), the held mouse button and its position, the screen currently open
-     * and whether vanilla code still believes the mouse is grabbed.
+     * and whether vanilla code still believes the mouse is grabbed. The FOV option goes back to its
+     * default (an options.txt a real run saved in the game directory would otherwise leak in).
      */
     public void resetForTest() {
         this.pressedButton = -1;
@@ -94,6 +116,7 @@ public final class Bridge {
         Proxies.hud.getChat().resetChatScroll();
         Proxies.gui.setScreen(null);
         MouseImpl.grabbed = false;
+        Proxies.options.fov().set(70);
     }
 
     public boolean isOpen() { return ClientImpl.screen != null; }
@@ -133,6 +156,7 @@ public final class Bridge {
     /** One 20 Hz client tick: the HUD (chat fade, titles, overlay message), the chat queue and the open screen. */
     public void tick() {
         Mirror.update();
+        OptionBridge.tick();
         if (Mirror.inWorld()) {
             // a dead player (killed, or joined while dead) sees the death screen
             if (Mirror.health() <= 0f && !Mirror.flag(Mirror.F_IMMEDIATE_RESPAWN)
@@ -155,6 +179,9 @@ public final class Bridge {
         Proxies.set(Proxies.player, "uuid", java.util.UUID.class, uuid);
         Proxies.set(Proxies.player, "stringUUID", String.class, uuid.toString());
         PlayerImpl.profile = new com.mojang.authlib.GameProfile(uuid, name);
+        // Player's own field (its constructor would set it; the proxy's is null without this):
+        // `Player.getName` reads it, e.g. the book's sign screen names the author.
+        Proxies.set(Proxies.player, "gameProfile", com.mojang.authlib.GameProfile.class, PlayerImpl.profile);
     }
 
     /** The joined world's dimension type (its id in the synchronised dimension_type registry). */
@@ -167,6 +194,37 @@ public final class Bridge {
         LevelImpl.features = net.minecraft.world.flag.FeatureFlags.REGISTRY.fromNames(l, id -> {});
     }
 
+    /**
+     * The pause-menu server links (configuration phase), one string per link:
+     * {@code "<b|c>\t<label>\t<url>"} (b = built-in label id, c = custom label text — flattened;
+     * the wire carries a component). Built like ClientCommonPacketListenerImpl.handleServerLinks:
+     * untrusted strings are parsed as URIs, invalid ones dropped.
+     */
+    public void setServerLinks(String[] links) {
+        java.util.List<net.minecraft.server.ServerLinks.Entry> entries = new java.util.ArrayList<>();
+        for (String l : links) {
+            String[] parts = l.split("\t", 3);
+            if (parts.length != 3) continue;
+            try {
+                java.net.URI uri = new java.net.URI(parts[2]);
+                com.mojang.datafixers.util.Either<net.minecraft.server.ServerLinks.KnownLinkType, net.minecraft.network.chat.Component> type;
+                if (parts[0].equals("b")) {
+                    int id = Integer.parseInt(parts[1]);
+                    net.minecraft.server.ServerLinks.KnownLinkType[] all = net.minecraft.server.ServerLinks.KnownLinkType.values();
+                    // continuous ids (ByIdMap.ZERO out-of-bounds strategy): index, clamped to the first
+                    net.minecraft.server.ServerLinks.KnownLinkType known = all[Math.floorMod(id, all.length)];
+                    type = com.mojang.datafixers.util.Either.left(known);
+                } else {
+                    type = com.mojang.datafixers.util.Either.right(net.minecraft.network.chat.Component.literal(parts[1]));
+                }
+                entries.add(new net.minecraft.server.ServerLinks.Entry(type, uri));
+            } catch (java.net.URISyntaxException | NumberFormatException e) {
+                // like vanilla: an invalid link is dropped with a warning
+            }
+        }
+        ConnectionImpl.SERVER_LINKS = new net.minecraft.server.ServerLinks(java.util.List.copyOf(entries));
+    }
+
     /** Tab held: the player list overlay is shown while the key is down (vanilla's tab list). */
     public void setTabListVisible(boolean visible) {
         Proxies.options.keyPlayerList.setDown(visible);
@@ -175,13 +233,17 @@ public final class Bridge {
 
     /**
      * The connection was lost or the server kicked us: vanilla's disconnect screen with the reason (a text component
-     * in its JSON form).
+     * in its JSON form). In menu mode the open screen (the connecting screen's parent, e.g. the server list) is the
+     * parent, so the screen's button returns there like vanilla's ConnectScreen failure path.
      */
     public void disconnected(String reasonJson) {
         net.minecraft.network.chat.Component reason = net.minecraft.network.chat.ComponentSerialization.CODEC
             .parse(com.mojang.serialization.JsonOps.INSTANCE, com.google.gson.JsonParser.parseString(reasonJson))
             .result().orElse(net.minecraft.network.chat.Component.literal(reasonJson));
-        Proxies.gui.setScreen(new net.minecraft.client.gui.screens.DisconnectedScreen(null,
+        Screen parent = Mirror.inWorld() ? null
+            : ClientImpl.screen instanceof net.minecraft.client.gui.screens.ConnectScreen c ? c.parent
+            : ClientImpl.screen;
+        Proxies.gui.setScreen(new net.minecraft.client.gui.screens.DisconnectedScreen(parent,
             net.minecraft.network.chat.Component.translatable("disconnect.lost"), reason));
     }
 
@@ -239,6 +301,20 @@ public final class Bridge {
     /** Whether a screen asked for the mouse to be grabbed (e.g. "Back to Game") and not released since. */
     public boolean mouseGrabbed() { return MouseImpl.grabbed; }
 
+    // ---- game input through the KeyMappings (haste.gui.OptionBridge) ----
+
+    /** A game key event (SDL3 scancode) mirrored into the KeyMappings; no screen may be open. */
+    public void gameKey(int scancode, boolean pressed) { OptionBridge.gameKey(scancode, pressed); }
+
+    /** A game mouse button (vanilla numbering) mirrored into the KeyMappings. */
+    public void gameMouse(int button, boolean pressed) { OptionBridge.gameMouse(button, pressed); }
+
+    /** The down state of the movement and action KeyMappings as a bitmask (OptionBridge.B_*). */
+    public int gameInput() { return OptionBridge.gameInput(); }
+
+    /** Clicks of the action KeyMappings not yet consumed, as a bitmask (OptionBridge.C_*). */
+    public int consumeClicks() { return OptionBridge.consumeClicks(); }
+
     /** Rust grabbed/released the mouse itself (e.g. on opening a screen). */
     public void setMouseGrabbed(boolean g) { MouseImpl.grabbed = g; }
 
@@ -284,9 +360,18 @@ public final class Bridge {
         }
     }
 
+    /** A use opened the command block editor (vanilla `LocalPlayer.openCommandBlock`). */
+    public void openCommandBlock(int x, int y, int z) {
+        Handlers.openCommandBlock(x, y, z);
+    }
+
+    /** A use opened the writable book's editor (vanilla `LocalPlayer.openItemGui`). */
+    public void openItemGui(int hand) {
+        Handlers.openItemGui(hand);
+    }
+
     /** Names of the server's commands the local player may use (the root of the command tree), one per line. */
-    public String commandNames() {
-        var src = ConnectionImpl.getSuggestionsProvider(Proxies.connection);
+    public String commandNames() {        var src = ConnectionImpl.getSuggestionsProvider(Proxies.connection);
         StringBuilder sb = new StringBuilder();
         for (var n : Handlers.commands.getRoot().getChildren()) {
             if (n.canUse(src)) sb.append(n.getName()).append('\n');

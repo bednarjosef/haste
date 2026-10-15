@@ -152,6 +152,12 @@ pub struct ResolvedModel {
     pub(crate) gui_display: Option<DisplayTransform>,
     /// `display.firstperson_righthand`, likewise.
     pub(crate) firstperson_display: Option<DisplayTransform>,
+    /// `display.thirdperson_righthand`, likewise (held items on mobs and players).
+    pub(crate) thirdperson_display: Option<DisplayTransform>,
+    /// `display.head`, likewise (heads and hats worn on the head).
+    pub(crate) head_display: Option<DisplayTransform>,
+    /// `display.ground`, likewise (dropped item entities).
+    pub(crate) ground_display: Option<DisplayTransform>,
     /// `display.fixed` (item frames and other fixed mounts), likewise.
     pub(crate) fixed_display: Option<DisplayTransform>,
 }

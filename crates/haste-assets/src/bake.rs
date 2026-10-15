@@ -609,7 +609,10 @@ mod tests {
             ambientocclusion: true,
             gui_light: false,
             gui_display: None,
+            ground_display: None,
             firstperson_display: None,
+            thirdperson_display: None,
+            head_display: None,
             fixed_display: None,
         };
         let mut resolved_models = HashMap::new();
