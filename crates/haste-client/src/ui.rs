@@ -336,6 +336,13 @@ impl Ui {
         self.gui().with_state(f)
     }
 
+    /// Whether any hotbar slot (vanilla `Inventory` 0-8) holds an item. The check scripts wait
+    /// on this after the runner's RCON `give`: on a busy shared server the inventory sync can
+    /// lag seconds behind the command's answer.
+    pub fn hotbar_has_items(&self) -> bool {
+        self.state(|s| s.inventory.iter().take(9).any(|s| !s.is_empty()))
+    }
+
     /// One 20 Hz client tick (game thread).
     pub fn tick(&self) {
         self.gui().tick();

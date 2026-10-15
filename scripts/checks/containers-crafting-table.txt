@@ -13,10 +13,10 @@ wait_until joined
 wait_until settled
 screenshot ccraft-setup
 # The runner now tps us to (125.5, 71, 2.5) facing the table, clears the inventory,
-# gives the items and places the table; wait for the log to appear in the hotbar. 10 s:
-# on a busy test server the player entity lags behind the client's join by several
-# seconds, so the runner's RCON setup needs the room.
-wait 200
+# gives the items and places the table. Waiting for the hotbar (not a fixed delay)
+# absorbs the busy shared server: the give's inventory sync can lag its RCON answer
+# by many seconds.
+wait_until hotbar_item
 # Open the table: look at it and use (the runner placed it at (125, 71, 5), on the
 # plain's ground so its north face is visible from the camera; from the eye at (125.5,
 # 72.62, 2.5), pitch 20 aims at the face at y ~71.7).
@@ -63,6 +63,6 @@ key E
 wait 20
 wait_until screen_closed
 screenshot ccraft-final
-# 5 s tail: the runner reads `data get entity ... Inventory` from this frame on, and the
-# shared test server can take a second to answer.
-wait 100
+# 10 s tail: the runner reads `data get entity ... Inventory` from this frame on, and
+# the shared test server can take seconds to answer.
+wait 200

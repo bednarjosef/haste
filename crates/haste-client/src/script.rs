@@ -256,6 +256,8 @@ pub enum Condition {
     Settled,
     ScreenOpen,
     ScreenClosed,
+    /// The hotbar holds at least one item (the runner's RCON `give` has arrived).
+    HotbarItem,
 }
 
 impl Condition {
@@ -265,6 +267,7 @@ impl Condition {
             "settled" => Ok(Condition::Settled),
             "screen_open" => Ok(Condition::ScreenOpen),
             "screen_closed" => Ok(Condition::ScreenClosed),
+            "hotbar_item" => Ok(Condition::HotbarItem),
             _ => Err(ScriptError::UnknownCondition {
                 name: name.to_owned(),
                 line,
@@ -278,6 +281,7 @@ impl Condition {
             Condition::Settled => state.settled,
             Condition::ScreenOpen => state.screen_open,
             Condition::ScreenClosed => !state.screen_open,
+            Condition::HotbarItem => state.hotbar_item,
         }
     }
 
@@ -287,6 +291,7 @@ impl Condition {
             Condition::Settled => "settled",
             Condition::ScreenOpen => "screen_open",
             Condition::ScreenClosed => "screen_closed",
+            Condition::HotbarItem => "hotbar_item",
         }
     }
 }
@@ -353,6 +358,8 @@ pub struct ScriptState {
     pub joined: bool,
     pub settled: bool,
     pub screen_open: bool,
+    /// Any hotbar slot holds an item (the RCON `give` has reached the client).
+    pub hotbar_item: bool,
 }
 
 /// A parse error. Every variant carries the 1-based source line it came from.

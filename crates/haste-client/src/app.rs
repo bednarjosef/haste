@@ -1992,6 +1992,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 joined: view.has_position,
                 settled,
                 screen_open: ui.as_ref().is_some_and(|u| u.screen_open()),
+                hotbar_item: ui.as_ref().is_some_and(|u| u.hotbar_has_items()),
             };
             // A screen opening takes the mouse (vanilla `Gui.setScreen` calls
             // `MouseHandler.releaseMouse` and `KeyMapping.releaseAll`): nothing the game held

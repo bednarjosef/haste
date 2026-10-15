@@ -857,11 +857,7 @@ fn tick_once(
         // gui.screen() == null)`). A screen taking the mouse also owns the buttons: a use
         // held from before the screen opened must not keep firing (it would re-open the
         // container the screen shows, server-side).
-        let screen_open = shared
-            .ui
-            .lock()
-            .as_ref()
-            .is_some_and(|ui| ui.screen_open());
+        let screen_open = shared.ui.lock().as_ref().is_some_and(|ui| ui.screen_open());
         // The click counts (vanilla's KeyMapping.clickCount) are drained into the player, which
         // consumes them in `Minecraft.handleKeybinds`' consumeClick loops.
         let (attack_clicks, use_clicks) = if screen_open {

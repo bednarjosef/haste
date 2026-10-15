@@ -294,15 +294,16 @@ plain_client() { # script log
 # shared world spawn is never used: other workers' players stand there and an entity in
 # the crosshair eats the use click) and zeroes the look offset (an absolute-rotation
 # teleport, so the scripts' `look` angles are what the crosshair aims); the caller's
-# commands give the items and place the blocks. The commands are retried: on a busy test
-# server the player entity lags behind the client's join by seconds, and RCON answers
-# "No player was found" until it is there.
+# commands give the items and place the blocks. The commands are retried for as long as
+# the script's `wait_until hotbar_item` window (25 s): on a busy shared test server the
+# player entity lags the client's join by many seconds, RCON answers "No player was
+# found" until it is there, and the give's inventory sync can lag its answer again.
 plain_setup() { # log shot pos commands...
   local log=$1 shot=$2 pos=$3
   shift 3
   if wait_shot "$log" "$shot" 90; then
-    local attempt
-    for attempt in 1 2 3 4 5; do
+    local end=$((SECONDS + 25))
+    while [ $SECONDS -lt $end ]; do
       rcon "gamemode survival $NAME" >/dev/null
       rcon "tp $NAME $pos" >/dev/null
       local c
@@ -311,9 +312,8 @@ plain_setup() { # log shot pos commands...
       done
       # done when a `data get` answer names the player (the commands found it)
       [ -n "$(rcon "data get entity $NAME Pos" 2>/dev/null | grep "$NAME")" ] && break
-      sleep 1
+      sleep 2
     done
-    sleep 2
   fi
 }
 
@@ -327,6 +327,8 @@ container_crafting_table() {
   plain_setup "$log" ccraft-setup "125.5 71 2.5 0 0" \
     "clear $NAME" \
     "give $NAME minecraft:oak_log 2" \
+    "fill 124 70 1 126 74 6 air replace" \
+    "fill 124 70 1 126 70 6 minecraft:stone replace" \
     "setblock 125 71 5 minecraft:crafting_table"
   local before after
   before=$(rcon "data get entity $NAME Inventory")
