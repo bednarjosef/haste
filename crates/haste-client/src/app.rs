@@ -4171,6 +4171,8 @@ struct BenchSample {
     /// Section meshes uploaded this frame and their vertex+index bytes.
     uploads: u32,
     upload_bytes: u64,
+    /// Terrain indices drawn (six per quad): the vertex-fetch load.
+    indices_drawn: u32,
     /// Frame index since the measure phase started.
     index: u32,
 }
@@ -4186,6 +4188,8 @@ struct BenchSummary {
     sections_drawn: f32,
     sections_total: f32,
     draw_calls: f32,
+    /// Terrain indices drawn per frame (six per quad): the vertex-fetch load.
+    indices_drawn: f32,
     prepare_ms: f32,
     acquire_ms: f32,
     cull_ms: f32,
@@ -4217,7 +4221,7 @@ impl BenchSummary {
              frame time: avg {:.2} ms ({:.0} FPS), 1% low {:.2} ms, worst {:.2} ms\n\
              breakdown ms: prepare {:.2} acquire {:.2} cull {:.2} encode {:.2} submit {:.2} present {:.2} | gpu main {:.2} hand {:.2} gui {:.2}\n\
              gpu main ms: sky {:.3} opaque {:.3} cutout {:.3} translucent {:.3} entities {:.3} particles {:.3} overlays {:.3}\n\
-             sections drawn {}/{} avg, draw calls {:.0} avg\n\
+             sections drawn {}/{} avg, draw calls {:.0} avg, indices {:.0} avg (quads {:.0})\n\
              render distance {} (requested {}), {}x{}, adapter {}",
             self.frames,
             meta.seconds,
@@ -4244,6 +4248,8 @@ impl BenchSummary {
             self.sections_drawn,
             self.sections_total,
             self.draw_calls,
+            self.indices_drawn,
+            self.indices_drawn / 6.0,
             meta.render_distance,
             meta.requested_render_distance,
             meta.width,
@@ -4350,6 +4356,7 @@ fn bench_summary(samples: &[BenchSample]) -> BenchSummary {
         sections_drawn: sum(samples, n, |s| s.sections_drawn as f32),
         sections_total: sum(samples, n, |s| s.sections_total as f32),
         draw_calls: sum(samples, n, |s| s.draw_calls as f32),
+        indices_drawn: sum(samples, n, |s| s.indices_drawn as f32),
         prepare_ms: t(|x| x.prepare_ms),
         acquire_ms: t(|x| x.acquire_ms),
         cull_ms: t(|x| x.cull_ms),
@@ -4568,6 +4575,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             sections_new: stats.chunk_sections_drawn.saturating_sub(prev_drawn),
             uploads: stats.uploads,
             upload_bytes: stats.upload_bytes,
+            indices_drawn: stats.indices_drawn,
             index: samples.len() as u32,
         });
         if shared.is_closed() {
@@ -4591,6 +4599,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             "sections_drawn": summary.sections_drawn,
             "sections_total": summary.sections_total,
             "draw_calls": summary.draw_calls,
+            "indices_drawn": summary.indices_drawn,
             "prepare_ms": summary.prepare_ms,
             "acquire_ms": summary.acquire_ms,
             "cull_ms": summary.cull_ms,
@@ -4821,6 +4830,7 @@ pub fn bench_window(args: &Args, seconds: u64) -> anyhow::Result<()> {
             "sections_drawn": summary.sections_drawn,
             "sections_total": summary.sections_total,
             "draw_calls": summary.draw_calls,
+            "indices_drawn": summary.indices_drawn,
             "prepare_ms": summary.prepare_ms,
             "acquire_ms": summary.acquire_ms,
             "cull_ms": summary.cull_ms,
@@ -5502,6 +5512,7 @@ impl App {
                     sections_new: stats.chunk_sections_drawn.saturating_sub(prev_drawn),
                     uploads: stats.uploads,
                     upload_bytes: stats.upload_bytes,
+                    indices_drawn: stats.indices_drawn,
                     index: bench.samples.len() as u32,
                 });
                 if started.elapsed().as_secs_f32() >= bench.seconds {
@@ -6225,6 +6236,7 @@ mod tests {
             sections_new: 0,
             uploads: 0,
             upload_bytes: 0,
+            indices_drawn: 0,
             index: 0,
         }
     }
