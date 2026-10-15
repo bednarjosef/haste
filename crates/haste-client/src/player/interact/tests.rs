@@ -1211,12 +1211,14 @@ fn a_held_attack_swings_the_hand_every_tick() {
         r.p.hand.tick(0.0, (0.0, 90.0), true, false, item, 4.0);
         progress.push(r.p.hand.attack().1);
     }
+    // The restart tick's pair falls from 3/6 to 0, so `SwingState.getAnimation`'s wrap carries
+    // the drawn value past 1 (the rest pose); the raw progress restarts at 0.
     for (got, want) in progress.iter().zip([
         0.0,
         1.0 / 6.0,
         2.0 / 6.0,
         3.0 / 6.0,
-        0.0,
+        1.0,
         1.0 / 6.0,
         2.0 / 6.0,
         3.0 / 6.0,
