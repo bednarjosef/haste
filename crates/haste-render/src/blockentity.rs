@@ -231,19 +231,17 @@ pub struct BeamSection {
 }
 
 /// A beam's render data, shared between the game thread (which walks the glass above the
-/// beacon, vanilla `BeaconBlockEntity.tick`) and the frame's instances: the sections and the
-/// animation time as vanilla's render state carries them (`floorMod(gameTime, 40) +
-/// partialTicks`).
+/// beacon, vanilla `BeaconBlockEntity.tick`) and the frame's instances: the sections only;
+/// the animation time is per frame, so it rides on the instance
+/// ([`BlockEntityInstance::beam_time`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct BeamData {
     /// The beam sections bottom-up; empty draws no beam.
     pub sections: Vec<BeamSection>,
-    /// Vanilla `BeaconRenderState.animationTime`: `floorMod(gameTime, 40) + partialTicks`.
-    pub animation_time: f32,
 }
 
 /// The end gateway beam (vanilla `EndGatewayRenderState`): the spawn/cooldown scale, the beam
-/// height in blocks, the ARGB colour and the animation time.
+/// height in blocks and the ARGB colour; the animation time rides per frame on the instance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GatewayBeam {
     /// Vanilla `state.scale` after its `sin(scale * PI)`.
@@ -252,8 +250,6 @@ pub struct GatewayBeam {
     pub height: i32,
     /// Magenta while spawning, purple while cooling down (`DyeColor.getTextureDiffuseColor`).
     pub color: u32,
-    /// `floorMod(gameTime, 40) + partialTicks`.
-    pub animation_time: f32,
 }
 
 /// A moving piston's render data, as vanilla's block entity keeps it: the moved block's state
@@ -375,6 +371,10 @@ pub struct BlockEntityInstance {
     /// The beacon's beam sections (computed by the game thread's glass walk), for
     /// `BlockEntityKind::Beacon`.
     pub beam: Option<std::sync::Arc<BeamData>>,
+    /// The beams' animation time this frame (vanilla `BeaconRenderState.animationTime`:
+    /// `floorMod(gameTime, 40) + partialTicks`), for `BlockEntityKind::Beacon` and
+    /// `EndGateway`.
+    pub beam_time: f32,
     /// The end gateway's beam, for `BlockEntityKind::EndGateway`.
     pub gateway_beam: Option<GatewayBeam>,
     /// The end portal's/gateway's visible faces, a bitmask over `Direction` ordinals (vanilla
@@ -1794,7 +1794,7 @@ pub(crate) fn emit_beacon_beam(
             &texture,
             rect_of,
             1.0,
-            data.animation_time,
+            inst.beam_time,
             beam_start,
             height,
             section.color,
@@ -1830,7 +1830,7 @@ pub(crate) fn emit_gateway_beam(
         &texture,
         rect_of,
         beam.scale,
-        beam.animation_time,
+        inst.beam_time,
         -beam.height,
         beam.height * 2,
         beam.color,
@@ -1888,9 +1888,14 @@ pub(crate) fn emit_portal_faces(out: &mut Vec<[f32; 4]>, faces: u8, layers: f32,
                 Vec3::new(1.0, 1.0, 1.0),
             ),
         };
-        for p in [a, b, c, dd] {
+        // Two triangles per face (the pipeline is a TriangleList; vanilla's QUADS topology
+        // took the four corners, here each face needs the six indices spelled out).
+        let push = |out: &mut Vec<[f32; 4]>, p: Vec3| {
             let p = m.transform_point3(p);
             out.push([p.x, p.y, p.z, layers]);
+        };
+        for p in [a, b, c, a, c, dd] {
+            push(out, p);
         }
     }
 }
@@ -2918,6 +2923,7 @@ mod tests {
             anim: None,
             sherds: None,
             beam: None,
+            beam_time: 0.0,
             gateway_beam: None,
             portal_faces: 0,
             piston: None,
@@ -2940,6 +2946,7 @@ mod tests {
             anim: None,
             sherds: None,
             beam: None,
+            beam_time: 0.0,
             gateway_beam: None,
             portal_faces: 0,
             piston: None,
@@ -3413,6 +3420,7 @@ mod tests {
             anim: None,
             sherds: None,
             beam: None,
+            beam_time: 0.0,
             gateway_beam: None,
             portal_faces: 0,
             piston: None,

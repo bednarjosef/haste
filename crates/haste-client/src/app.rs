@@ -739,6 +739,10 @@ pub struct WorldFeed {
     /// Beacon beam sections by position, rebuilt only when the blocks above change (the key
     /// is the column's state above the beacon: any change re-walks it).
     beacon_beams: HashMap<BlockPos, (u64, std::sync::Arc<haste_render::BeamData>)>,
+    /// End gateway ages by position: the NBT payload key, the world age it was first seen at
+    /// and its NBT age then (the age ticks on client-side, vanilla `beamAnimationTick`, since
+    /// the server sends the NBT only once).
+    gateway_ages: HashMap<BlockPos, (usize, usize, i64, i64)>,
     /// Moving piston data by position, rebuilt only when the block entity's NBT changes.
     piston_cache: HashMap<
         BlockPos,
@@ -1119,8 +1123,7 @@ impl WorldFeed {
                 // portal's faces, the piston's moved-block state.
                 let (beam, gateway_beam, portal_faces, piston) = match kind {
                     haste_render::BlockEntityKind::Beacon => {
-                        let beam =
-                            self.beacon_data(pos, &world, blocks, &shared.data, world_age, partial);
+                        let beam = self.beacon_data(pos, &world, blocks, &shared.data);
                         (beam, None, 0, None)
                     }
                     haste_render::BlockEntityKind::EndPortal => (
@@ -1164,6 +1167,8 @@ impl WorldFeed {
                     anim,
                     sherds,
                     beam,
+                    // Vanilla's beam animation time, `floorMod(gameTime, 40) + partial`.
+                    beam_time: haste_render::blockentity::beam_animation_time(world_age, partial),
                     gateway_beam,
                     portal_faces,
                     piston,
@@ -1237,16 +1242,13 @@ impl WorldFeed {
     /// The beacon's beam sections at `pos`: vanilla's own client-side walk
     /// (`BeaconBlockEntity.tick` over the stained glass above), done in one pass and re-walked
     /// whenever the column above the beacon changes (the key is a hash of the column's states;
-    /// vanilla re-checks 10 blocks a tick, we need only the result). The animation time is the
-    /// frame's (`floorMod(gameTime, 40) + partial`).
+    /// vanilla re-checks 10 blocks a tick, we need only the result).
     fn beacon_data(
         &mut self,
         pos: BlockPos,
         world: &World,
         blocks: &haste_data::BlockStates,
         data: &haste_data::GameData,
-        world_age: i64,
-        partial: f32,
     ) -> Option<std::sync::Arc<haste_render::BeamData>> {
         use haste_core::view::{BlockPhysics as _, BlockView as _};
         // The column's states from the beacon block itself (vanilla's walk starts at it: the
@@ -1307,10 +1309,7 @@ impl WorldFeed {
                 sections.last_mut().unwrap().height += 1;
             }
         }
-        let data = std::sync::Arc::new(haste_render::BeamData {
-            sections,
-            animation_time: haste_render::blockentity::beam_animation_time(world_age, partial),
-        });
+        let data = std::sync::Arc::new(haste_render::BeamData { sections });
         self.beacon_beams.insert(pos, (key, data.clone()));
         Some(data)
     }
@@ -1322,7 +1321,7 @@ impl WorldFeed {
     /// to the build limit, cooling down for 40 ticks in purple over 50 blocks).
     #[allow(clippy::too_many_arguments)]
     fn gateway_data(
-        &self,
+        &mut self,
         pos: BlockPos,
         world: &World,
         blocks: &haste_data::BlockStates,
@@ -1344,7 +1343,24 @@ impl WorldFeed {
             }
             faces |= 1 << d as u8;
         }
-        let beam = parse_gateway_beam(&be.nbt, world_age, partial);
+        // The gateway's age ticks on (vanilla `beamAnimationTick` runs on both sides) but the
+        // server only sends the NBT once, so track the age ourselves from the payload's first
+        // sight: age = age at sight + ticks since.
+        let key = (be.nbt.as_ptr() as usize, be.nbt.len());
+        let entry = *self
+            .gateway_ages
+            .entry(pos)
+            .or_insert_with(|| (key.0, key.1, world_age, parse_gateway_age(&be.nbt)));
+        let (k, len, seen_at, age0) = entry;
+        let age = if (k, len) == key {
+            age0 + (world_age - seen_at).max(0)
+        } else {
+            // A new payload: restart from its own age.
+            self.gateway_ages
+                .insert(pos, (key.0, key.1, world_age, parse_gateway_age(&be.nbt)));
+            parse_gateway_age(&be.nbt)
+        };
+        let beam = parse_gateway_beam(age, partial);
         (faces, beam)
     }
 
@@ -1555,36 +1571,37 @@ fn air_piston() -> haste_render::PistonData {
     }
 }
 
-/// The end gateway's beam from its NBT (vanilla `TheEndGatewayBlockEntity`: `Age` and the
-/// cooldown, both advanced by the game thread's tick; the cooldown arrives as a block event
-/// and is not in the NBT, so the beam shows only while spawning — age < 200 — which is also
-/// the only phase a fresh gateway renders before its first teleport). `None` hides the beam.
-fn parse_gateway_beam(
-    nbt: &[u8],
-    world_age: i64,
-    partial: f32,
-) -> Option<haste_render::GatewayBeam> {
-    use haste_protocol::nbt::deserializer::NbtReadHelperJava;
-    let mut cursor = std::io::Cursor::new(nbt);
-    let mut helper = NbtReadHelperJava::new(&mut cursor);
-    let Ok(doc) = haste_protocol::nbt::Nbt::read_unnamed(&mut helper) else {
-        return None;
-    };
-    let age = doc.root_tag.get_long("Age").unwrap_or(0);
+/// The end gateway's beam (vanilla `TheEndGatewayRenderer.extractRenderState`): spawning
+/// under age 200 in magenta to the build limit; the cooldown phase arrives as a block event
+/// (not in the NBT), so it is not drawn yet. `None` hides the beam.
+fn parse_gateway_beam(age: i64, partial: f32) -> Option<haste_render::GatewayBeam> {
     if age >= 200 {
         return None;
     }
     // Vanilla `getSpawnPercent`: `clamp((age + partial) / 200, 0, 1)`, then `sin(scale * PI)`;
-    // the beam distance is the build limit (`level.getMaxY()`), the height its floor.
+    // the beam distance is the build limit (`level.getMaxY()`), the height its floor. The
+    // overworld's build limit is 320.
     let scale = ((age as f32 + partial) / 200.0).clamp(0.0, 1.0);
     let scale = (scale * std::f32::consts::PI).sin();
-    let height = (scale * 2048.0).floor() as i32;
+    let height = (scale * 320.0).floor() as i32;
     Some(haste_render::GatewayBeam {
         scale,
         height,
-        color: haste_render::blockentity::DYE_DIFFUSE_COLOR[6],
-        animation_time: haste_render::blockentity::beam_animation_time(world_age, partial),
+        // Vanilla `DyeColor.MAGENTA.getTextureDiffuseColor()` while spawning.
+        color: haste_render::blockentity::DYE_DIFFUSE_COLOR[2],
     })
+}
+
+/// The gateway's `Age` from its NBT (vanilla `TheEndGatewayBlockEntity.loadAdditional`,
+/// default 0).
+fn parse_gateway_age(nbt: &[u8]) -> i64 {
+    use haste_protocol::nbt::deserializer::NbtReadHelperJava;
+    let mut cursor = std::io::Cursor::new(nbt);
+    let mut helper = NbtReadHelperJava::new(&mut cursor);
+    haste_protocol::nbt::Nbt::read_unnamed(&mut helper)
+        .ok()
+        .and_then(|doc| doc.root_tag.get_long("Age"))
+        .unwrap_or(0)
 }
 
 /// A stained-glass block's (or the beacon's own) beam colour (vanilla `BeaconBeamBlock.getColor`

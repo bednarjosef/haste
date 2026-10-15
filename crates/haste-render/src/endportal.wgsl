@@ -122,24 +122,40 @@ fn end_portal_layer(layer: f32, tex_proj: vec4<f32>) -> vec4<f32> {
         vec4<f32>(0.0, 0.0, 1.0, 0.0),
         vec4<f32>(0.0, 0.0, 0.0, 1.0),
     );
-    // mat4 composition in GLSL column-major with row-vector multiply `v * A * B` equals
-    // `(B^T * A^T) * v` with WGSL's column-vector convention.
-    let m = transpose(rotate_scale) * transpose(translate) * transpose(scale_translate);
+    // GLSL multiplies the row vector `texProj0 * (sr * t * st)`, which in WGSL's column
+    // convention is `transpose(st) * transpose(t) * transpose(sr) * v` — the transposes in
+    // the REVERSE order of the GLSL chain.
+    let m = transpose(scale_translate) * transpose(translate) * transpose(rotate_scale);
     return m * tex_proj;
+}
+
+// Vanilla samples with textureProj over REPEAT samplers; textureLoad needs the wrap done
+// by hand (out-of-bounds loads return black, which is what the broken starfield showed).
+fn wrap01(v: f32) -> f32 {
+    return v - floor(v);
 }
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    let uv = in.tex_proj.xy / in.tex_proj.w;
+    let uv = vec2<f32>(wrap01(in.tex_proj.x / in.tex_proj.w), wrap01(in.tex_proj.y / in.tex_proj.w));
     let dims_sky = vec2<f32>(textureDimensions(end_sky));
     let dims_portal = vec2<f32>(textureDimensions(end_portal));
-    let base = textureLoad(end_sky, vec2<i32>(uv * dims_sky), 0).rgb * COLORS[0];
+    let texel_sky = clamp(vec2<i32>(uv * dims_sky), vec2<i32>(0), vec2<i32>(dims_sky) - vec2<i32>(1));
+    let base = textureLoad(end_sky, texel_sky, 0).rgb * COLORS[0];
     var color = base;
     let layers = u32(in.layers);
     for (var i: u32 = 0u; i < layers; i = i + 1u) {
         let projected = end_portal_layer(f32(i + 1u), in.tex_proj);
-        let uv_layer = projected.xy / projected.w;
-        let c = textureLoad(end_portal, vec2<i32>(uv_layer * dims_portal), 0).rgb;
+        let uv_layer = vec2<f32>(
+            wrap01(projected.x / projected.w),
+            wrap01(projected.y / projected.w),
+        );
+        let texel = clamp(
+            vec2<i32>(uv_layer * dims_portal),
+            vec2<i32>(0),
+            vec2<i32>(dims_portal) - vec2<i32>(1),
+        );
+        let c = textureLoad(end_portal, texel, 0).rgb;
         color = color + c * COLORS[i];
     }
     return vec4<f32>(mix(color, camera.fog_color.rgb, in.fog), 1.0);
