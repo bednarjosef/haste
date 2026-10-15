@@ -1943,6 +1943,8 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut fps = FpsCounter::new();
     let mut last_err: Option<String> = None;
     let mut finished = false;
+    // Whether a screen was open last tick, to release the held game input when one opens.
+    let mut script_screen_was_open = false;
     // With `--pos`, the script's `wait_until settled` also waits for the server to have
     // teleported the player to these feet coordinates (the caller teleports over RCON while
     // we join, like the screenshot mode's `--pos`).
@@ -1991,6 +1993,14 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 settled,
                 screen_open: ui.as_ref().is_some_and(|u| u.screen_open()),
             };
+            // A screen opening takes the mouse (vanilla `Gui.setScreen` calls
+            // `MouseHandler.releaseMouse` and `KeyMapping.releaseAll`): nothing the game held
+            // stays held, or a use held from before would re-open the container the screen
+            // shows, server-side, the moment it closes.
+            if state.screen_open && !script_screen_was_open {
+                input.release();
+            }
+            script_screen_was_open = state.screen_open;
             for action in runner.tick(&state) {
                 match action {
                     script::Action::KeyDown(k) => {

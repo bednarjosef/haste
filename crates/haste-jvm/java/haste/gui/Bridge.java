@@ -201,20 +201,9 @@ public final class Bridge {
     public boolean key(int key, int keycode, int mods, boolean pressed) {
         ClientImpl.mods = mods;
         Screen s = ClientImpl.screen;
-        try {
-            java.nio.file.Files.writeString(java.nio.file.Path.of("target/haste-key-debug.log"),
-                "key=" + key + " pressed=" + pressed + " screen="
-                + (s == null ? "null" : s.getClass().getSimpleName()) + "\n",
-                java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
-        } catch (Exception x) { System.err.println("debug write failed: " + x); }
         if (s == null) return false;
         KeyEvent e = new KeyEvent(key, keycode, mods);
         boolean r = pressed ? s.keyPressed(e) : s.keyReleased(e);
-        try {
-            java.nio.file.Files.writeString(java.nio.file.Path.of("target/haste-key-debug.log"),
-                "  consumed=" + r + " after=" + (ClientImpl.screen == null ? "null" : ClientImpl.screen.getClass().getSimpleName()) + "\n",
-                java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
-        } catch (Exception x) { System.err.println("debug write failed: " + x); }
         InventorySync.sync();
         return r;
     }

@@ -272,22 +272,12 @@ craft() {
   check craft "one oak log became 4 oak planks in the survival inventory" "$r"
 }
 
-# ---- 7b. Temporary probe (not a check) ----
-container_probe() {
-  local log="$LOGDIR/container-probe.log"
-  plain_client "$ROOT/scripts/checks/probe-clicks.txt" "$log" \
-    || { check container-probe "player never joined" 1; return; }
-  plain_setup "$log" probe-setup "setblock 9 101 9 minecraft:crafting_table"
-  wait_exit
-  echo "--- probe done ---"
-}
-
 # ---- 7. Containers: every container screen works like vanilla, with server evidence ----
-# One function per container. All stand on the snowy plain: the camera joins at
-# (9.5, 71, 6.5) yaw 0 (looking south, +z) and the runner places the block 3 blocks ahead
-# (z 9-10) over RCON, gives the items, and reads `data get entity`/`data get block` back.
-# The scripts click the vanilla slot coordinates (menu position + 8 for a slot centre,
-# screen origin (152, 52) for a 176x166 screen centred in the 480x270 GUI).
+# One function per container. All stand on the snowy plain: a fresh player spawns at the
+# world spawn (9.5, 101, 6.5) yaw 0 (looking south, +z) and the runner places the block
+# 3 blocks ahead (z 9) over RCON, gives the items, and reads `data get entity`/`data get
+# block` back. The scripts click the vanilla slot coordinates (menu position + 8 for a
+# slot centre, screen origin (152, 52) for a 176x166 screen centred in the 480x270 GUI).
 
 # Starts the client on `script` and waits for it to be online. The player name is fresh
 # per run (`ContainersChk$RANDOM`): a fresh player always joins alive, empty and at the
@@ -301,16 +291,24 @@ plain_client() { # script log
 # The setup the container scripts trigger with their first screenshot (after the world
 # settled): the tp zeroes the look offset (an absolute-rotation teleport, so the scripts'
 # `look` angles are what the crosshair aims) and the caller's commands give the items and
-# place the blocks. The player stands at (9.5, 101, 6.5), the camera pose of the plain.
+# place the blocks. The player stands at (9.5, 101, 6.5), the world spawn. The commands
+# are retried: on a busy test server the player entity lags behind the client's join by
+# seconds, and RCON answers "No player was found" until it is there.
 plain_setup() { # log shot commands...
   local log=$1 shot=$2
   shift 2
   if wait_shot "$log" "$shot" 90; then
-    rcon "gamemode survival $NAME" >/dev/null
-    rcon "tp $NAME 9.5 101 6.5 0 0" >/dev/null
-    local c
-    for c in "$@"; do
-      rcon "$c" >/dev/null
+    local attempt
+    for attempt in 1 2 3 4 5; do
+      rcon "gamemode survival $NAME" >/dev/null
+      rcon "tp $NAME 9.5 101 6.5 0 0" >/dev/null
+      local c
+      for c in "$@"; do
+        rcon "$c" >/dev/null
+      done
+      # done when a `data get` answer names the player (the commands found it)
+      [ -n "$(rcon "data get entity $NAME Pos" 2>/dev/null | grep "$NAME")" ] && break
+      sleep 1
     done
     sleep 2
   fi
@@ -352,7 +350,6 @@ for f in "$@"; do
   case "$f" in
     hud | death | drop | modes | f2 | craft) "$f" ;;
     containers-crafting-table) container_crafting_table ;;
-    container-probe) container_probe ;;
     *) echo "unknown feature: $f" ;;
   esac
 done
