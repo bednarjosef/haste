@@ -1,0 +1,30 @@
+# One clear picture of the client's own block particles: the runner turns the
+# ground at the snowy plain spawn spot into an oak-leaves floor (bare-handed
+# survival mining breaks it without a tool) while we wait. The server's look
+# offset varies between runs, so the effective pitch lands somewhere downward and
+# the crosshair mines the leaves within reach either way. A frame barrage covers
+# the break moment: the crack build-up first, the destroy grid burst after.
+wait_until joined
+screenshot setup
+wait 400
+look 0 30
+wait 5
+mouse_down left
+wait 20
+screenshot mining-20
+wait 5
+screenshot mining-25
+wait 5
+screenshot mining-30
+wait 5
+screenshot mining-35
+wait 5
+screenshot mining-40
+wait 5
+screenshot mining-45
+wait 5
+screenshot mining-50
+wait 5
+screenshot mining-55
+mouse_up left
+wait 5
