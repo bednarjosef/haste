@@ -601,6 +601,9 @@ impl EntityRenderer {
                         self.emit_item_frame(e, f, camera, sky, block, assets)
                     }
                     Decoration::Painting(p) => self.emit_painting(e, p, camera, sky, block, assets),
+                    // The lightning bolt draws through the weather pass's own additive
+                    // pipeline (`RenderPipelines.LIGHTNING`); nothing here.
+                    Decoration::Lightning(_) => {}
                 }
                 if self.vertices.len() > start {
                     self.drawn += 1;

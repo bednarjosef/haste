@@ -163,6 +163,7 @@ fn measure(
         breaking: &[],
         camera_entity: None,
         spin: None,
+        weather: None,
     };
     // Mesh everything (drain uploads frame by frame) until the resident section count has not
     // changed for a second.

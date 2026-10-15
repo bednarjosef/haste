@@ -22,6 +22,7 @@ pub mod sky;
 pub mod timing;
 pub mod tint;
 pub mod vertex;
+pub mod weather;
 
 pub use blockentity::{
     chest_texture, kind_of, shulker_texture, xmas_textures, BlockEntityInstance, BlockEntityKind,
@@ -43,3 +44,4 @@ pub use sky::{SkyColors, SkyKind};
 pub use timing::FrameTimings;
 pub use tint::{BiomeClimate, BiomeColors, BiomeSource, Colormaps, GrassModifier};
 pub use vertex::PackedVertex;
+pub use weather::{WeatherColumn, WeatherFrame};
