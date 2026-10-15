@@ -16,11 +16,11 @@
 // undoes it. The shulker layer is already in entity convention; its root carries vanilla's own
 // `scale(1, -1, -1)` flip instead.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use glam::{Mat3, Mat4, Vec3};
 use haste_core::model::{Cube, CubeModel, ModelPart, PoseOverrides};
-use haste_core::{BlockPos, Direction, Identifier};
+use haste_core::{BlockPos, BlockStateId, Direction, Identifier};
 
 use crate::entity::{entity_shade, hurt_color, EntityVertex, TickPair};
 
@@ -132,6 +132,10 @@ pub enum BlockEntityAnim {
         active: bool,
         hunting: bool,
     },
+    /// A moving piston (vanilla `PistonMovingBlockEntity.tick`): the extension progress, which
+    /// advances 0.5 per tick to 1.0 and then the block entity is gone (the server replaces the
+    /// moving_piston block with the moved one).
+    Piston { progress: TickPair },
 }
 
 impl BlockEntityAnim {
@@ -196,6 +200,12 @@ impl BlockEntityAnim {
                 active,
                 hunting,
             },
+            BlockEntityAnim::Piston { progress } => BlockEntityAnim::Piston {
+                progress: TickPair {
+                    start: progress.start,
+                    end: progress.at(partial),
+                },
+            },
         }
     }
 }
@@ -208,6 +218,58 @@ pub struct BannerData {
     pub base: u8,
     /// The pattern layers, in order.
     pub layers: Vec<BannerLayer>,
+}
+
+/// One coloured segment of a beacon beam (vanilla `BeaconBeamOwner.Section`): the ARGB colour
+/// (the glass above, averaged when it changes mid-beam) and its height in blocks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BeamSection {
+    /// The section's colour, vanilla ARGB (`DyeColor.getTextureDiffuseColor` of the glass).
+    pub color: u32,
+    /// The section's height in blocks (1 for the beacon block's own segment).
+    pub height: i32,
+}
+
+/// A beam's render data, shared between the game thread (which walks the glass above the
+/// beacon, vanilla `BeaconBlockEntity.tick`) and the frame's instances: the sections only;
+/// the animation time is per frame, so it rides on the instance
+/// ([`BlockEntityInstance::beam_time`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BeamData {
+    /// The beam sections bottom-up; empty draws no beam.
+    pub sections: Vec<BeamSection>,
+}
+
+/// The end gateway beam (vanilla `EndGatewayRenderState`): the spawn/cooldown scale, the beam
+/// height in blocks and the ARGB colour; the animation time rides per frame on the instance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GatewayBeam {
+    /// Vanilla `state.scale` after its `sin(scale * PI)`.
+    pub scale: f32,
+    /// Vanilla `state.height`: `floor(scale * beamDistance)`, 0 hides the beam.
+    pub height: i32,
+    /// Magenta while spawning, purple while cooling down (`DyeColor.getTextureDiffuseColor`).
+    pub color: u32,
+}
+
+/// A moving piston's render data, as vanilla's block entity keeps it: the moved block's state
+/// string (from the NBT, full `block[facing=north,...]` form), the progress at the ends of the
+/// last tick (vanilla ticks it 0.5 per tick to 1.0), and the direction flags. The renderer
+/// resolves the state's quads once and caches them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PistonData {
+    /// The moved block state as vanilla's NBT `blockState` string (adjusted by the renderer
+    /// for the piston head's `short` and the base's `extended`, like `PistonHeadRenderer`
+    /// does before baking).
+    pub block_state: String,
+    /// `progressO`/`progress`, the extension at the ends of the last tick.
+    pub progress: TickPair,
+    /// The piston's own `facing` (NBT `facing`, the direction the head moves to).
+    pub facing: Direction,
+    /// NBT `extending`.
+    pub extending: bool,
+    /// NBT `source` (this block entity is the piston base itself).
+    pub source: bool,
 }
 
 /// What to draw for one block entity (the per-type registry's rows; later renderers for beds
@@ -256,6 +318,19 @@ pub enum BlockEntityKind {
     /// A conduit (vanilla `ConduitRenderer`): its shell when inactive, cage, wind and eye when
     /// active.
     Conduit,
+    /// A beacon's beam (vanilla `BeaconRenderer`): the beam sections' colours and heights ride
+    /// in [`BlockEntityInstance::beam`].
+    Beacon,
+    /// An end portal (vanilla `TheEndPortalRenderer`): the flat 1x0.375x1 slab of the layered
+    /// starfield shader; the visible faces ride in [`BlockEntityInstance::portal_faces`].
+    EndPortal,
+    /// An end gateway (vanilla `TheEndGatewayRenderer`): the full-cube starfield plus its
+    /// spawning/cooldown beam in [`BlockEntityInstance::beam`].
+    EndGateway,
+    /// A moving piston (vanilla `PistonHeadRenderer`): the moved block drawn at the offset the
+    /// block entity's progress interpolates; the data rides in
+    /// [`BlockEntityInstance::piston`].
+    MovingPiston,
 }
 
 /// The items on a campfire's grill, by slot (vanilla `CampfireBlockEntity.getItems()`, at most
@@ -411,6 +486,21 @@ pub struct BlockEntityInstance {
     pub anim: Option<BlockEntityAnim>,
     /// The decorated pot's sherds, for `BlockEntityKind::DecoratedPot`.
     pub sherds: Option<std::sync::Arc<PotSherds>>,
+    /// The beacon's beam sections (computed by the game thread's glass walk), for
+    /// `BlockEntityKind::Beacon`.
+    pub beam: Option<std::sync::Arc<BeamData>>,
+    /// The beams' animation time this frame (vanilla `BeaconRenderState.animationTime`:
+    /// `floorMod(gameTime, 40) + partialTicks`), for `BlockEntityKind::Beacon` and
+    /// `EndGateway`.
+    pub beam_time: f32,
+    /// The end gateway's beam, for `BlockEntityKind::EndGateway`.
+    pub gateway_beam: Option<GatewayBeam>,
+    /// The end portal's/gateway's visible faces, a bitmask over `Direction` ordinals (vanilla
+    /// `shouldRenderFace`: Y only for the portal, `Block.shouldRenderFace` for the gateway),
+    /// for `BlockEntityKind::EndPortal`/`EndGateway`.
+    pub portal_faces: u8,
+    /// The moving piston's state, for `BlockEntityKind::MovingPiston`.
+    pub piston: Option<std::sync::Arc<PistonData>>,
 }
 
 /// Resolves a block entity type name (from the synced `minecraft:block_entity_type` registry)
@@ -463,6 +553,10 @@ pub fn kind_of(be_type: &Identifier, block: &Identifier, xmas: bool) -> Option<B
         "bell" => Some(BlockEntityKind::Bell),
         "decorated_pot" => Some(BlockEntityKind::DecoratedPot),
         "conduit" => Some(BlockEntityKind::Conduit),
+        "beacon" => Some(BlockEntityKind::Beacon),
+        "end_portal" => Some(BlockEntityKind::EndPortal),
+        "end_gateway" => Some(BlockEntityKind::EndGateway),
+        "piston" => Some(BlockEntityKind::MovingPiston),
         _ => None,
     }
 }
@@ -1258,6 +1352,166 @@ pub fn banner_wave_phase(pos: BlockPos, game_time: i64, partial: f32) -> f32 {
     (hash.wrapping_add(game_time as i32).rem_euclid(100) as f32 + partial) / 100.0
 }
 
+/// Vanilla `BeaconRenderState.animationTime`: `floorMod(gameTime, 40) + partialTicks`.
+pub fn beam_animation_time(game_time: i64, partial: f32) -> f32 {
+    game_time.rem_euclid(40) as f32 + partial
+}
+
+/// Vanilla `BeaconRenderer.submit`'s per-section heights: every section draws from the beam
+/// start to its own height, the last one to `MAX_RENDER_Y` (2048) — the beam runs to the build
+/// limit whatever is above.
+pub const BEAM_MAX_RENDER_Y: i32 = 2048;
+
+/// The beam radius scale (vanilla `BeaconRenderer.extract`): 1 within 96 blocks (always 1
+/// while scoping), else the horizontal distance / 96, so distant beams stay visible.
+pub fn beam_radius_scale(distance: f32, scoping: bool) -> f32 {
+    if scoping {
+        1.0
+    } else {
+        (distance / 96.0).max(1.0)
+    }
+}
+
+/// The texture V offset of a beam (vanilla `submitBeaconBeam`): the scroll by animation time,
+/// `frac(scroll * 0.2 - floor(scroll * 0.1))` with `scroll = -animationTime` for an upward
+/// beam (`height >= 0`).
+pub fn beam_tex_v_offset(animation_time: f32, height: i32) -> f32 {
+    let scroll = if height < 0 {
+        animation_time
+    } else {
+        -animation_time
+    };
+    (scroll * 0.2 - (scroll * 0.1).floor()).fract()
+}
+
+/// One beam quad's two V texture coordinates (vanilla `submitBeaconBeam`): `vv2 = -1 + off`
+/// at the start, and `vv1` at the end — `height * scale * (0.5 / radius)` for the inner beam,
+/// `height * scale` for the glow.
+pub fn beam_tex_v1(height: f32, scale: f32, radius: f32, glow: bool, vv2: f32) -> f32 {
+    if glow {
+        height * scale + vv2
+    } else {
+        height * scale * (0.5 / radius) + vv2
+    }
+}
+
+/// The end portal's visible-face rule (vanilla `TheEndPortalBlockEntity.shouldRenderFace`):
+/// only the horizontal faces.
+pub fn end_portal_faces() -> u8 {
+    (1 << Direction::Up as u8) | (1 << Direction::Down as u8)
+}
+
+/// The end gateway's visible-face rule (vanilla `TheEndGatewayBlockEntity.shouldRenderFace` ->
+/// `Block.shouldRenderFace`): a face shows when the neighbour does not occlude it — an opaque
+/// full cube hides it, unless it is the gateway block itself (portals draw against their own
+/// type). `is_opaque` is the table's full-opaque check.
+pub fn end_gateway_faces(
+    get_state: impl Fn(BlockPos) -> BlockStateId,
+    block_of: impl Fn(BlockStateId) -> haste_core::Identifier,
+    is_opaque: impl Fn(BlockStateId) -> bool,
+    state: BlockStateId,
+    pos: BlockPos,
+) -> u8 {
+    let own = block_of(state);
+    let mut faces = 0u8;
+    for d in Direction::ALL {
+        let neighbour = get_state(pos.offset(d));
+        let same = block_of(neighbour) == own;
+        if !same && is_opaque(neighbour) {
+            continue;
+        }
+        faces |= 1 << d as u8;
+    }
+    faces
+}
+
+/// Vanilla `PistonMovingBlockEntity.getProgress`: `lerp(partial, progressO, progress)` clamped
+/// at partial 1.
+pub fn piston_progress(p: &PistonData, partial: f32) -> f32 {
+    p.progress.at(partial.min(1.0))
+}
+
+/// Vanilla `PistonMovingBlockEntity.getExtendedProgress`: `progress - 1` extending,
+/// `1 - progress` retracting.
+pub fn piston_extended_progress(p: &PistonData, progress: f32) -> f32 {
+    if p.extending {
+        progress - 1.0
+    } else {
+        1.0 - progress
+    }
+}
+
+/// The moved block's state string after vanilla `PistonHeadRenderer.extractRenderState`'s
+/// adjustments: a piston head picks `short` by the progress (<= 0.5), and the source piston's
+/// retracting base draws `extended=true` with a head above it.
+pub fn piston_drawn_states(p: &PistonData, progress: f32) -> (String, Option<String>) {
+    let (block, props) = parse_state_string(&p.block_state);
+    let mut props = props;
+    let is_head = block.path() == "piston_head";
+    let is_piston = matches!(block.path(), "piston" | "sticky_piston");
+    if is_head && progress <= 4.0 {
+        set_prop(&mut props, "short", &(progress <= 0.5).to_string());
+        return (format_state(&block, &props), None);
+    }
+    if p.source && !p.extending && is_piston {
+        // The head that retracts with the base (vanilla builds a piston_head state with the
+        // piston's own type and facing, `short` by the progress).
+        let sticky = block.path() == "sticky_piston";
+        let facing = props
+            .iter()
+            .find(|(k, _)| k == "facing")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| "north".into());
+        let head = format_state(
+            &Identifier::minecraft("piston_head"),
+            &[
+                ("facing".to_string(), facing.clone()),
+                ("short".to_string(), (progress >= 0.5).to_string()),
+                (
+                    "type".to_string(),
+                    if sticky { "sticky" } else { "normal" }.to_string(),
+                ),
+            ],
+        );
+        set_prop(&mut props, "extended", "true");
+        return (format_state(&block, &props), Some(head));
+    }
+    (p.block_state.clone(), None)
+}
+
+/// Parses a vanilla block state string `block[facing=north,...]` into its id and properties.
+pub(crate) fn parse_state_string(s: &str) -> (Identifier, Vec<(String, String)>) {
+    let (name, props) = match s.split_once('[') {
+        Some(n) => (n.0, n.1.trim_end_matches(']')),
+        None => (s, ""),
+    };
+    let id = Identifier::parse(name).unwrap_or_else(|_| Identifier::minecraft("stone"));
+    let props = props
+        .split(',')
+        .filter(|p| !p.is_empty())
+        .filter_map(|p| p.split_once('='))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    (id, props)
+}
+
+/// Formats a block id and properties back into vanilla's state string form.
+fn format_state(block: &Identifier, props: &[(String, String)]) -> String {
+    if props.is_empty() {
+        return block.to_string();
+    }
+    let joined: Vec<String> = props.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    format!("{}[{}]", block, joined.join(","))
+}
+
+fn set_prop(props: &mut Vec<(String, String)>, name: &str, value: &str) {
+    if let Some(p) = props.iter_mut().find(|(k, _)| k == name) {
+        p.1 = value.to_string();
+    } else {
+        props.push((name.to_string(), value.to_string()));
+    }
+}
+
 /// The texture a head kind is drawn with (vanilla `SkullBlockRenderer.SKIN_BY_TYPE`; the
 /// player head uses the default skin, custom profiles are not modelled yet).
 pub fn skull_texture(kind: SkullKind) -> Identifier {
@@ -1655,6 +1909,14 @@ pub(crate) fn emit_block_entity(
         | BlockEntityKind::Vault(_)
         | BlockEntityKind::Shelf(_)
         | BlockEntityKind::Brushable(_) => {}
+        // The beacon beam, end portals/gateways and moving pistons have their own pipelines
+        // (the beam ignores the lightmap, the portal is a position-only starfield, the piston
+        // resolves its moved block's model); `EntityRenderer::append_block_entities` routes
+        // them there.
+        BlockEntityKind::Beacon
+        | BlockEntityKind::EndPortal
+        | BlockEntityKind::EndGateway
+        | BlockEntityKind::MovingPiston => {}
         BlockEntityKind::Skull { kind, wall } => {
             let model = skull_model(kind);
             let mut pose = PoseOverrides::default();
@@ -1742,6 +2004,336 @@ pub(crate) fn emit_banner(
             emit_part_tinted(out, model, part, &pose, root, rect, light, 0.0, *tint);
         }
     }
+}
+
+// -------------------------------------------------------------------------------------------
+// Beacon beams and end gateways (vanilla `BeaconRenderer.submitBeaconBeam`,
+// `TheEndGatewayRenderer`): textured quads into a beam-specific vertex stream. The beam ignores
+// the lightmap (vanilla's `rendertype_beacon_beam` shader is texture * colour + fog), so these
+// do not join the entity stream; the end portal's layered starfield is a pipeline of its own
+// (`endportal.wgsl`).
+
+/// One beam quad pushed as two triangles, in the beam's own (camera-relative) space: `m` poses
+/// it, `rect` is the atlas region of `beacon_beam.png` / `end_gateway_beam.png`. The colour is
+/// the section's ARGB with the alpha the pass wants (255 inner, 32 glow).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_beam_quad(
+    out: &mut Vec<EntityVertex>,
+    m: Mat4,
+    p: [Vec3; 4],
+    uv: [[f32; 2]; 4],
+    color: [f32; 4],
+    rect: [u32; 4],
+) {
+    let p = p.map(|v| m.transform_point3(v));
+    let uv = uv.map(|t| {
+        [
+            rect[0] as f32 + t[0] * rect[2] as f32,
+            rect[1] as f32 + t[1] * rect[3] as f32,
+        ]
+    });
+    let r16 = rect.map(|v| v as u16);
+    let order = [0, 1, 2, 0, 2, 3];
+    for i in order {
+        out.push(EntityVertex {
+            pos: p[i].to_array(),
+            uv: uv[i],
+            color,
+            rect: r16,
+            // The beam shader ignores the lightmap; the field carries the light for the format.
+            light: [15, 15, 0, 0],
+        });
+    }
+}
+
+/// Vanilla `renderPart`: four quads around the beam axis (west-north, east-north, east-south,
+/// west-south corners as `(x, z)` pairs), each from `beamStart` to `beamEnd`.
+#[allow(clippy::too_many_arguments)]
+fn emit_beam_part(
+    out: &mut Vec<EntityVertex>,
+    m: Mat4,
+    color: [f32; 4],
+    beam_start: f32,
+    beam_end: f32,
+    corners: [(f32, f32); 4],
+    vv1: f32,
+    vv2: f32,
+    rect: [u32; 4],
+) {
+    let quads = [
+        (corners[0], corners[1]),
+        (corners[3], corners[2]),
+        (corners[1], corners[2]),
+        (corners[0], corners[3]),
+    ];
+    for &(a, b) in &quads {
+        push_beam_quad(
+            out,
+            m,
+            [
+                Vec3::new(a.0, beam_end, a.1),
+                Vec3::new(a.0, beam_start, a.1),
+                Vec3::new(b.0, beam_start, b.1),
+                Vec3::new(b.0, beam_end, b.1),
+            ],
+            [[1.0, vv1], [1.0, vv2], [0.0, vv2], [0.0, vv1]],
+            color,
+            rect,
+        );
+    }
+}
+
+/// Vanilla `BeaconRenderer.submitBeaconBeam` for one beam (also the gateway's, with its own
+/// texture, radii and colour): the inner beam (rotated by `animationTime * 2.25 - 45`
+/// degrees, opaque) and the glow (axis-aligned, alpha 32/255), both full-bright.
+/// `beam_start`/`height` are in blocks; `scale` is 1 for beacons, the gateway's spawn scale.
+/// The inner and glow quads go to separate streams (each is one draw with its own pipeline).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_beam(
+    inner: &mut Vec<EntityVertex>,
+    glow: &mut Vec<EntityVertex>,
+    inst_pos: BlockPos,
+    camera: glam::DVec3,
+    texture: &Identifier,
+    rect_of: &mut dyn FnMut(&Identifier) -> [u32; 4],
+    scale: f32,
+    animation_time: f32,
+    beam_start: i32,
+    height: i32,
+    color: u32,
+    radius_scale: f32,
+    solid_radius: f32,
+    glow_radius: f32,
+) {
+    let beam_end = beam_start + height;
+    let tex_v_off = beam_tex_v_offset(animation_time, height);
+    let root =
+        Mat4::from_translation((inst_pos.as_dvec3() - camera).as_vec3() + Vec3::new(0.5, 0.0, 0.5));
+    let rect = rect_of(texture);
+    let argb = |c: u32, a: u32| {
+        [
+            ((c >> 16) & 0xFF) as f32 / 255.0,
+            ((c >> 8) & 0xFF) as f32 / 255.0,
+            (c & 0xFF) as f32 / 255.0,
+            a as f32 / 255.0,
+        ]
+    };
+    let solid = solid_radius * radius_scale;
+    let glow_r = glow_radius * radius_scale;
+    // The inner beam turns with the animation; vanilla's `rotateDegrees(YP, ...)`.
+    let rot = root * Mat4::from_rotation_y((animation_time * 2.25 - 45.0).to_radians());
+    let vv2 = -1.0 + tex_v_off;
+    let vv1 = beam_tex_v1(height as f32, scale, solid, false, vv2);
+    emit_beam_part(
+        inner,
+        rot,
+        argb(color, 255),
+        beam_start as f32,
+        beam_end as f32,
+        [(0.0, solid), (solid, 0.0), (0.0, -solid), (-solid, 0.0)],
+        vv1,
+        vv2,
+        rect,
+    );
+    // The glow is axis-aligned around the same axis at the larger radius, translucent.
+    let vv1 = beam_tex_v1(height as f32, scale, glow_r, true, vv2);
+    emit_beam_part(
+        glow,
+        root,
+        argb(color, 32),
+        beam_start as f32,
+        beam_end as f32,
+        [
+            (-glow_r, -glow_r),
+            (glow_r, -glow_r),
+            (glow_r, glow_r),
+            (-glow_r, glow_r),
+        ],
+        vv1,
+        vv2,
+        rect,
+    );
+}
+
+/// The beacon's beam: one `emit_beam` per section, each from the running start to the
+/// section's height, the last to [`BEAM_MAX_RENDER_Y`] (vanilla `BeaconRenderer.submit`).
+pub(crate) fn emit_beacon_beam(
+    inner: &mut Vec<EntityVertex>,
+    glow: &mut Vec<EntityVertex>,
+    inst: &BlockEntityInstance,
+    camera: glam::DVec3,
+    radius_scale: f32,
+    rect_of: &mut dyn FnMut(&Identifier) -> [u32; 4],
+) {
+    let Some(data) = inst.beam.as_deref() else {
+        return;
+    };
+    let texture = Identifier::minecraft("entity/beacon/beacon_beam");
+    let mut beam_start = 0i32;
+    let last = data.sections.len().saturating_sub(1);
+    for (i, section) in data.sections.iter().enumerate() {
+        let height = if i == last {
+            BEAM_MAX_RENDER_Y
+        } else {
+            section.height
+        };
+        emit_beam(
+            inner,
+            glow,
+            inst.pos,
+            camera,
+            &texture,
+            rect_of,
+            1.0,
+            inst.beam_time,
+            beam_start,
+            height,
+            section.color,
+            radius_scale,
+            0.2,
+            0.25,
+        );
+        beam_start += section.height;
+    }
+}
+
+/// The end gateway's beam (vanilla `TheEndGatewayRenderer.submit`): the same beam shape at
+/// radii 0.15/0.175, from `-height` to `+height`, scaled by the spawn/cooldown percent.
+pub(crate) fn emit_gateway_beam(
+    inner: &mut Vec<EntityVertex>,
+    glow: &mut Vec<EntityVertex>,
+    inst: &BlockEntityInstance,
+    camera: glam::DVec3,
+    rect_of: &mut dyn FnMut(&Identifier) -> [u32; 4],
+) {
+    let Some(beam) = inst.gateway_beam else {
+        return;
+    };
+    if beam.height <= 0 {
+        return;
+    }
+    let texture = Identifier::minecraft("entity/end_portal/end_gateway_beam");
+    emit_beam(
+        inner,
+        glow,
+        inst.pos,
+        camera,
+        &texture,
+        rect_of,
+        beam.scale,
+        inst.beam_time,
+        -beam.height,
+        beam.height * 2,
+        beam.color,
+        1.0,
+        0.15,
+        0.175,
+    );
+}
+
+/// The end portal/gateway's starfield cube (vanilla `AbstractEndPortalRenderer.submitCube`):
+/// one quad per visible face of the unit cube, posed by `m` (the portal's own flat transform,
+/// the gateway's identity), into the portal pipeline's position vertex stream. Each vertex
+/// carries the layer count (15 portal, 16 gateway).
+pub(crate) fn emit_portal_faces(out: &mut Vec<[f32; 4]>, faces: u8, layers: f32, m: Mat4) {
+    for d in Direction::ALL {
+        if faces & (1 << d as u8) == 0 {
+            continue;
+        }
+        // The unit cube's face corners (vanilla `FaceInfo.fromFacing` order).
+        let (a, b, c, dd) = match d {
+            Direction::Down => (
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 1.0),
+                Vec3::new(0.0, 0.0, 1.0),
+                Vec3::new(0.0, 0.0, 0.0),
+            ),
+            Direction::Up => (
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(0.0, 1.0, 1.0),
+                Vec3::new(1.0, 1.0, 1.0),
+                Vec3::new(1.0, 1.0, 0.0),
+            ),
+            Direction::North => (
+                Vec3::new(1.0, 1.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ),
+            Direction::South => (
+                Vec3::new(0.0, 1.0, 1.0),
+                Vec3::new(0.0, 0.0, 1.0),
+                Vec3::new(1.0, 0.0, 1.0),
+                Vec3::new(1.0, 1.0, 1.0),
+            ),
+            Direction::West => (
+                Vec3::new(0.0, 1.0, 1.0),
+                Vec3::new(0.0, 0.0, 1.0),
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ),
+            Direction::East => (
+                Vec3::new(1.0, 1.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 1.0),
+                Vec3::new(1.0, 1.0, 1.0),
+            ),
+        };
+        // Two triangles per face (the pipeline is a TriangleList; vanilla's QUADS topology
+        // took the four corners, here each face needs the six indices spelled out).
+        let push = |out: &mut Vec<[f32; 4]>, p: Vec3| {
+            let p = m.transform_point3(p);
+            out.push([p.x, p.y, p.z, layers]);
+        };
+        for p in [a, b, c, a, c, dd] {
+            push(out, p);
+        }
+    }
+}
+
+/// The beacon-beam and end-portal pipelines the renderer creates once (vanilla
+/// `RenderPipelines.BEACON_BEAM_OPAQUE`, `BEACON_BEAM_TRANSLUCENT`, `END_PORTAL`/`END_GATEWAY`):
+/// the beam's two passes over the entity atlas without the lightmap, and the portal's
+/// position-only starfield.
+pub struct BeamPipelines {
+    /// The inner beam: opaque, depth write (vanilla `BEACON_BEAM_OPAQUE`).
+    pub opaque: wgpu::RenderPipeline,
+    /// The glow: alpha-blended, no depth write (`BEACON_BEAM_TRANSLUCENT`).
+    pub glow: wgpu::RenderPipeline,
+    /// The end portal/gateway starfield (`END_PORTAL`/`END_GATEWAY` share the shader; the
+    /// layer count rides in as a pipeline constant).
+    pub portal: wgpu::RenderPipeline,
+    /// The end portal's own bind group: the End sky and portal textures (the beam pipelines
+    /// reuse the entity atlas bind group).
+    pub portal_bind_group: wgpu::BindGroup,
+}
+
+/// One moved-block quad with its variant rotation: `(quad, x, y)` from the blockstate ref.
+pub(crate) type PistonQuad = (haste_assets::BakedQuad, i32, i32);
+
+/// The moved block's quads for a state string, resolved once and cached by the caller (the
+/// states a piston ever moves are few; vanilla's model resolver caches the same way). Variant
+/// x/y rotation is left to the emit matrix; each quad's texture resolves to its entity-atlas
+/// rect per frame (`texture_rect` caches those itself).
+pub(crate) fn piston_quads(
+    assets: &mut haste_assets::Assets,
+    state: &str,
+) -> Option<Arc<Vec<PistonQuad>>> {
+    let (block, props) = parse_state_string(state);
+    let quads = (|| -> Option<Vec<PistonQuad>> {
+        let def = assets.blockstate(&block).ok()?;
+        let refs = def.model_refs_for(&props);
+        let mut quads = Vec::new();
+        for r in refs {
+            let id = Identifier::parse(&r.model).ok()?;
+            let q = assets.model_quads(&id).ok()?;
+            for quad in q {
+                quads.push((quad, r.x, r.y));
+            }
+        }
+        Some(quads)
+    })();
+    quads.map(Arc::new)
 }
 
 // -------------------------------------------------------------------------------------------
@@ -2678,7 +3270,11 @@ pub(crate) fn emit_model_block_entity(
         | BlockEntityKind::Shulker(_)
         | BlockEntityKind::Sign { .. }
         | BlockEntityKind::Banner { .. }
-        | BlockEntityKind::Skull { .. } => {}
+        | BlockEntityKind::Skull { .. }
+        | BlockEntityKind::Beacon
+        | BlockEntityKind::EndPortal
+        | BlockEntityKind::EndGateway
+        | BlockEntityKind::MovingPiston => {}
         // The item and mob block entities are split out by `item_kind` and `emit_spawner`
         // before the emitter gets here.
         BlockEntityKind::Campfire(_)
@@ -2724,6 +3320,11 @@ mod tests {
             skull_anim: TickPair::fixed(0.0),
             anim: None,
             sherds: None,
+            beam: None,
+            beam_time: 0.0,
+            gateway_beam: None,
+            portal_faces: 0,
+            piston: None,
         }
     }
 
@@ -2742,6 +3343,11 @@ mod tests {
             skull_anim: TickPair::fixed(0.0),
             anim: None,
             sherds: None,
+            beam: None,
+            beam_time: 0.0,
+            gateway_beam: None,
+            portal_faces: 0,
+            piston: None,
         }
     }
 
@@ -3406,12 +4012,16 @@ mod tests {
             ("bell", BlockEntityKind::Bell),
             ("decorated_pot", BlockEntityKind::DecoratedPot),
             ("conduit", BlockEntityKind::Conduit),
+            ("beacon", BlockEntityKind::Beacon),
+            ("end_portal", BlockEntityKind::EndPortal),
+            ("end_gateway", BlockEntityKind::EndGateway),
+            ("piston", BlockEntityKind::MovingPiston),
         ] {
             let block = Identifier::minecraft(be);
             assert_eq!(kind_of(&block, &block, false), Some(kind), "{be}");
         }
         // Not drawn (no vanilla renderer we have).
-        for be in ["furnace", "beacon", "hopper", "piston"] {
+        for be in ["furnace", "hopper"] {
             assert_eq!(
                 kind_of(
                     &Identifier::minecraft(be),
@@ -3563,6 +4173,11 @@ mod tests {
             skull_anim: TickPair::fixed(0.0),
             anim: None,
             sherds: None,
+            beam: None,
+            beam_time: 0.0,
+            gateway_beam: None,
+            portal_faces: 0,
+            piston: None,
         }
     }
 

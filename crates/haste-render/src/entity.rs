@@ -261,6 +261,26 @@ pub struct EntityRenderer {
     arm_models: [Option<Arc<CubeModel>>; 2],
     /// The item frame block model quads, by `(glow, map)`, built once on first use.
     frame_models: HashMap<(bool, bool), Arc<Vec<haste_assets::BakedQuad>>>,
+    /// The moving pistons' moved-block quads, by the state string (resolved once per state a
+    /// piston ever moves).
+    piston_quads: ahash::AHashMap<String, Option<Arc<Vec<crate::blockentity::PistonQuad>>>>,
+    /// The beacon/gateway beam vertices (own pipelines: the beam ignores the lightmap), split
+    /// into the opaque inner beam and the translucent glow (two draws, one buffer each), and
+    /// the end portal/gateway starfield cube (position-only pipeline).
+    beam_vertices: Vec<EntityVertex>,
+    beam_buffer: wgpu::Buffer,
+    beam_capacity: usize,
+    glow_vertices: Vec<EntityVertex>,
+    glow_buffer: wgpu::Buffer,
+    glow_capacity: usize,
+    portal_vertices: Vec<[f32; 4]>,
+    portal_buffer: wgpu::Buffer,
+    portal_capacity: usize,
+    /// This frame's beam radius scale (vanilla `BeaconRenderer.extract`: 1 within 96 blocks
+    /// or while scoping, else distance / 96), set per frame by the renderer.
+    beam_radius_scale: f32,
+    /// The beam and portal pipelines (see [`crate::blockentity::BeamPipelines`]).
+    pub beams: crate::blockentity::BeamPipelines,
     /// The default font, for world-space sign text (glyph pages land in the entity atlas).
     font: Arc<haste_assets::BitmapFont>,
     /// Equipment asset info (`equipment/<asset>.json`), by asset id, loaded once (`None` for an
@@ -277,6 +297,7 @@ impl EntityRenderer {
         camera_layout: &wgpu::BindGroupLayout,
         lightmap_layout: &wgpu::BindGroupLayout,
         font: Arc<haste_assets::BitmapFont>,
+        assets: &mut Assets,
     ) -> EntityRenderer {
         let atlas = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("entity-atlas"),
@@ -415,6 +436,215 @@ impl EntityRenderer {
         let shadow_capacity = 2048;
         let shadow_buffer = make_vertex_buffer(&device, shadow_capacity);
         let hand_buffer = make_vertex_buffer(&device, 1024);
+        let beam_buffer = make_vertex_buffer(&device, 1024);
+        let glow_buffer = make_vertex_buffer(&device, 1024);
+        let portal_buffer = make_vertex_buffer(&device, 256);
+        // The beam pipelines share the entity vertex format and atlas bind group (group 1)
+        // but skip the lightmap (vanilla's beam shader has no lighting); the portal pipeline
+        // is position-only over its own two-texture bind group.
+        let beam_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("beam"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("beam.wgsl").into()),
+        });
+        let beam_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("beam-pipeline-layout"),
+            bind_group_layouts: &[Some(camera_layout), Some(&layout)],
+            immediate_size: 0,
+        });
+        let beam_state = |blend: Option<wgpu::BlendState>, depth_write: bool| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(if blend.is_some() {
+                    "beam-glow"
+                } else {
+                    "beam-opaque"
+                }),
+                layout: Some(&beam_layout),
+                vertex: wgpu::VertexState {
+                    module: &beam_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(EntityVertex::LAYOUT)],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &beam_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth24Plus,
+                    depth_write_enabled: Some(depth_write),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let beam_opaque = beam_state(None, true);
+        let beam_glow = beam_state(Some(wgpu::BlendState::ALPHA_BLENDING), false);
+        // The end portal: position-only vertices, its own two samplers (the End sky and the
+        // portal starfield from the jar), opaque with depth write (vanilla END_PORTAL).
+        let portal_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("endportal"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("endportal.wgsl").into()),
+        });
+        let mut put_texture = |id: &str| -> wgpu::TextureView {
+            let img = assets
+                .texture(&haste_core::Identifier::minecraft(id))
+                .unwrap_or_else(|e| {
+                    tracing::warn!("end portal texture {id}: {e:#}");
+                    image::RgbaImage::from_pixel(16, 16, image::Rgba([64, 0, 64, 255]))
+                });
+            let (w, h) = img.dimensions();
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("portal-texture"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                img.as_raw(),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * w),
+                    rows_per_image: Some(h),
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+            texture.create_view(&Default::default())
+        };
+        let end_sky = put_texture("environment/end_sky");
+        let end_portal = put_texture("entity/end_portal/end_portal");
+        let portal_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("portal-layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let portal_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("portal-bind"),
+            layout: &portal_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&end_sky),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&end_portal),
+                },
+            ],
+        });
+        let portal_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("portal-pipeline-layout"),
+                bind_group_layouts: &[Some(camera_layout), Some(&portal_layout)],
+                immediate_size: 0,
+            });
+        let portal_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("endportal"),
+            layout: Some(&portal_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &portal_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    // Position plus the layer count (15 portal, 16 gateway): the count rides
+                    // per vertex so one pipeline serves both (vanilla uses two shader
+                    // defines; wgpu here has no pipeline constants).
+                    array_stride: 16,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            offset: 0,
+                            shader_location: 0,
+                            format: wgpu::VertexFormat::Float32x3,
+                        },
+                        wgpu::VertexAttribute {
+                            offset: 12,
+                            shader_location: 1,
+                            format: wgpu::VertexFormat::Float32,
+                        },
+                    ],
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &portal_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24Plus,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         EntityRenderer {
             device,
             queue,
@@ -439,6 +669,23 @@ impl EntityRenderer {
             item_models: HashMap::new(),
             arm_models: [None, None],
             frame_models: HashMap::new(),
+            piston_quads: ahash::AHashMap::new(),
+            beam_vertices: Vec::new(),
+            beam_buffer,
+            beam_capacity: 1024,
+            glow_vertices: Vec::new(),
+            glow_buffer,
+            glow_capacity: 1024,
+            portal_vertices: Vec::new(),
+            portal_buffer,
+            portal_capacity: 256,
+            beam_radius_scale: 1.0,
+            beams: crate::blockentity::BeamPipelines {
+                opaque: beam_opaque,
+                glow: beam_glow,
+                portal: portal_pipeline,
+                portal_bind_group,
+            },
             font,
             equipment_infos: HashMap::new(),
             drawn: 0,
@@ -450,6 +697,12 @@ impl EntityRenderer {
     pub fn set_lights(&mut self, lights: impl IntoIterator<Item = (EntityId, (u8, u8))>) {
         self.lights.clear();
         self.lights.extend(lights);
+    }
+
+    /// The beams' radius scale for this frame (vanilla `BeaconRenderer.extract`: 1 within 96
+    /// blocks or while scoping, else the horizontal distance / 96).
+    pub fn set_beam_radius_scale(&mut self, scale: f32) {
+        self.beam_radius_scale = scale;
     }
 
     /// A font page's rectangle in the entity atlas (page images are 256x256, uploaded on first
@@ -1124,6 +1377,104 @@ impl EntityRenderer {
         self.vertices = out;
     }
 
+    /// One moving piston, following vanilla `PistonHeadRenderer`: the moved block's model
+    /// (from the block entity's NBT state string, `short`/`extended` adjusted like
+    /// `extractRenderState` does) at the interpolated progress offset, plus the retracting
+    /// source piston's base. The quads are resolved once per state string and cached; an
+    /// unreadable model draws nothing, never a panic.
+    fn emit_piston(
+        &mut self,
+        inst: &crate::blockentity::BlockEntityInstance,
+        camera: glam::DVec3,
+        assets: &mut Assets,
+    ) {
+        use crate::blockentity::{
+            piston_drawn_states, piston_extended_progress, piston_quads, PistonQuad,
+        };
+        let Some(p) = inst.piston.clone() else {
+            return;
+        };
+        // The progress pair already folds the partial tick (the client's anim ends).
+        let progress = p.progress.end;
+        let (block_state, head_state) = piston_drawn_states(&p, progress);
+        let off = piston_extended_progress(&p, progress);
+        // Vanilla `getMovementDirection`: the facing while extending, its opposite
+        // retracting.
+        let movement = if p.extending {
+            p.facing
+        } else {
+            p.facing.opposite()
+        };
+        let step = p.facing.offset();
+        let offset = Vec3::new(
+            step.x as f32 * off,
+            step.y as f32 * off,
+            step.z as f32 * off,
+        );
+        let (sky, block) = inst.light;
+        let light = (block, sky);
+        let base = (inst.pos.as_dvec3() - camera).as_vec3();
+        let mut out = std::mem::take(&mut self.vertices);
+        let mut emit_state = |me: &mut Self, out: &mut Vec<EntityVertex>, state: &str, at: Vec3| {
+            let quads: Option<Arc<Vec<PistonQuad>>> = match me.piston_quads.get(state) {
+                Some(q) => q.clone(),
+                None => {
+                    let q = piston_quads(assets, state);
+                    me.piston_quads.insert(state.to_string(), q.clone());
+                    q
+                }
+            };
+            let Some(quads) = quads else {
+                return;
+            };
+            let m = Mat4::from_translation(base + at);
+            let nm = Mat3::from_mat4(m).inverse().transpose();
+            for (q, rx, ry) in quads.iter() {
+                // The variant's x/y rotation around the block centre, baked into the matrix.
+                let mut rot = Mat4::IDENTITY;
+                if *rx != 0 {
+                    rot *= Mat4::from_rotation_x((*rx as f32).to_radians());
+                }
+                if *ry != 0 {
+                    rot *= Mat4::from_rotation_y((*ry as f32).to_radians());
+                }
+                let rot = Mat4::from_translation(Vec3::splat(0.5))
+                    * rot
+                    * Mat4::from_translation(-Vec3::splat(0.5));
+                let m = m * rot;
+                let rect = me.texture_rect(&parse_tex(&q.texture), assets);
+                let o = q.direction.offset();
+                push_world_quad(
+                    out,
+                    m,
+                    nm,
+                    q.positions.map(Vec3::from),
+                    q.uvs,
+                    Vec3::new(o[0] as f32, o[1] as f32, o[2] as f32),
+                    [1.0; 3],
+                    light,
+                    rect,
+                );
+            }
+        };
+        // Vanilla: the moved block is posed at `pos.relative(movement.getOpposite())`, then
+        // translated by the progress offset.
+        let back = Vec3::new(
+            -movement.offset().x as f32,
+            -movement.offset().y as f32,
+            -movement.offset().z as f32,
+        );
+        emit_state(self, &mut out, &block_state, back + offset);
+        if let Some(head) = head_state {
+            // The base sits at the block entity's own position: vanilla's
+            // `basePos = pos.relative(movement)` walks back to where `pos` came from
+            // (`pos = bePos.relative(movement.getOpposite())`), so `basePos == bePos`,
+            // unoffset.
+            emit_state(self, &mut out, &head, Vec3::ZERO);
+        }
+        self.vertices = out;
+    }
+
     /// One painting, following vanilla's `PaintingRenderer`: a `width` x `height` grid of front
     /// quads at z = -1/32 with the variant's sprite, a mirrored back at z = +1/32 and the edge
     /// strips, all turned by `180 - direction.get2DDataValue() * 90`. An unknown variant draws
@@ -1277,8 +1628,75 @@ impl EntityRenderer {
     ) -> u32 {
         let start = self.vertices.len();
         let mut drawn = 0;
+        self.beam_vertices.clear();
+        self.glow_vertices.clear();
+        self.portal_vertices.clear();
         for inst in instances {
             if !visible(inst) {
+                continue;
+            }
+            // Beacon beams and the end gateways' beams go into the beam stream (their own
+            // pipelines, no lightmap); end portals and gateway cubes into the portal stream
+            // (position-only starfield shader). Both are emitted here and drawn by the
+            // renderer's `draw_beams`/`draw_portals` after the entities. A gateway draws BOTH
+            // (its cube and, while spawning or cooling down, its beam), so the beam branch
+            // must not `continue` past the portal one.
+            if matches!(
+                inst.kind,
+                crate::blockentity::BlockEntityKind::Beacon
+                    | crate::blockentity::BlockEntityKind::EndGateway
+            ) {
+                let mut inner = std::mem::take(&mut self.beam_vertices);
+                let mut glow = std::mem::take(&mut self.glow_vertices);
+                let radius_scale = self.beam_radius_scale;
+                let me = &mut *self;
+                match inst.kind {
+                    crate::blockentity::BlockEntityKind::Beacon => {
+                        crate::blockentity::emit_beacon_beam(
+                            &mut inner,
+                            &mut glow,
+                            inst,
+                            camera,
+                            radius_scale,
+                            &mut |id| me.texture_rect(id, assets),
+                        );
+                    }
+                    _ => crate::blockentity::emit_gateway_beam(
+                        &mut inner,
+                        &mut glow,
+                        inst,
+                        camera,
+                        &mut |id| me.texture_rect(id, assets),
+                    ),
+                }
+                self.beam_vertices = inner;
+                self.glow_vertices = glow;
+                drawn += 1;
+                if matches!(inst.kind, crate::blockentity::BlockEntityKind::Beacon) {
+                    continue;
+                }
+            }
+            if matches!(
+                inst.kind,
+                crate::blockentity::BlockEntityKind::EndPortal
+                    | crate::blockentity::BlockEntityKind::EndGateway
+            ) {
+                let mut out = std::mem::take(&mut self.portal_vertices);
+                // Vanilla `TheEndPortalRenderer.TRANSFORMATION`: translate y +0.375, scale
+                // (1, 0.375, 1); the gateway draws the whole cube.
+                let m = (inst.pos.as_dvec3() - camera).as_vec3();
+                let (root, layers) = match inst.kind {
+                    crate::blockentity::BlockEntityKind::EndPortal => (
+                        Mat4::from_translation(m)
+                            * Mat4::from_translation(Vec3::new(0.0, 0.375, 0.0))
+                            * Mat4::from_scale(Vec3::new(1.0, 0.375, 1.0)),
+                        15.0,
+                    ),
+                    _ => (Mat4::from_translation(m), 16.0),
+                };
+                crate::blockentity::emit_portal_faces(&mut out, inst.portal_faces, layers, root);
+                self.portal_vertices = out;
+                drawn += 1;
                 continue;
             }
             if let crate::blockentity::BlockEntityKind::Sign { hanging } = inst.kind {
@@ -1436,6 +1854,13 @@ impl EntityRenderer {
                 drawn += 1;
                 continue;
             }
+            // Moving pistons resolve their moved block's model through the same atlas (the
+            // quads are cached per state string, so only the first frame pays the lookup).
+            if matches!(inst.kind, crate::blockentity::BlockEntityKind::MovingPiston) {
+                self.emit_piston(inst, camera, assets);
+                drawn += 1;
+                continue;
+            }
             // A spawner's display entity is a cube model posed by the block entity's own
             // transform (`emit_spawner`), not by the item emitters.
             if let crate::blockentity::BlockEntityKind::Spawner(ref spawner) = inst.kind {
@@ -1471,6 +1896,10 @@ impl EntityRenderer {
                 | crate::blockentity::BlockEntityKind::Bell
                 | crate::blockentity::BlockEntityKind::DecoratedPot
                 | crate::blockentity::BlockEntityKind::Conduit => unreachable!(),
+                crate::blockentity::BlockEntityKind::Beacon
+                | crate::blockentity::BlockEntityKind::EndPortal
+                | crate::blockentity::BlockEntityKind::EndGateway
+                | crate::blockentity::BlockEntityKind::MovingPiston => unreachable!(),
             };
             let rect = self.texture_rect(&texture, assets);
             let out = &mut self.vertices;
@@ -1494,8 +1923,84 @@ impl EntityRenderer {
             self.queue
                 .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
         }
+        if self.beam_vertices.len() > self.beam_capacity {
+            self.beam_capacity = self.beam_vertices.len().next_power_of_two();
+            self.beam_buffer = make_vertex_buffer(&self.device, self.beam_capacity);
+        }
+        if !self.beam_vertices.is_empty() {
+            self.queue.write_buffer(
+                &self.beam_buffer,
+                0,
+                bytemuck::cast_slice(&self.beam_vertices),
+            );
+        }
+        if self.glow_vertices.len() > self.glow_capacity {
+            self.glow_capacity = self.glow_vertices.len().next_power_of_two();
+            self.glow_buffer = make_vertex_buffer(&self.device, self.glow_capacity);
+        }
+        if !self.glow_vertices.is_empty() {
+            self.queue.write_buffer(
+                &self.glow_buffer,
+                0,
+                bytemuck::cast_slice(&self.glow_vertices),
+            );
+        }
+        if self.portal_vertices.len() > self.portal_capacity {
+            self.portal_capacity = self.portal_vertices.len().next_power_of_two();
+            self.portal_buffer = make_vertex_buffer(&self.device, self.portal_capacity);
+        }
+        if !self.portal_vertices.is_empty() {
+            self.queue.write_buffer(
+                &self.portal_buffer,
+                0,
+                bytemuck::cast_slice(&self.portal_vertices),
+            );
+        }
         self.drawn += drawn;
         drawn
+    }
+
+    /// Whether any beam or portal vertices were posed this frame (the draw calls are skipped).
+    pub fn has_beams_or_portals(&self) -> bool {
+        !self.beam_vertices.is_empty()
+            || !self.glow_vertices.is_empty()
+            || !self.portal_vertices.is_empty()
+    }
+
+    /// Draws the beacon/gateway beams: the opaque inner beams first (depth write, vanilla
+    /// `RenderPipelines.BEACON_BEAM_OPAQUE`), then the translucent glow without depth write
+    /// (`BEACON_BEAM_TRANSLUCENT`). Into the main pass; the camera bind group at group 0 and
+    /// the entity atlas at group 1 must already be set.
+    pub fn draw_beams<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) -> u32 {
+        let mut calls = 0;
+        if !self.beam_vertices.is_empty() {
+            pass.set_pipeline(&self.beams.opaque);
+            pass.set_bind_group(1, &self.bind_group, &[]);
+            pass.set_vertex_buffer(0, self.beam_buffer.slice(..));
+            pass.draw(0..self.beam_vertices.len() as u32, 0..1);
+            calls += 1;
+        }
+        if !self.glow_vertices.is_empty() {
+            pass.set_pipeline(&self.beams.glow);
+            pass.set_bind_group(1, &self.bind_group, &[]);
+            pass.set_vertex_buffer(0, self.glow_buffer.slice(..));
+            pass.draw(0..self.glow_vertices.len() as u32, 0..1);
+            calls += 1;
+        }
+        calls
+    }
+
+    /// Draws the end portal/gateway starfield cubes (vanilla `RenderPipelines.END_PORTAL` /
+    /// `END_GATEWAY`): position-only vertices. The camera bind group must be set at group 0.
+    pub fn draw_portals<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) -> u32 {
+        if self.portal_vertices.is_empty() {
+            return 0;
+        }
+        pass.set_pipeline(&self.beams.portal);
+        pass.set_bind_group(1, &self.beams.portal_bind_group, &[]);
+        pass.set_vertex_buffer(0, self.portal_buffer.slice(..));
+        pass.draw(0..self.portal_vertices.len() as u32, 0..1);
+        1
     }
 
     /// One sign's text, following vanilla `AbstractSignRenderer.submitSignText`: both sides,
@@ -2135,7 +2640,7 @@ fn parse_tex(id: &str) -> Identifier {
 /// One textured quad (`uv` 0..1 over `rect`) through `m`, wound counter-clockwise seen from
 /// the side its normal points to, shaded like entities.
 #[allow(clippy::too_many_arguments)]
-fn push_world_quad(
+pub(crate) fn push_world_quad(
     out: &mut Vec<EntityVertex>,
     m: Mat4,
     normal_matrix: Mat3,

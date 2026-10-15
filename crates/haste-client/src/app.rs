@@ -752,6 +752,26 @@ pub struct WorldFeed {
     /// The object-model block entities' animation state by position for this frame (reused
     /// lookup scratch; the game thread ticks it once per tick).
     anim_map: HashMap<BlockPos, haste_render::BlockEntityAnim>,
+    /// Beacon beam sections by position, rebuilt only when the blocks above change (the key
+    /// is the column's state above the beacon: any change re-walks it).
+    beacon_beams: HashMap<BlockPos, (u64, std::sync::Arc<haste_render::BeamData>)>,
+    /// End gateway ages by position: the NBT payload key, the world age it was first seen at
+    /// and its NBT age then (the age ticks on client-side, vanilla `beamAnimationTick`, since
+    /// the server sends the NBT only once).
+    gateway_ages: HashMap<BlockPos, (usize, usize, i64, i64)>,
+    /// Gateways already logged (debugging the draw, once per position).
+    logged_gateways: std::collections::HashSet<BlockPos>,
+    /// Gateways whose beam was live on the last frame (log on change).
+    gateway_beam_live: HashMap<BlockPos, bool>,
+    /// Moving piston data by position, rebuilt only when the block entity's NBT changes.
+    piston_cache: HashMap<
+        BlockPos,
+        (
+            usize,
+            usize,
+            Option<std::sync::Arc<haste_render::PistonData>>,
+        ),
+    >,
     /// The shared world as the mesh workers see it (created on the first feed).
     source: Option<Arc<dyn haste_render::SnapshotSource>>,
     /// Sections submitted this frame (reused).
@@ -943,6 +963,7 @@ impl WorldFeed {
         // Only the chunks the camera can see carry drawable block entities; skipping the
         // rest keeps the per-frame walk short on big worlds with nothing in them.
         let view = shared.view.lock().clone();
+        let world_age = view.world_age;
         let cam_chunk = ChunkPos::new(
             view.feet.x.floor() as i32 >> 4,
             view.feet.z.floor() as i32 >> 4,
@@ -1130,6 +1151,51 @@ impl WorldFeed {
                 {
                     sign_angle = 0.0;
                 }
+                // The special renderers' data: the beacon's beam sections (the client's own
+                // glass walk, vanilla `BeaconBlockEntity.tick`), the gateway's beam and the
+                // portal's faces, the piston's moved-block state.
+                let (beam, gateway_beam, portal_faces, piston) = match kind {
+                    haste_render::BlockEntityKind::Beacon => {
+                        let beam = self.beacon_data(pos, &world, blocks, &shared.data);
+                        (beam, None, 0, None)
+                    }
+                    haste_render::BlockEntityKind::EndPortal => (
+                        None,
+                        None,
+                        haste_render::blockentity::end_portal_faces(),
+                        None,
+                    ),
+                    haste_render::BlockEntityKind::EndGateway => {
+                        let (faces, beam) = self.gateway_data(
+                            pos,
+                            &world,
+                            blocks,
+                            &shared.data,
+                            be,
+                            world_age,
+                            partial,
+                        );
+                        // On every beam state change (and once at first sight): what the
+                        // renderer gets (debugging the draw).
+                        let beam_now = beam.is_some();
+                        let seen = self.logged_gateways.insert(pos);
+                        let changed = self
+                            .gateway_beam_live
+                            .insert(pos, beam_now)
+                            .is_some_and(|was| was != beam_now);
+                        if seen || changed {
+                            tracing::info!(
+                                "end gateway at {pos:?}: faces {faces:#08b}, beam {:?}",
+                                beam.map(|b| (b.scale, b.height))
+                            );
+                        }
+                        (None, beam, faces, None)
+                    }
+                    haste_render::BlockEntityKind::MovingPiston => {
+                        (None, None, 0, self.piston_data(pos, be, partial))
+                    }
+                    _ => (None, None, 0, None),
+                };
                 self.be_instances.push(haste_render::BlockEntityInstance {
                     pos,
                     facing,
@@ -1147,6 +1213,12 @@ impl WorldFeed {
                     skull_anim,
                     anim,
                     sherds,
+                    beam,
+                    // Vanilla's beam animation time, `floorMod(gameTime, 40) + partial`.
+                    beam_time: haste_render::blockentity::beam_animation_time(world_age, partial),
+                    gateway_beam,
+                    portal_faces,
+                    piston,
                 });
             }
         }
@@ -1349,6 +1421,172 @@ impl WorldFeed {
         Some(parsed)
     }
 
+    /// The beacon's beam sections at `pos`: vanilla's own client-side walk
+    /// (`BeaconBlockEntity.tick` over the stained glass above), done in one pass and re-walked
+    /// whenever the column above the beacon changes (the key is a hash of the column's states;
+    /// vanilla re-checks 10 blocks a tick, we need only the result).
+    fn beacon_data(
+        &mut self,
+        pos: BlockPos,
+        world: &World,
+        blocks: &haste_data::BlockStates,
+        data: &haste_data::GameData,
+    ) -> Option<std::sync::Arc<haste_render::BeamData>> {
+        use haste_core::view::{BlockPhysics as _, BlockView as _};
+        // The column's states from the beacon block itself (vanilla's walk starts at it: the
+        // beacon is a white `BeaconBeamBlock`, so it seeds the first section) up to the
+        // heightmap top, hashed as the cache key.
+        let top = world
+            .chunk(pos.chunk())
+            .and_then(|c| c.height_at((pos.x & 15) as u8, (pos.z & 15) as u8))
+            .unwrap_or(pos.y);
+        let mut key = 0u64;
+        let states: Vec<_> = (pos.y..=top)
+            .map(|y| {
+                let s = world.block_state(BlockPos::new(pos.x, y, pos.z));
+                key = key.wrapping_mul(31).wrapping_add(s.0 as u64);
+                s
+            })
+            .collect();
+        if let Some((k, data)) = self.beacon_beams.get(&pos) {
+            if *k == key {
+                return Some(data.clone());
+            }
+        }
+        // Vanilla's walk: the first one or two stained-glass blocks start sections (a colour
+        // change beyond that starts one in the averaged colour), any other block with light
+        // dampening 15 (except bedrock) ends the beam, and every further block extends the
+        // last section.
+        let mut sections: Vec<haste_render::BeamSection> = Vec::new();
+        for &s in &states {
+            let block = blocks.block_of(s);
+            if let Some(color) = beacon_beam_color(block) {
+                match sections.len() {
+                    0 | 1 => sections.push(haste_render::BeamSection { color, height: 1 }),
+                    _ => {
+                        let last_color = sections.last().unwrap().color;
+                        if last_color == color {
+                            sections.last_mut().unwrap().height += 1;
+                        } else {
+                            sections.push(haste_render::BeamSection {
+                                color: average_argb(last_color, color),
+                                height: 1,
+                            });
+                        }
+                    }
+                }
+            } else {
+                let ends = match sections.last() {
+                    None => true,
+                    Some(_) => {
+                        // Vanilla: `state.getLightDampening() >= 15 && !state.is(bedrock)` —
+                        // the oracle's opaque flag is the same fully-light-blocking set.
+                        data.is_opaque_full(s) && block != &Identifier::minecraft("bedrock")
+                    }
+                };
+                if ends {
+                    sections.clear();
+                    break;
+                }
+                sections.last_mut().unwrap().height += 1;
+            }
+        }
+        let data = std::sync::Arc::new(haste_render::BeamData { sections });
+        self.beacon_beams.insert(pos, (key, data.clone()));
+        Some(data)
+    }
+
+    /// The end gateway's visible faces and beam at `pos`: the faces from the neighbouring
+    /// blocks (vanilla `Block.shouldRenderFace`: an opaque neighbour hides the face unless it
+    /// is the gateway block itself), the beam from the block entity's NBT age and cooldown
+    /// (vanilla `TheEndGatewayRenderer.extractRenderState`: spawning under age 200 in magenta
+    /// to the build limit, cooling down for 40 ticks in purple over 50 blocks).
+    #[allow(clippy::too_many_arguments)]
+    fn gateway_data(
+        &mut self,
+        pos: BlockPos,
+        world: &World,
+        blocks: &haste_data::BlockStates,
+        data: &haste_data::GameData,
+        be: &haste_core::chunk::BlockEntityData,
+        world_age: i64,
+        partial: f32,
+    ) -> (u8, Option<haste_render::GatewayBeam>) {
+        use haste_core::view::{BlockPhysics as _, BlockView as _};
+        let mut faces = 0u8;
+        let state = world.block_state(pos);
+        let own = blocks.block_of(state).clone();
+        for d in haste_core::Direction::ALL {
+            let neighbour = world.block_state(pos.offset(d));
+            let same = *blocks.block_of(neighbour) == own;
+            let opaque = data.is_opaque_full(neighbour);
+            if !same && opaque {
+                continue;
+            }
+            faces |= 1 << d as u8;
+        }
+        // The gateway's age ticks on (vanilla `beamAnimationTick` runs on both sides) but the
+        // server only sends the NBT once, so track the age ourselves from the payload's first
+        // sight: age = age at sight + ticks since.
+        let key = (be.nbt.as_ptr() as usize, be.nbt.len());
+        let entry = *self
+            .gateway_ages
+            .entry(pos)
+            .or_insert_with(|| (key.0, key.1, world_age, parse_gateway_age(&be.nbt)));
+        let (k, len, seen_at, age0) = entry;
+        let age = if (k, len) == key {
+            age0 + (world_age - seen_at).max(0)
+        } else {
+            // A new payload: restart from its own age.
+            self.gateway_ages
+                .insert(pos, (key.0, key.1, world_age, parse_gateway_age(&be.nbt)));
+            parse_gateway_age(&be.nbt)
+        };
+        let beam = parse_gateway_beam(age, partial);
+        (faces, beam)
+    }
+
+    /// The moving piston's data at `pos` from the block entity's NBT (vanilla
+    /// `PistonMovingBlockEntity.loadAdditional`): the moved block state, facing, progress,
+    /// extending and source flags. The progress is the game thread's tick (vanilla advances
+    /// it 0.5 per tick to 1.0, then the block entity is gone); this reads its ends.
+    fn piston_data(
+        &mut self,
+        pos: BlockPos,
+        be: &haste_core::chunk::BlockEntityData,
+        partial: f32,
+    ) -> Option<std::sync::Arc<haste_render::PistonData>> {
+        let key = (be.nbt.as_ptr() as usize, be.nbt.len());
+        if let Some((k, len, data)) = self.piston_cache.get(&pos) {
+            if (*k, *len) == key {
+                if let Some(data) = data {
+                    // The progress ticks on: fold the anim's ends by the partial tick.
+                    let mut d = (**data).clone();
+                    d.progress = self
+                        .anim_map
+                        .get(&pos)
+                        .map(|a| match a {
+                            haste_render::BlockEntityAnim::Piston { progress } => {
+                                haste_render::TickPair {
+                                    start: progress.start,
+                                    end: progress.at(partial),
+                                }
+                            }
+                            _ => d.progress,
+                        })
+                        .unwrap_or(d.progress);
+                    return Some(std::sync::Arc::new(d));
+                }
+                return None;
+            }
+        }
+        let parsed = parse_piston_nbt(&be.nbt);
+        let parsed = std::sync::Arc::new(parsed);
+        self.piston_cache
+            .insert(pos, (key.0, key.1, Some(parsed.clone())));
+        Some(parsed)
+    }
+
     /// Hands the renderer the first-person hand (`Renderer::set_first_person`) when the view's
     /// per-tick part changed since the last call. The skin is fixed for the connection, so
     /// comparing the per-tick part is enough to catch every change; the skin is cloned only when
@@ -1468,6 +1706,126 @@ fn parse_pot_sherds(nbt: &[u8]) -> haste_render::blockentity::PotSherds {
         out.right = side(c, "right");
     }
     out
+}
+
+/// A moving piston's data from its NBT (vanilla `PistonMovingBlockEntity.loadAdditional`:
+/// `blockState`, `facing`, `progress`, `extending`, `source`). Unreadable or missing fields
+/// draw nothing (vanilla's `movedState` defaults to air, which also draws nothing).
+fn parse_piston_nbt(nbt: &[u8]) -> haste_render::PistonData {
+    use haste_protocol::nbt::deserializer::NbtReadHelperJava;
+    let mut cursor = std::io::Cursor::new(nbt);
+    let mut helper = NbtReadHelperJava::new(&mut cursor);
+    let Ok(doc) = haste_protocol::nbt::Nbt::read_unnamed(&mut helper) else {
+        return air_piston();
+    };
+    let root = &doc.root_tag;
+    // The state string carries its properties: `block[facing=north,...]`; keep it whole (the
+    // renderer parses it into the blockstate's variants).
+    let block_state = root
+        .get_string("blockState")
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let facing = root
+        .get_int("facing")
+        .and_then(|i| u8::try_from(i).ok())
+        .and_then(haste_core::Direction::from_ordinal)
+        .unwrap_or(haste_core::Direction::Down);
+    let progress = root.get_float("progress").unwrap_or(0.0);
+    let extending = root.get_bool("extending").unwrap_or(false);
+    let source = root.get_bool("source").unwrap_or(false);
+    haste_render::PistonData {
+        block_state,
+        progress: haste_render::TickPair::fixed(progress),
+        facing,
+        extending,
+        source,
+    }
+}
+
+/// The piston data for a block entity without a moved block (draws nothing).
+fn air_piston() -> haste_render::PistonData {
+    haste_render::PistonData {
+        block_state: String::new(),
+        progress: haste_render::TickPair::fixed(0.0),
+        facing: haste_core::Direction::Down,
+        extending: false,
+        source: false,
+    }
+}
+
+/// The end gateway's beam (vanilla `TheEndGatewayRenderer.extractRenderState`): spawning
+/// under age 200 in magenta to the build limit; the cooldown phase arrives as a block event
+/// (not in the NBT), so it is not drawn yet. `None` hides the beam.
+fn parse_gateway_beam(age: i64, partial: f32) -> Option<haste_render::GatewayBeam> {
+    if age >= 200 {
+        return None;
+    }
+    // Vanilla `getSpawnPercent`: `clamp((age + partial) / 200, 0, 1)`, then `sin(scale * PI)`;
+    // the beam distance is the build limit (`level.getMaxY()`), the height its floor. The
+    // overworld's build limit is 320.
+    let scale = ((age as f32 + partial) / 200.0).clamp(0.0, 1.0);
+    let scale = (scale * std::f32::consts::PI).sin();
+    let height = (scale * 320.0).floor() as i32;
+    Some(haste_render::GatewayBeam {
+        scale,
+        height,
+        // Vanilla `DyeColor.MAGENTA.getTextureDiffuseColor()` while spawning.
+        color: haste_render::blockentity::DYE_DIFFUSE_COLOR[2],
+    })
+}
+
+/// The gateway's `Age` from its NBT (vanilla `TheEndGatewayBlockEntity.loadAdditional`,
+/// default 0).
+fn parse_gateway_age(nbt: &[u8]) -> i64 {
+    use haste_protocol::nbt::deserializer::NbtReadHelperJava;
+    let mut cursor = std::io::Cursor::new(nbt);
+    let mut helper = NbtReadHelperJava::new(&mut cursor);
+    haste_protocol::nbt::Nbt::read_unnamed(&mut helper)
+        .ok()
+        .and_then(|doc| doc.root_tag.get_long("Age"))
+        .unwrap_or(0)
+}
+
+/// A stained-glass block's (or the beacon's own) beam colour (vanilla `BeaconBeamBlock.getColor`
+/// -> `DyeColor.getTextureDiffuseColor`), or `None` for other blocks.
+fn beacon_beam_color(block: &haste_core::Identifier) -> Option<u32> {
+    const GLASS: [(&str, u32); 16] = [
+        ("white_stained_glass", 0),
+        ("orange_stained_glass", 1),
+        ("magenta_stained_glass", 2),
+        ("light_blue_stained_glass", 3),
+        ("yellow_stained_glass", 4),
+        ("lime_stained_glass", 5),
+        ("pink_stained_glass", 6),
+        ("gray_stained_glass", 7),
+        ("light_gray_stained_glass", 8),
+        ("cyan_stained_glass", 9),
+        ("purple_stained_glass", 10),
+        ("blue_stained_glass", 11),
+        ("brown_stained_glass", 12),
+        ("green_stained_glass", 13),
+        ("red_stained_glass", 14),
+        ("black_stained_glass", 15),
+    ];
+    if block.namespace() != "minecraft" {
+        return None;
+    }
+    // The beacon block itself is a white beam block (vanilla `BeaconBlock.getColor`).
+    let color = if block.path() == "beacon" {
+        0
+    } else {
+        GLASS
+            .iter()
+            .find(|(name, _)| *name == block.path())
+            .map(|(_, dye)| *dye)?
+    };
+    Some(haste_render::blockentity::DYE_DIFFUSE_COLOR[color as usize])
+}
+
+/// Vanilla `ARGB.average`: the per-channel mean of two colours.
+fn average_argb(a: u32, b: u32) -> u32 {
+    let ch = |s: u32| (((a >> s) & 0xFF).wrapping_add((b >> s) & 0xFF)) / 2;
+    0xFF00_0000 | ch(16) << 16 | ch(8) << 8 | ch(0)
 }
 
 /// A banner's patterns from its NBT (`BannerBlockEntity`'s `patterns`: a list of
@@ -3367,6 +3725,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        renderer.set_game_time(shared.view.lock().world_age);
         renderer.set_lightmap_frame(lightmap);
         {
             let world = shared.world.read();
@@ -4096,6 +4455,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        renderer.set_game_time(shared.view.lock().world_age);
         {
             let world = shared.world.read();
             let mut particles = shared.particles.lock();
@@ -4510,6 +4870,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        renderer.set_game_time(shared.view.lock().world_age);
         renderer.set_lightmap_frame(lightmap);
         {
             let world = shared.world.read();
@@ -4693,6 +5054,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        renderer.set_game_time(shared.view.lock().world_age);
         renderer.set_lightmap_frame(lightmap);
         {
             let world = shared.world.read();
@@ -5639,6 +6001,7 @@ impl App {
             renderer.prepare_particles(&mut particles, &*world, camera, partial);
         }
         renderer.set_animation_tick(animation_tick);
+        renderer.set_game_time(session.shared.view.lock().world_age);
         renderer.set_lightmap_frame(lightmap);
         renderer.set_menu_blur_radius(self.options.menu_background_blurriness);
         if self.screenshot {
