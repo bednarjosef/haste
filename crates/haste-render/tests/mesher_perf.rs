@@ -379,13 +379,11 @@ fn mesher_output_stable() {
         "stability: {quads} quads, {vertices} vertices, sprite range {}..{}",
         sprites.0, sprites.1
     );
-    // Expected: the original mesher's output until the AO corner blend was
-    // ported from vanilla's BlockModelLighter (occluder count over four
-    // samples, the diagonal substituted by vanilla's side-0 cell when both
-    // side cells are non-permeable, and smoothBlend's zero-light fallbacks):
-    // every vertex's AO byte and lit corner change. Quad count, vertices and
-    // sprites are unchanged.
-    let expected: u64 = 2_526_463_744_587_925_612;
+    // Expected: the original mesher's output until the smooth light was kept
+    // in vanilla's 16th-of-a-level units (LIGHT16_PER_LEVEL) instead of
+    // rounding to nibbles: every vertex's light bytes change. Quad count,
+    // vertices and sprites are unchanged.
+    let expected: u64 = 4_054_758_899_771_904_499;
     assert_eq!(hash.finish(), expected, "mesher output changed");
     assert!(quads > 100_000, "suspiciously few quads: {quads}");
     eprintln!("{quads} quads, hash {:016x}", hash.finish());

@@ -318,7 +318,7 @@ impl MeshSink {
         layer: RenderLayer,
         positions: &[[f32; 3]; 4],
         uvs: &[[f32; 2]; 4],
-        lights: [[u8; 2]; 4],
+        lights: [[u8; 3]; 4],
         tint: u32,
         sprite: u16,
     ) {
@@ -351,7 +351,7 @@ impl MeshSink {
 fn pack_vertex_raw(
     position: [f32; 3],
     uv: [f32; 2],
-    light: [u8; 2],
+    light: [u8; 3],
     tint: u32,
     sprite: u16,
 ) -> PackedVertex {
@@ -641,12 +641,13 @@ pub fn mesh_section_with(
 
                         // Per-vertex light, following vanilla
                         // ModelBlockRenderer.AmbientOcclusionFace: face-adjacent
-                        // cell + the vertex's AO neighbours, blended.
-                        let lights: [[u8; 2]; 4] = core::array::from_fn(|vi| {
-                            let (ao_level, light) =
+                        // cell + the vertex's AO neighbours, blended. [sky16,
+                        // ao|shade, block16].
+                        let lights: [[u8; 3]; 4] = core::array::from_fn(|vi| {
+                            let (ao_level, [sky16, block16]) =
                                 vertex_light_for(&ctx, lx, ly, lz, quad.direction, vi);
                             let shade = shade_index(quad.shade_face);
-                            [light, pack_ao_shade(ao_level, shade)]
+                            [sky16, pack_ao_shade(ao_level, shade), block16]
                         });
                         let quad_tint = if quad.tinted {
                             *tint.get_or_insert_with(|| {
@@ -760,14 +761,28 @@ fn mesh_fluid(
         let own = ctx.snapshot.light(block_pos);
         let top_light = max_light(own, ctx.snapshot.light(block_pos.add(0, 1, 0)));
         let bottom_light = max_light(own, ctx.snapshot.light(block_pos.add(0, -1, 0)));
+        // Fluid light is a whole level (no blend): *16 into the smooth units
+        // the chunk vertex carries.
+        let light16 = |l: u8| {
+            [
+                (l >> 4) as u32 * crate::vertex::LIGHT16_PER_LEVEL as u32,
+                (l & 0xF) as u32 * crate::vertex::LIGHT16_PER_LEVEL as u32,
+            ]
+        };
+        let top16 = light16(top_light);
+        let bottom16 = light16(bottom_light);
         let offset = [lx as f32, ly as f32, lz as f32];
         for q in &quads {
-            let light = if q.dir == haste_assets::Direction::Down {
-                bottom_light
+            let [sky16, block16] = if q.dir == haste_assets::Direction::Down {
+                bottom16
             } else {
-                top_light
+                top16
             };
-            let packed = [light, pack_ao_shade(0, shade_index(Some(q.dir)))];
+            let packed = [
+                sky16 as u8,
+                pack_ao_shade(0, shade_index(Some(q.dir))),
+                block16 as u8,
+            ];
             let positions = q
                 .positions
                 .map(|p| [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]]);
@@ -840,10 +855,10 @@ struct AoSample {
 /// light blend of `LightCoordsUtil.smoothBlend` — the center's light averaged
 /// with the three samples, where a fully-dark neighbour takes the center's
 /// light and a zero-sky one its sky, but only when the center itself is lit
-/// (sky > 2 or block > 2). Vanilla keeps the average in 16th-of-a-level units
-/// through to the lightmap; the vertex format's nibble rounds to the nearest
-/// level (vanilla's average is exact, so this is the closest nibble).
-fn ao_corner_blend(sides: [AoSample; 2], diagonal: AoSample, center: AoSample) -> (u8, u8) {
+/// (sky > 2 or block > 2). The light comes back in vanilla's smooth units
+/// (16 per level, 0..240 — the exact average, like vanilla keeps into the
+/// lightmap; `LIGHT16_PER_LEVEL`).
+fn ao_corner_blend(sides: [AoSample; 2], diagonal: AoSample, center: AoSample) -> (u8, [u8; 2]) {
     let ao = vertex_ao_level(
         sides[0].occludes,
         sides[1].occludes,
@@ -867,12 +882,14 @@ fn ao_corner_blend(sides: [AoSample; 2], diagonal: AoSample, center: AoSample) -
         sky += s as u32;
         block += b as u32;
     }
+    // Vanilla keeps the exact average in 16th-of-a-level units (0..240) into
+    // the lightmap; the vertex carries it (`LIGHT16_PER_LEVEL`).
     (
         ao,
-        pack_light(
-            ((sky + 2) / 4).min(15) as u8,
-            ((block + 2) / 4).min(15) as u8,
-        ),
+        [
+            (sky * 4).min(crate::vertex::LIGHT16_MAX as u32) as u8,
+            (block * 4).min(crate::vertex::LIGHT16_MAX as u32) as u8,
+        ],
     )
 }
 
@@ -887,7 +904,7 @@ fn vertex_light_for(
     lz: i32,
     dir: haste_assets::Direction,
     vi: usize,
-) -> (u8, u8) {
+) -> (u8, [u8; 2]) {
     // (side1, side2, corner) offsets per vertex, in face_positions order.
     let corners = face_corners()[dir.index()][vi];
     let [s1, s2, corner] = corners;
@@ -1543,30 +1560,27 @@ mod tests {
         // (15, 0).
         // AO: stone + stone + air + air = 2 occluders (brightness 0.6).
         // Light: the center is lit (12 > 2), so the west side's zero light
-        // becomes the center's (12, 0); sky = (12 + 12 + 15 + 15 + 2) / 4
-        // = 14, block = (0 + 0 + 0 + 0 + 2) / 4 = 0.
-        let (ao, light) = ao_corner_blend(
+        // becomes the center's (12, 0); the sky levels sum to 12 + 12 + 15 +
+        // 15 = 54, whose exact average in 16th units is 54 * 4 = 216 (level
+        // 13.5 — the fraction is the point of the smooth units); block 0.
+        let (ao, [sky16, block16]) = ao_corner_blend(
             [stone(15, 0), stone(0, 0)],
             air(15, 0), // the substituted diagonal (side 0)
             air(12, 0), // center
         );
         assert_eq!(ao, 2);
-        assert_eq!(
-            light >> 4,
-            14,
-            "zero-light neighbour takes the center's sky"
-        );
-        assert_eq!(light & 0xF, 0);
+        assert_eq!(sky16, 216, "zero-light neighbour takes the center's sky");
+        assert_eq!(block16, 0);
 
-        // Without the zero-light fallback the sky average would be
-        // (12 + 0 + 15 + 15 + 2)/4 = 11 — the test above pins the rule.
-        let (_, l2) = ao_corner_blend([stone(15, 0), stone(9, 0)], air(15, 0), air(12, 0));
-        assert_eq!(l2 >> 4, 13, "no substitution when the neighbour is lit");
+        // Without the zero-light fallback the sky levels would sum to 12 + 0
+        // + 15 + 15 = 42 (168 in 16ths) — the test above pins the rule.
+        let (_, [l2, _]) = ao_corner_blend([stone(15, 0), stone(9, 0)], air(15, 0), air(12, 0));
+        assert_eq!(l2, 204, "no substitution when the neighbour is lit");
 
         // The center below the blend threshold: no substitution at all
         // (vanilla applies the fallbacks only when the center is lit).
-        let (_, l3) = ao_corner_blend([stone(15, 0), stone(0, 0)], air(15, 0), air(2, 0));
-        assert_eq!(l3 >> 4, 8, "dark center: zero light stays zero");
+        let (_, [l3, _]) = ao_corner_blend([stone(15, 0), stone(0, 0)], air(15, 0), air(2, 0));
+        assert_eq!(l3, 128, "dark center: zero light stays zero");
     }
 
     /// Pomme's `compute_face_ao` neighbour triples (vanilla AdjacencyInfo),
@@ -1705,9 +1719,9 @@ mod tests {
         }
     }
 
-    /// The vertex light's sky nibble, unpacked from the packed vertex.
-    fn vertex_sky(v: &PackedVertex) -> u8 {
-        v.light[0] >> 4
+    /// The vertex light's sky channel, in whole levels (smooth units / 16).
+    fn vertex_sky_levels(v: &PackedVertex) -> u8 {
+        v.light[0] / crate::vertex::LIGHT16_PER_LEVEL as u8
     }
 
     #[test]
@@ -1729,7 +1743,11 @@ mod tests {
         let mut seen = 0;
         for v in &mesh.vertices {
             if v.sprite == up {
-                assert_eq!(vertex_sky(v), 9, "up face light samples the y=1 cells");
+                assert_eq!(
+                    vertex_sky_levels(v),
+                    9,
+                    "up face light samples the y=1 cells"
+                );
                 seen += 1;
             }
         }
@@ -1758,12 +1776,12 @@ mod tests {
         let mut lights = std::collections::BTreeSet::new();
         for v in &mesh.vertices {
             if v.sprite == side {
-                lights.insert(vertex_sky(v));
+                lights.insert(v.light[0]);
             }
         }
         assert_eq!(
             lights.into_iter().collect::<Vec<_>>(),
-            vec![12, 15],
+            vec![192, 240],
             "side face light: the corner cells beside the face, not further out"
         );
     }
