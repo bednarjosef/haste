@@ -378,7 +378,36 @@ container_furnace() {
   check containers-furnace "1 raw iron smelted with 1 coal became 1 iron ingot" "$r"
 }
 
-ALL=(hud death drop modes f2 craft containers-crafting-table containers-furnace)
+# The anvil: rename a wooden sword with one XP level. The anvil sits at (122, 71, 5) in
+# the check's own area, on its own stone platform, the player 2.5 blocks north of it.
+container_anvil() {
+  local log="$LOGDIR/containers-anvil.log"
+  plain_client "$ROOT/scripts/checks/containers-anvil.txt" "$log" \
+    || { check containers-anvil "player never joined" 1; return; }
+  plain_setup "$log" canvil-setup "122.5 71 2.5 0 0" \
+    "clear $NAME" \
+    "give $NAME minecraft:wooden_sword 1" \
+    "xp add $NAME 1 levels" \
+    "fill 121 70 1 123 74 6 air replace" \
+    "fill 121 70 1 123 70 6 minecraft:stone replace" \
+    "setblock 122 71 5 minecraft:anvil"
+  local before after
+  before=$(rcon "data get entity $NAME Inventory")
+  if wait_shot "$log" canvil-closed 90; then
+    after=$(rcon "data get entity $NAME Inventory")
+  fi
+  wait_exit
+  echo "--- anvil evidence ---"
+  echo "Inventory before: $before"
+  echo "Inventory after:  $after"
+  local r=0
+  has "$before" "wooden_sword" || { echo "no wooden_sword before"; r=1; }
+  has "$after" "wooden_sword" || { echo "no renamed sword after"; r=1; }
+  has "$after" "RenamedSword" || { echo "no custom name RenamedSword"; r=1; }
+  check containers-anvil "a wooden sword was renamed to RenamedSword for 1 XP level" "$r"
+}
+
+ALL=(hud death drop modes f2 craft containers-crafting-table containers-furnace containers-anvil)
 if [ $# -eq 0 ]; then
   set -- "${ALL[@]}"
 fi
@@ -387,6 +416,7 @@ for f in "$@"; do
     hud | death | drop | modes | f2 | craft) "$f" ;;
     containers-crafting-table) container_crafting_table ;;
     containers-furnace) container_furnace ;;
+    containers-anvil) container_anvil ;;
     *) echo "unknown feature: $f" ;;
   esac
 done
