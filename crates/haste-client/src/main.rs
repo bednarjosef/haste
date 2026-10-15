@@ -21,6 +21,7 @@ mod boat;
 mod game;
 mod hand;
 mod headless;
+mod horse;
 mod launch;
 mod net;
 mod player;

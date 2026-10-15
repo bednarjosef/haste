@@ -67,6 +67,8 @@ struct FakeEntities {
     /// Registry index per entity id (spawn's `kind`), for the seat offset.
     kinds: HashMap<EntityId, i32>,
     dims: HashMap<EntityId, (f32, f32)>,
+    /// Equipment per entity id (wire slot, filled), like the store's stacks.
+    equipment: HashMap<EntityId, Vec<(u8, ItemStackData)>>,
 }
 
 impl EntitySink for FakeEntities {
@@ -121,8 +123,13 @@ impl EntitySink for FakeEntities {
         self.log
             .push(format!("metadata {} {}", id.0, entries.len()));
     }
-    fn set_equipment(&mut self, id: EntityId, slot: u8, _item: ItemStackData) {
+    fn set_equipment(&mut self, id: EntityId, slot: u8, item: ItemStackData) {
         self.log.push(format!("equipment {} {slot}", id.0));
+        let e = self.equipment.entry(id).or_default();
+        match e.iter_mut().find(|(s, _)| *s == slot) {
+            Some((_, stack)) => *stack = item,
+            None => e.push((slot, item)),
+        }
     }
     fn player_info(&mut self, info: &[PlayerInfo]) {
         self.log.push(format!("player_info {}", info.len()));
@@ -138,6 +145,9 @@ impl EntitySink for FakeEntities {
                 .get(&id)
                 .map(|d| (haste_core::RegistryIndex(*k as u32), *d))
         })
+    }
+    fn equipment(&self, id: EntityId) -> Option<&[(u8, ItemStackData)]> {
+        self.equipment.get(&id).map(Vec::as_slice)
     }
     fn entity_type(&self, id: EntityId) -> Option<haste_core::RegistryIndex> {
         self.kinds
@@ -955,6 +965,97 @@ fn mounting_a_boat_we_drive_starts_its_client_side_simulation() {
     }));
     assert!(r.session.player.vehicle().is_none());
     assert!(r.session.player.boat().is_none());
+}
+
+/// Mounting a saddled horse gives us its client-side simulation (vanilla
+/// `AbstractHorse.getControllingPassenger`: the first passenger, a player, of a saddled horse);
+/// an unsaddled one keeps its server-driven position, and the `update_attributes` the server
+/// sent with its spawn feeds the simulation's own attributes.
+#[test]
+fn mounting_a_saddled_horse_starts_its_client_side_simulation() {
+    let mut r = Rig::new();
+    r.session
+        .set_entity_type_names(names(&["player", "horse", "donkey", "llama", "camel"]));
+    r.session
+        .set_attribute_names(names(&["movement_speed", "jump_strength", "gravity"]));
+    r.apply(spawn_packet_kind(5, DVec3::new(40.0, 70.0, 40.0), 1)); // horse
+                                                                    // The attributes arrive with the spawn (ServerEntity.sendPairingData).
+    r.apply(ClientboundPlay::UpdateAttributes(cb::UpdateAttributes {
+        entity_id: 5,
+        properties: vec![
+            cb::AttributeProperty {
+                id: 0,
+                value: 0.25,
+                modifiers: vec![],
+            },
+            cb::AttributeProperty {
+                id: 1,
+                value: 0.9,
+                modifiers: vec![],
+            },
+        ],
+    }));
+    // The saddle arrives as equipment (wire slot 7).
+    r.apply(ClientboundPlay::SetEquipment(cb::SetEquipment {
+        entity_id: 5,
+        equipment: vec![(
+            7,
+            ItemStackData {
+                count: 1,
+                item: Some(haste_core::RegistryIndex(3)),
+                components_raw: Default::default(),
+            },
+        )],
+    }));
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 5,
+        passengers: vec![7],
+    }));
+    let horse = r.session.player.horse().expect("the horse is ours");
+    assert_eq!(horse.pos, DVec3::new(40.0, 70.0, 40.0));
+    assert!((horse.movement_speed - 0.25).abs() < 1.0e-9);
+    assert!((horse.jump_strength - 0.9).abs() < 1.0e-9);
+    // A horse without a saddle (or a llama, whose passengers never control it) is not ours.
+    r.apply(spawn_packet_kind(6, DVec3::ZERO, 3)); // llama
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 6,
+        passengers: vec![7],
+    }));
+    assert!(r.session.player.horse().is_none());
+    r.apply(spawn_packet_kind(8, DVec3::ZERO, 2)); // donkey without a saddle
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 8,
+        passengers: vec![7],
+    }));
+    assert!(
+        r.session.player.horse().is_none(),
+        "an unsaddled donkey is not ours to steer"
+    );
+    // Back on the saddled horse, and the server's correction snaps our simulation of it.
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 5,
+        passengers: vec![7],
+    }));
+    assert!(r.session.player.horse().is_some());
+    r.apply(ClientboundPlay::MoveVehicle(cb::MoveVehicle {
+        pos: DVec3::new(44.0, 70.0, 43.0),
+        yaw: 90.0,
+        pitch: 0.0,
+    }));
+    assert_eq!(
+        r.session.player.horse().expect("still ours").pos,
+        DVec3::new(44.0, 70.0, 43.0)
+    );
+    assert!(r.out.iter().any(|p| matches!(
+        p,
+        ServerboundPlay::MoveVehicle(m) if m.pos == DVec3::new(44.0, 70.0, 43.0) && m.yaw == 90.0
+    )));
+    // Dismount drops the simulation.
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 5,
+        passengers: vec![],
+    }));
+    assert!(r.session.player.horse().is_none());
 }
 
 #[test]

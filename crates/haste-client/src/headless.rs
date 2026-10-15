@@ -54,7 +54,9 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
     // server sent one, else the static one).
     let type_names = net::entity_type_names(regs, &data);
     let mob_variants = net::mob_variants(regs);
+    let attribute_names = net::attribute_names(regs, &data);
     driver.session.set_entity_type_names(type_names);
+    driver.session.set_attribute_names(attribute_names);
     let mut world = World::new_with_biomes(
         driver.login().dimension.clone(),
         data.clone(),

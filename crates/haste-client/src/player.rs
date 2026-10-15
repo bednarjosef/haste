@@ -60,6 +60,7 @@ pub const UNLOADED_CHUNK_FALL_SPEED: f64 = -0.1 * VERTICAL_DRAG as f64;
 pub mod command {
     pub const START_SPRINTING: i32 = 1;
     pub const STOP_SPRINTING: i32 = 2;
+    pub const START_RIDING_JUMP: i32 = 3;
     pub const START_FALL_FLYING: i32 = 6;
 }
 
@@ -218,6 +219,16 @@ pub struct LocalPlayer {
     /// any dismount: it holds the client's own authoritative simulation of a vehicle whose
     /// controlling passenger we are (vanilla `Entity.isLocalInstanceAuthoritative`).
     boat: Option<crate::boat::Boat>,
+    /// The horse-family vehicle we steer ([`crate::horse`]), like `boat` above.
+    horse: Option<crate::horse::Horse>,
+    /// The mount's charged jump state (vanilla `LocalPlayer.jumpRidingTicks` /
+    /// `jumpRidingScale`): counts the held jump while on a horse-family vehicle, and the scale
+    /// is what the `player_command` START_RIDING_JUMP carries and the HUD jump bar shows.
+    jump_riding_ticks: i32,
+    jump_riding_scale: f32,
+    /// The jump key state of the previous tick, for the charge's rising and falling edges
+    /// (vanilla reads `wasJumping` from before `input.tick()`).
+    riding_jump_held: bool,
     /// Where our feet sit on the vehicle while riding (set on mount), in the vehicle's own
     /// frame: the vehicle's passenger attachment point minus our own vehicle attachment point
     /// (`haste_entity::passenger_seat`).
@@ -300,6 +311,10 @@ impl LocalPlayer {
             loaded: false,
             vehicle: None,
             boat: None,
+            horse: None,
+            jump_riding_ticks: 0,
+            jump_riding_scale: 0.0,
+            riding_jump_held: false,
             seat: SeatPoint::ZERO,
             pending_accept: None,
             pending_accept_age: 0,
@@ -796,20 +811,29 @@ impl LocalPlayer {
 
     /// Mounts or dismounts (`set_passengers`): `seat` is where our feet sit on the vehicle each
     /// tick, in the vehicle's frame (the vehicle's passenger attachment point minus our own,
-    /// `haste_entity::passenger_seat`), and `boat` the vehicle's client-side simulation when it
-    /// is a boat we steer (`None` for any other vehicle, and on a dismount). On a dismount,
-    /// normal physics resumes from where the player is.
+    /// `haste_entity::passenger_seat`), and `boat`/`horse` the vehicle's client-side simulation
+    /// when it is a vehicle we steer (`None` for any other vehicle, and on a dismount). On a
+    /// dismount, normal physics resumes from where the player is.
     pub fn set_vehicle(
         &mut self,
         vehicle: Option<EntityId>,
         seat: SeatPoint,
         boat: Option<crate::boat::Boat>,
+        horse: Option<crate::horse::Horse>,
     ) {
         if vehicle.is_some() {
             self.seat = seat;
         }
         self.vehicle = vehicle;
         self.boat = boat;
+        let has_horse = horse.is_some();
+        self.horse = horse;
+        if !has_horse {
+            // Vanilla's charge state resets with the vehicle (a new mount starts uncharged).
+            self.jump_riding_ticks = 0;
+            self.jump_riding_scale = 0.0;
+            self.riding_jump_held = false;
+        }
     }
 
     /// The vehicle we ride, if any.
@@ -826,6 +850,23 @@ impl LocalPlayer {
     /// The boat we steer, for the packets that steer it (the server's corrections).
     pub fn boat_mut(&mut self) -> Option<&mut crate::boat::Boat> {
         self.boat.as_mut()
+    }
+
+    /// The horse-family vehicle we steer, if any (its simulated pose drives the seat and the
+    /// `move_vehicle` packets; for tests).
+    pub fn horse(&self) -> Option<&crate::horse::Horse> {
+        self.horse.as_ref()
+    }
+
+    /// The horse we steer, for the packets that steer it (the server's corrections).
+    pub fn horse_mut(&mut self) -> Option<&mut crate::horse::Horse> {
+        self.horse.as_mut()
+    }
+
+    /// The mount's charged jump scale (vanilla `LocalPlayer.getJumpRidingScale`): what the HUD
+    /// jump bar shows while we hold jump on a horse-family vehicle.
+    pub fn jump_riding_scale(&self) -> f32 {
+        self.jump_riding_scale
     }
 
     /// The seat we ride in while mounted, in the vehicle's own frame (for tests).
@@ -853,6 +894,11 @@ impl LocalPlayer {
             Some(VehiclePose {
                 pos: boat.pos,
                 yaw: boat.yaw,
+            })
+        } else if let Some(horse) = &self.horse {
+            Some(VehiclePose {
+                pos: horse.pos,
+                yaw: horse.yaw,
             })
         } else {
             vehicle
@@ -891,6 +937,60 @@ impl LocalPlayer {
             left: boat.paddle(0),
             right: boat.paddle(1),
         }));
+    }
+
+    /// The horse's own tick and the rider's charged jump (vanilla runs the vehicle before its
+    /// passenger, and the charge lives in the passenger's `LocalPlayer.aiStep` — after the
+    /// horse's tick, so the horse reads the charge and the input one tick late). The release
+    /// hands the horse its charge and sends the `player_command` START_RIDING_JUMP vanilla's
+    /// `sendRidingJump` does.
+    fn horse_tick(
+        &mut self,
+        input: &InputState,
+        look: (f32, f32),
+        ctx: &TickCtx<'_>,
+        out: &mut Vec<ServerboundPlay>,
+    ) {
+        let Some(horse) = &mut self.horse else {
+            return;
+        };
+        let env = crate::horse::HorseEnv {
+            world: ctx.world,
+            shapes: ctx.shapes,
+            blocks: ctx.blocks,
+        };
+        horse.tick(&env);
+        // The charged jump (vanilla `LocalPlayer.aiStep`, the `jumpableVehicle` branch; the
+        // horse family has no jump cooldown). A negative counter is the ten-tick lockout after
+        // a release; while it counts up to zero the scale stays empty.
+        let held = input.jump;
+        let was_held = self.riding_jump_held;
+        self.riding_jump_held = held;
+        if self.jump_riding_ticks < 0 {
+            self.jump_riding_ticks += 1;
+            if self.jump_riding_ticks == 0 {
+                self.jump_riding_scale = 0.0;
+            }
+        }
+        if was_held && !held {
+            self.jump_riding_ticks = -10;
+            let amount = crate::horse::charge_amount(self.jump_riding_scale);
+            horse.on_player_jump(amount);
+            out.push(ServerboundPlay::PlayerCommand(sb::PlayerCommand {
+                entity_id: self.entity_id.0,
+                action: command::START_RIDING_JUMP,
+                jump_boost: amount,
+            }));
+        } else if !was_held && held {
+            self.jump_riding_ticks = 0;
+            self.jump_riding_scale = 0.0;
+        } else if was_held {
+            self.jump_riding_ticks += 1;
+            self.jump_riding_scale = crate::horse::charge_scale(self.jump_riding_ticks);
+        }
+        // This tick's input and look are what the horse's next tick reads.
+        let (strafe, forward) = crate::horse::rider_input(input);
+        horse.set_input(strafe, forward, look);
     }
 
     fn tick_inner(
@@ -965,15 +1065,21 @@ impl LocalPlayer {
             // passenger's `rideTick` seats us on it, then `LocalPlayer.sendChanges`: the rotation
             // and, for a vehicle we control, the `move_vehicle` that carries its simulation.
             self.boat_tick(ctx, out);
+            self.horse_tick(input, look, ctx, out);
             self.ride_tick(input, look, vehicle);
             self.send_rotation(out);
-            if let Some(boat) = &self.boat {
-                if boat.pos.is_finite() && boat.yaw.is_finite() {
+            let steered = match (&self.boat, &self.horse) {
+                (Some(boat), _) => Some((boat.pos, boat.yaw, 0.0, boat.on_ground)),
+                (_, Some(horse)) => Some((horse.pos, horse.yaw, horse.pitch, horse.on_ground)),
+                _ => None,
+            };
+            if let Some((pos, yaw, pitch, on_ground)) = steered {
+                if pos.is_finite() && yaw.is_finite() {
                     out.push(ServerboundPlay::MoveVehicle(sb::MoveVehicle {
-                        pos: boat.pos,
-                        yaw: boat.yaw,
-                        pitch: 0.0,
-                        on_ground: boat.on_ground,
+                        pos,
+                        yaw,
+                        pitch,
+                        on_ground,
                     }));
                 }
             }
