@@ -578,13 +578,56 @@ commandblock() {
 }
 
 
-ALL=(hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock)
+# ---- 15. Sprint: double-tapping W starts sprinting (vanilla LocalPlayer.aiStep) ----
+# The server's player NBT has no sprint field, so the evidence is the speed: the script
+# double-taps W (press, 2-tick release, press and hold); while the hold runs the runner
+# samples the server's own position twice, one second apart, and computes the covered
+# distance. Sprinting covers ~5.61 m/s (sprint speed 5.612), walking only ~4.32 m/s
+# (vanilla `Player.getSprintingSpeed` and the walk speed): more than 5 m/s in one second
+# is sprinting, less than 4.8 is walking.
+sprint() {
+  local log="$LOGDIR/sprint.log"
+  NAME="spr_$$"
+  area
+  client_start "$ROOT/scripts/checks/sprint.txt" "$log"
+  wait_online || { check sprint "player never joined" 1; return; }
+  rcon "gamemode survival $NAME" >/dev/null
+  local p1="" p2="" z1="" z2=""
+  if wait_shot "$log" sprint-setup 90; then
+    rcon "tp $NAME $CX 100 $CZ 0 0" >/dev/null
+    rcon "execute at $NAME run fill ~-4 ~-1 ~-4 ~4 ~-1 ~4 stone" >/dev/null
+    rcon "execute at $NAME run fill ~-3 ~ ~-3 ~3 ~6 ~3 air" >/dev/null
+    wait_rcon "execute at $NAME if block ~ ~-1 ~ stone" "Test passed" 30 >/dev/null
+  fi
+  # Sample the position twice while the W hold runs (the script holds it 15 s).
+  p1=$(rcon "data get entity $NAME Pos" 2>/dev/null)
+  z1=$(pos_z "$p1")
+  sleep 1
+  p2=$(rcon "data get entity $NAME Pos" 2>/dev/null)
+  z2=$(pos_z "$p2")
+  wait_exit
+  # Our platform, not the shared spawn's.
+  rcon "fill $((CX - 4)) 99 $((CZ - 4)) $((CX + 4)) 106 $((CZ + 4)) air" >/dev/null
+  echo "--- sprint evidence ---"
+  echo "pos at sample 1: ${p1:-<none>}"
+  echo "pos at sample 2: ${p2:-<none>}"
+  local dist=0
+  if [ -n "$z1" ] && [ -n "$z2" ]; then
+    dist=$(awk -v a="$z1" -v b="$z2" 'BEGIN{d=b-a; if (d<0) d=-d; printf "%.2f", d}')
+  fi
+  echo "distance in ~1 s of the held W: ${dist} blocks"
+  local r=0
+  awk -v d="$dist" 'BEGIN{exit !(d>5.0)}' || { echo "the double tap did not reach sprint speed"; r=1; }
+  check sprint "double-tapping W made the player cover ${dist} blocks/s (sprint speed)" "$r"
+}
+
+ALL=(hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock sprint)
 if [ $# -eq 0 ]; then
   set -- "${ALL[@]}"
 fi
 for f in "$@"; do
   case "$f" in
-    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | particles | recipe-book | sign | book | commandblock) "${f//-/_}" ;;
+    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | particles | recipe-book | sign | book | commandblock | sprint) "${f//-/_}" ;;
     *) echo "unknown feature: $f" ;;
   esac
 done
