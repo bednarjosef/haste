@@ -399,7 +399,7 @@ plain_setup() { # log shot pos commands...
 # The crafting table: craft planks in the 3x3 grid, shift-click the result into the
 # inventory, then repeat with plain clicks (pick the result up, put it down). The table
 # sits in the check's own area; the player stands 2.5 blocks north of it.
-container_crafting_table() {
+containers_crafting_table() {
   local log="$LOGDIR/containers-crafting-table.log"
   plain_client "$ROOT/scripts/checks/containers-crafting-table.txt" "$log" \
     || { check containers-crafting-table "player never joined" 1; return; }
@@ -561,7 +561,7 @@ recipe_book() {
 # The furnace: smelt 1 raw iron with 1 coal, take the iron ingot. The furnace sits at
 # (128, 71, 5) in the check's own area, on its own stone platform, the player 2.5 blocks
 # north of it.
-container_furnace() {
+containers_furnace() {
   local log="$LOGDIR/containers-furnace.log"
   plain_client "$ROOT/scripts/checks/containers-furnace.txt" "$log" \
     || { check containers-furnace "player never joined" 1; return; }
@@ -590,7 +590,7 @@ container_furnace() {
 
 # The anvil: rename a wooden sword with one XP level. The anvil sits at (122, 71, 5) in
 # the check's own area, on its own stone platform, the player 2.5 blocks north of it.
-container_anvil() {
+containers_anvil() {
   local log="$LOGDIR/containers-anvil.log"
   plain_client "$ROOT/scripts/checks/containers-anvil.txt" "$log" \
     || { check containers-anvil "player never joined" 1; return; }
@@ -764,7 +764,7 @@ if [ $# -eq 0 ]; then
 fi
 for f in "$@"; do
   case "$f" in
-    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | particles | recipe-book | sign | book | commandblock | sprint | containers-crafting-table | containers-furnace | containers-anvil) "${f//-/_}" ;;
+    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | particles | recipe-book | sign | book | commandblock | sprint | containers-crafting-table | containers-furnace | containers-anvil) fn="${f//-/_}"; if declare -F "$fn" >/dev/null; then "$fn"; else check "$f" "no check function $fn" 1; fi ;;
     *) echo "unknown feature: $f" ;;
   esac
 done
