@@ -1320,36 +1320,45 @@ mod tests {
         // creative: no health, no hunger
         assert_eq!(vitals(&mut ui), (0, 0));
         // CHANGE_GAME_MODE (event 3), the param is the GameType id: 0 = survival
-        ui.handle(&ClientboundPlay::GameEvent(cb::GameEvent {
-            event: 3,
-            value: 0.0,
-        }));
+        ui.handle(
+            &ClientboundPlay::GameEvent(cb::GameEvent {
+                event: 3,
+                value: 0.0,
+            }),
+            &|_| BlockStateId::AIR,
+        );
         assert_eq!(ui.gui().with_state(|s| s.game_mode), GameMode::Survival);
         let (hearts, food) = vitals(&mut ui);
         assert!(hearts >= 10, "hearts: {hearts}");
         assert!(food >= 10, "food: {food}");
         // and back to creative (1): the hearts and the hunger bar go away again
-        ui.handle(&ClientboundPlay::GameEvent(cb::GameEvent {
-            event: 3,
-            value: 1.0,
-        }));
+        ui.handle(
+            &ClientboundPlay::GameEvent(cb::GameEvent {
+                event: 3,
+                value: 1.0,
+            }),
+            &|_| BlockStateId::AIR,
+        );
         assert_eq!(vitals(&mut ui), (0, 0));
         // the respawn packet carries the game mode too (a respawn in another mode)
-        ui.handle(&ClientboundPlay::Respawn(cb::Respawn {
-            spawn: cb::SpawnInfo {
-                dimension_type: 0,
-                dimension: "minecraft:overworld".parse().unwrap(),
-                hashed_seed: 0,
-                game_mode: 0,
-                previous_game_mode: 0,
-                is_debug: false,
-                is_flat: false,
-                death_location: None,
-                portal_cooldown: 0,
-                sea_level: 63,
-            },
-            data_kept: 0,
-        }));
+        ui.handle(
+            &ClientboundPlay::Respawn(cb::Respawn {
+                spawn: cb::SpawnInfo {
+                    dimension_type: 0,
+                    dimension: "minecraft:overworld".parse().unwrap(),
+                    hashed_seed: 0,
+                    game_mode: 0,
+                    previous_game_mode: 0,
+                    is_debug: false,
+                    is_flat: false,
+                    death_location: None,
+                    portal_cooldown: 0,
+                    sea_level: 63,
+                },
+                data_kept: 0,
+            }),
+            &|_| BlockStateId::AIR,
+        );
         let (hearts, food) = vitals(&mut ui);
         assert!(hearts >= 10, "hearts after the respawn: {hearts}");
         assert!(food >= 10, "food after the respawn: {food}");
