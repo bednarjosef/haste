@@ -3069,7 +3069,7 @@ impl Menu {
                 })();
                 match result {
                     Ok(host) => {
-                        let ui = crate::ui::Ui::new(host);
+                        let ui = crate::ui::Ui::new(host.clone());
                         // Screens need the synced registries (L1c): the jar's data pack stands in
                         // for a server's registry_data until one is joined.
                         if let Err(e) = ui.gui().load_jar_registries() {
@@ -3079,6 +3079,11 @@ impl Menu {
                             tracing::warn!("opening the title screen: {e:#}");
                         }
                         let _ = tx.send(ui);
+                        // The title screen is up: warm the classes its first clicks load
+                        // (Singleplayer's world-selection tree) while the player looks at it, on
+                        // this background thread — never the render thread. The UI is already
+                        // with the render loop, so the frames do not wait for this.
+                        host.warm_screen_classes();
                     }
                     Err(e) => {
                         tracing::warn!("no menu screens: the JVM did not start: {e:#}");
