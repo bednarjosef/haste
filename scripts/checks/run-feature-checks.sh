@@ -360,9 +360,14 @@ craft() {
 # 176x166 screen centred in the 480x270 GUI).
 
 # Starts the client on `script` and waits for it to be online. The player name is fresh
-# per run (`ContainersChk$RANDOM`): a fresh player always joins alive, empty and at the
-# world spawn, which is the snowy plain. Returns 1 when the client never joined.
+# per check (`ContainersChk` + a three-digit number - 16 characters at most: the vanilla
+# protocol rejects longer names with a generic disconnect): a fresh player always joins
+# alive, empty and at the world spawn, which is the snowy plain - so one runner's checks
+# never inherit each other's inventories through a shared player file (the previous
+# check's leftovers would satisfy `wait_until hotbar_item` before this check's give
+# arrives). Returns 1 when the client never joined.
 plain_client() { # script log
+  NAME="ContainersChk$((RANDOM % 1000))"
   client_start "$1" "$2"
   wait_online || return 1
   return 0
@@ -377,20 +382,34 @@ plain_client() { # script log
 # the script's `wait_until hotbar_item` window (25 s): on a busy shared test server the
 # player entity lags the client's join by many seconds, RCON answers "No player was
 # found" until it is there, and the give's inventory sync can lag its answer again.
+# Two phases, because the tp must land before anything is given: the scripts wait for
+# the give (`wait_until hotbar_item`), and if a give could land while the tp still
+# answers "No entity was found", the script would click at the shared spawn while the
+# scene is not even built (the area's chunks are not loaded there, so the fills and
+# setblock would have failed too). Phase one lands the tp (done is not "the player
+# exists" but "the player's own Pos answer shows the tp's x"); phase two gives the
+# items and places the blocks, retried until the give's item shows in the inventory.
 plain_setup() { # log shot pos commands...
   local log=$1 shot=$2 pos=$3
   shift 3
+  local x=${pos%% *}
   if wait_shot "$log" "$shot" 90; then
     local end=$((SECONDS + 25))
     while [ $SECONDS -lt $end ]; do
       rcon "gamemode survival $NAME" >/dev/null
       rcon "tp $NAME $pos" >/dev/null
+      # done when the player's own Pos answer shows the tp's x (the teleport landed)
+      rcon "data get entity $NAME Pos" 2>/dev/null | grep -q "\[${x}d," && break
+      sleep 2
+    done
+    # the scene: clear, give, fill, setblock (name- and area-based, all safe to repeat)
+    while [ $SECONDS -lt $end ]; do
       local c
       for c in "$@"; do
         rcon "$c" >/dev/null
       done
-      # done when a `data get` answer names the player (the commands found it)
-      [ -n "$(rcon "data get entity $NAME Pos" 2>/dev/null | grep "$NAME")" ] && break
+      # done when an item arrived (every check's commands give at least one)
+      rcon "data get entity $NAME Inventory" 2>/dev/null | grep -q "minecraft:" && break
       sleep 2
     done
   fi
@@ -409,7 +428,7 @@ containers_crafting_table() {
     "fill 124 70 1 126 74 6 air replace" \
     "fill 124 70 1 126 70 6 minecraft:stone replace" \
     "setblock 125 71 5 minecraft:crafting_table"
-  local before after
+  local before="" after=""
   before=$(rcon "data get entity $NAME Inventory")
   if wait_shot "$log" ccraft-final 90; then
     after=$(rcon "data get entity $NAME Inventory")
@@ -583,7 +602,7 @@ containers_furnace() {
     "fill 127 70 1 129 74 6 air replace" \
     "fill 127 70 1 129 70 6 minecraft:stone replace" \
     "setblock 128 71 5 minecraft:furnace"
-  local before after
+  local before="" after=""
   before=$(rcon "data get entity $NAME Inventory")
   if wait_shot "$log" cfurn-closed 90; then
     after=$(rcon "data get entity $NAME Inventory")
@@ -612,7 +631,7 @@ containers_anvil() {
     "fill 121 70 1 123 74 6 air replace" \
     "fill 121 70 1 123 70 6 minecraft:stone replace" \
     "setblock 122 71 5 minecraft:anvil"
-  local before after
+  local before="" after=""
   before=$(rcon "data get entity $NAME Inventory")
   if wait_shot "$log" canvil-closed 90; then
     after=$(rcon "data get entity $NAME Inventory")
@@ -643,7 +662,7 @@ containers_enchanting_table() {
     "fill 123 70 1 125 74 6 air replace" \
     "fill 123 70 1 125 70 6 minecraft:stone replace" \
     "setblock 124 71 5 minecraft:enchanting_table"
-  local before after
+  local before="" after=""
   before=$(rcon "data get entity $NAME Inventory")
   if wait_shot "$log" cench-closed 90; then
     after=$(rcon "data get entity $NAME Inventory")
@@ -680,7 +699,7 @@ containers_brewing_stand() {
     "fill 125 70 1 127 74 6 air replace" \
     "fill 125 70 1 127 70 6 minecraft:stone replace" \
     "setblock 126 71 5 minecraft:brewing_stand"
-  local before after
+  local before="" after=""
   before=$(rcon "data get entity $NAME Inventory")
   if wait_shot "$log" cbrew-closed 90; then
     after=$(rcon "data get entity $NAME Inventory")
@@ -716,7 +735,7 @@ containers_villager_trading() {
     "fill 128 70 1 130 74 6 air replace" \
     "fill 128 70 1 130 70 6 minecraft:stone replace" \
     "summon minecraft:villager 129.5 71 5 {NoAI:1b,PersistenceRequired:1b,Offers:{Recipes:[{buy:{id:\"minecraft:emerald\",count:1},sell:{id:\"minecraft:arrow\",count:5}}]}}"
-  local before after
+  local before="" after=""
   before=$(rcon "data get entity $NAME Inventory")
   if wait_shot "$log" ctrade-closed 90; then
     after=$(rcon "data get entity $NAME Inventory")
