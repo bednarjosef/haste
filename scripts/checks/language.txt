@@ -1,0 +1,62 @@
+# Switch the language to German (de_de) in Options > Language and back, and check the whole client
+# follows: the LanguageManager's reload listener reads the client's own resources (the pack.mcmeta
+# language list and assets/minecraft/lang/de_de.json) and injects the selected language into
+# vanilla's Language, so every screen and the HUD redraw in German. Evidence: the pause menu's
+# "Zurück zum Spiel" after the switch.
+# GUI 480x270 (960x540 at gui scale 2). The Options and Language buttons are clicked by coordinate
+# (language-independent); the Done button is matched as "Done|Fertig" because its label follows the
+# language. The language list is filtered through the search box, which has initial focus.
+wait_until joined
+wait_until settled
+wait 10
+key Escape
+wait_until screen_open
+wait 5
+screenshot pause
+
+# Options... (pause menu row 5 left) -> Language... (row 3 left)
+mouse 165 158
+click left 165 158
+wait_until screen_open
+screenshot options
+mouse 160 150
+click left 160 150
+wait_until screen_open
+screenshot language
+
+# Filter the list to German and pick Germany; Done applies and reloads the translations
+type deutsch
+wait 5
+screenshot language-search
+click_text "Deutsch (Deutschland)"
+wait 5
+screenshot language-selected
+click_text "Done|Fertig"
+wait_until screen_open
+wait 5
+screenshot options-de
+
+# back to the pause menu: it must be German now ("Zurück zum Spiel")
+key Escape
+wait_until screen_open
+wait 5
+screenshot pause-de
+
+# switch back to English so options.txt is en_us again
+mouse 165 158
+click left 165 158
+wait_until screen_open
+mouse 160 150
+click left 160 150
+wait_until screen_open
+type english
+wait 5
+screenshot language-search-en
+click_text "English (US)"
+wait 5
+click_text "Done|Fertig"
+wait_until screen_open
+key Escape
+wait_until screen_open
+wait 5
+screenshot pause-en
