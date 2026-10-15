@@ -210,6 +210,17 @@ pub struct FogInputs {
     pub darken_world_amount: f32,
     /// `LevelData.voidDarknessOnsetRange()` (32, or 1 on a superflat world).
     pub void_darkness_onset_range: f32,
+    /// `ClientLevel.getRainLevel(partialTick)` (0..1): darkens the sky colour mixed into
+    /// the fog, and (with the biome's precipitation and the sky light at the camera) pulls
+    /// the environmental fog bands in (`AtmosphericFogEnvironment.updateRainFogState`).
+    pub rain_level: f32,
+    /// `ClientLevel.getThunderLevel(partialTick)` (0..1, already scaled by the rain level):
+    /// the sky colour's extra thunder darkening.
+    pub thunder_level: f32,
+    /// `AtmosphericFogEnvironment.rainFogMultiplier` (0..1, eased per frame by the client):
+    /// rain level x sky-light factor x biome precipitation, pulling the environmental fog
+    /// band in by -160/-256 blocks per unit.
+    pub rain_fog_multiplier: f32,
 }
 
 impl Default for FogInputs {
@@ -230,6 +241,9 @@ impl Default for FogInputs {
             boss_world_fog: false,
             darken_world_amount: 0.0,
             void_darkness_onset_range: 32.0,
+            rain_level: 0.0,
+            thunder_level: 0.0,
+            rain_fog_multiplier: 0.0,
         }
     }
 }
@@ -378,6 +392,12 @@ pub fn setup_fog(view_distance_chunks: i32, f: &FogInputs) -> FogData {
         FogEnvironment::Atmospheric => {
             data.environmental_start = f.dimension.fog_start;
             data.environmental_end = f.dimension.fog_end;
+            // Rain pulls the environmental band in: start -160, end -256 per unit of the
+            // eased rain fog multiplier (end floored at min(96, fogEnd)).
+            data.environmental_start += -160.0 * f.rain_fog_multiplier;
+            let min_end = 96.0f32.min(data.environmental_end);
+            data.environmental_end =
+                (data.environmental_end + -256.0 * f.rain_fog_multiplier).max(min_end);
             data.sky_end = rd.min(f.dimension.sky_fog_end);
             data.cloud_end = 2048.0f32.min(f.dimension.cloud_fog_end);
             if f.boss_world_fog {
@@ -594,6 +614,17 @@ fn atmospheric_base(
     if dim.day_timeline {
         let night = timeline_sample3(&SKY_COLOR_NIGHT, time_of_day);
         sky = [sky[0] * night[0], sky[1] * night[1], sky[2] * night[2]];
+    }
+    // `AtmosphericFogEnvironment.applyWeatherDarken`: rain scales r/g down 0.5 and b down
+    // 0.4 per level, thunder all channels down 0.5 per level.
+    if f.rain_level > 0.0 {
+        let m = 1.0 - f.rain_level * 0.5;
+        let mb = 1.0 - f.rain_level * 0.4;
+        sky = [sky[0] * m, sky[1] * m, sky[2] * mb];
+    }
+    if f.thunder_level > 0.0 {
+        let m = 1.0 - f.thunder_level * 0.5;
+        sky = [sky[0] * m, sky[1] * m, sky[2] * m];
     }
     let sky_fog_end = (dim.sky_fog_end / 16.0).min(view_distance_chunks as f32);
     let mix = clamped_lerp(sky_fog_end / 32.0, 0.25, 1.0);

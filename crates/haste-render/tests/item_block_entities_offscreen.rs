@@ -78,6 +78,7 @@ fn render(
         breaking: &[],
         camera_entity: None,
         spin: None,
+        weather: None,
     };
     renderer.render(&frame).unwrap();
     renderer.read_back().unwrap()
@@ -143,6 +144,8 @@ fn item_and_mob_block_entities_offscreen() {
         banner_phase: 0.0,
         banner: None,
         skull_anim: TickPair::fixed(0.0),
+        anim: None,
+        sherds: None,
     };
 
     let campfire = instance(
@@ -293,6 +296,8 @@ fn fifty_campfire_items_frame_timing() {
                 banner_phase: 0.0,
                 banner: None,
                 skull_anim: TickPair::fixed(0.0),
+                anim: None,
+                sherds: None,
             })
             .collect()
     };
@@ -330,6 +335,7 @@ fn fifty_campfire_items_frame_timing() {
                     breaking: &[],
                     camera_entity: None,
                     spin: None,
+                    weather: None,
                 })
                 .unwrap();
         }
@@ -349,6 +355,7 @@ fn fifty_campfire_items_frame_timing() {
                     breaking: &[],
                     camera_entity: None,
                     spin: None,
+                    weather: None,
                 })
                 .unwrap();
             worst = worst.max(stats.frame_ms);

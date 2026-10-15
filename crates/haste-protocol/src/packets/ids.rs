@@ -261,6 +261,15 @@ impl ProtocolTables {
         self
     }
 
+    /// Tables with the given `minecraft:data_component_type` names (id -> name), as the
+    /// data generator's `registries.json` lists them.
+    pub fn with_data_components(names: Vec<String>) -> ProtocolTables {
+        ProtocolTables {
+            data_components: names,
+            ..ProtocolTables::default()
+        }
+    }
+
     /// Tables with the given data component names (tests).
     pub fn for_tests(components: &[(i32, &str)]) -> ProtocolTables {
         let mut t = ProtocolTables::default();

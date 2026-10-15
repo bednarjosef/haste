@@ -105,6 +105,7 @@ fn render_with_gui_skip(
         breaking: &[],
         camera_entity,
         spin: None,
+        weather: None,
     };
     renderer.render(&frame).unwrap();
     renderer.read_back().unwrap()
@@ -859,6 +860,7 @@ fn entity_shadows_offscreen() {
         breaking: &[],
         camera_entity: None,
         spin: None,
+        weather: None,
     };
     // `sample_world` extracts the shadows and samples entity light. A couple of warm-up frames
     // (lazy texture/atlas loads settle on the first render) before the captured one.

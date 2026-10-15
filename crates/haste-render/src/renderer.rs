@@ -59,6 +59,7 @@ pub struct ViewBob {
 pub struct SkyState {
     pub time_of_day: i64,
     pub rain: f32,
+    pub thunder: f32,
     pub dimension_has_sky: bool,
     pub fog_start: f32,
     pub fog_end: f32,
@@ -142,6 +143,9 @@ pub struct FrameInput<'a> {
     pub camera_entity: Option<haste_core::EntityId>,
     /// The nausea/portal screen warp for this frame (`None`: no warp).
     pub spin: Option<SpinWarp>,
+    /// The extracted weather columns (`WeatherEffectRenderer.extractRenderState`), `None`
+    /// when it does not rain (the pass is skipped entirely). Borrowed for one frame.
+    pub weather: Option<&'a crate::weather::WeatherFrame>,
 }
 
 #[cfg(test)]
@@ -237,6 +241,7 @@ mod tests {
             breaking: &[],
             camera_entity: None,
             spin: None,
+            weather: None,
         };
         // The section visibility walk runs off the render thread and lands a frame later
         // (vanilla draws the previous graph until the async update is swapped in), so keep
@@ -433,6 +438,8 @@ pub struct Renderer {
     atlas_texture: wgpu::Texture,
     /// Animated atlas textures: per-tick region uploads (`set_animation_tick`).
     animation: crate::animation::SpriteAnimator,
+    /// The game tick the client last reported (`set_animation_tick`), for weather scroll.
+    animation_tick: u64,
     baked: Arc<haste_assets::BakedBlockModels>,
     mesher: Mesher,
     /// Grass/foliage colormaps from the assets (biome colours are resolved against them).
@@ -507,8 +514,10 @@ pub struct Renderer {
     assets: haste_assets::Assets,
     /// Entity cube models (`FrameInput::entities`).
     entity: crate::entity::EntityRenderer,
-    /// Sky, celestial bodies, clouds, weather; terrain fog colour and daylight.
+    /// Sky, celestial bodies, clouds; terrain fog colour and daylight.
     sky: crate::sky::SkyRenderer,
+    /// Rain and snow columns (`FrameInput::sky.weather`).
+    weather: crate::weather::WeatherRenderer,
     /// Selection outline and break cracks.
     overlay: crate::overlay::OverlayRenderer,
     /// Particles (`FrameInput::particles`).
@@ -541,6 +550,8 @@ pub struct Renderer {
     block_entities_drawn: u32,
     /// The fog colour (sRGB) and distances of the last frame, for logging and tests.
     last_fog: Option<([f32; 3], crate::fog::FogData)>,
+    /// The frame's lightning bolts, collected from the entities (reused).
+    lightning_bolts: Vec<crate::weather::LightningBolt>,
 }
 
 /// An in-flight screenshot readback: the copy is submitted and `map_async` posted, the
@@ -878,11 +889,26 @@ impl Renderer {
                 })
         };
         let pipeline_solid = make_pipeline("chunk-solid", "fs_main", None);
-        let pipeline_cutout = make_pipeline("chunk-cutout", "fs_main", None);
+        let pipeline_cutout = make_pipeline("chunk-cutout", "fs_cutout", None);
         let pipeline_translucent = make_pipeline(
             "chunk-translucent",
             "fs_translucent",
-            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+            // Vanilla BlendFunction.TRANSLUCENT: (SRC_ALPHA, ONE_MINUS_SRC_ALPHA)
+            // both equations — the fragment colour is NOT premultiplied (block.fsh
+            // outputs the plain texel colour), so this and not the premultiplied
+            // state is the faithful blend.
+            Some(wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::SrcAlpha,
+                    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                    operation: wgpu::BlendOperation::Add,
+                },
+            }),
         );
 
         // Offscreen targets when windowless.
@@ -940,6 +966,20 @@ impl Renderer {
             surface_format,
             assets,
         );
+        let (rain_rect, snow_rect) = sky.weather_rects();
+        let mut weather = crate::weather::WeatherRenderer::new(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            surface_format,
+            rain_rect,
+            snow_rect,
+        );
+        weather.set_textures(
+            &gpu.device,
+            sky.atlas_view(),
+            lightmap.view(),
+            lightmap.sampler(),
+        );
         let overlay = crate::overlay::OverlayRenderer::new(
             gpu.device.clone(),
             gpu.queue.clone(),
@@ -969,6 +1009,7 @@ impl Renderer {
             atlas,
             atlas_texture,
             animation,
+            animation_tick: 0,
             baked,
             mesher,
             colormaps,
@@ -1013,6 +1054,7 @@ impl Renderer {
             assets: gui_assets,
             entity,
             sky,
+            weather,
             overlay,
             particles,
             first_person: None,
@@ -1028,6 +1070,7 @@ impl Renderer {
             surface_copy_logged: false,
             block_entities_drawn: 0,
             last_fog: None,
+            lightning_bolts: Vec::new(),
         })
     }
 
@@ -1056,6 +1099,7 @@ impl Renderer {
     /// re-uploads every changed sprite region.
     pub fn set_animation_tick(&mut self, tick: u64) {
         self.animation.set_tick(tick);
+        self.animation_tick = tick;
         // The GUI's own animated textures (the fire and nether-portal overlays) share the tick.
         self.gui.set_animation_tick(tick);
     }
@@ -1251,6 +1295,13 @@ impl Renderer {
     }
 
     /// The adapter this renderer runs on (name and backend, for bench reports).
+    /// Terrain-arena memory diagnostics: arena count and the vertex+index bytes
+    /// allocated (fixed-size GPU buffer pairs), plus the resident-section count.
+    pub fn arena_memory(&self) -> (usize, u64, usize) {
+        let (arenas, bytes) = self.arenas.memory_stats();
+        (arenas, bytes, self.sections.len())
+    }
+
     pub fn adapter_info(&self) -> wgpu::AdapterInfo {
         self.gpu.adapter.get_info()
     }
@@ -1756,6 +1807,45 @@ impl Renderer {
             &fog_data,
             fog_srgb,
         );
+        // The weather columns (vanilla draws them in the level pass after translucent
+        // terrain, right where the sky overlays run) and the lightning bolts (the entities'
+        // lightning decorations, camera-relative). Both submit camera-relative vertices,
+        // so they take the rotation-only projection like the entity and particle passes.
+        if let Some(weather) = frame.weather {
+            self.weather.prepare(
+                weather,
+                &frame.camera,
+                rot_view_proj,
+                &fog_data,
+                crate::sky::linear(fog_srgb),
+                self.animation_tick as i64,
+                frame.partial_tick,
+            );
+        }
+        if frame.entities.iter().any(|e| {
+            matches!(
+                e.decoration,
+                Some(haste_core::model::Decoration::Lightning(_))
+            )
+        }) {
+            let camera = frame.camera.pos;
+            self.lightning_bolts.clear();
+            for e in frame.entities {
+                if let Some(haste_core::model::Decoration::Lightning(bolt)) = &e.decoration {
+                    self.lightning_bolts.push(crate::weather::LightningBolt {
+                        pos: [
+                            (e.pos.x - camera.x) as f32,
+                            (e.pos.y - camera.y) as f32,
+                            (e.pos.z - camera.z) as f32,
+                        ],
+                        seed: bolt.seed,
+                    });
+                }
+            }
+            self.weather.prepare_lightning(&self.lightning_bolts);
+        } else {
+            self.weather.prepare_lightning(&[]);
+        }
         let fog_color = crate::sky::linear(fog_srgb);
         let mut camera_uniform = CameraUniform {
             cam_pos: [
@@ -1845,6 +1935,7 @@ impl Renderer {
         if let Some(t) = &mut self.timer {
             t.poll(&self.gpu.device);
             self.timings.gpu_ms = t.latest;
+            self.timings.gpu_sub_ms = t.latest_sub;
         }
         // A pending capture (F2) copies this frame's image out for `take_capture`; with
         // COPY_SRC on the surface that is the presented frame itself, and only without it
@@ -2038,6 +2129,10 @@ impl Renderer {
             let bonus = &self.bonus;
             let min_section = self.min_section;
             let column = |c: ChunkPos| self.visible_mask.column(c);
+            // The conduit's eye is billboarded to the camera (vanilla `ConduitRenderer` reads
+            // `camera.orientation`), which `Camera.setRotation` builds from yaw and pitch.
+            let orientation =
+                crate::blockentity::camera_orientation(frame.camera.yaw, frame.camera.pitch);
             self.block_entities_drawn = self.entity.append_block_entities(
                 frame.block_entities,
                 cam,
@@ -2059,13 +2154,36 @@ impl Renderer {
                 },
                 frame.partial_tick,
                 &mut self.assets,
+                orientation,
             );
         } else {
             self.block_entities_drawn = 0;
         }
 
         self.timings.cull_ms = lap(&mut mark);
+        // Close the open terrain bracket (main-pass sub-passes 1..=4), for a layer change or
+        // the entity insertion. One bracket per layer across all arenas: the layer-major draw
+        // order makes each layer's draws contiguous, and a wgpu query may only be written once
+        // per pass.
+        fn close_terrain(
+            pass: &mut wgpu::RenderPass<'_>,
+            t: &crate::timing::GpuTimer,
+            sub_open: &mut [bool; 8],
+        ) {
+            for (s, open) in sub_open.iter_mut().enumerate().take(5).skip(1) {
+                if *open {
+                    t.end_subpass(pass, s as u32);
+                    *open = false;
+                }
+            }
+        }
         let mut ran = [false; 3];
+        // Main-pass sub-pass bracket state (timing.rs MAIN_SUBPASSES order): a bracket is
+        // open when its layer began drawing and not yet ended. Solid and CutoutMipped share
+        // one pipeline but get separate brackets ("solid" 1, "cutout_mipped" 3), since their
+        // arena runs interleave in the layer-major draw order.
+        let mut sub_open = [false; 8];
+        let mut ran_sub = [false; 8];
         let mut draw_calls = 0u32;
         let mut encoder = self
             .gpu
@@ -2103,7 +2221,15 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            if let Some(t) = self.timer.as_ref() {
+                t.begin_subpass(&mut pass, 0);
+                sub_open[0] = true;
+            }
             draw_calls += self.sky.draw_background(&mut pass);
+            if let Some(t) = self.timer.as_ref() {
+                t.end_subpass(&mut pass, 0);
+                sub_open[0] = false;
+            }
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_bind_group(1, &self.atlas_bind_group, &[]);
             pass.set_bind_group(2, &self.lightmap_bind_group, &[]);
@@ -2121,6 +2247,12 @@ impl Renderer {
                 let instance = i;
                 // Entities after the opaque and cutout terrain, before translucent.
                 if !entities_drawn && d.layer == haste_assets::RenderLayer::Translucent {
+                    if let Some(t) = self.timer.as_ref() {
+                        close_terrain(&mut pass, t, &mut sub_open);
+                        t.begin_subpass(&mut pass, 5);
+                        ran_sub[5] = true;
+                        sub_open[5] = true;
+                    }
                     // Vanilla draws the entity shadows (a translucent, depth-tested pass) with
                     // the entities.
                     draw_calls += self.entity.draw_shadows(&mut pass);
@@ -2131,12 +2263,23 @@ impl Renderer {
                     bound_arena = u32::MAX;
                 }
                 if bound_layer != Some(d.layer) {
-                    let pipeline = match d.layer {
-                        haste_assets::RenderLayer::Solid
-                        | haste_assets::RenderLayer::CutoutMipped => &self.pipeline_solid,
-                        haste_assets::RenderLayer::Cutout => &self.pipeline_cutout,
-                        haste_assets::RenderLayer::Translucent => &self.pipeline_translucent,
+                    // CutoutMipped (leaves, vines) shares the solid *pipeline* (same shader
+                    // state, mips differ in the sampler) but must keep the alpha discard:
+                    // its sprites have transparent texels by vanilla's per-sprite layer rule
+                    // (NativeImage.computeTransparency -> ChunkSectionLayer.byTransparency).
+                    let (pipeline, sub) = match d.layer {
+                        haste_assets::RenderLayer::Solid => (&self.pipeline_solid, 1),
+                        haste_assets::RenderLayer::Cutout => (&self.pipeline_cutout, 2),
+                        haste_assets::RenderLayer::CutoutMipped => (&self.pipeline_cutout, 3),
+                        haste_assets::RenderLayer::Translucent => (&self.pipeline_translucent, 4),
                     };
+                    if let Some(t) = self.timer.as_ref() {
+                        // Close the previous terrain bracket, open the new layer's.
+                        close_terrain(&mut pass, t, &mut sub_open);
+                        t.begin_subpass(&mut pass, sub);
+                        ran_sub[sub as usize] = true;
+                        sub_open[sub as usize] = true;
+                    }
                     pass.set_pipeline(pipeline);
                     bound_layer = Some(d.layer);
                 }
@@ -2172,12 +2315,43 @@ impl Renderer {
                 }
             }
             if !entities_drawn {
+                if let Some(t) = self.timer.as_ref() {
+                    close_terrain(&mut pass, t, &mut sub_open);
+                    t.begin_subpass(&mut pass, 5);
+                    ran_sub[5] = true;
+                    sub_open[5] = true;
+                }
                 draw_calls += self.entity.draw_shadows(&mut pass);
                 draw_calls += self.entity.draw(&mut pass);
             }
+            if let Some(t) = self.timer.as_ref() {
+                if sub_open[5] {
+                    t.end_subpass(&mut pass, 5);
+                    sub_open[5] = false;
+                }
+                t.begin_subpass(&mut pass, 6);
+                ran_sub[6] = true;
+                sub_open[6] = true;
+            }
             draw_calls += self.particles.draw(&mut pass);
+            if let Some(t) = self.timer.as_ref() {
+                if sub_open[6] {
+                    t.end_subpass(&mut pass, 6);
+                    sub_open[6] = false;
+                }
+                t.begin_subpass(&mut pass, 7);
+                ran_sub[7] = true;
+                sub_open[7] = true;
+            }
             draw_calls += self.overlay.draw(&mut pass);
             draw_calls += self.sky.draw_overlays(&mut pass);
+            draw_calls += self.weather.draw(&mut pass);
+            draw_calls += self.weather.draw_lightning(&mut pass);
+            if let Some(t) = self.timer.as_ref() {
+                if sub_open[7] {
+                    t.end_subpass(&mut pass, 7);
+                }
+            }
         }
 
         // First-person hand: its own pass over the world with the depth cleared, so it never
@@ -2260,7 +2434,7 @@ impl Renderer {
 
         // Submit, then present (wgpu 30: present lives on the queue).
         let resolved = match &mut self.timer {
-            Some(t) => t.resolve(&mut encoder, ran),
+            Some(t) => t.resolve(&mut encoder, ran, ran_sub),
             None => false,
         };
         self.timings.encode_ms = lap(&mut mark);

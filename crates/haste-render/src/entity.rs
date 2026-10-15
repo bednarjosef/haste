@@ -603,6 +603,9 @@ impl EntityRenderer {
                         self.emit_item_frame(e, f, camera, sky, block, assets)
                     }
                     Decoration::Painting(p) => self.emit_painting(e, p, camera, sky, block, assets),
+                    // The lightning bolt draws through the weather pass's own additive
+                    // pipeline (`RenderPipelines.LIGHTNING`); nothing here.
+                    Decoration::Lightning(_) => {}
                 }
                 if self.vertices.len() > start {
                     self.drawn += 1;
@@ -1246,7 +1249,8 @@ impl EntityRenderer {
     /// the entities, after `prepare`: one draw call covers both, and each texture lands in the
     /// shared atlas on first use (the per-vertex `rect` picks it). `visible` decides per
     /// instance whether it is drawn (frustum and section culling are the caller's, like the
-    /// terrain's); returns how many were posed.
+    /// terrain's); returns how many were posed. `orientation` is the camera's orientation
+    /// quaternion, for the conduit's billboarded eye.
     pub fn append_block_entities(
         &mut self,
         instances: &[crate::blockentity::BlockEntityInstance],
@@ -1254,6 +1258,7 @@ impl EntityRenderer {
         visible: impl Fn(&crate::blockentity::BlockEntityInstance) -> bool,
         partial: f32,
         assets: &mut Assets,
+        orientation: glam::Quat,
     ) -> u32 {
         let start = self.vertices.len();
         let mut drawn = 0;
@@ -1378,6 +1383,44 @@ impl EntityRenderer {
                 drawn += 1;
                 continue;
             }
+            if matches!(
+                inst.kind,
+                crate::blockentity::BlockEntityKind::Lectern
+                    | crate::blockentity::BlockEntityKind::EnchantTable
+                    | crate::blockentity::BlockEntityKind::Bell
+                    | crate::blockentity::BlockEntityKind::DecoratedPot
+                    | crate::blockentity::BlockEntityKind::Conduit
+            ) {
+                // The object-model block entities (books, bells, decorated pots, conduits):
+                // one part list each, their own texture per part through the same atlas.
+                let texture = match inst.kind {
+                    crate::blockentity::BlockEntityKind::Lectern => {
+                        crate::blockentity::book_texture()
+                    }
+                    crate::blockentity::BlockEntityKind::EnchantTable => {
+                        crate::blockentity::book_texture()
+                    }
+                    crate::blockentity::BlockEntityKind::Bell => crate::blockentity::bell_texture(),
+                    crate::blockentity::BlockEntityKind::DecoratedPot => {
+                        crate::blockentity::pot_base_texture()
+                    }
+                    _ => crate::blockentity::conduit_shell_texture(),
+                };
+                let rect = self.texture_rect(&texture, assets);
+                let mut out = std::mem::take(&mut self.vertices);
+                let me = &mut *self;
+                crate::blockentity::emit_model_block_entity(
+                    &mut out,
+                    inst,
+                    camera,
+                    orientation,
+                    rect,
+                    &mut |id| me.texture_rect(id, assets),
+                );
+                self.vertices = out;
+                drawn += 1;
+                continue;
+            }
             // A spawner's display entity is a cube model posed by the block entity's own
             // transform (`emit_spawner`), not by the item emitters.
             if let crate::blockentity::BlockEntityKind::Spawner(ref spawner) = inst.kind {
@@ -1408,6 +1451,11 @@ impl EntityRenderer {
                 | crate::blockentity::BlockEntityKind::Vault(_)
                 | crate::blockentity::BlockEntityKind::Shelf(_)
                 | crate::blockentity::BlockEntityKind::Brushable(_) => unreachable!(),
+                crate::blockentity::BlockEntityKind::Lectern
+                | crate::blockentity::BlockEntityKind::EnchantTable
+                | crate::blockentity::BlockEntityKind::Bell
+                | crate::blockentity::BlockEntityKind::DecoratedPot
+                | crate::blockentity::BlockEntityKind::Conduit => unreachable!(),
             };
             let rect = self.texture_rect(&texture, assets);
             let out = &mut self.vertices;
@@ -2113,7 +2161,7 @@ fn push_world_quad(
 
 /// World-space entity shading: two directional lights at 0.6 and 0.4 ambient (the same
 /// lighting model as GUI items, with the light directions in world space).
-fn entity_shade(n: Vec3) -> f32 {
+pub(crate) fn entity_shade(n: Vec3) -> f32 {
     let l0 = Vec3::new(0.2, 1.0, -0.7).normalize();
     let l1 = Vec3::new(-0.2, 1.0, 0.7).normalize();
     ((n.dot(l0).max(0.0) + n.dot(l1).max(0.0)) * 0.6 + 0.4).min(1.0)
@@ -2208,7 +2256,7 @@ pub(crate) fn model_top(part: &ModelPart, parent_y: f32) -> f32 {
         .fold(own, f32::max)
 }
 
-fn pose_rotation(pose: &PoseOverrides, name: &str) -> Option<Vec3> {
+pub(crate) fn pose_rotation(pose: &PoseOverrides, name: &str) -> Option<Vec3> {
     pose.rotations
         .iter()
         .find(|(n, _)| n == name)

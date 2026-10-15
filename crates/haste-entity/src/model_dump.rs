@@ -26,6 +26,13 @@ const GROUND_Y: f32 = 24.0;
 /// The dump's format version this loader understands.
 const KNOWN_VERSION: u32 = 1;
 
+/// Layers whose vanilla `MeshDefinition` was built `.transformed(p -> p.translated(0, 24, 0))`:
+/// dump v1 records only the root's children, so the root's own PartPose translation is lost,
+/// and their pivots are already relative to the ground (vanilla
+/// `CopperGolemModel.createBodyLayer` is the only such main layer in 26.3). For these the
+/// `GROUND_Y` shift is skipped - applying it would float the model 1.5 blocks up.
+const ROOT_TRANSLATED_LAYERS: &[&str] = &["minecraft:copper_golem#main"];
+
 #[derive(Deserialize)]
 struct DumpFile {
     version: u32,
@@ -98,6 +105,10 @@ impl ModelLibrary {
         }
         let mut layers = AHashMap::with_capacity(file.layers.len());
         for l in file.layers {
+            // Layers whose vanilla mesh was built with a translated root PartPose (dump v1
+            // records only the root's children, so the translation is lost): their pivots are
+            // already ground-relative, and the shift is skipped (see ROOT_TRANSLATED_LAYERS).
+            let skip_ground_shift = ROOT_TRANSLATED_LAYERS.contains(&l.layer.as_str());
             let model = CubeModel {
                 texture: Identifier::new("haste", "entity_box"),
                 tex_width: l.texture_width.max(1),
@@ -108,7 +119,17 @@ impl ModelLibrary {
                     rotation: glam::Vec3::ZERO,
                     visible: true,
                     cubes: Vec::new(),
-                    children: l.parts.into_iter().map(convert_part).collect(),
+                    children: l
+                        .parts
+                        .into_iter()
+                        .map(|p| {
+                            if skip_ground_shift {
+                                convert_part(p)
+                            } else {
+                                convert_root_part(p)
+                            }
+                        })
+                        .collect(),
                 },
             };
             layers.insert(
@@ -149,13 +170,22 @@ impl ModelLibrary {
     }
 }
 
-/// Converts one dump part (pivots shifted to the feet-at-0 convention; rotations are already
-/// radians in vanilla x/y/z order). A part scale other than 1 is folded into its cubes'
-/// inflate as a mean and skipped for the pivot: vanilla uses part scales almost exclusively
-/// for whole-part effects (spinning arrows, end-crystal cores) that rest-pose rendering does
-/// not need to reproduce exactly.
+/// Converts one of the root's direct children: its pivot is in absolute model space, where the
+/// ground plane sits at y = 24 model units, so the y is shifted to the feet-at-0 convention.
+/// Every part below it keeps its parent-relative pivot unchanged (vanilla `PartPose` of a child
+/// is relative to its parent, and the dump already stored it that way).
+fn convert_root_part(p: PartJson) -> ModelPart {
+    let mut part = convert_part(p);
+    part.pivot.y -= GROUND_Y;
+    part
+}
+
+/// Converts one dump part (rotations are already radians in vanilla x/y/z order). A part scale
+/// other than 1 is folded into its cubes' inflate as a mean and skipped for the pivot: vanilla
+/// uses part scales almost exclusively for whole-part effects (spinning arrows, end-crystal
+/// cores) that rest-pose rendering does not need to reproduce exactly.
 fn convert_part(p: PartJson) -> ModelPart {
-    let pivot = glam::Vec3::new(p.pivot[0], p.pivot[1] - GROUND_Y, p.pivot[2]);
+    let pivot = glam::Vec3::new(p.pivot[0], p.pivot[1], p.pivot[2]);
     let rotation = glam::Vec3::new(p.rotation[0], p.rotation[1], p.rotation[2]);
     let uniform = (p.scale[0] + p.scale[1] + p.scale[2]) / 3.0;
     let cubes = p
