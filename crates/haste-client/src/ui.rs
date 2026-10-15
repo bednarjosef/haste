@@ -193,6 +193,12 @@ impl Ui {
         self.host.gui()
     }
 
+    /// JVM memory diagnostics (`Boot.memoryStats`): `key=value` lines (heap, metaspace,
+    /// code cache, compressed class space), empty when the JVM failed to start.
+    pub fn jvm_memory(&self) -> String {
+        self.host.jvm_memory().unwrap_or_default()
+    }
+
     /// Opens a real vanilla screen (menu mode's title screen, tests).
     pub fn open_screen(&self, kind: ScreenKind) -> anyhow::Result<()> {
         self.gui().open_screen(kind)

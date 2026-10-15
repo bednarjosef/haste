@@ -4470,9 +4470,19 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     // Measure phase. The buffer is sized up front: at most 1000 fps for the whole run, and it
     // grows once if the machine is faster than that (no allocation during steady-state frames).
     {
-        // Memory diagnostics: terrain arenas (fixed-size GPU buffer pairs) and resident
-        // sections, plus this process's peak RSS so far (the settle phase meshes everything).
-        let (arenas, bytes, sections) = renderer.arena_memory();
+        // Memory diagnostics: peak RSS plus every large allocation we can attribute —
+        // terrain arenas (allocated vs used), the world's chunk storage, the renderer's
+        // CPU-side copies and the embedded JVM's pools — so the diet work has a table.
+        let (arenas, arena_bytes, arena_used, sections) = renderer.arena_memory();
+        let cpu = renderer.cpu_memory();
+        let world = shared.world.read().memory_stats();
+        let jvm = shared
+            .ui
+            .lock()
+            .as_ref()
+            .map(|ui| ui.jvm_memory())
+            .unwrap_or_default();
+        let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
         let rss_kb = std::fs::read_to_string("/proc/self/status")
             .ok()
             .and_then(|s| {
@@ -4482,9 +4492,46 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             })
             .unwrap_or_default();
         println!(
-            "bench memory: peak RSS {rss_kb} kB, {arenas} arenas ({:.1} MiB vertex+index), {sections} resident sections",
-            bytes as f64 / (1024.0 * 1024.0)
+            "bench memory: peak RSS {rss_kb} kB ({:.1} MiB), {arenas} arenas ({:.1} MiB vertex+index, {:.1} used), {sections} resident sections",
+            rss_kb.parse::<f64>().unwrap_or(0.0) / 1024.0,
+            mib(arena_bytes),
+            mib(arena_used),
         );
+        println!(
+            "bench memory: world {:.1} MiB (sections {:.1}, heightmaps {:.1}, light {:.1}, block entities {:.1}, {} non-empty), atlas+models {:.1} MiB, mesher queue {}",
+            mib(world.chunks + world.sections + world.heightmaps + world.light + world.block_entities),
+            mib(world.sections),
+            mib(world.heightmaps),
+            mib(world.light),
+            mib(world.block_entities),
+            world.non_empty_sections,
+            mib(cpu.atlas_bytes + cpu.baked_bytes),
+            cpu.mesh_pending,
+        );
+        if !jvm.is_empty() {
+            let mut heap_c = 0;
+            let mut heap_u = 0;
+            let mut meta = 0;
+            let mut code = 0;
+            for line in jvm.lines() {
+                let (k, v) = line.split_once('=').unwrap_or(("", ""));
+                let v: u64 = v.parse().unwrap_or(0);
+                match k {
+                    "heap_committed" => heap_c = v,
+                    "heap_used" => heap_u = v,
+                    "metaspace_used" => meta = v,
+                    "code_cache_used" => code = v,
+                    _ => {}
+                }
+            }
+            println!(
+                "bench memory: JVM heap {:.1}/{:.1} MiB, metaspace {:.1} MiB, code cache {:.1} MiB",
+                mib(heap_u),
+                mib(heap_c),
+                mib(meta),
+                mib(code),
+            );
+        }
     }
     let mut samples: Vec<BenchSample> = Vec::with_capacity(seconds as usize * 1000);
     let total = seconds as f32;

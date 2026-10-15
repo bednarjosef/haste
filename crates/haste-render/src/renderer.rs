@@ -106,6 +106,18 @@ pub struct LightmapFrame {
     pub lightning_flash: bool,
 }
 
+/// CPU-side memory the renderer keeps beside its GPU buffers (bench memory line).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RendererCpuMemory {
+    /// Block atlas mip chain + animated sprite frames (CPU copies, byte-for-byte
+    /// what was uploaded to the GPU, kept for animated region updates).
+    pub atlas_bytes: u64,
+    /// Baked block models (per-state quads).
+    pub baked_bytes: u64,
+    /// Mesher queue length (sections waiting to be meshed).
+    pub mesh_pending: u64,
+}
+
 /// Per-frame render statistics (docs/INTERFACES.md FrameStats).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameStats {
@@ -1322,11 +1334,22 @@ impl Renderer {
     }
 
     /// The adapter this renderer runs on (name and backend, for bench reports).
-    /// Terrain-arena memory diagnostics: arena count and the vertex+index bytes
-    /// allocated (fixed-size GPU buffer pairs), plus the resident-section count.
-    pub fn arena_memory(&self) -> (usize, u64, usize) {
-        let (arenas, bytes) = self.arenas.memory_stats();
-        (arenas, bytes, self.sections.len())
+    /// Terrain-arena memory diagnostics: arena count, the vertex+index bytes allocated
+    /// (fixed-size GPU buffer pairs), the bytes actually used, plus the resident-section
+    /// count.
+    pub fn arena_memory(&self) -> (usize, u64, u64, usize) {
+        let (arenas, bytes, used) = self.arenas.memory_stats();
+        (arenas, bytes, used, self.sections.len())
+    }
+
+    /// CPU-side memory diagnostics for the bench's memory line: the block atlas's
+    /// retained mip chain, the baked block models and the mesher's pending queue.
+    pub fn cpu_memory(&self) -> RendererCpuMemory {
+        RendererCpuMemory {
+            atlas_bytes: self.atlas.pixel_bytes(),
+            baked_bytes: self.baked.memory_bytes(),
+            mesh_pending: self.mesher.pending_len() as u64,
+        }
     }
 
     pub fn adapter_info(&self) -> wgpu::AdapterInfo {

@@ -39,6 +39,11 @@ impl Section {
         self.block_count == 0
     }
 
+    /// Heap bytes of this section's block and biome containers (live allocations).
+    pub fn memory_bytes(&self) -> u64 {
+        self.blocks.memory_bytes() + self.biomes.memory_bytes()
+    }
+
     /// Biome at cell coordinates (0..4 within the section).
     pub fn biome(&self, x: u8, y: u8, z: u8) -> BiomeId {
         self.biomes.get_biome(x, y, z)

@@ -336,6 +336,12 @@ impl JvmHost {
         })
     }
 
+    /// JVM memory diagnostics (`Boot.memoryStats`): `key=value` lines with the heap
+    /// (committed/used/max), metaspace, code cache and compressed class space, in bytes.
+    pub fn jvm_memory(&self) -> Result<String> {
+        self.with_env(|env| call_static_string(env, &self.inner.boot, "memoryStats"))
+    }
+
     /// Methods of generated proxies that were called without an implementation (sorted, distinct).
     pub fn unimplemented(&self) -> Result<Vec<String>> {
         self.with_env(|env| {

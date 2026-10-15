@@ -146,6 +146,22 @@ pub struct BakedBlockModels {
 }
 
 impl BakedBlockModels {
+    /// Heap bytes of the baked quads and per-state tables (live allocations; the
+    /// `String` texture ids count their capacity).
+    pub fn memory_bytes(&self) -> u64 {
+        let quads: u64 = self
+            .quads
+            .iter()
+            .map(|v| {
+                v.capacity() as u64 * std::mem::size_of::<BakedQuad>() as u64
+                    + v.iter().map(|q| q.texture.capacity() as u64 + 24).sum::<u64>()
+            })
+            .sum();
+        quads
+            + self.quads.capacity() as u64 * std::mem::size_of::<Vec<BakedQuad>>() as u64
+            + (self.full_opaque.capacity() + self.layer.capacity()) as u64
+    }
+
     /// Bakes every state of every block in `states`, assigning atlas UVs. The
     /// atlas is rebuilt from every texture reachable from any blockstate file
     /// (all variants and all multipart applies). Blocks without a blockstate

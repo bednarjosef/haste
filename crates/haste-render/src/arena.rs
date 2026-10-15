@@ -22,12 +22,15 @@ const ARENA_INDICES: u32 = 3 << 22;
 pub(crate) struct RangeAlloc {
     /// Free ranges (start, len), sorted by start, non-adjacent.
     free: Vec<(u32, u32)>,
+    /// Total capacity in entries.
+    capacity: u32,
 }
 
 impl RangeAlloc {
     pub(crate) fn new(len: u32) -> RangeAlloc {
         RangeAlloc {
             free: vec![(0, len)],
+            capacity: len,
         }
     }
 
@@ -60,6 +63,12 @@ impl RangeAlloc {
             self.free[i - 1].1 += self.free[i].1;
             self.free.remove(i);
         }
+    }
+
+    /// Entries currently allocated (capacity minus the free list).
+    pub(crate) fn used(&self) -> u32 {
+        let free: u32 = self.free.iter().map(|&(_, l)| l).sum();
+        self.capacity - free
     }
 }
 
@@ -110,13 +119,21 @@ impl MeshArenas {
         }
     }
 
-    /// Memory stats for diagnostics: arena count and the vertex+index bytes allocated
-    /// (each arena is a fixed-size GPU buffer pair).
-    pub fn memory_stats(&self) -> (usize, u64) {
-        let bytes = self.arenas.len() as u64
-            * (ARENA_VERTICES as u64 * std::mem::size_of::<PackedVertex>() as u64
-                + ARENA_INDICES as u64 * 4);
-        (self.arenas.len(), bytes)
+    /// Memory stats for diagnostics: arena count, the vertex+index bytes allocated
+    /// (each arena is a fixed-size GPU buffer pair) and the bytes actually used.
+    pub fn memory_stats(&self) -> (usize, u64, u64) {
+        let per_arena = ARENA_VERTICES as u64 * std::mem::size_of::<PackedVertex>() as u64
+            + ARENA_INDICES as u64 * 4;
+        let used = self
+            .arenas
+            .iter()
+            .map(|a| {
+                let v = a.vertices.used();
+                let i = a.indices.used();
+                v as u64 * std::mem::size_of::<PackedVertex>() as u64 + i as u64 * 4
+            })
+            .sum();
+        (self.arenas.len(), self.arenas.len() as u64 * per_arena, used)
     }
 
     fn new_arena(&mut self) -> u32 {
