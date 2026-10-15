@@ -2119,7 +2119,7 @@ fn sign_editor_screen() {
     let got_pos = i64::from_be_bytes(body[i..i + 8].try_into().unwrap());
     i += 8;
     assert_eq!(haste_core::BlockPos::from_packed(got_pos), pos, "sign pos");
-    let mut line = |i: &mut usize| {
+    let line = |i: &mut usize| {
         let len = var_int(body, i) as usize;
         let s = String::from_utf8(body[*i..*i + len].to_vec()).unwrap();
         *i += len;
