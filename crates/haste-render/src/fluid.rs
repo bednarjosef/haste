@@ -426,8 +426,10 @@ pub fn fluid_quads(
     let h = corner_heights(world, table, p, fluid);
     let [nw, sw, se, ne] = h;
 
-    // Top: vertex order like a model's up face (NW, SW, SE, NE).
-    if !same(p.add(0, 1, 0)) {
+    // Top: vertex order like a model's up face (NW, SW, SE, NE). Vanilla skips the
+    // top face when the block above occludes it (`isFaceOccludedByNeighbor` with the
+    // minimum corner height); a full opaque block above always occludes.
+    if !same(p.add(0, 1, 0)) && !world.opaque(p.add(0, 1, 0)) {
         let positions = [
             [0.0, nw, 0.0],
             [0.0, sw, 1.0],

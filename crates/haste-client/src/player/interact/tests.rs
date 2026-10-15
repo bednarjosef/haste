@@ -1,7 +1,7 @@
 use std::sync::{Arc, OnceLock};
 
 use haste_core::input::InputState;
-use haste_core::RegistryIndex;
+use haste_core::{Identifier, RegistryIndex};
 use haste_physics::mining::{BlockTags, Tool, ToolTable};
 use haste_physics::testing::TestWorld;
 
@@ -12,6 +12,15 @@ const STONE: BlockStateId = BlockStateId(1);
 const DIRT: BlockStateId = BlockStateId(2);
 const BEDROCK: BlockStateId = BlockStateId(3);
 const GRASS: BlockStateId = BlockStateId(4);
+
+// `minecraft:entity_type` registry indexes in the test GameData (registries.json below).
+const ITEM_ENTITY: RegistryIndex = RegistryIndex(0);
+const EXPERIENCE_ORB: RegistryIndex = RegistryIndex(1);
+const ARROW: RegistryIndex = RegistryIndex(2);
+const SPECTRAL_ARROW: RegistryIndex = RegistryIndex(3);
+const ZOMBIE: RegistryIndex = RegistryIndex(5);
+const PLAYER: RegistryIndex = RegistryIndex(6);
+const ENDER_DRAGON: RegistryIndex = RegistryIndex(7);
 
 /// A small GameData written to a temp dir: air, stone (1.5, needs a tool), dirt (0.5),
 /// bedrock (-1), short grass (0, no collision), obsidian (50, needs a tool).
@@ -40,10 +49,32 @@ fn data() -> &'static haste_data::GameData {
             format!(
                 r#"{{"minecraft:block": {{"entries": {{{}}}}},
                     "minecraft:item": {{"entries": {{{}}}}},
-                    "minecraft:mob_effect": {{"entries": {{{}}}}}}}"#,
+                    "minecraft:mob_effect": {{"entries": {{{}}}}},
+                    "minecraft:entity_type": {{"entries": {{{}}}}}}}"#,
                 entries(&names),
                 entries(&["air", "diamond_pickaxe", "diamond_sword", "stick"]),
-                entries(&["speed", "haste", "mining_fatigue", "conduit_power"]),
+                entries(&[
+                    "speed",
+                    "haste",
+                    "mining_fatigue",
+                    "conduit_power",
+                    "nausea",
+                    "darkness",
+                ]),
+                entries(&[
+                    "item",
+                    "experience_orb",
+                    "arrow",
+                    "spectral_arrow",
+                    "trident",
+                    "zombie",
+                    "player",
+                    "ender_dragon",
+                    "interaction",
+                    "fireball",
+                    "wind_charge",
+                    "shulker_bullet",
+                ]),
             ),
         )
         .unwrap();
@@ -139,6 +170,7 @@ struct Rig {
     p: LocalPlayer,
     w: TestWorld,
     entities: Vec<(EntityId, Aabb)>,
+    types: Vec<RegistryIndex>,
 }
 
 impl Rig {
@@ -168,11 +200,18 @@ impl Rig {
             p,
             w: TestWorld::flat(0, STONE),
             entities: Vec::new(),
+            types: Vec::new(),
         };
         r.tick(InteractInput::default());
         r.tick(InteractInput::default());
         r.tick(InteractInput::default());
         r
+    }
+
+    /// An entity the crosshair could hit, with its `minecraft:entity_type` registry index.
+    fn add_entity(&mut self, id: EntityId, aabb: Aabb, type_index: RegistryIndex) {
+        self.entities.push((id, aabb));
+        self.types.push(type_index);
     }
 
     fn tick(&mut self, i: InteractInput) -> Vec<ServerboundPlay> {
@@ -181,6 +220,7 @@ impl Rig {
         let env = InteractEnv {
             data: data(),
             entities: &self.entities,
+            entity_types: &self.types,
         };
         let input = InputState {
             pitch: 90.0,
@@ -214,6 +254,8 @@ const ATTACK: InteractInput = InteractInput {
     drop_stack: false,
     swap_offhand: false,
     hotbar: None,
+    attack_clicks: 0,
+    use_clicks: 0,
 };
 
 fn actions(out: &[ServerboundPlay]) -> Vec<(i32, i32)> {
@@ -307,7 +349,7 @@ fn releasing_or_unbreakable() {
 fn creative_breaks_at_once_then_every_six_ticks_and_not_with_a_sword() {
     let mut r = Rig::new(GameMode::Creative);
     let mut broke_at = Vec::new();
-    for t in 1..=12 {
+    for t in 1..=13 {
         let out = r.tick(ATTACK);
         let a = actions(&out);
         assert!(a.iter().all(|a| a.0 == action::START_DESTROY));
@@ -315,13 +357,154 @@ fn creative_breaks_at_once_then_every_six_ticks_and_not_with_a_sword() {
             broke_at.push(t);
         }
     }
-    // The press tick breaks and its own continue step already counts the delay down once.
-    assert_eq!(broke_at, [1, 6, 12]);
+    // The press tick breaks and (endAttack) skips continueAttack; the 5-tick destroyDelay then
+    // counts down once per held tick: breaks on ticks 1, 7, 13.
+    assert_eq!(broke_at, [1, 7, 13]);
+    // A sword cannot break blocks in creative (Tool.canDestroyBlocksInCreative false). Vanilla
+    // still sends START_DESTROY_BLOCK every 5 ticks: destroyBlock no-ops (Item.canDestroyBlock
+    // fails) but startDestroyBlock/continueDestroyBlock return the packet regardless, so the
+    // block is never air and no STOP is ever sent.
     let mut s = Rig::new(GameMode::Creative);
     s.p.int.hotbar[0] = item(2);
-    for _ in 0..10 {
-        assert!(actions(&s.tick(ATTACK)).is_empty());
+    let pos = BlockPos::new(0, -1, 0);
+    let mut starts = Vec::new();
+    for t in 1..=12 {
+        let out = s.tick(ATTACK);
+        let a = actions(&out);
+        assert!(a.iter().all(|x| x.0 == action::START_DESTROY), "{out:?}");
+        if !a.is_empty() {
+            starts.push(t);
+        }
+        assert_eq!(s.w.block_state(pos), STONE);
     }
+    assert_eq!(starts, [1, 6, 12]);
+}
+
+#[test]
+fn creative_keeps_swinging_on_a_miss_without_miss_time() {
+    let mut r = Rig::new(GameMode::Creative);
+    r.w = TestWorld::new();
+    // hasMissTime() is false in creative: every fresh click on nothing is a miss and a swing
+    // (no 10-tick freeze like survival). Holding the button on a miss swings only on the press
+    // tick (continueAttack does nothing without a block target), so each click is press+release.
+    for _ in 0..5 {
+        assert!(matches!(r.tick(ATTACK)[0], ServerboundPlay::Punch(_)));
+        assert!(r.tick(InteractInput::default()).is_empty());
+    }
+}
+
+#[test]
+fn a_click_on_nothing_misses_and_freezes_the_held_attack_for_ten_ticks() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.w = TestWorld::new();
+    let out = r.tick(ATTACK);
+    assert!(matches!(out[0], ServerboundPlay::Punch(_))); // the miss swing
+                                                          // Held: continueAttack is gated on missTime <= 0 (Minecraft.continueAttack) — nothing
+                                                          // happens for ten ticks, not even a stop.
+    for _ in 0..10 {
+        assert!(r.tick(ATTACK).is_empty());
+    }
+}
+
+#[test]
+fn releasing_the_attack_button_clears_miss_time() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.w = TestWorld::new();
+    assert!(matches!(r.tick(ATTACK)[0], ServerboundPlay::Punch(_)));
+    // Released: continueAttack(false) resets missTime (and would stop a break).
+    assert!(r.tick(InteractInput::default()).is_empty());
+    let out = r.tick(ATTACK);
+    assert!(matches!(out[0], ServerboundPlay::Punch(_))); // a fresh miss, not blocked
+}
+
+#[test]
+fn spam_clicking_at_20_cps_on_air_swings_every_tick() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.w = TestWorld::new();
+    // One press+release per tick (20 cps): each fresh press is a miss and swings; the release
+    // clears missTime (Minecraft.continueAttack(false)) so the next click is not swallowed by
+    // the 10-tick freeze.
+    for _ in 0..5 {
+        assert!(matches!(r.tick(ATTACK)[0], ServerboundPlay::Punch(_)));
+        assert!(r.tick(InteractInput::default()).is_empty());
+    }
+}
+
+#[test]
+fn several_queued_attack_clicks_in_one_tick_each_count() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.add_entity(
+        EntityId(42),
+        Aabb::entity(DVec3::new(0.5, 0.0, 0.5), 0.6, 0.5),
+        ZOMBIE,
+    );
+    // KeyMapping.consumeClick: two clicks queued in one tick run startAttack twice.
+    r.p.queue_attack_click();
+    r.p.queue_attack_click();
+    let out = r.tick(ATTACK);
+    let attacks = out
+        .iter()
+        .filter(|p| matches!(p, ServerboundPlay::Attack(_)))
+        .count();
+    assert_eq!(attacks, 2, "{out:?}");
+}
+
+#[test]
+fn three_clicks_in_one_tick_run_start_attack_three_times() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.add_entity(
+        EntityId(42),
+        Aabb::entity(DVec3::new(0.5, 0.0, 0.5), 0.6, 0.5),
+        ZOMBIE,
+    );
+    // Three presses between ticks (faster than the 20 Hz tick): each consumeClick in
+    // `while (keyAttack.consumeClick()) instantAttack |= startAttack()` runs startAttack.
+    r.p.queue_attack_click();
+    r.p.queue_attack_click();
+    r.p.queue_attack_click();
+    let out = r.tick(ATTACK);
+    let attacks = out
+        .iter()
+        .filter(|p| matches!(p, ServerboundPlay::Attack(_)))
+        .count();
+    assert_eq!(attacks, 3, "{out:?}");
+}
+
+#[test]
+fn several_queued_use_clicks_in_one_tick_each_count() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.p.int.hotbar[0] = item(3);
+    // Two right clicks in one tick: startUseItem twice (the consumeClick loop does not wait for
+    // rightClickDelay).
+    r.p.queue_use_click();
+    r.p.queue_use_click();
+    let out = r.tick(InteractInput {
+        use_item: true,
+        ..Default::default()
+    });
+    let uses = out
+        .iter()
+        .filter(|p| matches!(p, ServerboundPlay::UseItemOn(_)))
+        .count();
+    assert_eq!(uses, 2, "{out:?}");
+}
+
+#[test]
+fn a_miss_delays_the_start_of_a_break_by_ten_ticks() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.w = TestWorld::new();
+    assert!(matches!(r.tick(ATTACK)[0], ServerboundPlay::Punch(_)));
+    r.w = TestWorld::flat(0, STONE);
+    // Holding attack onto the stone: the break starts only when missTime runs out (tick 11) —
+    // the freeze, then continueDestroyBlock's startDestroyBlock. No abort, no restart.
+    for t in 2..=11 {
+        let out = r.tick(ATTACK);
+        if actions(&out).iter().any(|a| a.0 == action::START_DESTROY) {
+            assert_eq!(t, 11);
+            return;
+        }
+    }
+    panic!("never started");
 }
 
 #[test]
@@ -399,6 +582,67 @@ fn use_on_block_with_cursor_and_repeat_delay() {
 }
 
 #[test]
+fn use_with_an_empty_main_hand_uses_the_off_hand() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.w = TestWorld::new();
+    r.p.int.offhand = item(3);
+    let out = r.tick(InteractInput {
+        use_item: true,
+        ..Default::default()
+    });
+    match &out[0] {
+        ServerboundPlay::UseItem(u) => assert_eq!(u.hand, 1),
+        p => panic!("{p:?}"),
+    }
+}
+
+#[test]
+fn use_does_nothing_while_a_block_is_being_destroyed() {
+    let mut r = Rig::new(GameMode::Survival);
+    let out = r.tick(ATTACK);
+    assert_eq!(actions(&out), [(action::START_DESTROY, 1)]);
+    let use_ = InteractInput {
+        use_item: true,
+        ..Default::default()
+    };
+    // The right click lands while the stone is breaking: startUseItem is gated on
+    // !gameMode.isDestroying(), nothing goes out (the abort below is the attack releasing).
+    let out = r.tick(use_);
+    let used = out.iter().any(|p| {
+        matches!(p, ServerboundPlay::UseItemOn(_)) || matches!(p, ServerboundPlay::UseItem(_))
+    });
+    assert!(!used, "{out:?}");
+    // After the attack is released the same click works.
+    r.tick(InteractInput::default());
+    let out = r.tick(use_);
+    assert!(matches!(out[0], ServerboundPlay::UseItemOn(_)));
+}
+
+#[test]
+fn while_an_item_is_in_use_clicks_do_nothing_and_releasing_sends_release_use_item() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.w = TestWorld::new();
+    let use_ = InteractInput {
+        use_item: true,
+        ..Default::default()
+    };
+    r.p.int.set_using_item(true);
+    // Holding use: no new use, no release, and the attack click is consumed and discarded.
+    assert!(r.tick(use_).is_empty());
+    assert!(r
+        .tick(InteractInput {
+            attack: true,
+            ..use_
+        })
+        .is_empty());
+    // Releasing the button: MultiPlayerGameMode.releaseUsingItem.
+    assert_eq!(
+        actions(&r.tick(InteractInput::default())),
+        [(action::RELEASE_USE_ITEM, 0)]
+    );
+}
+
+#[test]
 fn attack_entity_pick_and_hotbar() {
     let mut r = Rig::new(GameMode::Survival);
     // A mob standing on the block we look at, between us and it.
@@ -406,6 +650,7 @@ fn attack_entity_pick_and_hotbar() {
         EntityId(42),
         Aabb::entity(DVec3::new(0.5, 0.0, 0.5), 0.6, 0.5),
     ));
+    r.types.push(ZOMBIE);
     // Our eye is inside that box? no: the box ends at y 0.5, our eye is at 1.62.
     let out = r.tick(ATTACK);
     assert!(matches!(
@@ -416,6 +661,7 @@ fn attack_entity_pick_and_hotbar() {
     // Held attack on an entity does not attack again.
     assert!(r.tick(ATTACK).is_empty());
     r.entities.clear();
+    r.types.clear();
     let out = r.tick(InteractInput {
         pick_block: true,
         hotbar: Some(3),
@@ -469,6 +715,7 @@ fn inventory_and_effects_from_packets() {
     let env = InteractEnv {
         data: data(),
         entities: &[],
+        entity_types: &[],
     };
     let p = r.p.mining_params(STONE, &env);
     assert_eq!(
@@ -555,6 +802,164 @@ fn player_action_status_values_match_the_jar() {
     assert_eq!(action::RELEASE_USE_ITEM, 6);
     assert_eq!(action::SWAP_ITEM_WITH_OFFHAND, 7);
     assert_eq!(action::STAB, 8);
+}
+
+#[test]
+fn is_pickable_matches_vanilla_classes() {
+    // EntitySelector.CAN_BE_PICKED = Entity::isPickable, per entity class, by type name.
+    let pickable = [
+        "zombie",
+        "creeper",
+        "sheep",
+        "player",
+        "item_frame",
+        "glow_item_frame",
+        "painting",
+        "leash_knot",
+        "end_crystal",
+        "tnt",
+        "falling_block",
+        "armor_stand",
+        "boat",
+        "minecart",
+        "chest_minecart",
+        "interaction",
+        "shulker_bullet",
+        "fireball",
+        "wind_charge",
+        "breeze_wind_charge",
+        "guardian",
+    ];
+    for p in pickable {
+        assert!(
+            is_pickable(&Identifier::minecraft(p)),
+            "{p} should be pickable"
+        );
+    }
+    let not_pickable = [
+        "item",
+        "experience_orb",
+        "arrow",
+        "spectral_arrow",
+        "trident",
+        "ender_dragon",
+        "marker",
+        "area_effect_cloud",
+        "lightning_bolt",
+        "eye_of_ender",
+        "evoker_fangs",
+        "ominous_item_spawner",
+        "block_display",
+        "item_display",
+        "text_display",
+        "small_fireball",
+        "dragon_fireball",
+        "wither_skull",
+        "egg",
+        "snowball",
+        "ender_pearl",
+        "splash_potion",
+        "lingering_potion",
+        "experience_bottle",
+        "firework_rocket",
+        "llama_spit",
+        "fishing_bobber",
+    ];
+    for p in not_pickable {
+        assert!(
+            !is_pickable(&Identifier::minecraft(p)),
+            "{p} should not be pickable"
+        );
+    }
+    // Unknown (mod) types are pickable, like vanilla's default.
+    assert!(is_pickable(&Identifier::new("mymod", "golem")));
+    assert!(is_pickable(&Identifier::minecraft("something_new")));
+}
+
+/// The kick `multiplayer.disconnect.invalid_entity_attacked` in reverse: an item entity, an
+/// experience orb, an arrow, a spectral arrow and an ender dragon in the crosshair are never
+/// attack targets — the click falls through to a miss (or the block behind).
+#[test]
+fn non_pickable_entities_in_the_crosshair_are_never_attacked() {
+    for (idx, name) in [
+        (ITEM_ENTITY, "item"),
+        (EXPERIENCE_ORB, "experience_orb"),
+        (ARROW, "arrow"),
+        (SPECTRAL_ARROW, "spectral_arrow"),
+        (ENDER_DRAGON, "ender_dragon"),
+    ] {
+        let mut r = Rig::new(GameMode::Survival);
+        r.w = TestWorld::new();
+        r.add_entity(
+            EntityId(42),
+            Aabb::entity(DVec3::new(0.5, 0.0, 0.5), 0.6, 0.5),
+            idx,
+        );
+        let out = r.tick(ATTACK);
+        assert!(
+            !out.iter().any(|p| matches!(p, ServerboundPlay::Attack(_))),
+            "{name} was attacked"
+        );
+        assert!(
+            matches!(out[0], ServerboundPlay::Punch(_)),
+            "{name}: {out:?}"
+        );
+    }
+}
+
+#[test]
+fn a_non_pickable_entity_does_not_hide_the_block_behind_it() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.add_entity(
+        EntityId(42),
+        Aabb::entity(DVec3::new(0.5, 0.0, 0.5), 0.6, 0.5),
+        ITEM_ENTITY,
+    );
+    // The stone floor is the target, not the item entity: a start, not an attack.
+    let out = r.tick(ATTACK);
+    assert!(!out.iter().any(|p| matches!(p, ServerboundPlay::Attack(_))));
+    assert_eq!(actions(&out), [(action::START_DESTROY, 1)]);
+}
+
+#[test]
+fn the_player_itself_is_never_an_attack_target() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.w = TestWorld::new();
+    // Our own box around the eye: getEntities(except = us) and the pick filter agree it is
+    // never a target.
+    r.add_entity(
+        ME,
+        Aabb::entity(DVec3::new(0.5, 0.0, 0.5), 0.6, 1.8),
+        PLAYER,
+    );
+    let out = r.tick(ATTACK);
+    assert!(!out.iter().any(|p| matches!(p, ServerboundPlay::Attack(_))));
+    assert!(matches!(out[0], ServerboundPlay::Punch(_)));
+}
+
+#[test]
+fn an_entity_wins_only_when_it_is_strictly_closer_than_the_block() {
+    // Box top at y 0.5: 1.12 < 1.62 (the floor's top) — the entity is the target.
+    let mut r = Rig::new(GameMode::Survival);
+    r.add_entity(
+        EntityId(42),
+        Aabb::entity(DVec3::new(0.5, 0.0, 0.5), 0.6, 0.5),
+        ZOMBIE,
+    );
+    let out = r.tick(ATTACK);
+    assert!(matches!(
+        out[0],
+        ServerboundPlay::Attack(sb::Attack { entity_id: 42 })
+    ));
+    // Box top exactly at the floor's top (y 0, the same 1.62): not strictly closer.
+    let mut r = Rig::new(GameMode::Survival);
+    r.add_entity(
+        EntityId(42),
+        Aabb::entity(DVec3::new(0.5, -0.5, 0.5), 0.6, 0.5),
+        ZOMBIE,
+    );
+    let out = r.tick(ATTACK);
+    assert_eq!(actions(&out), [(action::START_DESTROY, 1)]);
 }
 
 /// Vanilla's `Minecraft.continueAttack`: while the block is breaking the arm swings every tick,

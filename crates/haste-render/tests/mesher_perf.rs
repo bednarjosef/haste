@@ -377,13 +377,13 @@ fn mesher_output_stable() {
         "stability: {quads} quads, {vertices} vertices, sprite range {}..{}",
         sprites.0, sprites.1
     );
-    // Expected: computed with the original mesher (commit on branch meshing-speed before
-    // the meshing-speed changes). Update ONLY when the mesher's output is intentionally
-    // changed (then recompute with the original code and justify it).
-    // The grass block's side overlay is emitted exactly as the model has it (coplanar
-    // with the side face), so this hash is the original one: the fix for the missing
-    // overlay is the terrain depth test (LessEqual), not the geometry.
-    let expected: u64 = 10_530_433_279_199_709_875;
+    // Expected: the original mesher's output until the smooth-light neighbour
+    // cells were fixed to the AO cells (one cell out from the block instead of
+    // one cell further along the face normal): the light of every face vertex
+    // that has a neighbour above or below it changes, which removes the thin
+    // lines the old sampling drew along block edges. Quad count, vertices,
+    // sprites and AO are unchanged.
+    let expected: u64 = 1_593_019_514_260_049_155;
     assert_eq!(hash.finish(), expected, "mesher output changed");
     assert!(quads > 100_000, "suspiciously few quads: {quads}");
     eprintln!("{quads} quads, hash {:016x}", hash.finish());

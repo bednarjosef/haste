@@ -26,6 +26,6 @@ pub use gui::{GuiPipeline, ScreenKind};
 pub use host::{JvmConfig, JvmHost, StartTimings};
 pub use loader::{ClassLog, ClassSource, ALLOW_CLASSES, ALLOW_PACKAGES, DENY};
 pub use proxies::{
-    decode_stack, empty_stack, encode_stack, ChatMessage, DebugInfo, GameState, PlayerVitals,
-    INVENTORY_SIZE,
+    decode_stack, empty_stack, encode_stack, ChatMessage, CreateWorldRequest, DebugInfo, GameState,
+    PlayerVitals, TargetedState, INVENTORY_SIZE,
 };

@@ -142,6 +142,7 @@ fn measure(
         dimension_has_sky: true,
         fog_start: (view_distance * 16) as f32 * 0.9,
         fog_end: (view_distance * 16) as f32,
+        ..Default::default()
     };
     let frame = |yaw: f32| FrameInput {
         camera: Camera {
@@ -149,16 +150,19 @@ fn measure(
             yaw,
             pitch: 10.0,
             fov_deg: 70.0,
+            hand_fov_deg: 70.0,
             roll_deg: 0.0,
             bob: haste_render::ViewBob::default(),
         },
         entities: &[],
+        block_entities: &[],
         gui: &gui,
         sky,
         partial_tick: 0.0,
         block_target: None,
         breaking: &[],
         camera_entity: None,
+        spin: None,
     };
     // Mesh everything (drain uploads frame by frame) until the resident section count has not
     // changed for a second.

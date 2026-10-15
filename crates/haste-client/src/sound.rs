@@ -452,6 +452,12 @@ impl Sounds {
         }
     }
 
+    /// Re-applies the per-category volumes live, the moment the player moves a sound slider
+    /// (vanilla's `SoundEngine.refreshCategoryVolume` for every `soundCategory_*` option).
+    pub fn set_volumes(&mut self, volumes: &haste_setup::options::SoundVolumes) {
+        apply_volumes(&mut self.system, volumes);
+    }
+
     /// Plays the requests this tick's packets recorded. `entity_pos` resolves a
     /// `sound_entity`'s entity to its current position; `None` (unknown entity) skips the
     /// sound, as vanilla does. The requests are consumed (the caller's buffer is cleared).
@@ -518,8 +524,10 @@ impl Sounds {
             .is_some_and(|event| self.system.is_event_playing(event))
     }
 
-    /// The end of a game tick (20 Hz): listener from the local player's eye and yaw, the
-    /// music situation, the music manager, then the system tick.
+    /// The end of a game tick (20 Hz): listener from the local player's eye and yaw, the music
+    /// situation, the music manager, then the system tick. The situation is recomputed where
+    /// vanilla recomputes it (`Minecraft.getSituationalMusic`: game mode, eye in water); the
+    /// manager follows vanilla's `MusicManager.tick` from there on.
     pub fn tick(&mut self, eye: DVec3, yaw_deg: f32, situation: MusicSituation) {
         self.system.set_listener(eye, yaw_deg);
         if situation != self.situation {
@@ -530,6 +538,8 @@ impl Sounds {
         if let Some(command) = self.music.tick(&mut self.music_rng, playing) {
             match command {
                 MusicCommand::Play(event) => {
+                    // Vanilla's `SimpleSoundInstance.forMusic(soundEvent)`: no position (the
+                    // listener hears it centred), the music source, volume and pitch 1.
                     self.system
                         .play(&event, SoundSource::Music, None, 1.0, 1.0, 0);
                     self.music_event = Some(event);

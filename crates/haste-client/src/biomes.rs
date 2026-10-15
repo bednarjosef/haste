@@ -7,7 +7,7 @@
 use haste_protocol::haste_core::{BiomeId, BlockPos, Identifier};
 use haste_protocol::nbt::NbtCompound;
 use haste_protocol::SyncedRegistries;
-use haste_render::{BiomeClimate, GrassModifier};
+use haste_render::{BiomeClimate, BiomeFog, GrassModifier};
 
 /// The world's biomes for the renderer's tint lookup (cell-resolution, biome 0 where nothing is
 /// loaded).
@@ -40,11 +40,25 @@ fn color(c: &NbtCompound, name: &str) -> Option<u32> {
         .map(|v| v & 0xFFFFFF)
 }
 
+/// One environment attribute from a biome's `attributes` map (vanilla
+/// `EnvironmentAttributeMap.NETWORK_CODEC`): the key is the attribute id (`visual/fog_color`),
+/// the value an int or `#rrggbb` string colour, or a number for the distances.
+fn attribute_color(a: &NbtCompound, name: &str) -> Option<u32> {
+    color(a, name)
+}
+
+fn attribute_float(a: &NbtCompound, name: &str) -> Option<f32> {
+    a.get_numeric_float(name)
+}
+
 /// One biome entry's NBT to its climate; missing fields take plains' values.
 pub fn climate_from_nbt(c: &NbtCompound) -> BiomeClimate {
     let plains = BiomeClimate::plains();
     let effects = c.get_compound("effects");
     let eff = |name: &str| effects.and_then(|e| color(e, name));
+    let attrs = c.get_compound("attributes");
+    let attr = |name: &str| attrs.and_then(|a| attribute_color(a, name));
+    let attrf = |name: &str| attrs.and_then(|a| attribute_float(a, name));
     BiomeClimate {
         temperature: c
             .get_numeric_float("temperature")
@@ -58,6 +72,19 @@ pub fn climate_from_nbt(c: &NbtCompound) -> BiomeClimate {
             Some("dark_forest") => GrassModifier::DarkForest,
             Some("swamp") => GrassModifier::Swamp,
             _ => GrassModifier::None,
+        },
+        // The attribute map keys are the `minecraft:environment_attribute` registry ids, which
+        // carry the `visual/` path under the `minecraft` namespace.
+        fog: BiomeFog {
+            fog_color: attr("minecraft:visual/fog_color"),
+            sky_color: attr("minecraft:visual/sky_color"),
+            fog_start: attrf("minecraft:visual/fog_start_distance"),
+            fog_end: attrf("minecraft:visual/fog_end_distance"),
+            sky_fog_end: attrf("minecraft:visual/sky_fog_end_distance"),
+            cloud_fog_end: attrf("minecraft:visual/cloud_fog_end_distance"),
+            water_fog_color: attr("minecraft:visual/water_fog_color"),
+            water_fog_start: attrf("minecraft:visual/water_fog_start_distance"),
+            water_fog_end: attrf("minecraft:visual/water_fog_end_distance"),
         },
     }
 }
@@ -114,8 +141,26 @@ mod tests {
                 foliage_color: Some(0x6A7039),
                 dry_foliage_color: Some(0x7B5334),
                 grass_modifier: GrassModifier::Swamp,
+                fog: BiomeFog::default(),
             }
         );
+    }
+
+    #[test]
+    fn attributes_parse_into_fog() {
+        let mut attrs = NbtCompound::new();
+        attrs.put_string("minecraft:visual/fog_color", "#330808".into());
+        attrs.put_string("minecraft:visual/water_fog_color", "#3f76e4".into());
+        attrs.put_float("minecraft:visual/fog_start_distance", 10.0);
+        attrs.put_float("minecraft:visual/fog_end_distance", 96.0);
+        let mut c = NbtCompound::new();
+        c.put_compound("attributes", attrs);
+        let fog = climate_from_nbt(&c).fog;
+        assert_eq!(fog.fog_color, Some(0x330808));
+        assert_eq!(fog.water_fog_color, Some(0x3F76E4));
+        assert_eq!(fog.fog_start, Some(10.0));
+        assert_eq!(fog.fog_end, Some(96.0));
+        assert_eq!(fog.sky_fog_end, None);
     }
 
     #[test]

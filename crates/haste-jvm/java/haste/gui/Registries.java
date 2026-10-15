@@ -45,12 +45,17 @@ public final class Registries {
 
     /**
      * An {@code update_tags} packet body (configuration or play). In configuration the tags are collected with the
-     * registries; in play they are applied to the current registries at once.
+     * registries; in play they are applied to the current registries at once and the creative tag search tree is
+     * rebuilt from the search tab's current items (vanilla: {@code ClientPacketListener.handleUpdateTags}).
      */
     static void tags(byte[] body, boolean play) {
         ClientboundUpdateTagsPacket p = ClientboundUpdateTagsPacket.STREAM_CODEC.decode(Unpooled.wrappedBuffer(body));
         collector().appendTags(p.tags());
-        if (play) finish();
+        if (play) {
+            finish();
+            ConnectionImpl.SEARCH_TREES.updateCreativeTags(
+                java.util.List.copyOf(net.minecraft.world.item.CreativeModeTabs.searchTab().getSearchTabDisplayItems()));
+        }
     }
 
     /**

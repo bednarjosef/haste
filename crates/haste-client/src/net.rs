@@ -23,6 +23,7 @@ use haste_protocol::haste_core::game::{DimensionInfo, GameMode};
 use haste_protocol::haste_core::{
     BlockPos, BlockStateId, ChunkPos, EntityId, Identifier, RegistryIndex,
 };
+use haste_protocol::nbt::NbtCompound;
 use haste_protocol::packets::play::clientbound as cb;
 use haste_protocol::packets::play::clientbound::teleport_flags;
 use haste_protocol::{
@@ -35,6 +36,10 @@ use crate::player::{LocalPlayer, VehiclePose};
 
 /// Hurt-tilt camera roll duration in ticks (vanilla's `hurtTime` runs to 10).
 pub const HURT_TILT_TICKS: u32 = 10;
+/// The head equipment slot of `set_equipment` (`EquipmentSlot.values()`: 0 main hand, 1 off
+/// hand, 2 boots, 3 leggings, 4 chestplate, 5 helmet, 6 body, 7 saddle). The item worn there
+/// can hide the screen behind a camera overlay (the carved pumpkin's blur).
+pub const HEAD_SLOT: u8 = 5;
 
 /// What the driver needs from the world (`haste_world::World`).
 pub trait WorldSink {
@@ -48,6 +53,12 @@ pub trait WorldSink {
     fn apply_light(&mut self, pos: ChunkPos, light: &LightData);
     /// `World::set_block_entity`.
     fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData);
+    /// The block state at `pos` (`World::block_state`; `AIR` by default for fakes). Named
+    /// differently from the `BlockView` method so `World` (which has both) stays unambiguous.
+    fn block_state_at(&self, pos: BlockPos) -> BlockStateId {
+        let _ = pos;
+        BlockStateId::AIR
+    }
     /// Drops every chunk and switches to `dim` (respawn / dimension change).
     fn reset(&mut self, dim: &DimensionInfo);
     /// Number of loaded chunks.
@@ -115,6 +126,10 @@ pub trait EntitySink {
     fn mark_hurt(&mut self, id: EntityId);
     /// `EntityStore::mark_dead`.
     fn mark_dead(&mut self, id: EntityId);
+    /// `EntityStore::mark_attack`: entity event 4 (a melee attack animation).
+    fn mark_attack(&mut self, id: EntityId) {
+        let _ = id;
+    }
     /// `EntityStore::set_metadata`.
     fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]);
     /// `EntityStore::set_equipment`.
@@ -123,6 +138,11 @@ pub trait EntitySink {
     fn player_info(&mut self, info: &[PlayerInfo]);
     /// `EntityStore::set_passengers`: the vehicle's passenger list is replaced by `passengers`.
     fn set_passengers(&mut self, vehicle: EntityId, passengers: &[EntityId]);
+    /// `EntityStore::set_world_age` (from `set_time`); the bee's anger end time compares
+    /// against it. Default no-op.
+    fn set_world_age(&mut self, world_age: i64) {
+        let _ = world_age;
+    }
     /// `EntityStore::entity_type_info`: registry index and dimensions, for the seat offset.
     fn entity_type_info(&self, _id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
         None
@@ -131,6 +151,11 @@ pub trait EntitySink {
     fn pose(&self, id: EntityId) -> Option<(DVec3, f32, f32)>;
     /// Hit box of an entity, for the crosshair (none in fakes by default).
     fn hitbox(&self, _id: EntityId) -> Option<haste_core::Aabb> {
+        None
+    }
+    /// `minecraft:entity_type` registry index of an entity, for the crosshair's pickability
+    /// filter (`Entity.isPickable`); none in fakes, which the picker treats as a mod type.
+    fn entity_type(&self, _id: EntityId) -> Option<haste_core::RegistryIndex> {
         None
     }
     /// Forgets every entity (respawn / dimension change).
@@ -156,6 +181,9 @@ impl WorldSink for World {
     }
     fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData) {
         World::set_block_entity(self, pos, data)
+    }
+    fn block_state_at(&self, pos: BlockPos) -> BlockStateId {
+        World::block_state(self, pos)
     }
     fn reset(&mut self, dim: &DimensionInfo) {
         let biomes = 1usize << self.biome_bits();
@@ -212,6 +240,9 @@ impl EntitySink for EntityStore {
     fn mark_dead(&mut self, id: EntityId) {
         EntityStore::mark_dead(self, id)
     }
+    fn mark_attack(&mut self, id: EntityId) {
+        EntityStore::mark_attack(self, id)
+    }
     fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]) {
         EntityStore::set_metadata(self, id, entries)
     }
@@ -224,6 +255,9 @@ impl EntitySink for EntityStore {
     fn set_passengers(&mut self, vehicle: EntityId, passengers: &[EntityId]) {
         EntityStore::set_passengers(self, vehicle, passengers)
     }
+    fn set_world_age(&mut self, world_age: i64) {
+        EntityStore::set_world_age(self, world_age)
+    }
     fn entity_type_info(&self, id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
         EntityStore::entity_type_info(self, id)
     }
@@ -233,6 +267,9 @@ impl EntitySink for EntityStore {
     fn hitbox(&self, id: EntityId) -> Option<haste_core::Aabb> {
         self.get(id)
             .map(|e| haste_core::Aabb::entity(e.pos, e.dimensions.0 as f64, e.dimensions.1 as f64))
+    }
+    fn entity_type(&self, id: EntityId) -> Option<haste_core::RegistryIndex> {
+        self.get(id).map(|e| e.kind)
     }
     fn clear(&mut self) {
         // Keeps the dimensions oracle, player info and painting variants (vanilla keeps the tab
@@ -303,6 +340,46 @@ pub fn painting_variants(regs: &SyncedRegistries) -> HashMap<u32, haste_entity::
     out
 }
 
+/// The variant registries the variant mobs read (`haste_entity::VARIANT_REGISTRIES`), each
+/// parsed into haste-entity's per-id asset table: `asset_id`/`baby_asset_id` (and `model`
+/// for pig/cow/chicken; wolf nests `assets`/`baby_assets` with `wild`/`tame`/`angry` — the
+/// wild texture is what an untamed, calm mob shows). An entry whose NBT is absent (a known
+/// pack) or does not parse stays `None`: the mob keeps the model table's default look.
+/// Returns the registry name and its table, one per registry the server sent.
+pub fn mob_variants(
+    regs: &SyncedRegistries,
+) -> Vec<(String, Vec<Option<haste_entity::VariantAssets>>)> {
+    let parse = |nbt: &NbtCompound| -> Option<haste_entity::VariantAssets> {
+        if nbt.get_string("asset_id").is_some() {
+            haste_entity::VariantAssets::from_assets(
+                nbt.get_string("asset_id").unwrap(),
+                nbt.get_string("baby_asset_id"),
+                nbt.get_string("model"),
+            )
+        } else {
+            // Wolf: assets/baby_assets, each with wild/tame/angry; batch 1 reads the wild
+            // texture (tame/angry are TamableAnimal flag textures, a later task).
+            let wild = nbt.get_compound("assets")?.get_string("wild")?;
+            let baby_wild = nbt.get_compound("baby_assets")?.get_string("wild")?;
+            haste_entity::VariantAssets::from_assets(wild, Some(baby_wild), None)
+        }
+    };
+    let mut out = Vec::new();
+    for wanted in haste_entity::VARIANT_REGISTRIES {
+        let Some(registry) = regs.names().find(|n| n.to_string() == *wanted) else {
+            continue;
+        };
+        let Some(entries) = regs.entries(registry) else {
+            continue;
+        };
+        let table = (0..entries.len())
+            .map(|i| regs.entry_nbt(registry, i).as_ref().and_then(parse))
+            .collect();
+        out.push(((*wanted).to_owned(), table));
+    }
+    out
+}
+
 /// Loads the game data (block states, registries, shapes) once for the whole client.
 pub fn load_game_data() -> anyhow::Result<Arc<GameData>> {
     let t = std::time::Instant::now();
@@ -322,6 +399,19 @@ pub fn load_game_data() -> anyhow::Result<Arc<GameData>> {
 pub fn synced_biome_count(regs: &SyncedRegistries) -> Option<usize> {
     regs.entries(&Identifier::minecraft("worldgen/biome"))
         .map(|e| e.len())
+}
+
+/// Registry id of `minecraft:overworld` in `minecraft:world_clock` (the day clock; the End
+/// has `minecraft:the_end`). 0 (the overworld clock, first registered) when the server sent
+/// no such registry.
+pub fn overworld_clock_id(regs: &SyncedRegistries) -> i32 {
+    regs.entries(&Identifier::minecraft("world_clock"))
+        .and_then(|entries| {
+            entries
+                .iter()
+                .position(|e| e.id == Identifier::minecraft("overworld"))
+        })
+        .map_or(0, |i| i as i32)
 }
 
 /// Per-connection counters for the HUD/headless printout.
@@ -351,6 +441,190 @@ pub struct NetCounters {
     pub own_sounds: u64,
 }
 
+/// One block entity's lid animation (vanilla `ChestLidController` for chests and ender chests,
+/// `ShulkerBoxBlockEntity.updateAnimation`'s progress for shulker boxes: both step their value
+/// by 0.1 per tick towards the open target). `old` is the value at the start of the last tick,
+/// for the partial-tick lerp.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LidAnim {
+    pub old: f32,
+    pub value: f32,
+    pub open: bool,
+}
+
+impl LidAnim {
+    /// One 20 Hz tick (vanilla `ChestLidController.tickLid`: 0.1 steps, clamped at 0 and 1).
+    fn tick(&mut self) {
+        self.old = self.value;
+        let target = if self.open { 1.0 } else { 0.0 };
+        if self.value < target {
+            self.value = (self.value + 0.1).min(target);
+        } else if self.value > target {
+            self.value = (self.value - 0.1).max(target);
+        }
+    }
+
+    /// Whether the lid is at rest closed (nothing left to animate, no need to copy it out).
+    fn at_rest_closed(&self) -> bool {
+        !self.open && self.value == 0.0
+    }
+}
+
+/// The client's per-tick lightmap state: vanilla `LightmapRenderStateExtractor` (the
+/// block-light flicker random walk, the effect-driven night vision and darkness) plus
+/// `GameRenderer`'s boss-overlay world darkening and `ClientLevel`'s lightning sky flash. The
+/// render thread interpolates it by partial tick (`frame_view`).
+#[derive(Clone, Debug)]
+pub struct LightmapState {
+    /// `LightmapRenderStateExtractor.blockLightFlicker`.
+    pub flicker: f32,
+    rng: u64,
+    /// Night-vision effect remaining ticks (`None` without it, `-1` infinite).
+    pub night_vision: Option<i32>,
+    /// Darkness effect remaining ticks.
+    pub darkness: Option<i32>,
+    /// `MobEffectInstance.BlendState` for the darkness effect (22 ticks in and out).
+    pub darkness_blend: haste_render::lightmap::BlendState,
+    /// Boss bars and their `(darkenScreen, createWorldFog)` flags (`BossEvent`), keyed by uuid
+    /// bits.
+    boss_bars: HashMap<u128, (bool, bool)>,
+    /// `GameRenderer.bossOverlayWorldDarkening` and its value one tick ago.
+    pub boss_darkening: f32,
+    pub boss_darkening_o: f32,
+    /// `BossHealthOverlay.shouldCreateWorldFog()`: any bar asks for the thick boss fog.
+    pub boss_world_fog: bool,
+    /// `ClientLevel.skyFlashTime`: a lightning strike raises the sky for 2 ticks.
+    pub sky_flash_time: i32,
+    /// The player's tick count (vanilla `LivingEntity.tickCount`), for the darkness pulse.
+    pub tick_count: i32,
+}
+
+impl Default for LightmapState {
+    fn default() -> Self {
+        Self {
+            flicker: 0.0,
+            // Vanilla seeds `RandomSource.create()` from a unique random seed; a fixed seed
+            // keeps Haste's runs reproducible and the walk's values are not observable.
+            rng: 0x9e37_79b9_7f4a_7c15,
+            night_vision: None,
+            darkness: None,
+            darkness_blend: haste_render::lightmap::BlendState::default(),
+            boss_bars: HashMap::new(),
+            boss_darkening: 0.0,
+            boss_darkening_o: 0.0,
+            boss_world_fog: false,
+            sky_flash_time: 0,
+            tick_count: 0,
+        }
+    }
+}
+
+impl LightmapState {
+    /// A uniform f32 in 0..1 (vanilla `RandomSource.nextFloat`; xorshift64*, seed fixed).
+    fn next_float(&mut self) -> f32 {
+        let mut x = self.rng;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.rng = x;
+        ((x.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 40) as f32) / (1u32 << 24) as f32
+    }
+
+    /// One game tick: `LightmapRenderStateExtractor.tick` (flicker), the effect durations and
+    /// darkness blend (`MobEffectInstance.tickClient`), the boss-overlay darkening
+    /// (`GameRenderer.tick`) and the lightning flash timer (`ClientLevel.tick`).
+    pub fn tick(&mut self) {
+        let (r1, r2, r3, r4) = (
+            self.next_float(),
+            self.next_float(),
+            self.next_float(),
+            self.next_float(),
+        );
+        self.flicker =
+            haste_render::lightmap::block_light_flicker_tick(self.flicker, r1, r2, r3, r4);
+        // MobEffectInstance.tickClient -> tickDownDuration; a finite effect that reaches 0 is
+        // removed (`LivingEntity.tickEffects`), an infinite one (-1) stays.
+        for slot in [&mut self.night_vision, &mut self.darkness] {
+            if let Some(d) = slot {
+                if *d > 0 {
+                    *d -= 1;
+                    if *d == 0 {
+                        *slot = None;
+                    }
+                }
+            }
+        }
+        // MobEffectInstance.BlendState.tick: the darkness effect blends over 22 ticks and
+        // starts blending out 22 ticks before it ends (MobEffects.DARKNESS).
+        let has_darkness = matches!(self.darkness, Some(d) if d == -1 || d > 22);
+        self.darkness_blend.tick(has_darkness, 22);
+        // GameRenderer.tick: while any boss bar asks to darken the screen, rise by 0.05/tick
+        // (capped at 1), else fall by 0.0125/tick.
+        self.boss_darkening_o = self.boss_darkening;
+        if self.boss_bars.values().any(|(darken, _)| *darken) {
+            self.boss_darkening = (self.boss_darkening + 0.05).min(1.0);
+        } else if self.boss_darkening > 0.0 {
+            self.boss_darkening -= 0.0125;
+        }
+        // `BossHealthOverlay.shouldCreateWorldFog`: any bar asks for the thick world fog.
+        self.boss_world_fog = self.boss_bars.values().any(|(_, fog)| *fog);
+        if self.sky_flash_time > 0 {
+            self.sky_flash_time -= 1;
+        }
+        self.tick_count = self.tick_count.wrapping_add(1);
+    }
+
+    /// An `update_mob_effect` for us: keep the duration of the night-vision or darkness effect.
+    fn update_effect(
+        &mut self,
+        ids: crate::player::interact::LightmapEffectIds,
+        effect: i32,
+        duration: i32,
+    ) {
+        if ids.night_vision == Some(effect) {
+            self.night_vision = Some(duration);
+        }
+        if ids.darkness == Some(effect) {
+            self.darkness = Some(duration);
+        }
+    }
+
+    /// A `remove_mob_effect` for us.
+    fn remove_effect(&mut self, ids: crate::player::interact::LightmapEffectIds, effect: i32) {
+        if ids.night_vision == Some(effect) {
+            self.night_vision = None;
+        }
+        if ids.darkness == Some(effect) {
+            self.darkness = None;
+        }
+    }
+
+    /// A `boss_event`: `BossEvent` flags (bit 0x01 darkenScreen, bit 0x04 createWorldFog) on
+    /// add/update flags.
+    fn boss_event(&mut self, id: u128, action: &cb::BossEventAction) {
+        let flags = |f: u8| (f & 0x01 != 0, f & 0x04 != 0);
+        match action {
+            cb::BossEventAction::Add { flags: f, .. } => {
+                self.boss_bars.insert(id, flags(*f));
+            }
+            cb::BossEventAction::Remove => {
+                self.boss_bars.remove(&id);
+            }
+            cb::BossEventAction::UpdateFlags(f) => {
+                if let Some(entry) = self.boss_bars.get_mut(&id) {
+                    *entry = flags(*f);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `LightningBolt.tick` on the client: `ClientLevel.setSkyFlashTime(2)`.
+    fn lightning(&mut self) {
+        self.sky_flash_time = 2;
+    }
+}
+
 /// Client-side session state the packets drive (everything except world and entities).
 pub struct Session {
     /// The local player (player.rs): its packets in, its movement packets out.
@@ -361,20 +635,32 @@ pub struct Session {
     pub dimension: DimensionInfo,
     /// Counters.
     pub counters: NetCounters,
+    /// Lid animations by block position, driven by `block_event` action 1 (chest and shulker
+    /// box lids; entries only exist while the block is one of `lid_states`).
+    pub lids: HashMap<BlockPos, LidAnim>,
+    /// The block states whose `block_event` action 1 belongs to a lid (chest family, shulker
+    /// boxes; copper chests are not drawn yet), filled from the game data at join.
+    lid_states: Option<HashSet<BlockStateId>>,
     /// Other players' break progress (`block_destruction`): breaker id -> (block, stage 0..=9).
     pub breaking: HashMap<i32, (BlockPos, u8)>,
     /// Entities the server spawned and has not removed (crosshair targets).
     entity_ids: HashSet<EntityId>,
     entity_boxes: Vec<(EntityId, haste_core::Aabb)>,
+    /// `minecraft:entity_type` registry index per `entity_boxes` entry (same order), for the
+    /// crosshair's pickability filter. A sentinel (`u32::MAX`) means unknown (mod) type.
+    entity_types: Vec<haste_core::RegistryIndex>,
     /// Firework rockets the server spawned and has not removed (their metadata index 9 is the
     /// attached-to entity id, `FireworkRocketEntity.DATA_ATTACHED_TO_TARGET`).
     fireworks: HashSet<EntityId>,
     /// The firework rocket currently attached to us: vanilla `FireworkRocketEntity.tick` pushes a
     /// fall-flying player it is attached to every tick (see [`Session::end_tick`]).
     attached_firework: Option<EntityId>,
-    /// Time of day in ticks from the first world clock of the last `set_time` (approximate:
-    /// that the first clock is the day clock is not verified).
+    /// Time of day in ticks from the overworld clock of the last `set_time` (`clocks` arrives
+    /// in HashMap order, so the overworld clock is looked up by registry id).
     pub time_of_day: Option<i64>,
+    /// World age in ticks (`set_time`'s `world_age`), for animations keyed to game time
+    /// (vanilla `Level.getGameTime`, e.g. `BannerRenderer`'s wave phase).
+    pub world_age: i64,
     /// Set by `start_configuration` or `transfer`: the next `login` starts a new world.
     pub new_world_pending: bool,
     /// `minecraft:entity_type` registry entries in id order (the synced registry's when the
@@ -386,6 +672,13 @@ pub struct Session {
     /// nobody drains them (headless). Reused, so a tick without sound packets allocates
     /// nothing.
     pub sound_requests: Vec<crate::sound::SoundRequest>,
+    /// The portal and spinning screen effects (`LocalPlayer.portalEffectIntensity`, the
+    /// spinning effect time and speed), ticked in `end_tick`.
+    pub screen: crate::screen_effects::PortalEffects,
+    /// This tick's world probe for the screen effects: the block the camera is inside, the
+    /// portal under our feet and the eye position's light (vanilla's
+    /// `LevelExtractor.getViewBlockingState` and `NetherPortalBlock.entityInside`).
+    pub screen_probe: crate::screen_effects::WorldProbe,
     /// The `fovEffectScale` option this run uses (set by the window from its saved options;
     /// the headless path leaves the vanilla default).
     pub fov_effect_scale: f32,
@@ -417,6 +710,8 @@ pub struct Session {
     /// `minecraft:particle_type` names by protocol id (the static registry the packet's
     /// numeric ids index; the synced registry is not authoritative for it).
     particle_names: std::sync::Arc<Vec<Identifier>>,
+    /// The per-tick lightmap state (flicker, effects, boss darkening, lightning).
+    pub lightmap: LightmapState,
 }
 
 impl Session {
@@ -438,14 +733,20 @@ impl Session {
             entity_id,
             dimension,
             breaking: HashMap::new(),
+            lids: HashMap::new(),
+            lid_states: None,
             entity_ids: HashSet::new(),
             entity_boxes: Vec::new(),
+            entity_types: Vec::new(),
             fireworks: HashSet::new(),
             attached_firework: None,
             time_of_day: None,
+            world_age: 0,
             new_world_pending: false,
             entity_type_names: Vec::new(),
             sound_requests: Vec::new(),
+            screen: crate::screen_effects::PortalEffects::default(),
+            screen_probe: crate::screen_effects::WorldProbe::default(),
             fov_effect_scale: 1.0,
             fov_modifier: 0.0,
             old_fov_modifier: 0.0,
@@ -459,6 +760,7 @@ impl Session {
             ambient_spawns: Vec::new(),
             particle_spawned: 0,
             particle_names,
+            lightmap: LightmapState::default(),
         }
     }
 
@@ -482,6 +784,14 @@ impl Session {
         self.entity_type_names
             .get(kind.0 as usize)
             .is_some_and(|n| n.path() == "firework_rocket")
+    }
+
+    /// Whether a spawned entity's registry index names the lightning bolt type (its tick sets
+    /// the sky flash).
+    fn is_lightning_type(&self, kind: RegistryIndex) -> bool {
+        self.entity_type_names
+            .get(kind.0 as usize)
+            .is_some_and(|n| n.path() == "lightning_bolt")
     }
 
     /// One 20 Hz tick of the camera effects (vanilla's `Camera.tick`, plus `LivingEntity.tick` /
@@ -628,6 +938,13 @@ impl Session {
         }))
     }
 
+    /// The block states that carry a lid (chest family, shulker boxes), from the game data;
+    /// call once at join so `block_event` can tell lid events from other blocks' (pistons use
+    /// the same action id).
+    pub fn set_lid_states(&mut self, states: HashSet<BlockStateId>) {
+        self.lid_states = Some(states);
+    }
+
     /// Applies one clientbound packet; serverbound replies go to `out`.
     pub fn apply<W: WorldSink + ?Sized, E: EntitySink + ?Sized>(
         &mut self,
@@ -657,6 +974,8 @@ impl Session {
                 self.entity_id = EntityId(l.entity_id);
                 let mode = GameMode::from_id(l.spawn.game_mode).unwrap_or(self.player.game_mode);
                 self.player = LocalPlayer::with_entity(self.entity_id, mode);
+                self.breaking.clear();
+                self.lids.clear();
                 self.counters.respawns += 1;
             }
         }
@@ -699,6 +1018,7 @@ impl Session {
                 entities.clear();
                 self.entity_ids.clear();
                 self.breaking.clear();
+                self.lids.clear();
                 self.fireworks.clear();
                 self.attached_firework = None;
                 self.dimension = dim;
@@ -716,6 +1036,17 @@ impl Session {
                     self.block_particle_requests.push(r);
                 }
             }
+            // The lightmap's effect inputs (night vision and darkness durations), boss-overlay
+            // darkening and the lightning sky flash; these also ride the player's own handling.
+            P::UpdateMobEffect(e) if e.entity_id == own.0 => {
+                let ids = self.player.int.lightmap_effect_ids;
+                self.lightmap.update_effect(ids, e.effect, e.duration);
+            }
+            P::RemoveMobEffect(e) if e.entity_id == own.0 => {
+                let ids = self.player.int.lightmap_effect_ids;
+                self.lightmap.remove_effect(ids, e.effect);
+            }
+            P::BossEvent(b) => self.lightmap.boss_event(b.id.as_u128(), &b.action),
             _ if player_packet => {}
             P::LevelChunkWithLight(c) => match world.load_chunk(&c.chunk) {
                 Ok(()) => self.counters.chunks_loaded += 1,
@@ -728,13 +1059,29 @@ impl Session {
                 }
             },
             P::ForgetLevelChunk(f) => {
+                // The chunk's block entities (and their lids) are gone with it.
+                self.lids.retain(|pos, _| pos.chunk() != f.pos);
                 world.unload_chunk(f.pos);
                 self.counters.chunks_unloaded += 1;
             }
             P::BlockUpdate(b) => {
                 let c = b.change();
+                self.lids.remove(&c.pos);
                 if !self.player.defer_block_update(c.pos, c.state) {
                     world.set_block(c.pos, c.state);
+                }
+            }
+            // A lid's open target (vanilla routes `block_event` to the block entity's
+            // `triggerEvent`: action 1, the opener count; chests use `count > 0`, shulker
+            // boxes 0 to close and 1 to open, which `> 0` matches exactly).
+            P::BlockEvent(b) if b.action == 1 => {
+                let is_lid = self
+                    .lid_states
+                    .as_ref()
+                    .is_some_and(|s| s.contains(&world.block_state_at(b.pos)));
+                if is_lid {
+                    let lid = self.lids.entry(b.pos).or_default();
+                    lid.open = b.param > 0;
                 }
             }
             P::BlockEntityData(b) => {
@@ -774,6 +1121,9 @@ impl Session {
                 self.entity_ids.insert(s.id);
                 if self.is_firework_type(s.kind) {
                     self.fireworks.insert(s.id);
+                }
+                if self.is_lightning_type(s.kind) {
+                    self.lightmap.lightning();
                 }
                 entities.spawn(&s)
             }
@@ -863,7 +1213,12 @@ impl Session {
                 entities.mark_hurt(EntityId(d.entity_id));
             }
             P::EntityEvent(e) if e.status == 3 => entities.mark_dead(EntityId(e.entity_id)),
+            // Entity status 4 is the melee attack animation (IronGolem.handleEntityEvent).
+            P::EntityEvent(e) if e.status == 4 => entities.mark_attack(EntityId(e.entity_id)),
             P::SetEntityData(d) => {
+                // Our own entity's data is handled by the player (`LocalPlayer::handle`: the air
+                // supply and the screen effects' on-fire and freeze ticks), and `_ if
+                // player_packet` above already swallowed it; only others go to the store.
                 if EntityId(d.entity_id) != own {
                     let id = EntityId(d.entity_id);
                     entities.set_metadata(id, &d.metadata);
@@ -882,12 +1237,27 @@ impl Session {
             }
             P::SetEquipment(e) => {
                 for (slot, item) in e.equipment {
+                    if EntityId(e.entity_id) == own && slot == HEAD_SLOT {
+                        // Our own head slot, if the server sends it this way (vanilla sends our
+                        // own armor through `container_set_slot`): the worn item's camera
+                        // overlay reads it.
+                        self.player.int.armor[0] = item.clone();
+                    }
                     entities.set_equipment(EntityId(e.entity_id), slot, item);
                 }
             }
             P::PlayerInfoUpdate(u) => entities.player_info(&u.infos()),
             P::SetTime(t) => {
-                if let Some(c) = t.clocks.first() {
+                entities.set_world_age(t.world_age);
+                self.world_age = t.world_age;
+                // The day clock is `minecraft:overworld` of `minecraft:world_clock` (the
+                // End has its own); `clocks` comes in HashMap order, so look the id up.
+                if let Some(c) = t
+                    .clocks
+                    .iter()
+                    .find(|c| c.clock == overworld_clock_id(regs))
+                    .or_else(|| t.clocks.first())
+                {
                     self.time_of_day = Some(c.time);
                 }
             }
@@ -939,9 +1309,16 @@ impl Session {
         self.block_particle_requests
             .extend(self.player.take_own_block_particles());
         self.entity_boxes.clear();
+        self.entity_types.clear();
         for id in &self.entity_ids {
             if let Some(b) = entities.hitbox(*id) {
                 self.entity_boxes.push((*id, b));
+                // Unknown (fakes, mod types) -> sentinel, which the picker treats as pickable.
+                self.entity_types.push(
+                    entities
+                        .entity_type(*id)
+                        .unwrap_or(haste_core::RegistryIndex(u32::MAX)),
+                );
             }
         }
         // The vehicle's position this tick, for the passenger tick (`ride_tick`). A vehicle we
@@ -968,6 +1345,7 @@ impl Session {
                 let env = crate::player::interact::InteractEnv {
                     data,
                     entities: &self.entity_boxes,
+                    entity_types: &self.entity_types,
                 };
                 self.player.tick_interact(input, view, &env, vehicle, out)
             }
@@ -982,13 +1360,52 @@ impl Session {
         }
         for (pos, state) in self.player.take_world_edits() {
             world.set_block(pos, state);
+            self.lids.remove(&pos);
         }
+        // Every lid's animation step (vanilla ticks each chest's `ChestLidController` and each
+        // shulker box's `updateAnimation` once per client tick).
+        for lid in self.lids.values_mut() {
+            lid.tick();
+        }
+        // The screen effects' tick, in vanilla's `LocalPlayer.tick` order: the portal
+        // transition effect (`portalProcess.isInsidePortalThisTick`, set by the game thread's
+        // world probe through [`Session::screen`]) and the spinning effect, which read the
+        // nausea blend factor at the end of the tick.
+        let nausea = self.player.int.nausea_factor(1.0);
+        self.screen.tick(true, nausea);
+    }
+
+    /// The item worn on the head (the helmet armor slot), if any.
+    pub fn head_item(&self) -> Option<haste_core::RegistryIndex> {
+        self.player.int.armor[0].item
+    }
+
+    /// Our own entity's screen-effect bits (on fire, freeze ticks), parsed by `LocalPlayer`.
+    pub fn own_flags(&self) -> &crate::screen_effects::OwnFlags {
+        &self.player.own_flags
+    }
+
+    /// The portal and spinning screen effects, ticked in `end_tick`.
+    pub fn screen_effects(&self) -> &crate::screen_effects::PortalEffects {
+        &self.screen
     }
 
     /// Break cracks to draw: other players' (`block_destruction`) and our own.
     pub fn breaking_stages(&self, out: &mut Vec<(BlockPos, u8)>) {
         out.extend(self.breaking.values().copied());
         out.extend(self.player.break_progress());
+    }
+
+    /// Lid animations to draw this frame, as (position, value at the last tick's start and
+    /// end) pairs for the partial-tick lerp. Only open or animating lids are listed (a closed
+    /// chest at rest draws the same as no entry).
+    pub fn lid_states(&self, out: &mut Vec<(BlockPos, (f32, f32))>) {
+        out.extend(
+            self.lids
+                .iter()
+                .filter(|(_, l)| !l.at_rest_closed())
+                .map(|(pos, l)| (*pos, (l.old, l.value))),
+        );
     }
 
     /// `level_particles`: resolve the particle type against the static registry's names and

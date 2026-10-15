@@ -1,0 +1,9 @@
+# Skulls and heads: skeleton, creeper, zombie, dragon, piglin on the floor and a player
+# head on a wall, drawn by the block entity renderer (the block model is empty). The runner
+# places them over RCON and teleports the player.
+wait_until joined
+wait_until settled
+wait 60
+look 180 30
+wait 5
+screenshot skulls

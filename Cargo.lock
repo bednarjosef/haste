@@ -1179,6 +1179,7 @@ dependencies = [
  "indexmap",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tracing",
  "zip",
@@ -1251,6 +1252,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]
@@ -1266,6 +1268,7 @@ dependencies = [
  "serde_json",
  "tracing",
  "uuid",
+ "zip",
 ]
 
 [[package]]
@@ -1274,11 +1277,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "flate2",
  "haste-core",
+ "haste-protocol",
  "jni",
  "parking_lot",
  "serde_json",
  "thiserror 2.0.21",
+ "tokio",
  "tracing",
  "zip",
 ]
@@ -1347,6 +1353,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "wgpu",
  "winit",
  "zip",

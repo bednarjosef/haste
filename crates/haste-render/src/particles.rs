@@ -1520,6 +1520,7 @@ impl ParticleRenderer {
         queue: Arc<wgpu::Queue>,
         target_format: wgpu::TextureFormat,
         camera_layout: &wgpu::BindGroupLayout,
+        lightmap_layout: &wgpu::BindGroupLayout,
     ) -> ParticleRenderer {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("particle-layout"),
@@ -1540,7 +1541,7 @@ impl ParticleRenderer {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("particle-pipeline-layout"),
-            bind_group_layouts: &[Some(camera_layout), Some(&layout)],
+            bind_group_layouts: &[Some(camera_layout), Some(&layout), Some(lightmap_layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1708,17 +1709,14 @@ impl ParticleRenderer {
             };
             let light = if p.behaviour.full_light {
                 // HugeExplosionParticle.getLightCoords: always full light.
-                crate::entity::lightmap(15, 15)
+                (15u8, 15u8)
             } else {
-                crate::entity::lightmap(p.sky_light, p.block_light)
+                (p.block_light, p.sky_light)
             };
             let alpha = p.behaviour.alpha.unwrap_or(1.0);
-            let color = [
-                light * p.color[0],
-                light * p.color[1],
-                light * p.color[2],
-                alpha,
-            ];
+            // The light is applied by the shader from the light texture, not multiplied into
+            // the colour here (that would light twice).
+            let color = [p.color[0], p.color[1], p.color[2], alpha];
             let rel = (pos.as_dvec3() - camera.pos).as_vec3();
             // The quad size the behaviour rolled at spawn, grown for its age
             // (`SingleQuadParticle.getQuadSize`).
@@ -1734,6 +1732,7 @@ impl ParticleRenderer {
                     uv: uvs[i],
                     color,
                     rect: rect16,
+                    light: [light.0 as u16, light.1 as u16, 0, 0],
                 });
             }
             self.drawn += 1;
@@ -1945,8 +1944,8 @@ mod tests {
             let [u0, v0, u1, v1] = sprite.uv;
             assert!((u1 - u0 - 4.0).abs() < 1e-3, "u span {}", u1 - u0);
             assert!((v1 - v0 - 4.0).abs() < 1e-3, "v span {}", v1 - v0);
-            assert!(u0 >= 0.0 && u0 <= 12.0, "u0 {u0}");
-            assert!(v0 >= 0.0 && v0 <= 12.0, "v0 {v0}");
+            assert!((0.0..=12.0).contains(&u0), "u0 {u0}");
+            assert!((0.0..=12.0).contains(&v0), "v0 {v0}");
         }
         // Every grid cell position appears once: the 64 rel centres of a 4x4x4 grid
         // over the unit cube are (i+0.5)/4, i in 0..4, per axis.
@@ -2012,7 +2011,8 @@ mod tests {
         assert!((0.03..=0.06).contains(&p.quad), "quad {}", p.quad);
 
         // The other faces put the particle outside their own side of the cube.
-        let cases: [(Direction, fn(&ParticleState) -> f32); 5] = [
+        type FaceAxis = fn(&ParticleState) -> f32;
+        let cases: [(Direction, FaceAxis); 5] = [
             (Direction::Down, |p| p.pos.y),
             (Direction::Up, |p| p.pos.y),
             (Direction::South, |p| p.pos.z),

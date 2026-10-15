@@ -32,8 +32,18 @@ public final class FontImpl {
         return Language.getInstance().getVisualOrder(SPLITTER.splitLines(t, w, Style.EMPTY));
     }
     public static List<FormattedText> splitIgnoringLanguage(Font f, FormattedText t, int w) { return SPLITTER.splitLines(t, w, Style.EMPTY); }
-    public static boolean isBidirectional(Font f) { return false; }
-    public static String bidirectionalShaping(Font f, String s) { return s; }
+    /** Vanilla {@code Font.isBidirectional}: the selected language's right-to-left flag. */
+    public static boolean isBidirectional(Font f) { return Language.getInstance().isDefaultRightToLeft(); }
+    /** Vanilla {@code Font.bidirectionalShaping} (ICU {@code Bidi} + {@code ArabicShaping}). */
+    public static String bidirectionalShaping(Font f, String s) {
+        try {
+            com.ibm.icu.text.Bidi bidi = new com.ibm.icu.text.Bidi(new com.ibm.icu.text.ArabicShaping(8).shape(s), 127);
+            bidi.setReorderingMode(0);
+            return bidi.writeReordered(2);
+        } catch (com.ibm.icu.text.ArabicShapingException e) {
+            return s;
+        }
+    }
     public static StringSplitter getSplitter(Font f) { return SPLITTER; }
 
     /**
@@ -60,6 +70,8 @@ public final class FontImpl {
         };
     }
     public static Font.PreparedText prepareText(Font f, String s, float x, float y, int color, boolean shadow, int background) {
+        // vanilla Font.prepareText(String, ...): shape first when the language is right-to-left
+        if (f.isBidirectional()) s = f.bidirectionalShaping(s);
         return prepareText(f, FormattedCharSequence.forward(s, Style.EMPTY), x, y, color, shadow, false, background);
     }
     public static Font.PreparedText prepare8xTextOutline(Font f, FormattedCharSequence seq, float x, float y, int color) {

@@ -7,6 +7,7 @@ description = "Embedded JVM host, tier-3 vanilla class loading, tier-2 proxies, 
 
 [dependencies]
 haste-core.workspace = true
+haste-protocol.workspace = true
 jni.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
@@ -15,6 +16,8 @@ serde_json.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true
 bytes.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 bytes.workspace = true
+flate2.workspace = true
