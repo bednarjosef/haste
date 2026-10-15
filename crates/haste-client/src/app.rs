@@ -3913,17 +3913,14 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 }
             }
             // A session the multiplayer screen's join created: it takes over from here (the
-            // game thread ticks the UI clone; the loop renders the world from now on).
+            // game thread ticks the UI clone; the loop renders the world from now on). The
+            // connecting/preparing screen stays up until the level is ready — `Ui::joined`
+            // closes it there, like vanilla's loading screen.
             if let Some(s) = arrived {
                 session = Some(s);
                 shared = session.as_ref().map(|s| s.shared.clone());
                 menu = None;
                 in_menu = false;
-                if let Some(u) = &ui {
-                    // The screens close like vanilla's ConnectScreen does when the level is
-                    // ready (the connecting or preparing screen); the HUD takes over.
-                    u.gui().close_screen();
-                }
             }
             // The actions may have changed what the game thread sees this tick.
             if let Some(shared) = shared.as_ref() {
@@ -5339,11 +5336,9 @@ impl App {
                 }
                 self.options = session.options.clone();
                 self.session = Some(session);
-                if let Some(ui) = &self.ui {
-                    // The screens close like vanilla's ConnectScreen does when the level is
-                    // ready; the HUD takes over.
-                    ui.gui().close_screen();
-                }
+                // The connecting screen stays up until the level is ready: `Ui::joined` (the
+                // game thread's login handling) closes it there, like vanilla's loading
+                // screen; closing here would run before the level exists.
             }
             Err(e) => {
                 tracing::warn!("joining {target} failed: {e:#}");

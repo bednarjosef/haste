@@ -277,14 +277,20 @@ public final class ClientImpl {
 
     /**
      * The thread check at the top of every play handler (vanilla: Minecraft's own PacketProcessor
-     * over its game thread, isSameThread). Haste decodes and handles every packet on the game
-     * thread by construction, so the processor is built over the thread that first asks for it
-     * (always a packet handler: the game thread) and vanilla's check passes, like vanilla's.
+     * over its game thread, isSameThread). Haste decodes and handles every packet on whatever
+     * thread drives the UI (Rust owns the connection and hands the packets over in order), and
+     * there is no cross-thread queue to re-schedule onto, so the check always passes — unlike
+     * vanilla, which would re-queue onto its game thread. Without this, the processor would
+     * capture the thread that first asks for it and later callers from other threads (tests,
+     * one thread per test over one shared JVM) would take vanilla's re-queue path, dropping the
+     * packet and loading the deny-listed RunningOnDifferentThreadException.
      */
     private static net.minecraft.network.PacketProcessor packetProcessor;
     public static net.minecraft.network.PacketProcessor packetProcessor(Minecraft m) {
         if (packetProcessor == null) {
-            packetProcessor = new net.minecraft.network.PacketProcessor(Thread.currentThread());
+            packetProcessor = new net.minecraft.network.PacketProcessor(Thread.currentThread()) {
+                @Override public boolean isSameThread() { return true; }
+            };
         }
         return packetProcessor;
     }
@@ -309,9 +315,15 @@ public final class ClientImpl {
         Screen old = screen;
         // vanilla Gui.setScreen: closing the last screen outside a world (the create screen's
         // Cancel after the empty world list auto-opened it, whose onClose is setScreen(null))
-        // falls back to a fresh title screen, not to no screen at all
-        if (s == null && !Mirror.inWorld()) {
-            s = new net.minecraft.client.gui.screens.TitleScreen();
+        // falls back to a fresh title screen, not to no screen at all. Vanilla reads the live
+        // `minecraft.level` here; the mirror is refreshed first so the calling thread (the game
+        // thread closing the loading screen when the level arrives, say) sees the current state,
+        // not whatever the last render or tick mirrored.
+        if (s == null) {
+            Mirror.update();
+            if (!Mirror.inWorld()) {
+                s = new net.minecraft.client.gui.screens.TitleScreen();
+            }
         }
         if (old != null && old != s) old.removed();
         screen = s;
