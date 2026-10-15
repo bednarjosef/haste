@@ -606,7 +606,7 @@ mod more_tests {
 }
 
 #[cfg(test)]
-mod tests {
+mod packet_tests {
     use super::*;
     use crate::packets::test_util::round_trip;
     use haste_core::entity::MetadataValue;
