@@ -273,11 +273,12 @@ craft() {
 }
 
 # ---- 7. Containers: every container screen works like vanilla, with server evidence ----
-# One function per container. All stand on the snowy plain: a fresh player spawns at the
-# world spawn (9.5, 101, 6.5) yaw 0 (looking south, +z) and the runner places the block
-# 3 blocks ahead (z 9) over RCON, gives the items, and reads `data get entity`/`data get
-# block` back. The scripts click the vanilla slot coordinates (menu position + 8 for a
-# slot centre, screen origin (152, 52) for a 176x166 screen centred in the 480x270 GUI).
+# One function per container. Each check owns a spot in this branch's area (x 120..130,
+# z 0..10 - never the shared spawn, where other workers' players block the crosshair):
+# the runner tps the player there over RCON, gives the items, places the block, and
+# reads `data get entity`/`data get block` back. The scripts click the vanilla slot
+# coordinates (menu position + 8 for a slot centre, screen origin (152, 52) for a
+# 176x166 screen centred in the 480x270 GUI).
 
 # Starts the client on `script` and waits for it to be online. The player name is fresh
 # per run (`ContainersChk$RANDOM`): a fresh player always joins alive, empty and at the
@@ -289,19 +290,21 @@ plain_client() { # script log
 }
 
 # The setup the container scripts trigger with their first screenshot (after the world
-# settled): the tp zeroes the look offset (an absolute-rotation teleport, so the scripts'
-# `look` angles are what the crosshair aims) and the caller's commands give the items and
-# place the blocks. The player stands at (9.5, 101, 6.5), the world spawn. The commands
-# are retried: on a busy test server the player entity lags behind the client's join by
-# seconds, and RCON answers "No player was found" until it is there.
-plain_setup() { # log shot commands...
-  local log=$1 shot=$2
-  shift 2
+# settled): the tp moves the player into this check's own area (x 120..130, z 0..10 - the
+# shared world spawn is never used: other workers' players stand there and an entity in
+# the crosshair eats the use click) and zeroes the look offset (an absolute-rotation
+# teleport, so the scripts' `look` angles are what the crosshair aims); the caller's
+# commands give the items and place the blocks. The commands are retried: on a busy test
+# server the player entity lags behind the client's join by seconds, and RCON answers
+# "No player was found" until it is there.
+plain_setup() { # log shot pos commands...
+  local log=$1 shot=$2 pos=$3
+  shift 3
   if wait_shot "$log" "$shot" 90; then
     local attempt
     for attempt in 1 2 3 4 5; do
       rcon "gamemode survival $NAME" >/dev/null
-      rcon "tp $NAME 9.5 101 6.5 0 0" >/dev/null
+      rcon "tp $NAME $pos" >/dev/null
       local c
       for c in "$@"; do
         rcon "$c" >/dev/null
@@ -315,15 +318,16 @@ plain_setup() { # log shot commands...
 }
 
 # The crafting table: craft planks in the 3x3 grid, shift-click the result into the
-# inventory, then repeat with plain clicks (pick the result up, put it down).
+# inventory, then repeat with plain clicks (pick the result up, put it down). The table
+# sits in the check's own area; the player stands 2.5 blocks north of it.
 container_crafting_table() {
   local log="$LOGDIR/containers-crafting-table.log"
   plain_client "$ROOT/scripts/checks/containers-crafting-table.txt" "$log" \
     || { check containers-crafting-table "player never joined" 1; return; }
-  plain_setup "$log" ccraft-setup \
+  plain_setup "$log" ccraft-setup "125.5 71 2.5 0 0" \
     "clear $NAME" \
     "give $NAME minecraft:oak_log 2" \
-    "setblock 9 101 9 minecraft:crafting_table"
+    "setblock 125 71 5 minecraft:crafting_table"
   local before after
   before=$(rcon "data get entity $NAME Inventory")
   if wait_shot "$log" ccraft-final 90; then
