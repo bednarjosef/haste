@@ -140,6 +140,13 @@ fn vs_main(in: VertexIn, @builtin(vertex_index) vi: u32) -> VertexOut {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    return shade(in, 0.0);
+}
+
+// Cutout terrain (leaves, plants) discards below vanilla CUTOUT_TERRAIN's
+// ALPHA_CUTOUT 0.5 (RenderPipelines.CUTOUT_TERRAIN).
+@fragment
+fn fs_cutout(in: VertexOut) -> @location(0) vec4<f32> {
     return shade(in, 0.5);
 }
 
@@ -161,7 +168,9 @@ fn shade(in: VertexOut, alpha_cutoff: f32) -> vec4<f32> {
     // atlas_sprite.glsl): fract for repeats, then map into the atlas.
     let uv = (origin + fract(in.sprite_uv) * sprite_size) / atlas_size;
     let color = sample_nearest(uv, 1.0 / atlas_size);
-    if (color.a < alpha_cutoff) {
+    // Vanilla's SOLID_TERRAIN defines no ALPHA_CUTOUT (RenderPipelines.SOLID_TERRAIN):
+    // solid terrain never discards, so the GPU keeps early-Z for the whole pass.
+    if (alpha_cutoff > 0.0 && color.a < alpha_cutoff) {
         discard;
     }
     // sRGB-ish: tint and light are applied in linear-ish space like Pomme's

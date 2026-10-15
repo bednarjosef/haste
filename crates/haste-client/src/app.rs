@@ -3439,6 +3439,11 @@ struct BenchSummary {
     present_ms: f32,
     /// GPU time of the main, hand and GUI passes.
     gpu_ms: [f32; 3],
+    /// GPU time of the main pass's sub-passes: sky, opaque terrain (solid + cutout-mipped),
+    /// cutout terrain, translucent terrain, entities, particles, overlays. Timing.rs carries
+    /// the solid and cutout-mipped phases separately (queries are written once per pass);
+    /// the bench reports them as one opaque phase like vanilla's ChunkSectionLayerGroup.
+    gpu_sub_ms: [f32; 7],
 }
 
 impl BenchSummary {
@@ -3456,6 +3461,7 @@ impl BenchSummary {
             "bench: {} frames in {:.0} s\n\
              frame time: avg {:.2} ms ({:.0} FPS), 1% low {:.2} ms, worst {:.2} ms\n\
              breakdown ms: prepare {:.2} acquire {:.2} cull {:.2} encode {:.2} submit {:.2} present {:.2} | gpu main {:.2} hand {:.2} gui {:.2}\n\
+             gpu main ms: sky {:.3} opaque {:.3} cutout {:.3} translucent {:.3} entities {:.3} particles {:.3} overlays {:.3}\n\
              sections drawn {}/{} avg, draw calls {:.0} avg\n\
              render distance {} (requested {}), {}x{}, adapter {}",
             self.frames,
@@ -3473,6 +3479,13 @@ impl BenchSummary {
             self.gpu_ms[0],
             self.gpu_ms[1],
             self.gpu_ms[2],
+            self.gpu_sub_ms[0],
+            self.gpu_sub_ms[1],
+            self.gpu_sub_ms[2],
+            self.gpu_sub_ms[3],
+            self.gpu_sub_ms[4],
+            self.gpu_sub_ms[5],
+            self.gpu_sub_ms[6],
             self.sections_drawn,
             self.sections_total,
             self.draw_calls,
@@ -3569,6 +3582,11 @@ fn bench_summary(samples: &[BenchSample]) -> BenchSummary {
     }
     let t = |f: fn(&haste_render::FrameTimings) -> f32| sum(samples, n, |s| f(&s.timings));
     let gpu = |i: usize| sum(samples, n, |s| s.timings.gpu_ms[i]);
+    // Solid + cutout-mipped (renderer sub-passes 1 and 3) fold into "opaque".
+    let opaque = sum(samples, n, |s| {
+        s.timings.gpu_sub_ms[1] + s.timings.gpu_sub_ms[3]
+    });
+    let gpu_sub = |i: usize| sum(samples, n, |s| s.timings.gpu_sub_ms[i]);
     BenchSummary {
         frames: samples.len() as u32,
         avg_ms: sum(samples, n, |s| s.frame_ms),
@@ -3584,6 +3602,15 @@ fn bench_summary(samples: &[BenchSample]) -> BenchSummary {
         submit_ms: t(|x| x.submit_ms),
         present_ms: t(|x| x.present_ms),
         gpu_ms: [gpu(0), gpu(1), gpu(2)],
+        gpu_sub_ms: [
+            gpu_sub(0),
+            opaque,
+            gpu_sub(2),
+            gpu_sub(4),
+            gpu_sub(5),
+            gpu_sub(6),
+            gpu_sub(7),
+        ],
     }
 }
 
@@ -3701,7 +3728,12 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             &session.options,
             Instant::now(),
         );
-        let camera = bench_camera(elapsed / total, &base, total);
+        let camera = if args.bench_fixed {
+            // Still camera at the settle spot: one fixed view, comparable with `--screenshot`.
+            base
+        } else {
+            bench_camera(elapsed / total, &base, total)
+        };
         let fog_end = (vd.max(2) * 16) as f32;
         sky.fog_start = fog_end * 0.75;
         sky.fog_end = fog_end;
@@ -3776,6 +3808,15 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             "gpu_main_ms": summary.gpu_ms[0],
             "gpu_hand_ms": summary.gpu_ms[1],
             "gpu_gui_ms": summary.gpu_ms[2],
+            "gpu_main_sub_ms": {
+                "sky": summary.gpu_sub_ms[0],
+                "opaque": summary.gpu_sub_ms[1],
+                "cutout": summary.gpu_sub_ms[2],
+                "translucent": summary.gpu_sub_ms[3],
+                "entities": summary.gpu_sub_ms[4],
+                "particles": summary.gpu_sub_ms[5],
+                "overlays": summary.gpu_sub_ms[6],
+            },
             "render_distance": meta.render_distance,
             "requested_render_distance": meta.requested_render_distance,
             "width": meta.width,

@@ -747,6 +747,72 @@ mod tests {
         assert_eq!(baked.render_layer(stone), RenderLayer::Solid);
         let leaves = find_state(&states, "oak_leaves");
         assert_eq!(baked.render_layer(leaves), RenderLayer::CutoutMipped);
+
+        // The solid layer must only ever hold fully opaque sprites: vanilla picks the
+        // layer per sprite from its texel scan (NativeImage.computeTransparency ->
+        // ChunkSectionLayer.byTransparency: alpha 0 -> CUTOUT, partial -> TRANSLUCENT,
+        // all 255 -> SOLID), and our classify_layer's alpha fallback is what enforces
+        // it here. These are the blocks whose sprites are not fully opaque: anything
+        // landing in Solid with transparent texels would render them (no discard).
+        let cutout_expect = [
+            ("grass_block", RenderLayer::Cutout), // side overlay sprite has alpha 0
+            // NB: glass_pane lands in Cutout here, not Translucent: the name heuristic
+            // matches `*_glass_pane` but not the bare `glass_pane`. Safe for the solid
+            // pass (never Solid), but a vanilla-parity gap worth fixing separately.
+            ("glass_pane", RenderLayer::Cutout),
+            ("iron_bars", RenderLayer::Cutout),
+            ("tall_grass", RenderLayer::Cutout),
+            ("poppy", RenderLayer::Cutout),
+            ("vine", RenderLayer::CutoutMipped),
+        ];
+        for (name, want) in cutout_expect {
+            // grass_block's snowy=true state uses the fully-opaque snow sprite; the
+            // overlay (with its alpha-0 texels) is on snowy=false.
+            let s = if name == "grass_block" {
+                (0..states.len() as u32)
+                    .map(BlockStateId)
+                    .find(|s| {
+                        states.block_of(*s).path() == "grass_block"
+                            && states
+                                .property_value(*s, "snowy")
+                                .is_some_and(|v| v == "false")
+                    })
+                    .expect("grass_block snowy=false state")
+            } else {
+                find_state(&states, name)
+            };
+            assert_eq!(
+                baked.render_layer(s),
+                want,
+                "{name} must not land in the solid layer"
+            );
+        }
+        // And no solid-layer state may use a sprite with a transparent texel.
+        let mut solid_with_holes = Vec::new();
+        for id in 0..states.len() as u32 {
+            let s = BlockStateId(id);
+            if baked.render_layer(s) == RenderLayer::Solid {
+                for q in baked.quads(s) {
+                    if !atlas.region(&q.texture).opaque {
+                        solid_with_holes.push(format!("{} -> {}", states.block_of(s), q.texture));
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(
+            solid_with_holes.is_empty(),
+            "{} solid-layer states use non-opaque sprites: {:?}",
+            solid_with_holes.len(),
+            &solid_with_holes[..solid_with_holes.len().min(20)]
+        );
+        // The grass block's side overlay sprite must be non-opaque in the atlas:
+        // it is what keeps grass_block out of the solid layer.
+        let overlay = atlas.region("minecraft:block/grass_block_side_overlay");
+        assert!(
+            !overlay.opaque,
+            "grass_block_side_overlay must not be opaque"
+        );
     }
 
     fn find_state(states: &BlocksJsonStates, block: &str) -> BlockStateId {
