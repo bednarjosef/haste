@@ -1249,13 +1249,15 @@ impl WorldFeed {
         partial: f32,
     ) -> Option<std::sync::Arc<haste_render::BeamData>> {
         use haste_core::view::{BlockPhysics as _, BlockView as _};
-        // The column's states up to the heightmap top, hashed as the cache key.
+        // The column's states from the beacon block itself (vanilla's walk starts at it: the
+        // beacon is a white `BeaconBeamBlock`, so it seeds the first section) up to the
+        // heightmap top, hashed as the cache key.
         let top = world
             .chunk(pos.chunk())
             .and_then(|c| c.height_at((pos.x & 15) as u8, (pos.z & 15) as u8))
             .unwrap_or(pos.y);
         let mut key = 0u64;
-        let states: Vec<_> = ((pos.y + 1)..=top)
+        let states: Vec<_> = (pos.y..=top)
             .map(|y| {
                 let s = world.block_state(BlockPos::new(pos.x, y, pos.z));
                 key = key.wrapping_mul(31).wrapping_add(s.0 as u64);
@@ -1585,8 +1587,8 @@ fn parse_gateway_beam(
     })
 }
 
-/// A stained-glass block's beam colour (vanilla `BeaconBeamBlock.getColor` ->
-/// `DyeColor.getTextureDiffuseColor`), or `None` for other blocks.
+/// A stained-glass block's (or the beacon's own) beam colour (vanilla `BeaconBeamBlock.getColor`
+/// -> `DyeColor.getTextureDiffuseColor`), or `None` for other blocks.
 fn beacon_beam_color(block: &haste_core::Identifier) -> Option<u32> {
     const GLASS: [(&str, u32); 16] = [
         ("white_stained_glass", 0),
@@ -1609,10 +1611,15 @@ fn beacon_beam_color(block: &haste_core::Identifier) -> Option<u32> {
     if block.namespace() != "minecraft" {
         return None;
     }
-    let color = GLASS
-        .iter()
-        .find(|(name, _)| *name == block.path())
-        .map(|(_, dye)| *dye)?;
+    // The beacon block itself is a white beam block (vanilla `BeaconBlock.getColor`).
+    let color = if block.path() == "beacon" {
+        0
+    } else {
+        GLASS
+            .iter()
+            .find(|(name, _)| *name == block.path())
+            .map(|(_, dye)| *dye)?
+    };
     Some(haste_render::blockentity::DYE_DIFFUSE_COLOR[color as usize])
 }
 
