@@ -39,9 +39,16 @@ pub enum ScreenKind {
     /// `net.minecraft.client.gui.screens.options.OptionsScreen` (vanilla opens it from the title
     /// screen; "Done" returns to the screen that opened it).
     Options,
+    /// `net.minecraft.client.gui.screens.packs.PackSelectionScreen` (the Options screen's
+    /// Resource Packs button; commits through `Minecraft.reloadResourcePacks`, which the
+    /// ClientImpl proxy reports to Rust).
+    Packs,
     /// `net.minecraft.client.gui.screens.multiplayer.JoinMultiplayerScreen`, whose parent is a
     /// `TitleScreen`.
     Multiplayer,
+    /// `net.minecraft.client.gui.screens.worldselection.SelectWorldScreen`, whose parent is a
+    /// `TitleScreen` (the title screen's Singleplayer button).
+    SelectWorld,
 }
 
 impl ScreenKind {
@@ -53,7 +60,9 @@ impl ScreenKind {
             ScreenKind::Command => 3,
             ScreenKind::Title => 4,
             ScreenKind::Options => 5,
+            ScreenKind::Packs => 8,
             ScreenKind::Multiplayer => 6,
+            ScreenKind::SelectWorld => 7,
         }
     }
 }
@@ -594,6 +603,26 @@ impl GuiPipeline {
         Ok(())
     }
 
+    /// The pause-menu server links from the configuration phase's `server_links` packet, one
+    /// string per link: `"<b|c>\t<label>\t<url>"` (b = built-in label id, c = custom label text).
+    pub fn set_server_links(&self, links: &[String]) -> anyhow::Result<()> {
+        self.with_bridge(|env, bridge| {
+            let arr = JObjectArray::<JString>::new(env, links.len(), JString::null())?;
+            for (i, l) in links.iter().enumerate() {
+                let s = JString::from_str(env, l)?;
+                arr.set_element(env, i, &s)?;
+            }
+            env.call_method(
+                bridge,
+                jni_str!("setServerLinks"),
+                jni_sig!("([Ljava/lang/String;)V"),
+                &[(&arr).into()],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     /// Tab held or released: vanilla's player list overlay is shown while it is down.
     pub fn set_tab_list_visible(&self, visible: bool) {
         if let Err(e) = self.with_bridge(|env, bridge| {
@@ -612,6 +641,48 @@ impl GuiPipeline {
     /// The connection ended: vanilla's disconnect screen with the reason.
     pub fn disconnected(&self, reason: &haste_core::Component) -> anyhow::Result<()> {
         self.disconnected_json(&serde_json::to_string(reason)?)
+    }
+
+    /// The multiplayer screen's Join: the address to connect to, if any was clicked since the
+    /// last call (menu mode; the connection is Rust's).
+    pub fn take_join_request(&self) -> Option<String> {
+        self.with_state(|s| s.join_requested.take())
+    }
+
+    /// Whether the connecting screen's Cancel was clicked since the last call (a join still in
+    /// progress must be dropped).
+    pub fn take_join_cancelled(&self) -> bool {
+        self.with_state(|s| std::mem::take(&mut s.join_cancelled))
+    }
+
+    /// The title screen's Quit Game was clicked (the client should exit).
+    pub fn take_quit_request(&self) -> bool {
+        self.with_state(|s| std::mem::take(&mut s.quit_requested))
+    }
+
+    /// The world list's "Play Selected World": the world folder to start the local server for
+    /// and join, if any was clicked since the last call.
+    pub fn take_open_world_request(&self) -> Option<String> {
+        self.with_state(|s| s.open_world_requested.take())
+    }
+
+    /// The create screen's "Create New World": the world to create, if requested since the last
+    /// call.
+    pub fn take_create_world_request(&self) -> Option<crate::proxies::CreateWorldRequest> {
+        self.with_state(|s| s.create_world_requested.take())
+    }
+
+    /// The resource pack selection the pack screen committed since the last call (vanilla's
+    /// `Minecraft.reloadResourcePacks`): repository ids, bottom first. The caller rebuilds its
+    /// asset stack and renderer from them.
+    pub fn take_resource_pack_ids(&self) -> Option<Vec<String>> {
+        self.with_state(|s| s.resource_pack_ids.take())
+    }
+
+    /// Tells the screens whether the local singleplayer server is running (the pause screen's
+    /// "Save and Quit" label). Set when the client starts/stops it.
+    pub fn set_local_world_running(&self, running: bool) {
+        self.with_state(|s| s.local_world_running = running);
     }
 
     /// [`Self::disconnected`] with the reason as a text component in its JSON form, e.g.

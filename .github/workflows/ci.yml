@@ -1,9 +1,10 @@
 name: CI
 
+# Pull requests only: main receives nothing but PRs that passed here, so a second run on the
+# merge push would only double the Actions minutes. workflow_dispatch runs it on main by hand.
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 # A new push to the same branch cancels the runs it supersedes.
 concurrency:
@@ -18,8 +19,12 @@ env:
   CARGO_DEP_OPT: --config profile.dev.package."*".opt-level=0 --config profile.test.package."*".opt-level=0
 
 jobs:
-  guard:
-    # Seconds: no personal data in files or commit identities (full history).
+  check:
+    # One job (one runner, one cache restore, one apt install; billed minutes round up per job):
+    # the personal-data guard, then fmt + clippy on all targets, then the fast test tier, on the
+    # pinned stable toolchain. No cache/ (oracle data is gitignored and several GiB; tier-2/3
+    # tests live on dev machines, see docs/TESTING.md; testkit tests skip their cache-dependent
+    # assertions when the dumps are absent).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,13 +32,6 @@ jobs:
           fetch-depth: 0
       - name: No personal data (paths, emails, commit identities)
         run: scripts/check-no-personal.sh
-
-  lint:
-    # fmt + clippy on all targets, pinned stable toolchain.
-    needs: guard
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
       - name: Install Rust (pinned by rust-toolchain.toml)
         run: rustup show
       - uses: Swatinem/rust-cache@v2
@@ -45,23 +43,6 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets $CARGO_DEP_OPT -- -D warnings
-
-  test:
-    # Fast tier: cargo test on the pinned stable toolchain, in parallel with lint.
-    # No cache/ (oracle data is gitignored and several GiB; tier-2/3 tests live on dev
-    # machines, see docs/TESTING.md; testkit tests skip their cache-dependent assertions
-    # when the dumps are absent).
-    needs: guard
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust (pinned by rust-toolchain.toml)
-        run: rustup show
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-      - name: System libraries (ALSA for haste-audio)
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: Test
         run: cargo test --workspace $CARGO_DEP_OPT
 

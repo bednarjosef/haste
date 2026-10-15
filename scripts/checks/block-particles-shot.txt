@@ -1,0 +1,81 @@
+# The deterministic block-particle picture at the world spawn (9.5, 71, 6.5).
+# The runner places an oak-leaves pillar two blocks ahead of the player during
+# the setup window (absolute setblock, no player-dependent commands — the RCON
+# player lookups are flaky on the shared server). The world spawn's look offset
+# this session is -90, so `look 0 105` aims 15 down — into the pillar, dead
+# center. Bare-handed survival mining breaks leaves in ~30 ticks: the crack
+# particles and overlay build up, then the destroy grid bursts at the
+# crosshair; a frame every 3 ticks covers the break moments. After the mining,
+# the server-sent block particles: the runner fires
+# `particle minecraft:block{block_state:"minecraft:grass_block"} 9.5 72 8.5 ...`
+# at the same spot while a second barrage runs.
+wait_until joined
+screenshot setup
+wait 400
+look 0 105
+wait 5
+mouse_down left
+wait 6
+screenshot crack-06
+wait 3
+screenshot crack-09
+wait 3
+screenshot crack-12
+wait 3
+screenshot crack-15
+wait 3
+screenshot crack-18
+wait 3
+screenshot crack-21
+wait 3
+screenshot crack-24
+wait 3
+screenshot crack-27
+wait 3
+screenshot crack-30
+wait 3
+screenshot crack-33
+wait 3
+screenshot crack-36
+wait 3
+screenshot crack-39
+wait 3
+screenshot crack-42
+wait 3
+screenshot crack-45
+mouse_up left
+wait 20
+# The server-sent block particles (the runner fires the particle command when
+# the barrage starts).
+screenshot particle-00
+wait 2
+screenshot particle-02
+wait 2
+screenshot particle-04
+wait 2
+screenshot particle-06
+wait 2
+screenshot particle-08
+wait 2
+screenshot particle-10
+wait 2
+screenshot particle-12
+wait 2
+screenshot particle-14
+wait 2
+screenshot particle-16
+wait 2
+screenshot particle-18
+wait 2
+screenshot particle-20
+wait 2
+screenshot particle-22
+wait 2
+screenshot particle-24
+wait 2
+screenshot particle-26
+wait 2
+screenshot particle-28
+wait 2
+screenshot particle-30
+wait 5

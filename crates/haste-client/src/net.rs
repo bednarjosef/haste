@@ -23,6 +23,7 @@ use haste_protocol::haste_core::game::{DimensionInfo, GameMode};
 use haste_protocol::haste_core::{
     BlockPos, BlockStateId, ChunkPos, EntityId, Identifier, RegistryIndex,
 };
+use haste_protocol::nbt::NbtCompound;
 use haste_protocol::packets::play::clientbound as cb;
 use haste_protocol::packets::play::clientbound::teleport_flags;
 use haste_protocol::{
@@ -35,6 +36,10 @@ use crate::player::{LocalPlayer, VehiclePose};
 
 /// Hurt-tilt camera roll duration in ticks (vanilla's `hurtTime` runs to 10).
 pub const HURT_TILT_TICKS: u32 = 10;
+/// The head equipment slot of `set_equipment` (`EquipmentSlot.values()`: 0 main hand, 1 off
+/// hand, 2 boots, 3 leggings, 4 chestplate, 5 helmet, 6 body, 7 saddle). The item worn there
+/// can hide the screen behind a camera overlay (the carved pumpkin's blur).
+pub const HEAD_SLOT: u8 = 5;
 
 /// What the driver needs from the world (`haste_world::World`).
 pub trait WorldSink {
@@ -133,6 +138,11 @@ pub trait EntitySink {
     fn player_info(&mut self, info: &[PlayerInfo]);
     /// `EntityStore::set_passengers`: the vehicle's passenger list is replaced by `passengers`.
     fn set_passengers(&mut self, vehicle: EntityId, passengers: &[EntityId]);
+    /// `EntityStore::set_world_age` (from `set_time`); the bee's anger end time compares
+    /// against it. Default no-op.
+    fn set_world_age(&mut self, world_age: i64) {
+        let _ = world_age;
+    }
     /// `EntityStore::entity_type_info`: registry index and dimensions, for the seat offset.
     fn entity_type_info(&self, _id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
         None
@@ -245,6 +255,9 @@ impl EntitySink for EntityStore {
     fn set_passengers(&mut self, vehicle: EntityId, passengers: &[EntityId]) {
         EntityStore::set_passengers(self, vehicle, passengers)
     }
+    fn set_world_age(&mut self, world_age: i64) {
+        EntityStore::set_world_age(self, world_age)
+    }
     fn entity_type_info(&self, id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
         EntityStore::entity_type_info(self, id)
     }
@@ -327,6 +340,46 @@ pub fn painting_variants(regs: &SyncedRegistries) -> HashMap<u32, haste_entity::
     out
 }
 
+/// The variant registries the variant mobs read (`haste_entity::VARIANT_REGISTRIES`), each
+/// parsed into haste-entity's per-id asset table: `asset_id`/`baby_asset_id` (and `model`
+/// for pig/cow/chicken; wolf nests `assets`/`baby_assets` with `wild`/`tame`/`angry` — the
+/// wild texture is what an untamed, calm mob shows). An entry whose NBT is absent (a known
+/// pack) or does not parse stays `None`: the mob keeps the model table's default look.
+/// Returns the registry name and its table, one per registry the server sent.
+pub fn mob_variants(
+    regs: &SyncedRegistries,
+) -> Vec<(String, Vec<Option<haste_entity::VariantAssets>>)> {
+    let parse = |nbt: &NbtCompound| -> Option<haste_entity::VariantAssets> {
+        if nbt.get_string("asset_id").is_some() {
+            haste_entity::VariantAssets::from_assets(
+                nbt.get_string("asset_id").unwrap(),
+                nbt.get_string("baby_asset_id"),
+                nbt.get_string("model"),
+            )
+        } else {
+            // Wolf: assets/baby_assets, each with wild/tame/angry; batch 1 reads the wild
+            // texture (tame/angry are TamableAnimal flag textures, a later task).
+            let wild = nbt.get_compound("assets")?.get_string("wild")?;
+            let baby_wild = nbt.get_compound("baby_assets")?.get_string("wild")?;
+            haste_entity::VariantAssets::from_assets(wild, Some(baby_wild), None)
+        }
+    };
+    let mut out = Vec::new();
+    for wanted in haste_entity::VARIANT_REGISTRIES {
+        let Some(registry) = regs.names().find(|n| n.to_string() == *wanted) else {
+            continue;
+        };
+        let Some(entries) = regs.entries(registry) else {
+            continue;
+        };
+        let table = (0..entries.len())
+            .map(|i| regs.entry_nbt(registry, i).as_ref().and_then(parse))
+            .collect();
+        out.push(((*wanted).to_owned(), table));
+    }
+    out
+}
+
 /// Loads the game data (block states, registries, shapes) once for the whole client.
 pub fn load_game_data() -> anyhow::Result<Arc<GameData>> {
     let t = std::time::Instant::now();
@@ -346,6 +399,19 @@ pub fn load_game_data() -> anyhow::Result<Arc<GameData>> {
 pub fn synced_biome_count(regs: &SyncedRegistries) -> Option<usize> {
     regs.entries(&Identifier::minecraft("worldgen/biome"))
         .map(|e| e.len())
+}
+
+/// Registry id of `minecraft:overworld` in `minecraft:world_clock` (the day clock; the End
+/// has `minecraft:the_end`). 0 (the overworld clock, first registered) when the server sent
+/// no such registry.
+pub fn overworld_clock_id(regs: &SyncedRegistries) -> i32 {
+    regs.entries(&Identifier::minecraft("world_clock"))
+        .and_then(|entries| {
+            entries
+                .iter()
+                .position(|e| e.id == Identifier::minecraft("overworld"))
+        })
+        .map_or(0, |i| i as i32)
 }
 
 /// Per-connection counters for the HUD/headless printout.
@@ -419,11 +485,14 @@ pub struct LightmapState {
     pub darkness: Option<i32>,
     /// `MobEffectInstance.BlendState` for the darkness effect (22 ticks in and out).
     pub darkness_blend: haste_render::lightmap::BlendState,
-    /// Boss bars and their darken-screen flag (`BossEvent.darkenScreen`), keyed by uuid bits.
-    boss_bars: HashMap<u128, bool>,
+    /// Boss bars and their `(darkenScreen, createWorldFog)` flags (`BossEvent`), keyed by uuid
+    /// bits.
+    boss_bars: HashMap<u128, (bool, bool)>,
     /// `GameRenderer.bossOverlayWorldDarkening` and its value one tick ago.
     pub boss_darkening: f32,
     pub boss_darkening_o: f32,
+    /// `BossHealthOverlay.shouldCreateWorldFog()`: any bar asks for the thick boss fog.
+    pub boss_world_fog: bool,
     /// `ClientLevel.skyFlashTime`: a lightning strike raises the sky for 2 ticks.
     pub sky_flash_time: i32,
     /// The player's tick count (vanilla `LivingEntity.tickCount`), for the darkness pulse.
@@ -443,6 +512,7 @@ impl Default for LightmapState {
             boss_bars: HashMap::new(),
             boss_darkening: 0.0,
             boss_darkening_o: 0.0,
+            boss_world_fog: false,
             sky_flash_time: 0,
             tick_count: 0,
         }
@@ -491,11 +561,13 @@ impl LightmapState {
         // GameRenderer.tick: while any boss bar asks to darken the screen, rise by 0.05/tick
         // (capped at 1), else fall by 0.0125/tick.
         self.boss_darkening_o = self.boss_darkening;
-        if self.boss_bars.values().any(|&darken| darken) {
+        if self.boss_bars.values().any(|(darken, _)| *darken) {
             self.boss_darkening = (self.boss_darkening + 0.05).min(1.0);
         } else if self.boss_darkening > 0.0 {
             self.boss_darkening -= 0.0125;
         }
+        // `BossHealthOverlay.shouldCreateWorldFog`: any bar asks for the thick world fog.
+        self.boss_world_fog = self.boss_bars.values().any(|(_, fog)| *fog);
         if self.sky_flash_time > 0 {
             self.sky_flash_time -= 1;
         }
@@ -527,18 +599,20 @@ impl LightmapState {
         }
     }
 
-    /// A `boss_event`: `BossEvent.setDarkenScreen` (flags bit 0x01 on add/update flags).
+    /// A `boss_event`: `BossEvent` flags (bit 0x01 darkenScreen, bit 0x04 createWorldFog) on
+    /// add/update flags.
     fn boss_event(&mut self, id: u128, action: &cb::BossEventAction) {
+        let flags = |f: u8| (f & 0x01 != 0, f & 0x04 != 0);
         match action {
-            cb::BossEventAction::Add { flags, .. } => {
-                self.boss_bars.insert(id, flags & 0x01 != 0);
+            cb::BossEventAction::Add { flags: f, .. } => {
+                self.boss_bars.insert(id, flags(*f));
             }
             cb::BossEventAction::Remove => {
                 self.boss_bars.remove(&id);
             }
-            cb::BossEventAction::UpdateFlags(flags) => {
-                if let Some(darken) = self.boss_bars.get_mut(&id) {
-                    *darken = flags & 0x01 != 0;
+            cb::BossEventAction::UpdateFlags(f) => {
+                if let Some(entry) = self.boss_bars.get_mut(&id) {
+                    *entry = flags(*f);
                 }
             }
             _ => {}
@@ -548,6 +622,304 @@ impl LightmapState {
     /// `LightningBolt.tick` on the client: `ClientLevel.setSkyFlashTime(2)`.
     fn lightning(&mut self) {
         self.sky_flash_time = 2;
+    }
+}
+
+/// The client's weather state (vanilla `Level`'s rain/thunder levels plus
+/// `ClientLevel.tickWeatherEffects`): the levels bracket the tick so the render thread can
+/// lerp by partial tick (`Level.getRainLevel(a)`), and the tick spawns the rain splash
+/// particles and plays the rain sound every few ticks.
+#[derive(Clone, Debug)]
+pub struct WeatherState {
+    /// `Level.oRainLevel`: the rain level at the start of the tick.
+    pub rain_level_o: f32,
+    /// `Level.rainLevel`.
+    pub rain_level: f32,
+    /// `Level.oThunderLevel` (before the rain scaling `getThunderLevel` applies).
+    pub thunder_level_o: f32,
+    /// `Level.thunderLevel`.
+    pub thunder_level: f32,
+    /// `ClientLevel.rainSoundTime`: the rain sound's counter (`random.nextInt(3) <
+    /// rainSoundTime++` picks the tick it plays on).
+    rain_sound_time: i32,
+    /// The RNG of `tickWeatherEffects` (a thread-local random in vanilla; a fixed seed
+    /// keeps Haste's runs reproducible, and the sequence is not player-visible).
+    rng: u64,
+}
+
+impl Default for WeatherState {
+    fn default() -> Self {
+        Self {
+            rain_level_o: 0.0,
+            rain_level: 0.0,
+            thunder_level_o: 0.0,
+            thunder_level: 0.0,
+            rain_sound_time: 0,
+            rng: 0x9e37_79b9_7f4a_7c15,
+        }
+    }
+}
+
+impl WeatherState {
+    /// Uniform f32 in [0, 1) (the xorshift of `LightmapState`'s flicker RNG).
+    fn next_float(&mut self) -> f32 {
+        let mut x = self.rng;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.rng = x;
+        ((x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 40) as f32) / 16_777_216.0
+    }
+
+    /// `Level.setRainLevel`: clamps and writes both the bracketed level and the target.
+    pub fn set_rain_level(&mut self, level: f32) {
+        let l = level.clamp(0.0, 1.0);
+        self.rain_level_o = l;
+        self.rain_level = l;
+    }
+
+    /// `Level.setThunderLevel`.
+    pub fn set_thunder_level(&mut self, level: f32) {
+        let l = level.clamp(0.0, 1.0);
+        self.thunder_level_o = l;
+        self.thunder_level = l;
+    }
+
+    /// One tick: shifts the bracket (`ClientLevel.tick` moves the old level to the target
+    /// each tick; the packets set both, so the lerp only shows between the server's
+    /// `rain_level_change` steps).
+    pub fn tick(&mut self) {
+        self.rain_level_o = self.rain_level;
+        self.thunder_level_o = self.thunder_level;
+    }
+
+    /// `Level.getRainLevel(a)`: lerped by partial tick.
+    pub fn rain_level(&self, partial: f32) -> f32 {
+        self.rain_level_o + (self.rain_level - self.rain_level_o) * partial
+    }
+
+    /// Whether the dimension can have weather at all (`Level.canHaveWeather`: skylight, no
+    /// ceiling, not the End). `DimensionInfo` carries no ceiling flag, so the known
+    /// ceiling dimensions are excluded by name (the Nether); custom skyless dimensions are
+    /// already excluded by the skylight flag.
+    pub fn can_have_weather(dimension: &DimensionInfo) -> bool {
+        dimension.has_skylight
+            && !is_end(dimension)
+            && dimension.dimension_type.path() != "the_nether"
+            && dimension.name.path() != "the_nether"
+    }
+
+    /// `ClientLevel.tickWeatherEffects`: spawns the rain splash particles around the
+    /// camera and plays the rain sound every few ticks. The particle spawns and the sound
+    /// request are pushed onto the caller's reused vectors (the game thread routes them to
+    /// the particle pool and the sound output); `weather_radius` is the `weatherRadius`
+    /// option, `climates` the biome climate table. Called by the game thread after
+    /// `end_tick` (vanilla runs it inside `ClientLevel.tick`, after the player's tick).
+    #[allow(clippy::too_many_arguments)]
+    pub fn tick_effects(
+        &mut self,
+        camera: DVec3,
+        weather_radius: i32,
+        world: &World,
+        climates: &[haste_render::BiomeClimate],
+        sea_level: i32,
+        min_y: i32,
+        particles: &mut Vec<haste_render::ParticleSpawn>,
+        sounds: &mut Vec<crate::sound::SoundRequest>,
+    ) {
+        let rain_level = self.rain_level(1.0);
+        if rain_level <= 0.0 {
+            return;
+        }
+        let weather_diameter = 2 * weather_radius + 1;
+        let weather_area = weather_diameter * weather_diameter;
+        // Vanilla: (int)(0.225F * weatherArea * rainLevel^2) (particle status ALL; the
+        // decreased option halves it, minimal takes the first hit only — Haste runs all).
+        let rain_particles = (0.225_f32 * weather_area as f32 * rain_level * rain_level) as i32;
+        let camera_block = BlockPos::new(
+            camera.x.floor() as i32,
+            camera.y.floor() as i32,
+            camera.z.floor() as i32,
+        );
+        let mut rain_particle_position: Option<BlockPos> = None;
+        for _ in 0..rain_particles {
+            let x = (self.next_float() * weather_diameter as f32) as i32 - weather_radius;
+            let z = (self.next_float() * weather_diameter as f32) as i32 - weather_radius;
+            let column = camera_block.add(x, 0, z);
+            let Some(heightmap_position) = heightmap_pos(world, &column, min_y) else {
+                continue;
+            };
+            if heightmap_position.y > min_y
+                && heightmap_position.y <= camera_block.y + 10
+                && heightmap_position.y >= camera_block.y - 10
+                && precipitation_at(world, climates, &heightmap_position, sea_level)
+                    == Precipitation::Rain
+            {
+                let pos = heightmap_position.add(0, -1, 0);
+                rain_particle_position = Some(pos);
+                let block_x = self.next_float() as f64;
+                let block_z = self.next_float() as f64;
+                // The particle's y sits on the block's (or the fluid's) top surface; without
+                // the shape lookup here it is the block's own top (vanilla
+                // `VoxelShape.max`/`FluidState.getHeight` at the random x/z).
+                let particle_y = pos.y as f64 + 1.0;
+                particles.push(rain_particle(pos, block_x, particle_y, block_z));
+            }
+        }
+        // The rain sound: `random.nextInt(3) < rainSoundTime++` (the counter grows every
+        // tick it rains, so after a few ticks the sound fires and resets), at the last
+        // particle's position, above the camera when there is a roof over the player. The
+        // short-circuit means the random is only drawn when a particle landed.
+        let fires = rain_particle_position.is_some_and(|_| {
+            let next = (self.next_float() * 3.0) as i32;
+            let old = self.rain_sound_time;
+            self.rain_sound_time = old + 1;
+            next < old
+        });
+        if fires {
+            self.rain_sound_time = 0;
+            let pos = rain_particle_position.expect("checked above");
+            let above = pos.y > camera_block.y + 1
+                && heightmap_pos(world, &camera_block, min_y)
+                    .is_some_and(|h| h.y > camera.y.floor() as i32);
+            let (event, volume, pitch) = if above {
+                ("minecraft:weather.rain.above", 0.1, 0.5)
+            } else {
+                ("minecraft:weather.rain", 0.2, 1.0)
+            };
+            sounds.push(crate::sound::SoundRequest::Play(
+                crate::sound::PlayRequest {
+                    sound: crate::sound::SoundRef::Inline(event.to_string()),
+                    // `SoundSource.WEATHER` (the packet's category order: master 0, music 1,
+                    // records 2, weather 3).
+                    category: 3,
+                    pos: crate::sound::SoundPos::Fixed(DVec3::new(
+                        pos.x as f64,
+                        pos.y as f64,
+                        pos.z as f64,
+                    )),
+                    volume,
+                    pitch,
+                    seed: 0,
+                },
+            ));
+        }
+    }
+}
+
+/// A biome's precipitation at a position (vanilla `Biome.Precipitation`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Precipitation {
+    None,
+    Rain,
+    Snow,
+}
+
+/// The weather extraction's public lookup: the biome precipitation at a position (the
+/// render thread's per-column scan; see `precipitation_at`).
+pub fn precipitation_at_pos(
+    world: &World,
+    climates: &[haste_render::BiomeClimate],
+    pos: &BlockPos,
+    sea_level: i32,
+) -> Precipitation {
+    precipitation_at(world, climates, pos, sea_level)
+}
+
+/// The weather extraction's public lookup: a column's MOTION_BLOCKING height (0 below the
+/// world when the chunk is not loaded, matching `Level.getHeight`'s empty fallback).
+pub fn column_height(world: &World, x: i32, z: i32) -> i32 {
+    let column = BlockPos::new(x, 0, z);
+    let min_y = world.dimension().min_y;
+    heightmap_pos(world, &column, min_y)
+        .map(|p| p.y)
+        .unwrap_or(min_y)
+}
+
+/// Whether the dimension is the End (`Level.canHaveWeather` excludes it by id).
+fn is_end(dim: &DimensionInfo) -> bool {
+    dim.name.path() == "the_end" || dim.dimension_type.path() == "the_end"
+}
+
+/// `ClientLevel.getHeightmapPos` for the MOTION_BLOCKING heightmap (wire type 4): the
+/// heightmap the chunk sent, else a linear scan of the column (`Chunk.height_at`).
+fn heightmap_pos(world: &World, column: &BlockPos, min_y: i32) -> Option<BlockPos> {
+    let chunk = world.chunk(column.chunk())?;
+    let local_x = (column.x & 15) as u8;
+    let local_z = (column.z & 15) as u8;
+    let h = chunk
+        .heightmap(4)
+        .map(|h| h.get(local_x, local_z) + min_y)
+        .or_else(|| chunk.height_at(local_x, local_z).map(|y| y + 1))?;
+    Some(BlockPos::new(column.x, h, column.z))
+}
+
+/// `Biome.getPrecipitationAt` at a position: no precipitation where the biome has none,
+/// else snow when the height-adjusted temperature is below 0.15
+/// (`Biome.coldEnoughToSnow`/`warmEnoughToRain`). The height adjustment above the snow
+/// line (sea level + 17) subtracts `(noise + y - snowLevel) * 0.05 / 40`; the temperature
+/// noise (`Biome.TEMPERATURE_NOISE`, simplex seeded 1234) is approximated by a smooth
+/// hash of the column — its exact value differs from vanilla's, so the snow line wobbles
+/// slightly differently. Returns `None` when the column's chunk is not loaded (vanilla
+/// `getPrecipitationAt` returns NONE then).
+fn precipitation_at(
+    world: &World,
+    climates: &[haste_render::BiomeClimate],
+    pos: &BlockPos,
+    sea_level: i32,
+) -> Precipitation {
+    use haste_render::BiomeSource as _;
+    let biome = crate::app::biomes::WorldBiomes(world).biome(*pos).0 as usize;
+    let Some(climate) = climates.get(biome) else {
+        return Precipitation::None;
+    };
+    if !climate.has_precipitation {
+        return Precipitation::None;
+    }
+    let snow_level = sea_level + 17;
+    let mut temperature = climate.temperature;
+    if pos.y > snow_level {
+        // Approximation of TEMPERATURE_NOISE.get(x/8, z/8) * 8: a deterministic value in
+        // about -8..8 from the column (see the doc comment).
+        let v = temperature_noise(pos.x, pos.z);
+        temperature -= (v + (pos.y - snow_level) as f32) * 0.05 / 40.0;
+    }
+    if temperature >= 0.15 {
+        Precipitation::Rain
+    } else {
+        Precipitation::Snow
+    }
+}
+
+/// The temperature noise stand-in: a fixed pseudo-random value in about -8..8 per column,
+/// seeded from the coordinates (vanilla's simplex value at x/8, z/8).
+fn temperature_noise(x: i32, z: i32) -> f32 {
+    let mut h = (x as u32 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (z as u32 as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h ^= h >> 31;
+    h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
+    h ^= h >> 29;
+    ((h >> 40) as f32 / (1u32 << 24) as f32) * 16.0 - 8.0
+}
+
+/// One rain splash particle (`ParticleTypes.RAIN`, the `WaterDropParticle` the particle
+/// pool knows: gravity 0.06, lifetime 8/(r*0.8+0.2)).
+fn rain_particle(
+    pos: BlockPos,
+    block_x: f64,
+    particle_y: f64,
+    block_z: f64,
+) -> haste_render::ParticleSpawn {
+    haste_render::ParticleSpawn {
+        kind: haste_core::Identifier::minecraft("rain"),
+        pos: DVec3::new(pos.x as f64 + block_x, particle_y, pos.z as f64 + block_z),
+        offset: [0.0; 3],
+        max_speed: [0.0; 3],
+        count: 0,
+        randomization: 0,
+        override_limiter: false,
+        dust: None,
+        block_state: None,
     }
 }
 
@@ -581,9 +953,12 @@ pub struct Session {
     /// The firework rocket currently attached to us: vanilla `FireworkRocketEntity.tick` pushes a
     /// fall-flying player it is attached to every tick (see [`Session::end_tick`]).
     attached_firework: Option<EntityId>,
-    /// Time of day in ticks from the first world clock of the last `set_time` (approximate:
-    /// that the first clock is the day clock is not verified).
+    /// Time of day in ticks from the overworld clock of the last `set_time` (`clocks` arrives
+    /// in HashMap order, so the overworld clock is looked up by registry id).
     pub time_of_day: Option<i64>,
+    /// World age in ticks (`set_time`'s `world_age`), for animations keyed to game time
+    /// (vanilla `Level.getGameTime`, e.g. `BannerRenderer`'s wave phase).
+    pub world_age: i64,
     /// Set by `start_configuration` or `transfer`: the next `login` starts a new world.
     pub new_world_pending: bool,
     /// `minecraft:entity_type` registry entries in id order (the synced registry's when the
@@ -595,6 +970,13 @@ pub struct Session {
     /// nobody drains them (headless). Reused, so a tick without sound packets allocates
     /// nothing.
     pub sound_requests: Vec<crate::sound::SoundRequest>,
+    /// The portal and spinning screen effects (`LocalPlayer.portalEffectIntensity`, the
+    /// spinning effect time and speed), ticked in `end_tick`.
+    pub screen: crate::screen_effects::PortalEffects,
+    /// This tick's world probe for the screen effects: the block the camera is inside, the
+    /// portal under our feet and the eye position's light (vanilla's
+    /// `LevelExtractor.getViewBlockingState` and `NetherPortalBlock.entityInside`).
+    pub screen_probe: crate::screen_effects::WorldProbe,
     /// The `fovEffectScale` option this run uses (set by the window from its saved options;
     /// the headless path leaves the vanilla default).
     pub fov_effect_scale: f32,
@@ -615,6 +997,12 @@ pub struct Session {
     /// Particle spawns queued by `level_particles` since the last tick (drained by the game
     /// thread into the shared pool).
     pub particle_spawns: Vec<haste_render::ParticleSpawn>,
+    /// Block particles queued since the last tick (our own break and mining start, and the
+    /// server's `level_event`s), drained by the game thread into the shared pool.
+    pub block_particle_requests: Vec<crate::block_particles::BlockParticleRequest>,
+    /// Ambient block particles of this tick's `animateTick` (reused buffer), spawned into
+    /// the pool by the game thread.
+    pub ambient_spawns: Vec<haste_render::ParticleSpawn>,
     /// Particle spawns the game thread took over the whole session (counters).
     pub particle_spawned: usize,
     /// `minecraft:particle_type` names by protocol id (the static registry the packet's
@@ -622,6 +1010,10 @@ pub struct Session {
     particle_names: std::sync::Arc<Vec<Identifier>>,
     /// The per-tick lightmap state (flicker, effects, boss darkening, lightning).
     pub lightmap: LightmapState,
+    /// The weather state (rain/thunder levels, the rain sound and splash particles).
+    pub weather: WeatherState,
+    /// `ClientLevel.seaLevel` (the spawn info's; biome precipitation's snow line).
+    pub sea_level: i32,
 }
 
 impl Session {
@@ -651,9 +1043,12 @@ impl Session {
             fireworks: HashSet::new(),
             attached_firework: None,
             time_of_day: None,
+            world_age: 0,
             new_world_pending: false,
             entity_type_names: Vec::new(),
             sound_requests: Vec::new(),
+            screen: crate::screen_effects::PortalEffects::default(),
+            screen_probe: crate::screen_effects::WorldProbe::default(),
             fov_effect_scale: 1.0,
             fov_modifier: 0.0,
             old_fov_modifier: 0.0,
@@ -663,9 +1058,13 @@ impl Session {
             use_ticks: 0,
             use_item: None,
             particle_spawns: Vec::new(),
+            block_particle_requests: Vec::new(),
+            ambient_spawns: Vec::new(),
             particle_spawned: 0,
             particle_names,
             lightmap: LightmapState::default(),
+            weather: WeatherState::default(),
+            sea_level: 63,
         }
     }
 
@@ -910,6 +1309,9 @@ impl Session {
                 self.counters.got_login = true;
                 self.player.game_mode =
                     GameMode::from_id(l.spawn.game_mode).unwrap_or(self.player.game_mode);
+                // `ClientLevel.seaLevel` comes with the spawn info (biome precipitation's
+                // snow line hangs off it).
+                self.sea_level = l.spawn.sea_level;
             }
             P::Respawn(r) => {
                 self.counters.respawns += 1;
@@ -919,6 +1321,7 @@ impl Session {
                         name: r.spawn.dimension.clone(),
                         ..DimensionInfo::overworld()
                     });
+                self.sea_level = r.spawn.sea_level;
                 world.reset(&dim);
                 entities.clear();
                 self.entity_ids.clear();
@@ -932,6 +1335,15 @@ impl Session {
             }
             P::PlayerPosition(_) => self.counters.teleports += 1,
             P::LevelParticles(p) => self.push_particles(&p, regs),
+            P::LevelEvent(e) => {
+                // The block-particle events (2001 break, 2019/2020 mining ticks); the
+                // rest of the level events are sounds and effects we do not decode.
+                if let Some(r) =
+                    crate::block_particles::request_from_level_event(e.event, e.pos, e.data)
+                {
+                    self.block_particle_requests.push(r);
+                }
+            }
             // The lightmap's effect inputs (night vision and darkness durations), boss-overlay
             // darkening and the lightning sky flash; these also ride the player's own handling.
             P::UpdateMobEffect(e) if e.entity_id == own.0 => {
@@ -943,6 +1355,14 @@ impl Session {
                 self.lightmap.remove_effect(ids, e.effect);
             }
             P::BossEvent(b) => self.lightmap.boss_event(b.id.as_u128(), &b.action),
+            // The weather game events (`ClientPacketListener.handleGameEvent`):
+            // start_raining resets the rain level to 0 (the server follows with
+            // rain_level_change steps that ramp it up), stop_raining sets it to 1 (the
+            // steps ramp it down), and the two level changes set rain/thunder directly.
+            P::GameEvent(g) if g.event == 1 => self.weather.set_rain_level(0.0),
+            P::GameEvent(g) if g.event == 2 => self.weather.set_rain_level(1.0),
+            P::GameEvent(g) if g.event == 7 => self.weather.set_rain_level(g.value),
+            P::GameEvent(g) if g.event == 8 => self.weather.set_thunder_level(g.value),
             _ if player_packet => {}
             P::LevelChunkWithLight(c) => match world.load_chunk(&c.chunk) {
                 Ok(()) => self.counters.chunks_loaded += 1,
@@ -1112,6 +1532,9 @@ impl Session {
             // Entity status 4 is the melee attack animation (IronGolem.handleEntityEvent).
             P::EntityEvent(e) if e.status == 4 => entities.mark_attack(EntityId(e.entity_id)),
             P::SetEntityData(d) => {
+                // Our own entity's data is handled by the player (`LocalPlayer::handle`: the air
+                // supply and the screen effects' on-fire and freeze ticks), and `_ if
+                // player_packet` above already swallowed it; only others go to the store.
                 if EntityId(d.entity_id) != own {
                     let id = EntityId(d.entity_id);
                     entities.set_metadata(id, &d.metadata);
@@ -1130,12 +1553,27 @@ impl Session {
             }
             P::SetEquipment(e) => {
                 for (slot, item) in e.equipment {
+                    if EntityId(e.entity_id) == own && slot == HEAD_SLOT {
+                        // Our own head slot, if the server sends it this way (vanilla sends our
+                        // own armor through `container_set_slot`): the worn item's camera
+                        // overlay reads it.
+                        self.player.int.armor[0] = item.clone();
+                    }
                     entities.set_equipment(EntityId(e.entity_id), slot, item);
                 }
             }
             P::PlayerInfoUpdate(u) => entities.player_info(&u.infos()),
             P::SetTime(t) => {
-                if let Some(c) = t.clocks.first() {
+                entities.set_world_age(t.world_age);
+                self.world_age = t.world_age;
+                // The day clock is `minecraft:overworld` of `minecraft:world_clock` (the
+                // End has its own); `clocks` comes in HashMap order, so look the id up.
+                if let Some(c) = t
+                    .clocks
+                    .iter()
+                    .find(|c| c.clock == overworld_clock_id(regs))
+                    .or_else(|| t.clocks.first())
+                {
                     self.time_of_day = Some(c.time);
                 }
             }
@@ -1183,6 +1621,9 @@ impl Session {
             self.counters.own_sounds += 1;
             self.sound_requests.push(request);
         }
+        // The player's own block particles this tick (break grid, mining cracks).
+        self.block_particle_requests
+            .extend(self.player.take_own_block_particles());
         self.entity_boxes.clear();
         self.entity_types.clear();
         for id in &self.entity_ids {
@@ -1242,6 +1683,27 @@ impl Session {
         for lid in self.lids.values_mut() {
             lid.tick();
         }
+        // The screen effects' tick, in vanilla's `LocalPlayer.tick` order: the portal
+        // transition effect (`portalProcess.isInsidePortalThisTick`, set by the game thread's
+        // world probe through [`Session::screen`]) and the spinning effect, which read the
+        // nausea blend factor at the end of the tick.
+        let nausea = self.player.int.nausea_factor(1.0);
+        self.screen.tick(true, nausea);
+    }
+
+    /// The item worn on the head (the helmet armor slot), if any.
+    pub fn head_item(&self) -> Option<haste_core::RegistryIndex> {
+        self.player.int.armor[0].item
+    }
+
+    /// Our own entity's screen-effect bits (on fire, freeze ticks), parsed by `LocalPlayer`.
+    pub fn own_flags(&self) -> &crate::screen_effects::OwnFlags {
+        &self.player.own_flags
+    }
+
+    /// The portal and spinning screen effects, ticked in `end_tick`.
+    pub fn screen_effects(&self) -> &crate::screen_effects::PortalEffects {
+        &self.screen
     }
 
     /// Break cracks to draw: other players' (`block_destruction`) and our own.
@@ -1275,6 +1737,7 @@ impl Session {
             return;
         };
         let dust = dust_option(&kind, &p.particle.data);
+        let block_state = block_state_option(&kind, &p.particle.data);
         self.particle_spawns.push(haste_render::ParticleSpawn {
             kind,
             pos: p.pos,
@@ -1284,6 +1747,7 @@ impl Session {
             randomization: p.randomization.max(0) as u32,
             override_limiter: p.override_limiter,
             dust,
+            block_state,
         });
     }
 
@@ -1312,6 +1776,32 @@ fn dust_option(kind: &Identifier, data: &[u8]) -> Option<haste_render::DustOptio
         ],
         scale,
     })
+}
+
+/// `BlockParticleOption` from a particle's raw data (one VarInt block state id,
+/// `ByteBufCodecs.idMapper(Block.BLOCK_STATE_REGISTRY)`); `None` for every other
+/// type and for a malformed payload. The fall-damage landing particles
+/// (`LivingEntity.checkFallDamage` -> `sendParticles`) arrive this way.
+fn block_state_option(kind: &Identifier, data: &[u8]) -> Option<haste_core::BlockStateId> {
+    const BLOCK_KINDS: [&str; 5] = [
+        "block",
+        "block_marker",
+        "falling_dust",
+        "dust_pillar",
+        "block_crumble",
+    ];
+    if !BLOCK_KINDS.contains(&kind.path()) || data.is_empty() {
+        return None;
+    }
+    // The VarInt the encoder wrote (up to 5 bytes, little-endian groups).
+    let mut value = 0u32;
+    for (i, byte) in data.iter().take(5).enumerate() {
+        value |= u32::from(byte & 0x7F) << (7 * i);
+        if byte & 0x80 == 0 {
+            return Some(haste_core::BlockStateId(value));
+        }
+    }
+    None
 }
 
 /// Entity metadata serializer type id of `OPTIONAL_UNSIGNED_INT` (the wire type of

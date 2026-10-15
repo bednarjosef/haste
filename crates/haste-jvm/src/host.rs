@@ -20,6 +20,12 @@ pub struct JvmConfig {
     pub java_home: PathBuf,
     /// The player's 26.3 client jar. Read one class at a time by `HasteClassLoader`, never on the class path.
     pub client_jar: PathBuf,
+    /// The launcher's downloaded assets (`assets/`): the index and its hash-named objects. The
+    /// client jar carries only en_us, so the other languages (and the pack.mcmeta language list)
+    /// come from here, like vanilla's built-in pack.
+    pub assets_dir: PathBuf,
+    /// The asset index name (`<assets_dir>/indexes/<name>.json`), the game version.
+    pub assets_index: String,
     /// Vanilla's third-party libraries (fastutil, guava, gson, joml, DFU, brigadier, ...).
     pub libraries: Vec<PathBuf>,
     /// ASM jars for the proxy generator (boot class path only).
@@ -36,6 +42,9 @@ pub struct JvmConfig {
     /// keeps every file vanilla would write in memory or in Rust; this is where anything that still
     /// writes ends up (`cache/jvm-game` by default).
     pub game_dir: PathBuf,
+    /// Where singleplayer worlds live (`<config dir>/singleplayer`): `Minecraft.getLevelSource`
+    /// (the world list) reads it, and Rust's local server plays them. Empty = the JVM game dir.
+    pub singleplayer_dir: PathBuf,
     /// Extra JVM options (e.g. `-Xmx512m`).
     pub jvm_options: Vec<String>,
     /// Print refused classes to stderr as they happen.
@@ -81,6 +90,8 @@ impl JvmConfig {
         let cfg = JvmConfig {
             java_home,
             client_jar,
+            assets_dir: cache.join("assets"),
+            assets_index: haste_core::paths::MC_VERSION.to_string(),
             libraries: loader::library_jars(&lib_dir),
             asm_jars,
             java_src: crate_dir.clone(),
@@ -94,6 +105,7 @@ impl JvmConfig {
                 fnv1a(crate_dir.to_string_lossy().as_bytes())
             )),
             game_dir: cache.join("jvm-game"),
+            singleplayer_dir: cache.join("jvm-game").join("singleplayer"),
             jvm_options: Vec::new(),
             verbose: std::env::var_os("HASTE_JVM_VERBOSE").is_some(),
         };
@@ -403,11 +415,22 @@ fn boot_config(cfg: &JvmConfig) -> String {
         s.push('\n');
     };
     kv("clientJar", &cfg.client_jar.display().to_string());
+    kv("assetsDir", &cfg.assets_dir.display().to_string());
+    kv("assetsIndex", &cfg.assets_index);
     kv("gameDir", &cfg.build_dir.join("game").display().to_string());
     kv("proxyDir", &cfg.proxy_dir.display().to_string());
     kv("proxiesConf", &cfg.proxies_conf.display().to_string());
     kv("verbose", if cfg.verbose { "true" } else { "false" });
     kv("minecraftDir", &cfg.game_dir.display().to_string());
+    // the launcher's assets dir (vanilla's --assetsDir): the built-in pack source reads it
+    kv(
+        "assetsDir",
+        &haste_core::paths::assets_dir().display().to_string(),
+    );
+    kv(
+        "singleplayerDir",
+        &cfg.singleplayer_dir.display().to_string(),
+    );
     for l in &cfg.libraries {
         kv("lib", &l.display().to_string());
     }

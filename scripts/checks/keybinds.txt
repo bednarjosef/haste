@@ -1,0 +1,43 @@
+# Key rebinding, run 1: open Options > Controls > Key Binds (vanilla's KeyBindsScreen),
+# click Jump's change button ("Space") and press J, click Drop Selected Item's ("Q") and
+# press K, close the screens; then press J (the server sees the player rise) and K with an
+# item in hand (the held stack drops by one). Leaves the rebinds in options.txt for the
+# restart run (scripts/checks/keybinds-check.sh resets them to defaults at the end).
+# The waits around key J / key K leave the player in-world while the harness reads the
+# position and the held stack over RCON.
+wait_until joined
+wait_until settled
+screenshot kb-joined
+# pause menu -> Options... -> Controls... -> Key Binds (vanilla: controls.keybinds label
+# is "Key Binds...", KeyBindsScreen)
+key ESCAPE
+wait_until screen_open
+click_text "Options..."
+click_text "Controls..."
+click_text "Key Binds..."
+# Jump's change button is labeled with its current key ("Space"); click it, then press J
+# (KeyBindsScreen.keyPressed: selectedKey.setKey(InputConstants.getKey(event)))
+click_text "Space"
+key J
+# the Drop entry sits below the fold: scroll the list down (the mouse is over it from the
+# click above; a negative dy is wheel-down, which scrolls down) until its "Q" button is
+# drawn, then click it and press K
+scroll -48
+click_text "Q"
+key K
+screenshot kb-rebound
+# close: Done (Key Binds -> Controls), then Escape x3 (Controls -> Options -> pause -> game)
+click_text "Done"
+key ESCAPE
+key ESCAPE
+key ESCAPE
+wait 60
+# J must jump now: the harness reads Pos before (the shot above is its signal) and the
+# apex for the next seconds (wait 120 = 6 s)
+key J
+screenshot kb-jump
+wait 120
+# K must drop one of the held stack: the harness reads SelectedItem after this shot
+key K
+screenshot kb-drop
+wait 100

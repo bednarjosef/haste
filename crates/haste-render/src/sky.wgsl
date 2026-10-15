@@ -109,7 +109,10 @@ fn fs_background(in: BackgroundOut) -> @location(0) vec4<f32> {
 
 struct DiscOut {
     @builtin(position) clip: vec4<f32>,
-    @location(0) fog: f32,
+    // The model-space position: vanilla computes the fog per FRAGMENT (sky.fsh
+    // `fog_spherical_distance(Position)`), and the disc's triangles span center-to-ring
+    // (distance 16 to 512) — interpolating vertex fog values across them is far off.
+    @location(0) pos: vec3<f32>,
 };
 
 @vertex
@@ -118,15 +121,16 @@ fn vs_disc(v: VertexIn) -> DiscOut {
     // Positions are in the camera's rotation frame already (radius 512 around it).
     let clip = sky.rot_view_proj * vec4<f32>(v.pos, 1.0);
     out.clip = vec4<f32>(clip.xy, clip.w * 0.99999, clip.w);
-    // Vanilla sky.fsh: max(linear(spherical, 0, skyEnd), linear(cylindrical, skyEnd,
-    // skyEnd)); the cylindrical term is 1 only past the ring where the spherical is too.
-    out.fog = linear_fog_value(length(v.pos), 0.0, sky.fog_bands2.x);
+    out.pos = v.pos;
     return out;
 }
 
 @fragment
 fn fs_disc(in: DiscOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(mix(sky.sky_color.rgb, sky.fog_color.rgb, in.fog), 1.0);
+    // Vanilla sky.fsh: max(linear(spherical, 0, skyEnd), linear(cylindrical, skyEnd,
+    // skyEnd)); the cylindrical term is 1 only past the ring where the spherical is too.
+    let fog = linear_fog_value(length(in.pos), 0.0, sky.fog_bands2.x);
+    return vec4<f32>(mix(sky.sky_color.rgb, sky.fog_color.rgb, fog), 1.0);
 }
 
 // ---- sunrise/sunset fan: translucent timeline colour, alpha ramping center to ring ----
@@ -194,28 +198,6 @@ fn fs_celestial(in: VertexOut) -> @location(0) vec4<f32> {
     // Additive with the texture's alpha (src alpha, one), like vanilla's sun and moon.
     let c = fetch(in.uv, in.rect);
     return vec4<f32>(c.rgb * c.a * in.color.rgb * in.color.a, 1.0);
-}
-
-// ---- world-space: rain and snow columns (alpha blended, depth tested) ----
-
-@vertex
-fn vs_world(v: VertexIn) -> VertexOut {
-    var out: VertexOut;
-    out.clip = sky.view_proj * vec4<f32>(v.pos, 1.0);
-    out.uv = v.uv;
-    out.color = v.color;
-    out.rect = v.rect;
-    out.fog = fog_factor(v.pos - sky.cam_pos.xyz);
-    return out;
-}
-
-@fragment
-fn fs_world(in: VertexOut) -> @location(0) vec4<f32> {
-    let c = fetch(in.uv, in.rect) * in.color;
-    if (c.a < 0.01) {
-        discard;
-    }
-    return vec4<f32>(mix(c.rgb, sky.fog_color.rgb, in.fog), c.a);
 }
 
 // ---- clouds: one plane at cloud height, each clouds.png texel a 12x12 block cell ----

@@ -28,6 +28,11 @@ pub const ALLOW_PACKAGES: &[&str] = &[
     "net/minecraft/client/renderer/entity/state/",
     "net/minecraft/client/renderer/state/",
     "net/minecraft/client/resources/language/",
+    // the pack repository the Resource Packs screen browses is real vanilla Java (tier 3):
+    // the skin manager stays proxied, so only the classes it needs are allowed below
+    // (ALLOW_CLASSES): ClientPackSource, IndexedAssetSource, NativeImage, TextureUtil
+    // the pack.mcmeta "language" section LanguageManager reads (the language list and its RTL flag)
+    "net/minecraft/client/resources/metadata/language/",
     // the Telemetry Data screen's event list is real vanilla Java over these value types; Haste sends
     // no telemetry (allowsTelemetry false), so the button is greyed like vanilla's, but the screen loads
     "net/minecraft/client/telemetry/",
@@ -42,6 +47,16 @@ pub const ALLOW_PACKAGES: &[&str] = &[
 /// Single classes served as real vanilla Java inside denied packages (value types and helpers the
 /// GUI and the bootstrap reach).
 pub const ALLOW_CLASSES: &[&str] = &[
+    // the pack repository the Resource Packs screen browses is real vanilla Java (tier 3):
+    // ClientPackSource (the built-in vanilla pack entry) and IndexedAssetSource (the assets
+    // dir view) are data/IO code; the skin manager stays proxied
+    "net/minecraft/client/resources/ClientPackSource",
+    "net/minecraft/client/resources/IndexedAssetSource",
+    // the pack screen reads pack.png icons through NativeImage (pure PNG decode, no GPU);
+    // DynamicTexture's constructor touches TextureUtil's statics (never called: the texture
+    // manager proxy records the location and uploads nothing)
+    "com/mojang/blaze3d/platform/NativeImage",
+    "com/mojang/blaze3d/platform/TextureUtil",
     "net/minecraft/server/Bootstrap",
     "net/minecraft/server/LoggedPrintStream",
     "net/minecraft/server/DebugLoggedPrintStream",
@@ -55,8 +70,54 @@ pub const ALLOW_CLASSES: &[&str] = &[
     "net/minecraft/client/multiplayer/RegistryDataCollector",
     "net/minecraft/client/multiplayer/ClientRegistryLayer",
     "net/minecraft/client/multiplayer/PlayerInfo",
+    // the server's recipe data (update_recipes): two maps of registry data (item property sets,
+    // stonecutter recipes), no server state; the kept handler stores it on the connection proxy
+    "net/minecraft/client/multiplayer/ClientRecipeContainer",
+    // the recipe book itself: a map of RecipeDisplayId -> RecipeDisplayEntry plus the book settings,
+    // rebuilt into RecipeCollections (all under the allowed gui/ package). No engine state: the kept
+    // recipe-book handlers read it through Player.getRecipeBook() and Proxies.create builds the one
+    // vanilla's LocalPlayer constructor would have (a proxy never runs that constructor)
+    "net/minecraft/client/ClientRecipeBook",
+    // the multiplayer screen's own data (tier 3: no hot game state). ServerList reads/writes
+    // servers.dat in the game directory, ServerData is its entry value type, and the resolver
+    // package is the address parsing the screen's join and direct-connect field use.
+    "net/minecraft/client/multiplayer/ServerList",
+    "net/minecraft/client/multiplayer/ServerData",
+    "net/minecraft/client/multiplayer/resolver/",
+    // the create-world screen's data loading (vanilla's CreateWorldScreen.openFresh loads the
+    // vanilla data pack into registries before the screen shows). Pure data code from the
+    // server package: no server thread, no world; the integrated server itself stays denied
+    // (Haste plays singleplayer through haste-setup's local server process).
+    "net/minecraft/server/WorldLoader",
+    "net/minecraft/server/WorldStem",
+    "net/minecraft/server/RegistryLayer",
+    "net/minecraft/server/ReloadableServerResources",
+    "net/minecraft/server/ReloadableServerRegistries",
+    "net/minecraft/server/ServerFunctionLibrary",
+    "net/minecraft/server/ServerAdvancementManager",
+    // only its static members are used by the data loading (configurePackRepository picks the
+    // vanilla pack; DEFAULT_GAME_RULES); the server object itself is never instantiated here
+    "net/minecraft/server/MinecraftServer",
+    // the status interface MinecraftServer implements (a parameter type of the allow-list's
+    // class loading, never implemented here)
+    "net/minecraft/server/ServerInfo",
+    // the command implementations the data loading's ReloadableServerResources registers
+    // (brigadier trees over the allowed commands package; executing them needs a server, which
+    // never runs here)
+    "net/minecraft/server/commands/",
+    // the netty event-loop holder the server list's ping lambda builds before every ping
+    // (Haste's pinger proxy ignores it; see java/haste/gui/PingerImpl)
+    "net/minecraft/server/network/EventLoopGroupHolder",
+    // the status ping's player sample record (ServerStatus.Players): a value type the
+    // server list's tooltip shows
+    "net/minecraft/server/players/NameAndId",
+    // LAN server detection (a multicast listener thread); the screen starts it in init and
+    // stops it in removed, exactly vanilla's lifecycle
+    "net/minecraft/client/server/LanServerDetection",
+    "net/minecraft/client/server/LanServer",
     "net/minecraft/client/multiplayer/SessionSearchTrees",
     "net/minecraft/client/multiplayer/ClientLevel$ClientLevelData",
+    "net/minecraft/client/multiplayer/ClientAdvancements",
     "net/minecraft/client/multiplayer/CommonListenerCookie",
     "net/minecraft/client/StringSplitter",
     "net/minecraft/client/InputType",
@@ -66,6 +127,13 @@ pub const ALLOW_CLASSES: &[&str] = &[
     "net/minecraft/client/ScrollWheelHandler",
     // the title screen asks the HUD for the splash text; its reload listener does not run in Haste
     "net/minecraft/client/resources/SplashManager",
+    // the default player skins (the social interactions screen's entries; offline mode always
+    // shows them): a table of PlayerSkin value objects, no manager state
+    "net/minecraft/client/resources/DefaultPlayerSkin",
+    // the creative inventory's saved hotbars: real vanilla Java over hotbar.nbt in the JVM game
+    // directory (loads and saves exactly like vanilla's)
+    "net/minecraft/client/HotbarManager",
+    "net/minecraft/client/player/inventory/Hotbar",
     "net/minecraft/client/Options",
     "net/minecraft/client/OptionInstance",
     "net/minecraft/client/ToggleKeyMapping",
@@ -123,6 +191,10 @@ pub const DENY: &[&str] = &[
     "net/minecraft/client/gui/render/",
     "net/minecraft/server/",
     "com/mojang/",
+    // one class out of the otherwise-allowed screens package: vanilla's ConnectScreen starts
+    // its own netty connection, but the connection is tier 1 (Rust owns it). Haste's
+    // replacement (see REPLACEMENTS) hands the address to Rust instead.
+    "net/minecraft/client/gui/screens/ConnectScreen",
 ];
 
 /// Haste-written replacement classes (sources: `java/haste/replace/<internal>.java`), served from the
@@ -135,6 +207,14 @@ pub const REPLACEMENTS: &[&str] = &[
     // The title screen builds one in `init()` and ticks, renders and clicks it. Haste has no Realms, so
     // the notification bell is a plain `Screen` that draws nothing.
     "com/mojang/realmsclient/gui/screens/RealmsNotificationsScreen",
+    // Vanilla's ConnectScreen opens its own netty connection in a Java thread; in Haste the
+    // connection is tier 1 (haste-protocol, Rust). The replacement shows vanilla's connecting
+    // screen and hands the address to Rust, which joins and takes over the window.
+    "net/minecraft/client/gui/screens/ConnectScreen",
+    // Vanilla's WorldOpenFlows plays a world through the integrated server; Haste's singleplayer
+    // is haste-setup's local dedicated server (Rust owns the process). The replacement keeps the
+    // screen flow and hands the world (and creation settings) to Rust.
+    "net/minecraft/client/gui/screens/worldselection/WorldOpenFlows",
 ];
 
 /// How the game class loader resolved a class (or why it did not).
