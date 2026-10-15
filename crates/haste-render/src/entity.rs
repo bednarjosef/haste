@@ -1271,9 +1271,7 @@ impl EntityRenderer {
                     crate::blockentity::BlockEntityKind::EnchantTable => {
                         crate::blockentity::book_texture()
                     }
-                    crate::blockentity::BlockEntityKind::Bell => {
-                        crate::blockentity::bell_texture()
-                    }
+                    crate::blockentity::BlockEntityKind::Bell => crate::blockentity::bell_texture(),
                     crate::blockentity::BlockEntityKind::DecoratedPot => {
                         crate::blockentity::pot_base_texture()
                     }

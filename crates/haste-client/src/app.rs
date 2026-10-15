@@ -929,108 +929,111 @@ impl WorldFeed {
                 // `StandingSignRenderer`/`BannerRenderer`/`SkullBlockRenderer` picking the
                 // block state's `rotation` segment or the wall `facing`), the sign's cached
                 // text, the banner's wave phase and cached patterns, the skull's animation.
-                let (mut sign_angle, text, banner_phase, banner, skull_anim, anim, sherds) = match kind {
-                    haste_render::BlockEntityKind::Sign { hanging } => {
-                        let angle = rotation_or_facing(blocks, state, facing);
-                        (
-                            angle,
-                            self.sign_text(pos, be, hanging),
+                let (mut sign_angle, text, banner_phase, banner, skull_anim, anim, sherds) =
+                    match kind {
+                        haste_render::BlockEntityKind::Sign { hanging } => {
+                            let angle = rotation_or_facing(blocks, state, facing);
+                            (
+                                angle,
+                                self.sign_text(pos, be, hanging),
+                                0.0,
+                                None,
+                                haste_render::TickPair::fixed(0.0),
+                                None,
+                                None,
+                            )
+                        }
+                        haste_render::BlockEntityKind::Banner { .. } => {
+                            let angle = rotation_or_facing(blocks, state, facing);
+                            // Vanilla `BannerRenderer.extractRenderState`'s phase: the position
+                            // hash plus the world age, over 100, plus the partial tick.
+                            let view = shared.view.lock();
+                            let phase = haste_render::blockentity::banner_wave_phase(
+                                pos,
+                                view.world_age,
+                                partial,
+                            );
+                            (
+                                angle,
+                                None,
+                                phase,
+                                self.banner_data(pos, be, block),
+                                haste_render::TickPair::fixed(0.0),
+                                None,
+                                None,
+                            )
+                        }
+                        haste_render::BlockEntityKind::Skull { .. } => {
+                            // The ground rotation angle (wall skulls read `facing` instead) and
+                            // the powered animation's tick ends.
+                            let angle = rotation_or_facing(blocks, state, facing);
+                            let anim = self.skull_anims.get(&pos).copied().unwrap_or((0.0, 0.0));
+                            (
+                                angle,
+                                None,
+                                0.0,
+                                None,
+                                haste_render::TickPair {
+                                    start: anim.0,
+                                    end: anim.1,
+                                },
+                                None,
+                                None,
+                            )
+                        }
+                        haste_render::BlockEntityKind::DecoratedPot => {
+                            // The wobble from the game thread's tick, the sherds from the block
+                            // entity's NBT (cached like the banner's patterns).
+                            let anim = self.anim_map.get(&pos).copied();
+                            (
+                                0.0,
+                                None,
+                                0.0,
+                                None,
+                                haste_render::TickPair::fixed(0.0),
+                                anim.map(|a| a.at(partial)),
+                                self.pot_sherds(pos, be),
+                            )
+                        }
+                        haste_render::BlockEntityKind::Lectern => {
+                            // A lectern's book is at rest (`BOOK_STATE` is constant) and its yaw
+                            // comes from the block's `facing`.
+                            (
+                                0.0,
+                                None,
+                                0.0,
+                                None,
+                                haste_render::TickPair::fixed(0.0),
+                                None,
+                                None,
+                            )
+                        }
+                        haste_render::BlockEntityKind::EnchantTable
+                        | haste_render::BlockEntityKind::Bell
+                        | haste_render::BlockEntityKind::Conduit => {
+                            // Ticked by the game thread (vanilla's block entity tickers); the
+                            // renderer's counters are lerped by the partial tick, vanilla's
+                            // `Mth.lerp(partialTicks, oX, X)`.
+                            (
+                                0.0,
+                                None,
+                                0.0,
+                                None,
+                                haste_render::TickPair::fixed(0.0),
+                                self.anim_map.get(&pos).copied().map(|a| a.at(partial)),
+                                None,
+                            )
+                        }
+                        _ => (
+                            0.0,
+                            None,
                             0.0,
                             None,
                             haste_render::TickPair::fixed(0.0),
                             None,
                             None,
-                        )
-                    }
-                    haste_render::BlockEntityKind::Banner { .. } => {
-                        let angle = rotation_or_facing(blocks, state, facing);
-                        // Vanilla `BannerRenderer.extractRenderState`'s phase: the position
-                        // hash plus the world age, over 100, plus the partial tick.
-                        let view = shared.view.lock();
-                        let phase = haste_render::blockentity::banner_wave_phase(
-                            pos,
-                            view.world_age,
-                            partial,
-                        );
-                        (
-                            angle,
-                            None,
-                            phase,
-                            self.banner_data(pos, be, block),
-                            haste_render::TickPair::fixed(0.0),
-                            None,
-                            None,
-                        )
-                    }
-                    haste_render::BlockEntityKind::Skull { .. } => {
-                        // The ground rotation angle (wall skulls read `facing` instead) and
-                        // the powered animation's tick ends.
-                        let angle = rotation_or_facing(blocks, state, facing);
-                        let anim = self.skull_anims.get(&pos).copied().unwrap_or((0.0, 0.0));
-                        (
-                            angle,
-                            None,
-                            0.0,
-                            None,
-                            haste_render::TickPair {
-                                start: anim.0,
-                                end: anim.1,
-                            },
-                            None,
-                            None,
-                        )
-                    }
-                    haste_render::BlockEntityKind::DecoratedPot => {
-                        // The wobble from the game thread's tick, the sherds from the block
-                        // entity's NBT (cached like the banner's patterns).
-                        let anim = self.anim_map.get(&pos).copied();
-                        (
-                            0.0,
-                            None,
-                            0.0,
-                            None,
-                            haste_render::TickPair::fixed(0.0),
-                            anim,
-                            self.pot_sherds(pos, be),
-                        )
-                    }
-                    haste_render::BlockEntityKind::Lectern => {
-                        // A lectern's book is at rest (`BOOK_STATE` is constant) and its yaw
-                        // comes from the block's `facing`.
-                        (
-                            0.0,
-                            None,
-                            0.0,
-                            None,
-                            haste_render::TickPair::fixed(0.0),
-                            None,
-                            None,
-                        )
-                    }
-                    haste_render::BlockEntityKind::EnchantTable
-                    | haste_render::BlockEntityKind::Bell
-                    | haste_render::BlockEntityKind::Conduit => {
-                        // Ticked by the game thread (vanilla's block entity tickers).
-                        (
-                            0.0,
-                            None,
-                            0.0,
-                            None,
-                            haste_render::TickPair::fixed(0.0),
-                            self.anim_map.get(&pos).copied(),
-                            None,
-                        )
-                    }
-                    _ => (
-                        0.0,
-                        None,
-                        0.0,
-                        None,
-                        haste_render::TickPair::fixed(0.0),
-                        None,
-                        None,
-                    ),
-                };
+                        ),
+                    };
                 // Wall skulls turn by the wall `facing` (their transform reads it); the
                 // rotation segment is only for the ground ones.
                 if matches!(

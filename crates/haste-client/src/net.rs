@@ -1105,14 +1105,14 @@ impl Session {
             // style for a decorated pot (`DecoratedPotBlockEntity.wobble`).
             P::BlockEvent(b) if b.action == 1 => {
                 let state = world.block_state_at(b.pos);
-                if self
-                    .lid_states
+                if self.lid_states.as_ref().is_some_and(|s| s.contains(&state)) {
+                    let lid = self.lids.entry(b.pos).or_default();
+                    lid.open = b.param > 0;
+                } else if self
+                    .bell_states
                     .as_ref()
                     .is_some_and(|s| s.contains(&state))
                 {
-                    let lid = self.lids.entry(b.pos).or_default();
-                    lid.open = b.param > 0;
-                } else if self.bell_states.as_ref().is_some_and(|s| s.contains(&state)) {
                     // `Direction.from3DDataValue(b1)`; vertical values leave the shake
                     // direction unset, which `BellModel.setupAnim` reads as no shake.
                     self.bells.insert(b.pos, Direction::from_ordinal(b.param));
