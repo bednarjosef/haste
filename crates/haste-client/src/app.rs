@@ -37,7 +37,7 @@ use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 // Declared here rather than in main.rs (lead-owned); the lead may move it.
 #[path = "biomes.rs"]
-mod biomes;
+pub(crate) mod biomes;
 
 use crate::game::{self, Shared};
 use crate::net::{self, NetDriver};
@@ -480,8 +480,12 @@ impl Session {
                 })
                 .collect();
         let particle_types = std::sync::Arc::new(
-            haste_render::ParticleTypes::build(&mut open_assets()?, &particle_ids)
-                .context("building the particle atlas")?,
+            haste_render::ParticleTypes::build(
+                &mut open_assets()?,
+                &particle_ids,
+                Some(&data.blocks),
+            )
+            .context("building the particle atlas")?,
         );
         let mut entities = net::new_entity_store(entity_types);
         tracing::info!("synced painting variants: {}", painting_variants.len());
@@ -506,6 +510,17 @@ impl Session {
             biome_climates.clone(),
             options.clone(),
         ));
+        // Terrain particles tint with the biome colours (the same climates the
+        // renderer resolves for meshing).
+        {
+            let colors = haste_render::Colormaps::load(&mut open_assets()?)
+                .map(|maps| haste_render::BiomeColors::new(&biome_climates, &maps))
+                .unwrap_or_else(|e| {
+                    tracing::warn!("no biome colours (block particles untinted): {e:#}");
+                    haste_render::BiomeColors::new(&[], &haste_render::Colormaps::uniform(0xFFFFFF))
+                });
+            shared.particles.lock().set_biome_colors(colors);
+        }
         shared.hud_enabled.store(
             HUD_ENABLED.load(std::sync::atomic::Ordering::Relaxed),
             std::sync::atomic::Ordering::Relaxed,
@@ -3257,6 +3272,11 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        {
+            let world = shared.world.read();
+            let mut particles = shared.particles.lock();
+            renderer.prepare_particles(&mut particles, &*world, camera, partial);
+        }
         renderer.set_lightmap_frame(lightmap);
         if let Ok(stats) = renderer.render(&frame) {
             last_stats = stats;
@@ -3280,7 +3300,11 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 image
                     .save(&path)
                     .with_context(|| format!("saving {}", path.display()))?;
-                println!("script screenshot saved to {}", path.display());
+                println!(
+                    "script screenshot saved to {} ({} particles drawn)",
+                    path.display(),
+                    renderer.particles_drawn()
+                );
                 // The frame's text, next to the PNG: the checks' lines to read without OCR.
                 let mut txt = path.clone().into_os_string();
                 txt.push(".txt");
