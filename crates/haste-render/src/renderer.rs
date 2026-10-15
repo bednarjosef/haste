@@ -1130,6 +1130,13 @@ impl Renderer {
     }
 
     /// The adapter this renderer runs on (name and backend, for bench reports).
+    /// Terrain-arena memory diagnostics: arena count and the vertex+index bytes
+    /// allocated (fixed-size GPU buffer pairs), plus the resident-section count.
+    pub fn arena_memory(&self) -> (usize, u64, usize) {
+        let (arenas, bytes) = self.arenas.memory_stats();
+        (arenas, bytes, self.sections.len())
+    }
+
     pub fn adapter_info(&self) -> wgpu::AdapterInfo {
         self.gpu.adapter.get_info()
     }
