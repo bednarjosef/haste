@@ -269,13 +269,79 @@ craft() {
   check craft "one oak log became 4 oak planks in the survival inventory" "$r"
 }
 
-ALL=(hud death drop modes f2 craft)
+# ---- 7. Every pause-menu screen ----
+pause() {
+  local log="$LOGDIR/pause.log"
+  client_start "$ROOT/scripts/checks/pause-all.txt" "$log"
+  wait_online || { check pause "player never joined" 1; return; }
+  wait_exit
+  local ev="$LOGDIR/pause.evidence"
+  grep -E "script text\[" "$log" >"$ev"
+  echo "--- pause evidence ---"; cat "$ev"
+  local r=0
+  local t
+  for t in advancements statistics report-bugs send-feedback friends player-reporting world-options; do
+    grep -q "script frame\[$t\]" "$log" || { echo "missing screenshot $t"; r=1; }
+  done
+  has "$(cat "$ev")" "Minecraft" || { echo "missing the Minecraft advancement tab"; r=1; }
+  # the stats screen's rows: the values arrive between the click and the screenshot
+  has "$(cat "$ev")" "Animals Bred" || { echo "statistics screen never showed its rows"; r=1; }
+  has "$(cat "$ev")" "Difficulty" || { echo "missing World Options difficulty row"; r=1; }
+  has "$(cat "$ev")" "Social Interactions" || { echo "missing player reporting screen"; r=1; }
+  has "$(cat "$ev")" "open this link" || { echo "missing the report-bugs link confirmation"; r=1; }
+  if grep -qE "haste proxy:|Java exception" "$log"; then
+    echo "proxy stubs or Java exceptions:"; grep -E "haste proxy:|Java exception" "$log" | head -5
+    r=1
+  fi
+  check pause "every pause-menu screen opens: advancements (with the server's tree), statistics, the icon buttons, world options" "$r"
+}
+
+# ---- 8. The creative inventory's Saved Hotbars tab ----
+creative_hotbars() {
+  local log="$LOGDIR/creative-hotbars.log"
+  client_start "$ROOT/scripts/checks/creative-hotbars.txt" "$log"
+  wait_online || { check creative-hotbars "player never joined" 1; return; }
+  rcon "gamemode creative $NAME" >/dev/null
+  wait_exit
+  local ev="$LOGDIR/creative-hotbars.evidence"
+  grep -E "script text\[" "$log" >"$ev"
+  echo "--- creative hotbars evidence ---"; cat "$ev"
+  local r=0
+  has "$(cat "$ev")" "Saved Hotbars" || { echo "missing the Saved Hotbars tab"; r=1; }
+  if grep -qE "haste proxy:|Java exception" "$log"; then
+    echo "proxy stubs or Java exceptions:"; grep -E "haste proxy:|Java exception" "$log" | head -5
+    r=1
+  fi
+  check creative-hotbars "the creative inventory's Saved Hotbars tab shows the saved hotbars" "$r"
+}
+
+# ---- 9. Languages other than English ----
+language() {
+  local log="$LOGDIR/language.log"
+  client_start "$ROOT/scripts/checks/language.txt" "$log"
+  wait_online || { check language "player never joined" 1; return; }
+  wait_exit
+  local ev="$LOGDIR/language.evidence"
+  grep -E "script text\[" "$log" >"$ev"
+  echo "--- language evidence (pause menu after switching to de_de) ---"
+  grep -E "script text\[pause-de\]" "$log"
+  local r=0
+  has "$(grep -E 'script text\[pause-de\]' "$log")" "Zurück zum Spiel" \
+    || { echo "pause menu not in German after switching"; r=1; }
+  if grep -qE "haste proxy:|Java exception" "$log"; then
+    echo "proxy stubs or Java exceptions:"; grep -E "haste proxy:|Java exception" "$log" | head -5
+    r=1
+  fi
+  check language "Options > Language switched to de_de and the pause menu drew in German" "$r"
+}
+
+ALL=(hud death drop modes f2 craft pause creative-hotbars language)
 if [ $# -eq 0 ]; then
   set -- "${ALL[@]}"
 fi
 for f in "$@"; do
   case "$f" in
-    hud | death | drop | modes | f2 | craft) "$f" ;;
+    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language) "$f" ;;
     *) echo "unknown feature: $f" ;;
   esac
 done
