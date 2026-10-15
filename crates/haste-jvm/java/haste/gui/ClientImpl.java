@@ -134,16 +134,49 @@ public final class ClientImpl {
     public static net.minecraft.client.renderer.GpuWarnlistManager getGpuWarnlistManager(Minecraft m) { return GPU_WARNLIST; }
 
     /**
-     * Real vanilla Java, built like {@code Minecraft}'s constructor does (its reload listener never runs,
-     * so the language list is vanilla's default: en_us only). LanguageSelectScreen reads and sets the
-     * selected code on it, which {@code Options} saves as {@code lang}.
+     * Real vanilla Java, built like {@code Minecraft}'s constructor does, and its reload listener is run over
+     * the client's resources ({@link AssetsPack}, the only pack Haste has): the language list comes from
+     * {@code pack.mcmeta}'s language section and the selected language's {@code assets/minecraft/lang/<code>.json}
+     * plus the en_us fallback load into a real
+     * {@link net.minecraft.client.resources.language.ClientLanguage}, injected with {@code Language.inject}
+     * like vanilla's reload. LanguageSelectScreen reads and sets the selected code on it, which {@code Options}
+     * saves as {@code lang}.
      */
     private static net.minecraft.client.resources.language.LanguageManager languages;
     public static net.minecraft.client.resources.language.LanguageManager getLanguageManager(Minecraft m) {
         if (languages == null) {
             languages = new net.minecraft.client.resources.language.LanguageManager(m, Proxies.options.languageCode, l -> {});
+            reloadLanguages();
         }
         return languages;
+    }
+
+    /**
+     * The language manager's reload: vanilla runs it as a resource-reload listener over the resource manager;
+     * Haste loads no resource packs, so {@link AssetsPack} (the client's jar assets plus the launcher's
+     * downloaded ones) is the one pack, read as CLIENT_RESOURCES (the lang files and the pack.mcmeta language
+     * list). The manager injects the selected language into {@code Language}, so every vanilla screen and the
+     * HUD use it at once.
+     */
+    static void reloadLanguages() {
+        if (languages == null) return;
+        try (net.minecraft.server.packs.resources.MultiPackResourceManager rm =
+                 new net.minecraft.server.packs.resources.MultiPackResourceManager(
+                     net.minecraft.server.packs.PackType.CLIENT_RESOURCES,
+                     java.util.List.of(new AssetsPack(
+                         System.getProperty("haste.clientJar"),
+                         System.getProperty("haste.assetsDir", ""),
+                         System.getProperty("haste.assetsIndex", ""))))) {
+            languages.onResourceManagerReload(rm);
+        } catch (java.io.IOException e) {
+            throw new RuntimeException("loading languages from the client's resources", e);
+        }
+    }
+
+    /** Vanilla's {@code Minecraft.reloadResourcePacks} (LanguageSelectScreen calls it after a language change). */
+    public static java.util.concurrent.CompletableFuture<Void> reloadResourcePacks(Minecraft m) {
+        reloadLanguages();
+        return java.util.concurrent.CompletableFuture.completedFuture(null);
     }
 
     /**

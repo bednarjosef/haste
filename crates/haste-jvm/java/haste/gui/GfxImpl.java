@@ -151,8 +151,12 @@ public final class GfxImpl {
     // ---- text ----
     public static void text(GuiGraphicsExtractor g, Font f, String s, int x, int y, int color) { text(g, f, s, x, y, color, true); }
     public static void text(GuiGraphicsExtractor g, Font f, String s, int x, int y, int color, boolean shadow) {
+        if (s == null) return;
         POSE.sync();
-        Text.emit(s, x, y, color, shadow);
+        // vanilla GuiGraphicsExtractor.text(Font, String, ...) reorders the string through the language
+        // (bidi), so right-to-left languages lay raw strings out like components
+        Text.emit(net.minecraft.locale.Language.getInstance().getVisualOrder(net.minecraft.network.chat.FormattedText.of(s)),
+            x, y, color, shadow);
     }
     public static void text(GuiGraphicsExtractor g, Font f, FormattedCharSequence s, int x, int y, int color) { text(g, f, s, x, y, color, true); }
     public static void text(GuiGraphicsExtractor g, Font f, FormattedCharSequence s, int x, int y, int color, boolean shadow) {

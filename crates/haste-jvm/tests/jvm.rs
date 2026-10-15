@@ -1843,6 +1843,78 @@ fn pause_screens_open_and_close() {
     );
 }
 
+/// Picking German in Options > Language reloads the client's de_de translations into vanilla's
+/// Language at once (LanguageManager's reload listener over the client's resources as
+/// CLIENT_RESOURCES), so every screen draws in German: the pause menu shows "Zurück zum Spiel".
+/// The whole-client version (with the saved options.txt) is scripts/checks/language.txt.
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn language_switch_german() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    reset(gui);
+    h.clear_unimplemented().unwrap();
+    open(&h, haste_jvm::ScreenKind::Pause);
+    let frame = |mouse: (f64, f64)| -> haste_core::gui::GuiFrame {
+        gui.render(480, 270, 2, mouse, 0.5)
+            .unwrap_or_else(|e| panic!("render: {e}"))
+    };
+    frame((-1.0, -1.0));
+    // Options... (row 5 left) then Language... (row 3 left), by coordinate (language-independent)
+    click(gui, 165.0, 158.0);
+    click(gui, 160.0, 150.0);
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.options.LanguageSelectScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    // the client's pack.mcmeta language section lists every language (the list opens on en_us)
+    let f = frame((0.0, 0.0));
+    assert!(
+        texts(&f).iter().any(|x| x == "English (US)"),
+        "language list: {:?}",
+        texts(&f)
+    );
+    // the search box has initial focus: filter to German and pick Germany
+    for c in "deutsch".chars() {
+        gui.char_typed(c, 0);
+    }
+    let f = frame((0.0, 0.0));
+    let (ex, ey) = text_pos(&f, "Deutsch (Deutschland)").expect("German entry after the filter");
+    click(gui, f64::from(ex), f64::from(ey));
+    let f = frame((0.0, 0.0));
+    let (dx, dy) = text_pos(&f, "Done").expect("Done button");
+    click(gui, f64::from(dx), f64::from(dy));
+    // Done applied and reloaded; back to the pause menu, now German
+    escape(gui);
+    let f = frame((0.0, 0.0));
+    assert!(
+        texts(&f).iter().any(|x| x == "Zurück zum Spiel"),
+        "pause menu after switching to German: {:?}",
+        texts(&f)
+    );
+    // switch back to English so the shared JVM (and the saved options.txt) stay en_us
+    click(gui, 165.0, 158.0);
+    click(gui, 160.0, 150.0);
+    for c in "english".chars() {
+        gui.char_typed(c, 0);
+    }
+    let f = frame((0.0, 0.0));
+    let (ex, ey) = text_pos(&f, "English (US)").expect("English entry");
+    click(gui, f64::from(ex), f64::from(ey));
+    let f = frame((0.0, 0.0));
+    let (dx, dy) = text_pos(&f, "Fertig").expect("German Done button");
+    click(gui, f64::from(dx), f64::from(dy));
+    escape(gui);
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented for the language switch: {unimpl:#?}"
+    );
+}
+
 fn click(gui: &haste_jvm::GuiPipeline, x: f64, y: f64) {
     gui.mouse(x, y, Some((haste_jvm::keys::MOUSE_LEFT, true)));
     gui.mouse(x, y, Some((haste_jvm::keys::MOUSE_LEFT, false)));
