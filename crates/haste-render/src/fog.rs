@@ -210,6 +210,17 @@ pub struct FogInputs {
     pub darken_world_amount: f32,
     /// `LevelData.voidDarknessOnsetRange()` (32, or 1 on a superflat world).
     pub void_darkness_onset_range: f32,
+    /// `ClientLevel.getRainLevel(partialTick)` (0..1): darkens the sky colour mixed into
+    /// the fog, and (with the biome's precipitation and the sky light at the camera) pulls
+    /// the environmental fog bands in (`AtmosphericFogEnvironment.updateRainFogState`).
+    pub rain_level: f32,
+    /// `ClientLevel.getThunderLevel(partialTick)` (0..1, already scaled by the rain level):
+    /// the sky colour's extra thunder darkening.
+    pub thunder_level: f32,
+    /// `AtmosphericFogEnvironment.rainFogMultiplier` (0..1, eased per frame by the client):
+    /// rain level x sky-light factor x biome precipitation, pulling the environmental fog
+    /// band in by -160/-256 blocks per unit.
+    pub rain_fog_multiplier: f32,
 }
 
 impl Default for FogInputs {
@@ -230,6 +241,9 @@ impl Default for FogInputs {
             boss_world_fog: false,
             darken_world_amount: 0.0,
             void_darkness_onset_range: 32.0,
+            rain_level: 0.0,
+            thunder_level: 0.0,
+            rain_fog_multiplier: 0.0,
         }
     }
 }
@@ -378,6 +392,12 @@ pub fn setup_fog(view_distance_chunks: i32, f: &FogInputs) -> FogData {
         FogEnvironment::Atmospheric => {
             data.environmental_start = f.dimension.fog_start;
             data.environmental_end = f.dimension.fog_end;
+            // Rain pulls the environmental band in: start -160, end -256 per unit of the
+            // eased rain fog multiplier (end floored at min(96, fogEnd)).
+            data.environmental_start += -160.0 * f.rain_fog_multiplier;
+            let min_end = 96.0f32.min(data.environmental_end);
+            data.environmental_end =
+                (data.environmental_end + -256.0 * f.rain_fog_multiplier).max(min_end);
             data.sky_end = rd.min(f.dimension.sky_fog_end);
             data.cloud_end = 2048.0f32.min(f.dimension.cloud_fog_end);
             if f.boss_world_fog {
@@ -540,8 +560,43 @@ pub fn sunrise_sunset_color(time_of_day: i64) -> [f32; 4] {
 }
 
 /// The overworld sky-dome colour this tick (sRGB): 0x78A7FF with the timeline's night
-/// multiplier (clear weather; rain/thunder darkening is a later task with weather itself).
-pub fn overworld_sky_color(time_of_day: i64) -> [f32; 3] {
+/// multiplier, then the weather layers (`WeatherAttributes.RAIN`/`THUNDER` over SKY_COLOR,
+/// `ColorModifier.BLEND_TO_GRAY_RGB`): rain lerps toward the greyscale times 0.6 by 0.75
+/// weighted by the rain level minus the thunder level, thunder toward the greyscale times
+/// 0.24 by 0.94 weighted by the thunder level.
+pub fn overworld_sky_color(time_of_day: i64, rain_level: f32, thunder_level: f32) -> [f32; 3] {
+    let mut sky = overworld_sky_color_clear(time_of_day);
+    let rain_only = (rain_level - thunder_level).clamp(0.0, 1.0);
+    let blend = |col: [f32; 3], brightness: f32, factor: f32| {
+        let grey = col[0] * 0.3 + col[1] * 0.59 + col[2] * 0.11;
+        [
+            col[0] + (grey * brightness - col[0]) * factor,
+            col[1] + (grey * brightness - col[1]) * factor,
+            col[2] + (grey * brightness - col[2]) * factor,
+        ]
+    };
+    if rain_only > 0.0 {
+        let target = blend(sky, 0.6, 0.75);
+        sky = [
+            sky[0] + (target[0] - sky[0]) * rain_only,
+            sky[1] + (target[1] - sky[1]) * rain_only,
+            sky[2] + (target[2] - sky[2]) * rain_only,
+        ];
+    }
+    if thunder_level > 0.0 {
+        let target = blend(sky, 0.24, 0.94);
+        sky = [
+            sky[0] + (target[0] - sky[0]) * thunder_level,
+            sky[1] + (target[1] - sky[1]) * thunder_level,
+            sky[2] + (target[2] - sky[2]) * thunder_level,
+        ];
+    }
+    sky
+}
+
+/// The clear-weather overworld sky-dome colour this tick (sRGB): 0x78A7FF with the
+/// timeline's night multiplier.
+fn overworld_sky_color_clear(time_of_day: i64) -> [f32; 3] {
     let night = timeline_sample3(&SKY_COLOR_NIGHT, time_of_day);
     [
         OVERWORLD_SKY_COLOR[0] * night[0],
@@ -589,11 +644,40 @@ fn atmospheric_base(
             }
         }
     }
+    // The FOG_COLOR weather layers (`WeatherAttributes.RAIN`/`THUNDER`, MULTIPLY_RGB):
+    // rain multiplies (0.5, 0.5, 0.6) by the rain level minus the thunder level, thunder
+    // (0.25, 0.25, 0.3) by the thunder level — the attribute system applies them to the
+    // probed fog colour before `AtmosphericFogEnvironment.getBaseColor` mixes toward the
+    // sky.
+    {
+        let rain_only = (f.rain_level - f.thunder_level).clamp(0.0, 1.0);
+        if rain_only > 0.0 {
+            let m = 1.0 - rain_only * 0.5;
+            let mb = 1.0 - rain_only * 0.4;
+            fog = [fog[0] * m, fog[1] * m, fog[2] * mb];
+        }
+        if f.thunder_level > 0.0 {
+            let m = 1.0 - f.thunder_level * 0.75;
+            let mb = 1.0 - f.thunder_level * 0.7;
+            fog = [fog[0] * m, fog[1] * m, fog[2] * mb];
+        }
+    }
     // Mix toward the sky colour, more the shorter the render distance.
     let mut sky = dim.sky_color;
     if dim.day_timeline {
         let night = timeline_sample3(&SKY_COLOR_NIGHT, time_of_day);
         sky = [sky[0] * night[0], sky[1] * night[1], sky[2] * night[2]];
+    }
+    // `AtmosphericFogEnvironment.applyWeatherDarken`: rain scales r/g down 0.5 and b down
+    // 0.4 per level, thunder all channels down 0.5 per level.
+    if f.rain_level > 0.0 {
+        let m = 1.0 - f.rain_level * 0.5;
+        let mb = 1.0 - f.rain_level * 0.4;
+        sky = [sky[0] * m, sky[1] * m, sky[2] * mb];
+    }
+    if f.thunder_level > 0.0 {
+        let m = 1.0 - f.thunder_level * 0.5;
+        sky = [sky[0] * m, sky[1] * m, sky[2] * m];
     }
     let sky_fog_end = (dim.sky_fog_end / 16.0).min(view_distance_chunks as f32);
     let mix = clamped_lerp(sky_fog_end / 32.0, 0.25, 1.0);
@@ -836,6 +920,44 @@ mod tests {
         let low = atmospheric_fog_color(12300, 2, [-1.0, 0.0, 0.0], 64.0, -64.0);
         let low_east = atmospheric_fog_color(12300, 2, [1.0, 0.0, 0.0], 64.0, -64.0);
         assert!(close3(low, low_east));
+    }
+
+    #[test]
+    fn fog_colour_takes_the_weather_layers() {
+        // The FOG_COLOR weather layers (WeatherAttributes RAIN/THUNDER, MULTIPLY_RGB):
+        // rain (0.5, 0.5, 0.6) by rain minus thunder, thunder (0.25, 0.25, 0.3) by thunder —
+        // applied to the base fog colour before the sky mix, exactly where the attribute
+        // system delivers them. Full rain, no thunder: fog * (0.5, 0.5, 0.6).
+        let rain_fog = |inputs: &FogInputs| {
+            compute_fog_color(inputs, 6000, 32, 0.0, [0.0, 0.0, -1.0], 64.0, -64.0)
+        };
+        let mut inputs = FogInputs::default();
+        let clear = rain_fog(&inputs);
+        inputs.rain_level = 1.0;
+        let rain = rain_fog(&inputs);
+        for i in 0..3 {
+            let m = [0.5, 0.5, 0.6][i];
+            assert!(
+                close(rain[i], OVERWORLD_FOG_COLOR[i] * m),
+                "channel {i}: {}",
+                rain[i]
+            );
+        }
+        // rd 32: no sky mix, so the whole colour is the layered fog. Clear is the base.
+        assert!(close3(clear, OVERWORLD_FOG_COLOR));
+        // Full thunder (rain 1, thunder 1): the rain layer's weight is 0, the thunder layer
+        // multiplies (0.25, 0.25, 0.3) — darker than rain.
+        inputs.thunder_level = 1.0;
+        let thunder = rain_fog(&inputs);
+        for i in 0..3 {
+            let m = [0.25, 0.25, 0.3][i];
+            assert!(
+                close(thunder[i], OVERWORLD_FOG_COLOR[i] * m),
+                "channel {i}: {}",
+                thunder[i]
+            );
+            assert!(thunder[i] < rain[i], "thunder darkens channel {i}");
+        }
     }
 
     #[test]

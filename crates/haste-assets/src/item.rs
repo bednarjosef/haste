@@ -48,6 +48,8 @@ pub struct ItemModelPart {
     pub ground: DisplayTransform,
     /// `display.fixed` (identity when the chain has none): item frames and other fixed mounts.
     pub fixed: DisplayTransform,
+    /// `display.on_shelf` (identity when the chain has none): items on a shelf block.
+    pub on_shelf: DisplayTransform,
     /// `gui_light: front` (flat items) instead of the default side lighting.
     pub gui_light_front: bool,
     /// Composite `transformation` applied to the geometry before the display transform.
@@ -122,6 +124,7 @@ impl Assets {
                 head: DisplayTransform::IDENTITY,
                 ground: DisplayTransform::IDENTITY,
                 fixed: DisplayTransform::IDENTITY,
+                on_shelf: DisplayTransform::IDENTITY,
                 gui_light_front: false,
                 transformation: leaf.transformation,
             });
@@ -139,6 +142,9 @@ impl Assets {
             .ground_display
             .unwrap_or(DisplayTransform::IDENTITY);
         let fixed = resolved.fixed_display.unwrap_or(DisplayTransform::IDENTITY);
+        let on_shelf = resolved
+            .on_shelf_display
+            .unwrap_or(DisplayTransform::IDENTITY);
         let geometry = if leaf.special {
             ItemGeometry::None
         } else if resolved.elements.is_empty() {
@@ -170,6 +176,7 @@ impl Assets {
             head,
             ground,
             fixed,
+            on_shelf,
             gui_light_front: resolved.gui_light,
             transformation: leaf.transformation,
         })

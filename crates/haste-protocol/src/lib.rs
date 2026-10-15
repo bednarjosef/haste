@@ -24,6 +24,7 @@ pub mod connection;
 pub mod metadata;
 pub mod nbt;
 pub mod packets;
+pub mod serverpack;
 pub mod transport;
 pub mod wire;
 

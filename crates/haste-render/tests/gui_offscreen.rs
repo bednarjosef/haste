@@ -279,6 +279,7 @@ fn gui_frame_offscreen() {
         breaking: &[],
         camera_entity: None,
         spin: None,
+        weather: None,
     };
     let stats = renderer.render(&input).unwrap();
     // Second frame: everything resident, measure.

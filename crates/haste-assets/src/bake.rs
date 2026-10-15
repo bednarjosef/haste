@@ -168,9 +168,11 @@ impl BakedBlockModels {
 
         // Pass 1: every model ref reachable from each blockstate file, resolved
         // once, collecting textures (Pomme resolves per variant; we need all
-        // branches for texture coverage, including non-matching multipart cases).
+        // branches for texture coverage, including non-matching multipart cases)
+        // and the sprites models declare force_translucent (26.3 model field).
         let mut texture_ids: Vec<Identifier> = Vec::new();
         let mut seen_textures = HashSet::new();
+        let mut force_translucent: HashSet<String> = HashSet::new();
         let mut resolved_models: HashMap<String, ResolvedModel> = HashMap::new();
         for block in &block_names {
             let Ok(def) = assets.blockstate(block) else {
@@ -188,6 +190,9 @@ impl BakedBlockModels {
                         continue;
                     }
                 };
+                for sprite in &resolved.force_translucent {
+                    force_translucent.insert(sprite.clone());
+                }
                 for el in &resolved.elements {
                     for face in el.faces.values() {
                         if let Some(tex) = face_texture_id(&face.texture, &resolved.textures) {
@@ -217,6 +222,15 @@ impl BakedBlockModels {
         }
         texture_ids.sort();
         *atlas = AtlasBuilder::build(assets, &texture_ids, true)?;
+        // Sprites a model declares force_translucent render translucent whatever
+        // their texels say (vanilla's 26.3 model field: glass panes, redstone dust);
+        // classify_layer reads the region flag.
+        for sprite in &force_translucent {
+            if let Ok(id) = Identifier::parse(sprite) {
+                let region = atlas.region_mut(&id.to_string());
+                region.translucent = true;
+            }
+        }
 
         // Pass 2: per state, evaluate variants/multipart and bake with UVs.
         // Baked geometry is cached per unique (refs) tuple: many states share
@@ -417,8 +431,10 @@ fn is_full_opaque(quads: &[BakedQuad], atlas: &dyn AtlasRegions) -> bool {
 
 /// Render layer heuristic. 26.3 block models carry no `render_type` field, so
 /// the layer comes from the known vanilla `ItemBlockRenderTypes` sets (by block
-/// name) with a texture-alpha fallback: any non-opaque texture -> cutout.
-/// Documented as approximate in NOTES.md.
+/// name) with a texture-alpha fallback following vanilla's per-sprite rule
+/// (`NativeImage.computeTransparency` -> `ChunkSectionLayer.byTransparency`):
+/// any sprite with partial-alpha texels -> translucent, any with alpha-0
+/// texels -> cutout, else solid. Documented as approximate in NOTES.md.
 fn classify_layer(
     quads: &[BakedQuad],
     block: &Identifier,
@@ -451,6 +467,12 @@ fn classify_layer(
     {
         return RenderLayer::CutoutMipped;
     }
+    if quads
+        .iter()
+        .any(|q| atlas.region_of(&q.texture).translucent)
+    {
+        return RenderLayer::Translucent;
+    }
     if quads.iter().any(|q| !atlas.region_of(&q.texture).opaque) {
         return RenderLayer::Cutout;
     }
@@ -465,8 +487,13 @@ mod tests {
     use crate::atlas::{AtlasRegion, AtlasRegions};
     use haste_core::view::BlockStateTable as _;
 
+    /// One sprite transparency class: fully opaque, cutout (alpha 0/255 only) or
+    /// translucent (partial alpha), as vanilla's `NativeImage.computeTransparency`
+    /// reports them.
+    #[derive(Clone, Copy)]
     struct TestRegions {
         opaque: bool,
+        translucent: bool,
     }
 
     impl AtlasRegions for TestRegions {
@@ -475,7 +502,7 @@ mod tests {
                 pixel_rect: [0, 0, 16, 16],
                 sprite: 1,
                 opaque: self.opaque,
-                translucent: !self.opaque,
+                translucent: self.translucent,
             }
         }
     }
@@ -486,8 +513,18 @@ mod tests {
 
     #[test]
     fn classify_layer_by_block_name_and_alpha() {
-        let opaque = TestRegions { opaque: true };
-        let transparent = TestRegions { opaque: false };
+        let opaque = TestRegions {
+            opaque: true,
+            translucent: false,
+        };
+        let cutout = TestRegions {
+            opaque: false,
+            translucent: false,
+        };
+        let translucent = TestRegions {
+            opaque: false,
+            translucent: true,
+        };
         let q = quad();
         assert_eq!(
             classify_layer(
@@ -525,9 +562,19 @@ mod tests {
             classify_layer(
                 std::slice::from_ref(&q),
                 &Identifier::minecraft("oak_sapling"),
-                &transparent
+                &cutout
             ),
             RenderLayer::Cutout
+        );
+        // A sprite with partial-alpha texels is translucent by vanilla's per-sprite
+        // scan, whatever the block is named.
+        assert_eq!(
+            classify_layer(
+                std::slice::from_ref(&q),
+                &Identifier::minecraft("oak_sapling"),
+                &translucent
+            ),
+            RenderLayer::Translucent
         );
     }
 
@@ -557,6 +604,7 @@ mod tests {
         textures.insert("all".to_string(), "minecraft:block/stone".to_string());
         let resolved = ResolvedModel {
             textures,
+            force_translucent: Default::default(),
             elements: file.elements,
             ambientocclusion: true,
             gui_light: false,
@@ -565,6 +613,7 @@ mod tests {
             firstperson_display: None,
             thirdperson_display: None,
             head_display: None,
+            on_shelf_display: None,
             fixed_display: None,
         };
         let mut resolved_models = HashMap::new();
@@ -628,7 +677,10 @@ mod tests {
 
     #[test]
     fn full_opaque_requires_six_full_faces() {
-        let opaque = TestRegions { opaque: true };
+        let opaque = TestRegions {
+            opaque: true,
+            translucent: false,
+        };
         let quads: Vec<BakedQuad> = Direction::ALL
             .iter()
             .copied()
@@ -644,7 +696,10 @@ mod tests {
         partial[0].positions[0][1] = 0.5;
         assert!(!is_full_opaque(&partial, &opaque));
         // transparent texture -> not full opaque
-        let transparent = TestRegions { opaque: false };
+        let transparent = TestRegions {
+            opaque: false,
+            translucent: false,
+        };
         assert!(!is_full_opaque(&quads, &transparent));
         // 5 faces -> not full opaque
         assert!(!is_full_opaque(&quads[..5], &opaque));
@@ -756,10 +811,10 @@ mod tests {
         // landing in Solid with transparent texels would render them (no discard).
         let cutout_expect = [
             ("grass_block", RenderLayer::Cutout), // side overlay sprite has alpha 0
-            // NB: glass_pane lands in Cutout here, not Translucent: the name heuristic
-            // matches `*_glass_pane` but not the bare `glass_pane`. Safe for the solid
-            // pass (never Solid), but a vanilla-parity gap worth fixing separately.
-            ("glass_pane", RenderLayer::Cutout),
+            // The glass pane's sprites (glass_pane_top, glass) have partial-alpha
+            // texels, so vanilla's per-sprite scan puts it in translucent; ours now
+            // does too via the region's translucent flag.
+            ("glass_pane", RenderLayer::Translucent),
             ("iron_bars", RenderLayer::Cutout),
             ("tall_grass", RenderLayer::Cutout),
             ("poppy", RenderLayer::Cutout),

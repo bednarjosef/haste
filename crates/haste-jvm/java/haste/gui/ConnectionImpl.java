@@ -140,4 +140,31 @@ public final class ConnectionImpl {
         return SEARCH_TREES;
     }
     static final net.minecraft.client.multiplayer.SessionSearchTrees SEARCH_TREES = new net.minecraft.client.multiplayer.SessionSearchTrees();
+
+    /**
+     * The server's recipe data ({@code update_recipes}, whose kept handler stores it on the proxy):
+     * the real vanilla container, read off the proxy like vanilla's own field. Before the packet
+     * arrives it is vanilla's field-initialiser value (an empty container).
+     */
+    private static final java.lang.invoke.VarHandle RECIPES;
+    static {
+        try {
+            RECIPES = java.lang.invoke.MethodHandles.privateLookupIn(
+                net.minecraft.client.multiplayer.ClientPacketListener.class, java.lang.invoke.MethodHandles.lookup())
+                .findVarHandle(net.minecraft.client.multiplayer.ClientPacketListener.class, "recipes",
+                    net.minecraft.client.multiplayer.ClientRecipeContainer.class);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+    public static net.minecraft.client.multiplayer.ClientRecipeContainer recipes(ClientPacketListener c) {
+        net.minecraft.client.multiplayer.ClientRecipeContainer r =
+            (net.minecraft.client.multiplayer.ClientRecipeContainer) RECIPES.get(c);
+        if (r == null) {
+            r = new net.minecraft.client.multiplayer.ClientRecipeContainer(java.util.Map.of(),
+                net.minecraft.world.item.crafting.SelectableRecipe.SingleInputSet.empty());
+            RECIPES.set(c, r);
+        }
+        return r;
+    }
 }

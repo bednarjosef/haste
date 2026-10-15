@@ -593,6 +593,12 @@ impl LocalPlayer {
             return;
         }
         let teleport_id = self.pending_accept.take().unwrap();
+        tracing::debug!(
+            "accept_teleportation {teleport_id} at ({:.1}, {:.1}, {:.1})",
+            self.state.pos.x,
+            self.state.pos.y,
+            self.state.pos.z
+        );
         out.push(ServerboundPlay::AcceptTeleportation(
             sb::AcceptTeleportation {
                 teleport_id,
@@ -1102,16 +1108,32 @@ impl LocalPlayer {
         let status_changed = s.on_ground != self.sent.on_ground
             || s.horizontal_collision != self.sent.horizontal_collision;
         match (pos_changed, rot_changed) {
-            (true, true) => out.push(ServerboundPlay::MovePlayerPosRot(sb::MovePlayerPosRot {
-                pos: s.pos,
-                yaw: s.yaw,
-                pitch: s.pitch,
-                flags,
-            })),
-            (true, false) => out.push(ServerboundPlay::MovePlayerPos(sb::MovePlayerPos {
-                pos: s.pos,
-                flags,
-            })),
+            (true, true) => {
+                tracing::debug!(
+                    "move_player_pos_rot to ({:.1}, {:.1}, {:.1})",
+                    s.pos.x,
+                    s.pos.y,
+                    s.pos.z
+                );
+                out.push(ServerboundPlay::MovePlayerPosRot(sb::MovePlayerPosRot {
+                    pos: s.pos,
+                    yaw: s.yaw,
+                    pitch: s.pitch,
+                    flags,
+                }));
+            }
+            (true, false) => {
+                tracing::debug!(
+                    "move_player_pos to ({:.1}, {:.1}, {:.1})",
+                    s.pos.x,
+                    s.pos.y,
+                    s.pos.z
+                );
+                out.push(ServerboundPlay::MovePlayerPos(sb::MovePlayerPos {
+                    pos: s.pos,
+                    flags,
+                }));
+            }
             (false, true) => out.push(ServerboundPlay::MovePlayerRot(sb::MovePlayerRot {
                 yaw: s.yaw,
                 pitch: s.pitch,

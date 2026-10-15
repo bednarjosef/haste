@@ -64,6 +64,8 @@ pub fn climate_from_nbt(c: &NbtCompound) -> BiomeClimate {
             .get_numeric_float("temperature")
             .unwrap_or(plains.temperature),
         downfall: c.get_numeric_float("downfall").unwrap_or(plains.downfall),
+        // `has_precipitation` (26.3's rename of `Biome.hasPrecipitation`); plains has it.
+        has_precipitation: c.get_bool("has_precipitation").unwrap_or(true),
         water_color: eff("water_color").unwrap_or(plains.water_color),
         grass_color: eff("grass_color"),
         foliage_color: eff("foliage_color"),
@@ -136,6 +138,7 @@ mod tests {
             BiomeClimate {
                 temperature: 0.8,
                 downfall: 0.9,
+                has_precipitation: true,
                 water_color: 0x617B64,
                 grass_color: None,
                 foliage_color: Some(0x6A7039),

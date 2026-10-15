@@ -2000,6 +2000,7 @@ mod tests {
                 head: haste_assets::DisplayTransform::IDENTITY,
                 ground: haste_assets::DisplayTransform::IDENTITY,
                 fixed: haste_assets::DisplayTransform::IDENTITY,
+                on_shelf: haste_assets::DisplayTransform::IDENTITY,
                 gui_light_front: false,
                 transformation: None,
             }],

@@ -2916,22 +2916,29 @@ impl Wire for Advancement {
 }
 
 /// Progress of one criterion.
+///
+/// The criterion is the plain map key from the advancement's JSON
+/// (`AdvancementProgress.STREAM_CODEC` pairs a string with a criterion), so it is carried as
+/// the exact string the server wrote. Names made it an `Identifier`, which wrote a
+/// `minecraft:` namespace back into the packet: the UI forwards this packet into Java in its
+/// wire form, and vanilla's `ClientAdvancements` then drops the progress because the
+/// criterion names no longer match the advancement's criteria.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CriterionProgress {
-    /// Criterion.
-    pub criterion: Identifier,
+    /// Criterion name (plain, not namespaced).
+    pub criterion: String,
     /// When achieved (ms since epoch).
     pub achieved_at: Option<i64>,
 }
 impl Wire for CriterionProgress {
     fn read(r: &mut Reader<'_>) -> DecodeResult<Self> {
         Ok(Self {
-            criterion: r.identifier()?,
+            criterion: r.string()?,
             achieved_at: r.read()?,
         })
     }
     fn write(&self, w: &mut Writer) {
-        w.identifier(&self.criterion);
+        w.string(&self.criterion);
         w.write(&self.achieved_at);
     }
 }
@@ -3618,7 +3625,7 @@ mod more_tests {
             progress: vec![AdvancementProgress {
                 id: Identifier::minecraft("story/root"),
                 criteria: vec![CriterionProgress {
-                    criterion: Identifier::minecraft("crafting_table"),
+                    criterion: "crafting_table".into(),
                     achieved_at: Some(1),
                 }],
             }],
@@ -3656,6 +3663,62 @@ mod more_tests {
         round_trip(&ShowDialog {
             dialog: IdOr::Inline(DialogNbt(nbt())),
         });
+    }
+
+    /// A body written the way vanilla writes it decodes to the same bytes again: the UI
+    /// forwards `update_advancements` into Java in its wire form, so a name written
+    /// differently than it was read would hand vanilla a different advancement tree.
+    #[test]
+    fn update_advancements_keeps_the_servers_bytes() {
+        let mut w = Writer::new();
+        // should_reset, then two added advancements (a root and its child, both without a
+        // display, as a vanilla server sends a recipe-only tree).
+        w.bool(true);
+        w.var_int(2);
+        w.identifier(&Identifier::minecraft("story/root"));
+        w.bool(false);
+        w.bool(false);
+        w.var_int(1);
+        w.var_int(1);
+        w.string("crafting_table");
+        w.bool(false);
+        w.f32(0.0);
+        w.f32(0.0);
+        w.identifier(&Identifier::minecraft("story/mine_stone"));
+        w.bool(true);
+        w.identifier(&Identifier::minecraft("story/root"));
+        w.bool(false);
+        w.var_int(1);
+        w.var_int(1);
+        w.string("crafting_table");
+        w.bool(false);
+        w.f32(0.0);
+        w.f32(0.0);
+        // one removed advancement.
+        w.var_int(1);
+        w.identifier(&Identifier::minecraft("story/gone"));
+        // progress for the root: its criteria by their plain names, with the obtained
+        // instants (a missing instant is a criterion that is not done).
+        w.var_int(1);
+        w.identifier(&Identifier::minecraft("story/root"));
+        w.var_int(2);
+        w.string("crafting_table");
+        w.bool(true);
+        w.i64(1_770_000_000_000);
+        w.string("unlock_right_away");
+        w.bool(false);
+        w.bool(true);
+        let body = Bytes::from(w.into_inner());
+        let mut r = Reader::from_bytes(&body);
+        let packet = UpdateAdvancements::decode_exact(&mut r)
+            .unwrap_or_else(|e| panic!("{}: {e}", UpdateAdvancements::NAME));
+        let mut w = Writer::new();
+        packet.encode(&mut w);
+        assert_eq!(w.into_inner(), body, "re-encoded bytes differ");
+        assert_eq!(
+            packet.progress[0].criteria[0].criterion, "crafting_table",
+            "the criterion names are the plain strings the server used"
+        );
     }
 }
 

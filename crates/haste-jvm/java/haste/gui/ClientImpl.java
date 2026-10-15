@@ -259,6 +259,20 @@ public final class ClientImpl {
     public static boolean hasControlDown(Minecraft m) { return (mods & 192) != 0; }
     public static boolean hasAltDown(Minecraft m) { return (mods & 768) != 0; }
 
+    /**
+     * The thread check at the top of every play handler (vanilla: Minecraft's own PacketProcessor
+     * over its game thread, isSameThread). Haste decodes and handles every packet on the game
+     * thread by construction, so the processor is built over the thread that first asks for it
+     * (always a packet handler: the game thread) and vanilla's check passes, like vanilla's.
+     */
+    private static net.minecraft.network.PacketProcessor packetProcessor;
+    public static net.minecraft.network.PacketProcessor packetProcessor(Minecraft m) {
+        if (packetProcessor == null) {
+            packetProcessor = new net.minecraft.network.PacketProcessor(Thread.currentThread());
+        }
+        return packetProcessor;
+    }
+
     // ---- Gui ----
     public static Screen screen(Gui g) { return screen; }
 
@@ -281,6 +295,10 @@ public final class ClientImpl {
         screen = s;
         if (s != null) {
             s.added();
+            // vanilla Gui.setScreen: every key mapping is released when a screen opens, so a
+            // button held into the screen (whose release the screen consumes) does not repeat
+            // the use through the server's block editors once it closes
+            net.minecraft.client.KeyMapping.releaseAll();
             s.init(GfxImpl.width, GfxImpl.height);
         }
     }
