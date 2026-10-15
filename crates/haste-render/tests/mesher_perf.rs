@@ -379,11 +379,11 @@ fn mesher_output_stable() {
         "stability: {quads} quads, {vertices} vertices, sprite range {}..{}",
         sprites.0, sprites.1
     );
-    // Expected: the original mesher's output until the smooth light was kept
-    // in vanilla's 16th-of-a-level units (LIGHT16_PER_LEVEL) instead of
-    // rounding to nibbles: every vertex's light bytes change. Quad count,
-    // vertices and sprites are unchanged.
-    let expected: u64 = 4_054_758_899_771_904_499;
+    // Expected: the original mesher's output until the diagonal substitution's
+    // permeability test moved to the one-out cells (vanilla's side + normal)
+    // and the zero-light fallback was gated off: the vertices next to
+    // occluders change. Quad count, vertices and sprites are unchanged.
+    let expected: u64 = 16_624_786_452_542_720_925;
     assert_eq!(hash.finish(), expected, "mesher output changed");
     assert!(quads > 100_000, "suspiciously few quads: {quads}");
     eprintln!("{quads} quads, hash {:016x}", hash.finish());

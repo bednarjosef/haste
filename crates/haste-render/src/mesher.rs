@@ -925,21 +925,21 @@ fn ao_corner_blend(sides: [AoSample; 2], diagonal: AoSample, center: AoSample) -
         center.occludes,
     );
     let (cs, cb) = (center.light >> 4, center.light & 0xF);
-    let lit = cs > 2 || cb > 2;
     let mut sky = cs as u32;
     let mut block = cb as u32;
     for s in sides.into_iter().chain([diagonal]) {
-        let (mut s, mut b) = (s.light >> 4, s.light & 0xF);
-        if lit {
-            if s == 0 && b == 0 {
-                s = cs;
-                b = cb;
-            } else if s == 0 {
-                s = cs;
-            }
-        }
-        sky += s as u32;
-        block += b as u32;
+        // Vanilla's smoothBlend replaces a zero-light neighbour with the
+        // center's light here (and a zero-sky one's sky) when the center is
+        // lit. Measured against the 26.3 reference screenshots that rule
+        // brightens terrain ~+10 mean error (every corner at a terrain step
+        // or trunk base lights up), while leaving it out lands all three
+        // compare shots at or below main's error — so it is left OUT until
+        // the light data matches vanilla's (Haste's snapshot light is
+        // measurably brighter than vanilla's around occluders, the same bias
+        // main has; the substitution amplifies it). See the branch's merge
+        // discussion.
+        sky += (s.light >> 4) as u32;
+        block += (s.light & 0xF) as u32;
     }
     // Vanilla keeps the exact average in 16th-of-a-level units (0..240) into
     // the lightmap; the vertex carries it (`LIGHT16_PER_LEVEL`).
@@ -980,15 +980,22 @@ fn vertex_light_for(
         light: cell(d).light,
     };
     // Vanilla `BlockState.isLightPermeable` (whether the diagonal sample is
-    // reachable): approximated as solid-render (`baked.is_full_opaque`); the
-    // light-dampening half of the vanilla test has no data in the client yet
-    // (the server's light values already carry it).
-    let permeable = |d: [i32; 3]| !ctx.baked.is_full_opaque(cell(d).state);
+    // reachable), tested — as in `BlockModelLighter` — at the cells ONE STEP
+    // OUT from the side cells along the face normal (`side cell + normal`),
+    // not at the side cells themselves: a terrain step's side cell sits inside
+    // the raised neighbour (non-permeable) while the cell above it is open, so
+    // testing the side cell would substitute the diagonal's dark sample where
+    // vanilla keeps it. Approximated as solid-render (`baked.is_full_opaque`);
+    // the light-dampening half of the vanilla test has no data in the client
+    // yet (the server's light values already carry it).
+    let n = dir.offset();
+    let out = |d: [i32; 3]| [d[0] + n[0], d[1] + n[1], d[2] + n[2]];
+    let permeable_out = |d: [i32; 3]| !ctx.baked.is_full_opaque(cell(out(d)).state);
 
     // The diagonal sample: the corner cell, or vanilla's side-0 cell when
-    // both side cells are non-permeable (vanilla reads side 0's shade and
-    // light there — not this vertex's own side).
-    let diagonal = if !permeable(s1) && !permeable(s2) {
+    // both one-out side cells are non-permeable (vanilla reads side 0's shade
+    // and light there — not this vertex's own side).
+    let diagonal = if !permeable_out(s1) && !permeable_out(s2) {
         sample(face_side0()[dir.index()])
     } else {
         sample(corner)
@@ -1003,7 +1010,6 @@ fn vertex_light_for(
     // `face_corner_offsets_match_vanilla_adjacency`), so sampling one cell
     // further out would make two adjacent coplanar faces read different
     // cells and draw a line along every block edge.
-    let n = dir.offset();
     let own = cell([0, 0, 0]);
     let center = AoSample {
         occludes: if cubic {
@@ -1643,9 +1649,9 @@ mod tests {
     }
 
     /// Hand-computed corner blend (vanilla BlockModelLighter's shade average
-    /// and LightCoordsUtil.smoothBlend), one up-face vertex: both side cells
-    /// solid-render, so the diagonal sample is vanilla's side-0 substitution,
-    /// and a zero-light neighbour takes the center's light.
+    /// and the light average), one up-face vertex: the exact 16th-unit average
+    /// of the four raw cell lights, with no zero-light substitution (see the
+    /// comment in `ao_corner_blend` for why vanilla's fallback is left out).
     #[test]
     fn corner_blend_matches_vanilla_rules() {
         let stone = |sky: u8, block: u8| AoSample {
@@ -1657,33 +1663,24 @@ mod tests {
             light: pack_light(sky, block),
         };
         // Center (the cell above the block): air, light (sky 12, block 0).
-        // Sides: both stone (ao-solid, solid-render), the west one's light
-        // fully dark (0, 0), the south one's (15, 0). Both non-permeable, so
-        // the diagonal is replaced by vanilla's side-0 sample: air, bright,
-        // (15, 0).
+        // Sides: both stone, the west one's light fully dark (0, 0), the
+        // south one's (15, 0); diagonal (the caller's substituted side-0
+        // sample): air, (15, 0).
         // AO: stone + stone + air + air = 2 occluders (brightness 0.6).
-        // Light: the center is lit (12 > 2), so the west side's zero light
-        // becomes the center's (12, 0); the sky levels sum to 12 + 12 + 15 +
-        // 15 = 54, whose exact average in 16th units is 54 * 4 = 216 (level
-        // 13.5 — the fraction is the point of the smooth units); block 0.
+        // Light: the raw average of sky 12 + 0 + 15 + 15 = 42 levels, whose
+        // exact value in 16th units is 42 * 4 = 168 (level 10.5 — the
+        // fraction is the point of the smooth units); block 0.
         let (ao, [sky16, block16]) = ao_corner_blend(
             [stone(15, 0), stone(0, 0)],
             air(15, 0), // the substituted diagonal (side 0)
             air(12, 0), // center
         );
         assert_eq!(ao, 2);
-        assert_eq!(sky16, 216, "zero-light neighbour takes the center's sky");
+        assert_eq!(sky16, 168, "the raw four-cell average, no substitution");
         assert_eq!(block16, 0);
 
-        // Without the zero-light fallback the sky levels would sum to 12 + 0
-        // + 15 + 15 = 42 (168 in 16ths) — the test above pins the rule.
         let (_, [l2, _]) = ao_corner_blend([stone(15, 0), stone(9, 0)], air(15, 0), air(12, 0));
-        assert_eq!(l2, 204, "no substitution when the neighbour is lit");
-
-        // The center below the blend threshold: no substitution at all
-        // (vanilla applies the fallbacks only when the center is lit).
-        let (_, [l3, _]) = ao_corner_blend([stone(15, 0), stone(0, 0)], air(15, 0), air(2, 0));
-        assert_eq!(l3, 128, "dark center: zero light stays zero");
+        assert_eq!(l2, 204, "lit neighbours average unchanged");
     }
 
     /// Pomme's `compute_face_ao` neighbour triples (vanilla AdjacencyInfo),

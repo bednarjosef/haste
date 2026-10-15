@@ -99,6 +99,7 @@ fn main() -> Result<()> {
     }
     for r in &regions {
         let mut sum = 0u64;
+        let mut signed = 0i64;
         let mut count = 0u64;
         for y in r.y..r.y.saturating_add(r.h).min(h) {
             for x in r.x..r.x.saturating_add(r.w).min(w) {
@@ -110,11 +111,17 @@ fn main() -> Result<()> {
                         .map(|(a, b)| a.abs_diff(*b) as u64)
                         .sum::<u64>();
                 sum += err / 4;
+                signed += pb.0[0] as i64 - pa.0[0] as i64;
                 count += 1;
             }
         }
         if count > 0 {
-            println!("region {} mean {:.2}", r.label, sum as f64 / count as f64);
+            println!(
+                "region {} mean {:.2} signed {:+.2}",
+                r.label,
+                sum as f64 / count as f64,
+                signed as f64 / count as f64
+            );
         }
     }
     Ok(())
