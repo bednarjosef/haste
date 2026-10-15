@@ -281,8 +281,10 @@ impl World {
     /// plus the number of non-empty sections. Counts live allocations (capacity of the
     /// backing vectors), not allocator slack.
     pub fn memory_stats(&self) -> WorldMemoryStats {
-        let mut stats = WorldMemoryStats::default();
-        stats.chunks = self.chunks.len() as u64 * (std::mem::size_of::<Chunk>() as u64 + 16);
+        let mut stats = WorldMemoryStats {
+            chunks: self.chunks.len() as u64 * (std::mem::size_of::<Chunk>() as u64 + 16),
+            ..Default::default()
+        };
         for chunk in self.chunks.values() {
             stats.heightmaps += chunk
                 .heightmaps
@@ -293,8 +295,8 @@ impl World {
                 .sum::<u64>();
             stats.block_entities += chunk
                 .block_entities
-                .iter()
-                .map(|(_, be)| {
+                .values()
+                .map(|be| {
                     be.nbt.len() as u64 + std::mem::size_of::<BlockEntityData>() as u64 + 24
                 })
                 .sum::<u64>();

@@ -294,14 +294,15 @@ pub fn synthetic_chunk_data(
 mod tests {
     use super::*;
 
-    /// A chunk with `sections` single-value air sections (the dirty bitset is what
-    /// these tests exercise; the contents do not matter).
+    /// A chunk with `sections` stone-filled sections (the dirty bitset is what these
+    /// tests exercise; the contents only need to be non-empty since `take_dirty`
+    /// skips air sections).
     fn chunk_with_sections(sections: usize, min_section: i32) -> Chunk {
         let cd = synthetic_chunk_data(
             ChunkPos::new(1, -2),
             min_section,
             sections,
-            |_si, _x, _y, _z| BlockStateId::AIR,
+            |_si, _x, _y, _z| BlockStateId(1),
         );
         Chunk::decode(&cd, min_section, sections, 15, 7, u32::MAX).unwrap()
     }

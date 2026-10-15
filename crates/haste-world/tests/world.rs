@@ -87,9 +87,10 @@ fn chunk_load_and_block_view() {
     assert_eq!(w.height(), 384);
     // chunk list
     assert_eq!(w.loaded_chunks().count(), 1);
-    // dirty: all sections of the chunk
+    // dirty: every section with blocks (the 8 stone sections; air sections mesh to
+    // nothing and are skipped, like vanilla's chunk cache)
     let dirty = w.take_dirty_sections();
-    assert_eq!(dirty.len(), sections);
+    assert_eq!(dirty.len(), 8);
     assert!(dirty.contains(&SectionPos::new(0, -4, 0)));
     assert!(w.take_dirty_sections().is_empty());
 }
