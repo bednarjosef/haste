@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs the feature check scripts in scripts/checks/ against the local test server.
 # usage: scripts/checks/run-feature-checks.sh [feature ...]
-#   features: hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock containers-crafting-table containers-furnace containers-anvil containers-enchanting-table  (default: all)
+#   features: hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock containers-crafting-table containers-furnace containers-anvil containers-enchanting-table containers-brewing-stand  (default: all)
 # The client runs offscreen (`--script`); all server state is set up over RCON from here,
 # never from the script (the player is not an operator and the server kicks command spam).
 # Evidence is printed and grepped: frame text commands (not images), server log lines and
@@ -665,6 +665,42 @@ containers_enchanting_table() {
   check containers-enchanting-table "a wooden sword was enchanted with 1 lapis and levels" "$r"
 }
 
+# The brewing stand: brew an awkward potion (water bottle + nether wart, blaze powder as
+# the fuel). The stand sits at (126, 71, 5) in the check's own area, on its own stone
+# platform, the player 2.5 blocks north of it.
+containers_brewing_stand() {
+  local log="$LOGDIR/containers-brewing-stand.log"
+  plain_client "$ROOT/scripts/checks/containers-brewing-stand.txt" "$log" \
+    || { check containers-brewing-stand "player never joined" 1; return; }
+  plain_setup "$log" cbrew-setup "126.5 71 2.5 0 0" \
+    "clear $NAME" \
+    "give $NAME minecraft:potion[minecraft:potion_contents={potion:\"minecraft:water\"}] 1" \
+    "give $NAME minecraft:nether_wart 1" \
+    "give $NAME minecraft:blaze_powder 1" \
+    "fill 125 70 1 127 74 6 air replace" \
+    "fill 125 70 1 127 70 6 minecraft:stone replace" \
+    "setblock 126 71 5 minecraft:brewing_stand"
+  local before after
+  before=$(rcon "data get entity $NAME Inventory")
+  if wait_shot "$log" cbrew-closed 90; then
+    after=$(rcon "data get entity $NAME Inventory")
+  fi
+  wait_exit
+  echo "--- brewing stand evidence ---"
+  echo "Inventory before: $before"
+  echo "Inventory after:  $after"
+  local r=0
+  has "$before" "potion" || { echo "no water bottle before"; r=1; }
+  has "$before" "nether_wart" || { echo "no nether_wart before"; r=1; }
+  has "$before" "blaze_powder" || { echo "no blaze_powder before"; r=1; }
+  has "$after" "awkward" || { echo "no awkward potion after"; r=1; }
+  if grep -qE "haste proxy:|Java exception" "$log"; then
+    echo "proxy stubs or Java exceptions:"; grep -E "haste proxy:|Java exception" "$log" | head -5
+    r=1
+  fi
+  check containers-brewing-stand "a water bottle and a nether wart (blaze powder fuel) became an awkward potion" "$r"
+}
+
 # ---- 10. Languages other than English ----
 language() {
   local log="$LOGDIR/language.log"
@@ -797,13 +833,13 @@ sprint() {
   check sprint "double-tapping W made the player cover ${dist} blocks/s (sprint speed)" "$r"
 }
 
-ALL=(hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock sprint containers-crafting-table containers-furnace containers-anvil containers-enchanting-table)
+ALL=(hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock sprint containers-crafting-table containers-furnace containers-anvil containers-enchanting-table containers-brewing-stand)
 if [ $# -eq 0 ]; then
   set -- "${ALL[@]}"
 fi
 for f in "$@"; do
   case "$f" in
-    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | particles | recipe-book | sign | book | commandblock | sprint | containers-crafting-table | containers-furnace | containers-anvil | containers-enchanting-table) fn="${f//-/_}"; if declare -F "$fn" >/dev/null; then "$fn"; else check "$f" "no check function $fn" 1; fi ;;
+    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | particles | recipe-book | sign | book | commandblock | sprint | containers-crafting-table | containers-furnace | containers-anvil | containers-enchanting-table | containers-brewing-stand) fn="${f//-/_}"; if declare -F "$fn" >/dev/null; then "$fn"; else check "$f" "no check function $fn" 1; fi ;;
     *) echo "unknown feature: $f" ;;
   esac
 done
