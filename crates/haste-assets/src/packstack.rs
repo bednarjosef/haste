@@ -135,12 +135,33 @@ impl PackStack {
     /// Unknown ids are skipped (the pack was deleted, vanilla drops them from
     /// the selection too); unreadable packs are skipped with a warning.
     pub fn open(packs_dir: &Path, ids: &[String]) -> PackStack {
-        let mut packs = Vec::with_capacity(ids.len());
+        PackStack::open_with_server(packs_dir, ids, &[])
+    }
+
+    /// [`PackStack::open`] with server resource packs layered above the folder
+    /// packs (vanilla's `DOWNLOADED_PACK_SELECTION`: TOP, fixed): the zips the
+    /// server pushed and Haste downloaded, in push order (bottom first). A
+    /// pack the server pushed twice keeps only its latest download (vanilla
+    /// `markExistingPacksAsRemoved`).
+    pub fn open_with_server(packs_dir: &Path, ids: &[String], server: &[PathBuf]) -> PackStack {
+        let mut packs = Vec::with_capacity(ids.len() + server.len());
         for id in ids {
             match open_pack_layer(packs_dir, id) {
                 Ok(Some(layer)) => packs.push(layer),
                 Ok(None) => tracing::info!("resource pack {id} not found, skipping"),
                 Err(e) => tracing::warn!("resource pack {id} unreadable, skipping: {e:#}"),
+            }
+        }
+        for zip in server {
+            match open_server_layer(zip) {
+                Ok(layer) => {
+                    // The same id pushed again replaces the earlier download.
+                    packs.retain(|p| p.id != layer.id);
+                    packs.push(layer);
+                }
+                Err(e) => {
+                    tracing::warn!("server resource pack {} unreadable: {e:#}", zip.display())
+                }
             }
         }
         PackStack { packs }
@@ -256,6 +277,35 @@ fn open_pack_layer(packs_dir: &Path, id: &str) -> Result<Option<PackLayer>> {
 struct PackMeta {
     #[serde(default)]
     description: String,
+}
+
+/// Opens a downloaded server pack (a zip at `downloads/<id>/<hash>`, no
+/// extension; vanilla `FilePackResources.FileResourcesSupplier`). The layer's
+/// id is `server/<uuid>` (vanilla's `server/<serial>/<uuid>`).
+fn open_server_layer(zip: &Path) -> Result<PackLayer> {
+    let file =
+        std::fs::File::open(zip).with_context(|| format!("opening pack {}", zip.display()))?;
+    let mut archive =
+        zip::ZipArchive::new(file).with_context(|| format!("reading zip {}", zip.display()))?;
+    let mut keys: Vec<(String, usize)> = archive
+        .file_names()
+        .enumerate()
+        .filter(|(_, n)| n.starts_with("assets/") && !n.ends_with('/'))
+        .map(|(i, n)| (n.to_owned(), i))
+        .collect();
+    keys.sort_by(|a, b| a.0.cmp(&b.0));
+    let PackMeta { description } = read_mcmeta_zip(&mut archive)?;
+    // The pack's directory name is its push id (downloads/<id>/<hash>).
+    let id = zip
+        .parent()
+        .and_then(|d| d.file_name())
+        .map(|n| format!("server/{}", n.to_string_lossy()))
+        .unwrap_or_else(|| "server".to_owned());
+    Ok(PackLayer {
+        id,
+        description,
+        file: PackFile::Zip { archive, keys },
+    })
 }
 
 fn read_mcmeta(path: &Path) -> Result<PackMeta> {
@@ -554,6 +604,65 @@ mod tests {
         assert!(keys.contains(&"assets/minecraft/textures/block/snow.png".to_string()));
         assert!(keys.contains(&"assets/minecraft/textures/item/gold_ingot.png".to_string()));
         assert!(!keys.contains(&"assets/minecraft/lang/en_us.json".to_string()));
+    }
+
+    #[test]
+    fn server_packs_layer_above_folder_packs() {
+        let (packs_dir, _temp) = packs_fixture();
+        // A downloaded server pack (downloads/<id>/<sha1>, no extension) overriding the
+        // folder packs' snow. The id is any push id (a uuid in practice).
+        let downloads = _temp.path().join("downloads");
+        let id = "12345678-1234-5678-1234-567812345678";
+        let pack_dir = downloads.join(id);
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        let server_zip = pack_dir.join("0123456789abcdef0123456789abcdef01234567");
+        {
+            let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(
+                std::fs::File::create(&server_zip).unwrap(),
+            ));
+            zip.start_file::<_, ()>("pack.mcmeta", Default::default())
+                .unwrap();
+            zip.write_all(
+                br#"{"pack":{"min_format":97,"max_format":97,"description":"server pack"}}"#,
+            )
+            .unwrap();
+            zip.start_file::<_, ()>(
+                "assets/minecraft/textures/block/snow.png",
+                Default::default(),
+            )
+            .unwrap();
+            zip.write_all(solid_png(180, 20, 220).as_slice()).unwrap();
+            zip.finish().unwrap();
+        }
+        // The server pack overrides the folder packs' snow (BluePack's).
+        let mut stack = PackStack::open_with_server(
+            &packs_dir,
+            &["file/RedPack".to_string(), "file/BluePack.zip".to_string()],
+            std::slice::from_ref(&server_zip),
+        );
+        let snow = stack
+            .read("assets/minecraft/textures/block/snow.png")
+            .unwrap();
+        let img = image::load_from_memory(&snow).unwrap().to_rgba8();
+        assert_eq!(*img.get_pixel(0, 0), image::Rgba([180, 20, 220, 255]));
+        // Its layer id names the push (server/<uuid>).
+        assert_eq!(stack.ids().last().unwrap(), &format!("server/{id}"));
+        // A folder pack's unique texture still resolves below it.
+        let gold = stack
+            .read("assets/minecraft/textures/item/gold_ingot.png")
+            .unwrap();
+        let img = image::load_from_memory(&gold).unwrap().to_rgba8();
+        assert_eq!(*img.get_pixel(0, 0), image::Rgba([0, 255, 0, 255]));
+        // The same id pushed again replaces the earlier download.
+        let stack = PackStack::open_with_server(
+            &packs_dir,
+            &["file/RedPack".to_string()],
+            &[server_zip.clone(), server_zip],
+        );
+        assert_eq!(
+            stack.ids(),
+            vec!["file/RedPack".to_string(), format!("server/{id}")]
+        );
     }
 
     #[test]

@@ -331,6 +331,9 @@ struct Session {
     local: (EntityId, u128),
     /// The particle atlas types (uploaded to the renderer once it exists).
     particle_types: std::sync::Arc<haste_render::ParticleTypes>,
+    /// The server's resource packs downloaded during the connection (push order),
+    /// layered above the selection wherever this session's assets open.
+    server_packs: Vec<std::path::PathBuf>,
 }
 
 /// Connection-phase data the F3 overlay shows: biome names of the synced registry (index = the
@@ -429,7 +432,16 @@ impl Session {
         // The saved render distance is what we advertise in client_information; the server's
         // own view distance (login packet) caps what we mesh below.
         opts.client_information.view_distance = options.render_distance as i8;
+        // Server resource packs download into the game dir's `downloads`
+        // (vanilla's layout) and apply on top of the selection.
+        opts.downloads_dir = Some(game_dir().join("downloads"));
         let mut driver: NetDriver = rt.block_on(NetDriver::connect(opts))?;
+        let server_packs: Vec<std::path::PathBuf> = driver
+            .connection()
+            .server_packs()
+            .into_iter()
+            .map(|p| p.path)
+            .collect();
         driver.session.fov_effect_scale = options.fov_effect_scale;
         let (biomes, biome_climates, type_names, sounds, painting_variants, mob_variants) = {
             let regs = driver.connection().registries();
@@ -481,7 +493,7 @@ impl Session {
                 .collect();
         let particle_types = std::sync::Arc::new(
             haste_render::ParticleTypes::build(
-                &mut open_assets()?,
+                &mut open_assets_with(&server_packs)?,
                 &particle_ids,
                 Some(&data.blocks),
             )
@@ -510,10 +522,14 @@ impl Session {
             biome_climates.clone(),
             options.clone(),
         ));
+        // The server's configuration-phase packs are part of the running stack from the
+        // start; a later pack-screen reload keeps them layered (vanilla's repository
+        // holds them beside the selection).
+        *shared.applied_server_packs.lock() = server_packs.clone();
         // Terrain particles tint with the biome colours (the same climates the
         // renderer resolves for meshing).
         {
-            let colors = haste_render::Colormaps::load(&mut open_assets()?)
+            let colors = haste_render::Colormaps::load(&mut open_assets_with(&server_packs)?)
                 .map(|maps| haste_render::BiomeColors::new(&biome_climates, &maps))
                 .unwrap_or_else(|e| {
                     tracing::warn!("no biome colours (block particles untinted): {e:#}");
@@ -546,6 +562,7 @@ impl Session {
             options,
             local,
             particle_types,
+            server_packs,
         })
     }
 
@@ -2259,6 +2276,12 @@ impl InputRouter {
 }
 
 fn open_assets() -> anyhow::Result<haste_assets::Assets> {
+    open_assets_with(&[])
+}
+
+/// [`open_assets`] with the server's downloaded packs layered above the
+/// selection (vanilla's `DownloadedPackSource`).
+fn open_assets_with(server_packs: &[std::path::PathBuf]) -> anyhow::Result<haste_assets::Assets> {
     let jar = haste_protocol::haste_core::paths::client_jar();
     let mut assets = haste_assets::Assets::open(
         &jar,
@@ -2271,16 +2294,16 @@ fn open_assets() -> anyhow::Result<haste_assets::Assets> {
     // source of truth at startup, like vanilla `Minecraft`'s constructor
     // (`reload` + `loadSelectedResourcePacks`).
     let ids = selected_resource_packs();
-    if !ids.is_empty() {
+    if !ids.is_empty() || !server_packs.is_empty() {
         tracing::info!("applying resource packs: {}", ids.join(", "));
-        assets.apply_packs(&default_resource_packs_dir(), &ids);
+        assets.apply_server_packs(&default_resource_packs_dir(), &ids, server_packs);
     }
     Ok(assets)
 }
 
 /// The resource pack ids saved in `<game dir>/options.txt` (`resourcePacks:`
 /// as vanilla's GSON string array, bottom first), or none.
-fn selected_resource_packs() -> Vec<String> {
+pub(crate) fn selected_resource_packs() -> Vec<String> {
     let options_txt = game_dir().join("options.txt");
     let Ok(text) = std::fs::read_to_string(&options_txt) else {
         return Vec::new();
@@ -2569,7 +2592,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let shared = session.shared.clone();
     // The shot is first person: the game thread's camera effects take that perspective.
     shared.input.lock().first_person = true;
-    let mut assets = open_assets()?;
+    let mut assets = open_assets_with(&session.server_packs)?;
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
@@ -2854,7 +2877,12 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     // a world; `menu` above only covers the boot, so this outlives it).
     let mut in_menu = session.is_none();
     let mut shared = session.as_ref().map(|s| s.shared.clone());
-    let mut assets = open_assets()?;
+    let mut assets = open_assets_with(
+        &session
+            .as_ref()
+            .map(|s| s.server_packs.clone())
+            .unwrap_or_default(),
+    )?;
     let data = net::load_game_data()?;
     let mut renderer = Renderer::new_offscreen(args.width, args.height, &mut assets, &data.blocks)?;
     if let Some(s) = &session {
@@ -2940,13 +2968,17 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         // `Minecraft.reloadResourcePacks`) before this iteration's tick computes its state,
         // so `wait_until reloaded`/`settled` see the new feed's queue, not the old one.
         if let Some(shared) = shared.as_ref() {
-            if let Some(ids) = shared.resource_pack_reload.lock().take() {
-                tracing::info!(
-                    "rebuilding renderer with resource packs [{}]",
-                    ids.join(", ")
-                );
+            if let Some(reload) = shared.resource_pack_reload.lock().take() {
+                let packs = reload
+                    .ids
+                    .iter()
+                    .cloned()
+                    .chain(reload.server.iter().map(|p| p.display().to_string()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                tracing::info!("rebuilding renderer with resource packs [{packs}]");
                 let session_ref = session.as_ref().expect("a session exists");
-                let mut fresh_assets = open_assets()?;
+                let mut fresh_assets = open_assets_with(&reload.server)?;
                 let mut fresh = Renderer::new_offscreen(
                     args.width,
                     args.height,
@@ -3673,7 +3705,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let shared = session.shared.clone();
     // The bench camera is first person: the game thread's camera effects take that perspective.
     shared.input.lock().first_person = true;
-    let mut assets = open_assets()?;
+    let mut assets = open_assets_with(&session.server_packs)?;
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
@@ -4334,22 +4366,30 @@ impl App {
         if self.renderer.is_none() {
             return;
         }
-        // The resource pack selection changed (the pack screen's Done, vanilla
-        // `Minecraft.reloadResourcePacks`): rebuild the renderer from a fresh asset stack —
-        // atlas, models, fonts and GUI textures re-read with the new packs layered on the jar.
+        // The resource pack selection changed (the pack screen's Done or a server
+        // pack download, vanilla `Minecraft.reloadResourcePacks`): rebuild the
+        // renderer from a fresh asset stack — atlas, models, fonts and GUI textures
+        // re-read with the new packs layered on the jar.
         let reload = self
             .session
             .as_ref()
             .map(|s| s.shared.resource_pack_reload.lock().take())
             .unwrap_or_default();
-        if let Some(ids) = reload {
+        if let Some(reload) = reload {
             let window = self
                 .window
                 .clone()
                 .expect("renderer exists, so does the window");
-            match self.reload_renderer(&window, &ids) {
+            match self.reload_renderer(&window, &reload) {
                 Ok(()) => {
-                    tracing::info!("renderer rebuilt with resource packs [{}]", ids.join(", "))
+                    let names = reload
+                        .ids
+                        .iter()
+                        .cloned()
+                        .chain(reload.server.iter().map(|p| p.display().to_string()))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    tracing::info!("renderer rebuilt with resource packs [{names}]")
                 }
                 Err(e) => {
                     self.error = Some(e.context("resource pack reload"));
@@ -4560,9 +4600,13 @@ impl App {
     /// Rebuilds the renderer after the resource pack selection changed (vanilla's reload
     /// rebuilds its resource manager, model manager and atlases). The new selection is
     /// written to options.txt by the JVM's own `Options.save` before we get here, so
-    /// `open_assets` reads it back; everything else re-applies like `resumed` does.
-    fn reload_renderer(&mut self, window: &Arc<Window>, _ids: &[String]) -> anyhow::Result<()> {
-        let mut assets = open_assets()?;
+    /// `open_assets` reads it back; the server's downloaded packs layer above it.
+    fn reload_renderer(
+        &mut self,
+        window: &Arc<Window>,
+        reload: &game::PackReload,
+    ) -> anyhow::Result<()> {
+        let mut assets = open_assets_with(&reload.server)?;
         let data = net::load_game_data()?;
         let mut renderer = Renderer::new(window.clone(), &mut assets, &data.blocks)?;
         if let Some(session) = &self.session {

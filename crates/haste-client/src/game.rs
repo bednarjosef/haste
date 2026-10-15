@@ -477,16 +477,32 @@ pub struct Shared {
     /// Bumped every time [`Shared::live_options`] changes, so the render thread copies the
     /// options only when they changed (never a per-frame clone).
     pub options_version: AtomicU64,
-    /// The resource pack selection the pack screen committed (vanilla
-    /// `Minecraft.reloadResourcePacks`), repository ids bottom first: the renderer rebuilds
-    /// from a fresh asset stack (atlas, models, fonts, GUI sprites) when it takes this,
+    /// A resource pack reload the render thread owes (vanilla
+    /// `Minecraft.reloadResourcePacks`): the pack screen's committed selection
+    /// (repository ids bottom first) and the server's downloaded packs (push
+    /// order, layered above the selection). The renderer rebuilds from a fresh
+    /// asset stack (atlas, models, fonts, GUI sprites) when it takes this,
     /// without restarting. `None` = no reload pending.
-    pub resource_pack_reload: Mutex<Option<Vec<String>>>,
+    pub resource_pack_reload: Mutex<Option<PackReload>>,
+
+    /// The server packs applied to the running asset stack (push order): a
+    /// new download joins them so a reload layers every server pack, not only
+    /// the newest.
+    pub applied_server_packs: Mutex<Vec<std::path::PathBuf>>,
     /// F3's tps line: packets sent per second (f64 bits), updated once per second by the game
     /// thread from the connection's counters.
     pub debug_tx: AtomicU64,
     /// Packets received per second (f64 bits).
     pub debug_rx: AtomicU64,
+}
+
+/// What a resource pack rebuild applies.
+#[derive(Clone, Debug)]
+pub struct PackReload {
+    /// Repository ids of the selection, bottom first (options.txt's order).
+    pub ids: Vec<String>,
+    /// The server's downloaded pack files, in push order, above the selection.
+    pub server: Vec<std::path::PathBuf>,
 }
 
 impl Shared {
@@ -572,6 +588,7 @@ impl Shared {
             live_options: Mutex::new(options),
             options_version: AtomicU64::new(1),
             resource_pack_reload: Mutex::new(None),
+            applied_server_packs: Mutex::new(Vec::new()),
             debug_tx: AtomicU64::new(0),
             debug_rx: AtomicU64::new(0),
         }
@@ -688,11 +705,20 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>, existing_ui: Option<Ui>) 
                 HudSlot { rx: None }
             }
         });
+    // The server pack set version this thread last applied (starts at the
+    // connection's: the configuration-phase packs were applied at session build).
+    let mut server_packs_version = driver.connection().server_packs_version();
     let reason = loop {
         if shared.stop.load(Ordering::Relaxed) {
             break "left the game".to_string();
         }
-        if let Err(e) = tick_once(&mut driver, &shared, &mut gone, &mut jvm) {
+        if let Err(e) = tick_once(
+            &mut driver,
+            &shared,
+            &mut gone,
+            &mut jvm,
+            &mut server_packs_version,
+        ) {
             break format!("tick failed: {e:#}");
         }
         if stats_second.elapsed() >= Duration::from_secs(1) {
@@ -849,6 +875,7 @@ fn tick_once(
     shared: &Shared,
     gone: &mut Vec<SectionPos>,
     jvm: &mut HudSlot,
+    server_packs_version: &mut u64,
 ) -> anyhow::Result<()> {
     // Once the JVM arrives (the session joined before the game thread started): build the
     // `Ui` and give the JVM the registries, tags and the local player. Menu mode's UI arrives
@@ -912,6 +939,29 @@ fn tick_once(
         dirty.append(gone);
         if !dirty.is_empty() {
             shared.dirty.lock().append(&mut dirty);
+        }
+        // A server pack finished downloading (vanilla ticks its ServerPackManager the
+        // same way): apply it on top of the stack and reload, like the pack screen's
+        // Done. The connection's cached reply path already answered the statuses.
+        // The server's live pack set changed (vanilla ticks its ServerPackManager
+        // the same way: a download finished, a re-push replaced one, or a pop
+        // arrived): apply the whole set on top of the stack and reload, like the
+        // pack screen's Done. The connection's reply path already sent statuses.
+        let version = driver.connection().server_packs_version();
+        if version != *server_packs_version {
+            *server_packs_version = version;
+            let packs = driver.connection().server_packs();
+            for pack in &packs {
+                tracing::info!(
+                    "server resource pack {} downloaded to {}",
+                    pack.id,
+                    pack.path.display()
+                );
+            }
+            *shared.applied_server_packs.lock() = packs.iter().map(|p| p.path.clone()).collect();
+            let ids = crate::app::selected_resource_packs();
+            let server = shared.applied_server_packs.lock().clone();
+            *shared.resource_pack_reload.lock() = Some(PackReload { ids, server });
         }
     }
     // This tick's sound packets, played through the output (when the client set one up).
@@ -1174,7 +1224,8 @@ fn tick_once(
         // frame (AtlasBuilder + bake + GUI textures read the new asset stack).
         if let Some(ids) = ui.take_resource_pack_selection() {
             tracing::info!("resource pack selection changed: [{}]", ids.join(", "));
-            *shared.resource_pack_reload.lock() = Some(ids);
+            let server = shared.applied_server_packs.lock().clone();
+            *shared.resource_pack_reload.lock() = Some(PackReload { ids, server });
         }
         ui.drain_outgoing(&mut ui_out);
     }
