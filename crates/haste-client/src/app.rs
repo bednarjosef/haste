@@ -2643,7 +2643,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let view = shared.view.lock().clone();
     let entities = feed.instances.len();
     println!(
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} gui commands, {} entity instances ({} drew geometry; perspective {}, local player {}), {} particles drawn, {} block entities, target {:?}",
+        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} gui commands, {} entity instances ({} drew geometry; perspective {}, local player {}), {} particles drawn, {} shadow quads, {} block entities, target {:?}",
         file.display(),
         image.width(),
         image.height(),
@@ -2662,6 +2662,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         args.perspective,
         perspective.draws_player(),
         renderer.particles_drawn(),
+        renderer.shadow_quad_count(),
         stats.block_entities_drawn,
         view.block_target
     );
