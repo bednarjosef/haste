@@ -915,16 +915,18 @@ fn load_entity_type_names() -> Option<HashMap<RegistryIndex, String>> {
     Some(names)
 }
 
-/// What special renderer (if any) an entity type takes: `ItemFrame(glow)` or `Painting`.
+/// What special renderer (if any) an entity type takes: `ItemFrame(glow)`, `Painting` or
+/// `LightningBolt`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecorationKind {
     ItemFrame { glow: bool },
     Painting,
+    LightningBolt,
 }
 
 /// The decoration kind of an entity type (`minecraft:item_frame`, `glow_item_frame`,
-/// `painting`); `None` for every other type. Warm lookups are a map probe, never an allocation
-/// (called per entity per frame).
+/// `painting`, `lightning_bolt`); `None` for every other type. Warm lookups are a map probe,
+/// never an allocation (called per entity per frame).
 pub fn decoration_kind(kind: RegistryIndex) -> Option<DecorationKind> {
     static NAMES: OnceLock<HashMap<RegistryIndex, String>> = OnceLock::new();
     let name = NAMES
@@ -934,6 +936,7 @@ pub fn decoration_kind(kind: RegistryIndex) -> Option<DecorationKind> {
         "minecraft:item_frame" => Some(DecorationKind::ItemFrame { glow: false }),
         "minecraft:glow_item_frame" => Some(DecorationKind::ItemFrame { glow: true }),
         "minecraft:painting" => Some(DecorationKind::Painting),
+        "minecraft:lightning_bolt" => Some(DecorationKind::LightningBolt),
         _ => None,
     }
 }

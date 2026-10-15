@@ -14,7 +14,9 @@
 //! The lead owns this file. Add a module by adding one line here and your own file.
 use clap::Parser;
 
+mod ambient_particles;
 mod app;
+mod block_particles;
 mod boat;
 mod game;
 mod hand;
@@ -70,6 +72,10 @@ pub struct Args {
     /// Bench mode: write the summary as JSON to this file.
     #[arg(long)]
     pub bench_out: Option<std::path::PathBuf>,
+    /// Bench mode: hold the settle camera still instead of the flight path (isolates one view,
+    /// e.g. the screenshot comparison spot).
+    #[arg(long)]
+    pub bench_fixed: bool,
     /// Render distance in chunks, overriding the saved option (like `--vsync`).
     #[arg(long)]
     pub render_distance: Option<u8>,

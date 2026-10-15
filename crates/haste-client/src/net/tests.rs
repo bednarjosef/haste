@@ -168,11 +168,12 @@ struct Rig {
 }
 
 /// The static particle registry the test sessions resolve ids against (id 0 `flame`, 1
-/// `smoke`).
+/// `smoke`, 2 `block`).
 fn test_particle_names() -> std::sync::Arc<Vec<Identifier>> {
     std::sync::Arc::new(vec![
         Identifier::minecraft("flame"),
         Identifier::minecraft("smoke"),
+        Identifier::minecraft("block"),
     ])
 }
 
@@ -1094,6 +1095,16 @@ fn level_particles(kind: i32, count: i32) -> ClientboundPlay {
     })
 }
 
+/// A `level_event` packet.
+fn level_event(event: i32, pos: BlockPos, data: i32) -> ClientboundPlay {
+    ClientboundPlay::LevelEvent(cb::LevelEvent {
+        event,
+        pos,
+        data,
+        global: false,
+    })
+}
+
 #[test]
 fn level_particles_queue_a_spawn_per_packet() {
     let mut r = Rig::new();
@@ -1120,6 +1131,65 @@ fn level_particles_with_an_unknown_type_id_are_dropped() {
     // No id 7 in the static registry: dropped silently (no panic, nothing queued).
     r.apply(level_particles(7, 10));
     assert_eq!(r.session.particle_spawns.len(), 0);
+}
+
+/// A `minecraft:block` particle's `BlockParticleOption` (one VarInt state id): the
+/// landing particles (`LivingEntity.checkFallDamage` -> `sendParticles`) carry the
+/// block they land on.
+#[test]
+fn block_particle_option_carries_the_state() {
+    let mut r = Rig::new();
+    let mut p = level_particles(2, 20);
+    let ClientboundPlay::LevelParticles(ref mut lp) = p else {
+        unreachable!()
+    };
+    // VarInt 100 (0x64) and VarInt 1000 (0xE8 0x07).
+    lp.particle.data = bytes::Bytes::from(vec![100]);
+    r.apply(p);
+    let mut p = level_particles(2, 20);
+    let ClientboundPlay::LevelParticles(ref mut lp) = p else {
+        unreachable!()
+    };
+    lp.particle.data = bytes::Bytes::from(vec![0xE8, 0x07]);
+    r.apply(p);
+    // Other types never read the payload as a state.
+    r.apply(level_particles(0, 1));
+    let spawns = &r.session.particle_spawns;
+    assert_eq!(spawns[0].block_state, Some(haste_core::BlockStateId(100)));
+    assert_eq!(spawns[1].block_state, Some(haste_core::BlockStateId(1000)));
+    assert_eq!(spawns[2].block_state, None);
+}
+
+/// The block-particle level events: 2001 (a break, the payload the state), 2019/2020
+/// (a mining tick, the payload the face ordinal), anything else nothing.
+#[test]
+fn level_events_queue_block_particles() {
+    let mut r = Rig::new();
+    let pos = BlockPos::new(10, 64, -5);
+    r.apply(level_event(2001, pos, 100));
+    r.apply(level_event(2020, pos, 0));
+    r.apply(level_event(2019, pos, 5));
+    r.apply(level_event(2000, pos, 0));
+    let requests = &r.session.block_particle_requests;
+    assert_eq!(requests.len(), 3);
+    assert!(
+        matches!(
+            requests[0],
+            crate::block_particles::BlockParticleRequest::Destroy {
+                state: haste_core::BlockStateId(100),
+                ..
+            }
+        ),
+        "2001 queues the destroy grid"
+    );
+    assert!(matches!(
+        requests[1],
+        crate::block_particles::BlockParticleRequest::Crack { .. }
+    ));
+    assert!(matches!(
+        requests[2],
+        crate::block_particles::BlockParticleRequest::Crack { .. }
+    ));
 }
 
 /// The attached firework rocket's push (vanilla `FireworkRocketEntity.tick`): the rocket is
@@ -1273,4 +1343,85 @@ fn lightmap_lightning_flashes_for_two_ticks() {
     assert_eq!(s.sky_flash_time, 0);
     s.tick();
     assert_eq!(s.sky_flash_time, 0);
+}
+
+#[test]
+fn weather_levels_follow_the_game_events() {
+    // handleGameEvent: start_raining resets to 0, stop_raining sets 1, the level changes set
+    // the level directly; both bracket the tick (Level.oRainLevel/rainLevel).
+    let dim = DimensionInfo::overworld();
+    let mut s = Session::new(EntityId(1), GameMode::Creative, dim, test_particle_names());
+    let mut world = FakeWorld::default();
+    let mut entities = new_entity_store(0);
+    let mut out = Vec::new();
+    let regs = SyncedRegistries::default();
+    let mut apply = |s: &mut Session, p: ClientboundPlay, out: &mut Vec<ServerboundPlay>| {
+        s.apply(p, &mut world, &mut entities, &regs, out);
+    };
+    apply(
+        &mut s,
+        ClientboundPlay::GameEvent(cb::GameEvent {
+            event: 7,
+            value: 0.5,
+        }),
+        &mut out,
+    );
+    assert_eq!(s.weather.rain_level, 0.5);
+    apply(
+        &mut s,
+        ClientboundPlay::GameEvent(cb::GameEvent {
+            event: 8,
+            value: 0.7,
+        }),
+        &mut out,
+    );
+    assert_eq!(s.weather.thunder_level, 0.7);
+    // Clamped like Level.setRainLevel.
+    apply(
+        &mut s,
+        ClientboundPlay::GameEvent(cb::GameEvent {
+            event: 7,
+            value: 2.0,
+        }),
+        &mut out,
+    );
+    assert_eq!(s.weather.rain_level, 1.0);
+    // The tick shifts the bracket; the lerp follows the partial tick.
+    s.weather.rain_level_o = 1.0;
+    s.weather.rain_level = 0.0;
+    assert!((s.weather.rain_level(0.5) - 0.5).abs() < 1e-6);
+}
+
+#[test]
+fn chunk_batches_are_acknowledged_with_the_vanilla_rate() {
+    // handleChunkBatchStart/Finished -> ServerboundChunkBatchReceived(getDesiredChunksPerTick):
+    // 7 ms over the aggregated per-chunk duration. Without the reply the server stops after
+    // the first batch, so a teleport's new area never streams (the far-teleport bug).
+    let dim = DimensionInfo::overworld();
+    let mut s = Session::new(EntityId(1), GameMode::Creative, dim, test_particle_names());
+    let mut world = FakeWorld::default();
+    let mut entities = new_entity_store(0);
+    let mut out = Vec::new();
+    let regs = SyncedRegistries::default();
+    // Without a batch start the timing origin is absent: the rate stays the default
+    // (7 ms / 2 ms per chunk = 3.5) and the reply is still sent — vanilla also replies when
+    // the batch size is zero or the start was missed.
+    s.apply(
+        ClientboundPlay::ChunkBatchFinished(cb::ChunkBatchFinished { batch_size: 10 }),
+        &mut world,
+        &mut entities,
+        &regs,
+        &mut out,
+    );
+    assert_eq!(out.len(), 1);
+    match &out[0] {
+        ServerboundPlay::ChunkBatchReceived(r) => {
+            assert!(
+                (r.chunks_per_tick - 3.5).abs() < 1e-3,
+                "{}",
+                r.chunks_per_tick
+            );
+        }
+        other => panic!("expected a chunk_batch_received, got {other:?}"),
+    }
 }

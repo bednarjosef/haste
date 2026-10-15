@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use haste_core::gui::{CursorShape, GuiBlend, GuiCommand, GuiFrame, TextMetrics, TextStyle};
-use haste_core::{EntityId, Identifier, RegistryIndex};
+use haste_core::{BlockPos, EntityId, Identifier, RegistryIndex};
 use jni::objects::{JIntArray, JObject, JObjectArray, JString};
 use jni::refs::Global;
 use jni::signature::{JavaType, Primitive};
@@ -39,6 +39,10 @@ pub enum ScreenKind {
     /// `net.minecraft.client.gui.screens.options.OptionsScreen` (vanilla opens it from the title
     /// screen; "Done" returns to the screen that opened it).
     Options,
+    /// `net.minecraft.client.gui.screens.packs.PackSelectionScreen` (the Options screen's
+    /// Resource Packs button; commits through `Minecraft.reloadResourcePacks`, which the
+    /// ClientImpl proxy reports to Rust).
+    Packs,
     /// `net.minecraft.client.gui.screens.multiplayer.JoinMultiplayerScreen`, whose parent is a
     /// `TitleScreen`.
     Multiplayer,
@@ -56,6 +60,7 @@ impl ScreenKind {
             ScreenKind::Command => 3,
             ScreenKind::Title => 4,
             ScreenKind::Options => 5,
+            ScreenKind::Packs => 8,
             ScreenKind::Multiplayer => 6,
             ScreenKind::SelectWorld => 7,
         }
@@ -490,6 +495,40 @@ impl GuiPipeline {
         Ok(self.call_bytes("packet", id_and_body, None)?)
     }
 
+    /// A use opened the command block editor at a position (vanilla
+    /// `LocalPlayer.openCommandBlock`; the block entity comes from the Java-side store).
+    pub fn open_command_block(&self, pos: BlockPos) -> anyhow::Result<()> {
+        self.with_bridge(|env, bridge| {
+            env.call_method(
+                bridge,
+                jni_str!("openCommandBlock"),
+                jni_sig!("(III)V"),
+                &[
+                    jni::objects::JValue::Int(pos.x),
+                    jni::objects::JValue::Int(pos.y),
+                    jni::objects::JValue::Int(pos.z),
+                ],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// A use opened the writable book's editor (vanilla `LocalPlayer.openItemGui`); `hand` is
+    /// `InteractionHand.values()` numbering (0 main, 1 off).
+    pub fn open_item_gui(&self, hand: i32) -> anyhow::Result<()> {
+        self.with_bridge(|env, bridge| {
+            env.call_method(
+                bridge,
+                jni_str!("openItemGui"),
+                jni_sig!("(I)V"),
+                &[jni::objects::JValue::Int(hand)],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     /// Sets a player inventory slot (vanilla `Inventory` numbering) in Java; the mirror in
     /// [`GameState::inventory`] follows.
     pub fn set_inventory_slot(&self, slot: i32, stack: &ItemStackData) -> anyhow::Result<()> {
@@ -631,6 +670,13 @@ impl GuiPipeline {
     /// call.
     pub fn take_create_world_request(&self) -> Option<crate::proxies::CreateWorldRequest> {
         self.with_state(|s| s.create_world_requested.take())
+    }
+
+    /// The resource pack selection the pack screen committed since the last call (vanilla's
+    /// `Minecraft.reloadResourcePacks`): repository ids, bottom first. The caller rebuilds its
+    /// asset stack and renderer from them.
+    pub fn take_resource_pack_ids(&self) -> Option<Vec<String>> {
+        self.with_state(|s| s.resource_pack_ids.take())
     }
 
     /// Tells the screens whether the local singleplayer server is running (the pause screen's

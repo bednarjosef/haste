@@ -125,6 +125,18 @@ const FORWARDED: &[&str] = &[
     "minecraft:set_player_inventory",
     "minecraft:merchant_offers",
     "minecraft:update_tags",
+    // the screens that edit block entities (signs, command blocks): the entity store and the
+    // editors live in Java (see haste.gui.BlockEntities)
+    "minecraft:block_entity_data",
+    "minecraft:open_sign_editor",
+    "minecraft:open_book",
+    // the recipe book (real vanilla Java over the forwarded packets): the book's displays and
+    // settings, the recipe container, and the ghost recipe the overlay shows on a right-click
+    "minecraft:recipe_book_add",
+    "minecraft:recipe_book_remove",
+    "minecraft:recipe_book_settings",
+    "minecraft:update_recipes",
+    "minecraft:place_ghost_recipe",
 ];
 
 /// Packets about one entity: forwarded only when they are about the local player.
@@ -458,6 +470,12 @@ impl Ui {
         self.state(|s| s.take_option_changes())
     }
 
+    /// The resource pack selection the pack screen committed since the last call (vanilla
+    /// `Minecraft.reloadResourcePacks` after Done): repository ids, bottom first.
+    pub fn take_resource_pack_selection(&self) -> Option<Vec<String>> {
+        self.gui().take_resource_pack_ids()
+    }
+
     /// A game key event (no screen open, SDL3 scancode) mirrored into the vanilla `KeyMapping`s,
     /// vanilla's `KeyboardHandler.keyPress` (press sets the down state and counts a click).
     pub fn game_key(&self, scancode: i32, pressed: bool) {
@@ -666,6 +684,27 @@ impl Ui {
     /// Whether vanilla code asked to leave the server (pause screen "Disconnect"); clears it.
     pub fn take_disconnect_request(&self) -> bool {
         self.state(|s| std::mem::take(&mut s.disconnect_requested))
+    }
+
+    /// Whether the player may use game-master blocks (vanilla
+    /// `Player.canUseGameMasterBlocks`: creative and operator level >= 2).
+    pub fn game_master_state(&self) -> (bool, u8) {
+        self.state(|s| (s.game_mode == GameMode::Creative, s.permission_level))
+    }
+
+    /// A use opened the command block editor (vanilla `LocalPlayer.openCommandBlock`).
+    pub fn open_used_command_block(&self, pos: haste_protocol::haste_core::BlockPos) {
+        if let Err(e) = self.gui().open_command_block(pos) {
+            tracing::warn!("opening the command block editor: {e:#}");
+        }
+    }
+
+    /// A use opened the writable book's editor (vanilla `LocalPlayer.openItemGui`); `hand` is
+    /// `InteractionHand.values()` numbering (0 main, 1 off).
+    pub fn open_item_gui(&self, hand: i32) {
+        if let Err(e) = self.gui().open_item_gui(hand) {
+            tracing::warn!("opening the book editor: {e:#}");
+        }
     }
 
     /// The connection ended: vanilla's disconnect screen with the reason; the HUD stops.

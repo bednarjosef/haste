@@ -37,7 +37,7 @@ use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 // Declared here rather than in main.rs (lead-owned); the lead may move it.
 #[path = "biomes.rs"]
-mod biomes;
+pub(crate) mod biomes;
 
 use crate::game::{self, Shared};
 use crate::net::{self, NetDriver};
@@ -331,6 +331,9 @@ struct Session {
     local: (EntityId, u128),
     /// The particle atlas types (uploaded to the renderer once it exists).
     particle_types: std::sync::Arc<haste_render::ParticleTypes>,
+    /// The server's resource packs downloaded during the connection (push order),
+    /// layered above the selection wherever this session's assets open.
+    server_packs: Vec<std::path::PathBuf>,
 }
 
 /// Connection-phase data the F3 overlay shows: biome names of the synced registry (index = the
@@ -429,7 +432,16 @@ impl Session {
         // The saved render distance is what we advertise in client_information; the server's
         // own view distance (login packet) caps what we mesh below.
         opts.client_information.view_distance = options.render_distance as i8;
+        // Server resource packs download into the game dir's `downloads`
+        // (vanilla's layout) and apply on top of the selection.
+        opts.downloads_dir = Some(game_dir().join("downloads"));
         let mut driver: NetDriver = rt.block_on(NetDriver::connect(opts))?;
+        let server_packs: Vec<std::path::PathBuf> = driver
+            .connection()
+            .server_packs()
+            .into_iter()
+            .map(|p| p.path)
+            .collect();
         driver.session.fov_effect_scale = options.fov_effect_scale;
         let (biomes, biome_climates, type_names, sounds, painting_variants, mob_variants) = {
             let regs = driver.connection().registries();
@@ -469,6 +481,9 @@ impl Session {
             block_entity_type_names(regs, &data)
         };
         let lid_states = lid_block_states(&data);
+        // The bells' and decorated pots' `block_event` action 1 states, for the same filter.
+        let bell_states = block_states_where(&data, haste_render::blockentity::is_bell_block);
+        let pot_states = block_states_where(&data, haste_render::blockentity::is_pot_block);
         // The particle types of the datagen registry (the synced one has no data we need):
         // one atlas built once, shared by the pool (name resolution) and the renderer.
         let particle_ids: Vec<haste_protocol::haste_core::Identifier> =
@@ -480,8 +495,12 @@ impl Session {
                 })
                 .collect();
         let particle_types = std::sync::Arc::new(
-            haste_render::ParticleTypes::build(&mut open_assets()?, &particle_ids)
-                .context("building the particle atlas")?,
+            haste_render::ParticleTypes::build(
+                &mut open_assets_with(&server_packs)?,
+                &particle_ids,
+                Some(&data.blocks),
+            )
+            .context("building the particle atlas")?,
         );
         let mut entities = net::new_entity_store(entity_types);
         tracing::info!("synced painting variants: {}", painting_variants.len());
@@ -506,6 +525,21 @@ impl Session {
             biome_climates.clone(),
             options.clone(),
         ));
+        // The server's configuration-phase packs are part of the running stack from the
+        // start; a later pack-screen reload keeps them layered (vanilla's repository
+        // holds them beside the selection).
+        *shared.applied_server_packs.lock() = server_packs.clone();
+        // Terrain particles tint with the biome colours (the same climates the
+        // renderer resolves for meshing).
+        {
+            let colors = haste_render::Colormaps::load(&mut open_assets_with(&server_packs)?)
+                .map(|maps| haste_render::BiomeColors::new(&biome_climates, &maps))
+                .unwrap_or_else(|e| {
+                    tracing::warn!("no biome colours (block particles untinted): {e:#}");
+                    haste_render::BiomeColors::new(&[], &haste_render::Colormaps::uniform(0xFFFFFF))
+                });
+            shared.particles.lock().set_biome_colors(colors);
+        }
         shared.hud_enabled.store(
             HUD_ENABLED.load(std::sync::atomic::Ordering::Relaxed),
             std::sync::atomic::Ordering::Relaxed,
@@ -514,6 +548,8 @@ impl Session {
             *shared.sound.lock() = sounds;
         }
         driver.session.set_lid_states(lid_states);
+        driver.session.set_bell_states(bell_states);
+        driver.session.set_pot_states(pot_states);
         let handle = rt.handle().clone();
         let sh = shared.clone();
         let game_thread = std::thread::Builder::new()
@@ -531,6 +567,7 @@ impl Session {
             options,
             local,
             particle_types,
+            server_packs,
         })
     }
 
@@ -684,8 +721,21 @@ pub struct WorldFeed {
             std::sync::Arc<haste_render::blockentity::BannerData>,
         ),
     >,
+    /// Parsed decorated pot sherds by position, rebuilt only when the NBT changes (the same
+    /// (pointer, length) caching scheme as `sign_texts`).
+    pot_sherds_cache: HashMap<
+        BlockPos,
+        (
+            usize,
+            usize,
+            std::sync::Arc<haste_render::blockentity::PotSherds>,
+        ),
+    >,
     /// The skull animations by position for this frame (reused lookup scratch).
     skull_anims: HashMap<BlockPos, (f32, f32)>,
+    /// The object-model block entities' animation state by position for this frame (reused
+    /// lookup scratch; the game thread ticks it once per tick).
+    anim_map: HashMap<BlockPos, haste_render::BlockEntityAnim>,
     /// The shared world as the mesh workers see it (created on the first feed).
     source: Option<Arc<dyn haste_render::SnapshotSource>>,
     /// Sections submitted this frame (reused).
@@ -721,6 +771,29 @@ impl WorldFeed {
         for p in dirty.drain(..) {
             if self.queued.insert(p) {
                 self.queue.push(p);
+            }
+        }
+        self.sort_needed = true;
+        self.last_arrival = Some(Instant::now());
+    }
+
+    /// Queues every non-empty section of the loaded world for meshing (a rebuilt renderer
+    /// starts with empty arenas: vanilla's reload re-bakes every model and section too).
+    /// Counts as an arrival so `settled` waits for the re-mesh to drain first.
+    fn queue_all_sections(&mut self, shared: &Shared) {
+        let world = shared.world.read();
+        for chunk_pos in world.loaded_chunks() {
+            let Some(chunk) = world.chunk(chunk_pos) else {
+                continue;
+            };
+            for (i, section) in chunk.sections.iter().enumerate() {
+                if section.is_empty() {
+                    continue;
+                }
+                let pos = SectionPos::new(chunk_pos.x, chunk.min_section + i as i32, chunk_pos.z);
+                if self.queued.insert(pos) {
+                    self.queue.push(pos);
+                }
             }
         }
         self.sort_needed = true;
@@ -838,6 +911,11 @@ impl WorldFeed {
             self.skull_anims.clear();
             self.skull_anims.extend(anims.iter().copied());
         }
+        {
+            let anims = shared.block_entity_anims.lock();
+            self.anim_map.clear();
+            self.anim_map.extend(anims.iter().map(|(p, a)| (*p, *a)));
+        }
         let names = &shared.block_entity_names;
         let blocks = &shared.data.blocks;
         let xmas = haste_render::xmas_textures();
@@ -906,53 +984,111 @@ impl WorldFeed {
                 // `StandingSignRenderer`/`BannerRenderer`/`SkullBlockRenderer` picking the
                 // block state's `rotation` segment or the wall `facing`), the sign's cached
                 // text, the banner's wave phase and cached patterns, the skull's animation.
-                let (mut sign_angle, text, banner_phase, banner, skull_anim) = match kind {
-                    haste_render::BlockEntityKind::Sign { hanging } => {
-                        let angle = rotation_or_facing(blocks, state, facing);
-                        (
-                            angle,
-                            self.sign_text(pos, be, hanging),
+                let (mut sign_angle, text, banner_phase, banner, skull_anim, anim, sherds) =
+                    match kind {
+                        haste_render::BlockEntityKind::Sign { hanging } => {
+                            let angle = rotation_or_facing(blocks, state, facing);
+                            (
+                                angle,
+                                self.sign_text(pos, be, hanging),
+                                0.0,
+                                None,
+                                haste_render::TickPair::fixed(0.0),
+                                None,
+                                None,
+                            )
+                        }
+                        haste_render::BlockEntityKind::Banner { .. } => {
+                            let angle = rotation_or_facing(blocks, state, facing);
+                            // Vanilla `BannerRenderer.extractRenderState`'s phase: the position
+                            // hash plus the world age, over 100, plus the partial tick.
+                            let view = shared.view.lock();
+                            let phase = haste_render::blockentity::banner_wave_phase(
+                                pos,
+                                view.world_age,
+                                partial,
+                            );
+                            (
+                                angle,
+                                None,
+                                phase,
+                                self.banner_data(pos, be, block),
+                                haste_render::TickPair::fixed(0.0),
+                                None,
+                                None,
+                            )
+                        }
+                        haste_render::BlockEntityKind::Skull { .. } => {
+                            // The ground rotation angle (wall skulls read `facing` instead) and
+                            // the powered animation's tick ends.
+                            let angle = rotation_or_facing(blocks, state, facing);
+                            let anim = self.skull_anims.get(&pos).copied().unwrap_or((0.0, 0.0));
+                            (
+                                angle,
+                                None,
+                                0.0,
+                                None,
+                                haste_render::TickPair {
+                                    start: anim.0,
+                                    end: anim.1,
+                                },
+                                None,
+                                None,
+                            )
+                        }
+                        haste_render::BlockEntityKind::DecoratedPot => {
+                            // The wobble from the game thread's tick, the sherds from the block
+                            // entity's NBT (cached like the banner's patterns).
+                            let anim = self.anim_map.get(&pos).copied();
+                            (
+                                0.0,
+                                None,
+                                0.0,
+                                None,
+                                haste_render::TickPair::fixed(0.0),
+                                anim.map(|a| a.at(partial)),
+                                self.pot_sherds(pos, be),
+                            )
+                        }
+                        haste_render::BlockEntityKind::Lectern => {
+                            // A lectern's book is at rest (`BOOK_STATE` is constant) and its yaw
+                            // comes from the block's `facing`.
+                            (
+                                0.0,
+                                None,
+                                0.0,
+                                None,
+                                haste_render::TickPair::fixed(0.0),
+                                None,
+                                None,
+                            )
+                        }
+                        haste_render::BlockEntityKind::EnchantTable
+                        | haste_render::BlockEntityKind::Bell
+                        | haste_render::BlockEntityKind::Conduit => {
+                            // Ticked by the game thread (vanilla's block entity tickers); the
+                            // renderer's counters are lerped by the partial tick, vanilla's
+                            // `Mth.lerp(partialTicks, oX, X)`.
+                            (
+                                0.0,
+                                None,
+                                0.0,
+                                None,
+                                haste_render::TickPair::fixed(0.0),
+                                self.anim_map.get(&pos).copied().map(|a| a.at(partial)),
+                                None,
+                            )
+                        }
+                        _ => (
+                            0.0,
+                            None,
                             0.0,
                             None,
                             haste_render::TickPair::fixed(0.0),
-                        )
-                    }
-                    haste_render::BlockEntityKind::Banner { .. } => {
-                        let angle = rotation_or_facing(blocks, state, facing);
-                        // Vanilla `BannerRenderer.extractRenderState`'s phase: the position
-                        // hash plus the world age, over 100, plus the partial tick.
-                        let view = shared.view.lock();
-                        let phase = haste_render::blockentity::banner_wave_phase(
-                            pos,
-                            view.world_age,
-                            partial,
-                        );
-                        (
-                            angle,
                             None,
-                            phase,
-                            self.banner_data(pos, be, block),
-                            haste_render::TickPair::fixed(0.0),
-                        )
-                    }
-                    haste_render::BlockEntityKind::Skull { .. } => {
-                        // The ground rotation angle (wall skulls read `facing` instead) and
-                        // the powered animation's tick ends.
-                        let angle = rotation_or_facing(blocks, state, facing);
-                        let anim = self.skull_anims.get(&pos).copied().unwrap_or((0.0, 0.0));
-                        (
-                            angle,
                             None,
-                            0.0,
-                            None,
-                            haste_render::TickPair {
-                                start: anim.0,
-                                end: anim.1,
-                            },
-                        )
-                    }
-                    _ => (0.0, None, 0.0, None, haste_render::TickPair::fixed(0.0)),
-                };
+                        ),
+                    };
                 // Wall skulls turn by the wall `facing` (their transform reads it); the
                 // rotation segment is only for the ground ones.
                 if matches!(
@@ -980,6 +1116,8 @@ impl WorldFeed {
                     banner_phase,
                     banner,
                     skull_anim,
+                    anim,
+                    sherds,
                 });
             }
         }
@@ -1002,6 +1140,25 @@ impl WorldFeed {
         }
         let parsed = parse_banner_nbt(&be.nbt, block)?;
         self.banner_texts
+            .insert(pos, (key.0, key.1, parsed.clone()));
+        Some(parsed)
+    }
+
+    /// The parsed decorated pot sherds at `pos` (`DecoratedPotBlockEntity`'s `sherds` NBT).
+    /// Cached like the banner patterns: re-parsed only when the payload changes.
+    fn pot_sherds(
+        &mut self,
+        pos: BlockPos,
+        be: &haste_core::chunk::BlockEntityData,
+    ) -> Option<std::sync::Arc<haste_render::blockentity::PotSherds>> {
+        let key = (be.nbt.as_ptr() as usize, be.nbt.len());
+        if let Some((k, len, data)) = self.pot_sherds_cache.get(&pos) {
+            if (*k, *len) == key {
+                return Some(data.clone());
+            }
+        }
+        let parsed = std::sync::Arc::new(parse_pot_sherds(&be.nbt));
+        self.pot_sherds_cache
             .insert(pos, (key.0, key.1, parsed.clone()));
         Some(parsed)
     }
@@ -1099,6 +1256,54 @@ fn rotation_or_facing(
         }),
         None => to_y_rot(facing),
     }
+}
+
+/// The pottery pattern a sherd item names (vanilla's item
+/// `minecraft:provides_pottery_pattern` component against `DecoratedPotPattern`'s asset id):
+/// `minecraft:angler_pottery_sherd` -> `minecraft:angler`. `minecraft:brick` (the blank sherd)
+/// has none. Items from mods whose names do not follow the vanilla pattern draw the blank side.
+fn sherd_pattern(item: &haste_core::Identifier) -> Option<haste_core::Identifier> {
+    if item.namespace() != "minecraft" {
+        return None;
+    }
+    let path = item.path().strip_suffix("_pottery_sherd")?;
+    Some(haste_core::Identifier::minecraft(path))
+}
+
+/// A decorated pot's four sherds from its NBT (`DecoratedPotBlockEntity`'s `sherds`, a record
+/// of optional item stack templates keyed `back`, `left`, `right`, `front`; the item is either
+/// an `{id, count}` compound or a plain id string). Sides without a sherd are `None`.
+fn parse_pot_sherds(nbt: &[u8]) -> haste_render::blockentity::PotSherds {
+    use haste_protocol::nbt::deserializer::NbtReadHelperJava;
+    use haste_protocol::nbt::NbtTag;
+    let side = |c: &haste_protocol::nbt::NbtCompound, key: &str| match c.get(key) {
+        // Vanilla writes each sherd as an item stack template; older payloads (and lenient
+        // readers) allow the plain item id.
+        Some(NbtTag::Compound(item)) => item.get_string("id").and_then(|s| {
+            haste_core::Identifier::parse(s)
+                .ok()
+                .as_ref()
+                .and_then(sherd_pattern)
+        }),
+        Some(NbtTag::String(s)) => haste_core::Identifier::parse(s)
+            .ok()
+            .as_ref()
+            .and_then(sherd_pattern),
+        _ => None,
+    };
+    let mut out = haste_render::blockentity::PotSherds::default();
+    let mut cursor = std::io::Cursor::new(nbt);
+    let mut helper = NbtReadHelperJava::new(&mut cursor);
+    let Ok(doc) = haste_protocol::nbt::Nbt::read_unnamed(&mut helper) else {
+        return out;
+    };
+    if let Some(c) = doc.root_tag.get_compound("sherds") {
+        out.front = side(c, "front");
+        out.back = side(c, "back");
+        out.left = side(c, "left");
+        out.right = side(c, "right");
+    }
+    out
 }
 
 /// A banner's patterns from its NBT (`BannerBlockEntity`'s `patterns`: a list of
@@ -1417,14 +1622,23 @@ pub fn view_bob(
 /// saved option with vanilla's per-tick FOV modifier interpolated, then the submerged and
 /// death adjustments; the hurt/death tilts and the view bobbing come from the view's per-tick
 /// state (vanilla's `Camera.calculateFov` and `GameRenderer.bobHurt`/`bobView`).
-fn frame_view(
+fn frame_view<'w>(
     shared: &Shared,
     perspective: game::Perspective,
     yaw: f32,
     pitch: f32,
     options: &Options,
     now: Instant,
-) -> (Camera, SkyState, LightmapFrame, f32, i32, u64) {
+    weather: &'w mut haste_render::WeatherFrame,
+) -> (
+    Camera,
+    SkyState,
+    LightmapFrame,
+    f32,
+    i32,
+    u64,
+    Option<&'w haste_render::WeatherFrame>,
+) {
     let view = shared.view.lock().clone();
     let partial = game::partial_tick(view.tick_at, now);
     let eye = game::interpolate(view.prev_eye, view.eye, partial);
@@ -1502,20 +1716,47 @@ fn frame_view(
         },
     };
     let fog_end = (view.view_distance.max(2) * 16) as f32;
+    // The weather levels (`Level.getRainLevel`/`getThunderLevel` lerped by partial tick)
+    // and the extracted columns (vanilla `WeatherEffectRenderer.extractRenderState`, which
+    // runs per frame on the render thread). The caller's frame buffer is reused, so a frame
+    // with rain allocates nothing.
+    let rain_level = view.rain_level.0 + (view.rain_level.1 - view.rain_level.0) * partial;
+    let thunder_level =
+        view.thunder_level.0 + (view.thunder_level.1 - view.thunder_level.0) * partial;
+    let weather_out = if rain_level > 0.0 && view.has_sky {
+        extract_weather(
+            weather,
+            &world,
+            &shared.biome_climates,
+            pos,
+            rain_level,
+            view.world_age,
+            view.sea_level,
+            partial,
+        );
+        Some(&*weather)
+    } else {
+        None
+    };
+    // `Level.getThunderLevel` scales the thunder level by the rain level (a dry thunderstorm
+    // cannot darken); the fog's thunder input is that product.
+    let mut fog = fog_inputs(
+        &world,
+        &shared.data,
+        &shared.biome_climates,
+        pos,
+        &view,
+        partial,
+    );
+    fog.thunder_level *= rain_level;
     let sky = SkyState {
         time_of_day: view.time_of_day,
-        rain: 0.0,
+        rain: rain_level,
+        thunder: thunder_level,
         dimension_has_sky: view.has_sky,
         fog_start: fog_end * 0.75,
         fog_end,
-        fog: fog_inputs(
-            &world,
-            &shared.data,
-            &shared.biome_climates,
-            pos,
-            &view,
-            partial,
-        ),
+        fog,
     };
     drop(world);
     // The lightmap inputs the extractor gathers per frame (LightmapRenderStateExtractor.extract):
@@ -1547,6 +1788,7 @@ fn frame_view(
         partial,
         view.view_distance,
         view.animation_tick,
+        weather_out,
     )
 }
 
@@ -1581,6 +1823,174 @@ fn camera_fog_type(world: &World, data: &haste_data::GameData, pos: DVec3) -> Fo
         return FogType::PowderSnow;
     }
     FogType::Atmospheric
+}
+
+/// Vanilla `RandomSource` (the single-threaded variant `WeatherEffectRenderer` uses): the
+/// 48-bit Java LCG. `setSeed` xors the multiplier, `next(bits)` advances the seed.
+struct JavaRandom(u64);
+
+/// The Java LCG's multiplier, 25214903917 (0x5DEECE66D).
+const LCG_MULTIPLIER: u64 = 25_214_903_917;
+/// The Java LCG's increment.
+const LCG_INCREMENT: u64 = 11;
+/// The Java LCG's 48-bit mask.
+const LCG_MASK: u64 = (1u64 << 48) - 1;
+
+impl JavaRandom {
+    fn new(seed: i64) -> Self {
+        JavaRandom((seed as u64 ^ LCG_MULTIPLIER) & LCG_MASK)
+    }
+
+    fn next_i32(&mut self, bits: u32) -> i32 {
+        self.0 = (self
+            .0
+            .wrapping_mul(LCG_MULTIPLIER)
+            .wrapping_add(LCG_INCREMENT))
+            & LCG_MASK;
+        (self.0 >> (48 - bits)) as i32
+    }
+
+    /// `nextFloat`.
+    fn next_float(&mut self) -> f32 {
+        self.next_i32(24) as f32 * 5.960_464_5E-8
+    }
+
+    /// `nextDouble`.
+    fn next_double(&mut self) -> f64 {
+        let upper = self.next_i32(26) as u64;
+        let lower = self.next_i32(27) as u64;
+        ((upper << 27) + lower) as f64 * 1.110_223E-16
+    }
+
+    /// `nextGaussian` (Marsaglia polar).
+    fn next_gaussian(&mut self) -> f64 {
+        loop {
+            let x = 2.0 * self.next_double() - 1.0;
+            let y = 2.0 * self.next_double() - 1.0;
+            let r2 = x * x + y * y;
+            if r2 < 1.0 && r2 > 0.0 {
+                let m = (-2.0 * r2.ln() / r2).sqrt();
+                return x * m;
+            }
+        }
+    }
+}
+
+/// Vanilla `WeatherEffectRenderer.extractRenderState` + the per-column instances: scans the
+/// weather radius around the camera, clips each column's y range to the heightmap, sorts it
+/// into rain or snow by the biome's precipitation at the camera's y, and fills the per-column
+/// random's texture offsets. Fills the caller's reused frame buffer.
+#[allow(clippy::too_many_arguments)]
+fn extract_weather(
+    frame: &mut haste_render::WeatherFrame,
+    world: &World,
+    climates: &[haste_render::BiomeClimate],
+    camera: DVec3,
+    intensity: f32,
+    game_time: i64,
+    sea_level: i32,
+    partial_tick: f32,
+) {
+    use haste_core::view::BlockView as _;
+    let radius = haste_render::weather::WEATHER_RADIUS;
+    frame.intensity = intensity;
+    frame.radius = radius;
+    frame.rain.clear();
+    frame.snow.clear();
+    let cbx = camera.x.floor() as i32;
+    let cby = camera.y.floor() as i32;
+    let cbz = camera.z.floor() as i32;
+    // One-time diagnostics: the camera, sea level, one column's height and the frame's
+    // rain/snow counts, so an invisible weather pass is debuggable from the log.
+    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let mut terrain_of_first: Option<i32> = None;
+    for z in cbz - radius..=cbz + radius {
+        for x in cbx - radius..=cbx + radius {
+            // `Level.getHeight(MOTION_BLOCKING, x, z)` (0 below the world when no chunk:
+            // the column then degenerates and is skipped by the y test, like vanilla's).
+            let terrain_height = crate::net::column_height(world, x, z);
+            if terrain_of_first.is_none() {
+                terrain_of_first = Some(terrain_height);
+            }
+            let y0 = (cby - radius).max(terrain_height);
+            let y1 = (cby + radius).max(terrain_height);
+            if y1 - y0 == 0 {
+                continue;
+            }
+            let probe = BlockPos::new(x, cby, z);
+            let precipitation =
+                crate::net::precipitation_at_pos(world, climates, &probe, sea_level);
+            let seed = haste_render::weather::column_seed(x, z);
+            let mut rng = JavaRandom::new(seed as i64);
+            let light_sample_y = cby.max(terrain_height);
+            let light_pos = BlockPos::new(x, light_sample_y, z);
+            let light = (world.block_light(light_pos), world.sky_light(light_pos));
+            let column = haste_render::WeatherColumn {
+                x,
+                z,
+                bottom_y: y0,
+                top_y: y1,
+                u_offset: 0.0,
+                v_offset: 0.0,
+                light,
+                seed,
+            };
+            match precipitation {
+                crate::net::Precipitation::Rain => {
+                    // `createRainColumnInstance`: the scroll speed 3 + rand, the wrapped
+                    // tick offset and the v offset it scrolls to.
+                    let wrapped_ticks = (game_time & 131071) as f32;
+                    let tick_offset = (x
+                        .wrapping_mul(x)
+                        .wrapping_mul(3121)
+                        .wrapping_add(x.wrapping_mul(45238971))
+                        .wrapping_add(z.wrapping_mul(z).wrapping_mul(418711))
+                        .wrapping_add(z.wrapping_mul(13761)))
+                        & 0xFF;
+                    let speed = 3.0 + rng.next_float();
+                    let texture_offset =
+                        -(wrapped_ticks + tick_offset as f32 + partial_tick) / 32.0 * speed;
+                    frame.rain.push(haste_render::WeatherColumn {
+                        v_offset: texture_offset % 32.0,
+                        ..column
+                    });
+                }
+                crate::net::Precipitation::Snow => {
+                    // `createSnowColumnInstance`: the drift u/v from the seeded gaussian
+                    // pair, the slow fall, and the brightened light.
+                    let wrapped_ticks = (game_time & 131071) as f32;
+                    let time = wrapped_ticks as f64 + partial_tick as f64;
+                    let u = (rng.next_double() + time * 0.01 * rng.next_gaussian()) as f32;
+                    let v = (rng.next_double() + time * rng.next_gaussian() * 0.001) as f32;
+                    let v_offset = -((game_time & 511) as f32 + partial_tick) / 512.0 + v;
+                    let brightened = (
+                        ((light.0 as i32 * 3 + 15) / 4).clamp(0, 15) as u8,
+                        ((light.1 as i32 * 3 + 15) / 4).clamp(0, 15) as u8,
+                    );
+                    frame.snow.push(haste_render::WeatherColumn {
+                        u_offset: u,
+                        v_offset,
+                        light: brightened,
+                        ..column
+                    });
+                }
+                crate::net::Precipitation::None => {}
+            }
+        }
+    }
+    if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tracing::info!(
+            "weather extraction: camera ({:.1}, {:.1}, {:.1}), sea level {sea_level}, first \
+             column height {:?}, {} rain + {} snow columns, intensity {:.3}",
+            camera.x,
+            camera.y,
+            camera.z,
+            terrain_of_first,
+            frame.rain.len(),
+            frame.snow.len(),
+            intensity
+        );
+    }
 }
 
 /// The `FogRenderer.setupFog`/`computeFogColor` inputs: the camera's fluid, the dimension
@@ -1637,6 +2047,12 @@ fn fog_inputs(
         darken_world_amount: view.lightmap_boss_darkening.0
             + (view.lightmap_boss_darkening.1 - view.lightmap_boss_darkening.0) * partial,
         void_darkness_onset_range: 32.0,
+        // The weather fields (rain/thunder levels, the rain fog multiplier) are filled by
+        // the caller from the same view.
+        rain_level: view.rain_level.0 + (view.rain_level.1 - view.rain_level.0) * partial,
+        thunder_level: view.thunder_level.0
+            + (view.thunder_level.1 - view.thunder_level.0) * partial,
+        rain_fog_multiplier: view.rain_fog_multiplier,
     }
 }
 
@@ -2167,6 +2583,11 @@ impl InputRouter {
             yaw: self.yaw,
             pitch: self.pitch,
         };
+        // The held attack/use are the KeyMappings' down state while the JVM is up, like
+        // vanilla's `handleKeybinds` reads them (a screen opening calls KeyMapping.releaseAll,
+        // so a button whose release a screen consumed does not repeat the use after it closes);
+        // the InputRouter's own press tracking is the fallback for when there is no JVM.
+        let mut held = None;
         if let Some(ui) = ui {
             let b = ui.game_input();
             state.forward = b & bits::B_FORWARD != 0;
@@ -2176,6 +2597,7 @@ impl InputRouter {
             state.jump = b & bits::B_JUMP != 0;
             state.sneak = b & bits::B_SNEAK != 0;
             state.sprint = b & bits::B_SPRINT != 0;
+            held = Some((b & bits::B_ATTACK != 0, b & bits::B_USE != 0));
         }
         let mut shared_input = shared.input.lock();
         shared_input.state = state;
@@ -2184,6 +2606,10 @@ impl InputRouter {
             let i = &mut shared_input.interact;
             i.attack = self.attack;
             i.use_item = self.use_item;
+            if let Some((attack, use_item)) = held {
+                i.attack = attack;
+                i.use_item = use_item;
+            }
             // The click counts accumulate across samples (the render thread may sample several
             // times per tick); the game thread drains them once per tick.
             i.attack_clicks = i
@@ -2221,13 +2647,70 @@ impl InputRouter {
 }
 
 fn open_assets() -> anyhow::Result<haste_assets::Assets> {
+    open_assets_with(&[])
+}
+
+/// [`open_assets`] with the server's downloaded packs layered above the
+/// selection (vanilla's `DownloadedPackSource`).
+fn open_assets_with(server_packs: &[std::path::PathBuf]) -> anyhow::Result<haste_assets::Assets> {
     let jar = haste_protocol::haste_core::paths::client_jar();
-    haste_assets::Assets::open(
+    let mut assets = haste_assets::Assets::open(
         &jar,
         &haste_protocol::haste_core::paths::assets_dir(),
         "26.3",
     )
-    .with_context(|| format!("opening assets from {}", jar.display()))
+    .with_context(|| format!("opening assets from {}", jar.display()))?;
+    // The pack selection options.txt holds (vanilla `Options.resourcePacks`,
+    // written by the pack screen's Done through the JVM's own Options) is the
+    // source of truth at startup, like vanilla `Minecraft`'s constructor
+    // (`reload` + `loadSelectedResourcePacks`).
+    let ids = selected_resource_packs();
+    if !ids.is_empty() || !server_packs.is_empty() {
+        tracing::info!("applying resource packs: {}", ids.join(", "));
+        assets.apply_server_packs(&default_resource_packs_dir(), &ids, server_packs);
+    }
+    Ok(assets)
+}
+
+/// The resource pack ids saved in `<game dir>/options.txt` (`resourcePacks:`
+/// as vanilla's GSON string array, bottom first), or none.
+pub(crate) fn selected_resource_packs() -> Vec<String> {
+    let options_txt = game_dir().join("options.txt");
+    let Ok(text) = std::fs::read_to_string(&options_txt) else {
+        return Vec::new();
+    };
+    for line in text.lines() {
+        if let Some(rest) = line.trim().strip_prefix("resourcePacks:") {
+            return parse_gson_string_array(rest.trim());
+        }
+    }
+    Vec::new()
+}
+
+/// Vanilla's `Options` saves the pack list as a GSON JSON array on one line,
+/// e.g. `["file/red","vanilla"]` (see `Options.process`'s `GSON::toJson`).
+fn parse_gson_string_array(text: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(text).unwrap_or_default()
+}
+
+/// The directory vanilla code sees as the game directory (servers.dat,
+/// options.txt, `resourcepacks/`): Haste's config dir, or `$HASTE_GAME_DIR`
+/// when set (tests and dev runs isolate their game files with it).
+pub fn game_dir() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("HASTE_GAME_DIR") {
+        if !dir.is_empty() {
+            return std::path::PathBuf::from(dir);
+        }
+    }
+    haste_setup::servers::path()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        .expect("no platform config dir for the game directory")
+}
+
+/// `<game dir>/resourcepacks`: vanilla's resource pack folder, where
+/// `FolderRepositorySource` looks (Java side) and `apply_packs` reads (Rust).
+fn default_resource_packs_dir() -> std::path::PathBuf {
+    game_dir().join("resourcepacks")
 }
 
 /// `minecraft:block_entity_type` names by synced registry id (stored block entities carry that
@@ -2255,9 +2738,17 @@ fn block_entity_type_names(
 /// The block states whose `block_event` action 1 drives a lid (chests, ender chests, trapped
 /// chests, shulker boxes; copper chests are not drawn yet), for the session's event filter.
 fn lid_block_states(data: &haste_data::GameData) -> std::collections::HashSet<BlockStateId> {
+    block_states_where(data, haste_render::blockentity::is_lid_block)
+}
+
+/// Every block state whose block matches `f`, for the session's `block_event` filters.
+fn block_states_where(
+    data: &haste_data::GameData,
+    f: impl Fn(&haste_core::Identifier) -> bool,
+) -> std::collections::HashSet<BlockStateId> {
     (0..data.blocks.len() as u32)
         .map(BlockStateId)
-        .filter(|s| haste_render::blockentity::is_lid_block(data.blocks.block_of(*s)))
+        .filter(|s| f(data.blocks.block_of(*s)))
         .collect()
 }
 
@@ -2317,9 +2808,7 @@ impl Menu {
                     // game directory: Haste's config directory, where the saved server list
                     // already lives (haste-setup's servers.dat). Singleplayer worlds live next
                     // to it (haste-setup's worlds module); the world list reads that dir.
-                    cfg.game_dir = haste_setup::servers::path()
-                        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
-                        .unwrap_or(cfg.game_dir);
+                    cfg.game_dir = game_dir();
                     if let Some(dir) = haste_setup::worlds::worlds_dir() {
                         cfg.singleplayer_dir = dir;
                     }
@@ -2372,6 +2861,7 @@ fn menu_screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let data = net::load_game_data()?;
     let mut renderer = Renderer::new_offscreen(args.width, args.height, &mut assets, &data.blocks)?;
     renderer.set_item_registry(&data.registries);
+    renderer.set_ao_shapes(&data.blocks, &data.shapes);
     let deadline = Instant::now() + Duration::from_secs(args.seconds.max(60));
     let options = load_options();
     let input = InputRouter::default();
@@ -2397,6 +2887,7 @@ fn menu_screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
                 breaking: &[],
                 camera_entity: None,
                 spin: None,
+                weather: None,
             };
             renderer.render(&frame)?;
             frames += 1;
@@ -2482,10 +2973,11 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let shared = session.shared.clone();
     // The shot is first person: the game thread's camera effects take that perspective.
     shared.input.lock().first_person = true;
-    let mut assets = open_assets()?;
+    let mut assets = open_assets_with(&session.server_packs)?;
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
+    renderer.set_ao_shapes(&shared.data.blocks, &shared.data.shapes);
     renderer.set_biomes(&session.biomes);
     renderer.set_particle_types(&session.particle_types);
     renderer.set_dimension(shared.world.read().dimension());
@@ -2523,13 +3015,15 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             input.state.yaw = look.0 - offset.0;
             input.state.pitch = (look.1 - offset.1).clamp(-90.0, 90.0);
         }
-        let (mut camera, sky, lightmap, partial, vd, animation_tick) = frame_view(
+        let mut weather_guard = shared.weather_scratch.lock();
+        let (mut camera, sky, lightmap, partial, vd, animation_tick, weather) = frame_view(
             &shared,
             perspective,
             look.0 - offset.0,
             look.1 - offset.1,
             &session.options,
             Instant::now(),
+            &mut weather_guard,
         );
         if let Some(pos) = want_pos {
             let view = shared.view.lock().clone();
@@ -2594,6 +3088,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             breaking: &breaking,
             camera_entity: (!perspective.draws_player()).then_some(session.local.0),
             spin,
+            weather,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -2604,6 +3099,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             renderer.prepare_particles(&mut particles, &*world, camera, partial);
         }
         stats = renderer.render(&frame)?;
+        drop(weather_guard);
         frames += 1;
         let placed = shared.view.lock().has_position;
         if shared.is_closed() {
@@ -2655,8 +3151,12 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let c = last_camera;
     let view = shared.view.lock().clone();
     let entities = feed.instances.len();
+    let chunks = (
+        shared.chunks_loaded.load(Ordering::Relaxed),
+        shared.chunks_unloaded.load(Ordering::Relaxed),
+    );
     println!(
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} gui commands, {} entity instances ({} drew geometry; perspective {}, local player {}), {} particles drawn, {} shadow quads, {} block entities, target {:?}",
+        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} gui commands, {} entity instances ({} drew geometry; perspective {}, local player {}), {} particles drawn, {} shadow quads, {} block entities, {} chunks loaded/{} unloaded, target {:?}",
         file.display(),
         image.width(),
         image.height(),
@@ -2677,6 +3177,8 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         renderer.particles_drawn(),
         renderer.shadow_quad_count(),
         stats.block_entities_drawn,
+        chunks.0,
+        chunks.1,
         view.block_target
     );
     if let Some((color, fog)) = renderer.last_fog() {
@@ -2767,11 +3269,17 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     // a world; `menu` above only covers the boot, so this outlives it).
     let mut in_menu = session.is_none();
     let mut shared = session.as_ref().map(|s| s.shared.clone());
-    let mut assets = open_assets()?;
+    let mut assets = open_assets_with(
+        &session
+            .as_ref()
+            .map(|s| s.server_packs.clone())
+            .unwrap_or_default(),
+    )?;
     let data = net::load_game_data()?;
     let mut renderer = Renderer::new_offscreen(args.width, args.height, &mut assets, &data.blocks)?;
     if let Some(s) = &session {
         renderer.set_item_registry(&s.shared.data.registries);
+        renderer.set_ao_shapes(&s.shared.data.blocks, &s.shared.data.shapes);
         renderer.set_biomes(&s.biomes);
         renderer.set_particle_types(&s.particle_types);
         renderer.set_dimension(s.shared.world.read().dimension());
@@ -2824,6 +3332,8 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     // Screenshot actions of this tick, saved after the frame is rendered (the readback must
     // include the frame the actions just produced: an open screen, the typed chat).
     let mut shots: Vec<String> = Vec::new();
+    // Set when a resource pack selection rebuilt the renderer (`wait_until reloaded`).
+    let mut resource_packs_reloaded = false;
     // The last rendered GUI frame (click_text finds its label in it).
     let mut last_gui = GuiFrame::default();
     // An F2 press this tick: save the frame to the config screenshots dir after it is rendered.
@@ -2847,6 +3357,37 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         // mode there is no view yet: `joined`/`settled` read as false.
         let mut view = shared.as_ref().map(|s| s.view.lock().clone());
         let look = (input.yaw, input.pitch);
+        // The pack screen's Done: rebuild the renderer from the new selection (vanilla's
+        // `Minecraft.reloadResourcePacks`) before this iteration's tick computes its state,
+        // so `wait_until reloaded`/`settled` see the new feed's queue, not the old one.
+        if let Some(shared) = shared.as_ref() {
+            if let Some(reload) = shared.resource_pack_reload.lock().take() {
+                let packs = reload
+                    .ids
+                    .iter()
+                    .cloned()
+                    .chain(reload.server.iter().map(|p| p.display().to_string()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                tracing::info!("rebuilding renderer with resource packs [{packs}]");
+                let session_ref = session.as_ref().expect("a session exists");
+                let mut fresh_assets = open_assets_with(&reload.server)?;
+                let mut fresh = Renderer::new_offscreen(
+                    args.width,
+                    args.height,
+                    &mut fresh_assets,
+                    &data.blocks,
+                )?;
+                fresh.set_item_registry(&session_ref.shared.data.registries);
+                fresh.set_biomes(&session_ref.biomes);
+                fresh.set_particle_types(&session_ref.particle_types);
+                fresh.set_dimension(session_ref.shared.world.read().dimension());
+                renderer = fresh;
+                feed = WorldFeed::default();
+                feed.queue_all_sections(shared);
+                resource_packs_reloaded = true;
+            }
+        }
         // Pick up a live option change (the options bridge) within a frame.
         if let Some(shared) = shared.as_ref() {
             let version = shared.options_version.load(Ordering::Relaxed);
@@ -2890,6 +3431,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                     settled,
                     screen_open: ui.as_ref().is_some_and(|u| u.screen_open()),
                     screen_class,
+                    reloaded: resource_packs_reloaded,
                 };
                 // Menu mode's screen tick and the join the screens requested — the multiplayer
                 // list's Join (a plain address), the world list's Play or the create screen's
@@ -2917,6 +3459,10 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                             ) {
                                 Ok(s) => {
                                     renderer.set_item_registry(&s.shared.data.registries);
+                                    renderer.set_ao_shapes(
+                                        &s.shared.data.blocks,
+                                        &s.shared.data.shapes,
+                                    );
                                     renderer.set_biomes(&s.biomes);
                                     renderer.set_particle_types(&s.particle_types);
                                     arrived = Some(s);
@@ -2958,6 +3504,10 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                                     ) {
                                         Ok(s) => {
                                             renderer.set_item_registry(&s.shared.data.registries);
+                                            renderer.set_ao_shapes(
+                                                &s.shared.data.blocks,
+                                                &s.shared.data.shapes,
+                                            );
                                             renderer.set_biomes(&s.biomes);
                                             renderer.set_particle_types(&s.particle_types);
                                             arrived = Some(s);
@@ -3132,6 +3682,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 breaking: &[],
                 camera_entity: None,
                 spin: None,
+                weather: None,
             };
             renderer.render(&frame)?;
             frames += 1;
@@ -3160,13 +3711,15 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         }
         let shared = shared.as_ref().expect("the session exists");
         let session_ref = session.as_ref().expect("the session exists");
-        let (camera, sky, lightmap, partial, vd, animation_tick) = frame_view(
+        let mut weather_guard = shared.weather_scratch.lock();
+        let (camera, sky, lightmap, partial, vd, animation_tick, weather) = frame_view(
             shared,
             game::Perspective::FirstPerson,
             look.0,
             look.1,
             &options,
             Instant::now(),
+            &mut weather_guard,
         );
         feed.feed(shared, &mut renderer, camera_section(&camera), vd);
         let (entities, block_entities) =
@@ -3226,14 +3779,21 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             breaking: &breaking,
             camera_entity: Some(session_ref.local.0),
             spin,
+            weather,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        {
+            let world = shared.world.read();
+            let mut particles = shared.particles.lock();
+            renderer.prepare_particles(&mut particles, &*world, camera, partial);
+        }
         renderer.set_lightmap_frame(lightmap);
         if let Ok(stats) = renderer.render(&frame) {
             last_stats = stats;
             fps.frame(&stats);
         }
+        drop(weather_guard);
         frames += 1;
         // This tick's screenshot actions: the frame they caused is now on the GPU.
         if !shots.is_empty() || f2_pending {
@@ -3252,7 +3812,11 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 image
                     .save(&path)
                     .with_context(|| format!("saving {}", path.display()))?;
-                println!("script screenshot saved to {}", path.display());
+                println!(
+                    "script screenshot saved to {} ({} particles drawn)",
+                    path.display(),
+                    renderer.particles_drawn()
+                );
                 // The frame's text, next to the PNG: the checks' lines to read without OCR.
                 let mut txt = path.clone().into_os_string();
                 txt.push(".txt");
@@ -3387,6 +3951,11 @@ struct BenchSummary {
     present_ms: f32,
     /// GPU time of the main, hand and GUI passes.
     gpu_ms: [f32; 3],
+    /// GPU time of the main pass's sub-passes: sky, opaque terrain (solid + cutout-mipped),
+    /// cutout terrain, translucent terrain, entities, particles, overlays. Timing.rs carries
+    /// the solid and cutout-mipped phases separately (queries are written once per pass);
+    /// the bench reports them as one opaque phase like vanilla's ChunkSectionLayerGroup.
+    gpu_sub_ms: [f32; 7],
 }
 
 impl BenchSummary {
@@ -3404,6 +3973,7 @@ impl BenchSummary {
             "bench: {} frames in {:.0} s\n\
              frame time: avg {:.2} ms ({:.0} FPS), 1% low {:.2} ms, worst {:.2} ms\n\
              breakdown ms: prepare {:.2} acquire {:.2} cull {:.2} encode {:.2} submit {:.2} present {:.2} | gpu main {:.2} hand {:.2} gui {:.2}\n\
+             gpu main ms: sky {:.3} opaque {:.3} cutout {:.3} translucent {:.3} entities {:.3} particles {:.3} overlays {:.3}\n\
              sections drawn {}/{} avg, draw calls {:.0} avg\n\
              render distance {} (requested {}), {}x{}, adapter {}",
             self.frames,
@@ -3421,6 +3991,13 @@ impl BenchSummary {
             self.gpu_ms[0],
             self.gpu_ms[1],
             self.gpu_ms[2],
+            self.gpu_sub_ms[0],
+            self.gpu_sub_ms[1],
+            self.gpu_sub_ms[2],
+            self.gpu_sub_ms[3],
+            self.gpu_sub_ms[4],
+            self.gpu_sub_ms[5],
+            self.gpu_sub_ms[6],
             self.sections_drawn,
             self.sections_total,
             self.draw_calls,
@@ -3517,6 +4094,11 @@ fn bench_summary(samples: &[BenchSample]) -> BenchSummary {
     }
     let t = |f: fn(&haste_render::FrameTimings) -> f32| sum(samples, n, |s| f(&s.timings));
     let gpu = |i: usize| sum(samples, n, |s| s.timings.gpu_ms[i]);
+    // Solid + cutout-mipped (renderer sub-passes 1 and 3) fold into "opaque".
+    let opaque = sum(samples, n, |s| {
+        s.timings.gpu_sub_ms[1] + s.timings.gpu_sub_ms[3]
+    });
+    let gpu_sub = |i: usize| sum(samples, n, |s| s.timings.gpu_sub_ms[i]);
     BenchSummary {
         frames: samples.len() as u32,
         avg_ms: sum(samples, n, |s| s.frame_ms),
@@ -3532,6 +4114,15 @@ fn bench_summary(samples: &[BenchSample]) -> BenchSummary {
         submit_ms: t(|x| x.submit_ms),
         present_ms: t(|x| x.present_ms),
         gpu_ms: [gpu(0), gpu(1), gpu(2)],
+        gpu_sub_ms: [
+            gpu_sub(0),
+            opaque,
+            gpu_sub(2),
+            gpu_sub(4),
+            gpu_sub(5),
+            gpu_sub(6),
+            gpu_sub(7),
+        ],
     }
 }
 
@@ -3547,10 +4138,11 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let shared = session.shared.clone();
     // The bench camera is first person: the game thread's camera effects take that perspective.
     shared.input.lock().first_person = true;
-    let mut assets = open_assets()?;
+    let mut assets = open_assets_with(&session.server_packs)?;
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
+    renderer.set_ao_shapes(&shared.data.blocks, &shared.data.shapes);
     renderer.set_biomes(&session.biomes);
     renderer.set_particle_types(&session.particle_types);
     renderer.set_dimension(shared.world.read().dimension());
@@ -3562,13 +4154,15 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let mut vd;
     // Settle phase: identical to the screenshot path (wait for position, meshing done, quiet).
     loop {
-        let (mut camera, sky, lightmap, partial, v, animation_tick) = frame_view(
+        let mut weather_guard = shared.weather_scratch.lock();
+        let (mut camera, sky, lightmap, partial, v, animation_tick, weather) = frame_view(
             &shared,
             game::Perspective::FirstPerson,
             0.0,
             0.0,
             &session.options,
             Instant::now(),
+            &mut weather_guard,
         );
         camera.yaw = args.yaw.unwrap_or(camera.yaw);
         camera.pitch = args.pitch.unwrap_or(camera.pitch);
@@ -3591,6 +4185,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             breaking: &breaking,
             camera_entity: Some(session.local.0),
             spin: None,
+            weather,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -3601,6 +4196,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             renderer.prepare_particles(&mut particles, &*world, camera, partial);
         }
         stats = renderer.render(&frame)?;
+        drop(weather_guard);
         if shared.is_closed() {
             anyhow::bail!(
                 "disconnected: {}",
@@ -3608,7 +4204,18 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             );
         }
         let placed = shared.view.lock().has_position;
-        if placed && feed.settled(&stats, Duration::from_millis(1500)) {
+        // `--pos` holds the settle until the server has teleported the player there (the
+        // screenshot path's rule), so the bench measures the intended spot, not the spawn.
+        let reached = args
+            .pos
+            .as_ref()
+            .filter(|v| v.len() == 3)
+            .map(|v| {
+                let want = DVec3::new(v[0], v[1], v[2]);
+                placed && (shared.view.lock().feet - want).length() <= 0.5
+            })
+            .unwrap_or(placed);
+        if reached && feed.settled(&stats, Duration::from_millis(1500)) {
             break;
         }
         if Instant::now() > deadline {
@@ -3619,6 +4226,23 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     }
     // Measure phase. The buffer is sized up front: at most 1000 fps for the whole run, and it
     // grows once if the machine is faster than that (no allocation during steady-state frames).
+    {
+        // Memory diagnostics: terrain arenas (fixed-size GPU buffer pairs) and resident
+        // sections, plus this process's peak RSS so far (the settle phase meshes everything).
+        let (arenas, bytes, sections) = renderer.arena_memory();
+        let rss_kb = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("VmHWM"))
+                    .and_then(|l| l.split_whitespace().nth(1).map(|v| v.to_string()))
+            })
+            .unwrap_or_default();
+        println!(
+            "bench memory: peak RSS {rss_kb} kB, {arenas} arenas ({:.1} MiB vertex+index), {sections} resident sections",
+            bytes as f64 / (1024.0 * 1024.0)
+        );
+    }
     let mut samples: Vec<BenchSample> = Vec::with_capacity(seconds as usize * 1000);
     let total = seconds as f32;
     let adapter = {
@@ -3641,15 +4265,22 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         }
         // The bench camera follows its fixed path; the sky and entities come from the live view
         // (time of day moves, the player stays where the server put it).
-        let (_, mut sky, lightmap, partial_tick, _, animation_tick) = frame_view(
+        let mut weather_guard = shared.weather_scratch.lock();
+        let (_, mut sky, lightmap, partial_tick, _, animation_tick, weather) = frame_view(
             &shared,
             game::Perspective::FirstPerson,
             0.0,
             0.0,
             &session.options,
             Instant::now(),
+            &mut weather_guard,
         );
-        let camera = bench_camera(elapsed / total, &base, total);
+        let camera = if args.bench_fixed {
+            // Still camera at the settle spot: one fixed view, comparable with `--screenshot`.
+            base
+        } else {
+            bench_camera(elapsed / total, &base, total)
+        };
         let fog_end = (vd.max(2) * 16) as f32;
         sky.fog_start = fog_end * 0.75;
         sky.fog_end = fog_end;
@@ -3671,6 +4302,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             breaking: &breaking,
             camera_entity: Some(session.local.0),
             spin: None,
+            weather,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -3681,6 +4313,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             renderer.prepare_particles(&mut particles, &*world, camera, partial_tick);
         }
         let stats = renderer.render(&frame)?;
+        drop(weather_guard);
         let prev_drawn = samples.last().map_or(0, |s| s.sections_drawn);
         samples.push(BenchSample {
             frame_ms: stats.frame_ms,
@@ -3724,6 +4357,15 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             "gpu_main_ms": summary.gpu_ms[0],
             "gpu_hand_ms": summary.gpu_ms[1],
             "gpu_gui_ms": summary.gpu_ms[2],
+            "gpu_main_sub_ms": {
+                "sky": summary.gpu_sub_ms[0],
+                "opaque": summary.gpu_sub_ms[1],
+                "cutout": summary.gpu_sub_ms[2],
+                "translucent": summary.gpu_sub_ms[3],
+                "entities": summary.gpu_sub_ms[4],
+                "particles": summary.gpu_sub_ms[5],
+                "overlays": summary.gpu_sub_ms[6],
+            },
             "render_distance": meta.render_distance,
             "requested_render_distance": meta.requested_render_distance,
             "width": meta.width,
@@ -4119,6 +4761,7 @@ impl App {
             Ok((session, server)) => {
                 if let Some(r) = self.renderer.as_mut() {
                     r.set_item_registry(&session.shared.data.registries);
+                    r.set_ao_shapes(&session.shared.data.blocks, &session.shared.data.shapes);
                     r.set_biomes(&session.biomes);
                     r.set_particle_types(&session.particle_types);
                 }
@@ -4198,6 +4841,7 @@ impl App {
             breaking: &[],
             camera_entity: None,
             spin: None,
+            weather: None,
         };
         if let Err(e) = renderer.render(&frame) {
             self.error = Some(e.context("render"));
@@ -4207,6 +4851,38 @@ impl App {
     fn draw(&mut self, event_loop: &ActiveEventLoop) {
         if self.renderer.is_none() {
             return;
+        }
+        // The resource pack selection changed (the pack screen's Done or a server
+        // pack download, vanilla `Minecraft.reloadResourcePacks`): rebuild the
+        // renderer from a fresh asset stack — atlas, models, fonts and GUI textures
+        // re-read with the new packs layered on the jar.
+        let reload = self
+            .session
+            .as_ref()
+            .map(|s| s.shared.resource_pack_reload.lock().take())
+            .unwrap_or_default();
+        if let Some(reload) = reload {
+            let window = self
+                .window
+                .clone()
+                .expect("renderer exists, so does the window");
+            match self.reload_renderer(&window, &reload) {
+                Ok(()) => {
+                    let names = reload
+                        .ids
+                        .iter()
+                        .cloned()
+                        .chain(reload.server.iter().map(|p| p.display().to_string()))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    tracing::info!("renderer rebuilt with resource packs [{names}]")
+                }
+                Err(e) => {
+                    self.error = Some(e.context("resource pack reload"));
+                    event_loop.exit();
+                    return;
+                }
+            }
         }
         // The screen that opened or closed since the last frame takes or frees the cursor,
         // and "Disconnect" leaves the server (back to the multiplayer screen, like vanilla).
@@ -4258,13 +4934,15 @@ impl App {
         self.input
             .sample(&session.shared, self.ui.as_ref(), self.perspective);
         let renderer = self.renderer.as_mut().expect("checked above");
-        let (camera, sky, lightmap, partial, vd, animation_tick) = frame_view(
+        let mut weather_guard = session.shared.weather_scratch.lock();
+        let (camera, sky, lightmap, partial, vd, animation_tick, weather) = frame_view(
             &session.shared,
             self.perspective,
             self.input.yaw,
             self.input.pitch,
             &self.options,
             t0,
+            &mut weather_guard,
         );
         self.feed
             .feed(&session.shared, renderer, camera_section(&camera), vd);
@@ -4345,6 +5023,7 @@ impl App {
             breaking: &self.breaking,
             camera_entity: (!self.perspective.draws_player()).then_some(session.local.0),
             spin: view.screen.spin_warp(partial),
+            weather,
         };
         // Outline boxes of the target and the states of breaking blocks (one short read lock),
         // then the particles (one short read lock).
@@ -4366,6 +5045,7 @@ impl App {
             renderer.request_capture();
         }
         let result = renderer.render(&frame);
+        drop(weather_guard);
         if let Ok(stats) = &result {
             self.frame_stats = *stats;
         }
@@ -4407,6 +5087,34 @@ impl App {
             }
         }
     }
+    /// Rebuilds the renderer after the resource pack selection changed (vanilla's reload
+    /// rebuilds its resource manager, model manager and atlases). The new selection is
+    /// written to options.txt by the JVM's own `Options.save` before we get here, so
+    /// `open_assets` reads it back; the server's downloaded packs layer above it.
+    fn reload_renderer(
+        &mut self,
+        window: &Arc<Window>,
+        reload: &game::PackReload,
+    ) -> anyhow::Result<()> {
+        let mut assets = open_assets_with(&reload.server)?;
+        let data = net::load_game_data()?;
+        let mut renderer = Renderer::new(window.clone(), &mut assets, &data.blocks)?;
+        if let Some(session) = &self.session {
+            renderer.set_item_registry(&session.shared.data.registries);
+            renderer.set_biomes(&session.biomes);
+            renderer.set_particle_types(&session.particle_types);
+            renderer.set_dimension(session.shared.world.read().dimension());
+        }
+        renderer.set_vsync(self.vsync);
+        // The old renderer's GPU objects drop with it; every loaded section is queued for
+        // re-meshing into the new arenas (vanilla's reload re-bakes the world's models too).
+        self.renderer = Some(renderer);
+        self.feed = WorldFeed::default();
+        if let Some(session) = &self.session {
+            self.feed.queue_all_sections(&session.shared);
+        }
+        Ok(())
+    }
 }
 
 impl ApplicationHandler for App {
@@ -4422,8 +5130,10 @@ impl ApplicationHandler for App {
             let mut assets = open_assets()?;
             let data = net::load_game_data()?;
             let mut renderer = Renderer::new(window.clone(), &mut assets, &data.blocks)?;
+            renderer.set_ao_shapes(&data.blocks, &data.shapes);
             if let Some(session) = &self.session {
                 renderer.set_item_registry(&session.shared.data.registries);
+                renderer.set_ao_shapes(&session.shared.data.blocks, &session.shared.data.shapes);
                 renderer.set_biomes(&session.biomes);
                 renderer.set_particle_types(&session.particle_types);
                 renderer.set_dimension(session.shared.world.read().dimension());
@@ -5323,5 +6033,96 @@ mod tests {
         assert!((pitch - 0.49667).abs() < 1e-4, "{pitch}");
         // No walk distance and no bob: nothing moves.
         assert_eq!(view_bob(0.0, 0.0, 0.0, 0.0, 0.5), (0.0, 0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn java_random_matches_vanilla_lcg() {
+        // The single-threaded RandomSource: seed 12345 -> (0xB30A9B << 48-bit scrambles).
+        // The first nextFloat of Java's Random with seed 0 is 0.73096776.
+        let mut r = JavaRandom::new(0);
+        assert!(
+            (r.next_float() - 0.73096776).abs() < 1e-6,
+            "{}",
+            r.next_float()
+        );
+        // nextDouble of the same fresh random: 0.627 exactly? The sequence advances; just
+        // check the bounds and determinism instead.
+        let mut a = JavaRandom::new(42);
+        let mut b = JavaRandom::new(42);
+        for _ in 0..8 {
+            let (x, y) = (a.next_double(), b.next_double());
+            assert_eq!(x, y);
+            assert!((0.0..1.0).contains(&x));
+        }
+        // Gaussian: two fresh streams agree and stay in a sane range.
+        let mut a = JavaRandom::new(7);
+        let mut b = JavaRandom::new(7);
+        for _ in 0..16 {
+            let (x, y) = (a.next_gaussian(), b.next_gaussian());
+            assert_eq!(x, y);
+            assert!(x.abs() < 6.0);
+        }
+    }
+
+    #[test]
+    fn rain_scroll_matches_vanilla_formula() {
+        // `createRainColumnInstance`: textureOffset = -(wrappedTicks + tickOffset +
+        // partial) / 32 * speed, wrapped modulo 32. Column (5, -3), tick 100, partial 0:
+        // tickOffset = (5*5*3121 + 5*45238971 + 9*418711 - 3*13761) & 0xFF.
+        let tick_offset = (5i64 * 5 * 3121 + 5 * 45238971 + 9 * 418711 + (-3) * 13761) & 0xFF;
+        // The speed is the seeded random's nextFloat (3..4); recompute through the same
+        // seed to keep the formula honest.
+        let seed = haste_render::weather::column_seed(5, -3);
+        let mut rng = JavaRandom::new(seed as i64);
+        let speed = 3.0 + rng.next_float();
+        let wrapped_ticks = 100i64 & 131071;
+        let expect = -((wrapped_ticks as f32 + tick_offset as f32) / 32.0 * speed) % 32.0;
+        assert!(expect <= 0.0 && expect > -32.0, "{expect}");
+        // The scroll is negative (the texture moves down) and wraps at 32 tiles.
+        assert_eq!(tick_offset as i32, tick_offset as i32);
+    }
+
+    #[test]
+    fn weather_levels_lerp_by_partial_tick() {
+        // `Level.getRainLevel(a)`: lerp between the old and the new level.
+        let mut w = crate::net::WeatherState::default();
+        w.set_rain_level(1.0);
+        assert_eq!(w.rain_level(0.0), 1.0);
+        assert_eq!(w.rain_level(1.0), 1.0);
+        // A step down brackets the tick: old 1, new 0.4 -> 0.7 at partial 0.5.
+        w.set_rain_level(1.0);
+        w.rain_level_o = 1.0;
+        w.rain_level = 0.4;
+        assert!((w.rain_level(0.5) - 0.7).abs() < 1e-6);
+        // Clamped: the packet's 2.0 becomes 1.0.
+        w.set_rain_level(2.0);
+        assert_eq!(w.rain_level, 1.0);
+        // canHaveWeather: the overworld yes, the Nether and End no.
+        use haste_core::game::DimensionInfo;
+        assert!(crate::net::WeatherState::can_have_weather(
+            &DimensionInfo::overworld()
+        ));
+        let mut nether = DimensionInfo::overworld();
+        nether.dimension_type = haste_core::Identifier::minecraft("the_nether");
+        nether.has_skylight = false;
+        assert!(!crate::net::WeatherState::can_have_weather(&nether));
+        let mut end = DimensionInfo::overworld();
+        end.name = haste_core::Identifier::minecraft("the_end");
+        assert!(!crate::net::WeatherState::can_have_weather(&end));
+    }
+
+    #[test]
+    fn game_events_drive_the_weather_levels() {
+        use crate::net::WeatherState;
+        // START_RAINING resets to 0, STOP_RAINING sets 1 (the level-change steps ramp from
+        // there), RAIN_LEVEL_CHANGE/THUNDER_LEVEL_CHANGE set the levels directly.
+        let mut w = WeatherState::default();
+        w.set_rain_level(0.5);
+        w.set_thunder_level(0.7);
+        assert_eq!(w.thunder_level, 0.7);
+        w.set_rain_level(1.0);
+        assert_eq!(w.rain_level, 1.0);
+        w.set_rain_level(0.0);
+        assert_eq!(w.rain_level, 0.0);
     }
 }

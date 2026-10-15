@@ -64,6 +64,7 @@ fn render(
         breaking: &[],
         camera_entity: None,
         spin: None,
+        weather: None,
     };
     renderer.render(&frame).unwrap();
     renderer.read_back().unwrap()
@@ -106,6 +107,8 @@ fn block_entities_offscreen() {
         banner_phase: 0.0,
         banner: None,
         skull_anim: TickPair::fixed(0.0),
+        anim: None,
+        sherds: None,
     };
     let shulker = BlockEntityInstance {
         pos: BlockPos::new(2, 1, 0),
@@ -119,6 +122,8 @@ fn block_entities_offscreen() {
         banner_phase: 0.0,
         banner: None,
         skull_anim: TickPair::fixed(0.0),
+        anim: None,
+        sherds: None,
     };
     // A sign on the floor at (0, 2, 2), facing the camera: the front text is drawn with the
     // default font into the entity stream. The board itself is the chunk's block model (drawn
@@ -155,6 +160,8 @@ fn block_entities_offscreen() {
         banner_phase: 0.0,
         banner: None,
         skull_anim: TickPair::fixed(0.0),
+        anim: None,
+        sherds: None,
     };
     // A standing banner next to the sign, red base with a blue stripe: pole, bar and waving
     // flag with the base and pattern layers.
@@ -176,6 +183,8 @@ fn block_entities_offscreen() {
             }],
         })),
         skull_anim: TickPair::fixed(0.0),
+        anim: None,
+        sherds: None,
     };
     // A skeleton skull on the floor between the sign and the banner, facing the camera: one
     // head cube in the block's bottom half.
@@ -195,6 +204,8 @@ fn block_entities_offscreen() {
         banner_phase: 0.0,
         banner: None,
         skull_anim: TickPair::fixed(0.0),
+        anim: None,
+        sherds: None,
     };
     // The camera looks at the chest's centre from four blocks south and 1.5 up: the chest
     // lands mid-frame.

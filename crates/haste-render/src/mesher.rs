@@ -51,12 +51,77 @@ fn face_corners() -> &'static [[[[i32; 3]; 3]; 4]; 6] {
     FACE_CORNERS.get_or_init(face_corner_table)
 }
 
+/// The per-face side-0 cell offsets (see `face_side0_table`), built once.
+static FACE_SIDE0: std::sync::OnceLock<[[i32; 3]; 6]> = std::sync::OnceLock::new();
+
+fn face_side0() -> &'static [[i32; 3]; 6] {
+    FACE_SIDE0.get_or_init(face_side0_table)
+}
+
+/// Per-state ambient-occlusion occluder flag (vanilla `getShadeBrightness <=
+/// 0.2`): whether the state's collision shape is a full cube, minus the glass
+/// family whose class overrides the brightness to 1.0. Also carries the raw
+/// collision-full flag (vanilla `isCollisionShapeFullBlock`), which the
+/// mesher's faceCubic test reads (glass is collision-full but bright). Built
+/// from `haste_data::BlockShapes`; the fallback treats every state as a full
+/// cube except air and fluids (approximate like all fallback shapes).
+#[derive(Clone)]
+pub struct AoTable {
+    solid: Vec<bool>,
+    /// Raw full-collision-cube flag (no glass override).
+    cubic: Vec<bool>,
+}
+
+impl AoTable {
+    /// From haste-data's shape data (oracle-backed when the dump exists).
+    pub fn from_shapes(
+        states: &dyn haste_core::view::BlockStateTable,
+        shapes: &haste_data::BlockShapes,
+    ) -> AoTable {
+        let mut solid = Vec::with_capacity(states.len());
+        let mut cubic = Vec::with_capacity(states.len());
+        for id in 0..states.len() as u32 {
+            solid.push(shapes.is_ao_solid(BlockStateId(id)));
+            cubic.push(shapes.is_collision_full(BlockStateId(id)));
+        }
+        AoTable { solid, cubic }
+    }
+
+    /// Fallback with no shape data (tests, before the game data is known):
+    /// every in-range state occludes (stone-like), ids past the table read as
+    /// non-occluding.
+    pub fn all_solid(n: usize) -> AoTable {
+        AoTable {
+            solid: vec![true; n],
+            cubic: vec![true; n],
+        }
+    }
+
+    /// Whether `state` darkens its neighbours' AO. Out-of-table ids (modded
+    /// servers) read as non-occluding rather than panicking; the placeholder
+    /// resolution the other tables do needs the state table, which tests
+    /// without one cannot provide, and an unknown block that renders should
+    /// not darken either (vanilla resolves it to stone, but the difference is
+    /// one AO corner on an unseen block).
+    pub fn is_solid(&self, state: BlockStateId) -> bool {
+        self.solid.get(state.0 as usize).copied().unwrap_or(false)
+    }
+
+    /// Raw full-collision-cube flag; out-of-table ids read as non-cubic (the
+    /// faceCubic test then falls back to the quad-geometry half alone).
+    pub fn is_cubic(&self, state: BlockStateId) -> bool {
+        self.cubic.get(state.0 as usize).copied().unwrap_or(false)
+    }
+}
+
 /// Per-block-state and per-biome tables the mesher reads (shared with the workers).
 #[derive(Clone)]
 pub struct MeshTables {
     pub tints: Arc<crate::tint::TintTable>,
     pub colors: Arc<crate::tint::BiomeColors>,
     pub fluids: Arc<crate::fluid::FluidTable>,
+    /// AO occluder test per state (vanilla collision-shape rule).
+    pub ao: Arc<AoTable>,
     /// Set identity for the mesher's per-state cache: a fresh value per
     /// constructed set (monotonic counter), so a new Renderer's tables
     /// never alias a previous set's pointer identities after a reconnect.
@@ -73,11 +138,13 @@ impl MeshTables {
         tints: Arc<crate::tint::TintTable>,
         colors: Arc<crate::tint::BiomeColors>,
         fluids: Arc<crate::fluid::FluidTable>,
+        ao: Arc<AoTable>,
     ) -> MeshTables {
         MeshTables {
             tints,
             colors,
             fluids,
+            ao,
             generation: TABLE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
@@ -89,6 +156,8 @@ impl Default for MeshTables {
             Arc::new(crate::tint::TintTable::empty()),
             Arc::new(crate::tint::BiomeColors::default()),
             Arc::new(crate::fluid::FluidTable::empty()),
+            // No shape data known: no state occludes AO (flat lighting).
+            Arc::new(AoTable::all_solid(0)),
         )
     }
 }
@@ -262,7 +331,7 @@ impl MeshSink {
         layer: RenderLayer,
         positions: &[[f32; 3]; 4],
         uvs: &[[f32; 2]; 4],
-        lights: [[u8; 2]; 4],
+        lights: [[u8; 3]; 4],
         tint: u32,
         sprite: u16,
     ) {
@@ -279,10 +348,11 @@ impl MeshSink {
         }
         // Flip the diagonal when the default one cuts a bright/dark AO corner
         // (Pomme's emit_face_into anisotropy fix): if 0+2 sums brighter than
-        // 1+3, route the shared edge through 1-3.
-        let ao = |v: usize| (lights[v][1] & 3) as u32;
+        // 1+3, route the shared edge through 1-3. The AO byte holds the
+        // occluder count, so brighter is the smaller sum.
+        let ao = |v: usize| (lights[v][1] & 7) as u32;
         let indices = &mut self.layers[layer_index(layer)];
-        if ao(0) + ao(2) > ao(1) + ao(3) {
+        if ao(0) + ao(2) < ao(1) + ao(3) {
             indices.extend_from_slice(&[base + 1, base + 2, base + 3, base + 3, base, base + 1]);
         } else {
             indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
@@ -294,7 +364,7 @@ impl MeshSink {
 fn pack_vertex_raw(
     position: [f32; 3],
     uv: [f32; 2],
-    light: [u8; 2],
+    light: [u8; 3],
     tint: u32,
     sprite: u16,
 ) -> PackedVertex {
@@ -315,10 +385,51 @@ fn shade_index(dir: Option<haste_assets::Direction>) -> u8 {
     }
 }
 
-/// Vanilla ambient occlusion level (Pomme block_ao::vertex_ao_level):
-/// 0 (three occluders) darkest .. 3 unoccluded.
-fn vertex_ao_level(side1: bool, side2: bool, corner: bool) -> u8 {
-    3 - (side1 as u8 + side2 as u8 + corner as u8)
+/// Vanilla ambient occlusion brightness as an occluder count (vanilla
+/// `BlockModelLighter.prepareQuadAmbientOcclusion`): the corner's brightness
+/// is the average of four shade samples — the two sides, the diagonal and the
+/// face-adjacent cell — each 1.0 or 0.2 (`getShadeBrightness`), so brightness
+/// = 1.0 - 0.2 * count, count 0..4. The diagonal is the caller's to resolve:
+/// vanilla reads side 0's sample when both of the vertex's side cells are
+/// non-light-permeable.
+fn vertex_ao_level(side1: bool, side2: bool, diagonal: bool, center: bool) -> u8 {
+    side1 as u8 + side2 as u8 + diagonal as u8 + center as u8
+}
+
+/// Vanilla `BlockModelLighter.prepareQuadShape`'s faceCubic per quad: flat
+/// along the face normal AND (on the block boundary OR the state's collision
+/// shape is a full cube), with vanilla's 1e-4 / 0.9999 thresholds. When not
+/// cubic, vanilla samples the AO/light center from the block's own cell
+/// instead of the face-adjacent one.
+fn quad_cubic(quad: &haste_assets::BakedQuad, state_cubic: bool) -> bool {
+    use haste_assets::Direction as D;
+    let (min, max) = quad_extremes(quad);
+    // (normal axis, at the low boundary): the axis the face is flat along.
+    let (axis, low) = match quad.direction {
+        D::Down | D::Up => (1, quad.direction == D::Down),
+        D::North | D::South => (2, quad.direction == D::North),
+        D::West | D::East => (0, quad.direction == D::West),
+    };
+    let flat = min[axis] == max[axis];
+    let on_boundary = if low {
+        min[axis] < 1.0e-4
+    } else {
+        max[axis] > 0.9999
+    };
+    flat && (on_boundary || state_cubic)
+}
+
+/// The min/max corner of a baked quad's model-space positions.
+fn quad_extremes(quad: &haste_assets::BakedQuad) -> ([f32; 3], [f32; 3]) {
+    let mut min = [f32::MAX; 3];
+    let mut max = [f32::MIN; 3];
+    for p in &quad.positions {
+        for a in 0..3 {
+            min[a] = min[a].min(p[a]);
+            max[a] = max[a].max(p[a]);
+        }
+    }
+    (min, max)
 }
 
 /// Mesh one section: per block, emit its baked quads with cullface culling,
@@ -360,6 +471,12 @@ struct EmitQuad {
     direction: haste_assets::Direction,
     /// Whether the quad takes the block's tint.
     tinted: bool,
+    /// Vanilla `faceCubic` (`BlockModelLighter.prepareQuadShape`): the quad
+    /// is flat along the face normal AND either lies on the block boundary or
+    /// the state's collision shape is a full cube. Decides the AO/light
+    /// center sample: the face-adjacent cell when cubic, else the block's
+    /// own cell.
+    cubic: bool,
     sprite: u16,
 }
 
@@ -457,6 +574,9 @@ impl<'a> MeshContext<'a> {
             self.states.resize(idx + 1, None);
         }
         if self.states[idx].is_none() {
+            // Vanilla's faceCubic test needs the state's collision-full flag
+            // (the quad-geometry half is per quad below).
+            let state_cubic = self.tables.ao.is_cubic(state);
             let quads: Vec<EmitQuad> = self
                 .baked
                 .quads(state)
@@ -476,6 +596,7 @@ impl<'a> MeshContext<'a> {
                         shade_face: quad.shade_face,
                         direction: quad.direction,
                         tinted: quad.tint_index.is_some(),
+                        cubic: quad_cubic(quad, state_cubic),
                         sprite,
                     }
                 })
@@ -577,13 +698,15 @@ pub fn mesh_section_with(
                             .positions
                             .map(|p| [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]]);
 
-                        // Per-vertex light: face-adjacent cell + the vertex's AO
-                        // neighbours, averaged (smooth lighting).
-                        let lights: [[u8; 2]; 4] = core::array::from_fn(|vi| {
-                            let (ao_level, light) =
-                                vertex_light_for(&ctx, lx, ly, lz, quad.direction, vi);
+                        // Per-vertex light, following vanilla
+                        // ModelBlockRenderer.AmbientOcclusionFace: face-adjacent
+                        // cell + the vertex's AO neighbours, blended. [sky16,
+                        // ao|shade, block16].
+                        let lights: [[u8; 3]; 4] = core::array::from_fn(|vi| {
+                            let (ao_level, [sky16, block16]) =
+                                vertex_light_for(&ctx, lx, ly, lz, quad.direction, quad.cubic, vi);
                             let shade = shade_index(quad.shade_face);
-                            [light, pack_ao_shade(ao_level, shade)]
+                            [sky16, pack_ao_shade(ao_level, shade), block16]
                         });
                         let quad_tint = if quad.tinted {
                             *tint.get_or_insert_with(|| {
@@ -697,14 +820,28 @@ fn mesh_fluid(
         let own = ctx.snapshot.light(block_pos);
         let top_light = max_light(own, ctx.snapshot.light(block_pos.add(0, 1, 0)));
         let bottom_light = max_light(own, ctx.snapshot.light(block_pos.add(0, -1, 0)));
+        // Fluid light is a whole level (no blend): *16 into the smooth units
+        // the chunk vertex carries.
+        let light16 = |l: u8| {
+            [
+                (l >> 4) as u32 * crate::vertex::LIGHT16_PER_LEVEL as u32,
+                (l & 0xF) as u32 * crate::vertex::LIGHT16_PER_LEVEL as u32,
+            ]
+        };
+        let top16 = light16(top_light);
+        let bottom16 = light16(bottom_light);
         let offset = [lx as f32, ly as f32, lz as f32];
         for q in &quads {
-            let light = if q.dir == haste_assets::Direction::Down {
-                bottom_light
+            let [sky16, block16] = if q.dir == haste_assets::Direction::Down {
+                bottom16
             } else {
-                top_light
+                top16
             };
-            let packed = [light, pack_ao_shade(3, shade_index(Some(q.dir)))];
+            let packed = [
+                sky16 as u8,
+                pack_ao_shade(0, shade_index(Some(q.dir))),
+                block16 as u8,
+            ];
             let positions = q
                 .positions
                 .map(|p| [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]]);
@@ -736,46 +873,157 @@ fn face_corner_table() -> [[[[i32; 3]; 3]; 4]; 6] {
     table
 }
 
-/// Per-vertex AO level + packed light for face vertex `vi` (Pomme
-/// compute_face_ao, inlined with the per-face neighbour table). Coordinates
-/// are section-local; the +1 maps the section into the snapshot's border.
+/// The "side 0" cell offset per face (vanilla `BlockModelLighter.AdjacencyInfo`
+/// `corners[0]` plus the face normal): vanilla substitutes this cell's shade and
+/// light for a vertex's diagonal sample whenever both of that vertex's side
+/// cells are non-light-permeable — whichever vertex the diagonal belongs to
+/// (so for two of the four vertices it is not one of their own sides; that is
+/// vanilla's behaviour, kept as the oracle).
+fn face_side0_table() -> [[i32; 3]; 6] {
+    use haste_assets::Direction as D;
+    // AdjacencyInfo.corners[0] per face, in Haste's Direction::ALL order
+    // (down, up, north, south, west, east).
+    let side0 = [
+        D::West, // down
+        D::East, // up
+        D::Up,   // north
+        D::West, // south
+        D::Up,   // west
+        D::Down, // east
+    ];
+    let mut table = [[0i32; 3]; 6];
+    for (di, dir) in D::ALL.into_iter().enumerate() {
+        let n = dir.offset();
+        let s = side0[di].offset();
+        table[di] = [n[0] + s[0], n[1] + s[1], n[2] + s[2]];
+    }
+    table
+}
+
+/// One AO/light sample cell: whether it darkens (`getShadeBrightness <= 0.2`)
+/// and its packed light.
+#[derive(Clone, Copy)]
+struct AoSample {
+    occludes: bool,
+    light: u8,
+}
+
+/// The per-vertex corner blend, vanilla `BlockModelLighter`'s cubic path:
+/// the AO occluder count over the two sides, the diagonal (the caller has
+/// already applied vanilla's side-0 substitution) and the center, plus the
+/// light blend of `LightCoordsUtil.smoothBlend` — the center's light averaged
+/// with the three samples, where a fully-dark neighbour takes the center's
+/// light and a zero-sky one its sky, but only when the center itself is lit
+/// (sky > 2 or block > 2). The light comes back in vanilla's smooth units
+/// (16 per level, 0..240 — the exact average, like vanilla keeps into the
+/// lightmap; `LIGHT16_PER_LEVEL`).
+fn ao_corner_blend(sides: [AoSample; 2], diagonal: AoSample, center: AoSample) -> (u8, [u8; 2]) {
+    let ao = vertex_ao_level(
+        sides[0].occludes,
+        sides[1].occludes,
+        diagonal.occludes,
+        center.occludes,
+    );
+    let (cs, cb) = (center.light >> 4, center.light & 0xF);
+    let mut sky = cs as u32;
+    let mut block = cb as u32;
+    for s in sides.into_iter().chain([diagonal]) {
+        // Vanilla's smoothBlend replaces a zero-light neighbour with the
+        // center's light here (and a zero-sky one's sky) when the center is
+        // lit. Measured against the 26.3 reference screenshots that rule
+        // brightens terrain ~+10 mean error (every corner at a terrain step
+        // or trunk base lights up), while leaving it out lands all three
+        // compare shots at or below main's error — so it is left OUT until
+        // the light data matches vanilla's (Haste's snapshot light is
+        // measurably brighter than vanilla's around occluders, the same bias
+        // main has; the substitution amplifies it). See the branch's merge
+        // discussion.
+        sky += (s.light >> 4) as u32;
+        block += (s.light & 0xF) as u32;
+    }
+    // Vanilla keeps the exact average in 16th-of-a-level units (0..240) into
+    // the lightmap; the vertex carries it (`LIGHT16_PER_LEVEL`).
+    (
+        ao,
+        [
+            (sky * 4).min(crate::vertex::LIGHT16_MAX as u32) as u8,
+            (block * 4).min(crate::vertex::LIGHT16_MAX as u32) as u8,
+        ],
+    )
+}
+
+/// Per-vertex AO occluder count + smooth light for face vertex `vi` (vanilla
+/// `BlockModelLighter.prepareQuadAmbientOcclusion`). Coordinates are
+/// section-local; the +1 maps the section into the snapshot's border.
+/// `cubic` is the quad's faceCubic flag: it picks the center sample (the
+/// face-adjacent cell when cubic, else the block's own cell).
 fn vertex_light_for(
     ctx: &MeshContext,
     lx: i32,
     ly: i32,
     lz: i32,
     dir: haste_assets::Direction,
+    cubic: bool,
     vi: usize,
-) -> (u8, u8) {
+) -> (u8, [u8; 2]) {
     // (side1, side2, corner) offsets per vertex, in face_positions order.
     let corners = face_corners()[dir.index()][vi];
     let [s1, s2, corner] = corners;
     let (x, y, z) = (lx + 1, ly + 1, lz + 1);
 
-    let opaque = |d: [i32; 3]| -> bool {
-        ctx.baked
-            .is_full_opaque(ctx.cell(x + d[0], y + d[1], z + d[2]).state)
+    let cell = |d: [i32; 3]| ctx.cell(x + d[0], y + d[1], z + d[2]);
+    // The AO occluder test (`BlockBehaviour.getShadeBrightness`): a full
+    // collision cube darkens (0.2), not texture opacity — glass and slabs
+    // keep their neighbours bright.
+    let sample = |d: [i32; 3]| AoSample {
+        occludes: ctx.tables.ao.is_solid(cell(d).state),
+        light: cell(d).light,
     };
-    let ao = vertex_ao_level(opaque(s1), opaque(s2), opaque(corner));
-
-    // Smooth light: the face-adjacent cell's light plus the three AO-neighbour
-    // cells, averaged (vanilla). The corner table's offsets already carry the
-    // face normal (the AO cells, checked against vanilla's AdjacencyInfo by
-    // `face_corner_offsets_match_vanilla_adjacency`), so the neighbour cells are
-    // `block + d`, exactly the cells the AO reads above: sampling them one cell
-    // further out would make the light of two adjacent coplanar faces come from
-    // different cells and draw a line along every block edge.
+    // Vanilla `BlockState.isLightPermeable` (whether the diagonal sample is
+    // reachable), tested — as in `BlockModelLighter` — at the cells ONE STEP
+    // OUT from the side cells along the face normal (`side cell + normal`),
+    // not at the side cells themselves: a terrain step's side cell sits inside
+    // the raised neighbour (non-permeable) while the cell above it is open, so
+    // testing the side cell would substitute the diagonal's dark sample where
+    // vanilla keeps it. Approximated as solid-render (`baked.is_full_opaque`);
+    // the light-dampening half of the vanilla test has no data in the client
+    // yet (the server's light values already carry it).
     let n = dir.offset();
-    let mut s = (ctx.cell(x + n[0], y + n[1], z + n[2]).light >> 4) as u32;
-    let mut b = (ctx.cell(x + n[0], y + n[1], z + n[2]).light & 0xF) as u32;
-    for d in [s1, s2, corner] {
-        let l = ctx.cell(x + d[0], y + d[1], z + d[2]).light;
-        s += (l >> 4) as u32;
-        b += (l & 0xF) as u32;
-    }
-    let sky = ((s + 2) / 4).min(15) as u8;
-    let block = ((b + 2) / 4).min(15) as u8;
-    (ao, pack_light(sky, block))
+    let out = |d: [i32; 3]| [d[0] + n[0], d[1] + n[1], d[2] + n[2]];
+    let permeable_out = |d: [i32; 3]| !ctx.baked.is_full_opaque(cell(out(d)).state);
+
+    // The diagonal sample: the corner cell, or vanilla's side-0 cell when
+    // both one-out side cells are non-permeable (vanilla reads side 0's shade
+    // and light there — not this vertex's own side).
+    let diagonal = if !permeable_out(s1) && !permeable_out(s2) {
+        sample(face_side0()[dir.index()])
+    } else {
+        sample(corner)
+    };
+
+    // Center sample (vanilla `prepareQuadShape`'s faceCubic split): the shade
+    // comes from the face-adjacent cell for a cubic face and from the block's
+    // own cell otherwise; the light comes from the face-adjacent cell for a
+    // cubic face or one visible through a non-solid-render neighbour, and
+    // from the block's own cell otherwise. The corner table's offsets already
+    // carry the face normal (checked against vanilla's AdjacencyInfo by
+    // `face_corner_offsets_match_vanilla_adjacency`), so sampling one cell
+    // further out would make two adjacent coplanar faces read different
+    // cells and draw a line along every block edge.
+    let own = cell([0, 0, 0]);
+    let center = AoSample {
+        occludes: if cubic {
+            ctx.tables.ao.is_solid(cell(n).state)
+        } else {
+            ctx.tables.ao.is_solid(own.state)
+        },
+        light: if cubic || !ctx.baked.is_full_opaque(cell(n).state) {
+            cell(n).light
+        } else {
+            own.light
+        },
+    };
+    ao_corner_blend([sample(s1), sample(s2)], diagonal, center)
 }
 
 /// The two in-plane axes of a face (u, v), each a unit offset.
@@ -1217,6 +1465,7 @@ mod tests {
         let Some((states, baked, atlas)) = load_baked() else {
             return;
         };
+        use haste_core::view::BlockStateTable as _;
         // A snowy biome's grass colour: explicit, and nothing like the default green.
         let mut snowy = crate::tint::BiomeClimate::plains();
         snowy.grass_color = Some(0x3A7D5C);
@@ -1227,6 +1476,7 @@ mod tests {
                     .with_radius(0),
             ),
             Arc::new(crate::fluid::FluidTable::empty()),
+            Arc::new(AoTable::all_solid(states.len())),
         );
         struct Snowy;
         impl crate::tint::BiomeSource for Snowy {
@@ -1354,17 +1604,83 @@ mod tests {
             Arc::new(crate::tint::TintTable::empty()),
             Arc::new(crate::tint::BiomeColors::default()),
             Arc::new(crate::fluid::FluidTable::empty()),
+            Arc::new(AoTable::all_solid(0)),
         );
         assert_ne!(a.generation, c.generation);
         assert_ne!(b.generation, c.generation);
     }
 
+    /// Vanilla `BlockModelLighter.prepareQuadShape`'s faceCubic: flat along the
+    /// normal AND (on the boundary OR full-collision state). A slab's top face
+    /// (y = 0.5, not on the boundary, not a full cube) is non-cubic; a full
+    /// block's face is cubic either way; a full-collision state's inset quad
+    /// (e.g. glass's model quirks) is cubic too.
+    #[test]
+    fn quad_cubic_follows_vanilla_prepare_quad_shape() {
+        use haste_assets::Direction as D;
+        let quad = |dir: D, from: [f32; 3], to: [f32; 3]| {
+            haste_assets::BakedQuad::from_element(dir, from, to, None, None)
+        };
+        // Slab top: flat at 0.5, off the boundary, state not collision-full.
+        let slab_top = quad(D::Up, [0.0, 0.5, 0.0], [1.0, 0.5, 1.0]);
+        assert!(!quad_cubic(&slab_top, false), "slab top is not cubic");
+        // Same quad on a full-collision state: cubic.
+        assert!(quad_cubic(&slab_top, true), "full-collision state is cubic");
+        // A boundary face (top of a full block): cubic regardless of state.
+        let top = quad(D::Up, [0.0, 1.0, 0.0], [1.0, 1.0, 1.0]);
+        assert!(quad_cubic(&top, false), "boundary face is cubic");
+        // Bottom face at y = 0: boundary from below.
+        let bottom = quad(D::Down, [0.0, 0.0, 0.0], [1.0, 0.0, 1.0]);
+        assert!(quad_cubic(&bottom, false), "bottom boundary face is cubic");
+        // A side face inset (x = 0.5) on a non-full state: non-cubic.
+        let inset = quad(D::East, [0.5, 0.0, 0.0], [0.5, 1.0, 1.0]);
+        assert!(!quad_cubic(&inset, false), "inset face is not cubic");
+    }
+
     #[test]
     fn ao_level_counts_occluders() {
-        assert_eq!(vertex_ao_level(false, false, false), 3);
-        assert_eq!(vertex_ao_level(true, false, false), 2);
-        assert_eq!(vertex_ao_level(true, true, false), 1);
-        assert_eq!(vertex_ao_level(true, true, true), 0);
+        // Vanilla's brightness is 1.0 - 0.2 * count over the four samples
+        // (two sides, diagonal, center).
+        assert_eq!(vertex_ao_level(false, false, false, false), 0);
+        assert_eq!(vertex_ao_level(true, false, false, false), 1);
+        assert_eq!(vertex_ao_level(true, true, false, false), 2);
+        assert_eq!(vertex_ao_level(true, true, true, false), 3);
+        assert_eq!(vertex_ao_level(true, true, true, true), 4);
+    }
+
+    /// Hand-computed corner blend (vanilla BlockModelLighter's shade average
+    /// and the light average), one up-face vertex: the exact 16th-unit average
+    /// of the four raw cell lights, with no zero-light substitution (see the
+    /// comment in `ao_corner_blend` for why vanilla's fallback is left out).
+    #[test]
+    fn corner_blend_matches_vanilla_rules() {
+        let stone = |sky: u8, block: u8| AoSample {
+            occludes: true,
+            light: pack_light(sky, block),
+        };
+        let air = |sky: u8, block: u8| AoSample {
+            occludes: false,
+            light: pack_light(sky, block),
+        };
+        // Center (the cell above the block): air, light (sky 12, block 0).
+        // Sides: both stone, the west one's light fully dark (0, 0), the
+        // south one's (15, 0); diagonal (the caller's substituted side-0
+        // sample): air, (15, 0).
+        // AO: stone + stone + air + air = 2 occluders (brightness 0.6).
+        // Light: the raw average of sky 12 + 0 + 15 + 15 = 42 levels, whose
+        // exact value in 16th units is 42 * 4 = 168 (level 10.5 — the
+        // fraction is the point of the smooth units); block 0.
+        let (ao, [sky16, block16]) = ao_corner_blend(
+            [stone(15, 0), stone(0, 0)],
+            air(15, 0), // the substituted diagonal (side 0)
+            air(12, 0), // center
+        );
+        assert_eq!(ao, 2);
+        assert_eq!(sky16, 168, "the raw four-cell average, no substitution");
+        assert_eq!(block16, 0);
+
+        let (_, [l2, _]) = ao_corner_blend([stone(15, 0), stone(9, 0)], air(15, 0), air(12, 0));
+        assert_eq!(l2, 204, "lit neighbours average unchanged");
     }
 
     /// Pomme's `compute_face_ao` neighbour triples (vanilla AdjacencyInfo),
@@ -1436,6 +1752,32 @@ mod tests {
         }
     }
 
+    /// The side-0 cell per face is vanilla AdjacencyInfo.corners[0] plus the
+    /// face normal (the cell whose shade and light vanilla substitutes for an
+    /// unreachable diagonal).
+    #[test]
+    fn face_side0_matches_vanilla_adjacency() {
+        use haste_assets::Direction as D;
+        // (face, AdjacencyInfo.corners[0])
+        let vanilla = [
+            (D::Down, D::West),
+            (D::Up, D::East),
+            (D::North, D::Up),
+            (D::South, D::West),
+            (D::West, D::Up),
+            (D::East, D::Down),
+        ];
+        for (dir, side0) in vanilla {
+            let n = dir.offset();
+            let s = side0.offset();
+            assert_eq!(
+                face_side0()[dir.index()],
+                [n[0] + s[0], n[1] + s[1], n[2] + s[2]],
+                "{dir:?} side-0 cell"
+            );
+        }
+    }
+
     /// A world whose sky light is a function of y alone: 9 at y=1, 3 at y=2.
     /// The smooth light of an up face must then be 9 (its four cells all sit at
     /// y=1); sampling the neighbours one cell further out would average the y=2
@@ -1477,9 +1819,9 @@ mod tests {
         }
     }
 
-    /// The vertex light's sky nibble, unpacked from the packed vertex.
-    fn vertex_sky(v: &PackedVertex) -> u8 {
-        v.light[0] >> 4
+    /// The vertex light's sky channel, in whole levels (smooth units / 16).
+    fn vertex_sky_levels(v: &PackedVertex) -> u8 {
+        v.light[0] / crate::vertex::LIGHT16_PER_LEVEL as u8
     }
 
     #[test]
@@ -1501,7 +1843,11 @@ mod tests {
         let mut seen = 0;
         for v in &mesh.vertices {
             if v.sprite == up {
-                assert_eq!(vertex_sky(v), 9, "up face light samples the y=1 cells");
+                assert_eq!(
+                    vertex_sky_levels(v),
+                    9,
+                    "up face light samples the y=1 cells"
+                );
                 seen += 1;
             }
         }
@@ -1530,12 +1876,12 @@ mod tests {
         let mut lights = std::collections::BTreeSet::new();
         for v in &mesh.vertices {
             if v.sprite == side {
-                lights.insert(vertex_sky(v));
+                lights.insert(v.light[0]);
             }
         }
         assert_eq!(
             lights.into_iter().collect::<Vec<_>>(),
-            vec![12, 15],
+            vec![192, 240],
             "side face light: the corner cells beside the face, not further out"
         );
     }

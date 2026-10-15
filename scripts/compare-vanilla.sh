@@ -39,11 +39,11 @@ print(c["pos"][0], c["pos"][1] - 1.62, c["pos"][2], c["yaw"], c["pitch"], d["wid
   # Keep teleporting Haste to the spot while it joins and settles (a tp to the same spot
   # does not reload anything once it is there).
   ( for _ in $(seq 40); do
-      "$ROOT/scripts/vanilla-rcon.sh" --port "$PORT" "tp haste $X $Y $Z $YAW $PITCH" >/dev/null 2>&1 || true
+      "$ROOT/scripts/vanilla-rcon.sh" --port "$PORT" "tp parity-compare $X $Y $Z $YAW $PITCH" >/dev/null 2>&1 || true
       sleep 0.25
     done ) &
   TP=$!
-  "$HASTE" --server "127.0.0.1:$PORT" --screenshot "$OUT/$name.haste.png" --hud off \
+  "$HASTE" --server "127.0.0.1:$PORT" --username parity-compare --screenshot "$OUT/$name.haste.png" --hud off \
     --pos "$X" "$Y" "$Z" --width "$W" --height "$H" --yaw "$YAW" --pitch "$PITCH" \
     --render-distance "$RD" --seconds 40 \
     > "$OUT/$name.haste.log" 2>&1 || echo "haste failed for $name (see $OUT/$name.haste.log)" >&2

@@ -31,12 +31,14 @@ pub struct PackedVertex {
     pub pos: [u16; 4],
     /// Sprite-local UV, u16 fixed point (`TERRAIN_UV_FIXED_SCALE` per unit).
     pub uv: [u16; 2],
-    /// Packed per-vertex lighting: [0] sky<<4|block, [1] ao|shade<<2, [2] tint red,
-    /// [3] tint green.
+    /// Packed per-vertex lighting: [0] sky in vanilla smooth units (16 per
+    /// level, 0..240), [1] ao count (bits 0..2) | shade index (bits 3..5),
+    /// [2] tint red, [3] tint green.
     pub light: [u8; 4],
     /// Index into the atlas sprite-rect buffer (0 = missing tile).
     pub sprite: u16,
-    /// [0] tint blue, [1] pad (20-byte stride).
+    /// [0] tint blue, [1] block light in smooth units (0..240; the old pad
+    /// byte, so the stride stays 20).
     pub tint_b: [u8; 2],
 }
 
@@ -44,8 +46,10 @@ impl PackedVertex {
     /// Attribute layout: wgpu requires offsets aligned to the format size, so
     /// the u16s pack into 4-byte groups: pos as Uint16x4 (x, y, z, pad), uv as
     /// Uint16x2, sprite Uint16, light as Uint8x4; 2 pad bytes to stride 20.
-    /// `light.0` = sky<<4 | block, `light.1` = ao (bits 0..1) | shade index
-    /// (bits 2..4), `light.2`/`light.3` = tint red/green, `tint_b.0` = tint blue.
+    /// `light.0` = sky light in smooth units (0..240), `light.1` = ao count
+    /// (bits 0..2) | shade index (bits 3..5), `light.2`/`light.3` = tint
+    /// red/green, `tint_b.0` = tint blue, `tint_b.1` = block light in smooth
+    /// units (0..240).
     pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
         array_stride: 20,
         step_mode: wgpu::VertexStepMode::Vertex,
@@ -100,10 +104,17 @@ pub fn pack_light(sky: u8, block: u8) -> u8 {
     ((sky & 0xF) << 4) | (block & 0xF)
 }
 
-/// `light[1]`: AO level (0 darkest..3) in bits 0..1, face shade index in
-/// bits 2..4 (0..5 = down/up/north/south/west/east, 6 = unshaded).
+/// Chunk-vertex light channels in vanilla's smooth units: 16 per light level
+/// (0..240), the precision `LightCoordsUtil.smoothBlend` keeps through to the
+/// lightmap (`minecraft_sample_lightmap`'s `(value + 8) / 256`).
+pub const LIGHT16_PER_LEVEL: u16 = 16;
+pub const LIGHT16_MAX: u16 = 240;
+
+/// `light[1]`: AO occluder count (0 unoccluded .. 4, brightness 1 - 0.2*count,
+/// vanilla's four-sample average) in bits 0..2, face shade index in bits 3..5
+/// (0..5 = down/up/north/south/west/east, 6 = unshaded).
 pub fn pack_ao_shade(ao_level: u8, shade_index: u8) -> u8 {
-    (ao_level & 3) | ((shade_index & 7) << 2)
+    (ao_level & 7) | ((shade_index & 7) << 3)
 }
 
 fn unorm_to_u16(x: f32) -> u16 {
@@ -126,9 +137,11 @@ pub struct QuadVertex {
     pub uv: [f32; 2],
 }
 
-/// Pack one vertex: positions are section-local floats, UVs sprite-local. `light` is
-/// [sky<<4|block, ao|shade<<2], `tint` 0xRRGGBB (0xFFFFFF = untinted).
-pub fn pack_vertex(v: &QuadVertex, sprite: u16, light: [u8; 2], tint: u32) -> PackedVertex {
+/// Pack one vertex: positions are section-local floats, UVs sprite-local.
+/// `light` is [sky16, ao|shade<<3, block16] (sky/block in vanilla smooth
+/// units, 16 per level, 0..240 — block16 rides the `tint_b` pad byte; see
+/// `PackedVertex`), `tint` 0xRRGGBB (0xFFFFFF = untinted).
+pub fn pack_vertex(v: &QuadVertex, sprite: u16, light: [u8; 3], tint: u32) -> PackedVertex {
     PackedVertex {
         pos: [
             quantize_coord(v.position[0]),
@@ -139,7 +152,7 @@ pub fn pack_vertex(v: &QuadVertex, sprite: u16, light: [u8; 2], tint: u32) -> Pa
         uv: [pack_sprite_uv(v.uv[0]), pack_sprite_uv(v.uv[1])],
         light: [light[0], light[1], (tint >> 16) as u8, (tint >> 8) as u8],
         sprite,
-        tint_b: [tint as u8, 0],
+        tint_b: [tint as u8, light[2]],
     }
 }
 
@@ -199,7 +212,7 @@ mod tests {
             }
         }
         let packed = pack_ao_shade(2, 5);
-        assert_eq!(packed & 3, 2);
-        assert_eq!((packed >> 2) & 7, 5);
+        assert_eq!(packed & 7, 2);
+        assert_eq!((packed >> 3) & 7, 5);
     }
 }

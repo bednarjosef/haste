@@ -217,6 +217,7 @@ fn detect(
             camera_entity: None,
             block_entities: &[],
             spin: None,
+            weather: None,
         };
         // Two frames: the section visibility walk's mask lands on a later frame.
         renderer.render(&frame).unwrap();

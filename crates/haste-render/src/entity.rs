@@ -574,6 +574,7 @@ impl EntityRenderer {
         entities: &[EntityInstance],
         skip: Option<EntityId>,
         camera: glam::DVec3,
+        frustum: &[glam::Vec4; 6],
         assets: &mut Assets,
     ) {
         self.vertices.clear();
@@ -581,6 +582,20 @@ impl EntityRenderer {
         self.drawn = 0;
         for e in entities {
             if Some(e.id) == skip {
+                continue;
+            }
+            // Vanilla `EntityRenderer.shouldRender`: skip entities beyond
+            // `64 * boundingBox.size` blocks (`Entity.shouldRenderAtSqrDistance`) or
+            // outside the camera frustum (the AABB inflated by 0.5, `Frustum.isVisible`).
+            // Same look: those entities would draw nothing visible anyway.
+            let (size, half) = model_extents(&e.model.root);
+            let rel = e.pos - camera;
+            let dist2 = rel.length_squared();
+            let limit = 64.0 * size.max(1.0) * e.scale;
+            if dist2 > f64::from(limit * limit) {
+                continue;
+            }
+            if !aabb_in_frustum(frustum, rel, half + 0.5) {
                 continue;
             }
             let (sky, block) = self.lights.get(&e.id).copied().unwrap_or((15, 0));
@@ -601,6 +616,9 @@ impl EntityRenderer {
                         self.emit_item_frame(e, f, camera, sky, block, assets)
                     }
                     Decoration::Painting(p) => self.emit_painting(e, p, camera, sky, block, assets),
+                    // The lightning bolt draws through the weather pass's own additive
+                    // pipeline (`RenderPipelines.LIGHTNING`); nothing here.
+                    Decoration::Lightning(_) => {}
                 }
                 if self.vertices.len() > start {
                     self.drawn += 1;
@@ -1217,13 +1235,15 @@ impl EntityRenderer {
     /// the entities, after `prepare`: one draw call covers both, and each texture lands in the
     /// shared atlas on first use (the per-vertex `rect` picks it). `visible` decides per
     /// instance whether it is drawn (frustum and section culling are the caller's, like the
-    /// terrain's); returns how many were posed.
+    /// terrain's); returns how many were posed. `orientation` is the camera's orientation
+    /// quaternion, for the conduit's billboarded eye.
     pub fn append_block_entities(
         &mut self,
         instances: &[crate::blockentity::BlockEntityInstance],
         camera: glam::DVec3,
         visible: impl Fn(&crate::blockentity::BlockEntityInstance) -> bool,
         assets: &mut Assets,
+        orientation: glam::Quat,
     ) -> u32 {
         let start = self.vertices.len();
         let mut drawn = 0;
@@ -1252,6 +1272,44 @@ impl EntityRenderer {
                 drawn += 1;
                 continue;
             }
+            if matches!(
+                inst.kind,
+                crate::blockentity::BlockEntityKind::Lectern
+                    | crate::blockentity::BlockEntityKind::EnchantTable
+                    | crate::blockentity::BlockEntityKind::Bell
+                    | crate::blockentity::BlockEntityKind::DecoratedPot
+                    | crate::blockentity::BlockEntityKind::Conduit
+            ) {
+                // The object-model block entities (books, bells, decorated pots, conduits):
+                // one part list each, their own texture per part through the same atlas.
+                let texture = match inst.kind {
+                    crate::blockentity::BlockEntityKind::Lectern => {
+                        crate::blockentity::book_texture()
+                    }
+                    crate::blockentity::BlockEntityKind::EnchantTable => {
+                        crate::blockentity::book_texture()
+                    }
+                    crate::blockentity::BlockEntityKind::Bell => crate::blockentity::bell_texture(),
+                    crate::blockentity::BlockEntityKind::DecoratedPot => {
+                        crate::blockentity::pot_base_texture()
+                    }
+                    _ => crate::blockentity::conduit_shell_texture(),
+                };
+                let rect = self.texture_rect(&texture, assets);
+                let mut out = std::mem::take(&mut self.vertices);
+                let me = &mut *self;
+                crate::blockentity::emit_model_block_entity(
+                    &mut out,
+                    inst,
+                    camera,
+                    orientation,
+                    rect,
+                    &mut |id| me.texture_rect(id, assets),
+                );
+                self.vertices = out;
+                drawn += 1;
+                continue;
+            }
             let texture = match inst.kind {
                 crate::blockentity::BlockEntityKind::Chest(m) => {
                     crate::blockentity::chest_texture(m, inst.half)
@@ -1264,6 +1322,11 @@ impl EntityRenderer {
                 }
                 crate::blockentity::BlockEntityKind::Sign { .. } => unreachable!(),
                 crate::blockentity::BlockEntityKind::Banner { .. } => unreachable!(),
+                crate::blockentity::BlockEntityKind::Lectern
+                | crate::blockentity::BlockEntityKind::EnchantTable
+                | crate::blockentity::BlockEntityKind::Bell
+                | crate::blockentity::BlockEntityKind::DecoratedPot
+                | crate::blockentity::BlockEntityKind::Conduit => unreachable!(),
             };
             let rect = self.texture_rect(&texture, assets);
             let out = &mut self.vertices;
@@ -1968,7 +2031,7 @@ fn push_world_quad(
 
 /// World-space entity shading: two directional lights at 0.6 and 0.4 ambient (the same
 /// lighting model as GUI items, with the light directions in world space).
-fn entity_shade(n: Vec3) -> f32 {
+pub(crate) fn entity_shade(n: Vec3) -> f32 {
     let l0 = Vec3::new(0.2, 1.0, -0.7).normalize();
     let l1 = Vec3::new(-0.2, 1.0, 0.7).normalize();
     ((n.dot(l0).max(0.0) + n.dot(l1).max(0.0)) * 0.6 + 0.4).min(1.0)
@@ -2063,7 +2126,50 @@ pub(crate) fn model_top(part: &ModelPart, parent_y: f32) -> f32 {
         .fold(own, f32::max)
 }
 
-fn pose_rotation(pose: &PoseOverrides, name: &str) -> Option<Vec3> {
+/// A model's render size and camera-relative half-extents in blocks, for vanilla's
+/// `Entity.shouldRenderAtSqrDistance` (`boundingBox.getSize()`) and the frustum test
+/// (`getBoundingBoxForCulling`, the model's static bounds: like vanilla's AABB it does
+/// not track animation). Model space is y-down, 1/16 block per unit; `emit_part` scales
+/// by 1/16 with x/y mirrored, so extents are symmetric and only the scale matters.
+pub(crate) fn model_extents(part: &ModelPart) -> (f32, f32) {
+    fn walk(part: &ModelPart, ox: f32, oy: f32, oz: f32, lo: &mut Vec3, hi: &mut Vec3) {
+        let (px, py, pz) = (ox + part.pivot.x, oy + part.pivot.y, oz + part.pivot.z);
+        for c in &part.cubes {
+            let (x0, y0, z0) = (px + c.origin.x, py + c.origin.y, pz + c.origin.z);
+            let (x1, y1, z1) = (x0 + c.size.x, y0 + c.size.y, z0 + c.size.z);
+            let i = c.inflate;
+            *lo = lo.min(Vec3::new(x0 - i, y0 - i, z0 - i));
+            *hi = hi.max(Vec3::new(x1 + i, y1 + i, z1 + i));
+        }
+        for child in &part.children {
+            walk(child, px, py, pz, lo, hi);
+        }
+    }
+    let mut lo = Vec3::splat(f32::MAX);
+    let mut hi = Vec3::splat(f32::MIN);
+    walk(part, 0.0, 0.0, 0.0, &mut lo, &mut hi);
+    let (w, h, d) = (
+        (hi.x - lo.x).abs(),
+        (hi.y - lo.y).abs(),
+        (hi.z - lo.z).abs(),
+    );
+    // `AABB.getSize()` is the diagonal's length; model space is 1/16 block, so / 16.
+    let size = ((w * w + h * h + d * d).sqrt() / 16.0).max(1.0);
+    let half = Vec3::new(w, h, d) / 16.0 / 2.0;
+    (size, half.length())
+}
+
+/// Conservative AABB-in-frustum test: the sphere around the entity (centre `rel` in
+/// camera-relative blocks, radius `r`) against the 6 planes (Gribb/Hartmann, the same
+/// plane form the terrain cull uses). The sphere contains the model's extents.
+pub(crate) fn aabb_in_frustum(planes: &[glam::Vec4; 6], rel: glam::DVec3, r: f32) -> bool {
+    let c = rel.as_vec3();
+    planes
+        .iter()
+        .all(|p| p.x * c.x + p.y * c.y + p.z * c.z + p.w >= -r)
+}
+
+pub(crate) fn pose_rotation(pose: &PoseOverrides, name: &str) -> Option<Vec3> {
     pose.rotations
         .iter()
         .find(|(n, _)| n == name)
@@ -2599,6 +2705,73 @@ fn placeholder_texture() -> image::RgbaImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The frustum cull keeps entities inside the view and drops those behind the camera:
+    /// vanilla `EntityRenderer.shouldRender` (`Frustum.isVisible` on the inflated AABB).
+    /// A sphere around the model stands in for the AABB, so an entity half-in view stays.
+    /// The planes come from the renderer's own `frustum_planes` on a straight, level view.
+    #[test]
+    fn frustum_cull_keeps_visible_and_drops_behind() {
+        let camera = crate::Camera {
+            pos: glam::DVec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.0,
+            fov_deg: 70.0,
+            hand_fov_deg: 70.0,
+            roll_deg: 0.0,
+            bob: crate::ViewBob::default(),
+        };
+        let view_proj = crate::Renderer::view_projection(&camera, 1.0, None);
+        let planes = crate::Renderer::frustum_planes(&view_proj);
+        let r = 1.0;
+        // Straight ahead at 10 blocks (yaw 0 looks along +z): kept.
+        assert!(aabb_in_frustum(
+            &planes,
+            glam::DVec3::new(0.0, 0.0, 10.0),
+            r
+        ));
+        // Behind the camera: dropped.
+        assert!(!aabb_in_frustum(
+            &planes,
+            glam::DVec3::new(0.0, 0.0, -10.0),
+            r
+        ));
+        // Ahead but far outside the 70-degree fov: dropped.
+        assert!(!aabb_in_frustum(
+            &planes,
+            glam::DVec3::new(100.0, 0.0, 10.0),
+            r
+        ));
+    }
+
+    /// A model's render size (vanilla `Entity.shouldRenderAtSqrDistance` compares against
+    /// `64 * boundingBox.getSize()`): an 8x8x8-unit cube spans half a block each way, so
+    /// its diagonal is ~0.87 blocks (clamped to 1) and the sphere radius is the
+    /// half-diagonal, ~0.43 blocks.
+    #[test]
+    fn model_extents_from_a_cube() {
+        let part = ModelPart {
+            name: "root".into(),
+            pivot: Vec3::ZERO,
+            rotation: Vec3::ZERO,
+            visible: true,
+            cubes: vec![haste_core::model::Cube {
+                origin: Vec3::new(-4.0, 0.0, -4.0),
+                size: Vec3::new(8.0, 8.0, 8.0),
+                inflate: 0.0,
+                uv: [0, 0],
+                mirror: false,
+            }],
+            children: Vec::new(),
+        };
+        let (size, half) = model_extents(&part);
+        let diagonal = (3.0_f32 * 8.0 * 8.0).sqrt();
+        assert!(
+            (size - (diagonal / 16.0).max(1.0)).abs() < 1e-5,
+            "size {size}"
+        );
+        assert!((half - diagonal / 16.0 / 2.0).abs() < 1e-5, "half {half}");
+    }
 
     /// `EntityRenderer.extractShadowPiece`: the shadow alpha fades with height above the
     /// block (`powerAtDepth = pow - (entity.y - pos.y) * 0.5`, then `* 0.5 * brightness`).
