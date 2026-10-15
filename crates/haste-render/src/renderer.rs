@@ -515,6 +515,8 @@ pub struct Renderer {
     first_person: Option<crate::entity::FirstPerson>,
     /// Name tags projected to GUI space this frame.
     nametags: Vec<crate::gui::ScreenNametag>,
+    /// Vanilla `Options.entityShadows`: draw the round entity shadows (default on).
+    entity_shadows: bool,
     /// F2 screenshot requested: the next `render` arms the capture for `take_capture`.
     capture_pending: bool,
     /// In-flight screenshot readback (copy submitted, async map pending) until
@@ -991,6 +993,7 @@ impl Renderer {
             timer,
             present_mode: wgpu::PresentMode::Fifo,
             nametags: Vec::new(),
+            entity_shadows: true,
             capture_pending: false,
             capture: None,
             surface_copy: false,
@@ -1045,6 +1048,7 @@ impl Renderer {
         frame: &FrameInput,
     ) {
         self.sample_entity_lights(world, frame.entities);
+        self.prepare_shadows(world, shapes, frame);
         let o = &mut self.overlay.world;
         o.target = frame.block_target.and_then(|(pos, _)| {
             let state = world.block_state(pos);
@@ -1127,6 +1131,53 @@ impl Renderer {
             );
             (e.id, (world.sky_light(p), world.block_light(p)))
         }));
+    }
+
+    /// Vanilla `Options.entityShadows`: draw the round entity shadows (default on).
+    pub fn set_entity_shadows(&mut self, on: bool) {
+        self.entity_shadows = on;
+    }
+
+    /// Number of shadow quads batched for the last frame (tests/reporting).
+    pub fn shadow_quad_count(&self) -> usize {
+        self.entity.shadow_quad_count()
+    }
+
+    /// Extracts and batches the entity shadows for `frame` (vanilla
+    /// `EntityRenderer.extractShadow`/`finalizeRenderState`). Called by [`Self::sample_world`];
+    /// call it directly when you render without `sample_world` (tests) and want shadows.
+    pub fn prepare_shadows(
+        &mut self,
+        world: &dyn BlockView,
+        shapes: &dyn haste_core::view::CollisionShapes,
+        frame: &FrameInput,
+    ) {
+        // `Level.getSkyDarken` = (int)(15 - SKY_LIGHT_LEVEL) off the day timeline; skyless
+        // dimensions never use it (`getRawBrightness` reads only the block light there).
+        let sky_darken = if frame.sky.dimension_has_sky {
+            (15.0 * (1.0 - crate::lightmap::overworld_sky_factor(frame.sky.time_of_day))).floor()
+                as i32
+        } else {
+            0
+        };
+        // `DimensionType.ambientLight`: 0.1 in the Nether (and skyless custom dimensions), 0
+        // in the overworld and End.
+        let ambient = if self.sky.kind == crate::sky::SkyKind::None {
+            0.1
+        } else {
+            0.0
+        };
+        self.entity.prepare_shadows(
+            frame.entities,
+            frame.camera_entity,
+            frame.camera.pos,
+            world,
+            shapes,
+            sky_darken,
+            ambient,
+            self.entity_shadows,
+            &mut self.assets,
+        );
     }
 
     /// Text measurement over the default font (vanilla `Font.width` rules), for the HUD and
@@ -1999,6 +2050,9 @@ impl Renderer {
                 let instance = i;
                 // Entities after the opaque and cutout terrain, before translucent.
                 if !entities_drawn && d.layer == haste_assets::RenderLayer::Translucent {
+                    // Vanilla draws the entity shadows (a translucent, depth-tested pass) with
+                    // the entities.
+                    draw_calls += self.entity.draw_shadows(&mut pass);
                     draw_calls += self.entity.draw(&mut pass);
                     pass.set_bind_group(1, &self.atlas_bind_group, &[]);
                     entities_drawn = true;
@@ -2047,6 +2101,7 @@ impl Renderer {
                 }
             }
             if !entities_drawn {
+                draw_calls += self.entity.draw_shadows(&mut pass);
                 draw_calls += self.entity.draw(&mut pass);
             }
             draw_calls += self.particles.draw(&mut pass);

@@ -212,6 +212,14 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
         // default skin for our UUID is what vanilla shows without a downloaded skin.
         skin: Some(haste_render::default_skin(uuid).0),
         nametag: None,
+        below_name: None,
+        // `AvatarRenderer` passes shadowRadius 0.5 (LivingEntityRenderer, player scale 1).
+        shadow_radius: 0.5,
+        shadow_strength: 1.0,
+        invisible: false,
+        is_discrete: view.pose == Some(haste_core::entity::Pose::Crouching),
+        // `EntityAttachment.NAME_TAG` AT_HEIGHT fallback = the player's 1.8 bb height.
+        name_tag_y: 1.8,
         // Our own model flashes red in third person like other entities: full strength on the
         // tick of the hit, fading over the 10 hurt ticks (vanilla's hurtTime / hurtDuration).
         hurt: (view.hurt_ticks.min(crate::net::HURT_TILT_TICKS) as f32

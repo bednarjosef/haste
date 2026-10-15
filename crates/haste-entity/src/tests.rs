@@ -1797,6 +1797,35 @@ fn baby_flag_and_baby_layers() {
     ));
 }
 
+/// The shadow radii are the values the 26.3 renderer constructors pass (a sample across the
+/// families), and a table-covered living type not named falls back to the usual 0.5.
+#[test]
+fn shadow_radius_table_matches_vanilla() {
+    use crate::registry::{shadow_radius_for_name, shadow_strength_for_name};
+    assert_eq!(shadow_radius_for_name("minecraft:pig"), 0.7);
+    assert_eq!(shadow_radius_for_name("minecraft:cow"), 0.7);
+    assert_eq!(shadow_radius_for_name("minecraft:zombie"), 0.5);
+    assert_eq!(shadow_radius_for_name("minecraft:creeper"), 0.5);
+    assert_eq!(shadow_radius_for_name("minecraft:item"), 0.15);
+    assert_eq!(shadow_radius_for_name("minecraft:experience_orb"), 0.15);
+    assert_eq!(shadow_radius_for_name("minecraft:armor_stand"), 0.0);
+    assert_eq!(shadow_radius_for_name("minecraft:ghast"), 1.5);
+    assert_eq!(shadow_radius_for_name("minecraft:bat"), 0.25);
+    // An unknown / non-rendered type casts no shadow.
+    assert_eq!(shadow_radius_for_name("minecraft:not_a_mob"), 0.0);
+    assert_eq!(shadow_strength_for_name("minecraft:item"), 0.75);
+    assert_eq!(shadow_strength_for_name("minecraft:pig"), 1.0);
+    // The name tag anchor: the bb height, or the sniffer's 2.05 override.
+    assert_eq!(
+        crate::registry::name_tag_offset_for_name("minecraft:pig", 0.9),
+        0.9
+    );
+    assert_eq!(
+        crate::registry::name_tag_offset_for_name("minecraft:sniffer", 1.75),
+        2.05
+    );
+}
+
 /// Baby layers come from the recorder's model dump, which CI does not have.
 #[test]
 #[ignore = "needs cache/oracle/26.3/entity_models.json"]

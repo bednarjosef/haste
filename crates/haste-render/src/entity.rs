@@ -12,7 +12,8 @@ use haste_core::model::{
     BodyOp, BodyTransform, CubeModel, Decoration, DroppedItem, EntityInstance, ItemFrameDecoration,
     ModelPart, PaintingDecoration, PoseOverrides,
 };
-use haste_core::{EntityId, Identifier};
+use haste_core::view::{BlockView, CollisionShapes};
+use haste_core::{BlockPos, EntityId, Identifier};
 
 use crate::gui::Shelf;
 
@@ -222,6 +223,11 @@ pub struct FirstPerson {
 pub struct Nametag {
     pub anchor: glam::DVec3,
     pub text: String,
+    /// `!state.isDiscrete`: draw the see-through pass as well as the solid one
+    /// (`SubmitNodeCollection.submitNameTag`).
+    pub see_through: bool,
+    /// The scoreboard below-name line (`Entity.belowNameDisplay`), drawn under the name.
+    pub below_name: Option<String>,
 }
 
 struct EntityTexture {
@@ -240,6 +246,12 @@ pub struct EntityRenderer {
     vertex_buffer: wgpu::Buffer,
     vertex_capacity: usize,
     vertices: Vec<EntityVertex>,
+    /// The entity-shadow pipeline: same atlas/vertex format as the entity pipeline, but
+    /// translucent with no depth write and no culling (vanilla `ENTITY_SHADOW`).
+    shadow_pipeline: wgpu::RenderPipeline,
+    shadow_buffer: wgpu::Buffer,
+    shadow_capacity: usize,
+    shadow_vertices: Vec<EntityVertex>,
     lights: HashMap<EntityId, (u8, u8)>,
     pub nametags: Vec<Nametag>,
     hand_buffer: wgpu::Buffer,
@@ -353,8 +365,57 @@ impl EntityRenderer {
             multiview_mask: None,
             cache: None,
         });
+        // `ENTITY_SHADOW` (RenderPipelines.ENTITY_SHADOW): same vertex format and atlas as the
+        // entity pipeline, but translucent with the depth test kept and no depth write
+        // (`DepthStencilState(GREATER_THAN_OR_EQUAL, false)`) and no back-face culling.
+        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("entity-shadow"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(EntityVertex::LAYOUT)],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24Plus,
+                depth_write_enabled: Some(false),
+                // Vanilla's `DepthStencilState(GREATER_THAN_OR_EQUAL, false)` (reverse-Z) is
+                // LessEqual against Haste's depth cleared to 1. The shadow quad is coplanar
+                // with the block top, so a small bias towards the camera replaces vanilla's
+                // `VIEW_OFFSET_Z_LAYERING` polygon offset.
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: -1,
+                    slope_scale: 0.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let vertex_capacity = 8192;
         let vertex_buffer = make_vertex_buffer(&device, vertex_capacity);
+        let shadow_capacity = 2048;
+        let shadow_buffer = make_vertex_buffer(&device, shadow_capacity);
         let hand_buffer = make_vertex_buffer(&device, 1024);
         EntityRenderer {
             device,
@@ -367,6 +428,10 @@ impl EntityRenderer {
             vertex_buffer,
             vertex_capacity,
             vertices: Vec::new(),
+            shadow_pipeline,
+            shadow_buffer,
+            shadow_capacity,
+            shadow_vertices: Vec::new(),
             lights: HashMap::new(),
             nametags: Vec::new(),
             hand_buffer,
@@ -602,11 +667,19 @@ impl EntityRenderer {
                 self.drawn += 1;
             }
             if let Some(name) = &e.nametag {
-                let top = model_top(&e.model.root, 0.0) * scale / 16.0;
-                self.nametags.push(Nametag {
-                    anchor: e.pos + glam::DVec3::new(0.0, top as f64 + 0.5, 0.0),
-                    text: name.clone(),
-                });
+                // `EntityRenderer.extractNameTags`: within 64 blocks, and past 32 when
+                // crouching (`LivingEntityRenderer.shouldShowName`). Invisible entities never
+                // reach here (haste-entity drops their tag). The anchor is the NAME_TAG
+                // attachment (bb height) plus 0.5.
+                let dist_sq = (e.pos - camera).length_squared();
+                if name_tag_visible(dist_sq, e.is_discrete) {
+                    self.nametags.push(Nametag {
+                        anchor: e.pos + glam::DVec3::new(0.0, e.name_tag_y as f64 + 0.5, 0.0),
+                        text: name.clone(),
+                        see_through: !e.is_discrete,
+                        below_name: e.below_name.clone(),
+                    });
+                }
             }
         }
         if self.vertices.len() > self.vertex_capacity {
@@ -617,6 +690,140 @@ impl EntityRenderer {
             self.queue
                 .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
         }
+    }
+
+    /// Vanilla `EntityRenderer.extractShadow`: the round `misc/shadow.png` quads on the full
+    /// top faces below each entity. For every entity the shadow is a `shadowRadius` (capped at
+    /// 32) disc, its power fading with camera distance (`1 - distSq/256`) times the renderer's
+    /// shadow strength, and with height above the block (`extractShadowPiece`); the alpha also
+    /// scales with the block's raw brightness through `Lightmap.getBrightness`. Skipped for
+    /// invisible entities and when the entity-shadows option is off. `sky_darken` is
+    /// `Level.getSkyDarken` (0..15) and `ambient_light` the dimension's `ambientLight`.
+    ///
+    /// Batched into one reused vertex buffer, no per-frame allocation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_shadows(
+        &mut self,
+        entities: &[EntityInstance],
+        skip: Option<EntityId>,
+        camera: glam::DVec3,
+        world: &dyn BlockView,
+        shapes: &dyn CollisionShapes,
+        sky_darken: i32,
+        ambient_light: f32,
+        entity_shadows: bool,
+        assets: &mut Assets,
+    ) {
+        self.shadow_vertices.clear();
+        if !entity_shadows {
+            return;
+        }
+        let rect = self.texture_rect(&Identifier::minecraft("misc/shadow"), assets);
+        for e in entities {
+            if Some(e.id) == skip || e.invisible || e.decoration.is_some() {
+                continue;
+            }
+            let radius = e.shadow_radius.min(32.0);
+            if radius <= 0.0 {
+                continue;
+            }
+            let dist_sq = (e.pos - camera).length_squared();
+            let pow = (1.0 - dist_sq / 256.0) as f32 * e.shadow_strength;
+            if pow <= 0.0 {
+                continue;
+            }
+            let x0 = (e.pos.x - radius as f64).floor() as i32;
+            let x1 = (e.pos.x + radius as f64).floor() as i32;
+            let z0 = (e.pos.z - radius as f64).floor() as i32;
+            let z1 = (e.pos.z + radius as f64).floor() as i32;
+            let depth = (pow / 0.5 - 1.0).min(radius);
+            let y0 = (e.pos.y - depth as f64).floor() as i32;
+            let y1 = e.pos.y.floor() as i32;
+            for z in z0..=z1 {
+                for x in x0..=x1 {
+                    for y in y0..=y1 {
+                        let pos = BlockPos::new(x, y, z);
+                        let power_at_depth = pow - (e.pos.y - y as f64) as f32 * 0.5;
+                        let below = BlockPos::new(x, y - 1, z);
+                        let below_state = world.block_state(below);
+                        // `isCollisionShapeFullBlock`: exactly one full 0..1 box.
+                        let boxes = shapes.collision_boxes(below_state);
+                        let full = boxes.len() == 1
+                            && boxes[0].min == glam::DVec3::ZERO
+                            && boxes[0].max == glam::DVec3::ONE;
+                        if !full {
+                            continue;
+                        }
+                        let brightness = max_local_raw_brightness(world, pos, sky_darken);
+                        if brightness <= 3 {
+                            continue;
+                        }
+                        let b = lightmap_brightness(ambient_light, brightness);
+                        let alpha = shadow_piece_alpha(power_at_depth, b);
+                        if alpha <= 0.0 {
+                            continue;
+                        }
+                        let r = 2.0 * radius as f64;
+                        let bx = x as f64;
+                        let bz = z as f64;
+                        let by = y as f64;
+                        let x01 = bx - e.pos.x;
+                        let x11 = bx + 1.0 - e.pos.x;
+                        let z01 = bz - e.pos.z;
+                        let z11 = bz + 1.0 - e.pos.z;
+                        let u0 = (-x01 / r) as f32 + 0.5;
+                        let u1 = (-x11 / r) as f32 + 0.5;
+                        let v0 = (-z01 / r) as f32 + 0.5;
+                        let v1 = (-z11 / r) as f32 + 0.5;
+                        let rel = |wx: f64, wy: f64, wz: f64| {
+                            Vec3::new(
+                                (wx - camera.x) as f32,
+                                (wy - camera.y) as f32,
+                                (wz - camera.z) as f32,
+                            )
+                        };
+                        // `ShadowFeatureRenderer.prepare`: (x01,z01), (x01,z11), (x11,z11),
+                        // (x11,z01), all at y01 = the block top.
+                        let p = [
+                            rel(bx, by, bz),
+                            rel(bx, by, bz + 1.0),
+                            rel(bx + 1.0, by, bz + 1.0),
+                            rel(bx + 1.0, by, bz),
+                        ];
+                        let uv = [[u0, v0], [u0, v1], [u1, v1], [u1, v0]];
+                        push_shadow_quad(&mut self.shadow_vertices, p, uv, alpha, rect);
+                    }
+                }
+            }
+        }
+        if self.shadow_vertices.len() > self.shadow_capacity {
+            self.shadow_capacity = self.shadow_vertices.len().next_power_of_two();
+            self.shadow_buffer = make_vertex_buffer(&self.device, self.shadow_capacity);
+        }
+        if !self.shadow_vertices.is_empty() {
+            self.queue.write_buffer(
+                &self.shadow_buffer,
+                0,
+                bytemuck::cast_slice(&self.shadow_vertices),
+            );
+        }
+    }
+
+    /// Draws the batched entity shadows; the camera and lightmap bind groups must be set.
+    pub fn draw_shadows<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) -> u32 {
+        if self.shadow_vertices.is_empty() {
+            return 0;
+        }
+        pass.set_pipeline(&self.shadow_pipeline);
+        pass.set_bind_group(1, &self.bind_group, &[]);
+        pass.set_vertex_buffer(0, self.shadow_buffer.slice(..));
+        pass.draw(0..self.shadow_vertices.len() as u32, 0..1);
+        1
+    }
+
+    /// Number of shadow quads batched for the last frame (6 vertices each); tests/reporting.
+    pub fn shadow_quad_count(&self) -> usize {
+        self.shadow_vertices.len() / 6
     }
 
     /// Draws an entity's equipment on top of its model (already emitted at `root`): the held
@@ -1779,6 +1986,68 @@ fn entity_shade(n: Vec3) -> f32 {
     ((n.dot(l0).max(0.0) + n.dot(l1).max(0.0)) * 0.6 + 0.4).min(1.0)
 }
 
+/// One shadow quad (four vertices, two triangles) with a flat white colour at `alpha`. The
+/// shadow texture is sampled at `uv` (0..1) inside `rect` in the entity atlas; the light is
+/// full-bright (vanilla's `15728880`), so `entity.wgsl` leaves the texture colour unchanged.
+fn push_shadow_quad(
+    out: &mut Vec<EntityVertex>,
+    p: [Vec3; 4],
+    uv: [[f32; 2]; 4],
+    alpha: f32,
+    rect: [u32; 4],
+) {
+    let color = [1.0, 1.0, 1.0, alpha];
+    let uv = uv.map(|t| {
+        [
+            rect[0] as f32 + t[0] * rect[2] as f32,
+            rect[1] as f32 + t[1] * rect[3] as f32,
+        ]
+    });
+    let r16 = rect.map(|v| v as u16);
+    for i in [0usize, 1, 2, 0, 2, 3] {
+        out.push(EntityVertex {
+            pos: p[i].to_array(),
+            uv: uv[i],
+            color,
+            rect: r16,
+            light: [15, 15, 0, 0],
+        });
+    }
+}
+
+/// `Level.getMaxLocalRawBrightness(pos)`: `max(blockLight, skyLight - skyDarken)`
+/// (`LevelLightEngine.getRawBrightness`). `sky_darken` is `Level.getSkyDarken`.
+pub(crate) fn max_local_raw_brightness(
+    world: &dyn BlockView,
+    pos: BlockPos,
+    sky_darken: i32,
+) -> i32 {
+    let block = world.block_light(pos) as i32;
+    let sky = world.sky_light(pos) as i32 - sky_darken;
+    block.max(sky)
+}
+
+/// `EntityRenderer.extractNameTags` + `LivingEntityRenderer.shouldShowName`: a name tag shows
+/// within 64 blocks, and only within 32 while crouching (`isDiscrete`, distanceSq >= 1024).
+pub fn name_tag_visible(dist_sq: f64, is_discrete: bool) -> bool {
+    dist_sq < 64.0 * 64.0 && !(is_discrete && dist_sq >= 32.0 * 32.0)
+}
+
+/// `Lightmap.getBrightness(dimensionType, level)`: the curved light curve
+/// `v / (4 - 3v)` with the dimension's ambient light floor, `lerp(ambient, curved, 1)`.
+pub fn lightmap_brightness(ambient: f32, level: i32) -> f32 {
+    let v = level as f32 / 15.0;
+    let curved = v / (4.0 - 3.0 * v);
+    curved + ambient * (1.0 - curved)
+}
+
+/// `EntityRenderer.extractShadowPiece`'s per-piece alpha:
+/// `clamp(powerAtDepth * 0.5 * brightness, 0, 1)` with
+/// `powerAtDepth = pow - (entity.y - pos.y) * 0.5`.
+pub fn shadow_piece_alpha(power_at_depth: f32, brightness: f32) -> f32 {
+    (power_at_depth * 0.5 * brightness).clamp(0.0, 1.0)
+}
+
 /// Hurt flash red overlay strength. Vanilla overlays red at about 30 % (`hurt` in
 /// `EntityRenderState` mixes `0.3 * hurt` towards (1, 0, 0)); we use the same 0.3.
 pub(crate) const HURT_RED_STRENGTH: f32 = 0.3;
@@ -2342,6 +2611,51 @@ fn placeholder_texture() -> image::RgbaImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `EntityRenderer.extractShadowPiece`: the shadow alpha fades with height above the
+    /// block (`powerAtDepth = pow - (entity.y - pos.y) * 0.5`, then `* 0.5 * brightness`).
+    #[test]
+    fn shadow_alpha_fades_with_height_above_the_block() {
+        // pow = 1: no camera distance falloff and shadow strength 1; the entity's feet at y=1.5.
+        let pow = 1.0f32;
+        let feet = 1.5f32;
+        let alpha_at = |block_y: i32| {
+            let power_at_depth = pow - (feet - block_y as f32) * 0.5;
+            shadow_piece_alpha(power_at_depth, lightmap_brightness(0.0, 15))
+        };
+        // The block under the feet is strongest, one lower is a quarter as strong, two lower
+        // is negative and clamps to zero.
+        assert!((alpha_at(1) - 0.375).abs() < 1e-6, "{}", alpha_at(1));
+        assert!((alpha_at(0) - 0.125).abs() < 1e-6, "{}", alpha_at(0));
+        assert_eq!(alpha_at(-1), 0.0);
+        // The alpha is clamped to 1.
+        assert_eq!(shadow_piece_alpha(4.0, 1.0), 1.0);
+    }
+
+    /// `Lightmap.getBrightness`: the curved `v / (4 - 3v)` curve with the dimension's ambient
+    /// light floor.
+    #[test]
+    fn lightmap_brightness_is_the_vanilla_curve() {
+        assert_eq!(lightmap_brightness(0.0, 15), 1.0);
+        assert_eq!(lightmap_brightness(0.0, 0), 0.0);
+        // 7 / (15 * (4 - 3 * 7/15)) = 7/39.
+        assert!((lightmap_brightness(0.0, 7) - 7.0 / 39.0).abs() < 1e-6);
+        // Nether ambient 0.1 lifts every level towards 1.
+        assert!((lightmap_brightness(0.1, 0) - 0.1).abs() < 1e-6);
+    }
+
+    /// `EntityRenderer.extractNameTags`/`LivingEntityRenderer.shouldShowName`: 64 blocks, 32
+    /// while crouching (distanceSq >= 1024 hides it).
+    #[test]
+    fn name_tag_culls_at_64_and_32_when_crouching() {
+        assert!(name_tag_visible(63.9 * 63.9, false));
+        assert!(!name_tag_visible(64.1 * 64.1, false));
+        assert!(name_tag_visible(31.9 * 31.9, true));
+        assert!(!name_tag_visible(32.0 * 32.0, true));
+        assert!(!name_tag_visible(40.0 * 40.0, true));
+        // Standing is not affected by the 32 limit.
+        assert!(name_tag_visible(40.0 * 40.0, false));
+    }
 
     /// `body_matrix` composes the ops left to right like `LivingEntityRenderer.setupRotations`
     /// (`poseStack` calls): `rotateZ(90); translate(0, 2, 0)` maps the origin to (-2, 0, 0).
