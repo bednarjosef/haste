@@ -1,0 +1,60 @@
+# Feature: editing a hanging sign. The check player is an operator on the test server
+# (ops.json), so the script stands in its own area (x 160..170, z 0..10, never the shared
+# spawn floor), drops onto the ground from above (so the area's real ground height is what
+# everything is relative to), builds a pillar one block ahead with relative setblocks, puts
+# an oak wall hanging sign on the pillar's side and uses it (SignBlock.useWithoutItem ->
+# openTextEdit -> open_sign_editor). The client builds the sign's block entity from the real
+# block state at the position (vanilla LevelChunk.createBlockEntity ->
+# EntityBlock.newBlockEntity: a hanging sign makes a HangingSignBlockEntity), so the
+# hanging-sign editor opens with the hanging-sign art instead of the standing sign's.
+# Evidence: `data get block` of the sign's front_text (the runner greps it, relative to the
+# player), the editor screenshots (hanging-sign art), and the JVM test
+# hanging_sign_editor_screen (screen class and texture).
+wait_until joined
+wait_until settled
+wait 60
+# creative, then drop onto our area's ground from well above it
+key T
+wait_until screen_open
+type /gamemode creative @s
+key ENTER
+wait_until screen_closed
+wait 10
+key T
+wait_until screen_open
+type /tp @s 165.5 120 5.5 0 0
+key ENTER
+wait_until screen_closed
+wait 120
+# a pillar two blocks east, two above the feet; the sign hangs on its west face, facing us
+key T
+wait_until screen_open
+type /execute at @s run setblock ~2 ~2 ~ oak_planks
+key ENTER
+wait_until screen_closed
+wait 10
+key T
+wait_until screen_open
+type /execute at @s run setblock ~1 ~2 ~ minecraft:oak_wall_hanging_sign[facing=west]
+key ENTER
+wait_until screen_closed
+wait 20
+# use the hanging sign one block east and one up (yaw -90 = east, pitch -42 = up-forward)
+look -90 -42
+wait 5
+mouse_down right
+wait 2
+mouse_up right
+wait 10
+wait_until screen_open
+screenshot hanging-sign-editor
+wait 20
+type HangOne
+key Down
+type HangTwo
+wait 10
+screenshot hanging-sign-typed
+key Escape
+wait_until screen_closed
+screenshot hanging-sign-done
+wait 60
