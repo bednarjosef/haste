@@ -406,7 +406,9 @@ struct CameraUniform {
     fog_cloud_end: f32,
     /// Sky light multiplier by time of day (`chunk.wgsl`).
     daylight: f32,
-    _pad: f32,
+    /// Vanilla `Globals.GameTime`: `(gameTime % 24000 + partial) / 24000`, the end portal's
+    /// layer scroll (0 when the frame carries no game time, e.g. the menu).
+    game_time: f32,
 }
 
 /// One section layer to draw this frame.
@@ -548,6 +550,9 @@ pub struct Renderer {
     surface_copy_logged: bool,
     /// Block entities posed into the entity stream this frame (chests, shulker boxes).
     block_entities_drawn: u32,
+    /// The frame's game time in ticks (`set_game_time`; vanilla `Level.getGameTime`), for
+    /// the beam animation and the end portal's layer scroll.
+    frame_game_time: i64,
     /// The fog colour (sRGB) and distances of the last frame, for logging and tests.
     last_fog: Option<([f32; 3], crate::fog::FogData)>,
     /// The frame's lightning bolts, collected from the entities (reused).
@@ -959,6 +964,7 @@ impl Renderer {
             &camera_bind_group_layout,
             &lightmap_bind_group_layout,
             font.clone(),
+            assets,
         );
         let sky = crate::sky::SkyRenderer::new(
             gpu.device.clone(),
@@ -1069,6 +1075,7 @@ impl Renderer {
             surface_copy: false,
             surface_copy_logged: false,
             block_entities_drawn: 0,
+            frame_game_time: 0,
             last_fog: None,
             lightning_bolts: Vec::new(),
         })
@@ -1102,6 +1109,13 @@ impl Renderer {
         self.animation_tick = tick;
         // The GUI's own animated textures (the fire and nether-portal overlays) share the tick.
         self.gui.set_animation_tick(tick);
+    }
+
+    /// The world's game time in ticks (vanilla `Level.getGameTime`), for the beacon beam's
+    /// animation and the end portal's layer scroll; the next `render` folds it with the
+    /// frame's partial tick into the camera uniform.
+    pub fn set_game_time(&mut self, game_time: i64) {
+        self.frame_game_time = game_time;
     }
 
     /// The first-person view: arm (empty hand) or held item; None draws nothing (third person,
@@ -1847,6 +1861,9 @@ impl Renderer {
             self.weather.prepare_lightning(&[]);
         }
         let fog_color = crate::sky::linear(fog_srgb);
+        // Vanilla `GlobalSettingsUniform`: `((gameTime % 24000) + worldPartialTicks) / 24000`.
+        let game_time_uniform =
+            (self.frame_game_time.rem_euclid(24_000) as f32 + frame.partial_tick) / 24_000.0;
         let mut camera_uniform = CameraUniform {
             cam_pos: [
                 frame.camera.pos.x as f32,
@@ -1864,7 +1881,7 @@ impl Renderer {
             fog_sky_end: fog_data.sky_end,
             fog_cloud_end: fog_data.cloud_end,
             daylight: self.sky.daylight(),
-            _pad: 0.0,
+            game_time: game_time_uniform,
         };
         self.gpu
             .queue
@@ -1896,7 +1913,7 @@ impl Renderer {
                 fog_sky_end: fog_data.sky_end,
                 fog_cloud_end: fog_data.cloud_end,
                 daylight: self.sky.daylight(),
-                _pad: 0.0,
+                game_time: game_time_uniform,
             };
             self.gpu.queue.write_buffer(
                 &self.hand_camera_uniform,
@@ -2133,6 +2150,21 @@ impl Renderer {
             // `camera.orientation`), which `Camera.setRotation` builds from yaw and pitch.
             let orientation =
                 crate::blockentity::camera_orientation(frame.camera.yaw, frame.camera.pitch);
+            // The beams' radius scale: 1 within 96 blocks of the beacon (vanilla
+            // `BeaconRenderer.extract`; scoping is always 1).
+            let mut radius_scale = 1.0f32;
+            for inst in frame.block_entities {
+                if matches!(inst.kind, crate::blockentity::BlockEntityKind::Beacon) {
+                    // Vanilla `extract`: the horizontal distance to the block's centre
+                    // (`Vec3.atCenterOf` then `horizontalDistance`), camera position vs
+                    // centre, both y-zeroed.
+                    let centre = inst.pos.as_dvec3() + glam::DVec3::new(0.5, 0.0, 0.5);
+                    let d = ((centre.x - cam.x).powi(2) + (centre.z - cam.z).powi(2)).sqrt();
+                    radius_scale =
+                        radius_scale.max(crate::blockentity::beam_radius_scale(d as f32, false));
+                }
+            }
+            self.entity.set_beam_radius_scale(radius_scale);
             self.block_entities_drawn = self.entity.append_block_entities(
                 frame.block_entities,
                 cam,
@@ -2253,10 +2285,15 @@ impl Renderer {
                         sub_open[5] = true;
                     }
                     // Vanilla draws the entity shadows (a translucent, depth-tested pass) with
-                    // the entities.
+                    // the entities, then the block entities' special passes: the end
+                    // portal/gateway starfield and the beacon beams (inner opaque, glow
+                    // translucent without depth write).
                     draw_calls += self.entity.draw_shadows(&mut pass);
                     draw_calls += self.entity.draw(&mut pass);
                     pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+                    pass.set_bind_group(2, &self.lightmap_bind_group, &[]);
+                    draw_calls += self.entity.draw_portals(&mut pass);
+                    draw_calls += self.entity.draw_beams(&mut pass);
                     entities_drawn = true;
                     bound_layer = None;
                     bound_arena = u32::MAX;
@@ -2322,6 +2359,10 @@ impl Renderer {
                 }
                 draw_calls += self.entity.draw_shadows(&mut pass);
                 draw_calls += self.entity.draw(&mut pass);
+                pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+                pass.set_bind_group(2, &self.lightmap_bind_group, &[]);
+                draw_calls += self.entity.draw_portals(&mut pass);
+                draw_calls += self.entity.draw_beams(&mut pass);
             }
             if let Some(t) = self.timer.as_ref() {
                 if sub_open[5] {

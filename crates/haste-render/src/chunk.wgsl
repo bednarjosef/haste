@@ -17,7 +17,8 @@ struct Camera {
     fog_cloud_end: f32,
     // Sky light multiplier by time of day (1 at day, 0 at night; block light is unaffected).
     daylight: f32,
-    _pad: f32,
+    // Vanilla `Globals.GameTime` (unused by the terrain; see endportal.wgsl).
+    game_time: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
