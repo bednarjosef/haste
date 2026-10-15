@@ -1,0 +1,32 @@
+# Feature: editing a writable book. The runner gives a writable book first (survival); we
+# use it (right click into the air), type a page, sign the book with a title.
+# Evidence: the held item's written_book_content component (the runner greps it).
+wait_until joined
+wait_until settled
+wait 60
+screenshot book-setup
+# look up a little so the use does not hit a block
+look 0 -30
+wait 5
+mouse_down right
+wait 2
+mouse_up right
+wait 10
+wait_until screen_open
+screenshot book-editor
+wait 20
+type Page one text
+wait 10
+# Sign: the "Sign" button (book.signButton) is bottom-left of the book gui
+click_text "Sign" 0 0
+wait 20
+wait_until screen_open
+screenshot book-sign
+type MyBook
+wait 10
+# Finalize (book.finalizeButton = "Sign and Close")
+click_text "Sign and Close" 0 0
+wait 20
+wait_until screen_closed
+screenshot book-done
+wait 60

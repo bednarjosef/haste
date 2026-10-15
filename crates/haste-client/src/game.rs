@@ -940,6 +940,19 @@ fn tick_once(
         // the server itself; `set_selected_slot` also marks it sent so the UI does not send it
         // a second time). The server's `set_held_slot` reaches both sides alike.
         ui.set_selected_slot(driver.session.player.held_slot);
+        // A use opened a screen (command block, writable book): the UI opens it, gated like
+        // vanilla's `Player.canUseGameMasterBlocks` (creative + operator level >= 2) for the
+        // command block.
+        match driver.session.player.take_used_screen() {
+            Some(crate::player::interact::UsedScreen::CommandBlock(pos)) => {
+                let (creative, level) = ui.game_master_state();
+                if creative && level >= 2 {
+                    ui.open_used_command_block(pos);
+                }
+            }
+            Some(crate::player::interact::UsedScreen::ItemGui(hand)) => ui.open_item_gui(hand),
+            None => {}
+        }
         ui.tick();
         // Every option a vanilla screen changed this tick reaches the running client live
         // (vanilla's `OptionInstance.onValueUpdate` callbacks, reported through the bridge).

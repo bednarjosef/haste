@@ -303,9 +303,18 @@ public final class Bridge {
         }
     }
 
+    /** A use opened the command block editor (vanilla `LocalPlayer.openCommandBlock`). */
+    public void openCommandBlock(int x, int y, int z) {
+        Handlers.openCommandBlock(x, y, z);
+    }
+
+    /** A use opened the writable book's editor (vanilla `LocalPlayer.openItemGui`). */
+    public void openItemGui(int hand) {
+        Handlers.openItemGui(hand);
+    }
+
     /** Names of the server's commands the local player may use (the root of the command tree), one per line. */
-    public String commandNames() {
-        var src = ConnectionImpl.getSuggestionsProvider(Proxies.connection);
+    public String commandNames() {        var src = ConnectionImpl.getSuggestionsProvider(Proxies.connection);
         StringBuilder sb = new StringBuilder();
         for (var n : Handlers.commands.getRoot().getChildren()) {
             if (n.canUse(src)) sb.append(n.getName()).append('\n');

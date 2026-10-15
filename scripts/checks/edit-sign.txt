@@ -1,0 +1,56 @@
+# Feature: editing a sign. The check player is an operator on the test server (ops.json), so
+# the script stands on a snow platform of its own near the world spawn (spawn chunks stay
+# loaded, so the runner can read the sign after the run), gives itself an oak sign through
+# the chat, places it on the ground ahead, types two lines and presses Escape (which is the
+# screen's Done: the sign update goes out on close).
+# Evidence: `data get block` of the sign's front_text (the check runner greps it).
+wait_until joined
+wait_until settled
+wait 60
+# stand on a flat snow platform 5 blocks east of the world spawn (spawn chunks stay loaded)
+key T
+wait_until screen_open
+type /execute positioned 150 70 -190 run fill 147 70 -193 153 70 -187 minecraft:snow_block
+key ENTER
+wait_until screen_closed
+wait 10
+key T
+wait_until screen_open
+type /tp @s 150.5 71 -190.5 0 55
+key ENTER
+wait_until screen_closed
+wait 20
+# give ourselves an oak sign through the chat (op): clear first so it lands in hotbar slot 0
+key T
+wait_until screen_open
+type /clear ScriptCheck
+key ENTER
+wait_until screen_closed
+wait 10
+key T
+wait_until screen_open
+type /give ScriptCheck minecraft:oak_sign 1
+key ENTER
+wait_until screen_closed
+wait 20
+key 1
+wait 5
+# look down-forward at the platform edge and place the sign against it
+look 0 55
+wait 5
+mouse_down right
+wait 2
+mouse_up right
+wait 10
+wait_until screen_open
+screenshot sign-editor
+wait 20
+type LineOne
+key Down
+type LineTwo
+wait 10
+screenshot sign-typed
+key Escape
+wait_until screen_closed
+screenshot sign-done
+wait 60

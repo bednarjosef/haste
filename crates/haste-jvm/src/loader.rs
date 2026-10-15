@@ -31,6 +31,11 @@ pub const ALLOW_PACKAGES: &[&str] = &[
     // the Telemetry Data screen's event list is real vanilla Java over these value types; Haste sends
     // no telemetry (allowsTelemetry false), so the button is greyed like vanilla's, but the screen loads
     "net/minecraft/client/telemetry/",
+    // the sign editor asks the renderer for the text's dark colour (AbstractSignRenderer.getDarkColor,
+    // a static formula over the SignText). Only that static method ever runs; the interface it
+    // implements is loaded with it, and nothing else of the block-entity renderer does.
+    "net/minecraft/client/renderer/blockentity/AbstractSignRenderer",
+    "net/minecraft/client/renderer/blockentity/BlockEntityRenderer",
     "net/minecraft/server/packs/",
     "net/minecraft/server/permissions/",
     "net/minecraft/server/dialog/",

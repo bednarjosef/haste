@@ -31,10 +31,12 @@ PASS=0
 FAIL=0
 FAILED=()
 
-client_start() { # script log
+client_start() { # script log [extra args...]
   : >"$2"
-  timeout 200 "$BIN" --server "127.0.0.1:$PORT" --username "$NAME" --script "$1" \
-    --seconds 120 >"$2" 2>&1 &
+  local script=$1 log=$2
+  shift 2
+  timeout 200 "$BIN" --server "127.0.0.1:$PORT" --username "$NAME" --script "$script" \
+    "$@" --seconds 120 >"$log" 2>&1 &
   CLIENT_PID=$!
 }
 
@@ -269,13 +271,88 @@ craft() {
   check craft "one oak log became 4 oak planks in the survival inventory" "$r"
 }
 
-ALL=(hud death drop modes f2 craft)
+# ---- 7. Signs: place an oak sign, the edit screen opens, type two lines, Done ----
+sign() {
+  local log="$LOGDIR/sign.log"
+  client_start "$ROOT/scripts/checks/edit-sign.txt" "$log" --pos 9.5 71 6.5
+  wait_online || { check sign "player never joined" 1; return; }
+  rcon "gamemode survival $NAME" >/dev/null
+  rcon "tp $NAME 9.5 71 6.5 0 10" >/dev/null
+  if wait_shot "$log" sign-setup 90; then
+    rcon "clear $NAME" >/dev/null
+    rcon "give $NAME minecraft:oak_sign 1" >/dev/null
+  fi
+  wait_exit
+  echo "--- sign evidence ---"
+  # The sign is placed on the ground ahead (scan the snowy plain in front of the camera).
+  local pos="" x y z out
+  for x in 8 9 10 11; do for y in 71 72 73; do for z in 7 8 9; do
+    if rcon "execute if block $x $y $z minecraft:oak_sign" 2>/dev/null | grep -q "Test passed"; then
+      pos="$x $y $z"; break 3
+    fi
+  done; done; done
+  if [ -n "$pos" ]; then
+    out=$(rcon "data get block $pos front_text")
+  else
+    out="<no sign found near the player>"
+  fi
+  echo "sign at: ${pos:-<none>}"
+  echo "front_text: $out"
+  local r=0
+  has "$out" "LineOne" || { echo "missing line one"; r=1; }
+  has "$out" "LineTwo" || { echo "missing line two"; r=1; }
+  check sign "placed an oak sign, typed two lines, Done sent the sign update" "$r"
+}
+
+# ---- 8. Books: use a writable book, type, sign ----
+book() {
+  local log="$LOGDIR/book.log"
+  client_start "$ROOT/scripts/checks/edit-book.txt" "$log"
+  wait_online || { check book "player never joined" 1; return; }
+  rcon "gamemode survival $NAME" >/dev/null
+  if wait_shot "$log" book-setup 90; then
+    rcon "clear $NAME" >/dev/null
+    rcon "give $NAME minecraft:writable_book 1" >/dev/null
+  fi
+  wait_exit
+  echo "--- book evidence ---"
+  local held
+  held=$(rcon "data get entity $NAME Inventory")
+  echo "Inventory: $held"
+  local r=0
+  has "$held" "written_book" || { echo "no written book after signing"; r=1; }
+  check book "used a writable book, typed, signed it into a written book" "$r"
+}
+
+# ---- 9. Command blocks: ops, place, use, type a command, Done ----
+commandblock() {
+  local log="$LOGDIR/commandblock.log"
+  client_start "$ROOT/scripts/checks/edit-command-block.txt" "$log" --pos 9.5 71 6.5
+  wait_online || { check commandblock "player never joined" 1; return; }
+  rcon "gamemode creative $NAME" >/dev/null
+  rcon "op $NAME" >/dev/null
+  rcon "tp $NAME 9.5 71 6.5 0 10" >/dev/null
+  if wait_shot "$log" command-block-setup 90; then
+    # A command block placed on the ground ahead of the camera.
+    rcon "setblock 9 71 9 minecraft:command_block" >/dev/null
+  fi
+  wait_exit
+  echo "--- command block evidence ---"
+  local out
+  out=$(rcon "data get block 9 71 9 Command")
+  echo "Command: $out"
+  local r=0
+  has "$out" "say hello" || { echo "command not set"; r=1; }
+  check commandblock "used the command block, typed a command, Done sent the update" "$r"
+}
+
+ALL=(hud death drop modes f2 craft sign book commandblock)
 if [ $# -eq 0 ]; then
   set -- "${ALL[@]}"
 fi
 for f in "$@"; do
   case "$f" in
-    hud | death | drop | modes | f2 | craft) "$f" ;;
+    hud | death | drop | modes | f2 | craft | sign | book | commandblock) "$f" ;;
     *) echo "unknown feature: $f" ;;
   esac
 done

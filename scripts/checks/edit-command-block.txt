@@ -1,0 +1,26 @@
+# Feature: editing a command block. The runner ops the player and gives/places a command
+# block first (over RCON); we use it (right click), type a command, press Done.
+# Evidence: `data get block` of the command block's Command (the runner greps it).
+wait_until joined
+wait_until settled
+wait 60
+screenshot command-block-setup
+# look down-forward at the placed command block (the runner places it at 9 71 9, ahead of us)
+look 0 25
+wait 5
+mouse_down right
+wait 2
+mouse_up right
+wait 10
+wait_until screen_open
+screenshot command-block-editor
+wait 20
+type say hello
+wait 10
+screenshot command-block-typed
+# Done button (gui.done) is bottom-left
+click_text "Done" 0 0
+wait 20
+wait_until screen_closed
+screenshot command-block-done
+wait 60
