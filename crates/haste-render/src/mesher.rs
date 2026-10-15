@@ -60,12 +60,16 @@ fn face_side0() -> &'static [[i32; 3]; 6] {
 
 /// Per-state ambient-occlusion occluder flag (vanilla `getShadeBrightness <=
 /// 0.2`): whether the state's collision shape is a full cube, minus the glass
-/// family whose class overrides the brightness to 1.0. Built from
-/// `haste_data::BlockShapes`; the fallback treats every state as a full cube
-/// except air and fluids (approximate like all fallback shapes).
+/// family whose class overrides the brightness to 1.0. Also carries the raw
+/// collision-full flag (vanilla `isCollisionShapeFullBlock`), which the
+/// mesher's faceCubic test reads (glass is collision-full but bright). Built
+/// from `haste_data::BlockShapes`; the fallback treats every state as a full
+/// cube except air and fluids (approximate like all fallback shapes).
 #[derive(Clone)]
 pub struct AoTable {
     solid: Vec<bool>,
+    /// Raw full-collision-cube flag (no glass override).
+    cubic: Vec<bool>,
 }
 
 impl AoTable {
@@ -75,10 +79,12 @@ impl AoTable {
         shapes: &haste_data::BlockShapes,
     ) -> AoTable {
         let mut solid = Vec::with_capacity(states.len());
+        let mut cubic = Vec::with_capacity(states.len());
         for id in 0..states.len() as u32 {
             solid.push(shapes.is_ao_solid(BlockStateId(id)));
+            cubic.push(shapes.is_collision_full(BlockStateId(id)));
         }
-        AoTable { solid }
+        AoTable { solid, cubic }
     }
 
     /// Fallback with no shape data (tests, before the game data is known):
@@ -87,6 +93,7 @@ impl AoTable {
     pub fn all_solid(n: usize) -> AoTable {
         AoTable {
             solid: vec![true; n],
+            cubic: vec![true; n],
         }
     }
 
@@ -98,6 +105,12 @@ impl AoTable {
     /// one AO corner on an unseen block).
     pub fn is_solid(&self, state: BlockStateId) -> bool {
         self.solid.get(state.0 as usize).copied().unwrap_or(false)
+    }
+
+    /// Raw full-collision-cube flag; out-of-table ids read as non-cubic (the
+    /// faceCubic test then falls back to the quad-geometry half alone).
+    pub fn is_cubic(&self, state: BlockStateId) -> bool {
+        self.cubic.get(state.0 as usize).copied().unwrap_or(false)
     }
 }
 
@@ -383,6 +396,42 @@ fn vertex_ao_level(side1: bool, side2: bool, diagonal: bool, center: bool) -> u8
     side1 as u8 + side2 as u8 + diagonal as u8 + center as u8
 }
 
+/// Vanilla `BlockModelLighter.prepareQuadShape`'s faceCubic per quad: flat
+/// along the face normal AND (on the block boundary OR the state's collision
+/// shape is a full cube), with vanilla's 1e-4 / 0.9999 thresholds. When not
+/// cubic, vanilla samples the AO/light center from the block's own cell
+/// instead of the face-adjacent one.
+fn quad_cubic(quad: &haste_assets::BakedQuad, state_cubic: bool) -> bool {
+    use haste_assets::Direction as D;
+    let (min, max) = quad_extremes(quad);
+    // (normal axis, at the low boundary): the axis the face is flat along.
+    let (axis, low) = match quad.direction {
+        D::Down | D::Up => (1, quad.direction == D::Down),
+        D::North | D::South => (2, quad.direction == D::North),
+        D::West | D::East => (0, quad.direction == D::West),
+    };
+    let flat = min[axis] == max[axis];
+    let on_boundary = if low {
+        min[axis] < 1.0e-4
+    } else {
+        max[axis] > 0.9999
+    };
+    flat && (on_boundary || state_cubic)
+}
+
+/// The min/max corner of a baked quad's model-space positions.
+fn quad_extremes(quad: &haste_assets::BakedQuad) -> ([f32; 3], [f32; 3]) {
+    let mut min = [f32::MAX; 3];
+    let mut max = [f32::MIN; 3];
+    for p in &quad.positions {
+        for a in 0..3 {
+            min[a] = min[a].min(p[a]);
+            max[a] = max[a].max(p[a]);
+        }
+    }
+    (min, max)
+}
+
 /// Mesh one section: per block, emit its baked quads with cullface culling,
 /// AO, smooth light, tint and layer routing.
 pub fn mesh_section(
@@ -422,6 +471,12 @@ struct EmitQuad {
     direction: haste_assets::Direction,
     /// Whether the quad takes the block's tint.
     tinted: bool,
+    /// Vanilla `faceCubic` (`BlockModelLighter.prepareQuadShape`): the quad
+    /// is flat along the face normal AND either lies on the block boundary or
+    /// the state's collision shape is a full cube. Decides the AO/light
+    /// center sample: the face-adjacent cell when cubic, else the block's
+    /// own cell.
+    cubic: bool,
     sprite: u16,
 }
 
@@ -519,6 +574,9 @@ impl<'a> MeshContext<'a> {
             self.states.resize(idx + 1, None);
         }
         if self.states[idx].is_none() {
+            // Vanilla's faceCubic test needs the state's collision-full flag
+            // (the quad-geometry half is per quad below).
+            let state_cubic = self.tables.ao.is_cubic(state);
             let quads: Vec<EmitQuad> = self
                 .baked
                 .quads(state)
@@ -538,6 +596,7 @@ impl<'a> MeshContext<'a> {
                         shade_face: quad.shade_face,
                         direction: quad.direction,
                         tinted: quad.tint_index.is_some(),
+                        cubic: quad_cubic(quad, state_cubic),
                         sprite,
                     }
                 })
@@ -645,7 +704,7 @@ pub fn mesh_section_with(
                         // ao|shade, block16].
                         let lights: [[u8; 3]; 4] = core::array::from_fn(|vi| {
                             let (ao_level, [sky16, block16]) =
-                                vertex_light_for(&ctx, lx, ly, lz, quad.direction, vi);
+                                vertex_light_for(&ctx, lx, ly, lz, quad.direction, quad.cubic, vi);
                             let shade = shade_index(quad.shade_face);
                             [sky16, pack_ao_shade(ao_level, shade), block16]
                         });
@@ -893,16 +952,18 @@ fn ao_corner_blend(sides: [AoSample; 2], diagonal: AoSample, center: AoSample) -
     )
 }
 
-/// Per-vertex AO occluder count + packed light for face vertex `vi` (vanilla
-/// `BlockModelLighter.prepareQuadAmbientOcclusion`, the cubic path).
-/// Coordinates are section-local; the +1 maps the section into the snapshot's
-/// border.
+/// Per-vertex AO occluder count + smooth light for face vertex `vi` (vanilla
+/// `BlockModelLighter.prepareQuadAmbientOcclusion`). Coordinates are
+/// section-local; the +1 maps the section into the snapshot's border.
+/// `cubic` is the quad's faceCubic flag: it picks the center sample (the
+/// face-adjacent cell when cubic, else the block's own cell).
 fn vertex_light_for(
     ctx: &MeshContext,
     lx: i32,
     ly: i32,
     lz: i32,
     dir: haste_assets::Direction,
+    cubic: bool,
     vi: usize,
 ) -> (u8, [u8; 2]) {
     // (side1, side2, corner) offsets per vertex, in face_positions order.
@@ -933,15 +994,30 @@ fn vertex_light_for(
         sample(corner)
     };
 
-    // Center sample: the face-adjacent cell (vanilla's cubic path, which any
-    // rendered quad of a full-collision block takes; a partial block's
-    // non-cubic quads read the block's own cell in vanilla, which for
-    // non-full blocks is bright like the neighbour usually is). The corner
-    // table's offsets already carry the face normal (checked against
-    // vanilla's AdjacencyInfo by `face_corner_offsets_match_vanilla_adjacency`),
-    // so sampling one cell further out would make two adjacent coplanar
-    // faces read different cells and draw a line along every block edge.
-    ao_corner_blend([sample(s1), sample(s2)], diagonal, sample(dir.offset()))
+    // Center sample (vanilla `prepareQuadShape`'s faceCubic split): the shade
+    // comes from the face-adjacent cell for a cubic face and from the block's
+    // own cell otherwise; the light comes from the face-adjacent cell for a
+    // cubic face or one visible through a non-solid-render neighbour, and
+    // from the block's own cell otherwise. The corner table's offsets already
+    // carry the face normal (checked against vanilla's AdjacencyInfo by
+    // `face_corner_offsets_match_vanilla_adjacency`), so sampling one cell
+    // further out would make two adjacent coplanar faces read different
+    // cells and draw a line along every block edge.
+    let n = dir.offset();
+    let own = cell([0, 0, 0]);
+    let center = AoSample {
+        occludes: if cubic {
+            ctx.tables.ao.is_solid(cell(n).state)
+        } else {
+            ctx.tables.ao.is_solid(own.state)
+        },
+        light: if cubic || !ctx.baked.is_full_opaque(cell(n).state) {
+            cell(n).light
+        } else {
+            own.light
+        },
+    };
+    ao_corner_blend([sample(s1), sample(s2)], diagonal, center)
 }
 
 /// The two in-plane axes of a face (u, v), each a unit offset.
@@ -1526,6 +1602,33 @@ mod tests {
         );
         assert_ne!(a.generation, c.generation);
         assert_ne!(b.generation, c.generation);
+    }
+
+    /// Vanilla `BlockModelLighter.prepareQuadShape`'s faceCubic: flat along the
+    /// normal AND (on the boundary OR full-collision state). A slab's top face
+    /// (y = 0.5, not on the boundary, not a full cube) is non-cubic; a full
+    /// block's face is cubic either way; a full-collision state's inset quad
+    /// (e.g. glass's model quirks) is cubic too.
+    #[test]
+    fn quad_cubic_follows_vanilla_prepare_quad_shape() {
+        use haste_assets::Direction as D;
+        let quad = |dir: D, from: [f32; 3], to: [f32; 3]| {
+            haste_assets::BakedQuad::from_element(dir, from, to, None, None)
+        };
+        // Slab top: flat at 0.5, off the boundary, state not collision-full.
+        let slab_top = quad(D::Up, [0.0, 0.5, 0.0], [1.0, 0.5, 1.0]);
+        assert!(!quad_cubic(&slab_top, false), "slab top is not cubic");
+        // Same quad on a full-collision state: cubic.
+        assert!(quad_cubic(&slab_top, true), "full-collision state is cubic");
+        // A boundary face (top of a full block): cubic regardless of state.
+        let top = quad(D::Up, [0.0, 1.0, 0.0], [1.0, 1.0, 1.0]);
+        assert!(quad_cubic(&top, false), "boundary face is cubic");
+        // Bottom face at y = 0: boundary from below.
+        let bottom = quad(D::Down, [0.0, 0.0, 0.0], [1.0, 0.0, 1.0]);
+        assert!(quad_cubic(&bottom, false), "bottom boundary face is cubic");
+        // A side face inset (x = 0.5) on a non-full state: non-cubic.
+        let inset = quad(D::East, [0.5, 0.0, 0.0], [0.5, 1.0, 1.0]);
+        assert!(!quad_cubic(&inset, false), "inset face is not cubic");
     }
 
     #[test]

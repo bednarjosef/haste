@@ -167,6 +167,14 @@ impl BlockShapes {
         self.shapes[self.row(state)].ao_solid
     }
 
+    /// Whether the state's collision shape is a full cube (vanilla
+    /// `isCollisionShapeFullBlock`): decides `BlockModelLighter`'s faceCubic
+    //  test for a quad that does not lie on the block boundary. Ids outside
+    /// the table resolve to the placeholder's entry.
+    pub fn is_collision_full(&self, state: BlockStateId) -> bool {
+        is_collision_full_block(&self.shapes[self.row(state)].collision)
+    }
+
     pub(crate) fn fluid(&self, state: BlockStateId) -> Option<FluidInfo> {
         self.shapes[self.row(state)].fluid
     }
