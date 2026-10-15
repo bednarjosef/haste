@@ -2182,7 +2182,18 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             );
         }
         let placed = shared.view.lock().has_position;
-        if placed && feed.settled(&stats, Duration::from_millis(1500)) {
+        // `--pos` holds the settle until the server has teleported the player there (the
+        // screenshot path's rule), so the bench measures the intended spot, not the spawn.
+        let reached = args
+            .pos
+            .as_ref()
+            .filter(|v| v.len() == 3)
+            .map(|v| {
+                let want = DVec3::new(v[0], v[1], v[2]);
+                placed && (shared.view.lock().feet - want).length() <= 0.5
+            })
+            .unwrap_or(placed);
+        if reached && feed.settled(&stats, Duration::from_millis(1500)) {
             break;
         }
         if Instant::now() > deadline {
