@@ -410,8 +410,17 @@ struct CameraUniform {
     /// target's aspect: the line vertex shader's NDC offset per pixel (overlay.wgsl).
     line_width: f32,
     aspect: f32,
-    _pad: [f32; 2],
+    /// WGSL rounds a uniform struct's size up to its alignment (16): the Rust struct must
+    /// be 144 bytes (36 floats), one pad float more than the WGSL fields spell out, or the
+    /// buffer binds 4 bytes short of what the shader expects. The assertion below keeps
+    /// Rust and WGSL agreeing.
+    _pad: [f32; 3],
 }
+
+const _: () = assert!(
+    std::mem::size_of::<CameraUniform>() == 144,
+    "CameraUniform must match the WGSL Camera structs (144 bytes; see overlay.wgsl)"
+);
 
 /// One section layer to draw this frame.
 #[derive(Clone, Copy)]
@@ -1950,7 +1959,7 @@ impl Renderer {
             daylight: self.sky.daylight(),
             line_width: 0.0,
             aspect,
-            _pad: [0.0; 2],
+            _pad: [0.0; 3],
         };
         // Vanilla's outline width (Window.getAppropriateLineWidth): scales with the
         // framebuffer so it covers the same fraction of the screen at any resolution.
@@ -1989,7 +1998,7 @@ impl Renderer {
                 daylight: self.sky.daylight(),
                 line_width: 0.0,
                 aspect,
-                _pad: [0.0; 2],
+                _pad: [0.0; 3],
             };
             self.gpu.queue.write_buffer(
                 &self.hand_camera_uniform,

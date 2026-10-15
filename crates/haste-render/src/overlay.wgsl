@@ -21,6 +21,9 @@ struct Camera {
     // stroke: one pixel is 2 / height in NDC y, 2 / (aspect * height) in NDC x.
     line_width: f32,
     aspect: f32,
+    // Keeps the struct a whole number of vec4s: WGSL rounds a uniform struct's size
+    // up to its alignment (16), so the Rust side must carry the same trailing pad
+    // (renderer.rs asserts both are equal).
     _pad: vec2<f32>,
 };
 
