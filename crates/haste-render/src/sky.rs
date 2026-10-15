@@ -972,13 +972,8 @@ mod tests {
             0.6549 + (target - 0.6549) * 0.75,
             1.0 + (target - 1.0) * 0.75,
         ];
-        for i in 0..3 {
-            assert!(
-                (noon.sky[i] - expect[i]).abs() < 1e-4,
-                "channel {i}: {} vs {}",
-                noon.sky[i],
-                expect[i]
-            );
+        for (i, (got, want)) in noon.sky.iter().zip(expect).enumerate() {
+            assert!((got - want).abs() < 1e-4, "channel {i}: {got} vs {want}");
         }
         // Stars are gone with any weather.
         assert_eq!(noon.star_brightness, 0.0);
