@@ -388,14 +388,23 @@ fn push_box_lines(out: &mut Vec<LineVertex>, origin: DVec3, b: &Aabb, color: [f3
     let color = Vec4::from_array(color);
     for (a, b) in edges {
         let dir = b - a;
-        for corner in [-1.0f32, 1.0] {
-            for p in [a, b] {
-                out.push(LineVertex {
-                    pos: p.to_array(),
-                    to: [dir.x, dir.y, dir.z, corner],
-                    color: color.to_array(),
-                });
-            }
+        // Two triangles per edge (TriangleList without an index buffer eats
+        // consecutive triples): the quad's corners are (a, -1), (a, +1), (b, -1),
+        // (b, +1), split along the (a, +1)-(b, -1) diagonal.
+        let quad = [
+            (-1.0f32, a),
+            (1.0, a),
+            (-1.0, b),
+            (-1.0, b),
+            (1.0, a),
+            (1.0, b),
+        ];
+        for (corner, p) in quad {
+            out.push(LineVertex {
+                pos: p.to_array(),
+                to: [dir.x, dir.y, dir.z, corner],
+                color: color.to_array(),
+            });
         }
     }
 }
@@ -437,8 +446,11 @@ fn push_cracks(
 mod tests {
     use super::*;
 
-    /// One box's 12 edges each become a quad of 4 vertices: 48 line vertices, each
-    /// carrying the edge direction and one of the two quad corners.
+    /// One box's 12 edges each become two triangles (6 vertices): 72 line vertices,
+    /// each carrying the edge direction and one of the two quad corners. The two
+    /// triangles must stay within one edge: a triangle spanning two edges is the
+    /// "large grey X across the face" bug (TriangleList without indices eats
+    /// consecutive triples, so the vertex order is the index buffer).
     #[test]
     fn box_edges_become_quads() {
         let mut out = Vec::new();
@@ -448,22 +460,30 @@ mod tests {
             &Aabb::new(DVec3::new(0.0, 0.0, 0.0), DVec3::new(1.0, 1.0, 1.0)),
             [0.0, 0.0, 0.0, 0.4],
         );
-        assert_eq!(out.len(), 12 * 4);
+        assert_eq!(out.len(), 12 * 6);
         // Vanilla's outline colour: black at 40% alpha (ARGB 0x66000000).
         assert!(out.iter().all(|v| v.color == [0.0, 0.0, 0.0, 0.4]));
         // Inflated by 0.002 like vanilla's outline: the min corner moves past the block.
         assert!(out[0].pos[0] < -0.001 && out[0].pos[1] < -0.001 && out[0].pos[2] < -0.001);
-        // Each quad: both corners of both endpoints, the direction on all four, and the
-        // corner sign flips within each endpoint pair.
-        for edge in out.chunks(4) {
+        for edge in out.chunks(6) {
+            // All six carry the same edge direction; the two endpoints appear three
+            // times each (both triangles span only this edge's two positions).
             let dir = [edge[0].to[0], edge[0].to[1], edge[0].to[2]];
             assert!(edge
                 .iter()
                 .all(|v| v.to[0] == dir[0] && v.to[1] == dir[1] && v.to[2] == dir[2]));
-            assert_eq!(edge[0].to[3], edge[1].to[3]);
-            assert_eq!(edge[2].to[3], edge[3].to[3]);
-            assert_eq!(edge[0].to[3], -edge[2].to[3]);
-            assert_eq!(edge[0].pos, edge[2].pos);
+            let a_pos = edge[0].pos;
+            let b_pos = edge[2].pos;
+            for triangle in [(&edge[0..3]), (&edge[3..6])] {
+                // Both endpoints appear (2 + 1 vertices): the triangle spans the
+                // edge and nothing else.
+                assert!(triangle.iter().any(|v| v.pos == a_pos));
+                assert!(triangle.iter().any(|v| v.pos == b_pos));
+                assert!(triangle.iter().all(|v| v.pos == a_pos || v.pos == b_pos));
+                // Each triangle spans the quad: it touches both corner signs.
+                assert!(triangle.iter().any(|v| v.to[3] < 0.0));
+                assert!(triangle.iter().any(|v| v.to[3] > 0.0));
+            }
         }
     }
 
