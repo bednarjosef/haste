@@ -74,7 +74,7 @@ type /execute at @s run setblock ~1 ~ ~ minecraft:lectern[facing=west]
 key ENTER
 wait_until screen_closed
 wait 20
-look -90 15
+look -90 48
 wait 5
 mouse_down right
 wait 2
