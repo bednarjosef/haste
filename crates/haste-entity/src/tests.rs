@@ -1764,7 +1764,7 @@ fn rest_pose_models_are_connected_and_grounded() {
         // entity position). Ground slack of 2 model units covers vanilla's 0.016 ground
         // fudge and hoof-antenna details drawn at the exact plane.
         let grounded = min.y <= 2.0 / 16.0;
-        if !grounded && !GROUND_EXEMPT.contains(&*name) {
+        if !grounded && !GROUND_EXEMPT.contains(name) {
             failures.push(format!(
                 "{name}: floats {min:.2} blocks above the ground at rest"
             ));
@@ -1773,7 +1773,7 @@ fn rest_pose_models_are_connected_and_grounded() {
         // interiors; a model's parts attach face-to-face).
         let n = boxes.len();
         let mut parent: Vec<usize> = (0..n).collect();
-        fn find(parent: &mut Vec<usize>, i: usize) -> usize {
+        fn find(parent: &mut [usize], i: usize) -> usize {
             let mut root = i;
             while parent[root] != root {
                 root = parent[root];
@@ -1808,7 +1808,7 @@ fn rest_pose_models_are_connected_and_grounded() {
         }
         let roots: std::collections::HashSet<usize> =
             (0..n).map(|i| find(&mut parent, i)).collect();
-        if roots.len() > 1 && !CONNECTIVITY_EXCEPTIONS.contains(&*name) {
+        if roots.len() > 1 && !CONNECTIVITY_EXCEPTIONS.contains(name) {
             failures.push(format!(
                 "{name}: rest pose splits into {} disconnected pieces",
                 roots.len()
