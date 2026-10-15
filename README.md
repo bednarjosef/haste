@@ -10,7 +10,7 @@ Plays like vanilla wherever you can feel it. Built from the start to run Fabric 
 [![License: GPL v3+](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 [![Minecraft](https://img.shields.io/badge/Minecraft-Java%2026.3-62b47a.svg)](#getting-started)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](rust-toolchain.toml)
-[![Phase 1](https://img.shields.io/badge/phase%201-86%25-brightgreen.svg)](#progress)
+[![Phase 1](https://img.shields.io/badge/phase%201-88%25-brightgreen.svg)](#progress)
 
 </div>
 
@@ -23,7 +23,7 @@ apart from vanilla, that runs faster than vanilla with Sodium, and that will lat
 mods through a compatibility layer.
 
 > [!NOTE]
-> Haste is in active development. Phase 1 (a complete vanilla client) is about **86 %** done:
+> Haste is in active development. Phase 1 (a complete vanilla client) is about **88 %** done:
 > you can play singleplayer and on offline-mode servers today. Online-mode servers (Microsoft
 > login) are not supported yet, and mods come in Phase 2.
 
@@ -68,17 +68,17 @@ downloaded or derived from Mojang's files stays in `cache/` (or `$HASTE_CACHE`).
 
 ## Progress
 
-**47 of 62 done, 13 partly done, 2 not started** (about 86 %, counting partly done as
+**49 of 62 done, 11 partly done, 2 not started** (about 88 %, counting partly done as
 half). The list is what a player needs to play Haste like the original game without noticing
 a difference; Phase 2 (mods) is not counted.
 
-`██████████████████████████░░░░` **86 %**
+`██████████████████████████░░░░` **88 %**
 
 | Area | Progress | ✅ | 🟡 | ⬜ |
 |---|---|---:|---:|---:|
 | Launching and setup | `█████████░` | 9 | 2 | 0 |
-| Connecting to servers | `███████░░░` | 2 | 3 | 0 |
-| World | `█████████░` | 4 | 1 | 0 |
+| Connecting to servers | `████████░░` | 3 | 2 | 0 |
+| World | `██████████` | 5 | 0 | 0 |
 | Rendering | `█████████░` | 14 | 3 | 1 |
 | HUD and screens | `█████████░` | 10 | 1 | 1 |
 | Playing | `█████████░` | 6 | 1 | 0 |
@@ -104,26 +104,29 @@ a difference; Phase 2 (mods) is not counted.
 - 🟡 Resource packs: the Resource Packs screen picks, orders and applies packs live, saved in options.txt; packs sent by servers not yet
 
 </details>
+
 <details>
-<summary><b>Connecting to servers</b> — 2 of 5 done</summary>
+<summary><b>Connecting to servers</b> — 3 of 5 done</summary>
 
 - ✅ Offline-mode vanilla and Fabric servers: join and stay connected on normal terrain, every packet decodes
 - ✅ Configuration phase, server transfers, cookies, resource pack answers
+- ✅ Item data: stacks decode and round-trip, and names, enchantments, damage, rarity and tool rules read into typed values; block breaking uses the held stack's `minecraft:tool` component and Efficiency, the attack strength delay its `minecraft:attack_speed` modifiers, and item use duration its `minecraft:consumable` (verified against vanilla's tick counts, `scripts/checks/item-data-check.sh`)
 - 🟡 Online-mode servers: encryption and session join need the Microsoft login above
 - 🟡 Signed chat (required by online-mode servers): message and command signing match vanilla's format (unit-tested); used once online mode works
-- ✅ Item data: stacks decode and round-trip, and names, enchantments, damage, rarity and tool rules read into typed values; block breaking uses the held stack's `minecraft:tool` component and Efficiency, the attack strength delay its `minecraft:attack_speed` modifiers, and item use duration its `minecraft:consumable` (verified against vanilla's tick counts, `scripts/checks/item-data-check.sh`)
 
 </details>
+
 <details>
-<summary><b>World</b> — 4 of 5 done</summary>
+<summary><b>World</b> — 5 of 5 done</summary>
 
 - ✅ Terrain: chunks, light, block and multi-block updates, chunk loading and unloading
 - ✅ Biomes and their grass, foliage and water colours
 - ✅ Dimensions: Overworld, Nether, End, respawn and dimension changes
 - ✅ Block entities (chests, signs, banners, ...): stored with their chunks and kept up to date
-- 🟡 Day and night, sun, moon, stars and clouds work; rain, snow and thunder are not drawn yet
+- ✅ Day and night, sun, moon, stars, clouds, rain, snow and thunder, with weather fog and lightning
 
 </details>
+
 <details>
 <summary><b>Rendering</b> — 14 of 18 done</summary>
 
@@ -147,6 +150,7 @@ a difference; Phase 2 (mods) is not counted.
 - ⬜ Downloaded player skins and capes
 
 </details>
+
 <details>
 <summary><b>HUD and screens</b> — 10 of 12 done</summary>
 
@@ -165,6 +169,7 @@ These run as the game's own Java code inside Haste, with keyboard and mouse inpu
 - ⬜ Editing signs, books and command blocks
 
 </details>
+
 <details>
 <summary><b>Playing</b> — 6 of 7 done</summary>
 
@@ -177,6 +182,7 @@ These run as the game's own Java code inside Haste, with keyboard and mouse inpu
 - 🟡 Riding: sitting in boats, minecarts, horses and pigs at vanilla's seat positions; steering vehicles not yet
 
 </details>
+
 <details>
 <summary><b>Sound</b> — 2 of 4 done</summary>
 
