@@ -212,7 +212,7 @@ pub struct BannerData {
 
 /// What to draw for one block entity (the per-type registry's rows; later renderers for beds
 /// and heads plug in here).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum BlockEntityKind {
     Chest(ChestMaterial),
     Shulker(Option<u8>),
@@ -232,6 +232,18 @@ pub enum BlockEntityKind {
         kind: SkullKind,
         wall: bool,
     },
+    /// A campfire: the items cooking on its grill, drawn by `CampfireRenderer`.
+    Campfire(CampfireItems),
+    /// A spawner or trial spawner: the mob spinning inside it,
+    /// `TrialSpawnerRenderer.extractSpawnerData` + `SpawnerRenderer.submitEntityInSpawner`.
+    Spawner(SpawnerDisplay),
+    /// A vault: its displayed item spinning above it (`VaultRenderer`).
+    Vault(VaultDisplay),
+    /// A shelf block: up to three items standing on the board (`ShelfRenderer`).
+    Shelf(ShelfItems),
+    /// A brushable block (suspicious sand/gravel): the item sticking out of it while it is
+    /// dusted, `BrushableBlockRenderer`.
+    Brushable(BrushableItem),
     /// A lectern's book (vanilla `LecternRenderer`, drawn only when the block state's
     /// `has_book` is true).
     Lectern,
@@ -244,6 +256,112 @@ pub enum BlockEntityKind {
     /// A conduit (vanilla `ConduitRenderer`): its shell when inactive, cage, wind and eye when
     /// active.
     Conduit,
+}
+
+/// The items on a campfire's grill, by slot (vanilla `CampfireBlockEntity.getItems()`, at most
+/// four). Fixed size and `Copy`: no allocation per frame or per block entity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct CampfireItems {
+    /// The item in each slot, by item registry index (`None` for an empty slot).
+    pub items: [Option<haste_core::RegistryIndex>; 4],
+}
+
+impl CampfireItems {
+    /// The item in `slot`, if any.
+    pub fn get(&self, slot: usize) -> Option<haste_core::RegistryIndex> {
+        self.items.get(slot).copied().flatten()
+    }
+}
+
+/// The mob spinning inside a spawner (vanilla `SpawnerRenderState`): the display entity's
+/// model (the client resolves it from `SpawnData`), the yaw spin in degrees and the scale.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpawnerDisplay {
+    /// The display entity's cube model; `None` draws nothing (vanilla leaves the render
+    /// state's `displayEntity` null when the spawn data names no spawnable entity).
+    pub model: Option<std::sync::Arc<CubeModel>>,
+    /// The display entity's spin as the ends of the last tick, in the units vanilla's
+    /// `BaseSpawner.spin` / `TrialSpawnerStateData.spin` accumulate (see
+    /// [`spawner_spin_at`] for the degrees the renderer draws).
+    pub spin: TickPair,
+    /// The scale vanilla derives from the display entity's bounding box
+    /// (`0.53125` divided by the larger of its width and height when that exceeds 1).
+    pub scale: f32,
+}
+
+/// The degrees a spawner's display mob is turned to at `partial`, vanilla
+/// `TrialSpawnerRenderer.extractSpawnerData`'s `Mth.lerp(partialTicks, oSpin, spin) * 10`
+/// (vanilla keeps the accumulating spin in its own units and scales it only for the pose).
+pub fn spawner_spin_at(spawner: &SpawnerDisplay, partial: f32) -> f32 {
+    spawner.spin.at(partial) * 10.0
+}
+
+/// A vault's displayed item (vanilla `VaultRenderState`): the item and how many copies of the
+/// stack to draw, plus the spin in degrees.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VaultDisplay {
+    pub item: haste_core::RegistryIndex,
+    /// `ItemClusterRenderState.getRenderedAmount` of the stack's count.
+    pub count: u32,
+    pub spin: TickPair,
+}
+
+impl VaultDisplay {
+    /// How many copies of the stack vanilla draws (1 for a single item, then one more per
+    /// full 16 of the count, up to 5): `ItemClusterRenderState.getRenderedAmount`.
+    pub fn copies(&self) -> u32 {
+        match self.count {
+            ..=0 => 0,
+            1 => 1,
+            2..=16 => 2,
+            17..=32 => 3,
+            33..=48 => 4,
+            _ => 5,
+        }
+    }
+
+    /// The yaw the displayed item is turned to at `partial`, vanilla `VaultRenderer`'s
+    /// `Mth.rotLerp(partialTicks, clientData.previousSpin(), clientData.currentSpin())`: the
+    /// lerp wraps at 180 degrees so the item keeps turning the short way when the spin rolls
+    /// over from its 10 degrees a tick (`VaultClientData.updateDisplayItemSpin`).
+    pub fn spin_at(&self, partial: f32) -> f32 {
+        let from = self.spin.start;
+        let mut delta = (self.spin.end - from) % 360.0;
+        if delta >= 180.0 {
+            delta -= 360.0;
+        }
+        if delta < -180.0 {
+            delta += 360.0;
+        }
+        from + partial * delta
+    }
+}
+
+/// The items on a shelf block (vanilla `ShelfBlockEntity`): three slots plus the
+/// `align_items_to_bottom` flag the board's NBT carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct ShelfItems {
+    pub items: [Option<haste_core::RegistryIndex>; 3],
+    pub align_to_bottom: bool,
+}
+
+impl ShelfItems {
+    /// The item in `slot`, if any.
+    pub fn get(&self, slot: usize) -> Option<haste_core::RegistryIndex> {
+        self.items.get(slot).copied().flatten()
+    }
+}
+
+/// The item a brushable block reveals (vanilla `BrushableBlockRenderState`): the item, the
+/// block face it is brushed from, and the `dusted` state (0..3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BrushableItem {
+    pub item: haste_core::RegistryIndex,
+    /// `BrushableBlockEntity.getHitDirection()`; `None` while the block has not been brushed
+    /// (vanilla then draws nothing).
+    pub hit_direction: Option<Direction>,
+    /// The block state's `dusted` property (vanilla's completion state, 0..3).
+    pub dusted: u8,
 }
 
 /// The head types vanilla renders (vanilla `SkullBlock.Types`); the block id picks one.
@@ -323,6 +441,23 @@ pub fn kind_of(be_type: &Identifier, block: &Identifier, xmas: bool) -> Option<B
             wall: block.path().ends_with("_wall_banner"),
         }),
         "skull" => skull_kind_of(block),
+        "campfire" => Some(BlockEntityKind::Campfire(CampfireItems::default())),
+        "mob_spawner" | "trial_spawner" => Some(BlockEntityKind::Spawner(SpawnerDisplay {
+            model: None,
+            spin: TickPair::fixed(0.0),
+            scale: SPAWNER_SCALE,
+        })),
+        "vault" => Some(BlockEntityKind::Vault(VaultDisplay {
+            item: haste_core::RegistryIndex(0),
+            count: 0,
+            spin: TickPair::fixed(0.0),
+        })),
+        "shelf" => Some(BlockEntityKind::Shelf(ShelfItems::default())),
+        "brushable_block" => Some(BlockEntityKind::Brushable(BrushableItem {
+            item: haste_core::RegistryIndex(0),
+            hit_direction: None,
+            dusted: 0,
+        })),
         "lectern" => Some(BlockEntityKind::Lectern),
         "enchanting_table" => Some(BlockEntityKind::EnchantTable),
         "bell" => Some(BlockEntityKind::Bell),
@@ -679,6 +814,233 @@ fn shulker_root(pos: BlockPos, facing: Direction, camera: glam::DVec3) -> Mat4 {
 /// Vanilla `ChestRenderer.submit`'s lid angle curve: `1 - (1 - open)^3`.
 pub fn chest_open_curve(open: f32) -> f32 {
     1.0 - (1.0 - open).powi(3)
+}
+
+/// Vanilla `TrialSpawnerRenderer.extractSpawnerData`'s base scale before the bounding-box
+/// correction (`state.scale = 0.53125F`).
+pub const SPAWNER_SCALE: f32 = 0.53125;
+
+/// Vanilla `CampfireRenderer.SIZE`: the scale an item on a campfire's grill is drawn at.
+pub const CAMPFIRE_ITEM_SIZE: f32 = 0.375;
+
+/// Vanilla `ShelfRenderer.ITEM_SIZE` and `ALIGN_ITEMS_TO_BOTTOM`.
+pub const SHELF_ITEM_SIZE: f32 = 0.25;
+pub const SHELF_ALIGN_OFFSET: f32 = -0.25;
+
+/// The extent of a cube model's geometry at rest (model units), as the bounding box of every
+/// cube transformed by its part pivots and rotations (the same matrices `emit_part` composes,
+/// with no pose). Used to size a spawner's display entity.
+pub(crate) fn cube_model_extent(model: &CubeModel) -> (Vec3, Vec3) {
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    let mut see = |p: Vec3| {
+        min = min.min(p);
+        max = max.max(p);
+    };
+    extent_of(&model.root, Mat4::IDENTITY, &mut see);
+    if min.x.is_finite() {
+        (min, max)
+    } else {
+        (Vec3::ZERO, Vec3::ZERO)
+    }
+}
+
+fn extent_of(part: &ModelPart, parent: Mat4, see: &mut impl FnMut(Vec3)) {
+    let m = parent
+        * Mat4::from_translation(part.pivot)
+        * Mat4::from_rotation_z(part.rotation.z)
+        * Mat4::from_rotation_y(part.rotation.y)
+        * Mat4::from_rotation_x(part.rotation.x);
+    for cube in &part.cubes {
+        let o = cube.origin + cube.inflate;
+        let s = cube.size + 2.0 * cube.inflate;
+        for x in [o.x, o.x + s.x] {
+            for y in [o.y, o.y + s.y] {
+                for z in [o.z, o.z + s.z] {
+                    see(m.transform_point3(Vec3::new(x, y, z)));
+                }
+            }
+        }
+    }
+    for child in &part.children {
+        extent_of(child, m, see);
+    }
+}
+
+/// Vanilla `TrialSpawnerRenderer.extractSpawnerData`'s scale for `model`: `0.53125`, divided by
+/// the larger of the display entity's bounding box width and height when that exceeds one
+/// block. Haste has no per-type bounding box table yet (haste-entity's `EntityDimensions`
+/// falls back to its default box, `crates/haste-entity/src/dims.rs:49`), so the box comes from
+/// the display model's own geometry, which vanilla's mob models are built to match.
+pub fn spawner_scale(model: &CubeModel) -> f32 {
+    let (min, max) = cube_model_extent(model);
+    let longest = (max.x - min.x).max(max.y - min.y) / 16.0;
+    if longest > 1.0 {
+        SPAWNER_SCALE / longest
+    } else {
+        SPAWNER_SCALE
+    }
+}
+
+/// Vanilla `CampfireRenderer.submit`'s per-slot matrix: the block's centre, turned so the slot
+/// looks outwards (`Direction.from2DDataValue((slot + facing.get2DDataValue()) % 4)`'s
+/// `-toYRot()`), laid flat (the +90 degrees about X) and offset to its own quadrant of the
+/// grill, at vanilla's `SIZE` scale. The item's own `display.fixed` transform is the
+/// renderer's job (`emit_item`).
+pub(crate) fn campfire_item_matrix(
+    pos: BlockPos,
+    facing: Direction,
+    slot: usize,
+    camera: glam::DVec3,
+) -> Mat4 {
+    let p = pos.as_dvec3() - camera;
+    // The slot's direction around the block (`from2DDataValue` of `(slot + facing) % 4`): the
+    // 2D order is south 0, west 1, north 2, east 3, so the item turns by `-toYRot` of it.
+    let two_d = (slot + facing.to_2d_data_value() as usize) % 4;
+    let y_rot = -(two_d as f32 * 90.0);
+    Mat4::from_translation(p.as_vec3() + Vec3::new(0.5, 0.44921875, 0.5))
+        * Mat4::from_rotation_y(y_rot.to_radians())
+        * Mat4::from_rotation_x(90.0f32.to_radians())
+        * Mat4::from_translation(Vec3::new(-0.3125, -0.3125, 0.0))
+        * Mat4::from_scale(Vec3::splat(CAMPFIRE_ITEM_SIZE))
+}
+
+/// Vanilla `SpawnerRenderer.submitEntityInSpawner` followed by
+/// `LivingEntityRenderer.submit`'s transform for the static display entity: the block's centre
+/// turned by the spawner's spin, the mob dropped a little and tipped back 30 degrees, then
+/// vanilla's `setupRotations` yaw (the display entity never turns its body, so it is the
+/// fixed `180 - bodyRot`), the model's y/z flip and the /16 that turns the model's pixel units
+/// into blocks. Haste's entity models place the feet at their y 0, so vanilla's extra
+/// `-1.501` block translate is not needed here.
+pub(crate) fn spawner_root(pos: BlockPos, spin: f32, scale: f32, camera: glam::DVec3) -> Mat4 {
+    let p = pos.as_dvec3() - camera;
+    Mat4::from_translation(p.as_vec3() + Vec3::new(0.5, 0.4, 0.5))
+        * Mat4::from_rotation_y(spin.to_radians())
+        * Mat4::from_translation(Vec3::new(0.0, -0.2, 0.0))
+        * Mat4::from_rotation_x((-30.0f32).to_radians())
+        * Mat4::from_scale(Vec3::splat(scale))
+        * Mat4::from_rotation_y(180.0f32.to_radians())
+        * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0) / 16.0)
+}
+
+/// Poses a spawner's display entity model into `out` (the entity motion is not animated: the
+/// mob only turns with the spawner's spin, like vanilla's `EntityRenderDispatcher.submit` on
+/// the static display entity).
+pub(crate) fn emit_spawner(
+    out: &mut Vec<EntityVertex>,
+    inst: &BlockEntityInstance,
+    model: &CubeModel,
+    rect: [u32; 4],
+    camera: glam::DVec3,
+    partial: f32,
+) {
+    let BlockEntityKind::Spawner(ref spawner) = inst.kind else {
+        return;
+    };
+    use crate::entity::emit_part_tinted;
+    let (sky, block) = inst.light;
+    let root = spawner_root(
+        inst.pos,
+        spawner_spin_at(spawner, partial),
+        spawner.scale,
+        camera,
+    );
+    emit_part_tinted(
+        out,
+        model,
+        &model.root,
+        &PoseOverrides::default(),
+        root,
+        rect,
+        (block, sky),
+        0.0,
+        [1.0; 3],
+    );
+}
+
+/// Vanilla `VaultRenderer.submit`: the block's centre at 0.4, turned by the vault's spin. The
+/// item cluster's copies come from the caller.
+pub(crate) fn vault_root(pos: BlockPos, spin: f32, camera: glam::DVec3) -> Mat4 {
+    let p = pos.as_dvec3() - camera;
+    Mat4::from_translation(p.as_vec3() + Vec3::new(0.5, 0.4, 0.5))
+        * Mat4::from_rotation_y(spin.to_radians())
+}
+
+/// Vanilla `ShelfRenderer.submitItem`: the block's centre turned by the shelf's facing (a
+/// vertical facing uses vanilla's 180 degrees), then the slot's x offset and the standing
+/// plane's -0.25, at vanilla's `ITEM_SIZE` scale. `offset_y` is vanilla's bounding-box
+/// alignment (see [`shelf_item_offset_y`]); it is applied in the same scaled space, after the
+/// scale, exactly like the renderer's `poseStack.translate(0, offsetY, 0)`.
+pub(crate) fn shelf_item_matrix(
+    pos: BlockPos,
+    facing: Direction,
+    slot: usize,
+    align_to_bottom: bool,
+    offset_y: f32,
+    camera: glam::DVec3,
+) -> Mat4 {
+    let p = pos.as_dvec3() - camera;
+    let y_rot = if facing.is_horizontal() {
+        -facing.to_y_rot()
+    } else {
+        180.0
+    };
+    Mat4::from_translation(p.as_vec3() + Vec3::new(0.5, 0.5, 0.5))
+        * Mat4::from_rotation_y(y_rot.to_radians())
+        * Mat4::from_translation(Vec3::new(
+            (slot as f32 - 1.0) * 0.3125,
+            if align_to_bottom {
+                SHELF_ALIGN_OFFSET
+            } else {
+                0.0
+            },
+            -0.25,
+        ))
+        * Mat4::from_scale(Vec3::splat(SHELF_ITEM_SIZE))
+        * Mat4::from_translation(Vec3::new(0.0, offset_y, 0.0))
+}
+
+/// Vanilla `ShelfRenderer.submitItem`'s vertical alignment: the model's box is lifted by its
+/// min y, and centred on the board when the shelf does not align its items to the bottom.
+/// `bbox` is the model's bounding box through its `on_shelf` display transform.
+pub fn shelf_item_offset_y(bbox: (Vec3, Vec3), align_to_bottom: bool) -> f32 {
+    let (min, max) = bbox;
+    let mut offset = -min.y;
+    if !align_to_bottom {
+        offset += -(max.y - min.y) / 2.0;
+    }
+    offset
+}
+
+/// Vanilla `BrushableBlockRenderer.submit`'s matrix: half a block up, translated out of the
+/// brushed face by the completion state, then vanilla's fixed 75 + 11 (90 more for a face on
+/// the x axis) degrees of yaw, at half scale. The item's own `display.fixed` transform is the
+/// renderer's job.
+pub(crate) fn brushable_item_matrix(
+    pos: BlockPos,
+    hit_direction: Direction,
+    dusted: u8,
+    camera: glam::DVec3,
+) -> Mat4 {
+    let p = pos.as_dvec3() - camera;
+    // Vanilla `translations`: each face's own resting translation, plus the completion offset
+    // out of it (`completionState / 10 * 0.75`).
+    let mut t = Vec3::new(0.5, 0.0, 0.5);
+    let offset = dusted as f32 / 10.0 * 0.75;
+    match hit_direction {
+        Direction::East => t.x = 0.73 + offset,
+        Direction::West => t.x = 0.25 - offset,
+        Direction::Up => t.y = 0.25 + offset,
+        Direction::Down => t.y = -0.23 - offset,
+        Direction::North => t.z = 0.25 - offset,
+        Direction::South => t.z = 0.73 + offset,
+    }
+    let east_west = matches!(hit_direction, Direction::East | Direction::West);
+    Mat4::from_translation(p.as_vec3() + Vec3::new(0.0, 0.5, 0.0))
+        * Mat4::from_translation(t)
+        * Mat4::from_rotation_y(75.0f32.to_radians())
+        * Mat4::from_rotation_y((if east_west { 90.0f32 } else { 0.0 } + 11.0).to_radians())
+        * Mat4::from_scale(Vec3::splat(0.5))
 }
 
 /// The entity renderer's cube emitter, as a type (light and shading are its job).
@@ -1186,6 +1548,28 @@ pub fn skull_piglin_ear_rotations(anim: f32) -> (f32, f32) {
     (left, right)
 }
 
+/// The block entity kinds that draw an item or a stack of items: they go through the entity
+/// renderer's item emitters (same models as held and dropped items) rather than the block
+/// entity's own texture, so the emitter splits them out first.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ItemBlockEntity {
+    Campfire(CampfireItems),
+    Shelf(ShelfItems),
+    Vault(VaultDisplay),
+    Brushable(BrushableItem),
+}
+
+/// The item-drawing payload of a block entity kind, when it has one.
+pub(crate) fn item_kind(kind: &BlockEntityKind) -> Option<ItemBlockEntity> {
+    match kind {
+        BlockEntityKind::Campfire(items) => Some(ItemBlockEntity::Campfire(*items)),
+        BlockEntityKind::Shelf(items) => Some(ItemBlockEntity::Shelf(*items)),
+        BlockEntityKind::Vault(vault) => Some(ItemBlockEntity::Vault(*vault)),
+        BlockEntityKind::Brushable(b) => Some(ItemBlockEntity::Brushable(*b)),
+        _ => None,
+    }
+}
+
 /// Poses one block entity into `out` (camera-relative, the entity stream's convention).
 /// `rect` is the texture's atlas rectangle, `light` the lightmap coordinates (block, sky).
 pub(crate) fn emit_block_entity(
@@ -1264,6 +1648,13 @@ pub(crate) fn emit_block_entity(
         // Banners likewise draw per-pattern layers with a tint, handled by
         // `EntityRenderer::emit_banner`.
         BlockEntityKind::Banner { .. } => {}
+        // The item and mob block entities draw through the entity renderer's item and cube
+        // emitters (they need the item models and the atlas), not the block entity's texture.
+        BlockEntityKind::Campfire(_)
+        | BlockEntityKind::Spawner(_)
+        | BlockEntityKind::Vault(_)
+        | BlockEntityKind::Shelf(_)
+        | BlockEntityKind::Brushable(_) => {}
         BlockEntityKind::Skull { kind, wall } => {
             let model = skull_model(kind);
             let mut pose = PoseOverrides::default();
@@ -2288,6 +2679,13 @@ pub(crate) fn emit_model_block_entity(
         | BlockEntityKind::Sign { .. }
         | BlockEntityKind::Banner { .. }
         | BlockEntityKind::Skull { .. } => {}
+        // The item and mob block entities are split out by `item_kind` and `emit_spawner`
+        // before the emitter gets here.
+        BlockEntityKind::Campfire(_)
+        | BlockEntityKind::Spawner(_)
+        | BlockEntityKind::Vault(_)
+        | BlockEntityKind::Shelf(_)
+        | BlockEntityKind::Brushable(_) => {}
     }
 }
 
@@ -2796,6 +3194,358 @@ mod tests {
     fn sign_line_metrics_match_vanilla() {
         assert_eq!(sign_line_metrics(false), (10, 90));
         assert_eq!(sign_line_metrics(true), (9, 60));
+    }
+
+    /// Vanilla `CampfireRenderer.submit`: every item sits 0.44921875 up, laid flat, in its own
+    /// quadrant (slot 0 at the facing's front, then clockwise), scaled by 0.375.
+    #[test]
+    fn campfire_item_matrix_places_each_slot() {
+        let pos = BlockPos::new(0, 0, 0);
+        let cam = glam::DVec3::ZERO;
+        // The item model's centre (0.5, 0.5, 0.5 in model space) is shifted into the slot's
+        // quadrant: -0.3125 + 0.5 * 0.375 = -0.125 in each of the two horizontal axes, laid
+        // flat by the 90-degree x rotation.
+        let centre = |slot: usize| {
+            campfire_item_matrix(pos, Direction::South, slot, cam)
+                .transform_point3(Vec3::new(0.5, 0.5, 0.5))
+        };
+        let s0 = centre(0);
+        assert!((s0.x - 0.375).abs() < 1e-6, "x: {}", s0.x);
+        // The 90-degree x rotation folds the model's own half depth (0.5 * 0.375) into y.
+        assert!(
+            (s0.y - (0.44921875 - 0.5 * CAMPFIRE_ITEM_SIZE)).abs() < 1e-6,
+            "y: {}",
+            s0.y
+        );
+        assert!((s0.z - 0.375).abs() < 1e-6, "z: {}", s0.z);
+        // Slot 1 turns 90 degrees (west), slot 2 180 (north), slot 3 270 (east).
+        let s1 = centre(1);
+        assert!(
+            (s1.x - 0.625).abs() < 1e-6 && (s1.z - 0.375).abs() < 1e-6,
+            "{s1:?}"
+        );
+        let s2 = centre(2);
+        assert!(
+            (s2.x - 0.625).abs() < 1e-6 && (s2.z - 0.625).abs() < 1e-6,
+            "{s2:?}"
+        );
+        let s3 = centre(3);
+        assert!(
+            (s3.x - 0.375).abs() < 1e-6 && (s3.z - 0.625).abs() < 1e-6,
+            "{s3:?}"
+        );
+        // The model's 0.375 scale: one block of model space is 0.375 blocks wide.
+        let edge = campfire_item_matrix(pos, Direction::South, 0, cam)
+            .transform_point3(Vec3::new(1.5, 0.5, 0.5))
+            - s0;
+        assert!(
+            (edge.x - CAMPFIRE_ITEM_SIZE).abs() < 1e-6,
+            "scale: {}",
+            edge.x
+        );
+        // A west-facing campfire's slots are shifted by one (slot 0 goes to the west).
+        let shifted = campfire_item_matrix(pos, Direction::West, 0, cam)
+            .transform_point3(Vec3::new(0.5, 0.5, 0.5));
+        assert!((shifted.x - s1.x).abs() < 1e-6, "{} vs {}", shifted.x, s1.x);
+        assert!((shifted.z - s1.z).abs() < 1e-6);
+    }
+
+    /// Vanilla `SpawnerRenderer.submitEntityInSpawner` + `LivingEntityRenderer.submit`: the
+    /// block's centre at 0.4, the model tipped 30 degrees back and scaled down, with the
+    /// display entity's fixed 180-degree yaw and the model flip.
+    #[test]
+    fn spawner_root_tips_and_scales_the_mob() {
+        let m = spawner_root(
+            BlockPos::new(0, 0, 0),
+            0.0,
+            SPAWNER_SCALE,
+            glam::DVec3::ZERO,
+        );
+        // The feet (model origin) sit at the block's centre, dropped by 0.2.
+        let p = m.transform_point3(Vec3::ZERO);
+        assert!((p.x - 0.5).abs() < 1e-6, "x: {}", p.x);
+        assert!((p.y - (0.4 - 0.2)).abs() < 1e-6, "y: {}", p.y);
+        assert!((p.z - 0.5).abs() < 1e-6, "z: {}", p.z);
+        // One model block up the y axis: `scale * cos(30)` blocks above the feet (the tip
+        // takes some of it into z).
+        let up = m.transform_point3(Vec3::new(0.0, -16.0, 0.0)) - p;
+        assert!(
+            (up.y - (SPAWNER_SCALE * 30.0f32.to_radians().cos())).abs() < 1e-6,
+            "up: {}",
+            up.y
+        );
+        assert!(
+            (up.z - (-SPAWNER_SCALE * 30.0f32.to_radians().sin())).abs() < 1e-6,
+            "z: {}",
+            up.z
+        );
+        // Along the model's +z the tip bends the axis down by half its length (sin 30) and
+        // shortens it by cos 30 (the yaw also turns it towards -z).
+        let z = m.transform_point3(Vec3::new(0.0, 0.0, 16.0)) - p;
+        assert!((z.y + SPAWNER_SCALE * 0.5).abs() < 1e-6, "tip: {}", z.y);
+        assert!(
+            (z.z - (-SPAWNER_SCALE * 30.0f32.to_radians().cos())).abs() < 1e-6,
+            "{}",
+            z.z
+        );
+    }
+
+    /// Vanilla `VaultRenderer.submit`: the block's centre at 0.4 turned by the spin; at spin 0
+    /// the item cluster is upright and unrotated, at 90 degrees +x points along -z.
+    #[test]
+    fn vault_root_turns_around_the_block_centre() {
+        let m = vault_root(BlockPos::new(0, 0, 0), 0.0, glam::DVec3::ZERO);
+        let p = m.transform_point3(Vec3::ZERO);
+        assert!((p.x - 0.5).abs() < 1e-6 && (p.y - 0.4).abs() < 1e-6 && (p.z - 0.5).abs() < 1e-6);
+        let x = m.transform_point3(Vec3::new(1.0, 0.0, 0.0)) - p;
+        assert!((x.x - 1.0).abs() < 1e-6 && x.z.abs() < 1e-6, "{x:?}");
+        let r = vault_root(BlockPos::new(0, 0, 0), 90.0, glam::DVec3::ZERO);
+        let x90 = r.transform_point3(Vec3::new(1.0, 0.0, 0.0)) - p;
+        assert!(x90.x.abs() < 1e-6 && (x90.z + 1.0).abs() < 1e-6, "{x90:?}");
+    }
+
+    /// Vanilla `ShelfRenderer.submitItem`: the slots spread along x by 0.3125, the item stands
+    /// 0.25 in front of the board, and it is centred on the board unless it aligns to the
+    /// bottom. The camera is taken relative (the block's own corner at 0).
+    #[test]
+    fn shelf_item_matrix_spreads_the_slots() {
+        let pos = BlockPos::new(0, 0, 0);
+        let cam = glam::DVec3::ZERO;
+        let m = shelf_item_matrix(pos, Direction::North, 0, false, 0.0, cam);
+        let p = m.transform_point3(Vec3::ZERO);
+        // North facing: yaw 180, so the slot offset runs along -x and the board is +z.
+        assert!((p.x - (0.5 + 0.3125)).abs() < 1e-6, "x: {}", p.x);
+        assert!((p.y - 0.5).abs() < 1e-6, "y: {}", p.y);
+        assert!((p.z - (0.5 + 0.25)).abs() < 1e-6, "z: {}", p.z);
+        // Slot 2 mirrors slot 0 across the block's centre.
+        let q = shelf_item_matrix(pos, Direction::North, 2, false, 0.0, cam)
+            .transform_point3(Vec3::ZERO);
+        assert!((q.x - (0.5 - 0.3125)).abs() < 1e-6, "{}", q.x);
+        // Align to bottom drops the item by 0.25 blocks (vanilla's ALIGN_ITEMS_TO_BOTTOM,
+        // applied outside the item's own scale).
+        let bottom = shelf_item_matrix(pos, Direction::North, 1, true, 0.0, cam)
+            .transform_point3(Vec3::ZERO);
+        assert!((bottom.y - (0.5 - 0.25)).abs() < 1e-6, "y: {}", bottom.y);
+        // The vertical offset rides in the same space: one model unit of `offset_y` is 0.25
+        // blocks (the shelf's scale).
+        let lifted = shelf_item_matrix(pos, Direction::North, 1, false, 1.0, cam)
+            .transform_point3(Vec3::ZERO);
+        assert!(
+            (lifted.y - (0.5 + SHELF_ITEM_SIZE)).abs() < 1e-6,
+            "y: {}",
+            lifted.y
+        );
+    }
+
+    /// Vanilla `ShelfRenderer`'s alignment: the model's box is lifted by its min y, and by
+    /// half its height as well when the shelf does not align its items to the bottom.
+    #[test]
+    fn shelf_item_offset_centres_or_bottoms_the_model() {
+        let bbox = (Vec3::new(-0.5, -0.25, 0.0), Vec3::new(0.5, 0.75, 0.0));
+        assert!((shelf_item_offset_y(bbox, true) - 0.25).abs() < 1e-6);
+        // Centred: 0.25 (the lift) minus half the 1.0-tall box's height (vanilla's
+        // `-(maxY - minY) / 2`).
+        assert!((shelf_item_offset_y(bbox, false) - -0.25).abs() < 1e-6);
+    }
+
+    /// Vanilla `BrushableBlockRenderer.submit` + `translations`: each face pushes the item out
+    /// of it by 0.25/0.73 plus `dusted / 10 * 0.75`, and the item keeps vanilla's 75 + 11
+    /// degrees of yaw (90 more on the x axis).
+    #[test]
+    fn brushable_item_matrix_follows_the_dusted_progress() {
+        let pos = BlockPos::new(0, 0, 0);
+        let cam = glam::DVec3::ZERO;
+        // North (touched from the north face): the item sits at z 0.25 at progress 0.
+        let m = brushable_item_matrix(pos, Direction::North, 0, cam);
+        let p = m.transform_point3(Vec3::ZERO);
+        assert!((p.y - 0.5).abs() < 1e-6, "y: {}", p.y);
+        assert!((p.z - 0.25).abs() < 1e-6, "z: {}", p.z);
+        assert!((p.x - 0.5).abs() < 1e-6, "x: {}", p.x);
+        // Progress 3 adds 3/10 * 0.75 towards the camera (-z).
+        let p3 = brushable_item_matrix(pos, Direction::North, 3, cam).transform_point3(Vec3::ZERO);
+        assert!((p3.z - (0.25 - 0.225)).abs() < 1e-6, "z: {}", p3.z);
+        // East is pushed the other way (0.73 + offset).
+        let e = brushable_item_matrix(pos, Direction::East, 0, cam).transform_point3(Vec3::ZERO);
+        assert!((e.x - 0.73).abs() < 1e-6, "x: {}", e.x);
+        // Down is unique: -0.23 - offset (the item hangs below the block).
+        let d = brushable_item_matrix(pos, Direction::Down, 0, cam).transform_point3(Vec3::ZERO);
+        assert!((d.y - (0.5 - 0.23)).abs() < 1e-6, "y: {}", d.y);
+    }
+
+    /// The block entity types vanilla has renderers for, and the ones we do not draw (the
+    /// other worker's lecterns, books, bells, pots and conduits, and the rest).
+    #[test]
+    fn kind_of_maps_the_item_and_mob_block_entities() {
+        let campfire = Identifier::minecraft("campfire");
+        assert_eq!(
+            kind_of(&Identifier::minecraft("campfire"), &campfire, false),
+            Some(BlockEntityKind::Campfire(CampfireItems::default()))
+        );
+        for (be, path) in [
+            ("mob_spawner", "spawner"),
+            ("trial_spawner", "trial_spawner"),
+            ("vault", "vault"),
+            ("shelf", "shelf"),
+            ("brushable_block", "suspicious_sand"),
+        ] {
+            let block = Identifier::minecraft(path);
+            let kind = kind_of(&Identifier::minecraft(be), &block, false).expect(be);
+            let payload = matches!(
+                kind,
+                BlockEntityKind::Spawner(_)
+                    | BlockEntityKind::Vault(_)
+                    | BlockEntityKind::Shelf(_)
+                    | BlockEntityKind::Brushable(_)
+            );
+            assert!(payload, "{be} mapped to {kind:?}");
+        }
+        // The object-model block entities resolve too (their own renderer draws them).
+        for (be, kind) in [
+            ("lectern", BlockEntityKind::Lectern),
+            ("enchanting_table", BlockEntityKind::EnchantTable),
+            ("bell", BlockEntityKind::Bell),
+            ("decorated_pot", BlockEntityKind::DecoratedPot),
+            ("conduit", BlockEntityKind::Conduit),
+        ] {
+            let block = Identifier::minecraft(be);
+            assert_eq!(kind_of(&block, &block, false), Some(kind), "{be}");
+        }
+        // Not drawn (no vanilla renderer we have).
+        for be in ["furnace", "beacon", "hopper", "piston"] {
+            assert_eq!(
+                kind_of(
+                    &Identifier::minecraft(be),
+                    &Identifier::minecraft("stone"),
+                    false
+                ),
+                None,
+                "{be}"
+            );
+        }
+    }
+
+    /// Vanilla `ItemClusterRenderState.getRenderedAmount`: one copy for a single item, then
+    /// one more per full 16 of the count, up to five.
+    #[test]
+    fn vault_copies_match_vanilla() {
+        let vault = |count: u32| {
+            VaultDisplay {
+                item: haste_core::RegistryIndex(0),
+                count,
+                spin: TickPair::fixed(0.0),
+            }
+            .copies()
+        };
+        assert_eq!(vault(0), 0);
+        assert_eq!(vault(1), 1);
+        assert_eq!(vault(16), 2);
+        assert_eq!(vault(17), 3);
+        assert_eq!(vault(32), 3);
+        assert_eq!(vault(33), 4);
+        assert_eq!(vault(48), 4);
+        assert_eq!(vault(49), 5);
+        assert_eq!(vault(1000), 5);
+    }
+
+    /// Vanilla `TrialSpawnerRenderer.extractSpawnerData`'s `Mth.lerp(partialTicks, oSpin, spin)
+    /// * 10`: the accumulating spin is only scaled for the pose.
+    #[test]
+    fn spawner_spin_is_scaled_by_ten() {
+        let spawner = SpawnerDisplay {
+            model: None,
+            spin: TickPair {
+                start: 3.0,
+                end: 4.0,
+            },
+            scale: SPAWNER_SCALE,
+        };
+        assert!((spawner_spin_at(&spawner, 0.5) - 35.0).abs() < 1e-6);
+    }
+
+    /// Vanilla `VaultRenderer`'s `Mth.rotLerp`: the vault's displayed item keeps turning the
+    /// short way when the 10-degrees-a-tick spin rolls over 360, unlike a plain lerp.
+    #[test]
+    fn vault_spin_wraps_through_the_short_arc() {
+        let vault = |start: f32, end: f32| VaultDisplay {
+            item: haste_core::RegistryIndex(0),
+            count: 1,
+            spin: TickPair { start, end },
+        };
+        // Halfway between 350 and 0 (a 10 degree turn through 360): the item is at 355, where a
+        // plain lerp would be at 175 and send the item backwards three quarters of a turn.
+        assert!((vault(350.0, 360.0).spin_at(0.5) - 355.0).abs() < 1e-6);
+        assert!((vault(350.0, 0.0).spin_at(0.5) - 355.0).abs() < 1e-6);
+        // A forward 10 degrees well inside the range interpolates plainly.
+        assert!((vault(20.0, 30.0).spin_at(0.5) - 25.0).abs() < 1e-6);
+        // A backwards turn (a spin the vault can never make) still takes the short arc.
+        assert!((vault(100.0, 80.0).spin_at(0.5) - 90.0).abs() < 1e-6);
+    }
+
+    /// The spawner scale: vanilla's 0.53125, divided by the larger of the display entity's
+    /// box width and height when it exceeds one block.
+    #[test]
+    fn spawner_scale_divides_big_models() {
+        let small = CubeModel {
+            texture: Identifier::minecraft("haste:test"),
+            tex_width: 16,
+            tex_height: 16,
+            root: ModelPart {
+                name: "root".into(),
+                pivot: Vec3::ZERO,
+                rotation: Vec3::ZERO,
+                visible: true,
+                cubes: vec![Cube {
+                    origin: Vec3::new(-4.0, -4.0, -4.0),
+                    size: Vec3::new(8.0, 8.0, 8.0),
+                    inflate: 0.0,
+                    uv: [0, 0],
+                    mirror: false,
+                }],
+                children: Vec::new(),
+            },
+        };
+        // 0.5 blocks at most: no division.
+        assert!((spawner_scale(&small) - SPAWNER_SCALE).abs() < 1e-6);
+        let tall = CubeModel {
+            texture: small.texture.clone(),
+            tex_width: 16,
+            tex_height: 16,
+            root: ModelPart {
+                cubes: vec![Cube {
+                    origin: Vec3::new(-2.0, -48.0, -2.0),
+                    size: Vec3::new(4.0, 48.0, 4.0),
+                    inflate: 0.0,
+                    uv: [0, 0],
+                    mirror: false,
+                }],
+                name: "root".into(),
+                pivot: Vec3::ZERO,
+                rotation: Vec3::ZERO,
+                visible: true,
+                children: Vec::new(),
+            },
+        };
+        // 3 blocks tall: 0.53125 / 3.
+        assert!(
+            (spawner_scale(&tall) - SPAWNER_SCALE / 3.0).abs() < 1e-6,
+            "{}",
+            spawner_scale(&tall)
+        );
+    }
+
+    /// The item block entity payloads fold out of their kinds (the emitter splits them off
+    /// from the block entity's own texture).
+    #[test]
+    fn item_kind_splits_the_item_payloads() {
+        let items = CampfireItems {
+            items: [Some(haste_core::RegistryIndex(1)), None, None, None],
+        };
+        match item_kind(&BlockEntityKind::Campfire(items)) {
+            Some(ItemBlockEntity::Campfire(c)) => assert_eq!(c.items[0].unwrap().0, 1),
+            other => panic!("{other:?}"),
+        }
+        assert!(item_kind(&BlockEntityKind::Chest(ChestMaterial::Normal)).is_none());
+        assert!(item_kind(&BlockEntityKind::Sign { hanging: true }).is_none());
     }
 
     fn lec(pos: BlockPos, kind: BlockEntityKind) -> BlockEntityInstance {
