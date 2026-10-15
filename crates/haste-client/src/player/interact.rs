@@ -130,6 +130,10 @@ pub struct Interaction {
     /// Block being broken, its face and the held item it started with, progress 0..1.
     destroying: Option<(BlockPos, Direction, ItemStackData)>,
     progress: f32,
+    /// Vanilla `MultiPlayerGameMode.destroyTicks`: how many `continueDestroyBlock` calls have
+    /// added progress to the current break (the press tick's `continueAttack` counts, so a
+    /// finished break reports the ticks from press to finish inclusive).
+    destroy_ticks: u32,
     destroy_delay: u8,
     use_delay: u8,
     /// Left/right clicks queued since the last tick (vanilla's `KeyMapping.consumeClick`): each
@@ -418,6 +422,10 @@ impl Interaction {
         let tool = patch.tool().map(|t| tool_from_component(t, data));
         let efficiency = efficiency_from_enchantments(&patch, data);
         let attack_speed = self.item_attack_speed(&stack, data);
+        tracing::debug!(
+            "held item components: attack_speed {attack_speed} ({} delay ticks), efficiency {efficiency}",
+            if attack_speed > 0.0 { 20.0 / attack_speed } else { 20.0 / 4.0 }
+        );
         self.components = Some(HeldItem {
             stack,
             tool,
@@ -525,6 +533,7 @@ impl Interaction {
     pub(super) fn respawned(&mut self) {
         self.destroying = None;
         self.progress = 0.0;
+        self.destroy_ticks = 0;
         self.target = None;
         self.effects.clear();
         self.miss_time = 0;
@@ -1421,6 +1430,7 @@ impl LocalPlayer {
             }
             self.int.destroying = Some((h.pos, h.face, self.main_hand().clone()));
             self.int.progress = 0.0;
+            self.int.destroy_ticks = 0;
         }
         false
     }
@@ -1467,7 +1477,13 @@ impl LocalPlayer {
             return false;
         }
         self.int.progress += self.mining_params(state, env).progress_per_tick();
+        self.int.destroy_ticks += 1;
         if self.int.progress >= 1.0 {
+            tracing::debug!(
+                "finished breaking {:?} after {} destroy ticks",
+                h.pos,
+                self.int.destroy_ticks
+            );
             self.send_destroy(action::STOP_DESTROY, h, state, true, env, out);
             self.int.destroying = None;
             self.int.progress = 0.0;
@@ -1493,10 +1509,12 @@ impl LocalPlayer {
 
     /// `MultiPlayerGameMode.stopDestroyBlock`: abort the break (Direction.DOWN, no sequence)
     /// and drop the progress, as vanilla does when the button is released or the crosshair
-    /// leaves the block.
+    /// leaves the block. The attack strength ticker resets with it (vanilla calls
+    /// `player.resetAttackStrengthTicker()` here).
     fn stop_destroy(&mut self, out: &mut Vec<ServerboundPlay>) {
         if let Some((_, _, _)) = self.int.destroying {
             self.abort_destroy(Direction::Down, out);
+            self.hand.reset_attack_strength_ticker();
         }
     }
 

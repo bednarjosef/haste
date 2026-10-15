@@ -437,6 +437,71 @@ mod tests {
         );
     }
 
+    /// The item-data check's expected break ticks (vanilla `BlockBehaviour.getDestroyProgress`
+    /// and `MultiPlayerGameMode.continueDestroyBlock`): progress accumulates in f32, one
+    /// addition per tick starting on the press tick (`Minecraft.handleKeybinds` runs
+    /// `startAttack` and `continueAttack` on the same tick). The counts include the press
+    /// tick, so the finish tick is the count itself.
+    #[test]
+    fn item_data_expected_break_ticks() {
+        let accumulate = |mut p: MiningParams| {
+            p.mining_efficiency = 0.0;
+            let d = p.progress_per_tick();
+            let mut progress = 0.0f32;
+            let mut ticks = 0;
+            while progress < 1.0 {
+                progress += d;
+                ticks += 1;
+                assert!(ticks < 10000, "never broke");
+            }
+            ticks
+        };
+        // Stone (hardness 1.5, needs a tool): by hand the wrong divisor 100 applies.
+        let hand = MiningParams {
+            hardness: 1.5,
+            requires_correct_tool: true,
+            tool_speed: 1.0,
+            tool_correct: None,
+            ..Default::default()
+        };
+        // f32 accumulation: 150 additions of 1/150 reach 1.0 only on the 151st.
+        assert_eq!(accumulate(hand), 151);
+        let pickaxe = |speed: f32| MiningParams {
+            hardness: 1.5,
+            requires_correct_tool: true,
+            tool_speed: speed,
+            tool_correct: Some(true),
+            ..Default::default()
+        };
+        // Wooden pickaxe: 2/45 per tick; diamond: 8/45.
+        assert_eq!(accumulate(pickaxe(2.0)), 23);
+        assert_eq!(accumulate(pickaxe(8.0)), 6);
+        // Efficiency V: 8 + 26 = 34 speed (Player.getDestroySpeed adds the attribute when
+        // the tool speed is above 1).
+        assert_eq!(accumulate(pickaxe(34.0)), 2);
+        // Obsidian (hardness 50) with a diamond pickaxe: 8/1500 per tick.
+        assert_eq!(
+            accumulate(MiningParams {
+                hardness: 50.0,
+                requires_correct_tool: true,
+                tool_speed: 8.0,
+                tool_correct: Some(true),
+                ..Default::default()
+            }),
+            188
+        );
+        // Cobweb (hardness 4) with a sword or shears: both carry a cobweb rule at speed 15
+        // and correct_for_drops true, so 15/4/30 = 0.125 exactly: 8 ticks.
+        let cobweb = MiningParams {
+            hardness: 4.0,
+            requires_correct_tool: true,
+            tool_speed: 15.0,
+            tool_correct: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(accumulate(cobweb), 8);
+    }
+
     #[test]
     fn modifiers() {
         let diamond = pickaxe(8.0, "incorrect_for_diamond_tool");
