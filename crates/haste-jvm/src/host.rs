@@ -412,6 +412,11 @@ fn boot_config(cfg: &JvmConfig) -> String {
     kv("proxiesConf", &cfg.proxies_conf.display().to_string());
     kv("verbose", if cfg.verbose { "true" } else { "false" });
     kv("minecraftDir", &cfg.game_dir.display().to_string());
+    // the launcher's assets dir (vanilla's --assetsDir): the built-in pack source reads it
+    kv(
+        "assetsDir",
+        &haste_core::paths::assets_dir().display().to_string(),
+    );
     kv(
         "singleplayerDir",
         &cfg.singleplayer_dir.display().to_string(),

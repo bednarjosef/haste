@@ -147,18 +147,45 @@ public final class ClientImpl {
     }
 
     /**
-     * The pack repository the Resource Packs screen browses: real vanilla Java with no sources (Haste
-     * loads no resource packs yet), so it lists none and selects none. {@code Options} saves the
-     * selection it reports.
+     * The pack repository the Resource Packs screen browses: real vanilla Java built like
+     * {@code Minecraft}'s constructor (a {@code FolderRepositorySource} over the player's
+     * {@code resourcepacks/} folder plus the built-in sources). Haste's own asset stack (Rust)
+     * applies the selection it commits; this repository is the source of truth for the screen
+     * and for what {@code Options} saves.
      */
-    private static final net.minecraft.server.packs.repository.PackRepository PACKS =
-        new net.minecraft.server.packs.repository.PackRepository();
+    private static final net.minecraft.server.packs.repository.PackRepository PACKS = createPackRepository();
     public static net.minecraft.server.packs.repository.PackRepository getResourcePackRepository(Minecraft m) { return PACKS; }
+    private static net.minecraft.server.packs.repository.PackRepository createPackRepository() {
+        java.nio.file.Path gameDir = new java.io.File(System.getProperty("haste.minecraftDir", ".")).toPath();
+        net.minecraft.world.level.validation.DirectoryValidator validator =
+            net.minecraft.world.level.storage.LevelStorageSource.parseValidator(gameDir.resolve("allowed_symlinks.txt"));
+        java.io.File assetsDir = new java.io.File(System.getProperty("haste.assetsDir", "."));
+        net.minecraft.client.resources.ClientPackSource clientPackSource =
+            new net.minecraft.client.resources.ClientPackSource(assetsDir.toPath(), validator);
+        net.minecraft.server.packs.repository.RepositorySource directoryPacks =
+            new net.minecraft.server.packs.repository.FolderRepositorySource(
+                new java.io.File(System.getProperty("haste.minecraftDir", "."), "resourcepacks").toPath(),
+                net.minecraft.server.packs.PackType.CLIENT_RESOURCES,
+                net.minecraft.server.packs.repository.PackSource.DEFAULT, validator);
+        return new net.minecraft.server.packs.repository.PackRepository(clientPackSource, directoryPacks);
+    }
     /** The player's {@code resourcepacks/} folder inside the JVM game directory (created on demand). */
     public static java.nio.file.Path getResourcePackDirectory(Minecraft m) {
         java.io.File dir = new java.io.File(System.getProperty("haste.minecraftDir", "."), "resourcepacks");
         dir.mkdirs();
         return dir.toPath();
+    }
+
+    /**
+     * {@code Minecraft.reloadResourcePacks} (vanilla: rebuild the resource manager from the
+     * repository's selected packs). The Rust side owns the assets, so this reports the new
+     * selection (bottom first) and lets the client rebuild its asset stack and renderer;
+     * the returned future completes at once (the rebuild is Rust's, off this thread).
+     */
+    public static java.util.concurrent.CompletableFuture<Void> reloadResourcePacks(Minecraft m) {
+        String[] ids = PACKS.getSelectedIds().toArray(new String[0]);
+        haste.rt.Native.resourcePacksChanged(ids);
+        return java.util.concurrent.CompletableFuture.completedFuture(null);
     }
     /** False while the canonical proxies are built (option changes then skip their side effects, like vanilla at startup). */
     static boolean running;

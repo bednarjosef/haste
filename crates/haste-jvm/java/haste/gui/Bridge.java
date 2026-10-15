@@ -19,7 +19,7 @@ import net.minecraft.client.input.MouseButtonInfo;
  * method runs vanilla screen code with the 26.3 signatures.
  */
 public final class Bridge {
-    public static final int CHAT = 0, PAUSE = 1, INVENTORY = 2, COMMAND = 3, TITLE = 4, OPTIONS = 5, MULTIPLAYER = 6, SELECT_WORLD = 7;
+    public static final int CHAT = 0, PAUSE = 1, INVENTORY = 2, COMMAND = 3, TITLE = 4, OPTIONS = 5, MULTIPLAYER = 6, SELECT_WORLD = 7, PACKS = 8;
 
     private int pressedButton = -1;
     private double lastX, lastY;
@@ -60,6 +60,15 @@ public final class Bridge {
             case INVENTORY -> new InventoryScreen(Proxies.player);
             case TITLE -> new TitleScreen();
             case OPTIONS -> new OptionsScreen(ClientImpl.screen, Proxies.options);
+            case PACKS -> new net.minecraft.client.gui.screens.packs.PackSelectionScreen(
+                ClientImpl.getResourcePackRepository(Proxies.minecraft),
+                // OptionsScreen.applyPacks: save the selection, reload, back to the opener
+                repo -> {
+                    Proxies.options.updateResourcePacks(repo);
+                    Proxies.gui.setScreen(ClientImpl.screen);
+                },
+                ClientImpl.getResourcePackDirectory(Proxies.minecraft),
+                net.minecraft.network.chat.Component.translatable("resourcePack.title"));
             case MULTIPLAYER -> new JoinMultiplayerScreen(new TitleScreen());
             case SELECT_WORLD -> new net.minecraft.client.gui.screens.worldselection.SelectWorldScreen(new TitleScreen());
             default -> throw new IllegalArgumentException("screen kind " + kind);
