@@ -7,7 +7,10 @@
 # linted and tested; a change to the workspace manifest, the lockfile or the toolchain checks the
 # whole workspace, and a change that touches no Rust or build file skips cargo entirely. When the
 # runtime Java (crates/haste-jvm/java) changed and a test server is up, the pause and language
-# feature checks run too: the runtime javac compiles that code only inside the game.
+# feature checks run too: the runtime javac compiles that code only inside the game. A change to
+# haste-jvm runs its ignored real-screen tests (they need the cached game jar), and a change to the
+# runtime Java or the client's screen plumbing (ui.rs, app.rs) runs the singleplayer check (title
+# -> create world -> in game -> pause -> quit, through the real local server).
 #
 # env: CI_JOBS (cargo -j, default 4), CI_GAME_CHECKS=0 to skip the feature checks,
 #      CARGO_TARGET_DIR (reuse a warm target directory between runs).
@@ -103,5 +106,23 @@ if [ "${CI_GAME_CHECKS:-1}" != 0 ] && grep -q '^crates/haste-jvm/java/' <<<"$cha
   else
     step "game checks skipped: no test server on 127.0.0.1:25691"
   fi
+fi
+if grep -q '^crates/haste-jvm/' <<<"$changed"; then
+  if [ -e cache ]; then
+    step "jvm screen tests (haste-jvm changed; real vanilla screens)"
+    out=$(cargo test -q -j "$jobs" -p haste-jvm --test jvm -- --ignored --test-threads 1 2>&1) \
+      || { grep -E 'FAILED|panicked|failures:' <<<"$out" | head -20; fail "jvm screen tests"; }
+    grep -E '^test result' <<<"$out" | sed 's/^/   /'
+  fi
+fi
+
+if [ "${CI_GAME_CHECKS:-1}" != 0 ] && grep -qE '^crates/haste-jvm/java/|^crates/haste-client/src/(ui|app)\.rs' <<<"$changed"; then
+  step "singleplayer check (screens or runtime Java changed)"
+  cargo build -q -j "$jobs" --release -p haste-client || fail "release build"
+  target="${CARGO_TARGET_DIR:-$PWD/target}"
+  out=$(HASTE_BIN="$target/release/haste" timeout 600 bash scripts/checks/singleplayer-check.sh 2>&1)
+  rc=$?
+  grep -E '^(PASS|FAIL)|passed|failed' <<<"$out" | tail -8
+  [ "$rc" -eq 0 ] || fail "singleplayer check"
 fi
 step "CI passed"
