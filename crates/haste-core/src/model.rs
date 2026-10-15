@@ -113,7 +113,24 @@ pub struct EntityInstance {
     /// wobble), multiplied into the model scale. `Vec3::ONE` for most entities.
     pub body_scale: Vec3,
     pub skin: Option<Identifier>,
+    /// The name tag's text when it should show (`EntityRenderer.extractNameTags`: within 64
+    /// blocks and `shouldShowName`), `None` otherwise. For players this is the player name.
     pub nametag: Option<String>,
+    /// The scoreboard's below-name line (`Entity.belowNameDisplay`), drawn under the name tag.
+    pub below_name: Option<String>,
+    /// `EntityRenderer.shadowRadius` for this entity's renderer, already scaled by the age
+    /// (`MobRenderer.getShadowRadius` * `ageScale`) or living scale; 0 draws no shadow.
+    pub shadow_radius: f32,
+    /// `EntityRenderer.shadowStrength` (1.0, or 0.75 for items/experience orbs).
+    pub shadow_strength: f32,
+    /// `Entity.isInvisible()`: no shadow (`extractShadow` skips it) and no name tag.
+    pub invisible: bool,
+    /// `Entity.isDiscrete()` (crouching): the name tag hides past 32 blocks and drops the
+    /// see-through pass (`LivingEntityRenderer.shouldShowName`, `submitNameTag`).
+    pub is_discrete: bool,
+    /// The name tag's anchor above the entity's feet: `EntityAttachment.NAME_TAG`'s fallback
+    /// `AT_HEIGHT` (`Entity.getBbHeight`, 2.05 for the sniffer).
+    pub name_tag_y: f32,
     /// Hurt flash strength in 0..1 (1 just after the hit, easing to 0 over the 10 hurt
     /// ticks; death holds it at 1 for the 20-tick death animation). The renderer mixes
     /// red into the entity's colour for values above 0.
@@ -216,11 +233,12 @@ pub struct EntityOverlay {
     pub tint: [f32; 3],
 }
 
-/// A hanging decoration the renderer draws itself rather than from a cube model.
+/// A decoration the renderer draws itself rather than from a cube model.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Decoration {
     ItemFrame(ItemFrameDecoration),
     Painting(PaintingDecoration),
+    Lightning(LightningDecoration),
 }
 
 /// The state `ItemFrameRenderer.extractRenderState` collects for an item frame.
@@ -246,4 +264,13 @@ pub struct PaintingDecoration {
     pub height: u8,
     /// The front sprite's texture id, `None` for a variant we do not know (draw the back only).
     pub front: Option<Identifier>,
+}
+
+/// The state `LightningBoltRenderer.extractRenderState` collects for a lightning bolt: the
+/// seed its geometry is generated from. Vanilla's seed is the entity's own random (not
+/// synced, re-rolled per flash), so a seed derived from the entity id stands in — the bolt's
+/// shape is procedural either way.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LightningDecoration {
+    pub seed: u64,
 }

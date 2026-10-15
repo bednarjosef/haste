@@ -90,6 +90,12 @@ pub struct ConnectOptions {
     pub chunks_per_tick: f32,
     /// How to answer `resource_pack_push`.
     pub resource_packs: ResourcePackPolicy,
+    /// Where server resource packs download to (vanilla's `<game
+    /// dir>/downloads`, `DownloadQueue`'s cache). Set: pushed packs really
+    /// download (hash-checked) and reach the client through
+    /// [`Connection::take_downloaded_packs`]. Unset: the policy's canned
+    /// replies only.
+    pub downloads_dir: Option<std::path::PathBuf>,
     /// Cookies from `store_cookie`. Clones share the jar, so cookies survive
     /// a `transfer` (vanilla keeps them in memory for the session only).
     pub cookies: CookieJar,
@@ -168,6 +174,7 @@ impl ConnectOptions {
             tables: None,
             chunks_per_tick: 64.0,
             resource_packs: ResourcePackPolicy::Accept,
+            downloads_dir: None,
             cookies: CookieJar::default(),
         }
     }
@@ -359,6 +366,11 @@ pub struct Connection {
     /// Registries from a reconfiguration or transfer, swapped in when the
     /// game dequeues the `login` that follows them.
     pending_registries: Arc<Mutex<Option<SyncedRegistries>>>,
+    /// Server resource packs downloaded on this connection (configuration and
+    /// play phase), until the client takes them to apply.
+    downloaded_packs: Arc<Mutex<Vec<crate::serverpack::DownloadedPack>>>,
+    /// Bumped on every change to the pack set (downloads, re-pushes, pops).
+    packs_version: Arc<std::sync::atomic::AtomicU64>,
     tables: Arc<ProtocolTables>,
     stats: Arc<Stats>,
     closed: Arc<Mutex<Option<String>>>,
@@ -670,6 +682,7 @@ impl Connection {
             regs,
             login,
             early,
+            downloaded_packs,
         } = est;
         let dimension = regs.dimension_info(login.spawn.dimension_type, &login.spawn.dimension).unwrap_or_else(|| {
             tracing::warn!("dimension type {} not resolvable from synced registries; assuming overworld layout", login.spawn.dimension_type);
@@ -695,6 +708,12 @@ impl Connection {
         let (out_tx, out_rx) = mpsc::unbounded_channel();
         let closed = Arc::new(Mutex::new(None));
         let pending_registries = Arc::new(Mutex::new(None));
+        let initial_pack_count = downloaded_packs.len();
+        let downloaded_packs = Arc::new(Mutex::new(downloaded_packs));
+        // Version 1 = a set exists from the configuration phase; 0 = none ever.
+        let packs_version = Arc::new(std::sync::atomic::AtomicU64::new(u64::from(
+            initial_pack_count > 0,
+        )));
         let Io { dec, enc, .. } = io;
         let writer = tokio::spawn(writer_task(
             enc,
@@ -717,6 +736,8 @@ impl Connection {
             tables: tables.clone(),
             stats: stats.clone(),
             closed: closed.clone(),
+            downloaded_packs: downloaded_packs.clone(),
+            packs_version: packs_version.clone(),
             opts,
             regs: regs.clone(),
             pending_registries: pending_registries.clone(),
@@ -727,6 +748,8 @@ impl Connection {
                 tx: out_tx,
                 registries: Arc::new(regs),
                 pending_registries,
+                downloaded_packs,
+                packs_version,
                 tables,
                 stats,
                 closed,
@@ -747,6 +770,23 @@ impl Connection {
         let p = self.rx.try_recv().ok()?;
         self.on_dequeue(&p);
         Some(p)
+    }
+
+    /// The connection's live set of server resource packs (vanilla's
+    /// `ServerPackManager.packs`): pushes add (a re-push of an id replaces
+    /// its download), pops remove. The caller re-reads it whenever
+    /// [`Self::server_packs_version`] changes.
+    pub fn server_packs(&self) -> Vec<crate::serverpack::DownloadedPack> {
+        match self.downloaded_packs.lock() {
+            Ok(g) => g.clone(),
+            Err(e) => e.into_inner().clone(),
+        }
+    }
+
+    /// Bumped every time [`Self::server_packs`] changed (a download finished,
+    /// a re-push replaced a pack, or a pop arrived).
+    pub fn server_packs_version(&self) -> u64 {
+        self.packs_version.load(Ordering::Relaxed)
     }
 
     /// Next packet; `None` once the connection is closed and drained.
@@ -859,6 +899,8 @@ struct Established {
     login: play::clientbound::Login,
     /// Play packets that arrived before `login`.
     early: Vec<ClientboundPlay>,
+    /// Server resource packs downloaded during configuration.
+    downloaded_packs: Vec<crate::serverpack::DownloadedPack>,
 }
 
 enum Handshaked {
@@ -900,7 +942,9 @@ async fn establish(
     let profile = login_state(&mut io, opts).await?;
 
     let mut regs = SyncedRegistries::default();
-    if let Some(addr) = configuration_state(&mut io, opts, &mut regs).await? {
+    let mut downloaded_packs = Vec::new();
+    if let Some(addr) = configuration_state(&mut io, opts, &mut regs, &mut downloaded_packs).await?
+    {
         return Ok(Handshaked::Transfer(addr));
     }
 
@@ -941,6 +985,7 @@ async fn establish(
         regs,
         login,
         early,
+        downloaded_packs,
     })))
 }
 
@@ -1154,6 +1199,18 @@ fn configuration_step(
     })
 }
 
+/// The download headers for a server pack (vanilla `createDownloadHeaders`): the
+/// player's name and UUID, this client's version and its resource pack format.
+fn pack_headers(opts: &ConnectOptions) -> Vec<(String, String)> {
+    crate::serverpack::download_headers(
+        opts.account.username(),
+        &opts.account.uuid().to_string(),
+        haste_core::paths::MC_VERSION,
+        haste_core::paths::MC_VERSION,
+        crate::serverpack::RESOURCE_PACK_FORMAT_MAJOR,
+    )
+}
+
 fn configuration_hello(
     tables: &ProtocolTables,
     opts: &ConnectOptions,
@@ -1178,6 +1235,7 @@ async fn configuration_state(
     io: &mut Io,
     opts: &ConnectOptions,
     regs: &mut SyncedRegistries,
+    downloaded_packs: &mut Vec<crate::serverpack::DownloadedPack>,
 ) -> Result<Option<String>, ProtocolError> {
     let tables = io.tables.clone();
     for b in configuration_hello(&tables, opts)? {
@@ -1195,6 +1253,46 @@ async fn configuration_state(
         let Some(p) = decode_with(&d, &raw, &tables, State::Configuration, &mut io.warned)? else {
             continue;
         };
+        // A server pack the client really applies: download inline (vanilla's
+        // statuses flow across the download; the server waits for neither), so the
+        // pack is in the cache before the play state starts.
+        if let ClientboundConfiguration::ResourcePackPush(r) = &p {
+            if let Some(dir) = &opts.downloads_dir {
+                let (results, pack) = crate::serverpack::handle_push(
+                    dir,
+                    opts.resource_packs == ResourcePackPolicy::Decline,
+                    r.id,
+                    &r.url,
+                    &r.hash,
+                    &pack_headers(opts),
+                )
+                .await;
+                for result in results {
+                    io.enc
+                        .write_packet(encode(
+                            &tables,
+                            State::Configuration,
+                            &cfg::serverbound::ResourcePack { id: r.id, result },
+                        )?)
+                        .await?;
+                    io.stats.packets_out.fetch_add(1, Ordering::Relaxed);
+                }
+                io.enc.flush().await?;
+                if let Some(pack) = pack {
+                    // A re-push of an id replaces its earlier download.
+                    downloaded_packs.retain(|p| p.id != pack.id);
+                    downloaded_packs.push(pack);
+                }
+                continue;
+            }
+        }
+        // Vanilla `handleResourcePackPop`: remove one pack (or all) from the set.
+        if let ClientboundConfiguration::ResourcePackPop(pop) = &p {
+            match pop.id {
+                Some(id) => downloaded_packs.retain(|p| p.id != id),
+                None => downloaded_packs.clear(),
+            }
+        }
         match configuration_step(p, &tables, opts, regs)? {
             ConfigStep::Reply(v) => {
                 for b in v {
@@ -1223,6 +1321,8 @@ struct ReaderCtx {
     tables: Arc<ProtocolTables>,
     stats: Arc<Stats>,
     closed: Arc<Mutex<Option<String>>>,
+    downloaded_packs: Arc<Mutex<Vec<crate::serverpack::DownloadedPack>>>,
+    packs_version: Arc<std::sync::atomic::AtomicU64>,
     opts: ConnectOptions,
     regs: SyncedRegistries,
     pending_registries: Arc<Mutex<Option<SyncedRegistries>>>,
@@ -1378,12 +1478,56 @@ async fn reader_task(mut c: ReaderCtx) {
                     r.forced,
                     c.opts.resource_packs
                 );
-                for &result in c.opts.resource_packs.replies() {
-                    reply(
-                        &c.out,
-                        &c.tables,
-                        ServerboundPlay::ResourcePack(sb::ResourcePack { id: r.id, result }),
-                    );
+                if let Some(dir) = c.opts.downloads_dir.clone() {
+                    // Download off the reader (vanilla's DownloadQueue runs beside the
+                    // connection); the statuses flow as the download progresses.
+                    let out = c.out.clone();
+                    let tables = c.tables.clone();
+                    let declined = c.opts.resource_packs == ResourcePackPolicy::Decline;
+                    let headers = pack_headers(&c.opts);
+                    let packs = c.downloaded_packs.clone();
+                    let version = c.packs_version.clone();
+                    let (id, url, hash) = (r.id, r.url.clone(), r.hash.clone());
+                    tokio::spawn(async move {
+                        let (results, pack) = crate::serverpack::handle_push(
+                            &dir, declined, id, &url, &hash, &headers,
+                        )
+                        .await;
+                        for result in results {
+                            reply(
+                                &out,
+                                &tables,
+                                ServerboundPlay::ResourcePack(sb::ResourcePack { id, result }),
+                            );
+                        }
+                        if let Some(pack) = pack {
+                            if let Ok(mut packs) = packs.lock() {
+                                // A re-push of an id replaces its earlier download.
+                                packs.retain(|p| p.id != pack.id);
+                                packs.push(pack);
+                                version.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    });
+                } else {
+                    for &result in c.opts.resource_packs.replies() {
+                        reply(
+                            &c.out,
+                            &c.tables,
+                            ServerboundPlay::ResourcePack(sb::ResourcePack { id: r.id, result }),
+                        );
+                    }
+                }
+            }
+            // Vanilla `handleResourcePackPop`: remove one pack (or all) from the
+            // live set; the client re-applies without it.
+            ClientboundPlay::ResourcePackPop(p) => {
+                if let Ok(mut packs) = c.downloaded_packs.lock() {
+                    match p.id {
+                        Some(id) => packs.retain(|p| p.id != id),
+                        None => packs.clear(),
+                    }
+                    c.packs_version.fetch_add(1, Ordering::Relaxed);
                 }
             }
             ClientboundPlay::Transfer(t) => transfer_to = Some(transfer_address(&t.host, t.port)),

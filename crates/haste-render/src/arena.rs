@@ -110,6 +110,15 @@ impl MeshArenas {
         }
     }
 
+    /// Memory stats for diagnostics: arena count and the vertex+index bytes allocated
+    /// (each arena is a fixed-size GPU buffer pair).
+    pub fn memory_stats(&self) -> (usize, u64) {
+        let bytes = self.arenas.len() as u64
+            * (ARENA_VERTICES as u64 * std::mem::size_of::<PackedVertex>() as u64
+                + ARENA_INDICES as u64 * 4);
+        (self.arenas.len(), bytes)
+    }
+
     fn new_arena(&mut self) -> u32 {
         let vertex = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("section-arena-vertices"),

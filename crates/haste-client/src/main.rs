@@ -14,7 +14,9 @@
 //! The lead owns this file. Add a module by adding one line here and your own file.
 use clap::Parser;
 
+mod ambient_particles;
 mod app;
+mod block_particles;
 mod game;
 mod hand;
 mod headless;
@@ -53,6 +55,10 @@ pub struct Args {
     /// (`--seconds` bounds the wait).
     #[arg(long)]
     pub screenshot: Option<std::path::PathBuf>,
+    /// The HUD, hand and block outline (vanilla's F1, `Hud.toggle`): `off` hides them for
+    /// this run — the whole JVM stays down, so offscreen shots match vanilla's F1 reference.
+    #[arg(long, default_value = "on")]
+    pub hud: String,
     /// Input script for the offscreen client: runs the steps every game tick through the
     /// same routing as the window (needs `--server`; `--seconds` bounds the run).
     #[arg(long)]
@@ -65,6 +71,10 @@ pub struct Args {
     /// Bench mode: write the summary as JSON to this file.
     #[arg(long)]
     pub bench_out: Option<std::path::PathBuf>,
+    /// Bench mode: hold the settle camera still instead of the flight path (isolates one view,
+    /// e.g. the screenshot comparison spot).
+    #[arg(long)]
+    pub bench_fixed: bool,
     /// Render distance in chunks, overriding the saved option (like `--vsync`).
     #[arg(long)]
     pub render_distance: Option<u8>,
@@ -114,6 +124,7 @@ fn main() -> anyhow::Result<()> {
     if let Some(dir) = &args.singleplayer_dir {
         haste_setup::worlds::set_dir(dir.clone());
     }
+    app::set_hud_from_args(&args.hud)?;
     if let Some(cmd) = args.command {
         return launch::run(cmd, &args.username);
     }

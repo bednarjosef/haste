@@ -1042,3 +1042,163 @@ async fn reconfiguration_cookies_resource_pack_and_transfer() {
     assert_eq!(&log[3..], ["reconfigured", "transferred"]);
     conn.disconnect();
 }
+
+/// Serves `body` once over plain HTTP (a tiny static file server for the pack
+/// download tests; vanilla downloads packs over http/https only).
+async fn serve_one_http(body: Bytes) -> reqwest::Url {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = reqwest::Url::parse(&format!("http://{addr}/pack.zip")).unwrap();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        use tokio::io::AsyncReadExt as _;
+        use tokio::io::AsyncWriteExt as _;
+        let mut buf = [0u8; 1024];
+        let _ = stream.read(&mut buf).await;
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).await.unwrap();
+        stream.write_all(&body).await.unwrap();
+    });
+    url
+}
+
+/// The `resource_pack_push` flow with a downloads directory (vanilla's
+/// `DownloadedPackSource`): a good push downloads the pack (hash-checked, in
+/// the `downloads/<id>/<sha1>` cache) with vanilla's statuses ACCEPTED,
+/// DOWNLOADED, SUCCESSFULLY_LOADED; a wrong hash answers ACCEPTED then
+/// FAILED_DOWNLOAD; a non-http URL answers INVALID_URL.
+#[tokio::test]
+async fn server_pack_push_downloads_and_reports_statuses() {
+    let tables = test_tables();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    // The pack: a small body with its SHA-1 as the push's hash.
+    let pack_bytes = Bytes::from_static(b"a server pushed this pack, hash-checked");
+    use sha1::Digest as _;
+    let mut hasher = sha1::Sha1::new();
+    hasher.update(&pack_bytes);
+    let digest: [u8; 20] = hasher.finalize().into();
+    let hex = digest
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let pack_url = serve_one_http(pack_bytes.clone()).await;
+    let hex_for_task = hex.clone();
+
+    let downloads = tempfile::tempdir().unwrap();
+    let downloads_dir = downloads.path().to_path_buf();
+
+    let task_tables = tables.clone();
+    let server = tokio::spawn(async move {
+        let mut s = Server::accept(&listener, task_tables, INTENT_LOGIN).await;
+        s.expect_hello().await;
+        let mut statuses = Vec::new();
+        // 1. A good push with the correct hash.
+        s.send(
+            State::Configuration,
+            &ccb::ResourcePackPush {
+                id: Uuid::from_u128(11),
+                url: pack_url.to_string(),
+                hash: hex_for_task,
+                forced: false,
+                prompt: None,
+            },
+        )
+        .await;
+        for _ in 0..3 {
+            let ServerboundConfiguration::ResourcePack(r) = s.recv_cfg().await else {
+                panic!("expected resource pack status")
+            };
+            statuses.push(format!("good {}", r.result));
+        }
+        // 2. The same URL with a wrong hash: ACCEPTED then FAILED_DOWNLOAD.
+        s.send(
+            State::Configuration,
+            &ccb::ResourcePackPush {
+                id: Uuid::from_u128(12),
+                url: pack_url.to_string(),
+                hash: "0".repeat(40),
+                forced: true,
+                prompt: None,
+            },
+        )
+        .await;
+        for _ in 0..2 {
+            let ServerboundConfiguration::ResourcePack(r) = s.recv_cfg().await else {
+                panic!("expected resource pack status")
+            };
+            statuses.push(format!("badhash {}", r.result));
+        }
+        // 3. A non-http URL: INVALID_URL only.
+        s.send(
+            State::Configuration,
+            &ccb::ResourcePackPush {
+                id: Uuid::from_u128(13),
+                url: "file:///etc/passwd".into(),
+                hash: String::new(),
+                forced: false,
+                prompt: None,
+            },
+        )
+        .await;
+        let ServerboundConfiguration::ResourcePack(r) = s.recv_cfg().await else {
+            panic!("expected resource pack status")
+        };
+        statuses.push(format!("badurl {}", r.result));
+        // 4. Pop the good pack: the live set empties.
+        s.send(
+            State::Configuration,
+            &ccb::ResourcePackPop {
+                id: Some(Uuid::from_u128(11)),
+            },
+        )
+        .await;
+        s.finish_with("plains", 5).await;
+        statuses.push("finished".into());
+        statuses
+    });
+
+    let mut opts = ConnectOptions::new(
+        addr.to_string(),
+        Account::Offline {
+            username: "tester".into(),
+        },
+    );
+    opts.tables = Some(tables.clone());
+    opts.downloads_dir = Some(downloads_dir.clone());
+    let (conn, login) = tokio::time::timeout(Duration::from_secs(10), Connection::connect(opts))
+        .await
+        .expect("connect timeout")
+        .unwrap();
+    assert_eq!(login.entity_id, EntityId(5));
+
+    // The good push downloaded (the file is in the cache, hash-named, with the
+    // exact bytes) but the pop removed it from the set before the play state,
+    // so the live set is empty (vanilla `handleResourcePackPop`).
+    let packs = conn.server_packs();
+    let file = downloads_dir
+        .join(Uuid::from_u128(11).to_string())
+        .join(&hex);
+    assert_eq!(std::fs::read(&file).unwrap(), &pack_bytes[..]);
+    assert!(packs.is_empty(), "the pop removed the pack: {packs:?}");
+    assert_eq!(conn.server_packs_version(), 0, "the set never existed live");
+
+    let statuses = server.await.unwrap();
+    assert_eq!(
+        statuses,
+        vec![
+            "good 3", // ACCEPTED
+            "good 4", // DOWNLOADED
+            "good 0", // SUCCESSFULLY_LOADED
+            "badhash 3",
+            "badhash 2", // FAILED_DOWNLOAD
+            "badurl 5",  // INVALID_URL
+            "finished",
+        ]
+    );
+    conn.disconnect();
+}

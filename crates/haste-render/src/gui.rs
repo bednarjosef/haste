@@ -186,6 +186,10 @@ pub struct ScreenNametag {
     pub y: f32,
     pub scale: f32,
     pub text: String,
+    /// `!state.isDiscrete`: also draw the opaque solid pass above the see-through one.
+    pub see_through: bool,
+    /// The scoreboard below-name line, drawn one text line under the name.
+    pub below_name: Option<String>,
 }
 
 /// Projects a world name tag to GUI space (vanilla draws tags at 0.025 blocks per text pixel).
@@ -224,6 +228,8 @@ pub fn project_nametag(
         y: fy,
         scale,
         text: tag.text.clone(),
+        see_through: tag.see_through,
+        below_name: tag.below_name.clone(),
     })
 }
 
@@ -858,28 +864,28 @@ impl GuiRenderer {
     ) {
         self.vertices.clear();
         self.batches.clear();
-        // Name tags first, under the HUD: a 25% black background and white text, drawn at the
-        // origin and then moved and scaled into place.
+        // Name tags first, under the HUD, following `SubmitNodeCollection.submitNameTag`: a
+        // black background box at `Options.textBackgroundOpacity` (0.25) and text at
+        // `max((bg + 0.75) * 0.5, 0.5)` alpha. When not crouching (`see_through`) the opaque
+        // solid pass is drawn on top; crouching keeps only the dimmer see-through pass, so a
+        // sneaking player's tag is darker (`EntityRenderer.submitNameDisplay`).
         for tag in nametags {
             let start = self.vertices.len();
-            let w = self.font.width_f32(&tag.text);
-            let x = -(w / 2.0).floor();
-            self.solid(
-                [0.0; 2],
-                [x - 1.0, -1.0, x + w, 8.0],
-                [0, 0, 0, 64],
-                [0, 0, 0, 64],
-            );
-            self.text(
-                [0.0; 2],
-                x,
-                0.0,
-                &tag.text,
-                0xFFFF_FFFF,
-                false,
-                TextStyle::default(),
-                assets,
-            );
+            let bg: [u8; 4] = [0, 0, 0, 64];
+            let text_alpha = 0x80FF_FFFFu32;
+            // The see-through line: background + semi-transparent text.
+            self.nametag_line([0.0; 2], 0.0, &tag.text, text_alpha, bg, assets);
+            if tag.see_through {
+                self.nametag_line([0.0; 2], 0.0, &tag.text, 0xFFFF_FFFF, [0, 0, 0, 0], assets);
+            }
+            // The scoreboard below-name line, one text line (`9 * 1.15`) under the name.
+            if let Some(bn) = &tag.below_name {
+                let oy = 9.0 * 1.15;
+                self.nametag_line([0.0; 2], oy, bn, text_alpha, bg, assets);
+                if tag.see_through {
+                    self.nametag_line([0.0; 2], oy, bn, 0xFFFF_FFFF, [0, 0, 0, 0], assets);
+                }
+            }
             for v in &mut self.vertices[start..] {
                 v.pos = [tag.x + v.pos[0] * tag.scale, tag.y + v.pos[1] * tag.scale];
             }
@@ -1338,6 +1344,25 @@ impl GuiRenderer {
             self.text_pass(o, x, y, text, color, base, true, assets);
         }
         self.text_pass(o, x, y, text, color, base, false, assets);
+    }
+
+    /// One centred name tag line at local `(x, y)` in text pixels: the background box (when
+    /// `bg` has alpha) and the text. The caller places and scales the vertices.
+    fn nametag_line(
+        &mut self,
+        o: [f32; 2],
+        y: f32,
+        text: &str,
+        color: u32,
+        bg: [u8; 4],
+        assets: &mut Assets,
+    ) {
+        let w = self.font.width_f32(text);
+        let x = -(w / 2.0).floor();
+        if bg[3] != 0 {
+            self.solid(o, [x - 1.0, y - 1.0, x + w, y + 8.0], bg, bg);
+        }
+        self.text(o, x, y, text, color, false, TextStyle::default(), assets);
     }
 
     #[allow(clippy::too_many_arguments)]

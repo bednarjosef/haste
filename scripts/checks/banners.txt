@@ -1,0 +1,8 @@
+# Banners: standing (pole + bar + flag), wall, plain and patterned, with the wave
+# animation by game time. The runner places them over RCON and teleports the player.
+wait_until joined
+wait_until settled
+wait 60
+look 180 25
+wait 5
+screenshot banners

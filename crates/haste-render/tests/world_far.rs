@@ -89,6 +89,7 @@ fn terrain_far_from_origin() {
                 yaw: 30.0,
                 pitch,
                 fov_deg: 70.0,
+                hand_fov_deg: 70.0,
                 roll_deg: 0.0,
                 bob: haste_render::ViewBob::default(),
             },
@@ -108,6 +109,7 @@ fn terrain_far_from_origin() {
             breaking: &[],
             camera_entity: None,
             spin: None,
+            weather: None,
         };
         // The section visibility walk runs off the render thread and lands a frame later
         // (vanilla draws the previous graph until the async update is swapped in), so keep
@@ -211,6 +213,7 @@ fn sky_times_of_day() {
                 yaw,
                 pitch,
                 fov_deg: 70.0,
+                hand_fov_deg: 70.0,
                 roll_deg: 0.0,
                 bob: haste_render::ViewBob::default(),
             },
@@ -230,6 +233,7 @@ fn sky_times_of_day() {
             breaking: &[],
             camera_entity: None,
             spin: None,
+            weather: None,
         };
         renderer.render(&frame).unwrap();
         let img = renderer.read_back().unwrap();
@@ -295,6 +299,7 @@ fn outline_and_cracks() {
                 yaw: 0.0,
                 pitch: 50.0,
                 fov_deg: 70.0,
+                hand_fov_deg: 70.0,
                 roll_deg: 0.0,
                 bob: haste_render::ViewBob::default(),
             },
@@ -314,6 +319,7 @@ fn outline_and_cracks() {
             breaking: if with { &breaking } else { &[] },
             camera_entity: None,
             spin: None,
+            weather: None,
         };
         renderer.sample_world(&world, &data.shapes, &frame);
         let stats = renderer.render(&frame).unwrap();

@@ -146,6 +146,13 @@ fn vs_main(in: VertexIn, @builtin(vertex_index) vi: u32) -> VertexOut {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    return shade(in, 0.0);
+}
+
+// Cutout terrain (leaves, plants) discards below vanilla CUTOUT_TERRAIN's
+// ALPHA_CUTOUT 0.5 (RenderPipelines.CUTOUT_TERRAIN).
+@fragment
+fn fs_cutout(in: VertexOut) -> @location(0) vec4<f32> {
     return shade(in, 0.5);
 }
 
@@ -166,8 +173,10 @@ fn shade(in: VertexOut, alpha_cutoff: f32) -> vec4<f32> {
     // Wrap the sprite-local UV inside the sprite rectangle (Pomme
     // atlas_sprite.glsl): fract for repeats, then map into the atlas.
     let uv = (origin + fract(in.sprite_uv) * sprite_size) / atlas_size;
-    let color = textureSample(atlas_texture, atlas_sampler, uv);
-    if (color.a < alpha_cutoff) {
+    let color = sample_nearest(uv, 1.0 / atlas_size);
+    // Vanilla's SOLID_TERRAIN defines no ALPHA_CUTOUT (RenderPipelines.SOLID_TERRAIN):
+    // solid terrain never discards, so the GPU keeps early-Z for the whole pass.
+    if (alpha_cutoff > 0.0 && color.a < alpha_cutoff) {
         discard;
     }
     // sRGB-ish: tint and light are applied in linear-ish space like Pomme's
@@ -175,4 +184,20 @@ fn shade(in: VertexOut, alpha_cutoff: f32) -> vec4<f32> {
     let lit = color.rgb * in.tint * in.light;
     let fogged = mix(lit, camera.fog_color.rgb, in.fog);
     return vec4<f32>(fogged, color.a);
+}
+
+// Vanilla texture_sampling.glsl `sampleNearest` (UseRgss == 0, the default): snap
+// the UV toward the containing texel's centre by how much of the texel one screen
+// pixel covers, then sample with explicit screen derivatives (the atlas sampler is
+// LINEAR/LINEAR trilinear; the snap keeps near terrain crisp).
+fn sample_nearest(uv: vec2<f32>, pixel_size: vec2<f32>) -> vec4<f32> {
+    let du = dpdx(uv);
+    let dv = dpdy(uv);
+    let texel_screen_size = sqrt(du * du + dv * dv);
+    let uv_texel_coords = uv / pixel_size;
+    let texel_center = round(uv_texel_coords) - vec2<f32>(0.5);
+    var texel_offset = uv_texel_coords - texel_center;
+    texel_offset = (texel_offset - vec2<f32>(0.5)) * pixel_size / texel_screen_size + vec2<f32>(0.5);
+    texel_offset = clamp(texel_offset, vec2<f32>(0.0), vec2<f32>(1.0));
+    return textureSampleGrad(atlas_texture, atlas_sampler, (texel_center + texel_offset) * pixel_size, du, dv);
 }

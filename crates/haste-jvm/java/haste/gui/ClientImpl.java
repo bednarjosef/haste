@@ -134,31 +134,98 @@ public final class ClientImpl {
     public static net.minecraft.client.renderer.GpuWarnlistManager getGpuWarnlistManager(Minecraft m) { return GPU_WARNLIST; }
 
     /**
-     * Real vanilla Java, built like {@code Minecraft}'s constructor does (its reload listener never runs,
-     * so the language list is vanilla's default: en_us only). LanguageSelectScreen reads and sets the
-     * selected code on it, which {@code Options} saves as {@code lang}.
+     * Real vanilla Java, built like {@code Minecraft}'s constructor does, and its reload listener is run over
+     * the client's resources ({@link AssetsPack}, the only pack Haste has): the language list comes from
+     * {@code pack.mcmeta}'s language section and the selected language's {@code assets/minecraft/lang/<code>.json}
+     * plus the en_us fallback load into a real
+     * {@link net.minecraft.client.resources.language.ClientLanguage}, injected with {@code Language.inject}
+     * like vanilla's reload. LanguageSelectScreen reads and sets the selected code on it, which {@code Options}
+     * saves as {@code lang}.
      */
     private static net.minecraft.client.resources.language.LanguageManager languages;
     public static net.minecraft.client.resources.language.LanguageManager getLanguageManager(Minecraft m) {
         if (languages == null) {
             languages = new net.minecraft.client.resources.language.LanguageManager(m, Proxies.options.languageCode, l -> {});
+            reloadLanguages();
         }
         return languages;
     }
 
     /**
-     * The pack repository the Resource Packs screen browses: real vanilla Java with no sources (Haste
-     * loads no resource packs yet), so it lists none and selects none. {@code Options} saves the
-     * selection it reports.
+     * The language manager's reload: vanilla runs it as a resource-reload listener over the resource manager;
+     * Haste loads no resource packs, so {@link AssetsPack} (the client's jar assets plus the launcher's
+     * downloaded ones) is the one pack, read as CLIENT_RESOURCES (the lang files and the pack.mcmeta language
+     * list). The manager injects the selected language into {@code Language}, so every vanilla screen and the
+     * HUD use it at once.
      */
-    private static final net.minecraft.server.packs.repository.PackRepository PACKS =
-        new net.minecraft.server.packs.repository.PackRepository();
-    public static net.minecraft.server.packs.repository.PackRepository getResourcePackRepository(Minecraft m) { return PACKS; }
+    static void reloadLanguages() {
+        if (languages == null) return;
+        try (net.minecraft.server.packs.resources.MultiPackResourceManager rm =
+                 new net.minecraft.server.packs.resources.MultiPackResourceManager(
+                     net.minecraft.server.packs.PackType.CLIENT_RESOURCES,
+                     java.util.List.of(new AssetsPack(
+                         System.getProperty("haste.clientJar"),
+                         System.getProperty("haste.assetsDir", ""),
+                         System.getProperty("haste.assetsIndex", ""))))) {
+            languages.onResourceManagerReload(rm);
+        } catch (java.io.IOException e) {
+            throw new RuntimeException("loading languages from the client's resources", e);
+        }
+    }
+
+    /**
+     * The pack repository the Resource Packs screen browses: real vanilla Java built like
+     * {@code Minecraft}'s constructor (a {@code FolderRepositorySource} over the player's
+     * {@code resourcepacks/} folder plus the built-in sources). Haste's own asset stack (Rust)
+     * applies the selection it commits; this repository is the source of truth for the screen
+     * and for what {@code Options} saves.
+     */
+    private static final net.minecraft.server.packs.repository.PackRepository PACKS = createPackRepository();
+    public static net.minecraft.server.packs.repository.PackRepository getResourcePackRepository(Minecraft m) {
+        // the saved selection loads once, like Minecraft's constructor (reload +
+        // Options.loadSelectedResourcePacks); options.txt's entries that no longer exist
+        // or are no longer compatible are dropped, exactly vanilla's behaviour
+        if (!packsLoaded) {
+            packsLoaded = true;
+            PACKS.reload();
+            Proxies.options.loadSelectedResourcePacks(PACKS);
+        }
+        return PACKS;
+    }
+    private static boolean packsLoaded;
+    private static net.minecraft.server.packs.repository.PackRepository createPackRepository() {
+        java.nio.file.Path gameDir = new java.io.File(System.getProperty("haste.minecraftDir", ".")).toPath();
+        net.minecraft.world.level.validation.DirectoryValidator validator =
+            net.minecraft.world.level.storage.LevelStorageSource.parseValidator(gameDir.resolve("allowed_symlinks.txt"));
+        java.io.File assetsDir = new java.io.File(System.getProperty("haste.assetsDir", "."));
+        net.minecraft.client.resources.ClientPackSource clientPackSource =
+            new net.minecraft.client.resources.ClientPackSource(assetsDir.toPath(), validator);
+        net.minecraft.server.packs.repository.RepositorySource directoryPacks =
+            new net.minecraft.server.packs.repository.FolderRepositorySource(
+                new java.io.File(System.getProperty("haste.minecraftDir", "."), "resourcepacks").toPath(),
+                net.minecraft.server.packs.PackType.CLIENT_RESOURCES,
+                net.minecraft.server.packs.repository.PackSource.DEFAULT, validator);
+        return new net.minecraft.server.packs.repository.PackRepository(clientPackSource, directoryPacks);
+    }
     /** The player's {@code resourcepacks/} folder inside the JVM game directory (created on demand). */
     public static java.nio.file.Path getResourcePackDirectory(Minecraft m) {
         java.io.File dir = new java.io.File(System.getProperty("haste.minecraftDir", "."), "resourcepacks");
         dir.mkdirs();
         return dir.toPath();
+    }
+
+    /**
+     * {@code Minecraft.reloadResourcePacks} (vanilla: rebuild the resource manager from the
+     * repository's selected packs). The Rust side owns the assets, so this reports the new
+     * selection (bottom first) and lets the client rebuild its asset stack and renderer;
+     * the returned future completes at once (the rebuild is Rust's, off this thread).
+     */
+    public static java.util.concurrent.CompletableFuture<Void> reloadResourcePacks(Minecraft m) {
+        String[] ids = PACKS.getSelectedIds().toArray(new String[0]);
+        haste.rt.Native.resourcePacksChanged(ids);
+        // the selected language is re-read too (LanguageSelectScreen calls this after a change)
+        reloadLanguages();
+        return java.util.concurrent.CompletableFuture.completedFuture(null);
     }
     /** False while the canonical proxies are built (option changes then skip their side effects, like vanilla at startup). */
     static boolean running;
@@ -192,6 +259,20 @@ public final class ClientImpl {
     public static boolean hasControlDown(Minecraft m) { return (mods & 192) != 0; }
     public static boolean hasAltDown(Minecraft m) { return (mods & 768) != 0; }
 
+    /**
+     * The thread check at the top of every play handler (vanilla: Minecraft's own PacketProcessor
+     * over its game thread, isSameThread). Haste decodes and handles every packet on the game
+     * thread by construction, so the processor is built over the thread that first asks for it
+     * (always a packet handler: the game thread) and vanilla's check passes, like vanilla's.
+     */
+    private static net.minecraft.network.PacketProcessor packetProcessor;
+    public static net.minecraft.network.PacketProcessor packetProcessor(Minecraft m) {
+        if (packetProcessor == null) {
+            packetProcessor = new net.minecraft.network.PacketProcessor(Thread.currentThread());
+        }
+        return packetProcessor;
+    }
+
     // ---- Gui ----
     public static Screen screen(Gui g) { return screen; }
 
@@ -214,6 +295,10 @@ public final class ClientImpl {
         screen = s;
         if (s != null) {
             s.added();
+            // vanilla Gui.setScreen: every key mapping is released when a screen opens, so a
+            // button held into the screen (whose release the screen consumes) does not repeat
+            // the use through the server's block editors once it closes
+            net.minecraft.client.KeyMapping.releaseAll();
             s.init(GfxImpl.width, GfxImpl.height);
         }
     }
