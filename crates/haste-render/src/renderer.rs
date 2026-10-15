@@ -1462,7 +1462,7 @@ impl Renderer {
     /// Build the view-projection matrix (right-handed, OpenGL-style depth like
     /// wgpu's default reverse... wgpu uses 0..1 z; glam's perspective_rh
     /// produces -1..1, so use perspective_infinite_rh style correction).
-    fn view_projection(camera: &Camera, aspect: f32) -> glam::Mat4 {
+    pub(crate) fn view_projection(camera: &Camera, aspect: f32) -> glam::Mat4 {
         let proj = glam::Mat4::perspective_rh(camera.fov_deg.to_radians(), aspect, 0.05, 4096.0);
         let eye = glam::Vec3::new(
             camera.pos.x as f32,
@@ -1483,7 +1483,7 @@ impl Renderer {
     }
 
     /// Frustum culling of sections (Pomme cull.comp reference; CPU here).
-    fn frustum_planes(m: &glam::Mat4) -> [glam::Vec4; 6] {
+    pub(crate) fn frustum_planes(m: &glam::Mat4) -> [glam::Vec4; 6] {
         // Gribb/Hartmann: planes are row3 +- row_i of the clip matrix (clip = M * p).
         // wgpu clip z is 0..w: the near plane is row2 alone.
         let r = |i: usize| m.row(i);
@@ -1517,10 +1517,20 @@ impl Renderer {
         };
         let aspect = self.size.0 as f32 / self.size.1 as f32;
         let view_proj = Self::view_projection(&frame.camera, aspect);
+        // Entity culling needs the frustum before posing (vanilla's
+        // `EntityRenderer.shouldRender`): the camera-relative view-projection's planes.
+        let entity_frustum = Self::frustum_planes(&Self::view_projection(
+            &Camera {
+                pos: glam::DVec3::ZERO,
+                ..frame.camera
+            },
+            aspect,
+        ));
         self.entity.prepare(
             frame.entities,
             frame.camera_entity,
             frame.camera.pos,
+            &entity_frustum,
             &mut self.assets,
         );
         {
