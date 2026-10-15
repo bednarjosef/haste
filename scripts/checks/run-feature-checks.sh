@@ -348,7 +348,37 @@ container_crafting_table() {
   check containers-crafting-table "2 oak logs became 8 oak planks (shift-click + hand-placed result)" "$r"
 }
 
-ALL=(hud death drop modes f2 craft containers-crafting-table)
+# The furnace: smelt 1 raw iron with 1 coal, take the iron ingot. The furnace sits at
+# (128, 71, 5) in the check's own area, on its own stone platform, the player 2.5 blocks
+# north of it.
+container_furnace() {
+  local log="$LOGDIR/containers-furnace.log"
+  plain_client "$ROOT/scripts/checks/containers-furnace.txt" "$log" \
+    || { check containers-furnace "player never joined" 1; return; }
+  plain_setup "$log" cfurn-setup "128.5 71 2.5 0 0" \
+    "clear $NAME" \
+    "give $NAME minecraft:raw_iron 1" \
+    "give $NAME minecraft:coal 1" \
+    "fill 127 70 1 129 74 6 air replace" \
+    "fill 127 70 1 129 70 6 minecraft:stone replace" \
+    "setblock 128 71 5 minecraft:furnace"
+  local before after
+  before=$(rcon "data get entity $NAME Inventory")
+  if wait_shot "$log" cfurn-closed 90; then
+    after=$(rcon "data get entity $NAME Inventory")
+  fi
+  wait_exit
+  echo "--- furnace evidence ---"
+  echo "Inventory before: $before"
+  echo "Inventory after:  $after"
+  local r=0
+  has "$before" "raw_iron" || { echo "no raw_iron before"; r=1; }
+  has "$before" "coal" || { echo "no coal before"; r=1; }
+  has "$after" "iron_ingot" || { echo "no iron_ingot after"; r=1; }
+  check containers-furnace "1 raw iron smelted with 1 coal became 1 iron ingot" "$r"
+}
+
+ALL=(hud death drop modes f2 craft containers-crafting-table containers-furnace)
 if [ $# -eq 0 ]; then
   set -- "${ALL[@]}"
 fi
@@ -356,6 +386,7 @@ for f in "$@"; do
   case "$f" in
     hud | death | drop | modes | f2 | craft) "$f" ;;
     containers-crafting-table) container_crafting_table ;;
+    containers-furnace) container_furnace ;;
     *) echo "unknown feature: $f" ;;
   esac
 done

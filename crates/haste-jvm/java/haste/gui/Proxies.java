@@ -120,6 +120,9 @@ public final class Proxies {
         set(minecraft, "gameMode", net.minecraft.client.multiplayer.MultiPlayerGameMode.class, gameMode);
         set(player, "minecraft", Minecraft.class, minecraft);
         set(player, "connection", net.minecraft.client.multiplayer.ClientPacketListener.class, connection);
+        // the connection's own handlers (kept vanilla bodies, e.g. handleUpdateRecipes) reach the
+        // client through this field
+        set(connection, "minecraft", Minecraft.class, minecraft);
         // the recipe book is a no-op proxy (no <clinit>), but InventoryScreen still shows its toggle button:
         // the sprites are the two that exist in the jar under textures/gui/sprites/recipe_book/
         setStatic(net.minecraft.client.gui.screens.recipebook.RecipeBookComponent.class, "RECIPE_BUTTON_SPRITES",

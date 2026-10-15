@@ -58,6 +58,9 @@ pub const ALLOW_CLASSES: &[&str] = &[
     "net/minecraft/client/multiplayer/SessionSearchTrees",
     "net/minecraft/client/multiplayer/ClientLevel$ClientLevelData",
     "net/minecraft/client/multiplayer/CommonListenerCookie",
+    // the connection's recipe container (update_recipes packets; container menus read it through
+    // ClientLevel.recipeAccess)
+    "net/minecraft/client/multiplayer/ClientRecipeContainer",
     "net/minecraft/client/StringSplitter",
     "net/minecraft/client/InputType",
     "net/minecraft/client/MusicToastDisplayState",

@@ -111,6 +111,7 @@ const FORWARDED: &[&str] = &[
     "minecraft:commands",
     "minecraft:command_suggestions",
     "minecraft:open_screen",
+    "minecraft:update_recipes",
     "minecraft:container_set_content",
     "minecraft:container_set_slot",
     "minecraft:container_set_data",

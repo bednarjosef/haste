@@ -163,6 +163,17 @@ public final class ClientImpl {
 
     /** Reduced debug info (the server's game rule, entity events 22/23): not forwarded yet, full info. */
     public static boolean showOnlyReducedInfo(Minecraft m) { return false; }
+
+    /**
+     * Vanilla's packet processor re-schedules packets onto the game thread; Haste forwards packets
+     * to Java from the game thread already (Ui::packet), so the same-thread guard always passes and
+     * kept vanilla handlers (e.g. handleUpdateRecipes) run inline.
+     */
+    private static final net.minecraft.network.PacketProcessor PACKET_PROCESSOR =
+        new net.minecraft.network.PacketProcessor(Thread.currentThread()) {
+            @Override public boolean isSameThread() { return true; }
+        };
+    public static net.minecraft.network.PacketProcessor packetProcessor(Minecraft m) { return PACKET_PROCESSOR; }
     /** Vanilla's tutorial (hints and toasts for new players); Haste starts it at the last step (no hints). */
     public static net.minecraft.client.tutorial.Tutorial getTutorial(Minecraft m) { return Proxies.tutorial; }
     /** Frames per second from Rust's render loop. */
