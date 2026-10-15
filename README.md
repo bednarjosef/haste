@@ -146,7 +146,7 @@ a difference; Phase 2 (mods) is not counted.
 - ✅ Particles: the server's and the client's own (breaking, mining cracks, sprinting, landing, torches, fire, lava, portals, drips) with vanilla's motion, size and lifetime
 - 🟡 Smooth lighting and ambient occlusion: present, but leaves, bark and grass sides are about 1.35x brighter than vanilla
 - 🟡 Performance: `haste --bench` measures about 900-980 FPS (1.0-1.1 ms per frame) at 1920x1080, render distance 12, on the development laptop's integrated GPU; not yet compared with vanilla and Sodium
-- 🟡 Block entities drawn: chests (lid animation), ender chests, shulker boxes, signs with text, banners and heads (beds are ordinary block models); lecterns, bells, campfire items, spawners and the other block entities not yet
+- 🟡 Block entities drawn: chests (lid animation), ender chests, shulker boxes, signs with text, banners and heads, lecterns, enchanting tables, bells, decorated pots and conduits, beacon beams (sections from the glass above), end portals and gateways (the layered starfield), moving pistons (beds are ordinary block models); campfire items, spawners and the other block entities not yet
 - ⬜ Downloaded player skins and capes
 
 </details>
