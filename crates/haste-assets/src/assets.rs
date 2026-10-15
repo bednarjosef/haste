@@ -374,6 +374,10 @@ impl Assets {
 
     pub(crate) fn resolve_model(&mut self, id: &Identifier) -> Result<ResolvedModel> {
         let mut texture_map: HashMap<String, String> = HashMap::new();
+        // Sprite ids any model in the parent chain declares force_translucent; their
+        // atlas regions are marked translucent after the build (26.3 model field).
+        let mut force_translucent: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         let mut elements: Option<Vec<crate::model::ElementDef>> = None;
         let mut ambientocclusion: Option<bool> = None;
         let mut gui_light: Option<bool> = None;
@@ -384,6 +388,9 @@ impl Assets {
 
         for _ in 0..20 {
             let model = self.load_model(&current)?;
+            for sprite in &model.textures.force_translucent {
+                force_translucent.insert(sprite.clone());
+            }
             for (key, value) in &model.textures {
                 texture_map
                     .entry(key.clone())
@@ -438,6 +445,7 @@ impl Assets {
 
         Ok(ResolvedModel {
             textures: resolved,
+            force_translucent,
             elements: elements.unwrap_or_default(),
             ambientocclusion: ambientocclusion.unwrap_or(true),
             gui_light: gui_light.unwrap_or(false),

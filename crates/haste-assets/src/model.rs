@@ -3,7 +3,7 @@
 // Haste (haste-core Identifier, atlas UVs, haste-data BlockStates). See
 // THIRD_PARTY.md.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Deserialize;
 
@@ -13,7 +13,7 @@ use serde::Deserialize;
 pub struct ModelFile {
     pub(crate) parent: Option<String>,
     #[serde(default, deserialize_with = "deserialize_texture_map")]
-    pub(crate) textures: HashMap<String, String>,
+    pub(crate) textures: TextureMap,
     #[serde(default)]
     pub(crate) elements: Vec<ElementDef>,
     /// vanilla `ambientocclusion` (absent = true).
@@ -25,21 +25,59 @@ pub struct ModelFile {
     pub(crate) display: HashMap<String, serde_json::Value>,
 }
 
-/// `textures` values may be `{"sprite": "..."}` objects (26.3).
-fn deserialize_texture_map<'de, D>(de: D) -> Result<HashMap<String, String>, D::Error>
+/// A model's `textures` map: sprite id per variable, plus the variables the model
+/// declares `force_translucent` (26.3) - the model overrides the sprite's texel
+/// scan for those (glass panes, redstone dust).
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct TextureMap {
+    #[serde(flatten)]
+    pub(crate) map: HashMap<String, String>,
+    #[serde(skip)]
+    pub(crate) force_translucent: HashSet<String>,
+}
+
+impl std::ops::Deref for TextureMap {
+    type Target = HashMap<String, String>;
+    fn deref(&self) -> &Self::Target {
+        &self.map
+    }
+}
+
+impl<'a> IntoIterator for &'a TextureMap {
+    type Item = (&'a String, &'a String);
+    type IntoIter = std::collections::hash_map::Iter<'a, String, String>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.map.iter()
+    }
+}
+
+impl TextureMap {}
+
+/// `textures` values may be `{"sprite": "...", "force_translucent": true}` objects (26.3).
+fn deserialize_texture_map<'de, D>(de: D) -> Result<TextureMap, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let raw: HashMap<String, serde_json::Value> = HashMap::deserialize(de)?;
-    let mut out = HashMap::new();
+    let mut map = HashMap::new();
+    let mut force_translucent = HashSet::new();
     for (k, v) in raw {
         if let Some(s) = v.as_str() {
-            out.insert(k, s.to_string());
+            map.insert(k, s.to_string());
         } else if let Some(sprite) = v.get("sprite").and_then(serde_json::Value::as_str) {
-            out.insert(k, sprite.to_string());
+            if v.get("force_translucent")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                force_translucent.insert(sprite.to_string());
+            }
+            map.insert(k, sprite.to_string());
         }
     }
-    Ok(out)
+    Ok(TextureMap {
+        map,
+        force_translucent,
+    })
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -105,6 +143,8 @@ pub struct FaceDef {
 /// Parent chain resolved model (internal to baking).
 pub struct ResolvedModel {
     pub(crate) textures: HashMap<String, String>,
+    /// Sprite ids some model in the chain declares `force_translucent` (26.3).
+    pub(crate) force_translucent: std::collections::HashSet<String>,
     pub(crate) elements: Vec<ElementDef>,
     pub(crate) ambientocclusion: bool,
     pub(crate) gui_light: bool,
@@ -508,6 +548,28 @@ mod tests {
         Direction::West,
         Direction::East,
     ];
+
+    /// 26.3 texture values may carry `force_translucent`; the sprite id lands in the
+    /// map and the flag in the model's set (glass panes, redstone dust).
+    #[test]
+    fn texture_objects_parse_sprite_and_force_translucent() {
+        let file: ModelFile = serde_json::from_str(
+            r##"{"textures": {
+                 "all": "block/stone",
+                 "edge": {"sprite": "block/glass_pane_top", "force_translucent": true},
+                 "pane": {"sprite": "block/glass"}
+               }}"##,
+        )
+        .unwrap();
+        assert_eq!(file.textures["all"], "block/stone");
+        assert_eq!(file.textures["edge"], "block/glass_pane_top");
+        assert_eq!(file.textures["pane"], "block/glass");
+        assert!(file
+            .textures
+            .force_translucent
+            .contains("block/glass_pane_top"));
+        assert!(!file.textures.force_translucent.contains("block/glass"));
+    }
 
     /// Quads must stay CCW viewed from outside for backface culling (Pomme test).
     #[test]

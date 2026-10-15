@@ -402,6 +402,14 @@ impl AtlasBuilder {
             .unwrap_or(self.missing)
     }
 
+    /// Mark a sprite's region translucent (the 26.3 model `force_translucent` field:
+    /// a model can declare a sprite translucent whatever its texels say).
+    pub fn region_mut(&mut self, texture_id: &str) -> &mut AtlasRegion {
+        self.regions
+            .get_mut(texture_id)
+            .unwrap_or(&mut self.missing)
+    }
+
     pub fn has(&self, texture_id: &str) -> bool {
         self.regions.contains_key(texture_id)
     }
