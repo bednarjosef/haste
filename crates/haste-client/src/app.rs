@@ -525,6 +525,15 @@ impl Session {
             biome_climates.clone(),
             options.clone(),
         ));
+        // Wake the game thread the moment a play packet arrives, so packets are
+        // applied between ticks like vanilla's every-frame queue drain
+        // (`Minecraft.runTick`) instead of waiting for the next 20 Hz tick.
+        {
+            let shared = shared.clone();
+            driver
+                .connection()
+                .set_packet_wake(Arc::new(move || shared.wake_on_packet()));
+        }
         // The server's configuration-phase packs are part of the running stack from the
         // start; a later pack-screen reload keeps them layered (vanilla's repository
         // holds them beside the selection).
@@ -2791,6 +2800,14 @@ impl InputRouter {
         self.pitch = pitch;
     }
 
+    /// A look change to an exact aim: the input layer holds its angles minus the server's
+    /// rotation offset, because the tick's pick adds the offset back (a teleport or a
+    /// `player_rotation` echo set it). A script's `look` asks for a specific crosshair, so it
+    /// goes through here; plain mouse motion goes through `look`.
+    fn aim(&mut self, yaw: f32, pitch: f32, offset: (f32, f32)) {
+        self.look(yaw - offset.0, (pitch - offset.1).clamp(-90.0, 90.0));
+    }
+
     /// Jump pressed: a second press within vanilla's 7-tick window toggles flight.
     fn jump_pressed(&mut self, now: Instant) {
         match self.last_jump_press {
@@ -3069,7 +3086,7 @@ impl Menu {
                 })();
                 match result {
                     Ok(host) => {
-                        let ui = crate::ui::Ui::new(host);
+                        let ui = crate::ui::Ui::new(host.clone());
                         // Screens need the synced registries (L1c): the jar's data pack stands in
                         // for a server's registry_data until one is joined.
                         if let Err(e) = ui.gui().load_jar_registries() {
@@ -3079,6 +3096,11 @@ impl Menu {
                             tracing::warn!("opening the title screen: {e:#}");
                         }
                         let _ = tx.send(ui);
+                        // The title screen is up: warm the classes its first clicks load
+                        // (Singleplayer's world-selection tree) while the player looks at it, on
+                        // this background thread — never the render thread. The UI is already
+                        // with the render loop, so the frames do not wait for this.
+                        host.warm_screen_classes();
                     }
                     Err(e) => {
                         tracing::warn!("no menu screens: the JVM did not start: {e:#}");
@@ -3872,7 +3894,12 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                                 ui.scroll(x, y, 0.0, f64::from(n));
                             }
                         }
-                        script::Action::Look(yaw, pitch) => input.look(yaw, pitch),
+                        // A scripted `look` aims exactly where asked (the server's rotation
+                        // offset would otherwise leave the crosshair elsewhere).
+                        script::Action::Look(yaw, pitch) => {
+                            let offset = view.as_ref().map_or((0.0, 0.0), |v| v.look_offset);
+                            input.aim(yaw, pitch, offset);
+                        }
                         script::Action::Screenshot(name) => shots.push(name),
                         script::Action::Error(e) => {
                             last_err = Some(e);
@@ -4007,6 +4034,10 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             &mut weather_guard,
         );
         feed.feed(shared, &mut renderer, camera_section(&camera), vd);
+        // The first-person hand, like the window and the screenshot path (`set_first_person`
+        // diffs the view's per-tick part and only touches the renderer on a change): without
+        // this the script's shots never show the held item.
+        feed.set_first_person(shared, &mut renderer, game::Perspective::FirstPerson);
         let (entities, block_entities) =
             feed.entities(shared, &mut renderer, session_ref.local, partial);
         let block_target = view.as_ref().and_then(|v| v.block_target);
@@ -4214,6 +4245,8 @@ struct BenchSample {
     /// Section meshes uploaded this frame and their vertex+index bytes.
     uploads: u32,
     upload_bytes: u64,
+    /// Terrain indices drawn (six per quad): the vertex-fetch load.
+    indices_drawn: u32,
     /// Frame index since the measure phase started.
     index: u32,
 }
@@ -4229,6 +4262,8 @@ struct BenchSummary {
     sections_drawn: f32,
     sections_total: f32,
     draw_calls: f32,
+    /// Terrain indices drawn per frame (six per quad): the vertex-fetch load.
+    indices_drawn: f32,
     prepare_ms: f32,
     acquire_ms: f32,
     cull_ms: f32,
@@ -4260,7 +4295,7 @@ impl BenchSummary {
              frame time: avg {:.2} ms ({:.0} FPS), 1% low {:.2} ms, worst {:.2} ms\n\
              breakdown ms: prepare {:.2} acquire {:.2} cull {:.2} encode {:.2} submit {:.2} present {:.2} | gpu main {:.2} hand {:.2} gui {:.2}\n\
              gpu main ms: sky {:.3} opaque {:.3} cutout {:.3} translucent {:.3} entities {:.3} particles {:.3} overlays {:.3}\n\
-             sections drawn {}/{} avg, draw calls {:.0} avg\n\
+             sections drawn {}/{} avg, draw calls {:.0} avg, indices {:.0} avg (quads {:.0})\n\
              render distance {} (requested {}), {}x{}, adapter {}",
             self.frames,
             meta.seconds,
@@ -4287,6 +4322,8 @@ impl BenchSummary {
             self.sections_drawn,
             self.sections_total,
             self.draw_calls,
+            self.indices_drawn,
+            self.indices_drawn / 6.0,
             meta.render_distance,
             meta.requested_render_distance,
             meta.width,
@@ -4393,6 +4430,7 @@ fn bench_summary(samples: &[BenchSample]) -> BenchSummary {
         sections_drawn: sum(samples, n, |s| s.sections_drawn as f32),
         sections_total: sum(samples, n, |s| s.sections_total as f32),
         draw_calls: sum(samples, n, |s| s.draw_calls as f32),
+        indices_drawn: sum(samples, n, |s| s.indices_drawn as f32),
         prepare_ms: t(|x| x.prepare_ms),
         acquire_ms: t(|x| x.acquire_ms),
         cull_ms: t(|x| x.cull_ms),
@@ -4513,9 +4551,19 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     // Measure phase. The buffer is sized up front: at most 1000 fps for the whole run, and it
     // grows once if the machine is faster than that (no allocation during steady-state frames).
     {
-        // Memory diagnostics: terrain arenas (fixed-size GPU buffer pairs) and resident
-        // sections, plus this process's peak RSS so far (the settle phase meshes everything).
-        let (arenas, bytes, sections) = renderer.arena_memory();
+        // Memory diagnostics: peak RSS plus every large allocation we can attribute —
+        // terrain arenas (allocated vs used), the world's chunk storage, the renderer's
+        // CPU-side copies and the embedded JVM's pools — so the diet work has a table.
+        let (arenas, arena_bytes, arena_used, sections) = renderer.arena_memory();
+        let cpu = renderer.cpu_memory();
+        let world = shared.world.read().memory_stats();
+        let jvm = shared
+            .ui
+            .lock()
+            .as_ref()
+            .map(|ui| ui.jvm_memory())
+            .unwrap_or_default();
+        let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
         let rss_kb = std::fs::read_to_string("/proc/self/status")
             .ok()
             .and_then(|s| {
@@ -4524,10 +4572,66 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
                     .and_then(|l| l.split_whitespace().nth(1).map(|v| v.to_string()))
             })
             .unwrap_or_default();
+        // smaps_rollup for the live (settled) picture: anonymous vs file-backed pages.
+        let rollup = std::fs::read_to_string("/proc/self/smaps_rollup")
+            .map(|s| {
+                let f = |key: &str| {
+                    s.lines()
+                        .find(|l| l.starts_with(key))
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .unwrap_or(0)
+                };
+                (f("Rss:"), f("Pss_Anon:"), f("Pss_File:"))
+            })
+            .unwrap_or((0, 0, 0));
         println!(
-            "bench memory: peak RSS {rss_kb} kB, {arenas} arenas ({:.1} MiB vertex+index), {sections} resident sections",
-            bytes as f64 / (1024.0 * 1024.0)
+            "bench memory: peak RSS {rss_kb} kB ({:.1} MiB), {arenas} arenas ({:.1} MiB vertex+index, {:.1} used), {sections} resident sections",
+            rss_kb.parse::<f64>().unwrap_or(0.0) / 1024.0,
+            mib(arena_bytes),
+            mib(arena_used),
         );
+        println!(
+            "bench memory: settled Rss {:.1} MiB (Pss_Anon {:.1}, Pss_File {:.1})",
+            mib(rollup.0 * 1024),
+            mib(rollup.1 * 1024),
+            mib(rollup.2 * 1024),
+        );
+        println!(
+            "bench memory: world {:.1} MiB (sections {:.1}, heightmaps {:.1}, light {:.1}, block entities {:.1}, {} non-empty), atlas+models {:.1} MiB, mesher queue {}",
+            mib(world.chunks + world.sections + world.heightmaps + world.light + world.block_entities),
+            mib(world.sections),
+            mib(world.heightmaps),
+            mib(world.light),
+            mib(world.block_entities),
+            world.non_empty_sections,
+            mib(cpu.atlas_bytes + cpu.baked_bytes),
+            cpu.mesh_pending,
+        );
+        if !jvm.is_empty() {
+            let mut heap_c = 0;
+            let mut heap_u = 0;
+            let mut meta = 0;
+            let mut code = 0;
+            for line in jvm.lines() {
+                let (k, v) = line.split_once('=').unwrap_or(("", ""));
+                let v: u64 = v.parse().unwrap_or(0);
+                match k {
+                    "heap_committed" => heap_c = v,
+                    "heap_used" => heap_u = v,
+                    "metaspace_used" => meta = v,
+                    "code_cache_used" => code = v,
+                    _ => {}
+                }
+            }
+            println!(
+                "bench memory: JVM heap {:.1}/{:.1} MiB, metaspace {:.1} MiB, code cache {:.1} MiB",
+                mib(heap_u),
+                mib(heap_c),
+                mib(meta),
+                mib(code),
+            );
+        }
     }
     let mut samples: Vec<BenchSample> = Vec::with_capacity(seconds as usize * 1000);
     let total = seconds as f32;
@@ -4611,6 +4715,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             sections_new: stats.chunk_sections_drawn.saturating_sub(prev_drawn),
             uploads: stats.uploads,
             upload_bytes: stats.upload_bytes,
+            indices_drawn: stats.indices_drawn,
             index: samples.len() as u32,
         });
         if shared.is_closed() {
@@ -4634,6 +4739,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             "sections_drawn": summary.sections_drawn,
             "sections_total": summary.sections_total,
             "draw_calls": summary.draw_calls,
+            "indices_drawn": summary.indices_drawn,
             "prepare_ms": summary.prepare_ms,
             "acquire_ms": summary.acquire_ms,
             "cull_ms": summary.cull_ms,
@@ -4721,6 +4827,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         started: Instant::now(),
         menu_next: Instant::now(),
         quitting: false,
+        bench: None,
     };
     event_loop.run_app(&mut app)?;
     if let Some(e) = app.error {
@@ -4734,7 +4841,163 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A join the screens requested, connecting on its own thread: what to show as the target
+/// The windowed bench's state (`--bench-window`): the recorded samples, the still camera
+/// (the settled frame's camera with `--yaw`/`--pitch`), and the run's metadata.
+struct WindowBench {
+    samples: Vec<BenchSample>,
+    /// The camera every measured frame uses (the settle frame's, yaw/pitch from the args).
+    camera: Option<Camera>,
+    /// The still camera's view distance (the settled view's; the summary reports it).
+    view_distance: i32,
+    /// Total measured seconds; the run ends when it has elapsed since `started`.
+    seconds: f32,
+    started: Option<Instant>,
+    feed_ms: f32,
+    /// The window's exact inner size in physical pixels (`--width`x`--height`).
+    size: (u32, u32),
+    /// The look the bench camera holds (`--yaw`/`--pitch`; `None` keeps the player's own).
+    look: (Option<f32>, Option<f32>),
+    /// `--pos`: the settle also waits until the server has teleported the player here.
+    want_pos: Option<DVec3>,
+}
+
+/// `--bench-window SECONDS`: the windowed twin of `bench`. Joins like the windowed client
+/// (a real window at `--width`x`--height`, vsync off unless `--vsync`), waits for the world
+/// to settle, then renders the still camera for SECONDS while recording the same
+/// `BenchSample`s as the offscreen bench. Prints the same summary block (marked `windowed`)
+/// and writes the same JSON to `--bench-out`; the window closes by itself.
+pub fn bench_window(args: &Args, seconds: u64) -> anyhow::Result<()> {
+    let Some(server) = args.server.as_deref() else {
+        anyhow::bail!("--bench-window needs --server <host[:port]>");
+    };
+    let session = Session::join(&args.username, args.render_distance, server, false, None)?;
+    let shared = session.shared.clone();
+    // The bench camera is first person: the game thread's camera effects take that perspective.
+    shared.input.lock().first_person = true;
+    // `--x11`: the same XWayland window vanilla's client gets (framebuffer exactly
+    // `--width`x`--height`; a Wayland window's is the desktop scale multiple).
+    if args.x11 {
+        std::env::set_var("WINIT_UNIX_BACKEND", "x11");
+        std::env::remove_var("WAYLAND_DISPLAY");
+    }
+    let event_loop = EventLoop::new()?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+    let options = session.options.clone();
+    let mut app = App {
+        username: args.username.clone(),
+        render_distance: args.render_distance,
+        session: Some(session),
+        menu: None,
+        joining: None,
+        local_server: None,
+        // Present, not vsync: the windowed number must carry the present cost but not be
+        // pinned to the display rate (vanilla's comparison run had vsync off too).
+        vsync: args.vsync.unwrap_or(false),
+        vsync_forced: args.vsync.or(Some(false)),
+        options,
+        options_version: 0,
+        perspective: game::Perspective::FirstPerson,
+        window: None,
+        renderer: None,
+        feed: WorldFeed::default(),
+        ui: None,
+        gui: GuiFrame::default(),
+        input: InputRouter::default(),
+        grabbed: false,
+        screen_was_open: false,
+        focused: true,
+        breaking: Vec::new(),
+        frame_stats: FrameStats::default(),
+        fps: FpsCounter::new(),
+        error: None,
+        seconds: None,
+        screenshot: false,
+        scope: 0.5,
+        frame_at: Instant::now(),
+        started: Instant::now(),
+        menu_next: Instant::now(),
+        quitting: false,
+        bench: Some(WindowBench {
+            samples: Vec::with_capacity(seconds as usize * 1000),
+            camera: None,
+            view_distance: 12,
+            seconds: seconds as f32,
+            started: None,
+            feed_ms: 0.0,
+            size: (args.width, args.height),
+            look: (args.yaw, args.pitch),
+            want_pos: args
+                .pos
+                .as_ref()
+                .filter(|v| v.len() == 3)
+                .map(|v| DVec3::new(v[0], v[1], v[2])),
+        }),
+    };
+    app.input.yaw = args.yaw.unwrap_or(0.0);
+    app.input.pitch = args.pitch.unwrap_or(10.0);
+    event_loop.run_app(&mut app)?;
+    if let Some(e) = app.error {
+        return Err(e);
+    }
+    let Some(bench) = app.bench else {
+        anyhow::bail!("the windowed bench ended without samples");
+    };
+    let (width, height) = app
+        .renderer
+        .as_ref()
+        .map_or((args.width, args.height), |r| r.size());
+    let meta = BenchMeta {
+        seconds: bench.seconds,
+        render_distance: bench.view_distance,
+        requested_render_distance: app.render_distance.unwrap_or(12),
+        width,
+        height,
+        adapter: app
+            .renderer
+            .as_ref()
+            .map(|r| {
+                let info = r.adapter_info();
+                format!("{} ({})", info.name, info.backend)
+            })
+            .unwrap_or_default(),
+    };
+    let summary = bench_summary(&bench.samples);
+    println!("windowed bench at {}, {}", meta.width, meta.height);
+    println!("{}", summary.text(&meta));
+    if let Some(out) = &args.bench_out {
+        let json = serde_json::json!({
+            "windowed": true,
+            "frames": summary.frames,
+            "seconds": meta.seconds,
+            "avg_ms": summary.avg_ms,
+            "fps": summary.fps(),
+            "p99_ms": summary.p99_ms,
+            "worst_ms": summary.worst_ms,
+            "sections_drawn": summary.sections_drawn,
+            "sections_total": summary.sections_total,
+            "draw_calls": summary.draw_calls,
+            "indices_drawn": summary.indices_drawn,
+            "prepare_ms": summary.prepare_ms,
+            "acquire_ms": summary.acquire_ms,
+            "cull_ms": summary.cull_ms,
+            "encode_ms": summary.encode_ms,
+            "submit_ms": summary.submit_ms,
+            "present_ms": summary.present_ms,
+            "gpu_main_ms": summary.gpu_ms[0],
+            "gpu_hand_ms": summary.gpu_ms[1],
+            "gpu_gui_ms": summary.gpu_ms[2],
+            "render_distance": meta.render_distance,
+            "requested_render_distance": meta.requested_render_distance,
+            "width": meta.width,
+            "height": meta.height,
+            "adapter": meta.adapter,
+        });
+        std::fs::write(out, serde_json::to_string_pretty(&json)?)?;
+        println!("bench summary written to {}", out.display());
+    }
+    Ok(())
+}
+
 /// (the address, or the world folder of a local world) and where the session (with its local
 /// world, for singleplayer) arrives.
 struct JoinInProgress {
@@ -4802,6 +5065,9 @@ struct App {
     menu_next: Instant,
     /// The title screen's Quit Game was clicked: close at the next `about_to_wait`.
     quitting: bool,
+    /// The windowed bench (`--bench-window`): records one sample per frame and closes the
+    /// window when the run is full. `None` in the normal windowed client.
+    bench: Option<WindowBench>,
 }
 
 impl App {
@@ -5231,9 +5497,20 @@ impl App {
         }
         self.input
             .sample(&session.shared, self.ui.as_ref(), self.perspective);
+        // The windowed bench holds the camera still (the settle frame's view with the
+        // requested look), like the offscreen `--bench --bench-fixed`.
+        if let Some(bench) = &mut self.bench {
+            let offset = session.shared.view.lock().look_offset;
+            if let Some(yaw) = bench.look.0 {
+                self.input.yaw = yaw - offset.0;
+            }
+            if let Some(pitch) = bench.look.1 {
+                self.input.pitch = (pitch - offset.1).clamp(-90.0, 90.0);
+            }
+        }
         let renderer = self.renderer.as_mut().expect("checked above");
         let mut weather_guard = session.shared.weather_scratch.lock();
-        let (camera, sky, lightmap, partial, vd, animation_tick, weather) = frame_view(
+        let (mut camera, sky, lightmap, partial, vd, animation_tick, weather) = frame_view(
             &session.shared,
             self.perspective,
             self.input.yaw,
@@ -5242,8 +5519,38 @@ impl App {
             t0,
             &mut weather_guard,
         );
+        // The windowed bench's settle and still camera: until the world has settled (and
+        // the HUD's JVM arrived, like the screenshot path), the frames only warm up; the
+        // first settled frame's camera is then held for the whole run.
+        if let Some(bench) = &mut self.bench {
+            let settled_now = {
+                let view = session.shared.view.lock().clone();
+                let at_pos = bench
+                    .want_pos
+                    .is_none_or(|p| (view.feet - p).length() <= 0.5);
+                view.has_position
+                    && at_pos
+                    && self
+                        .feed
+                        .settled(&self.frame_stats, Duration::from_millis(1500))
+                    && (self.ui.is_some()
+                        || session.shared.hud_failed.load(Ordering::Relaxed)
+                        || !session.shared.hud_enabled.load(Ordering::Relaxed))
+            };
+            if settled_now && bench.camera.is_none() {
+                bench.camera = Some(camera);
+                bench.view_distance = vd;
+            }
+            if let Some(still) = bench.camera {
+                camera = still;
+            }
+        }
+        let feed_start = Instant::now();
         self.feed
             .feed(&session.shared, renderer, camera_section(&camera), vd);
+        if let Some(bench) = &mut self.bench {
+            bench.feed_ms = feed_start.elapsed().as_secs_f32() * 1000.0;
+        }
         let t1 = Instant::now();
         self.feed
             .set_first_person(&session.shared, renderer, self.perspective);
@@ -5348,6 +5655,31 @@ impl App {
         if let Ok(stats) = &result {
             self.frame_stats = *stats;
         }
+        // The windowed bench's sample: recorded once the still camera is held (the settle
+        // frames before it are warm-up, not measurements). The run ends with the window.
+        if let (Some(bench), Ok(stats)) = (&mut self.bench, &result) {
+            if let Some(started) = bench.started {
+                let prev_drawn = bench.samples.last().map_or(0, |s| s.sections_drawn);
+                bench.samples.push(BenchSample {
+                    frame_ms: stats.frame_ms,
+                    sections_drawn: stats.chunk_sections_drawn,
+                    sections_total: stats.chunk_sections_total,
+                    draw_calls: stats.draw_calls,
+                    timings: renderer.timings(),
+                    feed_ms: bench.feed_ms,
+                    sections_new: stats.chunk_sections_drawn.saturating_sub(prev_drawn),
+                    uploads: stats.uploads,
+                    upload_bytes: stats.upload_bytes,
+                    indices_drawn: stats.indices_drawn,
+                    index: bench.samples.len() as u32,
+                });
+                if started.elapsed().as_secs_f32() >= bench.seconds {
+                    self.quitting = true;
+                }
+            } else if bench.camera.is_some() {
+                bench.started = Some(Instant::now());
+            }
+        }
         if let Some(result) = renderer.take_capture() {
             // Encode and write off the render thread: PNG compression of a full frame
             // would stall the frame loop (vanilla's chat line becomes a log line here).
@@ -5421,9 +5753,21 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes()
-            .with_title("Haste")
-            .with_inner_size(winit::dpi::LogicalSize::new(854.0, 480.0));
+        let attrs = if let Some(bench) = &self.bench {
+            // The windowed bench: a logical inner size (`--width`x`--height`), so the
+            // framebuffer is exactly the requested resolution times the desktop scale —
+            // the same window a vanilla client at `--width`x`--height` would get.
+            Window::default_attributes()
+                .with_title("Haste bench")
+                .with_inner_size(winit::dpi::LogicalSize::new(
+                    f64::from(bench.size.0),
+                    f64::from(bench.size.1),
+                ))
+        } else {
+            Window::default_attributes()
+                .with_title("Haste")
+                .with_inner_size(winit::dpi::LogicalSize::new(854.0, 480.0))
+        };
         let result = (|| -> anyhow::Result<(Arc<Window>, Renderer)> {
             let window = Arc::new(event_loop.create_window(attrs)?);
             let mut assets = open_assets()?;
@@ -5782,6 +6126,26 @@ mod tests {
         assert_eq!(apply_mouse(10.0, -80.0, (0.0, -200.0), DPP), (10.0, -90.0));
     }
 
+    /// A scripted look aims exactly where asked: the input layer holds the target angles minus
+    /// the server's rotation offset, which the tick's pick adds back. Without the subtraction a
+    /// `look` after the server turned the player (a teleport echo) aims `offset` away from the
+    /// target — the boat mount missed because the crosshair looked at the block under the
+    /// driver's feet instead of the boat.
+    #[test]
+    fn an_exact_aim_subtracts_the_servers_look_offset() {
+        let mut input = InputRouter::default();
+        // No server offset: the input layer holds the angles themselves.
+        input.aim(0.0, 49.0, (0.0, 0.0));
+        assert_eq!((input.yaw, input.pitch), (0.0, 49.0));
+        // The server turned us 60 degrees while the script's input still says 30 (the offset
+        // the player keeps, `LocalPlayer.look_offset`): aiming at 90 needs input 30.
+        input.aim(90.0, 10.0, (60.0, 0.0));
+        assert_eq!((input.yaw, input.pitch), (30.0, 10.0));
+        // A pitch past the clamp with the offset applied to the input, not the target.
+        input.aim(0.0, 90.0, (0.0, 40.0));
+        assert_eq!((input.yaw, input.pitch), (0.0, 50.0));
+    }
+
     #[test]
     fn sensitivity_formula_matches_vanilla_curve() {
         // Default sensitivity 50%: (0.5 * 0.6 + 0.2)^3 * 8 * 0.15 = 0.4^3 * 8 * 0.15.
@@ -6060,6 +6424,7 @@ mod tests {
             sections_new: 0,
             uploads: 0,
             upload_bytes: 0,
+            indices_drawn: 0,
             index: 0,
         }
     }

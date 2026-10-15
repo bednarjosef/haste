@@ -1,0 +1,29 @@
+# Hold each reported item and screenshot the first-person hand.
+# The items were given over RCON in hotbar order before the run:
+# 1 stick, 2 diamond_sword, 3 redstone, 4 redstone_block, 5 torch, 6 potion, 7 wooden_sword.
+wait_until joined
+look 0 10
+wait_until settled
+wait 100
+screenshot h0
+key 1
+wait 30
+screenshot h1
+key 2
+wait 30
+screenshot h2
+key 3
+wait 30
+screenshot h3
+key 4
+wait 30
+screenshot h4
+key 5
+wait 30
+screenshot h5
+key 6
+wait 30
+screenshot h6
+key 7
+wait 30
+screenshot h7

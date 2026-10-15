@@ -14,5 +14,5 @@ pub use palette::{
     BiomeContainer, BlockContainer, DecodedSection, PaletteError, PalettedContainer,
 };
 pub use world::World;
-pub use world::{SectionSnapshot, SnapshotSection};
+pub use world::{SectionSnapshot, SnapshotSection, WorldMemoryStats};
 pub use world_error::WorldError;

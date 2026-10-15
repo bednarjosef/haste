@@ -70,6 +70,27 @@ else
   step "no crate changed: cargo skipped"
 fi
 
+# Render smoke: when the renderer or the client changed and the test server is up, draw one real
+# frame (unit tests never bind the real pipelines; a uniform-size mismatch only shows on a frame).
+if grep -qE '^crates/haste-(render|client|assets)/' <<<"$changed"; then
+  if (exec 3<>/dev/tcp/127.0.0.1/25691) 2>/dev/null; then
+    step "render smoke: one real frame from the test server"
+    cargo build -q -j "$jobs" --release -p haste-client || fail "release build"
+    target="${CARGO_TARGET_DIR:-$PWD/target}"
+    shot="$target/ci-render-smoke.png"
+    rm -f "$shot"
+    out=$(timeout 120 "$target/release/haste" --server 127.0.0.1:25691 --username CiSmoke \
+      --screenshot "$shot" --seconds 60 2>&1)
+    rc=$?
+    if [ "$rc" -ne 0 ] || [ ! -s "$shot" ] || grep -q "panicked" <<<"$out"; then
+      grep -E "panicked|wgpu error|Validation|Error" <<<"$out" | head -8
+      fail "render smoke (exit $rc)"
+    fi
+  else
+    step "render smoke skipped: no test server on 127.0.0.1:25691"
+  fi
+fi
+
 if [ "${CI_GAME_CHECKS:-1}" != 0 ] && grep -q '^crates/haste-jvm/java/' <<<"$changed"; then
   if (exec 3<>/dev/tcp/127.0.0.1/25691) 2>/dev/null; then
     step "game checks (runtime Java changed): pause language"

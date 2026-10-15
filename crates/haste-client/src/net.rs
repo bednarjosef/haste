@@ -38,6 +38,9 @@ use crate::player::{LocalPlayer, VehiclePose};
 
 /// Hurt-tilt camera roll duration in ticks (vanilla's `hurtTime` runs to 10).
 pub const HURT_TILT_TICKS: u32 = 10;
+/// The server's correction of the vehicle we steer is only taken when it moved the boat this far
+/// (vanilla `ClientPacketListener.handleMoveVehicle` compares the distance to 1.0E-5).
+const VEHICLE_CORRECTION_EPSILON: f64 = 1.0e-5;
 /// The head equipment slot of `set_equipment` (`EquipmentSlot.values()`: 0 main hand, 1 off
 /// hand, 2 boots, 3 leggings, 4 chestplate, 5 helmet, 6 body, 7 saddle). The item worn there
 /// can hide the screen behind a camera overlay (the carved pumpkin's blur).
@@ -75,6 +78,10 @@ pub trait WorldSink {
 
 /// A world with no chunks: the player does not move in it.
 struct NoBlocks;
+
+/// One shared instance of it, for the paths that need a `'static` block view.
+const NO_BLOCKS: NoBlocks = NoBlocks;
+
 impl BlockView for NoBlocks {
     fn block_state(&self, _pos: BlockPos) -> BlockStateId {
         BlockStateId::AIR
@@ -1270,6 +1277,44 @@ impl Session {
         }))
     }
 
+    /// The boat we steer, when the vehicle the server just seated us in is one we drive (the
+    /// first passenger of a `AbstractBoat`): vanilla's `Entity.isLocalClientAuthoritative`. Our
+    /// own simulation of the boat starts where the server last told us it was, with the
+    /// dimensions its registry entry carries; after that the state we simulate is the truth on
+    /// this side and the server follows our `move_vehicle` packets.
+    fn boat_at<W: WorldSink + ?Sized, E: EntitySink + ?Sized>(
+        &self,
+        vehicle: EntityId,
+        entities: &E,
+        world: &W,
+    ) -> Option<crate::boat::Boat> {
+        let kind = entities.entity_type(vehicle)?;
+        let path = self
+            .entity_type_names
+            .get(kind.0 as usize)
+            .map(|id| id.path())?;
+        if !crate::boat::is_boat_type(path) {
+            return None;
+        }
+        let (pos, yaw, _) = entities.pose(vehicle)?;
+        let (_, dims) = entities.entity_type_info(vehicle)?;
+        let env = match world.physics() {
+            Some((view, data)) => crate::boat::BoatEnv {
+                world: view,
+                shapes: &data.shapes,
+                blocks: data,
+            },
+            // A world without physics data (test fakes): a boat in a void has no water and no
+            // ground, so it starts in the air.
+            None => crate::boat::BoatEnv {
+                world: &NO_BLOCKS,
+                shapes: &NO_BLOCKS,
+                blocks: &haste_physics::DefaultBlockPhysics,
+            },
+        };
+        Some(crate::boat::Boat::new(pos, yaw, dims, &env))
+    }
+
     /// The block states that carry a lid (chest family, shulker boxes), from the game data;
     /// call once at join so `block_event` can tell lid events from other blocks' (pistons use
     /// the same action id).
@@ -1354,6 +1399,12 @@ impl Session {
             for (pos, state) in self.player.take_world_edits() {
                 world.set_block(pos, state);
             }
+            // The boat we steer is this side's authoritative instance of it (vanilla
+            // `Entity.isLocalInstanceAuthoritative`): the entity the world draws sits where our
+            // simulation put it, not where the server's move packets for it still have it.
+            if let (Some(vehicle), Some(boat)) = (self.player.vehicle(), self.player.boat()) {
+                entities.teleport(vehicle, boat.pos, boat.yaw, 0.0, boat.on_ground);
+            }
         }
         match p {
             P::StartConfiguration(_) | P::Transfer(_) => self.new_world_pending = true,
@@ -1385,7 +1436,7 @@ impl Session {
                 self.attached_firework = None;
                 self.dimension = dim;
                 // A respawn is a new body: no vehicle, no riding.
-                self.player.set_vehicle(None, SeatPoint::ZERO);
+                self.player.set_vehicle(None, SeatPoint::ZERO, None);
             }
             P::PlayerPosition(p) => {
                 tracing::debug!(
@@ -1565,7 +1616,7 @@ impl Session {
                 // If our vehicle is removed, we dismount (the store's riding bookkeeping drops
                 // us too, as a passenger of the removed vehicle).
                 if self.player.vehicle.is_some_and(|v| ids.contains(&v)) {
-                    self.player.set_vehicle(None, SeatPoint::ZERO);
+                    self.player.set_vehicle(None, SeatPoint::ZERO, None);
                 }
                 for id in &ids {
                     self.entity_ids.remove(id);
@@ -1580,17 +1631,41 @@ impl Session {
                 let vehicle = EntityId(s.vehicle);
                 let passengers: Vec<EntityId> = s.passengers.iter().map(|i| EntityId(*i)).collect();
                 entities.set_passengers(vehicle, &passengers);
+                // A boat we steer is simulated on our side from the mount on (see
+                // [`crate::boat`]); the correction below clears it on any dismount.
+                let boat = (passengers.first() == Some(&self.entity_id))
+                    .then(|| self.boat_at(vehicle, entities, world))
+                    .flatten();
                 // Mount, re-seat, or dismount. The seat comes from the vehicle's type through
                 // vanilla's attachment rules (`haste_entity::passenger_seat`), which also names
                 // our own seat index: a boat's second passenger sits elsewhere than the first.
                 match self.seat_of(vehicle, &passengers, entities) {
-                    Some(seat) => self.player.set_vehicle(Some(vehicle), seat),
+                    Some(seat) => self.player.set_vehicle(Some(vehicle), seat, boat),
                     None if self.player.vehicle() == Some(vehicle) => {
                         // Dismount: our vehicle's new list no longer names us. Sneak's shift
                         // flag in player_input is what made the server send this.
-                        self.player.set_vehicle(None, SeatPoint::ZERO);
+                        self.player.set_vehicle(None, SeatPoint::ZERO, None);
                     }
                     None => {}
+                }
+            }
+            // The server's correction of the vehicle we steer (vanilla
+            // `ClientPacketListener.handleMoveVehicle`): our simulation is snapped to where the
+            // server put the boat, and the answer carries it straight back as our next
+            // `move_vehicle`.
+            P::MoveVehicle(m) => {
+                if let Some(boat) = self.player.boat_mut() {
+                    if (m.pos - boat.pos).length() > VEHICLE_CORRECTION_EPSILON {
+                        boat.correct(m.pos, m.yaw);
+                    }
+                    out.push(ServerboundPlay::MoveVehicle(
+                        haste_protocol::packets::play::serverbound::MoveVehicle {
+                            pos: boat.pos,
+                            yaw: boat.yaw,
+                            pitch: 0.0,
+                            on_ground: boat.on_ground,
+                        },
+                    ));
                 }
             }
             P::MoveEntityPos(m) => {
@@ -2031,21 +2106,32 @@ impl NetDriver {
     }
 
     /// Drains every queued packet into the session, world, entities and the UI (the HUD: every
-    /// packet in order, after the client's own handling), and sends the replies.
+    /// packet in order, after the client's own handling), and sends the replies. Packets queued
+    /// since the last drain are applied now (vanilla runs the packet queue every frame, before
+    /// the tick, `Minecraft.runTick` -> `packetProcessor.processQueuedPackets`).
     pub fn receive<W: WorldSink + ?Sized, E: EntitySink + ?Sized>(
         &mut self,
         world: &mut W,
         entities: &mut E,
         ui: Option<&crate::ui::Ui>,
     ) -> anyhow::Result<()> {
-        while let Some(p) = self.conn.try_recv() {
+        while let Some(a) = self.conn.try_recv_arrived() {
+            let waited_ms = a.at.elapsed().as_secs_f64() * 1000.0;
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                if let Some(name) = a.packet.name() {
+                    if name == "minecraft:container_set_slot" {
+                        tracing::debug!(wait_ms = waited_ms, "container_set_slot applied");
+                    }
+                }
+            }
             let regs = self.conn.registries();
             // The HUD sees every packet after the client's own handling, in order; cloning only
             // when there is a UI to show it (the session takes the original). While the HUD JVM
             // is still starting the UI-bound packets are kept and replayed once it is up.
-            let keep = ui.is_some() || crate::ui::ui_handles(&p);
-            let for_ui = keep.then(|| p.clone());
-            self.session.apply(p, world, entities, regs, &mut self.out);
+            let keep = ui.is_some() || crate::ui::ui_handles(&a.packet);
+            let for_ui = keep.then(|| a.packet.clone());
+            self.session
+                .apply(a.packet, world, entities, regs, &mut self.out);
             match (ui, for_ui) {
                 (Some(ui), Some(p)) => ui.handle(&p),
                 (None, Some(p)) if self.ui_backlog.len() < UI_BACKLOG_LIMIT => {

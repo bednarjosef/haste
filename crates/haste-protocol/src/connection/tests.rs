@@ -1202,3 +1202,63 @@ async fn server_pack_push_downloads_and_reports_statuses() {
     );
     conn.disconnect();
 }
+
+/// `set_packet_wake`'s hook fires when the reader queues a play packet, after
+/// the send (a woken drainer sees the packet), and the queued packet carries
+/// the arrival timestamp `try_recv_arrived` reports (the client's
+/// arrival-to-apply latency log depends on both).
+#[tokio::test]
+async fn packet_wake_fires_on_arrival() {
+    let tables = test_tables();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(serve(listener, tables.clone(), false, None));
+
+    let mut opts = ConnectOptions::new(
+        addr.to_string(),
+        Account::Offline {
+            username: "tester".into(),
+        },
+    );
+    opts.tables = Some(tables);
+    let (mut conn, _login) =
+        tokio::time::timeout(Duration::from_secs(10), Connection::connect(opts))
+            .await
+            .expect("connect timeout")
+            .unwrap();
+
+    let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let w = wakes.clone();
+    conn.set_packet_wake(Arc::new(move || {
+        w.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }));
+
+    // The login packet is queued before the hook is set, so it cannot have
+    // woken anything; it still arrives with a timestamp.
+    let first = tokio::time::timeout(Duration::from_secs(5), conn.recv_arrived())
+        .await
+        .expect("login timeout")
+        .expect("login");
+    assert!(matches!(first.packet, ClientboundPlay::Login(_)));
+    assert!(!first.at.elapsed().is_zero());
+
+    // Drain to the keep alive the server sends in the play state.
+    loop {
+        let a = tokio::time::timeout(Duration::from_secs(5), conn.recv_arrived())
+            .await
+            .expect("recv timeout")
+            .expect("connection open");
+        if matches!(a.packet, ClientboundPlay::KeepAlive(_)) {
+            break;
+        }
+    }
+    // The keep alive arrived through the reader, which queued it with the hook
+    // set: the hook fired (at least once — the reader may also have queued the
+    // level chunk in the same batch).
+    assert!(
+        wakes.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "the wake hook fired when a packet was queued"
+    );
+    server.abort();
+    conn.disconnect();
+}

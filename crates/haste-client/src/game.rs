@@ -26,7 +26,7 @@ use haste_protocol::haste_core::{
     BlockPos, BlockStateId, ChunkPos, Direction, EntityId, Identifier, RegistryIndex, SectionPos,
 };
 use haste_world::World;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Condvar, Mutex, RwLock};
 
 use crate::net::{NetDriver, WorldSink};
 use crate::ui::Ui;
@@ -549,6 +549,22 @@ pub struct Shared {
     pub chunks_loaded: AtomicU64,
     /// Chunk unload packets received.
     pub chunks_unloaded: AtomicU64,
+    /// Wakes the game thread the moment a play packet arrives (the reader task
+    /// notifies through [`Connection`'s wake hook]). Vanilla drains the packet
+    /// queue every frame (`Minecraft.runTick`), so a packet never waits for the
+    /// next 20 Hz tick to be applied; the game thread sleeps on this condvar
+    /// between packets and ticks, and re-sleeps when the queue is empty.
+    pub packet_wake: (Mutex<u64>, Condvar),
+}
+
+impl Shared {
+    /// Notifies the game thread that a packet arrived. Cheap when nobody
+    /// sleeps: one lock, one counter bump, one notify.
+    pub fn wake_on_packet(&self) {
+        let mut count = self.packet_wake.0.lock();
+        *count += 1;
+        self.packet_wake.1.notify_all();
+    }
 }
 
 /// What a resource pack rebuild applies.
@@ -655,6 +671,7 @@ impl Shared {
             debug_rx: AtomicU64::new(0),
             chunks_loaded: AtomicU64::new(0),
             chunks_unloaded: AtomicU64::new(0),
+            packet_wake: (Mutex::new(0), Condvar::new()),
         }
     }
 
@@ -772,9 +789,20 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>, existing_ui: Option<Ui>) 
     // The server pack set version this thread last applied (starts at the
     // connection's: the configuration-phase packs were applied at session build).
     let mut server_packs_version = driver.connection().server_packs_version();
+    // Packets are drained on arrival, not only at ticks: vanilla runs the packet
+    // queue every frame (`Minecraft.runTick` -> `processQueuedPackets`), so a
+    // `container_set_slot` shows on the frame after it arrives instead of up to
+    // one tick (50 ms) later. Between ticks the thread sleeps on the wake below
+    // and only drains packets (no game logic, no input): the 20 Hz tick order
+    // and rate are unchanged.
+    let mut drained_wakes = 0u64;
+    let mut failure: Option<String> = None;
     let reason = loop {
         if shared.stop.load(Ordering::Relaxed) {
             break "left the game".to_string();
+        }
+        if let Some(f) = failure.take() {
+            break f;
         }
         if let Err(e) = tick_once(
             &mut driver,
@@ -815,7 +843,31 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>, existing_ui: Option<Ui>) 
         next += tick;
         let now = Instant::now();
         if next > now {
-            std::thread::sleep(next - now);
+            // Sleep until the next tick, but wake the moment a packet arrives
+            // (the reader bumps the counter and notifies). The counter, not the
+            // notify, carries the signal, so a wake that arrived while we were
+            // awake is still seen on the next lock.
+            while Instant::now() < next && failure.is_none() {
+                let left = next.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                let mut seen = shared.packet_wake.0.lock();
+                if *seen == drained_wakes {
+                    let _ = shared.packet_wake.1.wait_for(&mut seen, left);
+                }
+                let arrived = *seen != drained_wakes;
+                drop(seen);
+                if arrived {
+                    if let Err(e) =
+                        drain_packets(&mut driver, &shared, &mut gone, &mut server_packs_version)
+                    {
+                        failure = Some(format!("tick failed: {e:#}"));
+                        break;
+                    }
+                    drained_wakes = *shared.packet_wake.0.lock();
+                }
+            }
         } else if now - next > tick * 10 {
             // Far behind (debugger, suspend): skip instead of bursting ticks.
             next = now;
@@ -941,6 +993,52 @@ impl HudSlot {
     }
 }
 
+/// Drains the packets that arrived since the last call into the session, world,
+/// entities and UI, and publishes the dirty sections. Runs both at the start of
+/// a tick and whenever a packet wakes the game thread between ticks (vanilla
+/// runs the packet queue every frame, `Minecraft.runTick` ->
+/// `packetProcessor.processQueuedPackets`, before the tick's own work).
+fn drain_packets(
+    driver: &mut NetDriver,
+    shared: &Shared,
+    gone: &mut Vec<SectionPos>,
+    server_packs_version: &mut u64,
+) -> anyhow::Result<()> {
+    let mut world = shared.world.write();
+    let mut entities = shared.entities.write();
+    let mut tracked = TrackedWorld {
+        world: &mut world,
+        gone,
+    };
+    let ui = shared.ui.lock().clone();
+    driver.receive(&mut tracked, &mut *entities, ui.as_ref())?;
+    let mut dirty = world.take_dirty_sections();
+    if !dirty.is_empty() {
+        shared.dirty.lock().append(&mut dirty);
+    }
+    // The server's live pack set changed (vanilla ticks its ServerPackManager the
+    // same way: a download finished, a re-push replaced one, or a pop arrived):
+    // apply the whole set on top of the stack and reload, like the pack screen's
+    // Done. The connection's reply path already sent statuses.
+    let version = driver.connection().server_packs_version();
+    if version != *server_packs_version {
+        *server_packs_version = version;
+        let packs = driver.connection().server_packs();
+        for pack in &packs {
+            tracing::info!(
+                "server resource pack {} downloaded to {}",
+                pack.id,
+                pack.path.display()
+            );
+        }
+        *shared.applied_server_packs.lock() = packs.iter().map(|p| p.path.clone()).collect();
+        let ids = crate::app::selected_resource_packs();
+        let server = shared.applied_server_packs.lock().clone();
+        *shared.resource_pack_reload.lock() = Some(PackReload { ids, server });
+    }
+    Ok(())
+}
+
 fn tick_once(
     driver: &mut NetDriver,
     shared: &Shared,
@@ -997,44 +1095,7 @@ fn tick_once(
     }
     // This tick's UI output (packets vanilla code sent, chat and commands typed).
     let mut ui_out = Vec::new();
-    {
-        let mut world = shared.world.write();
-        let mut entities = shared.entities.write();
-        let mut tracked = TrackedWorld {
-            world: &mut world,
-            gone,
-        };
-        let ui = shared.ui.lock().clone();
-        driver.receive(&mut tracked, &mut *entities, ui.as_ref())?;
-        let mut dirty = world.take_dirty_sections();
-        dirty.append(gone);
-        if !dirty.is_empty() {
-            shared.dirty.lock().append(&mut dirty);
-        }
-        // A server pack finished downloading (vanilla ticks its ServerPackManager the
-        // same way): apply it on top of the stack and reload, like the pack screen's
-        // Done. The connection's cached reply path already answered the statuses.
-        // The server's live pack set changed (vanilla ticks its ServerPackManager
-        // the same way: a download finished, a re-push replaced one, or a pop
-        // arrived): apply the whole set on top of the stack and reload, like the
-        // pack screen's Done. The connection's reply path already sent statuses.
-        let version = driver.connection().server_packs_version();
-        if version != *server_packs_version {
-            *server_packs_version = version;
-            let packs = driver.connection().server_packs();
-            for pack in &packs {
-                tracing::info!(
-                    "server resource pack {} downloaded to {}",
-                    pack.id,
-                    pack.path.display()
-                );
-            }
-            *shared.applied_server_packs.lock() = packs.iter().map(|p| p.path.clone()).collect();
-            let ids = crate::app::selected_resource_packs();
-            let server = shared.applied_server_packs.lock().clone();
-            *shared.resource_pack_reload.lock() = Some(PackReload { ids, server });
-        }
-    }
+    drain_packets(driver, shared, gone, server_packs_version)?;
     // This tick's sound packets, played through the output (when the client set one up).
     // This runs again after `end_tick` below to pick up the player's own block sounds
     // (footsteps, mining, placing) that the player's tick just produced.
@@ -1730,6 +1791,13 @@ fn tick_once(
             None => {}
         }
         ui.tick();
+        // Inventory edits vanilla Java code predicted client-side (creative slot sets, menu
+        // clicks, pick block): the server does not echo them back, so the client takes them
+        // from the Java mirror. Without this the hand keeps the old item (the reported
+        // creative-inventory bug: the hotbar shows the item, the hand does not).
+        for (slot, stack) in ui.drain_inventory_changes() {
+            driver.session.player.set_inventory_slot(slot, &stack);
+        }
         // Every option a vanilla screen changed this tick reaches the running client live
         // (vanilla's `OptionInstance.onValueUpdate` callbacks, reported through the bridge).
         let changes = ui.drain_option_changes();

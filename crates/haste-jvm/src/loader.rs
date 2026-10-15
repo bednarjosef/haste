@@ -211,6 +211,82 @@ pub const DENY: &[&str] = &[
     "net/minecraft/client/gui/screens/ConnectScreen",
 ];
 
+/// Classes the title screen's Singleplayer click loads on first use: the world-selection screen
+/// tree (SelectWorldScreen, WorldSelectionList and its entries, the layout and widget classes it
+/// builds, the NBT and level-summary classes the world list reads), captured by diffing the class
+/// log around the click. Menu mode loads them on a background thread once the title screen is up
+/// (see `JvmHost::warm_screen_classes`), so the first click does not pay for them.
+pub const WARM_CLASSES: &[&str] = &[
+    // the screens themselves
+    "net.minecraft.client.gui.screens.worldselection.SelectWorldScreen",
+    "net.minecraft.client.gui.screens.worldselection.WorldSelectionList",
+    "net.minecraft.client.gui.screens.LoadingDotsText",
+    "net.minecraft.client.gui.screens.FaviconTexture",
+    // the widgets and layouts they build
+    "net.minecraft.client.gui.components.AbstractContainerWidget",
+    "net.minecraft.client.gui.components.AbstractScrollArea",
+    "net.minecraft.client.gui.components.AbstractSelectionList",
+    "net.minecraft.client.gui.components.AbstractStringWidget",
+    "net.minecraft.client.gui.components.EditBox",
+    "net.minecraft.client.gui.components.ObjectSelectionList",
+    "net.minecraft.client.gui.components.SelectableEntry",
+    "net.minecraft.client.gui.components.StringWidget",
+    "net.minecraft.client.gui.layouts.AbstractLayout",
+    "net.minecraft.client.gui.layouts.FrameLayout",
+    "net.minecraft.client.gui.layouts.GridLayout",
+    "net.minecraft.client.gui.layouts.HeaderAndFooterLayout",
+    "net.minecraft.client.gui.layouts.LinearLayout",
+    "net.minecraft.client.gui.navigation.FocusNavigationEvent",
+    // the text shaping EditBox and the list entries use
+    "net.minecraft.client.StringSplitter",
+    "net.minecraft.client.ComponentCollector",
+    "net.minecraft.client.gui.components.ComponentRenderUtils",
+    "net.minecraft.client.gui.components.TextCursorUtils",
+    "net.minecraft.network.chat.FormattedText",
+    // the world summary read (level.dat: NBT into LevelSettings/LevelSummary)
+    "net.minecraft.nbt.NbtIo",
+    "net.minecraft.nbt.NbtUtils",
+    "net.minecraft.nbt.TagTypes",
+    "net.minecraft.nbt.visitors.SkipFields",
+    "net.minecraft.world.level.LevelSettings",
+    "net.minecraft.world.level.WorldDataConfiguration",
+    "net.minecraft.world.level.levelgen.WorldOptions",
+    "net.minecraft.world.level.storage.LevelStorageSource",
+    "net.minecraft.world.level.storage.LevelSummary",
+    "net.minecraft.world.level.storage.LevelVersion",
+    "net.minecraft.util.DirectoryLock",
+    "net.minecraft.util.FastBufferedInputStream",
+    // the rest of the click's first-use tree, captured by diffing the class log around the
+    // click (see tests/click_lag.rs): lazily resolved references and anonymous/nested classes
+    // `getDeclaredClasses` does not reach (they have no InnerClasses entry of their own)
+    "com.google.common.hash.HashFunction",
+    "com.mojang.blaze3d.platform.TextInputManager",
+    "com.mojang.math.Divisor",
+    "com.mojang.serialization.OptionalDynamic",
+    "it.unimi.dsi.fastutil.ints.IntIterator",
+    "org.apache.commons.lang3.StringUtils",
+    "net.minecraft.CharPredicate",
+    "net.minecraft.client.StringSplitter$1",
+    "net.minecraft.client.gui.ComponentPath",
+    "net.minecraft.client.gui.layouts.LayoutSettings",
+    "net.minecraft.client.renderer.texture.TextureManager",
+    "net.minecraft.nbt.CompoundTag$2",
+    "net.minecraft.nbt.IntTag$Cache",
+    "net.minecraft.nbt.NbtIo$1",
+    "net.minecraft.nbt.NbtOps$1",
+    "net.minecraft.nbt.StreamTagVisitor$EntryResult",
+    "net.minecraft.nbt.StreamTagVisitor$ValueResult",
+    "net.minecraft.nbt.visitors.CollectToTag",
+    "net.minecraft.nbt.visitors.FieldSelector",
+    "net.minecraft.nbt.visitors.FieldTree",
+    "net.minecraft.network.chat.FormattedText$3",
+    "net.minecraft.network.chat.FormattedText$4",
+    "net.minecraft.util.StringUtil",
+    "net.minecraft.world.level.storage.LevelResource",
+    // the TextureManager proxy's impl class (favicons register through it)
+    "haste.gui.TextureImpl",
+];
+
 /// Haste-written replacement classes (sources: `java/haste/replace/<internal>.java`), served from the
 /// game build under their vanilla name whatever the package rules above say.
 ///

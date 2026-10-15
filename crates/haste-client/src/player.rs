@@ -214,6 +214,10 @@ pub struct LocalPlayer {
     /// the player's own physics does not run: each tick its position is the vehicle's position
     /// plus the seat offset ([`LocalPlayer::ride_tick`]).
     pub vehicle: Option<EntityId>,
+    /// The boat we steer ([`crate::boat`]), set on mount together with `vehicle` and cleared on
+    /// any dismount: it holds the client's own authoritative simulation of a vehicle whose
+    /// controlling passenger we are (vanilla `Entity.isLocalInstanceAuthoritative`).
+    boat: Option<crate::boat::Boat>,
     /// Where our feet sit on the vehicle while riding (set on mount), in the vehicle's own
     /// frame: the vehicle's passenger attachment point minus our own vehicle attachment point
     /// (`haste_entity::passenger_seat`).
@@ -295,6 +299,7 @@ impl LocalPlayer {
             has_position: false,
             loaded: false,
             vehicle: None,
+            boat: None,
             seat: SeatPoint::ZERO,
             pending_accept: None,
             pending_accept_age: 0,
@@ -791,18 +796,36 @@ impl LocalPlayer {
 
     /// Mounts or dismounts (`set_passengers`): `seat` is where our feet sit on the vehicle each
     /// tick, in the vehicle's frame (the vehicle's passenger attachment point minus our own,
-    /// `haste_entity::passenger_seat`). On a dismount, normal physics resumes from where the
-    /// player is.
-    pub fn set_vehicle(&mut self, vehicle: Option<EntityId>, seat: SeatPoint) {
+    /// `haste_entity::passenger_seat`), and `boat` the vehicle's client-side simulation when it
+    /// is a boat we steer (`None` for any other vehicle, and on a dismount). On a dismount,
+    /// normal physics resumes from where the player is.
+    pub fn set_vehicle(
+        &mut self,
+        vehicle: Option<EntityId>,
+        seat: SeatPoint,
+        boat: Option<crate::boat::Boat>,
+    ) {
         if vehicle.is_some() {
             self.seat = seat;
         }
         self.vehicle = vehicle;
+        self.boat = boat;
     }
 
     /// The vehicle we ride, if any.
     pub fn vehicle(&self) -> Option<EntityId> {
         self.vehicle
+    }
+
+    /// The boat we steer, if any (its simulated pose drives the seat and the `move_vehicle`
+    /// packets; for tests).
+    pub fn boat(&self) -> Option<&crate::boat::Boat> {
+        self.boat.as_ref()
+    }
+
+    /// The boat we steer, for the packets that steer it (the server's corrections).
+    pub fn boat_mut(&mut self) -> Option<&mut crate::boat::Boat> {
+        self.boat.as_mut()
     }
 
     /// The seat we ride in while mounted, in the vehicle's own frame (for tests).
@@ -814,18 +837,60 @@ impl LocalPlayer {
     /// a branch inside it. The passenger's own physics does not run; its position is the
     /// vehicle's position plus the seat offset turned by the vehicle's yaw (vanilla's
     /// `Entity.positionRider`), and only its look is free (`look` is the player's look for this
-    /// tick, look offset already applied). `vehicle` is `None` when the vehicle is not tracked
+    /// tick, look offset already applied). The boat we steer moves under us: the pose comes from
+    /// its own simulation, not from the packets, and `input` hands it the held keys vanilla's
+    /// `LocalPlayer.rideTick` does. `vehicle` is `None` when the vehicle is not tracked
     /// (removed, or its spawn not yet arrived): the passenger keeps its last position.
-    pub fn ride_tick(&mut self, look: (f32, f32), vehicle: Option<VehiclePose>) {
-        if let Some(v) = vehicle {
+    pub fn ride_tick(
+        &mut self,
+        input: &InputState,
+        look: (f32, f32),
+        vehicle: Option<VehiclePose>,
+    ) {
+        // vanilla `LocalPlayer.rideTick`: the passenger is a boat's rudder.
+        let posed = if let Some(boat) = &mut self.boat {
+            boat.set_input(crate::boat::BoatInput::from_input(input));
+            Some(VehiclePose {
+                pos: boat.pos,
+                yaw: boat.yaw,
+            })
+        } else {
+            vehicle
+        };
+        if let Some(v) = posed {
             self.state.pos = v.pos + self.seat.rotated(v.yaw);
         }
         self.state.velocity = DVec3::ZERO;
         self.state.fall_distance = 0.0;
         self.state.on_ground = false;
         self.state.horizontal_collision = false;
-        self.state.yaw = look.0;
+        // vanilla `AbstractBoat.positionRider`: a boat drags our look with its turn and keeps
+        // it within 105 degrees of its own heading; any other vehicle leaves the look alone.
+        self.state.yaw = match &self.boat {
+            Some(boat) => crate::boat::passenger_yaw(look.0, boat),
+            None => look.0,
+        };
         self.state.pitch = look.1;
+    }
+
+    /// The boat's own tick, which vanilla runs before its passenger's (`ClientLevel`
+    /// .tickNonPassenger` ticks the vehicle, then `tickPassenger` the passenger): the status,
+    /// the buoyancy and drag, the paddles and the swept move, then the `paddle_boat` packet the
+    /// client's own instance sends every tick.
+    fn boat_tick(&mut self, ctx: &TickCtx<'_>, out: &mut Vec<ServerboundPlay>) {
+        let Some(boat) = &mut self.boat else {
+            return;
+        };
+        let env = crate::boat::BoatEnv {
+            world: ctx.world,
+            shapes: ctx.shapes,
+            blocks: ctx.blocks,
+        };
+        boat.tick(&env);
+        out.push(ServerboundPlay::PaddleBoat(sb::PaddleBoat {
+            left: boat.paddle(0),
+            right: boat.paddle(1),
+        }));
     }
 
     fn tick_inner(
@@ -896,8 +961,22 @@ impl LocalPlayer {
         // 2. The passenger tick (vanilla `rideTick`) replaces physics: a passenger sends
         // rotation only, never position packets (the server owns a passenger's position).
         if self.vehicle.is_some() {
-            self.ride_tick(look, vehicle);
+            // The vehicle's own tick first (vanilla `ClientLevel.tickNonPassenger`), then the
+            // passenger's `rideTick` seats us on it, then `LocalPlayer.sendChanges`: the rotation
+            // and, for a vehicle we control, the `move_vehicle` that carries its simulation.
+            self.boat_tick(ctx, out);
+            self.ride_tick(input, look, vehicle);
             self.send_rotation(out);
+            if let Some(boat) = &self.boat {
+                if boat.pos.is_finite() && boat.yaw.is_finite() {
+                    out.push(ServerboundPlay::MoveVehicle(sb::MoveVehicle {
+                        pos: boat.pos,
+                        yaw: boat.yaw,
+                        pitch: 0.0,
+                        on_ground: boat.on_ground,
+                    }));
+                }
+            }
             out.push(ServerboundPlay::ClientTickEnd(sb::ClientTickEnd {}));
             return;
         }

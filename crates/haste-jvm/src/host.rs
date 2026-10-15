@@ -4,7 +4,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use jni::objects::{JClass, JObject, JString, JValue};
+use jni::objects::{JClass, JObject, JObjectArray, JString, JValue};
 use jni::refs::Global;
 use jni::{jni_sig, jni_str, Env, InitArgsBuilder, JNIVersion, JavaVM};
 use parking_lot::Mutex;
@@ -221,6 +221,16 @@ impl JvmHost {
             ))
             .option("-Xshare:auto")
             .option("-Xss4m")
+            // Small-footprint JVM for the HUD: a 256 MiB heap cap (the GUI settles at
+            // ~110 MiB used; Bootstrap and the registries peak below 200), the serial GC
+            // (no collector threads or write barriers of the collectors meant for heaps
+            // 100x this size) and C1-only compilation (the GUI is not hot enough for C2
+            // to pay back its code cache and compile memory).
+            .option("-Xms32m")
+            .option("-Xmx256m")
+            .option("-XX:+UseSerialGC")
+            .option("-XX:TieredStopAtLevel=1")
+            .option("-XX:ReservedCodeCacheSize=32m")
             // Link game classes lazily: with verification on, the verifier loads every type a method
             // body could assign (all screens PauseScreen can open, their listeners, ...) before any of
             // it runs, and the first refused one fails the class. The vanilla classes are the player's
@@ -334,6 +344,48 @@ impl JvmHost {
                 "classLog",
             )?))
         })
+    }
+
+    /// Warms the classes a menu click loads on first use ([`loader::WARM_CLASSES`], plus every
+    /// class nested inside them) on a background thread, so the first click on the title screen
+    /// does not pay for their loading and static init. Returns at once; failures are logged, not
+    /// propagated (the click still works, just slower).
+    pub fn warm_screen_classes(&self) {
+        let host = self.clone();
+        std::thread::Builder::new()
+            .name("haste-jvm-warm".into())
+            .spawn(move || {
+                let t = Instant::now();
+                let r = host.with_env(|env| {
+                    let mut loaded = 0usize;
+                    for name in loader::WARM_CLASSES {
+                        let cls = match host.load_class(env, name) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                // a warm-up miss must never break the flow it prepares
+                                tracing::debug!("warm {name}: {e:#}");
+                                continue;
+                            }
+                        };
+                        loaded += 1 + warm_nested(env, &host, &cls, 0)?;
+                    }
+                    Ok(loaded)
+                });
+                match r {
+                    Ok(n) => tracing::debug!(
+                        "warmed {n} screen classes on the background thread in {:?}",
+                        t.elapsed()
+                    ),
+                    Err(e) => tracing::warn!("warming screen classes: {e:#}"),
+                }
+            })
+            .expect("spawning the warm-up thread");
+    }
+
+    /// JVM memory diagnostics (`Boot.memoryStats`): `key=value` lines with the heap
+    /// (committed/used/max), metaspace, code cache and compressed class space, in bytes.
+    pub fn jvm_memory(&self) -> Result<String> {
+        self.with_env(|env| call_static_string(env, &self.inner.boot, "memoryStats"))
     }
 
     /// Methods of generated proxies that were called without an implementation (sorted, distinct).
@@ -539,4 +591,47 @@ fn source_stamp(dirs: &[PathBuf], files: &[&Path]) -> String {
     v.extend(files.iter().map(|f| fingerprint(f)));
     v.sort();
     v.join("\n")
+}
+
+/// Loads and initialises every class nested inside `cls` (and, one level deeper, inside those),
+/// through [`JvmHost::load_class`]: the JVM resolves a nested class lazily on first use, so
+/// warming the outer class alone leaves `WorldSelectionList$WorldListEntry` and friends cold.
+/// Returns how many were warmed; a nested class that cannot load is skipped, not fatal.
+fn warm_nested(env: &mut Env, host: &JvmHost, cls: &JClass, depth: u8) -> Result<usize> {
+    if depth > 1 {
+        return Ok(0);
+    }
+    let nested = env
+        .call_method(
+            cls,
+            jni_str!("getDeclaredClasses"),
+            jni_sig!("()[Ljava/lang/Class;"),
+            &[],
+        )
+        .map_err(|e| caught(env, e))?
+        .l()?;
+    // Safety: getDeclaredClasses returns java.lang.Class[].
+    let arr = unsafe { JObjectArray::<JClass>::from_raw(env, nested.into_raw()) };
+    let len = arr.len(env)?;
+    let mut warmed = 0usize;
+    for i in 0..len {
+        let element = arr.get_element(env, i)?;
+        let name = env
+            .call_method(
+                &element,
+                jni_str!("getName"),
+                jni_sig!("()Ljava/lang/String;"),
+                &[],
+            )
+            .map_err(|e| caught(env, e))?
+            .l()?;
+        let name = jstring_to_string(env, name)?;
+        env.delete_local_ref(element);
+        match host.load_class(env, &name) {
+            // a nested class that refuses (a generated proxy's, say) is skipped, not fatal
+            Err(e) => tracing::debug!("warm {name}: {e:#}"),
+            Ok(inner) => warmed += 1 + warm_nested(env, host, &inner, depth + 1)?,
+        }
+    }
+    Ok(warmed)
 }

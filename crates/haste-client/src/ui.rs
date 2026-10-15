@@ -194,6 +194,12 @@ impl Ui {
         self.host.gui()
     }
 
+    /// JVM memory diagnostics (`Boot.memoryStats`): `key=value` lines (heap, metaspace,
+    /// code cache, compressed class space), empty when the JVM failed to start.
+    pub fn jvm_memory(&self) -> String {
+        self.host.jvm_memory().unwrap_or_default()
+    }
+
     /// Opens a real vanilla screen (menu mode's title screen, tests).
     pub fn open_screen(&self, kind: ScreenKind) -> anyhow::Result<()> {
         self.gui().open_screen(kind)
@@ -493,6 +499,15 @@ impl Ui {
     /// `OptionInstance.onValueUpdate` callbacks.
     pub fn drain_option_changes(&self) -> Vec<(String, String)> {
         self.state(|s| s.take_option_changes())
+    }
+
+    /// The inventory slots vanilla Java code changed since the last call (vanilla
+    /// `Inventory` numbering, oldest first): creative slot sets, menu clicks, pick block —
+    /// edits vanilla predicts client-side, which the server does not echo back (vanilla's
+    /// `handleSetCreativeModeSlot` marks the slot remote before `broadcastChanges`, so no
+    /// `container_set_slot`/`set_player_inventory` arrives for it).
+    pub fn drain_inventory_changes(&self) -> Vec<(i32, haste_core::entity::ItemStackData)> {
+        self.state(|s| s.take_inventory_changes())
     }
 
     /// The resource pack selection the pack screen committed since the last call (vanilla

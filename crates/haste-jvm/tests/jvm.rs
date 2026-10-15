@@ -54,6 +54,7 @@ fn reset(gui: &haste_jvm::GuiPipeline) {
     gui.with_state(|s| {
         s.inventory = vec![haste_jvm::empty_stack(); haste_jvm::INVENTORY_SIZE];
         s.carried = haste_jvm::empty_stack();
+        s.inventory_changes.clear();
         s.selected_slot = 0;
         s.sent.clear();
         s.outgoing.clear();
@@ -1437,6 +1438,43 @@ fn creative_inventory_and_search() {
     // The mirror arrays only refresh on render/tick: update them so the game mode is back
     // before any later test opens a screen.
     gui.tick();
+}
+
+/// A creative-mode slot set from Java (the creative screen's client-side prediction: the
+/// click mutates vanilla's `Inventory` and sends `set_creative_mode_slot`, which the
+/// server answers with nothing — `handleSetCreativeModeSlot` marks the slot remote before
+/// `broadcastChanges`). The Rust side must learn the stack from the Java mirror's change
+/// queue, or the first-person hand keeps showing the old item while the HUD hotbar (real
+/// vanilla Java, reading the same `Inventory`) shows the new one.
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM, data generator reports)"]
+fn creative_slot_set_reaches_the_rust_inventory() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    reset(gui);
+    // The change queue starts empty (reset drains nothing, but be explicit).
+    let pre = gui.with_state(|s| s.take_inventory_changes());
+    assert!(pre.is_empty(), "queued changes before: {pre:?}");
+    // What a creative click does: the stack lands in vanilla's `Inventory` (Java-side),
+    // then `InventorySync.sync` — which every bridge call runs — hands it to Rust.
+    gui.set_inventory_slot(0, &stack("minecraft:diamond_sword", 1))
+        .unwrap();
+    let changes = gui.with_state(|s| s.take_inventory_changes());
+    assert_eq!(
+        changes,
+        vec![(0, stack("minecraft:diamond_sword", 1))],
+        "the creative slot set must reach the Rust mirror's change queue"
+    );
+    // And drains once (the client takes each change exactly once).
+    assert!(gui.with_state(|s| s.take_inventory_changes()).is_empty());
+    // Clearing the slot (a creative pickup) is a change too.
+    gui.set_inventory_slot(0, &haste_jvm::empty_stack())
+        .unwrap();
+    assert_eq!(
+        gui.with_state(|s| s.take_inventory_changes()),
+        vec![(0, haste_jvm::empty_stack())]
+    );
 }
 
 /// `minecraft:item` registry id of an item, from the data generator's report (Rust's numbering).
