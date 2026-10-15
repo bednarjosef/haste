@@ -625,7 +625,11 @@ impl SkyRenderer {
             let glow = crate::fog::sunrise_sunset_color(sky.time_of_day);
             colors.sunrise = [glow[0], glow[1], glow[2], glow[3]];
             colors.sunrise_side = crate::fog::sun_glow_side(sky.time_of_day);
-            colors.sky = crate::fog::overworld_sky_color(sky.time_of_day);
+            colors.sky = crate::fog::overworld_sky_color(
+                sky.time_of_day,
+                sky.rain.clamp(0.0, 1.0),
+                (sky.thunder * sky.rain.clamp(0.0, 1.0)).clamp(0.0, 1.0),
+            );
         }
         self.colors = colors;
         let rain = sky.rain.clamp(0.0, 1.0);

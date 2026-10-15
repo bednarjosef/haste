@@ -560,8 +560,43 @@ pub fn sunrise_sunset_color(time_of_day: i64) -> [f32; 4] {
 }
 
 /// The overworld sky-dome colour this tick (sRGB): 0x78A7FF with the timeline's night
-/// multiplier (clear weather; rain/thunder darkening is a later task with weather itself).
-pub fn overworld_sky_color(time_of_day: i64) -> [f32; 3] {
+/// multiplier, then the weather layers (`WeatherAttributes.RAIN`/`THUNDER` over SKY_COLOR,
+/// `ColorModifier.BLEND_TO_GRAY_RGB`): rain lerps toward the greyscale times 0.6 by 0.75
+/// weighted by the rain level minus the thunder level, thunder toward the greyscale times
+/// 0.24 by 0.94 weighted by the thunder level.
+pub fn overworld_sky_color(time_of_day: i64, rain_level: f32, thunder_level: f32) -> [f32; 3] {
+    let mut sky = overworld_sky_color_clear(time_of_day);
+    let rain_only = (rain_level - thunder_level).clamp(0.0, 1.0);
+    let blend = |col: [f32; 3], brightness: f32, factor: f32| {
+        let grey = col[0] * 0.3 + col[1] * 0.59 + col[2] * 0.11;
+        [
+            col[0] + (grey * brightness - col[0]) * factor,
+            col[1] + (grey * brightness - col[1]) * factor,
+            col[2] + (grey * brightness - col[2]) * factor,
+        ]
+    };
+    if rain_only > 0.0 {
+        let target = blend(sky, 0.6, 0.75);
+        sky = [
+            sky[0] + (target[0] - sky[0]) * rain_only,
+            sky[1] + (target[1] - sky[1]) * rain_only,
+            sky[2] + (target[2] - sky[2]) * rain_only,
+        ];
+    }
+    if thunder_level > 0.0 {
+        let target = blend(sky, 0.24, 0.94);
+        sky = [
+            sky[0] + (target[0] - sky[0]) * thunder_level,
+            sky[1] + (target[1] - sky[1]) * thunder_level,
+            sky[2] + (target[2] - sky[2]) * thunder_level,
+        ];
+    }
+    sky
+}
+
+/// The clear-weather overworld sky-dome colour this tick (sRGB): 0x78A7FF with the
+/// timeline's night multiplier.
+fn overworld_sky_color_clear(time_of_day: i64) -> [f32; 3] {
     let night = timeline_sample3(&SKY_COLOR_NIGHT, time_of_day);
     [
         OVERWORLD_SKY_COLOR[0] * night[0],
