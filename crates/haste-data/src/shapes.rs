@@ -11,6 +11,7 @@ use crate::blocks::BlockStates;
 
 /// Per-state shape entry (empty = no collision). `light`/`air`/`opaque`/`fluid` come from the
 /// oracle dump's per-state fields (or fallback heuristics) and back `BlockPhysics` on `GameData`.
+/// `ao_solid` is vanilla `getShadeBrightness <= 0.2` (see `is_ao_solid`).
 #[derive(Default, Clone)]
 struct StateShapes {
     collision: Vec<Aabb>,
@@ -19,6 +20,7 @@ struct StateShapes {
     air: bool,
     opaque: bool,
     fluid: Option<FluidInfo>,
+    ao_solid: bool,
 }
 
 pub struct BlockShapes {
@@ -96,9 +98,12 @@ impl BlockShapes {
                     })
                     .collect()
             };
+            let collision = conv(&s.collision);
+            let outline = conv(&s.outline);
             shapes[idx] = StateShapes {
-                collision: conv(&s.collision),
-                outline: conv(&s.outline),
+                ao_solid: ao_solid_for(blocks.block_of(BlockStateId(s.id)).path(), &collision),
+                collision,
+                outline,
                 light: s.light,
                 air: s.air,
                 opaque: s.opaque,
@@ -150,6 +155,24 @@ impl BlockShapes {
 
     pub(crate) fn is_opaque_full(&self, state: BlockStateId) -> bool {
         self.shapes[self.row(state)].opaque
+    }
+
+    /// Whether the state darkens its neighbours' ambient occlusion: vanilla
+    /// `BlockBehaviour.getShadeBrightness` returns 0.2 for a full collision cube
+    /// and 1.0 otherwise. `TransparentBlock` (glass family) and the other
+    /// always-1.0 overrides win over the shape test; `SnowLayerBlock` is 0.2
+    /// only at layers = 8 (its full-cube state), which the shape test already
+    /// says. Ids outside the table resolve to the placeholder's entry.
+    pub fn is_ao_solid(&self, state: BlockStateId) -> bool {
+        self.shapes[self.row(state)].ao_solid
+    }
+
+    /// Whether the state's collision shape is a full cube (vanilla
+    /// `isCollisionShapeFullBlock`): decides `BlockModelLighter`'s faceCubic
+    //  test for a quad that does not lie on the block boundary. Ids outside
+    /// the table resolve to the placeholder's entry.
+    pub fn is_collision_full(&self, state: BlockStateId) -> bool {
+        is_collision_full_block(&self.shapes[self.row(state)].collision)
     }
 
     pub(crate) fn fluid(&self, state: BlockStateId) -> Option<FluidInfo> {
@@ -216,7 +239,15 @@ const KEYWORDS: &[&str] = &[
 ];
 
 fn fallback_shapes(blocks: &BlockStates, state: BlockStateId) -> StateShapes {
+    let mut shapes = fallback_shapes_inner(blocks, state);
     let path = blocks.block_of(state).path();
+    shapes.ao_solid = ao_solid_for(path, &shapes.collision);
+    shapes
+}
+
+fn fallback_shapes_inner(blocks: &BlockStates, state: BlockStateId) -> StateShapes {
+    let path = blocks.block_of(state).path().to_owned();
+    let path = path.as_str();
     let prop = |k: &str| blocks.property_value(state, k);
     // Air variants and fluids never collide. Fallback physics fields: air variants are air;
     // water/lava carry a full-source fluid; everything else is an opaque full cube.
@@ -335,6 +366,51 @@ fn is_full_cube(a: Aabb) -> bool {
     (d.x - 1.0).abs() < 1e-9 && (d.y - 1.0).abs() < 1e-9 && (d.z - 1.0).abs() < 1e-9
 }
 
+/// Vanilla `Block.isShapeFullBlock` on a state's collision shape: the shape
+/// covers the whole unit cube. Vanilla VoxelShapes merge into non-overlapping
+/// boxes inside 0..1, so that is exactly total volume 1 (a full cube is
+/// overwhelmingly the single-box case, checked first).
+fn is_collision_full_block(boxes: &[Aabb]) -> bool {
+    if boxes.len() == 1 && is_full_cube(boxes[0]) {
+        return true;
+    }
+    let mut volume = 0.0;
+    for b in boxes {
+        if b.min.x < -1e-9
+            || b.min.y < -1e-9
+            || b.min.z < -1e-9
+            || b.max.x > 1.0 + 1e-9
+            || b.max.y > 1.0 + 1e-9
+            || b.max.z > 1.0 + 1e-9
+        {
+            return false;
+        }
+        let d = b.max - b.min;
+        volume += d.x * d.y * d.z;
+    }
+    (volume - 1.0).abs() < 1e-6
+}
+
+/// Vanilla `getShadeBrightness <= 0.2` for a state: a full collision cube, minus
+/// the blocks whose class overrides the brightness back to 1.0 (the glass
+/// `TransparentBlock` family — `glass`, `stained_glass`, `tinted_glass`, the
+/// weathering `copper_grate` — `LightBlock`, `StructureVoidBlock`,
+/// `BarrierBlock`). The always-0.2 overrides (`MudBlock`, `SoulSandBlock`) are
+/// full cubes anyway, so the shape test alone already covers them, and
+/// `SnowLayerBlock`'s 0.2-at-layers-8 matches its full-cube shape.
+fn ao_solid_for(path: &str, collision: &[Aabb]) -> bool {
+    if matches!(
+        path,
+        "glass" | "tinted_glass" | "light" | "structure_void" | "barrier"
+    ) || path.ends_with("_stained_glass")
+        || path.ends_with("_copper_grate")
+        || path == "copper_grate"
+    {
+        return false;
+    }
+    is_collision_full_block(collision)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,5 +467,63 @@ mod tests {
             assert_eq!(s.light_emission(unknown), s.light_emission(stone));
             assert_eq!(s.fluid(unknown), s.fluid(stone));
         }
+    }
+
+    /// The AO occluder rule (vanilla `BlockBehaviour.getShadeBrightness`, read
+    /// from the 26.3 source): a full collision cube darkens (0.2) unless the
+    /// block's class overrides the brightness to 1.0 — glass
+    /// (`TransparentBlock`) keeps a full collision cube but stays bright. A
+    /// slab (half cube) and leaves' neighbors in the model sense stay bright
+    /// only when the shape is not full: leaves ARE a full collision cube, so
+    /// they darken like stone in vanilla.
+    #[test]
+    fn ao_solid_follows_the_collision_shape_not_render_opacity() {
+        // 0 air, 1 stone, 2 glass, 3 oak_leaves, 4 bottom slab, 5 stained glass,
+        // 6 snow (2 layers), 7 snow (8 layers).
+        let blocks_json = r#"{
+  "minecraft:air": { "states": [ { "id": 0, "default": true } ] },
+  "minecraft:stone": { "states": [ { "id": 1, "default": true } ] },
+  "minecraft:glass": { "states": [ { "id": 2, "default": true } ] },
+  "minecraft:oak_leaves": { "states": [ { "id": 3, "default": true } ] },
+  "minecraft:stone_slab": { "states": [ { "id": 4, "default": true } ] },
+  "minecraft:orange_stained_glass": { "states": [ { "id": 5, "default": true } ] },
+  "minecraft:snow": {
+    "properties": { "layers": ["2", "8"] },
+    "states": [
+      { "id": 6, "default": true, "properties": { "layers": "2" } },
+      { "id": 7, "properties": { "layers": "8" } }
+    ]
+  }
+}"#;
+        let blocks = BlockStates::parse(blocks_json, None).unwrap();
+        let oracle = r#"{
+  "version": 1,
+  "states": [
+    { "id": 0, "air": true, "collision": [], "outline": [], "light": 0, "opaque": false },
+    { "id": 1, "collision": [[0,0,0,1,1,1]], "outline": [[0,0,0,1,1,1]], "light": 0, "opaque": true },
+    { "id": 2, "collision": [[0,0,0,1,1,1]], "outline": [[0,0,0,1,1,1]], "light": 0, "opaque": false },
+    { "id": 3, "collision": [[0,0,0,1,1,1]], "outline": [[0,0,0,1,1,1]], "light": 0, "opaque": false },
+    { "id": 4, "collision": [[0,0,0,1,0.5,1]], "outline": [[0,0,0,1,0.5,1]], "light": 0, "opaque": false },
+    { "id": 5, "collision": [[0,0,0,1,1,1]], "outline": [[0,0,0,1,1,1]], "light": 0, "opaque": false },
+    { "id": 6, "collision": [[0,0,0,1,0.25,1]], "outline": [[0,0,0,1,0.25,1]], "light": 0, "opaque": false },
+    { "id": 7, "collision": [[0,0,0,1,1,1]], "outline": [[0,0,0,1,1,1]], "light": 0, "opaque": true }
+  ]
+}"#;
+        let s = BlockShapes::parse_oracle(oracle, &blocks).unwrap();
+        // Full collision cube, no class override: darkens.
+        assert!(s.is_ao_solid(BlockStateId(1)), "stone darkens");
+        // Full cube but glass (TransparentBlock): stays bright.
+        assert!(!s.is_ao_solid(BlockStateId(2)), "glass stays bright");
+        assert!(
+            !s.is_ao_solid(BlockStateId(5)),
+            "stained glass stays bright"
+        );
+        // Leaves: full collision cube, no override — vanilla darkens them.
+        assert!(s.is_ao_solid(BlockStateId(3)), "leaves darken (full cube)");
+        // Half cube: bright.
+        assert!(!s.is_ao_solid(BlockStateId(4)), "slab stays bright");
+        // Snow: 0.2 only at layers = 8 (the full-cube state).
+        assert!(!s.is_ao_solid(BlockStateId(6)), "thin snow stays bright");
+        assert!(s.is_ao_solid(BlockStateId(7)), "full snow darkens");
     }
 }
