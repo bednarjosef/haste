@@ -745,6 +745,8 @@ pub struct WorldFeed {
     gateway_ages: HashMap<BlockPos, (usize, usize, i64, i64)>,
     /// Gateways already logged (debugging the draw, once per position).
     logged_gateways: std::collections::HashSet<BlockPos>,
+    /// Gateways whose beam was live on the last frame (log on change).
+    gateway_beam_live: HashMap<BlockPos, bool>,
     /// Moving piston data by position, rebuilt only when the block entity's NBT changes.
     piston_cache: HashMap<
         BlockPos,
@@ -1144,8 +1146,15 @@ impl WorldFeed {
                             world_age,
                             partial,
                         );
-                        // Once per gateway: what the renderer gets (debugging the draw).
-                        if self.logged_gateways.insert(pos) {
+                        // On every beam state change (and once at first sight): what the
+                        // renderer gets (debugging the draw).
+                        let beam_now = beam.is_some();
+                        let seen = self.logged_gateways.insert(pos);
+                        let changed = self
+                            .gateway_beam_live
+                            .insert(pos, beam_now)
+                            .is_some_and(|was| was != beam_now);
+                        if seen || changed {
                             tracing::info!(
                                 "end gateway at {pos:?}: faces {faces:#08b}, beam {:?}",
                                 beam.map(|b| (b.scale, b.height))

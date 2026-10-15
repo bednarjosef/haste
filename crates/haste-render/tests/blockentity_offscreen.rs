@@ -320,6 +320,125 @@ fn block_entities_offscreen() {
         "skull draws {skull_pixels} differing pixels"
     );
 
+    // The beacon beam: sections white (the beacon's own block) and red, the beam rising the
+    // whole frame above the beacon. The camera looks north at (0, 1, 0) from four blocks
+    // south; the beam column is at the frame centre, its pixels differing from the empty
+    // scene, and above the block the red section's pixels are red-dominant (the section
+    // colour tints the beam texture).
+    let beacon = BlockEntityInstance {
+        pos: BlockPos::new(0, 1, 0),
+        kind: haste_render::BlockEntityKind::Beacon,
+        beam: Some(std::sync::Arc::new(haste_render::BeamData {
+            sections: vec![
+                haste_render::BeamSection {
+                    color: 0xFF_FF_FF_FF,
+                    height: 1,
+                },
+                haste_render::BeamSection {
+                    color: 0xFF_FF_00_00,
+                    height: 4,
+                },
+            ],
+        })),
+        beam_time: 12.5,
+        ..chest.clone()
+    };
+    let with_beam = render(&mut renderer, &world, &[beacon], camera);
+    with_beam.save(out.join("beacon-beam.png")).unwrap();
+    let mut beam_pixels = 0;
+    let mut beam_red = 0;
+    for (x, y, p) in with_beam.enumerate_pixels() {
+        if *p != *empty.get_pixel(x, y) {
+            beam_pixels += 1;
+            // Above the block (the sky half of the frame): the red section's tint.
+            if y < 200 {
+                let [r, g, b, _] = p.0;
+                if r as i32 - g.max(b) as i32 > 40 {
+                    beam_red += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        beam_pixels > 500,
+        "beam draws {beam_pixels} differing pixels"
+    );
+    assert!(
+        beam_red > 100,
+        "the red section tints the beam: {beam_red} red pixels"
+    );
+
+    // The end portal: the flat starfield slab in the block at (0, 1, 0) (the camera looks
+    // down at it from the south). Its pixels differ from the empty scene and are dark
+    // purple-blue (the starfield's tinted layers), not sky.
+    let portal = BlockEntityInstance {
+        pos: BlockPos::new(0, 1, 0),
+        kind: haste_render::BlockEntityKind::EndPortal,
+        portal_faces: haste_render::blockentity::end_portal_faces(),
+        ..chest.clone()
+    };
+    let with_portal = render(&mut renderer, &world, &[portal], camera);
+    with_portal.save(out.join("end-portal.png")).unwrap();
+    let mut portal_pixels = 0;
+    let mut portal_dark = 0;
+    for (x, y, p) in with_portal.enumerate_pixels() {
+        if *p != *empty.get_pixel(x, y) {
+            portal_pixels += 1;
+            let [r, g, b, _] = p.0;
+            // The starfield's layers are dark (the COLORS tints are 0.02..0.39) and
+            // blue-purple-dominant.
+            if r < 100 && b >= g {
+                portal_dark += 1;
+            }
+        }
+    }
+    assert!(
+        portal_pixels > 500,
+        "portal draws {portal_pixels} differing pixels"
+    );
+    assert!(
+        portal_dark > 200,
+        "portal starfield is dark blue-purple: {portal_dark} pixels"
+    );
+
+    // The end gateway: the full starfield cube plus its magenta spawn beam (scale 1, height
+    // 320). Both draw in the same frame: the cube's pixels and the beam's column above it.
+    let gateway = BlockEntityInstance {
+        pos: BlockPos::new(0, 1, 0),
+        kind: haste_render::BlockEntityKind::EndGateway,
+        portal_faces: 0b0011_1111,
+        gateway_beam: Some(haste_render::GatewayBeam {
+            scale: 1.0,
+            height: 320,
+            color: haste_render::blockentity::DYE_DIFFUSE_COLOR[2],
+        }),
+        ..chest.clone()
+    };
+    let with_gateway = render(&mut renderer, &world, &[gateway], camera);
+    with_gateway.save(out.join("end-gateway.png")).unwrap();
+    let mut gateway_pixels = 0;
+    let mut beam_column = 0;
+    for (x, y, p) in with_gateway.enumerate_pixels() {
+        if *p != *empty.get_pixel(x, y) {
+            gateway_pixels += 1;
+            // High above the cube (the top third): only the beam is there.
+            if y < 120 {
+                let [r, g, b, _] = p.0;
+                if r != g || g != b {
+                    beam_column += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        gateway_pixels > 500,
+        "gateway draws {gateway_pixels} differing pixels"
+    );
+    assert!(
+        beam_column > 100,
+        "gateway beam rises above the cube: {beam_column} pixels"
+    );
+
     // The chest sits at the frame centre (the camera looks at it): its pixels there differ
     // from the empty scene, and they are the chest's brown, not the sky above it.
     let centre = closed.get_pixel(320, 240).0;
