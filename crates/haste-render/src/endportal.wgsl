@@ -38,10 +38,13 @@ struct VertexOut {
 
 // Vanilla projection.glsl `projection_from_position`.
 fn projection_from_position(position: vec4<f32>) -> vec4<f32> {
-    var projection = position * 0.5;
-    projection.xy = vec2<f32>(projection.x + projection.w, projection.y + projection.w);
-    projection.zw = position.zw;
-    return projection;
+    let half = position * 0.5;
+    return vec4<f32>(
+        half.x + position.w,
+        half.y + position.w,
+        position.z,
+        position.w,
+    );
 }
 
 fn linear_fog_value(dist: f32, start: f32, end: f32) -> f32 {

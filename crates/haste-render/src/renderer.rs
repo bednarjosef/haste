@@ -2287,13 +2287,16 @@ impl Renderer {
                     // Vanilla draws the entity shadows (a translucent, depth-tested pass) with
                     // the entities, then the block entities' special passes: the end
                     // portal/gateway starfield and the beacon beams (inner opaque, glow
-                    // translucent without depth write).
+                    // translucent without depth write). The special passes use their own bind
+                    // groups at index 1, so the terrain's must be restored after them (the
+                    // loop below sets the pipeline but not the bind groups again).
                     draw_calls += self.entity.draw_shadows(&mut pass);
                     draw_calls += self.entity.draw(&mut pass);
                     pass.set_bind_group(1, &self.atlas_bind_group, &[]);
                     pass.set_bind_group(2, &self.lightmap_bind_group, &[]);
                     draw_calls += self.entity.draw_portals(&mut pass);
                     draw_calls += self.entity.draw_beams(&mut pass);
+                    pass.set_bind_group(1, &self.atlas_bind_group, &[]);
                     entities_drawn = true;
                     bound_layer = None;
                     bound_arena = u32::MAX;
