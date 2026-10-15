@@ -31,6 +31,24 @@ public final class BlockEntities {
         return BY_POS.get(pos);
     }
 
+    /**
+     * The block entity at a position, created empty when the store does not have it: vanilla's
+     * client builds it when the block state arrives (`LevelChunk.setBlockState`, and the chunk's
+     * own entity list), which Haste only mirrors for the entities a screen reached — the use of
+     * a game-master block or a freshly placed sign usually arrives before any
+     * {@code block_entity_data} named it.
+     */
+    static BlockEntity getOrCreate(BlockPos pos, BlockEntityType<?> type) {
+        BlockEntity be = BY_POS.get(pos);
+        if (be == null || be.getType() != type) {
+            be = type.create(pos, defaultState(type));
+            if (be == null) return null;
+            be.setLevel(Proxies.level);
+            BY_POS.put(pos, be);
+        }
+        return be;
+    }
+
     /** Called when the world is left (vanilla unloads the chunks' block entities with them). */
     static void clear() {
         BY_POS.clear();
@@ -56,21 +74,18 @@ public final class BlockEntities {
      * The block entity at {@code pos}, of the type the packet names: created from the type's first valid
      * block's default state when nothing is there yet (vanilla's {@code LevelChunk.setBlockState} creates it
      * when the block arrives), then loaded from the packet's tag like vanilla
-     * {@code ClientPacketListener.handleBlockEntityData} does.
+     * {@code ClientPacketListener.handleBlockEntityData} does. Returns the entity (null when the type
+     * cannot create one).
      */
-    static void load(BlockPos pos, BlockEntityType<?> type, CompoundTag tag) {
-        BlockEntity be = BY_POS.get(pos);
-        if (be == null || be.getType() != type) {
-            be = type.create(pos, defaultState(type));
-            if (be == null) return;
-            be.setLevel(Proxies.level);
-            BY_POS.put(pos, be);
-        }
+    static BlockEntity load(BlockPos pos, BlockEntityType<?> type, CompoundTag tag) {
+        BlockEntity be = getOrCreate(pos, type);
+        if (be == null) return null;
         try (var reporter = new net.minecraft.util.ProblemReporter.ScopedCollector(
             be.problemPath(), org.slf4j.LoggerFactory.getLogger(BlockEntities.class))) {
             be.loadWithComponents(net.minecraft.world.level.storage.TagValueInput.create(
                 reporter, Registries.access(), tag));
         }
+        return be;
     }
 
     /**
@@ -81,16 +96,7 @@ public final class BlockEntities {
      * packet naming a freshly placed sign is usually this one, not {@code block_entity_data}.
      */
     static void openSignEditor(BlockPos pos, SignTextSlot slot) {
-        BlockEntity be = BY_POS.get(pos);
-        if (be == null) {
-            // The block was placed on the ground below the player's crosshair; whether it is a hanging
-            // sign decides the screen class, and a wrong guess only changes the background art.
-            be = net.minecraft.world.level.block.entity.BlockEntityTypes.SIGN.create(pos,
-                defaultState(net.minecraft.world.level.block.entity.BlockEntityTypes.SIGN));
-            if (be == null) return;
-            be.setLevel(Proxies.level);
-            BY_POS.put(pos, be);
-        }
+        BlockEntity be = getOrCreate(pos, net.minecraft.world.level.block.entity.BlockEntityTypes.SIGN);
         if (be instanceof SignBlockEntity sign) {
             if (sign instanceof net.minecraft.world.level.block.entity.HangingSignBlockEntity hanging) {
                 Proxies.gui.setScreen(new net.minecraft.client.gui.screens.inventory.HangingSignEditScreen(

@@ -272,70 +272,61 @@ craft() {
 }
 
 # ---- 7. Signs: place an oak sign, the edit screen opens, type two lines, Done ----
+# The script is self-contained (the check player is an operator, so it clears, teleports to
+# the camera and gives itself the sign through the chat); the runner only ops the player and
+# reads the evidence. Looking down-forward from the camera (9.5 71 6.5), the placement use
+# targets the ground block ahead: the sign lands at (9, 70, 7) with the typed lines.
 sign() {
   local log="$LOGDIR/sign.log"
   client_start "$ROOT/scripts/checks/edit-sign.txt" "$log" --pos 9.5 71 6.5
   wait_online || { check sign "player never joined" 1; return; }
-  rcon "gamemode survival $NAME" >/dev/null
-  rcon "tp $NAME 9.5 71 6.5 0 10" >/dev/null
-  if wait_shot "$log" sign-setup 90; then
-    rcon "clear $NAME" >/dev/null
-    rcon "give $NAME minecraft:oak_sign 1" >/dev/null
-  fi
+  rcon "op $NAME" >/dev/null
   wait_exit
   echo "--- sign evidence ---"
-  # The sign is placed on the ground ahead (scan the snowy plain in front of the camera).
-  local pos="" x y z out
-  for x in 8 9 10 11; do for y in 71 72 73; do for z in 7 8 9; do
-    if rcon "execute if block $x $y $z minecraft:oak_sign" 2>/dev/null | grep -q "Test passed"; then
-      pos="$x $y $z"; break 3
-    fi
-  done; done; done
-  if [ -n "$pos" ]; then
-    out=$(rcon "data get block $pos front_text")
-  else
-    out="<no sign found near the player>"
-  fi
-  echo "sign at: ${pos:-<none>}"
+  local out
+  out=$(rcon "data get block 9 70 7 front_text")
   echo "front_text: $out"
   local r=0
   has "$out" "LineOne" || { echo "missing line one"; r=1; }
   has "$out" "LineTwo" || { echo "missing line two"; r=1; }
-  check sign "placed an oak sign, typed two lines, Done sent the sign update" "$r"
+  grep -E "haste proxy:|Java exception" "$log" && r=1
+  check sign "placed an oak sign, typed two lines, Escape (Done) sent the sign update" "$r"
 }
 
 # ---- 8. Books: use a writable book, type, sign ----
+# The script is self-contained (the check player is an operator); the runner ops the player
+# and reads the evidence while the player is still online (the entity's data is only
+# queryable while it exists: the final screenshot fires before the client leaves). Signing
+# the book makes the server replace the held writable book with a written book.
 book() {
   local log="$LOGDIR/book.log"
   client_start "$ROOT/scripts/checks/edit-book.txt" "$log"
   wait_online || { check book "player never joined" 1; return; }
-  rcon "gamemode survival $NAME" >/dev/null
-  if wait_shot "$log" book-setup 90; then
-    rcon "clear $NAME" >/dev/null
-    rcon "give $NAME minecraft:writable_book 1" >/dev/null
+  rcon "op $NAME" >/dev/null
+  local held=""
+  if wait_shot "$log" book-done 90; then
+    held=$(rcon "data get entity $NAME SelectedItem")
   fi
   wait_exit
   echo "--- book evidence ---"
-  local held
-  held=$(rcon "data get entity $NAME Inventory")
-  echo "Inventory: $held"
+  echo "SelectedItem: ${held:-<not read>}"
   local r=0
   has "$held" "written_book" || { echo "no written book after signing"; r=1; }
+  has "$held" "MyBook" || { echo "book title missing"; r=1; }
+  grep -E "haste proxy:|Java exception" "$log" && r=1
   check book "used a writable book, typed, signed it into a written book" "$r"
 }
 
 # ---- 9. Command blocks: ops, place, use, type a command, Done ----
+# The script is self-contained (the check player is an operator: creative mode, its own command
+# block ahead of the camera, the use opens the editor); the runner ops the player and reads the
+# evidence. The server sends block_entity_data when the player uses the command block, which
+# activates the editor's buttons (vanilla ClientPacketListener.handleBlockEntityData).
 commandblock() {
   local log="$LOGDIR/commandblock.log"
   client_start "$ROOT/scripts/checks/edit-command-block.txt" "$log" --pos 9.5 71 6.5
   wait_online || { check commandblock "player never joined" 1; return; }
-  rcon "gamemode creative $NAME" >/dev/null
   rcon "op $NAME" >/dev/null
-  rcon "tp $NAME 9.5 71 6.5 0 10" >/dev/null
-  if wait_shot "$log" command-block-setup 90; then
-    # A command block placed on the ground ahead of the camera.
-    rcon "setblock 9 71 9 minecraft:command_block" >/dev/null
-  fi
   wait_exit
   echo "--- command block evidence ---"
   local out
@@ -343,6 +334,7 @@ commandblock() {
   echo "Command: $out"
   local r=0
   has "$out" "say hello" || { echo "command not set"; r=1; }
+  grep -E "haste proxy:|Java exception" "$log" && r=1
   check commandblock "used the command block, typed a command, Done sent the update" "$r"
 }
 

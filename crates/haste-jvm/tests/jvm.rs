@@ -1582,3 +1582,111 @@ fn sign_editor_screen() {
     );
     gui.with_state(|s| s.in_world = false);
 }
+
+/// The book editor: `openItemGui` (a use of the held writable book) opens vanilla's
+/// BookEditScreen, typing fills the page, "Sign" opens BookSignScreen, the title is typed and
+/// "Sign and Close" sends the edit_book packet (slot, pages, title). Mirrors
+/// scripts/checks/edit-book.txt without a server.
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM, data generator reports)"]
+fn book_editor_screen() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    reset(gui);
+    h.clear_unimplemented().unwrap();
+    gui.with_state(|s| {
+        s.in_world = true;
+        s.selected_slot = 0;
+    });
+    // the local player as the login would have introduced it (the book's sign screen names
+    // the author from the profile)
+    gui.set_player(1, "SignAuthor", 0x0102_0304_0506_0708_090a_0b0c_0d0e)
+        .unwrap();
+    gui.set_inventory_slot(0, &stack("minecraft:writable_book", 1))
+        .unwrap();
+    // the use of the held writable book opens the editor (vanilla WritableBookItem.use)
+    gui.open_item_gui(0).unwrap();
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.inventory.BookEditScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    // the editor draws the page (page indicator "Page 1 of 1") and the buttons
+    type_text(&h, "Page one text");
+    let t = texts(&render(&h, (0.0, 0.0)));
+    assert!(
+        t.contains(&"Page one text".to_string()),
+        "typed page: {t:?}"
+    );
+    // "Sign" opens the sign screen (button bottom-left of the book gui)
+    let f = render(&h, (0.0, 0.0));
+    let sign = f
+        .commands
+        .iter()
+        .find_map(|c| match c {
+            haste_core::gui::GuiCommand::Text { text, x, y, .. } if text == "Sign" => {
+                Some((*x as f64, *y as f64))
+            }
+            _ => None,
+        })
+        .expect("the Sign button's label");
+    click(gui, sign.0, sign.1);
+    gui.render(320, 240, 2, sign, 0.5).unwrap();
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.inventory.BookSignScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    // the title is typed into the title box
+    type_text(&h, "MyBook");
+    let t = texts(&render(&h, (0.0, 0.0)));
+    assert!(t.contains(&"MyBook".to_string()), "typed title: {t:?}");
+    // "Sign and Close" sends the edit_book packet with slot, the page and the title
+    let f = render(&h, (0.0, 0.0));
+    let finalize = f
+        .commands
+        .iter()
+        .find_map(|c| match c {
+            haste_core::gui::GuiCommand::Text { text, x, y, .. } if text == "Sign and Close" => {
+                Some((*x as f64, *y as f64))
+            }
+            _ => None,
+        })
+        .expect("the Sign and Close button's label");
+    click(gui, finalize.0, finalize.1);
+    gui.render(320, 240, 2, finalize, 0.5).unwrap();
+    assert!(!gui.is_open(), "{:?}", gui.take_last_error());
+    let out = outgoing(&h);
+    let edit_book = serverbound_id("minecraft:edit_book");
+    let (_, body) = out
+        .iter()
+        .find(|(id, _)| *id == edit_book)
+        .expect("edit_book sent");
+    let mut i = 0;
+    assert_eq!(
+        var_int(body, &mut i),
+        0,
+        "slot 0 (the selected hotbar slot)"
+    );
+    let pages = var_int(body, &mut i);
+    assert_eq!(pages, 1, "one page");
+    let len = var_int(body, &mut i) as usize;
+    let page = String::from_utf8(body[i..i + len].to_vec()).unwrap();
+    i += len;
+    assert_eq!(page, "Page one text");
+    // the title is present (an Optional: a boolean byte, then the string)
+    assert_eq!(body[i], 1, "the title is present");
+    i += 1;
+    let tlen = var_int(body, &mut i) as usize;
+    let title = String::from_utf8(body[i..i + tlen].to_vec()).unwrap();
+    assert_eq!(title, "MyBook");
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for the book editor: {unimpl:#?}"
+    );
+    gui.with_state(|s| s.in_world = false);
+}

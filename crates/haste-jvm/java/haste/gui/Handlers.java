@@ -263,9 +263,18 @@ public final class Handlers {
         BlockEntities.openSignEditor(p.pos(), p.slot());
     }
 
-    /** {@code ClientPacketListener.handleBlockEntityData}: the store's entity is loaded from the packet. */
+    /**
+     * {@code ClientPacketListener.handleBlockEntityData}: the store's entity is loaded from the packet, and an
+     * open command-block editor picks the data up (vanilla's handler ends with {@code updateGui}, which
+     * activates its buttons — the server sends this packet when the player uses a command block).
+     */
     public static void handleBlockEntityData(ClientPacketListener c, ClientboundBlockEntityDataPacket p) {
-        BlockEntities.load(p.getPos(), p.getType(), p.getTag());
+        var be = BlockEntities.load(p.getPos(), p.getType(), p.getTag());
+        if (be instanceof net.minecraft.world.level.block.entity.CommandBlockEntity
+            && ClientImpl.screen instanceof net.minecraft.client.gui.screens.inventory.CommandBlockEditScreen editor)
+        {
+            editor.updateGui();
+        }
     }
 
     /** {@code ClientPacketListener.handleOpenBook}: the written book in hand opens for reading. */
@@ -282,7 +291,8 @@ public final class Handlers {
      * no packet for it): Rust forwards the use on a game-master block, and the entity comes from the store.
      */
     public static void openCommandBlock(int x, int y, int z) {
-        var be = BlockEntities.get(new net.minecraft.core.BlockPos(x, y, z));
+        var be = BlockEntities.getOrCreate(new net.minecraft.core.BlockPos(x, y, z),
+            net.minecraft.world.level.block.entity.BlockEntityTypes.COMMAND_BLOCK);
         if (be instanceof net.minecraft.world.level.block.entity.CommandBlockEntity commandBlock) {
             Proxies.gui.setScreen(new net.minecraft.client.gui.screens.inventory.CommandBlockEditScreen(commandBlock));
         }

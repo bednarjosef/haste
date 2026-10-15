@@ -1,11 +1,34 @@
-# Feature: editing a writable book. The runner gives a writable book first (survival); we
-# use it (right click into the air), type a page, sign the book with a title.
-# Evidence: the held item's written_book_content component (the runner greps it).
+# Feature: editing a writable book. The check player is an operator on the test server
+# (ops.json), so the script clears its inventory, gives itself a writable book through the
+# chat, uses it (right click into the air opens the book editor: WritableBookItem.use),
+# types a page, signs the book (BookSignScreen: title, "Sign and Close" sends
+# ServerboundEditBookPacket with the title). Evidence: the held item becomes a written book
+# (the runner greps the player's inventory over RCON).
 wait_until joined
 wait_until settled
 wait 60
-screenshot book-setup
-# look up a little so the use does not hit a block
+# stand at the check camera, clear and give ourselves a writable book (op), hotbar slot 0
+key T
+wait_until screen_open
+type /tp @s 9.5 71 6.5 0 0
+key ENTER
+wait_until screen_closed
+wait 20
+key T
+wait_until screen_open
+type /clear @s
+key ENTER
+wait_until screen_closed
+wait 10
+key T
+wait_until screen_open
+type /give @s minecraft:writable_book 1
+key ENTER
+wait_until screen_closed
+wait 20
+key 1
+wait 5
+# use the book: looking up so the use does not target a block
 look 0 -30
 wait 5
 mouse_down right
@@ -17,16 +40,16 @@ screenshot book-editor
 wait 20
 type Page one text
 wait 10
-# Sign: the "Sign" button (book.signButton) is bottom-left of the book gui
+screenshot book-typed
+# the "Sign" button (book.signButton) opens the sign screen
 click_text "Sign" 0 0
-wait 20
 wait_until screen_open
 screenshot book-sign
+wait 20
 type MyBook
 wait 10
-# Finalize (book.finalizeButton = "Sign and Close")
+# "Sign and Close" (book.finalizeButton) sends the edit-book packet with the title
 click_text "Sign and Close" 0 0
-wait 20
 wait_until screen_closed
 screenshot book-done
 wait 60

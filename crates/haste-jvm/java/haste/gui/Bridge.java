@@ -160,6 +160,9 @@ public final class Bridge {
         Proxies.set(Proxies.player, "uuid", java.util.UUID.class, uuid);
         Proxies.set(Proxies.player, "stringUUID", String.class, uuid.toString());
         PlayerImpl.profile = new com.mojang.authlib.GameProfile(uuid, name);
+        // Player's own field (its constructor would set it; the proxy's is null without this):
+        // `Player.getName` reads it, e.g. the book's sign screen names the author.
+        Proxies.set(Proxies.player, "gameProfile", com.mojang.authlib.GameProfile.class, PlayerImpl.profile);
     }
 
     /** The joined world's dimension type (its id in the synchronised dimension_type registry). */

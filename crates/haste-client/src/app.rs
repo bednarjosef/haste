@@ -1545,6 +1545,11 @@ impl InputRouter {
             yaw: self.yaw,
             pitch: self.pitch,
         };
+        // The held attack/use are the KeyMappings' down state while the JVM is up, like
+        // vanilla's `handleKeybinds` reads them (a screen opening calls KeyMapping.releaseAll,
+        // so a button whose release a screen consumed does not repeat the use after it closes);
+        // the InputRouter's own press tracking is the fallback for when there is no JVM.
+        let mut held = None;
         if let Some(ui) = ui {
             let b = ui.game_input();
             state.forward = b & bits::B_FORWARD != 0;
@@ -1554,6 +1559,7 @@ impl InputRouter {
             state.jump = b & bits::B_JUMP != 0;
             state.sneak = b & bits::B_SNEAK != 0;
             state.sprint = b & bits::B_SPRINT != 0;
+            held = Some((b & bits::B_ATTACK != 0, b & bits::B_USE != 0));
         }
         let mut shared_input = shared.input.lock();
         shared_input.state = state;
@@ -1562,6 +1568,10 @@ impl InputRouter {
             let i = &mut shared_input.interact;
             i.attack = self.attack;
             i.use_item = self.use_item;
+            if let Some((attack, use_item)) = held {
+                i.attack = attack;
+                i.use_item = use_item;
+            }
             // The click counts accumulate across samples (the render thread may sample several
             // times per tick); the game thread drains them once per tick.
             i.attack_clicks = i
