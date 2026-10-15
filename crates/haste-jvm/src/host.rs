@@ -221,6 +221,16 @@ impl JvmHost {
             ))
             .option("-Xshare:auto")
             .option("-Xss4m")
+            // Small-footprint JVM for the HUD: a 512 MiB heap cap (the GUI uses ~120 MiB;
+            // Bootstrap and the registries peak lower than that), the serial GC (no GC
+            // threads or write barriers of the collectors meant for heaps 100x this
+            // size) and C1-only compilation (the GUI is not hot enough for C2 to pay
+            // back its code cache and compile memory).
+            .option("-Xms32m")
+            .option("-Xmx512m")
+            .option("-XX:+UseSerialGC")
+            .option("-XX:TieredStopAtLevel=1")
+            .option("-XX:ReservedCodeCacheSize=32m")
             // Link game classes lazily: with verification on, the verifier loads every type a method
             // body could assign (all screens PauseScreen can open, their listeners, ...) before any of
             // it runs, and the first refused one fails the class. The vanilla classes are the player's
