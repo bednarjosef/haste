@@ -23,7 +23,7 @@ FAIL=0
 FAILED=()
 check() { if [ "$3" = 0 ]; then echo "PASS $1: $2"; PASS=$((PASS + 1)); else echo "FAIL $1: $2"; FAIL=$((FAIL + 1)); FAILED+=("$1"); fi; }
 has() { echo "$1" | grep -q -- "$2"; }
-pos_y() { echo "$1" | grep -oE '\[[-0-9.]+d, [-0-9.]+d, [-0-9.]+d\]' | tr -d '[]d' | cut -d, -f2; }
+pos_y() { echo "$1" | grep -oE '\[[-0-9.]+d, [-0-9.]+d, [-0-9.]+d\]' | tr -d '[]d ' | cut -d, -f2; }
 # True when both values are plain numbers (an unset position must not compare as one).
 numeric() { case "$1$2" in ''|*[!0-9.-]*) return 1;; *) return 0;; esac; }
 
@@ -35,13 +35,10 @@ client_start() { # script log
     --seconds 150 >"$2" 2>&1 &
   CLIENT_PID=$!
   # The game directory vanilla reads and writes options.txt in (JvmConfig::from_cache:
-  # $HASTE_CACHE/jvm-game); read the cache the client process actually uses.
-  OPTS=""
-  for _ in $(seq 1 50); do
-    OPTS=$(tr '\0' '\n' <"/proc/$CLIENT_PID/environ" 2>/dev/null | sed -n 's/^HASTE_CACHE=//p' | head -1)
-    [ -n "$OPTS" ] && break
-    sleep 0.2
-  done
+  # $HASTE_CACHE/jvm-game); read the cache the client process actually uses. The client
+  # leaves as soon as the script's last step ran, so this must not wait — the first read
+  # finds the process alive, and a dead one just means the default cache is used.
+  OPTS=$(tr '\0' '\n' <"/proc/$CLIENT_PID/environ" 2>/dev/null | sed -n 's/^HASTE_CACHE=//p' | head -1)
   OPTS="${OPTS:-$ROOT/cache}/jvm-game/options.txt"
 }
 
@@ -97,6 +94,9 @@ clean_log() { # log
 
 # ---- run 1: rebind Jump -> J and Drop -> K in Key Binds, then prove them live ----
 RUN1="$LOGDIR/keybinds.log"
+# A previous run (or its crash) may have left rebinds in options.txt: remove the key
+# lines so run 1 starts from the vanilla defaults and its own clicks find "Space"/"Q".
+sed -i '/^key_key\./d' "$ROOT/cache/jvm-game/options.txt" 2>/dev/null
 client_start "$ROOT/scripts/checks/keybinds.txt" "$RUN1"
 wait_online || { check run1 "the client joined the test server" 1; exit 1; }
 rcon "gamemode survival $NAME" >/dev/null
@@ -131,8 +131,8 @@ if wait_shot "$RUN1" kb-drop 60; then
   sleep 2
   AFTER=$(rcon "data get entity $NAME SelectedItem")
   echo "SelectedItem after K:  $AFTER"
-  has "$BEFORE" "stone" && has "$BEFORE" "Count: 3b" || { echo "no 3 stone in hand before K"; check run1 "K dropped one item (held 3 stone, dropped to 2)" 1; }
-  has "$AFTER" "stone" && has "$AFTER" "Count: 2b" \
+  has "$BEFORE" "stone" && has "$BEFORE" "count: 3" || { echo "no 3 stone in hand before K"; check run1 "K dropped one item (held 3 stone, dropped to 2)" 1; }
+  has "$AFTER" "stone" && has "$AFTER" "count: 2" \
     && check run1 "K dropped one item (held 3 stone, dropped to 2)" 0 \
     || check run1 "K did not drop one item (SelectedItem: $AFTER)" 1
 else
