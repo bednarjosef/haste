@@ -296,6 +296,11 @@ pub struct GameState {
     pub inventory: Vec<ItemStackData>,
     /// Mirror of the stack carried by the cursor in an open container. Written by Java.
     pub carried: ItemStackData,
+    /// Inventory slots Java changed since the last [`GameState::take_inventory_changes`]
+    /// (vanilla numbering), oldest first. Java predicts inventory edits itself (creative
+    /// slot sets, menu clicks); the server never echoes those back, so the client must take
+    /// them from here.
+    pub inventory_changes: Vec<(i32, ItemStackData)>,
     /// Selected hotbar slot (0-8).
     pub selected_slot: i32,
     /// Messages the chat screen sent since the last [`GameState::take_sent`].
@@ -355,6 +360,7 @@ impl Default for GameState {
         GameState {
             inventory: vec![empty_stack(); INVENTORY_SIZE],
             carried: empty_stack(),
+            inventory_changes: Vec::new(),
             selected_slot: 0,
             sent: Vec::new(),
             player_name: "Player".to_owned(),
@@ -411,7 +417,13 @@ impl GameState {
         if self.inventory.len() <= i {
             self.inventory.resize(i + 1, empty_stack());
         }
-        self.inventory[i] = stack;
+        self.inventory[i] = stack.clone();
+        self.inventory_changes.push((slot, stack));
+    }
+
+    /// Drains the inventory slots Java changed since the last call, oldest first.
+    pub fn take_inventory_changes(&mut self) -> Vec<(i32, ItemStackData)> {
+        std::mem::take(&mut self.inventory_changes)
     }
     /// Drains the messages sent by screens.
     pub fn take_sent(&mut self) -> Vec<ChatMessage> {
@@ -582,5 +594,17 @@ mod tests {
         });
         assert_eq!(s.take_sent().len(), 1);
         assert!(s.sent.is_empty());
+        // Every mirrored change is queued for the client to drain, oldest first.
+        assert_eq!(
+            s.take_inventory_changes(),
+            vec![(3, s.slot(3).cloned().unwrap()), (50, empty_stack())]
+        );
+        s.set_mirror(3, empty_stack());
+        assert_eq!(
+            s.take_inventory_changes(),
+            vec![(3, empty_stack())],
+            "clearing a slot is a change too (a creative pickup empties the hotbar slot)"
+        );
+        assert!(s.take_inventory_changes().is_empty(), "drained");
     }
 }

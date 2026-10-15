@@ -1791,6 +1791,13 @@ fn tick_once(
             None => {}
         }
         ui.tick();
+        // Inventory edits vanilla Java code predicted client-side (creative slot sets, menu
+        // clicks, pick block): the server does not echo them back, so the client takes them
+        // from the Java mirror. Without this the hand keeps the old item (the reported
+        // creative-inventory bug: the hotbar shows the item, the hand does not).
+        for (slot, stack) in ui.drain_inventory_changes() {
+            driver.session.player.set_inventory_slot(slot, &stack);
+        }
         // Every option a vanilla screen changed this tick reaches the running client live
         // (vanilla's `OptionInstance.onValueUpdate` callbacks, reported through the bridge).
         let changes = ui.drain_option_changes();

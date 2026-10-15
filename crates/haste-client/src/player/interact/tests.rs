@@ -823,6 +823,35 @@ fn inventory_and_effects_from_packets() {
     );
 }
 
+/// A slot the Java side changed (creative inventory pick, menu click): the server never
+/// echoes those back, so the game thread applies the mirror's change queue through the
+/// same path as `set_player_inventory` — the first-person hand reads the result.
+#[test]
+fn inventory_slot_from_the_java_mirror_reaches_the_hand() {
+    let mut r = Rig::new(GameMode::Creative);
+    // Vanilla `Inventory` numbering: hotbar 0, armor 36..=39 (feet..head), off hand 40.
+    r.p.set_inventory_slot(0, &item(2)); // diamond_sword
+    assert_eq!(r.p.main_hand().item, Some(RegistryIndex(2)));
+    // The selected slot's stack change swaps the hand's item (the reported bug).
+    r.p.set_inventory_slot(0, &ItemStackData::default());
+    assert_eq!(
+        r.p.main_hand().item,
+        None,
+        "a creative pickup clears the slot"
+    );
+    r.p.set_inventory_slot(2, &item(3)); // stick
+    assert_eq!(r.p.int.hotbar[2].item, Some(RegistryIndex(3)));
+    r.p.held_slot = 2;
+    assert_eq!(r.p.main_hand().item, Some(RegistryIndex(3)));
+    // Armor (36 feet, 37 legs, 38 chest, 39 head) and the off hand keep their slots.
+    r.p.set_inventory_slot(38, &item(1));
+    assert_eq!(r.p.int.armor[1].item, Some(RegistryIndex(1)));
+    r.p.set_inventory_slot(40, &item(4));
+    assert_eq!(r.p.int.offhand.item, Some(RegistryIndex(4)));
+    // Main inventory (9..=35) is held nowhere yet: accepted, nothing panics.
+    r.p.set_inventory_slot(20, &item(1));
+}
+
 /// The held stack's own `minecraft:tool` component and Efficiency enchantment drive the mining
 /// speed (`ItemStack.getDestroySpeed` / `Player.getDestroySpeed`): a stack with a speed-8 tool
 /// rule on `mineable/pickaxe` and Efficiency V (level^2 + 1 = 26) gives 8 + 26 = 34.

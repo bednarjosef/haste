@@ -501,6 +501,15 @@ impl Ui {
         self.state(|s| s.take_option_changes())
     }
 
+    /// The inventory slots vanilla Java code changed since the last call (vanilla
+    /// `Inventory` numbering, oldest first): creative slot sets, menu clicks, pick block —
+    /// edits vanilla predicts client-side, which the server does not echo back (vanilla's
+    /// `handleSetCreativeModeSlot` marks the slot remote before `broadcastChanges`, so no
+    /// `container_set_slot`/`set_player_inventory` arrives for it).
+    pub fn drain_inventory_changes(&self) -> Vec<(i32, haste_core::entity::ItemStackData)> {
+        self.state(|s| s.take_inventory_changes())
+    }
+
     /// The resource pack selection the pack screen committed since the last call (vanilla
     /// `Minecraft.reloadResourcePacks` after Done): repository ids, bottom first.
     pub fn take_resource_pack_selection(&self) -> Option<Vec<String>> {
