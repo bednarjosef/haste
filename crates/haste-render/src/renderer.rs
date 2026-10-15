@@ -132,6 +132,8 @@ pub struct FrameStats {
     pub uploads: u32,
     /// Vertex+index bytes written by this frame's uploads.
     pub upload_bytes: u64,
+    /// Terrain indices drawn this frame (six per quad): the vertex-fetch load.
+    pub indices_drawn: u32,
 }
 
 /// One frame's draw input.
@@ -2208,6 +2210,7 @@ impl Renderer {
         });
         let sections_total = self.sections.len() as u32;
         let drawn = draws.len() as u32;
+        let indices_drawn: u32 = draws.iter().map(|d| d.index_count).sum();
         self.origins.clear();
         self.origins.extend(draws.iter().map(|d| d.origin));
         if self.origins.len() > self.origin_capacity {
@@ -2676,6 +2679,7 @@ impl Renderer {
             meshes_pending: self.mesher.pending_len() as u32,
             uploads: self.last_uploads.0,
             upload_bytes: self.last_uploads.1,
+            indices_drawn,
             draw_calls,
             block_entities_drawn: self.block_entities_drawn,
         })
