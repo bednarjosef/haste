@@ -201,21 +201,29 @@ drop() {
   local log="$LOGDIR/drop.log"
   NAME="dro_$$"
   area
+  # A private platform, built before the client joins so its chunks arrive with the platform
+  # already in them: the dropped items then land in our own area, not at the shared spawn.
+  # (Teleporting the player before `wait_until settled` would restart chunk loading for a
+  # view distance of 32 and never settle inside the script's 600-tick budget.)
+  rcon "fill $((CX - 4)) 99 $((CZ - 4)) $((CX + 4)) 99 $((CZ + 4)) stone" >/dev/null
+  wait_rcon "execute positioned $CX 100 $CZ if block $CX 99 $CZ stone" "Test passed" 15 >/dev/null
+  # Where the player stands once teleported: the .5 the server adds to the z.
+  local zneedle
+  if [ "$CZ" -lt 0 ]; then zneedle="$((CZ + 1)).5d"; else zneedle="${CZ}.5d"; fi
   client_start "$ROOT/scripts/checks/drop-swap.txt" "$log"
   wait_online || { check drop "player never joined" 1; return; }
   rcon "gamemode survival $NAME" >/dev/null
-  # A private platform so the dropped items land in our own area, not the shared spawn
-  # (another worker's dropped items there would be counted too).
-  rcon "fill $((CX - 4)) 99 $((CZ - 4)) $((CX + 4)) 99 $((CZ + 4)) stone" >/dev/null
-  rcon "tp $NAME $CX 100 $CZ 0 0" >/dev/null
   local before= after= items=
   if wait_shot "$log" drop-setup 90; then
+    # Only now, after the world settled: moving the player must not disturb the settle.
+    rcon "tp $NAME $CX 100 $CZ 0 0" >/dev/null
+    wait_rcon "data get entity $NAME Pos" "$zneedle" 30 >/dev/null
     rcon "clear $NAME" >/dev/null
     rcon "give $NAME minecraft:stone 10" >/dev/null
     rcon "item replace entity $NAME weapon.offhand with minecraft:torch 3" >/dev/null
     wait_rcon "data get entity $NAME Inventory" "stone" 15 >/dev/null
+    before=$(rcon "data get entity $NAME SelectedItem" 2>/dev/null)
   fi
-  before=$(rcon "data get entity $NAME SelectedItem" 2>/dev/null)
   if wait_shot "$log" drop-swap 90; then
     after=$(rcon "data get entity $NAME SelectedItem" 2>/dev/null)
     items=$(items_at "$CX" 100 "$CZ" 12)
@@ -340,8 +348,16 @@ craft() {
 pause() {
   local log="$LOGDIR/pause.log"
   NAME="pau_$$"
+  area
   client_start "$ROOT/scripts/checks/pause-all.txt" "$log"
   wait_online || { check pause "player never joined" 1; return; }
+  if wait_shot "$log" advance-setup 90; then
+    # The advancement tree only travels to players that have made progress: a player that
+    # never earned one is sent the recipe root, which has no display and so shows no tab at
+    # all (vanilla `PlayerAdvancements.flushDirty` sends only the roots it marked dirty).
+    # Granting our own player the tree is the setup the screen's tabs need.
+    rcon "advancement grant $NAME everything" >/dev/null
+  fi
   wait_exit
   local ev="$LOGDIR/pause.evidence"
   grep -E "script text\[" "$log" >"$ev"
@@ -351,7 +367,17 @@ pause() {
   for t in advancements statistics report-bugs send-feedback friends player-reporting world-options; do
     grep -q "script frame\[$t\]" "$log" || { echo "missing screenshot $t"; r=1; }
   done
-  has "$(cat "$ev")" "Minecraft" || { echo "missing the Minecraft advancement tab"; r=1; }
+  # The advancements screen: a tab drawn, and the drawn nodes' icons. The server sends the
+  # tree's roots from a HashSet, so which root is first (and so which tab is selected)
+  # varies: any of vanilla's five root titles counts, and the icons are what prove the
+  # tree arrived rather than an empty screen.
+  local tab="" t
+  for t in Minecraft Adventure Husbandry Nether "The End"; do
+    if has "$(cat "$ev")" "$t"; then tab=$t; fi
+  done
+  [ -n "$tab" ] || { echo "no advancement tab drawn"; r=1; }
+  grep -q "frame\[advancements\].*items=\[[^]]" "$log" || { echo "advancements screen drew no tree"; r=1; }
+  echo "advancement tab drawn: ${tab:-<none>}"
   # the stats screen's rows: the values arrive between the click and the screenshot
   has "$(cat "$ev")" "Animals Bred" || { echo "statistics screen never showed its rows"; r=1; }
   has "$(cat "$ev")" "Difficulty" || { echo "missing World Options difficulty row"; r=1; }
@@ -390,7 +416,9 @@ if [ $# -eq 0 ]; then
 fi
 for f in "$@"; do
   case "$f" in
-    hud | death | drop | modes | f2 | craft | pause | creative-hotbars) "$f" ;;
+    hud | death | drop | modes | f2 | craft | pause) "$f" ;;
+    # the feature keeps the name the CLI prints; shell function names have no hyphen
+    creative-hotbars) creative_hotbars ;;
     *) echo "unknown feature: $f" ;;
   esac
 done
