@@ -291,6 +291,12 @@ public final class ClientImpl {
      */
     public static void setScreen(Gui g, Screen s) {
         Screen old = screen;
+        // vanilla Gui.setScreen: closing the last screen outside a world (the create screen's
+        // Cancel after the empty world list auto-opened it, whose onClose is setScreen(null))
+        // falls back to a fresh title screen, not to no screen at all
+        if (s == null && !Mirror.inWorld()) {
+            s = new net.minecraft.client.gui.screens.TitleScreen();
+        }
         if (old != null && old != s) old.removed();
         screen = s;
         if (s != null) {
