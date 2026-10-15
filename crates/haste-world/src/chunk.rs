@@ -256,18 +256,24 @@ impl Chunk {
     }
 
     /// Appends this chunk's dirty sections to `out` (in section order), clearing the
-    /// bits as they go.
+    /// bits as they go. Sections with no blocks are skipped: they mesh to nothing and
+    /// their neighbours do not change with them (vanilla's chunk cache drops them the
+    /// same way, `LevelChunkSection.hasOnlyAir`).
     pub(crate) fn take_dirty(&mut self, out: &mut Vec<SectionPos>) {
         for (w, word) in self.dirty.iter_mut().enumerate() {
             let mut bits = *word;
             while bits != 0 {
                 let b = bits.trailing_zeros() as usize;
                 bits &= bits - 1;
-                out.push(SectionPos::new(
-                    self.pos.x,
-                    self.min_section + (w * 64 + b) as i32,
-                    self.pos.z,
-                ));
+                let y = self.min_section + (w * 64 + b) as i32;
+                if self
+                    .sections
+                    .get(w * 64 + b)
+                    .is_some_and(|s| s.block_count == 0)
+                {
+                    continue;
+                }
+                out.push(SectionPos::new(self.pos.x, y, self.pos.z));
             }
             *word = 0;
         }
