@@ -1456,6 +1456,17 @@ fn frame_view(
         view.death_ticks,
         options.fov_effect_scale,
     );
+    // The hand's own FOV (`Camera.calculateHudFov`): the fixed 70 base with only the death
+    // and fluid adjustments — never the FOV option or its modifier, unlike the world FOV.
+    let hand_fov_deg = frame_fov(
+        70.0,
+        1.0,
+        1.0,
+        partial,
+        view.eye_in_water || view.eye_in_lava,
+        view.death_ticks,
+        options.fov_effect_scale,
+    );
     let hurt_tilt = hurt_tilt_degrees(view.hurt_ticks, partial, options.damage_tilt_strength);
     let death_roll = if view.death_ticks > 0 {
         death_roll_degrees(view.death_ticks, partial)
@@ -1478,6 +1489,7 @@ fn frame_view(
         yaw,
         pitch,
         fov_deg,
+        hand_fov_deg,
         roll_deg: 0.0,
         bob: haste_render::ViewBob {
             hurt_tilt_deg: hurt_tilt,
@@ -2435,6 +2447,7 @@ fn menu_camera() -> Camera {
         yaw: 180.0,
         pitch: 0.0,
         fov_deg: 70.0,
+        hand_fov_deg: 70.0,
         roll_deg: 0.0,
         bob: haste_render::ViewBob::default(),
     }
@@ -5090,6 +5103,7 @@ mod tests {
             yaw: 30.0,
             pitch: 10.0,
             fov_deg: 70.0,
+            hand_fov_deg: 70.0,
             roll_deg: 0.0,
             bob: haste_render::ViewBob::default(),
         };
