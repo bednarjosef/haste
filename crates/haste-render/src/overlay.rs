@@ -1,15 +1,13 @@
-// World overlays: the selection outline of the targeted block (its outline shape boxes' 12
-// edges each, drawn as a screen-space quad `max(2.5, width / 1920 * 2.5)` pixels wide like
-// vanilla's `rendertype_lines` lines, black at 40% alpha) and break cracks
-// (`textures/block/destroy_stage_0..9` projected onto the block's model faces, multiplied
-// 2 * src * dst into the terrain).
+// World overlays: the selection outline of the targeted block (its outline shape boxes as black
+// lines at 40% alpha, slightly inflated) and break cracks (`textures/block/destroy_stage_0..9`
+// projected onto the block's model faces, multiplied 2 * src * dst into the terrain).
 //
 // The renderer holds no world: the caller samples the target's outline boxes and the states of
 // breaking blocks with `Renderer::sample_world`.
 
 use std::sync::Arc;
 
-use glam::{DVec3, Vec3, Vec4};
+use glam::{DVec3, Vec3};
 use haste_assets::{Assets, BakedBlockModels};
 use haste_core::math::Aabb;
 use haste_core::{BlockPos, BlockStateId, Identifier};
@@ -31,26 +29,6 @@ impl OverlayVertex {
     };
 }
 
-/// A line edge vertex: the endpoint relative to `pos` (the expansion direction) and the quad
-/// corner (-1 or 1: which side of the edge). The vertex shader expands the edge into a quad.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct LineVertex {
-    pos: [f32; 3],
-    to: [f32; 4],
-    color: [f32; 4],
-}
-
-impl LineVertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 3] =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4, 2 => Float32x4];
-    const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<LineVertex>() as u64,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &Self::ATTRIBUTES,
-    };
-}
-
 /// What `sample_world` found for this frame's overlays.
 #[derive(Default, Clone, Debug)]
 pub struct OverlayWorld {
@@ -66,12 +44,11 @@ pub struct OverlayRenderer {
     lines: wgpu::RenderPipeline,
     cracks: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
-    line_buffer: wgpu::Buffer,
-    crack_buffer: wgpu::Buffer,
-    line_capacity: usize,
-    crack_capacity: usize,
-    line_vertices: Vec<LineVertex>,
-    crack_vertices: Vec<OverlayVertex>,
+    buffer: wgpu::Buffer,
+    capacity: usize,
+    vertices: Vec<OverlayVertex>,
+    line_count: u32,
+    crack_count: u32,
     pub world: OverlayWorld,
 }
 
@@ -159,9 +136,7 @@ impl OverlayRenderer {
             immediate_size: 0,
         });
         let make = |label: &str,
-                    vs: &str,
                     fs: &str,
-                    layout: wgpu::VertexBufferLayout<'_>,
                     topology: wgpu::PrimitiveTopology,
                     blend: wgpu::BlendState,
                     bias: wgpu::DepthBiasState| {
@@ -170,9 +145,9 @@ impl OverlayRenderer {
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
-                    entry_point: Some(vs),
+                    entry_point: Some("vs_main"),
                     compilation_options: Default::default(),
-                    buffers: &[Some(layout)],
+                    buffers: &[Some(OverlayVertex::LAYOUT)],
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
@@ -203,19 +178,16 @@ impl OverlayRenderer {
         };
         let lines = make(
             "outline",
-            "vs_line",
             "fs_line",
-            LineVertex::LAYOUT,
-            wgpu::PrimitiveTopology::TriangleList,
+            wgpu::PrimitiveTopology::LineList,
             wgpu::BlendState::ALPHA_BLENDING,
-            // The quads' vertices are pulled toward the camera instead (`prepare`).
+            // wgpu has no depth bias for lines: the vertices are pulled toward the camera
+            // instead (`prepare`).
             Default::default(),
         );
         let cracks = make(
             "cracks",
-            "vs_main",
             "fs_crack",
-            OverlayVertex::LAYOUT,
             wgpu::PrimitiveTopology::TriangleList,
             wgpu::BlendState {
                 color: wgpu::BlendComponent {
@@ -232,26 +204,19 @@ impl OverlayRenderer {
                 clamp: 0.0,
             },
         );
-        let line_capacity = 4096;
-        let crack_capacity = 1024;
-        let line_buffer = make_buffer(&device, line_capacity, std::mem::size_of::<LineVertex>());
-        let crack_buffer = make_buffer(
-            &device,
-            crack_capacity,
-            std::mem::size_of::<OverlayVertex>(),
-        );
+        let capacity = 1024;
+        let buffer = make_buffer(&device, capacity);
         OverlayRenderer {
             device,
             queue,
             lines,
             cracks,
             bind_group,
-            line_buffer,
-            crack_buffer,
-            line_capacity,
-            crack_capacity,
-            line_vertices: Vec::new(),
-            crack_vertices: Vec::new(),
+            buffer,
+            capacity,
+            vertices: Vec::new(),
+            line_count: 0,
+            crack_count: 0,
             world: OverlayWorld::default(),
         }
     }
@@ -265,102 +230,77 @@ impl OverlayRenderer {
         breaking: &[(BlockPos, u8)],
         baked: &BakedBlockModels,
     ) {
-        self.line_vertices.clear();
+        self.vertices.clear();
         if let (Some(pos), Some((sampled, boxes))) = (block_target, &self.world.target) {
             if pos == *sampled {
                 let origin = DVec3::new(pos.x as f64, pos.y as f64, pos.z as f64) - camera;
                 for b in boxes {
-                    push_box_lines(&mut self.line_vertices, origin, b, [0.0, 0.0, 0.0, 0.4]);
+                    push_box_lines(&mut self.vertices, origin, b, [0.0, 0.0, 0.0, 0.4]);
                 }
             }
         }
         // Lines lie on the neighbours' faces too: move them 0.3% toward the camera (positions are
         // camera-relative) so they win the depth test without z-fighting.
-        for v in &mut self.line_vertices {
+        for v in &mut self.vertices {
             v.pos = v.pos.map(|c| c * 0.997);
         }
-        if self.line_vertices.len() > self.line_capacity {
-            self.line_capacity = self.line_vertices.len().next_power_of_two();
-            self.line_buffer = make_buffer(
-                &self.device,
-                self.line_capacity,
-                std::mem::size_of::<LineVertex>(),
-            );
-        }
-        if !self.line_vertices.is_empty() {
-            self.queue.write_buffer(
-                &self.line_buffer,
-                0,
-                bytemuck::cast_slice(&self.line_vertices),
-            );
-        }
-        self.crack_vertices.clear();
+        self.line_count = self.vertices.len() as u32;
         for &(pos, stage) in breaking {
             let Some(&(_, state, _)) = self.world.breaking.iter().find(|b| b.0 == pos) else {
                 continue;
             };
             let origin = DVec3::new(pos.x as f64, pos.y as f64, pos.z as f64) - camera;
             push_cracks(
-                &mut self.crack_vertices,
+                &mut self.vertices,
                 origin.as_vec3(),
                 baked.quads(state),
                 stage.min(9),
             );
         }
-        if self.crack_vertices.len() > self.crack_capacity {
-            self.crack_capacity = self.crack_vertices.len().next_power_of_two();
-            self.crack_buffer = make_buffer(
-                &self.device,
-                self.crack_capacity,
-                std::mem::size_of::<OverlayVertex>(),
-            );
+        self.crack_count = self.vertices.len() as u32 - self.line_count;
+        if self.vertices.len() > self.capacity {
+            self.capacity = self.vertices.len().next_power_of_two();
+            self.buffer = make_buffer(&self.device, self.capacity);
         }
-        if !self.crack_vertices.is_empty() {
-            self.queue.write_buffer(
-                &self.crack_buffer,
-                0,
-                bytemuck::cast_slice(&self.crack_vertices),
-            );
+        if !self.vertices.is_empty() {
+            self.queue
+                .write_buffer(&self.buffer, 0, bytemuck::cast_slice(&self.vertices));
         }
     }
 
     /// Draws into the main pass after terrain (camera bind group at group 0).
     pub fn draw<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) -> u32 {
-        if self.line_vertices.is_empty() && self.crack_vertices.is_empty() {
+        if self.vertices.is_empty() {
             return 0;
         }
         let mut calls = 0;
         pass.set_bind_group(1, &self.bind_group, &[]);
-        if !self.crack_vertices.is_empty() {
+        pass.set_vertex_buffer(0, self.buffer.slice(..));
+        if self.crack_count > 0 {
             pass.set_pipeline(&self.cracks);
-            pass.set_vertex_buffer(0, self.crack_buffer.slice(..));
-            pass.draw(0..self.crack_vertices.len() as u32, 0..1);
+            pass.draw(self.line_count..self.line_count + self.crack_count, 0..1);
             calls += 1;
         }
-        if !self.line_vertices.is_empty() {
+        if self.line_count > 0 {
             pass.set_pipeline(&self.lines);
-            pass.set_vertex_buffer(0, self.line_buffer.slice(..));
-            pass.draw(0..self.line_vertices.len() as u32, 0..1);
+            pass.draw(0..self.line_count, 0..1);
             calls += 1;
         }
         calls
     }
 }
 
-fn make_buffer(device: &wgpu::Device, capacity: usize, stride: usize) -> wgpu::Buffer {
+fn make_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("overlay-vertices"),
-        size: (capacity * stride) as u64,
+        size: (capacity * std::mem::size_of::<OverlayVertex>()) as u64,
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
 }
 
-/// The 12 edges of a box (block-local, inflated by 0.002 like vanilla's outline). Each edge
-/// becomes two vertices per quad corner (4 vertices, 2 triangles): the vertex shader offsets
-/// them perpendicular to the edge's screen-space direction, so the quad is `line_width`
-/// framebuffer pixels wide at any distance and camera angle.
-fn push_box_lines(out: &mut Vec<LineVertex>, origin: DVec3, b: &Aabb, color: [f32; 4]) {
+/// The 12 edges of a box (block-local, inflated by 0.002 like vanilla's outline).
+fn push_box_lines(out: &mut Vec<OverlayVertex>, origin: DVec3, b: &Aabb, color: [f32; 4]) {
     let e = 0.002;
     let lo = (origin + b.min - DVec3::splat(e)).as_vec3();
     let hi = (origin + b.max + DVec3::splat(e)).as_vec3();
@@ -385,18 +325,15 @@ fn push_box_lines(out: &mut Vec<LineVertex>, origin: DVec3, b: &Aabb, color: [f3
         (c(false, true, false), c(false, true, true)),
         (c(true, true, false), c(true, true, true)),
     ];
-    let color = Vec4::from_array(color);
     for (a, b) in edges {
-        let dir = b - a;
-        for corner in [-1.0f32, 1.0] {
-            for p in [a, b] {
-                out.push(LineVertex {
-                    pos: p.to_array(),
-                    to: [dir.x, dir.y, dir.z, corner],
-                    color: color.to_array(),
-                });
-            }
-        }
+        out.push(OverlayVertex {
+            pos: a.to_array(),
+            data: color,
+        });
+        out.push(OverlayVertex {
+            pos: b.to_array(),
+            data: color,
+        });
     }
 }
 
@@ -430,50 +367,5 @@ fn push_cracks(
                 data: [t[0], t[1], column, 0.0],
             });
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// One box's 12 edges each become a quad of 4 vertices: 48 line vertices, each
-    /// carrying the edge direction and one of the two quad corners.
-    #[test]
-    fn box_edges_become_quads() {
-        let mut out = Vec::new();
-        push_box_lines(
-            &mut out,
-            DVec3::ZERO,
-            &Aabb::new(DVec3::new(0.0, 0.0, 0.0), DVec3::new(1.0, 1.0, 1.0)),
-            [0.0, 0.0, 0.0, 0.4],
-        );
-        assert_eq!(out.len(), 12 * 4);
-        // Vanilla's outline colour: black at 40% alpha (ARGB 0x66000000).
-        assert!(out.iter().all(|v| v.color == [0.0, 0.0, 0.0, 0.4]));
-        // Inflated by 0.002 like vanilla's outline: the min corner moves past the block.
-        assert!(out[0].pos[0] < -0.001 && out[0].pos[1] < -0.001 && out[0].pos[2] < -0.001);
-        // Each quad: both corners of both endpoints, the direction on all four, and the
-        // corner sign flips within each endpoint pair.
-        for edge in out.chunks(4) {
-            let dir = [edge[0].to[0], edge[0].to[1], edge[0].to[2]];
-            assert!(edge
-                .iter()
-                .all(|v| v.to[0] == dir[0] && v.to[1] == dir[1] && v.to[2] == dir[2]));
-            assert_eq!(edge[0].to[3], edge[1].to[3]);
-            assert_eq!(edge[2].to[3], edge[3].to[3]);
-            assert_eq!(edge[0].to[3], -edge[2].to[3]);
-            assert_eq!(edge[0].pos, edge[2].pos);
-        }
-    }
-
-    /// Vanilla's line width (Window.getAppropriateLineWidth):
-    /// max(2.5, framebuffer width / 1920 * 2.5) pixels, at any window size.
-    #[test]
-    fn vanilla_line_width() {
-        let width = |w: u32| (w as f32 / 1920.0 * 2.5).max(2.5);
-        assert_eq!(width(1280), 2.5); // below 1920: the minimum
-        assert_eq!(width(1920), 2.5);
-        assert_eq!(width(3840), 5.0); // 4K: scales up
     }
 }
