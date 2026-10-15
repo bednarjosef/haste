@@ -1,5 +1,7 @@
 // Block entity drawing: chests, ender chests, trapped chests and shulker boxes posed on the CPU
-// into the entity renderer's vertex stream (one draw call for all of them, like entities).
+// into the entity renderer's vertex stream (one draw call for all of them, like entities), plus
+// the object-model block entities (lectern and enchanting table books, bells, decorated pots and
+// conduits) whose layers are y-up world-aligned and go through [`emit_object`].
 //
 // Follows vanilla's renderers (26.3 decompiled source, `net.minecraft.client.renderer.blockentity`):
 // `ChestRenderer` (model transformation per facing, the lid angle curve, `Sheets.chooseSprite`'s
@@ -16,11 +18,11 @@
 
 use std::sync::OnceLock;
 
-use glam::{Mat4, Vec3};
+use glam::{Mat3, Mat4, Vec3};
 use haste_core::model::{Cube, CubeModel, ModelPart, PoseOverrides};
 use haste_core::{BlockPos, Direction, Identifier};
 
-use crate::entity::{EntityVertex, TickPair};
+use crate::entity::{entity_shade, hurt_color, pose_rotation, EntityVertex, TickPair};
 
 /// Which half of a double chest a block is (vanilla `ChestType`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,6 +84,55 @@ pub struct BannerLayer {
     pub color: u8,
 }
 
+/// A decorated pot's four sherds (vanilla `PotDecorations`), as the pottery pattern each side
+/// was made from: the pattern's asset id (vanilla `DecoratedPotPattern.assetId`, e.g.
+/// `minecraft:angler`), whose side texture is `entity/decorated_pot/<path>`. `None` is an empty
+/// side, drawn with vanilla's blank `DECORATED_POT_SIDE`.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct PotSherds {
+    pub front: Option<Identifier>,
+    pub back: Option<Identifier>,
+    pub left: Option<Identifier>,
+    pub right: Option<Identifier>,
+}
+
+/// The per-instance animation state of the object-model block entities, as vanilla's block
+/// entity tickers leave it at the ends of the last tick (the partial tick lerps the two ends).
+/// Build it in the client's tick (like [`crate::TickPair`] for the chest lids).
+#[derive(Clone, Copy, Debug)]
+pub enum BlockEntityAnim {
+    /// The enchanting table's book (vanilla `EnchantingTableBlockEntity.bookAnimationTick`):
+    /// `time` is the tick counter, the three pairs are `flip`, `open` and `rot`, and the last
+    /// three are the tick's own bookkeeping (`tRot`, `flipT` and `flipA`).
+    EnchantTable {
+        time: f32,
+        flip: TickPair,
+        open: TickPair,
+        rot: TickPair,
+        t_rot: f32,
+        flip_t: f32,
+        flip_a: f32,
+    },
+    /// A bell that was rung (vanilla `BellBlockEntity.triggerEvent` then `BellBlockEntity.tick`):
+    /// the shake ticks and the direction the bell was hit from (`clickDirection`).
+    Bell {
+        ticks: TickPair,
+        click: Option<Direction>,
+    },
+    /// A wobbling decorated pot (vanilla `DecoratedPotBlockEntity.triggerEvent`): ticks since
+    /// the wobble started, at the ends of the last tick.
+    Pot { wobble: TickPair },
+    /// A conduit (vanilla `ConduitBlockEntity.clientTick`): the tick counter, the spin counter
+    /// (vanilla's `activeRotation`, turned into degrees by the renderer), and the shape's
+    /// active/hunting flags.
+    Conduit {
+        tick_count: f32,
+        rotation: f32,
+        active: bool,
+        hunting: bool,
+    },
+}
+
 /// A banner's render data: the base colour (from the block id, vanilla `BannerBlock.getColor`)
 /// and up to 16 pattern layers (vanilla draws at most `MAX_PATTERNS`).
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -114,6 +165,18 @@ pub enum BlockEntityKind {
         kind: SkullKind,
         wall: bool,
     },
+    /// A lectern's book (vanilla `LecternRenderer`, drawn only when the block state's
+    /// `has_book` is true).
+    Lectern,
+    /// An enchanting table's book (vanilla `EnchantTableRenderer`).
+    EnchantTable,
+    /// A bell (vanilla `BellRenderer`).
+    Bell,
+    /// A decorated pot (vanilla `DecoratedPotRenderer`): the base layer plus four sherd sides.
+    DecoratedPot,
+    /// A conduit (vanilla `ConduitRenderer`): its shell when inactive, cage, wind and eye when
+    /// active.
+    Conduit,
 }
 
 /// The head types vanilla renders (vanilla `SkullBlock.Types`); the block id picks one.
@@ -158,6 +221,11 @@ pub struct BlockEntityInstance {
     /// `SkullBlockEntity.getAnimation`, counting while the block is powered), for
     /// `BlockEntityKind::Skull`.
     pub skull_anim: TickPair,
+    /// The object-model block entities' animation state (book, bell shake, pot wobble, conduit
+    /// spin), for the kinds from `Lectern` on.
+    pub anim: Option<BlockEntityAnim>,
+    /// The decorated pot's sherds, for `BlockEntityKind::DecoratedPot`.
+    pub sherds: Option<std::sync::Arc<PotSherds>>,
 }
 
 /// Resolves a block entity type name (from the synced `minecraft:block_entity_type` registry)
@@ -188,6 +256,11 @@ pub fn kind_of(be_type: &Identifier, block: &Identifier, xmas: bool) -> Option<B
             wall: block.path().ends_with("_wall_banner"),
         }),
         "skull" => skull_kind_of(block),
+        "lectern" => Some(BlockEntityKind::Lectern),
+        "enchanting_table" => Some(BlockEntityKind::EnchantTable),
+        "bell" => Some(BlockEntityKind::Bell),
+        "decorated_pot" => Some(BlockEntityKind::DecoratedPot),
+        "conduit" => Some(BlockEntityKind::Conduit),
         _ => None,
     }
 }
@@ -225,6 +298,18 @@ pub fn is_lid_block(block: &Identifier) -> bool {
     block.namespace() == "minecraft"
         && matches!(block.path(), "chest" | "trapped_chest" | "ender_chest")
         || (block.namespace() == "minecraft" && block.path().ends_with("shulker_box"))
+}
+
+/// Whether `block`'s `block_event` action 1 is a bell ring (vanilla `BellBlockEntity.onHit`),
+/// whose parameter is the click direction's 3D data value.
+pub fn is_bell_block(block: &Identifier) -> bool {
+    block.namespace() == "minecraft" && block.path() == "bell"
+}
+
+/// Whether `block`'s `block_event` action 1 is a decorated pot wobble (vanilla
+/// `DecoratedPotBlockEntity.wobble`), whose parameter is the wobble style's ordinal.
+pub fn is_pot_block(block: &Identifier) -> bool {
+    block.namespace() == "minecraft" && block.path() == "decorated_pot"
 }
 
 /// The dye colour id of a shulker box block id (`minecraft:white_shulker_box` -> 0), vanilla
@@ -1047,6 +1132,13 @@ pub(crate) fn emit_block_entity(
     let (sky, block) = inst.light;
     let light = (block, sky);
     match inst.kind {
+        // The object-model block entities (books, bells, decorated pots, conduits) go through
+        // `emit_model_block_entity`, which owns their textures and transforms.
+        BlockEntityKind::Lectern
+        | BlockEntityKind::EnchantTable
+        | BlockEntityKind::Bell
+        | BlockEntityKind::DecoratedPot
+        | BlockEntityKind::Conduit => {}
         BlockEntityKind::Chest(_material) => {
             let models = chest_models();
             let model = &models[match inst.half {
@@ -1194,6 +1286,907 @@ pub(crate) fn emit_banner(
     }
 }
 
+// -------------------------------------------------------------------------------------------
+// Object-model block entities: the lectern and enchanting table books, bells, decorated pots
+// and conduits (vanilla `LecternRenderer`, `EnchantTableRenderer`, `BellRenderer`,
+// `DecoratedPotRenderer`, `ConduitRenderer`).
+//
+// Their layers (`BookModel.createBodyLayer`, `BellModel.createBodyLayer`,
+// `DecoratedPotRenderer.createBaseLayer`/`createSidesLayer`, `ConduitRenderer.create*Layer`) are
+// *object* models, not entity models: y up and world aligned (vanilla's block entity pose stack
+// carries no y flip), the model's front at -z, one model unit = 1/16 block, and vanilla's own
+// cube UV layout (the polygon at the layer's min-y end takes the texture's top slot).
+// `emit_part` is the entity convention (y down), so these go through `emit_object`, which emits
+// vanilla's polygons as they are — same corners, same texture rectangles, same winding fix-up —
+// and the root matrix carries only the renderer's own translate/rotate plus the 1/16.
+
+/// Vanilla `BookModel.createBodyLayer` (64x32). `left_lid`, `right_lid`, `seam`, `left_pages`,
+/// `right_pages` and the two `flip_page`s; the pose (`BookModel.setupAnim`) is per instance.
+fn book_model() -> &'static CubeModel {
+    static MODEL: OnceLock<CubeModel> = OnceLock::new();
+    MODEL.get_or_init(|| CubeModel {
+        texture: Identifier::minecraft("entity/enchantment/enchanting_table_book"),
+        tex_width: 64,
+        tex_height: 32,
+        root: ModelPart {
+            name: "root".into(),
+            pivot: Vec3::ZERO,
+            rotation: Vec3::ZERO,
+            visible: true,
+            cubes: Vec::new(),
+            children: vec![
+                part("left_lid", Vec3::new(0.0, 0.0, -1.0), Vec3::ZERO)
+                    .cube(Vec3::new(-6.0, -5.0, -0.005), Vec3::new(6.0, 10.0, 0.005), 0.0, [0, 0])
+                    .done(Vec::new()),
+                part("right_lid", Vec3::new(0.0, 0.0, 1.0), Vec3::ZERO)
+                    .cube(Vec3::new(0.0, -5.0, -0.005), Vec3::new(6.0, 10.0, 0.005), 0.0, [16, 0])
+                    .done(Vec::new()),
+                part(
+                    "seam",
+                    Vec3::ZERO,
+                    Vec3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0),
+                )
+                .cube(Vec3::new(-1.0, -5.0, 0.0), Vec3::new(2.0, 10.0, 0.005), 0.0, [12, 0])
+                .done(Vec::new()),
+                part("left_pages", Vec3::ZERO, Vec3::ZERO)
+                    .cube(Vec3::new(0.0, -4.0, -0.99), Vec3::new(5.0, 8.0, 1.0), 0.0, [0, 10])
+                    .done(Vec::new()),
+                part("right_pages", Vec3::ZERO, Vec3::ZERO)
+                    .cube(Vec3::new(0.0, -4.0, -0.01), Vec3::new(5.0, 8.0, 1.0), 0.0, [12, 10])
+                    .done(Vec::new()),
+                part("flip_page1", Vec3::ZERO, Vec3::ZERO)
+                    .cube(Vec3::new(0.0, -4.0, 0.0), Vec3::new(5.0, 8.0, 0.005), 0.0, [24, 10])
+                    .done(Vec::new()),
+                part("flip_page2", Vec3::ZERO, Vec3::ZERO)
+                    .cube(Vec3::new(0.0, -4.0, 0.0), Vec3::new(5.0, 8.0, 0.005), 0.0, [24, 10])
+                    .done(Vec::new()),
+            ],
+        },
+    })
+}
+
+/// One part under construction: pivot, base rotation, and its cubes appended by
+/// [`ObjectPart::cube`].
+struct ObjectPart {
+    name: String,
+    pivot: Vec3,
+    rotation: Vec3,
+    cubes: Vec<Cube>,
+}
+
+impl ObjectPart {
+    fn cube(mut self, origin: Vec3, size: Vec3, inflate: f32, uv: [u32; 2]) -> Self {
+        self.cubes.push(Cube {
+            origin,
+            size,
+            inflate,
+            uv,
+            mirror: false,
+        });
+        self
+    }
+
+    fn done(self, children: Vec<ModelPart>) -> ModelPart {
+        ModelPart {
+            name: self.name,
+            pivot: self.pivot,
+            rotation: self.rotation,
+            visible: true,
+            cubes: self.cubes,
+            children,
+        }
+    }
+}
+
+fn part(name: &str, pivot: Vec3, rotation: Vec3) -> ObjectPart {
+    ObjectPart {
+        name: name.into(),
+        pivot,
+        rotation,
+        cubes: Vec::new(),
+    }
+}
+
+fn empty_root(children: Vec<ModelPart>) -> ModelPart {
+    ModelPart {
+        name: "root".into(),
+        pivot: Vec3::ZERO,
+        rotation: Vec3::ZERO,
+        visible: true,
+        cubes: Vec::new(),
+        children,
+    }
+}
+
+/// Vanilla `BellModel.createBodyLayer` (32x32): the body with the base child at the block's
+/// corner; the shake rotation is per instance.
+fn bell_model() -> &'static CubeModel {
+    static MODEL: OnceLock<CubeModel> = OnceLock::new();
+    MODEL.get_or_init(|| CubeModel {
+        texture: Identifier::minecraft("entity/bell/bell_body"),
+        tex_width: 32,
+        tex_height: 32,
+        root: empty_root(vec![
+            part("bell_body", Vec3::new(8.0, 12.0, 8.0), Vec3::ZERO)
+                .cube(Vec3::new(-3.0, -6.0, -3.0), Vec3::new(6.0, 7.0, 6.0), 0.0, [0, 0])
+                .done(vec![
+                    // The base hangs from the block's corner (the -8, -12, -8 offset cancels
+                    // BellModel's parent pivot).
+                    part("bell_base", Vec3::new(-8.0, -12.0, -8.0), Vec3::ZERO)
+                        .cube(Vec3::new(4.0, 4.0, 4.0), Vec3::new(8.0, 2.0, 8.0), 0.0, [0, 13])
+                        .done(Vec::new()),
+                ]),
+        ]),
+    })
+}
+
+/// Vanilla `DecoratedPotRenderer.createBaseLayer` (32x32): the neck (a deflated ring plus the
+/// inflated flare) above the block's top, and the top and bottom planes capping it.
+fn pot_base_model() -> &'static CubeModel {
+    static MODEL: OnceLock<CubeModel> = OnceLock::new();
+    MODEL.get_or_init(|| CubeModel {
+        texture: Identifier::minecraft("entity/decorated_pot/decorated_pot_base"),
+        tex_width: 32,
+        tex_height: 32,
+        root: empty_root(vec![
+            part(
+                "neck",
+                Vec3::new(0.0, 37.0, 16.0),
+                Vec3::new(std::f32::consts::PI, 0.0, 0.0),
+            )
+            .cube(Vec3::new(4.0, 17.0, 4.0), Vec3::new(8.0, 3.0, 8.0), -0.1, [0, 0])
+            .cube(Vec3::new(5.0, 20.0, 5.0), Vec3::new(6.0, 1.0, 6.0), 0.2, [0, 5])
+            .done(Vec::new()),
+            // Both planes share vanilla's `topBottomPlane` (texOffs(-14, 13)); the negative u
+            // is vanilla's own, stored wrapped in the cube's `u32` offset.
+            part("top", Vec3::new(1.0, 16.0, 1.0), Vec3::ZERO)
+                .cube(
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(14.0, 0.0, 14.0),
+                    0.0,
+                    [-14i32 as u32, 13],
+                )
+                .done(Vec::new()),
+            part("bottom", Vec3::new(1.0, 0.0, 1.0), Vec3::ZERO)
+                .cube(
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(14.0, 0.0, 14.0),
+                    0.0,
+                    [-14i32 as u32, 13],
+                )
+                .done(Vec::new()),
+        ]),
+    })
+}
+
+/// Vanilla `DecoratedPotRenderer.createSidesLayer` (16x16): one side plane per direction, the
+/// same 14x16 quad turned onto each wall. `front` faces the block's `facing`.
+fn pot_sides_model() -> &'static CubeModel {
+    static MODEL: OnceLock<CubeModel> = OnceLock::new();
+    MODEL.get_or_init(|| {
+        let side = |name: &str, pivot: Vec3, rotation: Vec3| {
+            part(name, pivot, rotation)
+                .cube(
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(14.0, 16.0, 0.0),
+                    0.0,
+                    [1, 0],
+                )
+                .done(Vec::new())
+        };
+        CubeModel {
+            texture: Identifier::minecraft("entity/decorated_pot/decorated_pot_side"),
+            tex_width: 16,
+            tex_height: 16,
+            root: empty_root(vec![
+                side("back", Vec3::new(15.0, 16.0, 1.0), Vec3::new(0.0, 0.0, std::f32::consts::PI)),
+                side(
+                    "left",
+                    Vec3::new(1.0, 16.0, 1.0),
+                    Vec3::new(0.0, -std::f32::consts::FRAC_PI_2, std::f32::consts::PI),
+                ),
+                side(
+                    "right",
+                    Vec3::new(15.0, 16.0, 15.0),
+                    Vec3::new(0.0, std::f32::consts::FRAC_PI_2, std::f32::consts::PI),
+                ),
+                side(
+                    "front",
+                    Vec3::new(1.0, 16.0, 15.0),
+                    Vec3::new(std::f32::consts::PI, 0.0, 0.0),
+                ),
+            ]),
+        }
+    })
+}
+
+/// Vanilla `ConduitRenderer.createShellLayer` (32x16): the inactive conduit's shell.
+fn conduit_shell_model() -> &'static CubeModel {
+    static MODEL: OnceLock<CubeModel> = OnceLock::new();
+    MODEL.get_or_init(|| CubeModel {
+        texture: Identifier::minecraft("entity/conduit/base"),
+        tex_width: 32,
+        tex_height: 16,
+        root: empty_root(vec![
+            part("shell", Vec3::ZERO, Vec3::ZERO)
+                .cube(Vec3::new(-3.0, -3.0, -3.0), Vec3::new(6.0, 6.0, 6.0), 0.0, [0, 0])
+                .done(Vec::new()),
+        ]),
+    })
+}
+
+/// Vanilla `ConduitRenderer.createCageLayer` (32x16): the active conduit's spinning cage.
+fn conduit_cage_model() -> &'static CubeModel {
+    static MODEL: OnceLock<CubeModel> = OnceLock::new();
+    MODEL.get_or_init(|| CubeModel {
+        texture: Identifier::minecraft("entity/conduit/cage"),
+        tex_width: 32,
+        tex_height: 16,
+        root: empty_root(vec![
+            part("shell", Vec3::ZERO, Vec3::ZERO)
+                .cube(Vec3::new(-4.0, -4.0, -4.0), Vec3::new(8.0, 8.0, 8.0), 0.0, [0, 0])
+                .done(Vec::new()),
+        ]),
+    })
+}
+
+/// Vanilla `ConduitRenderer.createWindLayer` (64x32): the wind box, drawn twice (the second copy
+/// counter-rotated by the renderer).
+fn conduit_wind_model() -> &'static CubeModel {
+    static MODEL: OnceLock<CubeModel> = OnceLock::new();
+    MODEL.get_or_init(|| CubeModel {
+        texture: Identifier::minecraft("entity/conduit/wind"),
+        tex_width: 64,
+        tex_height: 32,
+        root: empty_root(vec![
+            part("wind", Vec3::ZERO, Vec3::ZERO)
+                .cube(Vec3::new(-8.0, -8.0, -8.0), Vec3::new(16.0, 16.0, 16.0), 0.0, [0, 0])
+                .done(Vec::new()),
+        ]),
+    })
+}
+
+/// Vanilla `ConduitRenderer.createEyeLayer` (16x16): the billboarded eye plane, inflated by
+/// vanilla's `CubeDeformation(0.01)`.
+fn conduit_eye_model() -> &'static CubeModel {
+    static MODEL: OnceLock<CubeModel> = OnceLock::new();
+    MODEL.get_or_init(|| CubeModel {
+        texture: Identifier::minecraft("entity/conduit/open_eye"),
+        tex_width: 16,
+        tex_height: 16,
+        root: empty_root(vec![
+            part("eye", Vec3::ZERO, Vec3::ZERO)
+                .cube(Vec3::new(-4.0, -4.0, 0.0), Vec3::new(8.0, 8.0, 0.0), 0.01, [0, 0])
+                .done(Vec::new()),
+        ]),
+    })
+}
+
+/// The texture a book is drawn with (vanilla `EnchantTableRenderer.BOOK_TEXTURE`, in the block
+/// atlas under the `entity` prefix).
+pub fn book_texture() -> Identifier {
+    Identifier::minecraft("entity/enchantment/enchanting_table_book")
+}
+
+/// The texture a bell is drawn with (vanilla `BellRenderer.BELL_TEXTURE`).
+pub fn bell_texture() -> Identifier {
+    Identifier::minecraft("entity/bell/bell_body")
+}
+
+/// The decorated pot's base texture (vanilla `Sheets.DECORATED_POT_BASE`).
+pub fn pot_base_texture() -> Identifier {
+    Identifier::minecraft("entity/decorated_pot/decorated_pot_base")
+}
+
+/// The texture an undecorated pot side is drawn with (vanilla `Sheets.DECORATED_POT_SIDE`).
+pub fn pot_side_texture(sherd: Option<&Identifier>) -> Identifier {
+    match sherd {
+        // Vanilla `DecoratedPotRenderer.getSideSprite`: the blank sprite without a pattern.
+        None => Identifier::minecraft("entity/decorated_pot/decorated_pot_side"),
+        // `Sheets.DECORATED_POT_MAPPER` applied to the pattern's asset id.
+        Some(id) => Identifier::new(id.namespace(), &format!("entity/decorated_pot/{}", id.path())),
+    }
+}
+
+/// The conduit's shell texture (vanilla `ConduitRenderer.SHELL_TEXTURE`).
+pub fn conduit_shell_texture() -> Identifier {
+    Identifier::minecraft("entity/conduit/base")
+}
+
+/// The conduit's cage texture (vanilla `ConduitRenderer.ACTIVE_SHELL_TEXTURE`).
+pub fn conduit_cage_texture() -> Identifier {
+    Identifier::minecraft("entity/conduit/cage")
+}
+
+/// The conduit's wind texture (vanilla `ConduitRenderer.WIND_TEXTURE`, or the vertical one for
+/// animation phase 1).
+pub fn conduit_wind_texture(phase: i32) -> Identifier {
+    if phase == 1 {
+        Identifier::minecraft("entity/conduit/wind_vertical")
+    } else {
+        Identifier::minecraft("entity/conduit/wind")
+    }
+}
+
+/// The conduit's eye texture: the open one while it attacks (vanilla
+/// `ConduitRenderer.OPEN_EYE_TEXTURE`), the closed one otherwise.
+pub fn conduit_eye_texture(hunting: bool) -> Identifier {
+    if hunting {
+        Identifier::minecraft("entity/conduit/open_eye")
+    } else {
+        Identifier::minecraft("entity/conduit/closed_eye")
+    }
+}
+
+/// Vanilla `BookModel.State.forAnimation`'s openness: `(sin(progress * 0.02) * 0.1 + 1.25) *
+/// openness` radians.
+pub fn book_openness(progress: f32, openness: f32) -> f32 {
+    (((progress * 0.02) as f64).sin() as f32 * 0.1 + 1.25) * openness
+}
+
+/// Vanilla `EnchantTableRenderer.submit`'s page flips: `frac(flip + offset) * 1.6 - 0.3`,
+/// clamped to 0..1, at offsets 0.25 and 0.75.
+pub fn enchant_page_flip(flip: f32, offset: f32) -> f32 {
+    let f = flip + offset - (flip + offset).floor();
+    (f * 1.6 - 0.3).clamp(0.0, 1.0)
+}
+
+/// Vanilla `ConduitRenderer.submit`'s `hh`: `sin(animTime * 0.1) / 2 + 0.5`, then squared plus
+/// itself.
+pub fn conduit_bob(anim_time: f32) -> f32 {
+    let hh = ((anim_time * 0.1) as f64).sin() as f32 / 2.0 + 0.5;
+    hh * hh + hh
+}
+
+/// Vanilla `ConduitBlockEntity.getActiveRotation`: the per-tick counter times `-0.0375`, in
+/// degrees (`ConduitRenderer` spins by it directly).
+pub fn conduit_spin(active_rotation: f32) -> f32 {
+    active_rotation * -0.0375
+}
+
+/// Vanilla `BellModel.setupAnim`: `sin(ticks / PI) / (4 + ticks / 3)`, as the (x, z) rotation of
+/// the bell body; the click direction picks the axis and sign.
+pub fn bell_shake_rotation(ticks: f32, click: Option<Direction>) -> (f32, f32) {
+    let Some(click) = click else {
+        return (0.0, 0.0);
+    };
+    let base = (((ticks / std::f32::consts::PI) as f64).sin() as f32) / (4.0 + ticks / 3.0);
+    match click {
+        Direction::North => (-base, 0.0),
+        Direction::South => (base, 0.0),
+        Direction::East => (0.0, -base),
+        Direction::West => (0.0, base),
+        Direction::Up | Direction::Down => (0.0, 0.0),
+    }
+}
+
+/// Vanilla `Camera.setRotation`'s orientation quaternion, which the conduit's eye billboard
+/// needs: `rotationYXZ(PI - yawDeg * PI/180, -pitchDeg * PI/180, 0)`.
+pub fn camera_orientation(yaw_deg: f32, pitch_deg: f32) -> glam::Quat {
+    glam::Quat::from_euler(
+        glam::EulerRot::YXZ,
+        std::f32::consts::PI - yaw_deg.to_radians(),
+        -pitch_deg.to_radians(),
+        0.0,
+    )
+}
+
+/// Vanilla `DecoratedPotRenderer.modelTransformation`: `180 - facing.toYRot()` degrees about
+/// the block centre (its pose stack is the block's corner, so the rotation is about 0.5, 0.5,
+/// 0.5).
+fn pot_direction_rotation(pos: BlockPos, facing: Direction, camera: glam::DVec3) -> Mat4 {
+    let p = pos.as_dvec3() - camera;
+    Mat4::from_translation(p.as_vec3())
+        * rotate_around_y((180.0 - to_y_rot(facing)).to_radians(), Vec3::new(0.5, 0.5, 0.5))
+}
+
+/// A rotation about y by `angle`, around the point `p`.
+fn rotate_around_y(angle: f32, p: Vec3) -> Mat4 {
+    Mat4::from_translation(p) * Mat4::from_rotation_y(angle) * Mat4::from_translation(-p)
+}
+
+/// A rotation about `axis` by `angle`, around the point `p`.
+fn rotate_around(angle: f32, axis: Vec3, p: Vec3) -> Mat4 {
+    Mat4::from_translation(p)
+        * Mat4::from_axis_angle(axis, angle)
+        * Mat4::from_translation(-p)
+}
+
+/// Vanilla `Direction.getClockWise` (the y-axis turn).
+fn clockwise(d: Direction) -> Direction {
+    match d {
+        Direction::North => Direction::East,
+        Direction::South => Direction::West,
+        Direction::West => Direction::North,
+        Direction::East => Direction::South,
+        Direction::Up | Direction::Down => d,
+    }
+}
+
+/// Vanilla `LecternRenderer.submit`'s transform: (0.5, 1.0625, 0.5), `-yRot` about y, 67.5
+/// degrees about z, then (0, -0.125, 0). `yRot` is the block's
+/// `facing.getClockWise().toYRot()`.
+fn lectern_root(pos: BlockPos, facing: Direction, camera: glam::DVec3) -> Mat4 {
+    let p = pos.as_dvec3() - camera;
+    Mat4::from_translation(p.as_vec3() + Vec3::new(0.5, 1.0625, 0.5))
+        * Mat4::from_rotation_y((-to_y_rot(clockwise(facing))).to_radians())
+        * Mat4::from_rotation_z(67.5_f32.to_radians())
+        * Mat4::from_translation(Vec3::new(0.0, -0.125, 0.0))
+        * Mat4::from_scale(Vec3::splat(1.0 / 16.0))
+}
+
+/// Vanilla `EnchantTableRenderer.submit`'s transform: (0.5, 0.75, 0.5), the bob
+/// `0.1 + sin(time * 0.1) * 0.01`, `-rot` about y and 80 degrees about z. `rot` is the
+/// interpolated `rot` (radians).
+fn enchant_root(pos: BlockPos, time: f32, rot: f32, camera: glam::DVec3) -> Mat4 {
+    let p = pos.as_dvec3() - camera;
+    Mat4::from_translation(p.as_vec3() + Vec3::new(0.5, 0.75, 0.5))
+        * Mat4::from_translation(Vec3::new(
+            0.0,
+            0.1 + ((time * 0.1) as f64).sin() as f32 * 0.01,
+            0.0,
+        ))
+        * Mat4::from_rotation_y(-rot)
+        * Mat4::from_rotation_z(80.0_f32.to_radians())
+        * Mat4::from_scale(Vec3::splat(1.0 / 16.0))
+}
+
+/// Vanilla `BellRenderer.submit` carries no transform of its own: the block entity's pose stack
+/// is the block's corner, so the root is the block position and the 1/16 (the shake rides on
+/// the `bell_body` part).
+fn bell_root(pos: BlockPos, camera: glam::DVec3) -> Mat4 {
+    let p = pos.as_dvec3() - camera;
+    Mat4::from_translation(p.as_vec3()) * Mat4::from_scale(Vec3::splat(1.0 / 16.0))
+}
+
+/// Vanilla `DecoratedPotRenderer.submit`: the direction turn, then the wobble. 26.3's
+/// `extractRenderState` never assigns `state.wobbleStyle`, so the tilt branch is unreachable
+/// and the pot turns about (0.5, 0, 0.5) by `sin(-progress * 3PI) * 0.125 * (1 - progress)`
+/// instead.
+fn pot_root(pos: BlockPos, facing: Direction, progress: f32, camera: glam::DVec3) -> Mat4 {
+    let wobble = if (0.0..=1.0).contains(&progress) {
+        let turn = ((-progress * 3.0 * std::f32::consts::PI) as f64).sin() as f32 * 0.125;
+        let decay = 1.0 - progress;
+        rotate_around(turn * decay, Vec3::Y, Vec3::new(0.5, 0.0, 0.5))
+    } else {
+        Mat4::IDENTITY
+    };
+    pot_direction_rotation(pos, facing, camera) * wobble * Mat4::from_scale(Vec3::splat(1.0 / 16.0))
+}
+
+/// Vanilla `ConduitRenderer.submit`'s inactive shell: (0.5, 0.5, 0.5) and the spin about y.
+fn conduit_shell_root(pos: BlockPos, spin: f32, camera: glam::DVec3) -> Mat4 {
+    let p = pos.as_dvec3() - camera;
+    Mat4::from_translation(p.as_vec3() + Vec3::splat(0.5))
+        * Mat4::from_rotation_y(spin.to_radians())
+        * Mat4::from_scale(Vec3::splat(1.0 / 16.0))
+}
+
+/// The active cage: (0.5, 0.3 + hh * 0.2, 0.5) and the spin about the normalised (0.5, 1, 0.5)
+/// axis.
+fn conduit_cage_root(pos: BlockPos, spin: f32, hh: f32, camera: glam::DVec3) -> Mat4 {
+    let p = pos.as_dvec3() - camera;
+    let axis = Vec3::new(0.5, 1.0, 0.5).normalize();
+    Mat4::from_translation(p.as_vec3() + Vec3::new(0.5, 0.3 + hh * 0.2, 0.5))
+        * Mat4::from_axis_angle(axis, spin.to_radians())
+        * Mat4::from_scale(Vec3::splat(1.0 / 16.0))
+}
+
+/// The wind box: (0.5, 0.5, 0.5) with the animation phase's quarter turn about x (phase 1) or z
+/// (phase 2).
+fn conduit_wind_root(pos: BlockPos, phase: i32, camera: glam::DVec3) -> Mat4 {
+    let p = pos.as_dvec3() - camera;
+    let mut m = Mat4::from_translation(p.as_vec3() + Vec3::splat(0.5));
+    if phase == 1 {
+        m *= Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2);
+    } else if phase == 2 {
+        m *= Mat4::from_rotation_z(std::f32::consts::FRAC_PI_2);
+    }
+    m * Mat4::from_scale(Vec3::splat(1.0 / 16.0))
+}
+
+/// The wind box's second copy: scaled 0.875 and turned by `rotationXYZ(PI, 0, PI)`, which is a
+/// half turn about y.
+fn conduit_wind_back_root(pos: BlockPos, camera: glam::DVec3) -> Mat4 {
+    let p = pos.as_dvec3() - camera;
+    Mat4::from_translation(p.as_vec3() + Vec3::splat(0.5))
+        * Mat4::from_scale(Vec3::splat(0.875))
+        * Mat4::from_rotation_y(std::f32::consts::PI)
+        * Mat4::from_scale(Vec3::splat(1.0 / 16.0))
+}
+
+/// The eye: bobbed like the cage, scaled 0.5, turned to face the camera, then
+/// `rotationZ(PI).rotateY(PI)` (a half turn about x) and scaled 4/3.
+fn conduit_eye_root(
+    pos: BlockPos,
+    hh: f32,
+    orientation: glam::Quat,
+    camera: glam::DVec3,
+) -> Mat4 {
+    let p = pos.as_dvec3() - camera;
+    Mat4::from_translation(p.as_vec3() + Vec3::new(0.5, 0.3 + hh * 0.2, 0.5))
+        * Mat4::from_scale(Vec3::splat(0.5))
+        * Mat4::from_quat(orientation)
+        * Mat4::from_rotation_x(std::f32::consts::PI)
+        * Mat4::from_scale(Vec3::splat(4.0 / 3.0))
+        * Mat4::from_scale(Vec3::splat(1.0 / 16.0))
+}
+
+/// Poses one object-model block entity into `out`, one part list at a time. `offset` is added
+/// to every pivot (vanilla's `ModelPart.x/y/z` slide, which the book's pages use); `pose` holds
+/// the per-frame part rotations; `rects` is one texture rectangle per part (the pot's sherd
+/// sides differ, everything else repeats the same one).
+#[allow(clippy::too_many_arguments)]
+fn emit_object(
+    out: &mut Vec<EntityVertex>,
+    model: &CubeModel,
+    parts: &[&ModelPart],
+    rects: &[[u32; 4]],
+    offset: Vec3,
+    pose: &PoseOverrides,
+    root: Mat4,
+    light: (u8, u8),
+) {
+    for (part, rect) in parts.iter().zip(rects.iter()) {
+        emit_object_part(out, model, part, pose, root, *rect, offset, light);
+    }
+}
+
+/// One part and its children, vanilla's `ModelPart.render` then `ModelPart.Cube.compile`.
+#[allow(clippy::too_many_arguments)]
+fn emit_object_part(
+    out: &mut Vec<EntityVertex>,
+    model: &CubeModel,
+    part: &ModelPart,
+    pose: &PoseOverrides,
+    parent: Mat4,
+    rect: [u32; 4],
+    offset: Vec3,
+    light: (u8, u8),
+) {
+    let rot = part.rotation + pose_rotation(pose, &part.name).unwrap_or(Vec3::ZERO);
+    let m = parent
+        * Mat4::from_translation(part.pivot + offset)
+        * Mat4::from_rotation_z(rot.z)
+        * Mat4::from_rotation_y(rot.y)
+        * Mat4::from_rotation_x(rot.x);
+    let normal_matrix = Mat3::from_mat4(m).inverse().transpose();
+    let kx = rect[2] as f32 / model.tex_width.max(1) as f32;
+    let ky = rect[3] as f32 / model.tex_height.max(1) as f32;
+    let r16 = rect.map(|v| v as u16);
+    for c in &part.cubes {
+        let g = c.inflate;
+        let (x0, y0, z0) = (c.origin.x - g, c.origin.y - g, c.origin.z - g);
+        let (x1, y1, z1) = (
+            c.origin.x + c.size.x + g,
+            c.origin.y + c.size.y + g,
+            c.origin.z + c.size.z + g,
+        );
+        let (u, v) = (c.uv[0] as i32 as f32, c.uv[1] as i32 as f32);
+        let (w, h, d) = (c.size.x, c.size.y, c.size.z);
+        // Vanilla `ModelPart.Cube`'s corner and UV layout (object convention, y up).
+        let (t0, t1, t2, t3) = (
+            Vec3::new(x0, y0, z0),
+            Vec3::new(x1, y0, z0),
+            Vec3::new(x1, y1, z0),
+            Vec3::new(x0, y1, z0),
+        );
+        let (l0, l1, l2, l3) = (
+            Vec3::new(x0, y0, z1),
+            Vec3::new(x1, y0, z1),
+            Vec3::new(x1, y1, z1),
+            Vec3::new(x0, y1, z1),
+        );
+        let (u0, u1, u2, u22, u3, u4) = (u, u + d, u + d + w, u + d + 2.0 * w, u + d + w + d, u + d + w + d + w);
+        let (v0, v1, v2) = (v, v + d, v + d + h);
+        // (corners in vanilla's order, uv rectangle, normal), one per direction.
+        let faces: [([Vec3; 4], [f32; 4], Vec3); 6] = [
+            ([l1, l0, t0, t1], [u1, v0, u2, v1], Vec3::NEG_Y),
+            ([t2, t3, l3, l2], [u2, v1, u22, v0], Vec3::Y),
+            ([t0, l0, l3, t3], [u0, v1, u1, v2], Vec3::NEG_X),
+            ([t1, t0, t3, t2], [u1, v1, u2, v2], Vec3::NEG_Z),
+            ([l1, t1, t2, l2], [u2, v1, u3, v2], Vec3::X),
+            ([l0, l1, l2, l3], [u3, v1, u4, v2], Vec3::Z),
+        ];
+        for (corners, uvr, n) in faces {
+            let p = corners.map(|c| m.transform_point3(c));
+            let nw = (normal_matrix * n).normalize_or_zero();
+            let s = entity_shade(nw);
+            let [r, g, b] = hurt_color(s, 0.0);
+            let color = [r, g, b, 1.0];
+            // Vanilla's `ModelPart.Polygon` remap: the first and last corners take
+            // (u1, v0)/(u1, v1), the middle two (u0, v0)/(u0, v1).
+            let uv = [
+                [rect[0] as f32 + uvr[2] * kx, rect[1] as f32 + uvr[1] * ky],
+                [rect[0] as f32 + uvr[0] * kx, rect[1] as f32 + uvr[1] * ky],
+                [rect[0] as f32 + uvr[0] * kx, rect[1] as f32 + uvr[3] * ky],
+                [rect[0] as f32 + uvr[2] * kx, rect[1] as f32 + uvr[3] * ky],
+            ];
+            let ccw = (p[1] - p[0]).cross(p[2] - p[0]).dot(nw) >= 0.0;
+            let order: [usize; 6] = if ccw {
+                [0, 1, 2, 0, 2, 3]
+            } else {
+                [0, 2, 1, 0, 3, 2]
+            };
+            for i in order {
+                out.push(EntityVertex {
+                    pos: p[i].to_array(),
+                    uv: uv[i],
+                    color,
+                    rect: r16,
+                    light: [light.0 as u16, light.1 as u16, 0, 0],
+                });
+            }
+        }
+    }
+    for child in &part.children {
+        emit_object_part(out, model, child, pose, m, rect, offset, light);
+    }
+}
+
+/// One model's part rotations for the shared pose, keyed by name.
+fn pose_of(rotations: Vec<(&str, Vec3)>) -> PoseOverrides {
+    PoseOverrides {
+        rotations: rotations
+            .into_iter()
+            .map(|(n, r)| (n.to_string(), r))
+            .collect(),
+        hidden: Vec::new(),
+    }
+}
+
+/// The book's per-instance pose, vanilla `BookModel.setupAnim`: the lids and pages turn by the
+/// openness about y (the left lid from `PI`, the right lid from 0), the two flip pages by
+/// `openness - openness * 2 * flip`, and the pages slide by `sin(openness)` along x.
+fn book_pose(openness: f32, flip1: f32, flip2: f32) -> (PoseOverrides, Vec3) {
+    let pose = pose_of(vec![
+        ("left_lid", Vec3::new(0.0, std::f32::consts::PI + openness, 0.0)),
+        ("right_lid", Vec3::new(0.0, -openness, 0.0)),
+        ("left_pages", Vec3::new(0.0, openness, 0.0)),
+        ("right_pages", Vec3::new(0.0, -openness, 0.0)),
+        (
+            "flip_page1",
+            Vec3::new(0.0, openness - openness * 2.0 * flip1, 0.0),
+        ),
+        (
+            "flip_page2",
+            Vec3::new(0.0, openness - openness * 2.0 * flip2, 0.0),
+        ),
+    ]);
+    let slide = (openness as f64).sin() as f32;
+    (pose, Vec3::new(slide, 0.0, 0.0))
+}
+
+/// Poses one object-model block entity (the five kinds from [`BlockEntityKind::Lectern`]) into
+/// the entity vertex stream: one batched path with everything else. `rect_of` resolves the
+/// textures that differ per part (the pot's sherd sides); `orientation` is the camera's
+/// orientation quaternion for the conduit's billboarded eye.
+pub(crate) fn emit_model_block_entity(
+    out: &mut Vec<EntityVertex>,
+    inst: &BlockEntityInstance,
+    camera: glam::DVec3,
+    orientation: glam::Quat,
+    rect: [u32; 4],
+    rect_of: &mut dyn FnMut(&Identifier) -> [u32; 4],
+) {
+    // The instance stores (sky, block); the vertex wants (block, sky).
+    let (sky, block) = inst.light;
+    let light = (block, sky);
+    match inst.kind {
+        BlockEntityKind::Lectern => {
+            // Vanilla `LecternRenderer`'s fixed `BOOK_STATE`: `forAnimation(0, 0.1, 0.9, 1.2)`.
+            let openness = book_openness(0.0, 1.2);
+            let (pose, offset) = book_pose(openness, 0.1, 0.9);
+            let model = book_model();
+            let parts: Vec<&ModelPart> = model.root.children.iter().collect();
+            let rects = vec![rect; parts.len()];
+            emit_object(
+                out,
+                model,
+                &parts,
+                &rects,
+                offset,
+                &pose,
+                lectern_root(inst.pos, inst.facing, camera),
+                light,
+            );
+        }
+        BlockEntityKind::EnchantTable => {
+            // Vanilla `EnchantTableRenderer.submit`'s book state from the block entity's tick.
+            let (time, flip, open, rot) = match inst.anim {
+                Some(BlockEntityAnim::EnchantTable {
+                    time,
+                    flip,
+                    open,
+                    rot,
+                    ..
+                }) => (time, flip.end, open.end, rot.end),
+                _ => (0.0, 0.0, 0.0, 0.0),
+            };
+            let ff1 = enchant_page_flip(flip, 0.25);
+            let ff2 = enchant_page_flip(flip, 0.75);
+            let openness = book_openness(time, open);
+            let (pose, offset) = book_pose(openness, ff1, ff2);
+            let model = book_model();
+            let parts: Vec<&ModelPart> = model.root.children.iter().collect();
+            let rects = vec![rect; parts.len()];
+            emit_object(
+                out,
+                model,
+                &parts,
+                &rects,
+                offset,
+                &pose,
+                enchant_root(inst.pos, time, rot, camera),
+                light,
+            );
+        }
+        BlockEntityKind::Bell => {
+            let model = bell_model();
+            let parts: Vec<&ModelPart> = model.root.children.iter().collect();
+            let rects = vec![rect; parts.len()];
+            let (ticks, click) = match inst.anim {
+                Some(BlockEntityAnim::Bell { ticks, click }) => (ticks.end, Some(click)),
+                _ => (0.0, None),
+            };
+            let (x_rot, z_rot) = bell_shake_rotation(ticks, click.flatten());
+            let pose = pose_of(vec![("bell_body", Vec3::new(x_rot, 0.0, z_rot))]);
+            emit_object(
+                out,
+                model,
+                &parts,
+                &rects,
+                Vec3::ZERO,
+                &pose,
+                bell_root(inst.pos, camera),
+                light,
+            );
+        }
+        BlockEntityKind::DecoratedPot => {
+            // Vanilla's wobble progress: (gameTime - start + partial) / style.duration; the turn
+            // branch vanilla's (unassigned) `state.wobbleStyle` leaves reachable is the NEGATIVE
+            // one, 10 ticks.
+            let progress = match inst.anim {
+                Some(BlockEntityAnim::Pot { wobble }) => wobble.end / 10.0,
+                _ => 0.0,
+            };
+            let base = pot_base_model();
+            let base_parts: Vec<&ModelPart> = base.root.children.iter().collect();
+            let base_rects = vec![rect; base_parts.len()];
+            emit_object(
+                out,
+                base,
+                &base_parts,
+                &base_rects,
+                Vec3::ZERO,
+                &PoseOverrides::default(),
+                pot_root(inst.pos, inst.facing, progress, camera),
+                light,
+            );
+            // The four sherd sides, each with its own texture (the blank sprite without one).
+            let sides = pot_sides_model();
+            let sherds = inst.sherds.as_deref();
+            let sides_parts: Vec<&ModelPart> = sides.root.children.iter().collect();
+            let mut rects: Vec<[u32; 4]> = Vec::new();
+            for part in &sides_parts {
+                let sherd = match part.name.as_str() {
+                    "front" => sherds.and_then(|s| s.front.as_ref()),
+                    "back" => sherds.and_then(|s| s.back.as_ref()),
+                    "left" => sherds.and_then(|s| s.left.as_ref()),
+                    "right" => sherds.and_then(|s| s.right.as_ref()),
+                    _ => None,
+                };
+                let texture = pot_side_texture(sherd);
+                rects.push(rect_of(&texture));
+            }
+            emit_object(
+                out,
+                sides,
+                &sides_parts,
+                &rects,
+                Vec3::ZERO,
+                &PoseOverrides::default(),
+                pot_root(inst.pos, inst.facing, progress, camera),
+                light,
+            );
+        }
+        BlockEntityKind::Conduit => {
+            let (tick_count, rotation, active, hunting) = match inst.anim {
+                Some(BlockEntityAnim::Conduit {
+                    tick_count,
+                    rotation,
+                    active,
+                    hunting,
+                }) => (tick_count, rotation, active, hunting),
+                _ => (0.0, 0.0, false, false),
+            };
+            // Vanilla's `getActiveRotation`: the counter times -0.0375, in degrees.
+            let spin = conduit_spin(rotation);
+            let anim_time = tick_count;
+            let phase = (tick_count as i32 / 66).rem_euclid(3);
+            if !active {
+                let model = conduit_shell_model();
+                let parts: Vec<&ModelPart> = model.root.children.iter().collect();
+                let rects = vec![rect; parts.len()];
+                emit_object(
+                    out,
+                    model,
+                    &parts,
+                    &rects,
+                    Vec3::ZERO,
+                    &PoseOverrides::default(),
+                    conduit_shell_root(inst.pos, spin, camera),
+                    light,
+                );
+                return;
+            }
+            let hh = conduit_bob(anim_time);
+            // The cage.
+            let cage = conduit_cage_model();
+            let cage_parts: Vec<&ModelPart> = cage.root.children.iter().collect();
+            let cage_rects = vec![rect_of(&conduit_cage_texture()); cage_parts.len()];
+            emit_object(
+                out,
+                cage,
+                &cage_parts,
+                &cage_rects,
+                Vec3::ZERO,
+                &PoseOverrides::default(),
+                conduit_cage_root(inst.pos, spin, hh, camera),
+                light,
+            );
+            // The wind, twice (the second copy counter-rotated).
+            let wind = conduit_wind_model();
+            let wind_parts: Vec<&ModelPart> = wind.root.children.iter().collect();
+            let wind_rect = rect_of(&conduit_wind_texture(phase));
+            let wind_rects = vec![wind_rect; wind_parts.len()];
+            emit_object(
+                out,
+                wind,
+                &wind_parts,
+                &wind_rects,
+                Vec3::ZERO,
+                &PoseOverrides::default(),
+                conduit_wind_root(inst.pos, phase, camera),
+                light,
+            );
+            let back = conduit_wind_back_root(inst.pos, camera);
+            for part in &wind_parts {
+                emit_object_part(
+                    out,
+                    wind,
+                    part,
+                    &PoseOverrides::default(),
+                    back,
+                    wind_rect,
+                    Vec3::ZERO,
+                    light,
+                );
+            }
+            // The eye, billboarded to the camera.
+            let eye = conduit_eye_model();
+            let eye_parts: Vec<&ModelPart> = eye.root.children.iter().collect();
+            let eye_rect = rect_of(&conduit_eye_texture(hunting));
+            let eye_rects = vec![eye_rect; eye_parts.len()];
+            emit_object(
+                out,
+                eye,
+                &eye_parts,
+                &eye_rects,
+                Vec3::ZERO,
+                &PoseOverrides::default(),
+                conduit_eye_root(inst.pos, hh, orientation, camera),
+                light,
+            );
+        }
+        BlockEntityKind::Chest(_)
+        | BlockEntityKind::Shulker(_)
+        | BlockEntityKind::Sign { .. }
+        | BlockEntityKind::Banner { .. }
+        | BlockEntityKind::Skull { .. } => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1227,6 +2220,8 @@ mod tests {
             banner_phase: 0.0,
             banner: None,
             skull_anim: TickPair::fixed(0.0),
+            anim: None,
+            sherds: None,
         }
     }
 
@@ -1243,6 +2238,8 @@ mod tests {
             banner_phase: 0.0,
             banner: None,
             skull_anim: TickPair::fixed(0.0),
+            anim: None,
+            sherds: None,
         }
     }
 
@@ -1695,5 +2692,327 @@ mod tests {
     fn sign_line_metrics_match_vanilla() {
         assert_eq!(sign_line_metrics(false), (10, 90));
         assert_eq!(sign_line_metrics(true), (9, 60));
+    }
+
+    fn lec(pos: BlockPos, kind: BlockEntityKind) -> BlockEntityInstance {
+        BlockEntityInstance {
+            pos,
+            facing: Direction::North,
+            half: ChestHalf::Single,
+            kind,
+            open: TickPair::fixed(0.0),
+            light: (15, 0),
+            sign_angle: 0.0,
+            text: None,
+            banner_phase: 0.0,
+            banner: None,
+            skull_anim: TickPair::fixed(0.0),
+            anim: None,
+            sherds: None,
+        }
+    }
+
+    /// The five object-model block entities resolve from their type names, and unknown types
+    /// still do not.
+    #[test]
+    fn object_model_kinds_resolve() {
+        for (name, kind) in [
+            ("lectern", BlockEntityKind::Lectern),
+            ("enchanting_table", BlockEntityKind::EnchantTable),
+            ("bell", BlockEntityKind::Bell),
+            ("decorated_pot", BlockEntityKind::DecoratedPot),
+            ("conduit", BlockEntityKind::Conduit),
+        ] {
+            let block = Identifier::minecraft(name);
+            assert_eq!(kind_of(&block, &block, false), Some(kind), "{name}");
+        }
+    }
+
+    /// Vanilla `BookModel.State.forAnimation`: `(sin(progress * 0.02) * 0.1 + 1.25) * openness`.
+    /// At progress 0 the sine is 0, so the base is 1.25; the lectern's fixed state lifts it by
+    /// its `openness` of 1.2.
+    #[test]
+    fn book_openness_matches_vanilla() {
+        assert!((book_openness(0.0, 1.0) - 1.25).abs() < 1e-6);
+        assert!((book_openness(0.0, 1.2) - 1.5).abs() < 1e-6);
+        // A quarter turn of progress (PI/2 / 0.02 ticks) puts the sine at 1.
+        let full = std::f32::consts::PI / 2.0 / 0.02;
+        assert!((book_openness(full, 1.0) - 1.35).abs() < 1e-5, "{}", book_openness(full, 1.0));
+    }
+
+    /// Vanilla `EnchantTableRenderer.submit`'s page flips: `frac(flip + 0.25) * 1.6 - 0.3`
+    /// clamped to 0..1 (and the same at 0.75 for the second page).
+    #[test]
+    fn enchant_page_flip_matches_vanilla() {
+        // flip 0: frac(0.25) = 0.25 -> 0.4 - 0.3 = 0.1; frac(0.75) -> 1.2 - 0.3 = 0.9.
+        assert!((enchant_page_flip(0.0, 0.25) - 0.1).abs() < 1e-6);
+        assert!((enchant_page_flip(0.0, 0.75) - 0.9).abs() < 1e-6);
+        // Clamped at both ends: a raw value below 0 clamps to 0 (flip 0.9 -> frac(1.15) = 0.15,
+        // 0.24 - 0.3 < 0), and one above 1 clamps up (flip 0.5625 -> frac(0.8125) = 0.8125,
+        // 1.3 - 0.3 > 1).
+        assert_eq!(enchant_page_flip(0.9, 0.25), 0.0);
+        assert_eq!(enchant_page_flip(0.5625, 0.25), 1.0);
+        // `frac` wraps: flip 1.25 is flip 0.25.
+        assert!((enchant_page_flip(1.25, 0.0) - 0.1).abs() < 1e-6);
+    }
+
+    /// Vanilla `ConduitRenderer.submit`'s bob: `sin(animTime * 0.1) / 2 + 0.5` in 0..1, squared
+    /// plus itself, so it runs from 0.75 (sine 0) up to 2 (sine at 1, 5 PI ticks) and down to 0
+    /// (sine at -1, 15 PI ticks).
+    #[test]
+    fn conduit_bob_matches_vanilla() {
+        assert!((conduit_bob(0.0) - 0.75).abs() < 1e-6, "{}", conduit_bob(0.0));
+        let peak = conduit_bob(std::f32::consts::PI * 5.0);
+        assert!((peak - 2.0).abs() < 1e-4, "{peak}");
+        let trough = conduit_bob(std::f32::consts::PI * 15.0);
+        assert!(trough.abs() < 1e-4, "{trough}");
+    }
+
+    /// Vanilla `ConduitBlockEntity.getActiveRotation`: the counter times -0.0375, in degrees.
+    #[test]
+    fn conduit_spin_matches_vanilla() {
+        assert_eq!(conduit_spin(0.0), 0.0);
+        assert_eq!(conduit_spin(1.0), -0.0375);
+        // A full turn takes 9600 ticks (360 / 0.0375).
+        assert!((conduit_spin(9600.0) + 360.0).abs() < 1e-2);
+    }
+
+    /// Vanilla `BellModel.setupAnim`: the shake is `sin(ticks / PI) / (4 + ticks / 3)`, and the
+    /// click direction picks the axis and its sign (north/south tilt about x, west/east about
+    /// z); without a click direction the bell is at rest.
+    #[test]
+    fn bell_shake_matches_vanilla() {
+        assert_eq!(bell_shake_rotation(0.0, None), (0.0, 0.0));
+        // ticks 0: sin(0) = 0, so the shake is 0 whichever direction.
+        assert_eq!(bell_shake_rotation(0.0, Some(Direction::North)), (0.0, 0.0));
+        // ticks 1: sin(1 / PI) ~ 0.3138, over 4 + 1/3.
+        let base = (1.0 / std::f32::consts::PI).sin() / (4.0 + 1.0 / 3.0);
+        assert!((bell_shake_rotation(1.0, Some(Direction::South)).0 - base).abs() < 1e-4);
+        assert!((bell_shake_rotation(1.0, Some(Direction::North)).0 + base).abs() < 1e-4);
+        assert!(bell_shake_rotation(1.0, Some(Direction::North)).1.abs() < 1e-9);
+        assert!((bell_shake_rotation(1.0, Some(Direction::East)).1 + base).abs() < 1e-4);
+        assert!((bell_shake_rotation(1.0, Some(Direction::West)).1 - base).abs() < 1e-4);
+        // The sine's peak at the first ticks dwarfs the decay; by tick 10 the sine has swung
+        // past its peak and the growing denominator has taken over.
+        let (a, _) = bell_shake_rotation(10.0, Some(Direction::South));
+        assert!(a.abs() < base.abs(), "{a} vs {base}");
+    }
+
+    /// Vanilla `Camera.setRotation`'s orientation: the conduit's eye is billboarded through it,
+    /// so its plane's normal comes out facing the camera (`ConduitRenderer.submit`'s eye pose
+    /// ends with the half turn that flips the model's +z onto the view forward).
+    #[test]
+    fn camera_orientation_faces_forward_and_up() {
+        let forward = |yaw: f32, pitch: f32| {
+            let (sy, cy) = (yaw.to_radians().sin(), yaw.to_radians().cos());
+            let (sp, cp) = (pitch.to_radians().sin(), pitch.to_radians().cos());
+            Vec3::new(-cp * sy, -sp, cp * cy)
+        };
+        for (yaw, pitch) in [(0.0, 0.0), (45.0, -30.0), (180.0, 10.0), (270.0, -80.0)] {
+            let q = camera_orientation(yaw, pitch);
+            // The eye's plane normal (+z) through the renderer's pose: the 0.5 scale, the
+            // camera orientation and the `rotationZ(PI).rotateY(PI)` half turn about x.
+            let n = (Mat4::from_quat(q) * Mat4::from_rotation_x(std::f32::consts::PI))
+                .transform_vector3(Vec3::Z);
+            let want = forward(yaw, pitch);
+            assert!(
+                n.distance(want) < 1e-4,
+                "yaw {yaw} pitch {pitch}: eye normal {n:?}, want {want:?}"
+            );
+        }
+    }
+
+    /// Vanilla `ConduitRenderer.submit`'s inactive shell: one cube inside the block, centred.
+    #[test]
+    fn conduit_shell_fits_its_block() {
+        let mut inst = lec(BlockPos::new(0, 0, 0), BlockEntityKind::Conduit);
+        inst.anim = Some(BlockEntityAnim::Conduit {
+            tick_count: 0.0,
+            rotation: 0.0,
+            active: false,
+            hunting: false,
+        });
+        let out = emit_object_vertices(&inst, glam::Quat::IDENTITY);
+        assert_eq!(out.len(), 6 * 6);
+        for v in &out {
+            // One 6x6x6 cube inside the block, centred: 3/16 to every side of the centre.
+            let c = [v.pos[0] - 0.5, v.pos[1] - 0.5, v.pos[2] - 0.5];
+            assert!(c.iter().all(|a| a.abs() <= 0.1876), "shell outside: {c:?}");
+        }
+    }
+
+    /// Vanilla `BellModel.createBodyLayer`: the body hangs from its pivot at (8, 12, 8) model
+    /// units and the base sits on the block's corner, so the bell occupies the block's lower
+    /// three quarters, centred.
+    #[test]
+    fn bell_model_places_the_body_and_base() {
+        let inst = lec(BlockPos::new(0, 0, 0), BlockEntityKind::Bell);
+        let out = emit_object_vertices(&inst, glam::Quat::IDENTITY);
+        // Two cubes.
+        assert_eq!(out.len(), 2 * 6 * 6);
+        let max_y = out.iter().map(|v| v.pos[1]).fold(0.0f32, f32::max);
+        let min_y = out.iter().map(|v| v.pos[1]).fold(f32::MAX, f32::min);
+        // The body's top is at 12/16 + 1/16 = 0.8125; the base's bottom at 4/16 = 0.25.
+        assert!((max_y - 0.8125).abs() < 1e-4, "top {max_y}");
+        assert!((min_y - 0.25).abs() < 1e-4, "bottom {min_y}");
+        for v in &out {
+            assert!((-1e-4..=1.0 + 1e-4).contains(&v.pos[0]), "x {}", v.pos[0]);
+            assert!((-1e-4..=1.0 + 1e-4).contains(&v.pos[2]), "z {}", v.pos[2]);
+        }
+    }
+
+    /// Vanilla `BookModel.createBodyLayer`: the book is 12 model units wide (0.75 blocks) with
+    /// the two lids either side of the seam, and the lectern's transform puts it at the
+    /// lectern's top (y 1.0625) turned by the block's `getClockWise` facing.
+    #[test]
+    fn lectern_book_sits_on_the_lectern_top() {
+        let inst = lec(BlockPos::new(0, 0, 0), BlockEntityKind::Lectern);
+        let out = emit_object_vertices(&inst, glam::Quat::IDENTITY);
+        // Seven parts, six faces each.
+        assert_eq!(out.len(), 7 * 6 * 6);
+        let min_y = out.iter().map(|v| v.pos[1]).fold(f32::MAX, f32::min);
+        let max_y = out.iter().map(|v| v.pos[1]).fold(0.0f32, f32::max);
+        // The book's 10-tall lids span 5/16 around the pivot's y: 1.0625 - 0.125 - 5/16 ..
+        // 1.0625 - 0.125 + 5/16.
+        // The book's lids are 10 model units tall (0.625 blocks) around the pivot at
+        // 1.0625 - 0.125, so nothing reaches below 0.6 even turned by the 67.5-degree z tilt.
+        assert!(min_y > 0.6, "book hangs below the lectern top: {min_y}");
+        assert!(max_y < 1.3, "book rises too high: {max_y}");
+        // The book's width: 12 pixels wide and 10 deep, well inside a block.
+        let max_x = out.iter().map(|v| v.pos[0]).fold(0.0f32, f32::max);
+        let min_x = out.iter().map(|v| v.pos[0]).fold(f32::MAX, f32::min);
+        assert!((max_x - min_x) < 1.0, "book wider than a block: {max_x} {min_x}");
+    }
+
+    /// The lectern's facing turns the book: `LecternRenderer.extractRenderState` reads
+    /// `facing.getClockWise().toYRot()`, so a north-facing lectern (whose clockwise is east,
+    /// yaw 270) turns its book a quarter turn from a south-facing one (west, 90).
+    #[test]
+    fn lectern_facing_turns_the_book() {
+        let mut north = lec(BlockPos::new(0, 0, 0), BlockEntityKind::Lectern);
+        north.facing = Direction::North;
+        let mut south = lec(BlockPos::new(0, 0, 0), BlockEntityKind::Lectern);
+        south.facing = Direction::South;
+        let a = emit_object_vertices(&north, glam::Quat::IDENTITY);
+        let b = emit_object_vertices(&south, glam::Quat::IDENTITY);
+        // The two poses are different, and each keeps the book inside the block's column.
+        let differs = a
+            .iter()
+            .zip(b.iter())
+            .any(|(p, q)| (p.pos[0] - q.pos[0]).abs() > 1e-4 || (p.pos[2] - q.pos[2]).abs() > 1e-4);
+        assert!(differs, "the facing does not turn the book");
+    }
+
+    /// Vanilla `DecoratedPotRenderer.createBaseLayer`: the base's neck ring sits above the
+    /// block's top and its flare is narrower than the body's 14-pixel width.
+    #[test]
+    fn decorated_pot_neck_rises_above_the_block() {
+        let inst = lec(BlockPos::new(0, 0, 0), BlockEntityKind::DecoratedPot);
+        let out = emit_object_vertices(&inst, glam::Quat::IDENTITY);
+        // The base layer's neck carries two cubes (the deflated ring and the inflated flare),
+        // plus the top and bottom planes and the four side quads.
+        assert_eq!(out.len(), 8 * 6 * 6);
+        let max_y = out.iter().map(|v| v.pos[1]).fold(0.0f32, f32::max);
+        // The neck's flare tops out at 37/16 - 20/16 + 1/16 = 1.1875 plus its 0.2 inflation.
+        assert!(max_y > 1.15, "neck does not rise above the block: {max_y}");
+        assert!(max_y < 1.35, "neck rises too high: {max_y}");
+        // Everything else is inside the block.
+        for v in &out {
+            if v.pos[1] < max_y - 1e-3 {
+                assert!(
+                    (-0.2..=1.2).contains(&v.pos[0]) && (-0.2..=1.2).contains(&v.pos[2]),
+                    "pot part outside the block: {:?}",
+                    v.pos
+                );
+            }
+        }
+    }
+
+    /// The decorated pot's direction turn (vanilla `modelTransformation`): the sides are four
+    /// separate quads around the block, and the block's `facing` rotates them.
+    #[test]
+    fn decorated_pot_facing_turns_the_sides() {
+        let mut north = lec(BlockPos::new(0, 0, 0), BlockEntityKind::DecoratedPot);
+        north.facing = Direction::North;
+        let mut east = lec(BlockPos::new(0, 0, 0), BlockEntityKind::DecoratedPot);
+        east.facing = Direction::East;
+        let a = emit_object_vertices(&north, glam::Quat::IDENTITY);
+        let b = emit_object_vertices(&east, glam::Quat::IDENTITY);
+        let differs = a
+            .iter()
+            .zip(b.iter())
+            .any(|(p, q)| (p.pos[0] - q.pos[0]).abs() > 1e-4 || (p.pos[2] - q.pos[2]).abs() > 1e-4);
+        assert!(differs, "the facing does not turn the pot");
+    }
+
+    /// The enchanting table's book animates: the bob lifts it off the (0.5, 0.75, 0.5)
+    /// transform by up to a hundredth, and the openness closes when no player is near.
+    #[test]
+    fn enchant_table_book_animates() {
+        let mut inst = lec(BlockPos::new(0, 0, 0), BlockEntityKind::EnchantTable);
+        inst.anim = Some(BlockEntityAnim::EnchantTable {
+            time: 0.0,
+            flip: TickPair::fixed(0.0),
+            open: TickPair::fixed(0.5),
+            rot: TickPair::fixed(0.0),
+            t_rot: 0.0,
+            flip_t: 0.0,
+            flip_a: 0.0,
+        });
+        let closed = emit_object_vertices(&inst, glam::Quat::IDENTITY);
+        let mut later = inst.clone();
+        later.anim = Some(BlockEntityAnim::EnchantTable {
+            time: 25.0,
+            flip: TickPair::fixed(0.5),
+            open: TickPair::fixed(0.9),
+            rot: TickPair::fixed(0.4),
+            t_rot: 0.4,
+            flip_t: 1.0,
+            flip_a: 0.1,
+        });
+        let open = emit_object_vertices(&later, glam::Quat::IDENTITY);
+        let differs = closed.iter().zip(open.iter()).any(|(p, q)| {
+            (p.pos[0] - q.pos[0]).abs() > 1e-3
+                || (p.pos[1] - q.pos[1]).abs() > 1e-3
+                || (p.pos[2] - q.pos[2]).abs() > 1e-3
+        });
+        assert!(differs, "the book does not animate");
+    }
+
+    /// A ringing bell tilts its body (the base stays put): vanilla `BellModel.setupAnim` rotates
+    /// only `bell_body`.
+    #[test]
+    fn ringing_bell_tilts_its_body() {
+        let rest = lec(BlockPos::new(0, 0, 0), BlockEntityKind::Bell);
+        let mut ringing = lec(BlockPos::new(0, 0, 0), BlockEntityKind::Bell);
+        ringing.anim = Some(BlockEntityAnim::Bell {
+            ticks: TickPair::fixed(1.0),
+            click: Some(Direction::South),
+        });
+        let a = emit_object_vertices(&rest, glam::Quat::IDENTITY);
+        let b = emit_object_vertices(&ringing, glam::Quat::IDENTITY);
+        let differs = a.iter().zip(b.iter()).any(|(p, q)| {
+            (p.pos[0] - q.pos[0]).abs() > 1e-4 || (p.pos[2] - q.pos[2]).abs() > 1e-4
+        });
+        assert!(differs, "the bell does not shake");
+    }
+
+    /// One object-model block entity's vertices, posed through the same emitter the frame path
+    /// uses (the texture rect is a unit square; only the geometry is checked here).
+    fn emit_object_vertices(
+        inst: &BlockEntityInstance,
+        orientation: glam::Quat,
+    ) -> Vec<EntityVertex> {
+        let mut out = Vec::new();
+        let rect = [0, 0, 64, 64];
+        emit_model_block_entity(
+            &mut out,
+            inst,
+            glam::DVec3::ZERO,
+            orientation,
+            rect,
+            &mut |_| rect,
+        );
+        out
     }
 }
