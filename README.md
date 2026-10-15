@@ -33,7 +33,7 @@ Fabric mod support (Phase 2) is not counted here.
 - ✅ Configuration phase, server transfers, cookies, resource pack answers
 - 🟡 Online-mode servers: encryption and session join need the Microsoft login above
 - 🟡 Signed chat (required by online-mode servers): message and command signing match vanilla's format (unit-tested); used once online mode works
-- 🟡 Item data: stacks decode and round-trip, and names, enchantments, damage, rarity and tool rules read into typed values; the game logic does not use them yet
+- ✅ Item data: stacks decode and round-trip, and names, enchantments, damage, rarity and tool rules read into typed values; block breaking uses the held stack's `minecraft:tool` component and Efficiency, the attack strength delay its `minecraft:attack_speed` modifiers, and item use duration its `minecraft:consumable` (verified against vanilla's tick counts, `scripts/checks/item-data-check.sh`)
 
 ### World
 - ✅ Terrain: chunks, light, block and multi-block updates, chunk loading and unloading
