@@ -32,6 +32,8 @@ pub struct Assets {
     packs: crate::packstack::PackStack,
     /// Where the packs were read from (vanilla's `resourcepacks` folder).
     packs_dir: PathBuf,
+    /// The server's downloaded packs layered above the selection.
+    server_packs: Vec<PathBuf>,
     model_cache: HashMap<String, Arc<ModelFile>>,
     /// Where this was opened from (`reopen`).
     source: (PathBuf, PathBuf, String),
@@ -241,6 +243,7 @@ impl Assets {
             index_hashes,
             packs: crate::packstack::PackStack::empty(),
             packs_dir: PathBuf::new(),
+            server_packs: Vec::new(),
             model_cache: HashMap::new(),
             source,
             pack_ids: Vec::new(),
@@ -251,8 +254,8 @@ impl Assets {
     /// Re-applies the same pack stack when one was applied.
     pub fn reopen(&self) -> Result<Assets> {
         let mut assets = Assets::open(&self.source.0, &self.source.1, &self.source.2)?;
-        if !self.pack_ids.is_empty() {
-            assets.apply_packs(&self.packs_dir, &self.pack_ids);
+        if !self.pack_ids.is_empty() || !self.server_packs.is_empty() {
+            assets.apply_server_packs(&self.packs_dir, &self.pack_ids, &self.server_packs);
         }
         Ok(assets)
     }
@@ -262,15 +265,29 @@ impl Assets {
     /// Must be called before any asset is read; clears the model cache of
     /// pack-provided models.
     pub fn apply_packs(&mut self, packs_dir: &Path, ids: &[String]) {
+        self.apply_server_packs(packs_dir, ids, &[]);
+    }
+
+    /// [`Assets::apply_packs`] with the server's downloaded packs layered above
+    /// the selection (vanilla's `DownloadedPackSource` sits at the top of the
+    /// repository): the zips the server pushed, in push order.
+    pub fn apply_server_packs(&mut self, packs_dir: &Path, ids: &[String], server: &[PathBuf]) {
         self.packs_dir = packs_dir.to_path_buf();
-        self.packs = crate::packstack::PackStack::open(packs_dir, ids);
+        self.packs = crate::packstack::PackStack::open_with_server(packs_dir, ids, server);
         self.pack_ids = ids.to_vec();
+        self.server_packs = server.to_vec();
         self.model_cache.clear();
     }
 
     /// The pack ids currently layered (bottom first), as `apply_packs` got them.
     pub fn pack_ids(&self) -> &[String] {
         &self.pack_ids
+    }
+
+    /// The server packs currently layered above the selection, as
+    /// `apply_server_packs` got them.
+    pub fn server_packs(&self) -> &[PathBuf] {
+        &self.server_packs
     }
 
     /// The directory packs were layered from (vanilla's `resourcepacks` folder).
