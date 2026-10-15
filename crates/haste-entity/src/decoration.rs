@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 use haste_core::entity::MetadataValue;
-use haste_core::model::{Decoration, ItemFrameDecoration, PaintingDecoration};
+use haste_core::model::{Decoration, ItemFrameDecoration, LightningDecoration, PaintingDecoration};
 use haste_core::{Direction, Identifier, RegistryIndex};
 
 /// `ItemFrame.DATA_ITEM`.
@@ -99,7 +99,18 @@ pub fn build(
     data: i32,
     metadata: &crate::metadata::Metadata,
     variants: &HashMap<u32, PaintingVariant>,
+    entity_id: i32,
 ) -> Option<Decoration> {
+    // The lightning bolt is not hanging: it renders at the entity's own position, its
+    // geometry from a seed (the entity id stands in for vanilla's per-bolt random).
+    if matches!(
+        crate::registry::decoration_kind(kind),
+        Some(crate::registry::DecorationKind::LightningBolt)
+    ) {
+        return Some(Decoration::Lightning(LightningDecoration {
+            seed: entity_id as u32 as u64 | 0x5EED_0000_0000_0000,
+        }));
+    }
     let facing = Direction::from_ordinal(u8::try_from(data).ok()?)?;
     match crate::registry::decoration_kind(kind)? {
         crate::registry::DecorationKind::ItemFrame { glow } => {
@@ -129,6 +140,8 @@ pub fn build(
                 front,
             }))
         }
+        // Handled before the facing is parsed (the bolt is not hanging).
+        crate::registry::DecorationKind::LightningBolt => None,
     }
 }
 
@@ -163,6 +176,14 @@ pub fn render_center(
     metadata: &crate::metadata::Metadata,
     variants: &HashMap<u32, PaintingVariant>,
 ) -> haste_core::DVec3 {
+    // The lightning bolt hangs on nothing: its render origin is its own position (the spawn
+    // packet's).
+    if matches!(
+        crate::registry::decoration_kind(kind),
+        Some(crate::registry::DecorationKind::LightningBolt)
+    ) {
+        return block_pos;
+    }
     let Some(facing) = u8::try_from(data).ok().and_then(Direction::from_ordinal) else {
         return block_pos + haste_core::DVec3::splat(0.5);
     };
@@ -313,7 +334,7 @@ mod tests {
             },
         }]);
         // Unknown kind index: no decoration.
-        assert!(build(RegistryIndex(999), 2, &m, &variants).is_none());
+        assert!(build(RegistryIndex(999), 2, &m, &variants, 1).is_none());
     }
 
     #[test]

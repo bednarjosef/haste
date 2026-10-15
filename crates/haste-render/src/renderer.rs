@@ -59,6 +59,7 @@ pub struct ViewBob {
 pub struct SkyState {
     pub time_of_day: i64,
     pub rain: f32,
+    pub thunder: f32,
     pub dimension_has_sky: bool,
     pub fog_start: f32,
     pub fog_end: f32,
@@ -142,6 +143,9 @@ pub struct FrameInput<'a> {
     pub camera_entity: Option<haste_core::EntityId>,
     /// The nausea/portal screen warp for this frame (`None`: no warp).
     pub spin: Option<SpinWarp>,
+    /// The extracted weather columns (`WeatherEffectRenderer.extractRenderState`), `None`
+    /// when it does not rain (the pass is skipped entirely). Borrowed for one frame.
+    pub weather: Option<&'a crate::weather::WeatherFrame>,
 }
 
 #[cfg(test)]
@@ -237,6 +241,7 @@ mod tests {
             breaking: &[],
             camera_entity: None,
             spin: None,
+            weather: None,
         };
         // The section visibility walk runs off the render thread and lands a frame later
         // (vanilla draws the previous graph until the async update is swapped in), so keep
@@ -433,6 +438,8 @@ pub struct Renderer {
     atlas_texture: wgpu::Texture,
     /// Animated atlas textures: per-tick region uploads (`set_animation_tick`).
     animation: crate::animation::SpriteAnimator,
+    /// The game tick the client last reported (`set_animation_tick`), for weather scroll.
+    animation_tick: u64,
     baked: Arc<haste_assets::BakedBlockModels>,
     mesher: Mesher,
     /// Grass/foliage colormaps from the assets (biome colours are resolved against them).
@@ -507,8 +514,10 @@ pub struct Renderer {
     assets: haste_assets::Assets,
     /// Entity cube models (`FrameInput::entities`).
     entity: crate::entity::EntityRenderer,
-    /// Sky, celestial bodies, clouds, weather; terrain fog colour and daylight.
+    /// Sky, celestial bodies, clouds; terrain fog colour and daylight.
     sky: crate::sky::SkyRenderer,
+    /// Rain and snow columns (`FrameInput::sky.weather`).
+    weather: crate::weather::WeatherRenderer,
     /// Selection outline and break cracks.
     overlay: crate::overlay::OverlayRenderer,
     /// Particles (`FrameInput::particles`).
@@ -541,6 +550,8 @@ pub struct Renderer {
     block_entities_drawn: u32,
     /// The fog colour (sRGB) and distances of the last frame, for logging and tests.
     last_fog: Option<([f32; 3], crate::fog::FogData)>,
+    /// The frame's lightning bolts, collected from the entities (reused).
+    lightning_bolts: Vec<crate::weather::LightningBolt>,
 }
 
 /// An in-flight screenshot readback: the copy is submitted and `map_async` posted, the
@@ -955,6 +966,20 @@ impl Renderer {
             surface_format,
             assets,
         );
+        let (rain_rect, snow_rect) = sky.weather_rects();
+        let mut weather = crate::weather::WeatherRenderer::new(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            surface_format,
+            rain_rect,
+            snow_rect,
+        );
+        weather.set_textures(
+            &gpu.device,
+            sky.atlas_view(),
+            lightmap.view(),
+            lightmap.sampler(),
+        );
         let overlay = crate::overlay::OverlayRenderer::new(
             gpu.device.clone(),
             gpu.queue.clone(),
@@ -984,6 +1009,7 @@ impl Renderer {
             atlas,
             atlas_texture,
             animation,
+            animation_tick: 0,
             baked,
             mesher,
             colormaps,
@@ -1028,6 +1054,7 @@ impl Renderer {
             assets: gui_assets,
             entity,
             sky,
+            weather,
             overlay,
             particles,
             first_person: None,
@@ -1043,6 +1070,7 @@ impl Renderer {
             surface_copy_logged: false,
             block_entities_drawn: 0,
             last_fog: None,
+            lightning_bolts: Vec::new(),
         })
     }
 
@@ -1071,6 +1099,7 @@ impl Renderer {
     /// re-uploads every changed sprite region.
     pub fn set_animation_tick(&mut self, tick: u64) {
         self.animation.set_tick(tick);
+        self.animation_tick = tick;
         // The GUI's own animated textures (the fire and nether-portal overlays) share the tick.
         self.gui.set_animation_tick(tick);
     }
@@ -1771,6 +1800,45 @@ impl Renderer {
             &fog_data,
             fog_srgb,
         );
+        // The weather columns (vanilla draws them in the level pass after translucent
+        // terrain, right where the sky overlays run) and the lightning bolts (the entities'
+        // lightning decorations, camera-relative). Both submit camera-relative vertices,
+        // so they take the rotation-only projection like the entity and particle passes.
+        if let Some(weather) = frame.weather {
+            self.weather.prepare(
+                weather,
+                &frame.camera,
+                rot_view_proj,
+                &fog_data,
+                crate::sky::linear(fog_srgb),
+                self.animation_tick as i64,
+                frame.partial_tick,
+            );
+        }
+        if frame.entities.iter().any(|e| {
+            matches!(
+                e.decoration,
+                Some(haste_core::model::Decoration::Lightning(_))
+            )
+        }) {
+            let camera = frame.camera.pos;
+            self.lightning_bolts.clear();
+            for e in frame.entities {
+                if let Some(haste_core::model::Decoration::Lightning(bolt)) = &e.decoration {
+                    self.lightning_bolts.push(crate::weather::LightningBolt {
+                        pos: [
+                            (e.pos.x - camera.x) as f32,
+                            (e.pos.y - camera.y) as f32,
+                            (e.pos.z - camera.z) as f32,
+                        ],
+                        seed: bolt.seed,
+                    });
+                }
+            }
+            self.weather.prepare_lightning(&self.lightning_bolts);
+        } else {
+            self.weather.prepare_lightning(&[]);
+        }
         let fog_color = crate::sky::linear(fog_srgb);
         let mut camera_uniform = CameraUniform {
             cam_pos: [
@@ -2264,6 +2332,8 @@ impl Renderer {
             }
             draw_calls += self.overlay.draw(&mut pass);
             draw_calls += self.sky.draw_overlays(&mut pass);
+            draw_calls += self.weather.draw(&mut pass);
+            draw_calls += self.weather.draw_lightning(&mut pass);
             if let Some(t) = self.timer.as_ref() {
                 if sub_open[7] {
                     t.end_subpass(&mut pass, 7);

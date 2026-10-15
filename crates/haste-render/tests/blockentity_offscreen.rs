@@ -64,6 +64,7 @@ fn render(
         breaking: &[],
         camera_entity: None,
         spin: None,
+        weather: None,
     };
     renderer.render(&frame).unwrap();
     renderer.read_back().unwrap()

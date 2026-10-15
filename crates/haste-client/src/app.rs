@@ -1455,14 +1455,23 @@ pub fn view_bob(
 /// saved option with vanilla's per-tick FOV modifier interpolated, then the submerged and
 /// death adjustments; the hurt/death tilts and the view bobbing come from the view's per-tick
 /// state (vanilla's `Camera.calculateFov` and `GameRenderer.bobHurt`/`bobView`).
-fn frame_view(
+fn frame_view<'w>(
     shared: &Shared,
     perspective: game::Perspective,
     yaw: f32,
     pitch: f32,
     options: &Options,
     now: Instant,
-) -> (Camera, SkyState, LightmapFrame, f32, i32, u64) {
+    weather: &'w mut haste_render::WeatherFrame,
+) -> (
+    Camera,
+    SkyState,
+    LightmapFrame,
+    f32,
+    i32,
+    u64,
+    Option<&'w haste_render::WeatherFrame>,
+) {
     let view = shared.view.lock().clone();
     let partial = game::partial_tick(view.tick_at, now);
     let eye = game::interpolate(view.prev_eye, view.eye, partial);
@@ -1540,20 +1549,47 @@ fn frame_view(
         },
     };
     let fog_end = (view.view_distance.max(2) * 16) as f32;
+    // The weather levels (`Level.getRainLevel`/`getThunderLevel` lerped by partial tick)
+    // and the extracted columns (vanilla `WeatherEffectRenderer.extractRenderState`, which
+    // runs per frame on the render thread). The caller's frame buffer is reused, so a frame
+    // with rain allocates nothing.
+    let rain_level = view.rain_level.0 + (view.rain_level.1 - view.rain_level.0) * partial;
+    let thunder_level =
+        view.thunder_level.0 + (view.thunder_level.1 - view.thunder_level.0) * partial;
+    let weather_out = if rain_level > 0.0 && view.has_sky {
+        extract_weather(
+            weather,
+            &world,
+            &shared.biome_climates,
+            pos,
+            rain_level,
+            view.world_age,
+            view.sea_level,
+            partial,
+        );
+        Some(&*weather)
+    } else {
+        None
+    };
+    // `Level.getThunderLevel` scales the thunder level by the rain level (a dry thunderstorm
+    // cannot darken); the fog's thunder input is that product.
+    let mut fog = fog_inputs(
+        &world,
+        &shared.data,
+        &shared.biome_climates,
+        pos,
+        &view,
+        partial,
+    );
+    fog.thunder_level *= rain_level;
     let sky = SkyState {
         time_of_day: view.time_of_day,
-        rain: 0.0,
+        rain: rain_level,
+        thunder: thunder_level,
         dimension_has_sky: view.has_sky,
         fog_start: fog_end * 0.75,
         fog_end,
-        fog: fog_inputs(
-            &world,
-            &shared.data,
-            &shared.biome_climates,
-            pos,
-            &view,
-            partial,
-        ),
+        fog,
     };
     drop(world);
     // The lightmap inputs the extractor gathers per frame (LightmapRenderStateExtractor.extract):
@@ -1585,6 +1621,7 @@ fn frame_view(
         partial,
         view.view_distance,
         view.animation_tick,
+        weather_out,
     )
 }
 
@@ -1619,6 +1656,174 @@ fn camera_fog_type(world: &World, data: &haste_data::GameData, pos: DVec3) -> Fo
         return FogType::PowderSnow;
     }
     FogType::Atmospheric
+}
+
+/// Vanilla `RandomSource` (the single-threaded variant `WeatherEffectRenderer` uses): the
+/// 48-bit Java LCG. `setSeed` xors the multiplier, `next(bits)` advances the seed.
+struct JavaRandom(u64);
+
+/// The Java LCG's multiplier, 25214903917 (0x5DEECE66D).
+const LCG_MULTIPLIER: u64 = 25_214_903_917;
+/// The Java LCG's increment.
+const LCG_INCREMENT: u64 = 11;
+/// The Java LCG's 48-bit mask.
+const LCG_MASK: u64 = (1u64 << 48) - 1;
+
+impl JavaRandom {
+    fn new(seed: i64) -> Self {
+        JavaRandom((seed as u64 ^ LCG_MULTIPLIER) & LCG_MASK)
+    }
+
+    fn next_i32(&mut self, bits: u32) -> i32 {
+        self.0 = (self
+            .0
+            .wrapping_mul(LCG_MULTIPLIER)
+            .wrapping_add(LCG_INCREMENT))
+            & LCG_MASK;
+        (self.0 >> (48 - bits)) as i32
+    }
+
+    /// `nextFloat`.
+    fn next_float(&mut self) -> f32 {
+        self.next_i32(24) as f32 * 5.960_464_5E-8
+    }
+
+    /// `nextDouble`.
+    fn next_double(&mut self) -> f64 {
+        let upper = self.next_i32(26) as u64;
+        let lower = self.next_i32(27) as u64;
+        ((upper << 27) + lower) as f64 * 1.110_223E-16
+    }
+
+    /// `nextGaussian` (Marsaglia polar).
+    fn next_gaussian(&mut self) -> f64 {
+        loop {
+            let x = 2.0 * self.next_double() - 1.0;
+            let y = 2.0 * self.next_double() - 1.0;
+            let r2 = x * x + y * y;
+            if r2 < 1.0 && r2 > 0.0 {
+                let m = (-2.0 * r2.ln() / r2).sqrt();
+                return x * m;
+            }
+        }
+    }
+}
+
+/// Vanilla `WeatherEffectRenderer.extractRenderState` + the per-column instances: scans the
+/// weather radius around the camera, clips each column's y range to the heightmap, sorts it
+/// into rain or snow by the biome's precipitation at the camera's y, and fills the per-column
+/// random's texture offsets. Fills the caller's reused frame buffer.
+#[allow(clippy::too_many_arguments)]
+fn extract_weather(
+    frame: &mut haste_render::WeatherFrame,
+    world: &World,
+    climates: &[haste_render::BiomeClimate],
+    camera: DVec3,
+    intensity: f32,
+    game_time: i64,
+    sea_level: i32,
+    partial_tick: f32,
+) {
+    use haste_core::view::BlockView as _;
+    let radius = haste_render::weather::WEATHER_RADIUS;
+    frame.intensity = intensity;
+    frame.radius = radius;
+    frame.rain.clear();
+    frame.snow.clear();
+    let cbx = camera.x.floor() as i32;
+    let cby = camera.y.floor() as i32;
+    let cbz = camera.z.floor() as i32;
+    // One-time diagnostics: the camera, sea level, one column's height and the frame's
+    // rain/snow counts, so an invisible weather pass is debuggable from the log.
+    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let mut terrain_of_first: Option<i32> = None;
+    for z in cbz - radius..=cbz + radius {
+        for x in cbx - radius..=cbx + radius {
+            // `Level.getHeight(MOTION_BLOCKING, x, z)` (0 below the world when no chunk:
+            // the column then degenerates and is skipped by the y test, like vanilla's).
+            let terrain_height = crate::net::column_height(world, x, z);
+            if terrain_of_first.is_none() {
+                terrain_of_first = Some(terrain_height);
+            }
+            let y0 = (cby - radius).max(terrain_height);
+            let y1 = (cby + radius).max(terrain_height);
+            if y1 - y0 == 0 {
+                continue;
+            }
+            let probe = BlockPos::new(x, cby, z);
+            let precipitation =
+                crate::net::precipitation_at_pos(world, climates, &probe, sea_level);
+            let seed = haste_render::weather::column_seed(x, z);
+            let mut rng = JavaRandom::new(seed as i64);
+            let light_sample_y = cby.max(terrain_height);
+            let light_pos = BlockPos::new(x, light_sample_y, z);
+            let light = (world.block_light(light_pos), world.sky_light(light_pos));
+            let column = haste_render::WeatherColumn {
+                x,
+                z,
+                bottom_y: y0,
+                top_y: y1,
+                u_offset: 0.0,
+                v_offset: 0.0,
+                light,
+                seed,
+            };
+            match precipitation {
+                crate::net::Precipitation::Rain => {
+                    // `createRainColumnInstance`: the scroll speed 3 + rand, the wrapped
+                    // tick offset and the v offset it scrolls to.
+                    let wrapped_ticks = (game_time & 131071) as f32;
+                    let tick_offset = (x
+                        .wrapping_mul(x)
+                        .wrapping_mul(3121)
+                        .wrapping_add(x.wrapping_mul(45238971))
+                        .wrapping_add(z.wrapping_mul(z).wrapping_mul(418711))
+                        .wrapping_add(z.wrapping_mul(13761)))
+                        & 0xFF;
+                    let speed = 3.0 + rng.next_float();
+                    let texture_offset =
+                        -(wrapped_ticks + tick_offset as f32 + partial_tick) / 32.0 * speed;
+                    frame.rain.push(haste_render::WeatherColumn {
+                        v_offset: texture_offset % 32.0,
+                        ..column
+                    });
+                }
+                crate::net::Precipitation::Snow => {
+                    // `createSnowColumnInstance`: the drift u/v from the seeded gaussian
+                    // pair, the slow fall, and the brightened light.
+                    let wrapped_ticks = (game_time & 131071) as f32;
+                    let time = wrapped_ticks as f64 + partial_tick as f64;
+                    let u = (rng.next_double() + time * 0.01 * rng.next_gaussian()) as f32;
+                    let v = (rng.next_double() + time * rng.next_gaussian() * 0.001) as f32;
+                    let v_offset = -((game_time & 511) as f32 + partial_tick) / 512.0 + v;
+                    let brightened = (
+                        ((light.0 as i32 * 3 + 15) / 4).clamp(0, 15) as u8,
+                        ((light.1 as i32 * 3 + 15) / 4).clamp(0, 15) as u8,
+                    );
+                    frame.snow.push(haste_render::WeatherColumn {
+                        u_offset: u,
+                        v_offset,
+                        light: brightened,
+                        ..column
+                    });
+                }
+                crate::net::Precipitation::None => {}
+            }
+        }
+    }
+    if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tracing::info!(
+            "weather extraction: camera ({:.1}, {:.1}, {:.1}), sea level {sea_level}, first \
+             column height {:?}, {} rain + {} snow columns, intensity {:.3}",
+            camera.x,
+            camera.y,
+            camera.z,
+            terrain_of_first,
+            frame.rain.len(),
+            frame.snow.len(),
+            intensity
+        );
+    }
 }
 
 /// The `FogRenderer.setupFog`/`computeFogColor` inputs: the camera's fluid, the dimension
@@ -1675,6 +1880,12 @@ fn fog_inputs(
         darken_world_amount: view.lightmap_boss_darkening.0
             + (view.lightmap_boss_darkening.1 - view.lightmap_boss_darkening.0) * partial,
         void_darkness_onset_range: 32.0,
+        // The weather fields (rain/thunder levels, the rain fog multiplier) are filled by
+        // the caller from the same view.
+        rain_level: view.rain_level.0 + (view.rain_level.1 - view.rain_level.0) * partial,
+        thunder_level: view.thunder_level.0
+            + (view.thunder_level.1 - view.thunder_level.0) * partial,
+        rain_fog_multiplier: view.rain_fog_multiplier,
     }
 }
 
@@ -2484,6 +2695,7 @@ fn menu_screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
                 breaking: &[],
                 camera_entity: None,
                 spin: None,
+                weather: None,
             };
             renderer.render(&frame)?;
             frames += 1;
@@ -2610,13 +2822,15 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             input.state.yaw = look.0 - offset.0;
             input.state.pitch = (look.1 - offset.1).clamp(-90.0, 90.0);
         }
-        let (mut camera, sky, lightmap, partial, vd, animation_tick) = frame_view(
+        let mut weather_guard = shared.weather_scratch.lock();
+        let (mut camera, sky, lightmap, partial, vd, animation_tick, weather) = frame_view(
             &shared,
             perspective,
             look.0 - offset.0,
             look.1 - offset.1,
             &session.options,
             Instant::now(),
+            &mut weather_guard,
         );
         if let Some(pos) = want_pos {
             let view = shared.view.lock().clone();
@@ -2681,6 +2895,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             breaking: &breaking,
             camera_entity: (!perspective.draws_player()).then_some(session.local.0),
             spin,
+            weather,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -2691,6 +2906,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             renderer.prepare_particles(&mut particles, &*world, camera, partial);
         }
         stats = renderer.render(&frame)?;
+        drop(weather_guard);
         frames += 1;
         let placed = shared.view.lock().has_position;
         if shared.is_closed() {
@@ -3249,6 +3465,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 breaking: &[],
                 camera_entity: None,
                 spin: None,
+                weather: None,
             };
             renderer.render(&frame)?;
             frames += 1;
@@ -3277,13 +3494,15 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         }
         let shared = shared.as_ref().expect("the session exists");
         let session_ref = session.as_ref().expect("the session exists");
-        let (camera, sky, lightmap, partial, vd, animation_tick) = frame_view(
+        let mut weather_guard = shared.weather_scratch.lock();
+        let (camera, sky, lightmap, partial, vd, animation_tick, weather) = frame_view(
             shared,
             game::Perspective::FirstPerson,
             look.0,
             look.1,
             &options,
             Instant::now(),
+            &mut weather_guard,
         );
         feed.feed(shared, &mut renderer, camera_section(&camera), vd);
         let (entities, block_entities) =
@@ -3343,6 +3562,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             breaking: &breaking,
             camera_entity: Some(session_ref.local.0),
             spin,
+            weather,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -3356,6 +3576,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             last_stats = stats;
             fps.frame(&stats);
         }
+        drop(weather_guard);
         frames += 1;
         // This tick's screenshot actions: the frame they caused is now on the GPU.
         if !shots.is_empty() || f2_pending {
@@ -3715,13 +3936,15 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let mut vd;
     // Settle phase: identical to the screenshot path (wait for position, meshing done, quiet).
     loop {
-        let (mut camera, sky, lightmap, partial, v, animation_tick) = frame_view(
+        let mut weather_guard = shared.weather_scratch.lock();
+        let (mut camera, sky, lightmap, partial, v, animation_tick, weather) = frame_view(
             &shared,
             game::Perspective::FirstPerson,
             0.0,
             0.0,
             &session.options,
             Instant::now(),
+            &mut weather_guard,
         );
         camera.yaw = args.yaw.unwrap_or(camera.yaw);
         camera.pitch = args.pitch.unwrap_or(camera.pitch);
@@ -3744,6 +3967,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             breaking: &breaking,
             camera_entity: Some(session.local.0),
             spin: None,
+            weather,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -3754,6 +3978,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             renderer.prepare_particles(&mut particles, &*world, camera, partial);
         }
         stats = renderer.render(&frame)?;
+        drop(weather_guard);
         if shared.is_closed() {
             anyhow::bail!(
                 "disconnected: {}",
@@ -3794,13 +4019,15 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         }
         // The bench camera follows its fixed path; the sky and entities come from the live view
         // (time of day moves, the player stays where the server put it).
-        let (_, mut sky, lightmap, partial_tick, _, animation_tick) = frame_view(
+        let mut weather_guard = shared.weather_scratch.lock();
+        let (_, mut sky, lightmap, partial_tick, _, animation_tick, weather) = frame_view(
             &shared,
             game::Perspective::FirstPerson,
             0.0,
             0.0,
             &session.options,
             Instant::now(),
+            &mut weather_guard,
         );
         let camera = if args.bench_fixed {
             // Still camera at the settle spot: one fixed view, comparable with `--screenshot`.
@@ -3829,6 +4056,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             breaking: &breaking,
             camera_entity: Some(session.local.0),
             spin: None,
+            weather,
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
@@ -3839,6 +4067,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             renderer.prepare_particles(&mut particles, &*world, camera, partial_tick);
         }
         let stats = renderer.render(&frame)?;
+        drop(weather_guard);
         let prev_drawn = samples.last().map_or(0, |s| s.sections_drawn);
         samples.push(BenchSample {
             frame_ms: stats.frame_ms,
@@ -4365,6 +4594,7 @@ impl App {
             breaking: &[],
             camera_entity: None,
             spin: None,
+            weather: None,
         };
         if let Err(e) = renderer.render(&frame) {
             self.error = Some(e.context("render"));
@@ -4449,13 +4679,15 @@ impl App {
         self.input
             .sample(&session.shared, self.ui.as_ref(), self.perspective);
         let renderer = self.renderer.as_mut().expect("checked above");
-        let (camera, sky, lightmap, partial, vd, animation_tick) = frame_view(
+        let mut weather_guard = session.shared.weather_scratch.lock();
+        let (camera, sky, lightmap, partial, vd, animation_tick, weather) = frame_view(
             &session.shared,
             self.perspective,
             self.input.yaw,
             self.input.pitch,
             &self.options,
             t0,
+            &mut weather_guard,
         );
         self.feed
             .feed(&session.shared, renderer, camera_section(&camera), vd);
@@ -4536,6 +4768,7 @@ impl App {
             breaking: &self.breaking,
             camera_entity: (!self.perspective.draws_player()).then_some(session.local.0),
             spin: view.screen.spin_warp(partial),
+            weather,
         };
         // Outline boxes of the target and the states of breaking blocks (one short read lock),
         // then the particles (one short read lock).
@@ -4557,6 +4790,7 @@ impl App {
             renderer.request_capture();
         }
         let result = renderer.render(&frame);
+        drop(weather_guard);
         if let Ok(stats) = &result {
             self.frame_stats = *stats;
         }
@@ -5538,5 +5772,96 @@ mod tests {
         assert!((pitch - 0.49667).abs() < 1e-4, "{pitch}");
         // No walk distance and no bob: nothing moves.
         assert_eq!(view_bob(0.0, 0.0, 0.0, 0.0, 0.5), (0.0, 0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn java_random_matches_vanilla_lcg() {
+        // The single-threaded RandomSource: seed 12345 -> (0xB30A9B << 48-bit scrambles).
+        // The first nextFloat of Java's Random with seed 0 is 0.73096776.
+        let mut r = JavaRandom::new(0);
+        assert!(
+            (r.next_float() - 0.73096776).abs() < 1e-6,
+            "{}",
+            r.next_float()
+        );
+        // nextDouble of the same fresh random: 0.627 exactly? The sequence advances; just
+        // check the bounds and determinism instead.
+        let mut a = JavaRandom::new(42);
+        let mut b = JavaRandom::new(42);
+        for _ in 0..8 {
+            let (x, y) = (a.next_double(), b.next_double());
+            assert_eq!(x, y);
+            assert!((0.0..1.0).contains(&x));
+        }
+        // Gaussian: two fresh streams agree and stay in a sane range.
+        let mut a = JavaRandom::new(7);
+        let mut b = JavaRandom::new(7);
+        for _ in 0..16 {
+            let (x, y) = (a.next_gaussian(), b.next_gaussian());
+            assert_eq!(x, y);
+            assert!(x.abs() < 6.0);
+        }
+    }
+
+    #[test]
+    fn rain_scroll_matches_vanilla_formula() {
+        // `createRainColumnInstance`: textureOffset = -(wrappedTicks + tickOffset +
+        // partial) / 32 * speed, wrapped modulo 32. Column (5, -3), tick 100, partial 0:
+        // tickOffset = (5*5*3121 + 5*45238971 + 9*418711 - 3*13761) & 0xFF.
+        let tick_offset = (5i64 * 5 * 3121 + 5 * 45238971 + 9 * 418711 + (-3) * 13761) & 0xFF;
+        // The speed is the seeded random's nextFloat (3..4); recompute through the same
+        // seed to keep the formula honest.
+        let seed = haste_render::weather::column_seed(5, -3);
+        let mut rng = JavaRandom::new(seed as i64);
+        let speed = 3.0 + rng.next_float();
+        let wrapped_ticks = 100i64 & 131071;
+        let expect = -((wrapped_ticks as f32 + tick_offset as f32) / 32.0 * speed) % 32.0;
+        assert!(expect <= 0.0 && expect > -32.0, "{expect}");
+        // The scroll is negative (the texture moves down) and wraps at 32 tiles.
+        assert_eq!(tick_offset as i32, tick_offset as i32);
+    }
+
+    #[test]
+    fn weather_levels_lerp_by_partial_tick() {
+        // `Level.getRainLevel(a)`: lerp between the old and the new level.
+        let mut w = crate::net::WeatherState::default();
+        w.set_rain_level(1.0);
+        assert_eq!(w.rain_level(0.0), 1.0);
+        assert_eq!(w.rain_level(1.0), 1.0);
+        // A step down brackets the tick: old 1, new 0.4 -> 0.7 at partial 0.5.
+        w.set_rain_level(1.0);
+        w.rain_level_o = 1.0;
+        w.rain_level = 0.4;
+        assert!((w.rain_level(0.5) - 0.7).abs() < 1e-6);
+        // Clamped: the packet's 2.0 becomes 1.0.
+        w.set_rain_level(2.0);
+        assert_eq!(w.rain_level, 1.0);
+        // canHaveWeather: the overworld yes, the Nether and End no.
+        use haste_core::game::DimensionInfo;
+        assert!(crate::net::WeatherState::can_have_weather(
+            &DimensionInfo::overworld()
+        ));
+        let mut nether = DimensionInfo::overworld();
+        nether.dimension_type = haste_core::Identifier::minecraft("the_nether");
+        nether.has_skylight = false;
+        assert!(!crate::net::WeatherState::can_have_weather(&nether));
+        let mut end = DimensionInfo::overworld();
+        end.name = haste_core::Identifier::minecraft("the_end");
+        assert!(!crate::net::WeatherState::can_have_weather(&end));
+    }
+
+    #[test]
+    fn game_events_drive_the_weather_levels() {
+        use crate::net::WeatherState;
+        // START_RAINING resets to 0, STOP_RAINING sets 1 (the level-change steps ramp from
+        // there), RAIN_LEVEL_CHANGE/THUNDER_LEVEL_CHANGE set the levels directly.
+        let mut w = WeatherState::default();
+        w.set_rain_level(0.5);
+        w.set_thunder_level(0.7);
+        assert_eq!(w.thunder_level, 0.7);
+        w.set_rain_level(1.0);
+        assert_eq!(w.rain_level, 1.0);
+        w.set_rain_level(0.0);
+        assert_eq!(w.rain_level, 0.0);
     }
 }

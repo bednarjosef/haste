@@ -23,6 +23,7 @@ pub mod sky;
 pub mod timing;
 pub mod tint;
 pub mod vertex;
+pub mod weather;
 
 pub use block_particles::{BlockParticleSprite, BlockParticleTable};
 pub use blockentity::{
@@ -45,3 +46,4 @@ pub use sky::{SkyColors, SkyKind};
 pub use timing::FrameTimings;
 pub use tint::{BiomeClimate, BiomeColors, BiomeSource, Colormaps, GrassModifier};
 pub use vertex::PackedVertex;
+pub use weather::{WeatherColumn, WeatherFrame};

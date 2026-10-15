@@ -200,28 +200,6 @@ fn fs_celestial(in: VertexOut) -> @location(0) vec4<f32> {
     return vec4<f32>(c.rgb * c.a * in.color.rgb * in.color.a, 1.0);
 }
 
-// ---- world-space: rain and snow columns (alpha blended, depth tested) ----
-
-@vertex
-fn vs_world(v: VertexIn) -> VertexOut {
-    var out: VertexOut;
-    out.clip = sky.view_proj * vec4<f32>(v.pos, 1.0);
-    out.uv = v.uv;
-    out.color = v.color;
-    out.rect = v.rect;
-    out.fog = fog_factor(v.pos - sky.cam_pos.xyz);
-    return out;
-}
-
-@fragment
-fn fs_world(in: VertexOut) -> @location(0) vec4<f32> {
-    let c = fetch(in.uv, in.rect) * in.color;
-    if (c.a < 0.01) {
-        discard;
-    }
-    return vec4<f32>(mix(c.rgb, sky.fog_color.rgb, in.fog), c.a);
-}
-
 // ---- clouds: one plane at cloud height, each clouds.png texel a 12x12 block cell ----
 
 struct CloudOut {

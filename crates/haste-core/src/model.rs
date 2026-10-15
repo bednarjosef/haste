@@ -233,11 +233,12 @@ pub struct EntityOverlay {
     pub tint: [f32; 3],
 }
 
-/// A hanging decoration the renderer draws itself rather than from a cube model.
+/// A decoration the renderer draws itself rather than from a cube model.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Decoration {
     ItemFrame(ItemFrameDecoration),
     Painting(PaintingDecoration),
+    Lightning(LightningDecoration),
 }
 
 /// The state `ItemFrameRenderer.extractRenderState` collects for an item frame.
@@ -263,4 +264,13 @@ pub struct PaintingDecoration {
     pub height: u8,
     /// The front sprite's texture id, `None` for a variant we do not know (draw the back only).
     pub front: Option<Identifier>,
+}
+
+/// The state `LightningBoltRenderer.extractRenderState` collects for a lightning bolt: the
+/// seed its geometry is generated from. Vanilla's seed is the entity's own random (not
+/// synced, re-rolled per flash), so a seed derived from the entity id stands in — the bolt's
+/// shape is procedural either way.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LightningDecoration {
+    pub seed: u64,
 }

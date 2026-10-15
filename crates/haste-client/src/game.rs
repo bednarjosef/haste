@@ -155,6 +155,35 @@ fn player_pose(s: &crate::net::Session) -> Option<haste_core::entity::Pose> {
     }
 }
 
+/// `AtmosphericFogEnvironment.updateRainFogState`'s sky-light factor: the sky light at the
+/// camera's block, clamped `(light - 8) / 7`.
+fn rain_fog_sky_light(world: &World, eye: DVec3) -> f32 {
+    use haste_core::view::BlockView as _;
+    let p = BlockPos::new(
+        eye.x.floor() as i32,
+        eye.y.floor() as i32,
+        eye.z.floor() as i32,
+    );
+    ((world.sky_light(p) as f32) - 8.0) / 7.0
+}
+
+/// Whether the biome at the eye has precipitation (`updateRainFogState` halves the rain
+/// fog when it does not).
+fn biome_has_precipitation(
+    world: &World,
+    climates: &[haste_render::BiomeClimate],
+    eye: DVec3,
+) -> bool {
+    use haste_render::BiomeSource as _;
+    let p = BlockPos::new(
+        eye.x.floor() as i32,
+        eye.y.floor() as i32,
+        eye.z.floor() as i32,
+    );
+    let biome = crate::app::biomes::WorldBiomes(world).biome(p).0 as usize;
+    climates.get(biome).is_some_and(|c| c.has_precipitation)
+}
+
 /// The local player's own render instance for third person (the server does not spawn us as an
 /// entity, so it is not in the store): the humanoid model at the interpolated feet, body yaw
 /// and head pitched to the interpolated look, and its pose's adjustments like any player. The
@@ -325,6 +354,14 @@ pub struct ViewState {
     pub lightmap_boss_darkening: (f32, f32),
     pub lightmap_lightning: bool,
     pub lightmap_tick_count: i32,
+    /// The weather levels bracketing the tick (`Level.oRainLevel`/`rainLevel` and the
+    /// thunder pair), lerped by partial tick for the sky, fog and weather columns.
+    pub rain_level: (f32, f32),
+    pub thunder_level: (f32, f32),
+    /// `AtmosphericFogEnvironment.rainFogMultiplier`, eased per frame by the tick.
+    pub rain_fog_multiplier: f32,
+    /// `ClientLevel.seaLevel` (the spawn info's; biome precipitation's snow line).
+    pub sea_level: i32,
 }
 
 /// The per-tick part of the first-person hand: the held item, the light at the eye and this
@@ -421,6 +458,9 @@ pub struct Shared {
     pub data: Arc<GameData>,
     /// The world.
     pub world: RwLock<World>,
+    /// The render thread's weather extraction buffer (reused every frame, no allocation
+    /// after warmup). Only the render thread takes it.
+    pub weather_scratch: Mutex<haste_render::WeatherFrame>,
     /// The entities.
     pub entities: RwLock<EntityStore>,
     /// Sections changed since the render thread last looked (deduplicated there).
@@ -554,6 +594,10 @@ impl Shared {
                 lightmap_boss_darkening: (0.0, 0.0),
                 lightmap_lightning: false,
                 lightmap_tick_count: 0,
+                rain_level: (0.0, 0.0),
+                thunder_level: (0.0, 0.0),
+                rain_fog_multiplier: 0.0,
+                sea_level: 63,
             }),
             breaking: Mutex::new(Vec::new()),
             block_entity_lids: Mutex::new(Vec::new()),
@@ -561,6 +605,7 @@ impl Shared {
             block_entity_names,
             biome_climates,
             particles: Mutex::new(particles),
+            weather_scratch: Mutex::new(haste_render::WeatherFrame::default()),
             input: Mutex::new(SharedInput::default()),
             sound: Mutex::new(None),
             stop: AtomicBool::new(false),
@@ -1011,6 +1056,24 @@ fn tick_once(
             driver.session.screen_probe = probe;
         }
         driver.end_tick(&input.state, &mut *world, &mut *entities)?;
+        // The weather effects' tick (`ClientLevel.tick` -> `tickWeatherEffects`, after the
+        // entities): the rain splash particles join this tick's spawn list and the rain
+        // sound joins the sound requests below. The levels' bracket shifts here too (the
+        // render thread lerps it by partial tick).
+        driver.session.weather.tick();
+        if crate::net::WeatherState::can_have_weather(&driver.session.dimension) {
+            let camera = driver.session.player.camera(1.0).0;
+            driver.session.weather.tick_effects(
+                camera,
+                haste_render::weather::WEATHER_RADIUS,
+                &world,
+                &shared.biome_climates,
+                driver.session.sea_level,
+                driver.session.dimension.min_y,
+                &mut driver.session.particle_spawns,
+                &mut driver.session.sound_requests,
+            );
+        }
         let mut dirty = world.take_dirty_sections();
         if !dirty.is_empty() {
             shared.dirty.lock().append(&mut dirty);
@@ -1247,6 +1310,27 @@ fn tick_once(
     view.lightmap_boss_darkening = (lm.boss_darkening_o, lm.boss_darkening);
     view.lightmap_lightning = lm.sky_flash_time > 0;
     view.lightmap_tick_count = lm.tick_count;
+    // The weather levels bracketing this tick (the render thread lerps by partial tick)
+    // and the rain fog multiplier (`AtmosphericFogEnvironment.updateRainFogState` eased
+    // by `deltaTicks * 0.2` toward rain level x sky-light factor x biome precipitation).
+    {
+        let w = &s.weather;
+        view.rain_level = (w.rain_level_o, w.rain_level);
+        view.thunder_level = (w.thunder_level_o, w.thunder_level);
+        let target = if crate::net::WeatherState::can_have_weather(&s.dimension) {
+            let world = shared.world.read();
+            let precipitation = if biome_has_precipitation(&world, &shared.biome_climates, eye) {
+                1.0
+            } else {
+                0.5
+            };
+            w.rain_level(1.0) * rain_fog_sky_light(&world, eye) * precipitation
+        } else {
+            0.0
+        };
+        view.rain_fog_multiplier += (target - view.rain_fog_multiplier) * 0.2;
+        view.sea_level = s.sea_level;
+    }
     view.eye_height = s.player.eye_height();
     view.time_of_day = s.time_of_day.unwrap_or(6000);
     view.world_age = s.world_age;
