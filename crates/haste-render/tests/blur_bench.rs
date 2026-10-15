@@ -116,6 +116,7 @@ fn menu_blur_frame_cost() {
             block_target: None,
             breaking: &[],
             camera_entity: None,
+            weather: None,
             spin: None,
         }
     }
