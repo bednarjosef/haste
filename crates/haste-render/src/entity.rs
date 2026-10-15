@@ -1593,7 +1593,9 @@ impl EntityRenderer {
             // Beacon beams and the end gateways' beams go into the beam stream (their own
             // pipelines, no lightmap); end portals and gateway cubes into the portal stream
             // (position-only starfield shader). Both are emitted here and drawn by the
-            // renderer's `draw_beams`/`draw_portals` after the entities.
+            // renderer's `draw_beams`/`draw_portals` after the entities. A gateway draws BOTH
+            // (its cube and, while spawning or cooling down, its beam), so the beam branch
+            // must not `continue` past the portal one.
             if matches!(
                 inst.kind,
                 crate::blockentity::BlockEntityKind::Beacon
@@ -1625,7 +1627,9 @@ impl EntityRenderer {
                 self.beam_vertices = inner;
                 self.glow_vertices = glow;
                 drawn += 1;
-                continue;
+                if matches!(inst.kind, crate::blockentity::BlockEntityKind::Beacon) {
+                    continue;
+                }
             }
             if matches!(
                 inst.kind,

@@ -71,5 +71,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let size = vec2<i32>(in.rect.zw);
     let texel = clamp(vec2<i32>(floor(in.uv)), origin, origin + size - vec2<i32>(1, 1));
     let c = textureLoad(atlas, texel, 0);
-    return vec4<f32>(mix(c.rgb, camera.fog_color.rgb, in.fog), c.a * in.color.a);
+    // Vanilla `rendertype_beacon_beam.fsh`: texture * vertex colour (the section's tint
+    // times the pass alpha — 1.0 inner, 32/255 glow) + fog.
+    let lit = c.rgb * in.color.rgb;
+    return vec4<f32>(mix(lit, camera.fog_color.rgb, in.fog), c.a * in.color.a);
 }

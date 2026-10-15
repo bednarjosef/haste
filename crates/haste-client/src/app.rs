@@ -743,6 +743,8 @@ pub struct WorldFeed {
     /// and its NBT age then (the age ticks on client-side, vanilla `beamAnimationTick`, since
     /// the server sends the NBT only once).
     gateway_ages: HashMap<BlockPos, (usize, usize, i64, i64)>,
+    /// Gateways already logged (debugging the draw, once per position).
+    logged_gateways: std::collections::HashSet<BlockPos>,
     /// Moving piston data by position, rebuilt only when the block entity's NBT changes.
     piston_cache: HashMap<
         BlockPos,
@@ -1142,6 +1144,13 @@ impl WorldFeed {
                             world_age,
                             partial,
                         );
+                        // Once per gateway: what the renderer gets (debugging the draw).
+                        if self.logged_gateways.insert(pos) {
+                            tracing::info!(
+                                "end gateway at {pos:?}: faces {faces:#08b}, beam {:?}",
+                                beam.map(|b| (b.scale, b.height))
+                            );
+                        }
                         (None, beam, faces, None)
                     }
                     haste_render::BlockEntityKind::MovingPiston => {
