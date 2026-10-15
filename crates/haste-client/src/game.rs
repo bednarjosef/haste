@@ -246,6 +246,9 @@ pub struct ViewState {
     pub eye_height: f64,
     /// Time of day in ticks (first world clock of `set_time`; 6000 = noon until one arrives).
     pub time_of_day: i64,
+    /// World age in ticks (`set_time`'s `world_age`), for game-time-keyed animations
+    /// (vanilla `Level.getGameTime`: `BannerRenderer`'s wave phase).
+    pub world_age: i64,
     /// Whether the current dimension has a sky.
     pub has_sky: bool,
     /// Server view distance in chunks.
@@ -431,6 +434,10 @@ pub struct Shared {
     /// Lid animations to draw (`Session::lid_states`): (position, open value at the last
     /// tick's start and end), copied once per tick; the render thread lerps by partial tick.
     pub block_entity_lids: Mutex<Vec<(BlockPos, (f32, f32))>>,
+    /// Skull animations to draw: (position, animation tick at the last tick's start and
+    /// end) for powered skulls (vanilla `SkullBlockEntity.animation`'s counter), copied
+    /// once per tick.
+    pub skull_anims: Mutex<Vec<(BlockPos, (f32, f32))>>,
     /// Block entity type names by synced registry id (`minecraft:block_entity_type`), for
     /// resolving what each stored block entity is; the static registry's order when the server
     /// did not sync one (vanilla servers' ids agree with the data generator's).
@@ -504,6 +511,7 @@ impl Shared {
                 feet: DVec3::ZERO,
                 eye_height: 0.0,
                 time_of_day: 6000,
+                world_age: 0,
                 has_sky,
                 view_distance,
                 block_target: None,
@@ -540,6 +548,7 @@ impl Shared {
             }),
             breaking: Mutex::new(Vec::new()),
             block_entity_lids: Mutex::new(Vec::new()),
+            skull_anims: Mutex::new(Vec::new()),
             block_entity_names,
             biome_climates,
             particles: Mutex::new(particles),
@@ -1005,6 +1014,56 @@ fn tick_once(
         lids.clear();
         driver.session.lid_states(&mut lids);
     }
+    // The skulls' animation counters (vanilla ticks each `SkullBlockEntity.animation`:
+    // while the block state is powered the counter grows, powering the jaw/ear swing).
+    {
+        let world = shared.world.read();
+        let blocks = &shared.data.blocks;
+        let names = &shared.block_entity_names;
+        let mut anims = shared.skull_anims.lock();
+        anims.retain_mut(|(pos, anim)| {
+            // Gone (chunk unloaded, block replaced): drop. Otherwise a skull keeps its
+            // entry; powered ones advance, unpowered ones freeze at the last value (vanilla's
+            // counter stops but keeps its value).
+            let Some(be) = world.block_entity(*pos) else {
+                return false;
+            };
+            let is_skull = names
+                .get(be.kind as usize)
+                .is_some_and(|n| n.namespace() == "minecraft" && n.path() == "skull");
+            if !is_skull {
+                return false;
+            }
+            let powered = blocks
+                .property_value(world.block_state(*pos), "powered")
+                .is_some_and(|v| v == "true");
+            anim.0 = anim.1;
+            if powered {
+                anim.1 += 1.0;
+            }
+            true
+        });
+        // Newly powered skulls (loaded with powered=true, or toggled since) start at 0.
+        'outer: for chunk in world.loaded_chunks() {
+            for (pos, be) in world.block_entities_in(chunk) {
+                let Some(name) = names.get(be.kind as usize) else {
+                    continue;
+                };
+                if name.namespace() != "minecraft" || name.path() != "skull" {
+                    continue;
+                }
+                let powered = blocks
+                    .property_value(world.block_state(pos), "powered")
+                    .is_some_and(|v| v == "true");
+                if powered && !anims.iter().any(|(p, _)| p == &pos) {
+                    anims.push((pos, (0.0, 0.0)));
+                    if anims.len() > 1024 {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+    }
     // Particles: spawn what the packets brought, then one 20 Hz simulation step. The camera
     // for `ClientLevel.doAddParticle`'s 32-block limiter is the player's eye.
     {
@@ -1101,6 +1160,7 @@ fn tick_once(
     view.lightmap_tick_count = lm.tick_count;
     view.eye_height = s.player.eye_height();
     view.time_of_day = s.time_of_day.unwrap_or(6000);
+    view.world_age = s.world_age;
     view.has_sky = s.dimension.has_skylight;
     view.block_target = s.player.target();
     view.eye_in_water = s.player.state.eyes_in_water;

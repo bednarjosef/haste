@@ -658,6 +658,18 @@ pub struct WorldFeed {
     >,
     /// The renderer's text metrics (the font), for wrapping sign lines at parse time.
     text_metrics: Option<std::sync::Arc<dyn haste_core::gui::TextMetrics>>,
+    /// Parsed banner patterns by position, rebuilt only when the NBT changes (see
+    /// `sign_texts` for the caching scheme).
+    banner_texts: HashMap<
+        BlockPos,
+        (
+            usize,
+            usize,
+            std::sync::Arc<haste_render::blockentity::BannerData>,
+        ),
+    >,
+    /// The skull animations by position for this frame (reused lookup scratch).
+    skull_anims: HashMap<BlockPos, (f32, f32)>,
     /// The shared world as the mesh workers see it (created on the first feed).
     source: Option<Arc<dyn haste_render::SnapshotSource>>,
     /// Sections submitted this frame (reused).
@@ -766,7 +778,7 @@ impl WorldFeed {
         if self.text_metrics.is_none() {
             self.text_metrics = Some(renderer.text_metrics());
         }
-        self.block_entities(shared);
+        self.block_entities(shared, partial);
         self.instances.clear();
         {
             let store = shared.entities.read();
@@ -796,7 +808,7 @@ impl WorldFeed {
     /// `BrightnessCombiner`'s max light) and samples the block light. Types Haste cannot
     /// draw are logged once and skipped. The result is `self.be_instances` (read it after
     /// this call; `entities` borrows the feed too).
-    fn block_entities(&mut self, shared: &Shared) {
+    fn block_entities(&mut self, shared: &Shared, partial: f32) {
         use haste_core::view::BlockView as _;
         self.be_instances.clear();
         let world = shared.world.read();
@@ -804,6 +816,11 @@ impl WorldFeed {
             let lids = shared.block_entity_lids.lock();
             self.lid_map.clear();
             self.lid_map.extend(lids.iter().copied());
+        }
+        {
+            let anims = shared.skull_anims.lock();
+            self.skull_anims.clear();
+            self.skull_anims.extend(anims.iter().copied());
         }
         let names = &shared.block_entity_names;
         let blocks = &shared.data.blocks;
@@ -869,28 +886,69 @@ impl WorldFeed {
                         );
                     }
                 }
-                // Signs: the yaw angle the text transform turns by (vanilla
-                // `StandingSignRenderer`/`HangingSignRenderer` picking the block state's
-                // `rotation` segment or the wall `facing`), and the cached parsed text.
-                let (sign_angle, text) = match kind {
+                // Signs, banners and skulls: the yaw angle the transform turns by (vanilla
+                // `StandingSignRenderer`/`BannerRenderer`/`SkullBlockRenderer` picking the
+                // block state's `rotation` segment or the wall `facing`), the sign's cached
+                // text, the banner's wave phase and cached patterns, the skull's animation.
+                let (mut sign_angle, text, banner_phase, banner, skull_anim) = match kind {
                     haste_render::BlockEntityKind::Sign { hanging } => {
-                        let angle = match blocks.property_value(state, "rotation") {
-                            // `RotationSegment.convertToDegrees`: `segment * 22.5`, wrapped
-                            // from 180 to -180.
-                            Some(rot) => rot.parse::<i32>().map_or(0.0, |r| {
-                                let d = r.rem_euclid(16) as f32 * 22.5;
-                                if d >= 180.0 {
-                                    d - 360.0
-                                } else {
-                                    d
-                                }
-                            }),
-                            None => to_y_rot(facing),
-                        };
-                        (angle, self.sign_text(pos, be, hanging))
+                        let angle = rotation_or_facing(blocks, state, facing);
+                        (
+                            angle,
+                            self.sign_text(pos, be, hanging),
+                            0.0,
+                            None,
+                            haste_render::TickPair::fixed(0.0),
+                        )
                     }
-                    _ => (0.0, None),
+                    haste_render::BlockEntityKind::Banner { .. } => {
+                        let angle = rotation_or_facing(blocks, state, facing);
+                        // Vanilla `BannerRenderer.extractRenderState`'s phase: the position
+                        // hash plus the world age, over 100, plus the partial tick.
+                        let view = shared.view.lock();
+                        let phase = haste_render::blockentity::banner_wave_phase(
+                            pos,
+                            view.world_age,
+                            partial,
+                        );
+                        (
+                            angle,
+                            None,
+                            phase,
+                            self.banner_data(pos, be, block),
+                            haste_render::TickPair::fixed(0.0),
+                        )
+                    }
+                    haste_render::BlockEntityKind::Skull { .. } => {
+                        // The ground rotation angle (wall skulls read `facing` instead) and
+                        // the powered animation's tick ends.
+                        let angle = rotation_or_facing(blocks, state, facing);
+                        let anim = self.skull_anims.get(&pos).copied().unwrap_or((0.0, 0.0));
+                        (
+                            angle,
+                            None,
+                            0.0,
+                            None,
+                            haste_render::TickPair {
+                                start: anim.0,
+                                end: anim.1,
+                            },
+                        )
+                    }
+                    _ => (0.0, None, 0.0, None, haste_render::TickPair::fixed(0.0)),
                 };
+                // Wall skulls turn by the wall `facing` (their transform reads it); the
+                // rotation segment is only for the ground ones.
+                if matches!(
+                    kind,
+                    haste_render::BlockEntityKind::Skull {
+                        wall: true,
+                        kind: _
+                    }
+                ) && blocks.property_value(state, "rotation").is_none()
+                {
+                    sign_angle = 0.0;
+                }
                 self.be_instances.push(haste_render::BlockEntityInstance {
                     pos,
                     facing,
@@ -903,9 +961,33 @@ impl WorldFeed {
                     light,
                     sign_angle,
                     text,
+                    banner_phase,
+                    banner,
+                    skull_anim,
                 });
             }
         }
+    }
+
+    /// The parsed banner patterns at `pos` (`BannerBlockEntity`'s `patterns` NBT list) with
+    /// the base colour from the block id (vanilla `BannerBlock.getColor`). Cached like the
+    /// sign text: re-parsed only when the payload changes.
+    fn banner_data(
+        &mut self,
+        pos: BlockPos,
+        be: &haste_core::chunk::BlockEntityData,
+        block: &haste_core::Identifier,
+    ) -> Option<std::sync::Arc<haste_render::blockentity::BannerData>> {
+        let key = (be.nbt.as_ptr() as usize, be.nbt.len());
+        if let Some((k, len, data)) = self.banner_texts.get(&pos) {
+            if (*k, *len) == key {
+                return Some(data.clone());
+            }
+        }
+        let parsed = parse_banner_nbt(&be.nbt, block)?;
+        self.banner_texts
+            .insert(pos, (key.0, key.1, parsed.clone()));
+        Some(parsed)
     }
 
     /// The parsed sign text at `pos` (`SignBlockEntity`'s `front_text`/`back_text`), from the
@@ -980,6 +1062,99 @@ fn to_y_rot(d: Direction) -> f32 {
         Direction::East => 270.0,
         Direction::Down | Direction::Up => 0.0,
     }
+}
+
+/// The yaw a sign/banner turns by: the block state's `rotation` segment
+/// (`RotationSegment.convertToDegrees`: `segment * 22.5`, wrapped from 180 to -180), or the
+/// wall `facing`'s `toYRot()` when there is no rotation property.
+fn rotation_or_facing(
+    blocks: &haste_data::BlockStates,
+    state: haste_core::BlockStateId,
+    facing: Direction,
+) -> f32 {
+    match blocks.property_value(state, "rotation") {
+        Some(rot) => rot.parse::<i32>().map_or(0.0, |r| {
+            let d = r.rem_euclid(16) as f32 * 22.5;
+            if d >= 180.0 {
+                d - 360.0
+            } else {
+                d
+            }
+        }),
+        None => to_y_rot(facing),
+    }
+}
+
+/// A banner's patterns from its NBT (`BannerBlockEntity`'s `patterns`: a list of
+/// `{pattern: <registry id>, color: <dye name>}`) plus the base colour from the block id
+/// (`<colour>_banner`, vanilla `BannerBlock.getColor`). `None` when the NBT does not parse;
+/// a banner without a `patterns` tag is the plain base colour.
+fn parse_banner_nbt(
+    nbt: &[u8],
+    block: &haste_core::Identifier,
+) -> Option<std::sync::Arc<haste_render::blockentity::BannerData>> {
+    use haste_protocol::nbt::deserializer::NbtReadHelperJava;
+    use haste_protocol::nbt::NbtTag;
+    const DYES: [&str; 16] = [
+        "white",
+        "orange",
+        "magenta",
+        "light_blue",
+        "yellow",
+        "lime",
+        "pink",
+        "gray",
+        "light_gray",
+        "cyan",
+        "purple",
+        "blue",
+        "brown",
+        "green",
+        "red",
+        "black",
+    ];
+    let dye = |name: &str| {
+        DYES.iter()
+            .position(|d| *d == name)
+            .map(|i| i as u8)
+            .unwrap_or(15)
+    };
+    // The base colour: `<colour>_banner` / `<colour>_wall_banner` -> the dye id.
+    let base = block
+        .path()
+        .strip_suffix("_wall_banner")
+        .or_else(|| block.path().strip_suffix("_banner"))
+        .and_then(|c| DYES.iter().position(|d| *d == c))
+        .map_or(15, |i| i as u8);
+    let mut data = haste_render::blockentity::BannerData {
+        base,
+        layers: Vec::new(),
+    };
+    let mut cursor = std::io::Cursor::new(nbt);
+    let mut helper = NbtReadHelperJava::new(&mut cursor);
+    let doc = haste_protocol::nbt::Nbt::read_unnamed(&mut helper).ok()?;
+    if let Some(patterns) = doc.root_tag.get_list("patterns") {
+        for layer in patterns {
+            let NbtTag::Compound(c) = layer else {
+                continue;
+            };
+            // The pattern is the registry id (a string) or an inline `{asset_id: ...}` (a
+            // compound under `pattern`, or at the layer's top level for leniency).
+            let pattern = match c.get("pattern") {
+                Some(NbtTag::String(s)) => haste_core::Identifier::parse(s).ok()?,
+                Some(NbtTag::Compound(p)) => {
+                    haste_core::Identifier::parse(p.get_string("asset_id")?).ok()?
+                }
+                _ => c
+                    .get_string("asset_id")
+                    .and_then(|s| haste_core::Identifier::parse(s).ok())?,
+            };
+            let color = c.get_string("color").map(dye).unwrap_or(15);
+            data.layers
+                .push(haste_render::blockentity::BannerLayer { pattern, color });
+        }
+    }
+    Some(std::sync::Arc::new(data))
 }
 
 /// One sign side from its NBT compound (vanilla `SignText.CODEC`): `messages` (4 components as
@@ -5020,6 +5195,75 @@ mod tests {
         assert_eq!(parsed.back, empty_sign_side());
         // Not NBT at all: None, never a panic.
         assert!(parse_sign_nbt(&[1, 2, 3], &WrapFont, 90).is_none());
+    }
+
+    /// Banner NBT: the `patterns` list (registry id or inline `{asset_id}` form) and the base
+    /// colour from the block id; a banner without patterns is the plain base.
+    #[test]
+    fn banner_nbt_parses_patterns_and_base() {
+        use haste_protocol::nbt::serializer::{NbtWriteHelper, NbtWriteHelperJava};
+        use haste_protocol::nbt::{NbtCompound, NbtTag, COMPOUND_ID};
+        let nbt_bytes = |root: NbtCompound| {
+            let mut bytes = Vec::new();
+            let mut w = NbtWriteHelperJava::new(&mut bytes);
+            w.write_u8(COMPOUND_ID).unwrap();
+            root.clone().serialize_content(&mut w).unwrap();
+            bytes
+        };
+        // A red wall banner with two patterns.
+        let mut root = NbtCompound::new();
+        root.put_list(
+            "patterns",
+            vec![
+                NbtTag::Compound({
+                    let mut c = NbtCompound::new();
+                    c.put_string("pattern", "minecraft:stripe_bottom".into());
+                    c.put_string("color", "blue".into());
+                    c
+                }),
+                NbtTag::Compound({
+                    let mut c = NbtCompound::new();
+                    c.put_string("pattern", "minecraft:half_vertical".into());
+                    c.put_string("color", "white".into());
+                    c
+                }),
+            ],
+        );
+        let block = haste_core::Identifier::minecraft("red_wall_banner");
+        let data = parse_banner_nbt(&nbt_bytes(root), &block).unwrap();
+        assert_eq!(data.base, 14);
+        assert_eq!(data.layers.len(), 2);
+        assert_eq!(data.layers[0].pattern.path(), "stripe_bottom");
+        assert_eq!(data.layers[0].color, 11);
+        assert_eq!(data.layers[1].pattern.path(), "half_vertical");
+        assert_eq!(data.layers[1].color, 0);
+        // No patterns: the plain base (black from `minecraft:banner`).
+        let plain = parse_banner_nbt(
+            &nbt_bytes(NbtCompound::new()),
+            &haste_core::Identifier::minecraft("banner"),
+        )
+        .unwrap();
+        assert_eq!(plain.base, 15);
+        assert!(plain.layers.is_empty());
+        // The inline asset_id form.
+        let mut inline = NbtCompound::new();
+        inline.put_list(
+            "patterns",
+            vec![NbtTag::Compound({
+                let mut c = NbtCompound::new();
+                c.put_string("asset_id", "minecraft:cross".into());
+                c.put_string("color", "lime".into());
+                c
+            })],
+        );
+        let data = parse_banner_nbt(
+            &nbt_bytes(inline),
+            &haste_core::Identifier::minecraft("white_banner"),
+        )
+        .unwrap();
+        assert_eq!(data.layers.len(), 1);
+        assert_eq!(data.layers[0].pattern.path(), "cross");
+        assert_eq!(data.layers[0].color, 5);
     }
 
     #[test]
