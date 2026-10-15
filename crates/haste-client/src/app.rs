@@ -3902,10 +3902,14 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 }
                 if let Some(u) = &ui {
                     u.gui().set_local_world_running(false);
+                    u.left_world();
                     u.open_screen(haste_jvm::ScreenKind::Title)?;
                 }
                 shared = None;
                 in_menu = true;
+                // Like the window's `leave_server`: no world behind the title screen, no HUD.
+                feed = WorldFeed::default();
+                renderer.clear_world();
                 input.release();
             } else {
                 session = Some(s);
@@ -4870,7 +4874,10 @@ impl App {
 
     /// Drops the session (stopping its game thread and closing the connection) and the local
     /// singleplayer server, if one runs (its `stop` saves the world); the UI stays, menu mode
-    /// resumes around whatever screen the disconnect showed.
+    /// resumes around whatever screen the disconnect showed. The renderer loses the world's
+    /// sections (the menus draw over the plain background again, like the startup title screen)
+    /// and the HUD stops (`in_world` off): without this the last world frame — terrain,
+    /// hotbar, crosshair — stays behind the title screen.
     fn leave_server(&mut self) {
         if let Some(session) = self.session.take() {
             session.shared.stop.store(true, Ordering::Relaxed);
@@ -4885,6 +4892,15 @@ impl App {
                 ui.gui().set_local_world_running(false);
             }
             world.stop();
+        }
+        if let Some(ui) = &self.ui {
+            ui.left_world();
+        }
+        // The world feed's meshed set dies with the session's world; a fresh one starts clean
+        // at the next join (its source holds the old `Shared`).
+        self.feed = WorldFeed::default();
+        if let Some(r) = self.renderer.as_mut() {
+            r.clear_world();
         }
         self.input.release();
     }
