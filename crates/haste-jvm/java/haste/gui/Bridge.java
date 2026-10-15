@@ -62,15 +62,20 @@ public final class Bridge {
             case INVENTORY -> new InventoryScreen(Proxies.player);
             case TITLE -> new TitleScreen();
             case OPTIONS -> new OptionsScreen(ClientImpl.screen, Proxies.options);
-            case PACKS -> new net.minecraft.client.gui.screens.packs.PackSelectionScreen(
-                ClientImpl.getResourcePackRepository(Proxies.minecraft),
-                // OptionsScreen.applyPacks: save the selection, reload, back to the opener
-                repo -> {
-                    Proxies.options.updateResourcePacks(repo);
-                    Proxies.gui.setScreen(ClientImpl.screen);
-                },
-                ClientImpl.getResourcePackDirectory(Proxies.minecraft),
-                net.minecraft.network.chat.Component.translatable("resourcePack.title"));
+            case PACKS -> {
+                // the parent this pack screen returns to on Done (vanilla: the OptionsScreen
+                // that opened it; captured before the pack screen becomes the current one)
+                Screen parent = ClientImpl.screen;
+                yield new net.minecraft.client.gui.screens.packs.PackSelectionScreen(
+                    ClientImpl.getResourcePackRepository(Proxies.minecraft),
+                    // OptionsScreen.applyPacks: save the selection, reload, back to the opener
+                    repo -> {
+                        Proxies.options.updateResourcePacks(repo);
+                        Proxies.gui.setScreen(parent);
+                    },
+                    ClientImpl.getResourcePackDirectory(Proxies.minecraft),
+                    net.minecraft.network.chat.Component.translatable("resourcePack.title"));
+            }
             case MULTIPLAYER -> new JoinMultiplayerScreen(new TitleScreen());
             case SELECT_WORLD -> new net.minecraft.client.gui.screens.worldselection.SelectWorldScreen(new TitleScreen());
             default -> throw new IllegalArgumentException("screen kind " + kind);

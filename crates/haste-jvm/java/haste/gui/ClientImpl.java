@@ -181,7 +181,18 @@ public final class ClientImpl {
      * and for what {@code Options} saves.
      */
     private static final net.minecraft.server.packs.repository.PackRepository PACKS = createPackRepository();
-    public static net.minecraft.server.packs.repository.PackRepository getResourcePackRepository(Minecraft m) { return PACKS; }
+    public static net.minecraft.server.packs.repository.PackRepository getResourcePackRepository(Minecraft m) {
+        // the saved selection loads once, like Minecraft's constructor (reload +
+        // Options.loadSelectedResourcePacks); options.txt's entries that no longer exist
+        // or are no longer compatible are dropped, exactly vanilla's behaviour
+        if (!packsLoaded) {
+            packsLoaded = true;
+            PACKS.reload();
+            Proxies.options.loadSelectedResourcePacks(PACKS);
+        }
+        return PACKS;
+    }
+    private static boolean packsLoaded;
     private static net.minecraft.server.packs.repository.PackRepository createPackRepository() {
         java.nio.file.Path gameDir = new java.io.File(System.getProperty("haste.minecraftDir", ".")).toPath();
         net.minecraft.world.level.validation.DirectoryValidator validator =

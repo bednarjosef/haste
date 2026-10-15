@@ -1954,17 +1954,43 @@ fn pack_selection_screen_lists_folder_packs() {
         t.iter().any(|x| x == "jvm-probe-pack"),
         "the folder pack should be listed: {t:?}"
     );
-    // Clicking the entry's 32x32 icon selects it (the title text itself does nothing,
-    // TransferableSelectionList.PackEntry.mouseClicked); the title renders at the icon's
-    // right + 2, one pixel lower.
-    let (x, y) = text_pos(&f, "jvm-probe-pack").expect("the entry renders");
-    click(gui, f64::from(x - 18), f64::from(y + 15));
+    // The entry's list by its x position: at 320 wide the Available (left) list renders
+    // around x < 160 and the Selected (right) one above it.
+    let entry_selected =
+        |f: &haste_core::gui::GuiFrame| text_pos(f, "jvm-probe-pack").is_some_and(|(x, _)| x > 160);
+    // Clicking the entry's 32x32 icon selects or unselects it (the title itself does
+    // nothing, TransferableSelectionList.PackEntry.mouseClicked); the title renders at
+    // the icon's right + 2, one pixel lower. Selecting takes a click anywhere on the
+    // icon; unselecting takes its left half (SelectableEntry.mouseOverLeftHalf).
+    let click_entry =
+        |gui: &haste_jvm::GuiPipeline, f: &haste_core::gui::GuiFrame, unselect: bool| {
+            let (x, y) = text_pos(f, "jvm-probe-pack").expect("the entry renders");
+            let dx = if unselect { -26 } else { -18 };
+            click(gui, f64::from(x + dx), f64::from(y + 15));
+        };
+    // A previous run may have committed the same selection already (the JVM's Options
+    // object persists for the process, and options.txt in its game dir across runs):
+    // unselect and commit first when needed, so the selection this test commits is a
+    // change (vanilla's Options.updateResourcePacks only reloads on a changed list).
+    if entry_selected(&f) {
+        click_entry(gui, &f, true);
+        let f = render(&h, (0.0, 0.0));
+        assert!(!entry_selected(&f), "the unselect click should move it out");
+        let (x, y) = text_pos(&f, "Done").expect("the Done button renders");
+        click(gui, x as f64, y as f64);
+        assert!(!gui.is_open(), "Done should close the screen");
+        assert_eq!(
+            gui.take_resource_pack_ids(),
+            Some(vec!["vanilla".to_string()]),
+            "the unselected commit should reload too"
+        );
+        open(&h, haste_jvm::ScreenKind::Packs);
+    }
     let f = render(&h, (0.0, 0.0));
-    let t = texts(&f);
-    assert!(
-        t.iter().any(|x| x == "jvm-probe-pack"),
-        "the entry should still show after selecting: {t:?}"
-    );
+    assert!(!entry_selected(&f), "the pack should start unselected");
+    click_entry(gui, &f, false);
+    let f = render(&h, (0.0, 0.0));
+    assert!(entry_selected(&f), "the entry click should select the pack");
     let (x, y) = text_pos(&f, "Done").expect("the Done button renders");
     click(gui, x as f64, y as f64);
     let selected = gui.take_resource_pack_ids();
