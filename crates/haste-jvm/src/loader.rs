@@ -31,6 +31,8 @@ pub const ALLOW_PACKAGES: &[&str] = &[
     // the pack repository the Resource Packs screen browses is real vanilla Java (tier 3):
     // the skin manager stays proxied, so only the classes it needs are allowed below
     // (ALLOW_CLASSES): ClientPackSource, IndexedAssetSource, NativeImage, TextureUtil
+    // the pack.mcmeta "language" section LanguageManager reads (the language list and its RTL flag)
+    "net/minecraft/client/resources/metadata/language/",
     // the Telemetry Data screen's event list is real vanilla Java over these value types; Haste sends
     // no telemetry (allowsTelemetry false), so the button is greyed like vanilla's, but the screen loads
     "net/minecraft/client/telemetry/",

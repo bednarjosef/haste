@@ -44,6 +44,8 @@ public final class Bridge {
         GfxImpl.height = 240;
         Proxies.create();
         ClientImpl.running = true;
+        // the saved language (options.txt "lang") loads before the first frame, like vanilla's startup reload
+        ClientImpl.getLanguageManager(Proxies.minecraft);
         return new Bridge();
     }
 

@@ -1,0 +1,14 @@
+# The breaker for the block-particle shots: a second client that walks up to the
+# stone wall and mines a block out of it. Its break broadcasts level_event 2001
+# to every OTHER player (the shot client), which is the path under test; the
+# runner teleports this player to the wall's south face and equips it during the
+# setup window.
+wait_until joined
+screenshot breaker-setup
+wait 400
+look 180 -75
+wait 5
+mouse_down left
+wait 30
+mouse_up left
+wait 20

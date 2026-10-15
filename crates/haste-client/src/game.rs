@@ -346,10 +346,6 @@ pub struct FirstPersonView {
     pub x_bob: (f32, f32),
     /// The hand's yaw lag (`LocalPlayer.yBob`), in degrees.
     pub y_bob: (f32, f32),
-    /// Walk bob amplitude.
-    pub bob: (f32, f32),
-    /// Distance walked in blocks, the bob's phase.
-    pub walk_dist: (f32, f32),
 }
 
 impl FirstPersonView {
@@ -368,8 +364,6 @@ impl FirstPersonView {
             equip: (1.0, 1.0),
             x_bob: (0.0, 0.0),
             y_bob: (0.0, 0.0),
-            bob: (0.0, 0.0),
-            walk_dist: (0.0, 0.0),
         }
     }
 
@@ -380,8 +374,6 @@ impl FirstPersonView {
         self.equip = hand.equip();
         self.x_bob = hand.x_bob();
         self.y_bob = hand.y_bob();
-        self.bob = hand.bob();
-        self.walk_dist = hand.walk_dist();
     }
 
     /// The renderer's first-person hand for this view drawn with `skin` (the connection's
@@ -397,8 +389,6 @@ impl FirstPersonView {
             equip: pair(self.equip),
             x_bob: pair(self.x_bob),
             y_bob: pair(self.y_bob),
-            bob: pair(self.bob),
-            walk_dist: pair(self.walk_dist),
         }
     }
 }
@@ -1098,16 +1088,73 @@ fn tick_once(
             }
         }
     }
-    // Particles: spawn what the packets brought, then one 20 Hz simulation step. The camera
-    // for `ClientLevel.doAddParticle`'s 32-block limiter is the player's eye.
+    // Particles: spawn what the packets brought (and the client spawned itself), then one
+    // 20 Hz simulation step. The camera for `ClientLevel.doAddParticle`'s 32-block limiter
+    // is the player's eye.
     {
         let mut particles = shared.particles.lock();
         let camera = driver.session.player.camera(1.0).0;
         let spawns = std::mem::take(&mut driver.session.particle_spawns);
-        for s in &spawns {
-            particles.spawn(s, camera);
+        // Block particles: our own break/mining/sprint and the server's level events.
+        // The world (state, shapes, biomes) is read here, where the game thread holds it.
+        let requests = std::mem::take(&mut driver.session.block_particle_requests);
+        // The ambient block particles (`ClientLevel.animateTick`, vanilla runs it
+        // right before the particle tick): torch flames, fire smoke, campfires, lava,
+        // portals. Rain-gated parts (leaf drip) stay dormant until weather is decoded.
+        let mut ambient = std::mem::take(&mut driver.session.ambient_spawns);
+        {
+            let world = shared.world.read();
+            let data = shared.data.clone();
+            let biomes = crate::app::biomes::WorldBiomes(&world);
+            for s in &spawns {
+                particles.spawn(s, camera, Some(&biomes));
+            }
+            driver.session.particle_spawned = spawns.len();
+            let state_count = data.blocks.len();
+            for r in &requests {
+                match *r {
+                    crate::block_particles::BlockParticleRequest::Destroy { pos, state } => {
+                        // Vanilla's `Block.stateById` answers air (nothing spawns) for
+                        // ids the state table does not know.
+                        if (state.0 as usize) < state_count {
+                            particles.spawn_destroy(pos, state, &data.shapes, &biomes);
+                        }
+                    }
+                    crate::block_particles::BlockParticleRequest::Crack { pos, face } => {
+                        let state = world.block_state(pos);
+                        if !haste_physics::BlockPhysics::is_air(data.as_ref(), state) {
+                            particles.spawn_crack(pos, face, state, &data.shapes, &biomes);
+                        }
+                    }
+                    crate::block_particles::BlockParticleRequest::Sprint { feet, velocity } => {
+                        // `getOnPosLegacy`: the support block 0.2 below the feet.
+                        let support = haste_core::BlockPos::new(
+                            feet.x.floor() as i32,
+                            (feet.y - 0.2).floor() as i32,
+                            feet.z.floor() as i32,
+                        );
+                        let state = world.block_state(support);
+                        if !haste_physics::BlockPhysics::is_air(data.as_ref(), state) {
+                            particles.spawn_sprint(feet, velocity, state, &data.shapes, &biomes);
+                        }
+                    }
+                }
+            }
+            if driver.session.player.has_position {
+                let feet = haste_core::BlockPos::from_dvec3(driver.session.player.state.pos);
+                crate::ambient_particles::animate_tick(
+                    &*world,
+                    data.as_ref(),
+                    feet,
+                    false,
+                    &mut ambient,
+                );
+            }
         }
-        driver.session.particle_spawned = spawns.len();
+        for s in &ambient {
+            particles.spawn(s, camera, None);
+        }
+        driver.session.ambient_spawns = ambient;
         particles.tick();
     }
     if let Some(ui) = shared.ui.lock().as_ref() {
@@ -1150,13 +1197,14 @@ fn tick_once(
         None
     } else {
         let p = &mut driver.session.player;
+        let attack_speed = p.held_attack_speed();
         p.hand.tick(
             tick_moved,
             (p.state.yaw, p.state.pitch),
             p.state.on_ground,
             matches!(p.state.pose, haste_physics::Pose::Swimming),
             p.main_hand().item,
-            p.int.attrs.attack_speed,
+            attack_speed,
         );
         let eye = p.camera(1.0).0;
         let hand = &p.hand;
@@ -1356,11 +1404,12 @@ mod tests {
         assert_eq!(v.attack, (0.0, 1.0 / 6.0));
         assert_eq!(moving.attack.start, 0.0);
         assert!((moving.attack.end - 1.0 / 6.0).abs() < 1e-7);
-        // Walking: walkDist is 0.6 * distance, its bob is 0.4 per tick towards min(0.2, 0.1),
-        // one tick behind.
-        assert!((v.walk_dist.1 - 0.24).abs() < 1e-6);
-        assert!((v.bob.1 - 0.04).abs() < 1e-6);
-        // The hand lags behind the look by half the remaining angle each tick.
+        // Walking feeds the walk bob (the camera's, no longer the hand's own fields); the
+        // hand only carries the view lag by half the remaining angle each tick.
+        let (bob_o, bob) = hand.bob();
+        assert!((bob - 0.04).abs() < 1e-6, "{bob_o} -> {bob}");
+        let (walk_o, walk) = hand.walk_dist();
+        assert!((walk - 0.24).abs() < 1e-6, "{walk_o} -> {walk}");
         assert!((v.y_bob.1 - 7.5).abs() < 1e-6);
         assert!((v.x_bob.1 - 3.75).abs() < 1e-6);
         // The next tick's step is a different hand, so the renderer is told again.
