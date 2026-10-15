@@ -2871,8 +2871,12 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let c = last_camera;
     let view = shared.view.lock().clone();
     let entities = feed.instances.len();
+    let chunks = (
+        shared.chunks_loaded.load(Ordering::Relaxed),
+        shared.chunks_unloaded.load(Ordering::Relaxed),
+    );
     println!(
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} gui commands, {} entity instances ({} drew geometry; perspective {}, local player {}), {} particles drawn, {} shadow quads, {} block entities, target {:?}",
+        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} gui commands, {} entity instances ({} drew geometry; perspective {}, local player {}), {} particles drawn, {} shadow quads, {} block entities, {} chunks loaded/{} unloaded, target {:?}",
         file.display(),
         image.width(),
         image.height(),
@@ -2893,6 +2897,8 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         renderer.particles_drawn(),
         renderer.shadow_quad_count(),
         stats.block_entities_drawn,
+        chunks.0,
+        chunks.1,
         view.block_target
     );
     if let Some((color, fog)) = renderer.last_fog() {
