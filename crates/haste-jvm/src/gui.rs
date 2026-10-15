@@ -383,15 +383,17 @@ impl GuiPipeline {
             jvalue { d: mouse.1 },
             jvalue { f: partial },
         ];
-        let (commands, cursor) = self.call(self.m.render, JavaType::Array, &args, |env, v| {
-            decode_frame(env, v.l()?)
-        })?;
+        let (commands, cursor, blur_after) =
+            self.call(self.m.render, JavaType::Array, &args, |env, v| {
+                decode_frame(env, v.l()?)
+            })?;
         Ok(GuiFrame {
             commands,
             scale,
             width,
             height,
             cursor,
+            blur_after,
         })
     }
 
@@ -847,8 +849,11 @@ fn blend_of(code: i32) -> GuiBlend {
     }
 }
 
-fn decode_frame(env: &mut Env, frame: JObject) -> Result<(Vec<GuiCommand>, Option<CursorShape>)> {
-    // Safety: Bridge.render returns Object[]{int[], String[], int[1]}.
+fn decode_frame(
+    env: &mut Env,
+    frame: JObject,
+) -> Result<(Vec<GuiCommand>, Option<CursorShape>, i32)> {
+    // Safety: Bridge.render returns Object[]{int[], String[], int[2]}.
     let frame = unsafe { JObjectArray::<JObject>::from_raw(env, frame.into_raw()) };
     let ints = frame.get_element(env, 0)?;
     let ints = unsafe { JIntArray::from_raw(env, ints.into_raw()) };
@@ -866,9 +871,19 @@ fn decode_frame(env: &mut Env, frame: JObject) -> Result<(Vec<GuiCommand>, Optio
     }
     let cur = frame.get_element(env, 2)?;
     let cur = unsafe { JIntArray::from_raw(env, cur.into_raw()) };
-    let mut code = [0i32; 1];
+    let mut code = [0i32; 2];
     cur.get_region(env, 0, &mut code)?;
-    Ok((decode(&buf, &strings)?, cursor_shape(code[0])))
+    // The command index the blur goes after is a batch index; -1 means no blur this frame.
+    let blur = if code[1] < 0 {
+        None
+    } else {
+        Some(code[1] as usize)
+    };
+    let blur_after = match blur {
+        Some(b) => decode(&buf[..b.min(buf.len())], &strings)?.len() as i32,
+        None => -1,
+    };
+    Ok((decode(&buf, &strings)?, cursor_shape(code[0]), blur_after))
 }
 
 /// Decodes a frame's int records and string table into commands.

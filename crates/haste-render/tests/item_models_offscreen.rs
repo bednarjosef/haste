@@ -61,6 +61,7 @@ fn gui_slots_draw_flat_items_with_the_item_model() {
         width: W,
         height: H,
         cursor: None,
+        blur_after: -1,
     };
     let camera = Camera {
         pos: glam::DVec3::new(0.0, 100.0, 0.0),
@@ -152,6 +153,7 @@ fn held_item_draws_the_item_model_not_the_block_model() {
         width: W,
         height: H,
         cursor: None,
+        blur_after: -1,
     };
     let render = |renderer: &mut Renderer| {
         renderer

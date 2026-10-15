@@ -151,6 +151,12 @@ pub struct GuiFrame {
     pub height: u32,
     /// Cursor shape the screen asked for this frame (`None` = default arrow).
     pub cursor: Option<CursorShape>,
+    /// Command index the open screen's blurred background goes after: the commands before it
+    /// draw over the world, the blur runs (vanilla: `GameRenderer.processBlurEffect`, the
+    /// `blur` post chain), then the rest draw over the blurred result. `-1`: no blur (no
+    /// screen open, or the screen does not blur — chat, the HUD). Vanilla:
+    /// `Screen.extractBlurredBackground` / `GuiRenderer.draw`.
+    pub blur_after: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

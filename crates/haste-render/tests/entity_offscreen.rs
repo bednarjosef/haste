@@ -256,6 +256,7 @@ fn entities_offscreen() {
         width: 320,
         height: 240,
         cursor: None,
+        blur_after: -1,
     };
     let img = render_with_gui(&mut renderer, &world, &entities, camera, &gui, 0.0);
     img.save(out.join("entities_gui.png")).unwrap();
