@@ -2129,6 +2129,10 @@ impl Renderer {
             let bonus = &self.bonus;
             let min_section = self.min_section;
             let column = |c: ChunkPos| self.visible_mask.column(c);
+            // The conduit's eye is billboarded to the camera (vanilla `ConduitRenderer` reads
+            // `camera.orientation`), which `Camera.setRotation` builds from yaw and pitch.
+            let orientation =
+                crate::blockentity::camera_orientation(frame.camera.yaw, frame.camera.pitch);
             self.block_entities_drawn = self.entity.append_block_entities(
                 frame.block_entities,
                 cam,
@@ -2149,6 +2153,7 @@ impl Renderer {
                     column(c) & (1u32 << si) != 0 || bonus.contains(&(c, si))
                 },
                 &mut self.assets,
+                orientation,
             );
         } else {
             self.block_entities_drawn = 0;

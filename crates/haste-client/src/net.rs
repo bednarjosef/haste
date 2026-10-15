@@ -14,6 +14,7 @@ use anyhow::Context;
 use glam::DVec3;
 use haste_core::input::InputState;
 use haste_core::view::{BlockView, CollisionShapes};
+use haste_core::Direction;
 use haste_data::GameData;
 use haste_entity::riding::{passenger_seat, PassengerKind, SeatPoint, SeatQuery};
 use haste_entity::{EntityDimensions, EntityStore};
@@ -939,6 +940,16 @@ pub struct Session {
     /// The block states whose `block_event` action 1 belongs to a lid (chest family, shulker
     /// boxes; copper chests are not drawn yet), filled from the game data at join.
     lid_states: Option<HashSet<BlockStateId>>,
+    /// The bell block states, for `block_event` action 1's ring events.
+    bell_states: Option<HashSet<BlockStateId>>,
+    /// The decorated pot block states, for `block_event` action 1's wobble events.
+    pot_states: Option<HashSet<BlockStateId>>,
+    /// Bell rings waiting to be drawn, by block position: the click direction vanilla
+    /// `BellBlockEntity.onHit` sends as the event's parameter.
+    pub bells: HashMap<BlockPos, Option<Direction>>,
+    /// Decorated pot wobbles waiting to be drawn, by block position: the game tick the wobble
+    /// started (`DecoratedPotBlockEntity.wobbleStartedAtTick`) and the style's duration.
+    pub pots: HashMap<BlockPos, (i64, u32)>,
     /// Other players' break progress (`block_destruction`): breaker id -> (block, stage 0..=9).
     pub breaking: HashMap<i32, (BlockPos, u8)>,
     /// Entities the server spawned and has not removed (crosshair targets).
@@ -1037,6 +1048,10 @@ impl Session {
             breaking: HashMap::new(),
             lids: HashMap::new(),
             lid_states: None,
+            bell_states: None,
+            pot_states: None,
+            bells: HashMap::new(),
+            pots: HashMap::new(),
             entity_ids: HashSet::new(),
             entity_boxes: Vec::new(),
             entity_types: Vec::new(),
@@ -1249,6 +1264,28 @@ impl Session {
         self.lid_states = Some(states);
     }
 
+    /// The bell block states, for `block_event` action 1's ring events.
+    pub fn set_bell_states(&mut self, states: HashSet<BlockStateId>) {
+        self.bell_states = Some(states);
+    }
+
+    /// The decorated pot block states, for `block_event` action 1's wobble events.
+    pub fn set_pot_states(&mut self, states: HashSet<BlockStateId>) {
+        self.pot_states = Some(states);
+    }
+
+    /// The bell rings and decorated pot wobbles waiting to be drawn, as (position, click
+    /// direction) and (position, start tick, duration) pairs. The game thread turns them into
+    /// the animation state the renderer interpolates.
+    pub fn block_event_anims(
+        &self,
+        bells: &mut Vec<(BlockPos, Option<Direction>)>,
+        pots: &mut Vec<(BlockPos, i64, u32)>,
+    ) {
+        bells.extend(self.bells.iter().map(|(p, d)| (*p, *d)));
+        pots.extend(self.pots.iter().map(|(p, w)| (*p, w.0, w.1)));
+    }
+
     /// Applies one clientbound packet; serverbound replies go to `out`.
     pub fn apply<W: WorldSink + ?Sized, E: EntitySink + ?Sized>(
         &mut self,
@@ -1280,6 +1317,8 @@ impl Session {
                 self.player = LocalPlayer::with_entity(self.entity_id, mode);
                 self.breaking.clear();
                 self.lids.clear();
+                self.bells.clear();
+                self.pots.clear();
                 self.counters.respawns += 1;
             }
         }
@@ -1327,6 +1366,8 @@ impl Session {
                 self.entity_ids.clear();
                 self.breaking.clear();
                 self.lids.clear();
+                self.bells.clear();
+                self.pots.clear();
                 self.fireworks.clear();
                 self.attached_firework = None;
                 self.dimension = dim;
@@ -1377,27 +1418,41 @@ impl Session {
             P::ForgetLevelChunk(f) => {
                 // The chunk's block entities (and their lids) are gone with it.
                 self.lids.retain(|pos, _| pos.chunk() != f.pos);
+                self.bells.retain(|pos, _| pos.chunk() != f.pos);
+                self.pots.retain(|pos, _| pos.chunk() != f.pos);
                 world.unload_chunk(f.pos);
                 self.counters.chunks_unloaded += 1;
             }
             P::BlockUpdate(b) => {
                 let c = b.change();
                 self.lids.remove(&c.pos);
+                self.bells.remove(&c.pos);
+                self.pots.remove(&c.pos);
                 if !self.player.defer_block_update(c.pos, c.state) {
                     world.set_block(c.pos, c.state);
                 }
             }
-            // A lid's open target (vanilla routes `block_event` to the block entity's
-            // `triggerEvent`: action 1, the opener count; chests use `count > 0`, shulker
-            // boxes 0 to close and 1 to open, which `> 0` matches exactly).
+            // A block entity's `block_event` action 1: the opener count for a lid (chests use
+            // `count > 0`, shulker boxes 0 to close and 1 to open, which `> 0` matches
+            // exactly), the click direction for a bell (`BellBlockEntity.onHit`) and the wobble
+            // style for a decorated pot (`DecoratedPotBlockEntity.wobble`).
             P::BlockEvent(b) if b.action == 1 => {
-                let is_lid = self
-                    .lid_states
-                    .as_ref()
-                    .is_some_and(|s| s.contains(&world.block_state_at(b.pos)));
-                if is_lid {
+                let state = world.block_state_at(b.pos);
+                if self.lid_states.as_ref().is_some_and(|s| s.contains(&state)) {
                     let lid = self.lids.entry(b.pos).or_default();
                     lid.open = b.param > 0;
+                } else if self
+                    .bell_states
+                    .as_ref()
+                    .is_some_and(|s| s.contains(&state))
+                {
+                    // `Direction.from3DDataValue(b1)`; vertical values leave the shake
+                    // direction unset, which `BellModel.setupAnim` reads as no shake.
+                    self.bells.insert(b.pos, Direction::from_ordinal(b.param));
+                } else if self.pot_states.as_ref().is_some_and(|s| s.contains(&state)) {
+                    // `WobbleStyle.values()[data]`: POSITIVE 7 ticks, NEGATIVE 10.
+                    let duration = if b.param == 0 { 7 } else { 10 };
+                    self.pots.insert(b.pos, (self.world_age, duration));
                 }
             }
             P::BlockEntityData(b) => {
@@ -1677,6 +1732,8 @@ impl Session {
         for (pos, state) in self.player.take_world_edits() {
             world.set_block(pos, state);
             self.lids.remove(&pos);
+            self.bells.remove(&pos);
+            self.pots.remove(&pos);
         }
         // Every lid's animation step (vanilla ticks each chest's `ChestLidController` and each
         // shulker box's `updateAnimation` once per client tick).
