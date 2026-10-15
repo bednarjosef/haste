@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs the feature check scripts in scripts/checks/ against the local test server.
 # usage: scripts/checks/run-feature-checks.sh [feature ...]
-#   features: hud death drop modes f2 craft pause creative-hotbars recipe-book  (default: all)
+#   features: hud death drop modes f2 craft pause creative-hotbars language recipe-book  (default: all)
 # The client runs offscreen (`--script`); all server state is set up over RCON from here,
 # never from the script (the player is not an operator and the server kicks command spam).
 # Evidence is printed and grepped: frame text commands (not images), server log lines and
@@ -346,13 +346,33 @@ recipe_book() {
   check recipe-book "the book opens and lists recipes; searching finds oak planks; clicking it crafts 4 planks from one log" "$r"
 }
 
-ALL=(hud death drop modes f2 craft pause creative-hotbars recipe-book)
+# ---- 10. Languages other than English ----
+language() {
+  local log="$LOGDIR/language.log"
+  client_start "$ROOT/scripts/checks/language.txt" "$log"
+  wait_online || { check language "player never joined" 1; return; }
+  wait_exit
+  local ev="$LOGDIR/language.evidence"
+  grep -E "script text\[" "$log" >"$ev"
+  echo "--- language evidence (pause menu after switching to de_de) ---"
+  grep -E "script text\[pause-de\]" "$log"
+  local r=0
+  has "$(grep -E 'script text\[pause-de\]' "$log")" "Zurück zum Spiel" \
+    || { echo "pause menu not in German after switching"; r=1; }
+  if grep -qE "haste proxy:|Java exception" "$log"; then
+    echo "proxy stubs or Java exceptions:"; grep -E "haste proxy:|Java exception" "$log" | head -5
+    r=1
+  fi
+  check language "Options > Language switched to de_de and the pause menu drew in German" "$r"
+}
+
+ALL=(hud death drop modes f2 craft pause creative-hotbars language recipe-book)
 if [ $# -eq 0 ]; then
   set -- "${ALL[@]}"
 fi
 for f in "$@"; do
   case "$f" in
-    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | recipe-book) "$f" ;;
+    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | recipe-book) "${f//-/_}" ;;
     *) echo "unknown feature: $f" ;;
   esac
 done

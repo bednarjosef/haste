@@ -81,6 +81,16 @@ impl Registries {
             .and_then(|&i| self.registries.get(i as usize))
             .map_or(0, |r| r.entries.len())
     }
+
+    /// `minecraft:data_component_type` names by protocol id (empty when the registry is
+    /// absent): the ids an item stack's component patch indexes.
+    pub fn data_component_names(&self) -> Vec<String> {
+        self.by_name
+            .get("minecraft:data_component_type")
+            .and_then(|&i| self.registries.get(i as usize))
+            .map(|r| r.entries.iter().map(ToString::to_string).collect())
+            .unwrap_or_default()
+    }
 }
 
 #[derive(serde::Deserialize)]

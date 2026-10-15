@@ -22,7 +22,9 @@
 //!   entity interact, block use, item use; nothing at all while a block is being destroyed;
 //!   while the button is held, one use every 4 ticks (`handleKeybinds`); the item in progress
 //!   blocks both attack and use, and releasing the button sends
-//!   `MultiPlayerGameMode.releaseUsingItem`'s `release_use_item`.
+//!   `MultiPlayerGameMode.releaseUsingItem`'s `release_use_item`. An item with a use duration
+//!   (`Item.getUseDuration` from the `minecraft:consumable` component or the item class) starts
+//!   `LivingEntity.useItem`/`useItemRemaining`, whose animation is `Item.getUseAnimation`.
 //!
 //! Per tick (vanilla's order): hotbar, target, then the key handling (clicks, held use,
 //! continueAttack, `missTime`--), then pick block, then drop / off-hand swap.
@@ -137,9 +139,14 @@ pub struct Interaction {
     use_clicks: u8,
     /// `missTime` ticks left: 10 after a miss outside creative.
     miss_time: u8,
-    /// True while the player is using an item (vanilla sets it when a consumable's use starts;
-    /// haste has no consumable-item data yet, so nothing sets it — see `set_using_item`).
+    /// True while the player is using an item (`LivingEntity.isUsingItem`): set when a use with
+    /// a duration starts, cleared on release, an item change or death. `using` carries the
+    /// component-driven duration and animation.
     is_using_item: bool,
+    /// The item currently being used (`LivingEntity.useItem`/`useItemRemaining`): the
+    /// `minecraft:consumable` component's `use_duration`/`use_animation` (or the item class's
+    /// own), ticked down each game tick. Set together with `is_using_item`.
+    using: Option<UsingItem>,
     /// Last sequence number used for a prediction.
     sequence: i32,
     /// Predicted blocks: (sequence, pos, the server's state: before the prediction, then the
@@ -150,20 +157,98 @@ pub struct Interaction {
     pub hotbar: [ItemStackData; 9],
     pub offhand: ItemStackData,
     /// Armor, indexed helmet 0, chest 1, legs 2, boots 3 (player inventory menu 5..=8 and
-    /// `set_player_inventory` 36..=39). The chest slot answers the glider check.
+    /// `set_player_inventory` 36..=39). The chest slot answers the glider check; the helmet is
+    /// the worn item whose camera overlay `Hud.extractCameraOverlays` reads.
     pub armor: [ItemStackData; 4],
     /// Item registry indices whose default components carry `minecraft:glider`
     /// (`LivingEntity.canGlideUsing`), resolved from the item component reports in `prepare`.
     pub(crate) glider_items: Option<HashSet<RegistryIndex>>,
-    /// Active effects on us: `minecraft:mob_effect` index -> amplifier and remaining ticks.
+    /// Active effects on us: `minecraft:mob_effect` index -> amplifier, remaining ticks and the
+    /// vanilla `MobEffectInstance.BlendState` the screen effects read.
     pub effects: HashMap<i32, EffectData>,
     tools: Option<Arc<ToolTable>>,
     tags: Option<BlockTags>,
     effect_ids: Option<EffectIds>,
+    /// `minecraft:data_component_type` names by protocol id, for decoding the held stack's
+    /// component patch (`haste_protocol::wire::components::read_patch`).
+    component_tables: Option<Arc<haste_protocol::packets::ProtocolTables>>,
+    /// The item default components (`minecraft:attribute_modifiers`, `minecraft:consumable`)
+    /// from the data generator.
+    item_components: Option<Arc<haste_data::ItemComponents>>,
+    /// The held main-hand stack's decoded data and the stack it was decoded from (re-decoded
+    /// when the slot's stack changes; a decode failure leaves it `None`).
+    components: Option<HeldItem>,
     /// Night-vision and darkness effect indices for the lightmap (`prepare`).
     pub(crate) lightmap_effect_ids: LightmapEffectIds,
     /// Last blocks we sent actions for (debug logging of their server updates).
     recent: Vec<BlockPos>,
+}
+
+/// `ItemUseAnimation` (vanilla's order).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UseAnimation {
+    None,
+    Eat,
+    Drink,
+    Block,
+    Bow,
+    Trident,
+    Crossbow,
+    Spyglass,
+    TootHorn,
+    Brush,
+    Bundle,
+    Spear,
+}
+
+impl UseAnimation {
+    fn from_id(id: i32) -> Self {
+        match id {
+            0 => UseAnimation::None,
+            2 => UseAnimation::Drink,
+            3 => UseAnimation::Block,
+            4 => UseAnimation::Bow,
+            5 => UseAnimation::Trident,
+            6 => UseAnimation::Crossbow,
+            7 => UseAnimation::Spyglass,
+            8 => UseAnimation::TootHorn,
+            9 => UseAnimation::Brush,
+            10 => UseAnimation::Bundle,
+            11 => UseAnimation::Spear,
+            // `eat` (1) and unknown ids.
+            _ => UseAnimation::Eat,
+        }
+    }
+}
+
+/// The item being used and how long is left (`LivingEntity.useItem`/`useItemRemaining`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UsingItem {
+    /// The item type this use started with (`ItemStack.isSameItem` check each tick).
+    pub item: Option<RegistryIndex>,
+    /// `getUseDuration` (ticks).
+    pub duration: i32,
+    /// `useItemRemainingTicks`, decremented each tick.
+    pub remaining: i32,
+    /// `getUseAnimation`.
+    pub animation: UseAnimation,
+}
+
+/// The held main-hand stack's decoded components the game logic reads: what it mines
+/// (`minecraft:tool`), the Efficiency enchantment's `mining_efficiency` contribution
+/// (`Enchantments.EFFICIENCY`'s `LevelsSquared(1.0)` effect = level^2 + 1), and the
+/// `minecraft:attack_speed` its attribute modifiers grant.
+#[derive(Clone, Debug)]
+struct HeldItem {
+    /// The stack this was decoded from (re-decode when it changes).
+    stack: ItemStackData,
+    /// The stack's own `minecraft:tool` component, if it overrides the item default.
+    tool: Option<haste_physics::mining::Tool>,
+    /// `minecraft:mining_efficiency` from the stack's Efficiency enchantment (0 if none).
+    efficiency: f64,
+    /// The player's `minecraft:attack_speed` with this item held
+    /// (`Player.getCurrentItemAttackStrengthDelay`).
+    attack_speed: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -171,6 +256,11 @@ struct EffectIds {
     haste: i32,
     conduit_power: i32,
     mining_fatigue: i32,
+    /// The two effects that blend, as vanilla's `MobEffects` builds them: nausea has a 150-tick
+    /// fade in and a 20-tick fade out that starts 60 ticks early, darkness a 22-tick one.
+    /// Their blend factors are what the screen effects read.
+    nausea: i32,
+    darkness: i32,
 }
 
 /// The `minecraft:mob_effect` indices the lightmap needs (night vision and darkness), resolved
@@ -180,15 +270,15 @@ struct EffectIds {
 pub(crate) struct LightmapEffectIds {
     pub(crate) night_vision: Option<i32>,
     pub(crate) darkness: Option<i32>,
+    /// The blindness effect (fog environment `BlindnessFogEnvironment`).
+    pub(crate) blindness: Option<i32>,
+    /// The fire-resistance effect (lava fog distance `LavaFogEnvironment`).
+    pub(crate) fire_resistance: Option<i32>,
 }
 
-/// One active effect on us (vanilla `MobEffectInstance`): its amplifier and remaining ticks
-/// (`-1` infinite). The lightmap reads the night-vision and darkness durations from here.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EffectData {
-    pub amplifier: i32,
-    pub duration: i32,
-}
+/// One active effect on us: the vanilla `MobEffectInstance` the screen effects and the lightmap
+/// read (amplifier, remaining ticks and the `BlendState`).
+pub use crate::screen_effects::Effect as EffectData;
 
 impl Interaction {
     /// Loads the tool table (once; reads the data generator's item component reports) and the
@@ -222,24 +312,57 @@ impl Interaction {
                     .index("minecraft:mob_effect", &Identifier::minecraft(n))
                     .map(|i| i.0 as i32)
             };
-            if let (Some(haste), Some(conduit_power), Some(mining_fatigue)) =
-                (id("haste"), id("conduit_power"), id("mining_fatigue"))
-            {
+            if let (
+                Some(haste),
+                Some(conduit_power),
+                Some(mining_fatigue),
+                Some(nausea),
+                Some(darkness),
+            ) = (
+                id("haste"),
+                id("conduit_power"),
+                id("mining_fatigue"),
+                id("nausea"),
+                id("darkness"),
+            ) {
                 self.effect_ids = Some(EffectIds {
                     haste,
                     conduit_power,
                     mining_fatigue,
+                    nausea,
+                    darkness,
                 });
             }
             self.lightmap_effect_ids = LightmapEffectIds {
                 night_vision: id("night_vision"),
                 darkness: id("darkness"),
+                blindness: id("blindness"),
+                fire_resistance: id("fire_resistance"),
             };
+        }
+        if self.component_tables.is_none() {
+            self.component_tables = Some(Arc::new(
+                haste_protocol::packets::ProtocolTables::with_data_components(
+                    data.registries.data_component_names(),
+                ),
+            ));
+        }
+        if self.item_components.is_none() {
+            let c = haste_data::ItemComponents::load_default().unwrap_or_else(|e| {
+                tracing::warn!("no item attribute modifiers (attack speed from the server): {e:#}");
+                haste_data::ItemComponents::default()
+            });
+            self.item_components = Some(Arc::new(c));
         }
     }
 
     pub fn has_block_tags(&self) -> bool {
         self.tags.is_some()
+    }
+
+    /// The block tags the server synced (`update_tags`, registry `minecraft:block`).
+    pub fn block_tags(&self) -> Option<&BlockTags> {
+        self.tags.as_ref()
     }
 
     pub fn set_block_tags(&mut self, tags: BlockTags) {
@@ -248,6 +371,133 @@ impl Interaction {
 
     pub fn set_tools(&mut self, tools: Arc<ToolTable>) {
         self.tools = Some(tools);
+    }
+
+    /// Replaces the item default components (tests, without the data generator cache).
+    pub fn set_item_components(&mut self, item_components: Arc<haste_data::ItemComponents>) {
+        self.item_components = Some(item_components);
+    }
+
+    /// Decodes the held main-hand stack's component patch once, when the slot's stack changes
+    /// (`ItemStack.get(DataComponents.TOOL)` / the Efficiency enchantment's attribute effect).
+    fn refresh_components(&mut self, stack: ItemStackData, data: &haste_data::GameData) {
+        if self.components.as_ref().is_some_and(|h| h.stack == stack) {
+            return;
+        }
+        let Some(tables) = self.component_tables.clone() else {
+            return;
+        };
+        let patch = if stack.is_empty() || stack.components_raw.is_empty() {
+            haste_protocol::wire::components::ComponentPatch::default()
+        } else {
+            match haste_protocol::wire::components::read_patch(&stack.components_raw, &tables) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::debug!("held stack component patch did not decode: {e}");
+                    self.components = None;
+                    return;
+                }
+            }
+        };
+        let tool = patch.tool().map(|t| tool_from_component(t, data));
+        let efficiency = efficiency_from_enchantments(&patch, data);
+        let attack_speed = self.item_attack_speed(&stack, data);
+        self.components = Some(HeldItem {
+            stack,
+            tool,
+            efficiency,
+            attack_speed,
+        });
+    }
+
+    /// The player's `minecraft:attack_speed` with `stack` held: the base 4.0 plus the item's
+    /// main-hand `attack_speed` attribute modifiers, as `ItemAttributeModifiers.compute` does.
+    /// Falls back to the server-synced attribute for an item without any such modifier.
+    fn item_attack_speed(&self, stack: &ItemStackData, data: &haste_data::GameData) -> f64 {
+        let fallback = self.attrs.attack_speed;
+        let Some(item) = stack
+            .item
+            .and_then(|i| data.registries.name("minecraft:item", i))
+        else {
+            return fallback;
+        };
+        let attr = Identifier::minecraft("attack_speed");
+        let Some(ic) = &self.item_components else {
+            return fallback;
+        };
+        if ic
+            .attribute_modifiers(item)
+            .iter()
+            .any(|m| m.attribute == attr && m.applies_to_main_hand())
+        {
+            ic.main_hand_attribute(item, &attr, crate::hand::DEFAULT_ATTACK_SPEED)
+        } else {
+            fallback
+        }
+    }
+
+    /// `Item.getUseDuration` / `Item.getUseAnimation` for a held stack: the `minecraft:consumable`
+    /// component when present, else the item classes that override them. `None` when the item is
+    /// not used over time (duration 0, animation `NONE`).
+    fn use_data(
+        &self,
+        stack: &ItemStackData,
+        data: &haste_data::GameData,
+    ) -> Option<(i32, UseAnimation)> {
+        let item = stack
+            .item
+            .and_then(|i| data.registries.name("minecraft:item", i))?;
+        if let Some(ic) = &self.item_components {
+            if let Some(c) = ic.consumable(item) {
+                return Some((c.consume_ticks(), UseAnimation::from_id(c.animation)));
+            }
+        }
+        // Items whose class overrides `getUseDuration`/`getUseAnimation`
+        // (`BowItem`/`CrossbowItem`/`TridentItem`/`SpyglassItem`/`ShieldItem`); a shield's
+        // `minecraft:blocks_attacks` makes the default `Item` return 72000 and `BLOCK`.
+        match item.path() {
+            "bow" => Some((72000, UseAnimation::Bow)),
+            "crossbow" => Some((72000, UseAnimation::Crossbow)),
+            "trident" => Some((72000, UseAnimation::Trident)),
+            "spyglass" => Some((1200, UseAnimation::Spyglass)),
+            "shield" => Some((72000, UseAnimation::Block)),
+            _ => None,
+        }
+    }
+
+    /// The `minecraft:mob_effect` index of nausea, the effect whose blend factor drives the
+    /// nausea overlay and the screen warp (`MobEffects.NAUSEA`).
+    fn nausea_id(&self) -> Option<i32> {
+        self.effect_ids.map(|e| e.nausea)
+    }
+
+    /// Whether `effect` is `MobEffects.DARKNESS`, the other effect with a blend duration.
+    fn darkness_id(&self, effect: i32) -> bool {
+        self.effect_ids.is_some_and(|e| e.darkness == effect)
+    }
+
+    /// The nausea blend factor between two frames, 0 without the effect
+    /// (`LivingEntity.getEffectBlendFactor`).
+    pub fn nausea_factor(&self, partial_tick: f32) -> f32 {
+        self.nausea_id()
+            .and_then(|id| self.effects.get(&id))
+            .map_or(0.0, |e| e.blend_factor(partial_tick))
+    }
+
+    /// The nausea blend factor pair (the previous frame's and this tick's), for the frame's
+    /// lerp (`BlendState.factorPreviousFrame`, `.factor`).
+    pub fn nausea_blend_pair(&self) -> (f32, f32) {
+        self.nausea_id()
+            .and_then(|id| self.effects.get(&id))
+            .map_or((0.0, 0.0), |e| e.blend_pair())
+    }
+
+    /// One tick of the active effects (`LivingEntity.tickEffects`: each instance ticks its
+    /// duration and its vanilla blend state on the client).
+    pub(super) fn tick_effects(&mut self) {
+        for e in self.effects.values_mut() {
+            e.tick();
+        }
     }
 
     /// Test/script hook for the item-in-use state (vanilla: `player.isUsingItem()`; eating blocks
@@ -263,6 +513,7 @@ impl Interaction {
         self.effects.clear();
         self.miss_time = 0;
         self.is_using_item = false;
+        self.using = None;
         self.attack_clicks = 0;
         self.use_clicks = 0;
     }
@@ -288,10 +539,87 @@ impl Interaction {
     }
 }
 
+/// Converts a stack's `minecraft:tool` component (protocol `IdSet`s) into the physics tool the
+/// mining code matches against block tags and names.
+fn tool_from_component(
+    t: &haste_protocol::wire::components::Tool,
+    data: &haste_data::GameData,
+) -> haste_physics::mining::Tool {
+    use haste_physics::mining::{BlockSet, ToolRule};
+    use haste_protocol::wire::IdSet;
+    let rules = t
+        .rules
+        .iter()
+        .map(|r| {
+            let blocks = match &r.blocks {
+                IdSet::Tag(tag) => BlockSet::Tag(tag.clone()),
+                IdSet::Ids(ids) => BlockSet::List(
+                    ids.iter()
+                        .filter_map(|i| {
+                            data.registries
+                                .name("minecraft:block", RegistryIndex(*i as u32))
+                                .cloned()
+                        })
+                        .collect(),
+                ),
+            };
+            ToolRule {
+                blocks,
+                speed: r.speed,
+                correct_for_drops: r.correct_for_drops,
+            }
+        })
+        .collect();
+    haste_physics::mining::Tool {
+        rules,
+        default_mining_speed: t.default_mining_speed,
+        damage_per_block: t.damage_per_block,
+        can_destroy_blocks_in_creative: t.can_destroy_blocks_in_creative,
+    }
+}
+
+/// The `minecraft:mining_efficiency` a stack's Efficiency enchantment grants
+/// (`Enchantments.EFFICIENCY`, `LevelsSquared(1.0)` = level^2 + 1; ids from
+/// `minecraft:enchantment`).
+fn efficiency_from_enchantments(
+    patch: &haste_protocol::wire::components::ComponentPatch,
+    data: &haste_data::GameData,
+) -> f64 {
+    let Some(ench) = patch.enchantments() else {
+        return 0.0;
+    };
+    ench.iter()
+        .filter_map(|e| {
+            let name = data
+                .registries
+                .name("minecraft:enchantment", RegistryIndex(e.id as u32))?;
+            (name.namespace() == "minecraft" && name.path() == "efficiency").then(|| {
+                let l = f64::from(e.level);
+                l * l + 1.0
+            })
+        })
+        .sum()
+}
+
 impl LocalPlayer {
     /// This tick's mouse buttons and hotbar selection (applied inside the next tick).
     pub fn set_interact(&mut self, input: InteractInput) {
         self.int.input = input;
+    }
+
+    /// Whether we are scoping with a spyglass this tick: vanilla's `Player.isScoping` (using an
+    /// item, and the item being used is a spyglass). The use state is the held "use" button
+    /// (`use_item` is re-sent every 4 ticks while it stays held, so a held button is a use in
+    /// progress) and the item is the main hand's.
+    pub fn scoping(&self, data: &haste_data::GameData) -> bool {
+        if !self.int.last.use_item {
+            return false;
+        }
+        let name = self
+            .main_hand()
+            .item
+            .and_then(|i| data.registries.name("minecraft:item", i));
+        crate::screen_effects::is_spyglass(name)
     }
 
     /// Queues one left click for the next tick (vanilla's `keyAttack.clickCount++` /
@@ -335,6 +663,59 @@ impl LocalPlayer {
     /// The held main-hand stack.
     pub fn main_hand(&self) -> &ItemStackData {
         &self.int.hotbar[self.held_slot.clamp(0, 8) as usize]
+    }
+
+    /// The player's `minecraft:attack_speed` with the held item (base 4.0 plus the item's
+    /// attribute modifiers; the server-synced attribute when the item has none). Used by
+    /// `Player.getCurrentItemAttackStrengthDelay` for the equip and the attack indicator.
+    pub fn held_attack_speed(&self) -> f64 {
+        let stack = self.main_hand();
+        self.int
+            .components
+            .as_ref()
+            .filter(|h| h.stack == *stack)
+            .map_or(self.int.attrs.attack_speed, |h| h.attack_speed)
+    }
+
+    /// `Player.getAttackStrengthScale`: how charged the attack is (0..1) after
+    /// `attackStrengthTicker` ticks with the held item's delay.
+    pub fn attack_strength_scale(&self, partial: f32) -> f32 {
+        self.hand.attack_strength_scale(partial)
+    }
+
+    /// `Player.resetAttackStrengthTicker` (abort breaking, item change).
+    pub fn reset_attack_strength_ticker(&mut self) {
+        self.hand.reset_attack_strength_ticker();
+    }
+
+    /// `Player.resetOnlyAttackStrengthTicker` (`Player.onAttack`).
+    pub fn reset_only_attack_strength_ticker(&mut self) {
+        self.hand.reset_only_attack_strength_ticker();
+    }
+
+    /// `LivingEntity.isUsingItem`: an item is being used over time.
+    pub fn is_using_item(&self) -> bool {
+        self.int.is_using_item
+    }
+
+    /// `LivingEntity.getUseItemRemainingTicks`.
+    pub fn use_item_remaining(&self) -> i32 {
+        self.int.using.map_or(0, |u| u.remaining)
+    }
+
+    /// `LivingEntity.getUseItem`'s duration (`Item.getUseDuration`), 0 when not using.
+    pub fn use_duration(&self) -> i32 {
+        self.int.using.map_or(0, |u| u.duration)
+    }
+
+    /// `Item.getUseAnimation` of the item being used.
+    pub fn use_animation(&self) -> UseAnimation {
+        self.int.using.map_or(UseAnimation::None, |u| u.animation)
+    }
+
+    /// `LivingEntity.getTicksUsingItem`: how long the current use has run.
+    pub fn ticks_using_item(&self) -> i32 {
+        self.int.using.map_or(0, |u| u.duration - u.remaining)
     }
 
     /// The stack of hand `i` (0 main, 1 off), as `InteractionHand.values()` numbers them.
@@ -405,13 +786,34 @@ impl LocalPlayer {
                 _ => {}
             },
             P::UpdateMobEffect(e) if e.entity_id == me => {
-                self.int.effects.insert(
-                    e.effect,
-                    EffectData {
-                        amplifier: e.amplifier,
-                        duration: e.duration,
-                    },
+                // Vanilla's blend durations per effect (`MobEffects`): only nausea and
+                // darkness set them, everything else blends at once.
+                use crate::screen_effects as se;
+                let (blend_in, blend_out, blend_out_advance) =
+                    if Some(e.effect) == self.int.nausea_id() {
+                        (
+                            se::NAUSEA_BLEND_IN,
+                            se::NAUSEA_BLEND_OUT,
+                            se::NAUSEA_BLEND_OUT_ADVANCE,
+                        )
+                    } else if self.int.darkness_id(e.effect) {
+                        (se::DARKNESS_BLEND, se::DARKNESS_BLEND, se::DARKNESS_BLEND)
+                    } else {
+                        (0, 0, 0)
+                    };
+                let mut effect = EffectData::new(
+                    e.amplifier,
+                    e.duration,
+                    e.flags & 0x08 != 0,
+                    blend_in,
+                    blend_out,
+                    blend_out_advance,
                 );
+                // `LivingEntity.forceAddEffect` copies the previous instance's blend state.
+                if let Some(prev) = self.int.effects.get(&e.effect) {
+                    effect.copy_blend_from(prev);
+                }
+                self.int.effects.insert(e.effect, effect);
             }
             P::RemoveMobEffect(e) if e.entity_id == me => {
                 self.int.effects.remove(&e.effect);
@@ -581,7 +983,11 @@ impl LocalPlayer {
             }
         }
 
-        // 2. The crosshair target (Minecraft.pick).
+        // 2. The crosshair target (Minecraft.pick). The held stack's components are decoded once
+        // per stack change; nothing in the pick reads them, but the decode belongs with the
+        // per-tick held-item upkeep.
+        let held = self.main_hand().clone();
+        self.int.refresh_components(held, env.data);
         self.int.target = if self.game_mode == GameMode::Spectator {
             None
         } else {
@@ -614,9 +1020,19 @@ impl LocalPlayer {
         let mut instant_attack = false;
         if self.int.is_using_item {
             // While an item is in use the clicks are consumed and do nothing; releasing the
-            // button releases the item (MultiPlayerGameMode.releaseUsingItem).
+            // button releases the item (MultiPlayerGameMode.releaseUsingItem), and a different
+            // item in the hand stops the use without a packet
+            // (`LivingEntity.updatingUsingItem`).
             if !input.use_item {
                 self.release_using_item(out);
+            } else if self
+                .int
+                .using
+                .as_ref()
+                .is_some_and(|u| self.main_hand().item != u.item)
+            {
+                self.int.using = None;
+                self.int.is_using_item = false;
             }
         } else {
             // while (keyAttack.consumeClick()) instantAttack |= startAttack();
@@ -625,13 +1041,20 @@ impl LocalPlayer {
             }
             // while (keyUse.consumeClick()) startUseItem();
             for _ in 0..use_clicks {
-                self.start_use_item(look, out);
+                self.start_use_item(look, env, out);
             }
         }
 
         // if (keyUse.isDown() && rightClickDelay == 0 && !player.isUsingItem()) startUseItem();
         if input.use_item && self.int.use_delay == 0 && !self.int.is_using_item {
-            self.start_use_item(look, out);
+            self.start_use_item(look, env, out);
+        }
+
+        // `LivingEntity.tick` -> `updateUsingItem`: the remaining time ticks down each game tick,
+        // including the tick the use started on.
+        if let Some(mut u) = self.int.using {
+            u.remaining -= 1;
+            self.int.using = Some(u);
         }
 
         // continueAttack(screen == null && !instantAttack && keyAttack.isDown() && grabbed).
@@ -784,7 +1207,12 @@ impl LocalPlayer {
     /// `Minecraft.startUseItem`: `rightClickDelay` 4, then per hand (main first, then off
     /// hand, `InteractionHand.values()`): entity interact, block use, item use. Nothing at all
     /// while a block is being destroyed (`!gameMode.isDestroying()`).
-    fn start_use_item(&mut self, look: (f32, f32), out: &mut Vec<ServerboundPlay>) {
+    fn start_use_item(
+        &mut self,
+        look: (f32, f32),
+        env: &InteractEnv<'_>,
+        out: &mut Vec<ServerboundPlay>,
+    ) {
         if self.int.destroying.is_none() {
             self.int.use_delay = USE_DELAY;
             if !self.int.is_using_item {
@@ -838,6 +1266,19 @@ impl LocalPlayer {
                             pitch: look.1,
                         }));
                         self.hand.swing();
+                        // `LivingEntity.startUsingItem`: an item with a use duration starts
+                        // using (`Item.getUseDuration`/`getUseAnimation` from the consumable
+                        // component or the item class).
+                        let stack = self.hand(hand).clone();
+                        if let Some((duration, animation)) = self.int.use_data(&stack, env.data) {
+                            self.int.using = Some(UsingItem {
+                                item: stack.item,
+                                duration,
+                                remaining: duration,
+                                animation,
+                            });
+                            self.int.is_using_item = true;
+                        }
                         return;
                     }
                 }
@@ -855,6 +1296,7 @@ impl LocalPlayer {
             sequence: 0,
         }));
         self.int.is_using_item = false;
+        self.int.using = None;
     }
 
     /// `MultiPlayerGameMode.startDestroyBlock`: creative breaks at once (with `destroyDelay` 5,
@@ -1063,12 +1505,21 @@ impl LocalPlayer {
         };
         let e = self.int.effect_ids;
         let a = self.int.attrs;
+        // Vanilla's `speed += getAttributeValue(MINING_EFFICIENCY)`. The server syncs the
+        // attribute, but the value comes from the held stack's Efficiency enchantment, which the
+        // client also decodes itself; take whichever is present (they agree in real play).
+        let stack_efficiency = self
+            .int
+            .components
+            .as_ref()
+            .filter(|h| h.stack == *self.main_hand())
+            .map_or(0.0, |h| h.efficiency);
         MiningParams {
             hardness: data.destroy_time(state),
             requires_correct_tool: data.requires_correct_tool(state),
             tool_speed,
             tool_correct,
-            mining_efficiency: a.mining_efficiency,
+            mining_efficiency: a.mining_efficiency.max(stack_efficiency),
             haste_level: level(e.map(|e| e.haste)).max(level(e.map(|e| e.conduit_power))),
             fatigue_level: level(e.map(|e| e.mining_fatigue)),
             block_break_speed: a.block_break_speed,
@@ -1078,6 +1529,8 @@ impl LocalPlayer {
         }
     }
 
+    /// The held stack's `minecraft:tool` component (`ItemStack.get(DataComponents.TOOL)`) when
+    /// the stack overrides it, else the item's default from the data generator's reports.
     fn held_tool<'t>(
         &'t self,
         data: &haste_data::GameData,
@@ -1085,6 +1538,11 @@ impl LocalPlayer {
         let item = self.main_hand();
         if item.is_empty() {
             return None;
+        }
+        if let Some(h) = self.int.components.as_ref().filter(|h| h.stack == *item) {
+            if h.tool.is_some() {
+                return h.tool.as_ref();
+            }
         }
         let name = data
             .registries

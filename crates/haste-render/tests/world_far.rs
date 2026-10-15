@@ -89,6 +89,7 @@ fn terrain_far_from_origin() {
                 yaw: 30.0,
                 pitch,
                 fov_deg: 70.0,
+                hand_fov_deg: 70.0,
                 roll_deg: 0.0,
                 bob: haste_render::ViewBob::default(),
             },
@@ -101,11 +102,13 @@ fn terrain_far_from_origin() {
                 dimension_has_sky: true,
                 fog_start: 48.0,
                 fog_end: 64.0,
+                ..Default::default()
             },
             partial_tick: 0.0,
             block_target: None,
             breaking: &[],
             camera_entity: None,
+            spin: None,
         };
         // The section visibility walk runs off the render thread and lands a frame later
         // (vanilla draws the previous graph until the async update is swapped in), so keep
@@ -209,6 +212,7 @@ fn sky_times_of_day() {
                 yaw,
                 pitch,
                 fov_deg: 70.0,
+                hand_fov_deg: 70.0,
                 roll_deg: 0.0,
                 bob: haste_render::ViewBob::default(),
             },
@@ -221,11 +225,13 @@ fn sky_times_of_day() {
                 dimension_has_sky: true,
                 fog_start: 48.0,
                 fog_end: 64.0,
+                ..Default::default()
             },
             partial_tick: 0.0,
             block_target: None,
             breaking: &[],
             camera_entity: None,
+            spin: None,
         };
         renderer.render(&frame).unwrap();
         let img = renderer.read_back().unwrap();
@@ -291,6 +297,7 @@ fn outline_and_cracks() {
                 yaw: 0.0,
                 pitch: 50.0,
                 fov_deg: 70.0,
+                hand_fov_deg: 70.0,
                 roll_deg: 0.0,
                 bob: haste_render::ViewBob::default(),
             },
@@ -303,11 +310,13 @@ fn outline_and_cracks() {
                 dimension_has_sky: true,
                 fog_start: 48.0,
                 fog_end: 64.0,
+                ..Default::default()
             },
             partial_tick: 0.0,
             block_target: with.then_some((target, haste_core::Direction::Up)),
             breaking: if with { &breaking } else { &[] },
             camera_entity: None,
+            spin: None,
         };
         renderer.sample_world(&world, &data.shapes, &frame);
         let stats = renderer.render(&frame).unwrap();

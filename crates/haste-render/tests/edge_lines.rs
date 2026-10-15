@@ -209,12 +209,14 @@ fn detect(
                 dimension_has_sky: true,
                 fog_start: 100.0,
                 fog_end: 200.0,
+                ..Default::default()
             },
             partial_tick: 0.0,
             block_target: None,
             breaking: &[],
             camera_entity: None,
             block_entities: &[],
+            spin: None,
         };
         // Two frames: the section visibility walk's mask lands on a later frame.
         renderer.render(&frame).unwrap();
@@ -393,6 +395,7 @@ fn no_thin_lines_along_block_edges() {
                 yaw: -90.0,
                 pitch: 0.0,
                 fov_deg: 70.0,
+                hand_fov_deg: 70.0,
                 roll_deg: 0.0,
                 bob: haste_render::ViewBob::default(),
             },
@@ -404,6 +407,7 @@ fn no_thin_lines_along_block_edges() {
                 yaw: 0.0,
                 pitch: 8.0,
                 fov_deg: 70.0,
+                hand_fov_deg: 70.0,
                 roll_deg: 0.0,
                 bob: haste_render::ViewBob::default(),
             },
@@ -428,6 +432,7 @@ fn no_thin_lines_along_block_edges() {
                 yaw: 180.0,
                 pitch: 0.0,
                 fov_deg: 70.0,
+                hand_fov_deg: 70.0,
                 roll_deg: 0.0,
                 bob: haste_render::ViewBob::default(),
             },
@@ -439,6 +444,7 @@ fn no_thin_lines_along_block_edges() {
                 yaw: 0.0,
                 pitch: 0.0,
                 fov_deg: 70.0,
+                hand_fov_deg: 70.0,
                 roll_deg: 0.0,
                 bob: haste_render::ViewBob::default(),
             },

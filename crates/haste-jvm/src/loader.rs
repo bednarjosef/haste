@@ -28,6 +28,8 @@ pub const ALLOW_PACKAGES: &[&str] = &[
     "net/minecraft/client/renderer/entity/state/",
     "net/minecraft/client/renderer/state/",
     "net/minecraft/client/resources/language/",
+    // the pack.mcmeta "language" section LanguageManager reads (the language list and its RTL flag)
+    "net/minecraft/client/resources/metadata/language/",
     // the Telemetry Data screen's event list is real vanilla Java over these value types; Haste sends
     // no telemetry (allowsTelemetry false), so the button is greyed like vanilla's, but the screen loads
     "net/minecraft/client/telemetry/",

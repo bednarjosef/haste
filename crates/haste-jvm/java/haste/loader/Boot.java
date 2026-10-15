@@ -46,6 +46,10 @@ public final class Boot {
 
         // game-side code reads the player's jar for data it cannot get through the class loader (data pack listing)
         System.setProperty("haste.clientJar", clientJar.toString());
+        // the launcher's downloaded assets (the index and its objects): the client jar carries only
+        // en_us, so the rest of the languages and the pack.mcmeta language list come from here
+        System.setProperty("haste.assetsDir", one.getOrDefault("assetsDir", ""));
+        System.setProperty("haste.assetsIndex", one.getOrDefault("assetsIndex", ""));
         System.setProperty("haste.minecraftDir", one.getOrDefault("minecraftDir", "."));
         // where singleplayer worlds live (Rust and Java share it; see haste-setup's worlds module)
         System.setProperty("haste.singleplayerDir", one.getOrDefault("singleplayerDir", ""));
