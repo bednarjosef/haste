@@ -44,6 +44,10 @@ pub const SPRINT_FOOD_LEVEL: i32 = 6;
 /// on the first press and `Player.aiStep` counts it down, so a second press toggles creative
 /// flight while it is still above zero (the second press lands up to 6 ticks after the first).
 pub const JUMP_DOUBLE_TAP_TICKS: u8 = 7;
+/// Ticks a double tap of forward stays armed: vanilla `LocalPlayer.sprintTriggerTime`, set to
+/// `options.sprintWindow` (default 7, `Options.java`) on the first forward press with no
+/// impulse and counted down each `aiStep`, so a second press inside the window starts sprinting.
+pub const SPRINT_DOUBLE_TAP_TICKS: u8 = 7;
 /// Vertical movement while the chunk below is not loaded: vanilla `LivingEntity.travelInAir`
 /// skips gravity on the client and pins the vertical movement to -0.1 (0.0 at or below the
 /// world's minimum), with the 0.98 vertical drag applied on top.
@@ -231,6 +235,9 @@ pub struct LocalPlayer {
     camera_eye_old: f32,
     look_offset: (f32, f32),
     last_input_look: (f32, f32),
+    /// The previous tick's forward impulse (`forward && !back`), for the sprint double tap's
+    /// rising edge (vanilla reads `hasForwardImpulse` before `input.tick()`).
+    last_input_forward: bool,
     sent: Sent,
     attribute_ids: Option<AttributeIds>,
     /// Last `update_attributes` value per attribute id (base + modifiers).
@@ -249,6 +256,10 @@ pub struct LocalPlayer {
     /// Ticks left in the double-tap jump window: vanilla `LocalPlayer.jumpTriggerTime` (7 on the
     /// first press, counted down by `Player.aiStep` before the keys are looked at).
     jump_trigger_time: u8,
+    /// Ticks left in the double-tap sprint window: vanilla `LocalPlayer.sprintTriggerTime`
+    /// (`options.sprintWindow`, 7 on the first forward press with no impulse, counted down by
+    /// `aiStep` before the keys are looked at).
+    sprint_trigger_time: u8,
     /// Jump key state of the previous tick, so a fresh press is a rising edge (vanilla reads
     /// `input.keyPresses.jump()` before `input.tick()`).
     jump_held: bool,
@@ -293,6 +304,7 @@ impl LocalPlayer {
             camera_eye_old: 0.0,
             look_offset: (0.0, 0.0),
             last_input_look: (0.0, 0.0),
+            last_input_forward: false,
             sent: Sent::default(),
             attribute_ids: None,
             attributes: Vec::new(),
@@ -302,6 +314,7 @@ impl LocalPlayer {
             sound_out: Vec::new(),
             block_particles_out: Vec::new(),
             jump_trigger_time: 0,
+            sprint_trigger_time: 0,
             jump_held: false,
             water_vision_time: 0,
             int: interact::Interaction::default(),
@@ -510,6 +523,7 @@ impl LocalPlayer {
                 self.pending_accept_age = 0;
                 self.sent = Sent::default();
                 self.jump_trigger_time = 0;
+                self.sprint_trigger_time = 0;
                 self.jump_held = false;
                 self.int.respawned();
             }
@@ -824,6 +838,8 @@ impl LocalPlayer {
         self.apply_attributes();
         self.prev_pos = self.state.pos;
         self.last_input_look = (input.yaw, input.pitch);
+        let last_input_forward = self.last_input_forward;
+        self.last_input_forward = input.forward && !input.back;
         // Vanilla `Camera.tick` runs at the start of the client tick, before the player's own
         // tick (so the target is the pose's eye height as the last tick ended it), and even
         // while the player has no position yet: the camera halves its distance to the target
@@ -897,12 +913,45 @@ impl LocalPlayer {
         if self.jump_trigger_time > 0 {
             self.jump_trigger_time -= 1;
         }
+        if self.sprint_trigger_time > 0 {
+            self.sprint_trigger_time -= 1;
+        }
         let mut phys_input = *input;
         phys_input.yaw = input.yaw + self.look_offset.0;
         phys_input.pitch = (input.pitch + self.look_offset.1).clamp(-90.0, 90.0);
         if self.food <= SPRINT_FOOD_LEVEL && !self.abilities.may_fly {
             phys_input.sprint = false;
             self.state.sprinting = false;
+        }
+        // Vanilla `LocalPlayer.aiStep`'s double tap of forward, after `Player.aiStep` counted
+        // `sprintTriggerTime` down above: sneak held, an item in use or the backward key
+        // cancels the window. `hasForwardImpulse` is read from the PREVIOUS tick's input
+        // (vanilla captures it before `input.tick()`), so the window arms on a tick without
+        // forward and starts the sprint on the fresh press inside it. `canStartSprinting` is
+        // evaluated on the current keys — not sprinting, a forward impulse, `isSprintingPossible`
+        // (enough food or may-fly; the not-blind gate is vanilla's `Player.isMobilityRestricted`,
+        // not modelled here), not slowed by an item in use and not moving slowly
+        // (`isMovingSlowly`: crouching or the swimming pose out of water) unless under water.
+        // The window lasts `options.sprintWindow` ticks (default 7). The sprint key branch
+        // (`keyPresses.sprint()`) is the physics tick's own `input.sprint` rule.
+        let forward_impulse = input.forward && !input.back;
+        if input.sneak || self.is_using_item() || input.back {
+            self.sprint_trigger_time = 0;
+        }
+        let moving_slowly = self.state.crouching
+            || (self.state.pose == haste_physics::Pose::Swimming && !self.state.in_water);
+        let under_water = self.state.eyes_in_water && self.state.in_water;
+        let can_start_sprinting = !self.state.sprinting
+            && forward_impulse
+            && (self.food > SPRINT_FOOD_LEVEL || self.abilities.may_fly)
+            && !self.is_using_item()
+            && (!moving_slowly || under_water);
+        if can_start_sprinting && !last_input_forward {
+            if self.sprint_trigger_time > 0 {
+                phys_input.sprint = true;
+            } else {
+                self.sprint_trigger_time = SPRINT_DOUBLE_TAP_TICKS;
+            }
         }
         let was_flying = self.state.flying;
         let was_on_ground = self.state.on_ground;
