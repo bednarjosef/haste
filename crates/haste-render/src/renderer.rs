@@ -2500,6 +2500,7 @@ impl Renderer {
                 });
                 self.gui.draw(&mut pass, self.size);
             }
+            let first_batch_after_blur = self.gui.batch_count();
             draw_calls += self.gui.stats.draw_calls;
             if blur {
                 // The blur's input is the frame's colour target itself: copy it in (the
@@ -2556,8 +2557,12 @@ impl Renderer {
                         occlusion_query_set: None,
                         multiview_mask: None,
                     });
-                    self.gui.draw(&mut pass, self.size);
-                    draw_calls += self.gui.stats.draw_calls;
+                    // Only the batches built after the blur: the before-blur ones (HUD
+                    // included, like vanilla's firstStratumAfterBlur split) are already
+                    // on the target underneath it and must not be redrawn sharp.
+                    self.gui
+                        .draw_from(&mut pass, self.size, first_batch_after_blur);
+                    draw_calls += self.gui.stats.draw_calls - first_batch_after_blur as u32;
                 } else if !self.blur_unavailable_logged {
                     self.blur_unavailable_logged = true;
                     tracing::warn!("surface cannot be copied: menu background blur unavailable");

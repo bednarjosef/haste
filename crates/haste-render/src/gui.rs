@@ -869,12 +869,24 @@ impl GuiRenderer {
 
     /// Records the prepared frame into a render pass on the target.
     pub fn draw<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>, target: (u32, u32)) {
+        self.draw_from(pass, target, 0);
+    }
+
+    /// [`Self::draw`] over the batches from `first` on: after the blur ran (vanilla draws
+    /// only the after-blur strata then — the before-blur ones are already on the target,
+    /// under the blur), the second half must not re-draw them sharp.
+    pub fn draw_from<'p>(
+        &'p self,
+        pass: &mut wgpu::RenderPass<'p>,
+        target: (u32, u32),
+        first: usize,
+    ) {
         if self.batches.is_empty() {
             return;
         }
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        for b in &self.batches {
+        for b in &self.batches[first.min(self.batches.len())..] {
             pass.set_pipeline(&self.pipelines[b.blend as usize]);
             match b.scissor {
                 Some([x, y, w, h]) => pass.set_scissor_rect(x, y, w, h),
@@ -882,6 +894,12 @@ impl GuiRenderer {
             }
             pass.draw(b.start..b.end, 0..1);
         }
+    }
+
+    /// The number of batches built so far this frame (the blur splits the frame: batches
+    /// built before the blur must not be drawn again after it).
+    pub fn batch_count(&self) -> usize {
+        self.batches.len()
     }
 
     #[allow(clippy::too_many_arguments)]

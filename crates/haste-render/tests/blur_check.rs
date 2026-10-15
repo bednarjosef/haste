@@ -42,4 +42,37 @@ fn pause_blur_reduces_local_detail() {
         b < s * 0.7,
         "the pause screen's world should be blurrier than the chat screen's: {b:.1} vs {s:.1}"
     );
+
+    // The hotbar region (bottom centre, where the HUD draws): vanilla blurs the HUD too
+    // (the blur covers everything up to the screen's blur stratum), so the pause screen's
+    // hotbar must be blurrier than the chat screen's.
+    let hotbar = |img: &image::DynamicImage| -> f64 {
+        let gray = img.to_luma8();
+        let (w, h) = gray.dimensions();
+        let (x0, x1) = (w * 2 / 5, w * 3 / 5);
+        let (y0, y1) = (h - h / 8, h - 1);
+        let mut sum = 0.0;
+        let mut n = 0u64;
+        for y in (y0 + 1)..y1 {
+            for x in (x0 + 1)..(x1 - 1) {
+                let c = f64::from(gray.get_pixel(x, y)[0]);
+                let l = f64::from(gray.get_pixel(x - 1, y)[0]);
+                let r = f64::from(gray.get_pixel(x + 1, y)[0]);
+                let u = f64::from(gray.get_pixel(x, y - 1)[0]);
+                let d = f64::from(gray.get_pixel(x, y + 1)[0]);
+                sum += (4.0 * c - l - r - u - d).powi(2);
+                n += 1;
+            }
+        }
+        sum / n as f64
+    };
+    let hb = hotbar(&blurred);
+    let hs = hotbar(&sharp);
+    eprintln!("hotbar laplacian energy: blurred {hb:.1} sharp {hs:.1}");
+    // The pause screen's hotbar is blurred like the world (vanilla draws the HUD before the
+    // blur stratum); with the sharp redrawn hotbar it stays near the chat screen's energy.
+    assert!(
+        hb < hs * 0.6,
+        "the pause screen's hotbar should be blurred too: {hb:.1} vs {hs:.1}"
+    );
 }
