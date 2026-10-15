@@ -6,6 +6,7 @@
 
 pub mod animation;
 pub mod arena;
+pub mod block_particles;
 pub mod blockentity;
 pub mod entity;
 pub mod fluid;
@@ -24,6 +25,7 @@ pub mod tint;
 pub mod vertex;
 pub mod weather;
 
+pub use block_particles::{BlockParticleSprite, BlockParticleTable};
 pub use blockentity::{
     chest_texture, kind_of, shulker_texture, xmas_textures, BlockEntityInstance, BlockEntityKind,
     ChestHalf, ChestMaterial, SignSideText, SignTextData,

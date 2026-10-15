@@ -59,6 +59,50 @@ fn main() -> Result<()> {
         );
     }
     let (w, h) = vanilla.dimensions();
+    // The 40 worst pixels (max channel error), sampled at least 8 apart so they spread
+    // over the image: position + both colours + the ratio per channel.
+    if args.get(2).map(|a| a == "--worst").unwrap_or(false) {
+        /// One sampled pixel: position, both colours, max channel error.
+        struct Worst {
+            x: u32,
+            y: u32,
+            a: [u8; 4],
+            b: [u8; 4],
+            e: u8,
+        }
+        let mut worst: Vec<Worst> = Vec::new();
+        for y in (0..h).step_by(8) {
+            for x in (0..w).step_by(8) {
+                let (a, b) = (vanilla.get_pixel(x, y), haste.get_pixel(x, y));
+                let e = (0..3)
+                    .map(|i| (a[i] as i32 - b[i] as i32).unsigned_abs() as u8)
+                    .max()
+                    .unwrap_or(0);
+                worst.push(Worst {
+                    x,
+                    y,
+                    a: a.0,
+                    b: b.0,
+                    e,
+                });
+            }
+        }
+        worst.sort_by_key(|w| std::cmp::Reverse(w.e));
+        for Worst { x, y, a, b, e } in worst.iter().take(40) {
+            let r = |i: usize| {
+                if a[i] > 8 {
+                    format!("{:.2}", b[i] as f32 / a[i] as f32)
+                } else {
+                    "-".to_string()
+                }
+            };
+            println!(
+                "({x:4},{y:4}) err {e:3} van ({:3},{:3},{:3}) haste ({:3},{:3},{:3}) ratio {} {} {}",
+                a[0], a[1], a[2], b[0], b[1], b[2], r(0), r(1), r(2)
+            );
+        }
+        return Ok(());
+    }
     println!("{w}x{h}: region        vanilla-RGB      haste-RGB       delta-RGB  pixels");
     for &(name, f0, f1) in BANDS {
         let y0 = (f0 * h as f32) as u32;
@@ -92,7 +136,46 @@ fn main() -> Result<()> {
             println!("{row}");
         }
     }
+    // The haste image's dominant colour per grid cell: `blue > red + 30 and blue >
+    // green + 20` counts as "blue-ish" (water/sky-like), reported as a fraction of the
+    // cell. To find where unexpected blue comes from.
+    if args.get(2).map(|a| a == "--blue").unwrap_or(false) {
+        let g = 16u32;
+        println!("blue-ish fraction per cell (vanilla | haste), rows top to bottom");
+        for gy in 0..g {
+            let mut row = String::new();
+            for gx in 0..g {
+                let x0 = gx * w / g;
+                let x1 = (gx + 1) * w / g;
+                let y0 = gy * h / g;
+                let y1 = (gy + 1) * h / g;
+                let bv = blue_fraction(&vanilla, x0, x1, y0, y1);
+                let bh = blue_fraction(&haste, x0, x1, y0, y1);
+                row.push_str(&format!(" {:>3.0}/{:<3.0}", bv * 100.0, bh * 100.0));
+            }
+            println!("{row}");
+        }
+    }
     Ok(())
+}
+
+fn blue_fraction(img: &image::RgbaImage, x0: u32, x1: u32, y0: u32, y1: u32) -> f64 {
+    let mut n = 0u64;
+    let mut blue = 0u64;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let p = img.get_pixel(x, y);
+            if p[2] as i32 > p[0] as i32 + 30 && p[2] as i32 > p[1] as i32 + 20 {
+                blue += 1;
+            }
+            n += 1;
+        }
+    }
+    if n == 0 {
+        0.0
+    } else {
+        blue as f64 / n as f64
+    }
 }
 
 fn grid_means(

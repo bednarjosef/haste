@@ -480,8 +480,12 @@ impl Session {
                 })
                 .collect();
         let particle_types = std::sync::Arc::new(
-            haste_render::ParticleTypes::build(&mut open_assets()?, &particle_ids)
-                .context("building the particle atlas")?,
+            haste_render::ParticleTypes::build(
+                &mut open_assets()?,
+                &particle_ids,
+                Some(&data.blocks),
+            )
+            .context("building the particle atlas")?,
         );
         let mut entities = net::new_entity_store(entity_types);
         tracing::info!("synced painting variants: {}", painting_variants.len());
@@ -506,6 +510,17 @@ impl Session {
             biome_climates.clone(),
             options.clone(),
         ));
+        // Terrain particles tint with the biome colours (the same climates the
+        // renderer resolves for meshing).
+        {
+            let colors = haste_render::Colormaps::load(&mut open_assets()?)
+                .map(|maps| haste_render::BiomeColors::new(&biome_climates, &maps))
+                .unwrap_or_else(|e| {
+                    tracing::warn!("no biome colours (block particles untinted): {e:#}");
+                    haste_render::BiomeColors::new(&[], &haste_render::Colormaps::uniform(0xFFFFFF))
+                });
+            shared.particles.lock().set_biome_colors(colors);
+        }
         shared.hud_enabled.store(
             HUD_ENABLED.load(std::sync::atomic::Ordering::Relaxed),
             std::sync::atomic::Ordering::Relaxed,
@@ -721,6 +736,29 @@ impl WorldFeed {
         for p in dirty.drain(..) {
             if self.queued.insert(p) {
                 self.queue.push(p);
+            }
+        }
+        self.sort_needed = true;
+        self.last_arrival = Some(Instant::now());
+    }
+
+    /// Queues every non-empty section of the loaded world for meshing (a rebuilt renderer
+    /// starts with empty arenas: vanilla's reload re-bakes every model and section too).
+    /// Counts as an arrival so `settled` waits for the re-mesh to drain first.
+    fn queue_all_sections(&mut self, shared: &Shared) {
+        let world = shared.world.read();
+        for chunk_pos in world.loaded_chunks() {
+            let Some(chunk) = world.chunk(chunk_pos) else {
+                continue;
+            };
+            for (i, section) in chunk.sections.iter().enumerate() {
+                if section.is_empty() {
+                    continue;
+                }
+                let pos = SectionPos::new(chunk_pos.x, chunk.min_section + i as i32, chunk_pos.z);
+                if self.queued.insert(pos) {
+                    self.queue.push(pos);
+                }
             }
         }
         self.sort_needed = true;
@@ -2433,12 +2471,63 @@ impl InputRouter {
 
 fn open_assets() -> anyhow::Result<haste_assets::Assets> {
     let jar = haste_protocol::haste_core::paths::client_jar();
-    haste_assets::Assets::open(
+    let mut assets = haste_assets::Assets::open(
         &jar,
         &haste_protocol::haste_core::paths::assets_dir(),
         "26.3",
     )
-    .with_context(|| format!("opening assets from {}", jar.display()))
+    .with_context(|| format!("opening assets from {}", jar.display()))?;
+    // The pack selection options.txt holds (vanilla `Options.resourcePacks`,
+    // written by the pack screen's Done through the JVM's own Options) is the
+    // source of truth at startup, like vanilla `Minecraft`'s constructor
+    // (`reload` + `loadSelectedResourcePacks`).
+    let ids = selected_resource_packs();
+    if !ids.is_empty() {
+        tracing::info!("applying resource packs: {}", ids.join(", "));
+        assets.apply_packs(&default_resource_packs_dir(), &ids);
+    }
+    Ok(assets)
+}
+
+/// The resource pack ids saved in `<game dir>/options.txt` (`resourcePacks:`
+/// as vanilla's GSON string array, bottom first), or none.
+fn selected_resource_packs() -> Vec<String> {
+    let options_txt = game_dir().join("options.txt");
+    let Ok(text) = std::fs::read_to_string(&options_txt) else {
+        return Vec::new();
+    };
+    for line in text.lines() {
+        if let Some(rest) = line.trim().strip_prefix("resourcePacks:") {
+            return parse_gson_string_array(rest.trim());
+        }
+    }
+    Vec::new()
+}
+
+/// Vanilla's `Options` saves the pack list as a GSON JSON array on one line,
+/// e.g. `["file/red","vanilla"]` (see `Options.process`'s `GSON::toJson`).
+fn parse_gson_string_array(text: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(text).unwrap_or_default()
+}
+
+/// The directory vanilla code sees as the game directory (servers.dat,
+/// options.txt, `resourcepacks/`): Haste's config dir, or `$HASTE_GAME_DIR`
+/// when set (tests and dev runs isolate their game files with it).
+pub fn game_dir() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("HASTE_GAME_DIR") {
+        if !dir.is_empty() {
+            return std::path::PathBuf::from(dir);
+        }
+    }
+    haste_setup::servers::path()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        .expect("no platform config dir for the game directory")
+}
+
+/// `<game dir>/resourcepacks`: vanilla's resource pack folder, where
+/// `FolderRepositorySource` looks (Java side) and `apply_packs` reads (Rust).
+fn default_resource_packs_dir() -> std::path::PathBuf {
+    game_dir().join("resourcepacks")
 }
 
 /// `minecraft:block_entity_type` names by synced registry id (stored block entities carry that
@@ -2528,9 +2617,7 @@ impl Menu {
                     // game directory: Haste's config directory, where the saved server list
                     // already lives (haste-setup's servers.dat). Singleplayer worlds live next
                     // to it (haste-setup's worlds module); the world list reads that dir.
-                    cfg.game_dir = haste_setup::servers::path()
-                        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
-                        .unwrap_or(cfg.game_dir);
+                    cfg.game_dir = game_dir();
                     if let Some(dir) = haste_setup::worlds::worlds_dir() {
                         cfg.singleplayer_dir = dir;
                     }
@@ -3040,6 +3127,8 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     // Screenshot actions of this tick, saved after the frame is rendered (the readback must
     // include the frame the actions just produced: an open screen, the typed chat).
     let mut shots: Vec<String> = Vec::new();
+    // Set when a resource pack selection rebuilt the renderer (`wait_until reloaded`).
+    let mut resource_packs_reloaded = false;
     // The last rendered GUI frame (click_text finds its label in it).
     let mut last_gui = GuiFrame::default();
     // An F2 press this tick: save the frame to the config screenshots dir after it is rendered.
@@ -3063,6 +3152,33 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         // mode there is no view yet: `joined`/`settled` read as false.
         let mut view = shared.as_ref().map(|s| s.view.lock().clone());
         let look = (input.yaw, input.pitch);
+        // The pack screen's Done: rebuild the renderer from the new selection (vanilla's
+        // `Minecraft.reloadResourcePacks`) before this iteration's tick computes its state,
+        // so `wait_until reloaded`/`settled` see the new feed's queue, not the old one.
+        if let Some(shared) = shared.as_ref() {
+            if let Some(ids) = shared.resource_pack_reload.lock().take() {
+                tracing::info!(
+                    "rebuilding renderer with resource packs [{}]",
+                    ids.join(", ")
+                );
+                let session_ref = session.as_ref().expect("a session exists");
+                let mut fresh_assets = open_assets()?;
+                let mut fresh = Renderer::new_offscreen(
+                    args.width,
+                    args.height,
+                    &mut fresh_assets,
+                    &data.blocks,
+                )?;
+                fresh.set_item_registry(&session_ref.shared.data.registries);
+                fresh.set_biomes(&session_ref.biomes);
+                fresh.set_particle_types(&session_ref.particle_types);
+                fresh.set_dimension(session_ref.shared.world.read().dimension());
+                renderer = fresh;
+                feed = WorldFeed::default();
+                feed.queue_all_sections(shared);
+                resource_packs_reloaded = true;
+            }
+        }
         // Pick up a live option change (the options bridge) within a frame.
         if let Some(shared) = shared.as_ref() {
             let version = shared.options_version.load(Ordering::Relaxed);
@@ -3106,6 +3222,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                     settled,
                     screen_open: ui.as_ref().is_some_and(|u| u.screen_open()),
                     screen_class,
+                    reloaded: resource_packs_reloaded,
                 };
                 // Menu mode's screen tick and the join the screens requested — the multiplayer
                 // list's Join (a plain address), the world list's Play or the create screen's
@@ -3449,6 +3566,11 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        {
+            let world = shared.world.read();
+            let mut particles = shared.particles.lock();
+            renderer.prepare_particles(&mut particles, &*world, camera, partial);
+        }
         renderer.set_lightmap_frame(lightmap);
         if let Ok(stats) = renderer.render(&frame) {
             last_stats = stats;
@@ -3473,7 +3595,11 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 image
                     .save(&path)
                     .with_context(|| format!("saving {}", path.display()))?;
-                println!("script screenshot saved to {}", path.display());
+                println!(
+                    "script screenshot saved to {} ({} particles drawn)",
+                    path.display(),
+                    renderer.particles_drawn()
+                );
                 // The frame's text, next to the PNG: the checks' lines to read without OCR.
                 let mut txt = path.clone().into_os_string();
                 txt.push(".txt");
@@ -3608,6 +3734,11 @@ struct BenchSummary {
     present_ms: f32,
     /// GPU time of the main, hand and GUI passes.
     gpu_ms: [f32; 3],
+    /// GPU time of the main pass's sub-passes: sky, opaque terrain (solid + cutout-mipped),
+    /// cutout terrain, translucent terrain, entities, particles, overlays. Timing.rs carries
+    /// the solid and cutout-mipped phases separately (queries are written once per pass);
+    /// the bench reports them as one opaque phase like vanilla's ChunkSectionLayerGroup.
+    gpu_sub_ms: [f32; 7],
 }
 
 impl BenchSummary {
@@ -3625,6 +3756,7 @@ impl BenchSummary {
             "bench: {} frames in {:.0} s\n\
              frame time: avg {:.2} ms ({:.0} FPS), 1% low {:.2} ms, worst {:.2} ms\n\
              breakdown ms: prepare {:.2} acquire {:.2} cull {:.2} encode {:.2} submit {:.2} present {:.2} | gpu main {:.2} hand {:.2} gui {:.2}\n\
+             gpu main ms: sky {:.3} opaque {:.3} cutout {:.3} translucent {:.3} entities {:.3} particles {:.3} overlays {:.3}\n\
              sections drawn {}/{} avg, draw calls {:.0} avg\n\
              render distance {} (requested {}), {}x{}, adapter {}",
             self.frames,
@@ -3642,6 +3774,13 @@ impl BenchSummary {
             self.gpu_ms[0],
             self.gpu_ms[1],
             self.gpu_ms[2],
+            self.gpu_sub_ms[0],
+            self.gpu_sub_ms[1],
+            self.gpu_sub_ms[2],
+            self.gpu_sub_ms[3],
+            self.gpu_sub_ms[4],
+            self.gpu_sub_ms[5],
+            self.gpu_sub_ms[6],
             self.sections_drawn,
             self.sections_total,
             self.draw_calls,
@@ -3738,6 +3877,11 @@ fn bench_summary(samples: &[BenchSample]) -> BenchSummary {
     }
     let t = |f: fn(&haste_render::FrameTimings) -> f32| sum(samples, n, |s| f(&s.timings));
     let gpu = |i: usize| sum(samples, n, |s| s.timings.gpu_ms[i]);
+    // Solid + cutout-mipped (renderer sub-passes 1 and 3) fold into "opaque".
+    let opaque = sum(samples, n, |s| {
+        s.timings.gpu_sub_ms[1] + s.timings.gpu_sub_ms[3]
+    });
+    let gpu_sub = |i: usize| sum(samples, n, |s| s.timings.gpu_sub_ms[i]);
     BenchSummary {
         frames: samples.len() as u32,
         avg_ms: sum(samples, n, |s| s.frame_ms),
@@ -3753,6 +3897,15 @@ fn bench_summary(samples: &[BenchSample]) -> BenchSummary {
         submit_ms: t(|x| x.submit_ms),
         present_ms: t(|x| x.present_ms),
         gpu_ms: [gpu(0), gpu(1), gpu(2)],
+        gpu_sub_ms: [
+            gpu_sub(0),
+            opaque,
+            gpu_sub(2),
+            gpu_sub(4),
+            gpu_sub(5),
+            gpu_sub(6),
+            gpu_sub(7),
+        ],
     }
 }
 
@@ -3876,7 +4029,12 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             Instant::now(),
             &mut weather_guard,
         );
-        let camera = bench_camera(elapsed / total, &base, total);
+        let camera = if args.bench_fixed {
+            // Still camera at the settle spot: one fixed view, comparable with `--screenshot`.
+            base
+        } else {
+            bench_camera(elapsed / total, &base, total)
+        };
         let fog_end = (vd.max(2) * 16) as f32;
         sky.fog_start = fog_end * 0.75;
         sky.fog_end = fog_end;
@@ -3953,6 +4111,15 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             "gpu_main_ms": summary.gpu_ms[0],
             "gpu_hand_ms": summary.gpu_ms[1],
             "gpu_gui_ms": summary.gpu_ms[2],
+            "gpu_main_sub_ms": {
+                "sky": summary.gpu_sub_ms[0],
+                "opaque": summary.gpu_sub_ms[1],
+                "cutout": summary.gpu_sub_ms[2],
+                "translucent": summary.gpu_sub_ms[3],
+                "entities": summary.gpu_sub_ms[4],
+                "particles": summary.gpu_sub_ms[5],
+                "overlays": summary.gpu_sub_ms[6],
+            },
             "render_distance": meta.render_distance,
             "requested_render_distance": meta.requested_render_distance,
             "width": meta.width,
@@ -4438,6 +4605,30 @@ impl App {
         if self.renderer.is_none() {
             return;
         }
+        // The resource pack selection changed (the pack screen's Done, vanilla
+        // `Minecraft.reloadResourcePacks`): rebuild the renderer from a fresh asset stack —
+        // atlas, models, fonts and GUI textures re-read with the new packs layered on the jar.
+        let reload = self
+            .session
+            .as_ref()
+            .map(|s| s.shared.resource_pack_reload.lock().take())
+            .unwrap_or_default();
+        if let Some(ids) = reload {
+            let window = self
+                .window
+                .clone()
+                .expect("renderer exists, so does the window");
+            match self.reload_renderer(&window, &ids) {
+                Ok(()) => {
+                    tracing::info!("renderer rebuilt with resource packs [{}]", ids.join(", "))
+                }
+                Err(e) => {
+                    self.error = Some(e.context("resource pack reload"));
+                    event_loop.exit();
+                    return;
+                }
+            }
+        }
         // The screen that opened or closed since the last frame takes or frees the cursor,
         // and "Disconnect" leaves the server (back to the multiplayer screen, like vanilla).
         self.sync_grab();
@@ -4640,6 +4831,30 @@ impl App {
                 event_loop.exit();
             }
         }
+    }
+    /// Rebuilds the renderer after the resource pack selection changed (vanilla's reload
+    /// rebuilds its resource manager, model manager and atlases). The new selection is
+    /// written to options.txt by the JVM's own `Options.save` before we get here, so
+    /// `open_assets` reads it back; everything else re-applies like `resumed` does.
+    fn reload_renderer(&mut self, window: &Arc<Window>, _ids: &[String]) -> anyhow::Result<()> {
+        let mut assets = open_assets()?;
+        let data = net::load_game_data()?;
+        let mut renderer = Renderer::new(window.clone(), &mut assets, &data.blocks)?;
+        if let Some(session) = &self.session {
+            renderer.set_item_registry(&session.shared.data.registries);
+            renderer.set_biomes(&session.biomes);
+            renderer.set_particle_types(&session.particle_types);
+            renderer.set_dimension(session.shared.world.read().dimension());
+        }
+        renderer.set_vsync(self.vsync);
+        // The old renderer's GPU objects drop with it; every loaded section is queued for
+        // re-meshing into the new arenas (vanilla's reload re-bakes the world's models too).
+        self.renderer = Some(renderer);
+        self.feed = WorldFeed::default();
+        if let Some(session) = &self.session {
+            self.feed.queue_all_sections(&session.shared);
+        }
+        Ok(())
     }
 }
 

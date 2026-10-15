@@ -996,6 +996,12 @@ pub struct Session {
     /// Particle spawns queued by `level_particles` since the last tick (drained by the game
     /// thread into the shared pool).
     pub particle_spawns: Vec<haste_render::ParticleSpawn>,
+    /// Block particles queued since the last tick (our own break and mining start, and the
+    /// server's `level_event`s), drained by the game thread into the shared pool.
+    pub block_particle_requests: Vec<crate::block_particles::BlockParticleRequest>,
+    /// Ambient block particles of this tick's `animateTick` (reused buffer), spawned into
+    /// the pool by the game thread.
+    pub ambient_spawns: Vec<haste_render::ParticleSpawn>,
     /// Particle spawns the game thread took over the whole session (counters).
     pub particle_spawned: usize,
     /// `minecraft:particle_type` names by protocol id (the static registry the packet's
@@ -1051,6 +1057,8 @@ impl Session {
             use_ticks: 0,
             use_item: None,
             particle_spawns: Vec::new(),
+            block_particle_requests: Vec::new(),
+            ambient_spawns: Vec::new(),
             particle_spawned: 0,
             particle_names,
             lightmap: LightmapState::default(),
@@ -1326,6 +1334,15 @@ impl Session {
             }
             P::PlayerPosition(_) => self.counters.teleports += 1,
             P::LevelParticles(p) => self.push_particles(&p, regs),
+            P::LevelEvent(e) => {
+                // The block-particle events (2001 break, 2019/2020 mining ticks); the
+                // rest of the level events are sounds and effects we do not decode.
+                if let Some(r) =
+                    crate::block_particles::request_from_level_event(e.event, e.pos, e.data)
+                {
+                    self.block_particle_requests.push(r);
+                }
+            }
             // The lightmap's effect inputs (night vision and darkness durations), boss-overlay
             // darkening and the lightning sky flash; these also ride the player's own handling.
             P::UpdateMobEffect(e) if e.entity_id == own.0 => {
@@ -1603,6 +1620,9 @@ impl Session {
             self.counters.own_sounds += 1;
             self.sound_requests.push(request);
         }
+        // The player's own block particles this tick (break grid, mining cracks).
+        self.block_particle_requests
+            .extend(self.player.take_own_block_particles());
         self.entity_boxes.clear();
         self.entity_types.clear();
         for id in &self.entity_ids {
@@ -1716,6 +1736,7 @@ impl Session {
             return;
         };
         let dust = dust_option(&kind, &p.particle.data);
+        let block_state = block_state_option(&kind, &p.particle.data);
         self.particle_spawns.push(haste_render::ParticleSpawn {
             kind,
             pos: p.pos,
@@ -1725,6 +1746,7 @@ impl Session {
             randomization: p.randomization.max(0) as u32,
             override_limiter: p.override_limiter,
             dust,
+            block_state,
         });
     }
 
@@ -1753,6 +1775,32 @@ fn dust_option(kind: &Identifier, data: &[u8]) -> Option<haste_render::DustOptio
         ],
         scale,
     })
+}
+
+/// `BlockParticleOption` from a particle's raw data (one VarInt block state id,
+/// `ByteBufCodecs.idMapper(Block.BLOCK_STATE_REGISTRY)`); `None` for every other
+/// type and for a malformed payload. The fall-damage landing particles
+/// (`LivingEntity.checkFallDamage` -> `sendParticles`) arrive this way.
+fn block_state_option(kind: &Identifier, data: &[u8]) -> Option<haste_core::BlockStateId> {
+    const BLOCK_KINDS: [&str; 5] = [
+        "block",
+        "block_marker",
+        "falling_dust",
+        "dust_pillar",
+        "block_crumble",
+    ];
+    if !BLOCK_KINDS.contains(&kind.path()) || data.is_empty() {
+        return None;
+    }
+    // The VarInt the encoder wrote (up to 5 bytes, little-endian groups).
+    let mut value = 0u32;
+    for (i, byte) in data.iter().take(5).enumerate() {
+        value |= u32::from(byte & 0x7F) << (7 * i);
+        if byte & 0x80 == 0 {
+            return Some(haste_core::BlockStateId(value));
+        }
+    }
+    None
 }
 
 /// Entity metadata serializer type id of `OPTIONAL_UNSIGNED_INT` (the wire type of

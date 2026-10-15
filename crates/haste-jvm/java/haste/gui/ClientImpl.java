@@ -173,25 +173,59 @@ public final class ClientImpl {
         }
     }
 
-    /** Vanilla's {@code Minecraft.reloadResourcePacks} (LanguageSelectScreen calls it after a language change). */
-    public static java.util.concurrent.CompletableFuture<Void> reloadResourcePacks(Minecraft m) {
-        reloadLanguages();
-        return java.util.concurrent.CompletableFuture.completedFuture(null);
-    }
-
     /**
-     * The pack repository the Resource Packs screen browses: real vanilla Java with no sources (Haste
-     * loads no resource packs yet), so it lists none and selects none. {@code Options} saves the
-     * selection it reports.
+     * The pack repository the Resource Packs screen browses: real vanilla Java built like
+     * {@code Minecraft}'s constructor (a {@code FolderRepositorySource} over the player's
+     * {@code resourcepacks/} folder plus the built-in sources). Haste's own asset stack (Rust)
+     * applies the selection it commits; this repository is the source of truth for the screen
+     * and for what {@code Options} saves.
      */
-    private static final net.minecraft.server.packs.repository.PackRepository PACKS =
-        new net.minecraft.server.packs.repository.PackRepository();
-    public static net.minecraft.server.packs.repository.PackRepository getResourcePackRepository(Minecraft m) { return PACKS; }
+    private static final net.minecraft.server.packs.repository.PackRepository PACKS = createPackRepository();
+    public static net.minecraft.server.packs.repository.PackRepository getResourcePackRepository(Minecraft m) {
+        // the saved selection loads once, like Minecraft's constructor (reload +
+        // Options.loadSelectedResourcePacks); options.txt's entries that no longer exist
+        // or are no longer compatible are dropped, exactly vanilla's behaviour
+        if (!packsLoaded) {
+            packsLoaded = true;
+            PACKS.reload();
+            Proxies.options.loadSelectedResourcePacks(PACKS);
+        }
+        return PACKS;
+    }
+    private static boolean packsLoaded;
+    private static net.minecraft.server.packs.repository.PackRepository createPackRepository() {
+        java.nio.file.Path gameDir = new java.io.File(System.getProperty("haste.minecraftDir", ".")).toPath();
+        net.minecraft.world.level.validation.DirectoryValidator validator =
+            net.minecraft.world.level.storage.LevelStorageSource.parseValidator(gameDir.resolve("allowed_symlinks.txt"));
+        java.io.File assetsDir = new java.io.File(System.getProperty("haste.assetsDir", "."));
+        net.minecraft.client.resources.ClientPackSource clientPackSource =
+            new net.minecraft.client.resources.ClientPackSource(assetsDir.toPath(), validator);
+        net.minecraft.server.packs.repository.RepositorySource directoryPacks =
+            new net.minecraft.server.packs.repository.FolderRepositorySource(
+                new java.io.File(System.getProperty("haste.minecraftDir", "."), "resourcepacks").toPath(),
+                net.minecraft.server.packs.PackType.CLIENT_RESOURCES,
+                net.minecraft.server.packs.repository.PackSource.DEFAULT, validator);
+        return new net.minecraft.server.packs.repository.PackRepository(clientPackSource, directoryPacks);
+    }
     /** The player's {@code resourcepacks/} folder inside the JVM game directory (created on demand). */
     public static java.nio.file.Path getResourcePackDirectory(Minecraft m) {
         java.io.File dir = new java.io.File(System.getProperty("haste.minecraftDir", "."), "resourcepacks");
         dir.mkdirs();
         return dir.toPath();
+    }
+
+    /**
+     * {@code Minecraft.reloadResourcePacks} (vanilla: rebuild the resource manager from the
+     * repository's selected packs). The Rust side owns the assets, so this reports the new
+     * selection (bottom first) and lets the client rebuild its asset stack and renderer;
+     * the returned future completes at once (the rebuild is Rust's, off this thread).
+     */
+    public static java.util.concurrent.CompletableFuture<Void> reloadResourcePacks(Minecraft m) {
+        String[] ids = PACKS.getSelectedIds().toArray(new String[0]);
+        haste.rt.Native.resourcePacksChanged(ids);
+        // the selected language is re-read too (LanguageSelectScreen calls this after a change)
+        reloadLanguages();
+        return java.util.concurrent.CompletableFuture.completedFuture(null);
     }
     /** False while the canonical proxies are built (option changes then skip their side effects, like vanilla at startup). */
     static boolean running;
@@ -224,6 +258,20 @@ public final class ClientImpl {
     public static boolean hasShiftDown(Minecraft m) { return (mods & 3) != 0; }
     public static boolean hasControlDown(Minecraft m) { return (mods & 192) != 0; }
     public static boolean hasAltDown(Minecraft m) { return (mods & 768) != 0; }
+
+    /**
+     * The thread check at the top of every play handler (vanilla: Minecraft's own PacketProcessor
+     * over its game thread, isSameThread). Haste decodes and handles every packet on the game
+     * thread by construction, so the processor is built over the thread that first asks for it
+     * (always a packet handler: the game thread) and vanilla's check passes, like vanilla's.
+     */
+    private static net.minecraft.network.PacketProcessor packetProcessor;
+    public static net.minecraft.network.PacketProcessor packetProcessor(Minecraft m) {
+        if (packetProcessor == null) {
+            packetProcessor = new net.minecraft.network.PacketProcessor(Thread.currentThread());
+        }
+        return packetProcessor;
+    }
 
     // ---- Gui ----
     public static Screen screen(Gui g) { return screen; }

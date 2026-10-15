@@ -163,11 +163,12 @@ struct Rig {
 }
 
 /// The static particle registry the test sessions resolve ids against (id 0 `flame`, 1
-/// `smoke`).
+/// `smoke`, 2 `block`).
 fn test_particle_names() -> std::sync::Arc<Vec<Identifier>> {
     std::sync::Arc::new(vec![
         Identifier::minecraft("flame"),
         Identifier::minecraft("smoke"),
+        Identifier::minecraft("block"),
     ])
 }
 
@@ -1030,6 +1031,16 @@ fn level_particles(kind: i32, count: i32) -> ClientboundPlay {
     })
 }
 
+/// A `level_event` packet.
+fn level_event(event: i32, pos: BlockPos, data: i32) -> ClientboundPlay {
+    ClientboundPlay::LevelEvent(cb::LevelEvent {
+        event,
+        pos,
+        data,
+        global: false,
+    })
+}
+
 #[test]
 fn level_particles_queue_a_spawn_per_packet() {
     let mut r = Rig::new();
@@ -1056,6 +1067,65 @@ fn level_particles_with_an_unknown_type_id_are_dropped() {
     // No id 7 in the static registry: dropped silently (no panic, nothing queued).
     r.apply(level_particles(7, 10));
     assert_eq!(r.session.particle_spawns.len(), 0);
+}
+
+/// A `minecraft:block` particle's `BlockParticleOption` (one VarInt state id): the
+/// landing particles (`LivingEntity.checkFallDamage` -> `sendParticles`) carry the
+/// block they land on.
+#[test]
+fn block_particle_option_carries_the_state() {
+    let mut r = Rig::new();
+    let mut p = level_particles(2, 20);
+    let ClientboundPlay::LevelParticles(ref mut lp) = p else {
+        unreachable!()
+    };
+    // VarInt 100 (0x64) and VarInt 1000 (0xE8 0x07).
+    lp.particle.data = bytes::Bytes::from(vec![100]);
+    r.apply(p);
+    let mut p = level_particles(2, 20);
+    let ClientboundPlay::LevelParticles(ref mut lp) = p else {
+        unreachable!()
+    };
+    lp.particle.data = bytes::Bytes::from(vec![0xE8, 0x07]);
+    r.apply(p);
+    // Other types never read the payload as a state.
+    r.apply(level_particles(0, 1));
+    let spawns = &r.session.particle_spawns;
+    assert_eq!(spawns[0].block_state, Some(haste_core::BlockStateId(100)));
+    assert_eq!(spawns[1].block_state, Some(haste_core::BlockStateId(1000)));
+    assert_eq!(spawns[2].block_state, None);
+}
+
+/// The block-particle level events: 2001 (a break, the payload the state), 2019/2020
+/// (a mining tick, the payload the face ordinal), anything else nothing.
+#[test]
+fn level_events_queue_block_particles() {
+    let mut r = Rig::new();
+    let pos = BlockPos::new(10, 64, -5);
+    r.apply(level_event(2001, pos, 100));
+    r.apply(level_event(2020, pos, 0));
+    r.apply(level_event(2019, pos, 5));
+    r.apply(level_event(2000, pos, 0));
+    let requests = &r.session.block_particle_requests;
+    assert_eq!(requests.len(), 3);
+    assert!(
+        matches!(
+            requests[0],
+            crate::block_particles::BlockParticleRequest::Destroy {
+                state: haste_core::BlockStateId(100),
+                ..
+            }
+        ),
+        "2001 queues the destroy grid"
+    );
+    assert!(matches!(
+        requests[1],
+        crate::block_particles::BlockParticleRequest::Crack { .. }
+    ));
+    assert!(matches!(
+        requests[2],
+        crate::block_particles::BlockParticleRequest::Crack { .. }
+    ));
 }
 
 /// The attached firework rocket's push (vanilla `FireworkRocketEntity.tick`): the rocket is
