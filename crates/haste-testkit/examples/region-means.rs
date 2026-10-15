@@ -92,7 +92,46 @@ fn main() -> Result<()> {
             println!("{row}");
         }
     }
+    // The haste image's dominant colour per grid cell: `blue > red + 30 and blue >
+    // green + 20` counts as "blue-ish" (water/sky-like), reported as a fraction of the
+    // cell. To find where unexpected blue comes from.
+    if args.get(2).map(|a| a == "--blue").unwrap_or(false) {
+        let g = 16u32;
+        println!("blue-ish fraction per cell (vanilla | haste), rows top to bottom");
+        for gy in 0..g {
+            let mut row = String::new();
+            for gx in 0..g {
+                let x0 = gx * w / g;
+                let x1 = (gx + 1) * w / g;
+                let y0 = gy * h / g;
+                let y1 = (gy + 1) * h / g;
+                let bv = blue_fraction(&vanilla, x0, x1, y0, y1);
+                let bh = blue_fraction(&haste, x0, x1, y0, y1);
+                row.push_str(&format!(" {:>3.0}/{:<3.0}", bv * 100.0, bh * 100.0));
+            }
+            println!("{row}");
+        }
+    }
     Ok(())
+}
+
+fn blue_fraction(img: &image::RgbaImage, x0: u32, x1: u32, y0: u32, y1: u32) -> f64 {
+    let mut n = 0u64;
+    let mut blue = 0u64;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let p = img.get_pixel(x, y);
+            if p[2] as i32 > p[0] as i32 + 30 && p[2] as i32 > p[1] as i32 + 20 {
+                blue += 1;
+            }
+            n += 1;
+        }
+    }
+    if n == 0 {
+        0.0
+    } else {
+        blue as f64 / n as f64
+    }
 }
 
 fn grid_means(

@@ -346,10 +346,6 @@ pub struct FirstPersonView {
     pub x_bob: (f32, f32),
     /// The hand's yaw lag (`LocalPlayer.yBob`), in degrees.
     pub y_bob: (f32, f32),
-    /// Walk bob amplitude.
-    pub bob: (f32, f32),
-    /// Distance walked in blocks, the bob's phase.
-    pub walk_dist: (f32, f32),
 }
 
 impl FirstPersonView {
@@ -368,8 +364,6 @@ impl FirstPersonView {
             equip: (1.0, 1.0),
             x_bob: (0.0, 0.0),
             y_bob: (0.0, 0.0),
-            bob: (0.0, 0.0),
-            walk_dist: (0.0, 0.0),
         }
     }
 
@@ -380,8 +374,6 @@ impl FirstPersonView {
         self.equip = hand.equip();
         self.x_bob = hand.x_bob();
         self.y_bob = hand.y_bob();
-        self.bob = hand.bob();
-        self.walk_dist = hand.walk_dist();
     }
 
     /// The renderer's first-person hand for this view drawn with `skin` (the connection's
@@ -397,8 +389,6 @@ impl FirstPersonView {
             equip: pair(self.equip),
             x_bob: pair(self.x_bob),
             y_bob: pair(self.y_bob),
-            bob: pair(self.bob),
-            walk_dist: pair(self.walk_dist),
         }
     }
 }
@@ -1337,11 +1327,12 @@ mod tests {
         assert_eq!(v.attack, (0.0, 1.0 / 6.0));
         assert_eq!(moving.attack.start, 0.0);
         assert!((moving.attack.end - 1.0 / 6.0).abs() < 1e-7);
-        // Walking: walkDist is 0.6 * distance, its bob is 0.4 per tick towards min(0.2, 0.1),
-        // one tick behind.
-        assert!((v.walk_dist.1 - 0.24).abs() < 1e-6);
-        assert!((v.bob.1 - 0.04).abs() < 1e-6);
-        // The hand lags behind the look by half the remaining angle each tick.
+        // Walking feeds the walk bob (the camera's, no longer the hand's own fields); the
+        // hand only carries the view lag by half the remaining angle each tick.
+        let (bob_o, bob) = hand.bob();
+        assert!((bob - 0.04).abs() < 1e-6, "{bob_o} -> {bob}");
+        let (walk_o, walk) = hand.walk_dist();
+        assert!((walk - 0.24).abs() < 1e-6, "{walk_o} -> {walk}");
         assert!((v.y_bob.1 - 7.5).abs() < 1e-6);
         assert!((v.x_bob.1 - 3.75).abs() < 1e-6);
         // The next tick's step is a different hand, so the renderer is told again.

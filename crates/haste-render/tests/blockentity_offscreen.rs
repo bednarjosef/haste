@@ -203,6 +203,7 @@ fn block_entities_offscreen() {
         yaw: 0.0,
         pitch: 18.0,
         fov_deg: 70.0,
+        hand_fov_deg: 70.0,
         roll_deg: 0.0,
         bob: haste_render::ViewBob::default(),
     };
