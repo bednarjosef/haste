@@ -1399,9 +1399,9 @@ impl LocalPlayer {
             return false;
         }
         if self.game_mode == GameMode::Creative {
-            if self.int.destroy_delay > 0 {
-                return false;
-            }
+            // startDestroyBlock has no destroyDelay check: a fresh click breaks at once even
+            // while the 5-tick delay from a previous break is still counting down (the delay
+            // only gates continueDestroyBlock while the button is held).
             self.int.destroy_delay = DESTROY_DELAY;
             // Item.canDestroyBlock: a tool with can_destroy_blocks_in_creative false cannot
             // break in creative. The packet still goes out; only the block change is skipped.

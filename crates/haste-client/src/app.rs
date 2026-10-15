@@ -2465,6 +2465,15 @@ fn game_uses_key(ui_used: bool, screen_open: bool) -> bool {
     !ui_used && !screen_open
 }
 
+/// The last routing decision: whether the typed character of a key press reaches the screen.
+/// Only one pressed while a screen was already open does. The press that *opens* a screen
+/// drops its character, like vanilla: `Gui.handleKeybinds` runs on the tick after the press,
+/// so its character event finds no screen and goes nowhere (T opens the chat empty; the
+/// command key's single "/" is the screen's own prefix, not a typed character).
+fn char_goes_to_screen(screen_open_before: bool) -> bool {
+    screen_open_before
+}
+
 /// A script key in winit's numbering (the windowed client's events and the script runner's
 /// actions go through the same `KeyCode`-keyed routing).
 fn winit_key(key: crate::script::Key) -> KeyCode {
@@ -2646,7 +2655,9 @@ impl InputRouter {
             let forward = key_goes_to_ui(repeat, screen_open);
             let used = forward && ui.key(sc, keys::keycode(sc), mods, pressed);
             if let (Some(c), true) = (typed_char_of(text), pressed) {
-                ui.char_typed(c, mods);
+                if char_goes_to_screen(screen_open) {
+                    ui.char_typed(c, mods);
+                }
             }
             if !game_uses_key(used, screen_open) {
                 // The UI took it: whatever the game thought was held must go.
@@ -3582,6 +3593,9 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut last_gui = GuiFrame::default();
     // An F2 press this tick: save the frame to the config screenshots dir after it is rendered.
     let mut f2_pending = false;
+    // The last screen transition (its class and when), for the click-to-screen timings.
+    let mut last_screen_class: Option<String> = None;
+    let mut last_screen_at: Option<Instant> = None;
     // The local singleplayer world of the joined session (stopped when the world is left and
     // at the end of the script, whatever it ended with).
     let mut local_server: Option<LocalWorld> = None;
@@ -3670,6 +3684,20 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                     );
                 }
                 let screen_class = ui.as_ref().and_then(|u| u.gui().screen_class());
+                // How long a screen change took to show (click-to-screen): the class is read
+                // once per tick, so this is the switch's blocking cost plus up to one tick.
+                if screen_class != last_screen_class {
+                    let now = Instant::now();
+                    if let Some(since) = last_screen_at {
+                        tracing::info!(
+                            "screen {} after {} ms",
+                            screen_class.as_deref().unwrap_or("(none)"),
+                            (now - since).as_millis()
+                        );
+                    }
+                    last_screen_class = screen_class.clone();
+                    last_screen_at = Some(now);
+                }
                 let state = script::ScriptState {
                     joined: view.as_ref().is_some_and(|v| v.has_position),
                     settled,
@@ -3896,10 +3924,14 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 }
                 if let Some(u) = &ui {
                     u.gui().set_local_world_running(false);
+                    u.left_world();
                     u.open_screen(haste_jvm::ScreenKind::Title)?;
                 }
                 shared = None;
                 in_menu = true;
+                // Like the window's `leave_server`: no world behind the title screen, no HUD.
+                feed = WorldFeed::default();
+                renderer.clear_world();
                 input.release();
             } else {
                 session = Some(s);
@@ -4864,7 +4896,10 @@ impl App {
 
     /// Drops the session (stopping its game thread and closing the connection) and the local
     /// singleplayer server, if one runs (its `stop` saves the world); the UI stays, menu mode
-    /// resumes around whatever screen the disconnect showed.
+    /// resumes around whatever screen the disconnect showed. The renderer loses the world's
+    /// sections (the menus draw over the plain background again, like the startup title screen)
+    /// and the HUD stops (`in_world` off): without this the last world frame — terrain,
+    /// hotbar, crosshair — stays behind the title screen.
     fn leave_server(&mut self) {
         if let Some(session) = self.session.take() {
             session.shared.stop.store(true, Ordering::Relaxed);
@@ -4879,6 +4914,15 @@ impl App {
                 ui.gui().set_local_world_running(false);
             }
             world.stop();
+        }
+        if let Some(ui) = &self.ui {
+            ui.left_world();
+        }
+        // The world feed's meshed set dies with the session's world; a fresh one starts clean
+        // at the next join (its source holds the old `Shared`).
+        self.feed = WorldFeed::default();
+        if let Some(r) = self.renderer.as_mut() {
+            r.clear_world();
         }
         self.input.release();
     }
@@ -5879,6 +5923,16 @@ mod tests {
         // A screen is open: no game input even for keys the screen ignored (movement stops
         // while chat or the inventory is up).
         assert!(!game_uses_key(false, true));
+    }
+
+    #[test]
+    fn key_routing_drops_the_char_that_opened_the_screen() {
+        // Vanilla: the key press that opens a screen (T, "/") drops its typed character —
+        // `Gui.handleKeybinds` opens the chat screen on the tick after the press, so the
+        // press's character event finds no screen. Only characters typed while a screen was
+        // already open reach it.
+        assert!(!char_goes_to_screen(false));
+        assert!(char_goes_to_screen(true));
     }
 
     #[test]

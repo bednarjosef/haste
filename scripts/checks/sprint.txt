@@ -1,0 +1,21 @@
+# Fix 2 evidence: double-tapping W starts sprinting (vanilla LocalPlayer.aiStep's
+# sprintTriggerTime double tap). The runner (run-feature-checks.sh, feature "sprint")
+# reads the server's own position for our player twice during the hold and computes
+# the speed: sprinting covers ~5.61 m/s, walking only ~4.32 m/s (vanilla speeds).
+# The player stands on the platform the runner built, looking down the open lane.
+wait_until joined
+wait_until settled
+look 0 0
+wait 20
+screenshot sprint-setup
+wait 20
+# A quick double tap of W: press, release, press within the 7-tick window, then hold.
+key_down W
+wait 2
+key_up W
+wait 2
+key_down W
+wait 300
+screenshot sprint-running
+key_up W
+wait 10

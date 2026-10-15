@@ -1181,6 +1181,26 @@ impl Renderer {
         self.lightmap_frame = frame;
     }
 
+    /// Drops every resident section mesh back to the empty state of a fresh renderer, the world
+    /// the menus draw over after leaving a server (vanilla `Minecraft.disconnectClient` clears
+    /// the level and its render chunks). The per-frame lists (entities, particles, weather,
+    /// overlays, the hand) are rebuilt from each `FrameInput` and need no reset. The mesh
+    /// arenas keep their GPU buffers: `sections` is emptied, not freed, so a rejoin uploads into
+    /// the same arenas without reallocating them.
+    pub fn clear_world(&mut self) {
+        for s in self.sections.values() {
+            self.arenas.free(s);
+        }
+        self.sections.clear();
+        self.section_vis.lock().clear();
+        self.visible_mask = Default::default();
+        self.visible_for = None;
+        self.scheduled_for = None;
+        self.walk_in_flight = false;
+        self.bonus.clear();
+        self.vis_dirty = false;
+    }
+
     /// Vanilla `Options.menuBackgroundBlurriness`: the box-blur radius of an open screen's
     /// blurred background (0 = off, 10 = maximum; vanilla default 5).
     pub fn set_menu_blur_radius(&mut self, radius: u8) {

@@ -464,6 +464,113 @@ fn flight_turning_on_on_the_ground_jumps() {
     assert!((p.state.pos.y - 0.42).abs() < 1e-12);
 }
 
+/// Vanilla `LocalPlayer.aiStep`: the sprint double tap of forward. A fresh press of forward
+/// while the player may start sprinting arms `sprintTriggerTime` (`options.sprintWindow`, default
+/// 7); a second fresh press inside the window sets sprinting, which the `player_command`
+/// START_SPRINTING reports.
+#[test]
+fn sprint_double_tap_of_forward_starts_sprinting() {
+    let run = InputState {
+        forward: true,
+        ..Default::default()
+    };
+    let (mut p, _) = spawned();
+    // First press: arms the window only, no sprint yet.
+    let out = tick(&mut p, &run);
+    assert!(!names(&out).contains(&"command"));
+    assert!(!p.state.sprinting);
+    // Release, then a second press 2 ticks later: sprinting starts this tick.
+    tick(&mut p, &InputState::default());
+    tick(&mut p, &InputState::default());
+    let out = tick(&mut p, &run);
+    assert!(p.state.sprinting, "double tap starts sprinting");
+    match out
+        .iter()
+        .find(|p| matches!(p, ServerboundPlay::PlayerCommand(_)))
+    {
+        Some(ServerboundPlay::PlayerCommand(c)) => {
+            assert_eq!((c.entity_id, c.action), (ME.0, command::START_SPRINTING))
+        }
+        _ => panic!("no sprint command in {:?}", names(&out)),
+    }
+    // Holding forward across ticks does not re-arm or start anything on its own: the window
+    // only sees fresh presses (vanilla reads `hasForwardImpulse` before `input.tick()`).
+    let (mut q, _) = spawned();
+    tick(&mut q, &run);
+    tick(&mut q, &run);
+    assert!(!q.state.sprinting, "a held key is not a double tap");
+    // Backward cancels the window: a double tap around it does not sprint.
+    let (mut b, _) = spawned();
+    tick(&mut b, &run);
+    tick(
+        &mut b,
+        &InputState {
+            back: true,
+            ..Default::default()
+        },
+    );
+    let out = tick(&mut b, &run);
+    assert!(!b.state.sprinting && !names(&out).contains(&"command"));
+}
+
+/// The sprint double-tap window runs out: a second press 6 idle ticks after the first only arms
+/// it again (vanilla counts `sprintTriggerTime` down before the keys are looked at; the window
+/// is 7, so the sixth idle tick leaves it at zero and that press only re-arms it).
+#[test]
+fn sprint_double_tap_window_runs_out_after_seven_ticks() {
+    let run = InputState {
+        forward: true,
+        ..Default::default()
+    };
+    // 5 idle ticks between the presses: still inside; 6: outside.
+    for (idle, sprints) in [(5u32, true), (6, false)] {
+        let (mut p, _) = spawned();
+        tick(&mut p, &run);
+        for _ in 0..idle {
+            tick(&mut p, &InputState::default());
+        }
+        tick(&mut p, &run);
+        assert_eq!(p.state.sprinting, sprints, "idle {idle} ticks");
+    }
+}
+
+/// Vanilla `LocalPlayer.aiStep`'s hunger gate (`isSprintingPossible` ->
+/// `hasEnoughFoodToDoExhaustiveManoeuvres`, food > 6 or may-fly): a hungry player's double tap
+/// does not start the sprint.
+#[test]
+fn no_sprint_double_tap_when_hungry() {
+    let (mut p, _) = spawned();
+    p.food = 6;
+    let run = InputState {
+        forward: true,
+        ..Default::default()
+    };
+    tick(&mut p, &run);
+    tick(&mut p, &InputState::default());
+    let out = tick(&mut p, &run);
+    assert!(!p.state.sprinting && !names(&out).contains(&"command"));
+}
+
+/// Vanilla `LocalPlayer.aiStep`: sneaking cancels the sprint window (`wasShiftKeyDown`).
+#[test]
+fn sneak_cancels_the_sprint_window() {
+    let run = InputState {
+        forward: true,
+        ..Default::default()
+    };
+    let (mut p, _) = spawned();
+    tick(&mut p, &run);
+    tick(
+        &mut p,
+        &InputState {
+            sneak: true,
+            ..Default::default()
+        },
+    );
+    let out = tick(&mut p, &run);
+    assert!(!p.state.sprinting && !names(&out).contains(&"command"));
+}
+
 /// Vanilla `LivingEntity.travelInAir`: with the chunk below not loaded the client skips gravity
 /// and pins the vertical movement to -0.1 (the 0.98 vertical drag on top of it) while the player
 /// is above the world's minimum; at or below the minimum it is 0.0.

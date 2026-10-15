@@ -29,6 +29,16 @@ if grep -qE '\.rs$' <<<"$changed"; then
   cargo fmt --all --check >/dev/null 2>&1 || { cargo fmt --all --check | head -40; fail "cargo fmt"; }
 fi
 
+# Structure (AGENTS.md "Structured like vanilla"): a source file already over 1000 lines must not
+# grow. Reported as a warning for now; it becomes a failure once the large files are split.
+for f in $(grep -E '\.(rs|java)$' <<<"$changed"); do
+  [ -f "$f" ] || continue
+  now=$(wc -l <"$f"); before=$(git show "$base:$f" 2>/dev/null | wc -l)
+  if [ "$now" -gt 1000 ] && [ "$now" -gt "$before" ]; then
+    printf '!! structure warning: %s grew from %d to %d lines (over 1000)\n' "$f" "$before" "$now"
+  fi
+done
+
 # The crates to check: those owning a changed file plus every workspace crate depending on them.
 crates=$(cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c '
 import json, sys, os
