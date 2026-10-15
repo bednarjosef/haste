@@ -715,6 +715,13 @@ impl Ui {
         }
     }
 
+    /// The client left the world (pause screen "Disconnect", death screen "Title Screen"):
+    /// the HUD stops drawing (`Hud.extractRenderState` runs only while
+    /// [`GameState::in_world`] is set, like vanilla's `Gui` once its level is null).
+    pub fn left_world(&self) {
+        self.state(|s| s.in_world = false);
+    }
+
     /// The F3 overlay's numbers (FPS, position, rotation, chunk and entity counts), every frame.
     pub fn set_debug(&self, d: haste_jvm::DebugInfo) {
         self.state(|s| s.debug = d);
@@ -1570,5 +1577,49 @@ mod tests {
         assert_no_refusals(&c.ui.host);
         assert!(c.kicked.is_none(), "kicked: {:?}", c.kicked);
         c.disconnect();
+    }
+
+    /// Leaving the server stops the HUD like vanilla `Minecraft.disconnectClient` (the pause
+    /// screen's "Disconnect"): after `left_world` the title screen draws without the hotbar,
+    /// hearts or crosshair, over the plain menu background instead of the last world frame.
+    #[test]
+    fn leaving_the_world_hides_the_hud() {
+        let mut ui = Ui::new(host());
+        ui.gui().with_state(|s| {
+            s.in_world = true;
+            s.game_mode = GameMode::Survival;
+            s.vitals.health = 20.0;
+            s.vitals.food = 20;
+        });
+        let in_world = ui.frame(320, 240, 2, (0.0, 0.0), 0.0).clone();
+        let sprites: Vec<String> = in_world
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                GuiCommand::Sprite { sprite, .. } | GuiCommand::SpriteRegion { sprite, .. } => {
+                    Some(sprite.to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            sprites
+                .iter()
+                .any(|s| s.starts_with("minecraft:hud/hotbar")),
+            "hotbar while in the world: {sprites:?}"
+        );
+        // the window's `leave_server` path
+        ui.left_world();
+        let left = ui.frame(320, 240, 2, (0.0, 0.0), 0.0).clone();
+        assert!(
+            !left.commands.iter().any(|c| match c {
+                GuiCommand::Sprite { sprite, .. } | GuiCommand::SpriteRegion { sprite, .. } => {
+                    sprite.path().starts_with("hud/")
+                }
+                _ => false,
+            }),
+            "no HUD sprites after leaving: {:?}",
+            texts(&left)
+        );
     }
 }
