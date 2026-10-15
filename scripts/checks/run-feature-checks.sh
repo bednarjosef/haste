@@ -108,10 +108,11 @@ area() {
   CZ=$(( ($(date +%s) % 8) * 160 - 560 ))
 }
 
-# Item entities within `dist` of a position. Never a global @e: other workers drop items
-# on this server too, and a global selector would count theirs.
-items_at() { # x y z dist
-  rcon "execute positioned $1 $2 $3 as @e[type=item,distance=..$4] run data get entity @s Item" 2>/dev/null
+# Item entities within `dist` of a player. Never a global @e: other workers drop items on
+# this server too, and a selector with no anchor counts every one of them. The player has to
+# be online: `execute at` needs an entity to anchor on.
+items_around_player() { # player dist
+  rcon "execute at $1 as @e[type=item,distance=..$2] run data get entity @s Item" 2>/dev/null
 }
 
 # ---- 1. HUD elements: player list, boss bar, sidebar, title, action bar ----
@@ -201,23 +202,20 @@ drop() {
   local log="$LOGDIR/drop.log"
   NAME="dro_$$"
   area
-  # A private platform, built before the client joins so its chunks arrive with the platform
-  # already in them: the dropped items then land in our own area, not at the shared spawn.
-  # (Teleporting the player before `wait_until settled` would restart chunk loading for a
-  # view distance of 32 and never settle inside the script's 600-tick budget.)
-  rcon "fill $((CX - 4)) 99 $((CZ - 4)) $((CX + 4)) 99 $((CZ + 4)) stone" >/dev/null
-  wait_rcon "execute positioned $CX 100 $CZ if block $CX 99 $CZ stone" "Test passed" 15 >/dev/null
-  # Where the player stands once teleported: the .5 the server adds to the z.
-  local zneedle
-  if [ "$CZ" -lt 0 ]; then zneedle="$((CZ + 1)).5d"; else zneedle="${CZ}.5d"; fi
   client_start "$ROOT/scripts/checks/drop-swap.txt" "$log"
   wait_online || { check drop "player never joined" 1; return; }
   rcon "gamemode survival $NAME" >/dev/null
   local before= after= items=
   if wait_shot "$log" drop-setup 90; then
-    # Only now, after the world settled: moving the player must not disturb the settle.
+    # Move the player to our own area and build the platform under them there, not before
+    # the client joins and not somewhere the player is not: a platform filled into a chunk
+    # nobody keeps loaded is unloaded again with nothing saved, and the player that is
+    # teleported onto it later finds a hole. `execute at` also keeps every query and the
+    # cleanup around the player, so other players' items are never counted.
     rcon "tp $NAME $CX 100 $CZ 0 0" >/dev/null
-    wait_rcon "data get entity $NAME Pos" "$zneedle" 30 >/dev/null
+    rcon "execute at $NAME run fill ~-4 ~-1 ~-4 ~4 ~-1 ~4 stone" >/dev/null
+    # Evidence: the player really stands on the platform (they are not still falling).
+    wait_rcon "execute at $NAME if block ~ ~-1 ~ stone" "Test passed" 30 >/dev/null
     rcon "clear $NAME" >/dev/null
     rcon "give $NAME minecraft:stone 10" >/dev/null
     rcon "item replace entity $NAME weapon.offhand with minecraft:torch 3" >/dev/null
@@ -226,12 +224,13 @@ drop() {
   fi
   if wait_shot "$log" drop-swap 90; then
     after=$(rcon "data get entity $NAME SelectedItem" 2>/dev/null)
-    items=$(items_at "$CX" 100 "$CZ" 12)
+    items=$(items_around_player "$NAME" 10)
+    # Our dropped items and our platform, while the player is still here to anchor
+    # `execute at` (after they leave, the selectors find no entity at all).
+    rcon "execute at $NAME as @e[type=item,distance=..10] run kill @s" >/dev/null
+    rcon "execute at $NAME run fill ~-4 ~-1 ~-4 ~4 ~-1 ~4 air" >/dev/null
   fi
   wait_exit
-  # Our platform and our dropped items, not the shared spawn's.
-  rcon "fill $((CX - 4)) 99 $((CZ - 4)) $((CX + 4)) 99 $((CZ + 4)) air" >/dev/null
-  rcon "execute positioned $CX 100 $CZ as @e[type=item,distance=..12] run kill @s" >/dev/null
   echo "--- drop evidence ---"
   echo "SelectedItem before: ${before:-<none>}"
   echo "SelectedItem after:  ${after:-<none>}"
