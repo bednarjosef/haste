@@ -1695,11 +1695,18 @@ fn extract_weather(
     let cbx = camera.x.floor() as i32;
     let cby = camera.y.floor() as i32;
     let cbz = camera.z.floor() as i32;
+    // One-time diagnostics: the camera, sea level, one column's height and the frame's
+    // rain/snow counts, so an invisible weather pass is debuggable from the log.
+    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let mut terrain_of_first: Option<i32> = None;
     for z in cbz - radius..=cbz + radius {
         for x in cbx - radius..=cbx + radius {
             // `Level.getHeight(MOTION_BLOCKING, x, z)` (0 below the world when no chunk:
             // the column then degenerates and is skipped by the y test, like vanilla's).
             let terrain_height = crate::net::column_height(world, x, z);
+            if terrain_of_first.is_none() {
+                terrain_of_first = Some(terrain_height);
+            }
             let y0 = (cby - radius).max(terrain_height);
             let y1 = (cby + radius).max(terrain_height);
             if y1 - y0 == 0 {
@@ -1765,6 +1772,19 @@ fn extract_weather(
                 crate::net::Precipitation::None => {}
             }
         }
+    }
+    if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tracing::info!(
+            "weather extraction: camera ({:.1}, {:.1}, {:.1}), sea level {sea_level}, first \
+             column height {:?}, {} rain + {} snow columns, intensity {:.3}",
+            camera.x,
+            camera.y,
+            camera.z,
+            terrain_of_first,
+            frame.rain.len(),
+            frame.snow.len(),
+            intensity
+        );
     }
 }
 

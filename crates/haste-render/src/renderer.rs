@@ -1787,12 +1787,13 @@ impl Renderer {
         );
         // The weather columns (vanilla draws them in the level pass after translucent
         // terrain, right where the sky overlays run) and the lightning bolts (the entities'
-        // lightning decorations, camera-relative).
+        // lightning decorations, camera-relative). Both submit camera-relative vertices,
+        // so they take the rotation-only projection like the entity and particle passes.
         if let Some(weather) = frame.weather {
             self.weather.prepare(
                 weather,
                 &frame.camera,
-                view_proj,
+                rot_view_proj,
                 &fog_data,
                 crate::sky::linear(fog_srgb),
                 self.animation_tick as i64,

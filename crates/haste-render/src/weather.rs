@@ -181,6 +181,8 @@ pub struct WeatherRenderer {
     lightning_count: u32,
     /// Columns drawn this frame (for stats).
     pub drawn: u32,
+    /// Whether the one-time diagnostics line was logged.
+    logged: bool,
 }
 
 impl WeatherRenderer {
@@ -447,6 +449,7 @@ impl WeatherRenderer {
             vertex_count: 0,
             lightning_count: 0,
             drawn: 0,
+            logged: false,
         }
     }
 
@@ -577,6 +580,21 @@ impl WeatherRenderer {
         push(&mut self.vertices, &weather.snow, self.snow_rect, 0.8, true);
         self.vertex_count = self.vertices.len() as u32;
         self.drawn = (weather.rain.len() + weather.snow.len()) as u32;
+        // One-time diagnostics: what the pass actually received (column counts, vertex
+        // count, intensity), so an invisible weather pass is debuggable from the log.
+        if !self.logged {
+            self.logged = true;
+            tracing::info!(
+                "weather pass: {} rain + {} snow columns, {} vertices, intensity {:.3}, \
+                 rects rain {:?} snow {:?}",
+                weather.rain.len(),
+                weather.snow.len(),
+                self.vertex_count,
+                weather.intensity,
+                self.rain_rect,
+                self.snow_rect
+            );
+        }
         let _ = (game_time, partial_tick);
         if self.vertices.len() > self.capacity {
             self.capacity = self.vertices.len().next_power_of_two();
