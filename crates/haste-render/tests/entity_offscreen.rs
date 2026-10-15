@@ -833,6 +833,7 @@ fn entity_shadows_offscreen() {
         yaw: 0.0,
         pitch: 32.0,
         fov_deg: 70.0,
+        hand_fov_deg: 70.0,
         roll_deg: 0.0,
         bob: haste_render::ViewBob::default(),
     };
@@ -1150,6 +1151,7 @@ fn sheep_wool_overlay_offscreen() {
         yaw: 0.0,
         pitch: 5.0,
         fov_deg: 70.0,
+        hand_fov_deg: 70.0,
         roll_deg: 0.0,
         bob: haste_render::ViewBob::default(),
     };
