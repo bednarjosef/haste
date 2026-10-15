@@ -426,6 +426,60 @@ fn creative_breaks_at_once_then_every_six_ticks_and_not_with_a_sword() {
 }
 
 #[test]
+fn creative_single_tick_click_destroys_even_while_destroy_delay_counts_down() {
+    // The bug: a quick click broke nothing because start_destroy refused while destroy_delay
+    // (set by the previous break) was still counting down. Vanilla startDestroyBlock has no
+    // destroyDelay check — a fresh click always breaks at once and re-arms the 5-tick delay
+    // (which only gates continueDestroyBlock while the button is held).
+    let mut r = Rig::new(GameMode::Creative);
+    let pos = BlockPos::new(0, -1, 0);
+    // First click breaks the block and leaves destroy_delay = 5 counting down.
+    let first = r.tick(ATTACK);
+    assert_eq!(actions(&first), [(action::START_DESTROY, 1)]);
+    assert_eq!(r.w.block_state(pos), BlockStateId::AIR);
+    // The server confirms the break, so the spot is air on both sides.
+    assert!(r.p.defer_block_update(pos, BlockStateId::AIR));
+    let mut out = Vec::new();
+    r.p.handle(
+        &ClientboundPlay::BlockChangedAck(
+            haste_protocol::packets::play::clientbound::BlockChangedAck { sequence: 1 },
+        ),
+        &mut out,
+    );
+    // Release for a few ticks: the delay never reaches 0 (it only counts down while the
+    // button is held, in continueDestroyBlock).
+    for _ in 0..3 {
+        assert!(r.tick(InteractInput::default()).is_empty());
+    }
+    // A fresh single-tick click on a new block at the same spot must break it at once and
+    // send START_DESTROY exactly once, despite the running delay.
+    r.w.set(0, -1, 0, STONE);
+    let out = r.tick(ATTACK);
+    assert_eq!(actions(&out), [(action::START_DESTROY, 2)]);
+    assert_eq!(r.w.block_state(pos), BlockStateId::AIR);
+    // And even on the very next tick after a break (delay still 5): click, release, click.
+    assert!(r.p.defer_block_update(pos, BlockStateId::AIR));
+    r.p.handle(
+        &ClientboundPlay::BlockChangedAck(
+            haste_protocol::packets::play::clientbound::BlockChangedAck { sequence: 2 },
+        ),
+        &mut Vec::new(),
+    );
+    // Apply the ack's world edit now instead of on the next tick, so the new stone below is
+    // not overwritten by it.
+    for (p, s) in r.p.take_world_edits().collect::<Vec<_>>() {
+        r.w.set(p.x, p.y, p.z, s);
+    }
+    r.w.set(0, -1, 0, STONE);
+    // Release (the fresh press needs its edge), then click again one tick later: the delay
+    // is still at 5 — it only counts down on held ticks.
+    assert!(r.tick(InteractInput::default()).is_empty());
+    let out = r.tick(ATTACK);
+    assert_eq!(actions(&out), [(action::START_DESTROY, 3)]);
+    assert_eq!(r.w.block_state(pos), BlockStateId::AIR);
+}
+
+#[test]
 fn creative_keeps_swinging_on_a_miss_without_miss_time() {
     let mut r = Rig::new(GameMode::Creative);
     r.w = TestWorld::new();
