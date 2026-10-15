@@ -344,6 +344,10 @@ pub struct GameState {
     /// Option changes vanilla screens made, as options.txt key/value pairs, oldest first. The
     /// client drains them once per tick and applies them live (render distance, sound volumes, ...).
     pub option_changes: Vec<(String, String)>,
+    /// The resource pack selection the pack screen committed (vanilla
+    /// `Minecraft.reloadResourcePacks`), repository ids bottom first; the client rebuilds its
+    /// asset stack from them. `None` = no change pending.
+    pub resource_pack_ids: Option<Vec<String>>,
 }
 
 impl Default for GameState {
@@ -372,6 +376,7 @@ impl Default for GameState {
             create_world_requested: None,
             local_world_running: false,
             option_changes: Vec::new(),
+            resource_pack_ids: None,
         }
     }
 }
@@ -420,6 +425,10 @@ impl GameState {
     /// way `haste.gui.OptionBridge` reported them.
     pub fn take_option_changes(&mut self) -> Vec<(String, String)> {
         std::mem::take(&mut self.option_changes)
+    }
+    /// Takes the resource pack selection the pack screen committed, if any.
+    pub fn take_resource_pack_ids(&mut self) -> Option<Vec<String>> {
+        self.resource_pack_ids.take()
     }
 
     /// The F3 overlay's string values as `\n`-joined `key value` lines for `Native.debugText`

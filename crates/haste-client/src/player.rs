@@ -243,6 +243,9 @@ pub struct LocalPlayer {
     pub(crate) own_sounds: crate::sound::OwnBlockSounds,
     /// Own-sound requests this tick, drained into `Session::sound_requests` by `end_tick`.
     pub(crate) sound_out: Vec<crate::sound::SoundRequest>,
+    /// Own block particles this tick (our break prediction's destroy grid, the
+    /// mining start tick's crack), drained into `Session::block_particle_requests`.
+    pub(crate) block_particles_out: Vec<crate::block_particles::BlockParticleRequest>,
     /// Ticks left in the double-tap jump window: vanilla `LocalPlayer.jumpTriggerTime` (7 on the
     /// first press, counted down by `Player.aiStep` before the keys are looked at).
     jump_trigger_time: u8,
@@ -297,6 +300,7 @@ impl LocalPlayer {
             toggle_flight: false,
             own_sounds: crate::sound::OwnBlockSounds::new(),
             sound_out: Vec::new(),
+            block_particles_out: Vec::new(),
             jump_trigger_time: 0,
             jump_held: false,
             water_vision_time: 0,
@@ -323,6 +327,14 @@ impl LocalPlayer {
     /// for the caller to drain into its sound output or headless counters.
     pub fn take_own_sound_requests(&mut self) -> std::vec::Drain<'_, crate::sound::SoundRequest> {
         self.sound_out.drain(..)
+    }
+
+    /// Own block particles accumulated this tick, for the caller to drain into the
+    /// session's request queue.
+    pub fn take_own_block_particles(
+        &mut self,
+    ) -> std::vec::Drain<'_, crate::block_particles::BlockParticleRequest> {
+        self.block_particles_out.drain(..)
     }
 
     /// The input layer saw a double tap of jump (creative/spectator). Vanilla keeps the window
@@ -818,6 +830,26 @@ impl LocalPlayer {
         self.int.tick_effects();
         if !(self.has_position && self.loaded) {
             return;
+        }
+
+        // Vanilla `Entity.baseTick` starts the tick with the sprint particle
+        // (`canSpawnSprintParticle`: sprinting, not in water/lava, not sneaking or
+        // spectating, alive) — the velocity is the one the previous tick ended with.
+        if self.state.sprinting
+            && !self.state.in_water
+            && !self.state.in_lava
+            && !self.state.sneaking
+            && self.game_mode != GameMode::Spectator
+            && self.health > 0.0
+            && ctx
+                .world
+                .is_chunk_loaded(BlockPos::from_dvec3(self.state.pos).chunk())
+        {
+            self.block_particles_out
+                .push(crate::block_particles::BlockParticleRequest::Sprint {
+                    feet: self.state.pos,
+                    velocity: self.state.velocity,
+                });
         }
 
         // 0. Hotbar, crosshair target and interactions (vanilla handles key bindings before

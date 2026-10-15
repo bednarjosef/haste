@@ -429,7 +429,7 @@ mod tests {
         std::fs::create_dir_all(packs_dir.join("RedPack")).unwrap();
         std::fs::write(
             packs_dir.join("RedPack/pack.mcmeta"),
-            r#"{"pack":{"pack_format":97,"description":"Red pack"}}"#,
+            r#"{"pack":{"min_format":97,"max_format":97,"description":"Red pack"}}"#,
         )
         .unwrap();
         let red_png = solid_png(255, 0, 0);
@@ -457,8 +457,10 @@ mod tests {
             ));
             zip.start_file::<_, ()>("pack.mcmeta", Default::default())
                 .unwrap();
-            zip.write_all(br#"{"pack":{"pack_format":97,"description":"Blue pack"}}"#)
-                .unwrap();
+            zip.write_all(
+                br#"{"pack":{"min_format":97,"max_format":97,"description":"Blue pack"}}"#,
+            )
+            .unwrap();
             zip.start_file::<_, ()>(
                 "assets/minecraft/textures/block/snow.png",
                 Default::default(),

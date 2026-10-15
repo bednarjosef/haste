@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs the feature check scripts in scripts/checks/ against the local test server.
 # usage: scripts/checks/run-feature-checks.sh [feature ...]
-#   features: hud death drop modes f2 craft pause creative-hotbars language recipe-book  (default: all)
+#   features: hud death drop modes f2 craft pause creative-hotbars language particles recipe-book  (default: all)
 # The client runs offscreen (`--script`); all server state is set up over RCON from here,
 # never from the script (the player is not an operator and the server kicks command spam).
 # Evidence is printed and grepped: frame text commands (not images), server log lines and
@@ -269,6 +269,48 @@ craft() {
   check craft "one oak log became 4 oak planks in the survival inventory" "$r"
 }
 
+# ---- 10. Block particles: the client's own destroy grid and mining cracks ----
+particles() {
+  local log="$LOGDIR/particles.log"
+  # A name of our own: another agent's feature check may be running as $NAME on the
+  # shared server, and a duplicate login kicks our client mid-script.
+  local NAME=ParticlesCheck
+  client_start "$ROOT/scripts/checks/block-particles.txt" "$log"
+  wait_online || { check particles "player never joined" 1; return; }
+  # The script waits 15 s after its setup screenshot; set the stage in that window:
+  # survival, an empty hotbar, a stone platform under the player, an iron pickaxe.
+  # (`execute as/at` selectors: plain name arguments race other agents' players on
+  # the shared server; the selector forms resolve at run time.)
+  while ! grep -q "script-setup" "$log" 2>/dev/null; do
+    sleep 1
+    grep -q "game thread stopping" "$log" 2>/dev/null && break
+  done
+  rcon "execute as $NAME run tp @s 0 100 0 0 0" >/dev/null
+  rcon "execute as $NAME run gamemode survival @s" >/dev/null
+  rcon "execute as $NAME run clear @s" >/dev/null
+  rcon "execute at $NAME run fill ~-4 ~-1 ~-4 ~4 ~-1 ~4 stone" >/dev/null
+  rcon "execute at $NAME run fill ~-3 ~ ~-3 ~3 ~4 ~3 air" >/dev/null
+  rcon "execute as $NAME run give @s minecraft:iron_pickaxe 1" >/dev/null
+  # Torches around the player for the ambient animateTick particles (placed after
+  # the mining screenshots appear, so they do not get mined).
+  if wait_shot "$log" block-broken 60; then
+    rcon "execute at $NAME run setblock ~2 ~ ~2 torch" >/dev/null
+    rcon "execute at $NAME run setblock ~-2 ~ ~-1 torch" >/dev/null
+    rcon "execute at $NAME run setblock ~1 ~ ~-3 torch" >/dev/null
+  fi
+  wait_exit
+  echo "--- block particles evidence ---"
+  grep "particles drawn" "$log" | tail -4
+  local cracks broken ambient r=0
+  cracks=$(grep "script-mining-cracks" "$log" | grep -o '[0-9]* particles drawn' | grep -o '[0-9]*')
+  broken=$(grep "script-block-broken" "$log" | grep -o '[0-9]* particles drawn' | grep -o '[0-9]*')
+  ambient=$(grep "script-ambient-torches" "$log" | grep -o '[0-9]* particles drawn' | grep -o '[0-9]*')
+  [ -n "$cracks" ] && [ "$cracks" -gt 0 ] || { echo "no crack particles while mining"; r=1; }
+  [ -n "$broken" ] && [ "$broken" -gt 20 ] || { echo "no destroy grid on break"; r=1; }
+  [ -n "$ambient" ] && [ "$ambient" -gt 0 ] || { echo "no ambient torch particles"; r=1; }
+  check particles "mining drew crack particles ($cracks), the break the destroy grid ($broken), torches ambient particles ($ambient)" "$r"
+}
+
 # ---- 7. Every pause-menu screen ----
 pause() {
   local log="$LOGDIR/pause.log"
@@ -369,13 +411,13 @@ language() {
   check language "Options > Language switched to de_de and the pause menu drew in German" "$r"
 }
 
-ALL=(hud death drop modes f2 craft pause creative-hotbars language recipe-book)
+ALL=(hud death drop modes f2 craft pause creative-hotbars language particles recipe-book)
 if [ $# -eq 0 ]; then
   set -- "${ALL[@]}"
 fi
 for f in "$@"; do
   case "$f" in
-    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | recipe-book) "${f//-/_}" ;;
+    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | particles | recipe-book) "${f//-/_}" ;;
     *) echo "unknown feature: $f" ;;
   esac
 done

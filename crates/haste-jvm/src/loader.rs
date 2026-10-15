@@ -28,6 +28,9 @@ pub const ALLOW_PACKAGES: &[&str] = &[
     "net/minecraft/client/renderer/entity/state/",
     "net/minecraft/client/renderer/state/",
     "net/minecraft/client/resources/language/",
+    // the pack repository the Resource Packs screen browses is real vanilla Java (tier 3):
+    // the skin manager stays proxied, so only the classes it needs are allowed below
+    // (ALLOW_CLASSES): ClientPackSource, IndexedAssetSource, NativeImage, TextureUtil
     // the pack.mcmeta "language" section LanguageManager reads (the language list and its RTL flag)
     "net/minecraft/client/resources/metadata/language/",
     // the Telemetry Data screen's event list is real vanilla Java over these value types; Haste sends
@@ -44,6 +47,16 @@ pub const ALLOW_PACKAGES: &[&str] = &[
 /// Single classes served as real vanilla Java inside denied packages (value types and helpers the
 /// GUI and the bootstrap reach).
 pub const ALLOW_CLASSES: &[&str] = &[
+    // the pack repository the Resource Packs screen browses is real vanilla Java (tier 3):
+    // ClientPackSource (the built-in vanilla pack entry) and IndexedAssetSource (the assets
+    // dir view) are data/IO code; the skin manager stays proxied
+    "net/minecraft/client/resources/ClientPackSource",
+    "net/minecraft/client/resources/IndexedAssetSource",
+    // the pack screen reads pack.png icons through NativeImage (pure PNG decode, no GPU);
+    // DynamicTexture's constructor touches TextureUtil's statics (never called: the texture
+    // manager proxy records the location and uploads nothing)
+    "com/mojang/blaze3d/platform/NativeImage",
+    "com/mojang/blaze3d/platform/TextureUtil",
     "net/minecraft/server/Bootstrap",
     "net/minecraft/server/LoggedPrintStream",
     "net/minecraft/server/DebugLoggedPrintStream",
