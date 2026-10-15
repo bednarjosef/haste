@@ -139,6 +139,11 @@ impl EntitySink for FakeEntities {
                 .map(|d| (haste_core::RegistryIndex(*k as u32), *d))
         })
     }
+    fn entity_type(&self, id: EntityId) -> Option<haste_core::RegistryIndex> {
+        self.kinds
+            .get(&id)
+            .map(|k| haste_core::RegistryIndex(*k as u32))
+    }
     fn pose(&self, id: EntityId) -> Option<(DVec3, f32, f32)> {
         self.poses.get(&id).copied()
     }
@@ -891,6 +896,65 @@ fn set_passengers_mounts_and_dismounts_the_local_player() {
         ),
         "normal physics resumes, falling at the unloaded-chunk rate"
     );
+}
+
+/// Mounting a boat we drive gives us its client-side simulation (vanilla's
+/// `Entity.isLocalClientAuthoritative` for the vehicle whose controlling passenger is the local
+/// player): the paddles' keys go to our own boat, not to the server's copy of it, and the
+/// server's correction of it (`ClientboundMoveVehiclePacket`, vanilla's
+/// `ClientPacketListener.handleMoveVehicle`) is taken and answered straight back.
+#[test]
+fn mounting_a_boat_we_drive_starts_its_client_side_simulation() {
+    let mut r = Rig::new();
+    r.session
+        .set_entity_type_names(names(&["player", "oak_boat", "minecart"]));
+    r.apply(spawn_packet_kind(5, DVec3::new(40.0, 70.0, 40.0), 1)); // oak_boat
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 5,
+        passengers: vec![7],
+    }));
+    assert!(r.session.player.vehicle().is_some());
+    let start = r.session.player.boat().expect("the boat is ours").pos;
+    assert_eq!(start, DVec3::new(40.0, 70.0, 40.0));
+    // A vehicle we do not drive (the second passenger's view, or another craft) is not.
+    r.apply(spawn_packet_kind(6, DVec3::ZERO, 2));
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 6,
+        passengers: vec![9, 7],
+    }));
+    assert_eq!(r.session.player.vehicle(), Some(EntityId(6)));
+    assert!(
+        r.session.player.boat().is_none(),
+        "the second passenger of a boat does not simulate it"
+    );
+    // Back to the driver's seat of the first boat.
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 5,
+        passengers: vec![7],
+    }));
+    assert!(r.session.player.boat().is_some());
+    // The server's correction: our simulation is snapped where the server put the boat, and
+    // answered with a `move_vehicle` of that pose.
+    r.apply(ClientboundPlay::MoveVehicle(cb::MoveVehicle {
+        pos: DVec3::new(44.0, 70.0, 43.0),
+        yaw: 90.0,
+        pitch: 0.0,
+    }));
+    assert_eq!(
+        r.session.player.boat().expect("still ours").pos,
+        DVec3::new(44.0, 70.0, 43.0)
+    );
+    assert!(r.out.iter().any(|p| matches!(
+        p,
+        ServerboundPlay::MoveVehicle(m) if m.pos == DVec3::new(44.0, 70.0, 43.0) && m.yaw == 90.0
+    )));
+    // Dismounting drops the simulation with the mount.
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 5,
+        passengers: vec![],
+    }));
+    assert!(r.session.player.vehicle().is_none());
+    assert!(r.session.player.boat().is_none());
 }
 
 #[test]

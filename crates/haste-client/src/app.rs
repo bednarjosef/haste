@@ -2791,6 +2791,14 @@ impl InputRouter {
         self.pitch = pitch;
     }
 
+    /// A look change to an exact aim: the input layer holds its angles minus the server's
+    /// rotation offset, because the tick's pick adds the offset back (a teleport or a
+    /// `player_rotation` echo set it). A script's `look` asks for a specific crosshair, so it
+    /// goes through here; plain mouse motion goes through `look`.
+    fn aim(&mut self, yaw: f32, pitch: f32, offset: (f32, f32)) {
+        self.look(yaw - offset.0, (pitch - offset.1).clamp(-90.0, 90.0));
+    }
+
     /// Jump pressed: a second press within vanilla's 7-tick window toggles flight.
     fn jump_pressed(&mut self, now: Instant) {
         match self.last_jump_press {
@@ -3872,7 +3880,12 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                                 ui.scroll(x, y, 0.0, f64::from(n));
                             }
                         }
-                        script::Action::Look(yaw, pitch) => input.look(yaw, pitch),
+                        // A scripted `look` aims exactly where asked (the server's rotation
+                        // offset would otherwise leave the crosshair elsewhere).
+                        script::Action::Look(yaw, pitch) => {
+                            let offset = view.as_ref().map_or((0.0, 0.0), |v| v.look_offset);
+                            input.aim(yaw, pitch, offset);
+                        }
                         script::Action::Screenshot(name) => shots.push(name),
                         script::Action::Error(e) => {
                             last_err = Some(e);
@@ -5846,6 +5859,26 @@ mod tests {
         assert!((yaw - 15.0).abs() < 1e-4 && pitch == 0.0, "{yaw} {pitch}");
         assert_eq!(apply_mouse(0.0, 80.0, (0.0, 200.0), DPP), (0.0, 90.0));
         assert_eq!(apply_mouse(10.0, -80.0, (0.0, -200.0), DPP), (10.0, -90.0));
+    }
+
+    /// A scripted look aims exactly where asked: the input layer holds the target angles minus
+    /// the server's rotation offset, which the tick's pick adds back. Without the subtraction a
+    /// `look` after the server turned the player (a teleport echo) aims `offset` away from the
+    /// target — the boat mount missed because the crosshair looked at the block under the
+    /// driver's feet instead of the boat.
+    #[test]
+    fn an_exact_aim_subtracts_the_servers_look_offset() {
+        let mut input = InputRouter::default();
+        // No server offset: the input layer holds the angles themselves.
+        input.aim(0.0, 49.0, (0.0, 0.0));
+        assert_eq!((input.yaw, input.pitch), (0.0, 49.0));
+        // The server turned us 60 degrees while the script's input still says 30 (the offset
+        // the player keeps, `LocalPlayer.look_offset`): aiming at 90 needs input 30.
+        input.aim(90.0, 10.0, (60.0, 0.0));
+        assert_eq!((input.yaw, input.pitch), (30.0, 10.0));
+        // A pitch past the clamp with the offset applied to the input, not the target.
+        input.aim(0.0, 90.0, (0.0, 40.0));
+        assert_eq!((input.yaw, input.pitch), (0.0, 50.0));
     }
 
     #[test]
