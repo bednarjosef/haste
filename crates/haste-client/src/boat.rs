@@ -639,6 +639,62 @@ mod tests {
         }
     }
 
+    /// A boat placed at the surface of still water for 40 ticks stays within vanilla's float
+    /// band, computed from `AbstractBoat.floatBoat`'s own formulas: each tick the vertical delta
+    /// becomes `(dy - gravity + buoyancy * gravity / 0.65) * 0.75` with
+    /// `buoyancy = (waterLevel - y) / bbHeight` (the water's drag never scales y), a damped
+    /// convergence onto the equilibrium `surface - 0.65 * bbHeight` — the height the vanilla
+    /// server floats an oak boat at (its rest at 70.5232 in a surface-70.8889 lane, measured
+    /// over RCON). The overshoot of the damping is bounded by the gravity term times the
+    /// damping window: the band is one gravity (0.04) below the equilibrium. A hull whose
+    /// height is wrong (the live bug: the store's default 1.8 box instead of the oak boat's
+    /// 0.5625) makes the buoyancy term 3.2x too weak and sinks past the band onto the floor
+    /// within the 40 ticks.
+    #[test]
+    fn a_boat_at_the_surface_of_still_water_stays_in_vanillas_float_band() {
+        let (world, shapes) = over_water();
+        let env = env(&world, &shapes);
+        // Placed a fifth of a block under the surface, hull height into the water.
+        let start = surface() - 0.2;
+        let mut boat = Boat::new(DVec3::new(0.5, start, 0.5), 0.0, BOAT, &env);
+        assert_eq!(boat.status, Status::InWater);
+        // The expected series from vanilla's formulas, ticked alongside the boat.
+        let mut expected_y = start;
+        let mut expected_dy = 0.0;
+        for t in 0..40 {
+            ticks(&mut boat, &env, BoatInput::default(), 1);
+            let buoyancy = (surface() - expected_y) / f64::from(BOAT.1);
+            expected_dy = (expected_dy - GRAVITY + buoyancy * BUOYANCY_GRAVITY) * BUOYANCY_DAMPING;
+            expected_y += expected_dy;
+            assert!(
+                (boat.pos.y - expected_y).abs() < 1.0e-9,
+                "tick {t}: y {} vs vanilla's {}",
+                boat.pos.y,
+                expected_y
+            );
+            // The band: never above the start, never a gravity below the equilibrium.
+            assert!(
+                boat.pos.y <= start + 1.0e-9,
+                "tick {t}: y {} rose above the start {}",
+                boat.pos.y,
+                start
+            );
+            assert!(
+                boat.pos.y >= float_height() - GRAVITY,
+                "tick {t}: y {} sank below the float band",
+                boat.pos.y
+            );
+        }
+        // And it ends holding the vanilla equilibrium, not on the floor.
+        assert!(
+            (boat.pos.y - float_height()).abs() < 2.0e-3,
+            "{} vs {}",
+            boat.pos.y,
+            float_height()
+        );
+        assert!(!boat.on_ground, "the hull reached the floor");
+    }
+
     /// Holding W on open water for 20 ticks: vanilla's `controlBoat` adds 0.04 along the boat's
     /// facing and `floatBoat`'s 0.9 water drag takes 10% of it away each tick. The boat does not
     /// turn (no A/D), does not sink (the buoyancy holds it at its floating height) and floats
