@@ -1,0 +1,19 @@
+# Boat steering on the test server. The first `wait` is the window in which the RCON setup
+# lands (teleport the joined player onto the ledge, then read the boat's Pos for the "before"
+# line); the second long `wait` is the window in which the "after" Pos is read, three seconds
+# after the boat was paddled forward (W) and one second after it was turned (A).
+# The player stands on the ledge at 380.5 73 4.5 (facing +z, pitch 45 = looking down), and the
+# oak boat floats on the water lane at 380.5 71 7.5, three blocks away and within reach.
+wait_until joined
+wait 100
+look 0 45
+wait 10
+click right 480 270
+wait 200
+key_down w
+wait 60
+key_up w
+key_down a
+wait 20
+key_up a
+wait 100
