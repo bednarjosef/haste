@@ -383,8 +383,9 @@ fn light_apply_and_read() {
     assert_eq!(w.sky_light(BlockPos::new(2, 64, 0)), 2);
     assert_eq!(w.block_light(BlockPos::new(0, 64, 0)), 2);
     assert_eq!(w.block_light(BlockPos::new(1, 64, 0)), 1);
-    // cleared section: sky reads 15 (no data), block 0
-    assert_eq!(w.sky_light(BlockPos::new(0, 80, 0)), 15);
+    // cleared section: sky reads 0 (vanilla stores an all-zero DataLayer for an
+    // empty-marked section, ClientPacketListener.readSectionList), block 0
+    assert_eq!(w.sky_light(BlockPos::new(0, 80, 0)), 0);
     assert_eq!(w.block_light(BlockPos::new(0, 80, 0)), 0);
     // sections with no light data at all: sky 15, block 0
     assert_eq!(w.sky_light(BlockPos::new(0, 0, 0)), 15);
