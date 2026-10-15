@@ -180,9 +180,16 @@ proxies are generated per checkout (`cache/proxies/26.3-<hash>`). `ItemStack`, `
   the handle -1 proxy.
 - `MultiPlayerGameMode`: `handleContainerInput` -> Rust `ContainerClick` (no client prediction).
 - `EntityRenderDispatcher/AvatarRenderer`: empty `EntityRenderState`s (entity rendering is Rust's).
-- `RecipeBookComponent` (closed, everything else no-op): `updateScreenPosition` centres the container,
-  `hasClickedOutside`, `narrationPriority` NONE. `RECIPE_BUTTON_SPRITES` set to the jar's
-  `recipe_book/button(_highlighted)` sprites.
+- The recipe book is real vanilla Java (tier 3): `RecipeBookComponent`/`CraftingRecipeBookComponent`
+  and the rest of `gui/screens/recipebook/` keep vanilla's bodies over the real `ClientRecipeBook`
+  that `Proxies.create` sets on the player proxy (LocalPlayer's constructor, which builds the book,
+  never runs on a proxy). The recipe-book packets are plain data, so their `ClientPacketListener`
+  handlers keep vanilla's bodies (`keep` lines): `handleRecipeBookAdd/Remove/Settings`,
+  `handleUpdateRecipes` (stores the real `ClientRecipeContainer`, allow-listed in the loader) and
+  `handlePlaceRecipe` (the ghost recipe). Their `ensureRunningOnSameThread` check runs against
+  `Minecraft.packetProcessor` (ClientImpl): a real `PacketProcessor` over the game thread, which
+  every packet handler runs on. `ConnectionImpl.recipes` reads the stored container off the proxy
+  (vanilla's field-initialiser value before the packet).
 - `Level`: `isClientSide` true. No-op classes: SoundManager, SimpleSoundInstance, GameNarrator,
   PlayerSocialManager, ReportingContext. Types only: RenderPipelines, SoundEvents, DataComponents (no <clinit>:
   constants null), ServerPlayer.

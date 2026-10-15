@@ -70,6 +70,14 @@ pub const ALLOW_CLASSES: &[&str] = &[
     "net/minecraft/client/multiplayer/RegistryDataCollector",
     "net/minecraft/client/multiplayer/ClientRegistryLayer",
     "net/minecraft/client/multiplayer/PlayerInfo",
+    // the server's recipe data (update_recipes): two maps of registry data (item property sets,
+    // stonecutter recipes), no server state; the kept handler stores it on the connection proxy
+    "net/minecraft/client/multiplayer/ClientRecipeContainer",
+    // the recipe book itself: a map of RecipeDisplayId -> RecipeDisplayEntry plus the book settings,
+    // rebuilt into RecipeCollections (all under the allowed gui/ package). No engine state: the kept
+    // recipe-book handlers read it through Player.getRecipeBook() and Proxies.create builds the one
+    // vanilla's LocalPlayer constructor would have (a proxy never runs that constructor)
+    "net/minecraft/client/ClientRecipeBook",
     // the multiplayer screen's own data (tier 3: no hot game state). ServerList reads/writes
     // servers.dat in the game directory, ServerData is its entry value type, and the resolver
     // package is the address parsing the screen's join and direct-connect field use.
