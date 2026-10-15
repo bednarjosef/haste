@@ -477,6 +477,11 @@ pub struct Shared {
     /// Bumped every time [`Shared::live_options`] changes, so the render thread copies the
     /// options only when they changed (never a per-frame clone).
     pub options_version: AtomicU64,
+    /// The resource pack selection the pack screen committed (vanilla
+    /// `Minecraft.reloadResourcePacks`), repository ids bottom first: the renderer rebuilds
+    /// from a fresh asset stack (atlas, models, fonts, GUI sprites) when it takes this,
+    /// without restarting. `None` = no reload pending.
+    pub resource_pack_reload: Mutex<Option<Vec<String>>>,
     /// F3's tps line: packets sent per second (f64 bits), updated once per second by the game
     /// thread from the connection's counters.
     pub debug_tx: AtomicU64,
@@ -566,6 +571,7 @@ impl Shared {
             hud_enabled: AtomicBool::new(true),
             live_options: Mutex::new(options),
             options_version: AtomicU64::new(1),
+            resource_pack_reload: Mutex::new(None),
             debug_tx: AtomicU64::new(0),
             debug_rx: AtomicU64::new(0),
         }
@@ -776,6 +782,12 @@ fn spawn_jvm(shared: &Arc<Shared>) -> HudSlot {
             let result =
                 haste_jvm::JvmConfig::from_cache(&haste_protocol::haste_core::paths::cache_dir())
                     .map_err(anyhow::Error::from)
+                    .map(|mut cfg| {
+                        // the same game directory the menu's JVM and the asset pack
+                        // selection use (vanilla's options.txt and resourcepacks/ live there)
+                        cfg.game_dir = crate::app::game_dir();
+                        cfg
+                    })
                     .and_then(JvmHost::start);
             match result {
                 Ok(host) => {
@@ -1156,6 +1168,13 @@ fn tick_once(
         let changes = ui.drain_option_changes();
         if !changes.is_empty() {
             apply_option_changes(shared, driver, changes);
+        }
+        // The pack screen's Done: vanilla reloads its resource manager (Minecraft.
+        // reloadResourcePacks); the renderer rebuilds from the new selection on its next
+        // frame (AtlasBuilder + bake + GUI textures read the new asset stack).
+        if let Some(ids) = ui.take_resource_pack_selection() {
+            tracing::info!("resource pack selection changed: [{}]", ids.join(", "));
+            *shared.resource_pack_reload.lock() = Some(ids);
         }
         ui.drain_outgoing(&mut ui_out);
     }

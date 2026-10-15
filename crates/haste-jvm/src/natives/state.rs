@@ -1,6 +1,6 @@
 //! Player state / inventory mirror / outgoing natives on [`crate::GameState`].
 use jni::errors::ThrowRuntimeExAndDefault;
-use jni::objects::{JByteArray, JClass, JDoubleArray, JIntArray, JString};
+use jni::objects::{JByteArray, JClass, JDoubleArray, JIntArray, JObjectArray, JString};
 use jni::sys::{jboolean, jint};
 use jni::EnvUnowned;
 
@@ -95,6 +95,29 @@ pub(crate) extern "system" fn options_changed<'l>(
         let key = key.try_to_string(env)?;
         let value = value.try_to_string(env)?;
         with_state(|s| s.option_changes.push((key, value)));
+        Ok(())
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// The resource pack selection changed (`haste.gui.ClientImpl.reloadResourcePacks`, vanilla's
+/// `Minecraft.reloadResourcePacks` after the pack screen's Done): the repository's selected ids,
+/// bottom first. The client rebuilds its asset stack and renderer from them.
+pub(crate) extern "system" fn resource_packs_changed<'l>(
+    mut env: EnvUnowned<'l>,
+    _c: JClass<'l>,
+    ids: JObjectArray<'l>,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let len = ids.len(env)?;
+        let selected = (0..len)
+            .filter_map(|i| {
+                let element = ids.get_element(env, i).ok()?;
+                let id = unsafe { JString::from_raw(env, element.into_raw()) };
+                id.try_to_string(env).ok()
+            })
+            .collect();
+        with_state(|s| s.resource_pack_ids = Some(selected));
         Ok(())
     })
     .resolve::<ThrowRuntimeExAndDefault>()
