@@ -1920,6 +1920,95 @@ fn click(gui: &haste_jvm::GuiPipeline, x: f64, y: f64) {
     gui.mouse(x, y, Some((haste_jvm::keys::MOUSE_LEFT, false)));
 }
 
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn pack_selection_screen_lists_folder_packs() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    reset(gui);
+    h.clear_unimplemented().unwrap();
+    // A folder pack in the JVM game dir's resourcepacks (vanilla's FolderRepositorySource
+    // discovers it): the screen must list it under Available, and Done must commit the
+    // selection through Minecraft.reloadResourcePacks (the ClientImpl proxy).
+    let game_dir = h.config().game_dir.clone();
+    let pack = game_dir.join("resourcepacks/jvm-probe-pack");
+    std::fs::create_dir_all(pack.join("assets/minecraft/textures/block")).unwrap();
+    std::fs::write(
+        pack.join("pack.mcmeta"),
+        r#"{"pack":{"min_format":97,"max_format":97,"description":"probe"}}"#,
+    )
+    .unwrap();
+    open(&h, haste_jvm::ScreenKind::Packs);
+    assert!(gui.is_open());
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.packs.PackSelectionScreen")
+    );
+    let f = render(&h, (0.0, 0.0));
+    let t = texts(&f);
+    for want in ["Select Resource Packs", "Done"] {
+        assert!(t.iter().any(|x| x == want), "missing {want:?} in {t:?}");
+    }
+    assert!(
+        t.iter().any(|x| x == "jvm-probe-pack"),
+        "the folder pack should be listed: {t:?}"
+    );
+    // The entry's list by its x position: at 320 wide the Available (left) list renders
+    // around x < 160 and the Selected (right) one above it.
+    let entry_selected =
+        |f: &haste_core::gui::GuiFrame| text_pos(f, "jvm-probe-pack").is_some_and(|(x, _)| x > 160);
+    // Clicking the entry's 32x32 icon selects or unselects it (the title itself does
+    // nothing, TransferableSelectionList.PackEntry.mouseClicked); the title renders at
+    // the icon's right + 2, one pixel lower. Selecting takes a click anywhere on the
+    // icon; unselecting takes its left half (SelectableEntry.mouseOverLeftHalf).
+    let click_entry =
+        |gui: &haste_jvm::GuiPipeline, f: &haste_core::gui::GuiFrame, unselect: bool| {
+            let (x, y) = text_pos(f, "jvm-probe-pack").expect("the entry renders");
+            let dx = if unselect { -26 } else { -18 };
+            click(gui, f64::from(x + dx), f64::from(y + 15));
+        };
+    // A previous run may have committed the same selection already (the JVM's Options
+    // object persists for the process, and options.txt in its game dir across runs):
+    // unselect and commit first when needed, so the selection this test commits is a
+    // change (vanilla's Options.updateResourcePacks only reloads on a changed list).
+    if entry_selected(&f) {
+        click_entry(gui, &f, true);
+        let f = render(&h, (0.0, 0.0));
+        assert!(!entry_selected(&f), "the unselect click should move it out");
+        let (x, y) = text_pos(&f, "Done").expect("the Done button renders");
+        click(gui, x as f64, y as f64);
+        assert!(!gui.is_open(), "Done should close the screen");
+        assert_eq!(
+            gui.take_resource_pack_ids(),
+            Some(vec!["vanilla".to_string()]),
+            "the unselected commit should reload too"
+        );
+        open(&h, haste_jvm::ScreenKind::Packs);
+    }
+    let f = render(&h, (0.0, 0.0));
+    assert!(!entry_selected(&f), "the pack should start unselected");
+    click_entry(gui, &f, false);
+    let f = render(&h, (0.0, 0.0));
+    assert!(entry_selected(&f), "the entry click should select the pack");
+    let (x, y) = text_pos(&f, "Done").expect("the Done button renders");
+    click(gui, x as f64, y as f64);
+    let selected = gui.take_resource_pack_ids();
+    assert_eq!(
+        selected,
+        Some(vec![
+            "vanilla".to_string(),
+            "file/jvm-probe-pack".to_string()
+        ]),
+        "Done should commit the selection (bottom first)"
+    );
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for PackSelectionScreen: {unimpl:#?}"
+    );
+}
+
 fn escape(gui: &haste_jvm::GuiPipeline) {
     gui.key(
         haste_jvm::keys::ESCAPE,

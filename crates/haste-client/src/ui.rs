@@ -458,6 +458,12 @@ impl Ui {
         self.state(|s| s.take_option_changes())
     }
 
+    /// The resource pack selection the pack screen committed since the last call (vanilla
+    /// `Minecraft.reloadResourcePacks` after Done): repository ids, bottom first.
+    pub fn take_resource_pack_selection(&self) -> Option<Vec<String>> {
+        self.gui().take_resource_pack_ids()
+    }
+
     /// A game key event (no screen open, SDL3 scancode) mirrored into the vanilla `KeyMapping`s,
     /// vanilla's `KeyboardHandler.keyPress` (press sets the down state and counts a click).
     pub fn game_key(&self, scancode: i32, pressed: bool) {

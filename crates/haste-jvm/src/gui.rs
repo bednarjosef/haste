@@ -39,6 +39,10 @@ pub enum ScreenKind {
     /// `net.minecraft.client.gui.screens.options.OptionsScreen` (vanilla opens it from the title
     /// screen; "Done" returns to the screen that opened it).
     Options,
+    /// `net.minecraft.client.gui.screens.packs.PackSelectionScreen` (the Options screen's
+    /// Resource Packs button; commits through `Minecraft.reloadResourcePacks`, which the
+    /// ClientImpl proxy reports to Rust).
+    Packs,
     /// `net.minecraft.client.gui.screens.multiplayer.JoinMultiplayerScreen`, whose parent is a
     /// `TitleScreen`.
     Multiplayer,
@@ -56,6 +60,7 @@ impl ScreenKind {
             ScreenKind::Command => 3,
             ScreenKind::Title => 4,
             ScreenKind::Options => 5,
+            ScreenKind::Packs => 8,
             ScreenKind::Multiplayer => 6,
             ScreenKind::SelectWorld => 7,
         }
@@ -631,6 +636,13 @@ impl GuiPipeline {
     /// call.
     pub fn take_create_world_request(&self) -> Option<crate::proxies::CreateWorldRequest> {
         self.with_state(|s| s.create_world_requested.take())
+    }
+
+    /// The resource pack selection the pack screen committed since the last call (vanilla's
+    /// `Minecraft.reloadResourcePacks`): repository ids, bottom first. The caller rebuilds its
+    /// asset stack and renderer from them.
+    pub fn take_resource_pack_ids(&self) -> Option<Vec<String>> {
+        self.with_state(|s| s.resource_pack_ids.take())
     }
 
     /// Tells the screens whether the local singleplayer server is running (the pause screen's

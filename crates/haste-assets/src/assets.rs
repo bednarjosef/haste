@@ -921,7 +921,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(red.join("assets/minecraft/textures/block")).unwrap();
         std::fs::write(
             red.join("pack.mcmeta"),
-            r#"{"pack":{"pack_format":97,"description":"red stone"}}"#,
+            r#"{"pack":{"min_format":97,"max_format":97,"description":"red stone"}}"#,
         )
         .unwrap();
         let mut png = Vec::new();
@@ -940,7 +940,7 @@ pub(crate) mod tests {
             ));
             zip.start_file::<_, ()>("pack.mcmeta", Default::default())
                 .unwrap();
-            zip.write_all(br#"{"pack":{"pack_format":97,"description":"extra"}}"#)
+            zip.write_all(br#"{"pack":{"min_format":97,"max_format":97,"description":"extra"}}"#)
                 .unwrap();
             zip.start_file::<_, ()>(
                 "assets/minecraft/textures/block/haste_extra.png",

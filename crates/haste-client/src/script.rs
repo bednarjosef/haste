@@ -256,6 +256,9 @@ pub enum Condition {
     Settled,
     ScreenOpen,
     ScreenClosed,
+    /// The renderer was rebuilt from a new resource pack selection this run (the pack
+    /// screen's Done; vanilla `Minecraft.reloadResourcePacks`).
+    Reloaded,
     /// The open screen's class simple name is one of these (`TitleScreen`,
     /// `JoinMultiplayerScreen`, ...; `screen A|B` waits for either); no screen open matches
     /// nothing.
@@ -263,7 +266,7 @@ pub enum Condition {
 }
 
 impl Condition {
-    /// Parses the arguments of a `wait_until` line: one of the four named conditions, or
+    /// Parses the arguments of a `wait_until` line: one of the named conditions, or
     /// `screen <SimpleName>` (alternatives separated by `|`).
     fn parse(rest: &str, line: usize) -> Result<Condition, ScriptError> {
         let name = rest.split_whitespace().next().unwrap_or_default();
@@ -272,6 +275,7 @@ impl Condition {
             "settled" => Ok(Condition::Settled),
             "screen_open" => Ok(Condition::ScreenOpen),
             "screen_closed" => Ok(Condition::ScreenClosed),
+            "reloaded" => Ok(Condition::Reloaded),
             "screen" => {
                 let class = rest.split_whitespace().nth(1).ok_or_else(|| {
                     ScriptError::UnknownCondition {
@@ -299,6 +303,7 @@ impl Condition {
             Condition::Settled => state.settled,
             Condition::ScreenOpen => state.screen_open,
             Condition::ScreenClosed => !state.screen_open,
+            Condition::Reloaded => state.reloaded,
             Condition::Screen(want) => state.screen_class.as_deref().is_some_and(|open| {
                 open.rsplit('.')
                     .next()
@@ -313,6 +318,7 @@ impl Condition {
             Condition::Settled => "settled".into(),
             Condition::ScreenOpen => "screen_open".into(),
             Condition::ScreenClosed => "screen_closed".into(),
+            Condition::Reloaded => "reloaded".into(),
             Condition::Screen(s) => format!("screen {}", s.join("|")),
         }
     }
@@ -383,6 +389,9 @@ pub struct ScriptState {
     pub screen_open: bool,
     /// The open screen's class name (`wait_until screen <SimpleName>`), if any.
     pub screen_class: Option<String>,
+    /// The renderer was rebuilt from a new resource pack selection this run
+    /// (`wait_until reloaded`).
+    pub reloaded: bool,
 }
 
 /// A parse error. Every variant carries the 1-based source line it came from.
