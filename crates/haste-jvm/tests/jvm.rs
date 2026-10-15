@@ -710,6 +710,86 @@ fn title_screen_quit() {
     gui.close_screen();
 }
 
+/// Vanilla `Gui.setScreen(null)` outside a world opens a fresh title screen (the create
+/// screen's Cancel after the empty world list auto-opened it closes to `setScreen(null)`):
+/// closing the last screen must not leave the menu without one, and the title screen that
+/// comes back has its widgets (a fresh instance, so init runs).
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn close_screen_outside_world_returns_to_title() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    reset(gui);
+    h.clear_unimplemented().unwrap();
+    // the empty world list auto-opens the create screen; its Cancel runs the vanilla
+    // `setScreen(null)` fallback under test (an empty singleplayer dir, like a fresh install)
+    let saves = h.config().singleplayer_dir.clone();
+    let keep: Vec<_> = std::fs::read_dir(&saves)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    for p in &keep {
+        let _ = std::fs::remove_dir_all(p);
+    }
+    open(&h, haste_jvm::ScreenKind::Title);
+    let f = render(&h, (0.0, 0.0));
+    let p = text_pos(&f, "Singleplayer").expect("the Singleplayer button");
+    gui.mouse(f64::from(p.0 + 2), f64::from(p.1 + 2), Some((1, true)));
+    gui.mouse(f64::from(p.0 + 2), f64::from(p.1 + 2), Some((1, false)));
+    if let Some(e) = gui.take_last_error() {
+        panic!("clicking Singleplayer failed: {e}");
+    }
+    // the empty list's auto-jump lands on the create screen (CreateWorldScreen.openFresh)
+    let mut class = gui.screen_class();
+    for _ in 0..100 {
+        render(&h, (0.0, 0.0)); // the list polls on extractWidgetRenderState
+        class = gui.screen_class();
+        if class.as_deref() == Some(create_screen_class()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(
+        class.as_deref(),
+        Some(create_screen_class()),
+        "the create screen"
+    );
+    // Cancel: vanilla closes to setScreen(null), which is the title screen outside a world
+    let f = render(&h, (0.0, 0.0));
+    let p = text_pos(&f, "Cancel").expect("the Cancel button");
+    gui.mouse(f64::from(p.0 + 2), f64::from(p.1 + 2), Some((1, true)));
+    gui.mouse(f64::from(p.0 + 2), f64::from(p.1 + 2), Some((1, false)));
+    if let Some(e) = gui.take_last_error() {
+        panic!("clicking Cancel failed: {e}");
+    }
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.TitleScreen"),
+        "closing the last screen outside a world returns to the title screen"
+    );
+    // the title screen that came back draws its buttons again (init re-ran on the fresh instance)
+    let f = render(&h, (0.0, 0.0));
+    let t = texts(&f);
+    for want in ["Singleplayer", "Multiplayer", "Options...", "Quit Game"] {
+        assert!(
+            t.iter().any(|x| x == want),
+            "the returned title screen is missing {want:?} in {t:?}"
+        );
+    }
+    gui.close_screen();
+    for p in keep {
+        std::fs::create_dir_all(&p).unwrap();
+    }
+}
+
+/// The create screen's class name (its tab screens share the package).
+fn create_screen_class() -> &'static str {
+    "net.minecraft.client.gui.screens.worldselection.CreateWorldScreen"
+}
+
 /// The singleplayer world list: SelectWorldScreen opens, lists the worlds of the singleplayer
 /// dir (vanilla's own LevelStorageSource reading each world's `level.dat`), and "Play Selected
 /// World" goes through Haste's WorldOpenFlows replacement, which hands the world to Rust.

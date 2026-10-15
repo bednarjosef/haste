@@ -114,7 +114,10 @@ public final class Bridge {
         MouseImpl.y = 0.0;
         Proxies.hud.getChat().clearMessages(false);
         Proxies.hud.getChat().resetChatScroll();
-        Proxies.gui.setScreen(null);
+        // not Gui.setScreen(null) (which would open the title screen outside a world, like
+        // vanilla): the point here is no screen at all
+        if (ClientImpl.screen != null) ClientImpl.screen.removed();
+        ClientImpl.screen = null;
         MouseImpl.grabbed = false;
         Proxies.options.fov().set(70);
     }

@@ -3338,6 +3338,9 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut last_gui = GuiFrame::default();
     // An F2 press this tick: save the frame to the config screenshots dir after it is rendered.
     let mut f2_pending = false;
+    // The last screen transition (its class and when), for the click-to-screen timings.
+    let mut last_screen_class: Option<String> = None;
+    let mut last_screen_at: Option<Instant> = None;
     // The local singleplayer world of the joined session (stopped when the world is left and
     // at the end of the script, whatever it ended with).
     let mut local_server: Option<LocalWorld> = None;
@@ -3426,6 +3429,20 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                     );
                 }
                 let screen_class = ui.as_ref().and_then(|u| u.gui().screen_class());
+                // How long a screen change took to show (click-to-screen): the class is read
+                // once per tick, so this is the switch's blocking cost plus up to one tick.
+                if screen_class != last_screen_class {
+                    let now = Instant::now();
+                    if last_screen_at.is_some() {
+                        tracing::info!(
+                            "screen {} after {} ms",
+                            screen_class.as_deref().unwrap_or("(none)"),
+                            (now - last_screen_at.unwrap()).as_millis()
+                        );
+                    }
+                    last_screen_class = screen_class.clone();
+                    last_screen_at = Some(now);
+                }
                 let state = script::ScriptState {
                     joined: view.as_ref().is_some_and(|v| v.has_position),
                     settled,
