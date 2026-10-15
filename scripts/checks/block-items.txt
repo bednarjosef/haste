@@ -1,0 +1,9 @@
+# Campfire items, spawner mob, vault item, shelf items and a brushable block's item,
+# drawn by the block entity renderers. The runner places them with RCON in this worker's own
+# area (x 496-505, z 4-14, y 71) and teleports the player there; the camera looks south over
+# them from (500.5, 71, 6.5) at pitch 10 (looking down).
+wait_until joined
+wait 2500
+look 0 10
+wait 40
+screenshot block-items

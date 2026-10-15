@@ -241,6 +241,35 @@ public final class Handlers {
         Proxies.player.getEntityData().assignValues(p.packedItems());
     }
 
+    // ---- advancements ----
+
+    /** The server's advancement tree and progress, like ClientPacketListener.handleUpdateAdvancementsPacket. */
+    public static void handleUpdateAdvancementsPacket(ClientPacketListener c, ClientboundUpdateAdvancementsPacket p) {
+        Proxies.advancements.update(p);
+    }
+
+    /** The server picked the tab to show (login and world change). */
+    public static void handleSelectAdvancementsTab(ClientPacketListener c, ClientboundSelectAdvancementsTabPacket p) {
+        Proxies.advancements.setSelectedTab(p.getTab() == null ? null : Proxies.advancements.get(p.getTab()), false);
+    }
+
+    /** The server's answer to REQUEST_STATS, like ClientPacketListener.handleAwardStats. */
+    public static void handleAwardStats(ClientPacketListener c, ClientboundAwardStatsPacket p) {
+        for (var e : p.stats().object2IntEntrySet()) {
+            Proxies.player.getStats().setValue(Proxies.player, e.getKey(), e.getIntValue());
+        }
+        if (ClientImpl.screen instanceof net.minecraft.client.gui.screens.achievement.StatsScreen s) {
+            s.onStatsUpdated();
+        }
+    }
+
+    /** The server's game rule values, like ClientPacketListener.handleGameRuleValues. */
+    public static void handleGameRuleValues(ClientPacketListener c, ClientboundGameRuleValuesPacket p) {
+        if (ClientImpl.screen instanceof net.minecraft.client.gui.screens.options.InWorldGameRulesScreen s) {
+            s.onGameRuleValuesUpdated(p.values());
+        }
+    }
+
     // ---- commands ----
     public static void handleCommands(ClientPacketListener c, ClientboundCommandsPacket p) {
         var ctx = net.minecraft.commands.CommandBuildContext.simple(Registries.access(), LevelImpl.enabledFeatures(Proxies.level));
@@ -254,6 +283,62 @@ public final class Handlers {
     // ---- containers ----
     public static void handleOpenScreen(ClientPacketListener c, ClientboundOpenScreenPacket p) {
         net.minecraft.client.gui.screens.MenuScreens.create(p.getType(), Proxies.minecraft, p.getContainerId(), p.getTitle());
+    }
+
+    // ---- signs, books and command blocks (the screens that edit block entities; see BlockEntities) ----
+
+    /** {@code ClientPacketListener.handleOpenSignEditor}: the sign's edit screen over the block entity store. */
+    public static void handleOpenSignEditor(ClientPacketListener c, ClientboundOpenSignEditorPacket p) {
+        BlockEntities.openSignEditor(p.pos(), p.slot());
+    }
+
+    /**
+     * {@code ClientPacketListener.handleBlockEntityData}: the store's entity is loaded from the packet, and an
+     * open command-block editor picks the data up (vanilla's handler ends with {@code updateGui}, which
+     * activates its buttons — the server sends this packet when the player uses a command block).
+     */
+    public static void handleBlockEntityData(ClientPacketListener c, ClientboundBlockEntityDataPacket p) {
+        var be = BlockEntities.load(p.getPos(), p.getType(), p.getTag());
+        if (be instanceof net.minecraft.world.level.block.entity.CommandBlockEntity
+            && ClientImpl.screen instanceof net.minecraft.client.gui.screens.inventory.CommandBlockEditScreen editor)
+        {
+            editor.updateGui();
+        }
+    }
+
+    /** {@code ClientPacketListener.handleOpenBook}: the written book in hand opens for reading. */
+    public static void handleOpenBook(ClientPacketListener c, ClientboundOpenBookPacket p) {
+        var held = Proxies.player.getItemInHand(p.hand());
+        var access = net.minecraft.client.gui.screens.inventory.BookViewScreen.BookAccess.fromItem(held);
+        if (access != null) {
+            Proxies.gui.setScreen(new net.minecraft.client.gui.screens.inventory.BookViewScreen(access));
+        }
+    }
+
+    /**
+     * {@code MultiPlayerGameMode.performUseItemOn} opens the command block's editor on use (the server sends
+     * no packet for it): Rust forwards the use on a game-master block, and the entity comes from the store.
+     */
+    public static void openCommandBlock(int x, int y, int z) {
+        var be = BlockEntities.getOrCreate(new net.minecraft.core.BlockPos(x, y, z),
+            net.minecraft.world.level.block.entity.BlockEntityTypes.COMMAND_BLOCK);
+        if (be instanceof net.minecraft.world.level.block.entity.CommandBlockEntity commandBlock) {
+            Proxies.gui.setScreen(new net.minecraft.client.gui.screens.inventory.CommandBlockEditScreen(commandBlock));
+        }
+    }
+
+    /**
+     * {@code WritableBookItem.use} -> {@code LocalPlayer.openItemGui}: the writable book in hand opens for
+     * editing. Rust forwards the use of a writable book; the stack and the hand are Java's own.
+     */
+    public static void openItemGui(int hand) {
+        var h = hand == 0 ? net.minecraft.world.InteractionHand.MAIN_HAND : net.minecraft.world.InteractionHand.OFF_HAND;
+        var stack = Proxies.player.getItemInHand(h);
+        var content = stack.get(net.minecraft.core.component.DataComponents.WRITABLE_BOOK_CONTENT);
+        if (content != null) {
+            Proxies.gui.setScreen(new net.minecraft.client.gui.screens.inventory.BookEditScreen(
+                Proxies.player, stack, h, content));
+        }
     }
 
     private static AbstractContainerMenu menu(int id) {

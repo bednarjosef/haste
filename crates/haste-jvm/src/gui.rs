@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use haste_core::gui::{CursorShape, GuiBlend, GuiCommand, GuiFrame, TextMetrics, TextStyle};
-use haste_core::{EntityId, Identifier, RegistryIndex};
+use haste_core::{BlockPos, EntityId, Identifier, RegistryIndex};
 use jni::objects::{JIntArray, JObject, JObjectArray, JString};
 use jni::refs::Global;
 use jni::signature::{JavaType, Primitive};
@@ -39,9 +39,16 @@ pub enum ScreenKind {
     /// `net.minecraft.client.gui.screens.options.OptionsScreen` (vanilla opens it from the title
     /// screen; "Done" returns to the screen that opened it).
     Options,
+    /// `net.minecraft.client.gui.screens.packs.PackSelectionScreen` (the Options screen's
+    /// Resource Packs button; commits through `Minecraft.reloadResourcePacks`, which the
+    /// ClientImpl proxy reports to Rust).
+    Packs,
     /// `net.minecraft.client.gui.screens.multiplayer.JoinMultiplayerScreen`, whose parent is a
     /// `TitleScreen`.
     Multiplayer,
+    /// `net.minecraft.client.gui.screens.worldselection.SelectWorldScreen`, whose parent is a
+    /// `TitleScreen` (the title screen's Singleplayer button).
+    SelectWorld,
 }
 
 impl ScreenKind {
@@ -53,7 +60,9 @@ impl ScreenKind {
             ScreenKind::Command => 3,
             ScreenKind::Title => 4,
             ScreenKind::Options => 5,
+            ScreenKind::Packs => 8,
             ScreenKind::Multiplayer => 6,
+            ScreenKind::SelectWorld => 7,
         }
     }
 }
@@ -374,15 +383,17 @@ impl GuiPipeline {
             jvalue { d: mouse.1 },
             jvalue { f: partial },
         ];
-        let (commands, cursor) = self.call(self.m.render, JavaType::Array, &args, |env, v| {
-            decode_frame(env, v.l()?)
-        })?;
+        let (commands, cursor, blur_after) =
+            self.call(self.m.render, JavaType::Array, &args, |env, v| {
+                decode_frame(env, v.l()?)
+            })?;
         Ok(GuiFrame {
             commands,
             scale,
             width,
             height,
             cursor,
+            blur_after,
         })
     }
 
@@ -486,6 +497,40 @@ impl GuiPipeline {
         Ok(self.call_bytes("packet", id_and_body, None)?)
     }
 
+    /// A use opened the command block editor at a position (vanilla
+    /// `LocalPlayer.openCommandBlock`; the block entity comes from the Java-side store).
+    pub fn open_command_block(&self, pos: BlockPos) -> anyhow::Result<()> {
+        self.with_bridge(|env, bridge| {
+            env.call_method(
+                bridge,
+                jni_str!("openCommandBlock"),
+                jni_sig!("(III)V"),
+                &[
+                    jni::objects::JValue::Int(pos.x),
+                    jni::objects::JValue::Int(pos.y),
+                    jni::objects::JValue::Int(pos.z),
+                ],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// A use opened the writable book's editor (vanilla `LocalPlayer.openItemGui`); `hand` is
+    /// `InteractionHand.values()` numbering (0 main, 1 off).
+    pub fn open_item_gui(&self, hand: i32) -> anyhow::Result<()> {
+        self.with_bridge(|env, bridge| {
+            env.call_method(
+                bridge,
+                jni_str!("openItemGui"),
+                jni_sig!("(I)V"),
+                &[jni::objects::JValue::Int(hand)],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     /// Sets a player inventory slot (vanilla `Inventory` numbering) in Java; the mirror in
     /// [`GameState::inventory`] follows.
     pub fn set_inventory_slot(&self, slot: i32, stack: &ItemStackData) -> anyhow::Result<()> {
@@ -560,6 +605,26 @@ impl GuiPipeline {
         Ok(())
     }
 
+    /// The pause-menu server links from the configuration phase's `server_links` packet, one
+    /// string per link: `"<b|c>\t<label>\t<url>"` (b = built-in label id, c = custom label text).
+    pub fn set_server_links(&self, links: &[String]) -> anyhow::Result<()> {
+        self.with_bridge(|env, bridge| {
+            let arr = JObjectArray::<JString>::new(env, links.len(), JString::null())?;
+            for (i, l) in links.iter().enumerate() {
+                let s = JString::from_str(env, l)?;
+                arr.set_element(env, i, &s)?;
+            }
+            env.call_method(
+                bridge,
+                jni_str!("setServerLinks"),
+                jni_sig!("([Ljava/lang/String;)V"),
+                &[(&arr).into()],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     /// Tab held or released: vanilla's player list overlay is shown while it is down.
     pub fn set_tab_list_visible(&self, visible: bool) {
         if let Err(e) = self.with_bridge(|env, bridge| {
@@ -578,6 +643,48 @@ impl GuiPipeline {
     /// The connection ended: vanilla's disconnect screen with the reason.
     pub fn disconnected(&self, reason: &haste_core::Component) -> anyhow::Result<()> {
         self.disconnected_json(&serde_json::to_string(reason)?)
+    }
+
+    /// The multiplayer screen's Join: the address to connect to, if any was clicked since the
+    /// last call (menu mode; the connection is Rust's).
+    pub fn take_join_request(&self) -> Option<String> {
+        self.with_state(|s| s.join_requested.take())
+    }
+
+    /// Whether the connecting screen's Cancel was clicked since the last call (a join still in
+    /// progress must be dropped).
+    pub fn take_join_cancelled(&self) -> bool {
+        self.with_state(|s| std::mem::take(&mut s.join_cancelled))
+    }
+
+    /// The title screen's Quit Game was clicked (the client should exit).
+    pub fn take_quit_request(&self) -> bool {
+        self.with_state(|s| std::mem::take(&mut s.quit_requested))
+    }
+
+    /// The world list's "Play Selected World": the world folder to start the local server for
+    /// and join, if any was clicked since the last call.
+    pub fn take_open_world_request(&self) -> Option<String> {
+        self.with_state(|s| s.open_world_requested.take())
+    }
+
+    /// The create screen's "Create New World": the world to create, if requested since the last
+    /// call.
+    pub fn take_create_world_request(&self) -> Option<crate::proxies::CreateWorldRequest> {
+        self.with_state(|s| s.create_world_requested.take())
+    }
+
+    /// The resource pack selection the pack screen committed since the last call (vanilla's
+    /// `Minecraft.reloadResourcePacks`): repository ids, bottom first. The caller rebuilds its
+    /// asset stack and renderer from them.
+    pub fn take_resource_pack_ids(&self) -> Option<Vec<String>> {
+        self.with_state(|s| s.resource_pack_ids.take())
+    }
+
+    /// Tells the screens whether the local singleplayer server is running (the pause screen's
+    /// "Save and Quit" label). Set when the client starts/stops it.
+    pub fn set_local_world_running(&self, running: bool) {
+        self.with_state(|s| s.local_world_running = running);
     }
 
     /// [`Self::disconnected`] with the reason as a text component in its JSON form, e.g.
@@ -776,8 +883,11 @@ fn blend_of(code: i32) -> GuiBlend {
     }
 }
 
-fn decode_frame(env: &mut Env, frame: JObject) -> Result<(Vec<GuiCommand>, Option<CursorShape>)> {
-    // Safety: Bridge.render returns Object[]{int[], String[], int[1]}.
+fn decode_frame(
+    env: &mut Env,
+    frame: JObject,
+) -> Result<(Vec<GuiCommand>, Option<CursorShape>, i32)> {
+    // Safety: Bridge.render returns Object[]{int[], String[], int[2]}.
     let frame = unsafe { JObjectArray::<JObject>::from_raw(env, frame.into_raw()) };
     let ints = frame.get_element(env, 0)?;
     let ints = unsafe { JIntArray::from_raw(env, ints.into_raw()) };
@@ -795,9 +905,19 @@ fn decode_frame(env: &mut Env, frame: JObject) -> Result<(Vec<GuiCommand>, Optio
     }
     let cur = frame.get_element(env, 2)?;
     let cur = unsafe { JIntArray::from_raw(env, cur.into_raw()) };
-    let mut code = [0i32; 1];
+    let mut code = [0i32; 2];
     cur.get_region(env, 0, &mut code)?;
-    Ok((decode(&buf, &strings)?, cursor_shape(code[0])))
+    // The command index the blur goes after is a batch index; -1 means no blur this frame.
+    let blur = if code[1] < 0 {
+        None
+    } else {
+        Some(code[1] as usize)
+    };
+    let blur_after = match blur {
+        Some(b) => decode(&buf[..b.min(buf.len())], &strings)?.len() as i32,
+        None => -1,
+    };
+    Ok((decode(&buf, &strings)?, cursor_shape(code[0]), blur_after))
 }
 
 /// Decodes a frame's int records and string table into commands.

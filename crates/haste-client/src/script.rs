@@ -250,7 +250,7 @@ impl MouseButton {
 }
 
 /// A `wait_until` condition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Condition {
     Joined,
     Settled,
@@ -258,16 +258,41 @@ pub enum Condition {
     ScreenClosed,
     /// The hotbar holds at least one item (the runner's RCON `give` has arrived).
     HotbarItem,
+    /// The renderer was rebuilt from a new resource pack selection this run (the pack
+    /// screen's Done; vanilla `Minecraft.reloadResourcePacks`).
+    Reloaded,
+    /// The open screen's class simple name is one of these (`TitleScreen`,
+    /// `JoinMultiplayerScreen`, ...; `screen A|B` waits for either); no screen open matches
+    /// nothing.
+    Screen(Vec<String>),
 }
 
 impl Condition {
-    fn parse(name: &str, line: usize) -> Result<Condition, ScriptError> {
+    /// Parses the arguments of a `wait_until` line: one of the named conditions, or
+    /// `screen <SimpleName>` (alternatives separated by `|`).
+    fn parse(rest: &str, line: usize) -> Result<Condition, ScriptError> {
+        let name = rest.split_whitespace().next().unwrap_or_default();
         match name {
             "joined" => Ok(Condition::Joined),
             "settled" => Ok(Condition::Settled),
             "screen_open" => Ok(Condition::ScreenOpen),
             "screen_closed" => Ok(Condition::ScreenClosed),
             "hotbar_item" => Ok(Condition::HotbarItem),
+            "reloaded" => Ok(Condition::Reloaded),
+            "screen" => {
+                let class = rest.split_whitespace().nth(1).ok_or_else(|| {
+                    ScriptError::UnknownCondition {
+                        name: rest.to_owned(),
+                        line,
+                    }
+                })?;
+                Ok(Condition::Screen(
+                    class
+                        .split('|')
+                        .map(|c| c.rsplit('.').next().unwrap_or(c).to_owned())
+                        .collect(),
+                ))
+            }
             _ => Err(ScriptError::UnknownCondition {
                 name: name.to_owned(),
                 line,
@@ -282,16 +307,24 @@ impl Condition {
             Condition::ScreenOpen => state.screen_open,
             Condition::ScreenClosed => !state.screen_open,
             Condition::HotbarItem => state.hotbar_item,
+            Condition::Reloaded => state.reloaded,
+            Condition::Screen(want) => state.screen_class.as_deref().is_some_and(|open| {
+                open.rsplit('.')
+                    .next()
+                    .is_some_and(|n| want.iter().any(|w| w == n))
+            }),
         }
     }
 
-    fn name(&self) -> &'static str {
+    fn name(&self) -> String {
         match self {
-            Condition::Joined => "joined",
-            Condition::Settled => "settled",
-            Condition::ScreenOpen => "screen_open",
-            Condition::ScreenClosed => "screen_closed",
-            Condition::HotbarItem => "hotbar_item",
+            Condition::Joined => "joined".into(),
+            Condition::Settled => "settled".into(),
+            Condition::ScreenOpen => "screen_open".into(),
+            Condition::ScreenClosed => "screen_closed".into(),
+            Condition::HotbarItem => "hotbar_item".into(),
+            Condition::Reloaded => "reloaded".into(),
+            Condition::Screen(s) => format!("screen {}", s.join("|")),
         }
     }
 }
@@ -317,8 +350,9 @@ pub enum Step {
     /// Click a button at GUI coordinates.
     Click(MouseButton, i32, i32),
     /// Click the widget whose label is `text`, at the label's position plus `(dx, dy)`. The label
-    /// is matched exactly or as `text: value` (a slider's dynamic label); the offset lets a
-    /// script hit a slider's track rather than its centred label.
+    /// is matched exactly, as `text: value` (a slider's dynamic label) or as one of `|`
+    /// alternatives; the offset lets a script hit a slider's track rather than its centred
+    /// label.
     ClickText(String, i32, i32),
     /// Press and hold a mouse button (attack/use while a screen is closed).
     MouseDown(MouseButton),
@@ -353,13 +387,18 @@ pub enum Action {
 }
 
 /// The per-tick game state the runner reads for `wait_until`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ScriptState {
     pub joined: bool,
     pub settled: bool,
     pub screen_open: bool,
     /// Any hotbar slot holds an item (the RCON `give` has reached the client).
     pub hotbar_item: bool,
+    /// The open screen's class name (`wait_until screen <SimpleName>`), if any.
+    pub screen_class: Option<String>,
+    /// The renderer was rebuilt from a new resource pack selection this run
+    /// (`wait_until reloaded`).
+    pub reloaded: bool,
 }
 
 /// A parse error. Every variant carries the 1-based source line it came from.
@@ -428,8 +467,7 @@ pub fn parse(text: &str) -> Result<Vec<Step>, ScriptError> {
                 Step::Wait(parse_u32(n, line)?)
             }
             "wait_until" => {
-                let name = first_token(rest, "wait_until", line)?;
-                let condition = Condition::parse(name, line)?;
+                let condition = Condition::parse(rest, line)?;
                 Step::WaitUntil { condition, line }
             }
             "key" => Step::Key(parse_key(first_token(rest, "key", line)?, line)?),
@@ -451,17 +489,29 @@ pub fn parse(text: &str) -> Result<Vec<Step>, ScriptError> {
                 Step::Click(button, parse_i32(x, line)?, parse_i32(y, line)?)
             }
             "click_text" => {
+                // A quoted label may carry `dx dy` after it (a slider's track); an unquoted
+                // one is the whole rest of the line (multi-word labels, no offsets).
+                let quoted = rest.trim_start().starts_with('"');
                 let (text, rest) = parse_quoted(rest, "click_text", line)?;
-                let mut parts = rest.split_whitespace();
-                let dx = match parts.next() {
-                    Some(s) => parse_i32(s, line)?,
-                    None => 0,
-                };
-                let dy = match parts.next() {
-                    Some(s) => parse_i32(s, line)?,
-                    None => 0,
-                };
-                Step::ClickText(text, dx, dy)
+                if quoted {
+                    let mut parts = rest.split_whitespace();
+                    let dx = match parts.next() {
+                        Some(s) => parse_i32(s, line)?,
+                        None => 0,
+                    };
+                    let dy = match parts.next() {
+                        Some(s) => parse_i32(s, line)?,
+                        None => 0,
+                    };
+                    Step::ClickText(text, dx, dy)
+                } else {
+                    // Re-join the words `parse_quoted` split off (it takes the first word only).
+                    let label = match rest.is_empty() {
+                        true => text,
+                        false => format!("{text} {rest}"),
+                    };
+                    Step::ClickText(label, 0, 0)
+                }
             }
             "mouse_down" => Step::MouseDown(MouseButton::parse(
                 first_token(rest, "mouse_down", line)?,
@@ -735,6 +785,7 @@ mod tests {
             "type hello world",
             "mouse 160 90",
             "click right 10 20",
+            "click_text Multiplayer",
             "click_text \"FOV\" 90 5",
             "click_text Video",
             "mouse_down left",
@@ -759,6 +810,7 @@ mod tests {
                 Step::Text("hello world".to_owned()),
                 Step::MouseMove(160, 90),
                 Step::Click(MouseButton::Right, 10, 20),
+                Step::ClickText("Multiplayer".to_owned(), 0, 0),
                 Step::ClickText("FOV".to_owned(), 90, 5),
                 Step::ClickText("Video".to_owned(), 0, 0),
                 Step::MouseDown(MouseButton::Left),
@@ -767,6 +819,27 @@ mod tests {
                 Step::Look(90.0, 10.0),
                 Step::Screenshot("name1".to_owned()),
             ]
+        );
+        // The screen condition takes a class simple name (the package part is trimmed), or
+        // several separated by `|` (either matches).
+        let steps = parse("wait_until screen multiplayer.JoinMultiplayerScreen").unwrap();
+        assert_eq!(
+            steps,
+            vec![Step::WaitUntil {
+                condition: Condition::Screen(vec!["JoinMultiplayerScreen".to_owned()]),
+                line: 1,
+            }]
+        );
+        let steps = parse("wait_until screen TitleScreen|CreateWorldScreen").unwrap();
+        assert_eq!(
+            steps,
+            vec![Step::WaitUntil {
+                condition: Condition::Screen(vec![
+                    "TitleScreen".to_owned(),
+                    "CreateWorldScreen".to_owned()
+                ]),
+                line: 1,
+            }]
         );
     }
 

@@ -1,0 +1,33 @@
+# Recipe book: open the survival inventory, open the green recipe book button, search for the
+# oak planks recipe, click it (the server fills the 2x2 grid), take the result.
+# GUI 480x270. The inventory (176x166) is centred at (152, 52) while the book is closed.
+#   recipe book button              -> (152+104+10, 135-22+9)  = (266, 122)
+# With the book open the container moves right (leftPos 177+(480-176-200)/2 = 229) and the
+# book sits at xo=(480-147)/2-86=80, yo=(270-166)/2=52:
+#   search box (81x14 at xo+25, yo+13)  -> (105+40, 65+7)  = (145, 72)
+#   first recipe button (25x25 at xo+11, yo+31) -> (91+12, 83+12) = (103, 95)
+#   result slot (menu slot 0)         -> (229+154+8, 52+28+8) = (391, 88)
+#   hotbar slot 1 (menu slot 37)       -> (229+34, 52+150) = (263, 202)
+# The runner gives one oak log before the script runs.
+wait_until joined
+wait_until settled
+key E
+wait_until screen_open
+wait 10
+click left 266 122
+wait 20
+screenshot recipe-book-open
+click left 145 72
+type minecraft:oak_planks
+wait 40
+screenshot recipe-book-search
+click left 103 95
+wait 20
+click left 391 88
+wait 10
+click left 263 202
+wait 10
+key E
+wait_until screen_closed
+screenshot recipe-book-final
+wait 60
