@@ -26,6 +26,13 @@ const GROUND_Y: f32 = 24.0;
 /// The dump's format version this loader understands.
 const KNOWN_VERSION: u32 = 1;
 
+/// Layers whose vanilla `MeshDefinition` was built `.transformed(p -> p.translated(0, 24, 0))`:
+/// dump v1 records only the root's children, so the root's own PartPose translation is lost,
+/// and their pivots are already relative to the ground (vanilla
+/// `CopperGolemModel.createBodyLayer` is the only such main layer in 26.3). For these the
+/// `GROUND_Y` shift is skipped - applying it would float the model 1.5 blocks up.
+const ROOT_TRANSLATED_LAYERS: &[&str] = &["minecraft:copper_golem#main"];
+
 #[derive(Deserialize)]
 struct DumpFile {
     version: u32,
@@ -98,6 +105,10 @@ impl ModelLibrary {
         }
         let mut layers = AHashMap::with_capacity(file.layers.len());
         for l in file.layers {
+            // Layers whose vanilla mesh was built with a translated root PartPose (dump v1
+            // records only the root's children, so the translation is lost): their pivots are
+            // already ground-relative, and the shift is skipped (see ROOT_TRANSLATED_LAYERS).
+            let skip_ground_shift = ROOT_TRANSLATED_LAYERS.contains(&l.layer.as_str());
             let model = CubeModel {
                 texture: Identifier::new("haste", "entity_box"),
                 tex_width: l.texture_width.max(1),
@@ -108,7 +119,17 @@ impl ModelLibrary {
                     rotation: glam::Vec3::ZERO,
                     visible: true,
                     cubes: Vec::new(),
-                    children: l.parts.into_iter().map(convert_root_part).collect(),
+                    children: l
+                        .parts
+                        .into_iter()
+                        .map(|p| {
+                            if skip_ground_shift {
+                                convert_part(p)
+                            } else {
+                                convert_root_part(p)
+                            }
+                        })
+                        .collect(),
                 },
             };
             layers.insert(
