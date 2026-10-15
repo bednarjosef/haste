@@ -160,7 +160,9 @@ impl BakedBlockModels {
             }
             seen.push(ptr);
             quads += q.len() as u64 * std::mem::size_of::<BakedQuad>() as u64
-                + q.iter().map(|q| q.texture.capacity() as u64 + 24).sum::<u64>();
+                + q.iter()
+                    .map(|q| q.texture.capacity() as u64 + 24)
+                    .sum::<u64>();
         }
         quads
             + self.quads.capacity() as u64 * std::mem::size_of::<Option<Arc<[BakedQuad]>>>() as u64

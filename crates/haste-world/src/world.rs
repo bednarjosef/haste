@@ -296,9 +296,7 @@ impl World {
             stats.block_entities += chunk
                 .block_entities
                 .values()
-                .map(|be| {
-                    be.nbt.len() as u64 + std::mem::size_of::<BlockEntityData>() as u64 + 24
-                })
+                .map(|be| be.nbt.len() as u64 + std::mem::size_of::<BlockEntityData>() as u64 + 24)
                 .sum::<u64>();
             for s in &chunk.sections {
                 stats.sections += s.memory_bytes();

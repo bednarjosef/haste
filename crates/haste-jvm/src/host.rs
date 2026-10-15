@@ -221,13 +221,13 @@ impl JvmHost {
             ))
             .option("-Xshare:auto")
             .option("-Xss4m")
-            // Small-footprint JVM for the HUD: a 512 MiB heap cap (the GUI uses ~120 MiB;
-            // Bootstrap and the registries peak lower than that), the serial GC (no GC
-            // threads or write barriers of the collectors meant for heaps 100x this
-            // size) and C1-only compilation (the GUI is not hot enough for C2 to pay
-            // back its code cache and compile memory).
+            // Small-footprint JVM for the HUD: a 256 MiB heap cap (the GUI settles at
+            // ~110 MiB used; Bootstrap and the registries peak below 200), the serial GC
+            // (no collector threads or write barriers of the collectors meant for heaps
+            // 100x this size) and C1-only compilation (the GUI is not hot enough for C2
+            // to pay back its code cache and compile memory).
             .option("-Xms32m")
-            .option("-Xmx512m")
+            .option("-Xmx256m")
             .option("-XX:+UseSerialGC")
             .option("-XX:TieredStopAtLevel=1")
             .option("-XX:ReservedCodeCacheSize=32m")
