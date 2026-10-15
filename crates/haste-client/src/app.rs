@@ -525,6 +525,15 @@ impl Session {
             biome_climates.clone(),
             options.clone(),
         ));
+        // Wake the game thread the moment a play packet arrives, so packets are
+        // applied between ticks like vanilla's every-frame queue drain
+        // (`Minecraft.runTick`) instead of waiting for the next 20 Hz tick.
+        {
+            let shared = shared.clone();
+            driver
+                .connection()
+                .set_packet_wake(Arc::new(move || shared.wake_on_packet()));
+        }
         // The server's configuration-phase packs are part of the running stack from the
         // start; a later pack-screen reload keeps them layered (vanilla's repository
         // holds them beside the selection).
