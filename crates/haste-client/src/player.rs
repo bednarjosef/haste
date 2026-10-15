@@ -792,6 +792,26 @@ impl LocalPlayer {
             return;
         }
 
+        // Vanilla `Entity.baseTick` starts the tick with the sprint particle
+        // (`canSpawnSprintParticle`: sprinting, not in water/lava, not sneaking or
+        // spectating, alive) — the velocity is the one the previous tick ended with.
+        if self.state.sprinting
+            && !self.state.in_water
+            && !self.state.in_lava
+            && !self.state.sneaking
+            && self.game_mode != GameMode::Spectator
+            && self.health > 0.0
+            && ctx
+                .world
+                .is_chunk_loaded(BlockPos::from_dvec3(self.state.pos).chunk())
+        {
+            self.block_particles_out
+                .push(crate::block_particles::BlockParticleRequest::Sprint {
+                    feet: self.state.pos,
+                    velocity: self.state.velocity,
+                });
+        }
+
         // 0. Hotbar, crosshair target and interactions (vanilla handles key bindings before
         // the player's own tick).
         let look = (

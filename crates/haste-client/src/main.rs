@@ -11,6 +11,7 @@
 //! The lead owns this file. Add a module by adding one line here and your own file.
 use clap::Parser;
 
+mod ambient_particles;
 mod app;
 mod block_particles;
 mod game;

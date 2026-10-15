@@ -3,8 +3,9 @@
 # with an iron pickaxe; we look straight down and hold attack: crack particles while
 # mining, the destroy grid the moment the block goes.
 wait_until joined
-wait_until settled
-# The runner sets up the platform and the pickaxe while we wait here.
+# The runner teleports and sets up the platform and the pickaxe while we wait (the
+# settle wait is skipped: the shared test server is busy, and everything here happens
+# at the player's own feet).
 screenshot setup
 wait 300
 # Aim straight down at the block under our feet and start mining. Stone with an iron
@@ -17,4 +18,7 @@ screenshot mining-cracks
 wait 3
 screenshot block-broken
 mouse_up left
-wait 5
+# Ambient block particles: the runner places torches around the player after the
+# break; the animateTick samples spawn their flames and smoke.
+wait 60
+screenshot ambient-torches

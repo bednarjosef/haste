@@ -75,6 +75,11 @@ pub struct ParticleSpawn {
     /// `minecraft:dust` option data: ARGB colour and size scale (vanilla's
     /// `DustParticleOptions`), the one particle option whose payload we read.
     pub dust: Option<DustOption>,
+    /// `BlockParticleOption`: the block state a `minecraft:block` (or
+    /// `block_marker`/`falling_dust`/`dust_pillar`/`block_crumble`) particle is
+    /// made of — its sprite and tint replace the type's (vanilla
+    /// `TerrainParticle.createTerrainParticle`).
+    pub block_state: Option<BlockStateId>,
 }
 
 /// `DustParticleOptions`: the colour `DustParticle` tints its quad with, and the size scale
@@ -892,17 +897,44 @@ impl Particles {
 
     /// Spawns per the packet's semantics (see the module docs). Unknown types are skipped,
     /// logged once per type. `camera` is the eye position the vanilla distance limiter
-    /// measures from.
-    pub fn spawn(&mut self, s: &ParticleSpawn, camera: DVec3) {
+    /// measures from. `biomes` resolves terrain-particle tints (the world the game thread
+    /// holds); `None` leaves the grey base.
+    pub fn spawn(
+        &mut self,
+        s: &ParticleSpawn,
+        camera: DVec3,
+        biomes: Option<&dyn crate::tint::BiomeSource>,
+    ) {
         let Some(types) = self.types.as_deref() else {
             return;
         };
-        let Some(kind) = types.index(&s.kind) else {
-            if !self.unknown.contains(&s.kind) {
-                self.unknown.push(s.kind.clone());
-                tracing::warn!("particle type {} has no atlas sprites; skipped", s.kind);
+        // A BlockParticleOption replaces the type's sprite and colour (vanilla
+        // `TerrainParticle.createTerrainParticle`); it resolves through the block table,
+        // not the type's atlas sprites (a `minecraft:block` type has none).
+        let terrain = s
+            .block_state
+            .filter(|_| {
+                matches!(
+                    s.kind.path(),
+                    "block" | "block_marker" | "falling_dust" | "dust_pillar" | "block_crumble"
+                )
+            })
+            .and_then(|state| types.blocks.as_ref().and_then(|b| b.sprite(state)))
+            .filter(|sprite| sprite.spawn)
+            .copied();
+        let kind = if terrain.is_some() {
+            None
+        } else {
+            match types.index(&s.kind) {
+                Some(k) => Some(k),
+                None => {
+                    if !self.unknown.contains(&s.kind) {
+                        self.unknown.push(s.kind.clone());
+                        tracing::warn!("particle type {} has no atlas sprites; skipped", s.kind);
+                    }
+                    return;
+                }
             }
-            return;
         };
         // `ClientLevel.doAddParticle`: the limiter drops spawns more than 32 blocks from the
         // camera, unless the packet overrides it (explosions do). Vanilla checks the final
@@ -910,13 +942,25 @@ impl Particles {
         let within_limiter =
             |pos: DVec3| s.override_limiter || pos.distance_squared(camera) <= SPAWN_DISTANCE_SQ;
         let behaviour = ParticleBehaviour::of(&s.kind);
+        let tint = terrain.map_or([1.0; 3], |sprite| match biomes {
+            Some(b) => {
+                let f = s.pos.floor().as_ivec3();
+                let block = BlockPos::new(f.x, f.y, f.z);
+                self.terrain_tint(&sprite, block, b)
+            }
+            None => [0.6; 3],
+        });
         if s.count <= 0 {
             // One particle at the position, velocity = offset * max speed.
             if !within_limiter(s.pos) {
                 return;
             }
             let speed = Vec3::from(s.offset) * Vec3::from(s.max_speed);
-            self.push(kind, behaviour, s.pos, speed, s.dust);
+            match (kind, terrain) {
+                (Some(kind), _) => self.push(kind, behaviour, s.pos, speed, s.dust),
+                (None, Some(sprite)) => self.push_terrain(&sprite, s.pos, speed, 1.0, None, tint),
+                (None, None) => {}
+            }
         } else {
             for _ in 0..s.count {
                 if self.pool.len() >= MAX_PARTICLES {
@@ -958,7 +1002,13 @@ impl Particles {
                     ),
                 };
                 if within_limiter(pos) {
-                    self.push(kind, behaviour, pos, speed, s.dust);
+                    match (kind, terrain) {
+                        (Some(kind), _) => self.push(kind, behaviour, pos, speed, s.dust),
+                        (None, Some(sprite)) => {
+                            self.push_terrain(&sprite, pos, speed, 1.0, None, tint)
+                        }
+                        (None, None) => {}
+                    }
                 }
             }
         }
@@ -1075,6 +1125,53 @@ impl Particles {
         }
         let tint = self.terrain_tint(&sprite, pos, biomes);
         self.push_terrain(&sprite, p, Vec3::ZERO, 0.6, Some(0.2), tint);
+    }
+
+    /// The sprint particle: vanilla `Entity.spawnSprintParticle` — one block
+    /// particle per tick behind a sprinting player's feet, on the block below
+    /// (`getOnPosLegacy`, 0.2 below the feet), the position jittered by half the
+    /// entity's width (0.6 for a player) and clamped into the support block's
+    /// column when the feet left it, the velocity `movement * -4` horizontally and
+    /// `1.5` up, through the `TerrainParticle` constructor.
+    pub fn spawn_sprint(
+        &mut self,
+        feet: DVec3,
+        velocity: DVec3,
+        state: BlockStateId,
+        shapes: &dyn CollisionShapes,
+        biomes: &dyn crate::tint::BiomeSource,
+    ) {
+        // `getOnPosLegacy` = `getOnPos(0.2)`: the block column of the feet, 0.2 down.
+        let support = BlockPos::new(
+            feet.x.floor() as i32,
+            (feet.y - 0.2).floor() as i32,
+            feet.z.floor() as i32,
+        );
+        let Some(sprite) = self
+            .types
+            .as_deref()
+            .and_then(|t| t.blocks.as_ref())
+            .and_then(|b| b.sprite(state))
+            .filter(|s| s.spawn)
+            .copied()
+        else {
+            return;
+        };
+        let width = 0.6;
+        let mut x = feet.x + (self.rng.next_f64() - 0.5) * width;
+        let mut z = feet.z + (self.rng.next_f64() - 0.5) * width;
+        // Clamp into the support block's column when the feet are in another.
+        if (feet.x.floor() as i32) != support.x {
+            x = x.clamp(support.x as f64, support.x as f64 + 1.0);
+        }
+        if (feet.z.floor() as i32) != support.z {
+            z = z.clamp(support.z as f64, support.z as f64 + 1.0);
+        }
+        let pos = DVec3::new(x, feet.y + 0.1, z);
+        let speed = Vec3::new((velocity.x * -4.0) as f32, 1.5, (velocity.z * -4.0) as f32);
+        let tint = self.terrain_tint(&sprite, support, biomes);
+        let _ = shapes;
+        self.push_terrain(&sprite, pos, speed, 1.0, None, tint);
     }
 
     /// The tint of a terrain particle at `pos` (`TerrainParticle`'s colour source).
@@ -1736,6 +1833,7 @@ mod tests {
             randomization: 0,
             override_limiter: false,
             dust: None,
+            block_state: None,
         }
     }
 
@@ -1747,14 +1845,14 @@ mod tests {
         request.pos = DVec3::new(10.0, 64.0, -5.0);
         request.offset = [0.0, 0.0, 0.0];
         request.max_speed = [0.0, 0.0, 0.0];
-        particles.spawn(&request, request.pos);
+        particles.spawn(&request, request.pos, None);
     }
 
     /// Spawns with a 3-sigma gaussian spread from the packet, as `handleParticleEvent` does.
     fn spawn_spread(particles: &mut Particles, kind: &str, count: i32) {
         let mut request = spawn_request(kind, count);
         request.pos = DVec3::new(10.0, 64.0, -5.0);
-        particles.spawn(&request, request.pos);
+        particles.spawn(&request, request.pos, None);
     }
 
     /// True while the pool still has particles.
@@ -1950,7 +2048,11 @@ mod tests {
     #[test]
     fn count_zero_spawns_one_at_the_position() {
         let mut particles = Particles::new(types_for_tests(&[("flame", &[[0, 0, 8, 8]])]));
-        particles.spawn(&spawn_request("flame", 0), DVec3::new(10.0, 64.0, -5.0));
+        particles.spawn(
+            &spawn_request("flame", 0),
+            DVec3::new(10.0, 64.0, -5.0),
+            None,
+        );
         assert_eq!(particles.alive(), 1);
         let p = &particles.pool[0];
         assert_eq!(p.prev_pos, p.pos);
@@ -2022,18 +2124,18 @@ mod tests {
         let mut request = spawn_request("smoke", 0);
         // 33 blocks on the x axis: `ClientLevel.doAddParticle` drops it.
         request.pos = DVec3::new(33.0, 0.0, 0.0);
-        particles.spawn(&request, DVec3::ZERO);
+        particles.spawn(&request, DVec3::ZERO, None);
         assert_eq!(particles.alive(), 0);
         // The packet can override the limiter.
         let mut request = spawn_request("smoke", 0);
         request.pos = DVec3::new(33.0, 0.0, 0.0);
         request.override_limiter = true;
-        particles.spawn(&request, DVec3::ZERO);
+        particles.spawn(&request, DVec3::ZERO, None);
         assert_eq!(particles.alive(), 1);
         // 31 blocks survives the limiter.
         let mut request = spawn_request("smoke", 0);
         request.pos = DVec3::new(31.0, 0.0, 0.0);
-        particles.spawn(&request, DVec3::ZERO);
+        particles.spawn(&request, DVec3::ZERO, None);
         assert_eq!(particles.alive(), 2);
     }
 
@@ -2171,7 +2273,7 @@ mod tests {
         let mut particles = Particles::new(types_for_tests(&[("portal", &[[0, 0, 4, 4]])]));
         let mut request = spawn_request("portal", 0);
         request.max_speed = [0.0, 0.0, 0.0];
-        particles.spawn(&request, request.pos);
+        particles.spawn(&request, request.pos, None);
         let start = particles.pool[0].pos;
         let lifetime = particles.pool[0].lifetime;
         let mut ticks = 0;
@@ -2208,7 +2310,7 @@ mod tests {
         // The x speed is the size: quad = 2 * (1 - size/2), size = offset * max_speed.
         request.max_speed = [0.5, 0.0, 0.0];
         request.offset = [1.0, 0.0, 0.0];
-        particles.spawn(&request, request.pos);
+        particles.spawn(&request, request.pos, None);
         let p = &particles.pool[0];
         assert!((6.0..=9.0).contains(&p.lifetime), "life {}", p.lifetime);
         assert_eq!(p.quad, 2.0 * (1.0 - 0.5 * 0.5));
@@ -2227,7 +2329,7 @@ mod tests {
             color: [1.0, 0.0, 0.0],
             scale: 2.0,
         });
-        particles.spawn(&request, request.pos);
+        particles.spawn(&request, request.pos, None);
         let p = &particles.pool[0];
         // DustParticleBase: life (int)(8/(r*0.8+0.2) * 2) = 16..=80, quad 0.75*2 = 1.5x.
         assert!((16.0..=80.0).contains(&p.lifetime), "life {}", p.lifetime);
@@ -2260,6 +2362,40 @@ mod tests {
             assert!(up.is_normalized(), "{up:?}");
             assert!(right.cross(up).length() > 0.99);
         }
+    }
+
+    /// The sprint particle: on the block below the feet (0.2 down), y + 0.1, the
+    /// horizontal jitter clamped into the support column, velocity the constructor
+    /// over `movement * -4` and +1.5 y.
+    #[test]
+    fn sprint_particle_matches_entity_spawn_sprint_particle() {
+        let mut particles = Particles::new(types_with_blocks());
+        let feet = DVec3::new(10.5, 64.0, -5.5);
+        let velocity = DVec3::new(0.2, -0.078, 0.0);
+        particles.spawn_sprint(
+            feet,
+            velocity,
+            BlockStateId(0),
+            &full_cube_shapes(),
+            &OneBiome,
+        );
+        assert_eq!(particles.alive(), 1);
+        let p = &particles.pool[0];
+        // `getOnPosLegacy` at y=64 - 0.2 -> the block at 63; the particle sits at
+        // the feet height + 0.1, within the support column (the feet are in it).
+        assert!((p.pos.y - 64.1).abs() < 1e-6, "y {}", p.pos.y);
+        assert!(p.pos.x > 10.0 && p.pos.x < 11.0, "x {}", p.pos.x);
+        assert!(p.pos.z > -6.0 && p.pos.z < -5.0, "z {}", p.pos.z);
+        // The speed constructor's bounds (see the destroy grid test), y lifted.
+        assert!(
+            p.vel.y > 0.1 - 0.18 && p.vel.y < 0.1 + 0.18,
+            "vy {}",
+            p.vel.y
+        );
+        let horizontal = (p.vel.x * p.vel.x + p.vel.z * p.vel.z).sqrt();
+        assert!(horizontal < 0.18, "horizontal {horizontal}");
+        // A full-cube quad (no scale): the halved default.
+        assert!((0.05..=0.1).contains(&p.quad), "quad {}", p.quad);
     }
 
     /// The block sprite table over the real assets: every state of a few familiar

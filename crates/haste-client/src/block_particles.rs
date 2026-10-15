@@ -37,6 +37,15 @@ pub enum BlockParticleRequest {
         /// The face hit (`Direction.values()[data]`, the packet's payload).
         face: Direction,
     },
+    /// A sprint tick (`Entity.spawnSprintParticle`): one block particle behind the
+    /// sprinting player's feet. The block state is read from the world when the
+    /// request is applied.
+    Sprint {
+        /// The player's feet this tick (vanilla jitters around them).
+        feet: haste_core::DVec3,
+        /// The velocity this tick started with (vanilla `getDeltaMovement`).
+        velocity: haste_core::DVec3,
+    },
 }
 
 /// `LevelEventHandler.levelEvent`'s block-particle cases; `None` for every other

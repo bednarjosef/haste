@@ -409,6 +409,9 @@ pub struct Session {
     /// Block particles queued since the last tick (our own break and mining start, and the
     /// server's `level_event`s), drained by the game thread into the shared pool.
     pub block_particle_requests: Vec<crate::block_particles::BlockParticleRequest>,
+    /// Ambient block particles of this tick's `animateTick` (reused buffer), spawned into
+    /// the pool by the game thread.
+    pub ambient_spawns: Vec<haste_render::ParticleSpawn>,
     /// Particle spawns the game thread took over the whole session (counters).
     pub particle_spawned: usize,
     /// `minecraft:particle_type` names by protocol id (the static registry the packet's
@@ -453,6 +456,7 @@ impl Session {
             use_item: None,
             particle_spawns: Vec::new(),
             block_particle_requests: Vec::new(),
+            ambient_spawns: Vec::new(),
             particle_spawned: 0,
             particle_names,
         }
@@ -1000,6 +1004,7 @@ impl Session {
             return;
         };
         let dust = dust_option(&kind, &p.particle.data);
+        let block_state = block_state_option(&kind, &p.particle.data);
         self.particle_spawns.push(haste_render::ParticleSpawn {
             kind,
             pos: p.pos,
@@ -1009,6 +1014,7 @@ impl Session {
             randomization: p.randomization.max(0) as u32,
             override_limiter: p.override_limiter,
             dust,
+            block_state,
         });
     }
 
@@ -1037,6 +1043,32 @@ fn dust_option(kind: &Identifier, data: &[u8]) -> Option<haste_render::DustOptio
         ],
         scale,
     })
+}
+
+/// `BlockParticleOption` from a particle's raw data (one VarInt block state id,
+/// `ByteBufCodecs.idMapper(Block.BLOCK_STATE_REGISTRY)`); `None` for every other
+/// type and for a malformed payload. The fall-damage landing particles
+/// (`LivingEntity.checkFallDamage` -> `sendParticles`) arrive this way.
+fn block_state_option(kind: &Identifier, data: &[u8]) -> Option<haste_core::BlockStateId> {
+    const BLOCK_KINDS: [&str; 5] = [
+        "block",
+        "block_marker",
+        "falling_dust",
+        "dust_pillar",
+        "block_crumble",
+    ];
+    if !BLOCK_KINDS.contains(&kind.path()) || data.is_empty() {
+        return None;
+    }
+    // The VarInt the encoder wrote (up to 5 bytes, little-endian groups).
+    let mut value = 0u32;
+    for (i, byte) in data.iter().take(5).enumerate() {
+        value |= u32::from(byte & 0x7F) << (7 * i);
+        if byte & 0x80 == 0 {
+            return Some(haste_core::BlockStateId(value));
+        }
+    }
+    None
 }
 
 /// Entity metadata serializer type id of `OPTIONAL_UNSIGNED_INT` (the wire type of

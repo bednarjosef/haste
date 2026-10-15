@@ -272,6 +272,9 @@ craft() {
 # ---- 7. Block particles: the client's own destroy grid and mining cracks ----
 particles() {
   local log="$LOGDIR/particles.log"
+  # A name of our own: another agent's feature check may be running as $NAME on the
+  # shared server, and a duplicate login kicks our client mid-script.
+  local NAME=ParticlesCheck
   client_start "$ROOT/scripts/checks/block-particles.txt" "$log"
   wait_online || { check particles "player never joined" 1; return; }
   # The script waits 15 s after its setup screenshot; set the stage in that window:
@@ -288,15 +291,24 @@ particles() {
   rcon "execute at $NAME run fill ~-4 ~-1 ~-4 ~4 ~-1 ~4 stone" >/dev/null
   rcon "execute at $NAME run fill ~-3 ~ ~-3 ~3 ~4 ~3 air" >/dev/null
   rcon "execute as $NAME run give @s minecraft:iron_pickaxe 1" >/dev/null
+  # Torches around the player for the ambient animateTick particles (placed after
+  # the mining screenshots appear, so they do not get mined).
+  if wait_shot "$log" block-broken 60; then
+    rcon "execute at $NAME run setblock ~2 ~ ~2 torch" >/dev/null
+    rcon "execute at $NAME run setblock ~-2 ~ ~-1 torch" >/dev/null
+    rcon "execute at $NAME run setblock ~1 ~ ~-3 torch" >/dev/null
+  fi
   wait_exit
   echo "--- block particles evidence ---"
-  grep "particles drawn" "$log" | tail -3
-  local cracks broken r=0
+  grep "particles drawn" "$log" | tail -4
+  local cracks broken ambient r=0
   cracks=$(grep "script-mining-cracks" "$log" | grep -o '[0-9]* particles drawn' | grep -o '[0-9]*')
   broken=$(grep "script-block-broken" "$log" | grep -o '[0-9]* particles drawn' | grep -o '[0-9]*')
+  ambient=$(grep "script-ambient-torches" "$log" | grep -o '[0-9]* particles drawn' | grep -o '[0-9]*')
   [ -n "$cracks" ] && [ "$cracks" -gt 0 ] || { echo "no crack particles while mining"; r=1; }
   [ -n "$broken" ] && [ "$broken" -gt 20 ] || { echo "no destroy grid on break"; r=1; }
-  check particles "mining drew crack particles ($cracks) and the break the destroy grid ($broken)" "$r"
+  [ -n "$ambient" ] && [ "$ambient" -gt 0 ] || { echo "no ambient torch particles"; r=1; }
+  check particles "mining drew crack particles ($cracks), the break the destroy grid ($broken), torches ambient particles ($ambient)" "$r"
 }
 
 ALL=(hud death drop modes f2 craft particles)
