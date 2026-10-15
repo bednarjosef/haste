@@ -7,7 +7,10 @@
 # linted and tested; a change to the workspace manifest, the lockfile or the toolchain checks the
 # whole workspace, and a change that touches no Rust or build file skips cargo entirely. When the
 # runtime Java (crates/haste-jvm/java) changed and a test server is up, the pause and language
-# feature checks run too: the runtime javac compiles that code only inside the game.
+# feature checks run too: the runtime javac compiles that code only inside the game. A change to
+# haste-jvm runs its ignored real-screen tests (they need the cached game jar), and a change to the
+# runtime Java or the client's screen plumbing (ui.rs, app.rs) runs the singleplayer check (title
+# -> create world -> in game -> pause -> quit, through the real local server).
 #
 # env: CI_JOBS (cargo -j, default 4), CI_GAME_CHECKS=0 to skip the feature checks,
 #      CARGO_TARGET_DIR (reuse a warm target directory between runs).
@@ -28,6 +31,16 @@ if grep -qE '\.rs$' <<<"$changed"; then
   step "format"
   cargo fmt --all --check >/dev/null 2>&1 || { cargo fmt --all --check | head -40; fail "cargo fmt"; }
 fi
+
+# Structure (AGENTS.md "Structured like vanilla"): a source file already over 1000 lines must not
+# grow. Reported as a warning for now; it becomes a failure once the large files are split.
+for f in $(grep -E '\.(rs|java)$' <<<"$changed"); do
+  [ -f "$f" ] || continue
+  now=$(wc -l <"$f"); before=$(git show "$base:$f" 2>/dev/null | wc -l)
+  if [ "$now" -gt 1000 ] && [ "$now" -gt "$before" ]; then
+    printf '!! structure warning: %s grew from %d to %d lines (over 1000)\n' "$f" "$before" "$now"
+  fi
+done
 
 # The crates to check: those owning a changed file plus every workspace crate depending on them.
 crates=$(cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c '
@@ -60,6 +73,27 @@ else
   step "no crate changed: cargo skipped"
 fi
 
+# Render smoke: when the renderer or the client changed and the test server is up, draw one real
+# frame (unit tests never bind the real pipelines; a uniform-size mismatch only shows on a frame).
+if grep -qE '^crates/haste-(render|client|assets)/' <<<"$changed"; then
+  if (exec 3<>/dev/tcp/127.0.0.1/25691) 2>/dev/null; then
+    step "render smoke: one real frame from the test server"
+    cargo build -q -j "$jobs" --release -p haste-client || fail "release build"
+    target="${CARGO_TARGET_DIR:-$PWD/target}"
+    shot="$target/ci-render-smoke.png"
+    rm -f "$shot"
+    out=$(timeout 120 "$target/release/haste" --server 127.0.0.1:25691 --username CiSmoke \
+      --screenshot "$shot" --seconds 60 2>&1)
+    rc=$?
+    if [ "$rc" -ne 0 ] || [ ! -s "$shot" ] || grep -q "panicked" <<<"$out"; then
+      grep -E "panicked|wgpu error|Validation|Error" <<<"$out" | head -8
+      fail "render smoke (exit $rc)"
+    fi
+  else
+    step "render smoke skipped: no test server on 127.0.0.1:25691"
+  fi
+fi
+
 if [ "${CI_GAME_CHECKS:-1}" != 0 ] && grep -q '^crates/haste-jvm/java/' <<<"$changed"; then
   if (exec 3<>/dev/tcp/127.0.0.1/25691) 2>/dev/null; then
     step "game checks (runtime Java changed): pause language"
@@ -72,5 +106,23 @@ if [ "${CI_GAME_CHECKS:-1}" != 0 ] && grep -q '^crates/haste-jvm/java/' <<<"$cha
   else
     step "game checks skipped: no test server on 127.0.0.1:25691"
   fi
+fi
+if grep -q '^crates/haste-jvm/' <<<"$changed"; then
+  if [ -e cache ]; then
+    step "jvm screen tests (haste-jvm changed; real vanilla screens)"
+    out=$(cargo test -q -j "$jobs" -p haste-jvm --test jvm -- --ignored --test-threads 1 2>&1) \
+      || { grep -E 'FAILED|panicked|failures:' <<<"$out" | head -20; fail "jvm screen tests"; }
+    grep -E '^test result' <<<"$out" | sed 's/^/   /'
+  fi
+fi
+
+if [ "${CI_GAME_CHECKS:-1}" != 0 ] && grep -qE '^crates/haste-jvm/java/|^crates/haste-client/src/(ui|app)\.rs' <<<"$changed"; then
+  step "singleplayer check (screens or runtime Java changed)"
+  cargo build -q -j "$jobs" --release -p haste-client || fail "release build"
+  target="${CARGO_TARGET_DIR:-$PWD/target}"
+  out=$(HASTE_BIN="$target/release/haste" timeout 600 bash scripts/checks/singleplayer-check.sh 2>&1)
+  rc=$?
+  grep -E '^(PASS|FAIL)|passed|failed' <<<"$out" | tail -8
+  [ "$rc" -eq 0 ] || fail "singleplayer check"
 fi
 step "CI passed"

@@ -70,7 +70,7 @@ impl Account {
 }
 
 /// Connection parameters.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ConnectOptions {
     /// `host`, `host:port` or `ip:port`. Without a port, `_minecraft._tcp`
     /// SRV is tried, then port 25565.
@@ -157,6 +157,24 @@ impl CookieJar {
         if let Ok(mut m) = self.0.lock() {
             m.insert(key, payload);
         }
+    }
+}
+
+impl std::fmt::Debug for ConnectOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The wake hook is not `Debug` (and says nothing useful): its presence is enough.
+        f.debug_struct("ConnectOptions")
+            .field("address", &self.address)
+            .field("account", &self.account)
+            .field("protocol_version", &self.protocol_version)
+            .field("client_information", &self.client_information)
+            .field("brand", &self.brand)
+            .field("tables", &self.tables)
+            .field("chunks_per_tick", &self.chunks_per_tick)
+            .field("resource_packs", &self.resource_packs)
+            .field("downloads_dir", &self.downloads_dir)
+            .field("cookies", &self.cookies)
+            .finish()
     }
 }
 
@@ -358,9 +376,24 @@ enum Outgoing {
 type Decoder = TcpNetworkDecoder<BufReader<OwnedReadHalf>>;
 type Encoder = TcpNetworkEncoder<OwnedWriteHalf>;
 
+/// The wake hook the client sets on a live connection (see [`Connection`]).
+type PacketWake = Arc<dyn Fn() + Send + Sync>;
+/// Where the hook lives so the reader task and the owner share it.
+type PacketWakeSlot = Arc<Mutex<Option<PacketWake>>>;
+
+/// One queued clientbound packet with the instant the reader task decoded it
+/// (vanilla's packets are handled on the render thread's queue the same frame
+/// they arrive; the timestamp is how the client measures that wait).
+pub struct Arrived {
+    pub packet: ClientboundPlay,
+    /// When the reader task decoded the packet (`Instant` on the reader's
+    /// clock; the game thread compares it with its own `Instant::now`).
+    pub at: std::time::Instant,
+}
+
 /// A live play-state connection.
 pub struct Connection {
-    rx: mpsc::UnboundedReceiver<ClientboundPlay>,
+    rx: mpsc::UnboundedReceiver<Arrived>,
     tx: mpsc::UnboundedSender<Outgoing>,
     registries: Arc<SyncedRegistries>,
     /// Registries from a reconfiguration or transfer, swapped in when the
@@ -375,6 +408,12 @@ pub struct Connection {
     stats: Arc<Stats>,
     closed: Arc<Mutex<Option<String>>>,
     profile: GameProfile,
+    /// Called by the reader task after it queues a play packet, so the client
+    /// can wake whatever drains them (vanilla drains the packet queue every
+    /// frame; a 20 Hz tick alone leaves packets waiting up to 50 ms). Cheap
+    /// to call: a condvar notify. Set through [`Self::set_packet_wake`] once
+    /// the drainer (the game thread's `Shared`) exists.
+    packet_arrived: PacketWakeSlot,
     reader: tokio::task::JoinHandle<()>,
     writer: tokio::task::JoinHandle<()>,
 }
@@ -699,10 +738,18 @@ impl Connection {
             packet: login,
         };
         let (game_tx, game_rx) = mpsc::unbounded_channel();
+        let packet_arrived: PacketWakeSlot = Arc::new(Mutex::new(None));
+        let start = std::time::Instant::now();
         for p in early {
-            let _ = game_tx.send(p);
+            let _ = game_tx.send(Arrived {
+                packet: p,
+                at: start,
+            });
         }
-        let _ = game_tx.send(ClientboundPlay::Login(info.packet.clone()));
+        let _ = game_tx.send(Arrived {
+            packet: ClientboundPlay::Login(info.packet.clone()),
+            at: start,
+        });
 
         // Tasks.
         let (out_tx, out_rx) = mpsc::unbounded_channel();
@@ -741,6 +788,7 @@ impl Connection {
             opts,
             regs: regs.clone(),
             pending_registries: pending_registries.clone(),
+            packet_arrived: packet_arrived.clone(),
         }));
         (
             Connection {
@@ -754,6 +802,7 @@ impl Connection {
                 stats,
                 closed,
                 profile,
+                packet_arrived,
                 reader,
                 writer,
             },
@@ -767,9 +816,17 @@ impl Connection {
     /// (`start_configuration`) or a `transfer`; when it is returned,
     /// [`Self::registries`] already holds the registries that came with it.
     pub fn try_recv(&mut self) -> Option<ClientboundPlay> {
-        let p = self.rx.try_recv().ok()?;
-        self.on_dequeue(&p);
-        Some(p)
+        let a = self.rx.try_recv().ok()?;
+        self.on_dequeue(&a.packet);
+        Some(a.packet)
+    }
+
+    /// Like [`Self::try_recv`], keeping the arrival timestamp (for the client's
+    /// arrival-to-apply timing log).
+    pub fn try_recv_arrived(&mut self) -> Option<Arrived> {
+        let a = self.rx.try_recv().ok()?;
+        self.on_dequeue(&a.packet);
+        Some(a)
     }
 
     /// The connection's live set of server resource packs (vanilla's
@@ -789,11 +846,17 @@ impl Connection {
         self.packs_version.load(Ordering::Relaxed)
     }
 
+    /// Next packet with its arrival timestamp; `None` once the connection is
+    /// closed and drained.
+    pub async fn recv_arrived(&mut self) -> Option<Arrived> {
+        let a = self.rx.recv().await?;
+        self.on_dequeue(&a.packet);
+        Some(a)
+    }
+
     /// Next packet; `None` once the connection is closed and drained.
     pub async fn recv(&mut self) -> Option<ClientboundPlay> {
-        let p = self.rx.recv().await?;
-        self.on_dequeue(&p);
-        Some(p)
+        self.recv_arrived().await.map(|a| a.packet)
     }
 
     fn on_dequeue(&mut self, p: &ClientboundPlay) {
@@ -814,6 +877,14 @@ impl Connection {
         self.tx
             .send(Outgoing::Play(Box::new(p)))
             .map_err(|_| ProtocolError::Closed)
+    }
+
+    /// Sets the hook the reader task calls after queueing each play packet
+    /// (see [`Self::packet_arrived`]). Call once, right after connect.
+    pub fn set_packet_wake(&self, wake: PacketWake) {
+        if let Ok(mut g) = self.packet_arrived.lock() {
+            *g = Some(wake);
+        }
     }
 
     /// Registries from the configuration state.
@@ -1316,7 +1387,7 @@ async fn configuration_state(
 struct ReaderCtx {
     dec: Decoder,
     out: mpsc::UnboundedSender<Outgoing>,
-    game: mpsc::UnboundedSender<ClientboundPlay>,
+    game: mpsc::UnboundedSender<Arrived>,
     dispatch: Arc<Dispatch<ClientboundPlay>>,
     tables: Arc<ProtocolTables>,
     stats: Arc<Stats>,
@@ -1326,6 +1397,7 @@ struct ReaderCtx {
     opts: ConnectOptions,
     regs: SyncedRegistries,
     pending_registries: Arc<Mutex<Option<SyncedRegistries>>>,
+    packet_arrived: PacketWakeSlot,
 }
 
 fn set_closed(closed: &Mutex<Option<String>>, reason: String) {
@@ -1558,8 +1630,21 @@ async fn reader_task(mut c: ReaderCtx) {
             _ => {}
         }
         let is_disconnect = matches!(packet, ClientboundPlay::Disconnect(_));
-        if c.game.send(packet).is_err() || is_disconnect {
+        if c.game
+            .send(Arrived {
+                packet,
+                at: std::time::Instant::now(),
+            })
+            .is_err()
+            || is_disconnect
+        {
             break;
+        }
+        // After the send, so a woken drainer always sees the packet.
+        if let Ok(g) = c.packet_arrived.lock() {
+            if let Some(wake) = g.as_ref() {
+                wake();
+            }
         }
         if let Some(addr) = transfer_to {
             if !transfer(&mut c, &addr).await {
@@ -1599,9 +1684,13 @@ async fn transfer(c: &mut ReaderCtx, addr: &str) -> bool {
                 *g = Some(regs.clone());
             }
             c.regs = regs;
-            let _ = c.game.send(ClientboundPlay::Login(login));
+            let at = std::time::Instant::now();
+            let _ = c.game.send(Arrived {
+                packet: ClientboundPlay::Login(login),
+                at,
+            });
             for p in early {
-                let _ = c.game.send(p);
+                let _ = c.game.send(Arrived { packet: p, at });
             }
             true
         }

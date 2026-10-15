@@ -88,6 +88,7 @@ struct Methods {
     game_mouse: jni::objects::JMethodID,
     game_input: jni::objects::JMethodID,
     consume_clicks: jni::objects::JMethodID,
+    block_entity_count: jni::objects::JMethodID,
 }
 
 /// Drives real vanilla screens through the bridge. All calls are serialised (the Java side is
@@ -145,6 +146,11 @@ impl GuiPipeline {
             game_mouse: env.get_method_id(&cls, jni_str!("gameMouse"), jni_sig!("(IZ)V"))?,
             game_input: env.get_method_id(&cls, jni_str!("gameInput"), jni_sig!("()I"))?,
             consume_clicks: env.get_method_id(&cls, jni_str!("consumeClicks"), jni_sig!("()I"))?,
+            block_entity_count: env.get_method_id(
+                &cls,
+                jni_str!("blockEntityCount"),
+                jni_sig!("()I"),
+            )?,
         };
         Ok(GuiPipeline {
             bridge,
@@ -383,15 +389,17 @@ impl GuiPipeline {
             jvalue { d: mouse.1 },
             jvalue { f: partial },
         ];
-        let (commands, cursor) = self.call(self.m.render, JavaType::Array, &args, |env, v| {
-            decode_frame(env, v.l()?)
-        })?;
+        let (commands, cursor, blur_after) =
+            self.call(self.m.render, JavaType::Array, &args, |env, v| {
+                decode_frame(env, v.l()?)
+            })?;
         Ok(GuiFrame {
             commands,
             scale,
             width,
             height,
             cursor,
+            blur_after,
         })
     }
 
@@ -414,6 +422,32 @@ impl GuiPipeline {
     /// Reads or updates the Rust-owned state the proxies see (inventory mirror, chat history, outbox).
     pub fn with_state<T>(&self, f: impl FnOnce(&mut GameState) -> T) -> T {
         with_state(f)
+    }
+
+    /// Records the world's block state at a position (Java's global block state id): the block
+    /// entities the screens edit are built from the real state, like vanilla's chunks build them
+    /// (`LevelChunk.setBlockState`). The client records every position whose entity packets it
+    /// forwards, before forwarding them (the native must not take the world's lock: it can run
+    /// while the game thread holds it).
+    pub fn set_block_state(&self, pos: BlockPos, id: i32) {
+        with_state(|s| {
+            s.block_states.insert([pos.x, pos.y, pos.z], id);
+        });
+    }
+
+    /// A chunk was forgotten (vanilla `handleForgetLevelChunk` drops the chunk's block entities,
+    /// which the forwarded packet does for the Java-side store): the block states recorded for
+    /// its positions go with them, so the map does not grow without bound.
+    pub fn forget_recorded_block_states(&self, chunk_x: i32, chunk_z: i32) {
+        with_state(|s| {
+            s.block_states
+                .retain(|[x, _, z], _| (*x >> 4) != chunk_x || (*z >> 4) != chunk_z);
+        });
+    }
+
+    /// Number of block entities in the Java-side store (tests).
+    pub fn block_entity_count(&self) -> usize {
+        self.call_int("blockEntityCount", self.m.block_entity_count, &[]) as usize
     }
 
     /// Runs `f` with the JNI environment and the bridge object, serialised like every other call;
@@ -881,8 +915,11 @@ fn blend_of(code: i32) -> GuiBlend {
     }
 }
 
-fn decode_frame(env: &mut Env, frame: JObject) -> Result<(Vec<GuiCommand>, Option<CursorShape>)> {
-    // Safety: Bridge.render returns Object[]{int[], String[], int[1]}.
+fn decode_frame(
+    env: &mut Env,
+    frame: JObject,
+) -> Result<(Vec<GuiCommand>, Option<CursorShape>, i32)> {
+    // Safety: Bridge.render returns Object[]{int[], String[], int[2]}.
     let frame = unsafe { JObjectArray::<JObject>::from_raw(env, frame.into_raw()) };
     let ints = frame.get_element(env, 0)?;
     let ints = unsafe { JIntArray::from_raw(env, ints.into_raw()) };
@@ -900,9 +937,19 @@ fn decode_frame(env: &mut Env, frame: JObject) -> Result<(Vec<GuiCommand>, Optio
     }
     let cur = frame.get_element(env, 2)?;
     let cur = unsafe { JIntArray::from_raw(env, cur.into_raw()) };
-    let mut code = [0i32; 1];
+    let mut code = [0i32; 2];
     cur.get_region(env, 0, &mut code)?;
-    Ok((decode(&buf, &strings)?, cursor_shape(code[0])))
+    // The command index the blur goes after is a batch index; -1 means no blur this frame.
+    let blur = if code[1] < 0 {
+        None
+    } else {
+        Some(code[1] as usize)
+    };
+    let blur_after = match blur {
+        Some(b) => decode(&buf[..b.min(buf.len())], &strings)?.len() as i32,
+        None => -1,
+    };
+    Ok((decode(&buf, &strings)?, cursor_shape(code[0]), blur_after))
 }
 
 /// Decodes a frame's int records and string table into commands.

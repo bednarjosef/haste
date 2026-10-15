@@ -146,6 +146,7 @@ public final class Proxies {
             ConnectionImpl.searchTrees(connection));
         set(connection, "level", net.minecraft.client.multiplayer.ClientLevel.class, level);
         // ClientCommonPacketListenerImpl.minecraft: the kept handlers' thread check reads its packetProcessor
+        // (and handleUpdateRecipes and the other recipe-book handlers reach the client through it)
         set(connection, "minecraft", Minecraft.class, minecraft);
         // the HUD and the chat pipeline are real vanilla Java (tier 3) over the proxies
         toasts = new net.minecraft.client.gui.components.toasts.ToastManager(minecraft, options);

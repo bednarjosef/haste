@@ -454,6 +454,7 @@ impl Assets {
         let mut head_display: Option<crate::model::DisplayTransform> = None;
         let mut ground_display: Option<crate::model::DisplayTransform> = None;
         let mut fixed_display: Option<crate::model::DisplayTransform> = None;
+        let mut on_shelf_display: Option<crate::model::DisplayTransform> = None;
         let mut current = id.clone();
 
         for _ in 0..20 {
@@ -508,6 +509,12 @@ impl Assets {
                     .get("fixed")
                     .and_then(crate::model::DisplayTransform::parse);
             }
+            if on_shelf_display.is_none() {
+                on_shelf_display = model
+                    .display
+                    .get("on_shelf")
+                    .and_then(crate::model::DisplayTransform::parse);
+            }
             if gui_light.is_none() && model.gui_light.is_some() {
                 gui_light = Some(model.gui_light.as_deref() == Some("front"));
             }
@@ -543,6 +550,7 @@ impl Assets {
             head_display,
             ground_display,
             fixed_display,
+            on_shelf_display,
         })
     }
 

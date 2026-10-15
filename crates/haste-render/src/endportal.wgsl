@@ -14,7 +14,10 @@ struct Camera {
     fog_sky_end: f32,
     fog_cloud_end: f32,
     daylight: f32,
+    line_width: f32,
+    aspect: f32,
     game_time: f32,
+    _pad: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;

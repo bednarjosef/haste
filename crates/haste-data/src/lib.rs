@@ -764,6 +764,41 @@ mod tests {
         assert!(d
             .water_flow(&World(Default::default()), origin, stone)
             .is_none());
+        // A pool's edge: source water with air (over stone) on one side. Vanilla's getFlow
+        // reads the empty neighbour's below cell, finds no fluid there, and contributes
+        // nothing (distance 0), so still water at a pool's edge pushes nothing.
+        let mut w = World(Default::default());
+        w.0.insert(origin, source);
+        w.0.insert(BlockPos::new(1, 0, 0), source);
+        w.0.insert(BlockPos::new(0, 0, 1), source);
+        w.0.insert(BlockPos::new(0, 0, -1), source);
+        w.0.insert(BlockPos::new(0, -1, 1), stone);
+        let flow = d.water_flow(&w, origin, source).unwrap();
+        assert_eq!(flow, DVec3::ZERO, "edge flow: {flow:?}");
+        // The same edge through the real oracle data (the live rig's geometry): the stone
+        // below the air neighbour is what the lane's edge looks like on the server.
+        let reports = haste_core::paths::datagen_reports();
+        if !reports.join("blocks.json").is_file() {
+            eprintln!("skipped: no real reports for the edge-flow check");
+            return;
+        }
+        let real = GameData::load().unwrap();
+        let water = real
+            .blocks
+            .default_state(&Identifier::minecraft("water"))
+            .unwrap();
+        let stone_real = real
+            .blocks
+            .default_state(&Identifier::minecraft("stone"))
+            .unwrap();
+        let mut wr = World(Default::default());
+        wr.0.insert(origin, water);
+        wr.0.insert(BlockPos::new(1, 0, 0), water);
+        wr.0.insert(BlockPos::new(0, 0, 1), water);
+        wr.0.insert(BlockPos::new(0, 0, -1), water);
+        wr.0.insert(BlockPos::new(-1, -1, 0), stone_real);
+        let flow = real.water_flow(&wr, origin, water).unwrap();
+        assert_eq!(flow, DVec3::ZERO, "real edge flow: {flow:?}");
     }
 
     #[test]

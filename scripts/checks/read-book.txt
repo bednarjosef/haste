@@ -1,0 +1,91 @@
+# Feature: reading books. The check player is an operator on the test server (ops.json), so
+# the script stands in its own area (x 160..170, z 0..10, never the shared spawn floor),
+# signs a writable book into a written book, reads it in hand (WrittenBookItem.use ->
+# LocalPlayer.openItemGui -> the server's open_book -> BookViewScreen with the page), then
+# puts it on a lectern and reads it there (LecternBlock.useWithoutItem -> openMenu ->
+# open_screen + container_set_content -> LecternScreen with the same page). Evidence: the
+# frame text dumps of both screens (the runner greps the page text), the lectern's Book data
+# and the held written book (the runner greps them over RCON).
+wait_until joined
+wait_until settled
+wait 60
+# creative, drop onto our area's ground from well above it, clear and take a writable book
+key T
+wait_until screen_open
+type /gamemode creative @s
+key ENTER
+wait_until screen_closed
+wait 10
+key T
+wait_until screen_open
+type /tp @s 168.5 120 5.5 0 0
+key ENTER
+wait_until screen_closed
+wait 120
+key T
+wait_until screen_open
+type /clear @s
+key ENTER
+wait_until screen_closed
+wait 10
+key T
+wait_until screen_open
+type /give @s minecraft:writable_book 1
+key ENTER
+wait_until screen_closed
+wait 20
+key 1
+wait 5
+# write and sign the book (like scripts/checks/edit-book.txt)
+look 0 -30
+wait 5
+mouse_down right
+wait 2
+mouse_up right
+wait 10
+wait_until screen_open
+type Lectern page text
+wait 10
+click_text "Sign" 0 0
+wait_until screen_open
+wait 10
+type MyReadBook
+wait 10
+click_text "Sign and Close" 0 0
+wait_until screen_closed
+wait 20
+# read the written book in hand (open_book -> BookViewScreen)
+look 0 -30
+wait 5
+mouse_down right
+wait 2
+mouse_up right
+wait 10
+wait_until screen_open
+screenshot book-view
+wait 20
+key Escape
+wait_until screen_closed
+wait 20
+# a lectern one block east, facing the player; put the book on it and read it there
+key T
+wait_until screen_open
+type /execute at @s run setblock ~1 ~ ~ minecraft:lectern[facing=west]
+key ENTER
+wait_until screen_closed
+wait 20
+look -90 48
+wait 5
+mouse_down right
+wait 2
+mouse_up right
+wait 20
+# use the lectern again, now with an empty hand: the lectern screen opens with the book
+mouse_down right
+wait 2
+mouse_up right
+wait 10
+wait_until screen_open
+screenshot lectern-view
+wait 20
+wait 60

@@ -808,13 +808,7 @@ impl LocalPlayer {
             P::ContainerSetSlot(c) if c.window_id == 0 => {
                 self.set_inventory_menu_slot(c.slot as i32, &c.item)
             }
-            P::SetPlayerInventory(s) => match s.slot {
-                0..=8 => self.int.hotbar[s.slot as usize] = s.item.clone(),
-                // `Inventory` indices: 36 feet, 37 legs, 38 chest, 39 head, 40 off hand.
-                36..=39 => self.int.armor[(39 - s.slot) as usize] = s.item.clone(),
-                40 => self.int.offhand = s.item.clone(),
-                _ => {}
-            },
+            P::SetPlayerInventory(s) => self.set_inventory_slot(s.slot, &s.item),
             P::UpdateMobEffect(e) if e.entity_id == me => {
                 // Vanilla's blend durations per effect (`MobEffects`): only nausea and
                 // darkness set them, everything else blends at once.
@@ -860,6 +854,21 @@ impl LocalPlayer {
             5..=8 => self.int.armor[(slot - 5) as usize] = item.clone(),
             36..=44 => self.int.hotbar[(slot - 36) as usize] = item.clone(),
             45 => self.int.offhand = item.clone(),
+            _ => {}
+        }
+    }
+
+    /// A slot of the player's own inventory in vanilla `Inventory` numbering (0-8 hotbar,
+    /// 9-35 main, 36-39 armor feet..head, 40 off hand), as `set_player_inventory` carries
+    /// and Java's `InventorySync` mirrors. One path for the server's packets and the
+    /// client-side edits vanilla Java code predicts.
+    pub fn set_inventory_slot(&mut self, slot: i32, item: &ItemStackData) {
+        match slot {
+            0..=8 => self.int.hotbar[slot as usize] = item.clone(),
+            // `Inventory` indices: 36 feet, 37 legs, 38 chest, 39 head, 40 off hand.
+            36..=39 => self.int.armor[(39 - slot) as usize] = item.clone(),
+            40 => self.int.offhand = item.clone(),
+            // 9..=35 main inventory: not held anywhere yet (no use reads it).
             _ => {}
         }
     }
@@ -1399,9 +1408,9 @@ impl LocalPlayer {
             return false;
         }
         if self.game_mode == GameMode::Creative {
-            if self.int.destroy_delay > 0 {
-                return false;
-            }
+            // startDestroyBlock has no destroyDelay check: a fresh click breaks at once even
+            // while the 5-tick delay from a previous break is still counting down (the delay
+            // only gates continueDestroyBlock while the button is held).
             self.int.destroy_delay = DESTROY_DELAY;
             // Item.canDestroyBlock: a tool with can_destroy_blocks_in_creative false cannot
             // break in creative. The packet still goes out; only the block change is skipped.

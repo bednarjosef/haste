@@ -13,8 +13,13 @@ struct Camera {
     fog_sky_end: f32,
     fog_cloud_end: f32,
     daylight: f32,
-    // Vanilla `Globals.GameTime` (unused by the entity pass; see endportal.wgsl).
+    // Outline stroke (pixels / target height) and aspect: only the overlay shader reads
+    // them (see chunk.wgsl for why the pad is load-bearing).
+    line_width: f32,
+    aspect: f32,
+    // Vanilla `Globals.GameTime` (the end portal layers scroll with it; see endportal.wgsl).
     game_time: f32,
+    _pad: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;

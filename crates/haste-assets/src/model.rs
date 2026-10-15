@@ -160,6 +160,9 @@ pub struct ResolvedModel {
     pub(crate) ground_display: Option<DisplayTransform>,
     /// `display.fixed` (item frames and other fixed mounts), likewise.
     pub(crate) fixed_display: Option<DisplayTransform>,
+    /// `display.on_shelf` (items on a shelf block, vanilla `ItemDisplayContext.ON_SHELF`),
+    /// likewise.
+    pub(crate) on_shelf_display: Option<DisplayTransform>,
 }
 
 /// A model `display` entry: rotation (degrees, applied X then Y then Z), translation (in

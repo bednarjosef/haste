@@ -36,7 +36,7 @@ use std::sync::Arc;
 use haste_jvm::{GameState, GuiPipeline, JvmHost, ScreenKind};
 use haste_protocol::haste_core::game::GameMode;
 use haste_protocol::haste_core::gui::{GuiCommand, GuiFrame, TextMetrics};
-use haste_protocol::haste_core::Component;
+use haste_protocol::haste_core::{BlockPos, BlockStateId, Component};
 use haste_protocol::packets::configuration::clientbound::{
     RegistryData, ServerLinkLabel, UpdateTags,
 };
@@ -117,6 +117,7 @@ const FORWARDED: &[&str] = &[
     "minecraft:award_stats",
     "minecraft:game_rule_values",
     "minecraft:open_screen",
+    "minecraft:update_recipes",
     "minecraft:container_set_content",
     "minecraft:container_set_slot",
     "minecraft:container_set_data",
@@ -130,6 +131,8 @@ const FORWARDED: &[&str] = &[
     "minecraft:block_entity_data",
     "minecraft:open_sign_editor",
     "minecraft:open_book",
+    // the store drops the chunk's entities with the chunk (vanilla handleForgetLevelChunk)
+    "minecraft:forget_level_chunk",
     // the recipe book (real vanilla Java over the forwarded packets): the book's displays and
     // settings, the recipe container, and the ghost recipe the overlay shows on a right-click
     "minecraft:recipe_book_add",
@@ -191,6 +194,19 @@ impl Ui {
     /// The GUI pipeline (screens, ticks, frames; menu mode drives it before a session exists).
     pub fn gui(&self) -> &GuiPipeline {
         self.host.gui()
+    }
+
+    /// Records the world's block state at a position (Rust's `BlockStateId`), for the block
+    /// entities the screens edit (see [`Ui::handle`]); the game thread calls it while it can
+    /// still read the world.
+    pub fn record_block_state(&self, pos: BlockPos, state: BlockStateId) {
+        self.gui().set_block_state(pos, state.0 as i32);
+    }
+
+    /// JVM memory diagnostics (`Boot.memoryStats`): `key=value` lines (heap, metaspace,
+    /// code cache, compressed class space), empty when the JVM failed to start.
+    pub fn jvm_memory(&self) -> String {
+        self.host.jvm_memory().unwrap_or_default()
     }
 
     /// Opens a real vanilla screen (menu mode's title screen, tests).
@@ -301,13 +317,33 @@ impl Ui {
             s.immediate_respawn = !login.packet.enable_respawn_screen;
             s.disconnect_requested = false;
         });
+        // Vanilla keeps the connecting/loading screen up until the level exists
+        // (`ClientPacketListener.handleLogin` -> `startWaitingForNewLevel`, the loading screen
+        // closing when the level is ready) — never `setScreen(null)` before that, or the
+        // no-level fallback opens the title screen over the join. The level exists from here.
+        if self.gui().is_open() {
+            self.gui().close_screen();
+        }
         Ok(())
     }
 
     /// One clientbound play packet (call for every packet, in order, on the game thread).
-    pub fn handle(&self, p: &ClientboundPlay) {
+    /// `block_state` reads the world's block state at a position (the caller holds the world's
+    /// lock while draining packets; the callback must not call back into the JVM).
+    pub fn handle(&self, p: &ClientboundPlay, block_state: &dyn Fn(BlockPos) -> BlockStateId) {
         use ClientboundPlay as P;
         let local = self.shared.local_entity.load(Ordering::Relaxed);
+        // The block entities the screens edit are built from the real state (vanilla's chunks
+        // build them when the block state arrives, `LevelChunk.setBlockState`): record the
+        // positions this packet names a block entity at, before Java builds one.
+        if let Some(pos) = match p {
+            P::BlockEntityData(b) => Some(b.pos),
+            P::OpenSignEditor(o) => Some(o.pos),
+            _ => None,
+        } {
+            let id = block_state(pos).0 as i32;
+            self.gui().set_block_state(pos, id);
+        }
         match p {
             P::SetHealth(h) => self.state(|s| {
                 s.vitals.health = h.health;
@@ -376,6 +412,13 @@ impl Ui {
                     s.day_time = c.time;
                 }
             }),
+            // Vanilla drops a chunk's block entities with the chunk (the server forgets it):
+            // the Java-side store does the same through the forwarded packet; the states
+            // recorded for its positions go with them, so the map does not grow without bound.
+            P::ForgetLevelChunk(f) => {
+                let (cx, cz) = (f.pos.x, f.pos.z);
+                self.gui().forget_recorded_block_states(cx, cz);
+            }
             _ => {}
         }
         let Some(name) = p.name() else { return };
@@ -416,6 +459,13 @@ impl Ui {
         self.gui().with_state(f)
     }
 
+    /// Whether any hotbar slot (vanilla `Inventory` 0-8) holds an item. The check scripts wait
+    /// on this after the runner's RCON `give`: on a busy shared server the inventory sync can
+    /// lag seconds behind the command's answer.
+    pub fn hotbar_has_items(&self) -> bool {
+        self.state(|s| s.inventory.iter().take(9).any(|s| !s.is_empty()))
+    }
+
     /// One 20 Hz client tick (game thread).
     pub fn tick(&self) {
         self.gui().tick();
@@ -424,8 +474,11 @@ impl Ui {
         }
     }
 
-    /// Everything the UI sends this tick, in order: packets vanilla code sent, chat and commands    /// typed in the chat screen, the selected hotbar slot when it changed.
+    /// Everything the UI sends this tick, in order: packets vanilla code sent, chat and commands
+    /// typed in the chat screen, the selected hotbar slot when it changed, and the respawn a
+    /// dead player's immediate respawn queued (`PlayerCombatKill`).
     pub fn drain_outgoing(&self, out: &mut Vec<ServerboundPlay>) {
+        out.append(&mut self.shared.outbox.lock());
         let (packets, chat, slot) =
             self.state(|s| (s.take_outgoing(), s.take_sent(), s.selected_slot));
         if !packets.is_empty() {
@@ -434,7 +487,21 @@ impl Ui {
             if let (Some(tables), Some(dispatch)) = (tables, dispatch.as_ref()) {
                 for p in packets {
                     match decode_serverbound(dispatch, &tables, &p) {
-                        Ok(sp) => out.push(sp),
+                        Ok(sp) => {
+                            if let ServerboundPlay::ContainerClick(c) = &sp {
+                                tracing::info!(
+                                    "container_click: window {} slot {} button {} mode {} state {} changed {} carried {}",
+                                    c.window_id,
+                                    c.slot,
+                                    c.button,
+                                    c.mode,
+                                    c.state_id,
+                                    c.changed.len(),
+                                    c.carried.item.is_some()
+                                );
+                            }
+                            out.push(sp)
+                        }
                         Err(e) => tracing::warn!("packet from Java not sent: {e}"),
                     }
                 }
@@ -468,6 +535,15 @@ impl Ui {
     /// `OptionInstance.onValueUpdate` callbacks.
     pub fn drain_option_changes(&self) -> Vec<(String, String)> {
         self.state(|s| s.take_option_changes())
+    }
+
+    /// The inventory slots vanilla Java code changed since the last call (vanilla
+    /// `Inventory` numbering, oldest first): creative slot sets, menu clicks, pick block —
+    /// edits vanilla predicts client-side, which the server does not echo back (vanilla's
+    /// `handleSetCreativeModeSlot` marks the slot remote before `broadcastChanges`, so no
+    /// `container_set_slot`/`set_player_inventory` arrives for it).
+    pub fn drain_inventory_changes(&self) -> Vec<(i32, haste_core::entity::ItemStackData)> {
+        self.state(|s| s.take_inventory_changes())
     }
 
     /// The resource pack selection the pack screen committed since the last call (vanilla
@@ -715,6 +791,13 @@ impl Ui {
         }
     }
 
+    /// The client left the world (pause screen "Disconnect", death screen "Title Screen"):
+    /// the HUD stops drawing (`Hud.extractRenderState` runs only while
+    /// [`GameState::in_world`] is set, like vanilla's `Gui` once its level is null).
+    pub fn left_world(&self) {
+        self.state(|s| s.in_world = false);
+    }
+
     /// The F3 overlay's numbers (FPS, position, rotation, chunk and entity counts), every frame.
     pub fn set_debug(&self, d: haste_jvm::DebugInfo) {
         self.state(|s| s.debug = d);
@@ -918,7 +1001,7 @@ mod tests {
             let _rt = self.rt.enter();
             for _ in 0..n {
                 while let Some(p) = self.conn.as_mut().and_then(|c| c.try_recv()) {
-                    self.ui.handle(&p);
+                    self.ui.handle(&p, &|_| BlockStateId::AIR);
                     if let Some(n) = p.name() {
                         self.received.push(n);
                     }
@@ -1244,36 +1327,45 @@ mod tests {
         // creative: no health, no hunger
         assert_eq!(vitals(&mut ui), (0, 0));
         // CHANGE_GAME_MODE (event 3), the param is the GameType id: 0 = survival
-        ui.handle(&ClientboundPlay::GameEvent(cb::GameEvent {
-            event: 3,
-            value: 0.0,
-        }));
+        ui.handle(
+            &ClientboundPlay::GameEvent(cb::GameEvent {
+                event: 3,
+                value: 0.0,
+            }),
+            &|_| BlockStateId::AIR,
+        );
         assert_eq!(ui.gui().with_state(|s| s.game_mode), GameMode::Survival);
         let (hearts, food) = vitals(&mut ui);
         assert!(hearts >= 10, "hearts: {hearts}");
         assert!(food >= 10, "food: {food}");
         // and back to creative (1): the hearts and the hunger bar go away again
-        ui.handle(&ClientboundPlay::GameEvent(cb::GameEvent {
-            event: 3,
-            value: 1.0,
-        }));
+        ui.handle(
+            &ClientboundPlay::GameEvent(cb::GameEvent {
+                event: 3,
+                value: 1.0,
+            }),
+            &|_| BlockStateId::AIR,
+        );
         assert_eq!(vitals(&mut ui), (0, 0));
         // the respawn packet carries the game mode too (a respawn in another mode)
-        ui.handle(&ClientboundPlay::Respawn(cb::Respawn {
-            spawn: cb::SpawnInfo {
-                dimension_type: 0,
-                dimension: "minecraft:overworld".parse().unwrap(),
-                hashed_seed: 0,
-                game_mode: 0,
-                previous_game_mode: 0,
-                is_debug: false,
-                is_flat: false,
-                death_location: None,
-                portal_cooldown: 0,
-                sea_level: 63,
-            },
-            data_kept: 0,
-        }));
+        ui.handle(
+            &ClientboundPlay::Respawn(cb::Respawn {
+                spawn: cb::SpawnInfo {
+                    dimension_type: 0,
+                    dimension: "minecraft:overworld".parse().unwrap(),
+                    hashed_seed: 0,
+                    game_mode: 0,
+                    previous_game_mode: 0,
+                    is_debug: false,
+                    is_flat: false,
+                    death_location: None,
+                    portal_cooldown: 0,
+                    sea_level: 63,
+                },
+                data_kept: 0,
+            }),
+            &|_| BlockStateId::AIR,
+        );
         let (hearts, food) = vitals(&mut ui);
         assert!(hearts >= 10, "hearts after the respawn: {hearts}");
         assert!(food >= 10, "food after the respawn: {food}");
@@ -1451,6 +1543,16 @@ mod tests {
             t.iter().any(|x| x == "Minecraft"),
             "missing the story tab: {t:?}"
         );
+        // Escape closes the advancements screen back to the pause menu it opened from
+        // (vanilla AdvancementsScreen.onClose -> setScreen(this.lastScreen)), and the second
+        // Escape closes the pause menu (in a world, so no title-screen fallback)
+        c.press(keys::ESCAPE);
+        c.run(5);
+        assert_eq!(
+            c.ui.gui().screen_class().as_deref(),
+            Some("net.minecraft.client.gui.screens.PauseScreen"),
+            "the advancements screen closes back to the pause menu"
+        );
         c.press(keys::ESCAPE);
         c.run(5);
         assert!(!c.ui.screen_open());
@@ -1570,5 +1672,49 @@ mod tests {
         assert_no_refusals(&c.ui.host);
         assert!(c.kicked.is_none(), "kicked: {:?}", c.kicked);
         c.disconnect();
+    }
+
+    /// Leaving the server stops the HUD like vanilla `Minecraft.disconnectClient` (the pause
+    /// screen's "Disconnect"): after `left_world` the title screen draws without the hotbar,
+    /// hearts or crosshair, over the plain menu background instead of the last world frame.
+    #[test]
+    fn leaving_the_world_hides_the_hud() {
+        let mut ui = Ui::new(host());
+        ui.gui().with_state(|s| {
+            s.in_world = true;
+            s.game_mode = GameMode::Survival;
+            s.vitals.health = 20.0;
+            s.vitals.food = 20;
+        });
+        let in_world = ui.frame(320, 240, 2, (0.0, 0.0), 0.0).clone();
+        let sprites: Vec<String> = in_world
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                GuiCommand::Sprite { sprite, .. } | GuiCommand::SpriteRegion { sprite, .. } => {
+                    Some(sprite.to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            sprites
+                .iter()
+                .any(|s| s.starts_with("minecraft:hud/hotbar")),
+            "hotbar while in the world: {sprites:?}"
+        );
+        // the window's `leave_server` path
+        ui.left_world();
+        let left = ui.frame(320, 240, 2, (0.0, 0.0), 0.0).clone();
+        assert!(
+            !left.commands.iter().any(|c| match c {
+                GuiCommand::Sprite { sprite, .. } | GuiCommand::SpriteRegion { sprite, .. } => {
+                    sprite.path().starts_with("hud/")
+                }
+                _ => false,
+            }),
+            "no HUD sprites after leaving: {:?}",
+            texts(&left)
+        );
     }
 }

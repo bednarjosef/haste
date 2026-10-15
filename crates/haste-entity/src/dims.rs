@@ -71,18 +71,35 @@ impl EntityDimensions {
     }
 }
 
-/// Reads `entity_dimensions.json` if present. Format (brief):
-/// `{"version":1,"entities":{"minecraft:zombie":{"width":0.6,"height":1.95,"eye_height":1.74}}}`.
-/// Names need the entity_type registry to become indexes; until haste-data provides it we cannot
-/// map them, so this returns `None` and the default box is used. The oracle file is read once and
-/// cached; when world-and-data's `GameData` lands, the name -> `RegistryIndex` mapping goes through it.
+/// Reads `entity_dimensions.json` if present. Format (tools/recorder-mod `ServerDumps`):
+/// `{"version":1,"types":[{"id":<entity_type protocol id>,"type":"minecraft:oak_boat","width":1.375,
+/// "height":0.5625,"eye_height":...,"fixed":bool}],"player":{...}}`. Every entry already carries
+/// the registry protocol id, so no name -> index mapping is needed; `id` values the synced
+/// registry does not carry (a mod's) resolve to themselves and simply never hit. The file is read
+/// once and cached.
 fn load_oracle() -> Option<HashMap<RegistryIndex, Dimensions>> {
     let path = haste_core::paths::oracle_dir().join("entity_dimensions.json");
     let bytes = std::fs::read(path).ok()?;
     let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    let entities = v.get("entities")?.as_object()?;
-    // No registry to resolve names against yet (world-and-data's GameData is not exported). Parsed but
-    // unmapped: return nothing rather than guessing index positions.
-    let _ = entities.len();
-    None
+    let types = v.get("types")?.as_array()?;
+    let mut map = HashMap::with_capacity(types.len());
+    for t in types {
+        let (Some(id), Some(width), Some(height), Some(eye_height)) = (
+            t.get("id").and_then(serde_json::Value::as_u64),
+            t.get("width").and_then(serde_json::Value::as_f64),
+            t.get("height").and_then(serde_json::Value::as_f64),
+            t.get("eye_height").and_then(serde_json::Value::as_f64),
+        ) else {
+            continue;
+        };
+        map.insert(
+            RegistryIndex(id as u32),
+            Dimensions {
+                width: width as f32,
+                height: height as f32,
+                eye_height: eye_height as f32,
+            },
+        );
+    }
+    Some(map)
 }

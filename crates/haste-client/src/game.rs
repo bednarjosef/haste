@@ -26,7 +26,7 @@ use haste_protocol::haste_core::{
     BlockPos, BlockStateId, ChunkPos, Direction, EntityId, Identifier, RegistryIndex, SectionPos,
 };
 use haste_world::World;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Condvar, Mutex, RwLock};
 
 use crate::net::{NetDriver, WorldSink};
 use crate::ui::Ui;
@@ -476,6 +476,11 @@ pub struct Shared {
     /// end) for powered skulls (vanilla `SkullBlockEntity.animation`'s counter), copied
     /// once per tick.
     pub skull_anims: Mutex<Vec<(BlockPos, (f32, f32))>>,
+    /// Vault and spawner spins by block position: (spin at the last tick's start and end) in
+    /// degrees. Vanilla's `VaultClientData.updateDisplayItemSpin` (10 degrees a tick) and
+    /// `BaseSpawner.clientTick`'s / `TrialSpawner.tickClient`'s mob spin; the game tick
+    /// advances them, the renderer interpolates them.
+    pub block_entity_spins: Mutex<Vec<(BlockPos, (f32, f32))>>,
     /// The object-model block entities' animation state, by block position, ticked once per
     /// tick (vanilla's block entity tickers): the bell shake, the decorated pot wobble, the
     /// enchanting table's book and the conduit's spin. The render thread copies it per frame.
@@ -539,6 +544,27 @@ pub struct Shared {
     pub debug_tx: AtomicU64,
     /// Packets received per second (f64 bits).
     pub debug_rx: AtomicU64,
+    /// Chunk packets received (`NetCounters.chunks_loaded`), copied once per second by the
+    /// game thread so diagnostics (the screenshot summary) can show them.
+    pub chunks_loaded: AtomicU64,
+    /// Chunk unload packets received.
+    pub chunks_unloaded: AtomicU64,
+    /// Wakes the game thread the moment a play packet arrives (the reader task
+    /// notifies through [`Connection`'s wake hook]). Vanilla drains the packet
+    /// queue every frame (`Minecraft.runTick`), so a packet never waits for the
+    /// next 20 Hz tick to be applied; the game thread sleeps on this condvar
+    /// between packets and ticks, and re-sleeps when the queue is empty.
+    pub packet_wake: (Mutex<u64>, Condvar),
+}
+
+impl Shared {
+    /// Notifies the game thread that a packet arrived. Cheap when nobody
+    /// sleeps: one lock, one counter bump, one notify.
+    pub fn wake_on_packet(&self) {
+        let mut count = self.packet_wake.0.lock();
+        *count += 1;
+        self.packet_wake.1.notify_all();
+    }
 }
 
 /// What a resource pack rebuild applies.
@@ -623,6 +649,7 @@ impl Shared {
             breaking: Mutex::new(Vec::new()),
             block_entity_lids: Mutex::new(Vec::new()),
             skull_anims: Mutex::new(Vec::new()),
+            block_entity_spins: Mutex::new(Vec::new()),
             block_entity_anims: Mutex::new(std::collections::HashMap::new()),
             block_entity_names,
             biome_climates,
@@ -642,6 +669,9 @@ impl Shared {
             applied_server_packs: Mutex::new(Vec::new()),
             debug_tx: AtomicU64::new(0),
             debug_rx: AtomicU64::new(0),
+            chunks_loaded: AtomicU64::new(0),
+            chunks_unloaded: AtomicU64::new(0),
+            packet_wake: (Mutex::new(0), Condvar::new()),
         }
     }
 
@@ -759,9 +789,20 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>, existing_ui: Option<Ui>) 
     // The server pack set version this thread last applied (starts at the
     // connection's: the configuration-phase packs were applied at session build).
     let mut server_packs_version = driver.connection().server_packs_version();
+    // Packets are drained on arrival, not only at ticks: vanilla runs the packet
+    // queue every frame (`Minecraft.runTick` -> `processQueuedPackets`), so a
+    // `container_set_slot` shows on the frame after it arrives instead of up to
+    // one tick (50 ms) later. Between ticks the thread sleeps on the wake below
+    // and only drains packets (no game logic, no input): the 20 Hz tick order
+    // and rate are unchanged.
+    let mut drained_wakes = 0u64;
+    let mut failure: Option<String> = None;
     let reason = loop {
         if shared.stop.load(Ordering::Relaxed) {
             break "left the game".to_string();
+        }
+        if let Some(f) = failure.take() {
+            break f;
         }
         if let Err(e) = tick_once(
             &mut driver,
@@ -782,6 +823,13 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>, existing_ui: Option<Ui>) 
                 ((s.packets_in - last_in) as f64).to_bits(),
                 Ordering::Relaxed,
             );
+            let c = &driver.session.counters;
+            shared
+                .chunks_loaded
+                .store(c.chunks_loaded, Ordering::Relaxed);
+            shared
+                .chunks_unloaded
+                .store(c.chunks_unloaded, Ordering::Relaxed);
             last_out = s.packets_out;
             last_in = s.packets_in;
             stats_second = Instant::now();
@@ -795,7 +843,31 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>, existing_ui: Option<Ui>) 
         next += tick;
         let now = Instant::now();
         if next > now {
-            std::thread::sleep(next - now);
+            // Sleep until the next tick, but wake the moment a packet arrives
+            // (the reader bumps the counter and notifies). The counter, not the
+            // notify, carries the signal, so a wake that arrived while we were
+            // awake is still seen on the next lock.
+            while Instant::now() < next && failure.is_none() {
+                let left = next.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                let mut seen = shared.packet_wake.0.lock();
+                if *seen == drained_wakes {
+                    let _ = shared.packet_wake.1.wait_for(&mut seen, left);
+                }
+                let arrived = *seen != drained_wakes;
+                drop(seen);
+                if arrived {
+                    if let Err(e) =
+                        drain_packets(&mut driver, &shared, &mut gone, &mut server_packs_version)
+                    {
+                        failure = Some(format!("tick failed: {e:#}"));
+                        break;
+                    }
+                    drained_wakes = *shared.packet_wake.0.lock();
+                }
+            }
         } else if now - next > tick * 10 {
             // Far behind (debugger, suspend): skip instead of bursting ticks.
             next = now;
@@ -921,6 +993,52 @@ impl HudSlot {
     }
 }
 
+/// Drains the packets that arrived since the last call into the session, world,
+/// entities and UI, and publishes the dirty sections. Runs both at the start of
+/// a tick and whenever a packet wakes the game thread between ticks (vanilla
+/// runs the packet queue every frame, `Minecraft.runTick` ->
+/// `packetProcessor.processQueuedPackets`, before the tick's own work).
+fn drain_packets(
+    driver: &mut NetDriver,
+    shared: &Shared,
+    gone: &mut Vec<SectionPos>,
+    server_packs_version: &mut u64,
+) -> anyhow::Result<()> {
+    let mut world = shared.world.write();
+    let mut entities = shared.entities.write();
+    let mut tracked = TrackedWorld {
+        world: &mut world,
+        gone,
+    };
+    let ui = shared.ui.lock().clone();
+    driver.receive(&mut tracked, &mut *entities, ui.as_ref())?;
+    let mut dirty = world.take_dirty_sections();
+    if !dirty.is_empty() {
+        shared.dirty.lock().append(&mut dirty);
+    }
+    // The server's live pack set changed (vanilla ticks its ServerPackManager the
+    // same way: a download finished, a re-push replaced one, or a pop arrived):
+    // apply the whole set on top of the stack and reload, like the pack screen's
+    // Done. The connection's reply path already sent statuses.
+    let version = driver.connection().server_packs_version();
+    if version != *server_packs_version {
+        *server_packs_version = version;
+        let packs = driver.connection().server_packs();
+        for pack in &packs {
+            tracing::info!(
+                "server resource pack {} downloaded to {}",
+                pack.id,
+                pack.path.display()
+            );
+        }
+        *shared.applied_server_packs.lock() = packs.iter().map(|p| p.path.clone()).collect();
+        let ids = crate::app::selected_resource_packs();
+        let server = shared.applied_server_packs.lock().clone();
+        *shared.resource_pack_reload.lock() = Some(PackReload { ids, server });
+    }
+    Ok(())
+}
+
 fn tick_once(
     driver: &mut NetDriver,
     shared: &Shared,
@@ -968,8 +1086,9 @@ fn tick_once(
                     backlog.len()
                 );
                 if let Some(ui) = shared.ui.lock().as_ref() {
+                    let world = shared.world.read();
                     for p in backlog {
-                        ui.handle(&p);
+                        ui.handle(&p, &|pos| WorldSink::block_state_at(&*world, pos));
                     }
                 }
             }
@@ -977,44 +1096,7 @@ fn tick_once(
     }
     // This tick's UI output (packets vanilla code sent, chat and commands typed).
     let mut ui_out = Vec::new();
-    {
-        let mut world = shared.world.write();
-        let mut entities = shared.entities.write();
-        let mut tracked = TrackedWorld {
-            world: &mut world,
-            gone,
-        };
-        let ui = shared.ui.lock().clone();
-        driver.receive(&mut tracked, &mut *entities, ui.as_ref())?;
-        let mut dirty = world.take_dirty_sections();
-        dirty.append(gone);
-        if !dirty.is_empty() {
-            shared.dirty.lock().append(&mut dirty);
-        }
-        // A server pack finished downloading (vanilla ticks its ServerPackManager the
-        // same way): apply it on top of the stack and reload, like the pack screen's
-        // Done. The connection's cached reply path already answered the statuses.
-        // The server's live pack set changed (vanilla ticks its ServerPackManager
-        // the same way: a download finished, a re-push replaced one, or a pop
-        // arrived): apply the whole set on top of the stack and reload, like the
-        // pack screen's Done. The connection's reply path already sent statuses.
-        let version = driver.connection().server_packs_version();
-        if version != *server_packs_version {
-            *server_packs_version = version;
-            let packs = driver.connection().server_packs();
-            for pack in &packs {
-                tracing::info!(
-                    "server resource pack {} downloaded to {}",
-                    pack.id,
-                    pack.path.display()
-                );
-            }
-            *shared.applied_server_packs.lock() = packs.iter().map(|p| p.path.clone()).collect();
-            let ids = crate::app::selected_resource_packs();
-            let server = shared.applied_server_packs.lock().clone();
-            *shared.resource_pack_reload.lock() = Some(PackReload { ids, server });
-        }
-    }
+    drain_packets(driver, shared, gone, server_packs_version)?;
     // This tick's sound packets, played through the output (when the client set one up).
     // This runs again after `end_tick` below to pick up the player's own block sounds
     // (footsteps, mining, placing) that the player's tick just produced.
@@ -1046,6 +1128,11 @@ fn tick_once(
         // Held buttons stay; the press-only middle click, drop/swap presses and the hotbar choice
         // are consumed.
         let mut interact = shared_input.interact;
+        // Vanilla runs `Minecraft.handleKeybinds` (the attack/use clicks and the held use)
+        // only with no screen open (`Minecraft.tick`: `if (gui.overlay() == null &&
+        // gui.screen() == null)`). A screen taking the mouse also owns the buttons: a use
+        // held from before the screen opened must not keep firing (it would re-open the
+        // container the screen shows, server-side).
         let attack_clicks;
         let use_clicks;
         if screen_open {
@@ -1572,9 +1659,78 @@ fn tick_once(
             }
         }
     }
-    // Particles: spawn what the packets brought (and the client spawned itself), then one
-    // 20 Hz simulation step. The camera for `ClientLevel.doAddParticle`'s 32-block limiter
-    // is the player's eye.
+    // The vaults' and spawners' spins (vanilla `VaultClientData.updateDisplayItemSpin` and
+    // the spawners' client tick): every vault's displayed item turns 10 degrees a tick, a
+    // spawner's display mob turns at the rate its state's spinning mob speed and its remaining
+    // spawn delay give (a plain mob spawner only while a player is near it).
+    {
+        let world = shared.world.read();
+        let blocks = &shared.data.blocks;
+        let names = &shared.block_entity_names;
+        let player = driver.session.player.state.pos;
+        let game_time = driver.session.world_age;
+        let mut spins = shared.block_entity_spins.lock();
+        spins.retain_mut(|(pos, spin)| {
+            let Some(be) = world.block_entity(*pos) else {
+                return false;
+            };
+            let Some(name) = names.get(be.kind as usize) else {
+                return false;
+            };
+            let minecraft = name.namespace() == "minecraft";
+            let rate = if minecraft && name.path() == "vault" {
+                // `VaultClientData.ROTATION_SPEED` (10 degrees a tick, wrapped).
+                Some(10.0)
+            } else if minecraft && matches!(name.path(), "mob_spawner" | "trial_spawner") {
+                let trial = name.path() == "trial_spawner";
+                if trial || mob_spawner_spins(&be.nbt, *pos, player) {
+                    Some(spawner_spin_rate(
+                        &be.nbt,
+                        trial,
+                        game_time,
+                        blocks
+                            .property_value(world.block_state(*pos), "trial_spawner_state")
+                            .unwrap_or(""),
+                    ))
+                } else {
+                    // No player in range: vanilla holds the spin (`oSpin = spin`).
+                    Some(0.0)
+                }
+            } else {
+                None
+            };
+            let Some(rate) = rate else {
+                return false;
+            };
+            spin.0 = spin.1;
+            if rate > 0.0 {
+                // Vanilla's `(spin + rate) % 360`; a trial spawner in a state with no spinning
+                // mob holds its spin.
+                spin.1 = (spin.1 + rate).rem_euclid(360.0);
+            }
+            true
+        });
+        // New vaults and spawners start their spin at 0.
+        'outer: for chunk in world.loaded_chunks() {
+            for (pos, be) in world.block_entities_in(chunk) {
+                let Some(name) = names.get(be.kind as usize) else {
+                    continue;
+                };
+                if name.namespace() != "minecraft"
+                    || !matches!(name.path(), "vault" | "mob_spawner" | "trial_spawner")
+                    || spins.iter().any(|(p, _)| p == &pos)
+                {
+                    continue;
+                }
+                spins.push((pos, (0.0, 0.0)));
+                if spins.len() > 1024 {
+                    break 'outer;
+                }
+            }
+        }
+    }
+    // Particles: spawn what the packets brought, then one 20 Hz simulation step. The camera
+    // for `ClientLevel.doAddParticle`'s 32-block limiter is the player's eye.
     {
         let mut particles = shared.particles.lock();
         let camera = driver.session.player.camera(1.0).0;
@@ -1653,6 +1809,10 @@ fn tick_once(
             Some(crate::player::interact::UsedScreen::CommandBlock(pos)) => {
                 let (creative, level) = ui.game_master_state();
                 if creative && level >= 2 {
+                    // The editor's entity is built from the real state (the use itself opens
+                    // no packet the block state would ride on; vanilla's chunk has it).
+                    let state = WorldSink::block_state_at(&*shared.world.read(), pos);
+                    ui.record_block_state(pos, state);
                     ui.open_used_command_block(pos);
                 }
             }
@@ -1660,6 +1820,13 @@ fn tick_once(
             None => {}
         }
         ui.tick();
+        // Inventory edits vanilla Java code predicted client-side (creative slot sets, menu
+        // clicks, pick block): the server does not echo them back, so the client takes them
+        // from the Java mirror. Without this the hand keeps the old item (the reported
+        // creative-inventory bug: the hotbar shows the item, the hand does not).
+        for (slot, stack) in ui.drain_inventory_changes() {
+            driver.session.player.set_inventory_slot(slot, &stack);
+        }
         // Every option a vanilla screen changed this tick reaches the running client live
         // (vanilla's `OptionInstance.onValueUpdate` callbacks, reported through the bridge).
         let changes = ui.drain_option_changes();
@@ -1855,6 +2022,78 @@ fn eye_in_lava(world: &World, data: &GameData, eye: DVec3) -> bool {
         .is_some_and(|a| a.kind == FluidKind::Lava);
     let surface = p.y as f64 + if full { 1.0 } else { f.height as f64 };
     eye.y <= surface
+}
+
+/// Vanilla `BaseSpawner.isNearPlayer`: an alive player within the spawner's required player
+/// range of its centre. The client has only its own player, so a spawner spins its mob exactly
+/// when the camera is close, like vanilla's single-player client. Only `BaseSpawner.clientTick`
+/// checks this; a trial spawner's `tickClient` spins its mob in every state that has one.
+fn mob_spawner_spins(nbt: &[u8], pos: BlockPos, player: DVec3) -> bool {
+    let centre = DVec3::new(pos.x as f64 + 0.5, pos.y as f64 + 0.5, pos.z as f64 + 0.5);
+    // `BaseSpawner.requiredPlayerRange` is the block entity's `RequiredPlayerRange` tag, not a
+    // block state property; vanilla writes it as a short and reads it back leniently.
+    let range = read_block_entity_nbt(nbt)
+        .and_then(|doc| doc.root_tag.get_numeric_short("RequiredPlayerRange"))
+        .unwrap_or(16) as f64;
+    player.distance_squared(centre) <= range * range
+}
+
+/// The degrees a spawner's display mob turns in one tick, vanilla `BaseSpawner.clientTick`'s
+/// `1000 / (spawnDelay + 200)` and `TrialSpawner.tickClient`'s
+/// `spinningMobSpeed / (spawnDelay + 200)`. A trial spawner's spinning mob speed comes from
+/// its block state (`TrialSpawnerState`: 200 waiting for players, 1000 active, -1 for the
+/// states with no spinning mob) and its remaining spawn delay from `next_mob_spawns_at`.
+fn spawner_spin_rate(nbt: &[u8], trial: bool, game_time: i64, state: &str) -> f32 {
+    // The trial spawner's state decides whether a mob spins at all (vanilla
+    // `TrialSpawnerState.hasSpinningMob`).
+    let speed = if trial {
+        trial_spinning_mob_speed(state)
+    } else {
+        1000.0
+    };
+    if speed <= 0.0 {
+        return 0.0;
+    }
+    let delay = if trial {
+        trial_spawn_delay(nbt, game_time)
+    } else {
+        spawner_delay(nbt)
+    };
+    (speed / (delay.max(0) as f64 + 200.0)) as f32
+}
+
+/// Vanilla `BaseSpawner.spawnDelay`, from the block entity's `Delay` tag (a short, default 20).
+fn spawner_delay(nbt: &[u8]) -> i32 {
+    read_block_entity_nbt(nbt)
+        .and_then(|doc| doc.root_tag.get_short("Delay"))
+        .unwrap_or(20) as i32
+}
+
+/// Vanilla `TrialSpawnerStateData.nextMobSpawnsAt` as the remaining delay
+/// (`max(0, nextMobSpawnsAt - level.getGameTime())`).
+fn trial_spawn_delay(nbt: &[u8], game_time: i64) -> i32 {
+    read_block_entity_nbt(nbt)
+        .and_then(|doc| doc.root_tag.get_long("next_mob_spawns_at"))
+        .map(|at| (at - game_time).max(0) as i32)
+        .unwrap_or(0)
+}
+
+/// Vanilla `TrialSpawnerState.spinningMobSpeed` for the state the block is in: waiting for
+/// players 200, active 1000, every other state has no spinning mob (-1).
+fn trial_spinning_mob_speed(state: &str) -> f64 {
+    match state {
+        "waiting_for_players" => 200.0,
+        "active" => 1000.0,
+        _ => -1.0,
+    }
+}
+
+/// A block entity's NBT payload (the network variant `read_unnamed` reads), or `None`.
+fn read_block_entity_nbt(nbt: &[u8]) -> Option<haste_protocol::nbt::Nbt> {
+    use haste_protocol::nbt::deserializer::NbtReadHelperJava;
+    let mut cursor = std::io::Cursor::new(nbt);
+    let mut helper = NbtReadHelperJava::new(&mut cursor);
+    haste_protocol::nbt::Nbt::read_unnamed(&mut helper).ok()
 }
 
 #[cfg(test)]

@@ -188,23 +188,56 @@ pub fn sky_colors(sky: &SkyState, kind: SkyKind, view_distance: f32) -> SkyColor
             for i in 0..3 {
                 fog[i] += (sky_c[i] - fog[i]) * k;
             }
-            // Rain greys and darkens both.
-            if rain > 0.0 {
-                for col in [&mut sky_c, &mut fog] {
-                    let grey = (col[0] * 0.3 + col[1] * 0.59 + col[2] * 0.11) * 0.6;
-                    for v in col.iter_mut() {
-                        *v = (*v * (1.0 - rain * 0.75) + grey * rain * 0.75) * (1.0 - rain * 0.2);
-                    }
-                }
+            // The weather attribute layers (vanilla `WeatherAttributes.RAIN`/`THUNDER` over
+            // SKY_COLOR): rain blends the colour toward its greyscale times 0.6 by a factor
+            // of 0.75 (`ColorModifier.BLEND_TO_GRAY_RGB`), thunder toward the greyscale
+            // times 0.24 by 0.94. The rain layer's weight is the rain level minus the
+            // thunder level (which is itself scaled by the rain level), the thunder layer's
+            // the thunder level.
+            let thunder = (sky.thunder * rain).clamp(0.0, 1.0);
+            let rain_only = (rain - thunder).clamp(0.0, 1.0);
+            let blend_to_gray = |col: [f32; 3], brightness: f32, factor: f32| {
+                let grey = col[0] * 0.3 + col[1] * 0.59 + col[2] * 0.11;
+                [
+                    col[0] + (grey * brightness - col[0]) * factor,
+                    col[1] + (grey * brightness - col[1]) * factor,
+                    col[2] + (grey * brightness - col[2]) * factor,
+                ]
+            };
+            if rain_only > 0.0 {
+                let target = blend_to_gray(sky_c, 0.6, 0.75);
+                sky_c = [
+                    sky_c[0] + (target[0] - sky_c[0]) * rain_only,
+                    sky_c[1] + (target[1] - sky_c[1]) * rain_only,
+                    sky_c[2] + (target[2] - sky_c[2]) * rain_only,
+                ];
             }
+            if thunder > 0.0 {
+                let target = blend_to_gray(sky_c, 0.24, 0.94);
+                sky_c = [
+                    sky_c[0] + (target[0] - sky_c[0]) * thunder,
+                    sky_c[1] + (target[1] - sky_c[1]) * thunder,
+                    sky_c[2] + (target[2] - sky_c[2]) * thunder,
+                ];
+            }
+            // The sunrise/sunset colour's alpha takes the weather layers' RGB multiply
+            // (rain 0.6, thunder 0.3 on the alpha channel of the multipliers
+            // (0.5, 0.5, 0.6)/(0.25, 0.25, 0.3)).
+            let weather_a = 1.0 - rain_only * 0.4 - thunder * 0.7;
             let sunrise = if (-0.4..=0.4).contains(&c) {
                 let f = c / 0.4 * 0.5 + 0.5;
                 let a = (1.0 - (1.0 - (f * std::f32::consts::PI).sin()) * 0.99).powi(2);
-                [f * 0.3 + 0.7, f * f * 0.7 + 0.2, 0.2, a * (1.0 - rain)]
+                [f * 0.3 + 0.7, f * f * 0.7 + 0.2, 0.2, a * weather_a]
             } else {
                 [0.0; 4]
             };
             let s = (angle * std::f32::consts::TAU).sin();
+            // The weather layers also set the star brightness to 0 (`WeatherAttributes`
+            // `.set(STAR_BRIGHTNESS, 0)` applied by the levels).
+            let stars = (1.0 - (c * 2.0 + 0.25)).clamp(0.0, 1.0)
+                * 0.5
+                * (1.0 - rain_only)
+                * (1.0 - thunder);
             SkyColors {
                 celestial_angle: angle,
                 brightness,
@@ -212,7 +245,7 @@ pub fn sky_colors(sky: &SkyState, kind: SkyKind, view_distance: f32) -> SkyColor
                 fog,
                 sunrise,
                 sunrise_side: if s < 0.0 { 1.0 } else { -1.0 },
-                star_brightness: (1.0 - (c * 2.0 + 0.25)).clamp(0.0, 1.0) * 0.5 * (1.0 - rain),
+                star_brightness: stars,
                 moon_phase,
             }
         }
@@ -592,7 +625,11 @@ impl SkyRenderer {
             let glow = crate::fog::sunrise_sunset_color(sky.time_of_day);
             colors.sunrise = [glow[0], glow[1], glow[2], glow[3]];
             colors.sunrise_side = crate::fog::sun_glow_side(sky.time_of_day);
-            colors.sky = crate::fog::overworld_sky_color(sky.time_of_day);
+            colors.sky = crate::fog::overworld_sky_color(
+                sky.time_of_day,
+                sky.rain.clamp(0.0, 1.0),
+                (sky.thunder * sky.rain.clamp(0.0, 1.0)).clamp(0.0, 1.0),
+            );
         }
         self.colors = colors;
         let rain = sky.rain.clamp(0.0, 1.0);
@@ -632,7 +669,15 @@ impl SkyRenderer {
             [l[0], l[1], l[2], 1.0]
         };
         let sunrise = linear([colors.sunrise[0], colors.sunrise[1], colors.sunrise[2]]);
-        let cloud_brightness = srgb_to_linear((colors.brightness * 0.9 + 0.1) * (1.0 - rain * 0.5));
+        // The clouds take their own weather layers (`WeatherAttributes`: blend to the
+        // greyscale times 0.6 by a factor of 0.5 in rain, times 0.095 by 0.94 in thunder).
+        // For the scalar brightness (a grey value) that is v * (1 - factor + factor *
+        // brightness): rain keeps 0.7 of it, thunder 0.2856.
+        let thunder = (sky.thunder * rain).clamp(0.0, 1.0);
+        let rain_only = (rain - thunder).clamp(0.0, 1.0);
+        let cloud_value = colors.brightness * 0.9 + 0.1;
+        let cloud_value = cloud_value * (1.0 - rain_only * 0.3) * (1.0 - thunder * 0.7144);
+        let cloud_brightness = srgb_to_linear(cloud_value);
         let u = SkyUniforms {
             view_proj: view_proj.to_cols_array_2d(),
             rot_view_proj: rot_view_proj.to_cols_array_2d(),
@@ -914,6 +959,64 @@ mod tests {
         assert_eq!(dawn.sunrise_side, 1.0, "dawn glow is in the east");
         let dusk = sky_colors(&state(12500), SkyKind::Overworld, 12.0);
         assert_eq!(dusk.sunrise_side, -1.0, "dusk glow is in the west");
+    }
+
+    #[test]
+    fn rain_greys_the_sky_like_the_weather_attributes() {
+        // `WeatherAttributes.RAIN` over SKY_COLOR: lerp(0.75, colour, grey * 0.6) applied
+        // by the rain level (rain minus thunder). At noon (0x78A7FF) with full rain and no
+        // thunder: grey = 0.3*0.4706 + 0.59*0.6549 + 0.11*1.0 = 0.6427.
+        let mut s = state(6000);
+        s.rain = 1.0;
+        let noon = sky_colors(&s, SkyKind::Overworld, 12.0);
+        let grey = 0.3 * (0x78 as f32 / 255.0) + 0.59 * (0xA7 as f32 / 255.0) + 0.11 * 1.0;
+        let target = grey * 0.6;
+        let expect: [f32; 3] = [
+            0.4706 + (target - 0.4706) * 0.75,
+            0.6549 + (target - 0.6549) * 0.75,
+            1.0 + (target - 1.0) * 0.75,
+        ];
+        for (i, (got, want)) in noon.sky.iter().zip(expect).enumerate() {
+            assert!((got - want).abs() < 1e-4, "channel {i}: {got} vs {want}");
+        }
+        // Stars are gone with any weather.
+        assert_eq!(noon.star_brightness, 0.0);
+    }
+
+    #[test]
+    fn thunder_darkens_the_sky_further() {
+        // `WeatherAttributes.THUNDER`: lerp(0.94, colour, grey * 0.24) by the thunder level
+        // (which the rain level scales). Full thunder implies rain 1: the rain layer first
+        // greys by the rain-minus-thunder level (0 at full thunder), then the thunder layer
+        // takes over. The thunder sky is darker than the rain sky.
+        let mut rain = state(6000);
+        rain.rain = 1.0;
+        let rain_sky = sky_colors(&rain, SkyKind::Overworld, 12.0).sky;
+        let mut storm = state(6000);
+        storm.rain = 1.0;
+        storm.thunder = 1.0;
+        let storm_sky = sky_colors(&storm, SkyKind::Overworld, 12.0).sky;
+        for i in 0..3 {
+            assert!(
+                storm_sky[i] < rain_sky[i] + 1e-6,
+                "thunder darkens channel {i}: {} vs {}",
+                storm_sky[i],
+                rain_sky[i]
+            );
+        }
+        // Full thunder at noon: the colour is the base blended to the grey times 0.24 by
+        // the 0.94 factor (the rain layer's weight is rain minus thunder = 0 here).
+        let base = rgb(0x78A7FF);
+        let grey = 0.3 * base[0] + 0.59 * base[1] + 0.11 * base[2];
+        let target = grey * 0.24;
+        for i in 0..3 {
+            let expect = base[i] + (target - base[i]) * 0.94;
+            assert!(
+                (storm_sky[i] - expect).abs() < 1e-4,
+                "channel {i}: {} vs {expect}",
+                storm_sky[i]
+            );
+        }
     }
 
     #[test]

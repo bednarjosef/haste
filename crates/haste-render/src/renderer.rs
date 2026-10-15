@@ -106,6 +106,18 @@ pub struct LightmapFrame {
     pub lightning_flash: bool,
 }
 
+/// CPU-side memory the renderer keeps beside its GPU buffers (bench memory line).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RendererCpuMemory {
+    /// Block atlas mip chain + animated sprite frames (CPU copies, byte-for-byte
+    /// what was uploaded to the GPU, kept for animated region updates).
+    pub atlas_bytes: u64,
+    /// Baked block models (per-state quads).
+    pub baked_bytes: u64,
+    /// Mesher queue length (sections waiting to be meshed).
+    pub mesh_pending: u64,
+}
+
 /// Per-frame render statistics (docs/INTERFACES.md FrameStats).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameStats {
@@ -120,6 +132,8 @@ pub struct FrameStats {
     pub uploads: u32,
     /// Vertex+index bytes written by this frame's uploads.
     pub upload_bytes: u64,
+    /// Terrain indices drawn this frame (six per quad): the vertex-fetch load.
+    pub indices_drawn: u32,
 }
 
 /// One frame's draw input.
@@ -406,10 +420,24 @@ struct CameraUniform {
     fog_cloud_end: f32,
     /// Sky light multiplier by time of day (`chunk.wgsl`).
     daylight: f32,
+    /// Selection outline stroke, framebuffer pixels divided by the target height, and the
+    /// target's aspect: the line vertex shader's NDC offset per pixel (overlay.wgsl).
+    line_width: f32,
+    aspect: f32,
     /// Vanilla `Globals.GameTime`: `(gameTime % 24000 + partial) / 24000`, the end portal's
     /// layer scroll (0 when the frame carries no game time, e.g. the menu).
     game_time: f32,
+    /// WGSL rounds a uniform struct's size up to its alignment (16): the Rust struct must
+    /// be 144 bytes (36 floats), one pad float more than the WGSL fields spell out, or the
+    /// buffer binds 4 bytes short of what the shader expects. The assertion below keeps
+    /// Rust and WGSL agreeing.
+    _pad: [f32; 2],
 }
+
+const _: () = assert!(
+    std::mem::size_of::<CameraUniform>() == 144,
+    "CameraUniform must match the WGSL Camera structs (144 bytes; see overlay.wgsl)"
+);
 
 /// One section layer to draw this frame.
 #[derive(Clone, Copy)]
@@ -513,6 +541,12 @@ pub struct Renderer {
     size: (u32, u32),
     /// GUI batch drawing (`FrameInput::gui`) and its own handle on the assets for lazy loads.
     gui: crate::gui::GuiRenderer,
+    /// The menu background blur (vanilla: the `blur` post chain), when a screen asks for it.
+    blur: crate::blur::MenuBlur,
+    /// Vanilla `Options.menuBackgroundBlurriness` (the blur radius; 0 = off).
+    menu_blur_radius: u32,
+    /// The blur-unavailable warning (a surface without COPY_SRC) logged once.
+    blur_unavailable_logged: bool,
     assets: haste_assets::Assets,
     /// Entity cube models (`FrameInput::entities`).
     entity: crate::entity::EntityRenderer,
@@ -942,6 +976,9 @@ impl Renderer {
                 &crate::fluid::FluidRules::vanilla(),
                 crate::fluid::FluidSprites::from_atlas(&*atlas),
             )),
+            // No shape data at construction (the caller installs it with
+            // `set_ao_shapes`): no state occludes AO until then.
+            Arc::new(crate::mesher::AoTable::all_solid(0)),
         ));
         let arenas = MeshArenas::new(gpu.device.clone(), gpu.queue.clone());
         let timer = crate::timing::GpuTimer::new(&gpu.device, &gpu.queue);
@@ -1003,6 +1040,15 @@ impl Renderer {
         let mut gui_assets = assets.reopen()?;
         gui.preload_sprites(&mut gui_assets, crate::gui::HUD_SPRITES);
 
+        // The menu background blur: its two internal textures use the non-sRGB view of the
+        // target format (vanilla blurs the stored sRGB bytes of its RGBA8_UNORM target);
+        // the frame's colour is copied in, so no bind group on the target itself.
+        let blur = crate::blur::MenuBlur::new(
+            &gpu.device,
+            Self::gui_format_for(&gpu, surface_format),
+            size,
+        );
+
         let section_vis = Arc::new(Mutex::new(ahash::AHashMap::new()));
         let walk = crate::occlusion::AsyncOcclusionWalker::new(section_vis.clone())?;
 
@@ -1057,6 +1103,9 @@ impl Renderer {
             depth: None,
             size,
             gui,
+            blur,
+            menu_blur_radius: 5,
+            blur_unavailable_logged: false,
             assets: gui_assets,
             entity,
             sky,
@@ -1172,6 +1221,32 @@ impl Renderer {
     /// overlay darkening, lightning flash), set by the client before `render`.
     pub fn set_lightmap_frame(&mut self, frame: LightmapFrame) {
         self.lightmap_frame = frame;
+    }
+
+    /// Drops every resident section mesh back to the empty state of a fresh renderer, the world
+    /// the menus draw over after leaving a server (vanilla `Minecraft.disconnectClient` clears
+    /// the level and its render chunks). The per-frame lists (entities, particles, weather,
+    /// overlays, the hand) are rebuilt from each `FrameInput` and need no reset. The mesh
+    /// arenas keep their GPU buffers: `sections` is emptied, not freed, so a rejoin uploads into
+    /// the same arenas without reallocating them.
+    pub fn clear_world(&mut self) {
+        for s in self.sections.values() {
+            self.arenas.free(s);
+        }
+        self.sections.clear();
+        self.section_vis.lock().clear();
+        self.visible_mask = Default::default();
+        self.visible_for = None;
+        self.scheduled_for = None;
+        self.walk_in_flight = false;
+        self.bonus.clear();
+        self.vis_dirty = false;
+    }
+
+    /// Vanilla `Options.menuBackgroundBlurriness`: the box-blur radius of an open screen's
+    /// blurred background (0 = off, 10 = maximum; vanilla default 5).
+    pub fn set_menu_blur_radius(&mut self, radius: u8) {
+        self.menu_blur_radius = crate::blur::blur_radius(radius);
     }
 
     /// Uploads the particle atlas of `types` as the particle texture (call after
@@ -1309,11 +1384,22 @@ impl Renderer {
     }
 
     /// The adapter this renderer runs on (name and backend, for bench reports).
-    /// Terrain-arena memory diagnostics: arena count and the vertex+index bytes
-    /// allocated (fixed-size GPU buffer pairs), plus the resident-section count.
-    pub fn arena_memory(&self) -> (usize, u64, usize) {
-        let (arenas, bytes) = self.arenas.memory_stats();
-        (arenas, bytes, self.sections.len())
+    /// Terrain-arena memory diagnostics: arena count, the vertex+index bytes allocated
+    /// (fixed-size GPU buffer pairs), the bytes actually used, plus the resident-section
+    /// count.
+    pub fn arena_memory(&self) -> (usize, u64, u64, usize) {
+        let (arenas, bytes, used) = self.arenas.memory_stats();
+        (arenas, bytes, used, self.sections.len())
+    }
+
+    /// CPU-side memory diagnostics for the bench's memory line: the block atlas's
+    /// retained mip chain, the baked block models and the mesher's pending queue.
+    pub fn cpu_memory(&self) -> RendererCpuMemory {
+        RendererCpuMemory {
+            atlas_bytes: self.atlas.pixel_bytes(),
+            baked_bytes: self.baked.memory_bytes(),
+            mesh_pending: self.mesher.pending_len() as u64,
+        }
     }
 
     pub fn adapter_info(&self) -> wgpu::AdapterInfo {
@@ -1502,6 +1588,11 @@ impl Renderer {
         } else {
             self.configure_surface();
         }
+        self.blur.resize(
+            &self.gpu.device,
+            Self::gui_format_for(&self.gpu, self.surface_format),
+            self.size,
+        );
     }
 
     /// The biome table of the joined server (synced `minecraft:worldgen/biome` registry, index =
@@ -1518,6 +1609,19 @@ impl Renderer {
     pub fn set_biome_blend(&mut self, radius: i32) {
         let mut tables = self.mesher.tables();
         tables.colors = Arc::new((*tables.colors).clone().with_radius(radius));
+        self.mesher.set_tables(tables);
+    }
+
+    /// The AO occluder table from haste-data's shape data (vanilla
+    /// `getShadeBrightness <= 0.2`). Applies to sections meshed afterwards:
+    /// call it before the first chunks.
+    pub fn set_ao_shapes(
+        &mut self,
+        states: &dyn haste_core::view::BlockStateTable,
+        shapes: &haste_data::BlockShapes,
+    ) {
+        let mut tables = self.mesher.tables();
+        tables.ao = Arc::new(crate::mesher::AoTable::from_shapes(states, shapes));
         self.mesher.set_tables(tables);
     }
 
@@ -1661,7 +1765,11 @@ impl Renderer {
     /// Build the view-projection matrix (right-handed, OpenGL-style depth like
     /// wgpu's default reverse... wgpu uses 0..1 z; glam's perspective_rh
     /// produces -1..1, so use perspective_infinite_rh style correction).
-    fn view_projection(camera: &Camera, aspect: f32, spin: Option<SpinWarp>) -> glam::Mat4 {
+    pub(crate) fn view_projection(
+        camera: &Camera,
+        aspect: f32,
+        spin: Option<SpinWarp>,
+    ) -> glam::Mat4 {
         let mut proj =
             glam::Mat4::perspective_rh(camera.fov_deg.to_radians(), aspect, 0.05, 4096.0);
         if let Some(spin) = spin {
@@ -1699,7 +1807,7 @@ impl Renderer {
     }
 
     /// Frustum culling of sections (Pomme cull.comp reference; CPU here).
-    fn frustum_planes(m: &glam::Mat4) -> [glam::Vec4; 6] {
+    pub(crate) fn frustum_planes(m: &glam::Mat4) -> [glam::Vec4; 6] {
         // Gribb/Hartmann: planes are row3 +- row_i of the clip matrix (clip = M * p).
         // wgpu clip z is 0..w: the near plane is row2 alone.
         let r = |i: usize| m.row(i);
@@ -1733,10 +1841,21 @@ impl Renderer {
         };
         let aspect = self.size.0 as f32 / self.size.1 as f32;
         let view_proj = Self::view_projection(&frame.camera, aspect, frame.spin);
+        // Entity culling needs the frustum before posing (vanilla's
+        // `EntityRenderer.shouldRender`): the camera-relative view-projection's planes.
+        let entity_frustum = Self::frustum_planes(&Self::view_projection(
+            &Camera {
+                pos: glam::DVec3::ZERO,
+                ..frame.camera
+            },
+            aspect,
+            frame.spin,
+        ));
         self.entity.prepare(
             frame.entities,
             frame.camera_entity,
             frame.camera.pos,
+            &entity_frustum,
             &mut self.assets,
         );
         {
@@ -1881,8 +2000,16 @@ impl Renderer {
             fog_sky_end: fog_data.sky_end,
             fog_cloud_end: fog_data.cloud_end,
             daylight: self.sky.daylight(),
+            line_width: 0.0,
+            aspect,
             game_time: game_time_uniform,
+            _pad: [0.0; 2],
         };
+        // Vanilla's outline width (Window.getAppropriateLineWidth): scales with the
+        // framebuffer so it covers the same fraction of the screen at any resolution.
+        // Pre-divided by the target height: the line shader multiplies it into a NDC offset.
+        camera_uniform.line_width =
+            (self.size.0 as f32 / 1920.0 * 2.5).max(2.5) * 0.5 / self.size.1 as f32;
         self.gpu
             .queue
             .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&camera_uniform));
@@ -1913,7 +2040,10 @@ impl Renderer {
                 fog_sky_end: fog_data.sky_end,
                 fog_cloud_end: fog_data.cloud_end,
                 daylight: self.sky.daylight(),
+                line_width: 0.0,
+                aspect,
                 game_time: game_time_uniform,
+                _pad: [0.0; 2],
             };
             self.gpu.queue.write_buffer(
                 &self.hand_camera_uniform,
@@ -2100,6 +2230,7 @@ impl Renderer {
         });
         let sections_total = self.sections.len() as u32;
         let drawn = draws.len() as u32;
+        let indices_drawn: u32 = draws.iter().map(|d| d.index_count).sum();
         self.origins.clear();
         self.origins.extend(draws.iter().map(|d| d.origin));
         if self.origins.len() > self.origin_capacity {
@@ -2184,6 +2315,7 @@ impl Renderer {
                     let c = ChunkPos::new(section.x, section.z);
                     column(c) & (1u32 << si) != 0 || bonus.contains(&(c, si))
                 },
+                frame.partial_tick,
                 &mut self.assets,
                 orientation,
             );
@@ -2439,34 +2571,118 @@ impl Renderer {
             draw_calls += self.entity.draw_hand(&mut pass);
         }
 
-        // GUI on top, in its own pass over the non-sRGB view (no depth).
+        // GUI on top, in its own pass over the non-sRGB view (no depth). When the open screen
+        // asks for a blurred background (vanilla: Screen.extractBlurredBackground marking the
+        // strata split), the commands before the marker draw, the blur post chain runs over
+        // the target (GameRenderer.processBlurEffect), then the rest draws over the result.
         if !frame.gui.commands.is_empty() || !self.nametags.is_empty() {
-            self.gui.prepare(
+            let blur_after = frame.gui.blur_after as usize;
+            let blur = frame.gui.blur_after >= 0
+                && blur_after < frame.gui.commands.len()
+                && self.menu_blur_radius > 0;
+            let split = if blur {
+                blur_after
+            } else {
+                frame.gui.commands.len()
+            };
+            self.gui.prepare_range(
                 frame.gui,
                 frame.entities,
                 &self.nametags,
                 self.size,
                 &mut self.assets,
+                0,
+                split,
+                true,
             );
             ran[2] = true;
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("gui"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &gui_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: self.timer.as_ref().and_then(|t| t.writes(2)),
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            self.gui.draw(&mut pass, self.size);
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("gui"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &gui_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: self.timer.as_ref().and_then(|t| t.writes(2)),
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                self.gui.draw(&mut pass, self.size);
+            }
+            let first_batch_after_blur = self.gui.batch_count();
             draw_calls += self.gui.stats.draw_calls;
+            if blur {
+                // The blur's input is the frame's colour target itself: copy it in (the
+                // surface's texture, or the offscreen/capture target), run the chain, the
+                // last pass lands back in the target the rest of the GUI draws over.
+                let copy_src = match (&held_surface_texture, &capture_color, &self.offscreen) {
+                    (Some(tex), _, _) => Some(tex.texture.as_image_copy()),
+                    (None, Some(color), _) => Some(color.as_image_copy()),
+                    (None, None, Some(off)) => Some(off.color.as_image_copy()),
+                    (None, None, None) => None,
+                };
+                // A windowed surface without COPY_SRC cannot feed the blur; leave the world
+                // sharp rather than dropping the screen (logged once). Vulkan has COPY_SRC.
+                let can_blur = copy_src.is_some()
+                    && (self.offscreen.is_some() || capture_color.is_some() || self.surface_copy);
+                if can_blur {
+                    let copy_src = copy_src.unwrap();
+                    self.blur.resize(
+                        &self.gpu.device,
+                        Self::gui_format_for(&self.gpu, self.surface_format),
+                        self.size,
+                    );
+                    self.blur.run(
+                        &mut encoder,
+                        &self.gpu.queue,
+                        self.menu_blur_radius,
+                        &gui_view,
+                        copy_src,
+                    );
+                    // The rest of the frame's commands, over the blurred target.
+                    self.gui.prepare_range(
+                        frame.gui,
+                        frame.entities,
+                        &self.nametags,
+                        self.size,
+                        &mut self.assets,
+                        blur_after,
+                        frame.gui.commands.len(),
+                        false,
+                    );
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("gui-after-blur"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &gui_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                            depth_slice: None,
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    // Only the batches built after the blur: the before-blur ones (HUD
+                    // included, like vanilla's firstStratumAfterBlur split) are already
+                    // on the target underneath it and must not be redrawn sharp.
+                    self.gui
+                        .draw_from(&mut pass, self.size, first_batch_after_blur);
+                    draw_calls += self.gui.stats.draw_calls - first_batch_after_blur as u32;
+                } else if !self.blur_unavailable_logged {
+                    self.blur_unavailable_logged = true;
+                    tracing::warn!("surface cannot be copied: menu background blur unavailable");
+                }
+            }
         }
 
         // Animated atlas textures: the animation worker writes each tick's
@@ -2510,6 +2726,7 @@ impl Renderer {
             meshes_pending: self.mesher.pending_len() as u32,
             uploads: self.last_uploads.0,
             upload_bytes: self.last_uploads.1,
+            indices_drawn,
             draw_calls,
             block_entities_drawn: self.block_entities_drawn,
         })

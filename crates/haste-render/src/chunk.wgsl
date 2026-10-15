@@ -17,8 +17,15 @@ struct Camera {
     fog_cloud_end: f32,
     // Sky light multiplier by time of day (1 at day, 0 at night; block light is unaffected).
     daylight: f32,
-    // Vanilla `Globals.GameTime` (unused by the terrain; see endportal.wgsl).
+    // Outline stroke (pixels / target height) and aspect: only the overlay shader reads
+    // them. Every Camera declaration must stay layout-identical (renderer.rs asserts
+    // the Rust and WGSL sizes are equal, a uniform struct's size is rounded up to its
+    // alignment in WGSL, so the explicit pad below is load-bearing).
+    line_width: f32,
+    aspect: f32,
+    // Vanilla `Globals.GameTime` (the end portal layers scroll with it; see endportal.wgsl).
     game_time: f32,
+    _pad: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -80,8 +87,11 @@ fn face_shade(index: u32) -> f32 {
 @group(2) @binding(0) var lightmap_texture: texture_2d<f32>;
 @group(2) @binding(1) var lightmap_sampler: sampler;
 
-fn light_color(sky: u32, block: u32) -> vec3<f32> {
-    let uv = (vec2<f32>(f32(block), f32(sky)) + 0.5) / 16.0;
+/// Vanilla smooth light: channels in 16th-of-a-level units (0..240); the
+/// lightmap sample is `minecraft_sample_lightmap`'s `(value + 8) / 256`
+/// (a level's texel centre plus the fraction between levels, bilinear).
+fn light_color16(sky16: u32, block16: u32) -> vec3<f32> {
+    let uv = (vec2<f32>(f32(block16), f32(sky16)) + vec2<f32>(8.0)) / 256.0;
     return textureSampleLevel(lightmap_texture, lightmap_sampler, uv, 0.0).rgb;
 }
 
@@ -101,16 +111,19 @@ fn vs_main(in: VertexIn, @builtin(vertex_index) vi: u32) -> VertexOut {
     out.sprite_uv = vec2<f32>(f32(in.uv_packed.x), f32(in.uv_packed.y)) / UV_FIXED_SCALE;
     out.sprite = in.sprite_packed;
 
-    // Light nibbles -> lightmap. `light.x` = sky<<4 | block, `light.y` =
-    // ao (bits 0..1) | shade index (bits 2..4).
-    let packed = in.light.x;
-    let sky = packed >> 4u;
-    let block = packed & 0xFu;
+    // Light in vanilla smooth units (16 per level, 0..240): `light.x` = sky,
+    // `tint_b.y` = block, `light.y` = ao occluder count (bits 0..2) | shade
+    // index (bits 3..5).
+    let sky16 = u32(in.light.x);
+    let block16 = u32(in.tint_b.y);
     let ao_shade_packed = in.light.y;
-    let ao_level = ao_shade_packed & 3u;
-    let shade_index = (ao_shade_packed >> 2u) & 7u;
-    let ao = 0.4 + 0.2 * f32(ao_level); // AO_BRIGHTNESS [0.4, 0.6, 0.8, 1.0]
-    out.light = light_color(sky, block) * ao * face_shade(shade_index);
+    let ao_count = ao_shade_packed & 7u;
+    let shade_index = (ao_shade_packed >> 3u) & 7u;
+    // Vanilla's per-vertex AO brightness: the average of four shade samples
+    // (two sides, the diagonal, the face cell), each 1.0 or 0.2 — i.e.
+    // 1 - 0.2 * occluders.
+    let ao = 1.0 - 0.2 * f32(ao_count);
+    out.light = light_color16(sky16, block16) * ao * face_shade(shade_index);
 
     // Per-vertex biome/block tint. Vanilla multiplies sRGB texel by sRGB tint; the atlas is
     // sampled linear here, so the tint is linearized too (the product of the two

@@ -50,6 +50,7 @@ public final class GfxImpl {
         scissorDepth = 0;
         tooltip = null;
         cursor = 0;
+        blurAfter = -1;
         entityBoxes.clear();
         pipelineBlits = 0;
         nameBlits = 0;
@@ -69,7 +70,18 @@ public final class GfxImpl {
     public static int guiHeight(GuiGraphicsExtractor g) { return height; }
     public static Matrix3x2fStack pose(GuiGraphicsExtractor g) { return POSE; }
     public static void nextStratum(GuiGraphicsExtractor g) {}
-    public static void blurBeforeThisStratum(GuiGraphicsExtractor g) {}
+    /**
+     * The open screen asked to blur the world behind it (vanilla: the blur post chain runs here,
+     * between the HUD and the screen, when the accessibility option is >= 1). Records the command
+     * index the blur goes after; {@code GuiBatch.frame} reports it to Rust.
+     */
+    public static void blurBeforeThisStratum(GuiGraphicsExtractor g) {
+        if (blurAfter < 0 && Proxies.options.getMenuBackgroundBlurriness() >= 1.0F) {
+            blurAfter = GuiBatch.length();
+        }
+    }
+    /** The batch index the blur goes after this frame, or -1 when no screen asked for one. */
+    static int blurAfter;
     /** The cursor the screen asked for this frame (GuiBatch.frame's code; 0 = default). */
     static int cursor;
     public static void requestCursor(GuiGraphicsExtractor g, com.mojang.blaze3d.platform.cursor.CursorType c) {
@@ -426,4 +438,12 @@ public final class GfxImpl {
     }
 
     public static void setPreeditOverlay(GuiGraphicsExtractor g, Renderable r) {}
+
+    /**
+     * The enchanting table's book (vanilla: a 3D model in a GUI box, drawn by the entity renderer). Haste's
+     * GUI batch has no model rendering yet, so nothing is drawn; the book model the screen built is the
+     * replacement class ({@code haste/replace/.../BookModel.java}), whose shape matches this signature.
+     */
+    public static void book(GuiGraphicsExtractor g, net.minecraft.client.model.object.book.BookModel bookModel,
+                             Identifier texture, float scale, float open, float flip, int x0, int y0, int x1, int y1) {}
 }

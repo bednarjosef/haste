@@ -79,4 +79,34 @@ public final class Boot {
 
     /** The proxy generator's summary line from this start. */
     public static String genSummary() { return genSummary; }
+
+    /**
+     * JVM memory diagnostics for the bench's memory line, as {@code key=value} lines:
+     * heap committed/used/max, metaspace, code cache and the class data sharing archive (bytes).
+     */
+    public static String memoryStats() {
+        Runtime rt = Runtime.getRuntime();
+        long total = rt.totalMemory(), free = rt.freeMemory();
+        StringBuilder sb = new StringBuilder(256);
+        sb.append("heap_committed=").append(total).append('\n');
+        sb.append("heap_used=").append(total - free).append('\n');
+        sb.append("heap_max=").append(rt.maxMemory()).append('\n');
+        try {
+            java.lang.management.MemoryPoolMXBean metaspace = null, compressed = null;
+            long code = 0;
+            for (java.lang.management.MemoryPoolMXBean pool
+                     : java.lang.management.ManagementFactory.getMemoryPoolMXBeans()) {
+                String n = pool.getName();
+                if (n.startsWith("CodeHeap") || n.equals("CodeCache")) code += pool.getUsage().getUsed();
+                else if (n.equals("Metaspace")) metaspace = pool;
+                else if (n.equals("Compressed Class Space")) compressed = pool;
+            }
+            if (metaspace != null) sb.append("metaspace_used=").append(metaspace.getUsage().getUsed()).append('\n');
+            if (code > 0) sb.append("code_cache_used=").append(code).append('\n');
+            if (compressed != null) sb.append("compressed_class_used=").append(compressed.getUsage().getUsed()).append('\n');
+        } catch (Throwable t) {
+            // non-fatal: the bench prints what it got
+        }
+        return sb.toString();
+    }
 }

@@ -289,13 +289,17 @@ pub struct CreateWorldRequest {
 /// The game state the proxies read. Owned by Rust; the client updates it (e.g. from packets) and
 /// screens see it immediately through the natives. Java writes back what vanilla code produced
 /// (inventory changes, chat, serverbound packets).
-#[derive(Debug)]
 pub struct GameState {
     /// Mirror of the player's inventory in vanilla `Inventory` numbering (0-8 hotbar, 9-35 main,
     /// 36-39 armour feet..head, 40 offhand, then any further equipment slots). Written by Java.
     pub inventory: Vec<ItemStackData>,
     /// Mirror of the stack carried by the cursor in an open container. Written by Java.
     pub carried: ItemStackData,
+    /// Inventory slots Java changed since the last [`GameState::take_inventory_changes`]
+    /// (vanilla numbering), oldest first. Java predicts inventory edits itself (creative
+    /// slot sets, menu clicks); the server never echoes those back, so the client must take
+    /// them from here.
+    pub inventory_changes: Vec<(i32, ItemStackData)>,
     /// Selected hotbar slot (0-8).
     pub selected_slot: i32,
     /// Messages the chat screen sent since the last [`GameState::take_sent`].
@@ -344,6 +348,13 @@ pub struct GameState {
     /// Option changes vanilla screens made, as options.txt key/value pairs, oldest first. The
     /// client drains them once per tick and applies them live (render distance, sound volumes, ...).
     pub option_changes: Vec<(String, String)>,
+    /// Block states of the positions whose block entities the screens edit, `[x, y, z] -> global
+    /// block state id` (`Block.BLOCK_STATE_REGISTRY`, which the data generator's blocks.json
+    /// numbers the same). The client records them from its world before forwarding the packets
+    /// that make Java build an entity (`block_entity_data`, `open_sign_editor`, a use of a
+    /// game-master block); Java builds the entity's real state from it (`Block.stateById`), like
+    /// vanilla's chunks build entities from the block state (`LevelChunk.setBlockState`).
+    pub block_states: std::collections::HashMap<[i32; 3], i32>,
     /// The resource pack selection the pack screen committed (vanilla
     /// `Minecraft.reloadResourcePacks`), repository ids bottom first; the client rebuilds its
     /// asset stack from them. `None` = no change pending.
@@ -355,6 +366,7 @@ impl Default for GameState {
         GameState {
             inventory: vec![empty_stack(); INVENTORY_SIZE],
             carried: empty_stack(),
+            inventory_changes: Vec::new(),
             selected_slot: 0,
             sent: Vec::new(),
             player_name: "Player".to_owned(),
@@ -376,6 +388,7 @@ impl Default for GameState {
             create_world_requested: None,
             local_world_running: false,
             option_changes: Vec::new(),
+            block_states: std::collections::HashMap::new(),
             resource_pack_ids: None,
         }
     }
@@ -411,7 +424,13 @@ impl GameState {
         if self.inventory.len() <= i {
             self.inventory.resize(i + 1, empty_stack());
         }
-        self.inventory[i] = stack;
+        self.inventory[i] = stack.clone();
+        self.inventory_changes.push((slot, stack));
+    }
+
+    /// Drains the inventory slots Java changed since the last call, oldest first.
+    pub fn take_inventory_changes(&mut self) -> Vec<(i32, ItemStackData)> {
+        std::mem::take(&mut self.inventory_changes)
     }
     /// Drains the messages sent by screens.
     pub fn take_sent(&mut self) -> Vec<ChatMessage> {
@@ -582,5 +601,17 @@ mod tests {
         });
         assert_eq!(s.take_sent().len(), 1);
         assert!(s.sent.is_empty());
+        // Every mirrored change is queued for the client to drain, oldest first.
+        assert_eq!(
+            s.take_inventory_changes(),
+            vec![(3, s.slot(3).cloned().unwrap()), (50, empty_stack())]
+        );
+        s.set_mirror(3, empty_stack());
+        assert_eq!(
+            s.take_inventory_changes(),
+            vec![(3, empty_stack())],
+            "clearing a slot is a change too (a creative pickup empties the hotbar slot)"
+        );
+        assert!(s.take_inventory_changes().is_empty(), "drained");
     }
 }

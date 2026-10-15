@@ -17,6 +17,11 @@ public final class LevelImpl {
     public static net.minecraft.world.scores.Scoreboard getScoreboard(Level l) { return Handlers.SCOREBOARD; }
     public static net.minecraft.world.scores.Scoreboard getScoreboard(net.minecraft.client.multiplayer.ClientLevel l) { return Handlers.SCOREBOARD; }
 
+    /** The recipes the server sent at login (update_recipes into the connection proxy): what
+     *  container menus (furnace, brewing) cook with, vanilla {@code ClientLevel.recipeAccess}. */
+    public static net.minecraft.world.item.crafting.RecipeAccess recipeAccess(Level l) { return Proxies.connection.recipes(); }
+    public static net.minecraft.world.item.crafting.RecipeAccess recipeAccess(net.minecraft.client.multiplayer.ClientLevel l) { return Proxies.connection.recipes(); }
+
     public static void disconnect(net.minecraft.client.multiplayer.ClientLevel l, net.minecraft.network.chat.Component reason) { haste.rt.Native.requestDisconnect(); }
 
     /** The server's enabled feature flags (from the configuration phase; vanilla's defaults until then). */

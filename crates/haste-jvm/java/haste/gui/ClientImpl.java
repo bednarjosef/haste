@@ -104,6 +104,22 @@ public final class ClientImpl {
     public static net.minecraft.client.renderer.entity.EntityRenderDispatcher getEntityRenderDispatcher(Minecraft m) {
         return Proxies.service(net.minecraft.client.renderer.entity.EntityRenderDispatcher.class);
     }
+
+    /**
+     * The entity models the GUI screens bake (vanilla: the model manager's reload builds every layer). Haste's
+     * GUI batch draws no models, so only the layers a screen constructs are provided — the enchanting table's
+     * book — as real vanilla geometry (an empty mesh: the book's draw call is a no-op, its shape is never read).
+     */
+    public static net.minecraft.client.model.geom.EntityModelSet getEntityModels(Minecraft m) {
+        if (ENTITY_MODELS == null) {
+            ENTITY_MODELS = new net.minecraft.client.model.geom.EntityModelSet(java.util.Map.of(
+                net.minecraft.client.model.geom.ModelLayers.BOOK,
+                net.minecraft.client.model.geom.builders.LayerDefinition.create(
+                    new net.minecraft.client.model.geom.builders.MeshDefinition(), 64, 32)));
+        }
+        return ENTITY_MODELS;
+    }
+    private static net.minecraft.client.model.geom.EntityModelSet ENTITY_MODELS;
     public static PlayerSocialManager getPlayerSocialManager(Minecraft m) { return Proxies.service(PlayerSocialManager.class); }
     /** The skin manager: offline mode — every player shows their default skin, nothing is fetched. */
     public static net.minecraft.client.resources.SkinManager getSkinManager(Minecraft m) {
@@ -261,14 +277,20 @@ public final class ClientImpl {
 
     /**
      * The thread check at the top of every play handler (vanilla: Minecraft's own PacketProcessor
-     * over its game thread, isSameThread). Haste decodes and handles every packet on the game
-     * thread by construction, so the processor is built over the thread that first asks for it
-     * (always a packet handler: the game thread) and vanilla's check passes, like vanilla's.
+     * over its game thread, isSameThread). Haste decodes and handles every packet on whatever
+     * thread drives the UI (Rust owns the connection and hands the packets over in order), and
+     * there is no cross-thread queue to re-schedule onto, so the check always passes — unlike
+     * vanilla, which would re-queue onto its game thread. Without this, the processor would
+     * capture the thread that first asks for it and later callers from other threads (tests,
+     * one thread per test over one shared JVM) would take vanilla's re-queue path, dropping the
+     * packet and loading the deny-listed RunningOnDifferentThreadException.
      */
     private static net.minecraft.network.PacketProcessor packetProcessor;
     public static net.minecraft.network.PacketProcessor packetProcessor(Minecraft m) {
         if (packetProcessor == null) {
-            packetProcessor = new net.minecraft.network.PacketProcessor(Thread.currentThread());
+            packetProcessor = new net.minecraft.network.PacketProcessor(Thread.currentThread()) {
+                @Override public boolean isSameThread() { return true; }
+            };
         }
         return packetProcessor;
     }
@@ -291,6 +313,18 @@ public final class ClientImpl {
      */
     public static void setScreen(Gui g, Screen s) {
         Screen old = screen;
+        // vanilla Gui.setScreen: closing the last screen outside a world (the create screen's
+        // Cancel after the empty world list auto-opened it, whose onClose is setScreen(null))
+        // falls back to a fresh title screen, not to no screen at all. Vanilla reads the live
+        // `minecraft.level` here; the mirror is refreshed first so the calling thread (the game
+        // thread closing the loading screen when the level arrives, say) sees the current state,
+        // not whatever the last render or tick mirrored.
+        if (s == null) {
+            Mirror.update();
+            if (!Mirror.inWorld()) {
+                s = new net.minecraft.client.gui.screens.TitleScreen();
+            }
+        }
         if (old != null && old != s) old.removed();
         screen = s;
         if (s != null) {
@@ -335,6 +369,7 @@ public final class ClientImpl {
 
     /** Reduced debug info (the server's game rule, entity events 22/23): not forwarded yet, full info. */
     public static boolean showOnlyReducedInfo(Minecraft m) { return false; }
+
     /** Vanilla's tutorial (hints and toasts for new players); Haste starts it at the last step (no hints). */
     public static net.minecraft.client.tutorial.Tutorial getTutorial(Minecraft m) { return Proxies.tutorial; }
     /** Frames per second from Rust's render loop. */

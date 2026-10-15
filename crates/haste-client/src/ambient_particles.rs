@@ -68,6 +68,8 @@ impl Rng {
 /// One `animateTick` step: samples the blocks and queues `addParticle` spawns
 /// (`ParticleSpawn` count-0 semantics; the pool applies vanilla's 32-block limiter
 /// against the camera). `raining` gates the leaf drip (weather is not decoded yet).
+/// The buffer is replaced, not appended: only this tick's samples are in it when the
+/// call returns, so a block that is gone (a broken torch) stops spawning at once.
 pub fn animate_tick(
     world: &dyn BlockView,
     data: &GameData,
@@ -75,6 +77,7 @@ pub fn animate_tick(
     raining: bool,
     out: &mut Vec<ParticleSpawn>,
 ) {
+    out.clear();
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
     for _ in 0..SAMPLES {
         for r in RADII {
@@ -520,6 +523,32 @@ mod tests {
         for s in &out {
             assert!(s.pos.y.floor() == 64.0, "only the y=64 plane has torches");
         }
+    }
+
+    /// A reused buffer holds only the current tick's samples: the spawns of a
+    /// previous tick are dropped, not appended to (vanilla's `animateTick` starts
+    /// from nothing each tick; a broken torch stops spawning immediately because
+    /// nothing replays the old positions).
+    #[test]
+    #[ignore = "needs the datagen reports in the cache"]
+    fn animate_tick_replaces_the_buffer_not_appends() {
+        let Some(data) = game_data() else {
+            eprintln!("ignored: needs the data generator reports in the cache");
+            return;
+        };
+        let torch = state_of(&data, "torch");
+        let world = Flat(torch);
+        let mut out = Vec::new();
+        animate_tick(&world, &data, BlockPos::new(0, 64, 0), false, &mut out);
+        let first = out.len();
+        assert!(first > 0, "no spawns with torches around");
+        animate_tick(&world, &data, BlockPos::new(0, 64, 0), false, &mut out);
+        assert_eq!(out.len(), first, "the second tick appended to the first");
+        // The torch is gone (broken): the same world without it spawns nothing, and
+        // the stale spawns from when it stood are not replayed.
+        let air = Flat(BlockStateId::AIR);
+        animate_tick(&air, &data, BlockPos::new(0, 64, 0), false, &mut out);
+        assert!(out.is_empty(), "a broken torch still spawns: {}", out.len());
     }
 
     /// The torch odds over the whole sample: 667 * 2 draws, the y coordinate is

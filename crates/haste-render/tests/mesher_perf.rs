@@ -279,6 +279,8 @@ fn setup() -> Option<(
             &fluid::FluidRules::vanilla(),
             fluid::FluidSprites::from_atlas(&atlas),
         )),
+        // The bench world is full cubes: AO treats them all as occluders.
+        std::sync::Arc::new(haste_render::mesher::AoTable::all_solid(states.len())),
     );
     Some((states, baked, atlas, tables))
 }
@@ -377,13 +379,11 @@ fn mesher_output_stable() {
         "stability: {quads} quads, {vertices} vertices, sprite range {}..{}",
         sprites.0, sprites.1
     );
-    // Expected: the original mesher's output until the smooth-light neighbour
-    // cells were fixed to the AO cells (one cell out from the block instead of
-    // one cell further along the face normal): the light of every face vertex
-    // that has a neighbour above or below it changes, which removes the thin
-    // lines the old sampling drew along block edges. Quad count, vertices,
-    // sprites and AO are unchanged.
-    let expected: u64 = 1_593_019_514_260_049_155;
+    // Expected: the original mesher's output until the diagonal substitution's
+    // permeability test moved to the one-out cells (vanilla's side + normal)
+    // and the zero-light fallback was gated off: the vertices next to
+    // occluders change. Quad count, vertices and sprites are unchanged.
+    let expected: u64 = 16_624_786_452_542_720_925;
     assert_eq!(hash.finish(), expected, "mesher output changed");
     assert!(quads > 100_000, "suspiciously few quads: {quads}");
     eprintln!("{quads} quads, hash {:016x}", hash.finish());

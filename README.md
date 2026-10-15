@@ -10,7 +10,7 @@ Plays like vanilla wherever you can feel it. Built from the start to run Fabric 
 [![License: GPL v3+](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 [![Minecraft](https://img.shields.io/badge/Minecraft-Java%2026.3-62b47a.svg)](#getting-started)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](rust-toolchain.toml)
-[![Phase 1](https://img.shields.io/badge/phase%201-88%25-brightgreen.svg)](#progress)
+[![Phase 1](https://img.shields.io/badge/phase%201-90%25-brightgreen.svg)](#progress)
 
 </div>
 
@@ -23,7 +23,7 @@ apart from vanilla, that runs faster than vanilla with Sodium, and that will lat
 mods through a compatibility layer.
 
 > [!NOTE]
-> Haste is in active development. Phase 1 (a complete vanilla client) is about **88 %** done:
+> Haste is in active development. Phase 1 (a complete vanilla client) is about **90 %** done:
 > you can play singleplayer and on offline-mode servers today. Online-mode servers (Microsoft
 > login) are not supported yet, and mods come in Phase 2.
 
@@ -68,11 +68,11 @@ downloaded or derived from Mojang's files stays in `cache/` (or `$HASTE_CACHE`).
 
 ## Progress
 
-**49 of 62 done, 11 partly done, 2 not started** (about 88 %, counting partly done as
+**51 of 62 done, 10 partly done, 1 not started** (about 90 %, counting partly done as
 half). The list is what a player needs to play Haste like the original game without noticing
 a difference; Phase 2 (mods) is not counted.
 
-`██████████████████████████░░░░` **88 %**
+`███████████████████████████░░░` **90 %**
 
 | Area | Progress | ✅ | 🟡 | ⬜ |
 |---|---|---:|---:|---:|
@@ -80,7 +80,7 @@ a difference; Phase 2 (mods) is not counted.
 | Connecting to servers | `████████░░` | 3 | 2 | 0 |
 | World | `██████████` | 5 | 0 | 0 |
 | Rendering | `█████████░` | 14 | 3 | 1 |
-| HUD and screens | `█████████░` | 10 | 1 | 1 |
+| HUD and screens | `██████████` | 12 | 0 | 0 |
 | Playing | `█████████░` | 6 | 1 | 0 |
 | Sound | `████████░░` | 2 | 2 | 0 |
 
@@ -101,7 +101,7 @@ a difference; Phase 2 (mods) is not counted.
 - ✅ Languages: every language of the game, switched live from Options > Language
 - ✅ Keybind remapping: Options > Controls > Key Binds rebinds any key, saved in options.txt and kept across restarts (checked by script)
 - 🟡 Microsoft account login: `haste login` / `haste logout` run the device-code flow and store the account, untested end to end (needs a Microsoft app id)
-- 🟡 Resource packs: the Resource Packs screen picks, orders and applies packs live, saved in options.txt; packs sent by servers not yet
+- 🟡 Resource packs: the Resource Packs screen picks, orders and applies packs live, saved in options.txt; packs sent by servers download, are checked and applied above yours; the accept/decline prompt not yet
 
 </details>
 
@@ -144,15 +144,15 @@ a difference; Phase 2 (mods) is not counted.
 - ✅ Armour, held items, heads and elytra on mobs and players
 - ✅ Mobs and players: vanilla's models for all 91 mob types with babies, variants, sizes and states, default skins, name tags and shadows
 - ✅ Particles: the server's and the client's own (breaking, mining cracks, sprinting, landing, torches, fire, lava, portals, drips) with vanilla's motion, size and lifetime
-- 🟡 Smooth lighting and ambient occlusion: present, but leaves, bark and grass sides are about 1.35x brighter than vanilla
-- 🟡 Performance: `haste --bench` measures about 900-980 FPS (1.0-1.1 ms per frame) at 1920x1080, render distance 12, on the development laptop's integrated GPU; not yet compared with vanilla and Sodium
-- 🟡 Block entities drawn: chests (lid animation), ender chests, shulker boxes, signs with text, banners and heads, lecterns, enchanting tables, bells, decorated pots and conduits, beacon beams (sections from the glass above), end portals and gateways (the layered starfield), moving pistons (beds are ordinary block models); campfire items, spawners and the other block entities not yet
+- 🟡 Smooth lighting and ambient occlusion: ported from vanilla, enclosed areas dark like vanilla; a small brightness difference in distant tree canopies remains
+- 🟡 Performance: in the same window and spot as vanilla (1408x828, render distance 12) about 1.3x its frame rate and 1.7x less memory (807 MB against 1.35 GB); not yet compared with Sodium
+- 🟡 Block entities drawn: chests, ender chests, shulker boxes, signs, banners, heads, lecterns, enchanting tables, bells, decorated pots, conduits, campfire items, spawners, vaults, shelves and brushable blocks; beacon beams and end portals not yet
 - ⬜ Downloaded player skins and capes
 
 </details>
 
 <details>
-<summary><b>HUD and screens</b> — 10 of 12 done</summary>
+<summary><b>HUD and screens</b> — 12 of 12 done</summary>
 
 These run as the game's own Java code inside Haste, with keyboard and mouse input. Checked with input scripts (`haste --script`, `scripts/checks/`) against a vanilla server.
 - ✅ HUD: hotbar, health, hunger, armour, air, experience
@@ -165,8 +165,8 @@ These run as the game's own Java code inside Haste, with keyboard and mouse inpu
 - ✅ Creative inventory: every tab's items and search
 - ✅ Advancements and statistics screens, and every other pause-menu button
 - ✅ Recipe book: open it, search, click a recipe to craft (checked by script)
-- 🟡 Chests (clicks match vanilla byte for byte); furnace, crafting table, anvil, enchanting, brewing and trading are untested
-- ⬜ Editing signs, books and command blocks
+- ✅ Containers: chests, crafting table, furnace, anvil, enchanting table, brewing stand and villager trading, each checked in game against the server
+- ✅ Editing signs, books and command blocks (checked in game)
 
 </details>
 
@@ -179,7 +179,7 @@ These run as the game's own Java code inside Haste, with keyboard and mouse inpu
 - ✅ Game modes: survival, creative, spectator (through walls) and adventure
 - ✅ Screenshot key (F2): saves to the screenshots folder
 - ✅ Elytra flight: gliding started from the game, firework boost (the server sees a normal glide)
-- 🟡 Riding: sitting in boats, minecarts, horses and pigs at vanilla's seat positions; steering vehicles not yet
+- 🟡 Riding: vanilla seat positions, and steering a boat like vanilla (checked against the server); horses, pigs and striders not yet
 
 </details>
 

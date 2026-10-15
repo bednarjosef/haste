@@ -525,6 +525,15 @@ impl Session {
             biome_climates.clone(),
             options.clone(),
         ));
+        // Wake the game thread the moment a play packet arrives, so packets are
+        // applied between ticks like vanilla's every-frame queue drain
+        // (`Minecraft.runTick`) instead of waiting for the next 20 Hz tick.
+        {
+            let shared = shared.clone();
+            driver
+                .connection()
+                .set_packet_wake(Arc::new(move || shared.wake_on_packet()));
+        }
         // The server's configuration-phase packs are part of the running stack from the
         // start; a later pack-screen reload keeps them layered (vanilla's repository
         // holds them beside the selection).
@@ -733,6 +742,13 @@ pub struct WorldFeed {
     >,
     /// The skull animations by position for this frame (reused lookup scratch).
     skull_anims: HashMap<BlockPos, (f32, f32)>,
+    /// Parsed item and mob payloads by position, rebuilt only when the block entity's NBT
+    /// changes (the (pointer, length) key scheme of `sign_texts`): campfire items, shelf
+    /// items, a vault's displayed item, a brushable block's item and a spawner's display mob.
+    item_blocks: HashMap<BlockPos, (usize, usize, haste_render::BlockEntityKind)>,
+    /// The vault's and the spawners' spins by position for this frame (reused lookup
+    /// scratch), as (previous tick, current tick) in degrees.
+    spin_map: HashMap<BlockPos, (f32, f32)>,
     /// The object-model block entities' animation state by position for this frame (reused
     /// lookup scratch; the game thread ticks it once per tick).
     anim_map: HashMap<BlockPos, haste_render::BlockEntityAnim>,
@@ -932,6 +948,11 @@ impl WorldFeed {
             self.skull_anims.extend(anims.iter().copied());
         }
         {
+            let spins = shared.block_entity_spins.lock();
+            self.spin_map.clear();
+            self.spin_map.extend(spins.iter().copied());
+        }
+        {
             let anims = shared.block_entity_anims.lock();
             self.anim_map.clear();
             self.anim_map.extend(anims.iter().map(|(p, a)| (*p, *a)));
@@ -974,6 +995,14 @@ impl WorldFeed {
                     }
                     continue;
                 };
+                // The item and mob payloads (campfire items, spawner display mobs, vault and
+                // shelf items, brushable item) come from the block entity's NBT, parsed only
+                // when the payload changes. The vault's and spawner's spins come from the
+                // game tick (`VaultClientData.updateDisplayItemSpin`, `BaseSpawner.clientTick`).
+                let registries = &shared.data.registries;
+                let spin = self.spin_map.get(&pos).copied().unwrap_or((0.0, 0.0));
+                let kind =
+                    self.item_block_kind(pos, be, kind, type_name, blocks, state, registries, spin);
                 let facing = blocks
                     .property_value(state, "facing")
                     .and_then(direction_of_property)
@@ -1214,6 +1243,141 @@ impl WorldFeed {
         self.banner_texts
             .insert(pos, (key.0, key.1, parsed.clone()));
         Some(parsed)
+    }
+
+    /// The item or mob payload of a block entity (campfire items, shelf items, a vault's
+    /// displayed item, a brushable block's item, a spawner's display mob), parsed from the
+    /// block entity's NBT only when the payload changes and cached per position (the same
+    /// (pointer, length) scheme as the sign text). Kinds with no payload are handed back
+    /// unchanged.
+    #[allow(clippy::too_many_arguments)]
+    fn item_block_kind(
+        &mut self,
+        pos: BlockPos,
+        be: &haste_core::chunk::BlockEntityData,
+        kind: haste_render::BlockEntityKind,
+        type_name: &haste_core::Identifier,
+        blocks: &haste_data::BlockStates,
+        state: haste_core::BlockStateId,
+        registries: &haste_data::Registries,
+        spin: (f32, f32),
+    ) -> haste_render::BlockEntityKind {
+        use haste_render::blockentity::{BrushableItem, CampfireItems, ShelfItems, VaultDisplay};
+        let payload = matches!(
+            kind,
+            haste_render::BlockEntityKind::Campfire(_)
+                | haste_render::BlockEntityKind::Spawner(_)
+                | haste_render::BlockEntityKind::Vault(_)
+                | haste_render::BlockEntityKind::Shelf(_)
+                | haste_render::BlockEntityKind::Brushable(_)
+        );
+        if !payload {
+            return kind;
+        }
+        let key = (be.nbt.as_ptr() as usize, be.nbt.len());
+        if let Some((k, len, cached)) = self.item_blocks.get(&pos) {
+            if (*k, *len) == key {
+                return cached.clone();
+            }
+        }
+        let parsed = match kind {
+            // The campfire's and the shelf's items, by slot (`ContainerHelper.loadAllItems`).
+            haste_render::BlockEntityKind::Campfire(_) => {
+                let mut items = [None; 4];
+                parse_items_into(&be.nbt, registries, &mut items);
+                haste_render::BlockEntityKind::Campfire(CampfireItems { items })
+            }
+            haste_render::BlockEntityKind::Shelf(_) => {
+                let mut items = [None; 3];
+                parse_items_into(&be.nbt, registries, &mut items);
+                let align = read_nbt(&be.nbt)
+                    .and_then(|doc| doc.root_tag.get_bool("align_items_to_bottom"))
+                    .unwrap_or(false);
+                haste_render::BlockEntityKind::Shelf(ShelfItems {
+                    items,
+                    align_to_bottom: align,
+                })
+            }
+            // The vault's displayed item lives under `shared_data.display_item`; it draws only
+            // when the shared data has one (vanilla `VaultBlockEntity.Client
+            // .shouldDisplayActiveEffects` is `hasDisplayItem`).
+            haste_render::BlockEntityKind::Vault(_) => {
+                match parse_item_stack_path(&be.nbt, &["shared_data", "display_item"], registries) {
+                    Some((item, count)) => haste_render::BlockEntityKind::Vault(VaultDisplay {
+                        item,
+                        count,
+                        spin: haste_render::TickPair {
+                            start: spin.0,
+                            end: spin.1,
+                        },
+                    }),
+                    None => kind,
+                }
+            }
+            // The brushable block's item (its `item` tag) and the block state's `dusted`; the
+            // face it is brushed from is not in the NBT until it has been brushed, so it stays
+            // `None` and the item is drawn only while that face is known.
+            haste_render::BlockEntityKind::Brushable(_) => {
+                let dusted = blocks
+                    .property_value(state, "dusted")
+                    .and_then(|v| v.parse::<u8>().ok())
+                    .unwrap_or(0);
+                match (
+                    parse_item_stack_path(&be.nbt, &["item"], registries),
+                    // Vanilla stores `hit_direction` as `Direction.LEGACY_ID_CODEC`, a byte of
+                    // the direction's 3D data value (`BrushableBlockEntity.getUpdateTag`); read
+                    // it as any numeric, like vanilla's lenient `ValueInput`.
+                    read_nbt(&be.nbt)
+                        .and_then(|doc| doc.root_tag.get_numeric_short("hit_direction"))
+                        .and_then(|v| haste_core::Direction::from_ordinal(v as u8)),
+                ) {
+                    (Some((item, _)), hit_direction) => {
+                        haste_render::BlockEntityKind::Brushable(BrushableItem {
+                            item,
+                            hit_direction,
+                            dusted,
+                        })
+                    }
+                    (None, _) => kind,
+                }
+            }
+            // The spawner's display mob: the model from `SpawnData`'s (a trial spawner's
+            // `spawn_data`'s) entity id, and the spin the game tick keeps.
+            haste_render::BlockEntityKind::Spawner(_) => {
+                let trial =
+                    type_name.namespace() == "minecraft" && type_name.path() == "trial_spawner";
+                // A trial spawner has no display entity outside the states with a spinning mob
+                // (vanilla `TrialSpawnerStateData.getOrCreateDisplayEntity`).
+                let spinning = !trial
+                    || matches!(
+                        blocks
+                            .property_value(state, "trial_spawner_state")
+                            .unwrap_or(""),
+                        "waiting_for_players" | "active"
+                    );
+                let entity = spinning
+                    .then(|| spawner_entity_id(&be.nbt, trial))
+                    .flatten()
+                    .and_then(|id| registries.index("minecraft:entity_type", &id))
+                    .and_then(haste_entity::registry::model_for);
+                match entity {
+                    Some(model) => haste_render::BlockEntityKind::Spawner(
+                        haste_render::blockentity::SpawnerDisplay {
+                            model: Some(model.clone()),
+                            spin: haste_render::TickPair {
+                                start: spin.0,
+                                end: spin.1,
+                            },
+                            scale: haste_render::blockentity::spawner_scale(&model),
+                        },
+                    ),
+                    None => kind,
+                }
+            }
+            other => other,
+        };
+        self.item_blocks.insert(pos, (key.0, key.1, parsed.clone()));
+        parsed
     }
 
     /// The parsed decorated pot sherds at `pos` (`DecoratedPotBlockEntity`'s `sherds` NBT).
@@ -1666,6 +1830,93 @@ fn average_argb(a: u32, b: u32) -> u32 {
 
 /// A banner's patterns from its NBT (`BannerBlockEntity`'s `patterns`: a list of
 /// `{pattern: <registry id>, color: <dye name>}`) plus the base colour from the block id
+/// (`<colour>_banner`, vanilla `BannerBlock.getColor`). `None` when the NBT does not parse;
+/// a banner without a `patterns` tag is the plain base colour.
+/// Reads a block entity's NBT payload (the network variant `read_unnamed` reads). `None` when
+/// the payload does not parse, like vanilla's empty stack.
+fn read_nbt(nbt: &[u8]) -> Option<haste_protocol::nbt::Nbt> {
+    use haste_protocol::nbt::deserializer::NbtReadHelperJava;
+    let mut cursor = std::io::Cursor::new(nbt);
+    let mut helper = NbtReadHelperJava::new(&mut cursor);
+    haste_protocol::nbt::Nbt::read_unnamed(&mut helper).ok()
+}
+
+/// An item stack NBT's registry index and count: vanilla `ItemStack`'s `id` (a registry id in
+/// the namespace's own form) and `count`. `None` for an id we cannot resolve.
+fn parse_item_stack(
+    c: &haste_protocol::nbt::NbtCompound,
+    registries: &haste_data::Registries,
+) -> Option<(haste_core::RegistryIndex, u32)> {
+    let id = haste_core::Identifier::parse(c.get_string("id")?).ok()?;
+    let item = registries.index("minecraft:item", &id)?;
+    let count = c.get_int("count").unwrap_or(1).max(1) as u32;
+    Some((item, count))
+}
+
+/// The item stack under a chain of NBT keys (`shared_data.display_item` for a vault, `item`
+/// for a brushable block), as its registry index and count.
+fn parse_item_stack_path(
+    nbt: &[u8],
+    path: &[&str],
+    registries: &haste_data::Registries,
+) -> Option<(haste_core::RegistryIndex, u32)> {
+    let doc = read_nbt(nbt)?;
+    let mut current = &doc.root_tag;
+    for key in path {
+        current = current.get_compound(key)?;
+    }
+    parse_item_stack(current, registries)
+}
+
+/// The items of a slot-addressed container NBT (`Items`, vanilla `ContainerHelper
+/// The items of a slot-addressed container NBT (`Items`, vanilla `ContainerHelper
+/// .loadAllItems`), written into the caller's slot array; an item whose `Slot` is outside the
+/// array is dropped rather than panicking.
+fn parse_items_into(
+    nbt: &[u8],
+    registries: &haste_data::Registries,
+    items: &mut [Option<haste_core::RegistryIndex>],
+) {
+    let Some(doc) = read_nbt(nbt) else {
+        return;
+    };
+    let Some(list) = doc.root_tag.get_list("Items") else {
+        return;
+    };
+    for entry in list {
+        let haste_protocol::nbt::NbtTag::Compound(c) = entry else {
+            continue;
+        };
+        let slot = c.get_byte("Slot").unwrap_or(-1);
+        if slot < 0 || slot as usize >= items.len() {
+            continue;
+        }
+        if let Some((item, _)) = parse_item_stack(c, registries) {
+            items[slot as usize] = Some(item);
+        }
+    }
+}
+
+/// The entity id a spawner's NBT names (`BaseSpawner`'s `SpawnData.entity.id`; a trial
+/// spawner's `spawn_data.entity.id`), as a registry id.
+fn spawner_entity_id(nbt: &[u8], trial: bool) -> Option<haste_core::Identifier> {
+    let doc = read_nbt(nbt)?;
+    let data = if trial {
+        doc.root_tag.get_compound("spawn_data")?
+    } else {
+        &doc.root_tag
+    };
+    let spawn = if trial {
+        data
+    } else {
+        data.get_compound("SpawnData")?
+    };
+    let entity = spawn.get_compound("entity")?;
+    haste_core::Identifier::parse(entity.get_string("id")?).ok()
+}
+
+/// A banner's patterns from the block entity's NBT
+/// (`{pattern: <registry id>, color: <dye name>}`) plus the base colour from the block id
 /// (`<colour>_banner`, vanilla `BannerBlock.getColor`). `None` when the NBT does not parse;
 /// a banner without a `patterns` tag is the plain base colour.
 fn parse_banner_nbt(
@@ -2581,6 +2832,15 @@ fn game_uses_key(ui_used: bool, screen_open: bool) -> bool {
     !ui_used && !screen_open
 }
 
+/// The last routing decision: whether the typed character of a key press reaches the screen.
+/// Only one pressed while a screen was already open does. The press that *opens* a screen
+/// drops its character, like vanilla: `Gui.handleKeybinds` runs on the tick after the press,
+/// so its character event finds no screen and goes nowhere (T opens the chat empty; the
+/// command key's single "/" is the screen's own prefix, not a typed character).
+fn char_goes_to_screen(screen_open_before: bool) -> bool {
+    screen_open_before
+}
+
 /// A script key in winit's numbering (the windowed client's events and the script runner's
 /// actions go through the same `KeyCode`-keyed routing).
 fn winit_key(key: crate::script::Key) -> KeyCode {
@@ -2762,7 +3022,9 @@ impl InputRouter {
             let forward = key_goes_to_ui(repeat, screen_open);
             let used = forward && ui.key(sc, keys::keycode(sc), mods, pressed);
             if let (Some(c), true) = (typed_char_of(text), pressed) {
-                ui.char_typed(c, mods);
+                if char_goes_to_screen(screen_open) {
+                    ui.char_typed(c, mods);
+                }
             }
             if !game_uses_key(used, screen_open) {
                 // The UI took it: whatever the game thought was held must go.
@@ -2894,6 +3156,14 @@ impl InputRouter {
     fn look(&mut self, yaw: f32, pitch: f32) {
         self.yaw = yaw;
         self.pitch = pitch;
+    }
+
+    /// A look change to an exact aim: the input layer holds its angles minus the server's
+    /// rotation offset, because the tick's pick adds the offset back (a teleport or a
+    /// `player_rotation` echo set it). A script's `look` asks for a specific crosshair, so it
+    /// goes through here; plain mouse motion goes through `look`.
+    fn aim(&mut self, yaw: f32, pitch: f32, offset: (f32, f32)) {
+        self.look(yaw - offset.0, (pitch - offset.1).clamp(-90.0, 90.0));
     }
 
     /// Jump pressed: a second press within vanilla's 7-tick window toggles flight.
@@ -3174,7 +3444,7 @@ impl Menu {
                 })();
                 match result {
                     Ok(host) => {
-                        let ui = crate::ui::Ui::new(host);
+                        let ui = crate::ui::Ui::new(host.clone());
                         // Screens need the synced registries (L1c): the jar's data pack stands in
                         // for a server's registry_data until one is joined.
                         if let Err(e) = ui.gui().load_jar_registries() {
@@ -3184,6 +3454,11 @@ impl Menu {
                             tracing::warn!("opening the title screen: {e:#}");
                         }
                         let _ = tx.send(ui);
+                        // The title screen is up: warm the classes its first clicks load
+                        // (Singleplayer's world-selection tree) while the player looks at it, on
+                        // this background thread — never the render thread. The UI is already
+                        // with the render loop, so the frames do not wait for this.
+                        host.warm_screen_classes();
                     }
                     Err(e) => {
                         tracing::warn!("no menu screens: the JVM did not start: {e:#}");
@@ -3219,6 +3494,7 @@ fn menu_screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let data = net::load_game_data()?;
     let mut renderer = Renderer::new_offscreen(args.width, args.height, &mut assets, &data.blocks)?;
     renderer.set_item_registry(&data.registries);
+    renderer.set_ao_shapes(&data.blocks, &data.shapes);
     let deadline = Instant::now() + Duration::from_secs(args.seconds.max(60));
     let options = load_options();
     let input = InputRouter::default();
@@ -3334,6 +3610,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
+    renderer.set_ao_shapes(&shared.data.blocks, &shared.data.shapes);
     renderer.set_biomes(&session.biomes);
     renderer.set_particle_types(&session.particle_types);
     renderer.set_dimension(shared.world.read().dimension());
@@ -3508,8 +3785,12 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let c = last_camera;
     let view = shared.view.lock().clone();
     let entities = feed.instances.len();
+    let chunks = (
+        shared.chunks_loaded.load(Ordering::Relaxed),
+        shared.chunks_unloaded.load(Ordering::Relaxed),
+    );
     println!(
-        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} gui commands, {} entity instances ({} drew geometry; perspective {}, local player {}), {} particles drawn, {} shadow quads, {} block entities, target {:?}",
+        "screenshot {} ({}x{}) after {frames} frames: camera ({:.2}, {:.2}, {:.2}) yaw {:.1} pitch {:.1}, time of day {}, sections {} drawn of {}, {} draw calls, {} gui commands, {} entity instances ({} drew geometry; perspective {}, local player {}), {} particles drawn, {} shadow quads, {} block entities, {} chunks loaded/{} unloaded, target {:?}",
         file.display(),
         image.width(),
         image.height(),
@@ -3530,6 +3811,8 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         renderer.particles_drawn(),
         renderer.shadow_quad_count(),
         stats.block_entities_drawn,
+        chunks.0,
+        chunks.1,
         view.block_target
     );
     if let Some((color, fog)) = renderer.last_fog() {
@@ -3630,6 +3913,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut renderer = Renderer::new_offscreen(args.width, args.height, &mut assets, &data.blocks)?;
     if let Some(s) = &session {
         renderer.set_item_registry(&s.shared.data.registries);
+        renderer.set_ao_shapes(&s.shared.data.blocks, &s.shared.data.shapes);
         renderer.set_biomes(&s.biomes);
         renderer.set_particle_types(&s.particle_types);
         renderer.set_dimension(s.shared.world.read().dimension());
@@ -3671,6 +3955,8 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut fps = FpsCounter::new();
     let mut last_err: Option<String> = None;
     let mut finished = false;
+    // Whether a screen was open last tick, to release the held game input when one opens.
+    let mut script_screen_was_open = false;
     // With `--pos`, the script's `wait_until settled` also waits for the server to have
     // teleported the player to these feet coordinates (the caller teleports over RCON while
     // we join, like the screenshot mode's `--pos`).
@@ -3688,6 +3974,9 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut last_gui = GuiFrame::default();
     // An F2 press this tick: save the frame to the config screenshots dir after it is rendered.
     let mut f2_pending = false;
+    // The last screen transition (its class and when), for the click-to-screen timings.
+    let mut last_screen_class: Option<String> = None;
+    let mut last_screen_at: Option<Instant> = None;
     // The local singleplayer world of the joined session (stopped when the world is left and
     // at the end of the script, whatever it ended with).
     let mut local_server: Option<LocalWorld> = None;
@@ -3776,13 +4065,36 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                     );
                 }
                 let screen_class = ui.as_ref().and_then(|u| u.gui().screen_class());
+                // How long a screen change took to show (click-to-screen): the class is read
+                // once per tick, so this is the switch's blocking cost plus up to one tick.
+                if screen_class != last_screen_class {
+                    let now = Instant::now();
+                    if let Some(since) = last_screen_at {
+                        tracing::info!(
+                            "screen {} after {} ms",
+                            screen_class.as_deref().unwrap_or("(none)"),
+                            (now - since).as_millis()
+                        );
+                    }
+                    last_screen_class = screen_class.clone();
+                    last_screen_at = Some(now);
+                }
                 let state = script::ScriptState {
                     joined: view.as_ref().is_some_and(|v| v.has_position),
                     settled,
                     screen_open: ui.as_ref().is_some_and(|u| u.screen_open()),
                     screen_class,
                     reloaded: resource_packs_reloaded,
+                    hotbar_item: ui.as_ref().is_some_and(|u| u.hotbar_has_items()),
                 };
+                // A screen opening takes the mouse (vanilla `Gui.setScreen` calls
+                // `MouseHandler.releaseMouse` and `KeyMapping.releaseAll`): nothing the game held
+                // stays held, or a use held from before would re-open the container the screen
+                // shows, server-side, the moment it closes.
+                if state.screen_open && !script_screen_was_open {
+                    input.release();
+                }
+                script_screen_was_open = state.screen_open;
                 // Menu mode's screen tick and the join the screens requested — the multiplayer
                 // list's Join (a plain address), the world list's Play or the create screen's
                 // Create (a local server first) — the session takes a clone of the UI over;
@@ -3809,6 +4121,10 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                             ) {
                                 Ok(s) => {
                                     renderer.set_item_registry(&s.shared.data.registries);
+                                    renderer.set_ao_shapes(
+                                        &s.shared.data.blocks,
+                                        &s.shared.data.shapes,
+                                    );
                                     renderer.set_biomes(&s.biomes);
                                     renderer.set_particle_types(&s.particle_types);
                                     arrived = Some(s);
@@ -3850,6 +4166,10 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                                     ) {
                                         Ok(s) => {
                                             renderer.set_item_registry(&s.shared.data.registries);
+                                            renderer.set_ao_shapes(
+                                                &s.shared.data.blocks,
+                                                &s.shared.data.shapes,
+                                            );
                                             renderer.set_biomes(&s.biomes);
                                             renderer.set_particle_types(&s.particle_types);
                                             arrived = Some(s);
@@ -3933,7 +4253,12 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                                 ui.scroll(x, y, 0.0, f64::from(n));
                             }
                         }
-                        script::Action::Look(yaw, pitch) => input.look(yaw, pitch),
+                        // A scripted `look` aims exactly where asked (the server's rotation
+                        // offset would otherwise leave the crosshair elsewhere).
+                        script::Action::Look(yaw, pitch) => {
+                            let offset = view.as_ref().map_or((0.0, 0.0), |v| v.look_offset);
+                            input.aim(yaw, pitch, offset);
+                        }
                         script::Action::Screenshot(name) => shots.push(name),
                         script::Action::Error(e) => {
                             last_err = Some(e);
@@ -3947,17 +4272,14 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 }
             }
             // A session the multiplayer screen's join created: it takes over from here (the
-            // game thread ticks the UI clone; the loop renders the world from now on).
+            // game thread ticks the UI clone; the loop renders the world from now on). The
+            // connecting/preparing screen stays up until the level is ready — `Ui::joined`
+            // closes it there, like vanilla's loading screen.
             if let Some(s) = arrived {
                 session = Some(s);
                 shared = session.as_ref().map(|s| s.shared.clone());
                 menu = None;
                 in_menu = false;
-                if let Some(u) = &ui {
-                    // The screens close like vanilla's ConnectScreen does when the level is
-                    // ready (the connecting or preparing screen); the HUD takes over.
-                    u.gui().close_screen();
-                }
             }
             // The actions may have changed what the game thread sees this tick.
             if let Some(shared) = shared.as_ref() {
@@ -3985,10 +4307,14 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 }
                 if let Some(u) = &ui {
                     u.gui().set_local_world_running(false);
+                    u.left_world();
                     u.open_screen(haste_jvm::ScreenKind::Title)?;
                 }
                 shared = None;
                 in_menu = true;
+                // Like the window's `leave_server`: no world behind the title screen, no HUD.
+                feed = WorldFeed::default();
+                renderer.clear_world();
                 input.release();
             } else {
                 session = Some(s);
@@ -4064,6 +4390,10 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             &mut weather_guard,
         );
         feed.feed(shared, &mut renderer, camera_section(&camera), vd);
+        // The first-person hand, like the window and the screenshot path (`set_first_person`
+        // diffs the view's per-tick part and only touches the renderer on a change): without
+        // this the script's shots never show the held item.
+        feed.set_first_person(shared, &mut renderer, game::Perspective::FirstPerson);
         let (entities, block_entities) =
             feed.entities(shared, &mut renderer, session_ref.local, partial);
         let block_target = view.as_ref().and_then(|v| v.block_target);
@@ -4132,6 +4462,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             renderer.prepare_particles(&mut particles, &*world, camera, partial);
         }
         renderer.set_lightmap_frame(lightmap);
+        renderer.set_menu_blur_radius(options.menu_background_blurriness);
         if let Ok(stats) = renderer.render(&frame) {
             last_stats = stats;
             fps.frame(&stats);
@@ -4271,6 +4602,8 @@ struct BenchSample {
     /// Section meshes uploaded this frame and their vertex+index bytes.
     uploads: u32,
     upload_bytes: u64,
+    /// Terrain indices drawn (six per quad): the vertex-fetch load.
+    indices_drawn: u32,
     /// Frame index since the measure phase started.
     index: u32,
 }
@@ -4286,6 +4619,8 @@ struct BenchSummary {
     sections_drawn: f32,
     sections_total: f32,
     draw_calls: f32,
+    /// Terrain indices drawn per frame (six per quad): the vertex-fetch load.
+    indices_drawn: f32,
     prepare_ms: f32,
     acquire_ms: f32,
     cull_ms: f32,
@@ -4317,7 +4652,7 @@ impl BenchSummary {
              frame time: avg {:.2} ms ({:.0} FPS), 1% low {:.2} ms, worst {:.2} ms\n\
              breakdown ms: prepare {:.2} acquire {:.2} cull {:.2} encode {:.2} submit {:.2} present {:.2} | gpu main {:.2} hand {:.2} gui {:.2}\n\
              gpu main ms: sky {:.3} opaque {:.3} cutout {:.3} translucent {:.3} entities {:.3} particles {:.3} overlays {:.3}\n\
-             sections drawn {}/{} avg, draw calls {:.0} avg\n\
+             sections drawn {}/{} avg, draw calls {:.0} avg, indices {:.0} avg (quads {:.0})\n\
              render distance {} (requested {}), {}x{}, adapter {}",
             self.frames,
             meta.seconds,
@@ -4344,6 +4679,8 @@ impl BenchSummary {
             self.sections_drawn,
             self.sections_total,
             self.draw_calls,
+            self.indices_drawn,
+            self.indices_drawn / 6.0,
             meta.render_distance,
             meta.requested_render_distance,
             meta.width,
@@ -4450,6 +4787,7 @@ fn bench_summary(samples: &[BenchSample]) -> BenchSummary {
         sections_drawn: sum(samples, n, |s| s.sections_drawn as f32),
         sections_total: sum(samples, n, |s| s.sections_total as f32),
         draw_calls: sum(samples, n, |s| s.draw_calls as f32),
+        indices_drawn: sum(samples, n, |s| s.indices_drawn as f32),
         prepare_ms: t(|x| x.prepare_ms),
         acquire_ms: t(|x| x.acquire_ms),
         cull_ms: t(|x| x.cull_ms),
@@ -4485,6 +4823,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
+    renderer.set_ao_shapes(&shared.data.blocks, &shared.data.shapes);
     renderer.set_biomes(&session.biomes);
     renderer.set_particle_types(&session.particle_types);
     renderer.set_dimension(shared.world.read().dimension());
@@ -4547,7 +4886,18 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             );
         }
         let placed = shared.view.lock().has_position;
-        if placed && feed.settled(&stats, Duration::from_millis(1500)) {
+        // `--pos` holds the settle until the server has teleported the player there (the
+        // screenshot path's rule), so the bench measures the intended spot, not the spawn.
+        let reached = args
+            .pos
+            .as_ref()
+            .filter(|v| v.len() == 3)
+            .map(|v| {
+                let want = DVec3::new(v[0], v[1], v[2]);
+                placed && (shared.view.lock().feet - want).length() <= 0.5
+            })
+            .unwrap_or(placed);
+        if reached && feed.settled(&stats, Duration::from_millis(1500)) {
             break;
         }
         if Instant::now() > deadline {
@@ -4559,9 +4909,19 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     // Measure phase. The buffer is sized up front: at most 1000 fps for the whole run, and it
     // grows once if the machine is faster than that (no allocation during steady-state frames).
     {
-        // Memory diagnostics: terrain arenas (fixed-size GPU buffer pairs) and resident
-        // sections, plus this process's peak RSS so far (the settle phase meshes everything).
-        let (arenas, bytes, sections) = renderer.arena_memory();
+        // Memory diagnostics: peak RSS plus every large allocation we can attribute —
+        // terrain arenas (allocated vs used), the world's chunk storage, the renderer's
+        // CPU-side copies and the embedded JVM's pools — so the diet work has a table.
+        let (arenas, arena_bytes, arena_used, sections) = renderer.arena_memory();
+        let cpu = renderer.cpu_memory();
+        let world = shared.world.read().memory_stats();
+        let jvm = shared
+            .ui
+            .lock()
+            .as_ref()
+            .map(|ui| ui.jvm_memory())
+            .unwrap_or_default();
+        let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
         let rss_kb = std::fs::read_to_string("/proc/self/status")
             .ok()
             .and_then(|s| {
@@ -4570,10 +4930,66 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
                     .and_then(|l| l.split_whitespace().nth(1).map(|v| v.to_string()))
             })
             .unwrap_or_default();
+        // smaps_rollup for the live (settled) picture: anonymous vs file-backed pages.
+        let rollup = std::fs::read_to_string("/proc/self/smaps_rollup")
+            .map(|s| {
+                let f = |key: &str| {
+                    s.lines()
+                        .find(|l| l.starts_with(key))
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .unwrap_or(0)
+                };
+                (f("Rss:"), f("Pss_Anon:"), f("Pss_File:"))
+            })
+            .unwrap_or((0, 0, 0));
         println!(
-            "bench memory: peak RSS {rss_kb} kB, {arenas} arenas ({:.1} MiB vertex+index), {sections} resident sections",
-            bytes as f64 / (1024.0 * 1024.0)
+            "bench memory: peak RSS {rss_kb} kB ({:.1} MiB), {arenas} arenas ({:.1} MiB vertex+index, {:.1} used), {sections} resident sections",
+            rss_kb.parse::<f64>().unwrap_or(0.0) / 1024.0,
+            mib(arena_bytes),
+            mib(arena_used),
         );
+        println!(
+            "bench memory: settled Rss {:.1} MiB (Pss_Anon {:.1}, Pss_File {:.1})",
+            mib(rollup.0 * 1024),
+            mib(rollup.1 * 1024),
+            mib(rollup.2 * 1024),
+        );
+        println!(
+            "bench memory: world {:.1} MiB (sections {:.1}, heightmaps {:.1}, light {:.1}, block entities {:.1}, {} non-empty), atlas+models {:.1} MiB, mesher queue {}",
+            mib(world.chunks + world.sections + world.heightmaps + world.light + world.block_entities),
+            mib(world.sections),
+            mib(world.heightmaps),
+            mib(world.light),
+            mib(world.block_entities),
+            world.non_empty_sections,
+            mib(cpu.atlas_bytes + cpu.baked_bytes),
+            cpu.mesh_pending,
+        );
+        if !jvm.is_empty() {
+            let mut heap_c = 0;
+            let mut heap_u = 0;
+            let mut meta = 0;
+            let mut code = 0;
+            for line in jvm.lines() {
+                let (k, v) = line.split_once('=').unwrap_or(("", ""));
+                let v: u64 = v.parse().unwrap_or(0);
+                match k {
+                    "heap_committed" => heap_c = v,
+                    "heap_used" => heap_u = v,
+                    "metaspace_used" => meta = v,
+                    "code_cache_used" => code = v,
+                    _ => {}
+                }
+            }
+            println!(
+                "bench memory: JVM heap {:.1}/{:.1} MiB, metaspace {:.1} MiB, code cache {:.1} MiB",
+                mib(heap_u),
+                mib(heap_c),
+                mib(meta),
+                mib(code),
+            );
+        }
     }
     let mut samples: Vec<BenchSample> = Vec::with_capacity(seconds as usize * 1000);
     let total = seconds as f32;
@@ -4658,6 +5074,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             sections_new: stats.chunk_sections_drawn.saturating_sub(prev_drawn),
             uploads: stats.uploads,
             upload_bytes: stats.upload_bytes,
+            indices_drawn: stats.indices_drawn,
             index: samples.len() as u32,
         });
         if shared.is_closed() {
@@ -4681,6 +5098,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             "sections_drawn": summary.sections_drawn,
             "sections_total": summary.sections_total,
             "draw_calls": summary.draw_calls,
+            "indices_drawn": summary.indices_drawn,
             "prepare_ms": summary.prepare_ms,
             "acquire_ms": summary.acquire_ms,
             "cull_ms": summary.cull_ms,
@@ -4768,6 +5186,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         started: Instant::now(),
         menu_next: Instant::now(),
         quitting: false,
+        bench: None,
     };
     event_loop.run_app(&mut app)?;
     if let Some(e) = app.error {
@@ -4781,7 +5200,163 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A join the screens requested, connecting on its own thread: what to show as the target
+/// The windowed bench's state (`--bench-window`): the recorded samples, the still camera
+/// (the settled frame's camera with `--yaw`/`--pitch`), and the run's metadata.
+struct WindowBench {
+    samples: Vec<BenchSample>,
+    /// The camera every measured frame uses (the settle frame's, yaw/pitch from the args).
+    camera: Option<Camera>,
+    /// The still camera's view distance (the settled view's; the summary reports it).
+    view_distance: i32,
+    /// Total measured seconds; the run ends when it has elapsed since `started`.
+    seconds: f32,
+    started: Option<Instant>,
+    feed_ms: f32,
+    /// The window's exact inner size in physical pixels (`--width`x`--height`).
+    size: (u32, u32),
+    /// The look the bench camera holds (`--yaw`/`--pitch`; `None` keeps the player's own).
+    look: (Option<f32>, Option<f32>),
+    /// `--pos`: the settle also waits until the server has teleported the player here.
+    want_pos: Option<DVec3>,
+}
+
+/// `--bench-window SECONDS`: the windowed twin of `bench`. Joins like the windowed client
+/// (a real window at `--width`x`--height`, vsync off unless `--vsync`), waits for the world
+/// to settle, then renders the still camera for SECONDS while recording the same
+/// `BenchSample`s as the offscreen bench. Prints the same summary block (marked `windowed`)
+/// and writes the same JSON to `--bench-out`; the window closes by itself.
+pub fn bench_window(args: &Args, seconds: u64) -> anyhow::Result<()> {
+    let Some(server) = args.server.as_deref() else {
+        anyhow::bail!("--bench-window needs --server <host[:port]>");
+    };
+    let session = Session::join(&args.username, args.render_distance, server, false, None)?;
+    let shared = session.shared.clone();
+    // The bench camera is first person: the game thread's camera effects take that perspective.
+    shared.input.lock().first_person = true;
+    // `--x11`: the same XWayland window vanilla's client gets (framebuffer exactly
+    // `--width`x`--height`; a Wayland window's is the desktop scale multiple).
+    if args.x11 {
+        std::env::set_var("WINIT_UNIX_BACKEND", "x11");
+        std::env::remove_var("WAYLAND_DISPLAY");
+    }
+    let event_loop = EventLoop::new()?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+    let options = session.options.clone();
+    let mut app = App {
+        username: args.username.clone(),
+        render_distance: args.render_distance,
+        session: Some(session),
+        menu: None,
+        joining: None,
+        local_server: None,
+        // Present, not vsync: the windowed number must carry the present cost but not be
+        // pinned to the display rate (vanilla's comparison run had vsync off too).
+        vsync: args.vsync.unwrap_or(false),
+        vsync_forced: args.vsync.or(Some(false)),
+        options,
+        options_version: 0,
+        perspective: game::Perspective::FirstPerson,
+        window: None,
+        renderer: None,
+        feed: WorldFeed::default(),
+        ui: None,
+        gui: GuiFrame::default(),
+        input: InputRouter::default(),
+        grabbed: false,
+        screen_was_open: false,
+        focused: true,
+        breaking: Vec::new(),
+        frame_stats: FrameStats::default(),
+        fps: FpsCounter::new(),
+        error: None,
+        seconds: None,
+        screenshot: false,
+        scope: 0.5,
+        frame_at: Instant::now(),
+        started: Instant::now(),
+        menu_next: Instant::now(),
+        quitting: false,
+        bench: Some(WindowBench {
+            samples: Vec::with_capacity(seconds as usize * 1000),
+            camera: None,
+            view_distance: 12,
+            seconds: seconds as f32,
+            started: None,
+            feed_ms: 0.0,
+            size: (args.width, args.height),
+            look: (args.yaw, args.pitch),
+            want_pos: args
+                .pos
+                .as_ref()
+                .filter(|v| v.len() == 3)
+                .map(|v| DVec3::new(v[0], v[1], v[2])),
+        }),
+    };
+    app.input.yaw = args.yaw.unwrap_or(0.0);
+    app.input.pitch = args.pitch.unwrap_or(10.0);
+    event_loop.run_app(&mut app)?;
+    if let Some(e) = app.error {
+        return Err(e);
+    }
+    let Some(bench) = app.bench else {
+        anyhow::bail!("the windowed bench ended without samples");
+    };
+    let (width, height) = app
+        .renderer
+        .as_ref()
+        .map_or((args.width, args.height), |r| r.size());
+    let meta = BenchMeta {
+        seconds: bench.seconds,
+        render_distance: bench.view_distance,
+        requested_render_distance: app.render_distance.unwrap_or(12),
+        width,
+        height,
+        adapter: app
+            .renderer
+            .as_ref()
+            .map(|r| {
+                let info = r.adapter_info();
+                format!("{} ({})", info.name, info.backend)
+            })
+            .unwrap_or_default(),
+    };
+    let summary = bench_summary(&bench.samples);
+    println!("windowed bench at {}, {}", meta.width, meta.height);
+    println!("{}", summary.text(&meta));
+    if let Some(out) = &args.bench_out {
+        let json = serde_json::json!({
+            "windowed": true,
+            "frames": summary.frames,
+            "seconds": meta.seconds,
+            "avg_ms": summary.avg_ms,
+            "fps": summary.fps(),
+            "p99_ms": summary.p99_ms,
+            "worst_ms": summary.worst_ms,
+            "sections_drawn": summary.sections_drawn,
+            "sections_total": summary.sections_total,
+            "draw_calls": summary.draw_calls,
+            "indices_drawn": summary.indices_drawn,
+            "prepare_ms": summary.prepare_ms,
+            "acquire_ms": summary.acquire_ms,
+            "cull_ms": summary.cull_ms,
+            "encode_ms": summary.encode_ms,
+            "submit_ms": summary.submit_ms,
+            "present_ms": summary.present_ms,
+            "gpu_main_ms": summary.gpu_ms[0],
+            "gpu_hand_ms": summary.gpu_ms[1],
+            "gpu_gui_ms": summary.gpu_ms[2],
+            "render_distance": meta.render_distance,
+            "requested_render_distance": meta.requested_render_distance,
+            "width": meta.width,
+            "height": meta.height,
+            "adapter": meta.adapter,
+        });
+        std::fs::write(out, serde_json::to_string_pretty(&json)?)?;
+        println!("bench summary written to {}", out.display());
+    }
+    Ok(())
+}
+
 /// (the address, or the world folder of a local world) and where the session (with its local
 /// world, for singleplayer) arrives.
 struct JoinInProgress {
@@ -4849,6 +5424,9 @@ struct App {
     menu_next: Instant,
     /// The title screen's Quit Game was clicked: close at the next `about_to_wait`.
     quitting: bool,
+    /// The windowed bench (`--bench-window`): records one sample per frame and closes the
+    /// window when the run is full. `None` in the normal windowed client.
+    bench: Option<WindowBench>,
 }
 
 impl App {
@@ -4943,7 +5521,10 @@ impl App {
 
     /// Drops the session (stopping its game thread and closing the connection) and the local
     /// singleplayer server, if one runs (its `stop` saves the world); the UI stays, menu mode
-    /// resumes around whatever screen the disconnect showed.
+    /// resumes around whatever screen the disconnect showed. The renderer loses the world's
+    /// sections (the menus draw over the plain background again, like the startup title screen)
+    /// and the HUD stops (`in_world` off): without this the last world frame — terrain,
+    /// hotbar, crosshair — stays behind the title screen.
     fn leave_server(&mut self) {
         if let Some(session) = self.session.take() {
             session.shared.stop.store(true, Ordering::Relaxed);
@@ -4958,6 +5539,15 @@ impl App {
                 ui.gui().set_local_world_running(false);
             }
             world.stop();
+        }
+        if let Some(ui) = &self.ui {
+            ui.left_world();
+        }
+        // The world feed's meshed set dies with the session's world; a fresh one starts clean
+        // at the next join (its source holds the old `Shared`).
+        self.feed = WorldFeed::default();
+        if let Some(r) = self.renderer.as_mut() {
+            r.clear_world();
         }
         self.input.release();
     }
@@ -5094,6 +5684,7 @@ impl App {
             Ok((session, server)) => {
                 if let Some(r) = self.renderer.as_mut() {
                     r.set_item_registry(&session.shared.data.registries);
+                    r.set_ao_shapes(&session.shared.data.blocks, &session.shared.data.shapes);
                     r.set_biomes(&session.biomes);
                     r.set_particle_types(&session.particle_types);
                 }
@@ -5107,11 +5698,9 @@ impl App {
                 }
                 self.options = session.options.clone();
                 self.session = Some(session);
-                if let Some(ui) = &self.ui {
-                    // The screens close like vanilla's ConnectScreen does when the level is
-                    // ready; the HUD takes over.
-                    ui.gui().close_screen();
-                }
+                // The connecting screen stays up until the level is ready: `Ui::joined` (the
+                // game thread's login handling) closes it there, like vanilla's loading
+                // screen; closing here would run before the level exists.
             }
             Err(e) => {
                 tracing::warn!("joining {target} failed: {e:#}");
@@ -5265,9 +5854,20 @@ impl App {
         }
         self.input
             .sample(&session.shared, self.ui.as_ref(), self.perspective);
+        // The windowed bench holds the camera still (the settle frame's view with the
+        // requested look), like the offscreen `--bench --bench-fixed`.
+        if let Some(bench) = &mut self.bench {
+            let offset = session.shared.view.lock().look_offset;
+            if let Some(yaw) = bench.look.0 {
+                self.input.yaw = yaw - offset.0;
+            }
+            if let Some(pitch) = bench.look.1 {
+                self.input.pitch = (pitch - offset.1).clamp(-90.0, 90.0);
+            }
+        }
         let renderer = self.renderer.as_mut().expect("checked above");
         let mut weather_guard = session.shared.weather_scratch.lock();
-        let (camera, sky, lightmap, partial, vd, animation_tick, weather) = frame_view(
+        let (mut camera, sky, lightmap, partial, vd, animation_tick, weather) = frame_view(
             &session.shared,
             self.perspective,
             self.input.yaw,
@@ -5276,8 +5876,38 @@ impl App {
             t0,
             &mut weather_guard,
         );
+        // The windowed bench's settle and still camera: until the world has settled (and
+        // the HUD's JVM arrived, like the screenshot path), the frames only warm up; the
+        // first settled frame's camera is then held for the whole run.
+        if let Some(bench) = &mut self.bench {
+            let settled_now = {
+                let view = session.shared.view.lock().clone();
+                let at_pos = bench
+                    .want_pos
+                    .is_none_or(|p| (view.feet - p).length() <= 0.5);
+                view.has_position
+                    && at_pos
+                    && self
+                        .feed
+                        .settled(&self.frame_stats, Duration::from_millis(1500))
+                    && (self.ui.is_some()
+                        || session.shared.hud_failed.load(Ordering::Relaxed)
+                        || !session.shared.hud_enabled.load(Ordering::Relaxed))
+            };
+            if settled_now && bench.camera.is_none() {
+                bench.camera = Some(camera);
+                bench.view_distance = vd;
+            }
+            if let Some(still) = bench.camera {
+                camera = still;
+            }
+        }
+        let feed_start = Instant::now();
         self.feed
             .feed(&session.shared, renderer, camera_section(&camera), vd);
+        if let Some(bench) = &mut self.bench {
+            bench.feed_ms = feed_start.elapsed().as_secs_f32() * 1000.0;
+        }
         let t1 = Instant::now();
         self.feed
             .set_first_person(&session.shared, renderer, self.perspective);
@@ -5373,6 +6003,7 @@ impl App {
         renderer.set_animation_tick(animation_tick);
         renderer.set_game_time(session.shared.view.lock().world_age);
         renderer.set_lightmap_frame(lightmap);
+        renderer.set_menu_blur_radius(self.options.menu_background_blurriness);
         if self.screenshot {
             self.screenshot = false;
             renderer.request_capture();
@@ -5381,6 +6012,31 @@ impl App {
         drop(weather_guard);
         if let Ok(stats) = &result {
             self.frame_stats = *stats;
+        }
+        // The windowed bench's sample: recorded once the still camera is held (the settle
+        // frames before it are warm-up, not measurements). The run ends with the window.
+        if let (Some(bench), Ok(stats)) = (&mut self.bench, &result) {
+            if let Some(started) = bench.started {
+                let prev_drawn = bench.samples.last().map_or(0, |s| s.sections_drawn);
+                bench.samples.push(BenchSample {
+                    frame_ms: stats.frame_ms,
+                    sections_drawn: stats.chunk_sections_drawn,
+                    sections_total: stats.chunk_sections_total,
+                    draw_calls: stats.draw_calls,
+                    timings: renderer.timings(),
+                    feed_ms: bench.feed_ms,
+                    sections_new: stats.chunk_sections_drawn.saturating_sub(prev_drawn),
+                    uploads: stats.uploads,
+                    upload_bytes: stats.upload_bytes,
+                    indices_drawn: stats.indices_drawn,
+                    index: bench.samples.len() as u32,
+                });
+                if started.elapsed().as_secs_f32() >= bench.seconds {
+                    self.quitting = true;
+                }
+            } else if bench.camera.is_some() {
+                bench.started = Some(Instant::now());
+            }
         }
         if let Some(result) = renderer.take_capture() {
             // Encode and write off the render thread: PNG compression of a full frame
@@ -5455,16 +6111,30 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes()
-            .with_title("Haste")
-            .with_inner_size(winit::dpi::LogicalSize::new(854.0, 480.0));
+        let attrs = if let Some(bench) = &self.bench {
+            // The windowed bench: a logical inner size (`--width`x`--height`), so the
+            // framebuffer is exactly the requested resolution times the desktop scale —
+            // the same window a vanilla client at `--width`x`--height` would get.
+            Window::default_attributes()
+                .with_title("Haste bench")
+                .with_inner_size(winit::dpi::LogicalSize::new(
+                    f64::from(bench.size.0),
+                    f64::from(bench.size.1),
+                ))
+        } else {
+            Window::default_attributes()
+                .with_title("Haste")
+                .with_inner_size(winit::dpi::LogicalSize::new(854.0, 480.0))
+        };
         let result = (|| -> anyhow::Result<(Arc<Window>, Renderer)> {
             let window = Arc::new(event_loop.create_window(attrs)?);
             let mut assets = open_assets()?;
             let data = net::load_game_data()?;
             let mut renderer = Renderer::new(window.clone(), &mut assets, &data.blocks)?;
+            renderer.set_ao_shapes(&data.blocks, &data.shapes);
             if let Some(session) = &self.session {
                 renderer.set_item_registry(&session.shared.data.registries);
+                renderer.set_ao_shapes(&session.shared.data.blocks, &session.shared.data.shapes);
                 renderer.set_biomes(&session.biomes);
                 renderer.set_particle_types(&session.particle_types);
                 renderer.set_dimension(session.shared.world.read().dimension());
@@ -5814,6 +6484,26 @@ mod tests {
         assert_eq!(apply_mouse(10.0, -80.0, (0.0, -200.0), DPP), (10.0, -90.0));
     }
 
+    /// A scripted look aims exactly where asked: the input layer holds the target angles minus
+    /// the server's rotation offset, which the tick's pick adds back. Without the subtraction a
+    /// `look` after the server turned the player (a teleport echo) aims `offset` away from the
+    /// target — the boat mount missed because the crosshair looked at the block under the
+    /// driver's feet instead of the boat.
+    #[test]
+    fn an_exact_aim_subtracts_the_servers_look_offset() {
+        let mut input = InputRouter::default();
+        // No server offset: the input layer holds the angles themselves.
+        input.aim(0.0, 49.0, (0.0, 0.0));
+        assert_eq!((input.yaw, input.pitch), (0.0, 49.0));
+        // The server turned us 60 degrees while the script's input still says 30 (the offset
+        // the player keeps, `LocalPlayer.look_offset`): aiming at 90 needs input 30.
+        input.aim(90.0, 10.0, (60.0, 0.0));
+        assert_eq!((input.yaw, input.pitch), (30.0, 10.0));
+        // A pitch past the clamp with the offset applied to the input, not the target.
+        input.aim(0.0, 90.0, (0.0, 40.0));
+        assert_eq!((input.yaw, input.pitch), (0.0, 50.0));
+    }
+
     #[test]
     fn sensitivity_formula_matches_vanilla_curve() {
         // Default sensitivity 50%: (0.5 * 0.6 + 0.2)^3 * 8 * 0.15 = 0.4^3 * 8 * 0.15.
@@ -5958,6 +6648,16 @@ mod tests {
     }
 
     #[test]
+    fn key_routing_drops_the_char_that_opened_the_screen() {
+        // Vanilla: the key press that opens a screen (T, "/") drops its typed character —
+        // `Gui.handleKeybinds` opens the chat screen on the tick after the press, so the
+        // press's character event finds no screen. Only characters typed while a screen was
+        // already open reach it.
+        assert!(!char_goes_to_screen(false));
+        assert!(char_goes_to_screen(true));
+    }
+
+    #[test]
     fn script_keys_map_to_their_winit_codes() {
         // The script's key names and winit's KeyCodes must be one-to-one, so a scripted key
         // and a windowed key press route identically.
@@ -6082,6 +6782,7 @@ mod tests {
             sections_new: 0,
             uploads: 0,
             upload_bytes: 0,
+            indices_drawn: 0,
             index: 0,
         }
     }

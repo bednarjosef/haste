@@ -114,7 +114,10 @@ public final class Bridge {
         MouseImpl.y = 0.0;
         Proxies.hud.getChat().clearMessages(false);
         Proxies.hud.getChat().resetChatScroll();
-        Proxies.gui.setScreen(null);
+        // not Gui.setScreen(null) (which would open the title screen outside a world, like
+        // vanilla): the point here is no screen at all
+        if (ClientImpl.screen != null) ClientImpl.screen.removed();
+        ClientImpl.screen = null;
         MouseImpl.grabbed = false;
         Proxies.options.fov().set(70);
     }
@@ -150,7 +153,7 @@ public final class Bridge {
             Proxies.hud.extractDebugOverlay(Proxies.graphics);
         }
         GfxImpl.end();
-        return GuiBatch.frame(GfxImpl.cursor);
+        return GuiBatch.frame(GfxImpl.cursor, GfxImpl.blurAfter);
     }
 
     /** One 20 Hz client tick: the HUD (chat fade, titles, overlay message), the chat queue and the open screen. */
@@ -158,10 +161,15 @@ public final class Bridge {
         Mirror.update();
         OptionBridge.tick();
         if (Mirror.inWorld()) {
-            // a dead player (killed, or joined while dead) sees the death screen
-            if (Mirror.health() <= 0f && !Mirror.flag(Mirror.F_IMMEDIATE_RESPAWN)
-                && !(ClientImpl.screen instanceof net.minecraft.client.gui.screens.DeathScreen)) {
-                Proxies.gui.setScreen(new net.minecraft.client.gui.screens.DeathScreen(null, Mirror.flag(Mirror.F_HARDCORE), Proxies.player));
+            // a dead player (killed, or joined while dead) sees the death screen; with immediate
+            // respawn on, vanilla's Gui.setScreen(null) calls player.respawn() instead
+            // (vanilla: Gui.tick -> setScreen(null) -> isDeadOrDying -> shouldShowDeathScreen)
+            if (Mirror.health() <= 0f && !(ClientImpl.screen instanceof net.minecraft.client.gui.screens.DeathScreen)) {
+                if (Mirror.flag(Mirror.F_IMMEDIATE_RESPAWN)) {
+                    Proxies.player.respawn();
+                } else {
+                    Proxies.gui.setScreen(new net.minecraft.client.gui.screens.DeathScreen(null, Mirror.flag(Mirror.F_HARDCORE), Proxies.player));
+                }
             }
             Proxies.hud.tick(false);
             Proxies.chatListener.tick();
@@ -363,6 +371,16 @@ public final class Bridge {
     /** A use opened the command block editor (vanilla `LocalPlayer.openCommandBlock`). */
     public void openCommandBlock(int x, int y, int z) {
         Handlers.openCommandBlock(x, y, z);
+    }
+
+    /** The server forgot a chunk: its block entities leave the Java-side store (vanilla unloads them with the chunk). */
+    public void dropChunkBlockEntities(int chunkX, int chunkZ) {
+        BlockEntities.dropChunk(chunkX, chunkZ);
+    }
+
+    /** Number of block entities in the Java-side store (tests: chunk drops). */
+    public int blockEntityCount() {
+        return BlockEntities.count();
     }
 
     /** A use opened the writable book's editor (vanilla `LocalPlayer.openItemGui`). */

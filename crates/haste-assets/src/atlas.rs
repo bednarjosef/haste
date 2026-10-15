@@ -432,6 +432,19 @@ impl AtlasBuilder {
         self.size
     }
 
+    /// Heap bytes of the retained mip chain plus the animated sprites' frames.
+    pub fn pixel_bytes(&self) -> u64 {
+        let mut n = self.pixels.capacity() as u64;
+        for a in &self.animated {
+            n += a
+                .frames
+                .iter()
+                .map(|f| (f.width() * f.height() * 4) as u64)
+                .sum::<u64>();
+        }
+        n
+    }
+
     pub fn mip_levels(&self) -> u32 {
         self.mip_levels
     }

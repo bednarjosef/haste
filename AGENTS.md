@@ -85,6 +85,22 @@ be added without rewriting it:
   GUI code keep working.
 - If a design choice might block mods later, say so in your report.
 
+## Structured like vanilla (read this whatever your task is)
+
+Minecraft's own code is well structured: one class per concept, small focused files. Haste aims
+for the same, both for readability and because the Phase 2 mod layer maps Mixin targets onto
+these seams.
+
+- **One module per vanilla concept.** Each block entity renderer, entity renderer, particle
+  type, screen bridge and group of packet handlers lives in its own file, named after the
+  vanilla class it follows (`blockentity/chest.rs` for `ChestRenderer`, and so on). Shared
+  plumbing goes into its own module, not into the file that first needed it.
+- **Small files.** Source files stay under about 600 lines; tests live in their own files
+  (`tests.rs` or `tests/`). A file already over 1000 lines must not grow: put new code into a
+  new module and move the code you touch out of the big file when you can.
+- **Split along responsibilities, never by size alone.** A split is a pure move: no behaviour
+  change in the same commit, so the move can be reviewed as a move.
+
 ## Performance is the product
 
 Haste exists to be faster than vanilla and than vanilla with Sodium; client performance comes

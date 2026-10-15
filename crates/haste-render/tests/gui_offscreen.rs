@@ -210,6 +210,7 @@ fn frame(items: &[(RegistryIndex, &str)]) -> GuiFrame {
         width: W,
         height: H,
         cursor: None,
+        blur_after: -1,
     }
 }
 
