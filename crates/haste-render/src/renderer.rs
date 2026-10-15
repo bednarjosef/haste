@@ -878,7 +878,7 @@ impl Renderer {
                 })
         };
         let pipeline_solid = make_pipeline("chunk-solid", "fs_main", None);
-        let pipeline_cutout = make_pipeline("chunk-cutout", "fs_main", None);
+        let pipeline_cutout = make_pipeline("chunk-cutout", "fs_cutout", None);
         let pipeline_translucent = make_pipeline(
             "chunk-translucent",
             "fs_translucent",
@@ -1860,6 +1860,7 @@ impl Renderer {
         if let Some(t) = &mut self.timer {
             t.poll(&self.gpu.device);
             self.timings.gpu_ms = t.latest;
+            self.timings.gpu_sub_ms = t.latest_sub;
         }
         // A pending capture (F2) copies this frame's image out for `take_capture`; with
         // COPY_SRC on the surface that is the presented frame itself, and only without it
@@ -2079,7 +2080,29 @@ impl Renderer {
         }
 
         self.timings.cull_ms = lap(&mut mark);
+        // Close the open terrain bracket (main-pass sub-passes 1..=4), for a layer change or
+        // the entity insertion. One bracket per layer across all arenas: the layer-major draw
+        // order makes each layer's draws contiguous, and a wgpu query may only be written once
+        // per pass.
+        fn close_terrain(
+            pass: &mut wgpu::RenderPass<'_>,
+            t: &crate::timing::GpuTimer,
+            sub_open: &mut [bool; 8],
+        ) {
+            for (s, open) in sub_open.iter_mut().enumerate().take(5).skip(1) {
+                if *open {
+                    t.end_subpass(pass, s as u32);
+                    *open = false;
+                }
+            }
+        }
         let mut ran = [false; 3];
+        // Main-pass sub-pass bracket state (timing.rs MAIN_SUBPASSES order): a bracket is
+        // open when its layer began drawing and not yet ended. Solid and CutoutMipped share
+        // one pipeline but get separate brackets ("solid" 1, "cutout_mipped" 3), since their
+        // arena runs interleave in the layer-major draw order.
+        let mut sub_open = [false; 8];
+        let mut ran_sub = [false; 8];
         let mut draw_calls = 0u32;
         let mut encoder = self
             .gpu
@@ -2117,7 +2140,15 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            if let Some(t) = self.timer.as_ref() {
+                t.begin_subpass(&mut pass, 0);
+                sub_open[0] = true;
+            }
             draw_calls += self.sky.draw_background(&mut pass);
+            if let Some(t) = self.timer.as_ref() {
+                t.end_subpass(&mut pass, 0);
+                sub_open[0] = false;
+            }
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_bind_group(1, &self.atlas_bind_group, &[]);
             pass.set_bind_group(2, &self.lightmap_bind_group, &[]);
@@ -2135,6 +2166,12 @@ impl Renderer {
                 let instance = i;
                 // Entities after the opaque and cutout terrain, before translucent.
                 if !entities_drawn && d.layer == haste_assets::RenderLayer::Translucent {
+                    if let Some(t) = self.timer.as_ref() {
+                        close_terrain(&mut pass, t, &mut sub_open);
+                        t.begin_subpass(&mut pass, 5);
+                        ran_sub[5] = true;
+                        sub_open[5] = true;
+                    }
                     // Vanilla draws the entity shadows (a translucent, depth-tested pass) with
                     // the entities.
                     draw_calls += self.entity.draw_shadows(&mut pass);
@@ -2145,12 +2182,23 @@ impl Renderer {
                     bound_arena = u32::MAX;
                 }
                 if bound_layer != Some(d.layer) {
-                    let pipeline = match d.layer {
-                        haste_assets::RenderLayer::Solid
-                        | haste_assets::RenderLayer::CutoutMipped => &self.pipeline_solid,
-                        haste_assets::RenderLayer::Cutout => &self.pipeline_cutout,
-                        haste_assets::RenderLayer::Translucent => &self.pipeline_translucent,
+                    // CutoutMipped (leaves, vines) shares the solid *pipeline* (same shader
+                    // state, mips differ in the sampler) but must keep the alpha discard:
+                    // its sprites have transparent texels by vanilla's per-sprite layer rule
+                    // (NativeImage.computeTransparency -> ChunkSectionLayer.byTransparency).
+                    let (pipeline, sub) = match d.layer {
+                        haste_assets::RenderLayer::Solid => (&self.pipeline_solid, 1),
+                        haste_assets::RenderLayer::Cutout => (&self.pipeline_cutout, 2),
+                        haste_assets::RenderLayer::CutoutMipped => (&self.pipeline_cutout, 3),
+                        haste_assets::RenderLayer::Translucent => (&self.pipeline_translucent, 4),
                     };
+                    if let Some(t) = self.timer.as_ref() {
+                        // Close the previous terrain bracket, open the new layer's.
+                        close_terrain(&mut pass, t, &mut sub_open);
+                        t.begin_subpass(&mut pass, sub);
+                        ran_sub[sub as usize] = true;
+                        sub_open[sub as usize] = true;
+                    }
                     pass.set_pipeline(pipeline);
                     bound_layer = Some(d.layer);
                 }
@@ -2186,12 +2234,41 @@ impl Renderer {
                 }
             }
             if !entities_drawn {
+                if let Some(t) = self.timer.as_ref() {
+                    close_terrain(&mut pass, t, &mut sub_open);
+                    t.begin_subpass(&mut pass, 5);
+                    ran_sub[5] = true;
+                    sub_open[5] = true;
+                }
                 draw_calls += self.entity.draw_shadows(&mut pass);
                 draw_calls += self.entity.draw(&mut pass);
             }
+            if let Some(t) = self.timer.as_ref() {
+                if sub_open[5] {
+                    t.end_subpass(&mut pass, 5);
+                    sub_open[5] = false;
+                }
+                t.begin_subpass(&mut pass, 6);
+                ran_sub[6] = true;
+                sub_open[6] = true;
+            }
             draw_calls += self.particles.draw(&mut pass);
+            if let Some(t) = self.timer.as_ref() {
+                if sub_open[6] {
+                    t.end_subpass(&mut pass, 6);
+                    sub_open[6] = false;
+                }
+                t.begin_subpass(&mut pass, 7);
+                ran_sub[7] = true;
+                sub_open[7] = true;
+            }
             draw_calls += self.overlay.draw(&mut pass);
             draw_calls += self.sky.draw_overlays(&mut pass);
+            if let Some(t) = self.timer.as_ref() {
+                if sub_open[7] {
+                    t.end_subpass(&mut pass, 7);
+                }
+            }
         }
 
         // First-person hand: its own pass over the world with the depth cleared, so it never
@@ -2274,7 +2351,7 @@ impl Renderer {
 
         // Submit, then present (wgpu 30: present lives on the queue).
         let resolved = match &mut self.timer {
-            Some(t) => t.resolve(&mut encoder, ran),
+            Some(t) => t.resolve(&mut encoder, ran, ran_sub),
             None => false,
         };
         self.timings.encode_ms = lap(&mut mark);
