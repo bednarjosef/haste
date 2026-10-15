@@ -2222,12 +2222,40 @@ impl InputRouter {
 
 fn open_assets() -> anyhow::Result<haste_assets::Assets> {
     let jar = haste_protocol::haste_core::paths::client_jar();
-    haste_assets::Assets::open(
+    let mut assets = haste_assets::Assets::open(
         &jar,
         &haste_protocol::haste_core::paths::assets_dir(),
         "26.3",
     )
-    .with_context(|| format!("opening assets from {}", jar.display()))
+    .with_context(|| format!("opening assets from {}", jar.display()))?;
+    // Selected resource packs until the selection screen exists (Batch 2):
+    // `HASTE_RESOURCE_PACKS` = comma-separated pack ids (`file/<name>`,
+    // bottom first), `HASTE_RESOURCE_PACKS_DIR` = the folder holding them
+    // (default: the config dir's `resourcepacks`, vanilla's game-dir layout).
+    if let Ok(selection) = std::env::var("HASTE_RESOURCE_PACKS") {
+        let ids: Vec<String> = selection
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if !ids.is_empty() {
+            let dir = std::env::var("HASTE_RESOURCE_PACKS_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| default_resource_packs_dir());
+            tracing::info!("applying resource packs: {}", ids.join(", "));
+            assets.apply_packs(&dir, &ids);
+        }
+    }
+    Ok(assets)
+}
+
+/// `<config dir>/resourcepacks`: vanilla's `<game dir>/resourcepacks` in
+/// Haste's config-dir-as-game-dir layout (see `Menu::new`).
+fn default_resource_packs_dir() -> std::path::PathBuf {
+    haste_setup::servers::path()
+        .and_then(|p| p.parent().map(|d| d.join("resourcepacks")))
+        .unwrap_or_else(|| haste_protocol::haste_core::paths::cache_dir().join("resourcepacks"))
 }
 
 /// `minecraft:block_entity_type` names by synced registry id (stored block entities carry that
