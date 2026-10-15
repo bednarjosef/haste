@@ -2791,6 +2791,14 @@ impl InputRouter {
         self.pitch = pitch;
     }
 
+    /// A look change to an exact aim: the input layer holds its angles minus the server's
+    /// rotation offset, because the tick's pick adds the offset back (a teleport or a
+    /// `player_rotation` echo set it). A script's `look` asks for a specific crosshair, so it
+    /// goes through here; plain mouse motion goes through `look`.
+    fn aim(&mut self, yaw: f32, pitch: f32, offset: (f32, f32)) {
+        self.look(yaw - offset.0, (pitch - offset.1).clamp(-90.0, 90.0));
+    }
+
     /// Jump pressed: a second press within vanilla's 7-tick window toggles flight.
     fn jump_pressed(&mut self, now: Instant) {
         match self.last_jump_press {
@@ -3877,7 +3885,12 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                                 ui.scroll(x, y, 0.0, f64::from(n));
                             }
                         }
-                        script::Action::Look(yaw, pitch) => input.look(yaw, pitch),
+                        // A scripted `look` aims exactly where asked (the server's rotation
+                        // offset would otherwise leave the crosshair elsewhere).
+                        script::Action::Look(yaw, pitch) => {
+                            let offset = view.as_ref().map_or((0.0, 0.0), |v| v.look_offset);
+                            input.aim(yaw, pitch, offset);
+                        }
                         script::Action::Screenshot(name) => shots.push(name),
                         script::Action::Error(e) => {
                             last_err = Some(e);
@@ -4518,9 +4531,19 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     // Measure phase. The buffer is sized up front: at most 1000 fps for the whole run, and it
     // grows once if the machine is faster than that (no allocation during steady-state frames).
     {
-        // Memory diagnostics: terrain arenas (fixed-size GPU buffer pairs) and resident
-        // sections, plus this process's peak RSS so far (the settle phase meshes everything).
-        let (arenas, bytes, sections) = renderer.arena_memory();
+        // Memory diagnostics: peak RSS plus every large allocation we can attribute —
+        // terrain arenas (allocated vs used), the world's chunk storage, the renderer's
+        // CPU-side copies and the embedded JVM's pools — so the diet work has a table.
+        let (arenas, arena_bytes, arena_used, sections) = renderer.arena_memory();
+        let cpu = renderer.cpu_memory();
+        let world = shared.world.read().memory_stats();
+        let jvm = shared
+            .ui
+            .lock()
+            .as_ref()
+            .map(|ui| ui.jvm_memory())
+            .unwrap_or_default();
+        let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
         let rss_kb = std::fs::read_to_string("/proc/self/status")
             .ok()
             .and_then(|s| {
@@ -4529,10 +4552,66 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
                     .and_then(|l| l.split_whitespace().nth(1).map(|v| v.to_string()))
             })
             .unwrap_or_default();
+        // smaps_rollup for the live (settled) picture: anonymous vs file-backed pages.
+        let rollup = std::fs::read_to_string("/proc/self/smaps_rollup")
+            .map(|s| {
+                let f = |key: &str| {
+                    s.lines()
+                        .find(|l| l.starts_with(key))
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .unwrap_or(0)
+                };
+                (f("Rss:"), f("Pss_Anon:"), f("Pss_File:"))
+            })
+            .unwrap_or((0, 0, 0));
         println!(
-            "bench memory: peak RSS {rss_kb} kB, {arenas} arenas ({:.1} MiB vertex+index), {sections} resident sections",
-            bytes as f64 / (1024.0 * 1024.0)
+            "bench memory: peak RSS {rss_kb} kB ({:.1} MiB), {arenas} arenas ({:.1} MiB vertex+index, {:.1} used), {sections} resident sections",
+            rss_kb.parse::<f64>().unwrap_or(0.0) / 1024.0,
+            mib(arena_bytes),
+            mib(arena_used),
         );
+        println!(
+            "bench memory: settled Rss {:.1} MiB (Pss_Anon {:.1}, Pss_File {:.1})",
+            mib(rollup.0 * 1024),
+            mib(rollup.1 * 1024),
+            mib(rollup.2 * 1024),
+        );
+        println!(
+            "bench memory: world {:.1} MiB (sections {:.1}, heightmaps {:.1}, light {:.1}, block entities {:.1}, {} non-empty), atlas+models {:.1} MiB, mesher queue {}",
+            mib(world.chunks + world.sections + world.heightmaps + world.light + world.block_entities),
+            mib(world.sections),
+            mib(world.heightmaps),
+            mib(world.light),
+            mib(world.block_entities),
+            world.non_empty_sections,
+            mib(cpu.atlas_bytes + cpu.baked_bytes),
+            cpu.mesh_pending,
+        );
+        if !jvm.is_empty() {
+            let mut heap_c = 0;
+            let mut heap_u = 0;
+            let mut meta = 0;
+            let mut code = 0;
+            for line in jvm.lines() {
+                let (k, v) = line.split_once('=').unwrap_or(("", ""));
+                let v: u64 = v.parse().unwrap_or(0);
+                match k {
+                    "heap_committed" => heap_c = v,
+                    "heap_used" => heap_u = v,
+                    "metaspace_used" => meta = v,
+                    "code_cache_used" => code = v,
+                    _ => {}
+                }
+            }
+            println!(
+                "bench memory: JVM heap {:.1}/{:.1} MiB, metaspace {:.1} MiB, code cache {:.1} MiB",
+                mib(heap_u),
+                mib(heap_c),
+                mib(meta),
+                mib(code),
+            );
+        }
     }
     let mut samples: Vec<BenchSample> = Vec::with_capacity(seconds as usize * 1000);
     let total = seconds as f32;
@@ -5785,6 +5864,26 @@ mod tests {
         assert!((yaw - 15.0).abs() < 1e-4 && pitch == 0.0, "{yaw} {pitch}");
         assert_eq!(apply_mouse(0.0, 80.0, (0.0, 200.0), DPP), (0.0, 90.0));
         assert_eq!(apply_mouse(10.0, -80.0, (0.0, -200.0), DPP), (10.0, -90.0));
+    }
+
+    /// A scripted look aims exactly where asked: the input layer holds the target angles minus
+    /// the server's rotation offset, which the tick's pick adds back. Without the subtraction a
+    /// `look` after the server turned the player (a teleport echo) aims `offset` away from the
+    /// target — the boat mount missed because the crosshair looked at the block under the
+    /// driver's feet instead of the boat.
+    #[test]
+    fn an_exact_aim_subtracts_the_servers_look_offset() {
+        let mut input = InputRouter::default();
+        // No server offset: the input layer holds the angles themselves.
+        input.aim(0.0, 49.0, (0.0, 0.0));
+        assert_eq!((input.yaw, input.pitch), (0.0, 49.0));
+        // The server turned us 60 degrees while the script's input still says 30 (the offset
+        // the player keeps, `LocalPlayer.look_offset`): aiming at 90 needs input 30.
+        input.aim(90.0, 10.0, (60.0, 0.0));
+        assert_eq!((input.yaw, input.pitch), (30.0, 10.0));
+        // A pitch past the clamp with the offset applied to the input, not the target.
+        input.aim(0.0, 90.0, (0.0, 40.0));
+        assert_eq!((input.yaw, input.pitch), (0.0, 50.0));
     }
 
     #[test]

@@ -17,6 +17,7 @@ use clap::Parser;
 mod ambient_particles;
 mod app;
 mod block_particles;
+mod boat;
 mod game;
 mod hand;
 mod headless;

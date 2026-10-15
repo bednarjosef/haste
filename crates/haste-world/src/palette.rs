@@ -167,6 +167,11 @@ impl PackedArray {
         &self.longs
     }
 
+    /// Heap bytes of the packed data (the longs' live allocation).
+    pub fn memory_bytes(&self) -> u64 {
+        self.longs.capacity() as u64 * 8
+    }
+
     pub fn read_at(&self, i: usize) -> u32 {
         // Specialize the common widths: a match on constant bits lets the compiler use
         // shifts/masks instead of runtime div/mod.
@@ -220,6 +225,19 @@ pub enum Storage {
     Direct(PackedArray),
 }
 
+impl Storage {
+    /// Heap bytes of the stored data (palette plus packed entries; live allocations).
+    pub fn memory_bytes(&self) -> u64 {
+        match self {
+            Storage::Single(_) => 0,
+            Storage::Indirect { palette, data } => {
+                palette.capacity() as u64 * 4 + data.memory_bytes()
+            }
+            Storage::Direct(data) => data.memory_bytes(),
+        }
+    }
+}
+
 /// Conversion between `u32` wire ids and the typed id. Implemented for `BlockStateId` and
 /// `BiomeId` here (haste-core keeps its ids conversion-free by design).
 pub trait WireId: Copy {
@@ -255,6 +273,11 @@ pub struct PalettedContainer<T> {
 }
 
 impl<T: WireId> PalettedContainer<T> {
+    /// Heap bytes of the container's storage (see [`Storage::memory_bytes`]).
+    pub fn memory_bytes(&self) -> u64 {
+        self.storage.memory_bytes()
+    }
+
     /// Single-value container (every entry `v`). Block capacity.
     pub fn single(v: u32) -> Self {
         Self {

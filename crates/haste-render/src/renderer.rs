@@ -106,6 +106,18 @@ pub struct LightmapFrame {
     pub lightning_flash: bool,
 }
 
+/// CPU-side memory the renderer keeps beside its GPU buffers (bench memory line).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RendererCpuMemory {
+    /// Block atlas mip chain + animated sprite frames (CPU copies, byte-for-byte
+    /// what was uploaded to the GPU, kept for animated region updates).
+    pub atlas_bytes: u64,
+    /// Baked block models (per-state quads).
+    pub baked_bytes: u64,
+    /// Mesher queue length (sections waiting to be meshed).
+    pub mesh_pending: u64,
+}
+
 /// Per-frame render statistics (docs/INTERFACES.md FrameStats).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameStats {
@@ -406,8 +418,21 @@ struct CameraUniform {
     fog_cloud_end: f32,
     /// Sky light multiplier by time of day (`chunk.wgsl`).
     daylight: f32,
-    _pad: f32,
+    /// Selection outline stroke, framebuffer pixels divided by the target height, and the
+    /// target's aspect: the line vertex shader's NDC offset per pixel (overlay.wgsl).
+    line_width: f32,
+    aspect: f32,
+    /// WGSL rounds a uniform struct's size up to its alignment (16): the Rust struct must
+    /// be 144 bytes (36 floats), one pad float more than the WGSL fields spell out, or the
+    /// buffer binds 4 bytes short of what the shader expects. The assertion below keeps
+    /// Rust and WGSL agreeing.
+    _pad: [f32; 3],
 }
+
+const _: () = assert!(
+    std::mem::size_of::<CameraUniform>() == 144,
+    "CameraUniform must match the WGSL Camera structs (144 bytes; see overlay.wgsl)"
+);
 
 /// One section layer to draw this frame.
 #[derive(Clone, Copy)]
@@ -1342,11 +1367,22 @@ impl Renderer {
     }
 
     /// The adapter this renderer runs on (name and backend, for bench reports).
-    /// Terrain-arena memory diagnostics: arena count and the vertex+index bytes
-    /// allocated (fixed-size GPU buffer pairs), plus the resident-section count.
-    pub fn arena_memory(&self) -> (usize, u64, usize) {
-        let (arenas, bytes) = self.arenas.memory_stats();
-        (arenas, bytes, self.sections.len())
+    /// Terrain-arena memory diagnostics: arena count, the vertex+index bytes allocated
+    /// (fixed-size GPU buffer pairs), the bytes actually used, plus the resident-section
+    /// count.
+    pub fn arena_memory(&self) -> (usize, u64, u64, usize) {
+        let (arenas, bytes, used) = self.arenas.memory_stats();
+        (arenas, bytes, used, self.sections.len())
+    }
+
+    /// CPU-side memory diagnostics for the bench's memory line: the block atlas's
+    /// retained mip chain, the baked block models and the mesher's pending queue.
+    pub fn cpu_memory(&self) -> RendererCpuMemory {
+        RendererCpuMemory {
+            atlas_bytes: self.atlas.pixel_bytes(),
+            baked_bytes: self.baked.memory_bytes(),
+            mesh_pending: self.mesher.pending_len() as u64,
+        }
     }
 
     pub fn adapter_info(&self) -> wgpu::AdapterInfo {
@@ -1944,8 +1980,15 @@ impl Renderer {
             fog_sky_end: fog_data.sky_end,
             fog_cloud_end: fog_data.cloud_end,
             daylight: self.sky.daylight(),
-            _pad: 0.0,
+            line_width: 0.0,
+            aspect,
+            _pad: [0.0; 3],
         };
+        // Vanilla's outline width (Window.getAppropriateLineWidth): scales with the
+        // framebuffer so it covers the same fraction of the screen at any resolution.
+        // Pre-divided by the target height: the line shader multiplies it into a NDC offset.
+        camera_uniform.line_width =
+            (self.size.0 as f32 / 1920.0 * 2.5).max(2.5) * 0.5 / self.size.1 as f32;
         self.gpu
             .queue
             .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&camera_uniform));
@@ -1976,7 +2019,9 @@ impl Renderer {
                 fog_sky_end: fog_data.sky_end,
                 fog_cloud_end: fog_data.cloud_end,
                 daylight: self.sky.daylight(),
-                _pad: 0.0,
+                line_width: 0.0,
+                aspect,
+                _pad: [0.0; 3],
             };
             self.gpu.queue.write_buffer(
                 &self.hand_camera_uniform,
