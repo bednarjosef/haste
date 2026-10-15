@@ -240,6 +240,7 @@ Game state lives in three tiers:
 ## Development
 
 ```bash
+scripts/ci-local.sh                                         # the CI checks, only for what your branch changed
 cargo test --workspace                                      # fast tests
 cargo clippy --workspace --all-targets -- -D warnings       # what CI runs
 cargo run --release --bin haste -- --server host:port --bench 20   # offscreen benchmark
