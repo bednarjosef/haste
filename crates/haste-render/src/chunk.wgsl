@@ -17,13 +17,7 @@ struct Camera {
     fog_cloud_end: f32,
     // Sky light multiplier by time of day (1 at day, 0 at night; block light is unaffected).
     daylight: f32,
-    // Outline stroke (pixels / target height) and aspect: only the overlay shader reads
-    // them. Every Camera declaration must stay layout-identical (renderer.rs asserts
-    // the Rust and WGSL sizes are equal, a uniform struct's size is rounded up to its
-    // alignment in WGSL, so the explicit pad below is load-bearing).
-    line_width: f32,
-    aspect: f32,
-    _pad: vec2<f32>,
+    _pad: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;

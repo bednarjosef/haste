@@ -406,21 +406,8 @@ struct CameraUniform {
     fog_cloud_end: f32,
     /// Sky light multiplier by time of day (`chunk.wgsl`).
     daylight: f32,
-    /// Selection outline stroke, framebuffer pixels divided by the target height, and the
-    /// target's aspect: the line vertex shader's NDC offset per pixel (overlay.wgsl).
-    line_width: f32,
-    aspect: f32,
-    /// WGSL rounds a uniform struct's size up to its alignment (16): the Rust struct must
-    /// be 144 bytes (36 floats), one pad float more than the WGSL fields spell out, or the
-    /// buffer binds 4 bytes short of what the shader expects. The assertion below keeps
-    /// Rust and WGSL agreeing.
-    _pad: [f32; 3],
+    _pad: f32,
 }
-
-const _: () = assert!(
-    std::mem::size_of::<CameraUniform>() == 144,
-    "CameraUniform must match the WGSL Camera structs (144 bytes; see overlay.wgsl)"
-);
 
 /// One section layer to draw this frame.
 #[derive(Clone, Copy)]
@@ -1957,15 +1944,8 @@ impl Renderer {
             fog_sky_end: fog_data.sky_end,
             fog_cloud_end: fog_data.cloud_end,
             daylight: self.sky.daylight(),
-            line_width: 0.0,
-            aspect,
-            _pad: [0.0; 3],
+            _pad: 0.0,
         };
-        // Vanilla's outline width (Window.getAppropriateLineWidth): scales with the
-        // framebuffer so it covers the same fraction of the screen at any resolution.
-        // Pre-divided by the target height: the line shader multiplies it into a NDC offset.
-        camera_uniform.line_width =
-            (self.size.0 as f32 / 1920.0 * 2.5).max(2.5) * 0.5 / self.size.1 as f32;
         self.gpu
             .queue
             .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&camera_uniform));
@@ -1996,9 +1976,7 @@ impl Renderer {
                 fog_sky_end: fog_data.sky_end,
                 fog_cloud_end: fog_data.cloud_end,
                 daylight: self.sky.daylight(),
-                line_width: 0.0,
-                aspect,
-                _pad: [0.0; 3],
+                _pad: 0.0,
             };
             self.gpu.queue.write_buffer(
                 &self.hand_camera_uniform,
