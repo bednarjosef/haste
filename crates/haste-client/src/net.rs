@@ -919,6 +919,7 @@ fn rain_particle(
         randomization: 0,
         override_limiter: false,
         dust: None,
+        block_state: None,
     }
 }
 
