@@ -1298,16 +1298,12 @@ impl EntityRenderer {
                                 continue;
                             };
                             let m = crate::blockentity::campfire_item_matrix(
-                                inst.pos, inst.facing, slot, camera,
+                                inst.pos,
+                                inst.facing,
+                                slot,
+                                camera,
                             );
-                            self.emit_item(
-                                &mut out,
-                                &model,
-                                m,
-                                light,
-                                ItemDisplay::Fixed,
-                                assets,
-                            );
+                            self.emit_item(&mut out, &model, m, light, ItemDisplay::Fixed, assets);
                         }
                     }
                     crate::blockentity::ItemBlockEntity::Shelf(shelf) => {
@@ -1347,7 +1343,7 @@ impl EntityRenderer {
                                 let bbox = item_model_bbox(&model, &ItemDisplay::Ground);
                                 let base = crate::blockentity::vault_root(
                                     inst.pos,
-                                    vault.spin.at(partial),
+                                    vault.spin_at(partial),
                                     camera,
                                 );
                                 let rand = |i: u32| seeded_float(vault.item.0, i);
@@ -1375,14 +1371,7 @@ impl EntityRenderer {
                         let m = crate::blockentity::brushable_item_matrix(
                             inst.pos, dir, b.dusted, camera,
                         );
-                        self.emit_item(
-                            &mut out,
-                            &model,
-                            m,
-                            light,
-                            ItemDisplay::Fixed,
-                            assets,
-                        );
+                        self.emit_item(&mut out, &model, m, light, ItemDisplay::Fixed, assets);
                     }
                 }
                 self.vertices = out;

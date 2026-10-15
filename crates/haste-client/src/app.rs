@@ -1031,6 +1031,7 @@ impl WorldFeed {
     /// block entity's NBT only when the payload changes and cached per position (the same
     /// (pointer, length) scheme as the sign text). Kinds with no payload are handed back
     /// unchanged.
+    #[allow(clippy::too_many_arguments)]
     fn item_block_kind(
         &mut self,
         pos: BlockPos,
@@ -1104,13 +1105,17 @@ impl WorldFeed {
                     .unwrap_or(0);
                 match (
                     parse_item_stack_path(&be.nbt, &["item"], registries),
+                    // Vanilla stores `hit_direction` as `Direction.LEGACY_ID_CODEC`, a byte of
+                    // the direction's 3D data value (`BrushableBlockEntity.getUpdateTag`); read
+                    // it as any numeric, like vanilla's lenient `ValueInput`.
                     read_nbt(&be.nbt)
-                        .and_then(|doc| doc.root_tag.get_string("hit_direction").map(String::from)),
+                        .and_then(|doc| doc.root_tag.get_numeric_short("hit_direction"))
+                        .and_then(|v| haste_core::Direction::from_ordinal(v as u8)),
                 ) {
                     (Some((item, _)), hit_direction) => {
                         haste_render::BlockEntityKind::Brushable(BrushableItem {
                             item,
-                            hit_direction: hit_direction.as_deref().and_then(direction_of_name),
+                            hit_direction,
                             dusted,
                         })
                     }
@@ -1120,26 +1125,35 @@ impl WorldFeed {
             // The spawner's display mob: the model from `SpawnData`'s (a trial spawner's
             // `spawn_data`'s) entity id, and the spin the game tick keeps.
             haste_render::BlockEntityKind::Spawner(_) => {
-                let trial = type_name.namespace() == "minecraft"
-                    && type_name.path() == "trial_spawner";
-                let entity = spawner_entity_id(&be.nbt, trial)
+                let trial =
+                    type_name.namespace() == "minecraft" && type_name.path() == "trial_spawner";
+                // A trial spawner has no display entity outside the states with a spinning mob
+                // (vanilla `TrialSpawnerStateData.getOrCreateDisplayEntity`).
+                let spinning = !trial
+                    || matches!(
+                        blocks
+                            .property_value(state, "trial_spawner_state")
+                            .unwrap_or(""),
+                        "waiting_for_players" | "active"
+                    );
+                let entity = spinning
+                    .then(|| spawner_entity_id(&be.nbt, trial))
+                    .flatten()
                     .and_then(|id| registries.index("minecraft:entity_type", &id))
                     .and_then(haste_entity::registry::model_for);
-                        match entity {
-                            Some(model) => {
-                                haste_render::BlockEntityKind::Spawner(
-                                    haste_render::blockentity::SpawnerDisplay {
-                                        model: Some(model.clone()),
-                                        spin: haste_render::TickPair {
-                                            start: spin.0,
-                                            end: spin.1,
-                                        },
-                                        scale: haste_render::blockentity::spawner_scale(&model),
-                                    },
-                                )
-                            }
-                            None => kind,
-                        }
+                match entity {
+                    Some(model) => haste_render::BlockEntityKind::Spawner(
+                        haste_render::blockentity::SpawnerDisplay {
+                            model: Some(model.clone()),
+                            spin: haste_render::TickPair {
+                                start: spin.0,
+                                end: spin.1,
+                            },
+                            scale: haste_render::blockentity::spawner_scale(&model),
+                        },
+                    ),
+                    None => kind,
+                }
             }
             other => other,
         };
@@ -1202,12 +1216,6 @@ impl WorldFeed {
             && stats.meshes_pending == 0
             && self.last_arrival.is_some_and(|t| t.elapsed() >= quiet)
     }
-}
-
-/// A block state's `facing`-like property value as a `Direction` (the brushable block's
-/// `hit_direction` is stored as a direction name).
-fn direction_of_name(name: &str) -> Option<Direction> {
-    Direction::ALL.iter().find(|d| d.name() == name).copied()
 }
 
 /// A block state `facing` property value as a `Direction`.
@@ -1325,13 +1333,19 @@ fn spawner_entity_id(nbt: &[u8], trial: bool) -> Option<haste_core::Identifier> 
     } else {
         &doc.root_tag
     };
-    let spawn = if trial { data } else { data.get_compound("SpawnData")? };
+    let spawn = if trial {
+        data
+    } else {
+        data.get_compound("SpawnData")?
+    };
     let entity = spawn.get_compound("entity")?;
     haste_core::Identifier::parse(entity.get_string("id")?).ok()
 }
 
-/// A block entity payload's item registry index items as an array of four slots (campfires
-/// hold at most four items, vanilla `CampfireBlockEntity`).
+/// A banner's patterns from the block entity's NBT
+/// (`{pattern: <registry id>, color: <dye name>}`) plus the base colour from the block id
+/// (`<colour>_banner`, vanilla `BannerBlock.getColor`). `None` when the NBT does not parse;
+/// a banner without a `patterns` tag is the plain base colour.
 fn parse_banner_nbt(
     nbt: &[u8],
     block: &haste_core::Identifier,

@@ -150,12 +150,20 @@ pub struct SpawnerDisplay {
     /// The display entity's cube model; `None` draws nothing (vanilla leaves the render
     /// state's `displayEntity` null when the spawn data names no spawnable entity).
     pub model: Option<std::sync::Arc<CubeModel>>,
-    /// The spin as the ends of the last tick, in degrees (vanilla's
-    /// `Mth.lerp(partialTicks, oSpin, spin) * 10`; the client runs the tick maths).
+    /// The display entity's spin as the ends of the last tick, in the units vanilla's
+    /// `BaseSpawner.spin` / `TrialSpawnerStateData.spin` accumulate (see
+    /// [`spawner_spin_at`] for the degrees the renderer draws).
     pub spin: TickPair,
     /// The scale vanilla derives from the display entity's bounding box
     /// (`0.53125` divided by the larger of its width and height when that exceeds 1).
     pub scale: f32,
+}
+
+/// The degrees a spawner's display mob is turned to at `partial`, vanilla
+/// `TrialSpawnerRenderer.extractSpawnerData`'s `Mth.lerp(partialTicks, oSpin, spin) * 10`
+/// (vanilla keeps the accumulating spin in its own units and scales it only for the pose).
+pub fn spawner_spin_at(spawner: &SpawnerDisplay, partial: f32) -> f32 {
+    spawner.spin.at(partial) * 10.0
 }
 
 /// A vault's displayed item (vanilla `VaultRenderState`): the item and how many copies of the
@@ -180,6 +188,22 @@ impl VaultDisplay {
             33..=48 => 4,
             _ => 5,
         }
+    }
+
+    /// The yaw the displayed item is turned to at `partial`, vanilla `VaultRenderer`'s
+    /// `Mth.rotLerp(partialTicks, clientData.previousSpin(), clientData.currentSpin())`: the
+    /// lerp wraps at 180 degrees so the item keeps turning the short way when the spin rolls
+    /// over from its 10 degrees a tick (`VaultClientData.updateDisplayItemSpin`).
+    pub fn spin_at(&self, partial: f32) -> f32 {
+        let from = self.spin.start;
+        let mut delta = (self.spin.end - from) % 360.0;
+        if delta >= 180.0 {
+            delta -= 360.0;
+        }
+        if delta < -180.0 {
+            delta += 360.0;
+        }
+        from + partial * delta
     }
 }
 
@@ -763,7 +787,12 @@ pub(crate) fn emit_spawner(
     };
     use crate::entity::emit_part_tinted;
     let (sky, block) = inst.light;
-    let root = spawner_root(inst.pos, spawner.spin.at(partial), spawner.scale, camera);
+    let root = spawner_root(
+        inst.pos,
+        spawner_spin_at(spawner, partial),
+        spawner.scale,
+        camera,
+    );
     emit_part_tinted(
         out,
         model,
@@ -858,9 +887,7 @@ pub(crate) fn brushable_item_matrix(
     Mat4::from_translation(p.as_vec3() + Vec3::new(0.0, 0.5, 0.0))
         * Mat4::from_translation(t)
         * Mat4::from_rotation_y(75.0f32.to_radians())
-        * Mat4::from_rotation_y(
-            (if east_west { 90.0f32 } else { 0.0 } + 11.0).to_radians(),
-        )
+        * Mat4::from_rotation_y((if east_west { 90.0f32 } else { 0.0 } + 11.0).to_radians())
         * Mat4::from_scale(Vec3::splat(0.5))
 }
 
@@ -2085,16 +2112,29 @@ mod tests {
         assert!((s0.z - 0.375).abs() < 1e-6, "z: {}", s0.z);
         // Slot 1 turns 90 degrees (west), slot 2 180 (north), slot 3 270 (east).
         let s1 = centre(1);
-        assert!((s1.x - 0.625).abs() < 1e-6 && (s1.z - 0.375).abs() < 1e-6, "{s1:?}");
+        assert!(
+            (s1.x - 0.625).abs() < 1e-6 && (s1.z - 0.375).abs() < 1e-6,
+            "{s1:?}"
+        );
         let s2 = centre(2);
-        assert!((s2.x - 0.625).abs() < 1e-6 && (s2.z - 0.625).abs() < 1e-6, "{s2:?}");
+        assert!(
+            (s2.x - 0.625).abs() < 1e-6 && (s2.z - 0.625).abs() < 1e-6,
+            "{s2:?}"
+        );
         let s3 = centre(3);
-        assert!((s3.x - 0.375).abs() < 1e-6 && (s3.z - 0.625).abs() < 1e-6, "{s3:?}");
+        assert!(
+            (s3.x - 0.375).abs() < 1e-6 && (s3.z - 0.625).abs() < 1e-6,
+            "{s3:?}"
+        );
         // The model's 0.375 scale: one block of model space is 0.375 blocks wide.
         let edge = campfire_item_matrix(pos, Direction::South, 0, cam)
             .transform_point3(Vec3::new(1.5, 0.5, 0.5))
             - s0;
-        assert!((edge.x - CAMPFIRE_ITEM_SIZE).abs() < 1e-6, "scale: {}", edge.x);
+        assert!(
+            (edge.x - CAMPFIRE_ITEM_SIZE).abs() < 1e-6,
+            "scale: {}",
+            edge.x
+        );
         // A west-facing campfire's slots are shifted by one (slot 0 goes to the west).
         let shifted = campfire_item_matrix(pos, Direction::West, 0, cam)
             .transform_point3(Vec3::new(0.5, 0.5, 0.5));
@@ -2107,7 +2147,12 @@ mod tests {
     /// display entity's fixed 180-degree yaw and the model flip.
     #[test]
     fn spawner_root_tips_and_scales_the_mob() {
-        let m = spawner_root(BlockPos::new(0, 0, 0), 0.0, SPAWNER_SCALE, glam::DVec3::ZERO);
+        let m = spawner_root(
+            BlockPos::new(0, 0, 0),
+            0.0,
+            SPAWNER_SCALE,
+            glam::DVec3::ZERO,
+        );
         // The feet (model origin) sit at the block's centre, dropped by 0.2.
         let p = m.transform_point3(Vec3::ZERO);
         assert!((p.x - 0.5).abs() < 1e-6, "x: {}", p.x);
@@ -2264,12 +2309,14 @@ mod tests {
     /// one more per full 16 of the count, up to five.
     #[test]
     fn vault_copies_match_vanilla() {
-        let vault = |count: u32| VaultDisplay {
-            item: haste_core::RegistryIndex(0),
-            count,
-            spin: TickPair::fixed(0.0),
-        }
-        .copies();
+        let vault = |count: u32| {
+            VaultDisplay {
+                item: haste_core::RegistryIndex(0),
+                count,
+                spin: TickPair::fixed(0.0),
+            }
+            .copies()
+        };
         assert_eq!(vault(0), 0);
         assert_eq!(vault(1), 1);
         assert_eq!(vault(16), 2);
@@ -2279,6 +2326,40 @@ mod tests {
         assert_eq!(vault(48), 4);
         assert_eq!(vault(49), 5);
         assert_eq!(vault(1000), 5);
+    }
+
+    /// Vanilla `TrialSpawnerRenderer.extractSpawnerData`'s `Mth.lerp(partialTicks, oSpin, spin)
+    /// * 10`: the accumulating spin is only scaled for the pose.
+    #[test]
+    fn spawner_spin_is_scaled_by_ten() {
+        let spawner = SpawnerDisplay {
+            model: None,
+            spin: TickPair {
+                start: 3.0,
+                end: 4.0,
+            },
+            scale: SPAWNER_SCALE,
+        };
+        assert!((spawner_spin_at(&spawner, 0.5) - 35.0).abs() < 1e-6);
+    }
+
+    /// Vanilla `VaultRenderer`'s `Mth.rotLerp`: the vault's displayed item keeps turning the
+    /// short way when the 10-degrees-a-tick spin rolls over 360, unlike a plain lerp.
+    #[test]
+    fn vault_spin_wraps_through_the_short_arc() {
+        let vault = |start: f32, end: f32| VaultDisplay {
+            item: haste_core::RegistryIndex(0),
+            count: 1,
+            spin: TickPair { start, end },
+        };
+        // Halfway between 350 and 0 (a 10 degree turn through 360): the item is at 355, where a
+        // plain lerp would be at 175 and send the item backwards three quarters of a turn.
+        assert!((vault(350.0, 360.0).spin_at(0.5) - 355.0).abs() < 1e-6);
+        assert!((vault(350.0, 0.0).spin_at(0.5) - 355.0).abs() < 1e-6);
+        // A forward 10 degrees well inside the range interpolates plainly.
+        assert!((vault(20.0, 30.0).spin_at(0.5) - 25.0).abs() < 1e-6);
+        // A backwards turn (a spin the vault can never make) still takes the short arc.
+        assert!((vault(100.0, 80.0).spin_at(0.5) - 90.0).abs() < 1e-6);
     }
 
     /// The spawner scale: vanilla's 0.53125, divided by the larger of the display entity's

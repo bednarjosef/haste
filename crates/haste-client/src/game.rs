@@ -1084,7 +1084,8 @@ fn tick_once(
     }
     // The vaults' and spawners' spins (vanilla `VaultClientData.updateDisplayItemSpin` and
     // the spawners' client tick): every vault's displayed item turns 10 degrees a tick, a
-    // spawner's display mob turns while a player is within its required player range.
+    // spawner's display mob turns at the rate its state's spinning mob speed and its remaining
+    // spawn delay give (a plain mob spawner only while a player is near it).
     {
         let world = shared.world.read();
         let blocks = &shared.data.blocks;
@@ -1100,14 +1101,15 @@ fn tick_once(
                 return false;
             };
             let minecraft = name.namespace() == "minecraft";
-            let rate =             if minecraft && name.path() == "vault" {
+            let rate = if minecraft && name.path() == "vault" {
                 // `VaultClientData.ROTATION_SPEED` (10 degrees a tick, wrapped).
                 Some(10.0)
             } else if minecraft && matches!(name.path(), "mob_spawner" | "trial_spawner") {
-                if spawner_spins(*pos, blocks, world.block_state(*pos), player) {
+                let trial = name.path() == "trial_spawner";
+                if trial || mob_spawner_spins(&be.nbt, *pos, player) {
                     Some(spawner_spin_rate(
                         &be.nbt,
-                        name.path() == "trial_spawner",
+                        trial,
                         game_time,
                         blocks
                             .property_value(world.block_state(*pos), "trial_spawner_state")
@@ -1125,7 +1127,8 @@ fn tick_once(
             };
             spin.0 = spin.1;
             if rate > 0.0 {
-                // Vanilla's `(spin + rate) % 360`; a blocked trial spawner holds at 0.
+                // Vanilla's `(spin + rate) % 360`; a trial spawner in a state with no spinning
+                // mob holds its spin.
                 spin.1 = (spin.1 + rate).rem_euclid(360.0);
             }
             true
@@ -1137,10 +1140,7 @@ fn tick_once(
                     continue;
                 };
                 if name.namespace() != "minecraft"
-                    || !matches!(
-                        name.path(),
-                        "vault" | "mob_spawner" | "trial_spawner"
-                    )
+                    || !matches!(name.path(), "vault" | "mob_spawner" | "trial_spawner")
                     || spins.iter().any(|(p, _)| p == &pos)
                 {
                     continue;
@@ -1338,19 +1338,16 @@ fn eye_in_lava(world: &World, data: &GameData, eye: DVec3) -> bool {
 }
 
 /// Vanilla `BaseSpawner.isNearPlayer`: an alive player within the spawner's required player
-/// range (16 blocks) of its centre. The client has only its own player, so a spawner spins
-/// its mob exactly when the camera is close, like vanilla's single-player client.
-fn spawner_spins(
-    pos: BlockPos,
-    blocks: &haste_data::BlockStates,
-    state: haste_core::BlockStateId,
-    player: DVec3,
-) -> bool {
+/// range of its centre. The client has only its own player, so a spawner spins its mob exactly
+/// when the camera is close, like vanilla's single-player client. Only `BaseSpawner.clientTick`
+/// checks this; a trial spawner's `tickClient` spins its mob in every state that has one.
+fn mob_spawner_spins(nbt: &[u8], pos: BlockPos, player: DVec3) -> bool {
     let centre = DVec3::new(pos.x as f64 + 0.5, pos.y as f64 + 0.5, pos.z as f64 + 0.5);
-    let range = blocks
-        .property_value(state, "required_player_range")
-        .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(16.0);
+    // `BaseSpawner.requiredPlayerRange` is the block entity's `RequiredPlayerRange` tag, not a
+    // block state property; vanilla writes it as a short and reads it back leniently.
+    let range = read_block_entity_nbt(nbt)
+        .and_then(|doc| doc.root_tag.get_numeric_short("RequiredPlayerRange"))
+        .unwrap_or(16) as f64;
     player.distance_squared(centre) <= range * range
 }
 
