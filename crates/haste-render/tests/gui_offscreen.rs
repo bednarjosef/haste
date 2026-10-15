@@ -262,6 +262,7 @@ fn gui_frame_offscreen() {
             bob: haste_render::ViewBob::default(),
         },
         entities: &[],
+        block_entities: &[],
         gui: &gui,
         sky: SkyState {
             time_of_day: 6000,
@@ -269,11 +270,13 @@ fn gui_frame_offscreen() {
             dimension_has_sky: true,
             fog_start: 100.0,
             fog_end: 200.0,
+            ..Default::default()
         },
         partial_tick: 0.0,
         block_target: None,
         breaking: &[],
         camera_entity: None,
+        spin: None,
     };
     let stats = renderer.render(&input).unwrap();
     // Second frame: everything resident, measure.

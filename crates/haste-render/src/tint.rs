@@ -48,6 +48,8 @@ pub struct BiomeClimate {
     pub foliage_color: Option<u32>,
     pub dry_foliage_color: Option<u32>,
     pub grass_modifier: GrassModifier,
+    /// The biome's fog environment attributes (`attributes` map), for `FogRenderer`.
+    pub fog: crate::fog::BiomeFog,
 }
 
 impl BiomeClimate {
@@ -62,6 +64,7 @@ impl BiomeClimate {
             foliage_color: None,
             dry_foliage_color: None,
             grass_modifier: GrassModifier::None,
+            fog: crate::fog::BiomeFog::default(),
         }
     }
 }
