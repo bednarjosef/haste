@@ -5,7 +5,7 @@ use std::time::Instant;
 use haste_core::entity::{EntitySpawn, MetadataEntry, MetadataValue, PlayerInfo, Pose};
 use haste_core::game::GameMode;
 use haste_core::ids::{EntityId, RegistryIndex};
-use haste_core::model::EntityInstance;
+use haste_core::model::{BodyOp, EntityInstance};
 use haste_core::DVec3;
 use uuid::Uuid;
 
@@ -199,6 +199,56 @@ fn render_instances_midpoint() {
     let mut out = Vec::new();
     s.render_instances(1.0, &mut out);
     assert!((out[0].pos.x - 4.0 / 3.0).abs() < 1e-9);
+}
+
+/// A dropped item entity carries its stack in `ItemEntity.DATA_ITEM`, metadata index 8
+/// (Entity's eight synched fields come first): it reaches the draw list with the item's
+/// registry id, the stack count and its age (partial-tick interpolated), and an
+/// emptied stack clears it.
+#[test]
+fn item_entity_stack_from_metadata() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    let stack = |count, item: Option<u32>| MetadataEntry {
+        index: 8,
+        value: MetadataValue::ItemStack(haste_core::entity::ItemStackData {
+            count,
+            item: item.map(RegistryIndex),
+            components_raw: Default::default(),
+        }),
+    };
+    s.set_metadata(EntityId(1), &[stack(10, Some(5))]);
+    let mut out = Vec::new();
+    s.render_instances(0.5, &mut out);
+    assert_eq!(
+        out[0].item,
+        Some(haste_core::model::DroppedItem {
+            item: RegistryIndex(5),
+            count: 10,
+            age: 0.5,
+        })
+    );
+    // Age advances with the ticks (plus the partial).
+    s.tick();
+    s.tick();
+    let mut out = Vec::new();
+    s.render_instances(0.25, &mut out);
+    assert_eq!(out[0].item.unwrap().age, 2.25);
+    // An emptied stack (count 0) stops the item from drawing as an item.
+    s.set_metadata(EntityId(1), &[stack(0, Some(5))]);
+    let mut out = Vec::new();
+    s.render_instances(0.0, &mut out);
+    assert_eq!(out[0].item, None);
+    // An empty stack slot (None item) likewise.
+    s.set_metadata(EntityId(1), &[stack(3, None)]);
+    let mut out = Vec::new();
+    s.render_instances(0.0, &mut out);
+    assert_eq!(out[0].item, None);
+    // Entities without the metadata entry are unaffected.
+    s.spawn(&spawn(2, DVec3::ZERO));
+    let mut out = Vec::new();
+    s.render_instances(0.0, &mut out);
+    assert_eq!(out.iter().find(|i| i.id == EntityId(2)).unwrap().item, None);
 }
 
 #[test]
@@ -624,6 +674,98 @@ fn zombie_arms_are_forward_at_rest() {
     );
 }
 
+/// `Mob.DATA_MOB_FLAGS_ID` is metadata index 15 (Entity's 8 + LivingEntity's 7); bit 2 is
+/// left-handed, bit 4 aggressive (`Mob.isLeftHanded`/`isAggressive`).
+#[test]
+fn mob_flags_byte_aggressive_and_left_handed() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: 15,
+            value: MetadataValue::Byte(0x04 | 0x02),
+        }],
+    );
+    let m = &s.get(EntityId(1)).unwrap().metadata;
+    assert!(m.mob.aggressive);
+    assert!(m.mob.left_handed);
+    // Clearing the byte clears both bits.
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: 15,
+            value: MetadataValue::Byte(0),
+        }],
+    );
+    let m = &s.get(EntityId(1)).unwrap().metadata;
+    assert!(!m.mob.aggressive);
+    assert!(!m.mob.left_handed);
+}
+
+/// `AnimationUtils.animateZombieArms` with `aggressive = true`: `armDrop = -PI / 1.5`
+/// (`-2.09440`), the adult raiseArms branch, at rest with age 0 (idle bob adds z 0.1).
+#[test]
+fn aggressive_zombie_arms_are_raised() {
+    let model = mob_model(
+        "minecraft:entity/zombie/zombie",
+        &["head", "right_arm", "left_arm"],
+    );
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: 15,
+            value: MetadataValue::Byte(0x04),
+        }],
+    );
+    let e = s.get(EntityId(1)).unwrap();
+    let pose = crate::animation::setup_anim(e, &model, true, 0.0, false);
+    let rot: std::collections::HashMap<_, _> = pose.rotations.iter().cloned().collect();
+    let ra = rot.get("right_arm").unwrap();
+    assert!(
+        (ra.x - -2.094_395_2).abs() < 1e-4,
+        "aggressive zombie right arm {} != -2.09440",
+        ra.x
+    );
+    assert!((ra.y - -0.1).abs() < 1e-4);
+    assert!((ra.z - 0.1).abs() < 1e-4);
+}
+
+/// `SkeletonModel.setupAnim`: an aggressive skeleton not holding a bow raises both arms to
+/// `-PI/2` (with the swing offsets) and bobs them; this replaces the humanoid walk swing.
+#[test]
+fn aggressive_skeleton_arms_raised() {
+    let model = mob_model(
+        "minecraft:entity/skeleton/skeleton",
+        &["head", "right_arm", "left_arm"],
+    );
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: 15,
+            value: MetadataValue::Byte(0x04),
+        }],
+    );
+    let e = s.get(EntityId(1)).unwrap();
+    let pose = crate::animation::setup_anim(e, &model, true, 0.0, false);
+    let rot: std::collections::HashMap<_, _> = pose.rotations.iter().cloned().collect();
+    let ra = rot.get("right_arm").unwrap();
+    let la = rot.get("left_arm").unwrap();
+    assert!(
+        (ra.x - -std::f32::consts::FRAC_PI_2).abs() < 1e-4,
+        "skeleton right arm {} != -PI/2",
+        ra.x
+    );
+    assert!((ra.y - -0.1).abs() < 1e-4);
+    assert!((ra.z - 0.1).abs() < 1e-4);
+    assert!((la.y - 0.1).abs() < 1e-4);
+    assert!((la.z - -0.1).abs() < 1e-4);
+}
+
 /// A quadruped model (pig/cow/sheep: `right_hind_leg`/`left_front_leg` parts) gets
 /// `QuadrupedModel.setupAnim`: the hind and front legs on one side are out of phase.
 #[test]
@@ -654,6 +796,283 @@ fn quadruped_legs_swing_out_of_phase() {
     // Opposite phase: the right hind and right front legs have opposite sign here.
     assert!(rh.x * rf.x <= 0.0, "hind {} front {} in phase", rh.x, rf.x);
     assert!((lh.x + rh.x).abs() < 1e-4, "left/right hind not mirrored");
+}
+
+/// `LivingEntityRenderer.setupRotations`: `fall = sqrt((deathTime - 1) / 20 * 1.6)` clamped to 1,
+/// rotated about Z by `fall * 90`. deathTime is 0 until the first death tick, so the tilt is 0
+/// then, and reaches the full 90 degrees once `fall` saturates.
+#[test]
+fn death_tilt_rotates_over_twenty_ticks() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.mark_dead(EntityId(1));
+    // deathTime 0 (not yet ticked): no rotation at all.
+    let e = s.get(EntityId(1)).unwrap();
+    assert_eq!(crate::animation::body_transform(e, 0.0, false).len, 0);
+    // deathTime 1: fall = 0 -> Z rotation of 0.
+    s.tick();
+    let e = s.get(EntityId(1)).unwrap();
+    let b = crate::animation::body_transform(e, 0.0, false);
+    assert_eq!(b.len, 1);
+    assert!(matches!(b.ops[0], BodyOp::RotateZ(a) if a.abs() < 1e-6));
+    // deathTime 21: fall = 1.6 -> sqrt -> clamp 1 -> 90 degrees.
+    for _ in 0..20 {
+        s.tick();
+    }
+    let e = s.get(EntityId(1)).unwrap();
+    let b = crate::animation::body_transform(e, 1.0, false);
+    match b.ops[0] {
+        BodyOp::RotateZ(a) => {
+            assert!((a - std::f32::consts::FRAC_PI_2).abs() < 1e-4, "tilt {a}");
+        }
+        other => panic!("expected RotateZ, got {other:?}"),
+    }
+}
+
+/// `LivingEntityRenderer.setupRotations`: a mob named `Dinnerbone`/`Grumm` (custom name metadata
+/// index 2) is lifted by `(boundingBoxHeight + 0.1)` and rolled 180 degrees; its look pitch and
+/// head yaw are negated (`extractRenderState`).
+#[test]
+fn dinnerbone_is_upside_down() {
+    let model = mob_model("entity/humanoid", &["head", "right_arm", "left_arm"]);
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: 2,
+            value: MetadataValue::OptionalComponent(Some(haste_core::Component::text(
+                "Dinnerbone",
+            ))),
+        }],
+    );
+    s.set_rotation(EntityId(1), 0.0, 30.0, true);
+    let e = s.get(EntityId(1)).unwrap();
+    let b = crate::animation::body_transform(e, 0.0, false);
+    assert!(matches!(b.ops[0], BodyOp::Translate(t) if (t.y - 1.9).abs() < 1e-5));
+    assert!(matches!(b.ops[1], BodyOp::RotateZ(a) if (a - std::f32::consts::PI).abs() < 1e-5));
+    let pose = crate::animation::setup_anim(e, &model, true, 0.0, false);
+    let rot: std::collections::HashMap<_, _> = pose.rotations.iter().cloned().collect();
+    let head = rot.get("head").unwrap();
+    assert!(
+        (head.x - -30.0f32.to_radians()).abs() < 1e-5,
+        "upside-down head pitch {} != -30 deg",
+        head.x
+    );
+    // A name that is not Dinnerbone/Grumm leaves it upright.
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: 2,
+            value: MetadataValue::OptionalComponent(Some(haste_core::Component::text("Steve"))),
+        }],
+    );
+    let e = s.get(EntityId(1)).unwrap();
+    assert_eq!(crate::animation::body_transform(e, 0.0, false).len, 0);
+}
+
+/// `LivingEntityRenderer.setupRotations`'s sleeping branch: the `180 - bodyRot` yaw is replaced
+/// by `rotateY(angle); rotateZ(90); rotateY(270)` (the bed orientation is not tracked, so the
+/// body yaw fallback is used, as vanilla does when it is null).
+#[test]
+fn sleeping_pose_replaces_the_body_yaw() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: 6,
+            value: MetadataValue::Pose(Pose::Sleeping),
+        }],
+    );
+    let e = s.get(EntityId(1)).unwrap();
+    let b = crate::animation::body_transform(e, 0.0, false);
+    assert!(b.suppress_yaw);
+    assert_eq!(b.len, 3);
+    assert!(
+        matches!(b.ops[1], BodyOp::RotateZ(a) if (a - std::f32::consts::FRAC_PI_2).abs() < 1e-5)
+    );
+    assert!(matches!(b.ops[2], BodyOp::RotateY(a) if (a - 270.0f32.to_radians()).abs() < 1e-5));
+}
+
+/// `AvatarRenderer.setupRotations`: a fall-flying player is pitched by
+/// `fallFlyingScale * (-90 - xRot)` about X; after 10 fall-flying ticks the scale is 1.
+#[test]
+fn fall_flying_player_pitch() {
+    let mut s = store();
+    let sp = spawn(1, DVec3::ZERO);
+    let uuid = sp.uuid;
+    s.player_info(&[PlayerInfo {
+        uuid,
+        name: "Flyer".into(),
+        display_name: None,
+        latency: 20,
+        game_mode: Some(GameMode::Survival),
+        listed: true,
+        skin_texture_url: None,
+    }]);
+    s.spawn(&sp);
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: 0,
+            value: MetadataValue::Byte(0x80u8 as i8),
+        }],
+    );
+    s.set_rotation(EntityId(1), 0.0, 20.0, true);
+    for _ in 0..12 {
+        s.tick();
+    }
+    let e = s.get(EntityId(1)).unwrap();
+    let b = crate::animation::body_transform(e, 0.0, false);
+    match b.ops[0] {
+        BodyOp::RotateX(a) => {
+            let want = (-90.0f32 - 20.0).to_radians();
+            assert!((a - want).abs() < 1e-4, "fly pitch {a} != {want}");
+        }
+        other => panic!("expected RotateX, got {other:?}"),
+    }
+}
+
+/// `VillagerModel.setupAnim`: an unhappy villager (`AbstractVillager.DATA_UNHAPPY_COUNTER`,
+/// metadata index 18, > 0) shakes its head (`zRot = 0.3*sin(0.45*ageInTicks)`, `xRot = 0.4`),
+/// and the legs swing at half the humanoid amplitude.
+#[test]
+fn villager_unhappy_shakes_head_and_halves_walk() {
+    let model = mob_model(
+        "entity/villager/villager",
+        &["head", "arms", "right_leg", "left_leg"],
+    );
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: 18,
+            value: MetadataValue::VarInt(1),
+        }],
+    );
+    for _ in 0..10 {
+        s.move_delta(EntityId(1), DVec3::new(0.1, 0.0, 0.0), true);
+        s.tick();
+    }
+    let e = s.get(EntityId(1)).unwrap();
+    let pose = crate::animation::setup_anim(e, &model, true, 0.0, false);
+    let rot: std::collections::HashMap<_, _> = pose.rotations.iter().cloned().collect();
+    let head = rot.get("head").unwrap();
+    assert!((head.x - 0.4).abs() < 1e-6, "unhappy head x {}", head.x);
+    let age = e.tick_count as f32;
+    assert!(
+        (head.z - 0.3 * (0.45 * age).sin()).abs() < 1e-5,
+        "unhappy head z {}",
+        head.z
+    );
+    let pos = e.walk.position(0.0);
+    let speed = e.walk.speed(0.0);
+    let want = (pos * 0.6662).cos() * 1.4 * speed * 0.5;
+    let rl = rot.get("right_leg").unwrap();
+    assert!(
+        (rl.x - want).abs() < 1e-5,
+        "villager leg {} != {want}",
+        rl.x
+    );
+}
+
+/// `IllagerModel.setupAnim`: a calm vindicator crosses its arms (the "arms" part shown, the two
+/// arms hidden); an aggressive one attacks with `animateZombieArms(aggressive = true)`
+/// (`armDrop = -PI / 1.5`).
+#[test]
+fn illager_crosses_arms_and_attacks_when_aggressive() {
+    let model = mob_model(
+        "entity/illager/vindicator",
+        &[
+            "head",
+            "arms",
+            "right_arm",
+            "left_arm",
+            "right_leg",
+            "left_leg",
+        ],
+    );
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    let e = s.get(EntityId(1)).unwrap();
+    let pose = crate::animation::setup_anim(e, &model, true, 0.0, false);
+    assert!(pose.hidden.iter().any(|h| h == "right_arm"));
+    assert!(pose.hidden.iter().any(|h| h == "left_arm"));
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: 15,
+            value: MetadataValue::Byte(0x04),
+        }],
+    );
+    let e = s.get(EntityId(1)).unwrap();
+    let pose = crate::animation::setup_anim(e, &model, true, 0.0, false);
+    assert!(pose.hidden.iter().any(|h| h == "arms"));
+    let rot: std::collections::HashMap<_, _> = pose.rotations.iter().cloned().collect();
+    let ra = rot.get("right_arm").unwrap();
+    assert!(
+        (ra.x - -2.094_395_2).abs() < 1e-4,
+        "attacking illager arm {} != -PI/1.5",
+        ra.x
+    );
+}
+
+/// `IronGolemModel.setupAnim`: entity event 4 starts a 10-tick attack animation; at the first
+/// frame `attackTicksRemaining = 10`, `triangleWave(10, 10) = 1`, so both arms are at -0.5.
+#[test]
+fn iron_golem_attack_arms() {
+    let model = mob_model(
+        "entity/iron_golem/iron_golem",
+        &[
+            "head",
+            "body",
+            "right_arm",
+            "left_arm",
+            "right_leg",
+            "left_leg",
+        ],
+    );
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.mark_attack(EntityId(1));
+    let e = s.get(EntityId(1)).unwrap();
+    let pose = crate::animation::setup_anim(e, &model, true, 0.0, false);
+    let rot: std::collections::HashMap<_, _> = pose.rotations.iter().cloned().collect();
+    let ra = rot.get("right_arm").unwrap();
+    let la = rot.get("left_arm").unwrap();
+    assert!((ra.x - -0.5).abs() < 1e-5, "golem arm {} != -0.5", ra.x);
+    assert!((la.x - -0.5).abs() < 1e-5);
+}
+
+/// `CreeperRenderer.scale`: a fresh creeper is unscaled; a swelling one grows wider (x/z) and
+/// taller (y) from `getSwelling(partial) = lerp(partial, oldSwell, swell) / (maxSwell - 2)`.
+#[test]
+fn creeper_swell_scales_the_model() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    let e = s.get(EntityId(1)).unwrap();
+    assert_eq!(
+        crate::animation::creeper_scale(e, 0.0),
+        haste_core::math::Vec3::ONE
+    );
+    // Swell direction 1 (index 16, int) for 28 ticks: oldSwell 27, swell 28.
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: 16,
+            value: MetadataValue::VarInt(1),
+        }],
+    );
+    for _ in 0..28 {
+        s.tick();
+    }
+    let e = s.get(EntityId(1)).unwrap();
+    let sc = crate::animation::creeper_scale(e, 0.0);
+    assert!((sc.x - sc.z).abs() < 1e-6, "x/z should match");
+    assert!(sc.x > 1.0, "swollen creeper x {} not wider", sc.x);
+    assert!(sc.y > 1.0, "swollen creeper y {} not taller", sc.y);
 }
 
 /// Builds a minimal `CubeModel` whose root has one cube-less child per `parts` name, so the
@@ -1445,4 +1864,126 @@ fn table_textures_exist_in_jar() {
         "{} table textures missing from the jar: {missing:?}",
         missing.len()
     );
+}
+
+/// `render_instances` resolves a variant mob's look through the synced variant table: the
+/// metadata's variant id picks the assets, the model comes from the variant's model type,
+/// and without a variant in play the model table's default row stands. Needs the dump and
+/// registries.json (the kind is resolved through the real entity-type names).
+#[test]
+#[ignore = "needs cache/oracle/26.3 (recorder mod dump + registries.json; HASTE_CACHE overrides)"]
+fn render_instances_picks_up_variant_models() {
+    let Some(names) = crate::registry::entity_type_names() else {
+        eprintln!("skipped: no registries.json in the cache");
+        return;
+    };
+    let Some((kind, _)) = names.iter().find(|(_, n)| n.as_str() == "minecraft:pig") else {
+        eprintln!("skipped: minecraft:pig not in the registry");
+        return;
+    };
+    let mut s = store();
+    let mut sp = spawn(1, DVec3::ZERO);
+    sp.kind = *kind;
+    s.spawn(&sp);
+    // No variant table set: the default (temperate) pig model.
+    let mut out = Vec::new();
+    s.render_instances(0.5, &mut out);
+    let default = out[0].model.clone();
+    if crate::registry::model_for_name("minecraft:pig").is_none() {
+        eprintln!("skipped: no entity model dump in the cache");
+        return;
+    }
+    assert_eq!(
+        default.texture.path(),
+        "entity/pig/pig_temperate",
+        "the default pig row"
+    );
+    // A cold pig variant (registry id 2 in vanilla's order: temperate, warm, cold).
+    s.set_mob_variants(
+        "minecraft:pig_variant",
+        vec![
+            Some(
+                crate::variants::VariantAssets::from_assets(
+                    "minecraft:entity/pig/pig_temperate",
+                    Some("minecraft:entity/pig/pig_temperate_baby"),
+                    None,
+                )
+                .unwrap(),
+            ),
+            None,
+            Some(
+                crate::variants::VariantAssets::from_assets(
+                    "minecraft:entity/pig/pig_cold",
+                    Some("minecraft:entity/pig/pig_cold_baby"),
+                    Some("cold"),
+                )
+                .unwrap(),
+            ),
+        ],
+    );
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: crate::variants::metadata_index::PIG,
+            value: MetadataValue::Other {
+                type_id: crate::variants::serializer_id::PIG_VARIANT,
+                raw: vec![2].into(),
+            },
+        }],
+    );
+    let mut out = Vec::new();
+    s.render_instances(0.5, &mut out);
+    let cold = out[0].model.clone();
+    assert_eq!(cold.texture.path(), "entity/pig/pig_cold");
+    assert_ne!(cold.root, default.root, "the cold layer differs");
+    // An unknown variant id (a mod's registry): the default row stands.
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: crate::variants::metadata_index::PIG,
+            value: MetadataValue::Other {
+                type_id: crate::variants::serializer_id::PIG_VARIANT,
+                raw: vec![7].into(),
+            },
+        }],
+    );
+    let mut out = Vec::new();
+    s.render_instances(0.5, &mut out);
+    assert_eq!(out[0].model.texture.path(), "entity/pig/pig_temperate");
+}
+
+/// A sheep keeps its sheep model with wool metadata set: the wool byte sits at metadata 18,
+/// the same slot a shulker's colour byte occupies, so the shulker texture swap must be
+/// gated on the entity type (regression: a red-wool sheep used to come out as a red
+/// shulker). Needs registries.json + the dump.
+#[test]
+#[ignore = "needs cache/oracle/26.3 (registries.json + model dump; HASTE_CACHE overrides)"]
+fn sheep_with_wool_metadata_is_not_a_shulker() {
+    let Some(names) = crate::registry::entity_type_names() else {
+        eprintln!("skipped: no registries.json in the cache");
+        return;
+    };
+    let Some((kind, _)) = names.iter().find(|(_, n)| n.as_str() == "minecraft:sheep") else {
+        eprintln!("skipped: minecraft:sheep not in the registry");
+        return;
+    };
+    let mut s = store();
+    let mut sp = spawn(1, DVec3::ZERO);
+    sp.kind = *kind;
+    s.spawn(&sp);
+    // Red wool, exactly the byte that is a red shulker's colour.
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: crate::variants::metadata_index::SHEEP_WOOL,
+            value: MetadataValue::Byte(14),
+        }],
+    );
+    let mut out = Vec::new();
+    s.render_instances(0.5, &mut out);
+    assert_eq!(out[0].model.texture.path(), "entity/sheep/sheep");
+    // The wool overlay is there, tinted red.
+    let wool = out[0].overlays[0].as_ref().expect("wool overlay");
+    assert_eq!(wool.model.texture.path(), "entity/sheep/sheep_wool");
+    assert_eq!(wool.tint, crate::variants::dye_tint(14));
 }

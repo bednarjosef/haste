@@ -7,7 +7,7 @@ use std::path::Path;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() < 1 {
+    if args.is_empty() {
         bail!("usage: shot-meta <shot.json>");
     }
     let meta: ScreenshotMeta = serde_json::from_reader(

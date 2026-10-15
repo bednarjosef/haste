@@ -6,6 +6,7 @@
 
 pub mod animation;
 pub mod arena;
+pub mod blockentity;
 pub mod entity;
 pub mod fluid;
 pub mod fog;
@@ -22,8 +23,14 @@ pub mod timing;
 pub mod tint;
 pub mod vertex;
 
+pub use blockentity::{
+    chest_texture, kind_of, shulker_texture, xmas_textures, BlockEntityInstance, BlockEntityKind,
+    ChestHalf, ChestMaterial, SignSideText, SignTextData,
+};
 pub use entity::{default_skin, EntityRenderer, FirstPerson, Nametag, TickPair};
-pub use fog::{setup_fog, FogData, FogEnvironment};
+pub use fog::{
+    frame_fog, setup_fog, BiomeFog, DimensionFog, FogData, FogEnvironment, FogInputs, FogType,
+};
 pub use gui::{GuiRenderer, GuiStats, ScreenNametag};
 pub use mesher::{mesh_section, MeshSnapshot, Mesher, SectionMesh, SnapshotSource};
 pub use occlusion::{compute_visible_mask, section_visibility, Face, VisibilitySet};

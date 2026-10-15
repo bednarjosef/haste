@@ -36,6 +36,9 @@ pub struct JvmConfig {
     /// keeps every file vanilla would write in memory or in Rust; this is where anything that still
     /// writes ends up (`cache/jvm-game` by default).
     pub game_dir: PathBuf,
+    /// Where singleplayer worlds live (`<config dir>/singleplayer`): `Minecraft.getLevelSource`
+    /// (the world list) reads it, and Rust's local server plays them. Empty = the JVM game dir.
+    pub singleplayer_dir: PathBuf,
     /// Extra JVM options (e.g. `-Xmx512m`).
     pub jvm_options: Vec<String>,
     /// Print refused classes to stderr as they happen.
@@ -94,6 +97,7 @@ impl JvmConfig {
                 fnv1a(crate_dir.to_string_lossy().as_bytes())
             )),
             game_dir: cache.join("jvm-game"),
+            singleplayer_dir: cache.join("jvm-game").join("singleplayer"),
             jvm_options: Vec::new(),
             verbose: std::env::var_os("HASTE_JVM_VERBOSE").is_some(),
         };
@@ -408,6 +412,10 @@ fn boot_config(cfg: &JvmConfig) -> String {
     kv("proxiesConf", &cfg.proxies_conf.display().to_string());
     kv("verbose", if cfg.verbose { "true" } else { "false" });
     kv("minecraftDir", &cfg.game_dir.display().to_string());
+    kv(
+        "singleplayerDir",
+        &cfg.singleplayer_dir.display().to_string(),
+    );
     for l in &cfg.libraries {
         kv("lib", &l.display().to_string());
     }

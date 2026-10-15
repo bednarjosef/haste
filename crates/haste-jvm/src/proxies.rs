@@ -262,6 +262,30 @@ pub struct ChatMessage {
     pub command: bool,
 }
 
+/// The world the create screen asked to make (vanilla's CreateWorldScreen choices). The client
+/// turns it into `server.properties` for the local server, which creates the world.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreateWorldRequest {
+    /// The world folder (under the singleplayer dir; the create screen picked an unused name).
+    pub folder: String,
+    /// The world's name as typed (displayed in the world list).
+    pub name: String,
+    /// Vanilla `GameType` id: 0 survival, 1 creative, 2 adventure, 3 spectator.
+    pub game_mode: i32,
+    /// Vanilla `Difficulty` id: 0 peaceful .. 3 hard.
+    pub difficulty: i32,
+    /// Hardcore world.
+    pub hardcore: bool,
+    /// Cheats (vanilla `allowCommands`): the player joins as an operator.
+    pub allow_commands: bool,
+    /// The seed, decimal (empty = random).
+    pub seed: String,
+    /// Generate structures.
+    pub generate_structures: bool,
+    /// World type, a preset id like `minecraft:normal`.
+    pub level_type: String,
+}
+
 /// The game state the proxies read. Owned by Rust; the client updates it (e.g. from packets) and
 /// screens see it immediately through the natives. Java writes back what vanilla code produced
 /// (inventory changes, chat, serverbound packets).
@@ -300,8 +324,26 @@ pub struct GameState {
     /// Vanilla code asked to leave the server (pause screen "Disconnect"); the client disconnects
     /// and clears this.
     pub disconnect_requested: bool,
+    /// The multiplayer screen's Join: the address to connect to, until the client takes it.
+    pub join_requested: Option<String>,
+    /// The connecting screen's Cancel: a join still in progress must be dropped.
+    pub join_cancelled: bool,
+    /// Vanilla code asked to quit the game (the title screen's Quit Game).
+    pub quit_requested: bool,
+    /// The world list's "Play Selected World": the world folder to start the local server for
+    /// and join, until the client takes it.
+    pub open_world_requested: Option<String>,
+    /// The create screen's "Create New World": the world to create (folder and settings), until
+    /// the client takes it.
+    pub create_world_requested: Option<CreateWorldRequest>,
+    /// A local singleplayer server is running (the pause screen's "Save and Quit" label). Set by
+    /// the client when it starts/stops the local server.
+    pub local_world_running: bool,
     /// Serverbound play packets vanilla code sent (VarInt id + body, vanilla's encoding), oldest first.
     pub outgoing: Vec<Vec<u8>>,
+    /// Option changes vanilla screens made, as options.txt key/value pairs, oldest first. The
+    /// client drains them once per tick and applies them live (render distance, sound volumes, ...).
+    pub option_changes: Vec<(String, String)>,
 }
 
 impl Default for GameState {
@@ -323,6 +365,13 @@ impl Default for GameState {
             day_time: 0,
             outgoing: Vec::new(),
             disconnect_requested: false,
+            join_requested: None,
+            join_cancelled: false,
+            quit_requested: false,
+            open_world_requested: None,
+            create_world_requested: None,
+            local_world_running: false,
+            option_changes: Vec::new(),
         }
     }
 }
@@ -367,6 +416,12 @@ impl GameState {
     pub fn take_outgoing(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.outgoing)
     }
+    /// Drains the option changes vanilla screens made (options.txt key/value pairs each), the
+    /// way `haste.gui.OptionBridge` reported them.
+    pub fn take_option_changes(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.option_changes)
+    }
+
     /// The F3 overlay's string values as `\n`-joined `key value` lines for `Native.debugText`
     /// (`biome`, `dimension`, `brand`, `cpu`, `gpu`, then `block`/`fluid` with `pos`, `prop` and
     /// `tag` lines). Only pulled while the overlay is on, so it allocates on demand.
