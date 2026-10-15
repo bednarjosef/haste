@@ -509,8 +509,7 @@ impl WeatherRenderer {
         let push = |out: &mut Vec<WeatherVertex>,
                     columns: &[WeatherColumn],
                     rect: [u32; 4],
-                    max_alpha: f32,
-                    snow: bool| {
+                    max_alpha: f32| {
             for c in columns {
                 // `prepareInstances`: relative position, distance fade, column orientation.
                 let relative_x = c.x as f32 + 0.5 - cam.x;
@@ -531,24 +530,18 @@ impl WeatherRenderer {
                 let z1 = relative_z + half_z;
                 let y0 = c.bottom_y as f32 - cam.y;
                 let y1 = c.top_y as f32 - cam.y;
-                // Rain: one quarter of rain.png wide (`uOffset + 0..1` over the tile), the
-                // scroll in `v_offset`; the vertex V runs `bottomY * 0.25` to `topY * 0.25`
-                // past it (vanilla `prepareInstances`). Snow: the u/v drift the column's
-                // random fixed. The atlas rect is in texels; the quarter in rain's case.
+                // Rain: the full rain.png width (`uOffset` is 0 for rain columns, so
+                // `u0 = uOffset + 0`, `u1 = uOffset + 1` spans the whole texture); the
+                // scroll sits in `v_offset`, and the vertex V runs `bottomY * 0.25` to
+                // `topY * 0.25` past it (vanilla `prepareInstances`). Snow: the u/v drift
+                // the column's random fixed, still spanning a full texture width from the
+                // sub-tile offset. The atlas rect is in texels; the UVs may leave the rect
+                // (vanilla's sampler REPEATs), and the fragment wraps them back inside.
                 let r = rect.map(|v| v as f32);
-                let (u0, u1);
-                if snow {
-                    u0 = r[0] + (c.u_offset.rem_euclid(1.0)) * r[2];
-                    u1 = u0 + r[2];
-                } else {
-                    let quarter = r[2] / 4.0;
-                    let pick = (c.seed.unsigned_abs() % 4) as f32 * quarter;
-                    u0 = r[0] + pick;
-                    u1 = u0 + quarter;
-                }
-                let tile_v = |tiles: f32| r[1] + tiles.rem_euclid(1.0) * r[3];
-                let v0 = tile_v(c.v_offset + c.bottom_y as f32 * 0.25);
-                let v1 = tile_v(c.v_offset + c.top_y as f32 * 0.25);
+                let u0 = r[0] + c.u_offset * r[2];
+                let u1 = u0 + r[2];
+                let v0 = r[1] + (c.v_offset + c.bottom_y as f32 * 0.25) * r[3];
+                let v1 = r[1] + (c.v_offset + c.top_y as f32 * 0.25) * r[3];
                 let rect16 = rect.map(|v| v as u16);
                 let light = [c.light.0 as u32, c.light.1 as u32];
                 let color = [1.0, 1.0, 1.0, alpha];
@@ -569,15 +562,9 @@ impl WeatherRenderer {
                 }
             }
         };
-        push(
-            &mut self.vertices,
-            &weather.rain,
-            self.rain_rect,
-            1.0,
-            false,
-        );
+        push(&mut self.vertices, &weather.rain, self.rain_rect, 1.0);
         self.snow_start = self.vertices.len() as u32;
-        push(&mut self.vertices, &weather.snow, self.snow_rect, 0.8, true);
+        push(&mut self.vertices, &weather.snow, self.snow_rect, 0.8);
         self.vertex_count = self.vertices.len() as u32;
         self.drawn = (weather.rain.len() + weather.snow.len()) as u32;
         // One-time diagnostics: what the pass actually received (column counts, vertex

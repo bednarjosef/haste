@@ -297,7 +297,9 @@ impl SkyRenderer {
         });
         let rain = put("environment/rain", 288, 0);
         let snow = put("environment/snow", 352, 0);
-        let end_sky = put("environment/end_sky", 384, 0);
+        // Past the weather tiles (rain 288..352, snow 352..416): the End sky must not
+        // overlap them, or the weather pass samples its purple where snow flakes should be.
+        let end_sky = put("environment/end_sky", 448, 0);
         let clouds = put("environment/clouds", 0, 256);
         let rects = AtlasRects {
             sun,

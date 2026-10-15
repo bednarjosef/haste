@@ -70,9 +70,14 @@ fn vs_main(v: VertexIn) -> VertexOut {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    let origin = vec2<i32>(in.rect.xy);
-    let size = vec2<i32>(in.rect.zw);
-    let texel = clamp(vec2<i32>(floor(in.uv)), origin, origin + size - vec2<i32>(1, 1));
+    // Vanilla's weather textures repeat (the columns' V run many tiles through the
+    // texture); the atlas cannot rely on the sampler's REPEAT, so wrap the UV into the
+    // sprite's rect like the sky pass's fetch.
+    let origin = vec2<f32>(in.rect.xy);
+    let size = vec2<f32>(in.rect.zw);
+    let local = in.uv - origin;
+    let wrapped = local - size * floor(local / size);
+    let texel = vec2<i32>(floor(origin + wrapped));
     let c = textureLoad(atlas, texel, 0);
     if (c.a < 0.1) {
         discard;
