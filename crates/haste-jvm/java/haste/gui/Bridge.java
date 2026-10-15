@@ -373,6 +373,16 @@ public final class Bridge {
         Handlers.openCommandBlock(x, y, z);
     }
 
+    /** The server forgot a chunk: its block entities leave the Java-side store (vanilla unloads them with the chunk). */
+    public void dropChunkBlockEntities(int chunkX, int chunkZ) {
+        BlockEntities.dropChunk(chunkX, chunkZ);
+    }
+
+    /** Number of block entities in the Java-side store (tests: chunk drops). */
+    public int blockEntityCount() {
+        return BlockEntities.count();
+    }
+
     /** A use opened the writable book's editor (vanilla `LocalPlayer.openItemGui`). */
     public void openItemGui(int hand) {
         Handlers.openItemGui(hand);

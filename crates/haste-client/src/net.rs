@@ -2133,7 +2133,7 @@ impl NetDriver {
             self.session
                 .apply(a.packet, world, entities, regs, &mut self.out);
             match (ui, for_ui) {
-                (Some(ui), Some(p)) => ui.handle(&p),
+                (Some(ui), Some(p)) => ui.handle(&p, &|pos| world.block_state_at(pos)),
                 (None, Some(p)) if self.ui_backlog.len() < UI_BACKLOG_LIMIT => {
                     self.ui_backlog.push(p)
                 }
