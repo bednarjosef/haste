@@ -741,7 +741,11 @@ impl EntityStore {
             let passenger = riding.vehicle_of(slot.id).is_some();
             if !passenger && !slot.dead {
                 let target = (dist * 4.0).min(1.0);
-                slot.walk.update(target, 0.4, 1.0);
+                // `LivingEntity.updateWalkAnimation`: babies swing at three times the position
+                // scale (`isBaby() ? 3.0F : 1.0F`).
+                let baby = !slot.is_player_type && crate::registry::is_baby(&slot.metadata);
+                slot.walk
+                    .update(target, 0.4, if baby { 3.0 } else { 1.0 });
             } else {
                 slot.walk.stop();
             }

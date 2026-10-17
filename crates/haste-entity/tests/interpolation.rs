@@ -118,7 +118,6 @@ fn delta_after_position_sync_builds_on_the_synced_target() {
     assert_eq!(s.get(EntityId(1)).unwrap().pos.x, 12.0);
 }
 
-#[allow(dead_code)]
 fn metadata(index: u8, value: MetadataValue) -> MetadataEntry {
     MetadataEntry { index, value }
 }
@@ -201,4 +200,33 @@ fn spawn_body_yaw_comes_from_the_head_yaw() {
     assert_eq!(e.body_yaw_at(0.5), 70.0);
     assert_eq!(e.head_yaw, 70.0);
     assert_eq!(e.yaw, 10.0);
+}
+
+// ---------------------------------------------------------------------------
+// Item 9: babies' walk animation position scale (LivingEntity.updateWalkAnimation).
+// ---------------------------------------------------------------------------
+
+/// `updateWalkAnimation` passes `positionScale = 3.0` for `isBaby()`: the same speed, but the
+/// limb-swing position (`WalkAnimationState.position(partial)`) advances three times as fast.
+#[test]
+fn baby_walk_position_advances_three_times_as_fast() {
+    let walk_position = |baby: bool| {
+        let mut s = store();
+        s.spawn(&spawn(1, DVec3::ZERO));
+        if baby {
+            // `AgeableMob.DATA_BABY_ID` (index 16).
+            s.set_metadata(EntityId(1), &[metadata(16, MetadataValue::Boolean(true))]);
+        }
+        for _ in 0..4 {
+            s.move_delta(EntityId(1), DVec3::new(0.3, 0.0, 0.0), true);
+            s.tick();
+        }
+        let e = s.get(EntityId(1)).unwrap();
+        (e.walk.position(1.0), e.walk.speed(1.0))
+    };
+    let (adult_pos, adult_speed) = walk_position(false);
+    let (baby_pos, baby_speed) = walk_position(true);
+    assert!(adult_pos > 0.0);
+    assert!(near_f(baby_pos, adult_pos * 3.0), "{baby_pos} vs {adult_pos}");
+    assert!(near_f(baby_speed, adult_speed));
 }
