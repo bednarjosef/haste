@@ -227,7 +227,10 @@ fn baby_walk_position_advances_three_times_as_fast() {
     let (adult_pos, adult_speed) = walk_position(false);
     let (baby_pos, baby_speed) = walk_position(true);
     assert!(adult_pos > 0.0);
-    assert!(near_f(baby_pos, adult_pos * 3.0), "{baby_pos} vs {adult_pos}");
+    assert!(
+        near_f(baby_pos, adult_pos * 3.0),
+        "{baby_pos} vs {adult_pos}"
+    );
     assert!(near_f(baby_speed, adult_speed));
 }
 
@@ -297,4 +300,95 @@ fn positive_health_is_not_a_death() {
     assert!(!s.get(EntityId(1)).unwrap().dead);
     s.set_metadata(EntityId(1), &[metadata(9, MetadataValue::Float(0.5))]);
     assert!(!s.get(EntityId(1)).unwrap().dead);
+}
+
+// ---------------------------------------------------------------------------
+// Item 3: yaw/pitch from move packets ease with the position (LinearInterpolationHandler).
+// ---------------------------------------------------------------------------
+
+/// `handleMoveEntity` -> `moveOrInterpolateTo(yRot, xRot)`: `doInterpolate` moves yaw by
+/// `Mth.rotLerp` and pitch by `Mth.lerp`, 1/remaining per tick; `getYRot(partial)` /
+/// `getXRot(partial)` read the previous/current pair.
+#[test]
+fn rotation_packet_eases_yaw_and_pitch_over_three_ticks() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.set_rotation(EntityId(1), 90.0, 30.0, true);
+    let e = s.get(EntityId(1)).unwrap();
+    assert_eq!(e.yaw, 0.0);
+    assert_eq!(e.pitch, 0.0);
+    s.tick();
+    let e = s.get(EntityId(1)).unwrap();
+    assert!(near_f(e.yaw, 30.0), "{}", e.yaw);
+    assert!(near_f(e.pitch, 10.0), "{}", e.pitch);
+    assert!(near_f(e.yaw_at(0.5), 15.0));
+    assert!(near_f(e.pitch_at(0.5), 5.0));
+    assert_eq!(e.yaw_at(1.0), e.yaw);
+    assert_eq!(e.pitch_at(1.0), e.pitch);
+    s.tick();
+    s.tick();
+    let e = s.get(EntityId(1)).unwrap();
+    assert!(near_f(e.yaw, 90.0), "{}", e.yaw);
+    assert!(near_f(e.pitch, 30.0), "{}", e.pitch);
+    assert!(near_f(e.prev_yaw, 60.0));
+    assert!(near_f(e.prev_pitch, 20.0));
+}
+
+/// `interpolateTo` with no rotation keeps the rotation already in flight, and with no position
+/// keeps the position in flight: a pos+rot packet split into two calls lands on both.
+#[test]
+fn position_and_rotation_targets_are_kept_for_each_other() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.set_rotation(EntityId(1), 90.0, 0.0, true);
+    s.tick(); // yaw 30
+    s.move_delta(EntityId(1), DVec3::new(3.0, 0.0, 0.0), true);
+    s.tick(); // restarted: yaw 30 + 60/3 = 50, x = 1
+    let e = s.get(EntityId(1)).unwrap();
+    assert!(near_f(e.yaw, 50.0), "{}", e.yaw);
+    assert!(near(e.pos.x, 1.0), "{}", e.pos.x);
+    s.set_rotation(EntityId(1), 0.0, 0.0, true);
+    for _ in 0..3 {
+        s.tick();
+    }
+    let e = s.get(EntityId(1)).unwrap();
+    assert!(near_f(e.yaw, 0.0), "{}", e.yaw);
+    assert_eq!(e.pos.x, 3.0);
+}
+
+/// A rotation past the wrap takes the short way (`Mth.rotLerp`), pitch does not wrap.
+#[test]
+fn yaw_lerp_takes_the_short_way_round() {
+    let mut s = store();
+    let mut sp = spawn(1, DVec3::ZERO);
+    sp.yaw = 170.0;
+    s.spawn(&sp);
+    s.set_rotation(EntityId(1), -170.0, 0.0, true);
+    s.tick();
+    let e = s.get(EntityId(1)).unwrap();
+    assert!(near_f(e.yaw, 170.0 + 20.0 / 3.0), "{}", e.yaw);
+    assert!(near_f(e.yaw_at(0.5), 170.0 + 10.0 / 3.0));
+}
+
+/// A far position sync (`snapTo`) sets the rotation and its previous values at once.
+#[test]
+fn far_sync_snaps_rotation_too() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.teleport(EntityId(1), DVec3::new(0.0, 100.0, 0.0), 45.0, -10.0, true);
+    let e = s.get(EntityId(1)).unwrap();
+    assert_eq!(e.yaw_at(0.5), 45.0);
+    assert_eq!(e.pitch_at(0.5), -10.0);
+}
+
+/// The render list carries the interpolated pitch (and yaw for non-living models).
+#[test]
+fn render_instances_use_the_interpolated_pitch() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.set_rotation(EntityId(1), 0.0, 30.0, true);
+    s.tick();
+    let mut out = Vec::new();
+    s.render_instances(0.5, &mut out);
+    assert!(near_f(out[0].pitch, 5.0), "{}", out[0].pitch);
 }

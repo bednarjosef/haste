@@ -13,7 +13,7 @@ use haste_core::DVec3;
 use uuid::Uuid;
 
 use crate::dims::EntityDimensions;
-use crate::lerp::LerpState;
+use crate::lerp::{LerpState, LerpTarget};
 use crate::metadata::Metadata;
 use crate::riding::Riding;
 
@@ -203,8 +203,14 @@ pub struct Entity {
     /// The `add_entity` data field: hanging entities carry their facing direction here
     /// (`ItemFrame.recreateFromPacket` -> `Direction.from3DDataValue(packet.getData())`).
     pub data: i32,
+    /// `Entity.yRot` / `xRot`, stepped toward the last packet's rotation by `lerp`
+    /// (`LinearInterpolationHandler.doInterpolate`); read them at a partial tick with
+    /// `yaw_at` / `pitch_at`.
     pub yaw: f32,
     pub pitch: f32,
+    /// `Entity.yRotO` / `xRotO`: the rotation at the end of the previous tick.
+    pub prev_yaw: f32,
+    pub prev_pitch: f32,
     pub head_yaw: f32,
     /// Velocity the server sent (blocks/tick); informational until the lead asks for prediction.
     pub velocity: DVec3,
@@ -276,6 +282,8 @@ impl Entity {
             data: s.data,
             yaw: s.yaw,
             pitch: s.pitch,
+            prev_yaw: s.yaw,
+            prev_pitch: s.pitch,
             head_yaw: s.head_yaw,
             velocity: s.velocity,
             on_ground: false,
@@ -283,7 +291,7 @@ impl Entity {
             dimensions: dims.get(s.kind, Pose::Standing),
             metadata: Metadata::default(),
             equipment: Vec::new(),
-            lerp: LerpState::new(s.pos),
+            lerp: LerpState::new(s.pos, s.yaw, s.pitch),
             nametag: None,
             is_player_type: false,
             walk: WalkAnimationState::default(),
@@ -322,6 +330,29 @@ impl Entity {
             self.dead = true;
             self.hurt_ticks = DEATH_TICKS;
         }
+    }
+
+    /// `Entity.getYRot(partialTicks)`: `Mth.rotLerp(partial, yRotO, yRot)`.
+    pub fn yaw_at(&self, partial: f32) -> f32 {
+        if partial == 1.0 {
+            self.yaw
+        } else {
+            rot_lerp(partial, self.prev_yaw, self.yaw)
+        }
+    }
+
+    /// `Entity.getXRot(partialTicks)`: `Mth.lerp(partial, xRotO, xRot)`.
+    pub fn pitch_at(&self, partial: f32) -> f32 {
+        if partial == 1.0 {
+            self.pitch
+        } else {
+            lerp(partial, self.prev_pitch, self.pitch)
+        }
+    }
+
+    /// The present (pos, yaw, pitch): what `LerpState` keeps for the part a packet lacks.
+    fn current(&self) -> (DVec3, f32, f32) {
+        (self.pos, self.yaw, self.pitch)
     }
 
     /// Body yaw between the last two ticks (`Mth.rotLerp(partial, yBodyRotO, yBodyRot)`).
@@ -592,17 +623,18 @@ impl EntityStore {
     pub fn move_delta(&mut self, id: EntityId, delta: DVec3, on_ground: bool) {
         if let Some(i) = self.slot(id) {
             if let Some(e) = &mut self.slots[i as usize] {
-                e.lerp.on_delta(delta);
+                e.lerp.on_delta(delta, e.current());
                 e.on_ground = on_ground;
             }
         }
     }
 
+    /// A rotation from a move packet (`ClientPacketListener.handleMoveEntity` ->
+    /// `Entity.moveOrInterpolateTo(yRot, xRot)`): eased over 3 ticks with the position.
     pub fn set_rotation(&mut self, id: EntityId, yaw: f32, pitch: f32, on_ground: bool) {
         if let Some(i) = self.slot(id) {
             if let Some(e) = &mut self.slots[i as usize] {
-                e.yaw = yaw;
-                e.pitch = pitch;
+                e.lerp.interpolate_to(None, Some((yaw, pitch)), e.current());
                 e.on_ground = on_ground;
             }
         }
@@ -616,15 +648,18 @@ impl EntityStore {
     pub fn teleport(&mut self, id: EntityId, pos: DVec3, yaw: f32, pitch: f32, on_ground: bool) {
         if let Some(i) = self.slot(id) {
             if let Some(e) = &mut self.slots[i as usize] {
-                e.yaw = yaw;
-                e.pitch = pitch;
                 e.on_ground = on_ground;
                 if e.pos.distance_squared(pos) > TELEPORT_SNAP_DISTANCE_SQ {
                     e.pos = pos;
                     e.prev_pos = pos;
-                    e.lerp.snap(pos);
+                    e.yaw = yaw;
+                    e.prev_yaw = yaw;
+                    e.pitch = pitch;
+                    e.prev_pitch = pitch;
+                    e.lerp.snap(pos, yaw, pitch);
                 } else {
-                    e.lerp.on_target(pos);
+                    e.lerp
+                        .interpolate_to(Some(pos), Some((yaw, pitch)), e.current());
                 }
             }
         }
@@ -757,7 +792,14 @@ impl EntityStore {
                 );
                 slot.lerp_head_steps -= 1;
             }
-            slot.lerp.tick(&mut slot.pos, &mut slot.prev_pos);
+            slot.lerp.tick(&mut LerpTarget {
+                pos: &mut slot.pos,
+                prev_pos: &mut slot.prev_pos,
+                yaw: &mut slot.yaw,
+                prev_yaw: &mut slot.prev_yaw,
+                pitch: &mut slot.pitch,
+                prev_pitch: &mut slot.prev_pitch,
+            });
             let d = slot.pos - slot.prev_pos;
             let dist = f32::sqrt((d.x * d.x + d.z * d.z) as f32);
             // `LivingEntity.calculateEntityAnimation`: passengers and the dead stop walking.
@@ -767,8 +809,7 @@ impl EntityStore {
                 // `LivingEntity.updateWalkAnimation`: babies swing at three times the position
                 // scale (`isBaby() ? 3.0F : 1.0F`).
                 let baby = !slot.is_player_type && crate::registry::is_baby(&slot.metadata);
-                slot.walk
-                    .update(target, 0.4, if baby { 3.0 } else { 1.0 });
+                slot.walk.update(target, 0.4, if baby { 3.0 } else { 1.0 });
             } else {
                 slot.walk.stop();
             }
@@ -948,11 +989,12 @@ impl EntityStore {
             } else {
                 Vec3::ONE
             };
-            // Living models turn with their body yaw; a non-living box follows its packet yaw.
+            // Living models turn with their body yaw; a non-living box follows its yaw
+            // (`Entity.getYRot(partialTicks)`).
             let yaw = if has_head {
                 slot.body_yaw_at(partial_tick)
             } else {
-                slot.yaw
+                slot.yaw_at(partial_tick)
             };
             let type_name = crate::registry::entity_type_name(slot.kind);
             let is_baby = !slot.is_player_type && crate::registry::is_baby(&slot.metadata);
@@ -1004,7 +1046,7 @@ impl EntityStore {
                 model,
                 pos,
                 yaw,
-                pitch: slot.pitch,
+                pitch: slot.pitch_at(partial_tick),
                 head_yaw: slot.head_yaw,
                 // Slime/magma cube size (`AbstractCubeMob.ID_SIZE`); 1.0 for everything else.
                 scale: crate::variants::scale_for(slot.kind, &slot.metadata),
