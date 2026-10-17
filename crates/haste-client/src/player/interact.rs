@@ -170,7 +170,7 @@ pub struct Interaction {
     /// Item registry indices that steer a ridden animal while held (vanilla
     /// `Pig.getControllingPassenger`'s carrot on a stick, `Strider`'s warped fungus on a
     /// stick), resolved from the item registry in `prepare`.
-    pub(crate) steer_items: Option<HashSet<RegistryIndex>>,
+    pub(crate) steer_items: Option<HashMap<RegistryIndex, crate::item_based_steering::SteerStick>>,
     /// Active effects on us: `minecraft:mob_effect` index -> amplifier, remaining ticks and the
     /// vanilla `MobEffectInstance.BlendState` the screen effects read.
     pub effects: HashMap<i32, EffectData>,
@@ -333,13 +333,17 @@ impl Interaction {
         if self.steer_items.is_none() {
             // The sticks that steer a ridden animal while held (their item registry names).
             self.steer_items = Some(
-                ["carrot_on_a_stick", "warped_fungus_on_a_stick"]
-                    .iter()
-                    .filter_map(|n| {
-                        data.registries
-                            .index("minecraft:item", &Identifier::minecraft(n))
-                    })
-                    .collect(),
+                [
+                    crate::item_based_steering::SteerStick::CarrotOnAStick,
+                    crate::item_based_steering::SteerStick::WarpedFungusOnAStick,
+                ]
+                .into_iter()
+                .filter_map(|stick| {
+                    data.registries
+                        .index("minecraft:item", &Identifier::minecraft(stick.item_path()))
+                        .map(|i| (i, stick))
+                })
+                .collect(),
             );
         }
         if self.effect_ids.is_none() {
@@ -715,13 +719,13 @@ impl LocalPlayer {
     /// `Pig`/`Strider.getControllingPassenger` -> `LivingEntity.isHolding`, which looks at the
     /// main hand and the off hand: the carrot on a stick, the warped fungus on a stick). An
     /// unknown registry (no `prepare` yet) steers nothing.
-    pub fn holds_steer_stick(&self) -> bool {
+    pub fn holds_steer_stick(&self, stick: crate::item_based_steering::SteerStick) -> bool {
         let steers = |stack: &haste_core::entity::ItemStackData| {
             stack.item.is_some_and(|i| {
                 self.int
                     .steer_items
                     .as_ref()
-                    .is_some_and(|s| s.contains(&i))
+                    .is_some_and(|s| s.get(&i) == Some(&stick))
             })
         };
         steers(self.main_hand()) || steers(&self.int.offhand)

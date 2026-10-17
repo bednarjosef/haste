@@ -221,9 +221,10 @@ pub struct LocalPlayer {
     boat: Option<crate::boat::Boat>,
     /// The horse-family vehicle we steer ([`crate::horse`]), like `boat` above.
     horse: Option<crate::horse::Horse>,
-    /// The pig we steer with a carrot on a stick ([`crate::pig`]), like `boat` above: it ticks
-    /// only while the rider holds the stick (vanilla `Pig.getControllingPassenger`).
-    pig: Option<crate::pig::Pig>,
+    /// The pig or strider we steer with its stick ([`crate::item_based_steering`]), like
+    /// `boat` above: it ticks only while the rider holds the stick (vanilla
+    /// `Pig`/`Strider.getControllingPassenger`).
+    item_steered: Option<crate::item_based_steering::ItemSteered>,
     /// The mount's charged jump state (vanilla `LocalPlayer.jumpRidingTicks` /
     /// `jumpRidingScale`): counts the held jump while on a horse-family vehicle, and the scale
     /// is what the `player_command` START_RIDING_JUMP carries and the HUD jump bar shows.
@@ -315,7 +316,7 @@ impl LocalPlayer {
             vehicle: None,
             boat: None,
             horse: None,
-            pig: None,
+            item_steered: None,
             jump_riding_ticks: 0,
             jump_riding_scale: 0.0,
             riding_jump_held: false,
@@ -886,16 +887,14 @@ impl LocalPlayer {
             // and, for a vehicle we control, the `move_vehicle` that carries its simulation.
             self.boat_tick(ctx, out);
             self.horse_tick(input, look, ctx, out);
-            self.pig_tick(look, ctx);
+            self.item_steered_tick(look, vehicle, ctx);
             self.ride_tick(input, look, vehicle);
             self.send_rotation(out);
-            let pig_steered = self.holds_steer_stick();
-            let steered = match (&self.boat, &self.horse, &self.pig) {
+            let item_steered = self.steered_by_item();
+            let steered = match (&self.boat, &self.horse, item_steered) {
                 (Some(boat), _, _) => Some((boat.pos, boat.yaw, 0.0, boat.on_ground)),
                 (_, Some(horse), _) => Some((horse.pos, horse.yaw, horse.pitch, horse.on_ground)),
-                (_, _, Some(pig)) if pig_steered => {
-                    Some((pig.pos, pig.yaw, pig.pitch, pig.on_ground))
-                }
+                (_, _, Some(animal)) => Some(animal.pose()),
                 _ => None,
             };
             if let Some((pos, yaw, pitch, on_ground)) = steered {

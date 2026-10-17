@@ -22,6 +22,7 @@ mod game;
 mod hand;
 mod headless;
 mod horse;
+mod item_based_steering;
 mod launch;
 mod net;
 mod pig;
@@ -30,6 +31,7 @@ mod screen_effects;
 mod screenshots;
 mod script;
 mod sound;
+mod strider;
 mod travel;
 mod ui;
 

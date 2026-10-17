@@ -1431,24 +1431,38 @@ impl Session {
         &self,
         vehicle: EntityId,
         entities: &E,
-    ) -> Option<crate::pig::Pig> {
+    ) -> Option<crate::item_based_steering::ItemSteered> {
         let kind = entities.entity_type(vehicle)?;
         let path = self
             .entity_type_names
             .get(kind.0 as usize)
             .map(|id| id.path())?;
-        if !crate::pig::is_pig_type(path) {
+        let default_speed = if crate::pig::is_pig_type(path) {
+            crate::pig::DEFAULT_MOVEMENT_SPEED
+        } else if crate::strider::is_strider_type(path) {
+            crate::strider::DEFAULT_MOVEMENT_SPEED
+        } else {
             return None;
-        }
-        // Vanilla `Mob.isSaddled` with `Pig.canUseSlot(SADDLE)`: grown.
+        };
+        // Vanilla `Mob.isSaddled` with `Pig`/`Strider.canUseSlot(SADDLE)`: grown.
         if !is_saddled(vehicle, entities, false) {
             return None;
         }
         let (pos, yaw, _) = entities.pose(vehicle)?;
         let (_, dims) = entities.entity_type_info(vehicle)?;
-        let (speed, _, gravity) =
-            self.vehicle_attributes(vehicle, crate::pig::DEFAULT_MOVEMENT_SPEED);
-        Some(crate::pig::Pig::new(pos, yaw, dims, speed, gravity))
+        let (speed, _, gravity) = self.vehicle_attributes(vehicle, default_speed);
+        Some(if crate::pig::is_pig_type(path) {
+            crate::item_based_steering::ItemSteered::Pig(crate::pig::Pig::new(
+                pos, yaw, dims, speed, gravity,
+            ))
+        } else {
+            let mut s = crate::strider::Strider::new(pos, yaw, dims, speed, gravity);
+            s.suffocating = matches!(
+                entities.metadata_value(vehicle, crate::strider::DATA_SUFFOCATING),
+                Some(MetadataValue::Boolean(true))
+            );
+            crate::item_based_steering::ItemSteered::Strider(s)
+        })
     }
 
     /// The steered mount's attributes from the last `update_attributes` of `vehicle`
@@ -1863,16 +1877,19 @@ impl Session {
                         },
                     ));
                 }
-                if let Some(pig) = self.player.pig_mut() {
-                    if (m.pos - pig.pos).length() > VEHICLE_CORRECTION_EPSILON {
-                        pig.correct(m.pos, m.yaw);
+                // A pig or strider only while we hold its stick (otherwise it is not ours and
+                // vanilla does not answer).
+                if let Some(animal) = self.player.steered_by_item_mut() {
+                    if (m.pos - animal.pose().0).length() > VEHICLE_CORRECTION_EPSILON {
+                        animal.correct(m.pos, m.yaw);
                     }
+                    let (pos, yaw, pitch, on_ground) = animal.pose();
                     out.push(ServerboundPlay::MoveVehicle(
                         haste_protocol::packets::play::serverbound::MoveVehicle {
-                            pos: pig.pos,
-                            yaw: pig.yaw,
-                            pitch: pig.pitch,
-                            on_ground: pig.on_ground,
+                            pos,
+                            yaw,
+                            pitch,
+                            on_ground,
                         },
                     ));
                 }
@@ -1950,18 +1967,12 @@ impl Session {
                             }
                         }
                     }
-                    // The pig we steer: the boost's total (a use click on the carrot on a
-                    // stick made the server write it, vanilla `Pig.onSyncedDataUpdated` ->
-                    // `ItemBasedSteering.onSynced`).
+                    // The pig or strider we ride: the boost's total (a use click on its stick
+                    // made the server write it, vanilla `onSyncedDataUpdated` ->
+                    // `ItemBasedSteering.onSynced`) and the strider's suffocating flag.
                     if self.player.vehicle() == Some(id) {
-                        if let (Some(pig), Some(total)) = (
-                            self.player.pig_mut(),
-                            crate::pig::Pig::boost_total_of(&d.metadata),
-                        ) {
-                            if !pig.boosting() {
-                                tracing::debug!("pig boost started: {total} ticks");
-                            }
-                            pig.on_synced_boost(total);
+                        if let Some(animal) = self.player.item_steered_mut() {
+                            animal.on_metadata(&d.metadata);
                         }
                     }
                 }

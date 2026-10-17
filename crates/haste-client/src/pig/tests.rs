@@ -1,6 +1,7 @@
 //! Tests for the pig's ridden movement against vanilla's own formulas, on the flat stone
 //! platform of the evidence area.
 use super::*;
+use crate::item_based_steering::{boost_total_of, SteerEnv, DATA_BOOST_TIME};
 use crate::travel::{GROUND_ACCELERATION, HORIZONTAL_DRAG};
 use haste_core::entity::{MetadataEntry, MetadataValue};
 use haste_physics::testing::{states, TestShapes, TestWorld};
@@ -19,8 +20,8 @@ fn pig_at(pos: DVec3) -> Pig {
     )
 }
 
-fn env<'a>(world: &'a TestWorld, shapes: &'a TestShapes) -> PigEnv<'a> {
-    PigEnv {
+fn env<'a>(world: &'a TestWorld, shapes: &'a TestShapes) -> SteerEnv<'a> {
+    SteerEnv {
         world,
         shapes,
         blocks: shapes,
@@ -113,7 +114,7 @@ fn a_boosted_pig_speeds_up_and_back_down() {
     // The metadata update that carries the boost total starts it (ItemBasedSteering.onSynced).
     let total = 140;
     p.on_synced_boost(total);
-    assert!(p.boosting);
+    assert!(p.boosting());
     // The boost factor's series: 1 + 1.15 sin(boostTime / total * pi), the time counting from
     // the tick after the sync (tickBoost runs inside tickRidden, before the travel reads it).
     // The factor scales the acceleration the tick adds, not the speed the pig already has.
@@ -135,7 +136,7 @@ fn a_boosted_pig_speeds_up_and_back_down() {
         p.set_look((0.0, 0.0));
         p.tick(&e);
     }
-    assert!(!p.boosting, "the boost ended");
+    assert!(!p.boosting(), "the boost ended");
 }
 
 #[test]
@@ -144,14 +145,14 @@ fn the_boost_total_comes_from_the_metadata_update() {
         index: DATA_BOOST_TIME,
         value: MetadataValue::VarInt(317),
     }];
-    assert_eq!(Pig::boost_total_of(&boost), Some(317));
+    assert_eq!(boost_total_of(&boost), Some(317));
     // Other entries carry no boost.
     let other = [MetadataEntry {
         index: 19,
         value: MetadataValue::VarInt(1),
     }];
-    assert_eq!(Pig::boost_total_of(&other), None);
-    assert_eq!(Pig::boost_total_of(&[]), None);
+    assert_eq!(boost_total_of(&other), None);
+    assert_eq!(boost_total_of(&[]), None);
 }
 
 #[test]

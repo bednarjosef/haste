@@ -1138,7 +1138,7 @@ fn mounting_a_saddled_pig_starts_its_simulation_and_boost() {
     r.apply(ClientboundPlay::SetEntityData(cb::SetEntityData {
         entity_id: 5,
         metadata: vec![haste_core::entity::MetadataEntry {
-            index: crate::pig::DATA_BOOST_TIME,
+            index: crate::item_based_steering::DATA_BOOST_TIME,
             value: haste_core::entity::MetadataValue::VarInt(317),
         }],
     }));

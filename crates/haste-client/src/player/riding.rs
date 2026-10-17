@@ -2,6 +2,7 @@
 //! mounting and dismounting, the seat, and the ticks of the vehicles we steer, which vanilla
 //! runs before their passenger (`ClientLevel.tickNonPassenger`).
 use super::{command, LocalPlayer, TickCtx, VehiclePose};
+use crate::item_based_steering::{ItemSteered, SteerEnv};
 use glam::DVec3;
 use haste_core::input::InputState;
 use haste_core::EntityId;
@@ -12,7 +13,7 @@ use haste_protocol::ServerboundPlay;
 impl LocalPlayer {
     /// Mounts or dismounts (`set_passengers`): `seat` is where our feet sit on the vehicle each
     /// tick, in the vehicle's frame (the vehicle's passenger attachment point minus our own,
-    /// `haste_entity::passenger_seat`), and `boat`/`horse`/`pig` the vehicle's client-side
+    /// `haste_entity::passenger_seat`), and `boat`/`horse`/`item_steered` the vehicle's client-side
     /// simulation when it is a vehicle we steer (`None` for any other vehicle, and on a
     /// dismount). On a dismount, normal physics resumes from where the player is.
     pub fn set_vehicle(
@@ -21,14 +22,14 @@ impl LocalPlayer {
         seat: SeatPoint,
         boat: Option<crate::boat::Boat>,
         horse: Option<crate::horse::Horse>,
-        pig: Option<crate::pig::Pig>,
+        item_steered: Option<ItemSteered>,
     ) {
         if vehicle.is_some() {
             self.seat = seat;
         }
         self.vehicle = vehicle;
         self.boat = boat;
-        self.pig = pig;
+        self.item_steered = item_steered;
         let has_horse = horse.is_some();
         self.horse = horse;
         if !has_horse {
@@ -66,15 +67,44 @@ impl LocalPlayer {
         self.horse.as_mut()
     }
 
-    /// The pig we steer with a carrot on a stick, if any (for tests).
+    /// The pig we ride, if any (for tests).
     pub fn pig(&self) -> Option<&crate::pig::Pig> {
-        self.pig.as_ref()
+        match &self.item_steered {
+            Some(ItemSteered::Pig(p)) => Some(p),
+            _ => None,
+        }
     }
 
-    /// The pig we steer, for the packets that steer it (the server's corrections and the boost's
-    /// metadata sync).
-    pub fn pig_mut(&mut self) -> Option<&mut crate::pig::Pig> {
-        self.pig.as_mut()
+    /// The strider we ride, if any (for tests).
+    pub fn strider(&self) -> Option<&crate::strider::Strider> {
+        match &self.item_steered {
+            Some(ItemSteered::Strider(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The pig or strider we ride, for the packets about it (the boost's metadata sync).
+    pub fn item_steered_mut(&mut self) -> Option<&mut ItemSteered> {
+        self.item_steered.as_mut()
+    }
+
+    /// The pig or strider we ride while we control it: vanilla `getControllingPassenger` is the
+    /// rider only while it holds the animal's stick in either hand. Only then is our
+    /// simulation the truth (`isLocalInstanceAuthoritative`): it drives the seat, the
+    /// `move_vehicle` packets and the replies to the server's corrections.
+    pub fn steered_by_item(&self) -> Option<&ItemSteered> {
+        self.item_steered
+            .as_ref()
+            .filter(|a| self.holds_steer_stick(a.stick()))
+    }
+
+    /// [`Self::steered_by_item`], mutably.
+    pub fn steered_by_item_mut(&mut self) -> Option<&mut ItemSteered> {
+        let held = self
+            .item_steered
+            .as_ref()
+            .is_some_and(|a| self.holds_steer_stick(a.stick()));
+        self.item_steered.as_mut().filter(|_| held)
     }
 
     /// The mount's charged jump scale (vanilla `LocalPlayer.getJumpRidingScale`): what the HUD
@@ -114,11 +144,9 @@ impl LocalPlayer {
                 pos: horse.pos,
                 yaw: horse.yaw,
             })
-        } else if let Some(pig) = &self.pig {
-            Some(VehiclePose {
-                pos: pig.pos,
-                yaw: pig.yaw,
-            })
+        } else if let Some(animal) = self.steered_by_item() {
+            let (pos, yaw, _, _) = animal.pose();
+            Some(VehiclePose { pos, yaw })
         } else {
             vehicle
         };
@@ -212,24 +240,31 @@ impl LocalPlayer {
         horse.set_input(strafe, forward, look);
     }
 
-    /// The pig's own tick (vanilla runs the vehicle before its passenger). The pig walks full
-    /// forward on its own while the rider holds the carrot on a stick
-    /// (`Pig.getControllingPassenger`'s condition): without the stick our simulation stands
-    /// down and the pig keeps its server-driven position again. The look arrives one tick late,
-    /// like the horse's input.
-    pub(super) fn pig_tick(&mut self, look: (f32, f32), ctx: &TickCtx<'_>) {
-        let holding = self.holds_steer_stick();
-        let Some(pig) = &mut self.pig else {
+    /// The pig's or strider's own tick (vanilla runs the vehicle before its passenger). It
+    /// walks full forward on its own while the rider holds its stick (the
+    /// `getControllingPassenger` condition); without the stick it is not ours (vanilla
+    /// interpolates it from the server's moves), so our simulation follows the server's pose
+    /// and resumes from there. The look arrives one tick late, like the horse's input.
+    pub(super) fn item_steered_tick(
+        &mut self,
+        look: (f32, f32),
+        vehicle: Option<VehiclePose>,
+        ctx: &TickCtx<'_>,
+    ) {
+        let env = SteerEnv {
+            world: ctx.world,
+            shapes: ctx.shapes,
+            blocks: ctx.blocks,
+        };
+        let controlled = self.steered_by_item().is_some();
+        let Some(animal) = &mut self.item_steered else {
             return;
         };
-        if holding {
-            let env = crate::pig::PigEnv {
-                world: ctx.world,
-                shapes: ctx.shapes,
-                blocks: ctx.blocks,
-            };
-            pig.tick(&env);
+        if controlled {
+            animal.tick(&env);
+        } else if let Some(v) = vehicle {
+            animal.follow(v.pos, v.yaw);
         }
-        pig.set_look(look);
+        animal.set_look(look);
     }
 }

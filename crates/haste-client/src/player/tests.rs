@@ -1319,10 +1319,23 @@ fn on_the_pig() -> (LocalPlayer, TestWorld) {
         passenger: haste_entity::riding::PassengerKind::Player,
         passenger_type: "player",
     });
-    p.set_vehicle(Some(EntityId(9)), seat, None, None, Some(pig));
+    p.set_vehicle(
+        Some(EntityId(9)),
+        seat,
+        None,
+        None,
+        Some(crate::item_based_steering::ItemSteered::Pig(pig)),
+    );
     // The carrot on a stick in the main hand, and the steer-item set that names it.
     let stick = haste_core::RegistryIndex(42);
-    p.int.steer_items = Some([stick].into_iter().collect());
+    p.int.steer_items = Some(
+        [(
+            stick,
+            crate::item_based_steering::SteerStick::CarrotOnAStick,
+        )]
+        .into_iter()
+        .collect(),
+    );
     p.int.hotbar[0] = haste_core::entity::ItemStackData {
         count: 1,
         item: Some(stick),
@@ -1511,4 +1524,31 @@ fn landing_ends_the_glide_and_the_pose() {
         "vanilla `LivingEntity.travelFallFlying`"
     );
     assert_ne!(p.state.pose, haste_physics::Pose::FallFlying);
+}
+
+/// Each animal answers to its own stick (`Pig.getControllingPassenger` names the carrot on a
+/// stick, `Strider`'s the warped fungus on a stick): a pig ridden with a warped fungus on a
+/// stick is not ours, so it follows the server and no `move_vehicle` goes out.
+#[test]
+fn a_pig_ignores_the_warped_fungus_on_a_stick() {
+    let (mut p, world) = on_the_pig();
+    let stick = p.int.hotbar[0].item.expect("the stick");
+    p.int.steer_items = Some(
+        [(
+            stick,
+            crate::item_based_steering::SteerStick::WarpedFungusOnAStick,
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let hold = InputState::default();
+    for _ in 0..3 {
+        let out = tick_riding_world(&mut p, &hold, &world);
+        assert!(
+            !out.iter()
+                .any(|o| matches!(o, ServerboundPlay::MoveVehicle(_))),
+            "not ours: {:?}",
+            names(&out)
+        );
+    }
 }
