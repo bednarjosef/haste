@@ -156,14 +156,135 @@ const FOLIAGE: usize = 1;
 const DRY_FOLIAGE: usize = 2;
 const WATER: usize = 3;
 
-/// Per-biome resolved colours plus the blend radius.
+/// Vanilla's swamp grass modifier's position noise (`Biome.BIOME_INFO_NOISE`:
+/// `SimplexNoise(new WorldgenRandom(new LegacyRandomSource(2345)), true)`).
+/// The seed is fixed, so the noise is a pure function of the position —
+/// precomputed once per `BiomeColors`.
+#[derive(Clone)]
+struct SwampNoise {
+    perms: [u8; 256],
+}
+
+/// The 12 gradients vanilla's 2D simplex path indexes (`% 12`, the first 12
+/// of GradientNoise.GRADIENT).
+const SWAMP_GRADIENTS: [[f64; 3]; 12] = [
+    [1.0, 1.0, 0.0],
+    [-1.0, 1.0, 0.0],
+    [1.0, -1.0, 0.0],
+    [-1.0, -1.0, 0.0],
+    [1.0, 0.0, 1.0],
+    [-1.0, 0.0, 1.0],
+    [1.0, 0.0, -1.0],
+    [-1.0, 0.0, -1.0],
+    [0.0, 1.0, 1.0],
+    [0.0, -1.0, 1.0],
+    [0.0, 1.0, -1.0],
+    [0.0, -1.0, -1.0],
+];
+
+/// Simplex skew factors (SimplexNoise.F2/G2).
+const F2: f64 = 0.3660254037844386;
+const G2: f64 = 0.21132486540518713;
+
+impl SwampNoise {
+    /// The permutation shuffle from `GradientNoise`'s constructor: a Java
+    /// `LegacyRandomSource(2345)` (the 48-bit Java LCG), three `nextDouble`
+    /// draws for the (discarded, zero-scaled) offsets, then the 256-step
+    /// Fisher-Yates shuffle with `nextInt(256 - i)`.
+    fn new() -> SwampNoise {
+        // JavaRandom(2345): seed ^= 0x5DEECE66D, 48-bit LCG.
+        let mut seed: u64 = 2345 ^ 0x5DEECE66D;
+        let mut next = |bits: u32| {
+            seed = seed.wrapping_mul(0x5DEECE66D).wrapping_add(11) & ((1u64 << 48) - 1);
+            (seed >> (48 - bits)) as i32
+        };
+        // Java Random.nextInt(bound): power-of-two fast path, else rejection.
+        let next_int = |next: &mut dyn FnMut(u32) -> i32, bound: i32| {
+            if bound.isolate_lowest_one() == bound {
+                return (((bound as i64) * (next(31) as i64)) >> 31) as i32;
+            }
+            loop {
+                let bits = next(31);
+                let val = bits % bound;
+                if bits - val + (bound - 1) >= 0 {
+                    break val;
+                }
+            }
+        };
+        // The three offset draws (each nextDouble = next(26) then next(27)).
+        let _ = next(26);
+        let _ = next(27);
+        let _ = next(26);
+        let _ = next(27);
+        let _ = next(26);
+        let _ = next(27);
+        let mut perms: [u8; 256] = core::array::from_fn(|i| i as u8);
+        for i in 0..256 {
+            let offset = next_int(&mut next, 256 - i as i32) as usize;
+            perms.swap(i, offset + i);
+        }
+        SwampNoise { perms }
+    }
+
+    fn permute(&self, x: i32) -> i32 {
+        i32::from(self.perms[(x & 0xFF) as usize])
+    }
+
+    /// Vanilla `SimplexNoise.get(x, y)` (the 2D overload).
+    fn get(&self, xin: f64, yin: f64) -> f64 {
+        // discardNoiseOffset = true: the offsets are 0.
+        let s = (xin + yin) * F2;
+        let i = (xin + s).floor() as i64;
+        let j = (yin + s).floor() as i64;
+        let t = (i + j) as f64 * G2;
+        let x0 = xin - (i as f64 - t);
+        let y0 = yin - (j as f64 - t);
+        let (i1, j1) = if x0 > y0 { (1, 0) } else { (0, 1) };
+        let x1 = x0 - i1 as f64 + G2;
+        let y1 = y0 - j1 as f64 + G2;
+        let x2 = x0 - 1.0 + 2.0 * G2;
+        let y2 = y0 - 1.0 + 2.0 * G2;
+        let ii = (i & 0xFF) as i32;
+        let jj = (j & 0xFF) as i32;
+        let corner = |gi: i32, x: f64, y: f64, base: f64| {
+            let g = SWAMP_GRADIENTS[(gi % 12) as usize];
+            let t0 = base - x * x - y * y;
+            if t0 < 0.0 {
+                0.0
+            } else {
+                let t0 = t0 * t0;
+                t0 * t0 * (g[0] * x + g[1] * y)
+            }
+        };
+        let gi0 = self.permute(ii + self.permute(jj)) % 12;
+        let gi1 = self.permute(ii + i1 + self.permute(jj + j1)) % 12;
+        let gi2 = self.permute(ii + 1 + self.permute(jj + 1)) % 12;
+        70.0 * (corner(gi0, x0, y0, 0.5) + corner(gi1, x1, y1, 0.5) + corner(gi2, x2, y2, 0.5))
+    }
+
+    /// Vanilla `GrassColorModifier.SWAMP`: `BIOME_INFO_NOISE.get(x * 0.0225,
+    /// z * 0.0225) < -0.1 ? 0x4CBE1C : 0x6A7039`.
+    fn grass_color(&self, x: i32, z: i32) -> u32 {
+        let ground = self.get(f64::from(x) * 0.0225, f64::from(z) * 0.0225);
+        if ground < -0.1 {
+            0x4CBE1C
+        } else {
+            0x6A7039
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct BiomeColors {
-    /// [grass, foliage, dry_foliage, water] per biome registry id.
+    /// [grass, foliage, dry_foliage, water] per biome registry id; grass is
+    /// `u32::MAX` for the swamp modifier (its colour comes from the position
+    /// noise at use).
     per_biome: Vec<[u32; 4]>,
     /// Colours for ids past the end of the table (plains).
     fallback: [u32; 4],
     radius: i32,
+    /// The swamp modifier's position noise (vanilla `Biome.BIOME_INFO_NOISE`).
+    swamp_noise: SwampNoise,
 }
 
 fn resolve(climate: &BiomeClimate, maps: &Colormaps) -> [u32; 4] {
@@ -174,8 +295,9 @@ fn resolve(climate: &BiomeClimate, maps: &Colormaps) -> [u32; 4] {
     let grass = match climate.grass_modifier {
         GrassModifier::None => base_grass,
         GrassModifier::DarkForest => ((base_grass & 0xFEFEFE) + 0x28340A) >> 1,
-        // APPROXIMATE: vanilla alternates with 0x4C763C by a position noise.
-        GrassModifier::Swamp => 0x6A7039,
+        // The colour comes from the per-position noise (`SwampNoise`); the
+        // marker keeps `blended` from averaging a flat value.
+        GrassModifier::Swamp => u32::MAX,
     };
     [
         grass,
@@ -197,6 +319,7 @@ impl BiomeColors {
             per_biome: biomes.iter().map(|c| resolve(c, maps)).collect(),
             fallback: resolve(&BiomeClimate::plains(), maps),
             radius: DEFAULT_BLEND_RADIUS,
+            swamp_noise: SwampNoise::new(),
         }
     }
 
@@ -210,15 +333,22 @@ impl BiomeColors {
         self.radius
     }
 
-    /// Unblended colour of `kind` in `biome` (0xRRGGBB).
-    pub fn color(&self, biome: BiomeId, kind: TintKind) -> u32 {
+    /// Unblended colour of `kind` in `biome` at `(x, z)` (the swamp modifier
+    /// is per-position; 0xRRGGBB).
+    pub fn color_at(&self, biome: BiomeId, kind: TintKind, x: i32, z: i32) -> u32 {
         let c = self
             .per_biome
             .get(biome.0 as usize)
             .unwrap_or(&self.fallback);
         match kind {
             TintKind::None => 0xFFFFFF,
-            TintKind::Grass => c[GRASS],
+            TintKind::Grass => {
+                if c[GRASS] == u32::MAX {
+                    self.swamp_noise.grass_color(x, z)
+                } else {
+                    c[GRASS]
+                }
+            }
             TintKind::Foliage => c[FOLIAGE],
             TintKind::DryFoliage => c[DRY_FOLIAGE],
             TintKind::Water => c[WATER],
@@ -227,7 +357,9 @@ impl BiomeColors {
     }
 
     /// Blended colour of `kind` at block `(x, z)` (any frame): the integer per-channel average
-    /// of the colour over the `(2r+1)^2` square, `biome_at(x, z)` giving each block's biome.
+    /// of the colour over the `(2r+1)^2` square, `biome_at(x, z)` giving each block's biome
+    /// (each sample resolving its biome's colour at its own position, like vanilla's
+    /// `ColorResolver`).
     pub fn blended(
         &self,
         kind: TintKind,
@@ -244,7 +376,8 @@ impl BiomeColors {
         let (mut sr, mut sg, mut sb, mut n) = (0u32, 0u32, 0u32, 0u32);
         for dz in -r..=r {
             for dx in -r..=r {
-                let c = self.color(biome_at(x + dx, z + dz), kind);
+                let (sx, sz) = (x + dx, z + dz);
+                let c = self.color_at(biome_at(sx, sz), kind, sx, sz);
                 sr += (c >> 16) & 0xFF;
                 sg += (c >> 8) & 0xFF;
                 sb += c & 0xFF;
@@ -533,21 +666,36 @@ mod tests {
         dark.grass_modifier = GrassModifier::DarkForest;
         let colors = BiomeColors::new(&[BiomeClimate::plains(), swamp, dark], &maps);
         assert_eq!(
-            colors.color(BiomeId(0), TintKind::Grass),
+            colors.color_at(BiomeId(0), TintKind::Grass, 0, 0),
             (50 << 16) | (173 << 8)
         );
-        assert_eq!(colors.color(BiomeId(0), TintKind::Foliage), 0x123456);
-        assert_eq!(colors.color(BiomeId(1), TintKind::Foliage), 0x6A7039);
-        assert_eq!(colors.color(BiomeId(1), TintKind::Water), 0x617B64);
-        assert_eq!(colors.color(BiomeId(1), TintKind::Grass), 0x6A7039);
         assert_eq!(
-            colors.color(BiomeId(2), TintKind::Grass),
+            colors.color_at(BiomeId(0), TintKind::Foliage, 0, 0),
+            0x123456
+        );
+        assert_eq!(
+            colors.color_at(BiomeId(1), TintKind::Foliage, 0, 0),
+            0x6A7039
+        );
+        assert_eq!(colors.color_at(BiomeId(1), TintKind::Water, 0, 0), 0x617B64);
+        // The swamp grass colour is the position noise's output (one of the two
+        // vanilla values).
+        let swamp_grass = colors.color_at(BiomeId(1), TintKind::Grass, 0, 0);
+        assert!(
+            swamp_grass == 0x4CBE1C || swamp_grass == 0x6A7039,
+            "{swamp_grass:#x}"
+        );
+        assert_eq!(
+            colors.color_at(BiomeId(2), TintKind::Grass, 0, 0),
             ((0x507A32 & 0xFEFEFE) + 0x28340A) >> 1
         );
         // Ids past the table fall back to plains; fixed colours ignore the biome.
-        assert_eq!(colors.color(BiomeId(99), TintKind::Water), 0x3F76E4);
         assert_eq!(
-            colors.color(BiomeId(1), TintKind::Fixed(0x80A755)),
+            colors.color_at(BiomeId(99), TintKind::Water, 0, 0),
+            0x3F76E4
+        );
+        assert_eq!(
+            colors.color_at(BiomeId(1), TintKind::Fixed(0x80A755), 0, 0),
             0x80A755
         );
     }
@@ -590,6 +738,51 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The swamp noise's Java LCG, hand-derived from vanilla's
+    /// `LegacyRandomSource(2345)`: setSeed xors the multiplier into the seed,
+    /// `next` advances `seed = (seed * 0x5DEECE66D + 11) & (2^48 - 1)` and
+    /// returns the top bits. The first draws are snapshots of this formula;
+    /// if the arithmetic changes, they change.
+    #[test]
+    fn swamp_noise_lcg_matches_java() {
+        let mut seed: u64 = 2345 ^ 0x5DEECE66D;
+        assert_eq!(seed, 25_214_906_180);
+        let next = |seed: &mut u64, bits: u32| {
+            *seed = (*seed).wrapping_mul(0x5DEECE66D).wrapping_add(11) & ((1u64 << 48) - 1);
+            (*seed >> (48 - bits)) as i32
+        };
+        // First draws (the three nextDouble = next(26), next(27) pairs).
+        assert_eq!(next(&mut seed, 26), 62_658_898);
+        assert_eq!(next(&mut seed, 27), 1_547_889);
+    }
+
+    /// The swamp grass colours across a coarse grid: both vanilla values
+    /// appear, and the pattern is a pure function of (x, z). The exact
+    /// positions' values pin the port (SimplexNoise's 2D path with the
+    /// 2345-seeded permutation): if the port changes, these flip.
+    #[test]
+    fn swamp_grass_noise_both_colours_across_a_grid() {
+        let noise = SwampNoise::new();
+        let mut counts = [0usize; 2];
+        for z in -64..64 {
+            for x in -64..64 {
+                let c = noise.grass_color(x, z);
+                assert!(c == 0x4CBE1C || c == 0x6A7039, "{c:#x} at {x},{z}");
+                counts[usize::from(c == 0x4CBE1C)] += 1;
+            }
+        }
+        // Vanilla's swamp is mostly the darker 0x4CBE1C with 0x6A7039 patches
+        // (the noise's lower half); both must occur over a 128x128 sample.
+        assert!(counts[0] > 0 && counts[1] > 0, "both colours: {counts:?}");
+        assert!(
+            counts[0] > counts[1],
+            "mostly the below-threshold colour: {counts:?}"
+        );
+        // Deterministic positions (snapshots of the port).
+        assert_eq!(noise.grass_color(0, 0), 0x6A7039);
+        assert_eq!(noise.grass_color(256, -256), noise.grass_color(256, -256));
     }
 
     #[test]

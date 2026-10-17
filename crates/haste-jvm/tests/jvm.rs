@@ -65,6 +65,7 @@ fn reset(gui: &haste_jvm::GuiPipeline) {
         s.game_time = 0;
         s.day_time = 0;
         s.disconnect_requested = false;
+        s.in_world = false;
     });
 }
 
@@ -450,6 +451,9 @@ fn pause_screen() {
     let gui = h.gui();
     h.clear_unimplemented().unwrap();
     reset(gui);
+    // the pause menu only exists in a world: closing it (`Gui.setScreen(null)`) must land on
+    // no screen, not the no-level title-screen fallback
+    gui.with_state(|s| s.in_world = true);
     open(&h, haste_jvm::ScreenKind::Pause);
     assert!(gui.is_open());
     assert_eq!(
@@ -1221,7 +1225,12 @@ fn inventory_screen() {
         .unwrap(); // hotbar slot 0
     gui.set_inventory_slot(9, &stack("minecraft:oak_planks", 3))
         .unwrap(); // first main slot
-    gui.with_state(|s| s.outgoing.clear());
+                   // an inventory only exists in a world: closing it with E (`Gui.setScreen(null)`) must land
+                   // on no screen, not the no-level title-screen fallback
+    gui.with_state(|s| {
+        s.in_world = true;
+        s.outgoing.clear();
+    });
     // Rust's mirror follows Java's inventory
     assert_eq!(
         gui.with_state(|s| s.slot(0).cloned()),
@@ -1231,16 +1240,17 @@ fn inventory_screen() {
     let f = render(&h, (0.0, 0.0));
     dump(&f);
     assert!(f.commands.iter().any(|c| matches!(c, GuiCommand::Texture { texture, .. } if texture.path() == "textures/gui/container/inventory.png")));
-    // the container is centred (176 px wide in a 320 px GUI) and slots are drawn relative to it
+    // the container is centred (176 px wide in a 320 px GUI) and slots are drawn relative to it;
+    // the HUD's own translates come first (a world is joined), so the container's push is the
+    // x=72 one, not the first
     let origin = f
         .commands
         .iter()
         .find_map(|c| match c {
-            GuiCommand::TranslatePush { dx, dy, .. } => Some((*dx, *dy)),
+            GuiCommand::TranslatePush { dx, dy, .. } if *dx == 72.0 => Some((*dx, *dy)),
             _ => None,
         })
-        .unwrap();
-    assert_eq!(origin.0, 72.0);
+        .expect("the container is centred at x=72");
     let items: Vec<_> = f
         .commands
         .iter()
@@ -1250,9 +1260,14 @@ fn inventory_screen() {
         })
         .collect();
     let (stone, planks) = (item_id("minecraft:stone"), item_id("minecraft:oak_planks"));
+    // the HUD is drawn too (a world is joined): the hotbar's slot 0 holds the stone
     assert_eq!(
         items,
-        vec![(planks, 8, 84, 3), (stone, 8, 142, 64)],
+        vec![
+            (stone, 72, 221, 64),
+            (planks, 8, 84, 3),
+            (stone, 8, 142, 64)
+        ],
         "items from the inventory as GuiCommand::Item"
     );
     let t = texts(&f);
@@ -1586,6 +1601,15 @@ fn open_sign_editor(pos: haste_core::BlockPos) -> Vec<u8> {
     b
 }
 
+/// The first state id of a block, from the data generator's `blocks.json` (vanilla's global
+/// `Block.BLOCK_STATE_REGISTRY` numbering, which the client records for the entity screens).
+fn block_state_id(block: &str) -> i32 {
+    let reports = cache().join("datagen/26.3/reports/blocks.json");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(reports).unwrap()).unwrap();
+    v[block]["states"][0]["id"].as_i64().unwrap() as i32
+}
+
 fn sprite_at(f: &haste_core::gui::GuiFrame, name: &str) -> Vec<(i32, i32, i32, i32)> {
     sprites(f)
         .into_iter()
@@ -1847,6 +1871,8 @@ fn options_screens_open_and_close() {
     let gui = h.gui();
     reset(gui);
     h.clear_unimplemented().unwrap();
+    // the pause menu the options screens open from only exists in a world
+    gui.with_state(|s| s.in_world = true);
     open(&h, haste_jvm::ScreenKind::Pause);
     // the script client renders at 480x270 (960x540 at gui scale 2); a first frame also
     // re-lays the pause menu out for that size before the clicks
@@ -1937,6 +1963,8 @@ fn pause_screens_open_and_close() {
     let gui = h.gui();
     reset(gui);
     h.clear_unimplemented().unwrap();
+    // the pause menu only exists in a world (its final Escape closes to no screen)
+    gui.with_state(|s| s.in_world = true);
     open(&h, haste_jvm::ScreenKind::Pause);
     // every frame at the script client's size: a render at another size re-lays the widgets out
     let frame = |mouse: (f64, f64)| -> haste_core::gui::GuiFrame {
@@ -2158,7 +2186,13 @@ fn pack_selection_screen_lists_folder_packs() {
         assert!(!entry_selected(&f), "the unselect click should move it out");
         let (x, y) = text_pos(&f, "Done").expect("the Done button renders");
         click(gui, x as f64, y as f64);
-        assert!(!gui.is_open(), "Done should close the screen");
+        // Done closes to the null parent, and outside a world that is the title screen
+        // (vanilla Gui.setScreen's no-level fallback)
+        assert_eq!(
+            gui.screen_class().as_deref(),
+            Some("net.minecraft.client.gui.screens.TitleScreen"),
+            "Done should close the screen to the title screen"
+        );
         assert_eq!(
             gui.take_resource_pack_ids(),
             Some(vec!["vanilla".to_string()]),
@@ -2387,6 +2421,195 @@ fn book_editor_screen() {
     assert!(
         unimpl.is_empty(),
         "Unimplemented log for the book editor: {unimpl:#?}"
+    );
+    gui.with_state(|s| s.in_world = false);
+}
+
+/// `minecraft:data_component_type` registry id, from the data generator's report.
+fn data_component_id(name: &str) -> i32 {
+    let reports = cache().join("datagen/26.3/reports/registries.json");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(reports).unwrap()).unwrap();
+    v["minecraft:data_component_type"]["entries"][name]["protocol_id"]
+        .as_i64()
+        .unwrap() as i32
+}
+
+/// A stack of `item` with a `written_book_content` component holding one page of plain text
+/// (the component patch in vanilla's network encoding, the layout `slot.rs` documents:
+/// `written_book_content` = title, locked title, author, generation, pages, resolved).
+fn written_book(
+    item: &str,
+    title: &str,
+    author: &str,
+    page: &str,
+) -> haste_core::entity::ItemStackData {
+    let mut patch = Vec::new();
+    let var_int = |v: u32, out: &mut Vec<u8>| {
+        let mut v = v;
+        loop {
+            if v & !0x7f == 0 {
+                out.push(v as u8);
+                return;
+            }
+            out.push((v as u8 & 0x7f) | 0x80);
+            v >>= 7;
+        }
+    };
+    var_int(1, &mut patch); // one added component
+    var_int(0, &mut patch); // none removed
+    var_int(
+        data_component_id("minecraft:written_book_content") as u32,
+        &mut patch,
+    );
+    let string = |s: &str, out: &mut Vec<u8>| {
+        var_int(s.len() as u32, out);
+        out.extend_from_slice(s.as_bytes());
+    };
+    string(title, &mut patch);
+    patch.push(0); // no locked title
+    string(author, &mut patch);
+    var_int(0, &mut patch); // generation ORIGINAL
+    var_int(1, &mut patch); // one page
+                            // the page as a text component in network NBT: a bare TAG_String (no name at the root,
+                            // `NbtIo.readAnyTag`), whose payload (unlike the codec's strings) is u16-length-prefixed
+    patch.push(8);
+    patch.extend_from_slice(&(page.len() as u16).to_be_bytes());
+    patch.extend_from_slice(page.as_bytes());
+    patch.push(0); // no filtered page
+    patch.push(1); // resolved
+    haste_core::entity::ItemStackData {
+        count: 1,
+        item: Some(haste_core::RegistryIndex(item_id(item))),
+        components_raw: bytes::Bytes::from(patch),
+    }
+}
+
+/// A held written book opens for reading (`ClientboundOpenBookPacket` -> `handleOpenBook` ->
+/// `BookViewScreen.BookAccess.fromItem`), with the pages from its `written_book_content`.
+/// Mirrors the written-book half of scripts/checks/read-book.txt without a server.
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM, data generator reports)"]
+fn book_view_screen() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    reset(gui);
+    h.clear_unimplemented().unwrap();
+    gui.with_state(|s| {
+        s.in_world = true;
+        s.selected_slot = 0;
+    });
+    // a written book in hand (the server sends open_book when it is used)
+    gui.set_inventory_slot(
+        0,
+        &written_book("minecraft:written_book", "MyBook", "Author", "Hello page"),
+    )
+    .unwrap();
+    let mut b = vec![packet_id("minecraft:open_book")];
+    b.push(0); // main hand (VarInt)
+    gui.packet(&b).unwrap();
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.inventory.BookViewScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    // the page text and the page indicator are drawn
+    let t = texts(&render(&h, (0.0, 0.0)));
+    assert!(t.contains(&"Hello page".to_string()), "page: {t:?}");
+    assert!(
+        t.contains(&"Page 1 of 1".to_string()),
+        "page indicator: {t:?}"
+    );
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for the book view: {unimpl:#?}"
+    );
+    gui.with_state(|s| s.in_world = false);
+}
+
+/// The hanging-sign editor: the sign's block entity is built from the real block state at its
+/// position (`Native.blockState` -> `BlockEntities.stateFor`), so a hanging sign opens vanilla's
+/// `HangingSignEditScreen` where the type's default state would open the standing-sign editor.
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM, data generator reports)"]
+fn hanging_sign_editor_screen() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    reset(gui);
+    h.clear_unimplemented().unwrap();
+    gui.with_state(|s| {
+        s.in_world = true;
+        s.vitals.health = 20.0;
+    });
+    // the world has an oak hanging sign at the position (its block state recorded, like the
+    // client does when it forwards open_sign_editor)
+    let pos = haste_core::BlockPos::new(1, 65, 2);
+    gui.set_block_state(pos, block_state_id("minecraft:oak_hanging_sign"));
+    gui.packet(&open_sign_editor(pos)).unwrap();
+    assert_eq!(
+        gui.screen_class().as_deref(),
+        Some("net.minecraft.client.gui.screens.inventory.HangingSignEditScreen"),
+        "{:?}",
+        gui.take_last_error()
+    );
+    // the hanging-sign art is drawn (its editor texture, not the standing sign's)
+    let f = render(&h, (0.0, 0.0));
+    let textures: Vec<String> = f
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            haste_core::gui::GuiCommand::Texture { texture, .. } => Some(texture.to_string()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        textures.iter().any(|t| t.contains("hanging_signs/oak")),
+        "hanging sign texture: {textures:?}"
+    );
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for the hanging sign editor: {unimpl:#?}"
+    );
+    gui.with_state(|s| s.in_world = false);
+}
+
+/// A chunk forgotten drops its block entities from the Java-side store (vanilla
+/// `handleForgetLevelChunk` unloads the chunk's entities with it), so the store does not grow
+/// without bound over a session of moving around.
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM, data generator reports)"]
+fn chunk_unload_drops_block_entities() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    reset(gui);
+    h.clear_unimplemented().unwrap();
+    gui.with_state(|s| s.in_world = true);
+    let sign = haste_core::BlockPos::new(160, 70, 5);
+    let other_chunk = haste_core::BlockPos::new(0, 70, 0);
+    // entities in the sign's chunk (x 160..175) and in another chunk
+    gui.packet(&block_entity_data(sign, block_entity_id("minecraft:sign")))
+        .unwrap();
+    gui.packet(&block_entity_data(
+        other_chunk,
+        block_entity_id("minecraft:sign"),
+    ))
+    .unwrap();
+    assert_eq!(gui.block_entity_count(), 2, "both entities stored");
+    // forgetting the sign's chunk (packed long: z high, x low) drops its entity only
+    let chunk = sign.chunk();
+    let mut b = vec![packet_id("minecraft:forget_level_chunk")];
+    b.extend_from_slice(&chunk.to_packed().to_be_bytes());
+    gui.packet(&b).unwrap();
+    assert_eq!(
+        gui.block_entity_count(),
+        1,
+        "the forgotten chunk's entity is gone, the other chunk's stays"
     );
     gui.with_state(|s| s.in_world = false);
 }

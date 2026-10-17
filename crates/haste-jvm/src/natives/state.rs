@@ -26,6 +26,25 @@ pub(crate) extern "system" fn permission_level<'l>(_env: EnvUnowned<'l>, _c: JCl
     with_state(|s| jint::from(s.permission_level))
 }
 
+/// The global block state id the client's world has at a position (-1 unknown): the block
+/// entities the screens edit are built from it, like vanilla's chunks build them from the
+/// block state (`LevelChunk.setBlockState` -> `EntityBlock.newBlockEntity(pos, state)`).
+/// The client records the states of the positions whose entity packets it forwards (see
+/// `GameState::block_states`).
+pub(crate) extern "system" fn block_state<'l>(
+    _env: EnvUnowned<'l>,
+    _c: JClass<'l>,
+    x: jint,
+    y: jint,
+    z: jint,
+) -> jint {
+    with_state(|s| {
+        s.block_states
+            .get(&[x, y, z])
+            .map_or(-1, |id| jint::from(*id))
+    })
+}
+
 pub(crate) extern "system" fn game_mode<'l>(_env: EnvUnowned<'l>, _c: JClass<'l>) -> jint {
     with_state(|s| s.game_mode as jint)
 }

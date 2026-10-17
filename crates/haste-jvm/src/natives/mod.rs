@@ -49,6 +49,11 @@ pub(crate) fn register(env: &mut Env) -> Result<()> {
                 state::permission_level as *mut _,
             ),
             NativeMethod::from_raw_parts(
+                jni_str!("blockState"),
+                jni_str!("(III)I"),
+                state::block_state as *mut _,
+            ),
+            NativeMethod::from_raw_parts(
                 jni_str!("playerName"),
                 jni_str!("()Ljava/lang/String;"),
                 state::player_name as *mut _,

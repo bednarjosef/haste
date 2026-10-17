@@ -825,6 +825,71 @@ book() {
   check book "used a writable book, typed, signed it into a written book" "$r"
 }
 
+# ---- 16. Books read: a written book in hand (open_book -> BookViewScreen) and on a lectern
+# (open_screen + container_set_content -> LecternScreen). The script is self-contained (the
+# check player is an operator: creative, its own area, a signed book, a lectern with the book
+# on it); the runner ops the player and greps the frame text dumps of both screens (the page
+# text) plus the lectern's Book data and the held written book over RCON. The screen classes
+# are covered by the JVM test book_view_screen (BookViewScreen) and the "Take Book" button
+# (only LecternScreen draws it).
+read_book() {
+  local log="$LOGDIR/read-book.log"
+  client_start "$ROOT/scripts/checks/read-book.txt" "$log"
+  wait_online || { check read-book "player never joined" 1; return; }
+  rcon "op $NAME" >/dev/null
+  # the lectern's data is only readable while the player (its position anchor) is online
+  local lectern=""
+  if wait_shot "$log" lectern-view 90; then
+    lectern=$(rcon "execute at $NAME run data get block ~1 ~ ~ Book")
+  fi
+  wait_exit
+  echo "--- read book evidence ---"
+  local book_view lectern_view
+  book_view=$(grep -E "script text\[book-view\]" "$log")
+  lectern_view=$(grep -E "script text\[lectern-view\]" "$log")
+  echo "book-view frame: $book_view"
+  echo "lectern-view frame: $lectern_view"
+  echo "lectern Book: ${lectern:-<not read>}"
+  local r=0
+  has "$book_view" "Lectern page text" || { echo "BookViewScreen shows no page text"; r=1; }
+  has "$book_view" "Page 1 of 1" || { echo "BookViewScreen shows no page indicator"; r=1; }
+  has "$lectern_view" "Lectern page text" || { echo "LecternScreen shows no page text"; r=1; }
+  has "$lectern_view" "Take Book" || { echo "LecternScreen shows no Take Book button"; r=1; }
+  has "$lectern" "MyReadBook" || { echo "the lectern holds no written book titled MyReadBook"; r=1; }
+  grep -E "haste proxy:|Java exception" "$log" && r=1
+  check read-book "read a written book in hand and on a lectern (open_book, lectern screen)" "$r"
+}
+
+# ---- 17. Hanging signs: a wall hanging sign opens the hanging-sign editor, type, Done ----
+# The script is self-contained (the check player is an operator: creative, its own area with a
+# pillar and an oak wall hanging sign on its side, the use opens the editor); the runner ops
+# the player and reads the evidence relative to the player's position. The client builds the
+# sign's entity from the real block state, so the hanging-sign editor (with the hanging-sign
+# art, not the standing sign's) opens; the JVM test hanging_sign_editor_screen checks the
+# screen class and texture, the screenshots here are the visual end-to-end evidence.
+hanging_sign() {
+  local log="$LOGDIR/hanging-sign.log"
+  client_start "$ROOT/scripts/checks/edit-hanging-sign.txt" "$log"
+  wait_online || { check hanging-sign "player never joined" 1; return; }
+  rcon "op $NAME" >/dev/null
+  # the sign's data is only readable while the player (its position anchor) is online
+  local out=""
+  if wait_shot "$log" hanging-sign-done 90; then
+    out=$(rcon "execute at $NAME run data get block ~1 ~2 ~ front_text")
+  fi
+  wait_exit
+  echo "--- hanging sign evidence ---"
+  echo "front_text: ${out:-<not read>}"
+  local r=0
+  has "$out" "HangOne" || { echo "missing line one"; r=1; }
+  has "$out" "HangTwo" || { echo "missing line two"; r=1; }
+  grep -E "haste proxy:|Java exception" "$log" && r=1
+  ls "$ROOT/target/shots/script-hanging-sign-editor.png" >/dev/null 2>&1 \
+    || { echo "no editor screenshot"; r=1; }
+  echo "screenshots: $ROOT/target/shots/script-hanging-sign-editor.png (hanging-sign art)"
+  check hanging-sign "used a wall hanging sign, typed two lines, the hanging-sign editor opened" "$r"
+}
+
 # ---- 14. Command blocks: ops, place, use, type a command, Done ----
 # The script is self-contained (the check player is an operator: creative mode, its own command
 # block ahead of the camera, the use opens the editor); the runner ops the player and reads the
@@ -890,13 +955,13 @@ sprint() {
   check sprint "double-tapping W made the player cover ${dist} blocks/s (sprint speed)" "$r"
 }
 
-ALL=(hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock sprint containers-crafting-table containers-furnace containers-anvil containers-enchanting-table containers-brewing-stand containers-villager-trading)
+ALL=(hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book read-book hanging-sign commandblock sprint containers-crafting-table containers-furnace containers-anvil containers-enchanting-table containers-brewing-stand containers-villager-trading)
 if [ $# -eq 0 ]; then
   set -- "${ALL[@]}"
 fi
 for f in "$@"; do
   case "$f" in
-    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | particles | recipe-book | sign | book | commandblock | sprint | containers-crafting-table | containers-furnace | containers-anvil | containers-enchanting-table | containers-brewing-stand | containers-villager-trading) fn="${f//-/_}"; if declare -F "$fn" >/dev/null; then "$fn"; else check "$f" "no check function $fn" 1; fi ;;
+    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | particles | recipe-book | sign | book | read-book | hanging-sign | commandblock | sprint | containers-crafting-table | containers-furnace | containers-anvil | containers-enchanting-table | containers-brewing-stand | containers-villager-trading) fn="${f//-/_}"; if declare -F "$fn" >/dev/null; then "$fn"; else check "$f" "no check function $fn" 1; fi ;;
     *) echo "unknown feature: $f" ;;
   esac
 done

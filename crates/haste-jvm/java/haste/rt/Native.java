@@ -22,6 +22,12 @@ public final class Native {
     public static native int gameMode();
     /** The local player's operator permission level (0-4, from the server's entity events). */
     public static native int permissionLevel();
+    /**
+     * The global block state id ({@code Block.BLOCK_STATE_REGISTRY}) the client's world has at a
+     * position (-1 when the position has no chunk), for building the real state of a block entity
+     * the screens edit (vanilla's chunks know it; Haste's Rust world does).
+     */
+    public static native int blockState(int x, int y, int z);
     /** The local player's name. */
     public static native String playerName();
 

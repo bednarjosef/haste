@@ -1089,8 +1089,9 @@ fn tick_once(
                     backlog.len()
                 );
                 if let Some(ui) = shared.ui.lock().as_ref() {
+                    let world = shared.world.read();
                     for p in backlog {
-                        ui.handle(&p);
+                        ui.handle(&p, &|pos| WorldSink::block_state_at(&*world, pos));
                     }
                 }
             }
@@ -1445,6 +1446,13 @@ fn tick_once(
                             *rotation += 1.0;
                         }
                     }
+                    A::Piston { progress } => {
+                        // Vanilla `PistonMovingBlockEntity.tick`: 0.5 per tick to 1.0; the
+                        // block entity is removed after (the entry drops when the server's
+                        // block update arrives).
+                        progress.start = progress.end;
+                        progress.end = (progress.end + 0.5).min(1.0);
+                    }
                 }
                 true
             });
@@ -1496,6 +1504,11 @@ fn tick_once(
                             flip_t: 0.0,
                             flip_a: 0.0,
                         },
+                        // The moving piston starts at its NBT progress (the server sends it
+                        // with the block entity).
+                        "piston" => A::Piston {
+                            progress: haste_render::TickPair::fixed(piston_nbt_progress(&be.nbt)),
+                        },
                         _ => continue,
                     };
                     t.anims.entry(pos).or_insert(anim);
@@ -1514,7 +1527,19 @@ fn tick_once(
                 A::Pot { .. } => path == "decorated_pot",
                 A::Conduit { .. } => path == "conduit",
                 A::EnchantTable { .. } => path == "enchanting_table",
+                A::Piston { .. } => path == "piston",
             }
+        }
+
+        /// The moving piston's NBT progress (vanilla `PistonMovingBlockEntity.loadAdditional`).
+        fn piston_nbt_progress(nbt: &[u8]) -> f32 {
+            use haste_protocol::nbt::deserializer::NbtReadHelperJava;
+            let mut cursor = std::io::Cursor::new(nbt);
+            let mut helper = NbtReadHelperJava::new(&mut cursor);
+            haste_protocol::nbt::Nbt::read_unnamed(&mut helper)
+                .ok()
+                .and_then(|doc| doc.root_tag.get_float("progress"))
+                .unwrap_or(0.0)
         }
 
         /// Vanilla's wrap-to-[-PI, PI) loops, as an in-place fix.
@@ -1787,6 +1812,10 @@ fn tick_once(
             Some(crate::player::interact::UsedScreen::CommandBlock(pos)) => {
                 let (creative, level) = ui.game_master_state();
                 if creative && level >= 2 {
+                    // The editor's entity is built from the real state (the use itself opens
+                    // no packet the block state would ride on; vanilla's chunk has it).
+                    let state = WorldSink::block_state_at(&*shared.world.read(), pos);
+                    ui.record_block_state(pos, state);
                     ui.open_used_command_block(pos);
                 }
             }
