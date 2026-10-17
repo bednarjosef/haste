@@ -12,6 +12,7 @@ pub mod blur;
 pub mod entity;
 pub mod fluid;
 pub mod fog;
+pub(crate) mod java_random;
 pub mod gui;
 pub mod lightmap;
 pub mod mesher;
