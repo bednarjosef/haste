@@ -36,22 +36,30 @@ enum XstsMode {
     XErr(u64),
 }
 
+/// One request the mock saw.
+struct Seen {
+    method: String,
+    path: String,
+}
+
 /// The mock's script and the record of what it saw.
 struct Mock {
     /// Token polls so far (the first answers `authorization_pending`, the second `slow_down`).
     token_polls: AtomicUsize,
-    /// Which MSA access token the refresh grant hands out next.
+    /// login_with_xbox calls so far (the second hands out a different Minecraft token).
+    logins: AtomicUsize,
     xsts: XstsMode,
     entitled: bool,
     has_profile: bool,
-    /// Every request, in order: method, path, body, and the Authorization header if any.
-    log: Mutex<Vec<(String, String, String, Option<String>)>>,
+    /// Every request, in order.
+    log: Mutex<Vec<Seen>>,
 }
 
 impl Mock {
     fn new(xsts: XstsMode, entitled: bool, has_profile: bool) -> Arc<Self> {
         Arc::new(Self {
             token_polls: AtomicUsize::new(0),
+            logins: AtomicUsize::new(0),
             xsts,
             entitled,
             has_profile,
@@ -64,7 +72,7 @@ impl Mock {
             .lock()
             .unwrap()
             .iter()
-            .map(|(m, p, _, _)| format!("{m} {p}"))
+            .map(|r| format!("{} {}", r.method, r.path))
             .collect()
     }
 }
@@ -103,11 +111,11 @@ async fn handle(mock: Arc<Mock>, req: Request<Incoming>) -> Response<Full<Bytes>
         .map(|s| s.to_string());
     let body =
         String::from_utf8(req.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
-    mock.log
-        .lock()
-        .unwrap()
-        .push((method.clone(), path.clone(), body.clone(), auth.clone()));
-    let bearer = |token: &str| auth.as_deref() == Some(&format!("Bearer {token}"));
+    mock.log.lock().unwrap().push(Seen {
+        method: method.clone(),
+        path: path.clone(),
+    });
+    let bearer = |token: &str| auth.as_deref() == Some(format!("Bearer {token}").as_str());
     match (method.as_str(), path.as_str()) {
         ("POST", "/consumers/oauth2/v2.0/devicecode") => {
             let f = form(&body);
@@ -208,13 +216,7 @@ async fn handle(mock: Arc<Mock>, req: Request<Incoming>) -> Response<Full<Bytes>
             let v: serde_json::Value = serde_json::from_str(&body).unwrap();
             assert_eq!(v["identityToken"], format!("XBL3.0 x={UHS};{XSTS_TOKEN}"));
             // the second login (after a refresh) hands out a different Minecraft token
-            let logins = mock
-                .log
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|(_, p, _, _)| p == "/authentication/login_with_xbox")
-                .count();
+            let logins = mock.logins.fetch_add(1, Ordering::SeqCst) + 1;
             let token = if logins > 1 { MC_TOKEN_2 } else { MC_TOKEN };
             json(
                 StatusCode::OK,
@@ -363,7 +365,7 @@ async fn full_device_code_login_then_refresh_then_logout() {
     // Stored in the config like the CLI does.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
-    let mut config = Config {
+    let config = Config {
         msa: Some(tokens),
         ..Config::default()
     };
