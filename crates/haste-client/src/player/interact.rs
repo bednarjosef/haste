@@ -263,6 +263,33 @@ struct HeldItem {
     /// The player's `minecraft:attack_speed` with this item held
     /// (`Player.getCurrentItemAttackStrengthDelay`).
     attack_speed: f64,
+    /// [`swap_key`] of this stack, for the first-person equip.
+    swap_key: u64,
+}
+
+/// A key over what `ItemStack.matchesIgnoringComponents(a, b, DataComponentType::
+/// ignoreSwapAnimation)` compares beyond the item type: the count, which component types the
+/// stack's patch adds and removes, and the values of all but the ignored types (`damage`,
+/// `max_damage`, `max_stack_size`: those count only by presence). Equal keys mean the hand
+/// swaps the shown stack without the dip.
+pub(crate) fn swap_key(
+    stack: &ItemStackData,
+    patch: &haste_protocol::wire::components::ComponentPatch,
+) -> u64 {
+    use haste_protocol::wire::components::ItemComponent;
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    stack.count.hash(&mut h);
+    for c in &patch.added {
+        match c {
+            ItemComponent::Damage(_) => "damage".hash(&mut h),
+            ItemComponent::MaxDamage(_) => "max_damage".hash(&mut h),
+            ItemComponent::MaxStackSize(_) => "max_stack_size".hash(&mut h),
+            other => format!("{other:?}").hash(&mut h),
+        }
+    }
+    patch.removed.hash(&mut h);
+    h.finish()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -446,6 +473,7 @@ impl Interaction {
         let tool = patch.tool().map(|t| tool_from_component(t, data));
         let efficiency = efficiency_from_enchantments(&patch, data);
         let attack_speed = self.item_attack_speed(&stack, data);
+        let swap_key = swap_key(&stack, &patch);
         tracing::debug!(
             "held item components: attack_speed {attack_speed} ({} delay ticks), efficiency {efficiency}",
             if attack_speed > 0.0 { 20.0 / attack_speed } else { 20.0 / 4.0 }
@@ -455,6 +483,7 @@ impl Interaction {
             tool,
             efficiency,
             attack_speed,
+            swap_key,
         });
     }
 
@@ -736,6 +765,27 @@ impl LocalPlayer {
     /// The held main-hand stack.
     pub fn main_hand(&self) -> &ItemStackData {
         &self.int.hotbar[self.held_slot.clamp(0, 8) as usize]
+    }
+
+    /// The main-hand stack as the first-person equip compares it
+    /// (`FirstPersonHandsAndItems.shouldInstantlyReplaceVisibleItem`): its type and the swap key
+    /// of its decoded components, or of the raw patch when it has not been decoded.
+    pub fn held_stack(&self) -> crate::hand::HeldStack {
+        let stack = self.main_hand();
+        let swap_key = match self.int.components.as_ref() {
+            Some(h) if h.stack == *stack => h.swap_key,
+            _ => {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::hash::DefaultHasher::new();
+                stack.count.hash(&mut h);
+                stack.components_raw.hash(&mut h);
+                h.finish()
+            }
+        };
+        crate::hand::HeldStack {
+            item: stack.item,
+            swap_key,
+        }
     }
 
     /// Whether either hand holds an item that steers a ridden animal (vanilla

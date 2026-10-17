@@ -1560,15 +1560,17 @@ impl WorldFeed {
     /// per-tick part changed since the last call. The skin is fixed for the connection, so
     /// comparing the per-tick part is enough to catch every change; the skin is cloned only when
     /// one happens (no allocation per frame).
-    /// The first-person hand only exists in the first-person perspective (F5 hides it).
+    /// The first-person hand only exists in the first-person perspective (F5 hides it) and
+    /// while the HUD is shown (`GameRenderer.renderItemInHand` skips it when F1 hid the HUD).
     fn set_first_person(
         &mut self,
         shared: &Shared,
         renderer: &mut Renderer,
         perspective: game::Perspective,
+        hud_hidden: bool,
     ) {
         let view = match perspective {
-            game::Perspective::FirstPerson => shared.view.lock().first_person,
+            game::Perspective::FirstPerson if !hud_hidden => shared.view.lock().first_person,
             _ => None,
         };
         if view == self.first_person {
@@ -2104,11 +2106,13 @@ pub fn frame_fov(
     new_modifier: f32,
     partial: f32,
     submerged: bool,
-    death_ticks: u32,
+    death: Option<u32>,
     effect_scale: f32,
 ) -> f32 {
     let mut fov = base_fov * (old_modifier + (new_modifier - old_modifier) * partial);
-    if death_ticks > 0 {
+    // `LivingEntity.isDeadOrDying` (health <= 0) gates it, from the tick health hits 0 with
+    // `deathTime` still 0; `death` is that: `Some(deathTime)` while dead.
+    if let Some(death_ticks) = death {
         let duration = (death_ticks as f32 + partial).min(20.0);
         fov /= (1.0 - 500.0 / (duration + 500.0)) * 2.0 + 1.0;
     }
@@ -2212,7 +2216,7 @@ fn frame_view<'w>(
         view.fov_modifier,
         partial,
         view.eye_in_water || view.eye_in_lava,
-        view.death_ticks,
+        view.death(),
         options.fov_effect_scale,
     );
     // The hand's own FOV (`Camera.calculateHudFov`): the fixed 70 base with only the death
@@ -2223,14 +2227,13 @@ fn frame_view<'w>(
         1.0,
         partial,
         view.eye_in_water || view.eye_in_lava,
-        view.death_ticks,
+        view.death(),
         options.fov_effect_scale,
     );
     let hurt_tilt = hurt_tilt_degrees(view.hurt_ticks, partial, options.damage_tilt_strength);
-    let death_roll = if view.death_ticks > 0 {
-        death_roll_degrees(view.death_ticks, partial)
-    } else {
-        0.0
+    let death_roll = match view.death() {
+        Some(death_ticks) => death_roll_degrees(death_ticks, partial),
+        None => 0.0,
     };
     let (bob_x, bob_y, bob_roll, bob_pitch) = if options.bob_view {
         view_bob(
@@ -3618,7 +3621,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         last_camera = camera;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         if hud_on {
-            feed.set_first_person(&shared, &mut renderer, perspective);
+            feed.set_first_person(&shared, &mut renderer, perspective, false);
         }
         let (entities, block_entities) =
             feed.entities(&shared, &mut renderer, session.local, partial);
@@ -4345,7 +4348,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         // The first-person hand, like the window and the screenshot path (`set_first_person`
         // diffs the view's per-tick part and only touches the renderer on a change): without
         // this the script's shots never show the held item.
-        feed.set_first_person(shared, &mut renderer, game::Perspective::FirstPerson);
+        feed.set_first_person(shared, &mut renderer, game::Perspective::FirstPerson, false);
         let (entities, block_entities) =
             feed.entities(shared, &mut renderer, session_ref.local, partial);
         let block_target = view.as_ref().and_then(|v| v.block_target);
@@ -4812,7 +4815,12 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         base = camera;
         vd = v;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
-        feed.set_first_person(&shared, &mut renderer, game::Perspective::FirstPerson);
+        feed.set_first_person(
+            &shared,
+            &mut renderer,
+            game::Perspective::FirstPerson,
+            false,
+        );
         let (entities, block_entities) =
             feed.entities(&shared, &mut renderer, session.local, partial);
         let block_target = shared.view.lock().block_target;
@@ -5871,8 +5879,9 @@ impl App {
             bench.feed_ms = feed_start.elapsed().as_secs_f32() * 1000.0;
         }
         let t1 = Instant::now();
+        let hud_hidden = self.ui.as_ref().is_some_and(|ui| ui.hud_hidden());
         self.feed
-            .set_first_person(&session.shared, renderer, self.perspective);
+            .set_first_person(&session.shared, renderer, self.perspective, hud_hidden);
         let (entities, block_entities) =
             self.feed
                 .entities(&session.shared, renderer, session.local, partial);
@@ -6872,16 +6881,35 @@ mod tests {
     #[test]
     fn frame_fov_matches_vanilla_calculate_fov() {
         // `Camera.calculateFov`: base FOV times the interpolated modifier.
-        assert_eq!(frame_fov(70.0, 1.0, 1.0, 0.5, false, 0, 1.0), 70.0);
-        assert_eq!(frame_fov(70.0, 1.0, 1.5, 0.5, false, 0, 1.0), 70.0 * 1.25);
+        assert_eq!(frame_fov(70.0, 1.0, 1.0, 0.5, false, None, 1.0), 70.0);
+        assert_eq!(
+            frame_fov(70.0, 1.0, 1.5, 0.5, false, None, 1.0),
+            70.0 * 1.25
+        );
         // Under water/lava: `lerp(effectScale, 1.0, 0.85714287)`.
-        assert!((frame_fov(70.0, 1.0, 1.0, 0.0, true, 0, 1.0) - 60.0).abs() < 1e-3);
-        assert!((frame_fov(70.0, 1.0, 1.0, 0.0, true, 0, 0.5) - 65.0).abs() < 1e-4);
+        assert!((frame_fov(70.0, 1.0, 1.0, 0.0, true, None, 1.0) - 60.0).abs() < 1e-3);
+        assert!((frame_fov(70.0, 1.0, 1.0, 0.0, true, None, 0.5) - 65.0).abs() < 1e-4);
         // The effect scale off leaves it alone.
-        assert_eq!(frame_fov(70.0, 1.0, 1.0, 0.0, true, 0, 0.0), 70.0);
+        assert_eq!(frame_fov(70.0, 1.0, 1.0, 0.0, true, None, 0.0), 70.0);
         // Death: `fov /= (1 - 500/(duration+500))*2 + 1`, deathTime clamped at 20.
-        assert!((frame_fov(70.0, 1.0, 1.0, 0.0, false, 20, 1.0) - 65.0).abs() < 1e-4);
-        assert!((frame_fov(70.0, 1.0, 1.0, 0.0, false, 200, 1.0) - 65.0).abs() < 1e-4);
+        assert!((frame_fov(70.0, 1.0, 1.0, 0.0, false, Some(20), 1.0) - 65.0).abs() < 1e-4);
+        assert!((frame_fov(70.0, 1.0, 1.0, 0.0, false, Some(200), 1.0) - 65.0).abs() < 1e-4);
+        // `isDeadOrDying` gates it, so the very tick health hits 0 (deathTime 0) already
+        // shrinks the FOV: duration = 0 + partial.
+        let first = frame_fov(70.0, 1.0, 1.0, 0.5, false, Some(0), 1.0);
+        let expected = 70.0 / ((1.0 - 500.0 / 500.5) * 2.0 + 1.0);
+        assert!((first - expected).abs() < 1e-4, "{first} vs {expected}");
+        assert!(first < 70.0);
+    }
+
+    #[test]
+    fn death_view_is_gated_on_health_not_on_the_counter() {
+        // `View::death`: `Some(deathTime)` from the tick health is <= 0 (the counter is
+        // still 0 then), `None` while alive whatever the stale counter says.
+        assert_eq!(game::death_time(false, 0), None);
+        assert_eq!(game::death_time(true, 0), Some(0));
+        assert_eq!(game::death_time(true, 7), Some(7));
+        assert_eq!(game::death_time(false, 7), None);
     }
 
     #[test]
