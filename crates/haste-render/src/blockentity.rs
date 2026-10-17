@@ -24,6 +24,24 @@ use haste_core::{BlockPos, BlockStateId, Direction, Identifier};
 
 use crate::entity::{entity_shade, hurt_color, EntityVertex, TickPair};
 
+mod anim;
+mod beacon;
+mod book;
+mod enchant_table;
+mod end_gateway;
+mod lectern;
+
+pub use anim::BlockEntityAnim;
+pub use beacon::{
+    beam_animation_time, beam_radius_scale, beam_tex_v1, beam_tex_v_offset, BeamData, BeamSection,
+    BEAM_MAX_RENDER_Y,
+};
+pub(crate) use beacon::{emit_beacon_beam, push_beam_quad};
+pub use book::{book_openness, book_texture};
+pub use enchant_table::enchant_page_flip;
+pub(crate) use end_gateway::emit_gateway_beam;
+pub use end_gateway::{end_gateway_faces, GatewayBeam};
+
 /// Which half of a double chest a block is (vanilla `ChestType`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChestHalf {
@@ -96,120 +114,6 @@ pub struct PotSherds {
     pub right: Option<Identifier>,
 }
 
-/// The per-instance animation state of the object-model block entities, as vanilla's block
-/// entity tickers leave it at the ends of the last tick (the partial tick lerps the two ends).
-/// Build it in the client's tick (like [`crate::TickPair`] for the chest lids).
-#[derive(Clone, Copy, Debug)]
-pub enum BlockEntityAnim {
-    /// The enchanting table's book (vanilla `EnchantingTableBlockEntity.bookAnimationTick`):
-    /// `time` is the tick counter, the three pairs are `flip`, `open` and `rot`, and the last
-    /// three are the tick's own bookkeeping (`tRot`, `flipT` and `flipA`).
-    EnchantTable {
-        time: f32,
-        flip: TickPair,
-        open: TickPair,
-        rot: TickPair,
-        t_rot: f32,
-        flip_t: f32,
-        flip_a: f32,
-    },
-    /// A bell that was rung (vanilla `BellBlockEntity.triggerEvent` then `BellBlockEntity.tick`):
-    /// the shake ticks and the direction the bell was hit from (`clickDirection`).
-    Bell {
-        ticks: TickPair,
-        click: Option<Direction>,
-    },
-    /// A wobbling decorated pot (vanilla `DecoratedPotBlockEntity.triggerEvent`): ticks since
-    /// the wobble started, at the ends of the last tick, and the wobble style's duration
-    /// (`WobbleStyle.duration`, 7 for POSITIVE and 10 for NEGATIVE) the progress is measured in.
-    Pot { wobble: TickPair, duration: u32 },
-    /// A conduit (vanilla `ConduitBlockEntity.clientTick`): the tick counter, the spin counter
-    /// (vanilla's `activeRotation`, which the renderer names in degrees for the shell and in
-    /// radians for the cage), and the shape's active/hunting flags.
-    Conduit {
-        tick_count: f32,
-        rotation: f32,
-        active: bool,
-        hunting: bool,
-    },
-    /// A moving piston (vanilla `PistonMovingBlockEntity.tick`): the extension progress, which
-    /// advances 0.5 per tick to 1.0 and then the block entity is gone (the server replaces the
-    /// moving_piston block with the moved one).
-    Piston { progress: TickPair },
-}
-
-impl BlockEntityAnim {
-    /// The same animation at `partial` through the tick, vanilla's `Mth.lerp(partialTicks, oX,
-    /// X)` per field: the counters the renderers read (`BellBlockEntity.ticks` +
-    /// `partialTicks`, `DecoratedPotBlockEntity.wobbleStartedAtTick` + `partialTicks`, the
-    /// enchanting table's `flip`/`open`/`rot`). The game thread keeps the two ends; the render
-    /// thread hands this the partial tick it already has.
-    pub fn at(self, partial: f32) -> BlockEntityAnim {
-        match self {
-            BlockEntityAnim::EnchantTable {
-                time,
-                flip,
-                open,
-                rot,
-                t_rot,
-                flip_t,
-                flip_a,
-            } => BlockEntityAnim::EnchantTable {
-                time: time + partial,
-                flip: TickPair {
-                    start: flip.start,
-                    end: flip.at(partial),
-                },
-                open: TickPair {
-                    start: open.start,
-                    end: open.at(partial),
-                },
-                rot: TickPair {
-                    start: rot.start,
-                    end: rot.at(partial),
-                },
-                t_rot,
-                flip_t,
-                flip_a,
-            },
-            BlockEntityAnim::Bell { ticks, click } => BlockEntityAnim::Bell {
-                ticks: TickPair {
-                    start: ticks.start,
-                    end: ticks.at(partial),
-                },
-                click,
-            },
-            BlockEntityAnim::Pot { wobble, duration } => BlockEntityAnim::Pot {
-                wobble: TickPair {
-                    start: wobble.start,
-                    end: wobble.at(partial),
-                },
-                duration,
-            },
-            // Vanilla's `ConduitRenderState`: `animTime` is `tickCount + partialTicks` and
-            // `getActiveRotation(partialTicks)` adds the partial tick to the spin counter; the
-            // animation phase stays on the integer tick count.
-            BlockEntityAnim::Conduit {
-                tick_count,
-                rotation,
-                active,
-                hunting,
-            } => BlockEntityAnim::Conduit {
-                tick_count: tick_count + partial,
-                rotation: rotation + partial,
-                active,
-                hunting,
-            },
-            BlockEntityAnim::Piston { progress } => BlockEntityAnim::Piston {
-                progress: TickPair {
-                    start: progress.start,
-                    end: progress.at(partial),
-                },
-            },
-        }
-    }
-}
-
 /// A banner's render data: the base colour (from the block id, vanilla `BannerBlock.getColor`)
 /// and up to 16 pattern layers (vanilla draws at most `MAX_PATTERNS`).
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -218,38 +122,6 @@ pub struct BannerData {
     pub base: u8,
     /// The pattern layers, in order.
     pub layers: Vec<BannerLayer>,
-}
-
-/// One coloured segment of a beacon beam (vanilla `BeaconBeamOwner.Section`): the ARGB colour
-/// (the glass above, averaged when it changes mid-beam) and its height in blocks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BeamSection {
-    /// The section's colour, vanilla ARGB (`DyeColor.getTextureDiffuseColor` of the glass).
-    pub color: u32,
-    /// The section's height in blocks (1 for the beacon block's own segment).
-    pub height: i32,
-}
-
-/// A beam's render data, shared between the game thread (which walks the glass above the
-/// beacon, vanilla `BeaconBlockEntity.tick`) and the frame's instances: the sections only;
-/// the animation time is per frame, so it rides on the instance
-/// ([`BlockEntityInstance::beam_time`]).
-#[derive(Clone, Debug, PartialEq)]
-pub struct BeamData {
-    /// The beam sections bottom-up; empty draws no beam.
-    pub sections: Vec<BeamSection>,
-}
-
-/// The end gateway beam (vanilla `EndGatewayRenderState`): the spawn/cooldown scale, the beam
-/// height in blocks and the ARGB colour; the animation time rides per frame on the instance.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct GatewayBeam {
-    /// Vanilla `state.scale` after its `sin(scale * PI)`.
-    pub scale: f32,
-    /// Vanilla `state.height`: `floor(scale * beamDistance)`, 0 hides the beam.
-    pub height: i32,
-    /// Magenta while spawning, purple while cooling down (`DyeColor.getTextureDiffuseColor`).
-    pub color: u32,
 }
 
 /// A moving piston's render data, as vanilla's block entity keeps it: the moved block's state
@@ -1352,77 +1224,10 @@ pub fn banner_wave_phase(pos: BlockPos, game_time: i64, partial: f32) -> f32 {
     (hash.wrapping_add(game_time as i32).rem_euclid(100) as f32 + partial) / 100.0
 }
 
-/// Vanilla `BeaconRenderState.animationTime`: `floorMod(gameTime, 40) + partialTicks`.
-pub fn beam_animation_time(game_time: i64, partial: f32) -> f32 {
-    game_time.rem_euclid(40) as f32 + partial
-}
-
-/// Vanilla `BeaconRenderer.submit`'s per-section heights: every section draws from the beam
-/// start to its own height, the last one to `MAX_RENDER_Y` (2048) — the beam runs to the build
-/// limit whatever is above.
-pub const BEAM_MAX_RENDER_Y: i32 = 2048;
-
-/// The beam radius scale (vanilla `BeaconRenderer.extract`): 1 within 96 blocks (always 1
-/// while scoping), else the horizontal distance / 96, so distant beams stay visible.
-pub fn beam_radius_scale(distance: f32, scoping: bool) -> f32 {
-    if scoping {
-        1.0
-    } else {
-        (distance / 96.0).max(1.0)
-    }
-}
-
-/// The texture V offset of a beam (vanilla `submitBeaconBeam`): the scroll by animation time,
-/// `frac(scroll * 0.2 - floor(scroll * 0.1))` with `scroll = -animationTime` for an upward
-/// beam (`height >= 0`).
-pub fn beam_tex_v_offset(animation_time: f32, height: i32) -> f32 {
-    let scroll = if height < 0 {
-        animation_time
-    } else {
-        -animation_time
-    };
-    (scroll * 0.2 - (scroll * 0.1).floor()).fract()
-}
-
-/// One beam quad's two V texture coordinates (vanilla `submitBeaconBeam`): `vv2 = -1 + off`
-/// at the start, and `vv1` at the end — `height * scale * (0.5 / radius)` for the inner beam,
-/// `height * scale` for the glow.
-pub fn beam_tex_v1(height: f32, scale: f32, radius: f32, glow: bool, vv2: f32) -> f32 {
-    if glow {
-        height * scale + vv2
-    } else {
-        height * scale * (0.5 / radius) + vv2
-    }
-}
-
 /// The end portal's visible-face rule (vanilla `TheEndPortalBlockEntity.shouldRenderFace`):
 /// only the horizontal faces.
 pub fn end_portal_faces() -> u8 {
     (1 << Direction::Up as u8) | (1 << Direction::Down as u8)
-}
-
-/// The end gateway's visible-face rule (vanilla `TheEndGatewayBlockEntity.shouldRenderFace` ->
-/// `Block.shouldRenderFace`): a face shows when the neighbour does not occlude it — an opaque
-/// full cube hides it, unless it is the gateway block itself (portals draw against their own
-/// type). `is_opaque` is the table's full-opaque check.
-pub fn end_gateway_faces(
-    get_state: impl Fn(BlockPos) -> BlockStateId,
-    block_of: impl Fn(BlockStateId) -> haste_core::Identifier,
-    is_opaque: impl Fn(BlockStateId) -> bool,
-    state: BlockStateId,
-    pos: BlockPos,
-) -> u8 {
-    let own = block_of(state);
-    let mut faces = 0u8;
-    for d in Direction::ALL {
-        let neighbour = get_state(pos.offset(d));
-        let same = block_of(neighbour) == own;
-        if !same && is_opaque(neighbour) {
-            continue;
-        }
-        faces |= 1 << d as u8;
-    }
-    faces
 }
 
 /// Vanilla `PistonMovingBlockEntity.getProgress`: `lerp(partial, progressO, progress)` clamped
@@ -2006,231 +1811,6 @@ pub(crate) fn emit_banner(
     }
 }
 
-// -------------------------------------------------------------------------------------------
-// Beacon beams and end gateways (vanilla `BeaconRenderer.submitBeaconBeam`,
-// `TheEndGatewayRenderer`): textured quads into a beam-specific vertex stream. The beam ignores
-// the lightmap (vanilla's `rendertype_beacon_beam` shader is texture * colour + fog), so these
-// do not join the entity stream; the end portal's layered starfield is a pipeline of its own
-// (`endportal.wgsl`).
-
-/// One beam quad pushed as two triangles, in the beam's own (camera-relative) space: `m` poses
-/// it, `rect` is the atlas region of `beacon_beam.png` / `end_gateway_beam.png`. The colour is
-/// the section's ARGB with the alpha the pass wants (255 inner, 32 glow).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn push_beam_quad(
-    out: &mut Vec<EntityVertex>,
-    m: Mat4,
-    p: [Vec3; 4],
-    uv: [[f32; 2]; 4],
-    color: [f32; 4],
-    rect: [u32; 4],
-) {
-    let p = p.map(|v| m.transform_point3(v));
-    let uv = uv.map(|t| {
-        [
-            rect[0] as f32 + t[0] * rect[2] as f32,
-            rect[1] as f32 + t[1] * rect[3] as f32,
-        ]
-    });
-    let r16 = rect.map(|v| v as u16);
-    let order = [0, 1, 2, 0, 2, 3];
-    for i in order {
-        out.push(EntityVertex {
-            pos: p[i].to_array(),
-            uv: uv[i],
-            color,
-            rect: r16,
-            // The beam shader ignores the lightmap; the field carries the light for the format.
-            light: [15, 15, 0, 0],
-        });
-    }
-}
-
-/// Vanilla `renderPart`: four quads around the beam axis (west-north, east-north, east-south,
-/// west-south corners as `(x, z)` pairs), each from `beamStart` to `beamEnd`.
-#[allow(clippy::too_many_arguments)]
-fn emit_beam_part(
-    out: &mut Vec<EntityVertex>,
-    m: Mat4,
-    color: [f32; 4],
-    beam_start: f32,
-    beam_end: f32,
-    corners: [(f32, f32); 4],
-    vv1: f32,
-    vv2: f32,
-    rect: [u32; 4],
-) {
-    let quads = [
-        (corners[0], corners[1]),
-        (corners[3], corners[2]),
-        (corners[1], corners[2]),
-        (corners[0], corners[3]),
-    ];
-    for &(a, b) in &quads {
-        push_beam_quad(
-            out,
-            m,
-            [
-                Vec3::new(a.0, beam_end, a.1),
-                Vec3::new(a.0, beam_start, a.1),
-                Vec3::new(b.0, beam_start, b.1),
-                Vec3::new(b.0, beam_end, b.1),
-            ],
-            [[1.0, vv1], [1.0, vv2], [0.0, vv2], [0.0, vv1]],
-            color,
-            rect,
-        );
-    }
-}
-
-/// Vanilla `BeaconRenderer.submitBeaconBeam` for one beam (also the gateway's, with its own
-/// texture, radii and colour): the inner beam (rotated by `animationTime * 2.25 - 45`
-/// degrees, opaque) and the glow (axis-aligned, alpha 32/255), both full-bright.
-/// `beam_start`/`height` are in blocks; `scale` is 1 for beacons, the gateway's spawn scale.
-/// The inner and glow quads go to separate streams (each is one draw with its own pipeline).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn emit_beam(
-    inner: &mut Vec<EntityVertex>,
-    glow: &mut Vec<EntityVertex>,
-    inst_pos: BlockPos,
-    camera: glam::DVec3,
-    texture: &Identifier,
-    rect_of: &mut dyn FnMut(&Identifier) -> [u32; 4],
-    scale: f32,
-    animation_time: f32,
-    beam_start: i32,
-    height: i32,
-    color: u32,
-    radius_scale: f32,
-    solid_radius: f32,
-    glow_radius: f32,
-) {
-    let beam_end = beam_start + height;
-    let tex_v_off = beam_tex_v_offset(animation_time, height);
-    let root =
-        Mat4::from_translation((inst_pos.as_dvec3() - camera).as_vec3() + Vec3::new(0.5, 0.0, 0.5));
-    let rect = rect_of(texture);
-    let argb = |c: u32, a: u32| {
-        [
-            ((c >> 16) & 0xFF) as f32 / 255.0,
-            ((c >> 8) & 0xFF) as f32 / 255.0,
-            (c & 0xFF) as f32 / 255.0,
-            a as f32 / 255.0,
-        ]
-    };
-    let solid = solid_radius * radius_scale;
-    let glow_r = glow_radius * radius_scale;
-    // The inner beam turns with the animation; vanilla's `rotateDegrees(YP, ...)`.
-    let rot = root * Mat4::from_rotation_y((animation_time * 2.25 - 45.0).to_radians());
-    let vv2 = -1.0 + tex_v_off;
-    let vv1 = beam_tex_v1(height as f32, scale, solid, false, vv2);
-    emit_beam_part(
-        inner,
-        rot,
-        argb(color, 255),
-        beam_start as f32,
-        beam_end as f32,
-        [(0.0, solid), (solid, 0.0), (0.0, -solid), (-solid, 0.0)],
-        vv1,
-        vv2,
-        rect,
-    );
-    // The glow is axis-aligned around the same axis at the larger radius, translucent.
-    let vv1 = beam_tex_v1(height as f32, scale, glow_r, true, vv2);
-    emit_beam_part(
-        glow,
-        root,
-        argb(color, 32),
-        beam_start as f32,
-        beam_end as f32,
-        [
-            (-glow_r, -glow_r),
-            (glow_r, -glow_r),
-            (glow_r, glow_r),
-            (-glow_r, glow_r),
-        ],
-        vv1,
-        vv2,
-        rect,
-    );
-}
-
-/// The beacon's beam: one `emit_beam` per section, each from the running start to the
-/// section's height, the last to [`BEAM_MAX_RENDER_Y`] (vanilla `BeaconRenderer.submit`).
-pub(crate) fn emit_beacon_beam(
-    inner: &mut Vec<EntityVertex>,
-    glow: &mut Vec<EntityVertex>,
-    inst: &BlockEntityInstance,
-    camera: glam::DVec3,
-    radius_scale: f32,
-    rect_of: &mut dyn FnMut(&Identifier) -> [u32; 4],
-) {
-    let Some(data) = inst.beam.as_deref() else {
-        return;
-    };
-    let texture = Identifier::minecraft("entity/beacon/beacon_beam");
-    let mut beam_start = 0i32;
-    let last = data.sections.len().saturating_sub(1);
-    for (i, section) in data.sections.iter().enumerate() {
-        let height = if i == last {
-            BEAM_MAX_RENDER_Y
-        } else {
-            section.height
-        };
-        emit_beam(
-            inner,
-            glow,
-            inst.pos,
-            camera,
-            &texture,
-            rect_of,
-            1.0,
-            inst.beam_time,
-            beam_start,
-            height,
-            section.color,
-            radius_scale,
-            0.2,
-            0.25,
-        );
-        beam_start += section.height;
-    }
-}
-
-/// The end gateway's beam (vanilla `TheEndGatewayRenderer.submit`): the same beam shape at
-/// radii 0.15/0.175, from `-height` to `+height`, scaled by the spawn/cooldown percent.
-pub(crate) fn emit_gateway_beam(
-    inner: &mut Vec<EntityVertex>,
-    glow: &mut Vec<EntityVertex>,
-    inst: &BlockEntityInstance,
-    camera: glam::DVec3,
-    rect_of: &mut dyn FnMut(&Identifier) -> [u32; 4],
-) {
-    let Some(beam) = inst.gateway_beam else {
-        return;
-    };
-    if beam.height <= 0 {
-        return;
-    }
-    let texture = Identifier::minecraft("entity/end_portal/end_gateway_beam");
-    emit_beam(
-        inner,
-        glow,
-        inst.pos,
-        camera,
-        &texture,
-        rect_of,
-        beam.scale,
-        inst.beam_time,
-        -beam.height,
-        beam.height * 2,
-        beam.color,
-        1.0,
-        0.15,
-        0.175,
-    );
-}
-
 /// The end portal/gateway's starfield cube (vanilla `AbstractEndPortalRenderer.submitCube`):
 /// one quad per visible face of the unit cube, posed by `m` (the portal's own flat transform,
 /// the gateway's identity), into the portal pipeline's position vertex stream. Each vertex
@@ -2349,86 +1929,6 @@ pub(crate) fn piston_quads(
 // `emit_part` is the entity convention (y down), so these go through `emit_object`, which emits
 // vanilla's polygons as they are — same corners, same texture rectangles, same winding fix-up —
 // and the root matrix carries only the renderer's own translate/rotate plus the 1/16.
-
-/// Vanilla `BookModel.createBodyLayer` (64x32). `left_lid`, `right_lid`, `seam`, `left_pages`,
-/// `right_pages` and the two `flip_page`s; the pose (`BookModel.setupAnim`) is per instance.
-fn book_model() -> &'static CubeModel {
-    static MODEL: OnceLock<CubeModel> = OnceLock::new();
-    MODEL.get_or_init(|| CubeModel {
-        texture: Identifier::minecraft("entity/enchantment/enchanting_table_book"),
-        tex_width: 64,
-        tex_height: 32,
-        root: ModelPart {
-            name: "root".into(),
-            pivot: Vec3::ZERO,
-            rotation: Vec3::ZERO,
-            visible: true,
-            cubes: Vec::new(),
-            children: vec![
-                part("left_lid", Vec3::new(0.0, 0.0, -1.0), Vec3::ZERO)
-                    .cube(
-                        Vec3::new(-6.0, -5.0, -0.005),
-                        Vec3::new(6.0, 10.0, 0.005),
-                        0.0,
-                        [0, 0],
-                    )
-                    .done(Vec::new()),
-                part("right_lid", Vec3::new(0.0, 0.0, 1.0), Vec3::ZERO)
-                    .cube(
-                        Vec3::new(0.0, -5.0, -0.005),
-                        Vec3::new(6.0, 10.0, 0.005),
-                        0.0,
-                        [16, 0],
-                    )
-                    .done(Vec::new()),
-                part(
-                    "seam",
-                    Vec3::ZERO,
-                    Vec3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0),
-                )
-                .cube(
-                    Vec3::new(-1.0, -5.0, 0.0),
-                    Vec3::new(2.0, 10.0, 0.005),
-                    0.0,
-                    [12, 0],
-                )
-                .done(Vec::new()),
-                part("left_pages", Vec3::ZERO, Vec3::ZERO)
-                    .cube(
-                        Vec3::new(0.0, -4.0, -0.99),
-                        Vec3::new(5.0, 8.0, 1.0),
-                        0.0,
-                        [0, 10],
-                    )
-                    .done(Vec::new()),
-                part("right_pages", Vec3::ZERO, Vec3::ZERO)
-                    .cube(
-                        Vec3::new(0.0, -4.0, -0.01),
-                        Vec3::new(5.0, 8.0, 1.0),
-                        0.0,
-                        [12, 10],
-                    )
-                    .done(Vec::new()),
-                part("flip_page1", Vec3::ZERO, Vec3::ZERO)
-                    .cube(
-                        Vec3::new(0.0, -4.0, 0.0),
-                        Vec3::new(5.0, 8.0, 0.005),
-                        0.0,
-                        [24, 10],
-                    )
-                    .done(Vec::new()),
-                part("flip_page2", Vec3::ZERO, Vec3::ZERO)
-                    .cube(
-                        Vec3::new(0.0, -4.0, 0.0),
-                        Vec3::new(5.0, 8.0, 0.005),
-                        0.0,
-                        [24, 10],
-                    )
-                    .done(Vec::new()),
-            ],
-        },
-    })
-}
 
 /// One part under construction: pivot, base rotation, and its cubes appended by
 /// [`ObjectPart::cube`].
@@ -2685,12 +2185,6 @@ fn conduit_eye_model() -> &'static CubeModel {
     })
 }
 
-/// The texture a book is drawn with (vanilla `EnchantTableRenderer.BOOK_TEXTURE`, in the block
-/// atlas under the `entity` prefix).
-pub fn book_texture() -> Identifier {
-    Identifier::minecraft("entity/enchantment/enchanting_table_book")
-}
-
 /// The texture a bell is drawn with (vanilla `BellRenderer.BELL_TEXTURE`).
 pub fn bell_texture() -> Identifier {
     Identifier::minecraft("entity/bell/bell_body")
@@ -2742,19 +2236,6 @@ pub fn conduit_eye_texture(hunting: bool) -> Identifier {
     } else {
         Identifier::minecraft("entity/conduit/closed_eye")
     }
-}
-
-/// Vanilla `BookModel.State.forAnimation`'s openness: `(sin(progress * 0.02) * 0.1 + 1.25) *
-/// openness` radians.
-pub fn book_openness(progress: f32, openness: f32) -> f32 {
-    (((progress * 0.02) as f64).sin() as f32 * 0.1 + 1.25) * openness
-}
-
-/// Vanilla `EnchantTableRenderer.submit`'s page flips: `frac(flip + offset) * 1.6 - 0.3`,
-/// clamped to 0..1, at offsets 0.25 and 0.75.
-pub fn enchant_page_flip(flip: f32, offset: f32) -> f32 {
-    let f = flip + offset - (flip + offset).floor();
-    (f * 1.6 - 0.3).clamp(0.0, 1.0)
 }
 
 /// Vanilla `ConduitRenderer.submit`'s `hh`: `sin(animTime * 0.1) / 2 + 0.5`, then squared plus
@@ -2828,34 +2309,6 @@ fn clockwise(d: Direction) -> Direction {
         Direction::East => Direction::South,
         Direction::Up | Direction::Down => d,
     }
-}
-
-/// Vanilla `LecternRenderer.submit`'s transform: (0.5, 1.0625, 0.5), `-yRot` about y, 67.5
-/// degrees about z, then (0, -0.125, 0). `yRot` is the block's
-/// `facing.getClockWise().toYRot()`.
-fn lectern_root(pos: BlockPos, facing: Direction, camera: glam::DVec3) -> Mat4 {
-    let p = pos.as_dvec3() - camera;
-    Mat4::from_translation(p.as_vec3() + Vec3::new(0.5, 1.0625, 0.5))
-        * Mat4::from_rotation_y((-to_y_rot(clockwise(facing))).to_radians())
-        * Mat4::from_rotation_z(67.5_f32.to_radians())
-        * Mat4::from_translation(Vec3::new(0.0, -0.125, 0.0))
-        * Mat4::from_scale(Vec3::splat(1.0 / 16.0))
-}
-
-/// Vanilla `EnchantTableRenderer.submit`'s transform: (0.5, 0.75, 0.5), the bob
-/// `0.1 + sin(time * 0.1) * 0.01`, `-rot` about y and 80 degrees about z. `rot` is the
-/// interpolated `rot` (radians).
-fn enchant_root(pos: BlockPos, time: f32, rot: f32, camera: glam::DVec3) -> Mat4 {
-    let p = pos.as_dvec3() - camera;
-    Mat4::from_translation(p.as_vec3() + Vec3::new(0.5, 0.75, 0.5))
-        * Mat4::from_translation(Vec3::new(
-            0.0,
-            0.1 + ((time * 0.1) as f64).sin() as f32 * 0.01,
-            0.0,
-        ))
-        * Mat4::from_rotation_y(-rot)
-        * Mat4::from_rotation_z(80.0_f32.to_radians())
-        * Mat4::from_scale(Vec3::splat(1.0 / 16.0))
 }
 
 /// Vanilla `BellRenderer.submit` carries no transform of its own: the block entity's pose stack
@@ -3071,31 +2524,6 @@ fn pose_of(entries: &[(&'static str, Vec3)]) -> ObjectPose {
     out
 }
 
-/// The book's per-instance pose, vanilla `BookModel.setupAnim`: the lids and pages turn by the
-/// openness about y (the left lid from `PI`, the right lid from 0), the two flip pages by
-/// `openness - openness * 2 * flip`, and the pages slide by `sin(openness)` along x.
-fn book_pose(openness: f32, flip1: f32, flip2: f32) -> (ObjectPose, Vec3) {
-    let pose = pose_of(&[
-        (
-            "left_lid",
-            Vec3::new(0.0, std::f32::consts::PI + openness, 0.0),
-        ),
-        ("right_lid", Vec3::new(0.0, -openness, 0.0)),
-        ("left_pages", Vec3::new(0.0, openness, 0.0)),
-        ("right_pages", Vec3::new(0.0, -openness, 0.0)),
-        (
-            "flip_page1",
-            Vec3::new(0.0, openness - openness * 2.0 * flip1, 0.0),
-        ),
-        (
-            "flip_page2",
-            Vec3::new(0.0, openness - openness * 2.0 * flip2, 0.0),
-        ),
-    ]);
-    let slide = (openness as f64).sin() as f32;
-    (pose, Vec3::new(slide, 0.0, 0.0))
-}
-
 /// Poses one object-model block entity (the five kinds from [`BlockEntityKind::Lectern`]) into
 /// the entity vertex stream: one batched path with everything else. `rect_of` resolves the
 /// textures that differ per part (the pot's sherd sides); `orientation` is the camera's
@@ -3112,48 +2540,8 @@ pub(crate) fn emit_model_block_entity(
     let (sky, block) = inst.light;
     let light = (block, sky);
     match inst.kind {
-        BlockEntityKind::Lectern => {
-            // Vanilla `LecternRenderer`'s fixed `BOOK_STATE`: `forAnimation(0, 0.1, 0.9, 1.2)`.
-            let openness = book_openness(0.0, 1.2);
-            let (pose, offset) = book_pose(openness, 0.1, 0.9);
-            let model = book_model();
-            emit_object(
-                out,
-                model,
-                offset,
-                &pose,
-                lectern_root(inst.pos, inst.facing, camera),
-                light,
-                &mut |_| rect,
-            );
-        }
-        BlockEntityKind::EnchantTable => {
-            // Vanilla `EnchantTableRenderer.submit`'s book state from the block entity's tick.
-            let (time, flip, open, rot) = match inst.anim {
-                Some(BlockEntityAnim::EnchantTable {
-                    time,
-                    flip,
-                    open,
-                    rot,
-                    ..
-                }) => (time, flip.end, open.end, rot.end),
-                _ => (0.0, 0.0, 0.0, 0.0),
-            };
-            let ff1 = enchant_page_flip(flip, 0.25);
-            let ff2 = enchant_page_flip(flip, 0.75);
-            let openness = book_openness(time, open);
-            let (pose, offset) = book_pose(openness, ff1, ff2);
-            let model = book_model();
-            emit_object(
-                out,
-                model,
-                offset,
-                &pose,
-                enchant_root(inst.pos, time, rot, camera),
-                light,
-                &mut |_| rect,
-            );
-        }
+        BlockEntityKind::Lectern => lectern::submit(out, inst, camera, light, rect),
+        BlockEntityKind::EnchantTable => enchant_table::submit(out, inst, camera, light, rect),
         BlockEntityKind::Bell => {
             let model = bell_model();
             let (ticks, click) = match inst.anim {
