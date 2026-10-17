@@ -150,12 +150,31 @@ impl Swing {
     }
 }
 
+/// The stack in a hand as the equip sees it: the item type (for `Player.tick`'s tickers, which
+/// compare types with `ItemStack.isSameItem`) and a swap key over the count and the components
+/// that are not `DataComponentType.ignoreSwapAnimation` (`damage`, `max_damage`,
+/// `max_stack_size`), standing in for `ItemStack.matchesIgnoringComponents` in
+/// `FirstPersonHandsAndItems.shouldInstantlyReplaceVisibleItem`: two stacks with the same type
+/// and key are shown at once, anything else plays the swap dip.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HeldStack {
+    pub item: Option<RegistryIndex>,
+    pub swap_key: u64,
+}
+
+impl HeldStack {
+    /// A stack known by its type only (the tests, and callers without component data).
+    pub fn of(item: Option<RegistryIndex>) -> HeldStack {
+        HeldStack { item, swap_key: 0 }
+    }
+}
+
 /// `FirstPersonHandsAndItems`'s main hand: the item being shown and how far it is down
 /// (0 while it switches, 1 when it is up), plus `Player.itemSwapTicker`.
 #[derive(Clone, Debug)]
 pub struct Equip {
-    /// The item type currently shown; it only changes once the hand has dipped.
-    item: Option<RegistryIndex>,
+    /// The stack currently shown; it only changes once the hand has dipped.
+    item: HeldStack,
     height: f32,
     prev_height: f32,
     /// `Player.itemSwapTicker`, reset when the held item's type changes.
@@ -174,7 +193,7 @@ impl Default for Equip {
         // Vanilla's `FirstPersonHandsAndItems` fields start at their Java defaults (0.0), with
         // an empty shown item: the hand is raised in over the first ticks after joining.
         Equip {
-            item: None,
+            item: HeldStack::default(),
             height: 0.0,
             prev_height: 0.0,
             swap_ticker: 0,
@@ -187,21 +206,24 @@ impl Default for Equip {
 
 impl Equip {
     /// `Player.tick`'s tickers and item-type check, then `FirstPersonHandsAndItems.tick`.
-    /// `item` is this tick's main-hand item type and `attack_speed` the player's
+    /// `stack` is this tick's main-hand stack and `attack_speed` the player's
     /// `minecraft:attack_speed` attribute.
-    pub fn tick(&mut self, item: Option<RegistryIndex>, attack_speed: f64) {
+    pub fn tick(&mut self, stack: HeldStack, attack_speed: f64) {
         self.prev_height = self.height;
         self.attack_speed = attack_speed;
-        // `Player.tick`: both tickers advance, and a different item type resets both.
+        // `Player.tick`: both tickers advance, and a different item type resets both
+        // (`ItemStack.isSameItem`: the type only, not the count or components).
         self.swap_ticker += 1;
         self.attack_strength_ticker += 1;
-        if self.last_item != item {
+        if self.last_item != stack.item {
             self.swap_ticker = 0;
             self.attack_strength_ticker = 0;
         }
-        self.last_item = item;
-        // `shouldInstantlyReplaceVisibleItem`: the same item type is shown at once; a different
-        // one plays the swap animation (every vanilla item has `hand_animation_on_swap`).
+        self.last_item = stack.item;
+        let item = stack;
+        // `shouldInstantlyReplaceVisibleItem`: the same stack (type, count and non-ignored
+        // components) is shown at once; a different one plays the swap animation (every
+        // vanilla item has `hand_animation_on_swap`).
         if self.item != item && !SWAP_ANIMATION {
             self.item = item;
         }
@@ -236,7 +258,7 @@ impl Equip {
 
     /// The item type the hand shows (the renderer draws the arm while it is `None`).
     pub fn item(&self) -> Option<RegistryIndex> {
-        self.item
+        self.item.item
     }
 
     /// `Player.getAttackStrengthScale(a)`: the attack charge 0..1 over the held item's delay.
@@ -386,7 +408,7 @@ impl Hand {
     }
 
     /// One 20 Hz tick. `moved` is the horizontal distance travelled this tick, `look` the
-    /// player's rotation (yaw, pitch) in degrees at its end, `item` the main-hand item type and
+    /// player's rotation (yaw, pitch) in degrees at its end, `item` the main-hand stack and
     /// `attack_speed` the player's `minecraft:attack_speed` attribute.
     pub fn tick(
         &mut self,
@@ -394,7 +416,7 @@ impl Hand {
         look: (f32, f32),
         on_ground: bool,
         swimming: bool,
-        item: Option<RegistryIndex>,
+        item: HeldStack,
         attack_speed: f64,
     ) {
         // `LivingEntity.baseTick` runs before `Player.tick` and both run before
@@ -482,14 +504,14 @@ mod tests {
 
     /// One vanilla tick: no item held (the bare arm), standing on the ground, no swing.
     fn tick(h: &mut Hand, moved: f32) {
-        h.tick(moved, (0.0, 0.0), true, false, None, 4.0);
+        h.tick(moved, (0.0, 0.0), true, false, HeldStack::of(None), 4.0);
     }
 
     /// Ticks until the equip progress is back up (vanilla raises the hand in over the first
     /// ticks after joining, since `FirstPersonHandsAndItems` starts at 0).
     fn settle(h: &mut Hand, item: Option<RegistryIndex>) {
         for _ in 0..12 {
-            h.tick(0.0, (0.0, 0.0), true, false, item, 4.0);
+            h.tick(0.0, (0.0, 0.0), true, false, HeldStack::of(item), 4.0);
         }
         assert_eq!(h.equip().1, 1.0);
     }
@@ -646,7 +668,7 @@ mod tests {
         settle(&mut h, None);
         let mut seen = Vec::new();
         for _ in 0..6 {
-            h.tick(0.0, (0.0, 0.0), true, false, stone(), 4.0);
+            h.tick(0.0, (0.0, 0.0), true, false, HeldStack::of(stone()), 4.0);
             seen.push((h.equip(), h.shown_item()));
         }
         // 1.0 -> 0.6 -> 0.2 -> 0.0 (the item switches) -> 0.4 -> 0.8.
@@ -666,7 +688,7 @@ mod tests {
         let mut slow = Hand::new();
         settle(&mut slow, None);
         for _ in 0..4 {
-            slow.tick(0.0, (0.0, 0.0), true, false, stone(), 1.0);
+            slow.tick(0.0, (0.0, 0.0), true, false, HeldStack::of(stone()), 1.0);
         }
         assert!(
             (slow.equip().1 - 0.2f32.powi(3)).abs() < 1e-6,
@@ -677,11 +699,42 @@ mod tests {
     }
 
     #[test]
+    fn a_count_or_component_change_dips_too() {
+        // `shouldInstantlyReplaceVisibleItem` compares the whole stack minus the ignored
+        // components (`ItemStack.matchesIgnoringComponents`): more of the same item in the
+        // slot is a different stack and plays the swap, while the tickers (type-based,
+        // `Player.tick`) do not reset.
+        let mut h = Hand::new();
+        settle(&mut h, stone());
+        h.reset_attack_strength_ticker();
+        let more = HeldStack {
+            item: stone(),
+            swap_key: 7,
+        };
+        h.tick(0.0, (0.0, 0.0), true, false, more, 4.0);
+        assert_eq!(h.equip().1, 0.6, "the hand dips 0.4 on the count change");
+        assert_eq!(h.shown_item(), stone(), "the old stack is still shown");
+        assert_eq!(
+            h.equip.attack_strength_ticker, 1,
+            "no type change: no ticker reset"
+        );
+        for _ in 0..12 {
+            h.tick(0.0, (0.0, 0.0), true, false, more, 4.0);
+        }
+        assert_eq!(
+            h.equip().1,
+            1.0,
+            "then comes back up with the same type shown"
+        );
+        assert_eq!(h.shown_item(), stone());
+    }
+
+    #[test]
     fn the_same_item_never_dips() {
         let mut h = Hand::new();
         settle(&mut h, stone());
         for _ in 0..5 {
-            h.tick(0.0, (0.0, 0.0), true, false, stone(), 4.0);
+            h.tick(0.0, (0.0, 0.0), true, false, HeldStack::of(stone()), 4.0);
             assert_eq!(h.equip().1, 1.0, "the held item stays put");
         }
     }
@@ -716,10 +769,10 @@ mod tests {
         }
         // Leaving the ground: the first airborne tick still reads the ground tick's speed, the
         // one after it multiplies the bob by 0.6.
-        h.tick(0.0, (0.0, 0.0), false, false, None, 4.0);
+        h.tick(0.0, (0.0, 0.0), false, false, HeldStack::of(None), 4.0);
         let in_air = h.bob().1;
         assert!((in_air - (0.09899223 + (0.1 - 0.09899223) * 0.4)).abs() < 1e-6);
-        h.tick(0.0, (0.0, 0.0), false, false, None, 4.0);
+        h.tick(0.0, (0.0, 0.0), false, false, HeldStack::of(None), 4.0);
         assert!((h.bob().1 - in_air * 0.6).abs() < 1e-6, "{}", h.bob().1);
     }
 
@@ -747,7 +800,7 @@ mod tests {
         let (mut want_yaw, mut want_pitch) = (0.0, 0.0);
         for _ in 0..8 {
             yaw += 10.0;
-            h.tick(0.0, (yaw, yaw / 2.0), true, false, None, 4.0);
+            h.tick(0.0, (yaw, yaw / 2.0), true, false, HeldStack::of(None), 4.0);
             want_yaw += (yaw - want_yaw) * 0.5;
             want_pitch += (yaw / 2.0 - want_pitch) * 0.5;
         }
@@ -784,11 +837,11 @@ mod tests {
         tick(&mut h, 0.0);
         assert!((h.attack_strength_scale(0.0) - 0.2).abs() < 1e-6);
         // An item type change resets it (`Player.tick`).
-        h.tick(0.0, (0.0, 0.0), true, false, stone(), 1.6);
+        h.tick(0.0, (0.0, 0.0), true, false, HeldStack::of(stone()), 1.6);
         assert_eq!(h.attack_strength_scale(0.0), 0.0);
         // The sword's slower attack speed: 12 ticks -> 12 / 12.5 = 0.96.
         for _ in 0..12 {
-            h.tick(0.0, (0.0, 0.0), true, false, stone(), 1.6);
+            h.tick(0.0, (0.0, 0.0), true, false, HeldStack::of(stone()), 1.6);
         }
         assert!((h.attack_strength_scale(0.0) - 0.96).abs() < 1e-6);
     }
@@ -806,7 +859,7 @@ mod tests {
         let mut h = Hand::new();
         settle(&mut h, stone());
         h.item_used();
-        h.tick(0.0, (0.0, 0.0), true, false, stone(), 4.0);
+        h.tick(0.0, (0.0, 0.0), true, false, HeldStack::of(stone()), 4.0);
         assert_eq!(h.equip(), (0.0, 0.4));
         assert_eq!(h.shown_item(), stone());
     }

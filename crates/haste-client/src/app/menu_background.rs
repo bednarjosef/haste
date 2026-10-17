@@ -17,7 +17,12 @@ pub(super) fn menu_frame(
     options: &Options,
 ) -> (GuiFrame, Camera, SkyState, f32) {
     let (w, h) = renderer.size();
-    let scale = resolve_gui_scale(u32::from(options.gui_scale), w, h);
+    let scale = resolve_gui_scale(
+        u32::from(options.gui_scale),
+        w,
+        h,
+        options.force_unicode_font,
+    );
     let (gw, gh) = gui_scaled_size(w, h, scale);
     let gui = ui.frame(gw, gh, scale, input.mouse, 0.0).clone();
     // The screen's panorama (vanilla `Screen.extractPanorama`), drawn under its commands.

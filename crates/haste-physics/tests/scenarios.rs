@@ -641,3 +641,61 @@ fn spectator_no_physics_walks_through_a_wall() {
     );
     assert!(!spectator.state.horizontal_collision);
 }
+
+/// Vanilla's input chain (`KeyboardInput.tick` normalises the key vector, `LocalPlayer.modifyInput`
+/// scales it by 0.98 and the 0.3 sneak factor, `modifyInputSpeedForSquareMovement` stretches it by
+/// the direction's distance to the unit square): a sneaking diagonal (0.707, 0.707) becomes
+/// length 0.294, stretched by sqrt(2) to 0.4158, i.e. 0.294 on EACH axis: the same per-axis speed
+/// as sneaking straight (1.295 m/s), so the diagonal is sqrt(2) times faster (1.83 m/s). A
+/// full-speed diagonal is capped at length 1 (0.707 per axis, against 0.98 straight).
+#[test]
+fn square_movement_diagonal_matches_vanilla() {
+    let straight = steady_speed(
+        STONE,
+        InputState {
+            forward: true,
+            sneak: true,
+            ..Default::default()
+        },
+    )
+    .1;
+    let mut sim = Sim::new(TestWorld::flat(-1, STONE), DVec3::new(0.5, 0.0, 0.5));
+    let diag = InputState {
+        forward: true,
+        left: true,
+        sneak: true,
+        ..Default::default()
+    };
+    sim.run(&diag, 100);
+    let d = sim.step(&diag);
+    assert!(
+        (d.x.abs() - straight).abs() < 1e-6 && (d.z.abs() - straight).abs() < 1e-6,
+        "diagonal sneak per axis ({}, {}) should equal the straight sneak speed {}",
+        d.x.abs(),
+        d.z.abs(),
+        straight
+    );
+    assert!(
+        (mps(hspeed(d)) - 1.295 * std::f64::consts::SQRT_2).abs() < 0.002,
+        "diagonal sneak {} m/s",
+        mps(hspeed(d))
+    );
+
+    let walk = steady_speed(STONE, forward()).1;
+    let mut sim = Sim::new(TestWorld::flat(-1, STONE), DVec3::new(0.5, 0.0, 0.5));
+    let diag = InputState {
+        forward: true,
+        left: true,
+        ..Default::default()
+    };
+    sim.run(&diag, 100);
+    let d = sim.step(&diag);
+    let per_axis = walk / 0.98 * std::f64::consts::FRAC_1_SQRT_2;
+    assert!(
+        (d.x.abs() - per_axis).abs() < 1e-5 && (d.z.abs() - per_axis).abs() < 1e-5,
+        "full-speed diagonal per axis ({}, {}) should be {}",
+        d.x.abs(),
+        d.z.abs(),
+        per_axis
+    );
+}

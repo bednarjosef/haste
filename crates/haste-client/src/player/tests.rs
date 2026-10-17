@@ -882,6 +882,8 @@ fn riding() -> LocalPlayer {
             z: 0.0,
         },
         None,
+        None,
+        None,
     );
     p
 }
@@ -923,6 +925,8 @@ fn the_seat_turns_with_the_vehicle() {
             y: 0.0,
             z: 0.0,
         },
+        None,
+        None,
         None,
     );
     let pose = VehiclePose {
@@ -1028,7 +1032,7 @@ fn in_the_boat(world: &TestWorld) -> LocalPlayer {
         passenger: haste_entity::riding::PassengerKind::Player,
         passenger_type: "player",
     });
-    p.set_vehicle(Some(EntityId(9)), seat, Some(boat));
+    p.set_vehicle(Some(EntityId(9)), seat, Some(boat), None, None);
     p
 }
 
@@ -1129,7 +1133,7 @@ fn dismount_resumes_physics_from_the_seat() {
     assert_eq!(p.state.pos, DVec3::new(0.5, 64.1, 0.5));
     // Dismount: gravity takes over from the seat position. The first tick after it builds
     // velocity (the ride zeroed it); the fall starts the tick after.
-    p.set_vehicle(None, SeatPoint::ZERO, None);
+    p.set_vehicle(None, SeatPoint::ZERO, None, None, None);
     tick_riding(&mut p, &InputState::default(), None);
     assert_eq!(p.state.pos, DVec3::new(0.5, 64.1, 0.5));
     let out = tick_riding(&mut p, &InputState::default(), None);
@@ -1145,6 +1149,250 @@ fn dismount_resumes_physics_from_the_seat() {
             ServerboundPlay::MovePlayerPos(_) | ServerboundPlay::MovePlayerPosRot(_)
         )
     }));
+}
+
+// ---------------------------------------------------------------------------
+// Riding a horse: the steered mount of the horse family (vanilla `AbstractHorse`).
+// ---------------------------------------------------------------------------
+
+/// The horse's box, from its `EntityType`'s `sized(1.3964844F, 1.6F)`.
+const HORSE_DIMS: (f32, f32) = (1.396_484_4, 1.6);
+
+/// One tick of a passenger, against `world`.
+fn tick_riding_world(
+    p: &mut LocalPlayer,
+    input: &InputState,
+    world: &TestWorld,
+) -> Vec<ServerboundPlay> {
+    let mut out = Vec::new();
+    let shapes = TestShapes::default();
+    p.tick_with(input, world, &shapes, &shapes, None, &mut out);
+    out
+}
+
+/// Mounted on a saddled horse standing on the flat stone floor (top at y = 0), at the seat
+/// vanilla's attachment points give the first passenger of a horse.
+fn on_the_horse() -> (LocalPlayer, TestWorld) {
+    let world = TestWorld::flat(0, states::STONE);
+    let horse = crate::horse::Horse::new(
+        DVec3::new(0.5, 0.0, 0.5),
+        0.0,
+        HORSE_DIMS,
+        crate::horse::DEFAULT_MOVEMENT_SPEED,
+        crate::horse::DEFAULT_JUMP_STRENGTH,
+        crate::horse::DEFAULT_GRAVITY,
+    );
+    let (mut p, _) = spawned();
+    let seat = haste_entity::passenger_seat(haste_entity::riding::SeatQuery {
+        vehicle_type: "horse",
+        vehicle_dims: HORSE_DIMS,
+        seat: 0,
+        passengers: 1,
+        passenger: haste_entity::riding::PassengerKind::Player,
+        passenger_type: "player",
+    });
+    p.set_vehicle(Some(EntityId(9)), seat, None, Some(horse), None);
+    (p, world)
+}
+
+/// The steered horse is simulated on our side (vanilla's `AbstractHorse` tick for a
+/// client-authoritative instance): riding forward sends `move_vehicle` with the horse's own
+/// simulated pose each tick, and the seat follows it.
+#[test]
+fn steering_a_horse_sends_move_vehicle_of_its_simulation() {
+    let (mut p, world) = on_the_horse();
+    let forward = InputState {
+        forward: true,
+        ..Default::default()
+    };
+    // The first tick: the horse has not got our keys yet (they arrive with this tick, one tick
+    // late, like the boat's paddles), so it stands still but still reports its pose.
+    let out = tick_riding_world(&mut p, &forward, &world);
+    assert_eq!(names(&out), ["input", "move_vehicle", "tick_end"]);
+    let horse = p.horse().expect("still steering the horse");
+    assert!(horse.delta.z.abs() < 1.0e-9, "{}", horse.delta.z);
+    // The second tick rides.
+    let out = tick_riding_world(&mut p, &forward, &world);
+    assert_eq!(names(&out), ["move_vehicle", "tick_end"]);
+    match &out[0] {
+        ServerboundPlay::MoveVehicle(m) => {
+            assert_eq!(m.pos, p.horse().unwrap().pos);
+            assert_eq!(m.yaw, p.horse().unwrap().yaw);
+            assert!(m.pos.z > 0.5, "the horse walked: {}", m.pos.z);
+        }
+        other => panic!("expected move_vehicle, got {other:?}"),
+    }
+    // The rider sits at the seat of the horse we steer.
+    let horse = p.horse().unwrap();
+    assert!((p.state.pos.x - horse.pos.x).abs() < 1.0e-9);
+    assert!((p.state.pos.y - (horse.pos.y + p.seat().y)).abs() < 1.0e-9);
+    assert!((p.state.pos.z - horse.pos.z).abs() < 1.0e-9);
+}
+
+/// Holding jump charges the mount's jump (vanilla `LocalPlayer.aiStep`'s `jumpRidingTicks`
+/// series); releasing it sends the `player_command` START_RIDING_JUMP with the charge, and the
+/// horse fires the jump on its next ground tick.
+#[test]
+fn holding_and_releasing_jump_charges_and_sends_the_riding_jump() {
+    let (mut p, world) = on_the_horse();
+    let jump = InputState {
+        jump: true,
+        ..Default::default()
+    };
+    // Press: the charge starts empty. Tick two climbs to 0.1 (vanilla counts the press tick).
+    tick_riding_world(&mut p, &jump, &world);
+    assert_eq!(p.jump_riding_scale(), 0.0);
+    tick_riding_world(&mut p, &jump, &world);
+    assert!((p.jump_riding_scale() - 0.1).abs() < 1.0e-6);
+    for _ in 0..3 {
+        tick_riding_world(&mut p, &jump, &world);
+    }
+    assert!((p.jump_riding_scale() - 0.4).abs() < 1.0e-6);
+    // Release: the START_RIDING_JUMP carries the floor of the scale in percent.
+    let out = tick_riding_world(&mut p, &InputState::default(), &world);
+    let command = out.iter().find_map(|p| match p {
+        ServerboundPlay::PlayerCommand(c) => Some(c),
+        _ => None,
+    });
+    let c = command.expect("a riding jump command");
+    assert_eq!(c.action, command::START_RIDING_JUMP);
+    assert_eq!(c.jump_boost, 40);
+    // The horse fires the charged jump on its next tick (the scale is the pending 0.4 + 0.4 x
+    // 40/90).
+    tick_riding_world(&mut p, &InputState::default(), &world);
+    let horse = p.horse().unwrap();
+    assert!(!horse.on_ground, "the horse jumped: {}", horse.pos.y);
+    // The scale itself outlives the release (vanilla keeps it until the ten-tick lockout
+    // counts up to zero, so the HUD bar drains rather than vanishes).
+    assert_eq!(p.jump_riding_scale(), 0.4);
+    for _ in 0..10 {
+        tick_riding_world(&mut p, &InputState::default(), &world);
+    }
+    assert_eq!(p.jump_riding_scale(), 0.0);
+    // A fresh press charges from zero again.
+    tick_riding_world(&mut p, &jump, &world);
+    tick_riding_world(&mut p, &jump, &world);
+    assert!((p.jump_riding_scale() - 0.1).abs() < 1.0e-6);
+}
+
+/// A new mount starts uncharged, and a dismount clears the simulation (the horse keeps its
+/// server-driven position again).
+#[test]
+fn a_dismount_clears_the_horse_simulation() {
+    let (mut p, world) = on_the_horse();
+    let jump = InputState {
+        jump: true,
+        ..Default::default()
+    };
+    tick_riding_world(&mut p, &jump, &world);
+    tick_riding_world(&mut p, &jump, &world);
+    assert!(p.jump_riding_scale() > 0.0);
+    p.set_vehicle(None, SeatPoint::ZERO, None, None, None);
+    assert!(p.horse().is_none());
+    assert_eq!(p.jump_riding_scale(), 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// Riding a pig with a carrot on a stick (vanilla `Pig`).
+// ---------------------------------------------------------------------------
+
+/// The pig's box, from its `EntityType`'s `sized(0.9F, 0.9F)`.
+const PIG_DIMS: (f32, f32) = (0.9, 0.9);
+
+/// Mounted on a saddled pig standing on the flat stone floor, holding a carrot on a stick
+/// (item index 42, marked as a steer item) in the main hand.
+fn on_the_pig() -> (LocalPlayer, TestWorld) {
+    let world = TestWorld::flat(0, states::STONE);
+    let pig = crate::pig::Pig::new(
+        DVec3::new(0.5, 0.0, 0.5),
+        0.0,
+        PIG_DIMS,
+        crate::pig::DEFAULT_MOVEMENT_SPEED,
+        crate::horse::DEFAULT_GRAVITY,
+    );
+    let (mut p, _) = spawned();
+    let seat = haste_entity::passenger_seat(haste_entity::riding::SeatQuery {
+        vehicle_type: "pig",
+        vehicle_dims: PIG_DIMS,
+        seat: 0,
+        passengers: 1,
+        passenger: haste_entity::riding::PassengerKind::Player,
+        passenger_type: "player",
+    });
+    p.set_vehicle(
+        Some(EntityId(9)),
+        seat,
+        None,
+        None,
+        Some(crate::item_based_steering::ItemSteered::Pig(pig)),
+    );
+    // The carrot on a stick in the main hand, and the steer-item set that names it.
+    let stick = haste_core::RegistryIndex(42);
+    p.int.steer_items = Some(
+        [(
+            stick,
+            crate::item_based_steering::SteerStick::CarrotOnAStick,
+        )]
+        .into_iter()
+        .collect(),
+    );
+    p.int.hotbar[0] = haste_core::entity::ItemStackData {
+        count: 1,
+        item: Some(stick),
+        components_raw: Default::default(),
+    };
+    (p, world)
+}
+
+/// The pig walks forward on its own while the rider holds the carrot on a stick
+/// (`Pig.getRiddenInput` is a constant full forward): our simulation drives the seat and the
+/// `move_vehicle`, and putting the stick away stands it down (the server simulates again).
+#[test]
+fn a_pig_walks_while_the_carrot_stick_is_held() {
+    let (mut p, world) = on_the_pig();
+    let hold = InputState::default();
+    // The pig has no look yet (it arrives one tick late, like the horse's input).
+    let out = tick_riding_world(&mut p, &hold, &world);
+    assert_eq!(names(&out), ["move_vehicle", "tick_end"]);
+    let out = tick_riding_world(&mut p, &hold, &world);
+    let pig = p.pig().expect("still steering the pig");
+    assert!(pig.delta.z > 0.0, "the pig walked: {}", pig.delta.z);
+    match &out[0] {
+        ServerboundPlay::MoveVehicle(m) => {
+            assert_eq!(m.pos, p.pig().unwrap().pos);
+            assert!(m.pos.z > 0.5, "the pig moved: {}", m.pos.z);
+        }
+        other => panic!("expected move_vehicle, got {other:?}"),
+    }
+    // The rider sits at the seat of the pig we steer.
+    let pig = p.pig().unwrap();
+    assert!((p.state.pos.z - pig.pos.z).abs() < 1.0e-9);
+    // Putting the stick away (an empty hotbar slot): our simulation stands down, the pig
+    // keeps whatever the server says about it.
+    p.held_slot = 1;
+    let before = p.pig().unwrap().pos;
+    for _ in 0..5 {
+        tick_riding_world(&mut p, &hold, &world);
+    }
+    assert_eq!(p.pig().unwrap().pos, before, "the pig stood down");
+}
+
+/// `LivingEntity.isHolding` looks at both hands: the carrot on a stick in the off hand steers
+/// the pig too.
+#[test]
+fn the_carrot_stick_in_the_off_hand_steers_the_pig() {
+    let (mut p, world) = on_the_pig();
+    p.int.offhand = p.int.hotbar[0].clone();
+    p.held_slot = 1;
+    let hold = InputState::default();
+    tick_riding_world(&mut p, &hold, &world);
+    let out = tick_riding_world(&mut p, &hold, &world);
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, ServerboundPlay::MoveVehicle(_))),
+        "the off-hand stick steers"
+    );
+    assert!(p.pig().unwrap().pos.z > 0.5, "the pig walked");
 }
 
 // ---------------------------------------------------------------------------
@@ -1276,4 +1524,71 @@ fn landing_ends_the_glide_and_the_pose() {
         "vanilla `LivingEntity.travelFallFlying`"
     );
     assert_ne!(p.state.pose, haste_physics::Pose::FallFlying);
+}
+
+#[test]
+fn the_swap_key_ignores_damage_but_not_count_or_other_components() {
+    // `ItemStack.matchesIgnoringComponents` with `ignoreSwapAnimation`: a different count, a
+    // different custom name or a damage component appearing is a different stack (the hand
+    // dips); a different damage value on the same stack is not.
+    use haste_protocol::wire::components::{ComponentPatch, ItemComponent};
+    let stack = |count: i32| haste_core::entity::ItemStackData {
+        count,
+        item: Some(haste_core::RegistryIndex(3)),
+        components_raw: Default::default(),
+    };
+    let patch = |added: Vec<ItemComponent>| ComponentPatch {
+        added,
+        removed: Vec::new(),
+    };
+    let plain = interact::swap_key(&stack(1), &patch(vec![]));
+    assert_ne!(plain, interact::swap_key(&stack(2), &patch(vec![])));
+    let worn = interact::swap_key(&stack(1), &patch(vec![ItemComponent::Damage(5)]));
+    assert_ne!(plain, worn, "a damage component appearing counts");
+    assert_eq!(
+        worn,
+        interact::swap_key(&stack(1), &patch(vec![ItemComponent::Damage(9)])),
+        "its value does not"
+    );
+    assert_ne!(
+        plain,
+        interact::swap_key(&stack(1), &patch(vec![ItemComponent::RepairCost(1)]))
+    );
+    assert_ne!(
+        plain,
+        interact::swap_key(
+            &stack(1),
+            &ComponentPatch {
+                added: vec![],
+                removed: vec!["minecraft:food".into()],
+            }
+        )
+    );
+}
+
+/// Each animal answers to its own stick (`Pig.getControllingPassenger` names the carrot on a
+/// stick, `Strider`'s the warped fungus on a stick): a pig ridden with a warped fungus on a
+/// stick is not ours, so it follows the server and no `move_vehicle` goes out.
+#[test]
+fn a_pig_ignores_the_warped_fungus_on_a_stick() {
+    let (mut p, world) = on_the_pig();
+    let stick = p.int.hotbar[0].item.expect("the stick");
+    p.int.steer_items = Some(
+        [(
+            stick,
+            crate::item_based_steering::SteerStick::WarpedFungusOnAStick,
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let hold = InputState::default();
+    for _ in 0..3 {
+        let out = tick_riding_world(&mut p, &hold, &world);
+        assert!(
+            !out.iter()
+                .any(|o| matches!(o, ServerboundPlay::MoveVehicle(_))),
+            "not ours: {:?}",
+            names(&out)
+        );
+    }
 }

@@ -125,15 +125,9 @@ fn vs_main(in: VertexIn, @builtin(vertex_index) vi: u32) -> VertexOut {
     let ao = 1.0 - 0.2 * f32(ao_count);
     out.light = light_color16(sky16, block16) * ao * face_shade(shade_index);
 
-    // Per-vertex biome/block tint. Vanilla multiplies sRGB texel by sRGB tint; the atlas is
-    // sampled linear here, so the tint is linearized too (the product of the two
-    // linearizations is the linearization of the product, up to the curve's linear toe).
-    let tint_srgb = vec3<f32>(f32(in.light.z), f32(in.light.w), f32(in.tint_b.x)) / 255.0;
-    out.tint = select(
-        pow((tint_srgb + 0.055) / 1.055, vec3<f32>(2.4)),
-        tint_srgb / 12.92,
-        tint_srgb <= vec3<f32>(0.04045),
-    );
+    // Per-vertex biome/block tint, kept as the raw sRGB-encoded bytes: vanilla multiplies
+    // the encoded texel by the encoded tint (see `shade`).
+    out.tint = vec3<f32>(f32(in.light.z), f32(in.light.w), f32(in.tint_b.x)) / 255.0;
 
     // Fog: vanilla's two linear bands, both per-vertex like its vertex-shader varyings —
     // the environmental band on the spherical distance, the render distance band on the
@@ -187,11 +181,27 @@ fn shade(in: VertexOut, alpha_cutoff: f32) -> vec4<f32> {
     if (alpha_cutoff > 0.0 && color.a < alpha_cutoff) {
         discard;
     }
-    // sRGB-ish: tint and light are applied in linear-ish space like Pomme's
-    // shade_chunk_surface, then fog.
-    let lit = color.rgb * in.tint * in.light;
-    let fogged = mix(lit, camera.fog_color.rgb, in.fog);
-    return vec4<f32>(fogged, color.a);
+    // Vanilla's terrain shader (terrain.vsh/terrain.fsh) does all of its colour math on
+    // the encoded (sRGB) values, into a plain RGBA8 target: texel * vertex colour (tint,
+    // AO and face shade) * lightmap texel, then the fog mix with the encoded fog colour.
+    // The atlas here is an sRGB texture (the sample comes back linear) and the target is
+    // sRGB (the output is re-encoded), so the sample is encoded back, the vanilla math
+    // runs on encoded values, and the result is decoded for the target. Doing the
+    // multiplies on linear values instead lifts every factor below 1 to roughly its
+    // 1/2.4th power (a 0.6 side face or a two-occluder AO corner draws ~25% too bright).
+    let lit = srgb_encode(color.rgb) * in.tint * in.light;
+    let fogged = mix(lit, srgb_encode(camera.fog_color.rgb), in.fog);
+    return vec4<f32>(srgb_decode(fogged), color.a);
+}
+
+// The sRGB transfer function (IEC 61966-2-1), the one the sRGB texture formats apply.
+fn srgb_decode(c: vec3<f32>) -> vec3<f32> {
+    return select(pow((c + 0.055) / 1.055, vec3<f32>(2.4)), c / 12.92, c <= vec3<f32>(0.04045));
+}
+
+fn srgb_encode(c: vec3<f32>) -> vec3<f32> {
+    let x = max(c, vec3<f32>(0.0));
+    return select(1.055 * pow(x, vec3<f32>(1.0 / 2.4)) - 0.055, x * 12.92, x <= vec3<f32>(0.0031308));
 }
 
 // Vanilla texture_sampling.glsl `sampleNearest` (UseRgss == 0, the default): snap
