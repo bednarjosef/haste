@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use haste_protocol::haste_core::game::TICK_SECONDS;
 use haste_protocol::haste_core::BlockPos;
-use haste_protocol::{Account, ConnectOptions};
+use haste_protocol::ConnectOptions;
 use haste_world::World;
 
 use crate::net::{self, EntitySink, NetDriver, WorldSink};
@@ -39,10 +39,12 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
             haste_setup::options::Options::default()
         }
     };
-    let mut opts = ConnectOptions::new(address.clone(), Account::Offline { username });
+    let join = net::account::join_account(&username).await?;
+    let mut opts = ConnectOptions::new(address.clone(), join.account);
     opts.client_information.view_distance = options.render_distance as i8;
     let t0 = Instant::now();
     let mut driver = NetDriver::connect(opts).await?;
+    driver.chat.set_keys(join.keys);
     let regs = driver.connection().registries();
     let biomes = net::synced_biome_count(regs);
     let entity_types = regs

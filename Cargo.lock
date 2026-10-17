@@ -1232,11 +1232,13 @@ dependencies = [
  "image",
  "libc",
  "parking_lot",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "winit",
 ]
 
