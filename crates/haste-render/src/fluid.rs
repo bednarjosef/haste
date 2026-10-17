@@ -926,13 +926,18 @@ mod tests {
         fluid_quads(&g, &t, at(0, 0, 0), f, &mut q);
         let up = q.iter().find(|q| q.dir == Direction::Up).unwrap();
         for v in up.positions {
-            assert!((v[1] - (8.0 / 9.0 - INSET)).abs() < 1e-6, "{v:?}");
+            // A lone source: each corner averages the source (weight 10) with two air sides
+            // (weight 1 each) in `FluidRenderer.calculateAverageHeight`, then the inset.
+            assert!(
+                (v[1] - (8.0 / 9.0 * 10.0 / 12.0 - INSET)).abs() < 1e-6,
+                "{v:?}"
+            );
         }
         let down = q.iter().find(|q| q.dir == Direction::Down).unwrap();
         assert!(down.positions.iter().all(|v| v[1] == INSET));
         let north = q.iter().find(|q| q.dir == Direction::North).unwrap();
         assert!(north.positions.iter().all(|v| v[2] == INSET));
-        assert!((north.positions[0][1] - (8.0 / 9.0 - INSET)).abs() < 1e-6);
+        assert!((north.positions[0][1] - (8.0 / 9.0 * 10.0 / 12.0 - INSET)).abs() < 1e-6);
         assert_eq!(north.positions[1][1], INSET);
         let east = q.iter().find(|q| q.dir == Direction::East).unwrap();
         assert!(east.positions.iter().all(|v| v[0] == 1.0 - INSET));
