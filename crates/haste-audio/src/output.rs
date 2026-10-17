@@ -18,6 +18,7 @@
 //!
 //! `AudioOutput::open()` never fails: with no output device (headless CI, tests) it logs
 //! once and stays silent, and every call is accepted and does nothing.
+use std::io::Cursor;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;

@@ -1,6 +1,9 @@
 //! Tests of the audio output and the `SoundSystem` facade (`crate::output`).
 
 use super::*;
+use crate::engine::SoundSource;
+use crate::sounds::SoundEvents;
+use glam::DVec3;
 
 fn sound(samples: Vec<Sample>, channels: u16) -> DecodedSound {
     DecodedSound {

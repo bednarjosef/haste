@@ -12,7 +12,7 @@ use crate::sounds::{SoundEvents, SoundVariant};
 
 /// One sound the `SoundSystem` sent to the output, parallel to the engine's sound list:
 /// the same order, the same length, kept in lockstep by `play`, `stop` and `tick`.
-struct Sounded {
+pub(super) struct Sounded {
     id: SoundId,
     /// The sound event this was started with, shared with the engine and interned (so
     /// tracking it costs one reference count): what `stop`'s event filter and
@@ -34,21 +34,21 @@ struct Sounded {
 pub struct SoundSystem {
     events: SoundEvents,
     engine: SilentEngine,
-    output: AudioOutput,
+    pub(super) output: AudioOutput,
     assets: haste_assets::Assets,
     /// The engine's sounds that were sent to the output, in play order.
-    sounded: Vec<Sounded>,
+    pub(super) sounded: Vec<Sounded>,
     /// The interned event names, so playing an event again clones a shared `Arc<str>`
     /// instead of building a new string per sound (the first play of a name allocates
     /// once; every later play of it only bumps the reference count).
-    interned: HashSet<Arc<str>>,
+    pub(super) interned: HashSet<Arc<str>>,
     next_id: SoundId,
     /// Whether the worker already owns a copy of the assets (set on the first send).
     assets_sent: bool,
     /// Controls drained from the worker since the last tick, reused across ticks.
-    incoming: Vec<SoundControls>,
+    pub(super) incoming: Vec<SoundControls>,
     /// Indices of sounds whose player finished this tick, reused across ticks.
-    finished: Vec<usize>,
+    pub(super) finished: Vec<usize>,
 }
 
 impl SoundSystem {
