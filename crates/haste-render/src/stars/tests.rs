@@ -1,3 +1,6 @@
+// Expected values are full-precision prints of the f32 results.
+#![allow(clippy::excessive_precision)]
+
 use super::*;
 use glam::Vec3;
 
