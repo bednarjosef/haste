@@ -384,6 +384,9 @@ pub fn flow_direction(h: [f32; 4]) -> [f32; 2] {
     }
 }
 
+/// Vanilla's `FluidRenderer.tesselate` face inset (0.001 blocks).
+pub const INSET: f32 = 0.001;
+
 /// One emitted fluid quad (block-local positions 0..1, sprite-local UVs).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FluidQuad {
@@ -424,12 +427,22 @@ pub fn fluid_quads(
             .is_some_and(|f| f.fluid == fluid.fluid)
     };
     let h = corner_heights(world, table, p, fluid);
-    let [nw, sw, se, ne] = h;
 
-    // Top: vertex order like a model's up face (NW, SW, SE, NE). Vanilla skips the
-    // top face when the block above occludes it (`isFaceOccludedByNeighbor` with the
-    // minimum corner height); a full opaque block above always occludes.
-    if !same(p.add(0, 1, 0)) && !world.opaque(p.add(0, 1, 0)) {
+    // `FluidRenderer.tesselate` pulls every face a hair into the block so fluid does not
+    // z-fight with the faces of glass, slabs and other neighbours: top corners down by
+    // `INSET` (which the sides then share), sides in by `INSET`, and the bottom (plus the
+    // sides' bottom edge) up by `INSET` only when the bottom face is drawn.
+    let below = p.add(0, -1, 0);
+    let render_down = !same(below) && !world.opaque(below);
+    let bottom = if render_down { INSET } else { 0.0 };
+    // Vanilla skips the top face when the block above occludes it
+    // (`isFaceOccludedByNeighbor` with the minimum corner height); a full opaque block
+    // above always occludes.
+    let render_up = !same(p.add(0, 1, 0)) && !world.opaque(p.add(0, 1, 0));
+    let [nw, sw, se, ne] = if render_up { h.map(|c| c - INSET) } else { h };
+
+    // Top: vertex order like a model's up face (NW, SW, SE, NE).
+    if render_up {
         let positions = [
             [0.0, nw, 0.0],
             [0.0, sw, 1.0],
@@ -463,14 +476,13 @@ pub fn fluid_quads(
     }
 
     // Bottom (model down-face order).
-    let below = p.add(0, -1, 0);
-    if !same(below) && !world.opaque(below) {
+    if render_down {
         out.push(FluidQuad {
             positions: [
-                [0.0, 0.0, 1.0],
-                [0.0, 0.0, 0.0],
-                [1.0, 0.0, 0.0],
-                [1.0, 0.0, 1.0],
+                [0.0, bottom, 1.0],
+                [0.0, bottom, 0.0],
+                [1.0, bottom, 0.0],
+                [1.0, bottom, 1.0],
             ],
             uvs: [[0.0, 1.0], [0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
             sprite: still,
@@ -479,13 +491,15 @@ pub fn fluid_quads(
     }
 
     // Sides: (direction, neighbour offset, the face's two top corners as (x, z, height) in
-    // model vertex order: top-left then top-right seen from outside).
+    // model vertex order: top-left then top-right seen from outside). The face plane sits
+    // `INSET` inside the block (vanilla's `z + 0.001F` / `x + 1.0F - 0.001F`).
+    let (lo, hi) = (INSET, 1.0 - INSET);
     type Side = (Direction, [i32; 3], [f32; 3], [f32; 3]);
     let sides: [Side; 4] = [
-        (Direction::North, [0, 0, -1], [1.0, 0.0, ne], [0.0, 0.0, nw]),
-        (Direction::South, [0, 0, 1], [0.0, 1.0, sw], [1.0, 1.0, se]),
-        (Direction::West, [-1, 0, 0], [0.0, 0.0, nw], [0.0, 1.0, sw]),
-        (Direction::East, [1, 0, 0], [1.0, 1.0, se], [1.0, 0.0, ne]),
+        (Direction::North, [0, 0, -1], [1.0, lo, ne], [0.0, lo, nw]),
+        (Direction::South, [0, 0, 1], [0.0, hi, sw], [1.0, hi, se]),
+        (Direction::West, [-1, 0, 0], [lo, 0.0, nw], [lo, 1.0, sw]),
+        (Direction::East, [1, 0, 0], [hi, 1.0, se], [hi, 0.0, ne]),
     ];
     for (dir, o, a, b) in sides {
         let q = p.add(o[0], o[1], o[2]);
@@ -496,8 +510,8 @@ pub fn fluid_quads(
         // Model side-face order: top-left, bottom-left, bottom-right, top-right.
         let positions = [
             [a[0], a[2], a[1]],
-            [a[0], 0.0, a[1]],
-            [b[0], 0.0, b[1]],
+            [a[0], bottom, a[1]],
+            [b[0], bottom, b[1]],
             [b[0], b[2], b[1]],
         ];
         let uvs = [
@@ -839,6 +853,37 @@ mod tests {
         let mut q = Vec::new();
         fluid_quads(&g, &t, at(-1, 0, 0), lava, &mut q);
         assert!(q.iter().any(|q| q.dir == Direction::East));
+    }
+
+    #[test]
+    fn faces_are_inset_like_vanilla() {
+        // FluidRenderer.tesselate: top corners 0.001 down, sides 0.001 in, bottom (and the
+        // sides' bottom edge) 0.001 up only when the bottom face is drawn.
+        let t = table();
+        let f = t.fluid(water(0)).unwrap();
+        let mut g = Grid::default();
+        g.set(0, 0, 0, water(0));
+        let mut q = Vec::new();
+        fluid_quads(&g, &t, at(0, 0, 0), f, &mut q);
+        let up = q.iter().find(|q| q.dir == Direction::Up).unwrap();
+        for v in up.positions {
+            assert!((v[1] - (8.0 / 9.0 - INSET)).abs() < 1e-6, "{v:?}");
+        }
+        let down = q.iter().find(|q| q.dir == Direction::Down).unwrap();
+        assert!(down.positions.iter().all(|v| v[1] == INSET));
+        let north = q.iter().find(|q| q.dir == Direction::North).unwrap();
+        assert!(north.positions.iter().all(|v| v[2] == INSET));
+        assert!((north.positions[0][1] - (8.0 / 9.0 - INSET)).abs() < 1e-6);
+        assert_eq!(north.positions[1][1], INSET);
+        let east = q.iter().find(|q| q.dir == Direction::East).unwrap();
+        assert!(east.positions.iter().all(|v| v[0] == 1.0 - INSET));
+
+        // Stone below: the bottom face is gone and the sides reach y = 0.
+        g.set(0, -1, 0, STONE);
+        q.clear();
+        fluid_quads(&g, &t, at(0, 0, 0), f, &mut q);
+        let west = q.iter().find(|q| q.dir == Direction::West).unwrap();
+        assert_eq!(west.positions[1][1], 0.0);
     }
 
     #[test]
