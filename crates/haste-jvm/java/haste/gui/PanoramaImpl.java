@@ -17,6 +17,12 @@ public final class PanoramaImpl {
     private static Panorama instance;
     /** Vanilla {@code Panorama.shouldSpin}: true until a screen holds it. */
     private static boolean spinning = true;
+    /**
+     * Vanilla {@code Panorama.PANORAMA_OVERLAY}. Not read from {@code Panorama}: Haste stands in for that class,
+     * so its static initialiser never runs and the field is null.
+     */
+    private static final net.minecraft.resources.Identifier OVERLAY =
+        net.minecraft.resources.Identifier.withDefaultNamespace("textures/gui/title/background/panorama_overlay.png");
     /** Vanilla {@code Panorama.spin}, in degrees, wrapped to [-180, 180). */
     private static float spin;
 
@@ -42,6 +48,6 @@ public final class PanoramaImpl {
         }
         GfxImpl.panorama = true;
         GfxImpl.panoramaSpin = -spin;
-        graphics.blit(RenderPipelines.GUI_TEXTURED, Panorama.PANORAMA_OVERLAY, 0, 0, 0.0F, 0.0F, width, height, 16, 128, 16, 128);
+        graphics.blit(RenderPipelines.GUI_TEXTURED, OVERLAY, 0, 0, 0.0F, 0.0F, width, height, 16, 128, 16, 128);
     }
 }
