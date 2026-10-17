@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Pig riding live check (scripts/checks/pig-riding.txt) against the running test server on
-# 127.0.0.1:25691. It builds the stone platform in this branch's own area (x 400..420,
-# z 0..20, far from the shared spawn floor), gives the scripted player a carrot on a stick,
+# 127.0.0.1:25691. It builds a stone platform at y 120 in the riding area (x 125..165,
+# z -10..30, far from the shared spawn floor) and removes it afterwards, gives the scripted player a carrot on a stick,
 # summons a saddled pig, lets the scripted client mount it (use-item on the entity) and boost
 # it (a second use click, vanilla `FoodOnAStickItem.use`), then reads the server's own verdict
 # back over RCON: the pig's Pos before and after, that it carried the player, and that the
@@ -11,12 +11,15 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PORT=25691
-NAME=PigCheck
+NAME=riding-animals
 BIN="${HASTE_BIN:-$ROOT/target/debug/haste}"
 SCRIPT="$ROOT/scripts/checks/pig-riding.txt"
 LOG="$ROOT/target/pig-riding.log"
 cd "$ROOT" || exit 1
 rcon() { "$ROOT/scripts/vanilla-rcon.sh" --port "$PORT" "$@"; }
+# The pigs of the riding area only (never every pig on the server).
+PIGS="@e[type=pig,x=125,y=115,z=-10,dx=40,dy=15,dz=40]"
+PIG="@e[type=pig,x=125,y=115,z=-10,dx=40,dy=40,dz=40,limit=1,sort=nearest]"
 
 SERVER_LOG=
 for p in /proc/[0-9]*; do
@@ -31,7 +34,8 @@ SERVER_LINES=0
 
 : >"$LOG"
 echo "== joining headless as $NAME with $SCRIPT"
-"$BIN" --server "127.0.0.1:$PORT" --username "$NAME" --script "$SCRIPT" --seconds 150 >"$LOG" 2>&1 &
+systemd-run --user --scope -q -p MemoryMax=3G timeout 120 \
+  "$BIN" --server "127.0.0.1:$PORT" --username "$NAME" --script "$SCRIPT" --seconds 110 >"$LOG" 2>&1 &
 CLIENT_PID=$!
 
 up=
@@ -48,36 +52,49 @@ fi
 # The RCON setup must land inside the script's first `wait 400` (20 s): the teleport into the
 # area, the platform, the steer stick and the pig summon (the saddle is the SADDLE entry of
 # the `equipment` map in 26.3's NBT; NoAI keeps the pig on its mounting spot).
-rcon "tp $NAME 405.5 71 5.0 0 20" >/dev/null
+rcon "tp $NAME 145.5 121 7.0 0 20" >/dev/null
 sleep 4
-rcon "execute at $NAME run fill 400 71 0 420 90 20 air" >/dev/null
-rcon "execute at $NAME run fill 400 70 0 420 70 20 stone" >/dev/null
-rcon "kill @e[type=pig]" >/dev/null
+rcon "execute at $NAME run fill 125 121 -10 165 130 30 air" >/dev/null
+rcon "execute at $NAME run fill 125 120 -10 165 120 30 stone" >/dev/null
+rcon "kill $PIGS" >/dev/null
+# Back onto the platform: the first teleport only loads the area (the player may have fallen
+# before the platform existed).
+rcon "tp $NAME 145.5 121 7.0 0 20" >/dev/null
 rcon "clear $NAME" >/dev/null
 rcon "give $NAME minecraft:carrot_on_a_stick" >/dev/null
-rcon "summon minecraft:pig 405.5 71 8.5 {NoAI:1b,equipment:{saddle:{id:\"minecraft:saddle\",count:1}}}" >/dev/null
+rcon "summon minecraft:pig 145.5 121 10.5 {NoAI:1b,equipment:{saddle:{id:\"minecraft:saddle\",count:1}}}" >/dev/null
 sleep 3
 echo "== mounting spot"
 SPOT=$(rcon "data get entity $NAME Pos" 2>/dev/null)
 echo "player spot: $SPOT"
-PIG_REST=$(rcon "data get entity @e[type=pig,limit=1,sort=nearest] Pos" 2>/dev/null)
+PIG_REST=$(rcon "data get entity $PIG Pos" 2>/dev/null)
 echo "pig rest: $PIG_REST"
 
-# The script's first `click right` mounts the pig (the second starts the boost); the pig then
-# walks forward on its own. The offscreen client's ticks run slow while the world settles, so
-# the clicks land well after the nominal script times (a minute or so in), and the reads must
-# wait them out: the mounted and after-reads go out at setup+80 s, with the rest position from
-# the setup (the pig walks the moment it is mounted, so there is no at-rest read after it).
-sleep 80
-MOUNTED=$(rcon "data get entity $NAME RootVehicle" 2>/dev/null)
-AFTER=$(rcon "data get entity @e[type=pig,limit=1,sort=nearest] Pos" 2>/dev/null)
-ROTATION=$(rcon "data get entity @e[type=pig,limit=1,sort=nearest] Rotation" 2>/dev/null)
+# The script's first `click right` mounts the pig about 30 s after the client's HUD is up
+# (its first `wait 600`), the second starts the boost, then the look steers the walking pig
+# around a square and the script ends (the client leaves). Poll for the mount, then read the
+# pig again 8 s into the ride, while it still carries the player.
+MOUNTED=
+for _ in $(seq 1 70); do
+  MOUNTED=$(rcon "data get entity $NAME RootVehicle" 2>/dev/null)
+  echo "$MOUNTED" | grep -q "minecraft:pig" && break
+  sleep 1
+done
+PIG_REST=$(rcon "data get entity $PIG Pos" 2>/dev/null)
+sleep 8
+STILL=$(rcon "data get entity $NAME RootVehicle" 2>/dev/null)
+echo "$STILL" | grep -q "minecraft:pig" || MOUNTED="dismounted before the after-read: $STILL"
+AFTER=$(rcon "data get entity $PIG Pos" 2>/dev/null)
+ROTATION=$(rcon "data get entity $PIG Rotation" 2>/dev/null)
 PLAYER_AFTER=$(rcon "data get entity $NAME Pos" 2>/dev/null)
 
 wait "$CLIENT_PID" 2>/dev/null
 RC=$?
+# Remove the rig: the pig, the platform and the cleared volume's air stays air.
+rcon "kill $PIGS" >/dev/null
+rcon "fill 125 120 -10 165 120 30 air" >/dev/null
 
-echo "== pig Pos before (the mount's spot)"
+echo "== pig Pos at the mount"
 echo "$PIG_REST"
 echo "== rider's vehicle"
 echo "$MOUNTED"

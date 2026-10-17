@@ -1,17 +1,16 @@
 # Pig riding with a carrot on a stick on the test server (127.0.0.1:25691). Live evidence and
 # the steps that drive the client; the RCON setup the driver runs is in pig-riding.sh.
 #
-# RIG (this branch's own area, x 400..420, z 0..20, like the horse platform):
-#   fill 400 71 0 420 90 20 air      clear above the platform first (the natural terrain is
-#                                    higher than y 71 and would bury the player)
-#   fill 400 70 0 420 70 20 stone    platform, top at y 71
-#   tp <name> 405.5 71 5.0 0 20      the player at the platform's edge (eyes y 72.62)
+# RIG (the riding area, x 125..165, z -10..30, y 120; removed afterwards):
+#   fill 125 121 -10 165 130 30 air  clear above the platform first
+#   fill 125 120 -10 165 120 30 stone  platform, top at y 121
+#   tp <name> 145.5 121 7.0 0 20     the player at the platform's edge
 #   give <name> carrot_on_a_stick    the steer stick, in hotbar slot 0
-#   summon minecraft:pig 405.5 71 8.5 {NoAI:1b,equipment:{saddle:{...}}}
+#   summon minecraft:pig 145.5 121 10.5 {NoAI:1b,equipment:{saddle:{...}}}
 #                                    the saddled pig 3 blocks ahead (NoAI: a free pig wanders
 #                                    off its mounting spot; the ridden travel is unaffected)
 #
-# EVIDENCE (RCON, own username PigCheck, on 25691; see pig-riding.sh for the reads):
+# EVIDENCE (RCON, own username riding-animals, on 25691; see pig-riding.sh for the reads):
 #   the pig's Pos before the ride (mounted, at rest) and after (the walk plus a boost), the
 #   rider's RootVehicle naming the pig, and the server log's verdict — no "moved wrongly"/
 #   "moved too quickly" for it.
@@ -29,4 +28,30 @@ wait 10
 click right 480 270
 wait 40
 click right 480 270
-wait 400
+# Steer the walking pig around a square (the rider's look is all the steering: Pig.tickRidden
+# turns it to the rider's yaw), so it stays on the platform.
+look 90 20
+wait 30
+look 180 20
+wait 30
+look 270 20
+wait 30
+look 0 20
+wait 30
+look 90 20
+wait 30
+look 180 20
+wait 30
+look 270 20
+wait 30
+look 0 20
+wait 30
+look 90 20
+wait 30
+look 180 20
+wait 30
+look 270 20
+wait 30
+look 0 20
+wait 30
+wait 40
