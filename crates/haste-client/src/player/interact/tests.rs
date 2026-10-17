@@ -1237,7 +1237,7 @@ fn a_held_attack_swings_the_hand_every_tick() {
     for _ in 0..8 {
         r.tick(ATTACK);
         let item = r.p.main_hand().item;
-        r.p.hand.tick(0.0, (0.0, 90.0), true, false, item, 4.0);
+        r.p.hand.tick(0.0, (0.0, 90.0), true, false, crate::hand::HeldStack::of(item), 4.0);
         progress.push(r.p.hand.attack().1);
     }
     // The restart tick's pair falls from 3/6 to 0, so `SwingState.getAnimation`'s wrap carries
@@ -1278,10 +1278,10 @@ fn a_use_swings_the_hand_and_drops_it() {
     // ((itemSwapTicker + 1) / (20 / attack_speed))^3 = (2 / 5)^3 = 0.064, under the 0.1 at
     // which the item is switched.
     let item = r.p.main_hand().item;
-    r.p.hand.tick(0.0, (0.0, 90.0), true, false, item, 4.0);
+    r.p.hand.tick(0.0, (0.0, 90.0), true, false, crate::hand::HeldStack::of(item), 4.0);
     assert_eq!(r.p.hand.equip(), (0.0, 0.0));
     assert_eq!(r.p.hand.shown_item(), item);
-    r.p.hand.tick(0.0, (0.0, 90.0), true, false, item, 4.0);
+    r.p.hand.tick(0.0, (0.0, 90.0), true, false, crate::hand::HeldStack::of(item), 4.0);
     assert!(
         (r.p.hand.equip().1 - 0.064).abs() < 1e-6,
         "{}",
