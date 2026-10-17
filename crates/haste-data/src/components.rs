@@ -183,6 +183,8 @@ pub struct ItemComponents {
     dyed_color_type: Option<i32>,
     attributes: HashMap<Identifier, Vec<AttributeModifier>>,
     consumables: HashMap<Identifier, Consumable>,
+    /// `minecraft:food` by item: its `can_always_eat` flag (`FoodProperties.canAlwaysEat`).
+    foods: HashMap<Identifier, bool>,
     tools: HashMap<Identifier, ToolComponent>,
     gliders: HashSet<Identifier>,
 }
@@ -201,6 +203,12 @@ impl ItemComponents {
     /// The item's default `minecraft:consumable`, if it has one.
     pub fn consumable(&self, item: &Identifier) -> Option<Consumable> {
         self.consumables.get(item).copied()
+    }
+
+    /// The item's default `minecraft:food`, if it has one: `Some(can_always_eat)`
+    /// (`FoodProperties.canAlwaysEat`, false by default).
+    pub fn food(&self, item: &Identifier) -> Option<bool> {
+        self.foods.get(item).copied()
     }
 
     /// The item's default `minecraft:tool` component, if it has one.
@@ -273,6 +281,11 @@ impl ItemComponents {
         self.consumables.insert(item, consumable);
     }
 
+    /// Sets an item's default `minecraft:food` (tests and tools).
+    pub fn insert_food(&mut self, item: Identifier, can_always_eat: bool) {
+        self.foods.insert(item, can_always_eat);
+    }
+
     /// How many items carry `minecraft:attribute_modifiers`.
     pub fn len(&self) -> usize {
         self.attributes.len()
@@ -291,6 +304,7 @@ impl ItemComponents {
         let mut by_name: AHashMap<String, ItemEquippable> = AHashMap::new();
         let mut attributes: HashMap<Identifier, Vec<AttributeModifier>> = HashMap::new();
         let mut consumables: HashMap<Identifier, Consumable> = HashMap::new();
+        let mut foods: HashMap<Identifier, bool> = HashMap::new();
         let mut tools: HashMap<Identifier, ToolComponent> = HashMap::new();
         let mut gliders: HashSet<Identifier> = HashSet::new();
         let Ok(entries) = std::fs::read_dir(components_dir) else {
@@ -326,6 +340,13 @@ impl ItemComponents {
             if let Some(c) = components.get("minecraft:consumable") {
                 consumables.insert(item.clone(), parse_consumable(c));
             }
+            if let Some(f) = components.get("minecraft:food") {
+                let always = f
+                    .get("can_always_eat")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                foods.insert(item.clone(), always);
+            }
             if let Some(t) = components.get("minecraft:tool") {
                 if let Some(t) = ToolComponent::from_json(t) {
                     tools.insert(item.clone(), t);
@@ -347,6 +368,7 @@ impl ItemComponents {
             dyed_color_type: dyed_color_type(registries),
             attributes,
             consumables,
+            foods,
             tools,
             gliders,
         }

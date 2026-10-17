@@ -510,6 +510,13 @@ impl LocalPlayer {
                         (7, haste_core::entity::MetadataValue::VarInt(t)) => {
                             self.own_flags.frozen_ticks = *t;
                         }
+                        // Index 8 `DATA_LIVING_ENTITY_FLAGS`: bit 0x01 is `isUsingItem`, bit
+                        // 0x02 the used hand; the server clears it when a consume completes
+                        // (`LivingEntity.onSyncedDataUpdated`).
+                        (8, haste_core::entity::MetadataValue::Byte(b)) => {
+                            self.int
+                                .synced_using_item(*b & 0x01 != 0, (*b & 0x02 != 0) as i32);
+                        }
                         _ => {}
                     }
                 }
