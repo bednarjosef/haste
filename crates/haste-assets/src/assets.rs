@@ -39,6 +39,8 @@ pub struct Assets {
     source: (PathBuf, PathBuf, String),
     /// The pack ids `reopen` re-applies (empty when opened plain).
     pack_ids: Vec<String>,
+    /// Runtime-registered textures (downloaded skins), kept across `reopen`.
+    pub(crate) dynamic: crate::dynamic::DynamicTextures,
 }
 
 #[derive(Deserialize)]
@@ -245,6 +247,7 @@ impl Assets {
             packs_dir: PathBuf::new(),
             server_packs: Vec::new(),
             model_cache: HashMap::new(),
+            dynamic: Default::default(),
             source,
             pack_ids: Vec::new(),
         })
@@ -257,6 +260,7 @@ impl Assets {
         if !self.pack_ids.is_empty() || !self.server_packs.is_empty() {
             assets.apply_server_packs(&self.packs_dir, &self.pack_ids, &self.server_packs);
         }
+        assets.dynamic = self.dynamic.clone();
         Ok(assets)
     }
 
@@ -298,6 +302,9 @@ impl Assets {
     /// `assets/<ns>/<path>` of a full texture id such as `minecraft:textures/gui/x.png`, or
     /// `textures/<path>.png` of a short one (`minecraft:gui/x`), decoded.
     pub fn texture_any(&mut self, id: &Identifier) -> Result<image::RgbaImage> {
+        if let Some(image) = self.dynamic.get(id) {
+            return Ok(image.as_ref().clone());
+        }
         let key = if id.path().ends_with(".png") {
             format!("assets/{}/{}", id.namespace(), id.path())
         } else {

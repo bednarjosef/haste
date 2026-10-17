@@ -32,7 +32,7 @@ pub use blockentity::{
     BlockEntityInstance, BlockEntityKind, ChestHalf, ChestMaterial, GatewayBeam, PistonData,
     PotSherds, SignSideText, SignTextData,
 };
-pub use entity::{default_skin, EntityRenderer, FirstPerson, Nametag, TickPair};
+pub use entity::{EntityRenderer, FirstPerson, Nametag, TickPair};
 pub use fog::{
     frame_fog, setup_fog, BiomeFog, DimensionFog, FogData, FogEnvironment, FogInputs, FogType,
 };

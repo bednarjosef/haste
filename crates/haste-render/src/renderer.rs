@@ -17,6 +17,8 @@ use crate::mesher::{Mesher, SectionMesh};
 use crate::pipeline::{upload_atlas, Gpu};
 use crate::vertex::PackedVertex;
 
+mod textures;
+
 /// Camera for one frame (docs/INTERFACES.md FrameInput).
 #[derive(Clone, Copy, Debug)]
 pub struct Camera {

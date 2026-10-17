@@ -520,7 +520,7 @@ impl Session {
             entities,
             view_distance,
             haste_render::Particles::new(particle_types.clone()),
-            haste_render::default_skin(login.profile.uuid.as_u128()),
+            game::skins::SkinManager::new(game_dir().join("skins"), login.profile.uuid),
             block_entity_names,
             biome_climates.clone(),
             options.clone(),
@@ -776,8 +776,10 @@ pub struct WorldFeed {
     source: Option<Arc<dyn haste_render::SnapshotSource>>,
     /// Sections submitted this frame (reused).
     batch: Vec<SectionPos>,
-    /// The first-person state last sent to the renderer (None also before the first).
+    /// The first-person state last sent to the renderer (None also before the first), and
+    /// the skin it was drawn with.
     first_person: Option<game::FirstPersonView>,
+    first_person_skin: Option<Arc<haste_entity::skin::PlayerSkin>>,
 }
 
 /// Lets the mesh worker threads capture section snapshots from the shared world under its
@@ -905,22 +907,18 @@ impl WorldFeed {
         }
         self.block_entities(shared, partial);
         self.instances.clear();
-        {
+        // Finished skin downloads: registered as textures, then worn (players wear their
+        // default skin until then).
+        game::skins::pump(shared, renderer);
+        let own_skin = {
             let store = shared.entities.read();
             store.render_instances(partial, &mut self.instances);
-            for inst in &mut self.instances {
-                if inst.skin.is_none() {
-                    if let Some(e) = store.get(inst.id).filter(|e| e.is_player_type) {
-                        // The slim-arm flag is not used: haste-entity's humanoid model is wide.
-                        inst.skin = Some(haste_render::default_skin(e.uuid.as_u128()).0);
-                    }
-                }
-            }
-        }
+            store.player_skin(uuid::Uuid::from_u128(local.1))
+        };
         {
             let view = shared.view.lock().clone();
             self.instances
-                .push(game::player_instance(local.0, local.1, &view, partial));
+                .push(game::player_instance(local.0, &view, partial, &own_skin));
         }
         renderer.sample_entity_lights(&*shared.world.read(), &self.instances);
         (&self.instances, &self.be_instances)
@@ -1602,11 +1600,22 @@ impl WorldFeed {
             game::Perspective::FirstPerson => shared.view.lock().first_person,
             _ => None,
         };
-        if view == self.first_person {
+        // Our skin changes when its download lands: compare it by identity as well.
+        let skin = game::skins::local_skin(shared);
+        if view == self.first_person
+            && self
+                .first_person_skin
+                .as_ref()
+                .is_some_and(|s| Arc::ptr_eq(s, &skin))
+        {
             return;
         }
         self.first_person = view;
-        renderer.set_first_person(view.map(|v| v.with_skin(&shared.skin)));
+        // `FirstPersonHandsAndItemsRenderer`: the sleeve follows the right-sleeve part.
+        let sleeve = game::skins::LOCAL_MODEL_PARTS
+            .shown(haste_entity::avatar::PlayerModelPart::RightSleeve);
+        renderer.set_first_person(view.map(|v| v.with_skin(&skin, sleeve)));
+        self.first_person_skin = Some(skin);
     }
 
     /// Whether everything the game thread produced has been meshed and uploaded, and nothing

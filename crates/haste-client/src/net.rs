@@ -942,6 +942,9 @@ pub struct Session {
     pub dimension: DimensionInfo,
     /// Counters.
     pub counters: NetCounters,
+    /// Profiles added by `player_info_update` since the game thread last took them, with their
+    /// `textures` property, for the skin manager (`game::skins`).
+    pub profiles: Vec<crate::game::skins::ProfileRequest>,
     /// Lid animations by block position, driven by `block_event` action 1 (chest and shulker
     /// box lids; entries only exist while the block is one of `lid_states`).
     pub lids: HashMap<BlockPos, LidAnim>,
@@ -1056,6 +1059,7 @@ impl Session {
     ) -> Self {
         Self {
             player: LocalPlayer::with_entity(entity_id, game_mode),
+            profiles: Vec::new(),
             counters: NetCounters {
                 got_login: true,
                 ..Default::default()
@@ -1754,7 +1758,10 @@ impl Session {
                     entities.set_equipment(EntityId(e.entity_id), slot, item);
                 }
             }
-            P::PlayerInfoUpdate(u) => entities.player_info(&u.infos()),
+            P::PlayerInfoUpdate(u) => {
+                entities.player_info(&u.infos());
+                crate::game::skins::added_profiles(&u, &mut self.profiles);
+            }
             P::SetTime(t) => {
                 entities.set_world_age(t.world_age);
                 self.world_age = t.world_age;
