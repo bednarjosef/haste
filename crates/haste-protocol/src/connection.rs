@@ -40,6 +40,12 @@ use crate::transport::{
 };
 use crate::wire::{DecodeError, GameProfile, Reader, Writer};
 
+mod server_packs;
+pub use server_packs::{
+    asks as pack_push_asks, PackAnswer, PackPromptHook, PackPrompter, PendingPackPush,
+    REQUIRED_PACK_DISCONNECT,
+};
+
 /// Who we log in as.
 #[derive(Clone, Debug)]
 pub enum Account {
@@ -88,12 +94,16 @@ pub struct ConnectOptions {
     pub tables: Option<Arc<ProtocolTables>>,
     /// Chunks per tick requested in `chunk_batch_received`.
     pub chunks_per_tick: f32,
-    /// How to answer `resource_pack_push`.
+    /// How to answer `resource_pack_push` (the server's saved pack status).
     pub resource_packs: ResourcePackPolicy,
+    /// The confirm screen for pushes the policy asks about (see
+    /// [`PackPrompter`]). Unset, a push that would ask is accepted: a run
+    /// without a screen to ask on (headless runs, tests).
+    pub pack_prompt: Option<PackPromptHook>,
     /// Where server resource packs download to (vanilla's `<game
     /// dir>/downloads`, `DownloadQueue`'s cache). Set: pushed packs really
     /// download (hash-checked) and reach the client through
-    /// [`Connection::take_downloaded_packs`]. Unset: the policy's canned
+    /// [`Connection::server_packs`]. Unset: the policy's canned
     /// replies only.
     pub downloads_dir: Option<std::path::PathBuf>,
     /// Cookies from `store_cookie`. Clones share the jar, so cookies survive
@@ -101,15 +111,21 @@ pub struct ConnectOptions {
     pub cookies: CookieJar,
 }
 
-/// How the connection answers a server resource pack offer.
+/// How the connection answers a server resource pack offer: vanilla's
+/// per-server `ServerData.ServerPackStatus` (servers.dat `acceptTextures`),
+/// which `ConnectScreen` turns into `ServerPackManager.PackPromptStatus`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ResourcePackPolicy {
-    /// Answer accepted, downloaded, successfully loaded (what a vanilla client
-    /// that accepts sends). The pack is not downloaded.
+    /// ENABLED: accept without asking. Without a downloads directory the
+    /// answers are canned (accepted, downloaded, successfully loaded).
     #[default]
     Accept,
-    /// Answer declined (a forced pack then gets us kicked, as in vanilla).
+    /// DISABLED: decline without asking, except a required pack, which asks.
     Decline,
+    /// PROMPT: ask with the confirm screen; the answer then settles the
+    /// policy for the rest of the connection (vanilla `allowServerPacks` /
+    /// `rejectServerPacks`).
+    Prompt,
 }
 
 /// `resource_pack` result values (serverbound, configuration and play).
@@ -137,7 +153,9 @@ impl ResourcePackPolicy {
     pub fn replies(self) -> &'static [i32] {
         use resource_pack_status::*;
         match self {
-            ResourcePackPolicy::Accept => &[ACCEPTED, DOWNLOADED, SUCCESSFULLY_LOADED],
+            ResourcePackPolicy::Accept | ResourcePackPolicy::Prompt => {
+                &[ACCEPTED, DOWNLOADED, SUCCESSFULLY_LOADED]
+            }
             ResourcePackPolicy::Decline => &[DECLINED],
         }
     }
@@ -172,6 +190,7 @@ impl std::fmt::Debug for ConnectOptions {
             .field("tables", &self.tables)
             .field("chunks_per_tick", &self.chunks_per_tick)
             .field("resource_packs", &self.resource_packs)
+            .field("pack_prompt", &self.pack_prompt.is_some())
             .field("downloads_dir", &self.downloads_dir)
             .field("cookies", &self.cookies)
             .finish()
@@ -192,6 +211,7 @@ impl ConnectOptions {
             tables: None,
             chunks_per_tick: 64.0,
             resource_packs: ResourcePackPolicy::Accept,
+            pack_prompt: None,
             downloads_dir: None,
             cookies: CookieJar::default(),
         }
@@ -216,6 +236,12 @@ pub enum ProtocolError {
     /// The server closed the connection with a reason.
     #[error("disconnected by server: {0}")]
     Disconnected(String),
+    /// The player declined a required server resource pack on the confirm
+    /// screen: the client closes the connection itself (vanilla's
+    /// `PackConfirmScreen` callback disconnects with
+    /// [`REQUIRED_PACK_DISCONNECT`]).
+    #[error("declined a required server resource pack ({})", REQUIRED_PACK_DISCONNECT)]
+    RequiredPackDeclined,
     /// Authentication failed.
     #[error("authentication: {0}")]
     Auth(#[from] AuthError),
@@ -399,11 +425,9 @@ pub struct Connection {
     /// Registries from a reconfiguration or transfer, swapped in when the
     /// game dequeues the `login` that follows them.
     pending_registries: Arc<Mutex<Option<SyncedRegistries>>>,
-    /// Server resource packs downloaded on this connection (configuration and
-    /// play phase), until the client takes them to apply.
-    downloaded_packs: Arc<Mutex<Vec<crate::serverpack::DownloadedPack>>>,
-    /// Bumped on every change to the pack set (downloads, re-pushes, pops).
-    packs_version: Arc<std::sync::atomic::AtomicU64>,
+    /// Server resource packs on this connection (configuration and play
+    /// phase): the live set, the policy, pushes waiting for the prompt.
+    packs: Arc<server_packs::ServerPacks>,
     tables: Arc<ProtocolTables>,
     stats: Arc<Stats>,
     closed: Arc<Mutex<Option<String>>>,
@@ -721,7 +745,7 @@ impl Connection {
             regs,
             login,
             early,
-            downloaded_packs,
+            packs,
         } = est;
         let dimension = regs.dimension_info(login.spawn.dimension_type, &login.spawn.dimension).unwrap_or_else(|| {
             tracing::warn!("dimension type {} not resolvable from synced registries; assuming overworld layout", login.spawn.dimension_type);
@@ -755,12 +779,7 @@ impl Connection {
         let (out_tx, out_rx) = mpsc::unbounded_channel();
         let closed = Arc::new(Mutex::new(None));
         let pending_registries = Arc::new(Mutex::new(None));
-        let initial_pack_count = downloaded_packs.len();
-        let downloaded_packs = Arc::new(Mutex::new(downloaded_packs));
-        // Version 1 = a set exists from the configuration phase; 0 = none ever.
-        let packs_version = Arc::new(std::sync::atomic::AtomicU64::new(u64::from(
-            initial_pack_count > 0,
-        )));
+        let packs = server_packs::ServerPacks::new(packs, &opts, out_tx.clone(), tables.clone());
         let Io { dec, enc, .. } = io;
         let writer = tokio::spawn(writer_task(
             enc,
@@ -783,8 +802,7 @@ impl Connection {
             tables: tables.clone(),
             stats: stats.clone(),
             closed: closed.clone(),
-            downloaded_packs: downloaded_packs.clone(),
-            packs_version: packs_version.clone(),
+            packs: packs.clone(),
             opts,
             regs: regs.clone(),
             pending_registries: pending_registries.clone(),
@@ -796,8 +814,7 @@ impl Connection {
                 tx: out_tx,
                 registries: Arc::new(regs),
                 pending_registries,
-                downloaded_packs,
-                packs_version,
+                packs,
                 tables,
                 stats,
                 closed,
@@ -834,16 +851,41 @@ impl Connection {
     /// its download), pops remove. The caller re-reads it whenever
     /// [`Self::server_packs_version`] changes.
     pub fn server_packs(&self) -> Vec<crate::serverpack::DownloadedPack> {
-        match self.downloaded_packs.lock() {
-            Ok(g) => g.clone(),
-            Err(e) => e.into_inner().clone(),
-        }
+        self.packs.live()
     }
 
     /// Bumped every time [`Self::server_packs`] changed (a download finished,
     /// a re-push replaced a pack, or a pop arrived).
     pub fn server_packs_version(&self) -> u64 {
-        self.packs_version.load(Ordering::Relaxed)
+        self.packs.version()
+    }
+
+    /// The pushes waiting for the player's answer on the confirm screen
+    /// (play or reconfiguration; oldest first), empty while none waits. The
+    /// client shows them with its [`PackPrompter`] and answers through
+    /// [`Self::answer_server_packs`].
+    pub fn pending_pack_pushes(&self) -> Vec<PendingPackPush> {
+        self.packs.pending()
+    }
+
+    /// The connection's live pack policy (a prompt's answer settles it).
+    pub fn resource_pack_policy(&self) -> ResourcePackPolicy {
+        self.packs.policy()
+    }
+
+    /// The player answered the confirm screen for every pending push
+    /// (vanilla's `PackConfirmScreen` callback): yes accepts and downloads
+    /// them, no declines them; declining a required pack closes the
+    /// connection from this side, with [`REQUIRED_PACK_DISCONNECT`] (the
+    /// client shows it). `None` if no push was pending.
+    pub fn answer_server_packs(&self, accepted: bool) -> Option<PackAnswer> {
+        let answer = self.packs.answer(accepted)?;
+        if answer.disconnects() {
+            set_closed(&self.closed, ProtocolError::RequiredPackDeclined.to_string());
+            let _ = self.tx.send(Outgoing::Shutdown);
+            self.reader.abort();
+        }
+        Some(answer)
     }
 
     /// Next packet with its arrival timestamp; `None` once the connection is
@@ -970,8 +1012,9 @@ struct Established {
     login: play::clientbound::Login,
     /// Play packets that arrived before `login`.
     early: Vec<ClientboundPlay>,
-    /// Server resource packs downloaded during configuration.
-    downloaded_packs: Vec<crate::serverpack::DownloadedPack>,
+    /// Server resource packs from configuration (the live set, the settled
+    /// policy, a prompt still open).
+    packs: server_packs::PackHandover,
 }
 
 enum Handshaked {
@@ -1013,11 +1056,11 @@ async fn establish(
     let profile = login_state(&mut io, opts).await?;
 
     let mut regs = SyncedRegistries::default();
-    let mut downloaded_packs = Vec::new();
-    if let Some(addr) = configuration_state(&mut io, opts, &mut regs, &mut downloaded_packs).await?
-    {
+    let mut packs = server_packs::ConfigPacks::new(opts);
+    if let Some(addr) = configuration_state(&mut io, opts, &mut regs, &mut packs).await? {
         return Ok(Handshaked::Transfer(addr));
     }
+    let packs = packs.finish();
 
     // Play: wait for `login`, keeping anything that comes first.
     let play_dispatch = Dispatch::new(
@@ -1056,7 +1099,7 @@ async fn establish(
         regs,
         login,
         early,
-        downloaded_packs,
+        packs,
     })))
 }
 
@@ -1246,20 +1289,6 @@ fn configuration_step(
             tracing::info!("server code of conduct (auto-accepted): {}", c.text);
             ConfigStep::Reply(vec![encode(tables, s, &sb::AcceptCodeOfConduct {})?])
         }
-        ClientboundConfiguration::ResourcePackPush(r) => {
-            tracing::info!(
-                "server resource pack {} ({}), forced: {}: {:?}",
-                r.id,
-                r.url,
-                r.forced,
-                opts.resource_packs
-            );
-            let mut v = Vec::new();
-            for &result in opts.resource_packs.replies() {
-                v.push(encode(tables, s, &sb::ResourcePack { id: r.id, result })?);
-            }
-            ConfigStep::Reply(v)
-        }
         ClientboundConfiguration::FinishConfiguration(_) => {
             ConfigStep::Finished(encode(tables, s, &sb::FinishConfiguration {})?)
         }
@@ -1306,7 +1335,7 @@ async fn configuration_state(
     io: &mut Io,
     opts: &ConnectOptions,
     regs: &mut SyncedRegistries,
-    downloaded_packs: &mut Vec<crate::serverpack::DownloadedPack>,
+    packs: &mut server_packs::ConfigPacks<'_>,
 ) -> Result<Option<String>, ProtocolError> {
     let tables = io.tables.clone();
     for b in configuration_hello(&tables, opts)? {
@@ -1320,49 +1349,24 @@ async fn configuration_state(
         ClientboundConfiguration::DECODERS,
     );
     loop {
-        let raw = io.recv().await?;
+        let raw = server_packs::recv_answering(io, packs).await?;
         let Some(p) = decode_with(&d, &raw, &tables, State::Configuration, &mut io.warned)? else {
             continue;
         };
-        // A server pack the client really applies: download inline (vanilla's
-        // statuses flow across the download; the server waits for neither), so the
-        // pack is in the cache before the play state starts.
+        // Server packs (vanilla `handleResourcePackPush` / `handleResourcePackPop`):
+        // an accepted pack downloads inline, so it is in the cache before play.
         if let ClientboundConfiguration::ResourcePackPush(r) = &p {
-            if let Some(dir) = &opts.downloads_dir {
-                let (results, pack) = crate::serverpack::handle_push(
-                    dir,
-                    opts.resource_packs == ResourcePackPolicy::Decline,
-                    r.id,
-                    &r.url,
-                    &r.hash,
-                    &pack_headers(opts),
-                )
-                .await;
-                for result in results {
-                    io.enc
-                        .write_packet(encode(
-                            &tables,
-                            State::Configuration,
-                            &cfg::serverbound::ResourcePack { id: r.id, result },
-                        )?)
-                        .await?;
-                    io.stats.packets_out.fetch_add(1, Ordering::Relaxed);
-                }
-                io.enc.flush().await?;
-                if let Some(pack) = pack {
-                    // A re-push of an id replaces its earlier download.
-                    downloaded_packs.retain(|p| p.id != pack.id);
-                    downloaded_packs.push(pack);
-                }
-                continue;
-            }
+            let mut out = server_packs::StatusWriter {
+                enc: &mut io.enc,
+                stats: &io.stats,
+                tables: &tables,
+            };
+            packs.on_push(&mut out, r).await?;
+            continue;
         }
-        // Vanilla `handleResourcePackPop`: remove one pack (or all) from the set.
         if let ClientboundConfiguration::ResourcePackPop(pop) = &p {
-            match pop.id {
-                Some(id) => downloaded_packs.retain(|p| p.id != id),
-                None => downloaded_packs.clear(),
-            }
+            packs.pop(pop.id);
+            continue;
         }
         match configuration_step(p, &tables, opts, regs)? {
             ConfigStep::Reply(v) => {
@@ -1392,8 +1396,7 @@ struct ReaderCtx {
     tables: Arc<ProtocolTables>,
     stats: Arc<Stats>,
     closed: Arc<Mutex<Option<String>>>,
-    downloaded_packs: Arc<Mutex<Vec<crate::serverpack::DownloadedPack>>>,
-    packs_version: Arc<std::sync::atomic::AtomicU64>,
+    packs: Arc<server_packs::ServerPacks>,
     opts: ConnectOptions,
     regs: SyncedRegistries,
     pending_registries: Arc<Mutex<Option<SyncedRegistries>>>,
@@ -1442,8 +1445,17 @@ async fn reader_task(mut c: ReaderCtx) {
             .bytes_in
             .fetch_add(raw.payload.len() as u64, Ordering::Relaxed);
         if !in_play {
-            // Reconfiguration.
+            // Reconfiguration. Server packs work as in play (one handler for
+            // both listeners in vanilla), statuses in the configuration state.
             let step = match cfg_dispatch.decode(raw.id, &raw.payload, Some(&c.tables)) {
+                Decoded::Ok(ClientboundConfiguration::ResourcePackPush(r)) => {
+                    c.packs.on_push(&r);
+                    Ok(ConfigStep::Nothing)
+                }
+                Decoded::Ok(ClientboundConfiguration::ResourcePackPop(p)) => {
+                    c.packs.pop(p.id);
+                    Ok(ConfigStep::Nothing)
+                }
                 Decoded::Ok(p) => configuration_step(p, &c.tables, &c.opts, &mut c.regs),
                 Decoded::NoDecoder => Ok(ConfigStep::Nothing),
                 Decoded::Failed(name, e) => {
@@ -1465,8 +1477,10 @@ async fn reader_task(mut c: ReaderCtx) {
                         *g = Some(c.regs.clone());
                     }
                     in_play = true;
+                    c.packs.set_in_play(true);
                 }
                 Ok(ConfigStep::Transfer(addr)) => {
+                    c.packs.set_in_play(true);
                     if !transfer(&mut c, &addr).await {
                         break;
                     }
@@ -1542,66 +1556,9 @@ async fn reader_task(mut c: ReaderCtx) {
             ClientboundPlay::StoreCookie(s) => {
                 c.opts.cookies.store(s.key.clone(), s.payload.clone())
             }
-            ClientboundPlay::ResourcePackPush(r) => {
-                tracing::info!(
-                    "server resource pack {} ({}), forced: {}: {:?}",
-                    r.id,
-                    r.url,
-                    r.forced,
-                    c.opts.resource_packs
-                );
-                if let Some(dir) = c.opts.downloads_dir.clone() {
-                    // Download off the reader (vanilla's DownloadQueue runs beside the
-                    // connection); the statuses flow as the download progresses.
-                    let out = c.out.clone();
-                    let tables = c.tables.clone();
-                    let declined = c.opts.resource_packs == ResourcePackPolicy::Decline;
-                    let headers = pack_headers(&c.opts);
-                    let packs = c.downloaded_packs.clone();
-                    let version = c.packs_version.clone();
-                    let (id, url, hash) = (r.id, r.url.clone(), r.hash.clone());
-                    tokio::spawn(async move {
-                        let (results, pack) = crate::serverpack::handle_push(
-                            &dir, declined, id, &url, &hash, &headers,
-                        )
-                        .await;
-                        for result in results {
-                            reply(
-                                &out,
-                                &tables,
-                                ServerboundPlay::ResourcePack(sb::ResourcePack { id, result }),
-                            );
-                        }
-                        if let Some(pack) = pack {
-                            if let Ok(mut packs) = packs.lock() {
-                                // A re-push of an id replaces its earlier download.
-                                packs.retain(|p| p.id != pack.id);
-                                packs.push(pack);
-                                version.fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                    });
-                } else {
-                    for &result in c.opts.resource_packs.replies() {
-                        reply(
-                            &c.out,
-                            &c.tables,
-                            ServerboundPlay::ResourcePack(sb::ResourcePack { id: r.id, result }),
-                        );
-                    }
-                }
-            }
-            // Vanilla `handleResourcePackPop`: remove one pack (or all) from the
-            // live set; the client re-applies without it.
-            ClientboundPlay::ResourcePackPop(p) => {
-                if let Ok(mut packs) = c.downloaded_packs.lock() {
-                    match p.id {
-                        Some(id) => packs.retain(|p| p.id != id),
-                        None => packs.clear(),
-                    }
-                    c.packs_version.fetch_add(1, Ordering::Relaxed);
-                }
-            }
+            ClientboundPlay::ResourcePackPush(r) => c.packs.on_push(r),
+            // Vanilla `handleResourcePackPop`: the client re-applies without it.
+            ClientboundPlay::ResourcePackPop(p) => c.packs.pop(p.id),
             ClientboundPlay::Transfer(t) => transfer_to = Some(transfer_address(&t.host, t.port)),
             ClientboundPlay::StartConfiguration(_) => {
                 let _ = c.out.send(Outgoing::PlayAllowed(false));
@@ -1611,6 +1568,7 @@ async fn reader_task(mut c: ReaderCtx) {
                     ServerboundPlay::ConfigurationAcknowledged(sb::ConfigurationAcknowledged {}),
                 );
                 in_play = false;
+                c.packs.set_in_play(false);
                 // The server sends every registry again.
                 c.regs = SyncedRegistries::default();
                 // Whether vanilla sends brand and client information again
@@ -1667,6 +1625,9 @@ async fn transfer(c: &mut ReaderCtx, addr: &str) -> bool {
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     let _ = c.out.send(Outgoing::CloseCurrent(done_tx));
     let _ = done_rx.await;
+    // The new server starts from the pack status as it stands now (vanilla
+    // reconnects with the same `ServerData`, which an answer updated).
+    c.opts.resource_packs = c.packs.policy();
     match open(addr, &c.opts, &c.tables, &c.stats).await {
         Ok(est) => {
             let Established {
@@ -1674,8 +1635,10 @@ async fn transfer(c: &mut ReaderCtx, addr: &str) -> bool {
                 regs,
                 login,
                 early,
+                packs,
                 ..
             } = est;
+            c.packs.set_policy(packs.policy);
             let Io { dec, enc, .. } = io;
             c.dec = dec;
             let _ = c.out.send(Outgoing::NewEncoder(Box::new(enc)));
@@ -1785,5 +1748,7 @@ async fn writer_task(
     }
 }
 
+#[cfg(test)]
+mod pack_tests;
 #[cfg(test)]
 mod tests;

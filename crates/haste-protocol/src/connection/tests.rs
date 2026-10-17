@@ -83,18 +83,18 @@ fn test_tables_owned() -> ProtocolTables {
 }
 
 /// [`test_tables_owned`] behind an `Arc` (the connection API).
-fn test_tables() -> Arc<ProtocolTables> {
+pub(super) fn test_tables() -> Arc<ProtocolTables> {
     Arc::new(test_tables_owned())
 }
 
-struct Server {
-    dec: TcpNetworkDecoder<BufReader<OwnedReadHalf>>,
-    enc: TcpNetworkEncoder<OwnedWriteHalf>,
-    tables: Arc<ProtocolTables>,
+pub(super) struct Server {
+    pub(super) dec: TcpNetworkDecoder<BufReader<OwnedReadHalf>>,
+    pub(super) enc: TcpNetworkEncoder<OwnedWriteHalf>,
+    pub(super) tables: Arc<ProtocolTables>,
 }
 
 impl Server {
-    async fn send<P: Packet>(&mut self, state: State, p: &P) {
+    pub(super) async fn send<P: Packet>(&mut self, state: State, p: &P) {
         let b =
             crate::packets::encode_with_id(&self.tables.packets, state, Direction::Clientbound, p)
                 .expect("clientbound id");
@@ -113,7 +113,7 @@ impl Server {
         self.enc.write_packet(w.into_inner().into()).await.unwrap();
         self.enc.flush().await.unwrap();
     }
-    async fn recv<T>(
+    pub(super) async fn recv<T>(
         &mut self,
         state: State,
         decoders: &'static [(&'static str, crate::packets::DecodeFn<T>)],
@@ -747,7 +747,7 @@ fn cosmetic_warning_fires_once_per_name() {
 
 impl Server {
     /// Accepts a connection and runs handshake + offline login.
-    async fn accept(listener: &TcpListener, tables: Arc<ProtocolTables>, intent: i32) -> Server {
+    pub(super) async fn accept(listener: &TcpListener, tables: Arc<ProtocolTables>, intent: i32) -> Server {
         let (stream, _) = listener.accept().await.unwrap();
         let (r, w) = stream.into_split();
         let mut s = Server {
@@ -786,13 +786,13 @@ impl Server {
         s
     }
 
-    async fn recv_cfg(&mut self) -> ServerboundConfiguration {
+    pub(super) async fn recv_cfg(&mut self) -> ServerboundConfiguration {
         self.recv(State::Configuration, ServerboundConfiguration::DECODERS)
             .await
     }
 
     /// Expects brand + client information.
-    async fn expect_hello(&mut self) {
+    pub(super) async fn expect_hello(&mut self) {
         assert!(matches!(
             self.recv_cfg().await,
             ServerboundConfiguration::CustomPayload(_)
@@ -805,7 +805,7 @@ impl Server {
 
     /// Sends registries with one biome named `biome`, finishes configuration
     /// and sends the play `login` with `entity_id`.
-    async fn finish_with(&mut self, biome: &str, entity_id: i32) {
+    pub(super) async fn finish_with(&mut self, biome: &str, entity_id: i32) {
         self.send(
             State::Configuration,
             &ccb::RegistryData {
@@ -1045,7 +1045,7 @@ async fn reconfiguration_cookies_resource_pack_and_transfer() {
 
 /// Serves `body` once over plain HTTP (a tiny static file server for the pack
 /// download tests; vanilla downloads packs over http/https only).
-async fn serve_one_http(body: Bytes) -> reqwest::Url {
+pub(super) async fn serve_one_http(body: Bytes) -> reqwest::Url {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let url = reqwest::Url::parse(&format!("http://{addr}/pack.zip")).unwrap();

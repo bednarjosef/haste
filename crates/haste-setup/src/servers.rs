@@ -284,6 +284,47 @@ impl ServerList {
         self.entries.swap(index, index + 1);
         true
     }
+
+    /// The entry joined by `address`, compared like vanilla's
+    /// `ServerList.get(ip)`: the exact `ip` string, the listed entries first,
+    /// then the hidden (direct connect) ones.
+    pub fn entry_for_address_mut(&mut self, address: &str) -> Option<&mut ServerEntry> {
+        self.entries
+            .iter_mut()
+            .chain(self.hidden.iter_mut())
+            .find(|e| e.address == address)
+    }
+
+    /// The saved server resource pack status for `address` (vanilla
+    /// `ServerData.getResourcePackStatus`): `Some(true)` enabled,
+    /// `Some(false)` disabled, `None` prompt (also for a server that is not
+    /// in the list: vanilla's direct connect starts at prompt).
+    pub fn pack_status_for(&self, address: &str) -> Option<bool> {
+        self.entries
+            .iter()
+            .chain(self.hidden.iter())
+            .find(|e| e.address == address)
+            .and_then(|e| e.accept_textures)
+    }
+
+    /// Sets the pack status of the entry for `address` and saves the list
+    /// (vanilla's pack prompt callback, then `ServerList.saveSingleServer`,
+    /// which loads the file, replaces the matching entry and saves it).
+    /// Returns whether an entry matched; a server that is not in the list is
+    /// left out (vanilla saves only entries the file has).
+    pub fn save_pack_status(
+        path: &Path,
+        address: &str,
+        accept: Option<bool>,
+    ) -> anyhow::Result<bool> {
+        let mut list = Self::load(path)?;
+        let Some(entry) = list.entry_for_address_mut(address) else {
+            return Ok(false);
+        };
+        entry.accept_textures = accept;
+        list.save(path)?;
+        Ok(true)
+    }
 }
 
 /// `servers.dat` next to `config.toml` in the platform config dir.
@@ -572,5 +613,49 @@ mod tests {
         out.push(0x08); // TAG_String
         push_string(name, out);
         push_string(value, out);
+    }
+
+    #[test]
+    fn pack_status_finds_and_saves_per_server() {
+        let (_dir, path) = temp_path("servers.dat");
+        let mut list = ServerList::new();
+        list.add(ServerEntry::new("alpha", "alpha.example.com"));
+        let mut saved = ServerEntry::new("beta", "beta.example.com:25565");
+        saved.accept_textures = Some(false);
+        list.add(saved);
+        list.save(&path).unwrap();
+
+        // Prompt (no acceptTextures) reads as None, disabled as Some(false).
+        assert_eq!(list.pack_status_for("alpha.example.com"), None);
+        assert_eq!(list.pack_status_for("beta.example.com:25565"), Some(false));
+        // Vanilla compares the exact ip: another port is another server.
+        assert_eq!(list.pack_status_for("beta.example.com"), None);
+
+        // The answer after a prompt: enabled, saved for that entry only.
+        assert!(ServerList::save_pack_status(&path, "alpha.example.com", Some(true)).unwrap());
+        let reloaded = ServerList::load(&path).unwrap();
+        assert_eq!(reloaded.pack_status_for("alpha.example.com"), Some(true));
+        assert_eq!(reloaded.pack_status_for("beta.example.com:25565"), Some(false));
+
+        // Decline writes disabled; back to prompt removes the tag.
+        ServerList::save_pack_status(&path, "alpha.example.com", Some(false)).unwrap();
+        let reloaded = ServerList::load(&path).unwrap();
+        assert_eq!(reloaded.pack_status_for("alpha.example.com"), Some(false));
+        ServerList::save_pack_status(&path, "alpha.example.com", None).unwrap();
+        let reloaded = ServerList::load(&path).unwrap();
+        assert_eq!(reloaded.pack_status_for("alpha.example.com"), None);
+    }
+
+    #[test]
+    fn pack_status_leaves_unsaved_servers_alone() {
+        let (_dir, path) = temp_path("servers.dat");
+        let mut list = ServerList::new();
+        list.add(ServerEntry::new("alpha", "alpha.example.com"));
+        list.save(&path).unwrap();
+        // A server that is not in the list: nothing is added.
+        assert!(!ServerList::save_pack_status(&path, "nowhere.example.com", Some(true)).unwrap());
+        let reloaded = ServerList::load(&path).unwrap();
+        assert_eq!(reloaded.entries().len(), 1);
+        assert_eq!(reloaded.entries()[0].address, "alpha.example.com");
     }
 }

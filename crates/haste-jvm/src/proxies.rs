@@ -353,6 +353,10 @@ pub struct GameState {
     /// `Minecraft.reloadResourcePacks`), repository ids bottom first; the client rebuilds its
     /// asset stack from them. `None` = no change pending.
     pub resource_pack_ids: Option<Vec<String>>,
+    /// The player's answer to the server resource pack prompt (vanilla's
+    /// `PackConfirmScreen` callback), until the client takes it. `None` while
+    /// the screen is open (or none was shown).
+    pub pack_prompt_answer: Option<bool>,
 }
 
 impl Default for GameState {
@@ -383,6 +387,7 @@ impl Default for GameState {
             local_world_running: false,
             option_changes: Vec::new(),
             resource_pack_ids: None,
+            pack_prompt_answer: None,
         }
     }
 }

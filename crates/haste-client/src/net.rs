@@ -2182,5 +2182,6 @@ impl NetDriver {
     }
 }
 
+pub(crate) mod pack_prompt;
 #[cfg(test)]
 mod tests;

@@ -539,6 +539,8 @@ pub struct Shared {
     /// new download joins them so a reload layers every server pack, not only
     /// the newest.
     pub applied_server_packs: Mutex<Vec<std::path::PathBuf>>,
+    /// The server resource pack confirm screen in play (vanilla's `PackConfirmScreen`).
+    pub pack_prompt: Mutex<crate::net::pack_prompt::PlayPrompt>,
     /// F3's tps line: packets sent per second (f64 bits), updated once per second by the game
     /// thread from the connection's counters.
     pub debug_tx: AtomicU64,
@@ -667,6 +669,7 @@ impl Shared {
             options_version: AtomicU64::new(1),
             resource_pack_reload: Mutex::new(None),
             applied_server_packs: Mutex::new(Vec::new()),
+            pack_prompt: Mutex::default(),
             debug_tx: AtomicU64::new(0),
             debug_rx: AtomicU64::new(0),
             chunks_loaded: AtomicU64::new(0),
@@ -1814,6 +1817,11 @@ fn tick_once(
         }
         ui.drain_outgoing(&mut ui_out);
     }
+    // A pushed pack waiting for the player (vanilla's `PackConfirmScreen` in play).
+    shared
+        .pack_prompt
+        .lock()
+        .tick(driver.connection(), shared.ui.lock().as_ref());
     for p in ui_out {
         driver.queue(p);
     }
