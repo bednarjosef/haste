@@ -827,44 +827,14 @@ fn push_quad(
     }
 }
 
-/// 1500 small star quads on a sphere of radius 100 (positions from our own generator, not
-/// vanilla's seed: the pattern differs).
+/// The star field (`stars::star_quads`) as celestial vertices: two triangles per quad.
 fn star_vertices() -> Vec<SkyVertex> {
-    let mut state = 10842u64;
-    let mut next = || {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        (state >> 11) as f32 / (1u64 << 53) as f32
-    };
-    let mut out = Vec::with_capacity(1500 * 6);
-    for _ in 0..1500 {
-        let d = Vec3::new(next() * 2.0 - 1.0, next() * 2.0 - 1.0, next() * 2.0 - 1.0);
-        let size = 0.15 + next() * 0.1;
-        let len2 = d.length_squared();
-        if !(0.01..1.0).contains(&len2) {
-            continue;
-        }
-        let centre = d.normalize() * 100.0;
-        let n = centre.normalize();
-        let tangent = if n.y.abs() < 0.99 {
-            n.cross(Vec3::Y).normalize()
-        } else {
-            n.cross(Vec3::X).normalize()
-        };
-        let spin = next() * std::f32::consts::TAU;
-        let bitangent = n.cross(tangent);
-        let a = (tangent * spin.cos() + bitangent * spin.sin()) * size;
-        let b = n.cross(a);
-        let corners = [
-            centre - a - b,
-            centre + a - b,
-            centre + a + b,
-            centre - a + b,
-        ];
+    let quads = crate::stars::star_quads();
+    let mut out = Vec::with_capacity(quads.len() * 6);
+    for corners in &quads {
         for i in [0usize, 1, 2, 0, 2, 3] {
             out.push(SkyVertex {
-                pos: corners[i].to_array(),
+                pos: corners[i],
                 uv: [0.0; 2],
                 color: [1.0; 4],
                 rect: [0; 4],

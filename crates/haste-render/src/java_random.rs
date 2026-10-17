@@ -14,6 +14,25 @@ const LCG_INCREMENT: u64 = 11;
 const LCG_MASK: u64 = (1u64 << 48) - 1;
 
 impl JavaRandom {
+    /// A generator seeded like `SingleThreadedRandomSource.setSeed` (the seed scrambled with
+    /// the multiplier).
+    pub(crate) fn new(seed: i64) -> JavaRandom {
+        JavaRandom((seed as u64 ^ LCG_MULTIPLIER) & LCG_MASK)
+    }
+
+    /// `BitRandomSource.nextFloat`: 24 bits times 2^-24.
+    pub(crate) fn next_float(&mut self) -> f32 {
+        self.next_i32(24) as f32 * 5.960_464_5e-8
+    }
+
+    /// `BitRandomSource.nextDouble`: 26 + 27 bits times vanilla's float constant 1.110223e-16
+    /// (widened to double).
+    pub(crate) fn next_double(&mut self) -> f64 {
+        let upper = self.next_i32(26) as i64;
+        let lower = self.next_i32(27) as i64;
+        ((upper << 27) + lower) as f64 * (1.110_223e-16_f32 as f64)
+    }
+
     pub(crate) fn next_i32(&mut self, bits: u32) -> i32 {
         self.0 = (self
             .0

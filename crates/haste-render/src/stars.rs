@@ -1,5 +1,55 @@
-// The night sky's stars (vanilla `SkyRenderer.buildStars` / `renderStars`): the brightness
-// track of the overworld day timeline (`visual/star_brightness`).
+// The night sky's stars (vanilla `SkyRenderer.buildStars` / `renderStars`): the star field
+// from vanilla's seeded random and the brightness track of the overworld day timeline
+// (`visual/star_brightness`).
+
+use glam::{Mat3, Vec3};
+
+use crate::java_random::JavaRandom;
+
+/// Vanilla's star seed and attempt count (`SkyRenderer.buildStars`).
+const STAR_SEED: i64 = 10842;
+const STAR_ATTEMPTS: usize = 1500;
+
+/// The star quads in the celestial frame (sun-angle rotation applied by the shader), four
+/// corners each in vanilla's vertex order. Follows `SkyRenderer.buildStars`: a direction and
+/// a size from `nextFloat`, rejected outside the shell 0.01 < |d|^2 < 1, pushed out to radius
+/// 100, then a spin from `nextDouble`; the quad faces the origin (`rotateTowards(-centre,
+/// +Y)`) and turns by `-spin` about its own Z.
+pub fn star_quads() -> Vec<[[f32; 3]; 4]> {
+    let mut random = JavaRandom::new(STAR_SEED);
+    let mut out = Vec::with_capacity(STAR_ATTEMPTS);
+    for _ in 0..STAR_ATTEMPTS {
+        let x = random.next_float() * 2.0 - 1.0;
+        let y = random.next_float() * 2.0 - 1.0;
+        let z = random.next_float() * 2.0 - 1.0;
+        let size = 0.15 + random.next_float() * 0.1;
+        let len2 = x * x + y * y + z * z;
+        if len2 <= 0.010_000_001 || len2 >= 1.0 {
+            continue;
+        }
+        let centre = Vec3::new(x, y, z) * ((1.0 / len2.sqrt()) * 100.0);
+        let spin = (random.next_double() * std::f32::consts::PI as f64 * 2.0) as f32;
+        let basis = towards(-centre, Vec3::Y) * Mat3::from_rotation_z(-spin);
+        let corner = |sx: f32, sy: f32| (basis * Vec3::new(sx, sy, 0.0) + centre).to_array();
+        out.push([
+            corner(size, -size),
+            corner(size, size),
+            corner(-size, size),
+            corner(-size, -size),
+        ]);
+    }
+    out
+}
+
+/// JOML's `Matrix3f.rotateTowards(dir, up)` on the identity: the basis whose columns are
+/// left = normalize(up x dir), up' = dir x left and dir (normalized), mapping +Z onto `dir`.
+fn towards(dir: Vec3, up: Vec3) -> Mat3 {
+    let dir = dir * (1.0 / dir.length());
+    let left = up.cross(dir);
+    let left = left * (1.0 / left.length());
+    let up = dir.cross(left);
+    Mat3::from_cols(left, up, dir)
+}
 
 /// `visual/star_brightness` keyframes of the overworld day timeline (`Timelines`, a MAXIMUM
 /// modifier over the default 0), piecewise linear and wrapping over the 24000-tick day.
