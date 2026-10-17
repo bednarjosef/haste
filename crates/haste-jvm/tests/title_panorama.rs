@@ -24,16 +24,24 @@ fn title_screen_extracts_a_spinning_panorama() {
         .load_jar_registries()
         .expect("registries from the jar");
     let gui = h.gui();
-    gui.open_screen(ScreenKind::Title).expect("open the title screen");
+    gui.open_screen(ScreenKind::Title)
+        .expect("open the title screen");
     let render = || gui.render(320, 240, 2, (0.0, 0.0), 0.0).expect("render");
 
     // TitleScreen.extractRenderState -> extractPanorama: the frame carries the panorama and
     // the overlay blit over the whole screen (Panorama.extractRenderState).
     let f = render();
-    let first = gui.panorama().expect("the title screen extracts the panorama");
+    let first = gui
+        .panorama()
+        .expect("the title screen extracts the panorama");
     let overlay = f.commands.iter().find_map(|c| match c {
         GuiCommand::Texture {
-            texture, w, h, tex_w, tex_h, ..
+            texture,
+            w,
+            h,
+            tex_w,
+            tex_h,
+            ..
         } if texture.path() == "textures/gui/title/background/panorama_overlay.png" => {
             Some((*w, *h, *tex_w, *tex_h))
         }

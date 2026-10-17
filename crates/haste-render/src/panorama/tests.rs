@@ -65,7 +65,9 @@ fn indices_cover_six_quads() {
 fn faces_stack_in_vanillas_layer_order_upside_down() {
     // Face i is 1x2: top row value 10*i, bottom row 10*i + 1.
     let faces: [image::RgbaImage; 6] = std::array::from_fn(|i| {
-        image::RgbaImage::from_fn(1, 2, |_, y| image::Rgba([(10 * i) as u8 + y as u8, 0, 0, 255]))
+        image::RgbaImage::from_fn(1, 2, |_, y| {
+            image::Rgba([(10 * i) as u8 + y as u8, 0, 0, 255])
+        })
     });
     let (w, h, rgba) = stack_faces(&faces).unwrap();
     assert_eq!((w, h), (1, 2));
