@@ -146,6 +146,11 @@ impl PackStack {
     pub fn open_with_server(packs_dir: &Path, ids: &[String], server: &[PathBuf]) -> PackStack {
         let mut packs = Vec::with_capacity(ids.len() + server.len());
         for id in ids {
+            // The built-in vanilla pack (BuiltInPackSource.VANILLA_ID) is the client's own
+            // assets, the base every stack sits on; options.txt lists it like any pack.
+            if id == VANILLA_PACK_ID {
+                continue;
+            }
             match open_pack_layer(packs_dir, id) {
                 Ok(Some(layer)) => packs.push(layer),
                 Ok(None) => tracing::info!("resource pack {id} not found, skipping"),
@@ -233,6 +238,9 @@ pub fn discover_packs(packs_dir: &Path) -> Result<Vec<PackInfo>> {
 }
 
 /// Opens a pack by id (`file/<name>`) from `packs_dir` for layering.
+/// The built-in vanilla pack's id in the selection (vanilla `BuiltInPackSource.VANILLA_ID`).
+pub const VANILLA_PACK_ID: &str = "vanilla";
+
 fn open_pack_layer(packs_dir: &Path, id: &str) -> Result<Option<PackLayer>> {
     let name = id
         .strip_prefix("file/")
@@ -680,6 +688,12 @@ mod tests {
             stack.ids(),
             vec!["file/BluePack.zip".to_string(), "file/RedPack".to_string()]
         );
+        // The built-in vanilla id is the base assets, not a layer (and not an error).
+        let base = PackStack::open(
+            &packs_dir,
+            &["vanilla".to_string(), "file/RedPack".to_string()],
+        );
+        assert_eq!(base.ids(), vec!["file/RedPack".to_string()]);
         let empty = PackStack::open(&packs_dir, &["file/Deleted".to_string()]);
         assert!(empty.ids().is_empty());
     }

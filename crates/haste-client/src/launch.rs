@@ -149,8 +149,9 @@ async fn wait_for_ctrl_c() {
 pub async fn run_login() -> anyhow::Result<()> {
     // begin_device_code is the first thing that would use the client id, so this check is what
     // keeps the unset-env error before any network call.
-    require_client_id(haste_setup::msa::client_id())?;
-    let tokens = haste_setup::msa::device_code_login(|device| {
+    let endpoints = haste_setup::msa::MsaEndpoints::from_env();
+    require_client_id(endpoints.client_id.clone())?;
+    let tokens = haste_setup::msa::device_code_login(&endpoints, |device| {
         println!(
             "to sign in, open {} and enter the code {}",
             device.verification_uri, device.user_code
@@ -191,15 +192,13 @@ fn run_logout() -> anyhow::Result<()> {
 /// `haste logout` against an explicit config path; tests use temp files, the command uses the
 /// platform config.
 fn run_logout_at(path: &std::path::Path) -> anyhow::Result<()> {
-    let mut config = haste_setup::config::Config::load_from(path)?;
-    match config.msa.take() {
+    match haste_setup::msa::remove_stored_account(path)? {
         Some(tokens) => {
             let name = tokens
                 .profile
                 .as_ref()
                 .map(|p| p.name.as_str())
                 .unwrap_or("unknown account");
-            config.save_to(path)?;
             println!("logged out {name}");
         }
         None => println!("no account was logged in"),

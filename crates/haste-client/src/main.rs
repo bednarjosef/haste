@@ -21,13 +21,18 @@ mod boat;
 mod game;
 mod hand;
 mod headless;
+mod horse;
+mod item_based_steering;
 mod launch;
 mod net;
+mod pig;
 mod player;
 mod screen_effects;
 mod screenshots;
 mod script;
 mod sound;
+mod strider;
+mod travel;
 mod ui;
 
 #[derive(Parser, Debug)]
