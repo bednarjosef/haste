@@ -11,6 +11,7 @@ pub mod blockentity;
 pub mod blur;
 pub mod entity;
 pub mod fluid;
+pub mod fluid_occlusion;
 pub mod fog;
 pub mod gui;
 pub mod lightmap;
