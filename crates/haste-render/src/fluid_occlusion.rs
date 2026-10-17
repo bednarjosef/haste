@@ -5,7 +5,7 @@
 //! Boxes are `[min_x, min_y, min_z, max_x, max_y, max_z]` in block units. The fluid itself is
 //! the box `(0, 0, 0)..(1, height, 1)`, as in vanilla.
 
-use haste_core::Direction;
+use haste_assets::Direction;
 
 /// A neighbour's face occlusion shape (`BlockState.getFaceOcclusionShape`).
 #[derive(Clone, Copy, Debug)]
