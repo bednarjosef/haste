@@ -3,8 +3,8 @@
 use glam::{Mat4, Vec3};
 use haste_core::BlockPos;
 
-use super::book::{book_model, book_openness, book_pose};
-use super::{emit_object, BlockEntityAnim, BlockEntityInstance};
+use super::book::{book_openness, book_pose, emit_book};
+use super::{BlockEntityAnim, BlockEntityInstance};
 use crate::entity::EntityVertex;
 
 /// Vanilla `EnchantTableRenderer.submit`'s page flips: `frac(flip + offset) * 1.6 - 0.3`,
@@ -53,14 +53,12 @@ pub(super) fn submit(
     let ff2 = enchant_page_flip(flip, 0.75);
     let openness = book_openness(time, open);
     let (pose, offset) = book_pose(openness, ff1, ff2);
-    let model = book_model();
-    emit_object(
+    emit_book(
         out,
-        model,
-        offset,
         &pose,
+        offset,
         enchant_root(inst.pos, time, rot, camera),
         light,
-        &mut |_| rect,
+        rect,
     );
 }

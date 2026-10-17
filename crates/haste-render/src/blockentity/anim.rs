@@ -73,9 +73,12 @@ impl BlockEntityAnim {
                     start: open.start,
                     end: open.at(partial),
                 },
+                // Vanilla `extractRenderState`: `oRot` plus the difference wrapped into
+                // [-PI, PI) times the partial tick (`rot` wraps at the start of the tick, so
+                // a plain lerp would spin the book the long way round).
                 rot: TickPair {
                     start: rot.start,
-                    end: rot.at(partial),
+                    end: rot.start + wrap_pi(rot.end - rot.start) * partial,
                 },
                 t_rot,
                 flip_t,
@@ -118,3 +121,19 @@ impl BlockEntityAnim {
         }
     }
 }
+
+/// Vanilla's wrap of an angle into [-PI, PI) (the `while` loops of
+/// `EnchantingTableBlockEntity.bookAnimationTick` and `EnchantTableRenderer.extractRenderState`).
+pub fn wrap_pi(mut v: f32) -> f32 {
+    use std::f32::consts::{PI, TAU};
+    while v >= PI {
+        v -= TAU;
+    }
+    while v < -PI {
+        v += TAU;
+    }
+    v
+}
+
+#[cfg(test)]
+mod tests;

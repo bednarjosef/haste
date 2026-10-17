@@ -14,25 +14,29 @@ use haste_world::World;
 pub(super) static MODEL_RNG: parking_lot::Mutex<u64> =
     parking_lot::Mutex::new(0x2545_f491_4f6c_dd1d);
 
-/// `RandomSource.nextInt(bound)`: vanilla's 26.3 `XoroshiroRandomSource.nextInt` — the unsigned
-/// 32-bit draw multiplied by the bound, with the rejection loop that removes the modulo bias.
+/// `RandomSource.nextInt(bound)` of the table's static `RandomSource.create()`, a
+/// `LegacyRandomSource` (Java's 48-bit LCG; `rng` is its scrambled seed): `next(31)` per draw,
+/// the power-of-two shortcut, else `BitRandomSource.nextInt`'s rejection loop. Every draw
+/// advances the seed (the earlier version only advanced it inside the rejection loop, so the
+/// page-flip `do while` drew the same value forever and hung the game thread next to a table).
 fn model_next_int(rng: &mut u64, bound: u32) -> u32 {
-    const MASK: u64 = 0xFFFF_FFFF;
-    let mut bits = (*rng >> 32) & MASK;
-    let mut mul = bits * bound as u64;
-    let mut frac = mul & MASK;
-    if frac < bound as u64 {
-        let start = (u32::MAX - bound + 1).wrapping_rem(bound) as u64;
-        while frac < start {
-            *rng = rng
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            bits = (*rng >> 32) & MASK;
-            mul = bits * bound as u64;
-            frac = mul & MASK;
+    const MULTIPLIER: u64 = 0x5_DEEC_E66D;
+    const MASK: u64 = (1 << 48) - 1;
+    let mut next31 = || {
+        *rng = rng.wrapping_mul(MULTIPLIER).wrapping_add(11) & MASK;
+        (*rng >> 17) as i32
+    };
+    let bound = bound as i32;
+    if bound & (bound - 1) == 0 {
+        return ((bound as i64 * next31() as i64) >> 31) as u32;
+    }
+    loop {
+        let sample = next31();
+        let modulo = sample % bound;
+        if sample.wrapping_sub(modulo).wrapping_add(bound - 1) >= 0 {
+            return modulo as u32;
         }
     }
-    (mul >> 32) as u32
 }
 
 /// One tick of vanilla's block entity tickers for the object-model block entities: the bell
@@ -76,13 +80,14 @@ pub(super) fn tick_model_anims(t: TickModelAnims<'_>) {
                 flip_t,
                 flip_a,
             } => {
-                // `bookAnimationTick`: a player within 3 blocks opens the book and turns it
-                // toward them (the client level only knows the local player).
+                // `bookAnimationTick`: a player within 3 blocks (`getNearestPlayer`'s strict
+                // `dist < range * range`) opens the book and turns it toward them. Only the
+                // local player is checked: the entity store has no player iterator yet.
                 let near = {
                     let dx = t.feet.x - (pos.x as f64 + 0.5);
                     let dy = t.feet.y - (pos.y as f64 + 0.5);
                     let dz = t.feet.z - (pos.z as f64 + 0.5);
-                    dx * dx + dy * dy + dz * dz <= 9.0
+                    dx * dx + dy * dy + dz * dz < 9.0
                 };
                 flip.start = flip.end;
                 open.start = open.end;
@@ -322,3 +327,6 @@ fn conduit_shape(
         hunting: effect_blocks >= 42,
     }
 }
+
+#[cfg(test)]
+mod tests;

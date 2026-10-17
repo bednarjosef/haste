@@ -3,8 +3,8 @@
 use glam::{Mat4, Vec3};
 use haste_core::{BlockPos, Direction};
 
-use super::book::{book_model, book_openness, book_pose};
-use super::{clockwise, emit_object, to_y_rot, BlockEntityInstance};
+use super::book::{book_openness, book_pose, emit_book};
+use super::{clockwise, to_y_rot, BlockEntityInstance};
 use crate::entity::EntityVertex;
 
 /// Vanilla `LecternRenderer.submit`'s transform: (0.5, 1.0625, 0.5), `-yRot` about y, 67.5
@@ -31,14 +31,12 @@ pub(super) fn submit(
     // Vanilla `LecternRenderer`'s fixed `BOOK_STATE`: `forAnimation(0, 0.1, 0.9, 1.2)`.
     let openness = book_openness(0.0, 1.2);
     let (pose, offset) = book_pose(openness, 0.1, 0.9);
-    let model = book_model();
-    emit_object(
+    emit_book(
         out,
-        model,
-        offset,
         &pose,
+        offset,
         lectern_root(inst.pos, inst.facing, camera),
         light,
-        &mut |_| rect,
+        rect,
     );
 }

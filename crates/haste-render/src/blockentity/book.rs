@@ -7,7 +7,10 @@ use glam::Vec3;
 use haste_core::model::{CubeModel, ModelPart};
 use haste_core::Identifier;
 
-use super::{part, pose_of, ObjectPose};
+use glam::Mat4;
+
+use super::{emit_object_part, part, pose_of, ObjectPose};
+use crate::entity::EntityVertex;
 
 /// Vanilla `BookModel.createBodyLayer` (64x32). `left_lid`, `right_lid`, `seam`, `left_pages`,
 /// `right_pages` and the two `flip_page`s; the pose (`BookModel.setupAnim`) is per instance.
@@ -124,4 +127,23 @@ pub(super) fn book_pose(openness: f32, flip1: f32, flip2: f32) -> (ObjectPose, V
     ]);
     let slide = (openness as f64).sin() as f32;
     (pose, Vec3::new(slide, 0.0, 0.0))
+}
+
+/// Draws the posed book (vanilla `Model.renderToBuffer` after `BookModel.setupAnim`): the slide
+/// `setupAnim` gives the pages (`x = sin(openness)`) moves only `left_pages`, `right_pages` and
+/// the two flip pages; the lids and the seam stay at their pivots.
+pub(super) fn emit_book(
+    out: &mut Vec<EntityVertex>,
+    pose: &ObjectPose,
+    slide: Vec3,
+    root: Mat4,
+    light: (u8, u8),
+    rect: [u32; 4],
+) {
+    let model = book_model();
+    for p in &model.root.children {
+        let pages = p.name.ends_with("_pages") || p.name.starts_with("flip_page");
+        let offset = if pages { slide } else { Vec3::ZERO };
+        emit_object_part(out, model, p, pose, root, rect, offset, light);
+    }
 }

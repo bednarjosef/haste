@@ -53,7 +53,8 @@ impl WorldFeed {
                 .insert(pos, (key.0, key.1, world_age, parse_gateway_age(&be.nbt)));
             parse_gateway_age(&be.nbt)
         };
-        let beam = parse_gateway_beam(age, partial);
+        let max_y = world.dimension().min_y + world.dimension().height - 1;
+        let beam = parse_gateway_beam(age, partial, max_y);
         (faces, beam)
     }
 }
@@ -61,16 +62,16 @@ impl WorldFeed {
 /// The end gateway's beam (vanilla `TheEndGatewayRenderer.extractRenderState`): spawning
 /// under age 200 in magenta to the build limit; the cooldown phase arrives as a block event
 /// (not in the NBT), so it is not drawn yet. `None` hides the beam.
-fn parse_gateway_beam(age: i64, partial: f32) -> Option<haste_render::GatewayBeam> {
+fn parse_gateway_beam(age: i64, partial: f32, max_y: i32) -> Option<haste_render::GatewayBeam> {
     if age >= 200 {
         return None;
     }
     // Vanilla `getSpawnPercent`: `clamp((age + partial) / 200, 0, 1)`, then `sin(scale * PI)`;
     // the beam distance is the build limit (`level.getMaxY()`), the height its floor. The
-    // overworld's build limit is 320.
+    // world's `getMaxY()` is `minY + height - 1`.
     let scale = ((age as f32 + partial) / 200.0).clamp(0.0, 1.0);
     let scale = (scale * std::f32::consts::PI).sin();
-    let height = (scale * 320.0).floor() as i32;
+    let height = (scale as f64 * max_y as f64).floor() as i32;
     Some(haste_render::GatewayBeam {
         scale,
         height,

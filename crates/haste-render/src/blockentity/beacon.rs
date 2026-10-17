@@ -169,13 +169,13 @@ pub(crate) fn emit_beam(
     let root =
         Mat4::from_translation((inst_pos.as_dvec3() - camera).as_vec3() + Vec3::new(0.5, 0.0, 0.5));
     let rect = rect_of(texture);
+    // The beam colour as a linear-RGB multiplier: the atlas is sampled as sRGB (linear values
+    // in the shader) and the target re-encodes, so vanilla's sRGB-space `texture * colour`
+    // needs the colour linearised too (like the armour and banner tints, `argb_linear`).
+    // Passing the raw sRGB bytes washed the gateway's magenta out to pink.
     let argb = |c: u32, a: u32| {
-        [
-            ((c >> 16) & 0xFF) as f32 / 255.0,
-            ((c >> 8) & 0xFF) as f32 / 255.0,
-            (c & 0xFF) as f32 / 255.0,
-            a as f32 / 255.0,
-        ]
+        let [r, g, b] = crate::entity::argb_linear(c);
+        [r, g, b, a as f32 / 255.0]
     };
     let solid = solid_radius * radius_scale;
     let glow_r = glow_radius * radius_scale;

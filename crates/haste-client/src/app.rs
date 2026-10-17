@@ -1004,6 +1004,12 @@ impl WorldFeed {
                 let spin = self.spin_map.get(&pos).copied().unwrap_or((0.0, 0.0));
                 let kind =
                     self.item_block_kind(pos, be, kind, type_name, blocks, state, registries, spin);
+                // Vanilla `LecternRenderer`: the book only while the state's `has_book` is true.
+                if kind == haste_render::BlockEntityKind::Lectern
+                    && blocks.property_value(state, "has_book") != Some("true")
+                {
+                    continue;
+                }
                 let facing = blocks
                     .property_value(state, "facing")
                     .and_then(direction_of_property)
