@@ -240,7 +240,10 @@ pub enum ProtocolError {
     /// screen: the client closes the connection itself (vanilla's
     /// `PackConfirmScreen` callback disconnects with
     /// [`REQUIRED_PACK_DISCONNECT`]).
-    #[error("declined a required server resource pack ({})", REQUIRED_PACK_DISCONNECT)]
+    #[error(
+        "declined a required server resource pack ({})",
+        REQUIRED_PACK_DISCONNECT
+    )]
     RequiredPackDeclined,
     /// Authentication failed.
     #[error("authentication: {0}")]
@@ -881,7 +884,10 @@ impl Connection {
     pub fn answer_server_packs(&self, accepted: bool) -> Option<PackAnswer> {
         let answer = self.packs.answer(accepted)?;
         if answer.disconnects() {
-            set_closed(&self.closed, ProtocolError::RequiredPackDeclined.to_string());
+            set_closed(
+                &self.closed,
+                ProtocolError::RequiredPackDeclined.to_string(),
+            );
             let _ = self.tx.send(Outgoing::Shutdown);
             self.reader.abort();
         }

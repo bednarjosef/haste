@@ -635,7 +635,10 @@ mod tests {
         assert!(ServerList::save_pack_status(&path, "alpha.example.com", Some(true)).unwrap());
         let reloaded = ServerList::load(&path).unwrap();
         assert_eq!(reloaded.pack_status_for("alpha.example.com"), Some(true));
-        assert_eq!(reloaded.pack_status_for("beta.example.com:25565"), Some(false));
+        assert_eq!(
+            reloaded.pack_status_for("beta.example.com:25565"),
+            Some(false)
+        );
 
         // Decline writes disabled; back to prompt removes the tag.
         ServerList::save_pack_status(&path, "alpha.example.com", Some(false)).unwrap();

@@ -163,7 +163,10 @@ async fn prompt_batches_pushes_keeps_alive_and_follows_yes() {
     );
     let shown = screen.shown.lock().unwrap().clone();
     let (u1, u2) = (Uuid::from_u128(1), Uuid::from_u128(2));
-    assert_eq!(shown, vec![vec![(u1, false)], vec![(u1, false), (u2, false)]]);
+    assert_eq!(
+        shown,
+        vec![vec![(u1, false)], vec![(u1, false), (u2, false)]]
+    );
     assert_eq!(
         *screen.answered.lock().unwrap(),
         vec![PackAnswer {
@@ -199,11 +202,12 @@ async fn declining_a_required_pack_disconnects_without_a_status() {
             .is_err()
     });
     let opts = options(addr, ResourcePackPolicy::Prompt, &screen, downloads.path());
-    let err = tokio::time::timeout(Duration::from_secs(10), Connection::connect(opts))
+    let Err(err) = tokio::time::timeout(Duration::from_secs(10), Connection::connect(opts))
         .await
         .expect("connect timeout")
-        .err()
-        .expect("the join must fail");
+    else {
+        panic!("the join must fail");
+    };
     assert!(matches!(err, ProtocolError::RequiredPackDeclined), "{err}");
     assert!(server.await.unwrap(), "no packet after the decline");
     assert_eq!(
@@ -287,7 +291,10 @@ async fn disabled_declines_optional_asks_for_required_and_play_waits() {
     // The game thread's side: the push waits until answered.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while conn.pending_pack_pushes().is_empty() {
-        assert!(std::time::Instant::now() < deadline, "the play push never waited");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the play push never waited"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(conn.pending_pack_pushes()[0].id, Uuid::from_u128(8));
@@ -331,7 +338,11 @@ fn answers_follow_the_confirm_screen_callback() {
     assert_eq!(a.saved_status(), Some(Some(false)));
     let a = PackAnswer::for_pushes(false, &[push(false), push(true)]);
     assert!(a.disconnects());
-    assert_eq!(a.saved_status(), None, "a required decline keeps the status");
+    assert_eq!(
+        a.saved_status(),
+        None,
+        "a required decline keeps the status"
+    );
     let a = PackAnswer::for_pushes(true, &[push(true)]);
     assert_eq!(a.saved_status(), Some(Some(true)));
     assert_eq!(a.policy(), ResourcePackPolicy::Accept);

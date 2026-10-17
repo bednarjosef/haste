@@ -747,7 +747,11 @@ fn cosmetic_warning_fires_once_per_name() {
 
 impl Server {
     /// Accepts a connection and runs handshake + offline login.
-    pub(super) async fn accept(listener: &TcpListener, tables: Arc<ProtocolTables>, intent: i32) -> Server {
+    pub(super) async fn accept(
+        listener: &TcpListener,
+        tables: Arc<ProtocolTables>,
+        intent: i32,
+    ) -> Server {
         let (stream, _) = listener.accept().await.unwrap();
         let (r, w) = stream.into_split();
         let mut s = Server {
