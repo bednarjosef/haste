@@ -12,9 +12,43 @@ use rsa::{Pkcs1v15Encrypt, RsaPublicKey};
 use sha1::{Digest, Sha1};
 use uuid::Uuid;
 
+/// Mojang's session server: `session/minecraft/join` lives under it.
+pub const MOJANG_SESSION_HOST: &str = "https://sessionserver.mojang.com";
+/// Mojang's services API: `player/certificates` (the chat key pair) lives under it.
+pub const MOJANG_SERVICES_HOST: &str = "https://api.minecraftservices.com";
+/// Overrides [`MOJANG_SESSION_HOST`] (a local fake API for tests; never set for players).
+pub const SESSION_HOST_ENV: &str = "HASTE_SESSION_HOST";
+/// Overrides [`MOJANG_SERVICES_HOST`] (a local fake API for tests; never set for players).
+pub const SERVICES_HOST_ENV: &str = "HASTE_SERVICES_HOST";
+
 /// The session server endpoint a client posts to before answering an
-/// encryption request in online mode.
+/// encryption request in online mode (on Mojang's real host).
 pub const SESSION_JOIN_URL: &str = "https://sessionserver.mojang.com/session/minecraft/join";
+
+/// The session server base URL: `HASTE_SESSION_HOST` if set, else Mojang's.
+pub fn session_host() -> String {
+    host_from_env(SESSION_HOST_ENV, MOJANG_SESSION_HOST)
+}
+
+/// The services API base URL: `HASTE_SERVICES_HOST` if set, else Mojang's.
+pub fn services_host() -> String {
+    host_from_env(SERVICES_HOST_ENV, MOJANG_SERVICES_HOST)
+}
+
+/// Whether both API hosts are overridden (what a test account requires, so it can never
+/// reach Mojang's real servers).
+pub fn hosts_overridden() -> bool {
+    [SESSION_HOST_ENV, SERVICES_HOST_ENV]
+        .iter()
+        .all(|v| std::env::var(v).is_ok_and(|h| !h.trim().is_empty()))
+}
+
+fn host_from_env(var: &str, default: &str) -> String {
+    match std::env::var(var) {
+        Ok(h) if !h.trim().is_empty() => h.trim().trim_end_matches('/').to_string(),
+        _ => default.to_string(),
+    }
+}
 
 /// Minecraft Java credentials from the Microsoft login flow.
 #[derive(Clone, Debug)]
@@ -47,14 +81,23 @@ pub fn minecraft_hex_digest(digest: &[u8]) -> String {
     BigInt::from_signed_bytes_be(digest).to_str_radix(16)
 }
 
-/// The `serverId` hash for the session join: SHA-1 over the server id string,
-/// the shared secret and the server's DER public key.
+/// The `serverId` hash for the session join (vanilla `ClientHandshakePacketListenerImpl.handleHello`
+/// over `Crypt.digestData`): SHA-1 over the server id in ISO-8859-1, the shared secret and the
+/// server's DER public key, as [`minecraft_hex_digest`].
 pub fn server_hash(server_id: &str, shared_secret: &[u8], public_key_der: &[u8]) -> String {
     let mut h = Sha1::new();
-    h.update(server_id.as_bytes());
+    h.update(iso_8859_1(server_id));
     h.update(shared_secret);
     h.update(public_key_der);
     minecraft_hex_digest(&h.finalize())
+}
+
+/// Java's `String.getBytes("ISO_8859_1")`: one byte per char, `?` for chars above U+00FF
+/// (a UTF-16 surrogate pair is one unmappable char, so one `?`, like a Rust `char`).
+fn iso_8859_1(s: &str) -> Vec<u8> {
+    s.chars()
+        .map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?'))
+        .collect()
 }
 
 /// A fresh random 16-byte AES shared secret.
@@ -73,10 +116,11 @@ pub fn rsa_encrypt(public_key_der: &[u8], data: &[u8]) -> Result<Vec<u8>, AuthEr
         .map_err(|e| AuthError::Rsa(e.to_string()))
 }
 
-/// Tells the session server we are joining the server identified by
+/// Tells the session server ([`session_host`]) we are joining the server identified by
 /// `server_hash` (expects HTTP 204).
 pub async fn join_session(tokens: &MsaTokens, server_hash: &str) -> Result<(), AuthError> {
-    join_session_at(SESSION_JOIN_URL, tokens, server_hash).await
+    let url = format!("{}/session/minecraft/join", session_host());
+    join_session_at(&url, tokens, server_hash).await
 }
 
 /// [`join_session`] against an explicit URL (tests).
