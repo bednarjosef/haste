@@ -1,12 +1,15 @@
-//! Remote-entity position smoothing ("lerp steps").
+//! Remote-entity position smoothing: Haste's `LinearInterpolationHandler`.
 //!
-//! Observed vanilla behaviour (not decompiled code): a remote entity that receives a move packet
-//! does not jump to the new position; it covers the distance over the next 3 ticks, each tick
-//! travelling 1/`remaining` of what is left. A new packet arriving mid-flight extends the target
-//! and restarts the 3-tick window, so under steady 20 Hz packets the entity trails the server
-//! position by roughly 3 ticks. `prev_pos`/`pos` bracket each tick's step so the renderer can
-//! interpolate with the partial tick.
+//! A remote entity that receives a move packet does not jump to the new position; it covers the
+//! distance over the next 3 ticks (`LinearInterpolationHandler.DEFAULT_INTERPOLATION_STEPS`),
+//! each tick travelling 1/`remaining` of what is left (`doInterpolate`). A new target arriving
+//! mid-flight restarts the 3-tick window (`AbstractInterpolationHandler.interpolateTo`), unless
+//! it is the target already in flight. `prev_pos`/`pos` bracket each tick's step so the renderer
+//! can interpolate with the partial tick.
 use haste_core::DVec3;
+
+/// `LinearInterpolationHandler.DEFAULT_INTERPOLATION_STEPS`.
+pub const INTERPOLATION_STEPS: u8 = 3;
 
 pub(crate) struct LerpState {
     /// Where the entity is heading (blocks).
@@ -23,19 +26,37 @@ impl LerpState {
         }
     }
 
-    /// A short-delta move arrived (`delta` in blocks): extend the target, restart the window.
+    /// A short-delta move arrived (`delta` in blocks): the delta codec's base is the last
+    /// target, so the new target is the old one plus the delta; restart the window.
     pub fn on_delta(&mut self, delta: DVec3) {
-        self.target += delta;
-        self.remaining = 3;
+        self.on_target(self.target + delta);
     }
 
-    /// A teleport arrived: abandon any in-flight smoothing and rest on the new position.
-    pub fn on_teleport(&mut self, pos: DVec3) {
+    /// An absolute target arrived (`entity_position_sync` within 64 blocks,
+    /// `Entity.moveOrInterpolateTo`): head there over 3 steps. A target identical to the one
+    /// already in flight does not restart the window (`AbstractInterpolationHandler.interpolateTo`
+    /// checks `is` before `startInterpolating`).
+    pub fn on_target(&mut self, pos: DVec3) {
+        if self.remaining > 0 && self.target == pos {
+            return;
+        }
+        self.target = pos;
+        self.remaining = INTERPOLATION_STEPS;
+    }
+
+    /// `Entity.snapTo`: abandon any in-flight smoothing and rest on the new position.
+    pub fn snap(&mut self, pos: DVec3) {
         self.target = pos;
         self.remaining = 0;
     }
 
-    /// One 20 Hz step: brackets `pos` into `prev_pos`/`pos`.
+    /// `InterpolationHandler.hasActiveInterpolation`.
+    pub fn is_active(&self) -> bool {
+        self.remaining > 0
+    }
+
+    /// One 20 Hz step (`Entity.commonTick`: old position recorded, then `interpolate`):
+    /// brackets `pos` into `prev_pos`/`pos`.
     pub fn tick(&mut self, pos: &mut DVec3, prev_pos: &mut DVec3) {
         *prev_pos = *pos;
         if self.remaining > 0 {

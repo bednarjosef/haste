@@ -24,6 +24,9 @@ pub const DEATH_TICKS: u32 = 20;
 /// `Creeper.DEFAULT_MAX_SWELL` (the `Fuse` component can change it; the default is all the client
 /// usually sees).
 pub const CREEPER_MAX_SWELL: i32 = 30;
+/// `ClientPacketListener.handleEntityPositionSync`: a sync further than this (squared blocks,
+/// 64 blocks) from the entity's current position snaps instead of interpolating.
+pub const TELEPORT_SNAP_DISTANCE_SQ: f64 = 4096.0;
 
 /// `Mth.lerp`.
 fn lerp(delta: f32, start: f32, end: f32) -> f32 {
@@ -579,17 +582,24 @@ impl EntityStore {
         }
     }
 
-    /// A teleport abandons interpolation and snaps both `prev_pos` and `pos` (a teleport is a
-    /// discontinuity; the renderer must not draw a frame travelling the gap).
+    /// An absolute position (`entity_position_sync`, `teleport_entity`):
+    /// `ClientPacketListener.handleEntityPositionSync` interpolates it like a move packet
+    /// (`Entity.moveOrInterpolateTo`, 3 steps) unless the entity is more than 64 blocks away
+    /// (squared distance over `TELEPORT_SNAP_DISTANCE_SQ`), in which case it `snapTo`s: both
+    /// `prev_pos` and `pos` jump, so the renderer never draws a frame travelling the gap.
     pub fn teleport(&mut self, id: EntityId, pos: DVec3, yaw: f32, pitch: f32, on_ground: bool) {
         if let Some(i) = self.slot(id) {
             if let Some(e) = &mut self.slots[i as usize] {
                 e.yaw = yaw;
                 e.pitch = pitch;
                 e.on_ground = on_ground;
-                e.pos = pos;
-                e.prev_pos = pos;
-                e.lerp.on_teleport(pos);
+                if e.pos.distance_squared(pos) > TELEPORT_SNAP_DISTANCE_SQ {
+                    e.pos = pos;
+                    e.prev_pos = pos;
+                    e.lerp.snap(pos);
+                } else {
+                    e.lerp.on_target(pos);
+                }
             }
         }
     }
