@@ -121,7 +121,7 @@ pub(crate) fn apply_end_of_tick_effects(
     if state.on_ground {
         apply_step_on(state, attrs, world, shapes, blocks);
     }
-    apply_inside_block_effects(state, attrs, world, blocks);
+    apply_inside_block_effects(state, attrs, world, shapes, blocks);
 }
 
 /// `SlimeBlock.stepOn`: on the ground on slime with |vy| < 0.1 and not sneaking, horizontal
@@ -153,6 +153,7 @@ fn apply_inside_block_effects(
     state: &mut PlayerState,
     attrs: &PlayerAttributes,
     world: &dyn BlockView,
+    shapes: &dyn CollisionShapes,
     blocks: &dyn BlockPhysics,
 ) {
     let aabb = state.aabb(attrs);
@@ -174,6 +175,9 @@ fn apply_inside_block_effects(
                 }
                 if blocks.is_honey(s) {
                     apply_honey_slide(state, attrs, pos);
+                }
+                if blocks.is_bubble_column(s) {
+                    apply_bubble_column(state, attrs, world, shapes, blocks, pos, s);
                 }
             }
         }
@@ -235,6 +239,44 @@ fn apply_honey_slide(state: &mut PlayerState, attrs: &PlayerAttributes, pos: Blo
     };
     state.velocity = DVec3::new(vx, new_delta_y(HONEY_SLIDE_HORIZONTAL_SPEED), vz);
     state.fall_distance = 0.0;
+}
+
+/// `BubbleColumnBlock.entityInside` -> `Entity.handleOnInsideBubbleColumn` /
+/// `handleOnAboveBubbleColumn`: drag down (magma) or push up (soul sand), depending on the
+/// block's `drag` property; at the surface (air above) the limits are wider. Only the inside
+/// case resets the fall distance; flying skips the effect entirely (Player overrides).
+fn apply_bubble_column(
+    state: &mut PlayerState,
+    attrs: &PlayerAttributes,
+    world: &dyn BlockView,
+    shapes: &dyn CollisionShapes,
+    blocks: &dyn BlockPhysics,
+    pos: BlockPos,
+    s: BlockStateId,
+) {
+    let _ = attrs;
+    if state.flying {
+        return;
+    }
+    let drag_down = blocks.bubble_column_drag_down(s);
+    let above = world.block_state(pos.add(0, 1, 0));
+    let nothing_above = shapes.collision_boxes(above).is_empty() && blocks.fluid(above).is_none();
+    let y = state.velocity.y;
+    let new_y = if nothing_above {
+        if drag_down {
+            (y - 0.03).max(-0.9)
+        } else {
+            (y + 0.1).min(1.8)
+        }
+    } else if drag_down {
+        (y - 0.03).max(-0.3)
+    } else {
+        (y + 0.06).min(0.7)
+    };
+    state.velocity.y = new_y;
+    if !nothing_above {
+        state.fall_distance = 0.0;
+    }
 }
 
 /// `Entity.updateFluidInteraction` + `EntityFluidInteraction`: accumulate the flow vectors of
@@ -670,5 +712,120 @@ mod tests {
         assert!(cells.contains(&BlockPos::new(0, 0, 0)));
         assert!(cells.contains(&BlockPos::new(0, 2, 0)));
         assert_eq!(cells.len(), 3);
+    }
+
+    // ---- bubble columns -------------------------------------------------------------------------
+
+    #[test]
+    fn bubble_column_drags_down_inside() {
+        let mut world = TestWorld::new();
+        // bubble column at feet, another above so it is not the surface.
+        world.set(0, 0, 0, states::BUBBLE_COLUMN);
+        world.set(0, 1, 0, states::BUBBLE_COLUMN);
+        let shapes = TestShapes::default();
+        let attrs = attrs();
+        let mut state = PlayerState::at(DVec3::new(0.5, 0.5, 0.5));
+        state.velocity = DVec3::new(0.0, 0.5, 0.0);
+        let pos = BlockPos::new(0, 0, 0);
+        super::apply_bubble_column(
+            &mut state,
+            &attrs,
+            &world,
+            &shapes,
+            &shapes,
+            pos,
+            states::BUBBLE_COLUMN,
+        );
+        assert_eq!(state.velocity.y, (0.5_f64 - 0.03).max(-0.3));
+        assert_eq!(state.fall_distance, 0.0);
+    }
+
+    #[test]
+    fn bubble_column_drags_down_at_surface() {
+        let mut world = TestWorld::new();
+        world.set(0, 0, 0, states::BUBBLE_COLUMN);
+        // above is air: surface case.
+        let shapes = TestShapes::default();
+        let attrs = attrs();
+        let mut state = PlayerState::at(DVec3::new(0.5, 0.5, 0.5));
+        state.velocity = DVec3::new(0.0, 0.5, 0.0);
+        let pos = BlockPos::new(0, 0, 0);
+        super::apply_bubble_column(
+            &mut state,
+            &attrs,
+            &world,
+            &shapes,
+            &shapes,
+            pos,
+            states::BUBBLE_COLUMN,
+        );
+        assert_eq!(state.velocity.y, (0.5_f64 - 0.03).max(-0.9));
+    }
+
+    #[test]
+    fn bubble_column_pushes_up_inside() {
+        let mut world = TestWorld::new();
+        world.set(0, 0, 0, states::BUBBLE_COLUMN_UP);
+        world.set(0, 1, 0, states::BUBBLE_COLUMN_UP);
+        let shapes = TestShapes::default();
+        let attrs = attrs();
+        let mut state = PlayerState::at(DVec3::new(0.5, 0.5, 0.5));
+        state.velocity = DVec3::new(0.0, -0.5, 0.0);
+        let pos = BlockPos::new(0, 0, 0);
+        super::apply_bubble_column(
+            &mut state,
+            &attrs,
+            &world,
+            &shapes,
+            &shapes,
+            pos,
+            states::BUBBLE_COLUMN_UP,
+        );
+        assert_eq!(state.velocity.y, (-0.5_f64 + 0.06).min(0.7));
+        assert_eq!(state.fall_distance, 0.0);
+    }
+
+    #[test]
+    fn bubble_column_pushes_up_at_surface() {
+        let mut world = TestWorld::new();
+        world.set(0, 0, 0, states::BUBBLE_COLUMN_UP);
+        let shapes = TestShapes::default();
+        let attrs = attrs();
+        let mut state = PlayerState::at(DVec3::new(0.5, 0.5, 0.5));
+        state.velocity = DVec3::new(0.0, -0.5, 0.0);
+        let pos = BlockPos::new(0, 0, 0);
+        super::apply_bubble_column(
+            &mut state,
+            &attrs,
+            &world,
+            &shapes,
+            &shapes,
+            pos,
+            states::BUBBLE_COLUMN_UP,
+        );
+        assert_eq!(state.velocity.y, (-0.5_f64 + 0.1).min(1.8));
+    }
+
+    #[test]
+    fn bubble_column_skipped_while_flying() {
+        let mut world = TestWorld::new();
+        world.set(0, 0, 0, states::BUBBLE_COLUMN);
+        world.set(0, 1, 0, states::BUBBLE_COLUMN);
+        let shapes = TestShapes::default();
+        let attrs = attrs();
+        let mut state = PlayerState::at(DVec3::new(0.5, 0.5, 0.5));
+        state.flying = true;
+        state.velocity = DVec3::new(0.0, 0.5, 0.0);
+        let pos = BlockPos::new(0, 0, 0);
+        super::apply_bubble_column(
+            &mut state,
+            &attrs,
+            &world,
+            &shapes,
+            &shapes,
+            pos,
+            states::BUBBLE_COLUMN,
+        );
+        assert_eq!(state.velocity.y, 0.5);
     }
 }

@@ -71,6 +71,34 @@ pub trait BlockPhysics {
         let _ = state;
         false
     }
+    /// Bubble column: pushes entities up or down depending on the `drag` property
+    /// (`BubbleColumnBlock.entityInside` -> `Entity.handleOnInside/OnAboveBubbleColumn`).
+    fn is_bubble_column(&self, state: BlockStateId) -> bool {
+        let _ = state;
+        false
+    }
+    /// Whether a bubble column drags down (magma) rather than pushes up (soul sand):
+    /// the block state's `drag` property (`BlockStateProperties.DRAG`).
+    fn bubble_column_drag_down(&self, state: BlockStateId) -> bool {
+        let _ = state;
+        false
+    }
+    /// `Some(true)`/`Some(false)` for a bubble column's drag direction, `None` otherwise.
+    fn bubble_column_drag(&self, state: BlockStateId) -> Option<bool> {
+        if self.is_bubble_column(state) {
+            Some(self.bubble_column_drag_down(state))
+        } else {
+            None
+        }
+    }
+    /// Alias for [`Self::bubble_column_drag_down`].
+    fn bubble_column_drags_down(&self, state: BlockStateId) -> bool {
+        self.bubble_column_drag_down(state)
+    }
+    /// Alias for [`Self::bubble_column_drag_down`].
+    fn bubble_drags_down(&self, state: BlockStateId) -> bool {
+        self.bubble_column_drag_down(state)
+    }
     /// Vanilla `Block.getBounceRestitution`: 1.0 for slime, 0.0 otherwise.
     fn bounce_restitution(&self, state: BlockStateId) -> f32 {
         let _ = state;
