@@ -230,3 +230,71 @@ fn baby_walk_position_advances_three_times_as_fast() {
     assert!(near_f(baby_pos, adult_pos * 3.0), "{baby_pos} vs {adult_pos}");
     assert!(near_f(baby_speed, adult_speed));
 }
+
+// ---------------------------------------------------------------------------
+// Item 15: death from health <= 0, red overlay until removal.
+// ---------------------------------------------------------------------------
+
+fn hurt(s: &EntityStore) -> f32 {
+    let mut out = Vec::new();
+    s.render_instances(0.0, &mut out);
+    out[0].hurt
+}
+
+/// `LivingEntityRenderer.extractRenderState`: `hasRedOverlay = hurtTime > 0 || deathTime > 0`,
+/// and `deathTime` only ever grows, so a dead entity stays red until `remove_entities`, however
+/// late that packet is.
+#[test]
+fn dead_entity_keeps_the_red_overlay_past_twenty_ticks() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.mark_dead(EntityId(1));
+    for _ in 0..40 {
+        assert_eq!(hurt(&s), 1.0);
+        s.tick();
+    }
+    assert_eq!(hurt(&s), 1.0);
+    assert!(s.get(EntityId(1)).unwrap().dead);
+}
+
+/// `LivingEntity.isDeadOrDying` is `getHealth() <= 0 || dead`: health 0 in the metadata starts
+/// `tickDeath` without entity event 3 (the server does not send the event on every path).
+#[test]
+fn health_zero_in_metadata_starts_the_death() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.set_metadata(EntityId(1), &[metadata(9, MetadataValue::Float(4.0))]);
+    assert!(!s.get(EntityId(1)).unwrap().dead);
+    assert_eq!(hurt(&s), 0.0);
+    s.set_metadata(EntityId(1), &[metadata(9, MetadataValue::Float(0.0))]);
+    let e = s.get(EntityId(1)).unwrap();
+    assert!(e.dead);
+    assert_eq!(hurt(&s), 1.0);
+    // The death counter starts now: `deathTime` is 20 - hurt_ticks for `animation::death_time`.
+    assert_eq!(e.hurt_ticks, 20);
+}
+
+/// Event 3 arriving after the health metadata (or the reverse) does not restart the counter.
+#[test]
+fn second_death_trigger_does_not_restart_the_counter() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.set_metadata(EntityId(1), &[metadata(9, MetadataValue::Float(-1.0))]);
+    for _ in 0..5 {
+        s.tick();
+    }
+    assert_eq!(s.get(EntityId(1)).unwrap().hurt_ticks, 15);
+    s.mark_dead(EntityId(1));
+    assert_eq!(s.get(EntityId(1)).unwrap().hurt_ticks, 15);
+}
+
+/// A non-living float at index 9 above zero (or an int) is not a death.
+#[test]
+fn positive_health_is_not_a_death() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.set_metadata(EntityId(1), &[metadata(9, MetadataValue::VarInt(0))]);
+    assert!(!s.get(EntityId(1)).unwrap().dead);
+    s.set_metadata(EntityId(1), &[metadata(9, MetadataValue::Float(0.5))]);
+    assert!(!s.get(EntityId(1)).unwrap().dead);
+}

@@ -29,6 +29,9 @@ pub const CREEPER_MAX_SWELL: i32 = 30;
 pub const TELEPORT_SNAP_DISTANCE_SQ: f64 = 4096.0;
 /// `ClientPacketListener.handleRotateMob`: ticks a `rotate_head` packet's yaw is eased over.
 pub const HEAD_LERP_STEPS: u8 = 3;
+/// `LivingEntity.DATA_HEALTH_ID`: the second of `LivingEntity`'s synched fields after
+/// `Entity`'s eight (0-7), so index 9 (a float).
+pub const HEALTH_METADATA_INDEX: u8 = 9;
 
 /// `Mth.lerp`.
 fn lerp(delta: f32, start: f32, end: f32) -> f32 {
@@ -311,6 +314,16 @@ impl Entity {
         }
     }
 
+    /// `LivingEntity.isDeadOrDying` became true: `deathTime` starts counting on the next tick
+    /// (`hurt_ticks` runs the 20-tick death counter down; see `animation::death_time`). A
+    /// second trigger (event 3 after the health metadata, or the reverse) changes nothing.
+    fn start_death(&mut self) {
+        if !self.dead {
+            self.dead = true;
+            self.hurt_ticks = DEATH_TICKS;
+        }
+    }
+
     /// Body yaw between the last two ticks (`Mth.rotLerp(partial, yBodyRotO, yBodyRot)`).
     pub fn body_yaw_at(&self, partial: f32) -> f32 {
         self.prev_body_yaw + partial * wrap_degrees(self.body_yaw - self.prev_body_yaw)
@@ -438,11 +451,12 @@ pub struct EntityStore {
 }
 
 /// Hurt flash strength for an entity's remaining hurt ticks, eased out (quadratic, like
-/// vanilla's `hurtTime`-driven fade: strong on impact, gone by tick 10). `dead` holds the
-/// flash while the death animation's 20 ticks run.
+/// vanilla's `hurtTime`-driven fade: strong on impact, gone by tick 10). A dead entity keeps
+/// the flash until the server removes it (`LivingEntityRenderer.extractRenderState`:
+/// `hasRedOverlay = hurtTime > 0 || deathTime > 0`, and `deathTime` never resets).
 pub fn hurt_strength(e: &Entity) -> f32 {
     if e.dead {
-        return if e.hurt_ticks > 0 { 1.0 } else { 0.0 };
+        return 1.0;
     }
     let left = e.hurt_ticks.min(HURT_TICKS) as f32 / HURT_TICKS as f32;
     left * left
@@ -644,13 +658,14 @@ impl EntityStore {
         }
     }
 
-    /// The death event (entity status 3): holds the hurt tint while the 20-tick death
-    /// animation would play, then nothing.
+    /// The death event (entity status 3, `LivingEntity.handleEntityEvent`): starts the death
+    /// animation (`deathTime` counting from the next tick) and holds the hurt tint until the
+    /// server's `remove_entities`. Health reaching 0 in the metadata starts it too
+    /// (`LivingEntity.isDeadOrDying` -> `tickDeath`); the first of the two wins.
     pub fn mark_dead(&mut self, id: EntityId) {
         if let Some(i) = self.slot(id) {
             if let Some(e) = &mut self.slots[i as usize] {
-                e.dead = true;
-                e.hurt_ticks = DEATH_TICKS;
+                e.start_death();
             }
         }
     }
@@ -671,6 +686,14 @@ impl EntityStore {
             return;
         };
         e.metadata.apply(entries);
+        // `LivingEntity.DATA_HEALTH_ID` (index 9): health at or below 0 means `isDeadOrDying`,
+        // and the client ticks the death animation from that alone (a `/kill` without entity
+        // event 3, a player's death, or the event arriving after the metadata).
+        if let Some(entry) = e.metadata.get(HEALTH_METADATA_INDEX) {
+            if matches!(entry.value, MetadataValue::Float(h) if h <= 0.0) {
+                e.start_death();
+            }
+        }
         // A dropped item entity's stack: `ItemEntity.DATA_ITEM`, the first slot after
         // Entity's eight synched fields (indices 0-7), so index 8. An emptied stack
         // clears the drop.
