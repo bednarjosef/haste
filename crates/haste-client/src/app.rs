@@ -45,6 +45,9 @@ use crate::script;
 use crate::ui::keys;
 use crate::Args;
 use haste_jvm::JvmHost;
+use menu_background::{menu_camera, menu_frame, menu_sky};
+
+mod menu_background;
 
 /// Saved options this run uses: FOV, render distance, mouse sensitivity and (unless the
 /// `--vsync` flag says otherwise) vsync. `Config::load` creates the file with defaults on
@@ -3547,46 +3550,6 @@ fn menu_screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         class.as_deref().unwrap_or("(none)")
     );
     Ok(())
-}
-
-/// The GUI frame of menu mode: the open screen over the plain background the renderer draws
-/// without a world. `mouse` is the cursor in GUI pixels; the camera looks straight ahead.
-fn menu_frame(
-    ui: &mut crate::ui::Ui,
-    renderer: &mut Renderer,
-    input: &InputRouter,
-    options: &Options,
-) -> (GuiFrame, Camera, SkyState, f32) {
-    let (w, h) = renderer.size();
-    let scale = resolve_gui_scale(u32::from(options.gui_scale), w, h);
-    let (gw, gh) = gui_scaled_size(w, h, scale);
-    let gui = ui.frame(gw, gh, scale, input.mouse, 0.0).clone();
-    (gui, menu_camera(), menu_sky(), 0.0)
-}
-
-/// Menu mode's camera: at the origin looking north (the world is not drawn).
-fn menu_camera() -> Camera {
-    Camera {
-        pos: DVec3::ZERO,
-        yaw: 180.0,
-        pitch: 0.0,
-        fov_deg: 70.0,
-        hand_fov_deg: 70.0,
-        roll_deg: 0.0,
-        bob: haste_render::ViewBob::default(),
-    }
-}
-
-/// Menu mode's sky: noon, no fog (a plain bright background behind the screen).
-fn menu_sky() -> SkyState {
-    SkyState {
-        time_of_day: 6000,
-        rain: 0.0,
-        dimension_has_sky: true,
-        fog_start: 1000.0,
-        fog_end: 1000.0,
-        ..Default::default()
-    }
 }
 
 /// `--screenshot <file>`: with `--server`, join, wait until the world is meshed, render one
