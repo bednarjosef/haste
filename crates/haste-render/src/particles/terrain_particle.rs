@@ -2,10 +2,11 @@
 //! grid, mining cracks and the sprint particle.
 
 use glam::{DVec3, Vec3};
-use haste_core::view::{BlockView, CollisionShapes};
+use haste_core::view::CollisionShapes;
 use haste_core::{BlockPos, BlockStateId, Direction};
 
 use super::engine::*;
+use super::providers::ParticleBehaviour;
 use super::*;
 
 impl Particles {

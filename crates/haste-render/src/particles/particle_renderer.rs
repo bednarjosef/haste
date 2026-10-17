@@ -4,6 +4,8 @@
 use std::sync::Arc;
 
 use glam::Vec3;
+use haste_core::view::BlockView;
+use haste_core::BlockPos;
 
 use crate::entity::EntityVertex;
 use crate::renderer::Camera;

@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use haste_assets::{Assets, BitmapFont};
+use haste_assets::{Assets, BitmapFont, SpriteMeta};
 use haste_core::gui::{GuiBlend, GuiFrame};
 use haste_core::Identifier;
 

@@ -3,17 +3,13 @@ mod vanilla_numbers;
 
 use std::sync::Arc;
 
-use glam::Vec3;
 use haste_core::view::CollisionShapes;
 use haste_core::BlockPos;
 
 use super::engine::*;
-use super::particle::*;
 use super::particle_renderer::*;
-use super::providers::*;
 use super::resources::*;
 use super::rng::*;
-use super::single_quad_particle::*;
 use super::*;
 
 /// A type table with hand-written sprite lists (no assets needed).

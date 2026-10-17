@@ -1,6 +1,8 @@
 //! Name tags in GUI space: world tags projected to the screen and their text lines.
 
 use glam::Mat4;
+use haste_assets::Assets;
+use haste_core::gui::TextStyle;
 
 use super::*;
 

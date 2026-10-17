@@ -6,6 +6,7 @@ use std::sync::Arc;
 use glam::{DVec3, Vec3};
 use haste_core::{BlockPos, Identifier};
 
+use super::particle::Motion;
 use super::providers::ParticleBehaviour;
 use super::resources::ParticleTypes;
 use super::rng::Rng;

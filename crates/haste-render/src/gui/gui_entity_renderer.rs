@@ -1,5 +1,6 @@
 //! Entities drawn inside a GUI box (vanilla `GuiEntityRenderer`, the inventory player).
 
+use glam::{Mat4, Vec3};
 use haste_assets::Assets;
 
 use super::*;

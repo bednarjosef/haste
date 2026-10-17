@@ -1,4 +1,6 @@
 use super::*;
+use glam::Vec3;
+use haste_assets::{ItemGeometry, ItemModel};
 
 /// Vanilla's hotbar panel interior over a mid blue: 0.729 * 39/255 + 0.271 * 48/255 = 41.4,
 /// and the same in the other two channels (48.6, 55.6) -> 41, 49, 56.

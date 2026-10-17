@@ -1,8 +1,8 @@
 //! Command list ingestion: each `GuiCommand` turned into quads (vanilla `GuiGraphics`: fills,
 //! blits, nine-sliced and tiled sprites, scissors and blend switches).
 
-use haste_assets::Assets;
-use haste_core::gui::{GuiBlend, GuiCommand, GuiFrame};
+use haste_assets::{Assets, SpriteMeta};
+use haste_core::gui::{GuiBlend, GuiCommand, GuiFrame, TextStyle};
 use haste_core::Identifier;
 
 use super::*;

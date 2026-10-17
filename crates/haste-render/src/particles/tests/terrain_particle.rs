@@ -1,4 +1,5 @@
 use super::*;
+use haste_core::Direction;
 
 #[test]
 fn destroy_spawns_the_vanilla_grid() {
