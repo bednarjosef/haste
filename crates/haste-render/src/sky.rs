@@ -644,13 +644,18 @@ impl SkyRenderer {
                 100.0,
                 30.0,
                 self.rects.sun,
+                false,
                 [1.0, 1.0, 1.0, alpha],
             );
+            // Vanilla's moon quad (`SkyRenderer.buildMoonPhases`) has both U and V reversed
+            // and is turned 180 degrees about X by the moon angle; drawn here at y -100 with
+            // the sun's rotation that leaves only U mirrored.
             push_quad(
                 &mut self.vertices,
                 -100.0,
                 20.0,
                 self.rects.moon[colors.moon_phase],
+                true,
                 [1.0, 1.0, 1.0, alpha],
             );
         }
@@ -790,14 +795,27 @@ fn make_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
     })
 }
 
-/// A horizontal celestial quad at height `y` (celestial space) of half-size `half`.
-fn push_quad(out: &mut Vec<SkyVertex>, y: f32, half: f32, rect: [u32; 4], color: [f32; 4]) {
+/// A horizontal celestial quad at height `y` (celestial space) of half-size `half`; the
+/// texture's U runs along +x, or along -x with `mirror_u`.
+fn push_quad(
+    out: &mut Vec<SkyVertex>,
+    y: f32,
+    half: f32,
+    rect: [u32; 4],
+    mirror_u: bool,
+    color: [f32; 4],
+) {
     let r = rect.map(|v| v as f32);
+    let (u_neg, u_pos) = if mirror_u {
+        (r[0] + r[2], r[0])
+    } else {
+        (r[0], r[0] + r[2])
+    };
     let corners = [
-        ([-half, y, -half], [r[0], r[1]]),
-        ([half, y, -half], [r[0] + r[2], r[1]]),
-        ([half, y, half], [r[0] + r[2], r[1] + r[3]]),
-        ([-half, y, half], [r[0], r[1] + r[3]]),
+        ([-half, y, -half], [u_neg, r[1]]),
+        ([half, y, -half], [u_pos, r[1]]),
+        ([half, y, half], [u_pos, r[1] + r[3]]),
+        ([-half, y, half], [u_neg, r[1] + r[3]]),
     ];
     let rect = rect.map(|v| v as u16);
     for i in [0usize, 1, 2, 0, 2, 3] {

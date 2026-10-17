@@ -131,3 +131,27 @@ fn dimensions_pick_their_sky() {
     d.dimension_type = Identifier::minecraft("the_end");
     assert_eq!(SkyKind::of(&d), SkyKind::End);
 }
+
+/// Vanilla's moon (`SkyRenderer.buildMoonPhases` corner (-1, 0, -1) takes (U1, V1), then the
+/// moon angle turns the quad 180 degrees about X): in our frame the corner at (-h, -100, -h)
+/// shows (U1, V0) and (h, -100, -h) shows (U0, V0). The sun keeps U0 at -x.
+#[test]
+fn moon_uvs_follow_vanilla_mirroring() {
+    let rect = [32, 0, 32, 32];
+    let mut moon = Vec::new();
+    push_quad(&mut moon, -100.0, 20.0, rect, true, [1.0; 4]);
+    let uv_at = |v: &[SkyVertex], x: f32, z: f32| {
+        v.iter()
+            .find(|p| p.pos[0] == x && p.pos[2] == z)
+            .map(|p| p.uv)
+            .unwrap()
+    };
+    assert_eq!(uv_at(&moon, -20.0, -20.0), [64.0, 0.0]);
+    assert_eq!(uv_at(&moon, 20.0, -20.0), [32.0, 0.0]);
+    assert_eq!(uv_at(&moon, 20.0, 20.0), [32.0, 32.0]);
+    assert_eq!(uv_at(&moon, -20.0, 20.0), [64.0, 32.0]);
+    let mut sun = Vec::new();
+    push_quad(&mut sun, 100.0, 30.0, [0, 0, 32, 32], false, [1.0; 4]);
+    assert_eq!(uv_at(&sun, -30.0, -30.0), [0.0, 0.0]);
+    assert_eq!(uv_at(&sun, 30.0, 30.0), [32.0, 32.0]);
+}
