@@ -1364,6 +1364,24 @@ fn a_pig_walks_while_the_carrot_stick_is_held() {
     assert_eq!(p.pig().unwrap().pos, before, "the pig stood down");
 }
 
+/// `LivingEntity.isHolding` looks at both hands: the carrot on a stick in the off hand steers
+/// the pig too.
+#[test]
+fn the_carrot_stick_in_the_off_hand_steers_the_pig() {
+    let (mut p, world) = on_the_pig();
+    p.int.offhand = p.int.hotbar[0].clone();
+    p.held_slot = 1;
+    let hold = InputState::default();
+    tick_riding_world(&mut p, &hold, &world);
+    let out = tick_riding_world(&mut p, &hold, &world);
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, ServerboundPlay::MoveVehicle(_))),
+        "the off-hand stick steers"
+    );
+    assert!(p.pig().unwrap().pos.z > 0.5, "the pig walked");
+}
+
 // ---------------------------------------------------------------------------
 // Elytra flight (vanilla `Player.tryToStartFallFlying`, shared flag 7).
 // ---------------------------------------------------------------------------

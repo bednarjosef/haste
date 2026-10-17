@@ -299,13 +299,14 @@ fn a_rearing_horse_stands_still_until_the_stand_wears_off() {
     assert!(jumping.stand_counter > 0);
     tick_keys(&mut jumping, &e, &forward, (0.0, 0.0));
     assert!(!jumping.on_ground, "the jump fired");
-    // A rear-up without a charge blocks the input while it lasts. The stand counter counts down
-    // inside each tick before the input is read, so the tick that zeroes it already walks.
+    // A rear-up without a charge blocks the input while it lasts. AbstractHorse.tick counts the
+    // stand down after super.tick's ridden travel, so all twenty ticks hold the horse and the
+    // one after walks.
     let mut rearing = settled(DVec3::new(0.5, 0.0, 0.5));
     rearing.stand_counter = STAND_TICKS;
     rearing.player_jump_pending_scale = 0.0;
     rearing.allow_stand_sliding = false;
-    for t in 0..STAND_TICKS - 1 {
+    for t in 0..STAND_TICKS {
         tick_keys(&mut rearing, &e, &forward, (0.0, 0.0));
         assert!(
             rearing.pos.z < 0.5 + 1.0e-9,
@@ -313,7 +314,7 @@ fn a_rearing_horse_stands_still_until_the_stand_wears_off() {
             rearing.pos.z
         );
     }
-    // The rear-up's last tick walks again.
+    // The tick after the rear-up walks again.
     tick_keys(&mut rearing, &e, &forward, (0.0, 0.0));
     assert!(
         rearing.pos.z > 0.5,

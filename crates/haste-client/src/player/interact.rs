@@ -711,16 +711,20 @@ impl LocalPlayer {
         &self.int.hotbar[self.held_slot.clamp(0, 8) as usize]
     }
 
-    /// Whether the held main-hand item is one that steers a ridden animal while held (vanilla
-    /// `Pig`/`Strider.getControllingPassenger`: the carrot on a stick, the warped fungus on a
-    /// stick). An unknown registry (no `prepare` yet) steers nothing.
+    /// Whether either hand holds an item that steers a ridden animal (vanilla
+    /// `Pig`/`Strider.getControllingPassenger` -> `LivingEntity.isHolding`, which looks at the
+    /// main hand and the off hand: the carrot on a stick, the warped fungus on a stick). An
+    /// unknown registry (no `prepare` yet) steers nothing.
     pub fn holds_steer_stick(&self) -> bool {
-        self.main_hand().item.is_some_and(|i| {
-            self.int
-                .steer_items
-                .as_ref()
-                .is_some_and(|s| s.contains(&i))
-        })
+        let steers = |stack: &haste_core::entity::ItemStackData| {
+            stack.item.is_some_and(|i| {
+                self.int
+                    .steer_items
+                    .as_ref()
+                    .is_some_and(|s| s.contains(&i))
+            })
+        };
+        steers(self.main_hand()) || steers(&self.int.offhand)
     }
 
     /// The player's `minecraft:attack_speed` with the held item (base 4.0 plus the item's

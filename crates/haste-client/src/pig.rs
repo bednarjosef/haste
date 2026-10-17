@@ -144,8 +144,10 @@ impl Pig {
         self.pitch = self.look.1 * 0.5;
         self.yaw = self.look.0;
         if self.boosting {
+            // `boostTime++ > total`: the time before this tick's increment is compared.
+            let before = self.boost_time;
             self.boost_time += 1;
-            if self.boost_time > self.boost_time_total {
+            if before > self.boost_time_total {
                 self.boosting = false;
             }
         }

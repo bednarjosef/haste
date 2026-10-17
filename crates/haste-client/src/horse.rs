@@ -26,6 +26,11 @@ pub const DEFAULT_JUMP_STRENGTH: f64 = 0.7;
 pub const STEP_HEIGHT: f32 = 1.0;
 /// Vanilla `Attributes.GRAVITY`'s default (0.08), what `travelInAir` subtracts.
 pub const DEFAULT_GRAVITY: f64 = 0.08;
+/// `AbstractHorse.DATA_ID_FLAGS`'s synched data index (18: the first accessor after
+/// `AgeableMob`'s).
+pub const DATA_ID_FLAGS: u8 = 18;
+/// `AbstractHorse.FLAG_TAME`.
+pub const FLAG_TAME: i8 = 2;
 /// The rider's input scale (vanilla `LocalPlayer.modifyInput`: 0.98).
 const INPUT_SCALE: f32 = 0.98;
 /// Vanilla `AbstractHorse.SIDEWAYS_MOVE_SPEED_FACTOR` (0.5).
@@ -143,12 +148,14 @@ impl Horse {
     /// Vanilla `AbstractHorse.onPlayerJump` (from the rider's charged jump): a rear-up that lets
     /// the horse slide forward, and the scale the pending jump fires with.
     pub fn on_player_jump(&mut self, jump_amount: i32) {
-        if jump_amount < 0 {
-            return;
-        }
-        self.allow_stand_sliding = true;
-        // standIfPossible: a rear-up for twenty ticks.
-        self.stand_counter = STAND_TICKS;
+        let jump_amount = if jump_amount < 0 {
+            0
+        } else {
+            self.allow_stand_sliding = true;
+            // standIfPossible: a rear-up for twenty ticks.
+            self.stand_counter = STAND_TICKS;
+            jump_amount
+        };
         self.player_jump_pending_scale = pending_scale(jump_amount);
     }
 
@@ -165,12 +172,17 @@ impl Horse {
         if self.delta.z.abs() < 0.003 {
             self.delta.z = 0.0;
         }
-        if self.stand_counter > 0 {
-            self.stand_counter -= 1;
-        }
         let input = self.ridden_input();
         self.tick_ridden(&input);
         crate::travel::travel_in_air(self, input, self.yaw, env.world, env.shapes, env.blocks);
+        // AbstractHorse.tick counts the rear-up down after `super.tick()` (whose aiStep ran the
+        // ridden travel above), and clearStanding drops the slide permission with it.
+        if self.stand_counter > 0 {
+            self.stand_counter -= 1;
+            if self.stand_counter == 0 {
+                self.allow_stand_sliding = false;
+            }
+        }
     }
 
     /// Vanilla `AbstractHorse.getRiddenInput`: nothing while a rear-up holds the horse on the

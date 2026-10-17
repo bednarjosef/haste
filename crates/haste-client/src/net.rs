@@ -19,7 +19,9 @@ use haste_data::GameData;
 use haste_entity::riding::{passenger_seat, PassengerKind, SeatPoint, SeatQuery};
 use haste_entity::{EntityDimensions, EntityStore};
 use haste_protocol::haste_core::chunk::{BlockEntityData, ChunkData, LightData};
-use haste_protocol::haste_core::entity::{EntitySpawn, ItemStackData, MetadataEntry, PlayerInfo};
+use haste_protocol::haste_core::entity::{
+    EntitySpawn, ItemStackData, MetadataEntry, MetadataValue, PlayerInfo,
+};
 use haste_protocol::haste_core::game::{DimensionInfo, GameMode};
 use haste_protocol::haste_core::{
     BlockPos, BlockStateId, ChunkPos, EntityId, Identifier, RegistryIndex,
@@ -164,6 +166,11 @@ pub trait EntitySink {
     fn equipment(&self, _id: EntityId) -> Option<&[(u8, ItemStackData)]> {
         None
     }
+    /// The entity's last synced data value at `index` (vanilla `SynchedEntityData`). None in
+    /// fakes.
+    fn metadata_value(&self, _id: EntityId, _index: u8) -> Option<&MetadataValue> {
+        None
+    }
     /// Position and rotation of an entity.
     fn pose(&self, id: EntityId) -> Option<(DVec3, f32, f32)>;
     /// Hit box of an entity, for the crosshair (none in fakes by default).
@@ -281,6 +288,11 @@ impl EntitySink for EntityStore {
     fn equipment(&self, id: EntityId) -> Option<&[(u8, ItemStackData)]> {
         self.get(id).map(|e| e.equipment.as_slice())
     }
+    fn metadata_value(&self, id: EntityId, index: u8) -> Option<&MetadataValue> {
+        self.get(id)
+            .and_then(|e| e.metadata.get(index))
+            .map(|e| &e.value)
+    }
     fn pose(&self, id: EntityId) -> Option<(DVec3, f32, f32)> {
         self.get(id).map(|e| (e.pos, e.yaw, e.pitch))
     }
@@ -302,6 +314,26 @@ impl EntitySink for EntityStore {
     fn len(&self) -> usize {
         EntityStore::len(self)
     }
+}
+
+/// Vanilla `Mob.isSaddled` for a mount: the saddle slot (wire id 7) worn, and the slot usable
+/// (`canUseSlot(SADDLE)`: the pig and the strider when grown, the horse family also only when
+/// tamed, `AbstractHorse.DATA_ID_FLAGS` bit 2 at synched index 18). An untamed horse is never
+/// steered: the server's own AI bucks the rider (`RunAroundLikeCrazyGoal`) and we follow it.
+fn is_saddled<E: EntitySink + ?Sized>(vehicle: EntityId, entities: &E, needs_tame: bool) -> bool {
+    let worn = entities.equipment(vehicle).is_some_and(|eq| {
+        eq.iter()
+            .any(|(slot, stack)| *slot == SADDLE_SLOT && !stack.is_empty())
+    });
+    let baby = matches!(
+        entities.metadata_value(vehicle, haste_entity::registry::BABY_METADATA_INDEX),
+        Some(MetadataValue::Boolean(true))
+    );
+    let tamed = matches!(
+        entities.metadata_value(vehicle, crate::horse::DATA_ID_FLAGS),
+        Some(MetadataValue::Byte(b)) if b & crate::horse::FLAG_TAME != 0
+    );
+    worn && !baby && (tamed || !needs_tame)
 }
 
 /// The entity store (dimensions oracle when present).
@@ -1377,12 +1409,8 @@ impl Session {
         if !crate::horse::is_horse_type(path) {
             return None;
         }
-        // Vanilla `Mob.isSaddled`: the saddle equipment slot (wire id 7) worn and valid.
-        let saddled = entities
-            .equipment(vehicle)?
-            .iter()
-            .any(|(slot, stack)| *slot == SADDLE_SLOT && !stack.is_empty());
-        if !saddled {
+        // Vanilla `Mob.isSaddled` with `AbstractHorse.canUseSlot(SADDLE)`: tamed and grown.
+        if !is_saddled(vehicle, entities, true) {
             return None;
         }
         let (pos, yaw, _) = entities.pose(vehicle)?;
@@ -1412,12 +1440,8 @@ impl Session {
         if !crate::pig::is_pig_type(path) {
             return None;
         }
-        // Vanilla `Mob.isSaddled`: the saddle equipment slot (wire id 7) worn and valid.
-        let saddled = entities
-            .equipment(vehicle)?
-            .iter()
-            .any(|(slot, stack)| *slot == SADDLE_SLOT && !stack.is_empty());
-        if !saddled {
+        // Vanilla `Mob.isSaddled` with `Pig.canUseSlot(SADDLE)`: grown.
+        if !is_saddled(vehicle, entities, false) {
             return None;
         }
         let (pos, yaw, _) = entities.pose(vehicle)?;

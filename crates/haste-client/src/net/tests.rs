@@ -69,6 +69,8 @@ struct FakeEntities {
     dims: HashMap<EntityId, (f32, f32)>,
     /// Equipment per entity id (wire slot, filled), like the store's stacks.
     equipment: HashMap<EntityId, Vec<(u8, ItemStackData)>>,
+    /// Synched data per entity id (index -> last value), like the store's metadata.
+    metadata: HashMap<EntityId, HashMap<u8, haste_core::entity::MetadataValue>>,
 }
 
 impl EntitySink for FakeEntities {
@@ -122,6 +124,17 @@ impl EntitySink for FakeEntities {
     fn set_metadata(&mut self, id: EntityId, entries: &[MetadataEntry]) {
         self.log
             .push(format!("metadata {} {}", id.0, entries.len()));
+        let m = self.metadata.entry(id).or_default();
+        for e in entries {
+            m.insert(e.index, e.value.clone());
+        }
+    }
+    fn metadata_value(
+        &self,
+        id: EntityId,
+        index: u8,
+    ) -> Option<&haste_core::entity::MetadataValue> {
+        self.metadata.get(&id).and_then(|m| m.get(&index))
     }
     fn set_equipment(&mut self, id: EntityId, slot: u8, item: ItemStackData) {
         self.log.push(format!("equipment {} {slot}", id.0));
@@ -1006,6 +1019,28 @@ fn mounting_a_saddled_horse_starts_its_client_side_simulation() {
                 components_raw: Default::default(),
             },
         )],
+    }));
+    // Untamed (AbstractHorse.canUseSlot(SADDLE) needs the tame flag): the saddle does not
+    // count, the server's AI bucks us and we only follow it.
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 5,
+        passengers: vec![7],
+    }));
+    assert!(
+        r.session.player.horse().is_none(),
+        "an untamed horse is not ours"
+    );
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 5,
+        passengers: vec![],
+    }));
+    // Tamed: DATA_ID_FLAGS (index 18) bit 2.
+    r.apply(ClientboundPlay::SetEntityData(cb::SetEntityData {
+        entity_id: 5,
+        metadata: vec![MetadataEntry {
+            index: crate::horse::DATA_ID_FLAGS,
+            value: haste_core::entity::MetadataValue::Byte(crate::horse::FLAG_TAME),
+        }],
     }));
     r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
         vehicle: 5,

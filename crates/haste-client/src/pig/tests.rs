@@ -166,3 +166,21 @@ fn the_server_correction_snaps_the_pig() {
     assert_eq!(p.pos, DVec3::new(10.0, 0.0, 10.0));
     assert_eq!(p.yaw, 180.0);
 }
+
+/// `ItemBasedSteering.tickBoost` compares the time before its post-increment, so a boost of
+/// `total` runs `total + 1` ticks after the sync and ends on the next.
+#[test]
+fn the_boost_ends_the_tick_after_its_time_passes_the_total() {
+    let world = TestWorld::flat(0, states::STONE);
+    let shapes = TestShapes::default();
+    let e = env(&world, &shapes);
+    let mut p = settled();
+    p.on_synced_boost(10);
+    for _ in 0..11 {
+        p.set_look((0.0, 0.0));
+        p.tick(&e);
+    }
+    assert!(p.boosting(), "still boosting after total + 1 ticks");
+    p.tick(&e);
+    assert!(!p.boosting(), "ended on the next tick");
+}
