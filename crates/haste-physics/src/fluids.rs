@@ -11,6 +11,7 @@ use haste_core::input::InputState;
 use haste_core::view::{BlockView, CollisionShapes};
 use haste_core::{BlockPos, DVec3};
 
+use crate::climbing::{self, ClimbableBlocks};
 use crate::collision::no_collision;
 use crate::movement::{accelerate, apply_speed_factor, move_entity, Impulse};
 use crate::trig;
@@ -119,6 +120,7 @@ pub(crate) fn swim_up(state: &mut PlayerState) {
     state.velocity.y += SWIM_UP;
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn travel_water(
     state: &mut PlayerState,
     input: &InputState,
@@ -127,6 +129,7 @@ pub(crate) fn travel_water(
     world: &dyn BlockView,
     shapes: &dyn CollisionShapes,
     blocks: &dyn BlockPhysics,
+    climb: &dyn ClimbableBlocks,
 ) {
     // `LivingEntity.travelInFluid` decides `isFalling` from the velocity the tick started with,
     // before the sneak sink, the swim steering, the acceleration and the move.
@@ -148,6 +151,9 @@ pub(crate) fn travel_water(
     accelerate(state, imp, FLUID_ACCELERATION);
     let motion = state.velocity;
     move_entity(state, attrs, motion, world, shapes, blocks);
+    // `travelInFluid`: a horizontal collision with a climbable (vines in water) climbs it; the
+    // jump key does not count here, unlike in air.
+    climbing::climb_after_move(state, false, world, climb);
     apply_speed_factor(state, world, blocks);
     state.velocity.x *= h_drag;
     state.velocity.y *= WATER_DRAG;

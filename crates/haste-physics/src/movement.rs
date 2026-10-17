@@ -6,6 +6,7 @@ use haste_core::view::{BlockView, CollisionShapes};
 use haste_core::{Aabb, BlockPos, BlockStateId, DVec3};
 
 use crate::block_effects;
+use crate::climbing::{self, ClimbableBlocks, NoClimbables};
 use crate::collision::{collide_with_step, no_collision, supporting_block};
 use crate::elytra;
 use crate::{
@@ -107,8 +108,7 @@ fn fluid_jump_threshold(attrs: &PlayerAttributes, pose: Pose) -> f64 {
     }
 }
 
-/// One 50 ms player tick. `blocks` stands in for `GameData` until haste-data provides it (see
-/// NOTES.md, interface requests).
+/// One 50 ms player tick without a climbable table: nothing climbs (see [`tick_with`]).
 pub fn tick(
     state: &mut PlayerState,
     input: &InputState,
@@ -116,6 +116,20 @@ pub fn tick(
     world: &dyn BlockView,
     shapes: &dyn CollisionShapes,
     blocks: &dyn BlockPhysics,
+) -> TickResult {
+    tick_with(state, input, attrs, world, shapes, blocks, &NoClimbables)
+}
+
+/// One 50 ms player tick. `blocks` stands in for `GameData` until haste-data provides it (see
+/// NOTES.md, interface requests); `climb` answers the climbable tag and trapdoor rule.
+pub fn tick_with(
+    state: &mut PlayerState,
+    input: &InputState,
+    attrs: &PlayerAttributes,
+    world: &dyn BlockView,
+    shapes: &dyn CollisionShapes,
+    blocks: &dyn BlockPhysics,
+    climb: &dyn ClimbableBlocks,
 ) -> TickResult {
     let old_pos = state.pos;
     let old_ground = state.on_ground;
@@ -184,15 +198,20 @@ pub fn tick(
     } else if state.in_water {
         // vanilla `LivingEntity.travel`: the fluid branch wins over gliding (entering water
         // switches a glider to swim physics; the server clears the flag separately).
-        fluids::travel_water(state, input, impulse, attrs, world, shapes, blocks);
+        fluids::travel_water(state, input, impulse, attrs, world, shapes, blocks, climb);
     } else if state.in_lava {
         fluids::travel_lava(state, input, impulse, attrs, world, shapes, blocks);
-    } else if state.fall_flying {
+    } else if state.fall_flying && !climbing::on_climbable(state, world, climb) {
         // vanilla `LivingEntity.travel` -> `travelFallFlying`. No effects are modelled, so the
         // slow-falling gravity clamp is passed `false` (see `elytra`).
         elytra::travel(state, attrs, world, shapes, blocks, false);
     } else {
-        travel_normal(state, impulse, attrs, world, shapes, blocks);
+        // `travelFallFlying` on a climbable: travel in air (still with the glider box), then
+        // stop gliding.
+        travel_normal(
+            state, input.jump, impulse, attrs, world, shapes, blocks, climb,
+        );
+        state.fall_flying = false;
     }
 
     // vanilla `Entity.move`: the flag next tick's `shouldStopRunSprinting` reads - whether the
@@ -325,20 +344,52 @@ fn update_player_pose(
     };
 }
 
+/// The movement key vector (f32 throughout, in vanilla's order): `KeyboardInput.tick` builds
+/// (left - right, forward - back) and normalises it (`Vec2.normalized`, so a diagonal is
+/// (0.707, 0.707)); `LocalPlayer.modifyInput` then scales it by 0.98, by the sneak factor while
+/// moving slowly (`LocalPlayer.isMovingSlowly`: `isCrouching() || isVisuallyCrawling()`, the
+/// latter being the swimming pose outside water) and finally stretches it for square movement.
+/// The item-use slowdown is not modelled yet.
 fn impulse(state: &PlayerState, input: &InputState, attrs: &PlayerAttributes) -> Impulse {
-    let mut forward = (input.forward as i32 - input.back as i32) as f32;
-    let mut strafe = (input.left as i32 - input.right as i32) as f32;
-    // Slowed while crouching or crawling (vanilla `LocalPlayer.isMovingSlowly`:
-    // `isCrouching() || isVisuallyCrawling()`, the latter being the swimming pose outside
-    // water). Wiki "Sneaking": 1.3 m/s straight, 1.8 m/s diagonal.
+    let forward = (input.forward as i32 - input.back as i32) as f32;
+    let strafe = (input.left as i32 - input.right as i32) as f32;
+    let dist = (strafe * strafe + forward * forward).sqrt();
+    if dist < 1.0e-4 {
+        return Impulse::default();
+    }
+    let mut imp = Impulse {
+        strafe: strafe / dist * INPUT_SCALE,
+        forward: forward / dist * INPUT_SCALE,
+    };
     let slow = state.crouching || (state.pose == Pose::Swimming && !state.in_water);
     if slow {
-        forward *= attrs.sneaking_speed as f32;
-        strafe *= attrs.sneaking_speed as f32;
+        let factor = attrs.sneaking_speed as f32;
+        imp.strafe *= factor;
+        imp.forward *= factor;
     }
+    square_movement(imp)
+}
+
+/// Vanilla `LocalPlayer.modifyInputSpeedForSquareMovement`: the input vector is stretched by
+/// its direction's distance to the unit square (`distanceToUnitSquare`: sqrt(1 + tan^2) of the
+/// angle to the nearer axis, 1 on an axis, sqrt(2) on the diagonal) and capped at length 1. A
+/// full-speed diagonal lands on the cap, a slowed diagonal (sneaking, item use) keeps its
+/// per-axis speed instead of being 29 % slower (wiki "Sneaking": 1.3 m/s straight, 1.8 m/s
+/// diagonal).
+pub(crate) fn square_movement(imp: Impulse) -> Impulse {
+    let length = (imp.strafe * imp.strafe + imp.forward * imp.forward).sqrt();
+    if length <= 0.0 {
+        return imp;
+    }
+    let inv = 1.0 / length;
+    let (dx, dy) = (imp.strafe * inv, imp.forward * inv);
+    let (ax, ay) = (dx.abs(), dy.abs());
+    let tan = if ay > ax { ax / ay } else { ay / ax };
+    let to_unit_square = (1.0 + tan * tan).sqrt();
+    let modified = (length * to_unit_square).min(1.0);
     Impulse {
-        strafe: strafe * INPUT_SCALE,
-        forward: forward * INPUT_SCALE,
+        strafe: dx * modified,
+        forward: dy * modified,
     }
 }
 
@@ -453,15 +504,20 @@ fn jump(
     }
 }
 
-/// Walking/falling in air: accelerate, move, block speed factor, gravity + vertical drag,
-/// horizontal drag (slipperiness x 0.91 on ground, 0.91 in air).
+/// Walking/falling in air (vanilla `LivingEntity.travelInAir`): accelerate, the climbable clamp,
+/// move, the climb boost, block speed factor, gravity + vertical drag, horizontal drag
+/// (slipperiness x 0.91 on ground, 0.91 in air). `jumping` is the jump key
+/// (`LocalPlayer.applyInput`).
+#[allow(clippy::too_many_arguments)]
 fn travel_normal(
     state: &mut PlayerState,
+    jumping: bool,
     imp: Impulse,
     attrs: &PlayerAttributes,
     world: &dyn BlockView,
     shapes: &dyn CollisionShapes,
     blocks: &dyn BlockPhysics,
+    climb: &dyn ClimbableBlocks,
 ) {
     let slip = if state.on_ground {
         blocks.friction(ground_block(state, attrs, world, shapes))
@@ -480,8 +536,10 @@ fn travel_normal(
         AIR_ACCELERATION * sprint as f32
     };
     accelerate(state, imp, speed);
+    climbing::handle_on_climbable(state, world, climb);
     let motion = state.velocity;
     move_entity(state, attrs, motion, world, shapes, blocks);
+    climbing::climb_after_move(state, jumping, world, climb);
     apply_speed_factor(state, world, blocks);
     state.velocity.y -= attrs.gravity;
     state.velocity.y *= VERTICAL_DRAG as f64;
