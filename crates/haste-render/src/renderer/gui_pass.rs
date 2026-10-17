@@ -18,9 +18,17 @@ impl Renderer {
         target: Option<&wgpu::SurfaceTexture>,
         capture_color: Option<&wgpu::Texture>,
     ) -> Option<u32> {
-        if frame.gui.commands.is_empty() && self.nametags.is_empty() {
+        if frame.gui.commands.is_empty() && self.nametags.is_empty() && !self.panorama.requested() {
             return None;
         }
+        // Vanilla `GuiRenderer.render` draws the panorama's cube map first, under everything
+        // the frame's commands draw (its overlay, the blur, the screen).
+        self.panorama.prepare(
+            &self.gpu.device,
+            &self.gpu.queue,
+            &mut self.assets,
+            self.size,
+        );
         let mut draw_calls = 0u32;
         let blur_after = frame.gui.blur_after as usize;
         let blur = frame.gui.blur_after >= 0
@@ -58,6 +66,7 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            draw_calls += self.panorama.draw(&mut pass);
             self.gui.draw(&mut pass, self.size);
         }
         let first_batch_after_blur = self.gui.batch_count();

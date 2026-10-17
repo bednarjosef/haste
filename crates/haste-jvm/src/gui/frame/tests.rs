@@ -176,3 +176,9 @@ fn decodes_blend_codes() {
     assert_eq!(blend_of(2), GuiBlend::Invert);
     assert_eq!(blend_of(3), GuiBlend::Additive);
 }
+
+#[test]
+fn decodes_the_panorama_state() {
+    assert_eq!(panorama_of(0, 12.5f32.to_bits() as i32), None);
+    assert_eq!(panorama_of(1, (-37.25f32).to_bits() as i32), Some(-37.25));
+}

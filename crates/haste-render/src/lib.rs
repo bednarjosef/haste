@@ -17,6 +17,7 @@ pub mod lightmap;
 pub mod mesher;
 pub mod occlusion;
 pub mod overlay;
+pub mod panorama;
 pub mod particles;
 pub mod pipeline;
 pub mod renderer;

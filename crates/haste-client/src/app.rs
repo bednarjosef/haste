@@ -3655,6 +3655,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             );
             let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
             gui = u.frame(gw, gh, scale, (0.0, 0.0), partial).clone();
+            renderer.set_panorama(u.gui().panorama());
         }
         // The screen effects around the HUD frame, like the window draws them.
         let spin = {
@@ -4300,6 +4301,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                     resolve_gui_scale(u32::from(options.gui_scale), args.width, args.height);
                 let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
                 gui = u.frame(gw, gh, scale, input.mouse, 0.0).clone();
+                renderer.set_panorama(u.gui().panorama());
                 last_gui = gui.clone();
             }
             let frame = FrameInput {
@@ -4386,6 +4388,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             let scale = resolve_gui_scale(u32::from(options.gui_scale), args.width, args.height);
             let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
             gui = u.frame(gw, gh, scale, input.mouse, partial).clone();
+            renderer.set_panorama(u.gui().panorama());
             last_gui = gui.clone();
         }
         // The screen effects around the HUD frame, like the window draws them.
@@ -5703,8 +5706,7 @@ impl App {
         self.scope
     }
 
-    /// Menu mode's frame: the open screen over the plain background the renderer draws
-    /// without a world (vanilla draws the rotating panorama there; not yet in Haste).
+    /// Menu mode's frame: the open screen over the title panorama (see `menu_background`).
     fn draw_menu(&mut self) {
         let Some(renderer) = self.renderer.as_mut() else {
             return;
@@ -5918,6 +5920,7 @@ impl App {
             let scale = resolve_gui_scale(u32::from(self.options.gui_scale), w, h);
             let (gw, gh) = gui_scaled_size(w, h, scale);
             self.gui = ui.frame(gw, gh, scale, mouse, partial).clone();
+            renderer.set_panorama(ui.gui().panorama());
         }
         // The screen effects around the HUD frame (vanilla's `ScreenEffectRenderer.submit`'s
         // level-pass overlays and `Hud.extractCameraOverlays`'s own).

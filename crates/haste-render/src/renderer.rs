@@ -545,6 +545,8 @@ pub struct Renderer {
     gui: crate::gui::GuiRenderer,
     /// The menu background blur (vanilla: the `blur` post chain), when a screen asks for it.
     blur: crate::blur::MenuBlur,
+    /// The title panorama (vanilla `CubeMap`), under the GUI when a screen extracted it.
+    panorama: crate::panorama::PanoramaRenderer,
     /// Vanilla `Options.menuBackgroundBlurriness` (the blur radius; 0 = off).
     menu_blur_radius: u32,
     /// The blur-unavailable warning (a surface without COPY_SRC) logged once.
@@ -1051,6 +1053,10 @@ impl Renderer {
             size,
         );
 
+        let panorama = crate::panorama::PanoramaRenderer::new(
+            &gpu.device,
+            Self::gui_format_for(&gpu, surface_format),
+        );
         let section_vis = Arc::new(Mutex::new(ahash::AHashMap::new()));
         let walk = crate::occlusion::AsyncOcclusionWalker::new(section_vis.clone())?;
 
@@ -1106,6 +1112,7 @@ impl Renderer {
             size,
             gui,
             blur,
+            panorama,
             menu_blur_radius: 5,
             blur_unavailable_logged: false,
             assets: gui_assets,
@@ -1249,6 +1256,13 @@ impl Renderer {
     /// blurred background (0 = off, 10 = maximum; vanilla default 5).
     pub fn set_menu_blur_radius(&mut self, radius: u8) {
         self.menu_blur_radius = crate::blur::blur_radius(radius);
+    }
+
+    /// The title panorama for the next frame: its spin in degrees when the open screen
+    /// extracted it (`GuiPipeline::panorama`), drawn under the GUI; `None` draws none. Holds
+    /// for one `render` only, like vanilla's per-frame `PanoramaRenderState`.
+    pub fn set_panorama(&mut self, spin: Option<f32>) {
+        self.panorama.request(spin);
     }
 
     /// Uploads the particle atlas of `types` as the particle texture (call after

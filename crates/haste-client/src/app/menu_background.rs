@@ -1,5 +1,6 @@
-//! Menu mode's frame (no world joined): the open screen's GUI over the background the
-//! renderer draws without a world.
+//! Menu mode's frame (no world joined): the open screen's GUI over the title panorama
+//! (vanilla `Screen.extractBackground` -> `extractPanorama` when there is no level; the
+//! renderer draws the cube map under the frame's commands).
 use glam::DVec3;
 use haste_protocol::haste_core::gui::GuiFrame;
 use haste_render::{Camera, Renderer, SkyState};
@@ -7,8 +8,8 @@ use haste_setup::options::Options;
 
 use super::{gui_scaled_size, resolve_gui_scale, InputRouter};
 
-/// The GUI frame of menu mode: the open screen over the plain background the renderer draws
-/// without a world. `mouse` is the cursor in GUI pixels; the camera looks straight ahead.
+/// The GUI frame of menu mode: the open screen over the panorama it extracted (handed to the
+/// renderer for this frame). `mouse` is the cursor in GUI pixels; the camera looks straight ahead.
 pub(super) fn menu_frame(
     ui: &mut crate::ui::Ui,
     renderer: &mut Renderer,
@@ -19,6 +20,8 @@ pub(super) fn menu_frame(
     let scale = resolve_gui_scale(u32::from(options.gui_scale), w, h);
     let (gw, gh) = gui_scaled_size(w, h, scale);
     let gui = ui.frame(gw, gh, scale, input.mouse, 0.0).clone();
+    // The screen's panorama (vanilla `Screen.extractPanorama`), drawn under its commands.
+    renderer.set_panorama(ui.gui().panorama());
     (gui, menu_camera(), menu_sky(), 0.0)
 }
 

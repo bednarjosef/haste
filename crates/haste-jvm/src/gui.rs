@@ -7,6 +7,7 @@
 //! Coordinates: GUI-scaled pixels (vanilla "GUI scale"), for both `render`'s mouse position and the
 //! input methods. Key numbering: vanilla 26.3's (`InputConstants`, SDL3 scancodes for `key`,
 //! SDL keymod bits for `mods`), see [`crate::keys`]. Mouse buttons: 1 left, 2 middle, 3 right.
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use haste_core::gui::{GuiFrame, TextMetrics};
@@ -101,7 +102,12 @@ pub struct GuiPipeline {
     m: Methods,
     lock: Mutex<()>,
     last_error: Mutex<Option<String>>,
+    /// The last frame's panorama spin as f32 bits, [`NO_PANORAMA`] for none.
+    panorama: AtomicU32,
 }
+
+/// [`GuiPipeline::panorama`]'s "no panorama this frame" (a NaN pattern a spin never has).
+const NO_PANORAMA: u32 = u32::MAX;
 
 const BOOL: JavaType = JavaType::Primitive(Primitive::Boolean);
 const VOID: JavaType = JavaType::Primitive(Primitive::Void);
@@ -160,6 +166,7 @@ impl GuiPipeline {
             m,
             lock: Mutex::new(()),
             last_error: Mutex::new(None),
+            panorama: AtomicU32::new(NO_PANORAMA),
         })
     }
 
@@ -392,18 +399,32 @@ impl GuiPipeline {
             jvalue { d: mouse.1 },
             jvalue { f: partial },
         ];
-        let (commands, cursor, blur_after) =
-            self.call(self.m.render, JavaType::Array, &args, |env, v| {
-                decode_frame(env, v.l()?)
-            })?;
+        let f = self.call(self.m.render, JavaType::Array, &args, |env, v| {
+            decode_frame(env, v.l()?)
+        })?;
+        self.panorama.store(
+            f.panorama.map_or(NO_PANORAMA, f32::to_bits),
+            Ordering::Relaxed,
+        );
         Ok(GuiFrame {
-            commands,
+            commands: f.commands,
             scale,
             width,
             height,
-            cursor,
-            blur_after,
+            cursor: f.cursor,
+            blur_after: f.blur_after,
         })
+    }
+
+    /// The title panorama of the last [`GuiPipeline::render`]: its spin in degrees when the
+    /// open screen extracted it (vanilla `Screen.extractPanorama` -> `Panorama.extractRenderState`,
+    /// the frame's `PanoramaRenderState`), `None` when the frame had none. The renderer draws
+    /// the cube map under that frame's commands.
+    pub fn panorama(&self) -> Option<f32> {
+        match self.panorama.load(Ordering::Relaxed) {
+            NO_PANORAMA => None,
+            bits => Some(f32::from_bits(bits)),
+        }
     }
 
     /// Installs the renderer's text metrics; `Font.width` and friends call back into them.
