@@ -5,6 +5,7 @@
 // renderer interpolates.
 
 use glam::DVec3;
+use haste_protocol::haste_core::view::BlockView;
 use haste_protocol::haste_core::{BlockPos, Direction, Identifier};
 use haste_world::World;
 
