@@ -51,11 +51,6 @@ impl ClientChat {
         self.keys = keys;
     }
 
-    /// Whether messages are signed (a chat session was announced).
-    pub fn is_signing(&self) -> bool {
-        self.session.is_some()
-    }
-
     /// The incoming packets chat cares about; replies go to `out`.
     pub fn handle(&mut self, p: &ClientboundPlay, out: &mut Vec<ServerboundPlay>) {
         match p {
