@@ -27,10 +27,17 @@ pub const CREEPER_MAX_SWELL: i32 = 30;
 /// `ClientPacketListener.handleEntityPositionSync`: a sync further than this (squared blocks,
 /// 64 blocks) from the entity's current position snaps instead of interpolating.
 pub const TELEPORT_SNAP_DISTANCE_SQ: f64 = 4096.0;
+/// `ClientPacketListener.handleRotateMob`: ticks a `rotate_head` packet's yaw is eased over.
+pub const HEAD_LERP_STEPS: u8 = 3;
 
 /// `Mth.lerp`.
 fn lerp(delta: f32, start: f32, end: f32) -> f32 {
     start + delta * (end - start)
+}
+
+/// `Mth.rotLerp`.
+pub(crate) fn rot_lerp(delta: f32, start: f32, end: f32) -> f32 {
+    start + delta * wrap_degrees(end - start)
 }
 
 /// `Mth.wrapDegrees`.
@@ -219,8 +226,10 @@ pub struct Entity {
     pub prev_body_yaw: f32,
     /// Head yaw at the previous tick (`LivingEntity.yHeadRotO`), for interpolation.
     prev_head_yaw: f32,
-    /// Whether a `rotate_head` packet moved `head_yaw` since the last tick.
-    head_yaw_dirty: bool,
+    /// `LivingEntity.lerpYHeadRot` / `lerpHeadSteps`: the head yaw a `rotate_head` packet asked
+    /// for and the ticks left to ease `head_yaw` onto it (`lerpHeadTo(yaw, 3)`).
+    lerp_head_yaw: f32,
+    lerp_head_steps: u8,
     /// The hand swing state (`LivingEntity.swingState`, started by `swing_animation`).
     pub swing: SwingState,
     /// Smoothed swimming amount (`LivingEntity.swimAmount` / `swimAmountO`), 0..1.
@@ -278,7 +287,8 @@ impl Entity {
             body_yaw: s.yaw,
             prev_body_yaw: s.yaw,
             prev_head_yaw: s.head_yaw,
-            head_yaw_dirty: false,
+            lerp_head_yaw: s.head_yaw,
+            lerp_head_steps: 0,
             swing: SwingState::default(),
             swim_amount: 0.0,
             swim_amount_o: 0.0,
@@ -604,16 +614,13 @@ impl EntityStore {
         }
     }
 
+    /// `rotate_head`: `ClientPacketListener.handleRotateMob` -> `LivingEntity.lerpHeadTo(yaw, 3)`.
+    /// The head does not turn now; `tick` eases it over the next three ticks.
     pub fn set_head_yaw(&mut self, id: EntityId, yaw: f32) {
         if let Some(i) = self.slot(id) {
             if let Some(e) = &mut self.slots[i as usize] {
-                // `LivingEntity.baseTick` sets `yHeadRotO = yHeadRot` before the packet handler
-                // runs; capture the previous value once per tick for the render interpolation.
-                if !e.head_yaw_dirty {
-                    e.prev_head_yaw = e.head_yaw;
-                }
-                e.head_yaw = yaw;
-                e.head_yaw_dirty = true;
+                e.lerp_head_yaw = yaw;
+                e.lerp_head_steps = HEAD_LERP_STEPS;
             }
         }
     }
@@ -714,10 +721,17 @@ impl EntityStore {
         for slot in slots.iter_mut().flatten() {
             slot.tick_count += 1;
             slot.prev_body_yaw = slot.body_yaw;
-            if !slot.head_yaw_dirty {
-                slot.prev_head_yaw = slot.head_yaw;
+            // `LivingEntity.baseTick` records `yHeadRotO`, then `aiStep` applies one
+            // `lerpHeadRotationStep` (rotLerp by 1/steps toward the packet's head yaw).
+            slot.prev_head_yaw = slot.head_yaw;
+            if slot.lerp_head_steps > 0 {
+                slot.head_yaw = rot_lerp(
+                    1.0 / f32::from(slot.lerp_head_steps),
+                    slot.head_yaw,
+                    slot.lerp_head_yaw,
+                );
+                slot.lerp_head_steps -= 1;
             }
-            slot.head_yaw_dirty = false;
             slot.lerp.tick(&mut slot.pos, &mut slot.prev_pos);
             let d = slot.pos - slot.prev_pos;
             let dist = f32::sqrt((d.x * d.x + d.z * d.z) as f32);

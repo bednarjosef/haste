@@ -122,3 +122,61 @@ fn delta_after_position_sync_builds_on_the_synced_target() {
 fn metadata(index: u8, value: MetadataValue) -> MetadataEntry {
     MetadataEntry { index, value }
 }
+
+// ---------------------------------------------------------------------------
+// Item 4: head yaw eases over 3 ticks (LivingEntity.lerpHeadTo / lerpHeadRotationStep).
+// ---------------------------------------------------------------------------
+
+/// `handleRotateMob` -> `lerpHeadTo(yaw, 3)`: nothing turns on arrival; `aiStep` then rotLerps
+/// by 1/3, 1/2 and 1/1 of the remaining difference (30, 60, 90 degrees), with `baseTick`
+/// recording the previous value each tick for `getYHeadRot(partial)`.
+#[test]
+fn head_yaw_eases_over_three_ticks() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.set_head_yaw(EntityId(1), 90.0);
+    let e = s.get(EntityId(1)).unwrap();
+    assert_eq!(e.head_yaw, 0.0);
+    assert_eq!(e.head_yaw_at(0.5), 0.0);
+    s.tick();
+    let e = s.get(EntityId(1)).unwrap();
+    assert!(near_f(e.head_yaw, 30.0), "tick 1: {}", e.head_yaw);
+    assert!(near_f(e.head_yaw_at(0.0), 0.0));
+    assert!(near_f(e.head_yaw_at(0.5), 15.0));
+    s.tick();
+    let e = s.get(EntityId(1)).unwrap();
+    assert!(near_f(e.head_yaw, 60.0), "tick 2: {}", e.head_yaw);
+    s.tick();
+    let e = s.get(EntityId(1)).unwrap();
+    assert!(near_f(e.head_yaw, 90.0), "tick 3: {}", e.head_yaw);
+    s.tick();
+    let e = s.get(EntityId(1)).unwrap();
+    assert!(near_f(e.head_yaw, 90.0));
+    assert!(near_f(e.head_yaw_at(0.5), 90.0));
+}
+
+/// `Mth.rotLerp` takes the short way round the wrap: 170 -> -170 moves +20, not -340.
+#[test]
+fn head_yaw_lerp_wraps_the_short_way() {
+    let mut s = store();
+    let mut sp = spawn(1, DVec3::ZERO);
+    sp.head_yaw = 170.0;
+    s.spawn(&sp);
+    s.set_head_yaw(EntityId(1), -170.0);
+    s.tick();
+    let e = s.get(EntityId(1)).unwrap();
+    assert!(near_f(e.head_yaw, 170.0 + 20.0 / 3.0), "{}", e.head_yaw);
+}
+
+/// A second packet mid-ease replaces the target and restarts the three steps.
+#[test]
+fn head_yaw_packet_mid_ease_restarts_the_steps() {
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.set_head_yaw(EntityId(1), 90.0);
+    s.tick(); // 30
+    s.set_head_yaw(EntityId(1), 0.0);
+    s.tick(); // 30 - 10 = 20
+    let e = s.get(EntityId(1)).unwrap();
+    assert!(near_f(e.head_yaw, 20.0), "{}", e.head_yaw);
+}
