@@ -19,7 +19,9 @@ use haste_data::GameData;
 use haste_entity::riding::{passenger_seat, PassengerKind, SeatPoint, SeatQuery};
 use haste_entity::{EntityDimensions, EntityStore};
 use haste_protocol::haste_core::chunk::{BlockEntityData, ChunkData, LightData};
-use haste_protocol::haste_core::entity::{EntitySpawn, ItemStackData, MetadataEntry, PlayerInfo};
+use haste_protocol::haste_core::entity::{
+    EntitySpawn, ItemStackData, MetadataEntry, MetadataValue, PlayerInfo,
+};
 use haste_protocol::haste_core::game::{DimensionInfo, GameMode};
 use haste_protocol::haste_core::{
     BlockPos, BlockStateId, ChunkPos, EntityId, Identifier, RegistryIndex,
@@ -45,6 +47,9 @@ const VEHICLE_CORRECTION_EPSILON: f64 = 1.0e-5;
 /// hand, 2 boots, 3 leggings, 4 chestplate, 5 helmet, 6 body, 7 saddle). The item worn there
 /// can hide the screen behind a camera overlay (the carved pumpkin's blur).
 pub const HEAD_SLOT: u8 = 5;
+/// The saddle equipment slot of `set_equipment` (see `HEAD_SLOT`'s order): a mount wearing it
+/// is the one its passenger steers (vanilla `Mob.isSaddled`).
+pub const SADDLE_SLOT: u8 = 7;
 
 /// What the driver needs from the world (`haste_world::World`).
 pub trait WorldSink {
@@ -154,6 +159,16 @@ pub trait EntitySink {
     }
     /// `EntityStore::entity_type_info`: registry index and dimensions, for the seat offset.
     fn entity_type_info(&self, _id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
+        None
+    }
+    /// The entity's equipment slots (vanilla `LivingEntity` equipment): (wire slot, stack)
+    /// pairs, for the saddle a steered mount must wear. None in fakes.
+    fn equipment(&self, _id: EntityId) -> Option<&[(u8, ItemStackData)]> {
+        None
+    }
+    /// The entity's last synced data value at `index` (vanilla `SynchedEntityData`). None in
+    /// fakes.
+    fn metadata_value(&self, _id: EntityId, _index: u8) -> Option<&MetadataValue> {
         None
     }
     /// Position and rotation of an entity.
@@ -270,6 +285,14 @@ impl EntitySink for EntityStore {
     fn entity_type_info(&self, id: EntityId) -> Option<(haste_core::RegistryIndex, (f32, f32))> {
         EntityStore::entity_type_info(self, id)
     }
+    fn equipment(&self, id: EntityId) -> Option<&[(u8, ItemStackData)]> {
+        self.get(id).map(|e| e.equipment.as_slice())
+    }
+    fn metadata_value(&self, id: EntityId, index: u8) -> Option<&MetadataValue> {
+        self.get(id)
+            .and_then(|e| e.metadata.get(index))
+            .map(|e| &e.value)
+    }
     fn pose(&self, id: EntityId) -> Option<(DVec3, f32, f32)> {
         self.get(id).map(|e| (e.pos, e.yaw, e.pitch))
     }
@@ -293,6 +316,26 @@ impl EntitySink for EntityStore {
     }
 }
 
+/// Vanilla `Mob.isSaddled` for a mount: the saddle slot (wire id 7) worn, and the slot usable
+/// (`canUseSlot(SADDLE)`: the pig and the strider when grown, the horse family also only when
+/// tamed, `AbstractHorse.DATA_ID_FLAGS` bit 2 at synched index 18). An untamed horse is never
+/// steered: the server's own AI bucks the rider (`RunAroundLikeCrazyGoal`) and we follow it.
+fn is_saddled<E: EntitySink + ?Sized>(vehicle: EntityId, entities: &E, needs_tame: bool) -> bool {
+    let worn = entities.equipment(vehicle).is_some_and(|eq| {
+        eq.iter()
+            .any(|(slot, stack)| *slot == SADDLE_SLOT && !stack.is_empty())
+    });
+    let baby = matches!(
+        entities.metadata_value(vehicle, haste_entity::registry::BABY_METADATA_INDEX),
+        Some(MetadataValue::Boolean(true))
+    );
+    let tamed = matches!(
+        entities.metadata_value(vehicle, crate::horse::DATA_ID_FLAGS),
+        Some(MetadataValue::Byte(b)) if b & crate::horse::FLAG_TAME != 0
+    );
+    worn && !baby && (tamed || !needs_tame)
+}
+
 /// The entity store (dimensions oracle when present).
 pub fn new_entity_store(entity_types: usize) -> EntityStore {
     EntityStore::new(EntityDimensions::from_registry_len(entity_types))
@@ -310,6 +353,23 @@ pub fn entity_type_names(regs: &SyncedRegistries, data: &GameData) -> Vec<Identi
         .filter_map(|i| {
             data.registries
                 .name("minecraft:entity_type", haste_core::RegistryIndex(i as u32))
+                .cloned()
+        })
+        .collect()
+}
+
+/// The `minecraft:attribute` registry entries in id order (the synced registry's when the
+/// server sent one, else the static one from the game data): resolves an `update_attributes`
+/// property's index to its name, for the attributes a steered mount's simulation reads.
+pub fn attribute_names(regs: &SyncedRegistries, data: &GameData) -> Vec<Identifier> {
+    if let Some(entries) = regs.entries(&Identifier::minecraft("attribute")) {
+        return entries.iter().map(|e| e.id.clone()).collect();
+    }
+    let n = data.registries.len("minecraft:attribute");
+    (0..n)
+        .filter_map(|i| {
+            data.registries
+                .name("minecraft:attribute", haste_core::RegistryIndex(i as u32))
                 .cloned()
         })
         .collect()
@@ -1042,6 +1102,15 @@ pub struct Session {
     aggregated_nanos_per_chunk: f64,
     /// `oldSamplesWeight` (capped at 49).
     old_samples_weight: i32,
+    /// `update_attributes` values of living entities that are not us, by entity id (the syncable
+    /// attributes the server sends with an entity's spawn): what a steered mount's own
+    /// simulation reads (`movement_speed`, `jump_strength`, `gravity`). Entries live as long as
+    /// the entity does (`remove_entities` drops them).
+    entity_attributes: HashMap<EntityId, Vec<cb::AttributeProperty>>,
+    /// `minecraft:attribute` registry entries in id order: resolves an `update_attributes`
+    /// property's index to its name. The synced registry when the server sent one, else the
+    /// static one from the game data.
+    attribute_names: Option<Vec<Identifier>>,
 }
 
 impl Session {
@@ -1100,6 +1169,8 @@ impl Session {
             batch_started_at: None,
             aggregated_nanos_per_chunk: 2_000_000.0,
             old_samples_weight: 1,
+            entity_attributes: HashMap::new(),
+            attribute_names: None,
         }
     }
 
@@ -1116,6 +1187,11 @@ impl Session {
     /// types are unknown here and ride on the default seat, never a panic.
     pub fn set_entity_type_names(&mut self, names: Vec<Identifier>) {
         self.entity_type_names = names;
+    }
+
+    /// Sets the `minecraft:attribute` registry entries in id order (see [`attribute_names`]).
+    pub fn set_attribute_names(&mut self, names: Vec<Identifier>) {
+        self.attribute_names = Some(names);
     }
 
     /// Whether a spawned entity's registry index names the firework rocket type.
@@ -1315,6 +1391,116 @@ impl Session {
         Some(crate::boat::Boat::new(pos, yaw, dims, &env))
     }
 
+    /// The horse-family mount we steer, when the vehicle the server just seated us in is one we
+    /// control (vanilla `AbstractHorse.getControllingPassenger`: the first passenger, a player,
+    /// on a saddled horse): our own simulation starts where the server last told us it was,
+    /// with the attributes its `update_attributes` carried (the family's base values before
+    /// any sync lands) and the dimensions its registry entry carries.
+    fn horse_at<E: EntitySink + ?Sized>(
+        &self,
+        vehicle: EntityId,
+        entities: &E,
+    ) -> Option<crate::horse::Horse> {
+        let kind = entities.entity_type(vehicle)?;
+        let path = self
+            .entity_type_names
+            .get(kind.0 as usize)
+            .map(|id| id.path())?;
+        if !crate::horse::is_horse_type(path) {
+            return None;
+        }
+        // Vanilla `Mob.isSaddled` with `AbstractHorse.canUseSlot(SADDLE)`: tamed and grown.
+        if !is_saddled(vehicle, entities, true) {
+            return None;
+        }
+        let (pos, yaw, _) = entities.pose(vehicle)?;
+        let (_, dims) = entities.entity_type_info(vehicle)?;
+        let (speed, jump, gravity) =
+            self.vehicle_attributes(vehicle, crate::horse::DEFAULT_MOVEMENT_SPEED);
+        Some(crate::horse::Horse::new(
+            pos, yaw, dims, speed, jump, gravity,
+        ))
+    }
+
+    /// The pig we steer with a carrot on a stick, when the vehicle the server just seated us
+    /// in is one we control (vanilla `Pig.getControllingPassenger`: the first passenger, a
+    /// player, of a saddled pig — the carrot on a stick is checked per tick while riding, so
+    /// it is not part of this). Like the horse, our own simulation starts where the server
+    /// last told us it was.
+    fn pig_at<E: EntitySink + ?Sized>(
+        &self,
+        vehicle: EntityId,
+        entities: &E,
+    ) -> Option<crate::item_based_steering::ItemSteered> {
+        let kind = entities.entity_type(vehicle)?;
+        let path = self
+            .entity_type_names
+            .get(kind.0 as usize)
+            .map(|id| id.path())?;
+        let default_speed = if crate::pig::is_pig_type(path) {
+            crate::pig::DEFAULT_MOVEMENT_SPEED
+        } else if crate::strider::is_strider_type(path) {
+            crate::strider::DEFAULT_MOVEMENT_SPEED
+        } else {
+            return None;
+        };
+        // Vanilla `Mob.isSaddled` with `Pig`/`Strider.canUseSlot(SADDLE)`: grown.
+        if !is_saddled(vehicle, entities, false) {
+            return None;
+        }
+        let (pos, yaw, _) = entities.pose(vehicle)?;
+        let (_, dims) = entities.entity_type_info(vehicle)?;
+        let (speed, _, gravity) = self.vehicle_attributes(vehicle, default_speed);
+        Some(if crate::pig::is_pig_type(path) {
+            crate::item_based_steering::ItemSteered::Pig(crate::pig::Pig::new(
+                pos, yaw, dims, speed, gravity,
+            ))
+        } else {
+            let mut s = crate::strider::Strider::new(pos, yaw, dims, speed, gravity);
+            s.suffocating = matches!(
+                entities.metadata_value(vehicle, crate::strider::DATA_SUFFOCATING),
+                Some(MetadataValue::Boolean(true))
+            );
+            crate::item_based_steering::ItemSteered::Strider(s)
+        })
+    }
+
+    /// The steered mount's attributes from the last `update_attributes` of `vehicle`
+    /// (`movement_speed`, `jump_strength`, `gravity`; `default_speed` is the animal family's
+    /// own base value, the fallback vanilla's own client would read before a sync).
+    fn vehicle_attributes(&self, vehicle: EntityId, default_speed: f64) -> (f64, f64, f64) {
+        let attrs = self.entity_attributes.get(&vehicle);
+        let value = |name: &str, default: f64| {
+            attrs
+                .and_then(|a| {
+                    a.iter()
+                        .find(|p| self.attribute_is(haste_core::RegistryIndex(p.id as u32), name))
+                })
+                .map(|p| self.attribute_value(p))
+                .unwrap_or(default)
+        };
+        (
+            value("movement_speed", default_speed),
+            value("jump_strength", crate::horse::DEFAULT_JUMP_STRENGTH),
+            value("gravity", crate::horse::DEFAULT_GRAVITY),
+        )
+    }
+
+    /// Whether an attribute property's registry index is `minecraft:<name>` (the synced
+    /// `minecraft:attribute` registry's order, when the server sent one, else the data
+    /// generator's; both agree on vanilla servers).
+    fn attribute_is(&self, id: haste_core::RegistryIndex, name: &str) -> bool {
+        self.attribute_names
+            .as_ref()
+            .and_then(|names| names.get(id.0 as usize))
+            .is_some_and(|n| n.path() == name)
+    }
+
+    /// An attribute's value with its modifiers (the same fold the player's attributes use).
+    fn attribute_value(&self, p: &cb::AttributeProperty) -> f64 {
+        crate::player::attribute_value(p, |_| false)
+    }
+
     /// The block states that carry a lid (chest family, shulker boxes), from the game data;
     /// call once at join so `block_event` can tell lid events from other blocks' (pistons use
     /// the same action id).
@@ -1436,7 +1622,9 @@ impl Session {
                 self.attached_firework = None;
                 self.dimension = dim;
                 // A respawn is a new body: no vehicle, no riding.
-                self.player.set_vehicle(None, SeatPoint::ZERO, None);
+                self.entity_attributes.clear();
+                self.player
+                    .set_vehicle(None, SeatPoint::ZERO, None, None, None);
             }
             P::PlayerPosition(p) => {
                 tracing::debug!(
@@ -1616,11 +1804,13 @@ impl Session {
                 // If our vehicle is removed, we dismount (the store's riding bookkeeping drops
                 // us too, as a passenger of the removed vehicle).
                 if self.player.vehicle.is_some_and(|v| ids.contains(&v)) {
-                    self.player.set_vehicle(None, SeatPoint::ZERO, None);
+                    self.player
+                        .set_vehicle(None, SeatPoint::ZERO, None, None, None);
                 }
                 for id in &ids {
                     self.entity_ids.remove(id);
                     self.fireworks.remove(id);
+                    self.entity_attributes.remove(id);
                     if self.attached_firework == Some(*id) {
                         self.attached_firework = None;
                     }
@@ -1631,27 +1821,34 @@ impl Session {
                 let vehicle = EntityId(s.vehicle);
                 let passengers: Vec<EntityId> = s.passengers.iter().map(|i| EntityId(*i)).collect();
                 entities.set_passengers(vehicle, &passengers);
-                // A boat we steer is simulated on our side from the mount on (see
-                // [`crate::boat`]); the correction below clears it on any dismount.
-                let boat = (passengers.first() == Some(&self.entity_id))
+                // A boat, horse or pig we steer is simulated on our side from the mount on (see
+                // [`crate::boat`], [`crate::horse`], [`crate::pig`]); the correction below
+                // clears it on any dismount.
+                let first = passengers.first() == Some(&self.entity_id);
+                let boat = first
                     .then(|| self.boat_at(vehicle, entities, world))
                     .flatten();
+                let horse = first.then(|| self.horse_at(vehicle, entities)).flatten();
+                let pig = first.then(|| self.pig_at(vehicle, entities)).flatten();
                 // Mount, re-seat, or dismount. The seat comes from the vehicle's type through
                 // vanilla's attachment rules (`haste_entity::passenger_seat`), which also names
                 // our own seat index: a boat's second passenger sits elsewhere than the first.
                 match self.seat_of(vehicle, &passengers, entities) {
-                    Some(seat) => self.player.set_vehicle(Some(vehicle), seat, boat),
+                    Some(seat) => self
+                        .player
+                        .set_vehicle(Some(vehicle), seat, boat, horse, pig),
                     None if self.player.vehicle() == Some(vehicle) => {
                         // Dismount: our vehicle's new list no longer names us. Sneak's shift
                         // flag in player_input is what made the server send this.
-                        self.player.set_vehicle(None, SeatPoint::ZERO, None);
+                        self.player
+                            .set_vehicle(None, SeatPoint::ZERO, None, None, None);
                     }
                     None => {}
                 }
             }
             // The server's correction of the vehicle we steer (vanilla
             // `ClientPacketListener.handleMoveVehicle`): our simulation is snapped to where the
-            // server put the boat, and the answer carries it straight back as our next
+            // server put the vehicle, and the answer carries it straight back as our next
             // `move_vehicle`.
             P::MoveVehicle(m) => {
                 if let Some(boat) = self.player.boat_mut() {
@@ -1664,6 +1861,35 @@ impl Session {
                             yaw: boat.yaw,
                             pitch: 0.0,
                             on_ground: boat.on_ground,
+                        },
+                    ));
+                }
+                if let Some(horse) = self.player.horse_mut() {
+                    if (m.pos - horse.pos).length() > VEHICLE_CORRECTION_EPSILON {
+                        horse.correct(m.pos, m.yaw);
+                    }
+                    out.push(ServerboundPlay::MoveVehicle(
+                        haste_protocol::packets::play::serverbound::MoveVehicle {
+                            pos: horse.pos,
+                            yaw: horse.yaw,
+                            pitch: horse.pitch,
+                            on_ground: horse.on_ground,
+                        },
+                    ));
+                }
+                // A pig or strider only while we hold its stick (otherwise it is not ours and
+                // vanilla does not answer).
+                if let Some(animal) = self.player.steered_by_item_mut() {
+                    if (m.pos - animal.pose().0).length() > VEHICLE_CORRECTION_EPSILON {
+                        animal.correct(m.pos, m.yaw);
+                    }
+                    let (pos, yaw, pitch, on_ground) = animal.pose();
+                    out.push(ServerboundPlay::MoveVehicle(
+                        haste_protocol::packets::play::serverbound::MoveVehicle {
+                            pos,
+                            yaw,
+                            pitch,
+                            on_ground,
                         },
                     ));
                 }
@@ -1741,6 +1967,14 @@ impl Session {
                             }
                         }
                     }
+                    // The pig or strider we ride: the boost's total (a use click on its stick
+                    // made the server write it, vanilla `onSyncedDataUpdated` ->
+                    // `ItemBasedSteering.onSynced`) and the strider's suffocating flag.
+                    if self.player.vehicle() == Some(id) {
+                        if let Some(animal) = self.player.item_steered_mut() {
+                            animal.on_metadata(&d.metadata);
+                        }
+                    }
                 }
             }
             P::SetEquipment(e) => {
@@ -1752,6 +1986,18 @@ impl Session {
                         self.player.int.armor[0] = item.clone();
                     }
                     entities.set_equipment(EntityId(e.entity_id), slot, item);
+                }
+            }
+            // Another entity's attributes (ours are the player's own, handled above): kept for
+            // the mounts we steer, whose simulation reads them.
+            P::UpdateAttributes(u) if EntityId(u.entity_id) != own => {
+                let id = EntityId(u.entity_id);
+                let entry = self.entity_attributes.entry(id).or_default();
+                for prop in &u.properties {
+                    match entry.iter_mut().find(|a| a.id == prop.id) {
+                        Some(a) => *a = prop.clone(),
+                        None => entry.push(prop.clone()),
+                    }
                 }
             }
             P::PlayerInfoUpdate(u) => entities.player_info(&u.infos()),
