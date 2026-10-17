@@ -180,3 +180,25 @@ fn head_yaw_packet_mid_ease_restarts_the_steps() {
     let e = s.get(EntityId(1)).unwrap();
     assert!(near_f(e.head_yaw, 20.0), "{}", e.head_yaw);
 }
+
+// ---------------------------------------------------------------------------
+// Item 14: spawn body yaw from the head yaw (LivingEntity.recreateFromPacket).
+// ---------------------------------------------------------------------------
+
+/// `recreateFromPacket` sets `yBodyRot` and `yHeadRot` (and their `O` copies) from the add_entity
+/// packet's head yaw, so a mob entering view with its head turned does not start with its body
+/// facing the look direction and then swing round.
+#[test]
+fn spawn_body_yaw_comes_from_the_head_yaw() {
+    let mut s = store();
+    let mut sp = spawn(1, DVec3::ZERO);
+    sp.yaw = 10.0;
+    sp.head_yaw = 70.0;
+    s.spawn(&sp);
+    let e = s.get(EntityId(1)).unwrap();
+    assert_eq!(e.body_yaw, 70.0);
+    assert_eq!(e.prev_body_yaw, 70.0);
+    assert_eq!(e.body_yaw_at(0.5), 70.0);
+    assert_eq!(e.head_yaw, 70.0);
+    assert_eq!(e.yaw, 10.0);
+}

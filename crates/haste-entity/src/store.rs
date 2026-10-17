@@ -284,8 +284,10 @@ impl Entity {
             nametag: None,
             is_player_type: false,
             walk: WalkAnimationState::default(),
-            body_yaw: s.yaw,
-            prev_body_yaw: s.yaw,
+            // `LivingEntity.recreateFromPacket`: the body starts facing the packet's head yaw
+            // (`yBodyRot = yHeadRot = getYHeadRot()`, the `O` copies the same), not its yaw.
+            body_yaw: s.head_yaw,
+            prev_body_yaw: s.head_yaw,
             prev_head_yaw: s.head_yaw,
             lerp_head_yaw: s.head_yaw,
             lerp_head_steps: 0,
