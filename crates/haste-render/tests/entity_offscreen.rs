@@ -145,7 +145,10 @@ fn entities_offscreen() {
         .push(("left_leg".into(), glam::Vec3::new(-0.5, 0.0, 0.0)));
     walk.rotations
         .push(("head".into(), glam::Vec3::new(0.0, 0.5, 0.0)));
-    let (skin, slim) = haste_render::default_skin(0x1234_5678_9abc_def0_1234_5678_9abc_def0);
+    let default = haste_entity::skin::default_skin(uuid::Uuid::from_u128(
+        0x1234_5678_9abc_def0_1234_5678_9abc_def0,
+    ));
+    let (skin, slim) = (default.body.clone(), default.model.is_slim());
     let player = EntityInstance {
         id: EntityId(1),
         model: haste_entity::models::humanoid(slim),
@@ -297,6 +300,7 @@ fn entities_offscreen() {
     let hand = |held: Option<haste_core::RegistryIndex>| haste_render::FirstPerson {
         skin: None,
         slim: false,
+        sleeve: true,
         item: held,
         light: (15, 0),
         attack: haste_render::TickPair::fixed(0.0),
@@ -418,6 +422,7 @@ fn first_person_hand_against_a_wall() {
     let hand = |item: Option<haste_core::RegistryIndex>| haste_render::FirstPerson {
         skin: None,
         slim: false,
+        sleeve: true,
         item,
         light: (15, 0),
         attack: haste_render::TickPair::fixed(0.0),

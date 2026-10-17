@@ -17,6 +17,8 @@ use haste_core::{BlockPos, EntityId, Identifier};
 
 use crate::gui::Shelf;
 
+mod cape;
+
 const ATLAS_SIZE: u32 = 2048;
 
 /// Vanilla renders the player model at 15/16 scale.
@@ -120,27 +122,6 @@ impl EntityVertex {
     };
 }
 
-/// The default skin vanilla gives a player without a downloaded skin: the UUID's Java
-/// `hashCode` modulo the 18 default skins (nine names, slim then wide), per minecraft.wiki
-/// "Skin" ("the default skin is chosen from the UUID"). Returns the texture and whether the
-/// slim (3 px arm) model goes with it.
-pub fn default_skin(uuid: u128) -> (Identifier, bool) {
-    const NAMES: [&str; 9] = [
-        "alex", "ari", "efe", "kai", "makena", "noor", "steve", "sunny", "zuri",
-    ];
-    let hi = (uuid >> 64) as u64;
-    let lo = uuid as u64;
-    let hilo = hi ^ lo;
-    let hash = ((hilo >> 32) as i32) ^ (hilo as i32);
-    let i = hash.rem_euclid(18) as usize;
-    let slim = i < 9;
-    let kind = if slim { "slim" } else { "wide" };
-    (
-        Identifier::minecraft(&format!("entity/player/{kind}/{}", NAMES[i % 9])),
-        slim,
-    )
-}
-
 /// The texture an instance is drawn with and its model scale: players (haste-entity's
 /// `haste:entity/humanoid` model) use their skin, Steve without one, and vanilla's 15/16 player
 /// scale.
@@ -202,6 +183,8 @@ impl TickPair {
 pub struct FirstPerson {
     pub skin: Option<Identifier>,
     pub slim: bool,
+    /// `AvatarRenderState.showRightSleeve`: the arm draws its sleeve layer.
+    pub sleeve: bool,
     pub item: Option<haste_core::RegistryIndex>,
     pub light: (u8, u8),
     /// Swing progress 0..1 while the main hand swings, 0 when it does not
@@ -257,8 +240,9 @@ pub struct EntityRenderer {
     hand: Vec<EntityVertex>,
     item_names: Vec<Identifier>,
     item_models: HashMap<u32, Option<Arc<haste_assets::ItemModel>>>,
-    /// The first-person arm model, by [`FirstPerson::slim`] (built once on first use).
-    arm_models: [Option<Arc<CubeModel>>; 2],
+    /// The first-person arm model, by [`FirstPerson::slim`] and [`FirstPerson::sleeve`]
+    /// (built once on first use).
+    arm_models: [Option<Arc<CubeModel>>; 4],
     /// The item frame block model quads, by `(glow, map)`, built once on first use.
     frame_models: HashMap<(bool, bool), Arc<Vec<haste_assets::BakedQuad>>>,
     /// The moving pistons' moved-block quads, by the state string (resolved once per state a
@@ -667,7 +651,7 @@ impl EntityRenderer {
             hand: Vec::new(),
             item_names: Vec::new(),
             item_models: HashMap::new(),
-            arm_models: [None, None],
+            arm_models: [None, None, None, None],
             frame_models: HashMap::new(),
             piston_quads: ahash::AHashMap::new(),
             beam_vertices: Vec::new(),
@@ -918,16 +902,19 @@ impl EntityRenderer {
             // Overlay layers: the same transform and pose, each with its own texture and
             // tint (vanilla's RenderLayers, e.g. SheepWoolLayer's dyed copy of the model).
             for overlay in e.overlays.iter().flatten() {
+                let Some((oroot, hurt)) = self.overlay_root(e, &overlay.model, root, assets) else {
+                    continue;
+                };
                 let orect = self.texture_rect(&overlay.model.texture, assets);
                 emit_part_tinted(
                     &mut self.vertices,
                     &overlay.model,
                     &overlay.model.root,
                     &e.pose,
-                    root,
+                    oroot,
                     orect,
                     light,
-                    e.hurt,
+                    hurt,
                     overlay.tint,
                 );
             }
@@ -1182,7 +1169,10 @@ impl EntityRenderer {
                         .or(layer.dyeable)
                         .map(argb_linear)
                         .unwrap_or([1.0; 3]);
-                    let rect = self.texture_rect(&layer.texture, assets);
+                    let texture = cape::player_elytra_texture(e)
+                        .filter(|_| layer.use_player_texture)
+                        .unwrap_or(&layer.texture);
+                    let rect = self.texture_rect(texture, assets);
                     emit_part_tinted(
                         &mut out,
                         &elytra,
@@ -2234,9 +2224,9 @@ impl EntityRenderer {
     }
 
     /// The empty hand's arm model for the skin's arm width, built once (no per-frame work).
-    fn arm_model(&mut self, slim: bool) -> Arc<CubeModel> {
-        let slot = &mut self.arm_models[usize::from(slim)];
-        slot.get_or_insert_with(|| Arc::new(arm_model(slim)))
+    fn arm_model(&mut self, slim: bool, sleeve: bool) -> Arc<CubeModel> {
+        let slot = &mut self.arm_models[usize::from(slim) * 2 + usize::from(sleeve)];
+        slot.get_or_insert_with(|| Arc::new(arm_model(slim, sleeve)))
             .clone()
     }
 
@@ -2286,7 +2276,7 @@ impl EntityRenderer {
                 let steve = Identifier::minecraft("entity/player/wide/steve");
                 let skin = fp.skin.as_ref().unwrap_or(&steve);
                 let rect = self.texture_rect(skin, assets);
-                let model = self.arm_model(fp.slim);
+                let model = self.arm_model(fp.slim, fp.sleeve);
                 // Vanilla's `ModelPart` scales its pivot by 1/16 (the model is in pixels), and
                 // `AvatarRenderer.renderHand` gives the right arm its 0.1 rad z tilt.
                 let m = root * arm_matrix(fp, partial) * Mat4::from_scale(Vec3::splat(1.0 / 16.0));
@@ -2435,7 +2425,7 @@ fn make_vertex_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
 /// `right_sleeve` child (vanilla `HumanoidModel.createMesh` + `PlayerModel.createMesh`), in
 /// model pixels. `slim` picks the 3 px arm. Built once and cached, so the hand pass allocates
 /// nothing per frame.
-pub(crate) fn arm_model(slim: bool) -> CubeModel {
+pub(crate) fn arm_model(slim: bool, sleeve: bool) -> CubeModel {
     // Wide: (-3, -2, -2) + (4, 12, 4); slim: (-2, -2, -2) + (3, 12, 4).
     let origin_x = if slim { -2.0 } else { -3.0 };
     let w = if slim { 3.0 } else { 4.0 };
@@ -2458,11 +2448,12 @@ pub(crate) fn arm_model(slim: bool) -> CubeModel {
             rotation: Vec3::new(0.0, 0.0, 0.1),
             visible: true,
             cubes: vec![cube([40, 16], 0.0)],
+            // `AvatarRenderer.renderHand`: the sleeve shows with the right-sleeve part.
             children: vec![ModelPart {
                 name: "right_sleeve".into(),
                 pivot: Vec3::ZERO,
                 rotation: Vec3::ZERO,
-                visible: true,
+                visible: sleeve,
                 cubes: vec![cube([40, 32], 0.25)],
                 children: vec![],
             }],
@@ -3574,23 +3565,6 @@ mod tests {
     }
 
     #[test]
-    fn default_skin_follows_the_uuid_hash() {
-        // hashCode of the all-zero UUID is 0 -> first slim skin.
-        assert_eq!(
-            default_skin(0),
-            (Identifier::minecraft("entity/player/slim/alex"), true)
-        );
-        // hashCode 9 -> first wide skin.
-        assert_eq!(
-            default_skin(9),
-            (Identifier::minecraft("entity/player/wide/alex"), false)
-        );
-        // Negative hash codes wrap with floorMod: hash -1 -> 17 -> wide zuri.
-        let uuid = 0xFFFF_FFFFu128; // lo = 0xFFFFFFFF: (0 ^ -1) = -1
-        assert_eq!(default_skin(uuid).0.path(), "entity/player/wide/zuri");
-    }
-
-    #[test]
     fn a_cube_has_six_outward_ccw_faces() {
         let model = CubeModel {
             texture: Identifier::minecraft("x"),
@@ -3765,6 +3739,7 @@ mod tests {
         FirstPerson {
             skin: None,
             slim: false,
+            sleeve: true,
             item: None,
             light: (15, 0),
             attack: TickPair::fixed(0.0),
@@ -3802,7 +3777,7 @@ mod tests {
         // `PartPose` (-5, 2, 0) and its 0.1 rad z tilt: the hand ends up right of the view
         // centre, below it and in front of the camera, reaching down and forward.
         let m = arm_matrix(&still_hand(), 0.0) * Mat4::from_scale(Vec3::splat(1.0 / 16.0));
-        let model = arm_model(false);
+        let model = arm_model(false, true);
         let mut out = Vec::new();
         emit_part_tinted(
             &mut out,
@@ -3838,8 +3813,8 @@ mod tests {
         let mut out2 = Vec::new();
         emit_part_tinted(
             &mut out2,
-            &arm_model(false),
-            &arm_model(false).root,
+            &arm_model(false, true),
+            &arm_model(false, true).root,
             &PoseOverrides::default(),
             swung,
             [0, 0, 64, 64],
@@ -4077,7 +4052,7 @@ mod tests {
     #[test]
     fn the_arm_model_is_the_player_models_right_arm() {
         // `HumanoidModel.createMesh` + `PlayerModel.createMesh` + `AvatarRenderer.renderHand`.
-        let wide = arm_model(false);
+        let wide = arm_model(false, true);
         assert_eq!(wide.root.pivot, Vec3::new(-5.0, 2.0, 0.0));
         assert_eq!(wide.root.rotation, Vec3::new(0.0, 0.0, 0.1));
         let cube = &wide.root.cubes[0];
@@ -4089,7 +4064,7 @@ mod tests {
         assert_eq!(sleeve.cubes[0].uv, [40, 32]);
         assert_eq!(sleeve.cubes[0].inflate, 0.25);
         // Slim: a 3 px arm one pixel to the right.
-        let slim = arm_model(true);
+        let slim = arm_model(true, true);
         assert_eq!(slim.root.cubes[0].origin, Vec3::new(-2.0, -2.0, -2.0));
         assert_eq!(slim.root.cubes[0].size, Vec3::new(3.0, 12.0, 4.0));
     }

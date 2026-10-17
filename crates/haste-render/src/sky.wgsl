@@ -133,6 +133,13 @@ fn fs_disc(in: DiscOut) -> @location(0) vec4<f32> {
     return vec4<f32>(mix(sky.sky_color.rgb, sky.fog_color.rgb, fog), 1.0);
 }
 
+@fragment
+fn fs_dark_disc(in: DiscOut) -> @location(0) vec4<f32> {
+    // Vanilla renderDarkDisc: the sky pipeline coloured black, fogged like the sky disc.
+    let fog = linear_fog_value(length(in.pos), 0.0, sky.fog_bands2.x);
+    return vec4<f32>(mix(vec3<f32>(0.0), sky.fog_color.rgb, fog), 1.0);
+}
+
 // ---- sunrise/sunset fan: translucent timeline colour, alpha ramping center to ring ----
 
 @vertex
@@ -191,9 +198,10 @@ fn vs_celestial(v: VertexIn) -> VertexOut {
 @fragment
 fn fs_celestial(in: VertexOut) -> @location(0) vec4<f32> {
     if (in.rect.z == 0u) {
-        // Stars: plain quads at the star brightness.
+        // Stars: plain quads coloured (b, b, b, b) with the star brightness b, blended
+        // src-alpha/one (vanilla `RenderPipelines.STARS`, `BlendFunction.OVERLAY`): b * b.
         let b = sky.sunrise_dir.w;
-        return vec4<f32>(in.color.rgb * b, 1.0);
+        return vec4<f32>(in.color.rgb * b * b, 1.0);
     }
     // Additive with the texture's alpha (src alpha, one), like vanilla's sun and moon.
     let c = fetch(in.uv, in.rect);

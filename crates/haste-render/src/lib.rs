@@ -11,8 +11,10 @@ pub mod blockentity;
 pub mod blur;
 pub mod entity;
 pub mod fluid;
+pub mod fluid_occlusion;
 pub mod fog;
 pub mod gui;
+pub(crate) mod java_random;
 pub mod lightmap;
 pub mod mesher;
 pub mod occlusion;
@@ -21,6 +23,7 @@ pub mod particles;
 pub mod pipeline;
 pub mod renderer;
 pub mod sky;
+pub mod stars;
 pub mod timing;
 pub mod tint;
 pub mod vertex;
@@ -32,7 +35,7 @@ pub use blockentity::{
     BlockEntityInstance, BlockEntityKind, ChestHalf, ChestMaterial, GatewayBeam, PistonData,
     PotSherds, SignSideText, SignTextData,
 };
-pub use entity::{default_skin, EntityRenderer, FirstPerson, Nametag, TickPair};
+pub use entity::{EntityRenderer, FirstPerson, Nametag, TickPair};
 pub use fog::{
     frame_fog, setup_fog, BiomeFog, DimensionFog, FogData, FogEnvironment, FogInputs, FogType,
 };

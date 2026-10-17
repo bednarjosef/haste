@@ -1,0 +1,100 @@
+//! Server-sent particles (`level_particles`) and the client-spawned terrain particles,
+//! ported from vanilla 26.3's particle classes (`net.minecraft.client.particle`): a
+//! fixed-capacity pool simulated at 20 Hz on the game thread ([`Particles`]), drawn as
+//! camera-facing quads textured from the particle atlas in one batched draw inside the
+//! main pass ([`ParticleRenderer`], reusing the entity shader: sprite rects by
+//! textureLoad, vertex light colour, fog).
+//!
+//! Per-type behaviour lives in the [`ParticleBehaviour`] table: gravity, friction, lifetime,
+//! quad size and its growth over the particle's life, colour, alpha and spawn-time motion.
+//! Each entry names the vanilla class it follows (`FlameParticle` for `flame`,
+//! `BaseAshSmokeParticle` subclass `SmokeParticle` for `smoke`, ...). Registry ids without
+//! an entry use vanilla's generic `Particle` defaults, which is also what mods and vanilla
+//! types we have not ported get.
+//!
+//! `level_particles` semantics follow `ClientPacketListener.handleParticleEvent`:
+//! count 0 spawns one particle at the position with velocity `offset * max_speed`; count > 0
+//! spawns that many at `pos + dist * gaussian` with velocity `gaussian * max_speed` (or
+//! uniform, when the packet's randomization mode says so). `ClientLevel.doAddParticle`
+//! drops spawns beyond `sqrt(1024.0)` = 32 blocks of the camera unless the packet overrides
+//! the limiter.
+//!
+//! The terrain particles (vanilla `TerrainParticle`: block breaking's destroy grid,
+//! mining cracks) are the client's own, spawned by [`Particles::spawn_destroy`] and
+//! [`Particles::spawn_crack`] — their sprites and tints come from the block table
+//! ([`crate::block_particles`]) packed into the same atlas. See that module for the
+//! vanilla paths.
+//!
+//! Not modelled (each a separate later step): block collisions (`Particle.move` with
+//! `hasPhysics`, so no `onGround` drag and no `speedUpWhenYMotionIsBlocked` trigger beyond
+//! an exactly zero y step), item particles (they draw from the item atlas in vanilla),
+//! particle options other than `dust` (block states, trail colors, geyser),
+//! the 16384-particle cap with the distance squash (`ParticleGroup`), roll (billboards keep
+//! facing the camera), and the per-type light boosts `FlameParticle`/`PortalParticle` add.
+
+mod engine;
+mod particle;
+mod particle_renderer;
+mod providers;
+mod resources;
+mod rng;
+mod single_quad_particle;
+mod terrain_particle;
+#[cfg(test)]
+mod tests;
+
+use glam::DVec3;
+use haste_core::{BlockStateId, Identifier};
+
+pub use engine::Particles;
+pub use particle_renderer::ParticleRenderer;
+pub use resources::ParticleTypes;
+
+/// Pool capacity (vanilla caps its engine around 16384 with a distance squash we do not
+/// model; extra spawns are dropped).
+pub const MAX_PARTICLES: usize = 4096;
+
+/// Sky-light value meaning "not sampled yet" (resampled on the first frame).
+const UNSAMPLED: u8 = 255;
+
+/// How far from the camera `level_particles` spawns survive (`ClientLevel.doAddParticle`:
+/// `distanceToSqr(x, y, z) > 1024.0`).
+const SPAWN_DISTANCE_SQ: f64 = 1024.0;
+
+/// A particle spawn request from `level_particles`: the resolved type name and the packet's
+/// spawn parameters. The game thread queues these, the shared pool consumes them.
+#[derive(Clone, Debug)]
+pub struct ParticleSpawn {
+    /// Particle type (`minecraft:flame`).
+    pub kind: Identifier,
+    /// Spawn position.
+    pub pos: DVec3,
+    /// Offset per axis (spread box for count > 0, direction for count 0).
+    pub offset: [f32; 3],
+    /// Max speed per axis.
+    pub max_speed: [f32; 3],
+    /// Count (0: one particle at `pos` with velocity `offset * max_speed`).
+    pub count: i32,
+    /// Packet randomization mode (0 gaussian, 1 uniform, 2 uniform with speed).
+    pub randomization: u32,
+    /// The packet overrides `ClientLevel`'s distance limiter.
+    pub override_limiter: bool,
+    /// `minecraft:dust` option data: ARGB colour and size scale (vanilla's
+    /// `DustParticleOptions`), the one particle option whose payload we read.
+    pub dust: Option<DustOption>,
+    /// `BlockParticleOption`: the block state a `minecraft:block` (or
+    /// `block_marker`/`falling_dust`/`dust_pillar`/`block_crumble`) particle is
+    /// made of — its sprite and tint replace the type's (vanilla
+    /// `TerrainParticle.createTerrainParticle`).
+    pub block_state: Option<BlockStateId>,
+}
+
+/// `DustParticleOptions`: the colour `DustParticle` tints its quad with, and the size scale
+/// (`DustParticleBase` multiplies `quadSize` and `lifetime` with it).
+#[derive(Clone, Copy, Debug)]
+pub struct DustOption {
+    /// Linear RGB colour (vanilla unpacks the packet's ARGB int, alpha ignored).
+    pub color: [f32; 3],
+    /// Size scale (`0.2..=4.0` in vanilla's codec, 1.0 in practice).
+    pub scale: f32,
+}
