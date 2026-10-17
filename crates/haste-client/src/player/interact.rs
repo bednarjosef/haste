@@ -1504,9 +1504,7 @@ impl LocalPlayer {
             // Item.canDestroyBlock: a tool with can_destroy_blocks_in_creative false cannot
             // break in creative. The packet still goes out; only the block change is skipped.
             let can_break = self.can_break_in_creative(env.data);
-            // The start tick's hit sound (vanilla: addBreakingBlockEffects with playSound=true;
-            // the follow-up hits every 4 ticks are the server's 2020 level events).
-            self.own_mining_hit(h.pos, h.face, state, env);
+            // No hit sound or crack: the instabuild branch skips addBreakingBlockEffects.
             self.send_destroy(action::START_DESTROY, h, state, can_break, env, out);
             return can_break;
         }
@@ -1519,9 +1517,10 @@ impl LocalPlayer {
             let d = params.progress_per_tick();
             tracing::debug!("start breaking {:?}: {params:?} -> {d} per tick", h.pos);
             let instant = d >= 1.0;
-            // The start tick's hit sound (vanilla: addBreakingBlockEffects with playSound=true;
-            // the follow-up hits every 4 ticks are the server's 2020 level events).
-            self.own_mining_hit(h.pos, h.face, state, env);
+            // Hit sound + crack only when not instant (startDestroyBlock's else branch).
+            if !instant {
+                self.own_mining_hit(h.pos, h.face, state, env);
+            }
             self.send_destroy(action::START_DESTROY, h, state, instant, env, out);
             if instant {
                 return true;

@@ -1,0 +1,200 @@
+//! Decoded sounds for the output worker: the Ogg decode, the LRU cache of decoded
+//! non-streamed sounds and the rodio `Source`s the worker plays them through.
+
+use std::collections::VecDeque;
+use std::io::Cursor;
+use std::sync::Arc;
+use std::time::Duration;
+
+use rodio::{Decoder, Sample, Source};
+use tracing::{debug, warn};
+
+/// A fully decoded sound: interleaved samples with channel count and sample rate.
+#[derive(Clone)]
+pub(super) struct DecodedSound {
+    pub(super) samples: Arc<Vec<Sample>>,
+    pub(super) channels: u16,
+    pub(super) sample_rate: u32,
+}
+
+/// Bounded LRU cache of decoded sounds, by path. The front is the least recently used.
+pub(super) struct LruCache {
+    entries: VecDeque<(String, DecodedSound)>,
+    capacity: usize,
+}
+
+impl LruCache {
+    pub(super) fn new(capacity: usize) -> Self {
+        Self {
+            entries: VecDeque::new(),
+            capacity,
+        }
+    }
+
+    /// The entry for `path`, moved to the back (most recently used).
+    pub(super) fn get(&mut self, path: &str) -> Option<DecodedSound> {
+        let index = self.entries.iter().position(|(p, _)| p == path)?;
+        let (_, sound) = self.entries.remove(index).unwrap();
+        self.entries.push_back((path.to_string(), sound.clone()));
+        Some(sound)
+    }
+
+    /// Insert an entry; when full, the least recently used entry is evicted. Re-inserting
+    /// an existing path refreshes it instead of duplicating it.
+    pub(super) fn insert(&mut self, path: String, sound: DecodedSound) {
+        if let Some(index) = self.entries.iter().position(|(p, _)| *p == path) {
+            self.entries.remove(index);
+        } else if self.entries.len() >= self.capacity {
+            if let Some((evicted, _)) = self.entries.pop_front() {
+                debug!("evicted {evicted} from the decoded-sound cache");
+            }
+        }
+        self.entries.push_back((path, sound));
+    }
+
+    #[cfg(test)]
+    pub(super) fn paths(&self) -> Vec<&str> {
+        self.entries.iter().map(|(p, _)| p.as_str()).collect()
+    }
+}
+
+/// A mono `Source` over an `Arc`ed, already-decoded sample buffer.
+///
+/// rodio 0.23 has no owned-buffer source that is cheap to reuse per play
+/// (`StaticSamplesBuffer` needs a `&'static [Sample]`, `SamplesBuffer` moves a `Vec`), so
+/// the cache stores the raw interleaved samples and this feeds them as mono (channels
+/// averaged per frame), which is also what `ChannelVolume` wants as its input.
+#[derive(Clone)]
+pub(super) struct CachedSamples {
+    samples: Arc<Vec<Sample>>,
+    frame_len: usize,
+    sample_rate: u32,
+    /// Interleaved-sample cursor.
+    cursor: usize,
+}
+
+impl CachedSamples {
+    pub(super) fn new(sound: &DecodedSound) -> Self {
+        Self {
+            samples: Arc::clone(&sound.samples),
+            frame_len: sound.channels as usize,
+            sample_rate: sound.sample_rate,
+            cursor: 0,
+        }
+    }
+}
+
+impl Iterator for CachedSamples {
+    type Item = Sample;
+
+    fn next(&mut self) -> Option<Sample> {
+        let frame = self
+            .samples
+            .get(self.cursor..self.cursor + self.frame_len)?;
+        self.cursor += self.frame_len;
+        Some(frame.iter().sum::<Sample>() / self.frame_len as Sample)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let frames = (self.samples.len() - self.cursor) / self.frame_len;
+        (frames, Some(frames))
+    }
+}
+
+impl Source for CachedSamples {
+    fn current_span_len(&self) -> Option<usize> {
+        self.size_hint().1
+    }
+
+    fn channels(&self) -> rodio::ChannelCount {
+        rodio::ChannelCount::new(1).expect("constant 1 is non-zero")
+    }
+
+    fn sample_rate(&self) -> rodio::SampleRate {
+        rodio::SampleRate::new(self.sample_rate).expect("validated non-zero at decode")
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        Some(Duration::from_secs_f64(
+            self.size_hint().0 as f64 / self.sample_rate as f64,
+        ))
+    }
+}
+
+/// What the worker plays: a streamed decode (music) or a cached, already-decoded sound.
+pub(super) enum DecodedSource {
+    Streamed(Decoder<Cursor<Vec<u8>>>),
+    Cached(CachedSamples),
+}
+
+impl Iterator for DecodedSource {
+    type Item = Sample;
+
+    fn next(&mut self) -> Option<Sample> {
+        match self {
+            DecodedSource::Streamed(decoder) => decoder.next(),
+            DecodedSource::Cached(cached) => cached.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            DecodedSource::Streamed(decoder) => decoder.size_hint(),
+            DecodedSource::Cached(cached) => cached.size_hint(),
+        }
+    }
+}
+
+impl Source for DecodedSource {
+    fn current_span_len(&self) -> Option<usize> {
+        match self {
+            DecodedSource::Streamed(decoder) => decoder.current_span_len(),
+            DecodedSource::Cached(cached) => cached.current_span_len(),
+        }
+    }
+
+    fn channels(&self) -> rodio::ChannelCount {
+        match self {
+            DecodedSource::Streamed(decoder) => decoder.channels(),
+            DecodedSource::Cached(cached) => cached.channels(),
+        }
+    }
+
+    fn sample_rate(&self) -> rodio::SampleRate {
+        match self {
+            DecodedSource::Streamed(decoder) => decoder.sample_rate(),
+            DecodedSource::Cached(cached) => cached.sample_rate(),
+        }
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        match self {
+            DecodedSource::Streamed(decoder) => decoder.total_duration(),
+            DecodedSource::Cached(cached) => cached.total_duration(),
+        }
+    }
+}
+
+/// Decode Ogg Vorbis bytes fully into a `DecodedSound`; `None` (with a log) when they are
+/// not decodable.
+pub(super) fn decode(bytes: Vec<u8>, path: &str) -> Option<DecodedSound> {
+    let decoder = match Decoder::new_vorbis(Cursor::new(bytes)) {
+        Ok(decoder) => decoder,
+        Err(e) => {
+            warn!("cannot decode {path}: {e}");
+            return None;
+        }
+    };
+    let channels = decoder.channels().get();
+    let sample_rate = decoder.sample_rate().get();
+    let samples: Vec<Sample> = decoder.collect();
+    if channels == 0 || sample_rate == 0 || samples.is_empty() {
+        warn!("decoded {path} is empty");
+        return None;
+    }
+    Some(DecodedSound {
+        samples: Arc::new(samples),
+        channels,
+        sample_rate,
+    })
+}
