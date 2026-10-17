@@ -1877,12 +1877,13 @@ fn tick_once(
             (p.state.yaw, p.state.pitch),
             p.state.on_ground,
             matches!(p.state.pose, haste_physics::Pose::Swimming),
-            p.main_hand().item,
+            p.held_stack(),
             attack_speed,
         );
         let eye = p.camera(1.0).0;
         let hand = &p.hand;
-        let mut fp = FirstPersonView::sample(&*shared.world.read(), eye, hand.shown_item());
+        let mut fp =
+            FirstPersonView::sample(&*shared.world.read(), eye, hand.shown_item(), on_fire);
         fp.with_hand(hand);
         Some(fp)
     };
@@ -2158,10 +2159,17 @@ mod tests {
         );
         let mut hand = crate::hand::Hand::new();
         hand.swing();
-        let mut v = FirstPersonView::sample(&lit(), DVec3::ZERO, None);
+        let mut v = FirstPersonView::sample(&lit(), DVec3::ZERO, None, false);
         // Two ticks of walking 0.2 blocks with the look at (10, 5) and the hand swinging.
         for _ in 0..2 {
-            hand.tick(0.2, (10.0, 5.0), true, false, None, 4.0);
+            hand.tick(
+                0.2,
+                (10.0, 5.0),
+                true,
+                false,
+                crate::hand::HeldStack::of(None),
+                4.0,
+            );
         }
         v.with_hand(&hand);
         let moving = v.with_skin(&skin);
@@ -2180,7 +2188,14 @@ mod tests {
         assert!((v.y_bob.1 - 7.5).abs() < 1e-6);
         assert!((v.x_bob.1 - 3.75).abs() < 1e-6);
         // The next tick's step is a different hand, so the renderer is told again.
-        hand.tick(0.2, (10.0, 5.0), true, false, None, 4.0);
+        hand.tick(
+            0.2,
+            (10.0, 5.0),
+            true,
+            false,
+            crate::hand::HeldStack::of(None),
+            4.0,
+        );
         let mut next = v;
         next.with_hand(&hand);
         assert_ne!(next, v);

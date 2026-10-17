@@ -1277,3 +1277,43 @@ fn landing_ends_the_glide_and_the_pose() {
     );
     assert_ne!(p.state.pose, haste_physics::Pose::FallFlying);
 }
+
+#[test]
+fn the_swap_key_ignores_damage_but_not_count_or_other_components() {
+    // `ItemStack.matchesIgnoringComponents` with `ignoreSwapAnimation`: a different count, a
+    // different custom name or a damage component appearing is a different stack (the hand
+    // dips); a different damage value on the same stack is not.
+    use haste_protocol::wire::components::{ComponentPatch, ItemComponent};
+    let stack = |count: i32| haste_core::entity::ItemStackData {
+        count,
+        item: Some(haste_core::RegistryIndex(3)),
+        components_raw: Default::default(),
+    };
+    let patch = |added: Vec<ItemComponent>| ComponentPatch {
+        added,
+        removed: Vec::new(),
+    };
+    let plain = interact::swap_key(&stack(1), &patch(vec![]));
+    assert_ne!(plain, interact::swap_key(&stack(2), &patch(vec![])));
+    let worn = interact::swap_key(&stack(1), &patch(vec![ItemComponent::Damage(5)]));
+    assert_ne!(plain, worn, "a damage component appearing counts");
+    assert_eq!(
+        worn,
+        interact::swap_key(&stack(1), &patch(vec![ItemComponent::Damage(9)])),
+        "its value does not"
+    );
+    assert_ne!(
+        plain,
+        interact::swap_key(&stack(1), &patch(vec![ItemComponent::RepairCost(1)]))
+    );
+    assert_ne!(
+        plain,
+        interact::swap_key(
+            &stack(1),
+            &ComponentPatch {
+                added: vec![],
+                removed: vec!["minecraft:food".into()],
+            }
+        )
+    );
+}
