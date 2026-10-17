@@ -662,7 +662,8 @@ fn use_on_block_with_cursor_and_repeat_delay() {
         }
         p => panic!("{p:?}"),
     }
-    assert!(matches!(out[1], ServerboundPlay::Punch(_)));
+    // A stick on stone is a Pass: no punch, `useItem` with the same hand follows.
+    assert!(matches!(&out[1], ServerboundPlay::UseItem(u) if u.hand == 0));
     let mut used_at = vec![1];
     for t in 2..=10 {
         if r.tick(use_)
@@ -1360,10 +1361,11 @@ fn a_server_started_use_takes_the_held_items_duration() {
     let mut out = Vec::new();
     r.p.handle(&living_flags(0x01), &mut out);
     assert!(r.p.is_using_item());
-    r.tick(InteractInput::default());
+    // Held button: the use goes on with the apple's duration (the button up would release
+    // it, as vanilla's handleKeybinds does for any use).
+    assert!(r.tick(USE).is_empty());
     assert_eq!(r.p.use_duration(), 32);
     assert_eq!(r.p.use_animation(), UseAnimation::Eat);
-    // Still in use without the button (the server owns it): no release packet.
     assert!(r.p.is_using_item());
 }
 
@@ -1374,17 +1376,32 @@ fn use_on_a_block_falls_through_to_use_item_and_the_off_hand() {
     let mut r = hungry(GameMode::Survival);
     r.p.int.hotbar[0] = item(4);
     let out = r.tick(USE);
-    assert!(matches!(out[0], ServerboundPlay::UseItemOn(u) if u.hand == 0), "{out:?}");
-    assert!(matches!(out[1], ServerboundPlay::UseItem(u) if u.hand == 0), "{out:?}");
+    assert!(
+        matches!(&out[0], ServerboundPlay::UseItemOn(u) if u.hand == 0),
+        "{out:?}"
+    );
+    assert!(
+        matches!(&out[1], ServerboundPlay::UseItem(u) if u.hand == 0),
+        "{out:?}"
+    );
     assert_eq!(out.len(), 2);
     assert!(r.p.is_using_item());
 
     let mut r = hungry(GameMode::Survival);
     r.p.int.offhand = item(4);
     let out = r.tick(USE);
-    assert!(matches!(out[0], ServerboundPlay::UseItemOn(u) if u.hand == 0), "{out:?}");
-    assert!(matches!(out[1], ServerboundPlay::UseItemOn(u) if u.hand == 1), "{out:?}");
-    assert!(matches!(out[2], ServerboundPlay::UseItem(u) if u.hand == 1), "{out:?}");
+    assert!(
+        matches!(&out[0], ServerboundPlay::UseItemOn(u) if u.hand == 0),
+        "{out:?}"
+    );
+    assert!(
+        matches!(&out[1], ServerboundPlay::UseItemOn(u) if u.hand == 1),
+        "{out:?}"
+    );
+    assert!(
+        matches!(&out[2], ServerboundPlay::UseItem(u) if u.hand == 1),
+        "{out:?}"
+    );
     assert_eq!(out.len(), 3);
 }
 

@@ -561,6 +561,7 @@ impl Interaction {
         self.miss_time = 0;
         self.is_using_item = false;
         self.using = None;
+        self.pending_use_hand = None;
         self.attack_clicks = 0;
         self.use_clicks = 0;
     }
@@ -1667,7 +1668,7 @@ impl LocalPlayer {
         ];
         let path = data.blocks.block_of(state).path();
         USES.iter().any(|u| {
-            path.strip_suffix(u)
+            path.strip_suffix(*u)
                 .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with('_'))
         })
     }
@@ -1685,9 +1686,7 @@ impl LocalPlayer {
             return true;
         };
         match ic.food(name) {
-            Some(can_always_eat) => {
-                self.abilities.invulnerable || can_always_eat || self.food < 20
-            }
+            Some(can_always_eat) => self.abilities.invulnerable || can_always_eat || self.food < 20,
             None => true,
         }
     }

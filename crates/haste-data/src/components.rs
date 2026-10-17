@@ -341,7 +341,10 @@ impl ItemComponents {
                 consumables.insert(item.clone(), parse_consumable(c));
             }
             if let Some(f) = components.get("minecraft:food") {
-                let always = f.get("can_always_eat").and_then(|v| v.as_bool()).unwrap_or(false);
+                let always = f
+                    .get("can_always_eat")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 foods.insert(item.clone(), always);
             }
             if let Some(t) = components.get("minecraft:tool") {
