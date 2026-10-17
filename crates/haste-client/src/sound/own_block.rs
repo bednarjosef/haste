@@ -40,9 +40,9 @@ use super::{PlayRequest, SoundPos, SoundRef, SoundRequest};
 /// `Sounds::apply` with the category volumes applied.
 pub struct OwnBlockSounds {
     /// Accumulated horizontal distance (vanilla `moveDist`), times 0.6.
-    move_dist: f32,
+    pub(super) move_dist: f32,
     /// Distance at which the next step plays (vanilla `nextStep`).
-    next_step: f32,
+    pub(super) next_step: f32,
     /// `ClientLevel.random`: `playLocalSound` seeds each sound instance with its
     /// `nextLong()`, so footsteps and hits pick a different file each time instead of
     /// always the same one.
