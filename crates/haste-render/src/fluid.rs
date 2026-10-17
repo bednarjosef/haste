@@ -30,6 +30,7 @@
 //! - Water is tinted by the blended biome water colour and goes to the translucent layer;
 //!   lava is untinted and solid.
 
+pub use crate::fluid_occlusion::{is_face_occluded, Occluder};
 use haste_assets::{BakedBlockModels, Direction, RenderLayer};
 use haste_core::view::BlockStateTable;
 use haste_core::{BlockPos, BlockStateId};
@@ -287,10 +288,21 @@ impl FluidTable {
 /// What the fluid mesher reads around a block (the mesh snapshot, or a test grid).
 pub trait FluidWorld {
     fn state(&self, p: BlockPos) -> BlockStateId;
-    /// Full opaque cube (culls fluid faces).
+    /// Full opaque cube (`BlockState.isSolidRender`).
     fn opaque(&self, p: BlockPos) -> bool;
     /// Ignored by corner averaging (vanilla: blocks motion).
     fn solid(&self, p: BlockPos) -> bool;
+    /// The neighbour's occlusion shape on the face it shares with a fluid whose face `dir`
+    /// points at it (`BlockState.getFaceOcclusionShape(dir.getOpposite())`). The default
+    /// knows only full cubes; a world with block shapes returns slabs and stairs as boxes.
+    fn face_occluder(&self, p: BlockPos, dir: Direction) -> Occluder<'_> {
+        let _ = dir;
+        if self.opaque(p) {
+            Occluder::Full
+        } else {
+            Occluder::Empty
+        }
+    }
 }
 
 /// Whether a baked block counts as solid for corner averaging (see the module docs).
@@ -384,6 +396,12 @@ pub fn flow_direction(h: [f32; 4]) -> [f32; 2] {
     }
 }
 
+/// Vanilla's `FluidRenderer.tesselate` face inset (0.001 blocks).
+pub const INSET: f32 = 0.001;
+
+/// `FluidRenderer.MAX_FLUID_HEIGHT`: a source block's height (8/9).
+pub const MAX_FLUID_HEIGHT: f32 = 0.888_888_9;
+
 /// One emitted fluid quad (block-local positions 0..1, sprite-local UVs).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FluidQuad {
@@ -407,6 +425,28 @@ fn reversed(q: FluidQuad) -> FluidQuad {
     }
 }
 
+/// `FluidState.shouldRenderBackwardUpFace`: the underside of the surface is drawn only when
+/// one of the nine blocks of the layer above (centred on `above`) is neither the same fluid
+/// nor a solid-rendering block, i.e. when a player could see the surface from below it.
+pub fn should_render_backward_up_face(
+    world: &dyn FluidWorld,
+    table: &FluidTable,
+    above: BlockPos,
+    fluid: Fluid,
+) -> bool {
+    for ox in -1..=1 {
+        for oz in -1..=1 {
+            let q = above.add(ox, 0, oz);
+            let state = world.state(q);
+            let same = table.fluid(state).is_some_and(|f| f.fluid == fluid);
+            if !same && !world.opaque(q) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// The quads of the fluid at `p` (block-local), appended to `out`.
 pub fn fluid_quads(
     world: &dyn FluidWorld,
@@ -424,12 +464,27 @@ pub fn fluid_quads(
             .is_some_and(|f| f.fluid == fluid.fluid)
     };
     let h = corner_heights(world, table, p, fluid);
-    let [nw, sw, se, ne] = h;
 
-    // Top: vertex order like a model's up face (NW, SW, SE, NE). Vanilla skips the
-    // top face when the block above occludes it (`isFaceOccludedByNeighbor` with the
-    // minimum corner height); a full opaque block above always occludes.
-    if !same(p.add(0, 1, 0)) && !world.opaque(p.add(0, 1, 0)) {
+    // `FluidRenderer.tesselate` pulls every face a hair into the block so fluid does not
+    // z-fight with the faces of glass, slabs and other neighbours: top corners down by
+    // `INSET` (which the sides then share), sides in by `INSET`, and the bottom (plus the
+    // sides' bottom edge) up by `INSET` only when the bottom face is drawn.
+    // Faces are culled against the neighbour's occlusion shape (`isFaceOccludedByNeighbor`):
+    // the bottom with vanilla's MAX_FLUID_HEIGHT, the top with the lowest corner (a full
+    // block above hides only a full-height surface), each side with its higher corner.
+    let occluded = |q: BlockPos, dir: Direction, height: f32| {
+        is_face_occluded(dir, height, world.face_occluder(q, dir))
+    };
+    let below = p.add(0, -1, 0);
+    let render_down = !same(below) && !occluded(below, Direction::Down, MAX_FLUID_HEIGHT);
+    let bottom = if render_down { INSET } else { 0.0 };
+    let above = p.add(0, 1, 0);
+    let min_h = h.iter().copied().fold(1.0f32, f32::min);
+    let render_up = !same(above) && !occluded(above, Direction::Up, min_h);
+    let [nw, sw, se, ne] = if render_up { h.map(|c| c - INSET) } else { h };
+
+    // Top: vertex order like a model's up face (NW, SW, SE, NE).
+    if render_up {
         let positions = [
             [0.0, nw, 0.0],
             [0.0, sw, 1.0],
@@ -459,18 +514,19 @@ pub fn fluid_quads(
             dir: Direction::Up,
         };
         out.push(top);
-        out.push(reversed(top));
+        if should_render_backward_up_face(world, table, p.add(0, 1, 0), fluid.fluid) {
+            out.push(reversed(top));
+        }
     }
 
     // Bottom (model down-face order).
-    let below = p.add(0, -1, 0);
-    if !same(below) && !world.opaque(below) {
+    if render_down {
         out.push(FluidQuad {
             positions: [
-                [0.0, 0.0, 1.0],
-                [0.0, 0.0, 0.0],
-                [1.0, 0.0, 0.0],
-                [1.0, 0.0, 1.0],
+                [0.0, bottom, 1.0],
+                [0.0, bottom, 0.0],
+                [1.0, bottom, 0.0],
+                [1.0, bottom, 1.0],
             ],
             uvs: [[0.0, 1.0], [0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
             sprite: still,
@@ -479,25 +535,27 @@ pub fn fluid_quads(
     }
 
     // Sides: (direction, neighbour offset, the face's two top corners as (x, z, height) in
-    // model vertex order: top-left then top-right seen from outside).
+    // model vertex order: top-left then top-right seen from outside). The face plane sits
+    // `INSET` inside the block (vanilla's `z + 0.001F` / `x + 1.0F - 0.001F`).
+    let (lo, hi) = (INSET, 1.0 - INSET);
     type Side = (Direction, [i32; 3], [f32; 3], [f32; 3]);
     let sides: [Side; 4] = [
-        (Direction::North, [0, 0, -1], [1.0, 0.0, ne], [0.0, 0.0, nw]),
-        (Direction::South, [0, 0, 1], [0.0, 1.0, sw], [1.0, 1.0, se]),
-        (Direction::West, [-1, 0, 0], [0.0, 0.0, nw], [0.0, 1.0, sw]),
-        (Direction::East, [1, 0, 0], [1.0, 1.0, se], [1.0, 0.0, ne]),
+        (Direction::North, [0, 0, -1], [1.0, lo, ne], [0.0, lo, nw]),
+        (Direction::South, [0, 0, 1], [0.0, hi, sw], [1.0, hi, se]),
+        (Direction::West, [-1, 0, 0], [lo, 0.0, nw], [lo, 1.0, sw]),
+        (Direction::East, [1, 0, 0], [hi, 1.0, se], [hi, 0.0, ne]),
     ];
     for (dir, o, a, b) in sides {
         let q = p.add(o[0], o[1], o[2]);
-        if same(q) || world.opaque(q) {
+        if same(q) || occluded(q, dir, a[2].max(b[2])) {
             continue;
         }
         let overlay = def.overlay && table.overlay(world.state(q));
         // Model side-face order: top-left, bottom-left, bottom-right, top-right.
         let positions = [
             [a[0], a[2], a[1]],
-            [a[0], 0.0, a[1]],
-            [b[0], 0.0, b[1]],
+            [a[0], bottom, a[1]],
+            [b[0], bottom, b[1]],
             [b[0], b[2], b[1]],
         ];
         let uvs = [
@@ -687,15 +745,19 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct Grid(HashMap<(i32, i32, i32), BlockStateId>);
+    struct Grid {
+        blocks: HashMap<(i32, i32, i32), BlockStateId>,
+        /// Occlusion shapes of partial blocks (slabs, stairs) by state.
+        shapes: HashMap<BlockStateId, Vec<[f32; 6]>>,
+    }
     impl Grid {
         fn set(&mut self, x: i32, y: i32, z: i32, s: BlockStateId) {
-            self.0.insert((x, y, z), s);
+            self.blocks.insert((x, y, z), s);
         }
     }
     impl FluidWorld for Grid {
         fn state(&self, p: BlockPos) -> BlockStateId {
-            self.0
+            self.blocks
                 .get(&(p.x, p.y, p.z))
                 .copied()
                 .unwrap_or(BlockStateId::AIR)
@@ -704,7 +766,18 @@ mod tests {
             self.state(p) == STONE
         }
         fn solid(&self, p: BlockPos) -> bool {
-            self.state(p) == STONE
+            let s = self.state(p);
+            s == STONE || self.shapes.contains_key(&s)
+        }
+        fn face_occluder(&self, p: BlockPos, _dir: Direction) -> Occluder<'_> {
+            let s = self.state(p);
+            if s == STONE {
+                Occluder::Full
+            } else if let Some(boxes) = self.shapes.get(&s) {
+                Occluder::Boxes(boxes)
+            } else {
+                Occluder::Empty
+            }
         }
     }
 
@@ -839,6 +912,125 @@ mod tests {
         let mut q = Vec::new();
         fluid_quads(&g, &t, at(-1, 0, 0), lava, &mut q);
         assert!(q.iter().any(|q| q.dir == Direction::East));
+    }
+
+    #[test]
+    fn faces_are_inset_like_vanilla() {
+        // FluidRenderer.tesselate: top corners 0.001 down, sides 0.001 in, bottom (and the
+        // sides' bottom edge) 0.001 up only when the bottom face is drawn.
+        let t = table();
+        let f = t.fluid(water(0)).unwrap();
+        let mut g = Grid::default();
+        g.set(0, 0, 0, water(0));
+        let mut q = Vec::new();
+        fluid_quads(&g, &t, at(0, 0, 0), f, &mut q);
+        let up = q.iter().find(|q| q.dir == Direction::Up).unwrap();
+        for v in up.positions {
+            // A lone source: each corner averages the source (weight 10) with two air sides
+            // (weight 1 each) in `FluidRenderer.calculateAverageHeight`, then the inset.
+            assert!(
+                (v[1] - (8.0 / 9.0 * 10.0 / 12.0 - INSET)).abs() < 1e-6,
+                "{v:?}"
+            );
+        }
+        let down = q.iter().find(|q| q.dir == Direction::Down).unwrap();
+        assert!(down.positions.iter().all(|v| v[1] == INSET));
+        let north = q.iter().find(|q| q.dir == Direction::North).unwrap();
+        assert!(north.positions.iter().all(|v| v[2] == INSET));
+        assert!((north.positions[0][1] - (8.0 / 9.0 * 10.0 / 12.0 - INSET)).abs() < 1e-6);
+        assert_eq!(north.positions[1][1], INSET);
+        let east = q.iter().find(|q| q.dir == Direction::East).unwrap();
+        assert!(east.positions.iter().all(|v| v[0] == 1.0 - INSET));
+
+        // Stone below: the bottom face is gone and the sides reach y = 0.
+        g.set(0, -1, 0, STONE);
+        q.clear();
+        fluid_quads(&g, &t, at(0, 0, 0), f, &mut q);
+        let west = q.iter().find(|q| q.dir == Direction::West).unwrap();
+        assert_eq!(west.positions[1][1], 0.0);
+    }
+
+    #[test]
+    fn backward_up_face_only_when_visible_from_above_layer() {
+        // FluidState.shouldRenderBackwardUpFace: the underside of the surface is skipped
+        // when the whole 3x3 above is stone or the same fluid; one open block brings it back.
+        let t = table();
+        let f = t.fluid(water(0)).unwrap();
+        let mut g = Grid::default();
+        g.set(0, 0, 0, water(0));
+        let ups = |g: &Grid| {
+            let mut q = Vec::new();
+            fluid_quads(g, &t, at(0, 0, 0), f, &mut q);
+            q.iter().filter(|q| q.dir == Direction::Up).count()
+        };
+        assert_eq!(ups(&g), 2, "open sky: front and back face");
+        for x in -1..=1 {
+            for z in -1..=1 {
+                g.set(x, 1, z, STONE);
+            }
+        }
+        // isFaceOccludedByState: a full block above does not hide a surface at 8/9, but the
+        // back face is not needed under a closed ceiling.
+        assert_eq!(ups(&g), 1, "stone ceiling: front face only");
+        g.set(1, 1, 1, water(0));
+        assert_eq!(ups(&g), 1, "same fluid in the ceiling counts as closed");
+        g.set(1, 1, 1, BlockStateId::AIR);
+        assert_eq!(
+            ups(&g),
+            2,
+            "one open block in the 3x3 above: back face again"
+        );
+        g.set(1, 1, 1, STONE);
+        g.set(0, 1, 0, water(0));
+        assert_eq!(ups(&g), 0, "same fluid straight above: no top face");
+    }
+
+    #[test]
+    fn sides_cull_against_slabs_and_stairs() {
+        // isFaceOccludedByNeighbor with the neighbour's shape: a bottom slab east of a
+        // low flowing block hides the east face; next to a source it does not.
+        let t = table();
+        let mut g = Grid::default();
+        const SLAB: BlockStateId = BlockStateId(2);
+        g.shapes.insert(SLAB, vec![[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]]);
+        g.set(1, 0, 0, SLAB);
+        // Walls around so the corner heights stay at the block's own height.
+        for (x, z) in [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 1)] {
+            g.set(x, 0, z, STONE);
+        }
+        g.set(0, -1, 0, STONE);
+        let east = |g: &Grid, level: u8| {
+            g_fluid_quads(g, &t, level)
+                .iter()
+                .filter(|q| q.dir == Direction::East)
+                .count()
+        };
+        assert_eq!(east(&g, 6), 0, "level 6 (2/9 high) hidden by the slab");
+        assert_eq!(east(&g, 0), 2, "a source (8/9) shows above the slab");
+        // Below: a top slab hides the bottom face, a bottom slab does not.
+        g.set(0, -1, 0, SLAB);
+        assert!(g_fluid_quads(&g, &t, 0)
+            .iter()
+            .any(|q| q.dir == Direction::Down));
+        const TOP_SLAB: BlockStateId = BlockStateId(3);
+        g.shapes
+            .insert(TOP_SLAB, vec![[0.0, 0.5, 0.0, 1.0, 1.0, 1.0]]);
+        g.set(0, -1, 0, TOP_SLAB);
+        assert!(!g_fluid_quads(&g, &t, 0)
+            .iter()
+            .any(|q| q.dir == Direction::Down));
+    }
+
+    fn g_fluid_quads(g: &Grid, t: &FluidTable, level: u8) -> Vec<FluidQuad> {
+        let mut g2 = Grid {
+            blocks: g.blocks.clone(),
+            shapes: g.shapes.clone(),
+        };
+        g2.set(0, 0, 0, water(level));
+        let f = t.fluid(water(level)).unwrap();
+        let mut q = Vec::new();
+        fluid_quads(&g2, t, at(0, 0, 0), f, &mut q);
+        q
     }
 
     #[test]
