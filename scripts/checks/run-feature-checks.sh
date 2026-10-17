@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs the feature check scripts in scripts/checks/ against the local test server.
 # usage: scripts/checks/run-feature-checks.sh [feature ...]
-#   features: hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock containers-crafting-table containers-furnace containers-anvil  (default: all)
+#   features: hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock containers-crafting-table containers-furnace containers-anvil containers-enchanting-table containers-brewing-stand containers-villager-trading  (default: all)
 # The client runs offscreen (`--script`); all server state is set up over RCON from here,
 # never from the script (the player is not an operator and the server kicks command spam).
 # Evidence is printed and grepped: frame text commands (not images), server log lines and
@@ -360,9 +360,14 @@ craft() {
 # 176x166 screen centred in the 480x270 GUI).
 
 # Starts the client on `script` and waits for it to be online. The player name is fresh
-# per run (`ContainersChk$RANDOM`): a fresh player always joins alive, empty and at the
-# world spawn, which is the snowy plain. Returns 1 when the client never joined.
+# per check (`ContainersChk` + a three-digit number - 16 characters at most: the vanilla
+# protocol rejects longer names with a generic disconnect): a fresh player always joins
+# alive, empty and at the world spawn, which is the snowy plain - so one runner's checks
+# never inherit each other's inventories through a shared player file (the previous
+# check's leftovers would satisfy `wait_until hotbar_item` before this check's give
+# arrives). Returns 1 when the client never joined.
 plain_client() { # script log
+  NAME="ContainersChk$((RANDOM % 1000))"
   client_start "$1" "$2"
   wait_online || return 1
   return 0
@@ -377,20 +382,34 @@ plain_client() { # script log
 # the script's `wait_until hotbar_item` window (25 s): on a busy shared test server the
 # player entity lags the client's join by many seconds, RCON answers "No player was
 # found" until it is there, and the give's inventory sync can lag its answer again.
+# Two phases, because the tp must land before anything is given: the scripts wait for
+# the give (`wait_until hotbar_item`), and if a give could land while the tp still
+# answers "No entity was found", the script would click at the shared spawn while the
+# scene is not even built (the area's chunks are not loaded there, so the fills and
+# setblock would have failed too). Phase one lands the tp (done is not "the player
+# exists" but "the player's own Pos answer shows the tp's x"); phase two gives the
+# items and places the blocks, retried until the give's item shows in the inventory.
 plain_setup() { # log shot pos commands...
   local log=$1 shot=$2 pos=$3
   shift 3
+  local x=${pos%% *}
   if wait_shot "$log" "$shot" 90; then
     local end=$((SECONDS + 25))
     while [ $SECONDS -lt $end ]; do
       rcon "gamemode survival $NAME" >/dev/null
       rcon "tp $NAME $pos" >/dev/null
+      # done when the player's own Pos answer shows the tp's x (the teleport landed)
+      rcon "data get entity $NAME Pos" 2>/dev/null | grep -q "\[${x}d," && break
+      sleep 2
+    done
+    # the scene: clear, give, fill, setblock (name- and area-based, all safe to repeat)
+    while [ $SECONDS -lt $end ]; do
       local c
       for c in "$@"; do
         rcon "$c" >/dev/null
       done
-      # done when a `data get` answer names the player (the commands found it)
-      [ -n "$(rcon "data get entity $NAME Pos" 2>/dev/null | grep "$NAME")" ] && break
+      # done when an item arrived (every check's commands give at least one)
+      rcon "data get entity $NAME Inventory" 2>/dev/null | grep -q "minecraft:" && break
       sleep 2
     done
   fi
@@ -409,7 +428,7 @@ containers_crafting_table() {
     "fill 124 70 1 126 74 6 air replace" \
     "fill 124 70 1 126 70 6 minecraft:stone replace" \
     "setblock 125 71 5 minecraft:crafting_table"
-  local before after
+  local before="" after=""
   before=$(rcon "data get entity $NAME Inventory")
   if wait_shot "$log" ccraft-final 90; then
     after=$(rcon "data get entity $NAME Inventory")
@@ -583,7 +602,7 @@ containers_furnace() {
     "fill 127 70 1 129 74 6 air replace" \
     "fill 127 70 1 129 70 6 minecraft:stone replace" \
     "setblock 128 71 5 minecraft:furnace"
-  local before after
+  local before="" after=""
   before=$(rcon "data get entity $NAME Inventory")
   if wait_shot "$log" cfurn-closed 90; then
     after=$(rcon "data get entity $NAME Inventory")
@@ -612,7 +631,7 @@ containers_anvil() {
     "fill 121 70 1 123 74 6 air replace" \
     "fill 121 70 1 123 70 6 minecraft:stone replace" \
     "setblock 122 71 5 minecraft:anvil"
-  local before after
+  local before="" after=""
   before=$(rcon "data get entity $NAME Inventory")
   if wait_shot "$log" canvil-closed 90; then
     after=$(rcon "data get entity $NAME Inventory")
@@ -626,6 +645,117 @@ containers_anvil() {
   has "$after" "wooden_sword" || { echo "no renamed sword after"; r=1; }
   has "$after" "RenamedSword" || { echo "no custom name RenamedSword"; r=1; }
   check containers-anvil "a wooden sword was renamed to RenamedSword for 1 XP level" "$r"
+}
+
+# The enchanting table: enchant a wooden sword with lapis and levels. The table sits at
+# (124, 71, 5) in the check's own area, on its own stone platform, the player 2.5 blocks
+# north of it.
+containers_enchanting_table() {
+  local log="$LOGDIR/containers-enchanting-table.log"
+  plain_client "$ROOT/scripts/checks/containers-enchanting-table.txt" "$log" \
+    || { check containers-enchanting-table "player never joined" 1; return; }
+  plain_setup "$log" cench-setup "124.5 71 2.5 0 0" \
+    "clear $NAME" \
+    "give $NAME minecraft:wooden_sword 1" \
+    "give $NAME minecraft:lapis_lazuli 3" \
+    "xp add $NAME 5 levels" \
+    "fill 123 70 1 125 74 6 air replace" \
+    "fill 123 70 1 125 70 6 minecraft:stone replace" \
+    "setblock 124 71 5 minecraft:enchanting_table"
+  local before="" after=""
+  before=$(rcon "data get entity $NAME Inventory")
+  if wait_shot "$log" cench-closed 90; then
+    after=$(rcon "data get entity $NAME Inventory")
+  fi
+  wait_exit
+  echo "--- enchanting table evidence ---"
+  echo "Inventory before: $before"
+  echo "Inventory after:  $after"
+  local r=0
+  has "$before" "wooden_sword" || { echo "no wooden_sword before"; r=1; }
+  has "$before" "lapis_lazuli" || { echo "no lapis_lazuli before"; r=1; }
+  has "$after" "wooden_sword" || { echo "no enchanted sword after"; r=1; }
+  has "$after" "enchantments" || { echo "no enchantments component on the sword"; r=1; }
+  has "$after" "lapis_lazuli" || { echo "no leftover lapis after"; r=1; }
+  if grep -qE "haste proxy:|Java exception" "$log"; then
+    echo "proxy stubs or Java exceptions:"; grep -E "haste proxy:|Java exception" "$log" | head -5
+    r=1
+  fi
+  check containers-enchanting-table "a wooden sword was enchanted with 1 lapis and levels" "$r"
+}
+
+# The brewing stand: brew an awkward potion (water bottle + nether wart, blaze powder as
+# the fuel). The stand sits at (126, 71, 5) in the check's own area, on its own stone
+# platform, the player 2.5 blocks north of it.
+containers_brewing_stand() {
+  local log="$LOGDIR/containers-brewing-stand.log"
+  plain_client "$ROOT/scripts/checks/containers-brewing-stand.txt" "$log" \
+    || { check containers-brewing-stand "player never joined" 1; return; }
+  plain_setup "$log" cbrew-setup "126.5 71 2.5 0 0" \
+    "clear $NAME" \
+    "give $NAME minecraft:potion[minecraft:potion_contents={potion:\"minecraft:water\"}] 1" \
+    "give $NAME minecraft:nether_wart 1" \
+    "give $NAME minecraft:blaze_powder 1" \
+    "fill 125 70 1 127 74 6 air replace" \
+    "fill 125 70 1 127 70 6 minecraft:stone replace" \
+    "setblock 126 71 5 minecraft:brewing_stand"
+  local before="" after=""
+  before=$(rcon "data get entity $NAME Inventory")
+  if wait_shot "$log" cbrew-closed 90; then
+    after=$(rcon "data get entity $NAME Inventory")
+  fi
+  wait_exit
+  echo "--- brewing stand evidence ---"
+  echo "Inventory before: $before"
+  echo "Inventory after:  $after"
+  local r=0
+  has "$before" "potion" || { echo "no water bottle before"; r=1; }
+  has "$before" "nether_wart" || { echo "no nether_wart before"; r=1; }
+  has "$before" "blaze_powder" || { echo "no blaze_powder before"; r=1; }
+  has "$after" "awkward" || { echo "no awkward potion after"; r=1; }
+  if grep -qE "haste proxy:|Java exception" "$log"; then
+    echo "proxy stubs or Java exceptions:"; grep -E "haste proxy:|Java exception" "$log" | head -5
+    r=1
+  fi
+  check containers-brewing-stand "a water bottle and a nether wart (blaze powder fuel) became an awkward potion" "$r"
+}
+
+# The villager: trade with one. The runner summons a villager with one fixed offer
+# (1 emerald -> 5 arrows) at (129.5, 71, 5) in the check's own area, on its own stone
+# platform, the player 2.5 blocks north of it. Exactly one emerald is given, so the
+# shift-click result take buys one trade (vanilla AbstractContainerMenu.doClick's QUICK_MOVE
+# loop repeats while the result keeps refilling, which the single buy item ends).
+containers_villager_trading() {
+  local log="$LOGDIR/containers-villager-trading.log"
+  plain_client "$ROOT/scripts/checks/containers-villager-trading.txt" "$log" \
+    || { check containers-villager-trading "player never joined" 1; return; }
+  plain_setup "$log" ctrade-setup "129.5 71 2.5 0 0" \
+    "clear $NAME" \
+    "give $NAME minecraft:emerald 1" \
+    "fill 128 70 1 130 74 6 air replace" \
+    "fill 128 70 1 130 70 6 minecraft:stone replace" \
+    "summon minecraft:villager 129.5 71 5 {NoAI:1b,PersistenceRequired:1b,Offers:{Recipes:[{buy:{id:\"minecraft:emerald\",count:1},sell:{id:\"minecraft:arrow\",count:5}}]}}"
+  local before="" after=""
+  before=$(rcon "data get entity $NAME Inventory")
+  if wait_shot "$log" ctrade-closed 90; then
+    after=$(rcon "data get entity $NAME Inventory")
+  fi
+  wait_exit
+  # Our villager, removed while the chunks are still ours to touch (a named tag so the
+  # selector never matches another worker's villager on the shared server).
+  rcon "kill @e[type=villager,x=128,z=5,distance=..3]" >/dev/null
+  echo "--- villager trading evidence ---"
+  echo "Inventory before: $before"
+  echo "Inventory after:  $after"
+  local r=0
+  has "$before" "emerald" || { echo "no emeralds before"; r=1; }
+  has "$after" "arrow" || { echo "no arrows after"; r=1; }
+  has "$after" "count: 5" || { echo "not 5 arrows"; r=1; }
+  if grep -qE "haste proxy:|Java exception" "$log"; then
+    echo "proxy stubs or Java exceptions:"; grep -E "haste proxy:|Java exception" "$log" | head -5
+    r=1
+  fi
+  check containers-villager-trading "one trade was bought from a summoned villager (1 emerald -> 5 arrows)" "$r"
 }
 
 # ---- 10. Languages other than English ----
@@ -695,6 +825,71 @@ book() {
   check book "used a writable book, typed, signed it into a written book" "$r"
 }
 
+# ---- 16. Books read: a written book in hand (open_book -> BookViewScreen) and on a lectern
+# (open_screen + container_set_content -> LecternScreen). The script is self-contained (the
+# check player is an operator: creative, its own area, a signed book, a lectern with the book
+# on it); the runner ops the player and greps the frame text dumps of both screens (the page
+# text) plus the lectern's Book data and the held written book over RCON. The screen classes
+# are covered by the JVM test book_view_screen (BookViewScreen) and the "Take Book" button
+# (only LecternScreen draws it).
+read_book() {
+  local log="$LOGDIR/read-book.log"
+  client_start "$ROOT/scripts/checks/read-book.txt" "$log"
+  wait_online || { check read-book "player never joined" 1; return; }
+  rcon "op $NAME" >/dev/null
+  # the lectern's data is only readable while the player (its position anchor) is online
+  local lectern=""
+  if wait_shot "$log" lectern-view 90; then
+    lectern=$(rcon "execute at $NAME run data get block ~1 ~ ~ Book")
+  fi
+  wait_exit
+  echo "--- read book evidence ---"
+  local book_view lectern_view
+  book_view=$(grep -E "script text\[book-view\]" "$log")
+  lectern_view=$(grep -E "script text\[lectern-view\]" "$log")
+  echo "book-view frame: $book_view"
+  echo "lectern-view frame: $lectern_view"
+  echo "lectern Book: ${lectern:-<not read>}"
+  local r=0
+  has "$book_view" "Lectern page text" || { echo "BookViewScreen shows no page text"; r=1; }
+  has "$book_view" "Page 1 of 1" || { echo "BookViewScreen shows no page indicator"; r=1; }
+  has "$lectern_view" "Lectern page text" || { echo "LecternScreen shows no page text"; r=1; }
+  has "$lectern_view" "Take Book" || { echo "LecternScreen shows no Take Book button"; r=1; }
+  has "$lectern" "MyReadBook" || { echo "the lectern holds no written book titled MyReadBook"; r=1; }
+  grep -E "haste proxy:|Java exception" "$log" && r=1
+  check read-book "read a written book in hand and on a lectern (open_book, lectern screen)" "$r"
+}
+
+# ---- 17. Hanging signs: a wall hanging sign opens the hanging-sign editor, type, Done ----
+# The script is self-contained (the check player is an operator: creative, its own area with a
+# pillar and an oak wall hanging sign on its side, the use opens the editor); the runner ops
+# the player and reads the evidence relative to the player's position. The client builds the
+# sign's entity from the real block state, so the hanging-sign editor (with the hanging-sign
+# art, not the standing sign's) opens; the JVM test hanging_sign_editor_screen checks the
+# screen class and texture, the screenshots here are the visual end-to-end evidence.
+hanging_sign() {
+  local log="$LOGDIR/hanging-sign.log"
+  client_start "$ROOT/scripts/checks/edit-hanging-sign.txt" "$log"
+  wait_online || { check hanging-sign "player never joined" 1; return; }
+  rcon "op $NAME" >/dev/null
+  # the sign's data is only readable while the player (its position anchor) is online
+  local out=""
+  if wait_shot "$log" hanging-sign-done 90; then
+    out=$(rcon "execute at $NAME run data get block ~1 ~2 ~ front_text")
+  fi
+  wait_exit
+  echo "--- hanging sign evidence ---"
+  echo "front_text: ${out:-<not read>}"
+  local r=0
+  has "$out" "HangOne" || { echo "missing line one"; r=1; }
+  has "$out" "HangTwo" || { echo "missing line two"; r=1; }
+  grep -E "haste proxy:|Java exception" "$log" && r=1
+  ls "$ROOT/target/shots/script-hanging-sign-editor.png" >/dev/null 2>&1 \
+    || { echo "no editor screenshot"; r=1; }
+  echo "screenshots: $ROOT/target/shots/script-hanging-sign-editor.png (hanging-sign art)"
+  check hanging-sign "used a wall hanging sign, typed two lines, the hanging-sign editor opened" "$r"
+}
+
 # ---- 14. Command blocks: ops, place, use, type a command, Done ----
 # The script is self-contained (the check player is an operator: creative mode, its own command
 # block ahead of the camera, the use opens the editor); the runner ops the player and reads the
@@ -760,13 +955,13 @@ sprint() {
   check sprint "double-tapping W made the player cover ${dist} blocks/s (sprint speed)" "$r"
 }
 
-ALL=(hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book commandblock sprint containers-crafting-table containers-furnace containers-anvil)
+ALL=(hud death drop modes f2 craft pause creative-hotbars language particles recipe-book sign book read-book hanging-sign commandblock sprint containers-crafting-table containers-furnace containers-anvil containers-enchanting-table containers-brewing-stand containers-villager-trading)
 if [ $# -eq 0 ]; then
   set -- "${ALL[@]}"
 fi
 for f in "$@"; do
   case "$f" in
-    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | particles | recipe-book | sign | book | commandblock | sprint | containers-crafting-table | containers-furnace | containers-anvil) fn="${f//-/_}"; if declare -F "$fn" >/dev/null; then "$fn"; else check "$f" "no check function $fn" 1; fi ;;
+    hud | death | drop | modes | f2 | craft | pause | creative-hotbars | language | particles | recipe-book | sign | book | read-book | hanging-sign | commandblock | sprint | containers-crafting-table | containers-furnace | containers-anvil | containers-enchanting-table | containers-brewing-stand | containers-villager-trading) fn="${f//-/_}"; if declare -F "$fn" >/dev/null; then "$fn"; else check "$f" "no check function $fn" 1; fi ;;
     *) echo "unknown feature: $f" ;;
   esac
 done

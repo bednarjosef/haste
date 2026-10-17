@@ -2352,23 +2352,34 @@ impl NetDriver {
     }
 
     /// Drains every queued packet into the session, world, entities and the UI (the HUD: every
-    /// packet in order, after the client's own handling), and sends the replies.
+    /// packet in order, after the client's own handling), and sends the replies. Packets queued
+    /// since the last drain are applied now (vanilla runs the packet queue every frame, before
+    /// the tick, `Minecraft.runTick` -> `packetProcessor.processQueuedPackets`).
     pub fn receive<W: WorldSink + ?Sized, E: EntitySink + ?Sized>(
         &mut self,
         world: &mut W,
         entities: &mut E,
         ui: Option<&crate::ui::Ui>,
     ) -> anyhow::Result<()> {
-        while let Some(p) = self.conn.try_recv() {
+        while let Some(a) = self.conn.try_recv_arrived() {
+            let waited_ms = a.at.elapsed().as_secs_f64() * 1000.0;
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                if let Some(name) = a.packet.name() {
+                    if name == "minecraft:container_set_slot" {
+                        tracing::debug!(wait_ms = waited_ms, "container_set_slot applied");
+                    }
+                }
+            }
             let regs = self.conn.registries();
             // The HUD sees every packet after the client's own handling, in order; cloning only
             // when there is a UI to show it (the session takes the original). While the HUD JVM
             // is still starting the UI-bound packets are kept and replayed once it is up.
-            let keep = ui.is_some() || crate::ui::ui_handles(&p);
-            let for_ui = keep.then(|| p.clone());
-            self.session.apply(p, world, entities, regs, &mut self.out);
+            let keep = ui.is_some() || crate::ui::ui_handles(&a.packet);
+            let for_ui = keep.then(|| a.packet.clone());
+            self.session
+                .apply(a.packet, world, entities, regs, &mut self.out);
             match (ui, for_ui) {
-                (Some(ui), Some(p)) => ui.handle(&p),
+                (Some(ui), Some(p)) => ui.handle(&p, &|pos| world.block_state_at(pos)),
                 (None, Some(p)) if self.ui_backlog.len() < UI_BACKLOG_LIMIT => {
                     self.ui_backlog.push(p)
                 }

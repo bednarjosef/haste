@@ -531,6 +531,15 @@ impl Session {
             biome_climates.clone(),
             options.clone(),
         ));
+        // Wake the game thread the moment a play packet arrives, so packets are
+        // applied between ticks like vanilla's every-frame queue drain
+        // (`Minecraft.runTick`) instead of waiting for the next 20 Hz tick.
+        {
+            let shared = shared.clone();
+            driver
+                .connection()
+                .set_packet_wake(Arc::new(move || shared.wake_on_packet()));
+        }
         // The server's configuration-phase packs are part of the running stack from the
         // start; a later pack-screen reload keeps them layered (vanilla's repository
         // holds them beside the selection).
@@ -749,6 +758,26 @@ pub struct WorldFeed {
     /// The object-model block entities' animation state by position for this frame (reused
     /// lookup scratch; the game thread ticks it once per tick).
     anim_map: HashMap<BlockPos, haste_render::BlockEntityAnim>,
+    /// Beacon beam sections by position, rebuilt only when the blocks above change (the key
+    /// is the column's state above the beacon: any change re-walks it).
+    beacon_beams: HashMap<BlockPos, (u64, std::sync::Arc<haste_render::BeamData>)>,
+    /// End gateway ages by position: the NBT payload key, the world age it was first seen at
+    /// and its NBT age then (the age ticks on client-side, vanilla `beamAnimationTick`, since
+    /// the server sends the NBT only once).
+    gateway_ages: HashMap<BlockPos, (usize, usize, i64, i64)>,
+    /// Gateways already logged (debugging the draw, once per position).
+    logged_gateways: std::collections::HashSet<BlockPos>,
+    /// Gateways whose beam was live on the last frame (log on change).
+    gateway_beam_live: HashMap<BlockPos, bool>,
+    /// Moving piston data by position, rebuilt only when the block entity's NBT changes.
+    piston_cache: HashMap<
+        BlockPos,
+        (
+            usize,
+            usize,
+            Option<std::sync::Arc<haste_render::PistonData>>,
+        ),
+    >,
     /// The shared world as the mesh workers see it (created on the first feed).
     source: Option<Arc<dyn haste_render::SnapshotSource>>,
     /// Sections submitted this frame (reused).
@@ -940,6 +969,7 @@ impl WorldFeed {
         // Only the chunks the camera can see carry drawable block entities; skipping the
         // rest keeps the per-frame walk short on big worlds with nothing in them.
         let view = shared.view.lock().clone();
+        let world_age = view.world_age;
         let cam_chunk = ChunkPos::new(
             view.feet.x.floor() as i32 >> 4,
             view.feet.z.floor() as i32 >> 4,
@@ -1127,6 +1157,51 @@ impl WorldFeed {
                 {
                     sign_angle = 0.0;
                 }
+                // The special renderers' data: the beacon's beam sections (the client's own
+                // glass walk, vanilla `BeaconBlockEntity.tick`), the gateway's beam and the
+                // portal's faces, the piston's moved-block state.
+                let (beam, gateway_beam, portal_faces, piston) = match kind {
+                    haste_render::BlockEntityKind::Beacon => {
+                        let beam = self.beacon_data(pos, &world, blocks, &shared.data);
+                        (beam, None, 0, None)
+                    }
+                    haste_render::BlockEntityKind::EndPortal => (
+                        None,
+                        None,
+                        haste_render::blockentity::end_portal_faces(),
+                        None,
+                    ),
+                    haste_render::BlockEntityKind::EndGateway => {
+                        let (faces, beam) = self.gateway_data(
+                            pos,
+                            &world,
+                            blocks,
+                            &shared.data,
+                            be,
+                            world_age,
+                            partial,
+                        );
+                        // On every beam state change (and once at first sight): what the
+                        // renderer gets (debugging the draw).
+                        let beam_now = beam.is_some();
+                        let seen = self.logged_gateways.insert(pos);
+                        let changed = self
+                            .gateway_beam_live
+                            .insert(pos, beam_now)
+                            .is_some_and(|was| was != beam_now);
+                        if seen || changed {
+                            tracing::info!(
+                                "end gateway at {pos:?}: faces {faces:#08b}, beam {:?}",
+                                beam.map(|b| (b.scale, b.height))
+                            );
+                        }
+                        (None, beam, faces, None)
+                    }
+                    haste_render::BlockEntityKind::MovingPiston => {
+                        (None, None, 0, self.piston_data(pos, be, partial))
+                    }
+                    _ => (None, None, 0, None),
+                };
                 self.be_instances.push(haste_render::BlockEntityInstance {
                     pos,
                     facing,
@@ -1144,6 +1219,12 @@ impl WorldFeed {
                     skull_anim,
                     anim,
                     sherds,
+                    beam,
+                    // Vanilla's beam animation time, `floorMod(gameTime, 40) + partial`.
+                    beam_time: haste_render::blockentity::beam_animation_time(world_age, partial),
+                    gateway_beam,
+                    portal_faces,
+                    piston,
                 });
             }
         }
@@ -1346,6 +1427,172 @@ impl WorldFeed {
         Some(parsed)
     }
 
+    /// The beacon's beam sections at `pos`: vanilla's own client-side walk
+    /// (`BeaconBlockEntity.tick` over the stained glass above), done in one pass and re-walked
+    /// whenever the column above the beacon changes (the key is a hash of the column's states;
+    /// vanilla re-checks 10 blocks a tick, we need only the result).
+    fn beacon_data(
+        &mut self,
+        pos: BlockPos,
+        world: &World,
+        blocks: &haste_data::BlockStates,
+        data: &haste_data::GameData,
+    ) -> Option<std::sync::Arc<haste_render::BeamData>> {
+        use haste_core::view::{BlockPhysics as _, BlockView as _};
+        // The column's states from the beacon block itself (vanilla's walk starts at it: the
+        // beacon is a white `BeaconBeamBlock`, so it seeds the first section) up to the
+        // heightmap top, hashed as the cache key.
+        let top = world
+            .chunk(pos.chunk())
+            .and_then(|c| c.height_at((pos.x & 15) as u8, (pos.z & 15) as u8))
+            .unwrap_or(pos.y);
+        let mut key = 0u64;
+        let states: Vec<_> = (pos.y..=top)
+            .map(|y| {
+                let s = world.block_state(BlockPos::new(pos.x, y, pos.z));
+                key = key.wrapping_mul(31).wrapping_add(s.0 as u64);
+                s
+            })
+            .collect();
+        if let Some((k, data)) = self.beacon_beams.get(&pos) {
+            if *k == key {
+                return Some(data.clone());
+            }
+        }
+        // Vanilla's walk: the first one or two stained-glass blocks start sections (a colour
+        // change beyond that starts one in the averaged colour), any other block with light
+        // dampening 15 (except bedrock) ends the beam, and every further block extends the
+        // last section.
+        let mut sections: Vec<haste_render::BeamSection> = Vec::new();
+        for &s in &states {
+            let block = blocks.block_of(s);
+            if let Some(color) = beacon_beam_color(block) {
+                match sections.len() {
+                    0 | 1 => sections.push(haste_render::BeamSection { color, height: 1 }),
+                    _ => {
+                        let last_color = sections.last().unwrap().color;
+                        if last_color == color {
+                            sections.last_mut().unwrap().height += 1;
+                        } else {
+                            sections.push(haste_render::BeamSection {
+                                color: average_argb(last_color, color),
+                                height: 1,
+                            });
+                        }
+                    }
+                }
+            } else {
+                let ends = match sections.last() {
+                    None => true,
+                    Some(_) => {
+                        // Vanilla: `state.getLightDampening() >= 15 && !state.is(bedrock)` —
+                        // the oracle's opaque flag is the same fully-light-blocking set.
+                        data.is_opaque_full(s) && block != &Identifier::minecraft("bedrock")
+                    }
+                };
+                if ends {
+                    sections.clear();
+                    break;
+                }
+                sections.last_mut().unwrap().height += 1;
+            }
+        }
+        let data = std::sync::Arc::new(haste_render::BeamData { sections });
+        self.beacon_beams.insert(pos, (key, data.clone()));
+        Some(data)
+    }
+
+    /// The end gateway's visible faces and beam at `pos`: the faces from the neighbouring
+    /// blocks (vanilla `Block.shouldRenderFace`: an opaque neighbour hides the face unless it
+    /// is the gateway block itself), the beam from the block entity's NBT age and cooldown
+    /// (vanilla `TheEndGatewayRenderer.extractRenderState`: spawning under age 200 in magenta
+    /// to the build limit, cooling down for 40 ticks in purple over 50 blocks).
+    #[allow(clippy::too_many_arguments)]
+    fn gateway_data(
+        &mut self,
+        pos: BlockPos,
+        world: &World,
+        blocks: &haste_data::BlockStates,
+        data: &haste_data::GameData,
+        be: &haste_core::chunk::BlockEntityData,
+        world_age: i64,
+        partial: f32,
+    ) -> (u8, Option<haste_render::GatewayBeam>) {
+        use haste_core::view::{BlockPhysics as _, BlockView as _};
+        let mut faces = 0u8;
+        let state = world.block_state(pos);
+        let own = blocks.block_of(state).clone();
+        for d in haste_core::Direction::ALL {
+            let neighbour = world.block_state(pos.offset(d));
+            let same = *blocks.block_of(neighbour) == own;
+            let opaque = data.is_opaque_full(neighbour);
+            if !same && opaque {
+                continue;
+            }
+            faces |= 1 << d as u8;
+        }
+        // The gateway's age ticks on (vanilla `beamAnimationTick` runs on both sides) but the
+        // server only sends the NBT once, so track the age ourselves from the payload's first
+        // sight: age = age at sight + ticks since.
+        let key = (be.nbt.as_ptr() as usize, be.nbt.len());
+        let entry = *self
+            .gateway_ages
+            .entry(pos)
+            .or_insert_with(|| (key.0, key.1, world_age, parse_gateway_age(&be.nbt)));
+        let (k, len, seen_at, age0) = entry;
+        let age = if (k, len) == key {
+            age0 + (world_age - seen_at).max(0)
+        } else {
+            // A new payload: restart from its own age.
+            self.gateway_ages
+                .insert(pos, (key.0, key.1, world_age, parse_gateway_age(&be.nbt)));
+            parse_gateway_age(&be.nbt)
+        };
+        let beam = parse_gateway_beam(age, partial);
+        (faces, beam)
+    }
+
+    /// The moving piston's data at `pos` from the block entity's NBT (vanilla
+    /// `PistonMovingBlockEntity.loadAdditional`): the moved block state, facing, progress,
+    /// extending and source flags. The progress is the game thread's tick (vanilla advances
+    /// it 0.5 per tick to 1.0, then the block entity is gone); this reads its ends.
+    fn piston_data(
+        &mut self,
+        pos: BlockPos,
+        be: &haste_core::chunk::BlockEntityData,
+        partial: f32,
+    ) -> Option<std::sync::Arc<haste_render::PistonData>> {
+        let key = (be.nbt.as_ptr() as usize, be.nbt.len());
+        if let Some((k, len, data)) = self.piston_cache.get(&pos) {
+            if (*k, *len) == key {
+                if let Some(data) = data {
+                    // The progress ticks on: fold the anim's ends by the partial tick.
+                    let mut d = (**data).clone();
+                    d.progress = self
+                        .anim_map
+                        .get(&pos)
+                        .map(|a| match a {
+                            haste_render::BlockEntityAnim::Piston { progress } => {
+                                haste_render::TickPair {
+                                    start: progress.start,
+                                    end: progress.at(partial),
+                                }
+                            }
+                            _ => d.progress,
+                        })
+                        .unwrap_or(d.progress);
+                    return Some(std::sync::Arc::new(d));
+                }
+                return None;
+            }
+        }
+        let parsed = parse_piston_nbt(&be.nbt);
+        let parsed = std::sync::Arc::new(parsed);
+        self.piston_cache
+            .insert(pos, (key.0, key.1, Some(parsed.clone())));
+        Some(parsed)
+    }
+
     /// Hands the renderer the first-person hand (`Renderer::set_first_person`) when the view's
     /// per-tick part changed since the last call. The skin is fixed for the connection, so
     /// comparing the per-tick part is enough to catch every change; the skin is cloned only when
@@ -1465,6 +1712,126 @@ fn parse_pot_sherds(nbt: &[u8]) -> haste_render::blockentity::PotSherds {
         out.right = side(c, "right");
     }
     out
+}
+
+/// A moving piston's data from its NBT (vanilla `PistonMovingBlockEntity.loadAdditional`:
+/// `blockState`, `facing`, `progress`, `extending`, `source`). Unreadable or missing fields
+/// draw nothing (vanilla's `movedState` defaults to air, which also draws nothing).
+fn parse_piston_nbt(nbt: &[u8]) -> haste_render::PistonData {
+    use haste_protocol::nbt::deserializer::NbtReadHelperJava;
+    let mut cursor = std::io::Cursor::new(nbt);
+    let mut helper = NbtReadHelperJava::new(&mut cursor);
+    let Ok(doc) = haste_protocol::nbt::Nbt::read_unnamed(&mut helper) else {
+        return air_piston();
+    };
+    let root = &doc.root_tag;
+    // The state string carries its properties: `block[facing=north,...]`; keep it whole (the
+    // renderer parses it into the blockstate's variants).
+    let block_state = root
+        .get_string("blockState")
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let facing = root
+        .get_int("facing")
+        .and_then(|i| u8::try_from(i).ok())
+        .and_then(haste_core::Direction::from_ordinal)
+        .unwrap_or(haste_core::Direction::Down);
+    let progress = root.get_float("progress").unwrap_or(0.0);
+    let extending = root.get_bool("extending").unwrap_or(false);
+    let source = root.get_bool("source").unwrap_or(false);
+    haste_render::PistonData {
+        block_state,
+        progress: haste_render::TickPair::fixed(progress),
+        facing,
+        extending,
+        source,
+    }
+}
+
+/// The piston data for a block entity without a moved block (draws nothing).
+fn air_piston() -> haste_render::PistonData {
+    haste_render::PistonData {
+        block_state: String::new(),
+        progress: haste_render::TickPair::fixed(0.0),
+        facing: haste_core::Direction::Down,
+        extending: false,
+        source: false,
+    }
+}
+
+/// The end gateway's beam (vanilla `TheEndGatewayRenderer.extractRenderState`): spawning
+/// under age 200 in magenta to the build limit; the cooldown phase arrives as a block event
+/// (not in the NBT), so it is not drawn yet. `None` hides the beam.
+fn parse_gateway_beam(age: i64, partial: f32) -> Option<haste_render::GatewayBeam> {
+    if age >= 200 {
+        return None;
+    }
+    // Vanilla `getSpawnPercent`: `clamp((age + partial) / 200, 0, 1)`, then `sin(scale * PI)`;
+    // the beam distance is the build limit (`level.getMaxY()`), the height its floor. The
+    // overworld's build limit is 320.
+    let scale = ((age as f32 + partial) / 200.0).clamp(0.0, 1.0);
+    let scale = (scale * std::f32::consts::PI).sin();
+    let height = (scale * 320.0).floor() as i32;
+    Some(haste_render::GatewayBeam {
+        scale,
+        height,
+        // Vanilla `DyeColor.MAGENTA.getTextureDiffuseColor()` while spawning.
+        color: haste_render::blockentity::DYE_DIFFUSE_COLOR[2],
+    })
+}
+
+/// The gateway's `Age` from its NBT (vanilla `TheEndGatewayBlockEntity.loadAdditional`,
+/// default 0).
+fn parse_gateway_age(nbt: &[u8]) -> i64 {
+    use haste_protocol::nbt::deserializer::NbtReadHelperJava;
+    let mut cursor = std::io::Cursor::new(nbt);
+    let mut helper = NbtReadHelperJava::new(&mut cursor);
+    haste_protocol::nbt::Nbt::read_unnamed(&mut helper)
+        .ok()
+        .and_then(|doc| doc.root_tag.get_long("Age"))
+        .unwrap_or(0)
+}
+
+/// A stained-glass block's (or the beacon's own) beam colour (vanilla `BeaconBeamBlock.getColor`
+/// -> `DyeColor.getTextureDiffuseColor`), or `None` for other blocks.
+fn beacon_beam_color(block: &haste_core::Identifier) -> Option<u32> {
+    const GLASS: [(&str, u32); 16] = [
+        ("white_stained_glass", 0),
+        ("orange_stained_glass", 1),
+        ("magenta_stained_glass", 2),
+        ("light_blue_stained_glass", 3),
+        ("yellow_stained_glass", 4),
+        ("lime_stained_glass", 5),
+        ("pink_stained_glass", 6),
+        ("gray_stained_glass", 7),
+        ("light_gray_stained_glass", 8),
+        ("cyan_stained_glass", 9),
+        ("purple_stained_glass", 10),
+        ("blue_stained_glass", 11),
+        ("brown_stained_glass", 12),
+        ("green_stained_glass", 13),
+        ("red_stained_glass", 14),
+        ("black_stained_glass", 15),
+    ];
+    if block.namespace() != "minecraft" {
+        return None;
+    }
+    // The beacon block itself is a white beam block (vanilla `BeaconBlock.getColor`).
+    let color = if block.path() == "beacon" {
+        0
+    } else {
+        GLASS
+            .iter()
+            .find(|(name, _)| *name == block.path())
+            .map(|(_, dye)| *dye)?
+    };
+    Some(haste_render::blockentity::DYE_DIFFUSE_COLOR[color as usize])
+}
+
+/// Vanilla `ARGB.average`: the per-channel mean of two colours.
+fn average_argb(a: u32, b: u32) -> u32 {
+    let ch = |s: u32| (((a >> s) & 0xFF).wrapping_add((b >> s) & 0xFF)) / 2;
+    0xFF00_0000 | ch(16) << 16 | ch(8) << 8 | ch(0)
 }
 
 /// A banner's patterns from its NBT (`BannerBlockEntity`'s `patterns`: a list of
@@ -3083,7 +3450,7 @@ impl Menu {
                 })();
                 match result {
                     Ok(host) => {
-                        let ui = crate::ui::Ui::new(host);
+                        let ui = crate::ui::Ui::new(host.clone());
                         // Screens need the synced registries (L1c): the jar's data pack stands in
                         // for a server's registry_data until one is joined.
                         if let Err(e) = ui.gui().load_jar_registries() {
@@ -3093,6 +3460,11 @@ impl Menu {
                             tracing::warn!("opening the title screen: {e:#}");
                         }
                         let _ = tx.send(ui);
+                        // The title screen is up: warm the classes its first clicks load
+                        // (Singleplayer's world-selection tree) while the player looks at it, on
+                        // this background thread — never the render thread. The UI is already
+                        // with the render loop, so the frames do not wait for this.
+                        host.warm_screen_classes();
                     }
                     Err(e) => {
                         tracing::warn!("no menu screens: the JVM did not start: {e:#}");
@@ -3359,6 +3731,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        renderer.set_game_time(shared.view.lock().world_age);
         renderer.set_lightmap_frame(lightmap);
         {
             let world = shared.world.read();
@@ -3905,17 +4278,14 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 }
             }
             // A session the multiplayer screen's join created: it takes over from here (the
-            // game thread ticks the UI clone; the loop renders the world from now on).
+            // game thread ticks the UI clone; the loop renders the world from now on). The
+            // connecting/preparing screen stays up until the level is ready — `Ui::joined`
+            // closes it there, like vanilla's loading screen.
             if let Some(s) = arrived {
                 session = Some(s);
                 shared = session.as_ref().map(|s| s.shared.clone());
                 menu = None;
                 in_menu = false;
-                if let Some(u) = &ui {
-                    // The screens close like vanilla's ConnectScreen does when the level is
-                    // ready (the connecting or preparing screen); the HUD takes over.
-                    u.gui().close_screen();
-                }
             }
             // The actions may have changed what the game thread sees this tick.
             if let Some(shared) = shared.as_ref() {
@@ -4026,6 +4396,10 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             &mut weather_guard,
         );
         feed.feed(shared, &mut renderer, camera_section(&camera), vd);
+        // The first-person hand, like the window and the screenshot path (`set_first_person`
+        // diffs the view's per-tick part and only touches the renderer on a change): without
+        // this the script's shots never show the held item.
+        feed.set_first_person(shared, &mut renderer, game::Perspective::FirstPerson);
         let (entities, block_entities) =
             feed.entities(shared, &mut renderer, session_ref.local, partial);
         let block_target = view.as_ref().and_then(|v| v.block_target);
@@ -4087,6 +4461,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        renderer.set_game_time(shared.view.lock().world_age);
         {
             let world = shared.world.read();
             let mut particles = shared.particles.lock();
@@ -4233,6 +4608,8 @@ struct BenchSample {
     /// Section meshes uploaded this frame and their vertex+index bytes.
     uploads: u32,
     upload_bytes: u64,
+    /// Terrain indices drawn (six per quad): the vertex-fetch load.
+    indices_drawn: u32,
     /// Frame index since the measure phase started.
     index: u32,
 }
@@ -4248,6 +4625,8 @@ struct BenchSummary {
     sections_drawn: f32,
     sections_total: f32,
     draw_calls: f32,
+    /// Terrain indices drawn per frame (six per quad): the vertex-fetch load.
+    indices_drawn: f32,
     prepare_ms: f32,
     acquire_ms: f32,
     cull_ms: f32,
@@ -4279,7 +4658,7 @@ impl BenchSummary {
              frame time: avg {:.2} ms ({:.0} FPS), 1% low {:.2} ms, worst {:.2} ms\n\
              breakdown ms: prepare {:.2} acquire {:.2} cull {:.2} encode {:.2} submit {:.2} present {:.2} | gpu main {:.2} hand {:.2} gui {:.2}\n\
              gpu main ms: sky {:.3} opaque {:.3} cutout {:.3} translucent {:.3} entities {:.3} particles {:.3} overlays {:.3}\n\
-             sections drawn {}/{} avg, draw calls {:.0} avg\n\
+             sections drawn {}/{} avg, draw calls {:.0} avg, indices {:.0} avg (quads {:.0})\n\
              render distance {} (requested {}), {}x{}, adapter {}",
             self.frames,
             meta.seconds,
@@ -4306,6 +4685,8 @@ impl BenchSummary {
             self.sections_drawn,
             self.sections_total,
             self.draw_calls,
+            self.indices_drawn,
+            self.indices_drawn / 6.0,
             meta.render_distance,
             meta.requested_render_distance,
             meta.width,
@@ -4412,6 +4793,7 @@ fn bench_summary(samples: &[BenchSample]) -> BenchSummary {
         sections_drawn: sum(samples, n, |s| s.sections_drawn as f32),
         sections_total: sum(samples, n, |s| s.sections_total as f32),
         draw_calls: sum(samples, n, |s| s.draw_calls as f32),
+        indices_drawn: sum(samples, n, |s| s.indices_drawn as f32),
         prepare_ms: t(|x| x.prepare_ms),
         acquire_ms: t(|x| x.acquire_ms),
         cull_ms: t(|x| x.cull_ms),
@@ -4494,6 +4876,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        renderer.set_game_time(shared.view.lock().world_age);
         renderer.set_lightmap_frame(lightmap);
         {
             let world = shared.world.read();
@@ -4677,6 +5060,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
+        renderer.set_game_time(shared.view.lock().world_age);
         renderer.set_lightmap_frame(lightmap);
         {
             let world = shared.world.read();
@@ -4696,6 +5080,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             sections_new: stats.chunk_sections_drawn.saturating_sub(prev_drawn),
             uploads: stats.uploads,
             upload_bytes: stats.upload_bytes,
+            indices_drawn: stats.indices_drawn,
             index: samples.len() as u32,
         });
         if shared.is_closed() {
@@ -4719,6 +5104,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             "sections_drawn": summary.sections_drawn,
             "sections_total": summary.sections_total,
             "draw_calls": summary.draw_calls,
+            "indices_drawn": summary.indices_drawn,
             "prepare_ms": summary.prepare_ms,
             "acquire_ms": summary.acquire_ms,
             "cull_ms": summary.cull_ms,
@@ -4806,6 +5192,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         started: Instant::now(),
         menu_next: Instant::now(),
         quitting: false,
+        bench: None,
     };
     event_loop.run_app(&mut app)?;
     if let Some(e) = app.error {
@@ -4819,7 +5206,163 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A join the screens requested, connecting on its own thread: what to show as the target
+/// The windowed bench's state (`--bench-window`): the recorded samples, the still camera
+/// (the settled frame's camera with `--yaw`/`--pitch`), and the run's metadata.
+struct WindowBench {
+    samples: Vec<BenchSample>,
+    /// The camera every measured frame uses (the settle frame's, yaw/pitch from the args).
+    camera: Option<Camera>,
+    /// The still camera's view distance (the settled view's; the summary reports it).
+    view_distance: i32,
+    /// Total measured seconds; the run ends when it has elapsed since `started`.
+    seconds: f32,
+    started: Option<Instant>,
+    feed_ms: f32,
+    /// The window's exact inner size in physical pixels (`--width`x`--height`).
+    size: (u32, u32),
+    /// The look the bench camera holds (`--yaw`/`--pitch`; `None` keeps the player's own).
+    look: (Option<f32>, Option<f32>),
+    /// `--pos`: the settle also waits until the server has teleported the player here.
+    want_pos: Option<DVec3>,
+}
+
+/// `--bench-window SECONDS`: the windowed twin of `bench`. Joins like the windowed client
+/// (a real window at `--width`x`--height`, vsync off unless `--vsync`), waits for the world
+/// to settle, then renders the still camera for SECONDS while recording the same
+/// `BenchSample`s as the offscreen bench. Prints the same summary block (marked `windowed`)
+/// and writes the same JSON to `--bench-out`; the window closes by itself.
+pub fn bench_window(args: &Args, seconds: u64) -> anyhow::Result<()> {
+    let Some(server) = args.server.as_deref() else {
+        anyhow::bail!("--bench-window needs --server <host[:port]>");
+    };
+    let session = Session::join(&args.username, args.render_distance, server, false, None)?;
+    let shared = session.shared.clone();
+    // The bench camera is first person: the game thread's camera effects take that perspective.
+    shared.input.lock().first_person = true;
+    // `--x11`: the same XWayland window vanilla's client gets (framebuffer exactly
+    // `--width`x`--height`; a Wayland window's is the desktop scale multiple).
+    if args.x11 {
+        std::env::set_var("WINIT_UNIX_BACKEND", "x11");
+        std::env::remove_var("WAYLAND_DISPLAY");
+    }
+    let event_loop = EventLoop::new()?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+    let options = session.options.clone();
+    let mut app = App {
+        username: args.username.clone(),
+        render_distance: args.render_distance,
+        session: Some(session),
+        menu: None,
+        joining: None,
+        local_server: None,
+        // Present, not vsync: the windowed number must carry the present cost but not be
+        // pinned to the display rate (vanilla's comparison run had vsync off too).
+        vsync: args.vsync.unwrap_or(false),
+        vsync_forced: args.vsync.or(Some(false)),
+        options,
+        options_version: 0,
+        perspective: game::Perspective::FirstPerson,
+        window: None,
+        renderer: None,
+        feed: WorldFeed::default(),
+        ui: None,
+        gui: GuiFrame::default(),
+        input: InputRouter::default(),
+        grabbed: false,
+        screen_was_open: false,
+        focused: true,
+        breaking: Vec::new(),
+        frame_stats: FrameStats::default(),
+        fps: FpsCounter::new(),
+        error: None,
+        seconds: None,
+        screenshot: false,
+        scope: 0.5,
+        frame_at: Instant::now(),
+        started: Instant::now(),
+        menu_next: Instant::now(),
+        quitting: false,
+        bench: Some(WindowBench {
+            samples: Vec::with_capacity(seconds as usize * 1000),
+            camera: None,
+            view_distance: 12,
+            seconds: seconds as f32,
+            started: None,
+            feed_ms: 0.0,
+            size: (args.width, args.height),
+            look: (args.yaw, args.pitch),
+            want_pos: args
+                .pos
+                .as_ref()
+                .filter(|v| v.len() == 3)
+                .map(|v| DVec3::new(v[0], v[1], v[2])),
+        }),
+    };
+    app.input.yaw = args.yaw.unwrap_or(0.0);
+    app.input.pitch = args.pitch.unwrap_or(10.0);
+    event_loop.run_app(&mut app)?;
+    if let Some(e) = app.error {
+        return Err(e);
+    }
+    let Some(bench) = app.bench else {
+        anyhow::bail!("the windowed bench ended without samples");
+    };
+    let (width, height) = app
+        .renderer
+        .as_ref()
+        .map_or((args.width, args.height), |r| r.size());
+    let meta = BenchMeta {
+        seconds: bench.seconds,
+        render_distance: bench.view_distance,
+        requested_render_distance: app.render_distance.unwrap_or(12),
+        width,
+        height,
+        adapter: app
+            .renderer
+            .as_ref()
+            .map(|r| {
+                let info = r.adapter_info();
+                format!("{} ({})", info.name, info.backend)
+            })
+            .unwrap_or_default(),
+    };
+    let summary = bench_summary(&bench.samples);
+    println!("windowed bench at {}, {}", meta.width, meta.height);
+    println!("{}", summary.text(&meta));
+    if let Some(out) = &args.bench_out {
+        let json = serde_json::json!({
+            "windowed": true,
+            "frames": summary.frames,
+            "seconds": meta.seconds,
+            "avg_ms": summary.avg_ms,
+            "fps": summary.fps(),
+            "p99_ms": summary.p99_ms,
+            "worst_ms": summary.worst_ms,
+            "sections_drawn": summary.sections_drawn,
+            "sections_total": summary.sections_total,
+            "draw_calls": summary.draw_calls,
+            "indices_drawn": summary.indices_drawn,
+            "prepare_ms": summary.prepare_ms,
+            "acquire_ms": summary.acquire_ms,
+            "cull_ms": summary.cull_ms,
+            "encode_ms": summary.encode_ms,
+            "submit_ms": summary.submit_ms,
+            "present_ms": summary.present_ms,
+            "gpu_main_ms": summary.gpu_ms[0],
+            "gpu_hand_ms": summary.gpu_ms[1],
+            "gpu_gui_ms": summary.gpu_ms[2],
+            "render_distance": meta.render_distance,
+            "requested_render_distance": meta.requested_render_distance,
+            "width": meta.width,
+            "height": meta.height,
+            "adapter": meta.adapter,
+        });
+        std::fs::write(out, serde_json::to_string_pretty(&json)?)?;
+        println!("bench summary written to {}", out.display());
+    }
+    Ok(())
+}
+
 /// (the address, or the world folder of a local world) and where the session (with its local
 /// world, for singleplayer) arrives.
 struct JoinInProgress {
@@ -4887,6 +5430,9 @@ struct App {
     menu_next: Instant,
     /// The title screen's Quit Game was clicked: close at the next `about_to_wait`.
     quitting: bool,
+    /// The windowed bench (`--bench-window`): records one sample per frame and closes the
+    /// window when the run is full. `None` in the normal windowed client.
+    bench: Option<WindowBench>,
 }
 
 impl App {
@@ -5158,11 +5704,9 @@ impl App {
                 }
                 self.options = session.options.clone();
                 self.session = Some(session);
-                if let Some(ui) = &self.ui {
-                    // The screens close like vanilla's ConnectScreen does when the level is
-                    // ready; the HUD takes over.
-                    ui.gui().close_screen();
-                }
+                // The connecting screen stays up until the level is ready: `Ui::joined` (the
+                // game thread's login handling) closes it there, like vanilla's loading
+                // screen; closing here would run before the level exists.
             }
             Err(e) => {
                 tracing::warn!("joining {target} failed: {e:#}");
@@ -5316,9 +5860,20 @@ impl App {
         }
         self.input
             .sample(&session.shared, self.ui.as_ref(), self.perspective);
+        // The windowed bench holds the camera still (the settle frame's view with the
+        // requested look), like the offscreen `--bench --bench-fixed`.
+        if let Some(bench) = &mut self.bench {
+            let offset = session.shared.view.lock().look_offset;
+            if let Some(yaw) = bench.look.0 {
+                self.input.yaw = yaw - offset.0;
+            }
+            if let Some(pitch) = bench.look.1 {
+                self.input.pitch = (pitch - offset.1).clamp(-90.0, 90.0);
+            }
+        }
         let renderer = self.renderer.as_mut().expect("checked above");
         let mut weather_guard = session.shared.weather_scratch.lock();
-        let (camera, sky, lightmap, partial, vd, animation_tick, weather) = frame_view(
+        let (mut camera, sky, lightmap, partial, vd, animation_tick, weather) = frame_view(
             &session.shared,
             self.perspective,
             self.input.yaw,
@@ -5327,8 +5882,38 @@ impl App {
             t0,
             &mut weather_guard,
         );
+        // The windowed bench's settle and still camera: until the world has settled (and
+        // the HUD's JVM arrived, like the screenshot path), the frames only warm up; the
+        // first settled frame's camera is then held for the whole run.
+        if let Some(bench) = &mut self.bench {
+            let settled_now = {
+                let view = session.shared.view.lock().clone();
+                let at_pos = bench
+                    .want_pos
+                    .is_none_or(|p| (view.feet - p).length() <= 0.5);
+                view.has_position
+                    && at_pos
+                    && self
+                        .feed
+                        .settled(&self.frame_stats, Duration::from_millis(1500))
+                    && (self.ui.is_some()
+                        || session.shared.hud_failed.load(Ordering::Relaxed)
+                        || !session.shared.hud_enabled.load(Ordering::Relaxed))
+            };
+            if settled_now && bench.camera.is_none() {
+                bench.camera = Some(camera);
+                bench.view_distance = vd;
+            }
+            if let Some(still) = bench.camera {
+                camera = still;
+            }
+        }
+        let feed_start = Instant::now();
         self.feed
             .feed(&session.shared, renderer, camera_section(&camera), vd);
+        if let Some(bench) = &mut self.bench {
+            bench.feed_ms = feed_start.elapsed().as_secs_f32() * 1000.0;
+        }
         let t1 = Instant::now();
         self.feed
             .set_first_person(&session.shared, renderer, self.perspective);
@@ -5422,6 +6007,7 @@ impl App {
             renderer.prepare_particles(&mut particles, &*world, camera, partial);
         }
         renderer.set_animation_tick(animation_tick);
+        renderer.set_game_time(session.shared.view.lock().world_age);
         renderer.set_lightmap_frame(lightmap);
         renderer.set_menu_blur_radius(self.options.menu_background_blurriness);
         if self.screenshot {
@@ -5432,6 +6018,31 @@ impl App {
         drop(weather_guard);
         if let Ok(stats) = &result {
             self.frame_stats = *stats;
+        }
+        // The windowed bench's sample: recorded once the still camera is held (the settle
+        // frames before it are warm-up, not measurements). The run ends with the window.
+        if let (Some(bench), Ok(stats)) = (&mut self.bench, &result) {
+            if let Some(started) = bench.started {
+                let prev_drawn = bench.samples.last().map_or(0, |s| s.sections_drawn);
+                bench.samples.push(BenchSample {
+                    frame_ms: stats.frame_ms,
+                    sections_drawn: stats.chunk_sections_drawn,
+                    sections_total: stats.chunk_sections_total,
+                    draw_calls: stats.draw_calls,
+                    timings: renderer.timings(),
+                    feed_ms: bench.feed_ms,
+                    sections_new: stats.chunk_sections_drawn.saturating_sub(prev_drawn),
+                    uploads: stats.uploads,
+                    upload_bytes: stats.upload_bytes,
+                    indices_drawn: stats.indices_drawn,
+                    index: bench.samples.len() as u32,
+                });
+                if started.elapsed().as_secs_f32() >= bench.seconds {
+                    self.quitting = true;
+                }
+            } else if bench.camera.is_some() {
+                bench.started = Some(Instant::now());
+            }
         }
         if let Some(result) = renderer.take_capture() {
             // Encode and write off the render thread: PNG compression of a full frame
@@ -5506,9 +6117,21 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes()
-            .with_title("Haste")
-            .with_inner_size(winit::dpi::LogicalSize::new(854.0, 480.0));
+        let attrs = if let Some(bench) = &self.bench {
+            // The windowed bench: a logical inner size (`--width`x`--height`), so the
+            // framebuffer is exactly the requested resolution times the desktop scale —
+            // the same window a vanilla client at `--width`x`--height` would get.
+            Window::default_attributes()
+                .with_title("Haste bench")
+                .with_inner_size(winit::dpi::LogicalSize::new(
+                    f64::from(bench.size.0),
+                    f64::from(bench.size.1),
+                ))
+        } else {
+            Window::default_attributes()
+                .with_title("Haste")
+                .with_inner_size(winit::dpi::LogicalSize::new(854.0, 480.0))
+        };
         let result = (|| -> anyhow::Result<(Arc<Window>, Renderer)> {
             let window = Arc::new(event_loop.create_window(attrs)?);
             let mut assets = open_assets()?;
@@ -6165,6 +6788,7 @@ mod tests {
             sections_new: 0,
             uploads: 0,
             upload_bytes: 0,
+            indices_drawn: 0,
             index: 0,
         }
     }

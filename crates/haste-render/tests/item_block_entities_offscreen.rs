@@ -146,6 +146,11 @@ fn item_and_mob_block_entities_offscreen() {
         skull_anim: TickPair::fixed(0.0),
         anim: None,
         sherds: None,
+        beam: None,
+        beam_time: 0.0,
+        gateway_beam: None,
+        portal_faces: 0,
+        piston: None,
     };
 
     let campfire = instance(
@@ -298,6 +303,11 @@ fn fifty_campfire_items_frame_timing() {
                 skull_anim: TickPair::fixed(0.0),
                 anim: None,
                 sherds: None,
+                beam: None,
+                beam_time: 0.0,
+                gateway_beam: None,
+                portal_faces: 0,
+                piston: None,
             })
             .collect()
     };

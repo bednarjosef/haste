@@ -24,7 +24,7 @@ mod proxies;
 pub use error::JvmError;
 pub use gui::{GuiPipeline, ScreenKind};
 pub use host::{JvmConfig, JvmHost, StartTimings};
-pub use loader::{ClassLog, ClassSource, ALLOW_CLASSES, ALLOW_PACKAGES, DENY};
+pub use loader::{ClassLog, ClassSource, ALLOW_CLASSES, ALLOW_PACKAGES, DENY, WARM_CLASSES};
 pub use proxies::{
     decode_stack, empty_stack, encode_stack, ChatMessage, CreateWorldRequest, DebugInfo, GameState,
     PlayerVitals, TargetedState, INVENTORY_SIZE,

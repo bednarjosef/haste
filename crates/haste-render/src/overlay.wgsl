@@ -24,7 +24,9 @@ struct Camera {
     // Keeps the struct a whole number of vec4s: WGSL rounds a uniform struct's size
     // up to its alignment (16), so the Rust side must carry the same trailing pad
     // (renderer.rs asserts both are equal).
-    _pad: vec2<f32>,
+    // Vanilla `Globals.GameTime` (the end portal layers scroll with it; see endportal.wgsl).
+    game_time: f32,
+    _pad: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;

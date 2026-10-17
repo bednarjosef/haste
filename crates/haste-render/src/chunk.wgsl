@@ -23,7 +23,9 @@ struct Camera {
     // alignment in WGSL, so the explicit pad below is load-bearing).
     line_width: f32,
     aspect: f32,
-    _pad: vec2<f32>,
+    // Vanilla `Globals.GameTime` (the end portal layers scroll with it; see endportal.wgsl).
+    game_time: f32,
+    _pad: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
