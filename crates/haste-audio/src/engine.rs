@@ -75,9 +75,15 @@ impl SourceVolumes {
         }
     }
 
-    /// Effective gain multiplier of a source: `master * source`.
+    /// Effective gain multiplier of a source, as vanilla's `SoundEngine.calculateVolume`
+    /// takes `Options.getFinalSoundSourceVolume` clamped to 0..=1: `master * source`, and
+    /// the master volume alone for the master source (not master squared).
     pub fn effective(&self, source: SoundSource) -> f32 {
-        self.master * self.get(source)
+        let final_volume = match source {
+            SoundSource::Master => self.master,
+            _ => self.master * self.get(source),
+        };
+        final_volume.clamp(0.0, 1.0)
     }
 }
 

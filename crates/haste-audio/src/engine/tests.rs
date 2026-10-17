@@ -421,3 +421,17 @@ fn remove_drops_the_sound_at_the_index() {
     engine.tick();
     assert!(total_gains(&engine).0 > 0.0);
 }
+
+#[test]
+fn master_source_takes_the_master_volume_once() {
+    // Options.getFinalSoundSourceVolume: the master source's own volume is the master
+    // volume, every other source's is master * source, and SoundEngine clamps it to 0..=1.
+    let mut volumes = SourceVolumes::default();
+    volumes.set(SoundSource::Master, 0.5);
+    volumes.set(SoundSource::Block, 0.5);
+    assert_eq!(volumes.effective(SoundSource::Master), 0.5);
+    assert_eq!(volumes.effective(SoundSource::Block), 0.25);
+    volumes.set(SoundSource::Master, 2.0);
+    volumes.set(SoundSource::Block, 1.0);
+    assert_eq!(volumes.effective(SoundSource::Block), 1.0);
+}
