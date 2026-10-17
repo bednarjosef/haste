@@ -2377,6 +2377,12 @@ fn frame_view<'w>(
         dimension_has_sky: view.has_sky,
         fog_start: fog_end * 0.75,
         fog_end,
+        // `SkyRenderer.shouldRenderDarkDisc` reads the player's interpolated eye.
+        dark_disc: haste_render::sky::dark_disc::should_render_dark_disc(
+            game::interpolate(view.prev_eye, view.eye, partial).y,
+            view.horizon_height,
+            view.eye_in_water,
+        ),
         fog,
     };
     drop(world);

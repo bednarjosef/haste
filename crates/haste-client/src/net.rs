@@ -1073,6 +1073,8 @@ pub struct Session {
     pub weather: WeatherState,
     /// `ClientLevel.seaLevel` (the spawn info's; biome precipitation's snow line).
     pub sea_level: i32,
+    /// `ClientLevelData.isFlat` (the spawn info's superflat flag; the horizon height).
+    pub is_flat: bool,
     /// The chunk batch flow control (vanilla `ChunkBatchSizeCalculator`): the server sends
     /// chunk batches and waits for our `chunk_batch_received` rate before the next, so a
     /// client that never acknowledges gets one batch and then silence — a teleport's new
@@ -1146,6 +1148,7 @@ impl Session {
             lightmap: LightmapState::default(),
             weather: WeatherState::default(),
             sea_level: 63,
+            is_flat: false,
             batch_started_at: None,
             aggregated_nanos_per_chunk: 2_000_000.0,
             old_samples_weight: 1,
@@ -1406,6 +1409,7 @@ impl Session {
                 // `ClientLevel.seaLevel` comes with the spawn info (biome precipitation's
                 // snow line hangs off it).
                 self.sea_level = l.spawn.sea_level;
+                self.is_flat = l.spawn.is_flat;
             }
             P::Respawn(r) => {
                 self.counters.respawns += 1;
@@ -1416,6 +1420,7 @@ impl Session {
                         ..DimensionInfo::overworld()
                     });
                 self.sea_level = r.spawn.sea_level;
+                self.is_flat = r.spawn.is_flat;
                 world.reset(&dim);
                 entities.clear();
                 self.entity_ids.clear();
