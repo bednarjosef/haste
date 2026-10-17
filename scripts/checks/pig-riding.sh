@@ -88,11 +88,14 @@ AFTER=$(rcon "data get entity $PIG Pos" 2>/dev/null)
 ROTATION=$(rcon "data get entity $PIG Rotation" 2>/dev/null)
 PLAYER_AFTER=$(rcon "data get entity $NAME Pos" 2>/dev/null)
 
+# Remove the rig while the client still keeps the area loaded: the pig and the platform
+# (the cleared volume above stays air).
+rcon "kill $PIGS" >/dev/null
+CLEANUP=$(rcon "execute at $NAME run fill 125 120 -10 165 120 30 air" 2>/dev/null)
+echo "== cleanup: $CLEANUP"
+
 wait "$CLIENT_PID" 2>/dev/null
 RC=$?
-# Remove the rig: the pig, the platform and the cleared volume's air stays air.
-rcon "kill $PIGS" >/dev/null
-rcon "fill 125 120 -10 165 120 30 air" >/dev/null
 
 echo "== pig Pos at the mount"
 echo "$PIG_REST"
