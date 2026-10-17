@@ -1,6 +1,7 @@
 //! Dense entity storage: `Vec`-backed slots with a free list, `EntityId -> slot` in an ahash map.
 //! No per-tick allocation.
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use ahash::AHashMap;
 use haste_core::entity::{
@@ -248,6 +249,8 @@ pub struct Entity {
     pub item: Option<ItemStackData>,
     /// Ticks since spawn: drives the dropped items' spin and bob.
     pub age: u32,
+    /// A player's trailing cape point (`ClientAvatarState`'s cloak), ticked for players only.
+    pub cloak: crate::avatar::Cloak,
 }
 
 impl Entity {
@@ -293,6 +296,7 @@ impl Entity {
             attack_ticks: 0,
             item: None,
             age: 0,
+            cloak: crate::avatar::Cloak::default(),
         }
     }
 
@@ -420,6 +424,9 @@ pub struct EntityStore {
     /// Item default components (the `equippable` component armour reads), from the datagen
     /// report; empty when absent (armour then draws nothing).
     item_components: haste_data::ItemComponents,
+    /// Each player's resolved skin (`PlayerInfo.getSkin`), by profile id; a player without one
+    /// wears its default skin (`DefaultPlayerSkin.get`).
+    skins: AHashMap<Uuid, Arc<crate::skin::PlayerSkin>>,
 }
 
 /// Hurt flash strength for an entity's remaining hurt ticks, eased out (quadratic, like
@@ -447,6 +454,7 @@ impl EntityStore {
             by_id: AHashMap::new(),
             dims,
             players: AHashMap::new(),
+            skins: AHashMap::new(),
             riding: Riding::new(),
             painting_variants: HashMap::new(),
             mob_variants: crate::variants::MobVariants::empty(),
@@ -696,6 +704,19 @@ impl EntityStore {
         }
     }
 
+    /// Sets a player's resolved skin (the client's skin manager, once its textures loaded).
+    pub fn set_player_skin(&mut self, uuid: Uuid, skin: Arc<crate::skin::PlayerSkin>) {
+        self.skins.insert(uuid, skin);
+    }
+
+    /// `AbstractClientPlayer.getSkin`: the resolved skin, else the profile's default skin.
+    pub fn player_skin(&self, uuid: Uuid) -> Arc<crate::skin::PlayerSkin> {
+        match self.skins.get(&uuid) {
+            Some(s) => s.clone(),
+            None => crate::skin::default_skin(uuid),
+        }
+    }
+
     /// One 20 Hz tick: advance the lerp windows so `prev_pos`/`pos` bracket this tick's step,
     /// update the walk animation, the body yaw (`LivingEntity.tick` -> `calculateEntityAnimation`
     /// and `tickHeadTurn`) and the swing/swim/chicken timers.
@@ -708,6 +729,11 @@ impl EntityStore {
                 slot.prev_head_yaw = slot.head_yaw;
             }
             slot.head_yaw_dirty = false;
+            // `AbstractClientPlayer.tick`: the cloak follows the position before this tick's
+            // movement (the interpolation step below).
+            if slot.is_player_type {
+                slot.cloak.tick(slot.pos);
+            }
             slot.lerp.tick(&mut slot.pos, &mut slot.prev_pos);
             let d = slot.pos - slot.prev_pos;
             let dist = f32::sqrt((d.x * d.x + d.z * d.z) as f32);
@@ -946,7 +972,7 @@ impl EntityStore {
             } else {
                 ([None, None], Vec::new(), None)
             };
-            out.push(EntityInstance {
+            let mut inst = EntityInstance {
                 id: slot.id,
                 model,
                 pos,
@@ -975,7 +1001,16 @@ impl EntityStore {
                 hands,
                 equipment,
                 head_item,
-            });
+            };
+            if slot.is_player_type {
+                crate::avatar::dress_tracked(
+                    &self.player_skin(slot.uuid),
+                    slot,
+                    &mut inst,
+                    partial_tick,
+                );
+            }
+            out.push(inst);
         }
     }
 }
