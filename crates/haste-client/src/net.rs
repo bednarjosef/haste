@@ -1387,16 +1387,50 @@ impl Session {
         }
         let (pos, yaw, _) = entities.pose(vehicle)?;
         let (_, dims) = entities.entity_type_info(vehicle)?;
-        let (speed, jump, gravity) = self.vehicle_attributes(vehicle);
+        let (speed, jump, gravity) =
+            self.vehicle_attributes(vehicle, crate::horse::DEFAULT_MOVEMENT_SPEED);
         Some(crate::horse::Horse::new(
             pos, yaw, dims, speed, jump, gravity,
         ))
     }
 
+    /// The pig we steer with a carrot on a stick, when the vehicle the server just seated us
+    /// in is one we control (vanilla `Pig.getControllingPassenger`: the first passenger, a
+    /// player, of a saddled pig — the carrot on a stick is checked per tick while riding, so
+    /// it is not part of this). Like the horse, our own simulation starts where the server
+    /// last told us it was.
+    fn pig_at<E: EntitySink + ?Sized>(
+        &self,
+        vehicle: EntityId,
+        entities: &E,
+    ) -> Option<crate::pig::Pig> {
+        let kind = entities.entity_type(vehicle)?;
+        let path = self
+            .entity_type_names
+            .get(kind.0 as usize)
+            .map(|id| id.path())?;
+        if !crate::pig::is_pig_type(path) {
+            return None;
+        }
+        // Vanilla `Mob.isSaddled`: the saddle equipment slot (wire id 7) worn and valid.
+        let saddled = entities
+            .equipment(vehicle)?
+            .iter()
+            .any(|(slot, stack)| *slot == SADDLE_SLOT && !stack.is_empty());
+        if !saddled {
+            return None;
+        }
+        let (pos, yaw, _) = entities.pose(vehicle)?;
+        let (_, dims) = entities.entity_type_info(vehicle)?;
+        let (speed, _, gravity) =
+            self.vehicle_attributes(vehicle, crate::pig::DEFAULT_MOVEMENT_SPEED);
+        Some(crate::pig::Pig::new(pos, yaw, dims, speed, gravity))
+    }
+
     /// The steered mount's attributes from the last `update_attributes` of `vehicle`
-    /// (`movement_speed`, `jump_strength`, `gravity`; the family's base values as the
-    /// fallback, which is what vanilla's own client would read before a sync).
-    fn vehicle_attributes(&self, vehicle: EntityId) -> (f64, f64, f64) {
+    /// (`movement_speed`, `jump_strength`, `gravity`; `default_speed` is the animal family's
+    /// own base value, the fallback vanilla's own client would read before a sync).
+    fn vehicle_attributes(&self, vehicle: EntityId, default_speed: f64) -> (f64, f64, f64) {
         let attrs = self.entity_attributes.get(&vehicle);
         let value = |name: &str, default: f64| {
             attrs
@@ -1408,7 +1442,7 @@ impl Session {
                 .unwrap_or(default)
         };
         (
-            value("movement_speed", crate::horse::DEFAULT_MOVEMENT_SPEED),
+            value("movement_speed", default_speed),
             value("jump_strength", crate::horse::DEFAULT_JUMP_STRENGTH),
             value("gravity", crate::horse::DEFAULT_GRAVITY),
         )
@@ -1551,7 +1585,8 @@ impl Session {
                 self.dimension = dim;
                 // A respawn is a new body: no vehicle, no riding.
                 self.entity_attributes.clear();
-                self.player.set_vehicle(None, SeatPoint::ZERO, None, None);
+                self.player
+                    .set_vehicle(None, SeatPoint::ZERO, None, None, None);
             }
             P::PlayerPosition(p) => {
                 tracing::debug!(
@@ -1731,7 +1766,8 @@ impl Session {
                 // If our vehicle is removed, we dismount (the store's riding bookkeeping drops
                 // us too, as a passenger of the removed vehicle).
                 if self.player.vehicle.is_some_and(|v| ids.contains(&v)) {
-                    self.player.set_vehicle(None, SeatPoint::ZERO, None, None);
+                    self.player
+                        .set_vehicle(None, SeatPoint::ZERO, None, None, None);
                 }
                 for id in &ids {
                     self.entity_ids.remove(id);
@@ -1747,23 +1783,27 @@ impl Session {
                 let vehicle = EntityId(s.vehicle);
                 let passengers: Vec<EntityId> = s.passengers.iter().map(|i| EntityId(*i)).collect();
                 entities.set_passengers(vehicle, &passengers);
-                // A boat or horse we steer is simulated on our side from the mount on (see
-                // [`crate::boat`], [`crate::horse`]); the correction below clears it on any
-                // dismount.
+                // A boat, horse or pig we steer is simulated on our side from the mount on (see
+                // [`crate::boat`], [`crate::horse`], [`crate::pig`]); the correction below
+                // clears it on any dismount.
                 let first = passengers.first() == Some(&self.entity_id);
                 let boat = first
                     .then(|| self.boat_at(vehicle, entities, world))
                     .flatten();
                 let horse = first.then(|| self.horse_at(vehicle, entities)).flatten();
+                let pig = first.then(|| self.pig_at(vehicle, entities)).flatten();
                 // Mount, re-seat, or dismount. The seat comes from the vehicle's type through
                 // vanilla's attachment rules (`haste_entity::passenger_seat`), which also names
                 // our own seat index: a boat's second passenger sits elsewhere than the first.
                 match self.seat_of(vehicle, &passengers, entities) {
-                    Some(seat) => self.player.set_vehicle(Some(vehicle), seat, boat, horse),
+                    Some(seat) => self
+                        .player
+                        .set_vehicle(Some(vehicle), seat, boat, horse, pig),
                     None if self.player.vehicle() == Some(vehicle) => {
                         // Dismount: our vehicle's new list no longer names us. Sneak's shift
                         // flag in player_input is what made the server send this.
-                        self.player.set_vehicle(None, SeatPoint::ZERO, None, None);
+                        self.player
+                            .set_vehicle(None, SeatPoint::ZERO, None, None, None);
                     }
                     None => {}
                 }
@@ -1796,6 +1836,19 @@ impl Session {
                             yaw: horse.yaw,
                             pitch: horse.pitch,
                             on_ground: horse.on_ground,
+                        },
+                    ));
+                }
+                if let Some(pig) = self.player.pig_mut() {
+                    if (m.pos - pig.pos).length() > VEHICLE_CORRECTION_EPSILON {
+                        pig.correct(m.pos, m.yaw);
+                    }
+                    out.push(ServerboundPlay::MoveVehicle(
+                        haste_protocol::packets::play::serverbound::MoveVehicle {
+                            pos: pig.pos,
+                            yaw: pig.yaw,
+                            pitch: pig.pitch,
+                            on_ground: pig.on_ground,
                         },
                     ));
                 }
@@ -1871,6 +1924,20 @@ impl Session {
                             } else if self.attached_firework == Some(id) {
                                 self.attached_firework = None;
                             }
+                        }
+                    }
+                    // The pig we steer: the boost's total (a use click on the carrot on a
+                    // stick made the server write it, vanilla `Pig.onSyncedDataUpdated` ->
+                    // `ItemBasedSteering.onSynced`).
+                    if self.player.vehicle() == Some(id) {
+                        if let (Some(pig), Some(total)) = (
+                            self.player.pig_mut(),
+                            crate::pig::Pig::boost_total_of(&d.metadata),
+                        ) {
+                            if !pig.boosting() {
+                                tracing::debug!("pig boost started: {total} ticks");
+                            }
+                            pig.on_synced_boost(total);
                         }
                     }
                 }

@@ -2,6 +2,7 @@
 //! tick composes, computed independently from `AbstractHorse`'s constants), on the flat stone
 //! platform of the evidence area.
 use super::*;
+use crate::travel::{GROUND_ACCELERATION, HORIZONTAL_DRAG, VERTICAL_DRAG};
 use haste_physics::testing::{states, TestShapes, TestWorld};
 
 /// The horse's box, from its `EntityType`'s `sized(1.3964844F, 1.6F)`.

@@ -18,17 +18,15 @@ LOG="$ROOT/target/horse-riding.log"
 cd "$ROOT" || exit 1
 rcon() { "$ROOT/scripts/vanilla-rcon.sh" --port "$PORT" "$@"; }
 
-# The running server's own log (haste-cache/servers/lead-normal; fall back to scanning the
-# java process whose working directory names our port, as boat-steering.sh does).
-SERVER_LOG=$HASTE_CACHE/servers/lead-normal/logs/latest.log
-if [ ! -f "$SERVER_LOG" ]; then
-  for p in /proc/[0-9]*; do
-    cwd=$(readlink "$p/cwd" 2>/dev/null) || continue
-    if [ -f "$cwd/server.properties" ] && grep -q "^server-port=$PORT\$" "$cwd/server.properties" 2>/dev/null; then
-      SERVER_LOG="$cwd/logs/latest.log"
-    fi
-  done
-fi
+# The running server's own log: the java process whose working directory holds a
+# server.properties naming our port.
+SERVER_LOG=
+for p in /proc/[0-9]*; do
+  cwd=$(readlink "$p/cwd" 2>/dev/null) || continue
+  if [ -f "$cwd/server.properties" ] && grep -q "^server-port=$PORT\$" "$cwd/server.properties" 2>/dev/null; then
+    SERVER_LOG="$cwd/logs/latest.log"
+  fi
+done
 echo "== server log: ${SERVER_LOG:-<not found for port $PORT>}"
 SERVER_LINES=0
 [ -n "$SERVER_LOG" ] && SERVER_LINES=$(wc -l <"$SERVER_LOG" 2>/dev/null || echo 0)

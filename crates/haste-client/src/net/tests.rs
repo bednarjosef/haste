@@ -1058,6 +1058,67 @@ fn mounting_a_saddled_horse_starts_its_client_side_simulation() {
     assert!(r.session.player.horse().is_none());
 }
 
+/// Mounting a saddled pig gives us its client-side simulation (vanilla
+/// `Pig.getControllingPassenger`: the first passenger, a player, of a saddled pig — the carrot
+/// on a stick is checked per tick while riding), and the boost's total in a `set_entity_data`
+/// metadata update starts the boost on our side (vanilla `Pig.onSyncedDataUpdated` ->
+/// `ItemBasedSteering.onSynced`).
+#[test]
+fn mounting_a_saddled_pig_starts_its_simulation_and_boost() {
+    let mut r = Rig::new();
+    r.session
+        .set_entity_type_names(names(&["player", "horse", "pig"]));
+    r.session
+        .set_attribute_names(names(&["movement_speed", "jump_strength", "gravity"]));
+    r.apply(spawn_packet_kind(5, DVec3::new(40.0, 70.0, 40.0), 2)); // pig
+    r.apply(ClientboundPlay::UpdateAttributes(cb::UpdateAttributes {
+        entity_id: 5,
+        properties: vec![cb::AttributeProperty {
+            id: 0,
+            value: 0.3,
+            modifiers: vec![],
+        }],
+    }));
+    // The saddle arrives as equipment (wire slot 7).
+    r.apply(ClientboundPlay::SetEquipment(cb::SetEquipment {
+        entity_id: 5,
+        equipment: vec![(
+            7,
+            ItemStackData {
+                count: 1,
+                item: Some(haste_core::RegistryIndex(3)),
+                components_raw: Default::default(),
+            },
+        )],
+    }));
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 5,
+        passengers: vec![7],
+    }));
+    let pig = r.session.player.pig().expect("the pig is ours");
+    assert_eq!(pig.pos, DVec3::new(40.0, 70.0, 40.0));
+    assert!((pig.movement_speed - 0.3).abs() < 1.0e-9);
+    // The boost: a use click on the carrot on a stick made the server write the boost total
+    // into the pig's synched data (index 18), and the metadata update starts our side of it.
+    r.apply(ClientboundPlay::SetEntityData(cb::SetEntityData {
+        entity_id: 5,
+        metadata: vec![haste_core::entity::MetadataEntry {
+            index: crate::pig::DATA_BOOST_TIME,
+            value: haste_core::entity::MetadataValue::VarInt(317),
+        }],
+    }));
+    assert!(
+        r.session.player.pig().expect("still ours").boosting(),
+        "the metadata update started the boost"
+    );
+    // Dismount drops the simulation.
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 5,
+        passengers: vec![],
+    }));
+    assert!(r.session.player.pig().is_none());
+}
+
 #[test]
 fn a_set_passengers_for_another_vehicle_does_not_dismount_us() {
     let mut r = Rig::new();

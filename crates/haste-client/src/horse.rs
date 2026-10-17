@@ -14,8 +14,7 @@
 use glam::DVec3;
 use haste_core::input::InputState;
 use haste_core::view::{BlockPhysics, BlockView, CollisionShapes};
-use haste_core::{Aabb, BlockPos};
-use haste_physics::collision::collide_with_step;
+use haste_core::Aabb;
 
 /// Vanilla `Attributes.MOVEMENT_SPEED`'s base for `AbstractHorse.createBaseHorseAttributes`
 /// (`getRiddenSpeed` reads the attribute; a server syncs the real per-horse value through
@@ -25,17 +24,8 @@ pub const DEFAULT_MOVEMENT_SPEED: f64 = 0.225;
 pub const DEFAULT_JUMP_STRENGTH: f64 = 0.7;
 /// Vanilla `Attributes.STEP_HEIGHT`'s base for the horse family.
 pub const STEP_HEIGHT: f32 = 1.0;
-/// Vanilla `LivingEntity.travelInAir`: the air drag applied to the horizontal velocity.
-const HORIZONTAL_DRAG: f32 = 0.91;
-/// Vanilla `LivingEntity.travelInAir`: the vertical drag.
-const VERTICAL_DRAG: f32 = 0.98;
 /// Vanilla `Attributes.GRAVITY`'s default (0.08), what `travelInAir` subtracts.
 pub const DEFAULT_GRAVITY: f64 = 0.08;
-/// Vanilla `LivingEntity.getFrictionInfluencedSpeed`: the ground-acceleration constant.
-const GROUND_ACCELERATION: f32 = 0.216_000_02;
-/// The slipperiness above which the ground acceleration formula applies (vanilla
-/// `getFrictionInfluencedSpeed`: `blockFriction > 0.6`).
-const SLIPPERY_THRESHOLD: f32 = 0.6;
 /// The rider's input scale (vanilla `LocalPlayer.modifyInput`: 0.98).
 const INPUT_SCALE: f32 = 0.98;
 /// Vanilla `AbstractHorse.SIDEWAYS_MOVE_SPEED_FACTOR` (0.5).
@@ -180,7 +170,7 @@ impl Horse {
         }
         let input = self.ridden_input();
         self.tick_ridden(&input);
-        self.travel(input, env);
+        crate::travel::travel_in_air(self, input, self.yaw, env.world, env.shapes, env.blocks);
     }
 
     /// Vanilla `AbstractHorse.getRiddenInput`: nothing while a rear-up holds the horse on the
@@ -237,88 +227,43 @@ impl Horse {
     fn jump_power(&self, amount: f32) -> f64 {
         self.jump_strength * f64::from(amount)
     }
+}
 
-    /// Vanilla `LivingEntity.travel` -> `travelInAir` with the ridden speed: the ground
-    /// acceleration from the block's slipperiness, the swept move with the horse's step height,
-    /// then gravity and the drags.
-    fn travel(&mut self, input: (f32, f32), env: &HorseEnv<'_>) {
-        // getRiddenSpeed: the MOVEMENT_SPEED attribute.
-        let speed = self.movement_speed as f32;
-        let slip = if self.on_ground {
-            env.blocks
-                .friction(ground_block(self.pos, self.on_ground, env))
-        } else {
-            1.0
-        };
-        // getFrictionInfluencedSpeed: on the ground the acceleration follows the block's
-        // slipperiness; in the air the flying speed (the horse's speed * 0.1, a player controls
-        // it). A horse slips on ice exactly like the player does.
-        let acceleration = if self.on_ground && slip > SLIPPERY_THRESHOLD {
-            speed * (GROUND_ACCELERATION / (slip * slip * slip))
-        } else if self.on_ground {
-            speed
-        } else {
-            speed * 0.1
-        };
-        self.move_relative(acceleration, input);
-        let motion = self.delta;
-        self.move_horse(motion, env);
-        self.delta.y -= self.gravity;
-        self.delta.y *= VERTICAL_DRAG as f64;
-        let drag = f64::from(slip * HORIZONTAL_DRAG);
-        self.delta.x *= drag;
-        self.delta.z *= drag;
+impl crate::travel::RiddenAnimal for Horse {
+    fn pos(&self) -> DVec3 {
+        self.pos
     }
-
-    /// Vanilla `Entity.moveRelative` -> `getInputVector`: the input rotated by the yaw, its
-    /// length normalised past 1.
-    fn move_relative(&mut self, speed: f32, input: (f32, f32)) {
-        let (x, z) = (f64::from(input.0), f64::from(input.1));
-        let length = x * x + z * z;
-        if length < 1.0e-7 {
-            return;
-        }
-        let (mut x, mut z) = (x, z);
-        if length > 1.0 {
-            let l = length.sqrt();
-            x /= l;
-            z /= l;
-        }
-        x *= f64::from(speed);
-        z *= f64::from(speed);
-        let r = f64::from(self.yaw) * (std::f64::consts::PI / 180.0);
-        let (sin, cos) = (r.sin(), r.cos());
-        self.delta.x += x * cos - z * sin;
-        self.delta.z += z * cos + x * sin;
+    fn delta(&self) -> DVec3 {
+        self.delta
     }
-
-    /// Vanilla's `Entity.move` (`MoverType.SELF`) as the authoritative side runs it: the swept
-    /// box with the horse's step height, the collision flags and the zeroed collided components
-    /// (`restituteMovementAfterCollisions` with the horse's zero bounciness).
-    fn move_horse(&mut self, motion: DVec3, env: &HorseEnv<'_>) {
-        let moved = collide_with_step(
-            self.aabb(),
-            motion,
-            f64::from(STEP_HEIGHT),
-            self.on_ground,
-            env.world,
-            env.shapes,
-        );
-        self.pos += moved;
-        let x_collision = moved.x != motion.x;
-        let z_collision = moved.z != motion.z;
-        self.horizontal_collision = x_collision || z_collision;
-        self.vertical_collision = moved.y != motion.y;
-        self.on_ground = self.vertical_collision && motion.y < 0.0;
-        if x_collision {
-            self.delta.x = 0.0;
-        }
-        if z_collision {
-            self.delta.z = 0.0;
-        }
-        if self.vertical_collision {
-            self.delta.y = 0.0;
-        }
+    fn set_delta(&mut self, d: DVec3) {
+        self.delta = d;
+    }
+    fn add_pos(&mut self, d: DVec3) {
+        self.pos += d;
+    }
+    fn aabb(&self) -> Aabb {
+        self.aabb()
+    }
+    /// `getRiddenSpeed`: the MOVEMENT_SPEED attribute.
+    fn speed(&self) -> f32 {
+        self.movement_speed as f32
+    }
+    fn step_height(&self) -> f64 {
+        f64::from(STEP_HEIGHT)
+    }
+    fn gravity(&self) -> f64 {
+        self.gravity
+    }
+    fn on_ground(&self) -> bool {
+        self.on_ground
+    }
+    fn set_on_ground(&mut self, g: bool) {
+        self.on_ground = g;
+    }
+    fn set_collisions(&mut self, horizontal: bool, vertical: bool) {
+        self.horizontal_collision = horizontal;
+        self.vertical_collision = vertical;
     }
 }
 
@@ -377,15 +322,6 @@ fn impulse(positive: bool, negative: bool) -> f32 {
     } else {
         -1.0
     }
-}
-
-/// The block under the feet that the friction comes from (vanilla
-/// `Entity.getBlockPosBelowThatAffectsMyMovement` = `getOnPos(0.500001)`): a horse on the ground
-/// reads the block half a block below its feet.
-fn ground_block(pos: DVec3, on_ground: bool, env: &HorseEnv<'_>) -> haste_core::BlockStateId {
-    let _ = on_ground;
-    env.world
-        .block_state(BlockPos::from_dvec3(pos - DVec3::new(0.0, 0.500_001, 0.0)))
 }
 
 /// What a horse tick reads from the world.

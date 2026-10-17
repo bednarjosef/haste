@@ -167,6 +167,10 @@ pub struct Interaction {
     /// Item registry indices whose default components carry `minecraft:glider`
     /// (`LivingEntity.canGlideUsing`), resolved from the item component reports in `prepare`.
     pub(crate) glider_items: Option<HashSet<RegistryIndex>>,
+    /// Item registry indices that steer a ridden animal while held (vanilla
+    /// `Pig.getControllingPassenger`'s carrot on a stick, `Strider`'s warped fungus on a
+    /// stick), resolved from the item registry in `prepare`.
+    pub(crate) steer_items: Option<HashSet<RegistryIndex>>,
     /// Active effects on us: `minecraft:mob_effect` index -> amplifier, remaining ticks and the
     /// vanilla `MobEffectInstance.BlendState` the screen effects read.
     pub effects: HashMap<i32, EffectData>,
@@ -324,6 +328,18 @@ impl Interaction {
                             .collect()
                     })
                     .unwrap_or_default(),
+            );
+        }
+        if self.steer_items.is_none() {
+            // The sticks that steer a ridden animal while held (their item registry names).
+            self.steer_items = Some(
+                ["carrot_on_a_stick", "warped_fungus_on_a_stick"]
+                    .iter()
+                    .filter_map(|n| {
+                        data.registries
+                            .index("minecraft:item", &Identifier::minecraft(n))
+                    })
+                    .collect(),
             );
         }
         if self.effect_ids.is_none() {
@@ -693,6 +709,18 @@ impl LocalPlayer {
     /// The held main-hand stack.
     pub fn main_hand(&self) -> &ItemStackData {
         &self.int.hotbar[self.held_slot.clamp(0, 8) as usize]
+    }
+
+    /// Whether the held main-hand item is one that steers a ridden animal while held (vanilla
+    /// `Pig`/`Strider.getControllingPassenger`: the carrot on a stick, the warped fungus on a
+    /// stick). An unknown registry (no `prepare` yet) steers nothing.
+    pub fn holds_steer_stick(&self) -> bool {
+        self.main_hand().item.is_some_and(|i| {
+            self.int
+                .steer_items
+                .as_ref()
+                .is_some_and(|s| s.contains(&i))
+        })
     }
 
     /// The player's `minecraft:attack_speed` with the held item (base 4.0 plus the item's

@@ -24,11 +24,13 @@ mod headless;
 mod horse;
 mod launch;
 mod net;
+mod pig;
 mod player;
 mod screen_effects;
 mod screenshots;
 mod script;
 mod sound;
+mod travel;
 mod ui;
 
 #[derive(Parser, Debug)]

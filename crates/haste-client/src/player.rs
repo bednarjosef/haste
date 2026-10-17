@@ -221,6 +221,9 @@ pub struct LocalPlayer {
     boat: Option<crate::boat::Boat>,
     /// The horse-family vehicle we steer ([`crate::horse`]), like `boat` above.
     horse: Option<crate::horse::Horse>,
+    /// The pig we steer with a carrot on a stick ([`crate::pig`]), like `boat` above: it ticks
+    /// only while the rider holds the stick (vanilla `Pig.getControllingPassenger`).
+    pig: Option<crate::pig::Pig>,
     /// The mount's charged jump state (vanilla `LocalPlayer.jumpRidingTicks` /
     /// `jumpRidingScale`): counts the held jump while on a horse-family vehicle, and the scale
     /// is what the `player_command` START_RIDING_JUMP carries and the HUD jump bar shows.
@@ -312,6 +315,7 @@ impl LocalPlayer {
             vehicle: None,
             boat: None,
             horse: None,
+            pig: None,
             jump_riding_ticks: 0,
             jump_riding_scale: 0.0,
             riding_jump_held: false,
@@ -811,21 +815,23 @@ impl LocalPlayer {
 
     /// Mounts or dismounts (`set_passengers`): `seat` is where our feet sit on the vehicle each
     /// tick, in the vehicle's frame (the vehicle's passenger attachment point minus our own,
-    /// `haste_entity::passenger_seat`), and `boat`/`horse` the vehicle's client-side simulation
-    /// when it is a vehicle we steer (`None` for any other vehicle, and on a dismount). On a
-    /// dismount, normal physics resumes from where the player is.
+    /// `haste_entity::passenger_seat`), and `boat`/`horse`/`pig` the vehicle's client-side
+    /// simulation when it is a vehicle we steer (`None` for any other vehicle, and on a
+    /// dismount). On a dismount, normal physics resumes from where the player is.
     pub fn set_vehicle(
         &mut self,
         vehicle: Option<EntityId>,
         seat: SeatPoint,
         boat: Option<crate::boat::Boat>,
         horse: Option<crate::horse::Horse>,
+        pig: Option<crate::pig::Pig>,
     ) {
         if vehicle.is_some() {
             self.seat = seat;
         }
         self.vehicle = vehicle;
         self.boat = boat;
+        self.pig = pig;
         let has_horse = horse.is_some();
         self.horse = horse;
         if !has_horse {
@@ -861,6 +867,17 @@ impl LocalPlayer {
     /// The horse we steer, for the packets that steer it (the server's corrections).
     pub fn horse_mut(&mut self) -> Option<&mut crate::horse::Horse> {
         self.horse.as_mut()
+    }
+
+    /// The pig we steer with a carrot on a stick, if any (for tests).
+    pub fn pig(&self) -> Option<&crate::pig::Pig> {
+        self.pig.as_ref()
+    }
+
+    /// The pig we steer, for the packets that steer it (the server's corrections and the boost's
+    /// metadata sync).
+    pub fn pig_mut(&mut self) -> Option<&mut crate::pig::Pig> {
+        self.pig.as_mut()
     }
 
     /// The mount's charged jump scale (vanilla `LocalPlayer.getJumpRidingScale`): what the HUD
@@ -899,6 +916,11 @@ impl LocalPlayer {
             Some(VehiclePose {
                 pos: horse.pos,
                 yaw: horse.yaw,
+            })
+        } else if let Some(pig) = &self.pig {
+            Some(VehiclePose {
+                pos: pig.pos,
+                yaw: pig.yaw,
             })
         } else {
             vehicle
@@ -993,6 +1015,27 @@ impl LocalPlayer {
         horse.set_input(strafe, forward, look);
     }
 
+    /// The pig's own tick (vanilla runs the vehicle before its passenger). The pig walks full
+    /// forward on its own while the rider holds the carrot on a stick
+    /// (`Pig.getControllingPassenger`'s condition): without the stick our simulation stands
+    /// down and the pig keeps its server-driven position again. The look arrives one tick late,
+    /// like the horse's input.
+    fn pig_tick(&mut self, look: (f32, f32), ctx: &TickCtx<'_>) {
+        let holding = self.holds_steer_stick();
+        let Some(pig) = &mut self.pig else {
+            return;
+        };
+        if holding {
+            let env = crate::pig::PigEnv {
+                world: ctx.world,
+                shapes: ctx.shapes,
+                blocks: ctx.blocks,
+            };
+            pig.tick(&env);
+        }
+        pig.set_look(look);
+    }
+
     fn tick_inner(
         &mut self,
         input: &InputState,
@@ -1066,11 +1109,16 @@ impl LocalPlayer {
             // and, for a vehicle we control, the `move_vehicle` that carries its simulation.
             self.boat_tick(ctx, out);
             self.horse_tick(input, look, ctx, out);
+            self.pig_tick(look, ctx);
             self.ride_tick(input, look, vehicle);
             self.send_rotation(out);
-            let steered = match (&self.boat, &self.horse) {
-                (Some(boat), _) => Some((boat.pos, boat.yaw, 0.0, boat.on_ground)),
-                (_, Some(horse)) => Some((horse.pos, horse.yaw, horse.pitch, horse.on_ground)),
+            let pig_steered = self.holds_steer_stick();
+            let steered = match (&self.boat, &self.horse, &self.pig) {
+                (Some(boat), _, _) => Some((boat.pos, boat.yaw, 0.0, boat.on_ground)),
+                (_, Some(horse), _) => Some((horse.pos, horse.yaw, horse.pitch, horse.on_ground)),
+                (_, _, Some(pig)) if pig_steered => {
+                    Some((pig.pos, pig.yaw, pig.pitch, pig.on_ground))
+                }
                 _ => None,
             };
             if let Some((pos, yaw, pitch, on_ground)) = steered {
