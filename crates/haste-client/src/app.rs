@@ -1591,15 +1591,17 @@ impl WorldFeed {
     /// per-tick part changed since the last call. The skin is fixed for the connection, so
     /// comparing the per-tick part is enough to catch every change; the skin is cloned only when
     /// one happens (no allocation per frame).
-    /// The first-person hand only exists in the first-person perspective (F5 hides it).
+    /// The first-person hand only exists in the first-person perspective (F5 hides it) and
+    /// while the HUD is shown (`GameRenderer.renderItemInHand` skips it when F1 hid the HUD).
     fn set_first_person(
         &mut self,
         shared: &Shared,
         renderer: &mut Renderer,
         perspective: game::Perspective,
+        hud_hidden: bool,
     ) {
         let view = match perspective {
-            game::Perspective::FirstPerson => shared.view.lock().first_person,
+            game::Perspective::FirstPerson if !hud_hidden => shared.view.lock().first_person,
             _ => None,
         };
         if view == self.first_person {
@@ -3671,7 +3673,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         last_camera = camera;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         if hud_on {
-            feed.set_first_person(&shared, &mut renderer, perspective);
+            feed.set_first_person(&shared, &mut renderer, perspective, false);
         }
         let (entities, block_entities) =
             feed.entities(&shared, &mut renderer, session.local, partial);
@@ -4393,7 +4395,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         // The first-person hand, like the window and the screenshot path (`set_first_person`
         // diffs the view's per-tick part and only touches the renderer on a change): without
         // this the script's shots never show the held item.
-        feed.set_first_person(shared, &mut renderer, game::Perspective::FirstPerson);
+        feed.set_first_person(shared, &mut renderer, game::Perspective::FirstPerson, false);
         let (entities, block_entities) =
             feed.entities(shared, &mut renderer, session_ref.local, partial);
         let block_target = view.as_ref().and_then(|v| v.block_target);
@@ -4850,7 +4852,12 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         base = camera;
         vd = v;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
-        feed.set_first_person(&shared, &mut renderer, game::Perspective::FirstPerson);
+        feed.set_first_person(
+            &shared,
+            &mut renderer,
+            game::Perspective::FirstPerson,
+            false,
+        );
         let (entities, block_entities) =
             feed.entities(&shared, &mut renderer, session.local, partial);
         let block_target = shared.view.lock().block_target;
@@ -5909,8 +5916,9 @@ impl App {
             bench.feed_ms = feed_start.elapsed().as_secs_f32() * 1000.0;
         }
         let t1 = Instant::now();
+        let hud_hidden = self.ui.as_ref().is_some_and(|ui| ui.hud_hidden());
         self.feed
-            .set_first_person(&session.shared, renderer, self.perspective);
+            .set_first_person(&session.shared, renderer, self.perspective, hud_hidden);
         let (entities, block_entities) =
             self.feed
                 .entities(&session.shared, renderer, session.local, partial);

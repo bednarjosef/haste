@@ -84,6 +84,9 @@ struct Shared {
     /// The hotbar slot the server was last told about (`set_carried_item`), -1 none yet.
     sent_slot: AtomicI32,
     tab_down: AtomicBool,
+    /// F1: the HUD is hidden (vanilla `Hud.toggle`); the hand is skipped with it
+    /// (`GameRenderer.renderItemInHand`). Java keeps its own copy for the HUD.
+    hud_hidden: AtomicBool,
     salt: AtomicU64,
     /// Packets the UI itself decided to send (immediate respawn).
     outbox: Mutex<Vec<ServerboundPlay>>,
@@ -184,11 +187,17 @@ impl Ui {
                 local_entity: AtomicI32::new(i32::MIN),
                 sent_slot: AtomicI32::new(-1),
                 tab_down: AtomicBool::new(false),
+                hud_hidden: AtomicBool::new(false),
                 salt: AtomicU64::new(0x9e37_79b9_7f4a_7c15),
                 outbox: Mutex::new(Vec::new()),
             }),
             frame: GuiFrame::default(),
         }
+    }
+
+    /// Whether F1 hid the HUD (and with it the first-person hand).
+    pub fn hud_hidden(&self) -> bool {
+        self.shared.hud_hidden.load(Ordering::Relaxed)
     }
 
     /// The GUI pipeline (screens, ticks, frames; menu mode drives it before a session exists).
@@ -622,6 +631,7 @@ impl Ui {
             k if k == keys::ESCAPE => open(ScreenKind::Pause),
             k if k == keys::F1 => {
                 gui.toggle_hud();
+                self.shared.hud_hidden.fetch_xor(true, Ordering::Relaxed);
                 true
             }
             k if k == keys::F3 => {
