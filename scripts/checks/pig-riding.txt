@@ -1,0 +1,57 @@
+# Pig riding with a carrot on a stick on the test server (127.0.0.1:25691). Live evidence and
+# the steps that drive the client; the RCON setup the driver runs is in pig-riding.sh.
+#
+# RIG (the riding area, x 125..165, z -10..30, y 120; removed afterwards):
+#   fill 125 121 -10 165 130 30 air  clear above the platform first
+#   fill 125 120 -10 165 120 30 stone  platform, top at y 121
+#   tp <name> 145.5 121 7.0 0 20     the player at the platform's edge
+#   give <name> carrot_on_a_stick    the steer stick, in hotbar slot 0
+#   summon minecraft:pig 145.5 121 10.5 {NoAI:1b,equipment:{saddle:{...}}}
+#                                    the saddled pig 3 blocks ahead (NoAI: a free pig wanders
+#                                    off its mounting spot; the ridden travel is unaffected)
+#
+# EVIDENCE (RCON, own username riding-animals, on 25691; see pig-riding.sh for the reads):
+#   the pig's Pos before the ride (mounted, at rest) and after (the walk plus a boost), the
+#   rider's RootVehicle naming the pig, and the server log's verdict — no "moved wrongly"/
+#   "moved too quickly" for it.
+#
+# The steps below drive the client: mount the pig with use-item (the crosshair aims at its
+# body), then a second use click while holding the carrot on a stick starts the pig's boost
+# (vanilla `FoodOnAStickItem.use` -> `ItemSteerable.boost`), and the pig walks forward on its
+# own from then (vanilla `Pig.getRiddenInput` is a constant full forward while the rider
+# holds the stick). The first `wait 600` is generous on purpose: the offscreen client's
+# ticks run slow while the world settles, so the click lands well after the RCON setup.
+wait_until joined
+wait 600
+look 0 20
+wait 10
+click right 480 270
+wait 40
+click right 480 270
+# Steer the walking pig around a square (the rider's look is all the steering: Pig.tickRidden
+# turns it to the rider's yaw), so it stays on the platform.
+look 90 20
+wait 30
+look 180 20
+wait 30
+look 270 20
+wait 30
+look 0 20
+wait 30
+look 90 20
+wait 30
+look 180 20
+wait 30
+look 270 20
+wait 30
+look 0 20
+wait 30
+look 90 20
+wait 30
+look 180 20
+wait 30
+look 270 20
+wait 30
+look 0 20
+wait 30
+wait 40

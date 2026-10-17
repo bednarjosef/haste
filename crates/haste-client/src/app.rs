@@ -38,6 +38,7 @@ use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 // Declared here rather than in main.rs (lead-owned); the lead may move it.
 #[path = "biomes.rs"]
 pub(crate) mod biomes;
+mod end_gateway;
 
 use crate::game::{self, Shared};
 use crate::net::{self, NetDriver};
@@ -73,15 +74,18 @@ const DOUBLE_TAP: Duration = Duration::from_millis(350);
 const SUBMIT_PER_FRAME: usize = 512;
 /// The GUI scale the option asks for: 0 means auto (vanilla: `Options.AUTO_GUI_SCALE`).
 /// Like `Minecraft.resizeGui`, auto and any fixed scale both go through
-/// [`gui_scale_for`] (vanilla: `Window.calculateScale`).
-pub fn resolve_gui_scale(option: u32, width: u32, height: u32) -> u32 {
-    gui_scale_for(option.min(4), width, height)
+/// [`gui_scale_for`] (vanilla: `Window.calculateScale`) with the "Force Unicode Font"
+/// option (`Minecraft.isEnforceUnicode`). The stored option is not clamped: a value above
+/// the window's automatic maximum simply stops at that maximum, as in vanilla.
+pub fn resolve_gui_scale(option: u32, width: u32, height: u32, force_unicode: bool) -> u32 {
+    gui_scale_for(option, width, height, force_unicode)
 }
 
 /// The scale vanilla would use for the option at the window's framebuffer size
 /// (vanilla: `Window.calculateScale`; `max_scale` 0 grows it while the framebuffer
-/// keeps at least 320x240 GUI pixels).
-pub fn gui_scale_for(max_scale: u32, width: u32, height: u32) -> u32 {
+/// keeps at least 320x240 GUI pixels). With `enforce_unicode` an odd result is rounded up
+/// to the next even scale after the loop, as vanilla does for the unicode font.
+pub fn gui_scale_for(max_scale: u32, width: u32, height: u32, enforce_unicode: bool) -> u32 {
     let mut scale = 1;
     while scale != max_scale
         && scale < width
@@ -89,6 +93,9 @@ pub fn gui_scale_for(max_scale: u32, width: u32, height: u32) -> u32 {
         && width / (scale + 1) >= 320
         && height / (scale + 1) >= 240
     {
+        scale += 1;
+    }
+    if enforce_unicode && scale % 2 != 0 {
         scale += 1;
     }
     scale
@@ -473,6 +480,12 @@ impl Session {
         let entity_types = data.registries.len("minecraft:entity_type");
         let mut driver = driver;
         driver.session.set_entity_type_names(type_names);
+        {
+            let regs = driver.connection().registries();
+            driver
+                .session
+                .set_attribute_names(net::attribute_names(regs, &data));
+        }
         let view_distance = login.view_distance.min(options.render_distance as i32);
         // Block entity type names by synced registry id (the static registry's order when the
         // server did not sync one), and the block states whose lids `block_event` drives.
@@ -1003,6 +1016,12 @@ impl WorldFeed {
                 let spin = self.spin_map.get(&pos).copied().unwrap_or((0.0, 0.0));
                 let kind =
                     self.item_block_kind(pos, be, kind, type_name, blocks, state, registries, spin);
+                // Vanilla `LecternRenderer`: the book only while the state's `has_book` is true.
+                if kind == haste_render::BlockEntityKind::Lectern
+                    && blocks.property_value(state, "has_book") != Some("true")
+                {
+                    continue;
+                }
                 let facing = blocks
                     .property_value(state, "facing")
                     .and_then(direction_of_property)
@@ -1496,56 +1515,6 @@ impl WorldFeed {
         Some(data)
     }
 
-    /// The end gateway's visible faces and beam at `pos`: the faces from the neighbouring
-    /// blocks (vanilla `Block.shouldRenderFace`: an opaque neighbour hides the face unless it
-    /// is the gateway block itself), the beam from the block entity's NBT age and cooldown
-    /// (vanilla `TheEndGatewayRenderer.extractRenderState`: spawning under age 200 in magenta
-    /// to the build limit, cooling down for 40 ticks in purple over 50 blocks).
-    #[allow(clippy::too_many_arguments)]
-    fn gateway_data(
-        &mut self,
-        pos: BlockPos,
-        world: &World,
-        blocks: &haste_data::BlockStates,
-        data: &haste_data::GameData,
-        be: &haste_core::chunk::BlockEntityData,
-        world_age: i64,
-        partial: f32,
-    ) -> (u8, Option<haste_render::GatewayBeam>) {
-        use haste_core::view::{BlockPhysics as _, BlockView as _};
-        let mut faces = 0u8;
-        let state = world.block_state(pos);
-        let own = blocks.block_of(state).clone();
-        for d in haste_core::Direction::ALL {
-            let neighbour = world.block_state(pos.offset(d));
-            let same = *blocks.block_of(neighbour) == own;
-            let opaque = data.is_opaque_full(neighbour);
-            if !same && opaque {
-                continue;
-            }
-            faces |= 1 << d as u8;
-        }
-        // The gateway's age ticks on (vanilla `beamAnimationTick` runs on both sides) but the
-        // server only sends the NBT once, so track the age ourselves from the payload's first
-        // sight: age = age at sight + ticks since.
-        let key = (be.nbt.as_ptr() as usize, be.nbt.len());
-        let entry = *self
-            .gateway_ages
-            .entry(pos)
-            .or_insert_with(|| (key.0, key.1, world_age, parse_gateway_age(&be.nbt)));
-        let (k, len, seen_at, age0) = entry;
-        let age = if (k, len) == key {
-            age0 + (world_age - seen_at).max(0)
-        } else {
-            // A new payload: restart from its own age.
-            self.gateway_ages
-                .insert(pos, (key.0, key.1, world_age, parse_gateway_age(&be.nbt)));
-            parse_gateway_age(&be.nbt)
-        };
-        let beam = parse_gateway_beam(age, partial);
-        (faces, beam)
-    }
-
     /// The moving piston's data at `pos` from the block entity's NBT (vanilla
     /// `PistonMovingBlockEntity.loadAdditional`): the moved block state, facing, progress,
     /// extending and source flags. The progress is the game thread's tick (vanilla advances
@@ -1753,39 +1722,6 @@ fn air_piston() -> haste_render::PistonData {
         extending: false,
         source: false,
     }
-}
-
-/// The end gateway's beam (vanilla `TheEndGatewayRenderer.extractRenderState`): spawning
-/// under age 200 in magenta to the build limit; the cooldown phase arrives as a block event
-/// (not in the NBT), so it is not drawn yet. `None` hides the beam.
-fn parse_gateway_beam(age: i64, partial: f32) -> Option<haste_render::GatewayBeam> {
-    if age >= 200 {
-        return None;
-    }
-    // Vanilla `getSpawnPercent`: `clamp((age + partial) / 200, 0, 1)`, then `sin(scale * PI)`;
-    // the beam distance is the build limit (`level.getMaxY()`), the height its floor. The
-    // overworld's build limit is 320.
-    let scale = ((age as f32 + partial) / 200.0).clamp(0.0, 1.0);
-    let scale = (scale * std::f32::consts::PI).sin();
-    let height = (scale * 320.0).floor() as i32;
-    Some(haste_render::GatewayBeam {
-        scale,
-        height,
-        // Vanilla `DyeColor.MAGENTA.getTextureDiffuseColor()` while spawning.
-        color: haste_render::blockentity::DYE_DIFFUSE_COLOR[2],
-    })
-}
-
-/// The gateway's `Age` from its NBT (vanilla `TheEndGatewayBlockEntity.loadAdditional`,
-/// default 0).
-fn parse_gateway_age(nbt: &[u8]) -> i64 {
-    use haste_protocol::nbt::deserializer::NbtReadHelperJava;
-    let mut cursor = std::io::Cursor::new(nbt);
-    let mut helper = NbtReadHelperJava::new(&mut cursor);
-    haste_protocol::nbt::Nbt::read_unnamed(&mut helper)
-        .ok()
-        .and_then(|doc| doc.root_tag.get_long("Age"))
-        .unwrap_or(0)
 }
 
 /// A stained-glass block's (or the beacon's own) beam colour (vanilla `BeaconBeamBlock.getColor`
@@ -2368,6 +2304,12 @@ fn frame_view<'w>(
         dimension_has_sky: view.has_sky,
         fog_start: fog_end * 0.75,
         fog_end,
+        // `SkyRenderer.shouldRenderDarkDisc` reads the player's interpolated eye.
+        dark_disc: haste_render::sky::dark_disc::should_render_dark_disc(
+            game::interpolate(view.prev_eye, view.eye, partial).y,
+            view.horizon_height,
+            view.eye_in_water,
+        ),
         fog,
     };
     drop(world);
@@ -3561,7 +3503,12 @@ fn menu_frame(
     options: &Options,
 ) -> (GuiFrame, Camera, SkyState, f32) {
     let (w, h) = renderer.size();
-    let scale = resolve_gui_scale(u32::from(options.gui_scale), w, h);
+    let scale = resolve_gui_scale(
+        u32::from(options.gui_scale),
+        w,
+        h,
+        options.force_unicode_font,
+    );
     let (gw, gh) = gui_scaled_size(w, h, scale);
     let gui = ui.frame(gw, gh, scale, input.mouse, 0.0).clone();
     (gui, menu_camera(), menu_sky(), 0.0)
@@ -3692,6 +3639,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
                 u32::from(session.options.gui_scale),
                 args.width,
                 args.height,
+                session.options.force_unicode_font,
             );
             let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
             gui = u.frame(gw, gh, scale, (0.0, 0.0), partial).clone();
@@ -4336,8 +4284,12 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         // Menu mode renders the open screen over the plain background (no world yet).
         if session.is_none() {
             if let Some(u) = ui.as_mut() {
-                let scale =
-                    resolve_gui_scale(u32::from(options.gui_scale), args.width, args.height);
+                let scale = resolve_gui_scale(
+                    u32::from(options.gui_scale),
+                    args.width,
+                    args.height,
+                    options.force_unicode_font,
+                );
                 let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
                 gui = u.frame(gw, gh, scale, input.mouse, 0.0).clone();
                 last_gui = gui.clone();
@@ -4418,12 +4370,22 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 fps.fps as i32,
                 &last_stats,
                 entities.len() as i32,
-                resolve_gui_scale(u32::from(options.gui_scale), args.width, args.height),
+                resolve_gui_scale(
+                    u32::from(options.gui_scale),
+                    args.width,
+                    args.height,
+                    options.force_unicode_font,
+                ),
                 &gpu_info(&renderer),
             ));
         }
         if let Some(u) = &mut ui {
-            let scale = resolve_gui_scale(u32::from(options.gui_scale), args.width, args.height);
+            let scale = resolve_gui_scale(
+                u32::from(options.gui_scale),
+                args.width,
+                args.height,
+                options.force_unicode_font,
+            );
             let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
             gui = u.frame(gw, gh, scale, input.mouse, partial).clone();
             last_gui = gui.clone();
@@ -5953,7 +5915,12 @@ impl App {
                 self.fps.fps as i32,
                 &stats,
                 entities.len() as i32,
-                resolve_gui_scale(u32::from(self.options.gui_scale), w, h),
+                resolve_gui_scale(
+                    u32::from(self.options.gui_scale),
+                    w,
+                    h,
+                    self.options.force_unicode_font,
+                ),
                 &gpu,
             ));
             let view = session.shared.view.lock().clone();
@@ -5961,7 +5928,12 @@ impl App {
         }
         if let Some(ui) = &mut self.ui {
             let mouse = self.input.mouse;
-            let scale = resolve_gui_scale(u32::from(self.options.gui_scale), w, h);
+            let scale = resolve_gui_scale(
+                u32::from(self.options.gui_scale),
+                w,
+                h,
+                self.options.force_unicode_font,
+            );
             let (gw, gh) = gui_scaled_size(w, h, scale);
             self.gui = ui.frame(gw, gh, scale, mouse, partial).clone();
         }
@@ -6178,6 +6150,7 @@ impl ApplicationHandler for App {
                         u32::from(self.options.gui_scale),
                         r.size().0,
                         r.size().1,
+                        self.options.force_unicode_font,
                     ));
                     self.input
                         .mouse_moved(position.x / s, position.y / s, self.ui.as_ref());
@@ -6525,29 +6498,48 @@ mod tests {
 
     #[test]
     fn auto_gui_scale_matches_vanilla_resolutions() {
-        // `Window.calculateScale(0, ...)` at vanilla's default window and common
+        // `Window.calculateScale(0, false)` at vanilla's default window and common
         // resolutions: the scale grows while the framebuffer keeps >= 320x240 GUI
         // pixels. Computed by hand from the vanilla method's conditions.
-        assert_eq!(gui_scale_for(0, 854, 480), 2);
-        assert_eq!(gui_scale_for(0, 1280, 720), 3);
-        assert_eq!(gui_scale_for(0, 1920, 1080), 4);
-        assert_eq!(gui_scale_for(0, 2560, 1440), 6);
-        assert_eq!(gui_scale_for(0, 3840, 2160), 9);
+        assert_eq!(gui_scale_for(0, 854, 480, false), 2);
+        assert_eq!(gui_scale_for(0, 1280, 720, false), 3);
+        assert_eq!(gui_scale_for(0, 1920, 1080, false), 4);
+        assert_eq!(gui_scale_for(0, 2560, 1440, false), 6);
+        assert_eq!(gui_scale_for(0, 3840, 2160, false), 9);
     }
 
     #[test]
-    fn fixed_gui_scale_is_honoured_and_clamped() {
+    fn fixed_gui_scale_is_honoured_and_bounded_by_the_window() {
         // A fixed option stops there (vanilla: `calculateScale(maxScale, ...)`); a value
         // too large for the framebuffer is still bounded by the 320x240 rule.
-        assert_eq!(gui_scale_for(1, 1920, 1080), 1);
-        assert_eq!(gui_scale_for(3, 1920, 1080), 3);
-        assert_eq!(gui_scale_for(4, 854, 480), 2);
-        // The option is clamped to 0..=4 like `Options.sanitized`.
-        assert_eq!(resolve_gui_scale(9, 1920, 1080), 4);
-        assert_eq!(resolve_gui_scale(0, 1920, 1080), 4);
+        assert_eq!(gui_scale_for(1, 1920, 1080, false), 1);
+        assert_eq!(gui_scale_for(3, 1920, 1080, false), 3);
+        assert_eq!(gui_scale_for(4, 854, 480, false), 2);
+        // The option is not capped at 4: on 1920x1080 the window's automatic maximum (4)
+        // bounds it, on 3840x2160 scales 5..=9 are honoured and 9 is the maximum.
+        assert_eq!(resolve_gui_scale(9, 1920, 1080, false), 4);
+        assert_eq!(resolve_gui_scale(0, 1920, 1080, false), 4);
+        assert_eq!(resolve_gui_scale(5, 3840, 2160, false), 5);
+        assert_eq!(resolve_gui_scale(6, 3840, 2160, false), 6);
+        assert_eq!(resolve_gui_scale(9, 3840, 2160, false), 9);
+        assert_eq!(resolve_gui_scale(50, 3840, 2160, false), 9);
         // Tiny framebuffers still get scale 1 (the loop stops immediately).
-        assert_eq!(gui_scale_for(0, 320, 240), 1);
-        assert_eq!(gui_scale_for(0, 100, 100), 1);
+        assert_eq!(gui_scale_for(0, 320, 240, false), 1);
+        assert_eq!(gui_scale_for(0, 100, 100, false), 1);
+    }
+
+    #[test]
+    fn force_unicode_font_rounds_odd_gui_scales_up() {
+        // `Window.calculateScale(_, true)` bumps an odd result to the next even scale after
+        // the loop, even past the window's automatic maximum (9 -> 10 on 3840x2160).
+        assert_eq!(resolve_gui_scale(0, 1920, 1080, true), 4);
+        assert_eq!(resolve_gui_scale(3, 1920, 1080, true), 4);
+        assert_eq!(resolve_gui_scale(1, 1920, 1080, true), 2);
+        assert_eq!(resolve_gui_scale(2, 1920, 1080, true), 2);
+        assert_eq!(resolve_gui_scale(0, 3840, 2160, true), 10);
+        assert_eq!(resolve_gui_scale(5, 3840, 2160, true), 6);
+        assert_eq!(resolve_gui_scale(0, 1280, 720, true), 4);
+        assert_eq!(gui_scale_for(0, 320, 240, true), 2);
     }
 
     #[test]

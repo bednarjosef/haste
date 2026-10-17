@@ -5,8 +5,8 @@
 // The time-of-day curves follow minecraft.wiki "Daylight cycle": the celestial angle is
 // (2d + 0.5 - cos(pi d) / 2) / 3 with d = frac(time / 24000 - 0.25); sky brightness is
 // clamp(2 cos(2 pi angle) + 0.5); moon phase = day mod 8 (full moon first); default overworld
-// sky 0x78A7FF and fog 0xC0D8FF; Nether fog 0x330808; End sky tinted 0x282828. Sunrise colour,
-// star brightness and the horizon blend are approximations of the observed look.
+// sky 0x78A7FF and fog 0xC0D8FF; Nether fog 0x330808; End sky tinted 0x282828. The star
+// brightness is the day timeline's track (`stars.rs`).
 
 use std::sync::Arc;
 
@@ -17,6 +17,8 @@ use haste_core::Identifier;
 
 use crate::fog::FogData;
 use crate::{Camera, SkyState};
+
+pub mod dark_disc;
 
 const ATLAS_SIZE: u32 = 512;
 /// Cloud height in 26.3 (blocks).
@@ -234,8 +236,7 @@ pub fn sky_colors(sky: &SkyState, kind: SkyKind, view_distance: f32) -> SkyColor
             let s = (angle * std::f32::consts::TAU).sin();
             // The weather layers also set the star brightness to 0 (`WeatherAttributes`
             // `.set(STAR_BRIGHTNESS, 0)` applied by the levels).
-            let stars = (1.0 - (c * 2.0 + 0.25)).clamp(0.0, 1.0)
-                * 0.5
+            let stars = crate::stars::star_brightness(sky.time_of_day)
                 * (1.0 - rain_only)
                 * (1.0 - thunder);
             SkyColors {
@@ -273,6 +274,10 @@ pub struct SkyRenderer {
     disc: wgpu::RenderPipeline,
     /// The sunrise/sunset fan (vanilla `renderSunriseAndSunset`).
     sunrise: wgpu::RenderPipeline,
+    /// The black bottom fan (vanilla `renderDarkDisc`), drawn while `dark_disc` is set.
+    dark_disc_pipeline: wgpu::RenderPipeline,
+    dark_disc_buffer: wgpu::Buffer,
+    dark_disc: bool,
     stars: wgpu::Buffer,
     star_vertices: u32,
     disc_buffer: wgpu::Buffer,
@@ -519,6 +524,28 @@ impl SkyRenderer {
             wgpu::BlendState::ALPHA_BLENDING,
             false,
         );
+        let dark_disc_pipeline = make(
+            "sky-dark-disc",
+            "vs_disc",
+            "fs_dark_disc",
+            &[Some(SkyVertex::LAYOUT)],
+            wgpu::BlendState::REPLACE,
+            false,
+        );
+        let dark_disc_list = dark_disc::dark_disc_positions().map(|pos| SkyVertex {
+            pos,
+            uv: [0.0; 2],
+            color: [1.0; 4],
+            rect: [0; 4],
+        });
+        let dark_disc_buffer = wgpu::util::DeviceExt::create_buffer_init(
+            device.as_ref(),
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("sky-dark-disc"),
+                contents: bytemuck::cast_slice(&dark_disc_list),
+                usage: wgpu::BufferUsages::VERTEX,
+            },
+        );
         let star_list = star_vertices();
         let stars = wgpu::util::DeviceExt::create_buffer_init(
             device.as_ref(),
@@ -559,6 +586,9 @@ impl SkyRenderer {
             clouds,
             disc,
             sunrise,
+            dark_disc_pipeline,
+            dark_disc_buffer,
+            dark_disc: false,
             stars,
             star_vertices: star_list.len() as u32,
             disc_buffer,
@@ -632,6 +662,7 @@ impl SkyRenderer {
             );
         }
         self.colors = colors;
+        self.dark_disc = kind == SkyKind::Overworld && sky.dark_disc;
         let rain = sky.rain.clamp(0.0, 1.0);
         let cam = camera.pos.as_vec3();
 
@@ -644,13 +675,18 @@ impl SkyRenderer {
                 100.0,
                 30.0,
                 self.rects.sun,
+                false,
                 [1.0, 1.0, 1.0, alpha],
             );
+            // Vanilla's moon quad (`SkyRenderer.buildMoonPhases`) has both U and V reversed
+            // and is turned 180 degrees about X by the moon angle; drawn here at y -100 with
+            // the sun's rotation that leaves only U mirrored.
             push_quad(
                 &mut self.vertices,
                 -100.0,
                 20.0,
                 self.rects.moon[colors.moon_phase],
+                true,
                 [1.0, 1.0, 1.0, alpha],
             );
         }
@@ -758,6 +794,12 @@ impl SkyRenderer {
                 pass.draw(0..self.sunrise_fan_vertices, 0..1);
                 calls += 1;
             }
+            if self.dark_disc {
+                pass.set_pipeline(&self.dark_disc_pipeline);
+                pass.set_vertex_buffer(0, self.dark_disc_buffer.slice(..));
+                pass.draw(0..24, 0..1);
+                calls += 1;
+            }
         } else {
             pass.set_pipeline(&self.background);
             pass.draw(0..3, 0..1);
@@ -790,14 +832,27 @@ fn make_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
     })
 }
 
-/// A horizontal celestial quad at height `y` (celestial space) of half-size `half`.
-fn push_quad(out: &mut Vec<SkyVertex>, y: f32, half: f32, rect: [u32; 4], color: [f32; 4]) {
+/// A horizontal celestial quad at height `y` (celestial space) of half-size `half`; the
+/// texture's U runs along +x, or along -x with `mirror_u`.
+fn push_quad(
+    out: &mut Vec<SkyVertex>,
+    y: f32,
+    half: f32,
+    rect: [u32; 4],
+    mirror_u: bool,
+    color: [f32; 4],
+) {
     let r = rect.map(|v| v as f32);
+    let (u_neg, u_pos) = if mirror_u {
+        (r[0] + r[2], r[0])
+    } else {
+        (r[0], r[0] + r[2])
+    };
     let corners = [
-        ([-half, y, -half], [r[0], r[1]]),
-        ([half, y, -half], [r[0] + r[2], r[1]]),
-        ([half, y, half], [r[0] + r[2], r[1] + r[3]]),
-        ([-half, y, half], [r[0], r[1] + r[3]]),
+        ([-half, y, -half], [u_neg, r[1]]),
+        ([half, y, -half], [u_pos, r[1]]),
+        ([half, y, half], [u_pos, r[1] + r[3]]),
+        ([-half, y, half], [u_neg, r[1] + r[3]]),
     ];
     let rect = rect.map(|v| v as u16);
     for i in [0usize, 1, 2, 0, 2, 3] {
@@ -810,44 +865,14 @@ fn push_quad(out: &mut Vec<SkyVertex>, y: f32, half: f32, rect: [u32; 4], color:
     }
 }
 
-/// 1500 small star quads on a sphere of radius 100 (positions from our own generator, not
-/// vanilla's seed: the pattern differs).
+/// The star field (`stars::star_quads`) as celestial vertices: two triangles per quad.
 fn star_vertices() -> Vec<SkyVertex> {
-    let mut state = 10842u64;
-    let mut next = || {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        (state >> 11) as f32 / (1u64 << 53) as f32
-    };
-    let mut out = Vec::with_capacity(1500 * 6);
-    for _ in 0..1500 {
-        let d = Vec3::new(next() * 2.0 - 1.0, next() * 2.0 - 1.0, next() * 2.0 - 1.0);
-        let size = 0.15 + next() * 0.1;
-        let len2 = d.length_squared();
-        if !(0.01..1.0).contains(&len2) {
-            continue;
-        }
-        let centre = d.normalize() * 100.0;
-        let n = centre.normalize();
-        let tangent = if n.y.abs() < 0.99 {
-            n.cross(Vec3::Y).normalize()
-        } else {
-            n.cross(Vec3::X).normalize()
-        };
-        let spin = next() * std::f32::consts::TAU;
-        let bitangent = n.cross(tangent);
-        let a = (tangent * spin.cos() + bitangent * spin.sin()) * size;
-        let b = n.cross(a);
-        let corners = [
-            centre - a - b,
-            centre + a - b,
-            centre + a + b,
-            centre - a + b,
-        ];
+    let quads = crate::stars::star_quads();
+    let mut out = Vec::with_capacity(quads.len() * 6);
+    for corners in &quads {
         for i in [0usize, 1, 2, 0, 2, 3] {
             out.push(SkyVertex {
-                pos: corners[i].to_array(),
+                pos: corners[i],
                 uv: [0.0; 2],
                 color: [1.0; 4],
                 rect: [0; 4],
@@ -922,138 +947,4 @@ fn sunrise_matrix(side: f32, alpha: f32) -> Mat4 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn state(t: i64) -> SkyState {
-        SkyState {
-            time_of_day: t,
-            rain: 0.0,
-            dimension_has_sky: true,
-            fog_start: 0.0,
-            fog_end: 192.0,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn celestial_angle_noon_midnight() {
-        assert!(celestial_angle(6000).abs() < 1e-6);
-        assert!((celestial_angle(18000) - 0.5).abs() < 1e-6);
-        assert!((celestial_angle(30000) - 0.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn day_is_bright_night_is_dark_with_stars() {
-        let noon = sky_colors(&state(6000), SkyKind::Overworld, 12.0);
-        assert_eq!(noon.brightness, 1.0);
-        assert_eq!(noon.sky, rgb(0x78A7FF));
-        assert_eq!(noon.star_brightness, 0.0);
-        let night = sky_colors(&state(18000), SkyKind::Overworld, 12.0);
-        assert_eq!(night.brightness, 0.0);
-        assert!(night.star_brightness > 0.4);
-        // Sunrise glow around time 23000-1000, none at noon.
-        assert_eq!(noon.sunrise[3], 0.0);
-        let dawn = sky_colors(&state(23500), SkyKind::Overworld, 12.0);
-        assert!(dawn.sunrise[3] > 0.3, "{dawn:?}");
-        assert_eq!(dawn.sunrise_side, 1.0, "dawn glow is in the east");
-        let dusk = sky_colors(&state(12500), SkyKind::Overworld, 12.0);
-        assert_eq!(dusk.sunrise_side, -1.0, "dusk glow is in the west");
-    }
-
-    #[test]
-    fn rain_greys_the_sky_like_the_weather_attributes() {
-        // `WeatherAttributes.RAIN` over SKY_COLOR: lerp(0.75, colour, grey * 0.6) applied
-        // by the rain level (rain minus thunder). At noon (0x78A7FF) with full rain and no
-        // thunder: grey = 0.3*0.4706 + 0.59*0.6549 + 0.11*1.0 = 0.6427.
-        let mut s = state(6000);
-        s.rain = 1.0;
-        let noon = sky_colors(&s, SkyKind::Overworld, 12.0);
-        let grey = 0.3 * (0x78 as f32 / 255.0) + 0.59 * (0xA7 as f32 / 255.0) + 0.11 * 1.0;
-        let target = grey * 0.6;
-        let expect: [f32; 3] = [
-            0.4706 + (target - 0.4706) * 0.75,
-            0.6549 + (target - 0.6549) * 0.75,
-            1.0 + (target - 1.0) * 0.75,
-        ];
-        for (i, (got, want)) in noon.sky.iter().zip(expect).enumerate() {
-            assert!((got - want).abs() < 1e-4, "channel {i}: {got} vs {want}");
-        }
-        // Stars are gone with any weather.
-        assert_eq!(noon.star_brightness, 0.0);
-    }
-
-    #[test]
-    fn thunder_darkens_the_sky_further() {
-        // `WeatherAttributes.THUNDER`: lerp(0.94, colour, grey * 0.24) by the thunder level
-        // (which the rain level scales). Full thunder implies rain 1: the rain layer first
-        // greys by the rain-minus-thunder level (0 at full thunder), then the thunder layer
-        // takes over. The thunder sky is darker than the rain sky.
-        let mut rain = state(6000);
-        rain.rain = 1.0;
-        let rain_sky = sky_colors(&rain, SkyKind::Overworld, 12.0).sky;
-        let mut storm = state(6000);
-        storm.rain = 1.0;
-        storm.thunder = 1.0;
-        let storm_sky = sky_colors(&storm, SkyKind::Overworld, 12.0).sky;
-        for i in 0..3 {
-            assert!(
-                storm_sky[i] < rain_sky[i] + 1e-6,
-                "thunder darkens channel {i}: {} vs {}",
-                storm_sky[i],
-                rain_sky[i]
-            );
-        }
-        // Full thunder at noon: the colour is the base blended to the grey times 0.24 by
-        // the 0.94 factor (the rain layer's weight is rain minus thunder = 0 here).
-        let base = rgb(0x78A7FF);
-        let grey = 0.3 * base[0] + 0.59 * base[1] + 0.11 * base[2];
-        let target = grey * 0.24;
-        for i in 0..3 {
-            let expect = base[i] + (target - base[i]) * 0.94;
-            assert!(
-                (storm_sky[i] - expect).abs() < 1e-4,
-                "channel {i}: {} vs {expect}",
-                storm_sky[i]
-            );
-        }
-    }
-
-    #[test]
-    fn moon_phase_cycles_daily() {
-        assert_eq!(
-            sky_colors(&state(6000), SkyKind::Overworld, 12.0).moon_phase,
-            0
-        );
-        assert_eq!(
-            sky_colors(&state(24000 * 4 + 6000), SkyKind::Overworld, 12.0).moon_phase,
-            4
-        );
-        assert_eq!(
-            sky_colors(&state(24000 * 9), SkyKind::Overworld, 12.0).moon_phase,
-            1
-        );
-    }
-
-    #[test]
-    fn sun_rises_east_sets_west() {
-        let sun = |t: i64| celestial_matrix(celestial_angle(t)).transform_point3(Vec3::Y * 100.0);
-        assert!(sun(6000).y > 99.0);
-        assert!(sun(0).x > 50.0, "morning sun in the east: {:?}", sun(0));
-        assert!(
-            sun(12000).x < -50.0,
-            "evening sun in the west: {:?}",
-            sun(12000)
-        );
-    }
-
-    #[test]
-    fn dimensions_pick_their_sky() {
-        let mut d = DimensionInfo::overworld();
-        assert_eq!(SkyKind::of(&d), SkyKind::Overworld);
-        d.dimension_type = Identifier::minecraft("the_nether");
-        assert_eq!(SkyKind::of(&d), SkyKind::None);
-        d.dimension_type = Identifier::minecraft("the_end");
-        assert_eq!(SkyKind::of(&d), SkyKind::End);
-    }
-}
+mod tests;
