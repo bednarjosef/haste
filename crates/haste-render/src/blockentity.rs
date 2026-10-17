@@ -20,7 +20,7 @@ use std::sync::{Arc, OnceLock};
 
 use glam::{Mat3, Mat4, Vec3};
 use haste_core::model::{Cube, CubeModel, ModelPart, PoseOverrides};
-use haste_core::{BlockPos, BlockStateId, Direction, Identifier};
+use haste_core::{BlockPos, Direction, Identifier};
 
 use crate::entity::{entity_shade, hurt_color, EntityVertex, TickPair};
 
@@ -32,11 +32,11 @@ mod end_gateway;
 mod lectern;
 
 pub use anim::BlockEntityAnim;
+pub(crate) use beacon::emit_beacon_beam;
 pub use beacon::{
     beam_animation_time, beam_radius_scale, beam_tex_v1, beam_tex_v_offset, BeamData, BeamSection,
     BEAM_MAX_RENDER_Y,
 };
-pub(crate) use beacon::{emit_beacon_beam, push_beam_quad};
 pub use book::{book_openness, book_texture};
 pub use enchant_table::enchant_page_flip;
 pub(crate) use end_gateway::emit_gateway_beam;
