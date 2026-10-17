@@ -201,6 +201,7 @@ fn item_components() -> Arc<haste_data::ItemComponents> {
             animation: 1,
         },
     );
+    c.insert_food(Identifier::minecraft("apple"), false);
     c.insert_consumable(
         Identifier::minecraft("potion"),
         Consumable {
@@ -1286,5 +1287,192 @@ fn a_use_swings_the_hand_and_drops_it() {
         (r.p.hand.equip().1 - 0.064).abs() < 1e-6,
         "{}",
         r.p.hand.equip().1
+    );
+}
+
+const USE: InteractInput = InteractInput {
+    attack: false,
+    use_item: true,
+    pick_block: false,
+    drop_item: false,
+    drop_stack: false,
+    swap_offhand: false,
+    hotbar: None,
+    attack_clicks: 0,
+    use_clicks: 0,
+};
+
+/// A hungry survival player with the test item components loaded.
+fn hungry(mode: GameMode) -> Rig {
+    let mut r = Rig::new(mode);
+    r.p.int.prepare(data());
+    r.p.int.set_item_components(item_components());
+    r.p.food = 10;
+    r
+}
+
+fn living_flags(b: i8) -> ClientboundPlay {
+    use haste_core::entity::{MetadataEntry, MetadataValue};
+    ClientboundPlay::SetEntityData(haste_protocol::packets::play::clientbound::SetEntityData {
+        entity_id: ME.0,
+        metadata: vec![MetadataEntry {
+            index: 8,
+            value: MetadataValue::Byte(b),
+        }],
+    })
+}
+
+/// `LivingEntity.isUsingItem` is the synced `DATA_LIVING_ENTITY_FLAGS` bit 0x01: the server
+/// clearing it ends the eat, and a held button starts the next bite (`Minecraft.handleKeybinds`)
+/// without a `release_use_item`.
+#[test]
+fn eating_ends_when_the_server_clears_the_using_flag_and_continues_while_held() {
+    let mut r = hungry(GameMode::Survival);
+    r.p.int.hotbar[0] = item(4); // apple
+    r.w = TestWorld::new();
+    let out = r.tick(USE);
+    assert!(matches!(out[0], ServerboundPlay::UseItem(_)));
+    assert!(r.p.is_using_item());
+    let mut out = Vec::new();
+    // The server confirms: nothing changes.
+    r.p.handle(&living_flags(0x01), &mut out);
+    assert!(r.p.is_using_item());
+    assert_eq!(r.p.use_duration(), 32);
+    for _ in 0..5 {
+        assert!(r.tick(USE).is_empty());
+    }
+    // The consume completed: the flag drops, the use ends, the next tick starts a new one.
+    r.p.handle(&living_flags(0x00), &mut out);
+    assert!(!r.p.is_using_item());
+    let out = r.tick(USE);
+    assert!(actions(&out).is_empty(), "{out:?}");
+    assert!(matches!(out[0], ServerboundPlay::UseItem(_)));
+    assert!(r.p.is_using_item());
+}
+
+/// A use the server started (`onSyncedDataUpdated` with no local `useItem`) takes the held
+/// item's duration.
+#[test]
+fn a_server_started_use_takes_the_held_items_duration() {
+    let mut r = hungry(GameMode::Survival);
+    r.p.int.hotbar[0] = item(4);
+    r.w = TestWorld::new();
+    let mut out = Vec::new();
+    r.p.handle(&living_flags(0x01), &mut out);
+    assert!(r.p.is_using_item());
+    r.tick(InteractInput::default());
+    assert_eq!(r.p.use_duration(), 32);
+    assert_eq!(r.p.use_animation(), UseAnimation::Eat);
+    // Still in use without the button (the server owns it): no release packet.
+    assert!(r.p.is_using_item());
+}
+
+/// `Minecraft.startUseItem`: a Pass from `useItemOn` (food on stone) goes on to `useItem` with
+/// the same hand, and an empty main hand on to the off hand. No `punch` on a use.
+#[test]
+fn use_on_a_block_falls_through_to_use_item_and_the_off_hand() {
+    let mut r = hungry(GameMode::Survival);
+    r.p.int.hotbar[0] = item(4);
+    let out = r.tick(USE);
+    assert!(matches!(out[0], ServerboundPlay::UseItemOn(u) if u.hand == 0), "{out:?}");
+    assert!(matches!(out[1], ServerboundPlay::UseItem(u) if u.hand == 0), "{out:?}");
+    assert_eq!(out.len(), 2);
+    assert!(r.p.is_using_item());
+
+    let mut r = hungry(GameMode::Survival);
+    r.p.int.offhand = item(4);
+    let out = r.tick(USE);
+    assert!(matches!(out[0], ServerboundPlay::UseItemOn(u) if u.hand == 0), "{out:?}");
+    assert!(matches!(out[1], ServerboundPlay::UseItemOn(u) if u.hand == 1), "{out:?}");
+    assert!(matches!(out[2], ServerboundPlay::UseItem(u) if u.hand == 1), "{out:?}");
+    assert_eq!(out.len(), 3);
+}
+
+/// Right click on a plain block with nothing in hand: one `use_item_on` per hand, no swing
+/// (vanilla swings only on a Success with a PREDICTED swing source).
+#[test]
+fn an_empty_hand_on_a_plain_block_does_not_swing() {
+    let mut r = Rig::new(GameMode::Survival);
+    let out = r.tick(USE);
+    assert_eq!(out.len(), 2, "{out:?}");
+    assert!(out
+        .iter()
+        .all(|p| matches!(p, ServerboundPlay::UseItemOn(_))));
+    assert!(!r.p.hand.is_swinging());
+}
+
+/// `MultiPlayerGameMode.attack` ends with `resetAttackStrengthTicker`; `Minecraft.startAttack`'s
+/// MISS case resets it too (in every game mode).
+#[test]
+fn an_entity_hit_and_a_miss_reset_the_attack_strength() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.add_entity(
+        EntityId(42),
+        Aabb::entity(DVec3::new(0.5, 0.0, 0.5), 0.6, 0.5),
+        ZOMBIE,
+    );
+    for _ in 0..40 {
+        r.p.hand.tick(0.0, (0.0, 90.0), true, false, None, 4.0);
+    }
+    assert!((r.p.hand.attack_strength_scale(0.5) - 1.0).abs() < 1e-6);
+    let out = r.tick(ATTACK);
+    assert!(matches!(out[0], ServerboundPlay::Attack(_)));
+    assert!(r.p.hand.attack_strength_scale(0.5) < 0.2);
+
+    let mut r = Rig::new(GameMode::Creative);
+    r.w = TestWorld::new();
+    for _ in 0..40 {
+        r.p.hand.tick(0.0, (0.0, 90.0), true, false, None, 4.0);
+    }
+    assert!((r.p.hand.attack_strength_scale(0.5) - 1.0).abs() < 1e-6);
+    assert!(matches!(r.tick(ATTACK)[0], ServerboundPlay::Punch(_)));
+    assert!(r.p.hand.attack_strength_scale(0.5) < 0.2);
+}
+
+/// `Consumable.startConsuming` -> `Player.canEat`: food with a full hunger bar sends the packet
+/// but does not start the use.
+#[test]
+fn food_does_not_start_eating_with_a_full_hunger_bar() {
+    let mut r = hungry(GameMode::Survival);
+    r.p.food = 20;
+    r.p.int.hotbar[0] = item(4);
+    r.w = TestWorld::new();
+    let out = r.tick(USE);
+    assert!(matches!(out[0], ServerboundPlay::UseItem(_)));
+    assert!(!r.p.is_using_item());
+    // A potion is not food: it always starts.
+    r.p.int.hotbar[0] = item(10);
+    for _ in 0..4 {
+        r.tick(InteractInput::default());
+    }
+    r.tick(USE);
+    assert!(r.p.is_using_item());
+    // Invulnerable (creative) eats with a full bar.
+    let mut r = hungry(GameMode::Creative);
+    r.p.food = 20;
+    r.p.abilities.invulnerable = true;
+    r.p.int.hotbar[0] = item(4);
+    r.w = TestWorld::new();
+    r.tick(USE);
+    assert!(r.p.is_using_item());
+}
+
+/// `MultiPlayerGameMode.sameDestroyTarget` compares the held item and its components, not the
+/// count: picking up more of it keeps the break going.
+#[test]
+fn more_of_the_held_item_does_not_restart_the_break() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.p.int.hotbar[0] = item(3);
+    let out = r.tick(ATTACK);
+    assert_eq!(actions(&out), [(action::START_DESTROY, 1)]);
+    r.p.int.hotbar[0].count = 5;
+    let out = r.tick(ATTACK);
+    assert!(actions(&out).is_empty(), "{out:?}");
+    // A different item does restart it.
+    r.p.int.hotbar[0] = item(1);
+    let out = r.tick(ATTACK);
+    assert_eq!(
+        actions(&out).iter().map(|a| a.0).collect::<Vec<_>>(),
+        [action::ABORT_DESTROY, action::START_DESTROY]
     );
 }
