@@ -6,5 +6,6 @@
 pub mod engine;
 pub mod music;
 pub mod output;
+pub mod random;
 pub mod sounds;
 pub mod spatial;
