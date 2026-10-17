@@ -10,6 +10,7 @@
 pub mod assets;
 pub mod atlas;
 pub mod bake;
+pub mod dynamic;
 pub mod equipment;
 pub mod font;
 pub mod item;

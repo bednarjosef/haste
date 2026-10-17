@@ -190,6 +190,7 @@ fn held_item_draws_the_item_model_not_the_block_model() {
         renderer.set_first_person(Some(haste_render::FirstPerson {
             skin: None,
             slim: false,
+            sleeve: true,
             item: Some(item_index(&data, name)),
             light: (15, 0),
             attack: haste_render::TickPair::fixed(0.0),

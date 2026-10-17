@@ -28,8 +28,13 @@ use haste_protocol::haste_core::{
 use haste_world::World;
 use parking_lot::{Condvar, Mutex, RwLock};
 
+mod block_entity_ticks;
+
 use crate::net::{NetDriver, WorldSink};
+
+pub mod skins;
 use crate::ui::Ui;
+use block_entity_ticks::{tick_model_anims, TickModelAnims, MODEL_RNG};
 
 /// The particle pool: filled from `level_particles` packets (the renderer's atlas-backed
 /// particle types, so unknown/mod types are skipped there), ticked at 20 Hz by the game
@@ -189,7 +194,12 @@ fn biome_has_precipitation(
 /// and head pitched to the interpolated look, and its pose's adjustments like any player. The
 /// limb swing the store drives for other entities is omitted (no per-tick walk phase for the
 /// local player yet).
-pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32) -> EntityInstance {
+pub fn player_instance(
+    id: EntityId,
+    view: &ViewState,
+    partial: f32,
+    skin: &haste_entity::skin::PlayerSkin,
+) -> EntityInstance {
     let pos = interpolate(view.prev_feet, view.feet, partial);
     let yaw = view.prev_look.0 + (view.look.0 - view.prev_look.0) * partial;
     let pitch = view.prev_look.1 + (view.look.1 - view.prev_look.1) * partial;
@@ -226,7 +236,7 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
                 .push(("head".into(), Vec3::new(pitch.to_radians(), 0.0, 0.0)));
         }
     }
-    EntityInstance {
+    let mut inst = EntityInstance {
         id,
         model: haste_entity::models::humanoid(false),
         pos,
@@ -237,9 +247,7 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
         pose,
         body: BodyTransform::default(),
         body_scale: Vec3::ONE,
-        // The skin servers send for other players is not synced for ourselves; the renderer's
-        // default skin for our UUID is what vanilla shows without a downloaded skin.
-        skin: Some(haste_render::default_skin(uuid).0),
+        skin: None,
         nametag: None,
         below_name: None,
         // `AvatarRenderer` passes shadowRadius 0.5 (LivingEntityRenderer, player scale 1).
@@ -259,10 +267,18 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
-    }
+    };
+    skins::dress_local(&mut inst, skin, view, partial);
+    inst
 }
 
 /// What the render thread needs each frame, copied out under a short lock.
+/// `LivingEntity.isDeadOrDying` as the camera sees it: `Some(deathTime)` while the health is
+/// <= 0 (0 on the tick it got there), `None` alive.
+pub fn death_time(dead: bool, death_ticks: u32) -> Option<u32> {
+    dead.then_some(death_ticks)
+}
+
 #[derive(Clone, Debug)]
 pub struct ViewState {
     /// Player eye position at the start of the last tick (`LocalPlayer::camera(0.0)`).
@@ -327,14 +343,19 @@ pub struct ViewState {
     /// `hurt_dir`).
     pub hurt_ticks: u32,
     pub hurt_dir: f32,
-    /// Ticks since the local player died (`Session::death_ticks`).
+    /// Ticks since the local player died (`Session::death_ticks`, vanilla `deathTime`).
     pub death_ticks: u32,
+    /// `LivingEntity.isDeadOrDying`: the player's health is <= 0 (true from the tick it hits 0,
+    /// while `death_ticks` is still 0).
+    pub dead: bool,
     /// Look angles (yaw, pitch) before and after the last tick, for the player's own model in
     /// third person.
     pub prev_look: (f32, f32),
     pub look: (f32, f32),
     /// Feet positions bracketing the last tick (like `prev_eye`/`eye`, for the own model).
     pub prev_feet: DVec3,
+    /// Our cape's trailing point (`ClientAvatarState`'s cloak), ticked with the feet.
+    pub cloak: haste_entity::avatar::Cloak,
     /// Body pose metadata for the own model (`None`: the physics pose only knows standing,
     /// crouching and swimming).
     pub pose: Option<haste_core::entity::Pose>,
@@ -362,6 +383,15 @@ pub struct ViewState {
     pub rain_fog_multiplier: f32,
     /// `ClientLevel.seaLevel` (the spawn info's; biome precipitation's snow line).
     pub sea_level: i32,
+    /// `ClientLevelData.getHorizonHeight` (the dark disc's threshold).
+    pub horizon_height: f64,
+}
+
+impl ViewState {
+    /// [`death_time`] of this tick's state, for the death FOV and roll.
+    pub fn death(&self) -> Option<u32> {
+        death_time(self.dead, self.death_ticks)
+    }
 }
 
 /// The per-tick part of the first-person hand: the held item, the light at the eye and this
@@ -387,16 +417,24 @@ pub struct FirstPersonView {
 
 impl FirstPersonView {
     /// The first-person hand for `item` in `world` at `eye`: the item held and the light at the
-    /// eye, sampled the same way entities are (`Renderer::sample_entity_lights`).
-    pub fn sample(world: &dyn BlockView, eye: DVec3, item: Option<RegistryIndex>) -> Self {
+    /// block containing the eye (`EntityRenderer.getPackedLightCoords` probes
+    /// `Entity.getLightProbePosition`, the eye position); block light is 15 while the player is
+    /// on fire (`EntityRenderer.getBlockLightLevel`).
+    pub fn sample(
+        world: &dyn BlockView,
+        eye: DVec3,
+        item: Option<RegistryIndex>,
+        on_fire: bool,
+    ) -> Self {
         let p = BlockPos::new(
             eye.x.floor() as i32,
-            (eye.y + 0.5).floor() as i32,
+            eye.y.floor() as i32,
             eye.z.floor() as i32,
         );
+        let block_light = if on_fire { 15 } else { world.block_light(p) };
         FirstPersonView {
             item,
-            light: (world.sky_light(p), world.block_light(p)),
+            light: (world.sky_light(p), block_light),
             attack: (0.0, 0.0),
             equip: (1.0, 1.0),
             x_bob: (0.0, 0.0),
@@ -413,13 +451,18 @@ impl FirstPersonView {
         self.y_bob = hand.y_bob();
     }
 
-    /// The renderer's first-person hand for this view drawn with `skin` (the connection's
-    /// fixed skin): since the skin never changes, two views that compare equal produce equal
-    /// hands, so comparing the views is the whole "changed?" check.
-    pub fn with_skin(&self, skin: &(Identifier, bool)) -> haste_render::FirstPerson {
+    /// The renderer's first-person hand for this view drawn with `skin` and, when `sleeve`,
+    /// its right sleeve: two equal views with the same skin produce equal hands, so the
+    /// caller's "changed?" check compares the view and the skin.
+    pub fn with_skin(
+        &self,
+        skin: &haste_entity::skin::PlayerSkin,
+        sleeve: bool,
+    ) -> haste_render::FirstPerson {
         haste_render::FirstPerson {
-            skin: Some(skin.0.clone()),
-            slim: skin.1,
+            skin: Some(skin.body.clone()),
+            slim: skin.model.is_slim(),
+            sleeve,
             item: self.item,
             light: self.light,
             attack: pair(self.attack),
@@ -505,10 +548,8 @@ pub struct Shared {
     pub stop: AtomicBool,
     /// Why the connection ended, once it has.
     pub closed: Mutex<Option<String>>,
-    /// The skin the first-person arm is drawn with and whether it is the slim model (the local
-    /// player's default skin for its profile UUID, `haste_render::default_skin`); set once at
-    /// join, it never changes during a connection.
-    pub skin: (Identifier, bool),
+    /// The skin manager: profiles' skins and capes, downloaded off-thread (`skins`).
+    pub skins: Mutex<skins::SkinManager>,
     /// The HUD and chat (ui.rs): set by the game thread once the JVM has started and
     /// [`Ui::joined`] ran; the render thread clones it per frame ([`Ui`] is cheap to clone).
     pub ui: Mutex<Option<Ui>>,
@@ -588,7 +629,7 @@ impl Shared {
         entities: EntityStore,
         view_distance: i32,
         particles: haste_render::Particles,
-        skin: (Identifier, bool),
+        skins: skins::SkinManager,
         block_entity_names: Vec<Identifier>,
         biome_climates: Vec<haste_render::BiomeClimate>,
         options: haste_setup::options::Options,
@@ -631,9 +672,11 @@ impl Shared {
                 hurt_ticks: 0,
                 hurt_dir: 0.0,
                 death_ticks: 0,
+                dead: false,
                 prev_look: (0.0, 0.0),
                 look: (0.0, 0.0),
                 prev_feet: DVec3::ZERO,
+                cloak: Default::default(),
                 pose: None,
                 screen: crate::screen_effects::ViewEffects::default(),
                 lightmap_flicker: 0.0,
@@ -647,6 +690,7 @@ impl Shared {
                 thunder_level: (0.0, 0.0),
                 rain_fog_multiplier: 0.0,
                 sea_level: 63,
+                horizon_height: 63.0,
             }),
             breaking: Mutex::new(Vec::new()),
             block_entity_lids: Mutex::new(Vec::new()),
@@ -661,7 +705,7 @@ impl Shared {
             sound: Mutex::new(None),
             stop: AtomicBool::new(false),
             closed: Mutex::new(None),
-            skin,
+            skins: Mutex::new(skins),
             ui: Mutex::new(None),
             hud_failed: AtomicBool::new(false),
             hud_enabled: AtomicBool::new(true),
@@ -1015,6 +1059,8 @@ fn drain_packets(
     };
     let ui = shared.ui.lock().clone();
     driver.receive(&mut tracked, &mut *entities, ui.as_ref())?;
+    drop(entities);
+    skins::request_profiles(&shared.skins, &mut driver.session.profiles);
     let mut dirty = world.take_dirty_sections();
     if !dirty.is_empty() {
         shared.dirty.lock().append(&mut dirty);
@@ -1293,321 +1339,6 @@ fn tick_once(
             }
             true
         });
-        /// The page-flip random (vanilla `EnchantingTableBlockEntity`'s unseeded `RandomSource`, whose
-        /// values only decide when the book's pages flip): a fixed seed keeps Haste's runs
-        /// reproducible.
-        static MODEL_RNG: parking_lot::Mutex<u64> = parking_lot::Mutex::new(0x2545_f491_4f6c_dd1d);
-
-        /// `RandomSource.nextInt(bound)`: vanilla's 26.3 `XoroshiroRandomSource.nextInt` — the unsigned
-        /// 32-bit draw multiplied by the bound, with the rejection loop that removes the modulo bias.
-        fn model_next_int(rng: &mut u64, bound: u32) -> u32 {
-            const MASK: u64 = 0xFFFF_FFFF;
-            let mut bits = (*rng >> 32) & MASK;
-            let mut mul = bits * bound as u64;
-            let mut frac = mul & MASK;
-            if frac < bound as u64 {
-                let start = (u32::MAX - bound + 1).wrapping_rem(bound) as u64;
-                while frac < start {
-                    *rng = rng
-                        .wrapping_mul(6364136223846793005)
-                        .wrapping_add(1442695040888963407);
-                    bits = (*rng >> 32) & MASK;
-                    mul = bits * bound as u64;
-                    frac = mul & MASK;
-                }
-            }
-            (mul >> 32) as u32
-        }
-
-        /// One tick of vanilla's block entity tickers for the object-model block entities: the bell
-        /// shake (`BellBlockEntity.tick`), the decorated pot wobble (`DecoratedPotBlockEntity.triggerEvent`
-        /// with the game clock), the enchanting table's book (`EnchantingTableBlockEntity.bookAnimationTick`)
-        /// and the conduit's spin and active flag (`ConduitBlockEntity.clientTick`). Entries whose block
-        /// entity is gone are dropped, like the skulls above.
-        struct TickModelAnims<'a> {
-            anims: &'a mut std::collections::HashMap<BlockPos, haste_render::BlockEntityAnim>,
-            world: &'a World,
-            blocks: &'a haste_data::BlockStates,
-            names: &'a [Identifier],
-            tags: Option<&'a haste_physics::mining::BlockTags>,
-            world_age: i64,
-            feet: DVec3,
-            rng: &'a mut u64,
-            bell_events: &'a [(BlockPos, Option<Direction>)],
-            pot_events: &'a [(BlockPos, i64, u32)],
-        }
-
-        fn tick_model_anims(t: TickModelAnims<'_>) {
-            use haste_render::BlockEntityAnim as A;
-            t.anims.retain(|pos, anim| {
-                let Some(be) = t.world.block_entity(*pos) else {
-                    return false;
-                };
-                let is_kind = t
-                    .names
-                    .get(be.kind as usize)
-                    .is_some_and(|n| n.namespace() == "minecraft" && kind_matches(n.path(), anim));
-                if !is_kind {
-                    return false;
-                }
-                match anim {
-                    A::EnchantTable {
-                        time,
-                        flip,
-                        open,
-                        rot,
-                        t_rot,
-                        flip_t,
-                        flip_a,
-                    } => {
-                        // `bookAnimationTick`: a player within 3 blocks opens the book and turns it
-                        // toward them (the client level only knows the local player).
-                        let near = {
-                            let dx = t.feet.x - (pos.x as f64 + 0.5);
-                            let dy = t.feet.y - (pos.y as f64 + 0.5);
-                            let dz = t.feet.z - (pos.z as f64 + 0.5);
-                            dx * dx + dy * dy + dz * dz <= 9.0
-                        };
-                        flip.start = flip.end;
-                        open.start = open.end;
-                        rot.start = rot.end;
-                        if near {
-                            *t_rot = (t.feet.z - (pos.z as f64 + 0.5))
-                                .atan2(t.feet.x - (pos.x as f64 + 0.5))
-                                as f32;
-                            open.end += 0.1;
-                            if open.end < 0.5 || model_next_int(t.rng, 40) == 0 {
-                                let old = *flip_t;
-                                loop {
-                                    let a = model_next_int(t.rng, 4) as i32;
-                                    let b = model_next_int(t.rng, 4) as i32;
-                                    *flip_t += (a - b) as f32;
-                                    if old != *flip_t {
-                                        break;
-                                    }
-                                }
-                            }
-                        } else {
-                            *t_rot += 0.02;
-                            open.end -= 0.1;
-                        }
-                        wrap_pi(&mut rot.end);
-                        wrap_pi(t_rot);
-                        let mut rot_dir = *t_rot - rot.end;
-                        wrap_pi(&mut rot_dir);
-                        rot.end += rot_dir * 0.4;
-                        open.end = open.end.clamp(0.0, 1.0);
-                        *time += 1.0;
-                        let diff = ((*flip_t - flip.end) * 0.4).clamp(-0.2, 0.2);
-                        *flip_a += (diff - *flip_a) * 0.9;
-                        flip.end += *flip_a;
-                    }
-                    A::Bell { ticks, click } => {
-                        ticks.start = ticks.end;
-                        if ticks.end >= 50.0 {
-                            // Vanilla stops the shake and zeroes the counter; the click direction goes
-                            // with it (`shakeDirection` is null when not shaking).
-                            ticks.end = 0.0;
-                            *click = None;
-                        } else {
-                            ticks.end += 1.0;
-                        }
-                    }
-                    A::Pot { wobble, duration } => {
-                        // The wobble runs from the event's game tick for the style's duration.
-                        let (start, event_duration) = t
-                            .pot_events
-                            .iter()
-                            .find(|(p, _, _)| p == pos)
-                            .map(|(_, s, d)| (*s, *d))
-                            .unwrap_or((0, *duration));
-                        let elapsed = (t.world_age - start) as f32;
-                        wobble.start = elapsed - 1.0;
-                        wobble.end = elapsed;
-                        *duration = event_duration;
-                        if elapsed > event_duration as f32 {
-                            return false;
-                        }
-                    }
-                    A::Conduit {
-                        tick_count,
-                        rotation,
-                        active,
-                        hunting,
-                    } => {
-                        *tick_count += 1.0;
-                        // Vanilla re-reads the shape every 40 ticks of the world's game time.
-                        if t.world_age % 40 == 0 {
-                            let shape = conduit_shape(t.world, t.blocks, t.tags, *pos);
-                            *active = shape.active;
-                            *hunting = shape.hunting;
-                        }
-                        if *active {
-                            *rotation += 1.0;
-                        }
-                    }
-                    A::Piston { progress } => {
-                        // Vanilla `PistonMovingBlockEntity.tick`: 0.5 per tick to 1.0; the
-                        // block entity is removed after (the entry drops when the server's
-                        // block update arrives).
-                        progress.start = progress.end;
-                        progress.end = (progress.end + 0.5).min(1.0);
-                    }
-                }
-                true
-            });
-            // New entries: the bells and pots the events named, and every conduit or enchanting table
-            // the world has that is not ticking yet (a pot or bell without an event has no animation).
-            for (pos, click) in t.bell_events {
-                t.anims.entry(*pos).or_insert(A::Bell {
-                    ticks: haste_render::TickPair {
-                        start: 0.0,
-                        end: 0.0,
-                    },
-                    click: *click,
-                });
-            }
-            for (pos, start, duration) in t.pot_events {
-                let elapsed = (t.world_age - *start) as f32;
-                t.anims.entry(*pos).or_insert(A::Pot {
-                    wobble: haste_render::TickPair {
-                        start: elapsed - 1.0,
-                        end: elapsed,
-                    },
-                    duration: *duration,
-                });
-            }
-            'outer: for chunk in t.world.loaded_chunks() {
-                for (pos, be) in t.world.block_entities_in(chunk) {
-                    let Some(name) = t.names.get(be.kind as usize) else {
-                        continue;
-                    };
-                    if name.namespace() != "minecraft" {
-                        continue;
-                    }
-                    let anim = match name.path() {
-                        "conduit" => {
-                            let shape = conduit_shape(t.world, t.blocks, t.tags, pos);
-                            A::Conduit {
-                                tick_count: 0.0,
-                                rotation: 0.0,
-                                active: shape.active,
-                                hunting: shape.hunting,
-                            }
-                        }
-                        "enchanting_table" => A::EnchantTable {
-                            time: 0.0,
-                            flip: haste_render::TickPair::fixed(0.0),
-                            open: haste_render::TickPair::fixed(0.0),
-                            rot: haste_render::TickPair::fixed(0.0),
-                            t_rot: 0.0,
-                            flip_t: 0.0,
-                            flip_a: 0.0,
-                        },
-                        // The moving piston starts at its NBT progress (the server sends it
-                        // with the block entity).
-                        "piston" => A::Piston {
-                            progress: haste_render::TickPair::fixed(piston_nbt_progress(&be.nbt)),
-                        },
-                        _ => continue,
-                    };
-                    t.anims.entry(pos).or_insert(anim);
-                    if t.anims.len() > 4096 {
-                        break 'outer;
-                    }
-                }
-            }
-        }
-
-        /// Whether a block entity type name still matches the animation state it started with.
-        fn kind_matches(path: &str, anim: &haste_render::BlockEntityAnim) -> bool {
-            use haste_render::BlockEntityAnim as A;
-            match anim {
-                A::Bell { .. } => path == "bell",
-                A::Pot { .. } => path == "decorated_pot",
-                A::Conduit { .. } => path == "conduit",
-                A::EnchantTable { .. } => path == "enchanting_table",
-                A::Piston { .. } => path == "piston",
-            }
-        }
-
-        /// The moving piston's NBT progress (vanilla `PistonMovingBlockEntity.loadAdditional`).
-        fn piston_nbt_progress(nbt: &[u8]) -> f32 {
-            use haste_protocol::nbt::deserializer::NbtReadHelperJava;
-            let mut cursor = std::io::Cursor::new(nbt);
-            let mut helper = NbtReadHelperJava::new(&mut cursor);
-            haste_protocol::nbt::Nbt::read_unnamed(&mut helper)
-                .ok()
-                .and_then(|doc| doc.root_tag.get_float("progress"))
-                .unwrap_or(0.0)
-        }
-
-        /// Vanilla's wrap-to-[-PI, PI) loops, as an in-place fix.
-        fn wrap_pi(v: &mut f32) {
-            while *v >= std::f32::consts::PI {
-                *v -= std::f32::consts::TAU;
-            }
-            while *v < -std::f32::consts::PI {
-                *v += std::f32::consts::TAU;
-            }
-        }
-
-        /// The conduit's shape, refreshed every 40 ticks (vanilla
-        /// `ConduitBlockEntity.updateShape`/`updateHunting`).
-        #[derive(Clone, Copy, Default)]
-        struct ConduitShape {
-            active: bool,
-            hunting: bool,
-        }
-
-        fn conduit_shape(
-            world: &World,
-            blocks: &haste_data::BlockStates,
-            tags: Option<&haste_physics::mining::BlockTags>,
-            pos: BlockPos,
-        ) -> ConduitShape {
-            // The 3x3x3 around the conduit must be water.
-            for ox in -1..=1i32 {
-                for oy in -1..=1i32 {
-                    for oz in -1..=1i32 {
-                        let p = pos.add(ox, oy, oz);
-                        let block = blocks.block_of(world.block_state(p));
-                        if block.namespace() != "minecraft" || block.path() != "water" {
-                            return ConduitShape::default();
-                        }
-                    }
-                }
-            }
-            // The ring's `conduit_effect_block` tag entries (16 activate the conduit, 42 make it hunt).
-            let tag = Identifier::minecraft("conduit_effect_block");
-            let mut effect_blocks = 0;
-            for ox in -2..=2i32 {
-                for oy in -2..=2i32 {
-                    for oz in -2..=2i32 {
-                        let (ax, ay, az) = (ox.abs(), oy.abs(), oz.abs());
-                        let on_ring = (ax > 1 || ay > 1 || az > 1)
-                            && (ox == 0 && (ay == 2 || az == 2)
-                                || oy == 0 && (ax == 2 || az == 2)
-                                || oz == 0 && (ax == 2 || ay == 2));
-                        if !on_ring {
-                            continue;
-                        }
-                        let p = pos.add(ox, oy, oz);
-                        let block = blocks.block_of(world.block_state(p));
-                        if let (Some(index), Some(tags)) = (blocks.block_index(block), tags) {
-                            if tags.contains(&tag, index.0) {
-                                effect_blocks += 1;
-                            }
-                        }
-                    }
-                }
-            }
-            ConduitShape {
-                active: effect_blocks >= 16,
-                hunting: effect_blocks >= 42,
-            }
-        }
-
         // The object-model block entities' animation state: the bell shakes, the decorated pot
         // wobbles and the conduit and enchanting-table ticks (vanilla's block entity tickers for
         // `BellBlockEntity`, `DecoratedPotBlockEntity`, `ConduitBlockEntity` and
@@ -1869,6 +1600,7 @@ fn tick_once(
     let first_person = if driver.session.player.game_mode == GameMode::Spectator {
         None
     } else {
+        let on_fire = driver.session.own_flags().on_fire || driver.session.screen_probe.in_fire;
         let p = &mut driver.session.player;
         let attack_speed = p.held_attack_speed();
         p.hand.tick(
@@ -1876,12 +1608,13 @@ fn tick_once(
             (p.state.yaw, p.state.pitch),
             p.state.on_ground,
             matches!(p.state.pose, haste_physics::Pose::Swimming),
-            p.main_hand().item,
+            p.held_stack(),
             attack_speed,
         );
         let eye = p.camera(1.0).0;
         let hand = &p.hand;
-        let mut fp = FirstPersonView::sample(&*shared.world.read(), eye, hand.shown_item());
+        let mut fp =
+            FirstPersonView::sample(&*shared.world.read(), eye, hand.shown_item(), on_fire);
         fp.with_hand(hand);
         Some(fp)
     };
@@ -1902,6 +1635,8 @@ fn tick_once(
     // (sneaking), so the old feet are the last view's, not the eye minus its height.
     let feet = s.player.state.pos;
     view.prev_feet = if view.has_position { view.feet } else { feet };
+    let prev_feet = view.prev_feet;
+    view.cloak.tick(prev_feet);
     view.prev_eye = prev_eye;
     view.eye = eye;
     view.prev_look = (prev_yaw, prev_pitch);
@@ -1940,6 +1675,8 @@ fn tick_once(
         };
         view.rain_fog_multiplier += (target - view.rain_fog_multiplier) * 0.2;
         view.sea_level = s.sea_level;
+        view.horizon_height =
+            haste_render::sky::dark_disc::horizon_height(s.is_flat, s.dimension.min_y);
     }
     view.eye_height = s.player.eye_height();
     view.time_of_day = s.time_of_day.unwrap_or(6000);
@@ -1975,6 +1712,7 @@ fn tick_once(
     view.hurt_ticks = s.hurt_ticks;
     view.hurt_dir = s.hurt_dir;
     view.death_ticks = s.death_ticks;
+    view.dead = s.player.health <= 0.0;
     // The screen effects, from this tick's world probe (the block the camera is inside, the
     // eye's light), the own entity's flags and freeze ticks, the worn head item and the active
     // effects. The eyes being in water comes from the physics' fluid at the eye position.
@@ -2111,23 +1849,22 @@ mod tests {
 
     #[test]
     fn first_person_view_change_detection() {
-        // The skin is fixed for a connection, so view equality is the whole "did the hand
-        // change?" check: equal views produce equal hands, differing ones differing hands.
-        let skin = (
-            haste_core::Identifier::minecraft("entity/player/wide/steve"),
-            false,
-        );
-        let a = FirstPersonView::sample(&lit(), DVec3::ZERO, Some(RegistryIndex(5)));
+        // With the skin fixed, view equality is the whole "did the hand change?" check:
+        // equal views produce equal hands, differing ones differing hands.
+        let skin = haste_entity::skin::steve();
+        let skin = &*skin;
+        let a = FirstPersonView::sample(&lit(), DVec3::ZERO, Some(RegistryIndex(5)), false);
         let mut b = a;
         b.item = None;
         assert_eq!(a, a);
         assert_ne!(a, b);
-        let ha = a.with_skin(&skin);
-        let hb = b.with_skin(&skin);
-        assert_eq!(ha, a.with_skin(&skin));
+        let ha = a.with_skin(skin, true);
+        let hb = b.with_skin(skin, true);
+        assert_eq!(ha, a.with_skin(skin, true));
         assert_ne!(ha, hb);
-        assert_eq!(ha.skin, Some(skin.0.clone()));
+        assert_eq!(ha.skin, Some(skin.body.clone()));
         assert!(!ha.slim);
+        assert!(ha.sleeve);
         assert_eq!(ha.item, Some(RegistryIndex(5)));
         // Sampled at full sky light.
         assert_eq!(ha.light, (15, 0));
@@ -2135,7 +1872,7 @@ mod tests {
         let mut c = a;
         c.light = (4, 7);
         assert_ne!(a, c);
-        assert_ne!(ha, c.with_skin(&skin));
+        assert_ne!(ha, c.with_skin(skin, true));
     }
 
     /// A world at full sky light, for sampling the hand's light.
@@ -2151,19 +1888,28 @@ mod tests {
     fn the_view_carries_the_hand_animation_to_the_renderer() {
         // The per-tick pairs go through to the renderer's hand unchanged, so a swinging hand
         // (or a dipping equip progress, or the walk bob) is a different hand each tick.
-        let skin = (
-            haste_core::Identifier::minecraft("entity/player/wide/steve"),
+        let skin = haste_entity::skin::PlayerSkin::new(
+            haste_core::Identifier::minecraft("entity/player/slim/steve"),
+            None,
+            haste_entity::skin::PlayerModelType::Slim,
             true,
         );
         let mut hand = crate::hand::Hand::new();
         hand.swing();
-        let mut v = FirstPersonView::sample(&lit(), DVec3::ZERO, None);
+        let mut v = FirstPersonView::sample(&lit(), DVec3::ZERO, None, false);
         // Two ticks of walking 0.2 blocks with the look at (10, 5) and the hand swinging.
         for _ in 0..2 {
-            hand.tick(0.2, (10.0, 5.0), true, false, None, 4.0);
+            hand.tick(
+                0.2,
+                (10.0, 5.0),
+                true,
+                false,
+                crate::hand::HeldStack::of(None),
+                4.0,
+            );
         }
         v.with_hand(&hand);
-        let moving = v.with_skin(&skin);
+        let moving = v.with_skin(&skin, true);
         // The skin's slim arm is passed through.
         assert!(moving.slim);
         // The swing is `SwingState.ticks / 6` through: 0 on the attack tick, 1/6 on the next.
@@ -2179,11 +1925,18 @@ mod tests {
         assert!((v.y_bob.1 - 7.5).abs() < 1e-6);
         assert!((v.x_bob.1 - 3.75).abs() < 1e-6);
         // The next tick's step is a different hand, so the renderer is told again.
-        hand.tick(0.2, (10.0, 5.0), true, false, None, 4.0);
+        hand.tick(
+            0.2,
+            (10.0, 5.0),
+            true,
+            false,
+            crate::hand::HeldStack::of(None),
+            4.0,
+        );
         let mut next = v;
         next.with_hand(&hand);
         assert_ne!(next, v);
-        assert_ne!(next.with_skin(&skin), moving);
+        assert_ne!(next.with_skin(&skin, true), moving);
     }
 
     #[test]
@@ -2194,12 +1947,33 @@ mod tests {
             block: 7,
             asked: parking_lot::Mutex::new(Vec::new()),
         };
-        let v =
-            FirstPersonView::sample(&world, DVec3::new(3.2, 65.5, -7.8), Some(RegistryIndex(1)));
+        let v = FirstPersonView::sample(
+            &world,
+            DVec3::new(3.2, 65.5, -7.8),
+            Some(RegistryIndex(1)),
+            false,
+        );
         assert_eq!(v.item, Some(RegistryIndex(1)));
         assert_eq!(v.light, (12, 7));
-        // The eye at y = 65.5 samples y = 66 (eye.y + 0.5 floored), like entity light.
-        assert_eq!(world.asked.lock().clone(), vec![BlockPos::new(3, 66, -8)]);
+        // The eye at y = 65.5 samples the block containing it, y = 65
+        // (`Entity.getLightProbePosition` is the eye position, floored by `BlockPos.containing`),
+        // not the block above: in a 2-high tunnel the eye at feet + 1.62 is in the lit upper
+        // block and the hand must not take the ceiling's darkness.
+        assert_eq!(world.asked.lock().clone(), vec![BlockPos::new(3, 65, -8)]);
+    }
+
+    #[test]
+    fn first_person_sample_on_fire_forces_full_block_light() {
+        // `EntityRenderer.getBlockLightLevel`: 15 while on fire, sky light still from the world.
+        let world = LightWorld {
+            sky: 9,
+            block: 2,
+            asked: parking_lot::Mutex::new(Vec::new()),
+        };
+        let v = FirstPersonView::sample(&world, DVec3::new(0.5, 70.9, 0.5), None, true);
+        assert_eq!(v.light, (9, 15));
+        let v = FirstPersonView::sample(&world, DVec3::new(0.5, 70.9, 0.5), None, false);
+        assert_eq!(v.light, (9, 2));
     }
 
     /// A world that answers one sky/block light pair and records where it was asked.

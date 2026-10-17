@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use haste_protocol::haste_core::game::TICK_SECONDS;
 use haste_protocol::haste_core::BlockPos;
-use haste_protocol::{Account, ConnectOptions};
+use haste_protocol::ConnectOptions;
 use haste_world::World;
 
 use crate::net::{self, EntitySink, NetDriver, WorldSink};
@@ -39,10 +39,12 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
             haste_setup::options::Options::default()
         }
     };
-    let mut opts = ConnectOptions::new(address.clone(), Account::Offline { username });
+    let join = net::account::join_account(&username).await?;
+    let mut opts = ConnectOptions::new(address.clone(), join.account);
     opts.client_information.view_distance = options.render_distance as i8;
     let t0 = Instant::now();
     let mut driver = NetDriver::connect(opts).await?;
+    driver.chat.set_keys(join.keys);
     let regs = driver.connection().registries();
     let biomes = net::synced_biome_count(regs);
     let entity_types = regs
@@ -54,7 +56,9 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
     // server sent one, else the static one).
     let type_names = net::entity_type_names(regs, &data);
     let mob_variants = net::mob_variants(regs);
+    let attribute_names = net::attribute_names(regs, &data);
     driver.session.set_entity_type_names(type_names);
+    driver.session.set_attribute_names(attribute_names);
     let mut world = World::new_with_biomes(
         driver.login().dimension.clone(),
         data.clone(),

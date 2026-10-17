@@ -1213,7 +1213,9 @@ dependencies = [
 name = "haste-client"
 version = "0.1.0"
 dependencies = [
+ "ahash",
  "anyhow",
+ "base64 0.22.1",
  "bytes",
  "clap",
  "crossbeam-channel",
@@ -1232,11 +1234,14 @@ dependencies = [
  "image",
  "libc",
  "parking_lot",
+ "reqwest",
  "serde",
  "serde_json",
+ "sha1",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "winit",
 ]
 

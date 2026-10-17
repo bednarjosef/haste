@@ -1300,10 +1300,7 @@ struct AoSample {
 /// The per-vertex corner blend, vanilla `BlockModelLighter`'s cubic path:
 /// the AO occluder count over the two sides, the diagonal (the caller has
 /// already applied vanilla's side-0 substitution) and the center, plus the
-/// light blend of `LightCoordsUtil.smoothBlend` — the center's light averaged
-/// with the three samples, where a fully-dark neighbour takes the center's
-/// light and a zero-sky one its sky, but only when the center itself is lit
-/// (sky > 2 or block > 2). The light comes back in vanilla's smooth units
+/// light blend of `LightCoordsUtil.smoothBlend` ([`smooth_blend`]). The light comes back in vanilla's smooth units
 /// (16 per level, 0..240 — the exact average, like vanilla keeps into the
 /// lightmap; `LIGHT16_PER_LEVEL`).
 fn ao_corner_blend(sides: [AoSample; 2], diagonal: AoSample, center: AoSample) -> (u8, [u8; 2]) {
@@ -1313,23 +1310,10 @@ fn ao_corner_blend(sides: [AoSample; 2], diagonal: AoSample, center: AoSample) -
         diagonal.occludes,
         center.occludes,
     );
-    let (cs, cb) = (center.light >> 4, center.light & 0xF);
-    let mut sky = cs as u32;
-    let mut block = cb as u32;
-    for s in sides.into_iter().chain([diagonal]) {
-        // Vanilla's smoothBlend replaces a zero-light neighbour with the
-        // center's light here (and a zero-sky one's sky) when the center is
-        // lit. Measured against the 26.3 reference screenshots that rule
-        // brightens terrain ~+10 mean error (every corner at a terrain step
-        // or trunk base lights up), while leaving it out lands all three
-        // compare shots at or below main's error — so it is left OUT until
-        // the light data matches vanilla's (Haste's snapshot light is
-        // measurably brighter than vanilla's around occluders, the same bias
-        // main has; the substitution amplifies it). See the branch's merge
-        // discussion.
-        sky += (s.light >> 4) as u32;
-        block += (s.light & 0xF) as u32;
-    }
+    let (sky, block) = smooth_blend(
+        [sides[0].light, sides[1].light, diagonal.light],
+        center.light,
+    );
     // Vanilla keeps the exact average in 16th-of-a-level units (0..240) into
     // the lightmap; the vertex carries it (`LIGHT16_PER_LEVEL`).
     (
@@ -1339,6 +1323,31 @@ fn ao_corner_blend(sides: [AoSample; 2], diagonal: AoSample, center: AoSample) -
             (block * 4).min(crate::vertex::LIGHT16_MAX as u32) as u8,
         ],
     )
+}
+
+/// Vanilla `LightCoordsUtil.smoothBlend` on packed (sky << 4 | block) cell
+/// lights: when the center is lit (sky > 2 or block > 2), a fully dark
+/// neighbour (inside an opaque block) takes the center's light and a zero-sky
+/// one the center's sky; then the four are summed per channel. Returns the
+/// (sky, block) sums in whole levels, 0..60 (the caller scales the average to
+/// 16ths).
+fn smooth_blend(neighbours: [u8; 3], center: u8) -> (u32, u32) {
+    let (cs, cb) = (center >> 4, center & 0xF);
+    let lit = cs > 2 || cb > 2;
+    let mut sky = cs as u32;
+    let mut block = cb as u32;
+    for n in neighbours {
+        let n = if lit && n == 0 {
+            center
+        } else if lit && n >> 4 == 0 {
+            (cs << 4) | (n & 0xF)
+        } else {
+            n
+        };
+        sky += (n >> 4) as u32;
+        block += (n & 0xF) as u32;
+    }
+    (sky, block)
 }
 
 /// Per-vertex AO occluder count + smooth light for face vertex `vi` (vanilla
@@ -2054,9 +2063,7 @@ mod tests {
     }
 
     /// Hand-computed corner blend (vanilla BlockModelLighter's shade average
-    /// and the light average), one up-face vertex: the exact 16th-unit average
-    /// of the four raw cell lights, with no zero-light substitution (see the
-    /// comment in `ao_corner_blend` for why vanilla's fallback is left out).
+    /// and `LightCoordsUtil.smoothBlend`), one up-face vertex.
     #[test]
     fn corner_blend_matches_vanilla_rules() {
         let stone = |sky: u8, block: u8| AoSample {
@@ -2072,20 +2079,44 @@ mod tests {
         // south one's (15, 0); diagonal (the caller's substituted side-0
         // sample): air, (15, 0).
         // AO: stone + stone + air + air = 2 occluders (brightness 0.6).
-        // Light: the raw average of sky 12 + 0 + 15 + 15 = 42 levels, whose
-        // exact value in 16th units is 42 * 4 = 168 (level 10.5 — the
-        // fraction is the point of the smooth units); block 0.
+        // Light: the lit center (sky 12 > 2) replaces the fully dark side
+        // with its own light, so sky 12 + 12 + 15 + 15 = 54 levels, in 16th
+        // units 54 * 4 = 216 (level 13.5); block 0.
         let (ao, [sky16, block16]) = ao_corner_blend(
             [stone(15, 0), stone(0, 0)],
             air(15, 0), // the substituted diagonal (side 0)
             air(12, 0), // center
         );
         assert_eq!(ao, 2);
-        assert_eq!(sky16, 168, "the raw four-cell average, no substitution");
+        assert_eq!(sky16, 216, "the dark side takes the center's light");
         assert_eq!(block16, 0);
 
         let (_, [l2, _]) = ao_corner_blend([stone(15, 0), stone(9, 0)], air(15, 0), air(12, 0));
         assert_eq!(l2, 204, "lit neighbours average unchanged");
+    }
+
+    /// `smoothBlend`'s substitutions: a fully dark neighbour takes the whole
+    /// center light, a zero-sky one only the center's sky (keeping its own
+    /// block light), and nothing is substituted under a center at or below
+    /// level 2 on both channels.
+    #[test]
+    fn smooth_blend_substitutes_only_under_a_lit_center() {
+        let center = pack_light(10, 4);
+        // Dark (0,0) -> (10,4); zero-sky (0,7) -> (10,7); lit (14,1) as is.
+        let (sky, block) = smooth_blend(
+            [pack_light(0, 0), pack_light(0, 7), pack_light(14, 1)],
+            center,
+        );
+        assert_eq!((sky, block), (10 + 10 + 14 + 10, 4 + 7 + 1 + 4));
+        // A center at (2, 2) is not lit: the raw sums.
+        let dim = pack_light(2, 2);
+        let (sky, block) =
+            smooth_blend([pack_light(0, 0), pack_light(0, 7), pack_light(14, 1)], dim);
+        assert_eq!((sky, block), (2 + 14, 2 + 7 + 1));
+        // Block light alone lights the center (block 3 > 2).
+        let torch = pack_light(0, 3);
+        let (sky, block) = smooth_blend([0, 0, 0], torch);
+        assert_eq!((sky, block), (0, 12));
     }
 
     /// Pomme's `compute_face_ao` neighbour triples (vanilla AdjacencyInfo),

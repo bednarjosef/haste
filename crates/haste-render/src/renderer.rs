@@ -17,6 +17,8 @@ use crate::mesher::{Mesher, SectionMesh};
 use crate::pipeline::{upload_atlas, Gpu};
 use crate::vertex::PackedVertex;
 
+mod textures;
+
 /// Camera for one frame (docs/INTERFACES.md FrameInput).
 #[derive(Clone, Copy, Debug)]
 pub struct Camera {
@@ -63,6 +65,9 @@ pub struct SkyState {
     pub dimension_has_sky: bool,
     pub fog_start: f32,
     pub fog_end: f32,
+    /// Whether the dark disc goes under the horizon this frame (vanilla
+    /// `SkyRenderer.shouldRenderDarkDisc`, see `sky::dark_disc`).
+    pub dark_disc: bool,
     /// The fog environment inputs (`FogRenderer.setupFog`/`computeFogColor`): what the camera
     /// is in, the player's effects, the dimension/biome attributes and the boss-overlay values.
     pub fog: crate::fog::FogInputs,

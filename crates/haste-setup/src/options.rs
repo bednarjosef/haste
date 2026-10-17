@@ -5,8 +5,8 @@
 //! Defaults I am not fully certain about, listed here per the brief:
 //! - `simulation_distance` 12 (vanilla's default simulation distance; some versions ship 10),
 //! - `max_fps` 120 (vanilla's default framerate limit; 260 means "unlimited" there),
-//! - `gui_scale` is clamped to 0..=4; vanilla added the 4 ("large") step only in recent
-//!   versions, older ones cap at 3.
+//! - `gui_scale` is stored as written, like vanilla's `Options.guiScale` (0 = auto, any
+//!   larger value is bounded by the window only when used: `Window.calculateScale`).
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -154,8 +154,13 @@ pub struct Options {
     pub fov: u8,
     /// 0.0..=1.0 (vanilla stores 0..=1 in current versions; pre-1.18 it was 0..=0.5).
     pub mouse_sensitivity: f32,
-    /// 0 = auto.
+    /// 0 = auto (vanilla: `Options.AUTO_GUI_SCALE`). Not clamped here: like vanilla's
+    /// `Options.guiScale`, the stored value is bounded against the real window only when
+    /// it is used (`Window.calculateScale`, `resolve_gui_scale` in the client).
     pub gui_scale: u8,
+    /// Vanilla's "Force Unicode Font" option (`Options.forceUnicodeFont`, default off). Also
+    /// rounds an odd GUI scale up to the next even one (`Window.calculateScale`).
+    pub force_unicode_font: bool,
     pub fullscreen: bool,
     pub vsync: bool,
     /// Vanilla's "View Bobbing" accessibility option (default on).
@@ -187,6 +192,7 @@ impl Default for Options {
             fov: 70,
             mouse_sensitivity: 0.5,
             gui_scale: 0,
+            force_unicode_font: false,
             fullscreen: false,
             vsync: true,
             bob_view: true,
@@ -211,7 +217,6 @@ impl Options {
         self.simulation_distance = self.simulation_distance.clamp(2, 32);
         self.fov = self.fov.clamp(30, 110);
         self.mouse_sensitivity = self.mouse_sensitivity.clamp(0.0, 1.0);
-        self.gui_scale = self.gui_scale.clamp(0, 4);
         self.fov_effect_scale = self.fov_effect_scale.clamp(0.0, 1.0);
         self.damage_tilt_strength = self.damage_tilt_strength.clamp(0.0, 1.0);
         self.gamma = self.gamma.clamp(0.0, 1.0);
@@ -263,6 +268,12 @@ impl Options {
             "guiScale" => {
                 if let Ok(v) = value.parse::<u8>() {
                     self.gui_scale = v;
+                }
+                true
+            }
+            "forceUnicodeFont" => {
+                if let Ok(v) = value.parse::<bool>() {
+                    self.force_unicode_font = v;
                 }
                 true
             }
@@ -486,6 +497,7 @@ mod tests {
             fov: 90,
             mouse_sensitivity: 0.25,
             gui_scale: 3,
+            force_unicode_font: true,
             fullscreen: true,
             vsync: false,
             bob_view: false,
@@ -552,7 +564,9 @@ fov = 70.0
         assert_eq!(opts.simulation_distance, 2);
         assert_eq!(opts.fov, 110);
         assert_eq!(opts.mouse_sensitivity, 1.0);
-        assert_eq!(opts.gui_scale, 4);
+        // The GUI scale is not clamped on load (vanilla keeps the stored value and bounds
+        // it against the window when used), so 9 survives for a 4K window.
+        assert_eq!(opts.gui_scale, 9);
         assert_eq!(opts.max_fps, 260);
         assert_eq!(opts.sound.master, 1.0);
         assert_eq!(opts.sound.music, 0.0);
@@ -602,6 +616,8 @@ fov = 70.0
         assert!((opts.gamma - 1.0).abs() < 1e-6);
         assert!(opts.apply_one("bobView", "false"));
         assert!(!opts.bob_view);
+        assert!(opts.apply_one("forceUnicodeFont", "true"));
+        assert!(opts.force_unicode_font);
         // Unknown keys are ignored, not fatal.
         assert!(!opts.apply_one("skipMultiplayerWarning", "true"));
         // Malformed values leave the field untouched.

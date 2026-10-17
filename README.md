@@ -68,7 +68,7 @@ downloaded or derived from Mojang's files stays in `cache/` (or `$HASTE_CACHE`).
 
 ## Progress
 
-**51 of 62 done, 10 partly done, 1 not started** (about 90 %, counting partly done as
+**51 of 63 done, 12 partly done, 0 not started** (about 90 %, counting partly done as
 half). The list is what a player needs to play Haste like the original game without noticing
 a difference; Phase 2 (mods) is not counted.
 
@@ -79,10 +79,10 @@ a difference; Phase 2 (mods) is not counted.
 | Launching and setup | `█████████░` | 9 | 2 | 0 |
 | Connecting to servers | `████████░░` | 3 | 2 | 0 |
 | World | `██████████` | 5 | 0 | 0 |
-| Rendering | `█████████░` | 14 | 3 | 1 |
+| Rendering | `█████████░` | 15 | 3 | 0 |
 | HUD and screens | `██████████` | 12 | 0 | 0 |
-| Playing | `█████████░` | 6 | 1 | 0 |
-| Sound | `████████░░` | 2 | 2 | 0 |
+| Playing | `█████████░` | 6 | 2 | 0 |
+| Sound | `██████░░░░` | 1 | 3 | 0 |
 
 ✅ done: works in the game today, checked against a real server.
 🟡 partly done: some of it works, but a player cannot use all of it yet.
@@ -100,7 +100,7 @@ a difference; Phase 2 (mods) is not counted.
 - ✅ Joining a server: from the server list or Direct Connection, or `haste --server host:port`
 - ✅ Languages: every language of the game, switched live from Options > Language
 - ✅ Keybind remapping: Options > Controls > Key Binds rebinds any key, saved in options.txt and kept across restarts (checked by script)
-- 🟡 Microsoft account login: `haste login` / `haste logout` run the device-code flow and store the account, untested end to end (needs a Microsoft app id)
+- 🟡 Microsoft account login: `haste login` / `haste logout` run the device-code flow, refresh the token and store the account; the whole chain is tested against a local mock of Microsoft's servers, a run with a real Microsoft app id is still to do
 - 🟡 Resource packs: the Resource Packs screen picks, orders and applies packs live, saved in options.txt; packs sent by servers download, are checked and applied above yours; the accept/decline prompt not yet
 
 </details>
@@ -111,8 +111,8 @@ a difference; Phase 2 (mods) is not counted.
 - ✅ Offline-mode vanilla and Fabric servers: join and stay connected on normal terrain, every packet decodes
 - ✅ Configuration phase, server transfers, cookies, resource pack answers
 - ✅ Item data: stacks decode and round-trip, and names, enchantments, damage, rarity and tool rules read into typed values; block breaking uses the held stack's `minecraft:tool` component and Efficiency, the attack strength delay its `minecraft:attack_speed` modifiers, and item use duration its `minecraft:consumable` (verified against vanilla's tick counts, `scripts/checks/item-data-check.sh`)
-- 🟡 Online-mode servers: encryption and session join need the Microsoft login above
-- 🟡 Signed chat (required by online-mode servers): message and command signing match vanilla's format (unit-tested); used once online mode works
+- 🟡 Online-mode servers: encryption, vanilla's session hash and the session join are done and unit-tested against Java's results; a live run needs the Microsoft login above
+- 🟡 Signed chat (required by online-mode servers): chat session, message signing and the seen-messages window match vanilla (unit-tested); used once online mode works
 
 </details>
 
@@ -128,7 +128,7 @@ a difference; Phase 2 (mods) is not counted.
 </details>
 
 <details>
-<summary><b>Rendering</b> — 14 of 18 done</summary>
+<summary><b>Rendering</b> — 15 of 18 done</summary>
 
 - ✅ Textured blocks and block models
 - ✅ Water and lava with flow direction and corner heights
@@ -144,10 +144,10 @@ a difference; Phase 2 (mods) is not counted.
 - ✅ Armour, held items, heads and elytra on mobs and players
 - ✅ Mobs and players: vanilla's models for all 91 mob types with babies, variants, sizes and states, default skins, name tags and shadows
 - ✅ Particles: the server's and the client's own (breaking, mining cracks, sprinting, landing, torches, fire, lava, portals, drips) with vanilla's motion, size and lifetime
-- 🟡 Smooth lighting and ambient occlusion: ported from vanilla, enclosed areas dark like vanilla; a small brightness difference in distant tree canopies remains
+- ✅ Smooth lighting and ambient occlusion: ported from vanilla, shaded in vanilla's colour space; forest scenes match the vanilla reference shots within about 3/255 per channel
 - 🟡 Performance: in the same window and spot as vanilla (1408x828, render distance 12) about 1.3x its frame rate and 1.7x less memory (807 MB against 1.35 GB); not yet compared with Sodium
-- 🟡 Block entities drawn: chests, ender chests, shulker boxes, signs, banners, heads, lecterns, enchanting tables, bells, decorated pots, conduits, campfire items, spawners, vaults, shelves and brushable blocks; beacon beams and end portals not yet
-- ⬜ Downloaded player skins and capes
+- 🟡 Block entities drawn: chests, ender chests, shulker boxes, signs, banners, heads, lecterns, enchanting tables with their turning book, bells, decorated pots, conduits, campfire items, spawners, vaults, shelves, brushable blocks, beacon beams, end portals and gateways and moving pistons; the newest ones not yet checked on screen
+- 🟡 Player skins and capes: vanilla's default skins, skins and capes downloaded from the profile, slim and wide arms, the skin layers and the cape's swing; not yet checked on screen
 
 </details>
 
@@ -171,7 +171,7 @@ These run as the game's own Java code inside Haste, with keyboard and mouse inpu
 </details>
 
 <details>
-<summary><b>Playing</b> — 6 of 7 done</summary>
+<summary><b>Playing</b> — 6 of 8 done</summary>
 
 - ✅ Walking, sprinting, sneaking, jumping, swimming, creative flight and fall damage, accepted by the vanilla server without corrections
 - ✅ Breaking and placing blocks, using items, attacking, pick block, hotbar (mouse wheel and 1-9)
@@ -179,15 +179,16 @@ These run as the game's own Java code inside Haste, with keyboard and mouse inpu
 - ✅ Game modes: survival, creative, spectator (through walls) and adventure
 - ✅ Screenshot key (F2): saves to the screenshots folder
 - ✅ Elytra flight: gliding started from the game, firework boost (the server sees a normal glide)
-- 🟡 Riding: vanilla seat positions, and steering a boat like vanilla (checked against the server); horses, pigs and striders not yet
+- 🟡 Riding: vanilla seat positions; steering boats, horses, pigs (carrot on a stick) and striders (warped fungus on a stick) like vanilla, boats and pigs checked against the server; striders on lava, the horse jump bar and the mount's health not yet
+- 🟡 Climbing ladders, vines and scaffolding: vanilla's climbing physics is in; connecting it to the game is in progress
 
 </details>
 
 <details>
-<summary><b>Sound</b> — 2 of 4 done</summary>
+<summary><b>Sound</b> — 1 of 4 done</summary>
 
-- ✅ 3D sound: distance falloff and stereo panning from the player's eye, entity sounds follow the entity
-- ✅ Sounds of your own footsteps, mining, breaking, placing and falling, with vanilla's step distance
+- ✅ Sounds of your own footsteps, mining, breaking, placing and falling, with vanilla's step distance and sound variants
+- 🟡 3D sound: distance falloff and stereo panning from the player's eye; entity sounds do not follow a moving entity yet
 - 🟡 Sound effects: the server's sounds play in the window (block, entity and stopped sounds, per-category volumes); not yet checked by ear
 - 🟡 Music: plays by situation (game, creative, underwater) with vanilla's pauses; not yet checked by ear
 

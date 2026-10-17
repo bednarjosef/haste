@@ -234,11 +234,12 @@ pub(crate) fn setup_anim(
 }
 
 /// `LivingEntityRenderer.isEntityUpsideDown` / `AvatarRenderer.isEntityUpsideDown`: a mob named
-/// `Dinnerbone` or `Grumm` (custom name) is drawn upside down; a player uses its profile name
-/// (the cape is shown by default, so the check is not gated on the model part here).
+/// `Dinnerbone` or `Grumm` (custom name) is drawn upside down; a player uses its profile name,
+/// and only while its cape part is shown.
 fn is_upside_down(e: &Entity) -> bool {
     if e.is_player_type {
-        e.nametag.as_deref().is_some_and(is_upside_down_name)
+        crate::avatar::ModelParts::of(&e.metadata).shown(crate::avatar::PlayerModelPart::Cape)
+            && e.nametag.as_deref().is_some_and(is_upside_down_name)
     } else {
         e.metadata
             .custom_name
