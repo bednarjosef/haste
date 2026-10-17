@@ -20,7 +20,7 @@ use haste_protocol::haste_core::model::EntityInstance;
 use haste_protocol::haste_core::{
     BlockPos, BlockStateId, ChunkPos, Direction, EntityId, Identifier, SectionPos,
 };
-use haste_protocol::{Account, ConnectOptions};
+use haste_protocol::ConnectOptions;
 use haste_render::{
     Camera, DimensionFog, FogInputs, FogType, FrameInput, FrameStats, LightmapFrame, Renderer,
     SkyState,
@@ -430,12 +430,8 @@ impl Session {
         if let Some(rd) = render_distance {
             options.render_distance = rd;
         }
-        let mut opts = ConnectOptions::new(
-            address.to_owned(),
-            Account::Offline {
-                username: username.to_owned(),
-            },
-        );
+        let join = rt.block_on(net::account::join_account(username))?;
+        let mut opts = ConnectOptions::new(address.to_owned(), join.account);
         // The saved render distance is what we advertise in client_information; the server's
         // own view distance (login packet) caps what we mesh below.
         opts.client_information.view_distance = options.render_distance as i8;
@@ -443,6 +439,7 @@ impl Session {
         // (vanilla's layout) and apply on top of the selection.
         opts.downloads_dir = Some(game_dir().join("downloads"));
         let mut driver: NetDriver = rt.block_on(NetDriver::connect(opts))?;
+        driver.chat.set_keys(join.keys);
         let server_packs: Vec<std::path::PathBuf> = driver
             .connection()
             .server_packs()

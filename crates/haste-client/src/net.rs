@@ -2078,6 +2078,8 @@ pub struct NetDriver {
     /// Packets the UI would use, seen while the HUD JVM was still starting (replayed by the
     /// game thread once the `Ui` exists; see `crate::ui::ui_handles`).
     ui_backlog: Vec<ClientboundPlay>,
+    /// Signed chat: the session, the last-seen window, signing outgoing `chat`.
+    pub chat: chat_session::ClientChat,
 }
 
 impl NetDriver {
@@ -2098,10 +2100,12 @@ impl NetDriver {
             login.dimension.clone(),
             particle_names,
         );
+        let chat = chat_session::ClientChat::new(conn.profile().uuid, None);
         Ok(Self {
             conn,
             login,
             session,
+            chat,
             out: Vec::new(),
             ui_backlog: Vec::new(),
         })
@@ -2164,6 +2168,7 @@ impl NetDriver {
             // is still starting the UI-bound packets are kept and replayed once it is up.
             let keep = ui.is_some() || crate::ui::ui_handles(&a.packet);
             let for_ui = keep.then(|| a.packet.clone());
+            self.chat.handle(&a.packet, &mut self.out);
             self.session
                 .apply(a.packet, world, entities, regs, &mut self.out);
             match (ui, for_ui) {
@@ -2207,7 +2212,8 @@ impl NetDriver {
     }
 
     fn flush(&mut self) -> anyhow::Result<()> {
-        for p in self.out.drain(..) {
+        for mut p in self.out.drain(..) {
+            self.chat.pack(&mut p);
             self.conn
                 .send(p)
                 .map_err(|e| anyhow::anyhow!("send: {e}"))?;
@@ -2216,7 +2222,9 @@ impl NetDriver {
     }
 }
 
+pub mod account;
 mod block_events;
+pub mod chat_session;
 mod vehicle;
 
 #[cfg(test)]
