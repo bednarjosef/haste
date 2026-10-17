@@ -18,6 +18,8 @@ use haste_core::Identifier;
 use crate::fog::FogData;
 use crate::{Camera, SkyState};
 
+pub mod dark_disc;
+
 const ATLAS_SIZE: u32 = 512;
 /// Cloud height in 26.3 (blocks).
 pub const CLOUD_HEIGHT: f32 = 192.33;
@@ -272,6 +274,10 @@ pub struct SkyRenderer {
     disc: wgpu::RenderPipeline,
     /// The sunrise/sunset fan (vanilla `renderSunriseAndSunset`).
     sunrise: wgpu::RenderPipeline,
+    /// The black bottom fan (vanilla `renderDarkDisc`), drawn while `dark_disc` is set.
+    dark_disc_pipeline: wgpu::RenderPipeline,
+    dark_disc_buffer: wgpu::Buffer,
+    dark_disc: bool,
     stars: wgpu::Buffer,
     star_vertices: u32,
     disc_buffer: wgpu::Buffer,
@@ -518,6 +524,28 @@ impl SkyRenderer {
             wgpu::BlendState::ALPHA_BLENDING,
             false,
         );
+        let dark_disc_pipeline = make(
+            "sky-dark-disc",
+            "vs_disc",
+            "fs_dark_disc",
+            &[Some(SkyVertex::LAYOUT)],
+            wgpu::BlendState::REPLACE,
+            false,
+        );
+        let dark_disc_list = dark_disc::dark_disc_positions().map(|pos| SkyVertex {
+            pos,
+            uv: [0.0; 2],
+            color: [1.0; 4],
+            rect: [0; 4],
+        });
+        let dark_disc_buffer = wgpu::util::DeviceExt::create_buffer_init(
+            device.as_ref(),
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("sky-dark-disc"),
+                contents: bytemuck::cast_slice(&dark_disc_list),
+                usage: wgpu::BufferUsages::VERTEX,
+            },
+        );
         let star_list = star_vertices();
         let stars = wgpu::util::DeviceExt::create_buffer_init(
             device.as_ref(),
@@ -558,6 +586,9 @@ impl SkyRenderer {
             clouds,
             disc,
             sunrise,
+            dark_disc_pipeline,
+            dark_disc_buffer,
+            dark_disc: false,
             stars,
             star_vertices: star_list.len() as u32,
             disc_buffer,
@@ -631,6 +662,7 @@ impl SkyRenderer {
             );
         }
         self.colors = colors;
+        self.dark_disc = kind == SkyKind::Overworld && sky.dark_disc;
         let rain = sky.rain.clamp(0.0, 1.0);
         let cam = camera.pos.as_vec3();
 
@@ -760,6 +792,12 @@ impl SkyRenderer {
                 pass.set_pipeline(&self.sunrise);
                 pass.set_vertex_buffer(0, self.sunrise_fan.slice(..));
                 pass.draw(0..self.sunrise_fan_vertices, 0..1);
+                calls += 1;
+            }
+            if self.dark_disc {
+                pass.set_pipeline(&self.dark_disc_pipeline);
+                pass.set_vertex_buffer(0, self.dark_disc_buffer.slice(..));
+                pass.draw(0..24, 0..1);
                 calls += 1;
             }
         } else {

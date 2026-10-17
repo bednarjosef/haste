@@ -362,6 +362,8 @@ pub struct ViewState {
     pub rain_fog_multiplier: f32,
     /// `ClientLevel.seaLevel` (the spawn info's; biome precipitation's snow line).
     pub sea_level: i32,
+    /// `ClientLevelData.getHorizonHeight` (the dark disc's threshold).
+    pub horizon_height: f64,
 }
 
 /// The per-tick part of the first-person hand: the held item, the light at the eye and this
@@ -645,6 +647,7 @@ impl Shared {
                 thunder_level: (0.0, 0.0),
                 rain_fog_multiplier: 0.0,
                 sea_level: 63,
+                horizon_height: 63.0,
             }),
             breaking: Mutex::new(Vec::new()),
             block_entity_lids: Mutex::new(Vec::new()),
@@ -1932,6 +1935,8 @@ fn tick_once(
         };
         view.rain_fog_multiplier += (target - view.rain_fog_multiplier) * 0.2;
         view.sea_level = s.sea_level;
+        view.horizon_height =
+            haste_render::sky::dark_disc::horizon_height(s.is_flat, s.dimension.min_y);
     }
     view.eye_height = s.player.eye_height();
     view.time_of_day = s.time_of_day.unwrap_or(6000);

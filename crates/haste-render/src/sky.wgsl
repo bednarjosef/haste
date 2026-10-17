@@ -133,6 +133,13 @@ fn fs_disc(in: DiscOut) -> @location(0) vec4<f32> {
     return vec4<f32>(mix(sky.sky_color.rgb, sky.fog_color.rgb, fog), 1.0);
 }
 
+@fragment
+fn fs_dark_disc(in: DiscOut) -> @location(0) vec4<f32> {
+    // Vanilla renderDarkDisc: the sky pipeline coloured black, fogged like the sky disc.
+    let fog = linear_fog_value(length(in.pos), 0.0, sky.fog_bands2.x);
+    return vec4<f32>(mix(vec3<f32>(0.0), sky.fog_color.rgb, fog), 1.0);
+}
+
 // ---- sunrise/sunset fan: translucent timeline colour, alpha ramping center to ring ----
 
 @vertex

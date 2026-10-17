@@ -155,3 +155,18 @@ fn moon_uvs_follow_vanilla_mirroring() {
     assert_eq!(uv_at(&sun, -30.0, -30.0), [0.0, 0.0]);
     assert_eq!(uv_at(&sun, 30.0, 30.0), [32.0, 32.0]);
 }
+
+#[test]
+fn dark_disc_below_the_horizon_out_of_water() {
+    use super::dark_disc::*;
+    assert_eq!(horizon_height(false, -64), 63.0);
+    assert_eq!(horizon_height(true, -64), -64.0);
+    assert!(should_render_dark_disc(62.9, 63.0, false));
+    assert!(!should_render_dark_disc(63.0, 63.0, false));
+    assert!(!should_render_dark_disc(40.0, 63.0, true));
+    let fan = dark_disc_positions();
+    assert!(fan.iter().all(|p| p[1] == -4.0));
+    // The ring starts at a = -180: x = 512, z = 0.
+    assert!((fan[1][0] - 512.0).abs() < 1e-3 && fan[1][2].abs() < 1e-3);
+    assert_eq!(fan[0], [0.0, -4.0, 0.0]);
+}
