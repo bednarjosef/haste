@@ -191,9 +191,10 @@ fn vs_celestial(v: VertexIn) -> VertexOut {
 @fragment
 fn fs_celestial(in: VertexOut) -> @location(0) vec4<f32> {
     if (in.rect.z == 0u) {
-        // Stars: plain quads at the star brightness.
+        // Stars: plain quads coloured (b, b, b, b) with the star brightness b, blended
+        // src-alpha/one (vanilla `RenderPipelines.STARS`, `BlendFunction.OVERLAY`): b * b.
         let b = sky.sunrise_dir.w;
-        return vec4<f32>(in.color.rgb * b, 1.0);
+        return vec4<f32>(in.color.rgb * b * b, 1.0);
     }
     // Additive with the texture's alpha (src alpha, one), like vanilla's sun and moon.
     let c = fetch(in.uv, in.rect);

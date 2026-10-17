@@ -21,6 +21,7 @@ pub mod particles;
 pub mod pipeline;
 pub mod renderer;
 pub mod sky;
+pub mod stars;
 pub mod timing;
 pub mod tint;
 pub mod vertex;

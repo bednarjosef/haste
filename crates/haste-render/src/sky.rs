@@ -5,8 +5,8 @@
 // The time-of-day curves follow minecraft.wiki "Daylight cycle": the celestial angle is
 // (2d + 0.5 - cos(pi d) / 2) / 3 with d = frac(time / 24000 - 0.25); sky brightness is
 // clamp(2 cos(2 pi angle) + 0.5); moon phase = day mod 8 (full moon first); default overworld
-// sky 0x78A7FF and fog 0xC0D8FF; Nether fog 0x330808; End sky tinted 0x282828. Sunrise colour,
-// star brightness and the horizon blend are approximations of the observed look.
+// sky 0x78A7FF and fog 0xC0D8FF; Nether fog 0x330808; End sky tinted 0x282828. The star
+// brightness is the day timeline's track (`stars.rs`).
 
 use std::sync::Arc;
 
@@ -234,8 +234,7 @@ pub fn sky_colors(sky: &SkyState, kind: SkyKind, view_distance: f32) -> SkyColor
             let s = (angle * std::f32::consts::TAU).sin();
             // The weather layers also set the star brightness to 0 (`WeatherAttributes`
             // `.set(STAR_BRIGHTNESS, 0)` applied by the levels).
-            let stars = (1.0 - (c * 2.0 + 0.25)).clamp(0.0, 1.0)
-                * 0.5
+            let stars = crate::stars::star_brightness(sky.time_of_day)
                 * (1.0 - rain_only)
                 * (1.0 - thunder);
             SkyColors {
