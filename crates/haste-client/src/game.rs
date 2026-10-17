@@ -387,16 +387,24 @@ pub struct FirstPersonView {
 
 impl FirstPersonView {
     /// The first-person hand for `item` in `world` at `eye`: the item held and the light at the
-    /// eye, sampled the same way entities are (`Renderer::sample_entity_lights`).
-    pub fn sample(world: &dyn BlockView, eye: DVec3, item: Option<RegistryIndex>) -> Self {
+    /// block containing the eye (`EntityRenderer.getPackedLightCoords` probes
+    /// `Entity.getLightProbePosition`, the eye position); block light is 15 while the player is
+    /// on fire (`EntityRenderer.getBlockLightLevel`).
+    pub fn sample(
+        world: &dyn BlockView,
+        eye: DVec3,
+        item: Option<RegistryIndex>,
+        on_fire: bool,
+    ) -> Self {
         let p = BlockPos::new(
             eye.x.floor() as i32,
-            (eye.y + 0.5).floor() as i32,
+            eye.y.floor() as i32,
             eye.z.floor() as i32,
         );
+        let block_light = if on_fire { 15 } else { world.block_light(p) };
         FirstPersonView {
             item,
-            light: (world.sky_light(p), world.block_light(p)),
+            light: (world.sky_light(p), block_light),
             attack: (0.0, 0.0),
             equip: (1.0, 1.0),
             x_bob: (0.0, 0.0),
@@ -1861,6 +1869,7 @@ fn tick_once(
     let first_person = if driver.session.player.game_mode == GameMode::Spectator {
         None
     } else {
+        let on_fire = driver.session.own_flags().on_fire || driver.session.screen_probe.in_fire;
         let p = &mut driver.session.player;
         let attack_speed = p.held_attack_speed();
         p.hand.tick(
@@ -2109,7 +2118,7 @@ mod tests {
             haste_core::Identifier::minecraft("entity/player/wide/steve"),
             false,
         );
-        let a = FirstPersonView::sample(&lit(), DVec3::ZERO, Some(RegistryIndex(5)));
+        let a = FirstPersonView::sample(&lit(), DVec3::ZERO, Some(RegistryIndex(5)), false);
         let mut b = a;
         b.item = None;
         assert_eq!(a, a);
@@ -2186,12 +2195,33 @@ mod tests {
             block: 7,
             asked: parking_lot::Mutex::new(Vec::new()),
         };
-        let v =
-            FirstPersonView::sample(&world, DVec3::new(3.2, 65.5, -7.8), Some(RegistryIndex(1)));
+        let v = FirstPersonView::sample(
+            &world,
+            DVec3::new(3.2, 65.5, -7.8),
+            Some(RegistryIndex(1)),
+            false,
+        );
         assert_eq!(v.item, Some(RegistryIndex(1)));
         assert_eq!(v.light, (12, 7));
-        // The eye at y = 65.5 samples y = 66 (eye.y + 0.5 floored), like entity light.
-        assert_eq!(world.asked.lock().clone(), vec![BlockPos::new(3, 66, -8)]);
+        // The eye at y = 65.5 samples the block containing it, y = 65
+        // (`Entity.getLightProbePosition` is the eye position, floored by `BlockPos.containing`),
+        // not the block above: in a 2-high tunnel the eye at feet + 1.62 is in the lit upper
+        // block and the hand must not take the ceiling's darkness.
+        assert_eq!(world.asked.lock().clone(), vec![BlockPos::new(3, 65, -8)]);
+    }
+
+    #[test]
+    fn first_person_sample_on_fire_forces_full_block_light() {
+        // `EntityRenderer.getBlockLightLevel`: 15 while on fire, sky light still from the world.
+        let world = LightWorld {
+            sky: 9,
+            block: 2,
+            asked: parking_lot::Mutex::new(Vec::new()),
+        };
+        let v = FirstPersonView::sample(&world, DVec3::new(0.5, 70.9, 0.5), None, true);
+        assert_eq!(v.light, (9, 15));
+        let v = FirstPersonView::sample(&world, DVec3::new(0.5, 70.9, 0.5), None, false);
+        assert_eq!(v.light, (9, 2));
     }
 
     /// A world that answers one sky/block light pair and records where it was asked.
