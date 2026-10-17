@@ -47,10 +47,17 @@ pub async fn join_account(username: &str) -> anyhow::Result<JoinAccount> {
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("reading {}", std::path::Path::new(&path).display()))?;
     let test: TestAccount = serde_json::from_str(&text).context("parsing the test account")?;
-    let certificates =
-        haste_setup::msa::player_certificates(&reqwest::Client::new(), &test.access_token)
-            .await
-            .context("fetching player certificates")?;
+    let endpoints = haste_setup::msa::MsaEndpoints {
+        services_base: haste_protocol::auth::services_host(),
+        ..haste_setup::msa::MsaEndpoints::from_env()
+    };
+    let certificates = haste_setup::msa::player_certificates(
+        &reqwest::Client::new(),
+        &endpoints,
+        &test.access_token,
+    )
+    .await
+    .context("fetching player certificates")?;
     let keys = haste_setup::msa::profile_key_pair(&certificates);
     tracing::info!(
         "test account {} ({}), chat keys {}",
