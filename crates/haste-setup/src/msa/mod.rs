@@ -482,7 +482,10 @@ pub async fn exchange_msa_token(
     })
 }
 
-pub use certificates::{parse_player_certificates, parse_rfc3339, pem_to_der, player_certificates};
+pub use certificates::{
+    parse_player_certificates, parse_rfc3339, parse_rfc3339_millis, pem_to_der,
+    player_certificates, profile_key_pair,
+};
 
 /// The token in `config.msa` needs a refresh once it is past `expires_at` (with a small margin
 /// so we never connect with a token about to lapse). `now` is a parameter so tests decide it.

@@ -982,6 +982,9 @@ pub struct Session {
     pub dimension: DimensionInfo,
     /// Counters.
     pub counters: NetCounters,
+    /// Profiles added by `player_info_update` since the game thread last took them, with their
+    /// `textures` property, for the skin manager (`game::skins`).
+    pub profiles: Vec<crate::game::skins::ProfileRequest>,
     /// Lid animations by block position, driven by `block_event` action 1 (chest and shulker
     /// box lids; entries only exist while the block is one of `lid_states`).
     pub lids: HashMap<BlockPos, LidAnim>,
@@ -1107,6 +1110,7 @@ impl Session {
     ) -> Self {
         Self {
             player: LocalPlayer::with_entity(entity_id, game_mode),
+            profiles: Vec::new(),
             counters: NetCounters {
                 got_login: true,
                 ..Default::default()
@@ -1781,7 +1785,10 @@ impl Session {
                     }
                 }
             }
-            P::PlayerInfoUpdate(u) => entities.player_info(&u.infos()),
+            P::PlayerInfoUpdate(u) => {
+                entities.player_info(&u.infos());
+                crate::game::skins::added_profiles(&u, &mut self.profiles);
+            }
             P::SetTime(t) => {
                 entities.set_world_age(t.world_age);
                 self.world_age = t.world_age;
@@ -2071,6 +2078,8 @@ pub struct NetDriver {
     /// Packets the UI would use, seen while the HUD JVM was still starting (replayed by the
     /// game thread once the `Ui` exists; see `crate::ui::ui_handles`).
     ui_backlog: Vec<ClientboundPlay>,
+    /// Signed chat: the session, the last-seen window, signing outgoing `chat`.
+    pub chat: chat_session::ClientChat,
 }
 
 impl NetDriver {
@@ -2091,10 +2100,12 @@ impl NetDriver {
             login.dimension.clone(),
             particle_names,
         );
+        let chat = chat_session::ClientChat::new(conn.profile().uuid, None);
         Ok(Self {
             conn,
             login,
             session,
+            chat,
             out: Vec::new(),
             ui_backlog: Vec::new(),
         })
@@ -2157,6 +2168,7 @@ impl NetDriver {
             // is still starting the UI-bound packets are kept and replayed once it is up.
             let keep = ui.is_some() || crate::ui::ui_handles(&a.packet);
             let for_ui = keep.then(|| a.packet.clone());
+            self.chat.handle(&a.packet, &mut self.out);
             self.session
                 .apply(a.packet, world, entities, regs, &mut self.out);
             match (ui, for_ui) {
@@ -2200,7 +2212,8 @@ impl NetDriver {
     }
 
     fn flush(&mut self) -> anyhow::Result<()> {
-        for p in self.out.drain(..) {
+        for mut p in self.out.drain(..) {
+            self.chat.pack(&mut p);
             self.conn
                 .send(p)
                 .map_err(|e| anyhow::anyhow!("send: {e}"))?;
@@ -2209,7 +2222,9 @@ impl NetDriver {
     }
 }
 
+pub mod account;
 mod block_events;
+pub mod chat_session;
 mod vehicle;
 
 #[cfg(test)]

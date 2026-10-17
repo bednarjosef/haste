@@ -18,6 +18,7 @@ use crate::pipeline::{upload_atlas, Gpu};
 use crate::vertex::PackedVertex;
 
 mod gui_pass;
+mod textures;
 
 /// Camera for one frame (docs/INTERFACES.md FrameInput).
 #[derive(Clone, Copy, Debug)]

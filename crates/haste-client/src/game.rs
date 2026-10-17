@@ -31,6 +31,8 @@ use parking_lot::{Condvar, Mutex, RwLock};
 mod block_entity_ticks;
 
 use crate::net::{NetDriver, WorldSink};
+
+pub mod skins;
 use crate::ui::Ui;
 use block_entity_ticks::{tick_model_anims, TickModelAnims, MODEL_RNG};
 
@@ -192,7 +194,12 @@ fn biome_has_precipitation(
 /// and head pitched to the interpolated look, and its pose's adjustments like any player. The
 /// limb swing the store drives for other entities is omitted (no per-tick walk phase for the
 /// local player yet).
-pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32) -> EntityInstance {
+pub fn player_instance(
+    id: EntityId,
+    view: &ViewState,
+    partial: f32,
+    skin: &haste_entity::skin::PlayerSkin,
+) -> EntityInstance {
     let pos = interpolate(view.prev_feet, view.feet, partial);
     let yaw = view.prev_look.0 + (view.look.0 - view.prev_look.0) * partial;
     let pitch = view.prev_look.1 + (view.look.1 - view.prev_look.1) * partial;
@@ -229,7 +236,7 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
                 .push(("head".into(), Vec3::new(pitch.to_radians(), 0.0, 0.0)));
         }
     }
-    EntityInstance {
+    let mut inst = EntityInstance {
         id,
         model: haste_entity::models::humanoid(false),
         pos,
@@ -240,9 +247,7 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
         pose,
         body: BodyTransform::default(),
         body_scale: Vec3::ONE,
-        // The skin servers send for other players is not synced for ourselves; the renderer's
-        // default skin for our UUID is what vanilla shows without a downloaded skin.
-        skin: Some(haste_render::default_skin(uuid).0),
+        skin: None,
         nametag: None,
         below_name: None,
         // `AvatarRenderer` passes shadowRadius 0.5 (LivingEntityRenderer, player scale 1).
@@ -262,7 +267,9 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
         hands: [None, None],
         equipment: Vec::new(),
         head_item: None,
-    }
+    };
+    skins::dress_local(&mut inst, skin, view, partial);
+    inst
 }
 
 /// What the render thread needs each frame, copied out under a short lock.
@@ -347,6 +354,8 @@ pub struct ViewState {
     pub look: (f32, f32),
     /// Feet positions bracketing the last tick (like `prev_eye`/`eye`, for the own model).
     pub prev_feet: DVec3,
+    /// Our cape's trailing point (`ClientAvatarState`'s cloak), ticked with the feet.
+    pub cloak: haste_entity::avatar::Cloak,
     /// Body pose metadata for the own model (`None`: the physics pose only knows standing,
     /// crouching and swimming).
     pub pose: Option<haste_core::entity::Pose>,
@@ -442,13 +451,18 @@ impl FirstPersonView {
         self.y_bob = hand.y_bob();
     }
 
-    /// The renderer's first-person hand for this view drawn with `skin` (the connection's
-    /// fixed skin): since the skin never changes, two views that compare equal produce equal
-    /// hands, so comparing the views is the whole "changed?" check.
-    pub fn with_skin(&self, skin: &(Identifier, bool)) -> haste_render::FirstPerson {
+    /// The renderer's first-person hand for this view drawn with `skin` and, when `sleeve`,
+    /// its right sleeve: two equal views with the same skin produce equal hands, so the
+    /// caller's "changed?" check compares the view and the skin.
+    pub fn with_skin(
+        &self,
+        skin: &haste_entity::skin::PlayerSkin,
+        sleeve: bool,
+    ) -> haste_render::FirstPerson {
         haste_render::FirstPerson {
-            skin: Some(skin.0.clone()),
-            slim: skin.1,
+            skin: Some(skin.body.clone()),
+            slim: skin.model.is_slim(),
+            sleeve,
             item: self.item,
             light: self.light,
             attack: pair(self.attack),
@@ -534,10 +548,8 @@ pub struct Shared {
     pub stop: AtomicBool,
     /// Why the connection ended, once it has.
     pub closed: Mutex<Option<String>>,
-    /// The skin the first-person arm is drawn with and whether it is the slim model (the local
-    /// player's default skin for its profile UUID, `haste_render::default_skin`); set once at
-    /// join, it never changes during a connection.
-    pub skin: (Identifier, bool),
+    /// The skin manager: profiles' skins and capes, downloaded off-thread (`skins`).
+    pub skins: Mutex<skins::SkinManager>,
     /// The HUD and chat (ui.rs): set by the game thread once the JVM has started and
     /// [`Ui::joined`] ran; the render thread clones it per frame ([`Ui`] is cheap to clone).
     pub ui: Mutex<Option<Ui>>,
@@ -615,7 +627,7 @@ impl Shared {
         entities: EntityStore,
         view_distance: i32,
         particles: haste_render::Particles,
-        skin: (Identifier, bool),
+        skins: skins::SkinManager,
         block_entity_names: Vec<Identifier>,
         biome_climates: Vec<haste_render::BiomeClimate>,
         options: haste_setup::options::Options,
@@ -662,6 +674,7 @@ impl Shared {
                 prev_look: (0.0, 0.0),
                 look: (0.0, 0.0),
                 prev_feet: DVec3::ZERO,
+                cloak: Default::default(),
                 pose: None,
                 screen: crate::screen_effects::ViewEffects::default(),
                 lightmap_flicker: 0.0,
@@ -690,7 +703,7 @@ impl Shared {
             sound: Mutex::new(None),
             stop: AtomicBool::new(false),
             closed: Mutex::new(None),
-            skin,
+            skins: Mutex::new(skins),
             ui: Mutex::new(None),
             hud_failed: AtomicBool::new(false),
             hud_enabled: AtomicBool::new(true),
@@ -1043,6 +1056,8 @@ fn drain_packets(
     };
     let ui = shared.ui.lock().clone();
     driver.receive(&mut tracked, &mut *entities, ui.as_ref())?;
+    drop(entities);
+    skins::request_profiles(&shared.skins, &mut driver.session.profiles);
     let mut dirty = world.take_dirty_sections();
     if !dirty.is_empty() {
         shared.dirty.lock().append(&mut dirty);
@@ -1612,6 +1627,8 @@ fn tick_once(
     // (sneaking), so the old feet are the last view's, not the eye minus its height.
     let feet = s.player.state.pos;
     view.prev_feet = if view.has_position { view.feet } else { feet };
+    let prev_feet = view.prev_feet;
+    view.cloak.tick(prev_feet);
     view.prev_eye = prev_eye;
     view.eye = eye;
     view.prev_look = (prev_yaw, prev_pitch);
@@ -1824,23 +1841,22 @@ mod tests {
 
     #[test]
     fn first_person_view_change_detection() {
-        // The skin is fixed for a connection, so view equality is the whole "did the hand
-        // change?" check: equal views produce equal hands, differing ones differing hands.
-        let skin = (
-            haste_core::Identifier::minecraft("entity/player/wide/steve"),
-            false,
-        );
+        // With the skin fixed, view equality is the whole "did the hand change?" check:
+        // equal views produce equal hands, differing ones differing hands.
+        let skin = haste_entity::skin::steve();
+        let skin = &*skin;
         let a = FirstPersonView::sample(&lit(), DVec3::ZERO, Some(RegistryIndex(5)), false);
         let mut b = a;
         b.item = None;
         assert_eq!(a, a);
         assert_ne!(a, b);
-        let ha = a.with_skin(&skin);
-        let hb = b.with_skin(&skin);
-        assert_eq!(ha, a.with_skin(&skin));
+        let ha = a.with_skin(skin, true);
+        let hb = b.with_skin(skin, true);
+        assert_eq!(ha, a.with_skin(skin, true));
         assert_ne!(ha, hb);
-        assert_eq!(ha.skin, Some(skin.0.clone()));
+        assert_eq!(ha.skin, Some(skin.body.clone()));
         assert!(!ha.slim);
+        assert!(ha.sleeve);
         assert_eq!(ha.item, Some(RegistryIndex(5)));
         // Sampled at full sky light.
         assert_eq!(ha.light, (15, 0));
@@ -1848,7 +1864,7 @@ mod tests {
         let mut c = a;
         c.light = (4, 7);
         assert_ne!(a, c);
-        assert_ne!(ha, c.with_skin(&skin));
+        assert_ne!(ha, c.with_skin(skin, true));
     }
 
     /// A world at full sky light, for sampling the hand's light.
@@ -1864,8 +1880,10 @@ mod tests {
     fn the_view_carries_the_hand_animation_to_the_renderer() {
         // The per-tick pairs go through to the renderer's hand unchanged, so a swinging hand
         // (or a dipping equip progress, or the walk bob) is a different hand each tick.
-        let skin = (
-            haste_core::Identifier::minecraft("entity/player/wide/steve"),
+        let skin = haste_entity::skin::PlayerSkin::new(
+            haste_core::Identifier::minecraft("entity/player/slim/steve"),
+            None,
+            haste_entity::skin::PlayerModelType::Slim,
             true,
         );
         let mut hand = crate::hand::Hand::new();
@@ -1883,7 +1901,7 @@ mod tests {
             );
         }
         v.with_hand(&hand);
-        let moving = v.with_skin(&skin);
+        let moving = v.with_skin(&skin, true);
         // The skin's slim arm is passed through.
         assert!(moving.slim);
         // The swing is `SwingState.ticks / 6` through: 0 on the attack tick, 1/6 on the next.
@@ -1910,7 +1928,7 @@ mod tests {
         let mut next = v;
         next.with_hand(&hand);
         assert_ne!(next, v);
-        assert_ne!(next.with_skin(&skin), moving);
+        assert_ne!(next.with_skin(&skin, true), moving);
     }
 
     #[test]

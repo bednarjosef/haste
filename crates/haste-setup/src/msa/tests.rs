@@ -146,6 +146,27 @@ fn parses_rfc3339_times() {
 }
 
 #[test]
+fn parses_rfc3339_milliseconds() {
+    assert_eq!(
+        parse_rfc3339_millis("2025-06-15T12:30:45.123Z").unwrap(),
+        1749990645123
+    );
+    assert_eq!(
+        parse_rfc3339_millis("2025-06-15T12:30:45.1Z").unwrap(),
+        1749990645100
+    );
+    assert_eq!(
+        parse_rfc3339_millis("2025-06-15T12:30:45.123999Z").unwrap(),
+        1749990645123
+    );
+    assert_eq!(
+        parse_rfc3339_millis("2025-06-15T12:30:45Z").unwrap(),
+        1749990645000
+    );
+    assert_eq!(parse_rfc3339("1969-12-31T23:59:59.500Z").unwrap(), -1);
+}
+
+#[test]
 fn parses_player_certificates_response() {
     // shape from minecraft.wiki "Mojang API" / "Microsoft authentication"; keys are fake PEM
     // ("MIIEvgAB" -> 30 82 04 be 00 01, "MFwwDQYD" -> 30 5c 30 0d 06 03)
@@ -168,6 +189,18 @@ fn parses_player_certificates_response() {
     );
     assert_eq!(c.expires_at, Some(1751328000));
     assert_eq!(c.refreshed_after, Some(1749990645));
+    // the milliseconds survive: the chat key's signature covers them
+    assert_eq!(c.expires_at_millis, Some(1751328000000));
+    assert_eq!(c.refreshed_after_millis, Some(1749990645123));
+    let keys = profile_key_pair(&c).unwrap();
+    assert_eq!(keys.expires_at_millis, 1751328000000);
+    assert_eq!(keys.refreshed_after_millis, 1749990645123);
+    assert_eq!(
+        keys.key_signature,
+        vec![0x01, 0x02, 0x03, 0x04, 0x05],
+        "v2, not v1"
+    );
+    assert_eq!(keys.public_key_der, c.public_key_der);
     // V1 signature may be absent on newer accounts; empty times are tolerated
     let json_min = r#"{
         "keyPair": {
@@ -179,6 +212,7 @@ fn parses_player_certificates_response() {
     assert!(c.public_key_signature.is_empty());
     assert_eq!(c.expires_at, None);
     assert_eq!(c.refreshed_after, None);
+    assert!(profile_key_pair(&c).is_none(), "no expiry: nothing to sign");
     // bad base64 in a signature is an error
     let json_bad = json.replace("3q2+7w==", "!!!not base64!!!");
     assert!(parse_player_certificates(&json_bad).is_err());
@@ -193,6 +227,7 @@ fn certificate_refresh_decisions_with_explicit_now() {
         public_key_signature_v2: vec![4],
         expires_at: Some(1751328000),
         refreshed_after: Some(1749990645),
+        ..PlayerCertificates::default()
     };
     let now: i64 = 1749990000; // 2025-06-15T12:20:00Z, an hour before refreshedAfter
     assert!(!certificates_need_refresh(&Some(certs.clone()), now));
@@ -242,6 +277,7 @@ fn certificates_roundtrip_through_toml_config() {
         public_key_signature_v2: vec![0x01, 0x02, 0x03, 0x04, 0x05],
         expires_at: Some(1751328000),
         refreshed_after: Some(1749990645),
+        ..PlayerCertificates::default()
     };
     let cfg = crate::config::Config {
         player_certificates: Some(certs),
