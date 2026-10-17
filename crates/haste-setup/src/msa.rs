@@ -15,7 +15,6 @@ const XBL_AUTH_URL: &str = "https://user.auth.xboxlive.com/user/authenticate";
 const XSTS_AUTH_URL: &str = "https://xsts.auth.xboxlive.com/xsts/authorize";
 const MC_LOGIN_URL: &str = "https://api.minecraftservices.com/authentication/login_with_xbox";
 const MC_PROFILE_URL: &str = "https://api.minecraftservices.com/minecraft/profile";
-const MC_CERTIFICATES_URL: &str = "https://api.minecraftservices.com/player/certificates";
 
 /// Refresh a stored access token this many seconds before it actually expires.
 const TOKEN_EXPIRY_MARGIN_SECS: i64 = 60;
@@ -419,6 +418,13 @@ pub fn pem_to_der(pem: &str) -> anyhow::Result<Vec<u8>> {
 /// date crate. Fractional seconds are truncated; the offset must be whole minutes (the values
 /// Mojang sends are UTC with milliseconds, but inputs with offsets are handled too).
 pub fn parse_rfc3339(s: &str) -> anyhow::Result<i64> {
+    Ok(parse_rfc3339_millis(s)?.div_euclid(1000))
+}
+
+/// [`parse_rfc3339`] in unix milliseconds (fractions below a millisecond truncated), as
+/// Java's `Instant.parse(..).toEpochMilli()` gives: the chat key's signed payload carries the
+/// expiry in milliseconds, so the seconds are not enough there.
+pub fn parse_rfc3339_millis(s: &str) -> anyhow::Result<i64> {
     let bytes = s.as_bytes();
     let bad = || anyhow!("not an RFC 3339 time: {s:?}");
     anyhow::ensure!(bytes.len() >= 20, "{}", bad());
@@ -455,15 +461,22 @@ pub fn parse_rfc3339(s: &str) -> anyhow::Result<i64> {
         "{}",
         bad()
     );
-    // optional fractional seconds: .fff... (truncated)
+    // optional fractional seconds: .fff... (truncated to milliseconds)
     let mut i = 19;
+    let mut millis = 0i64;
     if bytes.get(i) == Some(&b'.') {
         let start = i + 1;
         i = start;
         while i < bytes.len() && bytes[i].is_ascii_digit() {
+            if i - start < 3 {
+                millis = millis * 10 + i64::from(bytes[i] - b'0');
+            }
             i += 1;
         }
         anyhow::ensure!(i > start, "{}", bad());
+        for _ in (i - start)..3 {
+            millis *= 10;
+        }
     }
     // offset: Z / z / ±hh:mm
     let mut offset_secs = 0i64;
@@ -490,7 +503,7 @@ pub fn parse_rfc3339(s: &str) -> anyhow::Result<i64> {
     // days since 1970-01-01 (civil-from-days, valid for any year i64 can hold)
     let days = days_from_civil(y, mo, d);
     let secs = days * 86400 + h * 3600 + mi * 60 + sec - offset_secs;
-    Ok(secs)
+    Ok(secs * 1000 + millis)
 }
 
 /// Days since 1970-01-01 for a civil (year, month, day); Howard Hinnant's algorithm.
@@ -521,23 +534,64 @@ pub fn parse_player_certificates(json: &str) -> anyhow::Result<PlayerCertificate
             .map_err(|e| anyhow!("decoding publicKeySignatureV2: {e}"))?,
         expires_at: None,
         refreshed_after: None,
+        expires_at_millis: None,
+        refreshed_after_millis: None,
     };
     if !v.expires_at.is_empty() {
-        certs.expires_at = Some(parse_rfc3339(&v.expires_at)?);
+        let ms = parse_rfc3339_millis(&v.expires_at)?;
+        certs.expires_at = Some(ms.div_euclid(1000));
+        certs.expires_at_millis = Some(ms);
     }
     if !v.refreshed_after.is_empty() {
-        certs.refreshed_after = Some(parse_rfc3339(&v.refreshed_after)?);
+        let ms = parse_rfc3339_millis(&v.refreshed_after)?;
+        certs.refreshed_after = Some(ms.div_euclid(1000));
+        certs.refreshed_after_millis = Some(ms);
     }
     Ok(certs)
 }
 
-/// Minecraft access token -> player profile key pair for chat signing (POST, empty body).
+/// The chat key pair protocol signs with, from the certificates: the v2 signature (the one
+/// vanilla's authlib reads as `publicKeySignature`) and the expiry in milliseconds. `None`
+/// when the response lacked a v2 signature or an expiry.
+pub fn profile_key_pair(c: &PlayerCertificates) -> Option<haste_protocol::ProfileKeyPair> {
+    let expires_at_millis = c.expires_at_millis.or(c.expires_at.map(|s| s * 1000))?;
+    if c.public_key_signature_v2.is_empty() {
+        return None;
+    }
+    Some(haste_protocol::ProfileKeyPair {
+        private_key_der: c.private_key_der.clone(),
+        public_key_der: c.public_key_der.clone(),
+        key_signature: c.public_key_signature_v2.clone(),
+        expires_at_millis,
+        refreshed_after_millis: c
+            .refreshed_after_millis
+            .or(c.refreshed_after.map(|s| s * 1000))
+            .unwrap_or(expires_at_millis),
+    })
+}
+
+/// Minecraft access token -> player profile key pair for chat signing (POST, empty body), on
+/// the services host (`haste_protocol::auth::services_host`: Mojang's unless
+/// `HASTE_SERVICES_HOST` points at a local fake API).
 pub async fn player_certificates(
     client: &reqwest::Client,
     mc_access_token: &str,
 ) -> anyhow::Result<PlayerCertificates> {
+    let url = format!(
+        "{}/player/certificates",
+        haste_protocol::auth::services_host()
+    );
+    player_certificates_at(client, &url, mc_access_token).await
+}
+
+/// [`player_certificates`] against an explicit URL.
+pub async fn player_certificates_at(
+    client: &reqwest::Client,
+    url: &str,
+    mc_access_token: &str,
+) -> anyhow::Result<PlayerCertificates> {
     let resp = client
-        .post(MC_CERTIFICATES_URL)
+        .post(url)
         .bearer_auth(mc_access_token)
         .body(String::new())
         .send()
@@ -759,6 +813,38 @@ mod tests {
     }
 
     #[test]
+    fn parses_rfc3339_milliseconds() {
+        assert_eq!(
+            parse_rfc3339_millis("2025-06-15T12:30:45.123Z").unwrap(),
+            1749990645123
+        );
+        assert_eq!(
+            parse_rfc3339_millis("2025-06-15T12:30:45.1Z").unwrap(),
+            1749990645100
+        );
+        assert_eq!(
+            parse_rfc3339_millis("2025-06-15T12:30:45.123999Z").unwrap(),
+            1749990645123
+        );
+        assert_eq!(
+            parse_rfc3339_millis("2025-06-15T12:30:45Z").unwrap(),
+            1749990645000
+        );
+        assert_eq!(parse_rfc3339("1969-12-31T23:59:59.500Z").unwrap(), -1);
+    }
+
+    #[test]
+    fn certificates_url_defaults_to_mojang() {
+        assert_eq!(
+            format!(
+                "{}/player/certificates",
+                haste_protocol::auth::MOJANG_SERVICES_HOST
+            ),
+            "https://api.minecraftservices.com/player/certificates"
+        );
+    }
+
+    #[test]
     fn parses_rfc3339_times() {
         assert_eq!(parse_rfc3339("2025-06-15T12:30:45Z").unwrap(), 1749990645);
         // fractional seconds are truncated
@@ -812,6 +898,18 @@ mod tests {
         );
         assert_eq!(c.expires_at, Some(1751328000));
         assert_eq!(c.refreshed_after, Some(1749990645));
+        // the milliseconds survive: the chat key's signature covers them
+        assert_eq!(c.expires_at_millis, Some(1751328000000));
+        assert_eq!(c.refreshed_after_millis, Some(1749990645123));
+        let keys = profile_key_pair(&c).unwrap();
+        assert_eq!(keys.expires_at_millis, 1751328000000);
+        assert_eq!(keys.refreshed_after_millis, 1749990645123);
+        assert_eq!(
+            keys.key_signature,
+            vec![0x01, 0x02, 0x03, 0x04, 0x05],
+            "v2, not v1"
+        );
+        assert_eq!(keys.public_key_der, c.public_key_der);
         // V1 signature may be absent on newer accounts; empty times are tolerated
         let json_min = r#"{
             "keyPair": {
@@ -823,6 +921,7 @@ mod tests {
         assert!(c.public_key_signature.is_empty());
         assert_eq!(c.expires_at, None);
         assert_eq!(c.refreshed_after, None);
+        assert!(profile_key_pair(&c).is_none(), "no expiry: nothing to sign");
         // bad base64 in a signature is an error
         let json_bad = json.replace("3q2+7w==", "!!!not base64!!!");
         assert!(parse_player_certificates(&json_bad).is_err());
@@ -837,6 +936,7 @@ mod tests {
             public_key_signature_v2: vec![4],
             expires_at: Some(1751328000),
             refreshed_after: Some(1749990645),
+            ..PlayerCertificates::default()
         };
         let now: i64 = 1749990000; // 2025-06-15T12:20:00Z, an hour before refreshedAfter
         assert!(!certificates_need_refresh(&Some(certs.clone()), now));
@@ -886,6 +986,7 @@ mod tests {
             public_key_signature_v2: vec![0x01, 0x02, 0x03, 0x04, 0x05],
             expires_at: Some(1751328000),
             refreshed_after: Some(1749990645),
+            ..PlayerCertificates::default()
         };
         let cfg = crate::config::Config {
             player_certificates: Some(certs),
