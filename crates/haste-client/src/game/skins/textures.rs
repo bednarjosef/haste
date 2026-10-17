@@ -26,6 +26,7 @@ pub struct ProfileTextures {
 }
 
 impl ProfileTextures {
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.skin.is_none() && self.cape.is_none() && self.elytra.is_none()
     }

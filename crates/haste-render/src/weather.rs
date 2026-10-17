@@ -6,6 +6,8 @@
 
 use std::sync::Arc;
 
+use crate::java_random::JavaRandom;
+
 /// The weather radius option's default and fancy value (vanilla `Options.weatherRadius`,
 /// `IntRange(3, 10)`; the fast preset sets 5). Columns are drawn in a square of this half
 /// extent around the camera's block.
@@ -653,41 +655,6 @@ impl WeatherRenderer {
     }
 }
 
-/// The vanilla bolt's random (the LCG `LightningBoltRenderer` seeds from the bolt's seed).
-struct BoltRandom(u64);
-
-/// The Java LCG's multiplier, 25214903917 (0x5DEECE66D).
-const LCG_MULTIPLIER: u64 = 25_214_903_917;
-/// The Java LCG's increment.
-const LCG_INCREMENT: u64 = 11;
-/// The Java LCG's 48-bit mask.
-const LCG_MASK: u64 = (1u64 << 48) - 1;
-
-impl BoltRandom {
-    fn next_i32(&mut self, bits: u32) -> i32 {
-        self.0 = (self
-            .0
-            .wrapping_mul(LCG_MULTIPLIER)
-            .wrapping_add(LCG_INCREMENT))
-            & LCG_MASK;
-        (self.0 >> (48 - bits)) as i32
-    }
-
-    /// `nextInt(bound)` (bounds 11 and 31 are not powers of two: the rejection path).
-    fn next_int(&mut self, bound: i32) -> i32 {
-        if bound & (bound - 1) == 0 {
-            return (((bound as i64) * (self.next_i32(31) as i64)) >> 31) as i32;
-        }
-        loop {
-            let sample = self.next_i32(31);
-            let modulo = sample % bound;
-            if sample - modulo + (bound - 1) >= 0 {
-                return modulo;
-            }
-        }
-    }
-}
-
 /// One bolt's geometry (vanilla `LightningBoltRenderer.submit`): the segment offsets walk
 /// down from a seeded random, then for each of the 4 layers each of the 3 branches draws
 /// four quads per segment. The bolt spans y 0..128 (8 segments of 16) at the entity's
@@ -696,7 +663,7 @@ fn push_lightning(out: &mut Vec<LightningVertex>, bolt: &LightningBolt) {
     let mut x_offsets = [0i32; 8];
     let mut z_offsets = [0i32; 8];
     let (mut x_offset, mut z_offset) = (0i32, 0i32);
-    let mut random = BoltRandom(bolt.seed);
+    let mut random = JavaRandom(bolt.seed);
     for i in (0..8).rev() {
         x_offsets[i] = x_offset;
         z_offsets[i] = z_offset;
@@ -705,7 +672,7 @@ fn push_lightning(out: &mut Vec<LightningVertex>, bolt: &LightningBolt) {
     }
     let (final_x, final_z) = (x_offset, z_offset);
     for layer in 0..4 {
-        let mut randomx = BoltRandom(bolt.seed);
+        let mut randomx = JavaRandom(bolt.seed);
         for branch in 0..3 {
             let is_trunk = branch == 0;
             let branch_start = 7 - branch;

@@ -437,7 +437,7 @@ pub fn fog_value(spherical: f32, cylindrical: f32, fog: &FogData) -> f32 {
 /// keyframes plus the wrap segment from the last keyframe back to the first (vanilla
 /// `KeyframeTrackSampler`: at a keyframe tick the keyframe's value, between them linear by
 /// tick, `ticks` taken mod the period).
-fn timeline_lerp<T, L>(keyframes: &[(i32, T)], ticks: i64, lerp: L) -> T
+pub(crate) fn timeline_lerp<T, L>(keyframes: &[(i32, T)], ticks: i64, lerp: L) -> T
 where
     T: Copy,
     L: Fn(T, T, f32) -> T,

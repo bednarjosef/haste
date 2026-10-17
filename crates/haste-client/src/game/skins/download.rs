@@ -13,6 +13,8 @@ use sha1::{Digest as _, Sha1};
 pub enum TextureType {
     Skin,
     Cape,
+    // Profile elytra textures are parsed but not downloaded yet.
+    #[allow(dead_code)]
     Elytra,
 }
 

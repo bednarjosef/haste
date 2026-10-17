@@ -3,12 +3,13 @@
 //! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
 //! Every constant, where it comes from and how sure we are of it is listed in `NOTES.md`.
 //!
-//! Layout: [`collision`] (pure AABB sweep + step-up), [`movement`] (the tick), [`fluids`] (water
-//! and lava), [`flying`] (creative flight), [`elytra`] (gliding), [`attributes`], [`replay`]
+//! Layout: [`collision`] (pure AABB sweep + step-up), [`movement`] (the tick), [`climbing`]
+//! (ladders and vines), [`fluids`] (water and lava), [`flying`] (creative flight), [`elytra`] (gliding), [`attributes`], [`replay`]
 //! (trace replay harness), [`testing`] (in-memory world for tests).
 
 pub mod attributes;
 pub mod block_effects;
+pub mod climbing;
 pub mod collision;
 pub mod elytra;
 pub mod fluids;
@@ -24,9 +25,10 @@ use haste_core::{Aabb, BlockStateId, DVec3};
 use serde::{Deserialize, Serialize};
 
 pub use attributes::{PlayerAttributes, Pose};
+pub use climbing::{on_climbable, ClimbableBlocks, NoClimbables};
 pub use collision::{collide, collide_with_step};
 pub use elytra::{effective_gravity, glide_velocity, look_angle};
-pub use movement::tick;
+pub use movement::{tick, tick_with};
 
 /// The local player's physics state. Positions/velocities are f64 like vanilla; angles f32.
 #[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
