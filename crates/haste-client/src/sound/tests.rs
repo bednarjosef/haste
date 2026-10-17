@@ -395,7 +395,7 @@ fn teleport_resets_the_step_accumulator() {
 /// factors apart.
 #[test]
 fn mining_hit_and_break_volume_pitch_factors() {
-    let own = OwnBlockSounds::new();
+    let mut own = OwnBlockSounds::new();
     let mut metal = stone_type();
     metal.volume = 1.0;
     metal.pitch = 1.5;
@@ -416,7 +416,7 @@ fn mining_hit_and_break_volume_pitch_factors() {
 /// "no sound" event (`intentionally_empty`) plays nothing.
 #[test]
 fn place_and_fall_factors_and_the_empty_event() {
-    let own = OwnBlockSounds::new();
+    let mut own = OwnBlockSounds::new();
     let mut wool = stone_type();
     wool.volume = 0.8;
     wool.pitch = 1.2;

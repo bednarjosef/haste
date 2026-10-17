@@ -1,6 +1,7 @@
 //! The local player's own block sounds (footsteps, mining, breaking, placing, falling).
 
 use glam::DVec3;
+use haste_audio::random::LegacyRandom;
 
 use super::{PlayRequest, SoundPos, SoundRef, SoundRequest};
 
@@ -42,6 +43,10 @@ pub struct OwnBlockSounds {
     move_dist: f32,
     /// Distance at which the next step plays (vanilla `nextStep`).
     next_step: f32,
+    /// `ClientLevel.random`: `playLocalSound` seeds each sound instance with its
+    /// `nextLong()`, so footsteps and hits pick a different file each time instead of
+    /// always the same one.
+    random: LegacyRandom,
 }
 
 /// `SoundSource.PLAYERS`, the category vanilla's `Player.getSoundSource()`
@@ -55,6 +60,7 @@ impl OwnBlockSounds {
         Self {
             move_dist: 0.0,
             next_step: 1.0,
+            random: LegacyRandom::new(unseeded()),
         }
     }
 
@@ -78,7 +84,9 @@ impl OwnBlockSounds {
             self.next_step = self.move_dist as i32 as f32 + 1.0;
             if let Some(t) = supporting {
                 // Entity.playStepSound: step at volume*0.15, pitch unchanged; PLAYER source.
+                let seed = self.random.next_long();
                 play_event(
+                    seed,
                     &t.step_sound,
                     CATEGORY_PLAYERS,
                     player_pos,
@@ -98,13 +106,14 @@ impl OwnBlockSounds {
 
     /// A block break we predicted (the moment the block goes for us).
     pub fn block_broken(
-        &self,
+        &mut self,
         pos: DVec3,
         t: &haste_data::BlockSoundType,
         requests: &mut Vec<SoundRequest>,
     ) {
         // LevelEventHandler case 2001: break at (v+1)/2, pitch*0.8, BLOCKS source.
         play_event(
+            self.random.next_long(),
             &t.break_sound,
             CATEGORY_BLOCKS,
             pos,
@@ -116,13 +125,14 @@ impl OwnBlockSounds {
 
     /// The first hit of mining a block (start tick only).
     pub fn mining_hit(
-        &self,
+        &mut self,
         pos: DVec3,
         t: &haste_data::BlockSoundType,
         requests: &mut Vec<SoundRequest>,
     ) {
         // ClientLevel.playBreakingSound: hit at (v+1)/8, pitch*0.5, BLOCKS source.
         play_event(
+            self.random.next_long(),
             &t.hit_sound,
             CATEGORY_BLOCKS,
             pos,
@@ -134,13 +144,14 @@ impl OwnBlockSounds {
 
     /// A block placement we initiated (`use_item_on` with a block item).
     pub fn block_placed(
-        &self,
+        &mut self,
         pos: DVec3,
         t: &haste_data::BlockSoundType,
         requests: &mut Vec<SoundRequest>,
     ) {
         // BlockItem.place: place at (v+1)/2, pitch*0.8, BLOCKS source.
         play_event(
+            self.random.next_long(),
             &t.place_sound,
             CATEGORY_BLOCKS,
             pos,
@@ -152,13 +163,14 @@ impl OwnBlockSounds {
 
     /// Landed from a fall far enough to hurt: the block's fall sound.
     pub fn landed_hard(
-        &self,
+        &mut self,
         player_pos: DVec3,
         t: &haste_data::BlockSoundType,
         requests: &mut Vec<SoundRequest>,
     ) {
         // LivingEntity.playBlockFallSound: fall at v*0.5, pitch*0.75, PLAYER source.
         play_event(
+            self.random.next_long(),
             &t.fall_sound,
             CATEGORY_PLAYERS,
             player_pos,
@@ -180,6 +192,7 @@ impl Default for OwnBlockSounds {
 /// The position is the player (vanilla plays its own sounds at itself); the
 /// break/place/hit ones are at the block, passed by the caller.
 fn play_event(
+    seed: i64,
     event: &str,
     category: i32,
     pos: DVec3,
@@ -196,6 +209,15 @@ fn play_event(
         pos: SoundPos::Fixed(pos),
         volume,
         pitch,
-        seed: 0,
+        seed,
     }));
+}
+
+/// A seed for an unseeded generator (vanilla's `RandomSource.create()` takes a unique
+/// seed per instance): the clock's nanoseconds.
+pub(super) fn unseeded() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0x5eed)
 }

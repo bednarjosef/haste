@@ -204,6 +204,9 @@ pub struct Sounds {
     names: Vec<String>,
     music: MusicManager,
     music_rng: MusicRng,
+    /// The random each music track's sound instance draws its variant from (vanilla's
+    /// `SimpleSoundInstance.forMusic` uses an unseeded random per track).
+    music_variants: haste_audio::random::LegacyRandom,
     /// Situation as of the last tick, so a change is only pushed on a change.
     situation: MusicSituation,
     /// The music event we started and believe is playing.
@@ -253,6 +256,7 @@ impl Sounds {
             names,
             music: MusicManager::new(),
             music_rng: MusicRng::new(0x5eed_1234),
+            music_variants: haste_audio::random::LegacyRandom::new(own_block::unseeded()),
             situation: MusicSituation::Menu,
             music_event: None,
             unknown_logged: HashSet::new(),
@@ -347,8 +351,9 @@ impl Sounds {
                 MusicCommand::Play(event) => {
                     // Vanilla's `SimpleSoundInstance.forMusic(soundEvent)`: no position (the
                     // listener hears it centred), the music source, volume and pitch 1.
+                    let seed = self.music_variants.next_long();
                     self.system
-                        .play(&event, SoundSource::Music, None, 1.0, 1.0, 0);
+                        .play(&event, SoundSource::Music, None, 1.0, 1.0, seed);
                     self.music_event = Some(event);
                 }
                 MusicCommand::Stop => {
