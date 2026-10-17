@@ -73,15 +73,18 @@ const DOUBLE_TAP: Duration = Duration::from_millis(350);
 const SUBMIT_PER_FRAME: usize = 512;
 /// The GUI scale the option asks for: 0 means auto (vanilla: `Options.AUTO_GUI_SCALE`).
 /// Like `Minecraft.resizeGui`, auto and any fixed scale both go through
-/// [`gui_scale_for`] (vanilla: `Window.calculateScale`).
-pub fn resolve_gui_scale(option: u32, width: u32, height: u32) -> u32 {
-    gui_scale_for(option.min(4), width, height)
+/// [`gui_scale_for`] (vanilla: `Window.calculateScale`) with the "Force Unicode Font"
+/// option (`Minecraft.isEnforceUnicode`). The stored option is not clamped: a value above
+/// the window's automatic maximum simply stops at that maximum, as in vanilla.
+pub fn resolve_gui_scale(option: u32, width: u32, height: u32, force_unicode: bool) -> u32 {
+    gui_scale_for(option, width, height, force_unicode)
 }
 
 /// The scale vanilla would use for the option at the window's framebuffer size
 /// (vanilla: `Window.calculateScale`; `max_scale` 0 grows it while the framebuffer
-/// keeps at least 320x240 GUI pixels).
-pub fn gui_scale_for(max_scale: u32, width: u32, height: u32) -> u32 {
+/// keeps at least 320x240 GUI pixels). With `enforce_unicode` an odd result is rounded up
+/// to the next even scale after the loop, as vanilla does for the unicode font.
+pub fn gui_scale_for(max_scale: u32, width: u32, height: u32, enforce_unicode: bool) -> u32 {
     let mut scale = 1;
     while scale != max_scale
         && scale < width
@@ -89,6 +92,9 @@ pub fn gui_scale_for(max_scale: u32, width: u32, height: u32) -> u32 {
         && width / (scale + 1) >= 320
         && height / (scale + 1) >= 240
     {
+        scale += 1;
+    }
+    if enforce_unicode && scale % 2 != 0 {
         scale += 1;
     }
     scale
@@ -3558,7 +3564,12 @@ fn menu_frame(
     options: &Options,
 ) -> (GuiFrame, Camera, SkyState, f32) {
     let (w, h) = renderer.size();
-    let scale = resolve_gui_scale(u32::from(options.gui_scale), w, h);
+    let scale = resolve_gui_scale(
+        u32::from(options.gui_scale),
+        w,
+        h,
+        options.force_unicode_font,
+    );
     let (gw, gh) = gui_scaled_size(w, h, scale);
     let gui = ui.frame(gw, gh, scale, input.mouse, 0.0).clone();
     (gui, menu_camera(), menu_sky(), 0.0)
@@ -3689,6 +3700,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
                 u32::from(session.options.gui_scale),
                 args.width,
                 args.height,
+                session.options.force_unicode_font,
             );
             let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
             gui = u.frame(gw, gh, scale, (0.0, 0.0), partial).clone();
@@ -4333,8 +4345,12 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         // Menu mode renders the open screen over the plain background (no world yet).
         if session.is_none() {
             if let Some(u) = ui.as_mut() {
-                let scale =
-                    resolve_gui_scale(u32::from(options.gui_scale), args.width, args.height);
+                let scale = resolve_gui_scale(
+                    u32::from(options.gui_scale),
+                    args.width,
+                    args.height,
+                    options.force_unicode_font,
+                );
                 let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
                 gui = u.frame(gw, gh, scale, input.mouse, 0.0).clone();
                 last_gui = gui.clone();
@@ -4415,12 +4431,22 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 fps.fps as i32,
                 &last_stats,
                 entities.len() as i32,
-                resolve_gui_scale(u32::from(options.gui_scale), args.width, args.height),
+                resolve_gui_scale(
+                    u32::from(options.gui_scale),
+                    args.width,
+                    args.height,
+                    options.force_unicode_font,
+                ),
                 &gpu_info(&renderer),
             ));
         }
         if let Some(u) = &mut ui {
-            let scale = resolve_gui_scale(u32::from(options.gui_scale), args.width, args.height);
+            let scale = resolve_gui_scale(
+                u32::from(options.gui_scale),
+                args.width,
+                args.height,
+                options.force_unicode_font,
+            );
             let (gw, gh) = gui_scaled_size(args.width, args.height, scale);
             gui = u.frame(gw, gh, scale, input.mouse, partial).clone();
             last_gui = gui.clone();
@@ -5944,7 +5970,12 @@ impl App {
                 self.fps.fps as i32,
                 &stats,
                 entities.len() as i32,
-                resolve_gui_scale(u32::from(self.options.gui_scale), w, h),
+                resolve_gui_scale(
+                    u32::from(self.options.gui_scale),
+                    w,
+                    h,
+                    self.options.force_unicode_font,
+                ),
                 &gpu,
             ));
             let view = session.shared.view.lock().clone();
@@ -5952,7 +5983,12 @@ impl App {
         }
         if let Some(ui) = &mut self.ui {
             let mouse = self.input.mouse;
-            let scale = resolve_gui_scale(u32::from(self.options.gui_scale), w, h);
+            let scale = resolve_gui_scale(
+                u32::from(self.options.gui_scale),
+                w,
+                h,
+                self.options.force_unicode_font,
+            );
             let (gw, gh) = gui_scaled_size(w, h, scale);
             self.gui = ui.frame(gw, gh, scale, mouse, partial).clone();
         }
@@ -6169,6 +6205,7 @@ impl ApplicationHandler for App {
                         u32::from(self.options.gui_scale),
                         r.size().0,
                         r.size().1,
+                        self.options.force_unicode_font,
                     ));
                     self.input
                         .mouse_moved(position.x / s, position.y / s, self.ui.as_ref());
@@ -6516,29 +6553,48 @@ mod tests {
 
     #[test]
     fn auto_gui_scale_matches_vanilla_resolutions() {
-        // `Window.calculateScale(0, ...)` at vanilla's default window and common
+        // `Window.calculateScale(0, false)` at vanilla's default window and common
         // resolutions: the scale grows while the framebuffer keeps >= 320x240 GUI
         // pixels. Computed by hand from the vanilla method's conditions.
-        assert_eq!(gui_scale_for(0, 854, 480), 2);
-        assert_eq!(gui_scale_for(0, 1280, 720), 3);
-        assert_eq!(gui_scale_for(0, 1920, 1080), 4);
-        assert_eq!(gui_scale_for(0, 2560, 1440), 6);
-        assert_eq!(gui_scale_for(0, 3840, 2160), 9);
+        assert_eq!(gui_scale_for(0, 854, 480, false), 2);
+        assert_eq!(gui_scale_for(0, 1280, 720, false), 3);
+        assert_eq!(gui_scale_for(0, 1920, 1080, false), 4);
+        assert_eq!(gui_scale_for(0, 2560, 1440, false), 6);
+        assert_eq!(gui_scale_for(0, 3840, 2160, false), 9);
     }
 
     #[test]
-    fn fixed_gui_scale_is_honoured_and_clamped() {
+    fn fixed_gui_scale_is_honoured_and_bounded_by_the_window() {
         // A fixed option stops there (vanilla: `calculateScale(maxScale, ...)`); a value
         // too large for the framebuffer is still bounded by the 320x240 rule.
-        assert_eq!(gui_scale_for(1, 1920, 1080), 1);
-        assert_eq!(gui_scale_for(3, 1920, 1080), 3);
-        assert_eq!(gui_scale_for(4, 854, 480), 2);
-        // The option is clamped to 0..=4 like `Options.sanitized`.
-        assert_eq!(resolve_gui_scale(9, 1920, 1080), 4);
-        assert_eq!(resolve_gui_scale(0, 1920, 1080), 4);
+        assert_eq!(gui_scale_for(1, 1920, 1080, false), 1);
+        assert_eq!(gui_scale_for(3, 1920, 1080, false), 3);
+        assert_eq!(gui_scale_for(4, 854, 480, false), 2);
+        // The option is not capped at 4: on 1920x1080 the window's automatic maximum (4)
+        // bounds it, on 3840x2160 scales 5..=9 are honoured and 9 is the maximum.
+        assert_eq!(resolve_gui_scale(9, 1920, 1080, false), 4);
+        assert_eq!(resolve_gui_scale(0, 1920, 1080, false), 4);
+        assert_eq!(resolve_gui_scale(5, 3840, 2160, false), 5);
+        assert_eq!(resolve_gui_scale(6, 3840, 2160, false), 6);
+        assert_eq!(resolve_gui_scale(9, 3840, 2160, false), 9);
+        assert_eq!(resolve_gui_scale(50, 3840, 2160, false), 9);
         // Tiny framebuffers still get scale 1 (the loop stops immediately).
-        assert_eq!(gui_scale_for(0, 320, 240), 1);
-        assert_eq!(gui_scale_for(0, 100, 100), 1);
+        assert_eq!(gui_scale_for(0, 320, 240, false), 1);
+        assert_eq!(gui_scale_for(0, 100, 100, false), 1);
+    }
+
+    #[test]
+    fn force_unicode_font_rounds_odd_gui_scales_up() {
+        // `Window.calculateScale(_, true)` bumps an odd result to the next even scale after
+        // the loop, even past the window's automatic maximum (9 -> 10 on 3840x2160).
+        assert_eq!(resolve_gui_scale(0, 1920, 1080, true), 4);
+        assert_eq!(resolve_gui_scale(3, 1920, 1080, true), 4);
+        assert_eq!(resolve_gui_scale(1, 1920, 1080, true), 2);
+        assert_eq!(resolve_gui_scale(2, 1920, 1080, true), 2);
+        assert_eq!(resolve_gui_scale(0, 3840, 2160, true), 10);
+        assert_eq!(resolve_gui_scale(5, 3840, 2160, true), 6);
+        assert_eq!(resolve_gui_scale(0, 1280, 720, true), 4);
+        assert_eq!(gui_scale_for(0, 320, 240, true), 2);
     }
 
     #[test]
