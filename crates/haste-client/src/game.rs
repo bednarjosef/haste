@@ -263,6 +263,12 @@ pub fn player_instance(id: EntityId, uuid: u128, view: &ViewState, partial: f32)
 }
 
 /// What the render thread needs each frame, copied out under a short lock.
+/// `LivingEntity.isDeadOrDying` as the camera sees it: `Some(deathTime)` while the health is
+/// <= 0 (0 on the tick it got there), `None` alive.
+pub fn death_time(dead: bool, death_ticks: u32) -> Option<u32> {
+    dead.then_some(death_ticks)
+}
+
 #[derive(Clone, Debug)]
 pub struct ViewState {
     /// Player eye position at the start of the last tick (`LocalPlayer::camera(0.0)`).
@@ -327,8 +333,11 @@ pub struct ViewState {
     /// `hurt_dir`).
     pub hurt_ticks: u32,
     pub hurt_dir: f32,
-    /// Ticks since the local player died (`Session::death_ticks`).
+    /// Ticks since the local player died (`Session::death_ticks`, vanilla `deathTime`).
     pub death_ticks: u32,
+    /// `LivingEntity.isDeadOrDying`: the player's health is <= 0 (true from the tick it hits 0,
+    /// while `death_ticks` is still 0).
+    pub dead: bool,
     /// Look angles (yaw, pitch) before and after the last tick, for the player's own model in
     /// third person.
     pub prev_look: (f32, f32),
@@ -362,6 +371,13 @@ pub struct ViewState {
     pub rain_fog_multiplier: f32,
     /// `ClientLevel.seaLevel` (the spawn info's; biome precipitation's snow line).
     pub sea_level: i32,
+}
+
+impl ViewState {
+    /// [`death_time`] of this tick's state, for the death FOV and roll.
+    pub fn death(&self) -> Option<u32> {
+        death_time(self.dead, self.death_ticks)
+    }
 }
 
 /// The per-tick part of the first-person hand: the held item, the light at the eye and this
@@ -637,6 +653,7 @@ impl Shared {
                 hurt_ticks: 0,
                 hurt_dir: 0.0,
                 death_ticks: 0,
+                dead: false,
                 prev_look: (0.0, 0.0),
                 look: (0.0, 0.0),
                 prev_feet: DVec3::ZERO,
@@ -1977,6 +1994,7 @@ fn tick_once(
     view.hurt_ticks = s.hurt_ticks;
     view.hurt_dir = s.hurt_dir;
     view.death_ticks = s.death_ticks;
+    view.dead = s.player.health <= 0.0;
     // The screen effects, from this tick's world probe (the block the camera is inside, the
     // eye's light), the own entity's flags and freeze ticks, the worn head item and the active
     // effects. The eyes being in water comes from the physics' fluid at the eye position.
