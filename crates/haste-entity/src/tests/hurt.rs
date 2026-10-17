@@ -68,7 +68,7 @@ fn death_holds_the_tint_for_20_ticks() {
         assert_eq!(strength(&s), 1.0);
         s.tick();
     }
-    // ...then nothing more.
+    // ...and it stays red until the entity is removed (hasRedOverlay while dying).
     s.tick();
-    assert_eq!(strength(&s), 0.0);
+    assert_eq!(strength(&s), 1.0);
 }

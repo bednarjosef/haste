@@ -151,6 +151,10 @@ pub struct Interaction {
     /// `minecraft:consumable` component's `use_duration`/`use_animation` (or the item class's
     /// own), ticked down each game tick. Set together with `is_using_item`.
     using: Option<UsingItem>,
+    /// The hand of a use the server's synced flags started that we have not started
+    /// locally yet (`LivingEntity.onSyncedDataUpdated` reads the held item then; we do it on
+    /// the next tick, when the game data is at hand).
+    pending_use_hand: Option<i32>,
     /// Last sequence number used for a prediction.
     sequence: i32,
     /// Predicted blocks: (sequence, pos, the server's state: before the prediction, then the
@@ -167,6 +171,10 @@ pub struct Interaction {
     /// Item registry indices whose default components carry `minecraft:glider`
     /// (`LivingEntity.canGlideUsing`), resolved from the item component reports in `prepare`.
     pub(crate) glider_items: Option<HashSet<RegistryIndex>>,
+    /// Item registry indices that steer a ridden animal while held (vanilla
+    /// `Pig.getControllingPassenger`'s carrot on a stick, `Strider`'s warped fungus on a
+    /// stick), resolved from the item registry in `prepare`.
+    pub(crate) steer_items: Option<HashMap<RegistryIndex, crate::item_based_steering::SteerStick>>,
     /// Active effects on us: `minecraft:mob_effect` index -> amplifier, remaining ticks and the
     /// vanilla `MobEffectInstance.BlendState` the screen effects read.
     pub effects: HashMap<i32, EffectData>,
@@ -324,6 +332,22 @@ impl Interaction {
                             .collect()
                     })
                     .unwrap_or_default(),
+            );
+        }
+        if self.steer_items.is_none() {
+            // The sticks that steer a ridden animal while held (their item registry names).
+            self.steer_items = Some(
+                [
+                    crate::item_based_steering::SteerStick::CarrotOnAStick,
+                    crate::item_based_steering::SteerStick::WarpedFungusOnAStick,
+                ]
+                .into_iter()
+                .filter_map(|stick| {
+                    data.registries
+                        .index("minecraft:item", &Identifier::minecraft(stick.item_path()))
+                        .map(|i| (i, stick))
+                })
+                .collect(),
             );
         }
         if self.effect_ids.is_none() {
@@ -530,6 +554,24 @@ impl Interaction {
         self.is_using_item = using;
     }
 
+    /// `LivingEntity.onSyncedDataUpdated` for `DATA_LIVING_ENTITY_FLAGS`: the server's
+    /// `isUsingItem` bit is the truth. Cleared (a consume completed, or the server refused the
+    /// use), the local use ends without a packet; set while nothing is in use locally, the held
+    /// item of `hand` starts being used (filled in on the next tick, see `interact_step`).
+    pub fn synced_using_item(&mut self, using: bool, hand: i32) {
+        if using {
+            if !self.is_using_item {
+                self.is_using_item = true;
+                self.using = None;
+                self.pending_use_hand = Some(hand);
+            }
+        } else if self.is_using_item {
+            self.is_using_item = false;
+            self.using = None;
+            self.pending_use_hand = None;
+        }
+    }
+
     pub(super) fn respawned(&mut self) {
         self.destroying = None;
         self.progress = 0.0;
@@ -539,6 +581,7 @@ impl Interaction {
         self.miss_time = 0;
         self.is_using_item = false;
         self.using = None;
+        self.pending_use_hand = None;
         self.attack_clicks = 0;
         self.use_clicks = 0;
     }
@@ -693,6 +736,22 @@ impl LocalPlayer {
     /// The held main-hand stack.
     pub fn main_hand(&self) -> &ItemStackData {
         &self.int.hotbar[self.held_slot.clamp(0, 8) as usize]
+    }
+
+    /// Whether either hand holds an item that steers a ridden animal (vanilla
+    /// `Pig`/`Strider.getControllingPassenger` -> `LivingEntity.isHolding`, which looks at the
+    /// main hand and the off hand: the carrot on a stick, the warped fungus on a stick). An
+    /// unknown registry (no `prepare` yet) steers nothing.
+    pub fn holds_steer_stick(&self, stick: crate::item_based_steering::SteerStick) -> bool {
+        let steers = |stack: &haste_core::entity::ItemStackData| {
+            stack.item.is_some_and(|i| {
+                self.int
+                    .steer_items
+                    .as_ref()
+                    .is_some_and(|s| s.get(&i) == Some(&stick))
+            })
+        };
+        steers(self.main_hand()) || steers(&self.int.offhand)
     }
 
     /// The player's `minecraft:attack_speed` with the held item (base 4.0 plus the item's
@@ -1057,6 +1116,19 @@ impl LocalPlayer {
             use_clicks = 1;
         }
         let mut instant_attack = false;
+        // A use the server's synced flags started (`LivingEntity.onSyncedDataUpdated`): the
+        // held item of that hand and its duration.
+        if let Some(hand) = self.int.pending_use_hand.take() {
+            let stack = self.hand(hand).clone();
+            if let Some((duration, animation)) = self.int.use_data(&stack, env.data) {
+                self.int.using = Some(UsingItem {
+                    item: stack.item,
+                    duration,
+                    remaining: duration,
+                    animation,
+                });
+            }
+        }
         if self.int.is_using_item {
             // While an item is in use the clicks are consumed and do nothing; releasing the
             // button releases the item (MultiPlayerGameMode.releaseUsingItem), and a different
@@ -1177,9 +1249,14 @@ impl LocalPlayer {
         self.hand.swing();
         match self.int.target {
             Some(Target::Entity { id, .. }) => {
-                // gameMode.attack, then the swing (below). No missTime, no attack-strength
-                // reset.
+                // `MultiPlayerGameMode.attack`: the packet, `Player.attack` (`onAttack` resets
+                // the attack ticker), `resetAttackStrengthTicker` (both tickers) and
+                // `destroyDelay` 5 in creative. No missTime.
                 out.push(ServerboundPlay::Attack(sb::Attack { entity_id: id.0 }));
+                self.hand.reset_attack_strength_ticker();
+                if self.game_mode == GameMode::Creative {
+                    self.int.destroy_delay = DESTROY_DELAY;
+                }
             }
             Some(Target::Block(h)) if !env.data.is_air(world.block_state(h.pos)) => {
                 // startDestroyBlock, then endAttack when the block is air afterwards.
@@ -1194,6 +1271,7 @@ impl LocalPlayer {
                 if self.game_mode != GameMode::Creative {
                     self.int.miss_time = MISS_TIME;
                 }
+                self.hand.reset_attack_strength_ticker();
             }
         }
         out.push(ServerboundPlay::Punch(sb::Punch {}));
@@ -1227,16 +1305,7 @@ impl LocalPlayer {
                     // `Minecraft.continueAttack` swings each tick the breaking continues.
                     self.hand.swing();
                     out.push(ServerboundPlay::Punch(sb::Punch {}));
-                    // `Minecraft.startUseItem` calls `player.itemUsed(hand)` for a use that
-                    // changed the held stack, which puts the hand down for the item switch.
-                    self.hand.item_used();
                 }
-                // The place sound, played when we place against a block while holding a
-                // block item (vanilla: BlockItem.place runs on the client too and plays
-                // it; the server's copy excludes us). We cannot know the placed state
-                // yet, so the held block item's block decides; unknown items (not a
-                // block, a mod) play nothing.
-                self.own_place_sound(h.pos, env);
             }
             // An entity, nothing, or an already-air block: stop breaking.
             _ => self.stop_destroy(out),
@@ -1288,16 +1357,31 @@ impl LocalPlayer {
                                 world_border_hit: false,
                                 sequence: seq,
                             }));
-                            if holding {
-                                out.push(ServerboundPlay::Punch(sb::Punch {}));
-                            }
-                            self.hand.swing();
                             // The block's own use opens the game-master editors on the client
                             // (`CommandBlock.useWithoutItem` -> `LocalPlayer.openCommandBlock`;
                             // the book's `useItemOn` is never consumed, so `Minecraft.startUseItem`
                             // falls through to `useItem` -> `WritableBookItem.use`).
                             self.use_opens_screen(env, Some((h.pos, world)), hand);
-                            return;
+                            // `Minecraft.startUseItem` swings only on a Success (swing source
+                            // PREDICTED) and returns; `itemUsed` when the stack changed (a
+                            // placed block). A Pass (food, a tool, an empty hand on a plain
+                            // block) goes on to `useItem` with the same hand. Without the
+                            // block's Java `useItemOn`, a placed block item or a block the
+                            // client knows to have a use count as Success; the server decides
+                            // the rest. No `punch`: that packet belongs to attacks only.
+                            let stack = self.hand(hand).clone();
+                            let placing = self.is_block_item(&stack, env.data);
+                            if placing || self.block_has_use(world.block_state(h.pos), env.data) {
+                                self.hand.swing();
+                                if placing {
+                                    self.hand.item_used();
+                                    // `BlockItem.place` plays the place sound on the client
+                                    // too (the server's copy excludes us). The held block
+                                    // item's block decides; unknown items play nothing.
+                                    self.own_place_sound(h.pos, &stack, env);
+                                }
+                                return;
+                            }
                         }
                         None => {}
                     }
@@ -1317,7 +1401,12 @@ impl LocalPlayer {
                         // `LivingEntity.startUsingItem`: an item with a use duration starts
                         // using (`Item.getUseDuration`/`getUseAnimation` from the consumable
                         // component or the item class).
+                        // Food starts only when the player can eat (`Consumable.startConsuming`
+                        // -> `canConsume` -> `Player.canEat`); the packet goes out either way.
                         let stack = self.hand(hand).clone();
+                        if !self.can_consume(&stack, env.data) {
+                            return;
+                        }
                         if let Some((duration, animation)) = self.int.use_data(&stack, env.data) {
                             self.int.using = Some(UsingItem {
                                 item: stack.item,
@@ -1527,12 +1616,13 @@ impl LocalPlayer {
         }
     }
 
-    /// `MultiPlayerGameMode.sameDestroyTarget`: same block and same held item.
+    /// `MultiPlayerGameMode.sameDestroyTarget`: same block and same held item
+    /// (`ItemStack.isSameItemSameComponents`: item and components, the count ignored).
     fn same_destroy_target(&self, pos: BlockPos) -> bool {
-        self.int
-            .destroying
-            .as_ref()
-            .is_some_and(|(p, _, item)| *p == pos && *item == *self.main_hand())
+        let held = self.main_hand();
+        self.int.destroying.as_ref().is_some_and(|(p, _, item)| {
+            *p == pos && item.item == held.item && item.components_raw == held.components_raw
+        })
     }
 
     fn abort_destroy(&mut self, face: Direction, out: &mut Vec<ServerboundPlay>) {
@@ -1551,17 +1641,95 @@ impl LocalPlayer {
     /// The held item's block, if it is a block item (item id = block id in vanilla,
     /// `BlockItemId.create(name)`; the 14 crop pairs with differing names are missing
     /// here — placing crops is rare and the server confirms anyway).
-    fn held_block<'d>(&self, data: &'d haste_data::GameData) -> Option<&'d haste_core::Identifier> {
-        let item = self.main_hand();
+    fn held_block<'d>(
+        &self,
+        item: &ItemStackData,
+        data: &'d haste_data::GameData,
+    ) -> Option<&'d haste_core::Identifier> {
+        if item.is_empty() {
+            return None;
+        }
         let index = item.item?;
         data.registries
             .name("minecraft:item", index)
             .and_then(|id| data.blocks.default_state(id).map(|_| id))
     }
 
+    /// Whether `item` is a block item (`BlockItem`): its `use_item_on` places a block, a Success
+    /// on the client.
+    fn is_block_item(&self, item: &ItemStackData, data: &haste_data::GameData) -> bool {
+        self.held_block(item, data).is_some()
+    }
+
+    /// Whether the block's own `useWithoutItem`/`useItemOn` is known to succeed on the client
+    /// (containers, doors, redstone switches, workstations, beds, ...), so `startUseItem`
+    /// stops at it instead of falling through to `useItem`. Mod blocks and anything not listed
+    /// pass through; the server still runs the real use.
+    fn block_has_use(&self, state: BlockStateId, data: &haste_data::GameData) -> bool {
+        const USES: &[&str] = &[
+            "chest",
+            "barrel",
+            "shulker_box",
+            "furnace",
+            "smoker",
+            "crafting_table",
+            "door",
+            "trapdoor",
+            "fence_gate",
+            "button",
+            "lever",
+            "bed",
+            "anvil",
+            "enchanting_table",
+            "brewing_stand",
+            "hopper",
+            "dispenser",
+            "dropper",
+            "note_block",
+            "repeater",
+            "comparator",
+            "daylight_detector",
+            "bell",
+            "lectern",
+            "cartography_table",
+            "smithing_table",
+            "grindstone",
+            "stonecutter",
+            "loom",
+            "beacon",
+            "command_block",
+            "jukebox",
+            "crafter",
+            "respawn_anchor",
+        ];
+        let path = data.blocks.block_of(state).path();
+        USES.iter().any(|u| {
+            path.strip_suffix(*u)
+                .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with('_'))
+        })
+    }
+
+    /// `Player.canEat` for a food item (`Consumable.canConsume`): invulnerable, `can_always_eat`
+    /// or a food level below 20. Anything that is not food can always be consumed.
+    fn can_consume(&self, item: &ItemStackData, data: &haste_data::GameData) -> bool {
+        let Some(ic) = &self.int.item_components else {
+            return true;
+        };
+        let Some(name) = item
+            .item
+            .and_then(|i| data.registries.name("minecraft:item", i))
+        else {
+            return true;
+        };
+        match ic.food(name) {
+            Some(can_always_eat) => self.abilities.invulnerable || can_always_eat || self.food < 20,
+            None => true,
+        }
+    }
+
     /// The place sound for a `use_item_on` with a block item held (see `use_item`).
-    fn own_place_sound(&mut self, pos: BlockPos, env: &InteractEnv<'_>) {
-        let Some(block) = self.held_block(env.data) else {
+    fn own_place_sound(&mut self, pos: BlockPos, item: &ItemStackData, env: &InteractEnv<'_>) {
+        let Some(block) = self.held_block(item, env.data) else {
             return;
         };
         let state = env.data.blocks.default_state(block);

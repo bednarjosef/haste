@@ -48,6 +48,10 @@ fn dinnerbone_is_upside_down() {
         }],
     );
     s.set_rotation(EntityId(1), 0.0, 30.0, true);
+    // The rotation eases in over three ticks (LinearInterpolationHandler).
+    for _ in 0..3 {
+        s.tick();
+    }
     let e = s.get(EntityId(1)).unwrap();
     let b = crate::animation::body_transform(e, 0.0, false);
     assert!(matches!(b.ops[0], BodyOp::Translate(t) if (t.y - 1.9).abs() < 1e-5));

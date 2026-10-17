@@ -13,7 +13,7 @@ use haste_core::DVec3;
 use uuid::Uuid;
 
 use crate::dims::EntityDimensions;
-use crate::lerp::LerpState;
+use crate::lerp::{LerpState, LerpTarget};
 use crate::metadata::Metadata;
 use crate::riding::Riding;
 
@@ -24,10 +24,23 @@ pub const DEATH_TICKS: u32 = 20;
 /// `Creeper.DEFAULT_MAX_SWELL` (the `Fuse` component can change it; the default is all the client
 /// usually sees).
 pub const CREEPER_MAX_SWELL: i32 = 30;
+/// `ClientPacketListener.handleEntityPositionSync`: a sync further than this (squared blocks,
+/// 64 blocks) from the entity's current position snaps instead of interpolating.
+pub const TELEPORT_SNAP_DISTANCE_SQ: f64 = 4096.0;
+/// `ClientPacketListener.handleRotateMob`: ticks a `rotate_head` packet's yaw is eased over.
+pub const HEAD_LERP_STEPS: u8 = 3;
+/// `LivingEntity.DATA_HEALTH_ID`: the second of `LivingEntity`'s synched fields after
+/// `Entity`'s eight (0-7), so index 9 (a float).
+pub const HEALTH_METADATA_INDEX: u8 = 9;
 
 /// `Mth.lerp`.
 fn lerp(delta: f32, start: f32, end: f32) -> f32 {
     start + delta * (end - start)
+}
+
+/// `Mth.rotLerp`.
+pub(crate) fn rot_lerp(delta: f32, start: f32, end: f32) -> f32 {
+    start + delta * wrap_degrees(end - start)
 }
 
 /// `Mth.wrapDegrees`.
@@ -190,8 +203,14 @@ pub struct Entity {
     /// The `add_entity` data field: hanging entities carry their facing direction here
     /// (`ItemFrame.recreateFromPacket` -> `Direction.from3DDataValue(packet.getData())`).
     pub data: i32,
+    /// `Entity.yRot` / `xRot`, stepped toward the last packet's rotation by `lerp`
+    /// (`LinearInterpolationHandler.doInterpolate`); read them at a partial tick with
+    /// `yaw_at` / `pitch_at`.
     pub yaw: f32,
     pub pitch: f32,
+    /// `Entity.yRotO` / `xRotO`: the rotation at the end of the previous tick.
+    pub prev_yaw: f32,
+    pub prev_pitch: f32,
     pub head_yaw: f32,
     /// Velocity the server sent (blocks/tick); informational until the lead asks for prediction.
     pub velocity: DVec3,
@@ -216,8 +235,10 @@ pub struct Entity {
     pub prev_body_yaw: f32,
     /// Head yaw at the previous tick (`LivingEntity.yHeadRotO`), for interpolation.
     prev_head_yaw: f32,
-    /// Whether a `rotate_head` packet moved `head_yaw` since the last tick.
-    head_yaw_dirty: bool,
+    /// `LivingEntity.lerpYHeadRot` / `lerpHeadSteps`: the head yaw a `rotate_head` packet asked
+    /// for and the ticks left to ease `head_yaw` onto it (`lerpHeadTo(yaw, 3)`).
+    lerp_head_yaw: f32,
+    lerp_head_steps: u8,
     /// The hand swing state (`LivingEntity.swingState`, started by `swing_animation`).
     pub swing: SwingState,
     /// Smoothed swimming amount (`LivingEntity.swimAmount` / `swimAmountO`), 0..1.
@@ -261,6 +282,8 @@ impl Entity {
             data: s.data,
             yaw: s.yaw,
             pitch: s.pitch,
+            prev_yaw: s.yaw,
+            prev_pitch: s.pitch,
             head_yaw: s.head_yaw,
             velocity: s.velocity,
             on_ground: false,
@@ -268,14 +291,17 @@ impl Entity {
             dimensions: dims.get(s.kind, Pose::Standing),
             metadata: Metadata::default(),
             equipment: Vec::new(),
-            lerp: LerpState::new(s.pos),
+            lerp: LerpState::new(s.pos, s.yaw, s.pitch),
             nametag: None,
             is_player_type: false,
             walk: WalkAnimationState::default(),
-            body_yaw: s.yaw,
-            prev_body_yaw: s.yaw,
+            // `LivingEntity.recreateFromPacket`: the body starts facing the packet's head yaw
+            // (`yBodyRot = yHeadRot = getYHeadRot()`, the `O` copies the same), not its yaw.
+            body_yaw: s.head_yaw,
+            prev_body_yaw: s.head_yaw,
             prev_head_yaw: s.head_yaw,
-            head_yaw_dirty: false,
+            lerp_head_yaw: s.head_yaw,
+            lerp_head_steps: 0,
             swing: SwingState::default(),
             swim_amount: 0.0,
             swim_amount_o: 0.0,
@@ -294,6 +320,39 @@ impl Entity {
             item: None,
             age: 0,
         }
+    }
+
+    /// `LivingEntity.isDeadOrDying` became true: `deathTime` starts counting on the next tick
+    /// (`hurt_ticks` runs the 20-tick death counter down; see `animation::death_time`). A
+    /// second trigger (event 3 after the health metadata, or the reverse) changes nothing.
+    fn start_death(&mut self) {
+        if !self.dead {
+            self.dead = true;
+            self.hurt_ticks = DEATH_TICKS;
+        }
+    }
+
+    /// `Entity.getYRot(partialTicks)`: `Mth.rotLerp(partial, yRotO, yRot)`.
+    pub fn yaw_at(&self, partial: f32) -> f32 {
+        if partial == 1.0 {
+            self.yaw
+        } else {
+            rot_lerp(partial, self.prev_yaw, self.yaw)
+        }
+    }
+
+    /// `Entity.getXRot(partialTicks)`: `Mth.lerp(partial, xRotO, xRot)`.
+    pub fn pitch_at(&self, partial: f32) -> f32 {
+        if partial == 1.0 {
+            self.pitch
+        } else {
+            lerp(partial, self.prev_pitch, self.pitch)
+        }
+    }
+
+    /// The present (pos, yaw, pitch): what `LerpState` keeps for the part a packet lacks.
+    fn current(&self) -> (DVec3, f32, f32) {
+        (self.pos, self.yaw, self.pitch)
     }
 
     /// Body yaw between the last two ticks (`Mth.rotLerp(partial, yBodyRotO, yBodyRot)`).
@@ -423,11 +482,12 @@ pub struct EntityStore {
 }
 
 /// Hurt flash strength for an entity's remaining hurt ticks, eased out (quadratic, like
-/// vanilla's `hurtTime`-driven fade: strong on impact, gone by tick 10). `dead` holds the
-/// flash while the death animation's 20 ticks run.
+/// vanilla's `hurtTime`-driven fade: strong on impact, gone by tick 10). A dead entity keeps
+/// the flash until the server removes it (`LivingEntityRenderer.extractRenderState`:
+/// `hasRedOverlay = hurtTime > 0 || deathTime > 0`, and `deathTime` never resets).
 pub fn hurt_strength(e: &Entity) -> f32 {
     if e.dead {
-        return if e.hurt_ticks > 0 { 1.0 } else { 0.0 };
+        return 1.0;
     }
     let left = e.hurt_ticks.min(HURT_TICKS) as f32 / HURT_TICKS as f32;
     left * left
@@ -563,47 +623,55 @@ impl EntityStore {
     pub fn move_delta(&mut self, id: EntityId, delta: DVec3, on_ground: bool) {
         if let Some(i) = self.slot(id) {
             if let Some(e) = &mut self.slots[i as usize] {
-                e.lerp.on_delta(delta);
+                e.lerp.on_delta(delta, e.current());
                 e.on_ground = on_ground;
             }
         }
     }
 
+    /// A rotation from a move packet (`ClientPacketListener.handleMoveEntity` ->
+    /// `Entity.moveOrInterpolateTo(yRot, xRot)`): eased over 3 ticks with the position.
     pub fn set_rotation(&mut self, id: EntityId, yaw: f32, pitch: f32, on_ground: bool) {
         if let Some(i) = self.slot(id) {
             if let Some(e) = &mut self.slots[i as usize] {
-                e.yaw = yaw;
-                e.pitch = pitch;
+                e.lerp.interpolate_to(None, Some((yaw, pitch)), e.current());
                 e.on_ground = on_ground;
             }
         }
     }
 
-    /// A teleport abandons interpolation and snaps both `prev_pos` and `pos` (a teleport is a
-    /// discontinuity; the renderer must not draw a frame travelling the gap).
+    /// An absolute position (`entity_position_sync`, `teleport_entity`):
+    /// `ClientPacketListener.handleEntityPositionSync` interpolates it like a move packet
+    /// (`Entity.moveOrInterpolateTo`, 3 steps) unless the entity is more than 64 blocks away
+    /// (squared distance over `TELEPORT_SNAP_DISTANCE_SQ`), in which case it `snapTo`s: both
+    /// `prev_pos` and `pos` jump, so the renderer never draws a frame travelling the gap.
     pub fn teleport(&mut self, id: EntityId, pos: DVec3, yaw: f32, pitch: f32, on_ground: bool) {
         if let Some(i) = self.slot(id) {
             if let Some(e) = &mut self.slots[i as usize] {
-                e.yaw = yaw;
-                e.pitch = pitch;
                 e.on_ground = on_ground;
-                e.pos = pos;
-                e.prev_pos = pos;
-                e.lerp.on_teleport(pos);
+                if e.pos.distance_squared(pos) > TELEPORT_SNAP_DISTANCE_SQ {
+                    e.pos = pos;
+                    e.prev_pos = pos;
+                    e.yaw = yaw;
+                    e.prev_yaw = yaw;
+                    e.pitch = pitch;
+                    e.prev_pitch = pitch;
+                    e.lerp.snap(pos, yaw, pitch);
+                } else {
+                    e.lerp
+                        .interpolate_to(Some(pos), Some((yaw, pitch)), e.current());
+                }
             }
         }
     }
 
+    /// `rotate_head`: `ClientPacketListener.handleRotateMob` -> `LivingEntity.lerpHeadTo(yaw, 3)`.
+    /// The head does not turn now; `tick` eases it over the next three ticks.
     pub fn set_head_yaw(&mut self, id: EntityId, yaw: f32) {
         if let Some(i) = self.slot(id) {
             if let Some(e) = &mut self.slots[i as usize] {
-                // `LivingEntity.baseTick` sets `yHeadRotO = yHeadRot` before the packet handler
-                // runs; capture the previous value once per tick for the render interpolation.
-                if !e.head_yaw_dirty {
-                    e.prev_head_yaw = e.head_yaw;
-                }
-                e.head_yaw = yaw;
-                e.head_yaw_dirty = true;
+                e.lerp_head_yaw = yaw;
+                e.lerp_head_steps = HEAD_LERP_STEPS;
             }
         }
     }
@@ -625,13 +693,14 @@ impl EntityStore {
         }
     }
 
-    /// The death event (entity status 3): holds the hurt tint while the 20-tick death
-    /// animation would play, then nothing.
+    /// The death event (entity status 3, `LivingEntity.handleEntityEvent`): starts the death
+    /// animation (`deathTime` counting from the next tick) and holds the hurt tint until the
+    /// server's `remove_entities`. Health reaching 0 in the metadata starts it too
+    /// (`LivingEntity.isDeadOrDying` -> `tickDeath`); the first of the two wins.
     pub fn mark_dead(&mut self, id: EntityId) {
         if let Some(i) = self.slot(id) {
             if let Some(e) = &mut self.slots[i as usize] {
-                e.dead = true;
-                e.hurt_ticks = DEATH_TICKS;
+                e.start_death();
             }
         }
     }
@@ -652,6 +721,14 @@ impl EntityStore {
             return;
         };
         e.metadata.apply(entries);
+        // `LivingEntity.DATA_HEALTH_ID` (index 9): health at or below 0 means `isDeadOrDying`,
+        // and the client ticks the death animation from that alone (a `/kill` without entity
+        // event 3, a player's death, or the event arriving after the metadata).
+        if let Some(entry) = e.metadata.get(HEALTH_METADATA_INDEX) {
+            if matches!(entry.value, MetadataValue::Float(h) if h <= 0.0) {
+                e.start_death();
+            }
+        }
         // A dropped item entity's stack: `ItemEntity.DATA_ITEM`, the first slot after
         // Entity's eight synched fields (indices 0-7), so index 8. An emptied stack
         // clears the drop.
@@ -704,18 +781,35 @@ impl EntityStore {
         for slot in slots.iter_mut().flatten() {
             slot.tick_count += 1;
             slot.prev_body_yaw = slot.body_yaw;
-            if !slot.head_yaw_dirty {
-                slot.prev_head_yaw = slot.head_yaw;
+            // `LivingEntity.baseTick` records `yHeadRotO`, then `aiStep` applies one
+            // `lerpHeadRotationStep` (rotLerp by 1/steps toward the packet's head yaw).
+            slot.prev_head_yaw = slot.head_yaw;
+            if slot.lerp_head_steps > 0 {
+                slot.head_yaw = rot_lerp(
+                    1.0 / f32::from(slot.lerp_head_steps),
+                    slot.head_yaw,
+                    slot.lerp_head_yaw,
+                );
+                slot.lerp_head_steps -= 1;
             }
-            slot.head_yaw_dirty = false;
-            slot.lerp.tick(&mut slot.pos, &mut slot.prev_pos);
+            slot.lerp.tick(&mut LerpTarget {
+                pos: &mut slot.pos,
+                prev_pos: &mut slot.prev_pos,
+                yaw: &mut slot.yaw,
+                prev_yaw: &mut slot.prev_yaw,
+                pitch: &mut slot.pitch,
+                prev_pitch: &mut slot.prev_pitch,
+            });
             let d = slot.pos - slot.prev_pos;
             let dist = f32::sqrt((d.x * d.x + d.z * d.z) as f32);
             // `LivingEntity.calculateEntityAnimation`: passengers and the dead stop walking.
             let passenger = riding.vehicle_of(slot.id).is_some();
             if !passenger && !slot.dead {
                 let target = (dist * 4.0).min(1.0);
-                slot.walk.update(target, 0.4, 1.0);
+                // `LivingEntity.updateWalkAnimation`: babies swing at three times the position
+                // scale (`isBaby() ? 3.0F : 1.0F`).
+                let baby = !slot.is_player_type && crate::registry::is_baby(&slot.metadata);
+                slot.walk.update(target, 0.4, if baby { 3.0 } else { 1.0 });
             } else {
                 slot.walk.stop();
             }
@@ -895,11 +989,12 @@ impl EntityStore {
             } else {
                 Vec3::ONE
             };
-            // Living models turn with their body yaw; a non-living box follows its packet yaw.
+            // Living models turn with their body yaw; a non-living box follows its yaw
+            // (`Entity.getYRot(partialTicks)`).
             let yaw = if has_head {
                 slot.body_yaw_at(partial_tick)
             } else {
-                slot.yaw
+                slot.yaw_at(partial_tick)
             };
             let type_name = crate::registry::entity_type_name(slot.kind);
             let is_baby = !slot.is_player_type && crate::registry::is_baby(&slot.metadata);
@@ -951,7 +1046,7 @@ impl EntityStore {
                 model,
                 pos,
                 yaw,
-                pitch: slot.pitch,
+                pitch: slot.pitch_at(partial_tick),
                 head_yaw: slot.head_yaw,
                 // Slime/magma cube size (`AbstractCubeMob.ID_SIZE`); 1.0 for everything else.
                 scale: crate::variants::scale_for(slot.kind, &slot.metadata),

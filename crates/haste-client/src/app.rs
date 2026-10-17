@@ -473,6 +473,12 @@ impl Session {
         let entity_types = data.registries.len("minecraft:entity_type");
         let mut driver = driver;
         driver.session.set_entity_type_names(type_names);
+        {
+            let regs = driver.connection().registries();
+            driver
+                .session
+                .set_attribute_names(net::attribute_names(regs, &data));
+        }
         let view_distance = login.view_distance.min(options.render_distance as i32);
         // Block entity type names by synced registry id (the static registry's order when the
         // server did not sync one), and the block states whose lids `block_event` drives.
