@@ -2,12 +2,16 @@
 //! local player and produces the serverbound packets a vanilla client sends for each tick.
 //!
 //! Per tick, in this order (the order a vanilla client is observed to send them in):
-//! 1. `player_input` when the held movement keys changed since the last one sent,
-//! 2. physics (`haste_physics::tick_with`),
-//! 3. `player_abilities` when flight was toggled or ended by landing,
-//! 4. `player_command` start/stop sprinting when the sprint state changed,
-//! 5. one of `move_player_pos_rot` / `_pos` / `_rot` / `_status_only` (send rules below),
-//! 6. `client_tick_end`.
+//! 1. `set_carried_item` when the hotbar slot changed underneath the last value sent
+//!    (`gameMode.tick` -> `ensureHasSentCarriedItem`),
+//! 2. the interactions (hotbar keys, clicks, held use, `continueAttack` — `handleKeybinds`),
+//! 3. physics (`haste_physics::tick_with`) with `player_command` START_FALL_FLYING and
+//!    `player_abilities` from `aiStep`,
+//! 4. `player_input` when the held movement keys changed since the last one sent
+//!    (`sendChanges` runs after `aiStep`),
+//! 5. `player_command` start/stop sprinting when the sprint state changed,
+//! 6. one of `move_player_pos_rot` / `_pos` / `_rot` / `_status_only` (send rules below),
+//! 7. `client_tick_end` — every tick a world exists, before `player_loaded` too.
 //!
 //! Movement send rules (wiki "Java Edition protocol", "Set Player Position"; checked against the
 //! vanilla server's movement checks): the position is sent when it moved more than 2.0E-4 blocks
@@ -208,6 +212,11 @@ pub struct LocalPlayer {
     pub own_flags: crate::screen_effects::OwnFlags,
     /// Selected hotbar slot (0..8).
     pub held_slot: i32,
+    /// The hotbar slot the server was last told about (`MultiPlayerGameMode.carriedIndex`).
+    /// `LocalPlayer::ensure_carried_item` (vanilla `ensureHasSentCarriedItem`, the start of
+    /// every `gameMode.tick`) sends the echo when the slot changed underneath it — the
+    /// client's own pick or the server's `set_held_slot`.
+    carried_index: i32,
     /// Whether a `player_position` arrived since login/respawn.
     pub has_position: bool,
     /// Whether `player_loaded` was sent since login/respawn (movement is sent only after).
@@ -268,6 +277,10 @@ pub struct LocalPlayer {
     toggle_flight: bool,
     /// The local player's own block sounds (client-side rules, sound.rs).
     pub(crate) own_sounds: crate::sound::OwnBlockSounds,
+    /// The local player's footsteps (client-side rules, sound/steps.rs).
+    steps: crate::sound::StepSounds,
+    /// The local player's own fall sounds (client-side rules, sound/falls.rs).
+    fall_sounds: crate::sound::FallSounds,
     /// Own-sound requests this tick, drained into `Session::sound_requests` by `end_tick`.
     pub(crate) sound_out: Vec<crate::sound::SoundRequest>,
     /// Own block particles this tick (our break prediction's destroy grid, the
@@ -288,6 +301,10 @@ pub struct LocalPlayer {
     water_vision_time: i32,
     /// Breaking, placing, using, attacking, hotbar and inventory (player/interact.rs).
     pub(crate) int: interact::Interaction,
+    /// Vanilla `LocalPlayer.handsBusy` (`isHandsBusy`): true while rowing — a movement key
+    /// held while controlling a boat (`rideTick` sets it each passenger tick, clears it on
+    /// dismount). While it is, `Minecraft.startAttack` and `startUseItem` do nothing.
+    hands_busy: bool,
     /// The first-person hand's per-tick animation state (player/hand.rs): swing, equip
     /// progress and bob, filled for the render state at the end of each tick.
     pub hand: hand::Hand,
@@ -312,6 +329,7 @@ impl LocalPlayer {
             air_supply: 300,
             own_flags: crate::screen_effects::OwnFlags::default(),
             held_slot: 0,
+            carried_index: 0,
             has_position: false,
             loaded: false,
             vehicle: None,
@@ -337,6 +355,8 @@ impl LocalPlayer {
             attributes_dirty: false,
             toggle_flight: false,
             own_sounds: crate::sound::OwnBlockSounds::new(),
+            steps: crate::sound::StepSounds::new(),
+            fall_sounds: crate::sound::FallSounds::new(),
             sound_out: Vec::new(),
             block_particles_out: Vec::new(),
             jump_trigger_time: 0,
@@ -344,6 +364,7 @@ impl LocalPlayer {
             jump_held: false,
             water_vision_time: 0,
             int: interact::Interaction::default(),
+            hands_busy: false,
             hand: hand::Hand::new(),
         };
         p.state.on_ground = true;
@@ -435,8 +456,9 @@ impl LocalPlayer {
 
     /// Consumes the packets about the local player. Returns false for packets it does not handle.
     /// The `out` buffer is kept for the caller's uniform signature; this handler defers every
-    /// serverbound reply to the next tick (see [`LocalPlayer::flush_pending_accept`]).
-    pub fn handle(&mut self, p: &ClientboundPlay, _out: &mut Vec<ServerboundPlay>) -> bool {
+    /// serverbound reply to the next tick (see [`LocalPlayer::flush_pending_accept`]) — except
+    /// a teleport's break abort, which vanilla sends from `handleMovePlayer` itself.
+    pub fn handle(&mut self, p: &ClientboundPlay, out: &mut Vec<ServerboundPlay>) -> bool {
         use ClientboundPlay as P;
         match p {
             P::PlayerPosition(t) => {
@@ -449,7 +471,16 @@ impl LocalPlayer {
                 // (flush_pending_accept).
                 self.pending_accept = Some(t.teleport_id);
                 self.pending_accept_age = 0;
-                self.mark_sent_position(self.state.on_ground, self.state.horizontal_collision);
+                // `ClientPacketListener.handleMovePlayer` also calls
+                // `BlockStatePredictionHandler.onTeleport` (a record of the prediction
+                // sequence at the teleport; our predictions never snap the player, so there
+                // is nothing to keep) and `MultiPlayerGameMode.stopDestroyBlock`: a running
+                // break is aborted here, before this tick's key handling — unlike the
+                // accept, which the join-teleport race above keeps a tick late.
+                self.stop_destroy(out);
+                // `xLast`/`yLast`/`zLast` are left untouched, so the first sendPosition
+                // after the teleport reports the new position whatever the threshold (the
+                // movement waits for the accept, as vanilla's handler has already answered).
             }
             P::PlayerRotation(r) => {
                 let yaw = if r.relative_yaw {
@@ -609,7 +640,7 @@ impl LocalPlayer {
             pick(teleport_flags::VEL_Z, v.z, p.velocity.z),
         );
         s.fall_distance = 0.0;
-        self.own_sounds.reset_steps();
+        self.steps.reset();
         self.set_look(yaw, pitch);
         tracing::debug!("after teleport {:?}", self.state);
         self.prev_pos = self.state.pos;
@@ -625,10 +656,9 @@ impl LocalPlayer {
     /// races the server's join bookkeeping and it logs
     /// "moved too quickly! <spawn position>" (observed on the vanilla 26.3 server, ~1 join
     /// in 8). One full tick later the server holds the login position, so the accept's
-    /// position matches it. The accepted position counts as sent (26.3's accept carries the
-    /// resulting position and rotation; an extra move_player_pos_rot right after it, what
-    /// older clients sent, gets the client kicked with invalid_player_movement after a
-    /// relative `/tp ~ ~10 ~`).
+    /// position matches it. 26.3's accept carries the resulting position and rotation; the
+    /// first move_player_pos_rot follows one tick after it, as vanilla's `sendPosition`
+    /// does (xLast untouched by the teleport — see the PlayerPosition handler).
     fn flush_pending_accept(&mut self, out: &mut Vec<ServerboundPlay>) {
         if self.pending_accept.is_none() {
             return;
@@ -660,6 +690,20 @@ impl LocalPlayer {
             // first move goes out next tick.
             out.push(ServerboundPlay::PlayerLoaded(sb::PlayerLoaded {}));
             self.loaded = true;
+        }
+    }
+
+    /// `MultiPlayerGameMode.ensureHasSentCarriedItem` (`gameMode.tick`, the start of every
+    /// client tick): the server is told the selected hotbar slot whenever it changed
+    /// underneath the last value sent — the client's own pick or the server's
+    /// `set_held_slot` (vanilla's `ClientPacketListener.handleSetHeldSlot` only sets the
+    /// inventory slot, so the next tick echoes `set_carried_item` back).
+    fn ensure_carried_item(&mut self, out: &mut Vec<ServerboundPlay>) {
+        if self.held_slot != self.carried_index {
+            self.carried_index = self.held_slot;
+            out.push(ServerboundPlay::SetCarriedItem(sb::SetCarriedItem {
+                slot: self.held_slot as i16,
+            }));
         }
     }
 
@@ -759,6 +803,7 @@ impl LocalPlayer {
             data,
             entities: &[],
             entity_types: &[],
+            border: None,
             warm_blocks: None,
         };
         self.tick_interact(input, world, &env, None, out);
@@ -848,6 +893,9 @@ impl LocalPlayer {
         // check below): their durations and blend states drive the screen effects.
         self.int.tick_effects();
         if !(self.has_position && self.loaded) {
+            // `Minecraft.tick` ends with ClientTickEnd every tick a level exists — before
+            // `player_loaded`, and with a screen open. Nothing else leaves the client yet.
+            out.push(ServerboundPlay::ClientTickEnd(sb::ClientTickEnd {}));
             return;
         }
 
@@ -871,7 +919,12 @@ impl LocalPlayer {
                 });
         }
 
-        // 0. Hotbar, crosshair target and interactions (vanilla handles key bindings before
+        // 0. `gameMode.tick` (`Minecraft.tick` runs it before `handleKeybinds`):
+        // `ensureHasSentCarriedItem` echoes the selected hotbar slot when it changed — our own
+        // pick or the server's `set_held_slot`.
+        self.ensure_carried_item(out);
+
+        // Hotbar, crosshair target and interactions (vanilla handles key bindings before
         // the player's own tick).
         let look = (
             input.yaw + self.look_offset.0,
@@ -881,25 +934,31 @@ impl LocalPlayer {
             self.interact_step(look, input.sneak, ctx.world, env, out);
         }
 
-        // 1. player_input when the held keys change (raw keys, as pressed). While riding this
-        // is how the vehicle learns our keys (steering, and sneak to dismount: the shift flag
-        // makes the server answer with a set_passengers that removes us).
+        // `LocalPlayer.sendInput`: the input packet leaves with `sendChanges`, after `aiStep`
+        // (physics, START_FALL_FLYING, the abilities toggle) and before the sprint command
+        // and the movement. While riding this is how the vehicle learns our keys (steering,
+        // and sneak to dismount: the shift flag makes the server answer with a
+        // set_passengers that removes us).
         let flags = input_bits(input);
-        if self.sent.input != Some(flags) {
-            out.push(ServerboundPlay::PlayerInput(sb::PlayerInput { flags }));
-            self.sent.input = Some(flags);
-        }
+        let send_input = |p: &mut Self, out: &mut Vec<ServerboundPlay>| {
+            if p.sent.input != Some(flags) {
+                out.push(ServerboundPlay::PlayerInput(sb::PlayerInput { flags }));
+                p.sent.input = Some(flags);
+            }
+        };
 
         // 2. The passenger tick (vanilla `rideTick`) replaces physics: a passenger sends
         // rotation only, never position packets (the server owns a passenger's position).
         if self.vehicle.is_some() {
             // The vehicle's own tick first (vanilla `ClientLevel.tickNonPassenger`), then the
-            // passenger's `rideTick` seats us on it, then `LocalPlayer.sendChanges`: the rotation
-            // and, for a vehicle we control, the `move_vehicle` that carries its simulation.
+            // passenger's `rideTick` seats us on it, then `LocalPlayer.sendChanges`: the
+            // input, the rotation and, for a vehicle we control, the `move_vehicle` that
+            // carries its simulation.
             self.boat_tick(ctx, out);
             self.horse_tick(input, look, ctx, out);
             self.item_steered_tick(look, vehicle, ctx);
             self.ride_tick(input, look, vehicle);
+            send_input(self, out);
             self.send_rotation(out);
             let item_steered = self.steered_by_item();
             let steered = match (&self.boat, &self.horse, item_steered) {
@@ -974,6 +1033,9 @@ impl LocalPlayer {
         let was_on_ground = self.state.on_ground;
         let pre_tick_pos = self.state.pos;
         let pre_tick_fall = self.state.fall_distance;
+        // The velocity this tick's move starts with (vanilla's `getDeltaMovement` at
+        // `Entity.move`): the step rule's swim-sound volume reads it.
+        let pre_tick_velocity = self.state.velocity;
         // Vanilla's double tap: while the window is armed a fresh press of jump (or the input
         // layer's own double-tap signal) toggles flight; without it a press arms the window for
         // 7 ticks. Vanilla keeps the window while the player swims, and skips the toggle on a
@@ -1021,7 +1083,7 @@ impl LocalPlayer {
             }));
         }
         if self.state.flying != was_flying {
-            self.own_sounds.reset_steps();
+            self.steps.reset();
         }
         let chunk = BlockPos::from_dvec3(self.state.pos).chunk();
         if ctx.world.is_chunk_loaded(chunk) {
@@ -1040,25 +1102,64 @@ impl LocalPlayer {
                 ctx.blocks,
                 &climb,
             );
-            // Own block sounds of moving: the step rule on the block below the
-            // feet, the fall sound on a hard landing (vanilla plays both on
-            // the client; the server excludes the acting player).
+            // Own block sounds of moving: footsteps from vanilla's step rule, the
+            // fall sound on a hard landing (the server excludes the acting player
+            // from its broadcasts, so the client plays both itself).
             let movement = self.state.pos - pre_tick_pos;
             let sound_type = ctx.env.and_then(|e| {
                 supporting_block_state(self.state.pos, ctx.world)
                     .and_then(|s| e.data.block_sound_type(s))
             });
-            self.own_sounds
-                .after_move(movement, self.state.pos, sound_type, &mut self.sound_out);
-            if !was_on_ground
-                && self.state.on_ground
-                && pre_tick_fall > SAFE_FALL_DISTANCE
-                && !self.state.in_water
-                && !self.state.flying
-            {
-                if let Some(t) = sound_type {
-                    self.own_sounds
-                        .landed_hard(self.state.pos, t, &mut self.sound_out);
+            if let Some(e) = ctx.env {
+                let (supporting, effect, primary) = crate::sound::resolve_step_blocks(
+                    self.state.pos,
+                    &self.state.aabb(&self.attrs),
+                    self.state.on_ground,
+                    ctx.world,
+                    ctx.shapes,
+                    e.data,
+                    self.int.block_tags(),
+                );
+                let steps = crate::sound::StepCtx {
+                    player_pos: self.state.pos,
+                    movement,
+                    velocity: pre_tick_velocity,
+                    on_ground: self.state.on_ground,
+                    flying: self.state.flying,
+                    discrete: self.state.sneaking,
+                    crouching: self.state.crouching,
+                    swimming: self.state.swimming,
+                    in_water: self.state.in_water,
+                    supporting,
+                    effect,
+                    primary,
+                };
+                self.steps.after_move(&steps, &mut self.sound_out);
+            }
+            if !was_on_ground && self.state.on_ground {
+                // Vanilla `Entity.checkFallDamage` runs inside the move that grounds the
+                // player with the fall distance including this tick's final fall (our
+                // physics resets it on grounding, so it is added back here).
+                let fall = pre_tick_fall as f64 - movement.y.min(0.0);
+                let landed_on = supporting_block_state(self.state.pos, ctx.world).zip(sound_type);
+                let rule = ctx.env.and_then(|e| {
+                    landed_on.map(|(state, _)| {
+                        crate::sound::FallBlockRule::of(
+                            state,
+                            self.int.block_tags(),
+                            Some(&e.data.blocks),
+                        )
+                    })
+                });
+                if let (Some((_, t)), Some(rule)) = (landed_on, rule) {
+                    self.fall_sounds.landed(
+                        self.state.pos,
+                        fall,
+                        self.abilities.may_fly,
+                        Some(crate::sound::LandedOn { sound: t }),
+                        rule,
+                        &mut self.sound_out,
+                    );
                 }
             }
         } else {
@@ -1106,6 +1207,10 @@ impl LocalPlayer {
                 flags: f,
             }));
         }
+
+        // `LocalPlayer.sendChanges` opens with the input packet (after `aiStep`, whose
+        // START_FALL_FLYING and abilities toggle went out above).
+        send_input(self, out);
 
         // 5. Sprint state.
         if self.state.sprinting != self.sent.sprinting {
@@ -1157,6 +1262,13 @@ impl LocalPlayer {
     }
 
     fn send_movement(&mut self, out: &mut Vec<ServerboundPlay>) {
+        // A teleport whose accept has not gone out yet: the first movement would name the
+        // post-teleport position before the server has taken the accept (vanilla's
+        // `handleMovePlayer` answers before the next `sendPosition` runs). It goes out with
+        // the accept's own tick, `xLast` still holding the pre-teleport position.
+        if self.pending_accept.is_some() {
+            return;
+        }
         let s = &self.state;
         if !(s.pos.is_finite() && s.yaw.is_finite() && s.pitch.is_finite()) {
             tracing::error!("non-finite player state, not sent: {s:?}");
@@ -1224,10 +1336,6 @@ impl LocalPlayer {
         self.sent.horizontal_collision = s.horizontal_collision;
     }
 }
-
-/// Vanilla's safe fall distance (the `SAFE_FALL_DISTANCE` attribute's default):
-/// a landing from above this plays the block's fall sound; below it, nothing.
-pub const SAFE_FALL_DISTANCE: f32 = 3.0;
 
 /// The block supporting the player at `pos` (vanilla `Entity.getOnPosLegacy`:
 /// the block at feet y minus 0.2), for step and fall sounds.

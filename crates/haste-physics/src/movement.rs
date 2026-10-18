@@ -208,7 +208,28 @@ pub fn tick_with(
     }
 
     if state.flying {
-        flying::travel(state, input, impulse, attrs, world, shapes, blocks);
+        // vanilla `LocalPlayer.aiStep`: while flying, jump/sneak steer y directly by three
+        // times the flying speed per tick, before the travel.
+        flying::apply_vertical_impulse(state, input, attrs);
+        if state.in_water || state.in_lava {
+            // vanilla `Player.travel`: with flight on, the y velocity is saved, the normal travel
+            // runs (the fluid one in water/lava: `LivingEntity.travel` -> `travelInFluid`), then y
+            // is restored to the saved value times 0.6.
+            let saved_y = state.velocity.y;
+            if state.in_water {
+                fluids::travel_water(state, input, impulse, attrs, world, shapes, blocks, climb);
+            } else {
+                fluids::travel_lava(state, input, impulse, attrs, world, shapes, blocks);
+            }
+            state.velocity.y = saved_y * flying::VERTICAL_FLY_DRAG;
+            // Landing ends creative flight, except for spectators (vanilla `LocalPlayer.aiStep`:
+            // `onGround() && abilities.flying && !gameMode.isSpectator()`).
+            if state.on_ground && !state.spectating {
+                state.flying = false;
+            }
+        } else {
+            flying::travel(state, input, impulse, attrs, world, shapes, blocks);
+        }
     } else if state.in_water {
         // vanilla `LivingEntity.travel`: the fluid branch wins over gliding (entering water
         // switches a glider to swim physics; the server clears the flag separately).
@@ -783,6 +804,114 @@ mod tests {
             w.set(0, 2, 0, fluid); // surface 2 + 8/9: depth 1.389 > 0.4
         }
         w // surface 1 + 8/9: depth from the feet 0.389 <= 0.4
+    }
+
+    /// A stone floor with the fluid up to y = 19: a player at y = 10 is fully submerged.
+    fn deep_fluid(fluid: haste_core::BlockStateId) -> TestWorld {
+        let mut w = TestWorld::flat(0, STONE);
+        w.fill((-50, 0, -50), (50, 19, 50), fluid);
+        w
+    }
+
+    /// vanilla `Player.travel`: a flying player in water or lava runs the fluid travel
+    /// (`LivingEntity.travel` -> `travelInFluid`), not the flight acceleration, so horizontal
+    /// flight in a fluid is far slower than in air.
+    #[test]
+    fn flying_in_fluid_covers_less_distance_than_flying_in_air() {
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let input = InputState {
+            forward: true,
+            ..Default::default()
+        };
+        let mut air = PlayerState::at(DVec3::new(0.5, 100.0, 0.5));
+        air.flying = true;
+        let mut water = PlayerState::at(DVec3::new(0.5, 10.0, 0.5));
+        water.flying = true;
+        let mut lava = PlayerState::at(DVec3::new(0.5, 10.0, 0.5));
+        lava.flying = true;
+        for _ in 0..20 {
+            tick(
+                &mut air,
+                &input,
+                &attrs,
+                &TestWorld::new(),
+                &shapes,
+                &shapes,
+            );
+            tick(
+                &mut water,
+                &input,
+                &attrs,
+                &deep_fluid(WATER_SOURCE),
+                &shapes,
+                &shapes,
+            );
+            tick(
+                &mut lava,
+                &input,
+                &attrs,
+                &deep_fluid(LAVA_SOURCE),
+                &shapes,
+                &shapes,
+            );
+        }
+        let air_d = air.pos.z - 0.5;
+        assert!(
+            water.pos.z - 0.5 < air_d * 0.5,
+            "flying in water covers {} blocks against {} in air",
+            water.pos.z - 0.5,
+            air_d
+        );
+        assert!(
+            lava.pos.z - 0.5 < air_d * 0.5,
+            "flying in lava covers {} blocks against {} in air",
+            lava.pos.z - 0.5,
+            air_d
+        );
+        assert_eq!(water.pos.y, 10.0, "the y restore keeps the flyer hovering");
+        assert_eq!(water.velocity.y, 0.0);
+    }
+
+    /// Hand-computed from vanilla's formulas for a flying player in deep water moving forward
+    /// from rest (`LivingEntity.travelInWater` + `Player.travel`): each tick adds 0.98 x 0.02
+    /// (the input scale x the fluid acceleration) to z, moves by it, drags z by the water drag
+    /// 0.8, and `Player.travel` restores y to the tick-start value times 0.6 - 0 every tick here,
+    /// so the flyer hovers.
+    #[test]
+    fn flying_in_water_matches_hand_computed_fluid_travel() {
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let input = InputState {
+            forward: true,
+            ..Default::default()
+        };
+        let mut s = PlayerState::at(DVec3::new(0.5, 10.0, 0.5));
+        s.flying = true;
+        let a = INPUT_SCALE as f64 * fluids::FLUID_ACCELERATION as f64;
+        let v1 = a;
+        let v2 = v1 * fluids::WATER_DRAG + a;
+        let v3 = v2 * fluids::WATER_DRAG + a;
+        for _ in 0..3 {
+            tick(
+                &mut s,
+                &input,
+                &attrs,
+                &deep_fluid(WATER_SOURCE),
+                &shapes,
+                &shapes,
+            );
+        }
+        assert!(
+            (s.pos.z - (0.5 + v1 + v2 + v3)).abs() < 1e-12,
+            "pos {:?}",
+            s.pos
+        );
+        assert_eq!(s.pos.y, 10.0, "hovering: y never moves");
+        assert_eq!(
+            s.velocity.y, 0.0,
+            "y restored to the tick-start value times 0.6"
+        );
     }
 
     #[test]
