@@ -4,12 +4,14 @@
 //! The rig lives in `tests.rs`; only the crosshair-look variant of its tick is
 //! here (it is fixed at straight down there).
 
+use glam::DVec3;
 use haste_core::game::GameMode;
 use haste_core::input::{InputState, InteractInput};
+use haste_core::{Aabb, BlockPos, Direction, EntityId};
 use haste_physics::testing::TestWorld;
 use haste_protocol::ServerboundPlay;
 
-use super::tests::{actions, data, item, Rig, ATTACK, USE};
+use super::tests::{actions, data, item, Rig, ATTACK, USE, ZOMBIE};
 use super::{action, InteractEnv};
 
 /// `minecraft:dirt` in the test registry (see `tests::data`): a block item.
@@ -216,4 +218,90 @@ fn a_writable_book_use_swings_and_opens_the_editor() {
     );
     assert!(r.p.hand.is_swinging(), "the use started a swing");
     assert_eq!(r.p.take_used_screen(), Some(super::UsedScreen::ItemGui(0)));
+}
+
+/// Bug C: a block item placed where an entity stands fails
+/// (`BlockItem.place` -> `canPlace` -> `Level.isUnobstructed` with the entity
+/// boxes): `Minecraft.startUseItem` returns on the Fail — no swing, no place
+/// sound — but the `use_item_on` packet still goes out (vanilla sends it
+/// inside `startPrediction` before the placement runs), and the use stops
+/// there: no `use_item` for the other hand.
+#[test]
+fn a_block_placed_into_an_entitys_box_fails_silently() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.p.int.hotbar[0] = item(DIRT_ITEM);
+    // A zombie beside the crosshair (the ray runs at x = 0.5), its box reaching
+    // into the cell the block would occupy at (0, 0, 2).
+    r.add_entity(
+        EntityId(9),
+        Aabb::entity(DVec3::new(1.1, 0.0, 2.5), 0.6, 1.95),
+        ZOMBIE,
+    );
+    r.p.int.offhand = item(3); // a stick: a Fail never falls through to it
+    let out = tick_looking(&mut r, 45.0, USE);
+    match &out[..] {
+        [ServerboundPlay::UseItemOn(u)] => {
+            assert_eq!(u.pos, BlockPos::new(0, -1, 2));
+            assert_eq!(u.face, Direction::Up as i32);
+        }
+        p => panic!("only the packet went out: {p:?}"),
+    }
+    assert!(
+        !r.p.hand.is_swinging(),
+        "the failed placement swings nothing"
+    );
+    assert!(
+        r.p.take_own_sound_requests().next().is_none(),
+        "no place sound for a failed placement"
+    );
+}
+
+/// The unobstructed half of the same use: the placement succeeds on the
+/// client, so `Minecraft.startUseItem` swings, `player.itemUsed(hand)` drops
+/// the hand and `BlockItem.place` plays the place sound at the placement
+/// position.
+#[test]
+fn an_unobstructed_placement_swings_and_sounds() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.p.int.hotbar[0] = item(DIRT_ITEM);
+    r.p.int.offhand = item(3); // a stick: the Success stops before it
+    let out = tick_looking(&mut r, 45.0, USE);
+    assert!(matches!(out[0], ServerboundPlay::UseItemOn(_)), "{out:?}");
+    assert!(
+        !out.iter().any(|p| matches!(p, ServerboundPlay::UseItem(_))),
+        "the placement is a Success, no use_item follows: {out:?}"
+    );
+    assert!(r.p.hand.is_swinging(), "the use started a swing");
+    assert_eq!(r.p.hand.equip(), (0.0, 0.0), "itemUsed dropped the hand");
+    let sounds = r.p.take_own_sound_requests().collect::<Vec<_>>();
+    assert_eq!(sounds.len(), 1, "the place sound plays");
+    assert!(matches!(
+        sounds[0],
+        crate::sound::SoundRequest::Play(ref p) if matches!(
+            p.pos,
+            crate::sound::SoundPos::Fixed(d) if d == DVec3::new(0.5, 0.5, 2.5)
+        )
+    ));
+}
+
+/// `Level.isUnobstructed` passes source null, so the placing player's own box
+/// obstructs too: a block cannot be placed into the space the player stands
+/// in (vanilla's reason a block clutch needs a jump).
+#[test]
+fn a_block_cannot_be_placed_into_the_players_own_box() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.p.int.hotbar[0] = item(DIRT_ITEM);
+    // Straight down (the rig's fixed look): the clicked block is (0, -1, 0), so
+    // the placement position is the player's feet cell (0, 0, 0).
+    let out = r.tick(USE);
+    assert!(matches!(out[0], ServerboundPlay::UseItemOn(_)), "{out:?}");
+    assert!(
+        !out.iter().any(|p| matches!(p, ServerboundPlay::UseItem(_))),
+        "the Fail stops the use: {out:?}"
+    );
+    assert!(
+        !r.p.hand.is_swinging(),
+        "the failed placement swings nothing"
+    );
+    assert!(r.p.take_own_sound_requests().next().is_none());
 }

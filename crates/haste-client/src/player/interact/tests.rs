@@ -25,7 +25,7 @@ const ITEM_ENTITY: RegistryIndex = RegistryIndex(0);
 const EXPERIENCE_ORB: RegistryIndex = RegistryIndex(1);
 const ARROW: RegistryIndex = RegistryIndex(2);
 const SPECTRAL_ARROW: RegistryIndex = RegistryIndex(3);
-const ZOMBIE: RegistryIndex = RegistryIndex(5);
+pub(super) const ZOMBIE: RegistryIndex = RegistryIndex(5);
 const PLAYER: RegistryIndex = RegistryIndex(6);
 const ENDER_DRAGON: RegistryIndex = RegistryIndex(7);
 const VILLAGER: RegistryIndex = RegistryIndex(12);
@@ -145,6 +145,14 @@ pub(super) fn data() -> &'static haste_data::GameData {
                 ]
                 .join(",")
             ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("block_sounds.json"),
+            r#"{"sound_types": [{"break": "minecraft:block.grass.break", "step": "minecraft:block.grass.step",
+                "place": "minecraft:block.grass.place", "hit": "minecraft:block.grass.hit",
+                "fall": "minecraft:block.grass.fall", "volume": 1.0, "pitch": 1.0}],
+            "blocks": {"minecraft:dirt": {"sound": 0}, "minecraft:stone": {"sound": 0}}}"#,
         )
         .unwrap();
         haste_data::GameData::load_from(&reports, Some(&dir.join("block_shapes.json"))).unwrap()
@@ -275,7 +283,7 @@ impl Rig {
     }
 
     /// An entity the crosshair could hit, with its `minecraft:entity_type` registry index.
-    fn add_entity(&mut self, id: EntityId, aabb: Aabb, type_index: RegistryIndex) {
+    pub(super) fn add_entity(&mut self, id: EntityId, aabb: Aabb, type_index: RegistryIndex) {
         self.entities.push((id, aabb));
         self.types.push(type_index);
     }
