@@ -55,6 +55,21 @@ pub(super) fn tick(s: &Session, shared: &Shared, prev_look: (f32, f32), look: (f
             progress: swing_progress,
         },
     });
+    // The worn equipment in the tracked entities' shape: the held stack and the four armour
+    // pieces by their wire slots (`set_equipment`'s numbering), read per tick by the render
+    // thread through `equipment_by_slot` exactly like a remote player's. This is what draws
+    // the armour (and an elytra's `WingsLayer`) on our own model.
+    model.equipment.clear();
+    if !s.player.main_hand().is_empty() {
+        model.equipment.push((0, s.player.main_hand().clone()));
+    }
+    for (wire, armor) in [(5u8, 0usize), (4, 1), (3, 2), (2, 3)] {
+        if !s.player.int.armor[armor].is_empty() {
+            model
+                .equipment
+                .push((wire, s.player.int.armor[armor].clone()));
+        }
+    }
 }
 
 /// Pushes the local player's own instance onto the render list (the render thread's step for
