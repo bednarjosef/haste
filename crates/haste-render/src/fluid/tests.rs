@@ -898,6 +898,7 @@ fn mesher_culls_fluid_faces_with_real_shapes() {
         )),
         Arc::new(crate::mesher::AoTable::all_solid(states.len())),
         Arc::new(occluders),
+        Arc::new(crate::mesher::FaceOccluders::absent()),
     );
     let west_face_vertices = |fluid_state: BlockStateId| -> usize {
         struct OnePair {

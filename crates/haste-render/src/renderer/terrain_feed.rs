@@ -36,8 +36,9 @@ impl Renderer {
     }
 
     /// The per-state shape tables from haste-data's shape data: the AO occluder table
-    /// (vanilla `getShadeBrightness <= 0.2`) and the fluid face-occlusion shapes
-    /// (`BlockState.getOcclusionShape`). Applies to sections meshed afterwards: call it
+    /// (vanilla `getShadeBrightness <= 0.2`), the fluid face-occlusion shapes and the
+    /// terrain face-occlusion shapes (`BlockState.getOcclusionShape`, vanilla
+    /// `Block.shouldRenderFace`). Applies to sections meshed afterwards: call it
     /// before the first chunks.
     pub fn set_shapes(
         &mut self,
@@ -51,6 +52,7 @@ impl Renderer {
             shapes,
             &self.baked,
         ));
+        tables.face_occluders = Arc::new(crate::mesher::FaceOccluders::from_shapes(states, shapes));
         self.mesher.set_tables(tables);
     }
 
