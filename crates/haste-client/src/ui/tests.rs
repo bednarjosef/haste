@@ -1,6 +1,8 @@
 use super::packets::{read_var_int, FORWARDED, FORWARDED_LOCAL};
 use super::*;
 
+mod click_timing;
+
 #[test]
 fn var_ints() {
     let mut i = 0;
