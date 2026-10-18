@@ -160,10 +160,10 @@ impl PlayerState {
     }
 
     /// Vanilla `LivingEntity.canGlide` (with `Player`'s `!abilities.flying`): the player must be
-    /// in the air and carry a glider. Being a passenger and having levitation are the caller's
-    /// checks (`PlayerState` has no field for them yet).
+    /// in the air, without levitation, and carry a glider. Being a passenger is the caller's check
+    /// (`PlayerState` has no field for it yet).
     pub fn can_glide(&self, has_glider: bool) -> bool {
-        has_glider && !self.flying && !self.on_ground
+        has_glider && !self.flying && !self.on_ground && self.levitation.is_none()
     }
 
     /// Whether gliding must end now: vanilla `LivingEntity.updateFallFlying` clears the flag once

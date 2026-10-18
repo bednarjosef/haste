@@ -38,9 +38,9 @@ pub const VERTICAL_DRAG: f32 = 0.98;
 /// Horizontal boost of a sprint jump, along the facing direction (mcpk.wiki "Horizontal Movement
 /// Formulas"; checked against the wiki's 7.127 m/s sprint-jump speed in tests/scenarios.rs).
 pub const SPRINT_JUMP_BOOST: f32 = 0.2;
-/// Extra jump power per jump-boost level (vanilla `LivingEntity.getJumpBoostPower`: 0.1 per
-/// amplifier + 1).
-pub const JUMP_BOOST_POWER_PER_LEVEL: f64 = 0.1;
+/// Extra jump power per jump-boost level (vanilla `LivingEntity.getJumpBoostPower`: `0.1F` per
+/// amplifier + 1, computed in float).
+pub const JUMP_BOOST_POWER_PER_LEVEL: f32 = 0.1;
 /// Levitation rise per level (vanilla `LivingEntity.travelInAir`: 0.05 x (amplifier + 1)).
 pub const LEVITATION_RISE_PER_LEVEL: f64 = 0.05;
 /// How fast levitation blends the vertical velocity towards its rise each tick (vanilla
@@ -203,7 +203,7 @@ pub fn tick_with(
 
     // Vanilla `LivingEntity.aiStep`, just before `travel`: either effect resets the fall
     // distance, so slow falling and levitation never accumulate fall damage.
-    if state.slow_falling || state.levitation_level > 0 {
+    if state.slow_falling || state.levitation.is_some() {
         state.fall_distance = 0.0;
     }
 
@@ -509,7 +509,9 @@ fn jump(
     // then takes y = max(jump power, current y), so jumping keeps a faster rise. The sprint boost
     // uses the same deg->rad conversion as the movement code (no separate jump constant).
     let power = attrs.jump_strength * factor as f64
-        + JUMP_BOOST_POWER_PER_LEVEL * f64::from(state.jump_boost_level);
+        + state.jump_boost.map_or(0.0, |amplifier| {
+            f64::from(JUMP_BOOST_POWER_PER_LEVEL * (amplifier as f32 + 1.0))
+        });
     if power > 1.0e-5 {
         state.velocity.y = power.max(state.velocity.y);
         if state.sprinting {
@@ -560,8 +562,8 @@ fn travel_normal(
     // Vanilla `LivingEntity.travelInAir`: levitation blends the vertical velocity towards
     // `0.05 * (amplifier + 1)` per tick and replaces gravity entirely; otherwise the effective
     // gravity applies (slow falling caps it at 0.01 while falling, `getEffectiveGravity`).
-    if state.levitation_level > 0 {
-        let rise = LEVITATION_RISE_PER_LEVEL * f64::from(state.levitation_level);
+    if let Some(amplifier) = state.levitation {
+        let rise = LEVITATION_RISE_PER_LEVEL * f64::from(amplifier + 1);
         state.velocity.y += (rise - state.velocity.y) * LEVITATION_BLEND;
     } else {
         state.velocity.y -= elytra::effective_gravity(attrs, state.velocity, state.slow_falling);
@@ -1069,7 +1071,7 @@ mod tests {
         let shapes = TestShapes::default();
         let attrs = PlayerAttributes::default();
         let mut s = PlayerState::at(DVec3::new(0.5, 5.0, 0.5));
-        s.levitation_level = 1;
+        s.levitation = Some(0);
         s.velocity = DVec3::ZERO;
         tick(&mut s, &InputState::default(), &attrs, &w, &shapes, &shapes);
         // (0.05 - 0.0) * 0.2 = 0.01, then * 0.98.
@@ -1080,7 +1082,7 @@ mod tests {
         );
         // Levitation II (level 2) targets 0.1: a tick from rest blends 0.02, then * 0.98.
         let mut s = PlayerState::at(DVec3::new(0.5, 5.0, 0.5));
-        s.levitation_level = 2;
+        s.levitation = Some(1);
         s.velocity = DVec3::ZERO;
         tick(&mut s, &InputState::default(), &attrs, &w, &shapes, &shapes);
         assert!(
@@ -1098,7 +1100,7 @@ mod tests {
         let shapes = TestShapes::default();
         let attrs = PlayerAttributes::default();
         let mut s = PlayerState::at(DVec3::new(0.5, 5.0, 0.5));
-        s.levitation_level = 1;
+        s.levitation = Some(0);
         s.velocity = DVec3::new(0.0, -0.5, 0.0);
         s.fall_distance = 10.0;
         tick(&mut s, &InputState::default(), &attrs, &w, &shapes, &shapes);
@@ -1173,14 +1175,16 @@ mod tests {
         let attrs = PlayerAttributes::default();
         let mut s = PlayerState::at(DVec3::new(0.5, 0.0, 0.5));
         s.on_ground = true;
-        s.jump_boost_level = 1;
+        s.jump_boost = Some(0);
         let input = InputState {
             jump: true,
             ..Default::default()
         };
         tick(&mut s, &input, &attrs, &w, &shapes, &shapes);
         assert!(
-            (s.velocity.y - (attrs.jump_strength + 0.1 - attrs.gravity) * VERTICAL_DRAG as f64)
+            (s.velocity.y
+                - (attrs.jump_strength + f64::from(0.1_f32) - attrs.gravity)
+                    * VERTICAL_DRAG as f64)
                 .abs()
                 < 1e-15,
             "{}",

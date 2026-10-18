@@ -588,12 +588,9 @@ impl Interaction {
 
     /// The movement effects the physics tick reads, from our active effects
     /// (`LivingEntity.hasEffect` / `getEffect(...).getAmplifier()`): the levitation and jump-boost
-    /// levels (amplifier + 1, 0 without) and whether slow falling is on.
-    pub fn movement_effects(&self) -> (u32, bool, u32) {
-        let level = |id: Option<i32>| {
-            id.and_then(|i| self.effects.get(&i))
-                .map_or(0, |e| (e.amplifier + 1).max(0) as u32)
-        };
+    /// amplifiers (`None` without the effect) and whether slow falling is on.
+    pub fn movement_effects(&self) -> (Option<i32>, bool, Option<i32>) {
+        let level = |id: Option<i32>| id.and_then(|i| self.effects.get(&i)).map(|e| e.amplifier);
         let ids = self.movement_effect_ids;
         (
             level(ids.levitation),
