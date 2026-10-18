@@ -58,11 +58,20 @@ pub fn fluid_quads(
     // Faces are culled against the neighbour's occlusion shape (`isFaceOccludedByNeighbor`):
     // the bottom with vanilla's MAX_FLUID_HEIGHT, the top with the lowest corner (a full
     // block above hides only a full-height surface), each side with its higher corner.
+    // The bottom and the sides also go through `shouldRenderFace`, whose
+    // `isFaceOccludedBySelf` drops faces the fluid block's own state covers (the water
+    // surface inside a waterlogged top slab or stair).
     let occluded = |q: BlockPos, dir: Direction, height: f32| {
         is_face_occluded(dir, height, world.face_occluder(q, dir))
     };
+    let self_occluded = |dir: Direction| {
+        let opp = dir.opposite();
+        is_face_occluded(opp, 1.0, world.face_occluder(p, opp))
+    };
     let below = p.add(0, -1, 0);
-    let render_down = !same(below) && !occluded(below, Direction::Down, MAX_FLUID_HEIGHT);
+    let render_down = !same(below)
+        && !self_occluded(Direction::Down)
+        && !occluded(below, Direction::Down, MAX_FLUID_HEIGHT);
     let bottom = if render_down { INSET } else { 0.0 };
     let above = p.add(0, 1, 0);
     let min_h = h.iter().copied().fold(1.0f32, f32::min);
@@ -134,7 +143,7 @@ pub fn fluid_quads(
     ];
     for (dir, o, a, b) in sides {
         let q = p.add(o[0], o[1], o[2]);
-        if same(q) || occluded(q, dir, a[2].max(b[2])) {
+        if same(q) || self_occluded(dir) || occluded(q, dir, a[2].max(b[2])) {
             continue;
         }
         let overlay = def.overlay && table.overlay(world.state(q));

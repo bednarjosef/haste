@@ -447,6 +447,49 @@ fn backward_up_face_only_when_visible_from_above_layer() {
 }
 
 #[test]
+fn waterlogged_block_culls_faces_its_own_shape_covers() {
+    // FluidRenderer.shouldRenderFace runs every face but the top through
+    // isFaceOccludedBySelf: the water inside a waterlogged bottom slab loses its
+    // bottom face (the slab sits on it), everything else stays; a top slab hides
+    // nothing of the fluid (its shape does not touch the fluid's bottom face).
+    let t = table();
+    let f = t.fluid(water(0)).unwrap();
+    let dirs = |g: &Grid| {
+        let mut q = Vec::new();
+        fluid_quads(g, &t, at(0, 0, 0), f, &mut q);
+        q.iter()
+            .map(|q| q.dir)
+            .collect::<std::collections::HashSet<_>>()
+    };
+    let mut g = Grid::default();
+    g.set(0, 0, 0, water(0));
+    g.shapes
+        .insert(water(0), vec![[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]]);
+    let d = dirs(&g);
+    assert!(
+        !d.contains(&Direction::Down),
+        "bottom slab covers the bottom"
+    );
+    assert!(d.contains(&Direction::Up));
+    assert!(d.contains(&Direction::North));
+
+    let mut g = Grid::default();
+    g.set(0, 0, 0, water(0));
+    g.shapes
+        .insert(water(0), vec![[0.0, 0.5, 0.0, 1.0, 1.0, 1.0]]);
+    let d = dirs(&g);
+    assert!(
+        d.contains(&Direction::Down),
+        "top slab leaves the bottom open"
+    );
+    assert!(
+        d.contains(&Direction::Up),
+        "the top face has no self-occlusion"
+    );
+    assert!(d.contains(&Direction::North));
+}
+
+#[test]
 fn sides_cull_against_slabs_and_stairs() {
     // isFaceOccludedByNeighbor with the neighbour's shape: a bottom slab east of a
     // low flowing block hides the east face; next to a source it does not.
