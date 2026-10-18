@@ -4,6 +4,11 @@
 //! and optional `grass_color`, `foliage_color`, `dry_foliage_color` (an int, or a `#rrggbb`
 //! string as in the data pack JSON) and `grass_color_modifier` (`none`, `dark_forest`, `swamp`).
 
+// `biomes.rs` is included through a `#[path]` module, so its submodules resolve next to it
+// in `src/`, not in `src/biomes/` — point zoom at its file explicitly.
+#[path = "biomes/zoom.rs"]
+pub mod zoom;
+
 use haste_protocol::haste_core::{BiomeId, BlockPos, Identifier};
 use haste_protocol::nbt::NbtCompound;
 use haste_protocol::SyncedRegistries;
