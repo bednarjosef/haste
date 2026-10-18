@@ -17,7 +17,7 @@ struct Sky {
     // x: cloud offset (blocks), y: fog end (blocks, cloud plane extent), z: cloud height,
     // w: sky kind (0 overworld, 1 none, 2 end).
     params: vec4<f32>,
-    // x: cloud brightness, y: cloud alpha.
+    // The cloud colour (linear RGB) and alpha.
     clouds: vec4<f32>,
     // Vanilla fog bands for the sky dome and weather: environmental start/end,
     // render distance start/end.
@@ -254,7 +254,9 @@ fn vs_clouds(@builtin(vertex_index) i: u32) -> CloudOut {
 
 @fragment
 fn fs_clouds(in: CloudOut) -> @location(0) vec4<f32> {
-    let cell = floor(vec2<f32>(in.world.x + sky.params.x, in.world.z) / 12.0);
+    // Vanilla shifts the cloud grid +3.96 blocks in z (`CloudRenderer.prepare`: cloudZ =
+    // cameraPosition.z + 3.96), so the cell under a fragment is z + 3.96.
+    let cell = floor(vec2<f32>(in.world.x + sky.params.x, in.world.z + 3.96) / 12.0);
     let c = fetch(vec2<f32>(sky.cloud_rect.xy) + cell + vec2<f32>(0.5, 0.5), sky.cloud_rect);
     if (c.a < 0.5) {
         discard;
@@ -262,5 +264,5 @@ fn fs_clouds(in: CloudOut) -> @location(0) vec4<f32> {
     // Vanilla clouds.fsh: alpha *= 1 - linear_fog_value(spherical distance, 0, cloud end).
     let rel = in.world - sky.cam_pos.xyz;
     let fade = 1.0 - linear_fog_value(length(rel), 0.0, sky.fog_bands2.y);
-    return vec4<f32>(vec3<f32>(sky.clouds.x), sky.clouds.y * fade);
+    return vec4<f32>(sky.clouds.rgb, sky.clouds.a * fade);
 }

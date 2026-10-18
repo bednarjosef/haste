@@ -1135,11 +1135,15 @@ fn frame_view<'w>(
     fog.thunder_level *= rain_level;
     let sky = SkyState {
         time_of_day: view.time_of_day,
+        game_time: view.world_age,
         rain: rain_level,
         thunder: thunder_level,
         dimension_has_sky: view.has_sky,
         fog_start: fog_end * 0.75,
         fog_end,
+        // The dimension's `visual/cloud_height` attribute: the overworld default; only
+        // sky dimensions draw clouds, and no synced source overrides it yet.
+        cloud_height: haste_render::sky::CLOUD_HEIGHT,
         // `SkyRenderer.shouldRenderDarkDisc` reads the player's interpolated eye.
         dark_disc: haste_render::sky::dark_disc::should_render_dark_disc(
             game::interpolate(view.prev_eye, view.eye, partial).y,

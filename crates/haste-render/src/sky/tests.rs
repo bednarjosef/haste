@@ -94,6 +94,52 @@ fn thunder_darkens_the_sky_further() {
     }
 }
 
+/// The cloud colour chain (`CloudRenderer.prepare`'s `color` from the `cloud_color`
+/// attribute): white 0.8 by day, the night multiplier (0.1, 0.1, 0.15) at night, then the
+/// weather layers (rain: blend to grey x0.24 by 0.5; thunder: grey x0.095 by 0.94).
+#[test]
+fn cloud_colour_follows_the_cloud_color_attribute() {
+    // Day: the overworld base, white at alpha 0.8.
+    let day = cloud_color(6000, 0.0, 0.0);
+    assert_eq!(day, [1.0, 1.0, 1.0, 0.8]);
+    // Night: the timeline's (0.1, 0.1, 0.15) multiply, alpha untouched.
+    let night = cloud_color(18000, 0.0, 0.0);
+    for i in 0..3 {
+        assert!((night[i] - [0.1, 0.1, 0.15][i]).abs() < 1e-6, "{night:?}");
+    }
+    assert_eq!(night[3], 0.8);
+    // Rain (level 1, no thunder): lerp(0.5, colour, grey * 0.24) with grey = 0.3 + 0.59 +
+    // 0.11 = 1 for white, so the target is 0.24 everywhere: 1 + (0.24 - 1) * 0.5 = 0.62.
+    let rain = cloud_color(6000, 1.0, 0.0);
+    for i in 0..3 {
+        assert!((rain[i] - 0.62).abs() < 1e-6, "{rain:?}");
+    }
+    assert_eq!(rain[3], 0.8);
+    // Full thunder (rain 1, thunder 1, so the rain layer's weight is 0): lerp(0.94,
+    // white, grey * 0.095) = 1 + (0.095 - 1) * 0.94 = 0.149.
+    let storm = cloud_color(6000, 1.0, 1.0);
+    for i in 0..3 {
+        assert!(
+            (storm[i] - (1.0 + (0.095 - 1.0) * 0.94)).abs() < 1e-6,
+            "{storm:?}"
+        );
+    }
+}
+
+/// The cloud drift advances with game time (not time of day), 0.03 blocks per tick plus
+/// the partial tick, and wraps at the clouds.png width in blocks (256 cells x 12).
+#[test]
+fn cloud_drift_uses_game_time_plus_partial() {
+    assert_eq!(cloud_drift(0, 0.0), 0.0);
+    assert!((cloud_drift(100, 0.5) - 3.015).abs() < 1e-4);
+    // Game time, not time of day: two worlds with the same time of day but 100 ticks of
+    // game time apart have their clouds 3 blocks apart.
+    assert!((cloud_drift(100, 0.0) - 3.0).abs() < 1e-4);
+    // The wrap: gameTime % (256 * 400) ticks == 3072 blocks of drift.
+    assert!((cloud_drift(256 * 400, 0.0)).abs() < 1e-4);
+    assert!((cloud_drift(256 * 400 + 100, 0.0) - 3.0).abs() < 1e-4);
+}
+
 #[test]
 fn moon_phase_cycles_daily() {
     assert_eq!(

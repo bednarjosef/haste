@@ -22,8 +22,11 @@ pub mod dark_disc;
 pub mod end_flash;
 
 const ATLAS_SIZE: u32 = 512;
-/// Cloud height in 26.3 (blocks).
+/// Cloud height in 26.3 (blocks): the overworld `visual/cloud_height` attribute's default.
 pub const CLOUD_HEIGHT: f32 = 192.33;
+/// The overworld `visual/cloud_color` attribute (`DimensionTypes` overworld: white at
+/// alpha 0.8); the day timeline and the weather layers modify it.
+pub const OVERWORLD_CLOUD_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 0.8];
 
 const MOON_PHASES: [&str; 8] = [
     "full_moon",
@@ -49,6 +52,7 @@ struct SkyUniforms {
     sunrise_dir: [f32; 4],
     cam_pos: [f32; 4],
     params: [f32; 4],
+    /// The cloud colour (linear RGB) and alpha.
     clouds: [f32; 4],
     /// Vanilla fog bands for the sky dome (0..sky_end on both distances) and the weather
     /// columns (the terrain bands): env start/end, rd start/end, sky end, cloud end.
@@ -145,6 +149,59 @@ fn srgb_to_linear(c: f32) -> f32 {
 
 pub fn linear(c: [f32; 3]) -> [f32; 3] {
     c.map(srgb_to_linear)
+}
+
+/// The clouds' eastward drift this frame (blocks): vanilla `CloudRenderer.prepare` takes
+/// `(gameTime % (width * 400)) + partialTicks` and moves the grid by `0.03` blocks per
+/// tick of it — game time, so a frozen time of day still moves the clouds.
+pub fn cloud_drift(game_time: i64, partial_tick: f32) -> f32 {
+    (game_time.rem_euclid(256 * 400) as f32 + partial_tick) * 0.030000001
+}
+
+/// The frame's cloud colour (sRGB, alpha included): the overworld `visual/cloud_color`
+/// attribute (white, alpha 0.8) under the day timeline's night multiplier
+/// (`cloud_color` MULTIPLY_ARGB, the bluish (0.1, 0.1, 0.15) at night), then the weather
+/// layers (`WeatherAttributes`: rain blends toward the greyscale times 0.24 by 0.5,
+/// thunder toward the greyscale times 0.095 by 0.94, alpha untouched —
+/// `ColorModifier.BLEND_TO_GRAY_ARGB`). Rain level is the frame's rain level, thunder
+/// the thunder level scaled by it (a dry thunderstorm cannot darken).
+pub fn cloud_color(time_of_day: i64, rain_level: f32, thunder_level: f32) -> [f32; 4] {
+    let night = crate::fog::cloud_night_multiplier(time_of_day);
+    let mut c = [
+        OVERWORLD_CLOUD_COLOR[0] * night[0],
+        OVERWORLD_CLOUD_COLOR[1] * night[1],
+        OVERWORLD_CLOUD_COLOR[2] * night[2],
+        OVERWORLD_CLOUD_COLOR[3],
+    ];
+    let blend_to_gray = |c: [f32; 4], brightness: f32, factor: f32| {
+        let grey = c[0] * 0.3 + c[1] * 0.59 + c[2] * 0.11;
+        [
+            c[0] + (grey * brightness - c[0]) * factor,
+            c[1] + (grey * brightness - c[1]) * factor,
+            c[2] + (grey * brightness - c[2]) * factor,
+            c[3],
+        ]
+    };
+    let rain_only = (rain_level - thunder_level).clamp(0.0, 1.0);
+    if rain_only > 0.0 {
+        let target = blend_to_gray(c, 0.24, 0.5);
+        c = [
+            c[0] + (target[0] - c[0]) * rain_only,
+            c[1] + (target[1] - c[1]) * rain_only,
+            c[2] + (target[2] - c[2]) * rain_only,
+            c[3],
+        ];
+    }
+    if thunder_level > 0.0 {
+        let target = blend_to_gray(c, 0.095, 0.94);
+        c = [
+            c[0] + (target[0] - c[0]) * thunder_level,
+            c[1] + (target[1] - c[1]) * thunder_level,
+            c[2] + (target[2] - c[2]) * thunder_level,
+            c[3],
+        ];
+    }
+    c
 }
 
 /// The frame's sky and fog colours (sRGB) for a sky kind; `view_distance` in chunks.
@@ -665,6 +722,7 @@ impl SkyRenderer {
 
     /// Computes this frame's colours and geometry and uploads the uniforms. `fog` is the
     /// frame's vanilla fog data (renderer.rs `frame_fog`), `fog_color` its sRGB colour.
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare(
         &mut self,
         camera: &Camera,
@@ -673,6 +731,7 @@ impl SkyRenderer {
         rot_view_proj: Mat4,
         fog: &FogData,
         fog_color: [f32; 3],
+        partial_tick: f32,
     ) {
         let kind = if sky.dimension_has_sky || self.kind != SkyKind::Overworld {
             self.kind
@@ -754,15 +813,17 @@ impl SkyRenderer {
             [l[0], l[1], l[2], 1.0]
         };
         let sunrise = linear([colors.sunrise[0], colors.sunrise[1], colors.sunrise[2]]);
-        // The clouds take their own weather layers (`WeatherAttributes`: blend to the
-        // greyscale times 0.6 by a factor of 0.5 in rain, times 0.095 by 0.94 in thunder).
-        // For the scalar brightness (a grey value) that is v * (1 - factor + factor *
-        // brightness): rain keeps 0.7 of it, thunder 0.2856.
+        // The cloud colour from the `cloud_color` attribute's chain (see `cloud_color`):
+        // the weather layers use the rain level minus the thunder level (itself scaled by
+        // the rain level, like `Level.getThunderLevel`).
         let thunder = (sky.thunder * rain).clamp(0.0, 1.0);
-        let rain_only = (rain - thunder).clamp(0.0, 1.0);
-        let cloud_value = colors.brightness * 0.9 + 0.1;
-        let cloud_value = cloud_value * (1.0 - rain_only * 0.3) * (1.0 - thunder * 0.7144);
-        let cloud_brightness = srgb_to_linear(cloud_value);
+        let cloud = cloud_color(sky.time_of_day, rain, thunder);
+        let cloud_lin = [
+            srgb_to_linear(cloud[0]),
+            srgb_to_linear(cloud[1]),
+            srgb_to_linear(cloud[2]),
+            cloud[3],
+        ];
         let u = SkyUniforms {
             view_proj: view_proj.to_cols_array_2d(),
             rot_view_proj: rot_view_proj.to_cols_array_2d(),
@@ -774,18 +835,20 @@ impl SkyRenderer {
             sunrise_dir: [colors.sunrise_side, 0.0, 0.0, colors.star_brightness],
             cam_pos: [cam.x, cam.y, cam.z, 0.0],
             params: [
-                // Clouds drift east at 0.03 blocks per tick (approximate: world time stands in
-                // for game time).
-                (sky.time_of_day as f64 * 0.03).rem_euclid(256.0 * 12.0) as f32,
+                cloud_drift(sky.game_time, partial_tick),
                 sky.fog_end,
-                CLOUD_HEIGHT,
+                if sky.cloud_height != 0.0 {
+                    sky.cloud_height
+                } else {
+                    CLOUD_HEIGHT
+                },
                 match kind {
                     SkyKind::Overworld => 0.0,
                     SkyKind::None => 1.0,
                     SkyKind::End => 2.0,
                 },
             ],
-            clouds: [cloud_brightness, 0.8, 0.0, 0.0],
+            clouds: cloud_lin,
             fog_bands: [
                 fog.environmental_start,
                 fog.environmental_end,

@@ -117,6 +117,7 @@ impl Renderer {
             rot_view_proj,
             &fog_data,
             fog_srgb,
+            frame.partial_tick,
         );
         // The weather columns (vanilla draws them in the level pass after translucent
         // terrain, right where the sky overlays run) and the lightning bolts (the entities'
