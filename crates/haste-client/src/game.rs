@@ -1657,6 +1657,12 @@ fn tick_once(
         let on_fire = driver.session.own_flags().on_fire || driver.session.screen_probe.in_fire;
         let p = &mut driver.session.player;
         let attack_speed = p.held_attack_speed();
+        // vanilla `LocalPlayer.rideTick`: `handsBusy` while the boat we steer is steered with a
+        // movement key held; `FirstPersonHandsAndItems.tick`'s busy branch reads it (the input
+        // snapshot is this tick's, the same one `rideTick` used).
+        let hands_busy = p.boat().is_some_and(|_| {
+            input.state.left || input.state.right || input.state.forward || input.state.back
+        });
         p.hand.tick(
             tick_moved,
             (p.state.yaw, p.state.pitch),
@@ -1664,6 +1670,7 @@ fn tick_once(
             matches!(p.state.pose, haste_physics::Pose::Swimming),
             p.held_stack(),
             attack_speed,
+            hands_busy,
         );
         let eye = p.camera(1.0).0;
         let hand = &p.hand;
@@ -1975,6 +1982,7 @@ mod tests {
                 false,
                 crate::hand::HeldStack::of(None),
                 4.0,
+                false,
             );
         }
         v.with_hand(&hand);
@@ -2001,6 +2009,7 @@ mod tests {
             false,
             crate::hand::HeldStack::of(None),
             4.0,
+            false,
         );
         let mut next = v;
         next.with_hand(&hand);

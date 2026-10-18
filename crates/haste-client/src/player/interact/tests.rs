@@ -1358,6 +1358,7 @@ fn a_held_attack_swings_the_hand_every_tick() {
             false,
             crate::hand::HeldStack::of(item),
             4.0,
+            false,
         );
         progress.push(r.p.hand.attack().1);
     }
@@ -1406,6 +1407,7 @@ fn a_use_swings_the_hand_and_drops_it() {
         false,
         crate::hand::HeldStack::of(item),
         4.0,
+        false,
     );
     assert_eq!(r.p.hand.equip(), (0.0, 0.0));
     assert_eq!(r.p.hand.shown_item(), item);
@@ -1416,6 +1418,7 @@ fn a_use_swings_the_hand_and_drops_it() {
         false,
         crate::hand::HeldStack::of(item),
         4.0,
+        false,
     );
     assert!(
         (r.p.hand.equip().1 - 0.064).abs() < 1e-6,
@@ -1569,6 +1572,7 @@ fn an_entity_hit_and_a_miss_reset_the_attack_strength() {
             false,
             crate::hand::HeldStack::of(None),
             4.0,
+            false,
         );
     }
     assert!((r.p.hand.attack_strength_scale(0.5) - 1.0).abs() < 1e-6);
@@ -1586,6 +1590,7 @@ fn an_entity_hit_and_a_miss_reset_the_attack_strength() {
             false,
             crate::hand::HeldStack::of(None),
             4.0,
+            false,
         );
     }
     assert!((r.p.hand.attack_strength_scale(0.5) - 1.0).abs() < 1e-6);
