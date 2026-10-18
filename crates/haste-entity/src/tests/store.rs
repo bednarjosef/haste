@@ -2,6 +2,23 @@
 //! be meaningful) and run in release via `cargo test --release -- --ignored`.
 use super::*;
 #[test]
+fn spawned_living_entity_body_yaw_from_head_yaw() {
+    let mut s = store();
+    let mut sp = spawn(1, DVec3::ZERO);
+    sp.yaw = 0.0;
+    sp.head_yaw = 90.0;
+    if let Some(names) = crate::registry::entity_type_names() {
+        if let Some((kind, _)) = names.iter().find(|(_, n)| **n == "minecraft:pig") {
+            sp.kind = *kind;
+        }
+    }
+    s.spawn(&sp);
+    let e = s.get(EntityId(1)).unwrap();
+    assert_eq!(e.body_yaw, 90.0);
+    assert_eq!(e.prev_body_yaw, 90.0);
+}
+
+#[test]
 fn spawn_get_remove() {
     let mut s = store();
     s.spawn(&spawn(1, DVec3::new(0.0, 64.0, 0.0)));

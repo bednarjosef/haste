@@ -267,15 +267,16 @@ impl EntityRenderer {
                 }
                 continue;
             }
-            let texture = match inst.kind {
+            let rect = match inst.kind {
                 crate::blockentity::BlockEntityKind::Chest(m) => {
-                    crate::blockentity::chest_texture(m, inst.half)
+                    self.texture_rect(crate::blockentity::chest_texture(m, inst.half), assets)
                 }
                 crate::blockentity::BlockEntityKind::Shulker(c) => {
-                    crate::blockentity::shulker_texture(c)
+                    self.texture_rect(crate::blockentity::shulker_texture(c), assets)
                 }
                 crate::blockentity::BlockEntityKind::Skull { kind, .. } => {
-                    crate::blockentity::skull_texture(kind)
+                    let t = crate::blockentity::skull_texture(kind);
+                    self.texture_rect(&t, assets)
                 }
                 crate::blockentity::BlockEntityKind::Sign { .. } => unreachable!(),
                 crate::blockentity::BlockEntityKind::Banner { .. } => unreachable!(),
@@ -295,7 +296,6 @@ impl EntityRenderer {
                 | crate::blockentity::BlockEntityKind::EndGateway
                 | crate::blockentity::BlockEntityKind::MovingPiston => unreachable!(),
             };
-            let rect = self.texture_rect(&texture, assets);
             let out = &mut self.vertices;
             let emit = |out: &mut Vec<EntityVertex>,
                         model: &CubeModel,
@@ -309,13 +309,20 @@ impl EntityRenderer {
             crate::blockentity::emit_block_entity(out, inst, camera, rect, &emit);
             drawn += 1;
         }
+        // One upload of the shared stream per frame: `prepare` already put the entities'
+        // vertices up, so only the tail past `start` goes here — in full when the buffer
+        // grew, because the fresh buffer holds no head (see `append_upload_range`).
+        let range = append_upload_range(self.vertices.len(), self.vertex_capacity, start);
         if self.vertices.len() > self.vertex_capacity {
             self.vertex_capacity = self.vertices.len().next_power_of_two();
             self.vertex_buffer = make_vertex_buffer(&self.device, self.vertex_capacity);
         }
-        if self.vertices.len() > start && !self.vertices.is_empty() {
-            self.queue
-                .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
+        if !range.is_empty() {
+            self.queue.write_buffer(
+                &self.vertex_buffer,
+                (range.start * std::mem::size_of::<EntityVertex>()) as u64,
+                bytemuck::cast_slice(&self.vertices[range]),
+            );
         }
         if self.beam_vertices.len() > self.beam_capacity {
             self.beam_capacity = self.beam_vertices.len().next_power_of_two();

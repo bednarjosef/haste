@@ -78,19 +78,31 @@ pub(super) fn local_month_day(t: std::time::SystemTime) -> (u32, u32) {
 }
 /// The texture a chest half is drawn with (vanilla `Sheets.chooseSprite`: `normal`/`trapped`/
 /// `christmas` with `_left`/`_right` for the double halves, `ender` single).
-pub fn chest_texture(material: ChestMaterial, half: ChestHalf) -> Identifier {
-    let prefix = match material {
-        ChestMaterial::Normal => "normal",
-        ChestMaterial::Trapped => "trapped",
-        ChestMaterial::Christmas => "christmas",
-        ChestMaterial::Ender => return Identifier::minecraft("entity/chest/ender"),
-    };
-    let suffix = match half {
-        ChestHalf::Single => "",
-        ChestHalf::Left => "_left",
-        ChestHalf::Right => "_right",
-    };
-    Identifier::minecraft(&format!("entity/chest/{prefix}{suffix}"))
+pub fn chest_texture(material: ChestMaterial, half: ChestHalf) -> &'static Identifier {
+    static TABLE: OnceLock<[Identifier; 12]> = OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        std::array::from_fn(|idx| {
+            let material = idx / 3;
+            let half = idx % 3;
+            if material == 3 {
+                return Identifier::minecraft("entity/chest/ender");
+            }
+            let prefix = match material {
+                0 => "normal",
+                1 => "trapped",
+                2 => "christmas",
+                _ => unreachable!(),
+            };
+            let suffix = match half {
+                0 => "",
+                1 => "_left",
+                2 => "_right",
+                _ => unreachable!(),
+            };
+            Identifier::minecraft(&format!("entity/chest/{prefix}{suffix}"))
+        })
+    });
+    &table[material as usize * 3 + half as usize]
 }
 
 /// Vanilla `ChestModel.createSingleBodyLayer` and friends (26.3), one model per chest half.

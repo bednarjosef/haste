@@ -53,7 +53,9 @@ pub(crate) use model_parts::{
 };
 #[cfg(test)]
 use vertex::HURT_RED_STRENGTH;
-pub(crate) use vertex::{entity_shade, hurt_color, max_local_raw_brightness, push_world_quad};
+pub(crate) use vertex::{
+    entity_shade, hand_normal_rotation, hurt_color, max_local_raw_brightness, push_world_quad,
+};
 pub use vertex::{lightmap_brightness, name_tag_visible, shadow_piece_alpha};
 use vertex::{make_vertex_buffer, parse_tex, push_shadow_quad};
 
@@ -136,6 +138,22 @@ pub(crate) fn seeded_float(seed: u32, i: u32) -> f32 {
     h ^= h >> 13;
     h = h.wrapping_mul(0x27D4_EB2F);
     (h >> 8) as f32 / (1u32 << 24) as f32
+}
+
+/// The vertex range the upload after `append_block_entities` must cover: only the tail
+/// past `start` (the entities' vertices were already uploaded by `prepare`), or everything
+/// when the buffer had to grow — a fresh buffer holds no head, so it is rewritten in full.
+/// An empty range means nothing was appended and no upload happens at all.
+pub(crate) fn append_upload_range(
+    len: usize,
+    capacity: usize,
+    start: usize,
+) -> std::ops::Range<usize> {
+    if len > capacity {
+        0..len
+    } else {
+        start..len
+    }
 }
 
 #[repr(C)]

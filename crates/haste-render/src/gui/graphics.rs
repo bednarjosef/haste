@@ -53,9 +53,9 @@ impl GuiRenderer {
             }
         }
         let scale = frame.scale.max(1) as f32;
-        let mut translate: Vec<[f32; 2]> = Vec::new();
+        self.translate.clear();
+        self.scissors.clear();
         let mut offset = [0.0f32; 2];
-        let mut scissors: Vec<[f32; 4]> = Vec::new();
         let mut scissor: Option<[u32; 4]> = None;
         let mut blend = GuiBlend::Normal;
         let mut batch_start = self.vertices.len() as u32;
@@ -214,7 +214,7 @@ impl GuiRenderer {
                             *x2 as f32 + offset[0],
                             *y2 as f32 + offset[1],
                         ];
-                        if let Some(p) = scissors.last() {
+                        if let Some(p) = self.scissors.last() {
                             r = [
                                 r[0].max(p[0]),
                                 r[1].max(p[1]),
@@ -249,7 +249,7 @@ impl GuiRenderer {
                         *x2 as f32 + offset[0],
                         *y2 as f32 + offset[1],
                     ];
-                    if let Some(p) = scissors.last() {
+                    if let Some(p) = self.scissors.last() {
                         r = [
                             r[0].max(p[0]),
                             r[1].max(p[1]),
@@ -257,23 +257,26 @@ impl GuiRenderer {
                             r[3].min(p[3]),
                         ];
                     }
-                    scissors.push(r);
+                    self.scissors.push(r);
                     let next = Some(to_framebuffer(r, scale, target));
                     let cur = blend;
                     self.switch(&mut scissor, &mut blend, next, cur, &mut batch_start);
                 }
                 GuiCommand::ScissorPop => {
-                    scissors.pop();
-                    let next = scissors.last().map(|r| to_framebuffer(*r, scale, target));
+                    self.scissors.pop();
+                    let next = self
+                        .scissors
+                        .last()
+                        .map(|r| to_framebuffer(*r, scale, target));
                     let cur = blend;
                     self.switch(&mut scissor, &mut blend, next, cur, &mut batch_start);
                 }
                 GuiCommand::TranslatePush { dx, dy, .. } => {
-                    translate.push(offset);
+                    self.translate.push(offset);
                     offset = [offset[0] + dx, offset[1] + dy];
                 }
                 GuiCommand::TranslatePop => {
-                    offset = translate.pop().unwrap_or([0.0; 2]);
+                    offset = self.translate.pop().unwrap_or([0.0; 2]);
                 }
             }
         }
