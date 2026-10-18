@@ -222,9 +222,8 @@ async fn run_async(
         let rss = std::fs::read_to_string("/proc/self/status")
             .ok()
             .and_then(|s| {
-                s.lines().find_map(|l| {
-                    l.strip_prefix("VmRSS:").map(|v| v.trim().to_string())
-                })
+                s.lines()
+                    .find_map(|l| l.strip_prefix("VmRSS:").map(|v| v.trim().to_string()))
             })
             .unwrap_or_else(|| "unknown".into());
         println!("process rss: {rss}");

@@ -29,26 +29,6 @@ pub struct WorldMemoryStats {
     pub non_empty_sections: u64,
 }
 
-/// How the loaded chunks' sky light is stored (see `World::sky_light_stats`).
-#[derive(Default)]
-pub struct SkyLightStats {
-    pub sections: u64,
-    /// No layer: reads resolve through the walk-up (`crate::sky_light`).
-    pub absent: u64,
-    /// A layer whose every cell holds one value other than 0.
-    pub uniform: u64,
-    /// A layer whose every cell is 0 (explicitly-dark sections).
-    pub uniform_zero: u64,
-    /// A non-uniform 2048-byte array.
-    pub arrays: u64,
-    /// Bytes the sky arrays cost (2048 per array plus headers).
-    pub array_bytes: u64,
-    /// Block-light arrays (non-uniform, non-zero).
-    pub block_arrays: u64,
-    /// Bytes the block arrays cost.
-    pub block_array_bytes: u64,
-}
-
 /// The loaded world of one dimension.
 pub struct World {
     dim: DimensionInfo,
@@ -217,7 +197,7 @@ impl World {
         // (`markSectionAndNeighborsAsAffected`).
         if !was_empty && now_empty {
             let idx = (sec_y - chunk.min_section) as usize;
-            chunk.light.sky[idx] = None;
+            chunk.light.sky[idx] = crate::light::SkyLight::Absent;
             chunk.light.block[idx] = crate::light::NibbleArray::default();
             for dy in -1..=1i32 {
                 for dx in -1..=1i32 {
@@ -415,49 +395,8 @@ impl World {
                     stats.non_empty_sections += 1;
                 }
             }
-            // Light: 2048-byte nibble arrays per present section, plus the Vec-of-Option
-            // slots and each NibbleArray's Bytes header (ref-counted slice: 16-byte fat
-            // pointer + the shared control block, counted once per array).
-            stats.light += chunk.light.sky.iter().flatten().count() as u64 * (2048 + 24)
-                + chunk
-                    .light
-                    .block
-                    .iter()
-                    .filter(|s| !s.all_zero() && !s.all_full())
-                    .count() as u64
-                    * (2048 + 24)
-                + (chunk.light.sky.capacity() + chunk.light.block.capacity()) as u64
-                    * std::mem::size_of::<Option<crate::light::NibbleArray>>() as u64;
-        }
-        stats
-    }
-
-    /// Sky-light storage census (diagnostics for the storage layout): how the per-section
-    /// sky light of the loaded chunks is stored, and what the arrays cost. Block light is
-    /// counted alongside (same storage, no walk-up).
-    pub fn sky_light_stats(&self) -> SkyLightStats {
-        let mut stats = SkyLightStats::default();
-        for chunk in self.chunks.values() {
-            for slot in &chunk.light.sky {
-                stats.sections += 1;
-                match slot {
-                    None => stats.absent += 1,
-                    Some(n) => match n.uniform_value() {
-                        Some(0) => stats.uniform_zero += 1,
-                        Some(_) => stats.uniform += 1,
-                        None => {
-                            stats.arrays += 1;
-                            stats.array_bytes += 2048 + 24;
-                        }
-                    },
-                }
-            }
-            for slot in &chunk.light.block {
-                if !(slot.all_zero() || slot.all_full()) {
-                    stats.block_arrays += 1;
-                    stats.block_array_bytes += 2048 + 24;
-                }
-            }
+            // Light: the layout's own accounting (see `ChunkLight::heap_bytes`).
+            stats.light += chunk.light.heap_bytes();
         }
         stats
     }
@@ -529,14 +468,11 @@ impl World {
 
         // An absent section is not all 15: it reads the bottom row of the nearest section
         // above with data (vanilla: SkyLightSectionStorage.getLightValue flattens y), so
-        // the snapshot gets a stand-in array repeating that row.
-        let sky = chunk
-            .light
-            .sky
-            .get(idx as usize)
-            .and_then(|n| n.as_ref())
-            .cloned()
-            .or_else(|| crate::sky_light::absent_array(chunk, idx as usize));
+        // the snapshot gets a stand-in repeating that row (one value when it is uniform).
+        let sky = match chunk.light.sky.get(idx as usize) {
+            Some(sky) if sky.is_storing() => sky.clone(),
+            _ => crate::sky_light::absent_section_light(chunk, idx as usize),
+        };
         let block_light = chunk
             .light
             .block
@@ -609,16 +545,12 @@ impl BlockView for World {
         match self.chunk_and_section(pos) {
             Some((c, _)) => {
                 let idx = ((pos.y >> 4) - c.min_section) as usize;
-                match c.light.sky.get(idx).and_then(|n| n.as_ref()) {
+                let (lx, ly, lz) = ((pos.x & 15) as u8, (pos.y & 15) as u8, (pos.z & 15) as u8);
+                match c.light.sky.get(idx).and_then(|s| s.value(lx, ly, lz)) {
+                    Some(v) => v,
                     // vanilla: SkyLightSectionStorage.getLightValue — a section with no
                     // data layer reads the bottom row of the nearest layer above
-                    Some(n) => n.get((pos.x & 15) as u8, (pos.y & 15) as u8, (pos.z & 15) as u8),
-                    None => crate::sky_light::absent_value(
-                        c,
-                        idx,
-                        (pos.x & 15) as u8,
-                        (pos.z & 15) as u8,
-                    ),
+                    None => crate::sky_light::absent_value(c, idx, lx, lz),
                 }
             }
             None => 15,
