@@ -403,6 +403,8 @@ impl Renderer {
             arenas,
             section_vis,
             visible_mask: Default::default(),
+            camera_spectator: false,
+            cull_sections: true,
             visible_for: None,
             scheduled_for: None,
             walk_in_flight: false,

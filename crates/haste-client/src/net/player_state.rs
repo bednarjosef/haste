@@ -59,6 +59,12 @@ impl Session {
                 // with vanilla's default border until its initialize_border arrives.
                 self.entity_attributes.clear();
                 self.world_border = crate::world_border::WorldBorder::default();
+                // And a new player in vanilla's sense (`LocalPlayer` is rebuilt): the
+                // hurt tilt and blink window end, the first `set_health` of the new
+                // body only stores the health.
+                self.hurt_ticks = 0;
+                self.damage_cooldown = 0;
+                self.health_seen = false;
                 self.player
                     .set_vehicle(None, SeatPoint::ZERO, None, None, None);
             }

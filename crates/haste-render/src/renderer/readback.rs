@@ -216,7 +216,9 @@ impl Renderer {
 }
 
 /// Unpacks a GPU copy buffer into tightly packed RGBA rows: drops the 256-byte row
-/// padding and, for BGRA surfaces, swaps the red and blue channels.
+/// padding and, for BGRA surfaces, swaps the red and blue channels. Every pixel comes out
+/// opaque, like vanilla `Screenshot.takeScreenshot`: the framebuffer's alpha is whatever the
+/// last blend left (0.5 behind leaves and water), not a transparency the image should carry.
 pub(super) fn texel_rows_to_rgba(
     data: &[u8],
     w: u32,
@@ -230,10 +232,12 @@ pub(super) fn texel_rows_to_rgba(
         let src = &data[y * stride..y * stride + row];
         if bgra {
             for px in src.as_chunks::<4>().0 {
-                pixels.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+                pixels.extend_from_slice(&[px[2], px[1], px[0], 255]);
             }
         } else {
-            pixels.extend_from_slice(src);
+            for px in src.as_chunks::<4>().0 {
+                pixels.extend_from_slice(&[px[0], px[1], px[2], 255]);
+            }
         }
     }
     pixels

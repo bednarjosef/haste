@@ -20,7 +20,7 @@ final class Mirror {
         I_FLAGS = 6, I_FPS = 7, I_CHUNKS = 8, I_SECTIONS_DRAWN = 9, I_SECTIONS_TOTAL = 10, I_ENTITIES = 11,
         I_ENTITIES_RENDERED = 12, I_SIMULATION_DISTANCE = 13, I_VIEW_DISTANCE = 14, I_FRAMERATE_LIMIT = 15,
         I_REFRESH_RATE = 16, I_DISPLAY_W = 17, I_DISPLAY_H = 18, I_GUI_SCALE = 19, I_LIGHT_SKY = 20, I_LIGHT_BLOCK = 21,
-        INTS = 22;
+        I_HURT_COOLDOWN = 22, INTS = 23;
     static final int D_HEALTH = 0, D_SATURATION = 1, D_XP_PROGRESS = 2, D_FLY_SPEED = 3, D_WALK_SPEED = 4, D_X = 5,
         D_Y = 6, D_Z = 7, D_YAW = 8, D_PITCH = 9, D_GAME_TIME = 10, D_DAY_TIME = 11, D_TX_PER_S = 12, D_RX_PER_S = 13,
         D_MOUNT_HEALTH = 14, D_MOUNT_MAX_HEALTH = 15, D_MOUNT_JUMP_SCALE = 16, D_ATTACK_STRENGTH_TICKER = 17,
@@ -62,6 +62,8 @@ final class Mirror {
         LocalPlayer p = Proxies.player;
         p.experienceLevel = I[I_XP_LEVEL];
         p.totalExperience = I[I_XP_TOTAL];
+        // Vanilla LivingEntity.damageCooldownTime: the HUD's heart blink gates on it (Hud.extractPlayerHealth).
+        p.damageCooldownTime = I[I_HURT_COOLDOWN];
         p.experienceProgress = (float) D[D_XP_PROGRESS];
         FOOD.setFoodLevel(I[I_FOOD]);
         FOOD.setSaturation((float) D[D_SATURATION]);

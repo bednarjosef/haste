@@ -171,15 +171,18 @@ impl Particles {
     }
 
     /// The tint of a terrain particle at `pos` (`TerrainParticle`'s colour source).
+    /// Without biome colours the plain grey 0.6 still goes through the same
+    /// linear-RGB conversion the entity pipeline's vertex colours take.
     pub(super) fn terrain_tint(
         &self,
         sprite: &crate::block_particles::BlockParticleSprite,
         pos: BlockPos,
         biomes: &dyn crate::tint::BiomeSource,
     ) -> [f32; 3] {
-        self.biome_colors.as_ref().map_or([0.6; 3], |colors| {
-            crate::block_particles::terrain_tint(sprite, pos, biomes, colors)
-        })
+        self.biome_colors.as_ref().map_or_else(
+            || crate::sky::linear([0.6, 0.6, 0.6]),
+            |colors| crate::block_particles::terrain_tint(sprite, pos, biomes, colors),
+        )
     }
 
     /// One `TerrainParticle` (vanilla: gravity 1, friction 0.98, life
