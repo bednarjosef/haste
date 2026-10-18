@@ -227,8 +227,8 @@ fn item_components() -> Arc<haste_data::ItemComponents> {
     Arc::new(c)
 }
 
-struct Rig {
-    p: LocalPlayer,
+pub(super) struct Rig {
+    pub(super) p: LocalPlayer,
     w: TestWorld,
     entities: Vec<(EntityId, Aabb)>,
     types: Vec<RegistryIndex>,
@@ -238,7 +238,7 @@ struct Rig {
 
 impl Rig {
     /// Player at (0.5, 0, 0.5) on a stone floor (top y = 0), looking straight down at (0, -1, 0).
-    fn new(mode: GameMode) -> Rig {
+    pub(super) fn new(mode: GameMode) -> Rig {
         let mut p = LocalPlayer::with_entity(ME, mode);
         p.int.set_tools(tools());
         p.int.set_block_tags(BlockTags::new([(
@@ -278,7 +278,7 @@ impl Rig {
         self.types.push(type_index);
     }
 
-    fn tick(&mut self, i: InteractInput) -> Vec<ServerboundPlay> {
+    pub(super) fn tick(&mut self, i: InteractInput) -> Vec<ServerboundPlay> {
         self.p.set_interact(i);
         let mut out = Vec::new();
         let env = InteractEnv {
@@ -312,7 +312,7 @@ impl Rig {
     }
 }
 
-const ATTACK: InteractInput = InteractInput {
+pub(super) const ATTACK: InteractInput = InteractInput {
     attack: true,
     use_item: false,
     pick_block: false,
