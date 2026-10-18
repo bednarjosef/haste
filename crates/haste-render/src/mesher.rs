@@ -13,6 +13,7 @@ mod fluid_view;
 mod lighting;
 mod merge;
 mod sink;
+mod skip;
 mod snapshot;
 mod tables;
 #[cfg(test)]
@@ -20,6 +21,7 @@ mod tests;
 
 pub use dispatch::{Mesher, SnapshotSource};
 pub use face_occlusion::FaceOccluders;
+pub use skip::SkipTable;
 pub use snapshot::MeshSnapshot;
 pub use tables::{AoTable, MeshTables};
 
@@ -383,27 +385,29 @@ pub fn mesh_section_with(
                     let mut tint: Option<u32> = None;
 
                     for quad in &info.quads {
-                        // Cullface: vanilla `Block.shouldRenderFace` on the dump's
-                        // occlusion shapes; None on an old dump keeps the model rule
+                        // Cullface: vanilla `Block.shouldRenderFace`: the state's
+                        // skipRendering rule (skip.rs), then the dump's occlusion
+                        // shapes; None on an old dump keeps the model rule
                         // (full-opaque neighbour, or the neighbour's opaque quads
                         // covering this quad's extent on the shared plane).
                         if let Some(cull) = quad.cullface {
                             let o = cull.offset();
                             let neighbor = ctx.cell(lx + 1 + o[0], ly + 1 + o[1], lz + 1 + o[2]);
-                            let visible = match ctx.tables.face_occluders.should_render_face(
-                                state,
-                                neighbor.state,
-                                cull,
-                            ) {
-                                Some(v) => v,
-                                None => {
-                                    !ctx.baked.is_full_opaque(neighbor.state)
-                                        && !ctx
-                                            .state_info(neighbor.state)
-                                            .cover
-                                            .covers(cull, &quad.positions)
-                                }
-                            };
+                            let visible = !ctx.tables.skip.skips(state, neighbor.state, cull)
+                                && match ctx.tables.face_occluders.should_render_face(
+                                    state,
+                                    neighbor.state,
+                                    cull,
+                                ) {
+                                    Some(v) => v,
+                                    None => {
+                                        !ctx.baked.is_full_opaque(neighbor.state)
+                                            && !ctx
+                                                .state_info(neighbor.state)
+                                                .cover
+                                                .covers(cull, &quad.positions)
+                                    }
+                                };
                             if !visible {
                                 continue;
                             }

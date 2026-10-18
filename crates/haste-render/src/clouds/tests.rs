@@ -187,7 +187,15 @@ fn mesh_covers_the_radius_disc_and_wraps_the_texture() {
     // bottom; the nine cells with |x|,|z| <= 1 also draw the six inside faces.
     let tex = solid(4, 4);
     let mut out = Vec::new();
-    build_mesh(&mut out, &tex, 0, 0, RelativeCameraPos::BelowClouds, 2);
+    build_mesh(
+        &mut out,
+        &tex,
+        0,
+        0,
+        RelativeCameraPos::BelowClouds,
+        2,
+        true,
+    );
     assert_eq!(
         out.len(),
         (13 + 9 * 6) * 6,
@@ -197,7 +205,15 @@ fn mesh_covers_the_radius_disc_and_wraps_the_texture() {
     // Radius 1 around cell (100, 100): the texture wraps at 4, so the cells read
     // (100,100) == (0,0) mod 4; the disc holds 5 cells, all with interior faces.
     let mut out = Vec::new();
-    build_mesh(&mut out, &tex, 100, 100, RelativeCameraPos::BelowClouds, 1);
+    build_mesh(
+        &mut out,
+        &tex,
+        100,
+        100,
+        RelativeCameraPos::BelowClouds,
+        1,
+        true,
+    );
     assert_eq!(out.len(), (5 + 5 * 6) * 6);
 }
 
@@ -268,4 +284,247 @@ fn cloud_drift_uses_game_time_plus_partial() {
     // The wrap: gameTime % (256 * 400) ticks == 3072 blocks of drift.
     assert!((cloud_drift(256 * 400, 0.0)).abs() < 1e-4);
     assert!((cloud_drift(256 * 400 + 100, 0.0) - 3.0).abs() < 1e-4);
+}
+
+/// The flat cells of the FAST mode (vanilla `CloudRenderer.buildFlatCell`): one down face
+/// per non-empty cell of the same disc as the fancy mesh, at the layer's bottom (y 0 in
+/// cell units), shaded with the top colour (vanilla's `FLAG_USE_TOP_COLOR` in
+/// `clouds.vsh`, `faceColors[1]`), regular winding, and the camera's position relative
+/// to the layer changes nothing (the flat cells do not branch on it).
+#[test]
+fn flat_cells_draw_one_top_shaded_down_face() {
+    // 4x4 texture of solid cells, radius 2: the disc holds 13 cells, one quad each.
+    let tex = solid(4, 4);
+    let mut out = Vec::new();
+    build_mesh(
+        &mut out,
+        &tex,
+        0,
+        0,
+        RelativeCameraPos::AboveClouds,
+        2,
+        false,
+    );
+    assert_eq!(out.len(), 13 * 6);
+    let mut below = Vec::new();
+    build_mesh(
+        &mut below,
+        &tex,
+        0,
+        0,
+        RelativeCameraPos::BelowClouds,
+        2,
+        false,
+    );
+    assert_eq!(out.len(), below.len());
+    for face in out.chunks(6) {
+        // The top colour (1.0), not the down face's own 0.7.
+        assert_eq!(face[0].shade, 1.0);
+        // The face lies at the layer's bottom.
+        for v in face {
+            assert_eq!(v.pos[1], 0.0);
+        }
+        // The corners are the down face's, in the regular order, relative to the cell
+        // the quad sits in (its min corner).
+        let base = [
+            face.iter().map(|v| v.pos[0]).fold(f32::MAX, f32::min),
+            0.0,
+            face.iter().map(|v| v.pos[2]).fold(f32::MAX, f32::min),
+        ];
+        let corners = Dir::Down.corners().map(|c| {
+            [
+                base[0] + c[0] * CELL_SIZE,
+                c[1] * CELL_HEIGHT,
+                base[2] + c[2] * CELL_SIZE,
+            ]
+        });
+        for (i, c) in [0usize, 1, 2, 0, 2, 3].iter().enumerate() {
+            assert_eq!(face[i].pos, corners[*c]);
+        }
+    }
+    // A single flat cell is exactly the one face (vanilla's buildFlatCell).
+    let mut one = Vec::new();
+    super::flat::build_flat_cell(&mut one, 3, -2);
+    assert_eq!(one.len(), 6);
+    assert_eq!(one[0].shade, 1.0);
+}
+
+/// The cloud option (vanilla `Options.cloudStatus`) gates the whole pass (vanilla
+/// `LevelRenderer`: `cloudStatus != OFF` is the render condition): OFF builds no mesh
+/// and emits no draw, FAST and FANCY draw once each and switching between them rebuilds
+/// the mesh once (vanilla's `prevCloudStatus` in the rebuild condition). Skips when no
+/// GPU adapter is available.
+#[test]
+fn cloud_status_gates_the_pass() {
+    let Ok(gpu) = crate::pipeline::Gpu::new(None) else {
+        eprintln!("skipped: no GPU adapter");
+        return;
+    };
+    let mut assets = synthetic_assets();
+    let mut renderer = CloudRenderer::new(
+        gpu.device.clone(),
+        gpu.queue.clone(),
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        &mut assets,
+    );
+    assert_eq!(renderer.status, CloudStatus::Fancy, "vanilla default");
+    let camera = Camera {
+        pos: glam::DVec3::new(0.5, 64.0, 0.5),
+        yaw: 0.0,
+        pitch: 0.0,
+        fov_deg: 70.0,
+        hand_fov_deg: 70.0,
+        roll_deg: 0.0,
+        bob: Default::default(),
+    };
+    let sky = SkyState {
+        time_of_day: 6000,
+        game_time: 0,
+        rain: 0.0,
+        thunder: 0.0,
+        dimension_has_sky: true,
+        fog_start: 0.0,
+        fog_end: 192.0,
+        cloud_height: 192.33,
+        ..Default::default()
+    };
+    let fog = crate::fog::FogData {
+        environmental_start: 0.0,
+        environmental_end: 0.0,
+        render_distance_start: 0.0,
+        render_distance_end: 192.0,
+        sky_end: 192.0,
+        cloud_end: 96.0,
+        environment: crate::fog::FogEnvironment::Atmospheric,
+    };
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("clouds-test-color"),
+        size: wgpu::Extent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Bgra8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let depth = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("clouds-test-depth"),
+        size: wgpu::Extent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth24Plus,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let mut draws = |renderer: &CloudRenderer| -> u32 {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("clouds-test-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &target.create_view(&wgpu::TextureViewDescriptor::default()),
+                resolve_target: None,
+                ops: wgpu::Operations::default(),
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &depth.create_view(&wgpu::TextureViewDescriptor::default()),
+                depth_ops: Some(wgpu::Operations::default()),
+                stencil_ops: Some(wgpu::Operations::default()),
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        renderer.draw(&mut pass)
+    };
+    // OFF: no mesh at all, no draw call.
+    renderer.set_status(CloudStatus::Off);
+    renderer.prepare(
+        &camera,
+        &sky,
+        crate::sky::SkyKind::Overworld,
+        glam::Mat4::IDENTITY,
+        &fog,
+        0.0,
+    );
+    assert_eq!(renderer.vertex_count(), 0);
+    assert_eq!(draws(&renderer), 0);
+    // FAST: the flat cells, one draw call.
+    renderer.set_status(CloudStatus::Fast);
+    renderer.prepare(
+        &camera,
+        &sky,
+        crate::sky::SkyKind::Overworld,
+        glam::Mat4::IDENTITY,
+        &fog,
+        0.0,
+    );
+    let fast = renderer.vertex_count();
+    assert!(fast > 0);
+    assert_eq!(draws(&renderer), 1);
+    // FANCY: the extruded boxes, more vertices than the flat cells, one draw call.
+    renderer.set_status(CloudStatus::Fancy);
+    renderer.prepare(
+        &camera,
+        &sky,
+        crate::sky::SkyKind::Overworld,
+        glam::Mat4::IDENTITY,
+        &fog,
+        0.0,
+    );
+    assert!(renderer.vertex_count() > fast);
+    assert_eq!(draws(&renderer), 1);
+    // Back to OFF: the mesh is dropped again.
+    renderer.set_status(CloudStatus::Off);
+    renderer.prepare(
+        &camera,
+        &sky,
+        crate::sky::SkyKind::Overworld,
+        glam::Mat4::IDENTITY,
+        &fog,
+        0.0,
+    );
+    assert_eq!(renderer.vertex_count(), 0);
+    assert_eq!(draws(&renderer), 0);
+}
+
+/// A jar with a small `clouds.png` (two solid texels, the rest empty) plus the entries
+/// `Assets::open` checks, in a fresh temp dir.
+fn synthetic_assets() -> haste_assets::Assets {
+    use std::io::Write;
+    let dir = std::env::temp_dir().join(format!("haste-render-clouds-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let jar = dir.join("client.jar");
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&jar).unwrap());
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    zip.start_file("assets/minecraft/blockstates/stone.json", options)
+        .unwrap();
+    zip.write_all(b"{\"variants\":{\"\":{\"model\":\"minecraft:block/stone\"}}}")
+        .unwrap();
+    zip.start_file("assets/minecraft/lang/en_us.json", options)
+        .unwrap();
+    zip.write_all(b"{}").unwrap();
+    let mut png = Vec::new();
+    let mut img = image::RgbaImage::new(4, 4);
+    img.put_pixel(1, 1, image::Rgba([255, 255, 255, 255]));
+    img.put_pixel(2, 2, image::Rgba([255, 255, 255, 255]));
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    zip.start_file("assets/minecraft/textures/environment/clouds.png", options)
+        .unwrap();
+    zip.write_all(&png).unwrap();
+    zip.finish().unwrap();
+    haste_assets::Assets::open(&jar, &dir.join("assets"), "test").unwrap()
 }

@@ -322,7 +322,11 @@ pub(crate) fn apply_damage_event<E: EntitySink + ?Sized>(
             .map(|n| n.to_string())
     };
     if let Some(name) = &name {
-        if mob_hurt_sound(name).is_none() && session.unknown_hurt_types.insert(name.clone()) {
+        // Players take their sound from the damage type (`player_hurt_sound`), not a table.
+        if name != "minecraft:player"
+            && mob_hurt_sound(name).is_none()
+            && session.unknown_hurt_types.insert(name.clone())
+        {
             tracing::info!("unknown entity type {name}; its hurt sound is the generic one");
         }
     }

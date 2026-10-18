@@ -25,11 +25,14 @@ mod camera;
 mod frame_setup;
 mod gui_pass;
 mod init;
+mod mesh_gate;
 mod query;
 mod readback;
 mod render_world;
 mod surface;
 mod terrain_feed;
+
+pub use terrain_feed::SectionLoadState;
 #[cfg(test)]
 mod tests;
 mod textures;
@@ -273,7 +276,20 @@ pub struct Renderer {
     /// mask until the new one arrives (vanilla `SectionOcclusionGraph` does the
     /// same with its background full update).
     section_vis: Arc<Mutex<ahash::AHashMap<(ChunkPos, i32), crate::occlusion::VisibilitySet>>>,
+    /// Per-column empty-section bits (vanilla `ClientChunkCache`'s empty sections,
+    /// `SectionOcclusionGraph.updateEmptySections`): the walk's see-through data for
+    /// sections that have no mesh, so unmeshed air never blocks it.
+    known_empty: Arc<Mutex<crate::occlusion::EmptyColumns>>,
     visible_mask: crate::occlusion::VisibleMask,
+    /// Bumped every time a finished walk replaces `visible_mask` or the look crosses a
+    /// 2-degree step, so the feed can re-check its held-back dirty sections.
+    want_version: u64,
+    /// The look step (`floor(yaw/2)`, `floor(pitch/2)`) `want_version` last bumped for
+    /// (vanilla `LevelExtractor.extract`'s `camRotX`/`camRotY` test).
+    want_look: Option<(i32, i32)>,
+    /// The last frame's frustum planes and camera position, for the mesh gate
+    /// (`wants_section`): written in `render`, read by the feed before the next one.
+    want_frustum: Option<([glam::Vec4; 6], glam::DVec3)>,
     /// The camera entity is a spectator (`Camera.extractRenderState` reads it off the player),
     /// for the solid-block rule below.
     camera_spectator: bool,
@@ -296,10 +312,10 @@ pub struct Renderer {
     bonus_dirty: bool,
     /// The worker thread running the walks.
     walk: crate::occlusion::AsyncOcclusionWalker,
-    /// Sightline data changed since the last schedule; walks for that are at
-    /// most 4 per second.
+    /// Sightline data changed since the last schedule; a walk for it is scheduled as
+    /// soon as none is in flight (vanilla re-walks from newly compiled sections every
+    /// frame, `SectionOcclusionGraph.schedulePropagationFrom`).
     vis_dirty: bool,
-    last_walk: std::time::Instant,
     /// World vertical extent in sections (`set_dimension`).
     min_section: i32,
     section_count: i32,
@@ -356,7 +372,8 @@ pub struct Renderer {
     entity: crate::entity::EntityRenderer,
     /// Sky, celestial bodies, clouds; terrain fog colour and daylight.
     sky: crate::sky::SkyRenderer,
-    /// The fancy clouds (`CloudRenderer`): the extruded cell mesh around the camera.
+    /// The clouds (`CloudRenderer`): the flat or extruded cell mesh around the camera,
+    /// by the `renderClouds` option (`set_cloud_status`).
     clouds: crate::clouds::CloudRenderer,
     /// Rain and snow columns (`FrameInput::sky.weather`).
     weather: crate::weather::WeatherRenderer,

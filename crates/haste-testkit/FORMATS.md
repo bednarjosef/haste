@@ -24,6 +24,14 @@ Common conventions:
       "collision": [[0.0,0.0,0.0,1.0,0.5,1.0]],  // boxes; [] = no collision
       "outline":   [[0.0,0.0,0.0,1.0,0.5,1.0]],  // visual selection outline boxes; [] = none
       "light": 0,                   // light emission 0..15
+      "occlusion": [[0.0,0.0,0.0,1.0,0.5,1.0]],  // getOcclusionShape() boxes; [] = occludes nothing
+                                    // (absent in dumps from before 2026-10-18)
+      "light_dampening": 0,         // getLightDampening() 0..15 (same regeneration as occlusion)
+      "propagates_skylight_down": true,  // propagatesSkylightDown() (same regeneration)
+      "can_occlude": true,          // canOcclude() (same regeneration): the shape-occlusion gate
+      "use_shape_for_light_occlusion": false,  // useShapeForLightOcclusion() (same regeneration):
+                                    // with can_occlude, LightEngine compares the occlusion
+                                    // shapes' faces instead of only light dampening
       "air": true,                  // isAir()
       "opaque": false,              // isSolidRender(): opaque full cube for light/render culling
       "fluid": "minecraft:water",   // only when the state has a fluid
@@ -254,3 +262,26 @@ then per packet:
 ```
 
 Multi-byte integers are big-endian, matching the protocol itself.
+
+## block_classes.json
+
+For every block id, the simple names of its Java class and superclasses up to `Block`
+(exclusive of `BlockBehaviour`). Which face-skip rule (`BlockBehaviour.skipRendering`) a block
+uses is a property of its class, so the mesher maps class names to culling rules from this dump
+instead of a hand-written block list (mods add blocks). Dumped by the recorder mod's
+`BlockClassDump` (called from `ServerDumps.dumpAll`).
+
+```jsonc
+{
+  "version": 1,
+  "minecraft": "26.3",
+  "blocks": {
+    "minecraft:glass":  ["GlassBlock", "TransparentBlock", "HalfTransparentBlock", "Block"],
+    "minecraft:iron_bars": ["IronBarsBlock", "CrossCollisionBlock", "Block"]
+    // ... every registered block, [] never occurs (every block extends at least Block)
+  }
+}
+```
+
+Blocks absent from the dump use the default rule (no skip); the loader never panics on unknown
+ids.
