@@ -45,6 +45,9 @@ pub struct World {
     direct_bits: u8,
     /// Bits for direct-encoded biome containers: ceil(log2(synced biome registry size)).
     biome_bits: u8,
+    /// Vanilla `BiomeManager.biomeZoomSeed`: the hashed seed of the login/respawn spawn
+    /// info, which picks each block's biome cell (`BiomeManager.getBiome`).
+    biome_zoom_seed: i64,
 }
 
 impl World {
@@ -75,6 +78,7 @@ impl World {
             dirty_unloaded: Vec::new(),
             direct_bits,
             biome_bits,
+            biome_zoom_seed: 0,
         }
     }
 
@@ -85,6 +89,16 @@ impl World {
 
     pub fn dimension(&self) -> &DimensionInfo {
         &self.dim
+    }
+
+    /// The biome zoom seed (vanilla `BiomeManager.biomeZoomSeed`), 0 until the spawn info sets it.
+    pub fn biome_zoom_seed(&self) -> i64 {
+        self.biome_zoom_seed
+    }
+
+    /// Sets the biome zoom seed from the login or respawn spawn info's hashed seed.
+    pub fn set_biome_zoom_seed(&mut self, seed: i64) {
+        self.biome_zoom_seed = seed;
     }
 
     pub fn game_data(&self) -> &Arc<GameData> {
