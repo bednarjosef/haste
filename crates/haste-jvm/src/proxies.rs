@@ -77,24 +77,11 @@ impl Default for PlayerVitals {
     }
 }
 
-/// The mount HUD while riding (vanilla `Hud`'s vehicle hearts and jump bar). Set while the
-/// player rides a living vehicle, cleared on foot: the hearts replace the food bar
-/// (`Hud.extractVehicleHealth` over `player.getVehicle()`), and the jump bar replaces the
-/// experience bar (`Hud.nextContextualInfoState` over `LocalPlayer.jumpableVehicle`) while
-/// we steer a saddled horse-family vehicle.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct MountHud {
-    /// The vehicle's health (`LivingEntity.DATA_HEALTH_ID`, metadata index 9).
-    pub health: f32,
-    /// The vehicle's `Attributes.MAX_HEALTH` (the synced attribute, the family's base
-    /// before a sync lands).
-    pub max_health: f32,
-    /// Vanilla `LocalPlayer.jumpableVehicle`: the vehicle we control can jump (the
-    /// horse-family vehicle Rust steers; its jump bar shows [`Self::jump_scale`]).
-    pub jumpable: bool,
-    /// Vanilla `LocalPlayer.getJumpRidingScale`: the charged jump the jump bar shows.
-    pub jump_scale: f32,
-}
+/// The mount HUD while riding (vanilla `Hud`'s vehicle hearts and jump bar): see
+/// [`mount_hud::MountHud`] (moved to its own module).
+pub use mount_hud::MountHud;
+
+mod mount_hud;
 
 /// What the F3 overlay shows (vanilla's default debug entries, see `NOTES.md`): filled by the
 /// client every frame. The numbers go through the mirror arrays; the strings
