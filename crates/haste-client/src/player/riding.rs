@@ -279,3 +279,11 @@ impl LocalPlayer {
         animal.set_look(look);
     }
 }
+
+impl LocalPlayer {
+    /// `LocalPlayer.isHandsBusy`: rowing a boat (set in `rideTick`). The first-person hands
+    /// dip while it is set (`FirstPersonHandsAndItems.tick`).
+    pub fn hands_busy(&self) -> bool {
+        self.hands_busy
+    }
+}

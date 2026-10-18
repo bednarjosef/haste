@@ -373,17 +373,7 @@ fn head_top_of_the_humanoid_layout() {
 
 /// A hand with no animation: no swing, the equip progress up, no bob, no lag.
 fn still_hand() -> FirstPerson {
-    FirstPerson {
-        skin: None,
-        slim: false,
-        sleeve: true,
-        item: None,
-        light: (15, 0),
-        attack: TickPair::fixed(0.0),
-        equip: TickPair::fixed(1.0),
-        x_bob: TickPair::fixed(0.0),
-        y_bob: TickPair::fixed(0.0),
-    }
+    FirstPerson::default()
 }
 
 #[test]
@@ -1019,4 +1009,26 @@ fn entity_cull_distance_scales_with_view_scale() {
             view_scale
         ));
     }
+}
+
+#[test]
+fn flame_quads_stack_up_the_bounding_box() {
+    let mut out = Vec::new();
+    flame::emit_geometry(
+        &mut out,
+        glam::Vec3::ZERO,
+        0.6,
+        1.8,
+        glam::Quat::IDENTITY,
+        (15, 15),
+        [0, 0, 1, 1],
+        [0, 0, 1, 1],
+    );
+    // height 1.8, width 0.6 -> 5 quads.
+    assert_eq!(out.len() / 6, 5);
+
+    // first vertex x = s * (-r) (identity rotation, origin zero)
+    let s = 0.6_f32 * 1.4;
+    let r = 0.5_f32;
+    assert!((out[0].pos[0] - (s * -r)).abs() < 1e-4);
 }

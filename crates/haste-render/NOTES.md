@@ -40,8 +40,9 @@
   view formats (GL) it renders linear colour into the sRGB target (half-transparent fills then
   blend in linear space). Text with alpha 0 is not drawn (vanilla since 1.21.6).
 - **Entities** (`entity.rs`): CPU-posed cubes, one draw; child pivots are relative to the parent
-  (vanilla PartPose). Light comes from `sample_world` / `sample_entity_lights` (the renderer
-  holds no world). Hurt tint needs an `EntityInstance` field (not there).
+  (vanilla PartPose). Light rides on each `EntityInstance` (`EntityInstance::sample_light`,
+  sampled by the client where it builds the frame's instances; the renderer holds no world).
+  Hurt tint needs an `EntityInstance` field (not there).
 - **Sky** (`sky.rs`): time-of-day curves from minecraft.wiki; sunrise colour, stars, rain columns
   (no heightmap: rain falls through roofs) and flat clouds are approximations.
 - **Terrain draw path**: section meshes in shared arenas (`arena.rs`), one
