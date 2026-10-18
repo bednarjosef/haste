@@ -37,6 +37,8 @@ const INPUT_SCALE: f32 = 0.98;
 const SIDEWAYS_FACTOR: f32 = 0.5;
 /// Vanilla `AbstractHorse.BACKWARDS_MOVE_SPEED_FACTOR` (0.25).
 const BACKWARDS_FACTOR: f32 = 0.25;
+/// Vanilla `AbstractHorse.FLAG_STANDING` (bit 32 of `DATA_ID_FLAGS`): the horse rears up.
+pub const FLAG_STANDING: i8 = 32;
 /// The forward push of a charged jump (`AbstractHorse.executeRidersJump`: 0.4).
 const JUMP_PUSH: f32 = 0.4;
 /// Vanilla `PlayerRideableJumping.getPlayerJumpPendingScale`: 90 or more is a full jump.
@@ -70,6 +72,10 @@ pub struct Horse {
     allow_stand_sliding: bool,
     /// `AbstractHorse.standCounter`: ticks of rear-up left (`isStanding` while > 0).
     stand_counter: u32,
+    /// The server's `FLAG_STANDING` from the horse's entity data: vanilla's `isStanding` reads
+    /// the synched flag, which our own simulation writes locally and the server writes with its
+    /// own view of the same rear-up (`set_entity_data` may arrive for a horse we steer).
+    metadata_standing: bool,
     /// The horse's (width, height) from its entity type's dimensions.
     dims: (f32, f32),
     /// `Attributes.MOVEMENT_SPEED` (synced by the server).
@@ -108,6 +114,7 @@ impl Horse {
             player_jump_pending_scale: 0.0,
             allow_stand_sliding: false,
             stand_counter: 0,
+            metadata_standing: false,
             dims,
             movement_speed,
             jump_strength,
@@ -157,6 +164,26 @@ impl Horse {
             jump_amount
         };
         self.player_jump_pending_scale = pending_scale(jump_amount);
+    }
+
+    /// A `set_entity_data` for this horse (vanilla `onSyncedDataUpdated`): the server's own
+    /// `FLAG_STANDING` of the rear-up.
+    pub fn on_metadata(&mut self, entries: &[haste_core::entity::MetadataEntry]) {
+        if let Some(haste_core::entity::MetadataValue::Byte(flags)) = entries
+            .iter()
+            .find(|e| e.index == DATA_ID_FLAGS)
+            .map(|e| &e.value)
+        {
+            self.metadata_standing = flags & FLAG_STANDING != 0;
+        }
+    }
+
+    /// Vanilla `AbstractHorse.isStanding`: our own rear-up counter, or the server's flag. The
+    /// seat offset and renderer that read it are not ported yet (vanilla
+    /// `AbstractHorse.getPassengerAttachmentPoint`'s `standAnimO` term).
+    #[cfg(test)]
+    pub fn is_standing(&self) -> bool {
+        self.stand_counter > 0 || self.metadata_standing
     }
 
     /// One tick of the horse we steer, in vanilla `LivingEntity.aiStep`'s order for a ridden

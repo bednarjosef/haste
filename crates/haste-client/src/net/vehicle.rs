@@ -3,11 +3,19 @@
 //! and the strider), built from the entity store and the last synced attributes.
 
 use haste_entity::riding::{passenger_seat, PassengerKind, SeatPoint, SeatQuery};
+use haste_entity::store::HEALTH_METADATA_INDEX;
+use haste_jvm::MountHud;
 use haste_protocol::haste_core::entity::MetadataValue;
 use haste_protocol::haste_core::EntityId;
 use haste_protocol::packets::play::clientbound as cb;
 
 use super::{EntitySink, Session, WorldSink, NO_BLOCKS, SADDLE_SLOT};
+
+/// The fallback max health of a mount whose `max_health` attribute has not been synced yet:
+/// `Attributes.MAX_HEALTH`'s own base (20.0). The horse family's own base is 53.0
+/// (`AbstractHorse.createBaseHorseAttributes`); a summoned horse's is randomized and always
+/// synced with the entity, so the fallback only shows for the ticks in between.
+const DEFAULT_MOUNT_MAX_HEALTH: f32 = 20.0;
 
 /// Vanilla `Mob.isSaddled` for a mount: the saddle slot (wire id 7) worn, and the slot usable
 /// (`canUseSlot(SADDLE)`: the pig and the strider when grown, the horse family also only when
@@ -203,5 +211,44 @@ impl Session {
     /// An attribute's value with its modifiers (the same fold the player's attributes use).
     fn attribute_value(&self, p: &cb::AttributeProperty) -> f64 {
         crate::player::attribute_value(p, |_| false)
+    }
+
+    /// The mount HUD's values for this tick (vanilla `Hud`: the vehicle's hearts replace the food
+    /// bar, the charged jump bar replaces the experience bar), `None` on foot or in a non-living
+    /// vehicle (a boat has no hearts to show). The health is the vehicle's living-entity data
+    /// (`LivingEntity.DATA_HEALTH_ID`, index 9; vanilla's own default 1.0 before the server sends
+    /// any), the max health its synced `max_health` attribute (the family's base before a sync:
+    /// `Attributes.MAX_HEALTH`'s own default 20.0, the horse family's 53.0). The jump scale is the
+    /// charge in the player's `LocalPlayer.aiStep` state, the jump flag exactly the horse-family
+    /// vehicle Rust steers (`LocalPlayer.jumpableVehicle`: the controlled vehicle, saddled).
+    pub fn mount_hud<E: EntitySink + ?Sized>(&self, entities: &E) -> Option<MountHud> {
+        let vehicle = self.player.vehicle()?;
+        // Vanilla `Entity.showVehicleHealth`: only a living vehicle's health shows. Rust tracks
+        // no is-living registry: the health metadata's presence marks one (every living entity's
+        // pairing data carries `DATA_HEALTH_ID`), so a vehicle without it is not living.
+        let health = entities
+            .metadata_value(vehicle, HEALTH_METADATA_INDEX)
+            .and_then(|v| match v {
+                MetadataValue::Float(h) => Some(*h),
+                _ => None,
+            })?;
+        let max_health = self
+            .entity_attributes
+            .get(&vehicle)
+            .and_then(|attrs| {
+                attrs
+                    .iter()
+                    .find(|p| {
+                        self.attribute_is(haste_core::RegistryIndex(p.id as u32), "max_health")
+                    })
+                    .map(|p| self.attribute_value(p) as f32)
+            })
+            .unwrap_or(DEFAULT_MOUNT_MAX_HEALTH);
+        Some(MountHud {
+            health,
+            max_health,
+            jumpable: self.player.horse().is_some(),
+            jump_scale: self.player.jump_riding_scale(),
+        })
     }
 }

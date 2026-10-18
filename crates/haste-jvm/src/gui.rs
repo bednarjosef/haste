@@ -697,6 +697,17 @@ impl GuiPipeline {
         }
     }
 
+    /// The player started riding (vanilla `ClientPacketListener.handleSetEntityPassengersPacket`):
+    /// the "Press <sneak key> to dismount" overlay message, with the bound key's name.
+    pub fn show_mount_message(&self) {
+        if let Err(e) = self.with_bridge(|env, bridge| {
+            env.call_method(bridge, jni_str!("showMountMessage"), jni_sig!("()V"), &[])?;
+            Ok(())
+        }) {
+            self.failed("show_mount_message", e);
+        }
+    }
+
     /// The connection ended: vanilla's disconnect screen with the reason.
     pub fn disconnected(&self, reason: &haste_core::Component) -> anyhow::Result<()> {
         self.disconnected_json(&serde_json::to_string(reason)?)

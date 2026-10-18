@@ -1,14 +1,16 @@
 # Horse riding on the test server (127.0.0.1:25691). Live evidence and the steps that drive
 # the client; the RCON setup the driver runs is in horse-riding.sh.
 #
-# RIG (this branch's own area, x 400..420, z 0..20, far from the shared spawn floor x 3..16,
-# z 2..16, y 60..70, and from the boat lane at x 370..394):
-#   fill 400 71 0 420 90 20 air      clear above the platform first: the natural terrain
-#                                    here is higher than y 71 and would bury the player
-#                                    (the crosshair then hits the block around the eyes)
-#   fill 400 70 0 420 70 20 stone    platform, top at y 71
-#   tp <name> 405.5 71 5.0 0 20      the player at the platform's edge (eyes y 72.62)
-#   summon minecraft:horse 405.5 71 8.5 {Tame:1b,NoAI:1b,equipment:{saddle:{...}}}
+# RIG (this branch's own area, x 340..360, z 0..20, top at y 120 — high above the natural
+# terrain, far from the shared spawn floor x 3..16, z 2..16, y 60..70, and from the boat
+# lane at x 370..394):
+#   fill 340 120 0 360 140 20 air      clear above the platform first: the natural terrain
+#                                      here can be higher than y 120 and would bury the
+#                                      player (the crosshair then hits the block around
+#                                      the eyes)
+#   fill 340 119 0 360 119 20 stone    platform, top at y 120
+#   tp <name> 345.5 120 5.0 0 20      the player at the platform's edge (eyes y 121.62)
+#   summon minecraft:horse 345.5 120 8.5 {Tame:1b,NoAI:1b,equipment:{saddle:{...}}}
 #                                    the tamed, saddled horse 3 blocks ahead (the saddle is
 #                                    the SADDLE entry of the `equipment` map in 26.3's NBT —
 #                                    `SaddleItem` is the pre-datafix name and is ignored;
@@ -16,7 +18,7 @@
 #                                    the script's first wait runs, and the ridden travel is
 #                                    unaffected)
 #
-# EVIDENCE (RCON, own username HorseCheck, on 25691; see horse-riding.sh for the reads):
+# EVIDENCE (RCON, own username riding-mount-hud, on 25691; see horse-riding.sh for the reads):
 #   the horse's Pos before the ride (mounted, at rest) and after (W 3 s and a charged
 #   jump), the rider's RootVehicle naming the horse, and the server log's verdict —
 #   no "moved wrongly"/"moved too quickly" for the horse.
