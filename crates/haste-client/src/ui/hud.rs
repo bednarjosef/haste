@@ -2,7 +2,12 @@
 //! (vitals, selected slot, the mount HUD, the F3 overlay) and the [`GuiFrame`] that draws it.
 //! See the module documentation of [`crate::ui`].
 
+use std::time::{Duration, Instant};
+
 use super::*;
+
+#[cfg(test)]
+mod tests;
 
 impl Ui {
     /// Whether F1 hid the HUD (and with it the first-person hand).
@@ -146,5 +151,83 @@ impl Ui {
     /// `Minecraft.crosshairPickEntity`): the attack indicator's full icon.
     pub fn set_crosshair_pick(&self, pick: bool) {
         self.state(|s| s.crosshair_pick_living = pick);
+    }
+}
+
+/// A freshly joined HUD warming up before it goes live: the JVM's first GUI frames load the
+/// HUD render path's classes, and the first seconds of frames cross the JVM's code-cache and
+/// metadata GC thresholds with full GC pauses of 100-200 ms (`-Xlog:gc`; measured ~5 s into
+/// the JVM's life, right after the HUD goes live). Rendering those frames here — on the game
+/// thread, budgeted per tick, before the UI is published — keeps every pause off the render
+/// thread, which would otherwise stall the moment it starts calling into the JVM. Vanilla
+/// needs no warm-up: its whole client is the JVM, warm before the loading screen ends.
+pub struct HudWarmup {
+    ui: Ui,
+    frames: u32,
+    /// The frame count when the last slow frame (a class load or a full GC) happened; warm
+    /// once enough frames have passed without another. The young GCs of the growing heap
+    /// (1-3 ms) do not count: they are not the hitches being waited out.
+    last_slow: u32,
+    /// The slowest warm-up frame so far (the class load or GC we are waiting out).
+    slowest_ms: f32,
+    started: Instant,
+}
+
+/// A frame at least this slow is a pause being waited out (the hitch threshold).
+const SLOW_MS: f32 = 20.0;
+/// Warm-up continues until at least this many frames (the boot GCs land a few hundred
+/// frames into GUI rendering, not on frame one).
+const MIN_FRAMES: u32 = 600;
+/// ...and until this many frames have passed without another slow one.
+const SETTLE_FRAMES: u32 = 300;
+/// Never warm longer than this many frames (a JVM whose pauses never stop still goes live,
+/// slow rather than never).
+const MAX_FRAMES: u32 = 4000;
+
+impl HudWarmup {
+    /// Starts warming `ui`, already joined: its frames render the real HUD state.
+    pub fn new(ui: Ui) -> Self {
+        Self {
+            ui,
+            frames: 0,
+            last_slow: 0,
+            slowest_ms: 0.0,
+            started: Instant::now(),
+        }
+    }
+
+    /// Renders warm-up frames for up to `budget` of wall time (one game-thread tick's
+    /// share; a single frame may overrun it — the class-loading first frame). `true` when
+    /// the HUD is warm: [`HudWarmup::into_ui`] hands it over to go live.
+    pub fn step(&mut self, budget: Duration) -> bool {
+        let start = Instant::now();
+        while self.frames < MAX_FRAMES && (self.frames == 0 || start.elapsed() < budget) {
+            // Vanilla's default window (854x480) at GUI scale 2: the size only shifts the
+            // layout, the classes and allocation are the same at any size.
+            let t = Instant::now();
+            self.ui.frame(854, 480, 2, (0.0, 0.0), 0.5);
+            let ms = t.elapsed().as_secs_f32() * 1e3;
+            self.slowest_ms = self.slowest_ms.max(ms);
+            self.frames += 1;
+            if ms >= SLOW_MS {
+                self.last_slow = self.frames;
+            }
+        }
+        let warm = self.frames >= MAX_FRAMES
+            || (self.frames >= MIN_FRAMES && self.frames - self.last_slow >= SETTLE_FRAMES);
+        if warm {
+            tracing::info!(
+                "HUD warm after {} frames in {:.2} s (slowest frame {:.0} ms)",
+                self.frames,
+                self.started.elapsed().as_secs_f32(),
+                self.slowest_ms
+            );
+        }
+        warm
+    }
+
+    /// The warmed UI, ready to publish.
+    pub fn into_ui(self) -> Ui {
+        self.ui
     }
 }
