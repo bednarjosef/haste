@@ -446,15 +446,21 @@ fn ray_occluded(
 /// Snapshot the shared section visibility sets into a dense grid for the walk:
 /// the walk reads each visited section's set once, and a slice index beats a
 /// hash probe per node. Sections without an entry are see-through (`all`).
-pub fn dense_visibility_grid(
-    vis: &AHashMap<(ChunkPos, i32), VisibilitySet>,
+/// The map is copied into `entries` under the lock (a fast drain into the
+/// worker's reusable buffer) and the grid is built after it is released, so
+/// the render thread's per-upload lock never waits on the grid build.
+fn dense_visibility_grid(
+    vis: &Mutex<AHashMap<(ChunkPos, i32), VisibilitySet>>,
+    entries: &mut Vec<((ChunkPos, i32), VisibilitySet)>,
     cam: ChunkPos,
     r: i32,
     h: i32,
 ) -> Vec<VisibilitySet> {
+    entries.clear();
+    entries.extend(vis.lock().iter().map(|(k, v)| (*k, *v)));
     let w = 2 * r + 1;
     let mut dense = vec![VisibilitySet::all(); (w * w * h) as usize];
-    for ((c, si), v) in vis.iter() {
+    for ((c, si), v) in entries.iter() {
         let dx = c.x - cam.x + r;
         let dz = c.z - cam.z + r;
         if dx < 0 || dz < 0 || dx >= w || dz >= w || *si < 0 || *si >= h {
@@ -478,11 +484,15 @@ struct WalkJob {
 }
 
 impl WalkJob {
-    fn run(&self, vis: &Mutex<AHashMap<(ChunkPos, i32), VisibilitySet>>) -> VisibleMask {
+    fn run(
+        &self,
+        vis: &Mutex<AHashMap<(ChunkPos, i32), VisibilitySet>>,
+        entries: &mut Vec<((ChunkPos, i32), VisibilitySet)>,
+    ) -> VisibleMask {
         let r = self.view_distance + 1;
         let h = self.section_count;
         let cam = ChunkPos::new(self.cam_section.x, self.cam_section.z);
-        let dense = dense_visibility_grid(&vis.lock(), cam, r, h);
+        let dense = dense_visibility_grid(vis, entries, cam, r, h);
         let w = 2 * r + 1;
         compute_visible_mask(
             |c, si| {
@@ -525,8 +535,10 @@ impl AsyncOcclusionWalker {
         let worker = std::thread::Builder::new()
             .name("haste-occlusion".into())
             .spawn(move || {
+                // The walk's snapshot buffer, reused across jobs (no allocation per walk).
+                let mut entries: Vec<((ChunkPos, i32), VisibilitySet)> = Vec::new();
                 while let Ok(job) = job_rx.recv() {
-                    let mask = job.run(&vis_worker);
+                    let mask = job.run(&vis_worker, &mut entries);
                     if done_tx.send(mask).is_err() {
                         break;
                     }

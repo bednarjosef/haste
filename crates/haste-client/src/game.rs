@@ -501,13 +501,14 @@ pub struct Shared {
     pub data: Arc<GameData>,
     /// The world.
     pub world: RwLock<World>,
-    /// The render thread's weather extraction buffer (reused every frame, no allocation
-    /// after warmup). Only the render thread takes it.
-    pub weather_scratch: Mutex<haste_render::WeatherFrame>,
     /// The entities.
     pub entities: RwLock<EntityStore>,
     /// Sections changed since the render thread last looked (deduplicated there).
     pub dirty: Mutex<Vec<SectionPos>>,
+    /// Bumped every time the world changed (dirty sections published); the render thread's
+    /// per-tick caches — the weather extraction's column heights and precipitation — refresh
+    /// only when it moves, instead of re-reading the world every frame.
+    pub world_version: AtomicU64,
     /// Per-frame view values.
     pub view: Mutex<ViewState>,
     /// Break cracks to draw (`Session::breaking_stages`), copied once per tick.
@@ -638,6 +639,7 @@ impl Shared {
             world: RwLock::new(world),
             entities: RwLock::new(entities),
             dirty: Mutex::new(Vec::new()),
+            world_version: AtomicU64::new(0),
             view: Mutex::new(ViewState {
                 prev_eye: DVec3::ZERO,
                 eye: DVec3::ZERO,
@@ -698,7 +700,6 @@ impl Shared {
             block_entity_names,
             biome_climates,
             particles: Mutex::new(particles),
-            weather_scratch: Mutex::new(haste_render::WeatherFrame::default()),
             input: Mutex::new(SharedInput::default()),
             sound: Mutex::new(None),
             stop: AtomicBool::new(false),
@@ -1061,6 +1062,9 @@ fn drain_packets(
     let mut dirty = world.take_dirty_sections();
     if !dirty.is_empty() {
         shared.dirty.lock().append(&mut dirty);
+        // Bumped with every world change so the render thread's per-tick caches (the weather
+        // columns' heights and precipitation) know to refresh.
+        shared.world_version.fetch_add(1, Ordering::Relaxed);
     }
     // The server's live pack set changed (vanilla ticks its ServerPackManager the
     // same way: a download finished, a re-push replaced one, or a pop arrived):
@@ -1283,6 +1287,7 @@ fn tick_once(
         let mut dirty = world.take_dirty_sections();
         if !dirty.is_empty() {
             shared.dirty.lock().append(&mut dirty);
+            shared.world_version.fetch_add(1, Ordering::Relaxed);
         }
         let moved = driver.session.player.state.pos - tick_start;
         ((moved.x * moved.x + moved.z * moved.z).sqrt()) as f32

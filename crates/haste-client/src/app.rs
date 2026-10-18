@@ -108,12 +108,14 @@ pub fn gui_scaled_size(width: u32, height: u32, scale: u32) -> (u32, u32) {
 
 /// F3's numbers for this frame: the cheap part (position, counts) always; the strings (biome,
 /// targeted block/fluid with properties and tags) only while the overlay is on, like vanilla
-/// building its lines only then. `look` is the yaw/pitch the player is rendered with.
+/// building its lines only then. `look` is the yaw/pitch the player is rendered with, `view`
+/// the frame's already-cloned view state (one lock per frame, shared with `frame_view`).
 #[allow(clippy::too_many_arguments)]
 fn debug_info(
     env: &DebugEnv,
     shared: &Shared,
     renderer: &Renderer,
+    view: &game::ViewState,
     look: (f32, f32),
     fps: i32,
     stats: &FrameStats,
@@ -124,8 +126,10 @@ fn debug_info(
     use haste_core::view::{BlockPhysics as _, BlockView};
     use haste_protocol::haste_core::BlockPos;
     use haste_render::BiomeSource as _;
-    let view = shared.view.lock().clone();
-    let world = shared.world.read();
+    // The overlay check comes first: while it is off, neither the world read lock nor the
+    // string building below runs (the numbers alone stay cheap).
+    let debug_shown = shared.ui.lock().as_ref().is_some_and(|ui| ui.debug_shown());
+    let world = debug_shown.then(|| shared.world.read());
     // The full look the player is rendered with (input look plus the server's offset), like
     // frame_view; vanilla's F3 shows the entity's rotation.
     let look = (
@@ -136,7 +140,9 @@ fn debug_info(
         fps,
         pos: [view.feet.x, view.feet.y, view.feet.z],
         rot: [look.0, look.1],
-        chunks: world.loaded_chunks().count() as i32,
+        chunks: world
+            .as_ref()
+            .map_or(0, |w| w.loaded_chunks().count() as i32),
         sections_drawn: stats.chunk_sections_drawn as i32,
         sections_total: stats.chunk_sections_total as i32,
         entities: shared.entities.read().len() as i32,
@@ -150,9 +156,9 @@ fn debug_info(
         light: [0, 0],
         ..Default::default()
     };
-    if !shared.ui.lock().as_ref().is_some_and(|ui| ui.debug_shown()) {
+    let Some(world) = world else {
         return d;
-    }
+    };
     d.gpu = gpu.to_owned();
     d.cpu = cpu_info();
     d.dimension = world.dimension().name.to_string();
@@ -313,13 +319,13 @@ fn cpu_info() -> String {
 }
 
 /// The GPU as F3's system group prints it ("name (backend)"), read from the adapter once.
-fn gpu_info(renderer: &Renderer) -> String {
+/// Returns the cached `&'static str` so the frame path allocates nothing.
+fn gpu_info(renderer: &Renderer) -> &'static str {
     static GPU: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     GPU.get_or_init(|| {
         let i = renderer.adapter_info();
         format!("{} ({})", i.name, i.backend)
     })
-    .clone()
 }
 
 /// A joined game: runtime, game thread and shared state.
@@ -913,12 +919,13 @@ impl WorldFeed {
         renderer: &mut Renderer,
         local: (EntityId, u128),
         partial: f32,
+        view: &game::ViewState,
     ) -> (&[EntityInstance], &[haste_render::BlockEntityInstance]) {
         // The sign text parser needs the font for the wrap; grabbed once per connection.
         if self.text_metrics.is_none() {
             self.text_metrics = Some(renderer.text_metrics());
         }
-        self.block_entities(shared, partial);
+        self.block_entities(shared, partial, view);
         self.instances.clear();
         // Finished skin downloads: registered as textures, then worn (players wear their
         // default skin until then).
@@ -928,11 +935,8 @@ impl WorldFeed {
             store.render_instances(partial, &mut self.instances);
             store.player_skin(uuid::Uuid::from_u128(local.1))
         };
-        {
-            let view = shared.view.lock().clone();
-            self.instances
-                .push(game::player_instance(local.0, &view, partial, &own_skin));
-        }
+        self.instances
+            .push(game::player_instance(local.0, view, partial, &own_skin));
         renderer.sample_entity_lights(&*shared.world.read(), &self.instances);
         (&self.instances, &self.be_instances)
     }
@@ -944,7 +948,7 @@ impl WorldFeed {
     /// `BrightnessCombiner`'s max light) and samples the block light. Types Haste cannot
     /// draw are logged once and skipped. The result is `self.be_instances` (read it after
     /// this call; `entities` borrows the feed too).
-    fn block_entities(&mut self, shared: &Shared, partial: f32) {
+    fn block_entities(&mut self, shared: &Shared, partial: f32, view: &game::ViewState) {
         use haste_core::view::BlockView as _;
         self.be_instances.clear();
         let world = shared.world.read();
@@ -973,7 +977,6 @@ impl WorldFeed {
         let xmas = haste_render::xmas_textures();
         // Only the chunks the camera can see carry drawable block entities; skipping the
         // rest keeps the per-frame walk short on big worlds with nothing in them.
-        let view = shared.view.lock().clone();
         let world_age = view.world_age;
         let cam_chunk = ChunkPos::new(
             view.feet.x.floor() as i32 >> 4,
@@ -1069,11 +1072,8 @@ impl WorldFeed {
                             let angle = rotation_or_facing(blocks, state, facing);
                             // Vanilla `BannerRenderer.extractRenderState`'s phase: the position
                             // hash plus the world age, over 100, plus the partial tick.
-                            let view = shared.view.lock();
                             let phase = haste_render::blockentity::banner_wave_phase(
-                                pos,
-                                view.world_age,
-                                partial,
+                                pos, world_age, partial,
                             );
                             (
                                 angle,
@@ -1566,9 +1566,10 @@ impl WorldFeed {
         renderer: &mut Renderer,
         perspective: game::Perspective,
         hud_hidden: bool,
+        first_person: Option<game::FirstPersonView>,
     ) {
         let view = match perspective {
-            game::Perspective::FirstPerson if !hud_hidden => shared.view.lock().first_person,
+            game::Perspective::FirstPerson if !hud_hidden => first_person,
             _ => None,
         };
         // Our skin changes when its download lands: compare it by identity as well.
@@ -2180,14 +2181,17 @@ pub fn view_bob(
 /// saved option with vanilla's per-tick FOV modifier interpolated, then the submerged and
 /// death adjustments; the hurt/death tilts and the view bobbing come from the view's per-tick
 /// state (vanilla's `Camera.calculateFov` and `GameRenderer.bobHurt`/`bobView`).
+#[allow(clippy::too_many_arguments)]
 fn frame_view<'w>(
     shared: &Shared,
+    view: &game::ViewState,
     perspective: game::Perspective,
     yaw: f32,
     pitch: f32,
     options: &Options,
     now: Instant,
     weather: &'w mut haste_render::WeatherFrame,
+    weather_cache: &mut WeatherColumnCache,
 ) -> (
     Camera,
     SkyState,
@@ -2197,7 +2201,6 @@ fn frame_view<'w>(
     u64,
     Option<&'w haste_render::WeatherFrame>,
 ) {
-    let view = shared.view.lock().clone();
     let partial = game::partial_tick(view.tick_at, now);
     let eye = game::interpolate(view.prev_eye, view.eye, partial);
     let look = (
@@ -2283,6 +2286,7 @@ fn frame_view<'w>(
     let weather_out = if rain_level > 0.0 && view.has_sky {
         extract_weather(
             weather,
+            weather_cache,
             &world,
             &shared.biome_climates,
             pos,
@@ -2290,6 +2294,7 @@ fn frame_view<'w>(
             view.world_age,
             view.sea_level,
             partial,
+            shared.world_version.load(Ordering::Relaxed),
         );
         Some(&*weather)
     } else {
@@ -2302,7 +2307,7 @@ fn frame_view<'w>(
         &shared.data,
         &shared.biome_climates,
         pos,
-        &view,
+        view,
         partial,
     );
     fog.thunder_level *= rain_level;
@@ -2439,13 +2444,77 @@ impl JavaRandom {
     }
 }
 
+/// One cached weather column: (x, z, terrain height, precipitation, light at the sample
+/// position) — the parts of the extraction that only change when the camera leaves its
+/// block cell or the world changes.
+type CachedWeatherColumn = (i32, i32, i32, crate::net::Precipitation, (u8, u8));
+
+/// The per-tick part of the weather extraction: a column's terrain height, its precipitation
+/// and its light sample, which only change when the camera leaves its block cell or the world
+/// changes (the world version bumps on every dirty-section publish). The frame's scroll
+/// offsets are recomputed every frame; these are not.
+#[derive(Default)]
+struct WeatherColumnCache {
+    /// The camera's block cell the cache was built for.
+    center: (i32, i32, i32),
+    /// The world version it was built at.
+    world_version: u64,
+    /// One entry per scanned column, in scan order.
+    columns: Vec<CachedWeatherColumn>,
+}
+
+impl WeatherColumnCache {
+    /// The cached columns for `camera`'s block cell, rebuilding only when the cell or the
+    /// world changed since the last call.
+    fn columns(
+        &mut self,
+        world: &World,
+        climates: &[haste_render::BiomeClimate],
+        camera: DVec3,
+        world_version: u64,
+        sea_level: i32,
+    ) -> &[CachedWeatherColumn] {
+        use haste_core::view::BlockView as _;
+        let radius = haste_render::weather::WEATHER_RADIUS;
+        let cbx = camera.x.floor() as i32;
+        let cby = camera.y.floor() as i32;
+        let cbz = camera.z.floor() as i32;
+        if self.center == (cbx, cby, cbz) && self.world_version == world_version {
+            return &self.columns;
+        }
+        self.center = (cbx, cby, cbz);
+        self.world_version = world_version;
+        self.columns.clear();
+        for z in cbz - radius..=cbz + radius {
+            for x in cbx - radius..=cbx + radius {
+                // `Level.getHeight(MOTION_BLOCKING, x, z)` (0 below the world when no chunk:
+                // the column then degenerates and is skipped by the y test, like vanilla's).
+                let terrain_height = crate::net::column_height(world, x, z);
+                // The biome precipitation at the camera's y (vanilla probes at the camera).
+                let probe = BlockPos::new(x, cby, z);
+                let precipitation =
+                    crate::net::precipitation_at_pos(world, climates, &probe, sea_level);
+                let light_sample_y = cby.max(terrain_height);
+                let light_pos = BlockPos::new(x, light_sample_y, z);
+                let light = (world.block_light(light_pos), world.sky_light(light_pos));
+                self.columns
+                    .push((x, z, terrain_height, precipitation, light));
+            }
+        }
+        &self.columns
+    }
+}
+
 /// Vanilla `WeatherEffectRenderer.extractRenderState` + the per-column instances: scans the
 /// weather radius around the camera, clips each column's y range to the heightmap, sorts it
 /// into rain or snow by the biome's precipitation at the camera's y, and fills the per-column
-/// random's texture offsets. Fills the caller's reused frame buffer.
+/// random's texture offsets. Fills the caller's reused frame buffer; the heights,
+/// precipitation and light come from `cache` (rebuilt only when the camera's block cell or
+/// the world changed), only the scroll offsets are recomputed per frame.
 #[allow(clippy::too_many_arguments)]
 fn extract_weather(
     frame: &mut haste_render::WeatherFrame,
+    cache: &mut WeatherColumnCache,
     world: &World,
     climates: &[haste_render::BiomeClimate],
     camera: DVec3,
@@ -2453,92 +2522,80 @@ fn extract_weather(
     game_time: i64,
     sea_level: i32,
     partial_tick: f32,
+    world_version: u64,
 ) {
-    use haste_core::view::BlockView as _;
     let radius = haste_render::weather::WEATHER_RADIUS;
     frame.intensity = intensity;
     frame.radius = radius;
     frame.rain.clear();
     frame.snow.clear();
-    let cbx = camera.x.floor() as i32;
     let cby = camera.y.floor() as i32;
-    let cbz = camera.z.floor() as i32;
     // One-time diagnostics: the camera, sea level, one column's height and the frame's
     // rain/snow counts, so an invisible weather pass is debuggable from the log.
     static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     let mut terrain_of_first: Option<i32> = None;
-    for z in cbz - radius..=cbz + radius {
-        for x in cbx - radius..=cbx + radius {
-            // `Level.getHeight(MOTION_BLOCKING, x, z)` (0 below the world when no chunk:
-            // the column then degenerates and is skipped by the y test, like vanilla's).
-            let terrain_height = crate::net::column_height(world, x, z);
-            if terrain_of_first.is_none() {
-                terrain_of_first = Some(terrain_height);
+    let columns = cache.columns(world, climates, camera, world_version, sea_level);
+    for &(x, z, terrain_height, precipitation, light) in columns {
+        let y0 = (cby - radius).max(terrain_height);
+        let y1 = (cby + radius).max(terrain_height);
+        if y1 - y0 == 0 {
+            continue;
+        }
+        if terrain_of_first.is_none() {
+            terrain_of_first = Some(terrain_height);
+        }
+        let seed = haste_render::weather::column_seed(x, z);
+        let mut rng = JavaRandom::new(seed as i64);
+        let column = haste_render::WeatherColumn {
+            x,
+            z,
+            bottom_y: y0,
+            top_y: y1,
+            u_offset: 0.0,
+            v_offset: 0.0,
+            light,
+            seed,
+        };
+        match precipitation {
+            crate::net::Precipitation::Rain => {
+                // `createRainColumnInstance`: the scroll speed 3 + rand, the wrapped
+                // tick offset and the v offset it scrolls to.
+                let wrapped_ticks = (game_time & 131071) as f32;
+                let tick_offset = (x
+                    .wrapping_mul(x)
+                    .wrapping_mul(3121)
+                    .wrapping_add(x.wrapping_mul(45238971))
+                    .wrapping_add(z.wrapping_mul(z).wrapping_mul(418711))
+                    .wrapping_add(z.wrapping_mul(13761)))
+                    & 0xFF;
+                let speed = 3.0 + rng.next_float();
+                let texture_offset =
+                    -(wrapped_ticks + tick_offset as f32 + partial_tick) / 32.0 * speed;
+                frame.rain.push(haste_render::WeatherColumn {
+                    v_offset: texture_offset % 32.0,
+                    ..column
+                });
             }
-            let y0 = (cby - radius).max(terrain_height);
-            let y1 = (cby + radius).max(terrain_height);
-            if y1 - y0 == 0 {
-                continue;
+            crate::net::Precipitation::Snow => {
+                // `createSnowColumnInstance`: the drift u/v from the seeded gaussian
+                // pair, the slow fall, and the brightened light.
+                let wrapped_ticks = (game_time & 131071) as f32;
+                let time = wrapped_ticks as f64 + partial_tick as f64;
+                let u = (rng.next_double() + time * 0.01 * rng.next_gaussian()) as f32;
+                let v = (rng.next_double() + time * rng.next_gaussian() * 0.001) as f32;
+                let v_offset = -((game_time & 511) as f32 + partial_tick) / 512.0 + v;
+                let brightened = (
+                    ((light.0 as i32 * 3 + 15) / 4).clamp(0, 15) as u8,
+                    ((light.1 as i32 * 3 + 15) / 4).clamp(0, 15) as u8,
+                );
+                frame.snow.push(haste_render::WeatherColumn {
+                    u_offset: u,
+                    v_offset,
+                    light: brightened,
+                    ..column
+                });
             }
-            let probe = BlockPos::new(x, cby, z);
-            let precipitation =
-                crate::net::precipitation_at_pos(world, climates, &probe, sea_level);
-            let seed = haste_render::weather::column_seed(x, z);
-            let mut rng = JavaRandom::new(seed as i64);
-            let light_sample_y = cby.max(terrain_height);
-            let light_pos = BlockPos::new(x, light_sample_y, z);
-            let light = (world.block_light(light_pos), world.sky_light(light_pos));
-            let column = haste_render::WeatherColumn {
-                x,
-                z,
-                bottom_y: y0,
-                top_y: y1,
-                u_offset: 0.0,
-                v_offset: 0.0,
-                light,
-                seed,
-            };
-            match precipitation {
-                crate::net::Precipitation::Rain => {
-                    // `createRainColumnInstance`: the scroll speed 3 + rand, the wrapped
-                    // tick offset and the v offset it scrolls to.
-                    let wrapped_ticks = (game_time & 131071) as f32;
-                    let tick_offset = (x
-                        .wrapping_mul(x)
-                        .wrapping_mul(3121)
-                        .wrapping_add(x.wrapping_mul(45238971))
-                        .wrapping_add(z.wrapping_mul(z).wrapping_mul(418711))
-                        .wrapping_add(z.wrapping_mul(13761)))
-                        & 0xFF;
-                    let speed = 3.0 + rng.next_float();
-                    let texture_offset =
-                        -(wrapped_ticks + tick_offset as f32 + partial_tick) / 32.0 * speed;
-                    frame.rain.push(haste_render::WeatherColumn {
-                        v_offset: texture_offset % 32.0,
-                        ..column
-                    });
-                }
-                crate::net::Precipitation::Snow => {
-                    // `createSnowColumnInstance`: the drift u/v from the seeded gaussian
-                    // pair, the slow fall, and the brightened light.
-                    let wrapped_ticks = (game_time & 131071) as f32;
-                    let time = wrapped_ticks as f64 + partial_tick as f64;
-                    let u = (rng.next_double() + time * 0.01 * rng.next_gaussian()) as f32;
-                    let v = (rng.next_double() + time * rng.next_gaussian() * 0.001) as f32;
-                    let v_offset = -((game_time & 511) as f32 + partial_tick) / 512.0 + v;
-                    let brightened = (
-                        ((light.0 as i32 * 3 + 15) / 4).clamp(0, 15) as u8,
-                        ((light.1 as i32 * 3 + 15) / 4).clamp(0, 15) as u8,
-                    );
-                    frame.snow.push(haste_render::WeatherColumn {
-                        u_offset: u,
-                        v_offset,
-                        light: brightened,
-                        ..column
-                    });
-                }
-                crate::net::Precipitation::None => {}
-            }
+            crate::net::Precipitation::None => {}
         }
     }
     if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -3576,6 +3633,10 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut gui = GuiFrame::default();
     let mut ui: Option<crate::ui::Ui> = None;
     let mut feed = WorldFeed::default();
+    // The render thread's weather extraction buffer (reused every frame, no allocation
+    // after warmup).
+    let mut weather_frame = haste_render::WeatherFrame::default();
+    let mut weather_cache = WeatherColumnCache::default();
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
     // With `--pos`, the shot is only taken once the server has teleported the player to these
     // feet coordinates (the compare script teleports over RCON while we join).
@@ -3600,25 +3661,26 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         // `frame_view` so the third-person camera offset follows it. The player is made to
         // look the same way, so its crosshair target (and the outline drawn for it) matches
         // the picture.
-        let offset = shared.view.lock().look_offset;
+        let view = shared.view.lock().clone();
+        let offset = view.look_offset;
         let look = (args.yaw.unwrap_or(offset.0), args.pitch.unwrap_or(offset.1));
         {
             let mut input = shared.input.lock();
             input.state.yaw = look.0 - offset.0;
             input.state.pitch = (look.1 - offset.1).clamp(-90.0, 90.0);
         }
-        let mut weather_guard = shared.weather_scratch.lock();
         let (mut camera, sky, lightmap, partial, vd, animation_tick, weather) = frame_view(
             &shared,
+            &view,
             perspective,
             look.0 - offset.0,
             look.1 - offset.1,
             &session.options,
             Instant::now(),
-            &mut weather_guard,
+            &mut weather_frame,
+            &mut weather_cache,
         );
         if let Some(pos) = want_pos {
-            let view = shared.view.lock().clone();
             let eye = pos + DVec3::new(0.0, view.eye_height, 0.0);
             camera.pos = if perspective.draws_player() {
                 let (world, shapes) = (shared.world.read(), &shared.data.shapes);
@@ -3630,11 +3692,17 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         last_camera = camera;
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         if hud_on {
-            feed.set_first_person(&shared, &mut renderer, perspective, false);
+            feed.set_first_person(
+                &shared,
+                &mut renderer,
+                perspective,
+                false,
+                view.first_person,
+            );
         }
         let (entities, block_entities) =
-            feed.entities(&shared, &mut renderer, session.local, partial);
-        let block_target = shared.view.lock().block_target;
+            feed.entities(&shared, &mut renderer, session.local, partial, &view);
+        let block_target = view.block_target;
         let breaking = shared.breaking.lock().clone();
         // The HUD, like the window: waiting for the JVM, then one `Ui` for this render thread.
         if ui.is_none() {
@@ -3655,7 +3723,6 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         }
         // The screen effects around the HUD frame, like the window draws them.
         let spin = {
-            let view = shared.view.lock().clone();
             crate::screen_effects::Frame {
                 width: gui.width,
                 height: gui.height,
@@ -3685,7 +3752,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
-        renderer.set_game_time(shared.view.lock().world_age);
+        renderer.set_game_time(view.world_age);
         renderer.set_lightmap_frame(lightmap);
         {
             let world = shared.world.read();
@@ -3693,9 +3760,8 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             renderer.prepare_particles(&mut particles, &*world, camera, partial);
         }
         stats = renderer.render(&frame)?;
-        drop(weather_guard);
         frames += 1;
-        let placed = shared.view.lock().has_position;
+        let placed = view.has_position;
         if shared.is_closed() {
             anyhow::bail!(
                 "disconnected: {}",
@@ -3703,7 +3769,6 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             );
         }
         if let Some(pos) = want_pos {
-            let view = shared.view.lock().clone();
             let reached = placed && (view.feet - pos).length() <= 0.5;
             if !reached {
                 if Instant::now() > deadline {
@@ -3902,6 +3967,10 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut gui = GuiFrame::default();
     let mut ui: Option<crate::ui::Ui> = None;
     let mut feed = WorldFeed::default();
+    // The render thread's weather extraction buffer (reused every frame, no allocation
+    // after warmup).
+    let mut weather_frame = haste_render::WeatherFrame::default();
+    let mut weather_cache = WeatherColumnCache::default();
     // The script's client is "grabbed" (game input goes through, like an active window).
     let mut input = InputRouter {
         grabbed: true,
@@ -4343,24 +4412,38 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         }
         let shared = shared.as_ref().expect("the session exists");
         let session_ref = session.as_ref().expect("the session exists");
-        let mut weather_guard = shared.weather_scratch.lock();
+        // The frame's view state: the tick above refreshes `view` when it runs (20 Hz);
+        // a frame between ticks reuses the last copy instead of taking the lock again.
+        let view_snapshot = match &view {
+            Some(v) => v.clone(),
+            None => shared.view.lock().clone(),
+        };
+        let view = &view_snapshot;
         let (camera, sky, lightmap, partial, vd, animation_tick, weather) = frame_view(
             shared,
+            view,
             game::Perspective::FirstPerson,
             look.0,
             look.1,
             &options,
             Instant::now(),
-            &mut weather_guard,
+            &mut weather_frame,
+            &mut weather_cache,
         );
         feed.feed(shared, &mut renderer, camera_section(&camera), vd);
         // The first-person hand, like the window and the screenshot path (`set_first_person`
         // diffs the view's per-tick part and only touches the renderer on a change): without
         // this the script's shots never show the held item.
-        feed.set_first_person(shared, &mut renderer, game::Perspective::FirstPerson, false);
+        feed.set_first_person(
+            shared,
+            &mut renderer,
+            game::Perspective::FirstPerson,
+            false,
+            view.first_person,
+        );
         let (entities, block_entities) =
-            feed.entities(shared, &mut renderer, session_ref.local, partial);
-        let block_target = view.as_ref().and_then(|v| v.block_target);
+            feed.entities(shared, &mut renderer, session_ref.local, partial, view);
+        let block_target = view.block_target;
         let breaking = shared.breaking.lock().clone();
         if ui.is_none() {
             ui = shared.ui.lock().clone();
@@ -4375,6 +4458,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                 &session_ref.debug_env,
                 shared,
                 &renderer,
+                view,
                 look,
                 fps.fps as i32,
                 &last_stats,
@@ -4385,7 +4469,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                     args.height,
                     options.force_unicode_font,
                 ),
-                &gpu_info(&renderer),
+                gpu_info(&renderer),
             ));
         }
         if let Some(u) = &mut ui {
@@ -4401,18 +4485,17 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         }
         // The screen effects around the HUD frame, like the window draws them.
         let spin = {
-            let screen = view.as_ref().map(|v| v.screen.clone()).unwrap_or_default();
             crate::screen_effects::Frame {
                 width: gui.width,
                 height: gui.height,
                 first_person: true,
-                effects: &screen,
+                effects: &view.screen,
                 partial_tick: partial,
                 look,
                 scope_scale: 1.125,
             }
             .append_to(&mut gui.commands);
-            screen.spin_warp(partial)
+            view.screen.spin_warp(partial)
         };
         let frame = FrameInput {
             camera,
@@ -4429,7 +4512,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
-        renderer.set_game_time(shared.view.lock().world_age);
+        renderer.set_game_time(view.world_age);
         {
             let world = shared.world.read();
             let mut particles = shared.particles.lock();
@@ -4441,7 +4524,6 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             last_stats = stats;
             fps.frame(&stats);
         }
-        drop(weather_guard);
         frames += 1;
         // This tick's screenshot actions: the frame they caused is now on the GPU.
         if !shots.is_empty() || f2_pending {
@@ -4803,21 +4885,27 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     renderer.set_dimension(shared.world.read().dimension());
     let gui = GuiFrame::default();
     let mut feed = WorldFeed::default();
+    // The render thread's weather extraction buffer (reused every frame, no allocation
+    // after warmup).
+    let mut weather_frame = haste_render::WeatherFrame::default();
+    let mut weather_cache = WeatherColumnCache::default();
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
     let mut stats;
     let mut base;
     let mut vd;
     // Settle phase: identical to the screenshot path (wait for position, meshing done, quiet).
     loop {
-        let mut weather_guard = shared.weather_scratch.lock();
+        let view = shared.view.lock().clone();
         let (mut camera, sky, lightmap, partial, v, animation_tick, weather) = frame_view(
             &shared,
+            &view,
             game::Perspective::FirstPerson,
             0.0,
             0.0,
             &session.options,
             Instant::now(),
-            &mut weather_guard,
+            &mut weather_frame,
+            &mut weather_cache,
         );
         camera.yaw = args.yaw.unwrap_or(camera.yaw);
         camera.pitch = args.pitch.unwrap_or(camera.pitch);
@@ -4829,10 +4917,11 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             &mut renderer,
             game::Perspective::FirstPerson,
             false,
+            view.first_person,
         );
         let (entities, block_entities) =
-            feed.entities(&shared, &mut renderer, session.local, partial);
-        let block_target = shared.view.lock().block_target;
+            feed.entities(&shared, &mut renderer, session.local, partial, &view);
+        let block_target = view.block_target;
         let breaking = shared.breaking.lock().clone();
         let frame = FrameInput {
             camera,
@@ -4849,7 +4938,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
-        renderer.set_game_time(shared.view.lock().world_age);
+        renderer.set_game_time(view.world_age);
         renderer.set_lightmap_frame(lightmap);
         {
             let world = shared.world.read();
@@ -4857,14 +4946,13 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             renderer.prepare_particles(&mut particles, &*world, camera, partial);
         }
         stats = renderer.render(&frame)?;
-        drop(weather_guard);
         if shared.is_closed() {
             anyhow::bail!(
                 "disconnected: {}",
                 shared.closed.lock().clone().unwrap_or_default()
             );
         }
-        let placed = shared.view.lock().has_position;
+        let placed = view.has_position;
         // `--pos` holds the settle until the server has teleported the player there (the
         // screenshot path's rule), so the bench measures the intended spot, not the spawn.
         let reached = args
@@ -4873,7 +4961,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             .filter(|v| v.len() == 3)
             .map(|v| {
                 let want = DVec3::new(v[0], v[1], v[2]);
-                placed && (shared.view.lock().feet - want).length() <= 0.5
+                placed && (view.feet - want).length() <= 0.5
             })
             .unwrap_or(placed);
         if reached && feed.settled(&stats, Duration::from_millis(1500)) {
@@ -4992,15 +5080,17 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         }
         // The bench camera follows its fixed path; the sky and entities come from the live view
         // (time of day moves, the player stays where the server put it).
-        let mut weather_guard = shared.weather_scratch.lock();
+        let view = shared.view.lock().clone();
         let (_, mut sky, lightmap, partial_tick, _, animation_tick, weather) = frame_view(
             &shared,
+            &view,
             game::Perspective::FirstPerson,
             0.0,
             0.0,
             &session.options,
             Instant::now(),
-            &mut weather_guard,
+            &mut weather_frame,
+            &mut weather_cache,
         );
         let camera = if args.bench_fixed {
             // Still camera at the settle spot: one fixed view, comparable with `--screenshot`.
@@ -5015,8 +5105,8 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         feed.feed(&shared, &mut renderer, camera_section(&camera), vd);
         let feed_ms = feed_start.elapsed().as_secs_f32() * 1000.0;
         let (entities, block_entities) =
-            feed.entities(&shared, &mut renderer, session.local, partial_tick);
-        let block_target = shared.view.lock().block_target;
+            feed.entities(&shared, &mut renderer, session.local, partial_tick, &view);
+        let block_target = view.block_target;
         let breaking = shared.breaking.lock().clone();
         let frame = FrameInput {
             camera,
@@ -5033,7 +5123,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         };
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
-        renderer.set_game_time(shared.view.lock().world_age);
+        renderer.set_game_time(view.world_age);
         renderer.set_lightmap_frame(lightmap);
         {
             let world = shared.world.read();
@@ -5041,7 +5131,6 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             renderer.prepare_particles(&mut particles, &*world, camera, partial_tick);
         }
         let stats = renderer.render(&frame)?;
-        drop(weather_guard);
         let prev_drawn = samples.last().map_or(0, |s| s.sections_drawn);
         samples.push(BenchSample {
             frame_ms: stats.frame_ms,
@@ -5166,6 +5255,8 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         menu_next: Instant::now(),
         quitting: false,
         bench: None,
+        weather: haste_render::WeatherFrame::default(),
+        weather_cache: WeatherColumnCache::default(),
     };
     event_loop.run_app(&mut app)?;
     if let Some(e) = app.error {
@@ -5270,6 +5361,8 @@ pub fn bench_window(args: &Args, seconds: u64) -> anyhow::Result<()> {
                 .filter(|v| v.len() == 3)
                 .map(|v| DVec3::new(v[0], v[1], v[2])),
         }),
+        weather: haste_render::WeatherFrame::default(),
+        weather_cache: WeatherColumnCache::default(),
     };
     app.input.yaw = args.yaw.unwrap_or(0.0);
     app.input.pitch = args.pitch.unwrap_or(10.0);
@@ -5406,6 +5499,12 @@ struct App {
     /// The windowed bench (`--bench-window`): records one sample per frame and closes the
     /// window when the run is full. `None` in the normal windowed client.
     bench: Option<WindowBench>,
+    /// The render thread's weather extraction buffer (reused every frame, no allocation
+    /// after warmup). Owns no lock: only `draw` touches it.
+    weather: haste_render::WeatherFrame,
+    /// The weather extraction's per-tick column cache (heights, precipitation, light),
+    /// rebuilt only when the camera's block cell or the world changed.
+    weather_cache: WeatherColumnCache,
 }
 
 impl App {
@@ -5833,34 +5932,36 @@ impl App {
         }
         self.input
             .sample(&session.shared, self.ui.as_ref(), self.perspective);
+        // The frame's view state: locked and copied once here, then passed to everything
+        // below (frame_view, the feed, debug_info) instead of each taking the lock again.
+        let view = session.shared.view.lock().clone();
         // The windowed bench holds the camera still (the settle frame's view with the
         // requested look), like the offscreen `--bench --bench-fixed`.
         if let Some(bench) = &mut self.bench {
-            let offset = session.shared.view.lock().look_offset;
             if let Some(yaw) = bench.look.0 {
-                self.input.yaw = yaw - offset.0;
+                self.input.yaw = yaw - view.look_offset.0;
             }
             if let Some(pitch) = bench.look.1 {
-                self.input.pitch = (pitch - offset.1).clamp(-90.0, 90.0);
+                self.input.pitch = (pitch - view.look_offset.1).clamp(-90.0, 90.0);
             }
         }
         let renderer = self.renderer.as_mut().expect("checked above");
-        let mut weather_guard = session.shared.weather_scratch.lock();
         let (mut camera, sky, lightmap, partial, vd, animation_tick, weather) = frame_view(
             &session.shared,
+            &view,
             self.perspective,
             self.input.yaw,
             self.input.pitch,
             &self.options,
             t0,
-            &mut weather_guard,
+            &mut self.weather,
+            &mut self.weather_cache,
         );
         // The windowed bench's settle and still camera: until the world has settled (and
         // the HUD's JVM arrived, like the screenshot path), the frames only warm up; the
         // first settled frame's camera is then held for the whole run.
         if let Some(bench) = &mut self.bench {
             let settled_now = {
-                let view = session.shared.view.lock().clone();
                 let at_pos = bench
                     .want_pos
                     .is_none_or(|p| (view.feet - p).length() <= 0.5);
@@ -5889,12 +5990,17 @@ impl App {
         }
         let t1 = Instant::now();
         let hud_hidden = self.ui.as_ref().is_some_and(|ui| ui.hud_hidden());
-        self.feed
-            .set_first_person(&session.shared, renderer, self.perspective, hud_hidden);
+        self.feed.set_first_person(
+            &session.shared,
+            renderer,
+            self.perspective,
+            hud_hidden,
+            view.first_person,
+        );
         let (entities, block_entities) =
             self.feed
-                .entities(&session.shared, renderer, session.local, partial);
-        let block_target = session.shared.view.lock().block_target;
+                .entities(&session.shared, renderer, session.local, partial, &view);
+        let block_target = view.block_target;
         self.breaking.clear();
         self.breaking
             .extend_from_slice(&session.shared.breaking.lock());
@@ -5909,7 +6015,6 @@ impl App {
             }
         }
         let (w, h) = renderer.size();
-        let view = session.shared.view.lock().clone();
         if let Some(ui) = &self.ui {
             // F3's numbers and the water overlay's flag, every frame (cheap: short mutexes,
             // no allocation while the overlay is off). The section counts are the previous
@@ -5920,6 +6025,7 @@ impl App {
                 &session.debug_env,
                 &session.shared,
                 renderer,
+                &view,
                 (self.input.yaw, self.input.pitch),
                 self.fps.fps as i32,
                 &stats,
@@ -5930,9 +6036,8 @@ impl App {
                     h,
                     self.options.force_unicode_font,
                 ),
-                &gpu,
+                gpu,
             ));
-            let view = session.shared.view.lock().clone();
             ui.set_eye_in_water(view.eye_in_water);
         }
         if let Some(ui) = &mut self.ui {
@@ -5991,7 +6096,7 @@ impl App {
             renderer.prepare_particles(&mut particles, &*world, camera, partial);
         }
         renderer.set_animation_tick(animation_tick);
-        renderer.set_game_time(session.shared.view.lock().world_age);
+        renderer.set_game_time(view.world_age);
         renderer.set_lightmap_frame(lightmap);
         renderer.set_menu_blur_radius(self.options.menu_background_blurriness);
         if self.screenshot {
@@ -5999,7 +6104,6 @@ impl App {
             renderer.request_capture();
         }
         let result = renderer.render(&frame);
-        drop(weather_guard);
         if let Ok(stats) = &result {
             self.frame_stats = *stats;
         }
