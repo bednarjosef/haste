@@ -304,3 +304,43 @@ fn quadruped_legs_swing_out_of_phase() {
     assert!(rh.x * rf.x <= 0.0, "hind {} front {} in phase", rh.x, rf.x);
     assert!((lh.x + rh.x).abs() < 1e-4, "left/right hind not mirrored");
 }
+
+/// `HumanoidModel.setupAnim`'s crouch moves the pivots too: head down 4.2, body and arms down
+/// 3.2, legs back 4 (model units), so the leaning body stays joined to the legs. Standing
+/// leaves every pivot where the model puts it.
+#[test]
+fn crouching_humanoid_drops_head_body_arms_and_moves_legs_back() {
+    use haste_core::parts;
+    let mut s = store();
+    s.spawn(&spawn(1, DVec3::ZERO));
+    s.tick();
+    let model = crate::models::humanoid(false);
+    let standing =
+        crate::animation::setup_anim(s.get(EntityId(1)).unwrap(), &model, true, 1.0, false);
+    for id in [
+        parts::HEAD,
+        parts::BODY,
+        parts::RIGHT_ARM,
+        parts::LEFT_ARM,
+        parts::RIGHT_LEG,
+    ] {
+        assert_eq!(standing.offset_of(id), None);
+    }
+    s.set_metadata(
+        EntityId(1),
+        &[MetadataEntry {
+            index: 0,
+            value: MetadataValue::Byte(0x02),
+        }],
+    );
+    s.tick();
+    let pose = crate::animation::setup_anim(s.get(EntityId(1)).unwrap(), &model, true, 1.0, false);
+    let y = |v: f32| Some(haste_core::math::Vec3::new(0.0, v, 0.0));
+    let back = Some(haste_core::math::Vec3::new(0.0, 0.0, 4.0));
+    assert_eq!(pose.offset_of(parts::HEAD), y(4.2));
+    assert_eq!(pose.offset_of(parts::BODY), y(3.2));
+    assert_eq!(pose.offset_of(parts::RIGHT_ARM), y(3.2));
+    assert_eq!(pose.offset_of(parts::LEFT_ARM), y(3.2));
+    assert_eq!(pose.offset_of(parts::RIGHT_LEG), back);
+    assert_eq!(pose.offset_of(parts::LEFT_LEG), back);
+}

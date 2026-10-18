@@ -15,6 +15,8 @@
 use haste_core::entity::Pose;
 use haste_core::math::Vec3;
 use haste_core::model::{BodyOp, BodyTransform, CubeModel, ModelPart, PoseOverrides};
+
+mod crouch;
 use haste_core::parts;
 
 use crate::store::{wrap_degrees, Entity};
@@ -422,9 +424,7 @@ fn humanoid(
         la = Vec3::new(x, y, 0.0);
     }
     if e.metadata.shared.crouching {
-        body.x = 0.5;
-        ra.x += 0.4;
-        la.x += 0.4;
+        crouch::pose(o, &mut body, &mut ra, &mut la);
     }
     ra += bob(age, 1.0);
     la += bob(age, -1.0);
