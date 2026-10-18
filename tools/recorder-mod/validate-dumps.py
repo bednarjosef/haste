@@ -85,10 +85,10 @@ if s["light"] != 15:
 for block, props, dampening, can_occlude, use_shape in [
     ("minecraft:stone", {}, 15, True, False),
     ("minecraft:air", {}, 0, False, False),
-    ("minecraft:oak_slab", {"type": "bottom"}, 0, True, True),
+    ("minecraft:oak_slab", {"type": "bottom", "waterlogged": "false"}, 0, True, True),
     ("minecraft:oak_slab", {"type": "double"}, 15, True, False),
     ("minecraft:snow", {"layers": "2"}, 0, True, True),
-    ("minecraft:oak_stairs", {"half": "bottom"}, 0, True, True),
+    ("minecraft:oak_stairs", {"half": "bottom", "waterlogged": "false"}, 0, True, True),
 ]:
     s = find(block, **props)[0]
     if s.get("light_dampening") != dampening:
