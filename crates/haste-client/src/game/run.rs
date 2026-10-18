@@ -10,13 +10,14 @@ use haste_jvm::JvmHost;
 use haste_protocol::haste_core::game::TICK_SECONDS;
 use haste_protocol::haste_core::view::DirtyTracker;
 use haste_protocol::haste_core::SectionPos;
+use haste_protocol::ServerboundPlay;
 
 use super::shared::{PackReload, Shared};
 use super::skins;
 use super::tick_once;
 use super::tracked_world::TrackedWorld;
 use crate::net::NetDriver;
-use crate::ui::Ui;
+use crate::ui::{HudWarmup, Ui};
 
 /// Runs the 20 Hz game loop until the connection closes or `shared.stop` is set, then closes
 /// the connection. Must run inside the tokio runtime's context (the connection's tasks).
@@ -41,13 +42,19 @@ pub fn run(mut driver: NetDriver, shared: Arc<Shared>, existing_ui: Option<Ui>) 
             // The menu already ticked this Ui; the game thread takes it over from here.
             let (tx, rx) = std::sync::mpsc::channel();
             let _ = tx.send(Some(HudArrival::Menu(ui)));
-            HudSlot { rx: Some(rx) }
+            HudSlot {
+                rx: Some(rx),
+                warmup: None,
+            }
         })
         .unwrap_or_else(|| {
             if shared.hud_enabled.load(Ordering::Relaxed) {
                 spawn_jvm(&shared)
             } else {
-                HudSlot { rx: None }
+                HudSlot {
+                    rx: None,
+                    warmup: None,
+                }
             }
         });
     // The server pack set version this thread last applied (starts at the
@@ -206,6 +213,12 @@ fn spawn_jvm(shared: &Arc<Shared>) -> HudSlot {
                         // the same game directory the menu's JVM and the asset pack
                         // selection use (vanilla's options.txt and resourcepacks/ live there)
                         cfg.game_dir = crate::app::game_dir();
+                        // GC diagnosis: the JVM's boot full GCs are the 100-200 ms frame
+                        // hitches right after the HUD goes live. HASTE_JVM_GC_LOG=1 logs
+                        // every pause with -Xlog:gc.
+                        if std::env::var_os("HASTE_JVM_GC_LOG").is_some() {
+                            cfg.jvm_options.push("-Xlog:gc".to_string());
+                        }
                         cfg
                     })
                     .and_then(JvmHost::start);
@@ -225,7 +238,10 @@ fn spawn_jvm(shared: &Arc<Shared>) -> HudSlot {
             }
         })
         .expect("spawning the JVM thread");
-    HudSlot { rx: Some(rx) }
+    HudSlot {
+        rx: Some(rx),
+        warmup: None,
+    }
 }
 
 /// What the HUD's slot delivers: a freshly started JVM, or menu mode's already-built UI.
@@ -239,6 +255,8 @@ pub(super) enum HudArrival {
 /// The JVM (or menu UI) arriving on its own thread: `take()` once, at the start of a game tick.
 pub(super) struct HudSlot {
     rx: Option<std::sync::mpsc::Receiver<Option<HudArrival>>>,
+    /// A fresh HUD warming up before it goes live (`hud.rs` steps it once per tick).
+    pub(super) warmup: Option<HudWarmup>,
 }
 
 /// Takes `item` from a slot that a background thread fills once: `None` while it is still
@@ -275,6 +293,7 @@ pub(super) fn drain_packets(
     gone: &mut Vec<SectionPos>,
     server_packs_version: &mut u64,
 ) -> anyhow::Result<()> {
+    send_ui_sends(driver, shared)?;
     let mut world = shared.world.write();
     let mut entities = shared.entities.write();
     let mut tracked = TrackedWorld {
@@ -328,4 +347,44 @@ pub(super) fn drain_packets(
         *shared.resource_pack_reload.lock() = Some(PackReload { ids, server });
     }
     Ok(())
+}
+
+/// Sends the packets a screen's input event queued (vanilla's `Connection.send` inside the
+/// input handler), and flushes whatever else sits in the driver's queue: a click that lost
+/// the race with the running tick's own Java drain (the tick's `tick_ui` took it out of
+/// Java's queue and queued it for the next tick's flush) still leaves now, not a tick
+/// later. Called before every packet drain, so a wake and a tick both send at once.
+pub(super) fn send_ui_sends(driver: &mut NetDriver, shared: &Shared) -> anyhow::Result<()> {
+    let queued = std::mem::take(&mut *shared.ui_sends.lock());
+    for (p, at) in queued {
+        if let ServerboundPlay::ContainerClick(c) = &p {
+            tracing::info!(
+                "container_click: window {} slot {} button {} mode {} state {} changed {} \
+                 carried {}, sent {:.1} ms after the click",
+                c.window_id,
+                c.slot,
+                c.button,
+                c.mode,
+                c.state_id,
+                c.changed.len(),
+                c.carried.item.is_some(),
+                at.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        driver.queue(p);
+    }
+    driver.flush()
+}
+
+/// Wires the UI's input-event sends to this connection's game thread (vanilla sends a
+/// container click inside the input handler itself; see [`Shared::ui_sends`]): every Ui
+/// clone shares the hook, so the render thread's input events reach it. Weak, because the
+/// shared state owns the UI — a strong reference would keep both alive forever.
+pub(super) fn wire_immediate_sender(ui: &crate::ui::Ui, shared: &Arc<Shared>) {
+    let weak = Arc::downgrade(shared);
+    ui.set_immediate_sender(std::sync::Arc::new(move |packets: &[ServerboundPlay]| {
+        if let Some(shared) = weak.upgrade() {
+            shared.queue_ui_sends(packets);
+        }
+    }));
 }

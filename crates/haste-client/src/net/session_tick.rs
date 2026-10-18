@@ -19,6 +19,7 @@ impl Session {
         input: &InputState,
         world: &mut W,
         entities: &E,
+        ui: Option<&crate::ui::Ui>,
         out: &mut Vec<ServerboundPlay>,
     ) {
         // Sound requests nobody drained (headless) are dropped here; the game thread
@@ -34,6 +35,9 @@ impl Session {
         // The player's own block particles this tick (break grid, mining cracks).
         self.block_particle_requests
             .extend(self.player.take_own_block_particles());
+        // The player's own item particles this tick (a consumable's crumbs).
+        self.item_particle_requests
+            .extend(self.player.take_own_item_particles());
         self.entity_boxes.clear();
         self.entity_types.clear();
         for id in &self.entity_ids {
@@ -82,6 +86,7 @@ impl Session {
                     warm_blocks: warm
                         .as_ref()
                         .map(|w| w as &dyn crate::item_based_steering::WarmBlocks),
+                    ui,
                 };
                 self.player.tick_interact(input, view, &env, vehicle, out)
             }
@@ -98,8 +103,10 @@ impl Session {
         // `ParticleEngine.tick` runs after `tickEntities`/`level.tick`), so their target is the
         // collector's position at the end of the tick.
         self.tick_pickup_particles(entities);
-        for (pos, state) in self.player.take_world_edits() {
-            world.set_block(pos, state);
+        // The drain holds the player's borrow, so the edits apply from a collected copy.
+        let edits: Vec<_> = self.player.take_world_edits().collect();
+        for (pos, state) in edits {
+            self.set_block_with_block_entities(world, pos, state);
             self.lids.remove(&pos);
             self.bells.remove(&pos);
             self.pots.remove(&pos);

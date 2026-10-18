@@ -6,11 +6,11 @@ crates/haste-assets/src/item.rs 754
 crates/haste-assets/src/model.rs 669
 crates/haste-assets/src/packstack.rs 722
 crates/haste-client/src/ambient_particles.rs 626
-crates/haste-client/src/app.rs 4890
+crates/haste-client/src/app.rs 4413
 crates/haste-client/src/boat.rs 871
-crates/haste-client/src/net/tests.rs 1841
-crates/haste-client/src/player/interact/tests.rs 2361
-crates/haste-client/src/player.rs 1391
+crates/haste-client/src/net/tests.rs 1788
+crates/haste-client/src/player/interact/tests.rs 2245
+crates/haste-client/src/player.rs 1404
 crates/haste-client/src/player/tests.rs 1713
 crates/haste-client/src/script.rs 1159
 crates/haste-client/src/sound/tests.rs 1163

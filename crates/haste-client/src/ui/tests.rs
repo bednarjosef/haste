@@ -1,6 +1,8 @@
 use super::packets::{read_var_int, FORWARDED, FORWARDED_LOCAL};
 use super::*;
 
+mod click_timing;
+
 #[test]
 fn var_ints() {
     let mut i = 0;
@@ -53,7 +55,7 @@ use haste_protocol::haste_core::DVec3;
 /// the process's one JVM and its one game state, and a parallel test would otherwise flip the
 /// shared state between another's write and its frame (the frame waits on the JVM's lock
 /// while the other test keeps writing).
-fn frame_tests() -> &'static std::sync::Mutex<()> {
+pub(crate) fn frame_tests() -> &'static std::sync::Mutex<()> {
     static SERIALISE: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     SERIALISE.get_or_init(std::sync::Mutex::default)
 }
@@ -61,7 +63,7 @@ fn frame_tests() -> &'static std::sync::Mutex<()> {
 const NEEDS_SERVER: &str = "needs cache/ and a test server (HASTE_TEST_SERVER, default 127.0.0.1:25614) where 'haste' is an operator; run with --test-threads=1";
 
 /// The process's JVM (one per process), started once.
-fn host() -> JvmHost {
+pub(crate) fn host() -> JvmHost {
     static HOST: std::sync::OnceLock<JvmHost> = std::sync::OnceLock::new();
     HOST.get_or_init(|| {
         let cache = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");

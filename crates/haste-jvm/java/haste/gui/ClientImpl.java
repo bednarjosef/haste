@@ -272,7 +272,10 @@ public final class ClientImpl {
     public static net.minecraft.client.InputType getLastInputType(Minecraft m) { return lastInput; }
     public static void setLastInputType(Minecraft m, net.minecraft.client.InputType t) { lastInput = t; }
     public static boolean hasShiftDown(Minecraft m) { return (mods & 3) != 0; }
-    public static boolean hasControlDown(Minecraft m) { return (mods & 192) != 0; }
+    public static boolean hasControlDown(Minecraft m) { return ctrlDown(); }
+    /** Ctrl's state at the last key event (SDL keymod), read where vanilla polls the live
+     * keyboard ({@code InputConstants.isKeyDown}) at a consume or click. */
+    static boolean ctrlDown() { return (mods & 192) != 0; }
     public static boolean hasAltDown(Minecraft m) { return (mods & 768) != 0; }
 
     /**

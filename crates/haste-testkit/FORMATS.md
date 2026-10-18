@@ -160,6 +160,37 @@ block's default (in 26.3 only the decorated pot's `cracked` variant does).
 `friction` is the block's slipperiness; `speed_factor`/`jump_factor` are multipliers applied while
 the entity is standing on the block. Defaults for blocks not overriding: 0.6 / 1.0 / 1.0.
 
+## block_entity_types.json
+
+Which block carries which `minecraft:block_entity_type` (the block side of vanilla
+`BlockEntityTypes`' valid-block sets). `blocks` is the authoritative view the client loads: for
+every block state where `BlockState.hasBlockEntity()` is true, the type `EntityBlock
+.newBlockEntity(BlockPos.ZERO, state)` returned — the same call `LevelChunk.setBlockState` makes
+when a block update places the block, so the client can create the entity itself (the server
+sends no `block_entity_data` for a plain placement). `types` is the registry's own view, for
+comparison. States of one block share the type; a block whose states disagree (or return no
+entity for some of them) is emitted per state under `states` instead — none in vanilla 26.3.
+
+```jsonc
+{
+  "version": 1,
+  "minecraft": "26.3",
+  "types": [
+    {
+      "id": 0,                            // registry id (BuiltInRegistries.BLOCK_ENTITY_TYPE)
+      "type": "minecraft:furnace",
+      "valid_blocks": ["minecraft:furnace"]
+    }
+  ],
+  "blocks": {
+    "minecraft:chest": "minecraft:chest",
+    "minecraft:spawner": "minecraft:mob_spawner",
+    "minecraft:oak_sign": "minecraft:sign"
+  },
+  "states": { }                          // state id -> type, only for blocks in `states`
+}
+```
+
 ## traces/<name>.json
 
 Physics traces recorded from the vanilla client (Task 3). One file per scripted input sequence.
