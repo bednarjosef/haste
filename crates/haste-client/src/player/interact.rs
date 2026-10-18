@@ -123,6 +123,9 @@ pub struct InteractEnv<'a> {
     /// (`docs/INTERFACES.md`: `entity_box` carries the entity_type name); the picker only reads
     /// it.
     pub entity_types: &'a [RegistryIndex],
+    /// The `#strider_warm_blocks` resolution for the strider the player steers (synced block
+    /// tags + the data's block table); `None` without a tag sync yet.
+    pub warm_blocks: Option<&'a dyn crate::item_based_steering::WarmBlocks>,
 }
 
 /// Interaction state of the local player.
