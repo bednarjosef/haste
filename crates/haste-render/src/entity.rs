@@ -22,6 +22,7 @@ mod atlas;
 mod block_entities;
 mod cape;
 mod equipment;
+mod experience_orb;
 mod item;
 mod item_frame;
 mod painting;
@@ -351,6 +352,7 @@ impl EntityRenderer {
         skip: Option<EntityId>,
         camera: glam::DVec3,
         frustum: &[glam::Vec4; 6],
+        orientation: glam::Quat,
         assets: &mut Assets,
     ) {
         self.vertices.clear();
@@ -395,6 +397,15 @@ impl EntityRenderer {
                     // The lightning bolt draws through the weather pass's own additive
                     // pipeline (`RenderPipelines.LIGHTNING`); nothing here.
                     Decoration::Lightning(_) => {}
+                    Decoration::ExperienceOrb(o) => self.emit_experience_orb(
+                        e,
+                        o.value,
+                        o.age,
+                        camera,
+                        light,
+                        orientation,
+                        assets,
+                    ),
                 }
                 if self.vertices.len() > start {
                     self.drawn += 1;
