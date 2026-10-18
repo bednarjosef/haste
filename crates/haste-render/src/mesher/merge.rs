@@ -137,6 +137,8 @@ pub(super) enum StagedQuad {
     /// A quad that cannot merge (any shape, or per-vertex light differences).
     Direct {
         layer: haste_assets::RenderLayer,
+        /// Face direction (`Direction::ALL` index): the sink's draw-time bucket.
+        dir: u8,
         positions: [[f32; 3]; 4],
         uvs: [[f32; 2]; 4],
         lights: [[u8; 3]; 4],
@@ -183,12 +185,18 @@ struct MergeRect {
 
 /// The greedy pass: merge the staged unit faces into rectangles and emit
 /// everything into `sink` in the original emission order.
+/// The staged direction byte back to a `Direction` (the sink buckets by it).
+fn dir_of(dir: u8) -> haste_assets::Direction {
+    haste_assets::Direction::from_index(dir as usize)
+}
+
 pub(super) fn flush_staged(staged: &mut [StagedQuad], sink: &mut MeshSink) {
     // Fast path: nothing mergeable (a section of shapes, or all-AO corners).
     if !staged.iter().any(|q| matches!(q, StagedQuad::Merge(_))) {
         for q in staged.iter() {
             if let StagedQuad::Direct {
                 layer,
+                dir,
                 positions,
                 uvs,
                 lights,
@@ -196,7 +204,15 @@ pub(super) fn flush_staged(staged: &mut [StagedQuad], sink: &mut MeshSink) {
                 sprite,
             } = q
             {
-                sink.push_quad(*layer, positions, uvs, *lights, *tint, *sprite);
+                sink.push_quad(
+                    *layer,
+                    dir_of(*dir),
+                    positions,
+                    uvs,
+                    *lights,
+                    *tint,
+                    *sprite,
+                );
             }
         }
         return;
@@ -291,12 +307,21 @@ pub(super) fn flush_staged(staged: &mut [StagedQuad], sink: &mut MeshSink) {
         match q {
             StagedQuad::Direct {
                 layer,
+                dir,
                 positions,
                 uvs,
                 lights,
                 tint,
                 sprite,
-            } => sink.push_quad(*layer, positions, uvs, *lights, *tint, *sprite),
+            } => sink.push_quad(
+                *layer,
+                dir_of(*dir),
+                positions,
+                uvs,
+                *lights,
+                *tint,
+                *sprite,
+            ),
             StagedQuad::Merge(_) => {
                 if let Some(ri) = rect_at[i] {
                     if emitted_rects[ri] {
@@ -351,6 +376,7 @@ fn emit_rect(r: &MergeRect, sink: &mut MeshSink) {
     let lights = [light; 4];
     sink.push_quad(
         layer_from_index(r.key.layer as usize),
+        haste_assets::Direction::from_index(r.key.dir as usize),
         &positions,
         &uvs,
         lights,

@@ -18,7 +18,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     let mut renderer =
         Renderer::new_offscreen(args.width, args.height, &mut assets, &shared.data.blocks)?;
     renderer.set_item_registry(&shared.data.registries);
-    renderer.set_ao_shapes(&shared.data.blocks, &shared.data.shapes);
+    renderer.set_shapes(&shared.data.blocks, &shared.data.shapes);
     renderer.set_biomes(&session.biomes);
     renderer.set_particle_types(&session.particle_types);
     renderer.set_dimension(shared.world.read().dimension());
