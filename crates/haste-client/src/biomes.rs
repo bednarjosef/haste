@@ -9,10 +9,24 @@
 #[path = "biomes/zoom.rs"]
 pub mod zoom;
 
-use haste_protocol::haste_core::{BiomeId, BlockPos, Identifier};
+use haste_protocol::haste_core::{BiomeId, BlockPos, ChunkPos, Identifier};
 use haste_protocol::nbt::NbtCompound;
 use haste_protocol::SyncedRegistries;
 use haste_render::{BiomeClimate, BiomeFog, GrassModifier};
+use std::sync::atomic::{AtomicI64, Ordering};
+
+/// The level's biome zoom seed (vanilla `BiomeManager.biomeZoomSeed`): the server applies
+/// `BiomeManager.obfuscateSeed` and sends the hashed value as the spawn info's seed with
+/// the login and respawn packets. One live connection at a time, like vanilla's one
+/// `ClientLevel`, so a process-wide atomic stands in for the field on vanilla's
+/// `BiomeManager` (relaxed: the value changes only with a respawn, which resets the world
+/// and re-meshes everything anyway).
+static ZOOM_SEED: AtomicI64 = AtomicI64::new(0);
+
+/// Stores the seed the login/respawn spawn info carried.
+pub fn set_zoom_seed(seed: i64) {
+    ZOOM_SEED.store(seed, Ordering::Relaxed);
+}
 
 /// The world's biomes for the renderer's tint lookup (cell-resolution, biome 0 where nothing is
 /// loaded).
@@ -20,16 +34,15 @@ pub struct WorldBiomes<'a>(pub &'a haste_world::World);
 
 impl haste_render::BiomeSource for WorldBiomes<'_> {
     fn biome(&self, pos: BlockPos) -> BiomeId {
+        // Vanilla `BiomeManager.getBiome`: the fiddled nearest corner's cell, which can be
+        // one quart cell off the block's own in each axis (crossing a section or chunk
+        // border; 0 where that neighbour is not loaded).
+        let (qx, qy, qz) =
+            zoom::zoomed_cell(ZOOM_SEED.load(Ordering::Relaxed), pos.x, pos.y, pos.z);
         self.0
-            .chunk(pos.chunk())
-            .and_then(|c| c.section(pos.y >> 4))
-            .map(|s| {
-                s.biome(
-                    ((pos.x & 15) >> 2) as u8,
-                    ((pos.y & 15) >> 2) as u8,
-                    ((pos.z & 15) >> 2) as u8,
-                )
-            })
+            .chunk(ChunkPos::new(qx >> 2, qz >> 2))
+            .and_then(|c| c.section(qy >> 2))
+            .map(|s| s.biome((qx & 3) as u8, (qy & 3) as u8, (qz & 3) as u8))
             .unwrap_or(BiomeId(0))
     }
 }

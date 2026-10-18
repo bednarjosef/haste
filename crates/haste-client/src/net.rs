@@ -1440,6 +1440,8 @@ impl Session {
                 // `ClientLevel.seaLevel` comes with the spawn info (biome precipitation's
                 // snow line hangs off it).
                 self.sea_level = l.spawn.sea_level;
+                // The spawn info's hashed seed is `BiomeManager`'s zoom seed.
+                crate::app::biomes::set_zoom_seed(l.spawn.hashed_seed);
                 self.is_flat = l.spawn.is_flat;
                 self.view_distance = l.view_distance;
             }
@@ -1452,6 +1454,7 @@ impl Session {
                         ..DimensionInfo::overworld()
                     });
                 self.sea_level = r.spawn.sea_level;
+                crate::app::biomes::set_zoom_seed(r.spawn.hashed_seed);
                 self.is_flat = r.spawn.is_flat;
                 world.reset(&dim);
                 entities.clear();
