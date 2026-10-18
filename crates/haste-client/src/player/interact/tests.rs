@@ -6,6 +6,8 @@ use haste_physics::mining::{BlockTags, Tool, ToolTable};
 use haste_physics::testing::TestWorld;
 
 use super::*;
+use super::pick::is_pickable;
+use super::use_item::UseAnimation;
 
 const ME: EntityId = EntityId(7);
 const STONE: BlockStateId = BlockStateId(1);

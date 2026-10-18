@@ -41,15 +41,20 @@ use std::sync::Arc;
 use glam::DVec3;
 use haste_core::entity::ItemStackData;
 use haste_core::input::InteractInput;
-use haste_core::view::{BlockPhysics, BlockView, CollisionShapes};
+use haste_core::view::{BlockPhysics, BlockView};
 use haste_core::{Aabb, BlockPos, BlockStateId, Direction, EntityId, Identifier, RegistryIndex};
 use haste_physics::mining::{BlockTags, MiningParams, ToolTable};
-use haste_physics::raycast::{self, BlockHit};
+use haste_physics::raycast::BlockHit;
 use haste_protocol::packets::play::serverbound as sb;
 use haste_protocol::{ClientboundPlay, ServerboundPlay};
 
 use super::LocalPlayer;
 use haste_core::game::GameMode;
+
+mod pick;
+mod use_item;
+pub use pick::Target;
+pub use use_item::UsingItem;
 
 /// Ticks between two broken blocks while attack stays held (`destroyDelay`).
 pub const DESTROY_DELAY: u8 = 5;
@@ -111,13 +116,6 @@ pub struct InteractEnv<'a> {
     /// (`docs/INTERFACES.md`: `entity_box` carries the entity_type name); the picker only reads
     /// it.
     pub entity_types: &'a [RegistryIndex],
-}
-
-/// What the crosshair is on.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Target {
-    Block(BlockHit),
-    Entity { id: EntityId, location: DVec3 },
 }
 
 /// Interaction state of the local player.
@@ -198,56 +196,6 @@ pub struct Interaction {
     recent: Vec<BlockPos>,
     /// The screen the last use opened (see [`UsedScreen`]), until the game thread takes it.
     used_screen: Option<UsedScreen>,
-}
-
-/// `ItemUseAnimation` (vanilla's order).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UseAnimation {
-    None,
-    Eat,
-    Drink,
-    Block,
-    Bow,
-    Trident,
-    Crossbow,
-    Spyglass,
-    TootHorn,
-    Brush,
-    Bundle,
-    Spear,
-}
-
-impl UseAnimation {
-    fn from_id(id: i32) -> Self {
-        match id {
-            0 => UseAnimation::None,
-            2 => UseAnimation::Drink,
-            3 => UseAnimation::Block,
-            4 => UseAnimation::Bow,
-            5 => UseAnimation::Trident,
-            6 => UseAnimation::Crossbow,
-            7 => UseAnimation::Spyglass,
-            8 => UseAnimation::TootHorn,
-            9 => UseAnimation::Brush,
-            10 => UseAnimation::Bundle,
-            11 => UseAnimation::Spear,
-            // `eat` (1) and unknown ids.
-            _ => UseAnimation::Eat,
-        }
-    }
-}
-
-/// The item being used and how long is left (`LivingEntity.useItem`/`useItemRemaining`).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct UsingItem {
-    /// The item type this use started with (`ItemStack.isSameItem` check each tick).
-    pub item: Option<RegistryIndex>,
-    /// `getUseDuration` (ticks).
-    pub duration: i32,
-    /// `useItemRemainingTicks`, decremented each tick.
-    pub remaining: i32,
-    /// `getUseAnimation`.
-    pub animation: UseAnimation,
 }
 
 /// The held main-hand stack's decoded components the game logic reads: what it mines
@@ -530,35 +478,6 @@ impl Interaction {
         }
     }
 
-    /// `Item.getUseDuration` / `Item.getUseAnimation` for a held stack: the `minecraft:consumable`
-    /// component when present, else the item classes that override them. `None` when the item is
-    /// not used over time (duration 0, animation `NONE`).
-    fn use_data(
-        &self,
-        stack: &ItemStackData,
-        data: &haste_data::GameData,
-    ) -> Option<(i32, UseAnimation)> {
-        let item = stack
-            .item
-            .and_then(|i| data.registries.name("minecraft:item", i))?;
-        if let Some(ic) = &self.item_components {
-            if let Some(c) = ic.consumable(item) {
-                return Some((c.consume_ticks(), UseAnimation::from_id(c.animation)));
-            }
-        }
-        // Items whose class overrides `getUseDuration`/`getUseAnimation`
-        // (`BowItem`/`CrossbowItem`/`TridentItem`/`SpyglassItem`/`ShieldItem`); a shield's
-        // `minecraft:blocks_attacks` makes the default `Item` return 72000 and `BLOCK`.
-        match item.path() {
-            "bow" => Some((72000, UseAnimation::Bow)),
-            "crossbow" => Some((72000, UseAnimation::Crossbow)),
-            "trident" => Some((72000, UseAnimation::Trident)),
-            "spyglass" => Some((1200, UseAnimation::Spyglass)),
-            "shield" => Some((72000, UseAnimation::Block)),
-            _ => None,
-        }
-    }
-
     /// The `minecraft:mob_effect` index of nausea, the effect whose blend factor drives the
     /// nausea overlay and the screen warp (`MobEffects.NAUSEA`).
     fn nausea_id(&self) -> Option<i32> {
@@ -605,30 +524,6 @@ impl Interaction {
     pub(super) fn tick_effects(&mut self) {
         for e in self.effects.values_mut() {
             e.tick();
-        }
-    }
-
-    /// Test/script hook for the item-in-use state (vanilla: `player.isUsingItem()`; eating blocks
-    /// attack and use and releasing the button then sends `release_use_item`).
-    pub fn set_using_item(&mut self, using: bool) {
-        self.is_using_item = using;
-    }
-
-    /// `LivingEntity.onSyncedDataUpdated` for `DATA_LIVING_ENTITY_FLAGS`: the server's
-    /// `isUsingItem` bit is the truth. Cleared (a consume completed, or the server refused the
-    /// use), the local use ends without a packet; set while nothing is in use locally, the held
-    /// item of `hand` starts being used (filled in on the next tick, see `interact_step`).
-    pub fn synced_using_item(&mut self, using: bool, hand: i32) {
-        if using {
-            if !self.is_using_item {
-                self.is_using_item = true;
-                self.using = None;
-                self.pending_use_hand = Some(hand);
-            }
-        } else if self.is_using_item {
-            self.is_using_item = false;
-            self.using = None;
-            self.pending_use_hand = None;
         }
     }
 
@@ -763,22 +658,6 @@ impl LocalPlayer {
         self.int.use_clicks = self.int.use_clicks.saturating_add(1);
     }
 
-    /// Block under the crosshair and the face hit.
-    pub fn target(&self) -> Option<(BlockPos, Direction)> {
-        match self.int.target {
-            Some(Target::Block(h)) => Some((h.pos, h.face)),
-            _ => None,
-        }
-    }
-
-    /// Entity under the crosshair.
-    pub fn target_entity(&self) -> Option<EntityId> {
-        match self.int.target {
-            Some(Target::Entity { id, .. }) => Some(id),
-            _ => None,
-        }
-    }
-
     /// The screen the last use opened (taken by the game thread, which hands it to the UI).
     pub fn take_used_screen(&mut self) -> Option<UsedScreen> {
         self.int.used_screen.take()
@@ -861,40 +740,6 @@ impl LocalPlayer {
     /// `Player.resetOnlyAttackStrengthTicker` (`Player.onAttack`).
     pub fn reset_only_attack_strength_ticker(&mut self) {
         self.hand.reset_only_attack_strength_ticker();
-    }
-
-    /// `LivingEntity.isUsingItem`: an item is being used over time.
-    pub fn is_using_item(&self) -> bool {
-        self.int.is_using_item
-    }
-
-    /// `LivingEntity.getUseItemRemainingTicks`.
-    pub fn use_item_remaining(&self) -> i32 {
-        self.int.using.map_or(0, |u| u.remaining)
-    }
-
-    /// `LivingEntity.getUseItem`'s duration (`Item.getUseDuration`), 0 when not using.
-    pub fn use_duration(&self) -> i32 {
-        self.int.using.map_or(0, |u| u.duration)
-    }
-
-    /// `Item.getUseAnimation` of the item being used.
-    pub fn use_animation(&self) -> UseAnimation {
-        self.int.using.map_or(UseAnimation::None, |u| u.animation)
-    }
-
-    /// `LivingEntity.getTicksUsingItem`: how long the current use has run.
-    pub fn ticks_using_item(&self) -> i32 {
-        self.int.using.map_or(0, |u| u.duration - u.remaining)
-    }
-
-    /// The stack of hand `i` (0 main, 1 off), as `InteractionHand.values()` numbers them.
-    fn hand(&self, hand: i32) -> &ItemStackData {
-        if hand == 1 {
-            &self.int.offhand
-        } else {
-            self.main_hand()
-        }
     }
 
     /// Predicted block changes to apply to the world now (breaking), and server states released
@@ -1032,102 +877,6 @@ impl LocalPlayer {
 
     fn eye(&self) -> DVec3 {
         self.state.pos + DVec3::new(0.0, self.attrs.eye_height_for(self.state.pose), 0.0)
-    }
-
-    /// The crosshair target for a look direction: `Minecraft.pick` ->
-    /// `LocalPlayer.raycastHitResult` -> `LocalPlayer.pick`, with
-    /// `ProjectileUtil.getEntityHitResult`'s `EntitySelector.CAN_BE_PICKED` filter.
-    ///
-    /// Block outlines are searched out to the larger of the two interaction ranges and then
-    /// filtered back to `block_interaction_range` (`filterHitResult`); the entity segment reaches
-    /// the block's distance when a block is hit, else the larger range, and an entity only wins
-    /// when it is strictly closer than the block. The winner is filtered to
-    /// `entity_interaction_range`, so an entity just out of reach makes the pick a miss rather
-    /// than showing the block behind it.
-    pub(super) fn pick(
-        &self,
-        look: (f32, f32),
-        world: &dyn BlockView,
-        shapes: &dyn CollisionShapes,
-        data: &haste_data::GameData,
-        entities: &[(EntityId, Aabb)],
-        entity_types: &[RegistryIndex],
-    ) -> Option<Target> {
-        let eye = self.eye();
-        let dir = raycast::look_vector(look.0, look.1);
-        let a = self.int.attrs;
-        let max_dist = a.block_reach.max(a.entity_reach);
-        // LocalPlayer.pick: the block raycast reaches the larger range; `filterHitResult`
-        // afterwards drops a block beyond `block_interaction_range`.
-        let block = raycast::raycast_blocks(eye, dir, max_dist, world, shapes)
-            .filter(|b| b.distance <= a.block_reach);
-        let block_dist = block.as_ref().map_or(f64::INFINITY, |b| b.distance);
-        // ProjectileUtil.getEntityHitResult: the nearest pickable box the segment touches. The
-        // segment reaches the block's distance when a block was hit, else the larger range
-        // (LocalPlayer.pick clamps maxDistance to the block distance); the winner is filtered
-        // back to `entity_interaction_range` (filterHitResult).
-        let search_dist = block_dist.min(max_dist);
-        let delta = dir * search_dist;
-        let mut best: Option<(usize, f64)> = None;
-        for (i, (id, b)) in entities.iter().enumerate() {
-            if *id == self.entity_id {
-                continue; // getEntities(except = the camera entity)
-            }
-            let name = self.entity_type_name(data, entity_types, i);
-            // EntitySelector.CAN_BE_PICKED = Entity::isPickable per type; unknown (mod)
-            // types are pickable, like vanilla's default.
-            if !name.is_none_or(is_pickable) {
-                continue;
-            }
-            // Entity.getPickRadius: Projectile searches with 1.0 for pickable projectiles.
-            let radius = name.and_then(entity_pick_radius).unwrap_or(0.0);
-            let bb = b.expand(DVec3::splat(radius));
-            // ProjectileUtil: an entity whose box holds the eye is picked at distance 0
-            // (canBePickedFromInside).
-            if bb.min.x <= eye.x
-                && eye.x <= bb.max.x
-                && bb.min.y <= eye.y
-                && eye.y <= bb.max.y
-                && bb.min.z <= eye.z
-                && eye.z <= bb.max.z
-            {
-                if best.is_none_or(|(_, bd)| 0.0 < bd) {
-                    best = Some((i, 0.0));
-                }
-                continue;
-            }
-            if let Some((t, _, _)) = raycast::clip_box(&bb, eye, delta) {
-                let d = search_dist * t;
-                if best.is_none_or(|(_, bd)| d < bd) {
-                    best = Some((i, d));
-                }
-            }
-        }
-        if let Some((i, d)) = best {
-            if d < block_dist {
-                // filterHitResult: an entity beyond entity_interaction_range makes the pick a
-                // miss (the block behind it is not shown).
-                if d <= a.entity_reach {
-                    return Some(Target::Entity {
-                        id: entities[i].0,
-                        location: eye + dir * d,
-                    });
-                }
-                return None;
-            }
-        }
-        block.map(Target::Block)
-    }
-
-    /// `minecraft:entity_type` name of `entities[i]`, when the caller has type data.
-    fn entity_type_name<'d>(
-        &self,
-        data: &'d haste_data::GameData,
-        entity_types: &[RegistryIndex],
-        i: usize,
-    ) -> Option<&'d Identifier> {
-        let kind = *entity_types.get(i)?;
-        data.registries.name("minecraft:entity_type", kind)
     }
 
     pub(super) fn interact_step(
@@ -1393,166 +1142,6 @@ impl LocalPlayer {
         }
     }
 
-    /// `Minecraft.startUseItem`: `rightClickDelay` 4, then per hand (main first, then off
-    /// hand, `InteractionHand.values()`): entity interact, block use, item use. Nothing at all
-    /// while a block is being destroyed (`!gameMode.isDestroying()`).
-    fn start_use_item(
-        &mut self,
-        look: (f32, f32),
-        world: &dyn BlockView,
-        env: &InteractEnv<'_>,
-        out: &mut Vec<ServerboundPlay>,
-    ) {
-        if self.int.destroying.is_none() {
-            self.int.use_delay = USE_DELAY;
-            if !self.int.is_using_item {
-                for hand in 0..=1 {
-                    let holding = !self.hand(hand).is_empty();
-                    match self.int.target {
-                        Some(Target::Entity { id, location }) => {
-                            // gameMode.interact: the interact packet goes out (the mod-driven
-                            // result that decides the swing comes back with the server's answer).
-                            out.push(ServerboundPlay::Interact(sb::Interact {
-                                entity_id: id.0,
-                                hand,
-                                target_offset: location - self.eye(),
-                                sneaking: self.state.sneaking,
-                            }));
-                            // `Minecraft.startUseItem` swings on a successful use (vanilla's
-                            // swing source PREDICTED).
-                            self.hand.swing();
-                            return;
-                        }
-                        Some(Target::Block(h)) => {
-                            // gameMode.useItemOn: cursor position inside the block, sequence.
-                            let seq = self.int.next_sequence();
-                            let c = h.location - h.pos.as_dvec3();
-                            out.push(ServerboundPlay::UseItemOn(sb::UseItemOn {
-                                hand,
-                                pos: h.pos,
-                                face: h.face as i32,
-                                cursor_x: c.x as f32,
-                                cursor_y: c.y as f32,
-                                cursor_z: c.z as f32,
-                                inside_block: h.inside,
-                                world_border_hit: false,
-                                sequence: seq,
-                            }));
-                            // The block's own use opens the game-master editors on the client
-                            // (`CommandBlock.useWithoutItem` -> `LocalPlayer.openCommandBlock`;
-                            // the book's `useItemOn` is never consumed, so `Minecraft.startUseItem`
-                            // falls through to `useItem` -> `WritableBookItem.use`).
-                            self.use_opens_screen(env, Some((h.pos, world)), hand);
-                            // `Minecraft.startUseItem` swings only on a Success (swing source
-                            // PREDICTED) and returns; `itemUsed` when the stack changed (a
-                            // placed block). A Pass (food, a tool, an empty hand on a plain
-                            // block) goes on to `useItem` with the same hand. Without the
-                            // block's Java `useItemOn`, a placed block item or a block the
-                            // client knows to have a use count as Success; the server decides
-                            // the rest. No `punch`: that packet belongs to attacks only.
-                            let stack = self.hand(hand).clone();
-                            let placing = self.is_block_item(&stack, env.data);
-                            if placing || self.block_has_use(world.block_state(h.pos), env.data) {
-                                self.hand.swing();
-                                if placing {
-                                    self.hand.item_used();
-                                    // `BlockItem.place` plays the place sound on the client
-                                    // too (the server's copy excludes us). The held block
-                                    // item's block decides; unknown items play nothing.
-                                    self.own_place_sound(h.pos, &stack, env);
-                                }
-                                return;
-                            }
-                        }
-                        None => {}
-                    }
-                    // gameMode.useItem with nothing targeted.
-                    if holding {
-                        let seq = self.int.next_sequence();
-                        out.push(ServerboundPlay::UseItem(sb::UseItem {
-                            hand,
-                            sequence: seq,
-                            yaw: look.0,
-                            pitch: look.1,
-                        }));
-                        self.hand.swing();
-                        // `itemStack.use`: a writable book opens its editor
-                        // (`WritableBookItem.use` -> `LocalPlayer.openItemGui`).
-                        self.use_opens_screen(env, None, hand);
-                        // `LivingEntity.startUsingItem`: an item with a use duration starts
-                        // using (`Item.getUseDuration`/`getUseAnimation` from the consumable
-                        // component or the item class).
-                        // Food starts only when the player can eat (`Consumable.startConsuming`
-                        // -> `canConsume` -> `Player.canEat`); the packet goes out either way.
-                        let stack = self.hand(hand).clone();
-                        if !self.can_consume(&stack, env.data) {
-                            return;
-                        }
-                        if let Some((duration, animation)) = self.int.use_data(&stack, env.data) {
-                            self.int.using = Some(UsingItem {
-                                item: stack.item,
-                                duration,
-                                remaining: duration,
-                                animation,
-                            });
-                            self.int.is_using_item = true;
-                        }
-                        return;
-                    }
-                }
-            }
-        }
-    }
-
-    /// `MultiPlayerGameMode.releaseUsingItem`: `player_action` release_use_item with a zeroed
-    /// pos, then the player stops using the item.
-    fn release_using_item(&mut self, out: &mut Vec<ServerboundPlay>) {
-        out.push(ServerboundPlay::PlayerAction(sb::PlayerAction {
-            status: action::RELEASE_USE_ITEM,
-            pos: BlockPos::new(0, 0, 0),
-            face: Direction::Down as u8,
-            sequence: 0,
-        }));
-        self.int.is_using_item = false;
-        self.int.using = None;
-    }
-
-    /// The screens a use opens client-side (vanilla `MultiPlayerGameMode.performUseItemOn` /
-    /// `useItem`): the command-block editor on its block (with `target`), the book editor for a
-    /// writable book in hand (also with `target`: no block consumes a book's use, so vanilla
-    /// falls through to `itemStack.use`). The game thread takes it and hands it to the UI.
-    fn use_opens_screen(
-        &mut self,
-        env: &InteractEnv<'_>,
-        target: Option<(BlockPos, &dyn BlockView)>,
-        hand: i32,
-    ) {
-        if let Some((pos, world)) = target {
-            let block = env.data.blocks.block_of(world.block_state(pos));
-            if [
-                Identifier::minecraft("command_block"),
-                Identifier::minecraft("chain_command_block"),
-                Identifier::minecraft("repeating_command_block"),
-            ]
-            .contains(block)
-            {
-                self.int.used_screen = Some(UsedScreen::CommandBlock(pos));
-                return;
-            }
-        }
-        let stack = self.hand(hand);
-        if stack.count > 0
-            && stack.item.is_some_and(|item| {
-                env.data
-                    .registries
-                    .name("minecraft:item", item)
-                    .is_some_and(|n| *n == Identifier::minecraft("writable_book"))
-            })
-        {
-            self.int.used_screen = Some(UsedScreen::ItemGui(hand));
-        }
-    }
-
     /// `MultiPlayerGameMode.startDestroyBlock`: creative breaks at once (with `destroyDelay` 5,
     /// and nothing with a tool that cannot break blocks in creative); survival starts the
     /// break and finishes it in the same call when one tick of progress is enough. Returns
@@ -1718,112 +1307,6 @@ impl LocalPlayer {
         }
     }
 
-    /// The held item's block, if it is a block item (item id = block id in vanilla,
-    /// `BlockItemId.create(name)`; the 14 crop pairs with differing names are missing
-    /// here — placing crops is rare and the server confirms anyway).
-    fn held_block<'d>(
-        &self,
-        item: &ItemStackData,
-        data: &'d haste_data::GameData,
-    ) -> Option<&'d haste_core::Identifier> {
-        if item.is_empty() {
-            return None;
-        }
-        let index = item.item?;
-        data.registries
-            .name("minecraft:item", index)
-            .and_then(|id| data.blocks.default_state(id).map(|_| id))
-    }
-
-    /// Whether `item` is a block item (`BlockItem`): its `use_item_on` places a block, a Success
-    /// on the client.
-    fn is_block_item(&self, item: &ItemStackData, data: &haste_data::GameData) -> bool {
-        self.held_block(item, data).is_some()
-    }
-
-    /// Whether the block's own `useWithoutItem`/`useItemOn` is known to succeed on the client
-    /// (containers, doors, redstone switches, workstations, beds, ...), so `startUseItem`
-    /// stops at it instead of falling through to `useItem`. Mod blocks and anything not listed
-    /// pass through; the server still runs the real use.
-    fn block_has_use(&self, state: BlockStateId, data: &haste_data::GameData) -> bool {
-        const USES: &[&str] = &[
-            "chest",
-            "barrel",
-            "shulker_box",
-            "furnace",
-            "smoker",
-            "crafting_table",
-            "door",
-            "trapdoor",
-            "fence_gate",
-            "button",
-            "lever",
-            "bed",
-            "anvil",
-            "enchanting_table",
-            "brewing_stand",
-            "hopper",
-            "dispenser",
-            "dropper",
-            "note_block",
-            "repeater",
-            "comparator",
-            "daylight_detector",
-            "bell",
-            "lectern",
-            "cartography_table",
-            "smithing_table",
-            "grindstone",
-            "stonecutter",
-            "loom",
-            "beacon",
-            "command_block",
-            "jukebox",
-            "crafter",
-            "respawn_anchor",
-        ];
-        let path = data.blocks.block_of(state).path();
-        USES.iter().any(|u| {
-            path.strip_suffix(*u)
-                .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with('_'))
-        })
-    }
-
-    /// `Player.canEat` for a food item (`Consumable.canConsume`): invulnerable, `can_always_eat`
-    /// or a food level below 20. Anything that is not food can always be consumed.
-    fn can_consume(&self, item: &ItemStackData, data: &haste_data::GameData) -> bool {
-        let Some(ic) = &self.int.item_components else {
-            return true;
-        };
-        let Some(name) = item
-            .item
-            .and_then(|i| data.registries.name("minecraft:item", i))
-        else {
-            return true;
-        };
-        match ic.food(name) {
-            Some(can_always_eat) => self.abilities.invulnerable || can_always_eat || self.food < 20,
-            None => true,
-        }
-    }
-
-    /// The place sound for a `use_item_on` with a block item held (see `use_item`).
-    fn own_place_sound(&mut self, pos: BlockPos, item: &ItemStackData, env: &InteractEnv<'_>) {
-        let Some(block) = self.held_block(item, env.data) else {
-            return;
-        };
-        let state = env.data.blocks.default_state(block);
-        if let Some(state) = state {
-            if let Some(t) = env.data.block_sound_type(state) {
-                self.own_sounds.block_placed(
-                    pos.as_dvec3() + DVec3::new(0.5, 0.5, 0.5),
-                    t,
-                    &mut self.sound_out,
-                );
-            }
-        }
-    }
-
     /// Mining parameters for a block with the held item.
     pub fn mining_params(&self, state: BlockStateId, env: &InteractEnv<'_>) -> MiningParams {
         let data = env.data;
@@ -1969,72 +1452,6 @@ impl LocalPlayer {
             self.block_particles_out
                 .push(crate::block_particles::BlockParticleRequest::Destroy { pos: h.pos, state });
         }
-    }
-}
-
-/// Vanilla's per-class `Entity.isPickable` (what `EntitySelector.CAN_BE_PICKED` tests in
-/// `ProjectileUtil.getEntityHitResult`), as a rule over `minecraft:entity_type` names. The type
-/// names are the registry ids from `EntityTypeIds` (ItemEntity's type is `item`, FishingHook's is
-/// `fishing_bobber`, the thrown potions are `splash_potion`/`lingering_potion`).
-/// Classes returning false: ItemEntity, ExperienceOrb, Marker, AreaEffectCloud, LightningBolt,
-/// EyeOfEnder, EvokerFangs and OminousItemSpawner (Entity's default `isPickable`), the Display
-/// entities (block/item/text_display, also Entity's default), EnderDragon (explicit false),
-/// AbstractArrow's arrow, spectral_arrow and trident (`!isInGround` aside), and the Projectile
-/// types outside the redirectable_projectile tag (small_fireball, dragon_fireball, wither_skull,
-/// egg, snowball, ender_pearl, splash_potion, lingering_potion, experience_bottle,
-/// firework_rocket, llama_spit, fishing_bobber — the tag holds fireball, wind_charge and
-/// breeze_wind_charge). Everything else — LivingEntity's `!isRemoved`, Player's `!isSpectator`,
-/// the boats, minecarts, item frames, paintings, leash knot, end crystal, TNT, falling blocks,
-/// the interaction entity, shulker bullets — is pickable, as is any unknown (mod) type. Arrows
-/// stuck in the ground (`AbstractArrow.isInGround`) stay pickable here: the box alone cannot tell.
-pub fn is_pickable(t: &Identifier) -> bool {
-    if t.namespace() != "minecraft" {
-        return true;
-    }
-    let p = t.path();
-    !matches!(
-        p,
-        "item"
-            | "experience_orb"
-            | "marker"
-            | "area_effect_cloud"
-            | "lightning_bolt"
-            | "eye_of_ender"
-            | "evoker_fangs"
-            | "ominous_item_spawner"
-            | "block_display"
-            | "item_display"
-            | "text_display"
-            | "ender_dragon"
-            | "trident"
-            | "small_fireball"
-            | "dragon_fireball"
-            | "wither_skull"
-            | "egg"
-            | "snowball"
-            | "ender_pearl"
-            | "splash_potion"
-            | "lingering_potion"
-            | "experience_bottle"
-            | "firework_rocket"
-            | "llama_spit"
-            | "fishing_bobber"
-    ) && p != "arrow"
-        && !p.ends_with("_arrow")
-}
-
-/// `Entity.getPickRadius` (Projectile: 1.0 when the type is pickable, else 0.0; every other
-/// class 0.0) — the box inflation `ProjectileUtil.getEntityHitResult` searches with.
-fn entity_pick_radius(t: &Identifier) -> Option<f64> {
-    if t.namespace() == "minecraft"
-        && matches!(
-            t.path(),
-            "fireball" | "wind_charge" | "breeze_wind_charge" | "shulker_bullet"
-        )
-    {
-        Some(1.0)
-    } else {
-        None
     }
 }
 
