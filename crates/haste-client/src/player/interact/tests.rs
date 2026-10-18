@@ -28,6 +28,7 @@ const SPECTRAL_ARROW: RegistryIndex = RegistryIndex(3);
 const ZOMBIE: RegistryIndex = RegistryIndex(5);
 const PLAYER: RegistryIndex = RegistryIndex(6);
 const ENDER_DRAGON: RegistryIndex = RegistryIndex(7);
+const VILLAGER: RegistryIndex = RegistryIndex(12);
 
 /// A small GameData written to a temp dir: air, stone (1.5, needs a tool), dirt (0.5),
 /// bedrock (-1), short grass (0, no collision), obsidian (50, needs a tool).
@@ -97,6 +98,7 @@ fn data() -> &'static haste_data::GameData {
                     "fireball",
                     "wind_charge",
                     "shulker_bullet",
+                    "villager",
                 ]),
             ),
         )
@@ -1261,6 +1263,74 @@ fn the_interact_offset_is_relative_to_the_entity_and_carries_the_shift_key() {
         }
         p => panic!("{p:?}"),
     }
+}
+
+/// `Minecraft.startUseItem`'s ENTITY case: a Pass from `Player.interactOn` (food on a zombie)
+/// goes on to `useItem` with the same hand, and an empty main hand to the off hand; a pair
+/// whose client-side interact consumes (a villager) stops at the entity.
+#[test]
+fn an_entity_use_falls_through_to_use_item_and_the_off_hand() {
+    // Food in the main hand on a zombie: interact, use_item, no off hand (it holds nothing).
+    let mut r = hungry(GameMode::Survival);
+    r.p.int.hotbar[0] = item(4); // apple
+    r.add_entity(
+        EntityId(42),
+        Aabb::entity(DVec3::new(0.5, 0.0, 0.5), 0.6, 0.5),
+        ZOMBIE,
+    );
+    let out = r.tick(USE);
+    assert!(
+        matches!(&out[0], ServerboundPlay::Interact(i) if i.entity_id == 42 && i.hand == 0),
+        "{out:?}"
+    );
+    assert!(
+        matches!(&out[1], ServerboundPlay::UseItem(u) if u.hand == 0),
+        "{out:?}"
+    );
+    assert_eq!(out.len(), 2, "{out:?}");
+    assert!(r.p.is_using_item());
+
+    // An empty main hand: its use_item is skipped (`!heldItem.isEmpty()`), the entity
+    // interact of the off hand follows, then its apple's use_item.
+    let mut r = hungry(GameMode::Survival);
+    r.p.int.offhand = item(4);
+    r.add_entity(
+        EntityId(42),
+        Aabb::entity(DVec3::new(0.5, 0.0, 0.5), 0.6, 0.5),
+        ZOMBIE,
+    );
+    let out = r.tick(USE);
+    assert!(
+        matches!(&out[0], ServerboundPlay::Interact(i) if i.hand == 0),
+        "{out:?}"
+    );
+    assert!(
+        matches!(&out[1], ServerboundPlay::Interact(i) if i.hand == 1),
+        "{out:?}"
+    );
+    assert!(
+        matches!(&out[2], ServerboundPlay::UseItem(u) if u.hand == 1),
+        "{out:?}"
+    );
+    assert_eq!(out.len(), 3, "{out:?}");
+    assert!(r.p.is_using_item());
+
+    // A pair whose client-side interact consumes (a villager's trade): nothing follows the
+    // interact, and the held food never starts a use.
+    let mut r = hungry(GameMode::Survival);
+    r.p.int.hotbar[0] = item(4);
+    r.add_entity(
+        EntityId(42),
+        Aabb::entity(DVec3::new(0.5, 0.0, 0.5), 0.6, 0.5),
+        VILLAGER,
+    );
+    let out = r.tick(USE);
+    assert!(
+        matches!(&out[0], ServerboundPlay::Interact(i) if i.entity_id == 42),
+        "{out:?}"
+    );
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert!(!r.p.is_using_item(), "the use stopped at the entity");
 }
 
 /// Vanilla's `Minecraft.continueAttack`: while the block is breaking the arm swings every tick,

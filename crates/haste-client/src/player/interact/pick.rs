@@ -20,6 +20,9 @@ pub enum Target {
         /// The entity's feet position the same tick (`MultiPlayerGameMode.interact` sends the
         /// hit location relative to it: `location - entity.position()`).
         pos: DVec3,
+        /// The entity's `minecraft:entity_type` registry index (unknown — a mod type, or no
+        /// type data — is the sentinel `u32::MAX`), for the use's fall-through rules.
+        kind: RegistryIndex,
     },
 }
 
@@ -125,6 +128,8 @@ impl LocalPlayer {
                             b.min.y,
                             (b.min.z + b.max.z) / 2.0,
                         ),
+                        // Unknown (mod) types are the sentinel the caller filled in.
+                        kind: *entity_types.get(i).unwrap_or(&RegistryIndex(u32::MAX)),
                     });
                 }
                 return None;
