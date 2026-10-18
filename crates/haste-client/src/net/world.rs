@@ -119,7 +119,7 @@ impl Session {
                     self.pots.remove(&c.pos);
                 }
                 if !self.player.defer_block_update(c.pos, c.state) {
-                    world.set_block(c.pos, c.state);
+                    self.set_block_with_block_entities(world, c.pos, c.state);
                 }
             }
             // A block entity's `block_event` action 1: the opener count for a lid (chests use
@@ -159,7 +159,7 @@ impl Session {
             P::SectionBlocksUpdate(u) => {
                 for c in u.changes() {
                     if !self.player.defer_block_update(c.pos, c.state) {
-                        world.set_block(c.pos, c.state);
+                        self.set_block_with_block_entities(world, c.pos, c.state);
                     }
                 }
             }
