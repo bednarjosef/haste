@@ -38,7 +38,6 @@ impl Renderer {
             &entity_frustum,
             orientation,
             &mut self.assets,
-            self.view_scale,
         );
         {
             // The hand is drawn in view space: vanilla's `renderItemInHand` multiplies the

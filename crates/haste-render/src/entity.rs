@@ -333,6 +333,7 @@ pub struct EntityRenderer {
     /// This frame's beam radius scale (vanilla `BeaconRenderer.extract`: 1 within 96 blocks
     /// or while scoping, else distance / 96), set per frame by the renderer.
     beam_radius_scale: f32,
+    view_scale: f32,
     /// The beam and portal pipelines (see [`crate::blockentity::BeamPipelines`]).
     pub beams: crate::blockentity::BeamPipelines,
     /// The default font, for world-space sign text (glyph pages land in the entity atlas).
@@ -356,6 +357,11 @@ impl EntityRenderer {
     pub fn set_beam_radius_scale(&mut self, scale: f32) {
         self.beam_radius_scale = scale;
     }
+    /// Vanilla `Entity.viewScale` for the entity render distance (from
+    /// `options.entityDistanceScaling`, 0.5..=5.0, default 1.0).
+    pub fn set_view_scale(&mut self, scale: f32) {
+        self.view_scale = scale;
+    }
     /// Poses every entity into the vertex buffer. `skip` is the entity the camera is (not drawn
     /// in first person). Positions are camera-relative (`camera` subtracted in f64) like the
     /// terrain.
@@ -367,8 +373,8 @@ impl EntityRenderer {
         frustum: &[glam::Vec4; 6],
         orientation: glam::Quat,
         assets: &mut Assets,
-        view_scale: f32,
     ) {
+        let view_scale = self.view_scale;
         self.vertices.clear();
         self.nametags.clear();
         self.drawn = 0;

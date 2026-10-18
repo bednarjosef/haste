@@ -449,7 +449,6 @@ impl Renderer {
             present_mode: wgpu::PresentMode::Fifo,
             nametags: Vec::new(),
             entity_shadows: true,
-            view_scale: 1.0,
             capture_pending: false,
             capture: None,
             surface_copy: false,
