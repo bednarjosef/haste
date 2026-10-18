@@ -38,6 +38,18 @@ fn data() -> &'static haste_data::GameData {
         let dir = std::env::temp_dir().join(format!("haste-interact-test-{}", std::process::id()));
         let reports = dir.join("reports");
         std::fs::create_dir_all(&reports).unwrap();
+        // One item components report file: the spear family's `minecraft:use_effects`
+        // (`Item.Properties.spear` sets `UseEffects(true, false, 1.0)`).
+        let components = reports
+            .join("minecraft")
+            .join("components")
+            .join("item");
+        std::fs::create_dir_all(&components).unwrap();
+        std::fs::write(
+            components.join("wooden_spear.json"),
+            r#"{"components":{"minecraft:use_effects":{"can_sprint":true,"interact_vibrations":false,"speed_multiplier":1.0}}}"#,
+        )
+        .unwrap();
         let names = ["air", "stone", "dirt", "bedrock", "short_grass", "obsidian"];
         let blocks: Vec<String> = names
             .iter()
@@ -731,11 +743,12 @@ fn use_does_nothing_while_a_block_is_being_destroyed() {
 }
 
 #[test]
-fn the_used_item_use_effects_speed_multiplier() {
-    // Vanilla `LocalPlayer.itemUseSpeedMultiplier`: 1.0 without an item in use, the default
-    // 0.2 every item's prototype carries (`UseEffects.DEFAULT` in
-    // `DataComponents.COMMON_ITEM_COMPONENTS`), and 1.0 for the spear family
-    // (`Item.Properties.spear` sets `UseEffects(true, false, 1.0)`).
+fn the_used_item_use_effects_feed_the_physics_state() {
+    // Vanilla `LocalPlayer.isSlowDueToUsingItem` and `itemUseSpeedMultiplier`: using an item
+    // blocks the sprint and scales the input by the stack's `use_effects` — the default
+    // (`UseEffects.DEFAULT`, speed 0.2, can_sprint false) for items without an override, the
+    // spear family's `(can_sprint true, speed 1.0)` from the components report — and nothing
+    // of either without an item in use.
     let mut r = Rig::new(GameMode::Survival);
     let env = InteractEnv {
         data: data(),
@@ -743,29 +756,41 @@ fn the_used_item_use_effects_speed_multiplier() {
         entity_types: &[],
         warm_blocks: None,
     };
-    assert_eq!(r.p.item_use_speed_multiplier(Some(&env)), 1.0);
+    r.p.apply_item_use_effects(Some(&env));
+    assert!(!r.p.state.using_item);
+    assert!(!r.p.state.slow_using_item);
+    assert_eq!(r.p.state.item_use_speed, 1.0);
     r.p.int.set_using_item(true);
-    // The server-synced use before the hand's stack fills in: the default.
-    assert_eq!(r.p.item_use_speed_multiplier(Some(&env)), 0.2);
-    assert_eq!(r.p.item_use_speed_multiplier(None), 0.2);
+    // The server-synced use before the hand's stack fills in, and no environment to resolve
+    // the item: the default every prototype carries.
+    r.p.apply_item_use_effects(Some(&env));
+    assert!(r.p.state.using_item);
+    assert!(r.p.state.slow_using_item);
+    assert_eq!(r.p.state.item_use_speed, 0.2);
+    r.p.apply_item_use_effects(None);
+    assert!(r.p.state.slow_using_item);
+    assert_eq!(r.p.state.item_use_speed, 0.2);
+    // An item without a use_effects entry in the report: the default.
     r.p.int.using = Some(UsingItem {
         item: Some(RegistryIndex(4)), // apple
         duration: 32,
         remaining: 32,
         animation: UseAnimation::Eat,
     });
-    assert_eq!(r.p.item_use_speed_multiplier(Some(&env)), 0.2);
+    r.p.apply_item_use_effects(Some(&env));
+    assert!(r.p.state.slow_using_item);
+    assert_eq!(r.p.state.item_use_speed, 0.2);
+    // The spear's component from the report: sprint stays possible, full speed.
     r.p.int.using = Some(UsingItem {
         item: Some(RegistryIndex(11)), // wooden_spear
         duration: 72000,
         remaining: 72000,
         animation: UseAnimation::Spear,
     });
-    assert_eq!(
-        r.p.item_use_speed_multiplier(Some(&env)),
-        1.0,
-        "the spear family charges at full speed"
-    );
+    r.p.apply_item_use_effects(Some(&env));
+    assert!(r.p.state.using_item);
+    assert!(!r.p.state.slow_using_item, "the spear's can_sprint");
+    assert_eq!(r.p.state.item_use_speed, 1.0);
 }
 
 #[test]

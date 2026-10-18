@@ -112,7 +112,10 @@ impl ItemComponents {
     /// the item is unknown (vanilla's `getOrDefault(USE_EFFECTS, UseEffects.DEFAULT)`: every
     /// item's prototype carries the component).
     pub fn use_effects(&self, item: &Identifier) -> UseEffects {
-        self.use_effects.get(item).copied().unwrap_or(UseEffects::DEFAULT)
+        self.use_effects
+            .get(item)
+            .copied()
+            .unwrap_or(UseEffects::DEFAULT)
     }
 
     /// `ItemAttributeModifiers.compute` for the main hand: `base` plus every main-hand modifier

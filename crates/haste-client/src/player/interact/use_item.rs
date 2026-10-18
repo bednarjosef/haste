@@ -124,35 +124,37 @@ impl LocalPlayer {
         self.int.is_using_item
     }
 
-    /// Vanilla `LocalPlayer.itemUseSpeedMultiplier`: the used stack's `minecraft:use_effects`
-    /// speed multiplier, which `LocalPlayer.modifyInput` scales the movement input by while
-    /// an item is in use. Every item's prototype carries the component
-    /// (`DataComponents.COMMON_ITEM_COMPONENTS`): `UseEffects.DEFAULT`, speed 0.2. The spear
-    /// family's built-in properties override it with `can_sprint` true and speed 1.0
-    /// (`Item.Properties.spear`). Items whose data-driven definition or stack patch sets its
-    /// own cannot be read on this side yet — the components report is not parsed for
-    /// `use_effects` and stack patches are not decoded for it. 1.0 when no item is in use.
-    pub fn item_use_speed_multiplier(&self, env: Option<&InteractEnv<'_>>) -> f32 {
-        if !self.int.is_using_item {
-            return 1.0;
-        }
-        // The used stack's item type. Without a stack (the server-synced use before the hand
-        // fills it in) or without the environment the item cannot be resolved: the default
-        // every prototype carries applies.
-        let item = self
+    /// The `minecraft:use_effects` of the item in use (vanilla reads them off the used stack
+    /// in `LocalPlayer.isSlowDueToUsingItem` and `itemUseSpeedMultiplier`): the item's default
+    /// components from the report. `UseEffects.DEFAULT` when it names none or the item cannot
+    /// be resolved (no environment, no stack yet — every item's prototype carries the
+    /// component). A stack's component patch can override them, which this side does not
+    /// decode.
+    fn used_item_effects(&self, env: Option<&InteractEnv<'_>>) -> haste_data::UseEffects {
+        let Some(env) = env else {
+            return haste_data::UseEffects::DEFAULT;
+        };
+        let Some(item) = self
             .int
             .using
             .and_then(|u| u.item)
-            .and_then(|i| env.and_then(|e| e.data.registries.name("minecraft:item", i)));
-        match item.map(Identifier::path) {
-            // `Item.Properties.spear` sets `UseEffects(true, false, 1.0)`.
-            Some(
-                "wooden_spear" | "stone_spear" | "copper_spear" | "iron_spear" | "golden_spear"
-                | "diamond_spear" | "netherite_spear",
-            ) => 1.0,
-            // `UseEffects.DEFAULT`: speed 0.2 on every item without an override.
-            _ => 0.2,
-        }
+            .and_then(|i| env.data.registries.name("minecraft:item", i))
+        else {
+            return haste_data::UseEffects::DEFAULT;
+        };
+        env.data.item_components.use_effects(item)
+    }
+
+    /// Feeds the physics state the used item's `use_effects`, before the movement tick
+    /// (vanilla `LocalPlayer.isSlowDueToUsingItem` and `itemUseSpeedMultiplier`): using an
+    /// item keeps a sprint from starting unless the stack's `can_sprint`, and scales the
+    /// movement input by its speed multiplier (1.0 when no item is in use).
+    pub fn apply_item_use_effects(&mut self, env: Option<&InteractEnv<'_>>) {
+        let effects = self.used_item_effects(env);
+        let using = self.int.is_using_item;
+        self.state.using_item = using;
+        self.state.slow_using_item = using && !effects.can_sprint;
+        self.state.item_use_speed = if using { effects.speed_multiplier } else { 1.0 };
     }
 
     /// `LivingEntity.getUseItemRemainingTicks`.
