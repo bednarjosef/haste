@@ -55,8 +55,10 @@ impl Session {
                 self.fireworks.clear();
                 self.attached_firework = None;
                 self.dimension = dim;
-                // A respawn is a new body: no vehicle, no riding.
+                // A respawn is a new body: no vehicle, no riding. A new level also starts
+                // with vanilla's default border until its initialize_border arrives.
                 self.entity_attributes.clear();
+                self.world_border = crate::world_border::WorldBorder::default();
                 self.player
                     .set_vehicle(None, SeatPoint::ZERO, None, None, None);
             }

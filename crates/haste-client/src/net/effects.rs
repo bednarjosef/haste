@@ -35,6 +35,19 @@ impl Session {
             P::GameEvent(g) if g.event == 2 => self.weather.set_rain_level(1.0),
             P::GameEvent(g) if g.event == 7 => self.weather.set_rain_level(g.value),
             P::GameEvent(g) if g.event == 8 => self.weather.set_thunder_level(g.value),
+            // The world border (vanilla `ClientPacketListener`'s border handlers): the
+            // interaction step gates its packets on it. The warning distance and time are
+            // not modelled yet.
+            P::InitializeBorder(b) => {
+                self.world_border
+                    .initialize(b.x, b.z, b.old_diameter, b.new_diameter, b.speed)
+            }
+            P::SetBorderCenter(c) => self.world_border.set_center(c.x, c.z),
+            P::SetBorderLerpSize(s) => {
+                self.world_border
+                    .set_lerp_size(s.old_diameter, s.new_diameter, s.speed)
+            }
+            P::SetBorderSize(s) => self.world_border.set_size(s.diameter),
             _ => return Some(p),
         }
         None

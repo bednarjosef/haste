@@ -926,6 +926,7 @@ pub enum DecorationKind {
     ItemFrame { glow: bool },
     Painting,
     LightningBolt,
+    ExperienceOrb,
 }
 
 /// The decoration kind of an entity type (`minecraft:item_frame`, `glow_item_frame`,
@@ -941,6 +942,7 @@ pub fn decoration_kind(kind: RegistryIndex) -> Option<DecorationKind> {
         "minecraft:glow_item_frame" => Some(DecorationKind::ItemFrame { glow: true }),
         "minecraft:painting" => Some(DecorationKind::Painting),
         "minecraft:lightning_bolt" => Some(DecorationKind::LightningBolt),
+        "minecraft:experience_orb" => Some(DecorationKind::ExperienceOrb),
         _ => None,
     }
 }

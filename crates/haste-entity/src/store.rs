@@ -276,6 +276,19 @@ pub struct Entity {
 
 impl Entity {
     fn new(s: &EntitySpawn, dims: &EntityDimensions) -> Entity {
+        let living = if s.kind.0 == 0 {
+            true
+        } else {
+            match crate::registry::entity_type_name(s.kind) {
+                None => true,
+                Some(name) => {
+                    crate::registry::table_entry(name).is_some()
+                        || name == "minecraft:player"
+                        || name == "minecraft:mannequin"
+                        || name == "minecraft:armor_stand"
+                }
+            }
+        };
         Entity {
             id: s.id,
             uuid: s.uuid,
@@ -300,8 +313,8 @@ impl Entity {
             walk: WalkAnimationState::default(),
             // `LivingEntity.recreateFromPacket`: the body starts facing the packet's head yaw
             // (`yBodyRot = yHeadRot = getYHeadRot()`, the `O` copies the same), not its yaw.
-            body_yaw: s.head_yaw,
-            prev_body_yaw: s.head_yaw,
+            body_yaw: if living { s.head_yaw } else { s.yaw },
+            prev_body_yaw: if living { s.head_yaw } else { s.yaw },
             prev_head_yaw: s.head_yaw,
             lerp_head_yaw: s.head_yaw,
             lerp_head_steps: 0,
@@ -916,6 +929,7 @@ impl EntityStore {
                 &slot.metadata,
                 &self.painting_variants,
                 slot.id.0,
+                slot.tick_count as f32 + partial_tick,
             );
             let pos = if decoration.is_some() {
                 crate::decoration::render_center(
@@ -1084,6 +1098,9 @@ impl EntityStore {
                 is_discrete: slot.metadata.shared.crouching,
                 name_tag_y,
                 hurt: hurt_strength(slot),
+                // Full sky until the client samples the world where it builds the frame's
+                // instances (`EntityInstance::sample_light`).
+                light: (15, 0),
                 // Overlay layers (sheep wool, horse markings, collars, the fish pattern):
                 // drawn with the same transform and pose after the base model.
                 overlays,

@@ -78,6 +78,7 @@ impl Session {
                     data,
                     entities: &self.entity_boxes,
                     entity_types: &self.entity_types,
+                    border: Some(&self.world_border),
                     warm_blocks: warm
                         .as_ref()
                         .map(|w| w as &dyn crate::item_based_steering::WarmBlocks),

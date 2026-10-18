@@ -137,6 +137,10 @@ pub struct Session {
     pub lightmap: LightmapState,
     /// The weather state (rain/thunder levels, the rain sound and splash particles).
     pub weather: WeatherState,
+    /// The world border (`minecraft:initialize_border` and the `set_border_*` packets): the
+    /// interaction step gates its packets on it (`useItemOn` fails without a packet outside
+    /// it, `startDestroyBlock` returns false).
+    world_border: crate::world_border::WorldBorder,
     /// `ClientLevel.seaLevel` (the spawn info's; biome precipitation's snow line).
     pub sea_level: i32,
     /// `ClientLevelData.isFlat` (the spawn info's superflat flag; the horizon height).
@@ -221,6 +225,7 @@ impl Session {
             particle_names,
             lightmap: LightmapState::default(),
             weather: WeatherState::default(),
+            world_border: crate::world_border::WorldBorder::default(),
             sea_level: 63,
             is_flat: false,
             view_distance: 0,
@@ -357,6 +362,7 @@ impl Session {
                 self.fireworks.clear();
                 self.attached_firework = None;
                 self.dimension = dim;
+                self.world_border = crate::world_border::WorldBorder::default();
                 self.entity_id = EntityId(l.entity_id);
                 let mode = GameMode::from_id(l.spawn.game_mode).unwrap_or(self.player.game_mode);
                 self.player = LocalPlayer::with_entity(self.entity_id, mode);

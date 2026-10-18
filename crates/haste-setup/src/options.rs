@@ -172,6 +172,9 @@ pub struct Options {
     /// Vanilla's "Brightness" (gamma) slider, 0.0..=1.0 (default 0.5). Feeds the lightmap's
     /// brightness factor (`LightmapRenderState.brightness`).
     pub gamma: f32,
+    /// Vanilla's "Entity Distance" scaling option, 0.5..=5.0 (default 1.0). Scales the
+    /// size-based entity render cull (`Entity.shouldRenderAtSqrDistance`).
+    pub entity_distance_scaling: f32,
     /// Vanilla's "Darkness Pulsing" accessibility option, 0.0..=1.0 (default 1.0). Scales the
     /// darkness effect in the lightmap (`LightmapRenderState.darknessEffectScale`).
     pub darkness_effect_scale: f32,
@@ -200,6 +203,7 @@ impl Default for Options {
             damage_tilt_strength: 1.0,
             gamma: 0.5,
             darkness_effect_scale: 1.0,
+            entity_distance_scaling: 1.0,
             menu_background_blurriness: 5,
             max_fps: 120,
             sound: SoundVolumes::default(),
@@ -221,6 +225,7 @@ impl Options {
         self.damage_tilt_strength = self.damage_tilt_strength.clamp(0.0, 1.0);
         self.gamma = self.gamma.clamp(0.0, 1.0);
         self.darkness_effect_scale = self.darkness_effect_scale.clamp(0.0, 1.0);
+        self.entity_distance_scaling = self.entity_distance_scaling.clamp(0.5, 5.0);
         self.menu_background_blurriness = self.menu_background_blurriness.min(10);
         self.max_fps = self.max_fps.clamp(10, 260);
         self.sound.clamped();
@@ -321,6 +326,12 @@ impl Options {
             "darknessEffectScale" => {
                 if let Ok(v) = value.parse::<f32>() {
                     self.darkness_effect_scale = v * v;
+                }
+                true
+            }
+            "entityDistanceScaling" => {
+                if let Ok(v) = value.parse::<f32>() {
+                    self.entity_distance_scaling = v;
                 }
                 true
             }
@@ -490,6 +501,24 @@ mod tests {
     }
 
     #[test]
+    fn entity_distance_option_imports_and_clamps() {
+        let opts = Options::import_vanilla("entityDistanceScaling:2.5\n");
+        assert!((opts.entity_distance_scaling - 2.5).abs() < 1e-6);
+        let opts = Options {
+            entity_distance_scaling: 9.0,
+            ..Options::default()
+        }
+        .sanitized();
+        assert_eq!(opts.entity_distance_scaling, 5.0);
+        let opts = Options {
+            entity_distance_scaling: 0.1,
+            ..Options::default()
+        }
+        .sanitized();
+        assert_eq!(opts.entity_distance_scaling, 0.5);
+    }
+
+    #[test]
     fn roundtrips_through_toml() {
         let opts = Options {
             render_distance: 20,
@@ -505,6 +534,7 @@ mod tests {
             damage_tilt_strength: 0.75,
             gamma: 0.25,
             darkness_effect_scale: 0.5,
+            entity_distance_scaling: 1.25,
             menu_background_blurriness: 7,
             max_fps: 60,
             sound: SoundVolumes {

@@ -24,37 +24,42 @@ impl EntityRenderer {
             .item
             .and_then(|i| self.item_names.get(i.0 as usize))
             .is_some_and(|n| n.path() == "filled_map");
-        let quads = self.frame_quads(f.glow, map, assets);
-        // `ItemFrameRenderer.getBlockLightLevel`: glow frames are at least block-light 5.
-        let frame_light = if f.glow {
-            (block.max(5), sky)
-        } else {
-            (block, sky)
-        };
-        let model = base * Mat4::from_translation(Vec3::splat(-0.5));
-        let nm = Mat3::from_mat4(model).inverse().transpose();
+        // `ItemFrameRenderer.extractRenderState`: an invisible frame clears its block model,
+        // so only the item inside draws, pushed flush to the wall (z 0.5 instead of 0.4375,
+        // `ItemFrameRenderer.submit`).
         let mut out = std::mem::take(&mut self.vertices);
-        for q in quads.iter() {
-            let rect = self.texture_rect(&parse_tex(&q.texture), assets);
-            let o = q.direction.offset();
-            push_world_quad(
-                &mut out,
-                model,
-                nm,
-                q.positions.map(Vec3::from),
-                q.uvs,
-                Vec3::new(o[0] as f32, o[1] as f32, o[2] as f32),
-                [1.0; 3],
-                frame_light,
-                rect,
-            );
+        if !e.invisible {
+            let quads = self.frame_quads(f.glow, map, assets);
+            // `ItemFrameRenderer.getBlockLightLevel`: glow frames are at least block-light 5.
+            let frame_light = if f.glow {
+                (block.max(5), sky)
+            } else {
+                (block, sky)
+            };
+            let model = base * Mat4::from_translation(Vec3::splat(-0.5));
+            let nm = Mat3::from_mat4(model).inverse().transpose();
+            for q in quads.iter() {
+                let rect = self.texture_rect(&parse_tex(&q.texture), assets);
+                let o = q.direction.offset();
+                push_world_quad(
+                    &mut out,
+                    model,
+                    nm,
+                    q.positions.map(Vec3::from),
+                    q.uvs,
+                    Vec3::new(o[0] as f32, o[1] as f32, o[2] as f32),
+                    [1.0; 3],
+                    frame_light,
+                    rect,
+                );
+            }
         }
         if let Some(idx) = f.item {
             if let Some(item) = self.item_model_for(idx, assets) {
                 // Glow frames draw the item full-bright (`getLightCoords(isGlowFrame, 15728880)`,
                 // block 15 / sky 15); otherwise the frame's own (block, sky) light.
                 let item_light = if f.glow { (15, 15) } else { (block, sky) };
-                let root = base * item_frame_item_transform(f.rotation);
+                let root = base * item_frame_item_transform(f.rotation, e.invisible);
                 self.emit_item(
                     &mut out,
                     &item,
