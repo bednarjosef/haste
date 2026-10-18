@@ -622,6 +622,13 @@ impl Drop for AsyncOcclusionWalker {
     }
 }
 
+/// Whether the section occlusion cull runs this frame. Vanilla `Camera.extractRenderState`
+/// sets `smartCull = false` for a spectator camera inside a solid-render block (the player is
+/// inside a hill: every section must draw or the screen goes empty).
+pub fn cull_sections(camera_spectator: bool, camera_in_solid: bool) -> bool {
+    !(camera_spectator && camera_in_solid)
+}
+
 /// Per-section visibility from a meshed snapshot's opacity grid, for the walk
 /// above. `snapshot` reads the section's own 16³ blocks.
 pub fn section_visibility(
@@ -649,6 +656,16 @@ mod tests {
                 assert!(v.visible_between(a, b));
             }
         }
+    }
+
+    #[test]
+    fn a_spectator_camera_inside_a_solid_block_turns_the_cull_off() {
+        // `Camera.extractRenderState`: smartCull is only disabled for a spectator camera
+        // that is inside a solid-render block; everyone else keeps the occlusion walk.
+        assert!(cull_sections(false, false));
+        assert!(cull_sections(false, true));
+        assert!(cull_sections(true, false));
+        assert!(!cull_sections(true, true));
     }
 
     #[test]

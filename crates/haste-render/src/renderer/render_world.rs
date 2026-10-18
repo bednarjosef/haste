@@ -427,12 +427,20 @@ impl Renderer {
                 });
             }
         };
-        for (c, si) in self.visible_mask.ordered() {
-            emit(&mut buckets, SectionPos::new(c.x, si + min_section, c.z));
-        }
-        for &pos in &self.bonus_list {
-            if sections.get(pos).is_some_and(|s| s.bonus) {
-                emit(&mut buckets, pos);
+        if self.cull_sections {
+            for (c, si) in self.visible_mask.ordered() {
+                emit(&mut buckets, SectionPos::new(c.x, si + min_section, c.z));
+            }
+            for &pos in &self.bonus_list {
+                if sections.get(pos).is_some_and(|s| s.bonus) {
+                    emit(&mut buckets, pos);
+                }
+            }
+        } else {
+            // `smartCull` off (a spectator camera inside a solid block): every section in
+            // the frustum draws, not just the walk's.
+            for s in self.sections.iter() {
+                emit(&mut buckets, s.pos);
             }
         }
         // Translucent back to front: the key is the negated distance, so

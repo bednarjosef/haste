@@ -900,10 +900,9 @@ impl WorldFeed {
 
     /// Hands the renderer the first-person hand (`Renderer::set_first_person`) when the view's
     /// per-tick part changed since the last call. The skin is fixed for the connection, so
-    /// comparing the per-tick part is enough to catch every change; the skin is cloned only when
-    /// one happens (no allocation per frame).
-    /// The first-person hand only exists in the first-person perspective (F5 hides it) and
-    /// while the HUD is shown (`GameRenderer.renderItemInHand` skips it when F1 hid the HUD).
+    /// comparing the per-tick part is enough; the skin is cloned only when one happens.
+    /// The hand only exists in first person (F5 hides it) and while the HUD is shown
+    /// (`GameRenderer.renderItemInHand` skips it when F1 hid the HUD).
     fn set_first_person(
         &mut self,
         shared: &Shared,
@@ -2244,8 +2243,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut gui = GuiFrame::default();
     let mut ui: Option<crate::ui::Ui> = None;
     let mut feed = WorldFeed::default();
-    // The render thread's weather extraction buffer and per-tick column cache (both
-    // reused, no allocation after warmup).
+    // The render thread's weather extraction buffer and per-tick column cache (both reused).
     let mut weather_frame = haste_render::WeatherFrame::default();
     let mut weather_cache = WeatherColumnCache::default();
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
@@ -2354,14 +2352,14 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
             gui: &gui,
             sky,
             partial_tick: partial,
-            // Vanilla's F1 hides the block outline too (`GameRenderer
-            // .shouldRenderBlockOutline` checks `hud.isHidden`).
+            // Vanilla's F1 hides the block outline too (`shouldRenderBlockOutline`: hud hidden).
             block_target: hud_on.then_some(block_target).flatten(),
             breaking: &breaking,
             camera_entity: (!perspective.draws_player()).then_some(session.local.0),
             spin,
             weather,
         };
+        renderer.set_camera_spectator(view.spectator);
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
         renderer.set_game_time(view.world_age);
@@ -2581,8 +2579,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
     let mut gui = GuiFrame::default();
     let mut ui: Option<crate::ui::Ui> = None;
     let mut feed = WorldFeed::default();
-    // The render thread's weather extraction buffer and per-tick column cache (both
-    // reused, no allocation after warmup).
+    // The render thread's weather extraction buffer and per-tick column cache (both reused).
     let mut weather_frame = haste_render::WeatherFrame::default();
     let mut weather_cache = WeatherColumnCache::default();
     // The script's client is "grabbed" (game input goes through, like an active window).
@@ -3124,6 +3121,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
             spin,
             weather,
         };
+        renderer.set_camera_spectator(view.spectator);
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
         renderer.set_game_time(view.world_age);
@@ -3502,8 +3500,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
     renderer.set_dimension(shared.world.read().dimension());
     let gui = GuiFrame::default();
     let mut feed = WorldFeed::default();
-    // The render thread's weather extraction buffer and per-tick column cache (both
-    // reused, no allocation after warmup).
+    // The render thread's weather extraction buffer and per-tick column cache (both reused).
     let mut weather_frame = haste_render::WeatherFrame::default();
     let mut weather_cache = WeatherColumnCache::default();
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
@@ -3553,6 +3550,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             spin: None,
             weather,
         };
+        renderer.set_camera_spectator(view.spectator);
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
         renderer.set_game_time(view.world_age);
@@ -3740,6 +3738,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             spin: None,
             weather,
         };
+        renderer.set_camera_spectator(view.spectator);
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
         renderer.set_game_time(view.world_age);
@@ -4718,9 +4717,9 @@ impl App {
             spin: view.screen.spin_warp(partial),
             weather,
         };
-        // Outline boxes of the target and the states of breaking blocks (one short read lock),
-        // then the particles (the per-tick snapshot; no locks).
+        // Outline boxes of the target and the states of breaking blocks (one short read lock).
         let session = self.session.as_ref().expect("the game path above");
+        renderer.set_camera_spectator(view.spectator);
         renderer.sample_world(
             &*session.shared.world.read(),
             &session.shared.data.shapes,
