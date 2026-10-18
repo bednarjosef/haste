@@ -303,6 +303,8 @@ impl Renderer {
             Arc::new(crate::mesher::AoTable::all_solid(0)),
             // Fluid faces fall back to full-if-opaque until then.
             Arc::new(crate::fluid::FluidOccluders::absent()),
+            // Terrain faces fall back to the model rule until then.
+            Arc::new(crate::mesher::FaceOccluders::absent()),
         ));
         let arenas = MeshArenas::new(gpu.device.clone(), gpu.queue.clone());
         let timer = crate::timing::GpuTimer::new(&gpu.device, &gpu.queue);

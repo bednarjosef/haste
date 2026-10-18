@@ -299,16 +299,26 @@ fn materialize(
     }
 }
 
-/// Vanilla `BlockBehaviour.getLightDampening` per state, computed from the game data the
-/// oracle already carries: `isSolidRender` (the dump's `opaque`) means 15; otherwise
-/// `propagatesSkylightDown` (not a full collision cube and not a fluid) means 0, else 1.
-/// Two overrides are matched by block path: the glass family forces skylight through
-/// (`TransparentBlock`) and tinted glass blocks it entirely (15). Leaves land on 1 through
-/// their full cube, like vanilla's own override.
+/// Vanilla `BlockState.getLightDampening` (the value `BlockStateBase.initCache` caches,
+/// with every class override in), straight from the oracle dump's `light_dampening` field.
+/// Dumps from before the 2026-10-18 regeneration lack it and fall back to the rule below.
 pub(crate) fn light_dampening(data: &GameData, state: BlockStateId) -> u8 {
     if state == BlockStateId::AIR {
         return 0;
     }
+    if let Some(v) = data.shapes.light_dampening(state) {
+        return v;
+    }
+    light_dampening_fallback(data, state)
+}
+
+/// The approximation for old dumps, from the game data they already carry:
+/// `isSolidRender` (the dump's `opaque`) means 15; otherwise `propagatesSkylightDown` (not
+/// a full collision cube and not a fluid) means 0, else 1. Two overrides are matched by
+/// block path: the glass family forces skylight through (`TransparentBlock`) and tinted
+/// glass blocks it entirely (15). Leaves land on 1 through their full cube, like vanilla's
+/// own override.
+fn light_dampening_fallback(data: &GameData, state: BlockStateId) -> u8 {
     if data.is_opaque_full(state) {
         return 15;
     }

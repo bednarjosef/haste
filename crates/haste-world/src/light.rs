@@ -25,6 +25,8 @@ mod engine;
 mod sky_light_engine;
 mod sky_sources;
 mod storage;
+#[cfg(test)]
+mod storage_tests;
 mod update;
 
 pub(crate) use update::{light_properties_differ, run_for_block};

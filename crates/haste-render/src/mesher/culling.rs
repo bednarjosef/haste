@@ -157,7 +157,7 @@ pub(super) fn union_covers(boxes: &[[f32; 4]], region: [f32; 4]) -> bool {
 }
 
 /// The world axis `direction` points along.
-fn normal_axis(direction: Direction) -> usize {
+pub(super) fn normal_axis(direction: Direction) -> usize {
     let o = direction.offset();
     (0..3).find(|&i| o[i] != 0).unwrap()
 }
@@ -165,7 +165,7 @@ fn normal_axis(direction: Direction) -> usize {
 /// The face plane's two tangent axes (world axis indices, ascending): the 2D
 /// frame both the culled quad and the neighbour's occluder boxes are measured
 /// in — the same world axes for a direction and its opposite.
-fn tangent_axes(direction: Direction) -> (usize, usize) {
+pub(super) fn tangent_axes(direction: Direction) -> (usize, usize) {
     match normal_axis(direction) {
         0 => (1, 2),
         1 => (0, 2),
