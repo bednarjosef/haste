@@ -561,9 +561,8 @@ impl LocalPlayer {
                         fov_modifier: self.abilities.fov_modifier,
                         ..Abilities::for_mode(m)
                     };
-                    if !self.abilities.may_fly {
-                        self.state.flying = false;
-                    }
+                    // `GameType.updatePlayerAbilities`, run by `setLocalMode` on the change.
+                    self.state.flying = spectator::flying_after_mode_change(m, self.state.flying);
                 }
             }
             P::Respawn(r) => {
@@ -581,6 +580,9 @@ impl LocalPlayer {
                 let pos = self.state.pos;
                 self.state = PlayerState::at(pos);
                 self.abilities = Abilities::for_mode(self.game_mode);
+                // `GameType.updatePlayerAbilities` again, on the respawn's game mode.
+                self.state.flying =
+                    spectator::flying_after_mode_change(self.game_mode, self.state.flying);
                 self.has_position = false;
                 self.loaded = false;
                 self.pending_accept = None;
@@ -1042,7 +1044,12 @@ impl LocalPlayer {
         let pressed = input.jump && !self.jump_held;
         self.jump_held = input.jump;
         let mut just_toggled_creative_flight = false;
-        if self.abilities.may_fly && (pressed || double_tap) {
+        // Vanilla `LocalPlayer.aiStep`'s creative-flight block: the double-tap toggle runs
+        // only outside spectator; in spectator `mayfly` keeps flight on instead.
+        if self.abilities.may_fly
+            && self.game_mode != GameMode::Spectator
+            && (pressed || double_tap)
+        {
             if armed {
                 if !self.state.swimming {
                     self.jump_trigger_time = 0;
@@ -1055,6 +1062,14 @@ impl LocalPlayer {
             } else {
                 self.jump_trigger_time = JUMP_DOUBLE_TAP_TICKS;
             }
+        }
+        if spectator::ai_step_forces_flight(
+            self.abilities.may_fly,
+            self.game_mode == GameMode::Spectator,
+            self.state.flying,
+        ) {
+            self.state.flying = true;
+            just_toggled_creative_flight = true;
         }
         if !self.abilities.may_fly {
             self.state.flying = false;
@@ -1389,5 +1404,6 @@ pub mod climbable;
 pub mod interact;
 mod riding;
 pub mod script;
+pub mod spectator;
 #[cfg(test)]
 mod tests;
