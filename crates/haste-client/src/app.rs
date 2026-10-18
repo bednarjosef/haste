@@ -1771,8 +1771,7 @@ impl InputRouter {
         false
     }
 
-    /// The wheel moved by `(dx, dy)` notches at GUI-scaled `(x, y)`. Returns `true` when the
-    /// UI used it.
+    /// The wheel moved by `(dx, dy)` notches at GUI-scaled `(x, y)`; `true` when the UI used it.
     fn wheel(
         &mut self,
         dx: f64,
@@ -1795,7 +1794,11 @@ impl InputRouter {
         let steps = self.scroll.trunc() as i32;
         if steps != 0 {
             self.scroll -= steps as f64;
-            // Scrolling down (negative) moves to the next slot, wrapping 0..=8.
+            // Spectator: the wheel steps the flying speed (`MouseHandler.onScroll`), not the slot.
+            if shared.view.lock().spectator {
+                shared.input.lock().spectator_scroll += steps as f32;
+                return true;
+            }
             let current = self
                 .hotbar
                 .map_or(shared.view.lock().held_slot, |s| s as i32);

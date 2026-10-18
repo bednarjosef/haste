@@ -4,6 +4,7 @@
 //! game_event mode change and at respawn), and `LocalPlayer.aiStep` re-forces it every tick
 //! while `mayfly` holds, so a server `player_abilities` cannot leave a spectator falling.
 
+use super::LocalPlayer;
 use haste_core::game::GameMode;
 
 /// Vanilla `GameType.updatePlayerAbilities`' `flying` field: spectator forces flight on,
@@ -22,6 +23,23 @@ pub fn flying_after_mode_change(mode: GameMode, flying: bool) -> bool {
 /// and the `player_abilities` packet leaves with the tick like every flight change).
 pub fn ai_step_forces_flight(may_fly: bool, spectator: bool, flying: bool) -> bool {
     may_fly && spectator && !flying
+}
+
+/// The flying-speed step one wheel notch adds (`MouseHandler.onScroll`).
+pub const FLYING_SPEED_SCROLL_STEP: f32 = 0.005;
+/// The flying speed's clamp (`MouseHandler.onScroll`: `Mth.clamp(speed, 0.0F, 0.2F)`).
+pub const FLYING_SPEED_MAX: f32 = 0.2;
+
+impl LocalPlayer {
+    /// Vanilla `MouseHandler.onScroll`'s spectator branch: with the spectator menu closed (it
+    /// takes the wheel when open), the wheel steps the flying speed instead of the hotbar
+    /// slot — `0.005` per notch, clamped to `0..0.2`. The speed is purely client-side: no
+    /// packet tells the server.
+    pub fn spectator_scroll_fly_speed(&mut self, wheel: f32) {
+        self.attrs.flying_speed = (self.attrs.flying_speed + wheel * FLYING_SPEED_SCROLL_STEP)
+            .clamp(0.0, FLYING_SPEED_MAX);
+        self.abilities.flying_speed = self.attrs.flying_speed;
+    }
 }
 
 #[cfg(test)]
@@ -174,6 +192,28 @@ mod tests {
                 .any(|o| matches!(o, ServerboundPlay::PlayerAbilities(_))),
             "no flight-change packet: flight was never toggled"
         );
+    }
+
+    #[test]
+    fn the_scroll_wheel_steps_the_flying_speed_within_vanillas_clamp() {
+        let mut p = spawned(GameMode::Spectator);
+        assert_eq!(p.attrs.flying_speed, 0.05);
+        p.spectator_scroll_fly_speed(1.0);
+        assert_eq!(p.attrs.flying_speed, 0.055);
+        p.spectator_scroll_fly_speed(-2.0);
+        assert_eq!(p.attrs.flying_speed, 0.045);
+        // Clamped at both ends, never negative and never past 0.2.
+        for _ in 0..40 {
+            p.spectator_scroll_fly_speed(1.0);
+        }
+        assert_eq!(p.attrs.flying_speed, 0.2);
+        for _ in 0..40 {
+            p.spectator_scroll_fly_speed(-1.0);
+        }
+        // f32 accumulation leaves a positive epsilon steps above zero (vanilla's too).
+        assert!(p.attrs.flying_speed < 1e-6 && p.attrs.flying_speed >= 0.0);
+        // The abilities mirror follows, so the FOV modifier path sees the same value.
+        assert_eq!(p.abilities.flying_speed, p.attrs.flying_speed);
     }
 
     #[test]
