@@ -76,6 +76,20 @@ pub struct PlayerState {
     /// through blocks.
     #[serde(default)]
     pub no_physics: bool,
+    /// Levitation effect amplifier (vanilla `getEffect(MobEffects.LEVITATION)`; `None` without).
+    /// `LivingEntity.travelInAir` blends the rise towards `0.05 * (amplifier + 1)` per tick and
+    /// skips gravity, whatever the amplifier (a negative one makes the player hover or sink).
+    #[serde(default)]
+    pub levitation: Option<i32>,
+    /// Slow falling effect on us (vanilla `LivingEntity.hasEffect(MobEffects.SLOW_FALLING)`):
+    /// `getEffectiveGravity` caps the gravity at 0.01 while falling and the fall distance is
+    /// reset each tick.
+    #[serde(default)]
+    pub slow_falling: bool,
+    /// Jump boost effect amplifier (vanilla `getEffect(MobEffects.JUMP_BOOST)`; `None` without).
+    /// `LivingEntity.getJumpBoostPower` adds `0.1F * (amplifier + 1)` to the jump power.
+    #[serde(default)]
+    pub jump_boost: Option<i32>,
 }
 
 impl PlayerState {
