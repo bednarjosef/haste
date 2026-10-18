@@ -105,6 +105,16 @@ pub(crate) fn event_eq(stored: &str, queried: &str) -> bool {
     stored_ns == queried_ns && stored_path == queried_path
 }
 
+/// What playing a sound did, vanilla's `SoundEngine.PlayResult`: not started at all, or
+/// started (possibly silently — a volume-0 music track that keeps its channel so a later
+/// volume change can fade it in).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlayResult {
+    Started,
+    StartedSilently,
+    NotStarted,
+}
+
 /// One sound currently tracked by the engine.
 #[derive(Clone, Debug)]
 struct PlayingSound {
@@ -160,6 +170,10 @@ impl SilentEngine {
     /// without one play at full gain, centred. `event` is the sound event the sound was
     /// started with, kept for `stop`'s event filter and [`Self::is_event_playing`]; it is
     /// shared, so tracking it costs no allocation.
+    ///
+    /// Vanilla's volume-0 rule (`SoundEngine.play`): a sound whose whole volume works out
+    /// to 0 is not started — except music, which starts silently and keeps playing, so a
+    /// later volume change (or the music fade) can raise it without restarting the track.
     pub fn play(
         &mut self,
         variant: &SoundVariant,
@@ -168,7 +182,12 @@ impl SilentEngine {
         volume: f32,
         pitch: f32,
         event: Arc<str>,
-    ) {
+    ) -> PlayResult {
+        let instance_volume = (volume * variant.volume).clamp(0.0, 1.0);
+        if instance_volume * self.volumes.effective(source) == 0.0 && source != SoundSource::Music {
+            return PlayResult::NotStarted;
+        }
+        let started_silently = instance_volume * self.volumes.effective(source) == 0.0;
         self.sounds.push(PlayingSound {
             event,
             source,
@@ -178,6 +197,18 @@ impl SilentEngine {
             attenuation_distance: variant.attenuation_distance,
             gains: (0.0, 0.0),
         });
+        if started_silently {
+            PlayResult::StartedSilently
+        } else {
+            PlayResult::Started
+        }
+    }
+
+    /// Drop the most recently started sound, after a channel could not be acquired for it
+    /// (vanilla's `SoundEngine.play` gives up on the sound when `createHandle` fails, so
+    /// it is never tracked anywhere).
+    pub fn remove_last(&mut self) {
+        self.sounds.pop();
     }
 
     /// Set the listener (camera) position and yaw for attenuation and panning.

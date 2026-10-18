@@ -423,6 +423,79 @@ fn remove_drops_the_sound_at_the_index() {
 }
 
 #[test]
+fn zero_volume_sound_is_not_started() {
+    // Vanilla's SoundEngine.play: a sound whose whole volume is 0 is skipped — it is not
+    // tracked and never plays. Master 0, source volume 0 or a play volume of 0 all do it.
+    let mut engine = SilentEngine::new();
+    engine.set_volume(SoundSource::Master, 0.0);
+    assert_eq!(
+        engine.play(
+            &variant("sounds/a.ogg", 16),
+            SoundSource::Block,
+            None,
+            1.0,
+            1.0,
+            Arc::from("minecraft:a"),
+        ),
+        super::PlayResult::NotStarted
+    );
+    let mut engine = SilentEngine::new();
+    assert_eq!(
+        engine.play(
+            &variant("sounds/a.ogg", 16),
+            SoundSource::Block,
+            None,
+            0.0,
+            1.0,
+            Arc::from("minecraft:a"),
+        ),
+        super::PlayResult::NotStarted
+    );
+    // A variant volume of 0 counts too (volume * variant volume, clamped).
+    assert_eq!(
+        engine.play(
+            &variant_with("sounds/b.ogg", 16, 0.0, 1.0),
+            SoundSource::Block,
+            None,
+            1.0,
+            1.0,
+            Arc::from("minecraft:b"),
+        ),
+        super::PlayResult::NotStarted
+    );
+    assert_eq!(engine.playing(), 0);
+}
+
+#[test]
+fn zero_volume_music_starts_silently() {
+    // The music exception: a volume-0 music track starts (silently) and is tracked, so a
+    // later volume change can raise it without restarting the track.
+    let mut engine = SilentEngine::new();
+    engine.set_volume(SoundSource::Music, 0.0);
+    assert_eq!(
+        engine.play(
+            &variant("sounds/music/game/calm1.ogg", 16),
+            SoundSource::Music,
+            None,
+            1.0,
+            1.0,
+            Arc::from("minecraft:music.game"),
+        ),
+        super::PlayResult::StartedSilently
+    );
+    assert_eq!(engine.playing(), 1);
+    engine.tick();
+    assert_eq!(engine.gains().next().unwrap(), (0.0, 0.0));
+    // The volume coming back raises the same track, with no restart.
+    engine.set_volume(SoundSource::Music, 1.0);
+    engine.tick();
+    assert_eq!(engine.playing(), 1);
+    let (l, r) = engine.gains().next().unwrap();
+    assert!((l - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5, "l {l}");
+    assert!((r - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5, "r {r}");
+}
+
+#[test]
 fn master_source_takes_the_master_volume_once() {
     // Options.getFinalSoundSourceVolume: the master source's own volume is the master
     // volume, every other source's is master * source, and SoundEngine clamps it to 0..=1.

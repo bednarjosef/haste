@@ -220,7 +220,70 @@ fn quiet_tick_allocates_nothing() {
     assert_eq!(system.playing(), 3);
 }
 
-/// Opens the real device and plays `minecraft:block.note_block.harp` from the real
+#[test]
+fn the_static_pool_caps_at_247_and_drops_the_rest() {
+    // Vanilla's Library pools: 247 static channels; a play that cannot get one is not
+    // started at all (SoundEngine.play returns NOT_STARTED when createHandle gives null).
+    let Some(assets) = cached_assets() else {
+        return;
+    };
+    let events =
+        SoundEvents::parse(br#"{"e": {"sounds": [{"name": "a", "attenuation_distance": 16}]}}"#)
+            .unwrap();
+    let mut system = SoundSystem::with_output(events, assets, AudioOutput::silent());
+    for i in 0..300 {
+        system.play("e", SoundSource::Block, None, 1.0, 1.0, i as i64);
+    }
+    assert_eq!(system.playing(), 247, "the 248th onward are dropped");
+    assert_eq!(
+        system.channels.used(crate::channels::Pool::Static),
+        247,
+        "the dropped sounds hold no channel"
+    );
+    // Stopping the sounds frees the pool for new ones.
+    system.stop(Some(SoundSource::Block), None);
+    assert_eq!(system.channels.used(crate::channels::Pool::Static), 0);
+    system.play("e", SoundSource::Block, None, 1.0, 1.0, 1);
+    assert_eq!(system.playing(), 1);
+}
+
+#[test]
+fn the_streaming_pool_caps_at_8() {
+    // Streamed sounds (music, records) draw from the separate streaming pool of 8.
+    let Some(assets) = cached_assets() else {
+        return;
+    };
+    let events =
+        SoundEvents::parse(br#"{"e": {"sounds": [{"name": "a", "stream": true}]}}"#).unwrap();
+    let mut system = SoundSystem::with_output(events, assets, AudioOutput::silent());
+    for i in 0..20 {
+        system.play("e", SoundSource::Music, None, 1.0, 1.0, i as i64);
+    }
+    assert_eq!(system.playing(), 8);
+    assert_eq!(system.channels.used(crate::channels::Pool::Streaming), 8);
+    // The static pool is untouched by streamed plays.
+    assert_eq!(system.channels.used(crate::channels::Pool::Static), 0);
+}
+
+#[test]
+fn zero_volume_sound_never_reaches_the_output() {
+    // SoundEngine.play's volume-0 rule in the facade: no engine tracking, no output
+    // request, no channel held.
+    let Some(assets) = cached_assets() else {
+        return;
+    };
+    let events = SoundEvents::parse(br#"{"e": {"sounds": ["a"]}}"#).unwrap();
+    let mut system = SoundSystem::with_output(events, assets, AudioOutput::silent());
+    system.set_volume(SoundSource::Block, 0.0);
+    system.play("e", SoundSource::Block, None, 1.0, 1.0, 1);
+    assert_eq!(system.playing(), 0);
+    assert_eq!(system.channels.used(crate::channels::Pool::Static), 0);
+    assert!(system.sounded.is_empty());
+    // Music at volume 0 still starts (silently) and holds a streaming channel.
+    system.set_volume(SoundSource::Music, 0.0);
+    system.play("music.game", SoundSource::Music, None, 1.0, 1.0, 2);
+    assert_eq!(system.playing(), 0, "the event is unknown here");
+}
 /// assets for 1 s. Run explicitly: `cargo test -p haste-audio -- --ignored`.
 #[test]
 #[ignore = "opens the real audio device and needs the downloaded assets in the cache"]

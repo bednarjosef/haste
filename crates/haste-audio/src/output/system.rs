@@ -7,7 +7,8 @@ use glam::DVec3;
 use tracing::{debug, warn};
 
 use super::{AudioOutput, PlayRequest, SoundControls, SoundId};
-use crate::engine::{event_eq, SilentEngine, SoundSource};
+use crate::channels::{ChannelPools, Pool};
+use crate::engine::{event_eq, PlayResult, SilentEngine, SoundSource};
 use crate::sounds::{SoundEvents, SoundVariant};
 
 /// One sound the `SoundSystem` sent to the output, parallel to the engine's sound list:
@@ -20,6 +21,9 @@ pub(super) struct Sounded {
     /// `SoundManager.stop(Identifier, SoundSource)` matches the event, not a file.
     event: Arc<str>,
     source: SoundSource,
+    /// The channel pool this sound's channel came from (streamed sounds stream), released
+    /// when it finishes or is stopped.
+    pool: Pool,
     /// The output's controls once the worker created the player; `None` until then.
     controls: Option<SoundControls>,
 }
@@ -34,6 +38,9 @@ pub(super) struct Sounded {
 pub struct SoundSystem {
     events: SoundEvents,
     engine: SilentEngine,
+    /// The channel pools (vanilla's `Library` split, 247 static + 8 streaming): a sound
+    /// that cannot get a channel is not started.
+    pub(super) channels: ChannelPools,
     pub(super) output: AudioOutput,
     assets: haste_assets::Assets,
     /// The engine's sounds that were sent to the output, in play order.
@@ -67,6 +74,7 @@ impl SoundSystem {
         Self {
             events,
             engine: SilentEngine::new(),
+            channels: ChannelPools::new(),
             output,
             assets,
             sounded: Vec::new(),
@@ -120,8 +128,25 @@ impl SoundSystem {
         event: &str,
     ) {
         let event = self.intern(event);
-        self.engine
-            .play(variant, source, pos, volume, pitch, Arc::clone(&event));
+        // Vanilla's `SoundEngine.play` order: the volume-0 rule first (a sound at zero
+        // volume is not started; music starts silently), then the channel acquisition
+        // (a full pool drops the sound).
+        match self
+            .engine
+            .play(variant, source, pos, volume, pitch, Arc::clone(&event))
+        {
+            PlayResult::NotStarted => return,
+            PlayResult::Started | PlayResult::StartedSilently => {}
+        }
+        let pool = if variant.stream {
+            Pool::Streaming
+        } else {
+            Pool::Static
+        };
+        if !self.channels.acquire(pool) {
+            self.engine.remove_last();
+            return;
+        }
         // The engine's gains for this sound right now, so the player starts at the right
         // volume instead of full until the first tick.
         self.engine.tick();
@@ -155,6 +180,7 @@ impl SoundSystem {
             id,
             event,
             source,
+            pool,
             controls: None,
         });
     }
@@ -170,10 +196,12 @@ impl SoundSystem {
         };
         // Tell the worker to stop the players; a sound still in the decode queue is
         // stopped by its own play handling, because the stop order queues behind its
-        // play request in the shared channel.
+        // play request in the shared channel. Each stopped sound gives its channel back
+        // (`ChannelHandle.release`).
         for sounded in &self.sounded {
             if matches(sounded) {
                 self.output.send_stop(sounded.id);
+                self.channels.release(sounded.pool);
             }
         }
         // Drop controls of the stopped sounds; the worker never sends them (or they are
@@ -258,8 +286,10 @@ impl SoundSystem {
             }
         }
         // Highest index first so the lower indices stay valid. The engine iterators are
-        // dropped by now, so `remove` can borrow the engine again.
+        // dropped by now, so `remove` can borrow the engine again. A sound that played
+        // through gives its channel back.
         for i in self.finished.iter().rev() {
+            self.channels.release(self.sounded[*i].pool);
             self.engine.remove(*i);
             self.sounded.remove(*i);
         }
