@@ -200,3 +200,22 @@ Newest at the top. One entry per decision, with the why; link the brief or repor
   `renderClouds:"false"` (clouds drift, so shots would not compare). Haste ignores the cloud
   option and always draws fancy clouds (brief cloud-option); benches against vanilla are not
   like-for-like until it honours `Options.cloudStatus`.
+- **2026-10-18 Zero-copy light arrays pinned whole chunk packets.** Light nibble arrays were
+  `Bytes` slices of the `level_chunk_with_light` packet, so every non-uniform section kept its
+  whole packet alive (~125 MB of 139 MB received at rd 32). Light arrays are now owned
+  (`Arc<[u8; 2048]>`, copied out of the packet) and uniform sky sections store one value, like
+  vanilla's `DataLayer`: RSS -80 MB (-30%) at rd 32. Any other long-lived data sliced out of a
+  packet with `Bytes::slice` has the same trap.
+- **2026-10-18 Which block carries which block entity comes from the game.** The
+  `block_entity_types.json` dump records `EntityBlock.newBlockEntity` per state. The old
+  hand-written table had `moving_piston -> piston` (vanilla returns null there: the piston's block
+  event creates that entity) and missed the copper golem statue variants.
+- **2026-10-18 Face culling order in the mesher.** A cullface is drawn when the state's
+  `skipRendering` rule keeps it (`mesher/skip.rs`, rules per vanilla class from the
+  `block_classes.json` dump) and `Block.shouldRenderFace`'s occlusion-shape test shows it
+  (`mesher/face_occlusion.rs`, from `block_shapes.json`); an old dump falls back to the model
+  rule. Cross models (grass, flowers) light by their 26.3 `shade_direction_override` ("up"),
+  not their side shades.
+- **2026-10-18 Container clicks are sent inside the input event.** Vanilla's
+  `MultiPlayerGameMode.handleContainerInput` sends at once; queuing to the next tick added
+  50-100 ms before the crafting result appeared.
