@@ -30,6 +30,7 @@ fn tick_looking(r: &mut Rig, pitch: f32, i: InteractInput) -> Vec<ServerboundPla
         entity_types: &r.types,
         border: r.border.as_ref(),
         warm_blocks: None,
+        ui: None,
     };
     let input = InputState {
         pitch: pitch - r.p.look_offset().1,

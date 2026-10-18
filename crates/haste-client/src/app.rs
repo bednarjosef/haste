@@ -1933,16 +1933,11 @@ impl InputRouter {
                 self.pick_block_ctrl = false;
             }
             if let Some(ui) = ui {
-                // The action mappings' clicks (hotbar, drop, swap, jump), consumed once per
-                // frame and handed to the game thread through the shared input.
+                // The action mappings' clicks (hotbar, drop, drop stack, swap, jump),
+                // consumed once per frame and handed to the game thread through the shared
+                // input.
                 let c = ui.consume_clicks();
-                for slot in 0..9 {
-                    if c & (bits::C_HOTBAR_0 << slot) != 0 {
-                        i.hotbar = Some(slot as u8);
-                    }
-                }
-                i.drop_item |= c & bits::C_DROP != 0;
-                i.swap_offhand |= c & bits::C_SWAP_OFFHAND != 0;
+                crate::ui::feed_clicks(c, i);
                 if c & bits::C_JUMP != 0 {
                     self.jump_pressed(Instant::now());
                 }

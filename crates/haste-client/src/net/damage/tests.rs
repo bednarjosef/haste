@@ -176,6 +176,7 @@ impl DamageRig {
             &haste_core::input::InputState::default(),
             world,
             &self.entities,
+            None,
             &mut self.out,
         );
         // The hurt and death counters tick with the camera (vanilla's per-tick step).

@@ -19,6 +19,7 @@ impl Session {
         input: &InputState,
         world: &mut W,
         entities: &E,
+        ui: Option<&crate::ui::Ui>,
         out: &mut Vec<ServerboundPlay>,
     ) {
         // Sound requests nobody drained (headless) are dropped here; the game thread
@@ -82,6 +83,7 @@ impl Session {
                     warm_blocks: warm
                         .as_ref()
                         .map(|w| w as &dyn crate::item_based_steering::WarmBlocks),
+                    ui,
                 };
                 self.player.tick_interact(input, view, &env, vehicle, out)
             }

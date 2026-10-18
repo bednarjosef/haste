@@ -55,6 +55,7 @@ mod screens;
 mod tests;
 
 pub use self::input::bits;
+pub use self::input::feed_clicks;
 pub use self::packets::ui_handles;
 pub use hud::HudWarmup;
 
