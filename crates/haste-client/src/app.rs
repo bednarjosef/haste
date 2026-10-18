@@ -1140,14 +1140,14 @@ fn frame_view<'w>(
     };
     // `Level.getThunderLevel` scales the thunder level by the rain level (a dry thunderstorm
     // cannot darken); the fog's thunder input is that product.
-     let mut fog = fog_inputs(
-         camera_fog,
-         &world,
-         &shared.biome_climates,
-         pos,
-         view,
-         partial,
-     );
+    let mut fog = fog_inputs(
+        camera_fog,
+        &world,
+        &shared.biome_climates,
+        pos,
+        view,
+        partial,
+    );
     fog.thunder_level *= rain_level;
     let sky = SkyState {
         time_of_day: view.time_of_day,
@@ -1198,42 +1198,16 @@ fn frame_view<'w>(
     )
 }
 
-/// Vanilla `Camera.getFluidInCamera` -> `FogRenderer.getFogType`: the fluid at the camera
-/// block (water by its surface height, then lava), else powder snow. Vanilla probes the five
-/// near-plane points for lava and powder snow; Haste approximates them with the camera block
-/// (like `eye_in_lava`).
 /// Vanilla `Camera.modifyFovBasedOnDeathOrFluid`: the FOV is shrunk only when the fluid at the
 /// camera (`Camera.getFluidInCamera`) is water or lava (not powder snow, not atmospheric).
 pub fn fluid_shrinks_fov(fog: FogType) -> bool {
     matches!(fog, FogType::Water | FogType::Lava)
 }
 
-// Aliases kept for callers/tests that use other names for the same helper.
-#[allow(dead_code)]
-pub fn fog_type_shrinks_fov(fog: FogType) -> bool {
-    fluid_shrinks_fov(fog)
-}
-#[allow(dead_code)]
-pub fn camera_fluid_shrinks_fov(fog: FogType) -> bool {
-    fluid_shrinks_fov(fog)
-}
-#[allow(dead_code)]
-pub fn fov_shrinks_in_fluid(fog: FogType) -> bool {
-    fluid_shrinks_fov(fog)
-}
-#[allow(dead_code)]
-pub fn shrinks_fov(fog: FogType) -> bool {
-    fluid_shrinks_fov(fog)
-}
-#[allow(dead_code)]
-pub fn fov_fluid_shrink(fog: FogType) -> bool {
-    fluid_shrinks_fov(fog)
-}
-#[allow(dead_code)]
-pub fn fluid_shrinks(fog: FogType) -> bool {
-    fluid_shrinks_fov(fog)
-}
-
+/// Vanilla `Camera.getFluidInCamera` -> `FogRenderer.getFogType`: the fluid at the camera
+/// block (water by its surface height, then lava), else powder snow. Vanilla probes the five
+/// near-plane points for lava and powder snow; Haste approximates them with the camera block
+/// (like `eye_in_lava`).
 fn camera_fog_type(world: &World, data: &haste_data::GameData, pos: DVec3) -> FogType {
     use haste_core::view::{BlockPhysics, BlockView, FluidKind};
     let p = BlockPos::new(
