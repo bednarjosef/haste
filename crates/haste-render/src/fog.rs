@@ -50,8 +50,6 @@ pub(crate) use timeline::timeline_lerp;
 
 use atmospheric::atmospheric_base;
 use blindness::blindness_darkness;
-#[allow(unused_imports)]
-use timeline::argb;
 use timeline::lerp3;
 use timeline::timeline_sample3;
 use timeline::{FOG_COLOR_NIGHT, SKY_COLOR_NIGHT};
