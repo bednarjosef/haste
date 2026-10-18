@@ -74,6 +74,7 @@ fn data() -> &'static haste_data::GameData {
                     "spyglass",
                     "shield",
                     "potion",
+                    "wooden_spear",
                 ]),
                 entries(&[
                     "speed",
@@ -727,6 +728,44 @@ fn use_does_nothing_while_a_block_is_being_destroyed() {
     r.tick(InteractInput::default());
     let out = r.tick(use_);
     assert!(matches!(out[0], ServerboundPlay::UseItemOn(_)));
+}
+
+#[test]
+fn the_used_item_use_effects_speed_multiplier() {
+    // Vanilla `LocalPlayer.itemUseSpeedMultiplier`: 1.0 without an item in use, the default
+    // 0.2 every item's prototype carries (`UseEffects.DEFAULT` in
+    // `DataComponents.COMMON_ITEM_COMPONENTS`), and 1.0 for the spear family
+    // (`Item.Properties.spear` sets `UseEffects(true, false, 1.0)`).
+    let mut r = Rig::new(GameMode::Survival);
+    let env = InteractEnv {
+        data: data(),
+        entities: &[],
+        entity_types: &[],
+        warm_blocks: None,
+    };
+    assert_eq!(r.p.item_use_speed_multiplier(Some(&env)), 1.0);
+    r.p.int.set_using_item(true);
+    // The server-synced use before the hand's stack fills in: the default.
+    assert_eq!(r.p.item_use_speed_multiplier(Some(&env)), 0.2);
+    assert_eq!(r.p.item_use_speed_multiplier(None), 0.2);
+    r.p.int.using = Some(UsingItem {
+        item: Some(RegistryIndex(4)), // apple
+        duration: 32,
+        remaining: 32,
+        animation: UseAnimation::Eat,
+    });
+    assert_eq!(r.p.item_use_speed_multiplier(Some(&env)), 0.2);
+    r.p.int.using = Some(UsingItem {
+        item: Some(RegistryIndex(11)), // wooden_spear
+        duration: 72000,
+        remaining: 72000,
+        animation: UseAnimation::Spear,
+    });
+    assert_eq!(
+        r.p.item_use_speed_multiplier(Some(&env)),
+        1.0,
+        "the spear family charges at full speed"
+    );
 }
 
 #[test]

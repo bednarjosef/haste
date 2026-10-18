@@ -944,6 +944,9 @@ impl LocalPlayer {
         self.state.sprint_blocked =
             self.int.is_blind() || (self.food <= SPRINT_FOOD_LEVEL && !self.abilities.may_fly);
         self.state.slow_using_item = self.is_using_item();
+        // Vanilla `LocalPlayer.itemUseSpeedMultiplier`: the used stack's `use_effects` speed
+        // multiplier, which the physics `impulse` scales the input by while using an item.
+        self.state.item_use_speed = self.item_use_speed_multiplier(ctx.env);
         // Vanilla `LocalPlayer.aiStep`'s double tap of forward, after `Player.aiStep` counted
         // `sprintTriggerTime` down above: sneak held, an item in use or the backward key
         // cancels the window. `hasForwardImpulse` is read from the PREVIOUS tick's input

@@ -124,6 +124,37 @@ impl LocalPlayer {
         self.int.is_using_item
     }
 
+    /// Vanilla `LocalPlayer.itemUseSpeedMultiplier`: the used stack's `minecraft:use_effects`
+    /// speed multiplier, which `LocalPlayer.modifyInput` scales the movement input by while
+    /// an item is in use. Every item's prototype carries the component
+    /// (`DataComponents.COMMON_ITEM_COMPONENTS`): `UseEffects.DEFAULT`, speed 0.2. The spear
+    /// family's built-in properties override it with `can_sprint` true and speed 1.0
+    /// (`Item.Properties.spear`). Items whose data-driven definition or stack patch sets its
+    /// own cannot be read on this side yet — the components report is not parsed for
+    /// `use_effects` and stack patches are not decoded for it. 1.0 when no item is in use.
+    pub fn item_use_speed_multiplier(&self, env: Option<&InteractEnv<'_>>) -> f32 {
+        if !self.int.is_using_item {
+            return 1.0;
+        }
+        // The used stack's item type. Without a stack (the server-synced use before the hand
+        // fills it in) or without the environment the item cannot be resolved: the default
+        // every prototype carries applies.
+        let item = self
+            .int
+            .using
+            .and_then(|u| u.item)
+            .and_then(|i| env.and_then(|e| e.data.registries.name("minecraft:item", i)));
+        match item.map(Identifier::path) {
+            // `Item.Properties.spear` sets `UseEffects(true, false, 1.0)`.
+            Some(
+                "wooden_spear" | "stone_spear" | "copper_spear" | "iron_spear" | "golden_spear"
+                | "diamond_spear" | "netherite_spear",
+            ) => 1.0,
+            // `UseEffects.DEFAULT`: speed 0.2 on every item without an override.
+            _ => 0.2,
+        }
+    }
+
     /// `LivingEntity.getUseItemRemainingTicks`.
     pub fn use_item_remaining(&self) -> i32 {
         self.int.using.map_or(0, |u| u.remaining)
