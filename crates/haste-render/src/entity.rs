@@ -13,7 +13,7 @@ use haste_core::model::{
     ModelPart, PaintingDecoration, PoseOverrides,
 };
 use haste_core::parts::{self, PartId};
-use haste_core::view::{BlockView, CollisionShapes};
+use haste_core::view::BlockView;
 use haste_core::{BlockPos, EntityId, Identifier};
 
 use crate::gui::Shelf;
@@ -23,6 +23,7 @@ mod block_entities;
 mod cape;
 mod equipment;
 mod experience_orb;
+mod flame;
 mod item;
 mod item_frame;
 mod painting;
@@ -497,6 +498,10 @@ impl EntityRenderer {
                 }
             }
             self.emit_equipment(e, root, light, assets);
+            // `EntityRenderDispatcher.submit`: the fire after the entity's own renderer.
+            if e.display_fire {
+                self.emit_flame(e, (e.pos - camera).as_vec3(), orientation, assets);
+            }
             if self.vertices.len() > start {
                 self.drawn += 1;
             }

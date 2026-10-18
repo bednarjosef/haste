@@ -134,7 +134,9 @@ public final class GfxImpl {
         POSE.sync();
         if (x1 > x2) { int t = x1; x1 = x2; x2 = t; }
         if (y1 > y2) { int t = y1; y1 = y2; y2 = t; }
-        GuiBatch.op(GuiBatch.FILL, x1, y1, x2, y2, color);
+        int ax = POSE.scaleX(x1, y1), ay = POSE.scaleY(x1, y1);
+        int bx = POSE.scaleX(x2, y2), by = POSE.scaleY(x2, y2);
+        GuiBatch.op(GuiBatch.FILL, Math.min(ax, bx), Math.min(ay, by), Math.max(ax, bx), Math.max(ay, by), color);
     }
 
     public static void fill(GuiGraphicsExtractor g, RenderPipeline p, int x1, int y1, int x2, int y2, int color) {
@@ -143,7 +145,9 @@ public final class GfxImpl {
 
     public static void fillGradient(GuiGraphicsExtractor g, int x1, int y1, int x2, int y2, int top, int bottom) {
         POSE.sync();
-        GuiBatch.op(GuiBatch.GRADIENT, x1, y1, x2, y2, top, bottom);
+        int ax = POSE.scaleX(x1, y1), ay = POSE.scaleY(x1, y1);
+        int bx = POSE.scaleX(x2, y2), by = POSE.scaleY(x2, y2);
+        GuiBatch.op(GuiBatch.GRADIENT, Math.min(ax, bx), Math.min(ay, by), Math.max(ax, bx), Math.max(ay, by), top, bottom);
     }
 
     public static void horizontalLine(GuiGraphicsExtractor g, int x1, int x2, int y, int color) {
@@ -290,7 +294,9 @@ public final class GfxImpl {
     }
     public static void blitSprite(GuiGraphicsExtractor g, RenderPipeline p, Identifier s, int x, int y, int w, int h, int tint) {
         POSE.sync();
-        GuiBatch.ops(GuiBatch.SPRITE, id(s), x, y, w, h, tint, blend(p, s));
+        int ax = POSE.scaleX(x, y), ay = POSE.scaleY(x, y);
+        int bx = POSE.scaleX(x + w, y + h), by = POSE.scaleY(x + w, y + h);
+        GuiBatch.ops(GuiBatch.SPRITE, id(s), Math.min(ax, bx), Math.min(ay, by), Math.abs(bx - ax), Math.abs(by - ay), tint, blend(p, s));
     }
     /** Sub-region of a sprite: region (u, v, w, h) of a sprite drawn as {@code spriteW x spriteH}, placed at x, y. */
     public static void blitSprite(GuiGraphicsExtractor g, RenderPipeline p, Identifier s, int spriteW, int spriteH, int u, int v, int x, int y, int w, int h) {
@@ -298,12 +304,17 @@ public final class GfxImpl {
     }
     public static void blitSprite(GuiGraphicsExtractor g, RenderPipeline p, Identifier s, int spriteW, int spriteH, int u, int v, int x, int y, int w, int h, int tint) {
         POSE.sync();
-        GuiBatch.ops(GuiBatch.SPRITE_REGION, id(s), spriteW, spriteH, u, v, x, y, w, h, tint, blend(p, s));
+        int ax = POSE.scaleX(x, y), ay = POSE.scaleY(x, y);
+        int bx = POSE.scaleX(x + w, y + h), by = POSE.scaleY(x + w, y + h);
+        GuiBatch.ops(GuiBatch.SPRITE_REGION, id(s), spriteW, spriteH, u, v, Math.min(ax, bx), Math.min(ay, by), Math.abs(bx - ax), Math.abs(by - ay), tint, blend(p, s));
     }
 
     private static void texture(RenderPipeline p, Identifier t, int x, int y, int w, int h, float u, float v, float uw, float vh, int texW, int texH, int tint) {
         POSE.sync();
-        GuiBatch.ops(GuiBatch.TEXTURE, id(t), x, y, w, h, Float.floatToRawIntBits(u), Float.floatToRawIntBits(v),
+        int ax = POSE.scaleX(x, y), ay = POSE.scaleY(x, y);
+        int bx = POSE.scaleX(x + w, y + h), by = POSE.scaleY(x + w, y + h);
+        GuiBatch.ops(GuiBatch.TEXTURE, id(t), Math.min(ax, bx), Math.min(ay, by), Math.abs(bx - ax), Math.abs(by - ay),
+            Float.floatToRawIntBits(u), Float.floatToRawIntBits(v),
             Float.floatToRawIntBits(uw), Float.floatToRawIntBits(vh), texW, texH, tint, blend(p, t));
     }
     public static void blit(GuiGraphicsExtractor g, RenderPipeline p, Identifier t, int x, int y, float u, float v, int w, int h, int texW, int texH) {
@@ -328,7 +339,7 @@ public final class GfxImpl {
     public static void item(GuiGraphicsExtractor g, ItemStack s, int x, int y, int seed) {
         if (s == null || s.isEmpty()) return;
         POSE.sync();
-        GuiBatch.op(GuiBatch.ITEM, itemId(s), x, y, s.getCount());
+        GuiBatch.op(GuiBatch.ITEM, itemId(s), POSE.scaleX(x, y), POSE.scaleY(x, y), s.getCount());
     }
 
     /** Index of the stack's item in the {@code minecraft:item} registry (the same numbering as Rust's). */

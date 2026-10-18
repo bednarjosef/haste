@@ -188,6 +188,7 @@ public final class ServerDumps {
             o.addProperty("height", dims.height());
             o.addProperty("eye_height", dims.eyeHeight());
             o.addProperty("fixed", dims.fixed());
+            o.addProperty("fire_immune", type.fireImmune());
             types.add(o);
         }
         root.add("types", types);

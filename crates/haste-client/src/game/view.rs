@@ -90,6 +90,10 @@ pub fn player_instance(
         shadow_radius: 0.5,
         shadow_strength: 1.0,
         invisible: false,
+        // `Entity.displayFireAnimation`: on fire and not a spectator.
+        display_fire: view.screen.on_fire && !view.spectator,
+        width: view.bb.0,
+        height: view.bb.1,
         is_discrete: view.pose == Some(Pose::Crouching),
         // `EntityAttachment.NAME_TAG` AT_HEIGHT fallback = the player's 1.8 bb height.
         name_tag_y: 1.8,
@@ -158,6 +162,9 @@ pub struct ViewState {
     pub water_vision: f32,
     /// Whether we are a spectator (`Entity.isSpectator`), for the lava/powder-snow fog.
     pub spectator: bool,
+    /// The player's bounding box (`getBbWidth`, `getBbHeight` for the current pose), for the
+    /// third-person flames.
+    pub bb: (f32, f32),
     /// Whether we have fire resistance, for the lava fog distance.
     pub fire_resistance: bool,
     /// `BossHealthOverlay.shouldCreateWorldFog()`, for the thick boss fog.
@@ -405,6 +412,10 @@ pub(super) fn publish(
     view.has_position = s.player.has_position;
     view.feet = feet;
     view.pose = player_pose(s);
+    view.bb = (
+        s.player.attrs.box_width() as f32,
+        s.player.attrs.height_for(s.player.state.pose) as f32,
+    );
     let lm = &s.lightmap;
     view.lightmap_flicker = lm.flicker;
     view.lightmap_night_vision = lm.night_vision;

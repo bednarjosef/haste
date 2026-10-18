@@ -323,4 +323,36 @@ fn loads_the_data_generator_attribute_modifiers() {
     assert_eq!((apple.animation, apple.consume_ticks()), (1, 32));
     let potion = c.consumable(&attr("potion")).expect("potion consumable");
     assert_eq!(potion.animation, 2);
+    // Every item carries `minecraft:use_effects` (`UseEffects.DEFAULT`), the spear family
+    // overrides it (`Item.Properties.spear`).
+    assert_eq!(c.use_effects(&attr("bow")), UseEffects::DEFAULT);
+    assert_eq!(
+        c.use_effects(&attr("wooden_spear")),
+        UseEffects {
+            can_sprint: true,
+            interact_vibrations: false,
+            speed_multiplier: 1.0
+        }
+    );
+}
+
+#[test]
+fn parses_the_use_effects_component() {
+    let parse = super::use_effects::parse_use_effects;
+    // `{}`: every field at its default (`UseEffects.DEFAULT`).
+    assert_eq!(parse(&serde_json::json!({})), UseEffects::DEFAULT);
+    assert_eq!(
+        parse(&serde_json::json!({
+            "can_sprint": true, "interact_vibrations": false, "speed_multiplier": 1.0
+        })),
+        UseEffects {
+            can_sprint: true,
+            interact_vibrations: false,
+            speed_multiplier: 1.0
+        }
+    );
+    // A missing item (or one without the component) falls back to the default, like
+    // vanilla's `getOrDefault(USE_EFFECTS, UseEffects.DEFAULT)`.
+    let c = ItemComponents::default();
+    assert_eq!(c.use_effects(&attr("wooden_spear")), UseEffects::DEFAULT);
 }

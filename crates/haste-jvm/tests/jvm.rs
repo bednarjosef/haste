@@ -2369,6 +2369,25 @@ fn sign_editor_screen() {
         "title: {:?}",
         texts(&f)
     );
+    // the board is drawn at the pose scale, not at its unscaled 24x26 texture size
+    // (SignEditScreen.extractSignBackground: pose scale 3.9 over the 24-wide board texture)
+    let board = f
+        .commands
+        .iter()
+        .find_map(|c| match c {
+            haste_core::gui::GuiCommand::Texture { texture, x, w, .. }
+                if texture.path().starts_with("textures/gui/signs/") =>
+            {
+                Some((*x, *w))
+            }
+            _ => None,
+        })
+        .expect("sign board texture");
+    assert_eq!(board.1, 94, "board width scaled by 3.9: {board:?}");
+    assert!(
+        (-50..=-40).contains(&board.0),
+        "board left edge around -47 (was -12 unscaled): {board:?}"
+    );
     // typing fills line 0; Down moves to line 1 and typing fills that
     type_text(&h, "first line");
     assert!(
@@ -2666,6 +2685,25 @@ fn hanging_sign_editor_screen() {
     assert!(
         textures.iter().any(|t| t.contains("hanging_signs/oak")),
         "hanging sign texture: {textures:?}"
+    );
+    // the board is drawn at the pose scale, not at its unscaled 16x16 texture size
+    // (HangingSignEditScreen.extractSignBackground: pose scale 4.5 over the 16-wide board texture)
+    let board = f
+        .commands
+        .iter()
+        .find_map(|c| match c {
+            haste_core::gui::GuiCommand::Texture { texture, x, w, .. }
+                if texture.path().starts_with("textures/gui/hanging_signs/") =>
+            {
+                Some((*x, *w))
+            }
+            _ => None,
+        })
+        .expect("hanging sign board texture");
+    assert_eq!(board.1, 72, "board width scaled by 4.5: {board:?}");
+    assert!(
+        (-40..=-30).contains(&board.0),
+        "board left edge around -36 (was -8 unscaled): {board:?}"
     );
     let unimpl = h.unimplemented().unwrap();
     assert!(

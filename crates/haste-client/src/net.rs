@@ -90,6 +90,12 @@ pub struct Session {
     /// server sent one, else the static one from the data generator reports): resolves the
     /// vehicle's type index to its name, for the passenger seat offset.
     pub entity_type_names: Vec<Identifier>,
+    /// The pickup particles (`take_item_entity`): the collected item/orb flying to the
+    /// collector for three ticks. Ticked here, published to the render thread each tick.
+    pub pickup_particles: Vec<crate::net::pickup::PickupParticle>,
+    /// The random vanilla's `ClientPacketListener.random` draws the pickup pitch and sound
+    /// seed from.
+    pickup_rng: haste_audio::random::LegacyRandom,
     /// Sound packets recorded this tick ([`crate::sound::record`]), drained by the game
     /// thread's sound output ([`crate::sound::Sounds::apply`]); cleared at `end_tick` when
     /// nobody drains them (headless). Reused, so a tick without sound packets allocates
@@ -207,6 +213,8 @@ impl Session {
             world_age: 0,
             new_world_pending: false,
             entity_type_names: Vec::new(),
+            pickup_particles: Vec::new(),
+            pickup_rng: Session::new_pickup_rng(),
             sound_requests: Vec::new(),
             screen: crate::screen_effects::PortalEffects::default(),
             screen_probe: crate::screen_effects::WorldProbe::default(),
@@ -455,10 +463,12 @@ mod driver;
 mod effects;
 mod entities;
 mod fov;
+mod item_world;
 mod lightmap;
 mod misc;
 pub(crate) mod pack_prompt;
 mod particles;
+pub mod pickup;
 mod player_state;
 mod registries;
 mod session_tick;
