@@ -90,3 +90,6 @@ fn instance(p: &PickupParticle, partial: f32) -> EntityInstance {
         head_item: None,
     }
 }
+
+#[cfg(test)]
+mod tests;
