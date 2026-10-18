@@ -535,4 +535,6 @@ impl LocalPlayer {
 }
 
 #[cfg(test)]
+mod spectator_tests;
+#[cfg(test)]
 mod tests;

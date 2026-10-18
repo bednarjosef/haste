@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use glam::DVec3;
-use haste_protocol::haste_core::gui::{GuiCommand, GuiFrame};
+use haste_protocol::haste_core::gui::GuiFrame;
 use haste_protocol::haste_core::input::InputState;
 use haste_protocol::haste_core::model::EntityInstance;
 use haste_protocol::haste_core::{
@@ -46,6 +46,7 @@ use weather_columns::{extract_weather, WeatherColumnCache};
 use crate::game::{self, Shared};
 use crate::net::{self, NetDriver};
 use crate::script;
+use crate::script_frame::log_script_frame;
 use crate::ui::keys;
 use crate::Args;
 use haste_jvm::JvmHost;
@@ -2478,33 +2479,6 @@ fn mouse_button_id(button: script::MouseButton) -> i32 {
         script::MouseButton::Middle => 2,
         script::MouseButton::Right => 3,
     }
-}
-
-/// Prints the text, item and HUD-sprite facts of a script screenshot's frame. The check scripts
-/// grep these lines as evidence instead of opening the PNGs.
-fn log_script_frame(frame: &GuiFrame, name: &str, item_names: &[Identifier]) {
-    let mut hotbar = false;
-    let mut items = Vec::new();
-    for c in &frame.commands {
-        match c {
-            GuiCommand::Text { text, .. } | GuiCommand::StyledText { text, .. } => {
-                println!("script text[{name}]: {text}");
-            }
-            GuiCommand::Sprite { sprite, .. } if sprite.path() == "hud/hotbar" => hotbar = true,
-            GuiCommand::Item { item, .. } => {
-                // The item's registry name (creative inventory checks grep for these).
-                if let Some(id) = item_names.get(item.0 as usize) {
-                    items.push(id.to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    println!(
-        "script frame[{name}]: hotbar={}, items=[{}]",
-        if hotbar { "yes" } else { "no" },
-        items.join(",")
-    );
 }
 
 /// `--script FILE`: with `--server`, join like `--screenshot` and drive the parsed script's
