@@ -2,6 +2,7 @@
 //! chat's tick (screens, inventory and option changes, the pack prompt) with this tick's UI
 //! output packets.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use haste_protocol::ServerboundPlay;
@@ -14,7 +15,7 @@ use crate::ui::Ui;
 /// Once the JVM arrives (the session joined before the game thread started): build the
 /// `Ui` and give the JVM the registries, tags and the local player. Menu mode's UI arrives
 /// pre-built (its JVM opened the title screen); only `joined` runs for it.
-pub(super) fn take_arrival(driver: &mut NetDriver, shared: &Shared, jvm: &mut HudSlot) {
+pub(super) fn take_arrival(driver: &mut NetDriver, shared: &Arc<Shared>, jvm: &mut HudSlot) {
     if let Some(ui) = jvm.take_ui() {
         let mut created = false;
         {
@@ -24,6 +25,9 @@ pub(super) fn take_arrival(driver: &mut NetDriver, shared: &Shared, jvm: &mut Hu
                     HudArrival::Fresh(host) => Ui::new(host),
                     HudArrival::Menu(ui) => ui,
                 };
+                // The UI's input events (a container click) send at once from here on, the
+                // way vanilla's `Connection.send` runs inside the input handler.
+                super::run::wire_immediate_sender(&ui, shared);
                 let t = Instant::now();
                 match ui.joined(
                     driver.connection(),

@@ -56,6 +56,9 @@ impl Ui {
         let gui = self.gui();
         if gui.is_open() {
             gui.key(key, keycode, mods, pressed);
+            // Vanilla code the keypress made send (E or Escape closing a container sends
+            // `container_close`) leaves at once, like `Connection.send` inside the event.
+            self.send_screen_packets_now();
             return true;
         }
         // No screen: vanilla's `KeyboardHandler.keyPress` sets the `KeyMapping`s (`handlesGameInput`),
@@ -121,6 +124,9 @@ impl Ui {
             return false;
         }
         gui.mouse(x, y, Some((button, pressed)));
+        // What the click made the screen send (a `container_click`) leaves at once, like
+        // vanilla's `Connection.send` inside the event handler.
+        self.send_screen_packets_now();
         true
     }
 
