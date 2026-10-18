@@ -24,6 +24,19 @@ public final class Bridge {
     private int pressedButton = -1;
     private double lastX, lastY;
 
+    /** Vanilla's MouseHandler.LastClick record: time (Util.getMillis), screen, button. */
+    private static final class LastClick {
+        final long time;
+        final Object screen;
+        final int button;
+        LastClick(long time, Object screen, int button) {
+            this.time = time;
+            this.screen = screen;
+            this.button = button;
+        }
+    }
+    private LastClick lastClick;
+
     private Bridge() {}
 
     /** How long vanilla's bootstrap took (ms). */
@@ -109,6 +122,7 @@ public final class Bridge {
         this.pressedButton = -1;
         this.lastX = 0.0;
         this.lastY = 0.0;
+        this.lastClick = null;
         MouseImpl.pressed = -1;
         MouseImpl.x = 0.0;
         MouseImpl.y = 0.0;
@@ -367,13 +381,74 @@ public final class Bridge {
         boolean r;
         if (pressed) {
             pressedButton = button;
-            r = s.mouseClicked(e, false);
+            // vanilla MouseHandler.onButton: double click when the previous click this screen
+            // accepted was < 250 ms ago, on the same screen object, with the same button.
+            s.afterMouseAction();
+            long currentTime = net.minecraft.util.Util.getMillis();
+            boolean doubleClick = this.lastClick != null
+                && currentTime - this.lastClick.time < 250L
+                && this.lastClick.screen == s
+                && this.lastClick.button == button;
+            r = s.mouseClicked(e, doubleClick);
+            if (r) {
+                this.lastClick = new LastClick(currentTime, s, button);
+            }
         } else {
             pressedButton = -1;
             r = s.mouseReleased(e);
         }
         InventorySync.sync();
         return r;
+    }
+
+    /** Whether {@code screen/button/now} is a double click under the vanilla rule (no mutation). */
+    private boolean isDoubleClick(Object screen, int button, long now) {
+        return this.lastClick != null
+            && now - this.lastClick.time < 250L
+            && this.lastClick.screen == screen
+            && this.lastClick.button == button;
+    }
+
+    /** Records a click that the screen accepted, as vanilla does only on a true result. */
+    private void recordClick(Object screen, int button, long now) {
+        this.lastClick = new LastClick(now, screen, button);
+    }
+
+    /**
+     * Self-test of the vanilla double-click rule (no cache/UI needed beyond the JVM). Returns
+     * true when all assertions hold.
+     */
+    public static boolean doubleClickRuleSelfTest() {
+        Bridge b = new Bridge();
+        Object s = new Object();
+        long t0 = net.minecraft.util.Util.getMillis();
+        if (b.isDoubleClick(s, 1, t0)) return false; // first click: no previous -> not double
+        // first click rejected: record is NOT updated, so a later click is not a double
+        {
+            Bridge b2 = new Bridge();
+            Object s2 = new Object();
+            long a = net.minecraft.util.Util.getMillis();
+            // rejected: do not record
+            if (b2.isDoubleClick(s2, 1, a)) return false;
+            try { Thread.sleep(100); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+            long c = net.minecraft.util.Util.getMillis();
+            if (b2.isDoubleClick(s2, 1, c)) return false; // would be double only if recorded
+        }
+        // accepted first click records
+        b.recordClick(s, 1, t0);
+        try { Thread.sleep(100); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+        long t1 = net.minecraft.util.Util.getMillis();
+        if (!b.isDoubleClick(s, 1, t1)) return false; // 100 ms -> double
+        // 300 ms apart -> not double
+        b.recordClick(s, 1, t1);
+        try { Thread.sleep(300); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+        long t2 = net.minecraft.util.Util.getMillis();
+        if (b.isDoubleClick(s, 1, t2)) return false;
+        // different button -> not double
+        b.recordClick(s, 1, t2);
+        long t3 = net.minecraft.util.Util.getMillis();
+        if (b.isDoubleClick(s, 2, t3)) return false;
+        return true;
     }
 
     public boolean scroll(double x, double y, double dx, double dy) {
