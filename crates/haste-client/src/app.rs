@@ -4015,9 +4015,9 @@ impl App {
         // The windowed bench's sample: recorded once the still camera is held (the settle
         // frames before it are warm-up, not measurements). The run ends with the window.
         if let (Some(bench), Ok(stats)) = (&mut self.bench, &result) {
-            if let Some(started) = bench.started {
+            if bench.started.is_some() {
                 let prev_drawn = bench.samples.last().map_or(0, |s| s.sections_drawn);
-                bench.record(BenchSample {
+                let sample = BenchSample {
                     frame_ms: stats.frame_ms,
                     sections_drawn: stats.chunk_sections_drawn,
                     sections_total: stats.chunk_sections_total,
@@ -4029,10 +4029,8 @@ impl App {
                     upload_bytes: stats.upload_bytes,
                     indices_drawn: stats.indices_drawn,
                     index: bench.samples.len() as u32,
-                });
-                if started.elapsed().as_secs_f32() >= bench.seconds {
-                    self.quitting = true;
-                }
+                };
+                self.quitting |= bench.record(sample, session, renderer);
             } else if bench.camera.is_some() {
                 bench.started = Some(Instant::now());
             }
