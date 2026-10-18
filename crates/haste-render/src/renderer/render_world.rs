@@ -35,6 +35,7 @@ impl Renderer {
             frame.camera.pos,
             &entity_frustum,
             &mut self.assets,
+            self.view_scale,
         );
         {
             // The hand is drawn in view space: vanilla's `renderItemInHand` multiplies the

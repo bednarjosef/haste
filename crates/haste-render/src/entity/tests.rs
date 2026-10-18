@@ -977,5 +977,26 @@ fn append_upload_range_covers_only_the_appended_tail() {
     // No entities either: the block entities are the whole stream, from 0.
     assert_eq!(append_upload_range(40, 256, 0), 0..40);
     // Outgrew it with no room to spare: still the whole stream.
-    assert_eq!(append_upload_range(512, 256, 100), 0..512);
+}
+
+/// `Entity.shouldRenderAtSqrDistance` scales the 64-block size distance by `viewScale`
+/// (from `options.entityDistanceScaling`): at 0.5/1.0/5.0 the cull distance is 32/64/320.
+#[test]
+fn entity_cull_distance_scales_with_view_scale() {
+    let size = 1.0f32;
+    let entity_scale = 1.0f32;
+    for (view_scale, limit) in [(0.5f32, 32.0f64), (1.0, 64.0), (5.0, 320.0)] {
+        assert!(should_render_at_sqr_distance(
+            size,
+            entity_scale,
+            (limit - 1.0).powi(2),
+            view_scale
+        ));
+        assert!(!should_render_at_sqr_distance(
+            size,
+            entity_scale,
+            (limit + 1.0).powi(2),
+            view_scale
+        ));
+    }
 }

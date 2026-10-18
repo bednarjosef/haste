@@ -360,6 +360,9 @@ pub struct Renderer {
     nametags: Vec<crate::gui::ScreenNametag>,
     /// Vanilla `Options.entityShadows`: draw the round entity shadows (default on).
     entity_shadows: bool,
+    /// Vanilla `Entity.viewScale` multiplier for entity render distance (from
+    /// `options.entityDistanceScaling`, 0.5..=5.0, default 1.0).
+    view_scale: f32,
     /// F2 screenshot requested: the next `render` arms the capture for `take_capture`.
     capture_pending: bool,
     /// In-flight screenshot readback (copy submitted, async map pending) until
