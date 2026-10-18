@@ -62,9 +62,12 @@ fn dinnerbone_is_upside_down() {
         .find(|(id, _)| haste_core::parts::name_of(*id) == "head")
         .map(|(_, r)| r)
         .unwrap();
+    // The head pitch is the look interpolated by the partial tick
+    // (`state.xRot = entity.getXRot(partialTicks)`): at partial 0 that is `xRotO`, the
+    // rotation one step into the 3-tick ease (20 of the 30 degrees), negated for the flip.
     assert!(
-        (head.x - -30.0f32.to_radians()).abs() < 1e-5,
-        "upside-down head pitch {} != -30 deg",
+        (head.x - -20.0f32.to_radians()).abs() < 1e-5,
+        "upside-down head pitch {} != -20 deg",
         head.x
     );
     // A name that is not Dinnerbone/Grumm leaves it upright.

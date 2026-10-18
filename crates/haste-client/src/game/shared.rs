@@ -55,6 +55,11 @@ pub struct Shared {
     pub world_version: AtomicU64,
     /// Per-frame view values.
     pub view: Mutex<ViewState>,
+    /// The local player's own model state (the server never spawns us as a tracked entity):
+    /// ticked per tick by the game thread ([`super::player_model::tick`]) from the client's
+    /// own state, drawn by the render thread through the same `setupAnim`/`setupRotations`
+    /// path a remote player takes. Short lock, same pattern as [`Shared::view`].
+    pub local_model: Mutex<haste_entity::Entity>,
     /// Break cracks to draw (`Session::breaking_stages`), copied once per tick.
     pub breaking: Mutex<Vec<(BlockPos, u8)>>,
     /// The pickup particles (`take_item_entity`), copied once per tick from the session; the
@@ -182,12 +187,14 @@ pub struct PackReload {
 
 impl Shared {
     /// Shared state for a fresh connection. `block_entity_names` are the
-    /// `minecraft:block_entity_type` names by synced id (see [`Shared::block_entity_names`]).
+    /// `minecraft:block_entity_type` names by synced id (see [`Shared::block_entity_names`]);
+    /// `local` is our own entity id and profile id, for the own model state.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         data: Arc<GameData>,
         world: World,
         entities: EntityStore,
+        local: (haste_core::EntityId, uuid::Uuid),
         view_distance: i32,
         particles: haste_render::Particles,
         skins: skins::SkinManager,
@@ -202,6 +209,13 @@ impl Shared {
             entities: RwLock::new(entities),
             dirty: Mutex::new(Vec::new()),
             world_version: AtomicU64::new(0),
+            local_model: Mutex::new(haste_entity::Entity::local_player(
+                local.0,
+                local.1,
+                DVec3::ZERO,
+                0.0,
+                0.0,
+            )),
             view: Mutex::new(ViewState {
                 prev_eye: DVec3::ZERO,
                 eye: DVec3::ZERO,
