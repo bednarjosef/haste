@@ -207,6 +207,12 @@ pub struct Interaction {
     recent: Vec<BlockPos>,
     /// The screen the last use opened (see [`UsedScreen`]), until the game thread takes it.
     used_screen: Option<UsedScreen>,
+    /// Whether a screen is open (the game thread sets it from the UI). While one is,
+    /// vanilla skips `Minecraft.handleKeybinds` entirely (`Minecraft.tick` only runs it
+    /// with no screen, and pins `missTime` to 10000): no clicks, no held use, no
+    /// continueAttack — a running break and an item use hang until the screen closes
+    /// (`KeyMapping.releaseAll` ran at the open, so the close tick releases and aborts).
+    pub(crate) screen_open: bool,
 }
 
 /// A screen a use opened (vanilla opens these in `MultiPlayerGameMode.performUseItemOn` /
@@ -395,6 +401,14 @@ impl LocalPlayer {
     /// This tick's mouse buttons and hotbar selection (applied inside the next tick).
     pub fn set_interact(&mut self, input: InteractInput) {
         self.int.input = input;
+    }
+
+    /// Whether a screen is open this tick (the game thread reads it off the UI). While one
+    /// is, `Minecraft.handleKeybinds` does not run: the clicks, the held use,
+    /// `continueAttack` (so a running break hangs) and the keybind-driven pick and drop
+    /// are all skipped until the screen closes.
+    pub fn set_screen_open(&mut self, open: bool) {
+        self.int.screen_open = open;
     }
 
     /// Whether we are scoping with a spyglass this tick: vanilla's `Player.isScoping` (using an

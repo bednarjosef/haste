@@ -1202,11 +1202,15 @@ fn tick_once(
         // Held buttons stay; the press-only middle click, drop/swap presses and the hotbar choice
         // are consumed.
         let mut interact = shared_input.interact;
-        // Vanilla runs `Minecraft.handleKeybinds` (the attack/use clicks and the held use)
-        // only with no screen open (`Minecraft.tick`: `if (gui.overlay() == null &&
-        // gui.screen() == null)`). A screen taking the mouse also owns the buttons: a use
-        // held from before the screen opened must not keep firing (it would re-open the
-        // container the screen shows, server-side).
+        // Vanilla runs `Minecraft.handleKeybinds` (the attack/use clicks, the held use,
+        // `continueAttack` and the keybind picks and drops) only with no screen open
+        // (`Minecraft.tick`: `if (gui.overlay() == null && gui.screen() == null)`): the
+        // player skips the whole key handling below while one is, so a running break and
+        // an item use hang until the screen closes (`set_screen_open`). A screen taking the
+        // mouse also owns the buttons (`KeyMapping.releaseAll` at the open): the held state
+        // is zeroed, so the close tick releases a use and aborts a break, never repeats
+        // them.
+        driver.session.player.set_screen_open(screen_open);
         let attack_clicks;
         let use_clicks;
         if screen_open {

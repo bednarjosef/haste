@@ -2096,3 +2096,62 @@ fn a_teleport_aborts_the_break_and_reports_its_position() {
         .collect();
     assert_eq!(names, ["abort", "accept", "pos"], "{names:?}");
 }
+
+/// A screen open skips `Minecraft.handleKeybinds` entirely (`Minecraft.tick` runs it only
+/// with no screen, and pins missTime to 10000): a running break hangs — no abort, the
+/// progress stays — and the use's remaining time keeps ticking (`LivingEntity.tick` runs
+/// with a screen open). On the close tick `KeyMapping.releaseAll` has cleared the buttons,
+/// so `continueAttack(false)` aborts the break and a use releases.
+#[test]
+fn a_screen_open_leaves_the_break_hanging_until_it_closes() {
+    let mut r = Rig::new(GameMode::Survival);
+    let out = r.tick(ATTACK);
+    assert_eq!(actions(&out), [(action::START_DESTROY, 1)]);
+    // The screen opens with the button held (vanilla's releaseAll is the game thread's
+    // zeroing; here the flag alone): nothing about the break, no abort.
+    r.p.set_screen_open(true);
+    let out = r.tick(ATTACK);
+    assert!(out.is_empty(), "{out:?}");
+    assert!(
+        r.p.break_progress().is_some(),
+        "the break hangs while the screen is open"
+    );
+    let progress = r.p.break_progress().unwrap().1;
+    for _ in 0..10 {
+        assert!(r.tick(ATTACK).is_empty());
+    }
+    // The progress froze (continueDestroyBlock does not run), it did not vanish.
+    assert_eq!(r.p.break_progress().unwrap().1, progress);
+    // The close tick, buttons released (the game thread zeroed them at the open): the
+    // abort with DOWN, exactly once, and no restart.
+    r.p.set_screen_open(false);
+    let out = r.tick(InteractInput::default());
+    assert_eq!(actions(&out), [(action::ABORT_DESTROY, 0)]);
+    assert!(r.p.break_progress().is_none());
+    // A use hangs the same way: no release while the screen is open, released on close.
+    let mut r = hungry(GameMode::Survival);
+    r.p.int.hotbar[0] = item(4); // apple
+    r.w = TestWorld::new();
+    let use_ = InteractInput {
+        use_item: true,
+        ..Default::default()
+    };
+    r.tick(use_);
+    assert!(r.p.is_using_item());
+    r.p.set_screen_open(true);
+    let out = r.tick(use_);
+    assert!(out.is_empty(), "no release while the screen is open");
+    assert!(r.p.is_using_item(), "the use hangs");
+    let remaining = r.p.use_item_remaining();
+    r.tick(use_);
+    assert!(
+        r.p.use_item_remaining() < remaining,
+        "the use's time still ticks with a screen open"
+    );
+    r.p.set_screen_open(false);
+    // The buttons were released at the open (the game thread zeroed them): the close tick
+    // sees them up.
+    let out = r.tick(InteractInput::default());
+    assert_eq!(actions(&out), [(action::RELEASE_USE_ITEM, 0)]);
+    assert!(!r.p.is_using_item());
+}

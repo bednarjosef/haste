@@ -65,19 +65,30 @@ impl LocalPlayer {
             env.entity_types,
         );
 
-        // 3. Minecraft.handleKeybinds: the click loops, the held use, then continueAttack.
-        // `KeyMapping.consumeClick` returns once per queued press, so several clicks in one tick
-        // each run. A driver that only reports the held button (no click queue) still gets one
-        // click on the press edge, as consumeClick would on a fresh press.
-        let mut attack_clicks = std::mem::take(&mut self.int.attack_clicks);
-        let mut use_clicks = std::mem::take(&mut self.int.use_clicks);
-        if attack_clicks == 0 && input.attack && !last.attack {
-            attack_clicks = 1;
-        }
-        if use_clicks == 0 && input.use_item && !last.use_item {
-            use_clicks = 1;
-        }
+        // 3. Minecraft.handleKeybinds: the click loops, the held use, then continueAttack —
+        // skipped entirely while a screen is open (`Minecraft.tick` runs it only with no
+        // screen, and pins missTime to 10000): a running break and an item use hang until
+        // the screen closes (`KeyMapping.releaseAll` ran at the open, so the close tick
+        // releases the use and aborts the break). The use's remaining time still ticks
+        // (vanilla's `LivingEntity.tick` runs with a screen open, below).
+        let screen_open = self.int.screen_open;
+        let mut attack_clicks = 0;
+        let mut use_clicks = 0;
         let mut instant_attack = false;
+        if !screen_open {
+            // `KeyMapping.consumeClick` returns once per queued press, so several clicks in
+            // one tick each run. A driver that only reports the held button (no click
+            // queue) still gets one click on the press edge, as consumeClick would on a
+            // fresh press.
+            attack_clicks = std::mem::take(&mut self.int.attack_clicks);
+            use_clicks = std::mem::take(&mut self.int.use_clicks);
+            if attack_clicks == 0 && input.attack && !last.attack {
+                attack_clicks = 1;
+            }
+            if use_clicks == 0 && input.use_item && !last.use_item {
+                use_clicks = 1;
+            }
+        }
         // A use the server's synced flags started (`LivingEntity.onSyncedDataUpdated`): the
         // held item of that hand and its duration.
         if let Some(hand) = self.int.pending_use_hand.take() {
@@ -95,14 +106,16 @@ impl LocalPlayer {
             // While an item is in use the clicks are consumed and do nothing; releasing the
             // button releases the item (MultiPlayerGameMode.releaseUsingItem), and a different
             // item in the hand stops the use without a packet
-            // (`LivingEntity.updatingUsingItem`).
-            if !input.use_item {
+            // (`LivingEntity.updatingUsingItem`). With a screen open the use hangs: the
+            // release (`!keyUse.isDown()` after releaseAll) only leaves on the close tick.
+            if !screen_open && !input.use_item {
                 self.release_using_item(out);
-            } else if self
-                .int
-                .using
-                .as_ref()
-                .is_some_and(|u| self.main_hand().item != u.item)
+            } else if !screen_open
+                && self
+                    .int
+                    .using
+                    .as_ref()
+                    .is_some_and(|u| self.main_hand().item != u.item)
             {
                 self.int.using = None;
                 self.int.is_using_item = false;
@@ -119,7 +132,7 @@ impl LocalPlayer {
         }
 
         // if (keyUse.isDown() && rightClickDelay == 0 && !player.isUsingItem()) startUseItem();
-        if input.use_item && self.int.use_delay == 0 && !self.int.is_using_item {
+        if !screen_open && input.use_item && self.int.use_delay == 0 && !self.int.is_using_item {
             self.start_use_item(look, sneak_key, world, env, out);
         }
 
@@ -130,20 +143,23 @@ impl LocalPlayer {
             self.int.using = Some(u);
         }
 
-        // continueAttack(screen == null && !instantAttack && keyAttack.isDown() && grabbed).
-        if !instant_attack {
+        // continueAttack(screen == null && !instantAttack && keyAttack.isDown() && grabbed):
+        // it lives inside handleKeybinds, so a screen open means it is not called at all —
+        // the break hangs (progress frozen) until the close tick's continueAttack(false).
+        if !screen_open && !instant_attack {
             self.continue_attack(input.attack, world, env, out);
         }
 
-        // Minecraft.tick(): missTime-- after the key handling.
-        if self.int.miss_time > 0 {
+        // Minecraft.tick(): missTime-- after the key handling (with a screen open the
+        // missTime is pinned instead, but continueAttack and startAttack do not run either).
+        if !screen_open && self.int.miss_time > 0 {
             self.int.miss_time -= 1;
         }
 
         // 4. Pick block (handleKeybinds: the keyPickItem loop). `Minecraft.pickBlockOrEntity`
         // passes `hasControlDown()` as `include_data` (Ctrl + middle click copies block-entity
         // data in creative).
-        if input.pick_block && !last.pick_block {
+        if !screen_open && input.pick_block && !last.pick_block {
             let include_data = input.pick_block_ctrl;
             match self.int.target {
                 Some(Target::Block(h)) => {
@@ -165,7 +181,7 @@ impl LocalPlayer {
         // loops run independently (all three in one tick is a drop, a stack drop and a swap);
         // gated on !isSpectator, not health. No target, pos and face zeroed as vanilla sends
         // it; the server answers with the slot updates.
-        if self.game_mode != GameMode::Spectator {
+        if !screen_open && self.game_mode != GameMode::Spectator {
             if input.drop_stack && !last.drop_stack {
                 self.drop_item(true, out);
             }
