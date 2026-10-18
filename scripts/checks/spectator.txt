@@ -1,0 +1,26 @@
+# Spectator mode (user bug 20): forced flight, the scroll wheel's fly speed, no HUD vitals
+# and no in-block overlay inside the ground. The runner makes the player a spectator and
+# teleports it into solid stone between the setup and the flight screenshots.
+wait_until joined
+wait_until settled
+screenshot spec-setup
+# The runner's window: spectator mode, the teleport into solid stone and the stone cube
+# around it (the fill loads the area's chunks, which takes a while).
+wait 100
+# Flying forward inside the stone (the default 0.05 fly speed): the runner samples the
+# server-side position around this screenshot.
+key_down W
+wait 60
+screenshot spec-inside-ground
+key_up W
+# The scroll wheel all the way down: the fly speed is 0, the same hold barely moves.
+scroll -20
+wait 5
+key_down W
+wait 60
+screenshot spec-fly-slow
+key_up W
+wait 5
+# The spectator HUD (the spectator hotbar, no hearts, no hunger).
+screenshot spec-hotbar
+wait 20

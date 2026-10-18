@@ -65,7 +65,8 @@ pub(crate) fn pose_rotation(pose: &PoseOverrides, id: PartId) -> Option<Vec3> {
 }
 
 /// The accumulated model matrix of a named part, the same transform `emit_part` gives it
-/// (`parent * translate(pivot) * R(z) R(y) R(x)`, pose overrides added to the base rotation), so
+/// (`parent * translate(pivot) * R(z) R(y) R(x)`, pose overrides added to the base rotation and
+/// pivot), so
 /// a held item attaches to the animated arm (vanilla `ArmedModel.translateToHand`). `None` when
 /// the model has no such part.
 pub(crate) fn part_matrix(
@@ -75,8 +76,9 @@ pub(crate) fn part_matrix(
     id: PartId,
 ) -> Option<Mat4> {
     let rot = part.rotation + pose_rotation(pose, part.id).unwrap_or(Vec3::ZERO);
+    let pivot = part.pivot + pose.offset_of(part.id).unwrap_or(Vec3::ZERO);
     let m = parent
-        * Mat4::from_translation(part.pivot)
+        * Mat4::from_translation(pivot)
         * Mat4::from_rotation_z(rot.z)
         * Mat4::from_rotation_y(rot.y)
         * Mat4::from_rotation_x(rot.x);
@@ -89,7 +91,7 @@ pub(crate) fn part_matrix(
 }
 
 /// Child pivots are relative to the parent (vanilla `PartPose`); rotation is Z * Y * X around
-/// the pivot, pose overrides add to the base rotation. `hurt` (0..1) tints the part red;
+/// the pivot, pose overrides add to the base rotation and pivot. `hurt` (0..1) tints the part red;
 /// `tint` multiplies the colour per channel (dyed overlay layers).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_part(
@@ -123,8 +125,9 @@ pub(crate) fn emit_part_tinted(
         return;
     }
     let rot = part.rotation + pose_rotation(pose, part.id).unwrap_or(Vec3::ZERO);
+    let pivot = part.pivot + pose.offset_of(part.id).unwrap_or(Vec3::ZERO);
     let m = parent
-        * Mat4::from_translation(part.pivot)
+        * Mat4::from_translation(pivot)
         * Mat4::from_rotation_z(rot.z)
         * Mat4::from_rotation_y(rot.y)
         * Mat4::from_rotation_x(rot.x);
@@ -254,3 +257,6 @@ pub(crate) fn emit_part_tinted(
         emit_part_tinted(out, model, child, pose, m, rect, light, hurt, tint);
     }
 }
+
+#[cfg(test)]
+mod tests;

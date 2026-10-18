@@ -31,6 +31,90 @@ pub const MAIN_SUBPASSES: [&str; 8] = [
     "overlays",
 ];
 
+/// Sub-pass indices within [`MAIN_SUBPASSES`].
+pub const SKY: u32 = 0;
+/// The first terrain layer bracket (solid): `close_terrain` closes 1..=4.
+pub const FIRST_LAYER: u32 = 1;
+pub const ENTITIES: u32 = 5;
+pub const PARTICLES: u32 = 6;
+pub const OVERLAYS: u32 = 7;
+
+/// The main pass's sub-pass bracket state: which brackets are open and which ran this frame.
+/// A wgpu query may only be written once per pass, so exactly one bracket per sub-pass; the
+/// terrain layers (1..=4) are layer-major, so a layer change or the entity insertion closes
+/// the open terrain bracket, and the last layer's bracket is closed after the draw loop (it
+/// never sees a layer change). The entities bracket closes right after the entity draws, so
+/// the translucent terrain below is not timed as "entities".
+#[derive(Default)]
+pub struct SubpassBrackets {
+    open: [bool; 8],
+    ran: [bool; 8],
+}
+
+impl SubpassBrackets {
+    /// Opens sub-pass `i`'s bracket. `t` None: no timer this frame, only bookkeeping.
+    pub fn begin(&mut self, pass: &mut wgpu::RenderPass<'_>, t: Option<&GpuTimer>, i: u32) {
+        if let Some(t) = t {
+            t.begin_subpass(pass, i);
+        }
+        self.ran[i as usize] = true;
+        self.open[i as usize] = true;
+    }
+
+    /// Closes sub-pass `i`'s bracket if one is open.
+    pub fn end(&mut self, pass: &mut wgpu::RenderPass<'_>, t: Option<&GpuTimer>, i: u32) {
+        if self.open[i as usize] {
+            if let Some(t) = t {
+                t.end_subpass(pass, i);
+            }
+            self.open[i as usize] = false;
+        }
+    }
+
+    /// Closes any open terrain bracket (the solid..translucent layers, 1..=4).
+    pub fn close_terrain(&mut self, pass: &mut wgpu::RenderPass<'_>, t: Option<&GpuTimer>) {
+        for s in FIRST_LAYER..ENTITIES {
+            self.end(pass, t, s);
+        }
+    }
+
+    /// Begins terrain layer `sub`'s bracket, closing the open terrain bracket first.
+    pub fn begin_terrain_layer(
+        &mut self,
+        pass: &mut wgpu::RenderPass<'_>,
+        t: Option<&GpuTimer>,
+        sub: u32,
+    ) {
+        self.close_terrain(pass, t);
+        self.begin(pass, t, sub);
+    }
+
+    /// Begins the entities bracket after the opaque terrain (vanilla
+    /// `LevelRenderer.renderLevel` draws the entities before the translucent terrain).
+    pub fn begin_entities(&mut self, pass: &mut wgpu::RenderPass<'_>, t: Option<&GpuTimer>) {
+        self.close_terrain(pass, t);
+        self.begin(pass, t, ENTITIES);
+    }
+
+    /// Begins the particles bracket after all terrain and entities.
+    pub fn begin_particles(&mut self, pass: &mut wgpu::RenderPass<'_>, t: Option<&GpuTimer>) {
+        self.close_terrain(pass, t);
+        self.end(pass, t, ENTITIES);
+        self.begin(pass, t, PARTICLES);
+    }
+
+    /// Begins the overlays bracket (weather, clouds) after the particles.
+    pub fn begin_overlays(&mut self, pass: &mut wgpu::RenderPass<'_>, t: Option<&GpuTimer>) {
+        self.end(pass, t, PARTICLES);
+        self.begin(pass, t, OVERLAYS);
+    }
+
+    /// Which sub-passes ran, for `GpuTimer::resolve`.
+    pub fn ran(&self) -> [bool; 8] {
+        self.ran
+    }
+}
+
 /// One frame's timings in milliseconds.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FrameTimings {

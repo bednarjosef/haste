@@ -44,6 +44,7 @@ mod piston;
 mod shulker;
 mod sign;
 mod skull;
+mod view_distance;
 
 pub use anim::BlockEntityAnim;
 pub(crate) use banner::emit_banner;
@@ -90,9 +91,11 @@ use sign::BLACK_TEXT_OUTLINE_COLOR;
 pub use sign::{sign_dark_color, sign_glow_color, sign_line_metrics_pub, DYE_DIFFUSE_COLOR};
 pub(crate) use sign::{sign_line_metrics, sign_text_transform};
 use skull::skull_kind_of;
+
 pub use skull::{skull_dragon_jaw_rotation, skull_piglin_ear_rotations, skull_texture, SkullKind};
 #[cfg(test)]
 use skull::{skull_model, skull_root};
+pub use view_distance::within_view_distance;
 
 #[cfg(test)]
 mod tests;
