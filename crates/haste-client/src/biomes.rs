@@ -4,7 +4,12 @@
 //! and optional `grass_color`, `foliage_color`, `dry_foliage_color` (an int, or a `#rrggbb`
 //! string as in the data pack JSON) and `grass_color_modifier` (`none`, `dark_forest`, `swamp`).
 
-use haste_protocol::haste_core::{BiomeId, BlockPos, Identifier};
+// `biomes.rs` is included through a `#[path]` module, so its submodules resolve next to it
+// in `src/`, not in `src/biomes/` — point zoom at its file explicitly.
+#[path = "biomes/zoom.rs"]
+pub mod zoom;
+
+use haste_protocol::haste_core::{BiomeId, BlockPos, ChunkPos, Identifier};
 use haste_protocol::nbt::NbtCompound;
 use haste_protocol::SyncedRegistries;
 use haste_render::{BiomeClimate, BiomeFog, GrassModifier};
@@ -15,16 +20,14 @@ pub struct WorldBiomes<'a>(pub &'a haste_world::World);
 
 impl haste_render::BiomeSource for WorldBiomes<'_> {
     fn biome(&self, pos: BlockPos) -> BiomeId {
+        // Vanilla `BiomeManager.getBiome`: the fiddled nearest corner's cell, which can be
+        // one quart cell off the block's own in each axis (crossing a section or chunk
+        // border; 0 where that neighbour is not loaded).
+        let (qx, qy, qz) = zoom::zoomed_cell(self.0.biome_zoom_seed(), pos.x, pos.y, pos.z);
         self.0
-            .chunk(pos.chunk())
-            .and_then(|c| c.section(pos.y >> 4))
-            .map(|s| {
-                s.biome(
-                    ((pos.x & 15) >> 2) as u8,
-                    ((pos.y & 15) >> 2) as u8,
-                    ((pos.z & 15) >> 2) as u8,
-                )
-            })
+            .chunk(ChunkPos::new(qx >> 2, qz >> 2))
+            .and_then(|c| c.section(qy >> 2))
+            .map(|s| s.biome((qx & 3) as u8, (qy & 3) as u8, (qz & 3) as u8))
             .unwrap_or(BiomeId(0))
     }
 }
