@@ -411,6 +411,47 @@ fn mining_hit_and_break_volume_pitch_factors() {
     assert!((break_p - 1.2).abs() < 1e-6, "break pitch {break_p}");
 }
 
+/// A server `level_event` plays its sound at the block centre (vanilla
+/// `Level.playLocalSound(BlockPos, ...)`): 2001 the break sound with
+/// `(v+1)/2`, `p*0.8`, 2020 the hit sound with `(v+1)/8`, `p*0.5`. Any other
+/// event is silent, and `intentionally_empty` plays nothing.
+#[test]
+fn level_events_play_the_block_sound_at_its_centre() {
+    let pos = haste_core::BlockPos::new(10, 64, -5);
+    let mut metal = stone_type();
+    metal.volume = 1.0;
+    metal.pitch = 1.5;
+    let mut requests = Vec::new();
+    level_event_sound(2020, pos, &metal, &mut requests);
+    level_event_sound(2001, pos, &metal, &mut requests);
+    level_event_sound(2019, pos, &metal, &mut requests);
+    assert_eq!(requests.len(), 2, "only 2020 and 2001 play a sound");
+    let (hit_name, hit_v, hit_p) = step_request(&requests[0]);
+    assert_eq!(hit_name, "minecraft:block.stone.hit");
+    assert!((hit_v - 2.0 / 8.0).abs() < 1e-6, "hit volume {hit_v}");
+    assert!((hit_p - 0.75).abs() < 1e-6, "hit pitch {hit_p}");
+    let (break_name, break_v, break_p) = step_request(&requests[1]);
+    assert_eq!(break_name, "minecraft:block.stone.break");
+    assert!((break_v - 1.0).abs() < 1e-6, "break volume {break_v}");
+    assert!((break_p - 1.2).abs() < 1e-6, "break pitch {break_p}");
+    // The position is the block centre, as vanilla's playLocalSound(BlockPos).
+    match &requests[0] {
+        SoundRequest::Play(p) => match p.pos {
+            SoundPos::Fixed(p) => {
+                assert_eq!(p, DVec3::new(10.5, 64.5, -4.5));
+            }
+            _ => panic!("not a fixed position"),
+        },
+        other => panic!("not a play: {other:?}"),
+    }
+    // A `intentionally_empty` break event plays nothing.
+    let mut quiet = stone_type();
+    quiet.break_sound = "minecraft:intentionally_empty".to_owned();
+    let mut requests = Vec::new();
+    level_event_sound(2001, pos, &quiet, &mut requests);
+    assert!(requests.is_empty());
+}
+
 /// The place (`BlockItem.place`: (v+1)/2, p*0.8) and fall
 /// (`LivingEntity.playBlockFallSound`: v*0.5, p*0.75) factors, and vanilla's
 /// "no sound" event (`intentionally_empty`) plays nothing.

@@ -1,9 +1,11 @@
 //! Server-sent particles (`level_particles`) and the client-spawned terrain particles,
 //! ported from vanilla 26.3's particle classes (`net.minecraft.client.particle`): a
-//! fixed-capacity pool simulated at 20 Hz on the game thread ([`Particles`]), drawn as
-//! camera-facing quads textured from the particle atlas in one batched draw inside the
-//! main pass ([`ParticleRenderer`], reusing the entity shader: sprite rects by
-//! textureLoad, vertex light colour, fog).
+//! fixed-capacity pool simulated at 20 Hz on the game thread ([`Particles`]), which
+//! publishes a render snapshot each tick ([`ParticleSnapshots`]) that the render thread
+//! draws as camera-facing quads textured from the particle atlas in one batched draw
+//! inside the main pass ([`ParticleRenderer`], reusing the entity shader: sprite rects
+//! by textureLoad, vertex light colour, fog) — interpolated by partial tick and culled
+//! per particle like vanilla's `QuadParticleGroup.extractRenderState`, without a lock.
 //!
 //! Per-type behaviour lives in the [`ParticleBehaviour`] table: gravity, friction, lifetime,
 //! quad size and its growth over the particle's life, colour, alpha and spawn-time motion.
@@ -39,6 +41,7 @@ mod providers;
 mod resources;
 mod rng;
 mod single_quad_particle;
+mod snapshot;
 mod terrain_particle;
 #[cfg(test)]
 mod tests;
@@ -49,13 +52,11 @@ use haste_core::{BlockStateId, Identifier};
 pub use engine::Particles;
 pub use particle_renderer::ParticleRenderer;
 pub use resources::ParticleTypes;
+pub use snapshot::{ParticleSnapshot, ParticleSnapshots, ParticleView};
 
 /// Pool capacity (vanilla caps its engine around 16384 with a distance squash we do not
 /// model; extra spawns are dropped).
 pub const MAX_PARTICLES: usize = 4096;
-
-/// Sky-light value meaning "not sampled yet" (resampled on the first frame).
-const UNSAMPLED: u8 = 255;
 
 /// How far from the camera `level_particles` spawns survive (`ClientLevel.doAddParticle`:
 /// `distanceToSqr(x, y, z) > 1024.0`).
