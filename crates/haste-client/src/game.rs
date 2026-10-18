@@ -789,6 +789,9 @@ impl WorldSink for TrackedWorld<'_> {
     fn apply_light(&mut self, pos: ChunkPos, light: &LightData) {
         WorldSink::apply_light(self.world, pos, light)
     }
+    fn replace_biomes(&mut self, pos: ChunkPos, data: &[u8]) {
+        WorldSink::replace_biomes(self.world, pos, data)
+    }
     fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData) {
         WorldSink::set_block_entity(self.world, pos, data)
     }
@@ -976,7 +979,7 @@ fn apply_option_changes(shared: &Shared, driver: &NetDriver, changes: Vec<(Strin
     shared.options_version.fetch_add(1, Ordering::Relaxed);
     if let Some(rd) = render_distance {
         // The server's view distance still caps what we mesh, like at join.
-        shared.view.lock().view_distance = driver.login().view_distance.min(rd);
+        shared.view.lock().view_distance = driver.session.view_distance.min(rd);
     }
     if sound_changed {
         let volumes = shared.live_options.lock().sound;
@@ -1079,6 +1082,17 @@ fn drain_packets(
     };
     let ui = shared.ui.lock().clone();
     driver.receive(&mut tracked, &mut *entities, ui.as_ref())?;
+    // The server's view distance (login, then `set_chunk_cache_radius`) caps what we mesh,
+    // like vanilla's `Options.setServerRenderDistance`. Read the option before taking the
+    // view lock so the two locks are never held together.
+    let render_distance = shared.live_options.lock().render_distance as i32;
+    let view_distance = driver.session.view_distance.min(render_distance);
+    {
+        let mut view = shared.view.lock();
+        if view.view_distance != view_distance {
+            view.view_distance = view_distance;
+        }
+    }
     drop(entities);
     skins::request_profiles(&shared.skins, &mut driver.session.profiles);
     let mut dirty = world.take_dirty_sections();
@@ -1563,6 +1577,9 @@ fn tick_once(
         particles.publish_snapshot(&*world, &shared.particle_snapshots);
     }
     if let Some(ui) = shared.ui.lock().as_ref() {
+        // The mount HUD's values for this tick (the vehicle's hearts and the charged jump bar),
+        // from the player's ride, the entity store and the synced attributes.
+        ui.set_mount_hud(driver.session.mount_hud(&*shared.entities.read()));
         // The hotbar authority is the player (the client picks with 1-9 and the wheel and tells
         // the server itself; `set_selected_slot` also marks it sent so the UI does not send it
         // a second time). The server's `set_held_slot` reaches both sides alike.

@@ -36,6 +36,9 @@ impl WorldSink for FakeWorld {
     fn apply_light(&mut self, pos: ChunkPos, _light: &LightData) {
         self.log.push(format!("light {} {}", pos.x, pos.z));
     }
+    fn replace_biomes(&mut self, pos: ChunkPos, _data: &[u8]) {
+        self.log.push(format!("biomes {} {}", pos.x, pos.z));
+    }
     fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData) {
         self.log.push(format!(
             "be {} {} {} {} {:?}",
@@ -1154,6 +1157,173 @@ fn mounting_a_saddled_pig_starts_its_simulation_and_boost() {
     assert!(r.session.player.pig().is_none());
 }
 
+/// The mount HUD while riding (vanilla `Hud`: the vehicle's hearts replace the food bar, the
+/// charged jump bar the experience bar): the vehicle's health from its living-entity data and
+/// its synced `max_health` attribute, the jump scale from the charge in the player, and the
+/// jump flag exactly on the horse we steer. On foot, or in a vehicle without living data, no
+/// mount HUD draws.
+#[test]
+fn the_mount_hud_reads_the_vehicles_health_and_the_charge() {
+    let mut r = Rig::new();
+    r.session
+        .set_entity_type_names(names(&["player", "horse", "minecart"]));
+    r.session.set_attribute_names(names(&[
+        "movement_speed",
+        "jump_strength",
+        "gravity",
+        "max_health",
+    ]));
+    r.apply(spawn_packet_kind(5, DVec3::new(40.0, 70.0, 40.0), 1)); // horse
+    r.apply(ClientboundPlay::UpdateAttributes(cb::UpdateAttributes {
+        entity_id: 5,
+        properties: vec![cb::AttributeProperty {
+            id: 3,
+            value: 22.0,
+            modifiers: vec![],
+        }],
+    }));
+    // The saddle (wire slot 7) and the tame flag make the horse ours to steer.
+    r.apply(ClientboundPlay::SetEquipment(cb::SetEquipment {
+        entity_id: 5,
+        equipment: vec![(
+            7,
+            ItemStackData {
+                count: 1,
+                item: Some(haste_core::RegistryIndex(3)),
+                components_raw: Default::default(),
+            },
+        )],
+    }));
+    r.apply(ClientboundPlay::SetEntityData(cb::SetEntityData {
+        entity_id: 5,
+        metadata: vec![MetadataEntry {
+            index: crate::horse::DATA_ID_FLAGS,
+            value: haste_core::entity::MetadataValue::Byte(crate::horse::FLAG_TAME),
+        }],
+    }));
+    // No health in the entity data yet: no mount HUD (the horse is not known to be living).
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 5,
+        passengers: vec![7],
+    }));
+    assert!(
+        r.session.mount_hud(&r.entities).is_none(),
+        "without living data the mount HUD stays off"
+    );
+    // The health metadata (index 9, a float) turns it on.
+    r.apply(ClientboundPlay::SetEntityData(cb::SetEntityData {
+        entity_id: 5,
+        metadata: vec![MetadataEntry {
+            index: 9,
+            value: haste_core::entity::MetadataValue::Float(15.5),
+        }],
+    }));
+    let hud = r.session.mount_hud(&r.entities).expect("the mount HUD");
+    assert!((hud.health - 15.5).abs() < 1.0e-6);
+    assert!((hud.max_health - 22.0).abs() < 1.0e-6);
+    assert!(hud.jumpable, "the horse we steer shows the jump bar");
+    assert_eq!(hud.jump_scale, 0.0);
+    // The charge climbs into the HUD with the player's aiStep state (vanilla
+    // `LocalPlayer.getJumpRidingScale`: the press tick starts empty, the second tick charges
+    // 0.1). The player needs its position first (the aiStep charge only runs once the
+    // server placed us); the fake world has no chunk loaded at the horse, so the ride
+    // ticks stay put.
+    r.apply(teleport(1, DVec3::new(40.0, 71.0, 40.0), 0));
+    end_tick_once(&mut r);
+    let jump = haste_core::input::InputState {
+        jump: true,
+        ..Default::default()
+    };
+    r.session
+        .end_tick(&jump, &mut r.world, &r.entities, &mut Vec::new());
+    r.session
+        .end_tick(&jump, &mut r.world, &r.entities, &mut Vec::new());
+    let hud = r.session.mount_hud(&r.entities).expect("the mount HUD");
+    assert_eq!(hud.jump_scale, 0.1, "jump scale after two held ticks");
+    // A vehicle without health metadata (a minecart) never shows hearts.
+    r.apply(spawn_packet_kind(6, DVec3::ZERO, 2));
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 6,
+        passengers: vec![7],
+    }));
+    assert!(
+        r.session.mount_hud(&r.entities).is_none(),
+        "a minecart is not living: no vehicle hearts"
+    );
+    // Back on the horse; a dismount ends the mount HUD with the ride.
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 5,
+        passengers: vec![7],
+    }));
+    assert!(r.session.mount_hud(&r.entities).is_some());
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 5,
+        passengers: vec![],
+    }));
+    assert!(
+        r.session.mount_hud(&r.entities).is_none(),
+        "on foot there is no mount HUD"
+    );
+}
+
+/// The horse's rear-up flag from the server's entity data (`AbstractHorse.DATA_ID_FLAGS` bit
+/// 32): the flag our own simulation writes locally and the server's own view of it both count
+/// (vanilla's `isStanding` reads one synched flag either side writes).
+#[test]
+fn the_horses_rear_up_flag_follows_the_servers_entity_data() {
+    let mut r = Rig::new();
+    r.session.set_entity_type_names(names(&["player", "horse"]));
+    r.session.set_attribute_names(names(&["movement_speed"]));
+    r.apply(spawn_packet_kind(5, DVec3::new(40.0, 70.0, 40.0), 1)); // horse
+    r.apply(ClientboundPlay::SetEquipment(cb::SetEquipment {
+        entity_id: 5,
+        equipment: vec![(
+            7,
+            ItemStackData {
+                count: 1,
+                item: Some(haste_core::RegistryIndex(3)),
+                components_raw: Default::default(),
+            },
+        )],
+    }));
+    r.apply(ClientboundPlay::SetEntityData(cb::SetEntityData {
+        entity_id: 5,
+        metadata: vec![MetadataEntry {
+            index: crate::horse::DATA_ID_FLAGS,
+            value: haste_core::entity::MetadataValue::Byte(crate::horse::FLAG_TAME),
+        }],
+    }));
+    r.apply(ClientboundPlay::SetPassengers(cb::SetPassengers {
+        vehicle: 5,
+        passengers: vec![7],
+    }));
+    let horse = r.session.player.horse().expect("the horse is ours");
+    assert!(!horse.is_standing());
+    // The server writes the rear-up flag (index 18, bit 32).
+    r.apply(ClientboundPlay::SetEntityData(cb::SetEntityData {
+        entity_id: 5,
+        metadata: vec![MetadataEntry {
+            index: crate::horse::DATA_ID_FLAGS,
+            value: haste_core::entity::MetadataValue::Byte(
+                crate::horse::FLAG_TAME | crate::horse::FLAG_STANDING,
+            ),
+        }],
+    }));
+    assert!(
+        r.session.player.horse().expect("still ours").is_standing(),
+        "the server's rear-up flag stands the horse"
+    );
+    // Cleared again: only our own rear-up (none here) counts.
+    r.apply(ClientboundPlay::SetEntityData(cb::SetEntityData {
+        entity_id: 5,
+        metadata: vec![MetadataEntry {
+            index: crate::horse::DATA_ID_FLAGS,
+            value: haste_core::entity::MetadataValue::Byte(crate::horse::FLAG_TAME),
+        }],
+    }));
+    assert!(!r.session.player.horse().expect("still ours").is_standing());
+}
+
 #[test]
 fn a_set_passengers_for_another_vehicle_does_not_dismount_us() {
     let mut r = Rig::new();
@@ -1621,4 +1791,29 @@ fn chunk_batches_are_acknowledged_with_the_vanilla_rate() {
         }
         other => panic!("expected a chunk_batch_received, got {other:?}"),
     }
+}
+
+/// `set_chunk_cache_radius` replaces the server view distance; `chunks_biomes` reaches the
+/// world once per chunk (vanilla `ClientPacketListener.handleSetChunkCacheRadius` /
+/// `handleChunksBiomes`).
+#[test]
+fn chunk_cache_radius_and_biome_updates_apply() {
+    let mut r = Rig::new();
+    r.apply(ClientboundPlay::SetChunkCacheRadius(
+        cb::SetChunkCacheRadius { radius: 6 },
+    ));
+    assert_eq!(r.session.view_distance, 6);
+    r.apply(ClientboundPlay::ChunksBiomes(cb::ChunksBiomes {
+        chunks: vec![
+            cb::ChunkBiomes {
+                pos: ChunkPos::new(3, 4),
+                data: Default::default(),
+            },
+            cb::ChunkBiomes {
+                pos: ChunkPos::new(-1, 0),
+                data: Default::default(),
+            },
+        ],
+    }));
+    assert_eq!(r.world.log, ["biomes 3 4", "biomes -1 0"]);
 }
