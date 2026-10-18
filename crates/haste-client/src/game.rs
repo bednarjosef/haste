@@ -539,6 +539,10 @@ pub struct Shared {
     /// Particles (`level_particles`): the game thread spawns and ticks them, the render
     /// thread draws them.
     pub particles: SharedParticles,
+    /// The particles' per-tick render snapshot: written by the game thread's particle
+    /// tick (under the locks it already holds), taken by the render thread each frame
+    /// (an `Arc` copy; no world read lock, no particle mutex, no waiting on the tick).
+    pub particle_snapshots: haste_render::ParticleSnapshots,
     /// Input for the next tick.
     pub input: Mutex<SharedInput>,
     /// The sound and music output (None until the client sets it up; headless leaves it
@@ -698,6 +702,7 @@ impl Shared {
             block_entity_names,
             biome_climates,
             particles: Mutex::new(particles),
+            particle_snapshots: haste_render::ParticleSnapshots::default(),
             weather_scratch: Mutex::new(haste_render::WeatherFrame::default()),
             input: Mutex::new(SharedInput::default()),
             sound: Mutex::new(None),
@@ -1527,6 +1532,12 @@ fn tick_once(
         }
         driver.session.ambient_spawns = ambient;
         particles.tick();
+        // The render snapshot for the coming frames (vanilla's per-frame
+        // `ParticleEngine.extract` folded into the tick: light sampled at the tick
+        // position, see `build_snapshot`), published while the locks are still held —
+        // the render thread only ever takes an `Arc` copy.
+        let world = shared.world.read();
+        particles.publish_snapshot(&*world, &shared.particle_snapshots);
     }
     if let Some(ui) = shared.ui.lock().as_ref() {
         // The hotbar authority is the player (the client picks with 1-9 and the wheel and tells

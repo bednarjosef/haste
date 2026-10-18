@@ -39,6 +39,7 @@ mod providers;
 mod resources;
 mod rng;
 mod single_quad_particle;
+mod snapshot;
 mod terrain_particle;
 #[cfg(test)]
 mod tests;
@@ -49,13 +50,11 @@ use haste_core::{BlockStateId, Identifier};
 pub use engine::Particles;
 pub use particle_renderer::ParticleRenderer;
 pub use resources::ParticleTypes;
+pub use snapshot::{ParticleSnapshot, ParticleSnapshots, ParticleView};
 
 /// Pool capacity (vanilla caps its engine around 16384 with a distance squash we do not
 /// model; extra spawns are dropped).
 pub const MAX_PARTICLES: usize = 4096;
-
-/// Sky-light value meaning "not sampled yet" (resampled on the first frame).
-const UNSAMPLED: u8 = 255;
 
 /// How far from the camera `level_particles` spawns survive (`ClientLevel.doAddParticle`:
 /// `distanceToSqr(x, y, z) > 1024.0`).

@@ -32,10 +32,6 @@ pub(super) struct ParticleState {
     pub(super) color: [f32; 3],
     /// Start position for the spiral path (`PortalParticle`).
     pub(super) portal_start: DVec3,
-    /// Block whose light is cached (resampled when the particle leaves it).
-    pub(super) light_at: BlockPos,
-    pub(super) sky_light: u8,
-    pub(super) block_light: u8,
     /// Terrain-particle override: the block sprite (clamping rect) and its 4x4
     /// sub-piece (uv offsets `uo`/`vo` of vanilla `TerrainParticle`), in place of
     /// the type's sprite list.
@@ -301,13 +297,6 @@ impl Particles {
             quad,
             color,
             portal_start: pos,
-            light_at: BlockPos::new(
-                pos.x.floor() as i32,
-                pos.y.floor() as i32,
-                pos.z.floor() as i32,
-            ),
-            sky_light: UNSAMPLED,
-            block_light: 0,
             block_sprite: None,
         };
         self.pool.push(state);
