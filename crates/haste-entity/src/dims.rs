@@ -65,6 +65,19 @@ impl EntityDimensions {
         (d.width, height)
     }
 
+    /// `Entity.getEyeHeight()` for an entity of this type: the standing eye height the
+    /// oracle names (1.62 for the default box). 26.3's `LivingEntity.getDimensions(pose)`
+    /// ignores the pose (only sleeping swaps dimensions), so no pose scaling; a baby's is
+    /// halved, like the age scale `getDefaultDimensions` applies.
+    pub fn eye_height(&self, kind: RegistryIndex, baby: bool) -> f32 {
+        let h = self.map.get(&kind).copied().unwrap_or(DEFAULT).eye_height;
+        if baby {
+            h * 0.5
+        } else {
+            h
+        }
+    }
+
     /// `EntityType.fireImmune()`: such entities never show flames (`Entity.isOnFire`).
     pub fn fire_immune(&self, kind: RegistryIndex) -> bool {
         self.map.get(&kind).copied().unwrap_or(DEFAULT).fire_immune

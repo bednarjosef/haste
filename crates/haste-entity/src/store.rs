@@ -276,6 +276,11 @@ pub struct Entity {
     pub age: u32,
     /// A player's trailing cape point (`ClientAvatarState`'s cloak), ticked for players only.
     pub cloak: crate::avatar::Cloak,
+    /// Whether the type is a `LivingEntity` (its metadata index 8 is the living-flags
+    /// byte; only such entities track a use).
+    pub(crate) is_living: bool,
+    /// An item use the server started (`useItem`/`useItemRemaining`; see `using_item`).
+    pub using_item: crate::using_item::UsingItem,
 }
 
 impl Entity {
@@ -344,6 +349,8 @@ impl Entity {
             is_item,
             age: 0,
             cloak: crate::avatar::Cloak::default(),
+            is_living: living,
+            using_item: crate::using_item::UsingItem::default(),
         }
     }
 
@@ -429,30 +436,8 @@ fn item_of(e: &Entity, partial_tick: f32) -> Option<haste_core::model::DroppedIt
     })
 }
 
-/// Whether a model has a part with this id (humanoid models carry `right_arm`, which only the
-/// armed/armoured layers need).
-fn model_has_part(part: &haste_core::model::ModelPart, id: haste_core::parts::PartId) -> bool {
-    part.id == id || part.children.iter().any(|c| model_has_part(c, id))
-}
-
-/// The hands, equipment layers and custom head item of an entity: the item in each hand (main
-/// hand -> right, off hand -> left), every armour piece whose item's `equippable` component names
-/// the same slot (vanilla `HumanoidArmorLayer.shouldRender`), and the head-slot item when it is
-/// not armour (vanilla `CustomHeadLayer`: pumpkins, heads). The equipment asset id comes from the
-/// item's default `equippable` component; the dye from the stack's `dyed_color` patch.
-/// A tracked entity's synced equipment, resolved through the shared per-slot rules
-/// ([`crate::local_player::equipment_by_slot`]).
-fn equipment_of(
-    e: &Entity,
-    components: &haste_data::ItemComponents,
-) -> (
-    [Option<RegistryIndex>; 2],
-    Vec<haste_core::model::EquipmentPiece>,
-    Option<RegistryIndex>,
-) {
-    crate::local_player::equipment_by_slot(&e.equipment, components)
-}
-
+/// The hands, equipment layers and custom head item of an entity, resolved through the shared
+/// per-slot rules ([`crate::local_player::equipment_of`]).
 pub struct EntityStore {
     slots: Vec<Option<Entity>>,
     free: Vec<u32>,
@@ -476,6 +461,9 @@ pub struct EntityStore {
     /// Each player's resolved skin (`PlayerInfo.getSkin`), by profile id; a player without one
     /// wears its default skin (`DefaultPlayerSkin.get`).
     skins: AHashMap<Uuid, Arc<crate::skin::PlayerSkin>>,
+    /// The tick's use steps (`LivingEntity.updateUsingItem`), recorded per entity for the
+    /// client's effects; reused, so a tick without a use allocates nothing.
+    pub(crate) use_ticks: Vec<crate::using_item::UseTick>,
 }
 
 /// Hurt flash strength for an entity's remaining hurt ticks, eased out (quadratic, like
@@ -510,6 +498,7 @@ impl EntityStore {
             mob_variants: crate::variants::MobVariants::empty(),
             world_age: 0,
             item_components: haste_data::ItemComponents::default(),
+            use_ticks: Vec::new(),
         }
     }
 
@@ -718,7 +707,12 @@ impl EntityStore {
         let Some(e) = &mut self.slots[i as usize] else {
             return;
         };
+        let old_living = e.metadata.living;
         e.metadata.apply(entries);
+        // `onSyncedDataUpdated` for the living-flags byte: a use started or stopped.
+        if e.is_living && e.metadata.living != old_living {
+            crate::using_item::on_living_flags(e);
+        }
         // `LivingEntity.DATA_HEALTH_ID` (index 9): health at or below 0 means `isDeadOrDying`,
         // and the client ticks the death animation from that alone (a `/kill` without entity
         // event 3, a player's death, or the event arriving after the metadata).
@@ -798,6 +792,7 @@ impl EntityStore {
 
     /// [`Self::tick`] with a world view for the dropped items (`ItemEntity.tick`).
     pub fn tick_in_world(&mut self, world: &dyn crate::item_entity::ItemWorld) {
+        self.use_ticks.clear();
         let EntityStore { slots, riding, .. } = self;
         for slot in slots.iter_mut().flatten() {
             slot.tick_count += 1;
@@ -830,6 +825,9 @@ impl EntityStore {
             if slot.is_item {
                 crate::item_entity::tick(slot, world);
             }
+            // `LivingEntity.tick`'s use step (`updatingUsingItem`), after `super.tick()`
+            // like vanilla: the tick is recorded for the client's effects.
+            crate::using_item::step(slot, &self.dims, &mut self.use_ticks);
             let d = slot.pos - slot.prev_pos;
             let dist = f32::sqrt((d.x * d.x + d.z * d.z) as f32);
             // `LivingEntity.calculateEntityAnimation`: passengers and the dead stop walking.
@@ -1062,9 +1060,10 @@ impl EntityStore {
             );
             // Equipment layers (held items, armour) are only drawn on humanoid models
             // (vanilla adds `ItemInHandLayer`/`HumanoidArmorLayer` per renderer type).
-            let humanoid = has_head && model_has_part(&model.root, haste_core::parts::RIGHT_ARM);
+            let humanoid = has_head
+                && crate::models::model_has_part(&model.root, haste_core::parts::RIGHT_ARM);
             let (hands, equipment, head_item) = if humanoid {
-                equipment_of(slot, &self.item_components)
+                crate::local_player::equipment_of(slot, &self.item_components)
             } else {
                 ([None, None], Vec::new(), None)
             };
