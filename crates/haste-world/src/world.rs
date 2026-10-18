@@ -412,7 +412,16 @@ impl World {
             }
         }
 
-        let sky = chunk.light.sky.get(idx as usize).cloned().flatten();
+        // An absent section is not all 15: it reads the bottom row of the nearest section
+        // above with data (vanilla: SkyLightSectionStorage.getLightValue flattens y), so
+        // the snapshot gets a stand-in array repeating that row.
+        let sky = chunk
+            .light
+            .sky
+            .get(idx as usize)
+            .and_then(|n| n.as_ref())
+            .cloned()
+            .or_else(|| crate::sky_light::absent_array(chunk, idx as usize));
         let block_light = chunk
             .light
             .block
@@ -479,13 +488,18 @@ impl BlockView for World {
     fn sky_light(&self, pos: BlockPos) -> u8 {
         match self.chunk_and_section(pos) {
             Some((c, _)) => {
-                let idx = (pos.y >> 4) - c.min_section;
-                c.light
-                    .sky
-                    .get(idx as usize)
-                    .and_then(|n| n.as_ref())
-                    .map(|n| n.get((pos.x & 15) as u8, (pos.y & 15) as u8, (pos.z & 15) as u8))
-                    .unwrap_or(15)
+                let idx = ((pos.y >> 4) - c.min_section) as usize;
+                match c.light.sky.get(idx).and_then(|n| n.as_ref()) {
+                    // vanilla: SkyLightSectionStorage.getLightValue — a section with no
+                    // data layer reads the bottom row of the nearest layer above
+                    Some(n) => n.get((pos.x & 15) as u8, (pos.y & 15) as u8, (pos.z & 15) as u8),
+                    None => crate::sky_light::absent_value(
+                        c,
+                        idx,
+                        (pos.x & 15) as u8,
+                        (pos.z & 15) as u8,
+                    ),
+                }
             }
             None => 15,
         }
@@ -576,7 +590,9 @@ impl SectionSnapshot {
         }
     }
 
-    /// Sky light at (x, y, z) in 0..16 coords; outside returns 15 (no data => full sky).
+    /// Sky light at (x, y, z) in 0..16 coords. A section that arrived absent was filled
+    /// from the layer above at snapshot time (see `snapshot_section`); `None` here means
+    /// no layer anywhere above, which reads as full sky.
     pub fn sky_light(&self, x: u8, y: u8, z: u8) -> u8 {
         self.sky.as_ref().map(|n| n.get(x, y, z)).unwrap_or(15)
     }
