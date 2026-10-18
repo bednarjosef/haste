@@ -2,11 +2,15 @@
 //! as the client's own authoritative instance, like the pig ([`crate::pig`]): a constant full
 //! forward while the rider holds the stick, the look steers, and the boost comes from the
 //! server's synched `DATA_BOOST_TIME`. `getRiddenSpeed` is slower out of the warmth
-//! (`DATA_SUFFOCATING`, which the server syncs). Walking on lava (`canStandOnFluid`) needs the
-//! fluid's collision shape in the swept move, which the shared travel does not have yet.
+//! (`DATA_SUFFOCATING`): the client decides warm/cold itself each tick from the blocks around
+//! (`Strider.tick`'s `setSuffocating`), instead of waiting for the server's flag. The strider
+//! walks on lava (`canStandOnFluid`): the shared travel gives the fluid surface a collision
+//! box ([`crate::travel`]) and `floatStrider` settles it there when it drops below.
 use crate::item_based_steering::{ItemBasedSteering, SteerEnv};
+use crate::travel::RiddenAnimal;
 use glam::DVec3;
-use haste_core::Aabb;
+use haste_core::view::{BlockPhysics, FluidKind};
+use haste_core::{Aabb, BlockStateId};
 
 /// Vanilla `Strider.createAttributes`: `Attributes.MOVEMENT_SPEED` base 0.175F (the server
 /// syncs the real value, with the suffocating modifier, through `update_attributes`; this is
@@ -87,10 +91,13 @@ impl Strider {
         self.look = look;
     }
 
-    /// One tick of the strider we steer, in vanilla `LivingEntity.aiStep`'s order for a ridden
-    /// strider: the velocity thresholds, then `tickRidden` (the rotation follows the rider and the
-    /// boost advances) and the shared `travelInAir` with `Strider`'s own input and speed.
+    /// One tick of the strider we steer, in vanilla's order for a ridden strider: the warm/cold
+    /// decision (`Strider.tick`'s `setSuffocating`, before `super.tick()` runs the travel), the
+    /// velocity thresholds (`aiStep`), then `tickRidden` (the rotation follows the rider and the
+    /// boost advances) and the shared `travelInAir` with `Strider`'s own input and speed, and
+    /// `floatStrider` after the move (vanilla runs it at the end of `tick`).
     pub fn tick(&mut self, env: &SteerEnv<'_>) {
+        self.update_suffocating(env);
         if self.delta.x.abs() < 0.003 {
             self.delta.x = 0.0;
         }
@@ -110,6 +117,48 @@ impl Strider {
             env.shapes,
             env.blocks,
         );
+        self.float_strider(env);
+    }
+
+    /// The client's own warm/cold decision, vanilla `Strider.tick`'s `setSuffocating` (the
+    /// server ticks the same code and syncs `DATA_SUFFOCATING`; computing it here makes the
+    /// speed switch on the right tick instead of a network round-trip later). Warm is the
+    /// `#strider_warm_blocks` tag on the block inside or below the feet, or any lava the box
+    /// touches (`getFluidHeight(LAVA) > 0`). Without the tag (no `update_tags` from the server
+    /// yet) only lava warms — the tag's other members are fire-family blocks.
+    fn update_suffocating(&mut self, env: &SteerEnv<'_>) {
+        let feet = haste_core::BlockPos::from_dvec3(self.pos);
+        let warm_block = |s: BlockStateId| {
+            is_lava(env.blocks, s) || env.warm_blocks.is_some_and(|w| w.is_strider_warm(s))
+        };
+        let in_warm_blocks = warm_block(env.world.block_state(feet))
+            || warm_block(env.world.block_state(feet.add(0, -1, 0)));
+        let fluid_height = fluid_touch_height(self.aabb(), env);
+        let warm = in_warm_blocks || fluid_height > 0.0;
+        self.suffocating = !warm;
+    }
+
+    /// Vanilla `Strider.floatStrider`, after the move: a strider inside lava either stands on
+    /// the surface (its feet above the liquid collision column and no lava above) or bobs up
+    /// (`delta * 0.5 + 0.05`).
+    fn float_strider(&mut self, env: &SteerEnv<'_>) {
+        if !is_lava(
+            env.blocks,
+            env.world
+                .block_state(haste_core::BlockPos::from_dvec3(self.pos)),
+        ) {
+            return;
+        }
+        // `context.isAbove(this.getLiquidCollisionShape(), this.blockPosition(), true)`: the
+        // feet above the column's half-block top, and no lava directly above the block.
+        let feet = haste_core::BlockPos::from_dvec3(self.pos);
+        let above = env.world.block_state(feet.add(0, 1, 0));
+        let stands = self.pos.y > feet.y as f64 + 0.5 - 1.0e-5 && !is_lava(env.blocks, above);
+        if stands {
+            self.on_ground = true;
+        } else {
+            self.delta = self.delta * 0.5 + DVec3::new(0.0, 0.05, 0.0);
+        }
     }
 
     /// Vanilla `Strider.tickRidden`: the rotation follows the rider (the pitch halved) and the
@@ -174,6 +223,65 @@ impl crate::travel::RiddenAnimal for Strider {
         self.horizontal_collision = horizontal;
         self.vertical_collision = vertical;
     }
+    /// `Strider.canStandOnFluid`: lava.
+    fn stands_on_fluid(&self) -> Option<haste_core::view::FluidKind> {
+        Some(haste_core::view::FluidKind::Lava)
+    }
+}
+
+/// Whether `state` carries lava (`Strider.canStandOnFluid`'s test, `fluid.is(FluidTags.LAVA)`).
+pub fn is_lava(blocks: &dyn BlockPhysics, state: BlockStateId) -> bool {
+    blocks
+        .fluid(state)
+        .is_some_and(|f| f.kind == FluidKind::Lava)
+}
+
+/// The lava the strider's box touches, as vanilla `Entity.getFluidHeight(LAVA)`: the fluid
+/// top minus the box bottom, over the box's deflated cells (the fluid trackers read the box
+/// shrunk by 0.001), or 0 when no lava reaches the box.
+fn fluid_touch_height(aabb: Aabb, env: &SteerEnv<'_>) -> f64 {
+    let box_shrunk = Aabb {
+        min: aabb.min + DVec3::splat(0.001),
+        max: aabb.max - DVec3::splat(0.001),
+    };
+    let (x0, x1) = (
+        box_shrunk.min.x.floor() as i32,
+        (box_shrunk.max.x.ceil() - 1.0) as i32,
+    );
+    let (y0, y1) = (
+        box_shrunk.min.y.floor() as i32,
+        (box_shrunk.max.y.ceil() - 1.0) as i32,
+    );
+    let (z0, z1) = (
+        box_shrunk.min.z.floor() as i32,
+        (box_shrunk.max.z.ceil() - 1.0) as i32,
+    );
+    let mut height = 0.0;
+    for x in x0..=x1 {
+        for y in y0..=y1 {
+            for z in z0..=z1 {
+                let pos = haste_core::BlockPos::new(x, y, z);
+                let state = env.world.block_state(pos);
+                let Some(f) = env.blocks.fluid(state) else {
+                    continue;
+                };
+                if f.kind != FluidKind::Lava {
+                    continue;
+                }
+                // `FluidState.getHeight`: the full block when the same fluid sits above.
+                let top = if is_lava(env.blocks, env.world.block_state(pos.add(0, 1, 0))) {
+                    1.0
+                } else {
+                    f.height as f64
+                };
+                let fluid_top = y as f64 + top;
+                if fluid_top >= box_shrunk.min.y {
+                    height = (fluid_top - aabb.min.y).max(height);
+                }
+            }
+        }
+    }
+    height
 }
 
 /// Whether a `minecraft:entity_type` registry path is the strider this module steers.

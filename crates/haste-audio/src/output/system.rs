@@ -7,7 +7,8 @@ use glam::DVec3;
 use tracing::{debug, warn};
 
 use super::{AudioOutput, PlayRequest, SoundControls, SoundId};
-use crate::engine::{event_eq, SilentEngine, SoundSource};
+use crate::channels::{ChannelPools, Pool};
+use crate::engine::{event_eq, PlayResult, SilentEngine, SoundSource};
 use crate::sounds::{SoundEvents, SoundVariant};
 
 /// One sound the `SoundSystem` sent to the output, parallel to the engine's sound list:
@@ -20,6 +21,9 @@ pub(super) struct Sounded {
     /// `SoundManager.stop(Identifier, SoundSource)` matches the event, not a file.
     event: Arc<str>,
     source: SoundSource,
+    /// The channel pool this sound's channel came from (streamed sounds stream), released
+    /// when it finishes or is stopped.
+    pool: Pool,
     /// The output's controls once the worker created the player; `None` until then.
     controls: Option<SoundControls>,
 }
@@ -34,6 +38,9 @@ pub(super) struct Sounded {
 pub struct SoundSystem {
     events: SoundEvents,
     engine: SilentEngine,
+    /// The channel pools (vanilla's `Library` split, 247 static + 8 streaming): a sound
+    /// that cannot get a channel is not started.
+    pub(super) channels: ChannelPools,
     pub(super) output: AudioOutput,
     assets: haste_assets::Assets,
     /// The engine's sounds that were sent to the output, in play order.
@@ -67,6 +74,7 @@ impl SoundSystem {
         Self {
             events,
             engine: SilentEngine::new(),
+            channels: ChannelPools::new(),
             output,
             assets,
             sounded: Vec::new(),
@@ -120,8 +128,25 @@ impl SoundSystem {
         event: &str,
     ) {
         let event = self.intern(event);
-        self.engine
-            .play(variant, source, pos, volume, pitch, Arc::clone(&event));
+        // Vanilla's `SoundEngine.play` order: the volume-0 rule first (a sound at zero
+        // volume is not started; music starts silently), then the channel acquisition
+        // (a full pool drops the sound).
+        match self
+            .engine
+            .play(variant, source, pos, volume, pitch, Arc::clone(&event))
+        {
+            PlayResult::NotStarted => return,
+            PlayResult::Started | PlayResult::StartedSilently => {}
+        }
+        let pool = if variant.stream {
+            Pool::Streaming
+        } else {
+            Pool::Static
+        };
+        if !self.channels.acquire(pool) {
+            self.engine.remove_last();
+            return;
+        }
         // The engine's gains for this sound right now, so the player starts at the right
         // volume instead of full until the first tick.
         self.engine.tick();
@@ -155,6 +180,7 @@ impl SoundSystem {
             id,
             event,
             source,
+            pool,
             controls: None,
         });
     }
@@ -170,10 +196,12 @@ impl SoundSystem {
         };
         // Tell the worker to stop the players; a sound still in the decode queue is
         // stopped by its own play handling, because the stop order queues behind its
-        // play request in the shared channel.
+        // play request in the shared channel. Each stopped sound gives its channel back
+        // (`ChannelHandle.release`).
         for sounded in &self.sounded {
             if matches(sounded) {
                 self.output.send_stop(sounded.id);
+                self.channels.release(sounded.pool);
             }
         }
         // Drop controls of the stopped sounds; the worker never sends them (or they are
@@ -185,14 +213,21 @@ impl SoundSystem {
         self.engine.stop(source, event);
     }
 
-    /// Set the listener (camera) position and yaw for attenuation and panning.
-    pub fn set_listener(&mut self, pos: DVec3, yaw_deg: f32) {
-        self.engine.set_listener(pos, yaw_deg);
+    /// Set the listener (the camera) position and look (yaw/pitch) for attenuation and
+    /// panning, vanilla's `SoundEngine.updateSource(Camera)`.
+    pub fn set_listener(&mut self, pos: DVec3, yaw_deg: f32, pitch_deg: f32) {
+        self.engine.set_listener(pos, yaw_deg, pitch_deg);
     }
 
     /// Set the volume of one sound source (or the master volume).
     pub fn set_volume(&mut self, source: SoundSource, volume: f32) {
         self.engine.set_volume(source, volume);
+    }
+
+    /// Set one source's extra category gain (the music fade's lever), vanilla's
+    /// `SoundEngine.updateCategoryVolume`: it multiplies with the option volumes.
+    pub fn update_category_volume(&mut self, source: SoundSource, gain: f32) {
+        self.engine.update_category_volume(source, gain);
     }
 
     /// 20 Hz: recompute gains, push them and the pitches to the playing sounds, and drop
@@ -210,7 +245,7 @@ impl SoundSystem {
         self.incoming.clear();
         self.output.drain_controls(&mut self.incoming);
         let mut next_incoming = 0;
-        for sounded in &mut self.sounded {
+        for (i, sounded) in self.sounded.iter_mut().enumerate() {
             if sounded.controls.is_some() {
                 continue;
             }
@@ -219,8 +254,14 @@ impl SoundSystem {
                 .get(next_incoming)
                 .is_some_and(|c| c.id == sounded.id)
             {
-                sounded.controls = Some(self.incoming[next_incoming].clone());
+                let controls = self.incoming[next_incoming].clone();
                 next_incoming += 1;
+                if controls.stereo {
+                    // The worker decoded a multi-channel file: OpenAL plays such a
+                    // buffer unpositioned, so the sound stops attenuating and panning.
+                    self.engine.set_stereo(i);
+                }
+                sounded.controls = Some(controls);
             }
         }
         // Anything still queued belongs to a sound this side no longer tracks (stopped
@@ -250,7 +291,13 @@ impl SoundSystem {
                     continue;
                 }
                 if let Some((left, right)) = gains.next() {
-                    *control.gains.lock().unwrap() = (left, right);
+                    if control.stereo {
+                        // Unpositioned multi-channel playback: the engine's two gains are
+                        // equal; the player's volume carries them both.
+                        player.set_volume(left);
+                    } else {
+                        *control.gains.lock().unwrap() = (left, right);
+                    }
                 }
                 if let Some(pitch) = pitches.next() {
                     player.set_speed(pitch);
@@ -258,8 +305,10 @@ impl SoundSystem {
             }
         }
         // Highest index first so the lower indices stay valid. The engine iterators are
-        // dropped by now, so `remove` can borrow the engine again.
+        // dropped by now, so `remove` can borrow the engine again. A sound that played
+        // through gives its channel back.
         for i in self.finished.iter().rev() {
+            self.channels.release(self.sounded[*i].pool);
             self.engine.remove(*i);
             self.sounded.remove(*i);
         }
@@ -281,5 +330,11 @@ impl SoundSystem {
     /// than for a whole source.
     pub fn is_event_playing(&self, event: &str) -> bool {
         self.engine.is_event_playing(event)
+    }
+
+    /// The current (left, right) gains of all playing sounds, in play order (tests,
+    /// diagnostics; the output stage pushes these to the players on `tick`).
+    pub fn engine_gains(&self) -> impl Iterator<Item = (f32, f32)> + '_ {
+        self.engine.gains()
     }
 }
