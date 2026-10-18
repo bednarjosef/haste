@@ -3,6 +3,8 @@
 // and blur options.
 use std::sync::Arc;
 
+use haste_core::SectionPos;
+
 use super::{Renderer, RendererCpuMemory};
 
 impl Renderer {
@@ -62,6 +64,23 @@ impl Renderer {
     /// settles only when everything the game thread marked has been meshed and uploaded.
     pub fn meshes_pending(&self) -> usize {
         self.mesher.pending_len() + self.mesh_carry.len()
+    }
+
+    /// The version of what the renderer wants meshed: bumped whenever a finished walk
+    /// replaces the visible mask or the look crosses a 2-degree step (vanilla rebuilds
+    /// `visibleSections` on those). The feed re-checks the dirty sections it held back
+    /// as invisible whenever it changes.
+    pub fn want_version(&self) -> u64 {
+        self.want_version
+    }
+
+    /// Whether the visible set is final for `cam` / `view_distance`: no sightline data
+    /// changed since the last walk, none is in flight, and the current mask was computed
+    /// for exactly this camera and render distance. The feed's settle test waits on this,
+    /// so screenshots and benches settle once meshing the visible sections can no longer
+    /// reveal more of them.
+    pub fn occlusion_settled(&self, cam: SectionPos, view_distance: i32) -> bool {
+        !self.vis_dirty && !self.walk_in_flight && self.visible_for == Some((cam, view_distance))
     }
 
     /// CPU-side memory diagnostics for the bench's memory line: the block atlas's
