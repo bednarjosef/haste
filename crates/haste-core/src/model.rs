@@ -198,6 +198,12 @@ pub struct EntityInstance {
     pub shadow_strength: f32,
     /// `Entity.isInvisible()`: no shadow (`extractShadow` skips it) and no name tag.
     pub invisible: bool,
+    /// `Entity.displayFireAnimation()`: on fire (shared flag 0x01), not fire immune, not a
+    /// spectator. Draws the flames (`FlameFeatureRenderer`).
+    pub display_fire: bool,
+    /// `Entity.getBbWidth()` / `getBbHeight()`: the bounding box the flames are sized to.
+    pub width: f32,
+    pub height: f32,
     /// `Entity.isDiscrete()` (crouching): the name tag hides past 32 blocks and drops the
     /// see-through pass (`LivingEntityRenderer.shouldShowName`, `submitNameTag`).
     pub is_discrete: bool,
@@ -208,6 +214,11 @@ pub struct EntityInstance {
     /// ticks; death holds it at 1 for the 20-tick death animation). The renderer mixes
     /// red into the entity's colour for values above 0.
     pub hurt: f32,
+    /// Sky and block light at the entity's position, `(sky, block)`, sampled once where the
+    /// instance is built for the frame ([`Self::sample_light`]; vanilla
+    /// `EntityRenderer.getLightColorCoordinates`). `(15, 0)` (full sky) until sampled, so
+    /// instances drawn without sampling render at full sky light.
+    pub light: (u8, u8),
     /// Overlay layers drawn on top of the base model with the same transform and pose
     /// (vanilla's `RenderLayer`s: sheep wool and undercoat, horse markings, cat/wolf
     /// collars, the tropical fish pattern). Fixed-size: sheep needs two, everything else
@@ -229,6 +240,21 @@ pub struct EntityInstance {
     /// The head-slot item when it is not armour (vanilla `CustomHeadLayer`: pumpkins, mob and
     /// player heads). `None` when the head is bare or wears a helmet (drawn by `equipment`).
     pub head_item: Option<RegistryIndex>,
+}
+
+impl EntityInstance {
+    /// Samples this instance's [`Self::light`] from `world`: vanilla
+    /// `EntityRenderer.getLightColorCoordinates` probes the block containing the position half
+    /// a block up (the entity's middle), sky and block light separately. Called by the client
+    /// in the pass that builds the instances for the frame, so the renderer never re-samples.
+    pub fn sample_light(&mut self, world: &dyn crate::view::BlockView) {
+        let p = crate::BlockPos::new(
+            self.pos.x.floor() as i32,
+            (self.pos.y + 0.5).floor() as i32,
+            self.pos.z.floor() as i32,
+        );
+        self.light = (world.sky_light(p), world.block_light(p));
+    }
 }
 
 /// An equipment slot, matching vanilla `EquipmentSlot`'s wire order (the ordinals the
@@ -312,6 +338,16 @@ pub enum Decoration {
     ItemFrame(ItemFrameDecoration),
     Painting(PaintingDecoration),
     Lightning(LightningDecoration),
+    ExperienceOrb(ExperienceOrbDecoration),
+}
+
+/// The state `ExperienceOrbRenderer.submit` collects for an experience orb.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExperienceOrbDecoration {
+    /// The orb's `Value` metadata, which picks the icon tier (`ExperienceOrb.getIcon`).
+    pub value: i32,
+    /// The orb's age in ticks (plus the partial tick), driving the colour cycle.
+    pub age: f32,
 }
 
 /// The state `ItemFrameRenderer.extractRenderState` collects for an item frame.
@@ -346,4 +382,125 @@ pub struct PaintingDecoration {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LightningDecoration {
     pub seed: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A world that answers one sky/block light pair and records where it was asked.
+    struct LightWorld {
+        sky: u8,
+        block: u8,
+        asked: std::sync::Mutex<Vec<crate::BlockPos>>,
+    }
+
+    impl crate::view::BlockView for LightWorld {
+        fn block_state(&self, _pos: crate::BlockPos) -> crate::BlockStateId {
+            crate::BlockStateId::AIR
+        }
+        fn is_chunk_loaded(&self, _pos: crate::ChunkPos) -> bool {
+            true
+        }
+        fn sky_light(&self, pos: crate::BlockPos) -> u8 {
+            self.asked.lock().unwrap().push(pos);
+            self.sky
+        }
+        fn block_light(&self, _pos: crate::BlockPos) -> u8 {
+            self.block
+        }
+        fn min_y(&self) -> i32 {
+            -64
+        }
+        fn height(&self) -> i32 {
+            384
+        }
+    }
+
+    fn instance(pos: glam::DVec3) -> EntityInstance {
+        let model = CubeModel {
+            texture: Identifier::minecraft("stone"),
+            tex_width: 64,
+            tex_height: 64,
+            root: ModelPart {
+                name: "root".into(),
+                id: crate::parts::ROOT,
+                pivot: Vec3::ZERO,
+                rotation: Vec3::ZERO,
+                visible: true,
+                cubes: Vec::new(),
+                children: Vec::new(),
+            },
+        };
+        EntityInstance {
+            id: crate::EntityId(1),
+            model: std::sync::Arc::new(model),
+            pos,
+            yaw: 0.0,
+            pitch: 0.0,
+            head_yaw: 0.0,
+            scale: 1.0,
+            pose: PoseOverrides::default(),
+            body: BodyTransform::default(),
+            body_scale: Vec3::ONE,
+            skin: None,
+            nametag: None,
+            below_name: None,
+            shadow_radius: 0.5,
+            shadow_strength: 1.0,
+            invisible: false,
+            display_fire: false,
+            width: 0.6,
+            height: 1.8,
+            is_discrete: false,
+            name_tag_y: 1.8,
+            hurt: 0.0,
+            light: (15, 0),
+            overlays: Default::default(),
+            item: None,
+            decoration: None,
+            hands: [None, None],
+            equipment: Vec::new(),
+            head_item: None,
+        }
+    }
+
+    #[test]
+    fn sample_light_carries_the_world_s_light_half_a_block_up() {
+        let world = LightWorld {
+            sky: 11,
+            block: 7,
+            asked: std::sync::Mutex::new(Vec::new()),
+        };
+        let mut e = instance(glam::DVec3::new(3.2, 64.6, -7.8));
+        e.sample_light(&world);
+        assert_eq!(e.light, (11, 7));
+        // `EntityRenderer.getLightColorCoordinates` probes the block containing the position
+        // half a block up: y = 64.6 probes y = 65, not the entity's feet block.
+        assert_eq!(
+            world.asked.lock().unwrap().clone(),
+            vec![crate::BlockPos::new(3, 65, -8)]
+        );
+    }
+
+    #[test]
+    fn sample_light_below_half_stays_in_the_feet_block() {
+        let world = LightWorld {
+            sky: 11,
+            block: 7,
+            asked: std::sync::Mutex::new(Vec::new()),
+        };
+        let mut e = instance(glam::DVec3::new(3.2, 64.4, -7.8));
+        e.sample_light(&world);
+        assert_eq!(
+            world.asked.lock().unwrap().clone(),
+            vec![crate::BlockPos::new(3, 64, -8)]
+        );
+    }
+
+    #[test]
+    fn unsampled_instances_carry_full_sky_light() {
+        // Instances drawn without sampling render at full sky light (the old map's default).
+        assert_eq!(instance(glam::DVec3::ZERO).light, (15, 0));
+    }
 }

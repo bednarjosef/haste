@@ -79,6 +79,27 @@ s = find("minecraft:glowstone")[0]
 if s["light"] != 15:
     failures.append(f"glowstone light != 15: {s['light']}")
 
+# render_shape: barrier/water invisible, stone a model
+for block, props, want in [
+    ("minecraft:barrier", {}, "invisible"),
+    ("minecraft:water", {"level": "0"}, "invisible"),
+    ("minecraft:stone", {}, "model"),
+]:
+    s = find(block, **props)[0]
+    if s.get("render_shape") != want:
+        failures.append(f"{block} render_shape {s.get('render_shape')} != {want}")
+
+# suffocation (vanilla LocalPlayer.suffocatesAt -> BlockState.isSuffocating):
+# stone yes, glass no (tag excludes it), torch no (not a full cube).
+for block, want in [
+    ("minecraft:stone", True),
+    ("minecraft:glass", False),
+    ("minecraft:torch", False),
+]:
+    s = find(block)[0]
+    if s.get("suffocating") != want:
+        failures.append(f"{block} suffocating {s.get('suffocating')} != {want}")
+
 # entity dimensions: player standing/swimming exist
 edims = json.loads((root / "cache/oracle/26.3/entity_dimensions.json").read_text())
 print(f"entity_dimensions.json: {len(edims['types'])} types, player poses: {list(edims['player'].keys())}")

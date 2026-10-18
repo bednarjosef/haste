@@ -12,7 +12,8 @@
 //!   `ItemAttributeModifiers` computes it;
 //! - `minecraft:consumable`: how long an item is used and the animation played while it is;
 //! - `minecraft:tool`: what an item mines and how fast (physics turns it into its mining `Tool`);
-//! - `minecraft:glider`: the elytra (and any mod item that carries it).
+//! - `minecraft:glider`: the elytra (and any mod item that carries it);
+//! - `minecraft:use_effects`: what using the item does to the player (sprint, input speed).
 //!
 //! A missing report directory or unreadable file yields an empty table, never an error: the
 //! components report is optional data.
@@ -31,6 +32,7 @@ mod consumable;
 mod equippable;
 mod patch;
 mod tool;
+mod use_effects;
 
 #[cfg(test)]
 mod tests;
@@ -39,10 +41,12 @@ pub use attributes::AttributeModifier;
 pub use consumable::Consumable;
 pub use equippable::{parse_equippable, ItemEquippable};
 pub use tool::ToolComponent;
+pub use use_effects::UseEffects;
 
 use attributes::parse_modifiers;
 use consumable::parse_consumable;
 use patch::{dyed_color_type, PatchReader};
+use use_effects::parse_use_effects;
 
 /// Item default components: the `equippable` per `minecraft:item` registry index, and the
 /// `attribute_modifiers`, `consumable`, `tool` and `glider` sets by item name. Items without a
@@ -59,6 +63,12 @@ pub struct ItemComponents {
     foods: HashMap<Identifier, bool>,
     tools: HashMap<Identifier, ToolComponent>,
     gliders: HashSet<Identifier>,
+    use_effects: HashMap<Identifier, UseEffects>,
+    /// Items whose default components carry `minecraft:piercing_weapon` (the spears): the
+    /// weapon's optional draw sound, if the report names one.
+    piercing_weapons: HashMap<Identifier, Option<String>>,
+    /// `minecraft:minimum_attack_charge` by item (`Player.cannotAttackWithItem`).
+    minimum_attack_charges: HashMap<Identifier, f32>,
 }
 
 impl ItemComponents {
@@ -97,10 +107,32 @@ impl ItemComponents {
         &self.gliders
     }
 
+    /// The item's default `minecraft:piercing_weapon` draw sound (`weapon.makeSound`), when
+    /// the item is a spear. `Some(None)` = a spear without a sound.
+    pub fn piercing_weapon_sound(&self, item: &Identifier) -> Option<Option<&str>> {
+        self.piercing_weapons.get(item).map(|s| s.as_deref())
+    }
+
+    /// The item's default `minecraft:minimum_attack_charge` (`Player.cannotAttackWithItem`),
+    /// if it has one.
+    pub fn minimum_attack_charge(&self, item: &Identifier) -> Option<f32> {
+        self.minimum_attack_charges.get(item).copied()
+    }
+
     /// Whether item's default components carry `minecraft:glider` (vanilla
     /// `LivingEntity.canGlideUsing`'s `DataComponents.GLIDER`).
     pub fn is_glider(&self, item: &Identifier) -> bool {
         self.gliders.contains(item)
+    }
+
+    /// The item's `minecraft:use_effects`, `UseEffects.DEFAULT` when the report named none or
+    /// the item is unknown (vanilla's `getOrDefault(USE_EFFECTS, UseEffects.DEFAULT)`: every
+    /// item's prototype carries the component).
+    pub fn use_effects(&self, item: &Identifier) -> UseEffects {
+        self.use_effects
+            .get(item)
+            .copied()
+            .unwrap_or(UseEffects::DEFAULT)
     }
 
     /// `ItemAttributeModifiers.compute` for the main hand: `base` plus every main-hand modifier
@@ -158,6 +190,16 @@ impl ItemComponents {
         self.foods.insert(item, can_always_eat);
     }
 
+    /// Sets an item's default `minecraft:piercing_weapon` and its draw sound (tests).
+    pub fn insert_piercing_weapon(&mut self, item: Identifier, sound: Option<String>) {
+        self.piercing_weapons.insert(item, sound);
+    }
+
+    /// Sets an item's default `minecraft:minimum_attack_charge` (tests).
+    pub fn insert_minimum_attack_charge(&mut self, item: Identifier, charge: f32) {
+        self.minimum_attack_charges.insert(item, charge);
+    }
+
     /// How many items carry `minecraft:attribute_modifiers`.
     pub fn len(&self) -> usize {
         self.attributes.len()
@@ -179,6 +221,9 @@ impl ItemComponents {
         let mut foods: HashMap<Identifier, bool> = HashMap::new();
         let mut tools: HashMap<Identifier, ToolComponent> = HashMap::new();
         let mut gliders: HashSet<Identifier> = HashSet::new();
+        let mut use_effects: HashMap<Identifier, UseEffects> = HashMap::new();
+        let mut piercing_weapons: HashMap<Identifier, Option<String>> = HashMap::new();
+        let mut minimum_attack_charges: HashMap<Identifier, f32> = HashMap::new();
         let Ok(entries) = std::fs::read_dir(components_dir) else {
             return ItemComponents {
                 dyed_color_type: dyed_color_type(registries),
@@ -224,8 +269,29 @@ impl ItemComponents {
                     tools.insert(item.clone(), t);
                 }
             }
+            if let Some(p) = components.get("minecraft:piercing_weapon") {
+                // The draw sound the report names ("sound": "minecraft:item.spear.attack" or
+                // an inline sound object); a spear may also name none.
+                let sound = p.get("sound").and_then(|s| match s {
+                    serde_json::Value::String(n) => Some(n.clone()),
+                    serde_json::Value::Object(_) => s
+                        .get("sound_id")
+                        .and_then(|v| v.as_str())
+                        .map(|n| n.to_owned()),
+                    _ => None,
+                });
+                piercing_weapons.insert(item.clone(), sound);
+            }
+            if let Some(c) = components.get("minecraft:minimum_attack_charge") {
+                if let Some(c) = c.as_f64() {
+                    minimum_attack_charges.insert(item.clone(), c as f32);
+                }
+            }
             if components.get("minecraft:glider").is_some() {
-                gliders.insert(item);
+                gliders.insert(item.clone());
+            }
+            if let Some(e) = components.get("minecraft:use_effects") {
+                use_effects.insert(item.clone(), parse_use_effects(e));
             }
         }
         let len = registries.len("minecraft:item");
@@ -243,6 +309,9 @@ impl ItemComponents {
             foods,
             tools,
             gliders,
+            use_effects,
+            piercing_weapons,
+            minimum_attack_charges,
         }
     }
 

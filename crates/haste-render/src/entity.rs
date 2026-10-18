@@ -13,7 +13,7 @@ use haste_core::model::{
     ModelPart, PaintingDecoration, PoseOverrides,
 };
 use haste_core::parts::{self, PartId};
-use haste_core::view::{BlockView, CollisionShapes};
+use haste_core::view::BlockView;
 use haste_core::{BlockPos, EntityId, Identifier};
 
 use crate::gui::Shelf;
@@ -22,6 +22,8 @@ mod atlas;
 mod block_entities;
 mod cape;
 mod equipment;
+mod experience_orb;
+mod flame;
 mod item;
 mod item_frame;
 mod painting;
@@ -53,11 +55,26 @@ pub(crate) use model_parts::{
 };
 #[cfg(test)]
 use vertex::HURT_RED_STRENGTH;
-pub(crate) use vertex::{entity_shade, hurt_color, max_local_raw_brightness, push_world_quad};
+pub(crate) use vertex::{
+    entity_shade, hand_normal_rotation, hurt_color, max_local_raw_brightness, push_world_quad,
+};
 pub use vertex::{lightmap_brightness, name_tag_visible, shadow_piece_alpha};
 use vertex::{make_vertex_buffer, parse_tex, push_shadow_quad};
 
 const ATLAS_SIZE: u32 = 2048;
+/// Vanilla `Entity.shouldRenderAtSqrDistance`: whether an entity whose model is `size`
+/// blocks and has entity `scale` should be drawn at squared distance `dist_sq`, given the
+/// `view_scale` (`Entity.viewScale`, from `options.entityDistanceScaling`).
+pub fn should_render_at_sqr_distance(
+    size: f32,
+    entity_scale: f32,
+    dist_sq: f64,
+    view_scale: f32,
+) -> bool {
+    let size = if size.is_nan() { 1.0 } else { size };
+    let limit = 64.0 * size.max(1.0) * entity_scale * view_scale;
+    dist_sq < f64::from(limit * limit)
+}
 
 /// Vanilla renders the player model at 15/16 scale.
 const PLAYER_SCALE: f32 = 0.9375;
@@ -287,7 +304,6 @@ pub struct EntityRenderer {
     shadow_buffer: wgpu::Buffer,
     shadow_capacity: usize,
     shadow_vertices: Vec<EntityVertex>,
-    lights: HashMap<EntityId, (u8, u8)>,
     pub nametags: Vec<Nametag>,
     hand_buffer: wgpu::Buffer,
     hand_capacity: usize,
@@ -317,6 +333,7 @@ pub struct EntityRenderer {
     /// This frame's beam radius scale (vanilla `BeaconRenderer.extract`: 1 within 96 blocks
     /// or while scoping, else distance / 96), set per frame by the renderer.
     beam_radius_scale: f32,
+    view_scale: f32,
     /// The beam and portal pipelines (see [`crate::blockentity::BeamPipelines`]).
     pub beams: crate::blockentity::BeamPipelines,
     /// The default font, for world-space sign text (glyph pages land in the entity atlas).
@@ -328,17 +345,15 @@ pub struct EntityRenderer {
 }
 
 impl EntityRenderer {
-    /// Sky/block light at each entity's position (sampled by the caller with the world at hand).
-    /// Entities without an entry are drawn at full sky light.
-    pub fn set_lights(&mut self, lights: impl IntoIterator<Item = (EntityId, (u8, u8))>) {
-        self.lights.clear();
-        self.lights.extend(lights);
-    }
-
     /// The beams' radius scale for this frame (vanilla `BeaconRenderer.extract`: 1 within 96
     /// blocks or while scoping, else the horizontal distance / 96).
     pub fn set_beam_radius_scale(&mut self, scale: f32) {
         self.beam_radius_scale = scale;
+    }
+    /// Vanilla `Entity.viewScale` for the entity render distance (from
+    /// `options.entityDistanceScaling`, 0.5..=5.0, default 1.0).
+    pub fn set_view_scale(&mut self, scale: f32) {
+        self.view_scale = scale;
     }
     /// Poses every entity into the vertex buffer. `skip` is the entity the camera is (not drawn
     /// in first person). Positions are camera-relative (`camera` subtracted in f64) like the
@@ -349,8 +364,10 @@ impl EntityRenderer {
         skip: Option<EntityId>,
         camera: glam::DVec3,
         frustum: &[glam::Vec4; 6],
+        orientation: glam::Quat,
         assets: &mut Assets,
     ) {
+        let view_scale = self.view_scale;
         self.vertices.clear();
         self.nametags.clear();
         self.drawn = 0;
@@ -365,15 +382,14 @@ impl EntityRenderer {
             let (size, half) = model_extents(&e.model.root);
             let rel = e.pos - camera;
             let dist2 = rel.length_squared();
-            let limit = 64.0 * size.max(1.0) * e.scale;
-            if dist2 > f64::from(limit * limit) {
+            if !should_render_at_sqr_distance(size, e.scale, dist2, view_scale) {
                 continue;
             }
             if !aabb_in_frustum(frustum, rel, half + 0.5) {
                 continue;
             }
-            let (sky, block) = self.lights.get(&e.id).copied().unwrap_or((15, 0));
-            // The map is (sky, block); the vertex wants (block, sky).
+            let (sky, block) = e.light;
+            // The instance's light is (sky, block); the vertex wants (block, sky).
             let light = (block, sky);
             if let Some(item) = &e.item {
                 let start = self.vertices.len();
@@ -393,6 +409,15 @@ impl EntityRenderer {
                     // The lightning bolt draws through the weather pass's own additive
                     // pipeline (`RenderPipelines.LIGHTNING`); nothing here.
                     Decoration::Lightning(_) => {}
+                    Decoration::ExperienceOrb(o) => self.emit_experience_orb(
+                        e,
+                        o.value,
+                        o.age,
+                        camera,
+                        light,
+                        orientation,
+                        assets,
+                    ),
                 }
                 if self.vertices.len() > start {
                     self.drawn += 1;
@@ -400,7 +425,6 @@ impl EntityRenderer {
                 continue;
             }
             let (texture, scale) = texture_and_scale(e);
-            let rect = self.texture_rect(&texture, assets);
             // `LivingEntityRenderer.setupRotations`: the body yaw turns the whole model, except a
             // sleeping entity, whose pose replaces that yaw with its own rotation sequence. The
             // body transform (death tilt, sleeping, upside-down, player flying/swimming pitch) is
@@ -423,41 +447,56 @@ impl EntityRenderer {
                 * body_matrix(&e.body)
                 * Mat4::from_scale(s / 16.0);
             let start = self.vertices.len();
-            emit_part_tinted(
-                &mut self.vertices,
-                &e.model,
-                &e.model.root,
-                &e.pose,
-                root,
-                rect,
-                light,
-                e.hurt,
-                [1.0; 3],
-            );
-            // Overlay layers: the same transform and pose, each with its own texture and
-            // tint (vanilla's RenderLayers, e.g. SheepWoolLayer's dyed copy of the model).
-            for overlay in e.overlays.iter().flatten() {
-                let Some((oroot, hurt)) = self.overlay_root(e, &overlay.model, root, assets) else {
-                    continue;
-                };
-                let orect = self.texture_rect(&overlay.model.texture, assets);
+            // `LivingEntityRenderer.submit`/`getRenderType`: an invisible entity draws no body
+            // (`isBodyVisible` false -> null render type; the translucent ghost a teammate or
+            // spectator would see needs the team inputs, not modelled yet) and no copy-model
+            // overlay layers (`RenderLayer.coloredCutoutModelCopyLayerRender` skips invisible
+            // states). The equipment layers stay: `HumanoidArmorLayer`, `ItemInHandLayer`,
+            // `CustomHeadLayer` and `WingsLayer` do not check invisibility, so invisible
+            // entities still wear armour and hold items.
+            if !e.invisible {
+                let rect = self.texture_rect(&texture, assets);
                 emit_part_tinted(
                     &mut self.vertices,
-                    &overlay.model,
-                    &overlay.model.root,
+                    &e.model,
+                    &e.model.root,
                     &e.pose,
-                    oroot,
-                    orect,
+                    root,
+                    rect,
                     light,
-                    hurt,
-                    overlay.tint,
+                    e.hurt,
+                    [1.0; 3],
                 );
+                // Overlay layers: the same transform and pose, each with its own texture and
+                // tint (vanilla's RenderLayers, e.g. SheepWoolLayer's dyed copy of the model).
+                for overlay in e.overlays.iter().flatten() {
+                    let Some((oroot, hurt)) = self.overlay_root(e, &overlay.model, root, assets)
+                    else {
+                        continue;
+                    };
+                    let orect = self.texture_rect(&overlay.model.texture, assets);
+                    emit_part_tinted(
+                        &mut self.vertices,
+                        &overlay.model,
+                        &overlay.model.root,
+                        &e.pose,
+                        oroot,
+                        orect,
+                        light,
+                        hurt,
+                        overlay.tint,
+                    );
+                }
             }
             self.emit_equipment(e, root, light, assets);
+            // `EntityRenderDispatcher.submit`: the fire after the entity's own renderer.
+            if e.display_fire {
+                self.emit_flame(e, (e.pos - camera).as_vec3(), orientation, assets);
+            }
             if self.vertices.len() > start {
                 self.drawn += 1;
             }
-            if let Some(name) = &e.nametag {
+            if let Some(name) = e.nametag.as_ref().filter(|_| !e.invisible) {
                 // `EntityRenderer.extractNameTags`: within 64 blocks, and past 32 when
                 // crouching (`LivingEntityRenderer.shouldShowName`). Invisible entities never
                 // reach here (haste-entity drops their tag). The anchor is the NAME_TAG
