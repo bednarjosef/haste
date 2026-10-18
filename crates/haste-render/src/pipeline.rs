@@ -164,7 +164,12 @@ pub fn upload_atlas(
         mip_level_count: mip_levels,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        // Vanilla's atlas is RGBA8_UNORM (`TextureAtlas.createTexture`): the GPU's
+        // bilinear and trilinear filtering blends the encoded sRGB values, and
+        // the terrain shader multiplies the raw encoded sample by the vertex
+        // colour (see `shade` in chunk.wgsl). An sRGB texture would filter in
+        // linear light and darken every blend between unlike texels.
+        format: wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_DST
             | wgpu::TextureUsages::COPY_SRC,
