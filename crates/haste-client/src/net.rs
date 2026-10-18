@@ -1384,6 +1384,19 @@ impl Session {
                     ));
             }
         }
+        if self.player.int.item_tags_missing() {
+            if let Some(t) = regs
+                .tags
+                .iter()
+                .find(|t| t.registry == Identifier::minecraft("item"))
+            {
+                self.player
+                    .int
+                    .set_item_tags(haste_physics::mining::BlockTags::new(
+                        t.tags.iter().map(|t| (t.name.clone(), t.entries.clone())),
+                    ));
+            }
+        }
         let player_packet = self.player.handle(&p, out);
         if player_packet {
             for (pos, state) in self.player.take_world_edits() {

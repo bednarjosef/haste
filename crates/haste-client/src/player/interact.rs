@@ -185,6 +185,9 @@ pub struct Interaction {
     pub effects: HashMap<i32, EffectData>,
     tools: Option<Arc<ToolTable>>,
     tags: Option<BlockTags>,
+    /// `minecraft:item` tags as the server synced them (`update_tags`): what an animal eats
+    /// (`Animal.isFood`) for the entity-use fall-through.
+    item_tags: Option<BlockTags>,
     effect_ids: Option<EffectIds>,
     /// `minecraft:data_component_type` names by protocol id, for decoding the held stack's
     /// component patch (`haste_protocol::wire::components::read_patch`).
@@ -331,6 +334,16 @@ impl Interaction {
 
     pub fn set_block_tags(&mut self, tags: BlockTags) {
         self.tags = Some(tags);
+    }
+
+    /// The item tags the server synced (`update_tags`, registry `minecraft:item`).
+    pub fn set_item_tags(&mut self, tags: BlockTags) {
+        self.item_tags = Some(tags);
+    }
+
+    /// Whether no `update_tags` for `minecraft:item` has arrived yet.
+    pub(crate) fn item_tags_missing(&self) -> bool {
+        self.item_tags.is_none()
     }
 
     pub fn set_tools(&mut self, tools: Arc<ToolTable>) {
