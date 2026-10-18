@@ -54,6 +54,7 @@ mod effects;
 mod held_item;
 mod packets;
 mod pick;
+mod place;
 mod step;
 mod use_item;
 use effects::EffectIds;

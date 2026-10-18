@@ -14,6 +14,7 @@ use haste_protocol::packets::play::serverbound as sb;
 use haste_protocol::ClientboundPlay;
 use haste_protocol::ServerboundPlay;
 
+mod click_results;
 mod use_item;
 
 const ME: EntityId = EntityId(7);
@@ -27,14 +28,14 @@ const ITEM_ENTITY: RegistryIndex = RegistryIndex(0);
 const EXPERIENCE_ORB: RegistryIndex = RegistryIndex(1);
 const ARROW: RegistryIndex = RegistryIndex(2);
 const SPECTRAL_ARROW: RegistryIndex = RegistryIndex(3);
-const ZOMBIE: RegistryIndex = RegistryIndex(5);
+pub(super) const ZOMBIE: RegistryIndex = RegistryIndex(5);
 const PLAYER: RegistryIndex = RegistryIndex(6);
 const ENDER_DRAGON: RegistryIndex = RegistryIndex(7);
 const VILLAGER: RegistryIndex = RegistryIndex(12);
 
 /// A small GameData written to a temp dir: air, stone (1.5, needs a tool), dirt (0.5),
 /// bedrock (-1), short grass (0, no collision), obsidian (50, needs a tool).
-fn data() -> &'static haste_data::GameData {
+pub(super) fn data() -> &'static haste_data::GameData {
     static D: OnceLock<haste_data::GameData> = OnceLock::new();
     D.get_or_init(|| {
         let dir = std::env::temp_dir().join(format!("haste-interact-test-{}", std::process::id()));
@@ -89,6 +90,8 @@ fn data() -> &'static haste_data::GameData {
                     "shield",
                     "potion",
                     "iron_spear",
+                    "dirt",
+                    "writable_book",
                 ]),
                 entries(&[
                     "speed",
@@ -159,6 +162,14 @@ fn data() -> &'static haste_data::GameData {
             ),
         )
         .unwrap();
+        std::fs::write(
+            dir.join("block_sounds.json"),
+            r#"{"sound_types": [{"break": "minecraft:block.grass.break", "step": "minecraft:block.grass.step",
+                "place": "minecraft:block.grass.place", "hit": "minecraft:block.grass.hit",
+                "fall": "minecraft:block.grass.fall", "volume": 1.0, "pitch": 1.0}],
+            "blocks": {"minecraft:dirt": {"sound": 0}, "minecraft:stone": {"sound": 0}}}"#,
+        )
+        .unwrap();
         haste_data::GameData::load_from(&reports, Some(&dir.join("block_shapes.json"))).unwrap()
     })
 }
@@ -203,7 +214,7 @@ fn tools() -> Arc<ToolTable> {
     Arc::new(t)
 }
 
-fn item(i: u32) -> ItemStackData {
+pub(super) fn item(i: u32) -> ItemStackData {
     ItemStackData {
         count: 1,
         item: Some(RegistryIndex(i)),
@@ -241,18 +252,18 @@ fn item_components() -> Arc<haste_data::ItemComponents> {
     Arc::new(c)
 }
 
-struct Rig {
-    p: LocalPlayer,
-    w: TestWorld,
-    entities: Vec<(EntityId, Aabb)>,
-    types: Vec<RegistryIndex>,
+pub(super) struct Rig {
+    pub(super) p: LocalPlayer,
+    pub(super) w: TestWorld,
+    pub(super) entities: Vec<(EntityId, Aabb)>,
+    pub(super) types: Vec<RegistryIndex>,
     /// The world border the rig's ticks gate on (`None`: the unlimited default).
-    border: Option<crate::world_border::WorldBorder>,
+    pub(super) border: Option<crate::world_border::WorldBorder>,
 }
 
 impl Rig {
     /// Player at (0.5, 0, 0.5) on a stone floor (top y = 0), looking straight down at (0, -1, 0).
-    fn new(mode: GameMode) -> Rig {
+    pub(super) fn new(mode: GameMode) -> Rig {
         let mut p = LocalPlayer::with_entity(ME, mode);
         p.int.set_tools(tools());
         p.int.set_block_tags(BlockTags::new([(
@@ -287,12 +298,12 @@ impl Rig {
     }
 
     /// An entity the crosshair could hit, with its `minecraft:entity_type` registry index.
-    fn add_entity(&mut self, id: EntityId, aabb: Aabb, type_index: RegistryIndex) {
+    pub(super) fn add_entity(&mut self, id: EntityId, aabb: Aabb, type_index: RegistryIndex) {
         self.entities.push((id, aabb));
         self.types.push(type_index);
     }
 
-    fn tick(&mut self, i: InteractInput) -> Vec<ServerboundPlay> {
+    pub(super) fn tick(&mut self, i: InteractInput) -> Vec<ServerboundPlay> {
         self.p.set_interact(i);
         let mut out = Vec::new();
         let env = InteractEnv {
@@ -326,7 +337,7 @@ impl Rig {
     }
 }
 
-const ATTACK: InteractInput = InteractInput {
+pub(super) const ATTACK: InteractInput = InteractInput {
     attack: true,
     use_item: false,
     pick_block: false,
@@ -339,7 +350,7 @@ const ATTACK: InteractInput = InteractInput {
     use_clicks: 0,
 };
 
-fn actions(out: &[ServerboundPlay]) -> Vec<(i32, i32)> {
+pub(super) fn actions(out: &[ServerboundPlay]) -> Vec<(i32, i32)> {
     out.iter()
         .filter_map(|p| match p {
             ServerboundPlay::PlayerAction(a) => Some((a.status, a.sequence)),
@@ -617,11 +628,19 @@ fn several_queued_use_clicks_in_one_tick_each_count() {
         use_item: true,
         ..Default::default()
     });
+    // Each click: the main hand's use_item_on, its Pass's use_item, and the off hand's
+    // use_item_on (vanilla's useItemOn sends the packet for the empty off hand too, inside
+    // startPrediction, before performUseItemOn's empty-hand check).
     let uses = out
+        .iter()
+        .filter(|p| matches!(p, ServerboundPlay::UseItem(_)))
+        .count();
+    assert_eq!(uses, 2, "{out:?}");
+    let uses_on = out
         .iter()
         .filter(|p| matches!(p, ServerboundPlay::UseItemOn(_)))
         .count();
-    assert_eq!(uses, 2, "{out:?}");
+    assert_eq!(uses_on, 4, "{out:?}");
 }
 
 #[test]
@@ -1424,55 +1443,7 @@ fn a_held_attack_swings_the_hand_every_tick() {
     assert!(r.p.hand.is_swinging(), "still mining, still swinging");
 }
 
-/// A right click with an item in hand swings it (`Minecraft.startUseItem` swings the result of
-/// `InteractionResult.SUCCESS`) and puts the hand down for the item switch.
-#[test]
-fn a_use_swings_the_hand_and_drops_it() {
-    let mut r = Rig::new(GameMode::Survival);
-    let place = InteractInput {
-        use_item: true,
-        ..InteractInput::default()
-    };
-    // The hotbar's first slot holds a block to place.
-    r.p.int.hotbar[0] = item(1);
-    r.tick(place);
-    assert!(r.p.hand.is_swinging(), "the use started a swing");
-    // `player.itemUsed(hand)` zeroed the equip progress, and the hand started at 0 (vanilla's
-    // field default), so the pair for this tick is (0, 0).
-    assert_eq!(r.p.hand.equip(), (0.0, 0.0));
-    // The held item is new this tick, so the shown item still differs from it: the progress
-    // stays 0 and the new item is shown. The tick after brings the hand back up towards
-    // ((itemSwapTicker + 1) / (20 / attack_speed))^3 = (2 / 5)^3 = 0.064, under the 0.1 at
-    // which the item is switched.
-    let item = r.p.main_hand().item;
-    r.p.hand.tick(
-        0.0,
-        (0.0, 90.0),
-        true,
-        false,
-        crate::hand::HeldStack::of(item),
-        4.0,
-        false,
-    );
-    assert_eq!(r.p.hand.equip(), (0.0, 0.0));
-    assert_eq!(r.p.hand.shown_item(), item);
-    r.p.hand.tick(
-        0.0,
-        (0.0, 90.0),
-        true,
-        false,
-        crate::hand::HeldStack::of(item),
-        4.0,
-        false,
-    );
-    assert!(
-        (r.p.hand.equip().1 - 0.064).abs() < 1e-6,
-        "{}",
-        r.p.hand.equip().1
-    );
-}
-
-const USE: InteractInput = InteractInput {
+pub(super) const USE: InteractInput = InteractInput {
     attack: false,
     use_item: true,
     pick_block: false,
