@@ -574,6 +574,30 @@ fn the_held_items_transform_is_vanillas_apply_item_arm_transform() {
 }
 
 #[test]
+fn the_eat_use_animation_replaces_the_swing() {
+    // `FirstPersonHandsAndItemsRenderer.submitArmWithItem`'s EAT/DRINK branch: while the main
+    // hand uses a consumable with ticks left, `item_arm_matrix` is `applyEatTransform` then
+    // `applyItemArmTransform`, not the swing.
+    let mut h = still_hand();
+    h.item = Some(haste_core::RegistryIndex(1));
+    let swing = item_arm_matrix(&h, 0.0);
+    h.use_eat = true;
+    h.use_remaining = 20;
+    h.use_duration = 32;
+    let eating = item_arm_matrix(&h, 0.0);
+    assert!(
+        !close(eating, swing, 1e-5),
+        "the eat pose differs from the swing"
+    );
+    // A use with no ticks left draws the swing (vanilla checks useItemRemainingTicks > 0).
+    h.use_remaining = 0;
+    assert!(
+        close(item_arm_matrix(&h, 0.0), swing, 1e-6),
+        "remaining 0 keeps the swing"
+    );
+}
+
+#[test]
 fn the_swing_is_the_interpolated_attack_value() {
     // A swing's tick pair lerps into the arm and item transforms at the partial tick
     // (vanilla interpolates `swingAnimation` the same way before both transforms read it):
