@@ -2359,6 +2359,7 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
         renderer.set_animation_tick(animation_tick);
         renderer.set_game_time(view.world_age);
         renderer.set_lightmap_frame(lightmap);
+        renderer.set_cloud_status(frame::cloud_status(session.options.clouds));
         {
             let snapshot = shared
                 .particle_snapshots
@@ -3101,6 +3102,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         renderer.set_lightmap_frame(lightmap);
         renderer.set_menu_blur_radius(options.menu_background_blurriness);
         renderer.set_view_scale(options.entity_distance_scaling);
+        renderer.set_cloud_status(frame::cloud_status(options.clouds));
         if let Ok(stats) = renderer.render(&frame) {
             last_stats = stats;
             fps.frame(&stats);

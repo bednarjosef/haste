@@ -205,7 +205,8 @@ impl RelativeCameraPos {
 
 /// Vanilla `buildMesh`: every cell of the disc of `radius_cells` cells around the
 /// camera's cell (x² + z² <= radius²), taking the cloud state from the texture with
-/// wraparound.
+/// wraparound. `fancy` is vanilla's `extrude`: the extruded boxes of the FANCY mode or
+/// the flat cells of the FAST one.
 pub(super) fn build_mesh(
     out: &mut Vec<CloudVertex>,
     texture: &CloudTexture,
@@ -213,21 +214,24 @@ pub(super) fn build_mesh(
     center_z: i32,
     relative_pos: RelativeCameraPos,
     radius_cells: i32,
+    fancy: bool,
 ) {
     for ring in 0..=2 * radius_cells {
         for x in -ring..=ring {
             let z = ring - x.abs();
             if z >= 0 && z <= radius_cells && x * x + z * z <= radius_cells * radius_cells {
                 if z != 0 {
-                    try_build_cell(out, texture, center_x, center_z, x, -z, relative_pos);
+                    try_build_cell(out, texture, center_x, center_z, x, -z, relative_pos, fancy);
                 }
-                try_build_cell(out, texture, center_x, center_z, x, z, relative_pos);
+                try_build_cell(out, texture, center_x, center_z, x, z, relative_pos, fancy);
             }
         }
     }
 }
 
 /// Vanilla `tryBuildCell`: the cell's texture state decides whether anything is drawn.
+/// The parameter list mirrors vanilla's own.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn try_build_cell(
     out: &mut Vec<CloudVertex>,
     texture: &CloudTexture,
@@ -236,12 +240,17 @@ pub(super) fn try_build_cell(
     x: i32,
     z: i32,
     relative_pos: RelativeCameraPos,
+    fancy: bool,
 ) {
     let cell = texture.cell(center_x + x, center_z + z);
     if cell.empty {
         return;
     }
-    build_extruded_cell(out, x, z, cell, relative_pos);
+    if fancy {
+        build_extruded_cell(out, x, z, cell, relative_pos);
+    } else {
+        super::flat::build_flat_cell(out, x, z);
+    }
 }
 
 /// Vanilla `buildExtrudedCell`: top and bottom by the camera's position relative to the
@@ -256,36 +265,45 @@ pub(super) fn build_extruded_cell(
     relative_pos: RelativeCameraPos,
 ) {
     if relative_pos != RelativeCameraPos::BelowClouds {
-        encode_face(out, x, z, Dir::Up, false);
+        encode_face(out, x, z, Dir::Up, false, false);
     }
     if relative_pos != RelativeCameraPos::AboveClouds {
-        encode_face(out, x, z, Dir::Down, false);
+        encode_face(out, x, z, Dir::Down, false, false);
     }
     if cell.north && z > 0 {
-        encode_face(out, x, z, Dir::North, false);
+        encode_face(out, x, z, Dir::North, false, false);
     }
     if cell.south && z < 0 {
-        encode_face(out, x, z, Dir::South, false);
+        encode_face(out, x, z, Dir::South, false, false);
     }
     if cell.west && x > 0 {
-        encode_face(out, x, z, Dir::West, false);
+        encode_face(out, x, z, Dir::West, false, false);
     }
     if cell.east && x < 0 {
-        encode_face(out, x, z, Dir::East, false);
+        encode_face(out, x, z, Dir::East, false, false);
     }
     if x.abs() <= 1 && z.abs() <= 1 {
         for dir in Dir::ALL {
-            encode_face(out, x, z, dir, true);
+            encode_face(out, x, z, dir, false, true);
         }
     }
 }
 
 /// Vanilla `encodeFace` + the vertex shader's position math: the face's corners in
 /// camera-cell-relative blocks (the per-frame offset inside the cell comes from the
-/// uniform), two triangles per quad like vanilla's quad index buffer. `inside` faces
-/// reverse the vertex order (vanilla's `FLAG_INSIDE_FACE`).
-fn encode_face(out: &mut Vec<CloudVertex>, x: i32, z: i32, dir: Dir, inside: bool) {
-    let shade = dir.shade();
+/// uniform), two triangles per quad like vanilla's quad index buffer. `top_color` is
+/// vanilla's `FLAG_USE_TOP_COLOR` (the face is shaded `faceColors[1]`, the top colour,
+/// whatever its direction — the flat cells' down faces); `inside` faces reverse the
+/// vertex order (vanilla's `FLAG_INSIDE_FACE`).
+pub(super) fn encode_face(
+    out: &mut Vec<CloudVertex>,
+    x: i32,
+    z: i32,
+    dir: Dir,
+    top_color: bool,
+    inside: bool,
+) {
+    let shade = if top_color { 1.0 } else { dir.shade() };
     let corner = |c: [f32; 3]| CloudVertex {
         pos: [
             (x as f32 + c[0]) * CELL_SIZE,
