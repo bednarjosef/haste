@@ -17,7 +17,7 @@ impl EntityRenderer {
         use crate::blockentity::{
             sign_dark_color, sign_glow_color, sign_line_metrics, sign_text_transform,
         };
-        let Some(text) = inst.text.clone() else {
+        let Some(text) = inst.text.as_ref() else {
             return;
         };
         let (sky, block) = inst.light;

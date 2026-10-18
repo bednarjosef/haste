@@ -18,13 +18,13 @@ impl EntityRenderer {
         use crate::blockentity::{
             piston_drawn_states, piston_extended_progress, piston_quads, PistonQuad,
         };
-        let Some(p) = inst.piston.clone() else {
+        let Some(p) = inst.piston.as_ref() else {
             return;
         };
         // The progress pair already folds the partial tick (the client's anim ends).
         let progress = p.progress.end;
-        let (block_state, head_state) = piston_drawn_states(&p, progress);
-        let off = piston_extended_progress(&p, progress);
+        let (block_state, head_state) = piston_drawn_states(p, progress);
+        let off = piston_extended_progress(p, progress);
         // Vanilla `getMovementDirection`: the facing while extending, its opposite
         // retracting.
         let movement = if p.extending {
