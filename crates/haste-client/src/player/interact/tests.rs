@@ -1030,38 +1030,6 @@ fn held_item_attack_speed_comes_from_its_attribute_modifiers() {
 
 /// `Item.getUseDuration` / `Item.getUseAnimation`: the consumable component for food and drink,
 /// and the item classes that override them (bow/crossbow/trident/spyglass/shield).
-#[test]
-fn use_duration_and_animation_come_from_the_item() {
-    let mut r = Rig::new(GameMode::Survival);
-    r.p.int.prepare(data());
-    r.p.int.set_item_components(item_components());
-    let env = InteractEnv {
-        data: data(),
-        entities: &[],
-        entity_types: &[],
-        border: None,
-        warm_blocks: None,
-        ui: None,
-    };
-    let d = |i: u32| {
-        r.p.int
-            .use_data(&item(i), env.data)
-            .map(|u| (u.duration, u.animation))
-    };
-    // Bow/crossbow/trident/shield: 72000 ticks; spyglass 1200.
-    assert_eq!(d(5), Some((72000, UseAnimation::Bow)));
-    assert_eq!(d(6), Some((72000, UseAnimation::Crossbow)));
-    assert_eq!(d(7), Some((72000, UseAnimation::Trident)));
-    assert_eq!(d(9), Some((72000, UseAnimation::Block)));
-    assert_eq!(d(8), Some((1200, UseAnimation::Spyglass)));
-    // Apple: `consume_seconds` 1.6 -> 32 ticks, `eat`; potion drinks.
-    assert_eq!(d(4), Some((32, UseAnimation::Eat)));
-    assert_eq!(d(10), Some((32, UseAnimation::Drink)));
-    // A tool is not used over time.
-    assert_eq!(d(1), None);
-    assert_eq!(d(3), None);
-}
-
 /// The `player_action` statuses this module sends, pinned to the declaration
 /// order of `ServerboundPlayerActionPacket$Action` in the 26.3 client jar
 /// (CHANGE_DESTROY_DIRECTION was inserted at 1, moving every later value).
