@@ -56,27 +56,36 @@ impl Ui {
     }
 
     /// What the HUD drew of the player's vitals, at debug level (the frame path stays clean
-    /// when debug logging is off): the game mode the HUD renders for and the heart and food
-    /// sprite counts, so a "no health, no hunger" report can be traced to the side that has
-    /// them wrong — the state, or the Java HUD that reads it (`Hud.extractHotbarAndDecorations`
-    /// draws them only while `gameMode.canHurtPlayer()`).
+    /// when debug logging is off): the game mode the HUD renders for and the heart, food and
+    /// attack indicator sprite counts, so a "no health, no hunger" report can be traced to
+    /// the side that has them wrong — the state, or the Java HUD that reads it
+    /// (`Hud.extractHotbarAndDecorations` draws them only while `gameMode.canHurtPlayer()`).
     fn trace_vitals(&self, f: &GuiFrame) {
         if !tracing::enabled!(tracing::Level::DEBUG) {
             return;
         }
-        let (hearts, food) = f.commands.iter().fold((0usize, 0usize), |(h, fd), c| {
-            if let GuiCommand::Sprite { sprite, .. } | GuiCommand::SpriteRegion { sprite, .. } = c {
-                let path = sprite.path();
-                (
-                    h + usize::from(path.starts_with("hud/heart")),
-                    fd + usize::from(path.starts_with("hud/food")),
-                )
-            } else {
-                (h, fd)
-            }
-        });
+        let (hearts, food, attack) =
+            f.commands
+                .iter()
+                .fold((0usize, 0usize, 0usize), |(h, fd, a), c| {
+                    if let GuiCommand::Sprite { sprite, .. }
+                    | GuiCommand::SpriteRegion { sprite, .. } = c
+                    {
+                        let path = sprite.path();
+                        (
+                            h + usize::from(path.starts_with("hud/heart")),
+                            fd + usize::from(path.starts_with("hud/food")),
+                            a + usize::from(path.starts_with("hud/crosshair_attack_indicator")),
+                        )
+                    } else {
+                        (h, fd, a)
+                    }
+                });
         let mode = self.state(|s| s.game_mode);
-        tracing::debug!("hud frame: {mode:?} hearts {hearts} food {food}");
+        let charge = self.state(|s| s.attack_strength);
+        tracing::debug!(
+            "hud frame: {mode:?} hearts {hearts} food {food} attack {attack} charge {charge:?}"
+        );
     }
 
     /// Whether the F3 debug overlay is on (its strings are only built then).
@@ -121,9 +130,28 @@ impl Ui {
         self.state(|s| s.vitals.eye_in_water = v);
     }
 
+    /// The player's damage cooldown (vanilla `LivingEntity.damageCooldownTime`, set by a
+    /// hit or a heal and ticked down by the session): the HUD's heart blink gates on it
+    /// (`Hud.extractPlayerHealth` blinks while it is positive).
+    pub fn set_damage_cooldown(&self, ticks: i32) {
+        self.state(|s| s.vitals.damage_cooldown_ticks = ticks);
+    }
+
     /// The mount HUD's values for this tick (vanilla `Hud`: the vehicle's hearts, the charged
     /// jump bar), `None` on foot.
     pub fn set_mount_hud(&self, mount: Option<haste_jvm::MountHud>) {
         self.state(|s| s.mount = mount);
+    }
+
+    /// The attack indicator's charge for this tick (vanilla `Player.getAttackStrengthScale`'s
+    /// ticker and the held item's delay), from the first-person hand's tick.
+    pub fn set_attack_strength(&self, charge: haste_jvm::AttackStrengthHud) {
+        self.state(|s| s.attack_strength = charge);
+    }
+
+    /// Whether the crosshair picks a living, alive entity in reach this tick (vanilla
+    /// `Minecraft.crosshairPickEntity`): the attack indicator's full icon.
+    pub fn set_crosshair_pick(&self, pick: bool) {
+        self.state(|s| s.crosshair_pick_living = pick);
     }
 }

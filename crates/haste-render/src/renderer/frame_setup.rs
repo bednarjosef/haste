@@ -3,7 +3,7 @@
 // particle and entity preparation, and the per-tick setters.
 use std::sync::Arc;
 
-use haste_core::view::BlockView;
+use haste_core::view::{BlockView, CollisionShapes};
 
 use super::{Camera, FrameInput, LightmapFrame, Renderer, SpinWarp};
 
@@ -44,14 +44,14 @@ impl Renderer {
     pub fn sample_world(
         &mut self,
         world: &dyn BlockView,
-        shapes: &dyn haste_core::view::CollisionShapes,
+        shapes: &haste_data::BlockShapes,
         frame: &FrameInput,
     ) {
         self.prepare_shadows(world, shapes, frame);
         // Vanilla `Camera.extractRenderState`: a spectator camera inside a solid-render
         // block draws with `smartCull` off, so the caves around it draw.
         let eye_block = haste_core::BlockPos::from_dvec3(frame.camera.pos);
-        self.cull_sections = crate::occlusion::cull_sections(
+        self.cull_sections = cull_sections(
             self.camera_spectator,
             self.baked.is_full_opaque(world.block_state(eye_block)),
         );
@@ -149,7 +149,7 @@ impl Renderer {
     pub fn prepare_shadows(
         &mut self,
         world: &dyn BlockView,
-        shapes: &dyn haste_core::view::CollisionShapes,
+        shapes: &haste_data::BlockShapes,
         frame: &FrameInput,
     ) {
         // `Level.getSkyDarken` = (int)(15 - SKY_LIGHT_LEVEL) off the day timeline; skyless
@@ -185,4 +185,11 @@ impl Renderer {
     pub fn set_particle_types(&mut self, types: &Arc<crate::particles::ParticleTypes>) {
         self.particles.set_types(types);
     }
+}
+
+/// Whether the section occlusion cull runs this frame. Vanilla `Camera.extractRenderState`
+/// sets `smartCull = false` for a spectator camera inside a solid-render block (the player is
+/// inside a hill: every section must draw or the screen goes empty).
+pub(super) fn cull_sections(camera_spectator: bool, camera_in_solid: bool) -> bool {
+    !(camera_spectator && camera_in_solid)
 }

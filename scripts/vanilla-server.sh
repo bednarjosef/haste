@@ -5,6 +5,7 @@
 # usage: scripts/vanilla-server.sh [port] [seconds]     (default port 25620, 3600 s)
 # env:   HASTE_REF_SEED (default below; changing it regenerates the world)
 #        HASTE_REF_PLAYERS (default "HasteRef haste": opped offline names)
+#        HASTE_REF_VIEW_DISTANCE (default 10; the server caps every client's render distance)
 # Runs in the foreground (start it with & or in another terminal); it prints "Done" when ready.
 # The world settings (gamerules, time) are applied by scripts/vanilla-rcon.sh setup once it is up.
 set -euo pipefail
@@ -24,7 +25,7 @@ if [ "$(cat "$DIR/seed" 2>/dev/null)" != "$SEED" ]; then rm -rf "$DIR/world"; fi
 echo "$SEED" > "$DIR/seed"
 sed -i -e "s/^level-seed=.*/level-seed=$SEED/" -e "s/^difficulty=.*/difficulty=peaceful/" \
   -e "s/^enable-rcon=.*/enable-rcon=true/" -e "s/^rcon.password=.*/rcon.password=haste-local/" \
-  -e "s/^gamemode=.*/gamemode=creative/" -e "s/^view-distance=.*/view-distance=10/" \
+  -e "s/^gamemode=.*/gamemode=creative/" -e "s/^view-distance=.*/view-distance=${HASTE_REF_VIEW_DISTANCE:-10}/" \
   -e "s/^generate-structures=.*/generate-structures=true/" -e "s/^max-players=.*/max-players=10/" \
   -e "s/^enforce-secure-profile=.*/enforce-secure-profile=false/" \
   "$DIR/server.properties"

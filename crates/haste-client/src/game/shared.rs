@@ -58,8 +58,16 @@ pub struct Shared {
     pub world_version: AtomicU64,
     /// Per-frame view values.
     pub view: Mutex<ViewState>,
+    /// The local player's own model state (the server never spawns us as a tracked entity):
+    /// ticked per tick by the game thread ([`super::player_model::tick`]) from the client's
+    /// own state, drawn by the render thread through the same `setupAnim`/`setupRotations`
+    /// path a remote player takes. Short lock, same pattern as [`Shared::view`].
+    pub local_model: Mutex<haste_entity::Entity>,
     /// Break cracks to draw (`Session::breaking_stages`), copied once per tick.
     pub breaking: Mutex<Vec<(BlockPos, u8)>>,
+    /// The pickup particles (`take_item_entity`), copied once per tick from the session; the
+    /// render thread appends one item/orb instance per particle at the eased position.
+    pub pickup_particles: Mutex<Vec<crate::net::pickup::PickupParticle>>,
     /// Lid animations to draw (`Session::lid_states`): (position, open value at the last
     /// tick's start and end), copied once per tick; the render thread lerps by partial tick.
     pub block_entity_lids: Mutex<Vec<(BlockPos, (f32, f32))>>,
@@ -182,12 +190,14 @@ pub struct PackReload {
 
 impl Shared {
     /// Shared state for a fresh connection. `block_entity_names` are the
-    /// `minecraft:block_entity_type` names by synced id (see [`Shared::block_entity_names`]).
+    /// `minecraft:block_entity_type` names by synced id (see [`Shared::block_entity_names`]);
+    /// `local` is our own entity id and profile id, for the own model state.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         data: Arc<GameData>,
         world: World,
         entities: EntityStore,
+        local: (haste_core::EntityId, uuid::Uuid),
         view_distance: i32,
         particles: haste_render::Particles,
         skins: skins::SkinManager,
@@ -202,6 +212,13 @@ impl Shared {
             entities: RwLock::new(entities),
             dirty: Mutex::new(Vec::new()),
             world_version: AtomicU64::new(0),
+            local_model: Mutex::new(haste_entity::Entity::local_player(
+                local.0,
+                local.1,
+                DVec3::ZERO,
+                0.0,
+                0.0,
+            )),
             view: Mutex::new(ViewState {
                 prev_eye: DVec3::ZERO,
                 eye: DVec3::ZERO,
@@ -221,6 +238,7 @@ impl Shared {
                 blindness: None,
                 water_vision: 0.0,
                 spectator: false,
+                bb: (0.6, 1.8),
                 fire_resistance: false,
                 boss_world_fog: false,
                 held_slot: 0,
@@ -255,6 +273,7 @@ impl Shared {
                 horizon_height: 63.0,
             }),
             breaking: Mutex::new(Vec::new()),
+            pickup_particles: Mutex::new(Vec::new()),
             block_entity_lids: Mutex::new(Vec::new()),
             skull_anims: Mutex::new(Vec::new()),
             block_entity_spins: Mutex::new(Vec::new()),

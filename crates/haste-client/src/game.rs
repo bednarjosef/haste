@@ -29,6 +29,8 @@ mod hud;
 mod input;
 mod level;
 mod particles;
+pub(crate) mod pickup;
+mod player_model;
 mod run;
 mod shared;
 mod sound;
@@ -43,11 +45,12 @@ use crate::net::WorldSink;
 pub mod skins;
 
 pub use camera::{third_person_camera, Perspective};
+pub use player_model::push_local_instance;
 pub use run::run;
 pub use shared::{PackReload, Shared};
 #[cfg(test)]
 pub use view::death_time;
-pub use view::{player_instance, FirstPersonView, ViewState};
+pub use view::{FirstPersonView, ViewState};
 
 #[cfg(test)]
 use camera::THIRD_PERSON_DISTANCE;
@@ -96,6 +99,8 @@ fn tick_once(
     // The horizontal distance travelled this tick, for the hand's walk bob: vanilla's
     // `LocalPlayer.move` adds `length(dx, dz) * 0.6` to `ClientAvatarState.walkDist`.
     let tick_moved = level::tick(driver, shared, &input)?;
+    // The pickup particles the tick produced or advanced, published to the render thread.
+    pickup::publish(driver, shared);
     // The player's own block sounds this tick (footsteps, mining, placing), played through
     // the same output the packets went through above.
     sound::play_own_sounds(driver, shared);
@@ -132,9 +137,13 @@ fn tick_once(
     // them); the interaction step above ran the attacks and uses that started the swings. In
     // spectator the hand is not drawn at all (vanilla hides it there), so it does not advance.
     let first_person = view::tick_hand(driver, shared, tick_moved);
+    hud::publish_attack_indicator(driver, shared);
     let s = &driver.session;
     let (prev_eye, prev_yaw, prev_pitch) = s.player.camera(0.0);
     let (eye, yaw, pitch) = s.player.camera(1.0);
+    // The local player's own model state, ticked from this tick's end state before the view
+    // publishes it (the same animation path a remote player's takes).
+    player_model::tick(s, shared, (prev_yaw, prev_pitch), (yaw, pitch));
     // The sound output's tick: listener from the camera (vanilla's
     // `SoundEngine.updateSource(Camera)` — the third-person perspectives move it off the
     // eye), music situation, then 20 Hz tick.

@@ -166,6 +166,9 @@ fn entities_offscreen() {
         shadow_radius: 0.5,
         shadow_strength: 1.0,
         invisible: false,
+        display_fire: false,
+        width: 0.6,
+        height: 1.8,
         is_discrete: false,
         name_tag_y: 1.8,
         hurt: 0.0,
@@ -194,6 +197,9 @@ fn entities_offscreen() {
         shadow_radius: 0.5,
         shadow_strength: 1.0,
         invisible: false,
+        display_fire: false,
+        width: 0.6,
+        height: 1.8,
         is_discrete: false,
         name_tag_y: 1.4,
         hurt: 0.0,
@@ -299,15 +305,8 @@ fn entities_offscreen() {
     };
     let base = render_scene(&mut renderer, &world, &mut [], camera);
     let hand = |held: Option<haste_core::RegistryIndex>| haste_render::FirstPerson {
-        skin: None,
-        slim: false,
-        sleeve: true,
         item: held,
-        light: (15, 0),
-        attack: haste_render::TickPair::fixed(0.0),
-        equip: haste_render::TickPair::fixed(1.0),
-        x_bob: haste_render::TickPair::fixed(0.0),
-        y_bob: haste_render::TickPair::fixed(0.0),
+        ..Default::default()
     };
     for (name, held) in [
         ("hand", None),
@@ -421,15 +420,8 @@ fn first_person_hand_against_a_wall() {
         bob: haste_render::ViewBob::default(),
     };
     let hand = |item: Option<haste_core::RegistryIndex>| haste_render::FirstPerson {
-        skin: None,
-        slim: false,
-        sleeve: true,
         item,
-        light: (15, 0),
-        attack: haste_render::TickPair::fixed(0.0),
-        equip: haste_render::TickPair::fixed(1.0),
-        x_bob: haste_render::TickPair::fixed(0.0),
-        y_bob: haste_render::TickPair::fixed(0.0),
+        ..Default::default()
     };
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
     std::fs::create_dir_all(&out).unwrap();
@@ -531,6 +523,9 @@ fn dropped_items_offscreen() {
         shadow_radius: 0.15,
         shadow_strength: 0.75,
         invisible: false,
+        display_fire: false,
+        width: 0.6,
+        height: 1.8,
         is_discrete: false,
         name_tag_y: 0.25,
         hurt: 0.0,
@@ -653,6 +648,9 @@ fn decoration(id: i32, pos: glam::DVec3, decoration: Decoration) -> EntityInstan
         shadow_radius: 0.0,
         shadow_strength: 1.0,
         invisible: false,
+        display_fire: false,
+        width: 0.6,
+        height: 1.8,
         is_discrete: false,
         name_tag_y: 1.0,
         hurt: 0.0,
@@ -800,6 +798,9 @@ fn entity_shadows_offscreen() {
         shadow_radius: 0.7,
         shadow_strength: 1.0,
         invisible: false,
+        display_fire: false,
+        width: 0.6,
+        height: 1.8,
         is_discrete: false,
         name_tag_y: 0.9,
         hurt: 0.0,
@@ -828,6 +829,9 @@ fn entity_shadows_offscreen() {
         shadow_radius: 0.5,
         shadow_strength: 1.0,
         invisible: false,
+        display_fire: false,
+        width: 0.6,
+        height: 1.8,
         is_discrete: false,
         name_tag_y: 1.95,
         hurt: 0.0,
@@ -1015,6 +1019,9 @@ fn equipment_offscreen() {
         shadow_radius: 0.5,
         shadow_strength: 1.0,
         invisible: false,
+        display_fire: false,
+        width: 0.6,
+        height: 1.8,
         is_discrete: false,
         name_tag_y: 1.8,
         hurt: 0.0,

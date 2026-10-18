@@ -6,7 +6,7 @@ use haste_entity::riding::SeatPoint;
 use haste_protocol::haste_core::entity::MetadataEntry;
 use haste_protocol::haste_core::EntityId;
 use haste_protocol::packets::play::clientbound::teleport_flags;
-use haste_protocol::{ClientboundPlay, ServerboundPlay};
+use haste_protocol::{ClientboundPlay, ServerboundPlay, SyncedRegistries};
 
 use super::{EntitySink, Session, WorldSink, HEAD_SLOT, VEHICLE_CORRECTION_EPSILON};
 
@@ -18,6 +18,7 @@ impl Session {
         own: EntityId,
         world: &mut W,
         entities: &mut E,
+        regs: &SyncedRegistries,
         out: &mut Vec<ServerboundPlay>,
     ) -> Option<ClientboundPlay> {
         use ClientboundPlay as P;
@@ -177,6 +178,9 @@ impl Session {
             P::SwingAnimation(s) => {
                 entities.swing(EntityId(s.entity_id), s.hand, s.animation, s.duration)
             }
+            // The item pickup animation (vanilla `handleTakeItemEntity`): the sound, the
+            // particle and the stack shrink / entity removal all live in the pickup module.
+            P::TakeItemEntity(t) => self.take_item_entity(t, entities),
             P::SetEntityMotion(m) => entities.set_velocity(EntityId(m.entity_id), m.velocity),
             P::HurtAnimation(h) => {
                 entities.mark_hurt(EntityId(h.entity_id));
@@ -184,9 +188,7 @@ impl Session {
                     self.start_hurt_tilt(h.yaw);
                 }
             }
-            P::DamageEvent(d) => {
-                entities.mark_hurt(EntityId(d.entity_id));
-            }
+            P::DamageEvent(d) => super::damage::apply_damage_event(self, &d, entities, regs),
             P::EntityEvent(e) if e.status == 3 => entities.mark_dead(EntityId(e.entity_id)),
             // Entity status 4 is the melee attack animation (IronGolem.handleEntityEvent).
             P::EntityEvent(e) if e.status == 4 => entities.mark_attack(EntityId(e.entity_id)),

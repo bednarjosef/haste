@@ -33,6 +33,7 @@ mod terrain_feed;
 #[cfg(test)]
 mod tests;
 mod textures;
+mod visible_sections;
 
 /// Camera for one frame (docs/INTERFACES.md FrameInput).
 #[derive(Clone, Copy, Debug)]

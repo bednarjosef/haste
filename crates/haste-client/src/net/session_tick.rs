@@ -94,6 +94,10 @@ impl Session {
                 out,
             ),
         }
+        // The pickup particles' tick, after the player moved this tick (vanilla's
+        // `ParticleEngine.tick` runs after `tickEntities`/`level.tick`), so their target is the
+        // collector's position at the end of the tick.
+        self.tick_pickup_particles(entities);
         for (pos, state) in self.player.take_world_edits() {
             world.set_block(pos, state);
             self.lids.remove(&pos);

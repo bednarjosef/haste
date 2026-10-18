@@ -6,6 +6,26 @@
 //! mask is explicitly all-zero. Sky light is absent where the dimension has no skylight; reads
 //! in an absent sky section go through `crate::sky_light` (the bottom row of the nearest section
 //! above with data), 15 only above the column's top data section.
+//!
+//! The client-side light engine (vanilla `BlockLightEngine`/`SkyLightEngine`, run from
+//! `World::set_block` because the server only sends `light_update` for border chunks) lives
+//! in the child modules:
+//!
+//! - `engine` — the propagation queues (`LightEngine`)
+//! - `storage` — the engine's view of the light arrays (`LayerLightSectionStorage`)
+//! - `block_light` — the block layer's check (`BlockLightEngine.checkNode`)
+//! - `sky_light_engine` — the sky layer's check and column sources (`SkyLightEngine`)
+//! - `sky_sources` — per-column sky source heights (`ChunkSkyLightSources`)
+//! - `update` — the per-block-change entry (`LevelLightEngine.checkBlock`+`runLightUpdates`)
+
+mod block_light;
+mod engine;
+mod sky_light_engine;
+mod sky_sources;
+mod storage;
+mod update;
+
+pub(crate) use update::{light_properties_differ, run_for_block};
 
 use bytes::Bytes;
 use haste_core::chunk::LightData;
@@ -154,6 +174,7 @@ mod ab_tests {
             heightmaps: vec![],
             block_entities: Default::default(),
             light: ChunkLight::new(1),
+            sky_sources: None,
             dirty: vec![0; 1],
         };
         // uniform full sky: stored as None (absent sky reads 15, same as the array)

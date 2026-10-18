@@ -117,13 +117,13 @@ impl WalkAnimationState {
 /// (`ClientPacketListener.handleSwingAnimation` -> `LivingEntity.swing`).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SwingState {
-    active: bool,
-    hand: i32,
-    animation: i32,
-    duration: i32,
-    ticks: i32,
-    progress: f32,
-    old_progress: f32,
+    pub(crate) active: bool,
+    pub(crate) hand: i32,
+    pub(crate) animation: i32,
+    pub(crate) duration: i32,
+    pub(crate) ticks: i32,
+    pub(crate) progress: f32,
+    pub(crate) old_progress: f32,
 }
 
 impl SwingState {
@@ -235,7 +235,7 @@ pub struct Entity {
     /// Body yaw at the end of the previous tick (`LivingEntity.yBodyRotO`), for interpolation.
     pub prev_body_yaw: f32,
     /// Head yaw at the previous tick (`LivingEntity.yHeadRotO`), for interpolation.
-    prev_head_yaw: f32,
+    pub(crate) prev_head_yaw: f32,
     /// `LivingEntity.lerpYHeadRot` / `lerpHeadSteps`: the head yaw a `rotate_head` packet asked
     /// for and the ticks left to ease `head_yaw` onto it (`lerpHeadTo(yaw, 3)`).
     lerp_head_yaw: f32,
@@ -266,8 +266,12 @@ pub struct Entity {
     pub old_swell: i32,
     /// `IronGolem.attackAnimationTick`: set to 10 by entity event 4, decremented each tick.
     pub attack_ticks: i32,
-    /// A dropped item entity's stack (metadata index 9, `Item`), if its metadata named one.
+    /// A dropped item entity's stack (metadata index 8, `ItemEntity.DATA_ITEM`), if its metadata
+    /// named one.
     pub item: Option<ItemStackData>,
+    /// True for a `minecraft:item` entity: its client-side motion is simulated
+    /// (`ItemEntity.getMoveSimulationType()` is `SERVER_AND_CLIENT`).
+    pub is_item: bool,
     /// Ticks since spawn: drives the dropped items' spin and bob.
     pub age: u32,
     /// A player's trailing cape point (`ClientAvatarState`'s cloak), ticked for players only.
@@ -275,11 +279,12 @@ pub struct Entity {
 }
 
 impl Entity {
-    fn new(s: &EntitySpawn, dims: &EntityDimensions) -> Entity {
+    pub(crate) fn new(s: &EntitySpawn, dims: &EntityDimensions) -> Entity {
+        let type_name = crate::registry::entity_type_name(s.kind);
         let living = if s.kind.0 == 0 {
             true
         } else {
-            match crate::registry::entity_type_name(s.kind) {
+            match type_name {
                 None => true,
                 Some(name) => {
                     crate::registry::table_entry(name).is_some()
@@ -289,6 +294,8 @@ impl Entity {
                 }
             }
         };
+        // `ItemEntity`: simulated client-side; `set_metadata` confirms it at index 8.
+        let is_item = type_name == Some("minecraft:item");
         Entity {
             id: s.id,
             uuid: s.uuid,
@@ -334,6 +341,7 @@ impl Entity {
             old_swell: 0,
             attack_ticks: 0,
             item: None,
+            is_item,
             age: 0,
             cloak: crate::avatar::Cloak::default(),
         }
@@ -385,7 +393,7 @@ impl Entity {
 
 /// `LivingEntity.tick`'s body-rotation step: follow the horizontal movement direction, then
 /// `tickHeadTurn` (0.3 lerp, 50 degree head/body split).
-fn update_body_yaw(e: &mut Entity, d: DVec3) {
+pub(crate) fn update_body_yaw(e: &mut Entity, d: DVec3) {
     let mut target = e.body_yaw;
     let side_dist = (d.x * d.x + d.z * d.z) as f32;
     if side_dist > 0.002_500_000_2 {
@@ -432,6 +440,8 @@ fn model_has_part(part: &haste_core::model::ModelPart, id: haste_core::parts::Pa
 /// the same slot (vanilla `HumanoidArmorLayer.shouldRender`), and the head-slot item when it is
 /// not armour (vanilla `CustomHeadLayer`: pumpkins, heads). The equipment asset id comes from the
 /// item's default `equippable` component; the dye from the stack's `dyed_color` patch.
+/// A tracked entity's synced equipment, resolved through the shared per-slot rules
+/// ([`crate::local_player::equipment_by_slot`]).
 fn equipment_of(
     e: &Entity,
     components: &haste_data::ItemComponents,
@@ -440,40 +450,7 @@ fn equipment_of(
     Vec<haste_core::model::EquipmentPiece>,
     Option<RegistryIndex>,
 ) {
-    use haste_core::model::{EquipmentPiece, EquipmentSlot};
-    let mut hands = [None, None];
-    let mut equipment = Vec::new();
-    let mut head_item = None;
-    for (wire, stack) in &e.equipment {
-        if stack.is_empty() {
-            continue;
-        }
-        let Some(item) = stack.item else { continue };
-        match EquipmentSlot::from_wire(*wire) {
-            Some(EquipmentSlot::MainHand) => hands[0] = Some(item),
-            Some(EquipmentSlot::OffHand) => hands[1] = Some(item),
-            Some(slot) if slot.is_armor() => {
-                let equippable = components.equippable(item);
-                let is_armor = equippable.map(|x| x.slot) == Some(slot);
-                if slot == EquipmentSlot::Head && !is_armor {
-                    // Not a helmet: `CustomHeadLayer` draws it on the head instead.
-                    head_item = Some(item);
-                    continue;
-                }
-                if !is_armor {
-                    continue;
-                }
-                equipment.push(EquipmentPiece {
-                    slot,
-                    item: Some(item),
-                    asset: equippable.and_then(|x| x.asset.clone()),
-                    dye: components.dyed_color(&stack.components_raw),
-                });
-            }
-            _ => {}
-        }
-    }
-    (hands, equipment, head_item)
+    crate::local_player::equipment_by_slot(&e.equipment, components)
 }
 
 pub struct EntityStore {
@@ -754,6 +731,11 @@ impl EntityStore {
         // Entity's eight synched fields (indices 0-7), so index 8. An emptied stack
         // clears the drop.
         if let Some(entry) = e.metadata.get(8) {
+            if matches!(entry.value, MetadataValue::ItemStack(_)) {
+                // Only `ItemEntity` defines an item stack at this slot, so it also confirms the
+                // type when the registry name was unavailable at spawn (no cache).
+                e.is_item = true;
+            }
             e.item = match &entry.value {
                 MetadataValue::ItemStack(s) if !s.is_empty() => Some(s.clone()),
                 _ => None,
@@ -811,6 +793,11 @@ impl EntityStore {
     /// update the walk animation, the body yaw (`LivingEntity.tick` -> `calculateEntityAnimation`
     /// and `tickHeadTurn`) and the swing/swim/chicken timers.
     pub fn tick(&mut self) {
+        self.tick_in_world(&crate::item_entity::NoWorld);
+    }
+
+    /// [`Self::tick`] with a world view for the dropped items (`ItemEntity.tick`).
+    pub fn tick_in_world(&mut self, world: &dyn crate::item_entity::ItemWorld) {
         let EntityStore { slots, riding, .. } = self;
         for slot in slots.iter_mut().flatten() {
             slot.tick_count += 1;
@@ -839,6 +826,10 @@ impl EntityStore {
                 pitch: &mut slot.pitch,
                 prev_pitch: &mut slot.prev_pitch,
             });
+            // `ItemEntity.tick`: gravity, move, drag, between position packets.
+            if slot.is_item {
+                crate::item_entity::tick(slot, world);
+            }
             let d = slot.pos - slot.prev_pos;
             let dist = f32::sqrt((d.x * d.x + d.z * d.z) as f32);
             // `LivingEntity.calculateEntityAnimation`: passengers and the dead stop walking.
@@ -1083,7 +1074,7 @@ impl EntityStore {
                 pos,
                 yaw,
                 pitch: slot.pitch_at(partial_tick),
-                head_yaw: slot.head_yaw,
+                head_yaw: slot.head_yaw_at(partial_tick),
                 // Slime/magma cube size (`AbstractCubeMob.ID_SIZE`); 1.0 for everything else.
                 scale: crate::variants::scale_for(slot.kind, &slot.metadata),
                 pose,
@@ -1095,6 +1086,12 @@ impl EntityStore {
                 shadow_radius,
                 shadow_strength,
                 invisible,
+                // `Entity.displayFireAnimation`: `isOnFire()` (the shared flag, never for a
+                // fire-immune type) and not a spectator (only players can be one; their game
+                // mode is not tracked for remote players yet).
+                display_fire: slot.metadata.shared.on_fire && !self.dims.fire_immune(slot.kind),
+                width: slot.dimensions.0,
+                height: slot.dimensions.1,
                 is_discrete: slot.metadata.shared.crouching,
                 name_tag_y,
                 hurt: hurt_strength(slot),
