@@ -47,6 +47,7 @@ use haste_physics::mining::{BlockTags, ToolTable};
 use super::LocalPlayer;
 
 mod attack;
+mod consume_effects;
 mod destroy;
 mod drop;
 mod effects;
@@ -58,7 +59,7 @@ mod use_item;
 use effects::EffectIds;
 pub(crate) use effects::{LightmapEffectIds, MovementEffectIds};
 pub use pick::Target;
-pub use use_item::UsingItem;
+pub use use_item::{UseAnimation, UsingItem};
 // `player/tests.rs` calls it as `interact::swap_key`.
 #[cfg(test)]
 pub(crate) use held_item::swap_key;
@@ -164,6 +165,8 @@ pub struct Interaction {
     /// `minecraft:consumable` component's `use_duration`/`use_animation` (or the item class's
     /// own), ticked down each game tick. Set together with `is_using_item`.
     using: Option<UsingItem>,
+    /// The consumable's per-tick sound state (`Consumable.emitParticlesAndSounds`).
+    pub(crate) consume: consume_effects::ConsumeEffects,
     /// The hand of a use the server's synced flags started that we have not started
     /// locally yet (`LivingEntity.onSyncedDataUpdated` reads the held item then; we do it on
     /// the next tick, when the game data is at hand).

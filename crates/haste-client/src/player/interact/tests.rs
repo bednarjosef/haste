@@ -14,6 +14,8 @@ use haste_protocol::packets::play::serverbound as sb;
 use haste_protocol::ClientboundPlay;
 use haste_protocol::ServerboundPlay;
 
+mod use_item;
+
 const ME: EntityId = EntityId(7);
 const STONE: BlockStateId = BlockStateId(1);
 const DIRT: BlockStateId = BlockStateId(2);
@@ -1041,41 +1043,6 @@ fn use_duration_and_animation_come_from_the_item() {
     // A tool is not used over time.
     assert_eq!(d(1), None);
     assert_eq!(d(3), None);
-}
-
-/// Starting a use sets `useItemRemainingTicks` and stops the 4-tick repeat; releasing the key
-/// sends `release_use_item` (`Minecraft.handleKeybinds` / `MultiPlayerGameMode.releaseUsingItem`).
-#[test]
-fn using_an_item_ticks_down_and_releases_on_key_up() {
-    let mut r = Rig::new(GameMode::Survival);
-    r.p.int.prepare(data());
-    r.p.int.set_item_components(item_components());
-    r.p.int.hotbar[0] = item(5); // bow
-    r.w = TestWorld::new(); // look at nothing: the use_item path
-    let use_ = InteractInput {
-        use_item: true,
-        ..Default::default()
-    };
-    let out = r.tick(use_);
-    assert!(matches!(out[0], ServerboundPlay::UseItem(_)));
-    assert!(r.p.is_using_item());
-    assert_eq!(r.p.use_duration(), 72000);
-    assert_eq!(r.p.use_animation(), UseAnimation::Bow);
-    // The start tick already ticked the remaining time down (`LivingEntity.tick`).
-    assert_eq!(r.p.use_item_remaining(), 71999);
-    // Held: the use does not repeat and only the timer advances.
-    let out = r.tick(use_);
-    assert!(out.is_empty());
-    assert_eq!(r.p.use_item_remaining(), 71998);
-    assert_eq!(r.p.ticks_using_item(), 2);
-    // Key up: one release, the use ends.
-    let out = r.tick(InteractInput::default());
-    assert_eq!(actions(&out), [(action::RELEASE_USE_ITEM, 0)]);
-    assert!(!r.p.is_using_item());
-    // A new press starts a fresh use.
-    let out = r.tick(use_);
-    assert!(matches!(out[0], ServerboundPlay::UseItem(_)));
-    assert_eq!(r.p.use_item_remaining(), 71999);
 }
 
 #[test]
