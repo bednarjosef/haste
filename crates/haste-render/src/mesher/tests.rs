@@ -7,6 +7,7 @@ use super::lighting::{
 use super::*;
 
 mod face_occlusion;
+mod merge_order;
 
 /// A synthetic flat world: one layer of `block` over bedrock, for the
 /// end-to-end mesh tests (real jar, ignored without cache).

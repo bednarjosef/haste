@@ -306,52 +306,26 @@ fn setup() -> Option<(
     Some((states, baked, atlas, tables))
 }
 
-/// Hash of one section's meshed vertex data (the stability oracle). Order-insensitive:
-/// the baked quads of a model come from a HashMap iteration (haste-assets model.rs
-/// `ElementDef.faces`), so vertex order varies per process while the geometry does not.
-/// Each triangle is hashed with its three vertices' full content, rotated so the smallest
-/// vertex comes first (winding preserved), and the per-layer triangle multisets are
-/// hashed sorted.
+/// Hash of one section's meshed vertex data (the stability oracle). Order-sensitive:
+/// the bake and mesh order is deterministic (model faces bake in vanilla's fixed
+/// direction order, blockstates and textures in sorted order, cells in fixed loops),
+/// so the hash pins the emitted vertices, their order and the index order — any
+/// change to the mesher's output, including an emission reorder, breaks it.
 fn mesh_hash(mesh: &haste_render::SectionMesh) -> u64 {
-    let vertex_key = |i: u32| {
-        let v = &mesh.vertices[i as usize];
-        let mut h = DefaultHasher::new();
+    let mut h = DefaultHasher::new();
+    mesh.vertices.len().hash(&mut h);
+    for v in &mesh.vertices {
         v.pos.hash(&mut h);
         v.uv.hash(&mut h);
         v.light.hash(&mut h);
         v.sprite.hash(&mut h);
         v.tint_b.hash(&mut h);
-        h.finish()
-    };
-    let mut h = DefaultHasher::new();
-    mesh.vertices.len().hash(&mut h);
+    }
     for l in &mesh.layers {
         layer_index(l.layer).hash(&mut h);
-        let mut triangles: Vec<u64> = l
-            .indices
-            .as_chunks::<3>()
-            .0
-            .iter()
-            .map(|t| {
-                let keys = [vertex_key(t[0]), vertex_key(t[1]), vertex_key(t[2])];
-                // Rotate so the smallest key leads (winding intact), then hash.
-                let rot = keys
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(_, k)| **k)
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                let mut th = DefaultHasher::new();
-                for k in 0..3 {
-                    keys[(rot + k) % 3].hash(&mut th);
-                }
-                th.finish()
-            })
-            .collect();
-        triangles.sort_unstable();
-        triangles.len().hash(&mut h);
-        for t in triangles {
-            t.hash(&mut h);
+        l.indices.len().hash(&mut h);
+        for i in &l.indices {
+            i.hash(&mut h);
         }
     }
     h.finish()
@@ -405,19 +379,15 @@ fn mesher_output_stable() {
         "stability: {quads} quads, {vertices} vertices, sprite range {}..{}",
         sprites.0, sprites.1
     );
-    // Expected: the original mesher's output until the diagonal substitution's
-    // permeability test moved to the one-out cells (vanilla's side + normal)
-    // and the zero-light fallback was gated off: the vertices next to
-    // occluders change. Quad count, vertices and sprites are unchanged.
-    // Then the face-coverage cull (vanilla `Block.shouldRenderFace`'s shape
-    // comparison, mesher/culling.rs) removed the interior faces between
-    // partial blocks that cover each other (snow layers, slabs): fewer quads.
-    // Then the 2026-10-18 dump regeneration (the `occlusion` field) changed the
-    // water faces the outline rule left visible; on this world of full cubes,
-    // empty shapes and non-adjacent flowers both culling rules agree, so the
-    // occlusion-based rules (mesher/face_occlusion.rs, fluid/occlusion.rs) keep
-    // the same quads and vertices as the model rules.
-    let expected: u64 = 9_991_751_837_968_507_622;
+    // Expected: re-recorded when the mesh hash became order-sensitive (the
+    // bake and mesh order is deterministic, so the hash now pins emission
+    // order too). Since the previous recording the merged branches changed
+    // the output: cross-model faces light as up (vanilla
+    // `shade_direction_override`, haste-assets model.rs) changed the plant
+    // quads' lights, the per-direction sink buckets (mesher/sink.rs) changed
+    // the index layout, and the occlusion dump's regenerated fields changed
+    // the water faces' culling.
+    let expected: u64 = 2_085_296_596_240_799_389;
     assert_eq!(hash.finish(), expected, "mesher output changed");
     assert!(quads > 100_000, "suspiciously few quads: {quads}");
     eprintln!("{quads} quads, hash {:016x}", hash.finish());
