@@ -286,6 +286,9 @@ pub struct LocalPlayer {
     /// Own block particles this tick (our break prediction's destroy grid, the
     /// mining start tick's crack), drained into `Session::block_particle_requests`.
     pub(crate) block_particles_out: Vec<crate::block_particles::BlockParticleRequest>,
+    /// Own item particles this tick (a consumable's eat/drink crumbs), drained into
+    /// `Session::item_particle_requests`.
+    pub(crate) item_particles_out: Vec<crate::item_particles::ItemParticleRequest>,
     /// Ticks left in the double-tap jump window: vanilla `LocalPlayer.jumpTriggerTime` (7 on the
     /// first press, counted down by `Player.aiStep` before the keys are looked at).
     jump_trigger_time: u8,
@@ -359,6 +362,7 @@ impl LocalPlayer {
             fall_sounds: crate::sound::FallSounds::new(),
             sound_out: Vec::new(),
             block_particles_out: Vec::new(),
+            item_particles_out: Vec::new(),
             jump_trigger_time: 0,
             sprint_trigger_time: 0,
             jump_held: false,
@@ -395,6 +399,14 @@ impl LocalPlayer {
         &mut self,
     ) -> std::vec::Drain<'_, crate::block_particles::BlockParticleRequest> {
         self.block_particles_out.drain(..)
+    }
+
+    /// Own item particles accumulated this tick (a consumable in use), for the caller to
+    /// drain into the session's request queue.
+    pub fn take_own_item_particles(
+        &mut self,
+    ) -> std::vec::Drain<'_, crate::item_particles::ItemParticleRequest> {
+        self.item_particles_out.drain(..)
     }
 
     /// The input layer saw a double tap of jump (creative/spectator). Vanilla keeps the window
@@ -807,6 +819,7 @@ impl LocalPlayer {
             entity_types: &[],
             border: None,
             warm_blocks: None,
+            ui: None,
         };
         self.tick_interact(input, world, &env, None, out);
     }

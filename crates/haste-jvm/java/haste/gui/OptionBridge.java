@@ -50,6 +50,9 @@ public final class OptionBridge {
     public static final int C_DROP = 1 << 9;
     public static final int C_SWAP_OFFHAND = 1 << 10;
     public static final int C_JUMP = 1 << 11;
+    /** The drop click consumed while Ctrl is held: the whole stack leaves the slot (vanilla
+     * {@code Minecraft.handleKeybinds} passes {@code hasControlDown()} to {@code dropItem}). */
+    public static final int C_DROP_STACK = 1 << 12;
 
     /** An option to poll: its options.txt key and the instance to read. */
     private record Tracked(String key, OptionInstance<?> instance) {}
@@ -191,7 +194,9 @@ public final class OptionBridge {
             }
         }
         if (Proxies.options.keyDrop.consumeClick()) {
-            out |= C_DROP;
+            // One item, or the whole stack when Ctrl is held at the consume (vanilla's
+            // keyDrop loop reads hasControlDown() live, when the click is consumed).
+            out |= ClientImpl.ctrlDown() ? C_DROP_STACK : C_DROP;
         }
         if (Proxies.options.keySwapOffhand.consumeClick()) {
             out |= C_SWAP_OFFHAND;

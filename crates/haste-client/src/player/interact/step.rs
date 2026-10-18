@@ -143,16 +143,33 @@ impl LocalPlayer {
         }
 
         // `LivingEntity.tick` -> `updateUsingItem`: `ItemStack.onUseTick` first (the
-        // consumable's sound every vanilla interval), then the remaining time ticks down,
-        // including the tick the use started on.
+        // consumable's sound and item particles every vanilla interval), then the
+        // remaining time ticks down, including the tick the use started on.
         if let Some(u) = self.int.using {
             if super::consume_effects::should_emit(u.duration, u.remaining) {
-                let item = u
-                    .item
-                    .and_then(|i| env.data.registries.name("minecraft:item", i));
-                self.int
-                    .consume
-                    .emit(u.animation, item, self.state.pos, &mut self.sound_out);
+                // `ItemStack.onUseTick` reads the stack's `minecraft:consumable` (the
+                // item's default components; a stack patch override is not decoded): no
+                // component, no per-tick effects (an item whose class overrides the use
+                // duration, like a bow, stays silent).
+                let consumable = u.item.and_then(|i| {
+                    env.data
+                        .registries
+                        .name("minecraft:item", i)
+                        .and_then(|name| self.int.item_components.as_ref()?.consumable(name))
+                });
+                if let Some(consumable) = consumable {
+                    self.int.consume.emit(
+                        &consumable,
+                        u.item,
+                        crate::item_particles::EntityPose {
+                            pos: self.state.pos,
+                            eye_y: self.state.pos.y + self.eye_height(),
+                            look,
+                        },
+                        &mut self.sound_out,
+                        &mut self.item_particles_out,
+                    );
+                }
             }
             let mut u = u;
             u.remaining -= 1;
@@ -199,10 +216,10 @@ impl LocalPlayer {
         // it; the server answers with the slot updates.
         if !screen_open && self.game_mode != GameMode::Spectator {
             if input.drop_stack && !last.drop_stack {
-                self.drop_item(true, out);
+                self.drop(env.ui, true, out);
             }
             if input.drop_item && !last.drop_item {
-                self.drop_item(false, out);
+                self.drop(env.ui, false, out);
             }
             if input.swap_offhand && !last.swap_offhand {
                 out.push(ServerboundPlay::PlayerAction(sb::PlayerAction {
@@ -221,5 +238,17 @@ impl LocalPlayer {
         self.int.input.drop_stack = false;
         self.int.input.swap_offhand = false;
         self.int.input.hotbar = None;
+    }
+
+    /// The drop (Q / Ctrl+Q) and off-hand swap (F) entry point: predicts the removal on the Java
+    /// inventory through the live UI (the HUD reads it), falling back to Rust's own prediction
+    /// when no UI is up. `drop_item` keeps the packet and the swing rule.
+    fn drop(&mut self, ui: Option<&crate::ui::Ui>, all: bool, out: &mut Vec<ServerboundPlay>) {
+        if let Some(ui) = ui {
+            self.drop_item(&|all| ui.remove_from_selected(all), all, out);
+        } else {
+            let removed_empty = self.predict_drop(all);
+            self.drop_item(&|_| removed_empty, all, out);
+        }
     }
 }

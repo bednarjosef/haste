@@ -160,28 +160,36 @@ block's default (in 26.3 only the decorated pot's `cracked` variant does).
 `friction` is the block's slipperiness; `speed_factor`/`jump_factor` are multipliers applied while
 the entity is standing on the block. Defaults for blocks not overriding: 0.6 / 1.0 / 1.0.
 
-## block_classes.json
+## block_entity_types.json
 
-For every block id, the simple names of its Java class and superclasses up to `Block`
-(exclusive of `BlockBehaviour`). Which face-skip rule (`BlockBehaviour.skipRendering`) a block
-uses is a property of its class, so the mesher maps class names to culling rules from this dump
-instead of a hand-written block list (mods add blocks). Dumped by the recorder mod's
-`BlockClassDump` (called from `ServerDumps.dumpAll`).
+Which block carries which `minecraft:block_entity_type` (the block side of vanilla
+`BlockEntityTypes`' valid-block sets). `blocks` is the authoritative view the client loads: for
+every block state where `BlockState.hasBlockEntity()` is true, the type `EntityBlock
+.newBlockEntity(BlockPos.ZERO, state)` returned — the same call `LevelChunk.setBlockState` makes
+when a block update places the block, so the client can create the entity itself (the server
+sends no `block_entity_data` for a plain placement). `types` is the registry's own view, for
+comparison. States of one block share the type; a block whose states disagree (or return no
+entity for some of them) is emitted per state under `states` instead — none in vanilla 26.3.
 
 ```jsonc
 {
   "version": 1,
   "minecraft": "26.3",
+  "types": [
+    {
+      "id": 0,                            // registry id (BuiltInRegistries.BLOCK_ENTITY_TYPE)
+      "type": "minecraft:furnace",
+      "valid_blocks": ["minecraft:furnace"]
+    }
+  ],
   "blocks": {
-    "minecraft:glass":  ["GlassBlock", "TransparentBlock", "HalfTransparentBlock", "Block"],
-    "minecraft:iron_bars": ["IronBarsBlock", "CrossCollisionBlock", "Block"]
-    // ... every registered block, [] never occurs (every block extends at least Block)
-  }
+    "minecraft:chest": "minecraft:chest",
+    "minecraft:spawner": "minecraft:mob_spawner",
+    "minecraft:oak_sign": "minecraft:sign"
+  },
+  "states": { }                          // state id -> type, only for blocks in `states`
 }
 ```
-
-Blocks absent from the dump use the default rule (no skip); the loader never panics on unknown
-ids.
 
 ## traces/<name>.json
 
@@ -246,3 +254,26 @@ then per packet:
 ```
 
 Multi-byte integers are big-endian, matching the protocol itself.
+
+## block_classes.json
+
+For every block id, the simple names of its Java class and superclasses up to `Block`
+(exclusive of `BlockBehaviour`). Which face-skip rule (`BlockBehaviour.skipRendering`) a block
+uses is a property of its class, so the mesher maps class names to culling rules from this dump
+instead of a hand-written block list (mods add blocks). Dumped by the recorder mod's
+`BlockClassDump` (called from `ServerDumps.dumpAll`).
+
+```jsonc
+{
+  "version": 1,
+  "minecraft": "26.3",
+  "blocks": {
+    "minecraft:glass":  ["GlassBlock", "TransparentBlock", "HalfTransparentBlock", "Block"],
+    "minecraft:iron_bars": ["IronBarsBlock", "CrossCollisionBlock", "Block"]
+    // ... every registered block, [] never occurs (every block extends at least Block)
+  }
+}
+```
+
+Blocks absent from the dump use the default rule (no skip); the loader never panics on unknown
+ids.

@@ -270,7 +270,7 @@ fn glass_wall_interior_faces_cull_in_the_mesh() {
         let mesh = mesh_section_with(&snapshot, &baked, &atlas, &tables, pos);
         mesh.layers
             .iter()
-            .map(|(_, idx)| idx.len() / 6)
+            .map(|l| l.indices.len() / 6)
             .sum::<usize>()
     };
     let (with, without) = (quads(skip), quads(none.clone()));
@@ -360,7 +360,7 @@ fn connected_pane_pair_culls_the_shared_faces() {
         let mesh = mesh_section_with(&snapshot, &baked, &atlas, &tables, pos);
         mesh.layers
             .iter()
-            .map(|(_, idx)| idx.len() / 6)
+            .map(|l| l.indices.len() / 6)
             .sum::<usize>()
     };
     // Connected pair: the arm faces on the shared plane disappear.
@@ -447,7 +447,7 @@ fn default_rule_culls_nothing_new() {
         let mesh = mesh_section_with(&snapshot, &baked, &atlas, &tables, pos);
         mesh.layers
             .iter()
-            .map(|(_, idx)| idx.len() / 6)
+            .map(|l| l.indices.len() / 6)
             .sum::<usize>()
     };
     assert_eq!(quads(skip), quads(none));
@@ -464,6 +464,7 @@ fn tables_with(
         std::sync::Arc::new(crate::fluid::FluidTable::empty()),
         std::sync::Arc::new(crate::mesher::AoTable::all_solid(states.len())),
         std::sync::Arc::new(crate::fluid::FluidOccluders::absent()),
+        std::sync::Arc::new(crate::mesher::FaceOccluders::absent()),
         std::sync::Arc::new(skip),
     )
 }

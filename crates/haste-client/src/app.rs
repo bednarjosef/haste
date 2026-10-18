@@ -535,11 +535,23 @@ impl Session {
                         .cloned()
                 })
                 .collect();
+        // The items whose default components carry `minecraft:consumable`: their model
+        // sprites are packed for the item particles a use emits.
+        let consumable_items: Vec<(haste_core::RegistryIndex, haste_core::Identifier)> = data
+            .item_components
+            .consumable_items()
+            .filter_map(|name| {
+                data.registries
+                    .index("minecraft:item", name)
+                    .map(|i| (i, name.clone()))
+            })
+            .collect();
         let particle_types = std::sync::Arc::new(
             haste_render::ParticleTypes::build(
                 &mut open_assets_with(&server_packs)?,
                 &particle_ids,
                 Some(&data.blocks),
+                &consumable_items,
             )
             .context("building the particle atlas")?,
         );
@@ -1933,16 +1945,11 @@ impl InputRouter {
                 self.pick_block_ctrl = false;
             }
             if let Some(ui) = ui {
-                // The action mappings' clicks (hotbar, drop, swap, jump), consumed once per
-                // frame and handed to the game thread through the shared input.
+                // The action mappings' clicks (hotbar, drop, drop stack, swap, jump),
+                // consumed once per frame and handed to the game thread through the shared
+                // input.
                 let c = ui.consume_clicks();
-                for slot in 0..9 {
-                    if c & (bits::C_HOTBAR_0 << slot) != 0 {
-                        i.hotbar = Some(slot as u8);
-                    }
-                }
-                i.drop_item |= c & bits::C_DROP != 0;
-                i.swap_offhand |= c & bits::C_SWAP_OFFHAND != 0;
+                crate::ui::feed_clicks(c, i);
                 if c & bits::C_JUMP != 0 {
                     self.jump_pressed(Instant::now());
                 }

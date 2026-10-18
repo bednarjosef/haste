@@ -35,6 +35,35 @@ pub struct SlabLayer {
     pub layer: haste_assets::RenderLayer,
     pub first_index: u32,
     pub index_count: u32,
+    /// Face direction (`Direction::ALL` index) of this group; 6 = the whole
+    /// layer (translucent, never direction-skipped). See `LayerDraw`.
+    pub dir: u8,
+}
+
+impl SlabLayer {
+    /// Whether this whole direction group is back-facing from the camera:
+    /// every quad in it points away, so the draw can skip it (the rasterizer
+    /// would cull each quad only after vertex shading). `lo`/`hi` is the
+    /// section's camera-relative AABB. A positive-direction face (up, south,
+    /// east) is back-facing when the camera is below/before the section's low
+    /// side on the face's axis, a negative one when the camera is past the
+    /// high side; inside the slab the group is mixed and kept.
+    pub fn back_facing(&self, lo: [f32; 3], hi: [f32; 3]) -> bool {
+        // Direction axis: down/up = y, north/south = z, west/east = x.
+        let (axis, positive) = match self.dir {
+            0 => (1, false),
+            1 => (1, true),
+            2 => (2, false),
+            3 => (2, true),
+            4 => (0, false),
+            _ => (0, true),
+        };
+        if positive {
+            lo[axis] > 0.0
+        } else {
+            hi[axis] < 0.0
+        }
+    }
 }
 
 /// Dense storage of resident sections with `SectionPos` lookup: a slab of
@@ -96,6 +125,7 @@ impl SectionSlab {
                 layer: l.layer,
                 first_index: l.first_index,
                 index_count: l.index_count,
+                dir: l.dir,
             })
             .collect();
         let layers_base = self.layers.len() as u32;
@@ -221,6 +251,7 @@ mod tests {
                     layer: haste_assets::RenderLayer::Solid,
                     first_index: i as u32 * 6,
                     index_count: 6,
+                    dir: 6,
                 })
                 .collect(),
             aabb: ([0.0; 3], [16.0; 3]),

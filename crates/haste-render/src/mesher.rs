@@ -8,6 +8,8 @@
 
 mod culling;
 mod dispatch;
+mod face_occlusion;
+mod fluid_view;
 mod lighting;
 mod merge;
 mod sink;
@@ -18,6 +20,7 @@ mod tables;
 mod tests;
 
 pub use dispatch::{Mesher, SnapshotSource};
+pub use face_occlusion::FaceOccluders;
 pub use skip::SkipTable;
 pub use snapshot::MeshSnapshot;
 pub use tables::{AoTable, MeshTables};
@@ -25,20 +28,22 @@ pub use tables::{AoTable, MeshTables};
 use haste_assets::RenderLayer;
 use haste_core::{BlockPos, BlockStateId, SectionPos};
 
-use crate::fluid_occlusion::Occluder;
 use crate::vertex::{pack_ao_shade, pack_light, PackedVertex};
+use fluid_view::FluidView;
 use lighting::{shade_index, vertex_light_for};
 use merge::{flush_staged, merge_face, MergeFace, MergeKey, MergeQuad, StagedQuad};
 use sink::{layer_index, MeshSink};
 use snapshot::{Cell, EXT};
+
+pub use sink::SectionLayerMesh;
 
 /// One section's meshed geometry, split by render layer.
 pub struct SectionMesh {
     pub pos: SectionPos,
     /// Vertices shared by all layers (section-local packed).
     pub vertices: Vec<PackedVertex>,
-    /// (layer, indices) pairs in draw order; indices reference `vertices`.
-    pub layers: Vec<(RenderLayer, Vec<u32>)>,
+    /// Layers in draw order; indices reference `vertices`.
+    pub layers: Vec<sink::SectionLayerMesh>,
     /// Section-local AABB (min/max in blocks) for frustum culling.
     pub aabb: ([f32; 3], [f32; 3]),
     /// Face-to-face sightlines through the section (cave culling).
@@ -76,7 +81,7 @@ impl SectionMesh {
 
     /// GPU bytes the indices will occupy in an arena.
     pub fn index_bytes(&self) -> u64 {
-        self.layers.iter().map(|(_, i)| i.len() as u64 * 4).sum()
+        self.layers.iter().map(|l| l.indices.len() as u64 * 4).sum()
     }
 }
 
@@ -251,12 +256,7 @@ impl MeshScratch {
     /// tables, so it persists across sections (clearing it would redo the
     /// atlas lookups and re-allocate every state's quad vector per section).
     fn begin_section(&mut self) {
-        self.sink.vertices.clear();
-        for idx in &mut self.sink.layers {
-            idx.clear();
-        }
-        self.sink.min = [f32::MAX; 3];
-        self.sink.max = [f32::MIN; 3];
+        self.sink.clear();
         self.fluid_scratch.clear();
         self.staged.clear();
     }
@@ -385,23 +385,30 @@ pub fn mesh_section_with(
                     let mut tint: Option<u32> = None;
 
                     for quad in &info.quads {
-                        // Cullface: skip the face when the neighbour is a full
-                        // opaque block (vanilla's model culling), when the
-                        // state's skipRendering rule skips it (skip.rs), or
-                        // when the neighbour's opaque quads cover this quad's
-                        // extent on the shared plane (the shape comparison:
-                        // snow layers against snow layers, slabs against
-                        // slabs).
+                        // Cullface: vanilla `Block.shouldRenderFace`: the state's
+                        // skipRendering rule (skip.rs), then the dump's occlusion
+                        // shapes; None on an old dump keeps the model rule
+                        // (full-opaque neighbour, or the neighbour's opaque quads
+                        // covering this quad's extent on the shared plane).
                         if let Some(cull) = quad.cullface {
                             let o = cull.offset();
                             let neighbor = ctx.cell(lx + 1 + o[0], ly + 1 + o[1], lz + 1 + o[2]);
-                            if ctx.baked.is_full_opaque(neighbor.state)
-                                || ctx.tables.skip.skips(state, neighbor.state, cull)
-                                || ctx
-                                    .state_info(neighbor.state)
-                                    .cover
-                                    .covers(cull, &quad.positions)
-                            {
+                            let visible = !ctx.tables.skip.skips(state, neighbor.state, cull)
+                                && match ctx.tables.face_occluders.should_render_face(
+                                    state,
+                                    neighbor.state,
+                                    cull,
+                                ) {
+                                    Some(v) => v,
+                                    None => {
+                                        !ctx.baked.is_full_opaque(neighbor.state)
+                                            && !ctx
+                                                .state_info(neighbor.state)
+                                                .cover
+                                                .covers(cull, &quad.positions)
+                                    }
+                                };
+                            if !visible {
                                 continue;
                             }
                         }
@@ -459,6 +466,7 @@ pub fn mesh_section_with(
                         } else {
                             staged.push(StagedQuad::Direct {
                                 layer: info.layer,
+                                dir: quad.direction.index() as u8,
                                 positions,
                                 uvs: quad.uvs,
                                 lights,
@@ -472,24 +480,9 @@ pub fn mesh_section_with(
         }
         flush_staged(staged, sink);
 
-        // The section's final output: the sink's vectors, moved (not copied)
-        // into the SectionMesh. Refill the scratch with right-sized vectors:
-        // consecutive sections are similar in size, so the next section pays
-        // one allocation per vector instead of growing them geometrically.
-        let vertex_len = sink.vertices.len();
-        let index_lens: [usize; 4] = core::array::from_fn(|i| sink.layers[i].len());
-        let vertices = std::mem::take(&mut sink.vertices);
-        let index_vecs = std::mem::take(&mut sink.layers);
-        sink.vertices = Vec::with_capacity(vertex_len);
-        sink.layers = index_lens.map(Vec::with_capacity);
-
-        // Compact into per-layer (vertices, indices).
-        let layers: Vec<(RenderLayer, Vec<u32>)> = index_vecs
-            .into_iter()
-            .enumerate()
-            .filter(|(_, idx)| !idx.is_empty())
-            .map(|(i, idx)| (sink::layer_from_index(i), idx))
-            .collect();
+        // The section's final output: the sink concatenates its buckets into
+        // per-layer index vectors (see `MeshSink::take_layers`).
+        let (vertices, layers) = sink.take_layers();
 
         SectionMesh {
             pos,
@@ -500,31 +493,6 @@ pub fn mesh_section_with(
             removed: false,
         }
     })
-}
-
-/// The snapshot as the fluid mesher sees it.
-struct FluidView<'a> {
-    snapshot: &'a MeshSnapshot,
-    baked: &'a haste_assets::BakedBlockModels,
-    /// Per-state occlusion shapes (`fluid/occlusion.rs`).
-    occluders: &'a crate::fluid::FluidOccluders,
-}
-
-impl crate::fluid::FluidWorld for FluidView<'_> {
-    fn state(&self, p: BlockPos) -> BlockStateId {
-        self.snapshot.block_state(p)
-    }
-    fn opaque(&self, p: BlockPos) -> bool {
-        self.baked.is_full_opaque(self.snapshot.block_state(p))
-    }
-    fn solid(&self, p: BlockPos) -> bool {
-        crate::fluid::baked_solid(self.baked, self.snapshot.block_state(p))
-    }
-    fn face_occluder(&self, p: BlockPos, _dir: haste_assets::Direction) -> Occluder<'_> {
-        let state = self.snapshot.block_state(p);
-        self.occluders
-            .occluder(state, || self.baked.is_full_opaque(state))
-    }
 }
 
 /// Max of two packed (sky, block) light values per channel.
@@ -592,7 +560,15 @@ fn mesh_fluid(
             let positions = q
                 .positions
                 .map(|p| [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]]);
-            sink.push_quad(layer, &positions, &q.uvs, [packed; 4], tint, q.sprite);
+            sink.push_quad(
+                layer,
+                q.dir,
+                &positions,
+                &q.uvs,
+                [packed; 4],
+                tint,
+                q.sprite,
+            );
         }
     }
     *ctx.fluid_scratch = quads;

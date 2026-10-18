@@ -3,21 +3,21 @@
 //! `Consumable.emitParticlesAndSounds`, driven from `LivingEntity.updateUsingItem` every
 //! game tick while a `minecraft:consumable` item is in use.
 //!
+//! The sound comes from the stack's component (`Consumable.sound`, the generic eat sound
+//! by default), the volume and pitch from the component's animation, and the item
+//! particles from `Consumable.hasConsumeParticles` (`LivingEntity.spawnItemParticles`).
 //! The client plays its own sound: `Player.playSound` passes the player as the excluded
 //! listener, so the server never sends the acting player their own eat/drink sound. The
 //! final 16-particle burst and the finishing sound in `Consumable.onConsume` are
 //! server-driven (the client's `updateUsingItem` skips `completeUsingItem` on the client),
 //! so they are not duplicated here.
-//!
-//! The item particles the consume spawns (`user.spawnItemParticles`) have no spawner in the
-//! renderer yet (the `minecraft:item` particle type has no atlas sprites and no item-stack
-//! option is decoded); `emit` reports whether vanilla would spawn them.
 
-use glam::DVec3;
 use haste_audio::random::LegacyRandom;
-use haste_core::Identifier;
+use haste_core::RegistryIndex;
+use haste_data::Consumable;
 
 use super::UseAnimation;
+use crate::item_particles::{spawn_item_particles, EntityPose, ItemParticleRequest};
 use crate::sound::{PlayRequest, SoundPos, SoundRef, SoundRequest};
 
 /// `SoundSource.PLAYERS`, the category `Player.getSoundSource` returns (the ordinal in
@@ -32,8 +32,9 @@ pub fn should_emit(consume_ticks: i32, remaining: i32) -> bool {
     item_used_for_ticks > wait_ticks_before_use_effects && remaining % 4 == 0
 }
 
-/// The consumable's per-tick sound state: a `LivingEntity.getRandom()` the volume and pitch
-/// draws come from (vanilla seeds each entity's `RandomSource` with a unique seed).
+/// The consumable's per-tick effects: a `LivingEntity.getRandom()` the volume, pitch and
+/// item-particle draws come from (vanilla seeds each entity's `RandomSource` with a
+/// unique seed).
 pub struct ConsumeEffects {
     random: LegacyRandom,
 }
@@ -47,47 +48,46 @@ impl Default for ConsumeEffects {
 }
 
 impl ConsumeEffects {
-    /// `Consumable.emitParticlesAndSounds`'s sound half: vanilla's four draws (always all of
-    /// them, whatever the animation) give the eat volume and pitch or the drink pitch, then
-    /// the sound plays at the player. Returns whether vanilla would also spawn the consume
-    /// particles (`hasConsumeParticles`, true for the eat animation).
+    /// `Consumable.emitParticlesAndSounds` (the 5-particle call from `onUseTick`): the
+    /// four random draws (always all of them, whatever the animation) give the eat volume
+    /// and pitch or the drink pitch, then the item particles spawn (the component's
+    /// `has_consume_particles`, vanilla `spawnItemParticles(stack, 5)`), then the
+    /// component's sound plays at the player. `pose` carries the entity's position, eye
+    /// height and rotations the particle math reads. `item` is the used stack's registry
+    /// index; `None` (an empty stack) spawns no particles, like vanilla's empty-stack
+    /// guard.
     pub fn emit(
         &mut self,
-        animation: UseAnimation,
-        item: Option<&Identifier>,
-        pos: DVec3,
+        consumable: &Consumable,
+        item: Option<RegistryIndex>,
+        pose: EntityPose,
         requests: &mut Vec<SoundRequest>,
-    ) -> bool {
+        particles: &mut Vec<ItemParticleRequest>,
+    ) {
         let eat_volume = if self.random.next(1) != 0 { 0.5 } else { 1.0 };
         let eat_pitch = 1.0 + 0.2 * (self.random.next_float() - self.random.next_float());
         let drink_pitch = 0.9 + self.random.next_float() * 0.1;
-        let drink = animation == UseAnimation::Drink;
+        // The volume and pitch rules follow the component's animation (the drink takes
+        // the fixed volume and its own pitch range), whatever sound it names.
+        let drink = UseAnimation::from_id(consumable.animation) == UseAnimation::Drink;
         let volume = if drink { 0.5 } else { eat_volume };
         let pitch = if drink { drink_pitch } else { eat_pitch };
-        // `Consumables.defaultFood` has consume particles, `defaultDrink` does not; the
-        // component data the client decodes carries neither `sound` nor
-        // `has_consume_particles`, so the animation decides and the honey bottle's one
-        // sound override is named here.
-        let particles = !drink;
-        let event = if drink {
-            if item.is_some_and(|i| i.path() == "honey_bottle") {
-                "minecraft:item.honey_bottle.drink"
-            } else {
-                "minecraft:entity.generic.drink"
+        if consumable.has_consume_particles {
+            if let Some(item) = item {
+                spawn_item_particles(&mut self.random, item, 5, pose, particles);
             }
-        } else {
-            "minecraft:entity.generic.eat"
-        };
+        }
         let seed = self.random.next_long();
         requests.push(SoundRequest::Play(PlayRequest {
-            sound: SoundRef::Inline(event.to_owned()),
+            // `Consumable.sound`: an unknown id plays nothing and logs once (the sound
+            // request channel drops ids `sounds.json` does not know).
+            sound: SoundRef::Inline(consumable.sound.to_string()),
             category: CATEGORY_PLAYERS,
-            pos: SoundPos::Fixed(pos),
+            pos: SoundPos::Fixed(pose.pos),
             volume,
             pitch,
             seed,
         }));
-        particles
     }
 }
 

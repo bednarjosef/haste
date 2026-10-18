@@ -431,8 +431,13 @@ public final class Bridge {
 
     // ---- game input through the KeyMappings (haste.gui.OptionBridge) ----
 
-    /** A game key event (SDL3 scancode) mirrored into the KeyMappings; no screen may be open. */
-    public void gameKey(int scancode, boolean pressed) { OptionBridge.gameKey(scancode, pressed); }
+    /** A game key event (SDL3 scancode) mirrored into the KeyMappings; no screen may be open.
+     * {@code mods} is the SDL keymod state of the event, kept current for the Ctrl-at-consume
+     * reads (vanilla polls the live keyboard there, e.g. the drop's one-item-or-stack). */
+    public void gameKey(int scancode, boolean pressed, int mods) {
+        ClientImpl.mods = mods;
+        OptionBridge.gameKey(scancode, pressed);
+    }
 
     /** A game mouse button (vanilla numbering) mirrored into the KeyMappings. */
     public void gameMouse(int button, boolean pressed) { OptionBridge.gameMouse(button, pressed); }
@@ -470,6 +475,18 @@ public final class Bridge {
     public void setInventorySlot(int slot, byte[] stack) {
         Proxies.inventory.setItem(slot, InventorySync.decode(stack));
         InventorySync.sync();
+    }
+
+    /**
+     * Removes from the selected hotbar slot (vanilla `MultiPlayerGameMode.dropItem` -> `Inventory.removeFromSelected`):
+     * one item, or the whole stack when {@code all}. The removal happens on the client inventory itself
+     * (the one the HUD and screens read); the server does not echo it back, so `InventorySync` mirrors
+     * the change to Rust. Returns whether the removed stack was empty (nothing left the slot).
+     */
+    public boolean removeFromSelected(boolean all) {
+        net.minecraft.world.item.ItemStack removed = Proxies.inventory.removeFromSelected(all);
+        InventorySync.sync();
+        return removed.isEmpty();
     }
 
     /** The chat log as plain text, oldest first (vanilla's ChatComponent; headless clients and tests). */

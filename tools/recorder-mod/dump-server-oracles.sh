@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds the recorder mod, runs the 26.3 dedicated server headless with it installed, and
 # produces the server-side oracle dumps in cache/oracle/26.3/:
-#   block_shapes.json, entity_dimensions.json, block_properties.json, block_classes.json
+#   block_shapes.json, entity_dimensions.json, block_properties.json, block_entity_types.json,
+#   block_classes.json
 #
 # The server runs OFFLINE on 127.0.0.1, flat world, and shuts itself down right after the dump
 # (the mixin stops the server once dumping is done). The working server copy lives in
@@ -58,16 +59,16 @@ PROPS
 
 echo "== run server (dumps on first tick, then stops)"
 mkdir -p "$OUT"
-# The wait below looks for the four files, so the previous run's copies must go first.
-rm -f "$OUT/block_shapes.json" "$OUT/entity_dimensions.json" "$OUT/block_properties.json" "$OUT/block_classes.json"
+# The wait below looks for the dump files, so the previous run's copies must go first.
+rm -f "$OUT/block_shapes.json" "$OUT/entity_dimensions.json" "$OUT/block_properties.json" "$OUT/block_entity_types.json" "$OUT/block_classes.json"
 cd "$SRV"
 "$JDK/java" -Xms512M -Xmx1G -Dhaste.oracle.out="$OUT" -jar fabric-server-launch.jar nogui > "$SRV/oracle-run.log" 2>&1 &
 SERVER_PID=$!
 trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
 
-# Wait for the four files (the mixin stops the server itself when done).
+# Wait for the dump files (the mixin stops the server itself when done).
 for i in $(seq 1 180); do
-  [ -f "$OUT/block_shapes.json" ] && [ -f "$OUT/entity_dimensions.json" ] && [ -f "$OUT/block_properties.json" ] && [ -f "$OUT/block_classes.json" ] && break
+  [ -f "$OUT/block_shapes.json" ] && [ -f "$OUT/entity_dimensions.json" ] && [ -f "$OUT/block_properties.json" ] && [ -f "$OUT/block_entity_types.json" ] && [ -f "$OUT/block_classes.json" ] && break
   if ! kill -0 $SERVER_PID 2>/dev/null; then break; fi
   sleep 1
 done
@@ -80,7 +81,7 @@ trap - EXIT
 
 echo "== results"
 ls -la "$OUT" || true
-for f in block_shapes.json entity_dimensions.json block_properties.json block_classes.json; do
+for f in block_shapes.json entity_dimensions.json block_properties.json block_entity_types.json block_classes.json; do
   if [ -f "$OUT/$f" ]; then
     echo "$f: $(wc -c < "$OUT/$f") bytes, $(wc -l < "$OUT/$f") lines"
   else
