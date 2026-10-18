@@ -29,7 +29,7 @@ pub use dye::{dye_tint, DYE_COLORS};
 pub use metadata_texture::{metadata_model_for, texture_for};
 pub use overlay::overlays_for;
 pub use registry_model::model_for;
-pub use shulker::shulker_texture;
+pub use shulker::{shulker_model_for, shulker_texture};
 pub use synced_registry::{MobVariants, VARIANT_REGISTRIES};
 pub use tropical_fish::tropical_fish_model;
 

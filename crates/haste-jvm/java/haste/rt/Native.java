@@ -93,4 +93,8 @@ public final class Native {
      * ({@code resourcePacks}); Rust re-opens its asset stack and rebuilds the renderer.
      */
     public static native void resourcePacksChanged(String[] selectedIds);
+
+    // ---- the server resource pack prompt (vanilla's PackConfirmScreen) ----
+    /** The player answered the server resource pack prompt (vanilla's confirm screen callback). */
+    public static native void packPromptAnswered(boolean accepted);
 }

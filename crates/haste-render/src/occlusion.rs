@@ -217,13 +217,21 @@ const ADV_CULL_SECTION_DIST: i32 = 3;
 const CEILED_SECTION_DIAGONAL: f64 = 28.0;
 const ADV_CULL_MIN_DIST_SQ: f64 = 3600.0;
 
-/// The sections the walk reached, per column, over the square of columns around the camera.
+/// The sections the walk reached, per column, over the square of columns around
+/// the camera. `order` lists them in BFS pop order — vanilla draws its sections
+/// in its occlusion graph's node order (`SectionOcclusionGraph.addSectionsInFrustum`
+/// appends them as the tree is visited), so opaque terrain needs no sort.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct VisibleMask {
     cx: i32,
     cz: i32,
     r: i32,
+    /// Vertical section count of the walk's grid (`section_count`).
+    h: i32,
     columns: Vec<u32>,
+    /// Node index per reached section, in BFS pop order: for a grid of
+    /// `(2r+1)^2` columns x `h` sections, `((dx * w + dz) * h + si)`.
+    order: Vec<u32>,
 }
 
 impl VisibleMask {
@@ -235,6 +243,20 @@ impl VisibleMask {
             return 0;
         }
         self.columns[(dx * w + dz) as usize]
+    }
+
+    /// The reached sections in BFS pop order (vanilla's draw order for opaque
+    /// terrain). Yields `(column, section index)`; empty until the first walk.
+    pub fn ordered(&self) -> impl Iterator<Item = (ChunkPos, i32)> + '_ {
+        let w = 2 * self.r + 1;
+        let h = self.h;
+        let cx = self.cx;
+        let cz = self.cz;
+        let r = self.r;
+        self.order.iter().map(move |&n| {
+            let (col, si) = ((n / h as u32) as i32, (n % h as u32) as i32);
+            (ChunkPos::new(cx + col / w - r, cz + col % w - r), si)
+        })
     }
 
     /// HashMap-style lookup (tests).
@@ -302,6 +324,9 @@ pub fn compute_visible_mask(
     };
     let mut columns = vec![0u32; (w * w) as usize];
     let mut queue: VecDeque<(i32, i32, i32)> = VecDeque::with_capacity(1024);
+    // Sections in BFS pop order (vanilla keeps its graph's node order and draws
+    // the sections in it; the mask below is derived from the same list).
+    let mut order: Vec<u32> = Vec::new();
 
     let cam_center = DVec3::new(
         (cam_col.x * 16 + 8) as f64,
@@ -320,6 +345,7 @@ pub fn compute_visible_mask(
 
     while let Some((x, si, z)) = queue.pop_front() {
         let i = grid.index(x, si, z).unwrap();
+        order.push(((x - cam_col.x + r) * w + (z - cam_col.z + r)) as u32 * h as u32 + si as u32);
         let source = grid.source[i];
         let cone = grid.cone[i] & !VISITED;
         let vis = section_vis(ChunkPos::new(x, z), si).unwrap_or(VisibilitySet::all());
@@ -400,7 +426,9 @@ pub fn compute_visible_mask(
         cx: cam_col.x,
         cz: cam_col.z,
         r,
+        h,
         columns,
+        order,
     }
 }
 
@@ -700,6 +728,7 @@ mod tests {
         let mut cone = vec![0u8; n];
         let mut columns = vec![0u32; (w * w) as usize];
         let mut queue: VecDeque<(i32, i32, i32)> = VecDeque::new();
+        let mut order: Vec<u32> = Vec::new();
         let idx = |x: i32, si: i32, z: i32| -> Option<usize> {
             let (dx, dz) = (x - cam_col.x + r, z - cam_col.z + r);
             if dx < 0 || dz < 0 || dx >= w || dz >= w || si < 0 || si >= h {
@@ -718,6 +747,9 @@ mod tests {
         queue.push_back(start);
         while let Some((x, si, z)) = queue.pop_front() {
             let i = idx(x, si, z).unwrap();
+            order.push(
+                ((x - cam_col.x + r) * w + (z - cam_col.z + r)) as u32 * h as u32 + si as u32,
+            );
             let src = source[i];
             let c = cone[i] & !VISITED;
             let vis = section_vis
@@ -771,7 +803,9 @@ mod tests {
             cx: cam_col.x,
             cz: cam_col.z,
             r,
+            h,
             columns,
+            order,
         }
     }
 

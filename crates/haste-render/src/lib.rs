@@ -22,6 +22,7 @@ pub mod overlay;
 pub mod particles;
 pub mod pipeline;
 pub mod renderer;
+pub mod section_slab;
 pub mod sky;
 pub mod stars;
 pub mod timing;
@@ -43,7 +44,8 @@ pub use gui::{GuiRenderer, GuiStats, ScreenNametag};
 pub use mesher::{mesh_section, MeshSnapshot, Mesher, SectionMesh, SnapshotSource};
 pub use occlusion::{compute_visible_mask, section_visibility, Face, VisibilitySet};
 pub use particles::{
-    DustOption, ParticleRenderer, ParticleSpawn, ParticleTypes, Particles, MAX_PARTICLES,
+    DustOption, ParticleRenderer, ParticleSnapshot, ParticleSnapshots, ParticleSpawn,
+    ParticleTypes, ParticleView, Particles, MAX_PARTICLES,
 };
 pub use pipeline::{upload_atlas, upload_section, Gpu, SectionGpuMesh};
 pub use renderer::{Camera, FrameInput, FrameStats, LightmapFrame, Renderer, SkyState, ViewBob};

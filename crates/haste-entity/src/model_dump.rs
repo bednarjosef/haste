@@ -115,6 +115,7 @@ impl ModelLibrary {
                 tex_height: l.texture_height.max(1),
                 root: ModelPart {
                     name: "root".to_owned(),
+                    id: haste_core::parts::ROOT,
                     pivot: glam::Vec3::ZERO,
                     rotation: glam::Vec3::ZERO,
                     visible: true,
@@ -200,6 +201,7 @@ fn convert_part(p: PartJson) -> ModelPart {
         })
         .collect();
     ModelPart {
+        id: haste_core::parts::intern(&p.name),
         name: p.name,
         pivot,
         rotation,
@@ -215,6 +217,7 @@ fn scaled_model(model: &CubeModel, factor: f32) -> CubeModel {
     fn scaled_part(p: &ModelPart, factor: f32) -> ModelPart {
         ModelPart {
             name: p.name.clone(),
+            id: p.id,
             pivot: p.pivot * factor,
             rotation: p.rotation,
             visible: p.visible,

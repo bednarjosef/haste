@@ -27,6 +27,7 @@ rayon.workspace = true
 crossbeam-channel.workspace = true
 parking_lot.workspace = true
 ahash.workspace = true
+hashbrown.workspace = true
 anyhow.workspace = true
 image.workspace = true
 tracing.workspace = true

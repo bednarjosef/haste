@@ -439,8 +439,11 @@ impl fmt::Display for ScriptError {
 
 impl std::error::Error for ScriptError {}
 
-/// `wait_until` gives up after this many ticks (default 600 ticks = 30 seconds).
-const WAIT_UNTIL_TIMEOUT: u32 = 600;
+/// `wait_until` gives up after this many ticks (2400 ticks = 2 minutes). Menu-mode scripts
+/// start with `wait_until screen TitleScreen`, which also covers the embedded JVM's start: on a
+/// loaded machine with freshly changed runtime Java that alone (javac + boot) took 33 s, so the
+/// earlier 30 s limit failed checks that were fine.
+const WAIT_UNTIL_TIMEOUT: u32 = 2400;
 
 /// Parses a whole script into steps. Blank lines and `# ...` comments are ignored; whitespace
 /// around a command is trimmed.

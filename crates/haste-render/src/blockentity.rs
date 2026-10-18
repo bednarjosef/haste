@@ -20,6 +20,7 @@ use std::sync::{Arc, OnceLock};
 
 use glam::{Mat3, Mat4, Vec3};
 use haste_core::model::{Cube, CubeModel, ModelPart, PoseOverrides};
+use haste_core::parts;
 use haste_core::{BlockPos, Direction, Identifier};
 
 use crate::entity::{entity_shade, hurt_color, EntityVertex, TickPair};
@@ -613,6 +614,7 @@ fn chest_model(half: ChestHalf) -> CubeModel {
         tex_height: 64,
         root: ModelPart {
             name: "root".into(),
+            id: parts::ROOT,
             pivot: Vec3::ZERO,
             rotation: Vec3::ZERO,
             visible: true,
@@ -621,6 +623,7 @@ fn chest_model(half: ChestHalf) -> CubeModel {
                 // bottom: addBox(x, 0, 1, w, 10, 14), texOffs(0, 19)
                 ModelPart {
                     name: "bottom".into(),
+                    id: parts::intern("bottom"),
                     pivot: Vec3::ZERO,
                     rotation: Vec3::ZERO,
                     visible: true,
@@ -634,6 +637,7 @@ fn chest_model(half: ChestHalf) -> CubeModel {
                 // lid: addBox(x, 0, 0, w, 5, 14) at PartPose.offset(0, 9, 1), texOffs(0, 0)
                 ModelPart {
                     name: "lid".into(),
+                    id: parts::LID,
                     pivot: Vec3::new(0.0, -9.0, 1.0),
                     rotation: Vec3::ZERO,
                     visible: true,
@@ -647,6 +651,7 @@ fn chest_model(half: ChestHalf) -> CubeModel {
                 // lock: addBox(lock_x, -2, 14, lock_w, 4, 1) at PartPose.offset(0, 9, 1), texOffs(0, 0)
                 ModelPart {
                     name: "lock".into(),
+                    id: parts::LOCK,
                     pivot: Vec3::new(0.0, -9.0, 1.0),
                     rotation: Vec3::ZERO,
                     visible: true,
@@ -685,6 +690,7 @@ fn shulker_model() -> &'static CubeModel {
         tex_height: 64,
         root: ModelPart {
             name: "root".into(),
+            id: parts::ROOT,
             pivot: Vec3::ZERO,
             rotation: Vec3::ZERO,
             visible: true,
@@ -693,6 +699,7 @@ fn shulker_model() -> &'static CubeModel {
                 // lid: addBox(-8, -16, -8, 16, 12, 16), texOffs(0, 0)
                 ModelPart {
                     name: "lid".into(),
+                    id: parts::LID,
                     pivot: Vec3::new(0.0, 24.0, 0.0),
                     rotation: Vec3::ZERO,
                     visible: true,
@@ -708,6 +715,7 @@ fn shulker_model() -> &'static CubeModel {
                 // base: addBox(-8, -8, -8, 16, 8, 16), texOffs(0, 28)
                 ModelPart {
                     name: "base".into(),
+                    id: parts::intern("base"),
                     pivot: Vec3::new(0.0, 24.0, 0.0),
                     rotation: Vec3::ZERO,
                     visible: true,
@@ -1132,6 +1140,7 @@ fn banner_model(wall: bool) -> &'static CubeModel {
         if !wall {
             children.push(ModelPart {
                 name: "pole".into(),
+                id: parts::intern("pole"),
                 pivot: Vec3::ZERO,
                 rotation: Vec3::ZERO,
                 visible: true,
@@ -1150,6 +1159,7 @@ fn banner_model(wall: bool) -> &'static CubeModel {
         let bar_z = if wall { 9.5 } else { -1.0 };
         children.push(ModelPart {
             name: "bar".into(),
+            id: parts::intern("bar"),
             pivot: Vec3::ZERO,
             rotation: Vec3::ZERO,
             visible: true,
@@ -1170,6 +1180,7 @@ fn banner_model(wall: bool) -> &'static CubeModel {
         };
         children.push(ModelPart {
             name: "flag".into(),
+            id: parts::intern("flag"),
             pivot: flag_pivot,
             rotation: Vec3::ZERO,
             visible: true,
@@ -1189,6 +1200,7 @@ fn banner_model(wall: bool) -> &'static CubeModel {
             tex_height: 64,
             root: ModelPart {
                 name: "root".into(),
+                id: parts::ROOT,
                 pivot: Vec3::ZERO,
                 rotation: Vec3::ZERO,
                 visible: true,
@@ -1350,6 +1362,7 @@ fn skull_model(kind: SkullKind) -> &'static CubeModel {
         let part =
             |name: &str, pivot: Vec3, cubes: Vec<Cube>, children: Vec<ModelPart>| ModelPart {
                 name: name.into(),
+                id: parts::intern(name),
                 pivot,
                 rotation: Vec3::ZERO,
                 visible: true,
@@ -1660,14 +1673,14 @@ pub(crate) fn emit_block_entity(
             // The lid and lock rotate by the open angle around their shared pivot (vanilla
             // `ChestModel.setupAnim`; the sign is the y mirror's, see the module doc).
             let mut pose = PoseOverrides::default();
-            pose.rotations.push((
-                "lid".into(),
+            pose.set_rotation(
+                parts::LID,
                 Vec3::new(open * std::f32::consts::FRAC_PI_2, 0.0, 0.0),
-            ));
-            pose.rotations.push((
-                "lock".into(),
+            );
+            pose.set_rotation(
+                parts::LOCK,
                 Vec3::new(open * std::f32::consts::FRAC_PI_2, 0.0, 0.0),
-            ));
+            );
             for part in &model.root.children {
                 emit_part(
                     out,
@@ -1685,13 +1698,13 @@ pub(crate) fn emit_block_entity(
             let progress = inst.open.end.max(inst.open.start);
             let mut pose = PoseOverrides::default();
             // Vanilla `ShulkerBoxModel.setupAnim`: the lid spins by 270 degrees * progress...
-            pose.rotations.push((
-                "lid".into(),
+            pose.set_rotation(
+                parts::LID,
                 Vec3::new(0.0, 270.0_f32.to_radians() * progress, 0.0),
-            ));
+            );
             let root = shulker_root(inst.pos, inst.facing, camera);
             for part in &model.root.children {
-                let parent = if part.name == "lid" {
+                let parent = if part.id == parts::LID {
                     // ...and rises by `progress * 0.5 * 16` model units (the pivot moves from
                     // 24 down to 16).
                     root * Mat4::from_translation(Vec3::new(0.0, -8.0 * progress, 0.0))
@@ -1731,17 +1744,15 @@ pub(crate) fn emit_block_entity(
             match kind {
                 SkullKind::Dragon => {
                     // The jaw swings about its pivot.
-                    pose.rotations.push((
-                        "jaw".into(),
+                    pose.set_rotation(
+                        parts::intern("jaw"),
                         Vec3::new(skull_dragon_jaw_rotation(anim), 0.0, 0.0),
-                    ));
+                    );
                 }
                 SkullKind::Piglin => {
                     let (left, right) = skull_piglin_ear_rotations(anim);
-                    pose.rotations
-                        .push(("left_ear".into(), Vec3::new(0.0, 0.0, left)));
-                    pose.rotations
-                        .push(("right_ear".into(), Vec3::new(0.0, 0.0, right)));
+                    pose.set_rotation(parts::intern("left_ear"), Vec3::new(0.0, 0.0, left));
+                    pose.set_rotation(parts::intern("right_ear"), Vec3::new(0.0, 0.0, right));
                 }
                 _ => {}
             }
@@ -1774,10 +1785,10 @@ pub(crate) fn emit_banner(
     let (sky, block) = inst.light;
     let light = (block, sky);
     let mut pose = PoseOverrides::default();
-    pose.rotations.push((
-        "flag".into(),
+    pose.set_rotation(
+        parts::intern("flag"),
         Vec3::new(banner_flag_rotation(inst.banner_phase), 0.0, 0.0),
-    ));
+    );
     let root = banner_root(inst.pos, angle, camera);
     let Some(data) = inst.banner.clone() else {
         return;
@@ -1953,6 +1964,7 @@ impl ObjectPart {
 
     fn done(self, children: Vec<ModelPart>) -> ModelPart {
         ModelPart {
+            id: parts::intern(&self.name),
             name: self.name,
             pivot: self.pivot,
             rotation: self.rotation,
@@ -1975,6 +1987,7 @@ fn part(name: &str, pivot: Vec3, rotation: Vec3) -> ObjectPart {
 fn empty_root(children: Vec<ModelPart>) -> ModelPart {
     ModelPart {
         name: "root".into(),
+        id: parts::ROOT,
         pivot: Vec3::ZERO,
         rotation: Vec3::ZERO,
         visible: true,
@@ -3489,6 +3502,7 @@ mod tests {
             tex_height: 16,
             root: ModelPart {
                 name: "root".into(),
+                id: parts::ROOT,
                 pivot: Vec3::ZERO,
                 rotation: Vec3::ZERO,
                 visible: true,
@@ -3517,6 +3531,7 @@ mod tests {
                     mirror: false,
                 }],
                 name: "root".into(),
+                id: parts::ROOT,
                 pivot: Vec3::ZERO,
                 rotation: Vec3::ZERO,
                 visible: true,

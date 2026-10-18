@@ -98,7 +98,7 @@ pub(super) fn spec_for(entity: &str) -> Option<&'static VariantSpec> {
 
 /// The variant spec for a registry kind, resolved through the entity-type names.
 pub(super) fn spec_for_kind(kind: RegistryIndex) -> Option<&'static VariantSpec> {
-    spec_for(crate::registry::entity_type_name(kind)?.as_str())
+    spec_for(crate::registry::entity_type_name(kind)?)
 }
 
 /// The per-mob variant tables, set once at join. Each entry id maps to its resolved assets;

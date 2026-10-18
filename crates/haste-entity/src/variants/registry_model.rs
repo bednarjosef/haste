@@ -64,7 +64,7 @@ pub fn model_for(
     if let Some(hit) = cache.lock().unwrap().get(&key) {
         return hit.clone();
     }
-    let (adult_layer, baby_layer) = layers_for(&name, assets.model);
+    let (adult_layer, baby_layer) = layers_for(name, assets.model);
     let (layer, texture) = if baby {
         (baby_layer, &assets.baby)
     } else {
