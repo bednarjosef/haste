@@ -204,36 +204,34 @@ pub fn player_instance(
     let yaw = view.prev_look.0 + (view.look.0 - view.prev_look.0) * partial;
     let pitch = view.prev_look.1 + (view.look.1 - view.prev_look.1) * partial;
     let mut pose = PoseOverrides::default();
+    use haste_core::parts;
     match view.pose {
         Some(haste_core::entity::Pose::Crouching) => {
-            pose.rotations
-                .push(("body".into(), Vec3::new(0.5, 0.0, 0.0)));
-            pose.rotations
-                .push(("head".into(), Vec3::new(-0.5, 0.0, 0.0)));
+            pose.set_rotation(parts::BODY, Vec3::new(0.5, 0.0, 0.0));
+            pose.set_rotation(parts::HEAD, Vec3::new(-0.5, 0.0, 0.0));
         }
         Some(
             haste_core::entity::Pose::Swimming
             | haste_core::entity::Pose::FallFlying
             | haste_core::entity::Pose::SpinAttack,
         ) => {
-            pose.rotations.push((
-                "body".into(),
+            pose.set_rotation(
+                parts::BODY,
                 Vec3::new(std::f32::consts::FRAC_PI_2, 0.0, 0.0),
-            ));
-            pose.rotations.push((
-                "right_arm".into(),
+            );
+            pose.set_rotation(
+                parts::RIGHT_ARM,
                 Vec3::new(-std::f32::consts::FRAC_PI_2, 0.0, 0.4),
-            ));
-            pose.rotations.push((
-                "left_arm".into(),
+            );
+            pose.set_rotation(
+                parts::LEFT_ARM,
                 Vec3::new(-std::f32::consts::FRAC_PI_2, 0.0, -0.4),
-            ));
+            );
         }
         _ => {
             // Head aim: the head follows the look's pitch (the body and head yaw are the same
             // here, so no yaw component).
-            pose.rotations
-                .push(("head".into(), Vec3::new(pitch.to_radians(), 0.0, 0.0)));
+            pose.set_rotation(parts::HEAD, Vec3::new(pitch.to_radians(), 0.0, 0.0));
         }
     }
     let mut inst = EntityInstance {

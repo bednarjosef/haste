@@ -57,8 +57,11 @@ fn dinnerbone_is_upside_down() {
     assert!(matches!(b.ops[0], BodyOp::Translate(t) if (t.y - 1.9).abs() < 1e-5));
     assert!(matches!(b.ops[1], BodyOp::RotateZ(a) if (a - std::f32::consts::PI).abs() < 1e-5));
     let pose = crate::animation::setup_anim(e, &model, true, 0.0, false);
-    let rot: std::collections::HashMap<_, _> = pose.rotations.iter().cloned().collect();
-    let head = rot.get("head").unwrap();
+    let head = pose
+        .rotations()
+        .find(|(id, _)| haste_core::parts::name_of(*id) == "head")
+        .map(|(_, r)| r)
+        .unwrap();
     assert!(
         (head.x - -30.0f32.to_radians()).abs() < 1e-5,
         "upside-down head pitch {} != -30 deg",
