@@ -135,6 +135,7 @@ fn tick_once(
     // them); the interaction step above ran the attacks and uses that started the swings. In
     // spectator the hand is not drawn at all (vanilla hides it there), so it does not advance.
     let first_person = view::tick_hand(driver, shared, tick_moved);
+    hud::publish_attack_indicator(driver, shared);
     let s = &driver.session;
     let (prev_eye, prev_yaw, prev_pitch) = s.player.camera(0.0);
     let (eye, yaw, pitch) = s.player.camera(1.0);

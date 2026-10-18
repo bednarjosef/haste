@@ -124,3 +124,16 @@ pub(super) fn tick_ui(driver: &mut NetDriver, shared: &Shared, ui_out: &mut Vec<
         driver.queue(p);
     }
 }
+
+/// The attack indicator's inputs for this tick (the crosshair bar and the hotbar icon,
+/// `Hud.extractCrosshair` / `extractItemHotbar`): published after the hand's tick so the HUD sees
+/// this tick's charge like vanilla's render, plus whether the crosshair picks a living, alive
+/// entity (the full icon's condition).
+pub(super) fn publish_attack_indicator(driver: &NetDriver, shared: &Shared) {
+    if let Some(ui) = shared.ui.lock().as_ref() {
+        let player = &driver.session.player;
+        let (ticker, delay) = player.hand.attack_strength_charge();
+        ui.set_attack_strength(haste_jvm::AttackStrengthHud { ticker, delay });
+        ui.set_crosshair_pick(player.crosshair_pick_living(&*shared.entities.read()));
+    }
+}

@@ -5,9 +5,12 @@
 use glam::DVec3;
 use haste_core::view::{BlockView, CollisionShapes};
 use haste_core::{Aabb, BlockPos, Direction, EntityId, Identifier, RegistryIndex};
+use haste_entity::store::HEALTH_METADATA_INDEX;
 use haste_physics::raycast::{self, BlockHit};
+use haste_protocol::haste_core::entity::MetadataValue;
 
 use super::super::LocalPlayer;
+use crate::net::EntitySink;
 
 /// What the crosshair is on.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -41,6 +44,22 @@ impl LocalPlayer {
             Some(Target::Entity { id, .. }) => Some(id),
             _ => None,
         }
+    }
+
+    /// Whether the crosshair picks a living, alive entity in reach (vanilla `Minecraft
+    /// .crosshairPickEntity`, the HUD attack indicator's full-icon condition): the pick is
+    /// already filtered to `entity_interaction_range`, so "in reach" holds by construction.
+    /// Rust tracks no is-living registry: like the mount HUD's vehicle check, the health
+    /// metadata's presence marks a living entity (every living entity's pairing data carries
+    /// `LivingEntity.DATA_HEALTH_ID`), and its value being positive is "alive".
+    pub fn crosshair_pick_living(&self, entities: &dyn EntitySink) -> bool {
+        let Some(id) = self.target_entity() else {
+            return false;
+        };
+        matches!(
+            entities.metadata_value(id, HEALTH_METADATA_INDEX),
+            Some(MetadataValue::Float(h)) if *h > 0.0
+        )
     }
 
     /// The crosshair target for a look direction: `Minecraft.pick` ->

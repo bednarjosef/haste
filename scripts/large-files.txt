@@ -8,7 +8,6 @@ crates/haste-assets/src/packstack.rs 723
 crates/haste-client/src/ambient_particles.rs 626
 crates/haste-client/src/app.rs 5756
 crates/haste-client/src/boat.rs 871
-crates/haste-client/src/hand.rs 1038
 crates/haste-client/src/net/tests.rs 1841
 crates/haste-client/src/player/interact/tests.rs 2423
 crates/haste-client/src/player/interact/use_item.rs 631
@@ -23,7 +22,7 @@ crates/haste-entity/src/registry.rs 1164
 crates/haste-entity/src/riding.rs 640
 crates/haste-entity/src/store.rs 1152
 crates/haste-jvm/src/host.rs 639
-crates/haste-jvm/src/proxies.rs 659
+crates/haste-jvm/src/proxies.rs 636
 crates/haste-jvm/tests/jvm.rs 2750
 crates/haste-physics/src/block_effects.rs 831
 crates/haste-physics/src/fluids.rs 664
