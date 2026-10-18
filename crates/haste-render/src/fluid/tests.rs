@@ -6,6 +6,8 @@ use haste_core::{Aabb, BlockPos, ChunkPos, DVec3, SectionPos};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod occlusion_dump;
+
 const STONE: BlockStateId = BlockStateId(1);
 /// State ids 10 + level: water; 30 + level: lava.
 fn water(level: u8) -> BlockStateId {
@@ -896,6 +898,7 @@ fn mesher_culls_fluid_faces_with_real_shapes() {
         )),
         Arc::new(crate::mesher::AoTable::all_solid(states.len())),
         Arc::new(occluders),
+        Arc::new(crate::mesher::FaceOccluders::absent()),
     );
     let west_face_vertices = |fluid_state: BlockStateId| -> usize {
         struct OnePair {
