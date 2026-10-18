@@ -1,5 +1,6 @@
 // Tests for the block entity extraction's parsing (moved from app.rs with the code).
 
+use super::sign::{empty_sign_side, first_wrapped_line};
 use super::*;
 
 /// A fixed-width "font" for the wrap tests: every character is 6 wide, `i` is 2.
