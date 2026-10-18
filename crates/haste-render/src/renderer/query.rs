@@ -97,4 +97,11 @@ impl Renderer {
     pub fn set_menu_blur_radius(&mut self, radius: u8) {
         self.menu_blur_radius = crate::blur::blur_radius(radius);
     }
+
+    /// The title panorama for the next frame: its spin in degrees when the open screen
+    /// extracted it (`GuiPipeline::panorama`), drawn under the GUI; `None` draws none. Holds
+    /// for one `render` only, like vanilla's per-frame `PanoramaRenderState`.
+    pub fn set_panorama(&mut self, spin: Option<f32>) {
+        self.panorama.request(spin);
+    }
 }

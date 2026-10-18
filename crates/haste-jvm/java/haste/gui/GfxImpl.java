@@ -51,6 +51,7 @@ public final class GfxImpl {
         tooltip = null;
         cursor = 0;
         blurAfter = -1;
+        panorama = false;
         entityBoxes.clear();
         pipelineBlits = 0;
         nameBlits = 0;
@@ -82,6 +83,13 @@ public final class GfxImpl {
     }
     /** The batch index the blur goes after this frame, or -1 when no screen asked for one. */
     static int blurAfter;
+    /**
+     * Whether a screen extracted the panorama this frame and its spin (vanilla: the
+     * {@code PanoramaRenderState} of {@code GuiRenderState}, reset every frame); {@code GuiBatch.frame}
+     * reports both to Rust, whose renderer draws the cube map under the frame's commands.
+     */
+    static boolean panorama;
+    static float panoramaSpin;
     /** The cursor the screen asked for this frame (GuiBatch.frame's code; 0 = default). */
     static int cursor;
     public static void requestCursor(GuiGraphicsExtractor g, com.mojang.blaze3d.platform.cursor.CursorType c) {

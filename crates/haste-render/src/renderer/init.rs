@@ -371,6 +371,10 @@ impl Renderer {
             size,
         );
 
+        let panorama = crate::panorama::PanoramaRenderer::new(
+            &gpu.device,
+            Self::gui_format_for(&gpu, surface_format),
+        );
         let section_vis = Arc::new(Mutex::new(ahash::AHashMap::new()));
         let walk = crate::occlusion::AsyncOcclusionWalker::new(section_vis.clone())?;
 
@@ -428,6 +432,7 @@ impl Renderer {
             size,
             gui,
             blur,
+            panorama,
             menu_blur_radius: 5,
             blur_unavailable_logged: false,
             assets: gui_assets,

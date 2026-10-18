@@ -7,7 +7,7 @@
 // per-frame hot path in `render_world.rs`, construction in `init.rs`, the
 // surface/window plumbing in `surface.rs`, camera math in `camera.rs`, the
 // world feed in `terrain_feed.rs`, per-frame state in `frame_setup.rs`,
-// readback in `readback.rs`, queries in `query.rs`).
+// readback in `readback.rs`, queries in `query.rs`, the GUI pass in `gui_pass.rs`).
 
 use std::sync::Arc;
 
@@ -23,6 +23,7 @@ pub(crate) use surface::Offscreen;
 
 mod camera;
 mod frame_setup;
+mod gui_pass;
 mod init;
 mod query;
 mod readback;
@@ -326,6 +327,8 @@ pub struct Renderer {
     gui: crate::gui::GuiRenderer,
     /// The menu background blur (vanilla: the `blur` post chain), when a screen asks for it.
     blur: crate::blur::MenuBlur,
+    /// The title panorama (vanilla `CubeMap`), under the GUI when a screen extracted it.
+    panorama: crate::panorama::PanoramaRenderer,
     /// Vanilla `Options.menuBackgroundBlurriness` (the blur radius; 0 = off).
     menu_blur_radius: u32,
     /// The blur-unavailable warning (a surface without COPY_SRC) logged once.
