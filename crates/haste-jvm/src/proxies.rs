@@ -40,6 +40,9 @@ pub struct PlayerVitals {
     pub xp_total: i32,
     /// The player's eyes are in water (air bubbles shown).
     pub eye_in_water: bool,
+    /// Vanilla `LivingEntity.damageCooldownTime` (20 per hit, 10 on a heal, ticked down
+    /// by the client): the HUD's heart blink gates on it (`Hud.extractPlayerHealth`).
+    pub damage_cooldown_ticks: i32,
     /// Hardcore world (hardcore hearts).
     pub hardcore: bool,
     /// Abilities: invulnerable.
@@ -66,6 +69,7 @@ impl Default for PlayerVitals {
             xp_level: 0,
             xp_total: 0,
             eye_in_water: false,
+            damage_cooldown_ticks: 0,
             hardcore: false,
             invulnerable: false,
             flying: false,
@@ -77,24 +81,11 @@ impl Default for PlayerVitals {
     }
 }
 
-/// The mount HUD while riding (vanilla `Hud`'s vehicle hearts and jump bar). Set while the
-/// player rides a living vehicle, cleared on foot: the hearts replace the food bar
-/// (`Hud.extractVehicleHealth` over `player.getVehicle()`), and the jump bar replaces the
-/// experience bar (`Hud.nextContextualInfoState` over `LocalPlayer.jumpableVehicle`) while
-/// we steer a saddled horse-family vehicle.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct MountHud {
-    /// The vehicle's health (`LivingEntity.DATA_HEALTH_ID`, metadata index 9).
-    pub health: f32,
-    /// The vehicle's `Attributes.MAX_HEALTH` (the synced attribute, the family's base
-    /// before a sync lands).
-    pub max_health: f32,
-    /// Vanilla `LocalPlayer.jumpableVehicle`: the vehicle we control can jump (the
-    /// horse-family vehicle Rust steers; its jump bar shows [`Self::jump_scale`]).
-    pub jumpable: bool,
-    /// Vanilla `LocalPlayer.getJumpRidingScale`: the charged jump the jump bar shows.
-    pub jump_scale: f32,
-}
+/// The mount HUD while riding (vanilla `Hud`'s vehicle hearts and jump bar): see
+/// [`mount_hud::MountHud`] (moved to its own module).
+pub use mount_hud::MountHud;
+
+mod mount_hud;
 
 /// The attack indicator's charge (vanilla `Hud.extractCrosshair` and its hotbar variant): the
 /// local player's attack strength ticker and the held item's attack delay, ticked by the client
@@ -211,7 +202,9 @@ pub(crate) mod mirror {
     pub const I_GUI_SCALE: usize = 19;
     pub const I_LIGHT_SKY: usize = 20;
     pub const I_LIGHT_BLOCK: usize = 21;
-    pub const INTS: usize = 22;
+    /// Vanilla `LivingEntity.damageCooldownTime` (the HUD heart blink's gate).
+    pub const I_HURT_COOLDOWN: usize = 22;
+    pub const INTS: usize = 23;
     pub const D_HEALTH: usize = 0;
     pub const D_SATURATION: usize = 1;
     pub const D_XP_PROGRESS: usize = 2;
@@ -293,6 +286,7 @@ impl GameState {
         i[I_GUI_SCALE] = dbg.gui_scale;
         i[I_LIGHT_SKY] = dbg.light[0];
         i[I_LIGHT_BLOCK] = dbg.light[1];
+        i[I_HURT_COOLDOWN] = v.damage_cooldown_ticks;
         d[D_HEALTH] = f64::from(v.health);
         d[D_SATURATION] = f64::from(v.saturation);
         d[D_XP_PROGRESS] = f64::from(v.xp_progress);
