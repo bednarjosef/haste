@@ -1006,6 +1006,19 @@ impl LocalPlayer {
         // item's `use_effects` keep a sprint from starting unless `can_sprint`, and scale the
         // movement input while using.
         self.apply_item_use_effects(ctx.env);
+        // Vanilla `LocalPlayer.aiStep`: when not `noPhysics` and not a passenger (the passenger
+        // tick returned above), the four feet probes free a player inside a suffocating block
+        // (sand, a closing piston or door) before the sprint rules below.
+        if !self.state.no_physics {
+            let bb = self.state.aabb(&self.attrs);
+            haste_physics::move_towards_closest_space(
+                &mut self.state,
+                &bb,
+                ctx.world,
+                ctx.shapes,
+                ctx.blocks,
+            );
+        }
         // Vanilla `LocalPlayer.aiStep`'s double tap of forward, after `Player.aiStep` counted
         // `sprintTriggerTime` down above: sneak held, an item in use or the backward key
         // cancels the window. `hasForwardImpulse` is read from the PREVIOUS tick's input

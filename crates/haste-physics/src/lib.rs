@@ -19,6 +19,7 @@ pub mod movement;
 pub mod raycast;
 pub mod replay;
 mod sprint;
+pub mod suffocation;
 pub mod testing;
 mod trig;
 
@@ -31,6 +32,7 @@ pub use collision::{collide, collide_with_step};
 pub use elytra::{effective_gravity, glide_velocity, look_angle};
 pub use movement::{tick, tick_with};
 pub use sprint::can_start_sprinting;
+pub use suffocation::move_towards_closest_space;
 
 /// The local player's physics state. Positions/velocities are f64 like vanilla; angles f32.
 #[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
