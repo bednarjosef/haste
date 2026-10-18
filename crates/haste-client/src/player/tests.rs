@@ -48,7 +48,9 @@ fn spawned() -> (LocalPlayer, Vec<ServerboundPlay>) {
     tick(&mut p, &InputState::default());
     assert_eq!(
         names(&tick(&mut p, &InputState::default())),
-        ["accept", "loaded", "input", "status", "tick_end"]
+        // The teleport's position is reported by the first sendPosition (xLast untouched
+        // by the teleport), one tick after the accept.
+        ["accept", "loaded", "input", "pos", "tick_end"]
     );
     (p, out)
 }
@@ -168,7 +170,7 @@ fn first_teleport_accepts_one_tick_later_then_reports_loaded() {
     let out = tick(&mut p, &InputState::default());
     assert_eq!(
         names(&out),
-        ["accept", "loaded", "input", "status", "tick_end"]
+        ["accept", "loaded", "input", "pos_rot", "tick_end"]
     );
     match &out[0] {
         ServerboundPlay::AcceptTeleportation(a) => {
@@ -233,8 +235,9 @@ fn position_reminder_every_twenty_ticks() {
             sent_at.push(t);
         }
     }
-    // The spawn teleport counts as a sent position, and `spawned()` spent one tick of it.
-    assert_eq!(sent_at, [19, 39]);
+    // The spawn teleport's position was sent by `spawned()` itself (xLast was untouched,
+    // so it reported at once and reset the reminder), so the next report is 20 ticks on.
+    assert_eq!(sent_at, [20, 40]);
 }
 
 #[test]

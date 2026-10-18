@@ -134,7 +134,7 @@ pub struct Interaction {
     pub target: Option<Target>,
     pub attrs: InteractAttributes,
     /// Block being broken, its face and the held item it started with, progress 0..1.
-    destroying: Option<(BlockPos, Direction, ItemStackData)>,
+    pub(crate) destroying: Option<(BlockPos, Direction, ItemStackData)>,
     progress: f32,
     /// Vanilla `MultiPlayerGameMode.destroyTicks`: how many `continueDestroyBlock` calls have
     /// added progress to the current break (the press tick's `continueAttack` counts, so a

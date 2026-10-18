@@ -2030,3 +2030,69 @@ fn a_hotbar_change_aborts_the_break_only_through_continue_destroy() {
     let out = r.tick(InteractInput::default());
     assert_eq!(actions(&out), [(action::ABORT_DESTROY, 0)]);
 }
+
+/// `ClientPacketListener.handleMovePlayer` calls `MultiPlayerGameMode.stopDestroyBlock`
+/// after applying the position: a teleport aborts a running break right in the packet
+/// handler (DOWN, no sequence, the attack strength ticker resets), and the position is
+/// reported by the next sendPosition (`xLast` untouched), not silently treated as sent.
+#[test]
+fn a_teleport_aborts_the_break_and_reports_its_position() {
+    let mut r = Rig::new(GameMode::Survival);
+    let out = r.tick(ATTACK);
+    assert_eq!(actions(&out), [(action::START_DESTROY, 1)]);
+    assert!(r.p.break_progress().is_some());
+    // The teleport arrives mid-break (mid-tick, like the packet drain): the abort is sent
+    // at once, from the handler, not from the next tick's key handling.
+    let mut move_out = Vec::new();
+    r.p.handle(
+        &ClientboundPlay::PlayerPosition(
+            haste_protocol::packets::play::clientbound::PlayerPosition {
+                teleport_id: 9,
+                pos: DVec3::new(30.5, 0.0, 30.5),
+                velocity: DVec3::ZERO,
+                yaw: 0.0,
+                pitch: 90.0,
+                flags: 0,
+            },
+        ),
+        &mut move_out,
+    );
+    assert_eq!(
+        actions(&move_out),
+        [(action::ABORT_DESTROY, 0)],
+        "the teleport aborted the running break"
+    );
+    assert!(r.p.break_progress().is_none());
+    // The tick the teleport arrived in: the movement waits for the accept (nothing about
+    // the break; the held button restarts a fresh one on the new ground below).
+    let out = r.tick(ATTACK);
+    assert_eq!(actions(&out), [(action::START_DESTROY, 2)]);
+    // The next tick opens with the accept and the movement reports the new position
+    // whatever the threshold (an unfiltered tick: Rig::tick drops the movement packets).
+    r.p.set_interact(ATTACK);
+    let mut unfiltered = Vec::new();
+    let env = InteractEnv {
+        data: data(),
+        entities: &r.entities,
+        entity_types: &r.types,
+    };
+    let input = InputState {
+        pitch: 90.0,
+        ..Default::default()
+    };
+    r.p.tick_interact(&input, &r.w, &env, None, &mut unfiltered);
+    let names: Vec<&str> = move_out
+        .iter()
+        .chain(unfiltered.iter())
+        .map(|p| match p {
+            ServerboundPlay::AcceptTeleportation(_) => "accept",
+            ServerboundPlay::PlayerAction(a) if a.status == action::ABORT_DESTROY => "abort",
+            ServerboundPlay::MovePlayerPos(_) => "pos",
+            ServerboundPlay::MovePlayerPosRot(_) => "pos_rot",
+            ServerboundPlay::ClientTickEnd(_) => "tick_end",
+            _ => "other",
+        })
+        .filter(|n| *n != "tick_end" && *n != "other")
+        .collect();
+    assert_eq!(names, ["abort", "accept", "pos"], "{names:?}");
+}

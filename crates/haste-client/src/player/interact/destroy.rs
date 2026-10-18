@@ -166,7 +166,7 @@ impl LocalPlayer {
     /// and drop the progress, as vanilla does when the button is released or the crosshair
     /// leaves the block. The attack strength ticker resets with it (vanilla calls
     /// `player.resetAttackStrengthTicker()` here).
-    pub(super) fn stop_destroy(&mut self, out: &mut Vec<ServerboundPlay>) {
+    pub(crate) fn stop_destroy(&mut self, out: &mut Vec<ServerboundPlay>) {
         if let Some((_, _, _)) = self.int.destroying {
             self.abort_destroy(Direction::Down, out);
             self.hand.reset_attack_strength_ticker();

@@ -441,8 +441,9 @@ impl LocalPlayer {
 
     /// Consumes the packets about the local player. Returns false for packets it does not handle.
     /// The `out` buffer is kept for the caller's uniform signature; this handler defers every
-    /// serverbound reply to the next tick (see [`LocalPlayer::flush_pending_accept`]).
-    pub fn handle(&mut self, p: &ClientboundPlay, _out: &mut Vec<ServerboundPlay>) -> bool {
+    /// serverbound reply to the next tick (see [`LocalPlayer::flush_pending_accept`]) — except
+    /// a teleport's break abort, which vanilla sends from `handleMovePlayer` itself.
+    pub fn handle(&mut self, p: &ClientboundPlay, out: &mut Vec<ServerboundPlay>) -> bool {
         use ClientboundPlay as P;
         match p {
             P::PlayerPosition(t) => {
@@ -455,7 +456,16 @@ impl LocalPlayer {
                 // (flush_pending_accept).
                 self.pending_accept = Some(t.teleport_id);
                 self.pending_accept_age = 0;
-                self.mark_sent_position(self.state.on_ground, self.state.horizontal_collision);
+                // `ClientPacketListener.handleMovePlayer` also calls
+                // `BlockStatePredictionHandler.onTeleport` (a record of the prediction
+                // sequence at the teleport; our predictions never snap the player, so there
+                // is nothing to keep) and `MultiPlayerGameMode.stopDestroyBlock`: a running
+                // break is aborted here, before this tick's key handling — unlike the
+                // accept, which the join-teleport race above keeps a tick late.
+                self.stop_destroy(out);
+                // `xLast`/`yLast`/`zLast` are left untouched, so the first sendPosition
+                // after the teleport reports the new position whatever the threshold (the
+                // movement waits for the accept, as vanilla's handler has already answered).
             }
             P::PlayerRotation(r) => {
                 let yaw = if r.relative_yaw {
@@ -631,10 +641,9 @@ impl LocalPlayer {
     /// races the server's join bookkeeping and it logs
     /// "moved too quickly! <spawn position>" (observed on the vanilla 26.3 server, ~1 join
     /// in 8). One full tick later the server holds the login position, so the accept's
-    /// position matches it. The accepted position counts as sent (26.3's accept carries the
-    /// resulting position and rotation; an extra move_player_pos_rot right after it, what
-    /// older clients sent, gets the client kicked with invalid_player_movement after a
-    /// relative `/tp ~ ~10 ~`).
+    /// position matches it. 26.3's accept carries the resulting position and rotation; the
+    /// first move_player_pos_rot follows one tick after it, as vanilla's `sendPosition`
+    /// does (xLast untouched by the teleport — see the PlayerPosition handler).
     fn flush_pending_accept(&mut self, out: &mut Vec<ServerboundPlay>) {
         if self.pending_accept.is_none() {
             return;
@@ -1182,6 +1191,13 @@ impl LocalPlayer {
     }
 
     fn send_movement(&mut self, out: &mut Vec<ServerboundPlay>) {
+        // A teleport whose accept has not gone out yet: the first movement would name the
+        // post-teleport position before the server has taken the accept (vanilla's
+        // `handleMovePlayer` answers before the next `sendPosition` runs). It goes out with
+        // the accept's own tick, `xLast` still holding the pre-teleport position.
+        if self.pending_accept.is_some() {
+            return;
+        }
         let s = &self.state;
         if !(s.pos.is_finite() && s.yaw.is_finite() && s.pitch.is_finite()) {
             tracing::error!("non-finite player state, not sent: {s:?}");

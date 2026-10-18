@@ -230,6 +230,7 @@ impl Rig {
             .map(|p| match p {
                 ServerboundPlay::AcceptTeleportation(_) => "accept_teleportation",
                 ServerboundPlay::PlayerLoaded(_) => "player_loaded",
+                ServerboundPlay::MovePlayerPos(_) => "move_player_pos",
                 ServerboundPlay::MovePlayerPosRot(_) => "move_player_pos_rot",
                 ServerboundPlay::PlayerInput(_) => "player_input",
                 ServerboundPlay::ClientTickEnd(_) => "client_tick_end",
@@ -497,10 +498,13 @@ fn teleport_is_accepted_one_tick_later_then_movement_follows() {
             "accept_teleportation",
             "player_loaded",
             "player_input",
+            // The teleport's position and rotation are reported by the first sendPosition
+            // after the accept (xLast and the sent rotation untouched by the teleport).
+            "move_player_pos_rot",
             "client_tick_end"
         ]
     );
-    // The fake world has no chunks: the player stays put, so no movement packet.
+    // The fake world has no chunks: the player stays put, so no further movement packet.
     // player_input only when it changes; player_loaded only once.
     r.session.end_tick(
         &InputState::default(),
@@ -526,7 +530,11 @@ fn teleport_is_accepted_one_tick_later_then_movement_follows() {
         &r.entities,
         &mut r.out,
     );
-    assert_eq!(r.names(), ["accept_teleportation", "client_tick_end"]);
+    // The relative teleport moved the player: the accept, then the new position.
+    assert_eq!(
+        r.names(),
+        ["accept_teleportation", "move_player_pos", "client_tick_end"]
+    );
 }
 
 #[test]
