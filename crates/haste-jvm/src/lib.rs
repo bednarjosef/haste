@@ -27,5 +27,5 @@ pub use host::{JvmConfig, JvmHost, StartTimings};
 pub use loader::{ClassLog, ClassSource, ALLOW_CLASSES, ALLOW_PACKAGES, DENY, WARM_CLASSES};
 pub use proxies::{
     decode_stack, empty_stack, encode_stack, ChatMessage, CreateWorldRequest, DebugInfo, GameState,
-    PlayerVitals, TargetedState, INVENTORY_SIZE,
+    MountHud, PlayerVitals, TargetedState, INVENTORY_SIZE,
 };

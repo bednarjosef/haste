@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Horse riding live check (scripts/checks/horse-riding.txt) against the running test
 # server on 127.0.0.1:25691. It builds a stone platform in this branch's own area
-# (x 400..420, z 0..20, far from the shared spawn floor), summons a tamed, saddled horse,
-# lets the scripted client mount it (use-item on the entity), ride forward (W, 3 s) and
-# jump (Space, a charged jump bar), then reads the server's own verdict back over RCON:
-# the horse's Pos before and after, that it carried the player, and that the server log
-# holds no "moved wrongly"/"moved too quickly" for it. No server is started, and nothing
-# outside this branch's area is touched.
+# (x 340..360, z 0..20, top at y 120, far from the shared spawn floor), summons a tamed,
+# saddled horse, lets the scripted client mount it (use-item on the entity), ride forward
+# (W, 3 s) and jump (Space, a charged jump bar), then reads the server's own verdict back
+# over RCON: the horse's Pos before and after, that it carried the player, and that the
+# server log holds no "moved wrongly"/"moved too quickly" for it. No server is started, and
+# nothing outside this branch's area is touched.
 # usage: scripts/checks/horse-riding.sh
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PORT=25691
-NAME=HorseCheck
+NAME=riding-mount-hud
 BIN="${HASTE_BIN:-$ROOT/target/debug/haste}"
 SCRIPT="$ROOT/scripts/checks/horse-riding.txt"
 LOG="$ROOT/target/horse-riding.log"
@@ -33,7 +33,8 @@ SERVER_LINES=0
 
 : >"$LOG"
 echo "== joining headless as $NAME with $SCRIPT"
-"$BIN" --server "127.0.0.1:$PORT" --username "$NAME" --script "$SCRIPT" --seconds 90 >"$LOG" 2>&1 &
+systemd-run --user --scope -q -p MemoryMax=3G timeout 120 \
+  "$BIN" --server "127.0.0.1:$PORT" --username "$NAME" --script "$SCRIPT" --seconds 110 >"$LOG" 2>&1 &
 CLIENT_PID=$!
 
 up=
@@ -50,22 +51,22 @@ fi
 # The RCON setup must land inside the script's first `wait 400` (20 s): the teleport into
 # the area (so the server loads its chunks), the platform and the horse summon (tamed, with
 # the saddle on, so our client's `getControllingPassenger` holds from the mount).
-rcon "tp $NAME 405.5 71 5.0 0 20" >/dev/null
+rcon "tp $NAME 345.5 120 5.0 0 20" >/dev/null
 sleep 4
 # Clear the volume above the platform first: the area's natural terrain can be higher
-# than y 71, which would bury the player (the crosshair then hits the block around the
+# than y 120, which would bury the player (the crosshair then hits the block around the
 # eyes and no use click ever reaches the horse).
-rcon "execute at $NAME run fill 400 71 0 420 90 20 air" >/dev/null
-rcon "execute at $NAME run fill 400 70 0 420 70 20 stone" >/dev/null
-rcon "kill @e[type=horse]" >/dev/null
+rcon "execute at $NAME run fill 340 120 0 360 140 20 air" >/dev/null
+rcon "execute at $NAME run fill 340 119 0 360 119 20 stone" >/dev/null
+rcon "kill @e[type=horse,x=340,y=115,z=0,dx=20,dy=15,dz=20]" >/dev/null
 # NoAI: a free horse wanders off its mounting spot while the script's first wait runs
 # (its AI ticks even from a distance); NoAI does not affect the ridden travel we steer.
-rcon "summon minecraft:horse 405.5 71 8.5 {Tame:1b,NoAI:1b,equipment:{saddle:{id:\"minecraft:saddle\",count:1}}}" >/dev/null
+rcon "summon minecraft:horse 345.5 120 8.5 {Tame:1b,NoAI:1b,equipment:{saddle:{id:\"minecraft:saddle\",count:1}}}" >/dev/null
 sleep 3
 echo "== mounting spot"
 SPOT=$(rcon "data get entity $NAME Pos" 2>/dev/null)
 echo "player spot: $SPOT"
-HORSE_REST=$(rcon "data get entity @e[type=horse,limit=1,sort=nearest] Pos" 2>/dev/null)
+HORSE_REST=$(rcon "data get entity @e[type=horse,x=340,y=115,z=0,dx=20,dy=15,dz=20,limit=1,sort=nearest] Pos" 2>/dev/null)
 echo "horse rest: $HORSE_REST"
 
 # The script's `click right` steps mount the horse (the second is a spare: the first mounts,
@@ -76,11 +77,17 @@ echo "horse rest: $HORSE_REST"
 # after-read at setup+33 s.
 sleep 16
 MOUNTED=$(rcon "data get entity $NAME RootVehicle" 2>/dev/null)
-BEFORE=$(rcon "data get entity @e[type=horse,limit=1,sort=nearest] Pos" 2>/dev/null)
+BEFORE=$(rcon "data get entity @e[type=horse,x=340,y=115,z=0,dx=20,dy=15,dz=20,limit=1,sort=nearest] Pos" 2>/dev/null)
 sleep 17
-AFTER=$(rcon "data get entity @e[type=horse,limit=1,sort=nearest] Pos" 2>/dev/null)
-ROTATION=$(rcon "data get entity @e[type=horse,limit=1,sort=nearest] Rotation" 2>/dev/null)
+AFTER=$(rcon "data get entity @e[type=horse,x=340,y=115,z=0,dx=20,dy=15,dz=20,limit=1,sort=nearest] Pos" 2>/dev/null)
+ROTATION=$(rcon "data get entity @e[type=horse,x=340,y=115,z=0,dx=20,dy=15,dz=20,limit=1,sort=nearest] Rotation" 2>/dev/null)
 PLAYER_AFTER=$(rcon "data get entity $NAME Pos" 2>/dev/null)
+
+# Remove the rig while the client still keeps the area loaded: the horse and the platform
+# (the cleared volume above stays air).
+rcon "kill @e[type=horse,x=340,y=115,z=0,dx=20,dy=15,dz=20]" >/dev/null
+CLEANUP=$(rcon "execute at $NAME run fill 340 119 0 360 119 20 air" 2>/dev/null)
+echo "== cleanup: $CLEANUP"
 
 wait "$CLIENT_PID" 2>/dev/null
 RC=$?
