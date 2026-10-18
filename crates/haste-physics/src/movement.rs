@@ -343,10 +343,10 @@ fn update_player_pose(
 
 /// The movement key vector (f32 throughout, in vanilla's order): `KeyboardInput.tick` builds
 /// (left - right, forward - back) and normalises it (`Vec2.normalized`, so a diagonal is
-/// (0.707, 0.707)); `LocalPlayer.modifyInput` then scales it by 0.98, by the sneak factor while
-/// moving slowly (`LocalPlayer.isMovingSlowly`: `isCrouching() || isVisuallyCrawling()`, the
-/// latter being the swimming pose outside water) and finally stretches it for square movement.
-/// The item-use slowdown is not modelled yet.
+/// (0.707, 0.707)); `LocalPlayer.modifyInput` then scales it by 0.98, by the used item's
+/// `use_effects` speed multiplier while using an item, by the sneak factor while moving slowly
+/// (`LocalPlayer.isMovingSlowly`: `isCrouching() || isVisuallyCrawling()`, the latter being the
+/// swimming pose outside water) and finally stretches it for square movement.
 fn impulse(state: &PlayerState, input: &InputState, attrs: &PlayerAttributes) -> Impulse {
     let forward = (input.forward as i32 - input.back as i32) as f32;
     let strafe = (input.left as i32 - input.right as i32) as f32;
@@ -358,6 +358,14 @@ fn impulse(state: &PlayerState, input: &InputState, attrs: &PlayerAttributes) ->
         strafe: strafe / dist * INPUT_SCALE,
         forward: forward / dist * INPUT_SCALE,
     };
+    // Vanilla `LocalPlayer.modifyInput`: while using an item the input is scaled by the used
+    // stack's `use_effects` speed multiplier (`LocalPlayer.itemUseSpeedMultiplier`, 1.0 when no
+    // item is in use). Vanilla also skips it while riding (`isPassenger()`); riding never
+    // reaches here, because the player's own physics tick does not run while in a vehicle.
+    if state.slow_using_item {
+        imp.strafe *= state.item_use_speed;
+        imp.forward *= state.item_use_speed;
+    }
     let slow = state.crouching || (state.pose == Pose::Swimming && !state.in_water);
     if slow {
         let factor = attrs.sneaking_speed as f32;
@@ -964,6 +972,64 @@ mod tests {
         tick(&mut s, &InputState::default(), &attrs, &w, &shapes, &shapes);
         assert_eq!(s.velocity.x, 0.0);
         assert_eq!(s.velocity.z, 0.0);
+    }
+
+    #[test]
+    fn using_an_item_scales_the_walking_input_by_the_use_effects_multiplier() {
+        // Vanilla `LocalPlayer.modifyInput`: while using an item the input is scaled by the
+        // used stack's `use_effects` speed multiplier after the 0.98 input scale. Walking
+        // straight on stone from rest, the per-tick recurrence is v = v_prev + a (the move),
+        // then v *= 0.6 x 0.91, with a = 0.98 x 0.2 (the multiplier) x movement speed 0.1.
+        let w = TestWorld::flat(0, STONE);
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let mut s = PlayerState::at(DVec3::new(0.5, 0.0, 0.5));
+        settle(&w, &mut s, &attrs, &shapes);
+        s.slow_using_item = true;
+        s.item_use_speed = 0.2;
+        let input = InputState {
+            forward: true,
+            ..Default::default()
+        };
+        let a = (INPUT_SCALE * 0.2) as f64 * 0.1f32 as f64;
+        let drag = (DEFAULT_SLIPPERINESS * HORIZONTAL_DRAG) as f64;
+        let mut v = 0.0f64;
+        let mut z = s.pos.z;
+        for _ in 0..10 {
+            tick(&mut s, &input, &attrs, &w, &shapes, &shapes);
+            v += a;
+            z += v;
+            v *= drag;
+            assert!(
+                (s.pos.z - z).abs() < 1.0e-9,
+                "walked to {} expected {z}",
+                s.pos.z
+            );
+        }
+    }
+
+    #[test]
+    fn using_an_item_at_multiplier_one_is_unchanged() {
+        // A `use_effects` speed multiplier of 1.0 leaves the walk exactly as it is without an
+        // item in use.
+        let w = TestWorld::flat(0, STONE);
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let input = InputState {
+            forward: true,
+            ..Default::default()
+        };
+        let run = |using: bool, speed: f32| {
+            let mut s = PlayerState::at(DVec3::new(0.5, 0.0, 0.5));
+            settle(&w, &mut s, &attrs, &shapes);
+            s.slow_using_item = using;
+            s.item_use_speed = speed;
+            for _ in 0..10 {
+                tick(&mut s, &input, &attrs, &w, &shapes, &shapes);
+            }
+            s.pos.z
+        };
+        assert_eq!(run(true, 1.0), run(false, 0.2), "multiplier 1.0 is a no-op");
     }
 
     #[test]

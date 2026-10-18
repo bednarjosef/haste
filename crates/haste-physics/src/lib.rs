@@ -101,6 +101,17 @@ pub struct PlayerState {
     /// start. Set by the client each tick.
     #[serde(default)]
     pub slow_using_item: bool,
+    /// The used item's `minecraft:use_effects` speed multiplier (vanilla
+    /// `LocalPlayer.itemUseSpeedMultiplier`: the used stack's component, `UseEffects.DEFAULT`'s
+    /// 0.2 when the item has none), applied to the movement input while using an item
+    /// (`LocalPlayer.modifyInput`). Set by the client each tick; 1.0 when no item is in use.
+    #[serde(default = "item_use_speed_default")]
+    pub item_use_speed: f32,
+}
+
+/// `PlayerState::item_use_speed`'s serde default: 1.0, no item in use.
+fn item_use_speed_default() -> f32 {
+    1.0
 }
 
 impl PlayerState {
