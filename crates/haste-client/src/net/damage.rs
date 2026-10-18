@@ -22,6 +22,7 @@
 use haste_audio::random::LegacyRandom;
 use haste_protocol::SyncedRegistries;
 
+use super::{EntityId, EntitySink, Session, DAMAGE_COOLDOWN_TICKS, HURT_TILT_TICKS};
 use crate::sound::{PlayRequest, SoundPos, SoundRef, SoundRequest};
 
 /// `SoundSource.PLAYERS` (the index in vanilla's `SoundSource` order).
@@ -65,98 +66,98 @@ pub fn player_hurt_sound(effects: &str) -> &'static str {
 pub(crate) fn mob_hurt_sound(name: &str) -> Option<&'static str> {
     let path = name.strip_prefix("minecraft:").unwrap_or(name);
     let sound = match path {
-        "allay" => "entity.allay.hurt",
-        "armor_stand" => "entity.armor_stand.hit",
-        "armadillo" => "entity.armadillo.hurt",
-        "axolotl" => "entity.axolotl.hurt",
-        "bat" => "entity.bat.hurt",
-        "bee" => "entity.bee.hurt",
-        "blaze" => "entity.blaze.hurt",
-        "bogged" => "entity.bogged.hurt",
-        "breeze" => "entity.breeze.hurt",
-        "camel" => "entity.camel.hurt",
-        "camel_husk" => "entity.camel_husk.hurt",
+        "allay" => "minecraft:entity.allay.hurt",
+        "armor_stand" => "minecraft:entity.armor_stand.hit",
+        "armadillo" => "minecraft:entity.armadillo.hurt",
+        "axolotl" => "minecraft:entity.axolotl.hurt",
+        "bat" => "minecraft:entity.bat.hurt",
+        "bee" => "minecraft:entity.bee.hurt",
+        "blaze" => "minecraft:entity.blaze.hurt",
+        "bogged" => "minecraft:entity.bogged.hurt",
+        "breeze" => "minecraft:entity.breeze.hurt",
+        "camel" => "minecraft:entity.camel.hurt",
+        "camel_husk" => "minecraft:entity.camel_husk.hurt",
         // The variant sound sets (cow, pig, chicken, cat, wolf) all start from the
         // classic set; a variant pick needs the synced variant field (not mirrored).
-        "cat" => "entity.cat.hurt",
-        "cave_spider" => "entity.spider.hurt", // Spider's override, inherited
-        "chicken" => "entity.chicken.hurt",
-        "cod" => "entity.cod.hurt",
-        "copper_golem" => "entity.copper_golem.hurt", // unweathered level
-        "cow" => "entity.cow.hurt",
-        "creeper" => "entity.creeper.hurt",
-        "creaking" => "entity.hostile.hurt", // Monster's, unless heart-bound
-        "dolphin" => "entity.dolphin.hurt",
-        "donkey" => "entity.donkey.hurt",
-        "drowned" => "entity.drowned.hurt", // the land variant
-        "elder_guardian" => "entity.elder_guardian.hurt",
-        "ender_dragon" => "entity.ender_dragon.hurt",
-        "enderman" => "entity.enderman.hurt",
-        "endermite" => "entity.endermite.hurt",
-        "evoker" => "entity.evoker.hurt",
-        "fox" => "entity.fox.hurt",
-        "frog" => "entity.frog.hurt",
-        "ghast" => "entity.ghast.hurt",
-        "giant" => "entity.hostile.hurt", // Monster's base
-        "glow_squid" => "entity.glow_squid.hurt",
-        "goat" => "entity.goat.hurt", // the non-screaming variant
-        "guardian" => "entity.guardian.hurt_land", // out of water
-        "happy_ghast" => "entity.happy_ghast.hurt",
-        "hoglin" => "entity.hoglin.hurt",
-        "horse" => "entity.horse.hurt",
-        "husk" => "entity.husk.hurt",
-        "illusioner" => "entity.illusioner.hurt",
-        "iron_golem" => "entity.iron_golem.hurt",
-        "llama" => "entity.llama.hurt",
-        "magma_cube" => "entity.magma_cube.hurt", // the non-tiny variant
-        "mule" => "entity.mule.hurt",
-        "nautilus" => "entity.nautilus.hurt",
-        "ocelot" => "entity.ocelot.hurt",
-        "panda" => "entity.panda.hurt",
-        "parrot" => "entity.parrot.hurt",
-        "parched" => "entity.parched.hurt",
-        "phantom" => "entity.phantom.hurt",
-        "pig" => "entity.pig.hurt",
-        "piglin" => "entity.piglin.hurt",
-        "piglin_brute" => "entity.piglin_brute.hurt",
-        "pillager" => "entity.pillager.hurt",
-        "polar_bear" => "entity.polar_bear.hurt",
-        "pufferfish" => "entity.puffer_fish.hurt",
-        "rabbit" => "entity.rabbit.hurt",
-        "ravager" => "entity.ravager.hurt",
-        "salmon" => "entity.salmon.hurt",
-        "sheep" => "entity.sheep.hurt",
-        "shulker" => "entity.shulker.hurt", // the open variant
-        "silverfish" => "entity.silverfish.hurt",
-        "skeleton" => "entity.skeleton.hurt",
-        "skeleton_horse" => "entity.skeleton_horse.hurt",
-        "slime" => "entity.slime.hurt", // the non-tiny variant
-        "sniffer" => "entity.sniffer.hurt",
-        "snow_golem" => "entity.snow_golem.hurt",
-        "spider" => "entity.spider.hurt",
-        "squid" => "entity.squid.hurt",
-        "stray" => "entity.stray.hurt",
-        "strider" => "entity.strider.hurt",
-        "sulfur_cube" => "entity.sulfur_cube.hurt", // the non-tiny variant
-        "tadpole" => "entity.tadpole.hurt",
-        "trader_llama" => "entity.llama.hurt", // Llama's override, inherited
-        "tropical_fish" => "entity.tropical_fish.hurt",
-        "turtle" => "entity.turtle.hurt",
-        "vex" => "entity.vex.hurt",
-        "villager" => "entity.villager.hurt",
-        "vindicator" => "entity.vindicator.hurt",
-        "wandering_trader" => "entity.wandering_trader.hurt",
-        "warden" => "entity.warden.hurt",
-        "witch" => "entity.witch.hurt",
-        "wither" => "entity.wither.hurt",
-        "wither_skeleton" => "entity.wither_skeleton.hurt",
-        "wolf" => "entity.wolf.hurt",
-        "zoglin" => "entity.zoglin.hurt",
-        "zombie" => "entity.zombie.hurt",
-        "zombie_horse" => "entity.zombie_horse.hurt",
-        "zombie_nautilus" => "entity.zombie_nautilus.hurt_land", // out of water
-        "zombie_villager" => "entity.zombie_villager.hurt",
-        "zombified_piglin" => "entity.zombified_piglin.hurt",
+        "cat" => "minecraft:entity.cat.hurt",
+        "cave_spider" => "minecraft:entity.spider.hurt", // Spider's override, inherited
+        "chicken" => "minecraft:entity.chicken.hurt",
+        "cod" => "minecraft:entity.cod.hurt",
+        "copper_golem" => "minecraft:entity.copper_golem.hurt", // unweathered level
+        "cow" => "minecraft:entity.cow.hurt",
+        "creeper" => "minecraft:entity.creeper.hurt",
+        "creaking" => "minecraft:entity.hostile.hurt", // Monster's, unless heart-bound
+        "dolphin" => "minecraft:entity.dolphin.hurt",
+        "donkey" => "minecraft:entity.donkey.hurt",
+        "drowned" => "minecraft:entity.drowned.hurt", // the land variant
+        "elder_guardian" => "minecraft:entity.elder_guardian.hurt",
+        "ender_dragon" => "minecraft:entity.ender_dragon.hurt",
+        "enderman" => "minecraft:entity.enderman.hurt",
+        "endermite" => "minecraft:entity.endermite.hurt",
+        "evoker" => "minecraft:entity.evoker.hurt",
+        "fox" => "minecraft:entity.fox.hurt",
+        "frog" => "minecraft:entity.frog.hurt",
+        "ghast" => "minecraft:entity.ghast.hurt",
+        "giant" => "minecraft:entity.hostile.hurt", // Monster's base
+        "glow_squid" => "minecraft:entity.glow_squid.hurt",
+        "goat" => "minecraft:entity.goat.hurt", // the non-screaming variant
+        "guardian" => "minecraft:entity.guardian.hurt_land", // out of water
+        "happy_ghast" => "minecraft:entity.happy_ghast.hurt",
+        "hoglin" => "minecraft:entity.hoglin.hurt",
+        "horse" => "minecraft:entity.horse.hurt",
+        "husk" => "minecraft:entity.husk.hurt",
+        "illusioner" => "minecraft:entity.illusioner.hurt",
+        "iron_golem" => "minecraft:entity.iron_golem.hurt",
+        "llama" => "minecraft:entity.llama.hurt",
+        "magma_cube" => "minecraft:entity.magma_cube.hurt", // the non-tiny variant
+        "mule" => "minecraft:entity.mule.hurt",
+        "nautilus" => "minecraft:entity.nautilus.hurt",
+        "ocelot" => "minecraft:entity.ocelot.hurt",
+        "panda" => "minecraft:entity.panda.hurt",
+        "parrot" => "minecraft:entity.parrot.hurt",
+        "parched" => "minecraft:entity.parched.hurt",
+        "phantom" => "minecraft:entity.phantom.hurt",
+        "pig" => "minecraft:entity.pig.hurt",
+        "piglin" => "minecraft:entity.piglin.hurt",
+        "piglin_brute" => "minecraft:entity.piglin_brute.hurt",
+        "pillager" => "minecraft:entity.pillager.hurt",
+        "polar_bear" => "minecraft:entity.polar_bear.hurt",
+        "pufferfish" => "minecraft:entity.puffer_fish.hurt",
+        "rabbit" => "minecraft:entity.rabbit.hurt",
+        "ravager" => "minecraft:entity.ravager.hurt",
+        "salmon" => "minecraft:entity.salmon.hurt",
+        "sheep" => "minecraft:entity.sheep.hurt",
+        "shulker" => "minecraft:entity.shulker.hurt", // the open variant
+        "silverfish" => "minecraft:entity.silverfish.hurt",
+        "skeleton" => "minecraft:entity.skeleton.hurt",
+        "skeleton_horse" => "minecraft:entity.skeleton_horse.hurt",
+        "slime" => "minecraft:entity.slime.hurt", // the non-tiny variant
+        "sniffer" => "minecraft:entity.sniffer.hurt",
+        "snow_golem" => "minecraft:entity.snow_golem.hurt",
+        "spider" => "minecraft:entity.spider.hurt",
+        "squid" => "minecraft:entity.squid.hurt",
+        "stray" => "minecraft:entity.stray.hurt",
+        "strider" => "minecraft:entity.strider.hurt",
+        "sulfur_cube" => "minecraft:entity.sulfur_cube.hurt", // the non-tiny variant
+        "tadpole" => "minecraft:entity.tadpole.hurt",
+        "trader_llama" => "minecraft:entity.llama.hurt", // Llama's override, inherited
+        "tropical_fish" => "minecraft:entity.tropical_fish.hurt",
+        "turtle" => "minecraft:entity.turtle.hurt",
+        "vex" => "minecraft:entity.vex.hurt",
+        "villager" => "minecraft:entity.villager.hurt",
+        "vindicator" => "minecraft:entity.vindicator.hurt",
+        "wandering_trader" => "minecraft:entity.wandering_trader.hurt",
+        "warden" => "minecraft:entity.warden.hurt",
+        "witch" => "minecraft:entity.witch.hurt",
+        "wither" => "minecraft:entity.wither.hurt",
+        "wither_skeleton" => "minecraft:entity.wither_skeleton.hurt",
+        "wolf" => "minecraft:entity.wolf.hurt",
+        "zoglin" => "minecraft:entity.zoglin.hurt",
+        "zombie" => "minecraft:entity.zombie.hurt",
+        "zombie_horse" => "minecraft:entity.zombie_horse.hurt",
+        "zombie_nautilus" => "minecraft:entity.zombie_nautilus.hurt_land", // out of water
+        "zombie_villager" => "minecraft:entity.zombie_villager.hurt",
+        "zombified_piglin" => "minecraft:entity.zombified_piglin.hurt",
         _ => return None,
     };
     Some(sound)
@@ -168,7 +169,7 @@ pub(crate) fn mob_hurt_sound(name: &str) -> Option<&'static str> {
 /// types vanilla's living-entity default.
 pub fn hurt_sound(entity_name: Option<&str>, effects: &str) -> &'static str {
     match entity_name {
-        Some(name) if name == "minecraft:player" => player_hurt_sound(effects),
+        Some("minecraft:player") => player_hurt_sound(effects),
         Some(name) => mob_hurt_sound(name).unwrap_or(GENERIC_HURT),
         None => GENERIC_HURT,
     }
@@ -213,13 +214,47 @@ pub fn hurt_category(entity_name: Option<&str>) -> i32 {
         CATEGORY_PLAYERS
     } else if matches!(
         path,
-        "blaze" | "bogged" | "breeze" | "creaking" | "creeper" | "drowned" | "elder_guardian"
-            | "enderman" | "endermite" | "evoker" | "ghast" | "giant" | "guardian" | "hoglin"
-            | "husk" | "illusioner" | "magma_cube" | "parched" | "phantom" | "piglin"
-            | "piglin_brute" | "pillager" | "ravager" | "shulker" | "silverfish" | "skeleton"
-            | "slime" | "spider" | "cave_spider" | "stray" | "vex" | "vindicator" | "warden"
-            | "witch" | "wither" | "wither_skeleton" | "zoglin" | "zombie" | "zombie_nautilus"
-            | "zombie_villager" | "zombified_piglin"
+        "blaze"
+            | "bogged"
+            | "breeze"
+            | "creaking"
+            | "creeper"
+            | "drowned"
+            | "elder_guardian"
+            | "enderman"
+            | "endermite"
+            | "evoker"
+            | "ghast"
+            | "giant"
+            | "guardian"
+            | "hoglin"
+            | "husk"
+            | "illusioner"
+            | "magma_cube"
+            | "parched"
+            | "phantom"
+            | "piglin"
+            | "piglin_brute"
+            | "pillager"
+            | "ravager"
+            | "shulker"
+            | "silverfish"
+            | "skeleton"
+            | "slime"
+            | "spider"
+            | "cave_spider"
+            | "stray"
+            | "vex"
+            | "vindicator"
+            | "warden"
+            | "witch"
+            | "wither"
+            | "wither_skeleton"
+            | "zoglin"
+            | "zombie"
+            | "zombie_nautilus"
+            | "zombie_villager"
+            | "zombified_piglin"
     ) {
         CATEGORY_HOSTILE
     } else {
@@ -255,6 +290,79 @@ pub fn hurt_request(
         pitch,
         seed: rng.next_long(),
     })
+}
+
+/// One `damage_event` (vanilla `ClientPacketListener.handleDamageEvent` ->
+/// `LivingEntity.handleDamageEvent`): the hurt animation runs (`hurtTime` 10 — the
+/// red flash for other entities, the camera tilt for the local player), the damage
+/// cooldown starts (the HUD heart blink's gate) and the victim's hurt sound plays
+/// with its type's volume and category and the hurt pitch `1 ± 0.2`.
+pub(crate) fn apply_damage_event<E: EntitySink + ?Sized>(
+    session: &mut Session,
+    d: &haste_protocol::packets::play::clientbound::DamageEvent,
+    entities: &mut E,
+    regs: &SyncedRegistries,
+) {
+    let id = EntityId(d.entity_id);
+    entities.mark_hurt(id);
+    let own_hit = id == session.entity_id;
+    if own_hit {
+        session.hurt_ticks = HURT_TILT_TICKS;
+        session.damage_cooldown = DAMAGE_COOLDOWN_TICKS;
+    }
+    // The victim's type: ours from the login (our own entity is not in the store),
+    // others' from their spawn's registry index. An index past the name table (a mod
+    // the server synced names for) falls through to the generic hurt, no panic.
+    let name: Option<String> = if own_hit {
+        Some("minecraft:player".to_owned())
+    } else {
+        entities
+            .entity_type(id)
+            .and_then(|k| session.entity_type_names.get(k.0 as usize))
+            .map(|n| n.to_string())
+    };
+    if let Some(name) = &name {
+        if mob_hurt_sound(name).is_none() && session.unknown_hurt_types.insert(name.clone()) {
+            tracing::info!("unknown entity type {name}; its hurt sound is the generic one");
+        }
+    }
+    // The synced data byte at index 16: the baby flag of most living entities, or the
+    // cube mobs' size (their volume scales with it).
+    let data16 = entities.metadata_value(id, 16).and_then(|v| match v {
+        haste_core::entity::MetadataValue::Byte(b) => Some(*b),
+        _ => None,
+    });
+    let effects = damage_effects_id(d.source_type, regs);
+    session.sound_requests.push(hurt_request(
+        &mut session.hurt_rng,
+        name.as_deref(),
+        &effects,
+        data16,
+        d.entity_id,
+        own_hit,
+        session.player.state.pos,
+    ));
+}
+
+/// One `set_health` for the local player (vanilla
+/// `ClientPacketListener.handleSetHealth` -> `LocalPlayer.hurtTo`): a health drop
+/// starts the hurt tilt (`hurtTime` 10) and the damage cooldown (20), a gain starts a
+/// short cooldown (10). The first `set_health` of a player (join, respawn) only stores
+/// the health (`flashOnSetHealth`): the login packet must not flash or tilt.
+pub(crate) fn hurt_to(session: &mut Session, old: f32, new: f32) {
+    if !session.health_seen {
+        session.health_seen = true;
+        return;
+    }
+    let dmg = old - new;
+    if dmg <= 0.0 {
+        if dmg < 0.0 {
+            session.damage_cooldown = 10;
+        }
+    } else {
+        session.hurt_ticks = HURT_TILT_TICKS;
+        session.damage_cooldown = DAMAGE_COOLDOWN_TICKS;
+    }
 }
 
 #[cfg(test)]

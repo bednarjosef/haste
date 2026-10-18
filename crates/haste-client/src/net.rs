@@ -1091,6 +1091,9 @@ pub struct Session {
     /// blink's gate (`Hud.extractPlayerHealth` blinks while it is positive), ticked down in
     /// `end_tick`.
     pub damage_cooldown: u32,
+    /// Vanilla `LocalPlayer.flashOnSetHealth`: the first `set_health` of a player (join,
+    /// respawn) only stores the health; drops from then on tilt and blink.
+    pub health_seen: bool,
     /// The hurt sounds' random (vanilla's per-entity `RandomSource`): hurt pitch and sound
     /// variant seeds.
     hurt_rng: haste_audio::random::LegacyRandom,
@@ -1199,6 +1202,7 @@ impl Session {
             hurt_ticks: 0,
             hurt_dir: 0.0,
             damage_cooldown: 0,
+            health_seen: false,
             hurt_rng: haste_audio::random::LegacyRandom::new(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1318,6 +1322,8 @@ impl Session {
 
         // Hurt and death counters (LivingEntity.tick / tickDeath).
         self.hurt_ticks = self.hurt_ticks.saturating_sub(1);
+        // The damage cooldown the HUD heart blink reads (`LivingEntity.tick`).
+        self.damage_cooldown = self.damage_cooldown.saturating_sub(1);
         if p.health <= 0.0 {
             self.death_ticks = self.death_ticks.saturating_add(1);
         } else {
@@ -1417,6 +1423,11 @@ impl Session {
                 self.entity_id = EntityId(l.entity_id);
                 let mode = GameMode::from_id(l.spawn.game_mode).unwrap_or(self.player.game_mode);
                 self.player = LocalPlayer::with_entity(self.entity_id, mode);
+                // A new player: no hurt tilt, no blink window, and the first
+                // `set_health` only stores the health (vanilla `flashOnSetHealth`).
+                self.hurt_ticks = 0;
+                self.damage_cooldown = 0;
+                self.health_seen = false;
                 self.breaking.clear();
                 self.lids.clear();
                 self.bells.clear();
@@ -1451,7 +1462,13 @@ impl Session {
                     ));
             }
         }
+        // `set_health`'s old value, for `LocalPlayer.hurtTo` after the player stored the
+        // new one (the health drop tilts the camera and starts the HUD blink's cooldown).
+        let health_before = matches!(p, P::SetHealth(_)).then(|| self.player.health);
         let player_packet = self.player.handle(&p, out);
+        if let (Some(old), P::SetHealth(h)) = (health_before, &p) {
+            damage::hurt_to(self, old, h.health);
+        }
         if player_packet {
             for (pos, state) in self.player.take_world_edits() {
                 world.set_block(pos, state);
@@ -1503,6 +1520,12 @@ impl Session {
                 // with vanilla's default border until its initialize_border arrives.
                 self.entity_attributes.clear();
                 self.world_border = crate::world_border::WorldBorder::default();
+                // And a new player in vanilla's sense (`LocalPlayer` is rebuilt): the
+                // hurt tilt and blink window end, the first `set_health` of the new
+                // body only stores the health.
+                self.hurt_ticks = 0;
+                self.damage_cooldown = 0;
+                self.health_seen = false;
                 self.player
                     .set_vehicle(None, SeatPoint::ZERO, None, None, None);
             }
@@ -1887,55 +1910,7 @@ impl Session {
                     self.start_hurt_tilt(h.yaw);
                 }
             }
-            P::DamageEvent(d) => {
-                // Vanilla `ClientPacketListener.handleDamageEvent` ->
-                // `LivingEntity.handleDamageEvent`: the hurt animation runs (hurtTime 10,
-                // the red flash for others, the camera tilt for us), the damage cooldown
-                // starts (the HUD heart blink's gate) and the victim's hurt sound plays.
-                let id = EntityId(d.entity_id);
-                entities.mark_hurt(id);
-                let own_hit = id == own;
-                if own_hit {
-                    self.hurt_ticks = HURT_TILT_TICKS;
-                    self.damage_cooldown = DAMAGE_COOLDOWN_TICKS;
-                }
-                // The victim's type: ours from the login (we are not in the entity
-                // store), others' from their spawn's registry index.
-                let name = if own_hit {
-                    Some("minecraft:player")
-                } else {
-                    entities
-                        .entity_type(id)
-                        .and_then(|k| self.entity_type_names.get(k.0 as usize))
-                        .map(|n| n.as_str())
-                };
-                if !own_hit {
-                    if let Some(name) = name {
-                        if damage::mob_hurt_sound(name).is_none()
-                            && self.unknown_hurt_types.insert(name.to_owned())
-                        {
-                            tracing::info!(
-                                "unknown entity type {name}; its hurt sound is the generic one"
-                            );
-                        }
-                    }
-                }
-                // The synced data byte at index 16: the baby flag, or the cube mobs' size.
-                let data16 = entities.metadata_value(id, 16).and_then(|v| match v {
-                    MetadataValue::Byte(b) => Some(*b),
-                    _ => None,
-                });
-                let effects = damage::damage_effects_id(d.source_type, regs);
-                self.sound_requests.push(damage::hurt_request(
-                    &mut self.hurt_rng,
-                    name,
-                    &effects,
-                    data16,
-                    d.entity_id,
-                    own_hit,
-                    self.player.state.pos,
-                ));
-            }
+            P::DamageEvent(d) => damage::apply_damage_event(self, &d, entities, regs),
             P::EntityEvent(e) if e.status == 3 => entities.mark_dead(EntityId(e.entity_id)),
             // Entity status 4 is the melee attack animation (IronGolem.handleEntityEvent).
             P::EntityEvent(e) if e.status == 4 => entities.mark_attack(EntityId(e.entity_id)),
