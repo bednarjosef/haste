@@ -140,6 +140,8 @@ impl Assets {
     pub fn packs_dir(&self) -> &Path {
         &self.packs_dir
     }
+    /// File names directly under `dir` (an `assets/...` key prefix) ending with `ext`, path
+    /// relative to `dir`, without the extension.
     pub fn names_in(&mut self, dir: &str, ext: &str) -> impl Iterator<Item = String> {
         self.names_under(dir, ext)
     }

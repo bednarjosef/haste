@@ -131,6 +131,8 @@ pub enum SpriteMeta {
 }
 
 impl Assets {
+    /// `assets/<ns>/<path>` of a full texture id such as `minecraft:textures/gui/x.png`, or
+    /// `textures/<path>.png` of a short one (`minecraft:gui/x`), decoded.
     pub fn texture_any(&mut self, id: &Identifier) -> Result<image::RgbaImage> {
         if let Some(image) = self.dynamic.get(id) {
             return Ok(image.as_ref().clone());
@@ -146,12 +148,14 @@ impl Assets {
 
     /// `textures/<path>.png` of an identifier, e.g. `minecraft:block/stone`.
     /// The PNG is decoded; for animated textures the first frame is returned along
+    /// with the parsed `AnimationMeta` (full-size image + meta when not animated).
     pub fn texture(&mut self, id: &Identifier) -> Result<image::RgbaImage> {
         let key = super::asset_key(id, "textures", ".png");
         let bytes = self.read_asset(&key)?;
         decode_png(&bytes, &key)
     }
 
+    /// Parsed `.mcmeta` next to a texture, or default (not animated) when absent.
     pub fn texture_meta(&mut self, id: &Identifier) -> Result<TextureMeta> {
         let key = super::asset_key(id, "textures", ".png.mcmeta");
         match self.try_read_asset(&key)? {
@@ -166,6 +170,8 @@ impl Assets {
         }
     }
 
+    /// `assets/minecraft/textures/gui/sprites/<path>.png` with its `.mcmeta` scaling
+    /// (`gui/scaling`: nine_slice with a uniform border in 26.3, tile, or stretch).
     pub fn gui_sprite(&mut self, id: &Identifier) -> Result<(image::RgbaImage, SpriteMeta)> {
         let key = super::asset_key(id, "textures/gui/sprites", ".png");
         let bytes = self.read_asset(&key)?;
@@ -188,8 +194,7 @@ impl Assets {
         Ok((image, meta))
     }
 
-    /// All `assets/minecraft/blockstates/*.json` block names (paths without the
-    /// directory and extension). For `BakedBlockModels::bake`.
+    /// All `assets/minecraft/textures/block/*.png` names (without extension).
     pub fn block_texture_names(&mut self) -> Vec<Identifier> {
         self.names_under("assets/minecraft/textures/block/", ".png")
             .map(|p| Identifier::minecraft(&format!("block/{p}")))

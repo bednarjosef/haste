@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use super::Assets;
 
 impl Assets {
+    /// `assets/minecraft/lang/<code>.json`.
     pub fn language(&mut self, code: &str) -> Result<HashMap<String, String>> {
         let key = format!("assets/minecraft/lang/{code}.json");
         let bytes = self.read_asset(&key)?;

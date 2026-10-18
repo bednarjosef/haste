@@ -11,6 +11,7 @@ use haste_core::Identifier;
 use super::Assets;
 
 impl Assets {
+    /// `blockstates/<path>.json` of a block, variants and multipart as written.
     pub fn blockstate(&mut self, block: &Identifier) -> Result<BlockStateDefinition> {
         let key = super::asset_key(block, "blockstates", ".json");
         let bytes = self.read_asset(&key)?;
@@ -21,6 +22,7 @@ impl Assets {
 
     /// `models/<path>.json` with the `parent` chain resolved: `textures` variables
     /// (`#all` etc.) resolved to texture identifiers, elements inherited from the
+    /// nearest ancestor that has any, `ambientocclusion` inherited (default true).
     pub fn model(&mut self, id: &Identifier) -> Result<ModelJson> {
         let resolved = self.resolve_model(id)?;
         Ok(ModelJson {
@@ -31,6 +33,8 @@ impl Assets {
         })
     }
 
+    /// All `assets/minecraft/blockstates/*.json` block names (paths without the
+    /// directory and extension). For `BakedBlockModels::bake`.
     pub fn blockstate_names(&mut self) -> Vec<Identifier> {
         self.names_under("assets/minecraft/blockstates/", ".json")
             .map(|p| Identifier::minecraft(&p))

@@ -1,4 +1,3 @@
-
 use super::textures::{animation_from_raw, AnimationMetaRaw, TextureMetaFile};
 use super::*;
 use haste_core::Identifier;
