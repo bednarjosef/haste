@@ -413,7 +413,6 @@ impl EntityRenderer {
                 continue;
             }
             let (texture, scale) = texture_and_scale(e);
-            let rect = self.texture_rect(&texture, assets);
             // `LivingEntityRenderer.setupRotations`: the body yaw turns the whole model, except a
             // sleeping entity, whose pose replaces that yaw with its own rotation sequence. The
             // body transform (death tilt, sleeping, upside-down, player flying/swimming pitch) is
@@ -436,41 +435,52 @@ impl EntityRenderer {
                 * body_matrix(&e.body)
                 * Mat4::from_scale(s / 16.0);
             let start = self.vertices.len();
-            emit_part_tinted(
-                &mut self.vertices,
-                &e.model,
-                &e.model.root,
-                &e.pose,
-                root,
-                rect,
-                light,
-                e.hurt,
-                [1.0; 3],
-            );
-            // Overlay layers: the same transform and pose, each with its own texture and
-            // tint (vanilla's RenderLayers, e.g. SheepWoolLayer's dyed copy of the model).
-            for overlay in e.overlays.iter().flatten() {
-                let Some((oroot, hurt)) = self.overlay_root(e, &overlay.model, root, assets) else {
-                    continue;
-                };
-                let orect = self.texture_rect(&overlay.model.texture, assets);
+            // `LivingEntityRenderer.submit`/`getRenderType`: an invisible entity draws no body
+            // (`isBodyVisible` false -> null render type; the translucent ghost a teammate or
+            // spectator would see needs the team inputs, not modelled yet) and no copy-model
+            // overlay layers (`RenderLayer.coloredCutoutModelCopyLayerRender` skips invisible
+            // states). The equipment layers stay: `HumanoidArmorLayer`, `ItemInHandLayer`,
+            // `CustomHeadLayer` and `WingsLayer` do not check invisibility, so invisible
+            // entities still wear armour and hold items.
+            if !e.invisible {
+                let rect = self.texture_rect(&texture, assets);
                 emit_part_tinted(
                     &mut self.vertices,
-                    &overlay.model,
-                    &overlay.model.root,
+                    &e.model,
+                    &e.model.root,
                     &e.pose,
-                    oroot,
-                    orect,
+                    root,
+                    rect,
                     light,
-                    hurt,
-                    overlay.tint,
+                    e.hurt,
+                    [1.0; 3],
                 );
+                // Overlay layers: the same transform and pose, each with its own texture and
+                // tint (vanilla's RenderLayers, e.g. SheepWoolLayer's dyed copy of the model).
+                for overlay in e.overlays.iter().flatten() {
+                    let Some((oroot, hurt)) = self.overlay_root(e, &overlay.model, root, assets)
+                    else {
+                        continue;
+                    };
+                    let orect = self.texture_rect(&overlay.model.texture, assets);
+                    emit_part_tinted(
+                        &mut self.vertices,
+                        &overlay.model,
+                        &overlay.model.root,
+                        &e.pose,
+                        oroot,
+                        orect,
+                        light,
+                        hurt,
+                        overlay.tint,
+                    );
+                }
             }
             self.emit_equipment(e, root, light, assets);
             if self.vertices.len() > start {
                 self.drawn += 1;
             }
-            if let Some(name) = &e.nametag {
+            if let Some(name) = e.nametag.as_ref().filter(|_| !e.invisible) {
                 // `EntityRenderer.extractNameTags`: within 64 blocks, and past 32 when
                 // crouching (`LivingEntityRenderer.shouldShowName`). Invisible entities never
                 // reach here (haste-entity drops their tag). The anchor is the NAME_TAG
