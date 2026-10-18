@@ -360,14 +360,16 @@ craft() {
 # 176x166 screen centred in the 480x270 GUI).
 
 # Starts the client on `script` and waits for it to be online. The player name is fresh
-# per check (`ContainersChk` + a three-digit number - 16 characters at most: the vanilla
-# protocol rejects longer names with a generic disconnect): a fresh player always joins
-# alive, empty and at the world spawn, which is the snowy plain - so one runner's checks
-# never inherit each other's inventories through a shared player file (the previous
-# check's leftovers would satisfy `wait_until hotbar_item` before this check's give
-# arrives). Returns 1 when the client never joined.
+# per run (`ConChk` + two RANDOM numbers - 16 characters at most: the vanilla protocol
+# rejects longer names with a generic disconnect): a fresh player always joins alive,
+# empty and at the world spawn, which is the snowy plain - so runs never inherit each
+# other's inventories through a shared player file. The space has to be wide: the old
+# three-digit names collided after a few dozen runs, and an inherited inventory satisfies
+# `wait_until hotbar_item` before this run's tp and give arrive, so the script's look
+# precedes the tp and the use clicks where nothing is placed yet - the check wedges.
+# Returns 1 when the client never joined.
 plain_client() { # script log
-  NAME="ContainersChk$((RANDOM % 1000))"
+  NAME="ConChk$RANDOM$RANDOM"
   client_start "$1" "$2"
   wait_online || return 1
   return 0
