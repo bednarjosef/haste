@@ -81,6 +81,8 @@ struct FakeEntities {
     equipment: HashMap<EntityId, Vec<(u8, ItemStackData)>>,
     /// Synched data per entity id (index -> last value), like the store's metadata.
     metadata: HashMap<EntityId, HashMap<u8, haste_core::entity::MetadataValue>>,
+    /// Age in ticks per entity id, like the store's `Entity.age`.
+    ages: HashMap<EntityId, u32>,
 }
 
 impl EntitySink for FakeEntities {
@@ -145,6 +147,9 @@ impl EntitySink for FakeEntities {
         index: u8,
     ) -> Option<&haste_core::entity::MetadataValue> {
         self.metadata.get(&id).and_then(|m| m.get(&index))
+    }
+    fn entity_age(&self, id: EntityId) -> Option<u32> {
+        self.ages.get(&id).copied()
     }
     fn set_equipment(&mut self, id: EntityId, slot: u8, item: ItemStackData) {
         self.log.push(format!("equipment {} {slot}", id.0));

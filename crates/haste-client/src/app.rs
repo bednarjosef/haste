@@ -887,6 +887,9 @@ impl WorldFeed {
         };
         self.instances
             .push(game::player_instance(local.0, view, partial, &own_skin));
+        // The pickup particles (`take_item_entity`): one item/orb instance each at the eased
+        // position, drawn through the dropped-item renderer (vanilla `ItemPickupParticleGroup`).
+        game::pickup::instances(shared, partial, &mut self.instances);
         // Entity light rides on the instances themselves (sampled once, where they are built;
         // the renderer holds no world reference and no longer keeps a per-frame light map).
         {
