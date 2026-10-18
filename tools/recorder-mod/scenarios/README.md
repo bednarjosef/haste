@@ -20,6 +20,7 @@ step, on a disconnect, or when the join never happens (120 s).
 | `dump_models` | write every baked model layer's geometry to `cache/oracle/26.3/entity_models.json` |
 | `dump_block_sounds` | write every block's SoundType (break/step/place/hit/fall sounds, volume, pitch) to `cache/oracle/26.3/block_sounds.json` |
 | `fps <seconds>` | log the game's FPS counter once a second for that many seconds |
+| `frametimes <seconds> <name>` | record every frame's time (no I/O per frame) and write avg/p50/p90/p99/p99.9/worst to `cache/oracle/26.3/bench/<name>.json` |
 | `log <text>` | write a line to the client log |
 | `quit` | close the game now |
 
