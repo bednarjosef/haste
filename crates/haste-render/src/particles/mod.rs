@@ -22,19 +22,23 @@
 //! the limiter.
 //!
 //! The terrain particles (vanilla `TerrainParticle`: block breaking's destroy grid,
-//! mining cracks) are the client's own, spawned by [`Particles::spawn_destroy`] and
-//! [`Particles::spawn_crack`] — their sprites and tints come from the block table
-//! ([`crate::block_particles`]) packed into the same atlas. See that module for the
-//! vanilla paths.
+//! mining cracks) and the item particles (vanilla `BreakingItemParticle`: eating and
+//! drinking's crumbs) are the client's own, spawned by [`Particles::spawn_destroy`],
+//! [`Particles::spawn_crack`] and [`Particles::spawn_item`] — their sprites come from
+//! the block and item tables ([`crate::block_particles`], `item_sprite`) packed into the
+//! same atlas. See those modules for the vanilla paths.
 //!
 //! Not modelled (each a separate later step): block collisions (`Particle.move` with
 //! `hasPhysics`, so no `onGround` drag and no `speedUpWhenYMotionIsBlocked` trigger beyond
-//! an exactly zero y step), item particles (they draw from the item atlas in vanilla),
-//! particle options other than `dust` (block states, trail colors, geyser),
-//! the 16384-particle cap with the distance squash (`ParticleGroup`), roll (billboards keep
-//! facing the camera), and the per-type light boosts `FlameParticle`/`PortalParticle` add.
+//! an exactly zero y step), particle options other than `dust` (block states, trail
+//! colors, geyser; a server-sent `minecraft:item` particle's stack option is not decoded,
+//! so those spawn nothing), the 16384-particle cap with the distance squash
+//! (`ParticleGroup`), roll (billboards keep facing the camera), and the per-type light
+//! boosts `FlameParticle`/`PortalParticle` add.
 
 mod engine;
+mod item_particle;
+mod item_sprite;
 mod particle;
 mod particle_renderer;
 mod providers;

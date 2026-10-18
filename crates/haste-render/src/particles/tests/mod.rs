@@ -1,3 +1,4 @@
+mod item_particle;
 mod snapshot;
 mod terrain_particle;
 mod vanilla_numbers;
@@ -19,6 +20,7 @@ fn types_for_tests(entries: &[(&str, &[[u16; 4]])]) -> Arc<ParticleTypes> {
         types: Vec::new(),
         by_name: Default::default(),
         blocks: None,
+        items: Default::default(),
         pixels: Vec::new(),
         size: 0,
     };
@@ -85,6 +87,7 @@ fn types_with_blocks() -> Arc<ParticleTypes> {
                 upper_half_tint_below: false,
             },
         )),
+        items: Default::default(),
         pixels: Vec::new(),
         size: 0,
     };

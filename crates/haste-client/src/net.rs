@@ -150,6 +150,9 @@ pub struct Session {
     /// Block particles queued since the last tick (our own break and mining start, and the
     /// server's `level_event`s), drained by the game thread into the shared pool.
     pub block_particle_requests: Vec<crate::block_particles::BlockParticleRequest>,
+    /// Item particles queued since the last tick (a consumable in use: the eat/drink
+    /// crumbs), drained by the game thread into the shared pool.
+    pub item_particle_requests: Vec<crate::item_particles::ItemParticleRequest>,
     /// Ambient block particles of this tick's `animateTick` (reused buffer), spawned into
     /// the pool by the game thread.
     pub ambient_spawns: Vec<haste_render::ParticleSpawn>,
@@ -257,6 +260,7 @@ impl Session {
             use_item: None,
             particle_spawns: Vec::new(),
             block_particle_requests: Vec::new(),
+            item_particle_requests: Vec::new(),
             ambient_spawns: Vec::new(),
             particle_spawned: 0,
             particle_names,
