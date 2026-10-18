@@ -427,7 +427,7 @@ containers_crafting_table() {
   plain_setup "$log" ccraft-setup "125.5 71 2.5 0 0" \
     "clear $NAME" \
     "give $NAME minecraft:oak_log 2" \
-    "fill 124 70 1 126 74 6 air replace" \
+    "fill 124 71 1 126 74 6 air replace" \
     "fill 124 70 1 126 70 6 minecraft:stone replace" \
     "setblock 125 71 5 minecraft:crafting_table"
   local before="" after=""
