@@ -6,6 +6,7 @@ use haste_core::model::{
     BodyTransform, Decoration, EntityInstance, ItemFrameDecoration, PaintingDecoration,
     PoseOverrides,
 };
+use haste_core::parts;
 use haste_core::{BlockPos, BlockStateId, ChunkPos, Direction, EntityId, Identifier, SectionPos};
 use haste_render::{Camera, FrameInput, Renderer, SkyState};
 
@@ -135,16 +136,11 @@ fn entities_offscreen() {
     }
 
     let mut walk = PoseOverrides::default();
-    walk.rotations
-        .push(("right_arm".into(), glam::Vec3::new(-0.6, 0.0, 0.0)));
-    walk.rotations
-        .push(("left_arm".into(), glam::Vec3::new(0.6, 0.0, 0.0)));
-    walk.rotations
-        .push(("right_leg".into(), glam::Vec3::new(0.5, 0.0, 0.0)));
-    walk.rotations
-        .push(("left_leg".into(), glam::Vec3::new(-0.5, 0.0, 0.0)));
-    walk.rotations
-        .push(("head".into(), glam::Vec3::new(0.0, 0.5, 0.0)));
+    walk.set_rotation(parts::RIGHT_ARM, glam::Vec3::new(-0.6, 0.0, 0.0));
+    walk.set_rotation(parts::LEFT_ARM, glam::Vec3::new(0.6, 0.0, 0.0));
+    walk.set_rotation(parts::RIGHT_LEG, glam::Vec3::new(0.5, 0.0, 0.0));
+    walk.set_rotation(parts::LEFT_LEG, glam::Vec3::new(-0.5, 0.0, 0.0));
+    walk.set_rotation(parts::HEAD, glam::Vec3::new(0.0, 0.5, 0.0));
     let default = haste_entity::skin::default_skin(uuid::Uuid::from_u128(
         0x1234_5678_9abc_def0_1234_5678_9abc_def0,
     ));

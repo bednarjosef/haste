@@ -34,7 +34,7 @@ fn variant_model_resolves_through_the_dump() {
     };
     let kind = names
         .iter()
-        .find(|(_, n)| n.as_str() == "minecraft:pig")
+        .find(|(_, n)| **n == "minecraft:pig")
         .map(|(k, _)| *k)
         .unwrap();
     let mut variants = MobVariants::empty();

@@ -1136,6 +1136,8 @@ pub(crate) fn decode(b: &[i32], strings: &[String]) -> Result<Vec<GuiCommand>> {
     Ok(out)
 }
 
+mod pack_prompt;
+
 #[cfg(test)]
 mod tests {
     use super::*;

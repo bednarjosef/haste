@@ -1,6 +1,7 @@
 //! The GUI renderer's setup, per-frame preparation (command list in, one vertex buffer up)
 //! and draw passes (vanilla `GuiRenderer`).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use haste_assets::{Assets, BitmapFont, SpriteMeta};
@@ -171,7 +172,7 @@ impl GuiRenderer {
             atlas,
             vertex_buffer,
             vertex_capacity,
-            keys: HashMap::new(),
+            keys: hashbrown::HashMap::new(),
             entries: Vec::new(),
             shelf: Shelf::default(),
             atlas_full: false,

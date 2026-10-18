@@ -23,7 +23,7 @@ fn villager_unhappy_shakes_head_and_halves_walk() {
     }
     let e = s.get(EntityId(1)).unwrap();
     let pose = crate::animation::setup_anim(e, &model, true, 0.0, false);
-    let rot: std::collections::HashMap<_, _> = pose.rotations.iter().cloned().collect();
+    let rot = rotations_by_name(&pose);
     let head = rot.get("head").unwrap();
     assert!((head.x - 0.4).abs() < 1e-6, "unhappy head x {}", head.x);
     let age = e.tick_count as f32;
@@ -63,8 +63,8 @@ fn illager_crosses_arms_and_attacks_when_aggressive() {
     s.spawn(&spawn(1, DVec3::ZERO));
     let e = s.get(EntityId(1)).unwrap();
     let pose = crate::animation::setup_anim(e, &model, true, 0.0, false);
-    assert!(pose.hidden.iter().any(|h| h == "right_arm"));
-    assert!(pose.hidden.iter().any(|h| h == "left_arm"));
+    assert!(pose.is_hidden(haste_core::parts::RIGHT_ARM));
+    assert!(pose.is_hidden(haste_core::parts::LEFT_ARM));
     s.set_metadata(
         EntityId(1),
         &[MetadataEntry {
@@ -74,8 +74,8 @@ fn illager_crosses_arms_and_attacks_when_aggressive() {
     );
     let e = s.get(EntityId(1)).unwrap();
     let pose = crate::animation::setup_anim(e, &model, true, 0.0, false);
-    assert!(pose.hidden.iter().any(|h| h == "arms"));
-    let rot: std::collections::HashMap<_, _> = pose.rotations.iter().cloned().collect();
+    assert!(pose.is_hidden(haste_core::parts::ARMS));
+    let rot = rotations_by_name(&pose);
     let ra = rot.get("right_arm").unwrap();
     assert!(
         (ra.x - -2.094_395_2).abs() < 1e-4,
@@ -104,7 +104,7 @@ fn iron_golem_attack_arms() {
     s.mark_attack(EntityId(1));
     let e = s.get(EntityId(1)).unwrap();
     let pose = crate::animation::setup_anim(e, &model, true, 0.0, false);
-    let rot: std::collections::HashMap<_, _> = pose.rotations.iter().cloned().collect();
+    let rot = rotations_by_name(&pose);
     let ra = rot.get("right_arm").unwrap();
     let la = rot.get("left_arm").unwrap();
     assert!((ra.x - -0.5).abs() < 1e-5, "golem arm {} != -0.5", ra.x);

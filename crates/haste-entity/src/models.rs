@@ -23,6 +23,7 @@ use haste_core::Identifier;
 fn part(name: &str, pivot: [f32; 3], cubes: Vec<Cube>, children: Vec<ModelPart>) -> ModelPart {
     ModelPart {
         name: name.to_owned(),
+        id: haste_core::parts::intern(name),
         pivot: pivot.into(),
         rotation: glam::Vec3::ZERO,
         visible: true,

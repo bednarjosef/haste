@@ -20,7 +20,7 @@ impl GuiRenderer {
         assets: &mut Assets,
     ) {
         let (texture, model_scale) = crate::entity::texture_and_scale(e);
-        let (rect, _) = self.lookup(&TexKey::Texture(texture), assets);
+        let (rect, _) = self.lookup_ref(TexKeyRef::Key(&TexKey::Texture(texture)), assets);
         let cx = (b[0] + b[2]) / 2.0;
         let height = crate::entity::model_top(&e.model.root, 0.0) * model_scale / 16.0;
         let feet = (b[1] + b[3]) / 2.0 + height * size / 2.0;
@@ -29,11 +29,11 @@ impl GuiRenderer {
         let f = (dx / 40.0).atan();
         let g = (dy / 40.0).atan();
         let mut pose = e.pose.clone();
-        pose.rotations.retain(|(n, _)| n != "head");
-        pose.rotations.push((
-            "head".into(),
+        // The GUI preview overrides the head aim with the mouse-follow rotation.
+        pose.set_rotation(
+            haste_core::parts::HEAD,
             Vec3::new(-g * 20f32.to_radians(), f * 20f32.to_radians(), 0.0),
-        ));
+        );
         // GUI space: x right, y down, z toward the viewer. The model's front (-z) turns to +z.
         let m = Mat4::from_translation(Vec3::new(cx + o[0], feet + o[1], 0.0))
             * Mat4::from_scale(Vec3::new(size, -size, size))
