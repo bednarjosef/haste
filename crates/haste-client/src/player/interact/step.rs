@@ -136,9 +136,11 @@ impl LocalPlayer {
             self.int.miss_time -= 1;
         }
 
-        // 4. Pick block (handleKeybinds: the keyPickItem loop).
+        // 4. Pick block (handleKeybinds: the keyPickItem loop). `Minecraft.pickBlockOrEntity`
+        // passes `hasControlDown()` as `include_data` (Ctrl + middle click copies block-entity
+        // data in creative).
         if input.pick_block && !last.pick_block {
-            let include_data = false;
+            let include_data = input.pick_block_ctrl;
             match self.int.target {
                 Some(Target::Block(h)) => {
                     out.push(ServerboundPlay::PickItemFromBlock(sb::PickItemFromBlock {
@@ -178,6 +180,7 @@ impl LocalPlayer {
 
         // The press-only fields are consumed; held buttons stay until the caller changes them.
         self.int.input.pick_block = false;
+        self.int.input.pick_block_ctrl = false;
         self.int.input.drop_item = false;
         self.int.input.drop_stack = false;
         self.int.input.swap_offhand = false;

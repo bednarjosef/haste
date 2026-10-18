@@ -1223,6 +1223,7 @@ fn tick_once(
             use_clicks = std::mem::take(&mut shared_input.interact.use_clicks);
         }
         shared_input.interact.pick_block = false;
+        shared_input.interact.pick_block_ctrl = false;
         shared_input.interact.drop_item = false;
         shared_input.interact.drop_stack = false;
         shared_input.interact.swap_offhand = false;

@@ -311,6 +311,7 @@ const ATTACK: InteractInput = InteractInput {
     attack: true,
     use_item: false,
     pick_block: false,
+    pick_block_ctrl: false,
     drop_item: false,
     drop_stack: false,
     swap_offhand: false,
@@ -1430,6 +1431,7 @@ const USE: InteractInput = InteractInput {
     attack: false,
     use_item: true,
     pick_block: false,
+    pick_block_ctrl: false,
     drop_item: false,
     drop_stack: false,
     swap_offhand: false,
@@ -1907,4 +1909,42 @@ fn minimum_attack_charge_blocks_the_click_below_it() {
     r.tick(InteractInput::default());
     let out = r.tick(ATTACK);
     assert!(matches!(out[0], ServerboundPlay::Punch(_)), "{out:?}");
+}
+
+/// `Minecraft.pickBlockOrEntity` passes `hasControlDown()` as `include_data`: Ctrl + middle
+/// click copies block-entity data in creative.
+#[test]
+fn pick_block_with_ctrl_sends_include_data() {
+    let mut r = Rig::new(GameMode::Creative);
+    let out = r.tick(InteractInput {
+        pick_block: true,
+        pick_block_ctrl: true,
+        ..Default::default()
+    });
+    assert!(matches!(
+        &out[0],
+        ServerboundPlay::PickItemFromBlock(sb::PickItemFromBlock {
+            include_data: true,
+            ..
+        })
+    ));
+    // Without Ctrl: false, and the ctrl flag alone (no press) sends nothing.
+    r.tick(InteractInput::default());
+    let out = r.tick(InteractInput {
+        pick_block: true,
+        ..Default::default()
+    });
+    assert!(matches!(
+        &out[0],
+        ServerboundPlay::PickItemFromBlock(sb::PickItemFromBlock {
+            include_data: false,
+            ..
+        })
+    ));
+    assert!(r
+        .tick(InteractInput {
+            pick_block_ctrl: true,
+            ..Default::default()
+        })
+        .is_empty());
 }
