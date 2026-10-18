@@ -1755,6 +1755,23 @@ impl Renderer {
     fn upload_mesh(&mut self, mesh: SectionMesh) {
         let pos = mesh.pos;
         let si = pos.y - self.min_section;
+        if mesh.is_removal() {
+            // The chunk is gone: drop the resident mesh and its visibility data
+            // (`ClientChunkCache.drop` releases the render data with the chunk). A
+            // section mined to air is an ordinary empty mesh and takes the path below.
+            let mut vis = self.section_vis.lock();
+            let had_vis = vis.remove(&(ChunkPos::new(pos.x, pos.z), si)).is_some();
+            drop(vis);
+            // The bonus bit lives on the section record and goes with it (a stale
+            // `bonus_list` entry is skipped when the list is cleared).
+            if let Some(old) = self.sections.remove(&pos) {
+                self.arenas.free(&old);
+            }
+            if had_vis {
+                self.vis_dirty = true;
+            }
+            return;
+        }
         let mut vis = self.section_vis.lock();
         let prev = vis.insert((ChunkPos::new(pos.x, pos.z), si), mesh.visibility);
         drop(vis);
