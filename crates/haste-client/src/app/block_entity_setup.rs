@@ -49,24 +49,35 @@ pub(crate) fn block_states_where(
 }
 
 /// Each block state whose block carries a block entity, with the block's
-/// `minecraft:block_entity_type` registry id (vanilla `BlockEntityTypes`' valid-block sets,
-/// resolved through the names the server synced): the block updates that place such blocks
-/// create their block entities client-side, like vanilla `LevelChunk.setBlockState` does — the
-/// server sends no `block_entity_data` for a plain placement.
+/// `minecraft:block_entity_type` registry id (the `block_entity_types.json` oracle dump —
+/// vanilla `EntityBlock.newBlockEntity`'s answer per state — resolved through the names the
+/// server synced): the block updates that place such blocks create their block entities
+/// client-side, like vanilla `LevelChunk.setBlockState` does — the server sends no
+/// `block_entity_data` for a plain placement. Without the dump no state carries one (the
+/// server's `block_entity_data` still works).
 pub(crate) fn block_entity_state_kinds(
     data: &haste_data::GameData,
     names: &[Identifier],
 ) -> HashMap<BlockStateId, u32> {
-    let ids: HashMap<&str, u32> = names
+    if !data.block_entity_types.is_loaded() {
+        tracing::warn!(
+            "no block_entity_types.json oracle dump (tools/recorder-mod/dump-server-oracles.sh): \
+             blocks placed by block updates get no client-side block entity"
+        );
+        return HashMap::new();
+    }
+    let ids: HashMap<&Identifier, u32> = names
         .iter()
         .enumerate()
-        .filter_map(|(id, n)| (n.namespace() == "minecraft").then_some((n.path(), id as u32)))
+        .map(|(id, n)| (n, id as u32))
         .collect();
     (0..data.blocks.len() as u32)
         .map(BlockStateId)
         .filter_map(|s| {
-            let path = crate::net::block_entity_type_path(data.blocks.block_of(s))?;
-            Some((s, *ids.get(path)?))
+            let ty = data
+                .block_entity_types
+                .type_of(data.blocks.block_of(s), s)?;
+            Some((s, *ids.get(ty)?))
         })
         .collect()
 }

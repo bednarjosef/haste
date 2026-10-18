@@ -1,15 +1,13 @@
 # Files over the size limit when scripts/check-file-sizes.sh was added, with their size then.
 # They may shrink but never grow. Lowered automatically by: scripts/check-file-sizes.sh --update
-crates/haste-assets/src/bake.rs 904
 crates/haste-assets/src/font.rs 626
 crates/haste-assets/src/item.rs 754
-crates/haste-assets/src/model.rs 669
 crates/haste-assets/src/packstack.rs 723
 crates/haste-client/src/ambient_particles.rs 626
 crates/haste-client/src/app.rs 4413
 crates/haste-client/src/boat.rs 871
-crates/haste-client/src/net/tests.rs 1841
-crates/haste-client/src/player/interact/tests.rs 2361
+crates/haste-client/src/net/tests.rs 1788
+crates/haste-client/src/player/interact/tests.rs 2245
 crates/haste-client/src/player.rs 1409
 crates/haste-client/src/player/tests.rs 1713
 crates/haste-client/src/script.rs 1159

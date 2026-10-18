@@ -1,101 +1,16 @@
-// The block side of vanilla's block entity types (`BlockEntityTypes`' valid-block sets): which
-// blocks carry which `minecraft:block_entity_type`. A block update that places such a block
-// creates its block entity on the client (`LevelChunk.setBlockState` -> `EntityBlock
-// .newBlockEntity`); the server sends no `block_entity_data` for a plain placement — only when
-// there is NBT to load — so without this the placed chest, sign or spawner never draws (its
-// block has no model of its own).
+// The session's block-entity half of block updates: vanilla `LevelChunk.setBlockState` creates
+// the entity when a state whose block carries one is placed (`EntityBlock.newBlockEntity`), and
+// the server sends no `block_entity_data` for a plain placement — only when there is NBT to
+// load — so without this the placed chest, sign or spawner never draws (its block has no model
+// of its own). Which block carries which type comes from the `block_entity_types.json` oracle
+// dump, resolved per state at join (`app::block_entity_setup`).
 
 use std::collections::HashMap;
 
 use haste_protocol::haste_core::chunk::BlockEntityData;
-use haste_protocol::haste_core::{BlockPos, BlockStateId, Identifier};
+use haste_protocol::haste_core::{BlockPos, BlockStateId};
 
 use super::{Session, WorldSink};
-
-/// The `minecraft:block_entity_type` path of the type `block` carries, if any: each type's
-/// valid-block set in vanilla `BlockEntityTypes`. The multi-block families (signs, banners,
-/// skulls, shulker boxes, shelves, copper chests) match by block name like the lid and bell
-/// filters (`haste_render::blockentity::is_lid_block`); blocks outside `minecraft` (mods)
-/// carry none, so their entities only appear through the packets the server sends.
-pub fn block_entity_type_path(block: &Identifier) -> Option<&'static str> {
-    if block.namespace() != "minecraft" {
-        return None;
-    }
-    let p = block.path();
-    // The piston's head block ends like the skull family but belongs to the moving piston's
-    // own entity (created from `moving_piston`, not the head).
-    if p == "piston_head" {
-        return None;
-    }
-    // The hanging signs first: "..._hanging_sign" also ends in "_sign".
-    if p.ends_with("_hanging_sign") {
-        return Some("hanging_sign");
-    }
-    if p.ends_with("_sign") {
-        return Some("sign");
-    }
-    if p.ends_with("_banner") {
-        return Some("banner");
-    }
-    if p.ends_with("_head") || p.ends_with("_skull") {
-        return Some("skull");
-    }
-    if p == "shulker_box" || p.ends_with("_shulker_box") {
-        return Some("shulker_box");
-    }
-    if p.ends_with("_shelf") {
-        return Some("shelf");
-    }
-    // The chest family: the plain chest and every copper chest variant.
-    if p == "chest" || p.ends_with("copper_chest") {
-        return Some("chest");
-    }
-    Some(match p {
-        "trapped_chest" => "trapped_chest",
-        "ender_chest" => "ender_chest",
-        "spawner" => "mob_spawner",
-        "moving_piston" => "piston",
-        "campfire" | "soul_campfire" => "campfire",
-        "bee_nest" | "beehive" => "beehive",
-        "suspicious_sand" | "suspicious_gravel" => "brushable_block",
-        "command_block" | "chain_command_block" | "repeating_command_block" => "command_block",
-        "furnace" => "furnace",
-        "jukebox" => "jukebox",
-        "dispenser" => "dispenser",
-        "dropper" => "dropper",
-        "creaking_heart" => "creaking_heart",
-        "brewing_stand" => "brewing_stand",
-        "enchanting_table" => "enchanting_table",
-        "end_portal" => "end_portal",
-        "beacon" => "beacon",
-        "daylight_detector" => "daylight_detector",
-        "hopper" => "hopper",
-        "comparator" => "comparator",
-        "structure_block" => "structure_block",
-        "end_gateway" => "end_gateway",
-        "conduit" => "conduit",
-        "barrel" => "barrel",
-        "smoker" => "smoker",
-        "blast_furnace" => "blast_furnace",
-        "lectern" => "lectern",
-        "bell" => "bell",
-        "jigsaw" => "jigsaw",
-        "sculk_sensor" => "sculk_sensor",
-        "calibrated_sculk_sensor" => "calibrated_sculk_sensor",
-        "sculk_catalyst" => "sculk_catalyst",
-        "sculk_shrieker" => "sculk_shrieker",
-        "chiseled_bookshelf" => "chiseled_bookshelf",
-        "decorated_pot" => "decorated_pot",
-        "crafter" => "crafter",
-        "trial_spawner" => "trial_spawner",
-        "vault" => "vault",
-        "test_block" => "test_block",
-        "test_instance_block" => "test_instance_block",
-        "copper_golem_statue" => "copper_golem_statue",
-        "potent_sulfur" => "potent_sulfur",
-        _ => return None,
-    })
-}
 
 impl Session {
     /// The block states that carry a block entity, with their `minecraft:block_entity_type`

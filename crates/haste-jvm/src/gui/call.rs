@@ -53,7 +53,7 @@ impl GuiPipeline {
                 jni_str!("setMouseGrabbed"),
                 jni_sig!("(Z)V"),
             )?,
-            game_key: env.get_method_id(&cls, jni_str!("gameKey"), jni_sig!("(IZ)V"))?,
+            game_key: env.get_method_id(&cls, jni_str!("gameKey"), jni_sig!("(IZI)V"))?,
             game_mouse: env.get_method_id(&cls, jni_str!("gameMouse"), jni_sig!("(IZ)V"))?,
             game_input: env.get_method_id(&cls, jni_str!("gameInput"), jni_sig!("()I"))?,
             consume_clicks: env.get_method_id(&cls, jni_str!("consumeClicks"), jni_sig!("()I"))?,

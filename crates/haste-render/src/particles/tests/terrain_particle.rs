@@ -235,7 +235,7 @@ fn block_particle_table_resolves_real_sprites() {
         &haste_core::paths::datagen_reports().join("blocks.json"),
     )
     .unwrap();
-    let types = ParticleTypes::build(&mut assets, &[], Some(&states)).unwrap();
+    let types = ParticleTypes::build(&mut assets, &[], Some(&states), &[]).unwrap();
     let blocks = types.blocks.as_ref().unwrap();
     // The state id of `name` with `props` (BlocksJsonStates has no lookup, so scan).
     let find = |name: &str, props: &[(&str, &str)]| {
