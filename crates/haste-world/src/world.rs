@@ -5,10 +5,11 @@ use std::sync::Arc;
 use haste_core::chunk::{BlockEntityData, ChunkData};
 use haste_core::game::DimensionInfo;
 use haste_core::view::{BlockView, DirtyTracker};
-use haste_core::{BiomeId, BlockPos, BlockStateId, ChunkPos, SectionPos};
+use haste_core::{BlockPos, BlockStateId, ChunkPos, SectionPos};
 use haste_data::GameData;
 
 use crate::chunk::{Chunk, Heightmap, Section};
+use crate::snapshot::{BorderCells, SectionSnapshot, SnapshotSection};
 use crate::world_error::WorldError;
 
 /// Heap bytes of the loaded world, by storage (see [`World::memory_stats`]).
@@ -249,6 +250,15 @@ impl World {
     /// mesher's smooth light samples the 3x3x3 block neighbourhood of each block, so a
     /// section's border blocks read light from the adjacent sections (diagonal ones too, in
     /// neighbouring chunks).
+    ///
+    /// The server only sends these for chunks on the *border* of a player's tracked area
+    /// (vanilla `ChunkHolder.broadcastChanges` sends `ClientboundLightUpdatePacket` to
+    /// `getPlayers(pos, true)` — `isChunkOnTrackedBorder`): block changes in interior chunks
+    /// arrive with no light update at all, because the vanilla client recomputes light
+    /// itself on every block change (`LevelChunk.setBlockState` -> `LevelLightEngine
+    /// .checkBlock`, run from `ClientLevel.update`). Haste does the same from `set_block`
+    /// (see `crate::light`); this path only matters for border chunks, where the packet's
+    /// values overwrite the locally computed (identical) ones.
     pub fn apply_light(&mut self, pos: ChunkPos, light: &haste_core::chunk::LightData) {
         if let Some(chunk) = self.chunks.get_mut(&pos.to_packed()) {
             chunk.apply_light(light);
@@ -562,99 +572,6 @@ impl DirtyTracker for World {
         }
         out
     }
-}
-
-/// A section plus its six one-block border faces (from the six neighbours), light included.
-/// Cloning the containers is a deep copy; the `PalettedContainer`'s palette and data are cloned.
-#[derive(Clone)]
-pub struct SnapshotSection {
-    pub block_count: i16,
-    /// Fluid count from the server's section header (0: no fluids to mesh).
-    pub fluid_count: i16,
-    pub blocks: crate::palette::BlockContainer,
-    pub biomes: crate::palette::BiomeContainer,
-}
-
-/// Border faces of a snapshot, each 16x16 (or 16x16 for top/bottom), row-major in the loop
-/// order used to gather them (see `snapshot_section`).
-#[derive(Default, Clone)]
-pub struct BorderCells {
-    pub neg_x: Vec<BlockStateId>,
-    pub pos_x: Vec<BlockStateId>,
-    pub neg_y: Vec<BlockStateId>,
-    pub pos_y: Vec<BlockStateId>,
-    pub neg_z: Vec<BlockStateId>,
-    pub pos_z: Vec<BlockStateId>,
-}
-
-/// What meshing threads get: a section, its border, its light.
-pub struct SectionSnapshot {
-    pub pos: SectionPos,
-    pub section: SnapshotSection,
-    pub border: BorderCells,
-    pub sky: Option<crate::light::NibbleArray>,
-    pub block: crate::light::NibbleArray,
-}
-
-impl SectionSnapshot {
-    /// Block at (x, y, z) with x/y/z in -1..=16 (the section plus one-block border).
-    pub fn get(&self, x: i8, y: i8, z: i8) -> BlockStateId {
-        if (0..16).contains(&x) && (0..16).contains(&y) && (0..16).contains(&z) {
-            return self.section.blocks.get_block(x as u8, y as u8, z as u8);
-        }
-        let (face, i) = self.border_face_index(x, y, z);
-        match face {
-            Some(f) => f[i],
-            None => BlockStateId::AIR,
-        }
-    }
-
-    /// Sky light at (x, y, z) in 0..16 coords. A section that arrived absent was filled
-    /// from the layer above at snapshot time (see `snapshot_section`); `None` here means
-    /// no layer anywhere above, which reads as full sky.
-    pub fn sky_light(&self, x: u8, y: u8, z: u8) -> u8 {
-        self.sky.as_ref().map(|n| n.get(x, y, z)).unwrap_or(15)
-    }
-
-    pub fn block_light(&self, x: u8, y: u8, z: u8) -> u8 {
-        self.block.get(x, y, z)
-    }
-
-    fn border_face_index(&self, x: i8, y: i8, z: i8) -> (Option<&Vec<BlockStateId>>, usize) {
-        // The gather loops in `snapshot_section` define the index order:
-        // neg_x: y*16+z ; pos_x: y*16+z ; neg_z: y*16+x ; pos_z: y*16+x ; neg_y: z*16+x ; pos_y: z*16+x
-        let b = &self.border;
-        if x == -1 {
-            let i = (y as usize) * 16 + z as usize;
-            return (Some(&b.neg_x), i);
-        }
-        if x == 16 {
-            let i = (y as usize) * 16 + z as usize;
-            return (Some(&b.pos_x), i);
-        }
-        if z == -1 {
-            let i = (y as usize) * 16 + x as usize;
-            return (Some(&b.neg_z), i);
-        }
-        if z == 16 {
-            let i = (y as usize) * 16 + x as usize;
-            return (Some(&b.pos_z), i);
-        }
-        if y == -1 {
-            let i = (z as usize) * 16 + x as usize;
-            return (Some(&b.neg_y), i);
-        }
-        if y == 16 {
-            let i = (z as usize) * 16 + x as usize;
-            return (Some(&b.pos_y), i);
-        }
-        (None, 0)
-    }
-}
-
-/// Biome of the snapshot's section at cell coords (0..4).
-pub fn snapshot_biome(s: &SectionSnapshot, x: u8, y: u8, z: u8) -> BiomeId {
-    s.section.biomes.get_biome(x, y, z)
 }
 
 /// ceil(log2(n)), at least 1 (bit width of an id in `0..n`).
