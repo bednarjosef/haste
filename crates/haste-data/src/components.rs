@@ -59,6 +59,11 @@ pub struct ItemComponents {
     foods: HashMap<Identifier, bool>,
     tools: HashMap<Identifier, ToolComponent>,
     gliders: HashSet<Identifier>,
+    /// Items whose default components carry `minecraft:piercing_weapon` (the spears): the
+    /// weapon's optional draw sound, if the report names one.
+    piercing_weapons: HashMap<Identifier, Option<String>>,
+    /// `minecraft:minimum_attack_charge` by item (`Player.cannotAttackWithItem`).
+    minimum_attack_charges: HashMap<Identifier, f32>,
 }
 
 impl ItemComponents {
@@ -95,6 +100,18 @@ impl ItemComponents {
     /// Items whose default components carry `minecraft:glider`.
     pub fn gliders(&self) -> &HashSet<Identifier> {
         &self.gliders
+    }
+
+    /// The item's default `minecraft:piercing_weapon` draw sound (`weapon.makeSound`), when
+    /// the item is a spear. `Some(None)` = a spear without a sound.
+    pub fn piercing_weapon_sound(&self, item: &Identifier) -> Option<Option<&str>> {
+        self.piercing_weapons.get(item).map(|s| s.as_deref())
+    }
+
+    /// The item's default `minecraft:minimum_attack_charge` (`Player.cannotAttackWithItem`),
+    /// if it has one.
+    pub fn minimum_attack_charge(&self, item: &Identifier) -> Option<f32> {
+        self.minimum_attack_charges.get(item).copied()
     }
 
     /// Whether item's default components carry `minecraft:glider` (vanilla
@@ -158,6 +175,16 @@ impl ItemComponents {
         self.foods.insert(item, can_always_eat);
     }
 
+    /// Sets an item's default `minecraft:piercing_weapon` and its draw sound (tests).
+    pub fn insert_piercing_weapon(&mut self, item: Identifier, sound: Option<String>) {
+        self.piercing_weapons.insert(item, sound);
+    }
+
+    /// Sets an item's default `minecraft:minimum_attack_charge` (tests).
+    pub fn insert_minimum_attack_charge(&mut self, item: Identifier, charge: f32) {
+        self.minimum_attack_charges.insert(item, charge);
+    }
+
     /// How many items carry `minecraft:attribute_modifiers`.
     pub fn len(&self) -> usize {
         self.attributes.len()
@@ -179,6 +206,8 @@ impl ItemComponents {
         let mut foods: HashMap<Identifier, bool> = HashMap::new();
         let mut tools: HashMap<Identifier, ToolComponent> = HashMap::new();
         let mut gliders: HashSet<Identifier> = HashSet::new();
+        let mut piercing_weapons: HashMap<Identifier, Option<String>> = HashMap::new();
+        let mut minimum_attack_charges: HashMap<Identifier, f32> = HashMap::new();
         let Ok(entries) = std::fs::read_dir(components_dir) else {
             return ItemComponents {
                 dyed_color_type: dyed_color_type(registries),
@@ -224,6 +253,24 @@ impl ItemComponents {
                     tools.insert(item.clone(), t);
                 }
             }
+            if let Some(p) = components.get("minecraft:piercing_weapon") {
+                // The draw sound the report names ("sound": "minecraft:item.spear.attack" or
+                // an inline sound object); a spear may also name none.
+                let sound = p.get("sound").and_then(|s| match s {
+                    serde_json::Value::String(n) => Some(n.clone()),
+                    serde_json::Value::Object(_) => s
+                        .get("sound_id")
+                        .and_then(|v| v.as_str())
+                        .map(|n| n.to_owned()),
+                    _ => None,
+                });
+                piercing_weapons.insert(item.clone(), sound);
+            }
+            if let Some(c) = components.get("minecraft:minimum_attack_charge") {
+                if let Some(c) = c.as_f64() {
+                    minimum_attack_charges.insert(item.clone(), c as f32);
+                }
+            }
             if components.get("minecraft:glider").is_some() {
                 gliders.insert(item);
             }
@@ -243,6 +290,8 @@ impl ItemComponents {
             foods,
             tools,
             gliders,
+            piercing_weapons,
+            minimum_attack_charges,
         }
     }
 

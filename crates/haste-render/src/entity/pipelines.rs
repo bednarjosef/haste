@@ -374,7 +374,6 @@ impl EntityRenderer {
             shadow_buffer,
             shadow_capacity,
             shadow_vertices: Vec::new(),
-            lights: HashMap::new(),
             nametags: Vec::new(),
             hand_buffer,
             hand_capacity: 1024,
@@ -394,6 +393,7 @@ impl EntityRenderer {
             portal_buffer,
             portal_capacity: 256,
             beam_radius_scale: 1.0,
+            view_scale: 1.0,
             beams: crate::blockentity::BeamPipelines {
                 opaque: beam_opaque,
                 glow: beam_glow,
