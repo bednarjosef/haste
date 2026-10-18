@@ -58,8 +58,9 @@ pub use vertex::{lightmap_brightness, name_tag_visible, shadow_piece_alpha};
 use vertex::{make_vertex_buffer, parse_tex, push_shadow_quad};
 
 const ATLAS_SIZE: u32 = 2048;
+/// Vanilla `Entity.shouldRenderAtSqrDistance`: whether an entity whose model is `size`
 /// blocks and has entity `scale` should be drawn at squared distance `dist_sq`, given the
-/// `view_scale` (from `options.entityDistanceScaling`).
+/// `view_scale` (`Entity.viewScale`, from `options.entityDistanceScaling`).
 pub fn should_render_at_sqr_distance(
     size: f32,
     entity_scale: f32,
@@ -69,11 +70,6 @@ pub fn should_render_at_sqr_distance(
     let size = if size.is_nan() { 1.0 } else { size };
     let limit = 64.0 * size.max(1.0) * entity_scale * view_scale;
     dist_sq < f64::from(limit * limit)
-}
-
-/// Alias for [`should_render_at_sqr_distance`].
-pub fn cull_distance(size: f32, entity_scale: f32, dist_sq: f64, view_scale: f32) -> bool {
-    should_render_at_sqr_distance(size, entity_scale, dist_sq, view_scale)
 }
 
 /// Vanilla renders the player model at 15/16 scale.
