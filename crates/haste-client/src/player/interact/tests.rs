@@ -1636,3 +1636,82 @@ fn more_of_the_held_item_does_not_restart_the_break() {
         [action::ABORT_DESTROY, action::START_DESTROY]
     );
 }
+
+/// `Minecraft.startAttack`'s spectator branch (`MultiPlayerGameMode.spectate` /
+/// `spectatorNoAction`): the left click teleports to the entity under the crosshair (entity
+/// id + 1, the optional VarInt encoding) or reports the no-action on a miss; no swing, no
+/// punch, no missTime, and no block or attack packet.
+#[test]
+fn spectator_left_click_sends_the_spectator_action() {
+    // An entity: id + 1.
+    let mut r = Rig::new(GameMode::Spectator);
+    r.add_entity(
+        EntityId(42),
+        Aabb::entity(DVec3::new(0.5, 0.0, 0.5), 0.6, 0.5),
+        ZOMBIE,
+    );
+    let out = r.tick(ATTACK);
+    assert_eq!(
+        out,
+        [ServerboundPlay::SpectatorAction(sb::SpectatorAction {
+            entity: 43
+        })]
+    );
+    assert!(!r.p.hand.is_swinging(), "no swing in spectator");
+    // Held: continueAttack keeps calling continueDestroyBlock, which the spectator's
+    // blockActionRestricted refuses without a packet.
+    for _ in 0..3 {
+        assert!(r.tick(ATTACK).is_empty());
+    }
+    // A miss (the same click at nothing): the empty no-action, not a punch or missTime.
+    let mut r = Rig::new(GameMode::Spectator);
+    r.w = TestWorld::new();
+    let out = r.tick(ATTACK);
+    assert_eq!(
+        out,
+        [ServerboundPlay::SpectatorAction(sb::SpectatorAction {
+            entity: 0
+        })]
+    );
+    // The click was not a miss with missTime (which would freeze the next ten): release and
+    // click again, and it reports again at once.
+    r.tick(InteractInput::default());
+    let out = r.tick(ATTACK);
+    assert_eq!(
+        out,
+        [ServerboundPlay::SpectatorAction(sb::SpectatorAction {
+            entity: 0
+        })]
+    );
+}
+
+/// A spectator's right click still sends `use_item_on` on a block (`MultiPlayerGameMode
+/// .useItemOn` sends before `performUseItemOn` answers its spectator CONSUME: no swing, no
+/// item change) and nothing at all on a miss or an entity (the interact packet went out, the
+/// client-side use was a Pass, `useItem` sends nothing for a spectator).
+#[test]
+fn spectator_use_on_a_block_sends_use_item_on_and_otherwise_nothing() {
+    let mut r = Rig::new(GameMode::Spectator);
+    let out = r.tick(USE);
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert!(matches!(&out[0], ServerboundPlay::UseItemOn(u) if u.hand == 0));
+    assert!(!r.p.hand.is_swinging());
+    // A miss: useItem answers spectator with a Pass before sending anything.
+    r.w = TestWorld::new();
+    assert!(r.tick(USE).is_empty());
+    // An entity (a fresh click; the held button does not re-run startUseItem while
+    // rightClickDelay counts): the interact packet, then nothing.
+    r.tick(InteractInput::default());
+    r.add_entity(
+        EntityId(42),
+        Aabb::entity(DVec3::new(0.5, 0.0, 0.5), 0.6, 0.5),
+        VILLAGER,
+    );
+    let out = r.tick(USE);
+    // Both hands' interact went out (each a client Pass, falling through to a useItem that
+    // sends nothing for a spectator).
+    assert_eq!(out.len(), 2, "{out:?}");
+    assert!(out
+        .iter()
+        .all(|p| matches!(p, ServerboundPlay::Interact(i) if i.entity_id == 42)));
+}

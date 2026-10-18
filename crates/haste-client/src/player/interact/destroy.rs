@@ -46,7 +46,8 @@ impl LocalPlayer {
         if env.data.is_air(state) || predicted_gone {
             return false;
         }
-        if self.game_mode == GameMode::Adventure {
+        // `Player.blockActionRestricted`: spectator (like adventure) never breaks; no packet.
+        if self.game_mode == GameMode::Adventure || self.game_mode == GameMode::Spectator {
             // Breaking in adventure depends on the held item's can_break predicate (not decoded).
             return false;
         }
@@ -116,7 +117,7 @@ impl LocalPlayer {
             );
             return true;
         }
-        if self.game_mode == GameMode::Adventure {
+        if self.game_mode == GameMode::Adventure || self.game_mode == GameMode::Spectator {
             return false;
         }
         if !self.same_destroy_target(h.pos) {

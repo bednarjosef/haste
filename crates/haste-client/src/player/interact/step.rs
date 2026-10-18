@@ -2,8 +2,6 @@
 //! crosshair target, then `Minecraft.handleKeybinds` (the click loops, the held use,
 //! `continueAttack`, `missTime`--), pick block, and drop / off-hand swap.
 
-use haste_core::game::GameMode;
-use haste_core::input::InteractInput;
 use haste_core::view::BlockView;
 use haste_core::BlockPos;
 use haste_protocol::packets::play::serverbound as sb;
@@ -48,25 +46,19 @@ impl LocalPlayer {
 
         // 2. The crosshair target (Minecraft.pick). The held stack's components are decoded once
         // per stack change; nothing in the pick reads them, but the decode belongs with the
-        // per-tick held-item upkeep.
+        // per-tick held-item upkeep. The pick runs in spectator too: `Minecraft.tick` calls it
+        // whatever the mode, and `Minecraft.startAttack`'s spectator branch needs the target
+        // (the entity to teleport to, or the miss).
         let held = self.main_hand().clone();
         self.int.refresh_components(held, env.data);
-        self.int.target = if self.game_mode == GameMode::Spectator {
-            None
-        } else {
-            self.pick(
-                look,
-                world,
-                &env.data.shapes,
-                env.data,
-                env.entities,
-                env.entity_types,
-            )
-        };
-        if self.game_mode == GameMode::Spectator {
-            self.int.input = InteractInput::default();
-            return;
-        }
+        self.int.target = self.pick(
+            look,
+            world,
+            &env.data.shapes,
+            env.data,
+            env.entities,
+            env.entity_types,
+        );
 
         // 3. Minecraft.handleKeybinds: the click loops, the held use, then continueAttack.
         // `KeyMapping.consumeClick` returns once per queued press, so several clicks in one tick

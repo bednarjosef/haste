@@ -5,6 +5,7 @@
 
 use glam::DVec3;
 use haste_core::entity::ItemStackData;
+use haste_core::game::GameMode;
 use haste_core::view::BlockView;
 use haste_core::{BlockPos, BlockStateId, Direction, Identifier, RegistryIndex};
 use haste_protocol::packets::play::serverbound as sb;
@@ -168,7 +169,12 @@ impl LocalPlayer {
             self.int.use_delay = USE_DELAY;
             if !self.int.is_using_item {
                 for hand in 0..=1 {
-                    let holding = !self.hand(hand).is_empty();
+                    // `MultiPlayerGameMode.useItem` answers spectator with a Pass before it sends
+                    // anything: no `use_item` packet and no use. `useItemOn`'s packet still
+                    // goes out (see the BLOCK arm), but its client half is a CONSUME without a
+                    // swing, so the use stops at the block.
+                    let spectator = self.game_mode == GameMode::Spectator;
+                    let holding = !spectator && !self.hand(hand).is_empty();
                     match self.int.target {
                         Some(Target::Entity {
                             id,
@@ -214,6 +220,11 @@ impl LocalPlayer {
                                 world_border_hit: false,
                                 sequence: seq,
                             }));
+                            // Spectator: `performUseItemOn`'s only answer is a CONSUME (no
+                            // swing, no item change), so the use stops at the packet.
+                            if spectator {
+                                return;
+                            }
                             // The block's own use opens the game-master editors on the client
                             // (`CommandBlock.useWithoutItem` -> `LocalPlayer.openCommandBlock`;
                             // the book's `useItemOn` is never consumed, so `Minecraft.startUseItem`
@@ -448,6 +459,11 @@ impl LocalPlayer {
             // An unknown (mod) type: its interact is the server's to answer.
             return false;
         };
+        // `MultiPlayerGameMode.interact` answers spectator with a Pass: the packet went out,
+        // nothing client-side consumes, the use falls through (to a useItem that does nothing).
+        if self.game_mode == GameMode::Spectator {
+            return false;
+        }
         if name.namespace() != "minecraft" {
             return false;
         }

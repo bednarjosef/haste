@@ -23,10 +23,24 @@ impl LocalPlayer {
         if self.int.miss_time > 0 {
             return false;
         }
-        // player.isHandsBusy() (an item in use, or dying) blocks the swing; spectator mode
-        // zeroed the input in interact_step.
+        // player.isHandsBusy() (an item in use, or dying) blocks the swing; item use is gated
+        // separately in handleKeybinds.
         if self.int.is_using_item {
             return false;
+        }
+        // `Minecraft.startAttack`'s spectator branch comes before the swing: an entity under
+        // the crosshair is teleported to (`MultiPlayerGameMode.spectate`, entity id + 1),
+        // anything else is the explicit no-action (`spectatorNoAction`, id 0). No swing, no
+        // missTime, and `endAttack` (true) skips continueAttack this tick.
+        if self.game_mode == GameMode::Spectator {
+            let target = match self.int.target {
+                Some(Target::Entity { id, .. }) => id.0 + 1,
+                _ => 0,
+            };
+            out.push(ServerboundPlay::SpectatorAction(sb::SpectatorAction {
+                entity: target,
+            }));
+            return true;
         }
         // `Minecraft.startAttack` swings on every attack, whatever the crosshair is on.
         self.hand.swing();
