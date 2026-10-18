@@ -394,6 +394,7 @@ impl EntityRenderer {
             portal_buffer,
             portal_capacity: 256,
             beam_radius_scale: 1.0,
+            view_scale: 1.0,
             beams: crate::blockentity::BeamPipelines {
                 opaque: beam_opaque,
                 glow: beam_glow,

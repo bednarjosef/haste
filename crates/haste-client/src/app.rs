@@ -3126,6 +3126,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         }
         renderer.set_lightmap_frame(lightmap);
         renderer.set_menu_blur_radius(options.menu_background_blurriness);
+        renderer.set_view_scale(options.entity_distance_scaling);
         if let Ok(stats) = renderer.render(&frame) {
             last_stats = stats;
             fps.frame(&stats);
@@ -4727,6 +4728,7 @@ impl App {
         renderer.set_game_time(view.world_age);
         renderer.set_lightmap_frame(lightmap);
         renderer.set_menu_blur_radius(self.options.menu_background_blurriness);
+        renderer.set_view_scale(self.options.entity_distance_scaling);
         if self.screenshot {
             self.screenshot = false;
             renderer.request_capture();

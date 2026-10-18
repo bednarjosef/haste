@@ -61,6 +61,19 @@ pub use vertex::{lightmap_brightness, name_tag_visible, shadow_piece_alpha};
 use vertex::{make_vertex_buffer, parse_tex, push_shadow_quad};
 
 const ATLAS_SIZE: u32 = 2048;
+/// Vanilla `Entity.shouldRenderAtSqrDistance`: whether an entity whose model is `size`
+/// blocks and has entity `scale` should be drawn at squared distance `dist_sq`, given the
+/// `view_scale` (`Entity.viewScale`, from `options.entityDistanceScaling`).
+pub fn should_render_at_sqr_distance(
+    size: f32,
+    entity_scale: f32,
+    dist_sq: f64,
+    view_scale: f32,
+) -> bool {
+    let size = if size.is_nan() { 1.0 } else { size };
+    let limit = 64.0 * size.max(1.0) * entity_scale * view_scale;
+    dist_sq < f64::from(limit * limit)
+}
 
 /// Vanilla renders the player model at 15/16 scale.
 const PLAYER_SCALE: f32 = 0.9375;
@@ -320,6 +333,7 @@ pub struct EntityRenderer {
     /// This frame's beam radius scale (vanilla `BeaconRenderer.extract`: 1 within 96 blocks
     /// or while scoping, else distance / 96), set per frame by the renderer.
     beam_radius_scale: f32,
+    view_scale: f32,
     /// The beam and portal pipelines (see [`crate::blockentity::BeamPipelines`]).
     pub beams: crate::blockentity::BeamPipelines,
     /// The default font, for world-space sign text (glyph pages land in the entity atlas).
@@ -343,6 +357,11 @@ impl EntityRenderer {
     pub fn set_beam_radius_scale(&mut self, scale: f32) {
         self.beam_radius_scale = scale;
     }
+    /// Vanilla `Entity.viewScale` for the entity render distance (from
+    /// `options.entityDistanceScaling`, 0.5..=5.0, default 1.0).
+    pub fn set_view_scale(&mut self, scale: f32) {
+        self.view_scale = scale;
+    }
     /// Poses every entity into the vertex buffer. `skip` is the entity the camera is (not drawn
     /// in first person). Positions are camera-relative (`camera` subtracted in f64) like the
     /// terrain.
@@ -355,6 +374,7 @@ impl EntityRenderer {
         orientation: glam::Quat,
         assets: &mut Assets,
     ) {
+        let view_scale = self.view_scale;
         self.vertices.clear();
         self.nametags.clear();
         self.drawn = 0;
@@ -369,8 +389,7 @@ impl EntityRenderer {
             let (size, half) = model_extents(&e.model.root);
             let rel = e.pos - camera;
             let dist2 = rel.length_squared();
-            let limit = 64.0 * size.max(1.0) * e.scale;
-            if dist2 > f64::from(limit * limit) {
+            if !should_render_at_sqr_distance(size, e.scale, dist2, view_scale) {
                 continue;
             }
             if !aabb_in_frustum(frustum, rel, half + 0.5) {
