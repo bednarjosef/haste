@@ -159,6 +159,7 @@ impl LocalPlayer {
     pub(super) fn start_use_item(
         &mut self,
         look: (f32, f32),
+        sneak_key: bool,
         world: &dyn BlockView,
         env: &InteractEnv<'_>,
         out: &mut Vec<ServerboundPlay>,
@@ -169,14 +170,16 @@ impl LocalPlayer {
                 for hand in 0..=1 {
                     let holding = !self.hand(hand).is_empty();
                     match self.int.target {
-                        Some(Target::Entity { id, location }) => {
+                        Some(Target::Entity { id, location, pos }) => {
                             // gameMode.interact: the interact packet goes out (the mod-driven
-                            // result that decides the swing comes back with the server's answer).
+                            // result that decides the swing comes back with the server's answer),
+                            // with the hit location relative to the entity and the shift key's
+                            // state (`player.isShiftKeyDown`, the raw key).
                             out.push(ServerboundPlay::Interact(sb::Interact {
                                 entity_id: id.0,
                                 hand,
-                                target_offset: location - self.eye(),
-                                sneaking: self.state.sneaking,
+                                target_offset: location - pos,
+                                sneaking: sneak_key,
                             }));
                             // `Minecraft.startUseItem` swings on a successful use (vanilla's
                             // swing source PREDICTED).

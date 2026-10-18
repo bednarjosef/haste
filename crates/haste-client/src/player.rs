@@ -874,7 +874,7 @@ impl LocalPlayer {
             (input.pitch + self.look_offset.1).clamp(-90.0, 90.0),
         );
         if let Some(env) = ctx.env {
-            self.interact_step(look, ctx.world, env, out);
+            self.interact_step(look, input.sneak, ctx.world, env, out);
         }
 
         // 1. player_input when the held keys change (raw keys, as pressed). While riding this

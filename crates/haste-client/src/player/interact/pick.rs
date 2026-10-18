@@ -13,7 +13,14 @@ use super::super::LocalPlayer;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Target {
     Block(BlockHit),
-    Entity { id: EntityId, location: DVec3 },
+    Entity {
+        id: EntityId,
+        /// Where the crosshair hits it (`EntityHitResult.location`).
+        location: DVec3,
+        /// The entity's feet position the same tick (`MultiPlayerGameMode.interact` sends the
+        /// hit location relative to it: `location - entity.position()`).
+        pos: DVec3,
+    },
 }
 
 impl LocalPlayer {
@@ -107,9 +114,17 @@ impl LocalPlayer {
                 // filterHitResult: an entity beyond entity_interaction_range makes the pick a
                 // miss (the block behind it is not shown).
                 if d <= a.entity_reach {
+                    let (id, b) = entities[i];
                     return Some(Target::Entity {
-                        id: entities[i].0,
+                        id,
                         location: eye + dir * d,
+                        // `EntityDimensions.makeBoundingBox`: feet at `pos`, centred
+                        // horizontally (the raw box, not the pick-radius-inflated one).
+                        pos: DVec3::new(
+                            (b.min.x + b.max.x) / 2.0,
+                            b.min.y,
+                            (b.min.z + b.max.z) / 2.0,
+                        ),
                     });
                 }
                 return None;

@@ -1232,6 +1232,37 @@ fn an_entity_wins_only_when_it_is_strictly_closer_than_the_block() {
     assert_eq!(actions(&out), [(action::START_DESTROY, 1)]);
 }
 
+/// `MultiPlayerGameMode.interact` sends the hit location relative to the entity (the server's
+/// `interactAt` reads it, e.g. an armor stand's slot from its Y) and the raw shift key
+/// (`player.isShiftKeyDown`), not the crouch state.
+#[test]
+fn the_interact_offset_is_relative_to_the_entity_and_carries_the_shift_key() {
+    let mut r = Rig::new(GameMode::Survival);
+    // A tall box standing on the floor below our eye: the crosshair hits its top half.
+    r.add_entity(
+        EntityId(42),
+        Aabb::entity(DVec3::new(0.5, 0.0, 0.5), 0.6, 1.9),
+        ZOMBIE,
+    );
+    // Not sneaking: shift not held.
+    let out = r.tick(USE);
+    match &out[0] {
+        ServerboundPlay::Interact(i) => {
+            assert_eq!(i.entity_id, 42);
+            // Feet at (0.5, 0, 0.5); the hit is on the box's centre axis, straight down.
+            assert!(
+                (i.target_offset.y - 1.62).abs() < 1e-6,
+                "{:?}",
+                i.target_offset
+            );
+            assert!((i.target_offset.x - 0.0).abs() < 1e-6);
+            assert!((i.target_offset.z - 0.0).abs() < 1e-6);
+            assert!(!i.sneaking);
+        }
+        p => panic!("{p:?}"),
+    }
+}
+
 /// Vanilla's `Minecraft.continueAttack`: while the block is breaking the arm swings every tick,
 /// but `LivingEntity.SwingState.startIfAble` refuses a restart less than half way through the
 /// 6 tick swing, so the swing runs 1/6, 2/6, 3/6, then starts over.
