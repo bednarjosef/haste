@@ -61,6 +61,10 @@ pub trait WorldSink {
     fn set_block(&mut self, pos: BlockPos, state: BlockStateId);
     /// `World::apply_light`.
     fn apply_light(&mut self, pos: ChunkPos, light: &LightData);
+    /// `World::replace_biomes` (chunks_biomes packet).
+    fn replace_biomes(&mut self, pos: ChunkPos, data: &[u8]) {
+        let _ = (pos, data);
+    }
     /// `World::set_block_entity`.
     fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData);
     /// The block state at `pos` (`World::block_state`; `AIR` by default for fakes). Named
@@ -202,6 +206,9 @@ impl WorldSink for World {
     }
     fn apply_light(&mut self, pos: ChunkPos, light: &LightData) {
         World::apply_light(self, pos, light)
+    }
+    fn replace_biomes(&mut self, pos: ChunkPos, data: &[u8]) {
+        World::replace_biomes(self, pos, data)
     }
     fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData) {
         World::set_block_entity(self, pos, data)
@@ -1078,6 +1085,8 @@ pub struct Session {
     pub sea_level: i32,
     /// `ClientLevelData.isFlat` (the spawn info's superflat flag; the horizon height).
     pub is_flat: bool,
+    /// Server view distance in chunks (from `login`, then `set_chunk_cache_radius`).
+    pub view_distance: i32,
     /// The chunk batch flow control (vanilla `ChunkBatchSizeCalculator`): the server sends
     /// chunk batches and waits for our `chunk_batch_received` rate before the next, so a
     /// client that never acknowledges gets one batch and then silence — a teleport's new
@@ -1153,6 +1162,7 @@ impl Session {
             weather: WeatherState::default(),
             sea_level: 63,
             is_flat: false,
+            view_distance: 0,
             batch_started_at: None,
             aggregated_nanos_per_chunk: 2_000_000.0,
             old_samples_weight: 1,
@@ -1385,6 +1395,7 @@ impl Session {
                 // snow line hangs off it).
                 self.sea_level = l.spawn.sea_level;
                 self.is_flat = l.spawn.is_flat;
+                self.view_distance = l.view_distance;
             }
             P::Respawn(r) => {
                 self.counters.respawns += 1;
@@ -1425,6 +1436,18 @@ impl Session {
             // it fires on every chunk border crossing, which would flood long sessions.
             P::SetChunkCacheCenter(c) => {
                 tracing::debug!("set_chunk_cache_center ({}, {})", c.x, c.z);
+            }
+            // Vanilla `ClientPacketListener.handleSetChunkCacheRadius`: the new server view
+            // distance (the game thread caps the meshed radius with it every drain).
+            P::SetChunkCacheRadius(r) => {
+                self.view_distance = r.radius;
+            }
+            // Vanilla `ClientPacketListener.handleChunksBiomes`: new biome containers for
+            // loaded chunks (`/fillbiome`); the world re-tints the 3x3 columns.
+            P::ChunksBiomes(b) => {
+                for c in &b.chunks {
+                    world.replace_biomes(c.pos, &c.data);
+                }
             }
             // The chunk batch flow control (vanilla `ClientPacketListener.handleChunkBatchStart`/
             // `handleChunkBatchFinished` + `ChunkBatchSizeCalculator`): time the batch, fold the
@@ -2118,12 +2141,13 @@ impl NetDriver {
                 .map(|s| Identifier::parse(&s).expect("registry names are valid identifiers"))
                 .collect::<Vec<_>>(),
         );
-        let session = Session::new(
+        let mut session = Session::new(
             login.entity_id,
             login.game_mode,
             login.dimension.clone(),
             particle_names,
         );
+        session.view_distance = login.view_distance;
         let chat = chat_session::ClientChat::new(conn.profile().uuid, None);
         Ok(Self {
             conn,
