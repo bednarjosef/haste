@@ -193,6 +193,98 @@ fn jar_gui_sprite_nine_slice() {
     });
 }
 
+/// Mob effect icons (vanilla `Hud.getMobEffectSprite` -> `mob_effect/<effect>`) live
+/// under `textures/mob_effect/`, not `gui/sprites`: the gui atlas definition's
+/// `mob_effect` directory source resolves them (before it, the HUD icon was the
+/// missing texture).
+#[test]
+#[ignore = "needs the client jar in the cache"]
+fn jar_gui_sprite_mob_effect() {
+    jar_test("gui_sprite_mob_effect", |a| {
+        let sprite = Identifier::minecraft("mob_effect/regeneration");
+        let key = a.atlas_sprite_texture_key(&sprite, "gui").unwrap();
+        assert_eq!(key, "assets/minecraft/textures/mob_effect/regeneration.png");
+        let (img, meta) = a.gui_sprite(&sprite).unwrap();
+        assert_eq!(img.dimensions(), (18, 18));
+        assert_eq!(meta, SpriteMeta::Stretch);
+        // The effect frame behind the icon is an ordinary gui sprite.
+        let (frame, _) = a
+            .gui_sprite(&Identifier::minecraft(
+                "container/inventory/effect_background",
+            ))
+            .unwrap();
+        assert_eq!(frame.dimensions(), (32, 32));
+    });
+}
+
+/// A pack layer's atlas definition stacks on the jar's (vanilla
+/// `SpriteSourceList.load` reads every layer's `atlases/gui.json`): its directory
+/// sources add sprites, the jar's keep serving `gui/sprites`, and a sprite id's
+/// namespace picks the namespace its texture is read from (mod effect icons).
+#[test]
+#[ignore = "needs the client jar in the cache"]
+fn pack_atlas_sources_stack() {
+    let mut assets = match open_assets() {
+        Some(a) => a,
+        None => {
+            eprintln!("ignored: needs the client jar in the cache");
+            return;
+        }
+    };
+    let packs_dir = haste_core::paths::cache_dir()
+        .join("assets")
+        .join("resourcepacks");
+    let pack = packs_dir.join("AtlasSources");
+    let dir = pack.join("assets/minecraft/textures/custom");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(pack.join("assets/minecraft/atlases")).unwrap();
+    std::fs::create_dir_all(pack.join("assets/haste_test/textures/mob_effect")).unwrap();
+    std::fs::write(
+        pack.join("pack.mcmeta"),
+        r#"{"pack":{"min_format":97,"max_format":97,"description":"atlas sources"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        pack.join("assets/minecraft/atlases/gui.json"),
+        r#"{"sources":[{"type":"minecraft:directory","source":"custom","prefix":"custom/"}]}"#,
+    )
+    .unwrap();
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        8,
+        8,
+        image::Rgba([10, 200, 90, 255]),
+    ))
+    .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+    .unwrap();
+    std::fs::write(dir.join("thing.png"), &png).unwrap();
+    std::fs::write(
+        pack.join("assets/haste_test/textures/mob_effect/thing.png"),
+        &png,
+    )
+    .unwrap();
+    assets.apply_packs(&packs_dir, &["file/AtlasSources".to_string()]);
+
+    // The pack's directory source resolves its own sprites...
+    let (img, _) = assets
+        .gui_sprite(&Identifier::minecraft("custom/thing"))
+        .unwrap();
+    assert_eq!(img.get_pixel(0, 0), &image::Rgba([10, 200, 90, 255]));
+    // ...the jar's sources still serve plain gui sprites...
+    let (hotbar, _) = assets
+        .gui_sprite(&Identifier::minecraft("hud/hotbar"))
+        .unwrap();
+    assert!(hotbar.dimensions().0 > 0);
+    // ...and the jar's `mob_effect` source reads a pack texture in its own
+    // namespace (how a mod's effect icon reaches the gui atlas).
+    let (modded, _) = assets
+        .gui_sprite(&Identifier::parse("haste_test:mob_effect/thing").unwrap())
+        .unwrap();
+    assert_eq!(modded.dimensions(), (8, 8));
+
+    std::fs::remove_dir_all(&pack).unwrap();
+}
+
 #[test]
 #[ignore = "needs the client jar in the cache"]
 fn jar_model_parent_resolution() {
