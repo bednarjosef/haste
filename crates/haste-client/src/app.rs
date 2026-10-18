@@ -17,9 +17,7 @@ use glam::DVec3;
 use haste_protocol::haste_core::gui::GuiFrame;
 use haste_protocol::haste_core::input::InputState;
 use haste_protocol::haste_core::model::EntityInstance;
-use haste_protocol::haste_core::{
-    BlockPos, BlockStateId, ChunkPos, EntityId, Identifier, SectionPos,
-};
+use haste_protocol::haste_core::{BlockPos, ChunkPos, EntityId, Identifier, SectionPos};
 use haste_protocol::ConnectOptions;
 use haste_render::{
     Camera, DimensionFog, FogInputs, FogType, FrameInput, FrameStats, LightmapFrame, Renderer,
@@ -39,6 +37,7 @@ use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 #[path = "biomes.rs"]
 pub(crate) mod biomes;
 pub(crate) mod block_entity_extract;
+mod block_entity_setup;
 mod weather_columns;
 
 use weather_columns::{extract_weather, WeatherColumnCache};
@@ -514,12 +513,18 @@ impl Session {
         // server did not sync one), and the block states whose lids `block_event` drives.
         let block_entity_names = {
             let regs = driver.connection().registries();
-            block_entity_type_names(regs, &data)
+            block_entity_setup::block_entity_type_names(regs, &data)
         };
-        let lid_states = lid_block_states(&data);
+        let lid_states = block_entity_setup::lid_block_states(&data);
+        // Each block state whose block carries a block entity, with the type's registry id: the
+        // block updates that place such blocks create their block entities client-side.
+        let block_entity_state_kinds =
+            block_entity_setup::block_entity_state_kinds(&data, &block_entity_names);
         // The bells' and decorated pots' `block_event` action 1 states, for the same filter.
-        let bell_states = block_states_where(&data, haste_render::blockentity::is_bell_block);
-        let pot_states = block_states_where(&data, haste_render::blockentity::is_pot_block);
+        let bell_states =
+            block_entity_setup::block_states_where(&data, haste_render::blockentity::is_bell_block);
+        let pot_states =
+            block_entity_setup::block_states_where(&data, haste_render::blockentity::is_pot_block);
         // The particle types of the datagen registry (the synced one has no data we need):
         // one atlas built once, shared by the pool (name resolution) and the renderer.
         let particle_ids: Vec<haste_protocol::haste_core::Identifier> =
@@ -596,6 +601,9 @@ impl Session {
         driver.session.set_lid_states(lid_states);
         driver.session.set_bell_states(bell_states);
         driver.session.set_pot_states(pot_states);
+        driver
+            .session
+            .set_block_entity_state_kinds(block_entity_state_kinds);
         *shared.pack_prompt.lock() = net::pack_prompt::PlayPrompt::new(address);
         let handle = rt.handle().clone();
         let sh = shared.clone();
@@ -2016,45 +2024,6 @@ pub fn game_dir() -> std::path::PathBuf {
 /// `FolderRepositorySource` looks (Java side) and `apply_packs` reads (Rust).
 fn default_resource_packs_dir() -> std::path::PathBuf {
     game_dir().join("resourcepacks")
-}
-
-/// `minecraft:block_entity_type` names by synced registry id (stored block entities carry that
-/// id); the static registry from the data generator when the server did not sync one, whose
-/// ids are the same on vanilla servers.
-fn block_entity_type_names(
-    regs: &haste_protocol::SyncedRegistries,
-    data: &haste_data::GameData,
-) -> Vec<Identifier> {
-    let registry = Identifier::minecraft("block_entity_type");
-    if let Some(entries) = regs.entries(&registry) {
-        return entries.iter().map(|e| e.id.clone()).collect();
-    }
-    let n = data.registries.len("minecraft:block_entity_type");
-    (0..n as u32)
-        .map(|i| {
-            data.registries
-                .name("minecraft:block_entity_type", haste_core::RegistryIndex(i))
-                .cloned()
-                .unwrap_or_else(|| Identifier::minecraft("air"))
-        })
-        .collect()
-}
-
-/// The block states whose `block_event` action 1 drives a lid (chests, ender chests, trapped
-/// chests, shulker boxes; copper chests are not drawn yet), for the session's event filter.
-fn lid_block_states(data: &haste_data::GameData) -> std::collections::HashSet<BlockStateId> {
-    block_states_where(data, haste_render::blockentity::is_lid_block)
-}
-
-/// Every block state whose block matches `f`, for the session's `block_event` filters.
-fn block_states_where(
-    data: &haste_data::GameData,
-    f: impl Fn(&haste_core::Identifier) -> bool,
-) -> std::collections::HashSet<BlockStateId> {
-    (0..data.blocks.len() as u32)
-        .map(BlockStateId)
-        .filter(|s| f(data.blocks.block_of(*s)))
-        .collect()
 }
 
 /// The sound output for a joined game: `sounds.json` parsed from the real assets, the
