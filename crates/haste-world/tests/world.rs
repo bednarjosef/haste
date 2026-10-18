@@ -89,11 +89,13 @@ fn chunk_load_and_block_view() {
     assert_eq!(w.height(), 384);
     // chunk list
     assert_eq!(w.loaded_chunks().count(), 1);
-    // dirty: every section with blocks (the 8 stone sections; air sections mesh to
-    // nothing and are skipped, like vanilla's chunk cache)
+    // dirty: every section of the chunk, the air ones above the stone included
+    // (vanilla's `SectionUpdateTracker.setDirty` marks regardless of contents; the
+    // client's feed skips the ones it never meshed)
     let dirty = w.take_dirty_sections();
-    assert_eq!(dirty.len(), 8);
+    assert_eq!(dirty.len(), 24);
     assert!(dirty.contains(&SectionPos::new(0, -4, 0)));
+    assert!(dirty.contains(&SectionPos::new(0, 19, 0)));
     assert!(w.take_dirty_sections().is_empty());
 }
 
@@ -127,6 +129,39 @@ fn set_block_and_border_dirty() {
     assert!(dirty.contains(&SectionPos::new(0, 4, 0)));
     assert!(dirty.contains(&SectionPos::new(0, 3, 0)));
     assert_eq!(dirty.len(), 2);
+}
+
+/// A section that held its chunk's only block and becomes empty must still be
+/// reported when it is marked dirty: the renderer is holding a mesh for it, and only
+/// an empty mesh result replaces that (vanilla compiles every dirty section and stores
+/// `CompiledSectionMesh.EMPTY` for one that compiled to nothing).
+#[test]
+fn emptied_section_still_reaches_the_drain() {
+    let mut w = World::new(overworld(), game_data());
+    // one stone block at (5, 100, 5), everything else air
+    let cp = ChunkPos::new(0, 0);
+    let cd = synthetic_chunk_data(cp, -4, 24, |si, x, y, z| {
+        if si == 10 && x == 5 && y == 4 && z == 5 {
+            STONE
+        } else {
+            BlockStateId::AIR
+        }
+    });
+    w.load_chunk(&cd).unwrap();
+    let _ = w.take_dirty_sections();
+
+    // remove the last block of the section: the section is empty now, but the
+    // renderer could be holding its mesh, so it must be reported
+    let p = BlockPos::new(5, 100, 5);
+    w.set_block(p, BlockStateId::AIR);
+    let dirty = w.take_dirty_sections();
+    assert!(
+        dirty.contains(&p.section()),
+        "the emptied section must reach the drain"
+    );
+    // the sections around the block (its 3x3x3 neighbourhood) are marked too
+    assert!(dirty.contains(&SectionPos::new(0, 5, 0)));
+    assert!(dirty.contains(&SectionPos::new(0, 7, 0)));
 }
 
 #[test]
