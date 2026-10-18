@@ -404,7 +404,12 @@ fn mesher_output_stable() {
     // Then the face-coverage cull (vanilla `Block.shouldRenderFace`'s shape
     // comparison, mesher/culling.rs) removed the interior faces between
     // partial blocks that cover each other (snow layers, slabs): fewer quads.
-    let expected: u64 = 3_174_783_879_967_708_120;
+    // Then the 2026-10-18 dump regeneration (the `occlusion` field) changed the
+    // water faces the outline rule left visible; on this world of full cubes,
+    // empty shapes and non-adjacent flowers both culling rules agree, so the
+    // occlusion-based rules (mesher/face_occlusion.rs, fluid/occlusion.rs) keep
+    // the same quads and vertices as the model rules.
+    let expected: u64 = 9_991_751_837_968_507_622;
     assert_eq!(hash.finish(), expected, "mesher output changed");
     assert!(quads > 100_000, "suspiciously few quads: {quads}");
     eprintln!("{quads} quads, hash {:016x}", hash.finish());
