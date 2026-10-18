@@ -1948,3 +1948,42 @@ fn pick_block_with_ctrl_sends_include_data() {
         })
         .is_empty());
 }
+
+/// `ClientPacketListener.handleSetHeldSlot` only sets the inventory slot, so the next tick's
+/// `gameMode.tick` -> `ensureHasSentCarriedItem` echoes `set_carried_item` back
+/// (`LocalPlayer::ensure_carried_item`, the start of `tick_inner`).
+#[test]
+fn the_servers_set_held_slot_is_echoed_the_next_tick() {
+    let mut r = Rig::new(GameMode::Survival);
+    let mut out = Vec::new();
+    r.p.handle(
+        &ClientboundPlay::SetHeldSlot(haste_protocol::packets::play::clientbound::SetHeldSlot {
+            slot: 4,
+        }),
+        &mut out,
+    );
+    assert_eq!(r.p.held_slot, 4);
+    // The next tick opens with the echo, before anything the keys do.
+    let out = r.tick(InteractInput::default());
+    assert_eq!(
+        out,
+        [ServerboundPlay::SetCarriedItem(sb::SetCarriedItem {
+            slot: 4
+        })]
+    );
+    // And not again the tick after.
+    assert!(r.tick(InteractInput::default()).is_empty());
+    // The client's own pick sends it at once (before this tick's actions) and the next
+    // `ensure` does not repeat it.
+    let out = r.tick(InteractInput {
+        hotbar: Some(2),
+        ..Default::default()
+    });
+    assert_eq!(
+        out,
+        [ServerboundPlay::SetCarriedItem(sb::SetCarriedItem {
+            slot: 2
+        })]
+    );
+    assert!(r.tick(InteractInput::default()).is_empty());
+}

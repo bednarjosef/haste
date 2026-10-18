@@ -31,10 +31,14 @@ impl LocalPlayer {
             self.int.use_delay -= 1;
         }
 
-        // 1. Hotbar (handleKeybinds: the keyHotbarSlots loop).
+        // 1. Hotbar (handleKeybinds: the keyHotbarSlots loop). Vanilla sends the slot from the
+        // next `ensureHasSentCarriedItem` (inside the actions' own `ensure` calls): the packet
+        // precedes whatever this tick's keys do. `carried_index` follows, so the next tick's
+        // `ensure_carried_item` does not repeat it.
         if let Some(slot) = input.hotbar {
             if slot <= 8 && slot as i32 != self.held_slot {
                 self.held_slot = slot as i32;
+                self.carried_index = slot as i32;
                 out.push(ServerboundPlay::SetCarriedItem(sb::SetCarriedItem {
                     slot: slot as i16,
                 }));

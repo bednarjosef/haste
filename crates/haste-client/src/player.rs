@@ -208,6 +208,11 @@ pub struct LocalPlayer {
     pub own_flags: crate::screen_effects::OwnFlags,
     /// Selected hotbar slot (0..8).
     pub held_slot: i32,
+    /// The hotbar slot the server was last told about (`MultiPlayerGameMode.carriedIndex`).
+    /// `LocalPlayer::ensure_carried_item` (vanilla `ensureHasSentCarriedItem`, the start of
+    /// every `gameMode.tick`) sends the echo when the slot changed underneath it — the
+    /// client's own pick or the server's `set_held_slot`.
+    carried_index: i32,
     /// Whether a `player_position` arrived since login/respawn.
     pub has_position: bool,
     /// Whether `player_loaded` was sent since login/respawn (movement is sent only after).
@@ -312,6 +317,7 @@ impl LocalPlayer {
             air_supply: 300,
             own_flags: crate::screen_effects::OwnFlags::default(),
             held_slot: 0,
+            carried_index: 0,
             has_position: false,
             loaded: false,
             vehicle: None,
@@ -663,6 +669,20 @@ impl LocalPlayer {
         }
     }
 
+    /// `MultiPlayerGameMode.ensureHasSentCarriedItem` (`gameMode.tick`, the start of every
+    /// client tick): the server is told the selected hotbar slot whenever it changed
+    /// underneath the last value sent — the client's own pick or the server's
+    /// `set_held_slot` (vanilla's `ClientPacketListener.handleSetHeldSlot` only sets the
+    /// inventory slot, so the next tick echoes `set_carried_item` back).
+    fn ensure_carried_item(&mut self, out: &mut Vec<ServerboundPlay>) {
+        if self.held_slot != self.carried_index {
+            self.carried_index = self.held_slot;
+            out.push(ServerboundPlay::SetCarriedItem(sb::SetCarriedItem {
+                slot: self.held_slot as i16,
+            }));
+        }
+    }
+
     fn mark_sent_position(&mut self, on_ground: bool, horizontal_collision: bool) {
         self.sent.pos = self.state.pos;
         self.sent.yaw = self.state.yaw;
@@ -868,7 +888,12 @@ impl LocalPlayer {
                 });
         }
 
-        // 0. Hotbar, crosshair target and interactions (vanilla handles key bindings before
+        // 0. `gameMode.tick` (`Minecraft.tick` runs it before `handleKeybinds`):
+        // `ensureHasSentCarriedItem` echoes the selected hotbar slot when it changed — our own
+        // pick or the server's `set_held_slot`.
+        self.ensure_carried_item(out);
+
+        // Hotbar, crosshair target and interactions (vanilla handles key bindings before
         // the player's own tick).
         let look = (
             input.yaw + self.look_offset.0,
