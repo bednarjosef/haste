@@ -306,42 +306,6 @@ impl Renderer {
         }
     }
 
-    /// Whether a dirty section may be submitted for meshing this frame: vanilla's
-    /// `LevelExtractor` compiles a section only when it is in `visibleSections` —
-    /// the occlusion walk's set (plus the bonus list, and everything when smart
-    /// culling is off) intersected with the frustum. Held-back sections keep their
-    /// dirty state and mesh when they become visible; one that was meshed before
-    /// keeps its stale mesh until then, as vanilla's does.
-    pub fn wants_section(&self, pos: SectionPos) -> bool {
-        if self.cull_sections {
-            let si = pos.y - self.min_section;
-            let in_mask = (0..32).contains(&si)
-                && self.visible_mask.column(ChunkPos::new(pos.x, pos.z)) & (1u32 << si) != 0;
-            let in_bonus = self.sections.get(pos).is_some_and(|s| s.bonus);
-            if !in_mask && !in_bonus {
-                return false;
-            }
-        }
-        let Some((planes, cam)) = &self.want_frustum else {
-            // No frame has rendered yet: mesh everything until a frustum exists.
-            return true;
-        };
-        // The section cube expanded by the camera cube: vanilla widens the frustum
-        // by `offsetToFullyIncludeCameraCube(8)` when it collects `visibleSections`,
-        // so terrain just outside the view meshes too and turning pops less.
-        let lo = [
-            ((pos.x << 4) as f64 - cam.x - 8.0) as f32,
-            ((pos.y << 4) as f64 - cam.y - 8.0) as f32,
-            ((pos.z << 4) as f64 - cam.z - 8.0) as f32,
-        ];
-        let hi = [
-            ((pos.x << 4) as f64 - cam.x + 24.0) as f32,
-            ((pos.y << 4) as f64 - cam.y + 24.0) as f32,
-            ((pos.z << 4) as f64 - cam.z + 24.0) as f32,
-        ];
-        Self::aabb_visible(planes, lo, hi)
-    }
-
     /// A newly uploaded section is drawn until the async walk catches up when a
     /// face-neighbour is in the current mask: vanilla seeds newly loaded
     /// sections into the propagation queue, so they appear before the next

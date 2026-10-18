@@ -25,6 +25,7 @@ mod camera;
 mod frame_setup;
 mod gui_pass;
 mod init;
+mod mesh_gate;
 mod query;
 mod readback;
 mod render_world;
