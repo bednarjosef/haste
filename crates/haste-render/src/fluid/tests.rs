@@ -694,33 +694,39 @@ fn occluder_table_classifies_outline_shapes() {
     // 2: bottom slab, 3: torch (empty outline).
     let outlines: [&[Aabb]; 4] = [&full, &full, &slab, none];
     let t = FluidOccluders::from_outlines(4, outline_table(&outlines), |s| s == BlockStateId(0));
-    assert!(matches!(t.occluder(BlockStateId(0), true), Occluder::Full));
     assert!(matches!(
-        t.occluder(BlockStateId(1), false),
+        t.occluder(BlockStateId(0), || true),
+        Occluder::Full
+    ));
+    assert!(matches!(
+        t.occluder(BlockStateId(1), || false),
         Occluder::Empty
     ));
-    match t.occluder(BlockStateId(2), false) {
+    match t.occluder(BlockStateId(2), || false) {
         Occluder::Boxes(boxes) => assert_eq!(boxes, &[[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]]),
         o => panic!("slab must occlude with its boxes, got {o:?}"),
     }
     assert!(matches!(
-        t.occluder(BlockStateId(3), false),
+        t.occluder(BlockStateId(3), || false),
         Occluder::Empty
     ));
     // No data (the table is absent) and past-the-end ids: the caller's opaque flag
     // decides, like the mesher did before shape data.
     let absent = FluidOccluders::absent();
     assert!(matches!(
-        absent.occluder(BlockStateId(0), true),
+        absent.occluder(BlockStateId(0), || true),
         Occluder::Full
     ));
     assert!(matches!(
-        absent.occluder(BlockStateId(0), false),
+        absent.occluder(BlockStateId(0), || false),
         Occluder::Empty
     ));
-    assert!(matches!(t.occluder(BlockStateId(99), true), Occluder::Full));
     assert!(matches!(
-        t.occluder(BlockStateId(99), false),
+        t.occluder(BlockStateId(99), || true),
+        Occluder::Full
+    ));
+    assert!(matches!(
+        t.occluder(BlockStateId(99), || false),
         Occluder::Empty
     ));
 }
@@ -747,7 +753,7 @@ impl FluidWorld for OccludedGrid<'_> {
     }
     fn face_occluder(&self, p: BlockPos, _dir: Direction) -> Occluder<'_> {
         let state = self.state(p);
-        self.occluders.occluder(state, self.opaque(p))
+        self.occluders.occluder(state, || self.opaque(p))
     }
 }
 
@@ -862,16 +868,16 @@ fn mesher_culls_fluid_faces_with_real_shapes() {
             .unwrap_or_else(|| panic!("no state for {name} {props:?}"))
     };
     let occluders = FluidOccluders::from_shapes(&states, &data.shapes, &baked);
-    match occluders.occluder(state("oak_slab", &[("type", "bottom")]), false) {
+    match occluders.occluder(state("oak_slab", &[("type", "bottom")]), || false) {
         Occluder::Boxes(boxes) => assert_eq!(boxes, &[[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]]),
         o => panic!("bottom slab must occlude with its boxes, got {o:?}"),
     }
     assert!(matches!(
-        occluders.occluder(state("stone", &[]), true),
+        occluders.occluder(state("stone", &[]), || true),
         Occluder::Full
     ));
     assert!(matches!(
-        occluders.occluder(state("glass", &[]), false),
+        occluders.occluder(state("glass", &[]), || false),
         Occluder::Empty
     ));
 

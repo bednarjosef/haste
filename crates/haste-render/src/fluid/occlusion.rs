@@ -134,11 +134,12 @@ impl FluidOccluders {
         FluidOccluders::default()
     }
 
-    /// The state's occlusion shape for `is_face_occluded`. `opaque` is the caller's
-    /// `isSolidRender`, used only for states the table has no data for (no game data
+    /// The state's occlusion shape for `is_face_occluded`. `opaque` answers the caller's
+    /// `isSolidRender` and runs only for states the table has no data for (no game data
     /// yet, or an id past the table — a modded server can send those; they fall back to
-    /// the same approximation instead of panicking).
-    pub fn occluder(&self, state: BlockStateId, opaque: bool) -> Occluder<'_> {
+    /// the same approximation instead of panicking), so the common path pays one span
+    /// lookup.
+    pub fn occluder(&self, state: BlockStateId, opaque: impl FnOnce() -> bool) -> Occluder<'_> {
         match self.spans.get(state.0 as usize) {
             Some(Span::Full) => Occluder::Full,
             Some(Span::Empty) => Occluder::Empty,
@@ -146,7 +147,7 @@ impl FluidOccluders {
                 Occluder::Boxes(&self.boxes[*start as usize..(*start + *len) as usize])
             }
             None => {
-                if opaque {
+                if opaque() {
                     Occluder::Full
                 } else {
                     Occluder::Empty

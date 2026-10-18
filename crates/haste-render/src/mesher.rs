@@ -504,7 +504,7 @@ impl crate::fluid::FluidWorld for FluidView<'_> {
     fn face_occluder(&self, p: BlockPos, _dir: haste_assets::Direction) -> Occluder<'_> {
         let state = self.snapshot.block_state(p);
         self.occluders
-            .occluder(state, self.baked.is_full_opaque(state))
+            .occluder(state, || self.baked.is_full_opaque(state))
     }
 }
 
