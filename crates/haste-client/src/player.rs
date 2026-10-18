@@ -805,6 +805,7 @@ impl LocalPlayer {
             entity_types: &[],
             border: None,
             warm_blocks: None,
+            ui: None,
         };
         self.tick_interact(input, world, &env, None, out);
     }

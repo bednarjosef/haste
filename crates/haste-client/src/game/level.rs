@@ -48,7 +48,8 @@ pub(super) fn tick(
         );
         driver.session.screen_probe = probe;
     }
-    driver.end_tick(&input.state, &mut *world, &mut *entities)?;
+    let ui = shared.ui.lock().clone();
+    driver.end_tick(&input.state, &mut *world, &mut *entities, ui.as_ref())?;
     weather::tick(driver, &world, shared);
     let mut dirty = world.take_dirty_sections();
     if !dirty.is_empty() {

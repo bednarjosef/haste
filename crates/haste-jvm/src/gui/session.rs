@@ -107,6 +107,23 @@ impl GuiPipeline {
         Ok(())
     }
 
+    /// Removes from the selected hotbar slot on the Java inventory (vanilla
+    /// `LocalPlayer.drop` -> `Inventory.removeFromSelected`): one item, or the whole stack when
+    /// `all`. The removal happens on the client inventory itself (the one the HUD and screens
+    /// read) and [`GameState::inventory`] mirrors it back through `InventorySync`, so Rust and
+    /// Java never disagree. Returns whether the removed stack was empty (nothing left the slot).
+    pub fn remove_from_selected(&self, all: bool) -> anyhow::Result<bool> {
+        self.with_bridge(|env, bridge| {
+            let r = env.call_method(
+                bridge,
+                jni_str!("removeFromSelected"),
+                jni_sig!("(Z)Z"),
+                &[jni::objects::JValue::Bool(all)],
+            )?;
+            Ok(r.z()?)
+        })
+    }
+
     /// The local player as the server introduced it: entity id (from `login`; effect, attribute
     /// and entity-data packets for this id update the player proxy), name and profile id.
     pub fn set_player(&self, entity_id: i32, name: &str, uuid: u128) -> anyhow::Result<()> {

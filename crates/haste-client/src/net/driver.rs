@@ -145,9 +145,10 @@ impl NetDriver {
         input: &InputState,
         world: &mut W,
         entities: &mut E,
+        ui: Option<&crate::ui::Ui>,
     ) -> anyhow::Result<()> {
         entities.tick();
-        self.session.end_tick(input, world, entities, &mut self.out);
+        self.session.end_tick(input, world, entities, ui, &mut self.out);
         self.flush()
     }
 
@@ -164,7 +165,7 @@ impl NetDriver {
         entities: &mut E,
     ) -> anyhow::Result<()> {
         self.receive(world, entities, None)?;
-        self.end_tick(input, world, entities)
+        self.end_tick(input, world, entities, None)
     }
 
     fn flush(&mut self) -> anyhow::Result<()> {

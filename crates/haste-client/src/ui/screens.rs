@@ -116,6 +116,23 @@ impl Ui {
         }
     }
 
+    /// Removes from the selected hotbar slot on the Java inventory (vanilla
+    /// `LocalPlayer.drop` -> `Inventory.removeFromSelected`): one item, or the whole stack when
+    /// `all`. The removal happens on the client inventory itself — the one the HUD and screens
+    /// read — and `InventorySync` mirrors the change back to Rust, so the two never disagree.
+    /// Returns whether the removed stack was empty (nothing left the slot). `false` when there is
+    /// no live UI (the JVM is still starting): the drop is then a no-op on the Java side and the
+    /// caller keeps its own prediction.
+    pub fn remove_from_selected(&self, all: bool) -> bool {
+        match self.gui().remove_from_selected(all) {
+            Ok(empty) => empty,
+            Err(e) => {
+                tracing::warn!("remove the selected item on the Java inventory: {e:#}");
+                true
+            }
+        }
+    }
+
     /// The connection ended: vanilla's disconnect screen with the reason; the HUD stops.
     pub fn disconnected(&self, reason: &Component) {
         self.state(|s| s.in_world = false);

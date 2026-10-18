@@ -287,6 +287,7 @@ impl Rig {
             entity_types: &self.types,
             border: self.border.as_ref(),
             warm_blocks: None,
+        ui: None,
         };
         let input = InputState {
             pitch: 90.0,
@@ -840,6 +841,7 @@ fn inventory_and_effects_from_packets() {
         entity_types: &[],
         border: None,
         warm_blocks: None,
+        ui: None,
     };
     let p = r.p.mining_params(STONE, &env);
     assert_eq!(
@@ -914,6 +916,7 @@ fn held_stack_components_drive_mining_speed() {
         entity_types: &[],
         border: None,
         warm_blocks: None,
+        ui: None,
     };
     let p = r.p.mining_params(STONE, &env);
     assert_eq!((p.tool_speed, p.tool_correct), (8.0, Some(true)));
@@ -963,6 +966,7 @@ fn use_duration_and_animation_come_from_the_item() {
         entity_types: &[],
         border: None,
         warm_blocks: None,
+        ui: None,
     };
     let d = |i: u32| r.p.int.use_data(&item(i), env.data);
     // Bow/crossbow/trident/shield: 72000 ticks; spyglass 1200.
@@ -2107,6 +2111,7 @@ fn a_teleport_aborts_the_break_and_reports_its_position() {
         entity_types: &r.types,
         border: None,
         warm_blocks: None,
+        ui: None,
     };
     let input = InputState {
         pitch: 90.0,
@@ -2226,6 +2231,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             entity_types: &r.types,
             border: None,
             warm_blocks: None,
+        ui: None,
         },
         None,
         &mut rowed,
@@ -2249,6 +2255,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             entity_types: &r.types,
             border: None,
             warm_blocks: None,
+        ui: None,
         },
         None,
         &mut Vec::new(),
@@ -2269,6 +2276,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             entity_types: &r.types,
             border: None,
             warm_blocks: None,
+        ui: None,
         },
         None,
         &mut out,
@@ -2297,6 +2305,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             entity_types: &r.types,
             border: None,
             warm_blocks: None,
+        ui: None,
         },
         None,
         &mut Vec::new(),
@@ -2315,6 +2324,7 @@ fn rowing_a_boat_blocks_the_attack_and_use_clicks() {
             entity_types: &r.types,
             border: None,
             warm_blocks: None,
+        ui: None,
         },
         None,
         &mut out,

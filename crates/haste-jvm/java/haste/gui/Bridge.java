@@ -472,6 +472,18 @@ public final class Bridge {
         InventorySync.sync();
     }
 
+    /**
+     * Removes from the selected hotbar slot (vanilla `LocalPlayer.drop` -> `Inventory.removeFromSelected`):
+     * one item, or the whole stack when {@code all}. The removal happens on the client inventory itself
+     * (the one the HUD and screens read); the server does not echo it back, so `InventorySync` mirrors
+     * the change to Rust. Returns whether the removed stack was empty (nothing left the slot).
+     */
+    public boolean removeFromSelected(boolean all) {
+        net.minecraft.world.item.ItemStack removed = Proxies.inventory.removeFromSelected(all);
+        InventorySync.sync();
+        return removed.isEmpty();
+    }
+
     /** The chat log as plain text, oldest first (vanilla's ChatComponent; headless clients and tests). */
     @SuppressWarnings("unchecked")
     public String chatHistory() {

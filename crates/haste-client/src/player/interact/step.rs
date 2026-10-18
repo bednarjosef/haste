@@ -183,10 +183,10 @@ impl LocalPlayer {
         // it; the server answers with the slot updates.
         if !screen_open && self.game_mode != GameMode::Spectator {
             if input.drop_stack && !last.drop_stack {
-                self.drop_item(true, out);
+                self.drop(env.ui, true, out);
             }
             if input.drop_item && !last.drop_item {
-                self.drop_item(false, out);
+                self.drop(env.ui, false, out);
             }
             if input.swap_offhand && !last.swap_offhand {
                 out.push(ServerboundPlay::PlayerAction(sb::PlayerAction {
@@ -205,5 +205,17 @@ impl LocalPlayer {
         self.int.input.drop_stack = false;
         self.int.input.swap_offhand = false;
         self.int.input.hotbar = None;
+    }
+
+    /// The drop (Q / Ctrl+Q) and off-hand swap (F) entry point: predicts the removal on the Java
+    /// inventory through the live UI (the HUD reads it), falling back to Rust's own prediction
+    /// when no UI is up. `drop_item` keeps the packet and the swing rule.
+    fn drop(&mut self, ui: Option<&crate::ui::Ui>, all: bool, out: &mut Vec<ServerboundPlay>) {
+        if let Some(ui) = ui {
+            self.drop_item(&|all| ui.remove_from_selected(all), all, out);
+        } else {
+            let removed_empty = self.predict_drop(all);
+            self.drop_item(&|_| removed_empty, all, out);
+        }
     }
 }
