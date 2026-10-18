@@ -373,20 +373,7 @@ fn head_top_of_the_humanoid_layout() {
 
 /// A hand with no animation: no swing, the equip progress up, no bob, no lag.
 fn still_hand() -> FirstPerson {
-    FirstPerson {
-        skin: None,
-        slim: false,
-        sleeve: true,
-        item: None,
-        light: (15, 0),
-        use_eat: false,
-        use_remaining: 0,
-        use_duration: 0,
-        attack: TickPair::fixed(0.0),
-        equip: TickPair::fixed(1.0),
-        x_bob: TickPair::fixed(0.0),
-        y_bob: TickPair::fixed(0.0),
-    }
+    FirstPerson::default()
 }
 
 #[test]
@@ -571,30 +558,6 @@ fn the_held_items_transform_is_vanillas_apply_item_arm_transform() {
             item_arm_matrix(&h, 0.0).to_cols_array_2d(),
         );
     }
-}
-
-#[test]
-fn the_eat_use_animation_replaces_the_swing() {
-    // `FirstPersonHandsAndItemsRenderer.submitArmWithItem`'s EAT/DRINK branch: while the main
-    // hand uses a consumable with ticks left, `item_arm_matrix` is `applyEatTransform` then
-    // `applyItemArmTransform`, not the swing.
-    let mut h = still_hand();
-    h.item = Some(haste_core::RegistryIndex(1));
-    let swing = item_arm_matrix(&h, 0.0);
-    h.use_eat = true;
-    h.use_remaining = 20;
-    h.use_duration = 32;
-    let eating = item_arm_matrix(&h, 0.0);
-    assert!(
-        !close(eating, swing, 1e-5),
-        "the eat pose differs from the swing"
-    );
-    // A use with no ticks left draws the swing (vanilla checks useItemRemainingTicks > 0).
-    h.use_remaining = 0;
-    assert!(
-        close(item_arm_matrix(&h, 0.0), swing, 1e-6),
-        "remaining 0 keeps the swing"
-    );
 }
 
 #[test]

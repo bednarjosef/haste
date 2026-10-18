@@ -305,18 +305,8 @@ fn entities_offscreen() {
     };
     let base = render_scene(&mut renderer, &world, &mut [], camera);
     let hand = |held: Option<haste_core::RegistryIndex>| haste_render::FirstPerson {
-        skin: None,
-        slim: false,
-        sleeve: true,
         item: held,
-        light: (15, 0),
-        use_eat: false,
-        use_remaining: 0,
-        use_duration: 0,
-        attack: haste_render::TickPair::fixed(0.0),
-        equip: haste_render::TickPair::fixed(1.0),
-        x_bob: haste_render::TickPair::fixed(0.0),
-        y_bob: haste_render::TickPair::fixed(0.0),
+        ..Default::default()
     };
     for (name, held) in [
         ("hand", None),
@@ -430,18 +420,8 @@ fn first_person_hand_against_a_wall() {
         bob: haste_render::ViewBob::default(),
     };
     let hand = |item: Option<haste_core::RegistryIndex>| haste_render::FirstPerson {
-        skin: None,
-        slim: false,
-        sleeve: true,
         item,
-        light: (15, 0),
-        use_eat: false,
-        use_remaining: 0,
-        use_duration: 0,
-        attack: haste_render::TickPair::fixed(0.0),
-        equip: haste_render::TickPair::fixed(1.0),
-        x_bob: haste_render::TickPair::fixed(0.0),
-        y_bob: haste_render::TickPair::fixed(0.0),
+        ..Default::default()
     };
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/render-checks");
     std::fs::create_dir_all(&out).unwrap();

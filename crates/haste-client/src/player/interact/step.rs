@@ -140,7 +140,7 @@ impl LocalPlayer {
         // consumable's sound every vanilla interval), then the remaining time ticks down,
         // including the tick the use started on.
         if let Some(u) = self.int.using {
-            if super::super::consume_effects::should_emit(u.duration, u.remaining) {
+            if super::consume_effects::should_emit(u.duration, u.remaining) {
                 let item = u
                     .item
                     .and_then(|i| env.data.registries.name("minecraft:item", i));

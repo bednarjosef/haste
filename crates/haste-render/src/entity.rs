@@ -279,6 +279,26 @@ pub struct FirstPerson {
     pub y_bob: TickPair,
 }
 
+impl Default for FirstPerson {
+    /// The empty hand at rest: fully equipped, no swing, no use, no bob, full block light.
+    fn default() -> Self {
+        FirstPerson {
+            skin: None,
+            slim: false,
+            sleeve: true,
+            item: None,
+            light: (15, 0),
+            use_eat: false,
+            use_remaining: 0,
+            use_duration: 0,
+            attack: TickPair::fixed(0.0),
+            equip: TickPair::fixed(1.0),
+            x_bob: TickPair::fixed(0.0),
+            y_bob: TickPair::fixed(0.0),
+        }
+    }
+}
+
 /// A name tag to draw: world anchor (above the head) and the text.
 #[derive(Clone, Debug)]
 pub struct Nametag {

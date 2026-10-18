@@ -47,6 +47,7 @@ use haste_physics::mining::{BlockTags, ToolTable};
 use super::LocalPlayer;
 
 mod attack;
+mod consume_effects;
 mod destroy;
 mod drop;
 mod effects;
@@ -165,7 +166,7 @@ pub struct Interaction {
     /// own), ticked down each game tick. Set together with `is_using_item`.
     using: Option<UsingItem>,
     /// The consumable's per-tick sound state (`Consumable.emitParticlesAndSounds`).
-    pub(crate) consume: super::consume_effects::ConsumeEffects,
+    pub(crate) consume: consume_effects::ConsumeEffects,
     /// The hand of a use the server's synced flags started that we have not started
     /// locally yet (`LivingEntity.onSyncedDataUpdated` reads the held item then; we do it on
     /// the next tick, when the game data is at hand).
