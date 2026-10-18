@@ -2,7 +2,7 @@
 # Runs CI locally: the same checks as .github/workflows/ci.yml, limited to what a change can affect.
 # usage: scripts/ci-local.sh [BASE]        (BASE defaults to main; the change is BASE..HEAD)
 #
-# Order, failing fast: the personal-data guard, cargo fmt, clippy (-D warnings, all targets) and
+# Order, failing fast: the personal-data guard, cargo fmt, the file size guard, clippy (-D warnings, all targets) and
 # the tests. Only the crates whose files changed and the workspace crates depending on them are
 # linted and tested; a change to the workspace manifest, the lockfile or the toolchain checks the
 # whole workspace, and a change that touches no Rust or build file skips cargo entirely. When the
@@ -32,15 +32,10 @@ if grep -qE '\.rs$' <<<"$changed"; then
   cargo fmt --all --check >/dev/null 2>&1 || { cargo fmt --all --check | head -40; fail "cargo fmt"; }
 fi
 
-# Structure (AGENTS.md "Structured like vanilla"): a source file already over 1000 lines must not
-# grow. Reported as a warning for now; it becomes a failure once the large files are split.
-for f in $(grep -E '\.(rs|java)$' <<<"$changed"); do
-  [ -f "$f" ] || continue
-  now=$(wc -l <"$f"); before=$(git show "$base:$f" 2>/dev/null | wc -l)
-  if [ "$now" -gt 1000 ] && [ "$now" -gt "$before" ]; then
-    printf '!! structure warning: %s grew from %d to %d lines (over 1000)\n' "$f" "$before" "$now"
-  fi
-done
+# Structure (AGENTS.md "Structured like vanilla"): source files within 600 lines, tests within
+# 1000, and the files listed in scripts/large-files.txt never grow.
+step "file sizes"
+scripts/check-file-sizes.sh || fail "file sizes (see AGENTS.md, Structured like vanilla)"
 
 # The crates to check: those owning a changed file plus every workspace crate depending on them.
 crates=$(cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c '
