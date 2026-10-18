@@ -78,9 +78,12 @@ impl HexGlyph {
 }
 
 /// The resolved default font. `TextMetrics` is implemented over it (`haste_core::gui`).
-#[derive(Default)]
 pub struct BitmapFont {
     glyphs: HashMap<char, Glyph>,
+    /// Code points 0..128 straight from `glyphs`, filled once after all providers are
+    /// merged so table and map always agree: nearly every character the GUI draws (ASCII)
+    /// avoids the hash probe.
+    ascii: [Option<Glyph>; 128],
     pages: Vec<Arc<image::RgbaImage>>,
     hex: Vec<HexGlyph>,
     /// Bitmap glyphs grouped by integer advance (vanilla's obfuscated text picks a random
@@ -88,14 +91,44 @@ pub struct BitmapFont {
     by_advance: HashMap<u32, Vec<char>>,
 }
 
+impl Default for BitmapFont {
+    fn default() -> Self {
+        Self {
+            glyphs: HashMap::new(),
+            ascii: [None; 128],
+            pages: Vec::new(),
+            hex: Vec::new(),
+            by_advance: HashMap::new(),
+        }
+    }
+}
+
 impl BitmapFont {
+    /// Refill `ascii` from `glyphs` after all providers have been merged (or after the last
+    /// direct `insert` in tests): the hot lookup paths read `ascii` for `ch < 128`, so it
+    /// must never lag behind the map.
+    fn fill_ascii_table(&mut self) {
+        self.ascii = [None; 128];
+        for (&ch, &glyph) in &self.glyphs {
+            if ch as u32 <= 127 {
+                self.ascii[ch as usize] = Some(glyph);
+            }
+        }
+    }
+
     /// The glyph for a code point, `Glyph::MISSING` when no provider has it.
     pub fn glyph(&self, ch: char) -> Glyph {
+        if ch as u32 <= 127 {
+            return self.ascii[ch as usize].unwrap_or(Glyph::MISSING);
+        }
         self.glyphs.get(&ch).copied().unwrap_or(Glyph::MISSING)
     }
 
     /// `Some(glyph)` only when a provider defines the code point.
     pub fn defined_glyph(&self, ch: char) -> Option<Glyph> {
+        if ch as u32 <= 127 {
+            return self.ascii[ch as usize];
+        }
         self.glyphs.get(&ch).copied()
     }
 
@@ -405,6 +438,7 @@ impl Assets {
     pub fn font_default(&mut self) -> Result<BitmapFont> {
         let mut font = BitmapFont::default();
         self.load_font_into(&Identifier::minecraft("default"), &mut font, 0)?;
+        font.fill_ascii_table();
         Ok(font)
     }
 
@@ -508,6 +542,14 @@ mod tests {
             chars: vec!["ab".into()],
         };
         f.add_bitmap_provider(&raw, img);
+        f.insert(
+            'λ',
+            Glyph {
+                advance: 5.0,
+                ..Glyph::MISSING
+            },
+        );
+        f.fill_ascii_table();
         f
     }
 
@@ -563,5 +605,33 @@ mod tests {
             },
         );
         assert_eq!(f.glyph('a').advance, 4.0);
+    }
+
+    #[test]
+    fn ascii_table_agrees_with_the_map() {
+        let f = tiny_font();
+        for cp in 0..0x250u32 {
+            let Some(ch) = char::from_u32(cp) else {
+                continue;
+            };
+            assert_eq!(
+                f.glyph(ch),
+                f.glyphs.get(&ch).copied().unwrap_or(Glyph::MISSING),
+                "glyph mismatch for U+{cp:04X}"
+            );
+            assert_eq!(
+                f.defined_glyph(ch),
+                f.glyphs.get(&ch).copied(),
+                "defined_glyph mismatch for U+{cp:04X}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_ascii_glyph_resolves_from_the_map() {
+        let f = tiny_font();
+        let g = f.glyph('λ');
+        assert_eq!(g.advance, 5.0);
+        assert_eq!(f.defined_glyph('λ'), Some(g));
     }
 }
