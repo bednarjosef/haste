@@ -27,11 +27,7 @@ pub(crate) struct Io {
 }
 
 impl Io {
-    pub(crate) fn new(
-        stream: TcpStream,
-        tables: Arc<ProtocolTables>,
-        stats: Arc<Stats>,
-    ) -> Self {
+    pub(crate) fn new(stream: TcpStream, tables: Arc<ProtocolTables>, stats: Arc<Stats>) -> Self {
         let _ = stream.set_nodelay(true);
         let (r, w) = stream.into_split();
         Self {
@@ -86,7 +82,7 @@ pub(crate) fn encode<P: Packet>(
 /// Everything else keeps ending the connection: `minecraft:explode` is
 /// deliberately absent, since the same particle field failing there also loses
 /// the knockback of an explosion that moves the player.
-const COSMETIC_LOSS_PACKETS: [&str; 4] = [
+pub(crate) const COSMETIC_LOSS_PACKETS: [&str; 4] = [
     "minecraft:level_particles",
     "minecraft:sound",
     "minecraft:sound_entity",
@@ -149,7 +145,7 @@ pub(crate) fn decode_with<T>(
             // particle has no length prefix), so the packet is lost whole.
             if warned.mark(name) {
                 tracing::warn!("{state:?}: dropping {name}, its loss is only cosmetic: {e}");
-                super::dump_packet(name, &raw.payload);
+                super::tasks::dump_packet(name, &raw.payload);
             }
             Ok(None)
         }

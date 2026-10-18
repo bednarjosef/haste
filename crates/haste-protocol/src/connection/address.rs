@@ -36,7 +36,7 @@ pub async fn resolve(address: &str) -> Result<(String, u16, Vec<SocketAddr>), Pr
     Ok((host, 25565, addrs))
 }
 
-fn split_host_port(address: &str) -> (String, Option<u16>) {
+pub(crate) fn split_host_port(address: &str) -> (String, Option<u16>) {
     // [v6]:port, host:port, v6 without port, host.
     if let Some(rest) = address.strip_prefix('[') {
         if let Some((h, p)) = rest.split_once("]:") {
