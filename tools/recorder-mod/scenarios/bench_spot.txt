@@ -6,5 +6,6 @@ cmd tp @s 9.5 71 6.5 0 10
 wait 40
 wait_world
 wait 100
+wait_world
 frametimes 30 vanilla
 quit
