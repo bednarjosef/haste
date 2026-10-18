@@ -29,6 +29,7 @@ mod hud;
 mod input;
 mod level;
 mod particles;
+pub(crate) mod pickup;
 mod run;
 mod shared;
 mod sound;
@@ -96,6 +97,8 @@ fn tick_once(
     // The horizontal distance travelled this tick, for the hand's walk bob: vanilla's
     // `LocalPlayer.move` adds `length(dx, dz) * 0.6` to `ClientAvatarState.walkDist`.
     let tick_moved = level::tick(driver, shared, &input)?;
+    // The pickup particles the tick produced or advanced, published to the render thread.
+    pickup::publish(driver, shared);
     // The player's own block sounds this tick (footsteps, mining, placing), played through
     // the same output the packets went through above.
     sound::play_own_sounds(driver, shared);

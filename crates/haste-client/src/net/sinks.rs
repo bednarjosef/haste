@@ -163,6 +163,11 @@ pub trait EntitySink {
     fn metadata_value(&self, _id: EntityId, _index: u8) -> Option<&MetadataValue> {
         None
     }
+    /// The entity's age in ticks (`Entity.tickCount`), for the pickup particle's frozen item
+    /// spin and bob. None in fakes that do not track it.
+    fn entity_age(&self, _id: EntityId) -> Option<u32> {
+        None
+    }
     /// Position and rotation of an entity.
     fn pose(&self, id: EntityId) -> Option<(DVec3, f32, f32)>;
     /// Hit box of an entity, for the crosshair (none in fakes by default).
@@ -290,6 +295,9 @@ impl EntitySink for EntityStore {
         self.get(id)
             .and_then(|e| e.metadata.get(index))
             .map(|e| &e.value)
+    }
+    fn entity_age(&self, id: EntityId) -> Option<u32> {
+        self.get(id).map(|e| e.age)
     }
     fn pose(&self, id: EntityId) -> Option<(DVec3, f32, f32)> {
         self.get(id).map(|e| (e.pos, e.yaw, e.pitch))

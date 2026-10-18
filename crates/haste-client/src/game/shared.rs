@@ -57,6 +57,9 @@ pub struct Shared {
     pub view: Mutex<ViewState>,
     /// Break cracks to draw (`Session::breaking_stages`), copied once per tick.
     pub breaking: Mutex<Vec<(BlockPos, u8)>>,
+    /// The pickup particles (`take_item_entity`), copied once per tick from the session; the
+    /// render thread appends one item/orb instance per particle at the eased position.
+    pub pickup_particles: Mutex<Vec<crate::net::pickup::PickupParticle>>,
     /// Lid animations to draw (`Session::lid_states`): (position, open value at the last
     /// tick's start and end), copied once per tick; the render thread lerps by partial tick.
     pub block_entity_lids: Mutex<Vec<(BlockPos, (f32, f32))>>,
@@ -252,6 +255,7 @@ impl Shared {
                 horizon_height: 63.0,
             }),
             breaking: Mutex::new(Vec::new()),
+            pickup_particles: Mutex::new(Vec::new()),
             block_entity_lids: Mutex::new(Vec::new()),
             skull_anims: Mutex::new(Vec::new()),
             block_entity_spins: Mutex::new(Vec::new()),
