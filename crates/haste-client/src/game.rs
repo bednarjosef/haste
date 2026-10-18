@@ -8,6 +8,7 @@
 //! entity render instances, never across `Renderer::render`. Everything else the render thread
 //! needs per frame is a small `Copy` value in [`Shared::view`].
 
+use std::sync::Arc;
 #[cfg(test)]
 use std::time::Duration;
 use std::time::Instant;
@@ -77,7 +78,7 @@ pub fn interpolate(prev: DVec3, cur: DVec3, partial: f32) -> DVec3 {
 
 fn tick_once(
     driver: &mut NetDriver,
-    shared: &Shared,
+    shared: &Arc<Shared>,
     gone: &mut Vec<SectionPos>,
     jvm: &mut HudSlot,
     server_packs_version: &mut u64,
@@ -87,6 +88,7 @@ fn tick_once(
     // `Ui` and give the JVM the registries, tags and the local player. Menu mode's UI arrives
     // pre-built (its JVM opened the title screen); only `joined` runs for it.
     hud::take_arrival(driver, shared, jvm);
+    let shared: &Shared = shared;
     // This tick's UI output (packets vanilla code sent, chat and commands typed).
     let mut ui_out = Vec::new();
     drain_packets(driver, shared, gone, server_packs_version)?;

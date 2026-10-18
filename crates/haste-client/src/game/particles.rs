@@ -16,6 +16,8 @@ pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
     // Block particles: our own break/mining/sprint and the server's level events.
     // The world (state, shapes, biomes) is read here, where the game thread holds it.
     let requests = std::mem::take(&mut driver.session.block_particle_requests);
+    // Item particles: a consumable in use (the eat/drink crumbs in front of the mouth).
+    let item_requests = std::mem::take(&mut driver.session.item_particle_requests);
     // The ambient block particles (`ClientLevel.animateTick`, vanilla runs it
     // right before the particle tick): torch flames, fire smoke, campfires, lava,
     // portals. Rain-gated parts (leaf drip) stay dormant until weather is decoded.
@@ -26,6 +28,9 @@ pub(super) fn tick(driver: &mut NetDriver, shared: &Shared) {
         let biomes = crate::app::biomes::WorldBiomes(&world);
         for s in &spawns {
             particles.spawn(s, camera, Some(&biomes));
+        }
+        for r in &item_requests {
+            particles.spawn_item(r.item, r.pos, r.vel);
         }
         driver.session.particle_spawned = spawns.len();
         let state_count = data.blocks.len();

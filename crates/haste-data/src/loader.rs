@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use crate::block_entity_types::BlockEntityTypes;
 use crate::blocks::BlockStates;
 use crate::components::ItemComponents;
 use crate::physics::BlockProperties;
@@ -18,6 +19,10 @@ pub struct GameData {
     pub shapes: BlockShapes,
     pub physics: BlockProperties,
     pub sounds: BlockSoundTypes,
+    /// Which block carries which `minecraft:block_entity_type` (oracle dump
+    /// `block_entity_types.json`). Empty when the dump is absent: block updates then create
+    /// no block entities, the server's `block_entity_data` still works.
+    pub block_entity_types: BlockEntityTypes,
     /// Item default components (the `equippable` component armour needs), from the report's
     /// `minecraft/components/item` directory. Empty when the report is absent.
     pub item_components: ItemComponents,
@@ -88,6 +93,10 @@ impl GameData {
             }
             _ => BlockSoundTypes::empty(&blocks),
         };
+        let block_entity_types = match sibling("block_entity_types.json") {
+            Some(p) if p.is_file() => BlockEntityTypes::parse(&std::fs::read_to_string(p)?)?,
+            _ => BlockEntityTypes::empty(),
+        };
         let item_components = ItemComponents::load(
             &reports.join("minecraft").join("components").join("item"),
             &registries,
@@ -98,6 +107,7 @@ impl GameData {
             shapes,
             physics,
             sounds,
+            block_entity_types,
             item_components,
         })
     }

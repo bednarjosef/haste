@@ -35,6 +35,9 @@ impl Session {
         // The player's own block particles this tick (break grid, mining cracks).
         self.block_particle_requests
             .extend(self.player.take_own_block_particles());
+        // The player's own item particles this tick (a consumable's crumbs).
+        self.item_particle_requests
+            .extend(self.player.take_own_item_particles());
         self.entity_boxes.clear();
         self.entity_types.clear();
         for id in &self.entity_ids {

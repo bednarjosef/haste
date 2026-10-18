@@ -174,7 +174,10 @@ impl NetDriver {
         self.end_tick(input, world, entities, None)
     }
 
-    fn flush(&mut self) -> anyhow::Result<()> {
+    /// Sends every queued packet now. `pub(crate)`: the game thread's input-event send path
+    /// (a container click leaves at once, like vanilla's `Connection.send` inside the input
+    /// handler) calls this outside a tick.
+    pub(crate) fn flush(&mut self) -> anyhow::Result<()> {
         for mut p in self.out.drain(..) {
             self.chat.pack(&mut p);
             self.conn

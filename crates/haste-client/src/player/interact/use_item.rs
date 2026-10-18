@@ -31,7 +31,7 @@ pub enum UseAnimation {
 }
 
 impl UseAnimation {
-    fn from_id(id: i32) -> Self {
+    pub(super) fn from_id(id: i32) -> Self {
         match id {
             0 => UseAnimation::None,
             2 => UseAnimation::Drink,

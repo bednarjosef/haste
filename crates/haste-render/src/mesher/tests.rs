@@ -6,6 +6,9 @@ use super::lighting::{
 };
 use super::*;
 
+mod face_occlusion;
+mod merge_order;
+
 /// A synthetic flat world: one layer of `block` over bedrock, for the
 /// end-to-end mesh tests (real jar, ignored without cache).
 struct FlatWorld {
@@ -447,8 +450,9 @@ fn platform_interior_boundary_quads_culled() {
 }
 
 /// The client jar's baked models and atlas (None without the cache: the caller
-/// returns, so the test is skipped rather than failed).
-fn load_baked() -> Option<(
+/// returns, so the test is skipped rather than failed). Also used by
+/// `skip/tests.rs`'s mesher tests.
+pub(super) fn load_baked() -> Option<(
     haste_assets::BlocksJsonStates,
     haste_assets::BakedBlockModels,
     haste_assets::AtlasBuilder,
@@ -506,6 +510,8 @@ fn every_tinted_quad_of_a_block_takes_its_blended_colour() {
         Arc::new(crate::fluid::FluidTable::empty()),
         Arc::new(AoTable::all_solid(states.len())),
         Arc::new(crate::fluid::FluidOccluders::absent()),
+        Arc::new(crate::mesher::FaceOccluders::absent()),
+        Arc::new(crate::mesher::skip::SkipTable::absent()),
     );
     struct Snowy;
     impl crate::tint::BiomeSource for Snowy {
@@ -635,6 +641,8 @@ fn table_generations_are_unique() {
         Arc::new(crate::fluid::FluidTable::empty()),
         Arc::new(AoTable::all_solid(0)),
         Arc::new(crate::fluid::FluidOccluders::absent()),
+        Arc::new(crate::mesher::FaceOccluders::absent()),
+        Arc::new(crate::mesher::skip::SkipTable::absent()),
     );
     assert_ne!(a.generation, c.generation);
     assert_ne!(b.generation, c.generation);

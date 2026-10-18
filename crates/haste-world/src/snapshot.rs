@@ -3,7 +3,7 @@
 
 use haste_core::{BiomeId, BlockStateId};
 
-use crate::light::NibbleArray;
+use crate::light::{NibbleArray, SkyLight};
 use crate::palette::{BiomeContainer, BlockContainer};
 
 /// A section plus its six one-block border faces (from the six neighbours), light included.
@@ -29,12 +29,13 @@ pub struct BorderCells {
     pub pos_z: Vec<BlockStateId>,
 }
 
-/// What meshing threads get: a section, its border, its light.
+/// What meshing threads get: a section, its border, its light. The sky light shares the
+/// stored section's array (a refcount bump) or the stand-in built for an absent section.
 pub struct SectionSnapshot {
     pub pos: haste_core::SectionPos,
     pub section: SnapshotSection,
     pub border: BorderCells,
-    pub sky: Option<NibbleArray>,
+    pub sky: SkyLight,
     pub block: NibbleArray,
 }
 
@@ -52,10 +53,10 @@ impl SectionSnapshot {
     }
 
     /// Sky light at (x, y, z) in 0..16 coords. A section that arrived absent was filled
-    /// from the layer above at snapshot time (see `snapshot_section`); `None` here means
+    /// from the layer above at snapshot time (see `snapshot_section`); `Absent` here means
     /// no layer anywhere above, which reads as full sky.
     pub fn sky_light(&self, x: u8, y: u8, z: u8) -> u8 {
-        self.sky.as_ref().map(|n| n.get(x, y, z)).unwrap_or(15)
+        self.sky.value(x, y, z).unwrap_or(15)
     }
 
     pub fn block_light(&self, x: u8, y: u8, z: u8) -> u8 {
