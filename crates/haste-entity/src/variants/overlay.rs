@@ -52,7 +52,7 @@ pub fn overlays_for(
     let Some(name) = crate::registry::entity_type_name(kind) else {
         return Default::default();
     };
-    match name.as_str() {
+    match name {
         // SheepWoolLayer + SheepWoolUndercoatLayer: the wool byte packs the colour (low
         // nibble) and the sheared bit (16); sheared sheep drop the wool layer, and the
         // undercoat hides for white adults (it would be invisible under white wool).
@@ -234,10 +234,10 @@ fn parent_model_with_texture(
 ) -> Option<Arc<CubeModel>> {
     let name = crate::registry::entity_type_name(kind)?;
     let model = if baby {
-        crate::registry::baby_model_for_name(&name)
-            .or_else(|| crate::registry::model_for_name(&name))?
+        crate::registry::baby_model_for_name(name)
+            .or_else(|| crate::registry::model_for_name(name))?
     } else {
-        crate::registry::model_for_name(&name)?
+        crate::registry::model_for_name(name)?
     };
     let texture = Identifier::minecraft(texture);
     if model.texture == texture {

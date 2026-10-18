@@ -49,6 +49,15 @@ fn find_part<'a>(p: &'a ModelPart, name: &str) -> Option<&'a ModelPart> {
     }
 }
 
+/// A pose's rotations keyed by part name, for assertions that name the vanilla parts.
+pub(crate) fn rotations_by_name(
+    pose: &haste_core::model::PoseOverrides,
+) -> std::collections::HashMap<&'static str, haste_core::Vec3> {
+    pose.rotations()
+        .map(|(id, r)| (haste_core::parts::name_of(id), r))
+        .collect()
+}
+
 fn humanoid_parts(m: &CubeModel) -> Vec<&str> {
     let mut v: Vec<&str> = m.root.children.iter().map(|c| c.name.as_str()).collect();
     v.extend(
@@ -67,6 +76,7 @@ fn mob_model(texture: &str, parts: &[&str]) -> CubeModel {
         .iter()
         .map(|name| ModelPart {
             name: (*name).to_owned(),
+            id: haste_core::parts::intern(name),
             pivot: glam::Vec3::ZERO,
             rotation: glam::Vec3::ZERO,
             visible: true,
@@ -80,6 +90,7 @@ fn mob_model(texture: &str, parts: &[&str]) -> CubeModel {
         tex_height: 64,
         root: ModelPart {
             name: "root".to_owned(),
+            id: haste_core::parts::ROOT,
             pivot: glam::Vec3::ZERO,
             rotation: glam::Vec3::ZERO,
             visible: true,
