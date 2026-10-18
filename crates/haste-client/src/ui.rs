@@ -59,6 +59,11 @@ pub use self::input::feed_clicks;
 pub use self::packets::ui_handles;
 pub use hud::HudWarmup;
 
+/// Takes the packets a screen sent from an input event, at once (see
+/// [`Ui::send_screen_packets_now`]): the game thread sets this once it owns the connection;
+/// it queues the packets and wakes itself, which is where they leave.
+pub type ImmediateSender = std::sync::Arc<dyn Fn(&[ServerboundPlay]) + Send + Sync>;
+
 /// The HUD and the vanilla screens of one client. See the module documentation.
 #[derive(Clone)]
 pub struct Ui {
@@ -80,6 +85,11 @@ struct Shared {
     salt: AtomicU64,
     /// Packets the UI itself decided to send (immediate respawn).
     outbox: Mutex<Vec<ServerboundPlay>>,
+    /// Where an input event's screen packets go at once (vanilla sends from the input
+    /// handler, not at the next tick): set by the game thread
+    /// ([`Ui::set_immediate_sender`]); `None` until it exists (menu mode, tests), and then
+    /// the per-tick [`Ui::drain_outgoing`] drain stands.
+    send_now: Mutex<Option<ImmediateSender>>,
 }
 
 impl Ui {
@@ -97,6 +107,7 @@ impl Ui {
                 hud_hidden: AtomicBool::new(false),
                 salt: AtomicU64::new(0x9e37_79b9_7f4a_7c15),
                 outbox: Mutex::new(Vec::new()),
+                send_now: Mutex::new(None),
             }),
             frame: GuiFrame::default(),
         }

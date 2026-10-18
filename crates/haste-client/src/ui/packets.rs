@@ -368,32 +368,7 @@ impl Ui {
         out.append(&mut self.shared.outbox.lock());
         let (packets, chat, slot) =
             self.state(|s| (s.take_outgoing(), s.take_sent(), s.selected_slot));
-        if !packets.is_empty() {
-            let tables = self.shared.tables.lock().clone();
-            let dispatch = self.shared.serverbound.lock();
-            if let (Some(tables), Some(dispatch)) = (tables, dispatch.as_ref()) {
-                for p in packets {
-                    match decode_serverbound(dispatch, &tables, &p) {
-                        Ok(sp) => {
-                            if let ServerboundPlay::ContainerClick(c) = &sp {
-                                tracing::info!(
-                                    "container_click: window {} slot {} button {} mode {} state {} changed {} carried {}",
-                                    c.window_id,
-                                    c.slot,
-                                    c.button,
-                                    c.mode,
-                                    c.state_id,
-                                    c.changed.len(),
-                                    c.carried.item.is_some()
-                                );
-                            }
-                            out.push(sp)
-                        }
-                        Err(e) => tracing::warn!("packet from Java not sent: {e}"),
-                    }
-                }
-            }
-        }
+        self.decode_java_sends(packets, out);
         for m in chat {
             out.push(if m.command {
                 ServerboundPlay::ChatCommand(sb::ChatCommand { command: m.text })
@@ -414,6 +389,46 @@ impl Ui {
                 slot: slot as i16,
             }));
         }
+    }
+
+    /// Decodes packets vanilla Java code sent (VarInt id + body) into [`ServerboundPlay`] in
+    /// order; shared by the per-tick drain and the input-event send.
+    fn decode_java_sends(&self, packets: Vec<Vec<u8>>, out: &mut Vec<ServerboundPlay>) {
+        if packets.is_empty() {
+            return;
+        }
+        let tables = self.shared.tables.lock().clone();
+        let dispatch = self.shared.serverbound.lock();
+        if let (Some(tables), Some(dispatch)) = (tables, dispatch.as_ref()) {
+            for p in packets {
+                match decode_serverbound(dispatch, &tables, &p) {
+                    Ok(sp) => out.push(sp),
+                    Err(e) => tracing::warn!("packet from Java not sent: {e}"),
+                }
+            }
+        }
+    }
+
+    /// Sets where an input event's screen packets go at once ([`Ui::send_screen_packets_now`]):
+    /// the game thread's queue-and-wake closure, once the connection exists.
+    pub fn set_immediate_sender(&self, sender: ImmediateSender) {
+        *self.shared.send_now.lock() = Some(sender);
+    }
+
+    /// Sends what the open screen just sent from an input event at once, not at the next tick:
+    /// vanilla's `MouseHandler.onPress` -> `AbstractContainerScreen.slotClicked` ->
+    /// `MultiPlayerGameMode.handleContainerInput` -> `Connection.send` all run inside the
+    /// event, and the crafting result the server answers with shows a full tick and more
+    /// earlier. Called right after forwarding a mouse or key event to a screen; the sender
+    /// (the game thread) is woken even when Java sent nothing, because the click may have
+    /// lost the race with the running tick's own drain and already sit in the driver's
+    /// queue, which the wake path flushes too.
+    pub fn send_screen_packets_now(&self) {
+        let sender = self.shared.send_now.lock().clone();
+        let Some(sender) = sender else { return };
+        let mut out = Vec::new();
+        self.decode_java_sends(self.state(|s| s.take_outgoing()), &mut out);
+        sender(&out);
     }
 
     fn next_salt(&self) -> i64 {
