@@ -68,6 +68,13 @@ impl Interaction {
             .map_or((0.0, 0.0), |e| e.blend_pair())
     }
 
+    /// Blind (vanilla `Player.isMobilityRestricted`: has `MobEffects.BLINDNESS`): no sprinting.
+    pub fn is_blind(&self) -> bool {
+        self.lightmap_effect_ids
+            .blindness
+            .is_some_and(|i| self.effects.contains_key(&i))
+    }
+
     /// The movement effects the physics tick reads, from our active effects
     /// (`LivingEntity.hasEffect` / `getEffect(...).getAmplifier()`): the levitation and jump-boost
     /// amplifiers (`None` without the effect) and whether slow falling is on.
