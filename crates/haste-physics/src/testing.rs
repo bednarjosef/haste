@@ -59,7 +59,9 @@ pub mod states {
     pub const BUBBLE_COLUMN_UP: BlockStateId = BlockStateId(24);
     pub const BUBBLE_COLUMN_PUSH_UP: BlockStateId = BlockStateId(24);
     pub const BUBBLE_COLUMN_SOUL_SAND: BlockStateId = BlockStateId(24);
-    pub const COUNT: usize = 25;
+    /// Full cube that suffocates (`BlockState.isSuffocating`), like sand.
+    pub const SAND: BlockStateId = BlockStateId(25);
+    pub const COUNT: usize = 26;
 }
 
 /// Shapes and per-block physics properties for the ids in [`states`].
@@ -94,6 +96,7 @@ impl Default for TestShapes {
         boxes[states::STEP_03.0 as usize] = vec![bx(0.0, -0.7, 0.0, 1.0, 0.3, 1.0)];
         boxes[states::LEDGE_0_6.0 as usize] = vec![bx(0.0, -1.6, 0.0, 1.0, -0.6, 1.0)];
         boxes[states::LADDER.0 as usize] = vec![bx(0.0, 0.0, 0.8125, 1.0, 1.0, 1.0)];
+        boxes[states::SAND.0 as usize] = full;
         Self { boxes }
     }
 }
@@ -132,6 +135,9 @@ impl BlockPhysics for TestShapes {
     }
     fn is_opaque_full(&self, s: BlockStateId) -> bool {
         matches!(s, states::STONE | states::ICE | states::BLUE_ICE)
+    }
+    fn is_suffocating(&self, s: BlockStateId) -> bool {
+        s == states::SAND
     }
     fn speed_factor(&self, s: BlockStateId) -> f32 {
         match s {
