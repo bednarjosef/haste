@@ -110,8 +110,16 @@ impl MusicSituation {
 pub enum MusicCommand {
     /// Start the music event (a sound event name like `minecraft:music.game`).
     Play(String),
-    /// Stop the current music (a replacing situation change).
+    /// Stop the current music (a replacing situation change, or the fade reaching zero).
     Stop,
+}
+
+/// One step of the music fade, vanilla's `MusicManager.fadePlaying` outcome.
+enum FadeStep {
+    /// Still fading; the music source's new gain.
+    Fading(f32),
+    /// The gain reached zero: the track stops (vanilla's `stopPlaying`).
+    Stopped,
 }
 
 /// A small deterministic xorshift RNG, so the random pauses replay exactly for a fixed seed.
@@ -163,6 +171,10 @@ pub struct MusicManager {
     next_song_delay: i32,
     /// The event of the track we started and believe is playing (vanilla's `currentMusic`).
     current: Option<String>,
+    /// Vanilla's `currentGain`: the music source's fade gain, eased toward the target
+    /// volume every tick while they differ, applied through
+    /// `SoundEngine.updateCategoryVolume(MUSIC, gain)`.
+    current_gain: f32,
     /// The `music_frequency` option's cap in ticks (`MusicFrequency.DEFAULT`: 20 minutes).
     max_frequency: u32,
     /// Ticks this manager has run, for the diagnostic log (which track started when).
@@ -184,6 +196,7 @@ impl MusicManager {
             situation: MusicSituation::Menu,
             next_song_delay: STARTING_DELAY,
             current: None,
+            current_gain: 1.0,
             max_frequency: DEFAULT_MAX_FREQUENCY,
             ticks: 0,
         }
@@ -214,14 +227,45 @@ impl MusicManager {
 
     /// One game tick (20 Hz). `is_playing` tells whether the music this manager started is
     /// still playing; while something plays, nothing new is started. `rng` drives the random
-    /// pauses (a fixed seed replays exactly).
+    /// pauses (a fixed seed replays exactly). `music_volume` is the target the fade eases
+    /// the music gain toward (vanilla's `Minecraft.getMusicVolume`: the camera's
+    /// `MUSIC_VOLUME` environment attribute, 1.0 outside the biomes that lower it), and
+    /// `apply_gain` receives each new fade gain, to hand to the sound engine the way
+    /// vanilla's `MusicManager.fadePlaying` calls
+    /// `SoundEngine.updateCategoryVolume(MUSIC, gain)`.
     ///
-    /// Vanilla's `MusicManager.tick` order of steps: a replacing situation stops the playing
-    /// track; a track that is no longer playing picks a fresh pause; the situation's maximum
-    /// caps the countdown; the countdown ticks down and starts the track when it reaches zero.
-    pub fn tick(&mut self, rng: &mut MusicRng, is_playing: bool) -> Option<MusicCommand> {
+    /// Vanilla's `MusicManager.tick` order of steps: the fade runs first (and may stop the
+    /// track); a replacing situation stops the playing track; a track that is no longer
+    /// playing picks a fresh pause; the situation's maximum caps the countdown; the
+    /// countdown ticks down and starts the track when it reaches zero.
+    pub fn tick(
+        &mut self,
+        rng: &mut MusicRng,
+        is_playing: bool,
+        music_volume: f32,
+        mut apply_gain: impl FnMut(f32),
+    ) -> Option<MusicCommand> {
         self.ticks += 1;
         let spec = self.situation.music();
+        // The fade (vanilla's `fadePlaying`): while a track plays and the gain is not at
+        // the target, ease toward it; a gain that reaches zero stops the track (and the
+        // next track fades back in from there).
+        if self.current.is_some() && self.current_gain != music_volume {
+            match self.fade_step(music_volume) {
+                FadeStep::Fading(gain) => apply_gain(gain),
+                FadeStep::Stopped => {
+                    self.current = None;
+                    self.next_song_delay =
+                        self.get_next_song_delay(&spec, rng).min(i32::MAX as u32) as i32 + 100;
+                    tracing::info!(
+                        "music: tick {}: faded out (situation {:?})",
+                        self.ticks,
+                        self.situation
+                    );
+                    return Some(MusicCommand::Stop);
+                }
+            }
+        }
         if let Some(current) = self.current.clone() {
             if is_playing {
                 // The track is still playing: a situation with replacing music stops it and
@@ -270,6 +314,32 @@ impl MusicManager {
         rng.range(0, spec.min_delay / 2).min(i32::MAX as u32) as i32
     }
 
+    /// One step of the fade toward `volume`, vanilla's `MusicManager.fadePlaying`:
+    /// rising gains creep up by at most 0.005 a tick, falling ones shrink by 3 % a tick;
+    /// a gain that reaches (or sits within 1e-4 of) the target snaps to it. Reaching
+    /// zero stops the track (the caller's `stopPlaying`).
+    fn fade_step(&mut self, volume: f32) -> FadeStep {
+        if self.current_gain < volume {
+            // Rising: at most half a percent of full volume per tick, never more than
+            // 0.005, so a track comes back in over seconds.
+            self.current_gain += self.current_gain.clamp(5.0e-4, 0.005);
+            if self.current_gain > volume {
+                self.current_gain = volume;
+            }
+        } else {
+            self.current_gain = 0.03 * volume + 0.97 * self.current_gain;
+            if (self.current_gain - volume).abs() < 1.0e-4 || self.current_gain < volume {
+                self.current_gain = volume;
+            }
+        }
+        self.current_gain = self.current_gain.clamp(0.0, 1.0);
+        if self.current_gain <= 1.0e-4 {
+            FadeStep::Stopped
+        } else {
+            FadeStep::Fading(self.current_gain)
+        }
+    }
+
     /// A fresh pause after a track ended: vanilla's
     /// `MusicFrequency.getNextSongDelay(music, random)` with the DEFAULT frequency — the
     /// music's own range with both ends capped by the option's maximum.
@@ -284,6 +354,9 @@ impl MusicManager {
 mod tests {
     use super::*;
 
+    /// A no-op fade-gain sink for tests that do not drive the fade.
+    fn no_gain(_: f32) {}
+
     /// Ticks with `is_playing` until the manager plays something; returns (ticks taken, event).
     fn until_play(
         manager: &mut MusicManager,
@@ -291,7 +364,7 @@ mod tests {
         is_playing: bool,
     ) -> (usize, String) {
         for tick in 1..=60_000usize {
-            match manager.tick(rng, is_playing) {
+            match manager.tick(rng, is_playing, 1.0, no_gain) {
                 Some(MusicCommand::Play(event)) => return (tick, event),
                 Some(MusicCommand::Stop) => panic!("unexpected Stop"),
                 None => {}
@@ -307,7 +380,7 @@ mod tests {
         is_playing: bool,
     ) -> MusicCommand {
         for _ in 1..=60_000usize {
-            if let Some(command) = manager.tick(rng, is_playing) {
+            if let Some(command) = manager.tick(rng, is_playing, 1.0, no_gain) {
                 return command;
             }
         }
@@ -339,7 +412,7 @@ mod tests {
         assert_eq!(event, "minecraft:music.game");
         // The track plays for a while and then ends.
         for _ in 0..100 {
-            assert_eq!(manager.tick(&mut rng, true), None);
+            assert_eq!(manager.tick(&mut rng, true, 1.0, no_gain), None);
         }
         let (ticks, event) = until_play(&mut manager, &mut rng, false);
         assert_eq!(event, "minecraft:music.game");
@@ -358,7 +431,7 @@ mod tests {
         // while our track plays, no second one starts (vanilla's nextSongDelay stays at
         // Integer.MAX_VALUE while the current music is active)
         for _ in 0..60_000 {
-            assert_eq!(manager.tick(&mut rng, true), None);
+            assert_eq!(manager.tick(&mut rng, true, 1.0, no_gain), None);
         }
         assert_eq!(manager.playing_event(), Some(event.as_str()));
     }
@@ -372,7 +445,7 @@ mod tests {
         let (_, event) = until_play(&mut manager, &mut rng, false);
         assert_eq!(event, "minecraft:music.game");
         for _ in 0..10 {
-            assert_eq!(manager.tick(&mut rng, true), None);
+            assert_eq!(manager.tick(&mut rng, true, 1.0, no_gain), None);
         }
         manager.set_situation(MusicSituation::End);
         assert_eq!(
@@ -398,11 +471,11 @@ mod tests {
         let (_, event) = until_play(&mut manager, &mut rng, false);
         assert_eq!(event, "minecraft:music.game");
         for _ in 0..10 {
-            assert_eq!(manager.tick(&mut rng, true), None);
+            assert_eq!(manager.tick(&mut rng, true, 1.0, no_gain), None);
         }
         manager.set_situation(MusicSituation::Creative);
         for _ in 0..100 {
-            assert_eq!(manager.tick(&mut rng, true), None);
+            assert_eq!(manager.tick(&mut rng, true, 1.0, no_gain), None);
         }
         let (ticks, event) = until_play(&mut manager, &mut rng, false);
         assert_eq!(event, "minecraft:music.creative");
@@ -420,7 +493,7 @@ mod tests {
         let mut manager = MusicManager::new();
         manager.set_situation(MusicSituation::Game);
         let mut rng = MusicRng::new(6);
-        assert_eq!(manager.tick(&mut rng, false), None);
+        assert_eq!(manager.tick(&mut rng, false, 1.0, no_gain), None);
         manager.set_situation(MusicSituation::Biome {
             event: "minecraft:music.cherry_grove".to_owned(),
             min_delay: 10,
@@ -442,7 +515,7 @@ mod tests {
             manager.set_situation(situation.clone());
             let mut rng = MusicRng::new(7);
             assert_eq!(
-                manager.tick(&mut rng, false),
+                manager.tick(&mut rng, false, 1.0, no_gain),
                 Some(MusicCommand::Play(situation.music().event)),
                 "{situation:?} has no delay"
             );
@@ -461,7 +534,7 @@ mod tests {
                 if step == 25_000 {
                     manager.set_situation(MusicSituation::Menu);
                 }
-                match manager.tick(&mut rng, playing) {
+                match manager.tick(&mut rng, playing, 1.0, no_gain) {
                     Some(command @ MusicCommand::Play(_)) => {
                         playing = true;
                         commands.push(command);
@@ -493,8 +566,97 @@ mod tests {
         let (_, event) = until_play(&mut manager, &mut rng, false);
         assert_eq!(manager.playing_event(), Some(event.as_str()));
         for _ in 0..10 {
-            assert_eq!(manager.tick(&mut rng, true), None);
+            assert_eq!(manager.tick(&mut rng, true, 1.0, no_gain), None);
         }
         assert_eq!(manager.playing_event(), Some(event.as_str()));
+    }
+
+    #[test]
+    fn the_fade_eases_the_gain_toward_the_target() {
+        // Vanilla's fadePlaying: a falling gain shrinks by 3 % a tick toward the target,
+        // and each new gain is handed to updateCategoryVolume.
+        let mut manager = MusicManager::new();
+        manager.set_situation(MusicSituation::Game);
+        let mut rng = MusicRng::new(9);
+        let (_, _) = until_play(&mut manager, &mut rng, false);
+        let mut applied = Vec::new();
+        let first = manager.tick(&mut rng, true, 0.5, |g| applied.push(g));
+        assert_eq!(first, None);
+        assert_eq!(applied.len(), 1, "one gain per fading tick");
+        // 0.03 * 0.5 + 0.97 * 1.0 = 0.985.
+        assert!((applied[0] - 0.985).abs() < 1e-6, "gain {}", applied[0]);
+        // The gain keeps easing toward the target without overshooting.
+        for expected in [0.97045, 0.956_336_5] {
+            let g = manager.tick(&mut rng, true, 0.5, |g| {
+                assert!((g - expected).abs() < 1e-4)
+            });
+            assert_eq!(g, None);
+        }
+        // Reaching the target stops the fade (no gain applied that tick).
+        let mut quiet = 0;
+        loop {
+            quiet += 1;
+            assert!(quiet < 10_000);
+            let mut gain = None;
+            let step = manager.tick(&mut rng, true, 0.5, |g| gain = Some(g));
+            assert_eq!(step, None);
+            if gain.is_none() {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn the_fade_to_zero_stops_the_track() {
+        // fadePlaying at zero target: the gain sinks until it reaches 1e-4, then the
+        // track stops (stopPlaying) and a fresh pause of get_nextSongDelay + 100 follows.
+        let mut manager = MusicManager::new();
+        manager.set_situation(MusicSituation::Game);
+        let mut rng = MusicRng::new(10);
+        let _ = until_play(&mut manager, &mut rng, false);
+        let mut stopped = false;
+        for _ in 0..2_000 {
+            if manager.tick(&mut rng, true, 0.0, no_gain) == Some(MusicCommand::Stop) {
+                stopped = true;
+                break;
+            }
+        }
+        assert!(stopped, "the fade reaches zero and stops the track");
+        assert_eq!(manager.playing_event(), None);
+        // The next track fades back in from the faded-out gain, rising by at most 0.005
+        // a tick (fadePlaying's rising branch).
+        let mut gains = Vec::new();
+        let (ticks, event) = {
+            let mut result = None;
+            for tick in 1..=60_000usize {
+                if let Some(MusicCommand::Play(event)) =
+                    manager.tick(&mut rng, false, 0.5, |g| gains.push(g))
+                {
+                    result = Some((tick, event));
+                    break;
+                }
+            }
+            result.expect("no Play within 60000 ticks")
+        };
+        assert_eq!(event, "minecraft:music.game");
+        assert!(ticks > 100, "a fresh pause (+100) precedes the next track");
+        assert!(
+            gains.iter().all(|g| *g <= 0.005 + 1e-9),
+            "the fade-in starts from the faded gain, creeping up"
+        );
+    }
+
+    #[test]
+    fn no_fade_while_the_gain_matches_the_target() {
+        // currentGain == volume: fadePlaying returns at once, no gain is applied.
+        let mut manager = MusicManager::new();
+        manager.set_situation(MusicSituation::Game);
+        let mut rng = MusicRng::new(11);
+        let _ = until_play(&mut manager, &mut rng, false);
+        let mut applied = 0;
+        for _ in 0..100 {
+            manager.tick(&mut rng, true, 1.0, |_| applied += 1);
+        }
+        assert_eq!(applied, 0);
     }
 }

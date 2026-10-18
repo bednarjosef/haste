@@ -530,6 +530,74 @@ fn a_stereo_file_plays_unpositioned() {
 }
 
 #[test]
+fn stopping_everything_resets_the_category_gains() {
+    // SoundEngine.stopAll clears gainBySource, so a faded music source comes back at
+    // full gain for the next track; a filtered stop (or a stop of one source) does not.
+    let mut engine = SilentEngine::new();
+    play_event(
+        &mut engine,
+        &variant("sounds/a.ogg", 16),
+        SoundSource::Music,
+        "minecraft:music.game",
+    );
+    engine.update_category_volume(SoundSource::Music, 0.25);
+    engine.tick();
+    let (l, r) = engine.gains().next().unwrap();
+    assert!(
+        (l * l + r * r).sqrt() - 0.25 < 1e-5,
+        "the fade gain scales the track"
+    );
+    // A stop with a filter keeps the fade gain.
+    engine.stop(Some(SoundSource::Music), None);
+    play_event(
+        &mut engine,
+        &variant("sounds/a.ogg", 16),
+        SoundSource::Music,
+        "minecraft:music.game",
+    );
+    engine.tick();
+    let (l, r) = engine.gains().next().unwrap();
+    assert!((l * l + r * r).sqrt() - 0.25 < 1e-5, "still faded");
+    // Stopping everything (both filters absent, vanilla's stopAll path) resets it.
+    engine.stop(None, None);
+    play_event(
+        &mut engine,
+        &variant("sounds/a.ogg", 16),
+        SoundSource::Music,
+        "minecraft:music.game",
+    );
+    engine.tick();
+    let (l, r) = engine.gains().next().unwrap();
+    assert!(
+        (l * l + r * r).sqrt() - 1.0 < 1e-5,
+        "full gain again after stop-all"
+    );
+}
+
+#[test]
+fn category_gain_clamps_and_multiplies() {
+    // updateCategoryVolume clamps to 0..=1; the gain multiplies with the option volumes.
+    let mut engine = SilentEngine::new();
+    engine.set_volume(SoundSource::Music, 0.5);
+    engine.update_category_volume(SoundSource::Music, 2.0);
+    play_event(
+        &mut engine,
+        &variant("sounds/a.ogg", 16),
+        SoundSource::Music,
+        "minecraft:a",
+    );
+    engine.tick();
+    let (l, r) = engine.gains().next().unwrap();
+    assert!(
+        (l * l + r * r).sqrt() - 0.5 < 1e-5,
+        "clamped to 1, times option 0.5"
+    );
+    // The master source carries no category gain of its own.
+    engine.update_category_volume(SoundSource::Master, 0.1);
+    assert_eq!(engine.gains().next().unwrap(), (l, r));
+}
+
+#[test]
 fn master_source_takes_the_master_volume_once() {
     // Options.getFinalSoundSourceVolume: the master source's own volume is the master
     // volume, every other source's is master * source, and SoundEngine clamps it to 0..=1.

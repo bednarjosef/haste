@@ -75,6 +75,12 @@ impl SourceVolumes {
         }
     }
 
+    /// The source's index in the per-source arrays (`Master` has none: it scales the
+    /// others and carries no gain of its own).
+    pub(crate) fn index_for(source: SoundSource) -> Option<usize> {
+        Self::index(source)
+    }
+
     /// Effective gain multiplier of a source, as vanilla's `SoundEngine.calculateVolume`
     /// takes `Options.getFinalSoundSourceVolume` clamped to 0..=1: `master * source`, and
     /// the master volume alone for the master source (not master squared).
@@ -149,6 +155,10 @@ struct PlayingSound {
 pub struct SilentEngine {
     sounds: Vec<PlayingSound>,
     volumes: SourceVolumes,
+    /// Extra per-source gains on top of the option volumes, vanilla's `gainBySource` map
+    /// (default 1.0 for a missing source): what `SoundEngine.updateCategoryVolume` sets
+    /// and what the music fade drives; `stopAll` clears it.
+    category_gains: [f32; 10],
     listener: ListenerTransform,
 }
 
@@ -163,8 +173,35 @@ impl SilentEngine {
         Self {
             sounds: Vec::new(),
             volumes: SourceVolumes::default(),
+            category_gains: [1.0; 10],
             listener: ListenerTransform::from_look(DVec3::ZERO, 0.0, 0.0),
         }
+    }
+
+    /// The whole gain multiplier of a sound's volume in `source` (the instance volume
+    /// times this is the channel volume): the option volumes times the category gain.
+    fn channel_gain(&self, source: SoundSource) -> f32 {
+        let gain = match SourceVolumes::index_for(source) {
+            Some(i) => self.category_gains[i],
+            None => return 1.0,
+        };
+        self.volumes.effective(source) * gain
+    }
+
+    /// Set one source's extra category gain, vanilla's
+    /// `SoundEngine.updateCategoryVolume(source, gain)`: the gain is clamped to 0..=1
+    /// and multiplies with the option volumes (the music fade drives this; at 1.0, the
+    /// default, it changes nothing).
+    pub fn update_category_volume(&mut self, source: SoundSource, gain: f32) {
+        if let Some(i) = SourceVolumes::index_for(source) {
+            self.category_gains[i] = gain.clamp(0.0, 1.0);
+        }
+    }
+
+    /// Reset every category gain to its default of 1.0, vanilla's `SoundEngine.stopAll`
+    /// (which clears `gainBySource`), so a later fade starts from the full gain.
+    pub fn reset_category_gains(&mut self) {
+        self.category_gains = [1.0; 10];
     }
 
     /// Start tracking a sound. The variant's `volume`/`pitch` from sounds.json multiply
@@ -187,10 +224,11 @@ impl SilentEngine {
         event: Arc<str>,
     ) -> PlayResult {
         let instance_volume = (volume * variant.volume).clamp(0.0, 1.0);
-        if instance_volume * self.volumes.effective(source) == 0.0 && source != SoundSource::Music {
+        let channel_volume = instance_volume * self.channel_gain(source);
+        if channel_volume == 0.0 && source != SoundSource::Music {
             return PlayResult::NotStarted;
         }
-        let started_silently = instance_volume * self.volumes.effective(source) == 0.0;
+        let started_silently = channel_volume == 0.0;
         self.sounds.push(PlayingSound {
             event,
             source,
@@ -232,8 +270,13 @@ impl SilentEngine {
     /// Stop playing sounds. `None` on an axis matches everything; a sound is stopped
     /// when both the source filter and the event filter match it, as vanilla's
     /// `SoundManager.stop(Identifier, SoundSource)` does: both `None` stops everything,
-    /// one `None` stops that whole axis.
+    /// one `None` stops that whole axis. Stopping everything also resets the category
+    /// gains (vanilla's `SoundEngine.stopAll` clears `gainBySource`, so a faded music
+    /// source comes back at full gain for the next track).
     pub fn stop(&mut self, source: Option<SoundSource>, event: Option<&str>) {
+        if source.is_none() && event.is_none() {
+            self.reset_category_gains();
+        }
         self.sounds.retain(|s| {
             let source_matches = source.is_none_or(|src| s.source == src);
             let event_matches = event.is_none_or(|e| event_eq(&s.event, e));
@@ -260,8 +303,15 @@ impl SilentEngine {
     /// Recompute the (left, right) gains of every playing sound from the current
     /// listener and source volumes.
     pub fn tick(&mut self) {
+        // Stack copies of the read-only state, so the loop can hold `&mut` sounds.
+        let volumes = self.volumes.clone();
+        let category_gains = self.category_gains;
+        let listener = self.listener;
         for sound in &mut self.sounds {
-            let effective = self.volumes.effective(sound.source);
+            let effective = match SourceVolumes::index_for(sound.source) {
+                Some(i) => volumes.effective(sound.source) * category_gains[i],
+                None => 1.0,
+            };
             // A stereo file plays unpositioned, as OpenAL plays multi-channel buffers:
             // full gain, centred, wherever it was asked to play.
             let (gain, pan) = if sound.stereo {
@@ -270,11 +320,11 @@ impl SilentEngine {
                 match sound.pos {
                     Some(pos) => (
                         attenuation(
-                            (pos - self.listener.position).length(),
+                            (pos - listener.position).length(),
                             sound.volume,
                             sound.attenuation_distance,
                         ) * effective,
-                        pan(&self.listener, pos),
+                        pan(&listener, pos),
                     ),
                     None => (sound.volume.min(1.0) * effective, 0.0),
                 }

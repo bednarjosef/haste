@@ -224,6 +224,12 @@ impl SoundSystem {
         self.engine.set_volume(source, volume);
     }
 
+    /// Set one source's extra category gain (the music fade's lever), vanilla's
+    /// `SoundEngine.updateCategoryVolume`: it multiplies with the option volumes.
+    pub fn update_category_volume(&mut self, source: SoundSource, gain: f32) {
+        self.engine.update_category_volume(source, gain);
+    }
+
     /// 20 Hz: recompute gains, push them and the pitches to the playing sounds, and drop
     /// finished sounds from the engine. Allocates nothing when no sound started since the
     /// last tick (all scratch buffers are fields, cleared and refilled in place).
