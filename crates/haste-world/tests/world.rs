@@ -389,8 +389,9 @@ fn light_apply_and_read() {
     // empty-marked section, ClientPacketListener.readSectionList), block 0
     assert_eq!(w.sky_light(BlockPos::new(0, 80, 0)), 0);
     assert_eq!(w.block_light(BlockPos::new(0, 80, 0)), 0);
-    // sections with no light data at all: sky 15, block 0
-    assert_eq!(w.sky_light(BlockPos::new(0, 0, 0)), 15);
+    // section with no light data below a data section: sky reads the bottom row of the
+    // nearest section above (vanilla SkyLightSectionStorage.getLightValue), block 0
+    assert_eq!(w.sky_light(BlockPos::new(0, 0, 0)), 0);
     assert_eq!(w.block_light(BlockPos::new(0, 0, 0)), 0);
     // light update dirties the changed section's neighbourhood
     assert!(!w.take_dirty_sections().is_empty());
