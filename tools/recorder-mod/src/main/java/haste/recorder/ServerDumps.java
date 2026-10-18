@@ -56,6 +56,10 @@ public final class ServerDumps {
             HasteRecorderMod.LOGGER.info("entity_dimensions.json: {} entity types", entities);
             int blocks = dumpBlockProperties(outDir);
             HasteRecorderMod.LOGGER.info("block_properties.json: {} blocks", blocks);
+            int beBlocks = BlockEntityTypeDump.dump(outDir);
+            HasteRecorderMod.LOGGER.info("block_entity_types.json: {} blocks", beBlocks);
+            int classes = BlockClassDump.dump(outDir);
+            HasteRecorderMod.LOGGER.info("block_classes.json: {} blocks", classes);
             HasteRecorderMod.LOGGER.info("oracle dumps complete in {} ms", (System.nanoTime() - t0) / 1_000_000);
         } catch (Throwable t) {
             HasteRecorderMod.LOGGER.error("oracle dump failed", t);
@@ -119,6 +123,11 @@ public final class ServerDumps {
         // (LightEngine, SkyLightEngine) reads for every block it propagates through.
         o.addProperty("light_dampening", state.getLightDampening());
         o.addProperty("propagates_skylight_down", state.propagatesSkylightDown());
+        // BlockState.canOcclude / useShapeForLightOcclusion: LightEngine's gates for
+        // shape-based light occlusion (isEmptyShape, shapeOccludes). Absent in dumps from
+        // before this field.
+        o.addProperty("can_occlude", state.canOcclude());
+        o.addProperty("use_shape_for_light_occlusion", state.useShapeForLightOcclusion());
         o.addProperty("air", state.isAir());
         o.addProperty("opaque", state.isSolidRender());
         // EntityRenderer.extractShadowPiece skips INVISIBLE render shapes; RenderShape has only

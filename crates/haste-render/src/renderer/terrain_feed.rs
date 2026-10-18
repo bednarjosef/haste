@@ -11,6 +11,42 @@ use crate::mesher::SectionMesh;
 
 use super::Renderer;
 
+/// What the client knows about a section's blocks, reported as dirty sections are
+/// examined (vanilla: `ClientChunkCache` reports its empty sections to
+/// `SectionOcclusionGraph.updateEmptySections`, and a missing chunk drops the
+/// section's render data).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SectionLoadState {
+    /// The section's chunk is not loaded.
+    Unloaded,
+    /// Loaded and holds no blocks: see-through to the occlusion walk, never meshed.
+    Empty,
+    /// Loaded with blocks.
+    NonEmpty,
+}
+
+/// Sets or clears a column's empty-section bit, dropping the column when its last bit
+/// goes; returns whether the map changed.
+pub(super) fn set_empty_bit(
+    empty: &mut crate::occlusion::EmptyColumns,
+    column: ChunkPos,
+    si: i32,
+    is_empty: bool,
+) -> bool {
+    let bit = 1u32 << si;
+    let bits = *empty.get(&column).unwrap_or(&0);
+    let want = if is_empty { bits | bit } else { bits & !bit };
+    if want == bits {
+        return false;
+    }
+    if want == 0 {
+        empty.remove(&column);
+    } else {
+        empty.insert(column, want);
+    }
+    true
+}
+
 /// Cap on sections meshed but not yet uploaded (the mesher's pending snapshots, queued
 /// results and in-flight jobs). At render distance 32 one section's mesh averages ~50 KiB,
 /// so this bounds the pipeline's RAM to ~150 MiB instead of the whole view distance's
@@ -36,9 +72,11 @@ impl Renderer {
     }
 
     /// The per-state shape tables from haste-data's shape data: the AO occluder table
-    /// (vanilla `getShadeBrightness <= 0.2`) and the fluid face-occlusion shapes
-    /// (`BlockState.getOcclusionShape`). Applies to sections meshed afterwards: call it
-    /// before the first chunks.
+    /// (vanilla `getShadeBrightness <= 0.2`), the fluid face-occlusion shapes, the
+    /// terrain face-occlusion shapes (`BlockState.getOcclusionShape`, vanilla
+    /// `Block.shouldRenderFace`) and the face-skip rules from the class dump
+    /// (`BlockBehaviour.skipRendering`, see `mesher/skip.rs`). Applies to sections meshed
+    /// afterwards: call it before the first chunks.
     pub fn set_shapes(
         &mut self,
         states: &dyn haste_core::view::BlockStateTable,
@@ -51,6 +89,8 @@ impl Renderer {
             shapes,
             &self.baked,
         ));
+        tables.face_occluders = Arc::new(crate::mesher::FaceOccluders::from_shapes(states, shapes));
+        tables.skip = Arc::new(crate::mesher::SkipTable::load(states));
         self.mesher.set_tables(tables);
     }
 
@@ -209,12 +249,14 @@ impl Renderer {
         }
         self.sections.clear();
         self.section_vis.lock().clear();
+        self.known_empty.lock().clear();
         self.visible_mask = Default::default();
         self.visible_for = None;
         self.scheduled_for = None;
         self.walk_in_flight = false;
         self.clear_bonus();
         self.vis_dirty = false;
+        self.want_version += 1;
     }
 
     /// A slab record's arena identity (`MeshArenas::free` input): the packed
@@ -242,6 +284,26 @@ impl Renderer {
         }
         self.bonus_list.clear();
         self.bonus_dirty = false;
+    }
+
+    /// Records what the client knows about a section (`SectionLoadState`). The empty
+    /// bits are the walk's see-through data for sections that have no mesh, so
+    /// unmeshed air never blocks it (vanilla swaps `UNCOMPILED` for `EMPTY` without
+    /// compiling); a bit appearing or disappearing marks the sightline data dirty so
+    /// the walk re-runs, like vanilla's propagation from newly loaded sections.
+    pub fn note_section_state(&mut self, pos: SectionPos, state: SectionLoadState) {
+        let si = pos.y - self.min_section;
+        if !(0..32).contains(&si) {
+            return;
+        }
+        if set_empty_bit(
+            &mut self.known_empty.lock(),
+            ChunkPos::new(pos.x, pos.z),
+            si,
+            state == SectionLoadState::Empty,
+        ) {
+            self.vis_dirty = true;
+        }
     }
 
     /// A newly uploaded section is drawn until the async walk catches up when a

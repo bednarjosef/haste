@@ -79,6 +79,27 @@ s = find("minecraft:glowstone")[0]
 if s["light"] != 15:
     failures.append(f"glowstone light != 15: {s['light']}")
 
+# light dampening and the shape-occlusion flags (LightEngine.isEmptyShape /
+# shapeOccludes): stone blocks light, air occludes nothing, slabs/snow/stairs use their
+# occlusion shape for light (a double slab does not; it is a full block).
+for block, props, dampening, can_occlude, use_shape in [
+    ("minecraft:stone", {}, 15, True, False),
+    ("minecraft:air", {}, 0, False, False),
+    ("minecraft:oak_slab", {"type": "bottom", "waterlogged": "false"}, 0, True, True),
+    ("minecraft:oak_slab", {"type": "double"}, 15, True, False),
+    ("minecraft:snow", {"layers": "2"}, 0, True, True),
+    ("minecraft:oak_stairs", {"half": "bottom", "waterlogged": "false"}, 0, True, True),
+]:
+    s = find(block, **props)[0]
+    if s.get("light_dampening") != dampening:
+        failures.append(f"{block} {props} light_dampening {s.get('light_dampening')} != {dampening}")
+    if s.get("can_occlude") != can_occlude:
+        failures.append(f"{block} {props} can_occlude {s.get('can_occlude')} != {can_occlude}")
+    if s.get("use_shape_for_light_occlusion") != use_shape:
+        failures.append(
+            f"{block} {props} use_shape_for_light_occlusion {s.get('use_shape_for_light_occlusion')} != {use_shape}"
+        )
+
 # render_shape: barrier/water invisible, stone a model
 for block, props, want in [
     ("minecraft:barrier", {}, "invisible"),
@@ -116,6 +137,32 @@ for name, fr in [("minecraft:stone", 0.6), ("minecraft:ice", 0.98), ("minecraft:
     got = bp["blocks"].get(name, {}).get("friction")
     if got != fr:
         failures.append(f"{name} friction {got} != {fr}")
+
+# block entity types: chest -> chest, oak_sign -> sign, spawner -> mob_spawner, stone none
+bet = json.loads((root / "cache/oracle/26.3/block_entity_types.json").read_text())
+print(f"block_entity_types.json: {len(bet['blocks'])} blocks, {len(bet['types'])} types")
+if bet.get("states"):
+    print(f"note: {len(bet['states'])} per-state entries (blocks whose states disagree)")
+for block, want in [
+    ("minecraft:chest", "minecraft:chest"),
+    ("minecraft:trapped_chest", "minecraft:trapped_chest"),
+    ("minecraft:exposed_copper_chest", "minecraft:chest"),
+    ("minecraft:oak_sign", "minecraft:sign"),
+    ("minecraft:oak_hanging_sign", "minecraft:hanging_sign"),
+    ("minecraft:white_banner", "minecraft:banner"),
+    ("minecraft:player_head", "minecraft:skull"),
+    ("minecraft:shulker_box", "minecraft:shulker_box"),
+    ("minecraft:poplar_shelf", "minecraft:shelf"),
+    ("minecraft:spawner", "minecraft:mob_spawner"),
+]:
+    got = bet["blocks"].get(block)
+    if got != want:
+        failures.append(f"{block} block entity type {got} != {want}")
+if "minecraft:stone" in bet["blocks"]:
+    failures.append("stone has a block entity type")
+# MovingPistonBlock.newBlockEntity returns null: the piston's block event makes that entity.
+if "minecraft:moving_piston" in bet["blocks"]:
+    failures.append("moving_piston has a block entity type from newBlockEntity")
 
 if failures:
     print("FAILURES:")

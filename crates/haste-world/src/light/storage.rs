@@ -7,12 +7,13 @@
 //! them back into the chunks, re-applying the uniform-array dedup of `light.rs`. The engine
 //! runs only for block changes, so per-run allocations here are fine.
 //!
-//! Shape-based light occlusion (vanilla `useShapeForLightOcclusion`, the merged-face
-//! `getLightDampeningInto` = 16 case) is not modelled: per-state dampening comes from
-//! `light_dampening` below.
+//! Shape-based light occlusion (vanilla `LightEngine.shapeOccludes` over the dump's
+//! `can_occlude`/`use_shape_for_light_occlusion` flags and occlusion shapes) lives in
+//! haste-data's `shapes::face_occlusion` and is called from `engine.rs`; per-state
+//! dampening comes from `light_dampening` below. Vanilla's merged-face
+//! `getLightDampeningInto` is server-side only (nylium and snowy dirt random ticks).
 
 use ahash::HashMap;
-use bytes::Bytes;
 use haste_core::game::DimensionInfo;
 use haste_core::view::BlockPhysics;
 use haste_core::{BlockPos, BlockStateId, ChunkPos, SectionPos};
@@ -22,7 +23,7 @@ use crate::chunk::Chunk;
 use crate::world::World;
 
 use super::engine::{unpack_x, unpack_y, unpack_z};
-use super::{nibble_get, nibble_set, NibbleArray};
+use super::{nibble_get, nibble_set, NibbleArray, SkyLight};
 
 /// Which light layer an operation addresses.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -86,9 +87,9 @@ impl<'a> Storage<'a> {
         };
         match layer {
             Layer::Block => {
-                !chunk.light.block[idx].0.is_empty() || chunk.sections[idx].block_count > 0
+                !chunk.light.block[idx].is_empty() || chunk.sections[idx].block_count > 0
             }
-            Layer::Sky => chunk.light.sky[idx].is_some() || chunk.sections[idx].block_count > 0,
+            Layer::Sky => chunk.light.sky[idx].is_storing() || chunk.sections[idx].block_count > 0,
         }
     }
 
@@ -117,8 +118,8 @@ impl<'a> Storage<'a> {
         };
         match layer {
             Layer::Block => chunk.light.block[idx].get(lx, ly, lz),
-            Layer::Sky => match chunk.light.sky[idx].as_ref() {
-                Some(n) => n.get(lx, ly, lz),
+            Layer::Sky => match chunk.light.sky[idx].value(lx, ly, lz) {
+                Some(v) => v,
                 None => self.walk_up_sky(chunk, idx as i32 + 1, lx, lz),
             },
         }
@@ -134,8 +135,8 @@ impl<'a> Storage<'a> {
             if let Some(arr) = self.sky.get(&key(sec)) {
                 return nibble_get(arr, lx, 0, lz);
             }
-            if let Some(n) = chunk.light.sky[idx as usize].as_ref() {
-                return n.get(lx, 0, lz);
+            if let Some(v) = chunk.light.sky[idx as usize].row_value(lx, lz) {
+                return v;
             }
             idx += 1;
         }
@@ -169,21 +170,16 @@ impl<'a> Storage<'a> {
         nibble_set(arr, (x & 15) as u8, (y & 15) as u8, (z & 15) as u8, level);
     }
 
-    /// Vanilla `LightEngine.getOpacity`: at least 1. Unloaded chunks read as fully opaque
-    /// (vanilla's `getState` returns bedrock there).
-    pub(super) fn opacity(&self, pos: u64) -> u8 {
-        let (x, y, z) = (unpack_x(pos), unpack_y(pos), unpack_z(pos));
-        match self.block_state(BlockPos::new(x, y, z)) {
-            Some(state) => light_dampening(self.world.game_data(), state).max(1),
-            None => 15,
-        }
-    }
-
-    /// Vanilla `BlockLightEngine.getEmission` (always "light on": loaded chunks have light).
-    pub(super) fn emission(&self, pos: u64) -> u8 {
+    /// Vanilla `LightEngine.getState` (unloaded chunks read as `None`; vanilla's bedrock
+    /// there makes them fully opaque, which `engine.rs` handles with opacity 15).
+    pub(super) fn state_at(&self, pos: u64) -> Option<BlockStateId> {
         let (x, y, z) = (unpack_x(pos), unpack_y(pos), unpack_z(pos));
         self.block_state(BlockPos::new(x, y, z))
-            .map_or(0, |s| self.world.game_data().light_emission(s))
+    }
+
+    /// The world's game data (the light engine's per-state lookups).
+    pub(super) fn game_data(&self) -> &GameData {
+        self.world.game_data()
     }
 
     pub(super) fn block_state(&self, pos: BlockPos) -> Option<BlockStateId> {
@@ -207,7 +203,7 @@ impl<'a> Storage<'a> {
         self.world.dimension()
     }
 
-    /// Writes the overlays back, re-applying the uniform-array dedup (`light.rs`), and
+    /// Writes the overlays back, re-applying the uniform-section dedup (`light.rs`), and
     /// returns every section whose cells were written (the caller re-meshes their 3x3x3
     /// neighbourhoods, like vanilla `setStoredLevel`'s `aroundAndAtBlockPos` collection in
     /// `swapSectionMap`).
@@ -222,7 +218,7 @@ impl<'a> Storage<'a> {
                     chunk.light.block[idx as usize] = if arr.iter().all(|&b| b == 0) {
                         NibbleArray::default()
                     } else {
-                        NibbleArray::from_bytes(Bytes::from(arr))
+                        NibbleArray::from_vec(arr)
                     };
                 }
             }
@@ -233,11 +229,7 @@ impl<'a> Storage<'a> {
             if let Some(chunk) = world.chunk_mut(sec.chunk()) {
                 let idx = sec.y - chunk.min_section;
                 if idx >= 0 && (idx as usize) < chunk.sections.len() {
-                    chunk.light.sky[idx as usize] = if arr.iter().all(|&b| b == 0xFF) {
-                        None
-                    } else {
-                        Some(NibbleArray::from_bytes(Bytes::from(arr)))
-                    };
+                    chunk.light.sky[idx as usize] = SkyLight::from_packed(&arr);
                 }
             }
             written.push(sec);
@@ -263,21 +255,14 @@ fn materialize(
         return vec![0u8; 2048];
     }
     match layer {
-        Layer::Block => {
-            let stored = &chunk.light.block[idx as usize];
-            if stored.0.is_empty() {
-                vec![0u8; 2048]
-            } else {
-                stored.0.to_vec()
-            }
-        }
+        Layer::Block => chunk.light.block[idx as usize].to_vec(),
         Layer::Sky => {
-            match chunk.light.sky[idx as usize].as_ref() {
+            match &chunk.light.sky[idx as usize] {
                 // a real array: copy it
-                Some(n) if n.0.len() == 2048 => return n.0.to_vec(),
-                // an empty-marked section (vanilla's zero `DataLayer`): all zero
-                Some(_) => return vec![0u8; 2048],
-                None => {}
+                SkyLight::Array(a) => return a.to_vec(),
+                // a uniform section (vanilla's null-data `DataLayer`): its one value
+                SkyLight::Uniform(v) => return vec![v | (v << 4); 2048],
+                SkyLight::Absent => {}
             }
             // absent: repeat the nearest array above's bottom row down the whole
             // section (the absent-section flattening, crate::sky_light's rule)
@@ -289,9 +274,7 @@ fn materialize(
                     if let Some(a) = sky.get(&key(asec)) {
                         return Some(nibble_get(a, x, 0, z));
                     }
-                    chunk.light.sky[above as usize]
-                        .as_ref()
-                        .map(|n| n.get(x, 0, z))
+                    chunk.light.sky[above as usize].row_value(x, z)
                 };
                 if read(0, 0).is_some() {
                     for z in 0..16u8 {
@@ -313,16 +296,26 @@ fn materialize(
     }
 }
 
-/// Vanilla `BlockBehaviour.getLightDampening` per state, computed from the game data the
-/// oracle already carries: `isSolidRender` (the dump's `opaque`) means 15; otherwise
-/// `propagatesSkylightDown` (not a full collision cube and not a fluid) means 0, else 1.
-/// Two overrides are matched by block path: the glass family forces skylight through
-/// (`TransparentBlock`) and tinted glass blocks it entirely (15). Leaves land on 1 through
-/// their full cube, like vanilla's own override.
+/// Vanilla `BlockState.getLightDampening` (the value `BlockStateBase.initCache` caches,
+/// with every class override in), straight from the oracle dump's `light_dampening` field.
+/// Dumps from before the 2026-10-18 regeneration lack it and fall back to the rule below.
 pub(crate) fn light_dampening(data: &GameData, state: BlockStateId) -> u8 {
     if state == BlockStateId::AIR {
         return 0;
     }
+    if let Some(v) = data.shapes.light_dampening(state) {
+        return v;
+    }
+    light_dampening_fallback(data, state)
+}
+
+/// The approximation for old dumps, from the game data they already carry:
+/// `isSolidRender` (the dump's `opaque`) means 15; otherwise `propagatesSkylightDown` (not
+/// a full collision cube and not a fluid) means 0, else 1. Two overrides are matched by
+/// block path: the glass family forces skylight through (`TransparentBlock`) and tinted
+/// glass blocks it entirely (15). Leaves land on 1 through their full cube, like vanilla's
+/// own override.
+fn light_dampening_fallback(data: &GameData, state: BlockStateId) -> u8 {
     if data.is_opaque_full(state) {
         return 15;
     }

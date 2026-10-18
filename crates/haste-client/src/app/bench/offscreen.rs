@@ -80,6 +80,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         renderer.set_animation_tick(animation_tick);
         renderer.set_game_time(view.world_age);
         renderer.set_lightmap_frame(lightmap);
+        renderer.set_cloud_status(crate::app::frame::cloud_status(session.options.clouds));
         {
             let snapshot = shared
                 .particle_snapshots
@@ -106,7 +107,15 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
                 placed && (view.feet - want).length() <= 0.5
             })
             .unwrap_or(placed);
-        if reached && feed.settled(&stats, Duration::from_millis(1500)) {
+        if reached
+            && feed.settled(
+                &stats,
+                Duration::from_millis(1500),
+                &renderer,
+                camera_section(&camera),
+                vd,
+            )
+        {
             break;
         }
         if Instant::now() > deadline {
@@ -251,6 +260,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
         renderer.set_animation_tick(animation_tick);
         renderer.set_game_time(view.world_age);
         renderer.set_lightmap_frame(lightmap);
+        renderer.set_cloud_status(crate::app::frame::cloud_status(session.options.clouds));
         {
             let snapshot = shared
                 .particle_snapshots

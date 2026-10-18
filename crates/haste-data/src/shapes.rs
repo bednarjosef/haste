@@ -5,9 +5,13 @@
 //! file replaces it once oracles records the dump.
 
 use haste_core::view::{FluidInfo, FluidKind};
-use haste_core::{Aabb, BlockStateId, DVec3};
+use haste_core::{Aabb, BlockStateId, DVec3, Direction};
 
 use crate::blocks::BlockStates;
+
+mod face_occlusion;
+
+use face_occlusion::{FaceOcclusion, OcclusionTable};
 
 /// Per-state shape entry (empty = no collision). `light`/`air`/`opaque`/`fluid` come from the
 /// oracle dump's per-state fields (or fallback heuristics) and back `BlockPhysics` on `GameData`.
@@ -34,6 +38,78 @@ pub struct BlockShapes {
     /// server can send ids past the end of the table; every lookup below resolves them to
     /// this state's entry instead of panicking.
     placeholder: BlockStateId,
+    /// `occlusion` dump field, empty when the dump predates it (see [`OcclusionTable`]).
+    occlusion: OcclusionTable,
+    /// The light engines' shape-occlusion table over the occlusion shapes and the
+    /// `can_occlude`/`use_shape_for_light_occlusion` flags (see [`FaceOcclusion`]).
+    face_occlusion: FaceOcclusion,
+    /// `light_dampening` dump field per state ([`DAMPENING_ABSENT`] without the field).
+    light_dampening: Vec<u8>,
+    /// `propagates_skylight_down` per state: 0 false, 1 true, [`SKYLIGHT_ABSENT`] without
+    /// the field.
+    skylight_down: Vec<u8>,
+}
+
+/// `light_dampening` is 0..=15; this marks a state the field is absent for.
+const DAMPENING_ABSENT: u8 = u8::MAX;
+/// `skylight_down` encoding for a state the field is absent for.
+const SKYLIGHT_ABSENT: u8 = 2;
+
+// Deserializing into Vec<OracleState> buffers all ~903k floats as f64 before we convert;
+// that double-buffering is a large part of the 30 MB file's cost (see NOTES.md).
+#[derive(serde::Deserialize)]
+struct OracleFile {
+    version: u32,
+    states: Vec<OracleState>,
+}
+
+#[derive(serde::Deserialize)]
+struct OracleState {
+    id: u32,
+    #[serde(default)]
+    collision: Vec<[f64; 6]>,
+    #[serde(default)]
+    outline: Vec<[f64; 6]>,
+    #[serde(default)]
+    light: u8,
+    #[serde(default)]
+    air: bool,
+    #[serde(default)]
+    opaque: bool,
+    /// Fluid id (`minecraft:water`, `minecraft:flowing_water`, `minecraft:lava`,
+    /// `minecraft:flowing_lava`) for fluid states and waterlogged blocks; null otherwise.
+    #[serde(default)]
+    fluid: Option<String>,
+    /// `properties` includes `level` for fluid states; absent for waterlogged blocks
+    /// (their fluid is a full source).
+    #[serde(default)]
+    properties: std::collections::HashMap<String, String>,
+    /// "invisible" | "model" (vanilla `RenderShape`, which has only those two constants
+    /// in 26.3). Absent in pre-regeneration dumps: treated as "model".
+    #[serde(default)]
+    render_shape: Option<String>,
+    /// Vanilla `BlockState.isSuffocating` with an empty level. Absent in
+    /// pre-regeneration dumps: falls back to the full-collision-cube rule below.
+    #[serde(default)]
+    suffocating: Option<bool>,
+    /// Vanilla `BlockState.getOcclusionShape`. Absent in pre-regeneration dumps.
+    #[serde(default)]
+    occlusion: Option<Vec<[f64; 6]>>,
+    /// Vanilla `BlockState.getLightDampening` (0..=15). Absent in
+    /// pre-regeneration dumps.
+    #[serde(default)]
+    light_dampening: Option<u8>,
+    /// Vanilla `BlockState.propagatesSkylightDown`. Absent in
+    /// pre-regeneration dumps.
+    #[serde(default)]
+    propagates_skylight_down: Option<bool>,
+    /// Vanilla `BlockState.canOcclude` / `useShapeForLightOcclusion`: the light engine's
+    /// gates for shape-based light occlusion (`LightEngine.isEmptyShape`). Absent in
+    /// dumps from before the flags were recorded.
+    #[serde(default)]
+    can_occlude: Option<bool>,
+    #[serde(default)]
+    use_shape_for_light_occlusion: Option<bool>,
 }
 
 impl BlockShapes {
@@ -50,49 +126,37 @@ impl BlockShapes {
 
     pub(crate) fn parse_oracle(json: &str, blocks: &BlockStates) -> anyhow::Result<Self> {
         let state_count = blocks.len();
-        // Deserializing into Vec<OracleState> buffers all ~903k floats as f64 before we convert;
-        // that double-buffering is a large part of the 30 MB file's cost (see NOTES.md).
-        #[derive(serde::Deserialize)]
-        struct OracleFile {
-            version: u32,
-            states: Vec<OracleState>,
-        }
-        #[derive(serde::Deserialize)]
-        struct OracleState {
-            id: u32,
-            #[serde(default)]
-            collision: Vec<[f64; 6]>,
-            #[serde(default)]
-            outline: Vec<[f64; 6]>,
-            #[serde(default)]
-            light: u8,
-            #[serde(default)]
-            air: bool,
-            #[serde(default)]
-            opaque: bool,
-            /// Fluid id (`minecraft:water`, `minecraft:flowing_water`, `minecraft:lava`,
-            /// `minecraft:flowing_lava`) for fluid states and waterlogged blocks; null otherwise.
-            #[serde(default)]
-            fluid: Option<String>,
-            /// `properties` includes `level` for fluid states; absent for waterlogged blocks
-            /// (their fluid is a full source).
-            #[serde(default)]
-            properties: std::collections::HashMap<String, String>,
-            /// "invisible" | "model" (vanilla `RenderShape`, which has only those two constants
-            /// in 26.3). Absent in pre-regeneration dumps: treated as "model".
-            #[serde(default)]
-            render_shape: Option<String>,
-            /// Vanilla `BlockState.isSuffocating` with an empty level. Absent in
-            /// pre-regeneration dumps: falls back to the full-collision-cube rule below.
-            #[serde(default)]
-            suffocating: Option<bool>,
-        }
         let file: OracleFile =
             serde_json::from_str(json).map_err(|e| anyhow::anyhow!("block_shapes.json: {e}"))?;
         if file.version != 1 {
             anyhow::bail!("block_shapes.json: unsupported version {}", file.version);
         }
         let mut shapes = vec![StateShapes::default(); state_count];
+        // The three optional fields are all-or-nothing per dump in practice (the recorder
+        // writes them unconditionally), but each state is checked on its own so a partial
+        // dump still answers for the states it has.
+        let mut occlusion = OcclusionTable::default();
+        let mut dampening = Vec::new();
+        let mut skylight = Vec::new();
+        if file.states.iter().any(|s| s.occlusion.is_some()) {
+            occlusion.ranges = vec![face_occlusion::OCCLUSION_ABSENT; state_count];
+            let mut intern = std::collections::HashMap::with_capacity(128);
+            for s in &file.states {
+                if let Some(list) = &s.occlusion {
+                    occlusion.intern(s.id, list, &mut intern);
+                }
+            }
+        }
+        if file.states.iter().any(|s| s.light_dampening.is_some()) {
+            dampening = vec![DAMPENING_ABSENT; state_count];
+        }
+        if file
+            .states
+            .iter()
+            .any(|s| s.propagates_skylight_down.is_some())
+        {
+            skylight = vec![SKYLIGHT_ABSENT; state_count];
+        }
         for s in &file.states {
             let idx = s.id as usize;
             if idx >= state_count {
@@ -138,11 +202,22 @@ impl BlockShapes {
                     Some(FluidInfo { kind, height })
                 }),
             };
+            if let Some(v) = s.light_dampening {
+                dampening[idx] = v;
+            }
+            if let Some(v) = s.propagates_skylight_down {
+                skylight[idx] = u8::from(v);
+            }
         }
+        let face_occlusion = FaceOcclusion::build(&occlusion, &file.states, state_count);
         Ok(Self {
             shapes,
             oracle_backed: true,
             placeholder: blocks.placeholder_state(),
+            occlusion,
+            face_occlusion,
+            light_dampening: dampening,
+            skylight_down: skylight,
         })
     }
 
@@ -157,6 +232,10 @@ impl BlockShapes {
             shapes,
             oracle_backed: false,
             placeholder: blocks.placeholder_state(),
+            occlusion: OcclusionTable::default(),
+            face_occlusion: FaceOcclusion::absent(),
+            light_dampening: Vec::new(),
+            skylight_down: Vec::new(),
         }
     }
 
@@ -218,6 +297,63 @@ impl BlockShapes {
     pub fn is_suffocating(&self, state: BlockStateId) -> bool {
         let id = state.0 as usize;
         id < self.shapes.len() && self.shapes[id].suffocating
+    }
+
+    /// The state's occlusion shape (vanilla `BlockState.getOcclusionShape`): what face
+    /// culling (`Block.shouldRenderFace`, `FluidRenderer.isFaceOccludedByNeighbor`) and
+    /// light occlusion compare against. `None` when the dump predates the field — an empty
+    /// slice is a real shape (the `noOcclusion` family occludes nothing). Ids outside the
+    /// table resolve to the placeholder's entry like the shape lookups above.
+    pub fn occlusion_boxes(&self, state: BlockStateId) -> Option<&[Aabb]> {
+        self.occlusion.boxes_of(self.row(state))
+    }
+
+    /// Vanilla `LightEngine.shapeOccludes(fromState, toState, direction)`: whether the
+    /// two states' face occlusion shapes block light travelling `from -> to` along
+    /// `direction` (a bottom slab blocks down through its bottom face but not sideways
+    /// through its open half). False on old dumps without the flags, which is the
+    /// pre-shape behaviour. Ids outside the table resolve to the placeholder's entry.
+    pub fn shape_occludes(
+        &self,
+        from: BlockStateId,
+        to: BlockStateId,
+        direction: Direction,
+    ) -> bool {
+        self.face_occlusion
+            .occludes(self.row(from), self.row(to), direction)
+    }
+
+    /// Vanilla `LightEngine.isEmptyShape`: `!canOcclude || !useShapeForLightOcclusion`,
+    /// the gate that decides a state's shape never occludes light. True on old dumps.
+    pub fn is_empty_shape(&self, state: BlockStateId) -> bool {
+        self.face_occlusion.is_empty_shape(self.row(state))
+    }
+
+    /// Vanilla `BlockState.useShapeForLightOcclusion` (the flag half of
+    /// `LightEngine.hasDifferentLightProperties`): `None` on old dumps.
+    pub fn use_shape_for_light_occlusion(&self, state: BlockStateId) -> Option<bool> {
+        self.face_occlusion.use_shape(self.row(state))
+    }
+
+    /// Vanilla `BlockState.getLightDampening` (0..=15, `BlockStateBase.initCache`'s cached
+    /// value): 15 for solid-render states, else 0 when skylight propagates down through the
+    /// shape, 1 otherwise, with class overrides already in. `None` when the dump predates
+    /// the field (the caller keeps its approximation). Ids outside the table resolve to
+    /// the placeholder's entry.
+    pub fn light_dampening(&self, state: BlockStateId) -> Option<u8> {
+        let value = *self.light_dampening.get(self.row(state))?;
+        (value != DAMPENING_ABSENT).then_some(value)
+    }
+
+    /// Vanilla `BlockState.propagatesSkylightDown`: a non-full shape (or a class override
+    /// like `TransparentBlock` for glass) lets skylight through unchanged. `None` when the
+    /// dump predates the field. Ids outside the table resolve to the placeholder's entry.
+    pub fn propagates_skylight_down(&self, state: BlockStateId) -> Option<bool> {
+        match self.skylight_down.get(self.row(state)) {
+            Some(&0) => Some(false),
+            Some(&1) => Some(true),
+            _ => None,
+        }
     }
 }
 
@@ -458,237 +594,4 @@ fn ao_solid_for(path: &str, collision: &[Aabb]) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use haste_core::view::CollisionShapes as _;
-
-    /// air = 0, stone = 1 (the placeholder): the fallback gives stone a solid full cube.
-    const BLOCKS_JSON: &str = r#"{
-  "minecraft:air": { "states": [ { "id": 0, "default": true } ] },
-  "minecraft:stone": { "states": [ { "id": 1, "default": true } ] }
-}"#;
-
-    fn fallback_shapes() -> BlockShapes {
-        let blocks = BlockStates::parse(BLOCKS_JSON, None).unwrap();
-        BlockShapes::fallback(&blocks)
-    }
-
-    #[test]
-    fn out_of_range_ids_use_the_placeholder_entry() {
-        let s = fallback_shapes();
-        let stone = BlockStateId(1);
-        assert!(s.is_opaque_full(stone));
-        assert!(!s.is_air(stone));
-        assert_eq!(s.collision_boxes(stone).len(), 1);
-        for id in [2u32, 100, u32::MAX] {
-            let unknown = BlockStateId(id);
-            assert_eq!(s.light_emission(unknown), s.light_emission(stone));
-            assert_eq!(s.is_air(unknown), s.is_air(stone));
-            assert_eq!(s.is_opaque_full(unknown), s.is_opaque_full(stone));
-            assert_eq!(s.fluid(unknown), s.fluid(stone));
-            assert_eq!(s.collision_boxes(unknown), s.collision_boxes(stone));
-            assert_eq!(s.outline_boxes(unknown), s.outline_boxes(stone));
-        }
-    }
-
-    #[test]
-    fn oracle_backed_shapes_are_total_too() {
-        let blocks = BlockStates::parse(BLOCKS_JSON, None).unwrap();
-        let oracle = r#"{
-  "version": 1,
-  "states": [
-    { "id": 0, "air": true, "collision": [], "outline": [], "light": 0, "opaque": false },
-    { "id": 1, "air": false, "collision": [[0,0,0,1,1,1]], "outline": [[0,0,0,1,1,1]], "light": 0, "opaque": true }
-  ]
-}"#;
-        let s = BlockShapes::parse_oracle(oracle, &blocks).unwrap();
-        assert!(s.is_oracle_backed());
-        let stone = blocks.placeholder_state();
-        for id in [2u32, u32::MAX] {
-            let unknown = BlockStateId(id);
-            assert_eq!(s.collision_boxes(unknown), s.collision_boxes(stone));
-            assert_eq!(s.outline_boxes(unknown), s.outline_boxes(stone));
-            assert_eq!(s.is_opaque_full(unknown), s.is_opaque_full(stone));
-            assert_eq!(s.is_air(unknown), s.is_air(stone));
-            assert_eq!(s.light_emission(unknown), s.light_emission(stone));
-            assert_eq!(s.fluid(unknown), s.fluid(stone));
-        }
-    }
-
-    /// The AO occluder rule (vanilla `BlockBehaviour.getShadeBrightness`, read
-    /// from the 26.3 source): a full collision cube darkens (0.2) unless the
-    /// block's class overrides the brightness to 1.0 — glass
-    /// (`TransparentBlock`) keeps a full collision cube but stays bright. A
-    /// slab (half cube) and leaves' neighbors in the model sense stay bright
-    /// only when the shape is not full: leaves ARE a full collision cube, so
-    /// they darken like stone in vanilla.
-    #[test]
-    fn ao_solid_follows_the_collision_shape_not_render_opacity() {
-        // 0 air, 1 stone, 2 glass, 3 oak_leaves, 4 bottom slab, 5 stained glass,
-        // 6 snow (2 layers), 7 snow (8 layers).
-        let blocks_json = r#"{
-  "minecraft:air": { "states": [ { "id": 0, "default": true } ] },
-  "minecraft:stone": { "states": [ { "id": 1, "default": true } ] },
-  "minecraft:glass": { "states": [ { "id": 2, "default": true } ] },
-  "minecraft:oak_leaves": { "states": [ { "id": 3, "default": true } ] },
-  "minecraft:stone_slab": { "states": [ { "id": 4, "default": true } ] },
-  "minecraft:orange_stained_glass": { "states": [ { "id": 5, "default": true } ] },
-  "minecraft:snow": {
-    "properties": { "layers": ["2", "8"] },
-    "states": [
-      { "id": 6, "default": true, "properties": { "layers": "2" } },
-      { "id": 7, "properties": { "layers": "8" } }
-    ]
-  }
-}"#;
-        let blocks = BlockStates::parse(blocks_json, None).unwrap();
-        let oracle = r#"{
-  "version": 1,
-  "states": [
-    { "id": 0, "air": true, "collision": [], "outline": [], "light": 0, "opaque": false },
-    { "id": 1, "collision": [[0,0,0,1,1,1]], "outline": [[0,0,0,1,1,1]], "light": 0, "opaque": true },
-    { "id": 2, "collision": [[0,0,0,1,1,1]], "outline": [[0,0,0,1,1,1]], "light": 0, "opaque": false },
-    { "id": 3, "collision": [[0,0,0,1,1,1]], "outline": [[0,0,0,1,1,1]], "light": 0, "opaque": false },
-    { "id": 4, "collision": [[0,0,0,1,0.5,1]], "outline": [[0,0,0,1,0.5,1]], "light": 0, "opaque": false },
-    { "id": 5, "collision": [[0,0,0,1,1,1]], "outline": [[0,0,0,1,1,1]], "light": 0, "opaque": false },
-    { "id": 6, "collision": [[0,0,0,1,0.25,1]], "outline": [[0,0,0,1,0.25,1]], "light": 0, "opaque": false },
-    { "id": 7, "collision": [[0,0,0,1,1,1]], "outline": [[0,0,0,1,1,1]], "light": 0, "opaque": true }
-  ]
-}"#;
-        let s = BlockShapes::parse_oracle(oracle, &blocks).unwrap();
-        // Full collision cube, no class override: darkens.
-        assert!(s.is_ao_solid(BlockStateId(1)), "stone darkens");
-        // Full cube but glass (TransparentBlock): stays bright.
-        assert!(!s.is_ao_solid(BlockStateId(2)), "glass stays bright");
-        assert!(
-            !s.is_ao_solid(BlockStateId(5)),
-            "stained glass stays bright"
-        );
-        // Leaves: full collision cube, no override — vanilla darkens them.
-        assert!(s.is_ao_solid(BlockStateId(3)), "leaves darken (full cube)");
-        // Half cube: bright.
-        assert!(!s.is_ao_solid(BlockStateId(4)), "slab stays bright");
-        // Snow: 0.2 only at layers = 8 (the full-cube state).
-        assert!(!s.is_ao_solid(BlockStateId(6)), "thin snow stays bright");
-        assert!(s.is_ao_solid(BlockStateId(7)), "full snow darkens");
-    }
-
-    /// render_shape/suffocating from the oracle dump's per-state fields (the recorder mod's
-    /// `stateJson`): vanilla `getRenderShape()` and `isSuffocating(EmptyBlockGetter, origin)`.
-    /// Unknown ids answer false for both (no shadow skip, no camera push-out), unlike the shape
-    /// lookups, which resolve to the placeholder.
-    #[test]
-    fn render_shape_and_suffocation_flags_from_the_oracle() {
-        // 0 air, 1 stone, 2 glass, 3 barrier, 4 bottom slab.
-        let blocks_json = r#"{
-          "minecraft:air": { "states": [ { "id": 0, "default": true } ] },
-          "minecraft:stone": { "states": [ { "id": 1, "default": true } ] },
-          "minecraft:glass": { "states": [ { "id": 2, "default": true } ] },
-          "minecraft:barrier": { "states": [ { "id": 3, "default": true } ] },
-          "minecraft:stone_slab": { "states": [ { "id": 4, "default": true } ] }
-        }"#;
-        let blocks = BlockStates::parse(blocks_json, None).unwrap();
-        let oracle = r#"{
-          "version": 1,
-          "states": [
-            { "id": 0, "air": true, "render_shape": "invisible", "suffocating": false },
-            { "id": 1, "collision": [[0,0,0,1,1,1]], "render_shape": "model", "suffocating": true },
-            { "id": 2, "collision": [[0,0,0,1,1,1]], "render_shape": "model", "suffocating": false },
-            { "id": 3, "render_shape": "invisible", "suffocating": false },
-            { "id": 4, "collision": [[0,0,0,1,0.5,1]], "render_shape": "model", "suffocating": false }
-          ]
-        }"#;
-        let s = BlockShapes::parse_oracle(oracle, &blocks).unwrap();
-        assert!(
-            !s.render_shape_invisible(BlockStateId(1)),
-            "stone is a model"
-        );
-        assert!(
-            s.render_shape_invisible(BlockStateId(0)),
-            "air is invisible"
-        );
-        assert!(
-            s.render_shape_invisible(BlockStateId(3)),
-            "barrier is invisible"
-        );
-        assert!(
-            !s.render_shape_invisible(BlockStateId(2)),
-            "glass is a model"
-        );
-        assert!(s.is_suffocating(BlockStateId(1)), "stone suffocates");
-        assert!(
-            !s.is_suffocating(BlockStateId(2)),
-            "glass does not suffocate"
-        );
-        assert!(
-            !s.is_suffocating(BlockStateId(4)),
-            "half slab does not suffocate"
-        );
-        assert!(!s.is_suffocating(BlockStateId(0)), "air does not suffocate");
-        // Unknown ids: false for both, no panic.
-        for id in [5u32, 100, u32::MAX] {
-            assert!(!s.render_shape_invisible(BlockStateId(id)));
-            assert!(!s.is_suffocating(BlockStateId(id)));
-        }
-    }
-
-    /// Dumps from before the render_shape/suffocating regeneration: render_shape defaults to
-    /// "model" everywhere; suffocating falls back to the full-collision-cube rule (the shape
-    /// half of vanilla's default predicate — glass diverges until the dump is regenerated).
-    #[test]
-    fn old_dumps_default_to_model_and_the_full_cube_rule() {
-        // 0 air, 1 stone, 2 glass, 3 bottom slab.
-        let blocks_json = r#"{
-          "minecraft:air": { "states": [ { "id": 0, "default": true } ] },
-          "minecraft:stone": { "states": [ { "id": 1, "default": true } ] },
-          "minecraft:glass": { "states": [ { "id": 2, "default": true } ] },
-          "minecraft:stone_slab": { "states": [ { "id": 3, "default": true } ] }
-        }"#;
-        let blocks = BlockStates::parse(blocks_json, None).unwrap();
-        let oracle = r#"{
-          "version": 1,
-          "states": [
-            { "id": 1, "collision": [[0,0,0,1,1,1]] },
-            { "id": 2, "collision": [[0,0,0,1,1,1]] },
-            { "id": 3, "collision": [[0,0,0,1,0.5,1]] }
-          ]
-        }"#;
-        let s = BlockShapes::parse_oracle(oracle, &blocks).unwrap();
-        assert!(
-            !s.render_shape_invisible(BlockStateId(1)),
-            "stone stays a model"
-        );
-        assert!(s.is_suffocating(BlockStateId(1)), "full cube suffocates");
-        assert!(
-            s.is_suffocating(BlockStateId(2)),
-            "full-cube fallback (glass diverges)"
-        );
-        assert!(!s.is_suffocating(BlockStateId(3)), "half cube does not");
-    }
-
-    /// Fallback table (no oracle dump): air and fluids render no model (vanilla
-    /// `AirBlock`/`LiquidBlock` are RenderShape.INVISIBLE); suffocation uses the full-cube rule.
-    #[test]
-    fn fallback_render_shape_and_suffocation() {
-        let s = fallback_shapes();
-        let stone = BlockStateId(1);
-        assert!(!s.render_shape_invisible(stone), "stone is a model");
-        assert!(s.is_suffocating(stone), "stone suffocates (full cube)");
-        for id in [2u32, 100, u32::MAX] {
-            assert!(!s.render_shape_invisible(BlockStateId(id)));
-            assert!(!s.is_suffocating(BlockStateId(id)));
-        }
-        // Air and fluids: no model (the fallback knows their paths directly).
-        let blocks_json = r#"{
-          "minecraft:air": { "states": [ { "id": 0, "default": true } ] },
-          "minecraft:water": { "states": [ { "id": 1, "default": true } ] },
-          "minecraft:lava": { "states": [ { "id": 2, "default": true } ] }
-        }"#;
-        let blocks = BlockStates::parse(blocks_json, None).unwrap();
-        let f = BlockShapes::fallback(&blocks);
-        for id in [0u32, 1, 2] {
-            assert!(f.render_shape_invisible(BlockStateId(id)), "air/fluid {id}");
-            assert!(!f.is_suffocating(BlockStateId(id)), "no collision");
-        }
-    }
-}
+mod tests;

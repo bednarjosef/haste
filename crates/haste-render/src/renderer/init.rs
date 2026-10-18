@@ -303,6 +303,10 @@ impl Renderer {
             Arc::new(crate::mesher::AoTable::all_solid(0)),
             // Fluid faces fall back to full-if-opaque until then.
             Arc::new(crate::fluid::FluidOccluders::absent()),
+            // Terrain faces fall back to the model rule until then.
+            Arc::new(crate::mesher::FaceOccluders::absent()),
+            // No face-skip rules until then (installed with `set_shapes`).
+            Arc::new(crate::mesher::SkipTable::absent()),
         ));
         let arenas = MeshArenas::new(gpu.device.clone(), gpu.queue.clone());
         let timer = crate::timing::GpuTimer::new(&gpu.device, &gpu.queue);
@@ -384,7 +388,9 @@ impl Renderer {
             Self::gui_format_for(&gpu, surface_format),
         );
         let section_vis = Arc::new(Mutex::new(ahash::AHashMap::new()));
-        let walk = crate::occlusion::AsyncOcclusionWalker::new(section_vis.clone())?;
+        let known_empty = Arc::new(Mutex::new(ahash::AHashMap::new()));
+        let walk =
+            crate::occlusion::AsyncOcclusionWalker::new(section_vis.clone(), known_empty.clone())?;
 
         Ok(Renderer {
             gpu,
@@ -402,7 +408,11 @@ impl Renderer {
             sections: crate::section_slab::SectionSlab::new(),
             arenas,
             section_vis,
+            known_empty,
             visible_mask: Default::default(),
+            want_version: 0,
+            want_look: None,
+            want_frustum: None,
             camera_spectator: false,
             cull_sections: true,
             visible_for: None,
@@ -412,7 +422,6 @@ impl Renderer {
             bonus_dirty: false,
             walk,
             vis_dirty: false,
-            last_walk: std::time::Instant::now(),
             min_section: -4,
             section_count: 24,
             view_distance: 32,

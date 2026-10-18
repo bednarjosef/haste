@@ -476,7 +476,7 @@ fn skip_potion_effect(r: &mut Reader<'_>) -> DecodeResult<()> {
 }
 
 /// `Consume Effect` (type ids are the wiki's: 0 apply_effects .. 4 play_sound).
-fn skip_consume_effect(r: &mut Reader<'_>) -> DecodeResult<()> {
+pub(crate) fn skip_consume_effect(r: &mut Reader<'_>) -> DecodeResult<()> {
     match r.var_int()? {
         0 => {
             r.list(MAX_LIST, |r| skip_potion_effect(r))?;

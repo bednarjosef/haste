@@ -82,6 +82,7 @@ impl Renderer {
         self.min_section = dim.min_section();
         self.section_count = dim.section_count() as i32;
         self.section_vis.lock().clear();
+        self.known_empty.lock().clear();
         self.visible_for = None;
         self.scheduled_for = None;
         self.walk_in_flight = false;
@@ -136,6 +137,12 @@ impl Renderer {
     /// `options.entityDistanceScaling`, 0.5..=5.0).
     pub fn set_view_scale(&mut self, scale: f32) {
         self.entity.set_view_scale(scale);
+    }
+
+    /// Vanilla `Options.cloudStatus` (options.txt `renderClouds`): OFF draws no cloud pass,
+    /// FAST the flat cells, FANCY the extruded boxes.
+    pub fn set_cloud_status(&mut self, status: crate::clouds::CloudStatus) {
+        self.clouds.set_status(status);
     }
 
     /// Number of shadow quads batched for the last frame (tests/reporting).

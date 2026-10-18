@@ -8,23 +8,28 @@
 
 mod culling;
 mod dispatch;
+mod face_occlusion;
+mod fluid_view;
 mod lighting;
 mod merge;
 mod sink;
+mod skip;
 mod snapshot;
 mod tables;
 #[cfg(test)]
 mod tests;
 
 pub use dispatch::{Mesher, SnapshotSource};
+pub use face_occlusion::FaceOccluders;
+pub use skip::SkipTable;
 pub use snapshot::MeshSnapshot;
 pub use tables::{AoTable, MeshTables};
 
 use haste_assets::RenderLayer;
 use haste_core::{BlockPos, BlockStateId, SectionPos};
 
-use crate::fluid_occlusion::Occluder;
 use crate::vertex::{pack_ao_shade, pack_light, PackedVertex};
+use fluid_view::FluidView;
 use lighting::{shade_index, vertex_light_for};
 use merge::{flush_staged, merge_face, MergeFace, MergeKey, MergeQuad, StagedQuad};
 use sink::{layer_index, MeshSink};
@@ -380,23 +385,30 @@ pub fn mesh_section_with(
                     let mut tint: Option<u32> = None;
 
                     for quad in &info.quads {
-                        // Cullface: skip the face when the neighbour is a full
-                        // opaque block (vanilla's model culling), or when the
-                        // neighbour's opaque quads cover this quad's extent on
-                        // the shared plane (vanilla `Block.shouldRenderFace`'s
-                        // shape comparison: snow layers against snow layers,
-                        // slabs against slabs).
+                        // Cullface: vanilla `Block.shouldRenderFace`: the state's
+                        // skipRendering rule (skip.rs), then the dump's occlusion
+                        // shapes; None on an old dump keeps the model rule
+                        // (full-opaque neighbour, or the neighbour's opaque quads
+                        // covering this quad's extent on the shared plane).
                         if let Some(cull) = quad.cullface {
                             let o = cull.offset();
                             let neighbor = ctx.cell(lx + 1 + o[0], ly + 1 + o[1], lz + 1 + o[2]);
-                            if ctx.baked.is_full_opaque(neighbor.state) {
-                                continue;
-                            }
-                            if ctx
-                                .state_info(neighbor.state)
-                                .cover
-                                .covers(cull, &quad.positions)
-                            {
+                            let visible = !ctx.tables.skip.skips(state, neighbor.state, cull)
+                                && match ctx.tables.face_occluders.should_render_face(
+                                    state,
+                                    neighbor.state,
+                                    cull,
+                                ) {
+                                    Some(v) => v,
+                                    None => {
+                                        !ctx.baked.is_full_opaque(neighbor.state)
+                                            && !ctx
+                                                .state_info(neighbor.state)
+                                                .cover
+                                                .covers(cull, &quad.positions)
+                                    }
+                                };
+                            if !visible {
                                 continue;
                             }
                         }
@@ -481,31 +493,6 @@ pub fn mesh_section_with(
             removed: false,
         }
     })
-}
-
-/// The snapshot as the fluid mesher sees it.
-struct FluidView<'a> {
-    snapshot: &'a MeshSnapshot,
-    baked: &'a haste_assets::BakedBlockModels,
-    /// Per-state occlusion shapes (`fluid/occlusion.rs`).
-    occluders: &'a crate::fluid::FluidOccluders,
-}
-
-impl crate::fluid::FluidWorld for FluidView<'_> {
-    fn state(&self, p: BlockPos) -> BlockStateId {
-        self.snapshot.block_state(p)
-    }
-    fn opaque(&self, p: BlockPos) -> bool {
-        self.baked.is_full_opaque(self.snapshot.block_state(p))
-    }
-    fn solid(&self, p: BlockPos) -> bool {
-        crate::fluid::baked_solid(self.baked, self.snapshot.block_state(p))
-    }
-    fn face_occluder(&self, p: BlockPos, _dir: haste_assets::Direction) -> Occluder<'_> {
-        let state = self.snapshot.block_state(p);
-        self.occluders
-            .occluder(state, || self.baked.is_full_opaque(state))
-    }
 }
 
 /// Max of two packed (sky, block) light values per channel.

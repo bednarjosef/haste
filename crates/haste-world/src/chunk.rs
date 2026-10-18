@@ -3,12 +3,13 @@
 use haste_core::chunk::{BlockEntityData, ChunkData, LightData};
 use haste_core::{BiomeId, BlockPos, BlockStateId, ChunkPos, SectionPos};
 
-use crate::light::NibbleArray;
+use crate::light::{NibbleArray, SkyLight};
 use crate::palette::{BiomeContainer, BlockContainer, DecodedSection, PaletteError};
 
 /// One 16x16x16 section of a chunk.
 pub struct Section {
-    /// Number of non-air blocks (vanilla's `block_count`); used to skip empty sections.
+    /// Number of non-air blocks (vanilla's `block_count`); the mesher's feed skips
+    /// sections that are empty and were never meshed.
     pub block_count: i16,
     /// Number of fluid blocks as the server sent it (not maintained by `set`); 0 lets the
     /// mesher skip fluid work for the section.
@@ -69,19 +70,41 @@ impl Heightmap {
     }
 }
 
-/// Sky and block light per section, parallel to `Chunk::sections`.
+/// Sky and block light per section, parallel to `Chunk::sections`. Sky light follows
+/// vanilla `DataLayer`: absent or uniform sections keep no array (see `SkyLight`), so a
+/// section costs heap memory only when its light genuinely varies.
 #[derive(Default)]
 pub struct ChunkLight {
-    pub sky: Vec<Option<NibbleArray>>,
+    pub sky: Vec<SkyLight>,
     pub block: Vec<NibbleArray>,
 }
 
 impl ChunkLight {
     pub(crate) fn new(section_count: usize) -> Self {
         Self {
-            sky: vec![None; section_count],
+            sky: vec![SkyLight::Absent; section_count],
             block: vec![NibbleArray::default(); section_count],
         }
+    }
+
+    /// Heap bytes of the stored light (the `World::memory_stats` light half): one owned
+    /// 2048-byte array (an `Arc` allocation: 2048 + 16 header) per section whose light
+    /// genuinely varies — uniform sky sections are one byte, absent ones nothing, and
+    /// all-zero block light shares one array — plus the Vec slots themselves.
+    pub fn heap_bytes(&self) -> u64 {
+        let arrays = self
+            .sky
+            .iter()
+            .filter(|s| matches!(s, SkyLight::Array(_)))
+            .count() as u64
+            + self
+                .block
+                .iter()
+                .filter(|s| !(s.all_zero() || s.all_full()))
+                .count() as u64;
+        arrays * (2048 + 16)
+            + (self.sky.capacity() * std::mem::size_of::<SkyLight>()
+                + self.block.capacity() * std::mem::size_of::<NibbleArray>()) as u64
     }
 }
 
@@ -261,9 +284,13 @@ impl Chunk {
     }
 
     /// Appends this chunk's dirty sections to `out` (in section order), clearing the
-    /// bits as they go. Sections with no blocks are skipped: they mesh to nothing and
-    /// their neighbours do not change with them (vanilla's chunk cache drops them the
-    /// same way, `LevelChunkSection.hasOnlyAir`).
+    /// bits as they go. Every dirty section is reported, empty ones included: vanilla's
+    /// `SectionUpdateTracker.setDirty` marks regardless of contents and
+    /// `SectionRenderDispatcher.RenderSection.CompileTask` stores an empty mesh for a
+    /// section that compiled to nothing, replacing the old one. Skipping a section that
+    /// became empty would leave the renderer holding its previous mesh (a ghost block);
+    /// the load-time cost of reporting air sections is filtered by the client's feed
+    /// (`WorldFeed`, which never submits an empty section it has not meshed before).
     pub(crate) fn take_dirty(&mut self, out: &mut Vec<SectionPos>) {
         for (w, word) in self.dirty.iter_mut().enumerate() {
             let mut bits = *word;
@@ -271,13 +298,6 @@ impl Chunk {
                 let b = bits.trailing_zeros() as usize;
                 bits &= bits - 1;
                 let y = self.min_section + (w * 64 + b) as i32;
-                if self
-                    .sections
-                    .get(w * 64 + b)
-                    .is_some_and(|s| s.block_count == 0)
-                {
-                    continue;
-                }
                 out.push(SectionPos::new(self.pos.x, y, self.pos.z));
             }
             *word = 0;
@@ -300,8 +320,8 @@ mod tests {
     use super::*;
 
     /// A chunk with `sections` stone-filled sections (the dirty bitset is what these
-    /// tests exercise; the contents only need to be non-empty since `take_dirty`
-    /// skips air sections).
+    /// tests exercise; the contents are irrelevant to it, every dirty section is
+    /// reported whatever it holds).
     fn chunk_with_sections(sections: usize, min_section: i32) -> Chunk {
         let cd = synthetic_chunk_data(
             ChunkPos::new(1, -2),

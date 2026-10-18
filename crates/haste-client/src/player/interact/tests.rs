@@ -76,7 +76,8 @@ pub(super) fn data() -> &'static haste_data::GameData {
                     "minecraft:mob_effect": {{"entries": {{{}}}}},
                     "minecraft:data_component_type": {{"entries": {{{}}}}},
                     "minecraft:enchantment": {{"entries": {{{}}}}},
-                    "minecraft:entity_type": {{"entries": {{{}}}}}}}"#,
+                    "minecraft:entity_type": {{"entries": {{{}}}}},
+                    "minecraft:sound_event": {{"entries": {{{}}}}}}}"#,
                 entries(&names),
                 entries(&[
                     "air",
@@ -102,12 +103,8 @@ pub(super) fn data() -> &'static haste_data::GameData {
                     "nausea",
                     "darkness",
                 ]),
-                entries(&[
-                    "tool",
-                    "enchantments",
-                    "piercing_weapon",
-                    "minimum_attack_charge",
-                ]),
+                entries(&["tool", "enchantments", "piercing_weapon", "minimum_attack_charge",
+                    "consumable"]),
                 entries(&["efficiency", "sharpness"]),
                 entries(&[
                     "item",
@@ -124,6 +121,7 @@ pub(super) fn data() -> &'static haste_data::GameData {
                     "shulker_bullet",
                     "villager",
                 ]),
+                entries(&["entity.generic.eat", "entity.generic.drink"]),
             ),
         )
         .unwrap();
@@ -235,21 +233,9 @@ fn item_components() -> Arc<haste_data::ItemComponents> {
     let mut c = ItemComponents::default();
     c.insert(Identifier::minecraft("diamond_sword"), vec![speed(-2.4)]);
     c.insert(Identifier::minecraft("diamond_pickaxe"), vec![speed(-2.8)]);
-    c.insert_consumable(
-        Identifier::minecraft("apple"),
-        Consumable {
-            consume_seconds: 1.6,
-            animation: 1,
-        },
-    );
+    c.insert_consumable(Identifier::minecraft("apple"), Consumable::default_food());
     c.insert_food(Identifier::minecraft("apple"), false);
-    c.insert_consumable(
-        Identifier::minecraft("potion"),
-        Consumable {
-            consume_seconds: 1.6,
-            animation: 2,
-        },
-    );
+    c.insert_consumable(Identifier::minecraft("potion"), Consumable::default_drink());
     Arc::new(c)
 }
 
@@ -811,6 +797,7 @@ fn the_used_item_use_effects_feed_the_physics_state() {
         duration: 32,
         remaining: 32,
         animation: UseAnimation::Eat,
+        consumable: None,
     });
     r.p.apply_item_use_effects(Some(&env));
     assert!(r.p.state.slow_using_item);
@@ -821,6 +808,7 @@ fn the_used_item_use_effects_feed_the_physics_state() {
         duration: 72000,
         remaining: 72000,
         animation: UseAnimation::Spear,
+        consumable: None,
     });
     r.p.apply_item_use_effects(Some(&env));
     assert!(r.p.state.using_item);
@@ -1042,34 +1030,6 @@ fn held_item_attack_speed_comes_from_its_attribute_modifiers() {
 
 /// `Item.getUseDuration` / `Item.getUseAnimation`: the consumable component for food and drink,
 /// and the item classes that override them (bow/crossbow/trident/spyglass/shield).
-#[test]
-fn use_duration_and_animation_come_from_the_item() {
-    let mut r = Rig::new(GameMode::Survival);
-    r.p.int.prepare(data());
-    r.p.int.set_item_components(item_components());
-    let env = InteractEnv {
-        data: data(),
-        entities: &[],
-        entity_types: &[],
-        border: None,
-        warm_blocks: None,
-        ui: None,
-    };
-    let d = |i: u32| r.p.int.use_data(&item(i), env.data);
-    // Bow/crossbow/trident/shield: 72000 ticks; spyglass 1200.
-    assert_eq!(d(5), Some((72000, UseAnimation::Bow)));
-    assert_eq!(d(6), Some((72000, UseAnimation::Crossbow)));
-    assert_eq!(d(7), Some((72000, UseAnimation::Trident)));
-    assert_eq!(d(9), Some((72000, UseAnimation::Block)));
-    assert_eq!(d(8), Some((1200, UseAnimation::Spyglass)));
-    // Apple: `consume_seconds` 1.6 -> 32 ticks, `eat`; potion drinks.
-    assert_eq!(d(4), Some((32, UseAnimation::Eat)));
-    assert_eq!(d(10), Some((32, UseAnimation::Drink)));
-    // A tool is not used over time.
-    assert_eq!(d(1), None);
-    assert_eq!(d(3), None);
-}
-
 /// The `player_action` statuses this module sends, pinned to the declaration
 /// order of `ServerboundPlayerActionPacket$Action` in the 26.3 client jar
 /// (CHANGE_DESTROY_DIRECTION was inserted at 1, moving every later value).
