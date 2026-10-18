@@ -66,11 +66,21 @@ pub struct GpuTimer {
     ran_sub: [bool; 8],
     pub latest: [f32; 3],
     pub latest_sub: [f32; 8],
+    /// Frames rendered so far; sub-pass brackets run on multiples of
+    /// [`SUBPASS_SAMPLE_FRAMES`].
+    frame: u32,
 }
 
 /// Total query slots: 2 per pass plus 2 per main-pass sub-pass bracket.
 const SUB_BASE: u32 = (PASSES.len() as u32) * 2;
 const QUERY_COUNT: u32 = SUB_BASE + (MAIN_SUBPASSES.len() as u32) * 2;
+
+/// Sub-pass brackets are written only every Nth frame: on RADV (Radeon 860M) each
+/// inside-pass timestamp write costs ~0.15 ms of GPU time, so the 16 bracket writes
+/// a frame costs ~2.5 ms — far too much to pay every frame just for attribution
+/// (measured at rd 32: frame interval 11.6 ms with brackets, 9.1 ms without). The
+/// pass begin/end timestamps stay every frame; they cost nothing measurable.
+const SUBPASS_SAMPLE_FRAMES: u32 = 64;
 
 impl GpuTimer {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Option<GpuTimer> {
@@ -111,6 +121,7 @@ impl GpuTimer {
             ran_sub: [false; 8],
             latest: [0.0; 3],
             latest_sub: [0.0; 8],
+            frame: 0,
         })
     }
 
@@ -125,17 +136,34 @@ impl GpuTimer {
 
     /// Begin sub-pass `i`'s bracket: one timestamp write inside `pass`. Each query may be
     /// written at most once per pass, so a bracket that is already open must not begin again.
-    /// No-op while the previous readback is still pending.
-    pub fn begin_subpass(&self, pass: &mut wgpu::RenderPass<'_>, i: u32) {
-        if !self.in_flight {
+    /// No-op while the previous readback is still pending or on a frame that does not sample
+    /// sub-passes (every [`SUBPASS_SAMPLE_FRAMES`]th); returns whether the bracket was
+    /// written, so the caller's `ran_sub` flag matches what the readback will contain.
+    pub fn begin_subpass(&self, pass: &mut wgpu::RenderPass<'_>, i: u32) -> bool {
+        if !self.in_flight && self.frame.is_multiple_of(SUBPASS_SAMPLE_FRAMES) {
             pass.write_timestamp(&self.query_set, SUB_BASE + i * 2);
+            true
+        } else {
+            false
         }
     }
 
-    /// End sub-pass `i`'s bracket.
+    /// End sub-pass `i`'s bracket. No-op unless this frame samples sub-passes (the same
+    /// condition as [`begin_subpass`], so the pair always matches).
     pub fn end_subpass(&self, pass: &mut wgpu::RenderPass<'_>, i: u32) {
-        if !self.in_flight {
+        if !self.in_flight && self.frame.is_multiple_of(SUBPASS_SAMPLE_FRAMES) {
             pass.write_timestamp(&self.query_set, SUB_BASE + i * 2 + 1);
+        }
+    }
+
+    /// Ends every open terrain sub-pass bracket (indices 1..=4: the four section
+    /// layers), for a layer change or the entity insertion before translucent.
+    pub fn close_terrain(&self, pass: &mut wgpu::RenderPass<'_>, sub_open: &mut [bool; 8]) {
+        for (s, open) in sub_open.iter_mut().enumerate().take(5).skip(1) {
+            if *open {
+                self.end_subpass(pass, s as u32);
+                *open = false;
+            }
         }
     }
 
@@ -147,6 +175,7 @@ impl GpuTimer {
         ran: [bool; 3],
         ran_sub: [bool; 8],
     ) -> bool {
+        self.frame = self.frame.wrapping_add(1);
         if self.in_flight {
             return false;
         }
@@ -198,11 +227,12 @@ impl GpuTimer {
             }
             for i in 0..MAIN_SUBPASSES.len() {
                 let (lo, hi) = (SUB_BASE as usize + i * 2, SUB_BASE as usize + i * 2 + 1);
-                self.latest_sub[i] = if self.ran_sub[i] && t[hi] >= t[lo] {
-                    ms(t[lo], t[hi])
-                } else {
-                    0.0
-                };
+                // Not run this readback (brackets are only sampled every
+                // SUBPASS_SAMPLE_FRAMES): keep the last sampled value, like the
+                // pass times keep theirs while a readback is pending.
+                if self.ran_sub[i] && t[hi] >= t[lo] {
+                    self.latest_sub[i] = ms(t[lo], t[hi]);
+                }
             }
         }
         self.readback.unmap();

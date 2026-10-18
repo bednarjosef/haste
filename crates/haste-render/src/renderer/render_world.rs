@@ -435,11 +435,19 @@ impl Renderer {
                 emit(&mut buckets, pos);
             }
         }
+        // Group the opaque buckets by arena: the draw loop issues one multi-draw-indirect
+        // call per run sharing a layer and an arena, and the visit order interleaves the
+        // arenas (a section's arena is where its mesh fit, unrelated to the walk), so
+        // ungrouped the runs average a few sections and the frame pays thousands of draw
+        // dispatches (2232 measured at rd 32 over 16 arenas). Depth-tested layers do not
+        // depend on order (terrain faces never coincide), so regrouping keeps the picture
+        // identical. Translucent stays back to front.
+        for b in buckets.iter_mut().take(3) {
+            b.sort_unstable_by_key(|d| d.arena);
+        }
         // Translucent back to front: the key is the negated distance, so
         // ascending key order is far first.
-        if buckets[3].len() > 1 {
-            buckets[3].sort_unstable_by(|a, b| a.key.total_cmp(&b.key));
-        }
+        buckets[3].sort_unstable_by(|a, b| a.key.total_cmp(&b.key));
         let mut draws = std::mem::take(&mut self.draw_list);
         draws.clear();
         for b in buckets.iter() {
@@ -542,27 +550,12 @@ impl Renderer {
         }
 
         self.timings.cull_ms = lap(&mut mark);
-        // Close the open terrain bracket (main-pass sub-passes 1..=4), for a layer change or
-        // the entity insertion. One bracket per layer across all arenas: the layer-major draw
-        // order makes each layer's draws contiguous, and a wgpu query may only be written once
-        // per pass.
-        fn close_terrain(
-            pass: &mut wgpu::RenderPass<'_>,
-            t: &crate::timing::GpuTimer,
-            sub_open: &mut [bool; 8],
-        ) {
-            for (s, open) in sub_open.iter_mut().enumerate().take(5).skip(1) {
-                if *open {
-                    t.end_subpass(pass, s as u32);
-                    *open = false;
-                }
-            }
-        }
         let mut ran = [false; 3];
-        // Main-pass sub-pass bracket state (timing.rs MAIN_SUBPASSES order): a bracket is
-        // open when its layer began drawing and not yet ended. Solid and CutoutMipped share
-        // one pipeline but get separate brackets ("solid" 1, "cutout_mipped" 3), since their
-        // arena runs interleave in the layer-major draw order.
+        // Main-pass sub-pass bracket state (timing.rs MAIN_SUBPASSES order): a bracket
+        // is open when its layer began drawing and not yet ended; `GpuTimer::close_terrain`
+        // ends the open terrain brackets (a wgpu query may only be written once per pass).
+        // Solid and CutoutMipped share one pipeline but get separate brackets ("solid" 1,
+        // "cutout_mipped" 3), since their arena runs interleave.
         let mut sub_open = [false; 8];
         let mut ran_sub = [false; 8];
         let mut draw_calls = 0u32;
@@ -603,7 +596,7 @@ impl Renderer {
                 multiview_mask: None,
             });
             if let Some(t) = self.timer.as_ref() {
-                t.begin_subpass(&mut pass, 0);
+                ran_sub[0] |= t.begin_subpass(&mut pass, 0);
                 sub_open[0] = true;
             }
             draw_calls += self.sky.draw_background(&mut pass);
@@ -629,9 +622,8 @@ impl Renderer {
                 // Entities after the opaque and cutout terrain, before translucent.
                 if !entities_drawn && d.layer == haste_assets::RenderLayer::Translucent {
                     if let Some(t) = self.timer.as_ref() {
-                        close_terrain(&mut pass, t, &mut sub_open);
-                        t.begin_subpass(&mut pass, 5);
-                        ran_sub[5] = true;
+                        t.close_terrain(&mut pass, &mut sub_open);
+                        ran_sub[5] |= t.begin_subpass(&mut pass, 5);
                         sub_open[5] = true;
                     }
                     // Vanilla draws the entity shadows (a translucent, depth-tested pass) with
@@ -647,6 +639,15 @@ impl Renderer {
                     draw_calls += self.entity.draw_portals(&mut pass);
                     draw_calls += self.entity.draw_beams(&mut pass);
                     pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+                    // End the entity bracket before the translucent terrain that follows
+                    // (the layer change below opens its own): without this end the
+                    // translucent draws would be attributed to "entities".
+                    if let Some(t) = self.timer.as_ref() {
+                        if sub_open[5] {
+                            t.end_subpass(&mut pass, 5);
+                            sub_open[5] = false;
+                        }
+                    }
                     entities_drawn = true;
                     bound_layer = None;
                     bound_arena = u32::MAX;
@@ -664,9 +665,8 @@ impl Renderer {
                     };
                     if let Some(t) = self.timer.as_ref() {
                         // Close the previous terrain bracket, open the new layer's.
-                        close_terrain(&mut pass, t, &mut sub_open);
-                        t.begin_subpass(&mut pass, sub);
-                        ran_sub[sub as usize] = true;
+                        t.close_terrain(&mut pass, &mut sub_open);
+                        ran_sub[sub as usize] |= t.begin_subpass(&mut pass, sub);
                         sub_open[sub as usize] = true;
                     }
                     pass.set_pipeline(pipeline);
@@ -705,9 +705,8 @@ impl Renderer {
             }
             if !entities_drawn {
                 if let Some(t) = self.timer.as_ref() {
-                    close_terrain(&mut pass, t, &mut sub_open);
-                    t.begin_subpass(&mut pass, 5);
-                    ran_sub[5] = true;
+                    t.close_terrain(&mut pass, &mut sub_open);
+                    ran_sub[5] |= t.begin_subpass(&mut pass, 5);
                     sub_open[5] = true;
                 }
                 draw_calls += self.entity.draw_shadows(&mut pass);
@@ -718,12 +717,14 @@ impl Renderer {
                 draw_calls += self.entity.draw_beams(&mut pass);
             }
             if let Some(t) = self.timer.as_ref() {
+                // The last terrain layer (translucent, after the entities) leaves its
+                // bracket open: close it so its timestamp pair is complete.
+                t.close_terrain(&mut pass, &mut sub_open);
                 if sub_open[5] {
                     t.end_subpass(&mut pass, 5);
                     sub_open[5] = false;
                 }
-                t.begin_subpass(&mut pass, 6);
-                ran_sub[6] = true;
+                ran_sub[6] |= t.begin_subpass(&mut pass, 6);
                 sub_open[6] = true;
             }
             draw_calls += self.particles.draw(&mut pass);
@@ -732,8 +733,7 @@ impl Renderer {
                     t.end_subpass(&mut pass, 6);
                     sub_open[6] = false;
                 }
-                t.begin_subpass(&mut pass, 7);
-                ran_sub[7] = true;
+                ran_sub[7] |= t.begin_subpass(&mut pass, 7);
                 sub_open[7] = true;
             }
             draw_calls += self.overlay.draw(&mut pass);
