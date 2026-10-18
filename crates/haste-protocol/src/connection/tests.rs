@@ -13,15 +13,27 @@ use rsa::{Pkcs1v15Encrypt, RsaPrivateKey};
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
+use super::test_imports::*;
 use super::*;
+use crate::nbt::NbtCompound;
 use crate::packets::configuration::clientbound as ccb;
+use crate::packets::configuration::clientbound::RegistryEntry;
+use crate::packets::configuration::serverbound::KnownPack;
+use crate::packets::configuration::ClientboundConfiguration;
 use crate::packets::configuration::ServerboundConfiguration;
+use crate::packets::handshake::serverbound::INTENT_STATUS;
+use crate::packets::handshake::serverbound::INTENT_TRANSFER;
 use crate::packets::handshake::ServerboundHandshake;
 use crate::packets::login::clientbound as lcb;
+use crate::packets::login::ClientboundLogin;
 use crate::packets::login::ServerboundLogin;
 use crate::packets::play::clientbound as pcb;
+use crate::packets::play::{self};
 use crate::packets::status::ServerboundStatus as ServerboundStatusAlias;
-use crate::packets::PacketIds;
+use crate::packets::status::{self, ClientboundStatus};
+use crate::packets::{Decoded, Packet, PacketIds};
+use crate::wire::Reader;
+use crate::wire::Writer;
 
 const FAKE_UNKNOWN: &str = "minecraft:fake_unknown";
 
