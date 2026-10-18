@@ -1,5 +1,6 @@
 package haste.recorder.client.mixin;
 
+import haste.recorder.client.FrameTimes;
 import haste.recorder.client.HasteHooks;
 import haste.recorder.client.RecorderIO;
 import net.minecraft.client.Minecraft;
@@ -21,6 +22,7 @@ public abstract class MinecraftMixin {
     @Inject(method = "runTick", at = @At("HEAD"))
     private void haste$benchFrame(boolean renderLevel, CallbackInfo ci) {
         long now = System.nanoTime();
+        FrameTimes.frame(now);
         if (haste$lastFrameNanos != 0 && HasteHooks.benchRunning) {
             double frameMs = (now - haste$lastFrameNanos) / 1e6;
             // Section/draw-call counts are not reachable from here yet; the testkit treats

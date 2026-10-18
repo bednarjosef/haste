@@ -72,7 +72,7 @@ public final class Scenario {
             String rest = line.substring(op.length()).strip();
             String[] args = rest.isEmpty() ? new String[0] : rest.split("\\s+");
             switch (op) {
-                case "wait", "fps", "wait_world", "cmd", "look", "hud", "screen", "chat", "screenshot",
+                case "wait", "fps", "frametimes", "wait_world", "cmd", "look", "hud", "screen", "chat", "screenshot",
                      "record", "slot", "quit", "log", "dump_models", "dump_block_sounds" -> {}
                 default -> throw new IOException(file + ":" + n + ": unknown step '" + op + "'");
             }
@@ -153,6 +153,24 @@ public final class Scenario {
                         mc.getWindow().getWidth(), mc.getWindow().getHeight());
                 }
                 return stepTicks + 1 >= Integer.parseInt(a[0]) * 20;
+            }
+            case "frametimes" -> {
+                // Records every frame's time for <seconds> seconds without moving the camera and
+                // writes the summary to cache/oracle/26.3/bench/<name>.json (FrameTimes).
+                if (!stepStarted) {
+                    stepStarted = true;
+                    FrameTimes.start();
+                    return false;
+                }
+                if (stepTicks + 1 < Integer.parseInt(a[0]) * 20) return false;
+                try {
+                    RecorderIO.LOGGER.info("haste-recorder: {}", FrameTimes.finish(a[1],
+                        mc.options.getEffectiveRenderDistance(),
+                        mc.getWindow().getWidth(), mc.getWindow().getHeight()));
+                } catch (IOException e) {
+                    throw new IllegalStateException("writing frametimes", e);
+                }
+                return true;
             }
             case "wait_world" -> {
                 // Ready = no screen, the player's own chunk is loaded, every visible section is
