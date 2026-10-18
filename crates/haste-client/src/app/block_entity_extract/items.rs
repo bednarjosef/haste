@@ -1,3 +1,144 @@
+use haste_protocol::haste_core::BlockPos;
+
+use super::BlockEntityExtractor;
+
+impl BlockEntityExtractor {
+    /// The item or mob payload of a block entity (campfire items, shelf items, a vault's
+    /// displayed item, a brushable block's item, a spawner's display mob), parsed from the
+    /// block entity's NBT only when the payload changes and cached per position (the same
+    /// (pointer, length) scheme as the sign text). Kinds with no payload are handed back
+    /// unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn item_block_kind(
+        &mut self,
+        pos: BlockPos,
+        be: &haste_core::chunk::BlockEntityData,
+        kind: haste_render::BlockEntityKind,
+        type_name: &haste_core::Identifier,
+        blocks: &haste_data::BlockStates,
+        state: haste_core::BlockStateId,
+        registries: &haste_data::Registries,
+        spin: (f32, f32),
+    ) -> haste_render::BlockEntityKind {
+        use haste_render::blockentity::{BrushableItem, CampfireItems, ShelfItems, VaultDisplay};
+        let payload = matches!(
+            kind,
+            haste_render::BlockEntityKind::Campfire(_)
+                | haste_render::BlockEntityKind::Spawner(_)
+                | haste_render::BlockEntityKind::Vault(_)
+                | haste_render::BlockEntityKind::Shelf(_)
+                | haste_render::BlockEntityKind::Brushable(_)
+        );
+        if !payload {
+            return kind;
+        }
+        let key = (be.nbt.as_ptr() as usize, be.nbt.len());
+        if let Some((k, len, cached)) = self.item_blocks.get(&pos) {
+            if (*k, *len) == key {
+                return cached.clone();
+            }
+        }
+        let parsed = match kind {
+            // The campfire's and the shelf's items, by slot (`ContainerHelper.loadAllItems`).
+            haste_render::BlockEntityKind::Campfire(_) => {
+                let mut items = [None; 4];
+                parse_items_into(&be.nbt, registries, &mut items);
+                haste_render::BlockEntityKind::Campfire(CampfireItems { items })
+            }
+            haste_render::BlockEntityKind::Shelf(_) => {
+                let mut items = [None; 3];
+                parse_items_into(&be.nbt, registries, &mut items);
+                let align = read_nbt(&be.nbt)
+                    .and_then(|doc| doc.root_tag.get_bool("align_items_to_bottom"))
+                    .unwrap_or(false);
+                haste_render::BlockEntityKind::Shelf(ShelfItems {
+                    items,
+                    align_to_bottom: align,
+                })
+            }
+            // The vault's displayed item lives under `shared_data.display_item`; it draws only
+            // when the shared data has one (vanilla `VaultBlockEntity.Client
+            // .shouldDisplayActiveEffects` is `hasDisplayItem`).
+            haste_render::BlockEntityKind::Vault(_) => {
+                match parse_item_stack_path(&be.nbt, &["shared_data", "display_item"], registries) {
+                    Some((item, count)) => haste_render::BlockEntityKind::Vault(VaultDisplay {
+                        item,
+                        count,
+                        spin: haste_render::TickPair {
+                            start: spin.0,
+                            end: spin.1,
+                        },
+                    }),
+                    None => kind,
+                }
+            }
+            // The brushable block's item (its `item` tag) and the block state's `dusted`; the
+            // face it is brushed from is not in the NBT until it has been brushed, so it stays
+            // `None` and the item is drawn only while that face is known.
+            haste_render::BlockEntityKind::Brushable(_) => {
+                let dusted = blocks
+                    .property_value(state, "dusted")
+                    .and_then(|v| v.parse::<u8>().ok())
+                    .unwrap_or(0);
+                match (
+                    parse_item_stack_path(&be.nbt, &["item"], registries),
+                    // Vanilla stores `hit_direction` as `Direction.LEGACY_ID_CODEC`, a byte of
+                    // the direction's 3D data value (`BrushableBlockEntity.getUpdateTag`); read
+                    // it as any numeric, like vanilla's lenient `ValueInput`.
+                    read_nbt(&be.nbt)
+                        .and_then(|doc| doc.root_tag.get_numeric_short("hit_direction"))
+                        .and_then(|v| haste_core::Direction::from_ordinal(v as u8)),
+                ) {
+                    (Some((item, _)), hit_direction) => {
+                        haste_render::BlockEntityKind::Brushable(BrushableItem {
+                            item,
+                            hit_direction,
+                            dusted,
+                        })
+                    }
+                    (None, _) => kind,
+                }
+            }
+            // The spawner's display mob: the model from `SpawnData`'s (a trial spawner's
+            // `spawn_data`'s) entity id, and the spin the game tick keeps.
+            haste_render::BlockEntityKind::Spawner(_) => {
+                let trial =
+                    type_name.namespace() == "minecraft" && type_name.path() == "trial_spawner";
+                // A trial spawner has no display entity outside the states with a spinning mob
+                // (vanilla `TrialSpawnerStateData.getOrCreateDisplayEntity`).
+                let spinning = !trial
+                    || matches!(
+                        blocks
+                            .property_value(state, "trial_spawner_state")
+                            .unwrap_or(""),
+                        "waiting_for_players" | "active"
+                    );
+                let entity = spinning
+                    .then(|| spawner_entity_id(&be.nbt, trial))
+                    .flatten()
+                    .and_then(|id| registries.index("minecraft:entity_type", &id))
+                    .and_then(haste_entity::registry::model_for);
+                match entity {
+                    Some(model) => haste_render::BlockEntityKind::Spawner(
+                        haste_render::blockentity::SpawnerDisplay {
+                            model: Some(model.clone()),
+                            spin: haste_render::TickPair {
+                                start: spin.0,
+                                end: spin.1,
+                            },
+                            scale: haste_render::blockentity::spawner_scale(&model),
+                        },
+                    ),
+                    None => kind,
+                }
+            }
+            other => other,
+        };
+        self.item_blocks.insert(pos, (key.0, key.1, parsed.clone()));
+        parsed
+    }
+}
+
 /// Reads a block entity's NBT payload (the network variant `read_unnamed` reads). `None` when
 /// the payload does not parse, like vanilla's empty stack.
 pub(super) fn read_nbt(nbt: &[u8]) -> Option<haste_protocol::nbt::Nbt> {

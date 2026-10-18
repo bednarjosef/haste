@@ -1,3 +1,30 @@
+use std::sync::Arc;
+
+use haste_protocol::haste_core::BlockPos;
+
+use super::BlockEntityExtractor;
+
+impl BlockEntityExtractor {
+    /// The parsed decorated pot sherds at `pos` (`DecoratedPotBlockEntity`'s `sherds` NBT).
+    /// Cached like the banner patterns: re-parsed only when the payload changes.
+    pub(super) fn pot_sherds(
+        &mut self,
+        pos: BlockPos,
+        be: &haste_core::chunk::BlockEntityData,
+    ) -> Option<Arc<haste_render::blockentity::PotSherds>> {
+        let key = (be.nbt.as_ptr() as usize, be.nbt.len());
+        if let Some((k, len, data)) = self.pot_sherds_cache.get(&pos) {
+            if (*k, *len) == key {
+                return Some(data.clone());
+            }
+        }
+        let parsed = Arc::new(parse_pot_sherds(&be.nbt));
+        self.pot_sherds_cache
+            .insert(pos, (key.0, key.1, parsed.clone()));
+        Some(parsed)
+    }
+}
+
 /// The pottery pattern a sherd item names (vanilla's item
 /// `minecraft:provides_pottery_pattern` component against `DecoratedPotPattern`'s asset id):
 /// `minecraft:angler_pottery_sherd` -> `minecraft:angler`. `minecraft:brick` (the blank sherd)

@@ -1,6 +1,8 @@
 // Tests for the block entity extraction's parsing (moved from app.rs with the code).
 
-use super::sign::{empty_sign_side, first_wrapped_line};
+use super::banner::parse_banner_nbt;
+use super::gateway::gateway_beam_at;
+use super::sign::{empty_sign_side, first_wrapped_line, parse_sign_nbt};
 use super::*;
 
 /// A fixed-width "font" for the wrap tests: every character is 6 wide, `i` is 2.

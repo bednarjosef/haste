@@ -1,5 +1,37 @@
 use std::sync::Arc;
 
+use haste_protocol::haste_core::BlockPos;
+
+use super::BlockEntityExtractor;
+use crate::game::Shared;
+
+impl BlockEntityExtractor {
+    /// The parsed sign text at `pos` (`SignBlockEntity`'s `front_text`/`back_text`), from the
+    /// block entity's NBT. Cached: the parse (and the wrap to the sign's line width) runs only
+    /// when the payload changes; the returned handle is shared with the tick's instances.
+    /// The font comes from the renderer through `Shared::sign_text_metrics` (set on the
+    /// first frame); until then signs draw without text, retried every tick.
+    pub(super) fn sign_text(
+        &mut self,
+        shared: &Shared,
+        pos: BlockPos,
+        be: &haste_core::chunk::BlockEntityData,
+        hanging: bool,
+    ) -> Option<Arc<haste_render::blockentity::SignTextData>> {
+        let key = (be.nbt.as_ptr() as usize, be.nbt.len());
+        if let Some((k, len, text)) = self.sign_texts.get(&pos) {
+            if (*k, *len) == key {
+                return Some(text.clone());
+            }
+        }
+        let metrics = shared.sign_text_metrics.get().cloned()?;
+        let (_line_height, max_width) = haste_render::blockentity::sign_line_metrics_pub(hanging);
+        let parsed = parse_sign_nbt(&be.nbt, &*metrics, max_width)?;
+        self.sign_texts.insert(pos, (key.0, key.1, parsed.clone()));
+        Some(parsed)
+    }
+}
+
 /// One sign side from its NBT compound (vanilla `SignText.CODEC`): `messages` (4 components as
 /// plain strings or `{"text": ...}` compounds), `color` (a `DyeColor` name) and
 /// `has_glowing_text`. Each line is wrapped to `max_width` like vanilla's render messages

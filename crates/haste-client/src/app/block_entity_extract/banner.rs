@@ -1,5 +1,32 @@
 use std::sync::Arc;
 
+use haste_protocol::haste_core::BlockPos;
+
+use super::BlockEntityExtractor;
+
+impl BlockEntityExtractor {
+    /// The parsed banner patterns at `pos` (`BannerBlockEntity`'s `patterns` NBT list) with
+    /// the base colour from the block id (vanilla `BannerBlock.getColor`). Cached like the
+    /// sign text: re-parsed only when the payload changes.
+    pub(super) fn banner_data(
+        &mut self,
+        pos: BlockPos,
+        be: &haste_core::chunk::BlockEntityData,
+        block: &haste_core::Identifier,
+    ) -> Option<Arc<haste_render::blockentity::BannerData>> {
+        let key = (be.nbt.as_ptr() as usize, be.nbt.len());
+        if let Some((k, len, data)) = self.banner_texts.get(&pos) {
+            if (*k, *len) == key {
+                return Some(data.clone());
+            }
+        }
+        let parsed = parse_banner_nbt(&be.nbt, block)?;
+        self.banner_texts
+            .insert(pos, (key.0, key.1, parsed.clone()));
+        Some(parsed)
+    }
+}
+
 /// A banner's patterns from its NBT (`BannerBlockEntity`'s `patterns`: a list of
 /// `{pattern: <registry id>, color: <dye name>}`) plus the base colour from the block id
 /// (`<colour>_banner`, vanilla `BannerBlock.getColor`). `None` when the NBT does not parse;
