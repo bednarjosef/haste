@@ -3,27 +3,19 @@
 //! the shape `FluidRenderer.isFaceOccludedByState` compares the fluid's face against
 //! (`Shapes.blockOccludes`, see `crate::fluid_occlusion`).
 //!
-//! The occlusion shape is the state's outline shape (`getShape` with an empty level) for
-//! blocks that can occlude, `Shapes.empty()` for the `noOcclusion` family (glass, leaves,
-//! panes, ...), and a smaller shape for the four overrides (fences, fence gates, lecterns,
-//! sculk shriekers). The oracle dump has the outline but neither the occlusion shape nor
-//! the can-occlude flag, so the table is built from the outline plus what vanilla's rules
-//! imply about it:
+//! The occlusion shape comes from the oracle dump's `occlusion` field (the 2026-10-18
+//! regeneration): the state's own shape for blocks that can occlude, `Shapes.empty()` for
+//! the `noOcclusion` family (glass, leaves, panes, ...), and a smaller shape for the four
+//! overrides (fences, fence gates, lecterns, sculk shriekers). Classification follows
+//! vanilla `BlockStateBase.initCache`: an empty occlusion shape never occludes, a full cube
+//! is solid render and occludes as `Shapes.block()`, anything else occludes as its boxes.
 //!
-//! - an empty outline is an empty occlusion shape (nothing to occlude with);
-//! - a full-cube outline occludes as a full block exactly when the state is solid render
-//!   (`is_full_opaque`: `solidRender = isShapeFullBlock(occlusionShape)`, and the
-//!   `noOcclusion` family with full outlines — glass, leaves, slime — is never solid
-//!   render, so it never occludes);
-//! - any other outline is the occluder as its boxes (slabs, stairs, snow layers, ...).
-//!
-//! The classes this cannot see: `noOcclusion` blocks with partial outlines whose shape
-//! still touches a shared face (they occlude nothing in vanilla) and the four overrides
-//! (whose occlusion shape is smaller than the outline). Both need an `occlusion` field in
-//! the recorder's `block_shapes.json` (tools/recorder-mod `ServerDumps`); until the dump
-//! carries it, this outline-based table is exact for full and empty outlines and for
-//! partial outlines of blocks that do not override, which covers slabs, stairs and the
-//! waterlogged shapes the fluid mesher needs most.
+//! Dumps from before the field fall back to the outline plus what vanilla's rules imply
+//! about it (an empty outline is an empty occlusion shape; a full-cube outline occludes as
+//! a full block exactly when the state is solid render — the `noOcclusion` family with
+//! full outlines like glass or leaves never is; any other outline is the occluder as its
+//! boxes). The classes that cannot see: `noOcclusion` blocks with partial outlines whose
+//! shape still touches a shared face, and the four overrides above.
 //!
 //! The table is built once per connection (no allocation per block): each state's boxes
 //! live in one flat arena and the per-state span indexes into it, like vanilla's cached
@@ -68,19 +60,82 @@ fn is_unit_cube(b: &Aabb) -> bool {
 }
 
 impl FluidOccluders {
-    /// From the game data the mesher already loads: haste-data's per-state outline shapes
-    /// (the oracle dump's `outline`, vanilla's default `getOcclusionShape`) and the baked
-    /// models' solid-render flag. See the module docs for what the outline cannot express.
+    /// From the game data the mesher already loads: haste-data's per-state occlusion
+    /// shapes (the oracle dump's `occlusion`, vanilla `getOcclusionShape`), the outline
+    /// shapes and the baked models' solid-render flag for dumps that predate the field.
     pub fn from_shapes(
         states: &dyn BlockStateTable,
         shapes: &haste_data::BlockShapes,
         baked: &BakedBlockModels,
     ) -> FluidOccluders {
-        Self::from_outlines(
+        Self::from_sources(
             states.len(),
+            |s| shapes.occlusion_boxes(s),
             |s| shapes.outline_boxes(s),
             |s| baked.is_full_opaque(s),
         )
+    }
+
+    /// The classification over an occlusion source (the dump's `occlusion` field) with the
+    /// outline classification as the fallback for states it has no data for
+    /// (`from_shapes` above; tests feed both directly).
+    pub fn from_sources<'a>(
+        state_count: usize,
+        occlusion: impl Fn(BlockStateId) -> Option<&'a [Aabb]>,
+        outline: impl Fn(BlockStateId) -> &'a [Aabb],
+        solid_render: impl Fn(BlockStateId) -> bool,
+    ) -> FluidOccluders {
+        let mut out = FluidOccluders {
+            boxes: Vec::new(),
+            spans: Vec::with_capacity(state_count),
+        };
+        for id in 0..state_count as u32 {
+            let state = BlockStateId(id);
+            let span = match occlusion(state) {
+                // Vanilla initCache over the occlusion shape itself: a full-cube occlusion
+                // shape is solid render by definition (isShapeFullBlock), so it occludes
+                // as the full block without consulting the models.
+                Some([]) => Span::Empty,
+                Some(boxes) if boxes.len() == 1 && is_unit_cube(&boxes[0]) => Span::Full,
+                Some(boxes) => out.span_for(boxes),
+                // A dump from before the occlusion field: the outline classification.
+                None => {
+                    let boxes = outline(state);
+                    if boxes.is_empty() {
+                        Span::Empty
+                    } else if boxes.len() == 1 && is_unit_cube(&boxes[0]) {
+                        if solid_render(state) {
+                            Span::Full
+                        } else {
+                            Span::Empty
+                        }
+                    } else {
+                        out.span_for(boxes)
+                    }
+                }
+            };
+            out.spans.push(span);
+        }
+        out
+    }
+
+    /// The span for a partial shape: its boxes, appended to the arena.
+    fn span_for(&mut self, boxes: &[Aabb]) -> Span {
+        let start = self.boxes.len() as u32;
+        self.boxes.extend(boxes.iter().map(|b| {
+            [
+                b.min.x as f32,
+                b.min.y as f32,
+                b.min.z as f32,
+                b.max.x as f32,
+                b.max.y as f32,
+                b.max.z as f32,
+            ]
+        }));
+        Span::Boxes {
+            start,
+            len: self.boxes.len() as u32 - start,
+        }
     }
 
     /// The classification over any outline source (tests, and `from_shapes` above).
@@ -91,41 +146,7 @@ impl FluidOccluders {
         outline: impl Fn(BlockStateId) -> &'a [Aabb],
         solid_render: impl Fn(BlockStateId) -> bool,
     ) -> FluidOccluders {
-        let mut out = FluidOccluders {
-            boxes: Vec::new(),
-            spans: Vec::with_capacity(state_count),
-        };
-        for id in 0..state_count as u32 {
-            let state = BlockStateId(id);
-            let boxes = outline(state);
-            let span = if boxes.is_empty() {
-                Span::Empty
-            } else if boxes.len() == 1 && is_unit_cube(&boxes[0]) {
-                if solid_render(state) {
-                    Span::Full
-                } else {
-                    Span::Empty
-                }
-            } else {
-                let start = out.boxes.len() as u32;
-                out.boxes.extend(boxes.iter().map(|b| {
-                    [
-                        b.min.x as f32,
-                        b.min.y as f32,
-                        b.min.z as f32,
-                        b.max.x as f32,
-                        b.max.y as f32,
-                        b.max.z as f32,
-                    ]
-                }));
-                Span::Boxes {
-                    start,
-                    len: out.boxes.len() as u32 - start,
-                }
-            };
-            out.spans.push(span);
-        }
-        out
+        Self::from_sources(state_count, |_| None, outline, solid_render)
     }
 
     /// No shape data at all (tests, before the game data is installed): every lookup
