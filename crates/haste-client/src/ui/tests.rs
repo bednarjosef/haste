@@ -808,8 +808,21 @@ fn hud_elements_from_the_server() {
 /// Leaving the server stops the HUD like vanilla `Minecraft.disconnectClient` (the pause
 /// screen's "Disconnect"): after `left_world` the title screen draws without the hotbar,
 /// hearts or crosshair, over the plain menu background instead of the last world frame.
+///
+/// Starts the JVM from cache/ (the client jar under it); like the other cache-bound tests,
+/// it skips (no ignore: CI has the cache) when the jar is absent.
 #[test]
 fn leaving_the_world_hides_the_hud() {
+    let cache = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    if !cache
+        .join("versions")
+        .join(haste_core::paths::MC_VERSION)
+        .join("client.jar")
+        .is_file()
+    {
+        eprintln!("skipped: no cache/");
+        return;
+    }
     let mut ui = Ui::new(host());
     ui.gui().with_state(|s| {
         s.in_world = true;
