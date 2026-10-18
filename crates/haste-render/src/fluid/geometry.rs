@@ -1,5 +1,5 @@
 //! Corner heights, flow direction and the backward-up-face visibility check: the geometry
-//! half of vanilla's `LiquidBlockRenderer`.
+//! half of vanilla's `FluidRenderer`.
 
 use haste_core::BlockPos;
 

@@ -1,5 +1,5 @@
 //! Vertex output: the quads of a fluid block, face culling and occlusion, flow-direction UVs
-//! and the overlay sprite (vanilla's `LiquidBlockRenderer.tesselate`).
+//! and the overlay sprite (vanilla's `FluidRenderer.tesselate`).
 
 use haste_assets::Direction;
 use haste_core::BlockPos;
