@@ -23,9 +23,10 @@ final class Mirror {
         INTS = 22;
     static final int D_HEALTH = 0, D_SATURATION = 1, D_XP_PROGRESS = 2, D_FLY_SPEED = 3, D_WALK_SPEED = 4, D_X = 5,
         D_Y = 6, D_Z = 7, D_YAW = 8, D_PITCH = 9, D_GAME_TIME = 10, D_DAY_TIME = 11, D_TX_PER_S = 12, D_RX_PER_S = 13,
-        DOUBLES = 14;
+        D_MOUNT_HEALTH = 14, D_MOUNT_MAX_HEALTH = 15, D_MOUNT_JUMP_SCALE = 16, DOUBLES = 17;
     static final int F_HARDCORE = 1, F_EYE_IN_WATER = 2, F_INVULNERABLE = 4, F_FLYING = 8, F_MAY_FLY = 16,
-        F_INSTABUILD = 32, F_IN_WORLD = 64, F_IMMEDIATE_RESPAWN = 128, F_DEBUG_SHOWN = 256;
+        F_INSTABUILD = 32, F_IN_WORLD = 64, F_IMMEDIATE_RESPAWN = 128, F_DEBUG_SHOWN = 256,
+        F_MOUNT_LIVING = 512, F_MOUNT_JUMPABLE = 1024;
 
     static final int[] I = new int[INTS];
     static final double[] D = new double[DOUBLES];
@@ -37,6 +38,14 @@ final class Mirror {
     static boolean flag(int f) { return (I[I_FLAGS] & f) != 0; }
     static boolean inWorld() { return flag(F_IN_WORLD); }
     static float health() { return (float) D[D_HEALTH]; }
+    /** Riding a living vehicle (the mount HUD: vehicle hearts, jump bar). */
+    static boolean mountLiving() { return flag(F_MOUNT_LIVING); }
+    /** Steering a vehicle that can jump (the horse family: the jump bar shows). */
+    static boolean mountJumpable() { return flag(F_MOUNT_JUMPABLE); }
+    static float mountHealth() { return (float) D[D_MOUNT_HEALTH]; }
+    static float mountMaxHealth() { return (float) D[D_MOUNT_MAX_HEALTH]; }
+    /** The mount's charged jump scale (vanilla LocalPlayer.getJumpRidingScale). */
+    static float jumpRidingScale() { return (float) D[D_MOUNT_JUMP_SCALE]; }
 
     private static boolean callbackSet;
 

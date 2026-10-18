@@ -1618,6 +1618,19 @@ fn sprite_at(f: &haste_core::gui::GuiFrame, name: &str) -> Vec<(i32, i32, i32, i
         .collect()
 }
 
+/// Whole sprites plus sprite sub-regions by name (the jump bar's progress is a sub-region of
+/// `hud/jump_bar_progress`), as (x, y, w, h).
+fn sprite_and_region_at(f: &haste_core::gui::GuiFrame, name: &str) -> Vec<(i32, i32, i32, i32)> {
+    let mut out = sprite_at(f, name);
+    out.extend(f.commands.iter().filter_map(|c| match c {
+        haste_core::gui::GuiCommand::SpriteRegion {
+            sprite, x, y, w, h, ..
+        } if sprite.to_string() == name => Some((*x, *y, *w, *h)),
+        _ => None,
+    }));
+    out
+}
+
 #[test]
 #[ignore = "needs cache/ (JDK, client jar, libraries, ASM, data generator reports)"]
 fn hud_frame() {
@@ -1697,6 +1710,90 @@ fn hud_frame() {
     assert!(
         unimpl.is_empty(),
         "Unimplemented log for the HUD: {unimpl:#?}"
+    );
+    gui.with_state(|s| s.in_world = false);
+}
+
+/// The mount HUD while riding (vanilla `Hud.extractVehicleHealth` and the contextual bar's
+/// `JUMPABLE_VEHICLE` state): the mount's hearts replace the food bar, the charged jump bar
+/// replaces the experience bar, and both are gone once the ride ends.
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM, data generator reports)"]
+fn mount_hud_vehicle_hearts_and_jump_bar() {
+    let _g = GUI.lock().unwrap_or_else(|e| e.into_inner());
+    let h = host();
+    let gui = h.gui();
+    h.clear_unimplemented().unwrap();
+    reset(gui);
+    gui.with_state(|s| {
+        s.in_world = true;
+        s.game_mode = haste_core::game::GameMode::Survival;
+        s.vitals.health = 20.0;
+        s.vitals.food = 20;
+        s.vitals.xp_level = 5;
+        s.mount = Some(haste_jvm::MountHud {
+            health: 15.0,
+            max_health: 22.0,
+            jumpable: true,
+            jump_scale: 0.0,
+        });
+    });
+    let f = render(&h, (0.0, 0.0));
+    // 22 max health: 11 vehicle hearts on the right of the hotbar, food bar hidden.
+    assert_eq!(
+        sprite_at(&f, "minecraft:hud/heart/vehicle_container").len(),
+        11,
+        "vehicle hearts"
+    );
+    assert_eq!(sprite_at(&f, "minecraft:hud/heart/vehicle_full").len(), 7);
+    assert_eq!(sprite_at(&f, "minecraft:hud/heart/vehicle_half").len(), 1);
+    assert!(
+        sprite_at(&f, "minecraft:hud/food_full").is_empty(),
+        "the food bar is hidden while riding"
+    );
+    // A saddled horse is jumpable (vanilla LocalPlayer.jumpableVehicle), so the contextual bar
+    // is the jump bar, not the experience bar; an empty charge draws only the background.
+    assert_eq!(
+        sprite_at(&f, "minecraft:hud/jump_bar_background").len(),
+        1,
+        "jump bar background"
+    );
+    assert!(
+        sprite_at(&f, "minecraft:hud/experience_bar_background").is_empty(),
+        "the experience bar is hidden while riding a jumpable mount"
+    );
+    // Charging: the progress sprite appears (vanilla JumpableVehicleBar: the scale lerped
+    // over the bar's 182 px, drawn as a sub-region of the 182x5 progress sprite).
+    gui.with_state(|s| {
+        s.mount = Some(haste_jvm::MountHud {
+            jump_scale: 0.5,
+            ..s.mount.unwrap()
+        })
+    });
+    let f = render(&h, (0.0, 0.0));
+    let progress = sprite_and_region_at(&f, "minecraft:hud/jump_bar_progress");
+    assert_eq!(progress.len(), 1, "charged jump bar: {progress:?}");
+    assert_eq!(progress[0], (160 - 91, 240 - 32 + 3, 91, 5));
+    // Not jumpable (a pig): the experience bar is back, the jump bar gone.
+    gui.with_state(|s| {
+        s.mount = Some(haste_jvm::MountHud {
+            jumpable: false,
+            jump_scale: 0.0,
+            ..s.mount.unwrap()
+        })
+    });
+    let f = render(&h, (0.0, 0.0));
+    assert!(!sprite_at(&f, "minecraft:hud/experience_bar_background").is_empty());
+    assert!(sprite_at(&f, "minecraft:hud/jump_bar_background").is_empty());
+    // Dismounted: no vehicle hearts, the food bar is back.
+    gui.with_state(|s| s.mount = None);
+    let f = render(&h, (0.0, 0.0));
+    assert!(sprite_at(&f, "minecraft:hud/heart/vehicle_container").is_empty());
+    assert!(!sprite_at(&f, "minecraft:hud/food_full").is_empty());
+    let unimpl = h.unimplemented().unwrap();
+    assert!(
+        unimpl.is_empty(),
+        "Unimplemented log for the mount HUD: {unimpl:#?}"
     );
     gui.with_state(|s| s.in_world = false);
 }

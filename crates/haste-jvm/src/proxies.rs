@@ -77,6 +77,25 @@ impl Default for PlayerVitals {
     }
 }
 
+/// The mount HUD while riding (vanilla `Hud`'s vehicle hearts and jump bar). Set while the
+/// player rides a living vehicle, cleared on foot: the hearts replace the food bar
+/// (`Hud.extractVehicleHealth` over `player.getVehicle()`), and the jump bar replaces the
+/// experience bar (`Hud.nextContextualInfoState` over `LocalPlayer.jumpableVehicle`) while
+/// we steer a saddled horse-family vehicle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MountHud {
+    /// The vehicle's health (`LivingEntity.DATA_HEALTH_ID`, metadata index 9).
+    pub health: f32,
+    /// The vehicle's `Attributes.MAX_HEALTH` (the synced attribute, the family's base
+    /// before a sync lands).
+    pub max_health: f32,
+    /// Vanilla `LocalPlayer.jumpableVehicle`: the vehicle we control can jump (the
+    /// horse-family vehicle Rust steers; its jump bar shows [`Self::jump_scale`]).
+    pub jumpable: bool,
+    /// Vanilla `LocalPlayer.getJumpRidingScale`: the charged jump the jump bar shows.
+    pub jump_scale: f32,
+}
+
 /// What the F3 overlay shows (vanilla's default debug entries, see `NOTES.md`): filled by the
 /// client every frame. The numbers go through the mirror arrays; the strings
 /// ([`DebugInfo::biome`], [`DebugInfo::target_block`], ...) through `Native.debugText`, pulled by
@@ -184,7 +203,11 @@ pub(crate) mod mirror {
     pub const D_DAY_TIME: usize = 11;
     pub const D_TX_PER_S: usize = 12;
     pub const D_RX_PER_S: usize = 13;
-    pub const DOUBLES: usize = 14;
+    /// The mount's health and max health, and the charged jump scale (see `MountHud`).
+    pub const D_MOUNT_HEALTH: usize = 14;
+    pub const D_MOUNT_MAX_HEALTH: usize = 15;
+    pub const D_MOUNT_JUMP_SCALE: usize = 16;
+    pub const DOUBLES: usize = 17;
     pub const F_HARDCORE: i32 = 1;
     pub const F_EYE_IN_WATER: i32 = 2;
     pub const F_INVULNERABLE: i32 = 4;
@@ -194,6 +217,10 @@ pub(crate) mod mirror {
     pub const F_IN_WORLD: i32 = 64;
     pub const F_IMMEDIATE_RESPAWN: i32 = 128;
     pub const F_DEBUG_SHOWN: i32 = 256;
+    /// Riding a living vehicle (the mount HUD's hearts show; see `MountHud`).
+    pub const F_MOUNT_LIVING: i32 = 512;
+    /// Steering a vehicle that can jump (the jump bar replaces the experience bar).
+    pub const F_MOUNT_JUMPABLE: i32 = 1024;
 }
 
 impl GameState {
@@ -218,7 +245,9 @@ impl GameState {
             | flag(v.instabuild, F_INSTABUILD)
             | flag(self.in_world, F_IN_WORLD)
             | flag(self.immediate_respawn, F_IMMEDIATE_RESPAWN)
-            | flag(self.debug_shown, F_DEBUG_SHOWN);
+            | flag(self.debug_shown, F_DEBUG_SHOWN)
+            | flag(self.mount.is_some(), F_MOUNT_LIVING)
+            | flag(self.mount.is_some_and(|m| m.jumpable), F_MOUNT_JUMPABLE);
         let dbg = &self.debug;
         i[I_FPS] = dbg.fps;
         i[I_CHUNKS] = dbg.chunks;
@@ -249,6 +278,11 @@ impl GameState {
         d[D_DAY_TIME] = self.day_time as f64;
         d[D_TX_PER_S] = dbg.tx_per_s;
         d[D_RX_PER_S] = dbg.rx_per_s;
+        if let Some(m) = &self.mount {
+            d[D_MOUNT_HEALTH] = f64::from(m.health);
+            d[D_MOUNT_MAX_HEALTH] = f64::from(m.max_health);
+            d[D_MOUNT_JUMP_SCALE] = f64::from(m.jump_scale);
+        }
         (i, d)
     }
 }
@@ -312,6 +346,8 @@ pub struct GameState {
     pub permission_level: u8,
     /// The local player's health, food, experience, abilities, ...
     pub vitals: PlayerVitals,
+    /// The mount HUD while riding a living vehicle (None on foot), see [`MountHud`].
+    pub mount: Option<MountHud>,
     /// What the F3 overlay shows.
     pub debug: DebugInfo,
     /// Whether the F3 overlay is on (vanilla's `DebugScreenEntryList.isOverlayVisible`; the
@@ -377,6 +413,7 @@ impl Default for GameState {
             game_mode: GameMode::Survival,
             permission_level: 0,
             vitals: PlayerVitals::default(),
+            mount: None,
             debug: DebugInfo::default(),
             debug_shown: false,
             in_world: false,
