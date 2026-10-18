@@ -475,6 +475,7 @@ pub(super) fn publish(
         nausea: s.player.int.nausea_blend_pair(),
         spinning_time: screen.spinning_time(),
         spinning_speed: screen.spinning_speed(),
+        spectator: view.spectator,
     };
     drop(view);
     feet

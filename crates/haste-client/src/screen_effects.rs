@@ -97,7 +97,8 @@ pub struct OwnFlags {
 pub struct ViewEffects {
     /// The camera is inside a view-blocking block: its particle texture over the whole screen
     /// (`ScreenEffectRenderer.submitBlockSprite`). Vanilla skips it in a bed, where the sleep
-    /// overlay takes over instead.
+    /// overlay takes over instead. `None` for a spectator (`LevelExtractor
+    /// .getViewBlockingState` answers nothing while `noPhysics`).
     pub block_overlay: Option<Identifier>,
     /// The eyes are in water, and the brighter of the sky and block light at the eye
     /// (`LevelExtractor.extractPlayerState`'s water overlay colour).
@@ -119,6 +120,9 @@ pub struct ViewEffects {
     /// The spinning effect time and speed (`LocalPlayer.getSpinningEffectAngle`).
     pub spinning_time: f32,
     pub spinning_speed: f32,
+    /// The local player is a spectator: vanilla's `ScreenEffectRenderer.submit` draws
+    /// neither the water nor the fire overlay for one (`firstPerson && !isSpectator`).
+    pub spectator: bool,
 }
 
 impl ViewEffects {
@@ -214,14 +218,14 @@ impl Frame<'_> {
                 );
             }
         }
-        // `ScreenEffectRenderer.submit`, the level pass: fire and water in first person, then
-        // the block the camera is inside.
-        if self.effects.on_fire && self.first_person {
+        // `ScreenEffectRenderer.submit`, the level pass: fire and water in first person
+        // (never for a spectator), then the block the camera is inside.
+        if self.effects.on_fire && self.first_person && !self.effects.spectator {
             for c in self.fire_overlay() {
                 out.insert(0, c);
             }
         }
-        if self.effects.eye_in_water && self.first_person {
+        if self.effects.eye_in_water && self.first_person && !self.effects.spectator {
             self.water_overlay(out);
         }
         if let Some(texture) = &self.effects.block_overlay {
