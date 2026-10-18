@@ -32,7 +32,7 @@ const VILLAGER: RegistryIndex = RegistryIndex(12);
 
 /// A small GameData written to a temp dir: air, stone (1.5, needs a tool), dirt (0.5),
 /// bedrock (-1), short grass (0, no collision), obsidian (50, needs a tool).
-fn data() -> &'static haste_data::GameData {
+pub(super) fn data() -> &'static haste_data::GameData {
     static D: OnceLock<haste_data::GameData> = OnceLock::new();
     D.get_or_init(|| {
         let dir = std::env::temp_dir().join(format!("haste-interact-test-{}", std::process::id()));
@@ -75,6 +75,7 @@ fn data() -> &'static haste_data::GameData {
                     "shield",
                     "potion",
                     "iron_spear",
+                    "dirt",
                 ]),
                 entries(&[
                     "speed",
@@ -189,7 +190,7 @@ fn tools() -> Arc<ToolTable> {
     Arc::new(t)
 }
 
-fn item(i: u32) -> ItemStackData {
+pub(super) fn item(i: u32) -> ItemStackData {
     ItemStackData {
         count: 1,
         item: Some(RegistryIndex(i)),
@@ -227,18 +228,18 @@ fn item_components() -> Arc<haste_data::ItemComponents> {
     Arc::new(c)
 }
 
-struct Rig {
-    p: LocalPlayer,
-    w: TestWorld,
-    entities: Vec<(EntityId, Aabb)>,
-    types: Vec<RegistryIndex>,
+pub(super) struct Rig {
+    pub(super) p: LocalPlayer,
+    pub(super) w: TestWorld,
+    pub(super) entities: Vec<(EntityId, Aabb)>,
+    pub(super) types: Vec<RegistryIndex>,
     /// The world border the rig's ticks gate on (`None`: the unlimited default).
-    border: Option<crate::world_border::WorldBorder>,
+    pub(super) border: Option<crate::world_border::WorldBorder>,
 }
 
 impl Rig {
     /// Player at (0.5, 0, 0.5) on a stone floor (top y = 0), looking straight down at (0, -1, 0).
-    fn new(mode: GameMode) -> Rig {
+    pub(super) fn new(mode: GameMode) -> Rig {
         let mut p = LocalPlayer::with_entity(ME, mode);
         p.int.set_tools(tools());
         p.int.set_block_tags(BlockTags::new([(
@@ -278,7 +279,7 @@ impl Rig {
         self.types.push(type_index);
     }
 
-    fn tick(&mut self, i: InteractInput) -> Vec<ServerboundPlay> {
+    pub(super) fn tick(&mut self, i: InteractInput) -> Vec<ServerboundPlay> {
         self.p.set_interact(i);
         let mut out = Vec::new();
         let env = InteractEnv {
@@ -312,7 +313,7 @@ impl Rig {
     }
 }
 
-const ATTACK: InteractInput = InteractInput {
+pub(super) const ATTACK: InteractInput = InteractInput {
     attack: true,
     use_item: false,
     pick_block: false,
@@ -325,7 +326,7 @@ const ATTACK: InteractInput = InteractInput {
     use_clicks: 0,
 };
 
-fn actions(out: &[ServerboundPlay]) -> Vec<(i32, i32)> {
+pub(super) fn actions(out: &[ServerboundPlay]) -> Vec<(i32, i32)> {
     out.iter()
         .filter_map(|p| match p {
             ServerboundPlay::PlayerAction(a) => Some((a.status, a.sequence)),
@@ -1438,7 +1439,7 @@ fn a_use_swings_the_hand_and_drops_it() {
     );
 }
 
-const USE: InteractInput = InteractInput {
+pub(super) const USE: InteractInput = InteractInput {
     attack: false,
     use_item: true,
     pick_block: false,

@@ -536,3 +536,5 @@ impl LocalPlayer {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_results;
