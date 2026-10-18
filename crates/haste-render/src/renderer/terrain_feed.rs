@@ -235,6 +235,9 @@ impl Renderer {
         if let Some(resident) = self.arenas.upload(&mesh, encoder) {
             self.sections.insert(resident);
         }
+        // The section's mesh is done even when it produced no vertices (no resident
+        // entry): pop-in tracking must not count it as unmeshed forever.
+        self.premesh.note_mesh_done(pos);
     }
 
     /// Drops every resident section mesh back to the empty state of a fresh renderer, the world
@@ -257,6 +260,8 @@ impl Renderer {
         self.clear_bonus();
         self.vis_dirty = false;
         self.want_version += 1;
+        // The tracked positions belong to the old world; the run's counters stay.
+        self.premesh.world_cleared();
     }
 
     /// A slab record's arena identity (`MeshArenas::free` input): the packed

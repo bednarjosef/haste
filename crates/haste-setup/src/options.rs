@@ -12,8 +12,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 mod cloud_status;
+mod premesh;
 
 pub use cloud_status::CloudStatus;
+pub use premesh::PremeshMode;
 
 /// Per-category sound volumes, each 0.0..=1.0. Category names follow vanilla's
 /// `soundCategory_*` keys.
@@ -190,6 +192,9 @@ pub struct Options {
     /// Vanilla's "Clouds" video setting (`Options.cloudStatus`, options.txt
     /// `renderClouds`; default FANCY).
     pub clouds: CloudStatus,
+    /// Haste's pre-mesh mode (no vanilla counterpart): turn prediction for the mesh
+    /// gate. `off` is exactly vanilla's visible-only meshing.
+    pub premesh: PremeshMode,
     pub sound: SoundVolumes,
     pub keys: Keybinds,
 }
@@ -214,6 +219,7 @@ impl Default for Options {
             menu_background_blurriness: 5,
             max_fps: 120,
             clouds: CloudStatus::default(),
+            premesh: PremeshMode::default(),
             sound: SoundVolumes::default(),
             keys: Keybinds::default(),
         }
