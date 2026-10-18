@@ -29,6 +29,26 @@ pub struct WorldMemoryStats {
     pub non_empty_sections: u64,
 }
 
+/// How the loaded chunks' sky light is stored (see `World::sky_light_stats`).
+#[derive(Default)]
+pub struct SkyLightStats {
+    pub sections: u64,
+    /// No layer: reads resolve through the walk-up (`crate::sky_light`).
+    pub absent: u64,
+    /// A layer whose every cell holds one value other than 0.
+    pub uniform: u64,
+    /// A layer whose every cell is 0 (explicitly-dark sections).
+    pub uniform_zero: u64,
+    /// A non-uniform 2048-byte array.
+    pub arrays: u64,
+    /// Bytes the sky arrays cost (2048 per array plus headers).
+    pub array_bytes: u64,
+    /// Block-light arrays (non-uniform, non-zero).
+    pub block_arrays: u64,
+    /// Bytes the block arrays cost.
+    pub block_array_bytes: u64,
+}
+
 /// The loaded world of one dimension.
 pub struct World {
     dim: DimensionInfo,
@@ -408,6 +428,36 @@ impl World {
                     * (2048 + 24)
                 + (chunk.light.sky.capacity() + chunk.light.block.capacity()) as u64
                     * std::mem::size_of::<Option<crate::light::NibbleArray>>() as u64;
+        }
+        stats
+    }
+
+    /// Sky-light storage census (diagnostics for the storage layout): how the per-section
+    /// sky light of the loaded chunks is stored, and what the arrays cost. Block light is
+    /// counted alongside (same storage, no walk-up).
+    pub fn sky_light_stats(&self) -> SkyLightStats {
+        let mut stats = SkyLightStats::default();
+        for chunk in self.chunks.values() {
+            for slot in &chunk.light.sky {
+                stats.sections += 1;
+                match slot {
+                    None => stats.absent += 1,
+                    Some(n) => match n.uniform_value() {
+                        Some(0) => stats.uniform_zero += 1,
+                        Some(_) => stats.uniform += 1,
+                        None => {
+                            stats.arrays += 1;
+                            stats.array_bytes += 2048 + 24;
+                        }
+                    },
+                }
+            }
+            for slot in &chunk.light.block {
+                if !(slot.all_zero() || slot.all_full()) {
+                    stats.block_arrays += 1;
+                    stats.block_array_bytes += 2048 + 24;
+                }
+            }
         }
         stats
     }

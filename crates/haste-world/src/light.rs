@@ -65,6 +65,24 @@ impl NibbleArray {
         Self::all_bytes(&self.0, 0)
     }
 
+    /// The one value every nibble holds, when the section is uniform (`None` when it is
+    /// not, or when both nibble positions differ). An empty (default) array is uniform 0.
+    /// Word-wide compare, like `all_bytes`: a byte loop costs ~1 ns/byte.
+    pub fn uniform_value(&self) -> Option<u8> {
+        let Some(&first) = self.0.first() else {
+            return Some(0);
+        };
+        let word = u64::from_ne_bytes([first; 8]);
+        let rest = &self.0[1..];
+        let (chunks, rem) = rest.as_chunks::<8>();
+        if !chunks.iter().all(|c| u64::from_ne_bytes(*c) == word) || !rem.iter().all(|&b| b == first)
+        {
+            return None;
+        }
+        let (lo, hi) = (first & 0x0F, first >> 4);
+        (lo == hi).then_some(lo)
+    }
+
     /// Every nibble is 15 (full light). Such an array can be stored as `None` without
     /// changing any read: sky light 15 only propagates straight down, so the bottom row
     /// the absent-section walk (`crate::sky_light`) finds above it is all 15 too.
@@ -285,6 +303,25 @@ mod tests {
         assert!(!n.all_zero());
         let z = NibbleArray::from_bytes(Bytes::from(vec![0u8; 2048]));
         assert!(z.all_zero());
+    }
+
+    #[test]
+    fn uniform_value_detects_uniform_sections() {
+        let u = |fill: u8| NibbleArray::from_bytes(Bytes::from(vec![fill; 2048]));
+        assert_eq!(u(0x00).uniform_value(), Some(0));
+        assert_eq!(u(0x55).uniform_value(), Some(5));
+        assert_eq!(u(0xFF).uniform_value(), Some(15));
+        // nibble positions differ: not uniform
+        assert_eq!(u(0x12).uniform_value(), None);
+        // mixed bytes: not uniform
+        let mut mixed = vec![0x55; 2048];
+        mixed[2047] = 0x00;
+        assert_eq!(
+            NibbleArray::from_bytes(Bytes::from(mixed)).uniform_value(),
+            None
+        );
+        // an empty (default) array is uniform zero
+        assert_eq!(NibbleArray::default().uniform_value(), Some(0));
     }
 
     #[test]

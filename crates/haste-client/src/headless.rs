@@ -27,10 +27,20 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         .enable_all()
         .worker_threads(2)
         .build()?;
-    rt.block_on(run_async(address, args.username.clone(), args.seconds))
+    rt.block_on(run_async(
+        address,
+        args.username.clone(),
+        args.seconds,
+        args.render_distance,
+    ))
 }
 
-async fn run_async(address: String, username: String, seconds: u64) -> anyhow::Result<()> {
+async fn run_async(
+    address: String,
+    username: String,
+    seconds: u64,
+    render_distance: Option<u8>,
+) -> anyhow::Result<()> {
     let data = net::load_game_data()?;
     let options = match haste_setup::config::Config::load() {
         Ok(c) => c.options,
@@ -41,7 +51,8 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
     };
     let join = net::account::join_account(&username).await?;
     let mut opts = ConnectOptions::new(address.clone(), join.account);
-    opts.client_information.view_distance = options.render_distance as i8;
+    opts.client_information.view_distance =
+        render_distance.unwrap_or(options.render_distance) as i8;
     let t0 = Instant::now();
     let mut driver = NetDriver::connect(opts).await?;
     driver.chat.set_keys(join.keys);
@@ -182,6 +193,42 @@ async fn run_async(address: String, username: String, seconds: u64) -> anyhow::R
         counters.own_sounds
     );
     println!("--- summary after {:.1} s", t0.elapsed().as_secs_f64());
+    {
+        // Storage-layout diagnostics (this is where a memory change gets its before/after
+        // numbers): the chunk map's heap census, the sky-light section census, and the
+        // process's resident set.
+        let mem = world.memory_stats();
+        let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
+        println!(
+            "world memory: chunks {:.1} MiB, sections {:.1} MiB, heightmaps {:.1} MiB, light {:.1} MiB, block entities {:.1} MiB",
+            mib(mem.chunks),
+            mib(mem.sections),
+            mib(mem.heightmaps),
+            mib(mem.light),
+            mib(mem.block_entities),
+        );
+        let sky = world.sky_light_stats();
+        println!(
+            "sky light: {} sections, {} absent, {} uniform, {} zero, {} arrays ({:.1} MiB); block light: {} arrays ({:.1} MiB)",
+            sky.sections,
+            sky.absent,
+            sky.uniform,
+            sky.uniform_zero,
+            sky.arrays,
+            mib(sky.array_bytes),
+            sky.block_arrays,
+            mib(sky.block_array_bytes),
+        );
+        let rss = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| {
+                s.lines().find_map(|l| {
+                    l.strip_prefix("VmRSS:").map(|v| v.trim().to_string())
+                })
+            })
+            .unwrap_or_else(|| "unknown".into());
+        println!("process rss: {rss}");
+    }
     println!(
         "packets in {} ({} bytes), out {}; chunks loaded {} (unloaded {}, refused by world {}), now loaded {} with {} non-empty sections, entities {}, teleports {}",
         stats.packets_in,

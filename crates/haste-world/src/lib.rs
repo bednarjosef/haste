@@ -15,6 +15,5 @@ pub use chunk::{Chunk, ChunkLight, Section};
 pub use palette::{
     BiomeContainer, BlockContainer, DecodedSection, PaletteError, PalettedContainer,
 };
-pub use world::World;
-pub use world::WorldMemoryStats;
+pub use world::{SkyLightStats, World, WorldMemoryStats};
 pub use world_error::WorldError;
