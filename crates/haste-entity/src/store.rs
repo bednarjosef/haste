@@ -276,6 +276,19 @@ pub struct Entity {
 
 impl Entity {
     fn new(s: &EntitySpawn, dims: &EntityDimensions) -> Entity {
+        let living = if s.kind.0 == 0 {
+            true
+        } else {
+            match crate::registry::entity_type_name(s.kind) {
+                None => true,
+                Some(name) => {
+                    crate::registry::table_entry(name).is_some()
+                        || name == "minecraft:player"
+                        || name == "minecraft:mannequin"
+                        || name == "minecraft:armor_stand"
+                }
+            }
+        };
         Entity {
             id: s.id,
             uuid: s.uuid,
@@ -300,8 +313,8 @@ impl Entity {
             walk: WalkAnimationState::default(),
             // `LivingEntity.recreateFromPacket`: the body starts facing the packet's head yaw
             // (`yBodyRot = yHeadRot = getYHeadRot()`, the `O` copies the same), not its yaw.
-            body_yaw: s.head_yaw,
-            prev_body_yaw: s.head_yaw,
+            body_yaw: if living { s.head_yaw } else { s.yaw },
+            prev_body_yaw: if living { s.head_yaw } else { s.yaw },
             prev_head_yaw: s.head_yaw,
             lerp_head_yaw: s.head_yaw,
             lerp_head_steps: 0,

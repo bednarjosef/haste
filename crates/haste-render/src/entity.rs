@@ -139,6 +139,22 @@ pub(crate) fn seeded_float(seed: u32, i: u32) -> f32 {
     (h >> 8) as f32 / (1u32 << 24) as f32
 }
 
+/// The vertex range the upload after `append_block_entities` must cover: only the tail
+/// past `start` (the entities' vertices were already uploaded by `prepare`), or everything
+/// when the buffer had to grow — a fresh buffer holds no head, so it is rewritten in full.
+/// An empty range means nothing was appended and no upload happens at all.
+pub(crate) fn append_upload_range(
+    len: usize,
+    capacity: usize,
+    start: usize,
+) -> std::ops::Range<usize> {
+    if len > capacity {
+        0..len
+    } else {
+        start..len
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct EntityVertex {
