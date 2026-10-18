@@ -137,3 +137,102 @@ pub(crate) fn item_arm_matrix(fp: &FirstPerson, partial: f32) -> Mat4 {
     m *= Mat4::from_rotation_x((xz_swing_rotation * -80.0).to_radians());
     m * Mat4::from_rotation_y((-45.0f32).to_radians())
 }
+
+impl EntityRenderer {
+    /// The empty hand's arm model for the skin's arm width, built once (no per-frame work).
+    fn arm_model(&mut self, slim: bool, sleeve: bool) -> Arc<CubeModel> {
+        let slot = &mut self.arm_models[usize::from(slim) * 2 + usize::from(sleeve)];
+        slot.get_or_insert_with(|| Arc::new(arm_model(slim, sleeve)))
+            .clone()
+    }
+
+    /// Builds the first-person arm or held item, following vanilla's
+    /// `FirstPersonHandsAndItemsRenderer.submitHandsWithItems`: the hurt tilt and walk bob
+    /// (`GameRenderer.renderItemInHand`'s pose stack) and the hand's lag behind the camera
+    /// turn are applied to the whole hand in view space, then per hand vanilla's own
+    /// transform, then the model.
+    ///
+    /// `prefix` is the pose stack the hand is submitted under (view space stays view space:
+    /// x right, y up, -z forward), `view` is the camera's look (yaw, pitch) in degrees and
+    /// `partial` the partial tick; the per-tick animation values live in `fp` and are only
+    /// lerped here.
+    ///
+    /// Nothing is allocated per frame: the arm model is cached by `slim` and the vertices go
+    /// into the reused hand buffer.
+    pub fn prepare_hand(
+        &mut self,
+        fp: Option<&FirstPerson>,
+        prefix: Mat4,
+        view: (f32, f32),
+        partial: f32,
+        assets: &mut Assets,
+    ) {
+        self.hand.clear();
+        let Some(fp) = fp else {
+            return;
+        };
+        // `FirstPerson::light` is (sky, block); the vertex wants (block, sky).
+        let light = (fp.light.1, fp.light.0);
+        let item = fp.item.and_then(|i| self.item_model_for(i, assets));
+        let mut out = std::mem::take(&mut self.hand);
+        let root = prefix * hand_root_matrix(fp, view, partial);
+        match item {
+            Some(model) => {
+                let root = root * item_arm_matrix(fp, partial);
+                self.emit_item(
+                    &mut out,
+                    &model,
+                    root,
+                    light,
+                    ItemDisplay::FirstPerson,
+                    assets,
+                );
+            }
+            None => {
+                let steve = Identifier::minecraft("entity/player/wide/steve");
+                let skin = fp.skin.as_ref().unwrap_or(&steve);
+                let rect = self.texture_rect(skin, assets);
+                let model = self.arm_model(fp.slim, fp.sleeve);
+                // Vanilla's `ModelPart` scales its pivot by 1/16 (the model is in pixels), and
+                // `AvatarRenderer.renderHand` gives the right arm its 0.1 rad z tilt.
+                let m = root * arm_matrix(fp, partial) * Mat4::from_scale(Vec3::splat(1.0 / 16.0));
+                emit_part_tinted(
+                    &mut out,
+                    &model,
+                    &model.root,
+                    &PoseOverrides::default(),
+                    m,
+                    rect,
+                    light,
+                    0.0,
+                    [1.0; 3],
+                );
+            }
+        }
+        self.hand = out;
+        if self.hand.len() > self.hand_capacity {
+            self.hand_capacity = self.hand.len().next_power_of_two();
+            self.hand_buffer = make_vertex_buffer(&self.device, self.hand_capacity);
+        }
+        if !self.hand.is_empty() {
+            self.queue
+                .write_buffer(&self.hand_buffer, 0, bytemuck::cast_slice(&self.hand));
+        }
+    }
+
+    /// Draws the first-person arm or item (its own pass, depth cleared).
+    pub fn draw_hand<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) -> u32 {
+        if self.hand.is_empty() {
+            return 0;
+        }
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(1, &self.bind_group, &[]);
+        pass.set_vertex_buffer(0, self.hand_buffer.slice(..));
+        pass.draw(0..self.hand.len() as u32, 0..1);
+        1
+    }
+
+    pub fn has_hand(&self) -> bool {
+        !self.hand.is_empty()
+    }
+}
