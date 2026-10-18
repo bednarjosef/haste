@@ -383,9 +383,11 @@ unsafe impl GlobalAlloc for Counting {
 static GLOBAL: Counting = Counting;
 
 /// Sums the bytes the chunk keeps allocated: section containers (palette + packed longs),
-/// heightmaps, block entities, light. Shared `Bytes` (zero-copy light/NBT slices of the
-/// packet) count at their full length, like the wire memory they pin.
+/// heightmaps, block entities, light. Light counts one owned 2048-byte array per section
+/// whose light varies (uniform sky sections are one value, absent ones nothing, and
+/// all-zero block light shares a single array).
 fn resident_bytes(c: &haste_world::Chunk) -> u64 {
+    use haste_world::light::SkyLight;
     use haste_world::palette::Storage;
     let mut total = 0u64;
     let container = |s: &Storage, total: &mut u64| match s {
@@ -409,10 +411,10 @@ fn resident_bytes(c: &haste_world::Chunk) -> u64 {
         .light
         .sky
         .iter()
-        .flatten()
-        .map(|n| n.0.len() as u64)
-        .sum::<u64>();
-    total += c.light.block.iter().map(|n| n.0.len() as u64).sum::<u64>();
+        .filter(|s| matches!(s, SkyLight::Array(_)))
+        .count() as u64
+        * 2048;
+    total += c.light.block.iter().filter(|n| !n.is_empty()).count() as u64 * 2048;
     // the per-chunk dirty bitset (remesh marks; one word covers up to 64 sections)
     total += c.dirty_bits().len() as u64 * 8;
     total
@@ -673,6 +675,10 @@ fn benchmark_chunks_decode_stably() {
     assert_eq!(c.heightmaps.len(), 2);
     assert!(c.height_at(0, 0).unwrap() > 80);
     assert_eq!(c.block_entities.len(), 8);
-    // light: sky arrays applied (sky_mask covers every wire index)
-    assert!(c.light.sky[0].is_some());
+    // light: the sky array applied (sky_mask covers every wire index; wire index 1 is
+    // our section 0, a non-uniform below-ground array)
+    assert!(matches!(
+        c.light.sky[0],
+        haste_world::light::SkyLight::Array(_)
+    ));
 }

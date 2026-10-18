@@ -305,6 +305,8 @@ impl Renderer {
             Arc::new(crate::fluid::FluidOccluders::absent()),
             // Terrain faces fall back to the model rule until then.
             Arc::new(crate::mesher::FaceOccluders::absent()),
+            // No face-skip rules until then (installed with `set_shapes`).
+            Arc::new(crate::mesher::SkipTable::absent()),
         ));
         let arenas = MeshArenas::new(gpu.device.clone(), gpu.queue.clone());
         let timer = crate::timing::GpuTimer::new(&gpu.device, &gpu.queue);
