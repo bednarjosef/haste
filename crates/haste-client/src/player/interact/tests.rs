@@ -267,6 +267,7 @@ impl Rig {
             data: data(),
             entities: &self.entities,
             entity_types: &self.types,
+            warm_blocks: None,
         };
         let input = InputState {
             pitch: 90.0,
@@ -817,6 +818,7 @@ fn inventory_and_effects_from_packets() {
         data: data(),
         entities: &[],
         entity_types: &[],
+        warm_blocks: None,
     };
     let p = r.p.mining_params(STONE, &env);
     assert_eq!(
@@ -889,6 +891,7 @@ fn held_stack_components_drive_mining_speed() {
         data: data(),
         entities: &[],
         entity_types: &[],
+        warm_blocks: None,
     };
     let p = r.p.mining_params(STONE, &env);
     assert_eq!((p.tool_speed, p.tool_correct), (8.0, Some(true)));
@@ -936,6 +939,7 @@ fn use_duration_and_animation_come_from_the_item() {
         data: data(),
         entities: &[],
         entity_types: &[],
+        warm_blocks: None,
     };
     let d = |i: u32| r.p.int.use_data(&item(i), env.data);
     // Bow/crossbow/trident/shield: 72000 ticks; spyglass 1200.

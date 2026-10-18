@@ -298,6 +298,34 @@ pub fn collide_with_step(
     })
 }
 
+/// [`collide_with_step`] plus extra world-space colliders (the fluid surface an entity that
+/// `canStandOnFluid` walks on): the fluid's stable column, already resolved to a world box by
+/// the caller. A pure addition to the sweep — no other behaviour changes.
+pub fn collide_with_step_and(
+    aabb: Aabb,
+    movement: DVec3,
+    step_height: f64,
+    on_ground: bool,
+    world: &dyn BlockView,
+    shapes: &dyn CollisionShapes,
+    extra: &[Aabb],
+) -> DVec3 {
+    if movement == DVec3::ZERO {
+        return movement;
+    }
+    let mut region = stretch(&aabb, movement);
+    if step_height > 0.0 {
+        region.max.y = region.max.y.max(aabb.max.y + step_height);
+    }
+    for b in extra {
+        region.min = region.min.min(b.min);
+        region.max = region.max.max(b.max);
+    }
+    with_boxes(&region, world, shapes, |src| {
+        sweep_with_step_and(src, aabb, movement, step_height, on_ground, extra)
+    })
+}
+
 fn sweep_with_step(
     src: Source,
     aabb: Aabb,
@@ -305,7 +333,21 @@ fn sweep_with_step(
     step_height: f64,
     on_ground: bool,
 ) -> DVec3 {
-    let plain = sweep(src, aabb, movement);
+    sweep_with_step_and(src, aabb, movement, step_height, on_ground, &[])
+}
+
+/// [`sweep_with_step`] with extra world-space colliders (the fluid surface an entity that
+/// `canStandOnFluid` walks on, `LiquidBlock.getCollisionShape`): they clip like any gathered
+/// world box and take part in the step-up candidates.
+fn sweep_with_step_and(
+    src: Source,
+    aabb: Aabb,
+    movement: DVec3,
+    step_height: f64,
+    on_ground: bool,
+    extra: &[Aabb],
+) -> DVec3 {
+    let plain = sweep_extra(src, aabb, movement, extra);
     let blocked_h = plain.x != movement.x || plain.z != movement.z;
     let landed = movement.y < 0.0 && plain.y != movement.y;
     if step_height <= 0.0 || !blocked_h || !(on_ground || landed) {
@@ -324,15 +366,58 @@ fn sweep_with_step(
         region.min.y -= COLLISION_EPSILON;
     }
     let mut candidates = step_candidates(src, &region, &grounded, step_height, plain.y);
+    for b in extra {
+        for coord in [b.min.y, b.max.y] {
+            let rel = coord - grounded.min.y;
+            if rel >= 0.0 && rel != plain.y && rel <= step_height {
+                candidates.push(rel);
+            }
+        }
+    }
     candidates.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
     candidates.dedup();
     for c in candidates {
-        let h = sweep(src, grounded, DVec3::new(movement.x, c, movement.z));
+        let h = sweep_extra(src, grounded, DVec3::new(movement.x, c, movement.z), extra);
         if horizontal_len_sq(h) > horizontal_len_sq(plain) {
             return DVec3::new(h.x, h.y + grounded.min.y - aabb.min.y, h.z);
         }
     }
     plain
+}
+
+/// [`sweep`] that also clips against `extra` world-space boxes, after the world's own.
+fn sweep_extra(src: Source, aabb: Aabb, movement: DVec3, extra: &[Aabb]) -> DVec3 {
+    let mut b = aabb;
+    let y = clip_extra(src, &b, Axis::Y, movement.y, extra);
+    b = b.offset(DVec3::new(0.0, y, 0.0));
+    let (x, z) = if movement.x.abs() < movement.z.abs() {
+        let z = clip_extra(src, &b, Axis::Z, movement.z, extra);
+        b = b.offset(DVec3::new(0.0, 0.0, z));
+        let x = clip_extra(src, &b, Axis::X, movement.x, extra);
+        (x, z)
+    } else {
+        let x = clip_extra(src, &b, Axis::X, movement.x, extra);
+        b = b.offset(DVec3::new(x, 0.0, 0.0));
+        let z = clip_extra(src, &b, Axis::Z, movement.z, extra);
+        (x, z)
+    };
+    DVec3::new(x, y, z)
+}
+
+/// [`clip`] with extra world-space boxes, clipped after the source's own.
+fn clip_extra(src: Source, mover: &Aabb, a: Axis, d: f64, extra: &[Aabb]) -> f64 {
+    if d == 0.0 {
+        return 0.0;
+    }
+    let mut d = clip(src, mover, a, d);
+    for b in extra {
+        d = clip_one(mover, b, a, d);
+    }
+    if d.abs() < COLLISION_EPSILON {
+        0.0
+    } else {
+        d
+    }
 }
 
 /// Candidate step-up heights: for every collider touching `region`, its Y coordinates relative

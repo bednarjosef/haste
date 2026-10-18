@@ -758,6 +758,7 @@ impl LocalPlayer {
             data,
             entities: &[],
             entity_types: &[],
+            warm_blocks: None,
         };
         self.tick_interact(input, world, &env, None, out);
     }
@@ -791,6 +792,7 @@ impl LocalPlayer {
                 shapes,
                 blocks,
                 env: None,
+                warm_blocks: None,
             },
             vehicle,
             out,
@@ -815,6 +817,7 @@ impl LocalPlayer {
                 shapes: &env.data.shapes,
                 blocks: env.data,
                 env: Some(env),
+                warm_blocks: env.warm_blocks,
             },
             vehicle,
             out,
@@ -1271,6 +1274,8 @@ struct TickCtx<'a> {
     shapes: &'a dyn CollisionShapes,
     blocks: &'a dyn BlockPhysics,
     env: Option<&'a interact::InteractEnv<'a>>,
+    /// The `#strider_warm_blocks` resolution for the strider we steer, from the driver.
+    warm_blocks: Option<&'a dyn crate::item_based_steering::WarmBlocks>,
 }
 
 pub mod interact;
