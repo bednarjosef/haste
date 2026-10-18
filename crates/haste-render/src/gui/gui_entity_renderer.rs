@@ -20,7 +20,7 @@ impl GuiRenderer {
         assets: &mut Assets,
     ) {
         let (texture, model_scale) = crate::entity::texture_and_scale(e);
-        let (rect, _) = self.lookup(&TexKey::Texture(texture), assets);
+        let (rect, _) = self.lookup_ref(TexKeyRef::Key(&TexKey::Texture(texture)), assets);
         let cx = (b[0] + b[2]) / 2.0;
         let height = crate::entity::model_top(&e.model.root, 0.0) * model_scale / 16.0;
         let feet = (b[1] + b[3]) / 2.0 + height * size / 2.0;

@@ -1,14 +1,16 @@
 //! The lazily filled GUI atlas: texture keys and entries, the shelf packer (vanilla
 //! `DynamicAtlasAllocator`), residency, animated textures and the generated images.
 
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use hashbrown::Equivalent;
 use haste_assets::{frame_at, Animation, Assets, SpriteMeta};
 use haste_core::Identifier;
 
 use super::*;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum TexKey {
     /// `textures/gui/sprites/<path>.png`.
     Sprite(Identifier),
@@ -19,6 +21,88 @@ pub(super) enum TexKey {
     FontPage(u16),
     Hex(u32),
     Missing,
+}
+
+/// A [`TexKey`] for map probes. Sprite and texture lookups run once per GUI command,
+/// so they must not allocate an owned `Identifier` just to probe the key map; the
+/// owned key is only built on a miss, when the entry is inserted.
+pub(super) enum TexKeyRef<'a> {
+    /// Probes a `TexKey::Sprite`.
+    Sprite(&'a Identifier),
+    /// Probes a `TexKey::Texture`.
+    Texture(&'a Identifier),
+    /// Probes any owned key (the cold paths: font pages, unihex glyphs, item textures).
+    Key(&'a TexKey),
+}
+
+impl TexKeyRef<'_> {
+    /// The owned key this probe stands for (the miss path's insert).
+    fn owned(&self) -> TexKey {
+        match *self {
+            TexKeyRef::Sprite(id) => TexKey::Sprite(id.clone()),
+            TexKeyRef::Texture(id) => TexKey::Texture(id.clone()),
+            TexKeyRef::Key(k) => k.clone(),
+        }
+    }
+}
+
+/// The owned key's hash; [`TexKeyRef`]'s mirrors it tag for tag (see its comment).
+impl Hash for TexKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            TexKey::Sprite(id) => {
+                state.write_u8(0);
+                id.hash(state);
+            }
+            TexKey::Texture(id) => {
+                state.write_u8(1);
+                id.hash(state);
+            }
+            TexKey::ItemTexture(s) => {
+                state.write_u8(2);
+                s.hash(state);
+            }
+            TexKey::FontPage(p) => {
+                state.write_u8(3);
+                p.hash(state);
+            }
+            TexKey::Hex(i) => {
+                state.write_u8(4);
+                i.hash(state);
+            }
+            TexKey::Missing => state.write_u8(5),
+        }
+    }
+}
+
+// A borrowed probe must hash exactly like the owned key it stands for, so both hash
+// through the same tag; reordering the variants would otherwise silently mismatch
+// (wrong or missing textures), not fail to compile.
+impl Hash for TexKeyRef<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            TexKeyRef::Sprite(id) => {
+                state.write_u8(0);
+                id.hash(state);
+            }
+            TexKeyRef::Texture(id) => {
+                state.write_u8(1);
+                id.hash(state);
+            }
+            TexKeyRef::Key(k) => k.hash(state),
+        }
+    }
+}
+
+impl Equivalent<TexKey> for TexKeyRef<'_> {
+    fn equivalent(&self, key: &TexKey) -> bool {
+        match (self, key) {
+            (TexKeyRef::Sprite(a), TexKey::Sprite(b))
+            | (TexKeyRef::Texture(a), TexKey::Texture(b)) => *a == b,
+            (TexKeyRef::Key(a), b) => *a == b,
+            _ => false,
+        }
+    }
 }
 
 pub(super) struct TexEntry {
@@ -197,8 +281,17 @@ impl GuiRenderer {
         rect
     }
 
-    pub(super) fn lookup(&mut self, key: &TexKey, assets: &mut Assets) -> ([u32; 4], u32) {
-        let i = self.entry(key, assets);
+    /// Looks a key up by reference (no `Identifier` clone per command), only building
+    /// the owned key when the entry is missing.
+    pub(super) fn lookup_ref(
+        &mut self,
+        key: TexKeyRef<'_>,
+        assets: &mut Assets,
+    ) -> ([u32; 4], u32) {
+        let i = match self.keys.get(&key) {
+            Some(&i) => i,
+            None => self.entry(&key.owned(), assets),
+        };
         (self.resident(i), i)
     }
 
