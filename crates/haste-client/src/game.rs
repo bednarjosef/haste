@@ -1059,10 +1059,17 @@ fn drain_packets(
     };
     let ui = shared.ui.lock().clone();
     driver.receive(&mut tracked, &mut *entities, ui.as_ref())?;
-    shared.view.lock().view_distance = driver
-        .session
-        .view_distance
-        .min(shared.live_options.lock().render_distance as i32);
+    // The server's view distance (login, then `set_chunk_cache_radius`) caps what we mesh,
+    // like vanilla's `Options.setServerRenderDistance`. Read the option before taking the
+    // view lock so the two locks are never held together.
+    let render_distance = shared.live_options.lock().render_distance as i32;
+    let view_distance = driver.session.view_distance.min(render_distance);
+    {
+        let mut view = shared.view.lock();
+        if view.view_distance != view_distance {
+            view.view_distance = view_distance;
+        }
+    }
     drop(entities);
     skins::request_profiles(&shared.skins, &mut driver.session.profiles);
     let mut dirty = world.take_dirty_sections();

@@ -1437,14 +1437,19 @@ impl Session {
             P::SetChunkCacheCenter(c) => {
                 tracing::debug!("set_chunk_cache_center ({}, {})", c.x, c.z);
             }
+            // Vanilla `ClientPacketListener.handleSetChunkCacheRadius`: the new server view
+            // distance (the game thread caps the meshed radius with it every drain).
             P::SetChunkCacheRadius(r) => {
                 self.view_distance = r.radius;
             }
+            // Vanilla `ClientPacketListener.handleChunksBiomes`: new biome containers for
+            // loaded chunks (`/fillbiome`); the world re-tints the 3x3 columns.
             P::ChunksBiomes(b) => {
                 for c in &b.chunks {
                     world.replace_biomes(c.pos, &c.data);
                 }
-            } // The chunk batch flow control (vanilla `ClientPacketListener.handleChunkBatchStart`/
+            }
+            // The chunk batch flow control (vanilla `ClientPacketListener.handleChunkBatchStart`/
             // `handleChunkBatchFinished` + `ChunkBatchSizeCalculator`): time the batch, fold the
             // per-chunk duration into the running average, and tell the server the rate we want.
             // Without the reply the server never sends the next batch, so a teleport's new area
@@ -2187,10 +2192,6 @@ impl NetDriver {
             // is still starting the UI-bound packets are kept and replayed once it is up.
             let keep = ui.is_some() || crate::ui::ui_handles(&a.packet);
             let for_ui = keep.then(|| a.packet.clone());
-            if let ClientboundPlay::SetChunkCacheRadius(r) = &a.packet {
-                self.login.view_distance = r.radius;
-                self.session.view_distance = r.radius;
-            }
             self.chat.handle(&a.packet, &mut self.out);
             self.session
                 .apply(a.packet, world, entities, regs, &mut self.out);

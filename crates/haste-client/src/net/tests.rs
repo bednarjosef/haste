@@ -1625,3 +1625,28 @@ fn chunk_batches_are_acknowledged_with_the_vanilla_rate() {
         other => panic!("expected a chunk_batch_received, got {other:?}"),
     }
 }
+
+/// `set_chunk_cache_radius` replaces the server view distance; `chunks_biomes` reaches the
+/// world once per chunk (vanilla `ClientPacketListener.handleSetChunkCacheRadius` /
+/// `handleChunksBiomes`).
+#[test]
+fn chunk_cache_radius_and_biome_updates_apply() {
+    let mut r = Rig::new();
+    r.apply(ClientboundPlay::SetChunkCacheRadius(
+        cb::SetChunkCacheRadius { radius: 6 },
+    ));
+    assert_eq!(r.session.view_distance, 6);
+    r.apply(ClientboundPlay::ChunksBiomes(cb::ChunksBiomes {
+        chunks: vec![
+            cb::ChunkBiomes {
+                pos: ChunkPos::new(3, 4),
+                data: Default::default(),
+            },
+            cb::ChunkBiomes {
+                pos: ChunkPos::new(-1, 0),
+                data: Default::default(),
+            },
+        ],
+    }));
+    assert_eq!(r.world.log, ["biomes 3 4", "biomes -1 0"]);
+}

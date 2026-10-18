@@ -273,20 +273,6 @@ impl World {
     /// `LevelChunk.replaceBiomes` does. Marks the 3x3 chunk columns dirty (biome tint).
     /// No-op for an unloaded chunk.
     pub fn replace_biomes(&mut self, pos: ChunkPos, data: &[u8]) {
-        self.apply_biomes_inner(pos, data);
-    }
-
-    /// Alias of [`World::replace_biomes`] (kept for callers that name it after the packet).
-    pub fn apply_biomes(&mut self, pos: ChunkPos, data: &[u8]) {
-        self.apply_biomes_inner(pos, data);
-    }
-
-    /// Alias of [`World::replace_biomes`].
-    pub fn set_biomes(&mut self, pos: ChunkPos, data: &[u8]) {
-        self.apply_biomes_inner(pos, data);
-    }
-
-    fn apply_biomes_inner(&mut self, pos: ChunkPos, data: &[u8]) {
         use crate::palette::{BiomeContainer, WireReader, BIOMES_PER_SECTION};
         let key = pos.to_packed();
         let Some(chunk) = self.chunks.get_mut(&key) else {
