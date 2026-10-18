@@ -23,6 +23,7 @@ pub mod panorama;
 pub mod particles;
 pub mod pipeline;
 pub mod renderer;
+pub mod section_slab;
 pub mod sky;
 pub mod stars;
 pub mod timing;

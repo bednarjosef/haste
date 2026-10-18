@@ -95,7 +95,7 @@ fn long_metadata(entries: &[(u8, i64)]) -> Metadata {
 fn kind_of(name: &str) -> Option<RegistryIndex> {
     crate::registry::entity_type_names()?
         .iter()
-        .find(|(_, n)| n.as_str() == name)
+        .find(|(_, n)| **n == name)
         .map(|(k, _)| *k)
 }
 

@@ -114,7 +114,7 @@ fn table_lookup_falls_back_on_unknown_ids() {
     };
     let kind = names
         .iter()
-        .find(|(_, n)| n.as_str() == "minecraft:pig")
+        .find(|(_, n)| **n == "minecraft:pig")
         .map(|(k, _)| *k)
         .unwrap();
     let m = metadata(metadata_index::PIG, serializer_id::PIG_VARIANT, &[2]);
@@ -130,7 +130,7 @@ fn table_lookup_falls_back_on_unknown_ids() {
     // Non-variant type: nothing.
     let zombie = names
         .iter()
-        .find(|(_, n)| n.as_str() == "minecraft:zombie")
+        .find(|(_, n)| **n == "minecraft:zombie")
         .map(|(k, _)| *k)
         .unwrap();
     assert!(variants.assets(zombie, &m).is_none());

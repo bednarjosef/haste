@@ -24,7 +24,7 @@ pub(super) fn menu_frame(
         options.force_unicode_font,
     );
     let (gw, gh) = gui_scaled_size(w, h, scale);
-    let gui = ui.frame(gw, gh, scale, input.mouse, 0.0).clone();
+    let gui = ui.take_frame(gw, gh, scale, input.mouse, 0.0);
     // The screen's panorama (vanilla `Screen.extractPanorama`), drawn under its commands.
     renderer.set_panorama(ui.gui().panorama());
     (gui, menu_camera(), menu_sky(), 0.0)

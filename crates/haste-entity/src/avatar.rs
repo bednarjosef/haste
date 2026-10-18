@@ -58,16 +58,17 @@ impl ModelParts {
 /// `PlayerModel.setupAnim`: hides the outer layers whose part is not shown. Nothing is pushed
 /// (so nothing allocated) when everything shows, the normal case.
 pub fn hide_layers(parts: ModelParts, pose: &mut PoseOverrides) {
-    for (part, name) in [
-        (PlayerModelPart::Hat, "hat"),
-        (PlayerModelPart::Jacket, "jacket"),
-        (PlayerModelPart::LeftPantsLeg, "left_pants"),
-        (PlayerModelPart::RightPantsLeg, "right_pants"),
-        (PlayerModelPart::LeftSleeve, "left_sleeve"),
-        (PlayerModelPart::RightSleeve, "right_sleeve"),
+    use haste_core::parts;
+    for (part, id) in [
+        (PlayerModelPart::Hat, parts::HAT),
+        (PlayerModelPart::Jacket, parts::JACKET),
+        (PlayerModelPart::LeftPantsLeg, parts::LEFT_PANTS),
+        (PlayerModelPart::RightPantsLeg, parts::RIGHT_PANTS),
+        (PlayerModelPart::LeftSleeve, parts::LEFT_SLEEVE),
+        (PlayerModelPart::RightSleeve, parts::RIGHT_SLEEVE),
     ] {
         if !parts.shown(part) {
-            pose.hidden.push(name.to_owned());
+            pose.hide(id);
         }
     }
 }
@@ -173,8 +174,7 @@ pub fn dress(inst: &mut EntityInstance, skin: &PlayerSkin, parts: ModelParts, ca
     if let Some(cape_model) = &skin.cape {
         if parts.shown(PlayerModelPart::Cape) && !inst.invisible {
             inst.pose
-                .rotations
-                .push(("cape".into(), cape_rotation(cape)));
+                .set_rotation(haste_core::parts::CAPE, cape_rotation(cape));
             inst.overlays[0] = Some(EntityOverlay {
                 model: cape_model.clone(),
                 tint: [1.0; 3],

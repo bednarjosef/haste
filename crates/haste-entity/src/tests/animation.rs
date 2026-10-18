@@ -21,7 +21,7 @@ fn walking_animation_zero_at_rest_and_bounded() {
     }
     let mut out = Vec::new();
     s.render_instances(0.5, &mut out);
-    let rot: std::collections::HashMap<_, _> = out[0].pose.rotations.iter().cloned().collect();
+    let rot = rotations_by_name(&out[0].pose);
     for limb in ["right_leg", "left_leg"] {
         let r = rot.get(limb).expect(limb);
         assert!(r.x.abs() < 1e-3, "{limb} swings at rest: {}", r.x);
@@ -39,7 +39,7 @@ fn walking_animation_zero_at_rest_and_bounded() {
     }
     let mut out = Vec::new();
     s.render_instances(0.5, &mut out);
-    let rot: std::collections::HashMap<_, _> = out[0].pose.rotations.iter().cloned().collect();
+    let rot = rotations_by_name(&out[0].pose);
     let arm = rot.get("right_arm").expect("arm rotation while walking");
     assert!(
         arm.x.abs() > 1e-3,
@@ -90,7 +90,7 @@ fn walk_leg_angle_after_five_ticks_at_point_two() {
     }
     let mut out = Vec::new();
     s.render_instances(1.0, &mut out);
-    let rot: std::collections::HashMap<_, _> = out[0].pose.rotations.iter().cloned().collect();
+    let rot = rotations_by_name(&out[0].pose);
     let rl = rot.get("right_leg").unwrap();
     let ll = rot.get("left_leg").unwrap();
     assert!(
@@ -129,7 +129,7 @@ fn attack_arm_angle_mid_swing() {
     }
     let mut out = Vec::new();
     s.render_instances(1.0, &mut out);
-    let rot: std::collections::HashMap<_, _> = out[0].pose.rotations.iter().cloned().collect();
+    let rot = rotations_by_name(&out[0].pose);
     let ra = rot.get("right_arm").unwrap();
     assert!(
         (ra.x - -0.742_670).abs() < 2e-3,
@@ -161,7 +161,7 @@ fn zombie_arms_are_forward_at_rest() {
     s.spawn(&spawn(1, DVec3::ZERO));
     let e = s.get(EntityId(1)).unwrap();
     let pose = crate::animation::setup_anim(e, &model, true, 0.0, false);
-    let rot: std::collections::HashMap<_, _> = pose.rotations.iter().cloned().collect();
+    let rot = rotations_by_name(&pose);
     let ra = rot.get("right_arm").unwrap();
     assert!(
         (ra.x - -1.396_263_4).abs() < 1e-4,
@@ -229,7 +229,7 @@ fn aggressive_zombie_arms_are_raised() {
     );
     let e = s.get(EntityId(1)).unwrap();
     let pose = crate::animation::setup_anim(e, &model, true, 0.0, false);
-    let rot: std::collections::HashMap<_, _> = pose.rotations.iter().cloned().collect();
+    let rot = rotations_by_name(&pose);
     let ra = rot.get("right_arm").unwrap();
     assert!(
         (ra.x - -2.094_395_2).abs() < 1e-4,
@@ -259,7 +259,7 @@ fn aggressive_skeleton_arms_raised() {
     );
     let e = s.get(EntityId(1)).unwrap();
     let pose = crate::animation::setup_anim(e, &model, true, 0.0, false);
-    let rot: std::collections::HashMap<_, _> = pose.rotations.iter().cloned().collect();
+    let rot = rotations_by_name(&pose);
     let ra = rot.get("right_arm").unwrap();
     let la = rot.get("left_arm").unwrap();
     assert!(
@@ -295,7 +295,7 @@ fn quadruped_legs_swing_out_of_phase() {
     }
     let e = s.get(EntityId(1)).unwrap();
     let pose = crate::animation::setup_anim(e, &model, true, 1.0, false);
-    let rot: std::collections::HashMap<_, _> = pose.rotations.iter().cloned().collect();
+    let rot = rotations_by_name(&pose);
     let rh = rot.get("right_hind_leg").unwrap();
     let rf = rot.get("right_front_leg").unwrap();
     let lh = rot.get("left_hind_leg").unwrap();

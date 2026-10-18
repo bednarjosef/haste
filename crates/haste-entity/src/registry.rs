@@ -854,26 +854,27 @@ pub fn model_entry(kind: RegistryIndex) -> Option<(bool, Arc<CubeModel>)> {
     if let Some(hit) = cache.lock().unwrap().get(&kind) {
         return hit.clone();
     }
-    let name = entity_type_names()?.get(&kind)?.clone();
-    let entry = model_for_name(&name).map(|m| (has_head(&m.root), m));
+    let name = entity_type_names()?.get(&kind).copied()?;
+    let entry = model_for_name(name).map(|m| (has_head(&m.root), m));
     cache.lock().unwrap().insert(kind, entry.clone());
     entry
 }
 
-/// The `minecraft:entity_type` name for `kind` (shared map, read once from the reports).
-pub fn entity_type_name(kind: RegistryIndex) -> Option<String> {
-    entity_type_names()?.get(&kind).cloned()
+/// The `minecraft:entity_type` name for `kind` (shared map, read once from the reports; the
+/// strings are leaked with the map, so this is a copy-free `&'static str`).
+pub fn entity_type_name(kind: RegistryIndex) -> Option<&'static str> {
+    entity_type_names()?.get(&kind).copied()
 }
 
 /// The table-covered entity type names by protocol id (loaded lazily, once per process).
-pub fn entity_type_names() -> Option<&'static HashMap<RegistryIndex, String>> {
-    static NAMES: OnceLock<Option<HashMap<RegistryIndex, String>>> = OnceLock::new();
+pub fn entity_type_names() -> Option<&'static HashMap<RegistryIndex, &'static str>> {
+    static NAMES: OnceLock<Option<HashMap<RegistryIndex, &'static str>>> = OnceLock::new();
     NAMES.get_or_init(load_entity_type_names).as_ref()
 }
 
 /// Whether the tree contains a part named "head" (computed once per type, not per frame).
 fn has_head(part: &haste_core::model::ModelPart) -> bool {
-    part.name == "head" || part.children.iter().any(has_head)
+    part.id == haste_core::parts::HEAD || part.children.iter().any(has_head)
 }
 
 /// The table entry for `name`: (layer id, root scale) for tests and callers
@@ -903,14 +904,17 @@ pub fn table_textures() -> impl Iterator<Item = &'static str> {
 /// registry it needs itself: haste-data's `Registries::parse` is not exported and pulling all
 /// of `GameData` in here would duplicate the client's load. Every entity type is kept (the
 /// decoration kinds need names the model table does not cover); `model_entry` filters.
-fn load_entity_type_names() -> Option<HashMap<RegistryIndex, String>> {
+fn load_entity_type_names() -> Option<HashMap<RegistryIndex, &'static str>> {
     let path = haste_core::paths::datagen_reports().join("registries.json");
     let bytes = std::fs::read(path).ok()?;
     let registries: HashMap<&str, EntityTypeRegistryJson> = serde_json::from_slice(&bytes).ok()?;
     let reg = registries.get("minecraft:entity_type")?;
     let mut names = HashMap::with_capacity(reg.entries.len());
     for (name, e) in &reg.entries {
-        names.insert(RegistryIndex(e.protocol_id), (*name).to_owned());
+        names.insert(
+            RegistryIndex(e.protocol_id),
+            Box::leak((*name).to_owned().into_boxed_str()) as &'static str,
+        );
     }
     Some(names)
 }
@@ -928,11 +932,11 @@ pub enum DecorationKind {
 /// `painting`, `lightning_bolt`); `None` for every other type. Warm lookups are a map probe,
 /// never an allocation (called per entity per frame).
 pub fn decoration_kind(kind: RegistryIndex) -> Option<DecorationKind> {
-    static NAMES: OnceLock<HashMap<RegistryIndex, String>> = OnceLock::new();
-    let name = NAMES
+    static NAMES: OnceLock<HashMap<RegistryIndex, &'static str>> = OnceLock::new();
+    let name = *NAMES
         .get_or_init(|| load_entity_type_names().unwrap_or_default())
         .get(&kind)?;
-    match name.as_str() {
+    match name {
         "minecraft:item_frame" => Some(DecorationKind::ItemFrame { glow: false }),
         "minecraft:glow_item_frame" => Some(DecorationKind::ItemFrame { glow: true }),
         "minecraft:painting" => Some(DecorationKind::Painting),

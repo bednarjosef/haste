@@ -137,7 +137,7 @@ impl GuiRenderer {
                 } => {
                     let cur = scissor;
                     self.switch(&mut scissor, &mut blend, cur, *cmd_blend, &mut batch_start);
-                    let (rect, index) = self.lookup(&TexKey::Texture(texture.clone()), assets);
+                    let (rect, index) = self.lookup_ref(TexKeyRef::Texture(texture), assets);
                     let (iw, ih) = self.entries[index as usize].dims;
                     let kx = iw as f32 / (*tex_w).max(1) as f32;
                     let ky = ih as f32 / (*tex_h).max(1) as f32;
@@ -179,7 +179,7 @@ impl GuiRenderer {
                 } => {
                     let cur = scissor;
                     self.switch(&mut scissor, &mut blend, cur, *cmd_blend, &mut batch_start);
-                    let (rect, _) = self.lookup(&TexKey::Sprite(sprite.clone()), assets);
+                    let (rect, _) = self.lookup_ref(TexKeyRef::Sprite(sprite), assets);
                     let kx = rect[2] as f32 / (*sprite_w).max(1) as f32;
                     let ky = rect[3] as f32 / (*sprite_h).max(1) as f32;
                     let u0 = rect[0] as f32 + *u as f32 * kx;
@@ -391,7 +391,7 @@ impl GuiRenderer {
         if w <= 0 || h <= 0 {
             return;
         }
-        let (rect, index) = self.lookup(&TexKey::Sprite(sprite.clone()), assets);
+        let (rect, index) = self.lookup_ref(TexKeyRef::Sprite(sprite), assets);
         let meta = self.entries[index as usize].meta.clone();
         let color = rgba(tint_or_white(tint));
         let (ax, ay, aw, ah) = (

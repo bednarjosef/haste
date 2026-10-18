@@ -46,7 +46,7 @@ pub fn texture_for(
     let tex = |adult: &str, baby_tex: &str| {
         Some(Identifier::minecraft(if baby { baby_tex } else { adult }))
     };
-    match name.as_str() {
+    match name {
         // AxolotlRenderer: axolotl_<variant name>.png / _baby.png, id clamped like
         // `ByIdMap.continuous(OutOfBoundsStrategy.ZERO)` (unknown -> LUCY).
         "minecraft:axolotl" => {
@@ -298,9 +298,9 @@ pub fn metadata_model_for(
     }
     // The layer comes from the model table's row for this type (adult or baby column).
     let model = (if baby {
-        crate::registry::baby_model_for_name(&name)
+        crate::registry::baby_model_for_name(name)
     } else {
-        crate::registry::model_for_name(&name)
+        crate::registry::model_for_name(name)
     })
     .map(|mut m| {
         if m.texture != texture {

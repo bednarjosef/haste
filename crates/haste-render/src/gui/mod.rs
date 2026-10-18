@@ -23,7 +23,6 @@ mod nametag;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use haste_assets::BitmapFont;
@@ -128,14 +127,16 @@ pub struct GuiRenderer {
     vertex_buffer: wgpu::Buffer,
     vertex_capacity: usize,
 
-    keys: HashMap<TexKey, u32>,
+    /// hashbrown so its key map can be probed through borrowed keys (`TexKeyRef`),
+    /// without allocating an owned `Identifier` per command.
+    keys: hashbrown::HashMap<TexKey, u32>,
     entries: Vec<TexEntry>,
     shelf: Shelf,
     atlas_full: bool,
 
     font: Arc<BitmapFont>,
     item_names: Vec<Identifier>,
-    items: HashMap<u32, Option<Arc<PreparedItem>>>,
+    items: std::collections::HashMap<u32, Option<Arc<PreparedItem>>>,
 
     vertices: Vec<GuiVertex>,
     batches: Vec<Batch>,

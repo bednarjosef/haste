@@ -3,7 +3,7 @@
 //!
 //! Per tick, in this order (the order a vanilla client is observed to send them in):
 //! 1. `player_input` when the held movement keys changed since the last one sent,
-//! 2. physics (`haste_physics::tick`),
+//! 2. physics (`haste_physics::tick_with`),
 //! 3. `player_abilities` when flight was toggled or ended by landing,
 //! 4. `player_command` start/stop sprinting when the sprint state changed,
 //! 5. one of `move_player_pos_rot` / `_pos` / `_rot` / `_status_only` (send rules below),
@@ -27,6 +27,7 @@ use haste_core::game::GameMode;
 use haste_core::input::InputState;
 use haste_core::view::{BlockPhysics, BlockView, CollisionShapes};
 use haste_core::{BlockPos, EntityId, Identifier};
+use haste_data::BlockStates;
 use haste_entity::riding::SeatPoint;
 use haste_physics::movement::{BLOCK_BELOW_OFFSET, SPRINT_JUMP_BOOST, VERTICAL_DRAG};
 use haste_physics::{PlayerAttributes, PlayerState};
@@ -1001,11 +1002,15 @@ impl LocalPlayer {
         }
         // Vanilla `LocalPlayer.aiStep`: a fresh jump press in the air with a glider equipped and
         // no liquid starts gliding (`tryToStartFallFlying` -> `START_FALL_FLYING`), skipped on
-        // the press that just toggled creative flight. The flag is set locally so this tick
-        // already glides; the server confirms it through the shared flag 7 and clears it when the
-        // glide ends. The climbable check (`!onClimbable`) is not modelled (no climbable tag).
+        // the press that just toggled creative flight and while on a climbable
+        // (`!this.onClimbable()`). The flag is set locally so this tick already glides; the
+        // server confirms it through the shared flag 7 and clears it when the glide ends.
+        // The climbable identity is built from the synced tags and the state table in place, so
+        // the borrow splits from the `&mut self.state` the physics tick below needs.
+        let climb = climbable::SyncedClimbables::new(self.int.block_tags(), ctx.blocks());
         if pressed
             && !just_toggled_creative_flight
+            && !haste_physics::on_climbable(&self.state, ctx.world, &climb)
             && self.state.can_start_fall_flying(self.has_glider())
         {
             self.state.start_fall_flying();
@@ -1026,13 +1031,14 @@ impl LocalPlayer {
             self.state.levitation = levitation;
             self.state.slow_falling = slow_falling;
             self.state.jump_boost = jump_boost;
-            haste_physics::tick(
+            haste_physics::tick_with(
                 &mut self.state,
                 &phys_input,
                 &self.attrs,
                 ctx.world,
                 ctx.shapes,
                 ctx.blocks,
+                &climb,
             );
             // Own block sounds of moving: the step rule on the block below the
             // feet, the fall sound on a hard landing (vanilla plays both on
@@ -1273,6 +1279,15 @@ struct TickCtx<'a> {
     env: Option<&'a interact::InteractEnv<'a>>,
 }
 
+impl TickCtx<'_> {
+    /// The block-state table when the tick's `blocks` came from game data (`None` for the test
+    /// worlds that only answer physics per state id).
+    fn blocks(&self) -> Option<&BlockStates> {
+        self.env.map(|env| &env.data.blocks)
+    }
+}
+
+pub mod climbable;
 pub mod interact;
 mod riding;
 pub mod script;
