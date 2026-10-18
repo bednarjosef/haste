@@ -79,6 +79,27 @@ s = find("minecraft:glowstone")[0]
 if s["light"] != 15:
     failures.append(f"glowstone light != 15: {s['light']}")
 
+# light dampening and the shape-occlusion flags (LightEngine.isEmptyShape /
+# shapeOccludes): stone blocks light, air occludes nothing, slabs/snow/stairs use their
+# occlusion shape for light (a double slab does not; it is a full block).
+for block, props, dampening, can_occlude, use_shape in [
+    ("minecraft:stone", {}, 15, True, False),
+    ("minecraft:air", {}, 0, False, False),
+    ("minecraft:oak_slab", {"type": "bottom"}, 0, True, True),
+    ("minecraft:oak_slab", {"type": "double"}, 15, True, False),
+    ("minecraft:snow", {"layers": "2"}, 0, True, True),
+    ("minecraft:oak_stairs", {"half": "bottom"}, 0, True, True),
+]:
+    s = find(block, **props)[0]
+    if s.get("light_dampening") != dampening:
+        failures.append(f"{block} {props} light_dampening {s.get('light_dampening')} != {dampening}")
+    if s.get("can_occlude") != can_occlude:
+        failures.append(f"{block} {props} can_occlude {s.get('can_occlude')} != {can_occlude}")
+    if s.get("use_shape_for_light_occlusion") != use_shape:
+        failures.append(
+            f"{block} {props} use_shape_for_light_occlusion {s.get('use_shape_for_light_occlusion')} != {use_shape}"
+        )
+
 # render_shape: barrier/water invisible, stone a model
 for block, props, want in [
     ("minecraft:barrier", {}, "invisible"),

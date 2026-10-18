@@ -6,12 +6,13 @@
 //! The table is computed lazily on the first block change that needs it and then maintained
 //! incrementally by [`update_column`] (vanilla `ChunkSkyLightSources.update`, run from
 //! `LevelChunk.setBlockState` before the light engines check the block). An edge occludes
-//! when the block below it has any light dampening; vanilla's shape-based variant
-//! (`useShapeForLightOcclusion`, `Shapes.faceShapeOccludes`) is not modelled, so the block
-//! above the edge never matters.
+//! when the block below it has any light dampening, or when the two states' face occlusion
+//! shapes cover the edge's plane (vanilla `isEdgeOccluded` -> `LightEngine.shapeOccludes`
+//! with direction DOWN: a bottom slab's bottom face closes the column at its own cell,
+//! its open top does not).
 
 use haste_core::view::BlockView;
-use haste_core::{BlockPos, BlockStateId, ChunkPos};
+use haste_core::{BlockPos, BlockStateId, ChunkPos, Direction};
 use haste_data::GameData;
 
 use crate::chunk::Chunk;
@@ -29,25 +30,35 @@ fn index(x: u8, z: u8) -> usize {
     x as usize + z as usize * 16
 }
 
-/// Whether the state occludes skylight coming down onto it.
+/// Vanilla `ChunkSkyLightSources.isEdgeOccluded`: the block below the edge has light
+/// dampening, or the states' face occlusion shapes cover the edge (`shape_occludes` with
+/// direction DOWN compares the top state's bottom face with the bottom state's top face).
 #[inline]
-fn occludes(data: &GameData, state: BlockStateId) -> bool {
-    light_dampening(data, state) != 0
+fn is_edge_occluded(data: &GameData, top: BlockStateId, bottom: BlockStateId) -> bool {
+    light_dampening(data, bottom) != 0
+        || data
+            .shapes
+            .shape_occludes(top, bottom, Direction::Down)
 }
 
 /// One column's lowest source y, walked from the world top downwards
-/// (vanilla `findLowestSourceY`): the y above the first occluding block, or
+/// (vanilla `findLowestSourceY`): the y above the first occluding edge, or
 /// [`OPEN_TO_BOTTOM`] when the column never occludes.
 fn column_lowest_source(data: &GameData, chunk: &Chunk, x: u8, z: u8) -> i32 {
+    let mut top = BlockStateId::AIR;
     for si in (0..chunk.sections.len()).rev() {
         let section = &chunk.sections[si];
         if section.block_count == 0 {
+            // an all-air section resets the edge's top state to air, like vanilla
+            top = BlockStateId::AIR;
             continue;
         }
         for y in (0..16u8).rev() {
-            if occludes(data, section.get(x, y, z)) {
+            let bottom = section.get(x, y, z);
+            if is_edge_occluded(data, top, bottom) {
                 return chunk.min_section * 16 + si as i32 * 16 + y as i32 + 1;
             }
+            top = bottom;
         }
     }
     OPEN_TO_BOTTOM
@@ -103,20 +114,21 @@ pub(crate) fn update_column(world: &mut World, pos: BlockPos) {
         return;
     }
     let data = world.game_data().clone();
+    let above = world.block_state(BlockPos::new(pos.x, pos.y + 1, pos.z));
     let mid = world.block_state(pos);
     let below = world.block_state(BlockPos::new(pos.x, pos.y - 1, pos.z));
     let mut new: Option<i32> = None;
     // edge between y+1 and y (vanilla tries this one first)
-    if occludes(&data, mid) {
+    if is_edge_occluded(&data, above, mid) {
         if pos.y + 1 > current {
             new = Some(pos.y + 1);
         }
     } else if pos.y + 1 == current {
-        new = Some(next_edge_below(world, pos));
+        new = Some(next_edge_below(world, pos, mid));
     }
     // edge between y and y-1, when the first edge changed nothing
     if new.is_none() {
-        if occludes(&data, below) {
+        if is_edge_occluded(&data, mid, below) {
             if pos.y > current {
                 new = Some(pos.y);
             }
@@ -124,6 +136,7 @@ pub(crate) fn update_column(world: &mut World, pos: BlockPos) {
             new = Some(next_edge_below(
                 world,
                 BlockPos::new(pos.x, pos.y - 1, pos.z),
+                below,
             ));
         }
     }
@@ -137,19 +150,23 @@ pub(crate) fn update_column(world: &mut World, pos: BlockPos) {
     }
 }
 
-/// Vanilla `findLowestSourceBelow`: walks down from `start` (a non-occluding block) to the
-/// next occluding edge, or [`OPEN_TO_BOTTOM`] at the world's floor.
-fn next_edge_below(world: &World, start: BlockPos) -> i32 {
+/// Vanilla `findLowestSourceBelow`: walks down from `start` (a non-occluding block whose
+/// state is `start_state`) to the next occluding edge, or [`OPEN_TO_BOTTOM`] at the
+/// world's floor.
+fn next_edge_below(world: &World, start: BlockPos, start_state: BlockStateId) -> i32 {
     let floor = world.dimension().min_y - 1;
     let mut top = start;
+    let mut top_state = start_state;
     loop {
         let bottom = BlockPos::new(top.x, top.y - 1, top.z);
         if bottom.y < floor {
             return OPEN_TO_BOTTOM;
         }
-        if occludes(world.game_data(), world.block_state(bottom)) {
+        let bottom_state = world.block_state(bottom);
+        if is_edge_occluded(world.game_data(), top_state, bottom_state) {
             return top.y;
         }
         top = bottom;
+        top_state = bottom_state;
     }
 }

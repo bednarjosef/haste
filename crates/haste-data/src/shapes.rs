@@ -5,9 +5,13 @@
 //! file replaces it once oracles records the dump.
 
 use haste_core::view::{FluidInfo, FluidKind};
-use haste_core::{Aabb, BlockStateId, DVec3};
+use haste_core::{Aabb, BlockStateId, Direction, DVec3};
 
 use crate::blocks::BlockStates;
+
+mod face_occlusion;
+
+use face_occlusion::{FaceOcclusion, OcclusionTable};
 
 /// Per-state shape entry (empty = no collision). `light`/`air`/`opaque`/`fluid` come from the
 /// oracle dump's per-state fields (or fallback heuristics) and back `BlockPhysics` on `GameData`.
@@ -36,6 +40,9 @@ pub struct BlockShapes {
     placeholder: BlockStateId,
     /// `occlusion` dump field, empty when the dump predates it (see [`OcclusionTable`]).
     occlusion: OcclusionTable,
+    /// The light engines' shape-occlusion table over the occlusion shapes and the
+    /// `can_occlude`/`use_shape_for_light_occlusion` flags (see [`FaceOcclusion`]).
+    face_occlusion: FaceOcclusion,
     /// `light_dampening` dump field per state ([`DAMPENING_ABSENT`] without the field).
     light_dampening: Vec<u8>,
     /// `propagates_skylight_down` per state: 0 false, 1 true, [`SKYLIGHT_ABSENT`] without
@@ -43,26 +50,67 @@ pub struct BlockShapes {
     skylight_down: Vec<u8>,
 }
 
-/// The dump's `occlusion` field (vanilla `BlockState.getOcclusionShape`, what face culling
-/// and light occlusion compare against: empty for the `noOcclusion` family, half boxes for
-/// slabs, the smaller shapes of fences, fence gates, lecterns and sculk shriekers). Absent
-/// in dumps from before the 2026-10-18 regeneration: an empty `ranges` answers `None` for
-/// every state. The boxes of all states are interned into one arena (most states share the
-/// full cube or nothing), so no state carries its own `Vec`.
-#[derive(Default)]
-struct OcclusionTable {
-    boxes: Vec<Aabb>,
-    /// Per state: its slice of `boxes`, or [`OCCLUSION_ABSENT`].
-    ranges: Vec<std::ops::Range<u32>>,
-}
-
-/// `ranges` entry for a state the dump has no occlusion shape for (an empty range is a
-/// real shape: glass occludes nothing).
-const OCCLUSION_ABSENT: std::ops::Range<u32> = u32::MAX..u32::MAX;
 /// `light_dampening` is 0..=15; this marks a state the field is absent for.
 const DAMPENING_ABSENT: u8 = u8::MAX;
 /// `skylight_down` encoding for a state the field is absent for.
 const SKYLIGHT_ABSENT: u8 = 2;
+
+// Deserializing into Vec<OracleState> buffers all ~903k floats as f64 before we convert;
+// that double-buffering is a large part of the 30 MB file's cost (see NOTES.md).
+#[derive(serde::Deserialize)]
+struct OracleFile {
+    version: u32,
+    states: Vec<OracleState>,
+}
+
+#[derive(serde::Deserialize)]
+struct OracleState {
+    id: u32,
+    #[serde(default)]
+    collision: Vec<[f64; 6]>,
+    #[serde(default)]
+    outline: Vec<[f64; 6]>,
+    #[serde(default)]
+    light: u8,
+    #[serde(default)]
+    air: bool,
+    #[serde(default)]
+    opaque: bool,
+    /// Fluid id (`minecraft:water`, `minecraft:flowing_water`, `minecraft:lava`,
+    /// `minecraft:flowing_lava`) for fluid states and waterlogged blocks; null otherwise.
+    #[serde(default)]
+    fluid: Option<String>,
+    /// `properties` includes `level` for fluid states; absent for waterlogged blocks
+    /// (their fluid is a full source).
+    #[serde(default)]
+    properties: std::collections::HashMap<String, String>,
+    /// "invisible" | "model" (vanilla `RenderShape`, which has only those two constants
+    /// in 26.3). Absent in pre-regeneration dumps: treated as "model".
+    #[serde(default)]
+    render_shape: Option<String>,
+    /// Vanilla `BlockState.isSuffocating` with an empty level. Absent in
+    /// pre-regeneration dumps: falls back to the full-collision-cube rule below.
+    #[serde(default)]
+    suffocating: Option<bool>,
+    /// Vanilla `BlockState.getOcclusionShape`. Absent in pre-regeneration dumps.
+    #[serde(default)]
+    occlusion: Option<Vec<[f64; 6]>>,
+    /// Vanilla `BlockState.getLightDampening` (0..=15). Absent in
+    /// pre-regeneration dumps.
+    #[serde(default)]
+    light_dampening: Option<u8>,
+    /// Vanilla `BlockState.propagatesSkylightDown`. Absent in
+    /// pre-regeneration dumps.
+    #[serde(default)]
+    propagates_skylight_down: Option<bool>,
+    /// Vanilla `BlockState.canOcclude` / `useShapeForLightOcclusion`: the light engine's
+    /// gates for shape-based light occlusion (`LightEngine.isEmptyShape`). Absent in
+    /// dumps from before the flags were recorded.
+    #[serde(default)]
+    can_occlude: Option<bool>,
+    #[serde(default)]
+    use_shape_for_light_occlusion: Option<bool>,
+}
 
 impl BlockShapes {
     /// Table row for `state`: the id itself when in range, else the placeholder's row.
@@ -78,54 +126,6 @@ impl BlockShapes {
 
     pub(crate) fn parse_oracle(json: &str, blocks: &BlockStates) -> anyhow::Result<Self> {
         let state_count = blocks.len();
-        // Deserializing into Vec<OracleState> buffers all ~903k floats as f64 before we convert;
-        // that double-buffering is a large part of the 30 MB file's cost (see NOTES.md).
-        #[derive(serde::Deserialize)]
-        struct OracleFile {
-            version: u32,
-            states: Vec<OracleState>,
-        }
-        #[derive(serde::Deserialize)]
-        struct OracleState {
-            id: u32,
-            #[serde(default)]
-            collision: Vec<[f64; 6]>,
-            #[serde(default)]
-            outline: Vec<[f64; 6]>,
-            #[serde(default)]
-            light: u8,
-            #[serde(default)]
-            air: bool,
-            #[serde(default)]
-            opaque: bool,
-            /// Fluid id (`minecraft:water`, `minecraft:flowing_water`, `minecraft:lava`,
-            /// `minecraft:flowing_lava`) for fluid states and waterlogged blocks; null otherwise.
-            #[serde(default)]
-            fluid: Option<String>,
-            /// `properties` includes `level` for fluid states; absent for waterlogged blocks
-            /// (their fluid is a full source).
-            #[serde(default)]
-            properties: std::collections::HashMap<String, String>,
-            /// "invisible" | "model" (vanilla `RenderShape`, which has only those two constants
-            /// in 26.3). Absent in pre-regeneration dumps: treated as "model".
-            #[serde(default)]
-            render_shape: Option<String>,
-            /// Vanilla `BlockState.isSuffocating` with an empty level. Absent in
-            /// pre-regeneration dumps: falls back to the full-collision-cube rule below.
-            #[serde(default)]
-            suffocating: Option<bool>,
-            /// Vanilla `BlockState.getOcclusionShape`. Absent in pre-regeneration dumps.
-            #[serde(default)]
-            occlusion: Option<Vec<[f64; 6]>>,
-            /// Vanilla `BlockState.getLightDampening` (0..=15). Absent in
-            /// pre-regeneration dumps.
-            #[serde(default)]
-            light_dampening: Option<u8>,
-            /// Vanilla `BlockState.propagatesSkylightDown`. Absent in
-            /// pre-regeneration dumps.
-            #[serde(default)]
-            propagates_skylight_down: Option<bool>,
-        }
         let file: OracleFile =
             serde_json::from_str(json).map_err(|e| anyhow::anyhow!("block_shapes.json: {e}"))?;
         if file.version != 1 {
@@ -139,25 +139,12 @@ impl BlockShapes {
         let mut dampening = Vec::new();
         let mut skylight = Vec::new();
         if file.states.iter().any(|s| s.occlusion.is_some()) {
-            occlusion.ranges = vec![OCCLUSION_ABSENT; state_count];
+            occlusion.ranges = vec![face_occlusion::OCCLUSION_ABSENT; state_count];
             let mut intern = std::collections::HashMap::with_capacity(128);
             for s in &file.states {
-                let Some(list) = &s.occlusion else { continue };
-                // Floats are not hashable: intern on the bit patterns (exact).
-                let key: Vec<[u64; 6]> = list.iter().map(|b| b.map(f64::to_bits)).collect();
-                let start = match intern.get(&key) {
-                    Some(&i) => i,
-                    None => {
-                        let i = occlusion.boxes.len() as u32;
-                        occlusion.boxes.extend(list.iter().map(|b| Aabb {
-                            min: DVec3::new(b[0], b[1], b[2]),
-                            max: DVec3::new(b[3], b[4], b[5]),
-                        }));
-                        intern.insert(key, i);
-                        i
-                    }
-                };
-                occlusion.ranges[s.id as usize] = start..start + list.len() as u32;
+                if let Some(list) = &s.occlusion {
+                    occlusion.intern(s.id, list, &mut intern);
+                }
             }
         }
         if file.states.iter().any(|s| s.light_dampening.is_some()) {
@@ -222,11 +209,13 @@ impl BlockShapes {
                 skylight[idx] = u8::from(v);
             }
         }
+        let face_occlusion = FaceOcclusion::build(&occlusion, &file.states, state_count);
         Ok(Self {
             shapes,
             oracle_backed: true,
             placeholder: blocks.placeholder_state(),
             occlusion,
+            face_occlusion,
             light_dampening: dampening,
             skylight_down: skylight,
         })
@@ -244,6 +233,7 @@ impl BlockShapes {
             oracle_backed: false,
             placeholder: blocks.placeholder_state(),
             occlusion: OcclusionTable::default(),
+            face_occlusion: FaceOcclusion::absent(),
             light_dampening: Vec::new(),
             skylight_down: Vec::new(),
         }
@@ -315,11 +305,28 @@ impl BlockShapes {
     /// slice is a real shape (the `noOcclusion` family occludes nothing). Ids outside the
     /// table resolve to the placeholder's entry like the shape lookups above.
     pub fn occlusion_boxes(&self, state: BlockStateId) -> Option<&[Aabb]> {
-        let range = self.occlusion.ranges.get(self.row(state))?;
-        if range == &OCCLUSION_ABSENT {
-            return None;
-        }
-        Some(&self.occlusion.boxes[range.start as usize..range.end as usize])
+        self.occlusion.boxes_of(self.row(state))
+    }
+
+    /// Vanilla `LightEngine.shapeOccludes(fromState, toState, direction)`: whether the
+    /// two states' face occlusion shapes block light travelling `from -> to` along
+    /// `direction` (a bottom slab blocks down through its bottom face but not sideways
+    /// through its open half). False on old dumps without the flags, which is the
+    /// pre-shape behaviour. Ids outside the table resolve to the placeholder's entry.
+    pub fn shape_occludes(&self, from: BlockStateId, to: BlockStateId, direction: Direction) -> bool {
+        self.face_occlusion.occludes(self.row(from), self.row(to), direction)
+    }
+
+    /// Vanilla `LightEngine.isEmptyShape`: `!canOcclude || !useShapeForLightOcclusion`,
+    /// the gate that decides a state's shape never occludes light. True on old dumps.
+    pub fn is_empty_shape(&self, state: BlockStateId) -> bool {
+        self.face_occlusion.is_empty_shape(self.row(state))
+    }
+
+    /// Vanilla `BlockState.useShapeForLightOcclusion` (the flag half of
+    /// `LightEngine.hasDifferentLightProperties`): `None` on old dumps.
+    pub fn use_shape_for_light_occlusion(&self, state: BlockStateId) -> Option<bool> {
+        self.face_occlusion.use_shape(self.row(state))
     }
 
     /// Vanilla `BlockState.getLightDampening` (0..=15, `BlockStateBase.initCache`'s cached

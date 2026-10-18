@@ -7,9 +7,11 @@
 //! them back into the chunks, re-applying the uniform-array dedup of `light.rs`. The engine
 //! runs only for block changes, so per-run allocations here are fine.
 //!
-//! Shape-based light occlusion (vanilla `useShapeForLightOcclusion`, the merged-face
-//! `getLightDampeningInto` = 16 case) is not modelled: per-state dampening comes from
-//! `light_dampening` below.
+//! Shape-based light occlusion (vanilla `LightEngine.shapeOccludes` over the dump's
+//! `can_occlude`/`use_shape_for_light_occlusion` flags and occlusion shapes) lives in
+//! haste-data's `shapes::face_occlusion` and is called from `engine.rs`; per-state
+//! dampening comes from `light_dampening` below. Vanilla's merged-face
+//! `getLightDampeningInto` is server-side only (nylium and snowy dirt random ticks).
 
 use ahash::HashMap;
 use bytes::Bytes;
@@ -169,21 +171,16 @@ impl<'a> Storage<'a> {
         nibble_set(arr, (x & 15) as u8, (y & 15) as u8, (z & 15) as u8, level);
     }
 
-    /// Vanilla `LightEngine.getOpacity`: at least 1. Unloaded chunks read as fully opaque
-    /// (vanilla's `getState` returns bedrock there).
-    pub(super) fn opacity(&self, pos: u64) -> u8 {
-        let (x, y, z) = (unpack_x(pos), unpack_y(pos), unpack_z(pos));
-        match self.block_state(BlockPos::new(x, y, z)) {
-            Some(state) => light_dampening(self.world.game_data(), state).max(1),
-            None => 15,
-        }
-    }
-
-    /// Vanilla `BlockLightEngine.getEmission` (always "light on": loaded chunks have light).
-    pub(super) fn emission(&self, pos: u64) -> u8 {
+    /// Vanilla `LightEngine.getState` (unloaded chunks read as `None`; vanilla's bedrock
+    /// there makes them fully opaque, which `engine.rs` handles with opacity 15).
+    pub(super) fn state_at(&self, pos: u64) -> Option<BlockStateId> {
         let (x, y, z) = (unpack_x(pos), unpack_y(pos), unpack_z(pos));
         self.block_state(BlockPos::new(x, y, z))
-            .map_or(0, |s| self.world.game_data().light_emission(s))
+    }
+
+    /// The world's game data (the light engine's per-state lookups).
+    pub(super) fn game_data(&self) -> &GameData {
+        self.world.game_data()
     }
 
     pub(super) fn block_state(&self, pos: BlockPos) -> Option<BlockStateId> {

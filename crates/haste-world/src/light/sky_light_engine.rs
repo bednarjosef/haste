@@ -24,8 +24,10 @@ const REMOVE_SKY_SOURCE: u32 = decrease_skip_one_direction(15, Direction::Up);
 /// Vanilla `REMOVE_TOP_SKY_SOURCE_ENTRY`: the topmost removed source, darkened from every
 /// direction.
 const REMOVE_TOP_SKY_SOURCE: u32 = decrease_all_directions(15);
-/// Vanilla `ADD_SKY_SOURCE_ENTRY`: a level-15 increase that does not go up.
-const ADD_SKY_SOURCE: u32 = increase_skip_one_direction(15, Direction::Up);
+/// Vanilla `ADD_SKY_SOURCE_ENTRY`: a level-15 increase that does not go up (vanilla
+/// records an empty-shape flag of false here: the source cell's state is read back when
+/// the shape test needs it).
+const ADD_SKY_SOURCE: u32 = increase_skip_one_direction(15, false, Direction::Up);
 
 /// Vanilla `SkyLightEngine.checkNode`.
 pub(super) fn check_node(store: &mut Storage<'_>, queues: &mut Queues, node: u64) {
