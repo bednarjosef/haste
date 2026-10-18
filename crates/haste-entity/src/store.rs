@@ -269,10 +269,8 @@ pub struct Entity {
     /// A dropped item entity's stack (metadata index 8, `ItemEntity.DATA_ITEM`), if its metadata
     /// named one.
     pub item: Option<ItemStackData>,
-    /// True for a `minecraft:item` entity (`ItemEntity`): its client-side motion is simulated from
-    /// the spawn / `set_entity_motion` velocity (`ItemEntity.getMoveSimulationType()` is
-    /// `SERVER_AND_CLIENT`). Resolved from the entity type name at spawn, and confirmed when the
-    /// item stack arrives at `ItemEntity.DATA_ITEM` (index 8).
+    /// True for a `minecraft:item` entity: its client-side motion is simulated
+    /// (`ItemEntity.getMoveSimulationType()` is `SERVER_AND_CLIENT`).
     pub is_item: bool,
     /// Ticks since spawn: drives the dropped items' spin and bob.
     pub age: u32,
@@ -296,8 +294,7 @@ impl Entity {
                 }
             }
         };
-        // `ItemEntity`: simulated client-side (SERVER_AND_CLIENT). Without the registry name
-        // (no cache) `set_metadata` upgrades this when `ItemEntity.DATA_ITEM` (index 8) arrives.
+        // `ItemEntity`: simulated client-side; `set_metadata` confirms it at index 8.
         let is_item = type_name == Some("minecraft:item");
         Entity {
             id: s.id,
@@ -827,6 +824,11 @@ impl EntityStore {
     /// update the walk animation, the body yaw (`LivingEntity.tick` -> `calculateEntityAnimation`
     /// and `tickHeadTurn`) and the swing/swim/chicken timers.
     pub fn tick(&mut self) {
+        self.tick_in_world(&crate::item_entity::NoWorld);
+    }
+
+    /// [`Self::tick`] with a world view for the dropped items (`ItemEntity.tick`).
+    pub fn tick_in_world(&mut self, world: &dyn crate::item_entity::ItemWorld) {
         let EntityStore { slots, riding, .. } = self;
         for slot in slots.iter_mut().flatten() {
             slot.tick_count += 1;
@@ -855,11 +857,9 @@ impl EntityStore {
                 pitch: &mut slot.pitch,
                 prev_pitch: &mut slot.prev_pitch,
             });
-            // `ItemEntity.tick`: the client simulates a dropped item's motion from its velocity
-            // (gravity + drag) until the next position packet; vanilla calls `commonTick` first,
-            // so this runs after the interpolation step above.
+            // `ItemEntity.tick`: gravity, move, drag, between position packets.
             if slot.is_item {
-                crate::item_entity::tick(slot);
+                crate::item_entity::tick(slot, world);
             }
             let d = slot.pos - slot.prev_pos;
             let dist = f32::sqrt((d.x * d.x + d.z * d.z) as f32);
