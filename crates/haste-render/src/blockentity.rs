@@ -392,7 +392,7 @@ pub(crate) fn emit_block_entity(
         | BlockEntityKind::DecoratedPot
         | BlockEntityKind::Conduit => {}
         BlockEntityKind::Chest(_material) => {
-            chest::submit(out, inst, camera, rect, light, emit_part);
+            chest::submit(out, inst, camera, rect, light);
         }
         BlockEntityKind::Shulker(_color) => {
             shulker::submit(out, inst, camera, rect, light, emit_part);

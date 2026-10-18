@@ -164,7 +164,12 @@ pub fn upload_atlas(
         mip_level_count: mip_levels,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        // Vanilla's atlas is RGBA8_UNORM (`TextureAtlas.createTexture`): the GPU's
+        // bilinear and trilinear filtering blends the encoded sRGB values, and
+        // the terrain shader multiplies the raw encoded sample by the vertex
+        // colour (see `shade` in chunk.wgsl). An sRGB texture would filter in
+        // linear light and darken every blend between unlike texels.
+        format: wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_DST
             | wgpu::TextureUsages::COPY_SRC,
@@ -252,16 +257,16 @@ pub fn upload_section(
     let (min, max) = (world(mesh.aabb.0), world(mesh.aabb.1));
     mesh.layers
         .iter()
-        .map(|(layer, indices)| SectionGpuMesh {
+        .map(|l| SectionGpuMesh {
             pos: mesh.pos,
             vertex_buffer: vertex_buffer.clone(),
             index_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("section-indices"),
-                contents: bytemuck::cast_slice(indices),
+                contents: bytemuck::cast_slice(&l.indices),
                 usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             }),
-            index_count: indices.len() as u32,
-            layer: *layer,
+            index_count: l.indices.len() as u32,
+            layer: l.layer,
             aabb: (min, max),
         })
         .collect()

@@ -6,6 +6,9 @@ use super::lighting::{
 };
 use super::*;
 
+mod face_occlusion;
+mod merge_order;
+
 /// A synthetic flat world: one layer of `block` over bedrock, for the
 /// end-to-end mesh tests (real jar, ignored without cache).
 struct FlatWorld {
@@ -148,7 +151,7 @@ fn jar_mesh_flat_stone_section() {
     // between neighbours, bottom at world bottom is against air but y=-1
     // is air so the bottom face shows too => 16*16 top + 16*16 bottom
     // + 4 edges * 16 = quads).
-    let total_quads: usize = mesh.layers.iter().map(|(_, idx)| idx.len() / 6).sum();
+    let total_quads: usize = mesh.layers.iter().map(|l| l.indices.len() / 6).sum();
     eprintln!("total quads: {total_quads}");
     // Histogram by cullface direction to debug face emission.
     use std::collections::HashMap;
@@ -162,7 +165,7 @@ fn jar_mesh_flat_stone_section() {
     eprintln!("stone baked quads by cullface: {hist:?}");
     // All in the solid layer.
     assert_eq!(mesh.layers.len(), 1);
-    assert_eq!(mesh.layers[0].0, haste_assets::RenderLayer::Solid);
+    assert_eq!(mesh.layers[0].layer, haste_assets::RenderLayer::Solid);
     // Vertices packed, sprite ids resolved from the atlas.
     assert!(mesh.vertices.iter().all(|v| v.sprite != 0));
     // Greedy merge: the uniform-light top and bottom faces each merge into
@@ -199,7 +202,7 @@ fn jar_mesh_flat_stone_section() {
     };
     let snapshot = MeshSnapshot::capture(&world, SectionPos::new(0, 0, 0));
     let mesh = mesh_section(&snapshot, &baked, &atlas, SectionPos::new(0, 0, 0));
-    let quads: usize = mesh.layers.iter().map(|(_, idx)| idx.len() / 6).sum();
+    let quads: usize = mesh.layers.iter().map(|l| l.indices.len() / 6).sum();
     eprintln!(
         "grass slab: {quads} quads, {} vertices",
         mesh.vertices.len()
@@ -400,8 +403,8 @@ fn platform_interior_boundary_quads_culled() {
         ]
     };
     let mut interior = 0usize;
-    for (_layer, idx) in &mesh.layers {
-        for quad in idx.chunks(6) {
+    for l in &mesh.layers {
+        for quad in l.indices.chunks(6) {
             let vs: Vec<_> = quad.iter().map(|i| &mesh.vertices[*i as usize]).collect();
             let ps: Vec<[f32; 3]> = vs.iter().map(|v| local(v)).collect();
             let min = ps.iter().fold([f32::MAX; 3], |mut a, p| {
@@ -447,8 +450,9 @@ fn platform_interior_boundary_quads_culled() {
 }
 
 /// The client jar's baked models and atlas (None without the cache: the caller
-/// returns, so the test is skipped rather than failed).
-fn load_baked() -> Option<(
+/// returns, so the test is skipped rather than failed). Also used by
+/// `skip/tests.rs`'s mesher tests.
+pub(super) fn load_baked() -> Option<(
     haste_assets::BlocksJsonStates,
     haste_assets::BakedBlockModels,
     haste_assets::AtlasBuilder,
@@ -506,6 +510,8 @@ fn every_tinted_quad_of_a_block_takes_its_blended_colour() {
         Arc::new(crate::fluid::FluidTable::empty()),
         Arc::new(AoTable::all_solid(states.len())),
         Arc::new(crate::fluid::FluidOccluders::absent()),
+        Arc::new(crate::mesher::FaceOccluders::absent()),
+        Arc::new(crate::mesher::skip::SkipTable::absent()),
     );
     struct Snowy;
     impl crate::tint::BiomeSource for Snowy {
@@ -635,6 +641,8 @@ fn table_generations_are_unique() {
         Arc::new(crate::fluid::FluidTable::empty()),
         Arc::new(AoTable::all_solid(0)),
         Arc::new(crate::fluid::FluidOccluders::absent()),
+        Arc::new(crate::mesher::FaceOccluders::absent()),
+        Arc::new(crate::mesher::skip::SkipTable::absent()),
     );
     assert_ne!(a.generation, c.generation);
     assert_ne!(b.generation, c.generation);

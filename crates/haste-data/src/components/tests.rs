@@ -87,20 +87,53 @@ fn parses_the_codec_shape() {
 
 #[test]
 fn parses_consumables_with_defaults() {
-    // `Consumable.CODEC` defaults: 1.6 s and `eat`.
+    // `Consumable.CODEC` defaults: 1.6 s, `eat`, the generic eat sound, particles on
+    // (bread's whole component in the report is `{}`).
     assert_eq!(
         parse_consumable(&serde_json::json!({})),
-        Consumable {
-            consume_seconds: 1.6,
-            animation: 1,
-        }
+        Consumable::default_food()
     );
     // A drink with its own time: `consumeTicks` = seconds * 20.
     let drink = parse_consumable(&serde_json::json!({
-        "consume_seconds": 1.6, "animation": "drink"
+        "consume_seconds": 1.6, "animation": "drink",
+        "sound": "minecraft:entity.generic.drink", "has_consume_particles": false
     }));
     assert_eq!(drink.animation, 2);
     assert_eq!(drink.consume_ticks(), 32);
+    assert_eq!(drink.sound, Identifier::minecraft("entity.generic.drink"));
+    assert!(!drink.has_consume_particles);
+    // An inline sound object names `sound_id` (`SoundEvent.DIRECT_CODEC`'s shape).
+    let inline = parse_consumable(&serde_json::json!({
+        "sound": {"sound_id": "minecraft:item.honey_bottle.drink", "range": 16.0}
+    }));
+    assert_eq!(
+        inline.sound,
+        Identifier::minecraft("item.honey_bottle.drink")
+    );
+}
+
+/// The report's `minecraft:consumable`: bread is every default, the potion the default
+/// drink (no particles, `entity.generic.drink`), the honey bottle overrides time and sound.
+#[test]
+#[ignore = "needs the item component reports in the cache"]
+fn report_consumables_carry_sound_and_particles() {
+    let c = super::ItemComponents::load_default().unwrap();
+    let consumable = |name: &str| {
+        c.consumable(&attr(name))
+            .unwrap_or_else(|| panic!("{name} has a consumable"))
+    };
+    assert_eq!(consumable("bread"), Consumable::default_food());
+    assert_eq!(consumable("potion"), Consumable::default_drink());
+    let honey = consumable("honey_bottle");
+    assert_eq!(honey.consume_seconds, 2.0);
+    assert_eq!(honey.animation, 2);
+    assert_eq!(
+        honey.sound,
+        Identifier::minecraft("item.honey_bottle.drink")
+    );
+    assert!(!honey.has_consume_particles);
+    assert!(c.consumable_items().any(|i| i == &attr("bread")));
+    assert!(!c.consumable_items().any(|i| i == &attr("diamond_sword")));
 }
 
 #[test]

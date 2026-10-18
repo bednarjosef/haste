@@ -11,6 +11,7 @@ use haste_data::GameData;
 use haste_entity::EntityStore;
 use haste_protocol::haste_core::input::{InputState, InteractInput};
 use haste_protocol::haste_core::{BlockPos, Identifier, SectionPos};
+use haste_protocol::ServerboundPlay;
 use haste_world::World;
 use parking_lot::{Condvar, Mutex, RwLock};
 
@@ -167,6 +168,14 @@ pub struct Shared {
     /// next 20 Hz tick to be applied; the game thread sleeps on this condvar
     /// between packets and ticks, and re-sleeps when the queue is empty.
     pub packet_wake: (Mutex<u64>, Condvar),
+    /// Packets a screen sent from an input event (a container click), with the moment it was
+    /// made, waiting to leave at once: vanilla sends inside the input handler
+    /// (`MouseHandler.onPress` -> `slotClicked` -> `MultiPlayerGameMode.handleContainerInput`
+    /// -> `Connection.send`), not at the next tick. The connection belongs to the game
+    /// thread, so the render thread queues here and wakes it through
+    /// [`Shared::packet_wake`] (the same wake a arriving packet uses); drained by the
+    /// game thread before every packet drain.
+    pub ui_sends: Mutex<Vec<(ServerboundPlay, Instant)>>,
 }
 
 impl Shared {
@@ -176,6 +185,24 @@ impl Shared {
         let mut count = self.packet_wake.0.lock();
         *count += 1;
         self.packet_wake.1.notify_all();
+    }
+
+    /// Queues what a screen sent from an input event and wakes the game thread to send it
+    /// (the same wake an arriving packet uses; the game thread's wake path drains this
+    /// first). Cheap: one lock, one push, one notify. All packets share the event's
+    /// timestamp: they were sent inside one input handler, like vanilla.
+    pub fn queue_ui_sends(&self, packets: &[ServerboundPlay]) {
+        if packets.is_empty() {
+            // Still wake: the click may sit in the driver's queue already, having lost the
+            // race with the running tick's own Java drain (see `send_ui_sends`).
+            self.wake_on_packet();
+            return;
+        }
+        let at = Instant::now();
+        self.ui_sends
+            .lock()
+            .extend(packets.iter().cloned().map(|p| (p, at)));
+        self.wake_on_packet();
     }
 }
 
@@ -304,6 +331,7 @@ impl Shared {
             chunks_loaded: AtomicU64::new(0),
             chunks_unloaded: AtomicU64::new(0),
             packet_wake: (Mutex::new(0), Condvar::new()),
+            ui_sends: Mutex::new(Vec::new()),
         }
     }
 

@@ -422,6 +422,10 @@ impl Renderer {
             )
             .length_squared();
             for l in sections.layers(s) {
+                // Skip a direction group facing away from the camera.
+                if l.dir < 6 && l.back_facing(lo, hi) {
+                    continue;
+                }
                 // Sort key: ascending distance for opaque (early depth),
                 // negated for translucent so ascending = far first.
                 let translucent = l.layer == haste_assets::RenderLayer::Translucent;
@@ -443,6 +447,14 @@ impl Renderer {
             }
         };
         self.for_each_visible_section(|pos| emit(&mut buckets, pos));
+        // Group the opaque buckets by arena: the draw loop issues one multi-draw
+        // call per run sharing a layer and an arena, and the visit order
+        // interleaves the arenas, so ungrouped the frame pays thousands of draw
+        // dispatches (2232 measured at rd 32 over 16 arenas). Depth-tested
+        // layers do not depend on order (terrain faces never coincide).
+        for b in buckets.iter_mut().take(3) {
+            b.sort_unstable_by_key(|d| d.arena);
+        }
         // Translucent back to front: the key is the negated distance, so
         // ascending key order is far first.
         if buckets[3].len() > 1 {

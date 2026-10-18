@@ -10,6 +10,7 @@ use haste_jvm::JvmHost;
 use haste_protocol::haste_core::game::TICK_SECONDS;
 use haste_protocol::haste_core::view::DirtyTracker;
 use haste_protocol::haste_core::SectionPos;
+use haste_protocol::ServerboundPlay;
 
 use super::shared::{PackReload, Shared};
 use super::skins;
@@ -292,6 +293,7 @@ pub(super) fn drain_packets(
     gone: &mut Vec<SectionPos>,
     server_packs_version: &mut u64,
 ) -> anyhow::Result<()> {
+    send_ui_sends(driver, shared)?;
     let mut world = shared.world.write();
     let mut entities = shared.entities.write();
     let mut tracked = TrackedWorld {
@@ -345,4 +347,44 @@ pub(super) fn drain_packets(
         *shared.resource_pack_reload.lock() = Some(PackReload { ids, server });
     }
     Ok(())
+}
+
+/// Sends the packets a screen's input event queued (vanilla's `Connection.send` inside the
+/// input handler), and flushes whatever else sits in the driver's queue: a click that lost
+/// the race with the running tick's own Java drain (the tick's `tick_ui` took it out of
+/// Java's queue and queued it for the next tick's flush) still leaves now, not a tick
+/// later. Called before every packet drain, so a wake and a tick both send at once.
+pub(super) fn send_ui_sends(driver: &mut NetDriver, shared: &Shared) -> anyhow::Result<()> {
+    let queued = std::mem::take(&mut *shared.ui_sends.lock());
+    for (p, at) in queued {
+        if let ServerboundPlay::ContainerClick(c) = &p {
+            tracing::info!(
+                "container_click: window {} slot {} button {} mode {} state {} changed {} \
+                 carried {}, sent {:.1} ms after the click",
+                c.window_id,
+                c.slot,
+                c.button,
+                c.mode,
+                c.state_id,
+                c.changed.len(),
+                c.carried.item.is_some(),
+                at.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        driver.queue(p);
+    }
+    driver.flush()
+}
+
+/// Wires the UI's input-event sends to this connection's game thread (vanilla sends a
+/// container click inside the input handler itself; see [`Shared::ui_sends`]): every Ui
+/// clone shares the hook, so the render thread's input events reach it. Weak, because the
+/// shared state owns the UI — a strong reference would keep both alive forever.
+pub(super) fn wire_immediate_sender(ui: &crate::ui::Ui, shared: &Arc<Shared>) {
+    let weak = Arc::downgrade(shared);
+    ui.set_immediate_sender(std::sync::Arc::new(move |packets: &[ServerboundPlay]| {
+        if let Some(shared) = weak.upgrade() {
+            shared.queue_ui_sends(packets);
+        }
+    }));
 }

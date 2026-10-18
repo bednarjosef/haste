@@ -3,7 +3,7 @@
 use haste_core::chunk::{BlockEntityData, ChunkData, LightData};
 use haste_core::{BiomeId, BlockPos, BlockStateId, ChunkPos, SectionPos};
 
-use crate::light::NibbleArray;
+use crate::light::{NibbleArray, SkyLight};
 use crate::palette::{BiomeContainer, BlockContainer, DecodedSection, PaletteError};
 
 /// One 16x16x16 section of a chunk.
@@ -69,19 +69,41 @@ impl Heightmap {
     }
 }
 
-/// Sky and block light per section, parallel to `Chunk::sections`.
+/// Sky and block light per section, parallel to `Chunk::sections`. Sky light follows
+/// vanilla `DataLayer`: absent or uniform sections keep no array (see `SkyLight`), so a
+/// section costs heap memory only when its light genuinely varies.
 #[derive(Default)]
 pub struct ChunkLight {
-    pub sky: Vec<Option<NibbleArray>>,
+    pub sky: Vec<SkyLight>,
     pub block: Vec<NibbleArray>,
 }
 
 impl ChunkLight {
     pub(crate) fn new(section_count: usize) -> Self {
         Self {
-            sky: vec![None; section_count],
+            sky: vec![SkyLight::Absent; section_count],
             block: vec![NibbleArray::default(); section_count],
         }
+    }
+
+    /// Heap bytes of the stored light (the `World::memory_stats` light half): one owned
+    /// 2048-byte array (an `Arc` allocation: 2048 + 16 header) per section whose light
+    /// genuinely varies — uniform sky sections are one byte, absent ones nothing, and
+    /// all-zero block light shares one array — plus the Vec slots themselves.
+    pub fn heap_bytes(&self) -> u64 {
+        let arrays = self
+            .sky
+            .iter()
+            .filter(|s| matches!(s, SkyLight::Array(_)))
+            .count() as u64
+            + self
+                .block
+                .iter()
+                .filter(|s| !(s.all_zero() || s.all_full()))
+                .count() as u64;
+        arrays * (2048 + 16)
+            + (self.sky.capacity() * std::mem::size_of::<SkyLight>()
+                + self.block.capacity() * std::mem::size_of::<NibbleArray>()) as u64
     }
 }
 

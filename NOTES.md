@@ -181,3 +181,41 @@ Newest at the top. One entry per decision, with the why; link the brief or repor
   images looked washed out over a light background.
 - **2026-10-18 Offscreen scripts and keys.** A `--script` client drops keys pressed before the
   JVM's KeyMappings exist; scripts that hold keys start with `wait_until settled`.
+- **2026-10-18 GPU sub-pass timestamps are expensive on RADV.** Writing the 16 inside-pass
+  timestamps every frame cost ~2.5 ms of GPU time at rd 32 (Radeon 860M); the sub-pass brackets
+  are now sampled every 64th frame (`timing.rs` `SUBPASS_SAMPLE_FRAMES`), and a bracket counts as
+  run only when its timestamp was written. The frame at rd 32 is vertex/draw-bound, not
+  fragment-bound (13x fewer pixels cut GPU time by 23%): grouping draws by arena (2761 -> 649
+  calls) and skipping back-facing face-direction groups per section (-30% quads) took the frame
+  from 11.6 to 6.4 ms. Phase 2 note: a section layer's draws are per face direction
+  (`LayerDraw.dir`, 6 = whole layer, used by translucent to keep emission order).
+- **2026-10-18 Ctrl state in the JVM.** Vanilla polls the live keyboard for `hasControlDown()`
+  when a click is consumed (`Minecraft.handleKeybinds` drop: one item or the stack). In Haste the
+  JVM keeps the SDL keymods of the last key event, also with no screen open
+  (`ClientImpl.ctrlDown()`); later "Ctrl held at the consume" reads use it.
+- **2026-10-18 Reported "holes" in the held block were texels.** The grey spots on a held dirt
+  block are dirt.png's own grey pebbles over grey ground; an offscreen test now checks that a
+  held block draws as a solid cube (`haste-render/tests/held_block_offscreen.rs`).
+- **2026-10-18 Vanilla reference runs have clouds off.** `scripts/vanilla-options.sh` sets
+  `renderClouds:"false"` (clouds drift, so shots would not compare). Haste ignores the cloud
+  option and always draws fancy clouds (brief cloud-option); benches against vanilla are not
+  like-for-like until it honours `Options.cloudStatus`.
+- **2026-10-18 Zero-copy light arrays pinned whole chunk packets.** Light nibble arrays were
+  `Bytes` slices of the `level_chunk_with_light` packet, so every non-uniform section kept its
+  whole packet alive (~125 MB of 139 MB received at rd 32). Light arrays are now owned
+  (`Arc<[u8; 2048]>`, copied out of the packet) and uniform sky sections store one value, like
+  vanilla's `DataLayer`: RSS -80 MB (-30%) at rd 32. Any other long-lived data sliced out of a
+  packet with `Bytes::slice` has the same trap.
+- **2026-10-18 Which block carries which block entity comes from the game.** The
+  `block_entity_types.json` dump records `EntityBlock.newBlockEntity` per state. The old
+  hand-written table had `moving_piston -> piston` (vanilla returns null there: the piston's block
+  event creates that entity) and missed the copper golem statue variants.
+- **2026-10-18 Face culling order in the mesher.** A cullface is drawn when the state's
+  `skipRendering` rule keeps it (`mesher/skip.rs`, rules per vanilla class from the
+  `block_classes.json` dump) and `Block.shouldRenderFace`'s occlusion-shape test shows it
+  (`mesher/face_occlusion.rs`, from `block_shapes.json`); an old dump falls back to the model
+  rule. Cross models (grass, flowers) light by their 26.3 `shade_direction_override` ("up"),
+  not their side shades.
+- **2026-10-18 Container clicks are sent inside the input event.** Vanilla's
+  `MultiPlayerGameMode.handleContainerInput` sends at once; queuing to the next tick added
+  50-100 ms before the crafting result appeared.

@@ -1,9 +1,10 @@
 //! Face culling by occlusion coverage (vanilla `Block.shouldRenderFace`).
 //!
 //! Vanilla culls a model face in three steps: the neighbour's face occlusion
-//! shape being the full block, the block's own `skipRendering`, and the shape
-//! comparison — the face renders only where its own occlusion shape pokes out
-//! beyond the neighbour's (`Shapes.joinIsNotEmpty(shape, occluder, ONLY_FIRST)`).
+//! shape being the full block, the block's own `skipRendering` (that rule is
+//! `skip.rs`), and the shape comparison — the face renders only where its own
+//! occlusion shape pokes out beyond the neighbour's
+//! (`Shapes.joinIsNotEmpty(shape, occluder, ONLY_FIRST)`).
 //! Haste's mesher had only the first rule's model equivalent
 //! (`BakedBlockModels::is_full_opaque`), so faces between two partial blocks
 //! that cover each other exactly were drawn: snow layers against snow layers
@@ -157,7 +158,7 @@ pub(super) fn union_covers(boxes: &[[f32; 4]], region: [f32; 4]) -> bool {
 }
 
 /// The world axis `direction` points along.
-fn normal_axis(direction: Direction) -> usize {
+pub(super) fn normal_axis(direction: Direction) -> usize {
     let o = direction.offset();
     (0..3).find(|&i| o[i] != 0).unwrap()
 }
@@ -165,7 +166,7 @@ fn normal_axis(direction: Direction) -> usize {
 /// The face plane's two tangent axes (world axis indices, ascending): the 2D
 /// frame both the culled quad and the neighbour's occluder boxes are measured
 /// in — the same world axes for a direction and its opposite.
-fn tangent_axes(direction: Direction) -> (usize, usize) {
+pub(super) fn tangent_axes(direction: Direction) -> (usize, usize) {
     match normal_axis(direction) {
         0 => (1, 2),
         1 => (0, 2),
