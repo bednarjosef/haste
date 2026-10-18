@@ -34,7 +34,11 @@ impl LocalPlayer {
         // 1. Hotbar (handleKeybinds: the keyHotbarSlots loop). Vanilla sends the slot from the
         // next `ensureHasSentCarriedItem` (inside the actions' own `ensure` calls): the packet
         // precedes whatever this tick's keys do. `carried_index` follows, so the next tick's
-        // `ensure_carried_item` does not repeat it.
+        // `ensure_carried_item` does not repeat it. A running break is NOT aborted here:
+        // vanilla has no such hook — the next `continueDestroyBlock` sees the new
+        // `sameDestroyTarget` and `startDestroyBlock` sends the abort with the current face
+        // (released: `stopDestroyBlock` aborts with DOWN; a screen open: nothing until it
+        // closes).
         if let Some(slot) = input.hotbar {
             if slot <= 8 && slot as i32 != self.held_slot {
                 self.held_slot = slot as i32;
@@ -42,10 +46,6 @@ impl LocalPlayer {
                 out.push(ServerboundPlay::SetCarriedItem(sb::SetCarriedItem {
                     slot: slot as i16,
                 }));
-                // A new tool restarts breaking (startDestroyBlock compares the held item).
-                if let Some((_, face, _)) = self.int.destroying {
-                    self.abort_destroy(face, out);
-                }
             }
         }
 

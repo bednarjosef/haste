@@ -121,7 +121,10 @@ impl LocalPlayer {
             return false;
         }
         if !self.same_destroy_target(h.pos) {
-            return self.start_destroy(h, world, env, out);
+            // startDestroyBlock restarts the break and returns "handled" (swing + punch),
+            // whatever became of the new target.
+            self.start_destroy(h, world, env, out);
+            return true;
         }
         let state = world.block_state(h.pos);
         if env.data.is_air(state) {

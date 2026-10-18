@@ -1987,3 +1987,46 @@ fn the_servers_set_held_slot_is_echoed_the_next_tick() {
     );
     assert!(r.tick(InteractInput::default()).is_empty());
 }
+
+/// A hotbar change does not abort a running break by itself (vanilla has no such hook): the
+/// next `continueDestroyBlock` sees the new `sameDestroyTarget` and `startDestroyBlock`
+/// sends the abort with the current face, then the START of the new break — the same packet
+/// order as a crosshair move to another block. With the button released, `stopDestroyBlock`
+/// sends the abort with DOWN.
+#[test]
+fn a_hotbar_change_aborts_the_break_only_through_continue_destroy() {
+    let mut r = Rig::new(GameMode::Survival);
+    // Slot 0 holds a pickaxe, slot 1 nothing: switching makes sameDestroyTarget false.
+    r.p.int.hotbar[0] = item(1);
+    let out = r.tick(ATTACK);
+    assert_eq!(actions(&out), [(action::START_DESTROY, 1)]);
+    // The switch tick, button held: set_carried_item, then continueDestroyBlock's
+    // startDestroyBlock — abort with the current face (Up, the block is below us), then the
+    // START of the bare-hand break.
+    let out = r.tick(InteractInput {
+        attack: true,
+        hotbar: Some(1),
+        ..Default::default()
+    });
+    let got: Vec<(i32, i32)> = out
+        .iter()
+        .filter_map(|p| match p {
+            ServerboundPlay::SetCarriedItem(c) => Some((100 + c.slot as i32, 0)),
+            ServerboundPlay::PlayerAction(a) => Some((a.status, a.sequence)),
+            ServerboundPlay::Punch(_) => Some((99, 0)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (101, 0), // set_carried_item slot 1
+            (action::ABORT_DESTROY, 0),
+            (action::START_DESTROY, 2),
+            (99, 0), // the swing's punch
+        ]
+    );
+    // Released the next tick: stopDestroyBlock's abort with DOWN.
+    let out = r.tick(InteractInput::default());
+    assert_eq!(actions(&out), [(action::ABORT_DESTROY, 0)]);
+}
