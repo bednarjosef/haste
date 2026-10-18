@@ -1386,6 +1386,7 @@ impl TickCtx<'_> {
 }
 
 pub mod climbable;
+pub mod consume_effects;
 pub mod interact;
 mod riding;
 pub mod script;

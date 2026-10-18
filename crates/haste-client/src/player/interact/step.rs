@@ -136,9 +136,19 @@ impl LocalPlayer {
             self.start_use_item(look, sneak_key, world, env, out);
         }
 
-        // `LivingEntity.tick` -> `updateUsingItem`: the remaining time ticks down each game tick,
+        // `LivingEntity.tick` -> `updateUsingItem`: `ItemStack.onUseTick` first (the
+        // consumable's sound every vanilla interval), then the remaining time ticks down,
         // including the tick the use started on.
-        if let Some(mut u) = self.int.using {
+        if let Some(u) = self.int.using {
+            if super::super::consume_effects::should_emit(u.duration, u.remaining) {
+                let item = u
+                    .item
+                    .and_then(|i| env.data.registries.name("minecraft:item", i));
+                self.int
+                    .consume
+                    .emit(u.animation, item, self.state.pos, &mut self.sound_out);
+            }
+            let mut u = u;
             u.remaining -= 1;
             self.int.using = Some(u);
         }
