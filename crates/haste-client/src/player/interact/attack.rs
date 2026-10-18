@@ -1,0 +1,97 @@
+//! Attacking (player workstream): `Minecraft.startAttack` / `Minecraft.continueAttack` —
+//! the one-click attack (entity: `MultiPlayerGameMode.attack`; block: start breaking; nothing:
+//! a miss) and the held-button repeat that keeps breaking.
+
+use haste_core::view::{BlockPhysics, BlockView};
+use haste_core::game::GameMode;
+use haste_protocol::packets::play::serverbound as sb;
+use haste_protocol::ServerboundPlay;
+
+use super::super::LocalPlayer;
+use super::{Target, InteractEnv, DESTROY_DELAY, MISS_TIME};
+
+impl LocalPlayer {
+    /// `Minecraft.startAttack`: one left click. Returns vanilla's `endAttack` — the block broke
+    /// at once (creative, or a survival block with progress >= 1 in one tick), so
+    /// `continueAttack` is skipped for this tick.
+    pub(super) fn start_attack(
+        &mut self,
+        world: &dyn BlockView,
+        env: &InteractEnv<'_>,
+        out: &mut Vec<ServerboundPlay>,
+    ) -> bool {
+        if self.int.miss_time > 0 {
+            return false;
+        }
+        // player.isHandsBusy() (an item in use, or dying) blocks the swing; spectator mode
+        // zeroed the input in interact_step.
+        if self.int.is_using_item {
+            return false;
+        }
+        // `Minecraft.startAttack` swings on every attack, whatever the crosshair is on.
+        self.hand.swing();
+        match self.int.target {
+            Some(Target::Entity { id, .. }) => {
+                // `MultiPlayerGameMode.attack`: the packet, `Player.attack` (`onAttack` resets
+                // the attack ticker), `resetAttackStrengthTicker` (both tickers) and
+                // `destroyDelay` 5 in creative. No missTime.
+                out.push(ServerboundPlay::Attack(sb::Attack { entity_id: id.0 }));
+                self.hand.reset_attack_strength_ticker();
+                if self.game_mode == GameMode::Creative {
+                    self.int.destroy_delay = DESTROY_DELAY;
+                }
+            }
+            Some(Target::Block(h)) if !env.data.is_air(world.block_state(h.pos)) => {
+                // startDestroyBlock, then endAttack when the block is air afterwards.
+                let gone = self.start_destroy(h, world, env, out);
+                out.push(ServerboundPlay::Punch(sb::Punch {}));
+                return gone;
+            }
+            // A miss, or a block hit on an already-air block: vanilla's switch has no `break`
+            // on the air branch, so it falls through to the MISS case — missTime 10 outside
+            // creative (gameMode.hasMissTime) and an attack-strength reset.
+            _ => {
+                if self.game_mode != GameMode::Creative {
+                    self.int.miss_time = MISS_TIME;
+                }
+                self.hand.reset_attack_strength_ticker();
+            }
+        }
+        out.push(ServerboundPlay::Punch(sb::Punch {}));
+        false
+    }
+
+    /// `Minecraft.continueAttack` with `down = keyAttack.isDown()` (this tick's `instantAttack`
+    /// aside): a held block target keeps breaking (swinging every tick), anything else stops
+    /// the break; releasing the button clears `missTime`; after a miss nothing happens for
+    /// `missTime` ticks.
+    pub(super) fn continue_attack(
+        &mut self,
+        down: bool,
+        world: &dyn BlockView,
+        env: &InteractEnv<'_>,
+        out: &mut Vec<ServerboundPlay>,
+    ) {
+        if !down {
+            self.int.miss_time = 0;
+        }
+        if self.int.miss_time > 0 || self.int.is_using_item {
+            return;
+        }
+        if !down {
+            self.stop_destroy(out);
+            return;
+        }
+        match self.int.target {
+            Some(Target::Block(h)) if !env.data.is_air(world.block_state(h.pos)) => {
+                if self.continue_destroy(h, world, env, out) {
+                    // `Minecraft.continueAttack` swings each tick the breaking continues.
+                    self.hand.swing();
+                    out.push(ServerboundPlay::Punch(sb::Punch {}));
+                }
+            }
+            // An entity, nothing, or an already-air block: stop breaking.
+            _ => self.stop_destroy(out),
+        }
+    }
+}
