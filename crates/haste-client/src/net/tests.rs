@@ -10,6 +10,7 @@ use haste_protocol::haste_core::ChunkPos;
 use haste_protocol::nbt::{Nbt, NbtCompound};
 use haste_protocol::packets::play::clientbound::{MoveDeltas, SpawnInfo};
 use haste_protocol::wire::particle::Particle;
+use haste_world::World;
 
 #[derive(Default)]
 struct FakeWorld {
