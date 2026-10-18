@@ -14,10 +14,12 @@ fn destroy_spawns_the_vanilla_grid() {
     // (vanilla `addDestroyBlockEffect`'s density 0.25 grid).
     assert_eq!(particles.alive(), 64);
     for p in &particles.pool {
-        // TerrainParticle: gravity 1, quad halved from the 0.1..=0.2 default.
+        // TerrainParticle: gravity 1, quad halved from the 0.1..=0.2 default. The
+        // colour is the grey 0.6 as a linear vertex multiplier (the entity pipeline
+        // multiplies linearized texels; vanilla multiplies encoded ones).
         assert_eq!(p.behaviour.gravity, 1.0);
         assert!((0.05..=0.1).contains(&p.quad), "quad {}", p.quad);
-        assert_eq!(p.color, [0.6, 0.6, 0.6]);
+        assert_eq!(p.color, crate::sky::linear([0.6, 0.6, 0.6]));
         // The speed constructor's output: the vector rescaled to a length of
         // (r+r+1)*0.15*0.4 = 0.06..<0.18 (the ±0.375 grid offsets only pick its
         // direction), then y lifted 0.1 — so y sits in 0.1 ± 0.18.
@@ -50,6 +52,50 @@ fn destroy_spawns_the_vanilla_grid() {
         cells.insert(cell);
     }
     assert_eq!(cells.len(), 64);
+}
+
+/// The terrain-particle tint is a linear-RGB vertex colour, not the sRGB-scale
+/// product vanilla feeds its shader: vanilla multiplies the sprite's encoded texels
+/// by the encoded 0.6 x tint (`TerrainParticle`'s constructor), while the particle pass
+/// runs the entity pipeline, which multiplies linearized texels — handing it the
+/// encoded-scale product made tinted particles brighter and hue-shifted against the
+/// blocks they came from (the leaves-particle bug). Birch's tint is a fixed constant,
+/// oak's the biome foliage colour, so no colormaps are needed.
+#[test]
+fn terrain_tint_is_a_linear_vertex_colour() {
+    // Birch leaves: BlockTintSources.constant(-8345771) = 0x80A755.
+    let birch = crate::block_particles::BlockParticleSprite {
+        rect: [0, 0, 16, 16],
+        tint: crate::tint::TintKind::Fixed(0x80A755),
+        spawn: true,
+        upper_half_tint_below: false,
+    };
+    // Oak leaves: the foliage colour of the one biome around the position.
+    let oak = crate::block_particles::BlockParticleSprite {
+        tint: crate::tint::TintKind::Foliage,
+        ..birch
+    };
+    let mut climate = crate::tint::BiomeClimate::plains();
+    climate.foliage_color = Some(0x48B518);
+    let colors =
+        crate::tint::BiomeColors::new(&[climate], &crate::tint::Colormaps::uniform(0xFFFFFF));
+    let linear = |c: u32| {
+        crate::sky::linear([
+            0.6 * ((c >> 16 & 0xFF) as f32 / 255.0),
+            0.6 * ((c >> 8 & 0xFF) as f32 / 255.0),
+            0.6 * ((c & 0xFF) as f32 / 255.0),
+        ])
+    };
+    assert_eq!(
+        crate::block_particles::terrain_tint(&birch, BlockPos::new(0, 64, 0), &OneBiome, &colors),
+        linear(0x80A755)
+    );
+    assert_eq!(
+        crate::block_particles::terrain_tint(&oak, BlockPos::new(0, 64, 0), &OneBiome, &colors),
+        linear(0x48B518)
+    );
+    // The conversion is load-bearing: linearizing 0.6 darkens it to ~0.319.
+    assert!((0.31..0.33).contains(&crate::sky::linear([0.6, 0.6, 0.6])[0]));
 }
 
 #[test]
