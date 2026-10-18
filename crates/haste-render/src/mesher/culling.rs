@@ -1,9 +1,10 @@
 //! Face culling by occlusion coverage (vanilla `Block.shouldRenderFace`).
 //!
 //! Vanilla culls a model face in three steps: the neighbour's face occlusion
-//! shape being the full block, the block's own `skipRendering`, and the shape
-//! comparison — the face renders only where its own occlusion shape pokes out
-//! beyond the neighbour's (`Shapes.joinIsNotEmpty(shape, occluder, ONLY_FIRST)`).
+//! shape being the full block, the block's own `skipRendering` (that rule is
+//! `skip.rs`), and the shape comparison — the face renders only where its own
+//! occlusion shape pokes out beyond the neighbour's
+//! (`Shapes.joinIsNotEmpty(shape, occluder, ONLY_FIRST)`).
 //! Haste's mesher had only the first rule's model equivalent
 //! (`BakedBlockModels::is_full_opaque`), so faces between two partial blocks
 //! that cover each other exactly were drawn: snow layers against snow layers

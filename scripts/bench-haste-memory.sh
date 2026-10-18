@@ -5,17 +5,22 @@
 # second while the bench runs, plus the client's own per-subsystem breakdown lines.
 #
 # usage: scripts/bench-haste-memory.sh <render distance> <seconds> <tag> [width] [height]
+#        [username] ["x y z yaw pitch"]
 # Needs the reference server (default port 25620) running with a view distance at least the
 # render distance. Output: target/bench-haste-memory/<tag>/.
+# env: HASTE_BENCH_SPOT ("x y z yaw pitch", default the screenshot spot below),
+#      HASTE_BENCH_USER (default perfmem), HASTE_BENCH_PORT (default 25620).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CACHE="${HASTE_CACHE:-$ROOT/cache}"
 PORT="${HASTE_BENCH_PORT:-25620}"
-RD=$1; SECS=$2; TAG=$3; W=${4:-1408}; H=${5:-828}
+RD=$1; SECS=$2; TAG=$3; W=${4:-1408}; H=${5:-828}; USER_ARG=${6:-}; SPOT_ARG=${7:-}
 OUT="$ROOT/target/bench-haste-memory/$TAG"
 mkdir -p "$OUT"
 GAME="$CACHE/bench-haste-game"
-X=9.5 Y=71 Z=6.5 YAW=0 PITCH=10
+if [ -n "$SPOT_ARG" ]; then HASTE_BENCH_SPOT="$SPOT_ARG"; fi
+if [ -n "$USER_ARG" ]; then HASTE_BENCH_USER="$USER_ARG"; fi
+read -r X Y Z YAW PITCH <<< "${HASTE_BENCH_SPOT:-9.5 71 6.5 0 10}"
 cd "$ROOT"
 
 "$ROOT/scripts/vanilla-options.sh" "$GAME/options.txt" "$W" "$H" "renderDistance:$RD" maxFps:260

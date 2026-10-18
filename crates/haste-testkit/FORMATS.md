@@ -262,3 +262,26 @@ then per packet:
 ```
 
 Multi-byte integers are big-endian, matching the protocol itself.
+
+## block_classes.json
+
+For every block id, the simple names of its Java class and superclasses up to `Block`
+(exclusive of `BlockBehaviour`). Which face-skip rule (`BlockBehaviour.skipRendering`) a block
+uses is a property of its class, so the mesher maps class names to culling rules from this dump
+instead of a hand-written block list (mods add blocks). Dumped by the recorder mod's
+`BlockClassDump` (called from `ServerDumps.dumpAll`).
+
+```jsonc
+{
+  "version": 1,
+  "minecraft": "26.3",
+  "blocks": {
+    "minecraft:glass":  ["GlassBlock", "TransparentBlock", "HalfTransparentBlock", "Block"],
+    "minecraft:iron_bars": ["IronBarsBlock", "CrossCollisionBlock", "Block"]
+    // ... every registered block, [] never occurs (every block extends at least Block)
+  }
+}
+```
+
+Blocks absent from the dump use the default rule (no skip); the loader never panics on unknown
+ids.
