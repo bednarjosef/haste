@@ -345,9 +345,11 @@ fn async_walk_matches_sync() {
 }
 
 /// The render thread must never run the walk: `schedule` (a channel send)
-/// and `poll` (a channel drain) cost microseconds even while a large walk is
-/// in flight on the worker. The walk itself is ~ms; if either call blocked
-/// on it, the per-call cost would be ~ms too.
+/// and `poll` (a channel drain) cost microseconds even while large walks are
+/// in flight on the worker. A single call can be delayed arbitrarily on a
+/// loaded machine (CI neighbours, preemption), so this measures many calls
+/// against a worker kept busy with queued walks and asserts on the median —
+/// if either call ran the ~ms walk itself, the median would be ~ms too.
 #[test]
 fn render_thread_never_walks() {
     use std::sync::Arc;
@@ -373,27 +375,59 @@ fn render_thread_never_walks() {
     let walker = AsyncOcclusionWalker::new(vis).unwrap();
     let eye = DVec3::new(8.0, 72.0, 8.0);
 
-    let started = Instant::now();
-    walker.schedule(SectionPos::new(0, 4, 0), vd, sc, -4, eye);
-    let schedule_us = started.elapsed().as_secs_f64() * 1e6;
+    // Queue enough full walks (each ~ms) that the worker stays busy for the
+    // whole measurement; the walker joins the remaining queue on drop, so the
+    // count stays bounded and the test finishes quickly.
+    const WALKS: usize = 32;
+    const SAMPLES: usize = 512;
+
+    let mut schedule_us: Vec<f64> = Vec::with_capacity(WALKS);
+    let mut poll_us: Vec<f64> = Vec::with_capacity(SAMPLES);
+    let mut mask = None;
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut poll_calls = 0u32;
-    let mut poll_total = Duration::ZERO;
-    let mask = loop {
-        let p = Instant::now();
-        let m = walker.poll();
-        poll_total += p.elapsed();
-        poll_calls += 1;
-        if let Some(m) = m {
-            break m;
+    while poll_us.len() < SAMPLES && Instant::now() < deadline {
+        if schedule_us.len() < WALKS {
+            let t = Instant::now();
+            walker.schedule(SectionPos::new(0, 4, 0), vd, sc, -4, eye);
+            schedule_us.push(t.elapsed().as_secs_f64() * 1e6);
         }
-        assert!(Instant::now() < deadline, "worker never finished");
+        let t = Instant::now();
+        if let Some(m) = walker.poll() {
+            mask = Some(m);
+        }
+        poll_us.push(t.elapsed().as_secs_f64() * 1e6);
         std::thread::sleep(Duration::from_micros(200));
+    }
+    let median = |v: &mut Vec<f64>| {
+        v.sort_by(|a, b| a.total_cmp(b));
+        v[v.len() / 2]
     };
-    let poll_us = poll_total.as_secs_f64() * 1e6 / poll_calls as f64;
-    eprintln!("schedule: {schedule_us:.2} us, poll: {poll_us:.2} us/call ({poll_calls} calls)");
-    assert!(schedule_us < 500.0, "schedule blocked the render thread");
-    assert!(poll_us < 500.0, "poll blocked the render thread");
+    let med_schedule = median(&mut schedule_us);
+    let med_poll = median(&mut poll_us);
+    eprintln!(
+        "schedule: median {med_schedule:.2} us ({} calls), \
+         poll: median {med_poll:.2} us ({} calls)",
+        schedule_us.len(),
+        poll_us.len()
+    );
+    assert!(
+        med_schedule < 500.0,
+        "schedule blocked the render thread (median {med_schedule:.2} us)"
+    );
+    assert!(
+        med_poll < 500.0,
+        "poll blocked the render thread (median {med_poll:.2} us)"
+    );
+    let mask = mask.unwrap_or_else(|| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(m) = walker.poll() {
+                break m;
+            }
+            assert!(Instant::now() < deadline, "worker never finished");
+            std::thread::sleep(Duration::from_micros(200));
+        }
+    });
     assert!(
         mask.column(ChunkPos::new(0, 0)) != 0,
         "worker walked an empty mask"
