@@ -66,6 +66,15 @@ pub(crate) fn entity_shade(n: Vec3) -> f32 {
     ((n.dot(l0).max(0.0) + n.dot(l1).max(0.0)) * 0.6 + 0.4).min(1.0)
 }
 
+/// The inverse camera rotation (yaw/pitch, the inverse of the view rotation in
+/// `renderer/camera.rs`) that vanilla `GameRenderer.renderItemInHand` puts on the hand's pose
+/// stack, so the hand's normals are world-oriented. Roll is not part of the view rotation.
+pub(crate) fn hand_normal_rotation(yaw: f32, pitch: f32) -> Mat3 {
+    let view = Mat4::from_rotation_x(pitch.to_radians())
+        * Mat4::from_rotation_y((yaw + 180.0).to_radians());
+    Mat3::from_mat4(view.inverse())
+}
+
 /// One shadow quad (four vertices, two triangles) with a flat white colour at `alpha`. The
 /// shadow texture is sampled at `uv` (0..1) inside `rect` in the entity atlas; the light is
 /// full-bright (vanilla's `15728880`), so `entity.wgsl` leaves the texture colour unchanged.

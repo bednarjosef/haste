@@ -962,6 +962,20 @@ fn painting_facing_transform_matches_vanilla() {
     ));
 }
 
+/// Hand shading is world-oriented (`GameRenderer.renderItemInHand`): the face toward the
+/// camera faces world up when looking straight down (brightest) and world down when looking
+/// straight up (ambient only).
+#[test]
+fn hand_shade_is_world_oriented() {
+    let toward_camera = Vec3::new(0.0, 0.0, 1.0);
+    let down = hand_normal_rotation(0.0, 90.0) * toward_camera;
+    let up = hand_normal_rotation(0.0, -90.0) * toward_camera;
+    assert!(down.abs_diff_eq(Vec3::Y, 1e-5), "{down}");
+    assert!(up.abs_diff_eq(-Vec3::Y, 1e-5), "{up}");
+    assert!(entity_shade(down) > entity_shade(up));
+    assert!((entity_shade(up) - 0.4).abs() < 1e-6);
+}
+
 /// The tail upload after `append_block_entities`: only the block entities' vertices past
 /// the entities' `start` go up when the existing buffer already holds them, everything
 /// when the buffer grew (a fresh wgpu buffer holds no head), and nothing when no block
