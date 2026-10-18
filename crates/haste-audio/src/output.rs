@@ -48,7 +48,7 @@ type SoundId = u64;
 /// A sound to decode and start playing, sent to the worker thread.
 struct PlayRequest {
     id: SoundId,
-    /// The engine's sound identity, e.g. `sounds/dig/stone1.ogg`.
+    /// The engine's sound identity, e.g. `minecraft/sounds/dig/stone1.ogg`.
     path: String,
     /// The worker owns the assets after the first request: `Assets` reads need `&mut` and
     /// a thread cannot borrow another thread's, so the first request moves a reopened
@@ -211,7 +211,7 @@ impl Worker {
     /// The Ogg bytes of the request's sound, read from the assets.
     fn read(&mut self, request: &PlayRequest) -> Option<Vec<u8>> {
         let assets = self.assets.as_mut()?;
-        let key = format!("assets/minecraft/{}", request.path);
+        let key = format!("assets/{}", request.path);
         match assets.read_asset(&key) {
             Ok(bytes) => Some(bytes),
             Err(e) => {

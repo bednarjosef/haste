@@ -3344,7 +3344,16 @@ fn open_sounds(
     let events = (|| -> anyhow::Result<haste_audio::sounds::SoundEvents> {
         let mut assets = open_assets()?;
         let bytes = assets.read_asset("assets/minecraft/sounds.json")?;
-        haste_audio::sounds::SoundEvents::parse(&bytes)
+        let mut events = haste_audio::sounds::SoundEvents::parse(&bytes)?;
+        // Vanilla's load-time check (SoundManager.prepare's validateSoundResource): a
+        // file listed in sounds.json but absent from the assets is dropped from its
+        // event now, so it can never be picked and fail to play later.
+        let dropped =
+            events.retain_files(|path| assets.read_asset(&format!("assets/{path}")).is_ok());
+        if dropped > 0 {
+            tracing::warn!("{dropped} sound files listed in sounds.json are missing");
+        }
+        Ok(events)
     })();
     match events {
         Ok(events) => Some(crate::sound::Sounds::new(

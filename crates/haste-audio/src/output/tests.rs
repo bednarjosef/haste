@@ -71,7 +71,7 @@ fn silent_output_accepts_every_call() {
     let mut drained = Vec::new();
     output.send(PlayRequest {
         id: 0,
-        path: "sounds/dig/stone1.ogg".into(),
+        path: "minecraft/sounds/dig/stone1.ogg".into(),
         assets: None,
         stream: false,
         gains: (1.0, 1.0),
