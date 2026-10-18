@@ -1615,9 +1615,17 @@ impl Session {
             }
             P::BlockUpdate(b) => {
                 let c = b.change();
-                self.lids.remove(&c.pos);
-                self.bells.remove(&c.pos);
-                self.pots.remove(&c.pos);
+                // The block entity, and with it its lid/bell/pot animation, only goes when the
+                // block changes (`LevelChunk.setBlockState`), not on a state change of it.
+                let block_changed = world.physics().is_none_or(|(_, data)| {
+                    data.blocks.block_of(world.block_state_at(c.pos))
+                        != data.blocks.block_of(c.state)
+                });
+                if block_changed {
+                    self.lids.remove(&c.pos);
+                    self.bells.remove(&c.pos);
+                    self.pots.remove(&c.pos);
+                }
                 if !self.player.defer_block_update(c.pos, c.state) {
                     world.set_block(c.pos, c.state);
                 }

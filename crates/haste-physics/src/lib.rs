@@ -18,6 +18,7 @@ pub mod mining;
 pub mod movement;
 pub mod raycast;
 pub mod replay;
+mod sprint;
 pub mod testing;
 mod trig;
 
@@ -29,6 +30,7 @@ pub use climbing::{on_climbable, ClimbableBlocks, NoClimbables};
 pub use collision::{collide, collide_with_step};
 pub use elytra::{effective_gravity, glide_velocity, look_angle};
 pub use movement::{tick, tick_with};
+pub use sprint::can_start_sprinting;
 
 /// The local player's physics state. Positions/velocities are f64 like vanilla; angles f32.
 #[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
@@ -90,6 +92,15 @@ pub struct PlayerState {
     /// `LivingEntity.getJumpBoostPower` adds `0.1F * (amplifier + 1)` to the jump power.
     #[serde(default)]
     pub jump_boost: Option<i32>,
+    /// Sprinting impossible whatever the water (vanilla `LocalPlayer.isSprintingPossible`'s
+    /// first terms failing: blind (`Player.isMobilityRestricted`), or not enough food and no
+    /// may-fly ability). Set by the client each tick; stops a sprint and keeps it from starting.
+    #[serde(default)]
+    pub sprint_blocked: bool,
+    /// Slowed by the item in use (vanilla `LocalPlayer.isSlowDueToUsingItem`): a sprint cannot
+    /// start. Set by the client each tick.
+    #[serde(default)]
+    pub slow_using_item: bool,
 }
 
 impl PlayerState {
