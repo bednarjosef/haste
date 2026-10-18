@@ -1002,7 +1002,10 @@ impl LocalPlayer {
         // blindness and food terms, `isSlowDueToUsingItem`).
         self.state.sprint_blocked =
             self.int.is_blind() || (self.food <= SPRINT_FOOD_LEVEL && !self.abilities.may_fly);
-        self.state.slow_using_item = self.is_using_item();
+        // Vanilla `LocalPlayer.isSlowDueToUsingItem` / `itemUseSpeedMultiplier`: the used
+        // item's `use_effects` keep a sprint from starting unless `can_sprint`, and scale the
+        // movement input while using.
+        self.apply_item_use_effects(ctx.env);
         // Vanilla `LocalPlayer.aiStep`: when not `noPhysics` and not a passenger (the passenger
         // tick returned above), the four feet probes free a player inside a suffocating block
         // (sand, a closing piston or door) before the sprint rules below.
