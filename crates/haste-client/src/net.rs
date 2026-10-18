@@ -67,6 +67,10 @@ pub trait WorldSink {
     }
     /// `World::set_block_entity`.
     fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData);
+    /// `World::set_biome_zoom_seed` (vanilla `BiomeManager.biomeZoomSeed` from the spawn info).
+    fn set_biome_zoom_seed(&mut self, seed: i64) {
+        let _ = seed;
+    }
     /// The block state at `pos` (`World::block_state`; `AIR` by default for fakes). Named
     /// differently from the `BlockView` method so `World` (which has both) stays unambiguous.
     fn block_state_at(&self, pos: BlockPos) -> BlockStateId {
@@ -229,6 +233,9 @@ impl WorldSink for World {
     }
     fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData) {
         World::set_block_entity(self, pos, data)
+    }
+    fn set_biome_zoom_seed(&mut self, seed: i64) {
+        World::set_biome_zoom_seed(self, seed)
     }
     fn block_state_at(&self, pos: BlockPos) -> BlockStateId {
         World::block_state(self, pos)
@@ -1441,7 +1448,7 @@ impl Session {
                 // snow line hangs off it).
                 self.sea_level = l.spawn.sea_level;
                 // The spawn info's hashed seed is `BiomeManager`'s zoom seed.
-                crate::app::biomes::set_zoom_seed(l.spawn.hashed_seed);
+                world.set_biome_zoom_seed(l.spawn.hashed_seed);
                 self.is_flat = l.spawn.is_flat;
                 self.view_distance = l.view_distance;
             }
@@ -1454,9 +1461,10 @@ impl Session {
                         ..DimensionInfo::overworld()
                     });
                 self.sea_level = r.spawn.sea_level;
-                crate::app::biomes::set_zoom_seed(r.spawn.hashed_seed);
                 self.is_flat = r.spawn.is_flat;
                 world.reset(&dim);
+                // The spawn info's hashed seed is `BiomeManager`'s zoom seed (after the reset).
+                world.set_biome_zoom_seed(r.spawn.hashed_seed);
                 entities.clear();
                 self.entity_ids.clear();
                 self.breaking.clear();

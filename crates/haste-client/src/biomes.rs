@@ -13,20 +13,6 @@ use haste_protocol::haste_core::{BiomeId, BlockPos, ChunkPos, Identifier};
 use haste_protocol::nbt::NbtCompound;
 use haste_protocol::SyncedRegistries;
 use haste_render::{BiomeClimate, BiomeFog, GrassModifier};
-use std::sync::atomic::{AtomicI64, Ordering};
-
-/// The level's biome zoom seed (vanilla `BiomeManager.biomeZoomSeed`): the server applies
-/// `BiomeManager.obfuscateSeed` and sends the hashed value as the spawn info's seed with
-/// the login and respawn packets. One live connection at a time, like vanilla's one
-/// `ClientLevel`, so a process-wide atomic stands in for the field on vanilla's
-/// `BiomeManager` (relaxed: the value changes only with a respawn, which resets the world
-/// and re-meshes everything anyway).
-static ZOOM_SEED: AtomicI64 = AtomicI64::new(0);
-
-/// Stores the seed the login/respawn spawn info carried.
-pub fn set_zoom_seed(seed: i64) {
-    ZOOM_SEED.store(seed, Ordering::Relaxed);
-}
 
 /// The world's biomes for the renderer's tint lookup (cell-resolution, biome 0 where nothing is
 /// loaded).
@@ -37,8 +23,7 @@ impl haste_render::BiomeSource for WorldBiomes<'_> {
         // Vanilla `BiomeManager.getBiome`: the fiddled nearest corner's cell, which can be
         // one quart cell off the block's own in each axis (crossing a section or chunk
         // border; 0 where that neighbour is not loaded).
-        let (qx, qy, qz) =
-            zoom::zoomed_cell(ZOOM_SEED.load(Ordering::Relaxed), pos.x, pos.y, pos.z);
+        let (qx, qy, qz) = zoom::zoomed_cell(self.0.biome_zoom_seed(), pos.x, pos.y, pos.z);
         self.0
             .chunk(ChunkPos::new(qx >> 2, qz >> 2))
             .and_then(|c| c.section(qy >> 2))
