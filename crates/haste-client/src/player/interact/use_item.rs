@@ -274,7 +274,13 @@ impl LocalPlayer {
                         }
                         None => {}
                     }
-                    // gameMode.useItem with nothing targeted.
+                    // gameMode.useItem with nothing targeted: the packet goes out, then
+                    // `itemStack.use` runs on the client. Only a Success answers the swing
+                    // and the equip drop (`Minecraft.startUseItem`: the swing on
+                    // `SwingSource.PREDICTED`, `player.itemUsed` on any Success — CONSUME,
+                    // eating or drawing a bow, drops the hand without swinging); a Pass
+                    // (a dirt block, redstone dust, a stick) and a Fail (food the player
+                    // cannot eat) swing nothing and fall through to the other hand.
                     if holding {
                         let seq = self.int.next_sequence();
                         out.push(ServerboundPlay::UseItem(sb::UseItem {
@@ -283,29 +289,33 @@ impl LocalPlayer {
                             yaw: look.0,
                             pitch: look.1,
                         }));
-                        self.hand.swing();
-                        // `itemStack.use`: a writable book opens its editor
-                        // (`WritableBookItem.use` -> `LocalPlayer.openItemGui`).
-                        self.use_opens_screen(env, None, hand);
+                        let stack = self.hand(hand).clone();
+                        // `WritableBookItem.use`: SUCCESS — swing, itemUsed, its editor.
+                        if self.use_opens_screen(env, None, hand) {
+                            self.hand.swing();
+                            self.hand.item_used();
+                            return;
+                        }
                         // `LivingEntity.startUsingItem`: an item with a use duration starts
                         // using (`Item.getUseDuration`/`getUseAnimation` from the consumable
                         // component or the item class).
                         // Food starts only when the player can eat (`Consumable.startConsuming`
                         // -> `canConsume` -> `Player.canEat`); the packet goes out either way.
-                        let stack = self.hand(hand).clone();
-                        if !self.can_consume(&stack, env.data) {
-                            return;
+                        if self.can_consume(&stack, env.data) {
+                            if let Some((duration, animation)) = self.int.use_data(&stack, env.data)
+                            {
+                                self.int.using = Some(UsingItem {
+                                    item: stack.item,
+                                    duration,
+                                    remaining: duration,
+                                    animation,
+                                });
+                                self.int.is_using_item = true;
+                                // The CONSUME Success's `player.itemUsed(hand)`.
+                                self.hand.item_used();
+                                return;
+                            }
                         }
-                        if let Some((duration, animation)) = self.int.use_data(&stack, env.data) {
-                            self.int.using = Some(UsingItem {
-                                item: stack.item,
-                                duration,
-                                remaining: duration,
-                                animation,
-                            });
-                            self.int.is_using_item = true;
-                        }
-                        return;
                     }
                 }
             }
@@ -329,12 +339,14 @@ impl LocalPlayer {
     /// `useItem`): the command-block editor on its block (with `target`), the book editor for a
     /// writable book in hand (also with `target`: no block consumes a book's use, so vanilla
     /// falls through to `itemStack.use`). The game thread takes it and hands it to the UI.
+    /// Returns whether a screen opened: the book's use is a SUCCESS, so `Minecraft
+    /// .startUseItem` swings and stops there instead of trying the other hand.
     fn use_opens_screen(
         &mut self,
         env: &InteractEnv<'_>,
         target: Option<(BlockPos, &dyn BlockView)>,
         hand: i32,
-    ) {
+    ) -> bool {
         if let Some((pos, world)) = target {
             let block = env.data.blocks.block_of(world.block_state(pos));
             if [
@@ -345,7 +357,7 @@ impl LocalPlayer {
             .contains(block)
             {
                 self.int.used_screen = Some(UsedScreen::CommandBlock(pos));
-                return;
+                return true;
             }
         }
         let stack = self.hand(hand);
@@ -358,7 +370,9 @@ impl LocalPlayer {
             })
         {
             self.int.used_screen = Some(UsedScreen::ItemGui(hand));
+            return true;
         }
+        false
     }
 
     /// The held item's block, if it is a block item (item id = block id in vanilla,

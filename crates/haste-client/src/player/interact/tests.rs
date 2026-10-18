@@ -76,6 +76,7 @@ pub(super) fn data() -> &'static haste_data::GameData {
                     "potion",
                     "iron_spear",
                     "dirt",
+                    "writable_book",
                 ]),
                 entries(&[
                     "speed",
@@ -604,11 +605,19 @@ fn several_queued_use_clicks_in_one_tick_each_count() {
         use_item: true,
         ..Default::default()
     });
+    // Each click: the main hand's use_item_on, its Pass's use_item, and the off hand's
+    // use_item_on (vanilla's useItemOn sends the packet for the empty off hand too, inside
+    // startPrediction, before performUseItemOn's empty-hand check).
     let uses = out
+        .iter()
+        .filter(|p| matches!(p, ServerboundPlay::UseItem(_)))
+        .count();
+    assert_eq!(uses, 2, "{out:?}");
+    let uses_on = out
         .iter()
         .filter(|p| matches!(p, ServerboundPlay::UseItemOn(_)))
         .count();
-    assert_eq!(uses, 2, "{out:?}");
+    assert_eq!(uses_on, 4, "{out:?}");
 }
 
 #[test]
@@ -1391,52 +1400,6 @@ fn a_held_attack_swings_the_hand_every_tick() {
         assert!((got - want).abs() < 1e-6, "{got} != {want}");
     }
     assert!(r.p.hand.is_swinging(), "still mining, still swinging");
-}
-
-/// A right click with an item in hand swings it (`Minecraft.startUseItem` swings the result of
-/// `InteractionResult.SUCCESS`) and puts the hand down for the item switch.
-#[test]
-fn a_use_swings_the_hand_and_drops_it() {
-    let mut r = Rig::new(GameMode::Survival);
-    let place = InteractInput {
-        use_item: true,
-        ..InteractInput::default()
-    };
-    // The hotbar's first slot holds a block to place.
-    r.p.int.hotbar[0] = item(1);
-    r.tick(place);
-    assert!(r.p.hand.is_swinging(), "the use started a swing");
-    // `player.itemUsed(hand)` zeroed the equip progress, and the hand started at 0 (vanilla's
-    // field default), so the pair for this tick is (0, 0).
-    assert_eq!(r.p.hand.equip(), (0.0, 0.0));
-    // The held item is new this tick, so the shown item still differs from it: the progress
-    // stays 0 and the new item is shown. The tick after brings the hand back up towards
-    // ((itemSwapTicker + 1) / (20 / attack_speed))^3 = (2 / 5)^3 = 0.064, under the 0.1 at
-    // which the item is switched.
-    let item = r.p.main_hand().item;
-    r.p.hand.tick(
-        0.0,
-        (0.0, 90.0),
-        true,
-        false,
-        crate::hand::HeldStack::of(item),
-        4.0,
-    );
-    assert_eq!(r.p.hand.equip(), (0.0, 0.0));
-    assert_eq!(r.p.hand.shown_item(), item);
-    r.p.hand.tick(
-        0.0,
-        (0.0, 90.0),
-        true,
-        false,
-        crate::hand::HeldStack::of(item),
-        4.0,
-    );
-    assert!(
-        (r.p.hand.equip().1 - 0.064).abs() < 1e-6,
-        "{}",
-        r.p.hand.equip().1
-    );
 }
 
 pub(super) const USE: InteractInput = InteractInput {
