@@ -36,6 +36,7 @@ pub(super) fn tick(
             bb_width: p.attrs.box_width(),
             bb_height: p.attrs.height_for(p.state.pose),
             scale: f64::from(p.attrs.scale),
+            spectator: p.game_mode == haste_core::game::GameMode::Spectator,
         }
         .sample();
         driver.session.screen.set_inside_portal(probe.in_portal);

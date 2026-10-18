@@ -17,8 +17,8 @@
 //!   (`fluid_occlusion.rs`): the bottom at `MAX_FLUID_HEIGHT`, the top at its lowest corner,
 //!   each side at its higher corner. The top's underside returns only for
 //!   `FluidState.shouldRenderBackwardUpFace`. Every face is pulled 0.001 into the block
-//!   (`tesselate`'s `offs`). APPROXIMATE: the mesher's `FluidWorld::face_occluder` answers
-//!   full cubes only so far; slabs and stairs need its shape data wired in.
+//!   (`tesselate`'s `offs`). The occlusion shapes come from `fluid/occlusion.rs` (the
+//!   oracle dump's outline shapes; see that module for the classes it cannot express).
 //! - Flow: `FlowingFluid.getFlow` (horizontal part; the FALLING branch only moves the y
 //!   component, which `tesselate` never reads) picks the still or the flowing sprite and
 //!   rotates the flow sprite's middle-half window along the flow. APPROXIMATE: the
@@ -37,6 +37,7 @@ use haste_assets::{BakedBlockModels, RenderLayer};
 use haste_core::BlockStateId;
 
 mod geometry;
+mod occlusion;
 mod quads;
 mod registry;
 #[cfg(test)]
@@ -45,6 +46,7 @@ mod tests;
 pub use geometry::{
     corner_heights, fluid_flow, should_render_backward_up_face, INSET, MAX_FLUID_HEIGHT,
 };
+pub use occlusion::FluidOccluders;
 pub use quads::{fluid_quads, FluidQuad};
 pub use registry::{
     Fluid, FluidDef, FluidRules, FluidSprites, FluidState, FluidTable, FluidTint, FluidWorld,

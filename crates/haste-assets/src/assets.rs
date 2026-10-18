@@ -28,6 +28,9 @@ pub struct Assets {
     /// The server's downloaded packs layered above the selection.
     server_packs: Vec<PathBuf>,
     model_cache: HashMap<String, Arc<ModelFile>>,
+    /// Directory sources per atlas definition (vanilla `SpriteSourceList`), cached
+    /// until the pack selection changes.
+    atlas_sources: HashMap<String, Vec<sprite_sources::DirectorySource>>,
     /// Where this was opened from (`reopen`).
     source: (PathBuf, PathBuf, String),
     /// The pack ids `reopen` re-applies (empty when opened plain).
@@ -49,6 +52,7 @@ pub(crate) fn asset_key(id: &haste_core::Identifier, category: &str, suffix: &st
 pub mod language;
 pub mod models;
 pub mod resources;
+pub mod sprite_sources;
 pub mod textures;
 
 pub use models::ModelJson;

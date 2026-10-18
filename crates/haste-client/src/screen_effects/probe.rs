@@ -40,6 +40,11 @@ pub struct Probe<'a> {
     pub bb_width: f64,
     pub bb_height: f64,
     pub scale: f64,
+    /// The local player is a spectator: vanilla's `Entity.noPhysics` (set from
+    /// `Player.tick`'s `isSpectator()`). It closes `LevelExtractor.getViewBlockingState`
+    /// (no in-block overlay) and `Entity.isAffectedByBlocks` (no block-inside effects:
+    /// portal, fire ignite, powder-snow freeze).
+    pub spectator: bool,
 }
 
 impl Probe<'_> {
@@ -49,48 +54,57 @@ impl Probe<'_> {
     pub fn sample(&self) -> WorldProbe {
         let air = haste_core::BlockStateId::AIR;
         let mut block_overlay = None;
-        for p in view_probe_points(self.eye, self.bb_width, self.scale) {
-            let pos = haste_core::BlockPos::new(
-                p.x.floor() as i32,
-                p.y.floor() as i32,
-                p.z.floor() as i32,
-            );
-            let state = self.world.block_state(pos);
-            if state == air {
-                continue;
-            }
-            if is_view_blocking(state, self.blocks, self.shapes, self.tags) {
-                block_overlay = Some(particle_texture(self.blocks.block_of(state)));
-                break;
+        if !self.spectator {
+            for p in view_probe_points(self.eye, self.bb_width, self.scale) {
+                let pos = haste_core::BlockPos::new(
+                    p.x.floor() as i32,
+                    p.y.floor() as i32,
+                    p.z.floor() as i32,
+                );
+                let state = self.world.block_state(pos);
+                if state == air {
+                    continue;
+                }
+                if is_view_blocking(state, self.blocks, self.shapes, self.tags) {
+                    block_overlay = Some(particle_texture(self.blocks.block_of(state)));
+                    break;
+                }
             }
         }
         // The block at the feet is a nether portal (`Entity.setAsInsidePortal` fires from the
         // portal block's `entityInside`).
-        let feet_pos = haste_core::BlockPos::new(
-            self.feet.x.floor() as i32,
-            self.feet.y.floor() as i32,
-            self.feet.z.floor() as i32,
-        );
-        let feet_state = self.world.block_state(feet_pos);
-        let in_portal = is_portal_block(self.blocks.block_of(feet_state));
+        let in_portal = if self.spectator {
+            false
+        } else {
+            let feet_pos = haste_core::BlockPos::new(
+                self.feet.x.floor() as i32,
+                self.feet.y.floor() as i32,
+                self.feet.z.floor() as i32,
+            );
+            let feet_state = self.world.block_state(feet_pos);
+            is_portal_block(self.blocks.block_of(feet_state))
+        };
         // Whether any fire block overlaps our bounding box: the local player's client-side
         // `BaseFireBlock.entityInside` -> `FIRE_IGNITE` is what sets its own fire ticks (the
-        // server does not send the owner their own `set_entity_data`).
+        // server does not send the owner their own `set_entity_data`). A spectator never
+        // gets block-inside effects at all (`Entity.isAffectedByBlocks`: `!noPhysics`).
         let mut in_fire = false;
         let mut in_powder_snow = false;
-        let half = self.bb_width * 0.5;
-        let min = self.feet - glam::DVec3::new(half, 0.0, half);
-        let max = self.feet + glam::DVec3::new(half, self.bb_height, half);
-        let (x0, x1) = (min.x.floor() as i32, (max.x - 1e-7).floor() as i32);
-        let (y0, y1) = (min.y.floor() as i32, (max.y - 1e-7).floor() as i32);
-        let (z0, z1) = (min.z.floor() as i32, (max.z - 1e-7).floor() as i32);
-        for x in x0..=x1 {
-            for y in y0..=y1 {
-                for z in z0..=z1 {
-                    let pos = haste_core::BlockPos::new(x, y, z);
-                    let block = self.blocks.block_of(self.world.block_state(pos));
-                    in_fire |= is_fire_block(block, self.blocks, self.tags);
-                    in_powder_snow |= is_powder_snow_block(block, self.blocks, self.tags);
+        if !self.spectator {
+            let half = self.bb_width * 0.5;
+            let min = self.feet - glam::DVec3::new(half, 0.0, half);
+            let max = self.feet + glam::DVec3::new(half, self.bb_height, half);
+            let (x0, x1) = (min.x.floor() as i32, (max.x - 1e-7).floor() as i32);
+            let (y0, y1) = (min.y.floor() as i32, (max.y - 1e-7).floor() as i32);
+            let (z0, z1) = (min.z.floor() as i32, (max.z - 1e-7).floor() as i32);
+            for x in x0..=x1 {
+                for y in y0..=y1 {
+                    for z in z0..=z1 {
+                        let pos = haste_core::BlockPos::new(x, y, z);
+                        let block = self.blocks.block_of(self.world.block_state(pos));
+                        in_fire |= is_fire_block(block, self.blocks, self.tags);
+                        in_powder_snow |= is_powder_snow_block(block, self.blocks, self.tags);
+                    }
                 }
             }
         }

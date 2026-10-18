@@ -32,6 +32,9 @@ pub struct SharedInput {
     pub state: InputState,
     /// Double-tap jump seen since the last tick (`LocalPlayer::toggle_flight`).
     pub toggle_flight: bool,
+    /// Wheel notches scrolled in spectator since the last tick
+    /// (`MouseHandler.onScroll`: they step the flying speed).
+    pub spectator_scroll: f32,
     /// Mouse buttons held, middle click and hotbar selection since the last tick.
     pub interact: InteractInput,
     /// The current perspective (F5 cycles it). The sound listener and the spyglass FOV
