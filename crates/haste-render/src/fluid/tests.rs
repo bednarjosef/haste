@@ -228,7 +228,7 @@ fn pool_interior_is_flat_and_still() {
     let f = t.fluid(water(0)).unwrap();
     let h = corner_heights(&g, &t, at(0, 0, 0), f);
     assert_close(h, 8.0 / 9.0);
-    assert_eq!(flow_direction(h), [0.0, 0.0]);
+    assert_eq!(fluid_flow(&g, &t, at(0, 0, 0), f), [0.0, 0.0]);
     // Interior: top + reversed top only (sides against water, bottom on stone).
     let mut quads = Vec::new();
     fluid_quads(&g, &t, at(0, 0, 0), f, &mut quads);
@@ -287,20 +287,63 @@ fn flowing_water_flows_downhill() {
     let h = corner_heights(&g, &t, at(1, 0, 0), f);
     // West corners lean on the source (>= 0.8, weight 10), east corners on level 2.
     assert!(h[0] > h[3] && h[1] > h[2], "{h:?}");
-    let [fx, fz] = flow_direction(h);
-    assert!(fx > 0.99 && fz.abs() < 1e-6, "flow ({fx}, {fz})");
+    // FlowingFluid.getFlow on the level-1 block: distance to the source is 7/9 - 8/9
+    // (pulled west), to level 2 it is 7/9 - 6/9 (pulled east); the stone walls and floor
+    // are in blocks_fluid_flow, so they pull nothing. Net 2/9 east.
+    let flow = fluid_flow(&g, &t, at(1, 0, 0), f);
+    assert!(
+        (flow[0] - 1.0).abs() < 1e-6 && flow[1].abs() < 1e-6,
+        "flow {flow:?}"
+    );
     let mut quads = Vec::new();
     fluid_quads(&g, &t, at(1, 0, 0), f, &mut quads);
     let top = quads.iter().find(|q| q.dir == Direction::Up).unwrap();
-    // Flow sprite (index 0 in the test sprites, same as still): UVs rotated so v grows
-    // toward +x (east).
-    let east = top.uvs[2][1]; // SE corner
-    let west = top.uvs[1][1]; // SW corner
-    assert!(east > west, "{:?}", top.uvs);
-    // UVs stay inside the middle half of the sprite.
-    for uv in top.uvs {
-        assert!((0.25..=0.75).contains(&uv[0]) && (0.25..=0.75).contains(&uv[1]));
+    // tesselate with flow (1, 0): the middle half of the flow sprite, v running east
+    // (u00 = 0.5 - c - s with c = 0, s = -0.25 and so on).
+    let expect = [[0.75, 0.25], [0.25, 0.25], [0.25, 0.75], [0.75, 0.75]];
+    for (uv, e) in top.uvs.iter().zip(expect) {
+        assert!(
+            (uv[0] - e[0]).abs() < 1e-6 && (uv[1] - e[1]).abs() < 1e-6,
+            "{:?}",
+            top.uvs
+        );
     }
+}
+
+#[test]
+fn flow_comes_from_getflow_not_the_corner_gradient() {
+    let t = table();
+    let f = t.fluid(water(0)).unwrap();
+    // A source on stone with open air east: its corners slope down to the east, but
+    // FlowingFluid.getFlow sees no fluid beside or below the air column: still top.
+    let mut g = Grid::default();
+    g.set(0, 0, 0, water(0));
+    g.set(0, -1, 0, STONE);
+    let h = corner_heights(&g, &t, at(0, 0, 0), f);
+    assert!(h[2] < 8.0 / 9.0, "corners slope: {h:?}");
+    assert_eq!(fluid_flow(&g, &t, at(0, 0, 0), f), [0.0, 0.0]);
+    let mut quads = Vec::new();
+    fluid_quads(&g, &t, at(0, 0, 0), f, &mut quads);
+    let top = quads.iter().find(|q| q.dir == Direction::Up).unwrap();
+    assert_eq!(top.uvs, [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]);
+
+    // Water one level below the drop-off pulls the surface over the edge: distance
+    // 8/9 - (8/9 - 8/9) = 8/9 toward east.
+    g.set(1, -1, 0, water(0));
+    let flow = fluid_flow(&g, &t, at(0, 0, 0), f);
+    assert!(
+        (flow[0] - 1.0).abs() < 1e-6 && flow[1].abs() < 1e-6,
+        "flow {flow:?}"
+    );
+
+    // A blocks_fluid_flow neighbour (the mesher's blocks-motion approximation) between
+    // them stops the pull again.
+    g.set(1, 0, 0, STONE);
+    assert_eq!(fluid_flow(&g, &t, at(0, 0, 0), f), [0.0, 0.0]);
+
+    // A different fluid beside does not pull either (affectsFlow is false).
+    g.set(1, 0, 0, BlockStateId(30));
+    assert_eq!(fluid_flow(&g, &t, at(0, 0, 0), f), [0.0, 0.0]);
 }
 
 #[test]
@@ -401,6 +444,49 @@ fn backward_up_face_only_when_visible_from_above_layer() {
     g.set(1, 1, 1, STONE);
     g.set(0, 1, 0, water(0));
     assert_eq!(ups(&g), 0, "same fluid straight above: no top face");
+}
+
+#[test]
+fn waterlogged_block_culls_faces_its_own_shape_covers() {
+    // FluidRenderer.shouldRenderFace runs every face but the top through
+    // isFaceOccludedBySelf: the water inside a waterlogged bottom slab loses its
+    // bottom face (the slab sits on it), everything else stays; a top slab hides
+    // nothing of the fluid (its shape does not touch the fluid's bottom face).
+    let t = table();
+    let f = t.fluid(water(0)).unwrap();
+    let dirs = |g: &Grid| {
+        let mut q = Vec::new();
+        fluid_quads(g, &t, at(0, 0, 0), f, &mut q);
+        q.iter()
+            .map(|q| q.dir)
+            .collect::<std::collections::HashSet<_>>()
+    };
+    let mut g = Grid::default();
+    g.set(0, 0, 0, water(0));
+    g.shapes
+        .insert(water(0), vec![[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]]);
+    let d = dirs(&g);
+    assert!(
+        !d.contains(&Direction::Down),
+        "bottom slab covers the bottom"
+    );
+    assert!(d.contains(&Direction::Up));
+    assert!(d.contains(&Direction::North));
+
+    let mut g = Grid::default();
+    g.set(0, 0, 0, water(0));
+    g.shapes
+        .insert(water(0), vec![[0.0, 0.5, 0.0, 1.0, 1.0, 1.0]]);
+    let d = dirs(&g);
+    assert!(
+        d.contains(&Direction::Down),
+        "top slab leaves the bottom open"
+    );
+    assert!(
+        d.contains(&Direction::Up),
+        "the top face has no self-occlusion"
+    );
+    assert!(d.contains(&Direction::North));
 }
 
 #[test]

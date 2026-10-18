@@ -561,9 +561,8 @@ impl LocalPlayer {
                         fov_modifier: self.abilities.fov_modifier,
                         ..Abilities::for_mode(m)
                     };
-                    if !self.abilities.may_fly {
-                        self.state.flying = false;
-                    }
+                    // `GameType.updatePlayerAbilities`, run by `setLocalMode` on the change.
+                    self.state.flying = spectator::flying_after_mode_change(m, self.state.flying);
                 }
             }
             P::Respawn(r) => {
@@ -581,6 +580,9 @@ impl LocalPlayer {
                 let pos = self.state.pos;
                 self.state = PlayerState::at(pos);
                 self.abilities = Abilities::for_mode(self.game_mode);
+                // `GameType.updatePlayerAbilities` again, on the respawn's game mode.
+                self.state.flying =
+                    spectator::flying_after_mode_change(self.game_mode, self.state.flying);
                 self.has_position = false;
                 self.loaded = false;
                 self.pending_accept = None;
@@ -1003,7 +1005,10 @@ impl LocalPlayer {
         // blindness and food terms, `isSlowDueToUsingItem`).
         self.state.sprint_blocked =
             self.int.is_blind() || (self.food <= SPRINT_FOOD_LEVEL && !self.abilities.may_fly);
-        self.state.slow_using_item = self.is_using_item();
+        // Vanilla `LocalPlayer.isSlowDueToUsingItem` / `itemUseSpeedMultiplier`: the used
+        // item's `use_effects` keep a sprint from starting unless `can_sprint`, and scale the
+        // movement input while using.
+        self.apply_item_use_effects(ctx.env);
         // Vanilla `LocalPlayer.aiStep`: when not `noPhysics` and not a passenger (the passenger
         // tick returned above), the four feet probes free a player inside a suffocating block
         // (sand, a closing piston or door) before the sprint rules below.
@@ -1047,32 +1052,10 @@ impl LocalPlayer {
         // The velocity this tick's move starts with (vanilla's `getDeltaMovement` at
         // `Entity.move`): the step rule's swim-sound volume reads it.
         let pre_tick_velocity = self.state.velocity;
-        // Vanilla's double tap: while the window is armed a fresh press of jump (or the input
-        // layer's own double-tap signal) toggles flight; without it a press arms the window for
-        // 7 ticks. Vanilla keeps the window while the player swims, and skips the toggle on a
-        // vehicle the player cannot jump (haste has no vehicles).
-        let armed = self.jump_trigger_time > 0;
-        let double_tap = std::mem::take(&mut self.toggle_flight);
         let pressed = input.jump && !self.jump_held;
         self.jump_held = input.jump;
-        let mut just_toggled_creative_flight = false;
-        if self.abilities.may_fly && (pressed || double_tap) {
-            if armed {
-                if !self.state.swimming {
-                    self.jump_trigger_time = 0;
-                    self.state.flying = !self.state.flying;
-                    just_toggled_creative_flight = true;
-                    if self.state.flying && self.state.on_ground {
-                        self.jump_from_ground(ctx.world, ctx.blocks);
-                    }
-                }
-            } else {
-                self.jump_trigger_time = JUMP_DOUBLE_TAP_TICKS;
-            }
-        }
-        if !self.abilities.may_fly {
-            self.state.flying = false;
-        }
+        let just_toggled_creative_flight =
+            self.creative_flight_step(pressed, ctx.world, ctx.blocks);
         // Vanilla `LocalPlayer.aiStep`: a fresh jump press in the air with a glider equipped and
         // no liquid starts gliding (`tryToStartFallFlying` -> `START_FALL_FLYING`), skipped on
         // the press that just toggled creative flight and while on a climbable
@@ -1400,8 +1383,10 @@ impl TickCtx<'_> {
 }
 
 pub mod climbable;
+mod creative_flight;
 pub mod interact;
 mod riding;
 pub mod script;
+pub mod spectator;
 #[cfg(test)]
 mod tests;

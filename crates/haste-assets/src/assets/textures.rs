@@ -170,10 +170,16 @@ impl Assets {
         }
     }
 
-    /// `assets/minecraft/textures/gui/sprites/<path>.png` with its `.mcmeta` scaling
-    /// (`gui/scaling`: nine_slice with a uniform border in 26.3, tile, or stretch).
+    /// The gui atlas sprite `id` with its `.mcmeta` scaling (`gui/scaling`:
+    /// nine_slice with a uniform border in 26.3, tile, or stretch). The gui atlas
+    /// definition's directory sources say where the texture lives (vanilla
+    /// `Hud.getMobEffectSprite` ids like `mob_effect/regeneration` are under
+    /// `textures/mob_effect/`, not `gui/sprites`); without a definition, the
+    /// `gui/sprites` guess.
     pub fn gui_sprite(&mut self, id: &Identifier) -> Result<(image::RgbaImage, SpriteMeta)> {
-        let key = super::asset_key(id, "textures/gui/sprites", ".png");
+        let key = self
+            .atlas_sprite_texture_key(id, "gui")
+            .unwrap_or_else(|| super::asset_key(id, "textures/gui/sprites", ".png"));
         let bytes = self.read_asset(&key)?;
         let image = decode_png(&bytes, &key)?;
         let meta_key = format!("{key}.mcmeta");

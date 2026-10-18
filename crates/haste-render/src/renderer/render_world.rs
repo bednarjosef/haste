@@ -427,14 +427,7 @@ impl Renderer {
                 });
             }
         };
-        for (c, si) in self.visible_mask.ordered() {
-            emit(&mut buckets, SectionPos::new(c.x, si + min_section, c.z));
-        }
-        for &pos in &self.bonus_list {
-            if sections.get(pos).is_some_and(|s| s.bonus) {
-                emit(&mut buckets, pos);
-            }
-        }
+        self.for_each_visible_section(|pos| emit(&mut buckets, pos));
         // Translucent back to front: the key is the negated distance, so
         // ascending key order is far first.
         if buckets[3].len() > 1 {

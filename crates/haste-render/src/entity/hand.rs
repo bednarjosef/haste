@@ -3,6 +3,8 @@
 
 use super::*;
 
+mod use_anim;
+
 /// The arm model of a first-person hand: the player model's `right_arm` with its
 /// `right_sleeve` child (vanilla `HumanoidModel.createMesh` + `PlayerModel.createMesh`), in
 /// model pixels. `slim` picks the 3 px arm. Built once and cached, so the hand pass allocates
@@ -119,9 +121,16 @@ pub(crate) fn item_arm_matrix(fp: &FirstPerson, partial: f32) -> Mat4 {
     const ITEM_SWING_X_POS_SCALE: f32 = -0.4;
     const ITEM_SWING_Y_POS_SCALE: f32 = 0.2;
     const ITEM_SWING_Z_POS_SCALE: f32 = -0.2;
-    let attack = fp.attack.at(partial);
     let inverse_arm_height = 1.0 - fp.equip.at(partial);
-    let mut m = Mat4::from_translation(Vec3::new(0.56, -0.52 + inverse_arm_height * -0.6, -0.72));
+    // The EAT/DRINK use animation replaces the swing: `applyEatTransform` and then
+    // `applyItemArmTransform` (vanilla's `submitArmWithItem` use branch; the transform
+    // before the switch is skipped because both have `customArmTransform`).
+    if fp.use_eat && fp.use_remaining > 0 {
+        return use_anim::eat_transform(partial, fp.use_remaining as f32, fp.use_duration)
+            * use_anim::item_arm_transform(inverse_arm_height);
+    }
+    let attack = fp.attack.at(partial);
+    let mut m = use_anim::item_arm_transform(inverse_arm_height);
     // `swingArm`.
     let sqrt_attack = attack.max(0.0).sqrt();
     m *= Mat4::from_translation(Vec3::new(

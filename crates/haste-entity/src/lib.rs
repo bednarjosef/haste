@@ -6,7 +6,9 @@ pub mod animation;
 pub mod avatar;
 pub mod decoration;
 pub mod dims;
+pub mod item_entity;
 pub mod lerp;
+pub mod local_player;
 pub mod metadata;
 pub mod model_dump;
 pub mod models;
@@ -23,6 +25,7 @@ mod tests;
 
 pub use decoration::PaintingVariant;
 pub use dims::{Dimensions, EntityDimensions};
+pub use local_player::{equipment_by_slot, LocalTick, MirroredSwing};
 pub use metadata::{Metadata, MobFlags, SharedFlags};
 pub use riding::{passenger_seat, PassengerKind, SeatPoint, SeatQuery};
 pub use store::{Entity, EntityStore};

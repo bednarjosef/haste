@@ -89,6 +89,7 @@ impl Assets {
             packs_dir: PathBuf::new(),
             server_packs: Vec::new(),
             model_cache: HashMap::new(),
+            atlas_sources: HashMap::new(),
             dynamic: Default::default(),
             source,
             pack_ids: Vec::new(),
@@ -123,6 +124,7 @@ impl Assets {
         self.pack_ids = ids.to_vec();
         self.server_packs = server.to_vec();
         self.model_cache.clear();
+        self.atlas_sources.clear();
     }
 
     /// The pack ids currently layered (bottom first), as `apply_packs` got them.

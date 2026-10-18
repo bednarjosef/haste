@@ -203,7 +203,12 @@ pub(crate) fn block_particle_table(
 }
 
 /// The terrain-particle colour of `state` at `pos`: grey 0.6 times the tint source's
-/// `colorAsTerrainParticle` (`TerrainParticle`'s constructor).
+/// `colorAsTerrainParticle` (`TerrainParticle`'s constructor), as a linear-RGB vertex
+/// multiplier. Vanilla multiplies the sprite's sRGB-encoded texels by the encoded
+/// colour in the shader; the particle pass runs the entity pipeline, which multiplies
+/// the linearized texel, so the sRGB-scale product is converted like the entity tints
+/// (`sky::linear`, the power law making `linear(texel * colour) == linear(texel) *
+/// linear(colour)` hold to within the sRGB curve's linear segment).
 pub(crate) fn terrain_tint(
     sprite: &BlockParticleSprite,
     pos: haste_core::BlockPos,
@@ -222,9 +227,9 @@ pub(crate) fn terrain_tint(
         pos
     };
     let c = sample(pos);
-    [
+    crate::sky::linear([
         0.6 * ((c >> 16 & 0xFF) as f32 / 255.0),
         0.6 * ((c >> 8 & 0xFF) as f32 / 255.0),
         0.6 * ((c & 0xFF) as f32 / 255.0),
-    ]
+    ])
 }

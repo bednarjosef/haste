@@ -147,7 +147,12 @@ impl NetDriver {
         entities: &mut E,
         ui: Option<&crate::ui::Ui>,
     ) -> anyhow::Result<()> {
-        entities.tick();
+        match world.physics() {
+            Some((view, data)) => {
+                entities.tick_in_world(&super::item_world::ItemWorldView { view, data })
+            }
+            None => entities.tick(),
+        }
         self.session.end_tick(input, world, entities, ui, &mut self.out);
         self.flush()
     }

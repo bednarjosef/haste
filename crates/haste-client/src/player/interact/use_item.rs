@@ -3,11 +3,10 @@
 //! screens a use opens, and the item-in-use state (`LivingEntity.useItem` /
 //! `useItemRemaining`, `Item.getUseDuration` / `getUseAnimation`).
 
-use glam::DVec3;
 use haste_core::entity::ItemStackData;
 use haste_core::game::GameMode;
 use haste_core::view::BlockView;
-use haste_core::{BlockPos, BlockStateId, Direction, Identifier, RegistryIndex};
+use haste_core::{BlockPos, Direction, Identifier, RegistryIndex};
 use haste_protocol::packets::play::serverbound as sb;
 use haste_protocol::ServerboundPlay;
 
@@ -123,6 +122,39 @@ impl LocalPlayer {
     /// `LivingEntity.isUsingItem`: an item is being used over time.
     pub fn is_using_item(&self) -> bool {
         self.int.is_using_item
+    }
+
+    /// The `minecraft:use_effects` of the item in use (vanilla reads them off the used stack
+    /// in `LocalPlayer.isSlowDueToUsingItem` and `itemUseSpeedMultiplier`): the item's default
+    /// components from the report. `UseEffects.DEFAULT` when it names none or the item cannot
+    /// be resolved (no environment, no stack yet — every item's prototype carries the
+    /// component). A stack's component patch can override them, which this side does not
+    /// decode.
+    fn used_item_effects(&self, env: Option<&InteractEnv<'_>>) -> haste_data::UseEffects {
+        let Some(env) = env else {
+            return haste_data::UseEffects::DEFAULT;
+        };
+        let Some(item) = self
+            .int
+            .using
+            .and_then(|u| u.item)
+            .and_then(|i| env.data.registries.name("minecraft:item", i))
+        else {
+            return haste_data::UseEffects::DEFAULT;
+        };
+        env.data.item_components.use_effects(item)
+    }
+
+    /// Feeds the physics state the used item's `use_effects`, before the movement tick
+    /// (vanilla `LocalPlayer.isSlowDueToUsingItem` and `itemUseSpeedMultiplier`): using an
+    /// item keeps a sprint from starting unless the stack's `can_sprint`, and scales the
+    /// movement input by its speed multiplier (1.0 when no item is in use).
+    pub fn apply_item_use_effects(&mut self, env: Option<&InteractEnv<'_>>) {
+        let effects = self.used_item_effects(env);
+        let using = self.int.is_using_item;
+        self.state.using_item = using;
+        self.state.slow_using_item = using && !effects.can_sprint;
+        self.state.item_use_speed = if using { effects.speed_multiplier } else { 1.0 };
     }
 
     /// `LivingEntity.getUseItemRemainingTicks`.
@@ -260,21 +292,38 @@ impl LocalPlayer {
                             // the rest. No `punch`: that packet belongs to attacks only.
                             let stack = self.hand(hand).clone();
                             let placing = self.is_block_item(&stack, env.data);
-                            if placing || self.block_has_use(world.block_state(h.pos), env.data) {
-                                self.hand.swing();
-                                if placing {
+                            if placing {
+                                // `BlockItem.place` -> `canPlace` -> `Level.isUnobstructed`:
+                                // an entity box in the new block's collision shape fails the
+                                // placement (FAIL), and `Minecraft.startUseItem` returns on a
+                                // Fail — no swing, no place sound, no fall-through to `useItem`
+                                // or the other hand. The `use_item_on` packet above went out
+                                // either way, inside `startPrediction` as vanilla sends it.
+                                if let Some(place_pos) = self.placement_pos(h, &stack, world, env) {
+                                    self.hand.swing();
                                     self.hand.item_used();
                                     // `BlockItem.place` plays the place sound on the client
-                                    // too (the server's copy excludes us). The held block
-                                    // item's block decides; unknown items play nothing.
-                                    self.own_place_sound(h.pos, &stack, env);
+                                    // too (the server's copy excludes us), at the placement
+                                    // position. The held block item's block decides; unknown
+                                    // items play nothing.
+                                    self.own_place_sound(place_pos, &stack, env);
                                 }
+                                return;
+                            }
+                            if self.block_has_use(world.block_state(h.pos), env.data) {
+                                self.hand.swing();
                                 return;
                             }
                         }
                         None => {}
                     }
-                    // gameMode.useItem with nothing targeted.
+                    // gameMode.useItem with nothing targeted: the packet goes out, then
+                    // `itemStack.use` runs on the client. Only a Success answers the swing
+                    // and the equip drop (`Minecraft.startUseItem`: the swing on
+                    // `SwingSource.PREDICTED`, `player.itemUsed` on any Success — CONSUME,
+                    // eating or drawing a bow, drops the hand without swinging); a Pass
+                    // (a dirt block, redstone dust, a stick) and a Fail (food the player
+                    // cannot eat) swing nothing and fall through to the other hand.
                     if holding {
                         let seq = self.int.next_sequence();
                         out.push(ServerboundPlay::UseItem(sb::UseItem {
@@ -283,29 +332,33 @@ impl LocalPlayer {
                             yaw: look.0,
                             pitch: look.1,
                         }));
-                        self.hand.swing();
-                        // `itemStack.use`: a writable book opens its editor
-                        // (`WritableBookItem.use` -> `LocalPlayer.openItemGui`).
-                        self.use_opens_screen(env, None, hand);
+                        let stack = self.hand(hand).clone();
+                        // `WritableBookItem.use`: SUCCESS — swing, itemUsed, its editor.
+                        if self.use_opens_screen(env, None, hand) {
+                            self.hand.swing();
+                            self.hand.item_used();
+                            return;
+                        }
                         // `LivingEntity.startUsingItem`: an item with a use duration starts
                         // using (`Item.getUseDuration`/`getUseAnimation` from the consumable
                         // component or the item class).
                         // Food starts only when the player can eat (`Consumable.startConsuming`
                         // -> `canConsume` -> `Player.canEat`); the packet goes out either way.
-                        let stack = self.hand(hand).clone();
-                        if !self.can_consume(&stack, env.data) {
-                            return;
+                        if self.can_consume(&stack, env.data) {
+                            if let Some((duration, animation)) = self.int.use_data(&stack, env.data)
+                            {
+                                self.int.using = Some(UsingItem {
+                                    item: stack.item,
+                                    duration,
+                                    remaining: duration,
+                                    animation,
+                                });
+                                self.int.is_using_item = true;
+                                // The CONSUME Success's `player.itemUsed(hand)`.
+                                self.hand.item_used();
+                                return;
+                            }
                         }
-                        if let Some((duration, animation)) = self.int.use_data(&stack, env.data) {
-                            self.int.using = Some(UsingItem {
-                                item: stack.item,
-                                duration,
-                                remaining: duration,
-                                animation,
-                            });
-                            self.int.is_using_item = true;
-                        }
-                        return;
                     }
                 }
             }
@@ -329,12 +382,14 @@ impl LocalPlayer {
     /// `useItem`): the command-block editor on its block (with `target`), the book editor for a
     /// writable book in hand (also with `target`: no block consumes a book's use, so vanilla
     /// falls through to `itemStack.use`). The game thread takes it and hands it to the UI.
+    /// Returns whether a screen opened: the book's use is a SUCCESS, so `Minecraft
+    /// .startUseItem` swings and stops there instead of trying the other hand.
     fn use_opens_screen(
         &mut self,
         env: &InteractEnv<'_>,
         target: Option<(BlockPos, &dyn BlockView)>,
         hand: i32,
-    ) {
+    ) -> bool {
         if let Some((pos, world)) = target {
             let block = env.data.blocks.block_of(world.block_state(pos));
             if [
@@ -345,7 +400,7 @@ impl LocalPlayer {
             .contains(block)
             {
                 self.int.used_screen = Some(UsedScreen::CommandBlock(pos));
-                return;
+                return true;
             }
         }
         let stack = self.hand(hand);
@@ -358,78 +413,9 @@ impl LocalPlayer {
             })
         {
             self.int.used_screen = Some(UsedScreen::ItemGui(hand));
+            return true;
         }
-    }
-
-    /// The held item's block, if it is a block item (item id = block id in vanilla,
-    /// `BlockItemId.create(name)`; the 14 crop pairs with differing names are missing
-    /// here — placing crops is rare and the server confirms anyway).
-    fn held_block<'d>(
-        &self,
-        item: &ItemStackData,
-        data: &'d haste_data::GameData,
-    ) -> Option<&'d haste_core::Identifier> {
-        if item.is_empty() {
-            return None;
-        }
-        let index = item.item?;
-        data.registries
-            .name("minecraft:item", index)
-            .and_then(|id| data.blocks.default_state(id).map(|_| id))
-    }
-
-    /// Whether `item` is a block item (`BlockItem`): its `use_item_on` places a block, a Success
-    /// on the client.
-    fn is_block_item(&self, item: &ItemStackData, data: &haste_data::GameData) -> bool {
-        self.held_block(item, data).is_some()
-    }
-
-    /// Whether the block's own `useWithoutItem`/`useItemOn` is known to succeed on the client
-    /// (containers, doors, redstone switches, workstations, beds, ...), so `startUseItem`
-    /// stops at it instead of falling through to `useItem`. Mod blocks and anything not listed
-    /// pass through; the server still runs the real use.
-    fn block_has_use(&self, state: BlockStateId, data: &haste_data::GameData) -> bool {
-        const USES: &[&str] = &[
-            "chest",
-            "barrel",
-            "shulker_box",
-            "furnace",
-            "smoker",
-            "crafting_table",
-            "door",
-            "trapdoor",
-            "fence_gate",
-            "button",
-            "lever",
-            "bed",
-            "anvil",
-            "enchanting_table",
-            "brewing_stand",
-            "hopper",
-            "dispenser",
-            "dropper",
-            "note_block",
-            "repeater",
-            "comparator",
-            "daylight_detector",
-            "bell",
-            "lectern",
-            "cartography_table",
-            "smithing_table",
-            "grindstone",
-            "stonecutter",
-            "loom",
-            "beacon",
-            "command_block",
-            "jukebox",
-            "crafter",
-            "respawn_anchor",
-        ];
-        let path = data.blocks.block_of(state).path();
-        USES.iter().any(|u| {
-            path.strip_suffix(*u)
-                .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with('_'))
-        })
+        false
     }
 
     /// `Player.canEat` for a food item (`Consumable.canConsume`): invulnerable, `can_always_eat`
@@ -527,23 +513,6 @@ impl LocalPlayer {
                     }) || is_common_food(animal, i)
                 })
             }),
-        }
-    }
-
-    /// The place sound for a `use_item_on` with a block item held (see `use_item`).
-    fn own_place_sound(&mut self, pos: BlockPos, item: &ItemStackData, env: &InteractEnv<'_>) {
-        let Some(block) = self.held_block(item, env.data) else {
-            return;
-        };
-        let state = env.data.blocks.default_state(block);
-        if let Some(state) = state {
-            if let Some(t) = env.data.block_sound_type(state) {
-                self.own_sounds.block_placed(
-                    pos.as_dvec3() + DVec3::new(0.5, 0.5, 0.5),
-                    t,
-                    &mut self.sound_out,
-                );
-            }
         }
     }
 }

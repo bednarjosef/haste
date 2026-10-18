@@ -373,17 +373,7 @@ fn head_top_of_the_humanoid_layout() {
 
 /// A hand with no animation: no swing, the equip progress up, no bob, no lag.
 fn still_hand() -> FirstPerson {
-    FirstPerson {
-        skin: None,
-        slim: false,
-        sleeve: true,
-        item: None,
-        light: (15, 0),
-        attack: TickPair::fixed(0.0),
-        equip: TickPair::fixed(1.0),
-        x_bob: TickPair::fixed(0.0),
-        y_bob: TickPair::fixed(0.0),
-    }
+    FirstPerson::default()
 }
 
 #[test]
