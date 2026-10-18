@@ -227,50 +227,80 @@ pub fn vacuum(downloads_dir: &Path) {
     }
 }
 
-/// One `resource_pack_push` handled end to end (vanilla
-/// `ClientCommonPacketListenerImpl.handleResourcePackPush` ->
-/// `DownloadedPackSource` -> `ServerPackManager`): the status result codes to
-/// report, oldest first, and the downloaded pack when one landed.
-///
-/// The status order is vanilla's: an invalid URL answers INVALID_URL at once;
-/// an accepted pack answers ACCEPTED, then DOWNLOADED once the hash-verified
-/// file is in the cache, then SUCCESSFULLY_LOADED. Vanilla sends the last one
-/// after its resource reload finished; Haste's reload is the client's (the
-/// pack reaches it through [`DownloadedPack`]), so it is reported with the
-/// download here. A hash mismatch or unreachable URL is FAILED_DOWNLOAD;
-/// a declined policy answers DECLINED (a forced pack then has the server
-/// disconnect us, as in vanilla).
-pub async fn handle_push(
+/// Downloads an accepted batch of pushes (vanilla `ServerPackManager.updateDownloads`
+/// hands every requested pack of a tick to one `DownloadQueue` batch): the
+/// verified file of each, `None` where the download or the hash check failed.
+/// The ids keep the batch's order.
+pub async fn fetch_batch(
     downloads_dir: &Path,
-    declined: bool,
-    id: uuid::Uuid,
-    url: &str,
-    hash: &str,
+    batch: &[(uuid::Uuid, String, String)],
     headers: &[(String, String)],
-) -> (Vec<i32>, Option<DownloadedPack>) {
-    if declined {
-        return (vec![status::DECLINED], None);
+) -> Vec<(uuid::Uuid, Option<PathBuf>)> {
+    let mut out = Vec::with_capacity(batch.len());
+    for (id, url, hash) in batch {
+        let path = match parse_pack_url(url) {
+            Ok(url) => match download_pack(downloads_dir, *id, &url, sha1_hex(hash), headers).await
+            {
+                Ok(path) => Some(path),
+                Err(e) => {
+                    tracing::warn!("server resource pack {id} failed: {e:#}");
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!("server resource pack {id}: invalid url: {e}");
+                None
+            }
+        };
+        out.push((*id, path));
     }
-    let Ok(url) = parse_pack_url(url) else {
-        return (vec![status::INVALID_URL], None);
-    };
-    match download_pack(downloads_dir, id, &url, sha1_hex(hash), headers).await {
-        Ok(path) => {
-            let pack = DownloadedPack { id, path };
-            (
-                vec![
-                    status::ACCEPTED,
-                    status::DOWNLOADED,
-                    status::SUCCESSFULLY_LOADED,
-                ],
-                Some(pack),
-            )
-        }
-        Err(e) => {
-            tracing::warn!("server resource pack {id} failed: {e:#}");
-            (vec![status::ACCEPTED, status::FAILED_DOWNLOAD], None)
-        }
+    out
+}
+
+/// The statuses after a batch's downloads finished, and the live set updated
+/// (vanilla `ServerPackManager.onDownload`, then `triggerReloadIfNeeded` and
+/// `cleanupRemovedPacks`; the ACCEPTED before the download is the caller's).
+///
+/// - Any failure fails the whole batch: the failed packs answer FAILED_DOWNLOAD
+///   and the others DISCARDED, in batch order, and none is DOWNLOADED; the live
+///   set stays as it was.
+/// - Otherwise every pack answers DOWNLOADED in batch order, joins the live set
+///   (a re-push of an id replaces the old one, which moves to the end), and the
+///   reload that follows answers SUCCESSFULLY_LOADED for every pack in the live
+///   set, in its order: vanilla's reload callback reports APPLIED for all packs
+///   it loads, the ones that were already active included. Vanilla sends that
+///   after its resource reload; Haste's reload is the client's (the pack reaches
+///   it through [`DownloadedPack`]), so it is reported here.
+pub fn settle_batch(
+    fetched: Vec<(uuid::Uuid, Option<PathBuf>)>,
+    live: &mut Vec<DownloadedPack>,
+) -> Vec<(uuid::Uuid, i32)> {
+    if fetched.iter().any(|(_, path)| path.is_none()) {
+        return fetched
+            .iter()
+            .map(|(id, path)| {
+                let result = if path.is_none() {
+                    status::FAILED_DOWNLOAD
+                } else {
+                    status::DISCARDED
+                };
+                (*id, result)
+            })
+            .collect();
     }
+    let mut out: Vec<(uuid::Uuid, i32)> = fetched
+        .iter()
+        .map(|(id, _)| (*id, status::DOWNLOADED))
+        .collect();
+    for (id, path) in fetched {
+        live.retain(|p| p.id != id);
+        live.push(DownloadedPack {
+            id,
+            path: path.expect("checked above"),
+        });
+    }
+    out.extend(live.iter().map(|p| (p.id, status::SUCCESSFULLY_LOADED)));
+    out
 }
 
 #[cfg(test)]
@@ -301,6 +331,37 @@ mod tests {
         assert!(parse_pack_url("file:///etc/passwd").is_err());
         assert!(parse_pack_url("ftp://example.com/pack.zip").is_err());
         assert!(parse_pack_url("not a url").is_err());
+    }
+
+    #[test]
+    fn a_failed_batch_discards_the_rest_and_a_good_one_reloads_every_pack() {
+        let id = uuid::Uuid::from_u128;
+        let path = |n: &str| Some(PathBuf::from(n));
+        let mut live = vec![DownloadedPack {
+            id: id(1),
+            path: PathBuf::from("one"),
+        }];
+        // One failure fails the batch (vanilla `onDownload`): no DOWNLOADED,
+        // the live set unchanged.
+        let out = settle_batch(vec![(id(2), path("two")), (id(3), None)], &mut live);
+        assert_eq!(
+            out,
+            vec![(id(2), status::DISCARDED), (id(3), status::FAILED_DOWNLOAD)]
+        );
+        assert_eq!(live.len(), 1);
+        // A good batch: DOWNLOADED in batch order, then the reload answers
+        // SUCCESSFULLY_LOADED for every live pack; a re-push moves to the end.
+        let out = settle_batch(vec![(id(2), path("two")), (id(1), path("one'"))], &mut live);
+        assert_eq!(
+            out,
+            vec![
+                (id(2), status::DOWNLOADED),
+                (id(1), status::DOWNLOADED),
+                (id(2), status::SUCCESSFULLY_LOADED),
+                (id(1), status::SUCCESSFULLY_LOADED),
+            ]
+        );
+        assert_eq!(live[1].path, PathBuf::from("one'"));
     }
 
     #[test]
