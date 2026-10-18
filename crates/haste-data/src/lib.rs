@@ -2,6 +2,7 @@
 //!
 //! See docs/INTERFACES.md for the contract this crate implements and AGENTS.md for the rules.
 
+mod block_entity_types;
 mod blocks;
 mod components;
 mod loader;
@@ -13,6 +14,7 @@ mod sounds;
 #[cfg(test)]
 mod tests;
 
+pub use block_entity_types::BlockEntityTypes;
 pub use blocks::BlockStates;
 pub use components::{AttributeModifier, Consumable, ItemComponents, ItemEquippable, UseEffects};
 pub use loader::{missing_reports, GameData, RUNTIME_REPORTS};

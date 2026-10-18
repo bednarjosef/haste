@@ -523,7 +523,6 @@ mod vehicle;
 mod weather;
 mod world;
 
-pub use block_entity_types::block_entity_type_path;
 pub use block_events::LidAnim;
 pub use counters::NetCounters;
 

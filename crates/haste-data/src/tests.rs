@@ -1,6 +1,7 @@
 //! Shared test fixtures: the tiny hand-written blocks/registries reports every test module
 //! loads through `GameData::load_from` (the temp dirs are unique per call).
 
+mod block_entity_types;
 mod block_physics;
 mod loader;
 mod sounds;

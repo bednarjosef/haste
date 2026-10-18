@@ -117,6 +117,32 @@ for name, fr in [("minecraft:stone", 0.6), ("minecraft:ice", 0.98), ("minecraft:
     if got != fr:
         failures.append(f"{name} friction {got} != {fr}")
 
+# block entity types: chest -> chest, oak_sign -> sign, spawner -> mob_spawner, stone none
+bet = json.loads((root / "cache/oracle/26.3/block_entity_types.json").read_text())
+print(f"block_entity_types.json: {len(bet['blocks'])} blocks, {len(bet['types'])} types")
+if bet.get("states"):
+    print(f"note: {len(bet['states'])} per-state entries (blocks whose states disagree)")
+for block, want in [
+    ("minecraft:chest", "minecraft:chest"),
+    ("minecraft:trapped_chest", "minecraft:trapped_chest"),
+    ("minecraft:exposed_copper_chest", "minecraft:chest"),
+    ("minecraft:oak_sign", "minecraft:sign"),
+    ("minecraft:oak_hanging_sign", "minecraft:hanging_sign"),
+    ("minecraft:white_banner", "minecraft:banner"),
+    ("minecraft:player_head", "minecraft:skull"),
+    ("minecraft:shulker_box", "minecraft:shulker_box"),
+    ("minecraft:poplar_shelf", "minecraft:shelf"),
+    ("minecraft:spawner", "minecraft:mob_spawner"),
+]:
+    got = bet["blocks"].get(block)
+    if got != want:
+        failures.append(f"{block} block entity type {got} != {want}")
+if "minecraft:stone" in bet["blocks"]:
+    failures.append("stone has a block entity type")
+# MovingPistonBlock.newBlockEntity returns null: the piston's block event makes that entity.
+if "minecraft:moving_piston" in bet["blocks"]:
+    failures.append("moving_piston has a block entity type from newBlockEntity")
+
 if failures:
     print("FAILURES:")
     for f in failures:
