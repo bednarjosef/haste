@@ -1,7 +1,10 @@
-//! The local player's own block sounds (footsteps, mining, breaking, placing, falling).
+//! Block sounds: the local player's own (footsteps, mining, breaking, placing,
+//! falling) and the ones the server's `level_event` asks for (a break, a mining
+//! tick).
 
 use glam::DVec3;
 use haste_audio::random::LegacyRandom;
+use haste_core::BlockPos;
 
 use super::{PlayRequest, SoundPos, SoundRef, SoundRequest};
 
@@ -111,16 +114,7 @@ impl OwnBlockSounds {
         t: &haste_data::BlockSoundType,
         requests: &mut Vec<SoundRequest>,
     ) {
-        // LevelEventHandler case 2001: break at (v+1)/2, pitch*0.8, BLOCKS source.
-        play_event(
-            self.random.next_long(),
-            &t.break_sound,
-            CATEGORY_BLOCKS,
-            pos,
-            (t.volume + 1.0) / 2.0,
-            t.pitch * 0.8,
-            requests,
-        );
+        break_request(pos, t, self.random.next_long(), requests);
     }
 
     /// The first hit of mining a block (start tick only).
@@ -130,16 +124,7 @@ impl OwnBlockSounds {
         t: &haste_data::BlockSoundType,
         requests: &mut Vec<SoundRequest>,
     ) {
-        // ClientLevel.playBreakingSound: hit at (v+1)/8, pitch*0.5, BLOCKS source.
-        play_event(
-            self.random.next_long(),
-            &t.hit_sound,
-            CATEGORY_BLOCKS,
-            pos,
-            (t.volume + 1.0) / 8.0,
-            t.pitch * 0.5,
-            requests,
-        );
+        hit_request(pos, t, self.random.next_long(), requests);
     }
 
     /// A block placement we initiated (`use_item_on` with a block item).
@@ -185,6 +170,67 @@ impl Default for OwnBlockSounds {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The sound a server `level_event` asks for (`LevelEventHandler` cases 2001 and
+/// 2020; `Level.playLocalSound(BlockPos, ...)` plays at the block centre): a
+/// break (2001) the block's break sound, a mining tick (2020) its hit sound.
+/// Every other event plays nothing, as does vanilla's `intentionally_empty`.
+///
+/// The server excludes the breaker from its 2001 broadcast
+/// (`Block.spawnDestroyByEntityParticles` with the player as the source), so
+/// playing this on the wire does not double the local player's own break sound.
+pub fn level_event_sound(
+    event: i32,
+    pos: BlockPos,
+    t: &haste_data::BlockSoundType,
+    requests: &mut Vec<SoundRequest>,
+) {
+    let pos = pos.as_dvec3() + DVec3::new(0.5, 0.5, 0.5);
+    let seed = unseeded();
+    match event {
+        2001 => break_request(pos, t, seed, requests),
+        2020 => hit_request(pos, t, seed, requests),
+        _ => {}
+    }
+}
+
+/// The mining hit request (`ClientLevel.playBreakingSound`): hit sound, volume
+/// `(v + 1) / 8`, pitch `p * 0.5`, BLOCKS source.
+fn hit_request(
+    pos: DVec3,
+    t: &haste_data::BlockSoundType,
+    seed: i64,
+    requests: &mut Vec<SoundRequest>,
+) {
+    play_event(
+        seed,
+        &t.hit_sound,
+        CATEGORY_BLOCKS,
+        pos,
+        (t.volume + 1.0) / 8.0,
+        t.pitch * 0.5,
+        requests,
+    );
+}
+
+/// The break request (`LevelEventHandler` case 2001): break sound, volume
+/// `(v + 1) / 2`, pitch `p * 0.8`, BLOCKS source.
+fn break_request(
+    pos: DVec3,
+    t: &haste_data::BlockSoundType,
+    seed: i64,
+    requests: &mut Vec<SoundRequest>,
+) {
+    play_event(
+        seed,
+        &t.break_sound,
+        CATEGORY_BLOCKS,
+        pos,
+        (t.volume + 1.0) / 2.0,
+        t.pitch * 0.8,
+        requests,
+    );
 }
 
 /// One own-sound request: an inline event name the normal `Sounds::apply`

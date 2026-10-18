@@ -217,6 +217,12 @@ impl BlockTags {
         self.tags.get(tag).is_some_and(|s| s.contains(&block_index))
     }
 
+    /// The block registry indices in `tag`, for callers that test many blocks against the same
+    /// tag (resolve once, then look up without building an [`Identifier`] per block).
+    pub fn members(&self, tag: &Identifier) -> Option<&HashSet<u32>> {
+        self.tags.get(tag)
+    }
+
     /// Whether the block (name and registry index) is in `set`.
     pub fn matches(&self, set: &BlockSet, block: &Identifier, block_index: u32) -> bool {
         match set {

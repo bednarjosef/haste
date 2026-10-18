@@ -2,6 +2,7 @@
 //!
 //! One step per line, `#` starts a comment:
 //! - `cmd <command>`: sends `/<command>` as `chat_command` (the bot must be an operator); 1 tick.
+//! - `chat <text>`: sends a chat message (signed on online-mode servers); 1 tick.
 //! - `wait <ticks>`: no keys held.
 //! - `hold <ticks> [forward|back|left|right|jump|sneak|sprint|attack|use]... [yaw=<deg>] [pitch=<deg>]`.
 //! - `slot <0..8>`: selects a hotbar slot; 1 tick.
@@ -18,6 +19,7 @@ use super::LocalPlayer;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Step {
     Command(String),
+    Chat(String),
     Hold {
         ticks: u32,
         input: InputState,
@@ -38,6 +40,7 @@ pub struct ScriptTick {
     pub input: InputState,
     pub interact: InteractInput,
     pub command: Option<String>,
+    pub chat: Option<String>,
     pub toggle_flight: bool,
     /// Labels to print before this tick.
     pub marks: Vec<String>,
@@ -67,6 +70,7 @@ impl WalkScript {
             let bad = |what: &str| anyhow::anyhow!("line {}: {what}: {line}", n + 1);
             steps.push(match word {
                 "cmd" => Step::Command(rest.trim_start_matches('/').to_string()),
+                "chat" => Step::Chat(rest.to_string()),
                 "fly" => Step::Fly,
                 "mark" => Step::Mark(rest.to_string()),
                 "look" => {
@@ -184,6 +188,10 @@ impl WalkScript {
                     t.command = Some(c);
                     return Some(t);
                 }
+                Step::Chat(c) => {
+                    t.chat = Some(c);
+                    return Some(t);
+                }
                 Step::Slot(n) => {
                     t.interact.hotbar = Some(n);
                     return Some(t);
@@ -288,11 +296,31 @@ impl Runner {
         let mut input = t.input;
         input.yaw -= dy;
         input.pitch -= dp;
-        let cmd = t.command.map(|command| {
-            haste_protocol::ServerboundPlay::ChatCommand(
-                haste_protocol::packets::play::serverbound::ChatCommand { command },
+        let chat = t.chat.map(|message| {
+            // The network driver signs it and fills the last-seen fields (`ClientChat::pack`).
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            haste_protocol::ServerboundPlay::Chat(
+                haste_protocol::packets::play::serverbound::Chat {
+                    message,
+                    timestamp: now.as_millis() as i64,
+                    salt: (now.as_nanos() as i64).wrapping_mul(0x9e37_79b9_7f4a_7c15u64 as i64),
+                    signature: None,
+                    message_count: 0,
+                    acknowledged: [0; 3],
+                    checksum: 0,
+                },
             )
         });
+        let cmd = t
+            .command
+            .map(|command| {
+                haste_protocol::ServerboundPlay::ChatCommand(
+                    haste_protocol::packets::play::serverbound::ChatCommand { command },
+                )
+            })
+            .or(chat);
         (input, cmd)
     }
 

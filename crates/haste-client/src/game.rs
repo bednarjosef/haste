@@ -38,7 +38,8 @@ use block_entity_ticks::{tick_model_anims, TickModelAnims, MODEL_RNG};
 
 /// The particle pool: filled from `level_particles` packets (the renderer's atlas-backed
 /// particle types, so unknown/mod types are skipped there), ticked at 20 Hz by the game
-/// thread. The render thread reads it per frame under this lock (no GPU state inside).
+/// thread, which then publishes [`Shared::particle_snapshots`] for the render thread (no
+/// GPU state inside).
 pub type SharedParticles = Mutex<haste_render::Particles>;
 
 /// How far the third-person camera sits from the eye when nothing is in the way (vanilla's
@@ -548,6 +549,10 @@ pub struct Shared {
     /// Particles (`level_particles`): the game thread spawns and ticks them, the render
     /// thread draws them.
     pub particles: SharedParticles,
+    /// The particles' per-tick render snapshot: written by the game thread's particle
+    /// tick (under the locks it already holds), taken by the render thread each frame
+    /// (an `Arc` copy; no world read lock, no particle mutex, no waiting on the tick).
+    pub particle_snapshots: haste_render::ParticleSnapshots,
     /// Input for the next tick.
     pub input: Mutex<SharedInput>,
     /// The sound and music output (None until the client sets it up; headless leaves it
@@ -589,6 +594,8 @@ pub struct Shared {
     /// new download joins them so a reload layers every server pack, not only
     /// the newest.
     pub applied_server_packs: Mutex<Vec<std::path::PathBuf>>,
+    /// The server resource pack confirm screen in play (vanilla's `PackConfirmScreen`).
+    pub pack_prompt: Mutex<crate::net::pack_prompt::PlayPrompt>,
     /// F3's tps line: packets sent per second (f64 bits), updated once per second by the game
     /// thread from the connection's counters.
     pub debug_tx: AtomicU64,
@@ -711,6 +718,7 @@ impl Shared {
             sign_text_metrics: std::sync::OnceLock::new(),
             biome_climates,
             particles: Mutex::new(particles),
+            particle_snapshots: haste_render::ParticleSnapshots::default(),
             weather_scratch: Mutex::new(haste_render::WeatherFrame::default()),
             input: Mutex::new(SharedInput::default()),
             sound: Mutex::new(None),
@@ -724,6 +732,7 @@ impl Shared {
             options_version: AtomicU64::new(1),
             resource_pack_reload: Mutex::new(None),
             applied_server_packs: Mutex::new(Vec::new()),
+            pack_prompt: Mutex::default(),
             debug_tx: AtomicU64::new(0),
             debug_rx: AtomicU64::new(0),
             chunks_loaded: AtomicU64::new(0),
@@ -1544,6 +1553,12 @@ fn tick_once(
         }
         driver.session.ambient_spawns = ambient;
         particles.tick();
+        // The render snapshot for the coming frames (vanilla's per-frame
+        // `ParticleEngine.extract` folded into the tick: light sampled at the tick
+        // position, see `build_snapshot`), published while the locks are still held —
+        // the render thread only ever takes an `Arc` copy.
+        let world = shared.world.read();
+        particles.publish_snapshot(&*world, &shared.particle_snapshots);
     }
     if let Some(ui) = shared.ui.lock().as_ref() {
         // The hotbar authority is the player (the client picks with 1-9 and the wheel and tells
@@ -1591,6 +1606,11 @@ fn tick_once(
         }
         ui.drain_outgoing(&mut ui_out);
     }
+    // A pushed pack waiting for the player (vanilla's `PackConfirmScreen` in play).
+    shared
+        .pack_prompt
+        .lock()
+        .tick(driver.connection(), shared.ui.lock().as_ref());
     for p in ui_out {
         driver.queue(p);
     }

@@ -133,6 +133,11 @@ pub(crate) fn register(env: &mut Env) -> Result<()> {
                 jni_str!("([Ljava/lang/String;)V"),
                 state::resource_packs_changed as *mut _,
             ),
+            NativeMethod::from_raw_parts(
+                jni_str!("packPromptAnswered"),
+                jni_str!("(Z)V"),
+                state::pack_prompt_answered as *mut _,
+            ),
         ]
     };
     // Safety: see above.
