@@ -12,7 +12,8 @@ use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum TexKey {
-    /// `textures/gui/sprites/<path>.png`.
+    /// A gui atlas sprite (`hud/hotbar`, `mob_effect/regeneration`, ...), wherever
+    /// the atlas definition's directory sources put its texture.
     Sprite(Identifier),
     /// A `GuiCommand::Texture` texture (full `textures/...png` path or short id).
     Texture(Identifier),

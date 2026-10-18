@@ -219,6 +219,233 @@ fn jar_mesh_flat_stone_section() {
     );
 }
 
+/// The face-box and union-coverage math of the cull rule
+/// (`mesher/culling.rs`, vanilla `Block.shouldRenderFace`'s shape comparison).
+mod culling_math {
+    use super::culling::{face_box, union_covers};
+    use haste_assets::Direction;
+
+    /// A quad on `direction`'s plane from (u0, v0) to (u1, v1) in its tangent
+    /// axes, in the winding order the bake produces (any order works: the
+    /// box test is order-independent).
+    fn quad(direction: Direction, u0: f32, v0: f32, u1: f32, v1: f32) -> [[f32; 3]; 4] {
+        let n = direction.offset().iter().position(|&c| c != 0).unwrap();
+        let (a, b) = match n {
+            0 => (1, 2),
+            1 => (0, 2),
+            _ => (0, 1),
+        };
+        let plane = if direction.offset()[n] > 0 { 1.0 } else { 0.0 };
+        let corners = [(u0, v0), (u1, v0), (u1, v1), (u0, v1)];
+        let mut p = [[0.0; 3]; 4];
+        for (i, (u, v)) in corners.iter().enumerate() {
+            p[i][n] = plane;
+            p[i][a] = *u;
+            p[i][b] = *v;
+        }
+        p
+    }
+
+    #[test]
+    fn flush_rectangle_quad_has_a_face_box() {
+        // A snow layer's west side: full width, a quarter of the height.
+        let q = quad(Direction::West, 0.0, 0.0, 1.0, 0.25);
+        assert_eq!(face_box(Direction::West, &q), Some([0.0, 0.0, 1.0, 0.25]));
+        // A full face.
+        let q = quad(Direction::Up, 0.0, 0.0, 1.0, 1.0);
+        assert_eq!(face_box(Direction::Up, &q), Some([0.0, 0.0, 1.0, 1.0]));
+    }
+
+    #[test]
+    fn off_plane_or_tilted_quad_has_no_face_box() {
+        // Off the plane: a slab's top face sits at half height, not on the
+        // cell boundary the cullface refers to.
+        let mut q = quad(Direction::Up, 0.0, 0.0, 1.0, 1.0);
+        for p in &mut q {
+            p[1] = 0.5;
+        }
+        assert_eq!(face_box(Direction::Up, &q), None);
+        // On the plane but tilted: the corners leave the extent rectangle.
+        let mut q = quad(Direction::West, 0.0, 0.0, 1.0, 0.25);
+        q[2][2] = 0.5; // pull one corner into the middle: no longer a rectangle
+        assert_eq!(face_box(Direction::West, &q), None);
+        // Degenerate: two corners at the same extent corner.
+        let q = quad(Direction::East, 0.25, 0.25, 0.25, 0.25);
+        assert_eq!(face_box(Direction::East, &q), None);
+    }
+
+    #[test]
+    fn identical_coverage_culls_like_vanilla_snow_layers() {
+        // Snow against snow: the neighbour's side coverage is the same strip,
+        // so the face's whole extent is covered (vanilla culls it).
+        let region = [0.0, 0.0, 1.0, 0.25];
+        let cover = [[0.0, 0.0, 1.0, 0.25]];
+        assert!(union_covers(&cover, region));
+        // Stone against snow: the full face sticks out above the strip.
+        let region = [0.0, 0.0, 1.0, 1.0];
+        assert!(!union_covers(&cover, region));
+        // No coverage at all (air): never culled.
+        assert!(!union_covers(&[], [0.0, 0.0, 1.0, 1.0]));
+    }
+
+    #[test]
+    fn union_coverage_handles_multiple_and_partial_boxes() {
+        let region = [0.0, 0.0, 1.0, 1.0];
+        // Two half-width strips cover a full-width face.
+        let cover = [[0.0, 0.0, 0.5, 1.0], [0.5, 0.0, 1.0, 1.0]];
+        assert!(union_covers(&cover, region));
+        // A gap between the boxes leaves the face visible.
+        let cover = [[0.0, 0.0, 0.4, 1.0], [0.6, 0.0, 1.0, 1.0]];
+        assert!(!union_covers(&cover, region));
+        // A 2x2 tiling of quarters covers the face.
+        let cover = [
+            [0.0, 0.0, 0.5, 0.5],
+            [0.5, 0.0, 1.0, 0.5],
+            [0.0, 0.5, 0.5, 1.0],
+            [0.5, 0.5, 1.0, 1.0],
+        ];
+        assert!(union_covers(&cover, region));
+        // ... but with one quarter missing the face shows through.
+        let cover = [
+            [0.0, 0.0, 0.5, 0.5],
+            [0.5, 0.0, 1.0, 0.5],
+            [0.0, 0.5, 0.5, 1.0],
+        ];
+        assert!(!union_covers(&cover, region));
+        // Coverage larger than the face covers a smaller face.
+        assert!(union_covers(&[[0.0, 0.0, 1.0, 1.0]], [0.0, 0.0, 1.0, 0.25]));
+    }
+}
+
+/// Faces between partial blocks that cover each other exactly (snow layers
+/// against snow layers, vanilla `Block.shouldRenderFace`'s shape comparison)
+/// must be culled: the mesh of the tests/snow_seams.rs platform (without its
+/// snow half) must have no quads on interior block boundaries — only the
+/// field's outer sides remain.
+#[test]
+#[ignore = "needs the client jar and datagen reports in the cache"]
+fn platform_interior_boundary_quads_culled() {
+    let Some((states, baked, atlas)) = load_baked() else {
+        return;
+    };
+    let find = |path: &str, prop: &str, value: &str| {
+        use haste_core::view::BlockStateTable as _;
+        (0..states.len() as u32)
+            .map(BlockStateId)
+            .find(|s| {
+                states.block_of(*s).path() == path && states.property_value(*s, prop) == Some(value)
+            })
+            .unwrap_or_else(|| panic!("{path}[{prop}={value}] in blocks.json"))
+    };
+    // Dirt at y=0, snowy grass (west) and plain grass (east) at y=1, snow
+    // layers on the west half at y=2: the user-bug platform.
+    struct Patch {
+        snowy_grass: BlockStateId,
+        grass: BlockStateId,
+        dirt: BlockStateId,
+        snow: BlockStateId,
+    }
+    impl haste_core::view::BlockView for Patch {
+        fn block_state(&self, p: BlockPos) -> BlockStateId {
+            let in_area = (0..10).contains(&p.x) && (0..10).contains(&p.z);
+            match p.y {
+                0 if in_area => self.dirt,
+                1 if in_area => {
+                    if p.x < 7 {
+                        self.snowy_grass
+                    } else {
+                        self.grass
+                    }
+                }
+                2 if in_area && p.x < 5 => self.snow,
+                _ => BlockStateId::AIR,
+            }
+        }
+        fn is_chunk_loaded(&self, _: haste_core::ChunkPos) -> bool {
+            true
+        }
+        fn sky_light(&self, p: BlockPos) -> u8 {
+            if p.y <= 0 {
+                0
+            } else {
+                15
+            }
+        }
+        fn block_light(&self, _: BlockPos) -> u8 {
+            0
+        }
+        fn min_y(&self) -> i32 {
+            -64
+        }
+        fn height(&self) -> i32 {
+            384
+        }
+    }
+    let world = Patch {
+        snowy_grass: find("grass_block", "snowy", "true"),
+        grass: find("grass_block", "snowy", "false"),
+        dirt: BlockStateId(1),
+        snow: find("snow", "layers", "2"),
+    };
+    let pos = SectionPos::new(0, 0, 0);
+    let snapshot = MeshSnapshot::capture(&world, pos);
+    let mesh = mesh_section(&snapshot, &baked, &atlas, pos);
+
+    // Decode a vertex's section-local position back to floats.
+    let local = |v: &PackedVertex| {
+        [
+            v.pos[0] as f32 / 65535.0 * 24.0 - 4.0,
+            v.pos[1] as f32 / 65535.0 * 24.0 - 4.0,
+            v.pos[2] as f32 / 65535.0 * 24.0 - 4.0,
+        ]
+    };
+    let mut interior = 0usize;
+    for (_layer, idx) in &mesh.layers {
+        for quad in idx.chunks(6) {
+            let vs: Vec<_> = quad.iter().map(|i| &mesh.vertices[*i as usize]).collect();
+            let ps: Vec<[f32; 3]> = vs.iter().map(|v| local(v)).collect();
+            let min = ps.iter().fold([f32::MAX; 3], |mut a, p| {
+                for i in 0..3 {
+                    a[i] = a[i].min(p[i]);
+                }
+                a
+            });
+            let max = ps.iter().fold([f32::MIN; 3], |mut a, p| {
+                for i in 0..3 {
+                    a[i] = a[i].max(p[i]);
+                }
+                a
+            });
+            let near_int = |t: f32| (t - t.round()).abs() < 0.01;
+            // Interior for the level the quad is at: the grass/dirt platform
+            // spans x/z 0..10, the snow half only x 0..5 (its east edge at x=5
+            // is a real exposed face, like the field's outer sides).
+            let snow_level = min[1] > 1.9;
+            let (x_hi, z_hi) = if snow_level {
+                (5.0, 10.0)
+            } else {
+                (10.0, 10.0)
+            };
+            let interior_plane = (min[0] > 0.01
+                && min[0] < x_hi - 0.01
+                && min[0] == max[0]
+                && near_int(min[0]))
+                || (min[2] > 0.01 && min[2] < z_hi - 0.01 && min[2] == max[2] && near_int(min[2]));
+            if interior_plane {
+                eprintln!(
+                    "boundary quad x {}..{} y {}..{} z {}..{}",
+                    min[0], max[0], min[1], max[1], min[2], max[2]
+                );
+                interior += 1;
+            }
+        }
+    }
+    assert_eq!(
+        interior, 0,
+        "faces on interior boundaries must be culled (vanilla shouldRenderFace)"
+    );
+}
+
 /// The client jar's baked models and atlas (None without the cache: the caller
 /// returns, so the test is skipped rather than failed).
 fn load_baked() -> Option<(

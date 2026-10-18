@@ -174,8 +174,21 @@ fn shade(in: VertexOut, alpha_cutoff: f32) -> vec4<f32> {
 
     // Wrap the sprite-local UV inside the sprite rectangle (Pomme
     // atlas_sprite.glsl): fract for repeats, then map into the atlas.
+    // The derivatives for mip selection and the texel snap come from the
+    // continuous sprite-local UV, not from the wrapped one: fract() makes the
+    // mapped UV jump a whole sprite at every repeat boundary (a greedy-merged
+    // quad repeats the sprite per block), and a derivative taken across that
+    // jump clamps textureSampleGrad to the atlas's coarsest mip — the
+    // atlas-average grey, drawn as a thin dashed line on every block edge
+    // (the user bug this fixes; vanilla never merges, so it has no wraps).
     let uv = (origin + fract(in.sprite_uv) * sprite_size) / atlas_size;
-    let color = sample_nearest(uv, 1.0 / atlas_size);
+    let atlas_scale = sprite_size / atlas_size;
+    let color = sample_nearest(
+        uv,
+        1.0 / atlas_size,
+        dpdx(in.sprite_uv) * atlas_scale,
+        dpdy(in.sprite_uv) * atlas_scale,
+    );
     // Vanilla's SOLID_TERRAIN defines no ALPHA_CUTOUT (RenderPipelines.SOLID_TERRAIN):
     // solid terrain never discards, so the GPU keeps early-Z for the whole pass.
     if (alpha_cutoff > 0.0 && color.a < alpha_cutoff) {
@@ -207,10 +220,9 @@ fn srgb_encode(c: vec3<f32>) -> vec3<f32> {
 // Vanilla texture_sampling.glsl `sampleNearest` (UseRgss == 0, the default): snap
 // the UV toward the containing texel's centre by how much of the texel one screen
 // pixel covers, then sample with explicit screen derivatives (the atlas sampler is
-// LINEAR/LINEAR trilinear; the snap keeps near terrain crisp).
-fn sample_nearest(uv: vec2<f32>, pixel_size: vec2<f32>) -> vec4<f32> {
-    let du = dpdx(uv);
-    let dv = dpdy(uv);
+// LINEAR/LINEAR trilinear; the snap keeps near terrain crisp). The derivatives are
+// passed in by the caller: they must be continuous (see `shade`).
+fn sample_nearest(uv: vec2<f32>, pixel_size: vec2<f32>, du: vec2<f32>, dv: vec2<f32>) -> vec4<f32> {
     let texel_screen_size = sqrt(du * du + dv * dv);
     let uv_texel_coords = uv / pixel_size;
     let texel_center = round(uv_texel_coords) - vec2<f32>(0.5);

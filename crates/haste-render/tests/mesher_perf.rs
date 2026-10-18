@@ -383,7 +383,10 @@ fn mesher_output_stable() {
     // permeability test moved to the one-out cells (vanilla's side + normal)
     // and the zero-light fallback was gated off: the vertices next to
     // occluders change. Quad count, vertices and sprites are unchanged.
-    let expected: u64 = 16_624_786_452_542_720_925;
+    // Then the face-coverage cull (vanilla `Block.shouldRenderFace`'s shape
+    // comparison, mesher/culling.rs) removed the interior faces between
+    // partial blocks that cover each other (snow layers, slabs): fewer quads.
+    let expected: u64 = 3_174_783_879_967_708_120;
     assert_eq!(hash.finish(), expected, "mesher output changed");
     assert!(quads > 100_000, "suspiciously few quads: {quads}");
     eprintln!("{quads} quads, hash {:016x}", hash.finish());

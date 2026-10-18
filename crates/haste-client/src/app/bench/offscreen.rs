@@ -75,6 +75,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             spin: None,
             weather,
         };
+        renderer.set_camera_spectator(view.spectator);
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
         renderer.set_game_time(view.world_age);
@@ -245,6 +246,7 @@ pub fn bench(args: &Args, seconds: u64) -> anyhow::Result<()> {
             spin: None,
             weather,
         };
+        renderer.set_camera_spectator(view.spectator);
         renderer.sample_world(&*shared.world.read(), &shared.data.shapes, &frame);
         renderer.set_animation_tick(animation_tick);
         renderer.set_game_time(view.world_age);

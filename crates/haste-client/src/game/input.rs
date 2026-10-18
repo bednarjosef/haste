@@ -10,6 +10,15 @@ pub(super) fn sample(driver: &mut NetDriver, shared: &Shared) -> SharedInput {
     if std::mem::take(&mut shared_input.toggle_flight) {
         driver.session.player.toggle_flight();
     }
+    // The wheel notches a spectator scrolled since the last tick (`MouseHandler.onScroll`'s
+    // spectator branch: the flying speed).
+    let spectator_scroll = std::mem::take(&mut shared_input.spectator_scroll);
+    if spectator_scroll != 0.0 {
+        driver
+            .session
+            .player
+            .spectator_scroll_fly_speed(spectator_scroll);
+    }
     // A screen being open is vanilla's `handleKeybinds` gate (`Minecraft.tick` runs the key
     // bindings only when `gui.screen() == null`): no attack or use happens while a screen
     // holds the input, and clicks queued for this tick are dropped, not saved (the release
@@ -71,6 +80,7 @@ pub(super) fn sample(driver: &mut NetDriver, shared: &Shared) -> SharedInput {
     }
     SharedInput {
         toggle_flight: shared_input.toggle_flight,
+        spectator_scroll: shared_input.spectator_scroll,
         interact: shared_input.interact,
         perspective: shared_input.perspective,
         state: shared_input.state,
