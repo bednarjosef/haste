@@ -40,11 +40,28 @@ fn section_state(world: &World, pos: SectionPos) -> SectionLoadState {
 
 /// Vanilla `SectionUpdateTracker.hasAllNeighbors`: the eight horizontal neighbour
 /// chunks of the section are loaded (vanilla also requires their light, which Haste
-/// applies with the chunk).
-fn has_all_neighbours(world: &World, pos: SectionPos) -> bool {
+/// applies with the chunk). A chunk outside the server's reach around the camera never
+/// loads, so it does not count as missing — otherwise the outermost ring of the view
+/// would never have its first build and settle would never finish.
+fn has_all_neighbours(
+    world: &World,
+    pos: SectionPos,
+    camera: SectionPos,
+    server_reach: i32,
+) -> bool {
     (-1..=1).all(|dx| {
         (-1..=1).all(|dz| {
-            dx == 0 && dz == 0 || world.chunk(ChunkPos::new(pos.x + dx, pos.z + dz)).is_some()
+            let (nx, nz) = (pos.x + dx, pos.z + dz);
+            (dx == 0 && dz == 0)
+                || world.chunk(ChunkPos::new(nx, nz)).is_some()
+                // Vanilla's chunk-send shape (ChunkTrackingView.isWithinDistance without
+                // neighbours): a chunk outside the rounded square never loads, so it does
+                // not count as missing.
+                || {
+                    let ex = ((nx - camera.x).abs() - 1).max(0) as i64;
+                    let ez = ((nz - camera.z).abs() - 1).max(0) as i64;
+                    ex * ex + ez * ez >= server_reach as i64 * server_reach as i64
+                }
         })
     })
 }
@@ -67,6 +84,8 @@ pub struct WorldFeed {
     waiting: Vec<SectionPos>,
     /// The visible-set version `waiting` was last checked against.
     last_want_version: u64,
+    /// Chunks whose columns the renderer's empty-section map has been told about.
+    noted_columns: HashSet<ChunkPos>,
     sort_needed: bool,
     pub(crate) last_arrival: Option<Instant>,
     /// Entity instances for this frame (reused).
@@ -186,6 +205,26 @@ impl WorldFeed {
                     break;
                 };
                 scanned += 1;
+                // First encounter of a loaded chunk: classify its whole column. Empty
+                // sections never ride the dirty stream (the world skips them, like
+                // vanilla's chunk cache drops `hasOnlyAir` sections), so without this
+                // their see-through bits would never reach the occlusion walk.
+                if !self.noted_columns.contains(&pos.chunk()) {
+                    if let Some(chunk) = world.chunk(pos.chunk()) {
+                        self.noted_columns.insert(pos.chunk());
+                        for (i, section) in chunk.sections.iter().enumerate() {
+                            let p = SectionPos::new(pos.x, chunk.min_section + i as i32, pos.z);
+                            renderer.note_section_state(
+                                p,
+                                if section.is_empty() {
+                                    SectionLoadState::Empty
+                                } else {
+                                    SectionLoadState::NonEmpty
+                                },
+                            );
+                        }
+                    }
+                }
                 let state = section_state(&world, pos);
                 renderer.note_section_state(pos, state);
                 let was_meshed = self.meshed.contains(&pos);
@@ -197,6 +236,8 @@ impl WorldFeed {
                         self.queue.pop();
                         self.queued.remove(&pos);
                         self.meshed.remove(&pos);
+                        // A reloaded chunk classifies its column again.
+                        self.noted_columns.remove(&pos.chunk());
                         if was_meshed {
                             batch.push(pos);
                         }
@@ -215,7 +256,7 @@ impl WorldFeed {
                         // `waiting` — and mesh when they become visible.
                         let first_build = !was_meshed
                             && state == SectionLoadState::NonEmpty
-                            && !has_all_neighbours(&world, pos);
+                            && !has_all_neighbours(&world, pos, camera, view_distance);
                         if first_build || !renderer.wants_section(pos) {
                             self.queue.pop();
                             self.waiting.push(pos);
