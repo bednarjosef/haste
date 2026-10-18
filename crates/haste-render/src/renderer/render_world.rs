@@ -832,7 +832,7 @@ impl Renderer {
             frame_ms: started.elapsed().as_secs_f32() * 1000.0,
             chunk_sections_drawn: drawn,
             chunk_sections_total: sections_total,
-            meshes_pending: self.mesher.pending_len() as u32,
+            meshes_pending: self.meshes_pending() as u32,
             uploads: self.last_uploads.0,
             upload_bytes: self.last_uploads.1,
             indices_drawn,

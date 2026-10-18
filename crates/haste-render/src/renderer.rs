@@ -258,6 +258,9 @@ pub struct Renderer {
     mesher: Mesher,
     /// Reused buffer for meshes drained from the mesher each frame.
     drain_buf: Vec<SectionMesh>,
+    /// Dirty sections held back by mesh back-pressure (see `update_world_from`):
+    /// submitted first on the next call.
+    mesh_carry: Vec<SectionPos>,
     /// Grass/foliage colormaps from the assets (biome colours are resolved against them).
     colormaps: crate::tint::Colormaps,
     sections: crate::section_slab::SectionSlab,
