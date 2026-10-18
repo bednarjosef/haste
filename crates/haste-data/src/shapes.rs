@@ -11,7 +11,9 @@ use crate::blocks::BlockStates;
 
 /// Per-state shape entry (empty = no collision). `light`/`air`/`opaque`/`fluid` come from the
 /// oracle dump's per-state fields (or fallback heuristics) and back `BlockPhysics` on `GameData`.
-/// `ao_solid` is vanilla `getShadeBrightness <= 0.2` (see `is_ao_solid`).
+/// `ao_solid` is vanilla `getShadeBrightness <= 0.2` (see `is_ao_solid`). `render_shape_invisible`
+/// is `RenderShape.INVISIBLE` (no model) and `suffocating` is `BlockState.isSuffocating` with an
+/// empty level (see the two query methods below).
 #[derive(Default, Clone)]
 struct StateShapes {
     collision: Vec<Aabb>,
@@ -21,6 +23,8 @@ struct StateShapes {
     opaque: bool,
     fluid: Option<FluidInfo>,
     ao_solid: bool,
+    render_shape_invisible: bool,
+    suffocating: bool,
 }
 
 pub struct BlockShapes {
@@ -74,6 +78,14 @@ impl BlockShapes {
             /// (their fluid is a full source).
             #[serde(default)]
             properties: std::collections::HashMap<String, String>,
+            /// "invisible" | "model" (vanilla `RenderShape`, which has only those two constants
+            /// in 26.3). Absent in pre-regeneration dumps: treated as "model".
+            #[serde(default)]
+            render_shape: Option<String>,
+            /// Vanilla `BlockState.isSuffocating` with an empty level. Absent in
+            /// pre-regeneration dumps: falls back to the full-collision-cube rule below.
+            #[serde(default)]
+            suffocating: Option<bool>,
         }
         let file: OracleFile =
             serde_json::from_str(json).map_err(|e| anyhow::anyhow!("block_shapes.json: {e}"))?;
@@ -100,8 +112,17 @@ impl BlockShapes {
             };
             let collision = conv(&s.collision);
             let outline = conv(&s.outline);
+            // Pre-regeneration dumps have no suffocating field: fall back to today's best rule,
+            // the full-collision-cube half of vanilla's default predicate (the `causes_suffocation`
+            // tag half is only known to haste-client through the server-synced tags, see
+            // crates/haste-client/src/screen_effects/in_block.rs; glass diverges here).
+            let suffocating = s
+                .suffocating
+                .unwrap_or_else(|| is_collision_full_block(&collision));
             shapes[idx] = StateShapes {
                 ao_solid: ao_solid_for(blocks.block_of(BlockStateId(s.id)).path(), &collision),
+                render_shape_invisible: s.render_shape.as_deref() == Some("invisible"),
+                suffocating,
                 collision,
                 outline,
                 light: s.light,
@@ -178,6 +199,26 @@ impl BlockShapes {
     pub(crate) fn fluid(&self, state: BlockStateId) -> Option<FluidInfo> {
         self.shapes[self.row(state)].fluid
     }
+
+    /// Whether the state renders no block model (vanilla `RenderShape.INVISIBLE`: air, the
+    /// liquid and bubble-column family, barrier, light, structure void, end portal/gateway,
+    /// moving piston). Consumers skip such blocks where vanilla does, e.g.
+    /// `EntityRenderer.extractShadowPiece` when drawing entity shadows. Ids outside the table
+    /// are `false` (not invisible): unlike the shape lookups above they do not resolve to the
+    /// placeholder, so an unknown modded state keeps today's behaviour.
+    pub fn render_shape_invisible(&self, state: BlockStateId) -> bool {
+        let id = state.0 as usize;
+        id < self.shapes.len() && self.shapes[id].render_shape_invisible
+    }
+
+    /// Whether an entity inside this state suffocates (vanilla `BlockState.isSuffocating`,
+    /// evaluated with an empty level in the oracle dump; the path `LocalPlayer.suffocatesAt` ->
+    /// `Level.collidesWithSuffocatingBlock` uses it to push the camera out of blocks). Ids
+    /// outside the table are `false` (no push-out), never a panic.
+    pub fn is_suffocating(&self, state: BlockStateId) -> bool {
+        let id = state.0 as usize;
+        id < self.shapes.len() && self.shapes[id].suffocating
+    }
 }
 
 /// Vanilla fluid surface height from the `level` property: level 0 (source) = 8/9,
@@ -242,6 +283,9 @@ fn fallback_shapes(blocks: &BlockStates, state: BlockStateId) -> StateShapes {
     let mut shapes = fallback_shapes_inner(blocks, state);
     let path = blocks.block_of(state).path();
     shapes.ao_solid = ao_solid_for(path, &shapes.collision);
+    // No tag data in haste-data: the shape half of vanilla's default suffocation predicate
+    // (see parse_oracle for the tag caveat). Air and fluids never render a model in vanilla.
+    shapes.suffocating = is_collision_full_block(&shapes.collision);
     shapes
 }
 
@@ -254,6 +298,7 @@ fn fallback_shapes_inner(blocks: &BlockStates, state: BlockStateId) -> StateShap
     if matches!(path, "air" | "cave_air" | "void_air") {
         return StateShapes {
             air: true,
+            render_shape_invisible: true,
             ..Default::default()
         };
     }
@@ -266,6 +311,7 @@ fn fallback_shapes_inner(blocks: &BlockStates, state: BlockStateId) -> StateShap
         let height = fluid_height(prop("level"));
         return StateShapes {
             fluid: Some(FluidInfo { kind, height }),
+            render_shape_invisible: true,
             ..Default::default()
         };
     }
@@ -525,5 +571,124 @@ mod tests {
         // Snow: 0.2 only at layers = 8 (the full-cube state).
         assert!(!s.is_ao_solid(BlockStateId(6)), "thin snow stays bright");
         assert!(s.is_ao_solid(BlockStateId(7)), "full snow darkens");
+    }
+
+    /// render_shape/suffocating from the oracle dump's per-state fields (the recorder mod's
+    /// `stateJson`): vanilla `getRenderShape()` and `isSuffocating(EmptyBlockGetter, origin)`.
+    /// Unknown ids answer false for both (no shadow skip, no camera push-out), unlike the shape
+    /// lookups, which resolve to the placeholder.
+    #[test]
+    fn render_shape_and_suffocation_flags_from_the_oracle() {
+        // 0 air, 1 stone, 2 glass, 3 barrier, 4 bottom slab.
+        let blocks_json = r#"{
+          "minecraft:air": { "states": [ { "id": 0, "default": true } ] },
+          "minecraft:stone": { "states": [ { "id": 1, "default": true } ] },
+          "minecraft:glass": { "states": [ { "id": 2, "default": true } ] },
+          "minecraft:barrier": { "states": [ { "id": 3, "default": true } ] },
+          "minecraft:stone_slab": { "states": [ { "id": 4, "default": true } ] }
+        }"#;
+        let blocks = BlockStates::parse(blocks_json, None).unwrap();
+        let oracle = r#"{
+          "version": 1,
+          "states": [
+            { "id": 0, "air": true, "render_shape": "invisible", "suffocating": false },
+            { "id": 1, "collision": [[0,0,0,1,1,1]], "render_shape": "model", "suffocating": true },
+            { "id": 2, "collision": [[0,0,0,1,1,1]], "render_shape": "model", "suffocating": false },
+            { "id": 3, "render_shape": "invisible", "suffocating": false },
+            { "id": 4, "collision": [[0,0,0,1,0.5,1]], "render_shape": "model", "suffocating": false }
+          ]
+        }"#;
+        let s = BlockShapes::parse_oracle(oracle, &blocks).unwrap();
+        assert!(
+            !s.render_shape_invisible(BlockStateId(1)),
+            "stone is a model"
+        );
+        assert!(
+            s.render_shape_invisible(BlockStateId(0)),
+            "air is invisible"
+        );
+        assert!(
+            s.render_shape_invisible(BlockStateId(3)),
+            "barrier is invisible"
+        );
+        assert!(
+            !s.render_shape_invisible(BlockStateId(2)),
+            "glass is a model"
+        );
+        assert!(s.is_suffocating(BlockStateId(1)), "stone suffocates");
+        assert!(
+            !s.is_suffocating(BlockStateId(2)),
+            "glass does not suffocate"
+        );
+        assert!(
+            !s.is_suffocating(BlockStateId(4)),
+            "half slab does not suffocate"
+        );
+        assert!(!s.is_suffocating(BlockStateId(0)), "air does not suffocate");
+        // Unknown ids: false for both, no panic.
+        for id in [5u32, 100, u32::MAX] {
+            assert!(!s.render_shape_invisible(BlockStateId(id)));
+            assert!(!s.is_suffocating(BlockStateId(id)));
+        }
+    }
+
+    /// Dumps from before the render_shape/suffocating regeneration: render_shape defaults to
+    /// "model" everywhere; suffocating falls back to the full-collision-cube rule (the shape
+    /// half of vanilla's default predicate — glass diverges until the dump is regenerated).
+    #[test]
+    fn old_dumps_default_to_model_and_the_full_cube_rule() {
+        // 0 air, 1 stone, 2 glass, 3 bottom slab.
+        let blocks_json = r#"{
+          "minecraft:air": { "states": [ { "id": 0, "default": true } ] },
+          "minecraft:stone": { "states": [ { "id": 1, "default": true } ] },
+          "minecraft:glass": { "states": [ { "id": 2, "default": true } ] },
+          "minecraft:stone_slab": { "states": [ { "id": 3, "default": true } ] }
+        }"#;
+        let blocks = BlockStates::parse(blocks_json, None).unwrap();
+        let oracle = r#"{
+          "version": 1,
+          "states": [
+            { "id": 1, "collision": [[0,0,0,1,1,1]] },
+            { "id": 2, "collision": [[0,0,0,1,1,1]] },
+            { "id": 3, "collision": [[0,0,0,1,0.5,1]] }
+          ]
+        }"#;
+        let s = BlockShapes::parse_oracle(oracle, &blocks).unwrap();
+        assert!(
+            !s.render_shape_invisible(BlockStateId(1)),
+            "stone stays a model"
+        );
+        assert!(s.is_suffocating(BlockStateId(1)), "full cube suffocates");
+        assert!(
+            s.is_suffocating(BlockStateId(2)),
+            "full-cube fallback (glass diverges)"
+        );
+        assert!(!s.is_suffocating(BlockStateId(3)), "half cube does not");
+    }
+
+    /// Fallback table (no oracle dump): air and fluids render no model (vanilla
+    /// `AirBlock`/`LiquidBlock` are RenderShape.INVISIBLE); suffocation uses the full-cube rule.
+    #[test]
+    fn fallback_render_shape_and_suffocation() {
+        let s = fallback_shapes();
+        let stone = BlockStateId(1);
+        assert!(!s.render_shape_invisible(stone), "stone is a model");
+        assert!(s.is_suffocating(stone), "stone suffocates (full cube)");
+        for id in [2u32, 100, u32::MAX] {
+            assert!(!s.render_shape_invisible(BlockStateId(id)));
+            assert!(!s.is_suffocating(BlockStateId(id)));
+        }
+        // Air and fluids: no model (the fallback knows their paths directly).
+        let blocks_json = r#"{
+          "minecraft:air": { "states": [ { "id": 0, "default": true } ] },
+          "minecraft:water": { "states": [ { "id": 1, "default": true } ] },
+          "minecraft:lava": { "states": [ { "id": 2, "default": true } ] }
+        }"#;
+        let blocks = BlockStates::parse(blocks_json, None).unwrap();
+        let f = BlockShapes::fallback(&blocks);
+        for id in [0u32, 1, 2] {
+            assert!(f.render_shape_invisible(BlockStateId(id)), "air/fluid {id}");
+            assert!(!f.is_suffocating(BlockStateId(id)), "no collision");
+        }
     }
 }
