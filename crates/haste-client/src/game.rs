@@ -38,7 +38,8 @@ use block_entity_ticks::{tick_model_anims, TickModelAnims, MODEL_RNG};
 
 /// The particle pool: filled from `level_particles` packets (the renderer's atlas-backed
 /// particle types, so unknown/mod types are skipped there), ticked at 20 Hz by the game
-/// thread. The render thread reads it per frame under this lock (no GPU state inside).
+/// thread, which then publishes [`Shared::particle_snapshots`] for the render thread (no
+/// GPU state inside).
 pub type SharedParticles = Mutex<haste_render::Particles>;
 
 /// How far the third-person camera sits from the eye when nothing is in the way (vanilla's

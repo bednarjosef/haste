@@ -1,9 +1,11 @@
 //! Server-sent particles (`level_particles`) and the client-spawned terrain particles,
 //! ported from vanilla 26.3's particle classes (`net.minecraft.client.particle`): a
-//! fixed-capacity pool simulated at 20 Hz on the game thread ([`Particles`]), drawn as
-//! camera-facing quads textured from the particle atlas in one batched draw inside the
-//! main pass ([`ParticleRenderer`], reusing the entity shader: sprite rects by
-//! textureLoad, vertex light colour, fog).
+//! fixed-capacity pool simulated at 20 Hz on the game thread ([`Particles`]), which
+//! publishes a render snapshot each tick ([`ParticleSnapshots`]) that the render thread
+//! draws as camera-facing quads textured from the particle atlas in one batched draw
+//! inside the main pass ([`ParticleRenderer`], reusing the entity shader: sprite rects
+//! by textureLoad, vertex light colour, fog) — interpolated by partial tick and culled
+//! per particle like vanilla's `QuadParticleGroup.extractRenderState`, without a lock.
 //!
 //! Per-type behaviour lives in the [`ParticleBehaviour`] table: gravity, friction, lifetime,
 //! quad size and its growth over the particle's life, colour, alpha and spawn-time motion.

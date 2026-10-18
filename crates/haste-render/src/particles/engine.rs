@@ -47,8 +47,9 @@ pub(super) struct BlockSpriteUv {
 }
 
 /// The particle pool (game state, no GPU): the game thread spawns into it from
-/// `level_particles` and ticks it at 20 Hz; the render thread reads it each frame (short
-/// lock). Fixed capacity, no allocation per particle or per frame after the pool warms up.
+/// `level_particles` and ticks it at 20 Hz, then publishes the render snapshot the
+/// render thread draws (see [`super::ParticleSnapshots`]). Fixed capacity, no
+/// allocation per particle after the pool warms up.
 pub struct Particles {
     pub(super) types: Option<Arc<ParticleTypes>>,
     /// Alive particles; expiry swaps the last in, so this stays compact.
