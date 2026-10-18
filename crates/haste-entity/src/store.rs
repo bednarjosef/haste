@@ -929,6 +929,7 @@ impl EntityStore {
                 &slot.metadata,
                 &self.painting_variants,
                 slot.id.0,
+                slot.tick_count as f32 + partial_tick,
             );
             let pos = if decoration.is_some() {
                 crate::decoration::render_center(

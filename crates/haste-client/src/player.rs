@@ -268,6 +268,10 @@ pub struct LocalPlayer {
     toggle_flight: bool,
     /// The local player's own block sounds (client-side rules, sound.rs).
     pub(crate) own_sounds: crate::sound::OwnBlockSounds,
+    /// The local player's footsteps (client-side rules, sound/steps.rs).
+    steps: crate::sound::StepSounds,
+    /// The local player's own fall sounds (client-side rules, sound/falls.rs).
+    fall_sounds: crate::sound::FallSounds,
     /// Own-sound requests this tick, drained into `Session::sound_requests` by `end_tick`.
     pub(crate) sound_out: Vec<crate::sound::SoundRequest>,
     /// Own block particles this tick (our break prediction's destroy grid, the
@@ -337,6 +341,8 @@ impl LocalPlayer {
             attributes_dirty: false,
             toggle_flight: false,
             own_sounds: crate::sound::OwnBlockSounds::new(),
+            steps: crate::sound::StepSounds::new(),
+            fall_sounds: crate::sound::FallSounds::new(),
             sound_out: Vec::new(),
             block_particles_out: Vec::new(),
             jump_trigger_time: 0,
@@ -609,7 +615,7 @@ impl LocalPlayer {
             pick(teleport_flags::VEL_Z, v.z, p.velocity.z),
         );
         s.fall_distance = 0.0;
-        self.own_sounds.reset_steps();
+        self.steps.reset();
         self.set_look(yaw, pitch);
         tracing::debug!("after teleport {:?}", self.state);
         self.prev_pos = self.state.pos;
@@ -971,6 +977,9 @@ impl LocalPlayer {
         let was_on_ground = self.state.on_ground;
         let pre_tick_pos = self.state.pos;
         let pre_tick_fall = self.state.fall_distance;
+        // The velocity this tick's move starts with (vanilla's `getDeltaMovement` at
+        // `Entity.move`): the step rule's swim-sound volume reads it.
+        let pre_tick_velocity = self.state.velocity;
         // Vanilla's double tap: while the window is armed a fresh press of jump (or the input
         // layer's own double-tap signal) toggles flight; without it a press arms the window for
         // 7 ticks. Vanilla keeps the window while the player swims, and skips the toggle on a
@@ -1018,7 +1027,7 @@ impl LocalPlayer {
             }));
         }
         if self.state.flying != was_flying {
-            self.own_sounds.reset_steps();
+            self.steps.reset();
         }
         let chunk = BlockPos::from_dvec3(self.state.pos).chunk();
         if ctx.world.is_chunk_loaded(chunk) {
@@ -1037,25 +1046,64 @@ impl LocalPlayer {
                 ctx.blocks,
                 &climb,
             );
-            // Own block sounds of moving: the step rule on the block below the
-            // feet, the fall sound on a hard landing (vanilla plays both on
-            // the client; the server excludes the acting player).
+            // Own block sounds of moving: footsteps from vanilla's step rule, the
+            // fall sound on a hard landing (the server excludes the acting player
+            // from its broadcasts, so the client plays both itself).
             let movement = self.state.pos - pre_tick_pos;
             let sound_type = ctx.env.and_then(|e| {
                 supporting_block_state(self.state.pos, ctx.world)
                     .and_then(|s| e.data.block_sound_type(s))
             });
-            self.own_sounds
-                .after_move(movement, self.state.pos, sound_type, &mut self.sound_out);
-            if !was_on_ground
-                && self.state.on_ground
-                && pre_tick_fall > SAFE_FALL_DISTANCE
-                && !self.state.in_water
-                && !self.state.flying
-            {
-                if let Some(t) = sound_type {
-                    self.own_sounds
-                        .landed_hard(self.state.pos, t, &mut self.sound_out);
+            if let Some(e) = ctx.env {
+                let (supporting, effect, primary) = crate::sound::resolve_step_blocks(
+                    self.state.pos,
+                    &self.state.aabb(&self.attrs),
+                    self.state.on_ground,
+                    ctx.world,
+                    ctx.shapes,
+                    e.data,
+                    self.int.block_tags(),
+                );
+                let steps = crate::sound::StepCtx {
+                    player_pos: self.state.pos,
+                    movement,
+                    velocity: pre_tick_velocity,
+                    on_ground: self.state.on_ground,
+                    flying: self.state.flying,
+                    discrete: self.state.sneaking,
+                    crouching: self.state.crouching,
+                    swimming: self.state.swimming,
+                    in_water: self.state.in_water,
+                    supporting,
+                    effect,
+                    primary,
+                };
+                self.steps.after_move(&steps, &mut self.sound_out);
+            }
+            if !was_on_ground && self.state.on_ground {
+                // Vanilla `Entity.checkFallDamage` runs inside the move that grounds the
+                // player with the fall distance including this tick's final fall (our
+                // physics resets it on grounding, so it is added back here).
+                let fall = pre_tick_fall as f64 - movement.y.min(0.0);
+                let landed_on = supporting_block_state(self.state.pos, ctx.world).zip(sound_type);
+                let rule = ctx.env.and_then(|e| {
+                    landed_on.map(|(state, _)| {
+                        crate::sound::FallBlockRule::of(
+                            state,
+                            self.int.block_tags(),
+                            Some(&e.data.blocks),
+                        )
+                    })
+                });
+                if let (Some((_, t)), Some(rule)) = (landed_on, rule) {
+                    self.fall_sounds.landed(
+                        self.state.pos,
+                        fall,
+                        self.abilities.may_fly,
+                        Some(crate::sound::LandedOn { sound: t }),
+                        rule,
+                        &mut self.sound_out,
+                    );
                 }
             }
         } else {
@@ -1221,10 +1269,6 @@ impl LocalPlayer {
         self.sent.horizontal_collision = s.horizontal_collision;
     }
 }
-
-/// Vanilla's safe fall distance (the `SAFE_FALL_DISTANCE` attribute's default):
-/// a landing from above this plays the block's fall sound; below it, nothing.
-pub const SAFE_FALL_DISTANCE: f32 = 3.0;
 
 /// The block supporting the player at `pos` (vanilla `Entity.getOnPosLegacy`:
 /// the block at feet y minus 0.2), for step and fall sounds.

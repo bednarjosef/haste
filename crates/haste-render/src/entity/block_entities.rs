@@ -309,13 +309,20 @@ impl EntityRenderer {
             crate::blockentity::emit_block_entity(out, inst, camera, rect, &emit);
             drawn += 1;
         }
+        // One upload of the shared stream per frame: `prepare` already put the entities'
+        // vertices up, so only the tail past `start` goes here — in full when the buffer
+        // grew, because the fresh buffer holds no head (see `append_upload_range`).
+        let range = append_upload_range(self.vertices.len(), self.vertex_capacity, start);
         if self.vertices.len() > self.vertex_capacity {
             self.vertex_capacity = self.vertices.len().next_power_of_two();
             self.vertex_buffer = make_vertex_buffer(&self.device, self.vertex_capacity);
         }
-        if self.vertices.len() > start && !self.vertices.is_empty() {
-            self.queue
-                .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
+        if !range.is_empty() {
+            self.queue.write_buffer(
+                &self.vertex_buffer,
+                (range.start * std::mem::size_of::<EntityVertex>()) as u64,
+                bytemuck::cast_slice(&self.vertices[range]),
+            );
         }
         if self.beam_vertices.len() > self.beam_capacity {
             self.beam_capacity = self.beam_vertices.len().next_power_of_two();

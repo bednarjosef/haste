@@ -26,7 +26,9 @@ impl SharedFlags {
             on_fire: b & 0x01 != 0,
             crouching: b & 0x02 != 0,
             riding: b & 0x04 != 0,
-            invisible: b & 0x10 != 0,
+            // Vanilla `Entity.FLAG_INVISIBLE = 5` (bit 0x20; bit 0x10 is FLAG_SWIMMING,
+            // `Entity.getSharedFlag`).
+            invisible: b & 0x20 != 0,
             glowing: b & 0x40 != 0,
             elytra_flying: b & 0x80 != 0,
         }
