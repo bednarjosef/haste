@@ -43,4 +43,4 @@ crates/haste-setup/src/install.rs 919
 crates/haste-setup/src/options.rs 705
 crates/haste-setup/src/servers.rs 664
 crates/haste-world/src/palette.rs 1033
-crates/haste-world/src/world.rs 621
+crates/haste-world/src/world.rs 603
