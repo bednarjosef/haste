@@ -1529,6 +1529,9 @@ fn tick_once(
         particles.tick();
     }
     if let Some(ui) = shared.ui.lock().as_ref() {
+        // The mount HUD's values for this tick (the vehicle's hearts and the charged jump bar),
+        // from the player's ride, the entity store and the synced attributes.
+        ui.set_mount_hud(driver.session.mount_hud(&*shared.entities.read()));
         // The hotbar authority is the player (the client picks with 1-9 and the wheel and tells
         // the server itself; `set_selected_slot` also marks it sent so the UI does not send it
         // a second time). The server's `set_held_slot` reaches both sides alike.

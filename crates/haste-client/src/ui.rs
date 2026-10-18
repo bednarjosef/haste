@@ -793,6 +793,13 @@ impl Ui {
         }
     }
 
+    /// The player started riding (vanilla
+    /// `ClientPacketListener.handleSetEntityPassengersPacket`): the "Press <sneak key> to
+    /// dismount" overlay message.
+    pub fn show_mount_message(&self) {
+        self.gui().show_mount_message();
+    }
+
     /// The connection ended: vanilla's disconnect screen with the reason; the HUD stops.
     pub fn disconnected(&self, reason: &Component) {
         self.state(|s| s.in_world = false);
@@ -816,6 +823,12 @@ impl Ui {
     /// The player's eyes are in water (air bubbles and the water overlay), from physics.
     pub fn set_eye_in_water(&self, v: bool) {
         self.state(|s| s.vitals.eye_in_water = v);
+    }
+
+    /// The mount HUD's values for this tick (vanilla `Hud`: the vehicle's hearts, the charged
+    /// jump bar), `None` on foot.
+    pub fn set_mount_hud(&self, mount: Option<haste_jvm::MountHud>) {
+        self.state(|s| s.mount = mount);
     }
 }
 

@@ -1096,6 +1096,10 @@ pub struct Session {
     /// property's index to its name. The synced registry when the server sent one, else the
     /// static one from the game data.
     attribute_names: Option<Vec<Identifier>>,
+    /// The player started riding with the last `set_passengers` (vanilla
+    /// `ClientPacketListener.handleSetEntityPassengersPacket` shows the "mount.onboard"
+    /// overlay message on exactly that transition): taken by the driver, which tells the UI.
+    mounted_message: bool,
 }
 
 impl Session {
@@ -1158,6 +1162,7 @@ impl Session {
             old_samples_weight: 1,
             entity_attributes: HashMap::new(),
             attribute_names: None,
+            mounted_message: false,
         }
     }
 
@@ -1179,6 +1184,12 @@ impl Session {
     /// Sets the `minecraft:attribute` registry entries in id order (see [`attribute_names`]).
     pub fn set_attribute_names(&mut self, names: Vec<Identifier>) {
         self.attribute_names = Some(names);
+    }
+
+    /// Whether the player started riding since the last call (the "mount.onboard" overlay
+    /// message, vanilla `ClientPacketListener.handleSetEntityPassengersPacket`).
+    pub fn take_mounted_message(&mut self) -> bool {
+        std::mem::take(&mut self.mounted_message)
     }
 
     /// Whether a spawned entity's registry index names the firework rocket type.
@@ -1643,9 +1654,16 @@ impl Session {
                 // vanilla's attachment rules (`haste_entity::passenger_seat`), which also names
                 // our own seat index: a boat's second passenger sits elsewhere than the first.
                 match self.seat_of(vehicle, &passengers, entities) {
-                    Some(seat) => self
-                        .player
-                        .set_vehicle(Some(vehicle), seat, boat, horse, pig),
+                    Some(seat) => {
+                        // The mount message only on the foot-to-riding transition (vanilla's
+                        // `!wasPlayerMounted`): not on a re-seat, which the same packet does.
+                        let was_riding = self.player.vehicle().is_some();
+                        self.player
+                            .set_vehicle(Some(vehicle), seat, boat, horse, pig);
+                        if !was_riding {
+                            self.mounted_message = true;
+                        }
+                    }
                     None if self.player.vehicle() == Some(vehicle) => {
                         // Dismount: our vehicle's new list no longer names us. Sneak's shift
                         // flag in player_input is what made the server send this.
@@ -1778,10 +1796,15 @@ impl Session {
                     }
                     // The pig or strider we ride: the boost's total (a use click on its stick
                     // made the server write it, vanilla `onSyncedDataUpdated` ->
-                    // `ItemBasedSteering.onSynced`) and the strider's suffocating flag.
+                    // `ItemBasedSteering.onSynced`) and the strider's suffocating flag. The
+                    // horse we steer: the server's rear-up flag (the same flag our own
+                    // simulation writes locally).
                     if self.player.vehicle() == Some(id) {
                         if let Some(animal) = self.player.item_steered_mut() {
                             animal.on_metadata(&d.metadata);
+                        }
+                        if let Some(horse) = self.player.horse_mut() {
+                            horse.on_metadata(&d.metadata);
                         }
                     }
                 }
@@ -2195,6 +2218,13 @@ impl NetDriver {
             self.chat.handle(&a.packet, &mut self.out);
             self.session
                 .apply(a.packet, world, entities, regs, &mut self.out);
+            // The mount message at the packet's own moment (vanilla shows it while handling
+            // `set_passengers`, not on the next tick).
+            if self.session.take_mounted_message() {
+                if let Some(ui) = ui {
+                    ui.show_mount_message();
+                }
+            }
             match (ui, for_ui) {
                 (Some(ui), Some(p)) => ui.handle(&p, &|pos| world.block_state_at(pos)),
                 (None, Some(p)) if self.ui_backlog.len() < UI_BACKLOG_LIMIT => {

@@ -337,6 +337,35 @@ fn the_horse_types_this_module_steers() {
     assert!(!is_horse_type("oak_boat"));
 }
 
+/// The rear-up flag from the server's entity data (`AbstractHorse.DATA_ID_FLAGS` bit 32): it
+/// stands the horse on its own, and it clears again; the metadata for anything but the flags
+/// leaves it alone.
+#[test]
+fn the_rear_up_flag_follows_the_entity_data() {
+    let mut h = horse_at(DVec3::new(0.5, 0.0, 0.5));
+    assert!(!h.is_standing());
+    let entry = |index: u8, value: haste_core::entity::MetadataValue| {
+        haste_core::entity::MetadataEntry { index, value }
+    };
+    h.on_metadata(&[entry(
+        DATA_ID_FLAGS,
+        haste_core::entity::MetadataValue::Byte(FLAG_TAME | FLAG_STANDING),
+    )]);
+    assert!(h.is_standing(), "the server's flag stands the horse");
+    // Another value on another index changes nothing.
+    h.on_metadata(&[entry(9, haste_core::entity::MetadataValue::Float(3.0))]);
+    assert!(h.is_standing());
+    // Cleared again: the flags without the bit end the rear-up (our own stand counter is 0).
+    h.on_metadata(&[entry(
+        DATA_ID_FLAGS,
+        haste_core::entity::MetadataValue::Byte(FLAG_TAME),
+    )]);
+    assert!(!h.is_standing());
+    // Our own charged jump's rear-up counts too (vanilla's one synched flag either side writes).
+    h.on_player_jump(0);
+    assert!(h.is_standing());
+}
+
 #[test]
 fn the_server_correction_snaps_the_horse() {
     let world = TestWorld::flat(0, states::STONE);

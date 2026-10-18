@@ -240,6 +240,17 @@ public final class Bridge {
     }
 
     /**
+     * The player started riding (vanilla ClientPacketListener.handleSetEntityPassengersPacket, on
+     * the foot-to-riding transition): the "mount.onboard" overlay message with the bound sneak
+     * key's name, exactly the component vanilla builds. No cushion seating exists in Haste, so
+     * "mount.sit" never applies.
+     */
+    public void showMountMessage() {
+        net.minecraft.network.chat.Component shiftKey = Proxies.options.keyShift.getTranslatedKeyMessage();
+        Proxies.hud.setOverlayMessage(net.minecraft.network.chat.Component.translatable("mount.onboard", shiftKey), false);
+    }
+
+    /**
      * The connection was lost or the server kicked us: vanilla's disconnect screen with the reason (a text component
      * in its JSON form). In menu mode the open screen (the connecting screen's parent, e.g. the server list) is the
      * parent, so the screen's button returns there like vanilla's ConnectScreen failure path.
