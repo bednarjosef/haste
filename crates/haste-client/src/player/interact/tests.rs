@@ -234,21 +234,9 @@ fn item_components() -> Arc<haste_data::ItemComponents> {
     let mut c = ItemComponents::default();
     c.insert(Identifier::minecraft("diamond_sword"), vec![speed(-2.4)]);
     c.insert(Identifier::minecraft("diamond_pickaxe"), vec![speed(-2.8)]);
-    c.insert_consumable(
-        Identifier::minecraft("apple"),
-        Consumable {
-            consume_seconds: 1.6,
-            animation: 1,
-        },
-    );
+    c.insert_consumable(Identifier::minecraft("apple"), Consumable::default_food());
     c.insert_food(Identifier::minecraft("apple"), false);
-    c.insert_consumable(
-        Identifier::minecraft("potion"),
-        Consumable {
-            consume_seconds: 1.6,
-            animation: 2,
-        },
-    );
+    c.insert_consumable(Identifier::minecraft("potion"), Consumable::default_drink());
     Arc::new(c)
 }
 

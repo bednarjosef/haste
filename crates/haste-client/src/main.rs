@@ -23,6 +23,7 @@ mod hand;
 mod headless;
 mod horse;
 mod item_based_steering;
+mod item_particles;
 mod launch;
 mod net;
 mod pig;

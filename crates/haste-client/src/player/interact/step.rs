@@ -143,16 +143,33 @@ impl LocalPlayer {
         }
 
         // `LivingEntity.tick` -> `updateUsingItem`: `ItemStack.onUseTick` first (the
-        // consumable's sound every vanilla interval), then the remaining time ticks down,
-        // including the tick the use started on.
+        // consumable's sound and item particles every vanilla interval), then the
+        // remaining time ticks down, including the tick the use started on.
         if let Some(u) = self.int.using {
             if super::consume_effects::should_emit(u.duration, u.remaining) {
-                let item = u
-                    .item
-                    .and_then(|i| env.data.registries.name("minecraft:item", i));
-                self.int
-                    .consume
-                    .emit(u.animation, item, self.state.pos, &mut self.sound_out);
+                // `ItemStack.onUseTick` reads the stack's `minecraft:consumable` (the
+                // item's default components; a stack patch override is not decoded): no
+                // component, no per-tick effects (an item whose class overrides the use
+                // duration, like a bow, stays silent).
+                let consumable = u.item.and_then(|i| {
+                    env.data
+                        .registries
+                        .name("minecraft:item", i)
+                        .and_then(|name| self.int.item_components.as_ref()?.consumable(name))
+                });
+                if let Some(consumable) = consumable {
+                    self.int.consume.emit(
+                        &consumable,
+                        u.item,
+                        crate::item_particles::EntityPose {
+                            pos: self.state.pos,
+                            eye_y: self.state.pos.y + self.eye_height(),
+                            look,
+                        },
+                        &mut self.sound_out,
+                        &mut self.item_particles_out,
+                    );
+                }
             }
             let mut u = u;
             u.remaining -= 1;
