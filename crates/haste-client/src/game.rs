@@ -489,9 +489,9 @@ pub struct SharedInput {
     pub toggle_flight: bool,
     /// Mouse buttons held, middle click and hotbar selection since the last tick.
     pub interact: InteractInput,
-    /// The current perspective is first person (vanilla's camera type; the spyglass FOV
-    /// zoom only applies in first person).
-    pub first_person: bool,
+    /// The current perspective (F5 cycles it). The sound listener and the spyglass FOV
+    /// read it: both follow the camera, which only sits at the eye in first person.
+    pub perspective: Perspective,
 }
 
 /// State shared between the game thread and the render thread.
@@ -500,13 +500,14 @@ pub struct Shared {
     pub data: Arc<GameData>,
     /// The world.
     pub world: RwLock<World>,
-    /// The render thread's weather extraction buffer (reused every frame, no allocation
-    /// after warmup). Only the render thread takes it.
-    pub weather_scratch: Mutex<haste_render::WeatherFrame>,
     /// The entities.
     pub entities: RwLock<EntityStore>,
     /// Sections changed since the render thread last looked (deduplicated there).
     pub dirty: Mutex<Vec<SectionPos>>,
+    /// Bumped every time the world changed (dirty sections published); the render thread's
+    /// per-tick caches — the weather extraction's column heights and precipitation — refresh
+    /// only when it moves, instead of re-reading the world every frame.
+    pub world_version: AtomicU64,
     /// Per-frame view values.
     pub view: Mutex<ViewState>,
     /// Break cracks to draw (`Session::breaking_stages`), copied once per tick.
@@ -652,6 +653,7 @@ impl Shared {
             world: RwLock::new(world),
             entities: RwLock::new(entities),
             dirty: Mutex::new(Vec::new()),
+            world_version: AtomicU64::new(0),
             view: Mutex::new(ViewState {
                 prev_eye: DVec3::ZERO,
                 eye: DVec3::ZERO,
@@ -717,7 +719,6 @@ impl Shared {
             biome_climates,
             particles: Mutex::new(particles),
             particle_snapshots: haste_render::ParticleSnapshots::default(),
-            weather_scratch: Mutex::new(haste_render::WeatherFrame::default()),
             input: Mutex::new(SharedInput::default()),
             sound: Mutex::new(None),
             stop: AtomicBool::new(false),
@@ -788,6 +789,9 @@ impl WorldSink for TrackedWorld<'_> {
     }
     fn apply_light(&mut self, pos: ChunkPos, light: &LightData) {
         WorldSink::apply_light(self.world, pos, light)
+    }
+    fn replace_biomes(&mut self, pos: ChunkPos, data: &[u8]) {
+        WorldSink::replace_biomes(self.world, pos, data)
     }
     fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData) {
         WorldSink::set_block_entity(self.world, pos, data)
@@ -976,7 +980,7 @@ fn apply_option_changes(shared: &Shared, driver: &NetDriver, changes: Vec<(Strin
     shared.options_version.fetch_add(1, Ordering::Relaxed);
     if let Some(rd) = render_distance {
         // The server's view distance still caps what we mesh, like at join.
-        shared.view.lock().view_distance = driver.login().view_distance.min(rd);
+        shared.view.lock().view_distance = driver.session.view_distance.min(rd);
     }
     if sound_changed {
         let volumes = shared.live_options.lock().sound;
@@ -1079,6 +1083,17 @@ fn drain_packets(
     };
     let ui = shared.ui.lock().clone();
     driver.receive(&mut tracked, &mut *entities, ui.as_ref())?;
+    // The server's view distance (login, then `set_chunk_cache_radius`) caps what we mesh,
+    // like vanilla's `Options.setServerRenderDistance`. Read the option before taking the
+    // view lock so the two locks are never held together.
+    let render_distance = shared.live_options.lock().render_distance as i32;
+    let view_distance = driver.session.view_distance.min(render_distance);
+    {
+        let mut view = shared.view.lock();
+        if view.view_distance != view_distance {
+            view.view_distance = view_distance;
+        }
+    }
     drop(entities);
     skins::request_profiles(&shared.skins, &mut driver.session.profiles);
     let mut dirty = world.take_dirty_sections();
@@ -1088,6 +1103,9 @@ fn drain_packets(
     dirty.append(gone);
     if !dirty.is_empty() {
         shared.dirty.lock().append(&mut dirty);
+        // Bumped with every world change so the render thread's per-tick caches (the weather
+        // columns' heights and precipitation) know to refresh.
+        shared.world_version.fetch_add(1, Ordering::Relaxed);
     }
     // The server's live pack set changed (vanilla ticks its ServerPackManager the
     // same way: a download finished, a re-push replaced one, or a pop arrived):
@@ -1250,7 +1268,7 @@ fn tick_once(
         SharedInput {
             toggle_flight: shared_input.toggle_flight,
             interact: shared_input.interact,
-            first_person: shared_input.first_person,
+            perspective: shared_input.perspective,
             state: shared_input.state,
         }
     };
@@ -1311,6 +1329,7 @@ fn tick_once(
         let mut dirty = world.take_dirty_sections();
         if !dirty.is_empty() {
             shared.dirty.lock().append(&mut dirty);
+            shared.world_version.fetch_add(1, Ordering::Relaxed);
         }
         let moved = driver.session.player.state.pos - tick_start;
         ((moved.x * moved.x + moved.z * moved.z).sqrt()) as f32
@@ -1563,6 +1582,9 @@ fn tick_once(
         particles.publish_snapshot(&*world, &shared.particle_snapshots);
     }
     if let Some(ui) = shared.ui.lock().as_ref() {
+        // The mount HUD's values for this tick (the vehicle's hearts and the charged jump bar),
+        // from the player's ride, the entity store and the synced attributes.
+        ui.set_mount_hud(driver.session.mount_hud(&*shared.entities.read()));
         // The hotbar authority is the player (the client picks with 1-9 and the wheel and tells
         // the server itself; `set_selected_slot` also marks it sent so the UI does not send it
         // a second time). The server's `set_held_slot` reaches both sides alike.
@@ -1619,9 +1641,10 @@ fn tick_once(
     // The per-tick camera effects (FOV modifier smoothing and the hurt and death counters;
     // the render thread interpolates them per frame). The view bobbing's walk distance and
     // bob are the hand's own, ticked below (vanilla's one `ClientAvatarState` serves both).
-    driver
-        .session
-        .tick_camera(Some(shared.data.as_ref()), input.first_person);
+    driver.session.tick_camera(
+        Some(shared.data.as_ref()),
+        input.perspective == Perspective::FirstPerson,
+    );
     // The lightmap's per-tick state (vanilla `GameRenderer.tick` + the effect durations).
     driver.session.lightmap.tick();
     // The first-person hand's tick, in vanilla's order (`LivingEntity.baseTick`, then
@@ -1652,13 +1675,21 @@ fn tick_once(
     let s = &driver.session;
     let (prev_eye, prev_yaw, prev_pitch) = s.player.camera(0.0);
     let (eye, yaw, pitch) = s.player.camera(1.0);
-    // The sound output's tick: listener from the eye, music situation, then 20 Hz tick.
+    // The sound output's tick: listener from the camera (vanilla's
+    // `SoundEngine.updateSource(Camera)` — the third-person perspectives move it off the
+    // eye), music situation, then 20 Hz tick.
     {
+        let listener = if input.perspective == Perspective::FirstPerson {
+            (eye, yaw, pitch)
+        } else {
+            let (world, shapes) = (shared.world.read(), &shared.data.shapes);
+            third_person_camera(input.perspective, eye, yaw, pitch, &*world, shapes)
+        };
         let mut sound = shared.sound.lock();
         if let Some(sounds) = sound.as_mut() {
             let situation =
                 crate::sound::music_situation(s.player.game_mode, s.player.state.eyes_in_water);
-            sounds.tick(eye, yaw, situation);
+            sounds.tick(listener.0, listener.1, listener.2, situation);
         }
     }
     let mut view = shared.view.lock();

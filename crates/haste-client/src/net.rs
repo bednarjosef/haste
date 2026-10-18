@@ -61,6 +61,10 @@ pub trait WorldSink {
     fn set_block(&mut self, pos: BlockPos, state: BlockStateId);
     /// `World::apply_light`.
     fn apply_light(&mut self, pos: ChunkPos, light: &LightData);
+    /// `World::replace_biomes` (chunks_biomes packet).
+    fn replace_biomes(&mut self, pos: ChunkPos, data: &[u8]) {
+        let _ = (pos, data);
+    }
     /// `World::set_block_entity`.
     fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData);
     /// The block state at `pos` (`World::block_state`; `AIR` by default for fakes). Named
@@ -113,6 +117,23 @@ impl CollisionShapes for NoBlocks {
     }
     fn outline_boxes(&self, _state: BlockStateId) -> &[haste_core::Aabb] {
         &[]
+    }
+}
+
+/// The `#strider_warm_blocks` test for the strider the player steers, wired from the game
+/// data's block table and the block tags the server synced (`update_tags`). The tag's
+/// members are looked up once per tick, not per block.
+struct StriderWarm<'a> {
+    data: &'a haste_data::GameData,
+    warm: &'a HashSet<u32>,
+}
+
+impl crate::item_based_steering::WarmBlocks for StriderWarm<'_> {
+    fn is_strider_warm(&self, state: BlockStateId) -> bool {
+        self.data
+            .blocks
+            .block_registry_index_of_state(state)
+            .is_some_and(|i| self.warm.contains(&i.0))
     }
 }
 
@@ -202,6 +223,9 @@ impl WorldSink for World {
     }
     fn apply_light(&mut self, pos: ChunkPos, light: &LightData) {
         World::apply_light(self, pos, light)
+    }
+    fn replace_biomes(&mut self, pos: ChunkPos, data: &[u8]) {
+        World::replace_biomes(self, pos, data)
     }
     fn set_block_entity(&mut self, pos: BlockPos, data: BlockEntityData) {
         World::set_block_entity(self, pos, data)
@@ -1009,6 +1033,10 @@ pub struct Session {
     /// `minecraft:entity_type` registry index per `entity_boxes` entry (same order), for the
     /// crosshair's pickability filter. A sentinel (`u32::MAX`) means unknown (mod) type.
     entity_types: Vec<haste_core::RegistryIndex>,
+    /// The block tags the server synced (`update_tags`), shared with `player.int` (which holds
+    /// its own copy for mining): the strider's warm test reads them during ticks that also
+    /// mutate the player, so the session keeps a copy the env can borrow.
+    block_tags: Option<haste_physics::mining::BlockTags>,
     /// Firework rockets the server spawned and has not removed (their metadata index 9 is the
     /// attached-to entity id, `FireworkRocketEntity.DATA_ATTACHED_TO_TARGET`).
     fireworks: HashSet<EntityId>,
@@ -1078,6 +1106,8 @@ pub struct Session {
     pub sea_level: i32,
     /// `ClientLevelData.isFlat` (the spawn info's superflat flag; the horizon height).
     pub is_flat: bool,
+    /// Server view distance in chunks (from `login`, then `set_chunk_cache_radius`).
+    pub view_distance: i32,
     /// The chunk batch flow control (vanilla `ChunkBatchSizeCalculator`): the server sends
     /// chunk batches and waits for our `chunk_batch_received` rate before the next, so a
     /// client that never acknowledges gets one batch and then silence — a teleport's new
@@ -1096,6 +1126,10 @@ pub struct Session {
     /// property's index to its name. The synced registry when the server sent one, else the
     /// static one from the game data.
     attribute_names: Option<Vec<Identifier>>,
+    /// The player started riding with the last `set_passengers` (vanilla
+    /// `ClientPacketListener.handleSetEntityPassengersPacket` shows the "mount.onboard"
+    /// overlay message on exactly that transition): taken by the driver, which tells the UI.
+    mounted_message: bool,
 }
 
 impl Session {
@@ -1127,6 +1161,7 @@ impl Session {
             entity_ids: HashSet::new(),
             entity_boxes: Vec::new(),
             entity_types: Vec::new(),
+            block_tags: None,
             fireworks: HashSet::new(),
             attached_firework: None,
             time_of_day: None,
@@ -1153,11 +1188,13 @@ impl Session {
             weather: WeatherState::default(),
             sea_level: 63,
             is_flat: false,
+            view_distance: 0,
             batch_started_at: None,
             aggregated_nanos_per_chunk: 2_000_000.0,
             old_samples_weight: 1,
             entity_attributes: HashMap::new(),
             attribute_names: None,
+            mounted_message: false,
         }
     }
 
@@ -1179,6 +1216,12 @@ impl Session {
     /// Sets the `minecraft:attribute` registry entries in id order (see [`attribute_names`]).
     pub fn set_attribute_names(&mut self, names: Vec<Identifier>) {
         self.attribute_names = Some(names);
+    }
+
+    /// Whether the player started riding since the last call (the "mount.onboard" overlay
+    /// message, vanilla `ClientPacketListener.handleSetEntityPassengersPacket`).
+    pub fn take_mounted_message(&mut self) -> bool {
+        std::mem::take(&mut self.mounted_message)
     }
 
     /// Whether a spawned entity's registry index names the firework rocket type.
@@ -1356,9 +1399,22 @@ impl Session {
                 .iter()
                 .find(|t| t.registry == Identifier::minecraft("block"))
             {
+                let tags = haste_physics::mining::BlockTags::new(
+                    t.tags.iter().map(|t| (t.name.clone(), t.entries.clone())),
+                );
+                self.player.int.set_block_tags(tags.clone());
+                self.block_tags = Some(tags);
+            }
+        }
+        if self.player.int.item_tags_missing() {
+            if let Some(t) = regs
+                .tags
+                .iter()
+                .find(|t| t.registry == Identifier::minecraft("item"))
+            {
                 self.player
                     .int
-                    .set_block_tags(haste_physics::mining::BlockTags::new(
+                    .set_item_tags(haste_physics::mining::BlockTags::new(
                         t.tags.iter().map(|t| (t.name.clone(), t.entries.clone())),
                     ));
             }
@@ -1385,6 +1441,7 @@ impl Session {
                 // snow line hangs off it).
                 self.sea_level = l.spawn.sea_level;
                 self.is_flat = l.spawn.is_flat;
+                self.view_distance = l.view_distance;
             }
             P::Respawn(r) => {
                 self.counters.respawns += 1;
@@ -1425,6 +1482,18 @@ impl Session {
             // it fires on every chunk border crossing, which would flood long sessions.
             P::SetChunkCacheCenter(c) => {
                 tracing::debug!("set_chunk_cache_center ({}, {})", c.x, c.z);
+            }
+            // Vanilla `ClientPacketListener.handleSetChunkCacheRadius`: the new server view
+            // distance (the game thread caps the meshed radius with it every drain).
+            P::SetChunkCacheRadius(r) => {
+                self.view_distance = r.radius;
+            }
+            // Vanilla `ClientPacketListener.handleChunksBiomes`: new biome containers for
+            // loaded chunks (`/fillbiome`); the world re-tints the 3x3 columns.
+            P::ChunksBiomes(b) => {
+                for c in &b.chunks {
+                    world.replace_biomes(c.pos, &c.data);
+                }
             }
             // The chunk batch flow control (vanilla `ClientPacketListener.handleChunkBatchStart`/
             // `handleChunkBatchFinished` + `ChunkBatchSizeCalculator`): time the batch, fold the
@@ -1643,9 +1712,16 @@ impl Session {
                 // vanilla's attachment rules (`haste_entity::passenger_seat`), which also names
                 // our own seat index: a boat's second passenger sits elsewhere than the first.
                 match self.seat_of(vehicle, &passengers, entities) {
-                    Some(seat) => self
-                        .player
-                        .set_vehicle(Some(vehicle), seat, boat, horse, pig),
+                    Some(seat) => {
+                        // The mount message only on the foot-to-riding transition (vanilla's
+                        // `!wasPlayerMounted`): not on a re-seat, which the same packet does.
+                        let was_riding = self.player.vehicle().is_some();
+                        self.player
+                            .set_vehicle(Some(vehicle), seat, boat, horse, pig);
+                        if !was_riding {
+                            self.mounted_message = true;
+                        }
+                    }
                     None if self.player.vehicle() == Some(vehicle) => {
                         // Dismount: our vehicle's new list no longer names us. Sneak's shift
                         // flag in player_input is what made the server send this.
@@ -1778,10 +1854,15 @@ impl Session {
                     }
                     // The pig or strider we ride: the boost's total (a use click on its stick
                     // made the server write it, vanilla `onSyncedDataUpdated` ->
-                    // `ItemBasedSteering.onSynced`) and the strider's suffocating flag.
+                    // `ItemBasedSteering.onSynced`) and the strider's suffocating flag. The
+                    // horse we steer: the server's rear-up flag (the same flag our own
+                    // simulation writes locally).
                     if self.player.vehicle() == Some(id) {
                         if let Some(animal) = self.player.item_steered_mut() {
                             animal.on_metadata(&d.metadata);
+                        }
+                        if let Some(horse) = self.player.horse_mut() {
+                            horse.on_metadata(&d.metadata);
                         }
                     }
                 }
@@ -1908,10 +1989,19 @@ impl Session {
         match world.physics() {
             Some((view, data)) => {
                 self.player.prepare(data);
+                let warm_tag = crate::item_based_steering::strider_warm_blocks();
+                let warm = self
+                    .block_tags
+                    .as_ref()
+                    .and_then(|tags| tags.members(&warm_tag))
+                    .map(|warm| StriderWarm { data, warm });
                 let env = crate::player::interact::InteractEnv {
                     data,
                     entities: &self.entity_boxes,
                     entity_types: &self.entity_types,
+                    warm_blocks: warm
+                        .as_ref()
+                        .map(|w| w as &dyn crate::item_based_steering::WarmBlocks),
                 };
                 self.player.tick_interact(input, view, &env, vehicle, out)
             }
@@ -2118,12 +2208,13 @@ impl NetDriver {
                 .map(|s| Identifier::parse(&s).expect("registry names are valid identifiers"))
                 .collect::<Vec<_>>(),
         );
-        let session = Session::new(
+        let mut session = Session::new(
             login.entity_id,
             login.game_mode,
             login.dimension.clone(),
             particle_names,
         );
+        session.view_distance = login.view_distance;
         let chat = chat_session::ClientChat::new(conn.profile().uuid, None);
         Ok(Self {
             conn,
@@ -2195,6 +2286,13 @@ impl NetDriver {
             self.chat.handle(&a.packet, &mut self.out);
             self.session
                 .apply(a.packet, world, entities, regs, &mut self.out);
+            // The mount message at the packet's own moment (vanilla shows it while handling
+            // `set_passengers`, not on the next tick).
+            if self.session.take_mounted_message() {
+                if let Some(ui) = ui {
+                    ui.show_mount_message();
+                }
+            }
             match (ui, for_ui) {
                 (Some(ui), Some(p)) => ui.handle(&p, &|pos| world.block_state_at(pos)),
                 (None, Some(p)) if self.ui_backlog.len() < UI_BACKLOG_LIMIT => {

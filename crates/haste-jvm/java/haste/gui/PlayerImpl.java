@@ -22,22 +22,38 @@ public final class PlayerImpl {
 
 
     // ---- LivingEntity ----
-    /** Health from Rust's set_health state. */
-    public static float getHealth(net.minecraft.world.entity.LivingEntity e) { return e == Proxies.player ? Mirror.health() : 0f; }
+    /** Health: the player's from Rust's set_health state, the mount's from its living-entity data. */
+    public static float getHealth(net.minecraft.world.entity.LivingEntity e) {
+        return e == Proxies.player ? Mirror.health() : Mirror.mountHealth();
+    }
+
+    /** Max health: the player's own attribute map; the mount's synced max_health attribute. */
+    public static float getMaxHealth(net.minecraft.world.entity.LivingEntity e) {
+        return e == Proxies.player
+            ? (float) Proxies.player.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH)
+            : Mirror.mountMaxHealth();
+    }
 
     /** Counts the player's effect durations down once per tick, as the client does between server updates. */
     static void tickEffects() {
         for (net.minecraft.world.effect.MobEffectInstance e : Proxies.player.getActiveEffects()) e.tickClient();
     }
 
-    /** Item use, attack cooldown, riding and sleeping are Rust's (player): not mirrored yet, so idle values. */
+    /** Item use, attack cooldown and sleeping are Rust's (player): not mirrored yet, so idle values. */
     public static net.minecraft.world.item.ItemStack getActiveItem(net.minecraft.world.entity.LivingEntity e) { return net.minecraft.world.item.ItemStack.EMPTY; }
     public static float getAttackStrengthScale(Player p, float partial) { return 1f; }
-    public static float getJumpRidingScale(net.minecraft.client.player.LocalPlayer p) { return 0f; }
+    /** The mount's charged jump scale (vanilla `LocalPlayer.getJumpRidingScale`, Rust's charge state). */
+    public static float getJumpRidingScale(net.minecraft.client.player.LocalPlayer p) { return Mirror.jumpRidingScale(); }
     public static int getSleepTimer(Player p) { return 0; }
     public static boolean isScoping(Player p) { return false; }
-    public static net.minecraft.world.entity.PlayerRideableJumping jumpableVehicle(net.minecraft.client.player.LocalPlayer p) { return null; }
-    public static boolean showVehicleHealth(net.minecraft.world.entity.LivingEntity e) { return false; }
+    /** Vanilla `LocalPlayer.jumpableVehicle`: the mount proxy while Rust steers a horse-family vehicle. */
+    public static net.minecraft.world.entity.PlayerRideableJumping jumpableVehicle(net.minecraft.client.player.LocalPlayer p) {
+        return Mirror.mountJumpable() ? Proxies.mount : null;
+    }
+    /** Vanilla `Entity.showVehicleHealth` (the HUD asks the vehicle): the mount is a living entity. */
+    public static boolean showVehicleHealth(net.minecraft.world.entity.Entity e) {
+        return e != Proxies.player && Mirror.mountLiving();
+    }
     public static void playSound(net.minecraft.world.entity.Entity e, net.minecraft.sounds.SoundEvent s, float volume, float pitch) {}
     public static void playSound(Player p, net.minecraft.sounds.SoundEvent s, float volume, float pitch) {}
 
@@ -45,6 +61,15 @@ public final class PlayerImpl {
     /** Eyes in water (the only fluid tag the HUD asks about): mirrored from Rust's physics. */
     public static boolean isEyeInFluid(net.minecraft.world.entity.Entity e, net.minecraft.tags.TagKey<net.minecraft.world.level.material.Fluid> tag) {
         return tag == net.minecraft.tags.FluidTags.WATER && Mirror.flag(Mirror.F_EYE_IN_WATER);
+    }
+
+    /**
+     * Vanilla {@code Entity.getVehicle}: the mount proxy while riding a living vehicle (its health
+     * feeds the HUD's vehicle hearts). Boats and other non-living vehicles have no proxy yet, so
+     * they answer null like being on foot does.
+     */
+    public static net.minecraft.world.entity.Entity getVehicle(net.minecraft.world.entity.Entity e) {
+        return e == Proxies.player && Mirror.mountLiving() ? Proxies.mount : null;
     }
 
     // ---- LocalPlayer ----

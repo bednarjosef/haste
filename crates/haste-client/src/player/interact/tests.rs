@@ -5,7 +5,14 @@ use haste_core::{Identifier, RegistryIndex};
 use haste_physics::mining::{BlockTags, Tool, ToolTable};
 use haste_physics::testing::TestWorld;
 
+use super::pick::is_pickable;
+use super::use_item::UseAnimation;
 use super::*;
+use haste_core::game::GameMode;
+use haste_core::view::BlockView;
+use haste_protocol::packets::play::serverbound as sb;
+use haste_protocol::ClientboundPlay;
+use haste_protocol::ServerboundPlay;
 
 const ME: EntityId = EntityId(7);
 const STONE: BlockStateId = BlockStateId(1);
@@ -21,6 +28,7 @@ const SPECTRAL_ARROW: RegistryIndex = RegistryIndex(3);
 const ZOMBIE: RegistryIndex = RegistryIndex(5);
 const PLAYER: RegistryIndex = RegistryIndex(6);
 const ENDER_DRAGON: RegistryIndex = RegistryIndex(7);
+const VILLAGER: RegistryIndex = RegistryIndex(12);
 
 /// A small GameData written to a temp dir: air, stone (1.5, needs a tool), dirt (0.5),
 /// bedrock (-1), short grass (0, no collision), obsidian (50, needs a tool).
@@ -90,6 +98,7 @@ fn data() -> &'static haste_data::GameData {
                     "fireball",
                     "wind_charge",
                     "shulker_bullet",
+                    "villager",
                 ]),
             ),
         )
@@ -267,6 +276,7 @@ impl Rig {
             data: data(),
             entities: &self.entities,
             entity_types: &self.types,
+            warm_blocks: None,
         };
         let input = InputState {
             pitch: 90.0,
@@ -817,6 +827,7 @@ fn inventory_and_effects_from_packets() {
         data: data(),
         entities: &[],
         entity_types: &[],
+        warm_blocks: None,
     };
     let p = r.p.mining_params(STONE, &env);
     assert_eq!(
@@ -889,6 +900,7 @@ fn held_stack_components_drive_mining_speed() {
         data: data(),
         entities: &[],
         entity_types: &[],
+        warm_blocks: None,
     };
     let p = r.p.mining_params(STONE, &env);
     assert_eq!((p.tool_speed, p.tool_correct), (8.0, Some(true)));
@@ -936,6 +948,7 @@ fn use_duration_and_animation_come_from_the_item() {
         data: data(),
         entities: &[],
         entity_types: &[],
+        warm_blocks: None,
     };
     let d = |i: u32| r.p.int.use_data(&item(i), env.data);
     // Bow/crossbow/trident/shield: 72000 ticks; spyglass 1200.
@@ -1223,6 +1236,105 @@ fn an_entity_wins_only_when_it_is_strictly_closer_than_the_block() {
     );
     let out = r.tick(ATTACK);
     assert_eq!(actions(&out), [(action::START_DESTROY, 1)]);
+}
+
+/// `MultiPlayerGameMode.interact` sends the hit location relative to the entity (the server's
+/// `interactAt` reads it, e.g. an armor stand's slot from its Y) and the raw shift key
+/// (`player.isShiftKeyDown`), not the crouch state.
+#[test]
+fn the_interact_offset_is_relative_to_the_entity_and_carries_the_shift_key() {
+    let mut r = Rig::new(GameMode::Survival);
+    // A tall box standing on the floor below our eye: the crosshair hits its top half.
+    r.add_entity(
+        EntityId(42),
+        Aabb::entity(DVec3::new(0.5, 0.0, 0.5), 0.6, 1.9),
+        ZOMBIE,
+    );
+    // Not sneaking: shift not held.
+    let out = r.tick(USE);
+    match &out[0] {
+        ServerboundPlay::Interact(i) => {
+            assert_eq!(i.entity_id, 42);
+            // Feet at (0.5, 0, 0.5); the hit is on the box's centre axis, straight down.
+            assert!(
+                (i.target_offset.y - 1.62).abs() < 1e-6,
+                "{:?}",
+                i.target_offset
+            );
+            assert!((i.target_offset.x - 0.0).abs() < 1e-6);
+            assert!((i.target_offset.z - 0.0).abs() < 1e-6);
+            assert!(!i.sneaking);
+        }
+        p => panic!("{p:?}"),
+    }
+}
+
+/// `Minecraft.startUseItem`'s ENTITY case: a Pass from `Player.interactOn` (food on a zombie)
+/// goes on to `useItem` with the same hand, and an empty main hand to the off hand; a pair
+/// whose client-side interact consumes (a villager) stops at the entity.
+#[test]
+fn an_entity_use_falls_through_to_use_item_and_the_off_hand() {
+    // Food in the main hand on a zombie: interact, use_item, no off hand (it holds nothing).
+    let mut r = hungry(GameMode::Survival);
+    r.p.int.hotbar[0] = item(4); // apple
+    r.add_entity(
+        EntityId(42),
+        Aabb::entity(DVec3::new(0.5, 0.0, 0.5), 0.6, 0.5),
+        ZOMBIE,
+    );
+    let out = r.tick(USE);
+    assert!(
+        matches!(&out[0], ServerboundPlay::Interact(i) if i.entity_id == 42 && i.hand == 0),
+        "{out:?}"
+    );
+    assert!(
+        matches!(&out[1], ServerboundPlay::UseItem(u) if u.hand == 0),
+        "{out:?}"
+    );
+    assert_eq!(out.len(), 2, "{out:?}");
+    assert!(r.p.is_using_item());
+
+    // An empty main hand: its use_item is skipped (`!heldItem.isEmpty()`), the entity
+    // interact of the off hand follows, then its apple's use_item.
+    let mut r = hungry(GameMode::Survival);
+    r.p.int.offhand = item(4);
+    r.add_entity(
+        EntityId(42),
+        Aabb::entity(DVec3::new(0.5, 0.0, 0.5), 0.6, 0.5),
+        ZOMBIE,
+    );
+    let out = r.tick(USE);
+    assert!(
+        matches!(&out[0], ServerboundPlay::Interact(i) if i.hand == 0),
+        "{out:?}"
+    );
+    assert!(
+        matches!(&out[1], ServerboundPlay::Interact(i) if i.hand == 1),
+        "{out:?}"
+    );
+    assert!(
+        matches!(&out[2], ServerboundPlay::UseItem(u) if u.hand == 1),
+        "{out:?}"
+    );
+    assert_eq!(out.len(), 3, "{out:?}");
+    assert!(r.p.is_using_item());
+
+    // A pair whose client-side interact consumes (a villager's trade): nothing follows the
+    // interact, and the held food never starts a use.
+    let mut r = hungry(GameMode::Survival);
+    r.p.int.hotbar[0] = item(4);
+    r.add_entity(
+        EntityId(42),
+        Aabb::entity(DVec3::new(0.5, 0.0, 0.5), 0.6, 0.5),
+        VILLAGER,
+    );
+    let out = r.tick(USE);
+    assert!(
+        matches!(&out[0], ServerboundPlay::Interact(i) if i.entity_id == 42),
+        "{out:?}"
+    );
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert!(!r.p.is_using_item(), "the use stopped at the entity");
 }
 
 /// Vanilla's `Minecraft.continueAttack`: while the block is breaking the arm swings every tick,

@@ -108,9 +108,10 @@ fn default_attenuation() -> u32 {
     16
 }
 
-/// The Ogg path of a sound name: `dig/stone1` -> `sounds/dig/stone1.ogg`.
+/// The Ogg asset key of a sound name: `dig/stone1` -> `minecraft/sounds/dig/stone1.ogg`,
+/// `foo:bar` -> `foo/sounds/bar.ogg` (the namespace is where in the assets the file lives).
 fn sound_path(id: &Identifier) -> String {
-    format!("sounds/{}.ogg", id.path())
+    format!("{}/sounds/{}.ogg", id.namespace(), id.path())
 }
 
 impl SoundEvents {
@@ -185,6 +186,35 @@ impl SoundEvents {
     /// The event with this name, `minecraft:block.stone.break` or `block.stone.break`.
     pub fn get(&self, event: &str) -> Option<&SoundEvent> {
         self.events.get(&namespaced(event))
+    }
+
+    /// Drop every file entry whose file does not exist, vanilla's
+    /// `SoundManager.Preparations.handleRegistration` skipping entries that fail
+    /// `validateSoundResource` (logged there as "File {} does not exist"): a missing file
+    /// is skipped at load instead of failing to play later. `exists` answers whether an
+    /// asset key (`<namespace>/sounds/<path>.ogg`) is present. An event left with no
+    /// (or only weightless) entries simply never plays, as vanilla's does. Returns the
+    /// number of dropped entries.
+    pub fn retain_files(&mut self, mut exists: impl FnMut(&str) -> bool) -> usize {
+        let mut dropped = 0;
+        for event in self.events.values_mut() {
+            let before = event.sounds.len();
+            event.sounds.retain(|entry| match entry {
+                SoundEntry::File(variant) => {
+                    let present = exists(&variant.path);
+                    if !present {
+                        tracing::warn!(
+                            "File {} does not exist, cannot add it to event",
+                            variant.path
+                        );
+                    }
+                    present
+                }
+                SoundEntry::Event { .. } => true,
+            });
+            dropped += before - event.sounds.len();
+        }
+        dropped
     }
 
     /// The event's subtitle key, if it has one.
@@ -301,7 +331,7 @@ mod tests {
             panic!("expected file entry");
         };
         assert_eq!(v.id.to_string(), "minecraft:dig/stone1");
-        assert_eq!(v.path, "sounds/dig/stone1.ogg");
+        assert_eq!(v.path, "minecraft/sounds/dig/stone1.ogg");
         assert_eq!((v.volume, v.pitch, v.weight), (1.0, 1.0, 1));
         assert_eq!(
             (v.stream, v.attenuation_distance, v.preload),
@@ -330,7 +360,7 @@ mod tests {
             panic!("expected file entry");
         };
         assert_eq!(v.id.to_string(), "foo:bar/baz");
-        assert_eq!(v.path, "sounds/bar/baz.ogg");
+        assert_eq!(v.path, "foo/sounds/bar/baz.ogg");
     }
 
     #[test]
@@ -456,6 +486,35 @@ mod tests {
         }"#;
         let events = SoundEvents::parse(json).unwrap();
         assert_eq!(events.pick("a", 1), None);
+    }
+
+    #[test]
+    fn missing_files_are_dropped_at_load() {
+        // SoundManager.Preparations.handleRegistration / validateSoundResource: an entry
+        // whose file does not exist is skipped while loading, so it can never be picked
+        // (rather than failing to play later); an event left without entries never plays.
+        let json = br#"{
+            "broken": {"sounds": ["gone", {"name": "there"}]},
+            "all_gone": {"sounds": ["missing1", "missing2"]},
+            "by_reference": {"sounds": [{"name": "all_gone", "type": "event"}, "there"]}
+        }"#;
+        let mut events = SoundEvents::parse(json).unwrap();
+        let dropped = events.retain_files(|path| path.contains("/there.ogg"));
+        assert_eq!(dropped, 3, "gone, missing1 and missing2 are dropped");
+        let broken = events.get("broken").unwrap();
+        assert_eq!(broken.sounds.len(), 1, "the existing file stays");
+        let SoundEntry::File(v) = &broken.sounds[0] else {
+            panic!("expected file entry");
+        };
+        assert_eq!(v.id.path(), "there");
+        // The emptied event can never be picked...
+        assert_eq!(events.pick("all_gone", 1), None);
+        // ...and neither can it be reached through a reference (its weight is 0).
+        assert_eq!(events.pick("by_reference", 1).unwrap().id.path(), "there");
+        // An entry with weight 0 counts as no entry at all: nothing changes for it.
+        let json = br#"{"z": {"sounds": [{"name": "there", "weight": 0}]}}"#;
+        let mut events = SoundEvents::parse(json).unwrap();
+        assert_eq!(events.retain_files(|_| true), 0);
     }
 
     #[test]

@@ -45,6 +45,18 @@ impl PackFile {
         }
     }
 
+    /// Whether this file provides `key` (no read).
+    fn contains(&self, key: &str) -> bool {
+        match self {
+            PackFile::Zip { keys, .. } => {
+                keys.binary_search_by(|(k, _)| k.as_str().cmp(key)).is_ok()
+            }
+            PackFile::Folder { entries } => entries
+                .binary_search_by(|(k, _)| k.as_str().cmp(key))
+                .is_ok(),
+        }
+    }
+
     /// Every `assets/...` key this file provides.
     fn keys(&self) -> impl Iterator<Item = &str> {
         let (zip, folder): (Vec<&str>, Vec<&str>) = match self {
@@ -186,6 +198,11 @@ impl PackStack {
     /// from the top of the stack down (vanilla `FallbackResourceManager`).
     pub(crate) fn read(&mut self, key: &str) -> Option<Vec<u8>> {
         self.packs.iter_mut().rev().find_map(|p| p.file.read(key))
+    }
+
+    /// Whether any pack in the stack provides `assets/<ns>/<path>` (no read).
+    pub(crate) fn contains(&self, key: &str) -> bool {
+        self.packs.iter().any(|p| p.file.contains(key))
     }
 
     /// Every `assets/<ns>/<path>` key any pack in the stack provides

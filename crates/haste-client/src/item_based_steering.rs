@@ -97,11 +97,27 @@ pub enum ItemSteered {
     Strider(crate::strider::Strider),
 }
 
+/// `#minecraft:strider_warm_blocks` (vanilla `BlockTags.STRIDER_WARM_BLOCKS`), the tag the
+/// strider's warm/cold test reads.
+pub fn strider_warm_blocks() -> haste_core::Identifier {
+    haste_core::Identifier::minecraft("strider_warm_blocks")
+}
+
+/// Resolves `#strider_warm_blocks` for a block state, as the driver wires it from the synced
+/// block tags and the game data's block table. Implemented once by `net.rs`.
+pub trait WarmBlocks {
+    /// Whether `state`'s block is in the tag.
+    fn is_strider_warm(&self, state: haste_core::BlockStateId) -> bool;
+}
+
 /// What an item-steered animal's tick reads from the world.
 pub struct SteerEnv<'a> {
     pub world: &'a dyn haste_core::view::BlockView,
     pub shapes: &'a dyn haste_core::view::CollisionShapes,
     pub blocks: &'a dyn haste_core::view::BlockPhysics,
+    /// The `#strider_warm_blocks` resolution (synced tags + block table); `None` without a
+    /// tag sync yet, in which case no block warms (lava alone still does, by fluid height).
+    pub warm_blocks: Option<&'a dyn WarmBlocks>,
 }
 
 impl ItemSteered {
