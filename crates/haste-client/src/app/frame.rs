@@ -4,6 +4,10 @@
 
 use super::*;
 
+mod hitch;
+use hitch::FramePhases;
+pub(crate) use hitch::HitchTrace;
+
 impl App {
     /// Menu mode's frame: the open screen over the title panorama (see `menu_background`).
     fn draw_menu(&mut self) {
@@ -89,6 +93,7 @@ impl App {
         // below (frame_view, the feed, debug_info) instead of each taking the lock again.
         // The spyglass scope's easing reads its flag from the same copy.
         let t0 = Instant::now();
+        let gap_ms = self.hitches.frame_started();
         let view = self
             .session
             .as_ref()
@@ -97,6 +102,9 @@ impl App {
             .view
             .lock()
             .clone();
+        // The view lock's wait time, of the view phase below (t0 to the feed): contention
+        // with the game thread's own view writes shows here first.
+        let view_lock_ms = t0.elapsed().as_secs_f32() * 1e3;
         let scope = self.scope_scale(view.screen.scoping, t0);
         let session = self.session.as_ref().expect("checked above");
         // The options the player just changed in a vanilla screen: the game thread applied
@@ -174,8 +182,9 @@ impl App {
         let feed_start = Instant::now();
         self.feed
             .feed(&session.shared, renderer, camera_section(&camera), vd);
+        let feed_ms = feed_start.elapsed().as_secs_f32() * 1000.0;
         if let Some(bench) = &mut self.bench {
-            bench.feed_ms = feed_start.elapsed().as_secs_f32() * 1000.0;
+            bench.feed_ms = feed_ms;
         }
         let t1 = Instant::now();
         let hud_hidden = self.ui.as_ref().is_some_and(|ui| ui.hud_hidden());
@@ -241,6 +250,7 @@ impl App {
             self.gui = ui.take_frame(gw, gh, scale, mouse, partial);
             renderer.set_panorama(ui.gui().panorama());
         }
+        let t_gui = Instant::now();
         // The screen effects around the HUD frame (vanilla's `ScreenEffectRenderer.submit`'s
         // level-pass overlays and `Hud.extractCameraOverlays`'s own).
         {
@@ -259,6 +269,7 @@ impl App {
             };
             frame.append_to(&mut self.gui.commands);
         }
+        let t_pre = Instant::now();
         let frame = FrameInput {
             camera,
             entities,
@@ -297,6 +308,7 @@ impl App {
             self.screenshot = false;
             renderer.request_capture();
         }
+        let t_render = Instant::now();
         let result = renderer.render(&frame);
         if let Ok(stats) = &result {
             self.frame_stats = *stats;
@@ -363,6 +375,19 @@ impl App {
                 event_loop.exit();
             }
         }
+        self.hitches.frame_ended(
+            gap_ms,
+            FramePhases {
+                view_lock: view_lock_ms,
+                view: (feed_start - t0).as_secs_f32() * 1e3,
+                feed: feed_ms,
+                entities: (t2 - t1).as_secs_f32() * 1e3,
+                gui: (t_gui - t2).as_secs_f32() * 1e3,
+                pre: (t_pre - t_gui).as_secs_f32() * 1e3,
+                render: (t3 - t_render).as_secs_f32() * 1e3,
+                post: t3.elapsed().as_secs_f32() * 1e3,
+            },
+        );
     }
     /// Rebuilds the renderer after the resource pack selection changed (vanilla's reload
     /// rebuilds its resource manager, model manager and atlases). The new selection is
@@ -509,4 +534,3 @@ impl FpsCounter {
         Some(line)
     }
 }
-

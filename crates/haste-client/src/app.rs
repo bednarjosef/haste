@@ -56,7 +56,7 @@ mod frame;
 mod menu_background;
 pub use bench::{bench, bench_window};
 use bench::{BenchSample, WindowBench};
-use frame::FpsCounter;
+use frame::{FpsCounter, HitchTrace};
 
 /// Saved options this run uses: FOV, render distance, mouse sensitivity and (unless the
 /// `--vsync` flag says otherwise) vsync. `Config::load` creates the file with defaults on
@@ -3293,6 +3293,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         breaking: Vec::new(),
         frame_stats: FrameStats::default(),
         fps: FpsCounter::new(),
+        hitches: HitchTrace::new(),
         error: None,
         seconds: args.window_seconds,
         screenshot: false,
@@ -3369,6 +3370,8 @@ struct App {
     /// The previous frame's statistics (F3 reads them between frames).
     frame_stats: FrameStats,
     fps: FpsCounter,
+    /// The slow-frame log (see `frame.rs`): every frame over 20 ms logs its phase times.
+    hitches: HitchTrace,
     error: Option<anyhow::Error>,
     /// Close the window after this long (`--window-seconds`, for unattended runs).
     seconds: Option<u64>,
@@ -3720,7 +3723,6 @@ impl App {
         };
         self.scope
     }
-
 }
 
 impl ApplicationHandler for App {
