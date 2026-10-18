@@ -197,12 +197,13 @@ fn shade(in: VertexOut, alpha_cutoff: f32) -> vec4<f32> {
     // Vanilla's terrain shader (terrain.vsh/terrain.fsh) does all of its colour math on
     // the encoded (sRGB) values, into a plain RGBA8 target: texel * vertex colour (tint,
     // AO and face shade) * lightmap texel, then the fog mix with the encoded fog colour.
-    // The atlas here is an sRGB texture (the sample comes back linear) and the target is
-    // sRGB (the output is re-encoded), so the sample is encoded back, the vanilla math
-    // runs on encoded values, and the result is decoded for the target. Doing the
-    // multiplies on linear values instead lifts every factor below 1 to roughly its
-    // 1/2.4th power (a 0.6 side face or a two-occluder AO corner draws ~25% too bright).
-    let lit = srgb_encode(color.rgb) * in.tint * in.light;
+    // The atlas here is an UNORM texture like vanilla's (`TextureAtlas.createTexture`),
+    // so the sample is already the encoded texel (and the GPU filters encoded values,
+    // like vanilla's); the target is sRGB (the output is re-encoded), so the result is
+    // decoded for the target. Doing the multiplies on linear values instead lifts every
+    // factor below 1 to roughly its 1/2.4th power (a 0.6 side face or a two-occluder AO
+    // corner draws ~25% too bright).
+    let lit = color.rgb * in.tint * in.light;
     let fogged = mix(lit, srgb_encode(camera.fog_color.rgb), in.fog);
     return vec4<f32>(srgb_decode(fogged), color.a);
 }
