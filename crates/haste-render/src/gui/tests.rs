@@ -189,3 +189,24 @@ fn flat_items_are_full_bright_and_block_faces_shade_like_vanilla() {
         }
     }
 }
+
+/// The borrowed atlas probes hash and compare like the owned keys they stand for: a sprite
+/// probe finds only the sprite entry, a texture probe only the texture entry of the same id.
+#[test]
+fn tex_key_ref_finds_the_owned_key() {
+    use super::atlas::{TexKey, TexKeyRef};
+    let id = Identifier::minecraft("hud/heart/full");
+    let mut keys: hashbrown::HashMap<TexKey, u32> = hashbrown::HashMap::new();
+    keys.insert(TexKey::Sprite(id.clone()), 1);
+    keys.insert(TexKey::Texture(id.clone()), 2);
+    keys.insert(TexKey::Missing, 3);
+    assert_eq!(keys.get(&TexKeyRef::Sprite(&id)), Some(&1));
+    assert_eq!(keys.get(&TexKeyRef::Texture(&id)), Some(&2));
+    assert_eq!(keys.get(&TexKeyRef::Key(&TexKey::Missing)), Some(&3));
+    assert_eq!(
+        keys.get(&TexKeyRef::Key(&TexKey::Sprite(id.clone()))),
+        Some(&1)
+    );
+    let other = Identifier::minecraft("hud/heart/empty");
+    assert_eq!(keys.get(&TexKeyRef::Sprite(&other)), None);
+}
