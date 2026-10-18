@@ -16,9 +16,7 @@ use anyhow::Context;
 use glam::DVec3;
 use haste_protocol::haste_core::gui::GuiFrame;
 use haste_protocol::haste_core::input::InputState;
-use haste_protocol::haste_core::{
-    BlockPos, BlockStateId, EntityId, Identifier, SectionPos,
-};
+use haste_protocol::haste_core::{BlockPos, BlockStateId, EntityId, Identifier, SectionPos};
 use haste_protocol::ConnectOptions;
 use haste_render::{
     Camera, DimensionFog, FogInputs, FogType, FrameInput, FrameStats, LightmapFrame, Renderer,
@@ -56,9 +54,9 @@ mod frame;
 mod menu_background;
 mod world_feed;
 pub use bench::{bench, bench_window};
-pub(crate) use world_feed::WorldFeed;
 use bench::{BenchSample, WindowBench};
 use frame::{FpsCounter, HitchTrace};
+pub(crate) use world_feed::WorldFeed;
 
 /// Saved options this run uses: FOV, render distance, mouse sensitivity and (unless the
 /// `--vsync` flag says otherwise) vsync. `Config::load` creates the file with defaults on
@@ -2185,7 +2183,16 @@ pub fn screenshot(args: &Args, file: &Path) -> anyhow::Result<()> {
                 continue;
             }
         }
-        if placed && feed.settled(&stats, Duration::from_millis(1500)) && !wait_for_hud {
+        if placed
+            && feed.settled(
+                &stats,
+                Duration::from_millis(1500),
+                &renderer,
+                camera_section(&camera),
+                vd,
+            )
+            && !wait_for_hud
+        {
             break;
         }
         wait_for_hud = wait_for_hud
@@ -2446,10 +2453,24 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
                     ui.is_some() || shared.is_some_and(|s| s.hud_failed.load(Ordering::Relaxed));
                 let at_pos = want_pos
                     .is_none_or(|p| view.as_ref().is_some_and(|v| (v.feet - p).length() <= 0.5));
-                let settled = view.as_ref().is_some_and(|v| v.has_position)
-                    && at_pos
-                    && hud_ready
-                    && feed.settled(&last_stats, Duration::from_millis(1500));
+                let settled = view.as_ref().is_some_and(|v| {
+                    v.has_position
+                        && at_pos
+                        && hud_ready
+                        && feed.settled(
+                            &last_stats,
+                            Duration::from_millis(1500),
+                            &renderer,
+                            // The camera section the render below builds from this view
+                            // (settled runs before it in the iteration).
+                            SectionPos::new(
+                                v.eye.x.floor() as i32 >> 4,
+                                v.eye.y.floor() as i32 >> 4,
+                                v.eye.z.floor() as i32 >> 4,
+                            ),
+                            v.view_distance,
+                        )
+                });
                 if !settled
                     && view.as_ref().is_some_and(|v| v.has_position)
                     && frames.is_multiple_of(40)

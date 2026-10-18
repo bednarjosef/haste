@@ -164,9 +164,13 @@ impl App {
                     .is_none_or(|p| (view.feet - p).length() <= 0.5);
                 view.has_position
                     && at_pos
-                    && self
-                        .feed
-                        .settled(&self.frame_stats, Duration::from_millis(1500))
+                    && self.feed.settled(
+                        &self.frame_stats,
+                        Duration::from_millis(1500),
+                        renderer,
+                        camera_section(&camera),
+                        vd,
+                    )
                     && (self.ui.is_some()
                         || session.shared.hud_failed.load(Ordering::Relaxed)
                         || !session.shared.hud_enabled.load(Ordering::Relaxed))

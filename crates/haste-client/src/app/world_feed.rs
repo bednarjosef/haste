@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 use haste_protocol::haste_core::model::EntityInstance;
 use haste_protocol::haste_core::{ChunkPos, EntityId, SectionPos};
 use haste_render::{
-    BlockEntityInstance, FrameStats, MeshSnapshot, Renderer, SnapshotSource,
+    BlockEntityInstance, FrameStats, MeshSnapshot, Renderer, SectionLoadState, SnapshotSource,
 };
+use haste_world::World;
 
 use super::biomes;
 use super::block_entity_extract::{self, BlockEntityTickFrame};
@@ -19,9 +20,41 @@ use crate::game::{self, Shared};
 /// Wall time the render thread may spend capturing sections for the mesher per frame.
 /// Sections handed to the mesh workers per frame (they capture the snapshots themselves).
 const SUBMIT_PER_FRAME: usize = 512;
+/// Queue entries classified per frame (world probes plus the renderer's section-state
+/// note): classifying a whole render distance 32 queue (~28k sections) in one frame
+/// would be a visible hitch, so the rest is classified over the next frames.
+const SCAN_PER_FRAME: usize = 4096;
 
-/// Feeds dirty sections to the renderer within a per-frame time budget, nearest first, and
-/// skips sections that are empty and were never meshed (nothing to draw, nothing to clear).
+/// What the client knows about a section right now: gone (its chunk is not loaded),
+/// loaded and empty, or loaded with blocks.
+fn section_state(world: &World, pos: SectionPos) -> SectionLoadState {
+    match world.chunk(pos.chunk()) {
+        None => SectionLoadState::Unloaded,
+        Some(c) => match c.section(pos.y) {
+            None => SectionLoadState::Unloaded,
+            Some(s) if s.is_empty() => SectionLoadState::Empty,
+            Some(_) => SectionLoadState::NonEmpty,
+        },
+    }
+}
+
+/// Vanilla `SectionUpdateTracker.hasAllNeighbors`: the eight horizontal neighbour
+/// chunks of the section are loaded (vanilla also requires their light, which Haste
+/// applies with the chunk).
+fn has_all_neighbours(world: &World, pos: SectionPos) -> bool {
+    (-1..=1).all(|dx| {
+        (-1..=1).all(|dz| {
+            dx == 0 && dz == 0 || world.chunk(ChunkPos::new(pos.x + dx, pos.z + dz)).is_some()
+        })
+    })
+}
+
+/// Feeds dirty sections to the renderer within a per-frame time budget, nearest first,
+/// skipping sections that are empty and were never meshed (nothing to draw, nothing to
+/// clear) and holding back sections the renderer does not want yet — vanilla's
+/// `LevelExtractor` compiles a dirty section only when it is in the frame's visible
+/// sections, so invisible terrain keeps its dirty state and meshes when it becomes
+/// visible.
 #[derive(Default)]
 pub struct WorldFeed {
     /// Sections waiting, sorted so the nearest is last (`pop`).
@@ -29,6 +62,11 @@ pub struct WorldFeed {
     queued: HashSet<SectionPos>,
     /// Sections whose last submitted mesh was non-empty.
     meshed: HashSet<SectionPos>,
+    /// Dirty sections the renderer does not want yet (not visible): re-checked whenever
+    /// the visible set or the look changes. Not sorted; promotion re-sorts the queue.
+    waiting: Vec<SectionPos>,
+    /// The visible-set version `waiting` was last checked against.
+    last_want_version: u64,
     sort_needed: bool,
     pub(crate) last_arrival: Option<Instant>,
     /// Entity instances for this frame (reused).
@@ -75,6 +113,12 @@ impl WorldFeed {
         for p in dirty.drain(..) {
             if self.queued.insert(p) {
                 self.queue.push(p);
+            } else if let Some(i) = self.waiting.iter().position(|&q| q == p) {
+                // A re-dirtied held-back section: put it back in the queue so its new
+                // state is examined (a held chunk-unload must still free the mesh).
+                self.waiting.swap_remove(i);
+                self.queue.push(p);
+                self.sort_needed = true;
             }
         }
         self.sort_needed = true;
@@ -114,6 +158,7 @@ impl WorldFeed {
         view_distance: i32,
     ) {
         self.collect(shared);
+        self.promote_wanted(renderer);
         if self.sort_needed {
             let d = |p: &SectionPos| {
                 let (dx, dy, dz) = (p.x - camera.x, p.y - camera.y, p.z - camera.z);
@@ -131,27 +176,88 @@ impl WorldFeed {
         batch.clear();
         {
             let world = shared.world.read();
-            while batch.len() < SUBMIT_PER_FRAME {
-                let Some(pos) = self.queue.pop() else { break };
-                self.queued.remove(&pos);
-                let non_empty = world
-                    .chunk(pos.chunk())
-                    .and_then(|c| c.section(pos.y))
-                    .is_some_and(|s| !s.is_empty());
-                if !non_empty && !self.meshed.contains(&pos) {
-                    continue;
+            // Scan the queue nearest-first (it is sorted so the nearest is last) up to
+            // both budgets: sections are submitted, dropped (never-meshed empty) or held
+            // back as not visible; classifying the whole view distance in one frame
+            // would be a hitch, so the rest waits for the next.
+            let mut scanned = 0;
+            while batch.len() < SUBMIT_PER_FRAME && scanned < SCAN_PER_FRAME {
+                let Some(pos) = self.queue.last().copied() else {
+                    break;
+                };
+                scanned += 1;
+                let state = section_state(&world, pos);
+                renderer.note_section_state(pos, state);
+                let was_meshed = self.meshed.contains(&pos);
+                match state {
+                    SectionLoadState::Unloaded => {
+                        // The chunk is gone: submit the removal so the renderer frees the
+                        // section (vanilla drops a chunk's render data with the chunk),
+                        // visible or not.
+                        self.queue.pop();
+                        self.queued.remove(&pos);
+                        self.meshed.remove(&pos);
+                        if was_meshed {
+                            batch.push(pos);
+                        }
+                    }
+                    SectionLoadState::Empty if !was_meshed => {
+                        // Never meshed and nothing in it: nothing to draw, nothing to
+                        // clear.
+                        self.queue.pop();
+                        self.queued.remove(&pos);
+                    }
+                    _ => {
+                        // Vanilla `LevelExtractor`: a dirty section compiles only when it
+                        // is in the frame's visible sections; a first build also waits for
+                        // every neighbour chunk (`SectionUpdateTracker.hasAllNeighbors`).
+                        // Held-back sections keep their dirty state — they stay in
+                        // `waiting` — and mesh when they become visible.
+                        let first_build = !was_meshed
+                            && state == SectionLoadState::NonEmpty
+                            && !has_all_neighbours(&world, pos);
+                        if first_build || !renderer.wants_section(pos) {
+                            self.queue.pop();
+                            self.waiting.push(pos);
+                            continue;
+                        }
+                        self.queue.pop();
+                        self.queued.remove(&pos);
+                        if state == SectionLoadState::NonEmpty {
+                            self.meshed.insert(pos);
+                        } else {
+                            self.meshed.remove(&pos);
+                        }
+                        batch.push(pos);
+                    }
                 }
-                if non_empty {
-                    self.meshed.insert(pos);
-                } else {
-                    self.meshed.remove(&pos);
-                }
-                batch.push(pos);
             }
         }
         // Also uploads meshes that finished since the last frame.
         renderer.update_world_from(&source, &batch, camera_chunk, view_distance);
         self.batch = batch;
+    }
+
+    /// Moves held-back sections that became wanted back into the queue (a new visible
+    /// set or a turned look both change what the renderer wants).
+    fn promote_wanted(&mut self, renderer: &Renderer) {
+        if renderer.want_version() == self.last_want_version {
+            return;
+        }
+        self.last_want_version = renderer.want_version();
+        if self.waiting.is_empty() {
+            return;
+        }
+        let mut i = 0;
+        while i < self.waiting.len() {
+            if renderer.wants_section(self.waiting[i]) {
+                let pos = self.waiting.swap_remove(i);
+                self.queue.push(pos);
+                self.sort_needed = true;
+            } else {
+                i += 1;
+            }
+        }
     }
 
     /// Copies the interpolated entity instances, gives players their default skin and samples
@@ -237,16 +343,27 @@ impl WorldFeed {
         self.first_person_skin = Some(skin);
     }
 
-    /// Whether everything the game thread produced has been meshed and uploaded, and nothing
-    /// new arrived for `quiet`.
+    /// Whether everything visible has been meshed and uploaded, and nothing new arrived for
+    /// `quiet`. Waits for the sections the renderer wants, not the whole view distance:
+    /// held-back sections stay unsettled only while one of them is wanted (or could still
+    /// become wanted — the visible set not being final).
     ///
     /// `meshes_pending` (pending + queued results + in-flight) already guarantees every
     /// submitted section was meshed and uploaded; comparing the renderer's resident-section
     /// count against a client-side count cannot work, because a section with blocks can still
     /// mesh to zero vertices (fully enclosed) and the renderer then keeps no entry for it.
-    pub(crate) fn settled(&self, stats: &FrameStats, quiet: Duration) -> bool {
+    pub(crate) fn settled(
+        &self,
+        stats: &FrameStats,
+        quiet: Duration,
+        renderer: &Renderer,
+        camera: SectionPos,
+        view_distance: i32,
+    ) -> bool {
         self.queue.is_empty()
             && stats.meshes_pending == 0
             && self.last_arrival.is_some_and(|t| t.elapsed() >= quiet)
+            && renderer.occlusion_settled(camera, view_distance)
+            && self.waiting.iter().all(|&p| !renderer.wants_section(p))
     }
 }
