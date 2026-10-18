@@ -26,6 +26,11 @@ struct Sky {
     fog_bands2: vec4<f32>,
     // The sunrise/sunset fan's rotation (camera rotation frame).
     sunrise_matrix: mat4x4<f32>,
+    // The End flash (vanilla `SkyRenderer.renderEndFlash`): intensity in x (0 = none),
+    // the x/y direction angles in degrees in y/z.
+    end_flash: vec4<f32>,
+    // The End flash quad's pose (camera rotation frame).
+    end_flash_matrix: mat4x4<f32>,
     // End sky texture rectangle in the atlas, clouds rectangle.
     end_rect: vec4<u32>,
     cloud_rect: vec4<u32>,
@@ -206,6 +211,22 @@ fn fs_celestial(in: VertexOut) -> @location(0) vec4<f32> {
     // Additive with the texture's alpha (src alpha, one), like vanilla's sun and moon.
     let c = fetch(in.uv, in.rect);
     return vec4<f32>(c.rgb * c.a * in.color.rgb * in.color.a, 1.0);
+}
+
+// ---- the End flash: a celestial quad in the flash's own pose (vanilla renderEndFlash) ----
+
+@vertex
+fn vs_end_flash(v: VertexIn) -> VertexOut {
+    var out: VertexOut;
+    let world = sky.end_flash_matrix * vec4<f32>(v.pos, 1.0);
+    let clip = sky.rot_view_proj * vec4<f32>(world.xyz, 1.0);
+    // Pinned to the far plane: behind everything, like the other celestial bodies.
+    out.clip = vec4<f32>(clip.xy, clip.w * 0.99999, clip.w);
+    out.uv = v.uv;
+    out.color = v.color;
+    out.rect = v.rect;
+    out.fog = 0.0;
+    return out;
 }
 
 // ---- clouds: one plane at cloud height, each clouds.png texel a 12x12 block cell ----
