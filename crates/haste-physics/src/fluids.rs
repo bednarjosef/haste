@@ -496,7 +496,10 @@ mod tests {
     fn water_gravity_sixteenths_skipped_while_sprinting() {
         // Vanilla LivingEntity.getFluidFallingAdjustedMovement skips the sink when sprinting,
         // whatever the pose (the swim flag is irrelevant).
-        let w = water_pool_eyes_dry();
+        // The eyes under water: in shallow water vanilla's `shouldStopRunSprinting` ends the
+        // sprint before the move (`isSprintingPossible(false)`).
+        let mut w = TestWorld::flat(0, STONE);
+        w.fill((-2, 0, -2), (2, 12, 2), WATER_SOURCE);
         let mut s = water_player();
         s.sprinting = true;
         tick_once(
@@ -507,9 +510,14 @@ mod tests {
                 i.sprint = true;
             }),
         );
+        // Sprinting under water with water at the feet also starts the swim this tick
+        // (`updateSwimming` sees last tick's sprint), so `Player.travel` steers y toward the
+        // level look (0.06) before the drag; no gravity sink follows.
+        let expected = (0.1 + (0.0 - 0.1) * SWIM_STEER) * WATER_DRAG;
+        assert!(s.swimming);
         assert!(
-            (s.velocity.y - 0.08).abs() < 1e-12,
-            "sprinting sink velocity {:?}",
+            (s.velocity.y - expected).abs() < 1e-12,
+            "sprinting sink velocity {:?}, expected {expected}",
             s.velocity.y
         );
     }
@@ -579,14 +587,18 @@ mod tests {
         let w = shallow_water();
         let mut s = PlayerState::at(DVec3::new(0.5, 0.5, 0.5));
         s.on_ground = false;
-        tick_once(
-            &w,
-            &mut s,
-            &input(|i| {
-                i.forward = true;
-                i.sprint = true;
-            }),
-        );
+        // The first tick starts the sprint, the second's `updateSwimming` (before the keys,
+        // vanilla `Entity.baseTick`) sees it and starts the swim.
+        for _ in 0..2 {
+            tick_once(
+                &w,
+                &mut s,
+                &input(|i| {
+                    i.forward = true;
+                    i.sprint = true;
+                }),
+            );
+        }
         assert!(s.swimming, "sprint-swimming established");
         s.pos = DVec3::new(0.5, 0.4, 0.5);
         s.velocity = DVec3::ZERO;
@@ -617,14 +629,18 @@ mod tests {
         let w = shallow_water();
         let mut s = PlayerState::at(DVec3::new(0.5, 0.5, 0.5));
         s.on_ground = false;
-        tick_once(
-            &w,
-            &mut s,
-            &input(|i| {
-                i.forward = true;
-                i.sprint = true;
-            }),
-        );
+        // The first tick starts the sprint, the second's `updateSwimming` (before the keys,
+        // vanilla `Entity.baseTick`) sees it and starts the swim.
+        for _ in 0..2 {
+            tick_once(
+                &w,
+                &mut s,
+                &input(|i| {
+                    i.forward = true;
+                    i.sprint = true;
+                }),
+            );
+        }
         assert!(s.swimming);
         s.pos = DVec3::new(0.5, 0.4, 0.5);
         s.velocity = DVec3::ZERO;

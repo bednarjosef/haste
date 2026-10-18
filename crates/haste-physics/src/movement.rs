@@ -165,7 +165,7 @@ pub fn tick_with(
     state.eyes_in_water = eyes_in_water;
     // Water currents (vanilla Entity.updateFluidInteraction, before the move).
     block_effects::apply_water_currents(state, attrs, world, blocks);
-    update_flags(state, input, attrs, eyes_in_water, world, shapes);
+    update_flags(state, input, attrs, eyes_in_water, world, shapes, blocks);
 
     if state.jump_cooldown > 0 {
         state.jump_cooldown -= 1;
@@ -253,9 +253,10 @@ pub fn tick_with(
     }
 }
 
-/// The input-driven flags for this tick's movement: `sneaking` (raw shift key), `crouching` and
-/// the sprint state (vanilla `LocalPlayer.aiStep`, in that order, from the CURRENT box, i.e. the
-/// pose the last tick ended with, before the player moves).
+/// The input-driven flags for this tick's movement: `swimming` (vanilla `Entity.baseTick`), then
+/// `sneaking` (raw shift key), `crouching` and the sprint state (vanilla `LocalPlayer.aiStep`, in
+/// that order, from the CURRENT box, i.e. the pose the last tick ended with, before the player
+/// moves).
 fn update_flags(
     state: &mut PlayerState,
     input: &InputState,
@@ -263,9 +264,12 @@ fn update_flags(
     eyes_in_water: bool,
     world: &dyn BlockView,
     shapes: &dyn CollisionShapes,
+    blocks: &dyn BlockPhysics,
 ) {
+    // `Entity.baseTick` updates the swimming state before `aiStep` looks at the keys.
+    let under_water = eyes_in_water && state.in_water;
+    crate::sprint::update_swimming(state, under_water, world, blocks);
     state.sneaking = input.sneak;
-    let forward = input.forward && !input.back;
     // Crouching (vanilla `LocalPlayer.aiStep`): not flying, not swimming, the crouching box
     // fits, and shift is held or standing does not fit (forced crouch under a low ceiling).
     // Riding and sleeping are not modelled.
@@ -273,28 +277,7 @@ fn update_flags(
         && !state.swimming
         && fits_pose(state, attrs, Pose::Crouching, world, shapes)
         && (state.sneaking || !fits_pose(state, attrs, Pose::Standing, world, shapes));
-    // Sprint (vanilla `LocalPlayer.aiStep`, `canStartSprinting` / `shouldStopRunSprinting`):
-    // starting needs the forward impulse and not moving slowly (`isMovingSlowly`: crouching or
-    // the swimming pose out of water, unless under water), with no collision condition; a
-    // horizontal collision ends it only when the collision is not minor (the input direction and
-    // the actual movement within 8 degrees, `isHorizontalCollisionMinor`). The stop is evaluated
-    // after the start so a persistent collision keeps the sprint off instead of restarting it
-    // every other tick. Releasing the sprint key alone does not end it. Hunger and blindness
-    // are the caller's business.
-    let moving_slowly = state.crouching || (state.pose == Pose::Swimming && !state.in_water);
-    let under_water = state.eyes_in_water && state.in_water;
-    if !state.sprinting && input.sprint && forward && (!moving_slowly || under_water) {
-        state.sprinting = true;
-    }
-    if state.sprinting
-        && (!forward || (state.horizontal_collision && !state.minor_horizontal_collision))
-    {
-        state.sprinting = false;
-    }
-    // Sprint-swimming state (vanilla `Entity.updateSwimming`: sprinting in water with the eyes
-    // in it, or already swimming; never while flying).
-    state.swimming =
-        state.sprinting && state.in_water && (eyes_in_water || state.swimming) && !state.flying;
+    crate::sprint::update_sprinting(state, input, under_water);
 }
 
 /// Whether the box of `pose` at the current position fits (vanilla
