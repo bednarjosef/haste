@@ -3,6 +3,8 @@
 
 use super::*;
 
+use std::sync::OnceLock;
+
 impl EntityRenderer {
     /// Vanilla `EntityRenderer.extractShadow`: the round `misc/shadow.png` quads on the full
     /// top faces below each entity. For every entity the shadow is a `shadowRadius` (capped at
@@ -30,7 +32,9 @@ impl EntityRenderer {
         if !entity_shadows {
             return;
         }
-        let rect = self.texture_rect(&Identifier::minecraft("misc/shadow"), assets);
+        static SHADOW_TEXTURE: OnceLock<Identifier> = OnceLock::new();
+        let shadow_id = SHADOW_TEXTURE.get_or_init(|| Identifier::minecraft("misc/shadow"));
+        let rect = self.texture_rect(shadow_id, assets);
         for e in entities {
             if Some(e.id) == skip || e.invisible || e.decoration.is_some() {
                 continue;

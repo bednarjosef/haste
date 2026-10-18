@@ -975,3 +975,21 @@ fn hand_shade_is_world_oriented() {
     assert!(entity_shade(down) > entity_shade(up));
     assert!((entity_shade(up) - 0.4).abs() < 1e-6);
 }
+
+/// The tail upload after `append_block_entities`: only the block entities' vertices past
+/// the entities' `start` go up when the existing buffer already holds them, everything
+/// when the buffer grew (a fresh wgpu buffer holds no head), and nothing when no block
+/// entity appended vertices.
+#[test]
+fn append_upload_range_covers_only_the_appended_tail() {
+    // Entities took 100 vertices; 40 more appended, buffer big enough: tail only.
+    assert_eq!(append_upload_range(140, 256, 100), 100..140);
+    // Nothing appended: no upload at all.
+    assert_eq!(append_upload_range(100, 256, 100), 100..100);
+    // The append outgrew the buffer: the whole stream is rewritten (fresh buffer).
+    assert_eq!(append_upload_range(300, 256, 100), 0..300);
+    // No entities either: the block entities are the whole stream, from 0.
+    assert_eq!(append_upload_range(40, 256, 0), 0..40);
+    // Outgrew it with no room to spare: still the whole stream.
+    assert_eq!(append_upload_range(512, 256, 100), 0..512);
+}
