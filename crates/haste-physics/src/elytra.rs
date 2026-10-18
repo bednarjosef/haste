@@ -120,8 +120,8 @@ pub fn effective_gravity(attrs: &PlayerAttributes, velocity: DVec3, slow_falling
 /// One glide tick of the travelling player, vanilla `LivingEntity.travelFallFlying`.
 ///
 /// This is the call the movement tick makes when `state.fall_flying` is set (see NOTES.md).
-/// `slow_falling` is the slow falling effect (no effect state on [`PlayerAttributes`] yet).
-/// Nothing here reads the movement input: gliding is steered with the look angles only.
+/// `slow_falling` is the slow falling effect ([`PlayerState::slow_falling`]). Nothing here reads
+/// the movement input: gliding is steered with the look angles only.
 pub fn travel(
     state: &mut PlayerState,
     attrs: &PlayerAttributes,

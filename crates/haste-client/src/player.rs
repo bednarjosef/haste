@@ -1020,6 +1020,12 @@ impl LocalPlayer {
         }
         let chunk = BlockPos::from_dvec3(self.state.pos).chunk();
         if ctx.world.is_chunk_loaded(chunk) {
+            // The active movement effects (vanilla `LivingEntity` reads them off itself): the
+            // physics tick applies levitation, slow falling and jump boost.
+            let (levitation, slow_falling, jump_boost) = self.int.movement_effects();
+            self.state.levitation_level = levitation;
+            self.state.slow_falling = slow_falling;
+            self.state.jump_boost_level = jump_boost;
             haste_physics::tick(
                 &mut self.state,
                 &phys_input,

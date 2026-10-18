@@ -38,6 +38,14 @@ pub const VERTICAL_DRAG: f32 = 0.98;
 /// Horizontal boost of a sprint jump, along the facing direction (mcpk.wiki "Horizontal Movement
 /// Formulas"; checked against the wiki's 7.127 m/s sprint-jump speed in tests/scenarios.rs).
 pub const SPRINT_JUMP_BOOST: f32 = 0.2;
+/// Extra jump power per jump-boost level (vanilla `LivingEntity.getJumpBoostPower`: 0.1 per
+/// amplifier + 1).
+pub const JUMP_BOOST_POWER_PER_LEVEL: f64 = 0.1;
+/// Levitation rise per level (vanilla `LivingEntity.travelInAir`: 0.05 x (amplifier + 1)).
+pub const LEVITATION_RISE_PER_LEVEL: f64 = 0.05;
+/// How fast levitation blends the vertical velocity towards its rise each tick (vanilla
+/// `LivingEntity.travelInAir`: 0.2).
+pub const LEVITATION_BLEND: f64 = 0.2;
 /// Ticks between jumps while jump stays held (wiki "Jumping": half a second delay).
 pub const JUMP_COOLDOWN_TICKS: u8 = 10;
 /// Sneak edge back-off step (vanilla `Player.maybeBackOffFromEdge`: 0.05).
@@ -193,6 +201,12 @@ pub fn tick_with(
     // `Player.updatePlayerPose` after `LivingEntity.aiStep`'s travel, inside `Player.tick`.
     let impulse = impulse(state, input, attrs);
 
+    // Vanilla `LivingEntity.aiStep`, just before `travel`: either effect resets the fall
+    // distance, so slow falling and levitation never accumulate fall damage.
+    if state.slow_falling || state.levitation_level > 0 {
+        state.fall_distance = 0.0;
+    }
+
     if state.flying {
         flying::travel(state, input, impulse, attrs, world, shapes, blocks);
     } else if state.in_water {
@@ -202,9 +216,9 @@ pub fn tick_with(
     } else if state.in_lava {
         fluids::travel_lava(state, input, impulse, attrs, world, shapes, blocks);
     } else if state.fall_flying && !climbing::on_climbable(state, world, climb) {
-        // vanilla `LivingEntity.travel` -> `travelFallFlying`. No effects are modelled, so the
-        // slow-falling gravity clamp is passed `false` (see `elytra`).
-        elytra::travel(state, attrs, world, shapes, blocks, false);
+        // vanilla `LivingEntity.travel` -> `travelFallFlying`, which uses the effective gravity
+        // (the slow falling clamp) like the air branch.
+        elytra::travel(state, attrs, world, shapes, blocks, state.slow_falling);
     } else {
         // `travelFallFlying` on a climbable: travel in air (still with the glider box), then
         // stop gliding.
@@ -490,10 +504,12 @@ fn jump(
     blocks: &dyn BlockPhysics,
 ) {
     let factor = block_factor(state, attrs, world, shapes, |s| blocks.jump_factor(s));
-    // vanilla `LivingEntity.jumpFromGround` (LivingEntity.java:2372): y = max(jump power, current
-    // y), so jumping keeps a faster rise; the sprint boost uses the same deg->rad conversion as
-    // the movement code (no separate jump constant).
-    let power = attrs.jump_strength * factor as f64;
+    // vanilla `LivingEntity.getJumpPower` (jump_strength x block jump factor) plus
+    // `getJumpBoostPower` (0.1 per jump-boost level); `jumpFromGround` (LivingEntity.java:2372)
+    // then takes y = max(jump power, current y), so jumping keeps a faster rise. The sprint boost
+    // uses the same deg->rad conversion as the movement code (no separate jump constant).
+    let power = attrs.jump_strength * factor as f64
+        + JUMP_BOOST_POWER_PER_LEVEL * f64::from(state.jump_boost_level);
     if power > 1.0e-5 {
         state.velocity.y = power.max(state.velocity.y);
         if state.sprinting {
@@ -541,7 +557,15 @@ fn travel_normal(
     move_entity(state, attrs, motion, world, shapes, blocks);
     climbing::climb_after_move(state, jumping, world, climb);
     apply_speed_factor(state, world, blocks);
-    state.velocity.y -= attrs.gravity;
+    // Vanilla `LivingEntity.travelInAir`: levitation blends the vertical velocity towards
+    // `0.05 * (amplifier + 1)` per tick and replaces gravity entirely; otherwise the effective
+    // gravity applies (slow falling caps it at 0.01 while falling, `getEffectiveGravity`).
+    if state.levitation_level > 0 {
+        let rise = LEVITATION_RISE_PER_LEVEL * f64::from(state.levitation_level);
+        state.velocity.y += (rise - state.velocity.y) * LEVITATION_BLEND;
+    } else {
+        state.velocity.y -= elytra::effective_gravity(attrs, state.velocity, state.slow_falling);
+    }
     state.velocity.y *= VERTICAL_DRAG as f64;
     let drag = (slip * HORIZONTAL_DRAG) as f64;
     state.velocity.x *= drag;
@@ -1035,5 +1059,132 @@ mod tests {
         }
         assert!(s.horizontal_collision, "grazing the wall at x={}", s.pos.x);
         assert!(s.sprinting, "a minor collision keeps sprinting");
+    }
+
+    #[test]
+    fn levitation_blends_the_rise_towards_five_hundredths_per_level() {
+        // vanilla `LivingEntity.travelInAir`: movementY += (0.05 * (amplifier + 1) - movementY)
+        // * 0.2, then the 0.98 vertical drag. Levitation I (amplifier 0, level 1) targets 0.05.
+        let w = TestWorld::flat(0, STONE);
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let mut s = PlayerState::at(DVec3::new(0.5, 5.0, 0.5));
+        s.levitation_level = 1;
+        s.velocity = DVec3::ZERO;
+        tick(&mut s, &InputState::default(), &attrs, &w, &shapes, &shapes);
+        // (0.05 - 0.0) * 0.2 = 0.01, then * 0.98.
+        assert!(
+            (s.velocity.y - 0.01 * VERTICAL_DRAG as f64).abs() < 1e-15,
+            "{}",
+            s.velocity.y
+        );
+        // Levitation II (level 2) targets 0.1: a tick from rest blends 0.02, then * 0.98.
+        let mut s = PlayerState::at(DVec3::new(0.5, 5.0, 0.5));
+        s.levitation_level = 2;
+        s.velocity = DVec3::ZERO;
+        tick(&mut s, &InputState::default(), &attrs, &w, &shapes, &shapes);
+        assert!(
+            (s.velocity.y - 0.02 * VERTICAL_DRAG as f64).abs() < 1e-15,
+            "{}",
+            s.velocity.y
+        );
+    }
+
+    #[test]
+    fn levitation_replaces_gravity_and_resets_the_fall_distance() {
+        // vanilla `LivingEntity.travelInAir`: the levitation branch is an `else if`, so no
+        // gravity is applied; `LivingEntity.aiStep` resets the fall distance with the effect.
+        let w = TestWorld::flat(0, STONE);
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let mut s = PlayerState::at(DVec3::new(0.5, 5.0, 0.5));
+        s.levitation_level = 1;
+        s.velocity = DVec3::new(0.0, -0.5, 0.0);
+        s.fall_distance = 10.0;
+        tick(&mut s, &InputState::default(), &attrs, &w, &shapes, &shapes);
+        // No gravity: the sink only blends towards the rise.
+        assert!(
+            (s.velocity.y - (-0.5 + (0.05 - -0.5) * 0.2) * VERTICAL_DRAG as f64).abs() < 1e-15,
+            "{}",
+            s.velocity.y
+        );
+        // The fall distance was reset, then the tick's descent (0.5) was added back.
+        assert!((s.fall_distance - 0.5).abs() < 1e-12, "{}", s.fall_distance);
+    }
+
+    #[test]
+    fn slow_falling_caps_the_fall_speed_growth_at_one_hundredth() {
+        // vanilla `LivingEntity.getEffectiveGravity`: while falling (y <= 0) slow falling clamps
+        // the gravity to min(gravity, 0.01); rising keeps the full gravity.
+        let w = TestWorld::flat(0, STONE);
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let mut s = PlayerState::at(DVec3::new(0.5, 5.0, 0.5));
+        s.slow_falling = true;
+        s.velocity = DVec3::new(0.0, -0.5, 0.0);
+        tick(&mut s, &InputState::default(), &attrs, &w, &shapes, &shapes);
+        assert!(
+            (s.velocity.y - (-0.5 - 0.01) * VERTICAL_DRAG as f64).abs() < 1e-15,
+            "{}",
+            s.velocity.y
+        );
+        // Rising with the effect: the full 0.08 gravity applies.
+        let mut s = PlayerState::at(DVec3::new(0.5, 5.0, 0.5));
+        s.slow_falling = true;
+        s.velocity = DVec3::new(0.0, 0.5, 0.0);
+        tick(&mut s, &InputState::default(), &attrs, &w, &shapes, &shapes);
+        assert!(
+            (s.velocity.y - (0.5 - 0.08) * VERTICAL_DRAG as f64).abs() < 1e-15,
+            "{}",
+            s.velocity.y
+        );
+        // Without the effect the same fall loses the full 0.08.
+        let mut s = PlayerState::at(DVec3::new(0.5, 5.0, 0.5));
+        s.velocity = DVec3::new(0.0, -0.5, 0.0);
+        tick(&mut s, &InputState::default(), &attrs, &w, &shapes, &shapes);
+        assert!(
+            (s.velocity.y - (-0.5 - 0.08) * VERTICAL_DRAG as f64).abs() < 1e-15,
+            "{}",
+            s.velocity.y
+        );
+    }
+
+    #[test]
+    fn slow_falling_resets_the_fall_distance() {
+        // vanilla `LivingEntity.aiStep` resets the fall distance while slow falling, so a fall
+        // never accumulates (and deals no damage).
+        let w = TestWorld::flat(0, STONE);
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let mut s = PlayerState::at(DVec3::new(0.5, 5.0, 0.5));
+        s.slow_falling = true;
+        s.velocity = DVec3::ZERO;
+        s.fall_distance = 10.0;
+        tick(&mut s, &InputState::default(), &attrs, &w, &shapes, &shapes);
+        assert_eq!(s.fall_distance, 0.0);
+    }
+
+    #[test]
+    fn jump_boost_adds_one_tenth_per_level_to_the_jump_power() {
+        // vanilla `LivingEntity.getJumpBoostPower`: 0.1 per (amplifier + 1); `getJumpPower`
+        // adds it to jump_strength x the block jump factor.
+        let w = TestWorld::flat(0, STONE);
+        let shapes = TestShapes::default();
+        let attrs = PlayerAttributes::default();
+        let mut s = PlayerState::at(DVec3::new(0.5, 0.0, 0.5));
+        s.on_ground = true;
+        s.jump_boost_level = 1;
+        let input = InputState {
+            jump: true,
+            ..Default::default()
+        };
+        tick(&mut s, &input, &attrs, &w, &shapes, &shapes);
+        assert!(
+            (s.velocity.y - (attrs.jump_strength + 0.1 - attrs.gravity) * VERTICAL_DRAG as f64)
+                .abs()
+                < 1e-15,
+            "{}",
+            s.velocity.y
+        );
     }
 }

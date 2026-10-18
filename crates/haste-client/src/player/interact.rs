@@ -192,6 +192,8 @@ pub struct Interaction {
     components: Option<HeldItem>,
     /// Night-vision and darkness effect indices for the lightmap (`prepare`).
     pub(crate) lightmap_effect_ids: LightmapEffectIds,
+    /// Levitation, slow-falling and jump-boost effect indices for the movement tick (`prepare`).
+    pub(crate) movement_effect_ids: MovementEffectIds,
     /// Last blocks we sent actions for (debug logging of their server updates).
     recent: Vec<BlockPos>,
     /// The screen the last use opened (see [`UsedScreen`]), until the game thread takes it.
@@ -304,6 +306,16 @@ struct EffectIds {
     darkness: i32,
 }
 
+/// The `minecraft:mob_effect` indices the movement tick needs (levitation, slow falling and jump
+/// boost), resolved from the game data. `None` until [`Interaction::prepare`] finds them, like
+/// [`LightmapEffectIds`].
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct MovementEffectIds {
+    pub(crate) levitation: Option<i32>,
+    pub(crate) slow_falling: Option<i32>,
+    pub(crate) jump_boost: Option<i32>,
+}
+
 /// The `minecraft:mob_effect` indices the lightmap needs (night vision and darkness), resolved
 /// from the game data. `None` until [`Interaction::prepare`] finds them (mod registries, or a
 /// report without them, leave the lightmap without those effects).
@@ -409,6 +421,11 @@ impl Interaction {
                 darkness: id("darkness"),
                 blindness: id("blindness"),
                 fire_resistance: id("fire_resistance"),
+            };
+            self.movement_effect_ids = MovementEffectIds {
+                levitation: id("levitation"),
+                slow_falling: id("slow_falling"),
+                jump_boost: id("jump_boost"),
             };
         }
         if self.component_tables.is_none() {
@@ -567,6 +584,23 @@ impl Interaction {
         self.nausea_id()
             .and_then(|id| self.effects.get(&id))
             .map_or((0.0, 0.0), |e| e.blend_pair())
+    }
+
+    /// The movement effects the physics tick reads, from our active effects
+    /// (`LivingEntity.hasEffect` / `getEffect(...).getAmplifier()`): the levitation and jump-boost
+    /// levels (amplifier + 1, 0 without) and whether slow falling is on.
+    pub fn movement_effects(&self) -> (u32, bool, u32) {
+        let level = |id: Option<i32>| {
+            id.and_then(|i| self.effects.get(&i))
+                .map_or(0, |e| (e.amplifier + 1).max(0) as u32)
+        };
+        let ids = self.movement_effect_ids;
+        (
+            level(ids.levitation),
+            ids.slow_falling
+                .is_some_and(|i| self.effects.contains_key(&i)),
+            level(ids.jump_boost),
+        )
     }
 
     /// One tick of the active effects (`LivingEntity.tickEffects`: each instance ticks its
