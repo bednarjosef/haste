@@ -8,7 +8,7 @@ use std::sync::Arc;
 use glam::DVec3;
 
 use crate::sounds::SoundVariant;
-use crate::spatial::{attenuation, clamp_pitch, pan, stereo_gains};
+use crate::spatial::{attenuation, clamp_pitch, pan, stereo_gains, ListenerTransform};
 
 /// The vanilla sound categories a sound can belong to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -144,8 +144,7 @@ struct PlayingSound {
 pub struct SilentEngine {
     sounds: Vec<PlayingSound>,
     volumes: SourceVolumes,
-    listener_pos: DVec3,
-    listener_yaw: f32,
+    listener: ListenerTransform,
 }
 
 impl Default for SilentEngine {
@@ -159,8 +158,7 @@ impl SilentEngine {
         Self {
             sounds: Vec::new(),
             volumes: SourceVolumes::default(),
-            listener_pos: DVec3::ZERO,
-            listener_yaw: 0.0,
+            listener: ListenerTransform::from_look(DVec3::ZERO, 0.0, 0.0),
         }
     }
 
@@ -213,9 +211,11 @@ impl SilentEngine {
 
     /// Set the listener (camera) position and yaw for attenuation and panning.
     /// Minecraft yaw: 0 = facing +Z (south), increasing clockwise seen from above.
-    pub fn set_listener(&mut self, pos: DVec3, yaw_deg: f32) {
-        self.listener_pos = pos;
-        self.listener_yaw = yaw_deg;
+    /// Set the listener (the camera) for attenuation and panning: position and look
+    /// (yaw/pitch), as vanilla's `SoundEngine.updateSource(Camera)` feeds the camera's
+    /// position, forward and up into `Listener.setTransform`.
+    pub fn set_listener(&mut self, pos: DVec3, yaw_deg: f32, pitch_deg: f32) {
+        self.listener = ListenerTransform::from_look(pos, yaw_deg, pitch_deg);
     }
 
     /// Set the volume of one sound source (or the master volume).
@@ -249,11 +249,11 @@ impl SilentEngine {
             let (gain, pan) = match sound.pos {
                 Some(pos) => (
                     attenuation(
-                        (pos - self.listener_pos).length(),
+                        (pos - self.listener.position).length(),
                         sound.volume,
                         sound.attenuation_distance,
                     ) * effective,
-                    pan(self.listener_pos, self.listener_yaw, pos),
+                    pan(&self.listener, pos),
                 ),
                 None => (sound.volume.min(1.0) * effective, 0.0),
             };

@@ -528,3 +528,42 @@ fn stop_by_event_stops_only_that_event() {
     sounds.stop(stop);
     assert_eq!(sounds.system.playing(), 1);
 }
+
+#[test]
+fn the_listener_is_the_camera_position_and_look() {
+    // The gains follow the camera handed to `Sounds::tick` (vanilla's
+    // `SoundEngine.updateSource(Camera)`), not the player's eye: a sound left of where
+    // the camera looks is louder on the left channel, and the camera's position drives
+    // the distance.
+    let Some(assets) = cached_assets() else {
+        return;
+    };
+    let events = SoundEvents::parse(br#"{"e": {"sounds": ["dig/stone1"]}}"#).unwrap();
+    let mut sounds = Sounds::with_system(
+        SoundSystem::with_output(events.clone(), assets, AudioOutput::silent()),
+        events,
+        Vec::new(),
+    );
+    // The camera at the origin facing south (+Z): west (-X) is its right.
+    let mut requests = vec![play_of("minecraft:e", 4)];
+    // The sound goes where the packet put it, at (1, 2, 3): east of the camera, so the
+    // left channel is the louder one.
+    sounds.apply(&mut requests, |_| None);
+    sounds.tick(DVec3::ZERO, 0.0, 0.0, MusicSituation::Game);
+    let (l, r) = sounds.system.engine_gains().next().unwrap();
+    assert!(
+        l > r,
+        "east of a south-looking camera is on the left ({l} vs {r})"
+    );
+    // Turning the camera west makes the same sound right of the listener.
+    sounds.tick(DVec3::ZERO, 90.0, 0.0, MusicSituation::Game);
+    let (l, r) = sounds.system.engine_gains().next().unwrap();
+    assert!(
+        r > l,
+        "east of a west-looking camera is on the right ({r} vs {l})"
+    );
+    // Moving the camera away silences it by distance.
+    sounds.tick(DVec3::new(1000.0, 0.0, 0.0), 0.0, 0.0, MusicSituation::Game);
+    let (l, r) = sounds.system.engine_gains().next().unwrap();
+    assert_eq!((l, r), (0.0, 0.0));
+}

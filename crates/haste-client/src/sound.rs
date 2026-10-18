@@ -335,12 +335,19 @@ impl Sounds {
             .is_some_and(|event| self.system.is_event_playing(event))
     }
 
-    /// The end of a game tick (20 Hz): listener from the local player's eye and yaw, the music
-    /// situation, the music manager, then the system tick. The situation is recomputed where
-    /// vanilla recomputes it (`Minecraft.getSituationalMusic`: game mode, eye in water); the
-    /// manager follows vanilla's `MusicManager.tick` from there on.
-    pub fn tick(&mut self, eye: DVec3, yaw_deg: f32, situation: MusicSituation) {
-        self.system.set_listener(eye, yaw_deg);
+    /// The end of a game tick (20 Hz): listener from the camera (position and look —
+    /// vanilla's `SoundEngine.updateSource(Camera)`), the music situation, the music
+    /// manager, then the system tick. The situation is recomputed where vanilla recomputes
+    /// it (`Minecraft.getSituationalMusic`: game mode, eye in water); the manager follows
+    /// vanilla's `MusicManager.tick` from there on.
+    pub fn tick(
+        &mut self,
+        camera_pos: DVec3,
+        yaw_deg: f32,
+        pitch_deg: f32,
+        situation: MusicSituation,
+    ) {
+        self.system.set_listener(camera_pos, yaw_deg, pitch_deg);
         if situation != self.situation {
             self.music.set_situation(situation.clone());
             self.situation = situation;

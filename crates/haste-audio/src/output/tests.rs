@@ -93,7 +93,7 @@ fn facade_plays_and_stops_through_the_silent_path() {
     let events = SoundEvents::parse(br#"{"e": {"sounds": ["dig/stone1"]}}"#).unwrap();
     let mut system = SoundSystem::with_output(events, assets, AudioOutput::silent());
     assert!(!system.output.is_live());
-    system.set_listener(DVec3::ZERO, 0.0);
+    system.set_listener(DVec3::ZERO, 0.0, 0.0);
     system.set_volume(SoundSource::Master, 0.5);
     system.play(
         "e",

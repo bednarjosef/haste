@@ -490,9 +490,9 @@ pub struct SharedInput {
     pub toggle_flight: bool,
     /// Mouse buttons held, middle click and hotbar selection since the last tick.
     pub interact: InteractInput,
-    /// The current perspective is first person (vanilla's camera type; the spyglass FOV
-    /// zoom only applies in first person).
-    pub first_person: bool,
+    /// The current perspective (F5 cycles it). The sound listener and the spyglass FOV
+    /// read it: both follow the camera, which only sits at the eye in first person.
+    pub perspective: Perspective,
 }
 
 /// State shared between the game thread and the render thread.
@@ -1222,7 +1222,7 @@ fn tick_once(
         SharedInput {
             toggle_flight: shared_input.toggle_flight,
             interact: shared_input.interact,
-            first_person: shared_input.first_person,
+            perspective: shared_input.perspective,
             state: shared_input.state,
         }
     };
@@ -1580,9 +1580,10 @@ fn tick_once(
     // The per-tick camera effects (FOV modifier smoothing and the hurt and death counters;
     // the render thread interpolates them per frame). The view bobbing's walk distance and
     // bob are the hand's own, ticked below (vanilla's one `ClientAvatarState` serves both).
-    driver
-        .session
-        .tick_camera(Some(shared.data.as_ref()), input.first_person);
+    driver.session.tick_camera(
+        Some(shared.data.as_ref()),
+        input.perspective == Perspective::FirstPerson,
+    );
     // The lightmap's per-tick state (vanilla `GameRenderer.tick` + the effect durations).
     driver.session.lightmap.tick();
     // The first-person hand's tick, in vanilla's order (`LivingEntity.baseTick`, then
@@ -1613,13 +1614,21 @@ fn tick_once(
     let s = &driver.session;
     let (prev_eye, prev_yaw, prev_pitch) = s.player.camera(0.0);
     let (eye, yaw, pitch) = s.player.camera(1.0);
-    // The sound output's tick: listener from the eye, music situation, then 20 Hz tick.
+    // The sound output's tick: listener from the camera (vanilla's
+    // `SoundEngine.updateSource(Camera)` — the third-person perspectives move it off the
+    // eye), music situation, then 20 Hz tick.
     {
+        let listener = if input.perspective == Perspective::FirstPerson {
+            (eye, yaw, pitch)
+        } else {
+            let (world, shapes) = (shared.world.read(), &shared.data.shapes);
+            third_person_camera(input.perspective, eye, yaw, pitch, &*world, shapes)
+        };
         let mut sound = shared.sound.lock();
         if let Some(sounds) = sound.as_mut() {
             let situation =
                 crate::sound::music_situation(s.player.game_mode, s.player.state.eyes_in_water);
-            sounds.tick(eye, yaw, situation);
+            sounds.tick(listener.0, listener.1, listener.2, situation);
         }
     }
     let mut view = shared.view.lock();

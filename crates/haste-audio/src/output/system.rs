@@ -213,9 +213,10 @@ impl SoundSystem {
         self.engine.stop(source, event);
     }
 
-    /// Set the listener (camera) position and yaw for attenuation and panning.
-    pub fn set_listener(&mut self, pos: DVec3, yaw_deg: f32) {
-        self.engine.set_listener(pos, yaw_deg);
+    /// Set the listener (the camera) position and look (yaw/pitch) for attenuation and
+    /// panning, vanilla's `SoundEngine.updateSource(Camera)`.
+    pub fn set_listener(&mut self, pos: DVec3, yaw_deg: f32, pitch_deg: f32) {
+        self.engine.set_listener(pos, yaw_deg, pitch_deg);
     }
 
     /// Set the volume of one sound source (or the master volume).
@@ -311,5 +312,11 @@ impl SoundSystem {
     /// than for a whole source.
     pub fn is_event_playing(&self, event: &str) -> bool {
         self.engine.is_event_playing(event)
+    }
+
+    /// The current (left, right) gains of all playing sounds, in play order (tests,
+    /// diagnostics; the output stage pushes these to the players on `tick`).
+    pub fn engine_gains(&self) -> impl Iterator<Item = (f32, f32)> + '_ {
+        self.engine.gains()
     }
 }
