@@ -75,11 +75,16 @@ pub struct ViewBob {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SkyState {
     pub time_of_day: i64,
+    /// World age in ticks (vanilla `Level.getGameTime`): the cloud drift advances with it
+    /// even when the time of day is frozen.
+    pub game_time: i64,
     pub rain: f32,
     pub thunder: f32,
     pub dimension_has_sky: bool,
     pub fog_start: f32,
     pub fog_end: f32,
+    /// The dimension's `visual/cloud_height` attribute (blocks; 192.33 in the overworld).
+    pub cloud_height: f32,
     /// Whether the dark disc goes under the horizon this frame (vanilla
     /// `SkyRenderer.shouldRenderDarkDisc`, see `sky::dark_disc`).
     pub dark_disc: bool,
@@ -340,6 +345,8 @@ pub struct Renderer {
     entity: crate::entity::EntityRenderer,
     /// Sky, celestial bodies, clouds; terrain fog colour and daylight.
     sky: crate::sky::SkyRenderer,
+    /// The fancy clouds (`CloudRenderer`): the extruded cell mesh around the camera.
+    clouds: crate::clouds::CloudRenderer,
     /// Rain and snow columns (`FrameInput::sky.weather`).
     weather: crate::weather::WeatherRenderer,
     /// Selection outline and break cracks.

@@ -1151,11 +1151,15 @@ fn frame_view<'w>(
     fog.thunder_level *= rain_level;
     let sky = SkyState {
         time_of_day: view.time_of_day,
+        game_time: view.world_age,
         rain: rain_level,
         thunder: thunder_level,
         dimension_has_sky: view.has_sky,
         fog_start: fog_end * 0.75,
         fog_end,
+        // The dimension's `visual/cloud_height` attribute: the overworld default; only
+        // sky dimensions draw clouds, and no synced source overrides it yet.
+        cloud_height: haste_render::clouds::CLOUD_HEIGHT,
         // `SkyRenderer.shouldRenderDarkDisc` reads the player's interpolated eye.
         dark_disc: haste_render::sky::dark_disc::should_render_dark_disc(
             game::interpolate(view.prev_eye, view.eye, partial).y,
@@ -1595,6 +1599,8 @@ struct InputRouter {
     attack_clicks: u8,
     use_clicks: u8,
     pick_block: bool,
+    /// Ctrl held at the middle-click press (`pickBlockOrEntity`'s `hasControlDown`).
+    pick_block_ctrl: bool,
     drop_item: bool,
     drop_stack: bool,
     swap_offhand: bool,
@@ -1621,6 +1627,7 @@ impl Default for InputRouter {
             attack_clicks: 0,
             use_clicks: 0,
             pick_block: false,
+            pick_block_ctrl: false,
             drop_item: false,
             drop_stack: false,
             swap_offhand: false,
@@ -1748,7 +1755,10 @@ impl InputRouter {
                     self.use_clicks = self.use_clicks.saturating_add(1);
                 }
             }
-            2 if pressed => self.pick_block = true,
+            2 if pressed => {
+                self.pick_block = true;
+                self.pick_block_ctrl = self.mods.0;
+            }
             _ => {}
         }
         false
@@ -1882,6 +1892,10 @@ impl InputRouter {
                 .use_clicks
                 .saturating_add(std::mem::take(&mut self.use_clicks));
             i.pick_block |= std::mem::take(&mut self.pick_block);
+            if self.pick_block_ctrl {
+                i.pick_block_ctrl = true;
+                self.pick_block_ctrl = false;
+            }
             if let Some(ui) = ui {
                 // The action mappings' clicks (hotbar, drop, swap, jump), consumed once per
                 // frame and handed to the game thread through the shared input.
@@ -3112,6 +3126,7 @@ pub fn script_run(args: &Args, file: &Path) -> anyhow::Result<()> {
         }
         renderer.set_lightmap_frame(lightmap);
         renderer.set_menu_blur_radius(options.menu_background_blurriness);
+        renderer.set_view_scale(options.entity_distance_scaling);
         if let Ok(stats) = renderer.render(&frame) {
             last_stats = stats;
             fps.frame(&stats);
@@ -4713,6 +4728,7 @@ impl App {
         renderer.set_game_time(view.world_age);
         renderer.set_lightmap_frame(lightmap);
         renderer.set_menu_blur_radius(self.options.menu_background_blurriness);
+        renderer.set_view_scale(self.options.entity_distance_scaling);
         if self.screenshot {
             self.screenshot = false;
             renderer.request_capture();

@@ -145,6 +145,12 @@ impl Renderer {
         self.entity_shadows = on;
     }
 
+    /// Vanilla `Entity.viewScale` factor for entity render distance (from
+    /// `options.entityDistanceScaling`, 0.5..=5.0).
+    pub fn set_view_scale(&mut self, scale: f32) {
+        self.entity.set_view_scale(scale);
+    }
+
     /// Number of shadow quads batched for the last frame (tests/reporting).
     pub fn shadow_quad_count(&self) -> usize {
         self.entity.shadow_quad_count()
