@@ -2,6 +2,7 @@
 
 use super::*;
 use haste_audio::output::AudioOutput;
+use haste_core::BlockStateId;
 use haste_protocol::packets::configuration::clientbound::RegistryEntry;
 
 fn regs_with(names: &[&str]) -> SyncedRegistries {
@@ -274,6 +275,38 @@ fn step_request(r: &SoundRequest) -> (&str, f32, f32) {
     }
 }
 
+/// A fabricated step-rule block: state id 1 (non-air) with `sound`, at the cell
+/// below the origin.
+fn step_block<'a>(sound: Option<&'a haste_data::BlockSoundType>) -> super::steps::StepBlock<'a> {
+    super::steps::StepBlock {
+        pos: haste_core::BlockPos::new(0, -1, 0),
+        state: BlockStateId(1),
+        sound,
+        climbable: false,
+    }
+}
+
+/// A step context: `movement` this tick, on the ground by default, walking over a
+/// block with `sound` (supporting = effect, the common case on a full block).
+fn step_ctx<'a>(
+    movement: DVec3,
+    on_ground: bool,
+    sound: Option<&'a haste_data::BlockSoundType>,
+) -> super::steps::StepCtx<'a> {
+    let block = step_block(sound);
+    super::steps::StepCtx {
+        movement,
+        on_ground,
+        flying: false,
+        discrete: false,
+        crouching: false,
+        swimming: false,
+        in_water: false,
+        supporting: step_block(sound),
+        effect: block,
+    }
+}
+
 /// Vanilla's step-distance rule (`Entity.applyMovementEmissionAndPlaySound`):
 /// the walked distance accumulates times 0.6 and a step plays when it passes
 /// `nextStep` = `(int)moveDist + 1`. Walking 0.2 blocks per tick: the first
@@ -281,22 +314,21 @@ fn step_request(r: &SoundRequest) -> (&str, f32, f32) {
 /// next when it passes 2.0 (tick 17) — about every 1.67 blocks walked.
 #[test]
 fn step_distance_rule_fires_every_full_block_walked() {
-    let mut own = OwnBlockSounds::new();
+    let mut steps = StepSounds::new();
     let stone = stone_type();
     let mut fired = 0;
     for tick in 0..40 {
         // 0.2 blocks per tick of horizontal movement.
         let mut requests = Vec::new();
-        own.after_move(
-            DVec3::new(0.2, 0.0, 0.0),
-            DVec3::ZERO,
-            Some(&stone),
+        steps.after_move(
+            &step_ctx(DVec3::new(0.2, 0.0, 0.0), true, Some(&stone)),
             &mut requests,
         );
         if !requests.is_empty() {
             fired += 1;
             // Each firing is exactly one step sound at the stone step event,
-            // volume 1.0 * 0.15, pitch 1.0 (vanilla's factors).
+            // volume 1.0 * 0.15, pitch 1.0 (vanilla's factors), PLAYER source,
+            // played at the block's centre (vanilla plays at the player).
             assert_eq!(requests.len(), 1, "tick {tick}");
             let (name, volume, pitch) = step_request(&requests[0]);
             assert_eq!(name, "minecraft:block.stone.step");
@@ -309,30 +341,90 @@ fn step_distance_rule_fires_every_full_block_walked() {
     assert_eq!(fired, 4, "steps fired");
 }
 
+/// `Player.getMovementEmission` is NONE while flying or sneaking on the ground:
+/// no step sound ever, and the walked distance does not accumulate either, so
+/// the steps that would have fired do not come back on landing.
+#[test]
+fn no_step_while_flying_or_sneaking_on_the_ground() {
+    let stone = stone_type();
+    for (name, flying, discrete) in [
+        ("flying", true, false),
+        ("sneaking on the ground", false, true),
+    ] {
+        let mut steps = StepSounds::new();
+        let mut ctx = step_ctx(DVec3::new(0.2, 0.0, 0.0), true, Some(&stone));
+        ctx.flying = flying;
+        ctx.discrete = discrete;
+        for _ in 0..40 {
+            let mut requests = Vec::new();
+            steps.after_move(&ctx, &mut requests);
+            assert!(requests.is_empty(), "{name} played a step");
+        }
+        assert!(
+            (steps.move_dist() - 0.0).abs() < 1e-6,
+            "{name} accumulated distance"
+        );
+    }
+}
+
+/// `nextStep` only advances on a played step (`vibrationAndSoundEffectsFromBlock`
+/// produced nothing): airborne over a block, with the gate closed (not on the
+/// ground, not climbing, not crouching), the distance accumulates past `nextStep`
+/// but the step never fires and `nextStep` stays — so the moment the gate opens
+/// (landing), exactly one step plays, not one per crossed boundary.
+#[test]
+fn next_step_only_advances_on_a_played_step() {
+    let mut steps = StepSounds::new();
+    let stone = stone_type();
+    // Airborne, not swimming: the gate is closed, no sound, no advance.
+    for _ in 0..20 {
+        let mut requests = Vec::new();
+        steps.after_move(
+            &step_ctx(DVec3::new(0.2, 0.0, 0.0), false, Some(&stone)),
+            &mut requests,
+        );
+        assert!(requests.is_empty());
+    }
+    assert!(
+        steps.move_dist() > steps.next_step(),
+        "distance passed nextStep"
+    );
+    assert!((steps.next_step() - 1.0).abs() < 1e-6, "nextStep advanced");
+    // Land: one step (the gate opens), and nextStep catches up.
+    let mut requests = Vec::new();
+    steps.after_move(
+        &step_ctx(DVec3::new(0.2, 0.0, 0.0), true, Some(&stone)),
+        &mut requests,
+    );
+    assert_eq!(requests.len(), 1, "one step on landing, not a burst");
+    assert!((steps.next_step() - (steps.move_dist() as i32 as f32 + 1.0)).abs() < 1e-6);
+}
+
 /// On air (no supporting block) no step plays, but the walked distance still
 /// accumulates (vanilla's `moveDist` counts it; only the firing needs support):
 /// landing after walking far over air fires one step per crossed block boundary,
 /// in quick succession — exactly what vanilla does.
 #[test]
 fn no_step_over_air_then_boundaries_on_landing() {
-    let mut own = OwnBlockSounds::new();
+    let mut steps = StepSounds::new();
     let stone = stone_type();
     // Walk 10 blocks over air: nothing fires, nextStep stays 1.0.
     for _ in 0..50 {
         let mut requests = Vec::new();
-        own.after_move(DVec3::new(0.2, 0.0, 0.0), DVec3::ZERO, None, &mut requests);
+        steps.after_move(
+            &step_ctx(DVec3::new(0.2, 0.0, 0.0), false, None),
+            &mut requests,
+        );
         assert!(requests.is_empty());
     }
-    assert!((own.next_step - 1.0).abs() < 1e-6);
+    assert!((steps.next_step() - 1.0).abs() < 1e-6);
     // Land: the first tick (md 6.12) crosses boundary 1 and the accumulator
     // catches nextStep up to 7; then 7.02 and 8.04 fire in the 20 ticks.
     let mut fired = 0;
     for _ in 0..20 {
         let mut requests = Vec::new();
-        own.after_move(
-            DVec3::new(0.2, 0.0, 0.0),
-            DVec3::ZERO,
-            Some(&stone),
+        steps.after_move(
+            &step_ctx(DVec3::new(0.2, 0.0, 0.0), true, Some(&stone)),
             &mut requests,
         );
         fired += requests.len();
@@ -344,30 +436,26 @@ fn no_step_over_air_then_boundaries_on_landing() {
 /// the first step after one comes a full block of walking later.
 #[test]
 fn teleport_resets_the_step_accumulator() {
-    let mut own = OwnBlockSounds::new();
+    let mut steps = StepSounds::new();
     let stone = stone_type();
     // Walk to md 0.6 (no fire yet) and teleport.
     for _ in 0..5 {
         let mut requests = Vec::new();
-        own.after_move(
-            DVec3::new(0.2, 0.0, 0.0),
-            DVec3::ZERO,
-            Some(&stone),
+        steps.after_move(
+            &step_ctx(DVec3::new(0.2, 0.0, 0.0), true, Some(&stone)),
             &mut requests,
         );
         assert!(requests.is_empty());
     }
-    own.reset_steps();
-    assert!((own.next_step - 1.0).abs() < 1e-6);
-    assert!((own.move_dist - 0.0).abs() < 1e-6);
+    steps.reset();
+    assert!((steps.next_step() - 1.0).abs() < 1e-6);
+    assert!((steps.move_dist() - 0.0).abs() < 1e-6);
     // 5 more ticks (md 0.6): still no step; the 9th would have fired without
     // the reset (md 1.08 > 1.0).
     let mut requests = Vec::new();
     for _ in 0..5 {
-        own.after_move(
-            DVec3::new(0.2, 0.0, 0.0),
-            DVec3::ZERO,
-            Some(&stone),
+        steps.after_move(
+            &step_ctx(DVec3::new(0.2, 0.0, 0.0), true, Some(&stone)),
             &mut requests,
         );
     }
@@ -378,10 +466,8 @@ fn teleport_resets_the_step_accumulator() {
     let mut fired = 0;
     for _ in 0..5 {
         let mut requests = Vec::new();
-        own.after_move(
-            DVec3::new(0.2, 0.0, 0.0),
-            DVec3::ZERO,
-            Some(&stone),
+        steps.after_move(
+            &step_ctx(DVec3::new(0.2, 0.0, 0.0), true, Some(&stone)),
             &mut requests,
         );
         fired += requests.len();
@@ -635,12 +721,10 @@ fn place_factors_and_the_empty_event() {
     // nothing rather than a silent event.
     let mut quiet = stone_type();
     quiet.step_sound = "minecraft:intentionally_empty".to_owned();
-    let mut own = OwnBlockSounds::new();
+    let mut steps = StepSounds::new();
     let mut requests = Vec::new();
-    own.after_move(
-        DVec3::new(0.2, 0.0, 0.0),
-        DVec3::ZERO,
-        Some(&quiet),
+    steps.after_move(
+        &step_ctx(DVec3::new(0.2, 0.0, 0.0), true, Some(&quiet)),
         &mut requests,
     );
     assert!(requests.is_empty());

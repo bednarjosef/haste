@@ -1,6 +1,6 @@
-//! Block sounds: the local player's own (footsteps, mining, breaking, placing)
-//! and the ones the server's `level_event` asks for (a break, a mining tick).
-//! The fall sounds live in `falls.rs`.
+//! Block sounds: the local player's own (mining, breaking, placing) and the ones
+//! the server's `level_event` asks for (a break, a mining tick). Footsteps live in
+//! `steps.rs`, fall sounds in `falls.rs`.
 
 use glam::DVec3;
 use haste_audio::random::LegacyRandom;
@@ -10,15 +10,9 @@ use super::{PlayRequest, SoundPos, SoundRef, SoundRequest};
 
 /// The local player's own block sounds (vanilla plays these client-side: the
 /// server excludes the acting player from its broadcasts, so a client that
-/// waits for packets stays silent while walking, mining, placing).
+/// waits for packets stays silent while mining, placing).
 ///
 /// The rules are vanilla's, read from the 26.3 client:
-/// - footsteps: `Entity.applyMovementEmissionAndPlaySound` — the horizontal
-///   distance moved (clipped by collision, times 0.6) accumulates in
-///   `moveDist`; a step sound fires when it passes `nextStep`
-///   (`(int)moveDist + 1`, so about every 1.67 blocks walked) and the block
-///   below is not air. Volume is the sound type's times 0.15, pitch
-///   unchanged;
 /// - mining hit: `MultiPlayerGameMode.startDestroyBlock` /
 ///   `continueDestroyBlock` call `addBreakingBlockEffects(playSound=true)`
 ///   on the *start* tick only (the server broadcasts the 2020 follow-ups
@@ -38,69 +32,20 @@ use super::{PlayRequest, SoundPos, SoundRef, SoundRequest};
 /// path, so headless counts them and the game thread plays them through
 /// `Sounds::apply` with the category volumes applied.
 pub struct OwnBlockSounds {
-    /// Accumulated horizontal distance (vanilla `moveDist`), times 0.6.
-    pub(super) move_dist: f32,
-    /// Distance at which the next step plays (vanilla `nextStep`).
-    pub(super) next_step: f32,
     /// `ClientLevel.random`: `playLocalSound` seeds each sound instance with its
     /// `nextLong()`, so footsteps and hits pick a different file each time instead of
     /// always the same one.
     random: LegacyRandom,
 }
 
-/// `SoundSource.PLAYERS`, the category vanilla's `Player.getSoundSource()`
-/// uses for its own sounds (index 7 in the packet's category order).
-const CATEGORY_PLAYERS: i32 = 7;
 /// `SoundSource.BLOCKS` for the block-driven ones (mining hit, break, place).
 const CATEGORY_BLOCKS: i32 = 4;
 
 impl OwnBlockSounds {
     pub fn new() -> Self {
         Self {
-            move_dist: 0.0,
-            next_step: 1.0,
             random: LegacyRandom::new(unseeded()),
         }
-    }
-
-    /// One tick's movement, after physics: accumulates the walked distance
-    /// and plays a step sound when the rule fires. `movement` is the
-    /// position change the player actually made this tick (vanilla passes
-    /// the collision-clipped movement; the horizontal part counts unless
-    /// climbing).
-    pub fn after_move(
-        &mut self,
-        movement: DVec3,
-        player_pos: DVec3,
-        supporting: Option<&haste_data::BlockSoundType>,
-        requests: &mut Vec<SoundRequest>,
-    ) {
-        // Vanilla accumulates `movement.horizontalDistance() * 0.6` (climbing uses the full
-        // length instead; we have no ladders yet).
-        let horiz = (movement.x * movement.x + movement.z * movement.z).sqrt() as f32 * 0.6;
-        self.move_dist += horiz;
-        if self.move_dist > self.next_step && supporting.is_some() {
-            self.next_step = self.move_dist as i32 as f32 + 1.0;
-            if let Some(t) = supporting {
-                // Entity.playStepSound: step at volume*0.15, pitch unchanged; PLAYER source.
-                let seed = self.random.next_long();
-                play_event(
-                    seed,
-                    &t.step_sound,
-                    CATEGORY_PLAYERS,
-                    player_pos,
-                    t.volume * 0.15,
-                    t.pitch,
-                    requests,
-                );
-            }
-        }
-    }
-
-    /// Reset the step accumulator (teleport, respawn, flight start).
-    pub fn reset_steps(&mut self) {
-        self.move_dist = 0.0;
-        self.next_step = 1.0;
     }
 
     /// A block break we predicted (the moment the block goes for us).

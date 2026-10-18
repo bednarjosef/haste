@@ -27,8 +27,10 @@ use haste_protocol::SyncedRegistries;
 
 mod falls;
 mod own_block;
+mod steps;
 pub use falls::{FallBlockRule, FallSounds, LandedOn};
 pub use own_block::{level_event_sound, OwnBlockSounds};
+pub use steps::{resolve_step_blocks, StepCtx, StepSounds};
 
 /// The `MUSIC_VOLUME` environment attribute's default (vanilla's
 /// `EnvironmentAttributes.MUSIC_VOLUME`): the target the music fade eases toward, on top

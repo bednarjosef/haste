@@ -268,6 +268,8 @@ pub struct LocalPlayer {
     toggle_flight: bool,
     /// The local player's own block sounds (client-side rules, sound.rs).
     pub(crate) own_sounds: crate::sound::OwnBlockSounds,
+    /// The local player's footsteps (client-side rules, sound/steps.rs).
+    steps: crate::sound::StepSounds,
     /// The local player's own fall sounds (client-side rules, sound/falls.rs).
     fall_sounds: crate::sound::FallSounds,
     /// Own-sound requests this tick, drained into `Session::sound_requests` by `end_tick`.
@@ -339,6 +341,7 @@ impl LocalPlayer {
             attributes_dirty: false,
             toggle_flight: false,
             own_sounds: crate::sound::OwnBlockSounds::new(),
+            steps: crate::sound::StepSounds::new(),
             fall_sounds: crate::sound::FallSounds::new(),
             sound_out: Vec::new(),
             block_particles_out: Vec::new(),
@@ -612,7 +615,7 @@ impl LocalPlayer {
             pick(teleport_flags::VEL_Z, v.z, p.velocity.z),
         );
         s.fall_distance = 0.0;
-        self.own_sounds.reset_steps();
+        self.steps.reset();
         self.set_look(yaw, pitch);
         tracing::debug!("after teleport {:?}", self.state);
         self.prev_pos = self.state.pos;
@@ -1027,7 +1030,7 @@ impl LocalPlayer {
             }));
         }
         if self.state.flying != was_flying {
-            self.own_sounds.reset_steps();
+            self.steps.reset();
         }
         let chunk = BlockPos::from_dvec3(self.state.pos).chunk();
         if ctx.world.is_chunk_loaded(chunk) {
@@ -1046,16 +1049,37 @@ impl LocalPlayer {
                 ctx.blocks,
                 &climb,
             );
-            // Own block sounds of moving: the step rule on the block below the
-            // feet, the fall sound on a hard landing (vanilla plays both on
-            // the client; the server excludes the acting player).
+            // Own block sounds of moving: footsteps from vanilla's step rule, the
+            // fall sound on a hard landing (the server excludes the acting player
+            // from its broadcasts, so the client plays both itself).
             let movement = self.state.pos - pre_tick_pos;
             let sound_type = ctx.env.and_then(|e| {
                 supporting_block_state(self.state.pos, ctx.world)
                     .and_then(|s| e.data.block_sound_type(s))
             });
-            self.own_sounds
-                .after_move(movement, self.state.pos, sound_type, &mut self.sound_out);
+            if let Some(e) = ctx.env {
+                let (supporting, effect) = crate::sound::resolve_step_blocks(
+                    self.state.pos,
+                    &self.state.aabb(&self.attrs),
+                    self.state.on_ground,
+                    ctx.world,
+                    ctx.shapes,
+                    e.data,
+                    self.int.block_tags(),
+                );
+                let steps = crate::sound::StepCtx {
+                    movement,
+                    on_ground: self.state.on_ground,
+                    flying: self.state.flying,
+                    discrete: self.state.sneaking,
+                    crouching: self.state.crouching,
+                    swimming: self.state.swimming,
+                    in_water: self.state.in_water,
+                    supporting,
+                    effect,
+                };
+                self.steps.after_move(&steps, &mut self.sound_out);
+            }
             if !was_on_ground && self.state.on_ground {
                 // Vanilla `Entity.checkFallDamage` runs inside the move that grounds the
                 // player with the fall distance including this tick's final fall (our
