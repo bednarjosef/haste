@@ -139,6 +139,12 @@ impl Renderer {
         self.entity.set_view_scale(scale);
     }
 
+    /// Vanilla `Options.cloudStatus` (options.txt `renderClouds`): OFF draws no cloud pass,
+    /// FAST the flat cells, FANCY the extruded boxes.
+    pub fn set_cloud_status(&mut self, status: crate::clouds::CloudStatus) {
+        self.clouds.set_status(status);
+    }
+
     /// Number of shadow quads batched for the last frame (tests/reporting).
     pub fn shadow_quad_count(&self) -> usize {
         self.entity.shadow_quad_count()

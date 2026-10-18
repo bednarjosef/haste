@@ -1,22 +1,37 @@
-// Fancy clouds (vanilla `CloudRenderer`): 12x12x4 boxes built from the `clouds.png`
+// The clouds (vanilla `CloudRenderer`): 12x12x4 boxes built from the `clouds.png`
 // cells around the camera (`mesh.rs`), drawn as one batched mesh with per-face shades
 // (0.7 bottom, 1.0 top, 0.8 north/south, 0.9 west/east). The mesh is
-// camera-cell-relative and is rebuilt only when the camera crosses a cell boundary or
-// moves between above, inside and below the cloud layer; every other frame only the
-// small uniform (the offset inside the cell) is uploaded. FANCY is vanilla's default
-// cloud mode; the flat cells of the FAST mode are not drawn (no option is wired).
+// camera-cell-relative and is rebuilt only when the camera crosses a cell boundary,
+// moves between above, inside and below the cloud layer, or the cloud mode changes;
+// every other frame only the small uniform (the offset inside the cell) is uploaded.
+// The mode is vanilla's `Options.cloudStatus` (options.txt `renderClouds`): OFF draws
+// no pass at all, FAST the flat cells of `flat.rs`, FANCY (vanilla's default) these
+// extruded boxes.
 
 use std::sync::Arc;
 
 use crate::fog::FogData;
 use crate::{Camera, SkyState};
 
+mod flat;
 mod mesh;
 #[cfg(test)]
 mod tests;
 
 use mesh::build_mesh;
 pub use mesh::{CloudTexture, RelativeCameraPos};
+
+/// Vanilla `net.minecraft.client.CloudStatus` (options.txt `renderClouds`): OFF skips the
+/// pass, FAST draws the flat cells, FANCY the extruded boxes. Default FANCY, like
+/// `Options.cloudStatus`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CloudStatus {
+    Off,
+    Fast,
+    /// Vanilla's default (`Options.cloudStatus`).
+    #[default]
+    Fancy,
+}
 
 /// One cloud cell is 12x12 blocks wide and 4 tall (vanilla `CELL_SIZE_IN_BLOCKS` and the
 /// extruded cell's height).
@@ -110,13 +125,17 @@ struct CloudUniforms {
     _pad1: [f32; 7],
 }
 
-/// The fancy-clouds pass (vanilla `CloudRenderer`): the extruded cell mesh around the
-/// camera, rebuilt only when the camera's cell or its position relative to the layer
-/// changes.
+/// The clouds pass (vanilla `CloudRenderer`): the cell mesh around the camera, rebuilt
+/// only when the camera's cell, its position relative to the layer or the cloud mode
+/// changes. FANCY draws the extruded boxes, FAST the flat cells (`flat.rs`), OFF
+/// nothing.
 pub struct CloudRenderer {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     pipeline: wgpu::RenderPipeline,
+    /// The flat cells of the FAST mode (vanilla `RenderPipelines.FLAT_CLOUDS`: the
+    /// clouds pipeline without back-face culling, so the plane shows from both sides).
+    flat_pipeline: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     vertex_buffer: wgpu::Buffer,
@@ -124,8 +143,10 @@ pub struct CloudRenderer {
     vertices: Vec<CloudVertex>,
     vertex_count: u32,
     texture: Option<CloudTexture>,
-    /// The camera cell and relative position the mesh was built for.
-    built_for: Option<(i32, i32, RelativeCameraPos)>,
+    /// The camera cell, position relative to the layer and mode the mesh was built for.
+    built_for: Option<(i32, i32, RelativeCameraPos, bool)>,
+    /// The frame's cloud mode (vanilla `Options.cloudStatus`, via `set_status`).
+    status: CloudStatus,
     /// Whether the one-time diagnostics line was logged.
     logged: bool,
 }
@@ -181,41 +202,26 @@ impl CloudRenderer {
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &attributes,
         };
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("clouds"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(vertex_layout)],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth24Plus,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline = make_pipeline(
+            &device,
+            &pipeline_layout,
+            &shader,
+            &vertex_layout,
+            target_format,
+            Some(wgpu::Face::Back),
+            "clouds",
+        );
+        // Vanilla `RenderPipelines.FLAT_CLOUDS`: the same pipeline without back-face
+        // culling, so the FAST mode's flat cells show from both sides.
+        let flat_pipeline = make_pipeline(
+            &device,
+            &pipeline_layout,
+            &shader,
+            &vertex_layout,
+            target_format,
+            None,
+            "clouds-flat",
+        );
         let capacity = 4096;
         CloudRenderer {
             vertex_buffer: make_buffer(&device, capacity),
@@ -224,18 +230,36 @@ impl CloudRenderer {
             vertex_count: 0,
             texture,
             built_for: None,
+            status: CloudStatus::default(),
             logged: false,
             device,
             queue,
             pipeline,
+            flat_pipeline,
             uniforms,
             bind_group,
         }
     }
 
-    /// Vanilla `CloudRenderer.prepare`: finds the camera's cell, rebuilds the mesh when
-    /// the cell or the position relative to the layer changed, and writes the per-frame
-    /// uniforms (the offset inside the cell, the colour, the fog end).
+    /// Vanilla `Options.cloudStatus` for the frames to come (the video setting; changed
+    /// from a vanilla options screen or the config). A mode change rebuilds the mesh once,
+    /// on the next `prepare` (vanilla's `prevCloudStatus` in the rebuild condition).
+    pub fn set_status(&mut self, status: CloudStatus) {
+        self.status = status;
+    }
+
+    /// The vertices of the current mesh (tests).
+    #[cfg(test)]
+    pub(super) fn vertex_count(&self) -> u32 {
+        self.vertex_count
+    }
+
+    /// Vanilla `CloudRenderer.prepare` under `LevelRenderer.renderClouds`: the OFF mode
+    /// draws no pass at all (no mesh, no uniforms), so it returns before anything else;
+    /// a dimension without clouds (not the overworld) skips the pass the same way.
+    /// Otherwise finds the camera's cell, rebuilds the mesh when the cell, the position
+    /// relative to the layer or the mode changed, and writes the per-frame uniforms
+    /// (the offset inside the cell, the colour, the fog end).
     pub fn prepare(
         &mut self,
         camera: &Camera,
@@ -246,7 +270,7 @@ impl CloudRenderer {
         partial_tick: f32,
     ) {
         self.vertex_count = 0;
-        if kind != crate::sky::SkyKind::Overworld {
+        if self.status == CloudStatus::Off || kind != crate::sky::SkyKind::Overworld {
             self.built_for = None;
             return;
         }
@@ -276,8 +300,9 @@ impl CloudRenderer {
         // The mesh covers the cloud fog end (vanilla draws the cloud range option's
         // distance; without the option wired, the fog end is where clouds fade out).
         let radius_cells = (fog.cloud_end / CELL_SIZE).ceil() as i32;
-        if self.built_for != Some((cell_x, cell_z, relative_pos)) {
-            self.built_for = Some((cell_x, cell_z, relative_pos));
+        let fancy = self.status == CloudStatus::Fancy;
+        if self.built_for != Some((cell_x, cell_z, relative_pos, fancy)) {
+            self.built_for = Some((cell_x, cell_z, relative_pos, fancy));
             self.vertices.clear();
             build_mesh(
                 &mut self.vertices,
@@ -286,6 +311,7 @@ impl CloudRenderer {
                 cell_z,
                 relative_pos,
                 radius_cells,
+                fancy,
             );
             self.vertex_count = self.vertices.len() as u32;
             if self.vertices.len() > self.capacity {
@@ -330,12 +356,17 @@ impl CloudRenderer {
     }
 
     /// Draws the cloud mesh into the main pass, after translucent terrain (where the sky
-    /// overlays run). One draw call.
+    /// overlays run). One draw call; the mode picks the pipeline (vanilla `render`:
+    /// `FLAT_CLOUDS` for the FAST cells, `CLOUDS` for the extruded boxes).
     pub fn draw<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) -> u32 {
         if self.vertex_count == 0 {
             return 0;
         }
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(if self.status == CloudStatus::Fancy {
+            &self.pipeline
+        } else {
+            &self.flat_pipeline
+        });
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         pass.draw(0..self.vertex_count, 0..1);
@@ -349,5 +380,54 @@ fn make_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
         size: (capacity * std::mem::size_of::<CloudVertex>()) as u64,
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
+    })
+}
+
+/// The clouds pass's pipeline (vanilla `RenderPipelines.CLOUDS`): alpha-blended,
+/// depth-tested without writes, with the given cull mode (`FLAT_CLOUDS` is the
+/// unculled one).
+fn make_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    vertex_layout: &wgpu::VertexBufferLayout,
+    target_format: wgpu::TextureFormat,
+    cull_mode: Option<wgpu::Face>,
+    label: &str,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[Some(vertex_layout.clone())],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: target_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth24Plus,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
     })
 }
