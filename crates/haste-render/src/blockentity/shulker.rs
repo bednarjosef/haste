@@ -40,7 +40,7 @@ pub(super) fn shulker_color(block: &Identifier) -> Option<u8> {
 
 /// The texture a shulker box is drawn with (vanilla `Sheets.getShulkerBoxSprite`:
 /// `entity/shulker/shulker_<color>`, the undyed `entity/shulker/shulker` for `None`).
-pub fn shulker_texture(color: Option<u8>) -> Identifier {
+pub fn shulker_texture(color: Option<u8>) -> &'static Identifier {
     const NAMES: [&str; 16] = [
         "white",
         "orange",
@@ -59,9 +59,19 @@ pub fn shulker_texture(color: Option<u8>) -> Identifier {
         "red",
         "black",
     ];
+    static TABLE: OnceLock<[Identifier; 17]> = OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        std::array::from_fn(|idx| {
+            if idx == 0 {
+                Identifier::minecraft("entity/shulker/shulker")
+            } else {
+                Identifier::minecraft(&format!("entity/shulker/shulker_{}", NAMES[idx - 1]))
+            }
+        })
+    });
     match color {
-        None => Identifier::minecraft("entity/shulker/shulker"),
-        Some(i) => Identifier::minecraft(&format!("entity/shulker/shulker_{}", NAMES[i as usize])),
+        None => &table[0],
+        Some(i) => &table[i as usize + 1],
     }
 }
 
