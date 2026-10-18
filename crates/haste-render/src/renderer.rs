@@ -1701,10 +1701,9 @@ impl Renderer {
         let pos = mesh.pos;
         let si = pos.y - self.min_section;
         if mesh.is_removal() {
-            // The chunk is gone (or the section was mined to air): drop the resident
-            // mesh and its visibility data — the walk treats a section without data
-            // as see-through, like vanilla's empty sections (`ClientChunkCache.drop`
-            // releases the render data with the chunk).
+            // The chunk is gone: drop the resident mesh and its visibility data
+            // (`ClientChunkCache.drop` releases the render data with the chunk). A
+            // section mined to air is an ordinary empty mesh and takes the path below.
             let mut vis = self.section_vis.lock();
             let had_vis = vis.remove(&(ChunkPos::new(pos.x, pos.z), si)).is_some();
             drop(vis);

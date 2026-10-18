@@ -27,6 +27,10 @@ pub struct SectionMesh {
     pub aabb: ([f32; 3], [f32; 3]),
     /// Face-to-face sightlines through the section (cave culling).
     pub visibility: crate::occlusion::VisibilitySet,
+    /// Set only by [`SectionMesh::removed`]: the chunk is gone, so the renderer frees the
+    /// section. An ordinary mesh with no geometry (air, or solid stone with every face
+    /// hidden) is not a removal: it keeps its visibility entry for cave culling.
+    pub removed: bool,
 }
 
 impl SectionMesh {
@@ -39,13 +43,14 @@ impl SectionMesh {
             layers: Vec::new(),
             aabb: ([0.0; 3], [0.0; 3]),
             visibility: crate::occlusion::VisibilitySet::none(),
+            removed: true,
         }
     }
 
-    /// Whether this mesh carries no geometry and only asks the renderer to drop what
-    /// is resident at its position (a forgotten chunk, or a section mined to air).
+    /// Whether this mesh only asks the renderer to drop what is resident at its position
+    /// (a forgotten chunk).
     pub fn is_removal(&self) -> bool {
-        self.vertices.is_empty() && self.layers.is_empty()
+        self.removed
     }
 
     /// GPU bytes the vertices will occupy in an arena.
@@ -1166,6 +1171,7 @@ pub fn mesh_section_with(
             layers,
             aabb: (sink.min, sink.max),
             visibility: crate::occlusion::section_visibility(snapshot, baked, pos),
+            removed: false,
         }
     })
 }
