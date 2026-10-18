@@ -11,8 +11,10 @@ use haste_core::math::Vec3;
 use haste_core::model::{BodyTransform, EntityInstance, PoseOverrides};
 use haste_core::view::BlockView;
 use haste_core::{BlockPos, Direction, EntityId, RegistryIndex};
-use haste_world::World;
+use haste_protocol::haste_core::game::GameMode;
 
+use super::camera::eye_in_lava;
+use super::weather::{biome_has_precipitation, rain_fog_sky_light};
 use super::{interpolate, skins};
 
 /// The local player's pose for its own model: the physics pose's render equivalent (sleeping and
@@ -25,35 +27,6 @@ pub(super) fn player_pose(s: &crate::net::Session) -> Option<Pose> {
         PhysicsPose::Swimming => Some(Pose::Swimming),
         PhysicsPose::FallFlying => Some(Pose::FallFlying),
     }
-}
-
-/// `AtmosphericFogEnvironment.updateRainFogState`'s sky-light factor: the sky light at the
-/// camera's block, clamped `(light - 8) / 7`.
-pub(super) fn rain_fog_sky_light(world: &World, eye: DVec3) -> f32 {
-    use haste_core::view::BlockView as _;
-    let p = BlockPos::new(
-        eye.x.floor() as i32,
-        eye.y.floor() as i32,
-        eye.z.floor() as i32,
-    );
-    ((world.sky_light(p) as f32) - 8.0) / 7.0
-}
-
-/// Whether the biome at the eye has precipitation (`updateRainFogState` halves the rain
-/// fog when it does not).
-pub(super) fn biome_has_precipitation(
-    world: &World,
-    climates: &[haste_render::BiomeClimate],
-    eye: DVec3,
-) -> bool {
-    use haste_render::BiomeSource as _;
-    let p = BlockPos::new(
-        eye.x.floor() as i32,
-        eye.y.floor() as i32,
-        eye.z.floor() as i32,
-    );
-    let biome = crate::app::biomes::WorldBiomes(world).biome(p).0 as usize;
-    climates.get(biome).is_some_and(|c| c.has_precipitation)
 }
 
 /// The local player's own render instance for third person (the server does not spawn us as an
@@ -340,4 +313,166 @@ fn pair(v: (f32, f32)) -> haste_render::TickPair {
         start: v.0,
         end: v.1,
     }
+}
+
+/// The first-person hand's tick, in vanilla's order (`LivingEntity.baseTick`, then
+/// `Player.tick`, then `FirstPersonHandsAndItems.tick`, with the walk bob in `aiStep` before
+/// them); the interaction step above ran the attacks and uses that started the swings. In
+/// spectator the hand is not drawn at all (vanilla hides it there), so it does not advance.
+pub(super) fn tick_hand(
+    driver: &mut crate::net::NetDriver,
+    shared: &super::shared::Shared,
+    tick_moved: f32,
+) -> Option<FirstPersonView> {
+    let first_person = if driver.session.player.game_mode == GameMode::Spectator {
+        None
+    } else {
+        let on_fire = driver.session.own_flags().on_fire || driver.session.screen_probe.in_fire;
+        let p = &mut driver.session.player;
+        let attack_speed = p.held_attack_speed();
+        p.hand.tick(
+            tick_moved,
+            (p.state.yaw, p.state.pitch),
+            p.state.on_ground,
+            matches!(p.state.pose, haste_physics::Pose::Swimming),
+            p.held_stack(),
+            attack_speed,
+        );
+        let eye = p.camera(1.0).0;
+        let hand = &p.hand;
+        let mut fp =
+            FirstPersonView::sample(&*shared.world.read(), eye, hand.shown_item(), on_fire);
+        fp.with_hand(hand);
+        Some(fp)
+    };
+    first_person
+}
+
+/// The view update, the tick's last step (vanilla's per-tick render state extraction):
+/// everything the render thread needs per frame is copied into [`ViewState`] here, bracketed
+/// around the tick. Returns the player's feet position, for the block entity extraction
+/// that follows.
+pub(super) fn publish(
+    driver: &crate::net::NetDriver,
+    shared: &super::shared::Shared,
+    first_person: Option<FirstPersonView>,
+    prev: (DVec3, f32, f32),
+    cur: (DVec3, f32, f32),
+) -> DVec3 {
+    let (prev_eye, prev_yaw, prev_pitch) = prev;
+    let (eye, yaw, pitch) = cur;
+    let s = &driver.session;
+    let mut view = shared.view.lock();
+    // The feet bracket the tick like the eye does; the eye height can change within it
+    // (sneaking), so the old feet are the last view's, not the eye minus its height.
+    let feet = s.player.state.pos;
+    view.prev_feet = if view.has_position { view.feet } else { feet };
+    let prev_feet = view.prev_feet;
+    view.cloak.tick(prev_feet);
+    view.prev_eye = prev_eye;
+    view.eye = eye;
+    view.prev_look = (prev_yaw, prev_pitch);
+    view.look = (yaw, pitch);
+    view.look_offset = s.player.look_offset();
+    view.tick_at = Instant::now();
+    view.animation_tick = view.animation_tick.wrapping_add(1);
+    view.has_position = s.player.has_position;
+    view.feet = feet;
+    view.pose = player_pose(s);
+    let lm = &s.lightmap;
+    view.lightmap_flicker = lm.flicker;
+    view.lightmap_night_vision = lm.night_vision;
+    view.lightmap_darkness = lm.darkness;
+    view.lightmap_darkness_blend = lm.darkness_blend;
+    view.lightmap_boss_darkening = (lm.boss_darkening_o, lm.boss_darkening);
+    view.lightmap_lightning = lm.sky_flash_time > 0;
+    view.lightmap_tick_count = lm.tick_count;
+    // The weather levels bracketing this tick (the render thread lerps by partial tick)
+    // and the rain fog multiplier (`AtmosphericFogEnvironment.updateRainFogState` eased
+    // by `deltaTicks * 0.2` toward rain level x sky-light factor x biome precipitation).
+    {
+        let w = &s.weather;
+        view.rain_level = (w.rain_level_o, w.rain_level);
+        view.thunder_level = (w.thunder_level_o, w.thunder_level);
+        let target = if crate::net::WeatherState::can_have_weather(&s.dimension) {
+            let world = shared.world.read();
+            let precipitation = if biome_has_precipitation(&world, &shared.biome_climates, eye) {
+                1.0
+            } else {
+                0.5
+            };
+            w.rain_level(1.0) * rain_fog_sky_light(&world, eye) * precipitation
+        } else {
+            0.0
+        };
+        view.rain_fog_multiplier += (target - view.rain_fog_multiplier) * 0.2;
+        view.sea_level = s.sea_level;
+        view.horizon_height =
+            haste_render::sky::dark_disc::horizon_height(s.is_flat, s.dimension.min_y);
+    }
+    view.eye_height = s.player.eye_height();
+    view.time_of_day = s.time_of_day.unwrap_or(6000);
+    view.world_age = s.world_age;
+    view.has_sky = s.dimension.has_skylight;
+    view.block_target = s.player.target();
+    view.eye_in_water = s.player.state.eyes_in_water;
+    view.eye_in_lava = eye_in_lava(&shared.world.read(), &shared.data, eye);
+    // The fog environment's player state (vanilla `FogRenderer.setupFog` reads these off the
+    // entity): blindness and fire resistance from the active effects, spectator from the mode,
+    // the water-vision ramp, and the boss overlay's world fog.
+    let eff = |id: Option<i32>| {
+        id.and_then(|i| s.player.int.effects.get(&i))
+            .map(|e| e.duration)
+    };
+    view.blindness = eff(s.player.int.lightmap_effect_ids.blindness);
+    view.fire_resistance = eff(s.player.int.lightmap_effect_ids.fire_resistance).is_some();
+    view.spectator = s.player.game_mode == GameMode::Spectator;
+    view.water_vision = s.player.get_water_vision();
+    view.boss_world_fog = s.lightmap.boss_world_fog;
+    view.held_slot = s.player.held_slot;
+    view.first_person = first_person;
+    view.fov_modifier = s.fov_modifier;
+    view.fov_modifier_old = s.old_fov_modifier;
+    // The view bobbing's walk distance and bob are the hand's own (vanilla's one
+    // `ClientAvatarState` ticks both).
+    let (walk_dist_o, walk_dist) = s.player.hand.walk_dist();
+    view.walk_dist = walk_dist;
+    view.walk_dist_o = walk_dist_o;
+    let (bob_o, bob) = s.player.hand.bob();
+    view.bob = bob;
+    view.bob_o = bob_o;
+    view.hurt_ticks = s.hurt_ticks;
+    view.hurt_dir = s.hurt_dir;
+    view.death_ticks = s.death_ticks;
+    view.dead = s.player.health <= 0.0;
+    // The screen effects, from this tick's world probe (the block the camera is inside, the
+    // eye's light), the own entity's flags and freeze ticks, the worn head item and the active
+    // effects. The eyes being in water comes from the physics' fluid at the eye position.
+    let head_item = s.head_item().and_then(|i| {
+        shared
+            .data
+            .registries
+            .name("minecraft:item", i)
+            .cloned()
+            .and_then(|name| crate::screen_effects::camera_overlay(&name))
+    });
+    let screen = s.screen_effects();
+    view.screen = crate::screen_effects::ViewEffects {
+        block_overlay: s.screen_probe.block_overlay.clone(),
+        eye_in_water: view.eye_in_water,
+        eye_light: s.screen_probe.eye_light,
+        // The client predicts its own fire from the fire block it overlaps
+        // (`BaseFireBlock.fireIgnite`); the server never sends the owner their own
+        // `set_entity_data`, so `own_flags.on_fire` stays false and the probe carries it.
+        on_fire: s.own_flags().on_fire || s.screen_probe.in_fire,
+        camera_overlay: head_item,
+        frozen_ticks: s.own_flags().frozen_ticks,
+        scoping: s.player.scoping(&shared.data),
+        portal: (screen.prev_portal(), screen.portal()),
+        nausea: s.player.int.nausea_blend_pair(),
+        spinning_time: screen.spinning_time(),
+        spinning_speed: screen.spinning_speed(),
+    };
+    drop(view);
+    feet
 }

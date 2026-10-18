@@ -8,7 +8,6 @@
 //! entity render instances, never across `Renderer::render`. Everything else the render thread
 //! needs per frame is a small `Copy` value in [`Shared::view`].
 
-use std::sync::atomic::Ordering;
 #[cfg(test)]
 use std::time::Duration;
 use std::time::Instant;
@@ -16,44 +15,51 @@ use std::time::Instant;
 use glam::DVec3;
 #[cfg(test)]
 use haste_protocol::haste_core::game::DimensionInfo;
-use haste_protocol::haste_core::game::{GameMode, TICK_SECONDS};
-use haste_protocol::haste_core::view::{BlockView, DirtyTracker};
+use haste_protocol::haste_core::game::TICK_SECONDS;
 #[cfg(test)]
 use haste_protocol::haste_core::RegistryIndex;
-use haste_protocol::haste_core::{BlockPos, SectionPos};
+use haste_protocol::haste_core::SectionPos;
 #[cfg(test)]
-use haste_protocol::haste_core::{BlockStateId, ChunkPos};
-use haste_world::World;
+use haste_protocol::haste_core::{BlockPos, BlockStateId, ChunkPos};
 
+mod block_entities;
 mod block_entity_ticks;
 mod camera;
+mod hud;
+mod input;
+mod level;
+mod particles;
 mod run;
 mod shared;
+mod sound;
 mod tracked_world;
 mod view;
+mod weather;
 
-use crate::net::{NetDriver, WorldSink};
+use crate::net::NetDriver;
+#[cfg(test)]
+use crate::net::WorldSink;
 
 pub mod skins;
-use crate::ui::Ui;
-use block_entity_ticks::{tick_model_anims, TickModelAnims, MODEL_RNG};
 
 pub use camera::{third_person_camera, Perspective};
 pub use run::run;
-pub use shared::{PackReload, Shared, SharedInput};
+pub use shared::{PackReload, Shared};
 #[cfg(test)]
 pub use view::death_time;
 pub use view::{player_instance, FirstPersonView, ViewState};
 
-use camera::eye_in_lava;
 #[cfg(test)]
 use camera::THIRD_PERSON_DISTANCE;
 #[cfg(test)]
+use haste_core::view::DirtyTracker;
+#[cfg(test)]
+use haste_world::World;
+#[cfg(test)]
 use run::take_slot;
-use run::{apply_option_changes, drain_packets, HudArrival, HudSlot};
+use run::{drain_packets, HudSlot};
 #[cfg(test)]
 use tracked_world::TrackedWorld;
-use view::{biome_has_precipitation, player_pose, rain_fog_sky_light};
 
 /// Fraction of the current tick that has elapsed at `now`, in `0..=1`.
 pub fn partial_tick(tick_at: Instant, now: Instant) -> f32 {
@@ -77,503 +83,41 @@ fn tick_once(
     // Once the JVM arrives (the session joined before the game thread started): build the
     // `Ui` and give the JVM the registries, tags and the local player. Menu mode's UI arrives
     // pre-built (its JVM opened the title screen); only `joined` runs for it.
-    if let Some(ui) = jvm.take_ui() {
-        let mut created = false;
-        {
-            let mut slot = shared.ui.lock();
-            if slot.is_none() {
-                let ui = match ui {
-                    HudArrival::Fresh(host) => Ui::new(host),
-                    HudArrival::Menu(ui) => ui,
-                };
-                let t = Instant::now();
-                match ui.joined(
-                    driver.connection(),
-                    driver.login(),
-                    driver.session.player.game_mode,
-                ) {
-                    Ok(()) => {
-                        tracing::info!(
-                            "HUD joined in {:.0} ms; the vanilla HUD and chat are live",
-                            t.elapsed().as_secs_f64() * 1000.0
-                        );
-                        *slot = Some(ui);
-                        created = true;
-                    }
-                    Err(e) => tracing::warn!("no HUD: joining the UI failed: {e:#}"),
-                }
-            }
-        }
-        // Play packets arrived while the JVM booted; give them to the HUD now, in order, so a
-        // fresh join's tab list, boss bars and scoreboard are not lost.
-        if created {
-            let backlog = driver.take_ui_backlog();
-            if !backlog.is_empty() {
-                tracing::info!(
-                    "HUD catching up on {} packets from the JVM boot",
-                    backlog.len()
-                );
-                if let Some(ui) = shared.ui.lock().as_ref() {
-                    let world = shared.world.read();
-                    for p in backlog {
-                        ui.handle(&p, &|pos| WorldSink::block_state_at(&*world, pos));
-                    }
-                }
-            }
-        }
-    }
+    hud::take_arrival(driver, shared, jvm);
     // This tick's UI output (packets vanilla code sent, chat and commands typed).
     let mut ui_out = Vec::new();
     drain_packets(driver, shared, gone, server_packs_version)?;
     // This tick's sound packets, played through the output (when the client set one up).
     // This runs again after `end_tick` below to pick up the player's own block sounds
     // (footsteps, mining, placing) that the player's tick just produced.
-    {
-        let requests = &mut driver.session.sound_requests;
-        let mut sound = shared.sound.lock();
-        if let Some(sounds) = sound.as_mut() {
-            // Entity positions for `sound_entity`, from the store the packets just updated.
-            let entities = shared.entities.read();
-            sounds.apply(requests, |id| {
-                entities
-                    .get(haste_protocol::haste_core::EntityId(id))
-                    .map(|e| e.pos)
-            });
-        }
-    }
+    sound::play_packet_sounds(driver, shared);
     // This tick's input, sampled from winit by the render thread.
-    let input = {
-        let mut shared_input = shared.input.lock();
-        if std::mem::take(&mut shared_input.toggle_flight) {
-            driver.session.player.toggle_flight();
-        }
-        // A screen being open is vanilla's `handleKeybinds` gate (`Minecraft.tick` runs the key
-        // bindings only when `gui.screen() == null`): no attack or use happens while a screen
-        // holds the input, and clicks queued for this tick are dropped, not saved (the release
-        // that ends a use that opened a screen is the screen's, and a held button must not
-        // repeat the use through the server's block editors — the sign editor would reopen).
-        let screen_open = shared.ui.lock().as_ref().is_some_and(|ui| ui.screen_open());
-        // Held buttons stay; the press-only middle click, drop/swap presses and the hotbar choice
-        // are consumed.
-        let mut interact = shared_input.interact;
-        // Vanilla runs `Minecraft.handleKeybinds` (the attack/use clicks and the held use)
-        // only with no screen open (`Minecraft.tick`: `if (gui.overlay() == null &&
-        // gui.screen() == null)`). A screen taking the mouse also owns the buttons: a use
-        // held from before the screen opened must not keep firing (it would re-open the
-        // container the screen shows, server-side).
-        let attack_clicks;
-        let use_clicks;
-        if screen_open {
-            interact.attack = false;
-            interact.use_item = false;
-            attack_clicks = 0;
-            use_clicks = 0;
-            shared_input.interact.attack_clicks = 0;
-            shared_input.interact.use_clicks = 0;
-        } else {
-            // The click counts (vanilla's KeyMapping.clickCount) are drained into the player,
-            // which consumes them in `Minecraft.handleKeybinds`' consumeClick loops.
-            attack_clicks = std::mem::take(&mut shared_input.interact.attack_clicks);
-            use_clicks = std::mem::take(&mut shared_input.interact.use_clicks);
-        }
-        shared_input.interact.pick_block = false;
-        shared_input.interact.drop_item = false;
-        shared_input.interact.drop_stack = false;
-        shared_input.interact.swap_offhand = false;
-        shared_input.interact.hotbar = None;
-        // A hotbar slot the UI picked since the last tick (the HUD's digits and wheel, or
-        // Java-side code) goes through the normal interact path, like the client's own
-        // digits did before the UI owned them: `set_carried_item` is sent and a changed
-        // held item restarts breaking. The server's `set_held_slot` changes both sides
-        // alike, so it never looks like a UI pick.
-        if interact.hotbar.is_none() {
-            if let Some(ui) = shared.ui.lock().as_ref() {
-                let slot = ui.selected_slot();
-                if slot != driver.session.player.held_slot {
-                    interact.hotbar = Some(slot.clamp(0, 8) as u8);
-                }
-            }
-        }
-        driver.session.player.set_interact(interact);
-        for _ in 0..attack_clicks {
-            driver.session.player.queue_attack_click();
-        }
-        for _ in 0..use_clicks {
-            driver.session.player.queue_use_click();
-        }
-        SharedInput {
-            toggle_flight: shared_input.toggle_flight,
-            interact: shared_input.interact,
-            perspective: shared_input.perspective,
-            state: shared_input.state,
-        }
-    };
+    let input = input::sample(driver, shared);
     // The horizontal distance travelled this tick, for the hand's walk bob: vanilla's
     // `LocalPlayer.move` adds `length(dx, dz) * 0.6` to `ClientAvatarState.walkDist`.
-    let tick_moved = {
-        let tick_start = driver.session.player.state.pos;
-        // Write lock: the player's breaking predicts block changes into the world.
-        let mut world = shared.world.write();
-        let mut entities = shared.entities.write();
-        // The world probe for the screen effects (vanilla's
-        // `NetherPortalBlock.entityInside` and `LevelExtractor.getViewBlockingState`): the
-        // portal under our feet feeds the portal effect's tick below, and the block the
-        // camera is inside plus the eye's light go into this tick's view.
-        {
-            let p = &driver.session.player;
-            let probe = crate::screen_effects::Probe {
-                world: &*world,
-                shapes: &shared.data.shapes,
-                blocks: &shared.data.blocks,
-                tags: p.int.block_tags(),
-                eye: p.camera(1.0).0,
-                feet: p.state.pos,
-                bb_width: p.attrs.box_width(),
-                bb_height: p.attrs.height_for(p.state.pose),
-                scale: f64::from(p.attrs.scale),
-            }
-            .sample();
-            driver.session.screen.set_inside_portal(probe.in_portal);
-            // The local player's freeze ticks are client-predicted (the server does not send the
-            // owner their own metadata): powder snow adds one, fire clears them.
-            driver.session.player.own_flags.frozen_ticks = crate::screen_effects::tick_frozen(
-                driver.session.player.own_flags.frozen_ticks,
-                probe.in_powder_snow,
-                probe.in_fire,
-            );
-            driver.session.screen_probe = probe;
-        }
-        driver.end_tick(&input.state, &mut *world, &mut *entities)?;
-        // The weather effects' tick (`ClientLevel.tick` -> `tickWeatherEffects`, after the
-        // entities): the rain splash particles join this tick's spawn list and the rain
-        // sound joins the sound requests below. The levels' bracket shifts here too (the
-        // render thread lerps it by partial tick).
-        driver.session.weather.tick();
-        if crate::net::WeatherState::can_have_weather(&driver.session.dimension) {
-            let camera = driver.session.player.camera(1.0).0;
-            driver.session.weather.tick_effects(
-                camera,
-                haste_render::weather::WEATHER_RADIUS,
-                &world,
-                &shared.biome_climates,
-                driver.session.sea_level,
-                driver.session.dimension.min_y,
-                &mut driver.session.particle_spawns,
-                &mut driver.session.sound_requests,
-            );
-        }
-        let mut dirty = world.take_dirty_sections();
-        if !dirty.is_empty() {
-            shared.dirty.lock().append(&mut dirty);
-            shared.world_version.fetch_add(1, Ordering::Relaxed);
-        }
-        let moved = driver.session.player.state.pos - tick_start;
-        ((moved.x * moved.x + moved.z * moved.z).sqrt()) as f32
-    };
+    let tick_moved = level::tick(driver, shared, &input)?;
     // The player's own block sounds this tick (footsteps, mining, placing), played through
     // the same output the packets went through above.
-    {
-        let requests = &mut driver.session.sound_requests;
-        let mut sound = shared.sound.lock();
-        if let Some(sounds) = sound.as_mut() {
-            sounds.apply(requests, |_| None);
-        }
-    }
+    sound::play_own_sounds(driver, shared);
     {
         let mut breaking = shared.breaking.lock();
         breaking.clear();
         driver.session.breaking_stages(&mut breaking);
     }
     // The lids' open targets (vanilla routes `block_event` to the block entity).
-    {
-        let mut lids = shared.block_entity_lids.lock();
-        lids.clear();
-        driver.session.lid_states(&mut lids);
-    }
+    block_entities::tick_lids(driver, shared);
     // The skulls' animation counters (vanilla ticks each `SkullBlockEntity.animation`:
     // while the block state is powered the counter grows, powering the jaw/ear swing).
-    {
-        let world = shared.world.read();
-        let blocks = &shared.data.blocks;
-        let names = &shared.block_entity_names;
-        let mut anims = shared.skull_anims.lock();
-        anims.retain_mut(|(pos, anim)| {
-            // Gone (chunk unloaded, block replaced): drop. Otherwise a skull keeps its
-            // entry; powered ones advance, unpowered ones freeze at the last value (vanilla's
-            // counter stops but keeps its value).
-            let Some(be) = world.block_entity(*pos) else {
-                return false;
-            };
-            let is_skull = names
-                .get(be.kind as usize)
-                .is_some_and(|n| n.namespace() == "minecraft" && n.path() == "skull");
-            if !is_skull {
-                return false;
-            }
-            let powered = blocks
-                .property_value(world.block_state(*pos), "powered")
-                .is_some_and(|v| v == "true");
-            anim.0 = anim.1;
-            if powered {
-                anim.1 += 1.0;
-            }
-            true
-        });
-        // The object-model block entities' animation state: the bell shakes, the decorated pot
-        // wobbles and the conduit and enchanting-table ticks (vanilla's block entity tickers for
-        // `BellBlockEntity`, `DecoratedPotBlockEntity`, `ConduitBlockEntity` and
-        // `EnchantingTableBlockEntity`). The events come from the session's `block_event` handling;
-        // everything else is driven from the world each tick, like the skulls above.
-        {
-            let tags = driver.session.player.int.block_tags();
-            let mut bell_events = Vec::new();
-            let mut pot_events = Vec::new();
-            driver
-                .session
-                .block_event_anims(&mut bell_events, &mut pot_events);
-            let view = shared.view.lock();
-            let world_age = view.world_age;
-            let feet = view.feet;
-            drop(view);
-            let mut anims = shared.block_entity_anims.lock();
-            let mut rng = MODEL_RNG.lock();
-            // The guard derefs to `&World` through the binding's type annotation.
-            let world: &World = &world;
-            tick_model_anims(TickModelAnims {
-                anims: &mut anims,
-                world,
-                blocks,
-                names,
-                tags,
-                world_age,
-                feet: DVec3::new(feet.x, feet.y, feet.z),
-                rng: &mut rng,
-                bell_events: &bell_events,
-                pot_events: &pot_events,
-            });
-        }
-        // Newly powered skulls (loaded with powered=true, or toggled since) start at 0.
-        'outer: for chunk in world.loaded_chunks() {
-            for (pos, be) in world.block_entities_in(chunk) {
-                let Some(name) = names.get(be.kind as usize) else {
-                    continue;
-                };
-                if name.namespace() != "minecraft" || name.path() != "skull" {
-                    continue;
-                }
-                let powered = blocks
-                    .property_value(world.block_state(pos), "powered")
-                    .is_some_and(|v| v == "true");
-                if powered && !anims.iter().any(|(p, _)| p == &pos) {
-                    anims.push((pos, (0.0, 0.0)));
-                    if anims.len() > 1024 {
-                        break 'outer;
-                    }
-                }
-            }
-        }
-    }
+    block_entities::tick_skulls_and_model_anims(driver, shared);
     // The vaults' and spawners' spins (vanilla `VaultClientData.updateDisplayItemSpin` and
     // the spawners' client tick): every vault's displayed item turns 10 degrees a tick, a
     // spawner's display mob turns at the rate its state's spinning mob speed and its remaining
     // spawn delay give (a plain mob spawner only while a player is near it).
-    {
-        let world = shared.world.read();
-        let blocks = &shared.data.blocks;
-        let names = &shared.block_entity_names;
-        let player = driver.session.player.state.pos;
-        let game_time = driver.session.world_age;
-        let mut spins = shared.block_entity_spins.lock();
-        spins.retain_mut(|(pos, spin)| {
-            let Some(be) = world.block_entity(*pos) else {
-                return false;
-            };
-            let Some(name) = names.get(be.kind as usize) else {
-                return false;
-            };
-            let minecraft = name.namespace() == "minecraft";
-            let rate = if minecraft && name.path() == "vault" {
-                // `VaultClientData.ROTATION_SPEED` (10 degrees a tick, wrapped).
-                Some(10.0)
-            } else if minecraft && matches!(name.path(), "mob_spawner" | "trial_spawner") {
-                let trial = name.path() == "trial_spawner";
-                if trial || mob_spawner_spins(&be.nbt, *pos, player) {
-                    Some(spawner_spin_rate(
-                        &be.nbt,
-                        trial,
-                        game_time,
-                        blocks
-                            .property_value(world.block_state(*pos), "trial_spawner_state")
-                            .unwrap_or(""),
-                    ))
-                } else {
-                    // No player in range: vanilla holds the spin (`oSpin = spin`).
-                    Some(0.0)
-                }
-            } else {
-                None
-            };
-            let Some(rate) = rate else {
-                return false;
-            };
-            spin.0 = spin.1;
-            if rate > 0.0 {
-                // Vanilla's `(spin + rate) % 360`; a trial spawner in a state with no spinning
-                // mob holds its spin.
-                spin.1 = (spin.1 + rate).rem_euclid(360.0);
-            }
-            true
-        });
-        // New vaults and spawners start their spin at 0.
-        'outer: for chunk in world.loaded_chunks() {
-            for (pos, be) in world.block_entities_in(chunk) {
-                let Some(name) = names.get(be.kind as usize) else {
-                    continue;
-                };
-                if name.namespace() != "minecraft"
-                    || !matches!(name.path(), "vault" | "mob_spawner" | "trial_spawner")
-                    || spins.iter().any(|(p, _)| p == &pos)
-                {
-                    continue;
-                }
-                spins.push((pos, (0.0, 0.0)));
-                if spins.len() > 1024 {
-                    break 'outer;
-                }
-            }
-        }
-    }
+    block_entities::tick_spins(driver, shared);
     // Particles: spawn what the packets brought, then one 20 Hz simulation step. The camera
     // for `ClientLevel.doAddParticle`'s 32-block limiter is the player's eye.
-    {
-        let mut particles = shared.particles.lock();
-        let camera = driver.session.player.camera(1.0).0;
-        let spawns = std::mem::take(&mut driver.session.particle_spawns);
-        // Block particles: our own break/mining/sprint and the server's level events.
-        // The world (state, shapes, biomes) is read here, where the game thread holds it.
-        let requests = std::mem::take(&mut driver.session.block_particle_requests);
-        // The ambient block particles (`ClientLevel.animateTick`, vanilla runs it
-        // right before the particle tick): torch flames, fire smoke, campfires, lava,
-        // portals. Rain-gated parts (leaf drip) stay dormant until weather is decoded.
-        let mut ambient = std::mem::take(&mut driver.session.ambient_spawns);
-        {
-            let world = shared.world.read();
-            let data = shared.data.clone();
-            let biomes = crate::app::biomes::WorldBiomes(&world);
-            for s in &spawns {
-                particles.spawn(s, camera, Some(&biomes));
-            }
-            driver.session.particle_spawned = spawns.len();
-            let state_count = data.blocks.len();
-            for r in &requests {
-                match *r {
-                    crate::block_particles::BlockParticleRequest::Destroy { pos, state } => {
-                        // Vanilla's `Block.stateById` answers air (nothing spawns) for
-                        // ids the state table does not know.
-                        if (state.0 as usize) < state_count {
-                            particles.spawn_destroy(pos, state, &data.shapes, &biomes);
-                        }
-                    }
-                    crate::block_particles::BlockParticleRequest::Crack { pos, face } => {
-                        let state = world.block_state(pos);
-                        if !haste_physics::BlockPhysics::is_air(data.as_ref(), state) {
-                            particles.spawn_crack(pos, face, state, &data.shapes, &biomes);
-                        }
-                    }
-                    crate::block_particles::BlockParticleRequest::Sprint { feet, velocity } => {
-                        // `getOnPosLegacy`: the support block 0.2 below the feet.
-                        let support = haste_core::BlockPos::new(
-                            feet.x.floor() as i32,
-                            (feet.y - 0.2).floor() as i32,
-                            feet.z.floor() as i32,
-                        );
-                        let state = world.block_state(support);
-                        if !haste_physics::BlockPhysics::is_air(data.as_ref(), state) {
-                            particles.spawn_sprint(feet, velocity, state, &data.shapes, &biomes);
-                        }
-                    }
-                }
-            }
-            if driver.session.player.has_position {
-                let feet = haste_core::BlockPos::from_dvec3(driver.session.player.state.pos);
-                crate::ambient_particles::animate_tick(
-                    &*world,
-                    data.as_ref(),
-                    feet,
-                    false,
-                    &mut ambient,
-                );
-            }
-        }
-        for s in &ambient {
-            particles.spawn(s, camera, None);
-        }
-        driver.session.ambient_spawns = ambient;
-        particles.tick();
-        // The render snapshot for the coming frames (vanilla's per-frame
-        // `ParticleEngine.extract` folded into the tick: light sampled at the tick
-        // position, see `build_snapshot`), published while the locks are still held —
-        // the render thread only ever takes an `Arc` copy.
-        let world = shared.world.read();
-        particles.publish_snapshot(&*world, &shared.particle_snapshots);
-    }
-    if let Some(ui) = shared.ui.lock().as_ref() {
-        // The mount HUD's values for this tick (the vehicle's hearts and the charged jump bar),
-        // from the player's ride, the entity store and the synced attributes.
-        ui.set_mount_hud(driver.session.mount_hud(&*shared.entities.read()));
-        // The hotbar authority is the player (the client picks with 1-9 and the wheel and tells
-        // the server itself; `set_selected_slot` also marks it sent so the UI does not send it
-        // a second time). The server's `set_held_slot` reaches both sides alike.
-        ui.set_selected_slot(driver.session.player.held_slot);
-        // A use opened a screen (command block, writable book): the UI opens it, gated like
-        // vanilla's `Player.canUseGameMasterBlocks` (creative + operator level >= 2) for the
-        // command block.
-        match driver.session.player.take_used_screen() {
-            Some(crate::player::interact::UsedScreen::CommandBlock(pos)) => {
-                let (creative, level) = ui.game_master_state();
-                if creative && level >= 2 {
-                    // The editor's entity is built from the real state (the use itself opens
-                    // no packet the block state would ride on; vanilla's chunk has it).
-                    let state = WorldSink::block_state_at(&*shared.world.read(), pos);
-                    ui.record_block_state(pos, state);
-                    ui.open_used_command_block(pos);
-                }
-            }
-            Some(crate::player::interact::UsedScreen::ItemGui(hand)) => ui.open_item_gui(hand),
-            None => {}
-        }
-        ui.tick();
-        // Inventory edits vanilla Java code predicted client-side (creative slot sets, menu
-        // clicks, pick block): the server does not echo them back, so the client takes them
-        // from the Java mirror. Without this the hand keeps the old item (the reported
-        // creative-inventory bug: the hotbar shows the item, the hand does not).
-        for (slot, stack) in ui.drain_inventory_changes() {
-            driver.session.player.set_inventory_slot(slot, &stack);
-        }
-        // Every option a vanilla screen changed this tick reaches the running client live
-        // (vanilla's `OptionInstance.onValueUpdate` callbacks, reported through the bridge).
-        let changes = ui.drain_option_changes();
-        if !changes.is_empty() {
-            apply_option_changes(shared, driver, changes);
-        }
-        // The pack screen's Done: vanilla reloads its resource manager (Minecraft.
-        // reloadResourcePacks); the renderer rebuilds from the new selection on its next
-        // frame (AtlasBuilder + bake + GUI textures read the new asset stack).
-        if let Some(ids) = ui.take_resource_pack_selection() {
-            tracing::info!("resource pack selection changed: [{}]", ids.join(", "));
-            let server = shared.applied_server_packs.lock().clone();
-            *shared.resource_pack_reload.lock() = Some(PackReload { ids, server });
-        }
-        ui.drain_outgoing(&mut ui_out);
-    }
-    // A pushed pack waiting for the player (vanilla's `PackConfirmScreen` in play).
-    shared
-        .pack_prompt
-        .lock()
-        .tick(driver.connection(), shared.ui.lock().as_ref());
-    for p in ui_out {
-        driver.queue(p);
-    }
+    particles::tick(driver, shared);
+    hud::tick_ui(driver, shared, &mut ui_out);
     // The per-tick camera effects (FOV modifier smoothing and the hurt and death counters;
     // the render thread interpolates them per frame). The view bobbing's walk distance and
     // bob are the hand's own, ticked below (vanilla's one `ClientAvatarState` serves both).
@@ -587,159 +131,23 @@ fn tick_once(
     // `Player.tick`, then `FirstPersonHandsAndItems.tick`, with the walk bob in `aiStep` before
     // them); the interaction step above ran the attacks and uses that started the swings. In
     // spectator the hand is not drawn at all (vanilla hides it there), so it does not advance.
-    let first_person = if driver.session.player.game_mode == GameMode::Spectator {
-        None
-    } else {
-        let on_fire = driver.session.own_flags().on_fire || driver.session.screen_probe.in_fire;
-        let p = &mut driver.session.player;
-        let attack_speed = p.held_attack_speed();
-        p.hand.tick(
-            tick_moved,
-            (p.state.yaw, p.state.pitch),
-            p.state.on_ground,
-            matches!(p.state.pose, haste_physics::Pose::Swimming),
-            p.held_stack(),
-            attack_speed,
-        );
-        let eye = p.camera(1.0).0;
-        let hand = &p.hand;
-        let mut fp =
-            FirstPersonView::sample(&*shared.world.read(), eye, hand.shown_item(), on_fire);
-        fp.with_hand(hand);
-        Some(fp)
-    };
+    let first_person = view::tick_hand(driver, shared, tick_moved);
     let s = &driver.session;
     let (prev_eye, prev_yaw, prev_pitch) = s.player.camera(0.0);
     let (eye, yaw, pitch) = s.player.camera(1.0);
     // The sound output's tick: listener from the camera (vanilla's
     // `SoundEngine.updateSource(Camera)` — the third-person perspectives move it off the
     // eye), music situation, then 20 Hz tick.
-    {
-        let listener = if input.perspective == Perspective::FirstPerson {
-            (eye, yaw, pitch)
-        } else {
-            let (world, shapes) = (shared.world.read(), &shared.data.shapes);
-            third_person_camera(input.perspective, eye, yaw, pitch, &*world, shapes)
-        };
-        let mut sound = shared.sound.lock();
-        if let Some(sounds) = sound.as_mut() {
-            let situation =
-                crate::sound::music_situation(s.player.game_mode, s.player.state.eyes_in_water);
-            sounds.tick(listener.0, listener.1, listener.2, situation);
-        }
-    }
-    let mut view = shared.view.lock();
-    // The feet bracket the tick like the eye does; the eye height can change within it
-    // (sneaking), so the old feet are the last view's, not the eye minus its height.
-    let feet = s.player.state.pos;
-    view.prev_feet = if view.has_position { view.feet } else { feet };
-    let prev_feet = view.prev_feet;
-    view.cloak.tick(prev_feet);
-    view.prev_eye = prev_eye;
-    view.eye = eye;
-    view.prev_look = (prev_yaw, prev_pitch);
-    view.look = (yaw, pitch);
-    view.look_offset = s.player.look_offset();
-    view.tick_at = Instant::now();
-    view.animation_tick = view.animation_tick.wrapping_add(1);
-    view.has_position = s.player.has_position;
-    view.feet = feet;
-    view.pose = player_pose(s);
-    let lm = &s.lightmap;
-    view.lightmap_flicker = lm.flicker;
-    view.lightmap_night_vision = lm.night_vision;
-    view.lightmap_darkness = lm.darkness;
-    view.lightmap_darkness_blend = lm.darkness_blend;
-    view.lightmap_boss_darkening = (lm.boss_darkening_o, lm.boss_darkening);
-    view.lightmap_lightning = lm.sky_flash_time > 0;
-    view.lightmap_tick_count = lm.tick_count;
-    // The weather levels bracketing this tick (the render thread lerps by partial tick)
-    // and the rain fog multiplier (`AtmosphericFogEnvironment.updateRainFogState` eased
-    // by `deltaTicks * 0.2` toward rain level x sky-light factor x biome precipitation).
-    {
-        let w = &s.weather;
-        view.rain_level = (w.rain_level_o, w.rain_level);
-        view.thunder_level = (w.thunder_level_o, w.thunder_level);
-        let target = if crate::net::WeatherState::can_have_weather(&s.dimension) {
-            let world = shared.world.read();
-            let precipitation = if biome_has_precipitation(&world, &shared.biome_climates, eye) {
-                1.0
-            } else {
-                0.5
-            };
-            w.rain_level(1.0) * rain_fog_sky_light(&world, eye) * precipitation
-        } else {
-            0.0
-        };
-        view.rain_fog_multiplier += (target - view.rain_fog_multiplier) * 0.2;
-        view.sea_level = s.sea_level;
-        view.horizon_height =
-            haste_render::sky::dark_disc::horizon_height(s.is_flat, s.dimension.min_y);
-    }
-    view.eye_height = s.player.eye_height();
-    view.time_of_day = s.time_of_day.unwrap_or(6000);
-    view.world_age = s.world_age;
-    view.has_sky = s.dimension.has_skylight;
-    view.block_target = s.player.target();
-    view.eye_in_water = s.player.state.eyes_in_water;
-    view.eye_in_lava = eye_in_lava(&shared.world.read(), &shared.data, eye);
-    // The fog environment's player state (vanilla `FogRenderer.setupFog` reads these off the
-    // entity): blindness and fire resistance from the active effects, spectator from the mode,
-    // the water-vision ramp, and the boss overlay's world fog.
-    let eff = |id: Option<i32>| {
-        id.and_then(|i| s.player.int.effects.get(&i))
-            .map(|e| e.duration)
-    };
-    view.blindness = eff(s.player.int.lightmap_effect_ids.blindness);
-    view.fire_resistance = eff(s.player.int.lightmap_effect_ids.fire_resistance).is_some();
-    view.spectator = s.player.game_mode == GameMode::Spectator;
-    view.water_vision = s.player.get_water_vision();
-    view.boss_world_fog = s.lightmap.boss_world_fog;
-    view.held_slot = s.player.held_slot;
-    view.first_person = first_person;
-    view.fov_modifier = s.fov_modifier;
-    view.fov_modifier_old = s.old_fov_modifier;
-    // The view bobbing's walk distance and bob are the hand's own (vanilla's one
-    // `ClientAvatarState` ticks both).
-    let (walk_dist_o, walk_dist) = s.player.hand.walk_dist();
-    view.walk_dist = walk_dist;
-    view.walk_dist_o = walk_dist_o;
-    let (bob_o, bob) = s.player.hand.bob();
-    view.bob = bob;
-    view.bob_o = bob_o;
-    view.hurt_ticks = s.hurt_ticks;
-    view.hurt_dir = s.hurt_dir;
-    view.death_ticks = s.death_ticks;
-    view.dead = s.player.health <= 0.0;
-    // The screen effects, from this tick's world probe (the block the camera is inside, the
-    // eye's light), the own entity's flags and freeze ticks, the worn head item and the active
-    // effects. The eyes being in water comes from the physics' fluid at the eye position.
-    let head_item = s.head_item().and_then(|i| {
-        shared
-            .data
-            .registries
-            .name("minecraft:item", i)
-            .cloned()
-            .and_then(|name| crate::screen_effects::camera_overlay(&name))
-    });
-    let screen = s.screen_effects();
-    view.screen = crate::screen_effects::ViewEffects {
-        block_overlay: s.screen_probe.block_overlay.clone(),
-        eye_in_water: view.eye_in_water,
-        eye_light: s.screen_probe.eye_light,
-        // The client predicts its own fire from the fire block it overlaps
-        // (`BaseFireBlock.fireIgnite`); the server never sends the owner their own
-        // `set_entity_data`, so `own_flags.on_fire` stays false and the probe carries it.
-        on_fire: s.own_flags().on_fire || s.screen_probe.in_fire,
-        camera_overlay: head_item,
-        frozen_ticks: s.own_flags().frozen_ticks,
-        scoping: s.player.scoping(&shared.data),
-        portal: (screen.prev_portal(), screen.portal()),
-        nausea: s.player.int.nausea_blend_pair(),
-        spinning_time: screen.spinning_time(),
-        spinning_speed: screen.spinning_speed(),
-    };
-    drop(view);
+    sound::tick_listener(driver, shared, &input, eye, yaw, pitch);
+    // The view update, the tick's last step: everything the render thread needs per frame is
+    // copied into the view state here, bracketed around the tick.
+    let feet = view::publish(
+        driver,
+        shared,
+        first_person,
+        (prev_eye, prev_yaw, prev_pitch),
+        (eye, yaw, pitch),
+    );
     // The block entities' render data for the next tick's frames (vanilla's per-tick
     // `extractRenderState`): everything that changes only per tick (block states, lights,
     // payloads, the anims' tick ends) is extracted here, off the render thread; the render
@@ -747,78 +155,6 @@ fn tick_once(
     // update so the camera chunk, view radius and world age are this tick's.
     extractor.extract(shared, feet, shared.view.lock().view_distance, s.world_age);
     Ok(())
-}
-
-/// Vanilla `BaseSpawner.isNearPlayer`: an alive player within the spawner's required player
-/// range of its centre. The client has only its own player, so a spawner spins its mob exactly
-/// when the camera is close, like vanilla's single-player client. Only `BaseSpawner.clientTick`
-/// checks this; a trial spawner's `tickClient` spins its mob in every state that has one.
-fn mob_spawner_spins(nbt: &[u8], pos: BlockPos, player: DVec3) -> bool {
-    let centre = DVec3::new(pos.x as f64 + 0.5, pos.y as f64 + 0.5, pos.z as f64 + 0.5);
-    // `BaseSpawner.requiredPlayerRange` is the block entity's `RequiredPlayerRange` tag, not a
-    // block state property; vanilla writes it as a short and reads it back leniently.
-    let range = read_block_entity_nbt(nbt)
-        .and_then(|doc| doc.root_tag.get_numeric_short("RequiredPlayerRange"))
-        .unwrap_or(16) as f64;
-    player.distance_squared(centre) <= range * range
-}
-
-/// The degrees a spawner's display mob turns in one tick, vanilla `BaseSpawner.clientTick`'s
-/// `1000 / (spawnDelay + 200)` and `TrialSpawner.tickClient`'s
-/// `spinningMobSpeed / (spawnDelay + 200)`. A trial spawner's spinning mob speed comes from
-/// its block state (`TrialSpawnerState`: 200 waiting for players, 1000 active, -1 for the
-/// states with no spinning mob) and its remaining spawn delay from `next_mob_spawns_at`.
-fn spawner_spin_rate(nbt: &[u8], trial: bool, game_time: i64, state: &str) -> f32 {
-    // The trial spawner's state decides whether a mob spins at all (vanilla
-    // `TrialSpawnerState.hasSpinningMob`).
-    let speed = if trial {
-        trial_spinning_mob_speed(state)
-    } else {
-        1000.0
-    };
-    if speed <= 0.0 {
-        return 0.0;
-    }
-    let delay = if trial {
-        trial_spawn_delay(nbt, game_time)
-    } else {
-        spawner_delay(nbt)
-    };
-    (speed / (delay.max(0) as f64 + 200.0)) as f32
-}
-
-/// Vanilla `BaseSpawner.spawnDelay`, from the block entity's `Delay` tag (a short, default 20).
-fn spawner_delay(nbt: &[u8]) -> i32 {
-    read_block_entity_nbt(nbt)
-        .and_then(|doc| doc.root_tag.get_short("Delay"))
-        .unwrap_or(20) as i32
-}
-
-/// Vanilla `TrialSpawnerStateData.nextMobSpawnsAt` as the remaining delay
-/// (`max(0, nextMobSpawnsAt - level.getGameTime())`).
-fn trial_spawn_delay(nbt: &[u8], game_time: i64) -> i32 {
-    read_block_entity_nbt(nbt)
-        .and_then(|doc| doc.root_tag.get_long("next_mob_spawns_at"))
-        .map(|at| (at - game_time).max(0) as i32)
-        .unwrap_or(0)
-}
-
-/// Vanilla `TrialSpawnerState.spinningMobSpeed` for the state the block is in: waiting for
-/// players 200, active 1000, every other state has no spinning mob (-1).
-fn trial_spinning_mob_speed(state: &str) -> f64 {
-    match state {
-        "waiting_for_players" => 200.0,
-        "active" => 1000.0,
-        _ => -1.0,
-    }
-}
-
-/// A block entity's NBT payload (the network variant `read_unnamed` reads), or `None`.
-fn read_block_entity_nbt(nbt: &[u8]) -> Option<haste_protocol::nbt::Nbt> {
-    use haste_protocol::nbt::deserializer::NbtReadHelperJava;
-    let mut cursor = std::io::Cursor::new(nbt);
-    let mut helper = NbtReadHelperJava::new(&mut cursor);
-    haste_protocol::nbt::Nbt::read_unnamed(&mut helper).ok()
 }
 
 #[cfg(test)]
