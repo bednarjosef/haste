@@ -421,8 +421,15 @@ fn platform_interior_boundary_quads_culled() {
             // spans x/z 0..10, the snow half only x 0..5 (its east edge at x=5
             // is a real exposed face, like the field's outer sides).
             let snow_level = min[1] > 1.9;
-            let (x_hi, z_hi) = if snow_level { (5.0, 10.0) } else { (10.0, 10.0) };
-            let interior_plane = (min[0] > 0.01 && min[0] < x_hi - 0.01 && min[0] == max[0] && near_int(min[0]))
+            let (x_hi, z_hi) = if snow_level {
+                (5.0, 10.0)
+            } else {
+                (10.0, 10.0)
+            };
+            let interior_plane = (min[0] > 0.01
+                && min[0] < x_hi - 0.01
+                && min[0] == max[0]
+                && near_int(min[0]))
                 || (min[2] > 0.01 && min[2] < z_hi - 0.01 && min[2] == max[2] && near_int(min[2]));
             if interior_plane {
                 eprintln!(

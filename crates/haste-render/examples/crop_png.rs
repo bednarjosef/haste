@@ -10,7 +10,11 @@ fn main() {
     let y1: u32 = args.next().expect("y1").parse().expect("y1 int");
     let img = image::open(&input).expect("open png");
     let crop = img.crop_imm(x0, y0, x1 - x0, y1 - y0);
-    let scaled = crop.resize_exact((x1 - x0) * 2, (y1 - y0) * 2, image::imageops::FilterType::Nearest);
+    let scaled = crop.resize_exact(
+        (x1 - x0) * 2,
+        (y1 - y0) * 2,
+        image::imageops::FilterType::Nearest,
+    );
     scaled.save(&output).expect("save png");
     println!("{output}: crop {x0},{y0}..{x1},{y1} at 2x");
 }

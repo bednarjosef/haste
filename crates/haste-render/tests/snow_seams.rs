@@ -187,7 +187,8 @@ fn snow_platform_seams() {
     // The same platform seen steeply from above (the snow band is at a
     // different place there): merged tops must not crack either.
     let img = render_at(&mut renderer, &full, true);
-    img.save("target/render-checks/snow-seams-steep.png").unwrap();
+    img.save("target/render-checks/snow-seams-steep.png")
+        .unwrap();
     let steep_lines = dark_line_pixels(&img, 700, 795);
     eprintln!("steep view: {steep_lines} dark line pixels");
     assert!(
