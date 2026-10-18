@@ -257,6 +257,11 @@ fn setup() -> Option<(
     .unwrap();
     let mut atlas = haste_assets::AtlasBuilder::build(&mut assets, &[], false).unwrap();
     let baked = haste_assets::BakedBlockModels::bake(&mut assets, &states, &mut atlas).unwrap();
+    // Real occlusion shapes for the lake's fluid faces when the game data is available;
+    // the bench needs the cache anyway (jar + reports), so this is the common path.
+    let occluders = haste_data::GameData::load()
+        .map(|data| fluid::FluidOccluders::from_shapes(&states, &data.shapes, &baked))
+        .unwrap_or_else(|_| fluid::FluidOccluders::absent());
     let tables = MeshTables::new(
         std::sync::Arc::new(tint::TintTable::new(&states)),
         std::sync::Arc::new(
@@ -281,6 +286,7 @@ fn setup() -> Option<(
         )),
         // The bench world is full cubes: AO treats them all as occluders.
         std::sync::Arc::new(haste_render::mesher::AoTable::all_solid(states.len())),
+        std::sync::Arc::new(occluders),
     );
     Some((states, baked, atlas, tables))
 }

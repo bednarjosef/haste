@@ -29,16 +29,22 @@ impl Renderer {
         self.mesher.set_tables(tables);
     }
 
-    /// The AO occluder table from haste-data's shape data (vanilla
-    /// `getShadeBrightness <= 0.2`). Applies to sections meshed afterwards:
-    /// call it before the first chunks.
-    pub fn set_ao_shapes(
+    /// The per-state shape tables from haste-data's shape data: the AO occluder table
+    /// (vanilla `getShadeBrightness <= 0.2`) and the fluid face-occlusion shapes
+    /// (`BlockState.getOcclusionShape`). Applies to sections meshed afterwards: call it
+    /// before the first chunks.
+    pub fn set_shapes(
         &mut self,
         states: &dyn haste_core::view::BlockStateTable,
         shapes: &haste_data::BlockShapes,
     ) {
         let mut tables = self.mesher.tables();
         tables.ao = Arc::new(crate::mesher::AoTable::from_shapes(states, shapes));
+        tables.fluid_occluders = Arc::new(crate::fluid::FluidOccluders::from_shapes(
+            states,
+            shapes,
+            &self.baked,
+        ));
         self.mesher.set_tables(tables);
     }
 

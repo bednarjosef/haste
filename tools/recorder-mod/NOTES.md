@@ -56,6 +56,12 @@ exists (`server.overworld()` is used for the per-pose player dimensions).
   this is the same path the game itself uses when it refreshes dimensions after a pose change.
 - **`fluid`** is emitted only when the state has one (13389 states): `"fluid": "<id>"` plus
   `"fluid_empty": true|false` (fluid states of non-liquid blocks are usually empty).
+- **`occlusion`** is `state.getOcclusionShape()`: the shape fluid faces and neighbour face
+  culling test against (`BlockBehaviour.initCache`: `getShape` by default, `Shapes.empty()`
+  for the `noOcclusion` family — glass, leaves, panes, ... — and smaller shapes for the four
+  overrides: fences, fence gates, lecterns, sculk shriekers). Absent in dumps from before
+  the field was added; consumers fall back to the `outline` shape plus the solid-render
+  flag, which is exact except for those two classes.
 - Deprecated-API warning at compile: `Block.stateById`/`Block.getId` are marked deprecated
   (they want you on the registry) but are exactly the BLOCK_STATE_REGISTRY view we need.
 
