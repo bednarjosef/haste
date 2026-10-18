@@ -11,6 +11,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+mod cloud_status;
+
+pub use cloud_status::CloudStatus;
+
 /// Per-category sound volumes, each 0.0..=1.0. Category names follow vanilla's
 /// `soundCategory_*` keys.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -183,6 +187,9 @@ pub struct Options {
     pub menu_background_blurriness: u8,
     /// 260 means "unlimited", as in vanilla's framerate limit.
     pub max_fps: u32,
+    /// Vanilla's "Clouds" video setting (`Options.cloudStatus`, options.txt
+    /// `renderClouds`; default FANCY).
+    pub clouds: CloudStatus,
     pub sound: SoundVolumes,
     pub keys: Keybinds,
 }
@@ -206,6 +213,7 @@ impl Default for Options {
             entity_distance_scaling: 1.0,
             menu_background_blurriness: 5,
             max_fps: 120,
+            clouds: CloudStatus::default(),
             sound: SoundVolumes::default(),
             keys: Keybinds::default(),
         }
@@ -346,6 +354,14 @@ impl Options {
             "framerateLimit" | "maxFps" => {
                 if let Ok(v) = value.parse::<u32>() {
                     self.max_fps = v;
+                }
+                true
+            }
+            // The clouds mode: options.txt writes vanilla's serialized names
+            // ("false"/"fast"/"true"), the live option bridge the enum names.
+            "renderClouds" => {
+                if let Some(v) = CloudStatus::parse(value) {
+                    self.clouds = v;
                 }
                 true
             }
