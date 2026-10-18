@@ -299,6 +299,9 @@ fn setup() -> Option<(
         std::sync::Arc::new(haste_render::mesher::AoTable::all_solid(states.len())),
         std::sync::Arc::new(occluders),
         std::sync::Arc::new(face_occluders),
+        // Face-skip rules from the class dump when it exists (none before the
+        // dump run: the bench then measures the no-skip mesh like before).
+        std::sync::Arc::new(haste_render::mesher::SkipTable::load(&states)),
     );
     Some((states, baked, atlas, tables))
 }
