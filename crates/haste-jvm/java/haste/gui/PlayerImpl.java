@@ -39,9 +39,12 @@ public final class PlayerImpl {
         for (net.minecraft.world.effect.MobEffectInstance e : Proxies.player.getActiveEffects()) e.tickClient();
     }
 
-    /** Item use, attack cooldown and sleeping are Rust's (player): not mirrored yet, so idle values. */
+    /** Item use and sleeping are Rust's (player): not mirrored yet, so idle values. */
     public static net.minecraft.world.item.ItemStack getActiveItem(net.minecraft.world.entity.LivingEntity e) { return net.minecraft.world.item.ItemStack.EMPTY; }
-    public static float getAttackStrengthScale(Player p, float partial) { return 1f; }
+    /** Vanilla {@code Player.getAttackStrengthScale}: (ticker + partial) / delay, clamped, from Rust's attack charge. */
+    public static float getAttackStrengthScale(Player p, float partial) {
+        return net.minecraft.util.Mth.clamp((Mirror.attackStrengthTicker() + partial) / Mirror.attackStrengthDelay(), 0f, 1f);
+    }
     /** The mount's charged jump scale (vanilla `LocalPlayer.getJumpRidingScale`, Rust's charge state). */
     public static float getJumpRidingScale(net.minecraft.client.player.LocalPlayer p) { return Mirror.jumpRidingScale(); }
     public static int getSleepTimer(Player p) { return 0; }

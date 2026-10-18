@@ -1,0 +1,19 @@
+# The attack indicator render smoke: swing at the sky (nothing under the crosshair, so the
+# click is a pure attack) and screenshot the recharge bar under the crosshair as it fills.
+# Each screenshot is preceded by its own click: saving a PNG stalls the frame loop longer
+# than the bare hand's 5-tick recharge, so a single click would be over before the shot.
+wait_until joined
+wait_until settled
+look 0 -60
+wait 40
+screenshot indicator-before
+click left 240 135
+screenshot indicator-bar-early
+click left 240 135
+wait 1
+screenshot indicator-bar-mid
+click left 240 135
+wait 2
+screenshot indicator-bar-late
+wait 30
+screenshot indicator-charged

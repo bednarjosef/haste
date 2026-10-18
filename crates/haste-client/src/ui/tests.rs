@@ -48,6 +48,16 @@ fn ui_handles_tier2_state_and_forwarded_packets_only() {
 use haste_protocol::haste_core::gui::GuiCommand;
 use haste_protocol::haste_core::DVec3;
 
+/// The frame tests that run without a server (`leaving_the_world_hides_the_hud`,
+/// `the_attack_indicator_bar_follows_the_mirrored_charge`) take turns on this lock: they share
+/// the process's one JVM and its one game state, and a parallel test would otherwise flip the
+/// shared state between another's write and its frame (the frame waits on the JVM's lock
+/// while the other test keeps writing).
+fn frame_tests() -> &'static std::sync::Mutex<()> {
+    static SERIALISE: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    SERIALISE.get_or_init(std::sync::Mutex::default)
+}
+
 const NEEDS_SERVER: &str = "needs cache/ and a test server (HASTE_TEST_SERVER, default 127.0.0.1:25614) where 'haste' is an operator; run with --test-threads=1";
 
 /// The process's JVM (one per process), started once.
@@ -823,6 +833,7 @@ fn leaving_the_world_hides_the_hud() {
         eprintln!("skipped: no cache/");
         return;
     }
+    let _serial = frame_tests().lock();
     let mut ui = Ui::new(host());
     ui.gui().with_state(|s| {
         s.in_world = true;
@@ -859,5 +870,86 @@ fn leaving_the_world_hides_the_hud() {
         }),
         "no HUD sprites after leaving: {:?}",
         texts(&left)
+    );
+}
+
+/// The attack indicator follows the mirrored attack charge (vanilla `Hud.extractCrosshair`):
+/// while the charge is below 1 the bar under the crosshair draws (`crosshair_attack_indicator_
+/// background` + `_progress`, the progress 17 * scale pixels wide), and at a full charge
+/// neither sprite draws.
+///
+/// Starts the JVM from cache/ (the client jar under it); like the other cache-bound tests,
+/// it skips (no ignore: CI has the cache) when the jar is absent.
+#[test]
+fn the_attack_indicator_bar_follows_the_mirrored_charge() {
+    let cache = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cache");
+    if !cache
+        .join("versions")
+        .join(haste_core::paths::MC_VERSION)
+        .join("client.jar")
+        .is_file()
+    {
+        eprintln!("skipped: no cache/");
+        return;
+    }
+    let _serial = frame_tests().lock();
+    let mut ui = Ui::new(host());
+    let attack_sprites = |f: &GuiFrame| -> Vec<String> {
+        f.commands
+            .iter()
+            .filter_map(|c| match c {
+                GuiCommand::Sprite { sprite, .. } | GuiCommand::SpriteRegion { sprite, .. } => {
+                    if sprite.path().starts_with("hud/crosshair_attack_indicator") {
+                        Some(sprite.path().to_owned())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    // Mid-charge: two of the bare hand's five ticks recharged.
+    ui.gui().with_state(|s| {
+        s.in_world = true;
+        s.game_mode = GameMode::Survival;
+        s.vitals.health = 20.0;
+        s.attack_strength = haste_jvm::AttackStrengthHud {
+            ticker: 2.0,
+            delay: 5.0,
+        };
+    });
+    let bar = ui.frame(320, 240, 2, (0.0, 0.0), 0.0).clone();
+    assert_eq!(
+        attack_sprites(&bar),
+        vec![
+            "hud/crosshair_attack_indicator_background",
+            "hud/crosshair_attack_indicator_progress",
+        ],
+        "recharge bar while charging: {:?}",
+        texts(&bar)
+    );
+    // The progress sprite is (int)(scale * 17) = 6 of the 17 pixels wide.
+    let progress = bar.commands.iter().find_map(|c| match c {
+        GuiCommand::SpriteRegion { sprite, w, .. }
+            if sprite.path() == "hud/crosshair_attack_indicator_progress" =>
+        {
+            Some(*w)
+        }
+        _ => None,
+    });
+    assert_eq!(progress, Some(6), "progress width");
+    // Fully charged: no indicator at all (the full icon needs a picked entity, step 2).
+    ui.gui().with_state(|s| {
+        s.attack_strength = haste_jvm::AttackStrengthHud {
+            ticker: 5.0,
+            delay: 5.0,
+        };
+    });
+    let full = ui.frame(320, 240, 2, (0.0, 0.0), 0.0).clone();
+    assert!(
+        attack_sprites(&full).is_empty(),
+        "no indicator at full charge: {:?}",
+        texts(&full)
     );
 }

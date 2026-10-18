@@ -1672,6 +1672,12 @@ fn tick_once(
         fp.with_hand(hand);
         Some(fp)
     };
+    // The attack indicator's charge for this tick (the crosshair bar and the hotbar icon),
+    // published after the hand's tick so the HUD sees this tick's value like vanilla's render.
+    if let Some(ui) = shared.ui.lock().as_ref() {
+        let (ticker, delay) = driver.session.player.hand.attack_strength_charge();
+        ui.set_attack_strength(haste_jvm::AttackStrengthHud { ticker, delay });
+    }
     let s = &driver.session;
     let (prev_eye, prev_yaw, prev_pitch) = s.player.camera(0.0);
     let (eye, yaw, pitch) = s.player.camera(1.0);

@@ -270,6 +270,16 @@ impl Equip {
         )
     }
 
+    /// The attack charge's raw parts for the HUD's attack indicator (`Player
+    /// .attackStrengthTicker` and `Player.getCurrentItemAttackStrengthDelay`), mirrored into
+    /// Java once per tick; the proxy's `getAttackStrengthScale` computes the scale from them.
+    pub fn attack_strength_charge(&self) -> (f32, f32) {
+        (
+            self.attack_strength_ticker as f32,
+            swap_delay(self.attack_speed),
+        )
+    }
+
     /// `Player.resetAttackStrengthTicker`: both tickers (`MultiPlayerGameMode.stopDestroyBlock`).
     pub fn reset_attack_strength_ticker(&mut self) {
         self.attack_strength_ticker = 0;
@@ -476,6 +486,12 @@ impl Hand {
     /// The attack charge 0..1 for the HUD attack indicator (`Player.getAttackStrengthScale`).
     pub fn attack_strength_scale(&self, a: f32) -> f32 {
         self.equip.attack_strength_scale(a)
+    }
+
+    /// The attack charge's raw parts for the HUD's attack indicator (see [`Equip
+    /// ::attack_strength_charge`]).
+    pub fn attack_strength_charge(&self) -> (f32, f32) {
+        self.equip.attack_strength_charge()
     }
 
     /// `Player.resetAttackStrengthTicker` (abort breaking, item change).
@@ -844,6 +860,24 @@ mod tests {
             h.tick(0.0, (0.0, 0.0), true, false, HeldStack::of(stone()), 1.6);
         }
         assert!((h.attack_strength_scale(0.0) - 0.96).abs() < 1e-6);
+    }
+
+    #[test]
+    fn attack_strength_charge_mirrors_the_ticker_and_delay() {
+        // What the HUD mirror carries: the raw ticker and delay, from which Java's
+        // `getAttackStrengthScale` computes (ticker + partial) / delay.
+        let mut h = Hand::new();
+        tick(&mut h, 0.0);
+        assert_eq!(h.attack_strength_charge(), (1.0, 5.0));
+        h.reset_only_attack_strength_ticker();
+        assert_eq!(h.attack_strength_charge(), (0.0, 5.0));
+        // A slower item changes the delay only (`Player.getCurrentItemAttackStrengthDelay`).
+        h.tick(0.0, (0.0, 0.0), true, false, HeldStack::of(stone()), 1.6);
+        assert_eq!(h.attack_strength_charge(), (0.0, 12.5));
+        for _ in 0..3 {
+            h.tick(0.0, (0.0, 0.0), true, false, HeldStack::of(stone()), 1.6);
+        }
+        assert_eq!(h.attack_strength_charge(), (3.0, 12.5));
     }
 
     #[test]
