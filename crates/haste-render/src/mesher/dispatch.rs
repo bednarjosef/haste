@@ -143,16 +143,15 @@ impl Mesher {
         });
     }
 
-    /// Drain finished meshes, up to `budget` per call.
-    pub fn drain(&self, budget: usize) -> Vec<SectionMesh> {
-        let mut out = Vec::with_capacity(budget.min(32));
+    /// Drain finished meshes, up to `budget` per call, into `out` (cleared first).
+    pub fn drain(&self, budget: usize, out: &mut Vec<SectionMesh>) {
+        out.clear();
         while out.len() < budget {
             match self.results.try_recv() {
                 Ok(m) => out.push(m),
                 Err(_) => break,
             }
         }
-        out
     }
 
     pub fn pending_len(&self) -> usize {

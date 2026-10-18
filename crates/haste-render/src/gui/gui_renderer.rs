@@ -182,6 +182,8 @@ impl GuiRenderer {
             vertices: Vec::new(),
             batches: Vec::new(),
             entity_scratch: Vec::new(),
+            translate: Vec::new(),
+            scissors: Vec::new(),
             rng: 0x9E37_79B9,
             linear_output,
             animation_tick: 0,
