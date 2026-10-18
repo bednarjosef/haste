@@ -431,8 +431,13 @@ public final class Bridge {
 
     // ---- game input through the KeyMappings (haste.gui.OptionBridge) ----
 
-    /** A game key event (SDL3 scancode) mirrored into the KeyMappings; no screen may be open. */
-    public void gameKey(int scancode, boolean pressed) { OptionBridge.gameKey(scancode, pressed); }
+    /** A game key event (SDL3 scancode) mirrored into the KeyMappings; no screen may be open.
+     * {@code mods} is the SDL keymod state of the event, kept current for the Ctrl-at-consume
+     * reads (vanilla polls the live keyboard there, e.g. the drop's one-item-or-stack). */
+    public void gameKey(int scancode, boolean pressed, int mods) {
+        ClientImpl.mods = mods;
+        OptionBridge.gameKey(scancode, pressed);
+    }
 
     /** A game mouse button (vanilla numbering) mirrored into the KeyMappings. */
     public void gameMouse(int button, boolean pressed) { OptionBridge.gameMouse(button, pressed); }

@@ -65,3 +65,38 @@ fn remove_from_selected_leaves_the_rest_and_mirrors_back() {
     let empty = gui.remove_from_selected(false).unwrap();
     assert!(empty, "nothing left an empty slot");
 }
+
+/// The drop click carries Ctrl at the consume (vanilla `Minecraft.handleKeybinds`:
+/// `dropItem(player, hasControlDown())`): the same Q press consumes as `C_DROP_STACK` with
+/// Ctrl held and as `C_DROP` without it, and the keymod state of the last game key event is
+/// what Java reads (no screen is open, so `Bridge.key` never runs).
+#[test]
+#[ignore = "needs cache/ (JDK, client jar, libraries, ASM)"]
+fn ctrl_q_consumes_as_a_stack_drop() {
+    use haste_jvm::keys::{LCTRL, MOD_CONTROL, Q};
+    let h =
+        JvmHost::start(JvmConfig::from_cache(&cache()).expect("cache layout")).expect("JVM start");
+    let gui = h.gui();
+    const C_DROP: i32 = 1 << 9;
+    const C_DROP_STACK: i32 = 1 << 12;
+    // A plain Q: one-item drop click.
+    gui.game_key(Q, true, 0);
+    gui.game_key(Q, false, 0);
+    let c = gui.consume_clicks();
+    assert_eq!(c & C_DROP, C_DROP, "a plain Q consumes as C_DROP");
+    assert_eq!(c & C_DROP_STACK, 0, "not a stack drop");
+    // Ctrl held through the same press: the stack drop click.
+    gui.game_key(LCTRL, true, MOD_CONTROL);
+    gui.game_key(Q, true, MOD_CONTROL);
+    let c = gui.consume_clicks();
+    assert_eq!(
+        c & C_DROP_STACK,
+        C_DROP_STACK,
+        "Ctrl held at the consume is a stack drop"
+    );
+    assert_eq!(c & C_DROP, 0, "not also a single-item drop");
+    // Released and drained: nothing left.
+    gui.game_key(LCTRL, false, 0);
+    gui.game_key(Q, false, 0);
+    assert_eq!(gui.consume_clicks(), 0);
+}

@@ -92,12 +92,18 @@ impl GuiPipeline {
 
     /// A game key event (no screen open) mirrored into the vanilla `KeyMapping`s, vanilla's
     /// `KeyboardHandler.keyPress`: press sets the down state and counts a click, release clears it.
-    /// `scancode` is the SDL3 scancode the key mappings match.
-    pub fn game_key(&self, scancode: i32, pressed: bool) {
+    /// `scancode` is the SDL3 scancode the key mappings match; `mods` is the SDL keymod state
+    /// of the event, kept current in Java for the Ctrl-at-consume reads (the drop's
+    /// one-item-or-stack, vanilla `hasControlDown`).
+    pub fn game_key(&self, scancode: i32, pressed: bool, mods: i32) {
         if let Err(e) = self.call(
             self.m.game_key,
             VOID,
-            &[jvalue { i: scancode }, jvalue { z: pressed }],
+            &[
+                jvalue { i: scancode },
+                jvalue { z: pressed },
+                jvalue { i: mods },
+            ],
             |_, _| Ok(()),
         ) {
             self.failed("game_key", e);
