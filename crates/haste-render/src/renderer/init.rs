@@ -331,6 +331,12 @@ impl Renderer {
             surface_format,
             assets,
         );
+        let clouds = crate::clouds::CloudRenderer::new(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            surface_format,
+            assets,
+        );
         let (rain_rect, snow_rect) = sky.weather_rects();
         let mut weather = crate::weather::WeatherRenderer::new(
             gpu.device.clone(),
@@ -438,6 +444,7 @@ impl Renderer {
             assets: gui_assets,
             entity,
             sky,
+            clouds,
             weather,
             overlay,
             particles,

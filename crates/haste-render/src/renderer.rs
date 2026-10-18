@@ -343,6 +343,8 @@ pub struct Renderer {
     entity: crate::entity::EntityRenderer,
     /// Sky, celestial bodies, clouds; terrain fog colour and daylight.
     sky: crate::sky::SkyRenderer,
+    /// The fancy clouds (`CloudRenderer`): the extruded cell mesh around the camera.
+    clouds: crate::clouds::CloudRenderer,
     /// Rain and snow columns (`FrameInput::sky.weather`).
     weather: crate::weather::WeatherRenderer,
     /// Selection outline and break cracks.

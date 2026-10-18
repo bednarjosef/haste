@@ -110,13 +110,17 @@ impl Renderer {
             world_min_y,
         );
         self.last_fog = Some((fog_srgb, fog_data));
-        self.sky.prepare(
+        self.sky
+            .prepare(&frame.sky, view_proj, rot_view_proj, &fog_data, fog_srgb);
+        // The clouds (vanilla `CloudRenderer.prepare`, called from the level renderer's
+        // translucent preparation with the frame's camera, game time and weather). The
+        // mesh is camera-relative, so it takes the rotation-only projection.
+        self.clouds.prepare(
             &frame.camera,
             &frame.sky,
-            view_proj,
+            self.sky.kind,
             rot_view_proj,
             &fog_data,
-            fog_srgb,
             frame.partial_tick,
         );
         // The weather columns (vanilla draws them in the level pass after translucent
@@ -730,7 +734,7 @@ impl Renderer {
                 sub_open[7] = true;
             }
             draw_calls += self.overlay.draw(&mut pass);
-            draw_calls += self.sky.draw_overlays(&mut pass);
+            draw_calls += self.clouds.draw(&mut pass);
             draw_calls += self.weather.draw(&mut pass);
             draw_calls += self.weather.draw_lightning(&mut pass);
             if let Some(t) = self.timer.as_ref() {

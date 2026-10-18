@@ -12,13 +12,8 @@ struct Sky {
     sunrise_color: vec4<f32>,
     // xyz: horizontal direction of the sunrise glow, w: star brightness.
     sunrise_dir: vec4<f32>,
-    // xyz: camera position, w: unused.
-    cam_pos: vec4<f32>,
-    // x: cloud offset (blocks), y: fog end (blocks, cloud plane extent), z: cloud height,
-    // w: sky kind (0 overworld, 1 none, 2 end).
+    // x: the sky kind (0 overworld, 1 none, 2 end); the other slots are unused.
     params: vec4<f32>,
-    // The cloud colour (linear RGB) and alpha.
-    clouds: vec4<f32>,
     // Vanilla fog bands for the sky dome and weather: environmental start/end,
     // render distance start/end.
     fog_bands: vec4<f32>,
@@ -31,9 +26,8 @@ struct Sky {
     end_flash: vec4<f32>,
     // The End flash quad's pose (camera rotation frame).
     end_flash_matrix: mat4x4<f32>,
-    // End sky texture rectangle in the atlas, clouds rectangle.
+    // End sky texture rectangle in the atlas.
     end_rect: vec4<u32>,
-    cloud_rect: vec4<u32>,
 };
 
 @group(0) @binding(0) var<uniform> sky: Sky;
@@ -227,42 +221,4 @@ fn vs_end_flash(v: VertexIn) -> VertexOut {
     out.rect = v.rect;
     out.fog = 0.0;
     return out;
-}
-
-// ---- clouds: one plane at cloud height, each clouds.png texel a 12x12 block cell ----
-
-struct CloudOut {
-    @builtin(position) clip: vec4<f32>,
-    @location(0) world: vec3<f32>,
-};
-
-@vertex
-fn vs_clouds(@builtin(vertex_index) i: u32) -> CloudOut {
-    let corner = array<vec2<f32>, 6>(
-        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
-        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0),
-    )[i];
-    // The plane reaches past the cloud fog end (vanilla renders real cloud cells out to the
-    // cloud range option).
-    let extent = max(sky.fog_bands2.y, 256.0);
-    let world = vec3<f32>(sky.cam_pos.x + corner.x * extent, sky.params.z, sky.cam_pos.z + corner.y * extent);
-    var out: CloudOut;
-    out.clip = sky.view_proj * vec4<f32>(world, 1.0);
-    out.world = world;
-    return out;
-}
-
-@fragment
-fn fs_clouds(in: CloudOut) -> @location(0) vec4<f32> {
-    // Vanilla shifts the cloud grid +3.96 blocks in z (`CloudRenderer.prepare`: cloudZ =
-    // cameraPosition.z + 3.96), so the cell under a fragment is z + 3.96.
-    let cell = floor(vec2<f32>(in.world.x + sky.params.x, in.world.z + 3.96) / 12.0);
-    let c = fetch(vec2<f32>(sky.cloud_rect.xy) + cell + vec2<f32>(0.5, 0.5), sky.cloud_rect);
-    if (c.a < 0.5) {
-        discard;
-    }
-    // Vanilla clouds.fsh: alpha *= 1 - linear_fog_value(spherical distance, 0, cloud end).
-    let rel = in.world - sky.cam_pos.xyz;
-    let fade = 1.0 - linear_fog_value(length(rel), 0.0, sky.fog_bands2.y);
-    return vec4<f32>(sky.clouds.rgb, sky.clouds.a * fade);
 }

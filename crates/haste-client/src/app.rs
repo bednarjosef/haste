@@ -1143,7 +1143,7 @@ fn frame_view<'w>(
         fog_end,
         // The dimension's `visual/cloud_height` attribute: the overworld default; only
         // sky dimensions draw clouds, and no synced source overrides it yet.
-        cloud_height: haste_render::sky::CLOUD_HEIGHT,
+        cloud_height: haste_render::clouds::CLOUD_HEIGHT,
         // `SkyRenderer.shouldRenderDarkDisc` reads the player's interpolated eye.
         dark_disc: haste_render::sky::dark_disc::should_render_dark_disc(
             game::interpolate(view.prev_eye, view.eye, partial).y,
