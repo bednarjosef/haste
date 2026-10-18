@@ -180,12 +180,43 @@ impl World {
         let ly = (pos.y & 15) as u8;
         let lz = (pos.z & 15) as u8;
         let old = section.get(lx, ly, lz);
+        let was_empty = section.block_count == 0;
         section.set(lx, ly, lz, state, direct_bits);
+        let now_empty = section.block_count == 0;
         // A replaced block drops its block entity (the server resends one if the new block
         // has one); a state change of the same block keeps it (vanilla
         // `LevelChunk.setBlockState`: removed only when `!oldState.is(newBlock)`).
         if blocks.block_of(old) != blocks.block_of(state) {
             chunk.block_entities.remove(&pos);
+        }
+        // vanilla `LevelChunk.setBlockState`: a section that flipped between empty and
+        // non-empty gains or loses its light layers (`updateSectionStatus`). Gaining them
+        // needs no work here (the engine materializes on write, and the absent stand-ins
+        // read the same values); losing them drops the arrays so reads flatten through to
+        // the sections above, and re-meshes the neighbourhood
+        // (`markSectionAndNeighborsAsAffected`).
+        if !was_empty && now_empty {
+            let idx = (sec_y - chunk.min_section) as usize;
+            chunk.light.sky[idx] = None;
+            chunk.light.block[idx] = crate::light::NibbleArray::default();
+            for dy in -1..=1i32 {
+                for dx in -1..=1i32 {
+                    for dz in -1..=1i32 {
+                        self.mark_dirty(SectionPos::new(
+                            chunk_pos.x + dx,
+                            sec_y + dy,
+                            chunk_pos.z + dz,
+                        ));
+                    }
+                }
+            }
+        }
+        // vanilla recomputes light for the changed block in the same frame
+        // (`LevelChunk.setBlockState` -> `checkBlock`, `ClientLevel.update` ->
+        // `runLightUpdates`); the server only sends border-chunk `light_update`s, so the
+        // client must do this itself
+        if crate::light::light_properties_differ(&self.data, old, state) {
+            crate::light::run_for_block(self, pos);
         }
         // per axis, the section offsets of the block's 3x3x3 neighbourhood: {0} plus {-1}
         // when on the low border, {+1} when on the high border (at most 2 per axis)
@@ -325,6 +356,11 @@ impl World {
 
     pub fn chunk(&self, pos: ChunkPos) -> Option<&Chunk> {
         self.chunks.get(&pos.to_packed())
+    }
+
+    /// The chunk containing `pos`, mutably. Unloaded -> None.
+    pub(crate) fn chunk_mut(&mut self, pos: ChunkPos) -> Option<&mut Chunk> {
+        self.chunks.get_mut(&pos.to_packed())
     }
 
     pub fn loaded_chunks(&self) -> impl Iterator<Item = ChunkPos> + '_ {
@@ -485,6 +521,11 @@ impl World {
         } else {
             self.dirty_unloaded.push(pos);
         }
+    }
+
+    /// `mark_dirty` for the light engine (crate-internal).
+    pub(crate) fn mark_dirty_section(&mut self, pos: SectionPos) {
+        self.mark_dirty(pos)
     }
 
     // -- BlockView helpers --
