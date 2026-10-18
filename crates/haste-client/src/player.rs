@@ -467,7 +467,8 @@ impl LocalPlayer {
                 // join teleport answered within microseconds of arrival races the server's
                 // own join bookkeeping, which logs "moved too quickly! <spawn position>"
                 // (the delta it computed against a not-yet-set position). A vanilla client
-                // answers from its game loop; the accept waits one full tick
+                // answers from its game loop; the join teleport's accept waits one full
+                // tick, every later one goes out in the tick it arrived in
                 // (flush_pending_accept).
                 self.pending_accept = Some(t.teleport_id);
                 self.pending_accept_age = 0;
@@ -666,9 +667,15 @@ impl LocalPlayer {
             return;
         }
         self.pending_accept_age += 1;
-        if self.pending_accept_age < 2 {
+        if self.pending_accept_age < 2 && !self.loaded {
             // Age 1 is the tick the teleport arrived in (the driver drains packets and
-            // ends the tick in one call); the accept goes out on the next.
+            // ends the tick in one call). The join teleport (the player not yet `loaded`)
+            // answers on the next: replying within microseconds of arrival races the
+            // server's join bookkeeping. Every later teleport answers in its arrival tick,
+            // ahead of that tick's interactions — the server drops `use_item_on` while a
+            // teleport is unconfirmed (`ServerGamePacketListenerImpl.handleUseItemOn`'s
+            // `awaitingPositionFromClient` gate), so an accept that waits a tick lets a
+            // use slip out before it and vanish server-side.
             return;
         }
         let teleport_id = self.pending_accept.take().unwrap();

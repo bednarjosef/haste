@@ -198,9 +198,9 @@ fn later_teleport_is_confirmed_by_the_accept_alone() {
         ),
         &mut out,
     );
-    // Nothing inline; the accept carries the resulting position one full tick later.
+    // Nothing inline; the accept carries the resulting position in the arrival tick (an
+    // in-play teleport does not wait: the server drops interactions while unconfirmed).
     assert!(out.is_empty());
-    assert_eq!(names(&tick(&mut p, &InputState::default())), ["tick_end"]);
     assert_eq!(
         names(&tick(&mut p, &InputState::default()))[..1],
         ["accept"]
