@@ -48,6 +48,7 @@ use super::LocalPlayer;
 
 mod attack;
 mod destroy;
+mod drop;
 mod effects;
 mod held_item;
 mod packets;

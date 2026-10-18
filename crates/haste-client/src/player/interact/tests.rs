@@ -1715,3 +1715,67 @@ fn spectator_use_on_a_block_sends_use_item_on_and_otherwise_nothing() {
         .iter()
         .all(|p| matches!(p, ServerboundPlay::Interact(i) if i.entity_id == 42)));
 }
+
+/// `MultiPlayerGameMode.dropItem` predicts the removal client-side
+/// (`Inventory.removeFromSelected`) and swings the main hand when the removed stack was not
+/// empty. `Minecraft.handleKeybinds`' keyDrop / keySwapOffhand loops run independently, all
+/// gated on `!player.isSpectator()` (not health).
+#[test]
+fn drop_predicts_the_removal_and_swings_and_runs_independently() {
+    let mut r = Rig::new(GameMode::Survival);
+    r.p.int.hotbar[0] = ItemStackData {
+        count: 3,
+        item: Some(RegistryIndex(3)),
+        components_raw: Default::default(),
+    };
+    // One item leaves the slot, the hand swings.
+    let out = r.tick(InteractInput {
+        drop_item: true,
+        ..Default::default()
+    });
+    assert_eq!(actions(&out), [(action::DROP_ITEM, 0)]);
+    assert_eq!(r.p.main_hand().count, 2, "the removal is predicted");
+    assert!(r.p.hand.is_swinging(), "a non-empty removal swings");
+    // The stack drop empties the slot.
+    let out = r.tick(InteractInput {
+        drop_stack: true,
+        ..Default::default()
+    });
+    assert_eq!(actions(&out), [(action::DROP_ALL_ITEMS, 0)]);
+    assert!(r.p.main_hand().is_empty());
+    // Dropping from an empty slot sends the packet but does not swing.
+    r.p.hand = crate::hand::Hand::new();
+    let out = r.tick(InteractInput {
+        drop_item: true,
+        ..Default::default()
+    });
+    assert_eq!(actions(&out), [(action::DROP_ITEM, 0)]);
+    assert!(!r.p.hand.is_swinging(), "an empty removal does not swing");
+
+    // All three in one tick (Q + Ctrl+Q + F): each loop runs, in vanilla's order.
+    let mut r = Rig::new(GameMode::Survival);
+    let out = r.tick(InteractInput {
+        drop_stack: true,
+        drop_item: true,
+        swap_offhand: true,
+        ..Default::default()
+    });
+    assert_eq!(
+        actions(&out),
+        [
+            (action::DROP_ALL_ITEMS, 0),
+            (action::DROP_ITEM, 0),
+            (action::SWAP_ITEM_WITH_OFFHAND, 0)
+        ]
+    );
+
+    // A spectator drops and swaps nothing.
+    let mut r = Rig::new(GameMode::Spectator);
+    let out = r.tick(InteractInput {
+        drop_stack: true,
+        drop_item: true,
+        swap_offhand: true,
+        ..Default::default()
+    });
+    assert!(out.is_empty(), "{out:?}");
+}

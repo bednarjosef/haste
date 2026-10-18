@@ -2,6 +2,7 @@
 //! crosshair target, then `Minecraft.handleKeybinds` (the click loops, the held use,
 //! `continueAttack`, `missTime`--), pick block, and drop / off-hand swap.
 
+use haste_core::game::GameMode;
 use haste_core::view::BlockView;
 use haste_core::BlockPos;
 use haste_protocol::packets::play::serverbound as sb;
@@ -155,21 +156,19 @@ impl LocalPlayer {
             }
         }
         // 5. Drop (Q / Ctrl+Q) and off-hand swap (F): handleKeybinds' keyDrop / keySwapOffhand
-        // loops; no target, pos and face zeroed as vanilla sends it; the server answers with
-        // the slot updates, nothing is predicted here.
-        if self.health > 0.0 {
-            let status = if input.drop_stack && !last.drop_stack {
-                Some(action::DROP_ALL_ITEMS)
-            } else if input.drop_item && !last.drop_item {
-                Some(action::DROP_ITEM)
-            } else if input.swap_offhand && !last.swap_offhand {
-                Some(action::SWAP_ITEM_WITH_OFFHAND)
-            } else {
-                None
-            };
-            if let Some(status) = status {
+        // loops run independently (all three in one tick is a drop, a stack drop and a swap);
+        // gated on !isSpectator, not health. No target, pos and face zeroed as vanilla sends
+        // it; the server answers with the slot updates.
+        if self.game_mode != GameMode::Spectator {
+            if input.drop_stack && !last.drop_stack {
+                self.drop_item(true, out);
+            }
+            if input.drop_item && !last.drop_item {
+                self.drop_item(false, out);
+            }
+            if input.swap_offhand && !last.swap_offhand {
                 out.push(ServerboundPlay::PlayerAction(sb::PlayerAction {
-                    status,
+                    status: action::SWAP_ITEM_WITH_OFFHAND,
                     pos: BlockPos::new(0, 0, 0),
                     face: 0,
                     sequence: 0,
