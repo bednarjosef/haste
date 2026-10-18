@@ -19,6 +19,7 @@ use crate::fog::FogData;
 use crate::{Camera, SkyState};
 
 pub mod dark_disc;
+pub mod end_flash;
 
 const ATLAS_SIZE: u32 = 512;
 /// Cloud height in 26.3 (blocks).
@@ -55,6 +56,11 @@ struct SkyUniforms {
     fog_bands2: [f32; 4],
     /// The sunrise/sunset fan's rotation (camera rotation frame).
     sunrise_matrix: [[f32; 4]; 4],
+    /// The End flash (vanilla `SkyRenderer.renderEndFlash`): intensity in x (0 = none),
+    /// the x/y direction angles in degrees in y/z.
+    end_flash: [f32; 4],
+    /// The End flash quad's pose (camera rotation frame).
+    end_flash_matrix: [[f32; 4]; 4],
     end_rect: [u32; 4],
     cloud_rect: [u32; 4],
 }
@@ -287,8 +293,14 @@ pub struct SkyRenderer {
     dynamic: wgpu::Buffer,
     dynamic_capacity: usize,
     vertices: Vec<SkyVertex>,
-    /// Sun + moon vertex count at the start of `vertices`.
+    /// Sun + moon vertex count at the start of `vertices` (the End flash in the End).
     celestial_count: u32,
+    /// The End flash (vanilla `SkyRenderer.renderEndFlash`, driven by the client's
+    /// `EndFlashState`): intensity and the two direction angles in degrees. Zero (no
+    /// flash) until `set_end_flash` is called.
+    end_flash: (f32, f32, f32),
+    /// The End flash quad (vanilla `renderEndFlash`, `END_FLASH_HEIGHT`/`END_FLASH_SCALE`).
+    end_flash_pipeline: wgpu::RenderPipeline,
     rects: AtlasRects,
     pub kind: SkyKind,
     pub colors: SkyColors,
@@ -302,6 +314,7 @@ struct AtlasRects {
     rain: [u32; 4],
     snow: [u32; 4],
     end_sky: [u32; 4],
+    end_flash: [u32; 4],
 }
 
 impl SkyRenderer {
@@ -339,6 +352,8 @@ impl SkyRenderer {
         // overlap them, or the weather pass samples its purple where snow flakes should be.
         let end_sky = put("environment/end_sky", 448, 0);
         let clouds = put("environment/clouds", 0, 256);
+        // Right of the 256-wide clouds row (vanilla `SkyRenderer.END_FLASH_SPRITE`).
+        let end_flash = put("environment/celestial/end_flash", 256, 256);
         let rects = AtlasRects {
             sun,
             moon,
@@ -346,6 +361,7 @@ impl SkyRenderer {
             rain,
             snow,
             end_sky,
+            end_flash,
         };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("sky-atlas"),
@@ -532,6 +548,16 @@ impl SkyRenderer {
             wgpu::BlendState::REPLACE,
             false,
         );
+        // The End flash quad: the celestial body pipeline's blending with the flash's own
+        // pose (vanilla `renderEndFlash` goes through `RenderPipelines.CELESTIAL` too).
+        let end_flash_pipeline = make(
+            "sky-end-flash",
+            "vs_end_flash",
+            "fs_celestial",
+            &[Some(SkyVertex::LAYOUT)],
+            additive,
+            false,
+        );
         let dark_disc_list = dark_disc::dark_disc_positions().map(|pos| SkyVertex {
             pos,
             uv: [0.0; 2],
@@ -589,6 +615,8 @@ impl SkyRenderer {
             dark_disc_pipeline,
             dark_disc_buffer,
             dark_disc: false,
+            end_flash: (0.0, 0.0, 0.0),
+            end_flash_pipeline,
             stars,
             star_vertices: star_list.len() as u32,
             disc_buffer,
@@ -625,6 +653,14 @@ impl SkyRenderer {
     /// pass.
     pub fn weather_rects(&self) -> ([u32; 4], [u32; 4]) {
         (self.rects.rain, self.rects.snow)
+    }
+
+    /// The End dimension's flash for this frame (vanilla `SkyRenderer.renderEndFlash`,
+    /// driven by the client's ticked `end_flash::EndFlashState`): the interpolated
+    /// intensity (0 = none) and the flash's x/y direction angles in degrees. Call before
+    /// [`SkyRenderer::prepare`]; without it no flash is drawn.
+    pub fn set_end_flash(&mut self, intensity: f32, x_angle: f32, y_angle: f32) {
+        self.end_flash = (intensity, x_angle, y_angle);
     }
 
     /// Computes this frame's colours and geometry and uploads the uniforms. `fog` is the
@@ -689,6 +725,19 @@ impl SkyRenderer {
                 true,
                 [1.0, 1.0, 1.0, alpha],
             );
+        } else if kind == SkyKind::End && self.end_flash.0 > 1e-5 {
+            // The End flash (vanilla `renderEndFlash` draws it while `intensity > 1e-5`):
+            // a celestial quad of half-size 60 at height 100 in the flash's own pose,
+            // modulated by the intensity like vanilla's (i, i, i, i) colour.
+            let (intensity, _, _) = self.end_flash;
+            push_quad(
+                &mut self.vertices,
+                100.0,
+                60.0,
+                self.rects.end_flash,
+                false,
+                [intensity; 4],
+            );
         }
         self.celestial_count = self.vertices.len() as u32;
         if self.vertices.len() > self.dynamic_capacity {
@@ -745,6 +794,9 @@ impl SkyRenderer {
             ],
             fog_bands2: [fog.sky_end, fog.cloud_end, 0.0, 0.0],
             sunrise_matrix: sunrise_matrix(colors.sunrise_side, colors.sunrise[3])
+                .to_cols_array_2d(),
+            end_flash: [self.end_flash.0, self.end_flash.1, self.end_flash.2, 0.0],
+            end_flash_matrix: end_flash::pose(self.end_flash.1, self.end_flash.2)
                 .to_cols_array_2d(),
             end_rect: self.rects.end_sky,
             cloud_rect: self.rects.clouds,
@@ -804,6 +856,14 @@ impl SkyRenderer {
             pass.set_pipeline(&self.background);
             pass.draw(0..3, 0..1);
             calls += 1;
+            // The End flash goes over the End sky, after it (vanilla `renderEndFlash` is
+            // called right after `renderEndSky`, while the intensity is above 1e-5).
+            if self.kind == SkyKind::End && self.celestial_count > 0 {
+                pass.set_pipeline(&self.end_flash_pipeline);
+                pass.set_vertex_buffer(0, self.dynamic.slice(..));
+                pass.draw(0..self.celestial_count, 0..1);
+                calls += 1;
+            }
         }
         calls
     }

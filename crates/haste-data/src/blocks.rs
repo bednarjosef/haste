@@ -367,6 +367,12 @@ impl BlockStates {
         let &b = self.by_name.get(block.to_string().as_str())?;
         self.blocks[b as usize].registry_index
     }
+
+    /// Index of the block owning `state` in the `minecraft:block` registry (tag lookups take
+    /// registry indices). Ids outside the table resolve to the placeholder block's index.
+    pub fn block_registry_index_of_state(&self, s: BlockStateId) -> Option<RegistryIndex> {
+        self.blocks[self.block_index_of_state(s) as usize].registry_index
+    }
 }
 
 #[derive(serde::Deserialize)]

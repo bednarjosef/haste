@@ -25,6 +25,7 @@ fn env<'a>(world: &'a TestWorld, shapes: &'a TestShapes) -> SteerEnv<'a> {
         world,
         shapes,
         blocks: shapes,
+        warm_blocks: None,
     }
 }
 

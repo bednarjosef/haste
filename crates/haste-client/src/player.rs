@@ -759,6 +759,7 @@ impl LocalPlayer {
             data,
             entities: &[],
             entity_types: &[],
+            warm_blocks: None,
         };
         self.tick_interact(input, world, &env, None, out);
     }
@@ -792,6 +793,7 @@ impl LocalPlayer {
                 shapes,
                 blocks,
                 env: None,
+                warm_blocks: None,
             },
             vehicle,
             out,
@@ -816,6 +818,7 @@ impl LocalPlayer {
                 shapes: &env.data.shapes,
                 blocks: env.data,
                 env: Some(env),
+                warm_blocks: env.warm_blocks,
             },
             vehicle,
             out,
@@ -936,33 +939,27 @@ impl LocalPlayer {
         let mut phys_input = *input;
         phys_input.yaw = input.yaw + self.look_offset.0;
         phys_input.pitch = (input.pitch + self.look_offset.1).clamp(-90.0, 90.0);
-        if self.food <= SPRINT_FOOD_LEVEL && !self.abilities.may_fly {
-            phys_input.sprint = false;
-            self.state.sprinting = false;
-        }
+        // What the physics tick's sprint rules cannot see (vanilla `isSprintingPossible`'s
+        // blindness and food terms, `isSlowDueToUsingItem`).
+        self.state.sprint_blocked =
+            self.int.is_blind() || (self.food <= SPRINT_FOOD_LEVEL && !self.abilities.may_fly);
+        self.state.slow_using_item = self.is_using_item();
         // Vanilla `LocalPlayer.aiStep`'s double tap of forward, after `Player.aiStep` counted
         // `sprintTriggerTime` down above: sneak held, an item in use or the backward key
         // cancels the window. `hasForwardImpulse` is read from the PREVIOUS tick's input
         // (vanilla captures it before `input.tick()`), so the window arms on a tick without
         // forward and starts the sprint on the fresh press inside it. `canStartSprinting` is
-        // evaluated on the current keys — not sprinting, a forward impulse, `isSprintingPossible`
-        // (enough food or may-fly; the not-blind gate is vanilla's `Player.isMobilityRestricted`,
-        // not modelled here), not slowed by an item in use and not moving slowly
-        // (`isMovingSlowly`: crouching or the swimming pose out of water) unless under water.
+        // evaluated on the current keys (`haste_physics::can_start_sprinting`, the same rule the
+        // physics tick applies to the sprint key).
         // The window lasts `options.sprintWindow` ticks (default 7). The sprint key branch
         // (`keyPresses.sprint()`) is the physics tick's own `input.sprint` rule.
         let forward_impulse = input.forward && !input.back;
         if input.sneak || self.is_using_item() || input.back {
             self.sprint_trigger_time = 0;
         }
-        let moving_slowly = self.state.crouching
-            || (self.state.pose == haste_physics::Pose::Swimming && !self.state.in_water);
         let under_water = self.state.eyes_in_water && self.state.in_water;
-        let can_start_sprinting = !self.state.sprinting
-            && forward_impulse
-            && (self.food > SPRINT_FOOD_LEVEL || self.abilities.may_fly)
-            && !self.is_using_item()
-            && (!moving_slowly || under_water);
+        let can_start_sprinting =
+            haste_physics::can_start_sprinting(&self.state, forward_impulse, under_water);
         if can_start_sprinting && !last_input_forward {
             if self.sprint_trigger_time > 0 {
                 phys_input.sprint = true;
@@ -1268,6 +1265,8 @@ struct TickCtx<'a> {
     shapes: &'a dyn CollisionShapes,
     blocks: &'a dyn BlockPhysics,
     env: Option<&'a interact::InteractEnv<'a>>,
+    /// The `#strider_warm_blocks` resolution for the strider we steer, from the driver.
+    warm_blocks: Option<&'a dyn crate::item_based_steering::WarmBlocks>,
 }
 
 impl TickCtx<'_> {

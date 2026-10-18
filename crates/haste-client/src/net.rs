@@ -120,6 +120,23 @@ impl CollisionShapes for NoBlocks {
     }
 }
 
+/// The `#strider_warm_blocks` test for the strider the player steers, wired from the game
+/// data's block table and the block tags the server synced (`update_tags`). The tag's
+/// members are looked up once per tick, not per block.
+struct StriderWarm<'a> {
+    data: &'a haste_data::GameData,
+    warm: &'a HashSet<u32>,
+}
+
+impl crate::item_based_steering::WarmBlocks for StriderWarm<'_> {
+    fn is_strider_warm(&self, state: BlockStateId) -> bool {
+        self.data
+            .blocks
+            .block_registry_index_of_state(state)
+            .is_some_and(|i| self.warm.contains(&i.0))
+    }
+}
+
 /// What the driver needs from the entity store (`haste_entity::EntityStore`).
 pub trait EntitySink {
     /// `EntityStore::spawn`.
@@ -1016,6 +1033,10 @@ pub struct Session {
     /// `minecraft:entity_type` registry index per `entity_boxes` entry (same order), for the
     /// crosshair's pickability filter. A sentinel (`u32::MAX`) means unknown (mod) type.
     entity_types: Vec<haste_core::RegistryIndex>,
+    /// The block tags the server synced (`update_tags`), shared with `player.int` (which holds
+    /// its own copy for mining): the strider's warm test reads them during ticks that also
+    /// mutate the player, so the session keeps a copy the env can borrow.
+    block_tags: Option<haste_physics::mining::BlockTags>,
     /// Firework rockets the server spawned and has not removed (their metadata index 9 is the
     /// attached-to entity id, `FireworkRocketEntity.DATA_ATTACHED_TO_TARGET`).
     fireworks: HashSet<EntityId>,
@@ -1140,6 +1161,7 @@ impl Session {
             entity_ids: HashSet::new(),
             entity_boxes: Vec::new(),
             entity_types: Vec::new(),
+            block_tags: None,
             fireworks: HashSet::new(),
             attached_firework: None,
             time_of_day: None,
@@ -1377,11 +1399,11 @@ impl Session {
                 .iter()
                 .find(|t| t.registry == Identifier::minecraft("block"))
             {
-                self.player
-                    .int
-                    .set_block_tags(haste_physics::mining::BlockTags::new(
-                        t.tags.iter().map(|t| (t.name.clone(), t.entries.clone())),
-                    ));
+                let tags = haste_physics::mining::BlockTags::new(
+                    t.tags.iter().map(|t| (t.name.clone(), t.entries.clone())),
+                );
+                self.player.int.set_block_tags(tags.clone());
+                self.block_tags = Some(tags);
             }
         }
         if self.player.int.item_tags_missing() {
@@ -1582,9 +1604,17 @@ impl Session {
             }
             P::BlockUpdate(b) => {
                 let c = b.change();
-                self.lids.remove(&c.pos);
-                self.bells.remove(&c.pos);
-                self.pots.remove(&c.pos);
+                // The block entity, and with it its lid/bell/pot animation, only goes when the
+                // block changes (`LevelChunk.setBlockState`), not on a state change of it.
+                let block_changed = world.physics().is_none_or(|(_, data)| {
+                    data.blocks.block_of(world.block_state_at(c.pos))
+                        != data.blocks.block_of(c.state)
+                });
+                if block_changed {
+                    self.lids.remove(&c.pos);
+                    self.bells.remove(&c.pos);
+                    self.pots.remove(&c.pos);
+                }
                 if !self.player.defer_block_update(c.pos, c.state) {
                     world.set_block(c.pos, c.state);
                 }
@@ -1967,10 +1997,19 @@ impl Session {
         match world.physics() {
             Some((view, data)) => {
                 self.player.prepare(data);
+                let warm_tag = crate::item_based_steering::strider_warm_blocks();
+                let warm = self
+                    .block_tags
+                    .as_ref()
+                    .and_then(|tags| tags.members(&warm_tag))
+                    .map(|warm| StriderWarm { data, warm });
                 let env = crate::player::interact::InteractEnv {
                     data,
                     entities: &self.entity_boxes,
                     entity_types: &self.entity_types,
+                    warm_blocks: warm
+                        .as_ref()
+                        .map(|w| w as &dyn crate::item_based_steering::WarmBlocks),
                 };
                 self.player.tick_interact(input, view, &env, vehicle, out)
             }

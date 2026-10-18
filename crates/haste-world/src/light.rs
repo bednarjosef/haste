@@ -3,8 +3,9 @@
 //! `level_chunk_with_light` / `light_update` semantics: bit sets index sections from
 //! `min_section - 1` to `max_section + 1` (one extra section on each end). A section whose bit
 //! is set in the (non-empty) mask receives the next array in order; a section set in the *empty*
-//! mask is explicitly all-zero. Sky light is absent where the dimension has no skylight; absent
-//! reads return 15 for sky (per `BlockView`).
+//! mask is explicitly all-zero. Sky light is absent where the dimension has no skylight; reads
+//! in an absent sky section go through `crate::sky_light` (the bottom row of the nearest section
+//! above with data), 15 only above the column's top data section.
 
 use bytes::Bytes;
 use haste_core::chunk::LightData;
@@ -44,8 +45,9 @@ impl NibbleArray {
         Self::all_bytes(&self.0, 0)
     }
 
-    /// Every nibble is 15 (full light). Absent sky light reads as 15, so such an array can
-    /// be stored as `None` without changing any read.
+    /// Every nibble is 15 (full light). Such an array can be stored as `None` without
+    /// changing any read: sky light 15 only propagates straight down, so the bottom row
+    /// the absent-section walk (`crate::sky_light`) finds above it is all 15 too.
     pub fn all_full(&self) -> bool {
         Self::all_bytes(&self.0, 0xFF)
     }
@@ -188,7 +190,8 @@ fn apply_side(
         if m {
             if let Some(bytes) = array_iter.next() {
                 if our_idx >= 0 && (our_idx as usize) < n_sections {
-                    // all-15 sky reads the same as absent sky (15): skip storing it, so
+                    // an all-15 sky array reads the same as an absent section (the walk
+                    // above it finds an all-15 bottom row): skip storing it, so
                     // uniform-daylight sections (everything above ground) cost no memory
                     // and stop pinning the packet's bytes
                     let n = NibbleArray::from_bytes(bytes.clone());
@@ -198,9 +201,8 @@ fn apply_side(
         } else if e && our_idx >= 0 && (our_idx as usize) < n_sections {
             // Explicitly cleared: all-zero light. Vanilla stores `new DataLayer()`
             // (default 0) for an empty-marked section (ClientPacketListener
-            // .readSectionList), so sky reads 0 — NOT the 15 an absent section
-            // reads (SkyLightSectionStorage's null-layer fallback). An empty
-            // `NibbleArray` reads 0 per cell.
+            // .readSectionList), so sky reads 0 — an absent section instead reads the
+            // layer above (`crate::sky_light`). An empty `NibbleArray` reads 0 per cell.
             slots[our_idx as usize] = Some(NibbleArray::default());
         }
         // neither set nor empty: section keeps its current light (light_update partial semantics)
